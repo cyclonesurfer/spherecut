@@ -33,6 +33,12 @@ allow = [
 ]
 confidence-threshold = 0.9
 unused-allowed-license = "allow"
+# WTFPL is GPL-compatible (FSF license list); allowed only for the FFmpeg
+# bindings. See DECISIONS.md "FFmpeg bindings".
+exceptions = [
+    { crate = "ffmpeg-next", allow = ["WTFPL"] },
+    { crate = "ffmpeg-sys-next", allow = ["WTFPL"] },
+]
 
 [bans]
 multiple-versions = "warn"

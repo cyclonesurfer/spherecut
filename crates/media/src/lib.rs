@@ -3,3 +3,5 @@
 
 pub mod mp4;
 pub mod spherical;
+
+pub use ffmpeg_next as ff;

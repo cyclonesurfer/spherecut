@@ -195,14 +195,17 @@ fn check_prereqs(d: Distro, ffmpeg_info: &str, vainfo: &str) -> Vec<Missing> {
                 blocks: "H.264/HEVC decode and encode",
             });
         }
-        let freeworld = capture("rpm", &["-q", "mesa-va-drivers-freeworld"]);
-        if !freeworld.ok && capture("rpm", &["-q", "mesa-va-drivers"]).ok {
+        let amd = gpu_vendor().as_deref() == Some("0x1002");
+        if amd && !capture("rpm", &["-q", "mesa-va-drivers-freeworld"]).ok {
+            let fix = if capture("rpm", &["-q", "mesa-va-drivers"]).ok {
+                "sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld   (RPM Fusion free)"
+            } else {
+                "sudo dnf install mesa-va-drivers-freeworld   (RPM Fusion free)"
+            };
             m.push(Missing {
-                what:
-                    "Mesa VA-API drivers with H.264/HEVC (stock mesa-va-drivers has them disabled)"
-                        .into(),
-                fix: "sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld   (RPM Fusion free)"
+                what: "Mesa VA-API driver with H.264/HEVC (Fedora's own build leaves them out)"
                     .into(),
+                fix: fix.into(),
                 blocks: "hardware H.264/HEVC decode and encode on AMD",
             });
         }
@@ -218,11 +221,34 @@ fn check_prereqs(d: Distro, ffmpeg_info: &str, vainfo: &str) -> Vec<Missing> {
             blocks: "decoding camera files",
         });
     }
+    if !Path::new("/dev/dri/renderD128").exists() {
+        m.push(Missing {
+            what: "a GPU render node (/dev/dri/renderD128)".into(),
+            fix: "check that the GPU driver is loaded and that your user is in the `render` group (`groups`; `sudo usermod -aG render $USER`, then log in again)".into(),
+            blocks: "all hardware tests",
+        });
+    }
+    for (sub, pkg) in [("fmt", "rustfmt"), ("clippy", "clippy")] {
+        if !crate::have_cargo_subcommand(sub) {
+            m.push(Missing {
+                what: format!("cargo {sub}"),
+                fix: if have("rustup") {
+                    format!("rustup component add {pkg}")
+                } else {
+                    format!(
+                        "{}   (or install rustup and use its toolchain)",
+                        pkg_cmd(d, pkg, "rust")
+                    )
+                },
+                blocks: "`cargo xtask check`",
+            });
+        }
+    }
     if !vainfo.is_empty() && !vainfo.contains("VAProfileHEVCMain") {
         m.push(Missing {
             what: "VA-API HEVC profiles (vainfo lists none)".into(),
             fix: match d {
-                Distro::Fedora => "sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld   (AMD; Intel: sudo dnf install intel-media-driver from RPM Fusion nonfree)".into(),
+                Distro::Fedora => "AMD: install mesa-va-drivers-freeworld (above); Intel: sudo dnf install intel-media-driver   (RPM Fusion nonfree)".into(),
                 Distro::Arch => "sudo pacman -S --needed mesa   (AMD) or intel-media-driver (Intel)".into(),
                 Distro::Other => "install a VA-API driver with HEVC enabled".into(),
             },
@@ -230,6 +256,14 @@ fn check_prereqs(d: Distro, ffmpeg_info: &str, vainfo: &str) -> Vec<Missing> {
         });
     }
     m
+}
+
+/// PCI vendor id of the first render node's GPU, e.g. "0x1002" (AMD) or
+/// "0x8086" (Intel).
+fn gpu_vendor() -> Option<String> {
+    std::fs::read_to_string("/sys/class/drm/renderD128/device/vendor")
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 /// Results of one libtest run, parsed from its text output.
@@ -474,16 +508,24 @@ pub fn run(a: Args) -> Result<()> {
         "| Rust | {} |",
         rustc.text.lines().next().unwrap_or("not found")
     );
+    let hevc = |entry: &str| {
+        vainfo
+            .text
+            .lines()
+            .any(|l| l.contains("VAProfileHEVCMain ") && l.contains(entry))
+    };
     let _ = writeln!(
         r,
-        "| VA-API HEVC | decode: {}, encode: {} |",
-        yes_no(
-            vainfo.text.contains("VAProfileHEVCMain") && vainfo.text.contains("VAEntrypointVLD")
-        ),
-        yes_no(
-            vainfo.text.contains("VAProfileHEVCMain")
-                && vainfo.text.contains("VAEntrypointEncSlice")
-        )
+        "| VA-API HEVC | {} |",
+        if !vainfo.ok {
+            "no VA-API device (vainfo failed)".to_string()
+        } else {
+            format!(
+                "decode: {}, encode: {}",
+                yes_no(hevc("VAEntrypointVLD")),
+                yes_no(hevc("VAEntrypointEncSlice"))
+            )
+        }
     );
     let _ = writeln!(
         r,
@@ -493,6 +535,7 @@ pub fn run(a: Args) -> Result<()> {
             .lines()
             .skip(1)
             .map(str::trim)
+            .filter(|l| !l.is_empty())
             .collect::<Vec<_>>()
             .join(", ")
     );

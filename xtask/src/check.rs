@@ -17,6 +17,14 @@ pub struct Args {
 }
 
 pub fn run(a: Args) -> Result<()> {
+    for (sub, pkg) in [("fmt", "rustfmt"), ("clippy", "clippy")] {
+        if !have_cargo_subcommand(sub) {
+            bail!(
+                "`cargo {sub}` is not installed: run `rustup component add {pkg}` \
+                 (or, with a distro toolchain, install the `{pkg}` package)"
+            );
+        }
+    }
     let mut fmt = Command::new("cargo");
     fmt.args(["fmt", "--all"]);
     if !a.fix {
