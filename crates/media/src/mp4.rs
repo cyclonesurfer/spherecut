@@ -66,6 +66,9 @@ pub struct Mp4Box {
     pub offset: u64,
     /// Total size including the header.
     pub size: u64,
+    /// Bytes from the box start to its payload: 8, 16 for a 64-bit size,
+    /// plus 16 for a `uuid` extended type.
+    pub header_len: u64,
     /// Payload (after the header, and after the extended type for `uuid`).
     pub payload: Vec<u8>,
     /// For `uuid` boxes, the 16-byte extended type.
@@ -192,6 +195,7 @@ pub fn read<R: Read + Seek>(r: &mut R) -> Result<Mp4Tree, Mp4Error> {
             fourcc: h.fourcc,
             offset: pos,
             size: h.size,
+            header_len: h.header_len,
             payload: Vec::new(),
             uuid: None,
             children: Vec::new(),
@@ -298,8 +302,7 @@ fn fill_box(b: &mut Mp4Box, mut payload: Vec<u8>, warnings: &mut Vec<String>) {
 }
 
 fn payload_start(b: &Mp4Box) -> u64 {
-    // Offsets are informational, so a best-effort header length suffices.
-    if b.uuid.is_some() { 24 } else { 8 }
+    b.header_len
 }
 
 fn looks_like_box(buf: &[u8], at: usize) -> bool {
@@ -333,6 +336,7 @@ fn parse_children(buf: &[u8], start: usize, base: u64, warnings: &mut Vec<String
             fourcc: h.fourcc,
             offset: base + pos as u64,
             size: h.size,
+            header_len: h.header_len,
             payload: Vec::new(),
             uuid: None,
             children: Vec::new(),
@@ -358,7 +362,7 @@ fn parse_stsd(buf: &[u8], base: u64, warnings: &mut Vec<String>) -> Vec<Mp4Box> 
         let skip = sample_entry_fixed_len(e.fourcc, &e.payload);
         if let Some(skip) = skip.filter(|&s| s <= e.payload.len()) {
             let payload = std::mem::take(&mut e.payload);
-            e.children = parse_children(&payload, skip, e.offset + 8, warnings);
+            e.children = parse_children(&payload, skip, e.offset + e.header_len, warnings);
             // Keep the fixed fields; they hold width/height/channels.
             e.payload = payload[..skip].to_vec();
         }
@@ -366,7 +370,9 @@ fn parse_stsd(buf: &[u8], base: u64, warnings: &mut Vec<String>) -> Vec<Mp4Box> 
     entries
 }
 
-fn sample_entry_fixed_len(t: FourCc, payload: &[u8]) -> Option<usize> {
+/// Length of a sample entry's fixed fields before its child boxes, for the
+/// entry types we know.
+pub(crate) fn sample_entry_fixed_len(t: FourCc, payload: &[u8]) -> Option<usize> {
     const VIDEO: &[&[u8; 4]] = &[
         b"avc1", b"avc3", b"hvc1", b"hev1", b"av01", b"vp09", b"apch", b"apcn", b"apcs", b"apco",
         b"ap4h", b"ap4x", b"mp4v", b"dvh1", b"dvhe", b"encv",

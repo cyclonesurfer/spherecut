@@ -42,7 +42,7 @@ the pinned commit*. The full list is at the end.
    `{u8 format, u8 id, u32le size}`. Older cameras are walked backwards from the end. X4 and later
    put an **index record (id 0)** last, with fixed 10-byte slots, and pad records to alignment
    boundaries. Everything is little-endian. [bytes] [code]
-4. Record 1 is a **protobuf** message (about 110 fields on the X5, numbered up to 199) holding model, firmware,
+4. Record 1 is a **protobuf** message (about 80 fields on the X5, numbered up to 199) holding model, firmware,
    timing, the IMU configuration, the stream layout and the per-lens **calibration strings**.
    Record 3 is the IMU, record 4 the per-frame exposure. [bytes] [code]
 5. Calibration comes in four generations of underscore-separated strings: V1, V2, V3 and V6.

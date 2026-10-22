@@ -174,13 +174,20 @@ pub fn guess(
             };
         }
 
-        // Insta360: metadata trailer after the last box.
-        if g.vendor.is_none() && tree.trailing_bytes >= 32 && has_trailer_magic(path) {
+        // Insta360: metadata trailer ending in a fixed magic, either loose
+        // after `moov` or (newer X5 firmware) wrapped in a top-level `inst`
+        // box. See docs/formats/insta360.md section 3.
+        if g.vendor.is_none() && has_trailer_magic(path) {
             g.vendor = Some("Insta360".into());
-            g.evidence.push(format!(
-                "Insta360 trailer magic in the last 32 bytes ({} trailing bytes)",
-                tree.trailing_bytes
-            ));
+            let wrapped = tree.top.iter().any(|b| b.fourcc.0 == *b"inst");
+            g.evidence.push(if wrapped {
+                "Insta360 trailer magic at end of file, inside an `inst` box".to_string()
+            } else {
+                format!(
+                    "Insta360 trailer magic at end of file ({} bytes after the last box)",
+                    tree.trailing_bytes
+                )
+            });
             g.layout = if ext == "lrv" {
                 Layout::LowResCompanion
             } else {

@@ -10,6 +10,7 @@ use thiserror::Error;
 pub mod detect;
 pub mod doctor;
 mod ffi;
+pub mod inject;
 pub mod mp4;
 pub mod probe;
 pub mod spherical;
