@@ -47,7 +47,6 @@ pub struct CodecParFields {
     pub channels: i32,
     pub channel_layout: Option<String>,
     pub sample_fmt: Option<String>,
-    pub bits_per_raw_sample: i32,
     /// Display rotation in degrees (counter-clockwise), from the display
     /// matrix side data, if present.
     pub rotation_deg: Option<f64>,
@@ -69,7 +68,6 @@ pub fn codecpar_fields(p: &ff::codec::Parameters) -> CodecParFields {
         sample_aspect: (par.sample_aspect_ratio.num, par.sample_aspect_ratio.den),
         sample_rate: par.sample_rate,
         channels: par.ch_layout.nb_channels,
-        bits_per_raw_sample: par.bits_per_raw_sample,
         ..Default::default()
     };
     match par.codec_type {
@@ -273,4 +271,10 @@ pub fn lib_versions() -> Vec<(&'static str, u32, u32, u32)> {
 pub fn ffmpeg_version() -> String {
     // SAFETY: returns a static string.
     cstr_opt(unsafe { sys::av_version_info() }).unwrap_or_else(|| "unknown".into())
+}
+
+/// `AVFormatContext.start_time` in `AV_TIME_BASE` units.
+pub fn format_start_time(ictx: &ff::format::context::Input) -> i64 {
+    // SAFETY: `ictx` owns a live AVFormatContext; reading a plain field.
+    unsafe { (*ictx.as_ptr()).start_time }
 }
