@@ -1,0 +1,15 @@
+[package]
+name = "spherecut-media"
+description = "Media backend trait, FFmpeg backend, probing, MP4 metadata boxes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

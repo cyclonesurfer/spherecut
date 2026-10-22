@@ -492,6 +492,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "spherecut-media"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "spherecut-sphere"
 version = "0.1.0"
 dependencies = [
