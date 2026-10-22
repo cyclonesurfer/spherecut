@@ -15,6 +15,7 @@ publish = false
 spherecut-core = { path = "crates/core" }
 spherecut-sphere = { path = "crates/sphere" }
 spherecut-media = { path = "crates/media" }
+spherecut-testkit = { path = "crates/testkit" }
 
 anyhow = "1.0.100"
 clap = { version = "4.5", features = ["derive"] }

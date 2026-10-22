@@ -1,0 +1,13 @@
+[package]
+name = "spherecut-testkit"
+description = "Test helpers: Tier 2 gating, synthetic media locations, image comparison"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

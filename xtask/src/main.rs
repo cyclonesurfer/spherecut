@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 mod check;
+mod hw_test;
 
 #[derive(Parser)]
 #[command(about = "Spherecut developer tasks")]
@@ -19,11 +20,14 @@ struct Cli {
 enum Cmd {
     /// fmt, clippy (-D warnings), Tier 1 tests, cargo-deny and cargo-audit.
     Check(check::Args),
+    /// Tier 2 run on real hardware; writes hw-reports/<host>-<commit>.md.
+    HwTest(hw_test::Args),
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Check(a) => check::run(a),
+        Cmd::HwTest(a) => hw_test::run(a),
     }
 }
 
