@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/sphere", "xtask"]
+default-members = ["crates/core", "crates/sphere"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/cyclonesurfer/spherecut"
+publish = false
+
+[workspace.dependencies]
+spherecut-core = { path = "crates/core" }
+spherecut-sphere = { path = "crates/sphere" }
+spherecut-media = { path = "crates/media" }
+
+anyhow = "1.0.100"
+clap = { version = "4.5", features = ["derive"] }
+glam = { version = "0.34", features = ["serde"] }
+proptest = "1.8"
+ron = "0.12"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+undocumented_unsafe_blocks = "deny"
+
+[profile.release]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2

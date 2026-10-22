@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bc036bff4965112bcd3635a65087e450f5a1dc8adb0d0166d70fbc5591696dd3 # shrinks to p = Fisheye, fov_deg = 316.46837437574277, x = 0.9867694025518519, y = -0.7177959484974634

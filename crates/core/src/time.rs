@@ -1,0 +1,508 @@
+//! Exact time.
+//!
+//! Every position on a timeline, every stream timestamp and every frame rate
+//! is a ratio of integers. Floating point appears only at the very edges (UI
+//! display, audio resampling ratios) and never in stored state.
+//!
+//! * [`Rational`] is a reduced fraction with `i64` numerator and a positive
+//!   `i64` denominator. Arithmetic is done in `i128` and reduced, and fails
+//!   with [`TimeError::Overflow`] instead of wrapping.
+//! * [`Time`] is a duration or position in seconds, stored as a [`Rational`].
+//! * [`FrameRate`] is frames per second, e.g. `30000/1001` for 29.97.
+//! * A stream timestamp is a `pts` integer plus a timebase [`Rational`]
+//!   (seconds per tick), converted with [`Time::from_pts`] / [`Time::to_pts`].
+
+use std::cmp::Ordering;
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum TimeError {
+    #[error("denominator is zero")]
+    ZeroDenominator,
+    #[error("arithmetic overflow in exact time computation")]
+    Overflow,
+    #[error("frame rate must be positive")]
+    NonPositiveRate,
+}
+
+/// How to map a time that falls between two ticks onto an integer tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rounding {
+    /// Towards negative infinity.
+    Floor,
+    /// Towards positive infinity.
+    Ceil,
+    /// To the nearest tick, halves away from zero.
+    Nearest,
+}
+
+/// A reduced fraction `num / den` with `den > 0`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "(i64, i64)", into = "(i64, i64)")]
+pub struct Rational {
+    num: i64,
+    den: i64,
+}
+
+fn gcd(mut a: i128, mut b: i128) -> i128 {
+    a = a.abs();
+    b = b.abs();
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a
+}
+
+fn div_round(n: i128, d: i128, rounding: Rounding) -> i128 {
+    debug_assert!(d > 0);
+    let q = n.div_euclid(d);
+    let r = n.rem_euclid(d);
+    match rounding {
+        Rounding::Floor => q,
+        Rounding::Ceil => {
+            if r == 0 {
+                q
+            } else {
+                q + 1
+            }
+        }
+        Rounding::Nearest => {
+            // Ties away from zero, so -0.5 rounds to -1 and 0.5 to 1.
+            let twice = 2 * r;
+            match twice.cmp(&d) {
+                Ordering::Less => q,
+                Ordering::Greater => q + 1,
+                Ordering::Equal => {
+                    if n < 0 {
+                        q
+                    } else {
+                        q + 1
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Rational {
+    pub const ZERO: Rational = Rational { num: 0, den: 1 };
+    pub const ONE: Rational = Rational { num: 1, den: 1 };
+
+    /// Build and reduce `num / den`.
+    pub fn new(num: i64, den: i64) -> Result<Self, TimeError> {
+        Self::from_i128(num as i128, den as i128)
+    }
+
+    pub const fn from_integer(n: i64) -> Self {
+        Rational { num: n, den: 1 }
+    }
+
+    fn from_i128(num: i128, den: i128) -> Result<Self, TimeError> {
+        if den == 0 {
+            return Err(TimeError::ZeroDenominator);
+        }
+        let g = gcd(num, den).max(1);
+        let (mut n, mut d) = (num / g, den / g);
+        if d < 0 {
+            n = -n;
+            d = -d;
+        }
+        let num = i64::try_from(n).map_err(|_| TimeError::Overflow)?;
+        let den = i64::try_from(d).map_err(|_| TimeError::Overflow)?;
+        Ok(Rational { num, den })
+    }
+
+    pub const fn num(self) -> i64 {
+        self.num
+    }
+
+    pub const fn den(self) -> i64 {
+        self.den
+    }
+
+    pub fn is_zero(self) -> bool {
+        self.num == 0
+    }
+
+    pub fn is_positive(self) -> bool {
+        self.num > 0
+    }
+
+    pub fn checked_add(self, o: Rational) -> Result<Rational, TimeError> {
+        let n = self.num as i128 * o.den as i128 + o.num as i128 * self.den as i128;
+        let d = self.den as i128 * o.den as i128;
+        Self::from_i128(n, d)
+    }
+
+    pub fn checked_sub(self, o: Rational) -> Result<Rational, TimeError> {
+        let n = self.num as i128 * o.den as i128 - o.num as i128 * self.den as i128;
+        let d = self.den as i128 * o.den as i128;
+        Self::from_i128(n, d)
+    }
+
+    pub fn checked_neg(self) -> Result<Rational, TimeError> {
+        Self::from_i128(-(self.num as i128), self.den as i128)
+    }
+
+    pub fn checked_mul(self, o: Rational) -> Result<Rational, TimeError> {
+        Self::from_i128(
+            self.num as i128 * o.num as i128,
+            self.den as i128 * o.den as i128,
+        )
+    }
+
+    pub fn checked_div(self, o: Rational) -> Result<Rational, TimeError> {
+        Self::from_i128(
+            self.num as i128 * o.den as i128,
+            self.den as i128 * o.num as i128,
+        )
+    }
+
+    pub fn recip(self) -> Result<Rational, TimeError> {
+        Self::from_i128(self.den as i128, self.num as i128)
+    }
+
+    /// Round to an integer.
+    pub fn round(self, rounding: Rounding) -> i64 {
+        // |num / den| <= |num| always fits in i64.
+        div_round(self.num as i128, self.den as i128, rounding) as i64
+    }
+
+    /// Lossy conversion for display and for interfaces that need floats.
+    pub fn to_f64(self) -> f64 {
+        self.num as f64 / self.den as f64
+    }
+}
+
+impl PartialOrd for Rational {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Rational {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.num as i128 * other.den as i128).cmp(&(other.num as i128 * self.den as i128))
+    }
+}
+
+impl fmt::Debug for Rational {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.num, self.den)
+    }
+}
+
+impl fmt::Display for Rational {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.den == 1 {
+            write!(f, "{}", self.num)
+        } else {
+            write!(f, "{}/{}", self.num, self.den)
+        }
+    }
+}
+
+impl TryFrom<(i64, i64)> for Rational {
+    type Error = TimeError;
+    fn try_from((n, d): (i64, i64)) -> Result<Self, Self::Error> {
+        Rational::new(n, d)
+    }
+}
+
+impl From<Rational> for (i64, i64) {
+    fn from(r: Rational) -> Self {
+        (r.num, r.den)
+    }
+}
+
+/// A position or duration in seconds.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Time(pub Rational);
+
+impl Time {
+    pub const ZERO: Time = Time(Rational::ZERO);
+
+    pub fn seconds(r: Rational) -> Self {
+        Time(r)
+    }
+
+    pub fn from_secs(s: i64) -> Self {
+        Time(Rational::from_integer(s))
+    }
+
+    /// Time of stream tick `pts` in a stream whose timebase is `tb` seconds
+    /// per tick.
+    pub fn from_pts(pts: i64, tb: Rational) -> Result<Self, TimeError> {
+        Rational::from_integer(pts).checked_mul(tb).map(Time)
+    }
+
+    /// Nearest stream tick for this time in timebase `tb`.
+    pub fn to_pts(self, tb: Rational, rounding: Rounding) -> Result<i64, TimeError> {
+        if tb.is_zero() {
+            return Err(TimeError::ZeroDenominator);
+        }
+        // pts = t / tb, computed in i128 without reducing first.
+        let n = self.0.num as i128 * tb.den as i128;
+        let d = self.0.den as i128 * tb.num as i128;
+        let (n, d) = if d < 0 { (-n, -d) } else { (n, d) };
+        i64::try_from(div_round(n, d, rounding)).map_err(|_| TimeError::Overflow)
+    }
+
+    pub fn checked_add(self, o: Time) -> Result<Time, TimeError> {
+        self.0.checked_add(o.0).map(Time)
+    }
+
+    pub fn checked_sub(self, o: Time) -> Result<Time, TimeError> {
+        self.0.checked_sub(o.0).map(Time)
+    }
+
+    pub fn as_rational(self) -> Rational {
+        self.0
+    }
+
+    pub fn to_secs_f64(self) -> f64 {
+        self.0.to_f64()
+    }
+}
+
+impl fmt::Debug for Time {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}s", self.0)
+    }
+}
+
+/// Frames per second, always positive.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "Rational", into = "Rational")]
+pub struct FrameRate(Rational);
+
+impl FrameRate {
+    pub const FPS_23_976: FrameRate = FrameRate(Rational {
+        num: 24000,
+        den: 1001,
+    });
+    pub const FPS_24: FrameRate = FrameRate(Rational::from_integer(24));
+    pub const FPS_25: FrameRate = FrameRate(Rational::from_integer(25));
+    pub const FPS_29_97: FrameRate = FrameRate(Rational {
+        num: 30000,
+        den: 1001,
+    });
+    pub const FPS_30: FrameRate = FrameRate(Rational::from_integer(30));
+    pub const FPS_50: FrameRate = FrameRate(Rational::from_integer(50));
+    pub const FPS_59_94: FrameRate = FrameRate(Rational {
+        num: 60000,
+        den: 1001,
+    });
+    pub const FPS_60: FrameRate = FrameRate(Rational::from_integer(60));
+
+    pub fn new(r: Rational) -> Result<Self, TimeError> {
+        if r.is_positive() {
+            Ok(FrameRate(r))
+        } else {
+            Err(TimeError::NonPositiveRate)
+        }
+    }
+
+    pub fn as_rational(self) -> Rational {
+        self.0
+    }
+
+    /// Duration of one frame.
+    pub fn frame_duration(self) -> Time {
+        // A positive reduced rational always has a representable reciprocal.
+        Time(Rational {
+            num: self.0.den,
+            den: self.0.num,
+        })
+    }
+
+    /// Start time of frame `index` (frame 0 starts at zero).
+    pub fn frame_to_time(self, index: i64) -> Result<Time, TimeError> {
+        Rational::from_integer(index)
+            .checked_mul(self.frame_duration().0)
+            .map(Time)
+    }
+
+    /// Index of the frame at time `t`. With [`Rounding::Floor`] this is the
+    /// frame being displayed at `t`.
+    pub fn time_to_frame(self, t: Time, rounding: Rounding) -> Result<i64, TimeError> {
+        t.to_pts(self.frame_duration().0, rounding)
+    }
+
+    pub fn to_f64(self) -> f64 {
+        self.0.to_f64()
+    }
+}
+
+impl TryFrom<Rational> for FrameRate {
+    type Error = TimeError;
+    fn try_from(r: Rational) -> Result<Self, Self::Error> {
+        FrameRate::new(r)
+    }
+}
+
+impl From<FrameRate> for Rational {
+    fn from(f: FrameRate) -> Self {
+        f.0
+    }
+}
+
+impl fmt::Debug for FrameRate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}fps", self.0)
+    }
+}
+
+impl fmt::Display for FrameRate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.den == 1 {
+            write!(f, "{}", self.0.num)
+        } else {
+            write!(f, "{:.3}", self.to_f64())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn r(n: i64, d: i64) -> Rational {
+        Rational::new(n, d).unwrap()
+    }
+
+    #[test]
+    fn reduces_and_normalises_sign() {
+        assert_eq!(r(2, 4), r(1, 2));
+        assert_eq!(r(1, -2), r(-1, 2));
+        assert_eq!(r(1, -2).den(), 2);
+        assert_eq!(Rational::new(1, 0), Err(TimeError::ZeroDenominator));
+    }
+
+    #[test]
+    fn ntsc_frame_times_are_exact() {
+        let fr = FrameRate::FPS_29_97;
+        // One hour of 29.97 is 107892.107892... frames; frame 107892 starts
+        // at 3599.9964 s exactly.
+        let t = fr.frame_to_time(107_892).unwrap();
+        assert_eq!(t.0, r(107_892 * 1001, 30_000));
+        assert_eq!(fr.time_to_frame(t, Rounding::Floor).unwrap(), 107_892);
+        assert_eq!(
+            fr.time_to_frame(Time::from_secs(3600), Rounding::Floor)
+                .unwrap(),
+            107_892
+        );
+    }
+
+    #[test]
+    fn pts_conversion_in_common_timebases() {
+        // MP4 from cameras commonly uses 1/90000 or 1/30000 timebases.
+        let tb = r(1, 90_000);
+        let t = Time::from_pts(3003, tb).unwrap();
+        assert_eq!(t.0, r(1001, 30_000));
+        assert_eq!(
+            FrameRate::FPS_29_97
+                .time_to_frame(t, Rounding::Nearest)
+                .unwrap(),
+            1
+        );
+        assert_eq!(t.to_pts(r(1, 30_000), Rounding::Floor).unwrap(), 1001);
+    }
+
+    #[test]
+    fn rounding_modes() {
+        let tb = r(1, 2);
+        let t = Time(r(-1, 4)); // -0.5 ticks
+        assert_eq!(t.to_pts(tb, Rounding::Floor).unwrap(), -1);
+        assert_eq!(t.to_pts(tb, Rounding::Ceil).unwrap(), 0);
+        assert_eq!(t.to_pts(tb, Rounding::Nearest).unwrap(), -1);
+        assert_eq!(Time(r(1, 4)).to_pts(tb, Rounding::Nearest).unwrap(), 1);
+    }
+
+    #[test]
+    fn overflow_is_reported() {
+        let big = Rational::from_integer(i64::MAX);
+        assert_eq!(big.checked_add(big), Err(TimeError::Overflow));
+    }
+
+    #[test]
+    fn serde_round_trip() {
+        let fr = FrameRate::FPS_59_94;
+        let s = ron::to_string(&fr).unwrap();
+        assert_eq!(s, "(60000,1001)");
+        let back: FrameRate = ron::from_str(&s).unwrap();
+        assert_eq!(back, fr);
+        assert!(ron::from_str::<FrameRate>("(0,1)").is_err());
+        assert!(ron::from_str::<Rational>("(1,0)").is_err());
+    }
+
+    fn rates() -> impl Strategy<Value = FrameRate> {
+        prop_oneof![
+            Just(FrameRate::FPS_23_976),
+            Just(FrameRate::FPS_24),
+            Just(FrameRate::FPS_25),
+            Just(FrameRate::FPS_29_97),
+            Just(FrameRate::FPS_30),
+            Just(FrameRate::FPS_50),
+            Just(FrameRate::FPS_59_94),
+            Just(FrameRate::FPS_60),
+            (1i64..=240_000, 1i64..=1001)
+                .prop_map(|(n, d)| FrameRate::new(Rational::new(n, d).unwrap()).unwrap()),
+        ]
+    }
+
+    fn timebases() -> impl Strategy<Value = Rational> {
+        prop_oneof![
+            Just(r(1, 90_000)),
+            Just(r(1, 30_000)),
+            Just(r(1, 60_000)),
+            Just(r(1, 48_000)),
+            Just(r(1001, 30_000)),
+            (1i64..=1001, 1i64..=1_000_000).prop_map(|(n, d)| r(n, d)),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn frame_index_round_trips(fr in rates(), idx in -10_000_000i64..10_000_000) {
+            let t = fr.frame_to_time(idx).unwrap();
+            prop_assert_eq!(fr.time_to_frame(t, Rounding::Floor).unwrap(), idx);
+            prop_assert_eq!(fr.time_to_frame(t, Rounding::Ceil).unwrap(), idx);
+            prop_assert_eq!(fr.time_to_frame(t, Rounding::Nearest).unwrap(), idx);
+        }
+
+        #[test]
+        fn pts_round_trips(tb in timebases(), pts in -1_000_000_000i64..1_000_000_000) {
+            let t = Time::from_pts(pts, tb).unwrap();
+            prop_assert_eq!(t.to_pts(tb, Rounding::Nearest).unwrap(), pts);
+        }
+
+        #[test]
+        fn floor_is_the_displayed_frame(fr in rates(), n in -1_000_000i64..1_000_000, d in 1i64..100_000) {
+            let t = Time(r(n, d));
+            let f = fr.time_to_frame(t, Rounding::Floor).unwrap();
+            let start = fr.frame_to_time(f).unwrap();
+            let next = fr.frame_to_time(f + 1).unwrap();
+            prop_assert!(start <= t && t < next);
+        }
+
+        #[test]
+        fn ordering_matches_f64(a in -1_000_000i64..1_000_000, b in 1i64..10_000,
+                                c in -1_000_000i64..1_000_000, d in 1i64..10_000) {
+            let (x, y) = (r(a, b), r(c, d));
+            let fx = a as f64 / b as f64;
+            let fy = c as f64 / d as f64;
+            if (fx - fy).abs() > 1e-9 {
+                prop_assert_eq!(x < y, fx < fy);
+            }
+            prop_assert_eq!(x.checked_sub(y).unwrap().checked_add(y).unwrap(), x);
+        }
+    }
+}

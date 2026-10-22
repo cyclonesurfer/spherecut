@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3d1f71232c92fae1065b5c7127b9b0d8c8f39c3c6d923917fafcadd9e2612376 # shrinks to a = DQuat(-0.010456698802220082, -0.001168248729252593, 0.3718705380163349, 0.928224970360369), b = DQuat(0.0, 0.0, 0.0, 1.0)

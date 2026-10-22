@@ -1,0 +1,57 @@
+# cargo-deny configuration. Run with `cargo xtask check` or `cargo deny check`.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Everything here is compatible with distributing Spherecut under
+# GPL-3.0-or-later. Add to this list only after checking compatibility and
+# recording the reason in DECISIONS.md.
+allow = [
+    "GPL-3.0-or-later",
+    "GPL-3.0",
+    "LGPL-2.1-or-later",
+    "LGPL-3.0-or-later",
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "BSL-1.0",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# Runtime must never touch the network, and the build must stay free of
+# webviews and JavaScript tooling.
+deny = [
+    { crate = "reqwest", reason = "no network access at runtime" },
+    { crate = "hyper", reason = "no network access at runtime" },
+    { crate = "ureq", reason = "no network access at runtime" },
+    { crate = "isahc", reason = "no network access at runtime" },
+    { crate = "curl", reason = "no network access at runtime" },
+    { crate = "wry", reason = "no webviews" },
+    { crate = "tauri", reason = "no webviews" },
+    { crate = "webkit2gtk", reason = "no webviews" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
