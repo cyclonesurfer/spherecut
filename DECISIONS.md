@@ -19,7 +19,8 @@ RPMs.
 
 Checked 2026-10-23 at 3d06a2e: `cargo +1.88 build --workspace
 --all-targets` builds without warnings and `cargo +1.88 test --workspace`
-passes.
+passes. Rechecked at c2b2753, after the final review's fixes: `cargo +1.88
+test --workspace` passes.
 
 ## D2. FFmpeg through ffmpeg-next, hardware paths over ffmpeg-sys-next
 
@@ -48,7 +49,10 @@ Why:
   An 8.1 build was checked in an earlier round, before the M0 fixes.
   *Updated after the final review:* the three tests in
   `crates/media/tests/hw_refusal.rs` decode on FFmpeg's Vulkan device
-  too, so they also fail on the 9.0.2 build without Vulkan.
+  too, so they also fail on the 9.0.2 build without Vulkan. Rechecked at
+  c2b2753 against that 9.0.2 build: 187 of the 192 Tier 1 tests pass, and
+  the 5 that fail are those in `crates/cli/tests/doctor.rs` and
+  `hw_refusal.rs`.
 - Since 9.0 it binds `hwcontext_vaapi.h`, `hwcontext_vulkan.h` and
   `hwcontext_drm.h`, which later zero-copy work (VA-API to DMA-BUF to
   Vulkan) needs.
