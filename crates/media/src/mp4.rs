@@ -1118,7 +1118,7 @@ pub(crate) mod tests {
     #[test]
     fn deep_nesting_is_fast_and_small() {
         // The 160 KB file used 1.4 GB and overflowed the stack before the
-        // depth limit; the 1.6 MB one never finished.
+        // depth limit; the 1.6 MB one ran out of memory.
         for n in [20_000, 200_000] {
             let f = nested_udta(n, &[]);
             let mut result = None;
