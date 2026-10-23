@@ -6,11 +6,63 @@
 //! Rust values. Every pointer read is from an object whose lifetime is tied
 //! to a borrowed ffmpeg-next wrapper, and every allocation made here is
 //! released before returning.
+//!
+//! C enums never become bindgen's Rust enums here. Those may only hold the
+//! values in the headers ffmpeg-sys-next was generated from, and a newer
+//! FFmpeg at run time can hand back others (a new pixel format, colour
+//! transfer or device type); making a Rust enum from such a value is
+//! undefined behaviour. So the functions in [`c`] are declared with the
+//! `int` the C ABI passes, and enum fields are read with [`enum_int`].
 
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_int};
 
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as sys;
+
+/// FFmpeg functions that take or return a C enum, declared with `int`s.
+/// The name functions return NULL for values they don't know.
+mod c {
+    use std::ffi::{c_char, c_int};
+
+    use ffmpeg_sys_next::{AVBufferRef, AVDictionary, AVPixFmtDescriptor};
+
+    unsafe extern "C" {
+        pub fn avcodec_get_name(id: c_int) -> *const c_char;
+        pub fn avcodec_profile_name(id: c_int, profile: c_int) -> *const c_char;
+        pub fn av_get_pix_fmt_name(fmt: c_int) -> *const c_char;
+        pub fn av_pix_fmt_desc_get(fmt: c_int) -> *const AVPixFmtDescriptor;
+        pub fn av_get_sample_fmt_name(fmt: c_int) -> *const c_char;
+        pub fn av_color_range_name(range: c_int) -> *const c_char;
+        pub fn av_color_space_name(space: c_int) -> *const c_char;
+        pub fn av_color_primaries_name(primaries: c_int) -> *const c_char;
+        pub fn av_color_transfer_name(transfer: c_int) -> *const c_char;
+        pub fn av_chroma_location_name(location: c_int) -> *const c_char;
+        pub fn av_hwdevice_iterate_types(prev: c_int) -> c_int;
+        pub fn av_hwdevice_find_type_by_name(name: *const c_char) -> c_int;
+        pub fn av_hwdevice_get_type_name(kind: c_int) -> *const c_char;
+        pub fn av_hwdevice_ctx_create(
+            device_ctx: *mut *mut AVBufferRef,
+            kind: c_int,
+            device: *const c_char,
+            opts: *mut AVDictionary,
+            flags: c_int,
+        ) -> c_int;
+    }
+}
+
+/// Read a C enum field as the `int` it is, whatever value it holds.
+///
+/// # Safety
+///
+/// `field` must point at an initialised enum field of a live FFmpeg struct.
+unsafe fn enum_int<E>(field: *const E) -> c_int {
+    const { assert!(size_of::<E>() == size_of::<c_int>()) };
+    // SAFETY: the caller's guarantee; C enums are `int`-sized (checked
+    // above), and any bit pattern is a valid `c_int`.
+    unsafe { field.cast::<c_int>().read() }
+}
+
+const HW_NONE: c_int = sys::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE as c_int;
 
 /// Convert a C string returned by an FFmpeg `*_name` function.
 fn cstr_opt(p: *const c_char) -> Option<String> {
@@ -54,79 +106,112 @@ pub struct CodecParFields {
 
 pub fn codecpar_fields(p: &ff::codec::Parameters) -> CodecParFields {
     // SAFETY: `p` borrows a live AVCodecParameters owned by its stream or
-    // by the Parameters value; we only read from it within this function.
-    let par = unsafe { &*p.as_ptr() };
-    let mut f = CodecParFields {
-        // SAFETY: avcodec_get_name accepts any codec id.
-        codec_name: cstr_opt(unsafe { sys::avcodec_get_name(par.codec_id) }),
-        codec_tag: par.codec_tag,
-        // SAFETY: avcodec_profile_name returns NULL for unknown profiles.
-        profile: cstr_opt(unsafe { sys::avcodec_profile_name(par.codec_id, par.profile) }),
-        level: (par.level >= 0).then_some(par.level),
-        width: par.width,
-        height: par.height,
-        sample_aspect: (par.sample_aspect_ratio.num, par.sample_aspect_ratio.den),
-        sample_rate: par.sample_rate,
-        channels: par.ch_layout.nb_channels,
-        ..Default::default()
+    // by the Parameters value. Its fields are read through this pointer and
+    // never through a reference, because some of them are enums.
+    let par = unsafe { p.as_ptr() };
+    // SAFETY: `par` is live (above); these are its enum fields.
+    let (codec_id, codec_type, field_order) = unsafe {
+        (
+            enum_int(&raw const (*par).codec_id),
+            enum_int(&raw const (*par).codec_type),
+            enum_int(&raw const (*par).field_order),
+        )
     };
-    match par.codec_type {
-        sys::AVMediaType::AVMEDIA_TYPE_VIDEO => {
-            if par.format >= 0 {
-                // SAFETY: `format` holds an AVPixelFormat for video streams;
-                // values unknown to this libavutil yield NULL descriptors.
-                let fmt: sys::AVPixelFormat = unsafe { std::mem::transmute(par.format) };
-                // SAFETY: as above.
-                f.pix_fmt = cstr_opt(unsafe { sys::av_get_pix_fmt_name(fmt) });
-                // SAFETY: returns NULL for unknown formats, checked below.
-                let desc = unsafe { sys::av_pix_fmt_desc_get(fmt) };
-                if !desc.is_null() {
-                    // SAFETY: non-NULL descriptors point at static tables.
-                    let d = unsafe { &*desc };
-                    let n = d.nb_components as usize;
-                    f.bit_depth = d.comp[..n.min(4)].iter().map(|c| c.depth as u32).max();
-                    f.chroma_subsampling = Some((d.log2_chroma_w as u32, d.log2_chroma_h as u32));
-                }
-            }
-            // SAFETY: name functions accept any enum value.
-            unsafe {
-                f.color_range = cstr_opt(sys::av_color_range_name(par.color_range));
-                f.color_matrix = cstr_opt(sys::av_color_space_name(par.color_space));
-                f.color_primaries = cstr_opt(sys::av_color_primaries_name(par.color_primaries));
-                f.color_transfer = cstr_opt(sys::av_color_transfer_name(par.color_trc));
-                f.chroma_location = cstr_opt(sys::av_chroma_location_name(par.chroma_location));
-            }
-            f.field_order = Some(
-                match par.field_order {
-                    sys::AVFieldOrder::AV_FIELD_PROGRESSIVE => "progressive",
-                    sys::AVFieldOrder::AV_FIELD_TT => "tt",
-                    sys::AVFieldOrder::AV_FIELD_BB => "bb",
-                    sys::AVFieldOrder::AV_FIELD_TB => "tb",
-                    sys::AVFieldOrder::AV_FIELD_BT => "bt",
-                    _ => "unknown",
-                }
-                .to_string(),
-            );
-            f.rotation_deg = display_rotation(par);
+    // SAFETY: as above; these are plain integer fields.
+    let mut f = unsafe {
+        CodecParFields {
+            codec_tag: (*par).codec_tag,
+            level: ((*par).level >= 0).then_some((*par).level),
+            width: (*par).width,
+            height: (*par).height,
+            sample_aspect: (
+                (*par).sample_aspect_ratio.num,
+                (*par).sample_aspect_ratio.den,
+            ),
+            sample_rate: (*par).sample_rate,
+            channels: (*par).ch_layout.nb_channels,
+            ..Default::default()
         }
-        sys::AVMediaType::AVMEDIA_TYPE_AUDIO => {
-            if par.format >= 0 {
-                // SAFETY: `format` holds an AVSampleFormat for audio streams.
-                let fmt: sys::AVSampleFormat = unsafe { std::mem::transmute(par.format) };
-                // SAFETY: returns NULL for unknown formats.
-                f.sample_fmt = cstr_opt(unsafe { sys::av_get_sample_fmt_name(fmt) });
+    };
+    // SAFETY: `par` is live; the name functions accept any codec id and
+    // return NULL for unknown ids and profiles.
+    unsafe {
+        f.codec_name = cstr_opt(c::avcodec_get_name(codec_id));
+        f.profile = cstr_opt(c::avcodec_profile_name(codec_id, (*par).profile));
+    }
+    // SAFETY: `par` is live; a plain integer field.
+    let format = unsafe { (*par).format };
+    if codec_type == sys::AVMediaType::AVMEDIA_TYPE_VIDEO as c_int {
+        if format >= 0 {
+            // SAFETY: `format` holds a pixel format for video streams, and
+            // both functions return NULL for values this libavutil doesn't
+            // know.
+            let (name, desc) = unsafe {
+                (
+                    c::av_get_pix_fmt_name(format),
+                    c::av_pix_fmt_desc_get(format),
+                )
+            };
+            f.pix_fmt = cstr_opt(name);
+            if !desc.is_null() {
+                // SAFETY: non-NULL descriptors point at static tables, and
+                // AVPixFmtDescriptor has no enum fields.
+                let d = unsafe { &*desc };
+                let n = d.nb_components as usize;
+                f.bit_depth = d.comp[..n.min(4)].iter().map(|c| c.depth as u32).max();
+                f.chroma_subsampling = Some((d.log2_chroma_w as u32, d.log2_chroma_h as u32));
             }
-            f.channel_layout = describe_layout(&par.ch_layout);
         }
-        _ => {}
+        // SAFETY: `par` is live and these are its enum fields; the name
+        // functions accept any value.
+        unsafe {
+            f.color_range = cstr_opt(c::av_color_range_name(enum_int(
+                &raw const (*par).color_range,
+            )));
+            f.color_matrix = cstr_opt(c::av_color_space_name(enum_int(
+                &raw const (*par).color_space,
+            )));
+            f.color_primaries = cstr_opt(c::av_color_primaries_name(enum_int(
+                &raw const (*par).color_primaries,
+            )));
+            f.color_transfer = cstr_opt(c::av_color_transfer_name(enum_int(
+                &raw const (*par).color_trc,
+            )));
+            f.chroma_location = cstr_opt(c::av_chroma_location_name(enum_int(
+                &raw const (*par).chroma_location,
+            )));
+        }
+        use sys::AVFieldOrder as F;
+        f.field_order = Some(
+            match field_order {
+                o if o == F::AV_FIELD_PROGRESSIVE as c_int => "progressive",
+                o if o == F::AV_FIELD_TT as c_int => "tt",
+                o if o == F::AV_FIELD_BB as c_int => "bb",
+                o if o == F::AV_FIELD_TB as c_int => "tb",
+                o if o == F::AV_FIELD_BT as c_int => "bt",
+                _ => "unknown",
+            }
+            .to_string(),
+        );
+        f.rotation_deg = display_rotation(par);
+    } else if codec_type == sys::AVMediaType::AVMEDIA_TYPE_AUDIO as c_int {
+        if format >= 0 {
+            // SAFETY: `format` holds a sample format for audio streams;
+            // returns NULL for values this libavutil doesn't know.
+            f.sample_fmt = cstr_opt(unsafe { c::av_get_sample_fmt_name(format) });
+        }
+        // SAFETY: `par` is live; this only takes the field's address.
+        f.channel_layout = describe_layout(unsafe { &raw const (*par).ch_layout });
     }
     f
 }
 
-fn describe_layout(l: &sys::AVChannelLayout) -> Option<String> {
+/// `l` points at the channel layout of live codec parameters.
+fn describe_layout(l: *const sys::AVChannelLayout) -> Option<String> {
     let mut buf = [0 as c_char; 256];
-    // SAFETY: `l` is a valid layout borrowed from live codec parameters and
-    // `buf` is a writable buffer of the size we pass.
+    // SAFETY: `l` is a valid layout in live codec parameters (FFmpeg reads
+    // its `order` field as the int it is), and `buf` is a writable buffer
+    // of the size we pass.
     let n = unsafe { sys::av_channel_layout_describe(l, buf.as_mut_ptr(), buf.len()) };
     if n <= 0 {
         return None;
@@ -139,41 +224,43 @@ fn describe_layout(l: &sys::AVChannelLayout) -> Option<String> {
     )
 }
 
-fn display_rotation(par: &sys::AVCodecParameters) -> Option<f64> {
+/// `par` points at live codec parameters.
+fn display_rotation(par: *const sys::AVCodecParameters) -> Option<f64> {
     // SAFETY: coded_side_data/nb_coded_side_data describe an array owned by
     // `par`; av_packet_side_data_get only reads it.
     let sd = unsafe {
         sys::av_packet_side_data_get(
-            par.coded_side_data,
-            par.nb_coded_side_data,
+            (*par).coded_side_data,
+            (*par).nb_coded_side_data,
             sys::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
         )
     };
     if sd.is_null() {
         return None;
     }
-    // SAFETY: non-NULL entry from the array above.
-    let sd = unsafe { &*sd };
-    if sd.size < 36 || sd.data.is_null() {
+    // SAFETY: non-NULL entry of the array above; only its plain fields are
+    // read.
+    let (size, data) = unsafe { ((*sd).size, (*sd).data) };
+    if size < 36 || data.is_null() {
         return None;
     }
     // SAFETY: a display matrix is nine int32 values, size checked above.
-    let r = unsafe { sys::av_display_rotation_get(sd.data as *const i32) };
+    let r = unsafe { sys::av_display_rotation_get(data as *const i32) };
     r.is_finite().then_some(r)
 }
 
 /// Hardware device types compiled into this FFmpeg.
 pub fn hw_device_types() -> Vec<String> {
     let mut out = Vec::new();
-    let mut t = sys::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE;
+    let mut t = HW_NONE;
     loop {
         // SAFETY: iterating from NONE is the documented way to list types.
-        t = unsafe { sys::av_hwdevice_iterate_types(t) };
-        if t == sys::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
+        t = unsafe { c::av_hwdevice_iterate_types(t) };
+        if t == HW_NONE {
             break;
         }
         // SAFETY: accepts any type value.
-        if let Some(n) = cstr_opt(unsafe { sys::av_hwdevice_get_type_name(t) }) {
+        if let Some(n) = cstr_opt(unsafe { c::av_hwdevice_get_type_name(t) }) {
             out.push(n);
         }
     }
@@ -185,8 +272,8 @@ pub fn hw_device_types() -> Vec<String> {
 pub fn try_hw_device(kind: &str, device: Option<&str>) -> Result<(), String> {
     let kind_c = CString::new(kind).map_err(|_| "bad device type".to_string())?;
     // SAFETY: valid NUL-terminated string.
-    let t = unsafe { sys::av_hwdevice_find_type_by_name(kind_c.as_ptr()) };
-    if t == sys::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
+    let t = unsafe { c::av_hwdevice_find_type_by_name(kind_c.as_ptr()) };
+    if t == HW_NONE {
         return Err(format!("this FFmpeg was built without {kind} support"));
     }
     let dev_c = device
@@ -196,7 +283,7 @@ pub fn try_hw_device(kind: &str, device: Option<&str>) -> Result<(), String> {
     let mut ctx: *mut sys::AVBufferRef = std::ptr::null_mut();
     // SAFETY: `ctx` is an out-pointer; device may be NULL (default device).
     let ret = unsafe {
-        sys::av_hwdevice_ctx_create(
+        c::av_hwdevice_ctx_create(
             &mut ctx,
             t,
             dev_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
@@ -225,11 +312,13 @@ pub fn decoder_hw_configs(codec: &ff::Codec) -> Vec<String> {
         if cfg.is_null() {
             break;
         }
-        // SAFETY: non-NULL configs point at static tables.
-        let cfg = unsafe { &*cfg };
-        if cfg.methods & sys::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32 != 0 {
+        // SAFETY: non-NULL configs point at static tables; the enum field
+        // is read as an int.
+        let (methods, device_type) =
+            unsafe { ((*cfg).methods, enum_int(&raw const (*cfg).device_type)) };
+        if methods & sys::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as c_int != 0 {
             // SAFETY: accepts any type value.
-            if let Some(n) = cstr_opt(unsafe { sys::av_hwdevice_get_type_name(cfg.device_type) }) {
+            if let Some(n) = cstr_opt(unsafe { c::av_hwdevice_get_type_name(device_type) }) {
                 out.push(n);
             }
         }
@@ -309,13 +398,14 @@ impl HwDevice {
     pub fn open(kind: &str, device: Option<&str>) -> Result<Self, String> {
         let kind_c = CString::new(kind).map_err(|_| "bad device type".to_string())?;
         // SAFETY: valid NUL-terminated string.
-        let t = unsafe { sys::av_hwdevice_find_type_by_name(kind_c.as_ptr()) };
-        if t == sys::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
+        let t = unsafe { c::av_hwdevice_find_type_by_name(kind_c.as_ptr()) };
+        if t == HW_NONE {
             return Err(format!("this FFmpeg was built without {kind} support"));
         }
+        use sys::AVHWDeviceType as T;
         let pix_fmt = match t {
-            sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI => sys::AVPixelFormat::AV_PIX_FMT_VAAPI,
-            sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN => sys::AVPixelFormat::AV_PIX_FMT_VULKAN,
+            t if t == T::AV_HWDEVICE_TYPE_VAAPI as c_int => sys::AVPixelFormat::AV_PIX_FMT_VAAPI,
+            t if t == T::AV_HWDEVICE_TYPE_VULKAN as c_int => sys::AVPixelFormat::AV_PIX_FMT_VULKAN,
             _ => return Err(format!("{kind} decoding is not supported by Spherecut")),
         };
         let dev_c = device
@@ -325,7 +415,7 @@ impl HwDevice {
         let mut ptr: *mut sys::AVBufferRef = std::ptr::null_mut();
         // SAFETY: `ptr` is an out-pointer; device may be NULL.
         let ret = unsafe {
-            sys::av_hwdevice_ctx_create(
+            c::av_hwdevice_ctx_create(
                 &mut ptr,
                 t,
                 dev_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
@@ -351,6 +441,12 @@ impl HwDevice {
     pub fn hw_pixel(&self) -> ff::format::Pixel {
         self.pix_fmt.into()
     }
+
+    /// [`hw_pixel`](Self::hw_pixel) as FFmpeg's int, to compare with
+    /// [`frame_format`].
+    pub fn hw_pix_fmt(&self) -> c_int {
+        self.pix_fmt as c_int
+    }
 }
 
 /// `get_format` callback: pick the hardware format stored in `opaque`, or
@@ -361,12 +457,18 @@ unsafe extern "C" fn pick_hw_format(
     fmts: *const sys::AVPixelFormat,
 ) -> sys::AVPixelFormat {
     // SAFETY: FFmpeg passes a live context whose `opaque` we set to the
-    // wanted format, and a list terminated by AV_PIX_FMT_NONE.
+    // wanted format, and a list terminated by AV_PIX_FMT_NONE. Entries are
+    // read as ints, since the list can hold formats our headers lack; the
+    // one returned equals `want`, which is a format they have.
     unsafe {
-        let want = (*ctx).opaque as isize as i32;
+        let want = (*ctx).opaque as isize as c_int;
         let mut p = fmts;
-        while *p != sys::AVPixelFormat::AV_PIX_FMT_NONE {
-            if *p as i32 == want {
+        loop {
+            let v = enum_int(p);
+            if v == sys::AVPixelFormat::AV_PIX_FMT_NONE as c_int {
+                break;
+            }
+            if v == want {
                 return *p;
             }
             p = p.add(1);
@@ -392,10 +494,23 @@ pub fn attach_hw_device(
             sys::av_buffer_unref(&mut (*c).hw_device_ctx);
         }
         (*c).hw_device_ctx = r;
-        (*c).opaque = dev.pix_fmt as i32 as isize as *mut std::ffi::c_void;
+        (*c).opaque = dev.pix_fmt as c_int as isize as *mut std::ffi::c_void;
         (*c).get_format = Some(pick_hw_format);
     }
     Ok(())
+}
+
+/// A frame's pixel format as FFmpeg's int, to compare and name it without
+/// making a bindgen enum of it (as `ff::frame::Video::format` does).
+pub fn frame_format(frame: &ff::frame::Video) -> c_int {
+    // SAFETY: `frame` wraps a live AVFrame; `format` is a plain int field.
+    unsafe { (*frame.as_ptr()).format }
+}
+
+/// FFmpeg's name for a pixel format, e.g. "yuv420p" or "vaapi".
+pub fn pix_fmt_name(fmt: c_int) -> Option<String> {
+    // SAFETY: accepts any value and returns NULL for unknown ones.
+    cstr_opt(unsafe { c::av_get_pix_fmt_name(fmt) })
 }
 
 /// Copy a hardware frame into system memory (NV12 / P010).

@@ -6,6 +6,7 @@
 //! can't decode the stream, opening or the first frame fails with the
 //! reason, and the caller chooses what to do.
 
+use std::ffi::c_int;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -44,8 +45,9 @@ impl DecodedFrame {
     /// path uploads planes without copying them like this. `None` for
     /// formats other than 4:2:0 8/10-bit.
     pub fn planes_u16(&self) -> Option<[Vec<u16>; 3]> {
-        use ff::format::Pixel as P;
+        use ff::ffi::AVPixelFormat as P;
         let f = &self.frame;
+        let is = |p: P| ffi::frame_format(f) == p as c_int;
         let (w, h) = (f.width() as usize, f.height() as usize);
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
         let row = |plane: usize, y: usize| -> &[u8] { &f.data(plane)[y * f.stride(plane)..] };
@@ -56,29 +58,33 @@ impl DecodedFrame {
                 .map(|(y, x)| px(y, x))
                 .collect()
         };
-        Some(match f.format() {
-            P::YUV420P | P::YUVJ420P => [
+        Some(if is(P::AV_PIX_FMT_YUV420P) || is(P::AV_PIX_FMT_YUVJ420P) {
+            [
                 collect(w, h, &|y, x| row(0, y)[x] as u16),
                 collect(cw, ch, &|y, x| row(1, y)[x] as u16),
                 collect(cw, ch, &|y, x| row(2, y)[x] as u16),
-            ],
-            P::YUV420P10LE => [
+            ]
+        } else if is(P::AV_PIX_FMT_YUV420P10LE) {
+            [
                 collect(w, h, &|y, x| rd16(row(0, y), x)),
                 collect(cw, ch, &|y, x| rd16(row(1, y), x)),
                 collect(cw, ch, &|y, x| rd16(row(2, y), x)),
-            ],
-            P::NV12 => [
+            ]
+        } else if is(P::AV_PIX_FMT_NV12) {
+            [
                 collect(w, h, &|y, x| row(0, y)[x] as u16),
                 collect(cw, ch, &|y, x| row(1, y)[2 * x] as u16),
                 collect(cw, ch, &|y, x| row(1, y)[2 * x + 1] as u16),
-            ],
+            ]
+        } else if is(P::AV_PIX_FMT_P010LE) {
             // P010 keeps the 10 bits in the high end of each u16.
-            P::P010LE => [
+            [
                 collect(w, h, &|y, x| rd16(row(0, y), x) >> 6),
                 collect(cw, ch, &|y, x| rd16(row(1, y), 2 * x) >> 6),
                 collect(cw, ch, &|y, x| rd16(row(1, y), 2 * x + 1) >> 6),
-            ],
-            _ => return None,
+            ]
+        } else {
+            return None;
         })
     }
 }
@@ -214,17 +220,15 @@ impl VideoDecoder {
     }
 
     fn finish_frame(&self, frame: ff::frame::Video) -> Result<DecodedFrame, MediaError> {
-        let on_device = self
-            .hw
-            .as_ref()
-            .is_some_and(|h| frame.format() == h.hw_pixel());
+        let format = ffi::frame_format(&frame);
+        let on_device = self.hw.as_ref().is_some_and(|h| format == h.hw_pix_fmt());
         if self.hw.is_some() && !on_device {
             return Err(err(
                 &self.path,
                 "hardware decode",
                 format!(
-                    "decoder produced {:?} frames instead of device frames",
-                    frame.format()
+                    "decoder produced {} frames instead of device frames",
+                    ffi::pix_fmt_name(format).unwrap_or_else(|| format!("format {format}"))
                 ),
             ));
         }
