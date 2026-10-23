@@ -234,26 +234,138 @@ pub struct DoctorReport {
     pub issues: Vec<Issue>,
 }
 
-const DECODERS: &[&str] = &[
-    "h264",
-    "hevc",
-    "av1",
-    "libdav1d",
-    "prores",
-    "aac",
-    "opus",
-    "pcm_s16le",
+/// A decoder or encoder doctor looks for, and the issue when FFmpeg lacks
+/// it.
+struct Need {
+    codec: &'static str,
+    severity: Severity,
+    /// What it is, e.g. "HEVC decoder".
+    what: &'static str,
+    /// What is lost without it.
+    impact: &'static str,
+}
+
+const fn need(
+    codec: &'static str,
+    severity: Severity,
+    what: &'static str,
+    impact: &'static str,
+) -> Need {
+    Need {
+        codec,
+        severity,
+        what,
+        impact,
+    }
+}
+
+const DECODERS: &[Need] = &[
+    need(
+        "h264",
+        Severity::Error,
+        "H.264 decoder",
+        "H.264 files cannot be opened",
+    ),
+    need(
+        "hevc",
+        Severity::Error,
+        "HEVC decoder",
+        "HEVC files (most 360 cameras record HEVC) cannot be opened",
+    ),
+    need(
+        "av1",
+        Severity::Info,
+        "AV1 decoder for VA-API and Vulkan Video",
+        "AV1 cannot decode on the GPU",
+    ),
+    // Only when the software AV1 check works without it; when that check
+    // fails, its own issue names libdav1d.
+    need(
+        LIBDAV1D,
+        Severity::Info,
+        "dav1d AV1 decoder",
+        "AV1 decodes in software with libaom-av1, which is far slower",
+    ),
+    need(
+        "prores",
+        Severity::Error,
+        "ProRes decoder",
+        "ProRes files cannot be opened",
+    ),
+    need(
+        "aac",
+        Severity::Error,
+        "AAC decoder",
+        "the audio of nearly every camera file cannot be decoded",
+    ),
+    need(
+        "opus",
+        Severity::Warning,
+        "Opus decoder",
+        "Opus audio cannot be decoded",
+    ),
+    need(
+        "pcm_s16le",
+        Severity::Warning,
+        "16-bit PCM decoder",
+        "16-bit PCM audio cannot be decoded",
+    ),
 ];
-const ENCODERS: &[&str] = &[
-    "libx264",
-    "libx265",
-    "libsvtav1",
-    "h264_vaapi",
-    "hevc_vaapi",
-    "av1_vaapi",
-    "prores_ks",
-    "aac",
+
+// FFmpeg's VA-API encoders are `<codec>_vaapi`. A build without VA-API has
+// none, and the issue that says so covers them.
+const ENCODERS: &[Need] = &[
+    need(
+        "libx264",
+        Severity::Warning,
+        "software H.264 encoder",
+        "H.264 export needs VA-API; there is no CPU fallback",
+    ),
+    need(
+        "libx265",
+        Severity::Warning,
+        "software HEVC encoder",
+        "HEVC export needs VA-API; there is no CPU fallback",
+    ),
+    need(
+        "libsvtav1",
+        Severity::Warning,
+        "software AV1 encoder",
+        "AV1 export needs VA-API; there is no CPU fallback",
+    ),
+    need(
+        "h264_vaapi",
+        Severity::Warning,
+        "VA-API H.264 encoder",
+        "H.264 export can't use the GPU: it runs on the CPU, which is far slower at 5.7K and up",
+    ),
+    need(
+        "hevc_vaapi",
+        Severity::Warning,
+        "VA-API HEVC encoder",
+        "HEVC export can't use the GPU: it runs on the CPU, which is far slower at 5.7K and up",
+    ),
+    need(
+        "av1_vaapi",
+        Severity::Info,
+        "VA-API AV1 encoder",
+        "AV1 export can't use the GPU",
+    ),
+    need(
+        "prores_ks",
+        Severity::Info,
+        "ProRes encoder",
+        "no ProRes export",
+    ),
+    need(
+        "aac",
+        Severity::Warning,
+        "AAC encoder",
+        "exports cannot have AAC audio",
+    ),
 ];
+
+const LIBDAV1D: &str = "libdav1d";
 
 pub const SOFTWARE: &str = "software";
 const AV1: &str = "AV1 Main";
@@ -359,14 +471,14 @@ pub fn run(render_node: &Path) -> DoctorReport {
     let distro = Distro::detect();
     let decoders: Vec<CodecStatus> = DECODERS
         .iter()
-        .map(|&n| match ff::decoder::find_by_name(n) {
+        .map(|n| match ff::decoder::find_by_name(n.codec) {
             Some(c) => CodecStatus {
-                name: n.into(),
+                name: n.codec.into(),
                 available: true,
                 hw: ffi::decoder_hw_configs(&c),
             },
             None => CodecStatus {
-                name: n.into(),
+                name: n.codec.into(),
                 available: false,
                 hw: vec![],
             },
@@ -374,9 +486,9 @@ pub fn run(render_node: &Path) -> DoctorReport {
         .collect();
     let encoders: Vec<CodecStatus> = ENCODERS
         .iter()
-        .map(|&n| CodecStatus {
-            name: n.into(),
-            available: ff::encoder::find_by_name(n).is_some(),
+        .map(|n| CodecStatus {
+            name: n.codec.into(),
+            available: ff::encoder::find_by_name(n.codec).is_some(),
             hw: vec![],
         })
         .collect();
@@ -799,7 +911,8 @@ impl Fixes<'_> {
         }
     }
 
-    /// A full FFmpeg: H.264/HEVC, dav1d, libx264/libx265, VA-API, Vulkan.
+    /// A full FFmpeg: H.264/HEVC, dav1d, libx264/libx265, SVT-AV1, VA-API,
+    /// Vulkan.
     fn ffmpeg(&self) -> String {
         match self.distro {
             Distro::Fedora => {
@@ -815,7 +928,7 @@ impl Fixes<'_> {
             }
             Distro::Arch => "sudo pacman -S --needed ffmpeg".into(),
             Distro::Other => "install a full FFmpeg build: H.264/HEVC, libdav1d, \
-                              libx264/libx265, VA-API and Vulkan"
+                              libx264/libx265, SVT-AV1, VA-API and Vulkan"
                 .into(),
         }
     }
@@ -963,24 +1076,27 @@ fn issues(r: &DoctorReport, env: &Env) -> Vec<Issue> {
             .is_some_and(|(k, _)| *k == ErrorKind::PermissionDenied),
     };
     let mut out = Vec::new();
-    let has_dec = |n: &str| r.decoders.iter().any(|c| c.name == n && c.available);
-    let has_enc = |n: &str| r.encoders.iter().any(|c| c.name == n && c.available);
-
-    for (codec, what) in [("hevc", "HEVC"), ("h264", "H.264")] {
-        if !has_dec(codec) {
-            out.push(Issue {
-                severity: Severity::Error,
-                what: format!("FFmpeg has no {what} decoder"),
-                impact: format!("{what} files (most 360 cameras record HEVC) cannot be opened"),
-                fix: fx.ffmpeg(),
-            });
-        }
-    }
-    let av1_software = r
+    let av1_software_fails = r
         .decode_checks
         .iter()
-        .find(|c| c.format == AV1 && c.path == SOFTWARE);
-    if av1_software.is_some_and(|c| c.result != CheckResult::Works) {
+        .any(|c| c.format == AV1 && c.path == SOFTWARE && c.result != CheckResult::Works);
+    let vaapi_built_in = r.hw_device_types.iter().any(|t| t == "vaapi");
+    for (needs, codecs) in [(DECODERS, &r.decoders), (ENCODERS, &r.encoders)] {
+        for n in needs {
+            let missing = codecs.iter().any(|c| c.name == n.codec && !c.available);
+            let covered = (n.codec == LIBDAV1D && av1_software_fails)
+                || (n.codec.ends_with("_vaapi") && !vaapi_built_in);
+            if missing && !covered {
+                out.push(Issue {
+                    severity: n.severity,
+                    what: format!("FFmpeg has no {} ({})", n.what, n.codec),
+                    impact: n.impact.into(),
+                    fix: fx.ffmpeg(),
+                });
+            }
+        }
+    }
+    if av1_software_fails {
         let on_gpu = r
             .decode_checks
             .iter()
@@ -1000,44 +1116,30 @@ fn issues(r: &DoctorReport, env: &Env) -> Vec<Issue> {
             fix: fx.ffmpeg(),
         });
     }
-    for (codec, what, impact) in [
-        ("prores", "ProRes", "ProRes files cannot be opened"),
-        (
-            "aac",
-            "AAC",
-            "the audio of nearly every camera file cannot be decoded",
-        ),
-    ] {
-        if !has_dec(codec) {
-            out.push(Issue {
-                severity: Severity::Error,
-                what: format!("FFmpeg has no {what} decoder"),
-                impact: impact.into(),
-                fix: fx.ffmpeg(),
-            });
-        }
-    }
-    for (enc, what) in [("libx265", "HEVC"), ("libx264", "H.264")] {
-        if !has_enc(enc) {
-            out.push(Issue {
-                severity: Severity::Warning,
-                what: format!("no software {what} encoder ({enc})"),
-                impact: format!("{what} export needs VA-API; there is no CPU fallback"),
-                fix: fx.ffmpeg(),
-            });
-        }
-    }
     vaapi_issues(r, env, &fx, &mut out);
     vulkan_issues(r, env, &fx, &mut out);
     out.sort_by_key(|i| i.severity);
     out
 }
 
-/// Formats whose checks on `path` failed for `fault`.
-fn failed<'a>(checks: &'a [Check], path: &str, fault: Fault) -> Vec<&'a str> {
+/// Formats whose checks on `path` failed for `fault`. A check whose
+/// decoder or encoder is missing from `codecs` is left out: the missing
+/// codec has an issue of its own.
+fn failed<'a>(
+    checks: &'a [Check],
+    codecs: &[CodecStatus],
+    path: &str,
+    fault: Fault,
+) -> Vec<&'a str> {
+    let missing = |name: &str| codecs.iter().any(|c| c.name == name && !c.available);
     checks
         .iter()
-        .filter(|c| c.path == path && c.result == CheckResult::Fails && c.fault == Some(fault))
+        .filter(|c| {
+            c.path == path
+                && c.result == CheckResult::Fails
+                && c.fault == Some(fault)
+                && !missing(&c.codec)
+        })
         .map(|c| c.format.as_str())
         .collect()
 }
@@ -1071,13 +1173,14 @@ fn vaapi_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issue
     }
 
     // What this FFmpeg build can't do on VA-API, whatever the driver: from
-    // the checks when the device opened, else from the codec lists.
+    // the checks when the device opened, else from the decoders' hwaccels.
+    // Missing VA-API encoders have issues of their own.
     let (ffmpeg_dec, ffmpeg_enc): (Vec<&str>, Vec<&str>) = if !built_in {
         (Vec::new(), Vec::new())
     } else if dev.ok {
         (
-            failed(&r.decode_checks, "vaapi", Fault::Ffmpeg),
-            failed(&r.encode_checks, "vaapi", Fault::Ffmpeg),
+            failed(&r.decode_checks, &r.decoders, "vaapi", Fault::Ffmpeg),
+            failed(&r.encode_checks, &r.encoders, "vaapi", Fault::Ffmpeg),
         )
     } else {
         let no_hwaccel = |n: &str| {
@@ -1085,18 +1188,13 @@ fn vaapi_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issue
                 .iter()
                 .any(|c| c.name == n && c.available && !c.hw.iter().any(|h| h == "vaapi"))
         };
-        let missing = |n: &str| r.encoders.iter().any(|c| c.name == n && !c.available);
         (
             [("h264", "H.264"), ("hevc", "HEVC")]
                 .into_iter()
                 .filter(|(n, _)| no_hwaccel(n))
                 .map(|(_, w)| w)
                 .collect(),
-            [("h264_vaapi", "H.264"), ("hevc_vaapi", "HEVC")]
-                .into_iter()
-                .filter(|(n, _)| missing(n))
-                .map(|(_, w)| w)
-                .collect(),
+            Vec::new(),
         )
     };
     if !ffmpeg_dec.is_empty() || !ffmpeg_enc.is_empty() {
@@ -1157,12 +1255,14 @@ fn vaapi_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issue
     }
 
     // The device opened: what its driver can't do.
-    let (av1_dec, dec): (Vec<&str>, Vec<&str>) = failed(&r.decode_checks, "vaapi", Fault::Driver)
-        .into_iter()
-        .partition(|f| *f == AV1);
-    let (av1_enc, enc): (Vec<&str>, Vec<&str>) = failed(&r.encode_checks, "vaapi", Fault::Driver)
-        .into_iter()
-        .partition(|f| *f == "AV1");
+    let (av1_dec, dec): (Vec<&str>, Vec<&str>) =
+        failed(&r.decode_checks, &r.decoders, "vaapi", Fault::Driver)
+            .into_iter()
+            .partition(|f| *f == AV1);
+    let (av1_enc, enc): (Vec<&str>, Vec<&str>) =
+        failed(&r.encode_checks, &r.encoders, "vaapi", Fault::Driver)
+            .into_iter()
+            .partition(|f| *f == "AV1");
     if !dec.is_empty() || !enc.is_empty() {
         let mut what = format!("VA-API on {node} cannot {}", cannot(&dec, &enc));
         // Fedora's Mesa turns off H.264 and HEVC, all profiles, both ways.
@@ -1286,7 +1386,7 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
                 .into()
         }
     };
-    let ffmpeg_dec = failed(&r.decode_checks, "vulkan", Fault::Ffmpeg);
+    let ffmpeg_dec = failed(&r.decode_checks, &r.decoders, "vulkan", Fault::Ffmpeg);
     if !ffmpeg_dec.is_empty() {
         out.push(Issue {
             severity: Severity::Info,
@@ -1344,13 +1444,13 @@ mod tests {
 
     use super::*;
 
-    fn codecs(names: &[&str]) -> Vec<CodecStatus> {
-        names
+    fn codecs(needs: &[Need]) -> Vec<CodecStatus> {
+        needs
             .iter()
             .map(|n| CodecStatus {
-                name: n.to_string(),
+                name: n.codec.to_string(),
                 available: true,
-                hw: if ["h264", "hevc", "av1"].contains(n) {
+                hw: if ["h264", "hevc", "av1"].contains(&n.codec) {
                     vec!["vaapi".into(), "vulkan".into()]
                 } else {
                     vec![]
@@ -1579,8 +1679,8 @@ mod tests {
         assert_eq!(
             whats,
             [
-                (Severity::Error, "FFmpeg has no ProRes decoder"),
-                (Severity::Error, "FFmpeg has no AAC decoder"),
+                (Severity::Error, "FFmpeg has no ProRes decoder (prores)"),
+                (Severity::Error, "FFmpeg has no AAC decoder (aac)"),
                 (
                     Severity::Warning,
                     "FFmpeg has no working software AV1 decoder (libdav1d)"
@@ -1595,6 +1695,105 @@ mod tests {
         let av1 = is.iter().find(|i| i.what.contains("AV1 decoder")).unwrap();
         assert_eq!(av1.severity, Severity::Error);
         assert_eq!(av1.impact, "AV1 files cannot be opened");
+    }
+
+    /// `r` with `codec` gone from the decoders or the encoders.
+    fn without(r: &DoctorReport, codec: &str, decoder: bool) -> DoctorReport {
+        let mut r = r.clone();
+        let list = if decoder {
+            &mut r.decoders
+        } else {
+            &mut r.encoders
+        };
+        list.iter_mut().find(|c| c.name == codec).unwrap().available = false;
+        r
+    }
+
+    #[test]
+    fn every_missing_codec_gets_an_issue_with_the_ffmpeg_fix() {
+        // The codec tables show each one as missing; something must say
+        // what that costs and how to fix it.
+        let base = healthy(Distro::Arch);
+        let mut all = base.clone();
+        let listed = DECODERS
+            .iter()
+            .map(|n| (n, true))
+            .chain(ENCODERS.iter().map(|n| (n, false)));
+        for (n, decoder) in listed {
+            let named = format!("({})", n.codec);
+            let r = without(&base, n.codec, decoder);
+            let i = only(&issues(&r, &Env::default())).clone();
+            assert!(i.what.contains(&named), "{}: {i:?}", n.codec);
+            assert_eq!(i.severity, n.severity, "{}", n.codec);
+            assert_eq!(i.impact, n.impact, "{}", n.codec);
+            assert_eq!(i.fix, "sudo pacman -S --needed ffmpeg", "{}", n.codec);
+            all = without(&all, n.codec, decoder);
+        }
+        // All at once, each one is still named.
+        let is = issues(&all, &Env::default());
+        for n in DECODERS.iter().chain(ENCODERS) {
+            let named = format!("({})", n.codec);
+            assert!(
+                is.iter().any(|i| i.what.contains(&named)),
+                "{named}: {is:#?}"
+            );
+        }
+
+        let i = only(&issues(
+            &without(&base, "libsvtav1", false),
+            &Env::default(),
+        ))
+        .clone();
+        assert_eq!(i.what, "FFmpeg has no software AV1 encoder (libsvtav1)");
+        assert_eq!(
+            i.impact,
+            "AV1 export needs VA-API; there is no CPU fallback"
+        );
+        let i = only(&issues(&without(&base, "aac", false), &Env::default())).clone();
+        assert_eq!(i.what, "FFmpeg has no AAC encoder (aac)");
+
+        // On other distros the fix names what a full build has.
+        let mut r = without(&base, "libsvtav1", false);
+        r.distro = Distro::Other;
+        assert_eq!(
+            only(&issues(&r, &Env::default())).fix,
+            "install a full FFmpeg build: H.264/HEVC, libdav1d, libx264/libx265, SVT-AV1, \
+             VA-API and Vulkan"
+        );
+    }
+
+    #[test]
+    fn a_missing_codec_is_not_also_blamed_on_vaapi_or_vulkan() {
+        // As doctor finds it: the hardware checks of that format fail for
+        // lack of the decoder or encoder.
+        let mut r = without(&healthy(Distro::Arch), "av1", true);
+        r = without(&r, "h264_vaapi", false);
+        for path in ["vaapi", "vulkan"] {
+            fail(&mut r.decode_checks, path, &[AV1], Fault::Ffmpeg);
+        }
+        fail(&mut r.encode_checks, "vaapi", &["H.264"], Fault::Ffmpeg);
+        let is = issues(&r, &Env::default());
+        let whats: Vec<_> = is.iter().map(|i| i.what.as_str()).collect();
+        assert_eq!(
+            whats,
+            [
+                "FFmpeg has no VA-API H.264 encoder (h264_vaapi)",
+                "FFmpeg has no AV1 decoder for VA-API and Vulkan Video (av1)",
+            ]
+        );
+
+        // Without VA-API at all, that one issue covers its encoders.
+        let mut r = healthy(Distro::Arch);
+        r.hw_device_types.retain(|t| t != "vaapi");
+        r.devices[0] = device("vaapi", false);
+        for c in r.decoders.iter_mut() {
+            c.hw.retain(|h| h != "vaapi");
+        }
+        for e in ["h264_vaapi", "hevc_vaapi", "av1_vaapi"] {
+            r = without(&r, e, false);
+        }
+        let i = only(&issues(&r, &Env::default())).clone();
+        assert_eq!(i.what, "this FFmpeg was built without VA-API");
     }
 
     #[test]
