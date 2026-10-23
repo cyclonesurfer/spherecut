@@ -177,7 +177,7 @@ fn broken_files_give_errors_not_panics() {
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     assert!(r.ffmpeg_log.is_empty(), "{:?}", r.ffmpeg_log);
     let bad = media::write_bad_files(&good, &dir).unwrap();
-    assert_eq!(bad.len(), 10);
+    assert_eq!(bad.len(), 12);
     let reasons = [
         ("bad-empty.mp4", "the file is empty"),
         ("bad-text.mp4", "not a recognised media file"),
@@ -189,6 +189,7 @@ fn broken_files_give_errors_not_panics() {
             "bad-trak-type.mp4",
             "has a type that is not text, so its header is damaged",
         ),
+        ("bad-trak-renamed.mp4", "box `Trak` at offset"),
         (
             "bad-timescale.mp4",
             "track #0: its `mdhd` gives timescale 0",
@@ -200,6 +201,10 @@ fn broken_files_give_errors_not_panics() {
         (
             "bad-audio-config.mp4",
             "stream #1 (sample entry `mp4a`) cannot be opened by FFmpeg's aac decoder",
+        ),
+        (
+            "bad-projection.mp4",
+            "in `avc1` has no `proj`, so FFmpeg ignores its projection",
         ),
     ];
     for b in &bad {
@@ -222,9 +227,11 @@ fn broken_files_give_errors_not_panics() {
         "bad-trunc-end.mp4",
         "bad-corrupt-moov.mp4",
         "bad-trak-type.mp4",
+        "bad-trak-renamed.mp4",
         "bad-timescale.mp4",
         "bad-codec-config.mp4",
         "bad-audio-config.mp4",
+        "bad-projection.mp4",
     ] {
         let r = probe::probe(&dir.join(name));
         assert!(r.is_ok_and(|r| !r.damage.is_empty()), "{name}");
@@ -237,9 +244,22 @@ fn broken_files_give_errors_not_panics() {
         audio.channels > 0 && audio.sample_fmt.is_some(),
         "{audio:?}"
     );
-    // The audio track is gone from what FFmpeg reads.
-    let r = probe::probe(&dir.join("bad-trak-type.mp4")).unwrap();
-    assert!(r.streams.iter().all(|s| s.kind != StreamKind::Audio));
+    // The audio track is gone from what FFmpeg reads, whether its type is
+    // still text or not.
+    for name in ["bad-trak-type.mp4", "bad-trak-renamed.mp4"] {
+        let r = probe::probe(&dir.join(name)).unwrap();
+        assert!(r.streams.iter().all(|s| s.kind != StreamKind::Audio));
+    }
+    // FFmpeg reads no projection from an `sv3d` without `proj`, and says so
+    // only in its log.
+    let r = probe::probe(&dir.join("bad-projection.mp4")).unwrap();
+    assert!(
+        r.ffmpeg_log
+            .iter()
+            .any(|l| l.contains("] Missing projection box")),
+        "{:?}",
+        r.ffmpeg_log
+    );
     // FFmpeg's own word on it is kept, apart from the damage.
     let r = probe::probe(&dir.join("bad-timescale.mp4")).unwrap();
     assert!(
@@ -305,7 +325,7 @@ fn broken_files_give_errors_not_panics() {
             bytes[at] = x;
         }
     }
-    // Most edits land in the sample tables and are found (3451 of them
+    // Most edits land in the sample tables and are found (3452 of them
     // with FFmpeg 6.1). The rest change sizes and times that stay
     // consistent, or bytes nothing checks, such as names.
     eprintln!("{detected} of 4000 edits found");

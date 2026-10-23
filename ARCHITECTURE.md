@@ -101,6 +101,9 @@ The other modules are safe Rust:
   other and against the `mdat` ranges; a box type that isn't printable
   text where only registered types belong (in `moov`, `trak`, `mdia`,
   `minf`, `stbl`, `stsd`, the known sample entries, `sv3d` and `proj`);
+  a `moov` child under another printable type whose payload starts with a
+  `tkhd` (a renamed `trak`, whose payload is kept whatever its size); an
+  `sv3d` without `svhd`, `proj` or `proj/prhd`, which FFmpeg ignores;
   and a `mvhd` or `mdhd` timescale FFmpeg can't use. Each FFmpeg stream is
   matched to its `trak` by track ID (by position when IDs repeat or are
   missing), and a video or audio `trak` that FFmpeg reads as another kind

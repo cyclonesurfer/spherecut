@@ -84,6 +84,11 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
             "box `\\xd1rak` at offset",
         ),
         (
+            "bad-trak-renamed.mp4",
+            "is damaged",
+            "in `moov` starts with a track header (`tkhd`), so it is a `trak` whose type is damaged and FFmpeg skips its stream",
+        ),
+        (
             "bad-timescale.mp4",
             "is damaged",
             "track #0: its `mdhd` gives timescale 0, so its times are wrong",
@@ -97,6 +102,11 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
             "bad-audio-config.mp4",
             "is damaged",
             "stream #1 (sample entry `mp4a`) cannot be opened by FFmpeg's aac decoder (Invalid data found when processing input), so its codec setup is damaged",
+        ),
+        (
+            "bad-projection.mp4",
+            "is damaged",
+            "in `avc1` has no `proj`, so FFmpeg ignores its projection",
         ),
     ];
     assert_eq!(bad.len(), expect.len());

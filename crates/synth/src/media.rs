@@ -324,9 +324,11 @@ type Corruption = fn(&Mp4Tree, &mut [u8]) -> bool;
 const CORRUPTIONS: &[(&str, Corruption)] = &[
     ("bad-corrupt-moov.mp4", flip_chunk_offsets),
     ("bad-trak-type.mp4", flip_last_trak_type),
+    ("bad-trak-renamed.mp4", rename_last_trak),
     ("bad-timescale.mp4", zero_first_timescale),
     ("bad-codec-config.mp4", flip_first_codec_config),
     ("bad-audio-config.mp4", reserve_audio_sample_rate),
+    ("bad-projection.mp4", rename_first_proj),
 ];
 
 /// The top byte of every chunk offset (`stco`/`co64`) flipped, so the
@@ -364,6 +366,34 @@ fn flip_last_trak_type(tree: &Mp4Tree, out: &mut [u8]) -> bool {
     };
     out.get_mut(trak.offset as usize + 4)
         .map(|x| *x ^= 0xa5)
+        .is_some()
+}
+
+/// One bit of the last `trak`'s type flipped so that it reads `Trak`,
+/// which is still text. FFmpeg skips it just the same.
+fn rename_last_trak(tree: &Mp4Tree, out: &mut [u8]) -> bool {
+    let Some(trak) = tree.tracks().last() else {
+        return false;
+    };
+    out.get_mut(trak.offset as usize + 4)
+        .map(|x| *x ^= 0x20)
+        .is_some()
+}
+
+/// One bit of the type of the first `proj` (Spherical Video V2) flipped
+/// so that it reads `qroj`. FFmpeg opens the file and says "Missing
+/// projection box" in its log, and the projection is gone.
+fn rename_first_proj(tree: &Mp4Tree, out: &mut [u8]) -> bool {
+    let proj = tree
+        .tracks()
+        .filter_map(|t| t.path(&[b"mdia", b"minf", b"stbl", b"stsd"]))
+        .flat_map(|stsd| &stsd.children)
+        .find_map(|entry| entry.path(&[b"sv3d", b"proj"]));
+    let Some(proj) = proj else {
+        return false;
+    };
+    out.get_mut(proj.offset as usize + 4)
+        .map(|x| *x ^= 0x01)
         .is_some()
 }
 

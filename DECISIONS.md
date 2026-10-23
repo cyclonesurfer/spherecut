@@ -411,7 +411,8 @@ Limits, so a hostile file costs bounded time and memory:
   top-level boxes are read only when each is at most 64 KiB and their
   total stays under 1 MiB.
 - Leaf payloads over 1 MiB are not kept, except the sample tables (`stts`,
-  `stsz`, `stz2`, `stsc`, `stco`, `co64`), which the 256 MiB `moov` limit
+  `stsz`, `stz2`, `stsc`, `stco`, `co64`) and a payload that starts with a
+  `tkhd` (a renamed `trak`, below), which the 256 MiB `moov` limit
   bounds.
 
 Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
@@ -433,6 +434,18 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   zero bytes (QuickTime's terminator, or padding) are allowed. `udta`,
   `meta` and `ilst` are not checked, because `©nam` and the like are
   normal there;
+- a child of `moov` whose type is printable but not `trak` and whose
+  payload starts with a `tkhd` box: a `trak` renamed to `Trak`, ``tr`k``
+  or `free`, which FFmpeg skips with its stream just as it skips
+  `\xd1rak`. 28 of the 32 one-bit flips of `trak` are still printable.
+  FFmpeg-written and Pat's X5 tracks start with `tkhd`. A renamed `mdia`,
+  `minf` or `stbl` needs no check of its own, because the track then has
+  none, which is damage already;
+- an `sv3d` in a sample entry without `svhd`, without `proj`, or with a
+  `proj` that has no `prhd`. FFmpeg then ignores the whole `sv3d`, saying
+  no more than "Missing projection box" in its log, so a `proj` renamed
+  to `qroj` loses the projection. A projection box FFmpeg does not know,
+  such as `mshp`, is not damage;
 - a `mvhd` or `mdhd` timescale of 0, or too large for a signed 32-bit
   number, which FFmpeg replaces with 1, so every time is wrong;
 - a video or audio stream FFmpeg could not set up, when its track has
@@ -477,9 +490,9 @@ object is `{"path", "error", "ffmpeg_log"}`.
 Not found without decoding: damage in `mdat`, and damage in `moov` that
 leaves the structure consistent, such as changed sample sizes or times
 (`stts`, `ctts`, `elst`), chunk offsets that still point into `mdat`,
-bits of a parameter set, or a `trak` renamed to another printable type
-such as `free`. Bytes of `mdat` that no chunk uses are not counted as
-damage.
+bits of a parameter set, or a box other than those above renamed to
+another printable type, such as `edts`. Bytes of `mdat` that no chunk
+uses are not counted as damage.
 
 Fuzzing, with proptest, in `mp4::tests::fuzz`, under overflow checks:
 structure-aware random box trees (containers, `stsd` and sample entries,
@@ -493,8 +506,8 @@ FFmpeg wrote, of which at least 3000 must be found
 (`crates/synth/tests/generated_media.rs`), and run `spherecut probe` on
 200 000 levels (`crates/cli/tests/probe.rs`). `write_bad_files` makes one
 file for each kind of `moov` damage FFmpeg opens without complaint: chunk
-offsets, a `trak` type, an `mdhd` timescale, a video codec configuration
-and an AAC setup.
+offsets, a `trak` type that is not text and one that still is, an `mdhd`
+timescale, a video codec configuration, an AAC setup and a `proj` type.
 
 Why: the M0 review found unbounded recursion and quadratic memory in the
 parser (B2), `probe` exiting 0 on corrupt and truncated MP4s (S1), and
@@ -502,7 +515,8 @@ that the parser was not fuzzed as D4 said. The final review (C6) found
 files that still probed clean: a renamed `trak`, a zero `mdhd` timescale
 and a damaged `hvcC`. The review of those fixes found more: an `esds`
 whose AAC object type FFmpeg cannot open, which left every field of the
-stream set.
+stream set, and printable renames (`Trak`, `qroj`, `wvhd`) that lose a
+stream or the projection.
 
 ## D16. `inject` and `Mp4Writer` write atomically
 

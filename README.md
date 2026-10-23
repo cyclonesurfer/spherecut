@@ -101,6 +101,11 @@ MP4/MOV files, probe counts these as damage:
 - a box type that isn't printable text inside `moov`, `trak`, `mdia`,
   `minf`, `stbl`, `stsd`, the sample entries probe knows, `sv3d` or
   `proj`;
+- a box in `moov` that starts with a track header (`tkhd`) but whose type
+  is another printable one, such as `Trak` or `free`: FFmpeg skips it, and
+  its stream with it;
+- an `sv3d` without its `svhd`, its `proj` or the `prhd` in `proj`, which
+  makes FFmpeg ignore the projection;
 - a `mvhd` or `mdhd` timescale of 0, or one FFmpeg reads as negative;
 - a video sample entry under an audio handler, or the other way round;
 - a video or audio track that FFmpeg reads as another kind of stream;

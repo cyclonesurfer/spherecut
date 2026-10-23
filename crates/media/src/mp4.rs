@@ -186,9 +186,10 @@ impl Mp4Tree {
 
     /// Why the file looks damaged: a box cut off by the end of the file,
     /// malformed boxes, box types that are not text where only registered
-    /// types belong, timescales FFmpeg cannot use, and sample tables that
-    /// disagree with each other or point outside the media data. Empty for
-    /// a healthy file. The work is linear in the size of the sample tables.
+    /// types belong, a `trak` under another type, an `sv3d` FFmpeg ignores,
+    /// timescales FFmpeg cannot use, and sample tables that disagree with
+    /// each other or point outside the media data. Empty for a healthy
+    /// file. The work is linear in the size of the sample tables.
     pub fn damage(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(t) = &self.truncated {
@@ -208,6 +209,8 @@ impl Mp4Tree {
             return out;
         };
         unprintable_types(moov, &mut out);
+        renamed_traks(moov, &mut out);
+        lost_projections(moov, &mut out);
         if let Some(ts) = moov.child(b"mvhd").and_then(bad_timescale) {
             out.push(format!(
                 "`mvhd` gives timescale {ts}, so the movie's times are wrong"
@@ -250,7 +253,8 @@ const CONTAINERS: &[&[u8; 4]] = &[
 /// of 8K is a few MB; anything above this is not metadata.
 const MAX_LOADED: u64 = 256 * 1024 * 1024;
 
-/// Leaf payloads above this size are not kept (we only need metadata).
+/// Leaf payloads above this size are not kept (we only need metadata),
+/// unless they start with a track header: see [`renamed_traks`].
 const MAX_KEPT_LEAF: usize = 1024 * 1024;
 
 /// Sample tables are kept whatever their size, so the structure can be
@@ -560,7 +564,10 @@ fn fill_box(b: &mut Mp4Box, body: &[u8], depth: usize, walk: &mut Walk) {
     } else if b.fourcc.0 == *b"stsd" {
         // A FullBox with an entry count, then the sample entries.
         b.children = parse_children(body, 8, base, depth + 1, walk, fill_entry);
-    } else if body.len() <= MAX_KEPT_LEAF || SAMPLE_TABLES.contains(&&b.fourcc.0) {
+    } else if body.len() <= MAX_KEPT_LEAF
+        || SAMPLE_TABLES.contains(&&b.fourcc.0)
+        || starts_with_tkhd(body)
+    {
         b.payload = body.to_vec();
     }
 }
@@ -775,6 +782,11 @@ const REGISTERED_CHILDREN: &[&[u8; 4]] = &[
     b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd", b"sv3d", b"proj",
 ];
 
+/// Whether a box type is text, as registered types are.
+fn is_text(t: FourCc) -> bool {
+    t.0.iter().all(|&x| x.is_ascii_graphic() || x == b' ')
+}
+
 /// List the children of `b`, a box that should hold only registered
 /// types, whose type is not printable, and look the same way inside each
 /// child that should too. Such a type is a damaged header. FFmpeg skips
@@ -785,14 +797,72 @@ const REGISTERED_CHILDREN: &[&[u8; 4]] = &[
 fn unprintable_types(b: &Mp4Box, out: &mut Vec<String>) {
     for c in &b.children {
         let t = c.fourcc;
-        let text = t.0.iter().all(|&x| x.is_ascii_graphic() || x == b' ');
-        if !text && t.0 != [0; 4] {
+        if !is_text(t) && t.0 != [0; 4] {
             out.push(format!(
                 "box `{t}` at offset {} in `{}` has a type that is not text, so its header is damaged",
                 c.offset, b.fourcc
             ));
         } else if REGISTERED_CHILDREN.contains(&&t.0) || entry_handler(t).is_some() {
             unprintable_types(c, out);
+        }
+    }
+}
+
+/// Whether `body` starts with a track header box (`tkhd`), as the payload
+/// of a `trak` does.
+fn starts_with_tkhd(body: &[u8]) -> bool {
+    body.get(4..8) == Some(&b"tkhd"[..]) && looks_like_box(body, 0)
+}
+
+/// List the children of `moov` with a printable type other than `trak`
+/// whose payload starts with a track header. Each is a `trak` whose type
+/// was damaged into another printable one, such as `Trak` or `free`,
+/// which FFmpeg skips with its stream, as it does a type that is not
+/// text. Their payloads are kept whatever their size, so this holds for
+/// long recordings too.
+fn renamed_traks(moov: &Mp4Box, out: &mut Vec<String>) {
+    for c in &moov.children {
+        let t = c.fourcc;
+        if is_text(t) && t.0 != *b"trak" && starts_with_tkhd(&c.payload) {
+            out.push(format!(
+                "box `{t}` at offset {} in `moov` starts with a track header (`tkhd`), so it is a `trak` whose type is damaged and FFmpeg skips its stream",
+                c.offset
+            ));
+        }
+    }
+}
+
+/// List each `sv3d` in the tracks' sample entries that lacks a box FFmpeg
+/// needs to read it: `svhd`, `proj`, or the `prhd` in `proj`. FFmpeg then
+/// ignores the whole `sv3d`, so a `proj` whose type reads `qroj` loses the
+/// projection with no more than a line in its log.
+fn lost_projections(moov: &Mp4Box, out: &mut Vec<String>) {
+    let entries = moov
+        .children_of(b"trak")
+        .filter_map(|t| t.path(&[b"mdia", b"minf", b"stbl", b"stsd"]))
+        .flat_map(|stsd| &stsd.children);
+    for entry in entries {
+        for sv3d in entry.children_of(b"sv3d") {
+            let proj = sv3d.child(b"proj");
+            let missing: Vec<&str> = [
+                (sv3d.child(b"svhd").is_some(), "`svhd`"),
+                (proj.is_some(), "`proj`"),
+                (
+                    proj.is_none_or(|p| p.child(b"prhd").is_some()),
+                    "`proj/prhd`",
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(have, name)| (!have).then_some(name))
+            .collect();
+            if !missing.is_empty() {
+                out.push(format!(
+                    "`sv3d` at offset {} in `{}` has no {}, so FFmpeg ignores its projection",
+                    sv3d.offset,
+                    entry.fourcc,
+                    missing.join(" or ")
+                ));
+            }
         }
     }
 }
@@ -1548,7 +1618,8 @@ pub(crate) mod tests {
             let mdhd = full(b"mdhd", 0, 0, &words(&[0, 0, 1000, 0, 0x55c4_0000]));
             let mdia = bx(b"mdia", &cat(&[mdhd, hdlr, bx(b"minf", &stbl)]));
             let mvhd = full(b"mvhd", 0, 0, &cat(&[words(&[0, 0, 1000, 0]), vec![0; 80]]));
-            bx(b"moov", &cat(&[mvhd, bx(b"trak", &mdia)]))
+            let tkhd = full(b"tkhd", 0, 3, &[0; 80]);
+            bx(b"moov", &cat(&[mvhd, bx(b"trak", &cat(&[tkhd, mdia]))]))
         };
         let mdat = bx(b"mdat", &vec![0xee; t.data_len]);
         if faststart {
@@ -1776,6 +1847,38 @@ pub(crate) mod tests {
         );
     }
 
+    /// `f` with `bytes` put in at offset `at`, and the size of the first
+    /// box of each type in `around` grown to hold them.
+    fn insert(f: &[u8], at: usize, bytes: &[u8], around: &[&[u8; 4]]) -> Vec<u8> {
+        let mut g = f.to_vec();
+        g.splice(at..at, bytes.iter().copied());
+        for t in around {
+            let at = g.windows(4).position(|w| w == *t).unwrap() - 4;
+            let size = u32::from_be_bytes(g[at..at + 4].try_into().unwrap()) + bytes.len() as u32;
+            g[at..at + 4].copy_from_slice(&size.to_be_bytes());
+        }
+        g
+    }
+
+    /// The boxes around the `hvc1` sample entry of [`minimal`], innermost
+    /// first.
+    const AROUND_ENTRY: &[&[u8; 4]] = &[
+        b"hvc1", b"stsd", b"stbl", b"minf", b"mdia", b"trak", b"moov",
+    ];
+
+    /// [`minimal`] with Spherical Video V2 boxes (`sv3d`) in its sample
+    /// entry, before `hvcC`.
+    fn spherical() -> Vec<u8> {
+        let proj = bx(
+            b"proj",
+            &cat(&[full(b"prhd", 0, 0, &[0; 12]), full(b"equi", 0, 0, &[0; 16])]),
+        );
+        let sv3d = bx(b"sv3d", &cat(&[full(b"svhd", 0, 0, b"\0"), proj]));
+        let f = minimal();
+        let entry = f.windows(4).position(|w| w == b"hvc1").unwrap() - 4;
+        insert(&f, entry + 8 + 78, &sv3d, AROUND_ENTRY)
+    }
+
     #[test]
     fn box_types_that_are_not_text_are_damage_where_types_are_registered() {
         let f = file_with(&tables(&[10], 1), false);
@@ -1811,27 +1914,11 @@ pub(crate) mod tests {
             assert!(d.iter().any(|d| d.starts_with(&want)), "{want}: {d:?}");
         }
         // A printable type we do not know says nothing.
-        assert!(with(b"trak", b'x').1.is_empty());
+        assert!(with(b"mvhd", b'x').1.is_empty());
 
         // Inside the sample entries we know, and in the Spherical Video V2
         // boxes, where a damaged type loses the projection.
-        let proj = bx(
-            b"proj",
-            &cat(&[full(b"prhd", 0, 0, &[0; 12]), full(b"equi", 0, 0, &[0; 16])]),
-        );
-        let sv3d = bx(b"sv3d", &cat(&[full(b"svhd", 0, 0, b"\0"), proj]));
-        let f = minimal();
-        let entry = f.windows(4).position(|w| w == b"hvc1").unwrap() - 4;
-        let mut g = f.clone();
-        g.splice(entry + 8 + 78..entry + 8 + 78, sv3d.iter().copied());
-        // Patch the sizes of the boxes around it.
-        for t in [
-            b"hvc1", b"stsd", b"stbl", b"minf", b"mdia", b"trak", b"moov",
-        ] {
-            let at = g.windows(4).position(|w| w == t).unwrap() - 4;
-            let size = u32::from_be_bytes(g[at..at + 4].try_into().unwrap()) + sv3d.len() as u32;
-            g[at..at + 4].copy_from_slice(&size.to_be_bytes());
-        }
+        let g = spherical();
         assert!(damage_of(g.clone()).is_empty(), "{:?}", damage_of(g));
         for (t, parent) in [
             (b"hvcC", "hvc1"),
@@ -1869,6 +1956,79 @@ pub(crate) mod tests {
                 .is_some()
         );
         assert!(t.damage().is_empty(), "{:?}", t.damage());
+    }
+
+    #[test]
+    fn a_trak_under_another_printable_type_is_damage() {
+        let f = file_with(&tables(&[10], 1), false);
+        let at = f.windows(4).position(|w| w == b"trak").unwrap();
+        let with = |t: &[u8; 4]| {
+            let mut g = f.clone();
+            g[at..at + 4].copy_from_slice(t);
+            damage_of(g)
+        };
+        let renamed = |t: &str| {
+            format!(
+                "box `{t}` at offset {} in `moov` starts with a track header (`tkhd`), so it is a `trak` whose type is damaged and FFmpeg skips its stream",
+                at - 4
+            )
+        };
+        // Every one-bit flip of the type is found: those that stay
+        // printable, such as `Trak`, here, and the rest as types that are
+        // not text.
+        let mut printable = 0;
+        for bit in 0..32 {
+            let mut t = *b"trak";
+            t[bit / 8] ^= 1 << (bit % 8);
+            let d = with(&t);
+            if is_text(FourCc(t)) {
+                printable += 1;
+                assert_eq!(d, [renamed(&FourCc(t).to_string())]);
+            } else {
+                assert_eq!(d.len(), 1, "{d:?}");
+                assert!(d[0].ends_with("has a type that is not text, so its header is damaged"));
+            }
+        }
+        assert_eq!(printable, 28);
+        assert_eq!(with(b"free"), [renamed("free")]);
+
+        // A track too large to keep as an unknown leaf is found too.
+        let big = file_with(&tables(&vec![1; MAX_KEPT_LEAF / 4], 1000), false);
+        let at = big.windows(4).position(|w| w == b"trak").unwrap();
+        let mut g = big.clone();
+        g[at..at + 4].copy_from_slice(b"free");
+        let d = damage_of(g);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].starts_with("box `free` at offset"), "{d:?}");
+
+        // A renamed `mdia` loses the stream too, and the track says so.
+        let at = f.windows(4).position(|w| w == b"mdia").unwrap();
+        let mut g = f.clone();
+        g[at..at + 4].copy_from_slice(b"mdiA");
+        assert_eq!(damage_of(g), ["track #0: it has no `mdia` box"]);
+    }
+
+    #[test]
+    fn an_sv3d_ffmpeg_ignores_is_damage() {
+        let f = spherical();
+        let with = |t: &[u8; 4], to: &[u8; 4]| {
+            let at = f.windows(4).position(|w| w == t).unwrap();
+            let mut g = f.clone();
+            g[at..at + 4].copy_from_slice(to);
+            damage_of(g)
+        };
+        let sv3d = f.windows(4).position(|w| w == b"sv3d").unwrap() - 4;
+        let lost = |missing: &str| {
+            [format!(
+                "`sv3d` at offset {sv3d} in `hvc1` has no {missing}, so FFmpeg ignores its projection"
+            )]
+        };
+        assert_eq!(with(b"proj", b"qroj"), lost("`proj`"));
+        assert_eq!(with(b"svhd", b"wvhd"), lost("`svhd`"));
+        assert_eq!(with(b"prhd", b"pshd"), lost("`proj/prhd`"));
+        // A projection we do not know is not damage: FFmpeg says so in its
+        // log, and the file may use a newer one.
+        assert!(with(b"equi", b"mshp").is_empty());
     }
 
     /// Structure-aware fuzzing: random box trees, encoded with 32-bit,
