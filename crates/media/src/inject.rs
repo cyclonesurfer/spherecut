@@ -8,11 +8,13 @@
 //!
 //! The output is written to a temporary file next to it and renamed into
 //! place, so it is always either absent, the old file or the whole new one.
+//! A symlinked output is written through: the file it points to is
+//! replaced and the link is kept.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, Permissions};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -151,8 +153,33 @@ fn temp_name() -> String {
     format!(".{APP_SLUG}-{r:016x}.tmp")
 }
 
+/// The file that writing to `path` would write: `path` itself, or the file
+/// a symlink there points to, through any chain of links. A dangling link
+/// gives the file that writing through it would create.
+fn follow_links(path: &Path) -> io::Result<PathBuf> {
+    let mut p = path.to_path_buf();
+    // The kernel's own limit for one lookup.
+    for _ in 0..40 {
+        match std::fs::symlink_metadata(&p) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let target = std::fs::read_link(&p)?;
+                // Relative targets are relative to the link's directory.
+                p = match p.parent() {
+                    Some(dir) => dir.join(target),
+                    None => target,
+                };
+            }
+            Ok(_) => return Ok(p),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(p),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other("too many levels of symbolic links"))
+}
+
 /// A new file next to `dest`, renamed onto it by [`TempFile::persist`] and
-/// removed if dropped before that (on an error or a panic).
+/// removed if dropped before that (on an error or a panic). `dest` itself
+/// is replaced, so follow links first ([`follow_links`]).
 struct TempFile {
     path: PathBuf,
     dest: PathBuf,
@@ -175,16 +202,32 @@ impl TempFile {
                 "output path has no file name",
             ));
         }
+        // A file being replaced keeps its permission bits (not its owner,
+        // ACLs or extended attributes). Until they are set the new file is
+        // private, so a private output is never readable while it is written.
+        let keep = std::fs::metadata(dest)
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| m.permissions().mode() & 0o777);
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        if keep.is_some() {
+            opts.mode(0o600);
+        }
         for _ in 0..TEMP_ATTEMPTS {
             let path = dest.with_file_name(name());
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
+            match opts.open(&path) {
                 Ok(file) => {
-                    return Ok(TempFile {
+                    let tmp = TempFile {
                         path,
                         dest: dest.to_path_buf(),
                         file,
                         persisted: false,
-                    });
+                    };
+                    if let Some(mode) = keep {
+                        tmp.file.set_permissions(Permissions::from_mode(mode))?;
+                    }
+                    return Ok(tmp);
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(e),
@@ -216,7 +259,12 @@ impl Drop for TempFile {
 }
 
 /// Write `input` to `output` with the edits applied, at most one edit per
-/// track. `output` must not be `input`; it is replaced atomically.
+/// track. `output` must not be `input`.
+///
+/// `output` is replaced atomically, by renaming a new file over it. The new
+/// file keeps the old one's permission bits, but not its owner, ACLs or
+/// extended attributes. If `output` is a symlink, the file it points to is
+/// replaced and the link is kept, as writing the file in place would.
 pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), InjectError> {
     check_not_same_file(input, output)?;
     for (i, e) in edits.iter().enumerate() {
@@ -336,10 +384,11 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
         shift_chunk_offsets(&mut moov_bytes, moov_end, total_delta)?;
     }
 
-    let mut tmp = TempFile::create(output).map_err(write_err(output))?;
+    let dest = follow_links(output).map_err(write_err(output))?;
+    let mut tmp = TempFile::create(&dest).map_err(write_err(&dest))?;
     let copy_err = |source| InjectError::Copy {
         input: input.to_path_buf(),
-        output: output.to_path_buf(),
+        output: dest.clone(),
         source,
     };
     let mut out = BufWriter::new(&mut tmp.file);
@@ -347,12 +396,12 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
     // output can't outgrow the input, whatever happens to the input file.
     f.seek(SeekFrom::Start(0)).map_err(read_err(input))?;
     copy_exact(&mut f, &mut out, moov.offset).map_err(copy_err)?;
-    out.write_all(&moov_bytes).map_err(write_err(output))?;
+    out.write_all(&moov_bytes).map_err(write_err(&dest))?;
     f.seek(SeekFrom::Start(moov_end)).map_err(read_err(input))?;
     copy_exact(&mut f, &mut out, tree.file_size.saturating_sub(moov_end)).map_err(copy_err)?;
-    out.flush().map_err(write_err(output))?;
+    out.flush().map_err(write_err(&dest))?;
     drop(out);
-    tmp.persist().map_err(write_err(output))?;
+    tmp.persist().map_err(write_err(&dest))?;
     Ok(())
 }
 
@@ -759,6 +808,84 @@ mod tests {
         let name = "o".repeat(251) + ".mp4";
         inject(&a, &dir.join(&name), &spherical_edits()).unwrap();
         assert_eq!(listing(&dir), ["in.mp4".to_string(), name]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn mode(p: &Path) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[test]
+    fn replaced_outputs_keep_their_permissions() {
+        let dir = tmpdir("mode");
+        let a = dir.join("in.mp4");
+        std::fs::write(&a, file(false).0).unwrap();
+        let out = dir.join("out.mp4");
+        for m in [0o600, 0o640, 0o755, 0o444] {
+            std::fs::remove_file(&out).ok();
+            std::fs::write(&out, b"old").unwrap();
+            std::fs::set_permissions(&out, Permissions::from_mode(m)).unwrap();
+            // The temp file has them from the start.
+            let tmp = TempFile::create(&out).unwrap();
+            assert_eq!(mode(&tmp.path), m);
+            drop(tmp);
+            inject(&a, &out, &spherical_edits()).unwrap();
+            assert_eq!(mode(&out), m, "{m:o}");
+            assert_ne!(std::fs::read(&out).unwrap(), b"old");
+        }
+        // A new output gets the mode any new file would.
+        std::fs::remove_file(&out).unwrap();
+        inject(&a, &out, &spherical_edits()).unwrap();
+        let fresh = dir.join("fresh");
+        std::fs::write(&fresh, b"").unwrap();
+        assert_eq!(mode(&out), mode(&fresh));
+        assert_eq!(listing(&dir), ["fresh", "in.mp4", "out.mp4"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn symlinked_outputs_are_written_through() {
+        use std::os::unix::fs::symlink;
+        let dir = tmpdir("symlink");
+        let a = dir.join("in.mp4");
+        std::fs::write(&a, file(false).0).unwrap();
+        let sub = dir.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let target = sub.join("target.mp4");
+        std::fs::write(&target, b"old").unwrap();
+        // link.mp4 -> sub/hop.mp4 -> target.mp4, with relative targets.
+        symlink("sub/hop.mp4", dir.join("link.mp4")).unwrap();
+        symlink("target.mp4", sub.join("hop.mp4")).unwrap();
+        // A dangling link names the file to create.
+        symlink("sub/new.mp4", dir.join("dangling.mp4")).unwrap();
+        for (link, file) in [
+            ("link.mp4", &target),
+            ("dangling.mp4", &sub.join("new.mp4")),
+        ] {
+            inject(&a, &dir.join(link), &spherical_edits()).unwrap();
+            let tree = mp4::read_file(file).unwrap();
+            assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+            assert!(spherical::read_tracks(&tree)[0].v2.is_some());
+        }
+        for link in [
+            dir.join("link.mp4"),
+            sub.join("hop.mp4"),
+            dir.join("dangling.mp4"),
+        ] {
+            assert!(link.symlink_metadata().unwrap().is_symlink());
+        }
+        assert_eq!(listing(&dir), ["dangling.mp4", "in.mp4", "link.mp4", "sub"]);
+        assert_eq!(listing(&sub), ["hop.mp4", "new.mp4", "target.mp4"]);
+
+        // A loop is an error, not a hang.
+        symlink("loop-b.mp4", dir.join("loop-a.mp4")).unwrap();
+        symlink("loop-a.mp4", dir.join("loop-b.mp4")).unwrap();
+        match inject(&a, &dir.join("loop-a.mp4"), &spherical_edits()) {
+            Err(e @ InjectError::Write { .. }) => {
+                assert!(e.to_string().contains("symbolic links"), "{e}")
+            }
+            r => panic!("{r:?}"),
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
