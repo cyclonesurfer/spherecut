@@ -18,11 +18,18 @@
 //! Some of ffmpeg-next's own accessors make such enums (`Frame::format`,
 //! `Parameters::medium`, `Context::id` when opening a decoder), so the
 //! decode and probe paths use [`frame_format`], [`plane`], [`media_type`]
-//! and [`open_video_decoder`] instead.
+//! and [`open_video_decoder`] instead. For the same reason they open files
+//! with [`open_input`] (ffmpeg-next panics on a path that isn't UTF-8) and
+//! read metadata with [`dict_entries`] (ffmpeg-next makes `&str`s of it
+//! without checking that it is UTF-8).
 
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::os::unix::ffi::OsStrExt;
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as sys;
@@ -43,6 +50,7 @@ mod c {
         pub fn avcodec_profile_name(id: c_int, profile: c_int) -> *const c_char;
         pub fn av_get_pix_fmt_name(fmt: c_int) -> *const c_char;
         pub fn av_pix_fmt_desc_get(fmt: c_int) -> *const AVPixFmtDescriptor;
+        pub fn av_image_get_linesize(fmt: c_int, width: c_int, plane: c_int) -> c_int;
         pub fn av_get_sample_fmt_name(fmt: c_int) -> *const c_char;
         pub fn av_color_range_name(range: c_int) -> *const c_char;
         pub fn av_color_space_name(space: c_int) -> *const c_char;
@@ -442,6 +450,18 @@ fn log_device(kind: &str, device: Option<&str>, e: Option<&HwError>) {
 /// Hardware device types a decoder can use through `hw_device_ctx`.
 pub fn decoder_hw_configs(codec: &ff::Codec) -> Vec<String> {
     let mut out = Vec::new();
+    for t in decoder_device_types(codec) {
+        // SAFETY: accepts any type value.
+        if let Some(n) = cstr_opt(unsafe { c::av_hwdevice_get_type_name(t) }) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// [`decoder_hw_configs`] as FFmpeg's ints.
+fn decoder_device_types(codec: &ff::Codec) -> Vec<c_int> {
+    let mut out = Vec::new();
     for i in 0.. {
         // SAFETY: `codec` wraps a static AVCodec; the call returns NULL past
         // the last config.
@@ -454,10 +474,7 @@ pub fn decoder_hw_configs(codec: &ff::Codec) -> Vec<String> {
         let (methods, device_type) =
             unsafe { ((*cfg).methods, enum_int(&raw const (*cfg).device_type)) };
         if methods & sys::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as c_int != 0 {
-            // SAFETY: accepts any type value.
-            if let Some(n) = cstr_opt(unsafe { c::av_hwdevice_get_type_name(device_type) }) {
-                out.push(n);
-            }
+            out.push(device_type);
         }
     }
     out
@@ -497,6 +514,95 @@ pub fn lib_versions() -> Vec<(&'static str, u32, u32, u32)> {
 pub fn ffmpeg_version() -> String {
     // SAFETY: returns a static string.
     cstr_opt(unsafe { sys::av_version_info() }).unwrap_or_else(|| "unknown".into())
+}
+
+/// Open a file for demuxing and read its stream info, as
+/// `ff::format::input` does, or `input_with_interrupt` with `cancel`
+/// (FFmpeg stops reading once it is set). FFmpeg gets the path's bytes as
+/// they are: ffmpeg-next's functions panic on a path that is not UTF-8,
+/// and Linux file names need not be.
+pub fn open_input(
+    path: &Path,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<ff::format::context::Input, ff::Error> {
+    let url = CString::new(path.as_os_str().as_bytes()).map_err(|_| ff::Error::Other {
+        errno: ff::util::error::EINVAL,
+    })?;
+    // SAFETY: allocates a context, which we own until it is handed to
+    // avformat_open_input below.
+    let mut ps = unsafe { sys::avformat_alloc_context() };
+    if ps.is_null() {
+        return Err(ff::Error::Other {
+            errno: ff::util::error::ENOMEM,
+        });
+    }
+    // The guard frees the closure when dropped, which is after FFmpeg has
+    // freed the context on every path below.
+    let guard = cancel.map(|cancel| {
+        let i = ff::util::interrupt::new(Box::new(move || cancel.load(Ordering::Relaxed)));
+        // SAFETY: `ps` is live and ours; FFmpeg calls the callback with
+        // its opaque, the closure, which the guard keeps alive.
+        unsafe { (*ps).interrupt_callback = i.interrupt };
+        i.guard
+    });
+    // SAFETY: `ps` is a context from avformat_alloc_context and `url` a
+    // NUL-terminated string that outlives the call. On failure FFmpeg
+    // frees the context.
+    let ret = unsafe {
+        sys::avformat_open_input(
+            &mut ps,
+            url.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ret < 0 {
+        return Err(ff::Error::from(ret));
+    }
+    // SAFETY: an open input context.
+    let ret = unsafe { sys::avformat_find_stream_info(ps, std::ptr::null_mut()) };
+    if ret < 0 {
+        // SAFETY: closes and frees the context opened above, which nothing
+        // else holds.
+        unsafe { sys::avformat_close_input(&mut ps) };
+        return Err(ff::Error::from(ret));
+    }
+    // SAFETY: an open input context, which the wrapper now owns: it closes
+    // the context when dropped, and only then drops the guard.
+    Ok(unsafe {
+        match guard {
+            Some(guard) => ff::format::context::Input::wrap_with_interrupt(ps, guard),
+            None => ff::format::context::Input::wrap(ps),
+        }
+    })
+}
+
+/// The entries of a dictionary, such as a file's or a stream's metadata,
+/// in order. FFmpeg doesn't check that metadata is UTF-8 (the MOV demuxer
+/// copies a title's bytes as they are), so bytes that aren't become
+/// U+FFFD. ffmpeg-next's own iterator would make `&str`s of them.
+pub fn dict_entries(d: &ff::DictionaryRef<'_>) -> Vec<(String, String)> {
+    // SAFETY: `d` borrows a live dictionary, or NULL for an empty one.
+    let m = unsafe { d.as_ptr() };
+    let mut out = Vec::new();
+    let mut e: *const sys::AVDictionaryEntry = std::ptr::null();
+    loop {
+        // SAFETY: av_dict_get accepts NULL for an empty dictionary. An
+        // empty key with AV_DICT_IGNORE_SUFFIX matches every entry, and `e`
+        // is NULL or the entry it returned last; the dictionary doesn't
+        // change while `d` is borrowed.
+        e = unsafe { sys::av_dict_get(m, c"".as_ptr(), e, sys::AV_DICT_IGNORE_SUFFIX) };
+        if e.is_null() {
+            return out;
+        }
+        // SAFETY: an entry's key and value are NUL-terminated strings the
+        // dictionary owns.
+        let (k, v) = unsafe { (CStr::from_ptr((*e).key), CStr::from_ptr((*e).value)) };
+        out.push((
+            k.to_string_lossy().into_owned(),
+            v.to_string_lossy().into_owned(),
+        ));
+    }
 }
 
 /// `AVFormatContext.start_time` in `AV_TIME_BASE` units.
@@ -548,6 +654,8 @@ pub fn discard_other_streams(ictx: &mut ff::format::context::Input, keep: usize)
 #[derive(Debug)]
 pub struct HwDevice {
     ptr: *mut sys::AVBufferRef,
+    /// FFmpeg's device type.
+    device_type: c_int,
     pix_fmt: sys::AVPixelFormat,
     kind: String,
 }
@@ -583,6 +691,7 @@ impl HwDevice {
             };
             Ok(HwDevice {
                 ptr: create_device(t, device)?,
+                device_type: t,
                 pix_fmt,
                 kind: kind.to_string(),
             })
@@ -611,6 +720,19 @@ impl HwDevice {
     pub(crate) fn as_ptr(&self) -> *mut sys::AVBufferRef {
         self.ptr
     }
+
+    /// A Vulkan "device" with no device context, for tests that only look
+    /// at its kind and pixel format. Dropping it unrefs NULL, which FFmpeg
+    /// allows.
+    #[cfg(test)]
+    pub(crate) fn vulkan_without_context() -> Self {
+        HwDevice {
+            ptr: std::ptr::null_mut(),
+            device_type: sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN as c_int,
+            pix_fmt: sys::AVPixelFormat::AV_PIX_FMT_VULKAN,
+            kind: "vulkan".into(),
+        }
+    }
 }
 
 /// Why a decoder could not decode on its device.
@@ -628,18 +750,22 @@ pub enum HwRefusal {
 
 /// What [`pick_hw_format`] keeps in a decoder context's `opaque`, which
 /// FFmpeg never reads: the device's pixel format, and what FFmpeg did with
-/// it. Kept in the context itself, it lives exactly as long as the
-/// decoder. (Frame threads would each get a copy; hardware decoding here
-/// uses one thread.)
+/// it at the latest `get_format` call. Kept in the context itself, it
+/// lives exactly as long as the decoder. (Frame threads would each get a
+/// copy; hardware decoding here uses one thread.)
 mod hw_choice {
     /// The pixel format, in the low bits.
     pub const FORMAT: usize = (1 << 24) - 1;
     /// FFmpeg asked for a format at all.
-    pub const ASKED: usize = 1 << 29;
-    /// The device's format was among those offered.
-    pub const OFFERED: usize = 1 << 30;
-    /// FFmpeg asked again without it after we took it, which it does when
-    /// setting up its hardware decoder failed.
+    pub const ASKED: usize = 1 << 28;
+    /// The latest call offered the device's format, and we took it.
+    pub const TAKEN: usize = 1 << 29;
+    /// A frame came out on the device since then, so FFmpeg's hardware
+    /// decoder for that format works.
+    pub const DECODED: usize = 1 << 30;
+    /// The latest call lacked the format right after a call that took it,
+    /// with no frame in between. FFmpeg asks again like that when setting
+    /// up its hardware decoder failed.
     pub const WITHDRAWN: usize = 1 << 31;
 }
 
@@ -657,7 +783,9 @@ unsafe extern "C" fn pick_hw_format(
     // ints, since the list can hold formats our headers lack; the one
     // returned equals the device's, which is a format they have.
     unsafe {
-        let mut state = (*ctx).opaque.addr() | ASKED;
+        let prev = (*ctx).opaque.addr();
+        let retry = prev & TAKEN != 0 && prev & DECODED == 0;
+        let mut state = (prev & FORMAT) | ASKED;
         let want = (state & FORMAT) as c_int;
         let mut p = fmts;
         let mut chosen = sys::AVPixelFormat::AV_PIX_FMT_NONE;
@@ -673,8 +801,8 @@ unsafe extern "C" fn pick_hw_format(
             p = p.add(1);
         }
         if chosen != sys::AVPixelFormat::AV_PIX_FMT_NONE {
-            state |= OFFERED;
-        } else if state & OFFERED != 0 {
+            state |= TAKEN;
+        } else if retry {
             state |= WITHDRAWN;
         }
         (*ctx).opaque = std::ptr::without_provenance_mut(state);
@@ -710,29 +838,68 @@ pub(crate) fn attach_hw_device(
     Ok(())
 }
 
-/// Why a decoder set up by [`attach_hw_device`] turned down its device's
-/// format, if it did.
-pub(crate) fn hw_refusal(dec: &ff::codec::context::Context) -> Option<HwRefusal> {
-    use hw_choice::*;
+/// The [`hw_choice`] state of a decoder set up by [`attach_hw_device`].
+fn hw_state(dec: &ff::codec::context::Context) -> usize {
     // SAFETY: the wrapper owns a live context; only `opaque` is read, which
     // attach_hw_device and pick_hw_format set.
-    let state = unsafe { (*dec.as_ptr()).opaque.addr() };
-    if state & WITHDRAWN != 0 {
-        Some(HwRefusal::Withdrawn)
-    } else if state & ASKED != 0 && state & OFFERED == 0 {
-        Some(HwRefusal::NotOffered)
-    } else {
+    unsafe { (*dec.as_ptr()).opaque.addr() }
+}
+
+/// Why a decoder set up by [`attach_hw_device`] turned down its device's
+/// format at the latest `get_format` call, if it did.
+pub(crate) fn hw_refusal(dec: &ff::codec::context::Context) -> Option<HwRefusal> {
+    use hw_choice::*;
+    let state = hw_state(dec);
+    if state & ASKED == 0 || state & TAKEN != 0 {
         None
+    } else if state & WITHDRAWN != 0 {
+        Some(HwRefusal::Withdrawn)
+    } else {
+        Some(HwRefusal::NotOffered)
     }
+}
+
+/// Whether a decoder set up by [`attach_hw_device`] has asked for a pixel
+/// format yet. One that decodes without asking never uses the device.
+pub(crate) fn hw_format_asked(dec: &ff::codec::context::Context) -> bool {
+    hw_state(dec) & hw_choice::ASKED != 0
+}
+
+/// Note that a decoder set up by [`attach_hw_device`] gave a frame on its
+/// device: the hardware decoder FFmpeg set up last works. A later list
+/// without the device's format is then a stream that changed format, not
+/// FFmpeg withdrawing it.
+pub(crate) fn note_device_frame(dec: &mut ff::codec::context::Context) {
+    // SAFETY: the wrapper owns a live context; only `opaque` is changed,
+    // which FFmpeg never reads.
+    unsafe {
+        let c = dec.as_mut_ptr();
+        (*c).opaque = std::ptr::without_provenance_mut((*c).opaque.addr() | hw_choice::DECODED);
+    }
+}
+
+/// Why [`open_video_decoder`] opened no decoder.
+#[derive(Debug, Error)]
+pub(crate) enum OpenDecoderError {
+    /// FFmpeg has decoders for the codec, but none decodes on the device.
+    #[error("no decoder for this codec decodes on the device")]
+    NotOnDevice,
+    #[error(transparent)]
+    Ffmpeg(#[from] ff::Error),
 }
 
 /// Open the decoder for a codec context made from a video stream's
 /// parameters. ffmpeg-next's `Decoder::video` would look the decoder up
 /// from the codec id, and check the media type, as bindgen enums; a file
 /// with a codec newer than our headers would make an invalid one.
-pub fn open_video_decoder(
+///
+/// For decoding on `dev`, the decoder is the first one for the codec that
+/// can use such a device. FFmpeg's own choice may not: for AV1 it is
+/// libdav1d, which only decodes in software.
+pub(crate) fn open_video_decoder(
     ctx: ff::codec::context::Context,
-) -> Result<ff::decoder::Video, ff::Error> {
+    dev: Option<&HwDevice>,
+) -> Result<ff::decoder::Video, OpenDecoderError> {
     // SAFETY: `ctx` owns a live AVCodecContext; its enum fields are read as
     // ints.
     let (kind, id) = unsafe {
@@ -743,17 +910,56 @@ pub fn open_video_decoder(
         )
     };
     if kind != sys::AVMediaType::AVMEDIA_TYPE_VIDEO as c_int {
-        return Err(ff::Error::InvalidData);
+        return Err(ff::Error::InvalidData.into());
     }
     // SAFETY: accepts any id; NULL when no decoder for it is built in.
-    let codec = unsafe { c::avcodec_find_decoder(id) };
+    let mut codec = unsafe { c::avcodec_find_decoder(id) };
     if codec.is_null() {
-        return Err(ff::Error::DecoderNotFound);
+        return Err(ff::Error::DecoderNotFound.into());
+    }
+    if let Some(dev) = dev {
+        codec = device_decoder(id, dev.device_type).ok_or(OpenDecoderError::NotOnDevice)?;
     }
     // SAFETY: registered codecs are static.
     let codec = unsafe { ff::Codec::wrap(codec) };
     // The media type is checked above, which is all `Opened::video` checks.
-    ctx.decoder().open_as(codec).map(ff::decoder::Video)
+    Ok(ctx.decoder().open_as(codec).map(ff::decoder::Video)?)
+}
+
+/// The decoder for codec `id` that can decode on a device of type
+/// `device_type`, chosen as avcodec_find_decoder chooses among all of
+/// them: the first registered, unless it is experimental and another is
+/// not.
+fn device_decoder(id: c_int, device_type: c_int) -> Option<*const sys::AVCodec> {
+    let mut iter: *mut c_void = std::ptr::null_mut();
+    let mut experimental = None;
+    loop {
+        // SAFETY: `iter` is the state av_codec_iterate keeps, started at
+        // NULL. It returns static codecs, then NULL.
+        let codec = unsafe { sys::av_codec_iterate(&mut iter) };
+        if codec.is_null() {
+            return experimental;
+        }
+        // SAFETY: a static codec; `id` is an enum field, read as an int.
+        let (decoder, codec_id, caps) = unsafe {
+            (
+                sys::av_codec_is_decoder(codec) != 0,
+                enum_int(&raw const (*codec).id),
+                (*codec).capabilities,
+            )
+        };
+        if !decoder || codec_id != id {
+            continue;
+        }
+        // SAFETY: registered codecs are static.
+        if !decoder_device_types(&unsafe { ff::Codec::wrap(codec) }).contains(&device_type) {
+            continue;
+        }
+        if caps & sys::AV_CODEC_CAP_EXPERIMENTAL as c_int == 0 {
+            return Some(codec);
+        }
+        experimental.get_or_insert(codec);
+    }
 }
 
 /// A frame's pixel format as FFmpeg's int, to compare and name it without
@@ -765,14 +971,26 @@ pub fn frame_format(frame: &ff::frame::Video) -> c_int {
 
 /// Plane `index` of a frame in system memory, as `ff::frame::Video::data`
 /// gives it, but sized from the pixel format read as an int (`data` calls
-/// `Frame::format`). `None` for a plane the format doesn't have, for a
-/// hardware frame, and for a format this libavutil doesn't describe.
+/// `Frame::format`), and never past the buffer that holds the plane.
+///
+/// The slice has `linesize` bytes for each row, but ends at the end of
+/// that buffer if it comes first, so the last row may be cut to the bytes
+/// the frame's width covers. That happens for a frame the decoder cropped
+/// on the left: its `data` moves right, and its last row has no padding
+/// after it to cover the move.
+///
+/// `None` for a plane the format doesn't have, for a hardware frame, for
+/// a format this libavutil doesn't describe, and for a plane whose rows
+/// don't fit in its buffer (a frame whose size was changed after its
+/// buffers were allocated).
 pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
-    // SAFETY: `frame` wraps a live AVFrame; these are plain fields.
-    let (format, height, data, linesize) = unsafe {
-        let f = frame.as_ptr();
+    // SAFETY: only takes the pointer to the AVFrame that `frame` wraps.
+    let f = unsafe { frame.as_ptr() };
+    // SAFETY: `f` is a live AVFrame; these are plain fields.
+    let (format, width, height, data, linesize) = unsafe {
         (
             (*f).format,
+            (*f).width,
             (*f).height,
             *(*f).data.get(index)?,
             *(*f).linesize.get(index)?,
@@ -786,7 +1004,7 @@ pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
         .map(|c| c.plane as usize + 1)
         .max()?;
     let hw = d.flags & sys::AV_PIX_FMT_FLAG_HWACCEL as u64 != 0;
-    if hw || index >= planes || data.is_null() || linesize <= 0 || height <= 0 {
+    if hw || index >= planes || data.is_null() || linesize <= 0 || width <= 0 || height <= 0 {
         return None;
     }
     // Planes 1 and 2 hold chroma, subsampled vertically (rounding up).
@@ -794,12 +1012,43 @@ pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
         1 | 2 => -((-height) >> d.log2_chroma_h),
         _ => height,
     };
-    // SAFETY: a frame FFmpeg allocates for this format has `rows` rows of
-    // `linesize` bytes from `data` in this plane, as av_image_fill_pointers
-    // lays them out (decoders pad their buffers beyond that, which also
-    // covers a cropped frame's shifted `data`). The buffers live as long as
-    // the frame, which stays borrowed.
-    Some(unsafe { std::slice::from_raw_parts(data, linesize as usize * rows as usize) })
+    // SAFETY: accepts any format and width (negative for a bad one), and
+    // `index` is a plane of the format, so below 4.
+    let row = unsafe { c::av_image_get_linesize(format, width, index as c_int) };
+    let (row, rows, linesize) = (usize::try_from(row).ok()?, rows as usize, linesize as usize);
+    let needed = linesize.checked_mul(rows - 1)?.checked_add(row)?;
+    let room = buffer_room(f, data)?;
+    if needed > room {
+        return None;
+    }
+    // SAFETY: the slice starts at `data` and ends inside the buffer that
+    // holds it (`room`), which the frame keeps a reference to. It lives as
+    // long as the frame, which stays borrowed.
+    Some(unsafe { std::slice::from_raw_parts(data, linesize.saturating_mul(rows).min(room)) })
+}
+
+/// How many bytes there are from `p` to the end of the buffer of `frame`
+/// that holds `p`. `None` when no buffer of the frame holds it.
+fn buffer_room(frame: *const sys::AVFrame, p: *const u8) -> Option<usize> {
+    // SAFETY: `frame` is a live AVFrame. `buf` holds NULL or references
+    // the frame owns, and `extended_buf` holds `nb_extended_buf` more.
+    let bufs = unsafe {
+        let extended = match usize::try_from((*frame).nb_extended_buf) {
+            Ok(n) if n > 0 && !(*frame).extended_buf.is_null() => {
+                std::slice::from_raw_parts((*frame).extended_buf, n)
+            }
+            _ => &[],
+        };
+        (*frame).buf.iter().chain(extended).copied()
+    };
+    let p = p.addr();
+    bufs.filter(|b| !b.is_null()).find_map(|b| {
+        // SAFETY: a live buffer reference; plain fields.
+        let (start, size) = unsafe { ((*b).data.addr(), (*b).size) };
+        (start..start.checked_add(size)?)
+            .contains(&p)
+            .then(|| start + size - p)
+    })
 }
 
 /// FFmpeg's name for a pixel format, e.g. "yuv420p" or "vaapi".
@@ -1045,16 +1294,37 @@ mod tests {
             P::AV_PIX_FMT_NONE as c_int,
         );
         // Not asked yet: nothing to say.
-        assert_eq!(hw_refusal(&wanting(vaapi)), None);
+        let ctx = wanting(vaapi);
+        assert_eq!(hw_refusal(&ctx), None);
+        assert!(!hw_format_asked(&ctx));
 
         // Offered, among formats our headers may lack: taken.
         let mut ctx = wanting(vaapi);
         assert_eq!(offer(&mut ctx, &[yuv, 100_000, vaapi]), vaapi);
         assert_eq!(hw_refusal(&ctx), None);
+        assert!(hw_format_asked(&ctx));
         // Then withdrawn, as when the hardware decoder fails to start.
         assert_eq!(offer(&mut ctx, &[yuv]), none);
         assert_eq!(hw_refusal(&ctx), Some(HwRefusal::Withdrawn));
-        // It stays withdrawn.
+        // The latest call counts: a list that never had it, as after a
+        // new SPS, isn't a withdrawal.
+        assert_eq!(offer(&mut ctx, &[yuv]), none);
+        assert_eq!(hw_refusal(&ctx), Some(HwRefusal::NotOffered));
+        // Taken again, it clears.
+        assert_eq!(offer(&mut ctx, &[vaapi, yuv]), vaapi);
+        assert_eq!(hw_refusal(&ctx), None);
+
+        // Taken, and frames decode on the device. Then the stream changes
+        // to a format FFmpeg has no hardware decoder for: not offered, not
+        // withdrawn.
+        let mut ctx = wanting(vaapi);
+        assert_eq!(offer(&mut ctx, &[vaapi, yuv]), vaapi);
+        note_device_frame(&mut ctx);
+        assert_eq!(hw_refusal(&ctx), None);
+        assert_eq!(offer(&mut ctx, &[yuv]), none);
+        assert_eq!(hw_refusal(&ctx), Some(HwRefusal::NotOffered));
+        // A new format the driver can't decode is still withdrawn.
+        assert_eq!(offer(&mut ctx, &[vaapi, yuv]), vaapi);
         assert_eq!(offer(&mut ctx, &[yuv]), none);
         assert_eq!(hw_refusal(&ctx), Some(HwRefusal::Withdrawn));
 
@@ -1062,6 +1332,133 @@ mod tests {
         let mut ctx = wanting(vaapi);
         assert_eq!(offer(&mut ctx, &[yuv]), none);
         assert_eq!(hw_refusal(&ctx), Some(HwRefusal::NotOffered));
+    }
+
+    /// One mid-grey 512x128 frame, encoded as Annex B HEVC by libx265.
+    fn hevc_frame() -> Vec<ff::Packet> {
+        use ff::format::Pixel;
+        let codec = ff::encoder::find_by_name("libx265").unwrap();
+        let mut enc = ff::codec::context::Context::new_with_codec(codec)
+            .encoder()
+            .video()
+            .unwrap();
+        enc.set_width(512);
+        enc.set_height(128);
+        enc.set_format(Pixel::YUV420P);
+        enc.set_time_base((1, 30));
+        let mut opts = ff::Dictionary::new();
+        opts.set("preset", "ultrafast");
+        opts.set("x265-params", "log-level=error");
+        let mut enc = enc.open_as_with(codec, opts).unwrap();
+        let mut frame = ff::frame::Video::new(Pixel::YUV420P, 512, 128);
+        for i in 0..3 {
+            frame.data_mut(i).fill(128);
+        }
+        frame.set_pts(Some(0));
+        enc.send_frame(&frame).unwrap();
+        enc.send_eof().unwrap();
+        let mut out = Vec::new();
+        let mut pkt = ff::Packet::empty();
+        while enc.receive_packet(&mut pkt).is_ok() {
+            out.push(std::mem::replace(&mut pkt, ff::Packet::empty()));
+        }
+        out
+    }
+
+    /// `packets` through FFmpeg's hevc_metadata filter, which sets the
+    /// SPS conformance window to crop `left` luma samples on the left.
+    fn crop_left(packets: Vec<ff::Packet>, left: i64) -> Vec<ff::Packet> {
+        use ff::codec::packet::Mut;
+        let mut out = Vec::new();
+        // SAFETY: the filter context is allocated, set up before
+        // av_bsf_init as FFmpeg requires (a codec id our headers have, and
+        // an option of the filter), and freed at the end. Each packet sent
+        // is a live one whose data the filter takes; each received goes
+        // into a fresh packet that we own.
+        unsafe {
+            let filter = sys::av_bsf_get_by_name(c"hevc_metadata".as_ptr());
+            assert!(!filter.is_null());
+            let mut bsf = std::ptr::null_mut();
+            assert!(sys::av_bsf_alloc(filter, &mut bsf) >= 0);
+            (*(*bsf).par_in).codec_id = sys::AVCodecID::AV_CODEC_ID_HEVC;
+            let set = sys::av_opt_set_int((*bsf).priv_data, c"crop_left".as_ptr(), left, 0);
+            assert!(set >= 0);
+            assert!(sys::av_bsf_init(bsf) >= 0);
+            let drain = |out: &mut Vec<ff::Packet>| loop {
+                let mut p = ff::Packet::empty();
+                if sys::av_bsf_receive_packet(bsf, p.as_mut_ptr()) < 0 {
+                    break;
+                }
+                out.push(p);
+            };
+            for mut p in packets {
+                assert!(sys::av_bsf_send_packet(bsf, p.as_mut_ptr()) >= 0);
+                drain(&mut out);
+            }
+            assert!(sys::av_bsf_send_packet(bsf, std::ptr::null_mut()) >= 0);
+            drain(&mut out);
+            sys::av_bsf_free(&mut bsf);
+        }
+        out
+    }
+
+    /// Where the buffer that holds plane `index` of `frame` ends, as
+    /// FFmpeg finds that buffer.
+    fn buffer_end(frame: &ff::frame::Video, index: c_int) -> *const u8 {
+        // SAFETY: a live frame, which the call only reads (FFmpeg before
+        // 7.0 declares it non-const). The buffer returned is the frame's
+        // own, with `size` bytes from `data`.
+        unsafe {
+            let b = sys::av_frame_get_plane_buffer(frame.as_ptr().cast_mut(), index);
+            assert!(!b.is_null());
+            (*b).data.add((*b).size)
+        }
+    }
+
+    #[test]
+    fn planes_of_a_frame_cropped_on_the_left_end_inside_their_buffers() {
+        let codec = ff::decoder::find_by_name("hevc").unwrap();
+        let mut dec = ff::codec::context::Context::new_with_codec(codec)
+            .decoder()
+            .open_as(codec)
+            .and_then(|d| d.video())
+            .unwrap();
+        // 128 luma bytes: more than the padding FFmpeg leaves after a
+        // plane, and the frame has no bottom crop to make up for it.
+        for p in crop_left(hevc_frame(), 128) {
+            dec.send_packet(&p).unwrap();
+        }
+        dec.send_eof().unwrap();
+        let mut frame = ff::frame::Video::empty();
+        dec.receive_frame(&mut frame).unwrap();
+        assert_eq!((frame.width(), frame.height()), (384, 128));
+
+        for (i, rows, row) in [(0, 128, 384), (1, 64, 192), (2, 64, 192)] {
+            let p = plane(&frame, i).unwrap();
+            assert!(
+                p.as_ptr_range().end <= buffer_end(&frame, i as c_int),
+                "plane {i} runs past its buffer"
+            );
+            // Every row of the cropped picture is there.
+            assert!(p.len() >= frame.stride(i) * (rows - 1) + row, "plane {i}");
+        }
+        // The luma plane is the one cut short at its buffer's end.
+        assert!(plane(&frame, 0).unwrap().len() < frame.stride(0) * 128);
+    }
+
+    #[test]
+    fn a_plane_whose_rows_do_not_fit_its_buffer_is_none() {
+        use ff::format::Pixel;
+        let mut f = ff::frame::Video::new(Pixel::YUV420P, 64, 16);
+        assert_eq!(plane(&f, 0).unwrap().len(), f.stride(0) * 16);
+        // ffmpeg-next's safe setters change the size, not the buffers.
+        f.set_height(4096);
+        for i in 0..3 {
+            assert!(plane(&f, i).is_none(), "plane {i}");
+        }
+        f.set_height(16);
+        f.set_width(1 << 20);
+        assert!(plane(&f, 0).is_none());
     }
 
     // One test, because the subscriber and FFmpeg's level are global.

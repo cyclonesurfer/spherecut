@@ -3,8 +3,9 @@
 //! This is the first slice of the M1 `MediaBackend`: it opens a file,
 //! decodes one video stream in order, and hands out frames in system memory.
 //! Hardware decoding never silently falls back to software: if the device
-//! can't decode the stream, opening or the first frame fails with the
-//! reason, and the caller chooses what to do.
+//! can't decode the stream, opening or decoding fails with
+//! [`MediaError::HwUnsupported`] and the reason, as does every call after
+//! it, and the caller chooses what to do.
 //!
 //! A read error or a cancelled read ends the stream with an error, after
 //! the frames that could still be decoded, never with `None`. So does a
@@ -27,11 +28,11 @@
 use std::ffi::c_int;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use spherecut_core::{Rational, Time};
 
-use crate::ffi::{self, HwDevice};
+use crate::ffi::{self, HwDevice, HwRefusal, OpenDecoderError};
 use crate::hwprobe::device_label;
 use crate::{MediaError, ff, init};
 
@@ -63,15 +64,24 @@ impl DecodedFrame {
     /// bit depth, whether the frame is planar (software) or semi-planar
     /// (NV12/P010 from hardware). For comparisons and tests; the render
     /// path uploads planes without copying them like this. `None` for
-    /// formats other than 4:2:0 8/10-bit.
+    /// formats other than 4:2:0 8/10-bit, and for a frame whose size no
+    /// longer matches its buffers.
     pub fn planes_u16(&self) -> Option<[Vec<u16>; 3]> {
         use ff::ffi::AVPixelFormat as P;
         let f = &self.frame;
         let is = |p: P| ffi::frame_format(f) == p as c_int;
         let (w, h) = (f.width() as usize, f.height() as usize);
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-        // Semi-planar formats have no third plane; it is never read for them.
-        let planes = [0, 1, 2].map(|i| ffi::plane(f, i).unwrap_or_default());
+        // `ffi::plane` holds every row of the frame's width, or is `None`.
+        // Semi-planar formats have no third plane; it is never read for
+        // them.
+        let planes = [0, 1, 2].map(|i| ffi::plane(f, i));
+        let semi_planar = is(P::AV_PIX_FMT_NV12) || is(P::AV_PIX_FMT_P010LE);
+        let n = if semi_planar { 2 } else { 3 };
+        if planes[..n].iter().any(Option::is_none) {
+            return None;
+        }
+        let planes = planes.map(Option::unwrap_or_default);
         let row = |plane: usize, y: usize| -> &[u8] { &planes[plane][y * f.stride(plane)..] };
         let rd16 = |b: &[u8], i: usize| u16::from_le_bytes([b[2 * i], b[2 * i + 1]]);
         let collect = |n: usize, h: usize, px: &dyn Fn(usize, usize) -> u16| -> Vec<u16> {
@@ -134,6 +144,9 @@ pub struct VideoDecoder {
     read_error: Option<String>,
     /// The error that ended the stream, returned by every later call.
     failed: Option<String>,
+    /// Why the device turned the stream down, returned by every later
+    /// call.
+    refused: Option<HwRefusal>,
     frames: u64,
     skipped: u64,
 }
@@ -162,6 +175,14 @@ fn open_err(path: &Path, e: ff::Error) -> MediaError {
     }
 }
 
+fn hw_unsupported(path: &Path, dev: &HwDevice, refusal: HwRefusal) -> MediaError {
+    MediaError::HwUnsupported {
+        path: path.to_path_buf(),
+        kind: device_label(dev.kind()).into(),
+        refusal,
+    }
+}
+
 impl VideoDecoder {
     /// Open the best video stream of `path` (or stream `index`).
     pub fn open(
@@ -170,7 +191,7 @@ impl VideoDecoder {
         hw: Option<Arc<HwDevice>>,
     ) -> Result<Self, MediaError> {
         init();
-        let ictx = ff::format::input(path).map_err(|e| open_err(path, e))?;
+        let ictx = ffi::open_input(path, None).map_err(|e| open_err(path, e))?;
         Self::with_input(path, ictx, index, hw)
     }
 
@@ -185,8 +206,7 @@ impl VideoDecoder {
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, MediaError> {
         init();
-        let ictx = ff::format::input_with_interrupt(path, move || cancel.load(Ordering::Relaxed))
-            .map_err(|e| open_err(path, e))?;
+        let ictx = ffi::open_input(path, Some(cancel)).map_err(|e| open_err(path, e))?;
         Self::with_input(path, ictx, index, hw)
     }
 
@@ -224,7 +244,12 @@ impl VideoDecoder {
                 count: 0,
             }),
         }
-        let dec = ffi::open_video_decoder(ctx).map_err(|e| err(path, "opening decoder", e))?;
+        let dec = ffi::open_video_decoder(ctx, hw.as_deref()).map_err(|e| match (e, &hw) {
+            (OpenDecoderError::NotOnDevice, Some(dev)) => {
+                hw_unsupported(path, dev, HwRefusal::NotOffered)
+            }
+            (e, _) => err(path, "opening decoder", e),
+        })?;
         let codec = dec.codec();
         tracing::debug!(
             path = %path.display(),
@@ -247,6 +272,7 @@ impl VideoDecoder {
             done: false,
             read_error: None,
             failed: None,
+            refused: None,
             frames: 0,
             skipped: 0,
         })
@@ -274,11 +300,16 @@ impl VideoDecoder {
     ///
     /// When reading the file fails (see the module docs), the frames
     /// decoded before that come first, then the error, which every later
-    /// call returns too. An error from the decoder itself is returned once;
-    /// calling again carries on with the next packet.
+    /// call returns too. So is [`MediaError::HwUnsupported`], once the
+    /// device turns the stream down: nothing more is decoded. Any other
+    /// error from the decoder itself is returned once; calling again
+    /// carries on with the next packet.
     pub fn next_frame(&mut self) -> Result<Option<DecodedFrame>, MediaError> {
         if let Some(reason) = &self.failed {
             return Err(err(&self.path, "reading", reason));
+        }
+        if let Some(e) = self.refusal() {
+            return Err(e);
         }
         let mut frame = ff::frame::Video::empty();
         loop {
@@ -339,15 +370,15 @@ impl VideoDecoder {
     /// A decoder error, or why the device can't decode this stream when
     /// that is the cause: the decoder's own error then is just "Operation
     /// not permitted".
-    fn decode_error(&self, e: ff::Error) -> MediaError {
-        match (ffi::hw_refusal(&self.dec), &self.hw) {
-            (Some(refusal), Some(dev)) => MediaError::HwUnsupported {
-                path: self.path.clone(),
-                kind: device_label(dev.kind()).into(),
-                refusal,
-            },
-            _ => err(&self.path, "decoding", e),
-        }
+    fn decode_error(&mut self, e: ff::Error) -> MediaError {
+        self.refused = ffi::hw_refusal(&self.dec);
+        self.refusal()
+            .unwrap_or_else(|| err(&self.path, "decoding", e))
+    }
+
+    /// `HwUnsupported`, once the device has turned the stream down.
+    fn refusal(&self) -> Option<MediaError> {
+        Some(hw_unsupported(&self.path, self.hw.as_ref()?, self.refused?))
     }
 
     /// The next packet to decode, or `None` once there are no more (see
@@ -449,18 +480,30 @@ impl VideoDecoder {
         })
     }
 
-    fn finish_frame(&self, frame: ff::frame::Video) -> Result<DecodedFrame, MediaError> {
+    fn finish_frame(&mut self, frame: ff::frame::Video) -> Result<DecodedFrame, MediaError> {
         let format = ffi::frame_format(&frame);
         let on_device = self.hw.as_ref().is_some_and(|h| format == h.hw_pix_fmt());
         if self.hw.is_some() && !on_device {
-            return Err(err(
-                &self.path,
-                "hardware decode",
-                format!(
-                    "decoder produced {} frames instead of device frames",
-                    ffi::pix_fmt_name(format).unwrap_or_else(|| format!("format {format}"))
-                ),
-            ));
+            // A decoder that never asked for a format doesn't use the
+            // device. One that turned the device down may go on in
+            // software.
+            self.refused = match ffi::hw_refusal(&self.dec) {
+                None if !ffi::hw_format_asked(&self.dec) => Some(HwRefusal::NotOffered),
+                r => r,
+            };
+            return Err(self.refusal().unwrap_or_else(|| {
+                err(
+                    &self.path,
+                    "hardware decode",
+                    format!(
+                        "decoder produced {} frames instead of device frames",
+                        ffi::pix_fmt_name(format).unwrap_or_else(|| format!("format {format}"))
+                    ),
+                )
+            }));
+        }
+        if on_device {
+            ffi::note_device_frame(&mut self.dec);
         }
         let pts = frame.pts();
         let frame = if on_device {
@@ -486,4 +529,73 @@ pub fn open_hw_device(kind: &str, device: Option<&str>) -> Result<Arc<HwDevice>,
             kind: kind.to_string(),
             reason,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use spherecut_core::FrameRate;
+
+    use super::*;
+    use crate::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+
+    /// Ten 256x128 frames of H.264.
+    fn clip() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("spherecut-decode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = VideoSettings {
+            encoder: "libx264".into(),
+            width: 256,
+            height: 128,
+            rate: FrameRate::FPS_30,
+            layout: PixelLayout::Yuv420p,
+            options: Vec::new(),
+            bt709_limited: true,
+        };
+        let mut w = Mp4Writer::create(&dir.join("clip.mp4"), &settings, None).unwrap();
+        for i in 0..10 {
+            let luma = vec![16 + 20 * i; 256 * 128];
+            let chroma = vec![128; 128 * 64];
+            w.push_video(&YuvPlanes::U8([luma, chroma.clone(), chroma]))
+                .unwrap();
+        }
+        w.finish().unwrap()
+    }
+
+    #[test]
+    fn software_frames_from_a_decoder_that_never_asked_for_a_format_are_refused() {
+        // A decoder that ignores its device decodes in software without
+        // asking get_format; one opened in software and then given a
+        // device is the same.
+        let mut d = VideoDecoder::open(&clip(), None, None).unwrap();
+        d.hw = Some(Arc::new(HwDevice::vulkan_without_context()));
+        for _ in 0..2 {
+            match d.next_frame() {
+                Err(MediaError::HwUnsupported {
+                    refusal: HwRefusal::NotOffered,
+                    ..
+                }) => {}
+                r => panic!("expected HwUnsupported, got {r:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn planes_of_a_frame_resized_after_its_buffers_are_none() {
+        let mut frame = ff::frame::Video::new(ff::format::Pixel::YUV420P, 64, 16);
+        for i in 0..3 {
+            frame.data_mut(i).fill(128);
+        }
+        let mut f = DecodedFrame {
+            pts: None,
+            time: None,
+            frame,
+            hw_decoded: false,
+        };
+        assert!(f.planes_u16().is_some());
+        // ffmpeg-next's safe setter; the buffers stay 16 rows high.
+        f.frame.set_height(4096);
+        assert!(f.planes_u16().is_none());
+    }
 }

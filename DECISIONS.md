@@ -46,6 +46,9 @@ Why:
   Vorbis, FLAC), 3 are doctor tests that need the AV1 and ProRes decoders
   and FFmpeg's Vulkan device, and 1 needs the `lrc` demuxer.
   An 8.1 build was checked in an earlier round, before the M0 fixes.
+  *Updated after the final review:* the three tests in
+  `crates/media/tests/hw_refusal.rs` decode on FFmpeg's Vulkan device
+  too, so they also fail on the 9.0.2 build without Vulkan.
 - Since 9.0 it binds `hwcontext_vaapi.h`, `hwcontext_vulkan.h` and
   `hwcontext_drm.h`, which later zero-copy work (VA-API to DMA-BUF to
   Vulkan) needs.
@@ -188,7 +191,8 @@ in its prerequisite check.
 - Tier 1 runs anywhere, including this GPU-less cloud VM, with lavapipe for
   GPU work once it exists. *Updated:* lavapipe is needed already, because
   `crates/cli/tests/doctor.rs` runs doctor with the Vulkan loader limited
-  to it (D18).
+  to it (D18), and `crates/media/tests/hw_refusal.rs` checks that
+  `VideoDecoder` turns streams down on it (D14).
 - Tier 2 tests are `#[ignore = "tier2: ..."]` and call
   `spherecut_testkit::tier2::require_*`, which panic with a `TIER2-SKIP:`
   marker when hardware or samples are missing. `cargo xtask hw-test` runs
@@ -246,6 +250,16 @@ fields: `Context::id()` (which `Decoder::video` calls), `medium()` on
 `ffi::open_video_decoder`, `ffi::media_type`, `ffi::plane` and
 `ffi::frame_format` instead.
 
+The same goes for strings. ffmpeg-next's dictionary iterator makes a
+`&str` of each key and value without checking that it is UTF-8, and
+FFmpeg copies tags as the file has them. So `probe` reads metadata with
+`ffi::dict_entries`, which turns bytes that aren't UTF-8 into U+FFFD
+(review C2). `ff::format::input` and `input_with_interrupt` unwrap the
+path as UTF-8 and panic on any other Linux file name. So `probe` and
+`VideoDecoder` open files with `ffi::open_input`, which gives FFmpeg the
+path's bytes as they are (review C1). Refusing such names with
+`MediaError::Open` was considered, but FFmpeg reads those files fine.
+
 FFI lives in two modules: `ffi.rs` and, for doctor's probes,
 `hwprobe.rs`. The workspace denies `unsafe_op_in_unsafe_fn` and
 `clippy::undocumented_unsafe_blocks`, so each `unsafe` block has a SAFETY
@@ -267,8 +281,9 @@ the runtime FFmpeg's list as ints (`ffi::sample_formats`): through
 `avcodec_get_supported_config` on FFmpeg 7.1 and later, and
 `AVCodec.sample_fmts` before that. `crates/media/build.rs` tells the two
 apart from ffmpeg-sys-next's version flags. Some tests
-(`generated_media.rs`, `writers.rs`, the `hwprobe` unit tests) call
-`Decoder::video`, `Decoder::audio`, `Frame::format` and `Frame::data`.
+(`generated_media.rs`, `writers.rs`, the `hwprobe` unit tests, the `ffi`
+plane tests) call `Decoder::video`, `Decoder::audio`, `Opened::video`,
+`Encoder::video`, `Frame::format`, `Frame::data` and `Frame::data_mut`.
 
 ## D12. FFmpeg's log goes to `tracing`
 
@@ -327,17 +342,44 @@ When the device can't decode a stream, `VideoDecoder` returns
 `MediaError::HwUnsupported { path, kind, refusal }` with a `HwRefusal`:
 
 - `NotOffered`: FFmpeg never offered the device's pixel format, so this
-  FFmpeg has no hardware decoder for the format or profile.
+  FFmpeg has no hardware decoder for the format or profile. This is also
+  the answer when no decoder for the codec can use the device at all,
+  and when a decoder gave software frames without asking for a format.
 - `Withdrawn`: FFmpeg offered it, then setting up its hardware decoder
   failed: the driver can't decode this profile.
 
-`ffi::attach_hw_device` installs the `get_format` callback, which records
-in the codec context's `opaque` (unused by FFmpeg) the device format in
-the low 24 bits and three flags: asked, offered and withdrawn.
-`ffi::hw_refusal` reads them. Doctor's probes (`hwprobe.rs`) use the same.
-The Tier 2 Vulkan test skips when there is no render node, when FFmpeg
-has no Vulkan device or no encoder to make its clip, or on
+The error comes from `open` when no decoder for the codec can use the
+device, and otherwise from `next_frame`. Once `next_frame` has returned
+it, every later call returns it again and decodes nothing. FFmpeg's HEVC
+decoder would otherwise go on in software after the refusal (review
+C12).
+
+With a device, `ffi::open_video_decoder` doesn't take FFmpeg's default
+decoder for the codec. It takes the first one whose hardware configs
+offer `hw_device_ctx` for the device's type. Like `avcodec_find_decoder`,
+it takes an experimental decoder only when no other one fits. FFmpeg's
+default for AV1 is libdav1d, which has no hardware configs: it ignored
+the device and decoded in software (review C13).
+
+`ffi::attach_hw_device` installs the `get_format` callback. In the codec
+context's `opaque` (unused by FFmpeg) it keeps the device format in the
+low 24 bits, plus flags that describe the latest call. Asked: FFmpeg has
+called it at all. Taken: the latest call offered the device format and
+we took it. Withdrawn: the latest call lacked the format, and the call
+before took it with no device frame since. That is how FFmpeg asks again
+when its hardware decoder fails to start. Decoded: a frame has come out
+on the device since the format was taken, which `VideoDecoder` notes
+(`ffi::note_device_frame`). A list without the format at any other time,
+such as after a new SPS, is `NotOffered`, and a call that takes the
+format again clears the refusal (review C16). `ffi::hw_refusal` reads
+the flags. Doctor's probes (`hwprobe.rs`) use the same callback and
+flags. The Tier 2 Vulkan test skips when there is no render node, when
+FFmpeg has no Vulkan device or no encoder to make its clip, or on
 `HwUnsupported`; any other error fails it.
+
+Limit: a new SPS whose format has no hardware decoder, arriving after
+the format was taken and before the first device frame, reads as
+`Withdrawn`, not `NotOffered`.
 
 Why: without this the caller got FFmpeg's "Operation not permitted". That
 is error code -1, from the `AV_PIX_FMT_NONE` (-1) our callback returns
