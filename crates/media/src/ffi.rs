@@ -43,6 +43,7 @@ mod c {
         pub fn avcodec_profile_name(id: c_int, profile: c_int) -> *const c_char;
         pub fn av_get_pix_fmt_name(fmt: c_int) -> *const c_char;
         pub fn av_pix_fmt_desc_get(fmt: c_int) -> *const AVPixFmtDescriptor;
+        pub fn av_image_get_linesize(fmt: c_int, width: c_int, plane: c_int) -> c_int;
         pub fn av_get_sample_fmt_name(fmt: c_int) -> *const c_char;
         pub fn av_color_range_name(range: c_int) -> *const c_char;
         pub fn av_color_space_name(space: c_int) -> *const c_char;
@@ -765,14 +766,26 @@ pub fn frame_format(frame: &ff::frame::Video) -> c_int {
 
 /// Plane `index` of a frame in system memory, as `ff::frame::Video::data`
 /// gives it, but sized from the pixel format read as an int (`data` calls
-/// `Frame::format`). `None` for a plane the format doesn't have, for a
-/// hardware frame, and for a format this libavutil doesn't describe.
+/// `Frame::format`), and never past the buffer that holds the plane.
+///
+/// The slice has `linesize` bytes for each row, but ends at the end of
+/// that buffer if it comes first, so the last row may be cut to the bytes
+/// the frame's width covers. That happens for a frame the decoder cropped
+/// on the left: its `data` moves right, and its last row has no padding
+/// after it to cover the move.
+///
+/// `None` for a plane the format doesn't have, for a hardware frame, for
+/// a format this libavutil doesn't describe, and for a plane whose rows
+/// don't fit in its buffer (a frame whose size was changed after its
+/// buffers were allocated).
 pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
-    // SAFETY: `frame` wraps a live AVFrame; these are plain fields.
-    let (format, height, data, linesize) = unsafe {
-        let f = frame.as_ptr();
+    // SAFETY: only takes the pointer to the AVFrame that `frame` wraps.
+    let f = unsafe { frame.as_ptr() };
+    // SAFETY: `f` is a live AVFrame; these are plain fields.
+    let (format, width, height, data, linesize) = unsafe {
         (
             (*f).format,
+            (*f).width,
             (*f).height,
             *(*f).data.get(index)?,
             *(*f).linesize.get(index)?,
@@ -786,7 +799,7 @@ pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
         .map(|c| c.plane as usize + 1)
         .max()?;
     let hw = d.flags & sys::AV_PIX_FMT_FLAG_HWACCEL as u64 != 0;
-    if hw || index >= planes || data.is_null() || linesize <= 0 || height <= 0 {
+    if hw || index >= planes || data.is_null() || linesize <= 0 || width <= 0 || height <= 0 {
         return None;
     }
     // Planes 1 and 2 hold chroma, subsampled vertically (rounding up).
@@ -794,12 +807,43 @@ pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
         1 | 2 => -((-height) >> d.log2_chroma_h),
         _ => height,
     };
-    // SAFETY: a frame FFmpeg allocates for this format has `rows` rows of
-    // `linesize` bytes from `data` in this plane, as av_image_fill_pointers
-    // lays them out (decoders pad their buffers beyond that, which also
-    // covers a cropped frame's shifted `data`). The buffers live as long as
-    // the frame, which stays borrowed.
-    Some(unsafe { std::slice::from_raw_parts(data, linesize as usize * rows as usize) })
+    // SAFETY: accepts any format and width (negative for a bad one), and
+    // `index` is a plane of the format, so below 4.
+    let row = unsafe { c::av_image_get_linesize(format, width, index as c_int) };
+    let (row, rows, linesize) = (usize::try_from(row).ok()?, rows as usize, linesize as usize);
+    let needed = linesize.checked_mul(rows - 1)?.checked_add(row)?;
+    let room = buffer_room(f, data)?;
+    if needed > room {
+        return None;
+    }
+    // SAFETY: the slice starts at `data` and ends inside the buffer that
+    // holds it (`room`), which the frame keeps a reference to. It lives as
+    // long as the frame, which stays borrowed.
+    Some(unsafe { std::slice::from_raw_parts(data, linesize.saturating_mul(rows).min(room)) })
+}
+
+/// How many bytes there are from `p` to the end of the buffer of `frame`
+/// that holds `p`. `None` when no buffer of the frame holds it.
+fn buffer_room(frame: *const sys::AVFrame, p: *const u8) -> Option<usize> {
+    // SAFETY: `frame` is a live AVFrame. `buf` holds NULL or references
+    // the frame owns, and `extended_buf` holds `nb_extended_buf` more.
+    let bufs = unsafe {
+        let extended = match usize::try_from((*frame).nb_extended_buf) {
+            Ok(n) if n > 0 && !(*frame).extended_buf.is_null() => {
+                std::slice::from_raw_parts((*frame).extended_buf, n)
+            }
+            _ => &[],
+        };
+        (*frame).buf.iter().chain(extended).copied()
+    };
+    let p = p.addr();
+    bufs.filter(|b| !b.is_null()).find_map(|b| {
+        // SAFETY: a live buffer reference; plain fields.
+        let (start, size) = unsafe { ((*b).data.addr(), (*b).size) };
+        (start..start.checked_add(size)?)
+            .contains(&p)
+            .then(|| start + size - p)
+    })
 }
 
 /// FFmpeg's name for a pixel format, e.g. "yuv420p" or "vaapi".
@@ -1062,6 +1106,133 @@ mod tests {
         let mut ctx = wanting(vaapi);
         assert_eq!(offer(&mut ctx, &[yuv]), none);
         assert_eq!(hw_refusal(&ctx), Some(HwRefusal::NotOffered));
+    }
+
+    /// One mid-grey 512x128 frame, encoded as Annex B HEVC by libx265.
+    fn hevc_frame() -> Vec<ff::Packet> {
+        use ff::format::Pixel;
+        let codec = ff::encoder::find_by_name("libx265").unwrap();
+        let mut enc = ff::codec::context::Context::new_with_codec(codec)
+            .encoder()
+            .video()
+            .unwrap();
+        enc.set_width(512);
+        enc.set_height(128);
+        enc.set_format(Pixel::YUV420P);
+        enc.set_time_base((1, 30));
+        let mut opts = ff::Dictionary::new();
+        opts.set("preset", "ultrafast");
+        opts.set("x265-params", "log-level=error");
+        let mut enc = enc.open_as_with(codec, opts).unwrap();
+        let mut frame = ff::frame::Video::new(Pixel::YUV420P, 512, 128);
+        for i in 0..3 {
+            frame.data_mut(i).fill(128);
+        }
+        frame.set_pts(Some(0));
+        enc.send_frame(&frame).unwrap();
+        enc.send_eof().unwrap();
+        let mut out = Vec::new();
+        let mut pkt = ff::Packet::empty();
+        while enc.receive_packet(&mut pkt).is_ok() {
+            out.push(std::mem::replace(&mut pkt, ff::Packet::empty()));
+        }
+        out
+    }
+
+    /// `packets` through FFmpeg's hevc_metadata filter, which sets the
+    /// SPS conformance window to crop `left` luma samples on the left.
+    fn crop_left(packets: Vec<ff::Packet>, left: i64) -> Vec<ff::Packet> {
+        use ff::codec::packet::Mut;
+        let mut out = Vec::new();
+        // SAFETY: the filter context is allocated, set up before
+        // av_bsf_init as FFmpeg requires (a codec id our headers have, and
+        // an option of the filter), and freed at the end. Each packet sent
+        // is a live one whose data the filter takes; each received goes
+        // into a fresh packet that we own.
+        unsafe {
+            let filter = sys::av_bsf_get_by_name(c"hevc_metadata".as_ptr());
+            assert!(!filter.is_null());
+            let mut bsf = std::ptr::null_mut();
+            assert!(sys::av_bsf_alloc(filter, &mut bsf) >= 0);
+            (*(*bsf).par_in).codec_id = sys::AVCodecID::AV_CODEC_ID_HEVC;
+            let set = sys::av_opt_set_int((*bsf).priv_data, c"crop_left".as_ptr(), left, 0);
+            assert!(set >= 0);
+            assert!(sys::av_bsf_init(bsf) >= 0);
+            let drain = |out: &mut Vec<ff::Packet>| loop {
+                let mut p = ff::Packet::empty();
+                if sys::av_bsf_receive_packet(bsf, p.as_mut_ptr()) < 0 {
+                    break;
+                }
+                out.push(p);
+            };
+            for mut p in packets {
+                assert!(sys::av_bsf_send_packet(bsf, p.as_mut_ptr()) >= 0);
+                drain(&mut out);
+            }
+            assert!(sys::av_bsf_send_packet(bsf, std::ptr::null_mut()) >= 0);
+            drain(&mut out);
+            sys::av_bsf_free(&mut bsf);
+        }
+        out
+    }
+
+    /// Where the buffer that holds plane `index` of `frame` ends, as
+    /// FFmpeg finds that buffer.
+    fn buffer_end(frame: &ff::frame::Video, index: c_int) -> *const u8 {
+        // SAFETY: a live frame, which the call only reads (FFmpeg before
+        // 7.0 declares it non-const). The buffer returned is the frame's
+        // own, with `size` bytes from `data`.
+        unsafe {
+            let b = sys::av_frame_get_plane_buffer(frame.as_ptr().cast_mut(), index);
+            assert!(!b.is_null());
+            (*b).data.add((*b).size)
+        }
+    }
+
+    #[test]
+    fn planes_of_a_frame_cropped_on_the_left_end_inside_their_buffers() {
+        let codec = ff::decoder::find_by_name("hevc").unwrap();
+        let mut dec = ff::codec::context::Context::new_with_codec(codec)
+            .decoder()
+            .open_as(codec)
+            .and_then(|d| d.video())
+            .unwrap();
+        // 128 luma bytes: more than the padding FFmpeg leaves after a
+        // plane, and the frame has no bottom crop to make up for it.
+        for p in crop_left(hevc_frame(), 128) {
+            dec.send_packet(&p).unwrap();
+        }
+        dec.send_eof().unwrap();
+        let mut frame = ff::frame::Video::empty();
+        dec.receive_frame(&mut frame).unwrap();
+        assert_eq!((frame.width(), frame.height()), (384, 128));
+
+        for (i, rows, row) in [(0, 128, 384), (1, 64, 192), (2, 64, 192)] {
+            let p = plane(&frame, i).unwrap();
+            assert!(
+                p.as_ptr_range().end <= buffer_end(&frame, i as c_int),
+                "plane {i} runs past its buffer"
+            );
+            // Every row of the cropped picture is there.
+            assert!(p.len() >= frame.stride(i) * (rows - 1) + row, "plane {i}");
+        }
+        // The luma plane is the one cut short at its buffer's end.
+        assert!(plane(&frame, 0).unwrap().len() < frame.stride(0) * 128);
+    }
+
+    #[test]
+    fn a_plane_whose_rows_do_not_fit_its_buffer_is_none() {
+        use ff::format::Pixel;
+        let mut f = ff::frame::Video::new(Pixel::YUV420P, 64, 16);
+        assert_eq!(plane(&f, 0).unwrap().len(), f.stride(0) * 16);
+        // ffmpeg-next's safe setters change the size, not the buffers.
+        f.set_height(4096);
+        for i in 0..3 {
+            assert!(plane(&f, i).is_none(), "plane {i}");
+        }
+        f.set_height(16);
+        f.set_width(1 << 20);
+        assert!(plane(&f, 0).is_none());
     }
 
     // One test, because the subscriber and FFmpeg's level are global.
