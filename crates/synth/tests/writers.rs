@@ -64,8 +64,8 @@ fn write_leaves_only_complete_files() {
     }
     assert_eq!(listing(&dir), ["tagged.mp4", "untagged.mp4"]);
 
-    // When the final rename fails (a directory is in the way), the error
-    // names the destination and no temporary file is left.
+    // With a directory in the way, the error names the destination and no
+    // temporary file is left.
     let blocked = tmp("atomic-blocked");
     for s in [&tagged, &untagged] {
         let dest = blocked.join(s.file_name());

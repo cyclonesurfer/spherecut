@@ -216,11 +216,15 @@ impl TempFile {
                 "output path has no file name",
             ));
         }
+        let existing = std::fs::metadata(dest).ok();
+        if existing.as_ref().is_some_and(|m| m.is_dir()) {
+            // The rename would fail, but only once all the work is done.
+            return Err(io::ErrorKind::IsADirectory.into());
+        }
         // A file being replaced keeps its permission bits (not its owner,
         // ACLs or extended attributes). Until they are set the new file is
         // private, so a private output is never readable while it is written.
-        let keep = std::fs::metadata(dest)
-            .ok()
+        let keep = existing
             .filter(|m| m.is_file())
             .map(|m| m.permissions().mode() & 0o777);
         let mut opts = OpenOptions::new();
@@ -932,13 +936,13 @@ mod tests {
         let dir = tmpdir("fail");
         let a = dir.join("in.mp4");
         std::fs::write(&a, file(false).0).unwrap();
-        // A directory in the way: everything works until the rename.
+        // A directory in the way is refused before any work is done.
         let out = dir.join("out.mp4");
         std::fs::create_dir(&out).unwrap();
         let r = inject(&a, &out, &spherical_edits());
         match &r {
             Err(e @ InjectError::Write { path, .. }) => {
-                // The output, not the temp file that failed to replace it.
+                // The output, not the temp file meant to replace it.
                 assert_eq!(path, &out);
                 assert!(!e.to_string().contains(".tmp"), "{e}");
             }
@@ -946,6 +950,13 @@ mod tests {
         }
         assert_eq!(listing(&dir), ["in.mp4", "out.mp4"]);
         assert!(out.is_dir());
+        // One that turns up while the file is written makes the rename
+        // fail, and the temp file goes too.
+        let late = dir.join("late.mp4");
+        let tmp = TempFile::create(&late).unwrap();
+        std::fs::create_dir(&late).unwrap();
+        assert!(tmp.persist().is_err());
+        assert_eq!(listing(&dir), ["in.mp4", "late.mp4", "out.mp4"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
