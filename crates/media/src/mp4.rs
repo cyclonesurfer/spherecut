@@ -262,14 +262,35 @@ pub const MAX_BOXES: usize = 250_000;
 /// Warnings past this many are counted, not listed.
 const MAX_WARNINGS: usize = 32;
 
+/// What [`read_with`] accepts as the first box of a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstBox {
+    /// A type that MP4 and MOV files start with (`ftyp`, `moov`, `mdat`,
+    /// ...); anything else is [`Mp4Error::NotMp4`]. For input that may not
+    /// be MP4 at all.
+    Known,
+    /// Any box whose header is valid, for input known to be MP4/MOV
+    /// (FFmpeg's demuxer took it), so that a damaged first box does not
+    /// hide the rest of the structure.
+    Any,
+}
+
 pub fn read_file(path: &Path) -> Result<Mp4Tree, Mp4Error> {
+    read_file_with(path, FirstBox::Known)
+}
+
+pub fn read_file_with(path: &Path, first: FirstBox) -> Result<Mp4Tree, Mp4Error> {
     let mut f = File::open(path)?;
-    read(&mut f)
+    read_with(&mut f, first)
 }
 
 /// Walk top-level boxes by seeking, loading only `moov` and small metadata
 /// boxes into memory.
 pub fn read<R: Read + Seek>(r: &mut R) -> Result<Mp4Tree, Mp4Error> {
+    read_with(r, FirstBox::Known)
+}
+
+pub fn read_with<R: Read + Seek>(r: &mut R, first: FirstBox) -> Result<Mp4Tree, Mp4Error> {
     let file_size = r.seek(SeekFrom::End(0))?;
     r.seek(SeekFrom::Start(0))?;
     let mut tree = Mp4Tree {
@@ -295,13 +316,15 @@ pub fn read<R: Read + Seek>(r: &mut R) -> Result<Mp4Tree, Mp4Error> {
             }
             break;
         };
-        if pos == 0 && !FIRST_BOXES.contains(&&h.fourcc.0) {
+        // At the start of a file known to be MP4, any box is the first.
+        let any = pos == 0 && first == FirstBox::Any;
+        if pos == 0 && !any && !FIRST_BOXES.contains(&&h.fourcc.0) {
             return Err(Mp4Error::NotMp4(format!(
                 "first box type `{}` is not an MP4 box",
                 h.fourcc
             )));
         }
-        if h.size > remaining && !known_top_level(&h.fourcc.0) {
+        if h.size > remaining && !any && !known_top_level(&h.fourcc.0) {
             // Vendor trailers (Insta360 before X5 firmware 1.7) are not
             // boxes, but their first bytes can look like an oversized one.
             tree.trailing_bytes = remaining;
@@ -1247,6 +1270,26 @@ pub(crate) mod tests {
             assert_eq!(t.truncated, None, "{junk:?}");
             assert_eq!(t.trailing_bytes, junk.len() as u64, "{junk:?}");
         }
+    }
+
+    #[test]
+    fn any_first_box_is_accepted_when_the_file_is_known_to_be_mp4() {
+        let mut f = minimal();
+        f[4..8].copy_from_slice(b"ftyq");
+        assert!(matches!(
+            read(&mut io::Cursor::new(f.clone())),
+            Err(Mp4Error::NotMp4(_))
+        ));
+        let t = read_with(&mut io::Cursor::new(f.clone()), FirstBox::Any).unwrap();
+        assert_eq!(t.top[0].fourcc, FourCc::new(b"ftyq"));
+        assert!(t.moov().is_some());
+        assert!(t.warnings.is_empty(), "{:?}", t.warnings);
+        // Cut short, it is truncation, whatever its type.
+        let t = read_with(&mut io::Cursor::new(f[..12].to_vec()), FirstBox::Any).unwrap();
+        assert!(t.truncated.is_some_and(|c| c.is(b"ftyq")));
+        // A header that is not one is still not MP4.
+        f[0..4].copy_from_slice(&5u32.to_be_bytes());
+        assert!(read_with(&mut io::Cursor::new(f), FirstBox::Any).is_err());
     }
 
     #[test]

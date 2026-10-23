@@ -10,7 +10,7 @@ use spherecut_core::Rational;
 use crate::detect::{self, CameraGuess};
 use crate::ff;
 use crate::ffi;
-use crate::mp4::{self, Cursor, Mp4Box, Mp4Tree};
+use crate::mp4::{self, Cursor, FirstBox, Mp4Box};
 use crate::spherical::{self, TrackSpherical};
 use crate::{MediaError, init};
 
@@ -209,12 +209,12 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     let mut warnings = Vec::new();
     let mut damage = Vec::new();
 
-    let tree: Option<Mp4Tree> = match mp4::read_file(path) {
-        Ok(t) => Some(t),
-        Err(mp4::Mp4Error::NotMp4(_)) => None,
+    let (mut tree, not_mp4) = match mp4::read_file(path) {
+        Ok(t) => (Some(t), false),
+        Err(mp4::Mp4Error::NotMp4(_)) => (None, true),
         Err(e) => {
             damage.push(format!("MP4 structure: {e}"));
-            None
+            (None, false)
         }
     };
     if let Some(t) = &tree {
@@ -225,6 +225,32 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         path: path.to_path_buf(),
         reason: describe_open_error(e, tree.is_some(), &damage),
     })?;
+    let fmt = ictx.format();
+
+    let mov_family = fmt.name().split(',').any(|n| n == "mov" || n == "mp4");
+    if not_mp4 && mov_family {
+        // FFmpeg found MP4/MOV boxes, so the first box is damaged or of a
+        // type we do not know. Check the rest of the structure anyway.
+        match mp4::read_file_with(path, FirstBox::Any) {
+            Ok(t) => {
+                let first = t.top.first().map(|b| b.fourcc);
+                let first = first.or(t.truncated.and_then(|c| c.fourcc));
+                warnings.push(format!(
+                    "FFmpeg reads this as MP4/MOV, but its first box{} is not of a type MP4/MOV files start with",
+                    first.map(|f| format!(" `{f}`")).unwrap_or_default()
+                ));
+                damage.extend(t.damage());
+                tree = Some(t);
+            }
+            Err(e) => damage.push(format!(
+                "FFmpeg reads this as MP4/MOV, but its structure cannot be checked: {}",
+                match e {
+                    mp4::Mp4Error::NotMp4(why) => why,
+                    e => e.to_string(),
+                }
+            )),
+        }
+    }
 
     let traks: Vec<&Mp4Box> = tree
         .as_ref()
@@ -232,7 +258,6 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         .unwrap_or_default();
     let trak_of = trak_matcher(&traks);
 
-    let fmt = ictx.format();
     let av_tb = Rational::new(1, ff::ffi::AV_TIME_BASE as i64).unwrap_or(Rational::ONE);
     let container = Container {
         format: fmt.name().to_string(),
@@ -344,13 +369,6 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
             ));
         }
     }
-    let mov_family = fmt.name().split(',').any(|n| n == "mov" || n == "mp4");
-    if tree.is_none() && mov_family {
-        warnings.push(
-            "FFmpeg reads this as MP4/MOV, but its first box is not one we know; spherical metadata and camera detection were skipped".into(),
-        );
-    }
-
     let camera = detect::guess(path, tree.as_ref(), &streams, &container.tags);
     let mp4 = tree.as_ref().map(|t| Mp4Summary {
         brand: t.ftyp_brand().map(|b| b.to_string()),

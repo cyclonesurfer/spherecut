@@ -241,3 +241,41 @@ fn file_ending_inside_a_box_header_fails() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn damaged_first_box_does_not_hide_other_damage() {
+    // One changed byte in the type of the first box: FFmpeg still reads
+    // the file as MP4, and so does probe, so the rest is still checked.
+    let dir = tmp("ftyq");
+    let (good, _) = media(&dir);
+    let ftyq = |name: &str| {
+        let mut f = std::fs::read(dir.join(name)).unwrap();
+        f[4..8].copy_from_slice(b"ftyq");
+        let path = dir.join(format!("ftyq-{name}"));
+        std::fs::write(&path, &f).unwrap();
+        path
+    };
+    let warning = "its first box `ftyq` is not of a type MP4/MOV files start with";
+
+    let out = probe(&[&ftyq(&good.file_name().unwrap().to_string_lossy())]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains(warning), "{stdout}");
+    // Spherical metadata is read again too.
+    assert!(stdout.contains("spherical v2: equirect"), "{stdout}");
+
+    for (name, why) in [
+        ("bad-trunc-end.mp4", "it was cut short"),
+        ("bad-corrupt-moov.mp4", "runs past the end of the file"),
+    ] {
+        let out = probe(&[&ftyq(name)]);
+        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+        assert_eq!(out.status.code(), Some(1), "{name}: {stdout}{stderr}");
+        assert!(stdout.contains(warning), "{name}: {stdout}");
+        assert!(
+            stderr.contains("is damaged") && stderr.contains(why),
+            "{name}: {stderr}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
