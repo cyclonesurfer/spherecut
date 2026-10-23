@@ -215,7 +215,8 @@ pub struct Issue {
 pub enum Severity {
     /// Some sources can't be opened at all.
     Error,
-    /// Works, but slowly (software fallback).
+    /// Sources open, but something is slow (a software fallback), missing
+    /// (such as an export or audio codec) or wrong (a driver's output).
     Warning,
     Info,
 }
@@ -1023,11 +1024,7 @@ impl Fixes<'_> {
             }
         };
         lines([
-            self.no_gpu_visible.then(|| {
-                "no GPU is visible here: in a VM or container, pass it through first \
-                 (for example `--device /dev/dri`)"
-                    .to_string()
-            }),
+            self.no_gpu_visible.then(|| PASS_THROUGH.to_string()),
             Some(driver),
         ])
     }
@@ -1053,11 +1050,18 @@ impl Fixes<'_> {
         if self.node_denied {
             return format!("{ADD_TO_RENDER}   (Vulkan opens the GPU through its render node)");
         }
+        // A CPU device was listed, so the Vulkan loader is there, and with
+        // Mesa's drivers installed too nothing is left to install.
+        let mesa = self.distro == Distro::Fedora && self.has("mesa-vulkan-drivers");
         // No driver loads for a GPU that isn't passed through.
         if self.no_gpu_visible {
-            return self.vulkan_driver();
+            return if mesa {
+                PASS_THROUGH.into()
+            } else {
+                self.vulkan_driver()
+            };
         }
-        if self.distro == Distro::Fedora && self.has("mesa-vulkan-drivers") {
+        if mesa {
             return "VK_LOADER_DEBUG=error,warn vulkaninfo --summary   (Mesa's Vulkan drivers \
                     are installed: this shows why none loads for the GPU)\n\
                     sudo dnf upgrade --refresh   (a GPU newer than its Mesa needs a newer Mesa)"
@@ -1068,6 +1072,9 @@ impl Fixes<'_> {
 }
 
 const ADD_TO_RENDER: &str = "sudo usermod -aG render \"$USER\"   then log out and back in";
+
+const PASS_THROUGH: &str = "no GPU is visible here: in a VM or container, pass it through \
+                            first (for example `--device /dev/dri`)";
 
 fn vainfo(node: &str) -> String {
     format!("vainfo --display drm --device {node}   (lists what this GPU decodes and encodes)")
@@ -1342,24 +1349,29 @@ fn vaapi_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issue
     }
 
     // What its driver runs and gets wrong: a bug, not a missing feature.
+    // The driver gives no error for it, so nothing falls back to the CPU,
+    // which happens only when a device refuses (D3).
     let dec = failures(&r.decode_checks, &r.decoders, "vaapi", Fault::WrongOutput);
     let enc = failures(&r.encode_checks, &r.encoders, "vaapi", Fault::WrongOutput);
-    let what = match (dec.is_empty(), enc.is_empty()) {
+    const SHOWN: &str = "the viewer and exports would show its wrong pictures";
+    const ENCODED: &str = "exports it encodes would be wrong";
+    let (what, used) = match (dec.is_empty(), enc.is_empty()) {
         (true, true) => return,
-        (false, true) => wrongly("decodes", &dec),
-        (true, false) => wrongly("encodes", &enc),
-        (false, false) => format!(
-            "{}, and {}",
-            wrongly("decodes", &dec),
-            wrongly("encodes", &enc)
+        (false, true) => (wrongly("decodes", &dec), SHOWN.to_string()),
+        (true, false) => (wrongly("encodes", &enc), ENCODED.to_string()),
+        (false, false) => (
+            format!(
+                "{}, and {}",
+                wrongly("decodes", &dec),
+                wrongly("encodes", &enc)
+            ),
+            format!("{SHOWN}, and {ENCODED}"),
         ),
     };
     out.push(Issue {
         severity: Severity::Warning,
         what: format!("VA-API on {node} {what}"),
-        impact: "its output can't be used, so these fall back to the CPU, which is far slower \
-                 at 5.7K and up"
-            .into(),
+        impact: format!("the driver gives no error, so nothing falls back to the CPU: {used}"),
         fix: lines([
             Some(fx.newer_driver("the VA-API driver")),
             Some(format!(
@@ -1446,29 +1458,62 @@ fn vulkan_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issu
 }
 
 /// What Vulkan Video can't decode, or decodes wrongly, on FFmpeg's Vulkan
-/// device, a GPU. Only notes: VA-API is the hardware decoder, and Vulkan
-/// Video the second one.
+/// device, a GPU. VA-API is the hardware decoder, and Vulkan Video the
+/// second one, so these are notes. The exception is wrong output where
+/// VA-API can't decode: Vulkan Video's wrong pictures are used there, which
+/// is a warning, as VA-API's own wrong output is.
 fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) {
-    // Which of `formats` VA-API still decodes, and which only the CPU.
-    let impact = |formats: &[&str]| -> String {
-        let on_vaapi = |f: &&str| {
-            r.decode_checks
+    // `formats` split by what VA-API, which comes first, does with them:
+    // decodes them, decodes them wrongly, or can't.
+    fn on_vaapi<'a>(r: &DoctorReport, formats: &[&'a str]) -> [Vec<&'a str>; 3] {
+        let (mut works, mut wrong, mut unable) = (Vec::new(), Vec::new(), Vec::new());
+        for &f in formats {
+            match r
+                .decode_checks
                 .iter()
-                .any(|c| c.path == "vaapi" && c.format == *f && c.result == CheckResult::Works)
-        };
-        let (vaapi, cpu): (Vec<&str>, Vec<&str>) = formats.iter().partition(|f| on_vaapi(f));
-        if cpu.is_empty() {
-            "none while VA-API decodes them, as it does here".into()
-        } else if vaapi.is_empty() {
-            "with VA-API unable too, they decode on the CPU, which is far slower at 5.7K and up"
-                .into()
-        } else {
-            format!(
-                "VA-API still decodes {}; the CPU decodes {}, which is far slower at 5.7K and up",
-                and_list(&vaapi),
-                and_list(&cpu)
-            )
+                .find(|c| c.path == "vaapi" && c.format == f)
+            {
+                Some(c) if c.result == CheckResult::Works => works.push(f),
+                Some(c) if c.fault == Some(Fault::WrongOutput) => wrong.push(f),
+                _ => unable.push(f),
+            }
         }
+        [works, wrong, unable]
+    }
+    // What decodes `formats`, which Vulkan Video refuses or, with
+    // `vulkan_wrong`, decodes wrongly. Only a refusal falls back, to Vulkan
+    // Video and then the CPU (D3): a driver that decodes wrongly gives no
+    // error, so its pictures are used.
+    let impact = |formats: &[&str], vulkan_wrong: bool| -> String {
+        let [works, wrong, unable] = on_vaapi(r, formats);
+        if works.len() == formats.len() {
+            return "none while VA-API decodes them, as it does here".into();
+        }
+        if unable.len() == formats.len() && !vulkan_wrong {
+            return "with VA-API unable too, they decode on the CPU, which is far slower at \
+                    5.7K and up"
+                .into();
+        }
+        let mut parts = Vec::new();
+        if !works.is_empty() {
+            parts.push(format!("VA-API still decodes {}", and_list(&works)));
+        }
+        if !wrong.is_empty() {
+            parts.push(format!("VA-API decodes {}, but wrongly", and_list(&wrong)));
+        }
+        if !unable.is_empty() && vulkan_wrong {
+            parts.push(format!(
+                "VA-API can't decode {}, and Vulkan Video gives no error, so nothing falls back \
+                 to the CPU: the viewer and exports would show its wrong pictures",
+                and_list(&unable)
+            ));
+        } else if !unable.is_empty() {
+            parts.push(format!(
+                "the CPU decodes {}, which is far slower at 5.7K and up",
+                and_list(&unable)
+            ));
+        }
+        parts.join("; ")
     };
     let ffmpeg_dec = failed(&r.decode_checks, &r.decoders, "vulkan", Fault::Ffmpeg);
     if !ffmpeg_dec.is_empty() {
@@ -1478,7 +1523,7 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
                 "this FFmpeg cannot use Vulkan Video to decode {}",
                 and_list(&ffmpeg_dec)
             ),
-            impact: impact(&ffmpeg_dec),
+            impact: impact(&ffmpeg_dec, false),
             fix: fx.ffmpeg(),
         });
     }
@@ -1504,7 +1549,7 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
                 "Vulkan Video on {on} cannot decode {}{why}",
                 and_list(&formats)
             ),
-            impact: impact(&formats),
+            impact: impact(&formats, false),
             fix: "vulkaninfo | grep -i video_decode   (the Vulkan Video formats this driver \
                   decodes; newer Mesa releases add more)"
                 .into(),
@@ -1519,10 +1564,16 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
             Some((Some(one), None) | (None, Some(one))) => one.to_string(),
             _ => "the Vulkan driver".to_string(),
         };
+        let formats = formats(&wrong);
+        let [.., unable] = on_vaapi(r, &formats);
         out.push(Issue {
-            severity: Severity::Info,
+            severity: if unable.is_empty() {
+                Severity::Info
+            } else {
+                Severity::Warning
+            },
             what: format!("Vulkan Video on {on} {}", wrongly("decodes", &wrong)),
-            impact: impact(&formats(&wrong)),
+            impact: impact(&formats, true),
             fix: fx.newer_driver(&driver),
         });
     }
@@ -1946,22 +1997,31 @@ mod tests {
                 .starts_with("VK_LOADER_DEBUG=error,warn vulkaninfo --summary"),
             "{i:?}"
         );
-        // In a VM or container with no GPU passed through, that comes first.
-        let no_node = Env {
+        // In a VM or container with no GPU passed through, that is the
+        // whole fix: the drivers are already installed.
+        let no_node = |pkgs: &[&str]| Env {
             node_error: Some((ErrorKind::NotFound, "not found".into())),
-            ..installed(&["mesa-vulkan-drivers"])
+            ..installed(pkgs)
         };
-        let i = issues(&r, &no_node)
-            .into_iter()
-            .find(|i| i.what.contains("Vulkan"))
-            .unwrap();
+        let vulkan_fix = |env: &Env| {
+            issues(&r, env)
+                .into_iter()
+                .find(|i| i.what.contains("Vulkan"))
+                .unwrap()
+                .fix
+        };
         assert_eq!(
-            i.fix,
+            vulkan_fix(&no_node(&["mesa-vulkan-drivers"])),
+            "no GPU is visible here: in a VM or container, pass it through first (for \
+             example `--device /dev/dri`)"
+        );
+        // Not installed: install it, after passing the GPU through.
+        assert_eq!(
+            vulkan_fix(&no_node(&[])),
             "no GPU is visible here: in a VM or container, pass it through first (for \
              example `--device /dev/dri`)\n\
              sudo dnf install mesa-vulkan-drivers vulkan-loader   (RADV for AMD, ANV for Intel)"
         );
-        // Not installed: install it.
         let i = only(&issues(&r, &Env::default())).clone();
         assert_eq!(
             i.fix,
@@ -2138,10 +2198,11 @@ mod tests {
             "VA-API on /dev/dri/renderD128 decodes HEVC Main wrongly (12 of 98304 samples \
              differ from FFmpeg's software decoder)"
         );
+        // Wrong output comes without an error, so nothing falls back.
         assert_eq!(
             i.impact,
-            "its output can't be used, so these fall back to the CPU, which is far slower at \
-             5.7K and up"
+            "the driver gives no error, so nothing falls back to the CPU: the viewer and \
+             exports would show its wrong pictures"
         );
         assert_eq!(
             i.fix,
@@ -2158,6 +2219,98 @@ mod tests {
             "VA-API on /dev/dri/renderD128 decodes HEVC Main wrongly (12 of 98304 samples \
              differ from FFmpeg's software decoder), and encodes H.264 wrongly (its output \
              doesn't decode: Invalid data found when processing input)"
+        );
+        assert_eq!(
+            i.impact,
+            "the driver gives no error, so nothing falls back to the CPU: the viewer and \
+             exports would show its wrong pictures, and exports it encodes would be wrong"
+        );
+        let mut r = healthy(Distro::Arch);
+        wrong(&mut r.encode_checks, "vaapi", "H.264", unreadable);
+        assert_eq!(
+            only(&issues(&r, &Env::default())).impact,
+            "the driver gives no error, so nothing falls back to the CPU: exports it encodes \
+             would be wrong"
+        );
+    }
+
+    #[test]
+    fn vulkan_notes_say_what_decodes_when_one_driver_refuses_and_the_other_is_wrong() {
+        let differ = "12 of 98304 samples differ from FFmpeg's software decoder";
+        let vulkan_note = |r: &DoctorReport| {
+            issues(r, &Env::default())
+                .into_iter()
+                .find(|i| i.what.starts_with("Vulkan Video"))
+                .unwrap()
+        };
+        let hevc = ["HEVC Main", "HEVC Main 10"];
+
+        // Vulkan Video decodes wrongly where VA-API refuses: its pictures
+        // are used, since only a refusal falls back. That is a warning, as
+        // VA-API's wrong output is.
+        let mut r = healthy(Distro::Arch);
+        for f in hevc {
+            wrong(&mut r.decode_checks, "vulkan", f, differ);
+        }
+        fail(&mut r.decode_checks, "vaapi", &["HEVC Main"], Fault::Driver);
+        assert_eq!(vulkan_note(&r).severity, Severity::Warning);
+        assert_eq!(
+            vulkan_note(&r).impact,
+            "VA-API still decodes HEVC Main 10; VA-API can't decode HEVC Main, and Vulkan \
+             Video gives no error, so nothing falls back to the CPU: the viewer and exports \
+             would show its wrong pictures"
+        );
+        fail(
+            &mut r.decode_checks,
+            "vaapi",
+            &["HEVC Main 10"],
+            Fault::Driver,
+        );
+        assert_eq!(
+            vulkan_note(&r).impact,
+            "VA-API can't decode HEVC Main and HEVC Main 10, and Vulkan Video gives no \
+             error, so nothing falls back to the CPU: the viewer and exports would show its \
+             wrong pictures"
+        );
+        // Wrong on both: VA-API comes first, and its pictures are used.
+        wrong(&mut r.decode_checks, "vaapi", "HEVC Main 10", differ);
+        assert_eq!(vulkan_note(&r).severity, Severity::Warning);
+        assert_eq!(
+            vulkan_note(&r).impact,
+            "VA-API decodes HEVC Main 10, but wrongly; VA-API can't decode HEVC Main, and \
+             Vulkan Video gives no error, so nothing falls back to the CPU: the viewer and \
+             exports would show its wrong pictures"
+        );
+        // VA-API's warning covers what it decodes wrongly, so with none of
+        // Vulkan Video's pictures used, that is a note again.
+        wrong(&mut r.decode_checks, "vaapi", "HEVC Main", differ);
+        assert_eq!(vulkan_note(&r).severity, Severity::Info);
+        assert_eq!(
+            vulkan_note(&r).impact,
+            "VA-API decodes HEVC Main and HEVC Main 10, but wrongly"
+        );
+
+        // The reverse: Vulkan Video refuses what VA-API decodes wrongly.
+        // Nothing falls back from VA-API, so the CPU doesn't decode it. A
+        // refusal is only a note.
+        let mut r = healthy(Distro::Arch);
+        fail(&mut r.decode_checks, "vulkan", &hevc, Fault::Driver);
+        wrong(&mut r.decode_checks, "vaapi", "HEVC Main", differ);
+        assert_eq!(vulkan_note(&r).severity, Severity::Info);
+        assert_eq!(
+            vulkan_note(&r).impact,
+            "VA-API still decodes HEVC Main 10; VA-API decodes HEVC Main, but wrongly"
+        );
+        fail(
+            &mut r.decode_checks,
+            "vaapi",
+            &["HEVC Main 10"],
+            Fault::Driver,
+        );
+        assert_eq!(
+            vulkan_note(&r).impact,
+            "VA-API decodes HEVC Main, but wrongly; the CPU decodes HEVC Main 10, which is \
+             far slower at 5.7K and up"
         );
     }
 

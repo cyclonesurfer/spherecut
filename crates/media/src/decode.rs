@@ -64,17 +64,20 @@ impl DecodedFrame {
     /// bit depth, whether the frame is planar (software) or semi-planar
     /// (NV12/P010 from hardware). For comparisons and tests; the render
     /// path uploads planes without copying them like this. `None` for
-    /// formats other than 4:2:0 8/10-bit, and for a frame whose size no
-    /// longer matches its buffers.
+    /// formats other than 4:2:0 8/10-bit, and for a frame whose rows don't
+    /// fit its buffers. That covers most frames whose size or format was
+    /// changed after their buffers were allocated, but not all: `ffi::plane`
+    /// says which.
     pub fn planes_u16(&self) -> Option<[Vec<u16>; 3]> {
         use ff::ffi::AVPixelFormat as P;
         let f = &self.frame;
         let is = |p: P| ffi::frame_format(f) == p as c_int;
         let (w, h) = (f.width() as usize, f.height() as usize);
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-        // `ffi::plane` holds every row of the frame's width, or is `None`.
-        // Semi-planar formats have no third plane; it is never read for
-        // them.
+        // `ffi::plane` holds every row of the frame's width and height,
+        // `stride` bytes apart, or is `None`, so the reads below stay in
+        // it. Semi-planar formats have no third plane; it is never read
+        // for them.
         let planes = [0, 1, 2].map(|i| ffi::plane(f, i));
         let semi_planar = is(P::AV_PIX_FMT_NV12) || is(P::AV_PIX_FMT_P010LE);
         let n = if semi_planar { 2 } else { 3 };
@@ -540,10 +543,28 @@ mod tests {
     use super::*;
     use crate::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 
-    /// Ten 256x128 frames of H.264.
-    fn clip() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("spherecut-decode-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// A test's own directory in the system's temp dir (unit tests get no
+    /// CARGO_TARGET_TMPDIR), removed with what it holds when dropped, so
+    /// also when the test fails.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("spherecut-decode-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    /// Ten 256x128 frames of H.264, in `dir`.
+    fn clip(dir: &TempDir) -> PathBuf {
         let settings = VideoSettings {
             encoder: "libx264".into(),
             width: 256,
@@ -553,7 +574,7 @@ mod tests {
             options: Vec::new(),
             bt709_limited: true,
         };
-        let mut w = Mp4Writer::create(&dir.join("clip.mp4"), &settings, None).unwrap();
+        let mut w = Mp4Writer::create(&dir.0.join("clip.mp4"), &settings, None).unwrap();
         for i in 0..10 {
             let luma = vec![16 + 20 * i; 256 * 128];
             let chroma = vec![128; 128 * 64];
@@ -568,7 +589,8 @@ mod tests {
         // A decoder that ignores its device decodes in software without
         // asking get_format; one opened in software and then given a
         // device is the same.
-        let mut d = VideoDecoder::open(&clip(), None, None).unwrap();
+        let dir = TempDir::new("never-asked");
+        let mut d = VideoDecoder::open(&clip(&dir), None, None).unwrap();
         d.hw = Some(Arc::new(HwDevice::vulkan_without_context()));
         for _ in 0..2 {
             match d.next_frame() {
@@ -582,20 +604,49 @@ mod tests {
     }
 
     #[test]
-    fn planes_of_a_frame_resized_after_its_buffers_are_none() {
+    fn test_directories_are_removed_when_dropped() {
+        // The clip is made in the test's directory, and goes with it.
+        let dir = TempDir::new("dropped");
+        let clip = clip(&dir);
+        drop(dir);
+        assert!(!clip.exists());
+    }
+
+    /// A grey 64x16 YUV420P frame, in buffers from av_frame_get_buffer.
+    fn grey_frame() -> DecodedFrame {
         let mut frame = ff::frame::Video::new(ff::format::Pixel::YUV420P, 64, 16);
         for i in 0..3 {
             frame.data_mut(i).fill(128);
         }
-        let mut f = DecodedFrame {
+        DecodedFrame {
             pts: None,
             time: None,
             frame,
             hw_decoded: false,
-        };
-        assert!(f.planes_u16().is_some());
-        // ffmpeg-next's safe setter; the buffers stay 16 rows high.
+        }
+    }
+
+    #[test]
+    fn planes_of_a_frame_changed_after_its_buffers_are_none() {
+        use ff::format::Pixel;
+        assert!(grey_frame().planes_u16().is_some());
+        // ffmpeg-next's safe setters change the frame's size and format,
+        // not its buffers, which keep 16 rows of 64 luma and 32 chroma
+        // bytes.
+        let mut f = grey_frame();
         f.frame.set_height(4096);
+        assert!(f.planes_u16().is_none());
+        // Rows wider than the bytes from one row to the next: luma rows of
+        // 100 bytes, and of 128 at 10 bits.
+        let mut f = grey_frame();
+        f.frame.set_width(100);
+        assert!(f.planes_u16().is_none());
+        let mut f = grey_frame();
+        f.frame.set_format(Pixel::YUV420P10LE);
+        assert!(f.planes_u16().is_none());
+        // NV12 keeps U and V in one plane, in chroma rows of 64 bytes.
+        let mut f = grey_frame();
+        f.frame.set_format(Pixel::NV12);
         assert!(f.planes_u16().is_none());
     }
 }

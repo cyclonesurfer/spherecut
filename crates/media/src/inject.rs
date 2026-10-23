@@ -637,12 +637,39 @@ mod tests {
             .collect()
     }
 
-    fn tmpdir(name: &str) -> PathBuf {
-        let dir =
+    /// A test's own directory in the system's temp dir, removed with what
+    /// it holds when dropped, so also when the test fails.
+    struct TempDir(PathBuf);
+
+    impl std::ops::Deref for TempDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn tmpdir(name: &str) -> TempDir {
+        let path =
             std::env::temp_dir().join(format!("spherecut-inject-{}-{name}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        std::fs::remove_dir_all(&path).ok();
+        std::fs::create_dir_all(&path).unwrap();
+        TempDir(path)
+    }
+
+    #[test]
+    fn test_directories_are_removed_when_dropped() {
+        let dir = tmpdir("dropped");
+        std::fs::write(dir.join("left.mp4"), b"").unwrap();
+        let path = dir.to_path_buf();
+        drop(dir);
+        assert!(!path.exists());
     }
 
     /// File names in `dir`, sorted; temp files show up here.
@@ -706,7 +733,6 @@ mod tests {
         assert_eq!(&out[offs[1] as usize..offs[1] as usize + 9], b"AUDIODATA");
         // No temp files left behind.
         assert_eq!(listing(&dir), ["in.mp4", "out.mp4", "out2.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -741,7 +767,6 @@ mod tests {
             assert!(std::fs::read(&a).unwrap() == bytes, "input changed");
         }
         assert_eq!(listing(&dir), ["hard.mp4", "in.mp4", "sym.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -764,7 +789,6 @@ mod tests {
             "{r:?}"
         );
         assert_eq!(listing(&dir), ["in.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -804,7 +828,6 @@ mod tests {
             }
             assert!(!out.exists());
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -833,7 +856,6 @@ mod tests {
             }
         }
         assert_eq!(listing(&dir), ["in.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -863,7 +885,6 @@ mod tests {
             r => panic!("{r:?}"),
         }
         assert_eq!(listing(&dir), ["in.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -884,7 +905,6 @@ mod tests {
         }
         drop((a, b));
         assert!(listing(&dir).is_empty());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -915,7 +935,6 @@ mod tests {
         );
         assert_eq!(tries, TEMP_ATTEMPTS);
         assert_eq!(listing(&dir), [".left-0.tmp", ".left-1.tmp", "out.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -926,7 +945,6 @@ mod tests {
         let name = "o".repeat(251) + ".mp4";
         inject(&a, &dir.join(&name), &spherical_edits()).unwrap();
         assert_eq!(listing(&dir), ["in.mp4".to_string(), name]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn mode(p: &Path) -> u32 {
@@ -958,7 +976,6 @@ mod tests {
         std::fs::write(&fresh, b"").unwrap();
         assert_eq!(mode(&out), mode(&fresh));
         assert_eq!(listing(&dir), ["fresh", "in.mp4", "out.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1004,7 +1021,6 @@ mod tests {
             }
             r => panic!("{r:?}"),
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1028,7 +1044,6 @@ mod tests {
             r => panic!("{r:?}"),
         }
         assert_eq!(listing(&dir), ["in.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1057,7 +1072,6 @@ mod tests {
         std::fs::create_dir(&late).unwrap();
         assert!(tmp.persist().is_err());
         assert_eq!(listing(&dir), ["in.mp4", "late.mp4", "out.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Make a FIFO at `p`, or say why not.
@@ -1068,42 +1082,95 @@ mod tests {
         }
     }
 
+    /// Make a unix socket at `p`. The socket stays when its listener is
+    /// closed. A socket's path must fit in 108 bytes, which a long TMPDIR
+    /// can use up, so the socket is made through a short path to the same
+    /// directory: `/proc/self/fd/<n>`, where `n` holds the directory open.
+    fn socket(p: &Path) -> Result<(), String> {
+        use std::os::fd::AsRawFd;
+        let err = |e: io::Error| format!("bind {}: {e}", p.display());
+        let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else {
+            return Err(err(io::ErrorKind::InvalidInput.into()));
+        };
+        let dir = std::fs::File::open(dir).map_err(err)?;
+        let short = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(name);
+        std::os::unix::net::UnixListener::bind(short)
+            .map(drop)
+            .map_err(err)
+    }
+
+    #[test]
+    fn sockets_are_made_however_long_their_path() {
+        use std::os::unix::fs::FileTypeExt;
+        // A socket's path must fit in sun_path's 108 bytes, and a long
+        // TMPDIR takes most of them. This one is too long with any TMPDIR.
+        let dir = tmpdir("socket-path");
+        let deep = dir.join("d".repeat(108));
+        std::fs::create_dir(&deep).unwrap();
+        let p = deep.join("socket");
+        socket(&p).unwrap();
+        assert!(p.symlink_metadata().unwrap().file_type().is_socket());
+        assert_eq!(listing(&deep), ["socket"]);
+    }
+
     #[test]
     fn outputs_that_are_not_regular_files_are_refused() {
         use std::os::unix::fs::FileTypeExt;
-        // Renaming over a pipe or a device node (`/dev/null`, say) would
-        // replace the node with an MP4 instead of writing to it.
+        // Renaming over a socket, a pipe or a device node (`/dev/null`,
+        // say) would replace the node with an MP4 instead of writing to it.
+        // A socket needs no tool to make, so it is always checked, and a
+        // FIFO is too when mkfifo is there. Not /dev/null itself: if the
+        // check broke, the test would replace the system's.
         let dir = tmpdir("special");
-        let fifo = dir.join("out.fifo");
-        if let Err(e) = mkfifo(&fifo) {
-            println!("not checked: no FIFO ({e})");
-            return;
-        }
         let a = dir.join("in.mp4");
         std::fs::write(&a, file(false).0).unwrap();
-        // Through a symlink too.
-        let link = dir.join("link.mp4");
-        std::os::unix::fs::symlink(&fifo, &link).unwrap();
-        for out in [&fifo, &link] {
-            match inject(&a, out, &spherical_edits()) {
-                Err(e @ InjectError::Write { .. }) => {
-                    assert!(e.to_string().contains("not a regular file"), "{e}")
+        let mut left = vec!["in.mp4".to_string()];
+        for kind in ["socket", "fifo"] {
+            let make = |p: &Path| match kind {
+                "socket" => socket(p),
+                _ => mkfifo(p),
+            };
+            let is_kind = |p: &Path| {
+                let t = p.metadata().unwrap().file_type();
+                if kind == "socket" {
+                    t.is_socket()
+                } else {
+                    t.is_fifo()
                 }
-                r => panic!("{}: {r:?}", out.display()),
+            };
+            let node = dir.join(kind);
+            if let Err(e) = make(&node) {
+                assert_eq!(kind, "fifo", "{e}");
+                println!("FIFO not checked: {e}");
+                continue;
             }
-            assert!(fifo.metadata().unwrap().file_type().is_fifo());
+            // Through a symlink too.
+            let link = dir.join(format!("{kind}-link.mp4"));
+            std::os::unix::fs::symlink(&node, &link).unwrap();
+            for out in [&node, &link] {
+                match inject(&a, out, &spherical_edits()) {
+                    Err(e @ InjectError::Write { .. }) => {
+                        assert!(e.to_string().contains("not a regular file"), "{e}")
+                    }
+                    r => panic!("{}: {r:?}", out.display()),
+                }
+                assert!(is_kind(&node), "{}", node.display());
+            }
+            assert!(link.symlink_metadata().unwrap().is_symlink());
+            // One that turns up while the file is written is refused too.
+            let late = dir.join(format!("late-{kind}.mp4"));
+            let tmp = TempFile::create(&late).unwrap();
+            make(&late).unwrap();
+            assert!(tmp.persist().is_err());
+            assert!(is_kind(&late), "{}", late.display());
+            left.extend([
+                kind.to_string(),
+                format!("{kind}-link.mp4"),
+                format!("late-{kind}.mp4"),
+            ]);
         }
-        assert!(link.symlink_metadata().unwrap().is_symlink());
-        // One that turns up while the file is written is refused too.
-        let late = dir.join("late.mp4");
-        let tmp = TempFile::create(&late).unwrap();
-        mkfifo(&late).unwrap();
-        assert!(tmp.persist().is_err());
-        assert!(late.metadata().unwrap().file_type().is_fifo());
-        assert_eq!(
-            listing(&dir),
-            ["in.mp4", "late.mp4", "link.mp4", "out.fifo"]
-        );
-        std::fs::remove_dir_all(&dir).ok();
+        // No temp files left behind.
+        left.sort();
+        assert_eq!(listing(&dir), left);
     }
 }
