@@ -125,12 +125,14 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             sample_rate,
             channels: 2,
             bit_rate: 192_000,
+            options: Vec::new(),
         }),
         Audio::AmbiX { .. } => Some(AudioSettings {
             encoder: "aac".into(),
             sample_rate,
             channels: 4,
             bit_rate: 256_000,
+            options: Vec::new(),
         }),
     };
     let mut w = Mp4Writer::create(&out, &spec.video_settings(), audio_settings.as_ref())?;

@@ -328,6 +328,7 @@ fn aac(channels: u32) -> AudioSettings {
         sample_rate: 48_000,
         channels,
         bit_rate: 128_000,
+        options: Vec::new(),
     }
 }
 
@@ -352,59 +353,79 @@ fn push_audio_rejects_bad_input_without_panicking() {
 
 #[test]
 fn audio_encoders_with_small_fixed_frames_get_exact_frames() {
-    // libvorbis takes exactly 64 samples per frame; the writer used to
-    // send at least 1024 and fail.
-    let dir = tmp("vorbis");
-    let a = AudioSettings {
-        encoder: "libvorbis".into(),
-        sample_rate: 48_000,
-        channels: 2,
-        bit_rate: 128_000,
-    };
-    let path = dir.join("vorbis.mp4");
-    let mut w = match Mp4Writer::create(&path, &video_settings(), Some(&a)) {
-        Ok(w) => w,
-        Err(EncodeError::NoEncoder(e)) => {
-            eprintln!("skipped: this FFmpeg has no {e} encoder");
-            return;
+    // Opus takes exactly 960 samples per frame and Vorbis 64; the writer
+    // used to send at least 1024 and fail. FFmpeg's own Opus encoder is in
+    // every ordinary build, and if neither encoder is there the test fails
+    // rather than pass without checking anything.
+    let dir = tmp("small-frames");
+    let mut checked = Vec::new();
+    for (encoder, options) in [
+        ("opus", vec![("strict".into(), "experimental".into())]),
+        ("libvorbis", vec![]),
+    ] {
+        let a = AudioSettings {
+            encoder: encoder.into(),
+            options,
+            ..aac(2)
+        };
+        let path = dir.join(format!("{encoder}.mp4"));
+        let mut w = match Mp4Writer::create(&path, &video_settings(), Some(&a)) {
+            Ok(w) => w,
+            Err(EncodeError::NoEncoder(_)) => continue,
+            Err(e) => panic!("{encoder}: {e}"),
+        };
+        let samples = audio::stereo(48_000, 48_000);
+        for i in 0..30 {
+            w.push_video(&black_frame()).unwrap();
+            let chunk: Vec<Vec<f32>> = samples
+                .iter()
+                .map(|c| c[i * 1600..(i + 1) * 1600].to_vec())
+                .collect();
+            w.push_audio(&chunk).unwrap();
         }
-        Err(e) => panic!("{e}"),
-    };
-    let samples = audio::stereo(48_000, 48_000);
-    for i in 0..30 {
-        w.push_video(&black_frame()).unwrap();
-        let chunk: Vec<Vec<f32>> = samples
-            .iter()
-            .map(|c| c[i * 1600..(i + 1) * 1600].to_vec())
-            .collect();
-        w.push_audio(&chunk).unwrap();
+        w.finish().unwrap();
+        let (ch, _) = decode_audio(&path);
+        assert_eq!(ch.len(), 2);
+        // Encoder delay and padding are not all trimmed on decode, so a
+        // little more comes back (48704 for libvorbis, 48840 for opus).
+        assert!(
+            (48_000..=48_000 + 2048).contains(&ch[0].len()),
+            "{encoder}: {} samples",
+            ch[0].len()
+        );
+        checked.push(encoder);
     }
-    w.finish().unwrap();
-    let (ch, _) = decode_audio(&path);
-    assert_eq!(ch.len(), 2);
-    // Nothing is trimmed from Vorbis in MP4, so a little encoder padding
-    // comes back too: allow up to one long block (2048 samples).
+    eprintln!("fixed frame sizes checked with {checked:?}");
     assert!(
-        (48_000..=48_000 + 2048).contains(&ch[0].len()),
-        "{} samples",
-        ch[0].len()
+        !checked.is_empty(),
+        "this FFmpeg has neither the opus nor the libvorbis encoder"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn audio_encoders_that_need_packed_samples_are_refused_clearly() {
+    // FFmpeg's own FLAC encoder is in every ordinary build; libopus is the
+    // one people would try.
     let dir = tmp("packed");
-    let a = AudioSettings {
-        encoder: "libopus".into(),
-        sample_rate: 48_000,
-        channels: 2,
-        bit_rate: 128_000,
-    };
-    match Mp4Writer::create(&dir.join("opus.mp4"), &video_settings(), Some(&a)) {
-        Err(EncodeError::Invalid(e)) => assert!(e.contains("planar"), "{e}"),
-        Err(EncodeError::NoEncoder(e)) => eprintln!("skipped: this FFmpeg has no {e} encoder"),
-        r => panic!("{r:?}"),
+    let mut checked = Vec::new();
+    for encoder in ["flac", "libopus"] {
+        let a = AudioSettings {
+            encoder: encoder.into(),
+            ..aac(2)
+        };
+        match Mp4Writer::create(&dir.join("a.mp4"), &video_settings(), Some(&a)) {
+            Err(EncodeError::Invalid(e)) => assert!(e.contains("planar"), "{e}"),
+            Err(EncodeError::NoEncoder(_)) => continue,
+            r => panic!("{encoder}: {r:?}"),
+        }
+        checked.push(encoder);
     }
+    eprintln!("packed formats checked with {checked:?}");
+    assert!(
+        !checked.is_empty(),
+        "this FFmpeg has neither the flac nor the libopus encoder"
+    );
+    assert!(listing(&dir).is_empty());
     std::fs::remove_dir_all(&dir).ok();
 }

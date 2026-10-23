@@ -79,6 +79,9 @@ pub struct AudioSettings {
     pub sample_rate: u32,
     pub channels: u32,
     pub bit_rate: usize,
+    /// Encoder options, e.g. `[("strict", "experimental")]` for FFmpeg's
+    /// own Opus encoder.
+    pub options: Vec<(String, String)>,
 }
 
 /// One planar YUV frame. Plane strides equal plane widths.
@@ -327,7 +330,9 @@ impl Mp4Writer {
                 if global_header {
                     aenc.set_flags(ff::codec::Flags::GLOBAL_HEADER);
                 }
-                let aenc = ctx(aenc.open(), || format!("opening {}", a.encoder))?;
+                let aenc = ctx(aenc.open_with(dict(&a.options)), || {
+                    format!("opening {}", a.encoder)
+                })?;
                 // A non-zero frame size is fixed (AAC 1024, Opus 960, Vorbis
                 // 64): every frame but the last must have exactly that many.
                 let frame_size = match aenc.frame_size() as usize {
