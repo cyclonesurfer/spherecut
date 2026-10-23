@@ -24,7 +24,9 @@ use ffmpeg_sys_next as sys;
 use thiserror::Error;
 
 /// FFmpeg functions that take or return a C enum, declared with `int`s.
-/// The name functions return NULL for values they don't know.
+/// All of them accept any value. The name functions return static strings:
+/// `avcodec_get_name` names an id it doesn't know "unknown_codec", and the
+/// others return NULL for values they don't know.
 mod c {
     use std::ffi::{c_char, c_int};
 
@@ -137,8 +139,10 @@ pub fn codecpar_fields(p: &ff::codec::Parameters) -> CodecParFields {
             ..Default::default()
         }
     };
-    // SAFETY: `par` is live; the name functions accept any codec id and
-    // return NULL for unknown ids and profiles.
+    // SAFETY: `par` is live. Both functions accept any id and profile and
+    // return static strings: avcodec_get_name never returns NULL (an
+    // unknown id is "unknown_codec"), and avcodec_profile_name returns NULL
+    // for a profile it doesn't know.
     unsafe {
         f.codec_name = cstr_opt(c::avcodec_get_name(codec_id));
         f.profile = cstr_opt(c::avcodec_profile_name(codec_id, (*par).profile));
