@@ -383,7 +383,12 @@ pub fn run(a: Args) -> Result<()> {
     let commit = short_commit();
     let os = os_release();
     let d = distro(&os);
+    // Cargo runs each test binary in its package directory, so the tests
+    // need an absolute path to see the same directory as this report.
     let samples = a.samples.unwrap_or_else(|| root.join("samples"));
+    let samples = std::fs::canonicalize(&samples)
+        .or_else(|_| std::path::absolute(&samples))
+        .with_context(|| format!("resolving {}", samples.display()))?;
     let bench_out = root.join("target").join("hw-bench.tsv");
 
     eprintln!("==> recording environment");
