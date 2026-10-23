@@ -416,8 +416,13 @@ Both write a temporary file next to the output and rename it into place:
 `inject` also refuses an output that is the input under any name (same
 device and inode, so hard links and symlinks too), two edits for one
 track, and fragmented MP4 (top-level `moof`, `sidx`, `ssix` or `mfra`, or
-`mvex` in `moov`), whose offsets it does not shift. It copies exactly the
-parsed lengths, so the output can't outgrow the input.
+`mvex` in `moov`), whose offsets it does not shift. It refuses input that
+did not parse cleanly (anything in `Mp4Tree::damage`, which includes the
+parser's warnings), because a partial parse can miss the `mdat` after
+`moov` and leave every chunk offset unshifted. For the same reason it
+refuses when its re-read of the edited `moov` warns, for example when
+the edits take it past `MAX_BOXES`. It copies exactly the parsed
+lengths, so the output can't outgrow the input.
 
 `Mp4Writer` always writes MP4, through a `StreamIo` on our own file handle,
 and looks up both encoders before touching the disk. `finish()` renames the

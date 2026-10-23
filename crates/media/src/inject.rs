@@ -50,6 +50,10 @@ pub enum InjectError {
     /// `tfra`), which we don't shift.
     #[error("fragmented MP4 (it has a `{0}` box) is not supported")]
     Fragmented(String),
+    /// The input did not parse cleanly. A partial parse can miss the
+    /// `mdat` after `moov`, or a track, and leave chunk offsets wrong.
+    #[error("{} is damaged: {}", path.display(), damage.join("; "))]
+    Damaged { path: PathBuf, damage: Vec<String> },
 }
 
 /// Which track's first sample entry to edit.
@@ -277,7 +281,8 @@ impl Drop for TempFile {
 }
 
 /// Write `input` to `output` with the edits applied, at most one edit per
-/// track. `output` must not be `input`.
+/// track. `output` must not be `input`, and `input` must parse cleanly:
+/// one with [`Mp4Tree::damage`] is refused.
 ///
 /// `output` is replaced atomically, by renaming a new file over it. The new
 /// file keeps the old one's permission bits, but not its owner, ACLs or
@@ -308,6 +313,13 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
         });
     if let Some(b) = fragment {
         return Err(InjectError::Fragmented(b.fourcc.to_string()));
+    }
+    let damage = tree.damage();
+    if !damage.is_empty() {
+        return Err(InjectError::Damaged {
+            path: input.to_path_buf(),
+            damage,
+        });
     }
     let mut f = File::open(input).map_err(read_err(input))?;
     f.seek(SeekFrom::Start(moov.offset))
@@ -474,6 +486,14 @@ fn shift_chunk_offsets(
     // Offsets in this tree are relative to the start of moov.
     let tree = mp4::read(&mut io::Cursor::new(moov_bytes.to_vec()))
         .map_err(|e| InjectError::Unsupported(format!("re-reading the edited moov: {e}")))?;
+    // A parse that stopped early (the edits can take it past MAX_BOXES)
+    // would miss chunk tables.
+    if !tree.warnings.is_empty() {
+        return Err(InjectError::Unsupported(format!(
+            "re-reading the edited moov: {}",
+            tree.warnings.join("; ")
+        )));
+    }
     let moov = tree
         .moov()
         .ok_or_else(|| InjectError::Unsupported("moov vanished".into()))?;
@@ -535,18 +555,18 @@ mod tests {
         full(b"hdlr", 0, 0, &p)
     }
 
+    fn words(w: &[u32]) -> Vec<u8> {
+        w.iter().flat_map(|x| x.to_be_bytes()).collect()
+    }
+
+    /// A track with one 9-byte sample in one chunk at `chunk_offset`.
     fn trak(kind: &[u8; 4], entry: Vec<u8>, chunk_offset: u32) -> Vec<u8> {
-        let stsd = full(b"stsd", 0, 0, &cat(&[1u32.to_be_bytes().to_vec(), entry]));
-        let stco = full(
-            b"stco",
-            0,
-            0,
-            &cat(&[
-                1u32.to_be_bytes().to_vec(),
-                chunk_offset.to_be_bytes().to_vec(),
-            ]),
-        );
-        let stbl = bx(b"stbl", &cat(&[stsd, stco]));
+        let stsd = full(b"stsd", 0, 0, &cat(&[words(&[1]), entry]));
+        let stts = full(b"stts", 0, 0, &words(&[1, 1, 1]));
+        let stsz = full(b"stsz", 0, 0, &words(&[0, 1, 9]));
+        let stsc = full(b"stsc", 0, 0, &words(&[1, 1, 1, 1]));
+        let stco = full(b"stco", 0, 0, &words(&[1, chunk_offset]));
+        let stbl = bx(b"stbl", &cat(&[stsd, stts, stsz, stsc, stco]));
         bx(
             b"trak",
             &bx(b"mdia", &cat(&[hdlr(kind), bx(b"minf", &stbl)])),
@@ -555,31 +575,36 @@ mod tests {
 
     /// A file with video+audio tracks whose single chunks hold known bytes.
     fn file(faststart: bool) -> (Vec<u8>, usize) {
+        file_padded(faststart, 0, 0)
+    }
+
+    /// [`file`] with `before` and `after` empty `free` boxes in `moov`,
+    /// before and after its tracks.
+    fn file_padded(faststart: bool, before: usize, after: usize) -> (Vec<u8>, usize) {
         let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isom");
         let ventry = bx(b"hvc1", &cat(&[vec![0u8; 78], bx(b"hvcC", &[9; 5])]));
         let aentry = bx(b"mp4a", &cat(&[vec![0u8; 28], bx(b"esds", &[7; 5])]));
         let payload = b"VIDEODATAAUDIODATA".to_vec();
+        let free = bx(b"free", &[]);
+        let moov = |data_start: usize| {
+            bx(
+                b"moov",
+                &cat(&[
+                    free.repeat(before),
+                    trak(b"vide", ventry.clone(), data_start as u32),
+                    trak(b"soun", aentry.clone(), (data_start + 9) as u32),
+                    free.repeat(after),
+                ]),
+            )
+        };
         // Compute layout: moov size doesn't depend on offset values.
-        let probe_moov = bx(
-            b"moov",
-            &cat(&[
-                trak(b"vide", ventry.clone(), 0),
-                trak(b"soun", aentry.clone(), 0),
-            ]),
-        );
         let mdat_header = 8;
         let data_start = if faststart {
-            ftyp.len() + probe_moov.len() + mdat_header
+            ftyp.len() + moov(0).len() + mdat_header
         } else {
             ftyp.len() + mdat_header
         };
-        let moov = bx(
-            b"moov",
-            &cat(&[
-                trak(b"vide", ventry, data_start as u32),
-                trak(b"soun", aentry, (data_start + 9) as u32),
-            ]),
-        );
+        let moov = moov(data_start);
         let mdat = bx(b"mdat", &payload);
         let f = if faststart {
             cat(&[ftyp, moov, mdat])
@@ -763,6 +788,65 @@ mod tests {
             }
             assert!(!out.exists());
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn damaged_inputs_are_refused() {
+        // A partial parse used to drive the copy: with more boxes in `moov`
+        // than the parser reads, it never saw the `mdat` after it, left
+        // every chunk offset unshifted, and returned Ok.
+        let dir = tmpdir("damaged");
+        let a = dir.join("in.mp4");
+        let out = dir.join("out.mp4");
+        let (padded, _) = file_padded(true, 0, mp4::MAX_BOXES);
+        let (whole, _) = file(true);
+        // A cut-off `mdat` is not in the tree either.
+        let cut = whole[..whole.len() - 4].to_vec();
+        for (bytes, why) in [
+            (padded, format!("more than {} boxes", mp4::MAX_BOXES)),
+            (cut, "it was cut short".to_string()),
+        ] {
+            std::fs::write(&a, &bytes).unwrap();
+            match inject(&a, &out, &spherical_edits()) {
+                Err(e @ InjectError::Damaged { .. }) => {
+                    let e = e.to_string();
+                    assert!(e.contains(&*a.to_string_lossy()) && e.contains(&why), "{e}")
+                }
+                r => panic!("{why}: {r:?}"),
+            }
+        }
+        assert_eq!(listing(&dir), ["in.mp4"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn edits_that_take_moov_past_the_box_limit_are_refused() {
+        // The input parses cleanly at exactly MAX_BOXES boxes, with the
+        // padding ahead of the tracks. The edits add boxes, so re-reading
+        // the edited `moov` would stop before the audio track's `stco`
+        // and leave its chunk offset unshifted.
+        fn count(b: &Mp4Box) -> usize {
+            1 + b.children.iter().map(count).sum::<usize>()
+        }
+        let boxes = |bytes: &[u8]| {
+            let tree = mp4::read(&mut io::Cursor::new(bytes.to_vec())).unwrap();
+            assert!(tree.damage().is_empty(), "{:?}", tree.damage());
+            tree.top.iter().map(count).sum::<usize>()
+        };
+        let pad = mp4::MAX_BOXES - boxes(&file(true).0);
+        let (bytes, _) = file_padded(true, pad, 0);
+        assert_eq!(boxes(&bytes), mp4::MAX_BOXES);
+        let dir = tmpdir("box-limit");
+        let a = dir.join("in.mp4");
+        std::fs::write(&a, &bytes).unwrap();
+        match inject(&a, &dir.join("out.mp4"), &spherical_edits()) {
+            Err(InjectError::Unsupported(e)) => {
+                assert!(e.contains("re-reading the edited moov: more than"), "{e}")
+            }
+            r => panic!("{r:?}"),
+        }
+        assert_eq!(listing(&dir), ["in.mp4"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
