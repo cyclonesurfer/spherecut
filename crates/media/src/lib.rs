@@ -32,8 +32,10 @@ pub enum MediaError {
     Open { path: PathBuf, reason: String },
     #[error("cannot decode {}: {reason}", path.display())]
     Decode { path: PathBuf, reason: String },
-    #[error("{kind} device unavailable: {source}")]
-    Hardware { kind: String, source: HwError },
+    /// The reason is part of the message, so it is not also the error's
+    /// `source()`, which would print it twice in an error chain.
+    #[error("{kind} device unavailable: {reason}")]
+    Hardware { kind: String, reason: HwError },
 }
 
 pub use ffi::{HwDevice, HwError};
