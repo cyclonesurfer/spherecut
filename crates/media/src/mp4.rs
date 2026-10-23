@@ -1080,6 +1080,13 @@ fn entry_handler(t: FourCc) -> Option<FourCc> {
     }
 }
 
+/// Whether sample entries of type `t` hold a codec that FFmpeg reads: the
+/// video and audio entry types we know, except the encrypted `encv` and
+/// `enca`, which need a key.
+pub fn is_known_codec(t: FourCc) -> bool {
+    entry_handler(t).is_some() && !matches!(&t.0, b"encv" | b"enca")
+}
+
 /// Length of a sample entry's fixed fields before its child boxes, for the
 /// entry types we know.
 pub(crate) fn sample_entry_fixed_len(t: FourCc, payload: &[u8]) -> Option<usize> {

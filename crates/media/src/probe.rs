@@ -12,7 +12,7 @@ use spherecut_core::Rational;
 use crate::detect::{self, CameraGuess};
 use crate::ff;
 use crate::ffi;
-use crate::mp4::{self, Cursor, FirstBox, Mp4Box};
+use crate::mp4::{self, Cursor, FirstBox, FourCc, Mp4Box};
 use crate::spherical::{self, TrackSpherical};
 use crate::{MediaError, init};
 
@@ -317,6 +317,8 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     let mut streams = Vec::new();
     // For each `trak`, the first stream that comes from it.
     let mut trak_stream: Vec<Option<usize>> = vec![None; traks.len()];
+    // For each stream, its `trak`.
+    let mut stream_trak = Vec::new();
     for st in ictx.streams() {
         let par = st.parameters();
         let f = ffi::codecpar_fields(&par);
@@ -335,6 +337,7 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         if let Some(i) = trak_index {
             trak_stream[i].get_or_insert(streams.len());
         }
+        stream_trak.push(trak_index);
         let trak = trak_index.and_then(|i| traks.get(i));
         let track_sph = trak.map(|t| spherical::read_track(t)).unwrap_or_default();
         let handler = trak
@@ -407,10 +410,34 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
                 "track #{i} is {} (handler `{}`, sample entry `{}`) but FFmpeg reads stream #{} as {}, so its track description is damaged",
                 kind_name(want),
                 handler.map(|t| t.to_string()).unwrap_or_default(),
-                sample_entry_type(trak).unwrap_or_else(|| "none".into()),
+                sample_entry_type(trak).map_or_else(|| "none".into(), |t| t.to_string()),
                 st.index,
                 kind_name(st.kind),
             ));
+        }
+    }
+    // A video or audio stream FFmpeg could not set up. When its track has
+    // samples of a codec FFmpeg reads, the codec setup (`avcC`, `hvcC`,
+    // `esds`, ...) or the sample entry is damaged. Otherwise the codec may
+    // just be one FFmpeg does not know.
+    for (st, trak) in streams.iter().zip(&stream_trak) {
+        let Some(why) = unconfigured(st) else {
+            continue;
+        };
+        let entry = trak
+            .and_then(|i| traks.get(i))
+            .and_then(|t| sample_entry_type(t));
+        let what = format!(
+            "stream #{}{} {why}",
+            st.index,
+            entry
+                .map(|e| format!(" (sample entry `{e}`)"))
+                .unwrap_or_default()
+        );
+        if entry.is_some_and(mp4::is_known_codec) && st.frames.is_some() {
+            damage.push(format!("{what}, so its codec setup is damaged"));
+        } else {
+            warnings.push(format!("{what} and cannot be decoded"));
         }
     }
     let camera = detect::guess(path, tree.as_ref(), &streams, &container.tags);
@@ -561,10 +588,45 @@ fn trak_matcher(traks: &[&Mp4Box]) -> impl Fn(usize, i32) -> Option<usize> + use
     }
 }
 
-/// The type of a track's first sample entry, e.g. "hvc1".
-fn sample_entry_type(trak: &Mp4Box) -> Option<String> {
+/// The type of a track's first sample entry, e.g. `hvc1`.
+fn sample_entry_type(trak: &Mp4Box) -> Option<FourCc> {
     let stsd = trak.path(&[b"mdia", b"minf", b"stbl", b"stsd"])?;
-    Some(stsd.children.first()?.fourcc.to_string())
+    Some(stsd.children.first()?.fourcc)
+}
+
+/// Why FFmpeg could not set up a video or audio stream, judged as FFmpeg
+/// judges it: it needs the codec, the frame size or the sample rate and
+/// channels, and the pixel or sample format when it has a decoder to find
+/// it with.
+fn unconfigured(st: &StreamInfo) -> Option<&'static str> {
+    if !matches!(st.kind, StreamKind::Video | StreamKind::Audio) {
+        return None;
+    }
+    let Some(codec) = &st.codec else {
+        return Some("has no codec FFmpeg knows");
+    };
+    // FFmpeg's own decoders are named after their codecs.
+    let decoder = || ff::decoder::find_by_name(codec).is_some();
+    if let Some(v) = &st.video {
+        if v.width == 0 || v.height == 0 {
+            return Some("has no frame size");
+        }
+        if v.pix_fmt.is_none() && decoder() {
+            return Some("has no pixel format");
+        }
+    }
+    if let Some(a) = &st.audio {
+        if a.sample_rate == 0 {
+            return Some("has no sample rate");
+        }
+        if a.channels == 0 {
+            return Some("has no channels");
+        }
+        if a.sample_fmt.is_none() && decoder() {
+            return Some("has no sample format");
+        }
+    }
+    None
 }
 
 fn describe_open_error(e: ff::Error, looked_like_mp4: bool, damage: &[String]) -> String {

@@ -198,6 +198,34 @@ fn reports_with_paths_that_are_not_utf8_serialize() {
 }
 
 #[test]
+fn a_codec_ffmpeg_does_not_know_is_a_warning() {
+    // A sample entry type FFmpeg has no codec for may be a real codec it
+    // lacks, so the file is not called damaged, but the report says the
+    // stream cannot be decoded.
+    let dir = tmp("unknown-codec");
+    let (good, _) = media(&dir);
+    let mut f = std::fs::read(&good).unwrap();
+    // The first entry's type follows the version, flags, entry count and
+    // entry size.
+    let at = f.windows(4).position(|w| w == b"stsd").unwrap() + 16;
+    assert_eq!(&f[at..at + 4], b"avc1");
+    f[at..at + 4].copy_from_slice(b"zzzz");
+    let path = dir.join("zzzz.mp4");
+    std::fs::write(&path, &f).unwrap();
+
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "  warning    stream #0 (sample entry `zzzz`) has no codec FFmpeg knows and cannot be decoded"
+        ),
+        "{stdout}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn deeply_nested_boxes_fail_fast() {
     // A `moov` holding 200 000 nested `udta` boxes once took the parser
     // past 2.8 GB of memory and a stack overflow.
