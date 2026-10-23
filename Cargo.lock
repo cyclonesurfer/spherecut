@@ -756,6 +756,7 @@ version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
  "ffmpeg-sys-next",
+ "proptest",
  "serde",
  "serde_json",
  "spherecut-core",
