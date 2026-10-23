@@ -571,8 +571,13 @@ fn parse_run(output: &str) -> BinaryRun {
             .or_else(|| line.trim_start().strip_prefix("could not execute process "))
             .filter(|_| exit != Exit::Clean);
         if let Some(cause) = cause {
-            let how = cause.rsplit_once(" (").map_or(cause, |(_, how)| how);
-            exit = Exit::Abnormal(how.strip_suffix(')').unwrap_or(how).to_string());
+            // "`<command>` (<status>)", and a status can have parentheses.
+            let how = cause.rsplit_once('`').map_or(cause, |(_, how)| how).trim();
+            let how = how
+                .strip_prefix('(')
+                .and_then(|h| h.strip_suffix(')'))
+                .unwrap_or(how);
+            exit = Exit::Abnormal(how.to_string());
         } else if let Some(name) = line
             .strip_prefix("---- ")
             .and_then(|l| l.strip_suffix(" stdout ----"))
@@ -1511,9 +1516,13 @@ test b ... \nok
 error: test failed, to rerun pass `--test tier2_ok_then_abort`
 
 Caused by:
-  process didn't exit successfully: `/t/debug/deps/tier2_ok_then_abort-f12029a49ed85019 --ignored` (signal: 6, SIGABRT: process abort signal)
+  process didn't exit successfully: `/t/debug/deps/tier2_ok_then_abort-f12029a49ed85019 --ignored` (signal: 6, SIGABRT: process abort signal (core dumped))
 ";
         let b = parse_run(out);
+        assert_eq!(
+            b.exit,
+            Exit::Abnormal("signal: 6, SIGABRT: process abort signal (core dumped)".into())
+        );
         assert_eq!(b.results.len(), 2, "{:?}", b.results);
         assert_eq!(b.results["a"], Outcome::Passed);
         assert!(matches!(&b.results["b"], Outcome::Failed(o) if o.contains("SIGABRT")));
