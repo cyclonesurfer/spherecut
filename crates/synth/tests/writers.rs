@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use spherecut_core::FrameRate;
+use spherecut_media::decode::VideoDecoder;
 use spherecut_media::encode::{
     AudioSettings, EncodeError, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes,
 };
@@ -15,7 +16,7 @@ use spherecut_media::inject::{self, EntryEdit, InjectError, TrackKind};
 use spherecut_media::probe::{self, StreamKind};
 use spherecut_media::spherical::write;
 use spherecut_synth::media::{self, Audio, Codec, Spec};
-use spherecut_synth::{Pattern, audio};
+use spherecut_synth::{Pattern, audio, decode_frame_code, yuv};
 
 fn tmp(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("spherecut-writers-{}-{name}", std::process::id()));
@@ -122,6 +123,36 @@ fn inject_refuses_to_overwrite_its_own_input() {
     }
     assert!(std::fs::read(&clip).unwrap() == before, "input changed");
     assert_eq!(listing(&dir), ["clip.mp4"]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn h264_10bit_is_in_the_standard_set_and_round_trips() {
+    assert!(
+        media::standard_set()
+            .iter()
+            .any(|s| s.codec == Codec::H264 && s.bits == 10)
+    );
+    let dir = tmp("h264-10");
+    let path = media::write(&spec("h264-10", 512, 4, Codec::H264, 10, Audio::None), &dir).unwrap();
+    let r = probe::probe(&path).unwrap();
+    let v = r
+        .streams
+        .iter()
+        .find(|s| s.kind == StreamKind::Video)
+        .unwrap();
+    assert_eq!(v.codec.as_deref(), Some("h264"));
+    assert_eq!(v.profile.as_deref(), Some("High 10"));
+    assert_eq!(v.video.as_ref().unwrap().bit_depth, Some(10));
+    assert!(v.spherical.v2.is_some());
+    let mut d = VideoDecoder::open(&path, None, None).unwrap();
+    let mut n = 0;
+    while let Some(f) = d.next_frame().unwrap() {
+        let img = yuv::from_yuv420(&YuvPlanes::U16(f.planes_u16().unwrap()), 512, 256, 10);
+        assert_eq!(decode_frame_code(&img), Some(n));
+        n += 1;
+    }
+    assert_eq!(n, 4);
     std::fs::remove_dir_all(&dir).ok();
 }
 

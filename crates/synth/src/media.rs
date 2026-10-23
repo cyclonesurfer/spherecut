@@ -267,6 +267,12 @@ pub fn standard_set() -> Vec<Spec> {
             frames: 25,
             ..base("grid-h264-25")
         },
+        // High 10, which common GPUs don't decode: the software path.
+        Spec {
+            codec: Codec::H264,
+            bits: 10,
+            ..base("grid-h264-10bit-30")
+        },
         Spec {
             spherical: false,
             ..base("grid-hevc8-30-untagged")
