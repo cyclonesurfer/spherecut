@@ -24,11 +24,14 @@ decisions and their reasons in `DECISIONS.md`.
 | Devices | no `/dev/dri`, no GPU, so no VA-API and no Vulkan Video |
 | Network | crates.io, GitHub and Ubuntu apt reachable through a proxy; ffmpeg.org blocked (recorded at setup) |
 
-Here Tier 1 runs fully. `SPHERECUT_TIER2=1 cargo test --workspace --
---ignored` runs the 9 Tier 2 tests and all 9 skip: 6 with "no DRM render
-node at /dev/dri/renderD128" and 3 with "samples directory samples not
-found". With `SPHERECUT_SAMPLES` pointing at the extracted X5 samples,
-`samples_probe_cleanly` passes.
+Here Tier 1 runs fully. `SPHERECUT_TIER2=1 cargo test --workspace
+--no-fail-fast -- --ignored` runs the 9 Tier 2 tests and all 9 skip: 6
+with "no DRM render node at /dev/dri/renderD128" and 3 with "samples
+directory samples not found". A skip counts as a failed test to cargo, so
+the command exits non-zero, and without `--no-fail-fast` cargo stops after
+the first test binary. `cargo xtask hw-test --quick` runs them the same
+way and reports each one. With `SPHERECUT_SAMPLES` pointing at the
+extracted X5 samples, `samples_probe_cleanly` passes.
 
 ### Pat's machines
 
