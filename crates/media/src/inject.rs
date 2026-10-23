@@ -637,12 +637,39 @@ mod tests {
             .collect()
     }
 
-    fn tmpdir(name: &str) -> PathBuf {
-        let dir =
+    /// A test's own directory in the system's temp dir, removed with what
+    /// it holds when dropped, so also when the test fails.
+    struct TempDir(PathBuf);
+
+    impl std::ops::Deref for TempDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn tmpdir(name: &str) -> TempDir {
+        let path =
             std::env::temp_dir().join(format!("spherecut-inject-{}-{name}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        std::fs::remove_dir_all(&path).ok();
+        std::fs::create_dir_all(&path).unwrap();
+        TempDir(path)
+    }
+
+    #[test]
+    fn test_directories_are_removed_when_dropped() {
+        let dir = tmpdir("dropped");
+        std::fs::write(dir.join("left.mp4"), b"").unwrap();
+        let path = dir.to_path_buf();
+        drop(dir);
+        assert!(!path.exists());
     }
 
     /// File names in `dir`, sorted; temp files show up here.
@@ -706,7 +733,6 @@ mod tests {
         assert_eq!(&out[offs[1] as usize..offs[1] as usize + 9], b"AUDIODATA");
         // No temp files left behind.
         assert_eq!(listing(&dir), ["in.mp4", "out.mp4", "out2.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -741,7 +767,6 @@ mod tests {
             assert!(std::fs::read(&a).unwrap() == bytes, "input changed");
         }
         assert_eq!(listing(&dir), ["hard.mp4", "in.mp4", "sym.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -764,7 +789,6 @@ mod tests {
             "{r:?}"
         );
         assert_eq!(listing(&dir), ["in.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -804,7 +828,6 @@ mod tests {
             }
             assert!(!out.exists());
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -833,7 +856,6 @@ mod tests {
             }
         }
         assert_eq!(listing(&dir), ["in.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -863,7 +885,6 @@ mod tests {
             r => panic!("{r:?}"),
         }
         assert_eq!(listing(&dir), ["in.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -884,7 +905,6 @@ mod tests {
         }
         drop((a, b));
         assert!(listing(&dir).is_empty());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -915,7 +935,6 @@ mod tests {
         );
         assert_eq!(tries, TEMP_ATTEMPTS);
         assert_eq!(listing(&dir), [".left-0.tmp", ".left-1.tmp", "out.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -926,7 +945,6 @@ mod tests {
         let name = "o".repeat(251) + ".mp4";
         inject(&a, &dir.join(&name), &spherical_edits()).unwrap();
         assert_eq!(listing(&dir), ["in.mp4".to_string(), name]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn mode(p: &Path) -> u32 {
@@ -958,7 +976,6 @@ mod tests {
         std::fs::write(&fresh, b"").unwrap();
         assert_eq!(mode(&out), mode(&fresh));
         assert_eq!(listing(&dir), ["fresh", "in.mp4", "out.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1004,7 +1021,6 @@ mod tests {
             }
             r => panic!("{r:?}"),
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1028,7 +1044,6 @@ mod tests {
             r => panic!("{r:?}"),
         }
         assert_eq!(listing(&dir), ["in.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1057,7 +1072,6 @@ mod tests {
         std::fs::create_dir(&late).unwrap();
         assert!(tmp.persist().is_err());
         assert_eq!(listing(&dir), ["in.mp4", "late.mp4", "out.mp4"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Make a FIFO at `p`, or say why not.
@@ -1097,7 +1111,6 @@ mod tests {
         socket(&p).unwrap();
         assert!(p.symlink_metadata().unwrap().file_type().is_socket());
         assert_eq!(listing(&deep), ["socket"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1159,6 +1172,5 @@ mod tests {
         // No temp files left behind.
         left.sort();
         assert_eq!(listing(&dir), left);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
