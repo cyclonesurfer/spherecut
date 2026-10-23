@@ -41,7 +41,7 @@ impl std::fmt::Debug for DecodedFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DecodedFrame")
             .field("pts", &self.pts)
-            .field("format", &self.frame.format())
+            .field("format", &ffi::pix_fmt_name(ffi::frame_format(&self.frame)))
             .field("size", &(self.frame.width(), self.frame.height()))
             .field("hw_decoded", &self.hw_decoded)
             .finish()
