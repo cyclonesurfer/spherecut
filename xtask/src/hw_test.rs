@@ -381,6 +381,7 @@ pub fn run(a: Args) -> Result<()> {
     let os = os_release();
     let d = distro(&os);
     let samples = a.samples.unwrap_or_else(|| root.join("samples"));
+    let bench_out = root.join("target").join("hw-bench.tsv");
 
     eprintln!("==> recording environment");
     let uname = capture("uname", &["-srvm"]);
@@ -453,10 +454,25 @@ pub fn run(a: Args) -> Result<()> {
                 args.push("--release");
             }
             args.extend(["--", "--ignored", "--test-threads=1"]);
+            if a.quick {
+                // Debug-build timings would only mislead.
+                args.extend(["--skip", "bench_"]);
+            }
+            // A stale file would mix in another run's numbers.
+            if let Err(e) = std::fs::remove_file(&bench_out)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                eprintln!("warning: could not clear {}: {e}", bench_out.display());
+            }
+            let bench_s = bench_out.to_string_lossy().into_owned();
             let t = capture_env(
                 "cargo",
                 &args,
-                &[("SPHERECUT_TIER2", "1"), ("SPHERECUT_SAMPLES", &samples_s)],
+                &[
+                    ("SPHERECUT_TIER2", "1"),
+                    ("SPHERECUT_SAMPLES", &samples_s),
+                    ("SPHERECUT_BENCH_OUT", &bench_s),
+                ],
             );
             let parsed = parse_libtest(&t.text);
             tests = Some((t, parsed));
@@ -629,10 +645,28 @@ pub fn run(a: Args) -> Result<()> {
     }
 
     let _ = writeln!(r, "## Benchmarks\n");
-    let _ = writeln!(
-        r,
-        "No benchmarks yet (they arrive with M1 decode and render).\n"
-    );
+    let benches = if tests.is_some() {
+        std::fs::read_to_string(&bench_out)
+            .map(|t| parse_benches(&t))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if a.quick {
+        let _ = writeln!(r, "Skipped (`--quick` builds in debug mode).\n");
+    } else if benches.is_empty() {
+        let _ = writeln!(
+            r,
+            "None recorded (benchmarks need the hardware the Tier 2 tests above need).\n"
+        );
+    } else {
+        let _ = writeln!(r, "Release build, one run each.\n");
+        let _ = writeln!(r, "| Benchmark | Result |\n|---|---:|");
+        for (name, value, unit) in &benches {
+            let _ = writeln!(r, "| {name} | {value} {unit} |");
+        }
+        let _ = writeln!(r);
+    }
     let _ = writeln!(r, "## GUI smoke run\n");
     let _ = writeln!(r, "Not available yet (the GUI arrives in M1).\n");
 
@@ -684,6 +718,20 @@ pub fn run(a: Args) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Lines of `name\tvalue\tunit` as written by `spherecut_testkit::bench`.
+fn parse_benches(text: &str) -> Vec<(String, String, String)> {
+    text.lines()
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            Some((
+                f.next()?.to_string(),
+                f.next()?.to_string(),
+                f.next()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 fn yes_no(b: bool) -> &'static str {

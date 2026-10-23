@@ -69,6 +69,31 @@ pub mod tier2 {
     }
 }
 
+/// Benchmark results from Tier 2 tests. `cargo xtask hw-test` sets
+/// `SPHERECUT_BENCH_OUT` to a file and puts every recorded line into the
+/// report's benchmark table; elsewhere results go to stderr.
+pub mod bench {
+    use std::io::Write;
+
+    /// Record one measurement, e.g. `record("decode 3840x1920 hevc8 vaapi", 212.0, "fps")`.
+    pub fn record(name: &str, value: f64, unit: &str) {
+        let line = format!("{name}\t{value:.2}\t{unit}\n");
+        match std::env::var_os("SPHERECUT_BENCH_OUT") {
+            Some(p) => {
+                let ok = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&p)
+                    .and_then(|mut f| f.write_all(line.as_bytes()));
+                if let Err(e) = ok {
+                    eprintln!("could not record benchmark to {}: {e}", p.to_string_lossy());
+                }
+            }
+            None => eprint!("BENCH {line}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::tier2;

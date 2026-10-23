@@ -190,3 +190,36 @@ fn broken_files_give_errors_not_panics() {
     assert!(probe::probe(&dir).is_err());
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn video_decoder_yields_every_frame_with_exact_times() {
+    use spherecut_media::decode::VideoDecoder;
+    let dir = tmp("decoder");
+    let path = media::write(&small("t-dec", Codec::Hevc, 8, Audio::None, true), &dir).unwrap();
+    let mut d = VideoDecoder::open(&path, None, None).unwrap();
+    assert_eq!((d.width(), d.height()), (512, 256));
+    let mut n = 0;
+    let mut first = None;
+    while let Some(f) = d.next_frame().unwrap() {
+        assert!(!f.hw_decoded);
+        let t = f.time.unwrap();
+        let t0 = *first.get_or_insert(t);
+        assert_eq!(
+            t.checked_sub(t0).unwrap(),
+            FrameRate::FPS_29_97.frame_to_time(n).unwrap(),
+            "time of frame {n}"
+        );
+        n += 1;
+    }
+    assert_eq!(n, 6);
+    // Reading past the end stays at the end.
+    assert!(d.next_frame().unwrap().is_none());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn missing_hardware_device_is_an_error_not_a_panic() {
+    let e = spherecut_media::decode::open_hw_device("vaapi", Some("/nonexistent/renderD999"));
+    assert!(e.is_err());
+    assert!(spherecut_media::decode::open_hw_device("no-such-api", None).is_err());
+}

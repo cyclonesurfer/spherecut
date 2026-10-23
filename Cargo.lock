@@ -780,6 +780,7 @@ dependencies = [
  "spherecut-core",
  "spherecut-media",
  "spherecut-sphere",
+ "spherecut-testkit",
  "thiserror",
 ]
 

@@ -7,6 +7,7 @@ use std::sync::Once;
 
 use thiserror::Error;
 
+pub mod decode;
 pub mod detect;
 pub mod doctor;
 pub mod encode;
@@ -29,7 +30,13 @@ pub enum MediaError {
     NotAFile(PathBuf),
     #[error("cannot open {}: {reason}", path.display())]
     Open { path: PathBuf, reason: String },
+    #[error("cannot decode {}: {reason}", path.display())]
+    Decode { path: PathBuf, reason: String },
+    #[error("{kind} device unavailable: {reason}")]
+    Hardware { kind: String, reason: String },
 }
+
+pub use ffi::HwDevice;
 
 static INIT: Once = Once::new();
 

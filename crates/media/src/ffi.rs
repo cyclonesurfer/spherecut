@@ -278,3 +278,138 @@ pub fn format_start_time(ictx: &ff::format::context::Input) -> i64 {
     // SAFETY: `ictx` owns a live AVFormatContext; reading a plain field.
     unsafe { (*ictx.as_ptr()).start_time }
 }
+
+/// A reference to an FFmpeg hardware device context. Dropping it releases
+/// the reference; FFmpeg's buffer refcounts are atomic, so it can move
+/// between threads.
+#[derive(Debug)]
+pub struct HwDevice {
+    ptr: *mut sys::AVBufferRef,
+    pix_fmt: sys::AVPixelFormat,
+    kind: String,
+}
+
+// SAFETY: AVBufferRef reference counting is thread-safe, and the device
+// context it points to is only mutated by FFmpeg under its own locking.
+unsafe impl Send for HwDevice {}
+// SAFETY: as above; &HwDevice only allows taking new references.
+unsafe impl Sync for HwDevice {}
+
+impl Drop for HwDevice {
+    fn drop(&mut self) {
+        // SAFETY: we own exactly one reference.
+        unsafe { sys::av_buffer_unref(&mut self.ptr) };
+    }
+}
+
+impl HwDevice {
+    /// Open a device: `kind` is an FFmpeg device type name ("vaapi",
+    /// "vulkan"); `device` is e.g. a DRM render node, or `None` for the
+    /// default.
+    pub fn open(kind: &str, device: Option<&str>) -> Result<Self, String> {
+        let kind_c = CString::new(kind).map_err(|_| "bad device type".to_string())?;
+        // SAFETY: valid NUL-terminated string.
+        let t = unsafe { sys::av_hwdevice_find_type_by_name(kind_c.as_ptr()) };
+        if t == sys::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
+            return Err(format!("this FFmpeg was built without {kind} support"));
+        }
+        let pix_fmt = match t {
+            sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI => sys::AVPixelFormat::AV_PIX_FMT_VAAPI,
+            sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN => sys::AVPixelFormat::AV_PIX_FMT_VULKAN,
+            _ => return Err(format!("{kind} decoding is not supported by Spherecut")),
+        };
+        let dev_c = device
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| "bad device path".to_string())?;
+        let mut ptr: *mut sys::AVBufferRef = std::ptr::null_mut();
+        // SAFETY: `ptr` is an out-pointer; device may be NULL.
+        let ret = unsafe {
+            sys::av_hwdevice_ctx_create(
+                &mut ptr,
+                t,
+                dev_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if ret < 0 || ptr.is_null() {
+            return Err(ff::Error::from(ret).to_string());
+        }
+        Ok(HwDevice {
+            ptr,
+            pix_fmt,
+            kind: kind.to_string(),
+        })
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// The pixel format of frames decoded on this device.
+    pub fn hw_pixel(&self) -> ff::format::Pixel {
+        self.pix_fmt.into()
+    }
+}
+
+/// `get_format` callback: pick the hardware format stored in `opaque`, or
+/// fail. Failing (instead of FFmpeg's silent software fallback) lets the
+/// caller decide and report what happened.
+unsafe extern "C" fn pick_hw_format(
+    ctx: *mut sys::AVCodecContext,
+    fmts: *const sys::AVPixelFormat,
+) -> sys::AVPixelFormat {
+    // SAFETY: FFmpeg passes a live context whose `opaque` we set to the
+    // wanted format, and a list terminated by AV_PIX_FMT_NONE.
+    unsafe {
+        let want = (*ctx).opaque as isize as i32;
+        let mut p = fmts;
+        while *p != sys::AVPixelFormat::AV_PIX_FMT_NONE {
+            if *p as i32 == want {
+                return *p;
+            }
+            p = p.add(1);
+        }
+    }
+    sys::AVPixelFormat::AV_PIX_FMT_NONE
+}
+
+/// Configure an unopened decoder context to decode on `dev`.
+pub fn attach_hw_device(
+    ctx: &mut ff::codec::context::Context,
+    dev: &HwDevice,
+) -> Result<(), String> {
+    // SAFETY: the context is not yet opened, so setting hw_device_ctx and
+    // get_format is allowed; we hand FFmpeg its own new reference.
+    unsafe {
+        let c = ctx.as_mut_ptr();
+        let r = sys::av_buffer_ref(dev.ptr);
+        if r.is_null() {
+            return Err("out of memory".into());
+        }
+        if !(*c).hw_device_ctx.is_null() {
+            sys::av_buffer_unref(&mut (*c).hw_device_ctx);
+        }
+        (*c).hw_device_ctx = r;
+        (*c).opaque = dev.pix_fmt as i32 as isize as *mut std::ffi::c_void;
+        (*c).get_format = Some(pick_hw_format);
+    }
+    Ok(())
+}
+
+/// Copy a hardware frame into system memory (NV12 / P010).
+pub fn download_frame(src: &ff::frame::Video) -> Result<ff::frame::Video, ff::Error> {
+    let mut dst = ff::frame::Video::empty();
+    // SAFETY: both frames are valid; transfer_data allocates dst's buffers.
+    let ret = unsafe { sys::av_hwframe_transfer_data(dst.as_mut_ptr(), src.as_ptr(), 0) };
+    if ret < 0 {
+        return Err(ff::Error::from(ret));
+    }
+    // SAFETY: copy timestamps and properties onto the new frame.
+    let ret = unsafe { sys::av_frame_copy_props(dst.as_mut_ptr(), src.as_ptr()) };
+    if ret < 0 {
+        return Err(ff::Error::from(ret));
+    }
+    Ok(dst)
+}
