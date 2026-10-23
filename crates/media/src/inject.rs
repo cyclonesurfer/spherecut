@@ -19,12 +19,23 @@ use thiserror::Error;
 
 use crate::mp4::{self, Mp4Box, Mp4Error, Mp4Tree};
 
+/// Errors name the file they are about: the input, or the real output,
+/// never the temporary file it is written as.
 #[derive(Debug, Error)]
 pub enum InjectError {
-    #[error(transparent)]
-    Mp4(#[from] Mp4Error),
-    #[error("I/O error: {0}")]
-    Io(#[from] io::Error),
+    #[error("{}: {source}", path.display())]
+    Mp4 { path: PathBuf, source: Mp4Error },
+    #[error("reading {}: {source}", path.display())]
+    Read { path: PathBuf, source: io::Error },
+    #[error("writing {}: {source}", path.display())]
+    Write { path: PathBuf, source: io::Error },
+    /// Copies read one file and write the other; the error can be either.
+    #[error("copying {} to {}: {source}", input.display(), output.display())]
+    Copy {
+        input: PathBuf,
+        output: PathBuf,
+        source: io::Error,
+    },
     #[error("{0}")]
     Unsupported(String),
     #[error("{} and {} are the same file", input.display(), output.display())]
@@ -98,7 +109,7 @@ const FRAGMENT_MOOV: &[&[u8; 4]] = &[b"mvex"];
 /// Refuse an `output` that is `input` under any name (the same path, a
 /// hard link, a symlink): we would read the input while overwriting it.
 fn check_not_same_file(input: &Path, output: &Path) -> Result<(), InjectError> {
-    let a = std::fs::metadata(input)?;
+    let a = std::fs::metadata(input).map_err(read_err(input))?;
     match std::fs::metadata(output) {
         Ok(b) if (a.dev(), a.ino()) == (b.dev(), b.ino()) => Err(InjectError::SameFile {
             input: input.to_path_buf(),
@@ -106,7 +117,21 @@ fn check_not_same_file(input: &Path, output: &Path) -> Result<(), InjectError> {
         }),
         Ok(_) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(write_err(output)(e)),
+    }
+}
+
+fn read_err(path: &Path) -> impl Fn(io::Error) -> InjectError + '_ {
+    move |source| InjectError::Read {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+fn write_err(path: &Path) -> impl Fn(io::Error) -> InjectError + '_ {
+    move |source| InjectError::Write {
+        path: path.to_path_buf(),
+        source,
     }
 }
 
@@ -175,7 +200,10 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
             return Err(InjectError::DuplicateEdit(e.track));
         }
     }
-    let tree = mp4::read_file(input)?;
+    let tree = mp4::read_file(input).map_err(|source| InjectError::Mp4 {
+        path: input.to_path_buf(),
+        source,
+    })?;
     let moov = tree
         .moov()
         .ok_or_else(|| InjectError::Unsupported("no moov box".into()))?;
@@ -191,10 +219,11 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
     if let Some(b) = fragment {
         return Err(InjectError::Fragmented(b.fourcc.to_string()));
     }
-    let mut f = File::open(input)?;
-    f.seek(SeekFrom::Start(moov.offset))?;
+    let mut f = File::open(input).map_err(read_err(input))?;
+    f.seek(SeekFrom::Start(moov.offset))
+        .map_err(read_err(input))?;
     let mut moov_bytes = vec![0u8; moov.size as usize];
-    f.read_exact(&mut moov_bytes)?;
+    f.read_exact(&mut moov_bytes).map_err(read_err(input))?;
 
     // Byte ranges are relative to the start of moov. Apply edits from the
     // highest offset down so earlier offsets stay valid.
@@ -283,27 +312,33 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
         shift_chunk_offsets(&mut moov_bytes, moov_end, total_delta)?;
     }
 
-    let mut tmp = TempFile::create(output)?;
+    let mut tmp = TempFile::create(output).map_err(write_err(output))?;
+    let copy_err = |source| InjectError::Copy {
+        input: input.to_path_buf(),
+        output: output.to_path_buf(),
+        source,
+    };
     let mut out = BufWriter::new(&mut tmp.file);
     // Copy exactly the lengths the parse saw, never "to the end": the
     // output can't outgrow the input, whatever happens to the input file.
-    f.seek(SeekFrom::Start(0))?;
-    copy_exact(&mut f, &mut out, moov.offset)?;
-    out.write_all(&moov_bytes)?;
-    f.seek(SeekFrom::Start(moov_end))?;
-    copy_exact(&mut f, &mut out, tree.file_size.saturating_sub(moov_end))?;
-    out.flush()?;
+    f.seek(SeekFrom::Start(0)).map_err(read_err(input))?;
+    copy_exact(&mut f, &mut out, moov.offset).map_err(copy_err)?;
+    out.write_all(&moov_bytes).map_err(write_err(output))?;
+    f.seek(SeekFrom::Start(moov_end)).map_err(read_err(input))?;
+    copy_exact(&mut f, &mut out, tree.file_size.saturating_sub(moov_end)).map_err(copy_err)?;
+    out.flush().map_err(write_err(output))?;
     drop(out);
-    tmp.persist()?;
+    tmp.persist().map_err(write_err(output))?;
     Ok(())
 }
 
-fn copy_exact(from: &mut File, to: &mut impl Write, len: u64) -> Result<(), InjectError> {
+fn copy_exact(from: &mut File, to: &mut impl Write, len: u64) -> io::Result<()> {
     let n = io::copy(&mut from.take(len), to)?;
     if n != len {
-        return Err(InjectError::Unsupported(format!(
-            "input shrank while copying ({n} of {len} bytes)"
-        )));
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("the input shrank while copying ({n} of {len} bytes)"),
+        ));
     }
     Ok(())
 }
@@ -346,7 +381,8 @@ fn shift_chunk_offsets(
     delta: i64,
 ) -> Result<(), InjectError> {
     // Offsets in this tree are relative to the start of moov.
-    let tree = mp4::read(&mut io::Cursor::new(moov_bytes.to_vec()))?;
+    let tree = mp4::read(&mut io::Cursor::new(moov_bytes.to_vec()))
+        .map_err(|e| InjectError::Unsupported(format!("re-reading the edited moov: {e}")))?;
     let moov = tree
         .moov()
         .ok_or_else(|| InjectError::Unsupported("moov vanished".into()))?;
@@ -640,6 +676,30 @@ mod tests {
     }
 
     #[test]
+    fn errors_name_the_file_they_are_about() {
+        let dir = tmpdir("names");
+        let a = dir.join("in.mp4");
+        let missing = dir.join("missing.mp4");
+        let out = dir.join("out.mp4");
+        match inject(&missing, &out, &spherical_edits()) {
+            Err(e @ InjectError::Read { .. }) => {
+                assert!(e.to_string().contains(&*missing.to_string_lossy()), "{e}")
+            }
+            r => panic!("{r:?}"),
+        }
+        std::fs::write(&a, file(false).0).unwrap();
+        let nowhere = dir.join("no-such-dir").join("out.mp4");
+        match inject(&a, &nowhere, &spherical_edits()) {
+            Err(e @ InjectError::Write { .. }) => {
+                assert!(e.to_string().contains(&*nowhere.to_string_lossy()), "{e}")
+            }
+            r => panic!("{r:?}"),
+        }
+        assert_eq!(listing(&dir), ["in.mp4"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn failed_write_removes_its_temp_file() {
         let dir = tmpdir("fail");
         let a = dir.join("in.mp4");
@@ -648,7 +708,14 @@ mod tests {
         let out = dir.join("out.mp4");
         std::fs::create_dir(&out).unwrap();
         let r = inject(&a, &out, &spherical_edits());
-        assert!(matches!(r, Err(InjectError::Io(_))), "{r:?}");
+        match &r {
+            Err(e @ InjectError::Write { path, .. }) => {
+                // The output, not the temp file that failed to replace it.
+                assert_eq!(path, &out);
+                assert!(!e.to_string().contains(".tmp"), "{e}");
+            }
+            r => panic!("{r:?}"),
+        }
         assert_eq!(listing(&dir), ["in.mp4", "out.mp4"]);
         assert!(out.is_dir());
         std::fs::remove_dir_all(&dir).ok();
