@@ -335,10 +335,13 @@ fn parse_libtest(output: &str) -> TestResults {
 
 fn short_commit() -> String {
     let c = capture("git", &["rev-parse", "--short=10", "HEAD"]);
-    let dirty = !capture("git", &["status", "--porcelain"])
-        .text
-        .trim()
-        .is_empty();
+    // Reports from earlier runs stay untracked until they are pushed; they
+    // are not changes to the code under test.
+    let status = capture(
+        "git",
+        &["status", "--porcelain", "--", ".", ":(exclude)hw-reports"],
+    );
+    let dirty = status.ok && !status.text.trim().is_empty();
     let base = if c.ok {
         c.text.trim().to_string()
     } else {
