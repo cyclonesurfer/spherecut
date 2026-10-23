@@ -773,6 +773,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "spherecut-synth"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "spherecut-core",
+ "spherecut-media",
+ "spherecut-sphere",
+ "thiserror",
+]
+
+[[package]]
 name = "spherecut-testkit"
 version = "0.1.0"
 
@@ -1012,6 +1023,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "spherecut-synth",
 ]
 
 [[package]]

@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+spherecut-synth.workspace = true
 
 [lints]
 workspace = true

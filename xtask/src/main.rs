@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 mod check;
+mod gen_media;
 mod hw_test;
 
 #[derive(Parser)]
@@ -20,6 +21,8 @@ struct Cli {
 enum Cmd {
     /// fmt, clippy (-D warnings), Tier 1 tests, cargo-deny and cargo-audit.
     Check(check::Args),
+    /// Write the synthetic test-media set to test-media/.
+    GenMedia(gen_media::Args),
     /// Tier 2 run on real hardware; writes hw-reports/<host>-<commit>.md.
     HwTest(hw_test::Args),
 }
@@ -27,6 +30,7 @@ enum Cmd {
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Check(a) => check::run(a),
+        Cmd::GenMedia(a) => gen_media::run(a),
         Cmd::HwTest(a) => hw_test::run(a),
     }
 }

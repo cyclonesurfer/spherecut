@@ -1,0 +1,18 @@
+[package]
+name = "spherecut-synth"
+description = "Synthetic test media: spherical test patterns, tones, ambiX, broken files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+glam.workspace = true
+spherecut-core.workspace = true
+spherecut-media.workspace = true
+spherecut-sphere.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

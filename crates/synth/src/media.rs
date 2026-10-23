@@ -1,0 +1,312 @@
+//! Writing synthetic patterns to real media files, plus deliberately broken
+//! files for robustness tests.
+
+use std::path::{Path, PathBuf};
+
+use spherecut_core::FrameRate;
+use spherecut_media::encode::{AudioSettings, Mp4Writer, PixelLayout, VideoSettings};
+use spherecut_media::inject::{self, EntryEdit, TrackKind};
+use spherecut_media::spherical::{StereoMode, write};
+use thiserror::Error;
+
+use crate::{Pattern, audio, render_equirect, yuv};
+
+#[derive(Debug, Error)]
+pub enum SynthError {
+    #[error(transparent)]
+    Encode(#[from] spherecut_media::encode::EncodeError),
+    #[error(transparent)]
+    Inject(#[from] inject::InjectError),
+    #[error("I/O error on {path}: {source}")]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Codec {
+    H264,
+    Hevc,
+    /// Mathematically lossless H.264 (x264 qp 0), for exact comparisons.
+    H264Lossless,
+    /// Mathematically lossless HEVC (x265 lossless), 8 or 10 bit.
+    HevcLossless,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Audio {
+    None,
+    Stereo,
+    /// First-order ambiX with a source at (azimuth, elevation) degrees.
+    AmbiX {
+        azimuth: i32,
+        elevation: i32,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct Spec {
+    pub name: String,
+    pub pattern: Pattern,
+    pub width: u32,
+    pub height: u32,
+    pub rate: FrameRate,
+    pub frames: u32,
+    pub codec: Codec,
+    pub bits: u32,
+    pub audio: Audio,
+    /// Write Spherical Video V2 (and SA3D for ambiX) metadata.
+    pub spherical: bool,
+}
+
+impl Spec {
+    pub fn file_name(&self) -> String {
+        format!("{}.mp4", self.name)
+    }
+
+    fn video_settings(&self) -> VideoSettings {
+        let (encoder, mut options) = match self.codec {
+            Codec::H264 => ("libx264", vec![("crf", "16"), ("preset", "veryfast")]),
+            Codec::Hevc => (
+                "libx265",
+                vec![
+                    ("crf", "18"),
+                    ("preset", "veryfast"),
+                    ("x265-params", "log-level=error"),
+                ],
+            ),
+            Codec::H264Lossless => ("libx264", vec![("qp", "0"), ("preset", "veryfast")]),
+            Codec::HevcLossless => (
+                "libx265",
+                vec![
+                    ("preset", "veryfast"),
+                    ("x265-params", "lossless=1:log-level=error"),
+                ],
+            ),
+        };
+        // Single-threaded encodes keep the bitstream reproducible.
+        options.push(("threads", "1"));
+        VideoSettings {
+            encoder: encoder.into(),
+            width: self.width,
+            height: self.height,
+            rate: self.rate,
+            layout: if self.bits > 8 {
+                PixelLayout::Yuv420p10
+            } else {
+                PixelLayout::Yuv420p
+            },
+            options: options
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            bt709_limited: true,
+        }
+    }
+}
+
+/// Render and encode `spec` into `dir`. Returns the file path.
+pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
+    std::fs::create_dir_all(dir).map_err(|source| SynthError::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    let out = dir.join(spec.file_name());
+    let raw = if spec.spherical {
+        dir.join(format!(".{}.tmp.mp4", spec.name))
+    } else {
+        out.clone()
+    };
+    let sample_rate = 48_000u32;
+    let audio_settings = match spec.audio {
+        Audio::None => None,
+        Audio::Stereo => Some(AudioSettings {
+            encoder: "aac".into(),
+            sample_rate,
+            channels: 2,
+            bit_rate: 192_000,
+        }),
+        Audio::AmbiX { .. } => Some(AudioSettings {
+            encoder: "aac".into(),
+            sample_rate,
+            channels: 4,
+            bit_rate: 256_000,
+        }),
+    };
+    let mut w = Mp4Writer::create(&raw, &spec.video_settings(), audio_settings.as_ref())?;
+    // Exact per-frame sample counts: frame i covers samples
+    // [i·sr/fps, (i+1)·sr/fps).
+    let fps = spec.rate.as_rational();
+    let samples_at = |i: u64| -> usize {
+        (i as u128 * sample_rate as u128 * fps.den() as u128 / fps.num() as u128) as usize
+    };
+    let total = samples_at(spec.frames as u64);
+    let full_audio = match spec.audio {
+        Audio::None => None,
+        Audio::Stereo => Some(audio::stereo(sample_rate, total)),
+        Audio::AmbiX { azimuth, elevation } => Some(audio::ambix_source(
+            sample_rate,
+            total,
+            azimuth as f64,
+            elevation as f64,
+        )),
+    };
+    for i in 0..spec.frames {
+        let img = render_equirect(spec.pattern, spec.width, spec.height, i, 2);
+        w.push_video(&yuv::to_yuv420(&img, spec.bits))?;
+        if let Some(a) = &full_audio {
+            let (s, e) = (samples_at(i as u64), samples_at(i as u64 + 1));
+            let chunk: Vec<Vec<f32>> = a.iter().map(|c| c[s..e].to_vec()).collect();
+            w.push_audio(&chunk)?;
+        }
+    }
+    w.finish()?;
+    if spec.spherical {
+        let mut edits = vec![EntryEdit {
+            track: TrackKind::Video,
+            boxes: [
+                write::st3d(StereoMode::Mono),
+                write::sv3d_equirect(spherecut_core::brand::APP_NAME),
+            ]
+            .concat(),
+        }];
+        if matches!(spec.audio, Audio::AmbiX { .. }) {
+            edits.push(EntryEdit {
+                track: TrackKind::Audio,
+                boxes: write::sa3d_first_order_ambix(),
+            });
+        }
+        inject::inject(&raw, &out, &edits)?;
+        std::fs::remove_file(&raw).map_err(|source| SynthError::Io {
+            path: raw.clone(),
+            source,
+        })?;
+    }
+    Ok(out)
+}
+
+/// The standard set written by `cargo xtask gen-media`.
+pub fn standard_set() -> Vec<Spec> {
+    let base = |name: &str| Spec {
+        name: name.into(),
+        pattern: Pattern::Grid,
+        width: 1024,
+        height: 512,
+        rate: FrameRate::FPS_30,
+        frames: 30,
+        codec: Codec::Hevc,
+        bits: 8,
+        audio: Audio::Stereo,
+        spherical: true,
+    };
+    vec![
+        Spec {
+            ..base("grid-hevc8-30")
+        },
+        Spec {
+            bits: 10,
+            rate: FrameRate::FPS_29_97,
+            ..base("grid-hevc10-2997")
+        },
+        Spec {
+            codec: Codec::H264,
+            rate: FrameRate::FPS_59_94,
+            frames: 60,
+            ..base("grid-h264-5994")
+        },
+        Spec {
+            codec: Codec::H264,
+            rate: FrameRate::FPS_25,
+            frames: 25,
+            ..base("grid-h264-25")
+        },
+        Spec {
+            spherical: false,
+            ..base("grid-hevc8-30-untagged")
+        },
+        Spec {
+            audio: Audio::AmbiX {
+                azimuth: 45,
+                elevation: 30,
+            },
+            ..base("grid-hevc8-30-ambix")
+        },
+        Spec {
+            codec: Codec::HevcLossless,
+            bits: 10,
+            frames: 10,
+            audio: Audio::None,
+            ..base("grid-hevc10-lossless")
+        },
+        Spec {
+            codec: Codec::H264Lossless,
+            frames: 10,
+            audio: Audio::None,
+            ..base("grid-h264-lossless")
+        },
+        Spec {
+            pattern: Pattern::HighFrequency,
+            width: 2048,
+            height: 1024,
+            codec: Codec::HevcLossless,
+            frames: 2,
+            audio: Audio::None,
+            ..base("hifreq-hevc-lossless")
+        },
+        Spec {
+            pattern: Pattern::Seam,
+            codec: Codec::HevcLossless,
+            frames: 2,
+            audio: Audio::None,
+            ..base("seam-hevc-lossless")
+        },
+        Spec {
+            width: 3840,
+            height: 1920,
+            frames: 30,
+            ..base("grid-hevc8-30-4k")
+        },
+    ]
+}
+
+/// Broken files derived from a good one: truncated at several points,
+/// corrupted inside `moov`, empty, and not media at all.
+pub fn write_bad_files(good: &Path, dir: &Path) -> Result<Vec<PathBuf>, SynthError> {
+    let io_err = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| SynthError::Io { path, source }
+    };
+    let bytes = std::fs::read(good).map_err(io_err(good))?;
+    let mut out = Vec::new();
+    let mut put = |name: &str, data: &[u8]| -> Result<(), SynthError> {
+        let p = dir.join(name);
+        std::fs::write(&p, data).map_err(io_err(&p))?;
+        out.push(p);
+        Ok(())
+    };
+    put("bad-empty.mp4", &[])?;
+    put("bad-text.mp4", b"this is not a video file\n")?;
+    put("bad-trunc-header.mp4", &bytes[..bytes.len().min(20)])?;
+    put("bad-trunc-half.mp4", &bytes[..bytes.len() / 2])?;
+    put(
+        "bad-trunc-end.mp4",
+        &bytes[..bytes.len().saturating_sub(100)],
+    )?;
+    // Flip bytes throughout the second half (where moov is, since the
+    // writer puts moov last), deterministically.
+    let mut corrupt = bytes.clone();
+    let start = corrupt.len() / 2;
+    let mut seed = 0x9e37_79b9_u32;
+    for _ in 0..64 {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        let i = start + (seed as usize % (corrupt.len() - start).max(1));
+        if let Some(b) = corrupt.get_mut(i) {
+            *b ^= 0xa5;
+        }
+    }
+    put("bad-corrupt-moov.mp4", &corrupt)?;
+    Ok(out)
+}

@@ -17,6 +17,7 @@ spherecut-sphere = { path = "crates/sphere" }
 spherecut-media = { path = "crates/media" }
 spherecut-testkit = { path = "crates/testkit" }
 spherecut-cli = { path = "crates/cli" }
+spherecut-synth = { path = "crates/synth" }
 
 anyhow = "1.0.100"
 clap = { version = "4.5", features = ["derive"] }
@@ -45,3 +46,11 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Pattern rendering and projection math are hot loops in tests and in
+# `cargo xtask gen-media`; keep them fast in dev builds too.
+[profile.dev.package.spherecut-synth]
+opt-level = 3
+
+[profile.dev.package.spherecut-sphere]
+opt-level = 3

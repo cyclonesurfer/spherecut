@@ -9,6 +9,7 @@ use thiserror::Error;
 
 pub mod detect;
 pub mod doctor;
+pub mod encode;
 mod ffi;
 pub mod inject;
 pub mod mp4;
