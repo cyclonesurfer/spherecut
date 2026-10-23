@@ -276,6 +276,24 @@ fn broken_files_give_errors_not_panics() {
     use spherecut_media::mp4;
     let mut bytes = std::fs::read(&good).unwrap();
     let tree = mp4::read(&mut std::io::Cursor::new(&bytes)).unwrap();
+    // The audio track's type, or its size and type, zeroed: FFmpeg skips
+    // it as it does any box of a type it does not know.
+    let audio = tree.tracks().last().unwrap().offset as usize;
+    for zeroed in [audio + 4..audio + 8, audio..audio + 8] {
+        let mut f = bytes.clone();
+        f[zeroed].fill(0);
+        let path = dir.join("zero-trak.mp4");
+        std::fs::write(&path, &f).unwrap();
+        let r = probe::probe(&path).unwrap();
+        assert!(r.streams.iter().all(|s| s.kind != StreamKind::Audio));
+        assert!(
+            r.damage
+                .iter()
+                .any(|d| d.contains("in `moov` has a type that is not text")),
+            "{:?}",
+            r.damage
+        );
+    }
     let moov = tree.moov().unwrap();
     // (start, length) of `moov` and of each sample table's entries.
     let mut ranges = vec![(moov.offset as usize, moov.size as usize)];

@@ -100,7 +100,8 @@ MP4/MOV files, probe counts these as damage:
   `mdat` data;
 - a box type that isn't printable text inside `moov`, `trak`, `mdia`,
   `minf`, `stbl`, `stsd`, the sample entries probe knows, `sv3d` or
-  `proj`;
+  `proj`, including four zero bytes anywhere but the last box of a sample
+  entry, where QuickTime puts a terminator;
 - a box in `moov` that starts with a track header (`tkhd`) but whose type
   is another printable one, such as `Trak` or `free`: FFmpeg skips it, and
   its stream with it;

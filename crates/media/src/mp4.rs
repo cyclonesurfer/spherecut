@@ -792,12 +792,15 @@ fn is_text(t: FourCc) -> bool {
 /// child that should too. Such a type is a damaged header. FFmpeg skips
 /// the box as one it does not know, so a `trak` whose type reads `\xd1rak`
 /// loses its stream without a word, and a damaged `sv3d` its projection.
-/// Four zero bytes are QuickTime's terminator, or padding, which FFmpeg
-/// skips too.
+/// Four zero bytes are allowed only as the last child of a sample entry,
+/// where QuickTime puts a terminator; anywhere else they are a header
+/// zeroed with the rest of its box.
 fn unprintable_types(b: &Mp4Box, out: &mut Vec<String>) {
-    for c in &b.children {
+    let entry = entry_handler(b.fourcc).is_some();
+    for (i, c) in b.children.iter().enumerate() {
         let t = c.fourcc;
-        if !is_text(t) && t.0 != [0; 4] {
+        let terminator = entry && t.0 == [0; 4] && i + 1 == b.children.len();
+        if !is_text(t) && !terminator {
             out.push(format!(
                 "box `{t}` at offset {} in `{}` has a type that is not text, so its header is damaged",
                 c.offset, b.fourcc
@@ -2029,6 +2032,48 @@ pub(crate) mod tests {
         // A projection we do not know is not damage: FFmpeg says so in its
         // log, and the file may use a newer one.
         assert!(with(b"equi", b"mshp").is_empty());
+    }
+
+    #[test]
+    fn zero_types_are_allowed_only_at_the_end_of_a_sample_entry() {
+        let f = minimal();
+        let entry = f.windows(4).position(|w| w == b"hvc1").unwrap() - 4;
+        let size = u32::from_be_bytes(f[entry..entry + 4].try_into().unwrap());
+        // An eight-byte terminator, and eight zero bytes, which read as a
+        // box that runs to the end of its parent.
+        for terminator in [words(&[8, 0]), vec![0; 8]] {
+            let g = insert(&f, entry + size as usize, &terminator, AROUND_ENTRY);
+            let t = read(&mut io::Cursor::new(&g)).unwrap();
+            let hvc1 = t.tracks().next().unwrap();
+            let hvc1 = hvc1.path(&[b"mdia", b"minf", b"stbl", b"stsd", b"hvc1"]);
+            assert_eq!(hvc1.unwrap().children.last().unwrap().fourcc.0, [0; 4]);
+            assert!(t.damage().is_empty(), "{:?}", t.damage());
+        }
+        // Before the entry's other children, it is damage.
+        let at = entry + 8 + 78;
+        let g = insert(&f, at, &words(&[8, 0]), AROUND_ENTRY);
+        assert_eq!(
+            damage_of(g),
+            [format!(
+                "box `\\x00\\x00\\x00\\x00` at offset {at} in `hvc1` has a type that is not text, so its header is damaged"
+            )]
+        );
+
+        // A track whose type, or size and type, are zeroed loses its
+        // stream. With size 0 it runs to the end of `moov`, so it is the
+        // last child there.
+        let f = file_with(&tables(&[10], 1), false);
+        let at = f.windows(4).position(|w| w == b"trak").unwrap() - 4;
+        for zeroed in [at + 4..at + 8, at..at + 8] {
+            let mut g = f.clone();
+            g[zeroed].fill(0);
+            assert_eq!(
+                damage_of(g),
+                [format!(
+                    "box `\\x00\\x00\\x00\\x00` at offset {at} in `moov` has a type that is not text, so its header is damaged"
+                )]
+            );
+        }
     }
 
     /// Structure-aware fuzzing: random box trees, encoded with 32-bit,

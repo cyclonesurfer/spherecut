@@ -431,9 +431,12 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   belong: in `moov`, `trak`, `mdia`, `minf`, `stbl`, `stsd`, the video and
   audio sample entries we know, `sv3d` and `proj`. FFmpeg skips such a box,
   so a `trak` whose type reads `\xd1rak` loses its stream silently. Four
-  zero bytes (QuickTime's terminator, or padding) are allowed. `udta`,
-  `meta` and `ilst` are not checked, because `©nam` and the like are
-  normal there;
+  zero bytes are allowed only as the type of the last box in a sample
+  entry, where QuickTime puts a terminator. Anywhere else they are a
+  header zeroed with the rest of its box, such as an audio `trak` whose
+  type, or size and type, were zeroed, which FFmpeg skips with its stream.
+  `udta`, `meta` and `ilst` are not checked, because `©nam` and the like
+  are normal there;
 - a child of `moov` whose type is printable but not `trak` and whose
   payload starts with a `tkhd` box: a `trak` renamed to `Trak`, ``tr`k``
   or `free`, which FFmpeg skips with its stream just as it skips
