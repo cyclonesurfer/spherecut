@@ -65,8 +65,9 @@ impl DecodedFrame {
     /// (NV12/P010 from hardware). For comparisons and tests; the render
     /// path uploads planes without copying them like this. `None` for
     /// formats other than 4:2:0 8/10-bit, and for a frame whose rows don't
-    /// fit its buffers, such as one whose size or format was changed after
-    /// they were allocated.
+    /// fit its buffers. That covers most frames whose size or format was
+    /// changed after their buffers were allocated, but not all: `ffi::plane`
+    /// says which.
     pub fn planes_u16(&self) -> Option<[Vec<u16>; 3]> {
         use ff::ffi::AVPixelFormat as P;
         let f = &self.frame;
