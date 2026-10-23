@@ -324,7 +324,7 @@ pub fn read_with<R: Read + Seek>(r: &mut R, first: FirstBox) -> Result<Mp4Tree, 
                 h.fourcc
             )));
         }
-        if h.size > remaining && !any && !known_top_level(&h.fourcc.0) {
+        if h.size > remaining && !any && !top_level_types().any(|t| *t == h.fourcc.0) {
             // Vendor trailers (Insta360 before X5 firmware 1.7) are not
             // boxes, but their first bytes can look like an oversized one.
             tree.trailing_bytes = remaining;
@@ -398,11 +398,8 @@ const OTHER_TOP_LEVEL: &[&[u8; 4]] = &[
     b"moof", b"mfra", b"meta", b"udta", b"sidx", b"styp", b"inst",
 ];
 
-fn known_top_level(t: &[u8]) -> bool {
-    FIRST_BOXES
-        .iter()
-        .chain(OTHER_TOP_LEVEL)
-        .any(|k| k[..] == *t)
+fn top_level_types() -> impl Iterator<Item = &'static [u8; 4]> {
+    FIRST_BOXES.iter().chain(OTHER_TOP_LEVEL).copied()
 }
 
 /// The box at `offset` if `b`, the rest of the file, is the start of its
@@ -415,7 +412,7 @@ fn cut_header(b: &[u8], offset: u64) -> Option<Truncated> {
         .map(u32::from_be_bytes);
     let header_len = if size32 == Some(1) { 16 } else { 8 };
     if b.len() >= header_len {
-        // The whole header is there, so it is not one.
+        // A whole header that did not parse.
         return None;
     }
     // Sizes 2 to 7 are smaller than a header.
@@ -425,11 +422,7 @@ fn cut_header(b: &[u8], offset: u64) -> Option<Truncated> {
     // As much of the type as the file holds must start a type we know.
     let fourcc = b.get(4..).unwrap_or_default();
     let fourcc = &fourcc[..fourcc.len().min(4)];
-    if !FIRST_BOXES
-        .iter()
-        .chain(OTHER_TOP_LEVEL)
-        .any(|k| k.starts_with(fourcc))
-    {
+    if !top_level_types().any(|t| t.starts_with(fourcc)) {
         return None;
     }
     Some(Truncated {
