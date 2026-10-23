@@ -1420,19 +1420,20 @@ impl Bench {
         } = self;
         match range {
             Some((lo, hi)) if *runs > 1 => {
+                // From the unrounded numbers; there is none without a
+                // median to divide by.
                 let spread = if *median > 0.0 {
-                    (hi - lo) / median * 100.0
+                    let spread = (hi - lo) / median * 100.0;
+                    let flag = if spread > UNSTABLE {
+                        " **unstable**"
+                    } else {
+                        ""
+                    };
+                    format!("{spread:.0}%{flag}")
                 } else {
-                    0.0
+                    "n/a".into()
                 };
-                let flag = if spread > UNSTABLE {
-                    " **unstable**"
-                } else {
-                    ""
-                };
-                format!(
-                    "| {name} | {median:.2} {unit} | {lo:.2} to {hi:.2} | {runs} | {spread:.0}%{flag} |"
-                )
+                format!("| {name} | {median:.2} {unit} | {lo:.2} to {hi:.2} | {runs} | {spread} |")
             }
             _ => format!("| {name} | {median:.2} {unit} | | {runs} | |"),
         }
@@ -2268,12 +2269,14 @@ fn main() {
     #[test]
     fn benchmarks_show_median_range_and_spread() {
         let b = parse_benches(
-            "8K30: VA-API decode\t1.14\t× real time\t1.10\t1.18\t3\n\
-             5.7K: VA-API\t88.00\tfps\t67.00\t110.00\t3\n\
+            "8K30: VA-API decode\t1.14\t× real time\t1.1\t1.18\t3\n\
+             5.7K: VA-API\t88\tfps\t67\t110\t3\n\
              old format\t2.50\tfps\n\
-             not a number\tfast\tfps\n",
+             not a number\tfast\tfps\n\
+             8K30: software\t0.056\t× real time\t0.054\t0.058\t3\n\
+             stalled\t0\tfps\t0\t1.5\t3\n",
         );
-        assert_eq!(b.len(), 3, "{b:?}");
+        assert_eq!(b.len(), 5, "{b:?}");
         assert_eq!(
             b[0].row(),
             "| 8K30: VA-API decode | 1.14 × real time | 1.10 to 1.18 | 3 | 7% |"
@@ -2284,5 +2287,16 @@ fn main() {
         );
         assert_eq!(b[2].runs, 1);
         assert_eq!(b[2].row(), "| old format | 2.50 fps | | 1 | |");
+        // The spread comes from the numbers as measured: rounded to 0.06,
+        // 0.05 and 0.06 first, these read as 17% and unstable.
+        assert_eq!(
+            b[3].row(),
+            "| 8K30: software | 0.06 × real time | 0.05 to 0.06 | 3 | 7% |"
+        );
+        // No spread without a median to divide by.
+        assert_eq!(
+            b[4].row(),
+            "| stalled | 0.00 fps | 0.00 to 1.50 | 3 | n/a |"
+        );
     }
 }
