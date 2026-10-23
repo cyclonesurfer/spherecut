@@ -18,7 +18,9 @@
 //! Some of ffmpeg-next's own accessors make such enums (`Frame::format`,
 //! `Parameters::medium`, `Context::id` when opening a decoder), so the
 //! decode and probe paths use [`frame_format`], [`plane`], [`media_type`]
-//! and [`open_video_decoder`] instead.
+//! and [`open_video_decoder`] instead. For the same reason they read
+//! metadata with [`dict_entries`] (ffmpeg-next makes `&str`s of it
+//! without checking that it is UTF-8).
 
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -498,6 +500,34 @@ pub fn lib_versions() -> Vec<(&'static str, u32, u32, u32)> {
 pub fn ffmpeg_version() -> String {
     // SAFETY: returns a static string.
     cstr_opt(unsafe { sys::av_version_info() }).unwrap_or_else(|| "unknown".into())
+}
+
+/// The entries of a dictionary, such as a file's or a stream's metadata,
+/// in order. FFmpeg doesn't check that metadata is UTF-8 (the MOV demuxer
+/// copies a title's bytes as they are), so bytes that aren't become
+/// U+FFFD. ffmpeg-next's own iterator would make `&str`s of them.
+pub fn dict_entries(d: &ff::DictionaryRef<'_>) -> Vec<(String, String)> {
+    // SAFETY: `d` borrows a live dictionary, or NULL for an empty one.
+    let m = unsafe { d.as_ptr() };
+    let mut out = Vec::new();
+    let mut e: *const sys::AVDictionaryEntry = std::ptr::null();
+    loop {
+        // SAFETY: av_dict_get accepts NULL for an empty dictionary. An
+        // empty key with AV_DICT_IGNORE_SUFFIX matches every entry, and `e`
+        // is NULL or the entry it returned last; the dictionary doesn't
+        // change while `d` is borrowed.
+        e = unsafe { sys::av_dict_get(m, c"".as_ptr(), e, sys::AV_DICT_IGNORE_SUFFIX) };
+        if e.is_null() {
+            return out;
+        }
+        // SAFETY: an entry's key and value are NUL-terminated strings the
+        // dictionary owns.
+        let (k, v) = unsafe { (CStr::from_ptr((*e).key), CStr::from_ptr((*e).value)) };
+        out.push((
+            k.to_string_lossy().into_owned(),
+            v.to_string_lossy().into_owned(),
+        ));
+    }
 }
 
 /// `AVFormatContext.start_time` in `AV_TIME_BASE` units.

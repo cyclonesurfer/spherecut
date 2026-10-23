@@ -181,9 +181,7 @@ fn fourcc_str(tag: u32) -> Option<String> {
 }
 
 fn tags(d: ff::DictionaryRef<'_>) -> BTreeMap<String, String> {
-    d.iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect()
+    ffi::dict_entries(&d).into_iter().collect()
 }
 
 /// Time `pts * tb`, or `None` for FFmpeg's "no value" marker.
