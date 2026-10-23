@@ -423,14 +423,18 @@ Limits, so a hostile file costs bounded time and memory:
 
 Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
 
-- every warning from the box parser. One is a box inside a top-level box
+- every warning from the box parser. One is a box below the top level
   whose 32-bit size is 0, unless it and everything after it in its parent
-  are zero bytes. ISO/IEC 14496-12 allows size 0 only for the last
-  top-level box. Below that it runs the box to the end of its parent, so
-  FFmpeg reads the boxes after it as its payload: a zeroed `hvcC` or
+  are zero bytes. ISO/IEC 14496-12 and QuickTime allow size 0 only for the
+  last top-level box. Below that it runs the box to the end of its parent,
+  so FFmpeg reads the boxes after it as its payload: a zeroed `hvcC` or
   `st3d` size loses the `sv3d` after it, an `stsd` size the sample
-  tables, a `trak` size the tracks after it, all with exit 0 before. None
-  of the healthy files in the sweeps has one;
+  tables, a `trak` size the tracks after it, all with exit 0 before. A
+  parent's last box with size 0 loses nothing, but it breaks the same
+  rule, and none of the healthy files in the sweeps has one, so it counts
+  too. Only boxes the parser reads are checked: `moov`, and the small
+  top-level `udta` and `meta` it loads. Fragments (`moof`, `traf`) are
+  not read;
 - no `moov` box, unless the file is item-based (a top-level `meta`) or the
   cut box may have been `moov`;
 - a top-level box cut off by the end of the file, including a file that
@@ -441,12 +445,14 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   or the `mdat` ranges;
 - a video or audio `trak` that FFmpeg reads as another kind of stream;
 - a box type that is not printable ASCII where only registered types
-  belong: in `moov`, `trak`, `mdia`, `minf`, `stbl`, `stsd`, the video and
-  audio sample entries we know, `sv3d` and `proj`. FFmpeg skips such a box,
-  so a `trak` whose type reads `\xd1rak` loses its stream silently. Four
-  zero bytes are allowed only as the type of QuickTime's terminator: the
-  last box in a sample entry, with nothing but zero bytes after its
-  header. Any other box of that type is a header zeroed with the rest of
+  belong: in `moov`, `trak`, `mdia`, `minf`, `stbl`, `stsd`, `edts`,
+  `dinf`, `mvex`, `tref`, the video and audio sample entries we know,
+  `sv3d` and `proj`. FFmpeg skips such a box, so a `trak` whose type
+  reads `\xd1rak` loses its stream silently, and a zeroed `elst` moves the
+  track's start time. Four zero bytes are allowed only as the type of
+  QuickTime's terminator: the last box in a sample entry, with nothing but
+  zero bytes after its header. `inject` keeps a terminator last when it
+  adds boxes to an entry, since FFmpeg reads nothing after it. Any other box of that type is a header zeroed with the rest of
   its box, which FFmpeg skips with what it holds. An audio `trak` whose
   type, or size and type, were zeroed loses its stream, and an `sv3d`,
   which FFmpeg writes last in the entry, loses the projection. A zeroed
@@ -653,10 +659,13 @@ AV1. `--json` keeps its old keys and adds `gpu`, `vulkan_devices`,
 `decode_checks` and `encode_checks`.
 
 Every decoder and encoder in doctor's tables that this FFmpeg lacks gets
-its own issue, naming the codec, with the FFmpeg fix. Each failed check
-has a fault: `ffmpeg` (the build left it out), `driver` (the driver or
-hardware refuses it) or `wrong_output` (it runs and the picture or the
-read-back differs). Only a refusal falls back to the CPU (D3). A driver
+its own issue, naming the codec, with the FFmpeg fix, except that an
+FFmpeg built without VA-API gets one issue for that instead of one per
+VA-API encoder. Each failed check has a fault: `ffmpeg` (the build left
+it out, or FFmpeg's own software decode came out in the wrong format),
+`driver` (the driver or hardware refuses it) or `wrong_output` (it runs
+and the picture or the read-back differs). A refusal, by the build or by
+the driver, falls back to the CPU (D3); wrong output does not. A driver
 with wrong output gives no error, so doctor says its wrong pictures would
 be used and suggests a newer driver. That makes VA-API wrong output a
 warning, and Vulkan Video wrong output a warning when VA-API can't decode

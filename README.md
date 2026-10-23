@@ -95,13 +95,15 @@ MP4/MOV files, probe counts these as damage:
 - a top-level box cut off by the end of the file, which the `mp4` line
   names: ``truncated `moov` (4847 of 4947 bytes)``;
 - anything the box reader warns about, such as a malformed box, a box
-  inside `moov` whose size is 0 (it then runs to the end of its parent and
-  hides the boxes after it), and a missing `moov` box;
+  inside `moov` whose size is 0 (only the last top-level box may have one;
+  anything after it in its parent is read as part of it), and a missing
+  `moov` box. Fragments (`moof`) are not checked;
 - sample tables that disagree with each other, or chunks outside the
   `mdat` data;
 - a box type that isn't printable text inside `moov`, `trak`, `mdia`,
-  `minf`, `stbl`, `stsd`, the sample entries probe knows, `sv3d` or
-  `proj`, including four zero bytes anywhere but in QuickTime's
+  `minf`, `stbl`, `stsd`, `edts`, `dinf`, `mvex`, `tref`, the sample
+  entries probe knows, `sv3d` or `proj`, including four zero bytes
+  anywhere but in QuickTime's
   terminator, the last box of a sample entry, which holds only zero bytes;
 - a box in `moov` that starts with a track header (`tkhd`) but whose type
   is another printable one, such as `Trak` or `free`: FFmpeg skips it, and
