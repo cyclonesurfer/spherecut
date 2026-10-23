@@ -52,41 +52,75 @@ planned ones above don't exist yet.
   fields (colour, channel layout, display matrix, profile), stream media
   types, hardware device types and codec hardware configs, `HwDevice` (a
   reference-counted device context, released on drop) and `HwError`, the
-  `get_format` callback that refuses software fallback and records why
-  (`HwRefusal`, kept in the codec context's `opaque`), opening a video
+  `get_format` callback that refuses software fallback, opening a video
   decoder by its int codec id, reading a frame's format and planes as
   ints, copying hardware frames to system memory, the demuxer index end,
   setting other streams to `AVDISCARD_ALL`, library versions, and the
   bridge that sends FFmpeg's `av_log` to `tracing` under the target
   `ffmpeg`. C enums are never made into bindgen's Rust enums (DECISIONS
-  D11).
+  D11). Five parts need more care:
+  * The `get_format` callback keeps its bookkeeping in the codec context's
+    `opaque`: the device's pixel format, and flags that describe the
+    latest call. Asked: FFmpeg has called it at all. Taken: the latest
+    call offered the device's format and it was taken. Decoded: a frame
+    has come out on the device since. Withdrawn: the latest call lacked
+    the format right after a call that took it, with no device frame in
+    between. `hw_refusal` reads them as a `HwRefusal` (D14).
+  * Given a device, `open_video_decoder` takes the first decoder for the
+    codec whose hardware configs offer `hw_device_ctx` for the device's
+    type, not FFmpeg's default decoder: for AV1 that is libdav1d, which
+    only decodes in software.
+  * A slice from `plane` ends inside the `AVBufferRef` that holds the
+    plane, so a frame the decoder cropped on the left can't make it run
+    past its buffer.
+  * `open_input` opens files from the path's raw bytes, because
+    ffmpeg-next's `format::input` panics on a path that isn't UTF-8.
+  * `dict_entries` reads metadata as lossy UTF-8 (U+FFFD for bytes that
+    aren't), because ffmpeg-next makes `&str`s of it unchecked.
 * `hwprobe.rs` (private) holds doctor's one-frame hardware decode and
   encode probes, the Vulkan device listing through FFmpeg's
   `AVVulkanDeviceContext` with its own `#[repr(C)]` declarations of the
-  few Vulkan structs it reads, and the capture of what FFmpeg logs during a
-  check (a thread-local `tracing` subscriber that passes everything on).
+  few Vulkan structs it reads, and `capture_ffmpeg_log`, which collects
+  what FFmpeg logs while doctor runs a check or `probe` reads a file (a
+  thread-local `tracing` subscriber that passes everything on).
 
 The other modules are safe Rust:
 
 * `probe`: what FFmpeg reports, plus our own checks. MP4/MOV files go
-  through `mp4::Mp4Tree::damage()` (a top-level box cut off by the end of
+  through `mp4::Mp4Tree::damage()`: a top-level box cut off by the end of
   the file, including a cut header; malformed boxes; a handler that
   disagrees with its sample entry; sample tables checked against each
-  other and against the `mdat` ranges). Each FFmpeg stream is matched to
-  its `trak` by track ID (by position when IDs repeat or are missing), and
-  a video or audio `trak` that FFmpeg reads as another kind is damage. A file FFmpeg
+  other and against the `mdat` ranges; a box type that isn't printable
+  text where only registered types belong (in `moov`, `trak`, `mdia`,
+  `minf`, `stbl`, `stsd`, the known sample entries, `sv3d` and `proj`);
+  and a `mvhd` or `mdhd` timescale FFmpeg can't use. Each FFmpeg stream is
+  matched to its `trak` by track ID (by position when IDs repeat or are
+  missing), and a video or audio `trak` that FFmpeg reads as another kind
+  is damage. A video or audio stream FFmpeg could not set up (no codec,
+  frame size, sample rate or channels, or no pixel or sample format though
+  FFmpeg has a decoder) is damage when its track has samples and its
+  sample entry is a codec FFmpeg reads (`mp4::is_known_codec`), and a
+  warning otherwise, since FFmpeg may simply lack the codec. A file FFmpeg
   reads as MOV/MP4 that the strict read refuses is read again with
   `FirstBox::Any`, which accepts any valid first box. Matroska files are
-  checked against their Segment length. `ProbeReport.structure` records
-  how much was checked (`full`, `length` or `none` with a reason), and
-  `damage` lists what was found. The CLI fails on any damage (D15).
+  checked against their Segment length. `probe` runs inside
+  `hwprobe::capture_ffmpeg_log` and keeps FFmpeg's warnings and errors in
+  `ProbeReport.ffmpeg_log`, apart from `damage` and `warnings`.
+  `ProbeReport.structure` records how much was checked (`full`, `length`
+  or `none` with a reason), and `damage` lists what was found.
+  `ProbeReport.path` serializes as lossy UTF-8. The CLI fails on any
+  damage (D15).
 * `mp4`: the box reader, with fixed limits (DECISIONS D15).
 * `spherical`: Spherical Video V1 and V2 and SA3D, read from the boxes and
   written as box bytes.
 * `inject`: adds or replaces boxes in the first video and audio sample
-  entries, fixing sizes and chunk offsets, written atomically (D16).
+  entries, fixing sizes and chunk offsets, written atomically (D16). It
+  refuses input that `Mp4Tree::damage()` finds damaged, and, when it
+  shifts chunk offsets, an edited `moov` whose re-read warns. It replaces
+  only a regular file at the output.
 * `encode`: `Mp4Writer`, one video stream from planar YUV and optional
-  planar-f32 audio, written atomically like `inject`. The synthetic media
+  planar-f32 audio, written atomically like `inject`, which also means
+  it refuses an output that isn't a regular file. The synthetic media
   generator uses it today; M2's export builds on it.
 * `decode`: `VideoDecoder`, which decodes one video stream in order, in
   software or on a `HwDevice`, and hands out frames in system memory. It
@@ -94,19 +128,28 @@ The other modules are safe Rust:
   packet flagged corrupt until the next read, and ends a damaged file with
   an error after the frames it could decode (D13). `open_cancellable`
   stops reading when a flag is set, and `skipped_packets` counts packets
-  skipped as invalid data. On a device it never falls back to software
-  (D3, D14).
+  skipped as invalid data. On a device it opens a decoder that can use the
+  device and never falls back to software (D3, D14).
 * `detect`: camera and layout guesses from container structure, each with
   its evidence.
-* `doctor`: the capability checks and the fixes (D18). The embedded
-  one-frame bitstreams are in `crates/media/fixtures/`, whose README gives
-  the commands that regenerate them byte for byte.
+* `doctor`: the capability checks and the fixes (D18). A failed check
+  names its `fault`: this FFmpeg build (`ffmpeg`), the driver refusing or
+  failing (`driver`), or the driver giving a wrong picture or stream
+  (`wrong_output`). The embedded one-frame bitstreams are in
+  `crates/media/fixtures/`, whose README gives the commands that
+  regenerate them byte for byte.
 
 `MediaError` has six variants: `Io`, `NotAFile`, `Open`, `Decode`,
 `HwUnsupported { path, kind, refusal: HwRefusal }` (the device can't decode
 this stream; software may) and `Hardware { kind, reason: HwError }` (the
-device can't be opened). Messages that include their cause don't also
-return it from `source()`, so `{e:#}` prints each cause once.
+device can't be opened). `VideoDecoder::open` returns `HwUnsupported`
+(`NotOffered`) when no decoder for the codec can use the device, and
+`next_frame` returns it when the device turns the stream down. A software
+frame from a decoder that never asked for the device's format, or that
+turned it down, is `HwUnsupported` too, not a `Decode` error. Once
+`next_frame` has returned it, every later call returns it again and
+decodes nothing. Messages that include their cause don't also return it
+from `source()`, so `{e:#}` prints each cause once.
 
 `spherecut_media::init()` initialises FFmpeg once and installs the log
 bridge. FFmpeg's own log level follows what the `tracing` subscriber
@@ -173,9 +216,10 @@ and samples with `textureSampleGrad`/`textureSampleLevel`.
 ## Testing tiers
 
 * **Tier 1** runs anywhere: unit and property tests, software decode and
-  encode, synthetic media that the tests generate themselves, and doctor
-  run against lavapipe. Golden images on lavapipe come with the renderer
-  (M1). `cargo xtask check` runs all of it.
+  encode, synthetic media that the tests generate themselves, doctor run
+  against lavapipe, and `VideoDecoder` turning streams down on lavapipe's
+  Vulkan device. Golden images on lavapipe come with the renderer (M1).
+  `cargo xtask check` runs all of it.
 * **Tier 2** needs hardware or samples. Tier 2 tests are `#[ignore]`d with a
   reason and call `spherecut_testkit::tier2::require_*`, which fails the
   test with a `TIER2-SKIP:` marker when a device or sample is missing.

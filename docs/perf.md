@@ -28,15 +28,19 @@ Under `cargo xtask hw-test`, `SPHERECUT_BENCH_OUT` points at
 `<cargo target dir>/hw-bench.tsv`. The target directory comes from
 `cargo metadata`, so it follows `CARGO_TARGET_DIR` and `build.target-dir`.
 hw-test deletes the file before the tests run, so it holds only this run's
-numbers. Each line is `name`, `median`, `unit`, `min`, `max`, `runs`,
-tab-separated. Outside hw-test the same line goes to stderr as `BENCH ...`.
-Tier 2 tests run one at a time (`--test-threads=1`), so benchmarks don't
-compete with other tests.
+numbers, and passes its path to the tests byte for byte. Each line is
+`name`, `median`, `unit`, `min`, `max`, `runs`, tab-separated, with the
+numbers at full precision. Outside hw-test the same line goes to stderr as
+`BENCH ...`. Tier 2 tests run one at a time (`--test-threads=1`), so
+benchmarks don't compete with other tests.
 
 The report's Benchmarks table has the columns Benchmark, Median, Range,
-Runs and Spread. Spread is (max − min) / median; over 10% the row is
-marked **unstable**, which usually means the machine was busy or changing
-clocks.
+Runs and Spread. hw-test rounds the numbers to two decimals only for the
+table, and works out Spread from the unrounded ones: (max − min) / median,
+as a whole percentage. Over 10% the row is marked **unstable**, which
+usually means the machine was busy or changing clocks. Spread shows "n/a"
+when the median is 0 or less, and Range and Spread are empty for a single
+run.
 
 `--quick` builds the workspace in debug mode and leaves the benchmarks out
 (`--skip bench_`): they appear in the Tier 2 table as "skipped: benchmark,
@@ -66,9 +70,9 @@ changes), 2026-10-22. Mesa 26.2.5 (radeonsi from
 1.99.0. The GPU was idle for the whole run: nothing else was loaded on it.
 
 This run predates the repeat-and-spread change above: each number is a
-single run, with no warm-up. It also predates the hw-test, doctor and
-decoder fixes merged since a9128cf. A rerun at the current commit is
-pending.
+single run, with no warm-up. It also predates the hw-test, doctor,
+decoder and probe fixes merged since a9128cf, from both M0 reviews. A
+rerun at M0_COMMIT is pending.
 
 Tier 2: 7 passed, 0 failed, 1 skipped. `vulkan_hevc_main_matches_software`
 skipped: Vulkan Video HEVC decode unavailable ("decoding: Operation not

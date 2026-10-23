@@ -16,8 +16,8 @@ What works today is the `spherecut` command line tool:
 - `spherecut probe <file>...` shows what a file is: container, streams,
   codecs, colour, exact frame rates and timebases, spherical video and
   ambisonic metadata, and the camera vendor and layout it most likely came
-  from. It also checks MP4/MOV files for truncation and corruption.
-  `--json` gives the same as JSON.
+  from. It also checks MP4/MOV files for the kinds of damage listed under
+  Build and run. `--json` gives the same as JSON.
 - `spherecut doctor` checks what your FFmpeg, drivers and GPU can actually
   do. It decodes one small frame each of H.264 High, HEVC Main, HEVC Main 10
   and AV1 in software, on VA-API and on FFmpeg's Vulkan device, encodes one
@@ -32,7 +32,8 @@ See `PLAN.md` for the milestones and `PROGRESS.md` for where things stand.
 - Linux with an AMD or Intel GPU (Mesa RADV or ANV). NVIDIA isn't supported.
 - FFmpeg 6.1 or newer, with its development files, H.264/HEVC decoders,
   an AV1 software decoder (libdav1d), and libx264/libx265, built with
-  Vulkan support (the Tier 1 doctor test needs FFmpeg's Vulkan device).
+  Vulkan support (the Tier 1 doctor and hardware-refusal tests need
+  FFmpeg's Vulkan device).
 - Rust 1.88 or newer (1.95 once the GUI lands), with rustfmt and clippy for
   development.
 - clang, for generating the FFmpeg bindings at build time.
@@ -88,22 +89,63 @@ cargo build --release
 can't be opened, is truncated or corrupt, or has no video or audio stream.
 A damaged file that FFmpeg can open still gets its report, with a
 `DAMAGE` line per problem, and stderr gets one line per bad file, such as
-`error: clip.mp4 is damaged: <first reason> (and 2 more problems)`. The
-`mp4` line names a top-level box cut off by the end of the file:
-``truncated `moov` (4847 of 4947 bytes)``. Only MP4/MOV structure is
-checked in full; Matroska files are checked against their Segment length
-only, and other containers not at all, which a `structure` line says.
+`error: clip.mp4 is damaged: <first reason> (and 2 more problems)`. In
+MP4/MOV files, probe counts these as damage:
+
+- a top-level box cut off by the end of the file, which the `mp4` line
+  names: ``truncated `moov` (4847 of 4947 bytes)``;
+- anything the box reader warns about, such as a malformed box, and a
+  missing `moov` box;
+- sample tables that disagree with each other, or chunks outside the
+  `mdat` data;
+- a box type that isn't printable text inside `moov`, `trak`, `mdia`,
+  `minf`, `stbl`, `stsd`, the sample entries probe knows, `sv3d` or
+  `proj`;
+- a `mvhd` or `mdhd` timescale of 0, or one FFmpeg reads as negative;
+- a video sample entry under an audio handler, or the other way round;
+- a video or audio track that FFmpeg reads as another kind of stream;
+- a video or audio stream FFmpeg could not set up although its sample
+  entry is a codec FFmpeg reads, which usually means a damaged `avcC` or
+  `hvcC`.
+
+Damage that keeps the structure consistent, such as changed sample sizes
+or times, and damage inside `mdat` are not found without decoding. A
+stream whose codec FFmpeg doesn't know, such as a `zzzz` sample entry, is
+a `warning` line and doesn't fail probe: it may be a real codec that this
+FFmpeg lacks. The `ffmpeg` lines hold the warnings and errors FFmpeg
+logged while reading the file, each repeated line listed once with a
+count, at most 32 lines. They often say what FFmpeg could not read, but
+they don't fail probe either, because healthy files can have some: cover
+art gives a `timescale not set` line. Only MP4/MOV structure is checked
+in full; Matroska files are checked against their Segment length only,
+and other containers not at all, which a `structure` line says.
+
 `--json` prints one object per file (an array for several) with `damage`,
-`structure` (`{"check": "full" | "length" | "none", "why"}`) and
-`mp4.truncated` (`fourcc`, `offset`, `header_len`, `size`, `present`, or
-null). A file that can't be opened is `{"path", "error"}`.
+`warnings`, `ffmpeg_log`, `structure` (`{"check": "full" | "length" |
+"none", "why"}`) and `mp4.truncated` (`fourcc`, `offset`, `header_len`,
+`size`, `present`, or null). A file that can't be opened is `{"path",
+"error"}`. File names don't have to be UTF-8; in the text report and in
+`path`, bytes that aren't UTF-8 show as U+FFFD. When the reader of
+probe's output goes away, as in `spherecut probe *.mp4 | head`, the output
+stops quietly, and probe still checks the remaining files, so the exit
+code and the errors on stderr cover every file.
 
 `spherecut doctor [--render-node /dev/dri/renderD128] [--json]` exits 1
 only when a problem is an error: FFmpeg has no H.264, HEVC, ProRes or AAC
-decoder, or nothing decodes AV1. Warnings, such as no GPU or a Vulkan
-device that runs on the CPU, exit 0. Doctor never installs or changes
-anything; on Fedora it makes one read-only `rpm -q` query to word its
-fixes.
+decoder, or nothing decodes AV1. Every decoder and encoder in doctor's
+tables that FFmpeg lacks gets a problem that names it, such as `FFmpeg has
+no software AV1 encoder (libsvtav1)`, with the fix for FFmpeg. A missing
+Opus or PCM decoder, or a missing AAC, libx264, libx265, libsvtav1, VA-API
+H.264 or VA-API HEVC encoder, is a warning. A missing `av1` decoder
+(FFmpeg's own, which VA-API and Vulkan Video use), VA-API AV1 encoder or
+ProRes encoder is a note. Warnings, such as no GPU or a Vulkan device that
+runs on the CPU, exit 0. Doctor tells a driver that refuses a format
+(`cannot decode HEVC Main 10`) from one that decodes it wrongly (`decodes
+HEVC Main wrongly (N of M samples differ from FFmpeg's software
+decoder)`); for the second, the fix is a newer driver. In `--json`, a
+failed check's `fault` is `ffmpeg`, `driver` or `wrong_output`. Doctor
+never installs or changes anything; on Fedora it makes one read-only
+`rpm -q` query to word its fixes.
 
 ### Logging
 
@@ -122,6 +164,9 @@ EnvFilter directives to that default:
 - A value that doesn't parse is reported (`warning: ignoring
   SPHERECUT_LOG=...`) and the default applies.
 
+The filter doesn't change probe's reports: their `ffmpeg` lines list
+FFmpeg's warnings and errors about each file whatever it is set to.
+
 ## Development
 
 ```sh
@@ -138,8 +183,10 @@ Tests come in two tiers. Tier 1 runs anywhere, including machines without
 a GPU. It needs the FFmpeg codecs listed above and Mesa's lavapipe Vulkan
 driver (`mesa-vulkan-drivers` on Fedora and Ubuntu, `vulkan-swrast` on
 Arch): `crates/cli/tests/doctor.rs` runs doctor with the Vulkan loader
-limited to lavapipe (`VK_DRIVER_FILES`, `VK_ICD_FILENAMES`). The tests
-generate the media they need; `gen-media` is not needed first.
+limited to lavapipe (`VK_DRIVER_FILES`, `VK_ICD_FILENAMES`), and
+`crates/media/tests/hw_refusal.rs` checks that the decoder turns streams
+down on lavapipe's Vulkan device instead of decoding them in software. The
+tests generate the media they need; `gen-media` is not needed first.
 
 Tier 2 needs a real GPU or camera samples; a plain `cargo test` lists
 those tests as ignored, and `cargo xtask hw-test` runs them. It needs no
@@ -150,7 +197,11 @@ every Tier 2 test and benchmark, and writes one report to
 has changes outside `hw-reports/`). Options:
 
 - `--samples <dir>`: camera samples (default `samples/` in the checkout; a
-  relative path is taken from the current directory).
+  relative path is taken from the current directory). The path reaches the
+  tests byte for byte, as `SPHERECUT_BENCH_OUT` (see `docs/perf.md`) does.
+  A directory whose path isn't valid UTF-8 shows in
+  the report's Samples row as present but unusable, and the samples tests
+  skip with that reason.
 - `--quick`: a debug build, with the benchmarks left out.
 - `--out <file>`: where to write the report.
 
