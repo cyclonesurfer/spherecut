@@ -215,10 +215,17 @@ fn decode_audio(path: &Path) -> (Vec<Vec<f32>>, String) {
     (out, layout)
 }
 
+fn dot(a: &[f32], b: &[f32]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum()
+}
+
 #[test]
 fn ambix_survives_aac_with_its_direction_and_sa3d() {
     let dir = tmp("ambix");
-    let (az, el) = (45.0, 30.0);
+    // Back left and below: Y, Z and X all differ in size and X and Z are
+    // negative, so swapping or flipping any channel moves the direction. At
+    // azimuth 45, Y and X are equal and a swap went unnoticed.
+    let (az, el) = (120, -20);
     let s = spec(
         "ambix",
         64,
@@ -226,8 +233,8 @@ fn ambix_survives_aac_with_its_direction_and_sa3d() {
         Codec::H264,
         8,
         Audio::AmbiX {
-            azimuth: az as i32,
-            elevation: el as i32,
+            azimuth: az,
+            elevation: el,
         },
     );
     let path = media::write(&s, &dir).unwrap();
@@ -244,9 +251,23 @@ fn ambix_survives_aac_with_its_direction_and_sa3d() {
     // channel order survives, and SA3D says what the channels are.
     eprintln!("ambiX AAC decodes with layout {layout:?}");
     assert_eq!(ch.len(), 4);
+    // Channel by channel: each one's gain against W is the one
+    // ambix_source gave it, so W, Y, Z, X come back in that order.
+    let (a, e) = ((az as f64).to_radians(), (el as f64).to_radians());
+    let want = [1.0, a.sin() * e.cos(), e.sin(), a.cos() * e.cos()];
+    let got: Vec<f64> = ch
+        .iter()
+        .map(|c| dot(&ch[0], c) / dot(&ch[0], &ch[0]))
+        .collect();
+    for (k, (g, w)) in got.iter().zip(want).enumerate() {
+        assert!(
+            (g - w).abs() < 0.03,
+            "channel {k} has gain {g:.3}, not {w:.3}: {got:.3?}"
+        );
+    }
     let (raz, rel) = audio::ambix_direction(&ch).unwrap();
     assert!(
-        (raz - az).abs() < 2.0 && (rel - el).abs() < 2.0,
+        (raz - az as f64).abs() < 2.0 && (rel - el as f64).abs() < 2.0,
         "{az},{el} came back as {raz:.2},{rel:.2}"
     );
     std::fs::remove_dir_all(&dir).ok();

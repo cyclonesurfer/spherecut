@@ -131,10 +131,11 @@ struct AudioState {
 /// encoder refuses the ambisonic and unspecified channel orders (checked on
 /// 6.1, 8.1 and 9.0), and an AAC stream can only name speaker positions.
 /// 4.0 is channel configuration 4, which every decoder handles and which
-/// keeps the channel order; quad needs a PCE and 3.1 low-passes a channel
-/// as LFE. The `SA3D` box that `inject` adds is what marks the track as
-/// ambiX, as YouTube's spatial audio spec intends. FFmpeg's mp4 demuxer
-/// reads it as "ambisonic 1", until its AAC decoder reports 4.0 again.
+/// keeps the channel order (the synth crate's writers test checks each
+/// channel); quad needs a PCE and 3.1 low-passes a channel as LFE. The
+/// `SA3D` box that `inject` adds is what marks the track as ambiX, as
+/// YouTube's spatial audio spec intends. FFmpeg's mp4 demuxer reads it as
+/// "ambisonic 1", until its AAC decoder reports 4.0 again.
 fn channel_layout(channels: u32) -> Result<ff::ChannelLayout, EncodeError> {
     let n = i32::try_from(channels)
         .ok()

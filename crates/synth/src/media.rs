@@ -227,10 +227,12 @@ pub fn standard_set() -> Vec<Spec> {
             spherical: false,
             ..base("grid-hevc8-30-untagged")
         },
+        // Front left and up, where Y, Z and X all differ, so a swapped
+        // channel shows.
         Spec {
             audio: Audio::AmbiX {
-                azimuth: 45,
-                elevation: 30,
+                azimuth: 30,
+                elevation: 20,
             },
             ..base("grid-hevc8-30-ambix")
         },
