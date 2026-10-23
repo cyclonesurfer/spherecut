@@ -541,6 +541,8 @@ struct Tier2 {
     /// `cargo test -- --ignored --list`: what should run.
     list: Captured,
     run: Captured,
+    /// The run's output per test binary.
+    output: BTreeMap<String, String>,
     /// Every Tier 2 test once.
     results: Vec<(String, Outcome)>,
 }
@@ -548,6 +550,18 @@ struct Tier2 {
 impl Tier2 {
     fn count(&self, f: impl Fn(&Outcome) -> bool) -> usize {
         self.results.iter().filter(|(_, o)| f(o)).count()
+    }
+
+    /// How many tests did not run, per binary.
+    fn did_not_run(&self) -> BTreeMap<&str, usize> {
+        let mut by_bin = BTreeMap::new();
+        for (name, o) in &self.results {
+            if *o == Outcome::DidNotRun {
+                let bin = name.split_once("::").map_or(name.as_str(), |(b, _)| b);
+                *by_bin.entry(bin).or_default() += 1;
+            }
+        }
+        by_bin
     }
 
     /// `cargo test` failed, but no test failed or skipped (a skip is a
@@ -634,12 +648,18 @@ fn run_tier2(quick: bool, samples: &Path, bench_out: &Path) -> Tier2 {
             ("SPHERECUT_BENCH_OUT", &bench_s),
         ],
     );
-    let ran = split_by_binary(&run.text)
-        .into_iter()
-        .map(|(bin, text)| (bin, parse_libtest(&text)))
+    let output: BTreeMap<String, String> = split_by_binary(&run.text).into_iter().collect();
+    let ran = output
+        .iter()
+        .map(|(bin, text)| (bin.clone(), parse_libtest(text)))
         .collect();
     let results = merge(&parse_list(&list.text), &ran, quick);
-    Tier2 { list, run, results }
+    Tier2 {
+        list,
+        run,
+        output,
+        results,
+    }
 }
 
 /// Cargo's target directory as `cargo metadata` gives it, which follows
@@ -991,16 +1011,25 @@ pub fn run(a: Args) -> Result<()> {
                     tail(&t.list.text, 60)
                 );
             }
-            let missing = t.count(|o| *o == Outcome::DidNotRun);
-            if missing > 0 || t.unexplained_failure() {
-                let why = if missing > 0 {
-                    format!("{missing} test(s) did not run")
-                } else {
-                    "`cargo test` failed, but no test failed".to_string()
+            let did_not_run = t.did_not_run();
+            for (bin, n) in &did_not_run {
+                let (why, out) = match t.output.get(*bin) {
+                    Some(out) => ("it stopped early. The end of its output", out),
+                    None => (
+                        "cargo never ran it. The end of the test output",
+                        &t.run.text,
+                    ),
                 };
                 let _ = writeln!(
                     r,
-                    "{why}. The end of the test output:\n\n```\n{}\n```\n",
+                    "{n} test(s) in `{bin}` did not run: {why}:\n\n```\n{}\n```\n",
+                    tail(out, 30)
+                );
+            }
+            if did_not_run.is_empty() && t.unexplained_failure() {
+                let _ = writeln!(
+                    r,
+                    "`cargo test` failed, but no test failed. The end of its output:\n\n```\n{}\n```\n",
                     tail(&t.run.text, 60)
                 );
             }
@@ -1378,6 +1407,7 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         Tier2 {
             list: captured(true),
             run: captured(run_ok),
+            output: BTreeMap::new(),
             results: results
                 .iter()
                 .enumerate()
@@ -1404,6 +1434,7 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         );
         assert_eq!(t.problems(), ["1 Tier 2 test(s) did not run"]);
         assert!(t.counts(false).contains("1 did not run"));
+        assert_eq!(t.did_not_run(), BTreeMap::from([("t", 1)]));
 
         let t = tier2(false, &[Outcome::Failed(String::new())]);
         assert_eq!(t.problems(), ["1 Tier 2 test(s) failed"]);
