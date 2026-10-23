@@ -215,7 +215,8 @@ pub struct Issue {
 pub enum Severity {
     /// Some sources can't be opened at all.
     Error,
-    /// Works, but slowly (software fallback).
+    /// Sources open, but something is slow (a software fallback), missing
+    /// (such as an export or audio codec) or wrong (a driver's output).
     Warning,
     Info,
 }
