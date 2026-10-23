@@ -40,13 +40,23 @@ pub use ffi::{HwDevice, HwError};
 
 static INIT: Once = Once::new();
 
-/// Initialise FFmpeg once per process and keep its own logging quiet; our
-/// errors carry the details instead.
+/// Initialise FFmpeg once per process, and send its log to `tracing` under
+/// the target "ffmpeg" (FFmpeg's verbose level as debug, its debug as
+/// trace). FFmpeg only formats messages the subscriber accepts for that
+/// target, so install the subscriber first, or call
+/// [`sync_ffmpeg_log_level`] after changing it.
 pub fn init() {
     INIT.call_once(|| {
+        ffi::route_log_to_tracing();
         if let Err(e) = ff::init() {
             tracing::warn!("FFmpeg init: {e}");
         }
-        ff::util::log::set_level(ff::util::log::Level::Fatal);
+        tracing::debug!(version = %ffi::ffmpeg_version(), "FFmpeg initialised");
     });
+}
+
+/// Match FFmpeg's log level to what the `tracing` subscriber now accepts
+/// for target "ffmpeg".
+pub fn sync_ffmpeg_log_level() {
+    ffi::sync_log_level();
 }

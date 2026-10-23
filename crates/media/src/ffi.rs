@@ -5,7 +5,8 @@
 //! creation, codec hardware configs) is read here and handed out as plain
 //! Rust values. Every pointer read is from an object whose lifetime is tied
 //! to a borrowed ffmpeg-next wrapper, and every allocation made here is
-//! released before returning.
+//! released before returning. FFmpeg's log is routed to `tracing` from
+//! here too.
 //!
 //! C enums never become bindgen's Rust enums here. Those may only hold the
 //! values in the headers ffmpeg-sys-next was generated from, and a newer
@@ -14,7 +15,9 @@
 //! undefined behaviour. So the functions in [`c`] are declared with the
 //! `int` the C ABI passes, and enum fields are read with [`enum_int`].
 
-use std::ffi::{CStr, CString, c_char, c_int};
+use std::cell::Cell;
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::panic::AssertUnwindSafe;
 
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as sys;
@@ -544,4 +547,285 @@ pub fn download_frame(src: &ff::frame::Video) -> Result<ff::frame::Video, ff::Er
         return Err(ff::Error::from(ret));
     }
     Ok(dst)
+}
+
+/// The `va_list` of FFmpeg's log callback, as bindgen spells the parameter:
+/// on x86-64 `va_list` is an array type, so it is passed as a pointer. It is
+/// only ever handed back to FFmpeg untouched.
+#[cfg(target_arch = "x86_64")]
+type VaList = *mut sys::__va_list_tag;
+#[cfg(not(target_arch = "x86_64"))]
+type VaList = sys::va_list;
+
+/// Send FFmpeg's log to `tracing`, under the target "ffmpeg".
+pub fn route_log_to_tracing() {
+    sync_log_level();
+    // SAFETY: `log_callback` has the signature FFmpeg expects, can be called
+    // from any thread, and never unwinds into C.
+    unsafe { sys::av_log_set_callback(Some(log_callback)) };
+}
+
+/// Set FFmpeg's log level to the most verbose one the current `tracing`
+/// subscriber accepts for target "ffmpeg", so that FFmpeg's messages
+/// nobody would see are not even formatted.
+pub fn sync_log_level() {
+    use tracing::{Level, enabled};
+    let level = if enabled!(target: "ffmpeg", Level::TRACE) {
+        sys::AV_LOG_TRACE
+    } else if enabled!(target: "ffmpeg", Level::DEBUG) {
+        sys::AV_LOG_VERBOSE
+    } else if enabled!(target: "ffmpeg", Level::INFO) {
+        sys::AV_LOG_INFO
+    } else if enabled!(target: "ffmpeg", Level::WARN) {
+        sys::AV_LOG_WARNING
+    } else if enabled!(target: "ffmpeg", Level::ERROR) {
+        sys::AV_LOG_ERROR
+    } else {
+        sys::AV_LOG_QUIET
+    };
+    // SAFETY: sets a global int; any level is allowed.
+    unsafe { sys::av_log_set_level(level) };
+}
+
+/// The `tracing` level for an FFmpeg level: FFmpeg's verbose is debug, and
+/// its debug and trace are trace.
+fn tracing_level(level: c_int) -> tracing::Level {
+    use tracing::Level;
+    if level <= sys::AV_LOG_ERROR {
+        Level::ERROR
+    } else if level <= sys::AV_LOG_WARNING {
+        Level::WARN
+    } else if level <= sys::AV_LOG_INFO {
+        Level::INFO
+    } else if level <= sys::AV_LOG_VERBOSE {
+        Level::DEBUG
+    } else {
+        Level::TRACE
+    }
+}
+
+thread_local! {
+    /// av_log_format_line2's "at the start of a line" flag. FFmpeg may log
+    /// one line in several calls, and only the first gets the
+    /// "[hevc @ 0x…]" prefix. Threads log independently, so each keeps its
+    /// own.
+    static PRINT_PREFIX: Cell<c_int> = const { Cell::new(1) };
+}
+
+/// FFmpeg's log callback. FFmpeg calls it for every message, whatever the
+/// log level, from whichever thread logs (decoder threads included).
+unsafe extern "C" fn log_callback(avcl: *mut c_void, level: c_int, fmt: *const c_char, vl: VaList) {
+    // A panic must not unwind into C; dropping the message is enough.
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: the arguments of this callback, passed on unchanged.
+        unsafe { forward_log(avcl, level, fmt, vl) }
+    }));
+}
+
+/// # Safety
+///
+/// The arguments of one call of FFmpeg's log callback, with `vl` unused.
+unsafe fn forward_log(avcl: *mut c_void, level: c_int, fmt: *const c_char, vl: VaList) {
+    // The low byte is the level; FFmpeg may put colour hints above it.
+    let plain = if level >= 0 { level & 0xff } else { level };
+    // SAFETY: reads a global int.
+    if plain > unsafe { sys::av_log_get_level() } {
+        return;
+    }
+    let mut line = [0 as c_char; 1024];
+    let mut prefix = PRINT_PREFIX.try_with(Cell::get).unwrap_or(1);
+    // SAFETY: `avcl`, `fmt` and `vl` are FFmpeg's own and `vl` is consumed
+    // only here; `line` is writable for the size passed, and FFmpeg
+    // truncates to it and NUL-terminates.
+    let n = unsafe {
+        sys::av_log_format_line2(
+            avcl,
+            level,
+            fmt,
+            vl,
+            line.as_mut_ptr(),
+            line.len() as c_int,
+            &mut prefix,
+        )
+    };
+    let _ = PRINT_PREFIX.try_with(|p| p.set(prefix));
+    if n < 0 {
+        return;
+    }
+    // SAFETY: NUL-terminated within `line` (above).
+    let msg = unsafe { CStr::from_ptr(line.as_ptr()) }.to_string_lossy();
+    let msg = msg.trim_end();
+    if msg.is_empty() {
+        return;
+    }
+    use tracing::Level;
+    match tracing_level(plain) {
+        Level::ERROR => tracing::error!(target: "ffmpeg", "{msg}"),
+        Level::WARN => tracing::warn!(target: "ffmpeg", "{msg}"),
+        Level::INFO => tracing::info!(target: "ffmpeg", "{msg}"),
+        Level::DEBUG => tracing::debug!(target: "ffmpeg", "{msg}"),
+        _ => tracing::trace!(target: "ffmpeg", "{msg}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::fmt::Debug;
+    use std::sync::Mutex;
+
+    use tracing::subscriber::Interest;
+    use tracing::{Event, Level, Metadata, Subscriber, field, span};
+
+    use super::*;
+
+    /// The most verbose "ffmpeg" level [`Capture`] accepts, `None` for none.
+    static MAX: Mutex<Option<Level>> = Mutex::new(Some(Level::TRACE));
+    static EVENTS: Mutex<Vec<(Level, String)>> = Mutex::new(Vec::new());
+
+    /// Records "ffmpeg" events up to [`MAX`], asking on every event.
+    struct Capture;
+
+    impl Subscriber for Capture {
+        fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
+            Interest::sometimes()
+        }
+        fn enabled(&self, m: &Metadata<'_>) -> bool {
+            m.target() == "ffmpeg" && MAX.lock().unwrap().is_some_and(|max| *m.level() <= max)
+        }
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+        fn event(&self, e: &Event<'_>) {
+            let mut m = Message(String::new());
+            e.record(&mut m);
+            EVENTS.lock().unwrap().push((*e.metadata().level(), m.0));
+        }
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
+    }
+
+    struct Message(String);
+
+    impl field::Visit for Message {
+        fn record_debug(&mut self, f: &field::Field, v: &dyn Debug) {
+            if f.name() == "message" {
+                self.0 = format!("{v:?}");
+            }
+        }
+    }
+
+    fn log(level: c_int, msg: &str) {
+        let msg = CString::new(msg).unwrap();
+        // SAFETY: a NULL context is allowed, and the format takes the one
+        // string passed.
+        unsafe { sys::av_log(std::ptr::null_mut(), level, c"%s".as_ptr(), msg.as_ptr()) };
+    }
+
+    /// Events whose message contains `tag`, in order.
+    fn captured(tag: &str) -> Vec<(Level, String)> {
+        let events = EVENTS.lock().unwrap();
+        events
+            .iter()
+            .filter(|(_, m)| m.contains(tag))
+            .cloned()
+            .collect()
+    }
+
+    fn set_max(max: Option<Level>) {
+        *MAX.lock().unwrap() = max;
+        sync_log_level();
+    }
+
+    // One test, because the subscriber and FFmpeg's level are global.
+    #[test]
+    fn ffmpeg_log_reaches_tracing_at_the_level_it_asks_for() {
+        tracing::subscriber::set_global_default(Capture).unwrap();
+        crate::init();
+        set_max(Some(Level::TRACE));
+        // SAFETY: reads a global int.
+        assert_eq!(unsafe { sys::av_log_get_level() }, sys::AV_LOG_TRACE);
+
+        // Each FFmpeg level lands on its tracing level; colour hints above
+        // the low byte don't change it.
+        for (av, want) in [
+            (sys::AV_LOG_PANIC, Level::ERROR),
+            (sys::AV_LOG_FATAL, Level::ERROR),
+            (sys::AV_LOG_ERROR, Level::ERROR),
+            (sys::AV_LOG_WARNING, Level::WARN),
+            (sys::AV_LOG_INFO | (134 << 8), Level::INFO),
+            (sys::AV_LOG_VERBOSE, Level::DEBUG),
+            (sys::AV_LOG_DEBUG, Level::TRACE),
+            (sys::AV_LOG_TRACE, Level::TRACE),
+        ] {
+            let tag = format!("level-test {av}");
+            log(av, &format!("{tag}\n"));
+            assert_eq!(captured(&tag), [(want, tag.clone())]);
+        }
+
+        // Several threads at once: every line arrives once and whole.
+        std::thread::scope(|s| {
+            for t in 0..8 {
+                s.spawn(move || {
+                    for i in 0..200 {
+                        log(sys::AV_LOG_WARNING, &format!("thread-test {t}/{i} end\n"));
+                    }
+                });
+            }
+        });
+        let got = captured("thread-test");
+        assert_eq!(got.len(), 8 * 200);
+        for t in 0..8 {
+            for i in 0..200 {
+                let line = format!("thread-test {t}/{i} end");
+                assert_eq!(got.iter().filter(|(_, m)| *m == line).count(), 1, "{line}");
+            }
+        }
+
+        // A line logged in two calls is prefixed with its context once.
+        // SAFETY: allocates a context to log with, freed below.
+        let fctx = unsafe { sys::avformat_alloc_context() };
+        assert!(!fctx.is_null());
+        for part in [
+            c"prefix-test start, ",
+            c"prefix-test end\n",
+            c"prefix-test next\n",
+        ] {
+            // SAFETY: `fctx` starts with its AVClass, as av_log requires;
+            // the format has no conversions.
+            unsafe { sys::av_log(fctx.cast(), sys::AV_LOG_ERROR, part.as_ptr()) };
+        }
+        // SAFETY: frees the context allocated above, which nothing else
+        // holds.
+        unsafe { sys::avformat_free_context(fctx) };
+        let got: Vec<_> = captured("prefix-test")
+            .into_iter()
+            .map(|(_, m)| m)
+            .collect();
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert!(got[0].starts_with("[AVFormatContext @ 0x"), "{got:?}");
+        assert!(got[0].ends_with("] prefix-test start,"), "{got:?}");
+        assert_eq!(got[1], "prefix-test end");
+        assert!(got[2].starts_with("[AVFormatContext @ 0x"), "{got:?}");
+
+        // FFmpeg's level follows the subscriber, so it skips what nobody
+        // reads.
+        set_max(Some(Level::WARN));
+        // SAFETY: reads a global int.
+        assert_eq!(unsafe { sys::av_log_get_level() }, sys::AV_LOG_WARNING);
+        log(sys::AV_LOG_INFO, "quiet-test info\n");
+        log(sys::AV_LOG_WARNING, "quiet-test warning\n");
+        assert_eq!(
+            captured("quiet-test"),
+            [(Level::WARN, "quiet-test warning".to_string())]
+        );
+        set_max(None);
+        // SAFETY: reads a global int.
+        assert_eq!(unsafe { sys::av_log_get_level() }, sys::AV_LOG_QUIET);
+        log(sys::AV_LOG_PANIC, "off-test\n");
+        assert!(captured("off-test").is_empty());
+    }
 }

@@ -38,13 +38,7 @@ enum Cmd {
 }
 
 fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("SPHERECUT_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    init_logging();
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(e) => {
@@ -52,6 +46,39 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Log warnings to stderr, but not FFmpeg's own messages: it logs an error
+/// for every device doctor tries that isn't there, and our errors already
+/// say what failed. `SPHERECUT_LOG` adds `EnvFilter` directives, e.g.
+/// `debug`, `ffmpeg=debug` or `spherecut_media=trace`. FFmpeg's messages
+/// show when it names the `ffmpeg` target or sets a level for everything.
+fn init_logging() {
+    use std::io::IsTerminal;
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::filter::LevelFilter;
+    const DEFAULT: &str = "warn,ffmpeg=off";
+    let filter = match std::env::var("SPHERECUT_LOG") {
+        Ok(v) if !v.trim().is_empty() => {
+            // `ffmpeg=off` would outrank a global level (a directive naming
+            // the target wins), so a global level replaces the default.
+            // `ffmpeg=...` simply overrides it.
+            let global = v
+                .split(',')
+                .any(|d| d.trim().parse::<LevelFilter>().is_ok());
+            let base = if global { "warn" } else { DEFAULT };
+            EnvFilter::try_new(format!("{base},{v}")).unwrap_or_else(|e| {
+                eprintln!("warning: ignoring SPHERECUT_LOG={v}: {e}");
+                EnvFilter::new(DEFAULT)
+            })
+        }
+        _ => EnvFilter::new(DEFAULT),
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
