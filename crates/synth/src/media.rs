@@ -107,17 +107,16 @@ impl Spec {
 }
 
 /// Render and encode `spec` into `dir`. Returns the file path.
+///
+/// [`Mp4Writer`] renames a file into place only when it is complete, so if
+/// the path exists it holds a whole clip, even after an interrupted run,
+/// and callers may cache clips by whether the file exists.
 pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
     std::fs::create_dir_all(dir).map_err(|source| SynthError::Io {
         path: dir.to_path_buf(),
         source,
     })?;
     let out = dir.join(spec.file_name());
-    let raw = if spec.spherical {
-        dir.join(format!(".{}.tmp.mp4", spec.name))
-    } else {
-        out.clone()
-    };
     let sample_rate = 48_000u32;
     let audio_settings = match spec.audio {
         Audio::None => None,
@@ -126,15 +125,17 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             sample_rate,
             channels: 2,
             bit_rate: 192_000,
+            options: Vec::new(),
         }),
         Audio::AmbiX { .. } => Some(AudioSettings {
             encoder: "aac".into(),
             sample_rate,
             channels: 4,
             bit_rate: 256_000,
+            options: Vec::new(),
         }),
     };
-    let mut w = Mp4Writer::create(&raw, &spec.video_settings(), audio_settings.as_ref())?;
+    let mut w = Mp4Writer::create(&out, &spec.video_settings(), audio_settings.as_ref())?;
     // Exact per-frame sample counts: frame i covers samples
     // [i·sr/fps, (i+1)·sr/fps).
     let fps = spec.rate.as_rational();
@@ -161,7 +162,6 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             w.push_audio(&chunk)?;
         }
     }
-    w.finish()?;
     if spec.spherical {
         let mut edits = vec![EntryEdit {
             track: TrackKind::Video,
@@ -177,11 +177,9 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
                 boxes: write::sa3d_first_order_ambix(),
             });
         }
-        inject::inject(&raw, &out, &edits)?;
-        std::fs::remove_file(&raw).map_err(|source| SynthError::Io {
-            path: raw.clone(),
-            source,
-        })?;
+        w.finish_with_edits(&edits)?;
+    } else {
+        w.finish()?;
     }
     Ok(out)
 }
@@ -221,14 +219,22 @@ pub fn standard_set() -> Vec<Spec> {
             frames: 25,
             ..base("grid-h264-25")
         },
+        // High 10, which common GPUs don't decode: the software path.
+        Spec {
+            codec: Codec::H264,
+            bits: 10,
+            ..base("grid-h264-10bit-30")
+        },
         Spec {
             spherical: false,
             ..base("grid-hevc8-30-untagged")
         },
+        // Front left and up, where Y, Z and X all differ, so a swapped
+        // channel shows.
         Spec {
             audio: Audio::AmbiX {
-                azimuth: 45,
-                elevation: 30,
+                azimuth: 30,
+                elevation: 20,
             },
             ..base("grid-hevc8-30-ambix")
         },

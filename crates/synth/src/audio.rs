@@ -72,7 +72,14 @@ mod tests {
 
     #[test]
     fn direction_round_trips() {
-        for (az, el) in [(0.0, 0.0), (90.0, 0.0), (-135.0, 20.0), (45.0, 30.0)] {
+        for (az, el) in [
+            (0.0, 0.0),
+            (90.0, 0.0),
+            (-135.0, 20.0),
+            (45.0, 30.0),
+            (30.0, 20.0),
+            (120.0, -20.0),
+        ] {
             let a = ambix_source(48_000, 4800, az, el);
             let (raz, rel) = ambix_direction(&a).unwrap();
             assert!(
