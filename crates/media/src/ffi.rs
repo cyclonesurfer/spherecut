@@ -408,6 +408,27 @@ pub fn format_start_time(ictx: &ff::format::context::Input) -> i64 {
     unsafe { (*ictx.as_ptr()).start_time }
 }
 
+/// Where the last sample that the demuxer's index lists for stream `index`
+/// ends, in bytes from the start of the file. `None` without an index.
+pub fn index_end(ictx: &ff::format::context::Input, index: usize) -> Option<u64> {
+    let st = ictx.stream(index)?;
+    // SAFETY: the stream lives as long as `ictx`, which stays borrowed. The
+    // index functions only read it, though avformat_index_get_entry's
+    // parameter isn't const.
+    let st = unsafe { st.as_ptr() }.cast_mut();
+    // SAFETY: as above.
+    let n = unsafe { sys::avformat_index_get_entries_count(st) };
+    (0..n)
+        .filter_map(|i| {
+            // SAFETY: `i` is in range, and the entry is read before anything
+            // else can touch the stream; AVIndexEntry has no enum fields.
+            let e = unsafe { sys::avformat_index_get_entry(st, i).as_ref() }?;
+            let pos = u64::try_from(e.pos).ok()?;
+            Some(pos + u64::try_from(e.size()).unwrap_or(0))
+        })
+        .max()
+}
+
 /// A reference to an FFmpeg hardware device context. Dropping it releases
 /// the reference; FFmpeg's buffer refcounts are atomic, so it can move
 /// between threads.
