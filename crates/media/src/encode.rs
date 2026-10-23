@@ -1,15 +1,22 @@
 //! A small synchronous MP4 writer: one video stream from planar YUV frames
 //! and an optional audio stream from planar float samples.
 //!
+//! The file is written under a temporary name next to its destination and
+//! renamed into place when it is finished, the way [`crate::inject`]
+//! replaces files, so a failed or abandoned export never leaves a partial
+//! file at the destination.
+//!
 //! The synthetic test-media generator uses it today; the export pipeline
 //! (M2) builds on it with hardware encoders, a render queue and
 //! cancellation.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use spherecut_core::{FrameRate, Rational};
 use thiserror::Error;
 
+use crate::inject::{self, EntryEdit, InjectError, TempFile, follow_links};
 use crate::{ff, init};
 
 #[derive(Debug, Error)]
@@ -20,6 +27,11 @@ pub enum EncodeError {
     Ffmpeg { context: String, source: ff::Error },
     #[error("{0}")]
     Invalid(String),
+    /// On the destination (with links followed), never the temporary file.
+    #[error("writing {}: {source}", path.display())]
+    Io { path: PathBuf, source: io::Error },
+    #[error(transparent)]
+    Inject(#[from] InjectError),
 }
 
 fn ctx<T>(r: Result<T, ff::Error>, context: impl FnOnce() -> String) -> Result<T, EncodeError> {
@@ -77,7 +89,10 @@ pub enum YuvPlanes {
 }
 
 pub struct Mp4Writer {
+    /// The destination as given to `create`.
     path: PathBuf,
+    /// What FFmpeg writes to; `finish` renames it onto the destination.
+    tmp: TempFile,
     octx: ff::format::context::Output,
     video: ff::encoder::Video,
     video_index: usize,
@@ -168,6 +183,26 @@ fn drain(
     }
 }
 
+/// The only sample format the writer sends.
+const PLANAR_F32: ff::format::Sample = ff::format::Sample::F32(ff::format::sample::Type::Planar);
+
+/// The encoder for `a`, if this FFmpeg has it and it takes what we send.
+fn audio_encoder(a: &AudioSettings) -> Result<ff::Codec, EncodeError> {
+    let codec = ff::encoder::find_by_name(&a.encoder)
+        .ok_or_else(|| EncodeError::NoEncoder(a.encoder.clone()))?;
+    // We only send planar float; say so rather than let the encoder fail to
+    // open with EINVAL (libopus takes packed).
+    if let Some(mut formats) = codec.audio().ok().and_then(|c| c.formats())
+        && !formats.any(|f| f == PLANAR_F32)
+    {
+        return Err(EncodeError::Invalid(format!(
+            "audio encoder `{}` does not take planar float samples",
+            a.encoder
+        )));
+    }
+    Ok(codec)
+}
+
 fn ff_rational(r: Rational) -> Result<ff::Rational, EncodeError> {
     let n = i32::try_from(r.num()).map_err(|_| EncodeError::Invalid("rate too large".into()))?;
     let d = i32::try_from(r.den()).map_err(|_| EncodeError::Invalid("rate too large".into()))?;
@@ -183,6 +218,12 @@ fn dict(opts: &[(String, String)]) -> ff::Dictionary<'static> {
 }
 
 impl Mp4Writer {
+    /// Start an MP4 file (whatever `path`'s extension) to be written to
+    /// `path` by [`finish`](Self::finish). Until then it lives under a
+    /// temporary name in the same directory, removed if the writer is
+    /// dropped unfinished. An existing file at `path` is replaced as
+    /// [`inject::inject`] replaces its output: permissions kept, symlinks
+    /// written through.
     pub fn create(
         path: &Path,
         v: &VideoSettings,
@@ -199,16 +240,35 @@ impl Mp4Writer {
                 v.width, v.height
             )));
         }
-        let mut octx = ctx(ff::format::output(path), || {
-            format!("creating {}", path.display())
+        // Both encoders exist before anything touches the disk.
+        let vcodec = ff::encoder::find_by_name(&v.encoder)
+            .ok_or_else(|| EncodeError::NoEncoder(v.encoder.clone()))?;
+        let acodec = a.map(audio_encoder).transpose()?;
+
+        let dest = follow_links(path).map_err(|source| EncodeError::Io {
+            path: path.to_path_buf(),
+            source,
         })?;
+        let io_err = |source| EncodeError::Io {
+            path: dest.clone(),
+            source,
+        };
+        let tmp = TempFile::create(&dest).map_err(io_err)?;
+        // FFmpeg writes through our handle rather than reopening the file by
+        // name, so it writes exactly the file we created.
+        let file = tmp.file().try_clone().map_err(io_err)?;
+        let stream = ctx(ff::format::context::StreamIo::from_write_seek(file), || {
+            format!("opening {}", dest.display())
+        })?;
+        let mut octx = ctx(
+            ff::format::output_to_stream(stream, None, Some("mp4")),
+            || format!("creating {}", dest.display()),
+        )?;
         let global_header = octx
             .format()
             .flags()
             .contains(ff::format::Flags::GLOBAL_HEADER);
 
-        let vcodec = ff::encoder::find_by_name(&v.encoder)
-            .ok_or_else(|| EncodeError::NoEncoder(v.encoder.clone()))?;
         let video_index = ctx(octx.add_stream(vcodec), || "adding video stream".into())?.index();
         let mut venc = ctx(
             ff::codec::context::Context::new_with_codec(vcodec)
@@ -244,22 +304,9 @@ impl Mp4Writer {
             ost.set_avg_frame_rate(fps);
         }
 
-        let audio = match a {
+        let audio = match a.zip(acodec) {
             None => None,
-            Some(a) => {
-                let acodec = ff::encoder::find_by_name(&a.encoder)
-                    .ok_or_else(|| EncodeError::NoEncoder(a.encoder.clone()))?;
-                // We only send planar float; say so rather than let the
-                // encoder fail to open with EINVAL (libopus takes packed).
-                let planar = ff::format::Sample::F32(ff::format::sample::Type::Planar);
-                if let Some(mut formats) = acodec.audio().ok().and_then(|c| c.formats())
-                    && !formats.any(|f| f == planar)
-                {
-                    return Err(EncodeError::Invalid(format!(
-                        "audio encoder `{}` does not take planar float samples",
-                        a.encoder
-                    )));
-                }
+            Some((a, acodec)) => {
                 let index = ctx(octx.add_stream(acodec), || "adding audio stream".into())?.index();
                 let mut aenc = ctx(
                     ff::codec::context::Context::new_with_codec(acodec)
@@ -272,7 +319,7 @@ impl Mp4Writer {
                     .map_err(|_| EncodeError::Invalid("sample rate too large".into()))?;
                 aenc.set_rate(rate);
                 aenc.set_channel_layout(layout);
-                aenc.set_format(planar);
+                aenc.set_format(PLANAR_F32);
                 aenc.set_bit_rate(a.bit_rate);
                 let tb = ff::Rational::new(1, rate);
                 aenc.set_time_base(tb);
@@ -309,6 +356,7 @@ impl Mp4Writer {
         ctx(octx.write_header(), || "writing MP4 header".into())?;
         Ok(Mp4Writer {
             path: path.to_path_buf(),
+            tmp,
             octx,
             video: venc,
             video_index,
@@ -406,11 +454,7 @@ impl Mp4Writer {
             } else {
                 return Ok(());
             };
-            let mut frame = ff::frame::Audio::new(
-                ff::format::Sample::F32(ff::format::sample::Type::Planar),
-                n,
-                a.layout,
-            );
+            let mut frame = ff::frame::Audio::new(PLANAR_F32, n, a.layout);
             frame.set_rate(a.tb.denominator() as u32);
             for ch in 0..a.channels {
                 let plane = frame.plane_mut::<f32>(ch);
@@ -441,8 +485,28 @@ impl Mp4Writer {
         drain(&mut a.enc, &mut self.octx, a.index, a.tb, "audio")
     }
 
-    /// Flush encoders and write the trailer.
-    pub fn finish(mut self) -> Result<PathBuf, EncodeError> {
+    /// Flush the encoders, write the trailer and rename the file into place.
+    /// Returns the path it was created with.
+    pub fn finish(self) -> Result<PathBuf, EncodeError> {
+        let (path, tmp) = self.close()?;
+        let dest = tmp.dest().to_path_buf();
+        tmp.persist()
+            .map_err(|source| EncodeError::Io { path: dest, source })?;
+        Ok(path)
+    }
+
+    /// Like [`finish`](Self::finish), but the file goes into place through
+    /// [`inject::inject`] with `edits` applied, so it appears with its
+    /// metadata boxes (spherical video and audio, say) already in it.
+    pub fn finish_with_edits(self, edits: &[EntryEdit]) -> Result<PathBuf, EncodeError> {
+        let (path, tmp) = self.close()?;
+        inject::inject(tmp.path(), tmp.dest(), edits)?;
+        // `tmp` is removed as it drops.
+        Ok(path)
+    }
+
+    /// Flush everything into the temporary file and close the muxer.
+    fn close(mut self) -> Result<(PathBuf, TempFile), EncodeError> {
         ctx(self.video.send_eof(), || "flushing video".into())?;
         self.drain_video()?;
         if self.audio.is_some() {
@@ -453,6 +517,11 @@ impl Mp4Writer {
             self.drain_audio()?;
         }
         ctx(self.octx.write_trailer(), || "writing MP4 trailer".into())?;
-        Ok(self.path)
+        let Mp4Writer {
+            path, tmp, octx, ..
+        } = self;
+        // The trailer flushed FFmpeg's buffer; this lets go of its handle.
+        drop(octx);
+        Ok((path, tmp))
     }
 }

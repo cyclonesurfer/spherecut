@@ -156,7 +156,7 @@ fn temp_name() -> String {
 /// The file that writing to `path` would write: `path` itself, or the file
 /// a symlink there points to, through any chain of links. A dangling link
 /// gives the file that writing through it would create.
-fn follow_links(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn follow_links(path: &Path) -> io::Result<PathBuf> {
     let mut p = path.to_path_buf();
     // The kernel's own limit for one lookup.
     for _ in 0..40 {
@@ -180,7 +180,9 @@ fn follow_links(path: &Path) -> io::Result<PathBuf> {
 /// A new file next to `dest`, renamed onto it by [`TempFile::persist`] and
 /// removed if dropped before that (on an error or a panic). `dest` itself
 /// is replaced, so follow links first ([`follow_links`]).
-struct TempFile {
+///
+/// [`crate::encode::Mp4Writer`] writes its files through one too.
+pub(crate) struct TempFile {
     path: PathBuf,
     dest: PathBuf,
     file: File,
@@ -188,8 +190,20 @@ struct TempFile {
 }
 
 impl TempFile {
-    fn create(dest: &Path) -> io::Result<Self> {
+    pub(crate) fn create(dest: &Path) -> io::Result<Self> {
         Self::create_named(dest, temp_name)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn dest(&self) -> &Path {
+        &self.dest
+    }
+
+    pub(crate) fn file(&self) -> &File {
+        &self.file
     }
 
     /// [`TempFile::create`] with names from `name`. A name that is taken
@@ -240,7 +254,7 @@ impl TempFile {
     }
 
     /// Flush to disk and rename into place.
-    fn persist(mut self) -> io::Result<()> {
+    pub(crate) fn persist(mut self) -> io::Result<()> {
         self.file.sync_all()?;
         std::fs::rename(&self.path, &self.dest)?;
         self.persisted = true;

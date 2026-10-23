@@ -65,17 +65,33 @@ fn write_leaves_only_complete_files() {
     assert_eq!(listing(&dir), ["tagged.mp4", "untagged.mp4"]);
 
     // When the final rename fails (a directory is in the way), the error
-    // comes back and no part file is left.
+    // names the destination and no temporary file is left.
     let blocked = tmp("atomic-blocked");
     for s in [&tagged, &untagged] {
-        std::fs::create_dir(blocked.join(s.file_name())).unwrap();
-        let r = media::write(s, &blocked);
-        assert!(r.is_err(), "{}: {r:?}", s.name);
+        let dest = blocked.join(s.file_name());
+        std::fs::create_dir(&dest).unwrap();
+        let e = media::write(s, &blocked).unwrap_err().to_string();
+        assert!(
+            e.contains(&*dest.to_string_lossy()) && !e.contains(".tmp"),
+            "{}: {e}",
+            s.name
+        );
     }
     assert_eq!(listing(&blocked), ["tagged.mp4", "untagged.mp4"]);
     assert!(blocked.join("tagged.mp4").is_dir());
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_dir_all(&blocked).ok();
+}
+
+#[test]
+fn clips_with_the_longest_legal_names_can_be_written() {
+    // Temporary names used to grow with the clip's and pass NAME_MAX.
+    let dir = tmp("long-name");
+    let s = spec(&"c".repeat(251), 64, 2, Codec::H264, 8, Audio::Stereo);
+    assert_eq!(s.file_name().len(), 255);
+    media::write(&s, &dir).unwrap();
+    assert_eq!(listing(&dir), [s.file_name()]);
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -253,15 +269,51 @@ fn black_frame() -> YuvPlanes {
 }
 
 #[test]
-fn push_audio_rejects_bad_input_without_panicking() {
-    let dir = tmp("bad-audio");
-    let a = AudioSettings {
+fn unfinished_exports_leave_the_destination_alone() {
+    let dir = tmp("unfinished");
+    let out = dir.join("out.mp4");
+    std::fs::write(&out, b"old").unwrap();
+    // A writer dropped part way, as after an encode error or a cancel.
+    let mut w = Mp4Writer::create(&out, &video_settings(), None).unwrap();
+    w.push_video(&black_frame()).unwrap();
+    drop(w);
+    // A missing encoder is found before anything is written. This used to
+    // leave an empty file.
+    let missing = AudioSettings {
+        encoder: "no-such-encoder".into(),
+        ..aac(2)
+    };
+    let r = Mp4Writer::create(&dir.join("new.mp4"), &video_settings(), Some(&missing));
+    assert!(matches!(r, Err(EncodeError::NoEncoder(_))), "{r:?}");
+    assert_eq!(std::fs::read(&out).unwrap(), b"old");
+    assert_eq!(listing(&dir), ["out.mp4"]);
+
+    // Finishing replaces the file, through a symlink to it.
+    let link = dir.join("link.mp4");
+    std::os::unix::fs::symlink("out.mp4", &link).unwrap();
+    let mut w = Mp4Writer::create(&link, &video_settings(), None).unwrap();
+    w.push_video(&black_frame()).unwrap();
+    assert_eq!(w.finish().unwrap(), link);
+    assert!(link.symlink_metadata().unwrap().is_symlink());
+    let r = probe::probe(&out).unwrap();
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    assert_eq!(listing(&dir), ["link.mp4", "out.mp4"]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+fn aac(channels: u32) -> AudioSettings {
+    AudioSettings {
         encoder: "aac".into(),
         sample_rate: 48_000,
-        channels: 2,
+        channels,
         bit_rate: 128_000,
-    };
-    let mut w = Mp4Writer::create(&dir.join("a.mp4"), &video_settings(), Some(&a)).unwrap();
+    }
+}
+
+#[test]
+fn push_audio_rejects_bad_input_without_panicking() {
+    let dir = tmp("bad-audio");
+    let mut w = Mp4Writer::create(&dir.join("a.mp4"), &video_settings(), Some(&aac(2))).unwrap();
     let wrong_count = w.push_audio(&[vec![0.0; 1600]]);
     assert!(
         matches!(wrong_count, Err(EncodeError::Invalid(_))),
