@@ -60,7 +60,9 @@ impl DecodedFrame {
         let is = |p: P| ffi::frame_format(f) == p as c_int;
         let (w, h) = (f.width() as usize, f.height() as usize);
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-        let row = |plane: usize, y: usize| -> &[u8] { &f.data(plane)[y * f.stride(plane)..] };
+        // Semi-planar formats have no third plane; it is never read for them.
+        let planes = [0, 1, 2].map(|i| ffi::plane(f, i).unwrap_or_default());
+        let row = |plane: usize, y: usize| -> &[u8] { &planes[plane][y * f.stride(plane)..] };
         let rd16 = |b: &[u8], i: usize| u16::from_le_bytes([b[2 * i], b[2 * i + 1]]);
         let collect = |n: usize, h: usize, px: &dyn Fn(usize, usize) -> u16| -> Vec<u16> {
             (0..h)
@@ -207,10 +209,7 @@ impl VideoDecoder {
                 count: 0,
             }),
         }
-        let dec = ctx
-            .decoder()
-            .video()
-            .map_err(|e| err(path, "opening decoder", e))?;
+        let dec = ffi::open_video_decoder(ctx).map_err(|e| err(path, "opening decoder", e))?;
         let codec = dec.codec();
         tracing::debug!(
             path = %path.display(),

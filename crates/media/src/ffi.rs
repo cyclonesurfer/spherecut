@@ -14,6 +14,10 @@
 //! transfer or device type); making a Rust enum from such a value is
 //! undefined behaviour. So the functions in [`c`] are declared with the
 //! `int` the C ABI passes, and enum fields are read with [`enum_int`].
+//! Some of ffmpeg-next's own accessors make such enums (`Frame::format`,
+//! `Parameters::medium`, `Context::id` when opening a decoder), so the
+//! decode and probe paths use [`frame_format`], [`plane`], [`media_type`]
+//! and [`open_video_decoder`] instead.
 
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -30,9 +34,10 @@ use thiserror::Error;
 mod c {
     use std::ffi::{c_char, c_int};
 
-    use ffmpeg_sys_next::{AVBufferRef, AVDictionary, AVPixFmtDescriptor};
+    use ffmpeg_sys_next::{AVBufferRef, AVCodec, AVDictionary, AVPixFmtDescriptor};
 
     unsafe extern "C" {
+        pub fn avcodec_find_decoder(id: c_int) -> *const AVCodec;
         pub fn avcodec_get_name(id: c_int) -> *const c_char;
         pub fn avcodec_profile_name(id: c_int, profile: c_int) -> *const c_char;
         pub fn av_get_pix_fmt_name(fmt: c_int) -> *const c_char;
@@ -212,6 +217,26 @@ pub fn codecpar_fields(p: &ff::codec::Parameters) -> CodecParFields {
         f.channel_layout = describe_layout(unsafe { &raw const (*par).ch_layout });
     }
     f
+}
+
+/// What a stream holds: `Parameters::medium` without making a bindgen enum
+/// of the field. A type our headers lack is `Unknown`.
+pub fn media_type(p: &ff::codec::Parameters) -> ff::media::Type {
+    use ff::media::Type;
+    use sys::AVMediaType as M;
+    // SAFETY: `p` borrows live codec parameters; the enum field is read as
+    // an int.
+    let t = unsafe { enum_int(&raw const (*p.as_ptr()).codec_type) };
+    [
+        (M::AVMEDIA_TYPE_VIDEO, Type::Video),
+        (M::AVMEDIA_TYPE_AUDIO, Type::Audio),
+        (M::AVMEDIA_TYPE_DATA, Type::Data),
+        (M::AVMEDIA_TYPE_SUBTITLE, Type::Subtitle),
+        (M::AVMEDIA_TYPE_ATTACHMENT, Type::Attachment),
+    ]
+    .into_iter()
+    .find(|(m, _)| *m as c_int == t)
+    .map_or(Type::Unknown, |(_, kind)| kind)
 }
 
 /// `l` points at the channel layout of live codec parameters.
@@ -562,11 +587,80 @@ pub fn attach_hw_device(
     Ok(())
 }
 
+/// Open the decoder for a codec context made from a video stream's
+/// parameters. ffmpeg-next's `Decoder::video` would look the decoder up
+/// from the codec id, and check the media type, as bindgen enums; a file
+/// with a codec newer than our headers would make an invalid one.
+pub fn open_video_decoder(
+    ctx: ff::codec::context::Context,
+) -> Result<ff::decoder::Video, ff::Error> {
+    // SAFETY: `ctx` owns a live AVCodecContext; its enum fields are read as
+    // ints.
+    let (kind, id) = unsafe {
+        let c = ctx.as_ptr();
+        (
+            enum_int(&raw const (*c).codec_type),
+            enum_int(&raw const (*c).codec_id),
+        )
+    };
+    if kind != sys::AVMediaType::AVMEDIA_TYPE_VIDEO as c_int {
+        return Err(ff::Error::InvalidData);
+    }
+    // SAFETY: accepts any id; NULL when no decoder for it is built in.
+    let codec = unsafe { c::avcodec_find_decoder(id) };
+    if codec.is_null() {
+        return Err(ff::Error::DecoderNotFound);
+    }
+    // SAFETY: registered codecs are static.
+    let codec = unsafe { ff::Codec::wrap(codec) };
+    // The media type is checked above, which is all `Opened::video` checks.
+    ctx.decoder().open_as(codec).map(ff::decoder::Video)
+}
+
 /// A frame's pixel format as FFmpeg's int, to compare and name it without
 /// making a bindgen enum of it (as `ff::frame::Video::format` does).
 pub fn frame_format(frame: &ff::frame::Video) -> c_int {
     // SAFETY: `frame` wraps a live AVFrame; `format` is a plain int field.
     unsafe { (*frame.as_ptr()).format }
+}
+
+/// Plane `index` of a frame in system memory, as `ff::frame::Video::data`
+/// gives it, but sized from the pixel format read as an int (`data` calls
+/// `Frame::format`). `None` for a plane the format doesn't have, for a
+/// hardware frame, and for a format this libavutil doesn't describe.
+pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
+    // SAFETY: `frame` wraps a live AVFrame; these are plain fields.
+    let (format, height, data, linesize) = unsafe {
+        let f = frame.as_ptr();
+        (
+            (*f).format,
+            (*f).height,
+            *(*f).data.get(index)?,
+            *(*f).linesize.get(index)?,
+        )
+    };
+    // SAFETY: accepts any value and returns NULL for unknown ones; non-NULL
+    // descriptors point at static tables with no enum fields.
+    let d = unsafe { c::av_pix_fmt_desc_get(format).as_ref() }?;
+    let planes = d.comp[..usize::from(d.nb_components).min(4)]
+        .iter()
+        .map(|c| c.plane as usize + 1)
+        .max()?;
+    let hw = d.flags & sys::AV_PIX_FMT_FLAG_HWACCEL as u64 != 0;
+    if hw || index >= planes || data.is_null() || linesize <= 0 || height <= 0 {
+        return None;
+    }
+    // Planes 1 and 2 hold chroma, subsampled vertically (rounding up).
+    let rows = match index {
+        1 | 2 => -((-height) >> d.log2_chroma_h),
+        _ => height,
+    };
+    // SAFETY: a frame FFmpeg allocates for this format has `rows` rows of
+    // `linesize` bytes from `data` in this plane, as av_image_fill_pointers
+    // lays them out (decoders pad their buffers beyond that, which also
+    // covers a cropped frame's shifted `data`). The buffers live as long as
+    // the frame, which stays borrowed.
+    Some(unsafe { std::slice::from_raw_parts(data, linesize as usize * rows as usize) })
 }
 
 /// FFmpeg's name for a pixel format, e.g. "yuv420p" or "vaapi".
