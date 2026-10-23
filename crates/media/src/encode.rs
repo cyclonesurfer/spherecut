@@ -101,10 +101,71 @@ struct AudioState {
     enc: ff::encoder::Audio,
     index: usize,
     tb: ff::Rational,
+    /// Samples per frame sent to the encoder (the last may be shorter).
     frame_size: usize,
     channels: usize,
+    layout: ff::ChannelLayout,
     pending: Vec<Vec<f32>>,
     next_pts: i64,
+}
+
+/// FFmpeg's default layout for `channels`.
+///
+/// Four channels are first-order ambiX here, and they get 4.0, which is
+/// not what they are. Nothing better exists for AAC: FFmpeg's native
+/// encoder refuses the ambisonic and unspecified channel orders (checked on
+/// 6.1, 8.1 and 9.0), and an AAC stream can only name speaker positions.
+/// 4.0 is channel configuration 4, which every decoder handles and which
+/// keeps the channel order; quad needs a PCE and 3.1 low-passes a channel
+/// as LFE. The `SA3D` box that `inject` adds is what marks the track as
+/// ambiX, as YouTube's spatial audio spec intends. FFmpeg's mp4 demuxer
+/// reads it as "ambisonic 1", until its AAC decoder reports 4.0 again.
+fn channel_layout(channels: u32) -> Result<ff::ChannelLayout, EncodeError> {
+    let n = i32::try_from(channels)
+        .ok()
+        .filter(|&n| n > 0)
+        .ok_or_else(|| EncodeError::Invalid(format!("{channels} audio channels")))?;
+    Ok(ff::ChannelLayout::default(n))
+}
+
+/// Samples per frame for an encoder that takes frames of any length: 20 ms,
+/// a common packet duration.
+fn variable_frame_size(sample_rate: u32) -> usize {
+    (sample_rate as usize / 50).max(1)
+}
+
+/// Write every packet the encoder has ready. EAGAIN (it wants more input)
+/// and EOF (it is fully flushed) end the loop; any other error is real.
+fn drain(
+    enc: &mut ff::encoder::Encoder,
+    octx: &mut ff::format::context::Output,
+    index: usize,
+    enc_tb: ff::Rational,
+    what: &str,
+) -> Result<(), EncodeError> {
+    let ost_tb = octx
+        .stream(index)
+        .map(|s| s.time_base())
+        .ok_or_else(|| EncodeError::Invalid(format!("{what} stream vanished")))?;
+    let mut pkt = ff::Packet::empty();
+    loop {
+        match enc.receive_packet(&mut pkt) {
+            Ok(()) => {}
+            Err(ff::Error::Other { errno }) if errno == ff::util::error::EAGAIN => return Ok(()),
+            Err(ff::Error::Eof) => return Ok(()),
+            Err(source) => {
+                return Err(EncodeError::Ffmpeg {
+                    context: format!("encoding {what}"),
+                    source,
+                });
+            }
+        }
+        pkt.set_stream(index);
+        pkt.rescale_ts(enc_tb, ost_tb);
+        ctx(pkt.write_interleaved(octx), || {
+            format!("writing {what} packet")
+        })?;
+    }
 }
 
 fn ff_rational(r: Rational) -> Result<ff::Rational, EncodeError> {
@@ -188,6 +249,17 @@ impl Mp4Writer {
             Some(a) => {
                 let acodec = ff::encoder::find_by_name(&a.encoder)
                     .ok_or_else(|| EncodeError::NoEncoder(a.encoder.clone()))?;
+                // We only send planar float; say so rather than let the
+                // encoder fail to open with EINVAL (libopus takes packed).
+                let planar = ff::format::Sample::F32(ff::format::sample::Type::Planar);
+                if let Some(mut formats) = acodec.audio().ok().and_then(|c| c.formats())
+                    && !formats.any(|f| f == planar)
+                {
+                    return Err(EncodeError::Invalid(format!(
+                        "audio encoder `{}` does not take planar float samples",
+                        a.encoder
+                    )));
+                }
                 let index = ctx(octx.add_stream(acodec), || "adding audio stream".into())?.index();
                 let mut aenc = ctx(
                     ff::codec::context::Context::new_with_codec(acodec)
@@ -195,12 +267,12 @@ impl Mp4Writer {
                         .audio(),
                     || "audio encoder context".into(),
                 )?;
-                let layout = ff::ChannelLayout::default(a.channels as i32);
+                let layout = channel_layout(a.channels)?;
                 let rate = i32::try_from(a.sample_rate)
                     .map_err(|_| EncodeError::Invalid("sample rate too large".into()))?;
                 aenc.set_rate(rate);
                 aenc.set_channel_layout(layout);
-                aenc.set_format(ff::format::Sample::F32(ff::format::sample::Type::Planar));
+                aenc.set_format(planar);
                 aenc.set_bit_rate(a.bit_rate);
                 let tb = ff::Rational::new(1, rate);
                 aenc.set_time_base(tb);
@@ -208,7 +280,12 @@ impl Mp4Writer {
                     aenc.set_flags(ff::codec::Flags::GLOBAL_HEADER);
                 }
                 let aenc = ctx(aenc.open(), || format!("opening {}", a.encoder))?;
-                let frame_size = (aenc.frame_size() as usize).max(1024);
+                // A non-zero frame size is fixed (AAC 1024, Opus 960, Vorbis
+                // 64): every frame but the last must have exactly that many.
+                let frame_size = match aenc.frame_size() as usize {
+                    0 => variable_frame_size(a.sample_rate),
+                    n => n,
+                };
                 {
                     let mut ost = octx
                         .stream_mut(index)
@@ -222,6 +299,7 @@ impl Mp4Writer {
                     tb,
                     frame_size,
                     channels: a.channels as usize,
+                    layout,
                     pending: vec![Vec::new(); a.channels as usize],
                     next_pts: 0,
                 })
@@ -289,13 +367,25 @@ impl Mp4Writer {
         self.drain_video()
     }
 
-    /// Append interleaved-by-channel audio: `samples[ch][i]`.
+    /// Append planar audio, `samples[ch][i]`: one slice per channel, all
+    /// the same length.
     pub fn push_audio(&mut self, samples: &[Vec<f32>]) -> Result<(), EncodeError> {
         let Some(a) = self.audio.as_mut() else {
             return Err(EncodeError::Invalid("no audio stream".into()));
         };
         if samples.len() != a.channels {
-            return Err(EncodeError::Invalid("wrong channel count".into()));
+            return Err(EncodeError::Invalid(format!(
+                "{} audio channels pushed to a {}-channel stream",
+                samples.len(),
+                a.channels
+            )));
+        }
+        let n = samples.first().map_or(0, Vec::len);
+        if let Some((ch, s)) = samples.iter().enumerate().find(|(_, s)| s.len() != n) {
+            return Err(EncodeError::Invalid(format!(
+                "audio channel {ch} has {} samples, channel 0 has {n}",
+                s.len()
+            )));
         }
         for (p, s) in a.pending.iter_mut().zip(samples) {
             p.extend_from_slice(s);
@@ -319,7 +409,7 @@ impl Mp4Writer {
             let mut frame = ff::frame::Audio::new(
                 ff::format::Sample::F32(ff::format::sample::Type::Planar),
                 n,
-                ff::ChannelLayout::default(a.channels as i32),
+                a.layout,
             );
             frame.set_rate(a.tb.denominator() as u32);
             for ch in 0..a.channels {
@@ -335,40 +425,20 @@ impl Mp4Writer {
     }
 
     fn drain_video(&mut self) -> Result<(), EncodeError> {
-        let ost_tb = self
-            .octx
-            .stream(self.video_index)
-            .map(|s| s.time_base())
-            .ok_or_else(|| EncodeError::Invalid("video stream vanished".into()))?;
-        let mut pkt = ff::Packet::empty();
-        while self.video.receive_packet(&mut pkt).is_ok() {
-            pkt.set_stream(self.video_index);
-            pkt.rescale_ts(self.video_tb, ost_tb);
-            ctx(pkt.write_interleaved(&mut self.octx), || {
-                "writing video packet".into()
-            })?;
-        }
-        Ok(())
+        drain(
+            &mut self.video,
+            &mut self.octx,
+            self.video_index,
+            self.video_tb,
+            "video",
+        )
     }
 
     fn drain_audio(&mut self) -> Result<(), EncodeError> {
         let Some(a) = self.audio.as_mut() else {
             return Ok(());
         };
-        let ost_tb = self
-            .octx
-            .stream(a.index)
-            .map(|s| s.time_base())
-            .ok_or_else(|| EncodeError::Invalid("audio stream vanished".into()))?;
-        let mut pkt = ff::Packet::empty();
-        while a.enc.receive_packet(&mut pkt).is_ok() {
-            pkt.set_stream(a.index);
-            pkt.rescale_ts(a.tb, ost_tb);
-            ctx(pkt.write_interleaved(&mut self.octx), || {
-                "writing audio packet".into()
-            })?;
-        }
-        Ok(())
+        drain(&mut a.enc, &mut self.octx, a.index, a.tb, "audio")
     }
 
     /// Flush encoders and write the trailer.
