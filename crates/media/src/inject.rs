@@ -5,10 +5,15 @@
 //! Only `moov` changes size. Its ancestors' size fields are patched in
 //! place, and when `moov` sits before `mdat` ("faststart") every chunk
 //! offset that points past `moov` is shifted by the size change.
+//!
+//! The output is written to a temporary file next to it and renamed into
+//! place, so it is always either absent, the old file or the whole new one.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
 
@@ -22,6 +27,8 @@ pub enum InjectError {
     Io(#[from] io::Error),
     #[error("{0}")]
     Unsupported(String),
+    #[error("{} and {} are the same file", input.display(), output.display())]
+    SameFile { input: PathBuf, output: PathBuf },
 }
 
 /// Which track's first sample entry to edit.
@@ -78,9 +85,81 @@ fn box_types(boxes: &[u8]) -> Result<Vec<[u8; 4]>, InjectError> {
     Ok(out)
 }
 
-/// Write `input` to `output` with the edits applied. `input` and `output`
-/// must differ.
+/// Refuse an `output` that is `input` under any name (the same path, a
+/// hard link, a symlink): we would read the input while overwriting it.
+fn check_not_same_file(input: &Path, output: &Path) -> Result<(), InjectError> {
+    let a = std::fs::metadata(input)?;
+    match std::fs::metadata(output) {
+        Ok(b) if (a.dev(), a.ino()) == (b.dev(), b.ino()) => Err(InjectError::SameFile {
+            input: input.to_path_buf(),
+            output: output.to_path_buf(),
+        }),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// A new file next to `dest`, renamed onto it by [`TempFile::persist`] and
+/// removed if dropped before that (on an error or a panic).
+struct TempFile {
+    path: PathBuf,
+    dest: PathBuf,
+    file: File,
+    persisted: bool,
+}
+
+impl TempFile {
+    fn create(dest: &Path) -> io::Result<Self> {
+        // Unique per process and call, so concurrent writers of the same
+        // destination never share a temp file.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let name = dest.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "output path has no file name")
+        })?;
+        let mut tmp_name = std::ffi::OsString::from(".");
+        tmp_name.push(name);
+        tmp_name.push(format!(
+            ".{}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = dest.with_file_name(tmp_name);
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        Ok(TempFile {
+            path,
+            dest: dest.to_path_buf(),
+            file,
+            persisted: false,
+        })
+    }
+
+    /// Flush to disk and rename into place.
+    fn persist(mut self) -> io::Result<()> {
+        self.file.sync_all()?;
+        std::fs::rename(&self.path, &self.dest)?;
+        self.persisted = true;
+        Ok(())
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if !self.persisted
+            && let Err(e) = std::fs::remove_file(&self.path)
+        {
+            tracing::warn!("could not remove {}: {e}", self.path.display());
+        }
+    }
+}
+
+/// Write `input` to `output` with the edits applied. `output` must not be
+/// `input`; it is replaced atomically.
 pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), InjectError> {
+    check_not_same_file(input, output)?;
     let tree = mp4::read_file(input)?;
     let moov = tree
         .moov()
@@ -177,13 +256,28 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
         shift_chunk_offsets(&mut moov_bytes, moov_end, total_delta)?;
     }
 
-    let mut out = BufWriter::new(File::create(output)?);
+    let mut tmp = TempFile::create(output)?;
+    let mut out = BufWriter::new(&mut tmp.file);
+    // Copy exactly the lengths the parse saw, never "to the end": the
+    // output can't outgrow the input, whatever happens to the input file.
     f.seek(SeekFrom::Start(0))?;
-    io::copy(&mut (&mut f).take(moov.offset), &mut out)?;
+    copy_exact(&mut f, &mut out, moov.offset)?;
     out.write_all(&moov_bytes)?;
     f.seek(SeekFrom::Start(moov_end))?;
-    io::copy(&mut f, &mut out)?;
+    copy_exact(&mut f, &mut out, tree.file_size.saturating_sub(moov_end))?;
     out.flush()?;
+    drop(out);
+    tmp.persist()?;
+    Ok(())
+}
+
+fn copy_exact(from: &mut File, to: &mut impl Write, len: u64) -> Result<(), InjectError> {
+    let n = io::copy(&mut from.take(len), to)?;
+    if n != len {
+        return Err(InjectError::Unsupported(format!(
+            "input shrank while copying ({n} of {len} bytes)"
+        )));
+    }
     Ok(())
 }
 
@@ -348,18 +442,26 @@ mod tests {
             .collect()
     }
 
-    fn run(faststart: bool) {
-        let dir = std::env::temp_dir().join(format!(
-            "spherecut-inject-{}-{faststart}",
-            std::process::id()
-        ));
+    fn tmpdir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("spherecut-inject-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        let (bytes, _) = file(faststart);
-        let a = dir.join("in.mp4");
-        let b = dir.join("out.mp4");
-        let c = dir.join("out2.mp4");
-        std::fs::write(&a, &bytes).unwrap();
-        let edits = [
+        dir
+    }
+
+    /// File names in `dir`, sorted; temp files show up here.
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn spherical_edits() -> [EntryEdit; 2] {
+        [
             EntryEdit {
                 track: TrackKind::Video,
                 boxes: cat(&[write::st3d(StereoMode::Mono), write::sv3d_equirect("test")]),
@@ -368,7 +470,19 @@ mod tests {
                 track: TrackKind::Audio,
                 boxes: write::sa3d_first_order_ambix(),
             },
-        ];
+        ]
+    }
+
+    fn run(faststart: bool) {
+        let dir = tmpdir(&format!("run-{faststart}"));
+        let (bytes, _) = file(faststart);
+        let a = dir.join("in.mp4");
+        let b = dir.join("out.mp4");
+        let c = dir.join("out2.mp4");
+        std::fs::write(&a, &bytes).unwrap();
+        // An existing output is replaced.
+        std::fs::write(&b, b"old contents").unwrap();
+        let edits = spherical_edits();
         inject(&a, &b, &edits).unwrap();
         // Injecting again replaces rather than duplicates.
         inject(&b, &c, &edits).unwrap();
@@ -395,6 +509,8 @@ mod tests {
         let offs = chunk_offsets(&tree);
         assert_eq!(&out[offs[0] as usize..offs[0] as usize + 9], b"VIDEODATA");
         assert_eq!(&out[offs[1] as usize..offs[1] as usize + 9], b"AUDIODATA");
+        // No temp files left behind.
+        assert_eq!(listing(&dir), ["in.mp4", "out.mp4", "out2.mp4"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -406,5 +522,45 @@ mod tests {
     #[test]
     fn inject_with_faststart_shifts_chunk_offsets() {
         run(true);
+    }
+
+    #[test]
+    fn same_file_under_any_name_is_refused_and_left_untouched() {
+        // Writing over the input used to grow it until the disk was full.
+        // The output is never written in place and copies are bounded by
+        // the parsed size now, so even a regression here can't run away.
+        let dir = tmpdir("same");
+        let (bytes, _) = file(true);
+        let a = dir.join("in.mp4");
+        std::fs::write(&a, &bytes).unwrap();
+        let hard = dir.join("hard.mp4");
+        std::fs::hard_link(&a, &hard).unwrap();
+        let sym = dir.join("sym.mp4");
+        std::os::unix::fs::symlink(&a, &sym).unwrap();
+        let dotted = dir.join(".").join("in.mp4");
+        for (input, output) in [(&a, &a), (&a, &dotted), (&a, &hard), (&a, &sym), (&sym, &a)] {
+            match inject(input, output, &spherical_edits()) {
+                Err(InjectError::SameFile { .. }) => {}
+                r => panic!("{} -> {}: {r:?}", input.display(), output.display()),
+            }
+            assert!(std::fs::read(&a).unwrap() == bytes, "input changed");
+        }
+        assert_eq!(listing(&dir), ["hard.mp4", "in.mp4", "sym.mp4"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn failed_write_removes_its_temp_file() {
+        let dir = tmpdir("fail");
+        let a = dir.join("in.mp4");
+        std::fs::write(&a, file(false).0).unwrap();
+        // A directory in the way: everything works until the rename.
+        let out = dir.join("out.mp4");
+        std::fs::create_dir(&out).unwrap();
+        let r = inject(&a, &out, &spherical_edits());
+        assert!(matches!(r, Err(InjectError::Io(_))), "{r:?}");
+        assert_eq!(listing(&dir), ["in.mp4", "out.mp4"]);
+        assert!(out.is_dir());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
