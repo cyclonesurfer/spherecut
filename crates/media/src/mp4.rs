@@ -185,9 +185,10 @@ impl Mp4Tree {
     }
 
     /// Why the file looks damaged: a box cut off by the end of the file,
-    /// malformed boxes, and sample tables that disagree with each other or
-    /// point outside the media data. Empty for a healthy file. The work is
-    /// linear in the size of the sample tables.
+    /// malformed boxes, box types that are not text where only registered
+    /// types belong, timescales FFmpeg cannot use, and sample tables that
+    /// disagree with each other or point outside the media data. Empty for
+    /// a healthy file. The work is linear in the size of the sample tables.
     pub fn damage(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(t) = &self.truncated {
@@ -206,6 +207,12 @@ impl Mp4Tree {
             }
             return out;
         };
+        unprintable_types(moov, &mut out);
+        if let Some(ts) = moov.child(b"mvhd").and_then(bad_timescale) {
+            out.push(format!(
+                "`mvhd` gives timescale {ts}, so the movie's times are wrong"
+            ));
+        }
         let mdats = self.media_data();
         for (i, trak) in moov.children_of(b"trak").enumerate() {
             if let Err(why) = check_track(trak, &mdats, self.file_size) {
@@ -760,10 +767,56 @@ fn self_contained(minf: &Mp4Box) -> bool {
     true
 }
 
-/// Check one track's sample tables against each other and against the
-/// media data, and return the first problem.
+/// Containers whose children all have registered types, which are
+/// printable ASCII, as do the children of the sample entries we know. Not
+/// `udta`, `meta` or `ilst`: QuickTime's `©nam` and the like start with
+/// the byte 0xA9.
+const REGISTERED_CHILDREN: &[&[u8; 4]] = &[
+    b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd", b"sv3d", b"proj",
+];
+
+/// List the children of `b`, a box that should hold only registered
+/// types, whose type is not printable, and look the same way inside each
+/// child that should too. Such a type is a damaged header. FFmpeg skips
+/// the box as one it does not know, so a `trak` whose type reads `\xd1rak`
+/// loses its stream without a word, and a damaged `sv3d` its projection.
+/// Four zero bytes are QuickTime's terminator, or padding, which FFmpeg
+/// skips too.
+fn unprintable_types(b: &Mp4Box, out: &mut Vec<String>) {
+    for c in &b.children {
+        let t = c.fourcc;
+        let text = t.0.iter().all(|&x| x.is_ascii_graphic() || x == b' ');
+        if !text && t.0 != [0; 4] {
+            out.push(format!(
+                "box `{t}` at offset {} in `{}` has a type that is not text, so its header is damaged",
+                c.offset, b.fourcc
+            ));
+        } else if REGISTERED_CHILDREN.contains(&&t.0) || entry_handler(t).is_some() {
+            unprintable_types(c, out);
+        }
+    }
+}
+
+/// The timescale of a `mvhd` or `mdhd` if FFmpeg cannot use it. FFmpeg
+/// reads it as a signed 32-bit number and takes 1 for one that is not
+/// positive, which puts every time in the movie or track out of place.
+fn bad_timescale(b: &Mp4Box) -> Option<u32> {
+    let mut c = Cursor::new(&b.payload);
+    let (version, _) = c.version_flags()?;
+    // Creation and modification times come first.
+    c.take(if version == 1 { 16 } else { 8 })?;
+    c.u32().filter(|&ts| ts == 0 || ts > i32::MAX as u32)
+}
+
+/// Check one track's timescale and sample tables against each other and
+/// against the media data, and return the first problem.
 fn check_track(trak: &Mp4Box, mdats: &[(u64, u64)], file_size: u64) -> Result<(), String> {
     let mdia = trak.child(b"mdia").ok_or("it has no `mdia` box")?;
+    if let Some(ts) = mdia.child(b"mdhd").and_then(bad_timescale) {
+        return Err(format!(
+            "its `mdhd` gives timescale {ts}, so its times are wrong"
+        ));
+    }
     if mdia.child(b"hdlr").is_none() {
         return Err("it has no handler (`mdia/hdlr`)".into());
     }
@@ -1484,8 +1537,11 @@ pub(crate) mod tests {
                     co,
                 ]),
             );
-            let trak = bx(b"trak", &bx(b"mdia", &cat(&[hdlr, bx(b"minf", &stbl)])));
-            bx(b"moov", &trak)
+            // Timescale 1000; the times and durations do not matter here.
+            let mdhd = full(b"mdhd", 0, 0, &words(&[0, 0, 1000, 0, 0x55c4_0000]));
+            let mdia = bx(b"mdia", &cat(&[mdhd, hdlr, bx(b"minf", &stbl)]));
+            let mvhd = full(b"mvhd", 0, 0, &cat(&[words(&[0, 0, 1000, 0]), vec![0; 80]]));
+            bx(b"moov", &cat(&[mvhd, bx(b"trak", &mdia)]))
         };
         let mdat = bx(b"mdat", &vec![0xee; t.data_len]);
         if faststart {
@@ -1684,6 +1740,128 @@ pub(crate) mod tests {
             damage_of(no_moov),
             ["there is no `moov` box, so no index of the media"]
         );
+    }
+
+    #[test]
+    fn timescales_ffmpeg_cannot_use_are_damage() {
+        let f = file_with(&tables(&[10], 1), false);
+        let with = |t: &[u8; 4], ts: u32| {
+            // After the type: version and flags, then two times.
+            let at = f.windows(4).position(|w| w == t).unwrap() + 16;
+            let mut g = f.clone();
+            g[at..at + 4].copy_from_slice(&ts.to_be_bytes());
+            damage_of(g)
+        };
+        assert!(with(b"mdhd", 1).is_empty());
+        assert!(with(b"mvhd", i32::MAX as u32).is_empty());
+        assert_eq!(
+            with(b"mdhd", 0),
+            ["track #0: its `mdhd` gives timescale 0, so its times are wrong"]
+        );
+        // FFmpeg reads it as a signed number.
+        assert_eq!(
+            with(b"mdhd", 1 << 31),
+            ["track #0: its `mdhd` gives timescale 2147483648, so its times are wrong"]
+        );
+        assert_eq!(
+            with(b"mvhd", 0),
+            ["`mvhd` gives timescale 0, so the movie's times are wrong"]
+        );
+    }
+
+    #[test]
+    fn box_types_that_are_not_text_are_damage_where_types_are_registered() {
+        let f = file_with(&tables(&[10], 1), false);
+        let with = |t: &[u8; 4], first: u8| {
+            let at = f.windows(4).position(|w| w == t).unwrap();
+            let mut g = f.clone();
+            g[at] = first;
+            (at - 4, damage_of(g))
+        };
+        // One byte of `trak` flipped: FFmpeg skips the track, and its
+        // stream is gone.
+        let (at, d) = with(b"trak", b't' ^ 0xa5);
+        assert_eq!(
+            d,
+            [format!(
+                "box `\\xd1rak` at offset {at} in `moov` has a type that is not text, so its header is damaged"
+            )]
+        );
+        for (t, parent) in [
+            (b"mvhd", "moov"),
+            (b"mdia", "trak"),
+            (b"mdhd", "mdia"),
+            (b"minf", "mdia"),
+            (b"stbl", "minf"),
+            (b"stsz", "stbl"),
+            (b"hvc1", "stsd"),
+        ] {
+            let (at, d) = with(t, 0);
+            let want = format!(
+                "box `\\x00{}` at offset {at} in `{parent}`",
+                t[1..].escape_ascii()
+            );
+            assert!(d.iter().any(|d| d.starts_with(&want)), "{want}: {d:?}");
+        }
+        // A printable type we do not know says nothing.
+        assert!(with(b"trak", b'x').1.is_empty());
+
+        // Inside the sample entries we know, and in the Spherical Video V2
+        // boxes, where a damaged type loses the projection.
+        let proj = bx(
+            b"proj",
+            &cat(&[full(b"prhd", 0, 0, &[0; 12]), full(b"equi", 0, 0, &[0; 16])]),
+        );
+        let sv3d = bx(b"sv3d", &cat(&[full(b"svhd", 0, 0, b"\0"), proj]));
+        let f = minimal();
+        let entry = f.windows(4).position(|w| w == b"hvc1").unwrap() - 4;
+        let mut g = f.clone();
+        g.splice(entry + 8 + 78..entry + 8 + 78, sv3d.iter().copied());
+        // Patch the sizes of the boxes around it.
+        for t in [
+            b"hvc1", b"stsd", b"stbl", b"minf", b"mdia", b"trak", b"moov",
+        ] {
+            let at = g.windows(4).position(|w| w == t).unwrap() - 4;
+            let size = u32::from_be_bytes(g[at..at + 4].try_into().unwrap()) + sv3d.len() as u32;
+            g[at..at + 4].copy_from_slice(&size.to_be_bytes());
+        }
+        assert!(damage_of(g.clone()).is_empty(), "{:?}", damage_of(g));
+        for (t, parent) in [
+            (b"hvcC", "hvc1"),
+            (b"sv3d", "hvc1"),
+            (b"proj", "sv3d"),
+            (b"equi", "proj"),
+        ] {
+            let at = g.windows(4).position(|w| w == t).unwrap();
+            let mut h = g.clone();
+            h[at + 3] ^= 0xa5;
+            let want = format!(
+                "box `{}\\x{:02x}` at offset {} in `{parent}`",
+                t[..3].escape_ascii(),
+                t[3] ^ 0xa5,
+                at - 4
+            );
+            let d = damage_of(h);
+            assert!(d.iter().any(|d| d.starts_with(&want)), "{want}: {d:?}");
+        }
+
+        // QuickTime metadata in `udta` and iTunes metadata in `meta/ilst`
+        // have types that start with 0xA9.
+        let hdlr = full(b"hdlr", 0, 0, b"\0\0\0\0mdirappl\0\0\0\0\0\0\0\0\0");
+        let ilst = bx(
+            b"ilst",
+            &bx(b"\xa9too", &bx(b"data", b"\0\0\0\x01\0\0\0\0x")),
+        );
+        let meta = full(b"meta", 0, 0, &cat(&[hdlr, ilst]));
+        let udta = bx(b"udta", &cat(&[bx(b"\xa9nam", b"\0\x05\0\0title"), meta]));
+        let f = cat(&[bx(b"ftyp", b"isom\0\0\x02\0isom"), bx(b"moov", &udta)]);
+        let t = read(&mut io::Cursor::new(&f)).unwrap();
+        let moov = t.moov().unwrap();
+        assert!(
+            moov.path(&[b"udta", b"meta", b"ilst", b"\xa9too"])
+                .is_some()
+        );
+        assert!(t.damage().is_empty(), "{:?}", t.damage());
     }
 
     /// Structure-aware fuzzing: random box trees, encoded with 32-bit,
