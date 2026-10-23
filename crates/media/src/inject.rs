@@ -383,13 +383,20 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
         let start = rel(entry);
         let fixed_end = start + entry.header_len as usize + entry.payload.len();
         let mut new_entry = moov_bytes[start..fixed_end].to_vec();
+        // QuickTime's terminator stays last: FFmpeg reads nothing after it.
+        // Mp4Tree::damage allows a zero type only there.
+        let mut terminator: &[u8] = &[];
         for c in &entry.children {
-            if !replace.contains(&c.fourcc.0) {
-                let cs = rel(c);
-                new_entry.extend_from_slice(&moov_bytes[cs..cs + c.size as usize]);
+            let cs = rel(c);
+            let bytes = &moov_bytes[cs..cs + c.size as usize];
+            if c.fourcc.0 == [0; 4] {
+                terminator = bytes;
+            } else if !replace.contains(&c.fourcc.0) {
+                new_entry.extend_from_slice(bytes);
             }
         }
         new_entry.extend_from_slice(&e.boxes);
+        new_entry.extend_from_slice(terminator);
         splices.push(Splice {
             start,
             end: start + entry.size as usize,
@@ -597,8 +604,18 @@ mod tests {
     /// [`file`] with `before` and `after` empty `free` boxes in `moov`,
     /// before and after its tracks.
     fn file_padded(faststart: bool, before: usize, after: usize) -> (Vec<u8>, usize) {
-        let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isom");
         let ventry = bx(b"hvc1", &cat(&[vec![0u8; 78], bx(b"hvcC", &[9; 5])]));
+        file_with_entry(faststart, before, after, ventry)
+    }
+
+    /// [`file_padded`] with `ventry` as the video sample entry.
+    fn file_with_entry(
+        faststart: bool,
+        before: usize,
+        after: usize,
+        ventry: Vec<u8>,
+    ) -> (Vec<u8>, usize) {
+        let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isom");
         let aentry = bx(b"mp4a", &cat(&[vec![0u8; 28], bx(b"esds", &[7; 5])]));
         let payload = b"VIDEODATAAUDIODATA".to_vec();
         let free = bx(b"free", &[]);
@@ -738,6 +755,31 @@ mod tests {
     #[test]
     fn inject_with_moov_at_end() {
         run(false);
+    }
+
+    #[test]
+    fn a_terminator_stays_last_in_its_entry() {
+        // Boxes added after QuickTime's terminator would be lost: FFmpeg
+        // stops reading the entry there. Eight zero bytes read as a box
+        // that runs to the end of the entry.
+        let dir = tmpdir("terminator");
+        let ventry = bx(
+            b"hvc1",
+            &cat(&[vec![0u8; 78], bx(b"hvcC", &[9; 5]), vec![0; 8]]),
+        );
+        for faststart in [false, true] {
+            let (bytes, _) = file_with_entry(faststart, 0, 0, ventry.clone());
+            let (a, b) = (dir.join("in.mp4"), dir.join("out.mp4"));
+            std::fs::write(&a, &bytes).unwrap();
+            inject(&a, &b, &spherical_edits()).unwrap();
+            let tree = mp4::read_file(&b).unwrap();
+            assert!(tree.damage().is_empty(), "{:?}", tree.damage());
+            assert!(spherical::read_tracks(&tree)[0].v2.is_some());
+            let hvc1 = tree.tracks().next().unwrap();
+            let hvc1 = hvc1.path(&[b"mdia", b"minf", b"stbl", b"stsd", b"hvc1"]);
+            let kinds: Vec<[u8; 4]> = hvc1.unwrap().children.iter().map(|c| c.fourcc.0).collect();
+            assert_eq!(kinds, [*b"hvcC", *b"st3d", *b"sv3d", [0; 4]]);
+        }
     }
 
     #[test]
