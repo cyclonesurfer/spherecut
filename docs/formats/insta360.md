@@ -1,14 +1,74 @@
 # Insta360 raw video: `.insv` and `.lrv`
 
-Status: desk research, 2026-10-22. **No Spherecut sample has been examined yet.** The only real
-camera bytes behind this document are the Insta360 X5 slices that GyroView publishes as test
-fixtures (two recordings: an info record, the trailer footer and index, and the first gyro and
-exposure samples). I decoded them myself with throwaway scripts. Everything else comes from
-other projects' source code and notes, or from Insta360's public manuals. Each source is pinned
-to a commit in [Sources](#sources).
+Status: desk research, 2026-10-22, then checked against Pat's own X5 samples on 2026-10-23
+(see [Pat's X5 samples](#pats-x5-samples), which take precedence over the rest where they
+disagree). Before the samples, the only real camera bytes behind this document were the
+Insta360 X5 slices that GyroView publishes as test fixtures (two recordings: an info record,
+the trailer footer and index, and the first gyro and exposure samples). I decoded them myself
+with throwaway scripts. Everything else comes from other projects' source code and notes, or
+from Insta360's public manuals. Each source is pinned to a commit in [Sources](#sources).
 
 Spherecut must not use Insta360's Media SDK, Camera SDK or Insta360 Studio, and must not copy
 code or data tables derived from them. Section 8 covers which references are clean.
+
+## Pat's X5 samples
+
+Seven recordings from Pat's **Insta360 X5, firmware `v1.1.22_build1`** (field 3), made
+2026-10-22, examined with `spherecut probe` and a throwaway trailer script. File numbers are
+the `_004` to `_010` suffixes. Which `docs/SAMPLES.md` clip each one is was not given, so the
+mapping below is inferred from mode and length.
+
+| File | Mode (from the trailer) | Tracks | Length | Likely clip |
+|---|---|---|---|---|
+| 004 | 8K30: 2 × 3840² HEVC, 29.97 fps | 2 video + AAC | 3.8 s | 1 |
+| 005 | 8K25: 2 × 3840², 25 fps | 2 video + AAC | 4.6 s | 2 |
+| 006 | 5.7K60: 2 × 2880², 59.94 fps | 2 video + AAC | 3.2 s | 3 |
+| 007 | 4K120: 2 × 1920², 119.88 fps | 2 video + AAC | 4.9 s | 4 |
+| 008 | 8K30 | 2 video + AAC | 32.2 s | 6, 8 or 10 |
+| 009 | 8K30 | 2 video + AAC | 63.5 s | 9 |
+| 010 | 8K30 | 2 video + AAC | 32.3 s | 6, 8 or 10 |
+
+What they show [bytes]:
+
+- **One file per take in every mode**, with both lenses as two `hvc1` tracks (handler
+  `INS.HVC`), plus an `LRV_…_01_….lrv` proxy. No `_10_` files.
+- **Box order** `ftyp` `wide` `mdat` `moov` `inst`. So the `wide` box is there (orbis was
+  right), and the `inst` wrapper is already used by firmware v1.1.22, which contradicts
+  GyroView's "from v1.7 on" (§2.1). `inst.size` = trailer size + 8 on all 14 files.
+- **Video**: HEVC Main, 8-bit `yuvj420p`, full range, BT.709 primaries, transfer and matrix,
+  chroma location left, level 6.1 (8K) or 5.1 (5.7K, 4K). About 62 Mb/s per track at 8K30,
+  79 Mb/s at 5.7K60. Field 135 (bitrate) says 120 Mb/s, or 150 at 5.7K60, for the two tracks
+  together.
+- **Timebases**: 1/30000 at 29.97, 1/25000 at 25, 1/60000 at 59.94, 1/120000 at 119.88, with
+  `avg_frame_rate` exactly 30000/1001, 25/1, 60000/1001 and 120000/1001.
+- **Both tracks have the same frame count** in every file.
+- **LRV**: H.264 High, 1664×832, about 8 Mb/s, full-range BT.709. It runs at **25 fps for a
+  25 fps master** and 29.97 fps otherwise, so "always 29.97" (§6) is wrong. It has exactly the
+  master's frame count at 25 and 29.97 fps, half at 59.94 (95 of 190) and a quarter rounded up
+  at 119.88 (147 of 586). Its trailer (checked on 004) has the same records with the same sizes
+  except the metadata record. The metadata fields listed below match the master's except field 26 index = 1,
+  field 131 = 1, field 132 = 1 (H.264) and field 135 = 7. Byte equality of the IMU records is
+  not checked yet.
+- **Audio**: one AAC-LC track, 48 kHz, 2 channels, in every file. Field 61 `audio_mode` = 9
+  everywhere. No 360-audio recording yet, so Q15 stays open.
+- **Trailer**: version 3, a 31-slot index, records 1, 2, 3, 4, 9, 10, 11, 22, 28 and 29.
+  Records are 128 KiB aligned except 1 and 10, as in §3.2. Record 22 is 8 306 836 bytes and
+  record 28 12 793 bytes in every file, so they are probably fixed per-camera data. The IMU
+  record (3) grows by about 20 kB per second.
+- **Thumbnail**: record 2 is 1 228 840 bytes (= 40 + 1280 × 640 × 1.5, consistent with the
+  NV12 1280×640 equirect of §3.3). The **4K120 file has no record 2**; the camera wrote it as a
+  sidecar `VID_….insv.thumbnail.bin` of the same size instead, and the same for its LRV. The
+  5.7K60 take has a `….insv.trim_thumbnail.bin` sidecar. Spherecut ignores these sidecars.
+- **Metadata**: `gamma_mode` `standard`, `is_flowstate_online` 0, `cam_posture` 0,
+  `is_raw_gyro` 1, `pts_type` 2, `capture_offset_version` 4 (V6), `image category` 2,
+  `stream_type` 4, `codec` 2 (H.265) on every `.insv`. Field 26 `file_group_info.type` is 0,
+  except **6 on the 5.7K60 take**, which telemetry-parser's enum calls `VideoHdr`. Either that
+  take was shot in an HDR video mode, or the enum doesn't match X5 firmware.
+
+Open questions this answers: Q1 (model and firmware), Q13 (25 fps timebase; no `_10_` on the
+X5), Q14 (every mode is one file plus an LRV), Q16 (thumbnail record). Still needs samples:
+I-Log/10-bit (Q11), 360 audio (Q15), FlowState on/off (Q9), a Studio export (Q4–Q6), a split
+recording (Q12), and which clip is which for the seam and rotation tests (Q2, Q7, Q8).
 
 ## 0. How to read this
 
