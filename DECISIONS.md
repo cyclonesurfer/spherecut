@@ -373,13 +373,43 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   other handlers (`pict`, `auxv`) are not checked;
 - sample tables that disagree with each other, or chunks outside the file
   or the `mdat` ranges;
-- a video or audio `trak` that FFmpeg reads as another kind of stream.
+- a video or audio `trak` that FFmpeg reads as another kind of stream;
+- a box type that is not printable ASCII where only registered types
+  belong: in `moov`, `trak`, `mdia`, `minf`, `stbl`, `stsd`, the video and
+  audio sample entries we know, `sv3d` and `proj`. FFmpeg skips such a box,
+  so a `trak` whose type reads `\xd1rak` loses its stream silently. Four
+  zero bytes (QuickTime's terminator, or padding) are allowed. `udta`,
+  `meta` and `ilst` are not checked, because `©nam` and the like are
+  normal there;
+- a `mvhd` or `mdhd` timescale of 0, or too large for a signed 32-bit
+  number, which FFmpeg replaces with 1, so every time is wrong;
+- a video or audio stream FFmpeg could not set up, when its track has
+  samples and its sample entry is a codec FFmpeg reads (the entries we
+  know, except the encrypted `encv` and `enca`). Like FFmpeg's own check,
+  that is no codec, no frame size, no sample rate or channels, or no pixel
+  or sample format although FFmpeg has a decoder (one named after the
+  codec). Usually the `avcC` or `hvcC` is damaged. With any other sample
+  entry, such as an unknown `zzzz`, the stream is a warning instead: it
+  may be a real codec this FFmpeg lacks.
 
 A file FFmpeg reads as MOV/MP4 is checked even when its first box type is
 unknown; that box alone is a warning, not damage. Matroska is checked
 only against its Segment length, other containers not at all, and the
 report says so (`structure`). A file with no video or audio stream also
 fails `probe`.
+
+What FFmpeg logs at warning or error level while `probe` runs goes into
+the report's `ffmpeg_log` (each line once, with a count, at most 32), even
+though the CLI's log hides FFmpeg (D12). It often says what FFmpeg could
+not read. It is not damage and not a warning, because healthy files can
+have some: FFmpeg says "timescale not set" for cover art.
+
+Not found without decoding: damage in `mdat`, and damage in `moov` that
+leaves the structure consistent, such as changed sample sizes or times
+(`stts`, `ctts`, `elst`), chunk offsets that still point into `mdat`,
+bits of a parameter set, or a `trak` renamed to another printable type
+such as `free`. Bytes of `mdat` that no chunk uses are not counted as
+damage.
 
 Fuzzing, with proptest, in `mp4::tests::fuzz`, under overflow checks:
 structure-aware random box trees (containers, `stsd` and sample entries,
@@ -389,12 +419,17 @@ never panic; consistent tables must never be damage; every cut must be an
 error or damage. Each parse must take under 1 s and stay within bounds on
 boxes, kept bytes and depth. Separate tests nest 20 000 and 200 000 levels
 (under 2 s each, under 64 MiB peak growth), make 4000 edits to a `moov`
-FFmpeg wrote (`crates/synth/tests/generated_media.rs`), and run
-`spherecut probe` on 200 000 levels (`crates/cli/tests/probe.rs`).
+FFmpeg wrote, of which at least 3000 must be found
+(`crates/synth/tests/generated_media.rs`), and run `spherecut probe` on
+200 000 levels (`crates/cli/tests/probe.rs`). `write_bad_files` makes one
+file for each kind of `moov` damage FFmpeg opens without complaint: chunk
+offsets, a `trak` type, an `mdhd` timescale and a codec configuration.
 
 Why: the M0 review found unbounded recursion and quadratic memory in the
 parser (B2), `probe` exiting 0 on corrupt and truncated MP4s (S1), and
-that the parser was not fuzzed as D4 said.
+that the parser was not fuzzed as D4 said. The final review (C6) found
+files that still probed clean: a renamed `trak`, a zero `mdhd` timescale
+and a damaged `hvcC`.
 
 ## D16. `inject` and `Mp4Writer` write atomically
 
