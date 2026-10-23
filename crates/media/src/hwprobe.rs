@@ -4,16 +4,19 @@
 //! A device that opens can still be useless: Fedora's Mesa VA-API driver
 //! opens with H.264 and HEVC turned off, and FFmpeg's Vulkan device opens
 //! on llvmpipe, which renders on the CPU. So doctor decodes and encodes one
-//! small frame on each device, never falling back to software. This module
+//! small frame on each device, never falling back to software, and lists
+//! the Vulkan physical devices with their type and driver. This module
 //! makes those calls; `doctor` decides what the results mean.
 //!
 //! What FFmpeg logs while a check runs is often the only real explanation
 //! ("No support for codec hevc profile 1."), so [`capture_ffmpeg_log`]
 //! keeps it.
 //!
-//! As in `ffi`, C enums are read as `int`s, never as bindgen's Rust enums.
+//! As in `ffi`, C enums are read as `int`s, never as bindgen's Rust enums,
+//! and the few Vulkan structs needed are declared here with only the
+//! fields that are read spelled out.
 
-use std::ffi::c_int;
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -51,6 +54,8 @@ pub(crate) enum ProbeError {
     },
     #[error(transparent)]
     Hw(#[from] HwError),
+    #[error("{0}")]
+    Vulkan(String),
 }
 
 impl ProbeError {
@@ -367,6 +372,251 @@ pub(crate) fn encode_one(
     Ok(out)
 }
 
+/// `VkPhysicalDeviceType` values; 0 is "other".
+pub(crate) mod vk_device_type {
+    pub const INTEGRATED_GPU: i32 = 1;
+    pub const DISCRETE_GPU: i32 = 2;
+    pub const VIRTUAL_GPU: i32 = 3;
+    pub const CPU: i32 = 4;
+}
+
+/// A Vulkan physical device as `vkGetPhysicalDeviceProperties` (and, from
+/// Vulkan 1.2, `VkPhysicalDeviceDriverProperties`) describe it.
+#[derive(Debug, Clone)]
+pub(crate) struct VkDevice {
+    pub name: String,
+    /// `VkPhysicalDeviceType`, see [`vk_device_type`].
+    pub device_type: i32,
+    pub vendor_id: u32,
+    pub device_id: u32,
+    /// Packed as `VK_MAKE_API_VERSION`; see [`vk_version`].
+    pub api_version: u32,
+    pub driver_name: Option<String>,
+    pub driver_info: Option<String>,
+    /// FFmpeg's Vulkan device context runs on this one.
+    pub ffmpeg_uses: bool,
+}
+
+/// `(major, minor, patch)` of a version packed as `VK_MAKE_API_VERSION`.
+pub(crate) fn vk_version(v: u32) -> (u32, u32, u32) {
+    ((v >> 22) & 0x7f, (v >> 12) & 0x3ff, v & 0xfff)
+}
+
+type VkHandle = *mut c_void;
+type VoidFn = unsafe extern "C" fn();
+type GetInstanceProcAddr = unsafe extern "C" fn(VkHandle, *const c_char) -> Option<VoidFn>;
+type EnumeratePhysicalDevices = unsafe extern "C" fn(VkHandle, *mut u32, *mut VkHandle) -> i32;
+type GetPhysicalDeviceProperties = unsafe extern "C" fn(VkHandle, *mut VkPhysicalDeviceProperties);
+type GetPhysicalDeviceProperties2 =
+    unsafe extern "C" fn(VkHandle, *mut VkPhysicalDeviceProperties2);
+
+/// The start of FFmpeg's `AVVulkanDeviceContext`. These fields have had
+/// these places since the struct was added; later ones changed between
+/// FFmpeg versions, so they are left out.
+#[repr(C)]
+struct VulkanDeviceHead {
+    alloc: *const c_void,
+    get_proc_addr: Option<GetInstanceProcAddr>,
+    inst: VkHandle,
+    phys_dev: VkHandle,
+}
+
+/// `VkPhysicalDeviceProperties`, with the limits and sparse properties
+/// (not read here) as opaque bytes of their C size.
+#[repr(C)]
+struct VkPhysicalDeviceProperties {
+    api_version: u32,
+    driver_version: u32,
+    vendor_id: u32,
+    device_id: u32,
+    /// `VkPhysicalDeviceType`, as the int it is.
+    device_type: i32,
+    device_name: [c_char; 256],
+    pipeline_cache_uuid: [u8; 16],
+    /// `VkPhysicalDeviceLimits`: 504 bytes, 8-byte aligned.
+    limits: [u64; 63],
+    /// `VkPhysicalDeviceSparseProperties`: five `VkBool32`s.
+    sparse: [u32; 5],
+}
+
+// The C sizes on 64-bit Linux, where the limits hold 64-bit `size_t`s.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(size_of::<VkPhysicalDeviceProperties>() == 824);
+    assert!(size_of::<VkPhysicalDeviceProperties2>() == 840);
+    assert!(size_of::<VkPhysicalDeviceDriverProperties>() == 536);
+};
+
+impl VkPhysicalDeviceProperties {
+    fn zeroed() -> Self {
+        VkPhysicalDeviceProperties {
+            api_version: 0,
+            driver_version: 0,
+            vendor_id: 0,
+            device_id: 0,
+            device_type: 0,
+            device_name: [0; 256],
+            pipeline_cache_uuid: [0; 16],
+            limits: [0; 63],
+            sparse: [0; 5],
+        }
+    }
+}
+
+const STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2: i32 = 1_000_059_001;
+const STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES: i32 = 1_000_196_000;
+
+#[repr(C)]
+struct VkPhysicalDeviceProperties2 {
+    s_type: i32,
+    p_next: *mut c_void,
+    properties: VkPhysicalDeviceProperties,
+}
+
+#[repr(C)]
+struct VkPhysicalDeviceDriverProperties {
+    s_type: i32,
+    p_next: *mut c_void,
+    /// `VkDriverId`, as the int it is.
+    driver_id: i32,
+    driver_name: [c_char; 256],
+    driver_info: [c_char; 256],
+    conformance_version: [u8; 4],
+}
+
+fn vulkan_err(msg: impl Into<String>) -> ProbeError {
+    ProbeError::Vulkan(msg.into())
+}
+
+/// Look up the instance-level Vulkan command `name`.
+///
+/// # Safety
+///
+/// `F` must be the function pointer type of the command `name`, and `inst`
+/// a live instance that `gipa` belongs to.
+unsafe fn vk_command<F>(
+    gipa: GetInstanceProcAddr,
+    inst: VkHandle,
+    name: &CStr,
+) -> Result<F, ProbeError> {
+    const { assert!(size_of::<F>() == size_of::<VoidFn>()) };
+    // SAFETY: the caller's guarantee; `name` is NUL-terminated.
+    let f = unsafe { gipa(inst, name.as_ptr()) }
+        .ok_or_else(|| vulkan_err(format!("Vulkan has no {}", name.to_string_lossy())))?;
+    // SAFETY: Vulkan hands out commands as PFN_vkVoidFunction, to be cast
+    // to their real type, which the caller guarantees `F` is.
+    Ok(unsafe { std::mem::transmute_copy::<VoidFn, F>(&f) })
+}
+
+/// A NUL-terminated string in a fixed-size Vulkan array; `None` if empty.
+fn fixed_str(chars: &[c_char]) -> Option<String> {
+    let bytes: Vec<u8> = chars
+        .iter()
+        .map(|&c| c as u8)
+        .take_while(|&b| b != 0)
+        .collect();
+    (!bytes.is_empty()).then(|| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The physical devices of the Vulkan instance behind FFmpeg's Vulkan
+/// device `dev`, marking the one FFmpeg uses.
+pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, ProbeError> {
+    if dev.kind() != "vulkan" {
+        return Err(vulkan_err(format!("{} is not a Vulkan device", dev.kind())));
+    }
+    // SAFETY: a device reference's data is its AVHWDeviceContext, and a
+    // Vulkan device's hwctx is an AVVulkanDeviceContext, which starts with
+    // the fields of VulkanDeviceHead. Only pointer fields are read, and
+    // the instance lives as long as `dev`.
+    let head = unsafe {
+        let hwdev = (*dev.as_ptr()).data.cast::<sys::AVHWDeviceContext>();
+        (*hwdev).hwctx.cast::<VulkanDeviceHead>().read()
+    };
+    let gipa = head
+        .get_proc_addr
+        .ok_or_else(|| vulkan_err("FFmpeg's Vulkan device has no vkGetInstanceProcAddr"))?;
+    // SAFETY: each type below matches the C prototype of the command it
+    // is looked up as, and the instance is FFmpeg's, made through `gipa`.
+    let (enumerate, props, props2) = unsafe {
+        (
+            vk_command::<EnumeratePhysicalDevices>(gipa, head.inst, c"vkEnumeratePhysicalDevices")?,
+            vk_command::<GetPhysicalDeviceProperties>(
+                gipa,
+                head.inst,
+                c"vkGetPhysicalDeviceProperties",
+            )?,
+            // Core in Vulkan 1.1; FFmpeg asks for at least that.
+            vk_command::<GetPhysicalDeviceProperties2>(
+                gipa,
+                head.inst,
+                c"vkGetPhysicalDeviceProperties2",
+            )
+            .ok(),
+        )
+    };
+    let mut n = 0u32;
+    // SAFETY: the counting form of the call, with no output array.
+    let r = unsafe { enumerate(head.inst, &mut n, std::ptr::null_mut()) };
+    if r < 0 {
+        return Err(vulkan_err(format!(
+            "vkEnumeratePhysicalDevices failed (VkResult {r})"
+        )));
+    }
+    let mut handles: Vec<VkHandle> = vec![std::ptr::null_mut(); n as usize];
+    // SAFETY: `handles` has room for the `n` handles asked for. A device
+    // added since the first call makes this VK_INCOMPLETE (positive).
+    let r = unsafe { enumerate(head.inst, &mut n, handles.as_mut_ptr()) };
+    if r < 0 {
+        return Err(vulkan_err(format!(
+            "vkEnumeratePhysicalDevices failed (VkResult {r})"
+        )));
+    }
+    handles.truncate(n as usize);
+    Ok(handles
+        .into_iter()
+        .map(|pd| {
+            let mut p = VkPhysicalDeviceProperties::zeroed();
+            // SAFETY: `pd` is a physical device of this instance, and `p`
+            // has the C layout and size Vulkan writes.
+            unsafe { props(pd, &mut p) };
+            let (mut driver_name, mut driver_info) = (None, None);
+            // VkPhysicalDeviceDriverProperties is core from Vulkan 1.2.
+            if let Some(props2) = props2
+                && vk_version(p.api_version) >= (1, 2, 0)
+            {
+                let mut drv = VkPhysicalDeviceDriverProperties {
+                    s_type: STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+                    p_next: std::ptr::null_mut(),
+                    driver_id: 0,
+                    driver_name: [0; 256],
+                    driver_info: [0; 256],
+                    conformance_version: [0; 4],
+                };
+                let mut p2 = VkPhysicalDeviceProperties2 {
+                    s_type: STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                    p_next: (&raw mut drv).cast(),
+                    properties: VkPhysicalDeviceProperties::zeroed(),
+                };
+                // SAFETY: as above, with a pNext chain of one struct that
+                // this device's Vulkan version has.
+                unsafe { props2(pd, &mut p2) };
+                driver_name = fixed_str(&drv.driver_name);
+                driver_info = fixed_str(&drv.driver_info);
+            }
+            VkDevice {
+                name: fixed_str(&p.device_name).unwrap_or_else(|| "(unnamed)".into()),
+                device_type: p.device_type,
+                vendor_id: p.vendor_id,
+                device_id: p.device_id,
+                api_version: p.api_version,
+                driver_name,
+                driver_info,
+                ffmpeg_uses: pd == head.phys_dev,
+            }
+        })
+        .collect())
+}
+
 /// Captures running now, in any thread. FFmpeg's log level goes back to
 /// following the subscriber only when the last one ends; the lock also
 /// keeps one capture's start and another's end from interleaving.
@@ -498,6 +748,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vulkan_versions_unpack() {
+        // VK_MAKE_API_VERSION(0, 1, 4, 318), as llvmpipe reports it.
+        assert_eq!(vk_version((1 << 22) | (4 << 12) | 318), (1, 4, 318));
+        assert!(vk_version((1 << 22) | (2 << 12)) >= (1, 2, 0));
+        assert!(vk_version((1 << 22) | (1 << 12) | 999) < (1, 2, 0));
+    }
+
+    #[test]
     fn log_lines_lose_their_context_address() {
         assert_eq!(
             without_address("[hevc @ 0x55d0c0ffee00] Error parsing NAL unit #3."),
@@ -510,6 +768,18 @@ mod tests {
         for plain in ["no prefix", "[x] no address", "[x @ 0xzz] not hex"] {
             assert_eq!(without_address(plain), plain);
         }
+    }
+
+    #[test]
+    fn fixed_strings_stop_at_nul() {
+        let mut a = [0 as c_char; 8];
+        for (d, s) in a.iter_mut().zip(b"radv\0xy") {
+            *d = *s as c_char;
+        }
+        assert_eq!(fixed_str(&a).as_deref(), Some("radv"));
+        assert_eq!(fixed_str(&[0; 4]), None);
+        // No NUL at all: the whole array.
+        assert_eq!(fixed_str(&[b'a' as c_char; 3]).as_deref(), Some("aaa"));
     }
 
     #[test]

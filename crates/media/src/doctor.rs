@@ -8,7 +8,8 @@
 //! and Main 10, AV1 Main; see `fixtures/README.md`) in software, on VA-API
 //! and on FFmpeg's Vulkan device, never falling back to software, and
 //! requires the hardware's picture to match the software decoder's. It
-//! encodes one frame with each VA-API encoder and reads it back.
+//! encodes one frame with each VA-API encoder and reads it back, and lists
+//! the Vulkan devices FFmpeg sees, with their type and driver.
 //!
 //! The fixes follow from those results, by distro and GPU vendor. On
 //! Fedora, `rpm -q` only chooses between "install" and "swap" wording and
@@ -25,7 +26,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::decode::DecodedFrame;
-use crate::hwprobe::{self, ENCODE_SIZE, ProbeError, device_label};
+use crate::hwprobe::{self, ENCODE_SIZE, ProbeError, device_label, vk_device_type};
 use crate::{HwDevice, HwError, ff, ffi, init};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -79,7 +80,8 @@ impl Vendor {
 pub struct Gpu {
     /// The DRM render node checked for VA-API.
     pub render_node: String,
-    /// The render node's GPU vendor, from sysfs.
+    /// The render node's GPU vendor (from sysfs), or else the first Vulkan
+    /// GPU's.
     pub vendor: Vendor,
     pub vendor_id: Option<String>,
 }
@@ -98,8 +100,65 @@ pub struct DeviceStatus {
     pub device: Option<String>,
     pub ok: bool,
     pub error: Option<String>,
+    /// The physical device FFmpeg runs on (Vulkan).
+    pub name: Option<String>,
     /// FFmpeg's warnings and errors while opening it.
     pub ffmpeg_log: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulkanDeviceType {
+    IntegratedGpu,
+    DiscreteGpu,
+    VirtualGpu,
+    /// A software rasterizer such as llvmpipe: no GPU acceleration.
+    Cpu,
+    Other,
+}
+
+/// A Vulkan physical device of the instance behind FFmpeg's Vulkan device.
+#[derive(Debug, Clone, Serialize)]
+pub struct VulkanDevice {
+    pub name: String,
+    pub device_type: VulkanDeviceType,
+    pub vendor_id: String,
+    pub device_id: String,
+    pub api_version: String,
+    /// The driver's name, e.g. "radv" or "llvmpipe" (Vulkan 1.2 and up).
+    pub driver: Option<String>,
+    /// e.g. "Mesa 25.2.8".
+    pub driver_info: Option<String>,
+    pub used_by_ffmpeg: bool,
+}
+
+impl VulkanDevice {
+    /// Whether it renders on the CPU, i.e. gives no GPU acceleration.
+    pub fn is_cpu(&self) -> bool {
+        self.device_type == VulkanDeviceType::Cpu
+    }
+}
+
+impl From<hwprobe::VkDevice> for VulkanDevice {
+    fn from(d: hwprobe::VkDevice) -> Self {
+        let (major, minor, patch) = hwprobe::vk_version(d.api_version);
+        VulkanDevice {
+            device_type: match d.device_type {
+                vk_device_type::INTEGRATED_GPU => VulkanDeviceType::IntegratedGpu,
+                vk_device_type::DISCRETE_GPU => VulkanDeviceType::DiscreteGpu,
+                vk_device_type::VIRTUAL_GPU => VulkanDeviceType::VirtualGpu,
+                vk_device_type::CPU => VulkanDeviceType::Cpu,
+                _ => VulkanDeviceType::Other,
+            },
+            name: d.name,
+            vendor_id: format!("{:#06x}", d.vendor_id),
+            device_id: format!("{:#06x}", d.device_id),
+            api_version: format!("{major}.{minor}.{patch}"),
+            driver: d.driver_name,
+            driver_info: d.driver_info,
+            used_by_ffmpeg: d.ffmpeg_uses,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -166,6 +225,7 @@ pub struct DoctorReport {
     pub encoders: Vec<CodecStatus>,
     pub gpu: Gpu,
     pub devices: Vec<DeviceStatus>,
+    pub vulkan_devices: Vec<VulkanDevice>,
     /// Each format decoded in software, on VA-API and on Vulkan.
     pub decode_checks: Vec<Check>,
     /// Each VA-API encoder, one frame each.
@@ -321,7 +381,16 @@ pub fn run(render_node: &Path) -> DoctorReport {
     let node = render_node.to_string_lossy().into_owned();
     let hw_device_types = ffi::hw_device_types();
     let (vaapi, vaapi_status) = open_device("vaapi", Some(&node), &hw_device_types);
-    let (vulkan, vulkan_status) = open_device("vulkan", None, &hw_device_types);
+    let (vulkan, mut vulkan_status) = open_device("vulkan", None, &hw_device_types);
+    let (vulkan_devices, vulkan_error) = match vulkan.as_ref().map(hwprobe::vulkan_devices) {
+        Some(Ok(v)) => (v.into_iter().map(VulkanDevice::from).collect(), None),
+        Some(Err(e)) => (Vec::new(), Some(e.to_string())),
+        None => (Vec::new(), None),
+    };
+    vulkan_status.name = vulkan_devices
+        .iter()
+        .find(|d| d.used_by_ffmpeg)
+        .map(|d| d.name.clone());
     let paths = [
         ("vaapi", vaapi.as_ref(), &vaapi_status),
         ("vulkan", vulkan.as_ref(), &vulkan_status),
@@ -333,9 +402,9 @@ pub fn run(render_node: &Path) -> DoctorReport {
         .collect();
     let gpu = Gpu {
         render_node: node,
-        ..gpu_vendor(render_node)
+        ..gpu_vendor(render_node, &vulkan_devices)
     };
-    let env = Env::detect(render_node, distro);
+    let env = Env::detect(render_node, distro, vulkan_error);
     let mut report = DoctorReport {
         distro,
         ffmpeg_version: ffi::ffmpeg_version(),
@@ -348,6 +417,7 @@ pub fn run(render_node: &Path) -> DoctorReport {
         encoders,
         gpu,
         devices: vec![vaapi_status, vulkan_status],
+        vulkan_devices,
         decode_checks,
         encode_checks,
         issues: Vec::new(),
@@ -376,6 +446,7 @@ fn open_device(
         device: device.map(str::to_string),
         ok: r.is_ok(),
         error: r.as_ref().err().map(|e| e.to_string()),
+        name: None,
         ffmpeg_log,
     };
     (r.ok(), status)
@@ -589,13 +660,20 @@ fn encode(t: &EncodeTarget, dev: Option<&HwDevice>, status: &DeviceStatus) -> Ch
     check.outcome(r, log)
 }
 
-/// The render node's vendor, from sysfs.
-fn gpu_vendor(render_node: &Path) -> Gpu {
+/// The render node's vendor from sysfs, else the first Vulkan GPU's.
+fn gpu_vendor(render_node: &Path, vulkan: &[VulkanDevice]) -> Gpu {
     let sysfs = render_node.file_name().and_then(|name| {
         let p = format!("/sys/class/drm/{}/device/vendor", name.to_string_lossy());
         std::fs::read_to_string(p).ok()
     });
-    let id = sysfs.and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok());
+    let id = sysfs
+        .and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
+        .or_else(|| {
+            vulkan
+                .iter()
+                .find(|d| !d.is_cpu())
+                .and_then(|d| u32::from_str_radix(d.vendor_id.trim_start_matches("0x"), 16).ok())
+        });
     Gpu {
         render_node: String::new(),
         vendor: id.map_or(Vendor::Unknown, Vendor::from_pci_id),
@@ -612,10 +690,12 @@ struct Env {
     other_nodes: Vec<String>,
     /// Which of [`FEDORA_PACKAGES`] are installed (Fedora only).
     installed: BTreeSet<String>,
+    /// Why the Vulkan devices couldn't be listed.
+    vulkan_error: Option<String>,
 }
 
 impl Env {
-    fn detect(render_node: &Path, distro: Distro) -> Self {
+    fn detect(render_node: &Path, distro: Distro, vulkan_error: Option<String>) -> Self {
         let node_error = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -630,6 +710,7 @@ impl Env {
             } else {
                 BTreeSet::new()
             },
+            vulkan_error,
         }
     }
 }
@@ -685,6 +766,8 @@ struct Fixes<'a> {
     distro: Distro,
     vendor: Vendor,
     installed: &'a BTreeSet<String>,
+    /// No render node at all: probably a VM or container.
+    no_gpu_visible: bool,
 }
 
 impl Fixes<'_> {
@@ -804,6 +887,31 @@ impl Fixes<'_> {
             },
         )
     }
+
+    /// A Vulkan driver for the GPU.
+    fn vulkan_driver(&self) -> String {
+        let driver = match self.distro {
+            Distro::Fedora => {
+                "sudo dnf install mesa-vulkan-drivers vulkan-loader   (RADV for AMD, ANV for Intel)"
+                    .into()
+            }
+            Distro::Arch => self.by_vendor(
+                || "sudo pacman -S --needed vulkan-radeon vulkan-icd-loader".into(),
+                || "sudo pacman -S --needed vulkan-intel vulkan-icd-loader".into(),
+            ),
+            Distro::Other => {
+                "install Mesa's Vulkan driver for your GPU (RADV for AMD, ANV for Intel)".into()
+            }
+        };
+        lines([
+            self.no_gpu_visible.then(|| {
+                "no GPU is visible here: in a VM or container, pass it through first \
+                 (for example `--device /dev/dri`)"
+                    .to_string()
+            }),
+            Some(driver),
+        ])
+    }
 }
 
 fn vainfo(node: &str) -> String {
@@ -822,6 +930,11 @@ fn issues(r: &DoctorReport, env: &Env) -> Vec<Issue> {
         distro: r.distro,
         vendor: r.gpu.vendor,
         installed: &env.installed,
+        no_gpu_visible: env
+            .node_error
+            .as_ref()
+            .is_some_and(|(k, _)| *k == ErrorKind::NotFound)
+            && env.other_nodes.is_empty(),
     };
     let mut out = Vec::new();
     let has_dec = |n: &str| r.decoders.iter().any(|c| c.name == n && c.available);
@@ -889,6 +1002,7 @@ fn issues(r: &DoctorReport, env: &Env) -> Vec<Issue> {
         }
     }
     vaapi_issues(r, env, &fx, &mut out);
+    vulkan_issues(r, env, &fx, &mut out);
     out.sort_by_key(|i| i.severity);
     out
 }
@@ -1054,6 +1168,78 @@ fn vaapi_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issue
     }
 }
 
+const NO_VULKAN_GPU: &str = "the viewer and exports render with Vulkan, and on the CPU \
+                             that is far too slow for 360 video; Vulkan Video decode is \
+                             unavailable";
+
+fn vulkan_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issue>) {
+    if !r.hw_device_types.iter().any(|t| t == "vulkan") {
+        out.push(Issue {
+            severity: Severity::Info,
+            what: "this FFmpeg was built without Vulkan".into(),
+            impact: "doctor cannot list the Vulkan devices, and FFmpeg's Vulkan Video decode \
+                     is unavailable"
+                .into(),
+            fix: fx.ffmpeg(),
+        });
+        return;
+    }
+    let Some(dev) = r.devices.iter().find(|d| d.kind == "vulkan") else {
+        return;
+    };
+    if !dev.ok {
+        out.push(Issue {
+            severity: Severity::Warning,
+            what: format!(
+                "FFmpeg cannot open a Vulkan device ({})",
+                dev.error.as_deref().unwrap_or("?")
+            ),
+            impact: NO_VULKAN_GPU.into(),
+            fix: fx.vulkan_driver(),
+        });
+        return;
+    }
+    if let Some(e) = &env.vulkan_error {
+        out.push(Issue {
+            severity: Severity::Info,
+            what: format!("cannot list the Vulkan devices: {e}"),
+            impact: "doctor cannot tell whether Vulkan runs on a GPU".into(),
+            fix: "vulkaninfo --summary   (lists them)".into(),
+        });
+        return;
+    }
+    let cpus: Vec<&VulkanDevice> = r.vulkan_devices.iter().filter(|d| d.is_cpu()).collect();
+    let gpu = r.vulkan_devices.iter().find(|d| !d.is_cpu());
+    match gpu {
+        None if !cpus.is_empty() => {
+            let names: Vec<&str> = cpus.iter().map(|d| d.name.as_str()).collect();
+            out.push(Issue {
+                severity: Severity::Warning,
+                what: format!(
+                    "the only Vulkan device is {}, which runs on the CPU: no GPU acceleration",
+                    and_list(&names)
+                ),
+                impact: NO_VULKAN_GPU.into(),
+                fix: fx.vulkan_driver(),
+            });
+        }
+        Some(gpu) if cpus.iter().any(|d| d.used_by_ffmpeg) => {
+            out.push(Issue {
+                severity: Severity::Info,
+                what: format!(
+                    "FFmpeg's Vulkan device runs on the CPU, though {} is there",
+                    gpu.name
+                ),
+                impact: "FFmpeg's Vulkan Video decode is unavailable".into(),
+                fix: "MESA_VK_DEVICE_SELECT=list vulkaninfo   (lists the devices; set \
+                      MESA_VK_DEVICE_SELECT=<vendor:device> to pick the GPU)"
+                    .into(),
+            });
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -1081,7 +1267,21 @@ mod tests {
             device: (kind == "vaapi").then(|| "/dev/dri/renderD128".into()),
             ok,
             error: (!ok).then(|| "Invalid argument".into()),
+            name: None,
             ffmpeg_log: vec![],
+        }
+    }
+
+    fn gpu_device(name: &str, device_type: VulkanDeviceType) -> VulkanDevice {
+        VulkanDevice {
+            name: name.into(),
+            device_type,
+            vendor_id: "0x1002".into(),
+            device_id: "0x7480".into(),
+            api_version: "1.4.318".into(),
+            driver: Some("radv".into()),
+            driver_info: None,
+            used_by_ffmpeg: true,
         }
     }
 
@@ -1106,6 +1306,10 @@ mod tests {
                 vendor_id: Some("0x1002".into()),
             },
             devices: vec![device("vaapi", true), device("vulkan", true)],
+            vulkan_devices: vec![gpu_device(
+                "AMD Radeon RX 7600 (RADV NAVI33)",
+                VulkanDeviceType::DiscreteGpu,
+            )],
             decode_checks,
             encode_checks: ENCODE_TARGETS
                 .iter()
@@ -1293,6 +1497,70 @@ mod tests {
         let av1 = is.iter().find(|i| i.what.contains("AV1 decoder")).unwrap();
         assert_eq!(av1.severity, Severity::Error);
         assert_eq!(av1.impact, "AV1 files cannot be opened");
+    }
+
+    #[test]
+    fn cpu_only_vulkan_is_flagged_with_the_driver_fix() {
+        let mut r = healthy(Distro::Arch);
+        r.vulkan_devices = vec![VulkanDevice {
+            driver: Some("llvmpipe".into()),
+            ..gpu_device("llvmpipe (LLVM 20.1.2, 256 bits)", VulkanDeviceType::Cpu)
+        }];
+        let i = only(&issues(&r, &Env::default())).clone();
+        assert_eq!(i.severity, Severity::Warning);
+        assert_eq!(
+            i.what,
+            "the only Vulkan device is llvmpipe (LLVM 20.1.2, 256 bits), which runs on the \
+             CPU: no GPU acceleration"
+        );
+        assert_eq!(
+            i.fix,
+            "sudo pacman -S --needed vulkan-radeon vulkan-icd-loader"
+        );
+
+        // No render node and no GPU vendor known: both Arch drivers, after
+        // the pass-through hint.
+        r.gpu.vendor = Vendor::Unknown;
+        let env = Env {
+            node_error: Some((ErrorKind::NotFound, "not found".into())),
+            ..Env::default()
+        };
+        let i = issues(&r, &env)
+            .into_iter()
+            .find(|i| i.what.contains("Vulkan"))
+            .unwrap();
+        assert_eq!(
+            i.fix,
+            "no GPU is visible here: in a VM or container, pass it through first (for \
+             example `--device /dev/dri`)\n\
+             # AMD GPU:\nsudo pacman -S --needed vulkan-radeon vulkan-icd-loader\n\
+             # Intel GPU:\nsudo pacman -S --needed vulkan-intel vulkan-icd-loader"
+        );
+
+        // A GPU next to llvmpipe is fine.
+        r.vulkan_devices.push(gpu_device(
+            "AMD Radeon 8060S",
+            VulkanDeviceType::IntegratedGpu,
+        ));
+        r.vulkan_devices[1].used_by_ffmpeg = false;
+        r.vulkan_devices[0].used_by_ffmpeg = false;
+        assert!(issues(&r, &Env::default()).is_empty());
+    }
+
+    #[test]
+    fn a_missing_vulkan_device_gets_the_driver_fix() {
+        let mut r = healthy(Distro::Fedora);
+        r.devices[1] = device("vulkan", false);
+        r.vulkan_devices.clear();
+        let i = only(&issues(&r, &Env::default())).clone();
+        assert_eq!(
+            i.what,
+            "FFmpeg cannot open a Vulkan device (Invalid argument)"
+        );
+        assert_eq!(
+            i.fix,
+            "sudo dnf install mesa-vulkan-drivers vulkan-loader   (RADV for AMD, ANV for Intel)"
+        );
     }
 
     #[test]

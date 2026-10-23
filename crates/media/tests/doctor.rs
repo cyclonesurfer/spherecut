@@ -13,7 +13,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use spherecut_media::doctor::{self, Check, CheckResult, DoctorReport, SOFTWARE, Severity};
+use spherecut_media::doctor::{
+    self, Check, CheckResult, DoctorReport, Fault, SOFTWARE, Severity, VulkanDeviceType,
+};
 use spherecut_testkit::tier2;
 
 /// A render node path that exists nowhere.
@@ -81,6 +83,53 @@ fn a_missing_render_node_is_reported_and_vaapi_not_tested() {
         .find(|i| i.what == format!("no DRM render node at {node}"))
         .unwrap_or_else(|| panic!("{:#?}", r.issues));
     assert_eq!(i.severity, Severity::Warning);
+}
+
+#[test]
+fn vulkan_devices_are_listed_and_cpu_ones_flagged() {
+    let r = report();
+    let dev = r.devices.iter().find(|d| d.kind == "vulkan").unwrap();
+    if !dev.ok {
+        // Then doctor says so, with the fix.
+        let i = r.issues.iter().find(|i| i.what.contains("Vulkan")).unwrap();
+        assert!(!i.fix.is_empty());
+        return;
+    }
+    assert!(!r.vulkan_devices.is_empty());
+    let used: Vec<_> = r
+        .vulkan_devices
+        .iter()
+        .filter(|d| d.used_by_ffmpeg)
+        .collect();
+    assert_eq!(used.len(), 1, "{:#?}", r.vulkan_devices);
+    assert_eq!(dev.name.as_deref(), Some(used[0].name.as_str()));
+    for d in &r.vulkan_devices {
+        let software = d.driver.as_deref() == Some("llvmpipe") || d.name.starts_with("llvmpipe");
+        assert_eq!(d.is_cpu(), software, "{d:#?}");
+        assert_eq!(d.device_type == VulkanDeviceType::Cpu, d.is_cpu());
+        assert!(d.api_version.starts_with("1."), "{d:#?}");
+    }
+    let cpu_issue = r
+        .issues
+        .iter()
+        .find(|i| i.what.starts_with("the only Vulkan device is"));
+    if r.vulkan_devices.iter().all(|d| d.is_cpu()) {
+        let i = cpu_issue.unwrap_or_else(|| panic!("{:#?}", r.issues));
+        assert!(
+            i.what
+                .ends_with("which runs on the CPU: no GPU acceleration")
+        );
+        assert!(!i.fix.is_empty());
+        // A CPU device has no video queues, so FFmpeg can't decode on it,
+        // and says why.
+        for c in checks(r, "vulkan") {
+            assert_eq!(c.result, CheckResult::Fails, "{c:#?}");
+            assert_eq!(c.fault, Some(Fault::Driver), "{c:#?}");
+            assert!(!c.ffmpeg_log.is_empty(), "{c:#?}");
+        }
+    } else {
+        assert!(cpu_issue.is_none(), "{:#?}", r.issues);
+    }
 }
 
 /// The checks on `path` and the issues, for a failure message.
