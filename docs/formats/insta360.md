@@ -15,18 +15,18 @@ code or data tables derived from them. Section 8 covers which references are cle
 
 Seven recordings from Pat's **Insta360 X5, firmware `v1.1.22_build1`** (field 3), made
 2026-10-22, examined with `spherecut probe` and a throwaway trailer script. File numbers are
-the `_004` to `_010` suffixes. Which `docs/SAMPLES.md` clip each one is was not given, so the
-mapping below is inferred from mode and length.
+the `_004` to `_010` suffixes. Pat shot them in the order of `docs/SAMPLES.md` and skipped
+clips 5 to 7, which matches the modes and lengths below.
 
-| File | Mode (from the trailer) | Tracks | Length | Likely clip |
+| File | Mode (from the trailer) | Tracks | Length | Clip |
 |---|---|---|---|---|
 | 004 | 8K30: 2 × 3840² HEVC, 29.97 fps | 2 video + AAC | 3.8 s | 1 |
 | 005 | 8K25: 2 × 3840², 25 fps | 2 video + AAC | 4.6 s | 2 |
-| 006 | 5.7K60: 2 × 2880², 59.94 fps | 2 video + AAC | 3.2 s | 3 |
+| 006 | 5.7K60 HDR video: 2 × 2880², 59.94 fps | 2 video + AAC | 3.2 s | 3 |
 | 007 | 4K120: 2 × 1920², 119.88 fps | 2 video + AAC | 4.9 s | 4 |
-| 008 | 8K30 | 2 video + AAC | 32.2 s | 6, 8 or 10 |
-| 009 | 8K30 | 2 video + AAC | 63.5 s | 9 |
-| 010 | 8K30 | 2 video + AAC | 32.3 s | 6, 8 or 10 |
+| 008 | 8K30 | 2 video + AAC | 32.2 s | 8: tripod, lines across the seams |
+| 009 | 8K30 | 2 video + AAC | 63.5 s | 9: handheld, fast turns, two flips |
+| 010 | 8K30 | 2 video + AAC | 32.3 s | 10: slow yaw, pitch and roll on the tripod |
 
 What they show [bytes]:
 
@@ -62,13 +62,17 @@ What they show [bytes]:
 - **Metadata**: `gamma_mode` `standard`, `is_flowstate_online` 0, `cam_posture` 0,
   `is_raw_gyro` 1, `pts_type` 2, `capture_offset_version` 4 (V6), `image category` 2,
   `stream_type` 4, `codec` 2 (H.265) on every `.insv`. Field 26 `file_group_info.type` is 0,
-  except **6 on the 5.7K60 take**, which telemetry-parser's enum calls `VideoHdr`. Either that
-  take was shot in an HDR video mode, or the enum doesn't match X5 firmware.
+  except **6 on the 5.7K60 take**, which telemetry-parser's enum calls `VideoHdr`. Pat confirms
+  that take was shot in the camera's HDR video mode, so the enum value holds on the X5. The
+  HDR take is still 8-bit BT.709 `standard`; HDR here is the camera's exposure mode, not an HDR
+  transfer function.
 
 Open questions this answers: Q1 (model and firmware), Q13 (25 fps timebase; no `_10_` on the
-X5), Q14 (every mode is one file plus an LRV), Q16 (thumbnail record). Still needs samples:
-I-Log/10-bit (Q11), 360 audio (Q15), FlowState on/off (Q9), a Studio export (Q4–Q6), a split
-recording (Q12), and which clip is which for the seam and rotation tests (Q2, Q7, Q8).
+X5), Q14 (every mode is one file plus an LRV), Q16 (thumbnail record). Samples now exist for
+Q7 and Q8 (clips 9 and 10) and for the seam half of Q4–Q6 (clip 8), but not yet the Studio
+export they need as a reference. Q2 needs a take with one lens covered, which clip 8 doesn't
+have. Still missing: I-Log/10-bit (Q11), 360 audio (Q15), FlowState on/off (Q9), a Studio
+export (Q4–Q6), and a split recording (Q12).
 
 ## 0. How to read this
 

@@ -49,12 +49,13 @@ rustup-init -y                                           # gets rustfmt and clip
 
 ## Samples
 
-- **Insta360 X5**, firmware v1.1.22, 7 takes with LRVs (2026-10-23): 8K30,
-  8K25, 5.7K60, 4K120 and three longer 8K30 takes. All 14 files probe
-  cleanly and are detected as Insta360 dual fisheye / LRV proxy. Findings:
-  `docs/formats/insta360.md`, "Pat's X5 samples". Still wanted: I-Log,
-  360 audio, FlowState on, a Studio export, a split recording, and which
-  take is which test clip.
+- **Insta360 X5**, firmware v1.1.22, 7 takes with LRVs (2026-10-23), clips
+  1–4 and 8–10 of `docs/SAMPLES.md`: 8K30, 8K25, 5.7K60 (HDR video mode),
+  4K120, the tripod seam clip, the handheld flips and the slow rotation. All
+  14 files probe cleanly and are detected as Insta360 dual fisheye / LRV
+  proxy. Findings: `docs/formats/insta360.md`, "Pat's X5 samples". Still
+  wanted: I-Log, 360 audio, FlowState on, a Studio export, a split
+  recording.
 - GoPro and DJI: none yet.
 
 ## Done in M0
