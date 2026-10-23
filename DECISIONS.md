@@ -213,7 +213,9 @@ in its prerequisite check.
   Agreement across machines is expected but not guaranteed, because the
   pattern code uses libm trigonometry, and it has not been checked. Two
   full `gen-media` runs on the fix/writers branch gave byte-identical
-  output (sha256 over all 19 files).
+  output (sha256 over all 19 files). Rechecked 2026-10-23 at 6b309fb: two
+  more runs gave byte-identical output over all 22 files (12 clips, 9 bad
+  files and `MANIFEST.md`), the same bytes as `test-media/`.
 - `spherecut_synth::media::write` writes through `Mp4Writer` (D16), so a
   clip at its final name is always complete. The Tier 2 clip cache
   (`CARGO_TARGET_TMPDIR/tier2-media-v2`) relies on that. A killed run can
@@ -572,6 +574,18 @@ other distros get the package named in words. Doctor exits 1 only on an
 error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes
 AV1. `--json` keeps its old keys and adds `gpu`, `vulkan_devices`,
 `decode_checks` and `encode_checks`.
+
+Every decoder and encoder in doctor's tables that this FFmpeg lacks gets
+its own issue, naming the codec, with the FFmpeg fix. Each failed check
+has a fault: `ffmpeg` (the build left it out), `driver` (the driver or
+hardware refuses it) or `wrong_output` (it runs and the picture or the
+read-back differs). Only a refusal falls back to the CPU (D3). A driver
+with wrong output gives no error, so doctor says its wrong pictures would
+be used and suggests a newer driver. That makes VA-API wrong output a
+warning, and Vulkan Video wrong output a warning when VA-API can't decode
+at least one of those formats, since Vulkan's pictures are then the ones
+used. Otherwise a Vulkan Video decode problem is a note, because VA-API
+is the first hardware decoder.
 
 `cargo xtask hw-test`'s prerequisite check still runs `rpm -q` for
 `ffmpeg-free`, `mesa-va-drivers` and `mesa-va-drivers-freeworld`, and
