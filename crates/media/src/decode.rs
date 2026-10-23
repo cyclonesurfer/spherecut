@@ -17,11 +17,12 @@
 //! Matroska file cut in a cluster, and for most cuts in a fragmented MP4,
 //! whose index only grows as its fragments are read.
 //!
-//! A packet the demuxer reports as invalid data is skipped, since the
-//! demuxer can resync after one and later frames keep their timestamps,
-//! but with a warning, and counted in [`VideoDecoder::skipped_packets`];
-//! after [`MAX_UNREADABLE_IN_A_ROW`] in a row the file counts as
-//! unreadable.
+//! Other streams in the file are not read, so damage in them doesn't end
+//! this one. A packet the demuxer reports as invalid data is skipped,
+//! since the demuxer can resync after one and later frames keep their
+//! timestamps, but with a warning, and counted in
+//! [`VideoDecoder::skipped_packets`]; after [`MAX_UNREADABLE_IN_A_ROW`] in
+//! a row the file counts as unreadable.
 
 use std::ffi::c_int;
 use std::path::{Path, PathBuf};
@@ -190,7 +191,7 @@ impl VideoDecoder {
 
     fn with_input(
         path: &Path,
-        ictx: ff::format::context::Input,
+        mut ictx: ff::format::context::Input,
         index: Option<usize>,
         hw: Option<Arc<HwDevice>>,
     ) -> Result<Self, MediaError> {
@@ -211,6 +212,7 @@ impl VideoDecoder {
             .map_err(|e| err(path, "bad stream timebase", e))?;
         let mut ctx = ff::codec::context::Context::from_parameters(st.parameters())
             .map_err(|e| err(path, "decoder parameters", e))?;
+        ffi::discard_other_streams(&mut ictx, stream_index);
         match &hw {
             Some(dev) => {
                 ffi::attach_hw_device(&mut ctx, dev).map_err(|e| err(path, "hardware device", e))?
@@ -419,7 +421,8 @@ impl VideoDecoder {
     }
 
     /// At the end of the file: whether it ends before the data the
-    /// demuxer's index lists for our stream, i.e. it was cut short.
+    /// demuxer's index lists for our stream, i.e. it was cut short. The
+    /// other streams don't count, since the demuxer skips them.
     fn truncation(&self) -> Option<String> {
         let end = ffi::index_end(&self.ictx, self.stream_index)?;
         let size = std::fs::metadata(&self.path).ok()?.len();

@@ -51,11 +51,14 @@ enum Layout {
     Faststart,
     /// `moov` after `mdat`.
     MoovAtEnd,
+    /// `moov` first, then every video sample, then every audio sample.
+    VideoThenAudio,
 }
 
 /// Remux `src` into `dst` laid out as `layout` says.
 fn remux(src: &Path, dst: &Path, layout: Layout) {
     let mut ictx = ff::format::input(src).unwrap();
+    let video = ictx.streams().best(ff::media::Type::Video).unwrap().index();
     let mut octx = ff::format::output(dst).unwrap();
     for st in ictx.streams() {
         let mut out = octx
@@ -69,10 +72,24 @@ fn remux(src: &Path, dst: &Path, layout: Layout) {
         opts.set("movflags", "faststart");
     }
     octx.write_header_with(opts).unwrap();
-    for (st, mut pkt) in ictx.packets() {
-        pkt.rescale_ts(st.time_base(), octx.stream(st.index()).unwrap().time_base());
-        pkt.set_position(-1);
-        pkt.write_interleaved(&mut octx).unwrap();
+    let mut packets: Vec<_> = ictx
+        .packets()
+        .map(|(st, mut pkt)| {
+            pkt.rescale_ts(st.time_base(), octx.stream(st.index()).unwrap().time_base());
+            pkt.set_position(-1);
+            pkt
+        })
+        .collect();
+    if layout == Layout::VideoThenAudio {
+        // A stable sort, so each stream keeps its order.
+        packets.sort_by_key(|p| p.stream() != video);
+        for pkt in packets {
+            pkt.write(&mut octx).unwrap();
+        }
+    } else {
+        for pkt in packets {
+            pkt.write_interleaved(&mut octx).unwrap();
+        }
     }
     octx.write_trailer().unwrap();
 }
@@ -185,6 +202,32 @@ fn with_moov_at_the_end_a_cut_in_the_media_data_fails_to_open() {
         VideoDecoder::open(&cut, None, None),
         Err(MediaError::Open { .. })
     ));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn damage_in_another_stream_does_not_end_the_video_early() {
+    let dir = tmp("other");
+    // Longer than a second: within one, the MOV demuxer reads samples in
+    // file order, so all of this file's video would come first anyway.
+    let src = clip(&dir, "t-other", 90);
+    let split = dir.join("t-other-split.mp4");
+    remux(&src, &split, Layout::VideoThenAudio);
+    assert_decodes_whole(&split, 90);
+    let bytes = std::fs::read(&split).unwrap();
+    let video = samples(&split, ff::media::Type::Video);
+    let audio = samples(&split, ff::media::Type::Audio);
+    let video_end = video.iter().map(|(pos, size)| pos + size).max().unwrap();
+    assert!(audio[0].0 >= video_end, "the audio must follow the video");
+
+    // Cut in the audio: every video sample is still in the file, so every
+    // frame decodes and the stream ends cleanly.
+    let cut = dir.join("t-other-part.mp4");
+    for (pos, size) in [audio[0], audio[audio.len() / 2]] {
+        let at = pos + size / 2;
+        std::fs::write(&cut, &bytes[..at as usize]).unwrap();
+        assert_decodes_whole(&cut, 90);
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 

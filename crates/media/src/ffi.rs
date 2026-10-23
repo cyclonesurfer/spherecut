@@ -468,6 +468,22 @@ pub fn index_end(ictx: &ff::format::context::Input, index: usize) -> Option<u64>
         .max()
 }
 
+/// Have the demuxer skip every stream but `keep`: it then neither reads
+/// their data nor stops at damage in it.
+pub fn discard_other_streams(ictx: &mut ff::format::context::Input, keep: usize) {
+    // SAFETY: `ictx` owns a live AVFormatContext whose `streams` array
+    // holds `nb_streams` live streams, and a stream's `discard` may be set
+    // between reads. The value written is one our headers define.
+    unsafe {
+        let fc = ictx.as_mut_ptr();
+        for i in 0..(*fc).nb_streams as usize {
+            if i != keep {
+                (**(*fc).streams.add(i)).discard = sys::AVDiscard::AVDISCARD_ALL;
+            }
+        }
+    }
+}
+
 /// A reference to an FFmpeg hardware device context. Dropping it releases
 /// the reference; FFmpeg's buffer refcounts are atomic, so it can move
 /// between threads.
