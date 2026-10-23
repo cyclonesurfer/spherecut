@@ -25,6 +25,7 @@
 //! report is written either way.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -129,8 +130,15 @@ fn capture_env(program: &str, args: &[&str], env: &[(&str, &str)]) -> Captured {
 /// Like `capture_env`, but stdout and stderr share one pipe, so the text is
 /// in the order it was written. `cargo test` names each test binary on
 /// stderr and the binary prints its results on stdout; only the merged
-/// stream says which binary a result came from. Runs in `dir`.
-fn capture_merged(dir: &Path, program: &str, args: &[&str], env: &[(&str, &str)]) -> Captured {
+/// stream says which binary a result came from. Runs in `dir`. The
+/// variables in `env` reach the child as they are, paths that are not
+/// UTF-8 included.
+fn capture_merged<V: AsRef<OsStr>>(
+    dir: &Path,
+    program: &str,
+    args: &[&str],
+    env: &[(&str, V)],
+) -> Captured {
     let cmdline = cmdline(program, args);
     let start = Instant::now();
     let run = || -> std::io::Result<(bool, String)> {
@@ -139,7 +147,7 @@ fn capture_merged(dir: &Path, program: &str, args: &[&str], env: &[(&str, &str)]
         // once the child has started and the read below ends at EOF.
         let mut child = Command::new(program)
             .args(args)
-            .envs(env.iter().copied())
+            .envs(env.iter().map(|(k, v)| (k, v.as_ref())))
             .current_dir(dir)
             .stdin(Stdio::null())
             .stdout(writer.try_clone()?)
@@ -865,24 +873,28 @@ fn run_tier2(quick: bool, samples: &Path, bench_out: &Path) -> Tier2 {
     {
         eprintln!("warning: could not clear {}: {e}", bench_out.display());
     }
-    let samples_s = samples.to_string_lossy().into_owned();
-    let bench_s = bench_out.to_string_lossy().into_owned();
-    list_and_run(
-        &workspace_root(),
-        quick,
-        &[
-            ("SPHERECUT_TIER2", "1"),
-            ("SPHERECUT_SAMPLES", &samples_s),
-            ("SPHERECUT_BENCH_OUT", &bench_s),
-        ],
-    )
+    list_and_run(&workspace_root(), quick, &tier2_env(samples, bench_out))
+}
+
+/// What the Tier 2 tests get from hw-test. The paths go as they are, so
+/// that the tests look at the same directory as the report.
+fn tier2_env<'a>(samples: &'a Path, bench_out: &'a Path) -> [(&'static str, &'a OsStr); 3] {
+    [
+        ("SPHERECUT_TIER2", OsStr::new("1")),
+        ("SPHERECUT_SAMPLES", samples.as_os_str()),
+        ("SPHERECUT_BENCH_OUT", bench_out.as_os_str()),
+    ]
 }
 
 /// Lists the ignored tests of the cargo workspace in `dir`, runs them, and
 /// pairs every listed test with its outcome. Every cargo command gets
 /// `env`, so that they all build the same way, and [`PLAIN_OUTPUT`].
-fn list_and_run(dir: &Path, quick: bool, env: &[(&str, &str)]) -> Tier2 {
-    let env: Vec<(&str, &str)> = env.iter().chain(&PLAIN_OUTPUT).copied().collect();
+fn list_and_run<V: AsRef<OsStr>>(dir: &Path, quick: bool, env: &[(&str, V)]) -> Tier2 {
+    let env: Vec<(&str, &OsStr)> = env
+        .iter()
+        .map(|(k, v)| (*k, v.as_ref()))
+        .chain(PLAIN_OUTPUT.iter().map(|&(k, v)| (k, OsStr::new(v))))
+        .collect();
     // A skip is a test failure to cargo; without --no-fail-fast it stops
     // after the first binary that has one.
     let mut cargo = vec!["test", "--workspace", "--no-fail-fast", "--color", "never"];
@@ -1169,11 +1181,7 @@ pub fn run(a: Args) -> Result<()> {
         r,
         "| Samples dir | {} ({}) |\n",
         samples.display(),
-        if samples.is_dir() {
-            "present"
-        } else {
-            "missing"
-        }
+        samples_status(&samples)
     );
 
     match &tier2 {
@@ -1363,6 +1371,18 @@ pub fn run(a: Args) -> Result<()> {
         bail!("{}; see {}", problems.join("; "), display_rel(&out, &root));
     }
     Ok(())
+}
+
+/// Whether the samples directory is there, and usable: the tests open
+/// samples through FFmpeg's Rust bindings, which take only UTF-8 paths.
+fn samples_status(samples: &Path) -> &'static str {
+    if !samples.is_dir() {
+        "missing"
+    } else if samples.to_str().is_none() {
+        "present, but its path is not valid UTF-8, which FFmpeg's Rust bindings can't open"
+    } else {
+        "present"
+    }
 }
 
 /// Spread, in percent of the median, above which a benchmark is flagged.
@@ -2207,6 +2227,42 @@ fn main() {
                 t.run.text
             );
         }
+    }
+
+    #[test]
+    fn paths_that_are_not_utf8_reach_the_tests_unchanged_and_are_reported() {
+        use std::os::unix::ffi::OsStrExt;
+        // A lossy copy is another path: the report said "present" while
+        // the tests looked for a directory with U+FFFD in its name.
+        let raw = OsStr::from_bytes(b"samples-\xff");
+        let s = Scratch::new("non-utf8", &[]);
+        let samples = s.0.join(raw);
+        std::fs::create_dir_all(&samples).unwrap();
+        let bench = s.0.join(raw).join("hw-bench.tsv");
+        let env = tier2_env(&samples, &bench);
+        assert_eq!(env[1], ("SPHERECUT_SAMPLES", samples.as_os_str()));
+        assert_eq!(env[2], ("SPHERECUT_BENCH_OUT", bench.as_os_str()));
+        let child = capture_merged(
+            &s.0,
+            "sh",
+            &["-c", "printf %s \"$SPHERECUT_SAMPLES\" | od -An -tx1"],
+            &env,
+        );
+        let want: String = samples
+            .as_os_str()
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let got: String = child.text.split_whitespace().collect();
+        assert_eq!(got, want, "{}", child.text);
+
+        assert_eq!(
+            samples_status(&samples),
+            "present, but its path is not valid UTF-8, which FFmpeg's Rust bindings can't open"
+        );
+        assert_eq!(samples_status(&s.0), "present");
+        assert_eq!(samples_status(&s.0.join("none")), "missing");
     }
 
     #[test]

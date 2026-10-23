@@ -539,7 +539,11 @@ It runs cargo with `CARGO_TERM_VERBOSE=false`, `CARGO_TERM_QUIET=false`,
 `CARGO_TERM_COLOR=never`, `CARGO_TERM_PROGRESS_WHEN=never` and
 `RUST_TEST_NOCAPTURE=0`, and passes libtest `--format pretty`, so the
 user's cargo settings don't change what it reads. `--samples` is made
-absolute, since cargo runs integration tests from the package directory.
+absolute, since cargo runs integration tests from the package directory,
+and reaches the tests byte for byte (as do `SPHERECUT_BENCH_OUT` and the
+other variables), never as a lossy UTF-8 copy. A samples path that is
+not valid UTF-8 is reported as unusable, since FFmpeg's Rust bindings
+open only UTF-8 paths, and the samples tests skip with that reason.
 The report name gets `-dirty` only for changes outside `hw-reports/`.
 
 Why: the M0 review found that hw-test silently dropped Tier 2 tests (B1)

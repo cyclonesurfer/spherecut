@@ -32,15 +32,30 @@ pub mod tier2 {
         }
     }
 
-    /// The samples directory, or skip if it is missing.
+    /// The samples directory, or skip if it is missing or unusable.
     #[track_caller]
     pub fn require_samples_dir() -> PathBuf {
         require_hw_run();
-        let dir = std::env::var_os("SPHERECUT_SAMPLES")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("samples"));
+        usable_samples_dir(
+            std::env::var_os("SPHERECUT_SAMPLES")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("samples")),
+        )
+    }
+
+    /// `dir`, or skip if it is missing or its path is not UTF-8: FFmpeg's
+    /// Rust bindings open only UTF-8 paths.
+    #[track_caller]
+    pub(crate) fn usable_samples_dir(dir: PathBuf) -> PathBuf {
         if !dir.is_dir() {
             skip(format!("samples directory {} not found", dir.display()));
+        }
+        if dir.to_str().is_none() {
+            skip(format!(
+                "samples directory {} has a path that is not valid UTF-8, which FFmpeg's \
+                 Rust bindings can't open",
+                dir.display()
+            ));
         }
         dir
     }
@@ -178,5 +193,25 @@ mod tests {
             .and_then(|e| e.downcast_ref::<String>().cloned())
             .unwrap_or_default();
         assert_eq!(msg, "TIER2-SKIP: no GPU");
+    }
+
+    #[test]
+    fn samples_with_a_path_that_is_not_utf8_are_skipped() {
+        use std::os::unix::ffi::OsStrExt;
+        let base = std::env::temp_dir().join(format!("spherecut-testkit-{}", std::process::id()));
+        let dir = base.join(std::ffi::OsStr::from_bytes(b"samples-\xff"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let skipped = |dir: std::path::PathBuf| {
+            std::panic::catch_unwind(|| tier2::usable_samples_dir(dir))
+                .err()
+                .and_then(|e| e.downcast_ref::<String>().cloned())
+        };
+        let msg = skipped(dir).unwrap_or_default();
+        assert!(
+            msg.starts_with("TIER2-SKIP: samples directory ") && msg.contains("not valid UTF-8"),
+            "{msg}"
+        );
+        assert_eq!(skipped(base.clone()), None);
+        std::fs::remove_dir_all(&base).ok();
     }
 }
