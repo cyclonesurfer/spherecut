@@ -792,9 +792,10 @@ fn is_text(t: FourCc) -> bool {
 /// child that should too. Such a type is a damaged header. FFmpeg skips
 /// the box as one it does not know, so a `trak` whose type reads `\xd1rak`
 /// loses its stream without a word, and a damaged `sv3d` its projection.
-/// Four zero bytes are allowed only as the last child of a sample entry
-/// that holds nothing but zero bytes, as QuickTime's terminator does;
-/// anywhere else they are a header zeroed with the rest of its box.
+/// Four zero bytes are allowed only as the type of a sample entry's last
+/// child with nothing but zero bytes after its header, QuickTime's
+/// terminator; anywhere else they are a header zeroed with the rest of
+/// its box.
 fn unprintable_types(b: &Mp4Box, out: &mut Vec<String>) {
     let entry = entry_handler(b.fourcc).is_some();
     for (i, c) in b.children.iter().enumerate() {
