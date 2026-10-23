@@ -3,3 +3,4 @@
 /hw-reports/*.tmp
 /test-media/
 *.profraw
+/.claude/
