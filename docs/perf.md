@@ -63,50 +63,47 @@ Current benchmarks:
 
 ### huginn (Radeon 8060S, Fedora 44)
 
-Report: [`hw-reports/huginn-a9128cf8df-dirty.md`](../hw-reports/huginn-a9128cf8df-dirty.md)
-at a9128cf (the `-dirty` is untracked scratch files only, no source
-changes), 2026-10-22. Mesa 26.2.5 (radeonsi from
+Report: [`hw-reports/huginn-4cd8a0f744.md`](../hw-reports/huginn-4cd8a0f744.md)
+at 4cd8a0f, 2026-10-23. Mesa 26.2.5 (radeonsi from
 `mesa-va-drivers-freeworld`, RADV), FFmpeg 8.1.3 (RPM Fusion), rustc
-1.99.0. The GPU was idle for the whole run: nothing else was loaded on it.
+1.99.0. Each number is the median of 3 runs after a warm-up.
 
-This run predates the repeat-and-spread change above: each number is a
-single run, with no warm-up. It also predates the hw-test, doctor,
-decoder and probe fixes merged since a9128cf, from both M0 reviews. A
-rerun at 2c8d0c0 is pending.
+Tier 2: 8 passed, 0 failed, 1 skipped. `vulkan_hevc_main_matches_software`
+skipped because the Vulkan driver does not support the format. Doctor's
+decode checks show RADV on Strix Halo decodes AV1 with Vulkan Video, but
+not H.264 or HEVC ("Device does not support decoding hevc!"). VA-API
+decodes and encodes all four formats it checks.
 
-Tier 2: 7 passed, 0 failed, 1 skipped. `vulkan_hevc_main_matches_software`
-skipped: Vulkan Video HEVC decode unavailable ("decoding: Operation not
-permitted"). That message is how error code -1 reads: the decoder passed
-on the `AV_PIX_FMT_NONE` (-1) that Spherecut's `get_format` callback
-returns when it refuses to fall back to software. The decoder now reports
-why instead (this FFmpeg has no hardware decoder for the format, or the
-driver refused it), and doctor's Vulkan decode checks show which formats
-fail. `spherecut doctor` (the version at a9128cf, which only opened the
-devices): no problems found.
-
-| Benchmark | VA-API | Software |
+| Benchmark | VA-API (median, range) | Software (median, range) |
 |---|---:|---:|
-| X5 2× 1920² @ 119.88 | 1.87 × real time | 1.08 × real time |
-| X5 2× 2880² @ 59.94 | 2.00 × real time | 0.96 × real time |
-| X5 2× 3840² @ 25.00 | 2.69 × real time | 0.80 × real time |
-| X5 2× 3840² @ 29.97 | 1.18 × real time | 0.67 × real time |
-| LRV 1× 1664×832 @ 25.00 | 45.37 × real time | 38.20 × real time |
-| LRV 1× 1664×832 @ 29.97 | 56.93 × real time | 47.77 × real time |
-| 3840×1920 HEVC 8-bit, synthetic | 284.57 fps | 687.46 fps |
-| 5760×2880 HEVC 8-bit, synthetic | 109.96 fps | 294.91 fps |
+| X5 2× 1920² @ 119.88 | 1.88 × (1.80 to 1.90) | 1.09 × (1.08 to 1.09) |
+| X5 2× 2880² @ 59.94 | 1.61 × (1.53 to 2.03) **unstable** | 0.97 × (0.97 to 0.98) |
+| X5 2× 3840² @ 25.00 | 2.43 × (1.52 to 2.87) **unstable** | 0.80 × (0.80 to 0.80) |
+| X5 2× 3840² @ 29.97 | 2.40 × (1.17 to 2.41) **unstable** | 0.68 × (0.67 to 0.68) |
+| LRV 1× 1664×832 @ 25.00 | 51.70 × (51.44 to 53.62) | 37.29 × (36.73 to 38.27) |
+| LRV 1× 1664×832 @ 29.97 | 60.81 × (54.95 to 60.93) | 43.76 × (43.65 to 45.16) |
+| 3840×1920 HEVC 8-bit, synthetic | 300.85 fps (299.32 to 304.14) | 716.82 fps (654.90 to 722.33) |
+| 5760×2880 HEVC 8-bit, synthetic | 120.79 fps (120.22 to 121.48) | 330.22 fps (307.73 to 360.40) **unstable** |
 
-A second run of both test binaries straight after
-([synth](../hw-reports/huginn-tier2-synth.log),
-[samples](../hw-reports/huginn-tier2-samples.log)) matched within 10% on
-the X5 and LRV rows and on VA-API 3840×1920. The other synthetic rows fell:
-VA-API 5760×2880 from 109.96 to 67.30 fps on an idle GPU, software
-3840×1920 from 687.46 to 523.08 fps and software 5760×2880 from 294.91 to
-243.90 fps. One run per benchmark is not enough to trust those numbers.
+What this says:
 
-Every X5 mode decodes faster than real time on VA-API and slower than real
-time in software, except 1920² at 1.08×. 3840² at 29.97 is the tightest
-case, at 1.18×. On the synthetic clips, software decode on huginn's CPU beats
-VA-API including its copy to RAM.
+- Software decode can't play the X5's 5.7K and 8K modes in real time even
+  on huginn's 16 cores (32 threads), so hardware decode is required, as
+  planned.
+- VA-API decodes every X5 mode faster than real time, but at 5.7K and 8K
+  the runs vary by up to half the median. The slowest 8K30 run, 1.17×,
+  leaves little headroom. VA-API times include copying each frame to
+  RAM. Keeping frames on the GPU (DMA-BUF into Vulkan) is in `PLAN.md`'s
+  M9 if profiling shows it matters; the M1 viewer's overlay will show how
+  much of each frame's time the copy and upload take.
+- On the synthetic clips, which are easy to decode, the CPU beats VA-API
+  including its copy, as in the first run.
+
+The first run, at a9128cf on 2026-10-22
+([`huginn-a9128cf8df-dirty.md`](../hw-reports/huginn-a9128cf8df-dirty.md)),
+timed each benchmark once, with no warm-up, and gave 1.18× for X5 8K30 on
+VA-API. Its Vulkan Video skip read "Operation not permitted", which was
+how Spherecut's refusal of a software fallback showed before 9300fc0.
 
 ### odin (RX 7600, Fedora)
 

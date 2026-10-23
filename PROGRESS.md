@@ -1,14 +1,14 @@
 # Progress
 
-Updated 2026-10-23, at 2c8d0c0. Milestone criteria are in `PLAN.md`;
+Updated 2026-10-23, after huginn's report at 4cd8a0f. Milestone criteria are in `PLAN.md`;
 decisions and their reasons in `DECISIONS.md`.
 
 ## Status
 
 | Milestone | State |
 |---|---|
-| M0 Foundation | **Done pending hardware**. The only hardware report (huginn, a9128cf) predates the fixes from both M0 reviews; a clean rerun at 2c8d0c0 is still needed. Evidence below |
-| M1 Viewer | Next. `VideoDecoder` (software, VA-API, Vulkan) is its first slice |
+| M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because RADV on Strix Halo has no Vulkan Video H.264 or HEVC decode. Evidence below |
+| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice |
 | M2–M9 | Not started |
 
 ## Environments
@@ -37,7 +37,7 @@ extracted X5 samples, `samples_probe_cleanly` passes.
 
 | Machine | Hardware | Software | State |
 |---|---|---|---|
-| huginn | Ryzen AI Max+ 395, Radeon 8060S (Strix Halo, RDNA 3.5), 128 GB | Fedora 44, kernel 7.0.9, Mesa 26.2.5 (RADV, radeonsi from `mesa-va-drivers-freeworld`), FFmpeg 8.1.3 (RPM Fusion), rustc 1.99.0 (Fedora RPM) | `hw-test` at a9128cf, 2026-10-22: 7 passed, 1 skipped (Vulkan Video HEVC). VA-API decode of H.264, HEVC Main and Main 10 matches software; `vainfo` lists HEVC encode. A rerun at 2c8d0c0 is wanted |
+| huginn | Ryzen AI Max+ 395, Radeon 8060S (Strix Halo, RDNA 3.5), 128 GB | Fedora 44, kernel 7.0.9, Mesa 26.2.5 (RADV, radeonsi from `mesa-va-drivers-freeworld`), FFmpeg 8.1.3 (RPM Fusion), rustc 1.99.0 (Fedora RPM) | `hw-test` at 4cd8a0f, 2026-10-23: 8 passed, 1 skipped. VA-API decodes H.264, HEVC Main and Main 10 and every X5 sample bit for bit like software, and encodes H.264, HEVC and AV1. Vulkan Video decodes AV1 but not H.264 or HEVC ("Device does not support decoding hevc!"). Earlier run at a9128cf: PR #1 |
 | odin | RX 7600 (RDNA 3) | Fedora | No report yet |
 | Framework 13 Pro | Intel Xe3 | Arch (Omarchy), Hyprland | Arrives late 2026 |
 
@@ -72,7 +72,7 @@ repository, so a commit has to be pushed before it can be run there.
 | `spherecut probe` | `crates/cli/tests/probe.rs`, among them `file_names_that_are_not_utf8_are_reported`, `files_named_in_bytes_that_are_not_utf8_are_probed`, `a_codec_ffmpeg_does_not_know_is_a_warning`, `an_audio_setup_ffmpeg_does_not_implement_is_a_warning`, `an_empty_track_ffmpeg_cannot_set_up_is_a_warning`, `ffmpegs_log_is_kept_for_a_file_it_cannot_open` and `a_reader_that_goes_away_is_not_an_error`; the `probe` unit tests on which streams FFmpeg cannot decode are damage (`a_stream_ffmpeg_cannot_set_up_is_damage_only_with_samples_it_reads`, `a_stream_without_a_decoder_in_this_build_is_a_warning`, `a_decoder_that_refuses_the_codec_setup_is_damage_unless_it_lacks_a_feature`); `tags_that_are_not_utf8_come_out_as_valid_json` in `crates/cli/tests/probe_tags.rs`; `a_file_whose_name_is_not_utf8_probes_and_decodes` in `crates/media/tests/non_utf8_names.rs`; `broken_files_give_errors_not_panics` in `crates/synth/tests/generated_media.rs` (every bad file, plus 4000 edits of a real `moov`, of which it must find at least 3000; it found 3453 at 1bfa90b); the `mp4` unit tests `timescales_ffmpeg_cannot_use_are_damage`, `box_types_that_are_not_text_are_damage_where_types_are_registered`, `a_trak_under_another_printable_type_is_damage`, `an_sv3d_ffmpeg_ignores_is_damage` and `zero_types_are_allowed_only_at_the_end_of_a_sample_entry`, and the MP4 fuzzing (D15) |
 | `spherecut doctor` | `crates/media/tests/doctor.rs`, `crates/cli/tests/doctor.rs` against lavapipe, and the unit tests in `crates/media/src/doctor.rs`, among them `every_missing_codec_gets_an_issue_with_the_ffmpeg_fix` and `a_driver_that_decodes_wrongly_is_told_apart_from_one_that_refuses`. `crates/media/tests/hw_refusal.rs` checks, on lavapipe, the refusals that doctor's probes share with `VideoDecoder` (D14). Capability checks and fixes: D18 |
 | `cargo xtask hw-test` | Unit tests in `xtask/src/hw_test.rs`, among them `paths_that_are_not_utf8_reach_the_tests_unchanged_and_are_reported` and `benchmarks_show_median_range_and_spread`, and `samples_with_a_path_that_is_not_utf8_are_used` in `crates/testkit/src/lib.rs`; the huginn run; the reporting rules in D19 |
-| First hardware report | `hw-reports/huginn-a9128cf8df-dirty.md`: toolchain, a Vulkan device (RADV), VA-API HEVC decode working, and the Vulkan Video HEVC gap named |
+| First hardware report | `hw-reports/huginn-a9128cf8df-dirty.md`, then the clean `hw-reports/huginn-4cd8a0f744.md`: toolchain, a Vulkan device (RADV), VA-API HEVC decode and encode working, doctor's decode checks naming exactly what Vulkan Video can't decode, and the benchmarks with their spread (`docs/perf.md`) |
 | Docs | README, PLAN, ARCHITECTURE, DECISIONS, PROGRESS, `docs/PROMPT.md`, `docs/SAMPLES.md`, `docs/formats/{insta360,gopro,dji}.md`, `docs/perf.md` |
 
 The M0 review at a9128cf found two blockers (B1, B2) and six should-fixes
@@ -104,10 +104,14 @@ commits made on main found a closed stderr still panicking (0b479e6,
 adead9f), a zeroed `elst` going unnoticed (e93d693, 8462720) and `inject`
 writing after a QuickTime terminator (324e224), all fixed with tests.
 
+huginn's rerun at 4cd8a0f (PR #2, `hw-reports/huginn-4cd8a0f744.md`) came
+back clean, so M0 is done.
+
 ## Known issues and limits
 
 - `VideoDecoder` copies hardware frames to system memory. Zero-copy
-  (VA-API to DMA-BUF to Vulkan) is planned for M1/M8 performance work.
+  (VA-API to DMA-BUF to Vulkan) is in `PLAN.md`'s M9, if profiling shows
+  it matters.
 - `VideoDecoder` doesn't detect Matroska cuts or most fragmented-MP4 cuts,
   and `probe` checks Matroska only against its Segment length (D13, D15).
 - Without decoding, `probe` can't find damage inside `mdat`, or damage in
@@ -158,13 +162,17 @@ writing after a QuickTime terminator (324e224), all fixed with tests.
 - Doctor doesn't print the full VA-API profile list; the hw-test report
   includes `vainfo`.
 - ambiX AAC plays as 4.0 surround in players that ignore `SA3D` (D17).
-- huginn's numbers are single runs from before the M0 fixes (`docs/perf.md`).
+- On huginn, VA-API decode of the X5 8K clips varies a lot between runs
+  (1.2 to 2.9 times real time; `docs/perf.md`), which hw-test marks as
+  unstable. The copy of each frame to RAM is a likely part of it; the M1
+  performance overlay will show how much.
+- No odin report yet, and no Intel machine until the Framework arrives.
 - No GUI yet, so no GUI smoke run (M1).
 
 ## Next
 
-1. Rerun `cargo xtask hw-test` on huginn at 2c8d0c0 or later, then the
-   first run on odin.
+1. The first `cargo xtask hw-test` run on odin (any time; the prompt is
+   the one huginn used).
 2. M1: the `MediaBackend` trait around `VideoDecoder` (seek, audio, worker
    threads, frame cache), then the wgpu projection shader and `spherecut
    frame`, golden images on lavapipe, then the eframe GUI. Bump

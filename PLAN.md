@@ -18,28 +18,28 @@ the next unblocked one starts and the blocked one resumes when unblocked.
 
 ## M0 Foundation
 
-- [ ] Environment recorded in PROGRESS.md (toolchain, Vulkan/lavapipe, FFmpeg
+- [x] Environment recorded in PROGRESS.md (toolchain, Vulkan/lavapipe, FFmpeg
       version and headers, network reach, device access).
-- [ ] Cargo workspace with the crates that have real content so far; every
+- [x] Cargo workspace with the crates that have real content so far; every
       crate GPL-3.0-or-later, `#![deny(unsafe_op_in_unsafe_fn)]`, no
       `unwrap`/`expect` outside tests.
-- [ ] `cargo xtask check` runs rustfmt, clippy `-D warnings`, Tier 1 tests,
+- [x] `cargo xtask check` runs rustfmt, clippy `-D warnings`, Tier 1 tests,
       cargo-deny and cargo-audit, and fails on any of them.
-- [ ] `cargo xtask gen-media` writes deterministic synthetic test media to
+- [x] `cargo xtask gen-media` writes deterministic synthetic test media to
       `test-media/`: equirect test patterns (lat/long grid with labelled
       directions, a high-frequency pattern for aliasing tests, a seam
       pattern), in H.264 and HEVC, 8-bit and 10-bit, at several frame rates
       including 29.97 and 59.94, with stereo and 4-channel ambiX audio, with
       and without Spherical Video V2 metadata, plus truncated and corrupt
       variants. Re-running produces byte-identical pattern frames.
-- [ ] `spherecut probe <file>` prints container, streams, codecs, pixel
+- [x] `spherecut probe <file>` prints container, streams, codecs, pixel
       format, color (matrix/primaries/transfer/range), frame rate and
       timebase as exact rationals, duration, spherical metadata (st3d/sv3d
       from the file's own boxes), ambisonic metadata (SA3D), and detected
       camera/format. `--json` gives the same as machine-readable JSON.
       Truncated, corrupt and non-media files give a clear error and a
       non-zero exit, never a panic (tested on the generated bad files).
-- [ ] `spherecut doctor` reports which decoders, encoders and hardware
+- [x] `spherecut doctor` reports which decoders, encoders and hardware
       paths are available and, for anything missing, the exact
       `dnf`/`pacman` command that fixes it. It shows what works by trying
       it: one frame each of H.264 High, HEVC Main, HEVC Main 10 and AV1 Main
@@ -49,7 +49,7 @@ the next unblocked one starts and the blocked one resumes when unblocked.
       Fedora's stock Mesa. The full profile list is the `vainfo` output in
       the hw-test report. DECISIONS D18.) The GUI will run the same check
       at startup.
-- [ ] `cargo xtask hw-test` runs without sudo from a fresh clone: checks
+- [x] `cargo xtask hw-test` runs without sudo from a fresh clone: checks
       prerequisites (printing the install command for anything missing),
       records the environment (host, kernel, Mesa, FFmpeg, GPU,
       `vulkaninfo --summary`, `vainfo`, FFmpeg hwaccels/encoders), builds in
@@ -57,10 +57,10 @@ the next unblocked one starts and the blocked one resumes when unblocked.
       self-contained report to `hw-reports/<host>-<commit>.md`. Tier 2 tests
       skip with a stated reason under plain `cargo test` and never pass
       silently without hardware.
-- [ ] First hardware report back from odin or huginn showing the toolchain,
+- [x] First hardware report back from odin or huginn showing the toolchain,
       a Vulkan device and VA-API HEVC decode working (or exactly what's
       missing).
-- [ ] Docs: README (what it is, how to build and run), PLAN, ARCHITECTURE,
+- [x] Docs: README (what it is, how to build and run), PLAN, ARCHITECTURE,
       DECISIONS, PROGRESS, `docs/PROMPT.md`, `docs/SAMPLES.md`,
       `docs/formats/<camera>.md` research notes, `docs/perf.md` skeleton.
 
