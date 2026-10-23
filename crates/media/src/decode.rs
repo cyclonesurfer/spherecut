@@ -271,8 +271,9 @@ impl VideoDecoder {
             }
             match self.dec.receive_frame(&mut frame) {
                 Ok(()) => {
+                    let f = self.finish_frame(frame)?;
                     self.frames += 1;
-                    return self.finish_frame(frame).map(Some);
+                    return Ok(Some(f));
                 }
                 Err(ff::Error::Eof) => {
                     self.done = true;
