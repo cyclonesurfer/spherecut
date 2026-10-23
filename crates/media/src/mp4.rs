@@ -792,14 +792,14 @@ fn is_text(t: FourCc) -> bool {
 /// child that should too. Such a type is a damaged header. FFmpeg skips
 /// the box as one it does not know, so a `trak` whose type reads `\xd1rak`
 /// loses its stream without a word, and a damaged `sv3d` its projection.
-/// Four zero bytes are allowed only as the last child of a sample entry,
-/// where QuickTime puts a terminator; anywhere else they are a header
-/// zeroed with the rest of its box.
+/// Four zero bytes are allowed only as the last child of a sample entry
+/// that holds nothing but zero bytes, as QuickTime's terminator does;
+/// anywhere else they are a header zeroed with the rest of its box.
 fn unprintable_types(b: &Mp4Box, out: &mut Vec<String>) {
     let entry = entry_handler(b.fourcc).is_some();
     for (i, c) in b.children.iter().enumerate() {
         let t = c.fourcc;
-        let terminator = entry && t.0 == [0; 4] && i + 1 == b.children.len();
+        let terminator = entry && t.0 == [0; 4] && i + 1 == b.children.len() && all_zero(c);
         if !is_text(t) && !terminator {
             out.push(format!(
                 "box `{t}` at offset {} in `{}` has a type that is not text, so its header is damaged",
@@ -809,6 +809,15 @@ fn unprintable_types(b: &Mp4Box, out: &mut Vec<String>) {
             unprintable_types(c, out);
         }
     }
+}
+
+/// Whether every byte after the header of `b`, a leaf, is zero, as a
+/// terminator's are. A box whose type was zeroed still holds its own
+/// bytes, and with its size zeroed too it runs to the end of its parent
+/// and holds the boxes after it, such as an `sv3d` that FFmpeg then
+/// skips. A payload too large to keep counts as not zero.
+fn all_zero(b: &Mp4Box) -> bool {
+    b.payload.len() as u64 == b.size - b.header_len && b.payload.iter().all(|&x| x == 0)
 }
 
 /// Whether `body` starts with a track header box (`tkhd`), as the payload
@@ -1879,17 +1888,20 @@ pub(crate) mod tests {
         b"hvc1", b"stsd", b"stbl", b"minf", b"mdia", b"trak", b"moov",
     ];
 
-    /// [`minimal`] with Spherical Video V2 boxes (`sv3d`) in its sample
-    /// entry, before `hvcC`.
-    fn spherical() -> Vec<u8> {
+    /// A Spherical Video V2 `sv3d` box with an equirectangular projection.
+    fn sv3d() -> Vec<u8> {
         let proj = bx(
             b"proj",
             &cat(&[full(b"prhd", 0, 0, &[0; 12]), full(b"equi", 0, 0, &[0; 16])]),
         );
-        let sv3d = bx(b"sv3d", &cat(&[full(b"svhd", 0, 0, b"\0"), proj]));
+        bx(b"sv3d", &cat(&[full(b"svhd", 0, 0, b"\0"), proj]))
+    }
+
+    /// [`minimal`] with an [`sv3d`] in its sample entry, before `hvcC`.
+    fn spherical() -> Vec<u8> {
         let f = minimal();
         let entry = f.windows(4).position(|w| w == b"hvc1").unwrap() - 4;
-        insert(&f, entry + 8 + 78, &sv3d, AROUND_ENTRY)
+        insert(&f, entry + 8 + 78, &sv3d(), AROUND_ENTRY)
     }
 
     #[test]
@@ -2059,15 +2071,36 @@ pub(crate) mod tests {
             assert_eq!(hvc1.unwrap().children.last().unwrap().fourcc.0, [0; 4]);
             assert!(t.damage().is_empty(), "{:?}", t.damage());
         }
+        let zeroed_at = |at: usize, parent: &str| {
+            [format!(
+                "box `\\x00\\x00\\x00\\x00` at offset {at} in `{parent}` has a type that is not text, so its header is damaged"
+            )]
+        };
         // Before the entry's other children, it is damage.
         let at = entry + 8 + 78;
         let g = insert(&f, at, &words(&[8, 0]), AROUND_ENTRY);
-        assert_eq!(
-            damage_of(g),
-            [format!(
-                "box `\\x00\\x00\\x00\\x00` at offset {at} in `hvc1` has a type that is not text, so its header is damaged"
-            )]
-        );
+        assert_eq!(damage_of(g), zeroed_at(at, "hvc1"));
+
+        // A last box that holds anything but zero bytes is no terminator.
+        // With an `sv3d` last, as FFmpeg writes it, zeroing its type, or
+        // its size and type, loses the projection, and so does zeroing the
+        // size and type of the `hvcC` before it, which then runs to the end
+        // of the entry and holds the `sv3d`.
+        let g = insert(&f, entry + size as usize, &sv3d(), AROUND_ENTRY);
+        assert!(damage_of(g.clone()).is_empty(), "{:?}", damage_of(g));
+        for t in [b"sv3d", b"hvcC"] {
+            let at = g.windows(4).position(|w| w == t).unwrap() - 4;
+            for zeroed in [at + 4..at + 8, at..at + 8] {
+                let mut h = g.clone();
+                h[zeroed].fill(0);
+                assert_eq!(damage_of(h), zeroed_at(at, "hvc1"));
+            }
+        }
+        // Nor is one whose bytes are too many to keep and look at.
+        let big = MAX_KEPT_LEAF + 1;
+        let last = cat(&[words(&[8 + big as u32, 0]), vec![1; big]]);
+        let g = insert(&f, entry + size as usize, &last, AROUND_ENTRY);
+        assert_eq!(damage_of(g), zeroed_at(entry + size as usize, "hvc1"));
 
         // A track whose type, or size and type, are zeroed loses its
         // stream. With size 0 it runs to the end of `moov`, so it is the
@@ -2077,12 +2110,7 @@ pub(crate) mod tests {
         for zeroed in [at + 4..at + 8, at..at + 8] {
             let mut g = f.clone();
             g[zeroed].fill(0);
-            assert_eq!(
-                damage_of(g),
-                [format!(
-                    "box `\\x00\\x00\\x00\\x00` at offset {at} in `moov` has a type that is not text, so its header is damaged"
-                )]
-            );
+            assert_eq!(damage_of(g), zeroed_at(at, "moov"));
         }
     }
 

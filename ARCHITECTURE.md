@@ -101,7 +101,7 @@ The other modules are safe Rust:
   other and against the `mdat` ranges; a box type that isn't printable
   text where only registered types belong (in `moov`, `trak`, `mdia`,
   `minf`, `stbl`, `stsd`, the known sample entries, `sv3d` and `proj`),
-  where four zero bytes pass only as a sample entry's last box,
+  where four zero bytes pass only as a sample entry's all-zero last box,
   QuickTime's terminator; a `moov` child under another printable type
   whose payload starts with a `tkhd` (a renamed `trak`, whose payload is
   kept whatever its size); an `sv3d` without `svhd`, `proj` or
