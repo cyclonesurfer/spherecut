@@ -19,7 +19,7 @@ RPMs.
 
 Checked 2026-10-23 at 3d06a2e: `cargo +1.88 build --workspace
 --all-targets` builds without warnings and `cargo +1.88 test --workspace`
-passes. Rechecked at c2b2753, after the final review's fixes: `cargo +1.88
+passes. Rechecked at 2c8d0c0, after the final review's fixes: `cargo +1.88
 test --workspace` passes.
 
 ## D2. FFmpeg through ffmpeg-next, hardware paths over ffmpeg-sys-next

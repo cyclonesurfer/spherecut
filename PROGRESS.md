@@ -1,13 +1,13 @@
 # Progress
 
-Updated 2026-10-23, at M0_COMMIT. Milestone criteria are in `PLAN.md`;
+Updated 2026-10-23, at 2c8d0c0. Milestone criteria are in `PLAN.md`;
 decisions and their reasons in `DECISIONS.md`.
 
 ## Status
 
 | Milestone | State |
 |---|---|
-| M0 Foundation | **Done pending hardware**. The only hardware report (huginn, a9128cf) predates the fixes from both M0 reviews; a clean rerun at M0_COMMIT is still needed. Evidence below |
+| M0 Foundation | **Done pending hardware**. The only hardware report (huginn, a9128cf) predates the fixes from both M0 reviews; a clean rerun at 2c8d0c0 is still needed. Evidence below |
 | M1 Viewer | Next. `VideoDecoder` (software, VA-API, Vulkan) is its first slice |
 | M2–M9 | Not started |
 
@@ -37,7 +37,7 @@ extracted X5 samples, `samples_probe_cleanly` passes.
 
 | Machine | Hardware | Software | State |
 |---|---|---|---|
-| huginn | Ryzen AI Max+ 395, Radeon 8060S (Strix Halo, RDNA 3.5), 128 GB | Fedora 44, kernel 7.0.9, Mesa 26.2.5 (RADV, radeonsi from `mesa-va-drivers-freeworld`), FFmpeg 8.1.3 (RPM Fusion), rustc 1.99.0 (Fedora RPM) | `hw-test` at a9128cf, 2026-10-22: 7 passed, 1 skipped (Vulkan Video HEVC). VA-API decode of H.264, HEVC Main and Main 10 matches software; `vainfo` lists HEVC encode. A rerun at M0_COMMIT is wanted |
+| huginn | Ryzen AI Max+ 395, Radeon 8060S (Strix Halo, RDNA 3.5), 128 GB | Fedora 44, kernel 7.0.9, Mesa 26.2.5 (RADV, radeonsi from `mesa-va-drivers-freeworld`), FFmpeg 8.1.3 (RPM Fusion), rustc 1.99.0 (Fedora RPM) | `hw-test` at a9128cf, 2026-10-22: 7 passed, 1 skipped (Vulkan Video HEVC). VA-API decode of H.264, HEVC Main and Main 10 matches software; `vainfo` lists HEVC encode. A rerun at 2c8d0c0 is wanted |
 | odin | RX 7600 (RDNA 3) | Fedora | No report yet |
 | Framework 13 Pro | Intel Xe3 | Arch (Omarchy), Hyprland | Arrives late 2026 |
 
@@ -67,7 +67,7 @@ repository, so a commit has to be pushed before it can be run there.
 | Environment recorded | The tables and the access note above |
 | Opening questions and sample request | Sent 2026-10-22; the sample list is `docs/SAMPLES.md`. Pat answered with Insta360 X5 samples; the rest of the list is still wanted (Samples, above) |
 | Workspace | Crates `core`, `sphere`, `media`, `synth`, `testkit`, `cli`, plus `xtask`; all GPL-3.0-or-later. Workspace lints deny `unsafe_op_in_unsafe_fn` and undocumented `unsafe` blocks; `unwrap_used` and `expect_used` warn, allowed only in tests (`clippy.toml`), and clippy runs with `-D warnings` |
-| `cargo xtask check` | `xtask/src/check.rs`. `cargo xtask check` passes at M0_COMMIT: rustfmt, clippy, the Tier 1 tests, doc tests, `cargo deny` (advisories, bans, licenses, sources) and `cargo audit` |
+| `cargo xtask check` | `xtask/src/check.rs`. `cargo xtask check` passes at 2c8d0c0: rustfmt, clippy, the Tier 1 tests, doc tests, `cargo deny` (advisories, bans, licenses, sources) and `cargo audit` |
 | `cargo xtask gen-media` | 12 clips (grid, high-frequency and seam patterns; H.264 and HEVC; 8 and 10-bit; 25, 29.97, 30 and 59.94 fps; stereo and ambiX; with and without Spherical V2; a 4K clip; lossless variants) and 12 broken files: empty, not media, cut at three points, and one for each kind of `moov` damage FFmpeg opens without complaint (chunk offsets, a `trak` type that is not text and one that still is, an `mdhd` timescale, a video codec configuration, an AAC setup and a `proj` type). `rendering_is_deterministic` in `crates/synth/src/lib.rs`; two full runs at c2b2753 gave byte-identical output over all 25 files, the clips, the broken files and `MANIFEST.md` (D9) |
 | `spherecut probe` | `crates/cli/tests/probe.rs`, among them `file_names_that_are_not_utf8_are_reported`, `files_named_in_bytes_that_are_not_utf8_are_probed`, `a_codec_ffmpeg_does_not_know_is_a_warning`, `an_audio_setup_ffmpeg_does_not_implement_is_a_warning`, `an_empty_track_ffmpeg_cannot_set_up_is_a_warning`, `ffmpegs_log_is_kept_for_a_file_it_cannot_open` and `a_reader_that_goes_away_is_not_an_error`; the `probe` unit tests on which streams FFmpeg cannot decode are damage (`a_stream_ffmpeg_cannot_set_up_is_damage_only_with_samples_it_reads`, `a_stream_without_a_decoder_in_this_build_is_a_warning`, `a_decoder_that_refuses_the_codec_setup_is_damage_unless_it_lacks_a_feature`); `tags_that_are_not_utf8_come_out_as_valid_json` in `crates/cli/tests/probe_tags.rs`; `a_file_whose_name_is_not_utf8_probes_and_decodes` in `crates/media/tests/non_utf8_names.rs`; `broken_files_give_errors_not_panics` in `crates/synth/tests/generated_media.rs` (every bad file, plus 4000 edits of a real `moov`, of which it must find at least 3000; it found 3453 at 1bfa90b); the `mp4` unit tests `timescales_ffmpeg_cannot_use_are_damage`, `box_types_that_are_not_text_are_damage_where_types_are_registered`, `a_trak_under_another_printable_type_is_damage`, `an_sv3d_ffmpeg_ignores_is_damage` and `zero_types_are_allowed_only_at_the_end_of_a_sample_entry`, and the MP4 fuzzing (D15) |
 | `spherecut doctor` | `crates/media/tests/doctor.rs`, `crates/cli/tests/doctor.rs` against lavapipe, and the unit tests in `crates/media/src/doctor.rs`, among them `every_missing_codec_gets_an_issue_with_the_ffmpeg_fix` and `a_driver_that_decodes_wrongly_is_told_apart_from_one_that_refuses`. `crates/media/tests/hw_refusal.rs` checks, on lavapipe, the refusals that doctor's probes share with `VideoDecoder` (D14). Capability checks and fixes: D18 |
@@ -88,8 +88,8 @@ merges 0cf475e (decoder: C1's library half, C2, C12, C13, C16, C18 and
 C19), 15c68b2 (probe: C1's CLI half and C6) and 5b3d02d (doctor, inject
 and hw-test: C4, C7 to C10, C14, C15 and C17), and by 721393a (C5 and
 C11, the Tier 2 command above). d2975a6 stops `spherecut probe *.mp4 |
-head` from panicking when `head` exits. C3, pushing the M0 work, is the
-first item under Next.
+head` from panicking when `head` exits. C3, pushing the M0 work, was
+done with 2c8d0c0.
 
 Fresh verifiers of those fixes found smaller problems, fixed in the
 merges a88d331 (decoded planes stay inside their own plane, the AV1
@@ -99,7 +99,10 @@ to the CPU, and Fedora's no-GPU fix drops a useless install line) and
 boxes, keeps FFmpeg's log lines whole and keeps them when probe fails,
 and the samples tests use a directory whose path is not UTF-8). c2b2753
 counts a box inside `moov` whose size is 0 as damage. Each branch was
-checked by a fresh verifier before it was merged.
+checked by a fresh verifier before it was merged. A last review of the
+commits made on main found a closed stderr still panicking (0b479e6,
+adead9f), a zeroed `elst` going unnoticed (e93d693, 8462720) and `inject`
+writing after a QuickTime terminator (324e224), all fixed with tests.
 
 ## Known issues and limits
 
@@ -160,8 +163,8 @@ checked by a fresh verifier before it was merged.
 
 ## Next
 
-1. Push M0_COMMIT, then rerun `cargo xtask hw-test` on huginn at that
-   commit, then the first run on odin.
+1. Rerun `cargo xtask hw-test` on huginn at 2c8d0c0 or later, then the
+   first run on odin.
 2. M1: the `MediaBackend` trait around `VideoDecoder` (seek, audio, worker
    threads, frame cache), then the wgpu projection shader and `spherecut
    frame`, golden images on lavapipe, then the eframe GUI. Bump

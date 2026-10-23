@@ -72,7 +72,7 @@ changes), 2026-10-22. Mesa 26.2.5 (radeonsi from
 This run predates the repeat-and-spread change above: each number is a
 single run, with no warm-up. It also predates the hw-test, doctor,
 decoder and probe fixes merged since a9128cf, from both M0 reviews. A
-rerun at M0_COMMIT is pending.
+rerun at 2c8d0c0 is pending.
 
 Tier 2: 7 passed, 0 failed, 1 skipped. `vulkan_hevc_main_matches_software`
 skipped: Vulkan Video HEVC decode unavailable ("decoding: Operation not
