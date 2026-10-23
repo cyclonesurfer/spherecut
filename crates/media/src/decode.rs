@@ -64,17 +64,19 @@ impl DecodedFrame {
     /// bit depth, whether the frame is planar (software) or semi-planar
     /// (NV12/P010 from hardware). For comparisons and tests; the render
     /// path uploads planes without copying them like this. `None` for
-    /// formats other than 4:2:0 8/10-bit, and for a frame whose size no
-    /// longer matches its buffers.
+    /// formats other than 4:2:0 8/10-bit, and for a frame whose rows don't
+    /// fit its buffers, such as one whose size or format was changed after
+    /// they were allocated.
     pub fn planes_u16(&self) -> Option<[Vec<u16>; 3]> {
         use ff::ffi::AVPixelFormat as P;
         let f = &self.frame;
         let is = |p: P| ffi::frame_format(f) == p as c_int;
         let (w, h) = (f.width() as usize, f.height() as usize);
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-        // `ffi::plane` holds every row of the frame's width, or is `None`.
-        // Semi-planar formats have no third plane; it is never read for
-        // them.
+        // `ffi::plane` holds every row of the frame's width and height,
+        // `stride` bytes apart, or is `None`, so the reads below stay in
+        // it. Semi-planar formats have no third plane; it is never read
+        // for them.
         let planes = [0, 1, 2].map(|i| ffi::plane(f, i));
         let semi_planar = is(P::AV_PIX_FMT_NV12) || is(P::AV_PIX_FMT_P010LE);
         let n = if semi_planar { 2 } else { 3 };
@@ -581,21 +583,41 @@ mod tests {
         }
     }
 
-    #[test]
-    fn planes_of_a_frame_resized_after_its_buffers_are_none() {
+    /// A grey 64x16 YUV420P frame, in buffers from av_frame_get_buffer.
+    fn grey_frame() -> DecodedFrame {
         let mut frame = ff::frame::Video::new(ff::format::Pixel::YUV420P, 64, 16);
         for i in 0..3 {
             frame.data_mut(i).fill(128);
         }
-        let mut f = DecodedFrame {
+        DecodedFrame {
             pts: None,
             time: None,
             frame,
             hw_decoded: false,
-        };
-        assert!(f.planes_u16().is_some());
-        // ffmpeg-next's safe setter; the buffers stay 16 rows high.
+        }
+    }
+
+    #[test]
+    fn planes_of_a_frame_changed_after_its_buffers_are_none() {
+        use ff::format::Pixel;
+        assert!(grey_frame().planes_u16().is_some());
+        // ffmpeg-next's safe setters change the frame's size and format,
+        // not its buffers, which keep 16 rows of 64 luma and 32 chroma
+        // bytes.
+        let mut f = grey_frame();
         f.frame.set_height(4096);
+        assert!(f.planes_u16().is_none());
+        // Rows wider than the bytes from one row to the next: luma rows of
+        // 100 bytes, and of 128 at 10 bits.
+        let mut f = grey_frame();
+        f.frame.set_width(100);
+        assert!(f.planes_u16().is_none());
+        let mut f = grey_frame();
+        f.frame.set_format(Pixel::YUV420P10LE);
+        assert!(f.planes_u16().is_none());
+        // NV12 keeps U and V in one plane, in chroma rows of 64 bytes.
+        let mut f = grey_frame();
+        f.frame.set_format(Pixel::NV12);
         assert!(f.planes_u16().is_none());
     }
 }

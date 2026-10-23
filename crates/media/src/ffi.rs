@@ -971,18 +971,26 @@ pub fn frame_format(frame: &ff::frame::Video) -> c_int {
 
 /// Plane `index` of a frame in system memory, as `ff::frame::Video::data`
 /// gives it, but sized from the pixel format read as an int (`data` calls
-/// `Frame::format`), and never past the buffer that holds the plane.
+/// `Frame::format`), and never past the room the plane has: up to the end
+/// of the buffer that holds it, or to the start of another of the frame's
+/// planes in that buffer if one comes first. av_frame_get_buffer puts all
+/// of a frame's planes in one buffer.
 ///
-/// The slice has `linesize` bytes for each row, but ends at the end of
-/// that buffer if it comes first, so the last row may be cut to the bytes
-/// the frame's width covers. That happens for a frame the decoder cropped
-/// on the left: its `data` moves right, and its last row has no padding
-/// after it to cover the move.
+/// The slice holds every row of the frame's width and height: row `y`
+/// starts `y * linesize` bytes in, and the bytes the width covers from
+/// there are all in the slice. It has `linesize` bytes for each row, but
+/// ends where the plane's room does if that comes first, so the last row
+/// may be cut to the bytes the width covers. That happens for a frame the
+/// decoder cropped on the left: its `data` moves right, and its last row
+/// has no padding after it to cover the move.
 ///
 /// `None` for a plane the format doesn't have, for a hardware frame, for
-/// a format this libavutil doesn't describe, and for a plane whose rows
-/// don't fit in its buffer (a frame whose size was changed after its
-/// buffers were allocated).
+/// a format this libavutil doesn't describe, for rows wider than
+/// `linesize`, and for rows that run past the plane's room, as they do in
+/// most frames whose size or format was changed after their buffers were
+/// allocated. The frame doesn't record the height its buffers were made
+/// for, though, so one whose height was raised by a little still gives
+/// `Some`: its extra rows are the plane's padding, never another plane.
 pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
     // SAFETY: only takes the pointer to the AVFrame that `frame` wraps.
     let f = unsafe { frame.as_ptr() };
@@ -1016,8 +1024,13 @@ pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
     // `index` is a plane of the format, so below 4.
     let row = unsafe { c::av_image_get_linesize(format, width, index as c_int) };
     let (row, rows, linesize) = (usize::try_from(row).ok()?, rows as usize, linesize as usize);
+    // A row wider than `linesize` runs into the next one, and the last row
+    // would run past the slice, which has `linesize` bytes a row.
+    if row > linesize {
+        return None;
+    }
     let needed = linesize.checked_mul(rows - 1)?.checked_add(row)?;
-    let room = buffer_room(f, data)?;
+    let room = plane_room(f, data)?;
     if needed > room {
         return None;
     }
@@ -1025,6 +1038,26 @@ pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
     // holds it (`room`), which the frame keeps a reference to. It lives as
     // long as the frame, which stays borrowed.
     Some(unsafe { std::slice::from_raw_parts(data, linesize.saturating_mul(rows).min(room)) })
+}
+
+/// How many bytes a plane of `frame` that starts at `p` can have: up to
+/// the end of the buffer that holds `p`, or to the next of the frame's
+/// data pointers in that buffer, since planes don't overlap. `None` when
+/// no buffer of the frame holds `p`.
+fn plane_room(frame: *const sys::AVFrame, p: *const u8) -> Option<usize> {
+    let room = buffer_room(frame, p)?;
+    // `buffer_room` found `p + room`, the buffer's end, without overflow.
+    let (start, end) = (p.addr(), p.addr() + room);
+    // SAFETY: `frame` is a live AVFrame; `data` is a plain array, and its
+    // pointers are only compared.
+    let data = unsafe { (*frame).data };
+    Some(
+        data.iter()
+            .map(|d| d.addr())
+            .filter(|d| start < *d && *d < end)
+            .min()
+            .map_or(room, |next| next - start),
+    )
 }
 
 /// How many bytes there are from `p` to the end of the buffer of `frame`
@@ -1459,6 +1492,34 @@ mod tests {
         f.set_height(16);
         f.set_width(1 << 20);
         assert!(plane(&f, 0).is_none());
+        // Rows wider than `linesize` fit the buffer, but would overlap.
+        f.set_width(100);
+        assert!(plane(&f, 0).is_none());
+        f.set_width(64);
+        f.set_format(Pixel::YUV420P10LE);
+        assert!(plane(&f, 0).is_none());
+        f.set_format(Pixel::NV12);
+        assert!(plane(&f, 1).is_none());
+    }
+
+    #[test]
+    fn a_plane_never_reaches_into_the_next() {
+        use ff::format::Pixel;
+        // av_frame_get_buffer puts all three planes in one buffer, so the
+        // buffer's bounds alone would let a plane run on into the next.
+        let mut f = ff::frame::Video::new(Pixel::YUV420P, 64, 16);
+        let starts = [0, 1, 2].map(|i| f.data(i).as_ptr());
+        for h in 16..=64 {
+            f.set_height(h);
+            for i in 0..3 {
+                let Some(p) = plane(&f, i) else { continue };
+                let span = p.as_ptr_range();
+                assert!(
+                    !starts.iter().any(|s| span.start < *s && *s < span.end),
+                    "plane {i} at height {h}"
+                );
+            }
+        }
     }
 
     // One test, because the subscriber and FFmpeg's level are global.
