@@ -116,13 +116,16 @@ pub fn probe(r: &ProbeReport) -> String {
     for w in &r.warnings {
         let _ = writeln!(s, "  warning    {w}");
     }
-    for l in &r.ffmpeg_log {
-        let _ = writeln!(s, "  ffmpeg     {l}");
-    }
+    s += &ffmpeg_lines(&r.ffmpeg_log);
     for d in &r.damage {
         let _ = writeln!(s, "  DAMAGE     {d}");
     }
     s
+}
+
+/// The lines of FFmpeg's log about a file, as probe's report shows them.
+pub fn ffmpeg_lines(log: &[String]) -> String {
+    log.iter().map(|l| format!("  ffmpeg     {l}\n")).collect()
 }
 
 fn stream(s: &mut String, st: &StreamInfo) {

@@ -126,11 +126,13 @@ Segment length only, and other containers not at all, which a
 `warnings`, `ffmpeg_log`, `structure` (`{"check": "full" | "length" |
 "none", "why"}`) and `mp4.truncated` (`fourcc`, `offset`, `header_len`,
 `size`, `present`, or null). A file that can't be opened is `{"path",
-"error"}`. File names don't have to be UTF-8; in the text report and in
-`path`, bytes that aren't UTF-8 show as U+FFFD. When the reader of
-probe's output goes away, as in `spherecut probe *.mp4 | head`, the output
-stops quietly, and probe still checks the remaining files, so the exit
-code and the errors on stderr cover every file.
+"error", "ffmpeg_log"}`; without `--json`, its `ffmpeg` lines follow the
+error on stderr, since FFmpeg's log often says why it could not open the
+file (`moov atom not found`). File names don't have to be UTF-8; in the
+text report and in `path`, bytes that aren't UTF-8 show as U+FFFD. When
+the reader of probe's output goes away, as in `spherecut probe *.mp4 |
+head`, the output stops quietly, and probe still checks the remaining
+files, so the exit code and the errors on stderr cover every file.
 
 `spherecut doctor [--render-node /dev/dri/renderD128] [--json]` exits 1
 only when a problem is an error: FFmpeg has no H.264, HEVC, ProRes or AAC

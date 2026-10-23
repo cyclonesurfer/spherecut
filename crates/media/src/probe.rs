@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use spherecut_core::Rational;
+use thiserror::Error;
 
 use crate::detect::{self, CameraGuess};
 use crate::ff;
@@ -218,18 +219,30 @@ fn disposition_names(d: ff::format::stream::Disposition) -> Vec<String> {
     .collect()
 }
 
-/// Probe a file. Never panics on bad input; returns
+/// Why [`probe`] failed, with what FFmpeg logged meanwhile.
+#[derive(Debug, Error)]
+#[error("{error}")]
+pub struct ProbeError {
+    pub error: MediaError,
+    /// FFmpeg's warnings and errors, as in [`ProbeReport::ffmpeg_log`].
+    /// For a file FFmpeg cannot open they often say why ("moov atom not
+    /// found").
+    pub ffmpeg_log: Vec<String>,
+}
+
+/// Probe a file. Never panics on bad input; fails with
 /// [`MediaError::Open`] for files FFmpeg can't read at all, and lists in
 /// [`ProbeReport::damage`] the structural damage of files it can.
-pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
+pub fn probe(path: &Path) -> Result<ProbeReport, ProbeError> {
     init();
     // The CLI hides FFmpeg's log by default, and it is often the only
     // word on what FFmpeg could not read.
     let (report, log) = hwprobe::capture_ffmpeg_log(|| probe_file(path));
-    report.map(|r| ProbeReport {
-        ffmpeg_log: tally(log),
-        ..r
-    })
+    let ffmpeg_log = tally(log);
+    match report {
+        Ok(r) => Ok(ProbeReport { ffmpeg_log, ..r }),
+        Err(error) => Err(ProbeError { error, ffmpeg_log }),
+    }
 }
 
 /// FFmpeg's log lines listed past this many are counted instead.

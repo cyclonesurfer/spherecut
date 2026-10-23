@@ -149,12 +149,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     }
                     Err(e) => {
                         failed = true;
-                        eprintln!("error: {e}");
+                        // FFmpeg's own word on why it could not open the
+                        // file, under ours.
+                        if json {
+                            eprintln!("error: {e}");
+                        } else {
+                            eprint!("error: {e}\n{}", show::ffmpeg_lines(&e.ffmpeg_log));
+                        }
                         // Lossy, as in the reports: Linux file names need
                         // not be UTF-8.
                         reports.push(serde_json::json!({
                             "path": f.to_string_lossy(),
                             "error": e.to_string(),
+                            "ffmpeg_log": e.ffmpeg_log,
                         }));
                     }
                 }

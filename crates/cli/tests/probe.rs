@@ -172,6 +172,54 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
 }
 
 #[test]
+fn ffmpegs_log_is_kept_for_a_file_it_cannot_open() {
+    // FFmpeg's own reason is printed under ours, and goes in the JSON.
+    let dir = tmp("cannot-open");
+    let (_, bad) = media(&dir);
+    let half = bad
+        .iter()
+        .find(|b| b.ends_with("bad-trunc-half.mp4"))
+        .unwrap();
+    let moov = "  ffmpeg     [mov,mp4,m4a,3gp,3g2,mj2] moov atom not found";
+
+    let out = probe(&[half]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.starts_with("error: cannot open"));
+    assert!(
+        at.is_some_and(|i| lines[i + 1..].contains(&moov)),
+        "{stderr}"
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .args(["probe", "--json"])
+        .arg(half)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("cannot open"), "{v}");
+    let log = v["ffmpeg_log"].as_array().unwrap();
+    assert!(
+        log.iter()
+            .any(|l| l.as_str().unwrap().ends_with("moov atom not found")),
+        "{v}"
+    );
+    // A file we refuse before FFmpeg reads it has an empty log.
+    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .args(["probe", "--json"])
+        .arg(dir.join("bad-empty.mp4"))
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ffmpeg_log"], serde_json::json!([]), "{v}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn file_names_that_are_not_utf8_are_reported() {
     // Linux file names are bytes. These two fail before FFmpeg opens them;
     // the error used to panic, and stop the files after it.

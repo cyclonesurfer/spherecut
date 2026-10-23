@@ -112,7 +112,8 @@ The other modules are safe Rust:
   `FirstBox::Any`, which accepts any valid first box. Matroska files are
   checked against their Segment length. `probe` runs inside
   `hwprobe::capture_ffmpeg_log` and keeps FFmpeg's warnings and errors in
-  `ProbeReport.ffmpeg_log`, apart from `damage` and `warnings`.
+  `ProbeReport.ffmpeg_log`, apart from `damage` and `warnings`, or in
+  `ProbeError.ffmpeg_log` beside the `MediaError` when it fails.
   `ProbeReport.structure` records how much was checked (`full`, `length`
   or `none` with a reason), and `damage` lists what was found.
   `ProbeReport.path` serializes as lossy UTF-8. The CLI fails on any

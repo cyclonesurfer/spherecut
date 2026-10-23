@@ -454,7 +454,11 @@ What FFmpeg logs at warning or error level while `probe` runs goes into
 the report's `ffmpeg_log` (each line once, with a count, at most 32), even
 though the CLI's log hides FFmpeg (D12). It often says what FFmpeg could
 not read. It is not damage and not a warning, because healthy files can
-have some: FFmpeg says "timescale not set" for cover art.
+have some: FFmpeg says "timescale not set" for cover art. When `probe`
+fails, the log goes with the error (`ProbeError.ffmpeg_log`), because
+for a file FFmpeg cannot open it is often the only explanation ("moov
+atom not found"). The CLI prints it under the error, and its JSON error
+object is `{"path", "error", "ffmpeg_log"}`.
 
 Not found without decoding: damage in `mdat`, and damage in `moov` that
 leaves the structure consistent, such as changed sample sizes or times
@@ -682,7 +686,7 @@ rest, with the versions in `Cargo.lock`:
 | serde_json 1.0.154 | cli | `--json` output. xtask reads cargo's JSON with a small field reader instead |
 | thiserror 2.0.21 | core, media, synth | Typed library errors without hand-written `Display` impls |
 | tracing 0.1.44 | media, cli | Structured logging, and the target for FFmpeg's log (D12) |
-| tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that doctor's thread-local FFmpeg log capture needs. It was already in the tree through `tracing` |
+| tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
 | tracing-subscriber 0.3.23 (env-filter) | cli | EnvFilter gives `SPHERECUT_LOG` its syntax, and the fmt layer writes to stderr. env-filter brings in `matchers` and `regex-automata` |
 | proptest 1.12.0 (dev) | core, sphere, media | Property tests and the MP4 fuzzing (D15) |
 | ron 0.12.2 (dev) | core | A serde round-trip test of the time types in a text format |

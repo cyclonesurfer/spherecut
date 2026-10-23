@@ -45,7 +45,13 @@ fn ffmpeg_messages_are_quiet_by_default_and_shown_on_request() {
     let quiet = probe_stderr(&f, None);
     assert!(quiet.contains("error: cannot open"), "{quiet}");
     assert!(ffmpeg_lines(&quiet).is_empty(), "{quiet}");
-    assert!(!quiet.contains("moov atom not found"), "{quiet}");
+    // What FFmpeg said about the file is part of probe's error, once,
+    // whatever the log shows.
+    assert_eq!(quiet.matches("moov atom not found").count(), 1, "{quiet}");
+    assert!(
+        quiet.contains("\n  ffmpeg     [mov,mp4,m4a,3gp,3g2,mj2] moov atom not found\n"),
+        "{quiet}"
+    );
 
     // Naming the target, or a global level above the default, shows them.
     for v in [
