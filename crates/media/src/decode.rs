@@ -600,10 +600,15 @@ mod tests {
                 r => panic!("expected HwUnsupported, got {r:?}"),
             }
         }
-        // The clip goes with its directory.
-        let path = dir.0.clone();
+    }
+
+    #[test]
+    fn test_directories_are_removed_when_dropped() {
+        // The clip is made in the test's directory, and goes with it.
+        let dir = TempDir::new("dropped");
+        let clip = clip(&dir);
         drop(dir);
-        assert!(!path.exists());
+        assert!(!clip.exists());
     }
 
     /// A grey 64x16 YUV420P frame, in buffers from av_frame_get_buffer.
