@@ -29,6 +29,12 @@ pub enum InjectError {
     Unsupported(String),
     #[error("{} and {} are the same file", input.display(), output.display())]
     SameFile { input: PathBuf, output: PathBuf },
+    #[error("two edits for the {0:?} track; put all its boxes in one edit")]
+    DuplicateEdit(TrackKind),
+    /// Fragments carry data offsets of their own (`tfhd`, `trun`, `sidx`,
+    /// `tfra`), which we don't shift.
+    #[error("fragmented MP4 (it has a `{0}` box) is not supported")]
+    Fragmented(String),
 }
 
 /// Which track's first sample entry to edit.
@@ -84,6 +90,10 @@ fn box_types(boxes: &[u8]) -> Result<Vec<[u8; 4]>, InjectError> {
     }
     Ok(out)
 }
+
+/// Boxes that only fragmented files have: at the top level, and in `moov`.
+const FRAGMENT_TOP: &[&[u8; 4]] = &[b"moof", b"sidx", b"ssix", b"mfra"];
+const FRAGMENT_MOOV: &[&[u8; 4]] = &[b"mvex"];
 
 /// Refuse an `output` that is `input` under any name (the same path, a
 /// hard link, a symlink): we would read the input while overwriting it.
@@ -156,14 +166,31 @@ impl Drop for TempFile {
     }
 }
 
-/// Write `input` to `output` with the edits applied. `output` must not be
-/// `input`; it is replaced atomically.
+/// Write `input` to `output` with the edits applied, at most one edit per
+/// track. `output` must not be `input`; it is replaced atomically.
 pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), InjectError> {
     check_not_same_file(input, output)?;
+    for (i, e) in edits.iter().enumerate() {
+        if edits[..i].iter().any(|o| o.track == e.track) {
+            return Err(InjectError::DuplicateEdit(e.track));
+        }
+    }
     let tree = mp4::read_file(input)?;
     let moov = tree
         .moov()
         .ok_or_else(|| InjectError::Unsupported("no moov box".into()))?;
+    let fragment = tree
+        .top
+        .iter()
+        .find(|b| FRAGMENT_TOP.contains(&&b.fourcc.0))
+        .or_else(|| {
+            moov.children
+                .iter()
+                .find(|b| FRAGMENT_MOOV.contains(&&b.fourcc.0))
+        });
+    if let Some(b) = fragment {
+        return Err(InjectError::Fragmented(b.fourcc.to_string()));
+    }
     let mut f = File::open(input)?;
     f.seek(SeekFrom::Start(moov.offset))?;
     let mut moov_bytes = vec![0u8; moov.size as usize];
@@ -546,6 +573,69 @@ mod tests {
             assert!(std::fs::read(&a).unwrap() == bytes, "input changed");
         }
         assert_eq!(listing(&dir), ["hard.mp4", "in.mp4", "sym.mp4"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn two_edits_for_one_track_are_refused() {
+        let dir = tmpdir("dup");
+        let a = dir.join("in.mp4");
+        std::fs::write(&a, file(false).0).unwrap();
+        let [v, _] = spherical_edits();
+        let edits = [
+            v.clone(),
+            EntryEdit {
+                track: TrackKind::Audio,
+                boxes: write::sa3d_first_order_ambix(),
+            },
+            v,
+        ];
+        let r = inject(&a, &dir.join("out.mp4"), &edits);
+        assert!(
+            matches!(r, Err(InjectError::DuplicateEdit(TrackKind::Video))),
+            "{r:?}"
+        );
+        assert_eq!(listing(&dir), ["in.mp4"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fragmented_files_are_refused() {
+        let dir = tmpdir("frag");
+        let ftyp = bx(b"ftyp", b"iso5\0\0\x02\0iso5");
+        let ventry = bx(b"hvc1", &cat(&[vec![0u8; 78], bx(b"hvcC", &[9; 5])]));
+        let moov = |extra: Vec<u8>| bx(b"moov", &cat(&[trak(b"vide", ventry.clone(), 0), extra]));
+        let mvex = bx(b"mvex", &full(b"trex", 0, 0, &[0; 20]));
+        let moof = bx(b"moof", &full(b"mfhd", 0, 0, &1u32.to_be_bytes()));
+        let cases = [
+            ("mvex", cat(&[ftyp.clone(), moov(mvex)])),
+            (
+                "moof",
+                cat(&[ftyp.clone(), moov(vec![]), moof, bx(b"mdat", b"x")]),
+            ),
+            (
+                "sidx",
+                cat(&[ftyp.clone(), moov(vec![]), full(b"sidx", 0, 0, &[0; 24])]),
+            ),
+            (
+                "mfra",
+                cat(&[
+                    ftyp.clone(),
+                    moov(vec![]),
+                    bx(b"mfra", &full(b"tfra", 0, 0, &[0; 12])),
+                ]),
+            ),
+        ];
+        let a = dir.join("in.mp4");
+        let out = dir.join("out.mp4");
+        for (name, bytes) in cases {
+            std::fs::write(&a, &bytes).unwrap();
+            match inject(&a, &out, &spherical_edits()[..1]) {
+                Err(InjectError::Fragmented(t)) => assert_eq!(t, name),
+                r => panic!("{name}: {r:?}"),
+            }
+            assert!(!out.exists());
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
