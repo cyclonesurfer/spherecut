@@ -73,6 +73,9 @@ fn samples_probe_cleanly() {
         match probe::probe(&p) {
             Err(e) => problems.push(format!("{name}: {e}")),
             Ok(r) => {
+                if !r.damage.is_empty() {
+                    problems.push(format!("{name}: damaged: {:?}", r.damage));
+                }
                 if !r.warnings.is_empty() {
                     problems.push(format!("{name}: warnings {:?}", r.warnings));
                 }
