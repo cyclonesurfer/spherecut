@@ -20,5 +20,8 @@ spherecut-media.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[dev-dependencies]
+spherecut-synth.workspace = true
+
 [lints]
 workspace = true

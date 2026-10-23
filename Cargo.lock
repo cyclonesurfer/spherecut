@@ -736,6 +736,7 @@ dependencies = [
  "serde_json",
  "spherecut-core",
  "spherecut-media",
+ "spherecut-synth",
  "tracing",
  "tracing-subscriber",
 ]
