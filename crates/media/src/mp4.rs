@@ -143,6 +143,52 @@ impl Mp4Tree {
     pub fn tracks(&self) -> impl Iterator<Item = &Mp4Box> {
         self.moov().into_iter().flat_map(|m| m.children_of(b"trak"))
     }
+
+    /// Why the file looks damaged: a box cut off by the end of the file,
+    /// malformed boxes, and sample tables that disagree with each other or
+    /// point outside the media data. Empty for a healthy file. The work is
+    /// linear in the size of the sample tables.
+    pub fn damage(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(t) = &self.truncated {
+            out.push(format!(
+                "the file ends {} bytes into the {}-byte `{}` box at offset {}: it was cut short",
+                t.present, t.size, t.fourcc, t.offset
+            ));
+        }
+        out.extend(self.warnings.iter().cloned());
+        let Some(moov) = self.moov() else {
+            let cut_moov = self.truncated.is_some_and(|t| t.fourcc.0 == *b"moov");
+            // HEIF images and other item-based files have a top-level `meta`.
+            let items = self.top.iter().any(|b| b.fourcc.0 == *b"meta");
+            if !cut_moov && !items {
+                out.push("there is no `moov` box, so no index of the media".into());
+            }
+            return out;
+        };
+        let mdats = self.media_data();
+        for (i, trak) in moov.children_of(b"trak").enumerate() {
+            if let Err(why) = check_track(trak, &mdats, self.file_size) {
+                out.push(format!("track #{i}: {why}"));
+            }
+        }
+        out
+    }
+
+    /// Payload byte ranges of the top-level `mdat` boxes in file order,
+    /// including one cut off by the end of the file.
+    fn media_data(&self) -> Vec<(u64, u64)> {
+        let cut = self
+            .truncated
+            .map(|t| (t.fourcc, t.offset, t.header_len, t.size));
+        self.top
+            .iter()
+            .map(|b| (b.fourcc, b.offset, b.header_len, b.size))
+            .chain(cut)
+            .filter(|(t, ..)| t.0 == *b"mdat")
+            .map(|(_, offset, header_len, size)| (offset + header_len, offset.saturating_add(size)))
+            .collect()
+    }
 }
 
 /// Containers we descend into. Sample entries are handled separately
@@ -501,6 +547,290 @@ fn parse_children(
     out
 }
 
+fn be_u32(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(
+        b.get(at..at.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+/// The entries of a sample table box: a u32 count at `count_at` in the
+/// payload, then `count` entries of `width` bytes, checked to fit.
+fn table_entries(b: &Mp4Box, count_at: usize, width: usize) -> Result<(u64, &[u8]), String> {
+    let count = be_u32(&b.payload, count_at)
+        .ok_or_else(|| format!("`{}` is too short to hold its entry count", b.fourcc))?;
+    let data = b.payload.get(count_at + 4..).unwrap_or_default();
+    let need = count as u64 * width as u64;
+    if need > data.len() as u64 {
+        return Err(format!(
+            "`{}` claims {count} entries but has room for {}",
+            b.fourcc,
+            data.len() / width
+        ));
+    }
+    Ok((count as u64, &data[..need as usize]))
+}
+
+/// Sample sizes from `stsz` or `stz2`.
+enum SampleSizes<'a> {
+    Constant(u64),
+    /// Big-endian fields of 4, 8, 16 or 32 bits.
+    Table {
+        bits: u64,
+        data: &'a [u8],
+    },
+}
+
+impl SampleSizes<'_> {
+    fn get(&self, k: u64) -> u64 {
+        let (bits, data) = match self {
+            SampleSizes::Constant(s) => return *s,
+            SampleSizes::Table { bits, data } => (*bits, *data),
+        };
+        let at = (k * bits / 8) as usize;
+        let byte = |i: usize| data.get(i).copied().unwrap_or(0) as u64;
+        match bits {
+            32 => be_u32(data, at).unwrap_or(0) as u64,
+            16 => byte(at) << 8 | byte(at + 1),
+            8 => byte(at),
+            _ if k.is_multiple_of(2) => byte(at) >> 4,
+            _ => byte(at) & 0xf,
+        }
+    }
+
+    /// Bytes in samples `start..start + n`, or None where the table does not
+    /// say. QuickTime gives uncompressed audio samples a nominal size of 1;
+    /// their real size is in the sample description.
+    fn total(&self, start: u64, n: u64) -> Option<u64> {
+        match self {
+            SampleSizes::Constant(s) if *s <= 1 => None,
+            SampleSizes::Constant(s) => s.checked_mul(n),
+            SampleSizes::Table { .. } => Some((start..start + n).map(|k| self.get(k)).sum()),
+        }
+    }
+}
+
+/// Read `stsz` or `stz2`: the sample count and sizes.
+fn sample_sizes(stbl: &Mp4Box) -> Result<Option<(u64, SampleSizes<'_>)>, String> {
+    let short = |b: &Mp4Box| format!("`{}` is too short", b.fourcc);
+    if let Some(b) = stbl.child(b"stsz") {
+        let constant = be_u32(&b.payload, 4).ok_or_else(|| short(b))?;
+        if constant != 0 {
+            let n = be_u32(&b.payload, 8).ok_or_else(|| short(b))?;
+            return Ok(Some((n as u64, SampleSizes::Constant(constant as u64))));
+        }
+        let (n, data) = table_entries(b, 8, 4)?;
+        return Ok(Some((n, SampleSizes::Table { bits: 32, data })));
+    }
+    let Some(b) = stbl.child(b"stz2") else {
+        return Ok(None);
+    };
+    let bits = b.payload.get(7).copied().ok_or_else(|| short(b))? as u64;
+    if !matches!(bits, 4 | 8 | 16) {
+        return Err(format!("`stz2` has {bits}-bit sizes"));
+    }
+    let n = be_u32(&b.payload, 8).ok_or_else(|| short(b))? as u64;
+    let data = b.payload.get(12..).unwrap_or_default();
+    let need = (n * bits).div_ceil(8);
+    if need > data.len() as u64 {
+        return Err(format!(
+            "`stz2` claims {n} entries but has room for {}",
+            data.len() as u64 * 8 / bits
+        ));
+    }
+    let data = &data[..need as usize];
+    Ok(Some((n, SampleSizes::Table { bits, data })))
+}
+
+/// Whether every data reference of a track points into this file. Tracks
+/// whose data lives elsewhere have chunk offsets into other files.
+fn self_contained(minf: &Mp4Box) -> bool {
+    let Some(dref) = minf.path(&[b"dinf", b"dref"]) else {
+        return true;
+    };
+    let mut c = Cursor::new(&dref.payload);
+    let (Some(_), Some(n)) = (c.version_flags(), c.u32()) else {
+        return true;
+    };
+    for _ in 0..n.min(64) {
+        // Each entry is a FullBox whose flag 1 means "in this file".
+        let (Some(size), Some(_), Some((_, flags))) = (c.u32(), c.take(4), c.version_flags())
+        else {
+            return true;
+        };
+        if flags & 1 == 0 {
+            return false;
+        }
+        if c.take((size as usize).saturating_sub(12)).is_none() {
+            return true;
+        }
+    }
+    true
+}
+
+/// Check one track's sample tables against each other and against the
+/// media data, and return the first problem.
+fn check_track(trak: &Mp4Box, mdats: &[(u64, u64)], file_size: u64) -> Result<(), String> {
+    let mdia = trak.child(b"mdia").ok_or("it has no `mdia` box")?;
+    if mdia.child(b"hdlr").is_none() {
+        return Err("it has no handler (`mdia/hdlr`)".into());
+    }
+    let minf = mdia.child(b"minf").ok_or("it has no `minf` box")?;
+    let stbl = minf
+        .child(b"stbl")
+        .ok_or("it has no sample table (`stbl`)")?;
+    let sizes = sample_sizes(stbl)?;
+    let stts = stbl.child(b"stts").map(|b| table_entries(b, 4, 8));
+    let stsc = stbl.child(b"stsc").map(|b| table_entries(b, 4, 12));
+    let (co, wide) = match (stbl.child(b"stco"), stbl.child(b"co64")) {
+        (Some(b), _) => (Some(b), false),
+        (None, b) => (b, true),
+    };
+    let co = co.map(|b| table_entries(b, 4, if wide { 8 } else { 4 }));
+    let samples = sizes.as_ref().map_or(0, |s| s.0);
+    let timed: u64 = match &stts {
+        Some(Ok((_, e))) => e
+            .chunks_exact(8)
+            .filter_map(|e| be_u32(e, 0))
+            .map(u64::from)
+            .sum(),
+        Some(Err(why)) => return Err(why.clone()),
+        None => 0,
+    };
+    let (chunk_count, chunks) = co.clone().transpose()?.unwrap_or((0, &[]));
+    if samples == 0 && timed == 0 && chunk_count == 0 {
+        // An empty track, or the `moov` of a fragmented file.
+        return Ok(());
+    }
+    let missing: Vec<&str> = [
+        (sizes.is_some(), "`stsz`"),
+        (stts.is_some(), "`stts`"),
+        (stsc.is_some(), "`stsc`"),
+        (co.is_some(), "`stco`"),
+    ]
+    .into_iter()
+    .filter_map(|(have, name)| (!have).then_some(name))
+    .collect();
+    if !missing.is_empty() {
+        return Err(format!("it has samples but no {}", missing.join(" or ")));
+    }
+    if timed != samples {
+        return Err(format!(
+            "`stts` times {timed} samples but `stsz` sizes {samples}"
+        ));
+    }
+
+    // `stsc` maps runs of chunks to samples per chunk; runs start at
+    // increasing chunk numbers, counted from 1.
+    let (runs, runs_data) = stsc.transpose()?.unwrap_or((0, &[]));
+    let run = |k: u64| {
+        let e = runs_data.get(k as usize * 12..).unwrap_or_default();
+        let f = |i| be_u32(e, i).unwrap_or(0) as u64;
+        (f(0), f(4), f(8))
+    };
+    if runs == 0 {
+        return Err(format!(
+            "`stsc` puts none of the {samples} samples into the {chunk_count} chunks"
+        ));
+    }
+    let descriptions = stbl.child(b"stsd").map_or(0, |s| s.children.len() as u64);
+    let mut placed: u128 = 0;
+    for k in 0..runs {
+        let (first, per_chunk, description) = run(k);
+        let prev = if k == 0 { 0 } else { run(k - 1).0 };
+        if first <= prev {
+            return Err(format!(
+                "`stsc` entry {k} starts at chunk {first}, after chunk {prev}"
+            ));
+        }
+        if first > chunk_count {
+            return Err(format!(
+                "`stsc` entry {k} starts at chunk {first}, but there are only {chunk_count} chunks"
+            ));
+        }
+        if per_chunk == 0 {
+            return Err(format!("`stsc` entry {k} puts no samples in its chunks"));
+        }
+        if description == 0 || description > descriptions {
+            return Err(format!(
+                "`stsc` entry {k} uses sample description {description}, but `stsd` has {descriptions}"
+            ));
+        }
+        // Like FFmpeg, let the first run cover any chunks before it.
+        let first = if k == 0 { 1 } else { first };
+        let end = if k + 1 < runs {
+            run(k + 1).0
+        } else {
+            chunk_count + 1
+        };
+        placed += (end - first) as u128 * per_chunk as u128;
+    }
+    if placed != samples as u128 {
+        return Err(format!(
+            "`stsc` and `stco` place {placed} samples but `stsz` sizes {samples}"
+        ));
+    }
+
+    if !self_contained(minf) {
+        return Ok(());
+    }
+    let Some((_, sizes)) = sizes else {
+        return Ok(());
+    };
+    // Every chunk's bytes must be in the file and inside an `mdat`.
+    let mut sample = 0u64;
+    for k in 0..runs {
+        let (first, per_chunk, _) = run(k);
+        let first = if k == 0 { 1 } else { first };
+        let end = if k + 1 < runs {
+            run(k + 1).0
+        } else {
+            chunk_count + 1
+        };
+        for c in first..end {
+            let at = (c - 1) as usize;
+            let offset = if wide {
+                let hi = be_u32(chunks, at * 8).unwrap_or(0) as u64;
+                hi << 32 | be_u32(chunks, at * 8 + 4).unwrap_or(0) as u64
+            } else {
+                be_u32(chunks, at * 4).unwrap_or(0) as u64
+            };
+            check_chunk(c, offset, sizes.total(sample, per_chunk), mdats, file_size)?;
+            sample += per_chunk;
+        }
+    }
+    Ok(())
+}
+
+/// Chunk `c` holds `size` bytes (None: at least one) at `offset`.
+fn check_chunk(
+    c: u64,
+    offset: u64,
+    size: Option<u64>,
+    mdats: &[(u64, u64)],
+    file_size: u64,
+) -> Result<(), String> {
+    if size == Some(0) {
+        return Ok(());
+    }
+    let what = match size {
+        Some(s) => format!("chunk {c} (bytes {offset}..{})", offset.saturating_add(s)),
+        None => format!("chunk {c} (at {offset})"),
+    };
+    let end = offset
+        .checked_add(size.unwrap_or(1))
+        .ok_or_else(|| format!("{what} overflows"))?;
+    if end > file_size {
+        return Err(format!(
+            "{what} runs past the end of the file ({file_size} bytes): it was cut short"
+        ));
+    }
+    let i = mdats.partition_point(|&(start, _)| start <= offset);
+    if i == 0 || end > mdats[i - 1].1 {
+        return Err(format!("{what} lies outside the media data (`mdat`)"));
+    }
+    Ok(())
+}
+
 /// Length of a sample entry's fixed fields before its child boxes, for the
 /// entry types we know.
 pub(crate) fn sample_entry_fixed_len(t: FourCc, payload: &[u8]) -> Option<usize> {
@@ -824,6 +1154,219 @@ pub(crate) mod tests {
         assert!(t.warnings[0].contains(&many), "{:?}", t.warnings);
     }
 
+    fn words(w: &[u32]) -> Vec<u8> {
+        w.iter().flat_map(|x| x.to_be_bytes()).collect()
+    }
+
+    /// Sample-table payloads for one video track.
+    #[derive(Debug, Clone)]
+    struct Tables {
+        stts: Vec<u8>,
+        stsz: Vec<u8>,
+        stsc: Vec<u8>,
+        /// Chunk offsets from the start of the `mdat` payload.
+        chunks: Vec<u64>,
+        co64: bool,
+        data_len: usize,
+    }
+
+    /// Consistent tables for samples of `sizes` bytes, `per_chunk` to a
+    /// chunk, stored back to back.
+    fn tables(sizes: &[u32], per_chunk: usize) -> Tables {
+        let n = sizes.len() as u32;
+        let chunk_count = sizes.len().div_ceil(per_chunk);
+        let last = (sizes.len() - (chunk_count - 1) * per_chunk) as u32;
+        let stsc = match (chunk_count as u32, per_chunk as u32) {
+            (1, _) => words(&[0, 1, 1, last, 1]),
+            (_, p) if last == p => words(&[0, 1, 1, p, 1]),
+            (c, p) => words(&[0, 2, 1, p, 1, c, last, 1]),
+        };
+        let mut chunks = Vec::new();
+        let mut at = 0u64;
+        for chunk in sizes.chunks(per_chunk) {
+            chunks.push(at);
+            at += chunk.iter().map(|&s| s as u64).sum::<u64>();
+        }
+        Tables {
+            stts: words(&[0, 1, n, 1000]),
+            stsz: [words(&[0, 0, n]), words(sizes)].concat(),
+            stsc,
+            chunks,
+            co64: false,
+            data_len: at as usize,
+        }
+    }
+
+    /// `ftyp`, `mdat` and `moov` (or `moov` before `mdat`) for `t`.
+    fn file_with(t: &Tables, faststart: bool) -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isom");
+        let moov = |base: u64| {
+            let n = t.chunks.len() as u32;
+            let co = if t.co64 {
+                let offs: Vec<u8> = t
+                    .chunks
+                    .iter()
+                    .flat_map(|c| (c + base).to_be_bytes())
+                    .collect();
+                bx(b"co64", &cat(&[words(&[0, n]), offs]))
+            } else {
+                let offs: Vec<u32> = t.chunks.iter().map(|c| (c + base) as u32).collect();
+                bx(b"stco", &cat(&[words(&[0, n]), words(&offs)]))
+            };
+            let hdlr = full(b"hdlr", 0, 0, b"\0\0\0\0vide\0\0\0\0\0\0\0\0\0\0\0\0V\0");
+            let entry = bx(b"hvc1", &[0u8; 78]);
+            let stsd = full(b"stsd", 0, 0, &cat(&[words(&[1]), entry]));
+            let stbl = bx(
+                b"stbl",
+                &cat(&[
+                    stsd,
+                    bx(b"stts", &t.stts),
+                    bx(b"stsz", &t.stsz),
+                    bx(b"stsc", &t.stsc),
+                    co,
+                ]),
+            );
+            let trak = bx(b"trak", &bx(b"mdia", &cat(&[hdlr, bx(b"minf", &stbl)])));
+            bx(b"moov", &trak)
+        };
+        let mdat = bx(b"mdat", &vec![0xee; t.data_len]);
+        if faststart {
+            let base = (ftyp.len() + moov(0).len() + 8) as u64;
+            cat(&[ftyp, moov(base), mdat])
+        } else {
+            let base = (ftyp.len() + 8) as u64;
+            cat(&[ftyp, mdat, moov(base)])
+        }
+    }
+
+    fn damage_of(f: Vec<u8>) -> Vec<String> {
+        read(&mut io::Cursor::new(f)).unwrap().damage()
+    }
+
+    #[test]
+    fn consistent_sample_tables_are_not_damage() {
+        let t = tables(&[10, 20, 30, 40, 50], 2);
+        for faststart in [false, true] {
+            assert!(damage_of(file_with(&t, faststart)).is_empty());
+            let wide = Tables {
+                co64: true,
+                ..t.clone()
+            };
+            assert!(damage_of(file_with(&wide, faststart)).is_empty());
+        }
+        // Constant-size samples and compact sizes describe the same bytes.
+        let constant = Tables {
+            stsz: words(&[0, 25, 4]),
+            ..tables(&[25; 4], 3)
+        };
+        assert!(damage_of(file_with(&constant, false)).is_empty());
+        let stz2 = Tables {
+            stsz: Vec::new(),
+            ..tables(&[1, 2, 3], 1)
+        };
+        let mut f = file_with(&stz2, false);
+        let compact = bx(b"stz2", &cat(&[words(&[0, 8, 3]), vec![1, 2, 3]]));
+        let at = f.windows(4).position(|w| w == b"stsz").unwrap() - 4;
+        f.splice(at..at + 8, compact.iter().copied());
+        // Patch the sizes of the boxes around it: stbl, minf, mdia, trak, moov.
+        let grow = compact.len() as u32 - 8;
+        for t in [b"stbl", b"minf", b"mdia", b"trak", b"moov"] {
+            let at = f.windows(4).position(|w| w == t).unwrap() - 4;
+            let size = u32::from_be_bytes(f[at..at + 4].try_into().unwrap()) + grow;
+            f[at..at + 4].copy_from_slice(&size.to_be_bytes());
+        }
+        assert!(damage_of(f).is_empty());
+    }
+
+    #[test]
+    fn inconsistent_sample_tables_are_damage() {
+        let good = tables(&[10, 20, 30, 40], 2);
+        let cases: Vec<(Tables, &str)> = vec![
+            (
+                Tables {
+                    stsz: words(&[0, 0, 5, 10, 20, 30, 40]),
+                    ..good.clone()
+                },
+                "`stsz` claims 5 entries but has room for 4",
+            ),
+            (
+                Tables {
+                    stts: words(&[0, 1, 3, 1000]),
+                    ..good.clone()
+                },
+                "`stts` times 3 samples but `stsz` sizes 4",
+            ),
+            (
+                Tables {
+                    stsc: words(&[0, 1, 1, 3, 1]),
+                    ..good.clone()
+                },
+                "place 6 samples but `stsz` sizes 4",
+            ),
+            (
+                Tables {
+                    stsc: words(&[0, 1, 1, 2, 2]),
+                    ..good.clone()
+                },
+                "uses sample description 2, but `stsd` has 1",
+            ),
+            (
+                Tables {
+                    stsc: words(&[0, 2, 1, 2, 1, 3, 2, 1]),
+                    ..good.clone()
+                },
+                "starts at chunk 3, but there are only 2 chunks",
+            ),
+            (
+                Tables {
+                    chunks: vec![0, 1_000_000],
+                    ..good.clone()
+                },
+                "chunk 2 (bytes 1000028..1000098) runs past the end of the file",
+            ),
+            (
+                // The second chunk starts where `moov` does.
+                Tables {
+                    chunks: vec![0, 100],
+                    ..good.clone()
+                },
+                "chunk 2 (bytes 128..198) lies outside the media data",
+            ),
+        ];
+        for (t, want) in cases {
+            let d = damage_of(file_with(&t, false));
+            assert!(
+                d.len() == 1 && d[0].contains(want),
+                "want {want:?}, got {d:?}"
+            );
+            assert!(d[0].starts_with("track #0: "), "{d:?}");
+        }
+    }
+
+    #[test]
+    fn missing_boxes_and_truncation_are_damage() {
+        let f = file_with(&tables(&[10, 20], 1), true);
+        let d = damage_of(f[..f.len() - 5].to_vec());
+        assert!(
+            d[0].contains("ends 33 bytes into the 38-byte `mdat` box"),
+            "{d:?}"
+        );
+        assert!(d[1].contains("track #0: chunk 2 (bytes"), "{d:?}");
+        assert!(d[1].contains("runs past the end of the file"), "{d:?}");
+
+        let no_hdlr = file_with(&tables(&[10], 1), false);
+        let at = no_hdlr.windows(4).position(|w| w == b"hdlr").unwrap();
+        let mut f = no_hdlr.clone();
+        f[at..at + 4].copy_from_slice(b"hdlx");
+        assert_eq!(damage_of(f), ["track #0: it has no handler (`mdia/hdlr`)"]);
+
+        let no_moov = cat(&[bx(b"ftyp", b"isom\0\0\x02\0isom"), bx(b"mdat", &[1; 8])]);
+        assert_eq!(
+            damage_of(no_moov),
+            ["there is no `moov` box, so no index of the media"]
+        );
+    }
+
     /// Structure-aware fuzzing: random box trees, encoded with 32-bit,
     /// 64-bit and to-the-end sizes, then cut and corrupted.
     mod fuzz {
@@ -833,7 +1376,7 @@ pub(crate) mod tests {
         use proptest::prelude::*;
 
         use super::super::*;
-        use super::{bx, tree_stats};
+        use super::{Tables, bx, file_with, tables, tree_stats};
 
         #[derive(Debug, Clone, Copy)]
         enum Size {
@@ -983,8 +1526,15 @@ pub(crate) mod tests {
         fn parse_bounded(f: &[u8]) -> Result<Option<Mp4Tree>, TestCaseError> {
             let start = Instant::now();
             let r = read(&mut io::Cursor::new(f));
+            let damage = r.as_ref().map(|t| t.damage());
             let elapsed = start.elapsed();
-            prop_assert!(elapsed < Duration::from_secs(1), "parse took {elapsed:?}");
+            prop_assert!(
+                elapsed < Duration::from_secs(1),
+                "parse and check took {elapsed:?}"
+            );
+            if let Ok(d) = &damage {
+                prop_assert!(d.len() <= MAX_WARNINGS + 3 + f.len() / 8);
+            }
             let Ok(t) = r else { return Ok(None) };
             let (boxes, kept, depth) = tree_stats(&t);
             prop_assert!(boxes <= f.len() / 8, "{boxes} boxes from {} bytes", f.len());
@@ -1022,6 +1572,55 @@ pub(crate) mod tests {
                 }
                 parse_bounded(&g)?;
                 parse_bounded(&g[..cut.index(g.len() + 1)])?;
+            }
+        }
+
+        fn sample_tables() -> impl Strategy<Value = (Tables, bool)> {
+            (
+                vec(0u32..300, 1..40),
+                1usize..6,
+                any::<bool>(),
+                any::<bool>(),
+            )
+                .prop_map(|(sizes, per_chunk, co64, faststart)| {
+                    let t = tables(&sizes, per_chunk);
+                    (Tables { co64, ..t }, faststart)
+                })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(128))]
+
+            #[test]
+            fn consistent_tables_are_never_damage((t, faststart) in sample_tables()) {
+                let f = file_with(&t, faststart);
+                let d = parse_bounded(&f)?.map(|t| t.damage());
+                prop_assert_eq!(d, Some(vec![]));
+            }
+
+            #[test]
+            fn every_cut_is_an_error_or_damage(
+                (t, faststart) in sample_tables(),
+                cut in any::<prop::sample::Index>(),
+            ) {
+                let f = file_with(&t, faststart);
+                let g = &f[..cut.index(f.len())];
+                if let Some(t) = parse_bounded(g)? {
+                    prop_assert!(!t.damage().is_empty(), "{} of {} bytes", g.len(), f.len());
+                }
+            }
+
+            #[test]
+            fn damaged_tables_never_panic(
+                (t, faststart) in sample_tables(),
+                flips in vec((any::<prop::sample::Index>(), any::<u8>()), 1..6),
+            ) {
+                let mut f = file_with(&t, faststart);
+                for (i, x) in &flips {
+                    let i = i.index(f.len());
+                    f[i] ^= x;
+                }
+                parse_bounded(&f)?;
             }
         }
 
