@@ -1842,6 +1842,20 @@ mod tests {
             ]
         );
 
+        // A capture gets the lines of its own run, each whole: a line this
+        // thread left unfinished before it is ended first, and one its run
+        // leaves unfinished is ended inside it.
+        log(sys::AV_LOG_WARNING, "capture-test before ");
+        let ((), lines) = crate::hwprobe::capture_ffmpeg_log(|| {
+            log(sys::AV_LOG_WARNING, "capture-test inside\n");
+            log(sys::AV_LOG_WARNING, "capture-test after");
+        });
+        assert_eq!(lines, ["capture-test inside", "capture-test after"]);
+        assert_eq!(
+            captured("capture-test"),
+            ["before", "inside", "after"].map(|w| (Level::WARN, format!("capture-test {w}")))
+        );
+
         // FFmpeg's level follows the subscriber, so it skips what nobody
         // reads.
         set_max(Some(Level::WARN));
