@@ -1485,19 +1485,27 @@ pub(crate) mod tests {
         assert!(t.warnings[0].contains(&deep), "{:?}", t.warnings);
     }
 
-    /// Reset this process's peak resident memory, run `f`, and return how
-    /// far the peak rose above the starting level, in KiB. None where
-    /// /proc cannot reset the peak.
-    fn peak_rss_growth_kib(f: impl FnOnce()) -> Option<u64> {
+    /// Reset this process's peak resident memory through `clear_refs`
+    /// (`/proc/self/clear_refs`), run `f`, and return how far the peak
+    /// rose above the starting level, in KiB. `f` runs in any case; the
+    /// result is None where the peak cannot be reset or read.
+    fn peak_rss_growth_kib(clear_refs: &Path, f: impl FnOnce()) -> Option<u64> {
         fn hwm() -> Option<u64> {
             let s = std::fs::read_to_string("/proc/self/status").ok()?;
             let line = s.lines().find(|l| l.starts_with("VmHWM:"))?;
             line.split_whitespace().nth(1)?.parse().ok()
         }
-        std::fs::write("/proc/self/clear_refs", "5").ok()?;
-        let before = hwm()?;
+        let before = std::fs::write(clear_refs, "5").ok().and_then(|()| hwm());
         f();
-        Some(hwm()?.saturating_sub(before))
+        Some(hwm()?.saturating_sub(before?))
+    }
+
+    #[test]
+    fn memory_growth_runs_its_closure_when_the_peak_cannot_be_reset() {
+        let mut ran = false;
+        let grew = peak_rss_growth_kib(Path::new("/nonexistent/clear_refs"), || ran = true);
+        assert!(ran);
+        assert_eq!(grew, None);
     }
 
     #[test]
@@ -1508,7 +1516,9 @@ pub(crate) mod tests {
             let f = nested_udta(n, &[]);
             let mut result = None;
             let start = std::time::Instant::now();
-            let grew = peak_rss_growth_kib(|| result = Some(read(&mut io::Cursor::new(&f))));
+            let grew = peak_rss_growth_kib(Path::new("/proc/self/clear_refs"), || {
+                result = Some(read(&mut io::Cursor::new(&f)))
+            });
             let elapsed = start.elapsed();
             let t = result.unwrap().unwrap();
             assert!(elapsed.as_secs_f64() < 2.0, "{n} levels took {elapsed:?}");
