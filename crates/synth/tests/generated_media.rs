@@ -343,7 +343,7 @@ fn broken_files_give_errors_not_panics() {
             bytes[at] = x;
         }
     }
-    // Most edits land in the sample tables and are found (3452 of them
+    // Most edits land in the sample tables and are found (3453 of them
     // with FFmpeg 6.1). The rest change sizes and times that stay
     // consistent, or bytes nothing checks, such as names.
     eprintln!("{detected} of 4000 edits found");
