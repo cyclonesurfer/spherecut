@@ -1367,6 +1367,42 @@ mod tests {
         assert_eq!(hw_refusal(&ctx), Some(HwRefusal::NotOffered));
     }
 
+    #[test]
+    fn a_device_gets_a_decoder_that_can_use_it() {
+        use sys::{AVCodecID as Id, AVHWDeviceType as T};
+        // FFmpeg's choice for AV1 is libdav1d, which never decodes on a
+        // device. Where FFmpeg's own decoder can use the device, the choice
+        // is that one, so AV1 is not refused at open when this FFmpeg has
+        // Vulkan Video for it (hw_refusal.rs accepts either).
+        for (name, id) in [
+            ("h264", Id::AV_CODEC_ID_H264),
+            ("hevc", Id::AV_CODEC_ID_HEVC),
+            ("av1", Id::AV_CODEC_ID_AV1),
+        ] {
+            let own = ff::decoder::find_by_name(name);
+            for t in [T::AV_HWDEVICE_TYPE_VAAPI, T::AV_HWDEVICE_TYPE_VULKAN] {
+                let t = t as c_int;
+                let chosen = device_decoder(id as c_int, t);
+                if let Some(c) = chosen {
+                    // SAFETY: registered codecs are static.
+                    let c = unsafe { ff::Codec::wrap(c) };
+                    assert!(
+                        decoder_device_types(&c).contains(&t),
+                        "{name}: {}",
+                        c.name()
+                    );
+                }
+                if let Some(own) = own.filter(|c| decoder_device_types(c).contains(&t)) {
+                    // SAFETY: the pointer is only compared.
+                    assert_eq!(chosen, Some(unsafe { own.as_ptr() }), "{name} on {t}");
+                }
+            }
+        }
+        // No FFmpeg has Vulkan Video for MPEG-4 Part 2.
+        let vulkan = T::AV_HWDEVICE_TYPE_VULKAN as c_int;
+        assert!(device_decoder(Id::AV_CODEC_ID_MPEG4 as c_int, vulkan).is_none());
+    }
+
     /// One mid-grey 512x128 frame, encoded as Annex B HEVC by libx265.
     fn hevc_frame() -> Vec<ff::Packet> {
         use ff::format::Pixel;

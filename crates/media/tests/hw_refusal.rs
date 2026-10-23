@@ -86,7 +86,9 @@ fn av1_is_refused_rather_than_decoded_by_a_software_only_decoder() {
     // decodes on a device. The clip is doctor's one AV1 frame.
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/av1-main.obu");
     match VideoDecoder::open(&path, None, Some(lavapipe())) {
-        // This FFmpeg has no AV1 decoder for Vulkan Video at all.
+        // This FFmpeg has no AV1 decoder for Vulkan Video at all. A choice
+        // that misses one that is there fails ffi's unit test
+        // a_device_gets_a_decoder_that_can_use_it instead.
         Err(e) => assert_eq!(refusal(Err::<(), _>(e)), HwRefusal::NotOffered),
         // FFmpeg's own decoder offered the device's format, and lavapipe
         // turned it down. libdav1d would have decoded in software without
