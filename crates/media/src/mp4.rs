@@ -486,7 +486,7 @@ fn looks_like_box(buf: &[u8], at: usize) -> bool {
     else {
         return false;
     };
-    h.size as usize <= buf.len() - at && h.fourcc.0.iter().all(|c| c.is_ascii_graphic())
+    h.size <= (buf.len() - at) as u64 && h.fourcc.0.iter().all(|c| c.is_ascii_graphic())
 }
 
 type Fill = fn(&mut Mp4Box, &[u8], usize, &mut Walk);
@@ -719,51 +719,18 @@ fn check_track(trak: &Mp4Box, mdats: &[(u64, u64)], file_size: u64) -> Result<()
         ));
     }
 
-    // `stsc` maps runs of chunks to samples per chunk; runs start at
-    // increasing chunk numbers, counted from 1.
-    let (runs, runs_data) = stsc.transpose()?.unwrap_or((0, &[]));
-    let run = |k: u64| {
-        let e = runs_data.get(k as usize * 12..).unwrap_or_default();
-        let f = |i| be_u32(e, i).unwrap_or(0) as u64;
-        (f(0), f(4), f(8))
-    };
+    let (runs, entries) = stsc.transpose()?.unwrap_or((0, &[]));
     if runs == 0 {
         return Err(format!(
             "`stsc` puts none of the {samples} samples into the {chunk_count} chunks"
         ));
     }
     let descriptions = stbl.child(b"stsd").map_or(0, |s| s.children.len() as u64);
-    let mut placed: u128 = 0;
-    for k in 0..runs {
-        let (first, per_chunk, description) = run(k);
-        let prev = if k == 0 { 0 } else { run(k - 1).0 };
-        if first <= prev {
-            return Err(format!(
-                "`stsc` entry {k} starts at chunk {first}, after chunk {prev}"
-            ));
-        }
-        if first > chunk_count {
-            return Err(format!(
-                "`stsc` entry {k} starts at chunk {first}, but there are only {chunk_count} chunks"
-            ));
-        }
-        if per_chunk == 0 {
-            return Err(format!("`stsc` entry {k} puts no samples in its chunks"));
-        }
-        if description == 0 || description > descriptions {
-            return Err(format!(
-                "`stsc` entry {k} uses sample description {description}, but `stsd` has {descriptions}"
-            ));
-        }
-        // Like FFmpeg, let the first run cover any chunks before it.
-        let first = if k == 0 { 1 } else { first };
-        let end = if k + 1 < runs {
-            run(k + 1).0
-        } else {
-            chunk_count + 1
-        };
-        placed += (end - first) as u128 * per_chunk as u128;
-    }
+    let runs = ChunkRuns::new(entries, chunk_count, descriptions)?;
+    let placed: u128 = runs
+        .iter()
+        .map(|r| r.chunks as u128 * r.per_chunk as u128)
+        .sum();
     if placed != samples as u128 {
         return Err(format!(
             "`stsc` and `stco` place {placed} samples but `stsz` sizes {samples}"
@@ -776,17 +743,11 @@ fn check_track(trak: &Mp4Box, mdats: &[(u64, u64)], file_size: u64) -> Result<()
     let Some((_, sizes)) = sizes else {
         return Ok(());
     };
-    // Every chunk's bytes must be in the file and inside an `mdat`.
+    // Every chunk's bytes must be in the file and inside an `mdat`. The
+    // runs place exactly `samples` samples, so `sample` stays below it.
     let mut sample = 0u64;
-    for k in 0..runs {
-        let (first, per_chunk, _) = run(k);
-        let first = if k == 0 { 1 } else { first };
-        let end = if k + 1 < runs {
-            run(k + 1).0
-        } else {
-            chunk_count + 1
-        };
-        for c in first..end {
+    for run in runs.iter() {
+        for c in run.first..run.first + run.chunks {
             let at = (c - 1) as usize;
             let offset = if wide {
                 let hi = be_u32(chunks, at * 8).unwrap_or(0) as u64;
@@ -794,11 +755,103 @@ fn check_track(trak: &Mp4Box, mdats: &[(u64, u64)], file_size: u64) -> Result<()
             } else {
                 be_u32(chunks, at * 4).unwrap_or(0) as u64
             };
-            check_chunk(c, offset, sizes.total(sample, per_chunk), mdats, file_size)?;
-            sample += per_chunk;
+            check_chunk(
+                c,
+                offset,
+                sizes.total(sample, run.per_chunk),
+                mdats,
+                file_size,
+            )?;
+            sample += run.per_chunk;
         }
     }
     Ok(())
+}
+
+/// Chunks `first..first + chunks`, counted from 1, hold `per_chunk`
+/// samples each.
+#[derive(Debug, Clone, Copy)]
+struct ChunkRun {
+    first: u64,
+    chunks: u64,
+    per_chunk: u64,
+}
+
+/// The entries of an `stsc` table, which map runs of chunks to samples
+/// per chunk, checked so that every run covers at least one chunk.
+struct ChunkRuns<'a> {
+    /// 12-byte entries: first chunk, samples per chunk, sample
+    /// description index.
+    entries: &'a [u8],
+    chunk_count: u64,
+}
+
+impl<'a> ChunkRuns<'a> {
+    /// Check that the runs start at increasing chunk numbers between 1
+    /// and `chunk_count`, put samples in their chunks, and use one of the
+    /// `descriptions` sample descriptions.
+    fn new(entries: &'a [u8], chunk_count: u64, descriptions: u64) -> Result<Self, String> {
+        let mut prev = 0;
+        for (k, e) in entries.chunks_exact(12).enumerate() {
+            let [first, per_chunk, description] = stsc_entry(e);
+            if first == 0 {
+                return Err(format!(
+                    "`stsc` entry {k} starts at chunk 0, but chunks count from 1"
+                ));
+            }
+            if first <= prev {
+                return Err(format!(
+                    "`stsc` entry {k} starts at chunk {first}, but the entry before it starts at chunk {prev}"
+                ));
+            }
+            if first > chunk_count {
+                return Err(format!(
+                    "`stsc` entry {k} starts at chunk {first}, but there are only {chunk_count} chunks"
+                ));
+            }
+            if per_chunk == 0 {
+                return Err(format!("`stsc` entry {k} puts no samples in its chunks"));
+            }
+            if description == 0 || description > descriptions {
+                return Err(format!(
+                    "`stsc` entry {k} uses sample description {description}, but `stsd` has {descriptions}"
+                ));
+            }
+            prev = first;
+        }
+        Ok(ChunkRuns {
+            entries,
+            chunk_count,
+        })
+    }
+
+    /// Each run ends where the next one starts, the last one at the last
+    /// chunk.
+    fn iter(&self) -> impl Iterator<Item = ChunkRun> + '_ {
+        let entries = self.entries.chunks_exact(12);
+        let ends = entries
+            .clone()
+            .skip(1)
+            .map(|e| stsc_entry(e)[0])
+            .chain(std::iter::once(self.chunk_count + 1));
+        entries.zip(ends).enumerate().map(|(k, (e, end))| {
+            let [first, per_chunk, _] = stsc_entry(e);
+            // Like FFmpeg, let the first run cover any chunks before it.
+            let first = if k == 0 { 1 } else { first };
+            ChunkRun {
+                first,
+                // new() checked that runs start at increasing chunks up to
+                // `chunk_count`, so this never saturates.
+                chunks: end.saturating_sub(first),
+                per_chunk,
+            }
+        })
+    }
+}
+
+/// An `stsc` entry's first chunk, samples per chunk and description index.
+fn stsc_entry(e: &[u8]) -> [u64; 3] {
+    [0, 4, 8].map(|i| be_u32(e, i).unwrap_or(0) as u64)
 }
 
 /// Chunk `c` holds `size` bytes (None: at least one) at `offset`.
@@ -1203,15 +1256,20 @@ pub(crate) mod tests {
         let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isom");
         let moov = |base: u64| {
             let n = t.chunks.len() as u32;
+            // Fuzzed offsets can be anywhere, so let them wrap.
             let co = if t.co64 {
                 let offs: Vec<u8> = t
                     .chunks
                     .iter()
-                    .flat_map(|c| (c + base).to_be_bytes())
+                    .flat_map(|c| c.wrapping_add(base).to_be_bytes())
                     .collect();
                 bx(b"co64", &cat(&[words(&[0, n]), offs]))
             } else {
-                let offs: Vec<u32> = t.chunks.iter().map(|c| (c + base) as u32).collect();
+                let offs: Vec<u32> = t
+                    .chunks
+                    .iter()
+                    .map(|c| c.wrapping_add(base) as u32)
+                    .collect();
                 bx(b"stco", &cat(&[words(&[0, n]), words(&offs)]))
             };
             let hdlr = full(b"hdlr", 0, 0, b"\0\0\0\0vide\0\0\0\0\0\0\0\0\0\0\0\0V\0");
@@ -1345,6 +1403,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn stsc_runs_out_of_order_are_damage() {
+        // Each run used to be measured up to the next one's first chunk
+        // before that was checked, which overflowed when it went backwards.
+        let good = tables(&[10, 20, 30, 40, 50, 60], 1);
+        let cases = [
+            (
+                words(&[0, 2, 1, 1, 1, 0, 1, 1]),
+                "`stsc` entry 1 starts at chunk 0, but chunks count from 1",
+            ),
+            (
+                words(&[0, 3, 1, 1, 1, 3, 1, 1, 2, 1, 1]),
+                "`stsc` entry 2 starts at chunk 2, but the entry before it starts at chunk 3",
+            ),
+            (
+                words(&[0, 2, 1, 1, 1, 1, 1, 1]),
+                "`stsc` entry 1 starts at chunk 1, but the entry before it starts at chunk 1",
+            ),
+        ];
+        for (stsc, want) in cases {
+            let t = Tables {
+                stsc,
+                ..good.clone()
+            };
+            assert_eq!(
+                damage_of(file_with(&t, false)),
+                [format!("track #0: {want}")]
+            );
+        }
+    }
+
+    #[test]
     fn missing_boxes_and_truncation_are_damage() {
         let f = file_with(&tables(&[10, 20], 1), true);
         let d = damage_of(f[..f.len() - 5].to_vec());
@@ -1377,7 +1466,7 @@ pub(crate) mod tests {
         use proptest::prelude::*;
 
         use super::super::*;
-        use super::{Tables, bx, file_with, tables, tree_stats};
+        use super::{Tables, bx, file_with, tables, tree_stats, words};
 
         #[derive(Debug, Clone, Copy)]
         enum Size {
@@ -1587,6 +1676,89 @@ pub(crate) mod tests {
                     let t = tables(&sizes, per_chunk);
                     (Tables { co64, ..t }, faststart)
                 })
+        }
+
+        /// A table field: usually small, so that entries interact, but
+        /// sometimes at or near the limits of its 32 bits.
+        fn field(small: u32) -> impl Strategy<Value = u32> {
+            prop_oneof![
+                8 => 0..small,
+                1 => Just(u32::MAX),
+                1 => any::<u32>(),
+            ]
+        }
+
+        /// Consistent tables for runs of (chunks, samples per chunk), one
+        /// `stsc` entry per run, with sample sizes taken in turn from
+        /// `sizes`.
+        fn tables_of_runs(runs: &[(u32, u32)], sizes: &[u32]) -> Tables {
+            let (mut stsc, mut all, mut chunks) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut first, mut at) = (1, 0u64);
+            for &(n, per_chunk) in runs {
+                stsc.extend([first, per_chunk, 1]);
+                for _ in 0..n {
+                    chunks.push(at);
+                    for _ in 0..per_chunk {
+                        let s = sizes[all.len() % sizes.len()];
+                        all.push(s);
+                        at += s as u64;
+                    }
+                }
+                first += n;
+            }
+            let n = all.len() as u32;
+            Tables {
+                stts: words(&[0, 1, n, 1000]),
+                stsz: [words(&[0, 0, n]), words(&all)].concat(),
+                stsc: [words(&[0, runs.len() as u32]), words(&stsc)].concat(),
+                chunks,
+                co64: false,
+                data_len: at as usize,
+            }
+        }
+
+        /// Sample tables as a few changed bytes inside `moov` leave them:
+        /// consistent tables with some of their words, entry counts
+        /// included, set to arbitrary values.
+        fn damaged_tables() -> impl Strategy<Value = (Tables, bool)> {
+            let runs = vec((1u32..4, 1u32..4), 1..5);
+            let sizes = vec(0u32..300, 1..4);
+            let edits = vec((0usize..4, any::<prop::sample::Index>(), field(8)), 1..4);
+            (runs, sizes, edits, any::<bool>(), any::<bool>()).prop_map(
+                |(runs, sizes, edits, co64, faststart)| {
+                    let mut t = Tables {
+                        co64,
+                        ..tables_of_runs(&runs, &sizes)
+                    };
+                    for (table, at, value) in edits {
+                        let payload = match table {
+                            0 => &mut t.stts,
+                            1 => &mut t.stsz,
+                            2 => &mut t.stsc,
+                            _ => {
+                                let i = at.index(t.chunks.len());
+                                t.chunks[i] = value as u64;
+                                continue;
+                            }
+                        };
+                        // Any word after the version and flags.
+                        let i = 4 + 4 * at.index(payload.len() / 4 - 1);
+                        payload[i..i + 4].copy_from_slice(&value.to_be_bytes());
+                    }
+                    (t, faststart)
+                },
+            )
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            /// `cargo test` builds with overflow checks, so this also
+            /// catches arithmetic on table values that would wrap.
+            #[test]
+            fn damaged_sample_tables_never_panic((t, faststart) in damaged_tables()) {
+                parse_bounded(&file_with(&t, faststart))?;
+            }
         }
 
         proptest! {
