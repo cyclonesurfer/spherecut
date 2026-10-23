@@ -19,13 +19,40 @@ use spherecut_media::ff;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Audio, Codec, Spec};
 
-fn tmp(name: &str) -> PathBuf {
+/// A test's own directory in the system's temp dir, removed with what it
+/// holds when dropped, so also when the test fails.
+struct TempDir(PathBuf);
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+fn tmp(name: &str) -> TempDir {
     let d = std::env::temp_dir().join(format!(
         "spherecut-decode-errors-{}-{name}",
         std::process::id()
     ));
     std::fs::create_dir_all(&d).unwrap();
-    d
+    TempDir(d)
+}
+
+#[test]
+fn test_directories_are_removed_when_dropped() {
+    let dir = tmp("dropped");
+    std::fs::write(dir.join("left.mp4"), b"").unwrap();
+    let path = dir.to_path_buf();
+    drop(dir);
+    assert!(!path.exists());
 }
 
 /// An H.264 clip with stereo audio.
@@ -184,7 +211,6 @@ fn a_file_cut_in_its_video_data_ends_with_an_error_after_the_whole_frames() {
         }
     }
     assert!(between > 0, "the audio must be interleaved with the video");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -202,7 +228,6 @@ fn with_moov_at_the_end_a_cut_in_the_media_data_fails_to_open() {
         VideoDecoder::open(&cut, None, None),
         Err(MediaError::Open { .. })
     ));
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -228,7 +253,6 @@ fn damage_in_another_stream_does_not_end_the_video_early() {
         std::fs::write(&cut, &bytes[..at as usize]).unwrap();
         assert_decodes_whole(&cut, 90);
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -269,5 +293,4 @@ fn a_cancelled_read_is_an_error_not_the_end_of_the_stream() {
         assert_eq!(d.skipped_packets(), 0);
         assert_eq!(decode_reason(&d.next_frame().unwrap_err()), reason);
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
