@@ -12,6 +12,7 @@ pub mod detect;
 pub mod doctor;
 pub mod encode;
 mod ffi;
+mod hwprobe;
 pub mod inject;
 pub mod mp4;
 pub mod probe;

@@ -363,16 +363,6 @@ fn create_device(t: c_int, device: Option<&str>) -> Result<*mut sys::AVBufferRef
     Ok(ctx)
 }
 
-/// Try to create a hardware device context, then release it.
-pub fn try_hw_device(kind: &str, device: Option<&str>) -> Result<(), HwError> {
-    let r = device_type(kind).and_then(|t| create_device(t, device));
-    log_device(kind, device, r.as_ref().err());
-    let mut ctx = r?;
-    // SAFETY: we own the reference returned above.
-    unsafe { sys::av_buffer_unref(&mut ctx) };
-    Ok(())
-}
-
 fn log_device(kind: &str, device: Option<&str>, e: Option<&HwError>) {
     let device = device.unwrap_or("default");
     match e {
@@ -546,6 +536,12 @@ impl HwDevice {
     /// [`frame_format`].
     pub fn hw_pix_fmt(&self) -> c_int {
         self.pix_fmt as c_int
+    }
+
+    /// The device context reference, still owned by `self`, for the
+    /// capability probes in `hwprobe`.
+    pub(crate) fn as_ptr(&self) -> *mut sys::AVBufferRef {
+        self.ptr
     }
 }
 

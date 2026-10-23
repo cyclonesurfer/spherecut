@@ -3,7 +3,9 @@
 use std::fmt::Write as _;
 
 use spherecut_core::Rational;
-use spherecut_media::doctor::{DoctorReport, Severity};
+use spherecut_media::doctor::{
+    Check, CheckResult, DoctorReport, SAMPLE_SIZE, Severity, VulkanDeviceType,
+};
 use spherecut_media::probe::{ProbeReport, StreamInfo};
 use spherecut_media::spherical::{Projection, StereoMode};
 
@@ -269,13 +271,59 @@ pub fn doctor(r: &DoctorReport) -> String {
             "  {:<7} {:<22} {}",
             d.kind,
             d.device.as_deref().unwrap_or("(default)"),
-            if d.ok {
-                "ok".to_string()
-            } else {
-                format!("unavailable: {}", d.error.as_deref().unwrap_or("?"))
+            match (d.ok, &d.name) {
+                (true, Some(n)) => format!("ok, on {n}"),
+                (true, None) => "ok".to_string(),
+                (false, _) => format!("unavailable: {}", d.error.as_deref().unwrap_or("?")),
             }
         );
+        for line in &d.ffmpeg_log {
+            let _ = writeln!(s, "  {:<30} FFmpeg: {line}", "");
+        }
     }
+    if !r.vulkan_devices.is_empty() {
+        let _ = writeln!(s, "\nVulkan devices");
+        for d in &r.vulkan_devices {
+            let kind = match d.device_type {
+                VulkanDeviceType::DiscreteGpu => "discrete GPU",
+                VulkanDeviceType::IntegratedGpu => "integrated GPU",
+                VulkanDeviceType::VirtualGpu => "virtual GPU",
+                VulkanDeviceType::Cpu => "CPU: no GPU acceleration",
+                VulkanDeviceType::Other => "other",
+            };
+            let _ = writeln!(
+                s,
+                "  {}{}\n    {kind}; driver {}{}; Vulkan {}; vendor {} device {}",
+                d.name,
+                if d.used_by_ffmpeg {
+                    "  (FFmpeg uses this one)"
+                } else {
+                    ""
+                },
+                d.driver.as_deref().unwrap_or("?"),
+                d.driver_info
+                    .as_ref()
+                    .map(|i| format!(" ({i})"))
+                    .unwrap_or_default(),
+                d.api_version,
+                d.vendor_id,
+                d.device_id
+            );
+        }
+    }
+    let _ = writeln!(
+        s,
+        "\nDecode check: one {n}x{n} frame each, no fallback to software; the hardware's\n\
+         picture must match the software decoder's",
+        n = SAMPLE_SIZE
+    );
+    checks(&mut s, &r.decode_checks);
+    let _ = writeln!(
+        s,
+        "\nEncode check: one {n}x{n} frame each on VA-API, decoded back in software",
+        n = SAMPLE_SIZE
+    );
+    checks(&mut s, &r.encode_checks);
     if r.issues.is_empty() {
         let _ = writeln!(s, "\nNo problems found.");
     } else {
@@ -297,4 +345,64 @@ pub fn doctor(r: &DoctorReport) -> String {
         }
     }
     s
+}
+
+/// A table of checks, one row per format and one column per path, with
+/// each distinct reason as a numbered note below it.
+fn checks(s: &mut String, checks: &[Check]) {
+    let mut paths: Vec<&str> = Vec::new();
+    let mut formats: Vec<&str> = Vec::new();
+    for c in checks {
+        if !paths.contains(&c.path.as_str()) {
+            paths.push(&c.path);
+        }
+        if !formats.contains(&c.format.as_str()) {
+            formats.push(&c.format);
+        }
+    }
+    let mut row = format!("  {:<14}", "");
+    for p in &paths {
+        let _ = write!(row, " {p:<11}");
+    }
+    let _ = writeln!(s, "{}", row.trim_end());
+    // Notes are a reason plus the first thing FFmpeg said, if anything,
+    // without the "[hevc] " that would keep identical notes apart.
+    let mut notes: Vec<String> = Vec::new();
+    for f in &formats {
+        let mut row = format!("  {f:<14}");
+        for p in &paths {
+            let Some(c) = checks.iter().find(|c| c.format == *f && c.path == *p) else {
+                let _ = write!(row, " {:<11}", "");
+                continue;
+            };
+            let word = match c.result {
+                CheckResult::Works => "works",
+                CheckResult::Fails => "FAILS",
+                CheckResult::NotTested => "-",
+            };
+            let cell = match &c.reason {
+                Some(reason) => {
+                    let mut note = reason.clone();
+                    if let Some(first) = c.ffmpeg_log.first() {
+                        let msg = first
+                            .strip_prefix('[')
+                            .and_then(|l| l.split_once("] "))
+                            .map_or(first.as_str(), |(_, m)| m);
+                        let _ = write!(note, "\n      FFmpeg: {msg}");
+                    }
+                    let n = notes.iter().position(|x| *x == note).unwrap_or_else(|| {
+                        notes.push(note);
+                        notes.len() - 1
+                    });
+                    format!("{word} [{}]", n + 1)
+                }
+                None => word.to_string(),
+            };
+            let _ = write!(row, " {cell:<11}");
+        }
+        let _ = writeln!(s, "{}", row.trim_end());
+    }
+    for (i, note) in notes.iter().enumerate() {
+        let _ = writeln!(s, "  [{}] {note}", i + 1);
+    }
 }

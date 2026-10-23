@@ -1,0 +1,140 @@
+//! `spherecut doctor` on a machine without a GPU, made so even where there
+//! is one: VA-API looks at a render node that doesn't exist, and the Vulkan
+//! loader sees only lavapipe (llvmpipe), which must be flagged as a CPU
+//! device with no GPU acceleration.
+
+// Test helpers outside #[test] functions; panicking is the point here.
+#![allow(clippy::unwrap_used)]
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use serde_json::Value;
+
+/// Mesa's lavapipe ICD for this architecture. Tier 1 needs it; it ships in
+/// mesa-vulkan-drivers (Fedora, Ubuntu) and vulkan-swrast (Arch).
+fn lavapipe_icd() -> PathBuf {
+    let dirs = [
+        "/usr/share/vulkan/icd.d",
+        "/etc/vulkan/icd.d",
+        "/usr/local/share/vulkan/icd.d",
+    ];
+    let arch = std::env::consts::ARCH;
+    let mut found: Vec<PathBuf> = dirs
+        .iter()
+        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
+        .map(|e| e.path())
+        .filter(|p| {
+            let n = p.file_name().unwrap().to_string_lossy().into_owned();
+            n.starts_with("lvp_icd") && (n == "lvp_icd.json" || n.contains(arch))
+        })
+        .collect();
+    found.sort();
+    found.into_iter().next().unwrap_or_else(|| {
+        panic!(
+            "no lavapipe Vulkan driver found in {dirs:?}; install mesa-vulkan-drivers \
+             (Fedora, Ubuntu) or vulkan-swrast (Arch)"
+        )
+    })
+}
+
+fn missing_node() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("no-such-dri")
+        .join("renderD128")
+}
+
+/// `spherecut doctor` with `args`, on lavapipe and no render node.
+fn doctor(args: &[&str]) -> Output {
+    let icd = lavapipe_icd();
+    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .arg("doctor")
+        .arg("--render-node")
+        .arg(missing_node())
+        .args(args)
+        // VK_DRIVER_FILES for current loaders, VK_ICD_FILENAMES for older.
+        .env("VK_DRIVER_FILES", &icd)
+        .env("VK_ICD_FILENAMES", &icd)
+        .env_remove("SPHERECUT_LOG")
+        .output()
+        .unwrap();
+    // Warnings only: a missing GPU slows things down but opens everything.
+    assert!(
+        out.status.success(),
+        "doctor failed: {}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
+}
+
+#[test]
+fn json_flags_lavapipe_as_cpu_and_the_render_node_as_missing() {
+    let out = doctor(&["--json"]);
+    let r: Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    // The keys doctor has always had are still there.
+    for k in [
+        "distro",
+        "ffmpeg_version",
+        "libraries",
+        "hw_device_types",
+        "decoders",
+        "encoders",
+        "devices",
+        "issues",
+    ] {
+        assert!(r.get(k).is_some(), "no {k} in {r:#}");
+    }
+
+    let vk = r["vulkan_devices"].as_array().unwrap();
+    assert_eq!(vk.len(), 1, "{vk:#?}");
+    assert_eq!(vk[0]["device_type"], "cpu");
+    assert_eq!(vk[0]["driver"], "llvmpipe");
+    assert_eq!(vk[0]["used_by_ffmpeg"], true);
+    assert!(vk[0]["name"].as_str().unwrap().starts_with("llvmpipe"));
+
+    let issues = r["issues"].as_array().unwrap();
+    let what = |prefix: &str| {
+        issues
+            .iter()
+            .find(|i| i["what"].as_str().unwrap().starts_with(prefix))
+            .unwrap_or_else(|| panic!("no issue \"{prefix}…\" in {issues:#?}"))
+    };
+    let cpu = what("the only Vulkan device is llvmpipe");
+    assert!(
+        cpu["what"]
+            .as_str()
+            .unwrap()
+            .ends_with("no GPU acceleration")
+    );
+    assert_eq!(cpu["severity"], "warning");
+    assert!(!cpu["fix"].as_str().unwrap().is_empty());
+    let node = what("no DRM render node at");
+    assert_eq!(node["severity"], "warning");
+
+    // Every format decodes in software; nothing is tested on VA-API.
+    for c in r["decode_checks"].as_array().unwrap() {
+        match c["path"].as_str().unwrap() {
+            "software" => assert_eq!(c["result"], "works", "{c:#}"),
+            "vaapi" => assert_eq!(c["result"], "not_tested", "{c:#}"),
+            _ => assert_eq!(c["result"], "fails", "{c:#}"),
+        }
+    }
+}
+
+#[test]
+fn text_lists_the_vulkan_device_and_the_check_tables() {
+    let out = doctor(&[]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    for want in [
+        "\nVulkan devices\n  llvmpipe",
+        "CPU: no GPU acceleration; driver llvmpipe",
+        "\nDecode check: one 256x256 frame each",
+        "  HEVC Main 10   works",
+        "\nEncode check: one 256x256 frame each on VA-API",
+        "[warning] the only Vulkan device is llvmpipe",
+    ] {
+        assert!(text.contains(want), "no {want:?} in:\n{text}");
+    }
+}

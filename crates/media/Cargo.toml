@@ -12,6 +12,7 @@ spherecut-core.workspace = true
 ffmpeg-next.workspace = true
 ffmpeg-sys-next.workspace = true
 tracing.workspace = true
+tracing-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
