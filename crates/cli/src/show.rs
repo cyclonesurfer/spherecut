@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use spherecut_core::Rational;
 use spherecut_media::doctor::{DoctorReport, Severity};
-use spherecut_media::probe::{ProbeReport, StreamInfo};
+use spherecut_media::probe::{ProbeReport, StreamInfo, TruncatedBox};
 use spherecut_media::spherical::{Projection, StereoMode};
 
 fn secs(r: Rational) -> String {
@@ -21,6 +21,21 @@ fn rate(r: Rational) -> String {
 
 fn opt<T: std::fmt::Display>(o: &Option<T>) -> String {
     o.as_ref().map_or_else(|| "-".into(), |v| v.to_string())
+}
+
+fn truncated(t: &TruncatedBox) -> String {
+    let fourcc = t.fourcc.as_ref().map(|f| format!(" `{f}`"));
+    match (fourcc, t.size) {
+        (Some(f), Some(size)) if t.present >= t.header_len => {
+            format!(", truncated{f} ({} of {size} bytes)", t.present)
+        }
+        (f, _) => format!(
+            ", truncated{} box header ({} of {} bytes)",
+            f.unwrap_or_default(),
+            t.present,
+            t.header_len
+        ),
+    }
 }
 
 pub fn probe(r: &ProbeReport) -> String {
@@ -48,13 +63,7 @@ pub fn probe(r: &ProbeReport) -> String {
             "  mp4        brand {}, boxes [{}]{}{}",
             opt(&m.brand),
             boxes.join(" "),
-            m.truncated
-                .as_ref()
-                .map(|t| format!(
-                    ", truncated `{}` ({} of {} bytes)",
-                    t.fourcc, t.present, t.size
-                ))
-                .unwrap_or_default(),
+            m.truncated.as_ref().map(truncated).unwrap_or_default(),
             if m.trailing_bytes > 0 {
                 format!(", {} trailing bytes", m.trailing_bytes)
             } else {

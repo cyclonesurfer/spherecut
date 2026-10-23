@@ -216,3 +216,28 @@ fn handler_and_sample_entry_disagreeing_is_damage() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn file_ending_inside_a_box_header_fails() {
+    // A camera file cut just after `moov` keeps the first bytes of the
+    // vendor box that followed: too few for a header, but a box size.
+    let dir = tmp("cut-header");
+    let (good, _) = media(&dir);
+    let mut f = std::fs::read(&good).unwrap();
+    f.extend_from_slice(&11_308_611u32.to_be_bytes());
+    let path = dir.join("cut-header.mp4");
+    std::fs::write(&path, &f).unwrap();
+
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("truncated box header (4 of 8 bytes)"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("ends 4 bytes into the header of a 11308611-byte box"),
+        "{stderr}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

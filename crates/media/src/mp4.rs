@@ -117,16 +117,48 @@ pub struct Mp4Tree {
     pub warnings: Vec<String>,
 }
 
-/// A top-level box whose header claims more bytes than the file has left.
+/// A top-level box that runs past the end of the file: its header claims
+/// more bytes than the file has left, or the file ends inside the header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Truncated {
-    pub fourcc: FourCc,
+    /// None when the file ends before the box type.
+    pub fourcc: Option<FourCc>,
     pub offset: u64,
     pub header_len: u64,
-    /// The size its header claims.
-    pub size: u64,
-    /// Bytes of it present in the file.
+    /// The size its header claims; None when the file ends before it.
+    pub size: Option<u64>,
+    /// Bytes of it present in the file, fewer than `header_len` when the
+    /// header itself is cut short.
     pub present: u64,
+}
+
+impl Truncated {
+    fn is(&self, t: &[u8; 4]) -> bool {
+        self.fourcc.is_some_and(|f| f.0 == *t)
+    }
+
+    fn reason(&self) -> String {
+        let (present, offset) = (self.present, self.offset);
+        if let (Some(f), Some(size)) = (self.fourcc, self.size)
+            && present >= self.header_len
+        {
+            return format!(
+                "the file ends {present} bytes into the {size}-byte `{f}` box at offset {offset}: it was cut short"
+            );
+        }
+        let what = match (self.fourcc, self.size) {
+            (Some(f), _) => format!("a `{f}` box"),
+            (None, Some(size)) => format!("a {size}-byte box"),
+            (None, None) => "a box".into(),
+        };
+        let present = match present {
+            1 => "1 byte".into(),
+            n => format!("{n} bytes"),
+        };
+        format!(
+            "the file ends {present} into the header of {what} at offset {offset}: it was cut short"
+        )
+    }
 }
 
 impl Mp4Tree {
@@ -151,14 +183,14 @@ impl Mp4Tree {
     pub fn damage(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(t) = &self.truncated {
-            out.push(format!(
-                "the file ends {} bytes into the {}-byte `{}` box at offset {}: it was cut short",
-                t.present, t.size, t.fourcc, t.offset
-            ));
+            out.push(t.reason());
         }
         out.extend(self.warnings.iter().cloned());
         let Some(moov) = self.moov() else {
-            let cut_moov = self.truncated.is_some_and(|t| t.fourcc.0 == *b"moov");
+            // The box cut short may have been `moov`.
+            let cut_moov = self
+                .truncated
+                .is_some_and(|t| t.fourcc.is_none() || t.is(b"moov"));
             // HEIF images and other item-based files have a top-level `meta`.
             let items = self.top.iter().any(|b| b.fourcc.0 == *b"meta");
             if !cut_moov && !items {
@@ -180,13 +212,14 @@ impl Mp4Tree {
     fn media_data(&self) -> Vec<(u64, u64)> {
         let cut = self
             .truncated
-            .map(|t| (t.fourcc, t.offset, t.header_len, t.size));
+            .filter(|t| t.is(b"mdat"))
+            .and_then(|t| Some((t.offset, t.header_len, t.size?)));
         self.top
             .iter()
-            .map(|b| (b.fourcc, b.offset, b.header_len, b.size))
+            .filter(|b| b.fourcc.0 == *b"mdat")
+            .map(|b| (b.offset, b.header_len, b.size))
             .chain(cut)
-            .filter(|(t, ..)| t.0 == *b"mdat")
-            .map(|(_, offset, header_len, size)| (offset + header_len, offset.saturating_add(size)))
+            .map(|(offset, header_len, size)| (offset + header_len, offset.saturating_add(size)))
             .collect()
     }
 }
@@ -248,10 +281,6 @@ pub fn read<R: Read + Seek>(r: &mut R) -> Result<Mp4Tree, Mp4Error> {
     let mut pos = 0u64;
     while pos < file_size {
         let remaining = file_size - pos;
-        if remaining < 8 {
-            tree.trailing_bytes = remaining;
-            break;
-        }
         r.seek(SeekFrom::Start(pos))?;
         // Room for a 64-bit size and a `uuid` extended type.
         let mut hdr = [0u8; 32];
@@ -260,16 +289,19 @@ pub fn read<R: Read + Seek>(r: &mut R) -> Result<Mp4Tree, Mp4Error> {
             if pos == 0 {
                 return Err(Mp4Error::NotMp4("no valid box header at offset 0".into()));
             }
-            tree.trailing_bytes = remaining;
+            match cut_header(&hdr[..n], pos) {
+                Some(cut) => tree.truncated = Some(cut),
+                None => tree.trailing_bytes = remaining,
+            }
             break;
         };
-        if pos == 0 && !plausible_first_box(h.fourcc) {
+        if pos == 0 && !FIRST_BOXES.contains(&&h.fourcc.0) {
             return Err(Mp4Error::NotMp4(format!(
                 "first box type `{}` is not an MP4 box",
                 h.fourcc
             )));
         }
-        if h.size > remaining && !known_top_level(h.fourcc) {
+        if h.size > remaining && !known_top_level(&h.fourcc.0) {
             // Vendor trailers (Insta360 before X5 firmware 1.7) are not
             // boxes, but their first bytes can look like an oversized one.
             tree.trailing_bytes = remaining;
@@ -277,10 +309,10 @@ pub fn read<R: Read + Seek>(r: &mut R) -> Result<Mp4Tree, Mp4Error> {
         }
         if h.size > remaining {
             tree.truncated = Some(Truncated {
-                fourcc: h.fourcc,
+                fourcc: Some(h.fourcc),
                 offset: pos,
                 header_len: h.header_len,
-                size: h.size,
+                size: Some(h.size),
                 present: remaining,
             });
             break;
@@ -333,20 +365,57 @@ pub fn read<R: Read + Seek>(r: &mut R) -> Result<Mp4Tree, Mp4Error> {
     Ok(tree)
 }
 
-fn plausible_first_box(t: FourCc) -> bool {
-    matches!(
-        &t.0,
-        b"ftyp" | b"moov" | b"mdat" | b"free" | b"skip" | b"wide" | b"pnot" | b"uuid"
-    )
+/// Box types that MP4 and MOV files start with.
+const FIRST_BOXES: &[&[u8; 4]] = &[
+    b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide", b"pnot", b"uuid",
+];
+
+/// Other box types that appear at the top level of MP4 and MOV files.
+const OTHER_TOP_LEVEL: &[&[u8; 4]] = &[
+    b"moof", b"mfra", b"meta", b"udta", b"sidx", b"styp", b"inst",
+];
+
+fn known_top_level(t: &[u8]) -> bool {
+    FIRST_BOXES
+        .iter()
+        .chain(OTHER_TOP_LEVEL)
+        .any(|k| k[..] == *t)
 }
 
-/// Box types that appear at the top level of MP4 and MOV files.
-fn known_top_level(t: FourCc) -> bool {
-    plausible_first_box(t)
-        || matches!(
-            &t.0,
-            b"moof" | b"mfra" | b"meta" | b"udta" | b"sidx" | b"styp" | b"inst"
-        )
+/// The box at `offset` if `b`, the rest of the file, is the start of its
+/// header: fewer bytes than a header needs, which agree with one. Other
+/// short leftovers are trailing bytes.
+fn cut_header(b: &[u8], offset: u64) -> Option<Truncated> {
+    let size32 = b
+        .get(0..4)
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_be_bytes);
+    let header_len = if size32 == Some(1) { 16 } else { 8 };
+    if b.len() >= header_len {
+        // The whole header is there, so it is not one.
+        return None;
+    }
+    // Sizes 2 to 7 are smaller than a header.
+    if size32.is_some_and(|s| (2..8).contains(&s)) {
+        return None;
+    }
+    // As much of the type as the file holds must start a type we know.
+    let fourcc = b.get(4..).unwrap_or_default();
+    let fourcc = &fourcc[..fourcc.len().min(4)];
+    if !FIRST_BOXES
+        .iter()
+        .chain(OTHER_TOP_LEVEL)
+        .any(|k| k.starts_with(fourcc))
+    {
+        return None;
+    }
+    Some(Truncated {
+        fourcc: fourcc.try_into().ok().map(FourCc),
+        offset,
+        header_len: header_len as u64,
+        size: size32.filter(|&s| s >= 8).map(u64::from),
+        present: b.len() as u64,
+    })
 }
 
 fn read_up_to<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
@@ -1121,18 +1190,63 @@ pub(crate) mod tests {
         let t = read(&mut io::Cursor::new(g[..g.len() - 10].to_vec())).unwrap();
         assert_eq!(t.trailing_bytes, 0);
         let cut = t.truncated.unwrap();
-        assert_eq!(cut.fourcc, FourCc::new(b"moov"));
+        assert_eq!(cut.fourcc, Some(FourCc::new(b"moov")));
         assert_eq!(cut.offset, moov_at as u64);
         assert_eq!(
             (cut.size, cut.present),
-            (moov.len() as u64, moov.len() as u64 - 10)
+            (Some(moov.len() as u64), moov.len() as u64 - 10)
         );
         assert!(t.moov().is_none());
 
         // A cut-short first box is still an MP4, just an unusable one.
         let t = read(&mut io::Cursor::new(f[..20].to_vec())).unwrap();
         assert!(t.top.is_empty());
-        assert_eq!(t.truncated.map(|c| c.fourcc), Some(FourCc::new(b"ftyp")));
+        assert_eq!(
+            t.truncated.and_then(|c| c.fourcc),
+            Some(FourCc::new(b"ftyp"))
+        );
+    }
+
+    #[test]
+    fn file_ending_inside_a_box_header_is_truncation() {
+        let f = minimal();
+        let at = f.len() as u64;
+        let next = bx(b"inst", &[7; 100]);
+        for cut in 1..8 {
+            let g = cat(&[f.clone(), next[..cut].to_vec()]);
+            let t = read(&mut io::Cursor::new(g.clone())).unwrap();
+            assert_eq!(t.trailing_bytes, 0, "{cut}");
+            let c = t.truncated.unwrap();
+            assert_eq!((c.offset, c.present, c.fourcc), (at, cut as u64, None));
+            assert_eq!(c.size, (cut >= 4).then_some(108), "{cut}");
+            let size = if cut >= 4 { "a 108-byte box" } else { "a box" };
+            let bytes = if cut == 1 { "byte" } else { "bytes" };
+            assert_eq!(
+                t.damage(),
+                [format!(
+                    "the file ends {cut} {bytes} into the header of {size} at offset {at}: it was cut short"
+                )]
+            );
+        }
+        // A 64-bit header cut after the type.
+        let large = cat(&[1u32.to_be_bytes().to_vec(), b"mdat".to_vec(), vec![0; 7]]);
+        let t = read(&mut io::Cursor::new(cat(&[f.clone(), large]))).unwrap();
+        let c = t.truncated.unwrap();
+        assert_eq!(
+            (c.fourcc, c.size, c.header_len, c.present),
+            (Some(FourCc::new(b"mdat")), None, 16, 15)
+        );
+        // Leftovers that cannot start a header are trailing bytes: a size
+        // below 8, a type we do not know, a 64-bit size below 16.
+        for junk in [
+            &b"\0\0\0\x05"[..],
+            b"\0\0\0\x10zz",
+            b"\0\0\0\x01mdat\0\0\0\0\0\0\0\x0f",
+        ] {
+            let t = read(&mut io::Cursor::new(cat(&[f.clone(), junk.to_vec()]))).unwrap();
+            assert_eq!(t.truncated, None, "{junk:?}");
+            assert_eq!(t.trailing_bytes, junk.len() as u64, "{junk:?}");
+        }
     }
 
     #[test]

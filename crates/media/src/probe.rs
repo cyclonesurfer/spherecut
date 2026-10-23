@@ -124,11 +124,14 @@ pub struct Mp4Summary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TruncatedBox {
-    pub fourcc: String,
+    /// None when the file ends before the box type.
+    pub fourcc: Option<String>,
     pub offset: u64,
-    /// The size its header claims.
-    pub size: u64,
-    /// Bytes of it present in the file.
+    pub header_len: u64,
+    /// The size its header claims; None when the file ends before it.
+    pub size: Option<u64>,
+    /// Bytes of it present in the file, fewer than `header_len` when the
+    /// header itself is cut short.
     pub present: u64,
 }
 
@@ -358,8 +361,9 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
             .collect(),
         trailing_bytes: t.trailing_bytes,
         truncated: t.truncated.map(|c| TruncatedBox {
-            fourcc: c.fourcc.to_string(),
+            fourcc: c.fourcc.map(|f| f.to_string()),
             offset: c.offset,
+            header_len: c.header_len,
             size: c.size,
             present: c.present,
         }),
