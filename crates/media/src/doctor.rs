@@ -1037,6 +1037,10 @@ impl Fixes<'_> {
         if self.node_denied {
             return format!("{ADD_TO_RENDER}   (Vulkan opens the GPU through its render node)");
         }
+        // No driver loads for a GPU that isn't passed through.
+        if self.no_gpu_visible {
+            return self.vulkan_driver();
+        }
         if self.distro == Distro::Fedora && self.has("mesa-vulkan-drivers") {
             return "VK_LOADER_DEBUG=error,warn vulkaninfo --summary   (Mesa's Vulkan drivers \
                     are installed: this shows why none loads for the GPU)\n\
@@ -1855,6 +1859,21 @@ mod tests {
             i.fix
                 .starts_with("VK_LOADER_DEBUG=error,warn vulkaninfo --summary"),
             "{i:?}"
+        );
+        // In a VM or container with no GPU passed through, that comes first.
+        let no_node = Env {
+            node_error: Some((ErrorKind::NotFound, "not found".into())),
+            ..installed(&["mesa-vulkan-drivers"])
+        };
+        let i = issues(&r, &no_node)
+            .into_iter()
+            .find(|i| i.what.contains("Vulkan"))
+            .unwrap();
+        assert_eq!(
+            i.fix,
+            "no GPU is visible here: in a VM or container, pass it through first (for \
+             example `--device /dev/dri`)\n\
+             sudo dnf install mesa-vulkan-drivers vulkan-loader   (RADV for AMD, ANV for Intel)"
         );
         // Not installed: install it.
         let i = only(&issues(&r, &Env::default())).clone();
