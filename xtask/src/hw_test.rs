@@ -16,7 +16,9 @@
 //! never reports a result, because its binary did not start or crashed
 //! first, shows up as "did not run" and fails the run. So does a binary
 //! that dies after its tests reported: each binary's exit is judged on its
-//! own, since a skip anywhere already makes `cargo test` fail.
+//! own, since a skip anywhere already makes `cargo test` fail. The list and
+//! the run are read from cargo's and libtest's text output, so cargo runs
+//! with fixed terminal settings rather than the user's.
 //!
 //! The command exits non-zero when the build fails, a Tier 2 test fails or
 //! does not run, or a test binary dies; skips alone are not a failure. The
@@ -40,6 +42,21 @@ const SKIP_MARKER: &str = "TIER2-SKIP:";
 /// `--quick` leaves out tests whose names contain this: debug-build timings
 /// would only mislead.
 const BENCH: &str = "bench_";
+
+/// Cargo and libtest settings that reading their output depends on, over
+/// the user's own (`term.verbose` or `term.quiet` in a cargo config, or the
+/// `CARGO_TERM_*` variables). Verbose cargo prints the test command instead
+/// of `Running <src> (<exe>)`; quiet cargo prints no `Running` lines and
+/// has libtest print one character per test. `RUST_TEST_NOCAPTURE` would
+/// move a failing test's output out of its `---- <name> stdout ----`
+/// section.
+const PLAIN_OUTPUT: [(&str, &str); 5] = [
+    ("CARGO_TERM_VERBOSE", "false"),
+    ("CARGO_TERM_QUIET", "false"),
+    ("CARGO_TERM_COLOR", "never"),
+    ("CARGO_TERM_PROGRESS_WHEN", "never"),
+    ("RUST_TEST_NOCAPTURE", "0"),
+];
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -112,8 +129,8 @@ fn capture_env(program: &str, args: &[&str], env: &[(&str, &str)]) -> Captured {
 /// Like `capture_env`, but stdout and stderr share one pipe, so the text is
 /// in the order it was written. `cargo test` names each test binary on
 /// stderr and the binary prints its results on stdout; only the merged
-/// stream says which binary a result came from.
-fn capture_merged(program: &str, args: &[&str], env: &[(&str, &str)]) -> Captured {
+/// stream says which binary a result came from. Runs in `dir`.
+fn capture_merged(dir: &Path, program: &str, args: &[&str], env: &[(&str, &str)]) -> Captured {
     let cmdline = cmdline(program, args);
     let start = Instant::now();
     let run = || -> std::io::Result<(bool, String)> {
@@ -123,7 +140,7 @@ fn capture_merged(program: &str, args: &[&str], env: &[(&str, &str)]) -> Capture
         let mut child = Command::new(program)
             .args(args)
             .envs(env.iter().copied())
-            .current_dir(workspace_root())
+            .current_dir(dir)
             .stdin(Stdio::null())
             .stdout(writer.try_clone()?)
             .stderr(writer)
@@ -696,6 +713,8 @@ fn merge(
 struct Tier2 {
     /// `cargo test -- --ignored --list`: what should run.
     list: Captured,
+    /// The tests in each binary, from the list, by report name.
+    listed: BTreeMap<String, Vec<String>>,
     run: Captured,
     /// Each test binary's part of the run, by report name.
     binaries: BTreeMap<String, BinaryRun>,
@@ -724,6 +743,7 @@ impl Tier2 {
         let results = merge(&listed, &binaries, quick);
         Tier2 {
             list,
+            listed,
             run,
             binaries,
             results,
@@ -788,6 +808,11 @@ impl Tier2 {
         let mut p = Vec::new();
         if !self.list.ok {
             p.push("listing the Tier 2 tests failed, so some may be missing".to_string());
+        } else if self.listed.is_empty() {
+            // Then cargo's output was not what this module reads.
+            p.push("the listing found no test binaries".to_string());
+        } else if self.listed.values().all(Vec::is_empty) {
+            p.push("the listing found no Tier 2 tests".to_string());
         }
         let failed = self.count(|o| matches!(o, Outcome::Failed(_)));
         if failed > 0 {
@@ -831,9 +856,33 @@ impl Tier2 {
     }
 }
 
-/// Lists the Tier 2 tests, runs them all, and pairs every listed test with
-/// its outcome.
+/// Lists the workspace's Tier 2 tests, runs them all with what they need
+/// from hw-test, and pairs every listed test with its outcome.
 fn run_tier2(quick: bool, samples: &Path, bench_out: &Path) -> Tier2 {
+    // A stale file would mix in another run's numbers.
+    if let Err(e) = std::fs::remove_file(bench_out)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("warning: could not clear {}: {e}", bench_out.display());
+    }
+    let samples_s = samples.to_string_lossy().into_owned();
+    let bench_s = bench_out.to_string_lossy().into_owned();
+    list_and_run(
+        &workspace_root(),
+        quick,
+        &[
+            ("SPHERECUT_TIER2", "1"),
+            ("SPHERECUT_SAMPLES", &samples_s),
+            ("SPHERECUT_BENCH_OUT", &bench_s),
+        ],
+    )
+}
+
+/// Lists the ignored tests of the cargo workspace in `dir`, runs them, and
+/// pairs every listed test with its outcome. Every cargo command gets
+/// `env`, so that they all build the same way, and [`PLAIN_OUTPUT`].
+fn list_and_run(dir: &Path, quick: bool, env: &[(&str, &str)]) -> Tier2 {
+    let env: Vec<(&str, &str)> = env.iter().chain(&PLAIN_OUTPUT).copied().collect();
     // A skip is a test failure to cargo; without --no-fail-fast it stops
     // after the first binary that has one.
     let mut cargo = vec!["test", "--workspace", "--no-fail-fast", "--color", "never"];
@@ -845,35 +894,19 @@ fn run_tier2(quick: bool, samples: &Path, bench_out: &Path) -> Tier2 {
     // package each one is from.
     let mut args = cargo.clone();
     args.extend(["--no-run", "--message-format=json-render-diagnostics"]);
-    let packages = test_packages(&capture_merged("cargo", &args, &[]).text);
+    let packages = test_packages(&capture_merged(dir, "cargo", &args, &env).text);
     let mut args = cargo.clone();
-    args.extend(["--", "--ignored", "--list"]);
-    let list = capture_merged("cargo", &args, &[]);
+    args.extend(["--", "--ignored", "--list", "--format", "pretty"]);
+    let list = capture_merged(dir, "cargo", &args, &env);
 
     eprintln!("==> running Tier 2 tests");
     let mut args = cargo;
-    args.extend(["--", "--ignored", "--test-threads=1"]);
+    args.extend(["--", "--ignored", "--test-threads=1", "--format", "pretty"]);
     if quick {
         args.extend(["--skip", BENCH]);
     }
-    // A stale file would mix in another run's numbers.
-    if let Err(e) = std::fs::remove_file(bench_out)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        eprintln!("warning: could not clear {}: {e}", bench_out.display());
-    }
-    let samples_s = samples.to_string_lossy().into_owned();
-    let bench_s = bench_out.to_string_lossy().into_owned();
-    let run = capture_merged(
-        "cargo",
-        &args,
-        &[
-            ("SPHERECUT_TIER2", "1"),
-            ("SPHERECUT_SAMPLES", &samples_s),
-            ("SPHERECUT_BENCH_OUT", &bench_s),
-        ],
-    );
-    Tier2::new(list, run, &packages, &workspace_root(), quick)
+    let run = capture_merged(dir, "cargo", &args, &env);
+    Tier2::new(list, run, &packages, dir, quick)
 }
 
 /// Cargo's target directory as `cargo metadata` gives it, which follows
@@ -1808,9 +1841,11 @@ error: test failed, to rerun pass `-p spherecut-synth --test tier2_hw_decode`
             .into_iter()
             .map(|(bin, b)| (bin.to_string(), b))
             .collect();
-        let results = merge(&listed(list), &binaries, true);
+        let listed = listed(list);
+        let results = merge(&listed, &binaries, true);
         Tier2 {
             list: captured(true),
+            listed,
             run: captured(run_ok),
             binaries,
             results,
@@ -1886,6 +1921,16 @@ error: test failed, to rerun pass `-p spherecut-synth --test tier2_hw_decode`
     }
 
     #[test]
+    fn an_empty_listing_fails_the_run() {
+        // Cargo output this module could not read must not look clean.
+        let t = tier2(true, &[], vec![]);
+        assert_eq!(t.problems(), ["the listing found no test binaries"]);
+        assert!(t.counts(false).contains("(0 tests)"));
+        let t = tier2(true, &[("a", &[]), ("b", &[])], vec![]);
+        assert_eq!(t.problems(), ["the listing found no Tier 2 tests"]);
+    }
+
+    #[test]
     fn a_skip_does_not_hide_another_binarys_failure() {
         // A skip makes cargo fail, but only explains its own binary.
         let mut crashed = ran(&[("passes", Outcome::Passed)]);
@@ -1929,5 +1974,170 @@ error: test failed, to rerun pass `-p spherecut-synth --test tier2_hw_decode`
             Some("/a/b \"q\"\\cé")
         );
         assert_eq!(json_str_field(json, "workspace_root"), None);
+    }
+
+    /// A throwaway cargo workspace in the temp directory, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str, files: &[(&str, &str)]) -> Scratch {
+            let dir =
+                std::env::temp_dir().join(format!("spherecut-xtask-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            for (rel, text) in files {
+                let p = dir.join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, text).unwrap();
+            }
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Two packages with a `tests/tier2.rs` each, and two binaries that
+    /// print what libtest would and then die. They exit with status 3
+    /// rather than abort, so that no core file is left behind.
+    const PROBE: &[(&str, &str)] = &[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"3\"\n",
+        ),
+        (
+            "a/Cargo.toml",
+            r#"[package]
+name = "probe-a"
+version = "0.0.0"
+edition = "2024"
+
+[[test]]
+name = "dies_after_summary"
+harness = false
+
+[[test]]
+name = "says_ok_then_dies"
+harness = false
+"#,
+        ),
+        ("a/src/lib.rs", ""),
+        (
+            "a/tests/tier2.rs",
+            "#[test]\n#[ignore]\nfn same_name() {}\n\n#[test]\nfn tier1() {}\n",
+        ),
+        (
+            "a/tests/dies_after_summary.rs",
+            r#"fn main() {
+    if std::env::args().any(|a| a == "--list") {
+        println!("passes: test\n\n1 test, 0 benchmarks");
+        return;
+    }
+    println!("\nrunning 1 test\ntest passes ... ok\n");
+    println!("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n");
+    std::process::exit(3);
+}
+"#,
+        ),
+        (
+            "a/tests/says_ok_then_dies.rs",
+            r#"use std::io::Write;
+
+fn main() {
+    if std::env::args().any(|a| a == "--list") {
+        println!("dies: test\n\n1 test, 0 benchmarks");
+        return;
+    }
+    print!("\nrunning 1 test\ntest dies ... ");
+    std::io::stdout().flush().unwrap();
+    eprintln!("\nok");
+    std::process::exit(3);
+}
+"#,
+        ),
+        (
+            "b/Cargo.toml",
+            "[package]\nname = \"probe-b\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        ),
+        ("b/src/lib.rs", ""),
+        (
+            "b/tests/tier2.rs",
+            "#[test]\n#[ignore]\nfn same_name() {\n    panic!(\"TIER2-SKIP: nothing here\");\n}\n",
+        ),
+    ];
+
+    #[test]
+    fn reads_real_cargo_output_whatever_the_users_terminal_settings() {
+        let s = Scratch::new("hw-test", PROBE);
+        let target = s.0.join("target").to_string_lossy().into_owned();
+        let base = [
+            ("CARGO_TARGET_DIR", target.as_str()),
+            ("CARGO_NET_OFFLINE", "true"),
+            ("CARGO_INCREMENTAL", "0"),
+        ];
+        // The user's cargo config, or variables hw-test inherits.
+        let users: [(&str, &[(&str, &str)]); 3] = [
+            ("[term]\nverbose = true\n", &[]),
+            ("[term]\nquiet = true\n", &[]),
+            (
+                "",
+                &[("CARGO_TERM_VERBOSE", "true"), ("RUST_TEST_NOCAPTURE", "1")],
+            ),
+        ];
+        for (config, user_env) in users {
+            let why = format!("config {config:?}, env {user_env:?}");
+            std::fs::create_dir_all(s.0.join(".cargo")).unwrap();
+            std::fs::write(s.0.join(".cargo/config.toml"), config).unwrap();
+            let env: Vec<(&str, &str)> = base.iter().chain(user_env).copied().collect();
+
+            // The setting does change cargo's output when left alone.
+            let plain = capture_merged(
+                &s.0,
+                "cargo",
+                &["test", "--workspace", "--", "--ignored", "--list"],
+                &env,
+            );
+            assert!(plain.ok, "{why}: {}", plain.text);
+            assert!(
+                !plain.text.contains("     Running tests/tier2.rs ("),
+                "{why}: {}",
+                plain.text
+            );
+
+            let t = list_and_run(&s.0, true, &env);
+            assert!(t.list.ok, "{why}: {}", t.list.text);
+            let names: Vec<&str> = t.results.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(
+                names,
+                [
+                    "dies_after_summary::passes",
+                    "probe-a/tier2::same_name",
+                    "probe-b/tier2::same_name",
+                    "says_ok_then_dies::dies"
+                ],
+                "{why}: {}",
+                t.run.text
+            );
+            assert_eq!(t.results[0].1, Outcome::Passed, "{why}");
+            assert_eq!(t.results[1].1, Outcome::Passed, "{why}");
+            assert_eq!(
+                t.results[2].1,
+                Outcome::Skipped("nothing here".into()),
+                "{why}"
+            );
+            assert!(matches!(t.results[3].1, Outcome::Failed(_)), "{why}");
+            assert_eq!(
+                t.problems(),
+                [
+                    "1 Tier 2 test(s) failed",
+                    "`dies_after_summary` exited abnormally after its tests finished (exit status: 3)",
+                    "`says_ok_then_dies` did not finish (exit status: 3)"
+                ],
+                "{why}: {}",
+                t.run.text
+            );
+        }
     }
 }
