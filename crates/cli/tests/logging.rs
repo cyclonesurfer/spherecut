@@ -47,11 +47,15 @@ fn ffmpeg_messages_are_quiet_by_default_and_shown_on_request() {
     assert!(ffmpeg_lines(&quiet).is_empty(), "{quiet}");
     assert!(!quiet.contains("moov atom not found"), "{quiet}");
 
+    // Naming the target, or a global level above the default, shows them.
     for v in [
         "ffmpeg=debug",
         "ffmpeg=error",
+        "warn,ffmpeg=warn",
         "debug",
+        "info",
         "info,spherecut_media=trace",
+        "warn,debug",
     ] {
         let loud = probe_stderr(&f, Some(v));
         assert!(
@@ -63,10 +67,31 @@ fn ffmpeg_messages_are_quiet_by_default_and_shown_on_request() {
         assert!(loud.contains("error: cannot open"), "{loud}");
     }
 
-    // Asking for our own debug output leaves FFmpeg's out.
-    let ours = probe_stderr(&f, Some("spherecut_media=debug"));
-    assert!(ours.contains("DEBUG spherecut_media: "), "{ours}");
-    assert!(ffmpeg_lines(&ours).is_empty(), "{ours}");
+    // The default level, or a quieter one, leaves them out as the default
+    // does; the last global level counts, as in EnvFilter.
+    for v in ["warn", "error", "debug,warn", "off"] {
+        let still = probe_stderr(&f, Some(v));
+        assert!(
+            ffmpeg_lines(&still).is_empty(),
+            "SPHERECUT_LOG={v}: {still}"
+        );
+    }
+
+    // Asking for our own debug output leaves FFmpeg's out, stray commas
+    // included.
+    for v in [
+        "spherecut_media=debug",
+        "spherecut_media=debug,",
+        ",spherecut_media=debug",
+        " , spherecut_media=debug",
+    ] {
+        let ours = probe_stderr(&f, Some(v));
+        assert!(
+            ours.contains("DEBUG spherecut_media: "),
+            "SPHERECUT_LOG={v}: {ours}"
+        );
+        assert!(ffmpeg_lines(&ours).is_empty(), "SPHERECUT_LOG={v}: {ours}");
+    }
 
     // A filter that doesn't parse is reported, then the default applies.
     let bad = probe_stderr(&f, Some("ffmpeg=loud"));
