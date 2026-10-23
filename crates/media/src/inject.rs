@@ -383,8 +383,10 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
         let start = rel(entry);
         let fixed_end = start + entry.header_len as usize + entry.payload.len();
         let mut new_entry = moov_bytes[start..fixed_end].to_vec();
-        // QuickTime's terminator stays last: FFmpeg reads nothing after it.
-        // Mp4Tree::damage allows a zero type only there.
+        // QuickTime's terminator stays last, the only place Mp4Tree::damage
+        // allows a zero type. As eight zero bytes it has size 0 and hides
+        // whatever follows it from FFmpeg. Bytes after the last whole child
+        // (a four-byte zero tail) are dropped.
         let mut terminator: &[u8] = &[];
         for c in &entry.children {
             let cs = rel(c);

@@ -2182,25 +2182,44 @@ pub(crate) mod tests {
     fn a_zeroed_edit_list_is_damage() {
         // FFmpeg skips an `elst` whose header was zeroed, and the track then
         // starts at the wrong time. `edts`, `dinf`, `mvex` and `tref` hold
-        // only registered types.
+        // only registered types, so the same goes for their children.
         let f = minimal();
-        let trak = f.windows(4).position(|w| w == b"trak").unwrap() - 4;
-        let edts = bx(
-            b"edts",
-            &full(b"elst", 0, 0, &words(&[1, 1000, 2000, 0x10000])),
+        let elst = full(b"elst", 0, 0, &words(&[1, 1000, 2000, 0x10000]));
+        let dref = full(
+            b"dref",
+            0,
+            0,
+            &cat(&[words(&[1]), full(b"url ", 0, 1, &[])]),
         );
-        let g = insert(&f, trak + 8, &edts, &[b"trak", b"moov"]);
-        assert!(damage_of(g.clone()).is_empty(), "{:?}", damage_of(g));
-        let at = trak + 16;
-        for range in [at + 4..at + 8, at..at + edts.len() - 8] {
-            let mut h = g.clone();
-            h[range].fill(0);
-            assert_eq!(
-                damage_of(h),
-                [format!(
-                    "box `\\x00\\x00\\x00\\x00` at offset {at} in `edts` has a type that is not text, so its header is damaged"
-                )]
-            );
+        let trex = full(b"trex", 0, 0, &words(&[1, 1, 0, 0, 0]));
+        let chap = bx(b"chap", &words(&[2]));
+        let cases = [
+            (b"trak", vec![b"trak", b"moov"], b"edts", elst),
+            (
+                b"minf",
+                vec![b"minf", b"mdia", b"trak", b"moov"],
+                b"dinf",
+                dref,
+            ),
+            (b"moov", vec![b"moov"], b"mvex", trex),
+            (b"trak", vec![b"trak", b"moov"], b"tref", chap),
+        ];
+        for (parent, around, container, child) in cases {
+            let p = f.windows(4).position(|w| w == parent).unwrap() - 4;
+            let g = insert(&f, p + 8, &bx(container, &child), &around);
+            assert!(damage_of(g.clone()).is_empty(), "{:?}", damage_of(g));
+            let at = p + 16;
+            for range in [at + 4..at + 8, at..at + child.len()] {
+                let mut h = g.clone();
+                h[range].fill(0);
+                assert_eq!(
+                    damage_of(h),
+                    [format!(
+                        "box `\\x00\\x00\\x00\\x00` at offset {at} in `{}` has a type that is not text, so its header is damaged",
+                        FourCc(*container)
+                    )]
+                );
+            }
         }
     }
 
