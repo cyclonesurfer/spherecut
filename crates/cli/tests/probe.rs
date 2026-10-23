@@ -708,8 +708,13 @@ fn files_without_video_or_audio_fail() {
 
 #[test]
 fn a_missing_file_says_why_once() {
-    let missing = tmp("missing").join("nothing-here.mp4");
+    // In a directory that is not there either, so there is nothing to
+    // remove afterwards.
+    let missing = std::env::temp_dir()
+        .join(format!("spherecut-cli-{}-missing", std::process::id()))
+        .join("nothing-here.mp4");
     let out = probe(&[&missing]);
+    assert!(!missing.parent().unwrap().exists());
     assert!(!out.status.success());
     let stderr = text(&out.stderr);
     assert_eq!(stderr.matches("No such file").count(), 1, "{stderr}");
