@@ -1,0 +1,23 @@
+   Compiling spherecut-media v0.1.0 (~/spherecut/crates/media)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.64s
+     Running tests/tier2_samples.rs (target/release/deps/tier2_samples-6ac2acfab48b1dfd)
+
+running 3 tests
+test bench_samples_realtime_decode ... BENCH Insta360DualFisheye 2× 1920x1920 @ 119.88: VA-API decode	1.70	× real time
+BENCH Insta360DualFisheye 2× 1920x1920 @ 119.88: software decode	1.07	× real time
+BENCH Insta360DualFisheye 2× 2880x2880 @ 59.94: VA-API decode	1.95	× real time
+BENCH Insta360DualFisheye 2× 2880x2880 @ 59.94: software decode	0.95	× real time
+BENCH Insta360DualFisheye 2× 3840x3840 @ 25.00: VA-API decode	2.55	× real time
+BENCH Insta360DualFisheye 2× 3840x3840 @ 25.00: software decode	0.79	× real time
+BENCH Insta360DualFisheye 2× 3840x3840 @ 29.97: VA-API decode	1.10	× real time
+BENCH Insta360DualFisheye 2× 3840x3840 @ 29.97: software decode	0.67	× real time
+BENCH LowResCompanion 1× 1664x832 @ 25.00: VA-API decode	47.31	× real time
+BENCH LowResCompanion 1× 1664x832 @ 25.00: software decode	37.62	× real time
+BENCH LowResCompanion 1× 1664x832 @ 29.97: VA-API decode	60.91	× real time
+BENCH LowResCompanion 1× 1664x832 @ 29.97: software decode	44.49	× real time
+ok
+test samples_probe_cleanly ... ok
+test samples_vaapi_decode_matches_software ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 117.98s
+

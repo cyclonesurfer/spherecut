@@ -39,7 +39,37 @@ Current benchmarks:
 
 ### huginn (Radeon 8060S, Fedora 44)
 
-No report yet.
+Report: [`hw-reports/huginn-a9128cf8df-dirty.md`](../hw-reports/huginn-a9128cf8df-dirty.md)
+at a9128cf (the `-dirty` is untracked scratch files only, no source
+changes), 2026-10-22. Mesa 26.2.5 (radeonsi from
+`mesa-va-drivers-freeworld`, RADV), FFmpeg 8.1.3 (RPM Fusion), rustc
+1.99.0. The GPU was idle for the whole run: nothing else was loaded on it.
+
+Tier 2: 7 passed, 0 failed, 1 skipped. `vulkan_hevc_main_matches_software`
+skipped: Vulkan Video HEVC decode unavailable ("decoding: Operation not
+permitted"). `spherecut doctor`: no problems found.
+
+| Benchmark | VA-API | Software |
+|---|---:|---:|
+| X5 2× 1920² @ 119.88 | 1.87 × real time | 1.08 × real time |
+| X5 2× 2880² @ 59.94 | 2.00 × real time | 0.96 × real time |
+| X5 2× 3840² @ 25.00 | 2.69 × real time | 0.80 × real time |
+| X5 2× 3840² @ 29.97 | 1.18 × real time | 0.67 × real time |
+| LRV 1× 1664×832 @ 25.00 | 45.37 × real time | 38.20 × real time |
+| LRV 1× 1664×832 @ 29.97 | 56.93 × real time | 47.77 × real time |
+| 3840×1920 HEVC 8-bit, synthetic | 284.57 fps | 687.46 fps |
+| 5760×2880 HEVC 8-bit, synthetic | 109.96 fps | 294.91 fps |
+
+A second run of both test binaries straight after
+([synth](../hw-reports/huginn-tier2-synth.log),
+[samples](../hw-reports/huginn-tier2-samples.log)) matched within about
+10%, except VA-API 5760×2880, which fell from 109.96 to 67.30 fps on an
+idle GPU. One run per benchmark is not enough to trust that number.
+
+Every X5 mode decodes faster than real time on VA-API and slower than real
+time in software, except 1920² at 1.08×. 3840² at 29.97 is the tightest
+case, at 1.18×. On the synthetic clips, software decode on the 32 cores beats
+VA-API including its copy to RAM.
 
 ### odin (RX 7600, Fedora)
 

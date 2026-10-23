@@ -1,0 +1,28 @@
+FFmpeg 8.1.3
+  libavcodec 62.28.103, libavformat 62.12.103, libavutil 60.26.103, libswresample 6.3.103, libswscale 9.5.103
+  hardware device types: vdpau, cuda, vaapi, qsv, drm, opencl, vulkan, amf
+
+Decoders
+  h264       yes  (hw: cuda, vaapi, vdpau, vulkan)
+  hevc       yes  (hw: cuda, vaapi, vdpau, vulkan)
+  av1        yes  (hw: cuda, vaapi, vdpau, vulkan)
+  prores     yes
+  aac        yes
+  opus       yes
+  pcm_s16le  yes
+
+Encoders
+  libx264    yes
+  libx265    yes
+  libsvtav1  yes
+  h264_vaapi yes
+  hevc_vaapi yes
+  av1_vaapi  yes
+  prores_ks  yes
+  aac        yes
+
+Hardware devices
+  vaapi   /dev/dri/renderD128    ok
+  vulkan  (default)              ok
+
+No problems found.
