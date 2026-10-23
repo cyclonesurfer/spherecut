@@ -16,8 +16,9 @@
 //! whether RPM Fusion needs enabling. Doctor never installs or changes
 //! anything.
 //!
-//! The GUI runs the same check at startup so a missing HEVC decoder is
-//! reported up front, not as a decode error halfway through a project.
+//! The GUI (from M1) will run the same check at startup, so that a missing
+//! HEVC decoder is reported up front, not as a decode error halfway
+//! through a project.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;

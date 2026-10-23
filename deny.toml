@@ -34,7 +34,7 @@ allow = [
 confidence-threshold = 0.9
 unused-allowed-license = "allow"
 # WTFPL is GPL-compatible (FSF license list); allowed only for the FFmpeg
-# bindings. See DECISIONS.md "FFmpeg bindings".
+# bindings. See DECISIONS.md D2, "FFmpeg through ffmpeg-next".
 exceptions = [
     { crate = "ffmpeg-next", allow = ["WTFPL"] },
     { crate = "ffmpeg-sys-next", allow = ["WTFPL"] },
@@ -60,6 +60,12 @@ deny = [
     { crate = "wry", reason = "no webviews" },
     { crate = "tauri", reason = "no webviews" },
     { crate = "webkit2gtk", reason = "no webviews" },
+    { crate = "v8", reason = "no JavaScript" },
+    { crate = "deno_core", reason = "no JavaScript" },
+    { crate = "boa_engine", reason = "no JavaScript" },
+    { crate = "rquickjs", reason = "no JavaScript" },
+    { crate = "quick-js", reason = "no JavaScript" },
+    { crate = "mozjs", reason = "no JavaScript" },
 ]
 
 [sources]

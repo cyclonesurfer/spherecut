@@ -59,6 +59,73 @@ mod c {
             opts: *mut AVDictionary,
             flags: c_int,
         ) -> c_int;
+        #[cfg(ffmpeg_7_1)]
+        pub fn avcodec_get_supported_config(
+            avctx: *const ffmpeg_sys_next::AVCodecContext,
+            codec: *const AVCodec,
+            config: c_int,
+            flags: std::ffi::c_uint,
+            out_configs: *mut *const std::ffi::c_void,
+            out_num_configs: *mut c_int,
+        ) -> c_int;
+    }
+}
+
+/// Planar 32-bit float, the only sample format `Mp4Writer` sends.
+pub(crate) const SAMPLE_FMT_FLTP: c_int = sys::AVSampleFormat::AV_SAMPLE_FMT_FLTP as c_int;
+
+/// The sample formats encoder `codec` takes, as FFmpeg's ints, or `None`
+/// when it doesn't say. Ints, because a newer FFmpeg may list formats our
+/// headers lack.
+pub(crate) fn sample_formats(codec: &ff::Codec) -> Option<Vec<c_int>> {
+    // SAFETY: the codec is a static AVCodec FFmpeg owns, and its list is
+    // static too.
+    unsafe { supported_sample_formats(codec.as_ptr()) }
+}
+
+#[cfg(ffmpeg_7_1)]
+unsafe fn supported_sample_formats(codec: *const sys::AVCodec) -> Option<Vec<c_int>> {
+    let mut list: *const c_void = std::ptr::null();
+    let mut n: c_int = 0;
+    // SAFETY: a live codec and out-pointers to locals; a NULL context asks
+    // for the defaults. The list FFmpeg returns is static.
+    let ret = unsafe {
+        c::avcodec_get_supported_config(
+            std::ptr::null(),
+            codec,
+            sys::AVCodecConfig::AV_CODEC_CONFIG_SAMPLE_FORMAT as c_int,
+            0,
+            &mut list,
+            &mut n,
+        )
+    };
+    if ret < 0 || list.is_null() {
+        return None;
+    }
+    let n = usize::try_from(n).ok()?;
+    // SAFETY: FFmpeg says the list holds `n` sample formats, which are C
+    // ints; they are copied out as ints.
+    Some(unsafe { std::slice::from_raw_parts(list.cast::<c_int>(), n) }.to_vec())
+}
+
+#[cfg(not(ffmpeg_7_1))]
+unsafe fn supported_sample_formats(codec: *const sys::AVCodec) -> Option<Vec<c_int>> {
+    // SAFETY: a live codec; `sample_fmts` is NULL or a static list ended by
+    // AV_SAMPLE_FMT_NONE, read as ints.
+    unsafe {
+        let mut p = (*codec).sample_fmts;
+        if p.is_null() {
+            return None;
+        }
+        let mut out = Vec::new();
+        loop {
+            let v = enum_int(p);
+            if v == sys::AVSampleFormat::AV_SAMPLE_FMT_NONE as c_int {
+                return Some(out);
+            }
+            out.push(v);
+            p = p.add(1);
+        }
     }
 }
 

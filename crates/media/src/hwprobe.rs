@@ -12,9 +12,11 @@
 //! ("No support for codec hevc profile 1."), so [`capture_ffmpeg_log`]
 //! keeps it.
 //!
-//! As in `ffi`, C enums are read as `int`s, never as bindgen's Rust enums,
-//! and the few Vulkan structs needed are declared here with only the
-//! fields that are read spelled out.
+//! As in `ffi`, C enums FFmpeg hands back are read as `int`s, never as
+//! bindgen's Rust enums. (ffmpeg-next's encoder and frame setters still
+//! build enums from values we chose; DECISIONS.md D11.) The few Vulkan
+//! structs needed are declared here with only the fields that are read
+//! spelled out.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::{Arc, Mutex, PoisonError};

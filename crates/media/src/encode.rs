@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use spherecut_core::{FrameRate, Rational};
 use thiserror::Error;
 
+use crate::ffi;
 use crate::inject::{self, EntryEdit, InjectError, TempFile, follow_links};
 use crate::{ff, init};
 
@@ -196,9 +197,7 @@ fn audio_encoder(a: &AudioSettings) -> Result<ff::Codec, EncodeError> {
         .ok_or_else(|| EncodeError::NoEncoder(a.encoder.clone()))?;
     // We only send planar float; say so rather than let the encoder fail to
     // open with EINVAL (libopus takes packed).
-    if let Some(mut formats) = codec.audio().ok().and_then(|c| c.formats())
-        && !formats.any(|f| f == PLANAR_F32)
-    {
+    if ffi::sample_formats(&codec).is_some_and(|f| !f.contains(&ffi::SAMPLE_FMT_FLTP)) {
         return Err(EncodeError::Invalid(format!(
             "audio encoder `{}` does not take planar float samples",
             a.encoder

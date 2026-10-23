@@ -1,8 +1,8 @@
 //! Spherical projection math, on the CPU, in `f64`.
 //!
-//! The WGSL shaders in the render crate implement the same functions in
-//! `f32`; this crate is the reference they are tested against, and is what
-//! the synthetic test-media generator uses to draw known scenes.
+//! The WGSL shaders of the render crate (from M1) will implement the same
+//! functions in `f32`, tested against this crate. The synthetic test-media
+//! generator uses it to draw known scenes.
 //!
 //! # Conventions
 //!

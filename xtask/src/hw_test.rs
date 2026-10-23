@@ -60,7 +60,7 @@ const PLAIN_OUTPUT: [(&str, &str); 5] = [
 
 #[derive(clap::Args)]
 pub struct Args {
-    /// Directory with camera samples (default: ./samples).
+    /// Directory with camera samples (default: `samples/` in the workspace root).
     #[arg(long)]
     samples: Option<PathBuf>,
     /// Build in debug mode and skip the benchmarks (environment and tests only).

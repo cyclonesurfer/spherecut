@@ -1,6 +1,6 @@
 [package]
 name = "spherecut-media"
-description = "Media backend trait, FFmpeg backend, probing, MP4 metadata boxes"
+description = "FFmpeg decode and encode, hardware devices, probing, doctor checks, MP4 metadata boxes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

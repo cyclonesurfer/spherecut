@@ -1,6 +1,6 @@
 [package]
 name = "spherecut-core"
-description = "Project model, exact time, keyframes and undo"
+description = "Core types: exact rational time and frame rates (the project model, keyframes and undo come later)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
