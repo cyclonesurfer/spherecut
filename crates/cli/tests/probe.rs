@@ -341,6 +341,28 @@ fn a_reader_that_goes_away_is_not_an_error() {
 }
 
 #[test]
+fn a_closed_stderr_keeps_the_exit_code() {
+    // `spherecut probe *.mp4 2>&1 | head`: the errors have nowhere to go,
+    // but the run still fails, rather than panicking.
+    use std::process::Stdio;
+    let dir = tmp("stderr-pipe");
+    let (good, bad) = media(&dir);
+    let mut args: Vec<&Path> = vec![&good; 40];
+    args.extend(bad.iter().map(PathBuf::as_path));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .arg("probe")
+        .args(&args)
+        .env_remove("SPHERECUT_LOG")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stderr.take());
+    assert_eq!(child.wait().unwrap().code(), Some(1));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn a_codec_ffmpeg_does_not_know_is_a_warning() {
     // A sample entry type FFmpeg has no codec for may be a real codec it
     // lacks, so the file is not called damaged, but the report says the

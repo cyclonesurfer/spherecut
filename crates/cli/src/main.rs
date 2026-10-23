@@ -44,7 +44,7 @@ fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("error: {e:#}");
+            to_stderr(&format!("error: {e:#}\n"));
             ExitCode::FAILURE
         }
     }
@@ -62,7 +62,7 @@ fn init_logging() {
     let filter = match std::env::var("SPHERECUT_LOG") {
         Ok(v) if !v.trim().is_empty() => {
             EnvFilter::try_new(log_directives(&v)).unwrap_or_else(|e| {
-                eprintln!("warning: ignoring SPHERECUT_LOG={v}: {e}");
+                to_stderr(&format!("warning: ignoring SPHERECUT_LOG={v}: {e}\n"));
                 EnvFilter::new(DEFAULT_LOG)
             })
         }
@@ -131,7 +131,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                                 1 => " (and 1 more problem)".into(),
                                 n => format!(" (and {n} more problems)"),
                             };
-                            eprintln!("error: {} is damaged: {first}{more}", f.display());
+                            to_stderr(&format!(
+                                "error: {} is damaged: {first}{more}\n",
+                                f.display()
+                            ));
                         } else if !r
                             .streams
                             .iter()
@@ -139,11 +142,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         {
                             // FFmpeg opens text files as subtitles or lyrics.
                             failed = true;
-                            eprintln!(
-                                "error: {} has no video or audio stream; FFmpeg reads it as {}",
+                            to_stderr(&format!(
+                                "error: {} has no video or audio stream; FFmpeg reads it as {}\n",
                                 f.display(),
                                 r.container.format_long
-                            );
+                            ));
                         }
                         reports.push(serde_json::to_value(&r)?);
                     }
@@ -152,9 +155,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         // FFmpeg's own word on why it could not open the
                         // file, under ours.
                         if json {
-                            eprintln!("error: {e}");
+                            to_stderr(&format!("error: {e}\n"));
                         } else {
-                            eprint!("error: {e}\n{}", show::ffmpeg_lines(&e.ffmpeg_log));
+                            to_stderr(&format!(
+                                "error: {e}\n{}",
+                                show::ffmpeg_lines(&e.ffmpeg_log)
+                            ));
                         }
                         // Lossy, as in the reports: Linux file names need
                         // not be UTF-8.
@@ -198,6 +204,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             })
         }
     }
+}
+
+/// Write `s` to stderr. Errors are ignored: with nowhere to report them,
+/// a closed stderr (`spherecut probe *.mp4 2>&1 | head`) must not turn the
+/// exit code into a panic's.
+fn to_stderr(s: &str) {
+    use std::io::Write;
+    let _ = std::io::stderr().lock().write_all(s.as_bytes());
 }
 
 /// Write `s` to stdout. Returns false when the reader has gone away, as in
