@@ -45,7 +45,8 @@ impl Pattern {
 /// Display-referred RGB in `[0, 1]`.
 pub type Rgb = [f64; 3];
 
-/// Axis marker colors, used by orientation tests.
+/// Axis marker colors, used by orientation tests. Each disc also carries
+/// its letter from [`AXIS_LABELS`]; the centre of the disc stays its color.
 pub const AXIS_MARKERS: [(DVec3, Rgb); 6] = [
     (DVec3::NEG_Z, [1.0, 0.0, 0.0]), // front: red
     (DVec3::X, [0.0, 1.0, 0.0]),     // right: green
@@ -56,6 +57,66 @@ pub const AXIS_MARKERS: [(DVec3, Rgb); 6] = [
 ];
 /// Angular radius of the axis discs.
 pub const AXIS_MARKER_RADIUS: f64 = 8.0 * std::f64::consts::PI / 180.0;
+
+/// The letter in each axis disc, in [`AXIS_MARKERS`] order.
+pub const AXIS_LABELS: [char; 6] = ['F', 'R', 'B', 'L', 'U', 'D'];
+
+/// Which way is up in each label, seen from the centre of the sphere. The
+/// side labels are upright; up and down read as they do after tilting the
+/// head from the front, so their tops point back and front.
+pub const AXIS_LABEL_UP: [DVec3; 6] = [
+    DVec3::Y,
+    DVec3::Y,
+    DVec3::Y,
+    DVec3::Y,
+    DVec3::Z,
+    DVec3::NEG_Z,
+];
+
+/// Side of a label cell, as the tangent of its angle at the sphere's centre
+/// (about 1.6°). A 5×7-cell glyph then fits inside its disc.
+pub const AXIS_LABEL_CELL: f64 = 0.028;
+
+/// 5×7 glyphs for [`AXIS_LABELS`], row by row from the top, side by side.
+/// The centre cell (row 3, column 2) is empty in all six, so a marker's
+/// centre direction keeps the marker color.
+const AXIS_GLYPHS: [[&str; 6]; 7] = [
+    //  F        R        B        L        U        D
+    ["#####", "####.", "####.", "#....", "#...#", "###.."],
+    ["#....", "#...#", "#...#", "#....", "#...#", "#..#."],
+    ["####.", "####.", "####.", "#....", "#...#", "#...#"],
+    ["#....", "##...", "#...#", "#....", "#...#", "#...#"],
+    ["#....", "#.#..", "#...#", "#....", "#...#", "#...#"],
+    ["#....", "#..#.", "#...#", "#....", "#...#", "#..#."],
+    ["#....", "#...#", "####.", "#####", ".###.", "###.."],
+];
+
+/// The ink of a label: black on light discs, white on dark ones.
+pub fn axis_label_ink(disc: Rgb) -> Rgb {
+    let luma = 0.2126 * disc[0] + 0.7152 * disc[1] + 0.0722 * disc[2];
+    if luma > 0.5 { [0.0; 3] } else { [1.0; 3] }
+}
+
+/// The label cell `(column, row)` that `d` falls in for marker `i`, given
+/// `along = d·axis > 0`. Gnomonic coordinates: plain arithmetic, so the
+/// glyphs render the same everywhere.
+pub fn axis_label_cell(i: usize, d: DVec3, along: f64) -> Option<(usize, usize)> {
+    let (axis, _) = AXIS_MARKERS.get(i)?;
+    let up = AXIS_LABEL_UP[i];
+    let right = axis.cross(up);
+    let x = d.dot(right) / along / AXIS_LABEL_CELL + 2.5;
+    let y = 3.5 - d.dot(up) / along / AXIS_LABEL_CELL;
+    ((0.0..5.0).contains(&x) && (0.0..7.0).contains(&y)).then_some((x as usize, y as usize))
+}
+
+/// Whether cell `(column, row)` of marker `i`'s glyph is inked.
+pub fn axis_label_inked(i: usize, (col, row): (usize, usize)) -> bool {
+    AXIS_GLYPHS
+        .get(row)
+        .and_then(|r| r.get(i))
+        .and_then(|g| g.as_bytes().get(col))
+        == Some(&b'#')
+}
 
 /// Frame counter: bit `i` is a square centred at latitude −20°,
 /// longitude `FRAME_CODE_LON0 + i·FRAME_CODE_STEP` degrees. White = 1.
@@ -90,9 +151,13 @@ pub fn color(pattern: Pattern, d: DVec3, frame: u32) -> Rgb {
             // Dot-product tests: cheaper than angles, and this is the
             // innermost loop of every synthetic frame.
             let cos_axis = AXIS_MARKER_RADIUS.cos();
-            for (axis, c) in AXIS_MARKERS {
-                if d.dot(axis) > cos_axis {
-                    return c;
+            for (i, (axis, c)) in AXIS_MARKERS.into_iter().enumerate() {
+                let along = d.dot(axis);
+                if along > cos_axis {
+                    return match axis_label_cell(i, d, along) {
+                        Some(cell) if axis_label_inked(i, cell) => axis_label_ink(c),
+                        _ => c,
+                    };
                 }
             }
             // Frame code.
@@ -248,6 +313,37 @@ mod tests {
         let img = render_equirect(Pattern::Grid, 360, 180, 0, 1);
         for (axis, c) in AXIS_MARKERS {
             assert_eq!(img.sample_equirect(axis), c, "{axis:?}");
+        }
+    }
+
+    #[test]
+    fn axis_labels_are_drawn_in_their_discs() {
+        for (i, (axis, c)) in AXIS_MARKERS.into_iter().enumerate() {
+            let up = AXIS_LABEL_UP[i];
+            let right = axis.cross(up);
+            let mut glyph = String::new();
+            for row in 0..7 {
+                for col in 0..5 {
+                    // Cell centre, in the disc's tangent plane.
+                    let x = (col as f64 - 2.0) * AXIS_LABEL_CELL;
+                    let y = (3.0 - row as f64) * AXIS_LABEL_CELL;
+                    let d = (axis + right * x + up * y).normalize();
+                    let got = color(Pattern::Grid, d, 0);
+                    glyph.push(if got == c {
+                        '.'
+                    } else {
+                        assert_eq!(got, axis_label_ink(c), "{} ({col}, {row})", AXIS_LABELS[i]);
+                        '#'
+                    });
+                }
+                glyph.push('\n');
+            }
+            let want: String = AXIS_GLYPHS.iter().map(|r| format!("{}\n", r[i])).collect();
+            assert_eq!(glyph, want, "{}", AXIS_LABELS[i]);
+            // Inked somewhere, and never at the centre.
+            assert!(glyph.contains('#'));
+            assert_eq!(&glyph[3 * 6 + 2..3 * 6 + 3], ".");
+            assert_ne!(axis_label_ink(c), c);
         }
     }
 
