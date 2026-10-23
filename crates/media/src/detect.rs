@@ -13,7 +13,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::mp4::{Cursor, Mp4Box, Mp4Tree};
+use crate::mp4::{Cursor, FourCc, Mp4Box, Mp4Tree};
 use crate::probe::{StreamInfo, StreamKind};
 
 /// What the file appears to contain.
@@ -46,6 +46,12 @@ pub struct CameraGuess {
 
 /// Insta360 files end with this ASCII marker after their metadata trailer.
 pub const INSTA360_TRAILER_MAGIC: &[u8; 32] = b"8db42d694ccc418790edff439fe026bf";
+
+/// The handler type of a `trak` (`mdia/hdlr`): `vide`, `soun`, `meta`, ...
+pub fn handler_type(trak: &Mp4Box) -> Option<FourCc> {
+    let hdlr = trak.path(&[b"mdia", b"hdlr"])?;
+    Some(FourCc(hdlr.payload.get(8..12)?.try_into().ok()?))
+}
 
 /// The handler name of a `trak` (`mdia/hdlr`), trimmed of padding.
 pub fn handler_name(trak: &Mp4Box) -> Option<String> {

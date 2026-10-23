@@ -45,9 +45,16 @@ pub fn probe(r: &ProbeReport) -> String {
         let boxes: Vec<String> = m.top_level.iter().map(|(t, _)| t.clone()).collect();
         let _ = writeln!(
             s,
-            "  mp4        brand {}, boxes [{}]{}",
+            "  mp4        brand {}, boxes [{}]{}{}",
             opt(&m.brand),
             boxes.join(" "),
+            m.truncated
+                .as_ref()
+                .map(|t| format!(
+                    ", truncated `{}` ({} of {} bytes)",
+                    t.fourcc, t.present, t.size
+                ))
+                .unwrap_or_default(),
             if m.trailing_bytes > 0 {
                 format!(", {} trailing bytes", m.trailing_bytes)
             } else {
@@ -82,6 +89,9 @@ pub fn probe(r: &ProbeReport) -> String {
     }
     for w in &r.warnings {
         let _ = writeln!(s, "  warning    {w}");
+    }
+    for d in &r.damage {
+        let _ = writeln!(s, "  DAMAGE     {d}");
     }
     s
 }

@@ -19,7 +19,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Show container, streams, codecs, color, timing, spherical metadata
-    /// and the detected camera for one or more files.
+    /// and the detected camera for one or more files. Fails if any file
+    /// cannot be read or is truncated or corrupt.
     Probe {
         files: Vec<PathBuf>,
         /// Print JSON instead of text.
@@ -67,6 +68,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     Ok(r) => {
                         if !json {
                             print!("{}", show::probe(&r));
+                        }
+                        if let Some(first) = r.damage.first() {
+                            failed = true;
+                            let more = match r.damage.len() - 1 {
+                                0 => String::new(),
+                                n => format!(" (and {n} more problems)"),
+                            };
+                            eprintln!("error: {} is damaged: {first}{more}", f.display());
                         }
                         reports.push(serde_json::to_value(&r)?);
                     }

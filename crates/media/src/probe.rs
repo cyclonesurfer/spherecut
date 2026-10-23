@@ -1,7 +1,7 @@
 //! `spherecut probe`: everything we can learn about a media file without
 //! decoding it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -10,7 +10,7 @@ use spherecut_core::Rational;
 use crate::detect::{self, CameraGuess};
 use crate::ff;
 use crate::ffi;
-use crate::mp4::{self, Mp4Tree};
+use crate::mp4::{self, Cursor, Mp4Box, Mp4Tree};
 use crate::spherical::{self, TrackSpherical};
 use crate::{MediaError, init};
 
@@ -23,6 +23,9 @@ pub struct ProbeReport {
     /// Present for MP4/MOV files, which is every camera format we support.
     pub mp4: Option<Mp4Summary>,
     pub camera: Option<CameraGuess>,
+    /// Why the file looks truncated or corrupt. A healthy file has none;
+    /// `spherecut probe` fails when there are any.
+    pub damage: Vec<String>,
     pub warnings: Vec<String>,
 }
 
@@ -114,7 +117,19 @@ pub struct Mp4Summary {
     pub top_level: Vec<(String, u64)>,
     /// Bytes after the last top-level box (vendor trailers).
     pub trailing_bytes: u64,
+    /// The top-level box cut off by the end of the file, if any.
+    pub truncated: Option<TruncatedBox>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TruncatedBox {
+    pub fourcc: String,
+    pub offset: u64,
+    /// The size its header claims.
+    pub size: u64,
+    /// Bytes of it present in the file.
+    pub present: u64,
 }
 
 fn rational(r: ff::Rational) -> Option<Rational> {
@@ -171,7 +186,8 @@ fn disposition_names(d: ff::format::stream::Disposition) -> Vec<String> {
 }
 
 /// Probe a file. Never panics on bad input; returns
-/// [`MediaError::Open`] for files FFmpeg can't read at all.
+/// [`MediaError::Open`] for files FFmpeg can't read at all, and lists in
+/// [`ProbeReport::damage`] the structural damage of files it can.
 pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     init();
     let meta = std::fs::metadata(path).map_err(|e| MediaError::Io {
@@ -181,33 +197,37 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     if !meta.is_file() {
         return Err(MediaError::NotAFile(path.to_path_buf()));
     }
+    if meta.len() == 0 {
+        return Err(MediaError::Open {
+            path: path.to_path_buf(),
+            reason: "the file is empty".into(),
+        });
+    }
     let mut warnings = Vec::new();
+    let mut damage = Vec::new();
 
     let tree: Option<Mp4Tree> = match mp4::read_file(path) {
         Ok(t) => Some(t),
         Err(mp4::Mp4Error::NotMp4(_)) => None,
         Err(e) => {
-            warnings.push(format!("MP4 structure: {e}"));
+            damage.push(format!("MP4 structure: {e}"));
             None
         }
     };
     if let Some(t) = &tree {
-        warnings.extend(t.warnings.iter().map(|w| format!("MP4 structure: {w}")));
+        damage.extend(t.damage());
     }
 
     let ictx = ff::format::input(path).map_err(|e| MediaError::Open {
         path: path.to_path_buf(),
-        reason: describe_open_error(e, tree.is_some()),
+        reason: describe_open_error(e, tree.is_some(), &damage),
     })?;
 
-    let sph: Vec<TrackSpherical> = tree
+    let traks: Vec<&Mp4Box> = tree
         .as_ref()
-        .map(spherical::read_tracks)
+        .map(|t| t.tracks().collect())
         .unwrap_or_default();
-    let handlers: Vec<Option<String>> = tree
-        .as_ref()
-        .map(|t| t.tracks().map(detect::handler_name).collect())
-        .unwrap_or_default();
+    let trak_of = trak_matcher(&traks);
 
     let fmt = ictx.format();
     let av_tb = Rational::new(1, ff::ffi::AV_TIME_BASE as i64).unwrap_or(Rational::ONE);
@@ -223,6 +243,8 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     };
 
     let mut streams = Vec::new();
+    // For each `trak`, the first stream that comes from it.
+    let mut trak_stream: Vec<Option<usize>> = vec![None; traks.len()];
     for st in ictx.streams() {
         let par = st.parameters();
         let f = ffi::codecpar_fields(&par);
@@ -237,12 +259,14 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         let tb = rational(st.time_base()).unwrap_or(Rational::ONE);
         let st_tags = tags(st.metadata());
         let idx = st.index();
-        // The MOV demuxer creates one stream per `trak`, in file order.
-        let track_sph = sph.get(idx).cloned().unwrap_or_default();
-        let handler = handlers
-            .get(idx)
-            .cloned()
-            .flatten()
+        let trak_index = trak_of(idx, st.id());
+        if let Some(i) = trak_index {
+            trak_stream[i].get_or_insert(streams.len());
+        }
+        let trak = trak_index.and_then(|i| traks.get(i));
+        let track_sph = trak.map(|t| spherical::read_track(t)).unwrap_or_default();
+        let handler = trak
+            .and_then(|t| detect::handler_name(t))
             .or_else(|| st_tags.get("handler_name").cloned());
         streams.push(StreamInfo {
             index: idx,
@@ -293,8 +317,39 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         });
     }
 
+    // A video or audio `trak` that FFmpeg reads as another kind of stream
+    // (often "data") has a track description FFmpeg could not follow.
+    for (i, trak) in traks.iter().enumerate() {
+        let handler = detect::handler_type(trak);
+        let want = match handler.map(|t| t.0) {
+            Some(t) if t == *b"vide" => StreamKind::Video,
+            Some(t) if t == *b"soun" => StreamKind::Audio,
+            _ => continue,
+        };
+        let Some(st) = trak_stream[i].and_then(|s| streams.get(s)) else {
+            warnings.push(format!("track #{i} has no FFmpeg stream"));
+            continue;
+        };
+        if st.kind != want {
+            damage.push(format!(
+                "track #{i} is {} (handler `{}`, sample entry `{}`) but FFmpeg reads stream #{} as {}, so its track description is damaged",
+                kind_name(want),
+                handler.map(|t| t.to_string()).unwrap_or_default(),
+                sample_entry_type(trak).unwrap_or_else(|| "none".into()),
+                st.index,
+                kind_name(st.kind),
+            ));
+        }
+    }
+    let mov_family = fmt.name().split(',').any(|n| n == "mov" || n == "mp4");
+    if tree.is_none() && mov_family {
+        warnings.push(
+            "FFmpeg reads this as MP4/MOV, but its first box is not one we know; spherical metadata and camera detection were skipped".into(),
+        );
+    }
+
     let camera = detect::guess(path, tree.as_ref(), &streams, &container.tags);
-    let mp4 = tree.map(|t| Mp4Summary {
+    let mp4 = tree.as_ref().map(|t| Mp4Summary {
         brand: t.ftyp_brand().map(|b| b.to_string()),
         top_level: t
             .top
@@ -302,7 +357,13 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
             .map(|b| (b.fourcc.to_string(), b.size))
             .collect(),
         trailing_bytes: t.trailing_bytes,
-        warnings: t.warnings,
+        truncated: t.truncated.map(|c| TruncatedBox {
+            fourcc: c.fourcc.to_string(),
+            offset: c.offset,
+            size: c.size,
+            present: c.present,
+        }),
+        warnings: t.warnings.clone(),
     });
 
     Ok(ProbeReport {
@@ -312,12 +373,58 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         streams,
         mp4,
         camera,
+        damage,
         warnings,
     })
 }
 
-fn describe_open_error(e: ff::Error, looked_like_mp4: bool) -> String {
+fn kind_name(k: StreamKind) -> String {
+    format!("{k:?}").to_lowercase()
+}
+
+/// The track ID from `tkhd`, which FFmpeg's MOV demuxer uses as the
+/// stream ID.
+fn track_id(trak: &Mp4Box) -> Option<u32> {
+    let tkhd = trak.child(b"tkhd")?;
+    let mut c = Cursor::new(&tkhd.payload);
+    let (version, _) = c.version_flags()?;
+    // Creation and modification times come first.
+    c.take(if version == 1 { 16 } else { 8 })?;
+    c.u32()
+}
+
+/// Match FFmpeg streams to `trak`s: map (stream index, stream ID) to the
+/// position of the stream's `trak`. Cover art in `udta` gives FFmpeg
+/// streams that have no `trak`, so match by track ID when every track has
+/// a distinct one, and by position otherwise.
+fn trak_matcher(traks: &[&Mp4Box]) -> impl Fn(usize, i32) -> Option<usize> + use<> {
+    let by_id: HashMap<u32, usize> = traks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| Some((track_id(t)?, i)))
+        .collect();
+    let count = traks.len();
+    let use_ids = by_id.len() == count;
+    move |index, id| {
+        if use_ids {
+            by_id.get(&u32::try_from(id).ok()?).copied()
+        } else {
+            (index < count).then_some(index)
+        }
+    }
+}
+
+/// The type of a track's first sample entry, e.g. "hvc1".
+fn sample_entry_type(trak: &Mp4Box) -> Option<String> {
+    let stsd = trak.path(&[b"mdia", b"minf", b"stbl", b"stsd"])?;
+    Some(stsd.children.first()?.fourcc.to_string())
+}
+
+fn describe_open_error(e: ff::Error, looked_like_mp4: bool, damage: &[String]) -> String {
     let base = e.to_string();
+    if let Some(why) = damage.first() {
+        return format!("{base}: {why}");
+    }
     match e {
         ff::Error::InvalidData if looked_like_mp4 => {
             format!(
