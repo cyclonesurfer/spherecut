@@ -220,20 +220,60 @@ fn file_names_that_are_not_utf8_are_reported() {
 }
 
 #[test]
-fn reports_with_paths_that_are_not_utf8_serialize() {
-    // FFmpeg's Rust bindings cannot open such a path yet, so give a report
-    // one.
+fn files_named_in_bytes_that_are_not_utf8_are_probed() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
     let dir = tmp("utf8-report");
     let (good, _) = media(&dir);
-    let mut r = spherecut_media::probe::probe(&good).unwrap();
-    r.path = dir.join(OsStr::from_bytes(b"clip-\xff.mp4"));
-    let v = serde_json::to_value(&r).unwrap();
+    let named = dir.join(OsStr::from_bytes(b"clip-\xff.mp4"));
+    std::fs::copy(&good, &named).unwrap();
+
+    let out = probe(&[&named]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("clip-\u{fffd}.mp4"), "{stdout}");
+    assert!(stdout.contains("#0  video   h264"), "{stdout}");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .args(["probe", "--json"])
+        .arg(&named)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(
         v["path"].as_str().unwrap().ends_with("clip-\u{fffd}.mp4"),
         "{v}"
     );
+    assert_eq!(v["damage"], serde_json::json!([]));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_reader_that_goes_away_is_not_an_error() {
+    // `spherecut probe *.mp4 | head`: the files after the reader leaves
+    // are still probed, so a broken one still fails the run.
+    use std::process::Stdio;
+    let dir = tmp("pipe");
+    let (good, bad) = media(&dir);
+    let mut args: Vec<&Path> = vec![&good; 50];
+    args.push(&bad[0]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .arg("probe")
+        .args(&args)
+        .env_remove("SPHERECUT_LOG")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    let stderr = text(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(!stderr.contains("stdout"), "{stderr}");
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    let name = bad[0].file_name().unwrap().to_string_lossy();
+    assert!(stderr.contains(&*name), "{stderr}");
     std::fs::remove_dir_all(&dir).ok();
 }
 

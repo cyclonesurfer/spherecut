@@ -115,11 +115,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             let mut failed = false;
             let mut reports = Vec::new();
+            // Cleared when the reader goes away; the rest are still probed
+            // for the exit code and the errors on stderr.
+            let mut reading = true;
             for f in &files {
                 match spherecut_media::probe::probe(f) {
                     Ok(r) => {
-                        if !json {
-                            print!("{}", show::probe(&r));
+                        if !json && reading {
+                            reading = emit(&show::probe(&r))?;
                         }
                         if let Some(first) = r.damage.first() {
                             failed = true;
@@ -162,7 +165,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 } else {
                     serde_json::Value::Array(reports)
                 };
-                println!("{}", serde_json::to_string_pretty(&v)?);
+                emit(&format!("{}\n", serde_json::to_string_pretty(&v)?))?;
             }
             Ok(if failed {
                 ExitCode::FAILURE
@@ -173,9 +176,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Doctor { render_node, json } => {
             let r = spherecut_media::doctor::run(&render_node);
             if json {
-                println!("{}", serde_json::to_string_pretty(&r)?);
+                emit(&format!("{}\n", serde_json::to_string_pretty(&r)?))?;
             } else {
-                print!("{}", show::doctor(&r));
+                emit(&show::doctor(&r))?;
             }
             let errors = r
                 .issues
@@ -187,5 +190,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 ExitCode::SUCCESS
             })
         }
+    }
+}
+
+/// Write `s` to stdout. Returns false when the reader has gone away, as in
+/// `spherecut probe *.mp4 | head`, which is not an error.
+fn emit(s: &str) -> Result<bool> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match out.write_all(s.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+        Err(e) => Err(anyhow::Error::new(e).context("cannot write to stdout")),
     }
 }
