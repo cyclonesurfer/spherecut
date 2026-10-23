@@ -172,19 +172,37 @@ fn lossy_h264_untagged_is_flagged_as_likely_equirect() {
 fn broken_files_give_errors_not_panics() {
     let dir = tmp("bad");
     let good = media::write(&small("t-good", Codec::H264, 8, Audio::Stereo, true), &dir).unwrap();
+    let r = probe::probe(&good).unwrap();
+    assert!(r.damage.is_empty(), "{:?}", r.damage);
     let bad = media::write_bad_files(&good, &dir).unwrap();
     assert_eq!(bad.len(), 6);
+    let reasons = [
+        ("bad-empty.mp4", "the file is empty"),
+        ("bad-text.mp4", "not a recognised media file"),
+        ("bad-trunc-header.mp4", "`ftyp` box at offset 0"),
+        ("bad-trunc-half.mp4", "`mdat` box at offset"),
+        ("bad-trunc-end.mp4", "`moov` box at offset"),
+        ("bad-corrupt-moov.mp4", "runs past the end of the file"),
+    ];
     for b in &bad {
         let name = b.file_name().unwrap().to_string_lossy().into_owned();
-        match probe::probe(b) {
-            Err(e) => assert!(!e.to_string().is_empty()),
-            // Some damage (late truncation, corruption) leaves a readable
-            // file; then the damage must show up as warnings.
-            Ok(r) => assert!(
-                !r.warnings.is_empty() || name.contains("corrupt") || name.contains("trunc-end"),
-                "{name} probed cleanly"
-            ),
-        }
+        // Either FFmpeg cannot open the file and the error says why, or it
+        // can (late truncation, corrupt tables) and the damage is reported.
+        let why = match probe::probe(b) {
+            Err(e) => e.to_string(),
+            Ok(r) => {
+                assert!(!r.damage.is_empty(), "{name} probed cleanly");
+                r.damage.join("; ")
+            }
+        };
+        let want = reasons.iter().find(|(n, _)| *n == name).unwrap().1;
+        assert!(why.contains(want), "{name}: {why}");
+    }
+    // FFmpeg opens these two without complaint; only the structure check
+    // finds the damage.
+    for name in ["bad-trunc-end.mp4", "bad-corrupt-moov.mp4"] {
+        let r = probe::probe(&dir.join(name));
+        assert!(r.is_ok_and(|r| !r.damage.is_empty()), "{name}");
     }
     // A directory is not a media file.
     assert!(probe::probe(&dir).is_err());
