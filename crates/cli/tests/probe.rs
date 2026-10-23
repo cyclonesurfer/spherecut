@@ -78,6 +78,21 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
             "is damaged",
             "runs past the end of the file",
         ),
+        (
+            "bad-trak-type.mp4",
+            "is damaged",
+            "box `\\xd1rak` at offset",
+        ),
+        (
+            "bad-timescale.mp4",
+            "is damaged",
+            "track #0: its `mdhd` gives timescale 0, so its times are wrong",
+        ),
+        (
+            "bad-codec-config.mp4",
+            "is damaged",
+            "stream #0 (sample entry `avc1`) has no pixel format, so its codec setup is damaged",
+        ),
     ];
     assert_eq!(bad.len(), expect.len());
     for (name, how, why) in expect {
@@ -124,10 +139,129 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["damage"], serde_json::json!([]));
 
+    // FFmpeg's own messages are shown in the report, though the log hides
+    // them by default.
+    let timescale = dir.join("bad-timescale.mp4");
+    let out = probe(&[&timescale]);
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("  ffmpeg     [") && l.contains("] Invalid mdhd time scale 0")),
+        "{stdout}"
+    );
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
+    let out = cmd
+        .args(["probe", "--json"])
+        .arg(&timescale)
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let log = v["ffmpeg_log"].as_array().unwrap();
+    assert!(
+        log.iter()
+            .any(|l| l.as_str().unwrap().contains("] Invalid mdhd time scale 0")),
+        "{v}"
+    );
+
     // A directory is not a media file.
     let out = probe(&[&dir]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("is not a regular file"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn file_names_that_are_not_utf8_are_reported() {
+    // Linux file names are bytes. These two fail before FFmpeg opens them;
+    // the error used to panic, and stop the files after it.
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tmp("utf8");
+    let (good, _) = media(&dir);
+    let empty = dir.join(OsStr::from_bytes(b"empty-\xff.mp4"));
+    std::fs::write(&empty, b"").unwrap();
+    let missing = dir.join(OsStr::from_bytes(b"missing-\xfe.mp4"));
+
+    let out = probe(&[&empty, &missing, &good]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(
+        stderr.contains("empty-\u{fffd}.mp4: the file is empty"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("missing-\u{fffd}.mp4: No such file"),
+        "{stderr}"
+    );
+    assert!(stdout.contains(&good.display().to_string()), "{stdout}");
+    assert!(stdout.contains("#0  video   h264"), "{stdout}");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
+    let out = cmd
+        .args(["probe", "--json"])
+        .args([&empty, &missing, &good])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let path = |i: usize| v[i]["path"].as_str().unwrap().to_string();
+    assert!(path(0).ends_with("empty-\u{fffd}.mp4"), "{v}");
+    assert!(
+        v[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("the file is empty")
+    );
+    assert!(path(1).ends_with("missing-\u{fffd}.mp4"), "{v}");
+    assert_eq!(path(2), good.display().to_string());
+    assert_eq!(v[2]["damage"], serde_json::json!([]));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn reports_with_paths_that_are_not_utf8_serialize() {
+    // FFmpeg's Rust bindings cannot open such a path yet, so give a report
+    // one.
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tmp("utf8-report");
+    let (good, _) = media(&dir);
+    let mut r = spherecut_media::probe::probe(&good).unwrap();
+    r.path = dir.join(OsStr::from_bytes(b"clip-\xff.mp4"));
+    let v = serde_json::to_value(&r).unwrap();
+    assert!(
+        v["path"].as_str().unwrap().ends_with("clip-\u{fffd}.mp4"),
+        "{v}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_codec_ffmpeg_does_not_know_is_a_warning() {
+    // A sample entry type FFmpeg has no codec for may be a real codec it
+    // lacks, so the file is not called damaged, but the report says the
+    // stream cannot be decoded.
+    let dir = tmp("unknown-codec");
+    let (good, _) = media(&dir);
+    let mut f = std::fs::read(&good).unwrap();
+    // The first entry's type follows the version, flags, entry count and
+    // entry size.
+    let at = f.windows(4).position(|w| w == b"stsd").unwrap() + 16;
+    assert_eq!(&f[at..at + 4], b"avc1");
+    f[at..at + 4].copy_from_slice(b"zzzz");
+    let path = dir.join("zzzz.mp4");
+    std::fs::write(&path, &f).unwrap();
+
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "  warning    stream #0 (sample entry `zzzz`) has no codec FFmpeg knows and cannot be decoded"
+        ),
+        "{stdout}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

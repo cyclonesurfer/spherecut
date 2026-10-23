@@ -147,8 +147,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     Err(e) => {
                         failed = true;
                         eprintln!("error: {e}");
+                        // Lossy, as in the reports: Linux file names need
+                        // not be UTF-8.
                         reports.push(serde_json::json!({
-                            "path": f,
+                            "path": f.to_string_lossy(),
                             "error": e.to_string(),
                         }));
                     }

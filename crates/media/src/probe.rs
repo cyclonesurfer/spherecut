@@ -12,12 +12,15 @@ use spherecut_core::Rational;
 use crate::detect::{self, CameraGuess};
 use crate::ff;
 use crate::ffi;
-use crate::mp4::{self, Cursor, FirstBox, Mp4Box};
+use crate::hwprobe;
+use crate::mp4::{self, Cursor, FirstBox, FourCc, Mp4Box};
 use crate::spherical::{self, TrackSpherical};
 use crate::{MediaError, init};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProbeReport {
+    /// As text, with bytes that are not UTF-8 replaced by U+FFFD.
+    #[serde(serialize_with = "lossy_path")]
     pub path: PathBuf,
     pub file_size: u64,
     pub container: Container,
@@ -31,6 +34,15 @@ pub struct ProbeReport {
     /// `spherecut probe` fails when there are any.
     pub damage: Vec<String>,
     pub warnings: Vec<String>,
+    /// The warnings and errors FFmpeg logged while reading the file. They
+    /// often say what it could not read, but healthy files can have some
+    /// too, so `spherecut probe` does not fail on them.
+    pub ffmpeg_log: Vec<String>,
+}
+
+/// A path as text, so that any file name can be reported.
+fn lossy_path<S: serde::Serializer>(p: &Path, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&p.to_string_lossy())
 }
 
 /// How much of a file's structure probe checks for damage, beyond what
@@ -211,6 +223,46 @@ fn disposition_names(d: ff::format::stream::Disposition) -> Vec<String> {
 /// [`ProbeReport::damage`] the structural damage of files it can.
 pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     init();
+    // The CLI hides FFmpeg's log by default, and it is often the only
+    // word on what FFmpeg could not read.
+    let (report, log) = hwprobe::capture_ffmpeg_log(|| probe_file(path));
+    report.map(|r| ProbeReport {
+        ffmpeg_log: tally(log),
+        ..r
+    })
+}
+
+/// FFmpeg's log lines listed past this many are counted instead.
+const MAX_LOG_LINES: usize = 32;
+
+/// Each of FFmpeg's log lines once, in order, with how often it came when
+/// more than once. A damaged stream can make it log the same line for
+/// every packet it reads.
+fn tally(lines: Vec<String>) -> Vec<String> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut dropped = 0;
+    for line in lines {
+        if let Some(&i) = seen.get(&line) {
+            counts[i].1 += 1;
+        } else if counts.len() < MAX_LOG_LINES {
+            seen.insert(line.clone(), counts.len());
+            counts.push((line, 1));
+        } else {
+            dropped += 1;
+        }
+    }
+    let mut out: Vec<String> = counts
+        .into_iter()
+        .map(|(l, n)| if n > 1 { format!("{l} ({n} times)") } else { l })
+        .collect();
+    if dropped > 0 {
+        out.push(format!("{dropped} more lines not listed"));
+    }
+    out
+}
+
+fn probe_file(path: &Path) -> Result<ProbeReport, MediaError> {
     let meta = std::fs::metadata(path).map_err(|e| MediaError::Io {
         path: path.to_path_buf(),
         error: e,
@@ -308,6 +360,8 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     let mut streams = Vec::new();
     // For each `trak`, the first stream that comes from it.
     let mut trak_stream: Vec<Option<usize>> = vec![None; traks.len()];
+    // For each stream, its `trak`.
+    let mut stream_trak = Vec::new();
     for st in ictx.streams() {
         let par = st.parameters();
         let f = ffi::codecpar_fields(&par);
@@ -326,6 +380,7 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         if let Some(i) = trak_index {
             trak_stream[i].get_or_insert(streams.len());
         }
+        stream_trak.push(trak_index);
         let trak = trak_index.and_then(|i| traks.get(i));
         let track_sph = trak.map(|t| spherical::read_track(t)).unwrap_or_default();
         let handler = trak
@@ -398,10 +453,34 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
                 "track #{i} is {} (handler `{}`, sample entry `{}`) but FFmpeg reads stream #{} as {}, so its track description is damaged",
                 kind_name(want),
                 handler.map(|t| t.to_string()).unwrap_or_default(),
-                sample_entry_type(trak).unwrap_or_else(|| "none".into()),
+                sample_entry_type(trak).map_or_else(|| "none".into(), |t| t.to_string()),
                 st.index,
                 kind_name(st.kind),
             ));
+        }
+    }
+    // A video or audio stream FFmpeg could not set up. When its track has
+    // samples of a codec FFmpeg reads, the codec setup (`avcC`, `hvcC`,
+    // `esds`, ...) or the sample entry is damaged. Otherwise the codec may
+    // just be one FFmpeg does not know.
+    for (st, trak) in streams.iter().zip(&stream_trak) {
+        let Some(why) = unconfigured(st) else {
+            continue;
+        };
+        let entry = trak
+            .and_then(|i| traks.get(i))
+            .and_then(|t| sample_entry_type(t));
+        let what = format!(
+            "stream #{}{} {why}",
+            st.index,
+            entry
+                .map(|e| format!(" (sample entry `{e}`)"))
+                .unwrap_or_default()
+        );
+        if entry.is_some_and(mp4::is_known_codec) && st.frames.is_some() {
+            damage.push(format!("{what}, so its codec setup is damaged"));
+        } else {
+            warnings.push(format!("{what} and cannot be decoded"));
         }
     }
     let camera = detect::guess(path, tree.as_ref(), &streams, &container.tags);
@@ -433,6 +512,7 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         structure,
         damage,
         warnings,
+        ffmpeg_log: Vec::new(),
     })
 }
 
@@ -552,10 +632,45 @@ fn trak_matcher(traks: &[&Mp4Box]) -> impl Fn(usize, i32) -> Option<usize> + use
     }
 }
 
-/// The type of a track's first sample entry, e.g. "hvc1".
-fn sample_entry_type(trak: &Mp4Box) -> Option<String> {
+/// The type of a track's first sample entry, e.g. `hvc1`.
+fn sample_entry_type(trak: &Mp4Box) -> Option<FourCc> {
     let stsd = trak.path(&[b"mdia", b"minf", b"stbl", b"stsd"])?;
-    Some(stsd.children.first()?.fourcc.to_string())
+    Some(stsd.children.first()?.fourcc)
+}
+
+/// Why FFmpeg could not set up a video or audio stream, judged as FFmpeg
+/// judges it: it needs the codec, the frame size or the sample rate and
+/// channels, and the pixel or sample format when it has a decoder to find
+/// it with.
+fn unconfigured(st: &StreamInfo) -> Option<&'static str> {
+    if !matches!(st.kind, StreamKind::Video | StreamKind::Audio) {
+        return None;
+    }
+    let Some(codec) = &st.codec else {
+        return Some("has no codec FFmpeg knows");
+    };
+    // FFmpeg's own decoders are named after their codecs.
+    let decoder = || ff::decoder::find_by_name(codec).is_some();
+    if let Some(v) = &st.video {
+        if v.width == 0 || v.height == 0 {
+            return Some("has no frame size");
+        }
+        if v.pix_fmt.is_none() && decoder() {
+            return Some("has no pixel format");
+        }
+    }
+    if let Some(a) = &st.audio {
+        if a.sample_rate == 0 {
+            return Some("has no sample rate");
+        }
+        if a.channels == 0 {
+            return Some("has no channels");
+        }
+        if a.sample_fmt.is_none() && decoder() {
+            return Some("has no sample format");
+        }
+    }
+    None
 }
 
 fn describe_open_error(e: ff::Error, looked_like_mp4: bool, damage: &[String]) -> String {
@@ -622,6 +737,20 @@ mod tests {
             segment(f[..at as usize + 10].to_vec()),
             Some((at, Some(300)))
         );
+    }
+
+    #[test]
+    fn ffmpeg_log_lines_are_counted_not_repeated() {
+        let lines = ["a", "b", "a", "a"].map(String::from).to_vec();
+        assert_eq!(tally(lines), ["a (3 times)", "b"]);
+        let many = (0..40)
+            .map(|i| format!("line {i}"))
+            .chain(["line 0".into(), "line 39".into()])
+            .collect();
+        let t = tally(many);
+        assert_eq!(t.len(), MAX_LOG_LINES + 1);
+        assert_eq!(t[0], "line 0 (2 times)");
+        assert_eq!(t[MAX_LOG_LINES], "9 more lines not listed");
     }
 
     #[test]

@@ -116,6 +116,9 @@ pub fn probe(r: &ProbeReport) -> String {
     for w in &r.warnings {
         let _ = writeln!(s, "  warning    {w}");
     }
+    for l in &r.ffmpeg_log {
+        let _ = writeln!(s, "  ffmpeg     {l}");
+    }
     for d in &r.damage {
         let _ = writeln!(s, "  DAMAGE     {d}");
     }

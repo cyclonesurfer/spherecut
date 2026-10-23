@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use spherecut_core::FrameRate;
 use spherecut_media::encode::{AudioSettings, Mp4Writer, PixelLayout, VideoSettings};
 use spherecut_media::inject::{self, EntryEdit, TrackKind};
-use spherecut_media::mp4;
+use spherecut_media::mp4::{self, Mp4Tree};
 use spherecut_media::spherical::{StereoMode, write};
 use thiserror::Error;
 
@@ -277,12 +277,16 @@ pub fn standard_set() -> Vec<Spec> {
     ]
 }
 
-/// Broken files derived from a good one: truncated at several points,
-/// corrupted inside `moov`, empty, and not media at all.
+/// Broken files derived from a good one with video and audio: truncated at
+/// several points, corrupted inside `moov`, empty, and not media at all.
 pub fn write_bad_files(good: &Path, dir: &Path) -> Result<Vec<PathBuf>, SynthError> {
     let io_err = |path: &Path| {
         let path = path.to_path_buf();
         move |error| SynthError::Io { path, error }
+    };
+    let invalid = |why: String| SynthError::Io {
+        path: good.to_path_buf(),
+        error: std::io::Error::new(std::io::ErrorKind::InvalidData, why),
     };
     let bytes = std::fs::read(good).map_err(io_err(good))?;
     let mut out = Vec::new();
@@ -300,22 +304,36 @@ pub fn write_bad_files(good: &Path, dir: &Path) -> Result<Vec<PathBuf>, SynthErr
         "bad-trunc-end.mp4",
         &bytes[..bytes.len().saturating_sub(100)],
     )?;
-    let corrupt = corrupt_sample_tables(&bytes).map_err(|e| SynthError::Io {
-        path: good.to_path_buf(),
-        error: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
-    })?;
-    put("bad-corrupt-moov.mp4", &corrupt)?;
+    let tree = mp4::read(&mut std::io::Cursor::new(&bytes)).map_err(|e| invalid(e.to_string()))?;
+    for (name, corrupt) in CORRUPTIONS {
+        let mut b = bytes.clone();
+        if !corrupt(&tree, &mut b) {
+            return Err(invalid(format!("{name}: nothing in `moov` to corrupt")));
+        }
+        put(name, &b)?;
+    }
     Ok(out)
 }
 
-/// `bytes` with the sample tables in `moov` damaged: the top byte of every
-/// chunk offset (`stco`/`co64`) flipped, so the chunks lie far past the end
-/// of a small file. FFmpeg still opens such a file (it refuses one whose
-/// sample sizes are absurd); only checking the tables shows the damage.
-fn corrupt_sample_tables(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let tree = mp4::read(&mut std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
-    let mut out = bytes.to_vec();
-    let mut flipped = 0;
+/// Changes a file's bytes in `moov`, as parsed in the tree, and says
+/// whether it found what it changes.
+type Corruption = fn(&Mp4Tree, &mut [u8]) -> bool;
+
+/// Damage inside `moov` that FFmpeg opens without complaint. Only probe's
+/// checks find it.
+const CORRUPTIONS: &[(&str, Corruption)] = &[
+    ("bad-corrupt-moov.mp4", flip_chunk_offsets),
+    ("bad-trak-type.mp4", flip_last_trak_type),
+    ("bad-timescale.mp4", zero_first_timescale),
+    ("bad-codec-config.mp4", flip_first_codec_config),
+];
+
+/// The top byte of every chunk offset (`stco`/`co64`) flipped, so the
+/// chunks lie far past the end of a small file. FFmpeg still opens such a
+/// file (it refuses one whose sample sizes are absurd); only checking the
+/// tables shows the damage.
+fn flip_chunk_offsets(tree: &Mp4Tree, out: &mut [u8]) -> bool {
+    let mut flipped = false;
     for trak in tree.tracks() {
         let Some(stbl) = trak.path(&[b"mdia", b"minf", b"stbl"]) else {
             continue;
@@ -328,13 +346,69 @@ fn corrupt_sample_tables(bytes: &[u8]) -> Result<Vec<u8>, String> {
             for at in (start..end).step_by(width) {
                 if let Some(x) = out.get_mut(at) {
                     *x ^= 0xa5;
-                    flipped += 1;
+                    flipped = true;
                 }
             }
         }
     }
-    if flipped == 0 {
-        return Err("no sample tables in `moov` to corrupt".into());
-    }
-    Ok(out)
+    flipped
+}
+
+/// The first byte of the last `trak`'s type flipped, as random flips once
+/// did to the audio track in the M0 review: FFmpeg skips the box as one it
+/// does not know, and the stream is gone without a word.
+fn flip_last_trak_type(tree: &Mp4Tree, out: &mut [u8]) -> bool {
+    let Some(trak) = tree.tracks().last() else {
+        return false;
+    };
+    out.get_mut(trak.offset as usize + 4)
+        .map(|x| *x ^= 0xa5)
+        .is_some()
+}
+
+/// The first track's `mdhd` timescale set to 0. FFmpeg takes 1 instead and
+/// says so only in its log, and every time in the track is wrong.
+fn zero_first_timescale(tree: &Mp4Tree, out: &mut [u8]) -> bool {
+    let Some(mdhd) = tree
+        .tracks()
+        .next()
+        .and_then(|t| t.path(&[b"mdia", b"mdhd"]))
+    else {
+        return false;
+    };
+    // After the version, flags, and creation and modification times.
+    let times = if mdhd.payload.first() == Some(&1) {
+        16
+    } else {
+        8
+    };
+    let at = (mdhd.offset + mdhd.header_len) as usize + 4 + times;
+    out.get_mut(at..at + 4).map(|ts| ts.fill(0)).is_some()
+}
+
+/// Every byte of the first track's codec configuration (`avcC`, `hvcC`)
+/// flipped. FFmpeg opens the file, but its decoder cannot set up from it,
+/// so the stream has no pixel format.
+fn flip_first_codec_config(tree: &Mp4Tree, out: &mut [u8]) -> bool {
+    let config = tree
+        .tracks()
+        .next()
+        .and_then(|t| t.path(&[b"mdia", b"minf", b"stbl", b"stsd"]))
+        .and_then(|stsd| stsd.children.first())
+        .and_then(|entry| {
+            entry
+                .children
+                .iter()
+                .find(|b| matches!(&b.fourcc.0, b"avcC" | b"hvcC"))
+        });
+    let Some(c) = config else {
+        return false;
+    };
+    let (start, end) = (
+        (c.offset + c.header_len) as usize,
+        (c.offset + c.size) as usize,
+    );
+    out.get_mut(start..end)
+        .map(|b| b.iter_mut().for_each(|x| *x ^= 0xa5))
+        .is_some()
 }
