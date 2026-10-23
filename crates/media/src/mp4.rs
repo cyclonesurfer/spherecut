@@ -678,6 +678,25 @@ fn check_track(trak: &Mp4Box, mdats: &[(u64, u64)], file_size: u64) -> Result<()
     let stbl = minf
         .child(b"stbl")
         .ok_or("it has no sample table (`stbl`)")?;
+    // FFmpeg takes the stream kind from the handler, and then cannot read
+    // a sample entry of the other kind.
+    let kind = |t: FourCc| match &t.0 {
+        b"vide" => Some("video"),
+        b"soun" => Some("audio"),
+        _ => None,
+    };
+    let handler = handler_type(trak).and_then(|h| Some((h, kind(h)?)));
+    for entry in stbl.child(b"stsd").into_iter().flat_map(|s| &s.children) {
+        let entry_kind = entry_handler(entry.fourcc).and_then(kind);
+        if let (Some((h, want)), Some(is)) = (handler, entry_kind)
+            && want != is
+        {
+            return Err(format!(
+                "its handler says {want} (`{h}`), but its sample entry `{}` is {is}",
+                entry.fourcc
+            ));
+        }
+    }
     let sizes = sample_sizes(stbl)?;
     let stts = stbl.child(b"stts").map(|b| table_entries(b, 4, 8));
     let stsc = stbl.child(b"stsc").map(|b| table_entries(b, 4, 12));
@@ -885,20 +904,42 @@ fn check_chunk(
     Ok(())
 }
 
+/// Video sample entry types we know.
+const VIDEO_ENTRIES: &[&[u8; 4]] = &[
+    b"avc1", b"avc3", b"hvc1", b"hev1", b"av01", b"vp09", b"apch", b"apcn", b"apcs", b"apco",
+    b"ap4h", b"ap4x", b"mp4v", b"dvh1", b"dvhe", b"encv",
+];
+
+/// Audio sample entry types we know.
+const AUDIO_ENTRIES: &[&[u8; 4]] = &[
+    b"mp4a", b"Opus", b"lpcm", b"sowt", b"twos", b"ipcm", b"fLaC", b"ac-3", b"ec-3", b"alac",
+    b"in24", b"in32", b"fl32", b"enca",
+];
+
+/// The handler type of a `trak` (`mdia/hdlr`): `vide`, `soun`, `meta`, ...
+pub fn handler_type(trak: &Mp4Box) -> Option<FourCc> {
+    let hdlr = trak.path(&[b"mdia", b"hdlr"])?;
+    Some(FourCc(hdlr.payload.get(8..12)?.try_into().ok()?))
+}
+
+/// The handler type (`vide` or `soun`) of tracks whose sample entries
+/// have type `t`, for the entry types we know.
+fn entry_handler(t: FourCc) -> Option<FourCc> {
+    if VIDEO_ENTRIES.contains(&&t.0) {
+        Some(FourCc(*b"vide"))
+    } else if AUDIO_ENTRIES.contains(&&t.0) {
+        Some(FourCc(*b"soun"))
+    } else {
+        None
+    }
+}
+
 /// Length of a sample entry's fixed fields before its child boxes, for the
 /// entry types we know.
 pub(crate) fn sample_entry_fixed_len(t: FourCc, payload: &[u8]) -> Option<usize> {
-    const VIDEO: &[&[u8; 4]] = &[
-        b"avc1", b"avc3", b"hvc1", b"hev1", b"av01", b"vp09", b"apch", b"apcn", b"apcs", b"apco",
-        b"ap4h", b"ap4x", b"mp4v", b"dvh1", b"dvhe", b"encv",
-    ];
-    const AUDIO: &[&[u8; 4]] = &[
-        b"mp4a", b"Opus", b"lpcm", b"sowt", b"twos", b"ipcm", b"fLaC", b"ac-3", b"ec-3", b"alac",
-        b"in24", b"in32", b"fl32", b"enca",
-    ];
-    if VIDEO.contains(&&t.0) {
+    if VIDEO_ENTRIES.contains(&&t.0) {
         Some(78)
-    } else if AUDIO.contains(&&t.0) {
+    } else if AUDIO_ENTRIES.contains(&&t.0) {
         // QuickTime sound sample description versions 1 and 2 are longer.
         let version = u16::from_be_bytes(payload.get(8..10)?.try_into().ok()?);
         match version {
@@ -1431,6 +1472,36 @@ pub(crate) mod tests {
                 [format!("track #0: {want}")]
             );
         }
+    }
+
+    #[test]
+    fn handler_and_sample_entry_of_other_kinds_are_damage() {
+        let f = file_with(&tables(&[10], 1), false);
+        let handler = |f: &[u8]| {
+            f.windows(16)
+                .position(|w| w.starts_with(b"hdlr") && w.ends_with(b"vide"))
+                .unwrap()
+                + 12
+        };
+        let with = |at: usize, t: &[u8; 4]| {
+            let mut g = f.clone();
+            g[at..at + 4].copy_from_slice(t);
+            damage_of(g)
+        };
+        assert_eq!(
+            with(handler(&f), b"soun"),
+            ["track #0: its handler says audio (`soun`), but its sample entry `hvc1` is video"]
+        );
+        // Image sequences (`pict`) and alpha planes (`auxv`) use video
+        // sample entries too.
+        assert!(with(handler(&f), b"pict").is_empty());
+        let entry = f.windows(4).position(|w| w == b"hvc1").unwrap();
+        assert_eq!(
+            with(entry, b"mp4a"),
+            ["track #0: its handler says video (`vide`), but its sample entry `mp4a` is audio"]
+        );
+        // An entry type we do not know says nothing.
+        assert!(with(entry, b"xxxx").is_empty());
     }
 
     #[test]

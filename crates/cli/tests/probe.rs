@@ -186,3 +186,33 @@ fn ffmpeg_and_trak_disagreeing_on_the_stream_kind_is_damage() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn handler_and_sample_entry_disagreeing_is_damage() {
+    // The video track's handler changed from `vide` to `soun`. FFmpeg then
+    // reads the H.264 track as an audio stream it cannot decode and agrees
+    // with the handler; only the sample entry shows the damage.
+    let dir = tmp("handler");
+    let (good, _) = media(&dir);
+    let mut f = std::fs::read(&good).unwrap();
+    let at = f
+        .windows(16)
+        .position(|w| w.starts_with(b"hdlr") && w.ends_with(b"vide"))
+        .unwrap()
+        + 12;
+    f[at..at + 4].copy_from_slice(b"soun");
+    let path = dir.join("handler.mp4");
+    std::fs::write(&path, &f).unwrap();
+
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stdout.contains("#0  audio"), "{stdout}");
+    assert!(
+        stderr.contains(
+            "track #0: its handler says audio (`soun`), but its sample entry `avc1` is video"
+        ),
+        "{stderr}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

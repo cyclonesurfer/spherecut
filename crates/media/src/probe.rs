@@ -320,7 +320,7 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     // A video or audio `trak` that FFmpeg reads as another kind of stream
     // (often "data") has a track description FFmpeg could not follow.
     for (i, trak) in traks.iter().enumerate() {
-        let handler = detect::handler_type(trak);
+        let handler = mp4::handler_type(trak);
         let want = match handler.map(|t| t.0) {
             Some(t) if t == *b"vide" => StreamKind::Video,
             Some(t) if t == *b"soun" => StreamKind::Audio,
