@@ -150,7 +150,44 @@ pub fn run(render_node: &Path) -> DoctorReport {
         }
     }
     let vaapi = devices.iter().find(|d| d.kind == "vaapi");
-    if !vaapi.is_some_and(|d| d.ok) {
+    let node_access = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(render_node)
+        .map(drop);
+    if !vaapi.is_some_and(|d| d.ok)
+        && let Err(e) = &node_access
+    {
+        let others = other_render_nodes(render_node);
+        let (what, fix) = match e.kind() {
+            std::io::ErrorKind::NotFound => (
+                format!("no DRM render node at {node}"),
+                if others.is_empty() {
+                    "no GPU driver is loaded; in a VM or container, pass the GPU through (for example `--device /dev/dri`)".to_string()
+                } else {
+                    format!(
+                        "this machine has {}; pass it with --render-node",
+                        others.join(", ")
+                    )
+                },
+            ),
+            std::io::ErrorKind::PermissionDenied => (
+                format!("no permission to open {node}"),
+                "sudo usermod -aG render \"$USER\"   then log out and back in".to_string(),
+            ),
+            _ => (
+                format!("cannot open {node}: {e}"),
+                "check the GPU driver with `vainfo`".to_string(),
+            ),
+        };
+        issues.push(Issue {
+            severity: Severity::Warning,
+            what,
+            impact: "decode and encode fall back to the CPU, which is far slower at 5.7K and up"
+                .into(),
+            fix,
+        });
+    } else if !vaapi.is_some_and(|d| d.ok) {
         let amd = gpu_vendor(render_node).as_deref() == Some("0x1002");
         let intel = gpu_vendor(render_node).as_deref() == Some("0x8086");
         issues.push(Issue {
@@ -224,6 +261,24 @@ pub fn run(render_node: &Path) -> DoctorReport {
         devices,
         issues,
     }
+}
+
+/// Render nodes other than `render_node`, e.g. on a laptop with two GPUs.
+fn other_render_nodes(render_node: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir("/dev/dri")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("renderD"))
+                && p != render_node
+        })
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
 }
 
 fn device_status(kind: &str, device: Option<&str>) -> DeviceStatus {
