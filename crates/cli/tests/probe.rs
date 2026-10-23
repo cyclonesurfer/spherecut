@@ -401,6 +401,42 @@ fn an_audio_setup_ffmpeg_does_not_implement_is_a_warning() {
 }
 
 #[test]
+fn an_empty_track_ffmpeg_cannot_set_up_is_a_warning() {
+    // bad-codec-config.mp4's video track, with its damaged `avcC`, emptied
+    // of samples: with no samples FFmpeg may have had too little to set
+    // the stream up from, so it is not called damaged.
+    let dir = tmp("empty-track");
+    media(&dir);
+    let mut f = std::fs::read(dir.join("bad-codec-config.mp4")).unwrap();
+    let tree = spherecut_media::mp4::read(&mut std::io::Cursor::new(&f)).unwrap();
+    let stbl = tree
+        .tracks()
+        .next()
+        .and_then(|t| t.path(&[b"mdia", b"minf", b"stbl"]))
+        .unwrap();
+    // Each table's count, after its version and flags (and in `stsz`, the
+    // size all samples share).
+    for (t, at) in [(b"stts", 4), (b"stsz", 8), (b"stsc", 4), (b"stco", 4)] {
+        let b = stbl.child(t).unwrap();
+        let at = (b.offset + b.header_len) as usize + at;
+        f[at..at + 4].fill(0);
+    }
+    let path = dir.join("empty-track.mp4");
+    std::fs::write(&path, &f).unwrap();
+
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "  warning    stream #0 (sample entry `avc1`) has no pixel format and cannot be decoded"
+        ),
+        "{stdout}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn deeply_nested_boxes_fail_fast() {
     // A `moov` holding 200 000 nested `udta` boxes once took the parser
     // past 2.8 GB of memory and a stack overflow.

@@ -861,6 +861,139 @@ mod tests {
         assert_eq!(t[MAX_LOG_LINES], "9 more lines not listed");
     }
 
+    /// A video or audio stream with everything FFmpeg needs to decode it.
+    fn stream(kind: StreamKind) -> StreamInfo {
+        StreamInfo {
+            index: 0,
+            kind,
+            codec: Some("h264".into()),
+            codec_tag: None,
+            profile: None,
+            level: None,
+            time_base: Rational::ONE,
+            start_pts: None,
+            duration: None,
+            frames: Some(10),
+            avg_frame_rate: None,
+            r_frame_rate: None,
+            bit_rate: None,
+            disposition: Vec::new(),
+            handler: None,
+            language: None,
+            video: (kind == StreamKind::Video).then(|| VideoInfo {
+                width: 64,
+                height: 32,
+                sample_aspect: None,
+                pix_fmt: Some("yuv420p".into()),
+                bit_depth: None,
+                chroma_subsampling: None,
+                color: ColorInfo {
+                    range: None,
+                    matrix: None,
+                    primaries: None,
+                    transfer: None,
+                    chroma_location: None,
+                },
+                field_order: None,
+                rotation_deg: None,
+            }),
+            audio: (kind == StreamKind::Audio).then(|| AudioInfo {
+                sample_rate: 48000,
+                channels: 2,
+                layout: None,
+                sample_fmt: Some("fltp".into()),
+            }),
+            spherical: TrackSpherical::default(),
+            tags: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_stream_ffmpeg_cannot_set_up_is_damage_only_with_samples_it_reads() {
+        let not_opened = || -> Result<(), ff::Error> { panic!("the decoder was opened") };
+        let h264 = || Some("h264".to_string());
+        let mut v = stream(StreamKind::Video);
+        assert!(undecodable(&v, h264(), || Ok(())).is_none());
+        v.video.as_mut().unwrap().pix_fmt = None;
+        let why = undecodable(&v, h264(), not_opened).unwrap();
+        assert!(matches!(
+            why,
+            Undecodable::Unconfigured("has no pixel format")
+        ));
+        // Damage when its track has samples of a codec FFmpeg reads.
+        let avc1 = Some(FourCc::new(b"avc1"));
+        assert!(why.is_damage(avc1, true));
+        // Without samples FFmpeg may have had too little to go on, and with
+        // a sample entry it does not read, it lacks the codec.
+        assert!(!why.is_damage(avc1, false));
+        assert!(!why.is_damage(Some(FourCc::new(b"zzzz")), true));
+        assert!(!why.is_damage(None, true));
+        assert_eq!(
+            why.describe("stream #0", false),
+            "stream #0 has no pixel format and cannot be decoded"
+        );
+        let mut a = stream(StreamKind::Audio);
+        a.audio.as_mut().unwrap().sample_fmt = None;
+        assert!(matches!(
+            undecodable(&a, Some("aac".into()), not_opened),
+            Some(Undecodable::Unconfigured("has no sample format"))
+        ));
+    }
+
+    #[test]
+    fn a_stream_without_a_decoder_in_this_build_is_a_warning() {
+        // FFmpeg finds the pixel or sample format with the decoder, so
+        // without one, the missing format is not the problem.
+        let not_opened = || -> Result<(), ff::Error> { panic!("the decoder was opened") };
+        let mut v = stream(StreamKind::Video);
+        v.video.as_mut().unwrap().pix_fmt = None;
+        let mut a = stream(StreamKind::Audio);
+        a.audio.as_mut().unwrap().sample_fmt = None;
+        for st in [v, a, stream(StreamKind::Video)] {
+            let why = undecodable(&st, None, not_opened).unwrap();
+            assert!(
+                matches!(&why, Undecodable::NoDecoder(c) if c == "h264"),
+                "{why:?}"
+            );
+            assert!(!why.is_damage(Some(FourCc::new(b"avc1")), true));
+            assert_eq!(
+                why.describe("stream #0", false),
+                "stream #0 cannot be decoded: this FFmpeg has no h264 decoder"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decoder_that_refuses_the_codec_setup_is_damage_unless_it_lacks_a_feature() {
+        // ffmpeg-next words its errors once FFmpeg is set up.
+        crate::init();
+        let a = stream(StreamKind::Audio);
+        let refused = |e| undecodable(&a, Some("aac".into()), || Err(e)).unwrap();
+        let why = refused(ff::Error::InvalidData);
+        // Whatever the sample entry, and with no samples too.
+        assert!(why.is_damage(None, false));
+        assert_eq!(
+            why.describe("stream #1", true),
+            "stream #1 cannot be opened by FFmpeg's aac decoder (Invalid data found when processing input), so its codec setup is damaged"
+        );
+        for e in [
+            ff::Error::PatchWelcome,
+            ff::Error::Experimental,
+            ff::Error::Other {
+                errno: ff::util::error::ENOSYS,
+            },
+        ] {
+            assert!(
+                !refused(e).is_damage(Some(FourCc::new(b"mp4a")), true),
+                "{e}"
+            );
+        }
+        // Only video and audio are checked.
+        let mut d = stream(StreamKind::Data);
+        d.codec = None;
+        assert!(undecodable(&d, None, || Err(ff::Error::InvalidData)).is_none());
+    }
+
     #[test]
     fn non_matroska_input_has_no_segment() {
         let doc_type = el(0x4282, b"webm", Some(4));
