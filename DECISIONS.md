@@ -448,7 +448,11 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   `\xd1rak`. 28 of the 32 one-bit flips of `trak` are still printable.
   FFmpeg-written and Pat's X5 tracks start with `tkhd`. A renamed `mdia`,
   `minf` or `stbl` needs no check of its own, because the track then has
-  none, which is damage already;
+  none, which is damage already. `free` and `skip` count too, although
+  they mark space for readers to skip: a track a tool dropped in place by
+  retyping it looks the same as a damaged one, so such a file fails
+  `probe` and `inject` refuses it, rather than a stream going missing
+  without a word. No such file turned up in the sweeps;
 - an `sv3d` in a sample entry without `svhd`, without `proj`, or with a
   `proj` that has no `prhd`. FFmpeg then ignores the whole `sv3d`, saying
   no more than "Missing projection box" in its log, so a `proj` renamed
@@ -504,8 +508,10 @@ Not found without decoding: damage in `mdat`, and damage in `moov` that
 leaves the structure consistent, such as changed sample sizes or times
 (`stts`, `ctts`, `elst`), chunk offsets that still point into `mdat`,
 bits of a parameter set, or a box other than those above renamed to
-another printable type, such as `edts`. Bytes of `mdat` that no chunk
-uses are not counted as damage.
+another printable type, such as `edts`, `mvhd`, which leaves FFmpeg
+without the movie's timescale and display matrix, or `st3d`, which loses
+the stereo mode. Bytes of `mdat` that no chunk uses are not counted as
+damage.
 
 Fuzzing, with proptest, in `mp4::tests::fuzz`, under overflow checks:
 structure-aware random box trees (containers, `stsd` and sample entries,
