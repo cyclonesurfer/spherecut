@@ -640,12 +640,13 @@ fn parse_children(
             break;
         }
         // ISO/IEC 14496-12 allows a size of 0 only for the last top-level
-        // box. Inside one it swallows the boxes after it, which FFmpeg
-        // then skips without a word. Zero bytes to the end are padding or
-        // QuickTime's terminator, which unprintable_types allows.
+        // box. Inside one, the box runs to the end of its parent, so FFmpeg
+        // reads the boxes after it as its payload and loses them. Zero
+        // bytes to the end are padding, or QuickTime's terminator, which
+        // unprintable_types allows only at the end of a sample entry.
         if h.to_end && rest.iter().any(|&x| x != 0) {
             walk.warn(format!(
-                "child box `{}` at {at} has size 0, so it runs to the end of its parent and hides the boxes after it",
+                "child box `{}` at {at} has size 0, which only the last top-level box may have; anything after it in its parent is read as part of it",
                 h.fourcc
             ));
         }
@@ -792,7 +793,8 @@ fn self_contained(minf: &Mp4Box) -> bool {
 /// `udta`, `meta` or `ilst`: QuickTime's `©nam` and the like start with
 /// the byte 0xA9.
 const REGISTERED_CHILDREN: &[&[u8; 4]] = &[
-    b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd", b"sv3d", b"proj",
+    b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd", b"sv3d", b"proj", b"edts", b"dinf",
+    b"mvex", b"tref",
 ];
 
 /// Whether a box type is text, as registered types are.
@@ -2176,10 +2178,36 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn a_zeroed_edit_list_is_damage() {
+        // FFmpeg skips an `elst` whose header was zeroed, and the track then
+        // starts at the wrong time. `edts`, `dinf`, `mvex` and `tref` hold
+        // only registered types.
+        let f = minimal();
+        let trak = f.windows(4).position(|w| w == b"trak").unwrap() - 4;
+        let edts = bx(
+            b"edts",
+            &full(b"elst", 0, 0, &words(&[1, 1000, 2000, 0x10000])),
+        );
+        let g = insert(&f, trak + 8, &edts, &[b"trak", b"moov"]);
+        assert!(damage_of(g.clone()).is_empty(), "{:?}", damage_of(g));
+        let at = trak + 16;
+        for range in [at + 4..at + 8, at..at + edts.len() - 8] {
+            let mut h = g.clone();
+            h[range].fill(0);
+            assert_eq!(
+                damage_of(h),
+                [format!(
+                    "box `\\x00\\x00\\x00\\x00` at offset {at} in `edts` has a type that is not text, so its header is damaged"
+                )]
+            );
+        }
+    }
+
     /// The warning for a child box `t` at `at` whose size field is 0.
     fn sized_to_end(at: usize, t: &str) -> String {
         format!(
-            "child box `{t}` at {at} has size 0, so it runs to the end of its parent and hides the boxes after it"
+            "child box `{t}` at {at} has size 0, which only the last top-level box may have; anything after it in its parent is read as part of it"
         )
     }
 
@@ -2229,9 +2257,10 @@ pub(crate) mod tests {
         enum Size {
             Short,
             Large,
-            /// Size 0: to the end of the file. Only the last top-level box
-            /// is encoded this way, as ISO/IEC 14496-12 allows; others fall
-            /// back to `Short`.
+            /// Size 0: to the end of the parent (or file). Only the last box
+            /// of a list is encoded this way; others fall back to `Short`.
+            /// Below the top level the parser warns about it (see
+            /// [`sized_to_end`]).
             ToEnd,
         }
 
@@ -2251,33 +2280,52 @@ pub(crate) mod tests {
             body: Body,
         }
 
-        /// Encode the children of a box, or with `top` the top level.
-        fn encode_list(list: &[Gen], top: bool) -> Vec<u8> {
+        fn encode_list(list: &[Gen]) -> Vec<u8> {
             let mut out = Vec::new();
             for (i, g) in list.iter().enumerate() {
-                encode(g, top && i + 1 == list.len(), &mut out);
+                encode(g, i + 1 == list.len(), &mut out);
             }
             out
         }
 
-        /// Encode `g`; `to_end` lets it take size 0.
-        fn encode(g: &Gen, to_end: bool, out: &mut Vec<u8>) {
+        /// How many boxes below the top level `list` encodes with size 0:
+        /// the last of each list of children whose size is `ToEnd`.
+        fn sized_to_end(list: &[Gen]) -> usize {
+            list.iter()
+                .map(|g| {
+                    let kids: &[Gen] = match &g.body {
+                        Body::Container(_, c) | Body::Stsd(c) | Body::Entry(_, c) => c,
+                        Body::Leaf(..) | Body::Uuid(..) => &[],
+                    };
+                    let last = matches!(
+                        kids.last(),
+                        Some(Gen {
+                            size: Size::ToEnd,
+                            ..
+                        })
+                    );
+                    usize::from(last) + sized_to_end(kids)
+                })
+                .sum()
+        }
+
+        fn encode(g: &Gen, last: bool, out: &mut Vec<u8>) {
             let (t, body) = match &g.body {
                 Body::Leaf(t, p) => (*t, p.clone()),
                 Body::Uuid(u, p) => (*b"uuid", [&u[..], p].concat()),
-                Body::Container(t, c) => (*t, encode_list(c, false)),
+                Body::Container(t, c) => (*t, encode_list(c)),
                 Body::Stsd(c) => {
                     let mut p = vec![0u8; 4];
                     p.extend_from_slice(&(c.len() as u32).to_be_bytes());
-                    p.extend_from_slice(&encode_list(c, false));
+                    p.extend_from_slice(&encode_list(c));
                     (*b"stsd", p)
                 }
                 Body::Entry(t, c) => {
                     let fixed = if t == b"hvc1" { 78 } else { 28 };
-                    (*t, [vec![0u8; fixed], encode_list(c, false)].concat())
+                    (*t, [vec![0u8; fixed], encode_list(c)].concat())
                 }
             };
-            match (g.size, to_end) {
+            match (g.size, last) {
                 (Size::ToEnd, true) => out.extend_from_slice(&0u32.to_be_bytes()),
                 (Size::Large, _) => {
                     out.extend_from_slice(&1u32.to_be_bytes());
@@ -2366,7 +2414,7 @@ pub(crate) mod tests {
         fn file() -> impl Strategy<Value = (Vec<Gen>, Vec<u8>)> {
             vec(tree(), 1..6).prop_map(|top| {
                 let mut f = bx(b"ftyp", b"isom\0\0\x02\0isom");
-                f.extend_from_slice(&encode_list(&top, true));
+                f.extend_from_slice(&encode_list(&top));
                 (top, f)
             })
         }
@@ -2400,7 +2448,16 @@ pub(crate) mod tests {
             #[test]
             fn well_formed_trees_parse_exactly((top, f) in file()) {
                 let t = parse_bounded(&f)?.unwrap_or_default();
-                prop_assert!(t.warnings.is_empty(), "{:?}", t.warnings);
+                // The only warnings are for boxes below the top level with
+                // size 0, one each, up to the limit and a count of the rest.
+                let n = sized_to_end(&top);
+                let listed = n.min(MAX_WARNINGS) + usize::from(n > MAX_WARNINGS);
+                prop_assert_eq!(t.warnings.len(), listed, "{:?}", t.warnings);
+                prop_assert!(
+                    t.warnings.iter().take(MAX_WARNINGS).all(|w| w.contains("has size 0")),
+                    "{:?}",
+                    t.warnings
+                );
                 prop_assert!(t.truncated.is_none());
                 prop_assert_eq!(t.trailing_bytes, 0);
                 prop_assert_eq!(t.top.len(), top.len() + 1);
