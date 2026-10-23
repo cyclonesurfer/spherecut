@@ -542,10 +542,28 @@ mod tests {
     use super::*;
     use crate::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 
-    /// Ten 256x128 frames of H.264.
-    fn clip() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("spherecut-decode-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// A test's own directory in the system's temp dir (unit tests get no
+    /// CARGO_TARGET_TMPDIR), removed with what it holds when dropped, so
+    /// also when the test fails.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("spherecut-decode-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    /// Ten 256x128 frames of H.264, in `dir`.
+    fn clip(dir: &TempDir) -> PathBuf {
         let settings = VideoSettings {
             encoder: "libx264".into(),
             width: 256,
@@ -555,7 +573,7 @@ mod tests {
             options: Vec::new(),
             bt709_limited: true,
         };
-        let mut w = Mp4Writer::create(&dir.join("clip.mp4"), &settings, None).unwrap();
+        let mut w = Mp4Writer::create(&dir.0.join("clip.mp4"), &settings, None).unwrap();
         for i in 0..10 {
             let luma = vec![16 + 20 * i; 256 * 128];
             let chroma = vec![128; 128 * 64];
@@ -570,7 +588,8 @@ mod tests {
         // A decoder that ignores its device decodes in software without
         // asking get_format; one opened in software and then given a
         // device is the same.
-        let mut d = VideoDecoder::open(&clip(), None, None).unwrap();
+        let dir = TempDir::new("never-asked");
+        let mut d = VideoDecoder::open(&clip(&dir), None, None).unwrap();
         d.hw = Some(Arc::new(HwDevice::vulkan_without_context()));
         for _ in 0..2 {
             match d.next_frame() {
@@ -581,6 +600,10 @@ mod tests {
                 r => panic!("expected HwUnsupported, got {r:?}"),
             }
         }
+        // The clip goes with its directory.
+        let path = dir.0.clone();
+        drop(dir);
+        assert!(!path.exists());
     }
 
     /// A grey 64x16 YUV420P frame, in buffers from av_frame_get_buffer.
