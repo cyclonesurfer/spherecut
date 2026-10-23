@@ -1458,14 +1458,14 @@ fn vulkan_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issu
 }
 
 /// What Vulkan Video can't decode, or decodes wrongly, on FFmpeg's Vulkan
-/// device, a GPU. Only notes: VA-API is the hardware decoder, and Vulkan
-/// Video the second one.
+/// device, a GPU. VA-API is the hardware decoder, and Vulkan Video the
+/// second one, so these are notes. The exception is wrong output where
+/// VA-API can't decode: Vulkan Video's wrong pictures are used there, which
+/// is a warning, as VA-API's own wrong output is.
 fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) {
-    // What decodes `formats`, which Vulkan Video refuses or, with
-    // `vulkan_wrong`, decodes wrongly. VA-API comes first. Only a refusal
-    // falls back, to Vulkan Video and then the CPU (D3): a driver that
-    // decodes wrongly gives no error, so its pictures are used.
-    let impact = |formats: &[&str], vulkan_wrong: bool| -> String {
+    // `formats` split by what VA-API, which comes first, does with them:
+    // decodes them, decodes them wrongly, or can't.
+    fn on_vaapi<'a>(r: &DoctorReport, formats: &[&'a str]) -> [Vec<&'a str>; 3] {
         let (mut works, mut wrong, mut unable) = (Vec::new(), Vec::new(), Vec::new());
         for &f in formats {
             match r
@@ -1478,6 +1478,14 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
                 _ => unable.push(f),
             }
         }
+        [works, wrong, unable]
+    }
+    // What decodes `formats`, which Vulkan Video refuses or, with
+    // `vulkan_wrong`, decodes wrongly. Only a refusal falls back, to Vulkan
+    // Video and then the CPU (D3): a driver that decodes wrongly gives no
+    // error, so its pictures are used.
+    let impact = |formats: &[&str], vulkan_wrong: bool| -> String {
+        let [works, wrong, unable] = on_vaapi(r, formats);
         if works.len() == formats.len() {
             return "none while VA-API decodes them, as it does here".into();
         }
@@ -1556,10 +1564,16 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
             Some((Some(one), None) | (None, Some(one))) => one.to_string(),
             _ => "the Vulkan driver".to_string(),
         };
+        let formats = formats(&wrong);
+        let [.., unable] = on_vaapi(r, &formats);
         out.push(Issue {
-            severity: Severity::Info,
+            severity: if unable.is_empty() {
+                Severity::Info
+            } else {
+                Severity::Warning
+            },
             what: format!("Vulkan Video on {on} {}", wrongly("decodes", &wrong)),
-            impact: impact(&formats(&wrong), true),
+            impact: impact(&formats, true),
             fix: fx.newer_driver(&driver),
         });
     }
@@ -2232,12 +2246,14 @@ mod tests {
         let hevc = ["HEVC Main", "HEVC Main 10"];
 
         // Vulkan Video decodes wrongly where VA-API refuses: its pictures
-        // are used, since only a refusal falls back.
+        // are used, since only a refusal falls back. That is a warning, as
+        // VA-API's wrong output is.
         let mut r = healthy(Distro::Arch);
         for f in hevc {
             wrong(&mut r.decode_checks, "vulkan", f, differ);
         }
         fail(&mut r.decode_checks, "vaapi", &["HEVC Main"], Fault::Driver);
+        assert_eq!(vulkan_note(&r).severity, Severity::Warning);
         assert_eq!(
             vulkan_note(&r).impact,
             "VA-API still decodes HEVC Main 10; VA-API can't decode HEVC Main, and Vulkan \
@@ -2258,18 +2274,29 @@ mod tests {
         );
         // Wrong on both: VA-API comes first, and its pictures are used.
         wrong(&mut r.decode_checks, "vaapi", "HEVC Main 10", differ);
+        assert_eq!(vulkan_note(&r).severity, Severity::Warning);
         assert_eq!(
             vulkan_note(&r).impact,
             "VA-API decodes HEVC Main 10, but wrongly; VA-API can't decode HEVC Main, and \
              Vulkan Video gives no error, so nothing falls back to the CPU: the viewer and \
              exports would show its wrong pictures"
         );
+        // VA-API's warning covers what it decodes wrongly, so with none of
+        // Vulkan Video's pictures used, that is a note again.
+        wrong(&mut r.decode_checks, "vaapi", "HEVC Main", differ);
+        assert_eq!(vulkan_note(&r).severity, Severity::Info);
+        assert_eq!(
+            vulkan_note(&r).impact,
+            "VA-API decodes HEVC Main and HEVC Main 10, but wrongly"
+        );
 
         // The reverse: Vulkan Video refuses what VA-API decodes wrongly.
-        // Nothing falls back from VA-API, so the CPU doesn't decode it.
+        // Nothing falls back from VA-API, so the CPU doesn't decode it. A
+        // refusal is only a note.
         let mut r = healthy(Distro::Arch);
         fail(&mut r.decode_checks, "vulkan", &hevc, Fault::Driver);
         wrong(&mut r.decode_checks, "vaapi", "HEVC Main", differ);
+        assert_eq!(vulkan_note(&r).severity, Severity::Info);
         assert_eq!(
             vulkan_note(&r).impact,
             "VA-API still decodes HEVC Main 10; VA-API decodes HEVC Main, but wrongly"
