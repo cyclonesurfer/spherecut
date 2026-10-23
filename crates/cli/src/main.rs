@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use spherecut_core::brand;
+use spherecut_media::probe::StreamKind;
 
 mod show;
 
@@ -20,7 +21,7 @@ struct Cli {
 enum Cmd {
     /// Show container, streams, codecs, color, timing, spherical metadata
     /// and the detected camera for one or more files. Fails if any file
-    /// cannot be read or is truncated or corrupt.
+    /// cannot be read, is truncated or corrupt, or has no video or audio.
     Probe {
         files: Vec<PathBuf>,
         /// Print JSON instead of text.
@@ -77,6 +78,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
                                 n => format!(" (and {n} more problems)"),
                             };
                             eprintln!("error: {} is damaged: {first}{more}", f.display());
+                        } else if !r
+                            .streams
+                            .iter()
+                            .any(|s| matches!(s.kind, StreamKind::Video | StreamKind::Audio))
+                        {
+                            // FFmpeg opens text files as subtitles or lyrics.
+                            failed = true;
+                            eprintln!(
+                                "error: {} has no video or audio stream; FFmpeg reads it as {}",
+                                f.display(),
+                                r.container.format_long
+                            );
                         }
                         reports.push(serde_json::to_value(&r)?);
                     }

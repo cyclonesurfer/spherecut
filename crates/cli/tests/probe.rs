@@ -372,3 +372,21 @@ fn matroska_cut_short_fails() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn files_without_video_or_audio_fail() {
+    // FFmpeg opens a text file that starts like song lyrics, but it is not
+    // a media file.
+    let dir = tmp("lyrics");
+    let path = dir.join("lyrics.txt");
+    std::fs::write(&path, b"[00:01.00]not a video\n").unwrap();
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stdout.contains("container  lrc"), "{stdout}");
+    assert!(
+        stderr.contains("lyrics.txt has no video or audio stream; FFmpeg reads it as"),
+        "{stderr}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
