@@ -9,8 +9,8 @@ with FFmpeg, in software or on the GPU through VA-API.
 
 It runs offline: no accounts, no telemetry, no network access.
 
-**Status: early.** Milestone M0 (foundations) is done pending a hardware
-rerun; there is no GUI yet.
+**Status: early.** Milestone M0 (foundations) is done; M1, the viewer, is
+in progress, so there is no GUI yet.
 What works today is the `spherecut` command line tool:
 
 - `spherecut probe <file>...` shows what a file is: container, streams,
