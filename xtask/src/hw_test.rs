@@ -10,9 +10,15 @@
 //! `spherecut_testkit::tier2::require_*`, which fails the test with a
 //! `TIER2-SKIP:` marker when a prerequisite (device, sample) is missing; this
 //! module reports those as skipped with the reason, never as passed.
+//!
+//! The Tier 2 tests are listed (`cargo test -- --ignored --list`) before
+//! they run, and the report has a line for every listed test. A test that
+//! never reports a result, because its binary did not start or crashed
+//! first, shows up as "did not run" and fails the run.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -20,6 +26,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::workspace_root;
+
+/// What a skipped test's panic message starts with
+/// (`spherecut_testkit::tier2::SKIP_MARKER`).
+const SKIP_MARKER: &str = "TIER2-SKIP:";
+
+/// `--quick` leaves out tests whose names contain this: debug-build timings
+/// would only mislead.
+const BENCH: &str = "bench_";
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -46,11 +60,15 @@ fn capture(program: &str, args: &[&str]) -> Captured {
     capture_env(program, args, &[])
 }
 
-fn capture_env(program: &str, args: &[&str], env: &[(&str, &str)]) -> Captured {
-    let cmdline = std::iter::once(program)
+fn cmdline(program: &str, args: &[&str]) -> String {
+    std::iter::once(program)
         .chain(args.iter().copied())
         .collect::<Vec<_>>()
-        .join(" ");
+        .join(" ")
+}
+
+fn capture_env(program: &str, args: &[&str], env: &[(&str, &str)]) -> Captured {
+    let cmdline = cmdline(program, args);
     let start = Instant::now();
     let out = Command::new(program)
         .args(args)
@@ -82,6 +100,42 @@ fn capture_env(program: &str, args: &[&str], env: &[(&str, &str)]) -> Captured {
             text: format!("could not run `{program}`: {e}"),
             elapsed,
         },
+    }
+}
+
+/// Like `capture_env`, but stdout and stderr share one pipe, so the text is
+/// in the order it was written. `cargo test` names each test binary on
+/// stderr and the binary prints its results on stdout; only the merged
+/// stream says which binary a result came from.
+fn capture_merged(program: &str, args: &[&str], env: &[(&str, &str)]) -> Captured {
+    let cmdline = cmdline(program, args);
+    let start = Instant::now();
+    let run = || -> std::io::Result<(bool, String)> {
+        let (mut reader, writer) = std::io::pipe()?;
+        // The Command is a temporary, so its copies of the write end close
+        // once the child has started and the read below ends at EOF.
+        let mut child = Command::new(program)
+            .args(args)
+            .envs(env.iter().copied())
+            .current_dir(workspace_root())
+            .stdin(Stdio::null())
+            .stdout(writer.try_clone()?)
+            .stderr(writer)
+            .spawn()?;
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        let status = child.wait()?;
+        Ok((
+            status.success(),
+            String::from_utf8_lossy(&bytes).into_owned(),
+        ))
+    };
+    let (ok, text) = run().unwrap_or_else(|e| (false, format!("could not run `{program}`: {e}")));
+    Captured {
+        cmdline,
+        ok,
+        text,
+        elapsed: start.elapsed(),
     }
 }
 
@@ -266,71 +320,322 @@ fn gpu_vendor() -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Results of one libtest run, parsed from its text output.
-#[derive(Default)]
-struct TestResults {
-    passed: Vec<String>,
-    failed: Vec<(String, String)>,
-    skipped: Vec<(String, String)>,
-    ignored: Vec<String>,
+/// How one Tier 2 test ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Outcome {
+    Passed,
+    /// With the test's output.
+    Failed(String),
+    /// With the `TIER2-SKIP:` reason.
+    Skipped(String),
+    /// A benchmark, left out by `--quick`.
+    LeftOut,
+    /// Listed, but no result came back.
+    DidNotRun,
 }
 
-fn parse_libtest(output: &str) -> TestResults {
-    let mut r = TestResults::default();
-    let mut failures: BTreeMap<String, String> = BTreeMap::new();
-    let mut current: Option<String> = None;
-    let mut buf = String::new();
+/// Splits `cargo test` output into one part per test binary. A binary is
+/// named after its executable without Cargo's hash (`tier2_samples`), and
+/// doc tests as `<crate> (doc-tests)`. Text before the first binary
+/// (compiler output) is dropped.
+fn split_by_binary(output: &str) -> Vec<(String, String)> {
+    let mut parts: Vec<(String, String)> = Vec::new();
+    // Short name -> the executable that has it.
+    let mut taken: BTreeMap<&str, &str> = BTreeMap::new();
     for line in output.lines() {
-        if let Some((name, status)) = line
-            .strip_prefix("test ")
-            .and_then(|rest| rest.rsplit_once(" ... "))
-        {
-            let name = name.trim().to_string();
-            match status.trim() {
-                "ok" => r.passed.push(name),
-                "FAILED" => {
-                    failures.entry(name).or_default();
+        // Cargo indents its status lines; test output that happens to say
+        // "Running" usually isn't.
+        let l = line.trim_start();
+        let indented = l.len() < line.len();
+        let exe = l
+            .strip_prefix("Running ")
+            .and_then(|r| r.strip_suffix(')'))
+            .and_then(|r| r.rsplit_once(" ("))
+            .map(|(_, exe)| exe)
+            .filter(|_| indented);
+        let name = if let Some(exe) = exe {
+            let file = exe.rsplit('/').next().unwrap_or(exe);
+            let short = strip_hash(file);
+            match taken.get(short) {
+                // Two packages can each have a `tests/foo.rs`.
+                Some(&other) if other != exe => Some(file.to_string()),
+                _ => {
+                    taken.insert(short, exe);
+                    Some(short.to_string())
                 }
-                s if s.starts_with("ignored") => r.ignored.push(name),
-                _ => {}
             }
-            continue;
+        } else {
+            l.strip_prefix("Doc-tests ")
+                .filter(|_| indented)
+                .map(|c| format!("{} (doc-tests)", c.trim()))
+        };
+        match name {
+            Some(name) => parts.push((name, String::new())),
+            None => {
+                if let Some((_, text)) = parts.last_mut() {
+                    text.push_str(line);
+                    text.push('\n');
+                }
+            }
         }
+    }
+    parts
+}
+
+/// `tier2_samples-2dfb113bee85abda` -> `tier2_samples`.
+fn strip_hash(file: &str) -> &str {
+    match file.rsplit_once('-') {
+        Some((name, hash)) if hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            name
+        }
+        _ => file,
+    }
+}
+
+/// The tests in each binary, from `cargo test -- --ignored --list`.
+fn parse_list(output: &str) -> BTreeMap<String, Vec<String>> {
+    split_by_binary(output)
+        .into_iter()
+        .map(|(bin, text)| {
+            let tests = text
+                .lines()
+                .filter_map(|l| l.strip_suffix(": test"))
+                .map(str::to_string)
+                .collect();
+            (bin, tests)
+        })
+        .collect()
+}
+
+/// Results from one binary's libtest output, run with `--test-threads=1`.
+///
+/// Libraries such as libva write straight to stderr, which can split a
+/// `test name ... ok` line, so a result is also taken from a bare `ok` or
+/// `FAILED` line, from the failure sections and from the `failures:` list
+/// at the end. A test that started but has no result failed: its binary
+/// stopped (crashed, aborted, was killed) while it ran, and what follows in
+/// the output says how.
+fn parse_libtest(output: &str) -> BTreeMap<String, Outcome> {
+    let lines: Vec<&str> = output.lines().collect();
+    // (name, status, line index), in the order they started.
+    let mut started: Vec<(String, String, usize)> = Vec::new();
+    let mut sections: BTreeMap<String, String> = BTreeMap::new();
+    let mut listed: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    let mut in_list = false;
+    let mut finished = false;
+    for (i, &line) in lines.iter().enumerate() {
         if let Some(name) = line
             .strip_prefix("---- ")
             .and_then(|l| l.strip_suffix(" stdout ----"))
         {
-            if let Some(prev) = current.take() {
-                failures.insert(prev, std::mem::take(&mut buf));
-            }
+            sections.entry(name.to_string()).or_default();
             current = Some(name.to_string());
-            continue;
-        }
-        if current.is_some() {
-            if line == "failures:" || line.starts_with("test result:") {
-                if let Some(prev) = current.take() {
-                    failures.insert(prev, std::mem::take(&mut buf));
-                }
-            } else {
-                buf.push_str(line);
-                buf.push('\n');
+        } else if line == "failures:" {
+            current = None;
+            in_list = true;
+        } else if line.starts_with("test result:") {
+            current = None;
+            in_list = false;
+            finished = true;
+        } else if let Some(name) = &current {
+            let text = sections.entry(name.clone()).or_default();
+            text.push_str(line);
+            text.push('\n');
+        } else if let Some((name, status)) = line
+            .strip_prefix("test ")
+            .and_then(|l| l.split_once(" ... "))
+        {
+            started.push((name.trim().to_string(), status.trim().to_string(), i));
+        } else if matches!(line, "ok" | "FAILED") {
+            if let Some((_, status, _)) = started.last_mut()
+                && !matches!(status.as_str(), "ok" | "FAILED")
+            {
+                *status = line.to_string();
             }
+        } else if in_list && let Some(name) = line.strip_prefix("    ") {
+            listed.push(name.trim().to_string());
         }
     }
-    if let Some(prev) = current.take() {
-        failures.insert(prev, buf);
-    }
-    for (name, out) in failures {
-        if let Some(reason) = out.lines().find_map(|l| {
-            l.split_once("TIER2-SKIP:")
-                .map(|(_, r)| r.trim().to_string())
-        }) {
-            r.skipped.push((name, reason));
+    let mut out = BTreeMap::new();
+    for (name, status, at) in &started {
+        let outcome = if let Some(text) = sections.get(name) {
+            failure(text)
+        } else if status == "FAILED" || listed.contains(name) {
+            Outcome::Failed(String::new())
+        } else if status.starts_with("ignored") {
+            // Not run, so no result (`--ignored` runs only these, though).
+            continue;
+        } else if status == "ok" || finished {
+            // A failed test would be in the `failures:` list.
+            Outcome::Passed
         } else {
-            r.failed.push((name, out));
+            let rest = std::iter::once(status.as_str()).chain(lines[at + 1..].iter().copied());
+            Outcome::Failed(format!(
+                "The test binary stopped before this test reported a result:\n\n{}",
+                rest.collect::<Vec<_>>().join("\n")
+            ))
+        };
+        out.insert(name.clone(), outcome);
+    }
+    for (name, text) in &sections {
+        out.entry(name.clone()).or_insert_with(|| failure(text));
+    }
+    for name in listed {
+        out.entry(name).or_insert(Outcome::Failed(String::new()));
+    }
+    out
+}
+
+/// A failed test's outcome: skipped if its panic message starts with the
+/// skip marker.
+fn failure(text: &str) -> Outcome {
+    let mut lines = text.lines();
+    // libtest prints `thread '…' panicked at file:line:col:`, then the message.
+    if lines.any(|l| l.contains(" panicked at "))
+        && let Some(reason) = lines.next().and_then(|m| m.strip_prefix(SKIP_MARKER))
+    {
+        return Outcome::Skipped(reason.trim().to_string());
+    }
+    Outcome::Failed(text.to_string())
+}
+
+/// Every listed test exactly once, as `binary::test` in name order, with how
+/// it ended. A listed test without a result did not run, unless it is a
+/// benchmark that `--quick` leaves out. Results for tests that were not
+/// listed are kept too.
+fn merge(
+    listed: &BTreeMap<String, Vec<String>>,
+    ran: &BTreeMap<String, BTreeMap<String, Outcome>>,
+    quick: bool,
+) -> Vec<(String, Outcome)> {
+    let mut all: BTreeMap<(&str, &str), Outcome> = BTreeMap::new();
+    for (bin, tests) in listed {
+        for t in tests {
+            let missing = if quick && t.contains(BENCH) {
+                Outcome::LeftOut
+            } else {
+                Outcome::DidNotRun
+            };
+            let o = ran.get(bin).and_then(|r| r.get(t)).cloned();
+            all.insert((bin.as_str(), t.as_str()), o.unwrap_or(missing));
         }
     }
-    r
+    for (bin, results) in ran {
+        for (t, o) in results {
+            all.entry((bin.as_str(), t.as_str()))
+                .or_insert_with(|| o.clone());
+        }
+    }
+    all.into_iter()
+        .map(|((bin, t), o)| (format!("{bin}::{t}"), o))
+        .collect()
+}
+
+/// The Tier 2 part of a run.
+struct Tier2 {
+    /// `cargo test -- --ignored --list`: what should run.
+    list: Captured,
+    run: Captured,
+    /// Every Tier 2 test once.
+    results: Vec<(String, Outcome)>,
+}
+
+impl Tier2 {
+    fn count(&self, f: impl Fn(&Outcome) -> bool) -> usize {
+        self.results.iter().filter(|(_, o)| f(o)).count()
+    }
+
+    /// `cargo test` failed, but no test failed or skipped (a skip is a
+    /// failure to cargo), so the failure is somewhere else.
+    fn unexplained_failure(&self) -> bool {
+        !self.run.ok && self.count(|o| matches!(o, Outcome::Failed(_) | Outcome::Skipped(_))) == 0
+    }
+
+    /// Why the Tier 2 part failed; empty if it did not. Skips alone are fine.
+    fn problems(&self) -> Vec<String> {
+        let mut p = Vec::new();
+        if !self.list.ok {
+            p.push("listing the Tier 2 tests failed, so some may be missing".to_string());
+        }
+        let failed = self.count(|o| matches!(o, Outcome::Failed(_)));
+        if failed > 0 {
+            p.push(format!("{failed} Tier 2 test(s) failed"));
+        }
+        let missing = self.count(|o| *o == Outcome::DidNotRun);
+        if missing > 0 {
+            p.push(format!("{missing} Tier 2 test(s) did not run"));
+        }
+        if self.unexplained_failure() {
+            p.push("`cargo test` failed without a failing test".to_string());
+        }
+        p
+    }
+
+    /// One line with every count, so nothing missing can look clean.
+    fn counts(&self, quick: bool) -> String {
+        let left_out = if quick {
+            format!(
+                "{} left out by `--quick`, ",
+                self.count(|o| *o == Outcome::LeftOut)
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "Tier 2: {} passed, {} failed, {} skipped, {left_out}{} did not run ({} tests)",
+            self.count(|o| *o == Outcome::Passed),
+            self.count(|o| matches!(o, Outcome::Failed(_))),
+            self.count(|o| matches!(o, Outcome::Skipped(_))),
+            self.count(|o| *o == Outcome::DidNotRun),
+            self.results.len()
+        )
+    }
+}
+
+/// Lists the Tier 2 tests, runs them all, and pairs every listed test with
+/// its outcome.
+fn run_tier2(quick: bool, samples: &Path, bench_out: &Path) -> Tier2 {
+    // A skip is a test failure to cargo; without --no-fail-fast it stops
+    // after the first binary that has one.
+    let mut cargo = vec!["test", "--workspace", "--no-fail-fast", "--color", "never"];
+    if !quick {
+        cargo.push("--release");
+    }
+    eprintln!("==> listing Tier 2 tests");
+    let mut args = cargo.clone();
+    args.extend(["--", "--ignored", "--list"]);
+    let list = capture_merged("cargo", &args, &[]);
+
+    eprintln!("==> running Tier 2 tests");
+    let mut args = cargo;
+    args.extend(["--", "--ignored", "--test-threads=1"]);
+    if quick {
+        args.extend(["--skip", BENCH]);
+    }
+    // A stale file would mix in another run's numbers.
+    if let Err(e) = std::fs::remove_file(bench_out)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("warning: could not clear {}: {e}", bench_out.display());
+    }
+    let samples_s = samples.to_string_lossy().into_owned();
+    let bench_s = bench_out.to_string_lossy().into_owned();
+    let run = capture_merged(
+        "cargo",
+        &args,
+        &[
+            ("SPHERECUT_TIER2", "1"),
+            ("SPHERECUT_SAMPLES", &samples_s),
+            ("SPHERECUT_BENCH_OUT", &bench_s),
+        ],
+    );
+    let ran = split_by_binary(&run.text)
+        .into_iter()
+        .map(|(bin, text)| (bin, parse_libtest(&text)))
+        .collect();
+    let results = merge(&parse_list(&list.text), &ran, quick);
+    Tier2 { list, run, results }
 }
 
 /// Cargo's target directory as `cargo metadata` gives it, which follows
@@ -485,7 +790,7 @@ pub fn run(a: Args) -> Result<()> {
     let build_blocked = missing.iter().any(|m| m.blocks == "building Spherecut");
 
     let mut build: Option<Captured> = None;
-    let mut tests: Option<(Captured, TestResults)> = None;
+    let mut tier2: Option<Tier2> = None;
     let mut doctor: Option<Captured> = None;
     if build_blocked {
         eprintln!("==> build prerequisites missing; skipping build and tests");
@@ -501,38 +806,20 @@ pub fn run(a: Args) -> Result<()> {
         let built = b.ok;
         build = Some(b);
         if built {
-            eprintln!("==> Tier 2 tests");
-            let samples_s = samples.to_string_lossy().into_owned();
-            let mut args = vec!["test", "--workspace"];
-            if !a.quick {
-                args.push("--release");
-            }
-            args.extend(["--", "--ignored", "--test-threads=1"]);
-            if a.quick {
-                // Debug-build timings would only mislead.
-                args.extend(["--skip", "bench_"]);
-            }
-            // A stale file would mix in another run's numbers.
-            if let Err(e) = std::fs::remove_file(&bench_out)
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
-                eprintln!("warning: could not clear {}: {e}", bench_out.display());
-            }
-            let bench_s = bench_out.to_string_lossy().into_owned();
-            let t = capture_env(
-                "cargo",
-                &args,
-                &[
-                    ("SPHERECUT_TIER2", "1"),
-                    ("SPHERECUT_SAMPLES", &samples_s),
-                    ("SPHERECUT_BENCH_OUT", &bench_s),
-                ],
-            );
-            let parsed = parse_libtest(&t.text);
-            tests = Some((t, parsed));
+            tier2 = Some(run_tier2(a.quick, &samples, &bench_out));
             let exe = target.join(profile).join("spherecut");
             doctor = Some(capture(&exe.to_string_lossy(), &["doctor"]));
         }
+    }
+
+    let mut problems = Vec::new();
+    match &build {
+        _ if build_blocked => problems.push("build prerequisites are missing".to_string()),
+        Some(b) if !b.ok => problems.push(format!("the {profile} build failed")),
+        _ => {}
+    }
+    if let Some(t) = &tier2 {
+        problems.extend(t.problems());
     }
 
     // ---- report ----
@@ -617,14 +904,16 @@ pub fn run(a: Args) -> Result<()> {
         }
     );
 
-    if let Some((_, t)) = &tests {
-        let _ = writeln!(
-            r,
-            "**Tier 2: {} passed, {} failed, {} skipped.**\n",
-            t.passed.len(),
-            t.failed.len(),
-            t.skipped.len()
-        );
+    match &tier2 {
+        Some(t) => {
+            let _ = writeln!(r, "**{}.**\n", t.counts(a.quick));
+        }
+        None => {
+            let _ = writeln!(r, "**Tier 2: not run.**\n");
+        }
+    }
+    if !problems.is_empty() {
+        let _ = writeln!(r, "**This run FAILED:** {}.\n", problems.join("; "));
     }
 
     let _ = writeln!(r, "## Prerequisites\n");
@@ -660,40 +949,62 @@ pub fn run(a: Args) -> Result<()> {
     }
 
     let _ = writeln!(r, "## Tier 2 tests\n");
-    match &tests {
+    match &tier2 {
         None => {
-            let _ = writeln!(r, "Not run.\n");
+            let _ = writeln!(r, "Not run: there was no build.\n");
         }
-        Some((cap, t)) => {
+        Some(t) => {
             let _ = writeln!(r, "| Test | Result |\n|---|---|");
-            for n in &t.passed {
-                let _ = writeln!(r, "| `{n}` | pass |");
+            for (n, o) in &t.results {
+                let result = match o {
+                    Outcome::Passed => "pass".to_string(),
+                    Outcome::Failed(_) => "**FAIL**".to_string(),
+                    Outcome::Skipped(why) => format!("skipped: {why}"),
+                    Outcome::LeftOut => "skipped: benchmark, left out by `--quick`".to_string(),
+                    Outcome::DidNotRun => "**did not run**".to_string(),
+                };
+                let _ = writeln!(r, "| `{n}` | {result} |");
             }
-            for (n, _) in &t.failed {
-                let _ = writeln!(r, "| `{n}` | **FAIL** |");
-            }
-            for (n, why) in &t.skipped {
-                let _ = writeln!(r, "| `{n}` | skipped: {why} |");
-            }
-            if t.passed.is_empty() && t.failed.is_empty() && t.skipped.is_empty() {
-                let _ = writeln!(r, "| (no Tier 2 tests yet) | |");
+            if t.results.is_empty() {
+                let _ = writeln!(r, "| (no Tier 2 tests found) | |");
             }
             let _ = writeln!(r);
-            for (n, out) in &t.failed {
-                let _ = writeln!(r, "### FAIL `{n}`\n\n```\n{}\n```\n", tail(out, 60));
+            for (n, o) in &t.results {
+                if let Outcome::Failed(out) = o {
+                    let out = if out.trim().is_empty() {
+                        "(libtest printed no output for this failure)".to_string()
+                    } else {
+                        tail(out, 60)
+                    };
+                    let _ = writeln!(r, "### FAIL `{n}`\n\n```\n{out}\n```\n");
+                }
             }
-            if !cap.ok && t.failed.is_empty() {
+            if !t.list.ok {
                 let _ = writeln!(
                     r,
-                    "The test run itself failed:\n\n```\n{}\n```\n",
-                    tail(&cap.text, 60)
+                    "Listing the Tier 2 tests (`{}`) failed, so tests may be missing above:\n\n```\n{}\n```\n",
+                    t.list.cmdline,
+                    tail(&t.list.text, 60)
+                );
+            }
+            let missing = t.count(|o| *o == Outcome::DidNotRun);
+            if missing > 0 || t.unexplained_failure() {
+                let why = if missing > 0 {
+                    format!("{missing} test(s) did not run")
+                } else {
+                    "`cargo test` failed, but no test failed".to_string()
+                };
+                let _ = writeln!(
+                    r,
+                    "{why}. The end of the test output:\n\n```\n{}\n```\n",
+                    tail(&t.run.text, 60)
                 );
             }
         }
     }
 
     let _ = writeln!(r, "## Benchmarks\n");
-    let benches = if tests.is_some() {
+    let benches = if tier2.is_some() {
         std::fs::read_to_string(&bench_out)
             .map(|t| parse_benches(&t))
             .unwrap_or_default()
@@ -741,12 +1052,13 @@ pub fn run(a: Args) -> Result<()> {
         ..decoders
     };
     details(&mut r, "ffmpeg decoders (filtered)", &dec);
-    if let Some((cap, _)) = &tests {
+    if let Some(t) = &tier2 {
+        details(&mut r, "Tier 2 test list", &t.list);
         let c = Captured {
-            text: tail(&cap.text, 400),
-            cmdline: cap.cmdline.clone(),
-            ok: cap.ok,
-            elapsed: cap.elapsed,
+            text: tail(&t.run.text, 400),
+            cmdline: t.run.cmdline.clone(),
+            ok: t.run.ok,
+            elapsed: t.run.elapsed,
         };
         details(&mut r, "test output", &c);
     }
@@ -759,6 +1071,9 @@ pub fn run(a: Args) -> Result<()> {
     }
     std::fs::write(&out, &r).with_context(|| format!("writing {}", out.display()))?;
     eprintln!("==> report written to {}", display_rel(&out, &root));
+    if let Some(t) = &tier2 {
+        eprintln!("==> {}", t.counts(a.quick));
+    }
     if !missing.is_empty() {
         eprintln!(
             "==> {} prerequisite(s) missing; see the report",
@@ -835,12 +1150,264 @@ failures:
 test result: FAILED. 1 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out
 ";
         let r = parse_libtest(out);
-        assert_eq!(r.passed, vec!["a::passes"]);
-        assert_eq!(r.ignored, vec!["d::not_tier2"]);
-        assert_eq!(r.skipped.len(), 1);
-        assert_eq!(r.skipped[0].1, "no VA-API device at /dev/dri/renderD128");
-        assert_eq!(r.failed.len(), 1);
-        assert!(r.failed[0].1.contains("psnr"));
+        assert_eq!(r.len(), 3, "{r:?}");
+        assert_eq!(r["a::passes"], Outcome::Passed);
+        assert_eq!(
+            r["b::needs_gpu"],
+            Outcome::Skipped("no VA-API device at /dev/dri/renderD128".into())
+        );
+        assert!(matches!(&r["c::real_failure"], Outcome::Failed(o) if o.contains("psnr")));
+    }
+
+    #[test]
+    fn skip_marker_must_start_the_panic_message() {
+        let out = "\
+test a ... FAILED
+
+failures:
+
+---- a stdout ----
+
+thread 'a' panicked at crates/x/src/lib.rs:1:1:
+open failed: TIER2-SKIP: is not a reason here
+
+failures:
+    a
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+";
+        assert!(matches!(parse_libtest(out)["a"], Outcome::Failed(_)));
+    }
+
+    #[test]
+    fn stray_stderr_does_not_hide_results() {
+        // libva and Mesa write to fd 2, into the middle of libtest's lines.
+        let out = "\
+running 3 tests
+test noisy_pass ... libva info: VA-API version 1.22.0
+libva info: Trying to open /usr/lib64/dri/radeonsi_drv_video.so
+ok
+test noisy_fail ... libva info: hi
+FAILED
+test quiet ... ok
+
+failures:
+
+---- noisy_fail stdout ----
+
+thread 'noisy_fail' (10115) panicked at tests/a.rs:24:5:
+boom
+
+failures:
+    noisy_fail
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+";
+        let r = parse_libtest(out);
+        assert_eq!(r.len(), 3);
+        assert_eq!(r["noisy_pass"], Outcome::Passed);
+        assert_eq!(r["quiet"], Outcome::Passed);
+        assert!(matches!(&r["noisy_fail"], Outcome::Failed(o) if o.contains("boom")));
+    }
+
+    #[test]
+    fn a_crash_fails_the_running_test() {
+        let out = "\
+running 3 tests
+test a_first ... ok
+test b_aborts ... error: test failed, to rerun pass `--test crash`
+
+Caused by:
+  process didn't exit successfully: `/t/debug/deps/crash-368fcdd4679797b5 --ignored --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+";
+        let r = parse_libtest(out);
+        assert_eq!(r.len(), 2, "c_after never started: {r:?}");
+        assert_eq!(r["a_first"], Outcome::Passed);
+        assert!(matches!(&r["b_aborts"], Outcome::Failed(o) if o.contains("SIGABRT")));
+    }
+
+    /// `cargo test -- --ignored --list` with stdout and stderr merged.
+    const LIST: &str = "\
+   Compiling spherecut-media v0.1.0 (/w/crates/media)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.10s
+     Running unittests src/lib.rs (/t/debug/deps/spherecut_media-390c456703c2e029)
+0 tests, 0 benchmarks
+     Running tests/tier2_samples.rs (/t/debug/deps/tier2_samples-2dfb113bee85abda)
+bench_samples_realtime_decode: test
+samples_probe_cleanly: test
+
+2 tests, 0 benchmarks
+     Running tests/tier2.rs (/t/debug/deps/tier2-1111111111111111)
+same_name: test
+
+1 tests, 0 benchmarks
+     Running tests/tier2.rs (/t/debug/deps/tier2-2222222222222222)
+same_name: test
+
+1 tests, 0 benchmarks
+   Doc-tests spherecut_core
+0 tests, 0 benchmarks
+";
+
+    #[test]
+    fn lists_tests_per_binary() {
+        let l = parse_list(LIST);
+        let names: Vec<&str> = l.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            [
+                "spherecut_core (doc-tests)",
+                "spherecut_media",
+                "tier2",
+                "tier2-2222222222222222",
+                "tier2_samples"
+            ]
+        );
+        assert!(l["spherecut_media"].is_empty());
+        assert_eq!(
+            l["tier2_samples"],
+            ["bench_samples_realtime_decode", "samples_probe_cleanly"]
+        );
+        assert_eq!(l["tier2"], ["same_name"]);
+        assert_eq!(l["tier2-2222222222222222"], ["same_name"]);
+    }
+
+    #[test]
+    fn splits_run_output_per_binary() {
+        // No `\` after the quote: it would eat the first line's indent.
+        let run =
+            "     Running tests/tier2_samples.rs (/t/debug/deps/tier2_samples-2dfb113bee85abda)
+
+running 1 test
+test samples_probe_cleanly ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out
+
+     Running tests/tier2_hw_decode.rs (/t/debug/deps/tier2_hw_decode-e196a90bf238723a)
+
+running 1 test
+test samples_probe_cleanly ... FAILED
+
+failures:
+
+---- samples_probe_cleanly stdout ----
+
+thread 'samples_probe_cleanly' panicked at tests/x.rs:1:1:
+TIER2-SKIP: no DRM render node at /dev/dri/renderD128
+
+failures:
+    samples_probe_cleanly
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+";
+        let parts = split_by_binary(run);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].0, "tier2_samples");
+        assert_eq!(parts[1].0, "tier2_hw_decode");
+        assert_eq!(
+            parse_libtest(&parts[0].1)["samples_probe_cleanly"],
+            Outcome::Passed
+        );
+        assert!(matches!(
+            parse_libtest(&parts[1].1)["samples_probe_cleanly"],
+            Outcome::Skipped(_)
+        ));
+    }
+
+    fn listed(bins: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+        bins.iter()
+            .map(|(b, ts)| (b.to_string(), ts.iter().map(|t| t.to_string()).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn merge_reports_a_missing_binary_as_did_not_run() {
+        let listed = listed(&[
+            ("tier2_samples", &["samples_probe_cleanly", "bench_samples"]),
+            ("tier2_hw_decode", &["vaapi_h264", "bench_decode"]),
+        ]);
+        // tier2_hw_decode never ran; an unlisted result is still kept.
+        let ran = BTreeMap::from([(
+            "tier2_samples".to_string(),
+            BTreeMap::from([
+                ("samples_probe_cleanly".to_string(), Outcome::Passed),
+                ("surprise".to_string(), Outcome::Failed("x".into())),
+            ]),
+        )]);
+        let full = merge(&listed, &ran, false);
+        let expect = [
+            ("tier2_hw_decode::bench_decode", Outcome::DidNotRun),
+            ("tier2_hw_decode::vaapi_h264", Outcome::DidNotRun),
+            ("tier2_samples::bench_samples", Outcome::DidNotRun),
+            ("tier2_samples::samples_probe_cleanly", Outcome::Passed),
+            ("tier2_samples::surprise", Outcome::Failed("x".into())),
+        ];
+        let expect: Vec<(String, Outcome)> = expect
+            .into_iter()
+            .map(|(n, o)| (n.to_string(), o))
+            .collect();
+        assert_eq!(full, expect);
+
+        // `--quick` leaves the benchmarks out on purpose.
+        let quick = merge(&listed, &ran, true);
+        assert_eq!(
+            quick[0],
+            ("tier2_hw_decode::bench_decode".into(), Outcome::LeftOut)
+        );
+        assert_eq!(quick[1].1, Outcome::DidNotRun);
+        assert_eq!(quick[2].1, Outcome::LeftOut);
+    }
+
+    fn captured(ok: bool) -> Captured {
+        Captured {
+            cmdline: "cargo test".into(),
+            ok,
+            text: String::new(),
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    fn tier2(run_ok: bool, results: &[Outcome]) -> Tier2 {
+        Tier2 {
+            list: captured(true),
+            run: captured(run_ok),
+            results: results
+                .iter()
+                .enumerate()
+                .map(|(i, o)| (format!("t::{i}"), o.clone()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn skips_alone_are_not_a_failure() {
+        // cargo exits non-zero for a skip, which is not worth a note.
+        let t = tier2(false, &[Outcome::Passed, Outcome::Skipped("no GPU".into())]);
+        assert!(!t.unexplained_failure());
+        assert!(t.problems().is_empty());
+        let t = tier2(true, &[Outcome::Passed, Outcome::LeftOut]);
+        assert!(t.problems().is_empty());
+    }
+
+    #[test]
+    fn missing_or_failed_tests_fail_the_run() {
+        let t = tier2(
+            false,
+            &[Outcome::Skipped("no GPU".into()), Outcome::DidNotRun],
+        );
+        assert_eq!(t.problems(), ["1 Tier 2 test(s) did not run"]);
+        assert!(t.counts(false).contains("1 did not run"));
+
+        let t = tier2(false, &[Outcome::Failed(String::new())]);
+        assert_eq!(t.problems(), ["1 Tier 2 test(s) failed"]);
+
+        let t = tier2(false, &[Outcome::Passed]);
+        assert!(t.unexplained_failure());
+        assert_eq!(t.problems(), ["`cargo test` failed without a failing test"]);
+
+        let mut t = tier2(true, &[Outcome::Passed]);
+        t.list.ok = false;
+        assert_eq!(t.problems().len(), 1);
     }
 
     #[test]
