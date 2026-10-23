@@ -1083,20 +1083,25 @@ mod tests {
     }
 
     /// Make a unix socket at `p`. The socket stays when its listener is
-    /// closed. A socket's path must fit in 108 bytes, which a long TMPDIR
-    /// can use up, so the socket is made through a short path to the same
-    /// directory: `/proc/self/fd/<n>`, where `n` holds the directory open.
+    /// closed. A socket's path must fit in sun_path's 108 bytes with its
+    /// NUL, which a long TMPDIR can use up, so a longer one is made through
+    /// a short path to the same directory: `/proc/self/fd/<n>`, where `n`
+    /// holds the directory open.
     fn socket(p: &Path) -> Result<(), String> {
         use std::os::fd::AsRawFd;
-        let err = |e: io::Error| format!("bind {}: {e}", p.display());
-        let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else {
-            return Err(err(io::ErrorKind::InvalidInput.into()));
+        let bind = |at: &Path| {
+            std::os::unix::net::UnixListener::bind(at)
+                .map(drop)
+                .map_err(|e| format!("bind {}: {e}", at.display()))
         };
-        let dir = std::fs::File::open(dir).map_err(err)?;
-        let short = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(name);
-        std::os::unix::net::UnixListener::bind(short)
-            .map(drop)
-            .map_err(err)
+        if p.as_os_str().len() < 108 {
+            return bind(p);
+        }
+        let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else {
+            return Err(format!("{} has no directory and name", p.display()));
+        };
+        let dir = std::fs::File::open(dir).map_err(|e| format!("open {}: {e}", dir.display()))?;
+        bind(&PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(name))
     }
 
     #[test]
@@ -1111,6 +1116,16 @@ mod tests {
         socket(&p).unwrap();
         assert!(p.symlink_metadata().unwrap().file_type().is_socket());
         assert_eq!(listing(&deep), ["socket"]);
+        // Binding again fails, and the error names the path that was bound:
+        // the short one under /proc here, and a path that fits as it is.
+        let e = socket(&p).unwrap_err();
+        assert!(e.starts_with("bind /proc/self/fd/"), "{e}");
+        let short = dir.join("s");
+        if short.as_os_str().len() < 108 {
+            socket(&short).unwrap();
+            let e = socket(&short).unwrap_err();
+            assert!(e.starts_with(&format!("bind {}: ", short.display())), "{e}");
+        }
     }
 
     #[test]

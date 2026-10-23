@@ -292,13 +292,20 @@ plane tests) call `Decoder::video`, `Decoder::audio`, `Opened::video`,
 *2026-10-23, M0.*
 
 `spherecut_media::init()` installs an `av_log` callback that sends each
-FFmpeg message to `tracing` under the target `ffmpeg`, formatted by
-FFmpeg with its `[hevc @ 0x...]` prefix. Error and worse map to error,
-warning to warn, info to info, verbose to debug, and FFmpeg's debug and
-trace to trace. A panic in the callback is caught and the message dropped.
-FFmpeg's own level is set to the most verbose level the subscriber
-accepts for `ffmpeg`, so messages nobody would see are never formatted;
-a subscriber installed after `init()` calls `sync_ffmpeg_log_level()`.
+line of FFmpeg's log to `tracing` under the target `ffmpeg`, as one event
+that starts with the `[hevc @ 0x...]` prefix of the context that logged
+it. FFmpeg formats the text; the prefix is made from the context's
+`AVClass` as FFmpeg makes it. FFmpeg may log one line in several calls
+(only the first names the context) and several lines in one call, so
+each thread keeps the line it has started until a call ends it with
+`\n` or `\r`, and gives every line of a call that call's prefix. A line
+takes the most severe level among its calls. Error and worse map to
+error, warning to warn, info to info, verbose to debug, and FFmpeg's
+debug and trace to trace. A panic in the callback is caught and the
+message dropped. FFmpeg's own level is set to the most verbose level the
+subscriber accepts for `ffmpeg`, so messages nobody would see are never
+formatted; a subscriber installed after `init()` calls
+`sync_ffmpeg_log_level()`.
 
 The CLI's default filter is `warn,ffmpeg=off`, and `SPHERECUT_LOG` adds
 EnvFilter directives to it (README, Logging). FFmpeg's messages are off by
@@ -306,7 +313,10 @@ default because doctor's device checks make FFmpeg log errors that are
 expected.
 
 Why: before this, `init()` set FFmpeg's level to fatal, so its
-explanations were lost (the review's minor on errors and logging).
+explanations were lost (the review's minor on errors and logging). Each
+call was later sent as its own event, so "Audio object type 0 is not
+implemented" came out in two pieces, the second without its `[aac]`, and
+the second line of a message started at column 0 in probe's report.
 
 ## D13. What `VideoDecoder` does with a damaged file
 
@@ -403,7 +413,8 @@ Limits, so a hostile file costs bounded time and memory:
   top-level boxes are read only when each is at most 64 KiB and their
   total stays under 1 MiB.
 - Leaf payloads over 1 MiB are not kept, except the sample tables (`stts`,
-  `stsz`, `stz2`, `stsc`, `stco`, `co64`), which the 256 MiB `moov` limit
+  `stsz`, `stz2`, `stsc`, `stco`, `co64`) and a payload that starts with a
+  `tkhd` (a renamed `trak`, below), which the 256 MiB `moov` limit
   bounds.
 
 Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
@@ -422,19 +433,62 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   belong: in `moov`, `trak`, `mdia`, `minf`, `stbl`, `stsd`, the video and
   audio sample entries we know, `sv3d` and `proj`. FFmpeg skips such a box,
   so a `trak` whose type reads `\xd1rak` loses its stream silently. Four
-  zero bytes (QuickTime's terminator, or padding) are allowed. `udta`,
-  `meta` and `ilst` are not checked, because `©nam` and the like are
-  normal there;
+  zero bytes are allowed only as the type of QuickTime's terminator: the
+  last box in a sample entry, with nothing but zero bytes after its
+  header. Any other box of that type is a header zeroed with the rest of
+  its box, which FFmpeg skips with what it holds. An audio `trak` whose
+  type, or size and type, were zeroed loses its stream, and an `sv3d`,
+  which FFmpeg writes last in the entry, loses the projection. A zeroed
+  size makes a box run to the end of its parent, so zeroing the size and
+  type of the `st3d` or `colr` before an `sv3d` loses it too. A last box
+  over 1 MiB, whose payload is not kept, is not taken for a terminator.
+  `udta`, `meta` and `ilst` are not checked, because `©nam` and the like
+  are normal there;
+- a child of `moov` whose type is printable but not `trak` and whose
+  payload starts with a `tkhd` box: a `trak` renamed to `Trak`, ``tr`k``
+  or `free`, which FFmpeg skips with its stream just as it skips
+  `\xd1rak`. 28 of the 32 one-bit flips of `trak` are still printable.
+  FFmpeg-written and Pat's X5 tracks start with `tkhd`. A renamed `mdia`,
+  `minf` or `stbl` needs no check of its own, because the track then has
+  none, which is damage already. `free` and `skip` count too, although
+  they mark space for readers to skip: a track a tool dropped in place by
+  retyping it looks the same as a damaged one, so such a file fails
+  `probe` and `inject` refuses it, rather than a stream going missing
+  without a word. No such file turned up in the sweeps;
+- an `sv3d` in a sample entry without `svhd`, without `proj`, or with a
+  `proj` that has no `prhd`. FFmpeg then ignores the whole `sv3d`, saying
+  no more than "Missing projection box" in its log, so a `proj` renamed
+  to `qroj` loses the projection. A projection box FFmpeg does not know,
+  such as `mshp`, is not damage;
+- a child of a sample entry whose type is printable but not `sv3d` and
+  whose payload starts with an `svhd` box, which only `sv3d` holds: an
+  `sv3d` renamed to `rv3d` or `sv3D`, which FFmpeg skips with the
+  projection, logging nothing. 27 of the 32 one-bit flips of `sv3d` are
+  still printable;
 - a `mvhd` or `mdhd` timescale of 0, or too large for a signed 32-bit
   number, which FFmpeg replaces with 1, so every time is wrong;
 - a video or audio stream FFmpeg could not set up, when its track has
   samples and its sample entry is a codec FFmpeg reads (the entries we
   know, except the encrypted `encv` and `enca`). Like FFmpeg's own check,
   that is no codec, no frame size, no sample rate or channels, or no pixel
-  or sample format although FFmpeg has a decoder (one named after the
-  codec). Usually the `avcC` or `hvcC` is damaged. With any other sample
-  entry, such as an unknown `zzzz`, the stream is a warning instead: it
-  may be a real codec this FFmpeg lacks.
+  or sample format although FFmpeg has a decoder (the one
+  `avcodec_find_decoder` picks for the codec id, read as an int). Usually
+  the `avcC` or `hvcC` is damaged. With any other sample entry, such as an
+  unknown `zzzz`, or in a track with no samples, where FFmpeg may have had
+  too little to go on, the stream is a warning instead: it may be a real
+  codec this FFmpeg lacks;
+- a video or audio stream whose decoder will not open with its codec
+  parameters. Those can look complete when the codec setup is not: the
+  MOV demuxer takes the channel count from the sample entry and the AAC
+  decoder sets the sample format before it refuses an `esds` with a
+  reserved sample rate. So probe opens each such decoder, as a player
+  would, on one thread (`avcodec_parameters_to_context` and
+  `avcodec_open2` through ffmpeg-next). Opening decodes nothing, and
+  probing Pat's X5 files took no measurably longer. A refusal that says
+  FFmpeg lacks a feature (`ENOSYS`, `AVERROR_PATCHWELCOME`, or
+  `AVERROR_EXPERIMENTAL` for a decoder this build does not enable) is a
+  warning, as is a codec with no decoder in this build; any other
+  refusal is damage, whatever the container.
 
 A file FFmpeg reads as MOV/MP4 is checked even when its first box type is
 unknown; that box alone is a warning, not damage. Matroska is checked
@@ -446,13 +500,19 @@ What FFmpeg logs at warning or error level while `probe` runs goes into
 the report's `ffmpeg_log` (each line once, with a count, at most 32), even
 though the CLI's log hides FFmpeg (D12). It often says what FFmpeg could
 not read. It is not damage and not a warning, because healthy files can
-have some: FFmpeg says "timescale not set" for cover art.
+have some: FFmpeg says "timescale not set" for cover art. When `probe`
+fails, the log goes with the error (`ProbeError.ffmpeg_log`), because
+for a file FFmpeg cannot open it is often the only explanation ("moov
+atom not found"). The CLI prints it under the error, and its JSON error
+object is `{"path", "error", "ffmpeg_log"}`.
 
 Not found without decoding: damage in `mdat`, and damage in `moov` that
 leaves the structure consistent, such as changed sample sizes or times
 (`stts`, `ctts`, `elst`), chunk offsets that still point into `mdat`,
-bits of a parameter set, or a `trak` renamed to another printable type
-such as `free`. Bytes of `mdat` that no chunk uses are not counted as
+bits of a parameter set, or a box other than those above renamed to
+another printable type, such as `edts`, `mvhd`, which leaves FFmpeg
+without the movie's timescale and display matrix, or `st3d`, which loses
+the stereo mode. Bytes of `mdat` that no chunk uses are not counted as
 damage.
 
 Fuzzing, with proptest, in `mp4::tests::fuzz`, under overflow checks:
@@ -467,13 +527,19 @@ FFmpeg wrote, of which at least 3000 must be found
 (`crates/synth/tests/generated_media.rs`), and run `spherecut probe` on
 200 000 levels (`crates/cli/tests/probe.rs`). `write_bad_files` makes one
 file for each kind of `moov` damage FFmpeg opens without complaint: chunk
-offsets, a `trak` type, an `mdhd` timescale and a codec configuration.
+offsets, a `trak` type that is not text and one that still is, an `mdhd`
+timescale, a video codec configuration, an AAC setup and a `proj` type.
 
 Why: the M0 review found unbounded recursion and quadratic memory in the
 parser (B2), `probe` exiting 0 on corrupt and truncated MP4s (S1), and
 that the parser was not fuzzed as D4 said. The final review (C6) found
 files that still probed clean: a renamed `trak`, a zero `mdhd` timescale
-and a damaged `hvcC`.
+and a damaged `hvcC`. The review of those fixes found more: an `esds`
+whose AAC object type FFmpeg cannot open, which left every field of the
+stream set, and printable renames (`Trak`, `qroj`, `wvhd`) that lose a
+stream or the projection. The next review found an `sv3d` whose type, or
+size and type, were zeroed, which passed as QuickTime's terminator, and
+an `sv3d` renamed to `rv3d`.
 
 ## D16. `inject` and `Mp4Writer` write atomically
 
@@ -633,9 +699,10 @@ user's cargo settings don't change what it reads. `--samples` is made
 absolute, since cargo runs integration tests from the package directory,
 and reaches the tests byte for byte (as do `SPHERECUT_BENCH_OUT` and the
 other variables), never as a lossy UTF-8 copy. A samples path that is
-not valid UTF-8 is reported as unusable, since FFmpeg's Rust bindings
-open only UTF-8 paths, and the samples tests skip with that reason.
-The report name gets `-dirty` only for changes outside `hw-reports/`.
+not valid UTF-8 is used like any other: the samples tests open files
+through `probe::probe` and `VideoDecoder::open`, which give FFmpeg the
+path's bytes (`ffi::open_input`). The report name gets `-dirty` only for
+changes outside `hw-reports/`.
 
 Why: the M0 review found that hw-test silently dropped Tier 2 tests (B1)
 and that a relative `--samples` tested nothing while the report said the
@@ -686,7 +753,7 @@ rest, with the versions in `Cargo.lock`:
 | serde_json 1.0.154 | cli | `--json` output. xtask reads cargo's JSON with a small field reader instead |
 | thiserror 2.0.21 | core, media, synth | Typed library errors without hand-written `Display` impls |
 | tracing 0.1.44 | media, cli | Structured logging, and the target for FFmpeg's log (D12) |
-| tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that doctor's thread-local FFmpeg log capture needs. It was already in the tree through `tracing` |
+| tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
 | tracing-subscriber 0.3.23 (env-filter) | cli | EnvFilter gives `SPHERECUT_LOG` its syntax, and the fmt layer writes to stderr. env-filter brings in `matchers` and `regex-automata` |
 | proptest 1.12.0 (dev) | core, sphere, media | Property tests and the MP4 fuzzing (D15) |
 | ron 0.12.2 (dev) | core | A serde round-trip test of the time types in a text format |

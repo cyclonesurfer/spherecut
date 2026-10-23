@@ -100,35 +100,54 @@ MP4/MOV files, probe counts these as damage:
   `mdat` data;
 - a box type that isn't printable text inside `moov`, `trak`, `mdia`,
   `minf`, `stbl`, `stsd`, the sample entries probe knows, `sv3d` or
-  `proj`;
+  `proj`, including four zero bytes anywhere but in QuickTime's
+  terminator, the last box of a sample entry, which holds only zero bytes;
+- a box in `moov` that starts with a track header (`tkhd`) but whose type
+  is another printable one, such as `Trak` or `free`: FFmpeg skips it, and
+  its stream with it;
+- an `sv3d` without its `svhd`, its `proj` or the `prhd` in `proj`, which
+  makes FFmpeg ignore the projection;
+- a box in a sample entry that starts with a spherical video header
+  (`svhd`) but whose type is another printable one, such as `rv3d`: FFmpeg
+  skips it, and the projection with it;
 - a `mvhd` or `mdhd` timescale of 0, or one FFmpeg reads as negative;
 - a video sample entry under an audio handler, or the other way round;
 - a video or audio track that FFmpeg reads as another kind of stream;
-- a video or audio stream FFmpeg could not set up although its sample
-  entry is a codec FFmpeg reads, which usually means a damaged `avcC` or
-  `hvcC`.
+- a video or audio stream FFmpeg could not set up although its track has
+  samples and its sample entry is a codec FFmpeg reads, which usually
+  means a damaged `avcC` or `hvcC`;
+- a video or audio stream whose decoder refuses to open with its codec
+  setup, such as an `esds` that gives a reserved sample rate, although
+  FFmpeg filled in the stream's fields from the sample entry.
 
 Damage that keeps the structure consistent, such as changed sample sizes
 or times, and damage inside `mdat` are not found without decoding. A
 stream whose codec FFmpeg doesn't know, such as a `zzzz` sample entry, is
 a `warning` line and doesn't fail probe: it may be a real codec that this
-FFmpeg lacks. The `ffmpeg` lines hold the warnings and errors FFmpeg
-logged while reading the file, each repeated line listed once with a
-count, at most 32 lines. They often say what FFmpeg could not read, but
-they don't fail probe either, because healthy files can have some: cover
-art gives a `timescale not set` line. Only MP4/MOV structure is checked
-in full; Matroska files are checked against their Segment length only,
-and other containers not at all, which a `structure` line says.
+FFmpeg lacks. So is a stream this FFmpeg has no decoder for, a stream
+FFmpeg could not set up from an empty track, and a stream whose decoder
+says it lacks a feature the stream uses (`Function not implemented`, as
+for AAC object type 0). The `ffmpeg` lines hold the warnings and errors
+FFmpeg logged while reading the file, one whole line each, starting with
+the context that logged it, such as `[aac]`. A repeated line is listed
+once with a count, and at most 32 are listed. They often say what FFmpeg
+could not read, but they don't fail probe either, because healthy files
+can have some: cover art gives a `timescale not set` line. Only MP4/MOV
+structure is checked in full; Matroska files are checked against their
+Segment length only, and other containers not at all, which a
+`structure` line says.
 
 `--json` prints one object per file (an array for several) with `damage`,
 `warnings`, `ffmpeg_log`, `structure` (`{"check": "full" | "length" |
 "none", "why"}`) and `mp4.truncated` (`fourcc`, `offset`, `header_len`,
 `size`, `present`, or null). A file that can't be opened is `{"path",
-"error"}`. File names don't have to be UTF-8; in the text report and in
-`path`, bytes that aren't UTF-8 show as U+FFFD. When the reader of
-probe's output goes away, as in `spherecut probe *.mp4 | head`, the output
-stops quietly, and probe still checks the remaining files, so the exit
-code and the errors on stderr cover every file.
+"error", "ffmpeg_log"}`; without `--json`, its `ffmpeg` lines follow the
+error on stderr, since FFmpeg's log often says why it could not open the
+file (`moov atom not found`). File names don't have to be UTF-8; in the
+text report and in `path`, bytes that aren't UTF-8 show as U+FFFD. When
+the reader of probe's output goes away, as in `spherecut probe *.mp4 |
+head`, the output stops quietly, and probe still checks the remaining
+files, so the exit code and the errors on stderr cover every file.
 
 `spherecut doctor [--render-node /dev/dri/renderD128] [--json]` exits 1
 only when a problem is an error: FFmpeg has no H.264, HEVC, ProRes or AAC
@@ -161,7 +180,9 @@ EnvFilter directives to that default:
   that target (`ffmpeg=warn`, `debug,ffmpeg=debug`) or when its last global
   level is more verbose than `warn` (`info`, `debug`, `trace`). `warn` and
   `error` keep them off, and `off` turns off everything. FFmpeg's verbose
-  level shows as debug, its debug and trace levels as trace.
+  level shows as debug, its debug and trace levels as trace. Each event is
+  one whole line of FFmpeg's log, starting with the context that logged
+  it, such as `[hevc @ 0x...]`.
 - A value that doesn't parse is reported (`warning: ignoring
   SPHERECUT_LOG=...`) and the default applies.
 
@@ -199,10 +220,8 @@ has changes outside `hw-reports/`). Options:
 
 - `--samples <dir>`: camera samples (default `samples/` in the checkout; a
   relative path is taken from the current directory). The path reaches the
-  tests byte for byte, as `SPHERECUT_BENCH_OUT` (see `docs/perf.md`) does.
-  A directory whose path isn't valid UTF-8 shows in the report's Samples
-  row as present but unusable, and the samples tests skip with that
-  reason.
+  tests byte for byte, as `SPHERECUT_BENCH_OUT` (see `docs/perf.md`) does,
+  and need not be valid UTF-8.
 - `--quick`: a debug build, with the benchmarks left out.
 - `--out <file>`: where to write the report.
 

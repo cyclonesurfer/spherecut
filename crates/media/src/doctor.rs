@@ -27,7 +27,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::decode::DecodedFrame;
-use crate::hwprobe::{self, ENCODE_SIZE, ProbeError, device_label, vk_device_type};
+use crate::hwprobe::{self, ENCODE_SIZE, HwProbeError, device_label, vk_device_type};
 use crate::{HwDevice, HwError, ff, ffi, init};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -577,8 +577,8 @@ struct Failure {
     fault: Fault,
 }
 
-impl From<ProbeError> for Failure {
-    fn from(e: ProbeError) -> Self {
+impl From<HwProbeError> for Failure {
+    fn from(e: HwProbeError) -> Self {
         Failure {
             fault: if e.is_ffmpeg_build() {
                 Fault::Ffmpeg
@@ -682,7 +682,7 @@ fn decode(s: &Sample, paths: &[(&str, Option<&HwDevice>, &DeviceStatus)]) -> Vec
 /// The software check of `s`, and the picture if it works.
 fn decode_in_software(s: &Sample) -> (Check, Option<[Vec<u16>; 3]>) {
     let Some(name) = first_decoder(s.software) else {
-        let e = ProbeError::NoDecoder(s.software.join(" or "));
+        let e = HwProbeError::NoDecoder(s.software.join(" or "));
         let check = Check::new(s.format, SOFTWARE, s.software[0], CheckResult::Works);
         return (check.outcome(Err(e.into()), Vec::new()), None);
     };

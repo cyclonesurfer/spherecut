@@ -31,8 +31,8 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
-/// A small spherical H.264 file with stereo audio, and the six broken
-/// files derived from it.
+/// A small spherical H.264 file with stereo audio, and the broken files
+/// derived from it.
 fn media(dir: &Path) -> (PathBuf, Vec<PathBuf>) {
     let spec = Spec {
         name: "good".into(),
@@ -84,6 +84,11 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
             "box `\\xd1rak` at offset",
         ),
         (
+            "bad-trak-renamed.mp4",
+            "is damaged",
+            "in `moov` starts with a track header (`tkhd`), so it is a `trak` whose type is damaged and FFmpeg skips its stream",
+        ),
+        (
             "bad-timescale.mp4",
             "is damaged",
             "track #0: its `mdhd` gives timescale 0, so its times are wrong",
@@ -92,6 +97,16 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
             "bad-codec-config.mp4",
             "is damaged",
             "stream #0 (sample entry `avc1`) has no pixel format, so its codec setup is damaged",
+        ),
+        (
+            "bad-audio-config.mp4",
+            "is damaged",
+            "stream #1 (sample entry `mp4a`) cannot be opened by FFmpeg's aac decoder (Invalid data found when processing input), so its codec setup is damaged",
+        ),
+        (
+            "bad-projection.mp4",
+            "is damaged",
+            "in `avc1` has no `proj`, so FFmpeg ignores its projection",
         ),
     ];
     assert_eq!(bad.len(), expect.len());
@@ -168,6 +183,54 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
     let out = probe(&[&dir]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("is not a regular file"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn ffmpegs_log_is_kept_for_a_file_it_cannot_open() {
+    // FFmpeg's own reason is printed under ours, and goes in the JSON.
+    let dir = tmp("cannot-open");
+    let (_, bad) = media(&dir);
+    let half = bad
+        .iter()
+        .find(|b| b.ends_with("bad-trunc-half.mp4"))
+        .unwrap();
+    let moov = "  ffmpeg     [mov,mp4,m4a,3gp,3g2,mj2] moov atom not found";
+
+    let out = probe(&[half]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.starts_with("error: cannot open"));
+    assert!(
+        at.is_some_and(|i| lines[i + 1..].contains(&moov)),
+        "{stderr}"
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .args(["probe", "--json"])
+        .arg(half)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("cannot open"), "{v}");
+    let log = v["ffmpeg_log"].as_array().unwrap();
+    assert!(
+        log.iter()
+            .any(|l| l.as_str().unwrap().ends_with("moov atom not found")),
+        "{v}"
+    );
+    // A file we refuse before FFmpeg reads it has an empty log.
+    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .args(["probe", "--json"])
+        .arg(dir.join("bad-empty.mp4"))
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ffmpeg_log"], serde_json::json!([]), "{v}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -299,6 +362,84 @@ fn a_codec_ffmpeg_does_not_know_is_a_warning() {
     assert!(
         stdout.contains(
             "  warning    stream #0 (sample entry `zzzz`) has no codec FFmpeg knows and cannot be decoded"
+        ),
+        "{stdout}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn an_audio_setup_ffmpeg_does_not_implement_is_a_warning() {
+    // AAC object type 0: FFmpeg sets the stream up from the sample entry,
+    // but its decoder says the object type is not implemented. That may be
+    // a feature this FFmpeg lacks, so it is a warning, not damage.
+    let dir = tmp("aot0");
+    let (good, _) = media(&dir);
+    let mut f = std::fs::read(&good).unwrap();
+    // The AAC setup starts where bad-audio-config.mp4 differs.
+    let bad = std::fs::read(dir.join("bad-audio-config.mp4")).unwrap();
+    let at = f.iter().zip(&bad).position(|(a, b)| a != b).unwrap();
+    f[at] &= 0x07;
+    let path = dir.join("aot0.mp4");
+    std::fs::write(&path, &f).unwrap();
+
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "  warning    stream #1 (sample entry `mp4a`) uses a feature FFmpeg's aac decoder lacks (Function not implemented) and cannot be decoded"
+        ),
+        "{stdout}"
+    );
+    // FFmpeg logs that in two calls, and the report has it as one line.
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l
+                .starts_with("  ffmpeg     [aac] Audio object type 0 is not implemented. Update")),
+        "{stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .filter(|l| l.starts_with("  ffmpeg"))
+            .all(|l| l.starts_with("  ffmpeg     [")),
+        "{stdout}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn an_empty_track_ffmpeg_cannot_set_up_is_a_warning() {
+    // bad-codec-config.mp4's video track, with its damaged `avcC`, emptied
+    // of samples: with no samples FFmpeg may have had too little to set
+    // the stream up from, so it is not called damaged.
+    let dir = tmp("empty-track");
+    media(&dir);
+    let mut f = std::fs::read(dir.join("bad-codec-config.mp4")).unwrap();
+    let tree = spherecut_media::mp4::read(&mut std::io::Cursor::new(&f)).unwrap();
+    let stbl = tree
+        .tracks()
+        .next()
+        .and_then(|t| t.path(&[b"mdia", b"minf", b"stbl"]))
+        .unwrap();
+    // Each table's count, after its version and flags (and in `stsz`, the
+    // size all samples share).
+    for (t, at) in [(b"stts", 4), (b"stsz", 8), (b"stsc", 4), (b"stco", 4)] {
+        let b = stbl.child(t).unwrap();
+        let at = (b.offset + b.header_len) as usize + at;
+        f[at..at + 4].fill(0);
+    }
+    let path = dir.join("empty-track.mp4");
+    std::fs::write(&path, &f).unwrap();
+
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "  warning    stream #0 (sample entry `avc1`) has no pixel format and cannot be decoded"
         ),
         "{stdout}"
     );
@@ -567,8 +708,13 @@ fn files_without_video_or_audio_fail() {
 
 #[test]
 fn a_missing_file_says_why_once() {
-    let missing = tmp("missing").join("nothing-here.mp4");
+    // In a directory that is not there either, so there is nothing to
+    // remove afterwards.
+    let missing = std::env::temp_dir()
+        .join(format!("spherecut-cli-{}-missing", std::process::id()))
+        .join("nothing-here.mp4");
     let out = probe(&[&missing]);
+    assert!(!missing.parent().unwrap().exists());
     assert!(!out.status.success());
     let stderr = text(&out.stderr);
     assert_eq!(stderr.matches("No such file").count(), 1, "{stderr}");

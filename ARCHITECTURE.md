@@ -53,12 +53,18 @@ planned ones above don't exist yet.
   types, hardware device types and codec hardware configs, `HwDevice` (a
   reference-counted device context, released on drop) and `HwError`, the
   `get_format` callback that refuses software fallback, opening files,
-  reading metadata, opening a video decoder by its int codec id, reading
-  a frame's format and planes as ints, copying hardware frames to system
-  memory, the demuxer index end, setting other streams to
-  `AVDISCARD_ALL`, library versions, and the bridge that sends FFmpeg's
-  `av_log` to `tracing` under the target `ffmpeg`. C enums are never made
-  into bindgen's Rust enums (DECISIONS D11). In more detail:
+  reading metadata, finding a stream's decoder and opening a video
+  decoder by its int codec id, reading a frame's format and planes as
+  ints, copying hardware frames to system memory, the demuxer index end,
+  setting other streams to `AVDISCARD_ALL`, library versions, and the
+  bridge that sends FFmpeg's `av_log` to `tracing` under the target
+  `ffmpeg`. C enums are never made into bindgen's Rust enums (DECISIONS
+  D11). In more detail:
+  * The log bridge sends one event per line, each with the `[hevc @
+    0x...]` prefix of its context. A line FFmpeg logs in several calls
+    waits in a thread-local buffer until a call ends it, and a call that
+    holds several lines gives each of them its prefix (D12).
+    `end_log_line` sends a line that never got its end.
   * The `get_format` callback keeps its bookkeeping in the codec context's
     `opaque`: the device's pixel format, and flags that describe the
     latest call. Asked: FFmpeg has called it at all. Taken: the latest
@@ -82,7 +88,9 @@ planned ones above don't exist yet.
   `AVVulkanDeviceContext` with its own `#[repr(C)]` declarations of the
   few Vulkan structs it reads, and `capture_ffmpeg_log`, which collects
   what FFmpeg logs while doctor runs a check or `probe` reads a file (a
-  thread-local `tracing` subscriber that passes everything on).
+  thread-local `tracing` subscriber that passes everything on). It ends
+  any unfinished line before and after, so that each captured line is
+  whole and is the run's own.
 
 The other modules are safe Rust:
 
@@ -92,20 +100,33 @@ The other modules are safe Rust:
   disagrees with its sample entry; sample tables checked against each
   other and against the `mdat` ranges; a box type that isn't printable
   text where only registered types belong (in `moov`, `trak`, `mdia`,
-  `minf`, `stbl`, `stsd`, the known sample entries, `sv3d` and `proj`);
-  and a `mvhd` or `mdhd` timescale FFmpeg can't use. Each FFmpeg stream is
-  matched to its `trak` by track ID (by position when IDs repeat or are
-  missing), and a video or audio `trak` that FFmpeg reads as another kind
-  is damage. A video or audio stream FFmpeg could not set up (no codec,
-  frame size, sample rate or channels, or no pixel or sample format though
-  FFmpeg has a decoder) is damage when its track has samples and its
+  `minf`, `stbl`, `stsd`, the known sample entries, `sv3d` and `proj`),
+  where four zero bytes pass only as a sample entry's all-zero last box,
+  QuickTime's terminator; a `moov` child under another printable type
+  whose payload starts with a `tkhd` (a renamed `trak`, whose payload is
+  kept whatever its size); an `sv3d` without `svhd`, `proj` or
+  `proj/prhd`, which FFmpeg ignores, and a sample entry's child under
+  another printable type whose payload starts with an `svhd` (a renamed
+  `sv3d`); and a `mvhd` or `mdhd` timescale FFmpeg can't use. Each FFmpeg
+  stream is matched to its `trak` by track ID (by position when IDs repeat
+  or are missing), and a video or audio `trak` that FFmpeg reads as
+  another kind is damage. A video or audio stream FFmpeg could not set up
+  (no codec, frame size, sample rate or channels, or no pixel or sample
+  format though FFmpeg has a decoder, which `ffi::find_decoder` looks up
+  by the codec id as an int) is damage when its track has samples and its
   sample entry is a codec FFmpeg reads (`mp4::is_known_codec`), and a
-  warning otherwise, since FFmpeg may simply lack the codec. A file FFmpeg
-  reads as MOV/MP4 that the strict read refuses is read again with
-  `FirstBox::Any`, which accepts any valid first box. Matroska files are
-  checked against their Segment length. `probe` runs inside
+  warning otherwise, since FFmpeg may simply lack the codec. Otherwise
+  probe opens the stream's decoder from its codec parameters, on one
+  thread, and closes it: a refusal is damage, unless the error says FFmpeg
+  lacks a feature (`ENOSYS`, `AVERROR_PATCHWELCOME`,
+  `AVERROR_EXPERIMENTAL`), and a codec with no decoder in this build is a
+  warning. `probe::Undecodable` holds the reason and decides which it is.
+  A file FFmpeg reads as MOV/MP4 that the strict read refuses is read
+  again with `FirstBox::Any`, which accepts any valid first box. Matroska
+  files are checked against their Segment length. `probe` runs inside
   `hwprobe::capture_ffmpeg_log` and keeps FFmpeg's warnings and errors in
-  `ProbeReport.ffmpeg_log`, apart from `damage` and `warnings`.
+  `ProbeReport.ffmpeg_log`, apart from `damage` and `warnings`, or in
+  `ProbeError.ffmpeg_log` beside the `MediaError` when it fails.
   `ProbeReport.structure` records how much was checked (`full`, `length`
   or `none` with a reason), and `damage` lists what was found.
   `ProbeReport.path` serializes as lossy UTF-8. The CLI fails on any
