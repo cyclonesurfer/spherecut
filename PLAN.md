@@ -40,9 +40,15 @@ the next unblocked one starts and the blocked one resumes when unblocked.
       Truncated, corrupt and non-media files give a clear error and a
       non-zero exit, never a panic (tested on the generated bad files).
 - [ ] `spherecut doctor` reports which decoders, encoders and hardware
-      paths (VA-API devices and profiles, Vulkan devices) are available and,
-      for anything missing, the exact `dnf`/`pacman` command that fixes it.
-      The GUI will run the same check at startup.
+      paths are available and, for anything missing, the exact
+      `dnf`/`pacman` command that fixes it. It shows what works by trying
+      it: one frame each of H.264 High, HEVC Main, HEVC Main 10 and AV1 Main
+      decoded in software, on VA-API and on Vulkan, and encoded on VA-API.
+      It lists the Vulkan devices and flags CPU ones. (Changed 2026-10-23
+      from listing VA-API profiles: a listed profile can still fail, as on
+      Fedora's stock Mesa. The full profile list is the `vainfo` output in
+      the hw-test report. DECISIONS D18.) The GUI will run the same check
+      at startup.
 - [ ] `cargo xtask hw-test` runs without sudo from a fresh clone: checks
       prerequisites (printing the install command for anything missing),
       records the environment (host, kernel, Mesa, FFmpeg, GPU,

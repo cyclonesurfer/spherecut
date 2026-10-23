@@ -17,6 +17,10 @@ not force rustup on Fedora, but the RPM has no rustfmt or clippy, so
 `cargo xtask check` on Fedora needs `rustup` or the `rustfmt` and `clippy`
 RPMs.
 
+Checked 2026-10-23 at 3d06a2e: `cargo +1.88 build --workspace
+--all-targets` builds without warnings and `cargo +1.88 test --workspace`
+passes.
+
 ## D2. FFmpeg through ffmpeg-next, hardware paths over ffmpeg-sys-next
 
 *2026-10-22, M0. Research: `docs/research/ffmpeg-bindings.md`.*
@@ -32,8 +36,16 @@ Why:
 
 - It builds against every FFmpeg our target distros ship: Ubuntu 24.04 has
   6.1, Fedora 43 has 7.1, Fedora 44 has 8.1, and Arch and Fedora 45 have
-  9.0. Checked here: the workspace compiles against 6.1.1, 8.1 and 9.0.2,
-  and the media and CLI tests pass against all three.
+  9.0. Checked on 2026-10-23 at 59976e9: against Ubuntu's 6.1.1 every
+  Tier 1 test passes. Against a 9.0.2 built here with VA-API, libx264,
+  libx265 and libdav1d but no Vulkan, every media, CLI and synth test
+  passes except the two in `crates/cli/tests/doctor.rs`, which need
+  FFmpeg's Vulkan device. Minimal 7.1 and 9.0.2 builds compile, and 122
+  of the 149 Tier 1 tests pass on each. The same 27 fail on both: 21 need
+  libx264 or libx265, 2 need audio encoders those builds leave out (Opus,
+  Vorbis, FLAC), 3 are doctor tests that need the AV1 and ProRes decoders
+  and FFmpeg's Vulkan device, and 1 needs the `lrc` demuxer.
+  An 8.1 build was checked in an earlier round, before the M0 fixes.
 - Since 9.0 it binds `hwcontext_vaapi.h`, `hwcontext_vulkan.h` and
   `hwcontext_drm.h`, which later zero-copy work (VA-API to DMA-BUF to
   Vulkan) needs.
@@ -54,6 +66,9 @@ as a per-crate exception, rather than in the global allow list.
 
 Revisit if: ffmpeg-next stops tracking new FFmpeg releases.
 
+*Updated by D11:* `crates/media/src/hwprobe.rs` (doctor's probes) is a
+second FFI module, and C enums are read as ints, never as bindgen enums.
+
 ## D3. Hardware decoding never falls back to software silently
 
 *2026-10-23, M0.*
@@ -73,7 +88,10 @@ silently.
 
 Software decoding lets libavcodec choose the thread count (frame
 threading). libavcodec's default is one thread, which is several times
-slower at 5.7K.
+slower at 5.7K. A hardware decoder keeps that default.
+
+*Extended by D14:* the error now says why the device refused the stream
+(`MediaError::HwUnsupported`), and doctor's probes use the same check.
 
 ## D4. Our own MP4 box parser and injector for spherical metadata
 
@@ -94,8 +112,12 @@ reading, injecting and validating keeps those consistent. Camera-specific
 boxes (Insta360 trailer, GoPro `udta`, DJI metadata) also need it.
 
 Validation: FFmpeg 6.1's `ffprobe` reads our injected boxes back as side
-data `spherical: equirectangular` and `stereo3d: 2D`. The parser is fuzzed with
-truncation and corruption in its unit tests.
+data `spherical: equirectangular` and `stereo3d: 2D`.
+
+*Updated by D15 and D16:* this entry used to say the parser was fuzzed.
+At the time it was tested with 2000 byte flips of one file plus
+truncations. D15 has the parser's limits, its damage checks and the
+fuzzing now in place; D16 has inject's checks and atomic writes.
 
 ## D5. glam for vectors and quaternions
 
@@ -146,30 +168,52 @@ the `Checked*` traits, and which hasn't been released since 2024.
 - licenses: a GPL-compatible allow list, plus the WTFPL exception in D2;
 - bans: HTTP clients (`reqwest`, `hyper`, `ureq`, `isahc`, `curl`) and
   webview crates (`wry`, `tauri`, `webkit2gtk`), so a dependency can't
-  quietly add network access or a webview;
+  quietly add network access or a webview (*updated by D21*, which adds
+  more HTTP clients and the TLS stacks);
 - sources: crates.io only; unknown registries and git sources are denied.
 
 The app makes no network requests. `spherecut doctor` prints the exact
 `dnf`/`pacman` command for a problem; it never runs package managers or
 downloads anything.
 
+*Superseded in part by D18:* doctor still never installs or changes
+anything and downloads nothing, but on Fedora it makes one read-only
+`rpm -q` query to word its fixes. `cargo xtask hw-test` also runs `rpm -q`
+in its prerequisite check.
+
 ## D9. Test tiers and synthetic media
 
 *2026-10-22, M0.*
 
 - Tier 1 runs anywhere, including this GPU-less cloud VM, with lavapipe for
-  GPU work once it exists.
+  GPU work once it exists. *Updated:* lavapipe is needed already, because
+  `crates/cli/tests/doctor.rs` runs doctor with the Vulkan loader limited
+  to it (D18).
 - Tier 2 tests are `#[ignore = "tier2: ..."]` and call
   `spherecut_testkit::tier2::require_*`, which panic with a `TIER2-SKIP:`
   marker when hardware or samples are missing. `cargo xtask hw-test` runs
   them with `--ignored` and counts that marker as "skipped" with its reason.
   So a missing GPU is never a pass and never a mystery failure.
+  *Updated by D19:* when this was written, hw-test could drop tests whose
+  binary never ran (review B1), so the last sentence did not hold. D19 has
+  the reporting rules that make it hold now.
 - Test media is generated, not committed. `cargo xtask gen-media` renders
-  patterns with known geometry (axis markers, a 16-bit frame code, a moving
-  marker) and encodes them with libx264/libx265 single-threaded, so the
-  pattern frames are reproducible. Lossless variants allow bit-exact
-  round-trip checks. Tier 1 therefore needs an FFmpeg with libx264 and
-  libx265 (on Fedora, RPM Fusion's `ffmpeg`, not `ffmpeg-free`).
+  patterns with known geometry (axis markers with letters, a 16-bit frame
+  code, a moving marker) and encodes them with libx264/libx265
+  single-threaded, so the pattern frames are reproducible. Lossless
+  variants allow bit-exact round-trip checks. Tier 1 therefore needs an
+  FFmpeg with libx264 and libx265 (on Fedora, RPM Fusion's `ffmpeg`, not
+  `ffmpeg-free`). With doctor's checks (D18) it also needs libdav1d and an
+  FFmpeg built with Vulkan.
+- Determinism: a given build renders the same bytes on every run.
+  Agreement across machines is expected but not guaranteed, because the
+  pattern code uses libm trigonometry, and it has not been checked. Two
+  full `gen-media` runs on the fix/writers branch gave byte-identical
+  output (sha256 over all 19 files).
+- `spherecut_synth::media::write` writes through `Mp4Writer` (D16), so a
+  clip at its final name is always complete. The Tier 2 clip cache
+  (`CARGO_TARGET_TMPDIR/tier2-media-v2`) relies on that. A killed run can
+  leave hidden `.spherecut-*.tmp` files.
 - Real camera samples stay outside the repo (`samples/` is gitignored) and
   are only used by Tier 2 tests.
 
@@ -181,6 +225,368 @@ The project is GPL-3.0-or-later. GPL-3.0-compatible code may be reused with
 attribution in the file header, notably Gyroflow (GPL-3.0-or-later) for
 FFmpeg hardware paths and lens/IMU math. Closed vendor SDKs (for example
 the Insta360 Media SDK) are not used, at build time or run time.
+
+## D11. FFmpeg's C enums are read as ints, never as bindgen enums
+
+*2026-10-23, M0. Updates D2.*
+
+FFmpeg's C enums (pixel and sample formats, colour fields, media types,
+codec ids, hardware device types) never become bindgen's Rust enums. A
+Rust enum may hold only the values in the headers ffmpeg-sys-next was
+generated from, and a newer libavutil at run time can hand back others,
+such as a new pixel format. Making a Rust enum from such a value is
+undefined behaviour. So `ffi.rs` declares the FFmpeg functions that take
+or return these enums with the `c_int` the C ABI passes, and reads enum
+fields as ints.
+
+The rule covers ffmpeg-next's own accessors that build these enums from C
+fields: `Context::id()` (which `Decoder::video` calls), `medium()` on
+`Opened`, `Context` and `Parameters`, and `Frame::format()`, which
+`frame::Video::data()` also calls. The decode and probe paths use
+`ffi::open_video_decoder`, `ffi::media_type`, `ffi::plane` and
+`ffi::frame_format` instead.
+
+FFI lives in two modules: `ffi.rs` and, for doctor's probes,
+`hwprobe.rs`. The workspace denies `unsafe_op_in_unsafe_fn` and
+`clippy::undocumented_unsafe_blocks`, so each `unsafe` block has a SAFETY
+comment.
+
+Why: the M0 review (S3) found `transmute` from a `c_int` into
+`AVPixelFormat` and `AVSampleFormat`.
+
+Considered: checking each value against the enum's `*_NB` count before
+converting. The count also comes from the build headers, so a valid value
+from a newer FFmpeg would still be refused.
+
+Not covered yet: the encode paths (`Mp4Writer`, and doctor's encode and
+decode probes) still call `Encoder::video`, `Encoder::audio`,
+`Opened::video` and `Frame::data_mut`. There the codec is chosen by name
+and the frame formats are set by us, so the enums only hold values we
+chose. `Mp4Writer`'s check of the audio encoder's sample formats reads
+the runtime FFmpeg's list as ints (`ffi::sample_formats`): through
+`avcodec_get_supported_config` on FFmpeg 7.1 and later, and
+`AVCodec.sample_fmts` before that. `crates/media/build.rs` tells the two
+apart from ffmpeg-sys-next's version flags. Some tests
+(`generated_media.rs`, `writers.rs`, the `hwprobe` unit tests) call
+`Decoder::video`, `Decoder::audio`, `Frame::format` and `Frame::data`.
+
+## D12. FFmpeg's log goes to `tracing`
+
+*2026-10-23, M0.*
+
+`spherecut_media::init()` installs an `av_log` callback that sends each
+FFmpeg message to `tracing` under the target `ffmpeg`, formatted by
+FFmpeg with its `[hevc @ 0x...]` prefix. Error and worse map to error,
+warning to warn, info to info, verbose to debug, and FFmpeg's debug and
+trace to trace. A panic in the callback is caught and the message dropped.
+FFmpeg's own level is set to the most verbose level the subscriber
+accepts for `ffmpeg`, so messages nobody would see are never formatted;
+a subscriber installed after `init()` calls `sync_ffmpeg_log_level()`.
+
+The CLI's default filter is `warn,ffmpeg=off`, and `SPHERECUT_LOG` adds
+EnvFilter directives to it (README, Logging). FFmpeg's messages are off by
+default because doctor's device checks make FFmpeg log errors that are
+expected.
+
+Why: before this, `init()` set FFmpeg's level to fatal, so its
+explanations were lost (the review's minor on errors and logging).
+
+## D13. What `VideoDecoder` does with a damaged file
+
+*2026-10-23, M0.*
+
+- Only a clean end of file ends the stream with `None`. A read error, a
+  cancelled read (`open_cancellable`) or a cut ends it with
+  `MediaError::Decode`, after the frames that could still be decoded.
+- A cut is found when the file ends before samples that the demuxer's
+  index lists for the decoded stream, which is how a moov-first MP4 or MOV
+  looks when it is cut. Matroska cuts and most fragmented-MP4 cuts end
+  cleanly, with only an FFmpeg warning.
+- A packet the demuxer flags corrupt is held back until the next read. If
+  that read fails, the packet was part of the failure and is dropped
+  rather than decoded.
+- Other streams are discarded (`AVDISCARD_ALL`), so damage in them doesn't
+  end the decoded one.
+- A packet read as invalid data is skipped with a warning and counted
+  (`skipped_packets`): the demuxer can resync after one, and later frames
+  keep their timestamps. 100 in a row (`MAX_UNREADABLE_IN_A_ROW`) is an
+  error.
+
+Why: the M0 review (S4) found that ffmpeg-next's `packets()` iterator
+ends on any read error except invalid data, which it skips silently, so an
+EIO mid-file looked like a clean end.
+
+Limits: the invalid-data skip has no test, and Matroska and fragmented-MP4
+cuts are not detected.
+
+## D14. A hardware decoder says why it refused a stream
+
+*2026-10-23, M0. Extends D3.*
+
+When the device can't decode a stream, `VideoDecoder` returns
+`MediaError::HwUnsupported { path, kind, refusal }` with a `HwRefusal`:
+
+- `NotOffered`: FFmpeg never offered the device's pixel format, so this
+  FFmpeg has no hardware decoder for the format or profile.
+- `Withdrawn`: FFmpeg offered it, then setting up its hardware decoder
+  failed: the driver can't decode this profile.
+
+`ffi::attach_hw_device` installs the `get_format` callback, which records
+in the codec context's `opaque` (unused by FFmpeg) the device format in
+the low 24 bits and three flags: asked, offered and withdrawn.
+`ffi::hw_refusal` reads them. Doctor's probes (`hwprobe.rs`) use the same.
+The Tier 2 Vulkan test skips when there is no render node, when FFmpeg
+has no Vulkan device or no encoder to make its clip, or on
+`HwUnsupported`; any other error fails it.
+
+Why: without this the caller got FFmpeg's "Operation not permitted". That
+is error code -1, from the `AV_PIX_FMT_NONE` (-1) our callback returns
+when it refuses to fall back to software, and it says nothing about the
+cause. huginn's first report skipped its Vulkan test with that message.
+
+## D15. MP4 parser limits, damage checks and fuzzing
+
+*2026-10-23, M0. Updates D4.*
+
+Limits, so a hostile file costs bounded time and memory:
+
+- Nesting deeper than 32 levels (`MAX_DEPTH`) is skipped with a warning.
+- Parsing stops after 250 000 boxes (`MAX_BOXES`).
+- At most 32 warnings are listed; the rest are counted ("N more problems
+  not listed").
+- A `moov` larger than 256 MiB is not parsed, with a warning.
+- Top-level `mdat`, `free`, `skip` and `wide` are never read. Other
+  top-level boxes are read only when each is at most 64 KiB and their
+  total stays under 1 MiB.
+- Leaf payloads over 1 MiB are not kept, except the sample tables (`stts`,
+  `stsz`, `stz2`, `stsc`, `stco`, `co64`), which the 256 MiB `moov` limit
+  bounds.
+
+Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
+
+- every warning from the box parser;
+- no `moov` box, unless the file is item-based (a top-level `meta`) or the
+  cut box may have been `moov`;
+- a top-level box cut off by the end of the file, including a file that
+  ends inside a box header when the bytes there agree with a header;
+- a video sample entry under a `soun` handler, or audio under `vide`;
+  other handlers (`pict`, `auxv`) are not checked;
+- sample tables that disagree with each other, or chunks outside the file
+  or the `mdat` ranges;
+- a video or audio `trak` that FFmpeg reads as another kind of stream.
+
+A file FFmpeg reads as MOV/MP4 is checked even when its first box type is
+unknown; that box alone is a warning, not damage. Matroska is checked
+only against its Segment length, other containers not at all, and the
+report says so (`structure`). A file with no video or audio stream also
+fails `probe`.
+
+Fuzzing, with proptest, in `mp4::tests::fuzz`, under overflow checks:
+structure-aware random box trees (containers, `stsd` and sample entries,
+`uuid`, 32-bit, 64-bit and size-0 headers) must parse exactly; byte flips
+and cuts of them must never panic; damaged and extreme sample tables must
+never panic; consistent tables must never be damage; every cut must be an
+error or damage. Each parse must take under 1 s and stay within bounds on
+boxes, kept bytes and depth. Separate tests nest 20 000 and 200 000 levels
+(under 2 s each, under 64 MiB peak growth), make 4000 edits to a `moov`
+FFmpeg wrote (`crates/synth/tests/generated_media.rs`), and run
+`spherecut probe` on 200 000 levels (`crates/cli/tests/probe.rs`).
+
+Why: the M0 review found unbounded recursion and quadratic memory in the
+parser (B2), `probe` exiting 0 on corrupt and truncated MP4s (S1), and
+that the parser was not fuzzed as D4 said.
+
+## D16. `inject` and `Mp4Writer` write atomically
+
+*2026-10-23, M0. Updates D4.*
+
+Both write a temporary file next to the output and rename it into place:
+
+- The name is `.spherecut-<16 random hex digits>.tmp`, so any legal output
+  name works. It is created with `create_new`; a taken name is skipped for
+  another, up to 16 tries.
+- A replaced output keeps its permission bits (the new file is 0600 until
+  they are set), but not its owner, ACLs or extended attributes.
+- The file is flushed to disk (`sync_all`) before the rename, and removed
+  on an error or a panic.
+- A symlinked output is written through: the file it finally names is
+  replaced and the link kept. A dangling link creates its target. A
+  directory at the output is refused before any work.
+
+`inject` also refuses an output that is the input under any name (same
+device and inode, so hard links and symlinks too), two edits for one
+track, and fragmented MP4 (top-level `moof`, `sidx`, `ssix` or `mfra`, or
+`mvex` in `moov`), whose offsets it does not shift. It copies exactly the
+parsed lengths, so the output can't outgrow the input.
+
+`Mp4Writer` always writes MP4, through a `StreamIo` on our own file handle,
+and looks up both encoders before touching the disk. `finish()` renames the
+file into place; `finish_with_edits()` goes through `inject`. Audio input
+is planar f32 only, and an encoder that doesn't take it (libopus, for
+example) is refused with a clear error.
+
+Why: the M0 review (S2) found that `inject` with the same input and
+output grew the file until the disk was full.
+
+## D17. First-order ambiX in AAC uses the 4.0 layout
+
+*2026-10-23, M0.*
+
+Four-channel ambiX audio is encoded as AAC with FFmpeg's default
+four-channel layout, 4.0 (channel configuration 4, no PCE). The `SA3D` box
+that `inject` adds marks the track as ambiX. In MP4 the muxer writes no
+`chnl` or `chan` box for AAC, and `ffprobe` 6.1.1 reports
+`channel_layout=4.0`.
+
+Why: FFmpeg's native AAC encoder refuses the ambisonic and unspecified
+four-channel layouts (EINVAL, "Unsupported channel layout"; seen on 6.1,
+8.1 and 9.0.2). AAC can only name speaker positions. Quad needs a PCE, and
+3.1 low-passes the fourth channel as LFE. 4.0 keeps the W, Y, Z, X order,
+which the synth writers test checks channel by channel. Google's spatial
+audio RFC puts no requirement on the AAC channel configuration.
+
+Cost: FFmpeg's mov demuxer reads our `SA3D` as "ambisonic 1", but
+`avformat_find_stream_info` then replaces it with the AAC decoder's 4.0,
+so players that ignore `SA3D` play it as 4.0 surround.
+
+Revisit for M2/M6: Opus with channel mapping family 2 (ffprobe 6.1 reports
+"ambisonic 1" for it in MP4). It needs packed-float audio in `Mp4Writer`
+and a check that YouTube accepts it.
+
+## D18. Doctor checks capability, and reads packages only to word fixes
+
+*2026-10-23, M0. Supersedes part of D8.*
+
+A device that opens can still be useless: Fedora's Mesa VA-API driver
+opens with H.264 and HEVC turned off, and FFmpeg's Vulkan device opens on
+llvmpipe. So `spherecut doctor`:
+
+- decodes one embedded 256×256 frame each of H.264 High, HEVC Main, HEVC
+  Main 10 and AV1 Main in software, on VA-API and on FFmpeg's Vulkan
+  device, never falling back to software, and requires the hardware
+  picture to match the software decode bit for bit;
+- encodes one frame with `h264_vaapi`, `hevc_vaapi` (8 and 10-bit) and
+  `av1_vaapi`, and decodes it back;
+- lists the Vulkan devices FFmpeg sees (through `AVVulkanDeviceContext`)
+  and flags CPU devices as having no GPU acceleration.
+
+Whether something works comes only from those checks, never from which
+packages are installed. On Fedora, doctor makes one read-only `rpm -q`
+query for a fixed list of packages (RPM Fusion release packages,
+`ffmpeg-free`, the Mesa VA-API and Vulkan drivers, the Intel media
+driver). The answer only chooses "install" or "swap" wording and whether
+RPM Fusion must be enabled first. Doctor never installs or changes
+anything.
+
+Fixes are exact `dnf` or `pacman` commands where a package fixes the
+problem, on Fedora and Arch. Other problems get the fix that applies
+(`usermod -aG render`, GPU passthrough, `MESA_VK_DEVICE_SELECT`), and
+other distros get the package named in words. Doctor exits 1 only on an
+error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes
+AV1. `--json` keeps its old keys and adds `gpu`, `vulkan_devices`,
+`decode_checks` and `encode_checks`.
+
+`cargo xtask hw-test`'s prerequisite check still runs `rpm -q` for
+`ffmpeg-free`, `mesa-va-drivers` and `mesa-va-drivers-freeworld`, and
+judges Fedora by those packages.
+
+Why: the M0 review (S6) found that doctor only checked that a device
+opened. It caught Fedora's codec-stripped VA-API driver only through an
+`rpm -q` guess, so the same problem with Intel drivers or on Arch went
+unnoticed, and it reported lavapipe as a working Vulkan device. The review
+also found that D8's "never runs package managers" was not true.
+
+## D19. How `cargo xtask hw-test` reports Tier 2 tests
+
+*2026-10-23, M0. Makes D9's "never a pass and never a mystery failure"
+hold.*
+
+1. It reads package names from `cargo test --no-run
+   --message-format=json-render-diagnostics`.
+2. It lists the Tier 2 tests with `cargo test [--release] -- --ignored
+   --list`.
+3. It runs them with `--no-fail-fast` and `--test-threads=1`; `--quick`
+   adds `--skip bench_`.
+
+Every listed test is reported exactly once: passed, FAIL with its output,
+skipped with the `TIER2-SKIP:` reason, left out by `--quick`, or did not
+run. A test is named `<binary>::<test>`, or `<package>/<binary>::<test>`
+when two packages have a test binary of that name. List and run results
+are matched by the binary's executable path.
+
+Each test binary's exit is judged on its own, so a skip in one binary
+can't hide another's crash. A binary that did not finish, exited
+abnormally after its tests finished, or failed with no failing test fails
+the run. Before libtest's summary, a bare `ok` printed by a library does
+not count as a pass.
+
+hw-test exits 1 when a build prerequisite is missing, the build fails, the
+listing fails or finds no test binaries or no Tier 2 tests, a test fails
+or does not run, a binary fails as above, or cargo fails for a reason
+nothing explains. Skips alone exit 0. The report is written either way.
+
+It runs cargo with `CARGO_TERM_VERBOSE=false`, `CARGO_TERM_QUIET=false`,
+`CARGO_TERM_COLOR=never`, `CARGO_TERM_PROGRESS_WHEN=never` and
+`RUST_TEST_NOCAPTURE=0`, and passes libtest `--format pretty`, so the
+user's cargo settings don't change what it reads. `--samples` is made
+absolute, since cargo runs integration tests from the package directory.
+The report name gets `-dirty` only for changes outside `hw-reports/`.
+
+Why: the M0 review found that hw-test silently dropped Tier 2 tests (B1)
+and that a relative `--samples` tested nothing while the report said the
+samples were present (S5).
+
+## D20. Benchmarks repeat, and report median and spread
+
+*2026-10-23, M0.*
+
+`spherecut_testkit::bench::measure` runs the measurement once to warm up,
+then `SPHERECUT_BENCH_RUNS` times (default 3), and records the median,
+minimum, maximum and run count. The hw-test report shows Median, Range,
+Runs and Spread ((max − min) / median), and marks a spread over 10% as
+**unstable**. Details: `docs/perf.md`.
+
+Why: huginn's first report used single runs. VA-API decode of the
+synthetic 5760×2880 clip gave 109.96 fps in one run and 67.30 fps in the
+next, on an idle GPU.
+
+## D21. The `deny.toml` bans list
+
+*2026-10-23, M0. Updates D8.*
+
+Banned: the HTTP clients `reqwest`, `hyper`, `ureq`, `isahc`, `curl`,
+`minreq` and `attohttpc`; the TLS stacks `rustls`, `native-tls` and
+`openssl`, all with the reason "no network access at runtime"; the
+webview crates `wry`, `tauri` and `webkit2gtk`; and the JavaScript
+engines `v8`, `deno_core`, `boa_engine`, `rquickjs`, `quick-js` and
+`mozjs`. A JavaScript toolchain (npm and the like) can't come in through
+Cargo, so only the engines can be banned here. `multiple-versions` warns,
+wildcard versions are denied, and yanked crates are denied.
+
+Revisit if: a dependency we need pulls in one of these without using the
+network; add a narrow exception with the reason.
+
+## D22. Direct dependencies
+
+*2026-10-23, M0.*
+
+The heavy ones have their own entries (FFmpeg bindings D2, glam D5). The
+rest, with the versions in `Cargo.lock`:
+
+| Crate | Used by | Why |
+|---|---|---|
+| anyhow 1.0.104 | cli, xtask | Error context at the program edges; libraries use `thiserror` |
+| clap 4.6.7 (derive) | cli, xtask | Argument parsing with generated help and errors, for two binaries with subcommands |
+| serde 1.0.229 (derive) | core, sphere, media | Serializable time types, `Projection`, and the probe and doctor reports |
+| serde_json 1.0.154 | cli | `--json` output. xtask reads cargo's JSON with a small field reader instead |
+| thiserror 2.0.21 | core, media, synth | Typed library errors without hand-written `Display` impls |
+| tracing 0.1.44 | media, cli | Structured logging, and the target for FFmpeg's log (D12) |
+| tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that doctor's thread-local FFmpeg log capture needs. It was already in the tree through `tracing` |
+| tracing-subscriber 0.3.23 (env-filter) | cli | EnvFilter gives `SPHERECUT_LOG` its syntax, and the fmt layer writes to stderr. env-filter brings in `matchers` and `regex-automata` |
+| proptest 1.12.0 (dev) | core, sphere, media | Property tests and the MP4 fuzzing (D15) |
+| ron 0.12.2 (dev) | core | A serde round-trip test of the time types in a text format |
+
+glam's `serde` feature is on, but no glam type is serialized yet.
 
 ## Open
 

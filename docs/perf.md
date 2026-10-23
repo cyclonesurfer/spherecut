@@ -12,28 +12,48 @@ table. Numbers from the GPU-less cloud workspace are not recorded here.
 | 5.7K30 raw or stitched footage plays in real time with hardware decode on odin and huginn | `bench_samples_realtime_decode`, `bench_decode_hevc_4k_and_5k7`; playback with the overlay from M1 |
 | 8K30 plays in real time, at least on proxies | the same, on 8K samples and their LRV proxies |
 | A random seek shows a frame in under ~150 ms on proxies | seek benchmark (M1) |
-| Reframed 4K30 exports at or above real time with hardware encode on odin and huginn | export benchmark (M7/M8) |
+| Reframed 4K30 exports at or above real time with hardware encode on odin and huginn | export benchmark (M2) |
 | Frame caches are bounded, sized from available memory, configurable | cache tests (M1) |
 
 ## How the benchmarks work
 
-Tier 2 tests call `spherecut_testkit::bench::record(name, value, unit)`.
-Under `cargo xtask hw-test` each value goes to `target/hw-bench.tsv` and into
-the report's Benchmarks table. Benchmarks are skipped with `--quick`, which
-builds in debug mode.
+Benchmarks are Tier 2 tests whose names start with `bench_`. Each one
+calls `spherecut_testkit::bench::measure(name, unit, f)`, which runs `f`
+once to warm up (file cache, GPU clocks), then `SPHERECUT_BENCH_RUNS` times
+(default 3), and records the median, the minimum, the maximum and the
+number of runs. `bench::record(name, value, unit)` records a single value
+as one run.
+
+Under `cargo xtask hw-test`, `SPHERECUT_BENCH_OUT` points at
+`<cargo target dir>/hw-bench.tsv`. The target directory comes from
+`cargo metadata`, so it follows `CARGO_TARGET_DIR` and `build.target-dir`.
+hw-test deletes the file before the tests run, so it holds only this run's
+numbers. Each line is `name`, `median`, `unit`, `min`, `max`, `runs`,
+tab-separated. Outside hw-test the same line goes to stderr as `BENCH ...`.
+Tier 2 tests run one at a time (`--test-threads=1`), so benchmarks don't
+compete with other tests.
+
+The report's Benchmarks table has the columns Benchmark, Median, Range,
+Runs and Spread. Spread is (max − min) / median; over 10% the row is
+marked **unstable**, which usually means the machine was busy or changing
+clocks.
+
+`--quick` builds the workspace in debug mode and leaves the benchmarks out
+(`--skip bench_`): they appear in the Tier 2 table as "skipped: benchmark,
+left out by `--quick`", and the Benchmarks section says it was skipped.
 
 Current benchmarks:
 
-- **`bench_decode_hevc_4k_and_5k7`**: decodes 60 frames of a synthetic
+- **`bench_decode_hevc_4k_and_5k7`**: decodes all 60 frames of a synthetic
   3840×1920 and 5760×2880 HEVC 8-bit clip, in software and on VA-API, in
   frames per second. The VA-API number includes copying each frame to
   system memory, which the render path will avoid later.
 - **`bench_samples_realtime_decode`**: for each recording mode in
-  `samples/`, decodes up to ten seconds of all its video streams at once,
-  one thread per stream as playback does, and reports the slowest stream
-  as a multiple of real time (1.0 = just keeps up). An Insta360 X5 8K30
-  file has two 3840² streams, so 1.0 means 60 decoded 3840² frames per
-  second.
+  `samples/`, takes the longest file, decodes up to ten seconds of all its
+  video streams at once, one thread per stream as playback does, and
+  reports the slowest stream as a multiple of real time (1.0 = just keeps
+  up). An Insta360 X5 8K30 file has two 3840² streams, so 1.0 means 60
+  decoded 3840² frames per second.
 
 ## Results
 
@@ -45,9 +65,20 @@ changes), 2026-10-22. Mesa 26.2.5 (radeonsi from
 `mesa-va-drivers-freeworld`, RADV), FFmpeg 8.1.3 (RPM Fusion), rustc
 1.99.0. The GPU was idle for the whole run: nothing else was loaded on it.
 
+This run predates the repeat-and-spread change above: each number is a
+single run, with no warm-up. It also predates the hw-test, doctor and
+decoder fixes merged since a9128cf. A rerun at the current commit is
+pending.
+
 Tier 2: 7 passed, 0 failed, 1 skipped. `vulkan_hevc_main_matches_software`
 skipped: Vulkan Video HEVC decode unavailable ("decoding: Operation not
-permitted"). `spherecut doctor`: no problems found.
+permitted"). That message is how error code -1 reads: the decoder passed
+on the `AV_PIX_FMT_NONE` (-1) that Spherecut's `get_format` callback
+returns when it refuses to fall back to software. The decoder now reports
+why instead (this FFmpeg has no hardware decoder for the format, or the
+driver refused it), and doctor's Vulkan decode checks show which formats
+fail. `spherecut doctor` (the version at a9128cf, which only opened the
+devices): no problems found.
 
 | Benchmark | VA-API | Software |
 |---|---:|---:|
@@ -62,18 +93,20 @@ permitted"). `spherecut doctor`: no problems found.
 
 A second run of both test binaries straight after
 ([synth](../hw-reports/huginn-tier2-synth.log),
-[samples](../hw-reports/huginn-tier2-samples.log)) matched within about
-10%, except VA-API 5760×2880, which fell from 109.96 to 67.30 fps on an
-idle GPU. One run per benchmark is not enough to trust that number.
+[samples](../hw-reports/huginn-tier2-samples.log)) matched within 10% on
+the X5 and LRV rows and on VA-API 3840×1920. The other synthetic rows fell:
+VA-API 5760×2880 from 109.96 to 67.30 fps on an idle GPU, software
+3840×1920 from 687.46 to 523.08 fps and software 5760×2880 from 294.91 to
+243.90 fps. One run per benchmark is not enough to trust those numbers.
 
 Every X5 mode decodes faster than real time on VA-API and slower than real
 time in software, except 1920² at 1.08×. 3840² at 29.97 is the tightest
-case, at 1.18×. On the synthetic clips, software decode on the 32 cores beats
+case, at 1.18×. On the synthetic clips, software decode on huginn's CPU beats
 VA-API including its copy to RAM.
 
 ### odin (RX 7600, Fedora)
 
-No report yet.
+Not run yet: no report.
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 
