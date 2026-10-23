@@ -18,13 +18,18 @@
 //! Some of ffmpeg-next's own accessors make such enums (`Frame::format`,
 //! `Parameters::medium`, `Context::id` when opening a decoder), so the
 //! decode and probe paths use [`frame_format`], [`plane`], [`media_type`]
-//! and [`open_video_decoder`] instead. For the same reason they read
-//! metadata with [`dict_entries`] (ffmpeg-next makes `&str`s of it
+//! and [`open_video_decoder`] instead. For the same reason they open files
+//! with [`open_input`] (ffmpeg-next panics on a path that isn't UTF-8) and
+//! read metadata with [`dict_entries`] (ffmpeg-next makes `&str`s of it
 //! without checking that it is UTF-8).
 
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::os::unix::ffi::OsStrExt;
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as sys;
@@ -500,6 +505,67 @@ pub fn lib_versions() -> Vec<(&'static str, u32, u32, u32)> {
 pub fn ffmpeg_version() -> String {
     // SAFETY: returns a static string.
     cstr_opt(unsafe { sys::av_version_info() }).unwrap_or_else(|| "unknown".into())
+}
+
+/// Open a file for demuxing and read its stream info, as
+/// `ff::format::input` does, or `input_with_interrupt` with `cancel`
+/// (FFmpeg stops reading once it is set). FFmpeg gets the path's bytes as
+/// they are: ffmpeg-next's functions panic on a path that is not UTF-8,
+/// and Linux file names need not be.
+pub fn open_input(
+    path: &Path,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<ff::format::context::Input, ff::Error> {
+    let url = CString::new(path.as_os_str().as_bytes()).map_err(|_| ff::Error::Other {
+        errno: ff::util::error::EINVAL,
+    })?;
+    // SAFETY: allocates a context, which we own until it is handed to
+    // avformat_open_input below.
+    let mut ps = unsafe { sys::avformat_alloc_context() };
+    if ps.is_null() {
+        return Err(ff::Error::Other {
+            errno: ff::util::error::ENOMEM,
+        });
+    }
+    // The guard frees the closure when dropped, which is after FFmpeg has
+    // freed the context on every path below.
+    let guard = cancel.map(|cancel| {
+        let i = ff::util::interrupt::new(Box::new(move || cancel.load(Ordering::Relaxed)));
+        // SAFETY: `ps` is live and ours; FFmpeg calls the callback with
+        // its opaque, the closure, which the guard keeps alive.
+        unsafe { (*ps).interrupt_callback = i.interrupt };
+        i.guard
+    });
+    // SAFETY: `ps` is a context from avformat_alloc_context and `url` a
+    // NUL-terminated string that outlives the call. On failure FFmpeg
+    // frees the context.
+    let ret = unsafe {
+        sys::avformat_open_input(
+            &mut ps,
+            url.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ret < 0 {
+        return Err(ff::Error::from(ret));
+    }
+    // SAFETY: an open input context.
+    let ret = unsafe { sys::avformat_find_stream_info(ps, std::ptr::null_mut()) };
+    if ret < 0 {
+        // SAFETY: closes and frees the context opened above, which nothing
+        // else holds.
+        unsafe { sys::avformat_close_input(&mut ps) };
+        return Err(ff::Error::from(ret));
+    }
+    // SAFETY: an open input context, which the wrapper now owns: it closes
+    // the context when dropped, and only then drops the guard.
+    Ok(unsafe {
+        match guard {
+            Some(guard) => ff::format::context::Input::wrap_with_interrupt(ps, guard),
+            None => ff::format::context::Input::wrap(ps),
+        }
+    })
 }
 
 /// The entries of a dictionary, such as a file's or a stream's metadata,

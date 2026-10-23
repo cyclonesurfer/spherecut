@@ -27,7 +27,7 @@
 use std::ffi::c_int;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use spherecut_core::{Rational, Time};
 
@@ -179,7 +179,7 @@ impl VideoDecoder {
         hw: Option<Arc<HwDevice>>,
     ) -> Result<Self, MediaError> {
         init();
-        let ictx = ff::format::input(path).map_err(|e| open_err(path, e))?;
+        let ictx = ffi::open_input(path, None).map_err(|e| open_err(path, e))?;
         Self::with_input(path, ictx, index, hw)
     }
 
@@ -194,8 +194,7 @@ impl VideoDecoder {
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, MediaError> {
         init();
-        let ictx = ff::format::input_with_interrupt(path, move || cancel.load(Ordering::Relaxed))
-            .map_err(|e| open_err(path, e))?;
+        let ictx = ffi::open_input(path, Some(cancel)).map_err(|e| open_err(path, e))?;
         Self::with_input(path, ictx, index, hw)
     }
 

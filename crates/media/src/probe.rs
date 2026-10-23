@@ -239,7 +239,7 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         damage.extend(t.damage());
     }
 
-    let ictx = ff::format::input(path).map_err(|e| MediaError::Open {
+    let ictx = ffi::open_input(path, None).map_err(|e| MediaError::Open {
         path: path.to_path_buf(),
         reason: describe_open_error(e, tree.is_some(), &damage),
     })?;
