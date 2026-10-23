@@ -819,9 +819,10 @@ fn check_chunk(
     let end = offset
         .checked_add(size.unwrap_or(1))
         .ok_or_else(|| format!("{what} overflows"))?;
+    // Not necessarily truncation: a corrupt offset does this too.
     if end > file_size {
         return Err(format!(
-            "{what} runs past the end of the file ({file_size} bytes): it was cut short"
+            "{what} runs past the end of the file ({file_size} bytes)"
         ));
     }
     let i = mdats.partition_point(|&(start, _)| start <= offset);
