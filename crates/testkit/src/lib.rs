@@ -194,10 +194,21 @@ mod tests {
         assert_eq!(msg, "TIER2-SKIP: no GPU");
     }
 
+    /// A test's own directory, removed with what it holds when dropped,
+    /// so also when the test fails.
+    struct TempDir(std::path::PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
     #[test]
     fn samples_with_a_path_that_is_not_utf8_are_used() {
         use std::os::unix::ffi::OsStrExt;
         let base = std::env::temp_dir().join(format!("spherecut-testkit-{}", std::process::id()));
+        let guard = TempDir(base.clone());
         let dir = base.join(std::ffi::OsStr::from_bytes(b"samples-\xff"));
         std::fs::create_dir_all(&dir).unwrap();
         let usable = |dir: std::path::PathBuf| {
@@ -210,6 +221,7 @@ mod tests {
             msg.starts_with("TIER2-SKIP: samples directory ") && msg.ends_with(" not found"),
             "{msg}"
         );
-        std::fs::remove_dir_all(&base).ok();
+        drop(guard);
+        assert!(!base.exists());
     }
 }
