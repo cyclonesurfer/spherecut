@@ -73,6 +73,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                             failed = true;
                             let more = match r.damage.len() - 1 {
                                 0 => String::new(),
+                                1 => " (and 1 more problem)".into(),
                                 n => format!(" (and {n} more problems)"),
                             };
                             eprintln!("error: {} is damaged: {first}{more}", f.display());
