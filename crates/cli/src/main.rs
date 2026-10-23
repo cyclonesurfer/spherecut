@@ -72,6 +72,9 @@ fn init_logging() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
+        // It would report a failed write with eprintln!, which panics on
+        // a closed stderr; see to_stderr.
+        .log_internal_errors(false)
         .init();
 }
 
