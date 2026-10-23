@@ -177,8 +177,12 @@ pub enum CheckResult {
 pub enum Fault {
     /// This FFmpeg build: a decoder, encoder or hwaccel left out.
     Ffmpeg,
-    /// The driver or the hardware.
+    /// The driver or the hardware refuses the format, or fails on it.
     Driver,
+    /// The driver runs it and gets it wrong: a picture that differs from
+    /// the software decoder's or has the wrong size or format, or an
+    /// encoding that doesn't read back as it should.
+    WrongOutput,
 }
 
 /// One decode or encode of one format on one path.
@@ -664,7 +668,7 @@ fn decode(s: &Sample, paths: &[(&str, Option<&HwDevice>, &DeviceStatus)]) -> Vec
             hwprobe::capture_ffmpeg_log(|| hwprobe::decode_one(s.hardware, s.data, Some(dev)));
         let r = r
             .map_err(Failure::from)
-            .and_then(|f| planes(&f, SAMPLE_SIZE, Fault::Driver))
+            .and_then(|f| planes(&f, SAMPLE_SIZE, Fault::WrongOutput))
             .and_then(|got| match &reference {
                 Some(want) => compare(want, &got),
                 None => Ok(Some("not compared: no software decode".into())),
@@ -719,10 +723,8 @@ fn compare(want: &[Vec<u16>; 3], got: &[Vec<u16>; 3]) -> Result<Option<String>, 
         Ok(None)
     } else {
         Err(Failure {
-            reason: format!(
-                "decodes, but {differ} of {total} samples differ from FFmpeg's software decoder"
-            ),
-            fault: Fault::Driver,
+            reason: format!("{differ} of {total} samples differ from FFmpeg's software decoder"),
+            fault: Fault::WrongOutput,
         })
     }
 }
@@ -751,7 +753,7 @@ fn encode(t: &EncodeTarget, dev: Option<&HwDevice>, status: &DeviceStatus) -> Ch
     let r = match r {
         Err(e) => Err(Failure {
             reason: format!("its output doesn't decode: {e}"),
-            fault: Fault::Driver,
+            fault: Fault::WrongOutput,
         }),
         Ok(f) => {
             let fmt = ffi::pix_fmt_name(ffi::frame_format(&f.frame));
@@ -764,7 +766,7 @@ fn encode(t: &EncodeTarget, dev: Option<&HwDevice>, status: &DeviceStatus) -> Ch
                         size.1,
                         fmt.as_deref().unwrap_or("?")
                     ),
-                    fault: Fault::Driver,
+                    fault: Fault::WrongOutput,
                 })
             } else {
                 Ok(None)
@@ -1029,6 +1031,20 @@ impl Fixes<'_> {
             Some(driver),
         ])
     }
+
+    /// A newer `driver` (e.g. "radv (Mesa 25.2.8)"), for one that runs a
+    /// format and gets it wrong.
+    fn newer_driver(&self, driver: &str) -> String {
+        let cmd = match self.distro {
+            Distro::Fedora => "sudo dnf upgrade --refresh",
+            Distro::Arch => "sudo pacman -Syu",
+            Distro::Other => "update the GPU driver",
+        };
+        format!(
+            "{cmd}   ({driver} gets this wrong: a newer release may fix it; if not, \
+             report it to its developers)"
+        )
+    }
 }
 
 impl Fixes<'_> {
@@ -1126,15 +1142,15 @@ fn issues(r: &DoctorReport, env: &Env) -> Vec<Issue> {
     out
 }
 
-/// Formats whose checks on `path` failed for `fault`. A check whose
-/// decoder or encoder is missing from `codecs` is left out: the missing
-/// codec has an issue of its own.
-fn failed<'a>(
+/// Checks on `path` that failed for `fault`. A check whose decoder or
+/// encoder is missing from `codecs` is left out: the missing codec has an
+/// issue of its own.
+fn failures<'a>(
     checks: &'a [Check],
     codecs: &[CodecStatus],
     path: &str,
     fault: Fault,
-) -> Vec<&'a str> {
+) -> Vec<&'a Check> {
     let missing = |name: &str| codecs.iter().any(|c| c.name == name && !c.available);
     checks
         .iter()
@@ -1144,8 +1160,36 @@ fn failed<'a>(
                 && c.fault == Some(fault)
                 && !missing(&c.codec)
         })
-        .map(|c| c.format.as_str())
         .collect()
+}
+
+fn formats<'a>(checks: &[&'a Check]) -> Vec<&'a str> {
+    checks.iter().map(|c| c.format.as_str()).collect()
+}
+
+/// The formats of [`failures`].
+fn failed<'a>(
+    checks: &'a [Check],
+    codecs: &[CodecStatus],
+    path: &str,
+    fault: Fault,
+) -> Vec<&'a str> {
+    formats(&failures(checks, codecs, path, fault))
+}
+
+/// "decodes X wrongly (why)", with each format's reason when there are
+/// several.
+fn wrongly(verb: &str, checks: &[&Check]) -> String {
+    let reason = |c: &Check| c.reason.clone().unwrap_or_default();
+    let why = match checks {
+        [one] => reason(one),
+        _ => checks
+            .iter()
+            .map(|c| format!("{}: {}", c.format, reason(c)))
+            .collect::<Vec<_>>()
+            .join("; "),
+    };
+    format!("{verb} {} wrongly ({why})", and_list(&formats(checks)))
 }
 
 /// "decode X and Y, or encode Z".
@@ -1296,6 +1340,33 @@ fn vaapi_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issue
             ),
         });
     }
+
+    // What its driver runs and gets wrong: a bug, not a missing feature.
+    let dec = failures(&r.decode_checks, &r.decoders, "vaapi", Fault::WrongOutput);
+    let enc = failures(&r.encode_checks, &r.encoders, "vaapi", Fault::WrongOutput);
+    let what = match (dec.is_empty(), enc.is_empty()) {
+        (true, true) => return,
+        (false, true) => wrongly("decodes", &dec),
+        (true, false) => wrongly("encodes", &enc),
+        (false, false) => format!(
+            "{}, and {}",
+            wrongly("decodes", &dec),
+            wrongly("encodes", &enc)
+        ),
+    };
+    out.push(Issue {
+        severity: Severity::Warning,
+        what: format!("VA-API on {node} {what}"),
+        impact: "its output can't be used, so these fall back to the CPU, which is far slower \
+                 at 5.7K and up"
+            .into(),
+        fix: lines([
+            Some(fx.newer_driver("the VA-API driver")),
+            Some(format!(
+                "vainfo --display drm --device {node}   (names the driver and its version)"
+            )),
+        ]),
+    });
 }
 
 const NO_VULKAN_GPU: &str = "the viewer and exports render with Vulkan, and on the CPU \
@@ -1374,20 +1445,29 @@ fn vulkan_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issu
     }
 }
 
-/// What Vulkan Video can't decode on FFmpeg's Vulkan device, a GPU. Only
-/// notes: VA-API is the hardware decoder, and Vulkan Video the second one.
+/// What Vulkan Video can't decode, or decodes wrongly, on FFmpeg's Vulkan
+/// device, a GPU. Only notes: VA-API is the hardware decoder, and Vulkan
+/// Video the second one.
 fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) {
+    // Which of `formats` VA-API still decodes, and which only the CPU.
     let impact = |formats: &[&str]| -> String {
         let on_vaapi = |f: &&str| {
             r.decode_checks
                 .iter()
                 .any(|c| c.path == "vaapi" && c.format == *f && c.result == CheckResult::Works)
         };
-        if formats.iter().all(on_vaapi) {
+        let (vaapi, cpu): (Vec<&str>, Vec<&str>) = formats.iter().partition(|f| on_vaapi(f));
+        if cpu.is_empty() {
             "none while VA-API decodes them, as it does here".into()
-        } else {
+        } else if vaapi.is_empty() {
             "with VA-API unable too, they decode on the CPU, which is far slower at 5.7K and up"
                 .into()
+        } else {
+            format!(
+                "VA-API still decodes {}; the CPU decodes {}, which is far slower at 5.7K and up",
+                and_list(&vaapi),
+                and_list(&cpu)
+            )
         }
     };
     let ffmpeg_dec = failed(&r.decode_checks, &r.decoders, "vulkan", Fault::Ffmpeg);
@@ -1402,44 +1482,50 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
             fix: fx.ffmpeg(),
         });
     }
-    let refused: Vec<&Check> = r
-        .decode_checks
-        .iter()
-        .filter(|c| {
-            c.path == "vulkan" && c.result == CheckResult::Fails && c.fault == Some(Fault::Driver)
-        })
-        .collect();
-    if refused.is_empty() {
-        return;
-    }
-    let formats: Vec<&str> = refused.iter().map(|c| c.format.as_str()).collect();
-    let on = r
-        .vulkan_devices
-        .iter()
-        .find(|d| d.used_by_ffmpeg)
-        .map_or_else(|| "the Vulkan device".to_string(), |d| d.name.clone());
-    // FFmpeg's first complaint says why, e.g. a missing video extension;
-    // shown when every format failed with the same one.
-    fn first_log(c: &Check) -> Option<&str> {
-        c.ffmpeg_log.first().map(String::as_str)
-    }
-    let why = match first_log(refused[0]) {
-        Some(line) if refused.iter().all(|c| first_log(c) == Some(line)) => {
-            format!(" (FFmpeg: {})", line.trim())
+    let dev = r.vulkan_devices.iter().find(|d| d.used_by_ffmpeg);
+    let on = dev.map_or_else(|| "the Vulkan device".to_string(), |d| d.name.clone());
+    let refused = failures(&r.decode_checks, &r.decoders, "vulkan", Fault::Driver);
+    if let [first, ..] = refused[..] {
+        // FFmpeg's first complaint says why, e.g. a missing video
+        // extension; shown when every format failed with the same one.
+        fn first_log(c: &Check) -> Option<&str> {
+            c.ffmpeg_log.first().map(String::as_str)
         }
-        _ => String::new(),
-    };
-    out.push(Issue {
-        severity: Severity::Info,
-        what: format!(
-            "Vulkan Video on {on} cannot decode {}{why}",
-            and_list(&formats)
-        ),
-        impact: impact(&formats),
-        fix: "vulkaninfo | grep -i video_decode   (the Vulkan Video formats this driver \
-              decodes; newer Mesa releases add more)"
-            .into(),
-    });
+        let why = match first_log(first) {
+            Some(line) if refused.iter().all(|c| first_log(c) == Some(line)) => {
+                format!(" (FFmpeg: {})", line.trim())
+            }
+            _ => String::new(),
+        };
+        let formats = formats(&refused);
+        out.push(Issue {
+            severity: Severity::Info,
+            what: format!(
+                "Vulkan Video on {on} cannot decode {}{why}",
+                and_list(&formats)
+            ),
+            impact: impact(&formats),
+            fix: "vulkaninfo | grep -i video_decode   (the Vulkan Video formats this driver \
+                  decodes; newer Mesa releases add more)"
+                .into(),
+        });
+    }
+    // A driver that decodes a format wrongly still lists it in vulkaninfo,
+    // so the fix is a newer driver.
+    let wrong = failures(&r.decode_checks, &r.decoders, "vulkan", Fault::WrongOutput);
+    if !wrong.is_empty() {
+        let driver = match dev.map(|d| (d.driver.as_deref(), d.driver_info.as_deref())) {
+            Some((Some(name), Some(info))) => format!("{name} ({info})"),
+            Some((Some(one), None) | (None, Some(one))) => one.to_string(),
+            _ => "the Vulkan driver".to_string(),
+        };
+        out.push(Issue {
+            severity: Severity::Info,
+            what: format!("Vulkan Video on {on} {}", wrongly("decodes", &wrong)),
+            impact: impact(&formats(&wrong)),
+            fix: fx.newer_driver(&driver),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -1929,14 +2015,35 @@ mod tests {
         );
         assert_eq!(i.impact, "none while VA-API decodes them, as it does here");
 
-        // VA-API can't decode HEVC Main either: the CPU does.
+        assert_eq!(
+            i.fix,
+            "vulkaninfo | grep -i video_decode   (the Vulkan Video formats this driver \
+             decodes; newer Mesa releases add more)"
+        );
+
+        // VA-API can't decode HEVC Main either: the CPU does, and only that.
+        let vulkan_note = |r: &DoctorReport| {
+            issues(r, &Env::default())
+                .into_iter()
+                .find(|i| i.what.starts_with("Vulkan Video"))
+                .unwrap()
+        };
         fail(&mut r.decode_checks, "vaapi", &["HEVC Main"], Fault::Driver);
-        let is = issues(&r, &Env::default());
-        let i = is
-            .iter()
-            .find(|i| i.what.starts_with("Vulkan Video"))
-            .unwrap();
-        assert!(i.impact.contains("decode on the CPU"), "{i:?}");
+        assert_eq!(
+            vulkan_note(&r).impact,
+            "VA-API still decodes HEVC Main 10; the CPU decodes HEVC Main, which is far \
+             slower at 5.7K and up"
+        );
+        fail(
+            &mut r.decode_checks,
+            "vaapi",
+            &["HEVC Main 10"],
+            Fault::Driver,
+        );
+        assert_eq!(
+            vulkan_note(&r).impact,
+            "with VA-API unable too, they decode on the CPU, which is far slower at 5.7K and up"
+        );
 
         // A build without the Vulkan hwaccel is FFmpeg's fault.
         let mut r = healthy(Distro::Arch);
@@ -1947,6 +2054,111 @@ mod tests {
             "this FFmpeg cannot use Vulkan Video to decode AV1 Main"
         );
         assert_eq!(i.fix, "sudo pacman -S --needed ffmpeg");
+    }
+
+    fn wrong(checks: &mut [Check], path: &str, format: &str, reason: &str) {
+        fail(checks, path, &[format], Fault::WrongOutput);
+        for c in checks
+            .iter_mut()
+            .filter(|c| c.path == path && c.format == format)
+        {
+            c.reason = Some(reason.into());
+        }
+    }
+
+    #[test]
+    fn a_driver_that_decodes_wrongly_is_told_apart_from_one_that_refuses() {
+        // A wrong picture is the driver's bug, not a missing feature.
+        let e = compare(
+            &[vec![1, 2], vec![3], vec![4]],
+            &[vec![1, 0], vec![3], vec![4]],
+        )
+        .unwrap_err();
+        assert_eq!(e.fault, Fault::WrongOutput);
+        assert_eq!(
+            e.reason,
+            "1 of 4 samples differ from FFmpeg's software decoder"
+        );
+
+        let mut r = healthy(Distro::Fedora);
+        r.vulkan_devices[0].driver_info = Some("Mesa 25.2.8".into());
+        fail(
+            &mut r.decode_checks,
+            "vulkan",
+            &["H.264 High"],
+            Fault::Driver,
+        );
+        let differ = "12 of 98304 samples differ from FFmpeg's software decoder";
+        wrong(&mut r.decode_checks, "vulkan", "HEVC Main", differ);
+        let is = issues(&r, &Env::default());
+        assert_eq!(is.len(), 2, "{is:#?}");
+        assert_eq!(
+            is[0].what,
+            "Vulkan Video on AMD Radeon RX 7600 (RADV NAVI33) cannot decode H.264 High"
+        );
+        assert!(is[0].fix.starts_with("vulkaninfo"), "{:?}", is[0]);
+        assert_eq!(is[1].severity, Severity::Info);
+        assert_eq!(
+            is[1].what,
+            "Vulkan Video on AMD Radeon RX 7600 (RADV NAVI33) decodes HEVC Main wrongly (12 \
+             of 98304 samples differ from FFmpeg's software decoder)"
+        );
+        assert_eq!(
+            is[1].impact,
+            "none while VA-API decodes them, as it does here"
+        );
+        assert_eq!(
+            is[1].fix,
+            "sudo dnf upgrade --refresh   (radv (Mesa 25.2.8) gets this wrong: a newer \
+             release may fix it; if not, report it to its developers)"
+        );
+
+        // Several formats each give their reason.
+        wrong(
+            &mut r.decode_checks,
+            "vulkan",
+            "HEVC Main 10",
+            "decodes to 128x128 instead of 256x256",
+        );
+        let i = issues(&r, &Env::default()).pop().unwrap();
+        assert_eq!(
+            i.what,
+            "Vulkan Video on AMD Radeon RX 7600 (RADV NAVI33) decodes HEVC Main and HEVC \
+             Main 10 wrongly (HEVC Main: 12 of 98304 samples differ from FFmpeg's software \
+             decoder; HEVC Main 10: decodes to 128x128 instead of 256x256)"
+        );
+
+        // On VA-API, the main hardware decoder, it is a warning.
+        let mut r = healthy(Distro::Arch);
+        wrong(&mut r.decode_checks, "vaapi", "HEVC Main", differ);
+        let i = only(&issues(&r, &Env::default())).clone();
+        assert_eq!(i.severity, Severity::Warning);
+        assert_eq!(
+            i.what,
+            "VA-API on /dev/dri/renderD128 decodes HEVC Main wrongly (12 of 98304 samples \
+             differ from FFmpeg's software decoder)"
+        );
+        assert_eq!(
+            i.impact,
+            "its output can't be used, so these fall back to the CPU, which is far slower at \
+             5.7K and up"
+        );
+        assert_eq!(
+            i.fix,
+            "sudo pacman -Syu   (the VA-API driver gets this wrong: a newer release may fix \
+             it; if not, report it to its developers)\n\
+             vainfo --display drm --device /dev/dri/renderD128   (names the driver and its \
+             version)"
+        );
+        let unreadable = "its output doesn't decode: Invalid data found when processing input";
+        wrong(&mut r.encode_checks, "vaapi", "H.264", unreadable);
+        let i = only(&issues(&r, &Env::default())).clone();
+        assert_eq!(
+            i.what,
+            "VA-API on /dev/dri/renderD128 decodes HEVC Main wrongly (12 of 98304 samples \
+             differ from FFmpeg's software decoder), and encodes H.264 wrongly (its output \
+             doesn't decode: Invalid data found when processing input)"
+        );
     }
 
     #[test]
