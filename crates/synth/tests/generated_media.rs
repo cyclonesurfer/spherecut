@@ -204,6 +204,60 @@ fn broken_files_give_errors_not_panics() {
         let r = probe::probe(&dir.join(name));
         assert!(r.is_ok_and(|r| !r.damage.is_empty()), "{name}");
     }
+    // Damage inside the `moov` FFmpeg wrote: bytes changed anywhere, or
+    // words of the sample tables of both tracks set to small or arbitrary
+    // values. Tests build with overflow checks, so arithmetic on the
+    // damaged values that would wrap panics here.
+    use spherecut_media::mp4;
+    let mut bytes = std::fs::read(&good).unwrap();
+    let tree = mp4::read(&mut std::io::Cursor::new(&bytes)).unwrap();
+    let moov = tree.moov().unwrap();
+    // (start, length) of `moov` and of each sample table's entries.
+    let mut ranges = vec![(moov.offset as usize, moov.size as usize)];
+    for trak in tree.tracks() {
+        let stbl = trak.path(&[b"mdia", b"minf", b"stbl"]).unwrap();
+        for b in &stbl.children {
+            if [b"stts", b"stsz", b"stsc", b"stco"].contains(&&b.fourcc.0) {
+                ranges.push(((b.offset + b.header_len) as usize + 4, b.payload.len() - 4));
+            }
+        }
+    }
+    assert_eq!(ranges.len(), 9);
+    let mut seed = 0x9e37_79b9_u32;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    for _ in 0..4000 {
+        let mut edits = Vec::new();
+        for _ in 0..1 + next() % 3 {
+            let (start, len) = ranges[next() as usize % ranges.len()];
+            let at = start + next() as usize % len;
+            if start == ranges[0].0 {
+                edits.push((at, next() as u8));
+            } else {
+                let word = start + (at - start) / 4 * 4;
+                let v = match next() % 4 {
+                    0 => next(),
+                    1 => u32::MAX,
+                    _ => next() % 8,
+                };
+                edits.extend((0..4).map(|i| (word + i, v.to_be_bytes()[i])));
+            }
+        }
+        let old: Vec<u8> = edits.iter().map(|&(at, _)| bytes[at]).collect();
+        for &(at, x) in &edits {
+            bytes[at] = x;
+        }
+        if let Ok(t) = mp4::read(&mut std::io::Cursor::new(&bytes)) {
+            t.damage();
+        }
+        for (&(at, _), x) in edits.iter().zip(old).rev() {
+            bytes[at] = x;
+        }
+    }
     // A directory is not a media file.
     assert!(probe::probe(&dir).is_err());
     std::fs::remove_dir_all(&dir).ok();
