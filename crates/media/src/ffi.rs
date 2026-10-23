@@ -450,6 +450,18 @@ fn log_device(kind: &str, device: Option<&str>, e: Option<&HwError>) {
 /// Hardware device types a decoder can use through `hw_device_ctx`.
 pub fn decoder_hw_configs(codec: &ff::Codec) -> Vec<String> {
     let mut out = Vec::new();
+    for t in decoder_device_types(codec) {
+        // SAFETY: accepts any type value.
+        if let Some(n) = cstr_opt(unsafe { c::av_hwdevice_get_type_name(t) }) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// [`decoder_hw_configs`] as FFmpeg's ints.
+fn decoder_device_types(codec: &ff::Codec) -> Vec<c_int> {
+    let mut out = Vec::new();
     for i in 0.. {
         // SAFETY: `codec` wraps a static AVCodec; the call returns NULL past
         // the last config.
@@ -462,10 +474,7 @@ pub fn decoder_hw_configs(codec: &ff::Codec) -> Vec<String> {
         let (methods, device_type) =
             unsafe { ((*cfg).methods, enum_int(&raw const (*cfg).device_type)) };
         if methods & sys::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as c_int != 0 {
-            // SAFETY: accepts any type value.
-            if let Some(n) = cstr_opt(unsafe { c::av_hwdevice_get_type_name(device_type) }) {
-                out.push(n);
-            }
+            out.push(device_type);
         }
     }
     out
@@ -645,6 +654,8 @@ pub fn discard_other_streams(ictx: &mut ff::format::context::Input, keep: usize)
 #[derive(Debug)]
 pub struct HwDevice {
     ptr: *mut sys::AVBufferRef,
+    /// FFmpeg's device type.
+    device_type: c_int,
     pix_fmt: sys::AVPixelFormat,
     kind: String,
 }
@@ -680,6 +691,7 @@ impl HwDevice {
             };
             Ok(HwDevice {
                 ptr: create_device(t, device)?,
+                device_type: t,
                 pix_fmt,
                 kind: kind.to_string(),
             })
@@ -707,6 +719,19 @@ impl HwDevice {
     /// capability probes in `hwprobe`.
     pub(crate) fn as_ptr(&self) -> *mut sys::AVBufferRef {
         self.ptr
+    }
+
+    /// A Vulkan "device" with no device context, for tests that only look
+    /// at its kind and pixel format. Dropping it unrefs NULL, which FFmpeg
+    /// allows.
+    #[cfg(test)]
+    pub(crate) fn vulkan_without_context() -> Self {
+        HwDevice {
+            ptr: std::ptr::null_mut(),
+            device_type: sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN as c_int,
+            pix_fmt: sys::AVPixelFormat::AV_PIX_FMT_VULKAN,
+            kind: "vulkan".into(),
+        }
     }
 }
 
@@ -834,6 +859,12 @@ pub(crate) fn hw_refusal(dec: &ff::codec::context::Context) -> Option<HwRefusal>
     }
 }
 
+/// Whether a decoder set up by [`attach_hw_device`] has asked for a pixel
+/// format yet. One that decodes without asking never uses the device.
+pub(crate) fn hw_format_asked(dec: &ff::codec::context::Context) -> bool {
+    hw_state(dec) & hw_choice::ASKED != 0
+}
+
 /// Note that a decoder set up by [`attach_hw_device`] gave a frame on its
 /// device: the hardware decoder FFmpeg set up last works. A later list
 /// without the device's format is then a stream that changed format, not
@@ -847,13 +878,28 @@ pub(crate) fn note_device_frame(dec: &mut ff::codec::context::Context) {
     }
 }
 
+/// Why [`open_video_decoder`] opened no decoder.
+#[derive(Debug, Error)]
+pub(crate) enum OpenDecoderError {
+    /// FFmpeg has decoders for the codec, but none decodes on the device.
+    #[error("no decoder for this codec decodes on the device")]
+    NotOnDevice,
+    #[error(transparent)]
+    Ffmpeg(#[from] ff::Error),
+}
+
 /// Open the decoder for a codec context made from a video stream's
 /// parameters. ffmpeg-next's `Decoder::video` would look the decoder up
 /// from the codec id, and check the media type, as bindgen enums; a file
 /// with a codec newer than our headers would make an invalid one.
-pub fn open_video_decoder(
+///
+/// For decoding on `dev`, the decoder is the first one for the codec that
+/// can use such a device. FFmpeg's own choice may not: for AV1 it is
+/// libdav1d, which only decodes in software.
+pub(crate) fn open_video_decoder(
     ctx: ff::codec::context::Context,
-) -> Result<ff::decoder::Video, ff::Error> {
+    dev: Option<&HwDevice>,
+) -> Result<ff::decoder::Video, OpenDecoderError> {
     // SAFETY: `ctx` owns a live AVCodecContext; its enum fields are read as
     // ints.
     let (kind, id) = unsafe {
@@ -864,17 +910,56 @@ pub fn open_video_decoder(
         )
     };
     if kind != sys::AVMediaType::AVMEDIA_TYPE_VIDEO as c_int {
-        return Err(ff::Error::InvalidData);
+        return Err(ff::Error::InvalidData.into());
     }
     // SAFETY: accepts any id; NULL when no decoder for it is built in.
-    let codec = unsafe { c::avcodec_find_decoder(id) };
+    let mut codec = unsafe { c::avcodec_find_decoder(id) };
     if codec.is_null() {
-        return Err(ff::Error::DecoderNotFound);
+        return Err(ff::Error::DecoderNotFound.into());
+    }
+    if let Some(dev) = dev {
+        codec = device_decoder(id, dev.device_type).ok_or(OpenDecoderError::NotOnDevice)?;
     }
     // SAFETY: registered codecs are static.
     let codec = unsafe { ff::Codec::wrap(codec) };
     // The media type is checked above, which is all `Opened::video` checks.
-    ctx.decoder().open_as(codec).map(ff::decoder::Video)
+    Ok(ctx.decoder().open_as(codec).map(ff::decoder::Video)?)
+}
+
+/// The decoder for codec `id` that can decode on a device of type
+/// `device_type`, chosen as avcodec_find_decoder chooses among all of
+/// them: the first registered, unless it is experimental and another is
+/// not.
+fn device_decoder(id: c_int, device_type: c_int) -> Option<*const sys::AVCodec> {
+    let mut iter: *mut c_void = std::ptr::null_mut();
+    let mut experimental = None;
+    loop {
+        // SAFETY: `iter` is the state av_codec_iterate keeps, started at
+        // NULL. It returns static codecs, then NULL.
+        let codec = unsafe { sys::av_codec_iterate(&mut iter) };
+        if codec.is_null() {
+            return experimental;
+        }
+        // SAFETY: a static codec; `id` is an enum field, read as an int.
+        let (decoder, codec_id, caps) = unsafe {
+            (
+                sys::av_codec_is_decoder(codec) != 0,
+                enum_int(&raw const (*codec).id),
+                (*codec).capabilities,
+            )
+        };
+        if !decoder || codec_id != id {
+            continue;
+        }
+        // SAFETY: registered codecs are static.
+        if !decoder_device_types(&unsafe { ff::Codec::wrap(codec) }).contains(&device_type) {
+            continue;
+        }
+        if caps & sys::AV_CODEC_CAP_EXPERIMENTAL as c_int == 0 {
+            return Some(codec);
+        }
+        experimental.get_or_insert(codec);
+    }
 }
 
 /// A frame's pixel format as FFmpeg's int, to compare and name it without
@@ -1211,11 +1296,13 @@ mod tests {
         // Not asked yet: nothing to say.
         let ctx = wanting(vaapi);
         assert_eq!(hw_refusal(&ctx), None);
+        assert!(!hw_format_asked(&ctx));
 
         // Offered, among formats our headers may lack: taken.
         let mut ctx = wanting(vaapi);
         assert_eq!(offer(&mut ctx, &[yuv, 100_000, vaapi]), vaapi);
         assert_eq!(hw_refusal(&ctx), None);
+        assert!(hw_format_asked(&ctx));
         // Then withdrawn, as when the hardware decoder fails to start.
         assert_eq!(offer(&mut ctx, &[yuv]), none);
         assert_eq!(hw_refusal(&ctx), Some(HwRefusal::Withdrawn));

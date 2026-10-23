@@ -79,3 +79,28 @@ fn a_refused_stream_stays_refused() {
         assert_eq!(refusal(d.next_frame()), first);
     }
 }
+
+#[test]
+fn av1_is_refused_rather_than_decoded_by_a_software_only_decoder() {
+    // FFmpeg lists libdav1d before its own AV1 decoder, and libdav1d never
+    // decodes on a device. The clip is doctor's one AV1 frame.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/av1-main.obu");
+    let r = VideoDecoder::open(&path, None, Some(lavapipe())).and_then(|mut d| d.next_frame());
+    refusal(r);
+    // Software still decodes it.
+    let mut d = VideoDecoder::open(&path, None, None).unwrap();
+    assert!(d.next_frame().unwrap().is_some());
+}
+
+#[test]
+fn a_codec_no_decoder_can_decode_on_the_device_is_refused_at_open() {
+    // No FFmpeg has Vulkan Video for MPEG-4 Part 2.
+    let path = clip("mpeg4.mp4", "mpeg4", &[]);
+    assert_eq!(
+        refusal(VideoDecoder::open(&path, None, Some(lavapipe()))),
+        HwRefusal::NotOffered
+    );
+    // Software still decodes it.
+    let mut d = VideoDecoder::open(&path, None, None).unwrap();
+    assert!(d.next_frame().unwrap().is_some());
+}

@@ -32,7 +32,7 @@ use std::sync::atomic::AtomicBool;
 
 use spherecut_core::{Rational, Time};
 
-use crate::ffi::{self, HwDevice, HwRefusal};
+use crate::ffi::{self, HwDevice, HwRefusal, OpenDecoderError};
 use crate::hwprobe::device_label;
 use crate::{MediaError, ff, init};
 
@@ -244,7 +244,12 @@ impl VideoDecoder {
                 count: 0,
             }),
         }
-        let dec = ffi::open_video_decoder(ctx).map_err(|e| err(path, "opening decoder", e))?;
+        let dec = ffi::open_video_decoder(ctx, hw.as_deref()).map_err(|e| match (e, &hw) {
+            (OpenDecoderError::NotOnDevice, Some(dev)) => {
+                hw_unsupported(path, dev, HwRefusal::NotOffered)
+            }
+            (e, _) => err(path, "opening decoder", e),
+        })?;
         let codec = dec.codec();
         tracing::debug!(
             path = %path.display(),
@@ -479,14 +484,23 @@ impl VideoDecoder {
         let format = ffi::frame_format(&frame);
         let on_device = self.hw.as_ref().is_some_and(|h| format == h.hw_pix_fmt());
         if self.hw.is_some() && !on_device {
-            return Err(err(
-                &self.path,
-                "hardware decode",
-                format!(
-                    "decoder produced {} frames instead of device frames",
-                    ffi::pix_fmt_name(format).unwrap_or_else(|| format!("format {format}"))
-                ),
-            ));
+            // A decoder that never asked for a format doesn't use the
+            // device. One that turned the device down may go on in
+            // software.
+            self.refused = match ffi::hw_refusal(&self.dec) {
+                None if !ffi::hw_format_asked(&self.dec) => Some(HwRefusal::NotOffered),
+                r => r,
+            };
+            return Err(self.refusal().unwrap_or_else(|| {
+                err(
+                    &self.path,
+                    "hardware decode",
+                    format!(
+                        "decoder produced {} frames instead of device frames",
+                        ffi::pix_fmt_name(format).unwrap_or_else(|| format!("format {format}"))
+                    ),
+                )
+            }));
         }
         if on_device {
             ffi::note_device_frame(&mut self.dec);
@@ -521,7 +535,51 @@ pub fn open_hw_device(kind: &str, device: Option<&str>) -> Result<Arc<HwDevice>,
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use spherecut_core::FrameRate;
+
     use super::*;
+    use crate::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+
+    /// Ten 256x128 frames of H.264.
+    fn clip() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("spherecut-decode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = VideoSettings {
+            encoder: "libx264".into(),
+            width: 256,
+            height: 128,
+            rate: FrameRate::FPS_30,
+            layout: PixelLayout::Yuv420p,
+            options: Vec::new(),
+            bt709_limited: true,
+        };
+        let mut w = Mp4Writer::create(&dir.join("clip.mp4"), &settings, None).unwrap();
+        for i in 0..10 {
+            let luma = vec![16 + 20 * i; 256 * 128];
+            let chroma = vec![128; 128 * 64];
+            w.push_video(&YuvPlanes::U8([luma, chroma.clone(), chroma]))
+                .unwrap();
+        }
+        w.finish().unwrap()
+    }
+
+    #[test]
+    fn software_frames_from_a_decoder_that_never_asked_for_a_format_are_refused() {
+        // A decoder that ignores its device decodes in software without
+        // asking get_format; one opened in software and then given a
+        // device is the same.
+        let mut d = VideoDecoder::open(&clip(), None, None).unwrap();
+        d.hw = Some(Arc::new(HwDevice::vulkan_without_context()));
+        for _ in 0..2 {
+            match d.next_frame() {
+                Err(MediaError::HwUnsupported {
+                    refusal: HwRefusal::NotOffered,
+                    ..
+                }) => {}
+                r => panic!("expected HwUnsupported, got {r:?}"),
+            }
+        }
+    }
 
     #[test]
     fn planes_of_a_frame_resized_after_its_buffers_are_none() {
