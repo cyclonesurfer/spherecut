@@ -98,10 +98,10 @@ The other modules are safe Rust:
   through `mp4::Mp4Tree::damage()`: a top-level box cut off by the end of
   the file, including a cut header; malformed boxes, among them a box
   whose size is 0 below the top level, which the standard allows only for
-  the last top-level box (in `moov` and the small top-level boxes the
-  reader loads, such as `udta`; fragments are not read); a handler that
-  disagrees with its sample entry; sample tables checked against each
-  other and against the `mdat` ranges; a box type that isn't printable
+  the last top-level box (in `moov` and the small top-level containers
+  the reader loads, such as `udta` and `meta`; fragments are not read); a
+  handler that disagrees with its sample entry; sample tables checked
+  against each other and against the `mdat` ranges; a box type that isn't printable
   text where only registered types belong (in `moov`, `trak`, `mdia`,
   `minf`, `stbl`, `stsd`, `edts`, `dinf`, `mvex`, `tref`, the known sample
   entries, `sv3d` and `proj`),

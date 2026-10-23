@@ -433,8 +433,8 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   parent's last box with size 0 loses nothing, but it breaks the same
   rule, and none of the healthy files in the sweeps has one, so it counts
   too. Only boxes the parser reads are checked: `moov`, and the small
-  top-level `udta` and `meta` it loads. Fragments (`moof`, `traf`) are
-  not read;
+  top-level containers it loads, such as `udta` and `meta`. Fragments
+  (`moof`, `traf`) are not read;
 - no `moov` box, unless the file is item-based (a top-level `meta`) or the
   cut box may have been `moov`;
 - a top-level box cut off by the end of the file, including a file that
@@ -452,7 +452,9 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   track's start time. Four zero bytes are allowed only as the type of
   QuickTime's terminator: the last box in a sample entry, with nothing but
   zero bytes after its header. `inject` keeps a terminator last when it
-  adds boxes to an entry, since FFmpeg reads nothing after it. Any other box of that type is a header zeroed with the rest of
+  adds boxes to an entry: that is the only place it is allowed, and as
+  eight zero bytes it has size 0 and hides what follows from FFmpeg. Any
+  other box of that type is a header zeroed with the rest of
   its box, which FFmpeg skips with what it holds. An audio `trak` whose
   type, or size and type, were zeroed loses its stream, and an `sv3d`,
   which FFmpeg writes last in the entry, loses the projection. A zeroed
@@ -661,17 +663,17 @@ AV1. `--json` keeps its old keys and adds `gpu`, `vulkan_devices`,
 Every decoder and encoder in doctor's tables that this FFmpeg lacks gets
 its own issue, naming the codec, with the FFmpeg fix, except that an
 FFmpeg built without VA-API gets one issue for that instead of one per
-VA-API encoder. Each failed check has a fault: `ffmpeg` (the build left
-it out, or FFmpeg's own software decode came out in the wrong format),
-`driver` (the driver or hardware refuses it) or `wrong_output` (it runs
-and the picture or the read-back differs). A refusal, by the build or by
-the driver, falls back to the CPU (D3); wrong output does not. A driver
-with wrong output gives no error, so doctor says its wrong pictures would
-be used and suggests a newer driver. That makes VA-API wrong output a
-warning, and Vulkan Video wrong output a warning when VA-API can't decode
-at least one of those formats, since Vulkan's pictures are then the ones
-used. Otherwise a Vulkan Video decode problem is a note, because VA-API
-is the first hardware decoder.
+VA-API encoder. Each failed check has a fault: `ffmpeg` (the build left it
+out, or FFmpeg's own software decode failed or came out in the wrong
+format), `driver` (the driver or hardware refuses it) or `wrong_output`
+(it runs and the picture or the read-back differs). A refusal, by the
+build or by the driver, falls back to the CPU (D3); wrong output does not.
+A driver with wrong output gives no error, so doctor says its wrong
+pictures would be used and suggests a newer driver. That makes VA-API
+wrong output a warning, and Vulkan Video wrong output a warning when
+VA-API can't decode at least one of those formats, since Vulkan's pictures
+are then the ones used. Otherwise a Vulkan Video decode problem is a note,
+because VA-API is the first hardware decoder.
 
 `cargo xtask hw-test`'s prerequisite check still runs `rpm -q` for
 `ffmpeg-free`, `mesa-va-drivers` and `mesa-va-drivers-freeworld`, and
