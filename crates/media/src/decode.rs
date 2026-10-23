@@ -3,8 +3,9 @@
 //! This is the first slice of the M1 `MediaBackend`: it opens a file,
 //! decodes one video stream in order, and hands out frames in system memory.
 //! Hardware decoding never silently falls back to software: if the device
-//! can't decode the stream, opening or the first frame fails with the
-//! reason, and the caller chooses what to do.
+//! can't decode the stream, opening or decoding fails with
+//! [`MediaError::HwUnsupported`] and the reason, as does every call after
+//! it, and the caller chooses what to do.
 //!
 //! A read error or a cancelled read ends the stream with an error, after
 //! the frames that could still be decoded, never with `None`. So does a
@@ -31,7 +32,7 @@ use std::sync::atomic::AtomicBool;
 
 use spherecut_core::{Rational, Time};
 
-use crate::ffi::{self, HwDevice};
+use crate::ffi::{self, HwDevice, HwRefusal};
 use crate::hwprobe::device_label;
 use crate::{MediaError, ff, init};
 
@@ -143,6 +144,9 @@ pub struct VideoDecoder {
     read_error: Option<String>,
     /// The error that ended the stream, returned by every later call.
     failed: Option<String>,
+    /// Why the device turned the stream down, returned by every later
+    /// call.
+    refused: Option<HwRefusal>,
     frames: u64,
     skipped: u64,
 }
@@ -168,6 +172,14 @@ fn open_err(path: &Path, e: ff::Error) -> MediaError {
     MediaError::Open {
         path: path.to_path_buf(),
         reason: e.to_string(),
+    }
+}
+
+fn hw_unsupported(path: &Path, dev: &HwDevice, refusal: HwRefusal) -> MediaError {
+    MediaError::HwUnsupported {
+        path: path.to_path_buf(),
+        kind: device_label(dev.kind()).into(),
+        refusal,
     }
 }
 
@@ -255,6 +267,7 @@ impl VideoDecoder {
             done: false,
             read_error: None,
             failed: None,
+            refused: None,
             frames: 0,
             skipped: 0,
         })
@@ -282,11 +295,16 @@ impl VideoDecoder {
     ///
     /// When reading the file fails (see the module docs), the frames
     /// decoded before that come first, then the error, which every later
-    /// call returns too. An error from the decoder itself is returned once;
-    /// calling again carries on with the next packet.
+    /// call returns too. So is [`MediaError::HwUnsupported`], once the
+    /// device turns the stream down: nothing more is decoded. Any other
+    /// error from the decoder itself is returned once; calling again
+    /// carries on with the next packet.
     pub fn next_frame(&mut self) -> Result<Option<DecodedFrame>, MediaError> {
         if let Some(reason) = &self.failed {
             return Err(err(&self.path, "reading", reason));
+        }
+        if let Some(e) = self.refusal() {
+            return Err(e);
         }
         let mut frame = ff::frame::Video::empty();
         loop {
@@ -347,15 +365,15 @@ impl VideoDecoder {
     /// A decoder error, or why the device can't decode this stream when
     /// that is the cause: the decoder's own error then is just "Operation
     /// not permitted".
-    fn decode_error(&self, e: ff::Error) -> MediaError {
-        match (ffi::hw_refusal(&self.dec), &self.hw) {
-            (Some(refusal), Some(dev)) => MediaError::HwUnsupported {
-                path: self.path.clone(),
-                kind: device_label(dev.kind()).into(),
-                refusal,
-            },
-            _ => err(&self.path, "decoding", e),
-        }
+    fn decode_error(&mut self, e: ff::Error) -> MediaError {
+        self.refused = ffi::hw_refusal(&self.dec);
+        self.refusal()
+            .unwrap_or_else(|| err(&self.path, "decoding", e))
+    }
+
+    /// `HwUnsupported`, once the device has turned the stream down.
+    fn refusal(&self) -> Option<MediaError> {
+        Some(hw_unsupported(&self.path, self.hw.as_ref()?, self.refused?))
     }
 
     /// The next packet to decode, or `None` once there are no more (see
