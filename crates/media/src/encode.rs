@@ -226,7 +226,7 @@ impl Mp4Writer {
     /// temporary name in the same directory, removed if the writer is
     /// dropped unfinished. An existing file at `path` is replaced as
     /// [`inject::inject`] replaces its output: permissions kept, symlinks
-    /// written through.
+    /// written through, anything but a regular file refused.
     pub fn create(
         path: &Path,
         v: &VideoSettings,

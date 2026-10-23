@@ -410,8 +410,13 @@ Both write a temporary file next to the output and rename it into place:
 - The file is flushed to disk (`sync_all`) before the rename, and removed
   on an error or a panic.
 - A symlinked output is written through: the file it finally names is
-  replaced and the link kept. A dangling link creates its target. A
-  directory at the output is refused before any work.
+  replaced and the link kept. A dangling link creates its target.
+- Only a regular file at the output is replaced. A directory, pipe,
+  device or socket there is refused before any work, and again just
+  before the rename: a rename over a pipe or `/dev/null` would replace
+  the node instead of writing to it. Writing to a pipe or `/dev/null`
+  (say, `render -o /dev/null` for a benchmark) would need its own
+  non-atomic path that opens the node and writes it in place.
 
 `inject` also refuses an output that is the input under any name (same
 device and inode, so hard links and symlinks too), two edits for one

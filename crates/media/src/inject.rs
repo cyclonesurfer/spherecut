@@ -9,7 +9,8 @@
 //! The output is written to a temporary file next to it and renamed into
 //! place, so it is always either absent, the old file or the whole new one.
 //! A symlinked output is written through: the file it points to is
-//! replaced and the link is kept.
+//! replaced and the link is kept. An output that is not a regular file (a
+//! directory, pipe, device or socket) is refused.
 
 use std::fs::{File, OpenOptions, Permissions};
 use std::hash::{BuildHasher, RandomState};
@@ -181,9 +182,28 @@ pub(crate) fn follow_links(path: &Path) -> io::Result<PathBuf> {
     Err(io::Error::other("too many levels of symbolic links"))
 }
 
+/// What is at `dest`, if it is a regular file that a rename may replace.
+/// Anything else is refused: a rename over a directory fails, but only
+/// once all the work is done, and one over a pipe, device or socket
+/// (`/dev/null`, say) replaces the node instead of writing to it.
+fn replaceable(dest: &Path) -> io::Result<Option<std::fs::Metadata>> {
+    match std::fs::metadata(dest) {
+        Ok(m) if m.is_dir() => Err(io::ErrorKind::IsADirectory.into()),
+        Ok(m) if !m.is_file() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "it is not a regular file (a pipe, device or socket, say), so it would be \
+             replaced rather than written",
+        )),
+        Ok(m) => Ok(Some(m)),
+        // Missing; any other error shows when the file is created or renamed.
+        Err(_) => Ok(None),
+    }
+}
+
 /// A new file next to `dest`, renamed onto it by [`TempFile::persist`] and
 /// removed if dropped before that (on an error or a panic). `dest` itself
-/// is replaced, so follow links first ([`follow_links`]).
+/// is replaced, so follow links first ([`follow_links`]); it must be a
+/// regular file or nothing.
 ///
 /// [`crate::encode::Mp4Writer`] writes its files through one too.
 pub(crate) struct TempFile {
@@ -220,17 +240,10 @@ impl TempFile {
                 "output path has no file name",
             ));
         }
-        let existing = std::fs::metadata(dest).ok();
-        if existing.as_ref().is_some_and(|m| m.is_dir()) {
-            // The rename would fail, but only once all the work is done.
-            return Err(io::ErrorKind::IsADirectory.into());
-        }
         // A file being replaced keeps its permission bits (not its owner,
         // ACLs or extended attributes). Until they are set the new file is
         // private, so a private output is never readable while it is written.
-        let keep = existing
-            .filter(|m| m.is_file())
-            .map(|m| m.permissions().mode() & 0o777);
+        let keep = replaceable(dest)?.map(|m| m.permissions().mode() & 0o777);
         let mut opts = OpenOptions::new();
         opts.write(true).create_new(true);
         if keep.is_some() {
@@ -264,6 +277,8 @@ impl TempFile {
     /// Flush to disk and rename into place.
     pub(crate) fn persist(mut self) -> io::Result<()> {
         self.file.sync_all()?;
+        // Something may have turned up at `dest` while the file was written.
+        replaceable(&self.dest)?;
         std::fs::rename(&self.path, &self.dest)?;
         self.persisted = true;
         Ok(())
@@ -287,7 +302,8 @@ impl Drop for TempFile {
 /// `output` is replaced atomically, by renaming a new file over it. The new
 /// file keeps the old one's permission bits, but not its owner, ACLs or
 /// extended attributes. If `output` is a symlink, the file it points to is
-/// replaced and the link is kept, as writing the file in place would.
+/// replaced and the link is kept, as writing the file in place would. A
+/// directory, pipe, device or socket at `output` is refused.
 pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), InjectError> {
     check_not_same_file(input, output)?;
     for (i, e) in edits.iter().enumerate() {
@@ -1041,6 +1057,53 @@ mod tests {
         std::fs::create_dir(&late).unwrap();
         assert!(tmp.persist().is_err());
         assert_eq!(listing(&dir), ["in.mp4", "late.mp4", "out.mp4"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Make a FIFO at `p`, or say why not.
+    fn mkfifo(p: &Path) -> Result<(), String> {
+        match std::process::Command::new("mkfifo").arg(p).status() {
+            Ok(s) if s.success() => Ok(()),
+            r => Err(format!("mkfifo {}: {r:?}", p.display())),
+        }
+    }
+
+    #[test]
+    fn outputs_that_are_not_regular_files_are_refused() {
+        use std::os::unix::fs::FileTypeExt;
+        // Renaming over a pipe or a device node (`/dev/null`, say) would
+        // replace the node with an MP4 instead of writing to it.
+        let dir = tmpdir("special");
+        let fifo = dir.join("out.fifo");
+        if let Err(e) = mkfifo(&fifo) {
+            println!("not checked: no FIFO ({e})");
+            return;
+        }
+        let a = dir.join("in.mp4");
+        std::fs::write(&a, file(false).0).unwrap();
+        // Through a symlink too.
+        let link = dir.join("link.mp4");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+        for out in [&fifo, &link] {
+            match inject(&a, out, &spherical_edits()) {
+                Err(e @ InjectError::Write { .. }) => {
+                    assert!(e.to_string().contains("not a regular file"), "{e}")
+                }
+                r => panic!("{}: {r:?}", out.display()),
+            }
+            assert!(fifo.metadata().unwrap().file_type().is_fifo());
+        }
+        assert!(link.symlink_metadata().unwrap().is_symlink());
+        // One that turns up while the file is written is refused too.
+        let late = dir.join("late.mp4");
+        let tmp = TempFile::create(&late).unwrap();
+        mkfifo(&late).unwrap();
+        assert!(tmp.persist().is_err());
+        assert!(late.metadata().unwrap().file_type().is_fifo());
+        assert_eq!(
+            listing(&dir),
+            ["in.mp4", "late.mp4", "link.mp4", "out.fifo"]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
