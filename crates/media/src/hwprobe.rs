@@ -33,7 +33,7 @@ use crate::ffi::{self, HwDevice, HwError, HwRefusal};
 
 /// Why a check failed.
 #[derive(Debug, Error)]
-pub(crate) enum ProbeError {
+pub(crate) enum HwProbeError {
     #[error("FFmpeg has no {0} decoder")]
     NoDecoder(String),
     #[error("FFmpeg has no {0} encoder")]
@@ -59,7 +59,7 @@ pub(crate) enum ProbeError {
     Vulkan(String),
 }
 
-impl ProbeError {
+impl HwProbeError {
     /// Whether the FFmpeg build is what's missing, rather than the driver
     /// or the hardware.
     pub(crate) fn is_ffmpeg_build(&self) -> bool {
@@ -82,11 +82,11 @@ pub(crate) fn device_label(kind: &str) -> &str {
     }
 }
 
-fn ffmpeg(what: &'static str) -> impl FnOnce(ff::Error) -> ProbeError {
-    move |error| ProbeError::Ffmpeg { what, error }
+fn ffmpeg(what: &'static str) -> impl FnOnce(ff::Error) -> HwProbeError {
+    move |error| HwProbeError::Ffmpeg { what, error }
 }
 
-fn check(ret: c_int, what: &'static str) -> Result<(), ProbeError> {
+fn check(ret: c_int, what: &'static str) -> Result<(), HwProbeError> {
     if ret < 0 {
         Err(ffmpeg(what)(ff::Error::from(ret)))
     } else {
@@ -94,7 +94,7 @@ fn check(ret: c_int, what: &'static str) -> Result<(), ProbeError> {
     }
 }
 
-fn no_memory(what: &'static str) -> ProbeError {
+fn no_memory(what: &'static str) -> HwProbeError {
     ffmpeg(what)(ff::Error::Other {
         errno: ff::util::error::ENOMEM,
     })
@@ -111,9 +111,9 @@ pub(crate) fn decode_one(
     decoder: &str,
     data: &[u8],
     dev: Option<&HwDevice>,
-) -> Result<DecodedFrame, ProbeError> {
-    let codec =
-        ff::decoder::find_by_name(decoder).ok_or_else(|| ProbeError::NoDecoder(decoder.into()))?;
+) -> Result<DecodedFrame, HwProbeError> {
+    let codec = ff::decoder::find_by_name(decoder)
+        .ok_or_else(|| HwProbeError::NoDecoder(decoder.into()))?;
     let mut ctx = ff::codec::context::Context::new_with_codec(codec);
     // One thread: FFmpeg then sets up the hardware decoder, and logs why
     // it can't, on this thread, where capture_ffmpeg_log listens.
@@ -136,10 +136,10 @@ pub(crate) fn decode_one(
         .and_then(|()| dec.receive_frame(&mut frame));
     if let Err(e) = decoded {
         return Err(match (dev, ffi::hw_refusal(&dec)) {
-            (Some(d), Some(HwRefusal::Withdrawn)) => ProbeError::DriverRefused {
+            (Some(d), Some(HwRefusal::Withdrawn)) => HwProbeError::DriverRefused {
                 device: device_label(d.kind()).into(),
             },
-            (Some(d), Some(HwRefusal::NotOffered)) => ProbeError::NoHwFormat {
+            (Some(d), Some(HwRefusal::NotOffered)) => HwProbeError::NoHwFormat {
                 decoder: decoder.into(),
                 device: device_label(d.kind()).into(),
             },
@@ -156,7 +156,7 @@ pub(crate) fn decode_one(
     };
     let format = ffi::frame_format(&frame);
     if format != dev.hw_pix_fmt() {
-        return Err(ProbeError::NotOnDevice(
+        return Err(HwProbeError::NotOnDevice(
             ffi::pix_fmt_name(format).unwrap_or_else(|| format!("format {format}")),
         ));
     }
@@ -188,7 +188,7 @@ fn hw_frames(
     sw_format: ff::format::Pixel,
     w: u32,
     h: u32,
-) -> Result<BufferRef, ProbeError> {
+) -> Result<BufferRef, HwProbeError> {
     // SAFETY: the device reference is live; this returns a new reference
     // that we own, or NULL.
     let frames = BufferRef(unsafe { sys::av_hwframe_ctx_alloc(dev.as_ptr()) });
@@ -255,9 +255,9 @@ pub(crate) fn encode_one(
     encoder: &str,
     dev: &HwDevice,
     ten_bit: bool,
-) -> Result<Vec<u8>, ProbeError> {
-    let codec =
-        ff::encoder::find_by_name(encoder).ok_or_else(|| ProbeError::NoEncoder(encoder.into()))?;
+) -> Result<Vec<u8>, HwProbeError> {
+    let codec = ff::encoder::find_by_name(encoder)
+        .ok_or_else(|| HwProbeError::NoEncoder(encoder.into()))?;
     let (w, h) = (ENCODE_SIZE, ENCODE_SIZE);
     let sw_format = if ten_bit {
         ff::format::Pixel::P010LE
@@ -421,8 +421,8 @@ struct VkPhysicalDeviceDriverProperties {
     conformance_version: [u8; 4],
 }
 
-fn vulkan_err(msg: impl Into<String>) -> ProbeError {
-    ProbeError::Vulkan(msg.into())
+fn vulkan_err(msg: impl Into<String>) -> HwProbeError {
+    HwProbeError::Vulkan(msg.into())
 }
 
 /// Look up the instance-level Vulkan command `name`.
@@ -435,7 +435,7 @@ unsafe fn vk_command<F>(
     gipa: GetInstanceProcAddr,
     inst: VkHandle,
     name: &CStr,
-) -> Result<F, ProbeError> {
+) -> Result<F, HwProbeError> {
     const { assert!(size_of::<F>() == size_of::<VoidFn>()) };
     // SAFETY: the caller's guarantee; `name` is NUL-terminated.
     let f = unsafe { gipa(inst, name.as_ptr()) }
@@ -457,7 +457,7 @@ fn fixed_str(chars: &[c_char]) -> Option<String> {
 
 /// The physical devices of the Vulkan instance behind FFmpeg's Vulkan
 /// device `dev`, marking the one FFmpeg uses.
-pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, ProbeError> {
+pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeError> {
     if dev.kind() != "vulkan" {
         return Err(vulkan_err(format!("{} is not a Vulkan device", dev.kind())));
     }
