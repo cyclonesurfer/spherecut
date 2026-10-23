@@ -26,7 +26,7 @@ pub struct Args {
     /// Directory with camera samples (default: ./samples).
     #[arg(long)]
     samples: Option<PathBuf>,
-    /// Skip the release build and benchmarks (environment and tests only).
+    /// Build in debug mode and skip the benchmarks (environment and tests only).
     #[arg(long)]
     quick: bool,
     /// Where to write the report (default: hw-reports/<host>-<commit>.md).
@@ -333,6 +333,48 @@ fn parse_libtest(output: &str) -> TestResults {
     r
 }
 
+/// Cargo's target directory as `cargo metadata` gives it, which follows
+/// `CARGO_TARGET_DIR` and `build.target-dir`.
+fn target_dir(root: &Path) -> PathBuf {
+    let m = capture("cargo", &["metadata", "--format-version", "1", "--no-deps"]);
+    if m.ok
+        && let Some(dir) = json_str_field(&m.text, "target_directory")
+    {
+        return PathBuf::from(dir);
+    }
+    eprintln!("warning: `cargo metadata` gave no target directory; guessing");
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(|d| root.join(d))
+        .unwrap_or_else(|| root.join("target"))
+}
+
+/// The string value of `"key":` in compact JSON such as `cargo metadata`
+/// prints; enough to read one field without a JSON parser.
+fn json_str_field(json: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\":\"");
+    let start = json.find(&pat)? + pat.len();
+    let mut chars = json[start..].chars();
+    let mut out = String::new();
+    loop {
+        match chars.next()? {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                'b' => out.push('\u{8}'),
+                'f' => out.push('\u{c}'),
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+                }
+                c => out.push(c),
+            },
+            c => out.push(c),
+        }
+    }
+}
+
 fn short_commit() -> String {
     let c = capture("git", &["rev-parse", "--short=10", "HEAD"]);
     // Reports from earlier runs stay untracked until they are pushed; they
@@ -389,7 +431,9 @@ pub fn run(a: Args) -> Result<()> {
     let samples = std::fs::canonicalize(&samples)
         .or_else(|_| std::path::absolute(&samples))
         .with_context(|| format!("resolving {}", samples.display()))?;
-    let bench_out = root.join("target").join("hw-bench.tsv");
+    let target = target_dir(&root);
+    let profile = if a.quick { "debug" } else { "release" };
+    let bench_out = target.join("hw-bench.tsv");
 
     eprintln!("==> recording environment");
     let uname = capture("uname", &["-srvm"]);
@@ -446,14 +490,16 @@ pub fn run(a: Args) -> Result<()> {
     if build_blocked {
         eprintln!("==> build prerequisites missing; skipping build and tests");
     } else {
+        // `--quick` builds too: `cargo test` alone would not rebuild the
+        // spherecut binary, and doctor output from an old one misleads.
+        eprintln!("==> building ({profile})");
+        let mut args = vec!["build", "--workspace", "--all-targets"];
         if !a.quick {
-            eprintln!("==> building (release)");
-            build = Some(capture(
-                "cargo",
-                &["build", "--release", "--workspace", "--all-targets"],
-            ));
+            args.push("--release");
         }
-        let built = build.as_ref().is_none_or(|b| b.ok);
+        let b = capture("cargo", &args);
+        let built = b.ok;
+        build = Some(b);
         if built {
             eprintln!("==> Tier 2 tests");
             let samples_s = samples.to_string_lossy().into_owned();
@@ -484,11 +530,8 @@ pub fn run(a: Args) -> Result<()> {
             );
             let parsed = parse_libtest(&t.text);
             tests = Some((t, parsed));
-            let bin = if a.quick { "debug" } else { "release" };
-            let exe = root.join("target").join(bin).join("spherecut");
-            if exe.exists() {
-                doctor = Some(capture(&exe.to_string_lossy(), &["doctor"]));
-            }
+            let exe = target.join(profile).join("spherecut");
+            doctor = Some(capture(&exe.to_string_lossy(), &["doctor"]));
         }
     }
 
@@ -600,16 +643,13 @@ pub fn run(a: Args) -> Result<()> {
 
     let _ = writeln!(r, "## Build\n");
     match &build {
-        _ if build_blocked => {
-            let _ = writeln!(r, "Not attempted: build prerequisites are missing.\n");
-        }
         None => {
-            let _ = writeln!(r, "Skipped (`--quick`).\n");
+            let _ = writeln!(r, "Not attempted: build prerequisites are missing.\n");
         }
         Some(b) => {
             let _ = writeln!(
                 r,
-                "{} in {:.0} s.\n",
+                "{} ({profile}) in {:.0} s.\n",
                 if b.ok { "Succeeded" } else { "**FAILED**" },
                 b.elapsed.as_secs_f64()
             );
@@ -801,5 +841,15 @@ test result: FAILED. 1 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out
         assert_eq!(r.skipped[0].1, "no VA-API device at /dev/dri/renderD128");
         assert_eq!(r.failed.len(), 1);
         assert!(r.failed[0].1.contains("psnr"));
+    }
+
+    #[test]
+    fn reads_target_directory_from_cargo_metadata() {
+        let json = r#"{"packages":[],"target_directory":"/a/b \"q\"\\c\u00e9","version":1}"#;
+        assert_eq!(
+            json_str_field(json, "target_directory").as_deref(),
+            Some("/a/b \"q\"\\cé")
+        );
+        assert_eq!(json_str_field(json, "workspace_root"), None);
     }
 }
