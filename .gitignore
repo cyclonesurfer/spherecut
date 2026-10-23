@@ -1,5 +1,5 @@
 /target
-/samples/
+/samples
 /hw-reports/*.tmp
 /test-media/
 *.profraw

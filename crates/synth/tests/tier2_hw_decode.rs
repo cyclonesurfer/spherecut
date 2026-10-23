@@ -16,9 +16,10 @@ use std::time::Instant;
 
 use spherecut_core::FrameRate;
 use spherecut_media::decode::{VideoDecoder, open_hw_device};
-use spherecut_media::{HwDevice, MediaError, ff};
+use spherecut_media::encode::EncodeError;
+use spherecut_media::{HwDevice, MediaError};
 use spherecut_synth::Pattern;
-use spherecut_synth::media::{self, Audio, Codec, Spec};
+use spherecut_synth::media::{self, Audio, Codec, Spec, SynthError};
 use spherecut_testkit::{bench, tier2};
 
 /// Generated clips are cached in Cargo's per-target temp dir.
@@ -38,78 +39,16 @@ fn clip(name: &str, codec: Codec, bits: u32, width: u32, frames: u32) -> PathBuf
     };
     let path = dir.join(spec.file_name());
     if !path.exists() {
-        media::write(&spec, &dir).expect("generating clip");
+        match media::write(&spec, &dir) {
+            Ok(_) => {}
+            // A prerequisite, not a hardware result; hw-test lists the fix.
+            Err(SynthError::Encode(EncodeError::NoEncoder(e))) => {
+                tier2::skip(format!("FFmpeg has no {e} encoder to generate test clips"))
+            }
+            Err(e) => panic!("generating {}: {e}", path.display()),
+        }
     }
     path
-}
-
-/// Y, U, V planes as u16 samples at their native bit depth, regardless of
-/// whether the frame is planar (software) or semi-planar (NV12/P010).
-fn planes(f: &ff::frame::Video) -> [Vec<u16>; 3] {
-    use ff::format::Pixel as P;
-    let (w, h) = (f.width() as usize, f.height() as usize);
-    let (cw, ch) = (w / 2, h / 2);
-    let row = |plane: usize, y: usize| -> &[u8] { &f.data(plane)[y * f.stride(plane)..] };
-    let rd16 = |b: &[u8], i: usize| u16::from_le_bytes([b[2 * i], b[2 * i + 1]]);
-    match f.format() {
-        P::YUV420P => {
-            let get = |p, pw, ph| -> Vec<u16> {
-                (0..ph)
-                    .flat_map(|y| {
-                        row(p, y)[..pw]
-                            .iter()
-                            .map(|&v| v as u16)
-                            .collect::<Vec<_>>()
-                    })
-                    .collect()
-            };
-            [get(0, w, h), get(1, cw, ch), get(2, cw, ch)]
-        }
-        P::YUV420P10LE => {
-            let get = |p, pw, ph| -> Vec<u16> {
-                (0..ph)
-                    .flat_map(|y| (0..pw).map(move |x| rd16(row(p, y), x)).collect::<Vec<_>>())
-                    .collect()
-            };
-            [get(0, w, h), get(1, cw, ch), get(2, cw, ch)]
-        }
-        P::NV12 => {
-            let y: Vec<u16> = (0..h)
-                .flat_map(|r| row(0, r)[..w].iter().map(|&v| v as u16).collect::<Vec<_>>())
-                .collect();
-            let uv = |o: usize| -> Vec<u16> {
-                (0..ch)
-                    .flat_map(|r| {
-                        (0..cw)
-                            .map(move |x| row(1, r)[2 * x + o] as u16)
-                            .collect::<Vec<_>>()
-                    })
-                    .collect()
-            };
-            [y, uv(0), uv(1)]
-        }
-        P::P010LE => {
-            // P010 keeps the 10 bits in the high end of each u16.
-            let y: Vec<u16> = (0..h)
-                .flat_map(|r| {
-                    (0..w)
-                        .map(move |x| rd16(row(0, r), x) >> 6)
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            let uv = |o: usize| -> Vec<u16> {
-                (0..ch)
-                    .flat_map(|r| {
-                        (0..cw)
-                            .map(move |x| rd16(row(1, r), 2 * x + o) >> 6)
-                            .collect::<Vec<_>>()
-                    })
-                    .collect()
-            };
-            [y, uv(0), uv(1)]
-        }
-        other => panic!("unexpected pixel format {other:?}"),
-    }
 }
 
 /// A decoded frame's pts and planes.
@@ -120,7 +59,10 @@ fn decode_all(path: &Path, hw: Option<Arc<HwDevice>>) -> Result<Vec<Frame>, Medi
     let mut out = Vec::new();
     while let Some(f) = d.next_frame()? {
         assert_eq!(f.hw_decoded, hw.is_some());
-        out.push((f.pts, planes(&f.frame)));
+        let planes = f
+            .planes_u16()
+            .unwrap_or_else(|| panic!("unexpected pixel format {:?}", f.frame.format()));
+        out.push((f.pts, planes));
     }
     Ok(out)
 }
@@ -138,8 +80,11 @@ fn device(kind: &str) -> Arc<HwDevice> {
     }
 }
 
-fn check_matches_software(kind: &str, path: &Path) {
+/// Opens the device before generating the clip, so a machine without one
+/// skips straight away.
+fn check_matches_software(kind: &str, clip: impl FnOnce() -> PathBuf) {
     let dev = device(kind);
+    let path = &clip();
     let sw = decode_all(path, None).expect("software decode");
     let hw = match decode_all(path, Some(dev)) {
         Ok(f) => f,
@@ -160,19 +105,19 @@ fn check_matches_software(kind: &str, path: &Path) {
 #[test]
 #[ignore = "tier2: needs a VA-API GPU with HEVC Main"]
 fn vaapi_hevc_main_matches_software() {
-    check_matches_software("vaapi", &clip("t2-hevc8", Codec::Hevc, 8, 1024, 12));
+    check_matches_software("vaapi", || clip("t2-hevc8", Codec::Hevc, 8, 1024, 12));
 }
 
 #[test]
 #[ignore = "tier2: needs a VA-API GPU with HEVC Main10"]
 fn vaapi_hevc_main10_matches_software() {
-    check_matches_software("vaapi", &clip("t2-hevc10", Codec::Hevc, 10, 1024, 12));
+    check_matches_software("vaapi", || clip("t2-hevc10", Codec::Hevc, 10, 1024, 12));
 }
 
 #[test]
 #[ignore = "tier2: needs a VA-API GPU with H.264"]
 fn vaapi_h264_matches_software() {
-    check_matches_software("vaapi", &clip("t2-h264", Codec::H264, 8, 1024, 12));
+    check_matches_software("vaapi", || clip("t2-h264", Codec::H264, 8, 1024, 12));
 }
 
 #[test]
@@ -185,7 +130,7 @@ fn vulkan_hevc_main_matches_software() {
     };
     let path = clip("t2-hevc8", Codec::Hevc, 8, 1024, 12);
     match VideoDecoder::open(&path, None, Some(dev.clone())).and_then(|mut d| d.next_frame()) {
-        Ok(_) => check_matches_software("vulkan", &path),
+        Ok(_) => check_matches_software("vulkan", || path),
         // Vulkan Video is optional; Fedora's Mesa ships without H.265 video.
         Err(e) => tier2::skip(format!("Vulkan Video HEVC decode unavailable: {e}")),
     }
@@ -193,11 +138,12 @@ fn vulkan_hevc_main_matches_software() {
 
 #[test]
 #[ignore = "tier2: benchmark, needs a VA-API GPU"]
-fn bench_decode_3840x1920_hevc() {
+fn bench_decode_hevc_4k_and_5k7() {
     let node = tier2::require_render_node();
-    let path = clip("t2-hevc8-4k", Codec::Hevc, 8, 3840, 60);
-    let run = |hw: Option<Arc<HwDevice>>| -> Result<f64, MediaError> {
-        let mut d = VideoDecoder::open(&path, None, hw)?;
+    let dev =
+        open_hw_device("vaapi", Some(&node.to_string_lossy())).unwrap_or_else(|e| panic!("{e}"));
+    let fps = |path: &Path, hw: Option<Arc<HwDevice>>| -> Result<f64, MediaError> {
+        let mut d = VideoDecoder::open(path, None, hw)?;
         let t = Instant::now();
         let mut n = 0;
         while d.next_frame()?.is_some() {
@@ -205,18 +151,17 @@ fn bench_decode_3840x1920_hevc() {
         }
         Ok(n as f64 / t.elapsed().as_secs_f64())
     };
-    let sw = run(None).expect("software decode");
-    bench::record(
-        "decode 3840x1920 HEVC 8-bit, software (incl. download)",
-        sw,
-        "fps",
-    );
-    let dev =
-        open_hw_device("vaapi", Some(&node.to_string_lossy())).unwrap_or_else(|e| panic!("{e}"));
-    let hw = run(Some(dev)).unwrap_or_else(|e| panic!("{e}"));
-    bench::record(
-        "decode 3840x1920 HEVC 8-bit, VA-API (incl. download)",
-        hw,
-        "fps",
-    );
+    // 5760x2880 is what 5.7K cameras record; the target is 30 fps.
+    for (w, name) in [(3840, "t2-hevc8-4k"), (5760, "t2-hevc8-5k7")] {
+        let path = clip(name, Codec::Hevc, 8, w, 60);
+        let size = format!("{w}x{}", w / 2);
+        let sw = fps(&path, None).expect("software decode");
+        bench::record(&format!("decode {size} HEVC 8-bit, software"), sw, "fps");
+        let hw = fps(&path, Some(dev.clone())).unwrap_or_else(|e| panic!("{e}"));
+        bench::record(
+            &format!("decode {size} HEVC 8-bit, VA-API (incl. copy to RAM)"),
+            hw,
+            "fps",
+        );
+    }
 }

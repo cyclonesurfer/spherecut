@@ -37,6 +37,52 @@ impl std::fmt::Debug for DecodedFrame {
     }
 }
 
+impl DecodedFrame {
+    /// Copies of the Y, U and V planes as `u16` samples at their native
+    /// bit depth, whether the frame is planar (software) or semi-planar
+    /// (NV12/P010 from hardware). For comparisons and tests; the render
+    /// path uploads planes without copying them like this. `None` for
+    /// formats other than 4:2:0 8/10-bit.
+    pub fn planes_u16(&self) -> Option<[Vec<u16>; 3]> {
+        use ff::format::Pixel as P;
+        let f = &self.frame;
+        let (w, h) = (f.width() as usize, f.height() as usize);
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let row = |plane: usize, y: usize| -> &[u8] { &f.data(plane)[y * f.stride(plane)..] };
+        let rd16 = |b: &[u8], i: usize| u16::from_le_bytes([b[2 * i], b[2 * i + 1]]);
+        let collect = |n: usize, h: usize, px: &dyn Fn(usize, usize) -> u16| -> Vec<u16> {
+            (0..h)
+                .flat_map(|y| (0..n).map(move |x| (y, x)))
+                .map(|(y, x)| px(y, x))
+                .collect()
+        };
+        Some(match f.format() {
+            P::YUV420P | P::YUVJ420P => [
+                collect(w, h, &|y, x| row(0, y)[x] as u16),
+                collect(cw, ch, &|y, x| row(1, y)[x] as u16),
+                collect(cw, ch, &|y, x| row(2, y)[x] as u16),
+            ],
+            P::YUV420P10LE => [
+                collect(w, h, &|y, x| rd16(row(0, y), x)),
+                collect(cw, ch, &|y, x| rd16(row(1, y), x)),
+                collect(cw, ch, &|y, x| rd16(row(2, y), x)),
+            ],
+            P::NV12 => [
+                collect(w, h, &|y, x| row(0, y)[x] as u16),
+                collect(cw, ch, &|y, x| row(1, y)[2 * x] as u16),
+                collect(cw, ch, &|y, x| row(1, y)[2 * x + 1] as u16),
+            ],
+            // P010 keeps the 10 bits in the high end of each u16.
+            P::P010LE => [
+                collect(w, h, &|y, x| rd16(row(0, y), x) >> 6),
+                collect(cw, ch, &|y, x| rd16(row(1, y), 2 * x) >> 6),
+                collect(cw, ch, &|y, x| rd16(row(1, y), 2 * x + 1) >> 6),
+            ],
+            _ => return None,
+        })
+    }
+}
+
 pub struct VideoDecoder {
     path: PathBuf,
     ictx: ff::format::context::Input,
