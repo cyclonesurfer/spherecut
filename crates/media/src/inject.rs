@@ -10,11 +10,13 @@
 //! place, so it is always either absent, the old file or the whole new one.
 
 use std::fs::{File, OpenOptions};
+use std::hash::{BuildHasher, RandomState};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use spherecut_core::brand::APP_SLUG;
 use thiserror::Error;
 
 use crate::mp4::{self, Mp4Box, Mp4Error, Mp4Tree};
@@ -135,6 +137,20 @@ fn write_err(path: &Path) -> impl Fn(io::Error) -> InjectError + '_ {
     }
 }
 
+/// How many names [`TempFile::create`] tries before giving up.
+const TEMP_ATTEMPTS: usize = 16;
+
+/// A name for a temporary file: hidden, recognisably ours, the same short
+/// length whatever the output is called, and random, so that a file left
+/// by a killed run (whose pid may well come round again) is not in the way.
+fn temp_name() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    // RandomState is seeded from the OS's random source.
+    let r = RandomState::new().hash_one((std::process::id(), n));
+    format!(".{APP_SLUG}-{r:016x}.tmp")
+}
+
 /// A new file next to `dest`, renamed onto it by [`TempFile::persist`] and
 /// removed if dropped before that (on an error or a panic).
 struct TempFile {
@@ -146,30 +162,38 @@ struct TempFile {
 
 impl TempFile {
     fn create(dest: &Path) -> io::Result<Self> {
-        // Unique per process and call, so concurrent writers of the same
-        // destination never share a temp file.
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let name = dest.file_name().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "output path has no file name")
-        })?;
-        let mut tmp_name = std::ffi::OsString::from(".");
-        tmp_name.push(name);
-        tmp_name.push(format!(
-            ".{}-{}.tmp",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let path = dest.with_file_name(tmp_name);
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        Ok(TempFile {
-            path,
-            dest: dest.to_path_buf(),
-            file,
-            persisted: false,
-        })
+        Self::create_named(dest, temp_name)
+    }
+
+    /// [`TempFile::create`] with names from `name`. A name that is taken
+    /// (by another writer, or left over from a killed one) is skipped for
+    /// the next, since `create_new` never opens an existing file.
+    fn create_named(dest: &Path, mut name: impl FnMut() -> String) -> io::Result<Self> {
+        if dest.file_name().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "output path has no file name",
+            ));
+        }
+        for _ in 0..TEMP_ATTEMPTS {
+            let path = dest.with_file_name(name());
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => {
+                    return Ok(TempFile {
+                        path,
+                        dest: dest.to_path_buf(),
+                        file,
+                        persisted: false,
+                    });
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("no free temporary file name in {TEMP_ATTEMPTS} tries"),
+        ))
     }
 
     /// Flush to disk and rename into place.
@@ -672,6 +696,69 @@ mod tests {
             }
             assert!(!out.exists());
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn temp_names_are_short_and_fresh() {
+        let dir = tmpdir("temp-names");
+        // The longest legal name: the temp name must not grow with it.
+        let dest = dir.join("o".repeat(251) + ".mp4");
+        let a = TempFile::create(&dest).unwrap();
+        let b = TempFile::create(&dest).unwrap();
+        assert_ne!(a.path, b.path);
+        for t in [&a, &b] {
+            assert_eq!(t.path.parent(), dest.parent());
+            let name = t.path.file_name().unwrap().to_str().unwrap();
+            assert!(
+                name.starts_with(".spherecut-") && name.ends_with(".tmp") && name.len() == 31,
+                "{name}"
+            );
+        }
+        drop((a, b));
+        assert!(listing(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn taken_temp_names_are_skipped() {
+        // A killed run leaves its temp file behind, and a later one may
+        // come up with the same name (pid-based names used to, every time).
+        let dir = tmpdir("temp-taken");
+        let dest = dir.join("out.mp4");
+        for n in [".left-0.tmp", ".left-1.tmp"] {
+            std::fs::write(dir.join(n), b"leftover").unwrap();
+        }
+        let mut names = [".left-0.tmp", ".left-1.tmp", ".fresh.tmp"].into_iter();
+        let t = TempFile::create_named(&dest, || names.next().unwrap().into()).unwrap();
+        assert_eq!(t.path, dir.join(".fresh.tmp"));
+        t.persist().unwrap();
+        assert_eq!(std::fs::read(dir.join(".left-0.tmp")).unwrap(), b"leftover");
+        assert_eq!(listing(&dir), [".left-0.tmp", ".left-1.tmp", "out.mp4"]);
+
+        // It gives up after a bounded number of tries.
+        let mut tries = 0;
+        let r = TempFile::create_named(&dest, || {
+            tries += 1;
+            ".left-0.tmp".into()
+        });
+        assert_eq!(
+            r.err().map(|e| e.kind()),
+            Some(io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(tries, TEMP_ATTEMPTS);
+        assert_eq!(listing(&dir), [".left-0.tmp", ".left-1.tmp", "out.mp4"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn long_output_names_work() {
+        let dir = tmpdir("long");
+        let a = dir.join("in.mp4");
+        std::fs::write(&a, file(false).0).unwrap();
+        let name = "o".repeat(251) + ".mp4";
+        inject(&a, &dir.join(&name), &spherical_edits()).unwrap();
+        assert_eq!(listing(&dir), ["in.mp4".to_string(), name]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
