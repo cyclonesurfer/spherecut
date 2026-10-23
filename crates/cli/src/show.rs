@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use spherecut_core::Rational;
 use spherecut_media::doctor::{DoctorReport, Severity};
 use spherecut_media::probe::{ProbeReport, StreamInfo};
-use spherecut_media::spherical::Projection;
+use spherecut_media::spherical::{Projection, StereoMode};
 
 fn secs(r: Rational) -> String {
     format!("{:.3} s", r.to_f64())
@@ -180,10 +180,17 @@ fn stream(s: &mut String, st: &StreamInfo) {
             Some(Projection::Other { fourcc }) => format!("unknown `{fourcc}`"),
             None => "no projection box".into(),
         };
+        let stereo = match v2.stereo {
+            Some(StereoMode::Mono) => "mono".to_string(),
+            Some(StereoMode::TopBottom) => "stereo top-bottom".into(),
+            Some(StereoMode::LeftRight) => "stereo left-right".into(),
+            Some(StereoMode::StereoCustom) => "stereo (custom)".into(),
+            Some(StereoMode::Unknown(v)) => format!("unknown stereo mode {v}"),
+            None => "no st3d (mono)".into(),
+        };
         let _ = writeln!(
             s,
-            "             spherical v2: {proj}, stereo {:?}, pose y{} p{} r{}{}",
-            v2.stereo,
+            "             spherical v2: {proj}, {stereo}, pose y{} p{} r{}{}",
             v2.pose_yaw,
             v2.pose_pitch,
             v2.pose_roll,
