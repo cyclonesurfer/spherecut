@@ -487,14 +487,24 @@ Both write a temporary file next to the output and rename it into place:
 - The file is flushed to disk (`sync_all`) before the rename, and removed
   on an error or a panic.
 - A symlinked output is written through: the file it finally names is
-  replaced and the link kept. A dangling link creates its target. A
-  directory at the output is refused before any work.
+  replaced and the link kept. A dangling link creates its target.
+- Only a regular file at the output is replaced. A directory, pipe,
+  device or socket there is refused before any work, and again just
+  before the rename: a rename over a pipe or `/dev/null` would replace
+  the node instead of writing to it. Writing to a pipe or `/dev/null`
+  (say, `render -o /dev/null` for a benchmark) would need its own
+  non-atomic path that opens the node and writes it in place.
 
 `inject` also refuses an output that is the input under any name (same
 device and inode, so hard links and symlinks too), two edits for one
 track, and fragmented MP4 (top-level `moof`, `sidx`, `ssix` or `mfra`, or
-`mvex` in `moov`), whose offsets it does not shift. It copies exactly the
-parsed lengths, so the output can't outgrow the input.
+`mvex` in `moov`), whose offsets it does not shift. It refuses input that
+did not parse cleanly (anything in `Mp4Tree::damage`, which includes the
+parser's warnings), because a partial parse can miss the `mdat` after
+`moov` and leave every chunk offset unshifted. For the same reason it
+refuses when its re-read of the edited `moov` warns, for example when
+the edits take it past `MAX_BOXES`. It copies exactly the parsed
+lengths, so the output can't outgrow the input.
 
 `Mp4Writer` always writes MP4, through a `StreamIo` on our own file handle,
 and looks up both encoders before touching the disk. `finish()` renames the
@@ -606,7 +616,11 @@ It runs cargo with `CARGO_TERM_VERBOSE=false`, `CARGO_TERM_QUIET=false`,
 `CARGO_TERM_COLOR=never`, `CARGO_TERM_PROGRESS_WHEN=never` and
 `RUST_TEST_NOCAPTURE=0`, and passes libtest `--format pretty`, so the
 user's cargo settings don't change what it reads. `--samples` is made
-absolute, since cargo runs integration tests from the package directory.
+absolute, since cargo runs integration tests from the package directory,
+and reaches the tests byte for byte (as do `SPHERECUT_BENCH_OUT` and the
+other variables), never as a lossy UTF-8 copy. A samples path that is
+not valid UTF-8 is reported as unusable, since FFmpeg's Rust bindings
+open only UTF-8 paths, and the samples tests skip with that reason.
 The report name gets `-dirty` only for changes outside `hw-reports/`.
 
 Why: the M0 review found that hw-test silently dropped Tier 2 tests (B1)

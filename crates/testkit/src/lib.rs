@@ -32,15 +32,30 @@ pub mod tier2 {
         }
     }
 
-    /// The samples directory, or skip if it is missing.
+    /// The samples directory, or skip if it is missing or unusable.
     #[track_caller]
     pub fn require_samples_dir() -> PathBuf {
         require_hw_run();
-        let dir = std::env::var_os("SPHERECUT_SAMPLES")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("samples"));
+        usable_samples_dir(
+            std::env::var_os("SPHERECUT_SAMPLES")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("samples")),
+        )
+    }
+
+    /// `dir`, or skip if it is missing or its path is not UTF-8: FFmpeg's
+    /// Rust bindings open only UTF-8 paths.
+    #[track_caller]
+    pub(crate) fn usable_samples_dir(dir: PathBuf) -> PathBuf {
         if !dir.is_dir() {
             skip(format!("samples directory {} not found", dir.display()));
+        }
+        if dir.to_str().is_none() {
+            skip(format!(
+                "samples directory {} has a path that is not valid UTF-8, which FFmpeg's \
+                 Rust bindings can't open",
+                dir.display()
+            ));
         }
         dir
     }
@@ -104,7 +119,9 @@ pub mod bench {
     }
 
     /// Record several runs of one benchmark as a line of
-    /// `name, median, unit, min, max, runs`, tab-separated.
+    /// `name, median, unit, min, max, runs`, tab-separated. The numbers
+    /// are written at full precision; hw-test rounds them for its table,
+    /// after working out the spread.
     pub fn record_runs(name: &str, values: &[f64], unit: &str) {
         let Some(line) = line(name, values, unit) else {
             return;
@@ -135,9 +152,7 @@ pub mod bench {
         } else {
             (v[n / 2 - 1] + v[n / 2]) / 2.0
         };
-        Some(format!(
-            "{name}\t{median:.2}\t{unit}\t{min:.2}\t{max:.2}\t{n}\n"
-        ))
+        Some(format!("{name}\t{median}\t{unit}\t{min}\t{max}\t{n}\n"))
     }
 
     #[cfg(test)]
@@ -155,11 +170,16 @@ pub mod bench {
             assert_eq!(v, [4.0, 1.0, 3.0, 2.0]);
             assert_eq!(
                 line("m", &v, "fps").as_deref(),
-                Some("m\t2.50\tfps\t1.00\t4.00\t4\n")
+                Some("m\t2.5\tfps\t1\t4\t4\n")
             );
             assert_eq!(
                 line("one", &[5.0], "fps").as_deref(),
-                Some("one\t5.00\tfps\t5.00\t5.00\t1\n")
+                Some("one\t5\tfps\t5\t5\t1\n")
+            );
+            // Unrounded: as 0.06, 0.05 and 0.06, a 7% spread read as 17%.
+            assert_eq!(
+                line("8K", &[0.058, 0.054, 0.056], "x").as_deref(),
+                Some("8K\t0.056\tx\t0.054\t0.058\t3\n")
             );
             assert_eq!(line("none", &[], "fps"), None);
         }
@@ -178,5 +198,25 @@ mod tests {
             .and_then(|e| e.downcast_ref::<String>().cloned())
             .unwrap_or_default();
         assert_eq!(msg, "TIER2-SKIP: no GPU");
+    }
+
+    #[test]
+    fn samples_with_a_path_that_is_not_utf8_are_skipped() {
+        use std::os::unix::ffi::OsStrExt;
+        let base = std::env::temp_dir().join(format!("spherecut-testkit-{}", std::process::id()));
+        let dir = base.join(std::ffi::OsStr::from_bytes(b"samples-\xff"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let skipped = |dir: std::path::PathBuf| {
+            std::panic::catch_unwind(|| tier2::usable_samples_dir(dir))
+                .err()
+                .and_then(|e| e.downcast_ref::<String>().cloned())
+        };
+        let msg = skipped(dir).unwrap_or_default();
+        assert!(
+            msg.starts_with("TIER2-SKIP: samples directory ") && msg.contains("not valid UTF-8"),
+            "{msg}"
+        );
+        assert_eq!(skipped(base.clone()), None);
+        std::fs::remove_dir_all(&base).ok();
     }
 }
