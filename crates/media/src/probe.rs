@@ -2,6 +2,8 @@
 //! decoding it.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fs::File;
+use std::io::{BufReader, Read, Seek};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -23,10 +25,28 @@ pub struct ProbeReport {
     /// Present for MP4/MOV files, which is every camera format we support.
     pub mp4: Option<Mp4Summary>,
     pub camera: Option<CameraGuess>,
+    /// How much of the file's structure was checked for `damage`.
+    pub structure: StructureCheck,
     /// Why the file looks truncated or corrupt. A healthy file has none;
     /// `spherecut probe` fails when there are any.
     pub damage: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+/// How much of a file's structure probe checks for damage, beyond what
+/// FFmpeg needs to open it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "check", rename_all = "snake_case")]
+pub enum StructureCheck {
+    /// MP4/MOV: every top-level box, and each track's sample tables
+    /// against the media data.
+    Full,
+    /// Matroska/WebM: only that the file is as long as its header says.
+    /// Damage inside goes unnoticed.
+    Length,
+    /// Nothing, for the reason given: truncation and corruption go
+    /// unnoticed.
+    None { why: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -252,6 +272,23 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         }
     }
 
+    let structure = if tree.is_some() {
+        StructureCheck::Full
+    } else if mov_family {
+        StructureCheck::None {
+            why: "its MP4/MOV boxes could not be read".into(),
+        }
+    } else if fmt.name().split(',').any(|n| n == "matroska") {
+        check_matroska(path, meta.len(), &mut damage)
+    } else {
+        StructureCheck::None {
+            why: format!(
+                "spherecut checks MP4/MOV and Matroska files, not {}",
+                fmt.description()
+            ),
+        }
+    };
+
     let traks: Vec<&Mp4Box> = tree
         .as_ref()
         .map(|t| t.tracks().collect())
@@ -395,9 +432,90 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         streams,
         mp4,
         camera,
+        structure,
         damage,
         warnings,
     })
+}
+
+/// Check that a Matroska/WebM file is as long as its Segment says. Live
+/// recordings leave the size unknown.
+fn check_matroska(path: &Path, file_size: u64, damage: &mut Vec<String>) -> StructureCheck {
+    let segment = File::open(path)
+        .ok()
+        .and_then(|f| matroska_segment(&mut BufReader::new(f)));
+    match segment {
+        Some((start, Some(size))) => {
+            if start.saturating_add(size) > file_size {
+                damage.push(format!(
+                    "the file holds {} of the {size} bytes its Matroska Segment says it has: it was cut short",
+                    file_size.saturating_sub(start)
+                ));
+            }
+            StructureCheck::Length
+        }
+        Some((_, None)) => StructureCheck::None {
+            why: "its Matroska Segment does not record its size, as in live recordings".into(),
+        },
+        None => StructureCheck::None {
+            why: "its Matroska header could not be read".into(),
+        },
+    }
+}
+
+const EBML_HEADER: u64 = 0x1A45_DFA3;
+const EBML_VOID: u64 = 0xEC;
+const MATROSKA_SEGMENT: u64 = 0x1853_8067;
+
+/// Where the data of a Matroska file's Segment starts, and its size if
+/// known: the EBML header comes first, then the Segment, perhaps after a
+/// few Void elements.
+fn matroska_segment<R: Read + Seek>(r: &mut R) -> Option<(u64, Option<u64>)> {
+    let skip = |r: &mut R, size: Option<u64>| r.seek_relative(i64::try_from(size?).ok()?).ok();
+    if ebml_id(r)? != EBML_HEADER {
+        return None;
+    }
+    let size = ebml_size(r)?;
+    skip(r, size)?;
+    for _ in 0..8 {
+        let id = ebml_id(r)?;
+        let size = ebml_size(r)?;
+        match id {
+            MATROSKA_SEGMENT => return Some((r.stream_position().ok()?, size)),
+            EBML_VOID => skip(r, size)?,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// An EBML variable-length integer of at most `max_len` bytes, still
+/// with its length marker (the first set bit), and its length.
+fn ebml_vint<R: Read>(r: &mut R, max_len: u32) -> Option<(u64, u32)> {
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b).ok()?;
+    let len = b[0].leading_zeros() + 1;
+    if len > max_len {
+        return None;
+    }
+    let mut v = u64::from(b[0]);
+    for _ in 1..len {
+        r.read_exact(&mut b).ok()?;
+        v = v << 8 | u64::from(b[0]);
+    }
+    Some((v, len))
+}
+
+/// An element ID, which keeps its length marker.
+fn ebml_id<R: Read>(r: &mut R) -> Option<u64> {
+    ebml_vint(r, 4).map(|(id, _)| id)
+}
+
+/// An element size: Some(None) for the all-ones "unknown" size.
+fn ebml_size<R: Read>(r: &mut R) -> Option<Option<u64>> {
+    let (v, len) = ebml_vint(r, 8)?;
+    let mask = (1u64 << (7 * len)) - 1;
+    Some((v & mask != mask).then_some(v & mask))
 }
 
 fn kind_name(k: StreamKind) -> String {
@@ -455,5 +573,73 @@ fn describe_open_error(e: ff::Error, looked_like_mp4: bool, damage: &[String]) -
         }
         ff::Error::InvalidData => format!("{base}: not a recognised media file"),
         _ => base,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    /// An EBML element; `size` None writes the 8-byte "unknown" size.
+    fn el(id: u32, payload: &[u8], size: Option<u64>) -> Vec<u8> {
+        let id = id.to_be_bytes();
+        let skip = id.iter().position(|&b| b != 0).unwrap_or(3);
+        let mut v = id[skip..].to_vec();
+        match size {
+            // The 1-byte form where it fits.
+            Some(n) if n < 127 => v.push(0x80 | n as u8),
+            Some(n) => v.extend_from_slice(&(n | 1 << 56).to_be_bytes()),
+            None => v.extend_from_slice(&[0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+        }
+        v.extend_from_slice(payload);
+        v
+    }
+
+    fn segment(f: Vec<u8>) -> Option<(u64, Option<u64>)> {
+        matroska_segment(&mut io::Cursor::new(f))
+    }
+
+    #[test]
+    fn matroska_segment_is_found_after_the_header() {
+        let doc_type = el(0x4282, b"webm", Some(4));
+        let header = el(0x1A45_DFA3, &doc_type, Some(doc_type.len() as u64));
+        let at = header.len() as u64 + 4 + 8;
+        let body = vec![0; 300];
+        let seg = |size| el(0x1853_8067, &body, size);
+
+        let f = [header.clone(), seg(Some(300))].concat();
+        assert_eq!(segment(f), Some((at, Some(300))));
+        // Live recordings leave the size unknown.
+        let f = [header.clone(), seg(None)].concat();
+        assert_eq!(segment(f), Some((at, None)));
+        // Void elements may come first.
+        let void = el(0xEC, &[0; 5], Some(5));
+        let f = [header.clone(), void.clone(), seg(Some(300))].concat();
+        assert_eq!(segment(f), Some((at + void.len() as u64, Some(300))));
+        // Cut short, the size still says how long it was.
+        let f = [header.clone(), seg(Some(300))].concat();
+        assert_eq!(
+            segment(f[..at as usize + 10].to_vec()),
+            Some((at, Some(300)))
+        );
+    }
+
+    #[test]
+    fn non_matroska_input_has_no_segment() {
+        let doc_type = el(0x4282, b"webm", Some(4));
+        let header = el(0x1A45_DFA3, &doc_type, Some(doc_type.len() as u64));
+        let cluster = el(0x1F43_B675, &[0; 8], Some(8));
+        for f in [
+            Vec::new(),
+            b"RIFF\x24\0\0\0WAVEfmt ".to_vec(),
+            header[..header.len() - 2].to_vec(),
+            [header.clone(), cluster].concat(),
+            // An ID longer than 4 bytes.
+            [header, vec![0x08, 1, 2, 3, 4]].concat(),
+        ] {
+            assert_eq!(segment(f.clone()), None, "{f:?}");
+        }
     }
 }

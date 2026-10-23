@@ -279,3 +279,96 @@ fn damaged_first_box_does_not_hide_other_damage() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A Matroska element with an 8-byte size, or the "unknown" size.
+fn el(id: &[u8], payload: &[u8], known: bool) -> Vec<u8> {
+    let size = if known {
+        (payload.len() as u64 | 1 << 56).to_be_bytes()
+    } else {
+        [0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+    };
+    [id, &size, payload].concat()
+}
+
+/// A small Matroska file with one 8 kHz PCM track in three clusters.
+fn matroska(size_known: bool) -> Vec<u8> {
+    let e = |id: &[u8], payload: &[u8]| el(id, payload, true);
+    let header = e(
+        b"\x1a\x45\xdf\xa3",
+        &[e(b"\x42\x82", b"matroska"), e(b"\x42\x87", &[4])].concat(),
+    );
+    let info = e(
+        b"\x15\x49\xa9\x66",
+        &[
+            e(b"\x2a\xd7\xb1", &[0x0f, 0x42, 0x40]),
+            e(b"\x4d\x80", b"t"),
+        ]
+        .concat(),
+    );
+    let audio = [
+        e(b"\xb5", &8000f64.to_be_bytes()),
+        e(b"\x9f", &[1]),
+        e(b"\x62\x64", &[16]),
+    ]
+    .concat();
+    let track = [
+        e(b"\xd7", &[1]),
+        e(b"\x73\xc5", &[1]),
+        e(b"\x83", &[2]),
+        e(b"\x86", b"A_PCM/INT/LIT"),
+        e(b"\xe1", &audio),
+    ]
+    .concat();
+    let tracks = e(b"\x16\x54\xae\x6b", &e(b"\xae", &track));
+    let clusters: Vec<u8> = (0..3u8)
+        .flat_map(|t| {
+            let block = [&b"\x81\x00\x00\x80"[..], &[0; 1600]].concat();
+            e(
+                b"\x1f\x43\xb6\x75",
+                &[e(b"\xe7", &[t * 100]), e(b"\xa3", &block)].concat(),
+            )
+        })
+        .collect();
+    let segment = [info, tracks, clusters].concat();
+    [header, el(b"\x18\x53\x80\x67", &segment, size_known)].concat()
+}
+
+#[test]
+fn matroska_cut_short_fails() {
+    let dir = tmp("mkv");
+    let write = |name: &str, data: &[u8]| {
+        let p = dir.join(name);
+        std::fs::write(&p, data).unwrap();
+        p
+    };
+    let good = matroska(true);
+    let checked = "structure  only its length is checked";
+
+    let out = probe(&[&write("good.mkv", &good)]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("#0  audio   pcm_s16le"), "{stdout}");
+    assert!(stdout.contains(checked), "{stdout}");
+
+    // FFmpeg opens it cut to 60% without a word.
+    let out = probe(&[&write("cut.mkv", &good[..good.len() * 3 / 5])]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stdout.contains("#0  audio   pcm_s16le"), "{stdout}");
+    assert!(
+        stderr.contains("bytes its Matroska Segment says it has: it was cut short"),
+        "{stderr}"
+    );
+
+    // Without a recorded size there is nothing to compare with, and the
+    // report says so.
+    let out = probe(&[&write("live.mkv", &matroska(false))]);
+    let stdout = text(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("structure  not checked (its Matroska Segment does not record its size"),
+        "{stdout}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

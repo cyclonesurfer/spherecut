@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use spherecut_core::Rational;
 use spherecut_media::doctor::{DoctorReport, Severity};
-use spherecut_media::probe::{ProbeReport, StreamInfo, TruncatedBox};
+use spherecut_media::probe::{ProbeReport, StreamInfo, StructureCheck, TruncatedBox};
 use spherecut_media::spherical::{Projection, StereoMode};
 
 fn secs(r: Rational) -> String {
@@ -70,6 +70,21 @@ pub fn probe(r: &ProbeReport) -> String {
                 String::new()
             }
         );
+    }
+    match &r.structure {
+        StructureCheck::Full => {}
+        StructureCheck::Length => {
+            let _ = writeln!(
+                s,
+                "  structure  only its length is checked; damage inside goes unnoticed"
+            );
+        }
+        StructureCheck::None { why } => {
+            let _ = writeln!(
+                s,
+                "  structure  not checked ({why}); truncation and corruption go unnoticed"
+            );
+        }
     }
     if let Some(c) = &r.camera {
         let _ = writeln!(
