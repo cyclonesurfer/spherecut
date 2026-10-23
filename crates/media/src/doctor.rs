@@ -1023,11 +1023,7 @@ impl Fixes<'_> {
             }
         };
         lines([
-            self.no_gpu_visible.then(|| {
-                "no GPU is visible here: in a VM or container, pass it through first \
-                 (for example `--device /dev/dri`)"
-                    .to_string()
-            }),
+            self.no_gpu_visible.then(|| PASS_THROUGH.to_string()),
             Some(driver),
         ])
     }
@@ -1053,11 +1049,18 @@ impl Fixes<'_> {
         if self.node_denied {
             return format!("{ADD_TO_RENDER}   (Vulkan opens the GPU through its render node)");
         }
+        // A CPU device was listed, so the Vulkan loader is there, and with
+        // Mesa's drivers installed too nothing is left to install.
+        let mesa = self.distro == Distro::Fedora && self.has("mesa-vulkan-drivers");
         // No driver loads for a GPU that isn't passed through.
         if self.no_gpu_visible {
-            return self.vulkan_driver();
+            return if mesa {
+                PASS_THROUGH.into()
+            } else {
+                self.vulkan_driver()
+            };
         }
-        if self.distro == Distro::Fedora && self.has("mesa-vulkan-drivers") {
+        if mesa {
             return "VK_LOADER_DEBUG=error,warn vulkaninfo --summary   (Mesa's Vulkan drivers \
                     are installed: this shows why none loads for the GPU)\n\
                     sudo dnf upgrade --refresh   (a GPU newer than its Mesa needs a newer Mesa)"
@@ -1068,6 +1071,9 @@ impl Fixes<'_> {
 }
 
 const ADD_TO_RENDER: &str = "sudo usermod -aG render \"$USER\"   then log out and back in";
+
+const PASS_THROUGH: &str = "no GPU is visible here: in a VM or container, pass it through \
+                            first (for example `--device /dev/dri`)";
 
 fn vainfo(node: &str) -> String {
     format!("vainfo --display drm --device {node}   (lists what this GPU decodes and encodes)")
@@ -1976,22 +1982,31 @@ mod tests {
                 .starts_with("VK_LOADER_DEBUG=error,warn vulkaninfo --summary"),
             "{i:?}"
         );
-        // In a VM or container with no GPU passed through, that comes first.
-        let no_node = Env {
+        // In a VM or container with no GPU passed through, that is the
+        // whole fix: the drivers are already installed.
+        let no_node = |pkgs: &[&str]| Env {
             node_error: Some((ErrorKind::NotFound, "not found".into())),
-            ..installed(&["mesa-vulkan-drivers"])
+            ..installed(pkgs)
         };
-        let i = issues(&r, &no_node)
-            .into_iter()
-            .find(|i| i.what.contains("Vulkan"))
-            .unwrap();
+        let vulkan_fix = |env: &Env| {
+            issues(&r, env)
+                .into_iter()
+                .find(|i| i.what.contains("Vulkan"))
+                .unwrap()
+                .fix
+        };
         assert_eq!(
-            i.fix,
+            vulkan_fix(&no_node(&["mesa-vulkan-drivers"])),
+            "no GPU is visible here: in a VM or container, pass it through first (for \
+             example `--device /dev/dri`)"
+        );
+        // Not installed: install it, after passing the GPU through.
+        assert_eq!(
+            vulkan_fix(&no_node(&[])),
             "no GPU is visible here: in a VM or container, pass it through first (for \
              example `--device /dev/dri`)\n\
              sudo dnf install mesa-vulkan-drivers vulkan-loader   (RADV for AMD, ANV for Intel)"
         );
-        // Not installed: install it.
         let i = only(&issues(&r, &Env::default())).clone();
         assert_eq!(
             i.fix,
