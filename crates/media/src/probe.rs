@@ -12,6 +12,7 @@ use spherecut_core::Rational;
 use crate::detect::{self, CameraGuess};
 use crate::ff;
 use crate::ffi;
+use crate::hwprobe;
 use crate::mp4::{self, Cursor, FirstBox, FourCc, Mp4Box};
 use crate::spherical::{self, TrackSpherical};
 use crate::{MediaError, init};
@@ -33,6 +34,10 @@ pub struct ProbeReport {
     /// `spherecut probe` fails when there are any.
     pub damage: Vec<String>,
     pub warnings: Vec<String>,
+    /// The warnings and errors FFmpeg logged while reading the file. They
+    /// often say what it could not read, but healthy files can have some
+    /// too, so `spherecut probe` does not fail on them.
+    pub ffmpeg_log: Vec<String>,
 }
 
 /// A path as text, so that any file name can be reported.
@@ -220,6 +225,46 @@ fn disposition_names(d: ff::format::stream::Disposition) -> Vec<String> {
 /// [`ProbeReport::damage`] the structural damage of files it can.
 pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     init();
+    // The CLI hides FFmpeg's log by default, and it is often the only
+    // word on what FFmpeg could not read.
+    let (report, log) = hwprobe::capture_ffmpeg_log(|| probe_file(path));
+    report.map(|r| ProbeReport {
+        ffmpeg_log: tally(log),
+        ..r
+    })
+}
+
+/// FFmpeg's log lines listed past this many are counted instead.
+const MAX_LOG_LINES: usize = 32;
+
+/// Each of FFmpeg's log lines once, in order, with how often it came when
+/// more than once. A damaged stream can make it log the same line for
+/// every packet it reads.
+fn tally(lines: Vec<String>) -> Vec<String> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut dropped = 0;
+    for line in lines {
+        if let Some(&i) = seen.get(&line) {
+            counts[i].1 += 1;
+        } else if counts.len() < MAX_LOG_LINES {
+            seen.insert(line.clone(), counts.len());
+            counts.push((line, 1));
+        } else {
+            dropped += 1;
+        }
+    }
+    let mut out: Vec<String> = counts
+        .into_iter()
+        .map(|(l, n)| if n > 1 { format!("{l} ({n} times)") } else { l })
+        .collect();
+    if dropped > 0 {
+        out.push(format!("{dropped} more lines not listed"));
+    }
+    out
+}
+
+fn probe_file(path: &Path) -> Result<ProbeReport, MediaError> {
     let meta = std::fs::metadata(path).map_err(|e| MediaError::Io {
         path: path.to_path_buf(),
         error: e,
@@ -469,6 +514,7 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         structure,
         damage,
         warnings,
+        ffmpeg_log: Vec::new(),
     })
 }
 
@@ -693,6 +739,20 @@ mod tests {
             segment(f[..at as usize + 10].to_vec()),
             Some((at, Some(300)))
         );
+    }
+
+    #[test]
+    fn ffmpeg_log_lines_are_counted_not_repeated() {
+        let lines = ["a", "b", "a", "a"].map(String::from).to_vec();
+        assert_eq!(tally(lines), ["a (3 times)", "b"]);
+        let many = (0..40)
+            .map(|i| format!("line {i}"))
+            .chain(["line 0".into(), "line 39".into()])
+            .collect();
+        let t = tally(many);
+        assert_eq!(t.len(), MAX_LOG_LINES + 1);
+        assert_eq!(t[0], "line 0 (2 times)");
+        assert_eq!(t[MAX_LOG_LINES], "9 more lines not listed");
     }
 
     #[test]

@@ -139,6 +139,31 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["damage"], serde_json::json!([]));
 
+    // FFmpeg's own messages are shown in the report, though the log hides
+    // them by default.
+    let timescale = dir.join("bad-timescale.mp4");
+    let out = probe(&[&timescale]);
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("  ffmpeg     [") && l.contains("] Invalid mdhd time scale 0")),
+        "{stdout}"
+    );
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
+    let out = cmd
+        .args(["probe", "--json"])
+        .arg(&timescale)
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let log = v["ffmpeg_log"].as_array().unwrap();
+    assert!(
+        log.iter()
+            .any(|l| l.as_str().unwrap().contains("] Invalid mdhd time scale 0")),
+        "{v}"
+    );
+
     // A directory is not a media file.
     let out = probe(&[&dir]);
     assert_eq!(out.status.code(), Some(1));

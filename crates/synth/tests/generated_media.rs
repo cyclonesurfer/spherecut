@@ -175,6 +175,7 @@ fn broken_files_give_errors_not_panics() {
     let r = probe::probe(&good).unwrap();
     assert!(r.damage.is_empty(), "{:?}", r.damage);
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    assert!(r.ffmpeg_log.is_empty(), "{:?}", r.ffmpeg_log);
     let bad = media::write_bad_files(&good, &dir).unwrap();
     assert_eq!(bad.len(), 9);
     let reasons = [
@@ -226,6 +227,15 @@ fn broken_files_give_errors_not_panics() {
     // The audio track is gone from what FFmpeg reads.
     let r = probe::probe(&dir.join("bad-trak-type.mp4")).unwrap();
     assert!(r.streams.iter().all(|s| s.kind != StreamKind::Audio));
+    // FFmpeg's own word on it is kept, apart from the damage.
+    let r = probe::probe(&dir.join("bad-timescale.mp4")).unwrap();
+    assert!(
+        r.ffmpeg_log
+            .iter()
+            .any(|l| l.contains("] Invalid mdhd time scale 0")),
+        "{:?}",
+        r.ffmpeg_log
+    );
     // Damage inside the `moov` FFmpeg wrote: bytes changed anywhere, or
     // words of the sample tables of both tracks set to small or arbitrary
     // values. Tests build with overflow checks, so arithmetic on the
