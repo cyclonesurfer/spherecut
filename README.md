@@ -217,10 +217,8 @@ has changes outside `hw-reports/`). Options:
 
 - `--samples <dir>`: camera samples (default `samples/` in the checkout; a
   relative path is taken from the current directory). The path reaches the
-  tests byte for byte, as `SPHERECUT_BENCH_OUT` (see `docs/perf.md`) does.
-  A directory whose path isn't valid UTF-8 shows in the report's Samples
-  row as present but unusable, and the samples tests skip with that
-  reason.
+  tests byte for byte, as `SPHERECUT_BENCH_OUT` (see `docs/perf.md`) does,
+  and need not be valid UTF-8.
 - `--quick`: a debug build, with the benchmarks left out.
 - `--out <file>`: where to write the report.
 

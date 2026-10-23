@@ -667,9 +667,10 @@ user's cargo settings don't change what it reads. `--samples` is made
 absolute, since cargo runs integration tests from the package directory,
 and reaches the tests byte for byte (as do `SPHERECUT_BENCH_OUT` and the
 other variables), never as a lossy UTF-8 copy. A samples path that is
-not valid UTF-8 is reported as unusable, since FFmpeg's Rust bindings
-open only UTF-8 paths, and the samples tests skip with that reason.
-The report name gets `-dirty` only for changes outside `hw-reports/`.
+not valid UTF-8 is used like any other: the samples tests open files
+through `probe::probe` and `VideoDecoder::open`, which give FFmpeg the
+path's bytes (`ffi::open_input`). The report name gets `-dirty` only for
+changes outside `hw-reports/`.
 
 Why: the M0 review found that hw-test silently dropped Tier 2 tests (B1)
 and that a relative `--samples` tested nothing while the report said the

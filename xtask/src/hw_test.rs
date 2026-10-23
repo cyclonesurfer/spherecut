@@ -1373,15 +1373,14 @@ pub fn run(a: Args) -> Result<()> {
     Ok(())
 }
 
-/// Whether the samples directory is there, and usable: the tests open
-/// samples through FFmpeg's Rust bindings, which take only UTF-8 paths.
+/// Whether the samples directory is there. Its path need not be UTF-8:
+/// it reaches the tests byte for byte, and they open samples from the
+/// path's bytes.
 fn samples_status(samples: &Path) -> &'static str {
-    if !samples.is_dir() {
-        "missing"
-    } else if samples.to_str().is_none() {
-        "present, but its path is not valid UTF-8, which FFmpeg's Rust bindings can't open"
-    } else {
+    if samples.is_dir() {
         "present"
+    } else {
+        "missing"
     }
 }
 
@@ -2258,10 +2257,7 @@ fn main() {
         let got: String = child.text.split_whitespace().collect();
         assert_eq!(got, want, "{}", child.text);
 
-        assert_eq!(
-            samples_status(&samples),
-            "present, but its path is not valid UTF-8, which FFmpeg's Rust bindings can't open"
-        );
+        assert_eq!(samples_status(&samples), "present");
         assert_eq!(samples_status(&s.0), "present");
         assert_eq!(samples_status(&s.0.join("none")), "missing");
     }

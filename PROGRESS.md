@@ -127,11 +127,6 @@ first item under Next.
 - `hw-test` runs the `spherecut doctor` it built through a lossy UTF-8
   copy of the binary's path, so a cargo target directory whose path isn't
   UTF-8 makes that run fail; the report shows the failure.
-- `hw-test` and the samples tests still treat a samples directory whose
-  path isn't valid UTF-8 as unusable, saying FFmpeg's Rust bindings can't
-  open it, and the samples tests skip. That predates `spherecut-media`
-  opening files from the path's raw bytes (D11), which the samples tests
-  go through.
 - The Insta360 trailer is detected but not parsed, so `probe` shows no
   model or firmware.
 - GoPro and DJI detection comes from format research only; no samples
