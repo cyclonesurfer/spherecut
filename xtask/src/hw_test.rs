@@ -15,6 +15,10 @@
 //! they run, and the report has a line for every listed test. A test that
 //! never reports a result, because its binary did not start or crashed
 //! first, shows up as "did not run" and fails the run.
+//!
+//! The command exits non-zero when the build fails or a Tier 2 test fails or
+//! does not run; skips alone are not a failure. The report is written either
+//! way.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -23,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::workspace_root;
 
@@ -1079,6 +1083,9 @@ pub fn run(a: Args) -> Result<()> {
             "==> {} prerequisite(s) missing; see the report",
             missing.len()
         );
+    }
+    if !problems.is_empty() {
+        bail!("{}; see {}", problems.join("; "), display_rel(&out, &root));
     }
     Ok(())
 }
