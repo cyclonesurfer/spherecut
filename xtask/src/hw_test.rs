@@ -338,43 +338,37 @@ enum Outcome {
     DidNotRun,
 }
 
-/// Splits `cargo test` output into one part per test binary. A binary is
-/// named after its executable without Cargo's hash (`tier2_samples`), and
-/// doc tests as `<crate> (doc-tests)`. Text before the first binary
-/// (compiler output) is dropped.
-fn split_by_binary(output: &str) -> Vec<(String, String)> {
-    let mut parts: Vec<(String, String)> = Vec::new();
-    // Short name -> the executable that has it.
-    let mut taken: BTreeMap<&str, &str> = BTreeMap::new();
+/// A test binary in `cargo test` output.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Binary {
+    /// A test executable, as its `Running` line gives it (relative to the
+    /// directory cargo runs in, if it is inside). The list and the run give
+    /// an executable the same path, whichever other binaries ran.
+    Exe(String),
+    /// The doc tests of a library crate.
+    Doc(String),
+}
+
+/// Splits `cargo test` output into one part per test binary. Text before
+/// the first binary (compiler output) is dropped.
+fn split_by_binary(output: &str) -> Vec<(Binary, String)> {
+    let mut parts: Vec<(Binary, String)> = Vec::new();
     for line in output.lines() {
         // Cargo indents its status lines; test output that happens to say
         // "Running" usually isn't.
         let l = line.trim_start();
-        let indented = l.len() < line.len();
-        let exe = l
-            .strip_prefix("Running ")
-            .and_then(|r| r.strip_suffix(')'))
-            .and_then(|r| r.rsplit_once(" ("))
-            .map(|(_, exe)| exe)
-            .filter(|_| indented);
-        let name = if let Some(exe) = exe {
-            let file = exe.rsplit('/').next().unwrap_or(exe);
-            let short = strip_hash(file);
-            match taken.get(short) {
-                // Two packages can each have a `tests/foo.rs`.
-                Some(&other) if other != exe => Some(file.to_string()),
-                _ => {
-                    taken.insert(short, exe);
-                    Some(short.to_string())
-                }
-            }
+        let bin = if l.len() == line.len() {
+            None
+        } else if let Some(r) = l.strip_prefix("Running ") {
+            r.strip_suffix(')')
+                .and_then(|r| r.rsplit_once(" ("))
+                .map(|(_, exe)| Binary::Exe(exe.to_string()))
         } else {
             l.strip_prefix("Doc-tests ")
-                .filter(|_| indented)
-                .map(|c| format!("{} (doc-tests)", c.trim()))
+                .map(|c| Binary::Doc(c.trim().to_string()))
         };
-        match name {
-            Some(name) => parts.push((name, String::new())),
+        match bin {
+            Some(bin) => parts.push((bin, String::new())),
             None => {
                 if let Some((_, text)) = parts.last_mut() {
                     text.push_str(line);
@@ -396,8 +390,87 @@ fn strip_hash(file: &str) -> &str {
     }
 }
 
+/// Report names for test binaries, given once for the list and the run: the
+/// executable's name without Cargo's hash (`tier2_samples`), or
+/// `<package>/<name>` when binaries in two packages have that name, so that
+/// reports from different builds line up. Doc tests are `<crate>
+/// (doc-tests)`. `packages` gives each executable's package, by its
+/// absolute path; `dir` is where cargo ran.
+fn binary_names<'a>(
+    bins: impl IntoIterator<Item = &'a Binary>,
+    packages: &BTreeMap<PathBuf, String>,
+    dir: &Path,
+) -> BTreeMap<Binary, String> {
+    let file = |exe: &str| exe.rsplit('/').next().unwrap_or(exe).to_string();
+    let mut names: BTreeMap<Binary, String> = bins
+        .into_iter()
+        .map(|b| {
+            let name = match b {
+                Binary::Exe(exe) => strip_hash(&file(exe)).to_string(),
+                Binary::Doc(krate) => format!("{krate} (doc-tests)"),
+            };
+            (b.clone(), name)
+        })
+        .collect();
+    // Two packages can each have a `tests/foo.rs`. Name those after their
+    // package, and keep Cargo's hash only if that is not enough.
+    for qualify in [true, false] {
+        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+        for n in names.values() {
+            *seen.entry(n.clone()).or_default() += 1;
+        }
+        for (b, n) in &mut names {
+            if let Binary::Exe(exe) = b
+                && seen.get(n.as_str()).is_some_and(|&c| c > 1)
+            {
+                *n = match packages.get(&dir.join(exe)) {
+                    Some(package) if qualify => format!("{package}/{n}"),
+                    _ => file(exe),
+                };
+            }
+        }
+    }
+    names
+}
+
+/// Rekeys a per-binary map by report name.
+fn by_name<T>(m: BTreeMap<Binary, T>, names: &BTreeMap<Binary, String>) -> BTreeMap<String, T> {
+    m.into_iter()
+        .filter_map(|(b, v)| Some((names.get(&b)?.clone(), v)))
+        .collect()
+}
+
+/// The package of each test executable, by its absolute path, from the
+/// `compiler-artifact` messages of `cargo test --no-run
+/// --message-format=json`. Cargo prints each message as one line.
+fn test_packages(output: &str) -> BTreeMap<PathBuf, String> {
+    output
+        .lines()
+        .filter(|l| {
+            l.starts_with('{')
+                && json_str_field(l, "reason").as_deref() == Some("compiler-artifact")
+        })
+        .filter_map(|l| {
+            let exe = json_str_field(l, "executable")?;
+            let id = json_str_field(l, "package_id")?;
+            Some((PathBuf::from(exe), package_name(&id)?.to_string()))
+        })
+        .collect()
+}
+
+/// The name in a package ID spec as cargo's JSON gives it:
+/// `path+file:///w/crates/media#spherecut-media@0.1.0`, or
+/// `path+file:///w/xtask#0.1.0` when the name is the directory's.
+fn package_name(id: &str) -> Option<&str> {
+    let (url, fragment) = id.rsplit_once('#')?;
+    match fragment.split_once('@') {
+        Some((name, _version)) => Some(name),
+        None => url.split('?').next()?.rsplit('/').next(),
+    }
+}
+
 /// The tests in each binary, from `cargo test -- --ignored --list`.
-fn parse_list(output: &str) -> BTreeMap<String, Vec<String>> {
+fn parse_list(output: &str) -> BTreeMap<Binary, Vec<String>> {
     split_by_binary(output)
         .into_iter()
         .map(|(bin, text)| {
@@ -548,6 +621,32 @@ struct Tier2 {
 }
 
 impl Tier2 {
+    /// Pairs every test in the list with its outcome in the run. `packages`
+    /// and `dir` are for [`binary_names`].
+    fn new(
+        list: Captured,
+        run: Captured,
+        packages: &BTreeMap<PathBuf, String>,
+        dir: &Path,
+        quick: bool,
+    ) -> Tier2 {
+        let listed = parse_list(&list.text);
+        let output: BTreeMap<Binary, String> = split_by_binary(&run.text).into_iter().collect();
+        let names = binary_names(listed.keys().chain(output.keys()), packages, dir);
+        let (listed, output) = (by_name(listed, &names), by_name(output, &names));
+        let ran = output
+            .iter()
+            .map(|(bin, text)| (bin.clone(), parse_libtest(text)))
+            .collect();
+        let results = merge(&listed, &ran, quick);
+        Tier2 {
+            list,
+            run,
+            output,
+            results,
+        }
+    }
+
     fn count(&self, f: impl Fn(&Outcome) -> bool) -> usize {
         self.results.iter().filter(|(_, o)| f(o)).count()
     }
@@ -621,6 +720,11 @@ fn run_tier2(quick: bool, samples: &Path, bench_out: &Path) -> Tier2 {
         cargo.push("--release");
     }
     eprintln!("==> listing Tier 2 tests");
+    // The `Running` lines name only the executable; this says which
+    // package each one is from.
+    let mut args = cargo.clone();
+    args.extend(["--no-run", "--message-format=json-render-diagnostics"]);
+    let packages = test_packages(&capture_merged("cargo", &args, &[]).text);
     let mut args = cargo.clone();
     args.extend(["--", "--ignored", "--list"]);
     let list = capture_merged("cargo", &args, &[]);
@@ -648,18 +752,7 @@ fn run_tier2(quick: bool, samples: &Path, bench_out: &Path) -> Tier2 {
             ("SPHERECUT_BENCH_OUT", &bench_s),
         ],
     );
-    let output: BTreeMap<String, String> = split_by_binary(&run.text).into_iter().collect();
-    let ran = output
-        .iter()
-        .map(|(bin, text)| (bin.clone(), parse_libtest(text)))
-        .collect();
-    let results = merge(&parse_list(&list.text), &ran, quick);
-    Tier2 {
-        list,
-        run,
-        output,
-        results,
-    }
+    Tier2::new(list, run, &packages, &workspace_root(), quick)
 }
 
 /// Cargo's target directory as `cargo metadata` gives it, which follows
@@ -677,8 +770,9 @@ fn target_dir(root: &Path) -> PathBuf {
         .unwrap_or_else(|| root.join("target"))
 }
 
-/// The string value of `"key":` in compact JSON such as `cargo metadata`
-/// prints; enough to read one field without a JSON parser.
+/// The string value of the first `"key":` in compact JSON such as cargo
+/// prints; enough to read a field whose key appears once (or first at the
+/// top level) without a JSON parser.
 fn json_str_field(json: &str, key: &str) -> Option<String> {
     let pat = format!("\"{key}\":\"");
     let start = json.find(&pat)? + pat.len();
@@ -1156,6 +1250,8 @@ fn display_rel(p: &Path, root: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -1285,17 +1381,29 @@ same_name: test
 0 tests, 0 benchmarks
 ";
 
+    fn packages(exes: &[(&str, &str)]) -> BTreeMap<PathBuf, String> {
+        exes.iter()
+            .map(|(exe, p)| (PathBuf::from(exe), p.to_string()))
+            .collect()
+    }
+
     #[test]
     fn lists_tests_per_binary() {
         let l = parse_list(LIST);
+        let packages = packages(&[
+            ("/t/debug/deps/tier2-1111111111111111", "probe-a"),
+            ("/t/debug/deps/tier2-2222222222222222", "probe-b"),
+        ]);
+        let names = binary_names(l.keys(), &packages, Path::new("/w"));
+        let l = by_name(l, &names);
         let names: Vec<&str> = l.keys().map(String::as_str).collect();
         assert_eq!(
             names,
             [
+                "probe-a/tier2",
+                "probe-b/tier2",
                 "spherecut_core (doc-tests)",
                 "spherecut_media",
-                "tier2",
-                "tier2-2222222222222222",
                 "tier2_samples"
             ]
         );
@@ -1304,8 +1412,90 @@ same_name: test
             l["tier2_samples"],
             ["bench_samples_realtime_decode", "samples_probe_cleanly"]
         );
-        assert_eq!(l["tier2"], ["same_name"]);
-        assert_eq!(l["tier2-2222222222222222"], ["same_name"]);
+        assert_eq!(l["probe-a/tier2"], ["same_name"]);
+        assert_eq!(l["probe-b/tier2"], ["same_name"]);
+
+        // Without the packages, Cargo's hash is all that tells them apart.
+        let names = binary_names(parse_list(LIST).keys(), &BTreeMap::new(), Path::new("/w"));
+        let names: BTreeSet<&str> = names.values().map(String::as_str).collect();
+        assert!(names.contains("tier2-1111111111111111"), "{names:?}");
+        assert!(names.contains("tier2-2222222222222222"), "{names:?}");
+        assert!(names.contains("tier2_samples"), "{names:?}");
+    }
+
+    #[test]
+    fn same_named_binaries_keep_their_own_results() {
+        // probe-a's tier2 comes first in the list, but cargo never ran it.
+        let list = "     Running tests/tier2.rs (target/debug/deps/tier2-1111111111111111)
+same_name: test
+
+1 test, 0 benchmarks
+     Running tests/tier2.rs (target/debug/deps/tier2-2222222222222222)
+only_in_b: test
+same_name: test
+
+2 tests, 0 benchmarks
+";
+        let run = "     Running tests/tier2.rs (target/debug/deps/tier2-2222222222222222)
+
+running 2 tests
+test only_in_b ... ok
+test same_name ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+";
+        let packages = packages(&[
+            ("/w/target/debug/deps/tier2-1111111111111111", "probe-a"),
+            ("/w/target/debug/deps/tier2-2222222222222222", "probe-b"),
+        ]);
+        let t = Tier2::new(
+            Captured {
+                text: list.into(),
+                ..captured(true)
+            },
+            Captured {
+                text: run.into(),
+                ..captured(false)
+            },
+            &packages,
+            Path::new("/w"),
+            false,
+        );
+        let expect = [
+            ("probe-a/tier2::same_name", Outcome::DidNotRun),
+            ("probe-b/tier2::only_in_b", Outcome::Passed),
+            ("probe-b/tier2::same_name", Outcome::Passed),
+        ];
+        let expect: Vec<(String, Outcome)> = expect
+            .into_iter()
+            .map(|(n, o)| (n.to_string(), o))
+            .collect();
+        assert_eq!(t.results, expect);
+        assert_eq!(t.did_not_run(), BTreeMap::from([("probe-a/tier2", 1)]));
+    }
+
+    #[test]
+    fn reads_packages_from_cargo_json() {
+        assert_eq!(
+            package_name("path+file:///w/crates/media#spherecut-media@0.1.0"),
+            Some("spherecut-media")
+        );
+        assert_eq!(package_name("path+file:///w/xtask#0.1.0"), Some("xtask"));
+        assert_eq!(package_name("xtask 0.1.0 (path+file:///w/xtask)"), None);
+
+        let json = r#"{"reason":"compiler-artifact","package_id":"path+file:///w/a#probe-a@0.0.0","manifest_path":"/w/a/Cargo.toml","target":{"kind":["lib"],"name":"probe_a"},"executable":null,"fresh":true}
+{"reason":"compiler-artifact","package_id":"path+file:///w/a#probe-a@0.0.0","manifest_path":"/w/a/Cargo.toml","target":{"kind":["test"],"name":"tier2"},"executable":"/w/target/debug/deps/tier2-721e609f1adde35e","fresh":true}
+{"reason":"compiler-artifact","package_id":"path+file:///w/xtask#0.1.0","manifest_path":"/w/xtask/Cargo.toml","target":{"kind":["bin"],"name":"xtask"},"executable":"/w/target/debug/deps/xtask-253d62ad6a641493","fresh":true}
+  Executable tests/tier2.rs (target/debug/deps/tier2-721e609f1adde35e)
+{"reason":"build-finished","success":true}
+"#;
+        assert_eq!(
+            test_packages(json),
+            packages(&[
+                ("/w/target/debug/deps/tier2-721e609f1adde35e", "probe-a"),
+                ("/w/target/debug/deps/xtask-253d62ad6a641493", "xtask"),
+            ])
+        );
     }
 
     #[test]
@@ -1338,8 +1528,13 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
 ";
         let parts = split_by_binary(run);
         assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].0, "tier2_samples");
-        assert_eq!(parts[1].0, "tier2_hw_decode");
+        let names = binary_names(
+            parts.iter().map(|(b, _)| b),
+            &BTreeMap::new(),
+            Path::new("/w"),
+        );
+        assert_eq!(names[&parts[0].0], "tier2_samples");
+        assert_eq!(names[&parts[1].0], "tier2_hw_decode");
         assert_eq!(
             parse_libtest(&parts[0].1)["samples_probe_cleanly"],
             Outcome::Passed
