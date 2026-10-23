@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use spherecut_core::brand;
+use spherecut_media::probe::StreamKind;
 
 mod show;
 
@@ -19,7 +20,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Show container, streams, codecs, color, timing, spherical metadata
-    /// and the detected camera for one or more files.
+    /// and the detected camera for one or more files. Fails if any file
+    /// cannot be read, is truncated or corrupt, or has no video or audio.
     Probe {
         files: Vec<PathBuf>,
         /// Print JSON instead of text.
@@ -118,6 +120,27 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     Ok(r) => {
                         if !json {
                             print!("{}", show::probe(&r));
+                        }
+                        if let Some(first) = r.damage.first() {
+                            failed = true;
+                            let more = match r.damage.len() - 1 {
+                                0 => String::new(),
+                                1 => " (and 1 more problem)".into(),
+                                n => format!(" (and {n} more problems)"),
+                            };
+                            eprintln!("error: {} is damaged: {first}{more}", f.display());
+                        } else if !r
+                            .streams
+                            .iter()
+                            .any(|s| matches!(s.kind, StreamKind::Video | StreamKind::Audio))
+                        {
+                            // FFmpeg opens text files as subtitles or lyrics.
+                            failed = true;
+                            eprintln!(
+                                "error: {} has no video or audio stream; FFmpeg reads it as {}",
+                                f.display(),
+                                r.container.format_long
+                            );
                         }
                         reports.push(serde_json::to_value(&r)?);
                     }

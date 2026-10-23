@@ -1,0 +1,392 @@
+//! `spherecut probe` on generated good and broken files: exit codes and
+//! what it says.
+
+// Test helpers outside #[test] functions; panicking is the point here.
+#![allow(clippy::unwrap_used)]
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::{Duration, Instant};
+
+use spherecut_core::FrameRate;
+use spherecut_synth::Pattern;
+use spherecut_synth::media::{self, Audio, Codec, Spec};
+
+fn tmp(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("spherecut-cli-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn probe(args: &[&Path]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .arg("probe")
+        .args(args)
+        .env_remove("SPHERECUT_LOG")
+        .output()
+        .unwrap()
+}
+
+fn text(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
+/// A small spherical H.264 file with stereo audio, and the six broken
+/// files derived from it.
+fn media(dir: &Path) -> (PathBuf, Vec<PathBuf>) {
+    let spec = Spec {
+        name: "good".into(),
+        pattern: Pattern::Grid,
+        width: 512,
+        height: 256,
+        rate: FrameRate::FPS_25,
+        frames: 5,
+        codec: Codec::H264,
+        bits: 8,
+        audio: Audio::Stereo,
+        spherical: true,
+    };
+    let good = media::write(&spec, dir).unwrap();
+    let bad = media::write_bad_files(&good, dir).unwrap();
+    (good, bad)
+}
+
+#[test]
+fn good_files_pass_and_bad_files_fail_with_a_reason() {
+    let dir = tmp("files");
+    let (good, bad) = media(&dir);
+
+    let out = probe(&[&good]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("#0  video   h264"), "{stdout}");
+    assert!(stdout.contains("spherical v2: equirect"), "{stdout}");
+    assert!(
+        !stdout.contains("DAMAGE") && !stderr.contains("error"),
+        "{stdout}{stderr}"
+    );
+
+    // (file, how it fails, why)
+    let expect = [
+        ("bad-empty.mp4", "cannot open", "the file is empty"),
+        ("bad-text.mp4", "cannot open", "not a recognised media file"),
+        ("bad-trunc-header.mp4", "cannot open", "it was cut short"),
+        ("bad-trunc-half.mp4", "cannot open", "it was cut short"),
+        ("bad-trunc-end.mp4", "is damaged", "it was cut short"),
+        (
+            "bad-corrupt-moov.mp4",
+            "is damaged",
+            "runs past the end of the file",
+        ),
+    ];
+    assert_eq!(bad.len(), expect.len());
+    for (name, how, why) in expect {
+        let out = probe(&[&dir.join(name)]);
+        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+        assert_eq!(out.status.code(), Some(1), "{name}: {stdout}{stderr}");
+        let line = stderr
+            .lines()
+            .find(|l| l.starts_with("error: "))
+            .unwrap_or("");
+        assert!(line.contains(how) && line.contains(why), "{name}: {stderr}");
+        if how == "is damaged" {
+            // The report is still printed, with the damage in it.
+            assert!(stdout.contains("#0  video"), "{name}: {stdout}");
+            assert!(stdout.contains("  DAMAGE  "), "{name}: {stdout}");
+        }
+    }
+
+    // One bad file fails the run; the others are still reported.
+    let corrupt = dir.join("bad-corrupt-moov.mp4");
+    let out = probe(&[&good, &corrupt, &dir.join("bad-empty.mp4")]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stdout.contains(&good.display().to_string()), "{stdout}");
+    assert!(stdout.contains(&corrupt.display().to_string()), "{stdout}");
+
+    // JSON carries the damage list.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
+    let out = cmd
+        .args(["probe", "--json"])
+        .arg(&corrupt)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let damage = v["damage"].as_array().unwrap();
+    assert!(
+        damage[0].as_str().unwrap().starts_with("track #0: chunk 1"),
+        "{v}"
+    );
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
+    let out = cmd.args(["probe", "--json"]).arg(&good).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["damage"], serde_json::json!([]));
+
+    // A directory is not a media file.
+    let out = probe(&[&dir]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("is not a regular file"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn deeply_nested_boxes_fail_fast() {
+    // A `moov` holding 200 000 nested `udta` boxes once took the parser
+    // past 2.8 GB of memory and a stack overflow.
+    let dir = tmp("nested");
+    let n = 200_000usize;
+    let mut f = Vec::with_capacity(24 + 8 * (n + 1));
+    f.extend_from_slice(&24u32.to_be_bytes());
+    f.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+    for (i, t) in std::iter::once(b"moov")
+        .chain(std::iter::repeat_n(b"udta", n))
+        .enumerate()
+    {
+        f.extend_from_slice(&(8 * (n + 1 - i) as u32).to_be_bytes());
+        f.extend_from_slice(t);
+    }
+    let path = dir.join("nested.mp4");
+    std::fs::write(&path, &f).unwrap();
+    let start = Instant::now();
+    let out = probe(&[&path]);
+    let elapsed = start.elapsed();
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("nested more than 32 deep"), "{stderr}");
+    assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn ffmpeg_and_trak_disagreeing_on_the_stream_kind_is_damage() {
+    // FFmpeg takes a track's kind from the last `hdlr` it sees in the
+    // `trak`. Turn the video track's `dinf` into a QuickTime-style data
+    // handler of type `soun`: FFmpeg then reads the video as audio, while
+    // `mdia/hdlr` still says `vide`.
+    let dir = tmp("kind");
+    let (good, _) = media(&dir);
+    let mut f = std::fs::read(&good).unwrap();
+    let at = f.windows(4).position(|w| w == b"dinf").unwrap() - 4;
+    let size = u32::from_be_bytes(f[at..at + 4].try_into().unwrap()) as usize;
+    f[at + 4..at + 8].copy_from_slice(b"hdlr");
+    let mut handler = vec![0u8; size - 8];
+    handler[4..12].copy_from_slice(b"mhlrsoun");
+    f[at + 8..at + size].copy_from_slice(&handler);
+    let path = dir.join("kind.mp4");
+    std::fs::write(&path, &f).unwrap();
+
+    let out = probe(&[&path]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("track #0 is video (handler `vide`, sample entry `avc1`) but FFmpeg reads stream #0 as audio"),
+        "{stderr}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn handler_and_sample_entry_disagreeing_is_damage() {
+    // The video track's handler changed from `vide` to `soun`. FFmpeg then
+    // reads the H.264 track as an audio stream it cannot decode and agrees
+    // with the handler; only the sample entry shows the damage.
+    let dir = tmp("handler");
+    let (good, _) = media(&dir);
+    let mut f = std::fs::read(&good).unwrap();
+    let at = f
+        .windows(16)
+        .position(|w| w.starts_with(b"hdlr") && w.ends_with(b"vide"))
+        .unwrap()
+        + 12;
+    f[at..at + 4].copy_from_slice(b"soun");
+    let path = dir.join("handler.mp4");
+    std::fs::write(&path, &f).unwrap();
+
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stdout.contains("#0  audio"), "{stdout}");
+    assert!(
+        stderr.contains(
+            "track #0: its handler says audio (`soun`), but its sample entry `avc1` is video"
+        ),
+        "{stderr}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn file_ending_inside_a_box_header_fails() {
+    // A camera file cut just after `moov` keeps the first bytes of the
+    // vendor box that followed: too few for a header, but a box size.
+    let dir = tmp("cut-header");
+    let (good, _) = media(&dir);
+    let mut f = std::fs::read(&good).unwrap();
+    f.extend_from_slice(&11_308_611u32.to_be_bytes());
+    let path = dir.join("cut-header.mp4");
+    std::fs::write(&path, &f).unwrap();
+
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("truncated box header (4 of 8 bytes)"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("ends 4 bytes into the header of a 11308611-byte box"),
+        "{stderr}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn damaged_first_box_does_not_hide_other_damage() {
+    // One changed byte in the type of the first box: FFmpeg still reads
+    // the file as MP4, and so does probe, so the rest is still checked.
+    let dir = tmp("ftyq");
+    let (good, _) = media(&dir);
+    let ftyq = |name: &str| {
+        let mut f = std::fs::read(dir.join(name)).unwrap();
+        f[4..8].copy_from_slice(b"ftyq");
+        let path = dir.join(format!("ftyq-{name}"));
+        std::fs::write(&path, &f).unwrap();
+        path
+    };
+    let warning = "its first box `ftyq` is not of a type MP4/MOV files start with";
+
+    let out = probe(&[&ftyq(&good.file_name().unwrap().to_string_lossy())]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains(warning), "{stdout}");
+    // Spherical metadata is read again too.
+    assert!(stdout.contains("spherical v2: equirect"), "{stdout}");
+
+    for (name, why) in [
+        ("bad-trunc-end.mp4", "it was cut short"),
+        ("bad-corrupt-moov.mp4", "runs past the end of the file"),
+    ] {
+        let out = probe(&[&ftyq(name)]);
+        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+        assert_eq!(out.status.code(), Some(1), "{name}: {stdout}{stderr}");
+        assert!(stdout.contains(warning), "{name}: {stdout}");
+        assert!(
+            stderr.contains("is damaged") && stderr.contains(why),
+            "{name}: {stderr}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A Matroska element with an 8-byte size, or the "unknown" size.
+fn el(id: &[u8], payload: &[u8], known: bool) -> Vec<u8> {
+    let size = if known {
+        (payload.len() as u64 | 1 << 56).to_be_bytes()
+    } else {
+        [0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+    };
+    [id, &size, payload].concat()
+}
+
+/// A small Matroska file with one 8 kHz PCM track in three clusters.
+fn matroska(size_known: bool) -> Vec<u8> {
+    let e = |id: &[u8], payload: &[u8]| el(id, payload, true);
+    let header = e(
+        b"\x1a\x45\xdf\xa3",
+        &[e(b"\x42\x82", b"matroska"), e(b"\x42\x87", &[4])].concat(),
+    );
+    let info = e(
+        b"\x15\x49\xa9\x66",
+        &[
+            e(b"\x2a\xd7\xb1", &[0x0f, 0x42, 0x40]),
+            e(b"\x4d\x80", b"t"),
+        ]
+        .concat(),
+    );
+    let audio = [
+        e(b"\xb5", &8000f64.to_be_bytes()),
+        e(b"\x9f", &[1]),
+        e(b"\x62\x64", &[16]),
+    ]
+    .concat();
+    let track = [
+        e(b"\xd7", &[1]),
+        e(b"\x73\xc5", &[1]),
+        e(b"\x83", &[2]),
+        e(b"\x86", b"A_PCM/INT/LIT"),
+        e(b"\xe1", &audio),
+    ]
+    .concat();
+    let tracks = e(b"\x16\x54\xae\x6b", &e(b"\xae", &track));
+    let clusters: Vec<u8> = (0..3u8)
+        .flat_map(|t| {
+            let block = [&b"\x81\x00\x00\x80"[..], &[0; 1600]].concat();
+            e(
+                b"\x1f\x43\xb6\x75",
+                &[e(b"\xe7", &[t * 100]), e(b"\xa3", &block)].concat(),
+            )
+        })
+        .collect();
+    let segment = [info, tracks, clusters].concat();
+    [header, el(b"\x18\x53\x80\x67", &segment, size_known)].concat()
+}
+
+#[test]
+fn matroska_cut_short_fails() {
+    let dir = tmp("mkv");
+    let write = |name: &str, data: &[u8]| {
+        let p = dir.join(name);
+        std::fs::write(&p, data).unwrap();
+        p
+    };
+    let good = matroska(true);
+    let checked = "structure  only its length is checked";
+
+    let out = probe(&[&write("good.mkv", &good)]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("#0  audio   pcm_s16le"), "{stdout}");
+    assert!(stdout.contains(checked), "{stdout}");
+
+    // FFmpeg opens it cut to 60% without a word.
+    let out = probe(&[&write("cut.mkv", &good[..good.len() * 3 / 5])]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stdout.contains("#0  audio   pcm_s16le"), "{stdout}");
+    assert!(
+        stderr.contains("bytes its Matroska Segment says it has: it was cut short"),
+        "{stderr}"
+    );
+
+    // Without a recorded size there is nothing to compare with, and the
+    // report says so.
+    let out = probe(&[&write("live.mkv", &matroska(false))]);
+    let stdout = text(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("structure  not checked (its Matroska Segment does not record its size"),
+        "{stdout}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn files_without_video_or_audio_fail() {
+    // FFmpeg opens a text file that starts like song lyrics, but it is not
+    // a media file.
+    let dir = tmp("lyrics");
+    let path = dir.join("lyrics.txt");
+    std::fs::write(&path, b"[00:01.00]not a video\n").unwrap();
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stdout.contains("container  lrc"), "{stdout}");
+    assert!(
+        stderr.contains("lyrics.txt has no video or audio stream; FFmpeg reads it as"),
+        "{stderr}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

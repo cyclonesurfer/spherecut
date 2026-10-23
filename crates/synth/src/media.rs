@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use spherecut_core::FrameRate;
 use spherecut_media::encode::{AudioSettings, Mp4Writer, PixelLayout, VideoSettings};
 use spherecut_media::inject::{self, EntryEdit, TrackKind};
+use spherecut_media::mp4;
 use spherecut_media::spherical::{StereoMode, write};
 use thiserror::Error;
 
@@ -299,20 +300,41 @@ pub fn write_bad_files(good: &Path, dir: &Path) -> Result<Vec<PathBuf>, SynthErr
         "bad-trunc-end.mp4",
         &bytes[..bytes.len().saturating_sub(100)],
     )?;
-    // Flip bytes throughout the second half (where moov is, since the
-    // writer puts moov last), deterministically.
-    let mut corrupt = bytes.clone();
-    let start = corrupt.len() / 2;
-    let mut seed = 0x9e37_79b9_u32;
-    for _ in 0..64 {
-        seed ^= seed << 13;
-        seed ^= seed >> 17;
-        seed ^= seed << 5;
-        let i = start + (seed as usize % (corrupt.len() - start).max(1));
-        if let Some(b) = corrupt.get_mut(i) {
-            *b ^= 0xa5;
+    let corrupt = corrupt_sample_tables(&bytes).map_err(|e| SynthError::Io {
+        path: good.to_path_buf(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+    })?;
+    put("bad-corrupt-moov.mp4", &corrupt)?;
+    Ok(out)
+}
+
+/// `bytes` with the sample tables in `moov` damaged: the top byte of every
+/// chunk offset (`stco`/`co64`) flipped, so the chunks lie far past the end
+/// of a small file. FFmpeg still opens such a file (it refuses one whose
+/// sample sizes are absurd); only checking the tables shows the damage.
+fn corrupt_sample_tables(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let tree = mp4::read(&mut std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let mut out = bytes.to_vec();
+    let mut flipped = 0;
+    for trak in tree.tracks() {
+        let Some(stbl) = trak.path(&[b"mdia", b"minf", b"stbl"]) else {
+            continue;
+        };
+        // Entries start after the version, flags and entry count.
+        for (t, width) in [(b"stco", 4), (b"co64", 8)] {
+            let Some(b) = stbl.child(t) else { continue };
+            let start = (b.offset + b.header_len) as usize + 8;
+            let end = (b.offset + b.size) as usize;
+            for at in (start..end).step_by(width) {
+                if let Some(x) = out.get_mut(at) {
+                    *x ^= 0xa5;
+                    flipped += 1;
+                }
+            }
         }
     }
-    put("bad-corrupt-moov.mp4", &corrupt)?;
+    if flipped == 0 {
+        return Err("no sample tables in `moov` to corrupt".into());
+    }
     Ok(out)
 }

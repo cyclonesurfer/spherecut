@@ -7,6 +7,11 @@
 //!
 //! Every read is bounds-checked. Malformed input produces an error or a
 //! partial tree with [`Mp4Tree::warnings`], never a panic.
+//!
+//! Time and memory are linear in the input, whatever it holds: each
+//! top-level box is read into one buffer and its children are parsed from
+//! offsets into it, nesting stops at [`MAX_DEPTH`], parsing stops at
+//! [`MAX_BOXES`], and only small leaf payloads are copied out.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -101,10 +106,59 @@ pub struct Mp4Tree {
     pub top: Vec<Mp4Box>,
     pub file_size: u64,
     /// Bytes after the last complete top-level box (vendor trailers live
-    /// here on some cameras).
+    /// here on some cameras). A box cut off by the end of the file is
+    /// [`Mp4Tree::truncated`] instead.
     pub trailing_bytes: u64,
-    /// Problems that did not stop parsing.
+    /// The top-level box that runs past the end of the file, if the file
+    /// was cut short. It is not in `top`.
+    pub truncated: Option<Truncated>,
+    /// Problems that did not stop parsing. Each one means the structure is
+    /// damaged (or hostile); a healthy file has none.
     pub warnings: Vec<String>,
+}
+
+/// A top-level box that runs past the end of the file: its header claims
+/// more bytes than the file has left, or the file ends inside the header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Truncated {
+    /// None when the file ends before the box type.
+    pub fourcc: Option<FourCc>,
+    pub offset: u64,
+    pub header_len: u64,
+    /// The size its header claims; None when the file ends before it.
+    pub size: Option<u64>,
+    /// Bytes of it present in the file, fewer than `header_len` when the
+    /// header itself is cut short.
+    pub present: u64,
+}
+
+impl Truncated {
+    fn is(&self, t: &[u8; 4]) -> bool {
+        self.fourcc.is_some_and(|f| f.0 == *t)
+    }
+
+    fn reason(&self) -> String {
+        let (present, offset) = (self.present, self.offset);
+        if let (Some(f), Some(size)) = (self.fourcc, self.size)
+            && present >= self.header_len
+        {
+            return format!(
+                "the file ends {present} bytes into the {size}-byte `{f}` box at offset {offset}: it was cut short"
+            );
+        }
+        let what = match (self.fourcc, self.size) {
+            (Some(f), _) => format!("a `{f}` box"),
+            (None, Some(size)) => format!("a {size}-byte box"),
+            (None, None) => "a box".into(),
+        };
+        let present = match present {
+            1 => "1 byte".into(),
+            n => format!("{n} bytes"),
+        };
+        format!(
+            "the file ends {present} into the header of {what} at offset {offset}: it was cut short"
+        )
+    }
 }
 
 impl Mp4Tree {
@@ -121,6 +175,53 @@ impl Mp4Tree {
     pub fn tracks(&self) -> impl Iterator<Item = &Mp4Box> {
         self.moov().into_iter().flat_map(|m| m.children_of(b"trak"))
     }
+
+    /// Why the file looks damaged: a box cut off by the end of the file,
+    /// malformed boxes, and sample tables that disagree with each other or
+    /// point outside the media data. Empty for a healthy file. The work is
+    /// linear in the size of the sample tables.
+    pub fn damage(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(t) = &self.truncated {
+            out.push(t.reason());
+        }
+        out.extend(self.warnings.iter().cloned());
+        let Some(moov) = self.moov() else {
+            // The box cut short may have been `moov`.
+            let cut_moov = self
+                .truncated
+                .is_some_and(|t| t.fourcc.is_none() || t.is(b"moov"));
+            // HEIF images and other item-based files have a top-level `meta`.
+            let items = self.top.iter().any(|b| b.fourcc.0 == *b"meta");
+            if !cut_moov && !items {
+                out.push("there is no `moov` box, so no index of the media".into());
+            }
+            return out;
+        };
+        let mdats = self.media_data();
+        for (i, trak) in moov.children_of(b"trak").enumerate() {
+            if let Err(why) = check_track(trak, &mdats, self.file_size) {
+                out.push(format!("track #{i}: {why}"));
+            }
+        }
+        out
+    }
+
+    /// Payload byte ranges of the top-level `mdat` boxes in file order,
+    /// including one cut off by the end of the file.
+    fn media_data(&self) -> Vec<(u64, u64)> {
+        let cut = self
+            .truncated
+            .filter(|t| t.is(b"mdat"))
+            .and_then(|t| Some((t.offset, t.header_len, t.size?)));
+        self.top
+            .iter()
+            .filter(|b| b.fourcc.0 == *b"mdat")
+            .map(|b| (b.offset, b.header_len, b.size))
+            .chain(cut)
+            .map(|(offset, header_len, size)| (offset + header_len, offset.saturating_add(size)))
+            .collect()
+    }
 }
 
 /// Containers we descend into. Sample entries are handled separately
@@ -130,100 +231,207 @@ const CONTAINERS: &[&[u8; 4]] = &[
     b"meta", b"ilst", b"tref", b"mvex",
 ];
 
-/// The largest box payload we load into memory for parsing. `moov` for an
-/// hour of 8K is a few MB; anything above this is not metadata.
+/// The largest `moov` we load into memory for parsing. `moov` for an hour
+/// of 8K is a few MB; anything above this is not metadata.
 const MAX_LOADED: u64 = 256 * 1024 * 1024;
 
 /// Leaf payloads above this size are not kept (we only need metadata).
 const MAX_KEPT_LEAF: usize = 1024 * 1024;
 
-pub fn read_file(path: &Path) -> Result<Mp4Tree, Mp4Error> {
-    let mut f = File::open(path)?;
-    read(&mut f)
+/// Sample tables are kept whatever their size, so the structure can be
+/// checked against the media data. They are part of `moov`, so
+/// [`MAX_LOADED`] bounds them.
+const SAMPLE_TABLES: &[&[u8; 4]] = &[b"stts", b"stsz", b"stz2", b"stsc", b"stco", b"co64"];
+
+/// Other top-level boxes are vendor metadata or fragments, read only when
+/// this small and while their total stays under [`MAX_KEPT_TOP_TOTAL`].
+/// Media data and padding (`mdat`, `free`, ...) are never read.
+const MAX_KEPT_TOP: u64 = 64 * 1024;
+const MAX_KEPT_TOP_TOTAL: u64 = 1024 * 1024;
+
+/// Real files nest boxes about ten deep (`moov/trak/mdia/minf/stbl/stsd/
+/// hvc1/sv3d/proj/equi`). Boxes deeper than this are skipped with a
+/// warning.
+pub const MAX_DEPTH: usize = 32;
+
+/// Far more boxes than any real file has. A parsed box takes about 100
+/// bytes, so without a limit a file of empty 8-byte boxes would need
+/// twelve times its size in memory.
+pub const MAX_BOXES: usize = 250_000;
+
+/// Warnings past this many are counted, not listed.
+const MAX_WARNINGS: usize = 32;
+
+/// What [`read_with`] accepts as the first box of a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstBox {
+    /// A type that MP4 and MOV files start with (`ftyp`, `moov`, `mdat`,
+    /// ...); anything else is [`Mp4Error::NotMp4`]. For input that may not
+    /// be MP4 at all.
+    Known,
+    /// Any box whose header is valid, for input known to be MP4/MOV
+    /// (FFmpeg's demuxer took it), so that a damaged first box does not
+    /// hide the rest of the structure.
+    Any,
 }
 
-/// Walk top-level boxes by seeking, loading only `ftyp`, `moov` and small
+pub fn read_file(path: &Path) -> Result<Mp4Tree, Mp4Error> {
+    read_file_with(path, FirstBox::Known)
+}
+
+pub fn read_file_with(path: &Path, first: FirstBox) -> Result<Mp4Tree, Mp4Error> {
+    let mut f = File::open(path)?;
+    read_with(&mut f, first)
+}
+
+/// Walk top-level boxes by seeking, loading only `moov` and small metadata
 /// boxes into memory.
 pub fn read<R: Read + Seek>(r: &mut R) -> Result<Mp4Tree, Mp4Error> {
+    read_with(r, FirstBox::Known)
+}
+
+pub fn read_with<R: Read + Seek>(r: &mut R, first: FirstBox) -> Result<Mp4Tree, Mp4Error> {
     let file_size = r.seek(SeekFrom::End(0))?;
     r.seek(SeekFrom::Start(0))?;
     let mut tree = Mp4Tree {
         file_size,
         ..Default::default()
     };
+    let mut walk = Walk::default();
+    let mut top_budget = MAX_KEPT_TOP_TOTAL;
     let mut pos = 0u64;
     while pos < file_size {
         let remaining = file_size - pos;
-        if remaining < 8 {
-            tree.trailing_bytes = remaining;
-            break;
-        }
         r.seek(SeekFrom::Start(pos))?;
-        let mut hdr = [0u8; 16];
+        // Room for a 64-bit size and a `uuid` extended type.
+        let mut hdr = [0u8; 32];
         let n = read_up_to(r, &mut hdr)?;
         let Some(h) = parse_header(&hdr[..n], remaining) else {
-            if tree.top.is_empty() {
+            if pos == 0 {
                 return Err(Mp4Error::NotMp4("no valid box header at offset 0".into()));
             }
-            tree.trailing_bytes = remaining;
+            match cut_header(&hdr[..n], pos) {
+                Some(cut) => tree.truncated = Some(cut),
+                None => tree.trailing_bytes = remaining,
+            }
             break;
         };
-        if h.size > remaining {
-            if tree.top.is_empty() {
-                return Err(Mp4Error::NotMp4(format!(
-                    "first box `{}` claims {} bytes but the file has {}",
-                    h.fourcc, h.size, file_size
-                )));
-            }
-            tree.warnings.push(format!(
-                "box `{}` at {pos} is truncated ({} of {} bytes present)",
-                h.fourcc, remaining, h.size
-            ));
-            tree.trailing_bytes = remaining;
-            break;
-        }
-        if tree.top.is_empty() && !plausible_first_box(h.fourcc) {
+        // At the start of a file known to be MP4, any box is the first.
+        let any = pos == 0 && first == FirstBox::Any;
+        if pos == 0 && !any && !FIRST_BOXES.contains(&&h.fourcc.0) {
             return Err(Mp4Error::NotMp4(format!(
                 "first box type `{}` is not an MP4 box",
                 h.fourcc
             )));
         }
+        if h.size > remaining && !any && !top_level_types().any(|t| *t == h.fourcc.0) {
+            // Vendor trailers (Insta360 before X5 firmware 1.7) are not
+            // boxes, but their first bytes can look like an oversized one.
+            tree.trailing_bytes = remaining;
+            break;
+        }
+        if h.size > remaining {
+            tree.truncated = Some(Truncated {
+                fourcc: Some(h.fourcc),
+                offset: pos,
+                header_len: h.header_len,
+                size: Some(h.size),
+                present: remaining,
+            });
+            break;
+        }
+        if !walk.add_box(pos) {
+            break;
+        }
         let payload_len = h.size - h.header_len;
-        let load = matches!(&h.fourcc.0, b"moov" | b"ftyp" | b"uuid")
-            || payload_len <= MAX_KEPT_LEAF as u64;
+        let load = match &h.fourcc.0 {
+            b"moov" if payload_len > MAX_LOADED => {
+                walk.warn(format!(
+                    "`moov` at {pos} is {payload_len} bytes, too large to parse"
+                ));
+                false
+            }
+            b"moov" => true,
+            b"mdat" | b"free" | b"skip" | b"wide" => false,
+            _ => payload_len <= MAX_KEPT_TOP.min(top_budget),
+        };
+        let hl = h.header_len as usize;
         let mut b = Mp4Box {
             fourcc: h.fourcc,
             offset: pos,
             size: h.size,
             header_len: h.header_len,
             payload: Vec::new(),
-            uuid: None,
+            uuid: extended_type(h.fourcc, &hdr, hl),
             children: Vec::new(),
         };
-        if load && payload_len <= MAX_LOADED {
+        if load {
+            if h.fourcc.0 != *b"moov" {
+                top_budget -= payload_len;
+            }
             r.seek(SeekFrom::Start(pos + h.header_len))?;
             let mut buf = vec![0u8; payload_len as usize];
             r.read_exact(&mut buf)?;
-            fill_box(&mut b, buf, &mut tree.warnings);
+            fill_box(&mut b, &buf, 0, &mut walk);
         }
         tree.top.push(b);
         pos += h.size;
     }
-    if tree.top.is_empty() {
+    if tree.top.is_empty() && tree.truncated.is_none() {
         return Err(Mp4Error::NotMp4(if file_size == 0 {
             "the file is empty".into()
         } else {
             "no complete box found".into()
         }));
     }
+    tree.warnings = walk.finish();
     Ok(tree)
 }
 
-fn plausible_first_box(t: FourCc) -> bool {
-    matches!(
-        &t.0,
-        b"ftyp" | b"moov" | b"mdat" | b"free" | b"skip" | b"wide" | b"pnot" | b"uuid"
-    )
+/// Box types that MP4 and MOV files start with.
+const FIRST_BOXES: &[&[u8; 4]] = &[
+    b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide", b"pnot", b"uuid",
+];
+
+/// Other box types that appear at the top level of MP4 and MOV files.
+const OTHER_TOP_LEVEL: &[&[u8; 4]] = &[
+    b"moof", b"mfra", b"meta", b"udta", b"sidx", b"styp", b"inst",
+];
+
+fn top_level_types() -> impl Iterator<Item = &'static [u8; 4]> {
+    FIRST_BOXES.iter().chain(OTHER_TOP_LEVEL).copied()
+}
+
+/// The box at `offset` if `b`, the rest of the file, is the start of its
+/// header: fewer bytes than a header needs, which agree with one. Other
+/// short leftovers are trailing bytes.
+fn cut_header(b: &[u8], offset: u64) -> Option<Truncated> {
+    let size32 = b
+        .get(0..4)
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_be_bytes);
+    let header_len = if size32 == Some(1) { 16 } else { 8 };
+    if b.len() >= header_len {
+        // A whole header that did not parse.
+        return None;
+    }
+    // Sizes 2 to 7 are smaller than a header.
+    if size32.is_some_and(|s| (2..8).contains(&s)) {
+        return None;
+    }
+    // As much of the type as the file holds must start a type we know.
+    let fourcc = b.get(4..).unwrap_or_default();
+    let fourcc = &fourcc[..fourcc.len().min(4)];
+    if !top_level_types().any(|t| t.starts_with(fourcc)) {
+        return None;
+    }
+    Some(Truncated {
+        fourcc: fourcc.try_into().ok().map(FourCc),
+        offset,
+        header_len: header_len as u64,
+        size: size32.filter(|&s| s >= 8).map(u64::from),
+        present: b.len() as u64,
+    })
 }
 
 fn read_up_to<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
@@ -237,6 +445,47 @@ fn read_up_to<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
         }
     }
     Ok(n)
+}
+
+/// Limits and problems shared by every level of one parse.
+#[derive(Default)]
+struct Walk {
+    warnings: Vec<String>,
+    dropped: usize,
+    boxes: usize,
+}
+
+impl Walk {
+    fn warn(&mut self, w: String) {
+        if self.warnings.len() < MAX_WARNINGS {
+            self.warnings.push(w);
+        } else {
+            self.dropped += 1;
+        }
+    }
+
+    /// Count the box at `offset`; false once [`MAX_BOXES`] is reached.
+    fn add_box(&mut self, offset: u64) -> bool {
+        if self.boxes >= MAX_BOXES {
+            if self.boxes == MAX_BOXES {
+                self.warn(format!(
+                    "more than {MAX_BOXES} boxes; stopped parsing at offset {offset}"
+                ));
+                self.boxes += 1;
+            }
+            return false;
+        }
+        self.boxes += 1;
+        true
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        if self.dropped > 0 {
+            self.warnings
+                .push(format!("{} more problems not listed", self.dropped));
+        }
+        self.warnings
+    }
 }
 
 struct Header {
@@ -269,40 +518,50 @@ fn parse_header(b: &[u8], remaining: u64) -> Option<Header> {
     })
 }
 
-/// Fill payload/children of `b` from its payload bytes (which, for `uuid`,
-/// still start with the extended type).
-fn fill_box(b: &mut Mp4Box, mut payload: Vec<u8>, warnings: &mut Vec<String>) {
-    if b.fourcc.0 == *b"uuid" {
-        if payload.len() >= 16 {
-            let mut u = [0u8; 16];
-            u.copy_from_slice(&payload[..16]);
-            b.uuid = Some(u);
-            payload.drain(..16);
-        } else {
-            warnings.push(format!("uuid box at {} too short", b.offset));
-        }
+/// The 16-byte extended type of a `uuid` box: the last 16 bytes of its
+/// `header_len`-byte header `b`.
+fn extended_type(t: FourCc, b: &[u8], header_len: usize) -> Option<[u8; 16]> {
+    if t.0 != *b"uuid" {
+        return None;
     }
-    let base = b.offset + payload_start(b);
+    b.get(header_len.checked_sub(16)?..header_len)?
+        .try_into()
+        .ok()
+}
+
+/// Fill the payload or children of `b` from `body`, its bytes after the
+/// header. `depth` is the depth of `b` itself: 0 at the top level.
+fn fill_box(b: &mut Mp4Box, body: &[u8], depth: usize, walk: &mut Walk) {
+    let base = b.offset + b.header_len;
     if CONTAINERS.contains(&&b.fourcc.0) {
         // `meta` is a FullBox in MP4 but a plain box in QuickTime; tell them
         // apart by whether a plausible child header starts at 0 or 4.
-        let skip = if b.fourcc.0 == *b"meta" && !looks_like_box(&payload, 0) {
+        let skip = if b.fourcc.0 == *b"meta" && !looks_like_box(body, 0) {
             4
         } else {
             0
         };
-        b.children = parse_children(&payload, skip, base, warnings);
-        b.payload = Vec::new();
+        b.children = parse_children(body, skip, base, depth + 1, walk, fill_box);
     } else if b.fourcc.0 == *b"stsd" {
-        b.children = parse_stsd(&payload, base, warnings);
-        b.payload = Vec::new();
-    } else if payload.len() <= MAX_KEPT_LEAF {
-        b.payload = payload;
+        // A FullBox with an entry count, then the sample entries.
+        b.children = parse_children(body, 8, base, depth + 1, walk, fill_entry);
+    } else if body.len() <= MAX_KEPT_LEAF || SAMPLE_TABLES.contains(&&b.fourcc.0) {
+        b.payload = body.to_vec();
     }
 }
 
-fn payload_start(b: &Mp4Box) -> u64 {
-    b.header_len
+/// Fill a sample entry, whose child boxes start after fixed per-kind
+/// fields.
+fn fill_entry(e: &mut Mp4Box, body: &[u8], depth: usize, walk: &mut Walk) {
+    match sample_entry_fixed_len(e.fourcc, body).filter(|&s| s <= body.len()) {
+        Some(skip) => {
+            // Keep the fixed fields; they hold width/height/channels.
+            e.payload = body[..skip].to_vec();
+            let base = e.offset + e.header_len;
+            e.children = parse_children(body, skip, base, depth + 1, walk, fill_box);
+        }
+        None => fill_box(e, body, depth, walk),
+    }
 }
 
 fn looks_like_box(buf: &[u8], at: usize) -> bool {
@@ -312,78 +571,460 @@ fn looks_like_box(buf: &[u8], at: usize) -> bool {
     else {
         return false;
     };
-    h.size as usize <= buf.len() - at && h.fourcc.0.iter().all(|c| c.is_ascii_graphic())
+    h.size <= (buf.len() - at) as u64 && h.fourcc.0.iter().all(|c| c.is_ascii_graphic())
 }
 
-fn parse_children(buf: &[u8], start: usize, base: u64, warnings: &mut Vec<String>) -> Vec<Mp4Box> {
+type Fill = fn(&mut Mp4Box, &[u8], usize, &mut Walk);
+
+/// Parse the boxes in `buf[start..]`, at file offset `base + start` and
+/// nesting depth `depth`, filling each with `fill`.
+fn parse_children(
+    buf: &[u8],
+    start: usize,
+    base: u64,
+    depth: usize,
+    walk: &mut Walk,
+    fill: Fill,
+) -> Vec<Mp4Box> {
     let mut out = Vec::new();
+    if depth > MAX_DEPTH {
+        if buf.len() >= start.saturating_add(8) {
+            walk.warn(format!(
+                "boxes at {} are nested more than {MAX_DEPTH} deep; skipped them",
+                base + start as u64
+            ));
+        }
+        return out;
+    }
     let mut pos = start;
-    while pos + 8 <= buf.len() {
+    while pos.saturating_add(8) <= buf.len() {
         let rest = &buf[pos..];
+        let at = base + pos as u64;
         let Some(h) = parse_header(rest, rest.len() as u64) else {
-            warnings.push(format!("bad child box header at {}", base + pos as u64));
+            walk.warn(format!("bad child box header at {at}"));
             break;
         };
-        if h.size as usize > rest.len() || (h.size as usize) < h.header_len as usize {
-            warnings.push(format!(
-                "child box `{}` at {} overruns its parent",
-                h.fourcc,
-                base + pos as u64
+        if h.size > rest.len() as u64 {
+            walk.warn(format!(
+                "child box `{}` at {at} overruns its parent",
+                h.fourcc
             ));
             break;
         }
+        if !walk.add_box(at) {
+            break;
+        }
+        // parse_header guarantees header_len <= size, and size fits in rest.
+        let (hl, size) = (h.header_len as usize, h.size as usize);
         let mut b = Mp4Box {
             fourcc: h.fourcc,
-            offset: base + pos as u64,
+            offset: at,
             size: h.size,
             header_len: h.header_len,
             payload: Vec::new(),
-            uuid: None,
+            uuid: extended_type(h.fourcc, rest, hl),
             children: Vec::new(),
         };
-        let body = rest[(if h.fourcc.0 == *b"uuid" {
-            h.header_len - 16
-        } else {
-            h.header_len
-        }) as usize..h.size as usize]
-            .to_vec();
-        fill_box(&mut b, body, warnings);
+        fill(&mut b, &rest[hl..size], depth, walk);
         out.push(b);
-        pos += h.size as usize;
+        pos += size;
     }
     out
 }
 
-/// `stsd` is a FullBox with an entry count, followed by sample entries whose
-/// own children start after fixed per-kind fields.
-fn parse_stsd(buf: &[u8], base: u64, warnings: &mut Vec<String>) -> Vec<Mp4Box> {
-    let mut entries = parse_children(buf, 8.min(buf.len()), base, warnings);
-    for e in &mut entries {
-        let skip = sample_entry_fixed_len(e.fourcc, &e.payload);
-        if let Some(skip) = skip.filter(|&s| s <= e.payload.len()) {
-            let payload = std::mem::take(&mut e.payload);
-            e.children = parse_children(&payload, skip, e.offset + e.header_len, warnings);
-            // Keep the fixed fields; they hold width/height/channels.
-            e.payload = payload[..skip].to_vec();
+fn be_u32(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(
+        b.get(at..at.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+/// The entries of a sample table box: a u32 count at `count_at` in the
+/// payload, then `count` entries of `width` bytes, checked to fit.
+fn table_entries(b: &Mp4Box, count_at: usize, width: usize) -> Result<(u64, &[u8]), String> {
+    let count = be_u32(&b.payload, count_at)
+        .ok_or_else(|| format!("`{}` is too short to hold its entry count", b.fourcc))?;
+    let data = b.payload.get(count_at + 4..).unwrap_or_default();
+    let need = count as u64 * width as u64;
+    if need > data.len() as u64 {
+        return Err(format!(
+            "`{}` claims {count} entries but has room for {}",
+            b.fourcc,
+            data.len() / width
+        ));
+    }
+    Ok((count as u64, &data[..need as usize]))
+}
+
+/// Sample sizes from `stsz` or `stz2`.
+enum SampleSizes<'a> {
+    Constant(u64),
+    /// Big-endian fields of 4, 8, 16 or 32 bits.
+    Table {
+        bits: u64,
+        data: &'a [u8],
+    },
+}
+
+impl SampleSizes<'_> {
+    fn get(&self, k: u64) -> u64 {
+        let (bits, data) = match self {
+            SampleSizes::Constant(s) => return *s,
+            SampleSizes::Table { bits, data } => (*bits, *data),
+        };
+        let at = (k * bits / 8) as usize;
+        let byte = |i: usize| data.get(i).copied().unwrap_or(0) as u64;
+        match bits {
+            32 => be_u32(data, at).unwrap_or(0) as u64,
+            16 => byte(at) << 8 | byte(at + 1),
+            8 => byte(at),
+            _ if k.is_multiple_of(2) => byte(at) >> 4,
+            _ => byte(at) & 0xf,
         }
     }
-    entries
+
+    /// Bytes in samples `start..start + n`, or None where the table does not
+    /// say. QuickTime gives uncompressed audio samples a nominal size of 1;
+    /// their real size is in the sample description.
+    fn total(&self, start: u64, n: u64) -> Option<u64> {
+        match self {
+            SampleSizes::Constant(s) if *s <= 1 => None,
+            SampleSizes::Constant(s) => s.checked_mul(n),
+            SampleSizes::Table { .. } => Some((start..start + n).map(|k| self.get(k)).sum()),
+        }
+    }
+}
+
+/// Read `stsz` or `stz2`: the sample count and sizes.
+fn sample_sizes(stbl: &Mp4Box) -> Result<Option<(u64, SampleSizes<'_>)>, String> {
+    let short = |b: &Mp4Box| format!("`{}` is too short", b.fourcc);
+    if let Some(b) = stbl.child(b"stsz") {
+        let constant = be_u32(&b.payload, 4).ok_or_else(|| short(b))?;
+        if constant != 0 {
+            let n = be_u32(&b.payload, 8).ok_or_else(|| short(b))?;
+            return Ok(Some((n as u64, SampleSizes::Constant(constant as u64))));
+        }
+        let (n, data) = table_entries(b, 8, 4)?;
+        return Ok(Some((n, SampleSizes::Table { bits: 32, data })));
+    }
+    let Some(b) = stbl.child(b"stz2") else {
+        return Ok(None);
+    };
+    let bits = b.payload.get(7).copied().ok_or_else(|| short(b))? as u64;
+    if !matches!(bits, 4 | 8 | 16) {
+        return Err(format!("`stz2` has {bits}-bit sizes"));
+    }
+    let n = be_u32(&b.payload, 8).ok_or_else(|| short(b))? as u64;
+    let data = b.payload.get(12..).unwrap_or_default();
+    let need = (n * bits).div_ceil(8);
+    if need > data.len() as u64 {
+        return Err(format!(
+            "`stz2` claims {n} entries but has room for {}",
+            data.len() as u64 * 8 / bits
+        ));
+    }
+    let data = &data[..need as usize];
+    Ok(Some((n, SampleSizes::Table { bits, data })))
+}
+
+/// Whether every data reference of a track points into this file. Tracks
+/// whose data lives elsewhere have chunk offsets into other files.
+fn self_contained(minf: &Mp4Box) -> bool {
+    let Some(dref) = minf.path(&[b"dinf", b"dref"]) else {
+        return true;
+    };
+    let mut c = Cursor::new(&dref.payload);
+    let (Some(_), Some(n)) = (c.version_flags(), c.u32()) else {
+        return true;
+    };
+    for _ in 0..n.min(64) {
+        // Each entry is a FullBox whose flag 1 means "in this file".
+        let (Some(size), Some(_), Some((_, flags))) = (c.u32(), c.take(4), c.version_flags())
+        else {
+            return true;
+        };
+        if flags & 1 == 0 {
+            return false;
+        }
+        if c.take((size as usize).saturating_sub(12)).is_none() {
+            return true;
+        }
+    }
+    true
+}
+
+/// Check one track's sample tables against each other and against the
+/// media data, and return the first problem.
+fn check_track(trak: &Mp4Box, mdats: &[(u64, u64)], file_size: u64) -> Result<(), String> {
+    let mdia = trak.child(b"mdia").ok_or("it has no `mdia` box")?;
+    if mdia.child(b"hdlr").is_none() {
+        return Err("it has no handler (`mdia/hdlr`)".into());
+    }
+    let minf = mdia.child(b"minf").ok_or("it has no `minf` box")?;
+    let stbl = minf
+        .child(b"stbl")
+        .ok_or("it has no sample table (`stbl`)")?;
+    // FFmpeg takes the stream kind from the handler, and then cannot read
+    // a sample entry of the other kind.
+    let kind = |t: FourCc| match &t.0 {
+        b"vide" => Some("video"),
+        b"soun" => Some("audio"),
+        _ => None,
+    };
+    let handler = handler_type(trak).and_then(|h| Some((h, kind(h)?)));
+    for entry in stbl.child(b"stsd").into_iter().flat_map(|s| &s.children) {
+        let entry_kind = entry_handler(entry.fourcc).and_then(kind);
+        if let (Some((h, want)), Some(is)) = (handler, entry_kind)
+            && want != is
+        {
+            return Err(format!(
+                "its handler says {want} (`{h}`), but its sample entry `{}` is {is}",
+                entry.fourcc
+            ));
+        }
+    }
+    let sizes = sample_sizes(stbl)?;
+    let stts = stbl.child(b"stts").map(|b| table_entries(b, 4, 8));
+    let stsc = stbl.child(b"stsc").map(|b| table_entries(b, 4, 12));
+    let (co, wide) = match (stbl.child(b"stco"), stbl.child(b"co64")) {
+        (Some(b), _) => (Some(b), false),
+        (None, b) => (b, true),
+    };
+    let co = co.map(|b| table_entries(b, 4, if wide { 8 } else { 4 }));
+    let samples = sizes.as_ref().map_or(0, |s| s.0);
+    let timed: u64 = match &stts {
+        Some(Ok((_, e))) => e
+            .chunks_exact(8)
+            .filter_map(|e| be_u32(e, 0))
+            .map(u64::from)
+            .sum(),
+        Some(Err(why)) => return Err(why.clone()),
+        None => 0,
+    };
+    let (chunk_count, chunks) = co.clone().transpose()?.unwrap_or((0, &[]));
+    if samples == 0 && timed == 0 && chunk_count == 0 {
+        // An empty track, or the `moov` of a fragmented file.
+        return Ok(());
+    }
+    let missing: Vec<&str> = [
+        (sizes.is_some(), "`stsz`"),
+        (stts.is_some(), "`stts`"),
+        (stsc.is_some(), "`stsc`"),
+        (co.is_some(), "`stco`"),
+    ]
+    .into_iter()
+    .filter_map(|(have, name)| (!have).then_some(name))
+    .collect();
+    if !missing.is_empty() {
+        return Err(format!("it has samples but no {}", missing.join(" or ")));
+    }
+    if timed != samples {
+        return Err(format!(
+            "`stts` times {timed} samples but `stsz` sizes {samples}"
+        ));
+    }
+
+    let (runs, entries) = stsc.transpose()?.unwrap_or((0, &[]));
+    if runs == 0 {
+        return Err(format!(
+            "`stsc` puts none of the {samples} samples into the {chunk_count} chunks"
+        ));
+    }
+    let descriptions = stbl.child(b"stsd").map_or(0, |s| s.children.len() as u64);
+    let runs = ChunkRuns::new(entries, chunk_count, descriptions)?;
+    let placed: u128 = runs
+        .iter()
+        .map(|r| r.chunks as u128 * r.per_chunk as u128)
+        .sum();
+    if placed != samples as u128 {
+        return Err(format!(
+            "`stsc` and `stco` place {placed} samples but `stsz` sizes {samples}"
+        ));
+    }
+
+    if !self_contained(minf) {
+        return Ok(());
+    }
+    let Some((_, sizes)) = sizes else {
+        return Ok(());
+    };
+    // Every chunk's bytes must be in the file and inside an `mdat`. The
+    // runs place exactly `samples` samples, so `sample` stays below it.
+    let mut sample = 0u64;
+    for run in runs.iter() {
+        for c in run.first..run.first + run.chunks {
+            let at = (c - 1) as usize;
+            let offset = if wide {
+                let hi = be_u32(chunks, at * 8).unwrap_or(0) as u64;
+                hi << 32 | be_u32(chunks, at * 8 + 4).unwrap_or(0) as u64
+            } else {
+                be_u32(chunks, at * 4).unwrap_or(0) as u64
+            };
+            check_chunk(
+                c,
+                offset,
+                sizes.total(sample, run.per_chunk),
+                mdats,
+                file_size,
+            )?;
+            sample += run.per_chunk;
+        }
+    }
+    Ok(())
+}
+
+/// Chunks `first..first + chunks`, counted from 1, hold `per_chunk`
+/// samples each.
+#[derive(Debug, Clone, Copy)]
+struct ChunkRun {
+    first: u64,
+    chunks: u64,
+    per_chunk: u64,
+}
+
+/// The entries of an `stsc` table, which map runs of chunks to samples
+/// per chunk, checked so that every run covers at least one chunk.
+struct ChunkRuns<'a> {
+    /// 12-byte entries: first chunk, samples per chunk, sample
+    /// description index.
+    entries: &'a [u8],
+    chunk_count: u64,
+}
+
+impl<'a> ChunkRuns<'a> {
+    /// Check that the runs start at increasing chunk numbers between 1
+    /// and `chunk_count`, put samples in their chunks, and use one of the
+    /// `descriptions` sample descriptions.
+    fn new(entries: &'a [u8], chunk_count: u64, descriptions: u64) -> Result<Self, String> {
+        let mut prev = 0;
+        for (k, e) in entries.chunks_exact(12).enumerate() {
+            let [first, per_chunk, description] = stsc_entry(e);
+            if first == 0 {
+                return Err(format!(
+                    "`stsc` entry {k} starts at chunk 0, but chunks count from 1"
+                ));
+            }
+            if first <= prev {
+                return Err(format!(
+                    "`stsc` entry {k} starts at chunk {first}, but the entry before it starts at chunk {prev}"
+                ));
+            }
+            if first > chunk_count {
+                return Err(format!(
+                    "`stsc` entry {k} starts at chunk {first}, but there are only {chunk_count} chunks"
+                ));
+            }
+            if per_chunk == 0 {
+                return Err(format!("`stsc` entry {k} puts no samples in its chunks"));
+            }
+            if description == 0 || description > descriptions {
+                return Err(format!(
+                    "`stsc` entry {k} uses sample description {description}, but `stsd` has {descriptions}"
+                ));
+            }
+            prev = first;
+        }
+        Ok(ChunkRuns {
+            entries,
+            chunk_count,
+        })
+    }
+
+    /// Each run ends where the next one starts, the last one at the last
+    /// chunk.
+    fn iter(&self) -> impl Iterator<Item = ChunkRun> + '_ {
+        let entries = self.entries.chunks_exact(12);
+        let ends = entries
+            .clone()
+            .skip(1)
+            .map(|e| stsc_entry(e)[0])
+            .chain(std::iter::once(self.chunk_count + 1));
+        entries.zip(ends).enumerate().map(|(k, (e, end))| {
+            let [first, per_chunk, _] = stsc_entry(e);
+            // Like FFmpeg, let the first run cover any chunks before it.
+            let first = if k == 0 { 1 } else { first };
+            ChunkRun {
+                first,
+                // new() checked that runs start at increasing chunks up to
+                // `chunk_count`, so this never saturates.
+                chunks: end.saturating_sub(first),
+                per_chunk,
+            }
+        })
+    }
+}
+
+/// An `stsc` entry's first chunk, samples per chunk and description index.
+fn stsc_entry(e: &[u8]) -> [u64; 3] {
+    [0, 4, 8].map(|i| be_u32(e, i).unwrap_or(0) as u64)
+}
+
+/// Chunk `c` holds `size` bytes (None: at least one) at `offset`.
+fn check_chunk(
+    c: u64,
+    offset: u64,
+    size: Option<u64>,
+    mdats: &[(u64, u64)],
+    file_size: u64,
+) -> Result<(), String> {
+    if size == Some(0) {
+        return Ok(());
+    }
+    let what = match size {
+        Some(s) => format!("chunk {c} (bytes {offset}..{})", offset.saturating_add(s)),
+        None => format!("chunk {c} (at {offset})"),
+    };
+    let end = offset
+        .checked_add(size.unwrap_or(1))
+        .ok_or_else(|| format!("{what} overflows"))?;
+    // Not necessarily truncation: a corrupt offset does this too.
+    if end > file_size {
+        return Err(format!(
+            "{what} runs past the end of the file ({file_size} bytes)"
+        ));
+    }
+    let i = mdats.partition_point(|&(start, _)| start <= offset);
+    if i == 0 || end > mdats[i - 1].1 {
+        return Err(format!("{what} lies outside the media data (`mdat`)"));
+    }
+    Ok(())
+}
+
+/// Video sample entry types we know.
+const VIDEO_ENTRIES: &[&[u8; 4]] = &[
+    b"avc1", b"avc3", b"hvc1", b"hev1", b"av01", b"vp09", b"apch", b"apcn", b"apcs", b"apco",
+    b"ap4h", b"ap4x", b"mp4v", b"dvh1", b"dvhe", b"encv",
+];
+
+/// Audio sample entry types we know.
+const AUDIO_ENTRIES: &[&[u8; 4]] = &[
+    b"mp4a", b"Opus", b"lpcm", b"sowt", b"twos", b"ipcm", b"fLaC", b"ac-3", b"ec-3", b"alac",
+    b"in24", b"in32", b"fl32", b"enca",
+];
+
+/// The handler type of a `trak` (`mdia/hdlr`): `vide`, `soun`, `meta`, ...
+pub fn handler_type(trak: &Mp4Box) -> Option<FourCc> {
+    let hdlr = trak.path(&[b"mdia", b"hdlr"])?;
+    Some(FourCc(hdlr.payload.get(8..12)?.try_into().ok()?))
+}
+
+/// The handler type (`vide` or `soun`) of tracks whose sample entries
+/// have type `t`, for the entry types we know.
+fn entry_handler(t: FourCc) -> Option<FourCc> {
+    if VIDEO_ENTRIES.contains(&&t.0) {
+        Some(FourCc(*b"vide"))
+    } else if AUDIO_ENTRIES.contains(&&t.0) {
+        Some(FourCc(*b"soun"))
+    } else {
+        None
+    }
 }
 
 /// Length of a sample entry's fixed fields before its child boxes, for the
 /// entry types we know.
 pub(crate) fn sample_entry_fixed_len(t: FourCc, payload: &[u8]) -> Option<usize> {
-    const VIDEO: &[&[u8; 4]] = &[
-        b"avc1", b"avc3", b"hvc1", b"hev1", b"av01", b"vp09", b"apch", b"apcn", b"apcs", b"apco",
-        b"ap4h", b"ap4x", b"mp4v", b"dvh1", b"dvhe", b"encv",
-    ];
-    const AUDIO: &[&[u8; 4]] = &[
-        b"mp4a", b"Opus", b"lpcm", b"sowt", b"twos", b"ipcm", b"fLaC", b"ac-3", b"ec-3", b"alac",
-        b"in24", b"in32", b"fl32", b"enca",
-    ];
-    if VIDEO.contains(&&t.0) {
+    if VIDEO_ENTRIES.contains(&&t.0) {
         Some(78)
-    } else if AUDIO.contains(&&t.0) {
+    } else if AUDIO_ENTRIES.contains(&&t.0) {
         // QuickTime sound sample description versions 1 and 2 are longer.
         let version = u16::from_be_bytes(payload.get(8..10)?.try_into().ok()?);
         match version {
@@ -540,6 +1181,852 @@ pub(crate) mod tests {
                 g[i] = (seed >> 8) as u8;
             }
             let _ = read(&mut io::Cursor::new(g));
+        }
+    }
+
+    #[test]
+    fn top_level_uuid_keeps_its_extended_type_and_payload() {
+        let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isom");
+        let uuid = bx(b"uuid", b"0123456789ABCDEFPAYLOAD-BYTES-HERE-XYZ");
+        let t = read(&mut io::Cursor::new(cat(&[ftyp, uuid]))).unwrap();
+        let u = &t.top[1];
+        assert_eq!(u.uuid, Some(*b"0123456789ABCDEF"));
+        assert_eq!(u.payload, b"PAYLOAD-BYTES-HERE-XYZ");
+        assert_eq!(u.header_len, 24);
+    }
+
+    #[test]
+    fn truncated_box_is_not_trailing_bytes() {
+        // moov last, as most cameras write it, then cut 10 bytes short.
+        let f = minimal();
+        let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isomiso2");
+        let moov_at = ftyp.len() + 40;
+        let moov = &f[ftyp.len()..f.len() - 40];
+        let g = cat(&[ftyp, bx(b"mdat", &[0; 32]), moov.to_vec()]);
+        let t = read(&mut io::Cursor::new(g[..g.len() - 10].to_vec())).unwrap();
+        assert_eq!(t.trailing_bytes, 0);
+        let cut = t.truncated.unwrap();
+        assert_eq!(cut.fourcc, Some(FourCc::new(b"moov")));
+        assert_eq!(cut.offset, moov_at as u64);
+        assert_eq!(
+            (cut.size, cut.present),
+            (Some(moov.len() as u64), moov.len() as u64 - 10)
+        );
+        assert!(t.moov().is_none());
+
+        // A cut-short first box is still an MP4, just an unusable one.
+        let t = read(&mut io::Cursor::new(f[..20].to_vec())).unwrap();
+        assert!(t.top.is_empty());
+        assert_eq!(
+            t.truncated.and_then(|c| c.fourcc),
+            Some(FourCc::new(b"ftyp"))
+        );
+    }
+
+    #[test]
+    fn file_ending_inside_a_box_header_is_truncation() {
+        let f = minimal();
+        let at = f.len() as u64;
+        let next = bx(b"inst", &[7; 100]);
+        for cut in 1..8 {
+            let g = cat(&[f.clone(), next[..cut].to_vec()]);
+            let t = read(&mut io::Cursor::new(g.clone())).unwrap();
+            assert_eq!(t.trailing_bytes, 0, "{cut}");
+            let c = t.truncated.unwrap();
+            assert_eq!((c.offset, c.present, c.fourcc), (at, cut as u64, None));
+            assert_eq!(c.size, (cut >= 4).then_some(108), "{cut}");
+            let size = if cut >= 4 { "a 108-byte box" } else { "a box" };
+            let bytes = if cut == 1 { "byte" } else { "bytes" };
+            assert_eq!(
+                t.damage(),
+                [format!(
+                    "the file ends {cut} {bytes} into the header of {size} at offset {at}: it was cut short"
+                )]
+            );
+        }
+        // A 64-bit header cut after the type.
+        let large = cat(&[1u32.to_be_bytes().to_vec(), b"mdat".to_vec(), vec![0; 7]]);
+        let t = read(&mut io::Cursor::new(cat(&[f.clone(), large]))).unwrap();
+        let c = t.truncated.unwrap();
+        assert_eq!(
+            (c.fourcc, c.size, c.header_len, c.present),
+            (Some(FourCc::new(b"mdat")), None, 16, 15)
+        );
+        // Leftovers that cannot start a header are trailing bytes: a size
+        // below 8, a type we do not know, a 64-bit size below 16.
+        for junk in [
+            &b"\0\0\0\x05"[..],
+            b"\0\0\0\x10zz",
+            b"\0\0\0\x01mdat\0\0\0\0\0\0\0\x0f",
+        ] {
+            let t = read(&mut io::Cursor::new(cat(&[f.clone(), junk.to_vec()]))).unwrap();
+            assert_eq!(t.truncated, None, "{junk:?}");
+            assert_eq!(t.trailing_bytes, junk.len() as u64, "{junk:?}");
+        }
+    }
+
+    #[test]
+    fn any_first_box_is_accepted_when_the_file_is_known_to_be_mp4() {
+        let mut f = minimal();
+        f[4..8].copy_from_slice(b"ftyq");
+        assert!(matches!(
+            read(&mut io::Cursor::new(f.clone())),
+            Err(Mp4Error::NotMp4(_))
+        ));
+        let t = read_with(&mut io::Cursor::new(f.clone()), FirstBox::Any).unwrap();
+        assert_eq!(t.top[0].fourcc, FourCc::new(b"ftyq"));
+        assert!(t.moov().is_some());
+        assert!(t.warnings.is_empty(), "{:?}", t.warnings);
+        // Cut short, it is truncation, whatever its type.
+        let t = read_with(&mut io::Cursor::new(f[..12].to_vec()), FirstBox::Any).unwrap();
+        assert!(t.truncated.is_some_and(|c| c.is(b"ftyq")));
+        // A header that is not one is still not MP4.
+        f[0..4].copy_from_slice(&5u32.to_be_bytes());
+        assert!(read_with(&mut io::Cursor::new(f), FirstBox::Any).is_err());
+    }
+
+    #[test]
+    fn media_data_and_large_top_level_payloads_are_not_kept() {
+        let f = cat(&[
+            bx(b"ftyp", b"isom\0\0\x02\0isom"),
+            bx(b"mdat", &[7; 1000]),
+            bx(b"free", &[0; 100]),
+            bx(b"blob", &vec![1; MAX_KEPT_TOP as usize + 1]),
+            bx(b"camd", b"vendor"),
+        ]);
+        let t = read(&mut io::Cursor::new(f)).unwrap();
+        let kept: Vec<usize> = t.top.iter().map(|b| b.payload.len()).collect();
+        assert_eq!(kept, [12, 0, 0, 0, 6]);
+    }
+
+    /// `ftyp` and a `moov` holding `n` nested `udta` boxes, the innermost
+    /// holding `inner`.
+    fn nested_udta(n: usize, inner: &[u8]) -> Vec<u8> {
+        let mut f = bx(b"ftyp", b"isom\0\0\x02\0isom");
+        let total = 8 + 8 * n + inner.len();
+        f.extend_from_slice(&(total as u32).to_be_bytes());
+        f.extend_from_slice(b"moov");
+        for i in 0..n {
+            f.extend_from_slice(&((8 * (n - i) + inner.len()) as u32).to_be_bytes());
+            f.extend_from_slice(b"udta");
+        }
+        f.extend_from_slice(inner);
+        f
+    }
+
+    /// (boxes, payload bytes kept, deepest depth) of a parsed tree.
+    fn tree_stats(t: &Mp4Tree) -> (usize, usize, usize) {
+        fn walk(b: &Mp4Box, depth: usize, s: &mut (usize, usize, usize)) {
+            s.0 += 1;
+            s.1 += b.payload.len();
+            s.2 = s.2.max(depth);
+            for c in &b.children {
+                walk(c, depth + 1, s);
+            }
+        }
+        let mut s = (0, 0, 0);
+        for b in &t.top {
+            walk(b, 0, &mut s);
+        }
+        s
+    }
+
+    #[test]
+    fn nesting_stops_at_max_depth() {
+        let leaf = bx(b"abcd", b"x");
+        // The leaf sits at depth n + 1.
+        let t = read(&mut io::Cursor::new(nested_udta(MAX_DEPTH - 1, &leaf))).unwrap();
+        assert!(t.warnings.is_empty(), "{:?}", t.warnings);
+        assert_eq!(tree_stats(&t).2, MAX_DEPTH);
+        let t = read(&mut io::Cursor::new(nested_udta(MAX_DEPTH, &leaf))).unwrap();
+        assert_eq!(tree_stats(&t).2, MAX_DEPTH);
+        let deep = format!("nested more than {MAX_DEPTH} deep");
+        assert!(t.warnings[0].contains(&deep), "{:?}", t.warnings);
+    }
+
+    /// Reset this process's peak resident memory, run `f`, and return how
+    /// far the peak rose above the starting level, in KiB. None where
+    /// /proc cannot reset the peak.
+    fn peak_rss_growth_kib(f: impl FnOnce()) -> Option<u64> {
+        fn hwm() -> Option<u64> {
+            let s = std::fs::read_to_string("/proc/self/status").ok()?;
+            let line = s.lines().find(|l| l.starts_with("VmHWM:"))?;
+            line.split_whitespace().nth(1)?.parse().ok()
+        }
+        std::fs::write("/proc/self/clear_refs", "5").ok()?;
+        let before = hwm()?;
+        f();
+        Some(hwm()?.saturating_sub(before))
+    }
+
+    #[test]
+    fn deep_nesting_is_fast_and_small() {
+        // The 160 KB file used 1.4 GB and overflowed the stack before the
+        // depth limit; the 1.6 MB one ran out of memory.
+        for n in [20_000, 200_000] {
+            let f = nested_udta(n, &[]);
+            let mut result = None;
+            let start = std::time::Instant::now();
+            let grew = peak_rss_growth_kib(|| result = Some(read(&mut io::Cursor::new(&f))));
+            let elapsed = start.elapsed();
+            let t = result.unwrap().unwrap();
+            assert!(elapsed.as_secs_f64() < 2.0, "{n} levels took {elapsed:?}");
+            let (boxes, _, depth) = tree_stats(&t);
+            assert_eq!((boxes, depth), (2 + MAX_DEPTH, MAX_DEPTH));
+            assert!(
+                t.warnings[0].contains("nested more than"),
+                "{:?}",
+                t.warnings
+            );
+            // The input is 1.6 MB at most and `moov` is read once; other
+            // tests running at the same time share the process.
+            if let Some(kib) = grew {
+                assert!(
+                    kib < 64 * 1024,
+                    "{n} levels raised peak memory by {kib} KiB"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn box_count_is_limited() {
+        let moov = bx(b"free", &[]).repeat(MAX_BOXES + 10);
+        let f = cat(&[bx(b"ftyp", b"isom\0\0\x02\0isom"), bx(b"moov", &moov)]);
+        let t = read(&mut io::Cursor::new(f)).unwrap();
+        assert_eq!(tree_stats(&t).0, MAX_BOXES);
+        let many = format!("more than {MAX_BOXES} boxes");
+        assert!(t.warnings[0].contains(&many), "{:?}", t.warnings);
+    }
+
+    fn words(w: &[u32]) -> Vec<u8> {
+        w.iter().flat_map(|x| x.to_be_bytes()).collect()
+    }
+
+    /// Sample-table payloads for one video track.
+    #[derive(Debug, Clone)]
+    struct Tables {
+        stts: Vec<u8>,
+        stsz: Vec<u8>,
+        stsc: Vec<u8>,
+        /// Chunk offsets from the start of the `mdat` payload.
+        chunks: Vec<u64>,
+        co64: bool,
+        data_len: usize,
+    }
+
+    /// Consistent tables for samples of `sizes` bytes, `per_chunk` to a
+    /// chunk, stored back to back.
+    fn tables(sizes: &[u32], per_chunk: usize) -> Tables {
+        let n = sizes.len() as u32;
+        let chunk_count = sizes.len().div_ceil(per_chunk);
+        let last = (sizes.len() - (chunk_count - 1) * per_chunk) as u32;
+        let stsc = match (chunk_count as u32, per_chunk as u32) {
+            (1, _) => words(&[0, 1, 1, last, 1]),
+            (_, p) if last == p => words(&[0, 1, 1, p, 1]),
+            (c, p) => words(&[0, 2, 1, p, 1, c, last, 1]),
+        };
+        let mut chunks = Vec::new();
+        let mut at = 0u64;
+        for chunk in sizes.chunks(per_chunk) {
+            chunks.push(at);
+            at += chunk.iter().map(|&s| s as u64).sum::<u64>();
+        }
+        Tables {
+            stts: words(&[0, 1, n, 1000]),
+            stsz: [words(&[0, 0, n]), words(sizes)].concat(),
+            stsc,
+            chunks,
+            co64: false,
+            data_len: at as usize,
+        }
+    }
+
+    /// `ftyp`, `mdat` and `moov` (or `moov` before `mdat`) for `t`.
+    fn file_with(t: &Tables, faststart: bool) -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isom");
+        let moov = |base: u64| {
+            let n = t.chunks.len() as u32;
+            // Fuzzed offsets can be anywhere, so let them wrap.
+            let co = if t.co64 {
+                let offs: Vec<u8> = t
+                    .chunks
+                    .iter()
+                    .flat_map(|c| c.wrapping_add(base).to_be_bytes())
+                    .collect();
+                bx(b"co64", &cat(&[words(&[0, n]), offs]))
+            } else {
+                let offs: Vec<u32> = t
+                    .chunks
+                    .iter()
+                    .map(|c| c.wrapping_add(base) as u32)
+                    .collect();
+                bx(b"stco", &cat(&[words(&[0, n]), words(&offs)]))
+            };
+            let hdlr = full(b"hdlr", 0, 0, b"\0\0\0\0vide\0\0\0\0\0\0\0\0\0\0\0\0V\0");
+            let entry = bx(b"hvc1", &[0u8; 78]);
+            let stsd = full(b"stsd", 0, 0, &cat(&[words(&[1]), entry]));
+            let stbl = bx(
+                b"stbl",
+                &cat(&[
+                    stsd,
+                    bx(b"stts", &t.stts),
+                    bx(b"stsz", &t.stsz),
+                    bx(b"stsc", &t.stsc),
+                    co,
+                ]),
+            );
+            let trak = bx(b"trak", &bx(b"mdia", &cat(&[hdlr, bx(b"minf", &stbl)])));
+            bx(b"moov", &trak)
+        };
+        let mdat = bx(b"mdat", &vec![0xee; t.data_len]);
+        if faststart {
+            let base = (ftyp.len() + moov(0).len() + 8) as u64;
+            cat(&[ftyp, moov(base), mdat])
+        } else {
+            let base = (ftyp.len() + 8) as u64;
+            cat(&[ftyp, mdat, moov(base)])
+        }
+    }
+
+    fn damage_of(f: Vec<u8>) -> Vec<String> {
+        read(&mut io::Cursor::new(f)).unwrap().damage()
+    }
+
+    #[test]
+    fn consistent_sample_tables_are_not_damage() {
+        let t = tables(&[10, 20, 30, 40, 50], 2);
+        for faststart in [false, true] {
+            assert!(damage_of(file_with(&t, faststart)).is_empty());
+            let wide = Tables {
+                co64: true,
+                ..t.clone()
+            };
+            assert!(damage_of(file_with(&wide, faststart)).is_empty());
+        }
+        // Constant-size samples and compact sizes describe the same bytes.
+        let constant = Tables {
+            stsz: words(&[0, 25, 4]),
+            ..tables(&[25; 4], 3)
+        };
+        assert!(damage_of(file_with(&constant, false)).is_empty());
+        let stz2 = Tables {
+            stsz: Vec::new(),
+            ..tables(&[1, 2, 3], 1)
+        };
+        let mut f = file_with(&stz2, false);
+        let compact = bx(b"stz2", &cat(&[words(&[0, 8, 3]), vec![1, 2, 3]]));
+        let at = f.windows(4).position(|w| w == b"stsz").unwrap() - 4;
+        f.splice(at..at + 8, compact.iter().copied());
+        // Patch the sizes of the boxes around it: stbl, minf, mdia, trak, moov.
+        let grow = compact.len() as u32 - 8;
+        for t in [b"stbl", b"minf", b"mdia", b"trak", b"moov"] {
+            let at = f.windows(4).position(|w| w == t).unwrap() - 4;
+            let size = u32::from_be_bytes(f[at..at + 4].try_into().unwrap()) + grow;
+            f[at..at + 4].copy_from_slice(&size.to_be_bytes());
+        }
+        assert!(damage_of(f).is_empty());
+    }
+
+    #[test]
+    fn inconsistent_sample_tables_are_damage() {
+        let good = tables(&[10, 20, 30, 40], 2);
+        let cases: Vec<(Tables, &str)> = vec![
+            (
+                Tables {
+                    stsz: words(&[0, 0, 5, 10, 20, 30, 40]),
+                    ..good.clone()
+                },
+                "`stsz` claims 5 entries but has room for 4",
+            ),
+            (
+                Tables {
+                    stts: words(&[0, 1, 3, 1000]),
+                    ..good.clone()
+                },
+                "`stts` times 3 samples but `stsz` sizes 4",
+            ),
+            (
+                Tables {
+                    stsc: words(&[0, 1, 1, 3, 1]),
+                    ..good.clone()
+                },
+                "place 6 samples but `stsz` sizes 4",
+            ),
+            (
+                Tables {
+                    stsc: words(&[0, 1, 1, 2, 2]),
+                    ..good.clone()
+                },
+                "uses sample description 2, but `stsd` has 1",
+            ),
+            (
+                Tables {
+                    stsc: words(&[0, 2, 1, 2, 1, 3, 2, 1]),
+                    ..good.clone()
+                },
+                "starts at chunk 3, but there are only 2 chunks",
+            ),
+            (
+                Tables {
+                    chunks: vec![0, 1_000_000],
+                    ..good.clone()
+                },
+                "chunk 2 (bytes 1000028..1000098) runs past the end of the file",
+            ),
+            (
+                // The second chunk starts where `moov` does.
+                Tables {
+                    chunks: vec![0, 100],
+                    ..good.clone()
+                },
+                "chunk 2 (bytes 128..198) lies outside the media data",
+            ),
+        ];
+        for (t, want) in cases {
+            let d = damage_of(file_with(&t, false));
+            assert!(
+                d.len() == 1 && d[0].contains(want),
+                "want {want:?}, got {d:?}"
+            );
+            assert!(d[0].starts_with("track #0: "), "{d:?}");
+        }
+    }
+
+    #[test]
+    fn stsc_runs_out_of_order_are_damage() {
+        // Each run used to be measured up to the next one's first chunk
+        // before that was checked, which overflowed when it went backwards.
+        let good = tables(&[10, 20, 30, 40, 50, 60], 1);
+        let cases = [
+            (
+                words(&[0, 2, 1, 1, 1, 0, 1, 1]),
+                "`stsc` entry 1 starts at chunk 0, but chunks count from 1",
+            ),
+            (
+                words(&[0, 3, 1, 1, 1, 3, 1, 1, 2, 1, 1]),
+                "`stsc` entry 2 starts at chunk 2, but the entry before it starts at chunk 3",
+            ),
+            (
+                words(&[0, 2, 1, 1, 1, 1, 1, 1]),
+                "`stsc` entry 1 starts at chunk 1, but the entry before it starts at chunk 1",
+            ),
+        ];
+        for (stsc, want) in cases {
+            let t = Tables {
+                stsc,
+                ..good.clone()
+            };
+            assert_eq!(
+                damage_of(file_with(&t, false)),
+                [format!("track #0: {want}")]
+            );
+        }
+    }
+
+    #[test]
+    fn handler_and_sample_entry_of_other_kinds_are_damage() {
+        let f = file_with(&tables(&[10], 1), false);
+        let handler = |f: &[u8]| {
+            f.windows(16)
+                .position(|w| w.starts_with(b"hdlr") && w.ends_with(b"vide"))
+                .unwrap()
+                + 12
+        };
+        let with = |at: usize, t: &[u8; 4]| {
+            let mut g = f.clone();
+            g[at..at + 4].copy_from_slice(t);
+            damage_of(g)
+        };
+        assert_eq!(
+            with(handler(&f), b"soun"),
+            ["track #0: its handler says audio (`soun`), but its sample entry `hvc1` is video"]
+        );
+        // Image sequences (`pict`) and alpha planes (`auxv`) use video
+        // sample entries too.
+        assert!(with(handler(&f), b"pict").is_empty());
+        let entry = f.windows(4).position(|w| w == b"hvc1").unwrap();
+        assert_eq!(
+            with(entry, b"mp4a"),
+            ["track #0: its handler says video (`vide`), but its sample entry `mp4a` is audio"]
+        );
+        // An entry type we do not know says nothing.
+        assert!(with(entry, b"xxxx").is_empty());
+    }
+
+    #[test]
+    fn missing_boxes_and_truncation_are_damage() {
+        let f = file_with(&tables(&[10, 20], 1), true);
+        let d = damage_of(f[..f.len() - 5].to_vec());
+        assert!(
+            d[0].contains("ends 33 bytes into the 38-byte `mdat` box"),
+            "{d:?}"
+        );
+        assert!(d[1].contains("track #0: chunk 2 (bytes"), "{d:?}");
+        assert!(d[1].contains("runs past the end of the file"), "{d:?}");
+
+        let no_hdlr = file_with(&tables(&[10], 1), false);
+        let at = no_hdlr.windows(4).position(|w| w == b"hdlr").unwrap();
+        let mut f = no_hdlr.clone();
+        f[at..at + 4].copy_from_slice(b"hdlx");
+        assert_eq!(damage_of(f), ["track #0: it has no handler (`mdia/hdlr`)"]);
+
+        let no_moov = cat(&[bx(b"ftyp", b"isom\0\0\x02\0isom"), bx(b"mdat", &[1; 8])]);
+        assert_eq!(
+            damage_of(no_moov),
+            ["there is no `moov` box, so no index of the media"]
+        );
+    }
+
+    /// Structure-aware fuzzing: random box trees, encoded with 32-bit,
+    /// 64-bit and to-the-end sizes, then cut and corrupted.
+    mod fuzz {
+        use std::time::{Duration, Instant};
+
+        use proptest::collection::vec;
+        use proptest::prelude::*;
+
+        use super::super::*;
+        use super::{Tables, bx, file_with, tables, tree_stats, words};
+
+        #[derive(Debug, Clone, Copy)]
+        enum Size {
+            Short,
+            Large,
+            /// Size 0: to the end of the parent (or file). Only the last box
+            /// of a list is encoded this way; others fall back to `Short`.
+            ToEnd,
+        }
+
+        #[derive(Debug, Clone)]
+        enum Body {
+            Leaf([u8; 4], Vec<u8>),
+            Uuid([u8; 16], Vec<u8>),
+            Container([u8; 4], Vec<Gen>),
+            Stsd(Vec<Gen>),
+            /// A sample entry with zeroed fixed fields; only inside `stsd`.
+            Entry([u8; 4], Vec<Gen>),
+        }
+
+        #[derive(Debug, Clone)]
+        struct Gen {
+            size: Size,
+            body: Body,
+        }
+
+        fn encode_list(list: &[Gen]) -> Vec<u8> {
+            let mut out = Vec::new();
+            for (i, g) in list.iter().enumerate() {
+                encode(g, i + 1 == list.len(), &mut out);
+            }
+            out
+        }
+
+        fn encode(g: &Gen, last: bool, out: &mut Vec<u8>) {
+            let (t, body) = match &g.body {
+                Body::Leaf(t, p) => (*t, p.clone()),
+                Body::Uuid(u, p) => (*b"uuid", [&u[..], p].concat()),
+                Body::Container(t, c) => (*t, encode_list(c)),
+                Body::Stsd(c) => {
+                    let mut p = vec![0u8; 4];
+                    p.extend_from_slice(&(c.len() as u32).to_be_bytes());
+                    p.extend_from_slice(&encode_list(c));
+                    (*b"stsd", p)
+                }
+                Body::Entry(t, c) => {
+                    let fixed = if t == b"hvc1" { 78 } else { 28 };
+                    (*t, [vec![0u8; fixed], encode_list(c)].concat())
+                }
+            };
+            match (g.size, last) {
+                (Size::ToEnd, true) => out.extend_from_slice(&0u32.to_be_bytes()),
+                (Size::Large, _) => {
+                    out.extend_from_slice(&1u32.to_be_bytes());
+                    out.extend_from_slice(&t);
+                    out.extend_from_slice(&(16 + body.len() as u64).to_be_bytes());
+                    out.extend_from_slice(&body);
+                    return;
+                }
+                _ => out.extend_from_slice(&(8 + body.len() as u32).to_be_bytes()),
+            }
+            out.extend_from_slice(&t);
+            out.extend_from_slice(&body);
+        }
+
+        /// Whether the parse of `g` matches what was generated.
+        fn same(g: &Gen, b: &Mp4Box, top: bool) -> bool {
+            let kids = |c: &[Gen]| {
+                c.len() == b.children.len()
+                    && c.iter().zip(&b.children).all(|(g, b)| same(g, b, false))
+            };
+            match &g.body {
+                Body::Leaf(t, p) => {
+                    let dropped = top && matches!(t, b"mdat" | b"free" | b"skip" | b"wide");
+                    b.fourcc.0 == *t && b.payload == if dropped { &[][..] } else { &p[..] }
+                }
+                Body::Uuid(u, p) => b.uuid == Some(*u) && b.payload == *p,
+                Body::Container(t, c) => b.fourcc.0 == *t && kids(c),
+                Body::Stsd(c) => b.fourcc.0 == *b"stsd" && kids(c),
+                Body::Entry(t, c) => {
+                    b.fourcc.0 == *t && b.payload.iter().all(|&x| x == 0) && kids(c)
+                }
+            }
+        }
+
+        fn size() -> impl Strategy<Value = Size> {
+            prop_oneof![4 => Just(Size::Short), 1 => Just(Size::Large), 1 => Just(Size::ToEnd)]
+        }
+
+        fn leaf_type() -> impl Strategy<Value = [u8; 4]> {
+            // Printable, so QuickTime-style `meta` is recognised.
+            prop_oneof![
+                Just(*b"hdlr"),
+                Just(*b"stsz"),
+                Just(*b"stco"),
+                Just(*b"mdat"),
+                Just(*b"free"),
+                Just(*b"st3d"),
+                Just(*b"SA3D"),
+                proptest::array::uniform4(b'a'..=b'z').prop_filter("a leaf type", |t| {
+                    !CONTAINERS.contains(&t) && !matches!(t, b"stsd" | b"uuid")
+                }),
+            ]
+        }
+
+        fn container_type() -> impl Strategy<Value = [u8; 4]> {
+            proptest::sample::select(CONTAINERS.iter().map(|t| **t).collect::<Vec<_>>())
+        }
+
+        fn tree() -> impl Strategy<Value = Gen> {
+            let leaf = prop_oneof![
+                (leaf_type(), vec(any::<u8>(), 0..24)).prop_map(|(t, p)| Body::Leaf(t, p)),
+                (any::<[u8; 16]>(), vec(any::<u8>(), 0..24)).prop_map(|(u, p)| Body::Uuid(u, p)),
+            ];
+            let leaf = (size(), leaf).prop_map(|(size, body)| Gen { size, body });
+            leaf.prop_recursive(6, 48, 4, |inner| {
+                let entry = (
+                    size(),
+                    prop_oneof![Just(*b"hvc1"), Just(*b"mp4a")],
+                    vec(inner.clone(), 0..3),
+                )
+                    .prop_map(|(size, t, c)| Gen {
+                        size,
+                        body: Body::Entry(t, c),
+                    });
+                prop_oneof![
+                    3 => (size(), container_type(), vec(inner, 0..4)).prop_map(
+                        |(size, t, c)| Gen { size, body: Body::Container(t, c) }
+                    ),
+                    1 => (size(), vec(entry, 0..3))
+                        .prop_map(|(size, c)| Gen { size, body: Body::Stsd(c) }),
+                ]
+            })
+        }
+
+        /// A file: `ftyp`, then random top-level boxes.
+        fn file() -> impl Strategy<Value = (Vec<Gen>, Vec<u8>)> {
+            vec(tree(), 1..6).prop_map(|top| {
+                let mut f = bx(b"ftyp", b"isom\0\0\x02\0isom");
+                f.extend_from_slice(&encode_list(&top));
+                (top, f)
+            })
+        }
+
+        /// Parse `f`; check it took little time and that the tree is no
+        /// bigger than the input could describe.
+        fn parse_bounded(f: &[u8]) -> Result<Option<Mp4Tree>, TestCaseError> {
+            let start = Instant::now();
+            let r = read(&mut io::Cursor::new(f));
+            let damage = r.as_ref().map(|t| t.damage());
+            let elapsed = start.elapsed();
+            prop_assert!(
+                elapsed < Duration::from_secs(1),
+                "parse and check took {elapsed:?}"
+            );
+            if let Ok(d) = &damage {
+                prop_assert!(d.len() <= MAX_WARNINGS + 3 + f.len() / 8);
+            }
+            let Ok(t) = r else { return Ok(None) };
+            let (boxes, kept, depth) = tree_stats(&t);
+            prop_assert!(boxes <= f.len() / 8, "{boxes} boxes from {} bytes", f.len());
+            prop_assert!(kept <= f.len(), "kept {kept} of {} bytes", f.len());
+            prop_assert!(depth <= MAX_DEPTH);
+            prop_assert!(t.warnings.len() <= MAX_WARNINGS + 1);
+            Ok(Some(t))
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            #[test]
+            fn well_formed_trees_parse_exactly((top, f) in file()) {
+                let t = parse_bounded(&f)?.unwrap_or_default();
+                prop_assert!(t.warnings.is_empty(), "{:?}", t.warnings);
+                prop_assert!(t.truncated.is_none());
+                prop_assert_eq!(t.trailing_bytes, 0);
+                prop_assert_eq!(t.top.len(), top.len() + 1);
+                for (g, b) in top.iter().zip(&t.top[1..]) {
+                    prop_assert!(same(g, b, true), "{g:?}\nparsed as\n{b:?}");
+                }
+            }
+
+            #[test]
+            fn damaged_trees_never_panic(
+                (_, f) in file(),
+                cut in any::<prop::sample::Index>(),
+                flips in vec((any::<prop::sample::Index>(), any::<u8>()), 0..8),
+            ) {
+                let mut g = f.clone();
+                for (i, x) in &flips {
+                    let i = i.index(g.len());
+                    g[i] ^= x;
+                }
+                parse_bounded(&g)?;
+                parse_bounded(&g[..cut.index(g.len() + 1)])?;
+            }
+        }
+
+        fn sample_tables() -> impl Strategy<Value = (Tables, bool)> {
+            (
+                vec(0u32..300, 1..40),
+                1usize..6,
+                any::<bool>(),
+                any::<bool>(),
+            )
+                .prop_map(|(sizes, per_chunk, co64, faststart)| {
+                    let t = tables(&sizes, per_chunk);
+                    (Tables { co64, ..t }, faststart)
+                })
+        }
+
+        /// A table field: usually small, so that entries interact, but
+        /// sometimes at or near the limits of its 32 bits.
+        fn field(small: u32) -> impl Strategy<Value = u32> {
+            prop_oneof![
+                8 => 0..small,
+                1 => Just(u32::MAX),
+                1 => any::<u32>(),
+            ]
+        }
+
+        /// Consistent tables for runs of (chunks, samples per chunk), one
+        /// `stsc` entry per run, with sample sizes taken in turn from
+        /// `sizes`.
+        fn tables_of_runs(runs: &[(u32, u32)], sizes: &[u32]) -> Tables {
+            let (mut stsc, mut all, mut chunks) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut first, mut at) = (1, 0u64);
+            for &(n, per_chunk) in runs {
+                stsc.extend([first, per_chunk, 1]);
+                for _ in 0..n {
+                    chunks.push(at);
+                    for _ in 0..per_chunk {
+                        let s = sizes[all.len() % sizes.len()];
+                        all.push(s);
+                        at += s as u64;
+                    }
+                }
+                first += n;
+            }
+            let n = all.len() as u32;
+            Tables {
+                stts: words(&[0, 1, n, 1000]),
+                stsz: [words(&[0, 0, n]), words(&all)].concat(),
+                stsc: [words(&[0, runs.len() as u32]), words(&stsc)].concat(),
+                chunks,
+                co64: false,
+                data_len: at as usize,
+            }
+        }
+
+        /// Sample tables as a few changed bytes inside `moov` leave them:
+        /// consistent tables with some of their words, entry counts
+        /// included, set to arbitrary values.
+        fn damaged_tables() -> impl Strategy<Value = (Tables, bool)> {
+            let runs = vec((1u32..4, 1u32..4), 1..5);
+            let sizes = vec(0u32..300, 1..4);
+            let edits = vec((0usize..4, any::<prop::sample::Index>(), field(8)), 1..4);
+            (runs, sizes, edits, any::<bool>(), any::<bool>()).prop_map(
+                |(runs, sizes, edits, co64, faststart)| {
+                    let mut t = Tables {
+                        co64,
+                        ..tables_of_runs(&runs, &sizes)
+                    };
+                    for (table, at, value) in edits {
+                        let payload = match table {
+                            0 => &mut t.stts,
+                            1 => &mut t.stsz,
+                            2 => &mut t.stsc,
+                            _ => {
+                                let i = at.index(t.chunks.len());
+                                t.chunks[i] = value as u64;
+                                continue;
+                            }
+                        };
+                        // Any word after the version and flags.
+                        let i = 4 + 4 * at.index(payload.len() / 4 - 1);
+                        payload[i..i + 4].copy_from_slice(&value.to_be_bytes());
+                    }
+                    (t, faststart)
+                },
+            )
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            /// `cargo test` builds with overflow checks, so this also
+            /// catches arithmetic on table values that would wrap.
+            #[test]
+            fn damaged_sample_tables_never_panic((t, faststart) in damaged_tables()) {
+                parse_bounded(&file_with(&t, faststart))?;
+            }
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(128))]
+
+            #[test]
+            fn consistent_tables_are_never_damage((t, faststart) in sample_tables()) {
+                let f = file_with(&t, faststart);
+                let d = parse_bounded(&f)?.map(|t| t.damage());
+                prop_assert_eq!(d, Some(vec![]));
+            }
+
+            #[test]
+            fn every_cut_is_an_error_or_damage(
+                (t, faststart) in sample_tables(),
+                cut in any::<prop::sample::Index>(),
+            ) {
+                let f = file_with(&t, faststart);
+                let g = &f[..cut.index(f.len())];
+                if let Some(t) = parse_bounded(g)? {
+                    prop_assert!(!t.damage().is_empty(), "{} of {} bytes", g.len(), f.len());
+                }
+            }
+
+            #[test]
+            fn damaged_tables_never_panic(
+                (t, faststart) in sample_tables(),
+                flips in vec((any::<prop::sample::Index>(), any::<u8>()), 1..6),
+            ) {
+                let mut f = file_with(&t, faststart);
+                for (i, x) in &flips {
+                    let i = i.index(f.len());
+                    f[i] ^= x;
+                }
+                parse_bounded(&f)?;
+            }
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(48))]
+
+            #[test]
+            fn every_truncation_of_small_trees((_, f) in file()) {
+                for len in 0..f.len().min(512) {
+                    parse_bounded(&f[..len])?;
+                }
+            }
         }
     }
 }

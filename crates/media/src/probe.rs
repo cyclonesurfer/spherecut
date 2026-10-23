@@ -1,7 +1,9 @@
 //! `spherecut probe`: everything we can learn about a media file without
 //! decoding it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fs::File;
+use std::io::{BufReader, Read, Seek};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -10,7 +12,7 @@ use spherecut_core::Rational;
 use crate::detect::{self, CameraGuess};
 use crate::ff;
 use crate::ffi;
-use crate::mp4::{self, Mp4Tree};
+use crate::mp4::{self, Cursor, FirstBox, Mp4Box};
 use crate::spherical::{self, TrackSpherical};
 use crate::{MediaError, init};
 
@@ -23,7 +25,28 @@ pub struct ProbeReport {
     /// Present for MP4/MOV files, which is every camera format we support.
     pub mp4: Option<Mp4Summary>,
     pub camera: Option<CameraGuess>,
+    /// How much of the file's structure was checked for `damage`.
+    pub structure: StructureCheck,
+    /// Why the file looks truncated or corrupt. A healthy file has none;
+    /// `spherecut probe` fails when there are any.
+    pub damage: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+/// How much of a file's structure probe checks for damage, beyond what
+/// FFmpeg needs to open it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "check", rename_all = "snake_case")]
+pub enum StructureCheck {
+    /// MP4/MOV: every top-level box, and each track's sample tables
+    /// against the media data.
+    Full,
+    /// Matroska/WebM: only that the file is as long as its header says.
+    /// Damage inside goes unnoticed.
+    Length,
+    /// Nothing, for the reason given: truncation and corruption go
+    /// unnoticed.
+    None { why: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,7 +137,22 @@ pub struct Mp4Summary {
     pub top_level: Vec<(String, u64)>,
     /// Bytes after the last top-level box (vendor trailers).
     pub trailing_bytes: u64,
+    /// The top-level box cut off by the end of the file, if any.
+    pub truncated: Option<TruncatedBox>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TruncatedBox {
+    /// None when the file ends before the box type.
+    pub fourcc: Option<String>,
+    pub offset: u64,
+    pub header_len: u64,
+    /// The size its header claims; None when the file ends before it.
+    pub size: Option<u64>,
+    /// Bytes of it present in the file, fewer than `header_len` when the
+    /// header itself is cut short.
+    pub present: u64,
 }
 
 fn rational(r: ff::Rational) -> Option<Rational> {
@@ -171,7 +209,8 @@ fn disposition_names(d: ff::format::stream::Disposition) -> Vec<String> {
 }
 
 /// Probe a file. Never panics on bad input; returns
-/// [`MediaError::Open`] for files FFmpeg can't read at all.
+/// [`MediaError::Open`] for files FFmpeg can't read at all, and lists in
+/// [`ProbeReport::damage`] the structural damage of files it can.
 pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     init();
     let meta = std::fs::metadata(path).map_err(|e| MediaError::Io {
@@ -181,35 +220,81 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     if !meta.is_file() {
         return Err(MediaError::NotAFile(path.to_path_buf()));
     }
+    if meta.len() == 0 {
+        return Err(MediaError::Open {
+            path: path.to_path_buf(),
+            reason: "the file is empty".into(),
+        });
+    }
     let mut warnings = Vec::new();
+    let mut damage = Vec::new();
 
-    let tree: Option<Mp4Tree> = match mp4::read_file(path) {
-        Ok(t) => Some(t),
-        Err(mp4::Mp4Error::NotMp4(_)) => None,
+    let (mut tree, not_mp4) = match mp4::read_file(path) {
+        Ok(t) => (Some(t), false),
+        Err(mp4::Mp4Error::NotMp4(_)) => (None, true),
         Err(e) => {
-            warnings.push(format!("MP4 structure: {e}"));
-            None
+            damage.push(format!("MP4 structure: {e}"));
+            (None, false)
         }
     };
     if let Some(t) = &tree {
-        warnings.extend(t.warnings.iter().map(|w| format!("MP4 structure: {w}")));
+        damage.extend(t.damage());
     }
 
     let ictx = ff::format::input(path).map_err(|e| MediaError::Open {
         path: path.to_path_buf(),
-        reason: describe_open_error(e, tree.is_some()),
+        reason: describe_open_error(e, tree.is_some(), &damage),
     })?;
-
-    let sph: Vec<TrackSpherical> = tree
-        .as_ref()
-        .map(spherical::read_tracks)
-        .unwrap_or_default();
-    let handlers: Vec<Option<String>> = tree
-        .as_ref()
-        .map(|t| t.tracks().map(detect::handler_name).collect())
-        .unwrap_or_default();
-
     let fmt = ictx.format();
+
+    let mov_family = fmt.name().split(',').any(|n| n == "mov" || n == "mp4");
+    if not_mp4 && mov_family {
+        // FFmpeg found MP4/MOV boxes, so the first box is damaged or of a
+        // type we do not know. Check the rest of the structure anyway.
+        match mp4::read_file_with(path, FirstBox::Any) {
+            Ok(t) => {
+                let first = t.top.first().map(|b| b.fourcc);
+                let first = first.or(t.truncated.and_then(|c| c.fourcc));
+                warnings.push(format!(
+                    "FFmpeg reads this as MP4/MOV, but its first box{} is not of a type MP4/MOV files start with",
+                    first.map(|f| format!(" `{f}`")).unwrap_or_default()
+                ));
+                damage.extend(t.damage());
+                tree = Some(t);
+            }
+            Err(e) => damage.push(format!(
+                "FFmpeg reads this as MP4/MOV, but its structure cannot be checked: {}",
+                match e {
+                    mp4::Mp4Error::NotMp4(why) => why,
+                    e => e.to_string(),
+                }
+            )),
+        }
+    }
+
+    let structure = if tree.is_some() {
+        StructureCheck::Full
+    } else if mov_family {
+        StructureCheck::None {
+            why: "its MP4/MOV boxes could not be read".into(),
+        }
+    } else if fmt.name().split(',').any(|n| n == "matroska") {
+        check_matroska(path, meta.len(), &mut damage)
+    } else {
+        StructureCheck::None {
+            why: format!(
+                "spherecut checks MP4/MOV and Matroska files, not {}",
+                fmt.description()
+            ),
+        }
+    };
+
+    let traks: Vec<&Mp4Box> = tree
+        .as_ref()
+        .map(|t| t.tracks().collect())
+        .unwrap_or_default();
+    let trak_of = trak_matcher(&traks);
+
     let av_tb = Rational::new(1, ff::ffi::AV_TIME_BASE as i64).unwrap_or(Rational::ONE);
     let container = Container {
         format: fmt.name().to_string(),
@@ -223,6 +308,8 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     };
 
     let mut streams = Vec::new();
+    // For each `trak`, the first stream that comes from it.
+    let mut trak_stream: Vec<Option<usize>> = vec![None; traks.len()];
     for st in ictx.streams() {
         let par = st.parameters();
         let f = ffi::codecpar_fields(&par);
@@ -237,12 +324,14 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         let tb = rational(st.time_base()).unwrap_or(Rational::ONE);
         let st_tags = tags(st.metadata());
         let idx = st.index();
-        // The MOV demuxer creates one stream per `trak`, in file order.
-        let track_sph = sph.get(idx).cloned().unwrap_or_default();
-        let handler = handlers
-            .get(idx)
-            .cloned()
-            .flatten()
+        let trak_index = trak_of(idx, st.id());
+        if let Some(i) = trak_index {
+            trak_stream[i].get_or_insert(streams.len());
+        }
+        let trak = trak_index.and_then(|i| traks.get(i));
+        let track_sph = trak.map(|t| spherical::read_track(t)).unwrap_or_default();
+        let handler = trak
+            .and_then(|t| detect::handler_name(t))
             .or_else(|| st_tags.get("handler_name").cloned());
         streams.push(StreamInfo {
             index: idx,
@@ -293,8 +382,32 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         });
     }
 
+    // A video or audio `trak` that FFmpeg reads as another kind of stream
+    // (often "data") has a track description FFmpeg could not follow.
+    for (i, trak) in traks.iter().enumerate() {
+        let handler = mp4::handler_type(trak);
+        let want = match handler.map(|t| t.0) {
+            Some(t) if t == *b"vide" => StreamKind::Video,
+            Some(t) if t == *b"soun" => StreamKind::Audio,
+            _ => continue,
+        };
+        let Some(st) = trak_stream[i].and_then(|s| streams.get(s)) else {
+            warnings.push(format!("track #{i} has no FFmpeg stream"));
+            continue;
+        };
+        if st.kind != want {
+            damage.push(format!(
+                "track #{i} is {} (handler `{}`, sample entry `{}`) but FFmpeg reads stream #{} as {}, so its track description is damaged",
+                kind_name(want),
+                handler.map(|t| t.to_string()).unwrap_or_default(),
+                sample_entry_type(trak).unwrap_or_else(|| "none".into()),
+                st.index,
+                kind_name(st.kind),
+            ));
+        }
+    }
     let camera = detect::guess(path, tree.as_ref(), &streams, &container.tags);
-    let mp4 = tree.map(|t| Mp4Summary {
+    let mp4 = tree.as_ref().map(|t| Mp4Summary {
         brand: t.ftyp_brand().map(|b| b.to_string()),
         top_level: t
             .top
@@ -302,7 +415,14 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
             .map(|b| (b.fourcc.to_string(), b.size))
             .collect(),
         trailing_bytes: t.trailing_bytes,
-        warnings: t.warnings,
+        truncated: t.truncated.map(|c| TruncatedBox {
+            fourcc: c.fourcc.map(|f| f.to_string()),
+            offset: c.offset,
+            header_len: c.header_len,
+            size: c.size,
+            present: c.present,
+        }),
+        warnings: t.warnings.clone(),
     });
 
     Ok(ProbeReport {
@@ -312,12 +432,139 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
         streams,
         mp4,
         camera,
+        structure,
+        damage,
         warnings,
     })
 }
 
-fn describe_open_error(e: ff::Error, looked_like_mp4: bool) -> String {
+/// Check that a Matroska/WebM file is as long as its Segment says. Live
+/// recordings leave the size unknown.
+fn check_matroska(path: &Path, file_size: u64, damage: &mut Vec<String>) -> StructureCheck {
+    let segment = File::open(path)
+        .ok()
+        .and_then(|f| matroska_segment(&mut BufReader::new(f)));
+    match segment {
+        Some((start, Some(size))) => {
+            if start.saturating_add(size) > file_size {
+                damage.push(format!(
+                    "the file holds {} of the {size} bytes its Matroska Segment says it has: it was cut short",
+                    file_size.saturating_sub(start)
+                ));
+            }
+            StructureCheck::Length
+        }
+        Some((_, None)) => StructureCheck::None {
+            why: "its Matroska Segment does not record its size, as in live recordings".into(),
+        },
+        None => StructureCheck::None {
+            why: "its Matroska header could not be read".into(),
+        },
+    }
+}
+
+const EBML_HEADER: u64 = 0x1A45_DFA3;
+const EBML_VOID: u64 = 0xEC;
+const MATROSKA_SEGMENT: u64 = 0x1853_8067;
+
+/// Where the data of a Matroska file's Segment starts, and its size if
+/// known: the EBML header comes first, then the Segment, perhaps after a
+/// few Void elements.
+fn matroska_segment<R: Read + Seek>(r: &mut R) -> Option<(u64, Option<u64>)> {
+    let skip = |r: &mut R, size: Option<u64>| r.seek_relative(i64::try_from(size?).ok()?).ok();
+    if ebml_id(r)? != EBML_HEADER {
+        return None;
+    }
+    let size = ebml_size(r)?;
+    skip(r, size)?;
+    for _ in 0..8 {
+        let id = ebml_id(r)?;
+        let size = ebml_size(r)?;
+        match id {
+            MATROSKA_SEGMENT => return Some((r.stream_position().ok()?, size)),
+            EBML_VOID => skip(r, size)?,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// An EBML variable-length integer of at most `max_len` bytes, still
+/// with its length marker (the first set bit), and its length.
+fn ebml_vint<R: Read>(r: &mut R, max_len: u32) -> Option<(u64, u32)> {
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b).ok()?;
+    let len = b[0].leading_zeros() + 1;
+    if len > max_len {
+        return None;
+    }
+    let mut v = u64::from(b[0]);
+    for _ in 1..len {
+        r.read_exact(&mut b).ok()?;
+        v = v << 8 | u64::from(b[0]);
+    }
+    Some((v, len))
+}
+
+/// An element ID, which keeps its length marker.
+fn ebml_id<R: Read>(r: &mut R) -> Option<u64> {
+    ebml_vint(r, 4).map(|(id, _)| id)
+}
+
+/// An element size: Some(None) for the all-ones "unknown" size.
+fn ebml_size<R: Read>(r: &mut R) -> Option<Option<u64>> {
+    let (v, len) = ebml_vint(r, 8)?;
+    let mask = (1u64 << (7 * len)) - 1;
+    Some((v & mask != mask).then_some(v & mask))
+}
+
+fn kind_name(k: StreamKind) -> String {
+    format!("{k:?}").to_lowercase()
+}
+
+/// The track ID from `tkhd`, which FFmpeg's MOV demuxer uses as the
+/// stream ID.
+fn track_id(trak: &Mp4Box) -> Option<u32> {
+    let tkhd = trak.child(b"tkhd")?;
+    let mut c = Cursor::new(&tkhd.payload);
+    let (version, _) = c.version_flags()?;
+    // Creation and modification times come first.
+    c.take(if version == 1 { 16 } else { 8 })?;
+    c.u32()
+}
+
+/// Match FFmpeg streams to `trak`s: map (stream index, stream ID) to the
+/// position of the stream's `trak`. Cover art in `udta` gives FFmpeg
+/// streams that have no `trak`, so match by track ID when every track has
+/// a distinct one, and by position otherwise.
+fn trak_matcher(traks: &[&Mp4Box]) -> impl Fn(usize, i32) -> Option<usize> + use<> {
+    let by_id: HashMap<u32, usize> = traks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| Some((track_id(t)?, i)))
+        .collect();
+    let count = traks.len();
+    let use_ids = by_id.len() == count;
+    move |index, id| {
+        if use_ids {
+            by_id.get(&u32::try_from(id).ok()?).copied()
+        } else {
+            (index < count).then_some(index)
+        }
+    }
+}
+
+/// The type of a track's first sample entry, e.g. "hvc1".
+fn sample_entry_type(trak: &Mp4Box) -> Option<String> {
+    let stsd = trak.path(&[b"mdia", b"minf", b"stbl", b"stsd"])?;
+    Some(stsd.children.first()?.fourcc.to_string())
+}
+
+fn describe_open_error(e: ff::Error, looked_like_mp4: bool, damage: &[String]) -> String {
     let base = e.to_string();
+    if let Some(why) = damage.first() {
+        return format!("{base}: {why}");
+    }
     match e {
         ff::Error::InvalidData if looked_like_mp4 => {
             format!(
@@ -326,5 +573,73 @@ fn describe_open_error(e: ff::Error, looked_like_mp4: bool) -> String {
         }
         ff::Error::InvalidData => format!("{base}: not a recognised media file"),
         _ => base,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    /// An EBML element; `size` None writes the 8-byte "unknown" size.
+    fn el(id: u32, payload: &[u8], size: Option<u64>) -> Vec<u8> {
+        let id = id.to_be_bytes();
+        let skip = id.iter().position(|&b| b != 0).unwrap_or(3);
+        let mut v = id[skip..].to_vec();
+        match size {
+            // The 1-byte form where it fits.
+            Some(n) if n < 127 => v.push(0x80 | n as u8),
+            Some(n) => v.extend_from_slice(&(n | 1 << 56).to_be_bytes()),
+            None => v.extend_from_slice(&[0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+        }
+        v.extend_from_slice(payload);
+        v
+    }
+
+    fn segment(f: Vec<u8>) -> Option<(u64, Option<u64>)> {
+        matroska_segment(&mut io::Cursor::new(f))
+    }
+
+    #[test]
+    fn matroska_segment_is_found_after_the_header() {
+        let doc_type = el(0x4282, b"webm", Some(4));
+        let header = el(0x1A45_DFA3, &doc_type, Some(doc_type.len() as u64));
+        let at = header.len() as u64 + 4 + 8;
+        let body = vec![0; 300];
+        let seg = |size| el(0x1853_8067, &body, size);
+
+        let f = [header.clone(), seg(Some(300))].concat();
+        assert_eq!(segment(f), Some((at, Some(300))));
+        // Live recordings leave the size unknown.
+        let f = [header.clone(), seg(None)].concat();
+        assert_eq!(segment(f), Some((at, None)));
+        // Void elements may come first.
+        let void = el(0xEC, &[0; 5], Some(5));
+        let f = [header.clone(), void.clone(), seg(Some(300))].concat();
+        assert_eq!(segment(f), Some((at + void.len() as u64, Some(300))));
+        // Cut short, the size still says how long it was.
+        let f = [header.clone(), seg(Some(300))].concat();
+        assert_eq!(
+            segment(f[..at as usize + 10].to_vec()),
+            Some((at, Some(300)))
+        );
+    }
+
+    #[test]
+    fn non_matroska_input_has_no_segment() {
+        let doc_type = el(0x4282, b"webm", Some(4));
+        let header = el(0x1A45_DFA3, &doc_type, Some(doc_type.len() as u64));
+        let cluster = el(0x1F43_B675, &[0; 8], Some(8));
+        for f in [
+            Vec::new(),
+            b"RIFF\x24\0\0\0WAVEfmt ".to_vec(),
+            header[..header.len() - 2].to_vec(),
+            [header.clone(), cluster].concat(),
+            // An ID longer than 4 bytes.
+            [header, vec![0x08, 1, 2, 3, 4]].concat(),
+        ] {
+            assert_eq!(segment(f.clone()), None, "{f:?}");
+        }
     }
 }
