@@ -6,14 +6,22 @@
 //! can't decode the stream, opening or the first frame fails with the
 //! reason, and the caller chooses what to do.
 //!
-//! Nor does a damaged file pass for a shorter one. Only a clean end of
-//! file ends the stream with `None`. A read error, a cancelled read, or a
-//! file that ends before the samples its index lists ends it with an
-//! error, after the frames that could still be decoded. A packet the
-//! demuxer reports as invalid data is skipped, since the demuxer can
-//! resync after one and later frames keep their timestamps, but with a
-//! warning, and counted in [`VideoDecoder::skipped_packets`]; after
-//! [`MAX_UNREADABLE_IN_A_ROW`] in a row the file counts as unreadable.
+//! A read error or a cancelled read ends the stream with an error, after
+//! the frames that could still be decoded, never with `None`. So does a
+//! file that ends before the samples its demuxer's index lists for the
+//! stream, which is how an MP4 or MOV with its `moov` first looks when it
+//! is cut before the end of the stream's data. The sample the cut falls
+//! in is dropped, not handed to the decoder. A cut that the index doesn't
+//! reach goes unnoticed: the stream ends with `None` after the last whole
+//! frame, and only FFmpeg's log mentions it. That is the case for a
+//! Matroska file cut in a cluster, and for most cuts in a fragmented MP4,
+//! whose index only grows as its fragments are read.
+//!
+//! A packet the demuxer reports as invalid data is skipped, since the
+//! demuxer can resync after one and later frames keep their timestamps,
+//! but with a warning, and counted in [`VideoDecoder::skipped_packets`];
+//! after [`MAX_UNREADABLE_IN_A_ROW`] in a row the file counts as
+//! unreadable.
 
 use std::ffi::c_int;
 use std::path::{Path, PathBuf};
@@ -113,6 +121,10 @@ pub struct VideoDecoder {
     time_base: Rational,
     dec: ff::decoder::Video,
     hw: Option<Arc<HwDevice>>,
+    /// A packet read ahead, after one flagged corrupt (see `next_packet`).
+    lookahead: Option<ff::Packet>,
+    /// The demuxer has nothing more to give.
+    read_done: bool,
     eof_sent: bool,
     done: bool,
     /// Why reading stopped before a clean end of file; reported once the
@@ -226,6 +238,8 @@ impl VideoDecoder {
             time_base,
             dec,
             hw,
+            lookahead: None,
+            read_done: false,
             eof_sent: false,
             done: false,
             read_error: None,
@@ -304,7 +318,7 @@ impl VideoDecoder {
                 // Drained; receive_frame will report Eof next.
                 continue;
             }
-            match self.read_packet() {
+            match self.next_packet() {
                 Some(pkt) => self
                     .dec
                     .send_packet(&pkt)
@@ -319,15 +333,53 @@ impl VideoDecoder {
         }
     }
 
-    /// The next packet of our stream, or `None` once there are no more:
-    /// at a clean end of file, or with `read_error` saying why not.
+    /// The next packet to decode, or `None` once there are no more (see
+    /// `read_packet`).
+    ///
+    /// A sample cut short, by the end of a truncated file or by a read
+    /// that failed, comes back flagged corrupt. So such a packet waits for
+    /// the read after it: if reading stops there with an error, the packet
+    /// is part of that failure and is dropped, rather than sent to the
+    /// decoder for an error of its own that would come first.
+    fn next_packet(&mut self) -> Option<ff::Packet> {
+        let pkt = match self.lookahead.take() {
+            Some(pkt) => pkt,
+            None => self.read_packet()?,
+        };
+        if !pkt.is_corrupt() {
+            return Some(pkt);
+        }
+        match self.read_packet() {
+            Some(next) => {
+                self.lookahead = Some(next);
+                Some(pkt)
+            }
+            None if self.read_error.is_some() => None,
+            None => Some(pkt),
+        }
+    }
+
+    /// The next packet of our stream from the demuxer, or `None` once
+    /// there are no more: at a clean end of file, or with `read_error`
+    /// saying why not.
     fn read_packet(&mut self) -> Option<ff::Packet> {
+        if self.read_done {
+            return None;
+        }
+        let pkt = self.demux();
+        self.read_done = pkt.is_none();
+        pkt
+    }
+
+    fn demux(&mut self) -> Option<ff::Packet> {
         let mut unreadable = 0;
         loop {
             let mut pkt = ff::Packet::empty();
             match pkt.read(&mut self.ictx) {
                 Ok(()) if pkt.stream() == self.stream_index => return Some(pkt),
                 Ok(()) => unreadable = 0,
+                // FFmpeg reports a read error that made the demuxer stop
+                // as that error, not as the end of the file.
                 Err(ff::Error::Eof) => {
                     self.read_error = self.truncation();
                     return None;

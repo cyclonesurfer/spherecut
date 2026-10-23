@@ -1,5 +1,9 @@
 //! `VideoDecoder` on files it can't read to the end: a damaged file must
 //! end with an error, never pass for a shorter one.
+//!
+//! The files are cut at offsets taken from their own sample tables, at
+//! every video sample, so what each test expects doesn't depend on how
+//! the encoder or muxer laid out the bytes.
 
 // Test helpers outside #[test] functions; panicking is the point here.
 #![allow(clippy::unwrap_used)]
@@ -24,7 +28,7 @@ fn tmp(name: &str) -> PathBuf {
     d
 }
 
-/// An H.264 clip with stereo audio, interleaved like a camera file.
+/// An H.264 clip with stereo audio.
 fn clip(dir: &Path, name: &str, frames: u32) -> PathBuf {
     let spec = Spec {
         name: name.into(),
@@ -41,9 +45,16 @@ fn clip(dir: &Path, name: &str, frames: u32) -> PathBuf {
     media::write(&spec, dir).unwrap()
 }
 
-/// Remux `src` with `moov` before `mdat`, so that a cut in the media data
-/// leaves an index FFmpeg can open.
-fn faststart(src: &Path, dst: &Path) {
+#[derive(Clone, Copy, PartialEq)]
+enum Layout {
+    /// `moov` before `mdat`, samples interleaved like a camera file's.
+    Faststart,
+    /// `moov` after `mdat`.
+    MoovAtEnd,
+}
+
+/// Remux `src` into `dst` laid out as `layout` says.
+fn remux(src: &Path, dst: &Path, layout: Layout) {
     let mut ictx = ff::format::input(src).unwrap();
     let mut octx = ff::format::output(dst).unwrap();
     for st in ictx.streams() {
@@ -54,7 +65,9 @@ fn faststart(src: &Path, dst: &Path) {
         out.set_time_base(st.time_base());
     }
     let mut opts = ff::Dictionary::new();
-    opts.set("movflags", "faststart");
+    if layout != Layout::MoovAtEnd {
+        opts.set("movflags", "faststart");
+    }
     octx.write_header_with(opts).unwrap();
     for (st, mut pkt) in ictx.packets() {
         pkt.rescale_ts(st.time_base(), octx.stream(st.index()).unwrap().time_base());
@@ -62,6 +75,20 @@ fn faststart(src: &Path, dst: &Path) {
         pkt.write_interleaved(&mut octx).unwrap();
     }
     octx.write_trailer().unwrap();
+}
+
+/// Where each sample of `path`'s best stream of type `kind` lies, as
+/// (offset, size), in file order.
+fn samples(path: &Path, kind: ff::media::Type) -> Vec<(u64, u64)> {
+    let mut ictx = ff::format::input(path).unwrap();
+    let index = ictx.streams().best(kind).unwrap().index();
+    let mut v: Vec<_> = ictx
+        .packets()
+        .filter(|(st, _)| st.index() == index)
+        .map(|(_, p)| (p.position() as u64, p.size() as u64))
+        .collect();
+    v.sort_unstable();
+    v
 }
 
 /// Decode until the stream ends: the frame count, and the error if it
@@ -84,48 +111,78 @@ fn decode_reason(e: &MediaError) -> &str {
     }
 }
 
-#[test]
-fn a_file_cut_in_its_media_data_ends_with_an_error_after_its_frames() {
-    let dir = tmp("cut");
-    let good = clip(&dir, "t-cut", 30);
-    let fast = dir.join("t-cut-faststart.mp4");
-    faststart(&good, &fast);
-    let bytes = std::fs::read(&fast).unwrap();
-
-    // Whole files decode to the end without complaint, whichever end moov
-    // is at.
-    for p in [&good, &fast] {
-        let mut d = VideoDecoder::open(p, None, None).unwrap();
-        let (n, e) = decode(&mut d);
-        assert!(e.is_none(), "{}: {e:?}", p.display());
-        assert_eq!(n, 30);
-        assert_eq!(d.skipped_packets(), 0);
-    }
-
-    // Cut at 60%: moov survives, the last samples it lists don't.
-    let cut = dir.join("t-cut-60.mp4");
-    std::fs::write(&cut, &bytes[..bytes.len() * 6 / 10]).unwrap();
-    let mut d = VideoDecoder::open(&cut, None, None).unwrap();
+/// Decode `path` and check that it decodes whole: `frames` frames, then
+/// the end of the stream.
+fn assert_decodes_whole(path: &Path, frames: usize) {
+    let mut d = VideoDecoder::open(path, None, None).unwrap();
     let (n, e) = decode(&mut d);
-    assert!(n > 0 && n < 30, "{n} frames");
-    let e = e.expect("a truncated file must not end like a whole one");
-    let reason = decode_reason(&e).to_string();
-    assert!(reason.contains("truncated"), "{reason}");
-    assert!(
-        reason.contains(&format!("ends at byte {}", bytes.len() * 6 / 10)),
-        "{reason}"
-    );
-    assert!(reason.contains(&format!("after {n} frames")), "{reason}");
-    // The stream stays ended with the same error.
-    let again = d.next_frame().unwrap_err();
-    assert_eq!(decode_reason(&again), reason);
+    assert!(e.is_none(), "{}: {e:?}", path.display());
+    assert_eq!(n, frames, "{}", path.display());
+    assert_eq!(d.skipped_packets(), 0);
+}
 
-    // With moov at the end, the same cut loses the index: opening fails.
-    let good_bytes = std::fs::read(&good).unwrap();
-    let cut_tail = dir.join("t-cut-tail.mp4");
-    std::fs::write(&cut_tail, &good_bytes[..good_bytes.len() * 6 / 10]).unwrap();
+#[test]
+fn a_file_cut_in_its_video_data_ends_with_an_error_after_the_whole_frames() {
+    let dir = tmp("cut");
+    let src = clip(&dir, "t-cut", 30);
+    let fast = dir.join("t-cut-faststart.mp4");
+    remux(&src, &fast, Layout::Faststart);
+    assert_decodes_whole(&fast, 30);
+    let bytes = std::fs::read(&fast).unwrap();
+    let video = samples(&fast, ff::media::Type::Video);
+    assert_eq!(video.len(), 30);
+    let video_end = video.iter().map(|(pos, size)| pos + size).max().unwrap();
+
+    // Cut where each video sample starts, in its middle, and in whatever
+    // lies between it and the one before (audio, in this file). The moov
+    // survives every cut, and so does each sample before the cut.
+    let cut = dir.join("t-cut-part.mp4");
+    let mut between = 0;
+    for k in 1..video.len() {
+        let (pos, size) = video[k];
+        let prev_end = video[k - 1].0 + video[k - 1].1;
+        let mut cuts = vec![pos, pos + size / 2];
+        if prev_end < pos {
+            between += 1;
+            cuts.push((prev_end + pos) / 2);
+        }
+        for at in cuts {
+            std::fs::write(&cut, &bytes[..at as usize]).unwrap();
+            let mut d = VideoDecoder::open(&cut, None, None).unwrap();
+            let (n, e) = decode(&mut d);
+            let Some(e) = e else {
+                panic!("cut at byte {at}, in sample {k}: ended like a whole file after {n} frames");
+            };
+            // The k whole samples decode; the one the cut falls in, if any,
+            // is not decoded.
+            let want = format!(
+                "reading: the file is truncated: it ends at byte {at}, but its index \
+                 lists video data up to byte {video_end} (after {k} frames)"
+            );
+            assert_eq!(decode_reason(&e), want, "cut in sample {k}");
+            assert_eq!(n, k, "cut at byte {at}");
+            assert_eq!(d.skipped_packets(), 0);
+            // The stream stays ended with the same error.
+            assert_eq!(decode_reason(&d.next_frame().unwrap_err()), want);
+        }
+    }
+    assert!(between > 0, "the audio must be interleaved with the video");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn with_moov_at_the_end_a_cut_in_the_media_data_fails_to_open() {
+    let dir = tmp("tail");
+    let src = clip(&dir, "t-tail", 30);
+    let tail = dir.join("t-tail-moov-last.mp4");
+    remux(&src, &tail, Layout::MoovAtEnd);
+    assert_decodes_whole(&tail, 30);
+    let bytes = std::fs::read(&tail).unwrap();
+    let video = samples(&tail, ff::media::Type::Video);
+    let cut = dir.join("t-tail-part.mp4");
+    std::fs::write(&cut, &bytes[..video[15].0 as usize]).unwrap();
     assert!(matches!(
-        VideoDecoder::open(&cut_tail, None, None),
+        VideoDecoder::open(&cut, None, None),
         Err(MediaError::Open { .. })
     ));
     std::fs::remove_dir_all(&dir).ok();
@@ -134,26 +191,40 @@ fn a_file_cut_in_its_media_data_ends_with_an_error_after_its_frames() {
 #[test]
 fn a_cancelled_read_is_an_error_not_the_end_of_the_stream() {
     let dir = tmp("cancel");
-    // Several times FFmpeg's 32 KiB read buffer, so reads go on after the
-    // first frame.
-    let path = clip(&dir, "t-cancel", 90);
-    assert!(std::fs::metadata(&path).unwrap().len() > 3 * 32 * 1024);
+    let path = clip(&dir, "t-cancel", 120);
+    // A cancel takes effect at the next read from the file, which FFmpeg
+    // reads 32 KiB at a time. The cancels below come in the first third of
+    // a clip several times that size, so reads are still to come.
+    let len = std::fs::metadata(&path).unwrap().len();
+    assert!(len > 3 * 32 * 1024, "{len} bytes");
 
-    let cancel = Arc::new(AtomicBool::new(false));
-    let mut d = VideoDecoder::open_cancellable(&path, None, None, cancel.clone()).unwrap();
-    assert!(d.next_frame().unwrap().is_some());
-    cancel.store(true, Ordering::Relaxed);
-    let (n, e) = decode(&mut d);
-    assert!(n < 89, "decoded {n} more frames after the cancel");
-    let e = e.expect("a cancelled read must not end like the file did");
-    let reason = decode_reason(&e).to_string();
-    assert!(reason.contains("cancelled"), "{reason}");
-    assert_eq!(decode_reason(&d.next_frame().unwrap_err()), reason);
-
-    // Uncancelled, the same file decodes to the end.
+    // Uncancelled, the file decodes to the end.
     let mut d = VideoDecoder::open_cancellable(&path, None, None, Arc::default()).unwrap();
     let (n, e) = decode(&mut d);
     assert!(e.is_none(), "{e:?}");
-    assert_eq!(n, 90);
+    assert_eq!(n, 120);
+
+    // Cancelled before the first frame or after some, the stream ends with
+    // that error, whichever read the cancel stops and whichever sample that
+    // read leaves unfinished.
+    for after in [0, 1, 10, 20, 30, 40] {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut d = VideoDecoder::open_cancellable(&path, None, None, cancel.clone()).unwrap();
+        for _ in 0..after {
+            assert!(d.next_frame().unwrap().is_some());
+        }
+        cancel.store(true, Ordering::Relaxed);
+        let (n, e) = decode(&mut d);
+        let Some(e) = e else {
+            panic!("cancelled after {after} frames, ended like the file did after {n} more");
+        };
+        let reason = decode_reason(&e).to_string();
+        assert_eq!(
+            reason,
+            format!("reading: cancelled (after {} frames)", after + n)
+        );
+        assert_eq!(d.skipped_packets(), 0);
+        assert_eq!(decode_reason(&d.next_frame().unwrap_err()), reason);
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
