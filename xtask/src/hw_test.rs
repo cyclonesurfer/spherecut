@@ -14,11 +14,13 @@
 //! The Tier 2 tests are listed (`cargo test -- --ignored --list`) before
 //! they run, and the report has a line for every listed test. A test that
 //! never reports a result, because its binary did not start or crashed
-//! first, shows up as "did not run" and fails the run.
+//! first, shows up as "did not run" and fails the run. So does a binary
+//! that dies after its tests reported: each binary's exit is judged on its
+//! own, since a skip anywhere already makes `cargo test` fail.
 //!
-//! The command exits non-zero when the build fails or a Tier 2 test fails or
-//! does not run; skips alone are not a failure. The report is written either
-//! way.
+//! The command exits non-zero when the build fails, a Tier 2 test fails or
+//! does not run, or a test binary dies; skips alone are not a failure. The
+//! report is written either way.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -484,15 +486,64 @@ fn parse_list(output: &str) -> BTreeMap<Binary, Vec<String>> {
         .collect()
 }
 
-/// Results from one binary's libtest output, run with `--test-threads=1`.
+/// How a test binary exited, from what cargo printed after it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum Exit {
+    /// Cargo printed nothing: exit status 0.
+    #[default]
+    Clean,
+    /// `error: test failed, to rerun pass …` alone: libtest's exit status
+    /// when a test failed (101), which a skip is too.
+    TestsFailed,
+    /// A signal, another exit status, or no start at all, as cargo puts it
+    /// (`signal: 6, SIGABRT: process abort signal`).
+    Abnormal(String),
+}
+
+/// One test binary's part of the run.
+#[derive(Debug, Default)]
+struct BinaryRun {
+    /// What the binary printed, then what cargo printed about it.
+    output: String,
+    results: BTreeMap<String, Outcome>,
+    /// libtest printed its `test result:` line.
+    finished: bool,
+    exit: Exit,
+}
+
+impl BinaryRun {
+    /// What went wrong with the binary itself, beyond its tests' results.
+    /// libtest prints `test result:` and then exits 0, or 101 if a test
+    /// failed or skipped; anything else means the binary died, which its
+    /// test list alone can hide (all passed, or a skip that explains a 101).
+    fn problem(&self) -> Option<String> {
+        let failed = self
+            .results
+            .values()
+            .any(|o| matches!(o, Outcome::Failed(_) | Outcome::Skipped(_)));
+        match &self.exit {
+            Exit::Abnormal(how) if !self.finished => Some(format!("did not finish ({how})")),
+            _ if !self.finished => Some("did not finish".to_string()),
+            Exit::Abnormal(how) => Some(format!(
+                "exited abnormally after its tests finished ({how})"
+            )),
+            Exit::TestsFailed if !failed => Some("failed, but none of its tests did".to_string()),
+            _ => None,
+        }
+    }
+}
+
+/// One binary's part of the run: its libtest output (run with
+/// `--test-threads=1`), then what cargo printed when it exited.
 ///
 /// Libraries such as libva write straight to stderr, which can split a
 /// `test name ... ok` line, so a result is also taken from a bare `ok` or
 /// `FAILED` line, from the failure sections and from the `failures:` list
-/// at the end. A test that started but has no result failed: its binary
-/// stopped (crashed, aborted, was killed) while it ran, and what follows in
-/// the output says how.
-fn parse_libtest(output: &str) -> BTreeMap<String, Outcome> {
+/// at the end. A test that started but has no confirmed result failed: its
+/// binary stopped (crashed, aborted, was killed) while it ran, and what
+/// follows in the output says how. Until libtest's summary, only the next
+/// test starting confirms an `ok`, since a library can print one too.
+fn parse_run(output: &str) -> BinaryRun {
     let lines: Vec<&str> = output.lines().collect();
     // (name, status, line index), in the order they started.
     let mut started: Vec<(String, String, usize)> = Vec::new();
@@ -501,8 +552,28 @@ fn parse_libtest(output: &str) -> BTreeMap<String, Outcome> {
     let mut current: Option<String> = None;
     let mut in_list = false;
     let mut finished = false;
+    let mut exit = Exit::Clean;
     for (i, &line) in lines.iter().enumerate() {
-        if let Some(name) = line
+        // Cargo's error once the binary has exited. It can end a line that
+        // libtest started (`test b ... error: test failed, …`).
+        let line = match line.find("error: ") {
+            Some(at) if line[at..].contains(" failed, to rerun pass `") => {
+                exit = Exit::TestsFailed;
+                current = None;
+                &line[..at]
+            }
+            _ => line,
+        };
+        // Then, unless libtest's exit status was all it had to say, why.
+        let cause = line
+            .trim_start()
+            .strip_prefix("process didn't exit successfully: ")
+            .or_else(|| line.trim_start().strip_prefix("could not execute process "))
+            .filter(|_| exit != Exit::Clean);
+        if let Some(cause) = cause {
+            let how = cause.rsplit_once(" (").map_or(cause, |(_, how)| how);
+            exit = Exit::Abnormal(how.strip_suffix(')').unwrap_or(how).to_string());
+        } else if let Some(name) = line
             .strip_prefix("---- ")
             .and_then(|l| l.strip_suffix(" stdout ----"))
         {
@@ -525,8 +596,9 @@ fn parse_libtest(output: &str) -> BTreeMap<String, Outcome> {
         {
             started.push((name.trim().to_string(), status.trim().to_string(), i));
         } else if matches!(line, "ok" | "FAILED") {
+            // Of two results, one is a library's; FAILED is the safe one.
             if let Some((_, status, _)) = started.last_mut()
-                && !matches!(status.as_str(), "ok" | "FAILED")
+                && (line == "FAILED" || !matches!(status.as_str(), "ok" | "FAILED"))
             {
                 *status = line.to_string();
             }
@@ -534,34 +606,40 @@ fn parse_libtest(output: &str) -> BTreeMap<String, Outcome> {
             listed.push(name.trim().to_string());
         }
     }
-    let mut out = BTreeMap::new();
-    for (name, status, at) in &started {
+    let mut results = BTreeMap::new();
+    for (k, (name, status, at)) in started.iter().enumerate() {
         let outcome = if let Some(text) = sections.get(name) {
             failure(text)
-        } else if status == "FAILED" || listed.contains(name) {
+        } else if listed.contains(name) || (finished && status == "FAILED") {
             Outcome::Failed(String::new())
         } else if status.starts_with("ignored") {
             // Not run, so no result (`--ignored` runs only these, though).
             continue;
-        } else if status == "ok" || finished {
+        } else if finished || (status == "ok" && k + 1 < started.len()) {
             // A failed test would be in the `failures:` list.
             Outcome::Passed
         } else {
-            let rest = std::iter::once(status.as_str()).chain(lines[at + 1..].iter().copied());
             Outcome::Failed(format!(
-                "The test binary stopped before this test reported a result:\n\n{}",
-                rest.collect::<Vec<_>>().join("\n")
+                "The test binary stopped before it confirmed this test's result:\n\n{}",
+                lines[*at..].join("\n")
             ))
         };
-        out.insert(name.clone(), outcome);
+        results.insert(name.clone(), outcome);
     }
     for (name, text) in &sections {
-        out.entry(name.clone()).or_insert_with(|| failure(text));
+        results.entry(name.clone()).or_insert_with(|| failure(text));
     }
     for name in listed {
-        out.entry(name).or_insert(Outcome::Failed(String::new()));
+        results
+            .entry(name)
+            .or_insert(Outcome::Failed(String::new()));
     }
-    out
+    BinaryRun {
+        output: output.to_string(),
+        results,
+        finished,
+        exit,
+    }
 }
 
 /// A failed test's outcome: skipped if its panic message starts with the
@@ -583,7 +661,7 @@ fn failure(text: &str) -> Outcome {
 /// listed are kept too.
 fn merge(
     listed: &BTreeMap<String, Vec<String>>,
-    ran: &BTreeMap<String, BTreeMap<String, Outcome>>,
+    ran: &BTreeMap<String, BinaryRun>,
     quick: bool,
 ) -> Vec<(String, Outcome)> {
     let mut all: BTreeMap<(&str, &str), Outcome> = BTreeMap::new();
@@ -594,12 +672,12 @@ fn merge(
             } else {
                 Outcome::DidNotRun
             };
-            let o = ran.get(bin).and_then(|r| r.get(t)).cloned();
+            let o = ran.get(bin).and_then(|r| r.results.get(t)).cloned();
             all.insert((bin.as_str(), t.as_str()), o.unwrap_or(missing));
         }
     }
-    for (bin, results) in ran {
-        for (t, o) in results {
+    for (bin, run) in ran {
+        for (t, o) in &run.results {
             all.entry((bin.as_str(), t.as_str()))
                 .or_insert_with(|| o.clone());
         }
@@ -614,8 +692,8 @@ struct Tier2 {
     /// `cargo test -- --ignored --list`: what should run.
     list: Captured,
     run: Captured,
-    /// The run's output per test binary.
-    output: BTreeMap<String, String>,
+    /// Each test binary's part of the run, by report name.
+    binaries: BTreeMap<String, BinaryRun>,
     /// Every Tier 2 test once.
     results: Vec<(String, Outcome)>,
 }
@@ -633,16 +711,16 @@ impl Tier2 {
         let listed = parse_list(&list.text);
         let output: BTreeMap<Binary, String> = split_by_binary(&run.text).into_iter().collect();
         let names = binary_names(listed.keys().chain(output.keys()), packages, dir);
-        let (listed, output) = (by_name(listed, &names), by_name(output, &names));
-        let ran = output
-            .iter()
-            .map(|(bin, text)| (bin.clone(), parse_libtest(text)))
+        let listed = by_name(listed, &names);
+        let binaries = by_name(output, &names)
+            .into_iter()
+            .map(|(bin, text)| (bin, parse_run(&text)))
             .collect();
-        let results = merge(&listed, &ran, quick);
+        let results = merge(&listed, &binaries, quick);
         Tier2 {
             list,
             run,
-            output,
+            binaries,
             results,
         }
     }
@@ -663,10 +741,41 @@ impl Tier2 {
         by_bin
     }
 
-    /// `cargo test` failed, but no test failed or skipped (a skip is a
-    /// failure to cargo), so the failure is somewhere else.
+    /// A note for each binary with tests that did not run or a problem of
+    /// its own: what happened, and the output that shows why.
+    fn binary_notes(&self) -> Vec<(String, &str)> {
+        let did_not_run = self.did_not_run();
+        let mut notes = Vec::new();
+        for (bin, n) in &did_not_run {
+            if !self.binaries.contains_key(*bin) {
+                notes.push((
+                    format!(
+                        "{n} test(s) in `{bin}` did not run: cargo never ran it. The end of the test output"
+                    ),
+                    self.run.text.as_str(),
+                ));
+            }
+        }
+        for (bin, b) in &self.binaries {
+            let what = match (did_not_run.get(bin.as_str()), b.problem()) {
+                (Some(n), Some(why)) => format!("{n} test(s) in `{bin}` did not run, and it {why}"),
+                (Some(n), None) => {
+                    format!("{n} test(s) in `{bin}` did not run, although it finished")
+                }
+                (None, Some(why)) => format!("`{bin}` {why}"),
+                (None, None) => continue,
+            };
+            notes.push((format!("{what}. The end of its output"), b.output.as_str()));
+        }
+        notes
+    }
+
+    /// `cargo test` failed, but every binary that ran exited cleanly and no
+    /// test is missing, so the failure is somewhere else.
     fn unexplained_failure(&self) -> bool {
-        !self.run.ok && self.count(|o| matches!(o, Outcome::Failed(_) | Outcome::Skipped(_))) == 0
+        !self.run.ok
+            && self.binaries.values().all(|b| b.exit == Exit::Clean)
+            && self.count(|o| *o == Outcome::DidNotRun) == 0
     }
 
     /// Why the Tier 2 part failed; empty if it did not. Skips alone are fine.
@@ -683,8 +792,15 @@ impl Tier2 {
         if missing > 0 {
             p.push(format!("{missing} Tier 2 test(s) did not run"));
         }
+        // Judged per binary: a skip in one binary explains only its own
+        // failure to cargo, not another binary's crash.
+        for (bin, b) in &self.binaries {
+            if let Some(why) = b.problem() {
+                p.push(format!("`{bin}` {why}"));
+            }
+        }
         if self.unexplained_failure() {
-            p.push("`cargo test` failed without a failing test".to_string());
+            p.push("`cargo test` failed, but no test binary did".to_string());
         }
         p
     }
@@ -1105,25 +1221,13 @@ pub fn run(a: Args) -> Result<()> {
                     tail(&t.list.text, 60)
                 );
             }
-            let did_not_run = t.did_not_run();
-            for (bin, n) in &did_not_run {
-                let (why, out) = match t.output.get(*bin) {
-                    Some(out) => ("it stopped early. The end of its output", out),
-                    None => (
-                        "cargo never ran it. The end of the test output",
-                        &t.run.text,
-                    ),
-                };
-                let _ = writeln!(
-                    r,
-                    "{n} test(s) in `{bin}` did not run: {why}:\n\n```\n{}\n```\n",
-                    tail(out, 30)
-                );
+            for (what, out) in t.binary_notes() {
+                let _ = writeln!(r, "{what}:\n\n```\n{}\n```\n", tail(out, 30));
             }
-            if did_not_run.is_empty() && t.unexplained_failure() {
+            if t.unexplained_failure() {
                 let _ = writeln!(
                     r,
-                    "`cargo test` failed, but no test failed. The end of its output:\n\n```\n{}\n```\n",
+                    "`cargo test` failed, but no test binary did. The end of its output:\n\n```\n{}\n```\n",
                     tail(&t.run.text, 60)
                 );
             }
@@ -1281,7 +1385,7 @@ failures:
 
 test result: FAILED. 1 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out
 ";
-        let r = parse_libtest(out);
+        let r = parse_run(out).results;
         assert_eq!(r.len(), 3, "{r:?}");
         assert_eq!(r["a::passes"], Outcome::Passed);
         assert_eq!(
@@ -1308,7 +1412,7 @@ failures:
 
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
 ";
-        assert!(matches!(parse_libtest(out)["a"], Outcome::Failed(_)));
+        assert!(matches!(parse_run(out).results["a"], Outcome::Failed(_)));
     }
 
     #[test]
@@ -1335,7 +1439,7 @@ failures:
 
 test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
 ";
-        let r = parse_libtest(out);
+        let r = parse_run(out).results;
         assert_eq!(r.len(), 3);
         assert_eq!(r["noisy_pass"], Outcome::Passed);
         assert_eq!(r["quiet"], Outcome::Passed);
@@ -1352,10 +1456,72 @@ test b_aborts ... error: test failed, to rerun pass `--test crash`
 Caused by:
   process didn't exit successfully: `/t/debug/deps/crash-368fcdd4679797b5 --ignored --test-threads=1` (signal: 6, SIGABRT: process abort signal)
 ";
-        let r = parse_libtest(out);
+        let b = parse_run(out);
+        let r = &b.results;
         assert_eq!(r.len(), 2, "c_after never started: {r:?}");
         assert_eq!(r["a_first"], Outcome::Passed);
         assert!(matches!(&r["b_aborts"], Outcome::Failed(o) if o.contains("SIGABRT")));
+        assert!(!b.finished);
+        assert_eq!(
+            b.problem().as_deref(),
+            Some("did not finish (signal: 6, SIGABRT: process abort signal)")
+        );
+    }
+
+    #[test]
+    fn a_crash_after_the_summary_fails_the_binary() {
+        // Every test passed, then the binary died on its way out (a
+        // driver's exit handler, say).
+        let out = "\
+running 1 test
+test passes_then_binary_crashes_at_exit ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p spherecut-testkit --test tier2_exit_crash`
+
+Caused by:
+  process didn't exit successfully: `/t/debug/deps/tier2_exit_crash-f5ee94ef98ecad17 --ignored --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+";
+        let b = parse_run(out);
+        assert_eq!(
+            b.results["passes_then_binary_crashes_at_exit"],
+            Outcome::Passed
+        );
+        assert!(b.finished);
+        assert_eq!(
+            b.exit,
+            Exit::Abnormal("signal: 6, SIGABRT: process abort signal".into())
+        );
+        assert_eq!(
+            b.problem().as_deref(),
+            Some(
+                "exited abnormally after its tests finished (signal: 6, SIGABRT: process abort signal)"
+            )
+        );
+    }
+
+    #[test]
+    fn a_stray_ok_before_a_crash_is_not_a_pass() {
+        // The next test starting confirms `a`'s ok; nothing confirms `b`'s.
+        let out = "running 3 tests
+test a ... libva info: VA-API version 1.22.0
+ok
+test b ... \nok
+error: test failed, to rerun pass `--test tier2_ok_then_abort`
+
+Caused by:
+  process didn't exit successfully: `/t/debug/deps/tier2_ok_then_abort-f12029a49ed85019 --ignored` (signal: 6, SIGABRT: process abort signal)
+";
+        let b = parse_run(out);
+        assert_eq!(b.results.len(), 2, "{:?}", b.results);
+        assert_eq!(b.results["a"], Outcome::Passed);
+        assert!(matches!(&b.results["b"], Outcome::Failed(o) if o.contains("SIGABRT")));
+        assert!(b.problem().is_some_and(|p| p.starts_with("did not finish")));
+
+        // A FAILED after a stray ok is the real result.
+        let out = "test a ... \nok\nFAILED\ntest b ... ok\nerror: test failed, to rerun pass `--test x`\n";
+        assert!(matches!(parse_run(out).results["a"], Outcome::Failed(_)));
     }
 
     /// `cargo test -- --ignored --list` with stdout and stderr merged.
@@ -1525,9 +1691,17 @@ failures:
     samples_probe_cleanly
 
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+
+error: test failed, to rerun pass `-p spherecut-synth --test tier2_hw_decode`
 ";
         let parts = split_by_binary(run);
         assert_eq!(parts.len(), 2);
+        assert_eq!(parse_run(&parts[0].1).exit, Exit::Clean);
+        // A skip makes libtest exit 101, which is not a problem by itself.
+        let skips = parse_run(&parts[1].1);
+        assert_eq!(skips.exit, Exit::TestsFailed);
+        assert!(skips.finished);
+        assert_eq!(skips.problem(), None);
         let names = binary_names(
             parts.iter().map(|(b, _)| b),
             &BTreeMap::new(),
@@ -1536,11 +1710,11 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         assert_eq!(names[&parts[0].0], "tier2_samples");
         assert_eq!(names[&parts[1].0], "tier2_hw_decode");
         assert_eq!(
-            parse_libtest(&parts[0].1)["samples_probe_cleanly"],
+            parse_run(&parts[0].1).results["samples_probe_cleanly"],
             Outcome::Passed
         );
         assert!(matches!(
-            parse_libtest(&parts[1].1)["samples_probe_cleanly"],
+            parse_run(&parts[1].1).results["samples_probe_cleanly"],
             Outcome::Skipped(_)
         ));
     }
@@ -1560,9 +1734,9 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         // tier2_hw_decode never ran; an unlisted result is still kept.
         let ran = BTreeMap::from([(
             "tier2_samples".to_string(),
-            BTreeMap::from([
-                ("samples_probe_cleanly".to_string(), Outcome::Passed),
-                ("surprise".to_string(), Outcome::Failed("x".into())),
+            ran(&[
+                ("samples_probe_cleanly", Outcome::Passed),
+                ("surprise", Outcome::Failed("x".into())),
             ]),
         )]);
         let full = merge(&listed, &ran, false);
@@ -1598,26 +1772,62 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         }
     }
 
-    fn tier2(run_ok: bool, results: &[Outcome]) -> Tier2 {
+    /// A binary that finished with these results and exited as libtest
+    /// does.
+    fn ran(results: &[(&str, Outcome)]) -> BinaryRun {
+        let failed = results
+            .iter()
+            .any(|(_, o)| matches!(o, Outcome::Failed(_) | Outcome::Skipped(_)));
+        BinaryRun {
+            output: String::new(),
+            results: results
+                .iter()
+                .map(|(t, o)| (t.to_string(), o.clone()))
+                .collect(),
+            finished: true,
+            exit: if failed {
+                Exit::TestsFailed
+            } else {
+                Exit::Clean
+            },
+        }
+    }
+
+    /// A `--quick` Tier 2 part with these listed tests and binary runs.
+    fn tier2(run_ok: bool, list: &[(&str, &[&str])], runs: Vec<(&str, BinaryRun)>) -> Tier2 {
+        let binaries = runs
+            .into_iter()
+            .map(|(bin, b)| (bin.to_string(), b))
+            .collect();
+        let results = merge(&listed(list), &binaries, true);
         Tier2 {
             list: captured(true),
             run: captured(run_ok),
-            output: BTreeMap::new(),
-            results: results
-                .iter()
-                .enumerate()
-                .map(|(i, o)| (format!("t::{i}"), o.clone()))
-                .collect(),
+            binaries,
+            results,
         }
+    }
+
+    fn skip() -> Outcome {
+        Outcome::Skipped("no GPU".into())
     }
 
     #[test]
     fn skips_alone_are_not_a_failure() {
         // cargo exits non-zero for a skip, which is not worth a note.
-        let t = tier2(false, &[Outcome::Passed, Outcome::Skipped("no GPU".into())]);
+        let t = tier2(
+            false,
+            &[("a", &["passes", "skips"])],
+            vec![("a", ran(&[("passes", Outcome::Passed), ("skips", skip())]))],
+        );
         assert!(!t.unexplained_failure());
         assert!(t.problems().is_empty());
-        let t = tier2(true, &[Outcome::Passed, Outcome::LeftOut]);
+        let t = tier2(
+            true,
+            &[("a", &["passes", "bench_x"])],
+            vec![("a", ran(&[("passes", Outcome::Passed)]))],
+        );
+        assert_eq!(t.results[0].1, Outcome::LeftOut);
         assert!(t.problems().is_empty());
     }
 
@@ -1625,22 +1835,81 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
     fn missing_or_failed_tests_fail_the_run() {
         let t = tier2(
             false,
-            &[Outcome::Skipped("no GPU".into()), Outcome::DidNotRun],
+            &[("a", &["skips"]), ("b", &["never_ran"])],
+            vec![("a", ran(&[("skips", skip())]))],
         );
         assert_eq!(t.problems(), ["1 Tier 2 test(s) did not run"]);
         assert!(t.counts(false).contains("1 did not run"));
-        assert_eq!(t.did_not_run(), BTreeMap::from([("t", 1)]));
+        assert_eq!(t.did_not_run(), BTreeMap::from([("b", 1)]));
+        let notes = t.binary_notes();
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0]
+                .0
+                .starts_with("1 test(s) in `b` did not run: cargo never ran it")
+        );
 
-        let t = tier2(false, &[Outcome::Failed(String::new())]);
+        let t = tier2(
+            false,
+            &[("a", &["fails"])],
+            vec![("a", ran(&[("fails", Outcome::Failed(String::new()))]))],
+        );
         assert_eq!(t.problems(), ["1 Tier 2 test(s) failed"]);
 
-        let t = tier2(false, &[Outcome::Passed]);
+        let t = tier2(
+            false,
+            &[("a", &["passes"])],
+            vec![("a", ran(&[("passes", Outcome::Passed)]))],
+        );
         assert!(t.unexplained_failure());
-        assert_eq!(t.problems(), ["`cargo test` failed without a failing test"]);
+        assert_eq!(
+            t.problems(),
+            ["`cargo test` failed, but no test binary did"]
+        );
 
-        let mut t = tier2(true, &[Outcome::Passed]);
+        let mut t = tier2(
+            true,
+            &[("a", &["passes"])],
+            vec![("a", ran(&[("passes", Outcome::Passed)]))],
+        );
         t.list.ok = false;
         assert_eq!(t.problems().len(), 1);
+    }
+
+    #[test]
+    fn a_skip_does_not_hide_another_binarys_failure() {
+        // A skip makes cargo fail, but only explains its own binary.
+        let mut crashed = ran(&[("passes", Outcome::Passed)]);
+        crashed.exit = Exit::Abnormal("signal: 6, SIGABRT: process abort signal".into());
+        let t = tier2(
+            false,
+            &[("a", &["skips"]), ("b", &["passes"])],
+            vec![("a", ran(&[("skips", skip())])), ("b", crashed)],
+        );
+        assert_eq!(
+            t.problems(),
+            [
+                "`b` exited abnormally after its tests finished (signal: 6, SIGABRT: process abort signal)"
+            ]
+        );
+        assert!(!t.unexplained_failure());
+        let notes = t.binary_notes();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].0.starts_with("`b` exited abnormally"));
+
+        let mut odd = ran(&[("passes", Outcome::Passed)]);
+        odd.exit = Exit::TestsFailed;
+        let t = tier2(
+            false,
+            &[("a", &["skips"]), ("b", &["passes"])],
+            vec![("a", ran(&[("skips", skip())])), ("b", odd)],
+        );
+        assert_eq!(t.problems(), ["`b` failed, but none of its tests did"]);
+
+        let mut unfinished = ran(&[("passes", Outcome::Passed)]);
+        unfinished.finished = false;
+        let t = tier2(true, &[("b", &["passes"])], vec![("b", unfinished)]);
+        assert_eq!(t.problems(), ["`b` did not finish"]);
     }
 
     #[test]
