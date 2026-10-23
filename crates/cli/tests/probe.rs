@@ -78,6 +78,21 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
             "is damaged",
             "runs past the end of the file",
         ),
+        (
+            "bad-trak-type.mp4",
+            "is damaged",
+            "box `\\xd1rak` at offset",
+        ),
+        (
+            "bad-timescale.mp4",
+            "is damaged",
+            "track #0: its `mdhd` gives timescale 0, so its times are wrong",
+        ),
+        (
+            "bad-codec-config.mp4",
+            "is damaged",
+            "stream #0 (sample entry `avc1`) has no pixel format, so its codec setup is damaged",
+        ),
     ];
     assert_eq!(bad.len(), expect.len());
     for (name, how, why) in expect {

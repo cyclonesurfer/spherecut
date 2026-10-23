@@ -174,8 +174,9 @@ fn broken_files_give_errors_not_panics() {
     let good = media::write(&small("t-good", Codec::H264, 8, Audio::Stereo, true), &dir).unwrap();
     let r = probe::probe(&good).unwrap();
     assert!(r.damage.is_empty(), "{:?}", r.damage);
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     let bad = media::write_bad_files(&good, &dir).unwrap();
-    assert_eq!(bad.len(), 6);
+    assert_eq!(bad.len(), 9);
     let reasons = [
         ("bad-empty.mp4", "the file is empty"),
         ("bad-text.mp4", "not a recognised media file"),
@@ -183,6 +184,18 @@ fn broken_files_give_errors_not_panics() {
         ("bad-trunc-half.mp4", "`mdat` box at offset"),
         ("bad-trunc-end.mp4", "`moov` box at offset"),
         ("bad-corrupt-moov.mp4", "runs past the end of the file"),
+        (
+            "bad-trak-type.mp4",
+            "has a type that is not text, so its header is damaged",
+        ),
+        (
+            "bad-timescale.mp4",
+            "track #0: its `mdhd` gives timescale 0",
+        ),
+        (
+            "bad-codec-config.mp4",
+            "stream #0 (sample entry `avc1`) has no pixel format",
+        ),
     ];
     for b in &bad {
         let name = b.file_name().unwrap().to_string_lossy().into_owned();
@@ -198,12 +211,21 @@ fn broken_files_give_errors_not_panics() {
         let want = reasons.iter().find(|(n, _)| *n == name).unwrap().1;
         assert!(why.contains(want), "{name}: {why}");
     }
-    // FFmpeg opens these two without complaint; only the structure check
-    // finds the damage.
-    for name in ["bad-trunc-end.mp4", "bad-corrupt-moov.mp4"] {
+    // FFmpeg opens these without complaint; only probe's checks find the
+    // damage.
+    for name in [
+        "bad-trunc-end.mp4",
+        "bad-corrupt-moov.mp4",
+        "bad-trak-type.mp4",
+        "bad-timescale.mp4",
+        "bad-codec-config.mp4",
+    ] {
         let r = probe::probe(&dir.join(name));
         assert!(r.is_ok_and(|r| !r.damage.is_empty()), "{name}");
     }
+    // The audio track is gone from what FFmpeg reads.
+    let r = probe::probe(&dir.join("bad-trak-type.mp4")).unwrap();
+    assert!(r.streams.iter().all(|s| s.kind != StreamKind::Audio));
     // Damage inside the `moov` FFmpeg wrote: bytes changed anywhere, or
     // words of the sample tables of both tracks set to small or arbitrary
     // values. Tests build with overflow checks, so arithmetic on the
@@ -230,6 +252,7 @@ fn broken_files_give_errors_not_panics() {
         seed ^= seed << 5;
         seed
     };
+    let mut detected = 0;
     for _ in 0..4000 {
         let mut edits = Vec::new();
         for _ in 0..1 + next() % 3 {
@@ -251,13 +274,19 @@ fn broken_files_give_errors_not_panics() {
         for &(at, x) in &edits {
             bytes[at] = x;
         }
-        if let Ok(t) = mp4::read(&mut std::io::Cursor::new(&bytes)) {
-            t.damage();
-        }
+        detected += match mp4::read(&mut std::io::Cursor::new(&bytes)) {
+            Ok(t) => usize::from(!t.damage().is_empty()),
+            Err(_) => 1,
+        };
         for (&(at, _), x) in edits.iter().zip(old).rev() {
             bytes[at] = x;
         }
     }
+    // Most edits land in the sample tables and are found (3451 of them
+    // with FFmpeg 6.1). The rest change sizes and times that stay
+    // consistent, or bytes nothing checks, such as names.
+    eprintln!("{detected} of 4000 edits found");
+    assert!(detected >= 3000, "only {detected} of 4000 edits found");
     // A directory is not a media file.
     assert!(probe::probe(&dir).is_err());
     std::fs::remove_dir_all(&dir).ok();
