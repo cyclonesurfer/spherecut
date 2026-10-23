@@ -22,7 +22,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Mp4Error {
     #[error("I/O error: {0}")]
-    Io(#[from] io::Error),
+    Io(io::Error),
     #[error("not an MP4/MOV file: {0}")]
     NotMp4(String),
     #[error("box `{fourcc}` at offset {offset} is malformed: {why}")]
@@ -31,6 +31,14 @@ pub enum Mp4Error {
         offset: u64,
         why: String,
     },
+}
+
+/// By hand rather than `#[from]`, which would also make the I/O error the
+/// `source()` of a message that already includes it.
+impl From<io::Error> for Mp4Error {
+    fn from(e: io::Error) -> Self {
+        Mp4Error::Io(e)
+    }
 }
 
 /// A four-character box type.

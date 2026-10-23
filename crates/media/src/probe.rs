@@ -215,7 +215,7 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     init();
     let meta = std::fs::metadata(path).map_err(|e| MediaError::Io {
         path: path.to_path_buf(),
-        source: e,
+        error: e,
     })?;
     if !meta.is_file() {
         return Err(MediaError::NotAFile(path.to_path_buf()));

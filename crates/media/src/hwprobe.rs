@@ -17,7 +17,6 @@
 //! fields that are read spelled out.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use ffmpeg_sys_next as sys;
@@ -28,7 +27,7 @@ use tracing::{Dispatch, Event, Level, Metadata, Subscriber, field, span};
 
 use crate::decode::DecodedFrame;
 use crate::ff;
-use crate::ffi::{self, HwDevice, HwError};
+use crate::ffi::{self, HwDevice, HwError, HwRefusal};
 
 /// Why a check failed.
 #[derive(Debug, Error)]
@@ -47,10 +46,10 @@ pub(crate) enum ProbeError {
     DriverRefused { device: String },
     #[error("the decoder produced {0} frames instead of device frames")]
     NotOnDevice(String),
-    #[error("{what}: {source}")]
+    #[error("{what}: {error}")]
     Ffmpeg {
         what: &'static str,
-        source: ff::Error,
+        error: ff::Error,
     },
     #[error(transparent)]
     Hw(#[from] HwError),
@@ -82,7 +81,7 @@ pub(crate) fn device_label(kind: &str) -> &str {
 }
 
 fn ffmpeg(what: &'static str) -> impl FnOnce(ff::Error) -> ProbeError {
-    move |source| ProbeError::Ffmpeg { what, source }
+    move |error| ProbeError::Ffmpeg { what, error }
 }
 
 fn check(ret: c_int, what: &'static str) -> Result<(), ProbeError> {
@@ -99,55 +98,6 @@ fn no_memory(what: &'static str) -> ProbeError {
     })
 }
 
-const PIX_FMT_NONE: c_int = sys::AVPixelFormat::AV_PIX_FMT_NONE as c_int;
-
-/// What [`choose_format`] saw while a decoder set itself up.
-struct FormatChoice {
-    /// The device's pixel format, the only one we accept.
-    want: c_int,
-    /// FFmpeg asked for a format at all.
-    asked: AtomicBool,
-    /// The device's format was among those offered.
-    offered: AtomicBool,
-    /// FFmpeg asked again without it after we took it, which it does when
-    /// setting up the hardware decoder failed.
-    withdrawn: AtomicBool,
-}
-
-/// `get_format` for the checks: take the device's format or nothing, and
-/// note whether FFmpeg offered it and whether it took it back.
-unsafe extern "C" fn choose_format(
-    ctx: *mut sys::AVCodecContext,
-    fmts: *const sys::AVPixelFormat,
-) -> sys::AVPixelFormat {
-    const { assert!(size_of::<sys::AVPixelFormat>() == size_of::<c_int>()) };
-    // SAFETY: FFmpeg passes the context whose `opaque` decode_one pointed
-    // at a FormatChoice that outlives the decoder, and a list ended by
-    // AV_PIX_FMT_NONE. Entries are read as ints, since the list can hold
-    // formats our headers lack; the one returned equals `want`, which is
-    // a format they have.
-    unsafe {
-        let choice = &*(*ctx).opaque.cast::<FormatChoice>();
-        choice.asked.store(true, Ordering::Relaxed);
-        let mut p = fmts;
-        loop {
-            let v = p.cast::<c_int>().read();
-            if v == PIX_FMT_NONE {
-                break;
-            }
-            if v == choice.want {
-                choice.offered.store(true, Ordering::Relaxed);
-                return *p;
-            }
-            p = p.add(1);
-        }
-        if choice.offered.load(Ordering::Relaxed) {
-            choice.withdrawn.store(true, Ordering::Relaxed);
-        }
-    }
-    sys::AVPixelFormat::AV_PIX_FMT_NONE
-}
-
 /// Decode the single frame in `data` with FFmpeg's decoder `decoder`, on
 /// `dev` if given, and return it in system memory.
 ///
@@ -162,13 +112,6 @@ pub(crate) fn decode_one(
 ) -> Result<DecodedFrame, ProbeError> {
     let codec =
         ff::decoder::find_by_name(decoder).ok_or_else(|| ProbeError::NoDecoder(decoder.into()))?;
-    // Declared before the decoder, so that it outlives it.
-    let choice = FormatChoice {
-        want: dev.map_or(PIX_FMT_NONE, HwDevice::hw_pix_fmt),
-        asked: AtomicBool::new(false),
-        offered: AtomicBool::new(false),
-        withdrawn: AtomicBool::new(false),
-    };
     let mut ctx = ff::codec::context::Context::new_with_codec(codec);
     // One thread: FFmpeg then sets up the hardware decoder, and logs why
     // it can't, on this thread, where capture_ffmpeg_log listens.
@@ -178,13 +121,6 @@ pub(crate) fn decode_one(
     });
     if let Some(dev) = dev {
         ffi::attach_hw_device(&mut ctx, dev)?;
-        // SAFETY: the context is not opened yet, so get_format may still
-        // change, and `choice` outlives the decoder (above).
-        unsafe {
-            let c = ctx.as_mut_ptr();
-            (*c).opaque = (&raw const choice).cast_mut().cast();
-            (*c).get_format = Some(choose_format);
-        }
     }
     let mut dec = ctx
         .decoder()
@@ -197,12 +133,11 @@ pub(crate) fn decode_one(
         .and_then(|()| dec.send_eof())
         .and_then(|()| dec.receive_frame(&mut frame));
     if let Err(e) = decoded {
-        let seen = |b: &AtomicBool| b.load(Ordering::Relaxed);
-        return Err(match dev {
-            Some(d) if seen(&choice.withdrawn) => ProbeError::DriverRefused {
+        return Err(match (dev, ffi::hw_refusal(&dec)) {
+            (Some(d), Some(HwRefusal::Withdrawn)) => ProbeError::DriverRefused {
                 device: device_label(d.kind()).into(),
             },
-            Some(d) if seen(&choice.asked) && !seen(&choice.offered) => ProbeError::NoHwFormat {
+            (Some(d), Some(HwRefusal::NotOffered)) => ProbeError::NoHwFormat {
                 decoder: decoder.into(),
                 device: device_label(d.kind()).into(),
             },

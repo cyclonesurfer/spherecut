@@ -390,3 +390,13 @@ fn files_without_video_or_audio_fail() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_missing_file_says_why_once() {
+    let missing = tmp("missing").join("nothing-here.mp4");
+    let out = probe(&[&missing]);
+    assert!(!out.status.success());
+    let stderr = text(&out.stderr);
+    assert_eq!(stderr.matches("No such file").count(), 1, "{stderr}");
+    assert!(stderr.contains("nothing-here.mp4"), "{stderr}");
+}

@@ -23,21 +23,21 @@ use crate::{ff, init};
 pub enum EncodeError {
     #[error("encoder `{0}` is not available in this FFmpeg build")]
     NoEncoder(String),
-    #[error("{context}: {source}")]
-    Ffmpeg { context: String, source: ff::Error },
+    #[error("{context}: {error}")]
+    Ffmpeg { context: String, error: ff::Error },
     #[error("{0}")]
     Invalid(String),
     /// On the destination (with links followed), never the temporary file.
-    #[error("writing {}: {source}", path.display())]
-    Io { path: PathBuf, source: io::Error },
+    #[error("writing {}: {error}", path.display())]
+    Io { path: PathBuf, error: io::Error },
     #[error(transparent)]
     Inject(#[from] InjectError),
 }
 
 fn ctx<T>(r: Result<T, ff::Error>, context: impl FnOnce() -> String) -> Result<T, EncodeError> {
-    r.map_err(|source| EncodeError::Ffmpeg {
+    r.map_err(|error| EncodeError::Ffmpeg {
         context: context(),
-        source,
+        error,
     })
 }
 
@@ -172,10 +172,10 @@ fn drain(
             Ok(()) => {}
             Err(ff::Error::Other { errno }) if errno == ff::util::error::EAGAIN => return Ok(()),
             Err(ff::Error::Eof) => return Ok(()),
-            Err(source) => {
+            Err(error) => {
                 return Err(EncodeError::Ffmpeg {
                     context: format!("encoding {what}"),
-                    source,
+                    error,
                 });
             }
         }
@@ -249,13 +249,13 @@ impl Mp4Writer {
             .ok_or_else(|| EncodeError::NoEncoder(v.encoder.clone()))?;
         let acodec = a.map(audio_encoder).transpose()?;
 
-        let dest = follow_links(path).map_err(|source| EncodeError::Io {
+        let dest = follow_links(path).map_err(|error| EncodeError::Io {
             path: path.to_path_buf(),
-            source,
+            error,
         })?;
-        let io_err = |source| EncodeError::Io {
+        let io_err = |error| EncodeError::Io {
             path: dest.clone(),
-            source,
+            error,
         };
         let tmp = TempFile::create(&dest).map_err(io_err)?;
         // FFmpeg writes through our handle rather than reopening the file by
@@ -497,7 +497,7 @@ impl Mp4Writer {
         let (path, tmp) = self.close()?;
         let dest = tmp.dest().to_path_buf();
         tmp.persist()
-            .map_err(|source| EncodeError::Io { path: dest, source })?;
+            .map_err(|error| EncodeError::Io { path: dest, error })?;
         Ok(path)
     }
 

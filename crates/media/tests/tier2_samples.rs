@@ -109,7 +109,7 @@ fn decode_first(
         assert_eq!(f.hw_decoded, on_gpu);
         let planes = f
             .planes_u16()
-            .unwrap_or_else(|| panic!("unexpected pixel format {:?}", f.frame.format()));
+            .unwrap_or_else(|| panic!("unexpected pixel format: {f:?}"));
         out.push((f.pts, planes));
     }
     Ok(out)

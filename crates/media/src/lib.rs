@@ -22,10 +22,10 @@ pub use ffmpeg_next as ff;
 
 #[derive(Debug, Error)]
 pub enum MediaError {
-    #[error("{}: {source}", path.display())]
+    #[error("{}: {error}", path.display())]
     Io {
         path: PathBuf,
-        source: std::io::Error,
+        error: std::io::Error,
     },
     #[error("{} is not a regular file", .0.display())]
     NotAFile(PathBuf),
@@ -33,13 +33,22 @@ pub enum MediaError {
     Open { path: PathBuf, reason: String },
     #[error("cannot decode {}: {reason}", path.display())]
     Decode { path: PathBuf, reason: String },
+    /// The stream can't be decoded on the hardware device; software may
+    /// still decode it.
+    #[error("cannot decode {} on {kind}: {refusal}", path.display())]
+    HwUnsupported {
+        path: PathBuf,
+        /// "VA-API" or "Vulkan".
+        kind: String,
+        refusal: HwRefusal,
+    },
     /// The reason is part of the message, so it is not also the error's
     /// `source()`, which would print it twice in an error chain.
     #[error("{kind} device unavailable: {reason}")]
     Hardware { kind: String, reason: HwError },
 }
 
-pub use ffi::{HwDevice, HwError};
+pub use ffi::{HwDevice, HwError, HwRefusal};
 
 static INIT: Once = Once::new();
 

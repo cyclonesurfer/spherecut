@@ -27,18 +27,18 @@ use crate::mp4::{self, Mp4Box, Mp4Error, Mp4Tree};
 /// never the temporary file it is written as.
 #[derive(Debug, Error)]
 pub enum InjectError {
-    #[error("{}: {source}", path.display())]
-    Mp4 { path: PathBuf, source: Mp4Error },
-    #[error("reading {}: {source}", path.display())]
-    Read { path: PathBuf, source: io::Error },
-    #[error("writing {}: {source}", path.display())]
-    Write { path: PathBuf, source: io::Error },
+    #[error("{}: {error}", path.display())]
+    Mp4 { path: PathBuf, error: Mp4Error },
+    #[error("reading {}: {error}", path.display())]
+    Read { path: PathBuf, error: io::Error },
+    #[error("writing {}: {error}", path.display())]
+    Write { path: PathBuf, error: io::Error },
     /// Copies read one file and write the other; the error can be either.
-    #[error("copying {} to {}: {source}", input.display(), output.display())]
+    #[error("copying {} to {}: {error}", input.display(), output.display())]
     Copy {
         input: PathBuf,
         output: PathBuf,
-        source: io::Error,
+        error: io::Error,
     },
     #[error("{0}")]
     Unsupported(String),
@@ -126,16 +126,16 @@ fn check_not_same_file(input: &Path, output: &Path) -> Result<(), InjectError> {
 }
 
 fn read_err(path: &Path) -> impl Fn(io::Error) -> InjectError + '_ {
-    move |source| InjectError::Read {
+    move |error| InjectError::Read {
         path: path.to_path_buf(),
-        source,
+        error,
     }
 }
 
 fn write_err(path: &Path) -> impl Fn(io::Error) -> InjectError + '_ {
-    move |source| InjectError::Write {
+    move |error| InjectError::Write {
         path: path.to_path_buf(),
-        source,
+        error,
     }
 }
 
@@ -290,9 +290,9 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
             return Err(InjectError::DuplicateEdit(e.track));
         }
     }
-    let tree = mp4::read_file(input).map_err(|source| InjectError::Mp4 {
+    let tree = mp4::read_file(input).map_err(|error| InjectError::Mp4 {
         path: input.to_path_buf(),
-        source,
+        error,
     })?;
     let moov = tree
         .moov()
@@ -404,10 +404,10 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
 
     let dest = follow_links(output).map_err(write_err(output))?;
     let mut tmp = TempFile::create(&dest).map_err(write_err(&dest))?;
-    let copy_err = |source| InjectError::Copy {
+    let copy_err = |error| InjectError::Copy {
         input: input.to_path_buf(),
         output: dest.clone(),
-        source,
+        error,
     };
     let mut out = BufWriter::new(&mut tmp.file);
     // Copy exactly the lengths the parse saw, never "to the end": the

@@ -350,6 +350,7 @@ const FEDORA_PACKAGES: &[&str] = &[
     "mesa-va-drivers-freeworld",
     "libva-intel-media-driver",
     "intel-media-driver",
+    "mesa-vulkan-drivers",
 ];
 
 pub fn run(render_node: &Path) -> DoctorReport {
@@ -768,6 +769,8 @@ struct Fixes<'a> {
     installed: &'a BTreeSet<String>,
     /// No render node at all: probably a VM or container.
     no_gpu_visible: bool,
+    /// The render node is there, and we may not open it.
+    node_denied: bool,
 }
 
 impl Fixes<'_> {
@@ -802,7 +805,7 @@ impl Fixes<'_> {
                 let cmd = if self.has("ffmpeg-free") {
                     "sudo dnf swap ffmpeg-free ffmpeg --allowerasing"
                 } else {
-                    "sudo dnf install ffmpeg"
+                    "sudo dnf install ffmpeg --allowerasing"
                 };
                 lines([
                     self.rpmfusion("free"),
@@ -914,6 +917,24 @@ impl Fixes<'_> {
     }
 }
 
+impl Fixes<'_> {
+    /// Vulkan on the GPU, where only a CPU device shows up.
+    fn vulkan_gpu(&self) -> String {
+        if self.node_denied {
+            return format!("{ADD_TO_RENDER}   (Vulkan opens the GPU through its render node)");
+        }
+        if self.distro == Distro::Fedora && self.has("mesa-vulkan-drivers") {
+            return "VK_LOADER_DEBUG=error,warn vulkaninfo --summary   (Mesa's Vulkan drivers \
+                    are installed: this shows why none loads for the GPU)\n\
+                    sudo dnf upgrade --refresh   (a GPU newer than its Mesa needs a newer Mesa)"
+                .into();
+        }
+        self.vulkan_driver()
+    }
+}
+
+const ADD_TO_RENDER: &str = "sudo usermod -aG render \"$USER\"   then log out and back in";
+
 fn vainfo(node: &str) -> String {
     format!("vainfo --display drm --device {node}   (lists what this GPU decodes and encodes)")
 }
@@ -935,6 +956,10 @@ fn issues(r: &DoctorReport, env: &Env) -> Vec<Issue> {
             .as_ref()
             .is_some_and(|(k, _)| *k == ErrorKind::NotFound)
             && env.other_nodes.is_empty(),
+        node_denied: env
+            .node_error
+            .as_ref()
+            .is_some_and(|(k, _)| *k == ErrorKind::PermissionDenied),
     };
     let mut out = Vec::new();
     let has_dec = |n: &str| r.decoders.iter().any(|c| c.name == n && c.available);
@@ -1104,7 +1129,7 @@ fn vaapi_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issue
             ),
             Some((ErrorKind::PermissionDenied, _)) => (
                 format!("no permission to open {node}"),
-                "sudo usermod -aG render \"$USER\"   then log out and back in".to_string(),
+                ADD_TO_RENDER.to_string(),
             ),
             Some((_, e)) => (
                 format!("cannot open {node}: {e}"),
@@ -1213,14 +1238,18 @@ fn vulkan_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issu
     match gpu {
         None if !cpus.is_empty() => {
             let names: Vec<&str> = cpus.iter().map(|d| d.name.as_str()).collect();
-            out.push(Issue {
-                severity: Severity::Warning,
-                what: format!(
-                    "the only Vulkan device is {}, which runs on the CPU: no GPU acceleration",
+            let what = match names[..] {
+                [one] => format!("the only Vulkan device is {one}, which runs on the CPU"),
+                _ => format!(
+                    "the only Vulkan devices, {}, run on the CPU",
                     and_list(&names)
                 ),
+            };
+            out.push(Issue {
+                severity: Severity::Warning,
+                what: format!("{what}: no GPU acceleration"),
                 impact: NO_VULKAN_GPU.into(),
-                fix: fx.vulkan_driver(),
+                fix: fx.vulkan_gpu(),
             });
         }
         Some(gpu) if cpus.iter().any(|d| d.used_by_ffmpeg) => {
@@ -1236,8 +1265,76 @@ fn vulkan_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issu
                     .into(),
             });
         }
-        _ => {}
+        _ => vulkan_decode_issues(r, fx, out),
     }
+}
+
+/// What Vulkan Video can't decode on FFmpeg's Vulkan device, a GPU. Only
+/// notes: VA-API is the hardware decoder, and Vulkan Video the second one.
+fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) {
+    let impact = |formats: &[&str]| -> String {
+        let on_vaapi = |f: &&str| {
+            r.decode_checks
+                .iter()
+                .any(|c| c.path == "vaapi" && c.format == *f && c.result == CheckResult::Works)
+        };
+        if formats.iter().all(on_vaapi) {
+            "none while VA-API decodes them, as it does here".into()
+        } else {
+            "with VA-API unable too, they decode on the CPU, which is far slower at 5.7K and up"
+                .into()
+        }
+    };
+    let ffmpeg_dec = failed(&r.decode_checks, "vulkan", Fault::Ffmpeg);
+    if !ffmpeg_dec.is_empty() {
+        out.push(Issue {
+            severity: Severity::Info,
+            what: format!(
+                "this FFmpeg cannot use Vulkan Video to decode {}",
+                and_list(&ffmpeg_dec)
+            ),
+            impact: impact(&ffmpeg_dec),
+            fix: fx.ffmpeg(),
+        });
+    }
+    let refused: Vec<&Check> = r
+        .decode_checks
+        .iter()
+        .filter(|c| {
+            c.path == "vulkan" && c.result == CheckResult::Fails && c.fault == Some(Fault::Driver)
+        })
+        .collect();
+    if refused.is_empty() {
+        return;
+    }
+    let formats: Vec<&str> = refused.iter().map(|c| c.format.as_str()).collect();
+    let on = r
+        .vulkan_devices
+        .iter()
+        .find(|d| d.used_by_ffmpeg)
+        .map_or_else(|| "the Vulkan device".to_string(), |d| d.name.clone());
+    // FFmpeg's first complaint says why, e.g. a missing video extension;
+    // shown when every format failed with the same one.
+    fn first_log(c: &Check) -> Option<&str> {
+        c.ffmpeg_log.first().map(String::as_str)
+    }
+    let why = match first_log(refused[0]) {
+        Some(line) if refused.iter().all(|c| first_log(c) == Some(line)) => {
+            format!(" (FFmpeg: {})", line.trim())
+        }
+        _ => String::new(),
+    };
+    out.push(Issue {
+        severity: Severity::Info,
+        what: format!(
+            "Vulkan Video on {on} cannot decode {}{why}",
+            and_list(&formats)
+        ),
+        impact: impact(&formats),
+        fix: "vulkaninfo | grep -i video_decode   (the Vulkan Video formats this driver \
+              decodes; newer Mesa releases add more)"
+            .into(),
+    });
 }
 
 #[cfg(test)]
@@ -1545,6 +1642,107 @@ mod tests {
         r.vulkan_devices[1].used_by_ffmpeg = false;
         r.vulkan_devices[0].used_by_ffmpeg = false;
         assert!(issues(&r, &Env::default()).is_empty());
+    }
+
+    #[test]
+    fn cpu_only_vulkan_on_fedora_with_mesa_installed_asks_why_it_does_not_load() {
+        let mut r = healthy(Distro::Fedora);
+        let llvmpipe = gpu_device("llvmpipe (LLVM 20.1.2, 256 bits)", VulkanDeviceType::Cpu);
+        r.vulkan_devices = vec![llvmpipe.clone()];
+        let env = installed(&["mesa-vulkan-drivers"]);
+        let i = only(&issues(&r, &env)).clone();
+        assert!(
+            i.fix
+                .starts_with("VK_LOADER_DEBUG=error,warn vulkaninfo --summary"),
+            "{i:?}"
+        );
+        // Not installed: install it.
+        let i = only(&issues(&r, &Env::default())).clone();
+        assert_eq!(
+            i.fix,
+            "sudo dnf install mesa-vulkan-drivers vulkan-loader   (RADV for AMD, ANV for Intel)"
+        );
+
+        // Two CPU devices read as a plural.
+        r.vulkan_devices
+            .push(gpu_device("SwiftShader", VulkanDeviceType::Cpu));
+        let i = only(&issues(&r, &env)).clone();
+        assert_eq!(
+            i.what,
+            "the only Vulkan devices, llvmpipe (LLVM 20.1.2, 256 bits) and SwiftShader, run \
+             on the CPU: no GPU acceleration"
+        );
+    }
+
+    #[test]
+    fn cpu_only_vulkan_without_render_node_permission_adds_the_user_to_render() {
+        let mut r = healthy(Distro::Arch);
+        r.devices[0] = device("vaapi", false);
+        r.vulkan_devices = vec![gpu_device("llvmpipe", VulkanDeviceType::Cpu)];
+        let env = Env {
+            node_error: Some((ErrorKind::PermissionDenied, String::new())),
+            ..Env::default()
+        };
+        let is = issues(&r, &env);
+        assert_eq!(is.len(), 2, "{is:#?}");
+        assert!(
+            is.iter()
+                .all(|i| i.fix.starts_with("sudo usermod -aG render"))
+        );
+    }
+
+    #[test]
+    fn vulkan_video_failures_on_a_gpu_are_notes_with_ffmpegs_reason() {
+        let mut r = healthy(Distro::Fedora);
+        let hevc = ["HEVC Main", "HEVC Main 10"];
+        fail(&mut r.decode_checks, "vulkan", &hevc, Fault::Driver);
+        for c in r.decode_checks.iter_mut().filter(|c| c.path == "vulkan") {
+            c.ffmpeg_log =
+                vec!["Device does not support the VK_KHR_video_decode_h265 extension!\n".into()];
+        }
+        let i = only(&issues(&r, &Env::default())).clone();
+        assert_eq!(i.severity, Severity::Info);
+        assert_eq!(
+            i.what,
+            "Vulkan Video on AMD Radeon RX 7600 (RADV NAVI33) cannot decode HEVC Main and \
+             HEVC Main 10 (FFmpeg: Device does not support the VK_KHR_video_decode_h265 \
+             extension!)"
+        );
+        assert_eq!(i.impact, "none while VA-API decodes them, as it does here");
+
+        // VA-API can't decode HEVC Main either: the CPU does.
+        fail(&mut r.decode_checks, "vaapi", &["HEVC Main"], Fault::Driver);
+        let is = issues(&r, &Env::default());
+        let i = is
+            .iter()
+            .find(|i| i.what.starts_with("Vulkan Video"))
+            .unwrap();
+        assert!(i.impact.contains("decode on the CPU"), "{i:?}");
+
+        // A build without the Vulkan hwaccel is FFmpeg's fault.
+        let mut r = healthy(Distro::Arch);
+        fail(&mut r.decode_checks, "vulkan", &[AV1], Fault::Ffmpeg);
+        let i = only(&issues(&r, &Env::default())).clone();
+        assert_eq!(
+            i.what,
+            "this FFmpeg cannot use Vulkan Video to decode AV1 Main"
+        );
+        assert_eq!(i.fix, "sudo pacman -S --needed ffmpeg");
+    }
+
+    #[test]
+    fn fedora_installs_full_ffmpeg_allowing_erasure() {
+        let mut r = healthy(Distro::Fedora);
+        r.decoders
+            .iter_mut()
+            .find(|c| c.name == "aac")
+            .unwrap()
+            .available = false;
+        let i = only(&issues(&r, &installed(&["rpmfusion-free-release"]))).clone();
+        assert_eq!(
+            i.fix,
+            "sudo dnf install ffmpeg --allowerasing   (RPM Fusion's full FFmpeg)"
+        );
     }
 
     #[test]

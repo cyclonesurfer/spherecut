@@ -67,7 +67,7 @@ fn decode_all(path: &Path, hw: Option<Arc<HwDevice>>) -> Result<Vec<Frame>, Medi
         assert_eq!(f.hw_decoded, hw.is_some());
         let planes = f
             .planes_u16()
-            .unwrap_or_else(|| panic!("unexpected pixel format {:?}", f.frame.format()));
+            .unwrap_or_else(|| panic!("unexpected pixel format: {f:?}"));
         out.push((f.pts, planes));
     }
     Ok(out)
@@ -137,8 +137,12 @@ fn vulkan_hevc_main_matches_software() {
     let path = clip("t2-hevc8", Codec::Hevc, 8, 1024, 12);
     match VideoDecoder::open(&path, None, Some(dev.clone())).and_then(|mut d| d.next_frame()) {
         Ok(_) => check_matches_software("vulkan", || path),
-        // Vulkan Video is optional; Fedora's Mesa ships without H.265 video.
-        Err(e) => tier2::skip(format!("Vulkan Video HEVC decode unavailable: {e}")),
+        // Vulkan Video is optional, and not every driver has it. Any other
+        // failure is a bug.
+        Err(e @ MediaError::HwUnsupported { .. }) => {
+            tier2::skip(format!("Vulkan Video HEVC decode unavailable: {e}"))
+        }
+        Err(e) => panic!("Vulkan decode of {} failed: {e}", path.display()),
     }
 }
 

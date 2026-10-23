@@ -18,10 +18,10 @@ pub enum SynthError {
     Encode(#[from] spherecut_media::encode::EncodeError),
     #[error(transparent)]
     Inject(#[from] inject::InjectError),
-    #[error("I/O error on {path}: {source}")]
+    #[error("I/O error on {}: {error}", path.display())]
     Io {
         path: PathBuf,
-        source: std::io::Error,
+        error: std::io::Error,
     },
 }
 
@@ -113,9 +113,9 @@ impl Spec {
 /// the path exists it holds a whole clip, even after an interrupted run,
 /// and callers may cache clips by whether the file exists.
 pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
-    std::fs::create_dir_all(dir).map_err(|source| SynthError::Io {
+    std::fs::create_dir_all(dir).map_err(|error| SynthError::Io {
         path: dir.to_path_buf(),
-        source,
+        error,
     })?;
     let out = dir.join(spec.file_name());
     let sample_rate = 48_000u32;
@@ -282,7 +282,7 @@ pub fn standard_set() -> Vec<Spec> {
 pub fn write_bad_files(good: &Path, dir: &Path) -> Result<Vec<PathBuf>, SynthError> {
     let io_err = |path: &Path| {
         let path = path.to_path_buf();
-        move |source| SynthError::Io { path, source }
+        move |error| SynthError::Io { path, error }
     };
     let bytes = std::fs::read(good).map_err(io_err(good))?;
     let mut out = Vec::new();
@@ -302,7 +302,7 @@ pub fn write_bad_files(good: &Path, dir: &Path) -> Result<Vec<PathBuf>, SynthErr
     )?;
     let corrupt = corrupt_sample_tables(&bytes).map_err(|e| SynthError::Io {
         path: good.to_path_buf(),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+        error: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
     })?;
     put("bad-corrupt-moov.mp4", &corrupt)?;
     Ok(out)

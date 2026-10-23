@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use spherecut_core::{Rational, Time};
 
 use crate::ffi::{self, HwDevice};
+use crate::hwprobe::device_label;
 use crate::{MediaError, ff, init};
 
 /// A decoded frame in system memory.
@@ -314,7 +315,7 @@ impl VideoDecoder {
                     };
                 }
                 Err(ff::Error::Other { errno }) if errno == ff::util::error::EAGAIN => {}
-                Err(e) => return Err(err(&self.path, "decoding", e)),
+                Err(e) => return Err(self.decode_error(e)),
             }
             if self.eof_sent {
                 // Drained; receive_frame will report Eof next.
@@ -324,7 +325,7 @@ impl VideoDecoder {
                 Some(pkt) => self
                     .dec
                     .send_packet(&pkt)
-                    .map_err(|e| err(&self.path, "decoding", e))?,
+                    .map_err(|e| self.decode_error(e))?,
                 None => {
                     self.dec
                         .send_eof()
@@ -332,6 +333,20 @@ impl VideoDecoder {
                     self.eof_sent = true;
                 }
             }
+        }
+    }
+
+    /// A decoder error, or why the device can't decode this stream when
+    /// that is the cause: the decoder's own error then is just "Operation
+    /// not permitted".
+    fn decode_error(&self, e: ff::Error) -> MediaError {
+        match (ffi::hw_refusal(&self.dec), &self.hw) {
+            (Some(refusal), Some(dev)) => MediaError::HwUnsupported {
+                path: self.path.clone(),
+                kind: device_label(dev.kind()).into(),
+                refusal,
+            },
+            _ => err(&self.path, "decoding", e),
         }
     }
 

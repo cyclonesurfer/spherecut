@@ -1,4 +1,5 @@
-//! The only module in this crate that touches FFmpeg's C API directly.
+//! One of the two modules in this crate that touch FFmpeg's C API
+//! directly; the other is `hwprobe`, the doctor's probes.
 //!
 //! ffmpeg-next covers demuxing and coding; what it doesn't expose safely
 //! (color and channel-layout fields, display matrices, hardware device
@@ -545,39 +546,82 @@ impl HwDevice {
     }
 }
 
-/// `get_format` callback: pick the hardware format stored in `opaque`, or
-/// fail. Failing (instead of FFmpeg's silent software fallback) lets the
-/// caller decide and report what happened.
+/// Why a decoder could not decode on its device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum HwRefusal {
+    /// The decoder never offered the device's format: this FFmpeg was
+    /// built without that hwaccel, or it doesn't cover this profile.
+    #[error("this FFmpeg has no hardware decoder for this format")]
+    NotOffered,
+    /// FFmpeg offered the format, then setting up its hardware decoder
+    /// failed: the driver can't decode this profile.
+    #[error("the driver does not support this format")]
+    Withdrawn,
+}
+
+/// What [`pick_hw_format`] keeps in a decoder context's `opaque`, which
+/// FFmpeg never reads: the device's pixel format, and what FFmpeg did with
+/// it. Kept in the context itself, it lives exactly as long as the
+/// decoder. (Frame threads would each get a copy; hardware decoding here
+/// uses one thread.)
+mod hw_choice {
+    /// The pixel format, in the low bits.
+    pub const FORMAT: usize = (1 << 24) - 1;
+    /// FFmpeg asked for a format at all.
+    pub const ASKED: usize = 1 << 29;
+    /// The device's format was among those offered.
+    pub const OFFERED: usize = 1 << 30;
+    /// FFmpeg asked again without it after we took it, which it does when
+    /// setting up its hardware decoder failed.
+    pub const WITHDRAWN: usize = 1 << 31;
+}
+
+/// `get_format` callback: take the device's format, or fail. Failing
+/// (instead of FFmpeg's silent software fallback) lets the caller decide
+/// and report what happened. The decoder then fails with AV_PIX_FMT_NONE
+/// as its error, "Operation not permitted", so [`hw_refusal`] says why.
 unsafe extern "C" fn pick_hw_format(
     ctx: *mut sys::AVCodecContext,
     fmts: *const sys::AVPixelFormat,
 ) -> sys::AVPixelFormat {
-    // SAFETY: FFmpeg passes a live context whose `opaque` we set to the
-    // wanted format, and a list terminated by AV_PIX_FMT_NONE. Entries are
-    // read as ints, since the list can hold formats our headers lack; the
-    // one returned equals `want`, which is a format they have.
+    use hw_choice::*;
+    // SAFETY: FFmpeg passes a live context, whose `opaque` attach_hw_device
+    // set, and a list terminated by AV_PIX_FMT_NONE. Entries are read as
+    // ints, since the list can hold formats our headers lack; the one
+    // returned equals the device's, which is a format they have.
     unsafe {
-        let want = (*ctx).opaque as isize as c_int;
+        let mut state = (*ctx).opaque.addr() | ASKED;
+        let want = (state & FORMAT) as c_int;
         let mut p = fmts;
+        let mut chosen = sys::AVPixelFormat::AV_PIX_FMT_NONE;
         loop {
             let v = enum_int(p);
             if v == sys::AVPixelFormat::AV_PIX_FMT_NONE as c_int {
                 break;
             }
             if v == want {
-                return *p;
+                chosen = *p;
+                break;
             }
             p = p.add(1);
         }
+        if chosen != sys::AVPixelFormat::AV_PIX_FMT_NONE {
+            state |= OFFERED;
+        } else if state & OFFERED != 0 {
+            state |= WITHDRAWN;
+        }
+        (*ctx).opaque = std::ptr::without_provenance_mut(state);
+        chosen
     }
-    sys::AVPixelFormat::AV_PIX_FMT_NONE
 }
 
 /// Configure an unopened decoder context to decode on `dev`.
-pub fn attach_hw_device(
+pub(crate) fn attach_hw_device(
     ctx: &mut ff::codec::context::Context,
     dev: &HwDevice,
 ) -> Result<(), HwError> {
+    let want = dev.pix_fmt as c_int as usize;
+    debug_assert!(want <= hw_choice::FORMAT);
     // SAFETY: the context is not yet opened, so setting hw_device_ctx and
     // get_format is allowed; we hand FFmpeg its own new reference.
     unsafe {
@@ -593,10 +637,26 @@ pub fn attach_hw_device(
             sys::av_buffer_unref(&mut (*c).hw_device_ctx);
         }
         (*c).hw_device_ctx = r;
-        (*c).opaque = dev.pix_fmt as c_int as isize as *mut std::ffi::c_void;
+        (*c).opaque = std::ptr::without_provenance_mut(want & hw_choice::FORMAT);
         (*c).get_format = Some(pick_hw_format);
     }
     Ok(())
+}
+
+/// Why a decoder set up by [`attach_hw_device`] turned down its device's
+/// format, if it did.
+pub(crate) fn hw_refusal(dec: &ff::codec::context::Context) -> Option<HwRefusal> {
+    use hw_choice::*;
+    // SAFETY: the wrapper owns a live context; only `opaque` is read, which
+    // attach_hw_device and pick_hw_format set.
+    let state = unsafe { (*dec.as_ptr()).opaque.addr() };
+    if state & WITHDRAWN != 0 {
+        Some(HwRefusal::Withdrawn)
+    } else if state & ASKED != 0 && state & OFFERED == 0 {
+        Some(HwRefusal::NotOffered)
+    } else {
+        None
+    }
 }
 
 /// Open the decoder for a codec context made from a video stream's
@@ -886,6 +946,55 @@ mod tests {
     fn set_max(max: Option<Level>) {
         *MAX.lock().unwrap() = max;
         sync_log_level();
+    }
+
+    /// A decoder context whose get_format wants `want`, as
+    /// attach_hw_device leaves it (without a device).
+    fn wanting(want: c_int) -> ff::codec::context::Context {
+        let mut ctx = ff::codec::context::Context::new();
+        // SAFETY: a fresh context that nothing else holds; FFmpeg never
+        // reads `opaque`.
+        unsafe {
+            (*ctx.as_mut_ptr()).opaque = std::ptr::without_provenance_mut(want as usize);
+        }
+        ctx
+    }
+
+    /// Offer `fmts` to `ctx`'s get_format, as a decoder does.
+    fn offer(ctx: &mut ff::codec::context::Context, fmts: &[c_int]) -> c_int {
+        let none = sys::AVPixelFormat::AV_PIX_FMT_NONE as c_int;
+        let list: Vec<c_int> = fmts.iter().copied().chain([none]).collect();
+        // SAFETY: a live context set up as attach_hw_device does, and a
+        // list ended by AV_PIX_FMT_NONE, which is read as ints.
+        unsafe { pick_hw_format(ctx.as_mut_ptr(), list.as_ptr().cast()) as c_int }
+    }
+
+    #[test]
+    fn get_format_takes_only_the_device_format_and_notes_why_not() {
+        use sys::AVPixelFormat as P;
+        let (vaapi, yuv, none) = (
+            P::AV_PIX_FMT_VAAPI as c_int,
+            P::AV_PIX_FMT_YUV420P as c_int,
+            P::AV_PIX_FMT_NONE as c_int,
+        );
+        // Not asked yet: nothing to say.
+        assert_eq!(hw_refusal(&wanting(vaapi)), None);
+
+        // Offered, among formats our headers may lack: taken.
+        let mut ctx = wanting(vaapi);
+        assert_eq!(offer(&mut ctx, &[yuv, 100_000, vaapi]), vaapi);
+        assert_eq!(hw_refusal(&ctx), None);
+        // Then withdrawn, as when the hardware decoder fails to start.
+        assert_eq!(offer(&mut ctx, &[yuv]), none);
+        assert_eq!(hw_refusal(&ctx), Some(HwRefusal::Withdrawn));
+        // It stays withdrawn.
+        assert_eq!(offer(&mut ctx, &[yuv]), none);
+        assert_eq!(hw_refusal(&ctx), Some(HwRefusal::Withdrawn));
+
+        // Never offered.
+        let mut ctx = wanting(vaapi);
+        assert_eq!(offer(&mut ctx, &[yuv]), none);
+        assert_eq!(hw_refusal(&ctx), Some(HwRefusal::NotOffered));
     }
 
     // One test, because the subscriber and FFmpeg's level are global.
