@@ -132,6 +132,72 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
 }
 
 #[test]
+fn file_names_that_are_not_utf8_are_reported() {
+    // Linux file names are bytes. These two fail before FFmpeg opens them;
+    // the error used to panic, and stop the files after it.
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tmp("utf8");
+    let (good, _) = media(&dir);
+    let empty = dir.join(OsStr::from_bytes(b"empty-\xff.mp4"));
+    std::fs::write(&empty, b"").unwrap();
+    let missing = dir.join(OsStr::from_bytes(b"missing-\xfe.mp4"));
+
+    let out = probe(&[&empty, &missing, &good]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(
+        stderr.contains("empty-\u{fffd}.mp4: the file is empty"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("missing-\u{fffd}.mp4: No such file"),
+        "{stderr}"
+    );
+    assert!(stdout.contains(&good.display().to_string()), "{stdout}");
+    assert!(stdout.contains("#0  video   h264"), "{stdout}");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
+    let out = cmd
+        .args(["probe", "--json"])
+        .args([&empty, &missing, &good])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let path = |i: usize| v[i]["path"].as_str().unwrap().to_string();
+    assert!(path(0).ends_with("empty-\u{fffd}.mp4"), "{v}");
+    assert!(
+        v[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("the file is empty")
+    );
+    assert!(path(1).ends_with("missing-\u{fffd}.mp4"), "{v}");
+    assert_eq!(path(2), good.display().to_string());
+    assert_eq!(v[2]["damage"], serde_json::json!([]));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn reports_with_paths_that_are_not_utf8_serialize() {
+    // FFmpeg's Rust bindings cannot open such a path yet, so give a report
+    // one.
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tmp("utf8-report");
+    let (good, _) = media(&dir);
+    let mut r = spherecut_media::probe::probe(&good).unwrap();
+    r.path = dir.join(OsStr::from_bytes(b"clip-\xff.mp4"));
+    let v = serde_json::to_value(&r).unwrap();
+    assert!(
+        v["path"].as_str().unwrap().ends_with("clip-\u{fffd}.mp4"),
+        "{v}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn deeply_nested_boxes_fail_fast() {
     // A `moov` holding 200 000 nested `udta` boxes once took the parser
     // past 2.8 GB of memory and a stack overflow.

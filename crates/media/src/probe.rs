@@ -18,6 +18,8 @@ use crate::{MediaError, init};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProbeReport {
+    /// As text, with bytes that are not UTF-8 replaced by U+FFFD.
+    #[serde(serialize_with = "lossy_path")]
     pub path: PathBuf,
     pub file_size: u64,
     pub container: Container,
@@ -31,6 +33,11 @@ pub struct ProbeReport {
     /// `spherecut probe` fails when there are any.
     pub damage: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+/// A path as text, so that any file name can be reported.
+fn lossy_path<S: serde::Serializer>(p: &Path, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&p.to_string_lossy())
 }
 
 /// How much of a file's structure probe checks for damage, beyond what
