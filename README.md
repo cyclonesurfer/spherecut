@@ -134,18 +134,19 @@ code and the errors on stderr cover every file.
 only when a problem is an error: FFmpeg has no H.264, HEVC, ProRes or AAC
 decoder, or nothing decodes AV1. Every decoder and encoder in doctor's
 tables that FFmpeg lacks gets a problem that names it, such as `FFmpeg has
-no software AV1 encoder (libsvtav1)`, with the fix for FFmpeg. A missing
-Opus or PCM decoder, or a missing AAC, libx264, libx265, libsvtav1, VA-API
-H.264 or VA-API HEVC encoder, is a warning. A missing `av1` decoder
-(FFmpeg's own, which VA-API and Vulkan Video use), VA-API AV1 encoder or
-ProRes encoder is a note. Warnings, such as no GPU or a Vulkan device that
-runs on the CPU, exit 0. Doctor tells a driver that refuses a format
-(`cannot decode HEVC Main 10`) from one that decodes it wrongly (`decodes
-HEVC Main wrongly (N of M samples differ from FFmpeg's software
-decoder)`); for the second, the fix is a newer driver. In `--json`, a
-failed check's `fault` is `ffmpeg`, `driver` or `wrong_output`. Doctor
-never installs or changes anything; on Fedora it makes one read-only
-`rpm -q` query to word its fixes.
+no software AV1 encoder (libsvtav1)`, with the fix for FFmpeg; an FFmpeg
+built without VA-API gets one problem saying so instead of one for each
+VA-API encoder. A missing Opus or PCM decoder, or a missing AAC, libx264,
+libx265, libsvtav1, VA-API H.264 or VA-API HEVC encoder, is a warning. A
+missing `av1` decoder (FFmpeg's own, which VA-API and Vulkan Video use),
+VA-API AV1 encoder or ProRes encoder is a note. Warnings, such as no GPU
+or a Vulkan device that runs on the CPU, exit 0. Doctor tells a driver
+that refuses a format (`cannot decode HEVC Main 10`) from one that decodes
+it wrongly (`decodes HEVC Main wrongly (N of M samples differ from
+FFmpeg's software decoder)`); for the second, the fix is a newer driver.
+In `--json`, a failed check's `fault` is `ffmpeg`, `driver` or
+`wrong_output`. Doctor never installs or changes anything; on Fedora it
+makes one read-only `rpm -q` query to word its fixes.
 
 ### Logging
 
@@ -199,9 +200,9 @@ has changes outside `hw-reports/`). Options:
 - `--samples <dir>`: camera samples (default `samples/` in the checkout; a
   relative path is taken from the current directory). The path reaches the
   tests byte for byte, as `SPHERECUT_BENCH_OUT` (see `docs/perf.md`) does.
-  A directory whose path isn't valid UTF-8 shows in
-  the report's Samples row as present but unusable, and the samples tests
-  skip with that reason.
+  A directory whose path isn't valid UTF-8 shows in the report's Samples
+  row as present but unusable, and the samples tests skip with that
+  reason.
 - `--quick`: a debug build, with the benchmarks left out.
 - `--out <file>`: where to write the report.
 

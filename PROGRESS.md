@@ -69,7 +69,7 @@ repository, so a commit has to be pushed before it can be run there.
 | Workspace | Crates `core`, `sphere`, `media`, `synth`, `testkit`, `cli`, plus `xtask`; all GPL-3.0-or-later. Workspace lints deny `unsafe_op_in_unsafe_fn` and undocumented `unsafe` blocks; `unwrap_used` and `expect_used` warn, allowed only in tests (`clippy.toml`), and clippy runs with `-D warnings` |
 | `cargo xtask check` | `xtask/src/check.rs`. `cargo xtask check` passes at M0_COMMIT: rustfmt, clippy, the Tier 1 tests, doc tests, `cargo deny` (advisories, bans, licenses, sources) and `cargo audit` |
 | `cargo xtask gen-media` | 12 clips (grid, high-frequency and seam patterns; H.264 and HEVC; 8 and 10-bit; 25, 29.97, 30 and 59.94 fps; stereo and ambiX; with and without Spherical V2; a 4K clip; lossless variants) and 9 broken files: empty, not media, cut at three points, and one for each kind of `moov` damage FFmpeg opens without complaint (chunk offsets, a `trak` type, an `mdhd` timescale and a codec configuration). `rendering_is_deterministic` in `crates/synth/src/lib.rs`; two full runs on the fix/writers branch were byte-identical (D9). That was before `bad-trak-type.mp4`, `bad-timescale.mp4` and `bad-codec-config.mp4` were added, which are fixed byte edits of the first clip |
-| `spherecut probe` | `crates/cli/tests/probe.rs`, among them `file_names_that_are_not_utf8_are_reported`, `files_named_in_bytes_that_are_not_utf8_are_probed`, `a_codec_ffmpeg_does_not_know_is_a_warning` and `a_reader_that_goes_away_is_not_an_error`; `tags_that_are_not_utf8_come_out_as_valid_json` in `crates/cli/tests/probe_tags.rs`; `a_file_whose_name_is_not_utf8_probes_and_decodes` in `crates/media/tests/non_utf8_names.rs`; `broken_files_give_errors_not_panics` in `crates/synth/tests/generated_media.rs` (every bad file, plus 4000 edits of a real `moov`, of which it must find at least 3000; it found 3451 at 9d212c3); the MP4 tests `timescales_ffmpeg_cannot_use_are_damage` and `box_types_that_are_not_text_are_damage_where_types_are_registered`, and the MP4 fuzzing (D15) |
+| `spherecut probe` | `crates/cli/tests/probe.rs`, among them `file_names_that_are_not_utf8_are_reported`, `files_named_in_bytes_that_are_not_utf8_are_probed`, `a_codec_ffmpeg_does_not_know_is_a_warning` and `a_reader_that_goes_away_is_not_an_error`; `tags_that_are_not_utf8_come_out_as_valid_json` in `crates/cli/tests/probe_tags.rs`; `a_file_whose_name_is_not_utf8_probes_and_decodes` in `crates/media/tests/non_utf8_names.rs`; `broken_files_give_errors_not_panics` in `crates/synth/tests/generated_media.rs` (every bad file, plus 4000 edits of a real `moov`, of which it must find at least 3000; it found 3451 at 9d212c3); the `mp4` unit tests `timescales_ffmpeg_cannot_use_are_damage` and `box_types_that_are_not_text_are_damage_where_types_are_registered`, and the MP4 fuzzing (D15) |
 | `spherecut doctor` | `crates/media/tests/doctor.rs`, `crates/cli/tests/doctor.rs` against lavapipe, and the unit tests in `crates/media/src/doctor.rs`, among them `every_missing_codec_gets_an_issue_with_the_ffmpeg_fix` and `a_driver_that_decodes_wrongly_is_told_apart_from_one_that_refuses`. `crates/media/tests/hw_refusal.rs` checks, on lavapipe, the refusals that doctor's probes share with `VideoDecoder` (D14). Capability checks and fixes: D18 |
 | `cargo xtask hw-test` | Unit tests in `xtask/src/hw_test.rs`, among them `paths_that_are_not_utf8_reach_the_tests_unchanged_and_are_reported` and `benchmarks_show_median_range_and_spread`; the huginn run; the reporting rules in D19 |
 | First hardware report | `hw-reports/huginn-a9128cf8df-dirty.md`: toolchain, a Vulkan device (RADV), VA-API HEVC decode working, and the Vulkan Video HEVC gap named |
@@ -116,14 +116,14 @@ first item under Next.
   before the rename, but no rename call replaces only a regular file, so
   a pipe or device created at the output in the microseconds between the
   last check and the rename would still be replaced.
-- `inject` refuses damaged input (anything `probe` reports as damage).
-  When `moov` comes before `mdat`, it also refuses edits that take `moov`
-  past the box reader's limit (`MAX_BOXES`, 250 000 boxes), found when it
-  re-reads `moov` to shift the chunk offsets. With `moov` at the end of
-  the file no
-  offsets move and there is no re-read, so such edits give a valid MP4
-  that Spherecut's own box reader stops partway through, and `probe`
-  reports as damaged. No chunk offset is ever wrong.
+- `inject` refuses damaged input: anything `Mp4Tree::damage()` finds,
+  which includes the box reader's warnings. When `moov` comes before
+  `mdat`, it also refuses edits that take `moov` past the box reader's
+  limit (`MAX_BOXES`, 250 000 boxes), found when it re-reads `moov` to
+  shift the chunk offsets. With `moov` at the end of the file no offsets
+  move and there is no re-read, so such edits give a valid MP4 that
+  Spherecut's own box reader stops partway through, and `probe` reports
+  as damaged. No chunk offset is ever wrong.
 - `hw-test` runs the `spherecut doctor` it built through a lossy UTF-8
   copy of the binary's path, so a cargo target directory whose path isn't
   UTF-8 makes that run fail; the report shows the failure.

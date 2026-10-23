@@ -52,13 +52,13 @@ planned ones above don't exist yet.
   fields (colour, channel layout, display matrix, profile), stream media
   types, hardware device types and codec hardware configs, `HwDevice` (a
   reference-counted device context, released on drop) and `HwError`, the
-  `get_format` callback that refuses software fallback, opening a video
-  decoder by its int codec id, reading a frame's format and planes as
-  ints, copying hardware frames to system memory, the demuxer index end,
-  setting other streams to `AVDISCARD_ALL`, library versions, and the
-  bridge that sends FFmpeg's `av_log` to `tracing` under the target
-  `ffmpeg`. C enums are never made into bindgen's Rust enums (DECISIONS
-  D11). Five parts need more care:
+  `get_format` callback that refuses software fallback, opening files,
+  reading metadata, opening a video decoder by its int codec id, reading
+  a frame's format and planes as ints, copying hardware frames to system
+  memory, the demuxer index end, setting other streams to
+  `AVDISCARD_ALL`, library versions, and the bridge that sends FFmpeg's
+  `av_log` to `tracing` under the target `ffmpeg`. C enums are never made
+  into bindgen's Rust enums (DECISIONS D11). In more detail:
   * The `get_format` callback keeps its bookkeeping in the codec context's
     `opaque`: the device's pixel format, and flags that describe the
     latest call. Asked: FFmpeg has called it at all. Taken: the latest
