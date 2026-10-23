@@ -32,11 +32,11 @@ pub enum MediaError {
     Open { path: PathBuf, reason: String },
     #[error("cannot decode {}: {reason}", path.display())]
     Decode { path: PathBuf, reason: String },
-    #[error("{kind} device unavailable: {reason}")]
-    Hardware { kind: String, reason: String },
+    #[error("{kind} device unavailable: {source}")]
+    Hardware { kind: String, source: HwError },
 }
 
-pub use ffi::HwDevice;
+pub use ffi::{HwDevice, HwError};
 
 static INIT: Once = Once::new();
 

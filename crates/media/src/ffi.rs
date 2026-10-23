@@ -18,6 +18,7 @@ use std::ffi::{CStr, CString, c_char, c_int};
 
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as sys;
+use thiserror::Error;
 
 /// FFmpeg functions that take or return a C enum, declared with `int`s.
 /// The name functions return NULL for values they don't know.
@@ -267,19 +268,45 @@ pub fn hw_device_types() -> Vec<String> {
     out
 }
 
-/// Try to create a hardware device context, then release it. Returns the
-/// FFmpeg error text on failure.
-pub fn try_hw_device(kind: &str, device: Option<&str>) -> Result<(), String> {
-    let kind_c = CString::new(kind).map_err(|_| "bad device type".to_string())?;
+/// Why a hardware device could not be opened or attached to a decoder.
+#[derive(Debug, Error)]
+pub enum HwError {
+    #[error("this FFmpeg was built without {0} support")]
+    NotBuiltIn(String),
+    #[error("{0} decoding is not supported by Spherecut")]
+    Unsupported(String),
+    #[error("{what} {name:?} contains a NUL byte")]
+    Nul { what: &'static str, name: String },
+    /// FFmpeg's own error, e.g. for a missing render node or driver.
+    #[error(transparent)]
+    Ffmpeg(#[from] ff::Error),
+}
+
+/// FFmpeg's device type for a name such as "vaapi".
+fn device_type(kind: &str) -> Result<c_int, HwError> {
+    let kind_c = CString::new(kind).map_err(|_| HwError::Nul {
+        what: "device type",
+        name: kind.into(),
+    })?;
     // SAFETY: valid NUL-terminated string.
     let t = unsafe { c::av_hwdevice_find_type_by_name(kind_c.as_ptr()) };
     if t == HW_NONE {
-        return Err(format!("this FFmpeg was built without {kind} support"));
+        return Err(HwError::NotBuiltIn(kind.into()));
     }
+    Ok(t)
+}
+
+/// Create a device context of type `t` on `device` (`None` for the
+/// default). The caller owns the returned reference.
+fn create_device(t: c_int, device: Option<&str>) -> Result<*mut sys::AVBufferRef, HwError> {
     let dev_c = device
-        .map(CString::new)
-        .transpose()
-        .map_err(|_| "bad device path".to_string())?;
+        .map(|d| {
+            CString::new(d).map_err(|_| HwError::Nul {
+                what: "device path",
+                name: d.into(),
+            })
+        })
+        .transpose()?;
     let mut ctx: *mut sys::AVBufferRef = std::ptr::null_mut();
     // SAFETY: `ctx` is an out-pointer; device may be NULL (default device).
     let ret = unsafe {
@@ -291,15 +318,25 @@ pub fn try_hw_device(kind: &str, device: Option<&str>) -> Result<(), String> {
             0,
         )
     };
-    if !ctx.is_null() {
-        // SAFETY: we own the reference returned above.
-        unsafe { sys::av_buffer_unref(&mut ctx) };
-    }
     if ret < 0 {
-        Err(ff::Error::from(ret).to_string())
-    } else {
-        Ok(())
+        if !ctx.is_null() {
+            // SAFETY: we own the reference returned above.
+            unsafe { sys::av_buffer_unref(&mut ctx) };
+        }
+        return Err(ff::Error::from(ret).into());
     }
+    if ctx.is_null() {
+        return Err(ff::Error::Bug.into());
+    }
+    Ok(ctx)
+}
+
+/// Try to create a hardware device context, then release it.
+pub fn try_hw_device(kind: &str, device: Option<&str>) -> Result<(), HwError> {
+    let mut ctx = create_device(device_type(kind)?, device)?;
+    // SAFETY: we own the reference returned above.
+    unsafe { sys::av_buffer_unref(&mut ctx) };
+    Ok(())
 }
 
 /// Hardware device types a decoder can use through `hw_device_ctx`.
@@ -395,39 +432,16 @@ impl HwDevice {
     /// Open a device: `kind` is an FFmpeg device type name ("vaapi",
     /// "vulkan"); `device` is e.g. a DRM render node, or `None` for the
     /// default.
-    pub fn open(kind: &str, device: Option<&str>) -> Result<Self, String> {
-        let kind_c = CString::new(kind).map_err(|_| "bad device type".to_string())?;
-        // SAFETY: valid NUL-terminated string.
-        let t = unsafe { c::av_hwdevice_find_type_by_name(kind_c.as_ptr()) };
-        if t == HW_NONE {
-            return Err(format!("this FFmpeg was built without {kind} support"));
-        }
+    pub fn open(kind: &str, device: Option<&str>) -> Result<Self, HwError> {
+        let t = device_type(kind)?;
         use sys::AVHWDeviceType as T;
         let pix_fmt = match t {
             t if t == T::AV_HWDEVICE_TYPE_VAAPI as c_int => sys::AVPixelFormat::AV_PIX_FMT_VAAPI,
             t if t == T::AV_HWDEVICE_TYPE_VULKAN as c_int => sys::AVPixelFormat::AV_PIX_FMT_VULKAN,
-            _ => return Err(format!("{kind} decoding is not supported by Spherecut")),
+            _ => return Err(HwError::Unsupported(kind.into())),
         };
-        let dev_c = device
-            .map(CString::new)
-            .transpose()
-            .map_err(|_| "bad device path".to_string())?;
-        let mut ptr: *mut sys::AVBufferRef = std::ptr::null_mut();
-        // SAFETY: `ptr` is an out-pointer; device may be NULL.
-        let ret = unsafe {
-            c::av_hwdevice_ctx_create(
-                &mut ptr,
-                t,
-                dev_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if ret < 0 || ptr.is_null() {
-            return Err(ff::Error::from(ret).to_string());
-        }
         Ok(HwDevice {
-            ptr,
+            ptr: create_device(t, device)?,
             pix_fmt,
             kind: kind.to_string(),
         })
@@ -481,14 +495,17 @@ unsafe extern "C" fn pick_hw_format(
 pub fn attach_hw_device(
     ctx: &mut ff::codec::context::Context,
     dev: &HwDevice,
-) -> Result<(), String> {
+) -> Result<(), HwError> {
     // SAFETY: the context is not yet opened, so setting hw_device_ctx and
     // get_format is allowed; we hand FFmpeg its own new reference.
     unsafe {
         let c = ctx.as_mut_ptr();
         let r = sys::av_buffer_ref(dev.ptr);
         if r.is_null() {
-            return Err("out of memory".into());
+            return Err(ff::Error::Other {
+                errno: ff::util::error::ENOMEM,
+            }
+            .into());
         }
         if !(*c).hw_device_ctx.is_null() {
             sys::av_buffer_unref(&mut (*c).hw_device_ctx);

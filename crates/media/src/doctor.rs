@@ -287,7 +287,7 @@ fn device_status(kind: &str, device: Option<&str>) -> DeviceStatus {
         kind: kind.into(),
         device: device.map(str::to_string),
         ok: r.is_ok(),
-        error: r.err(),
+        error: r.err().map(|e| e.to_string()),
     }
 }
 

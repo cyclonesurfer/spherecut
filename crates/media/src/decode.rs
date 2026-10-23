@@ -252,8 +252,8 @@ pub fn open_hw_device(kind: &str, device: Option<&str>) -> Result<Arc<HwDevice>,
     init();
     HwDevice::open(kind, device)
         .map(Arc::new)
-        .map_err(|reason| MediaError::Hardware {
+        .map_err(|source| MediaError::Hardware {
             kind: kind.to_string(),
-            reason,
+            source,
         })
 }
