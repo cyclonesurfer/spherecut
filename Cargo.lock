@@ -757,7 +757,6 @@ dependencies = [
  "ffmpeg-next",
  "ffmpeg-sys-next",
  "serde",
- "serde_json",
  "spherecut-core",
  "spherecut-testkit",
  "thiserror",

@@ -226,7 +226,7 @@ pub fn probe(path: &Path) -> Result<ProbeReport, MediaError> {
     for st in ictx.streams() {
         let par = st.parameters();
         let f = ffi::codecpar_fields(&par);
-        let kind = match par.medium() {
+        let kind = match ffi::media_type(&par) {
             ff::media::Type::Video => StreamKind::Video,
             ff::media::Type::Audio => StreamKind::Audio,
             ff::media::Type::Data => StreamKind::Data,

@@ -38,13 +38,7 @@ enum Cmd {
 }
 
 fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("SPHERECUT_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    init_logging();
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(e) => {
@@ -52,6 +46,63 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// What the CLI logs by default: warnings, but not FFmpeg's own messages.
+/// FFmpeg logs an error for every device doctor tries that isn't there,
+/// and our errors already say what failed.
+const DEFAULT_LOG: &str = "warn,ffmpeg=off";
+
+/// Log to stderr as [`log_directives`] says for `SPHERECUT_LOG`.
+fn init_logging() {
+    use std::io::IsTerminal;
+    use tracing_subscriber::EnvFilter;
+    let filter = match std::env::var("SPHERECUT_LOG") {
+        Ok(v) if !v.trim().is_empty() => {
+            EnvFilter::try_new(log_directives(&v)).unwrap_or_else(|e| {
+                eprintln!("warning: ignoring SPHERECUT_LOG={v}: {e}");
+                EnvFilter::new(DEFAULT_LOG)
+            })
+        }
+        _ => EnvFilter::new(DEFAULT_LOG),
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
+}
+
+/// The `EnvFilter` directives for a `SPHERECUT_LOG` value, e.g. `debug`,
+/// `ffmpeg=debug` or `spherecut_media=trace`, which add to the default.
+/// FFmpeg's messages show when the value names the `ffmpeg` target, or
+/// sets a level for everything that is more verbose than the default's
+/// (`info`, `debug`, `trace`); `warn` and `error` leave them off.
+fn log_directives(v: &str) -> String {
+    use tracing_subscriber::filter::LevelFilter;
+    // EnvFilter splits on commas too, but takes spaces as part of a
+    // directive. An empty directive would parse as a level (ERROR).
+    let directives: Vec<&str> = v
+        .split(',')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .collect();
+    // The last global level wins in EnvFilter. `ffmpeg=off` would outrank
+    // it (a directive naming the target wins), so a more verbose one
+    // replaces the default. A directive naming `ffmpeg` comes later and
+    // simply overrides it.
+    let global = directives
+        .iter()
+        .rev()
+        .find_map(|d| d.parse::<LevelFilter>().ok());
+    let base = match global {
+        Some(level) if level > LevelFilter::WARN => "warn",
+        _ => DEFAULT_LOG,
+    };
+    std::iter::once(base)
+        .chain(directives)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
