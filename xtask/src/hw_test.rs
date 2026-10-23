@@ -1288,10 +1288,20 @@ pub fn run(a: Args) -> Result<()> {
             "None recorded (benchmarks need the hardware the Tier 2 tests above need).\n"
         );
     } else {
-        let _ = writeln!(r, "Release build, one run each.\n");
-        let _ = writeln!(r, "| Benchmark | Result |\n|---|---:|");
-        for (name, value, unit) in &benches {
-            let _ = writeln!(r, "| {name} | {value} {unit} |");
+        let _ = writeln!(
+            r,
+            "Release build. Each benchmark runs once to warm up, then {} times \
+             (`SPHERECUT_BENCH_RUNS`); the result is the median. Spread is the \
+             range over the median: over {UNSTABLE}% means the machine was busy \
+             or changing clocks, so take that result with care.\n",
+            bench_runs()
+        );
+        let _ = writeln!(
+            r,
+            "| Benchmark | Median | Range | Runs | Spread |\n|---|---:|---:|---:|---:|"
+        );
+        for b in &benches {
+            let _ = writeln!(r, "{}", b.row());
         }
         let _ = writeln!(r);
     }
@@ -1355,16 +1365,74 @@ pub fn run(a: Args) -> Result<()> {
     Ok(())
 }
 
-/// Lines of `name\tvalue\tunit` as written by `spherecut_testkit::bench`.
-fn parse_benches(text: &str) -> Vec<(String, String, String)> {
+/// Spread, in percent of the median, above which a benchmark is flagged.
+const UNSTABLE: f64 = 10.0;
+
+/// The runs `spherecut_testkit::bench::measure` makes, as the test
+/// processes will see it.
+fn bench_runs() -> usize {
+    std::env::var("SPHERECUT_BENCH_RUNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n: &usize| n > 0)
+        .unwrap_or(3)
+}
+
+/// One line of `hw-bench.tsv`.
+#[derive(Debug, PartialEq)]
+struct Bench {
+    name: String,
+    median: f64,
+    unit: String,
+    /// Min and max, when there was more than one run.
+    range: Option<(f64, f64)>,
+    runs: usize,
+}
+
+impl Bench {
+    fn row(&self) -> String {
+        let Bench {
+            name,
+            median,
+            unit,
+            range,
+            runs,
+        } = self;
+        match range {
+            Some((lo, hi)) if *runs > 1 => {
+                let spread = if *median > 0.0 {
+                    (hi - lo) / median * 100.0
+                } else {
+                    0.0
+                };
+                let flag = if spread > UNSTABLE {
+                    " **unstable**"
+                } else {
+                    ""
+                };
+                format!(
+                    "| {name} | {median:.2} {unit} | {lo:.2} to {hi:.2} | {runs} | {spread:.0}%{flag} |"
+                )
+            }
+            _ => format!("| {name} | {median:.2} {unit} | | {runs} | |"),
+        }
+    }
+}
+
+/// Lines of `name, median, unit[, min, max, runs]`, tab-separated, as
+/// written by `spherecut_testkit::bench`.
+fn parse_benches(text: &str) -> Vec<Bench> {
     text.lines()
         .filter_map(|l| {
-            let mut f = l.split('\t');
-            Some((
-                f.next()?.to_string(),
-                f.next()?.to_string(),
-                f.next()?.to_string(),
-            ))
+            let f: Vec<&str> = l.split('\t').collect();
+            let num = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
+            Some(Bench {
+                name: f.first()?.to_string(),
+                median: num(1)?,
+                unit: f.get(2)?.to_string(),
+                range: num(3).zip(num(4)),
+                runs: f.get(5).and_then(|v| v.parse().ok()).unwrap_or(1),
+            })
         })
         .collect()
 }
@@ -2139,5 +2207,26 @@ fn main() {
                 t.run.text
             );
         }
+    }
+
+    #[test]
+    fn benchmarks_show_median_range_and_spread() {
+        let b = parse_benches(
+            "8K30: VA-API decode\t1.14\t× real time\t1.10\t1.18\t3\n\
+             5.7K: VA-API\t88.00\tfps\t67.00\t110.00\t3\n\
+             old format\t2.50\tfps\n\
+             not a number\tfast\tfps\n",
+        );
+        assert_eq!(b.len(), 3, "{b:?}");
+        assert_eq!(
+            b[0].row(),
+            "| 8K30: VA-API decode | 1.14 × real time | 1.10 to 1.18 | 3 | 7% |"
+        );
+        assert_eq!(
+            b[1].row(),
+            "| 5.7K: VA-API | 88.00 fps | 67.00 to 110.00 | 3 | 49% **unstable** |"
+        );
+        assert_eq!(b[2].runs, 1);
+        assert_eq!(b[2].row(), "| old format | 2.50 fps | | 1 | |");
     }
 }

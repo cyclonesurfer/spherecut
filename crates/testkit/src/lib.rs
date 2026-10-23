@@ -75,9 +75,45 @@ pub mod tier2 {
 pub mod bench {
     use std::io::Write;
 
+    /// How many measured runs [`measure`] makes: `SPHERECUT_BENCH_RUNS`,
+    /// default 3.
+    pub fn runs() -> usize {
+        std::env::var("SPHERECUT_BENCH_RUNS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(3)
+    }
+
+    /// Run `f` once to warm up (file cache, GPU clocks), then [`runs`]
+    /// times, and record the median and the range. `f` returns one
+    /// measurement in `unit`.
+    pub fn measure(name: &str, unit: &str, mut f: impl FnMut() -> f64) {
+        f();
+        let values: Vec<f64> = (0..runs()).map(|_| f()).collect();
+        record_runs(name, &values, unit);
+    }
+
     /// Record one measurement, e.g. `record("decode 3840x1920 hevc8 vaapi", 212.0, "fps")`.
     pub fn record(name: &str, value: f64, unit: &str) {
-        let line = format!("{name}\t{value:.2}\t{unit}\n");
+        record_runs(name, &[value], unit);
+    }
+
+    /// Record several runs of one benchmark as a line of
+    /// `name, median, unit, min, max, runs`, tab-separated.
+    pub fn record_runs(name: &str, values: &[f64], unit: &str) {
+        let mut v = values.to_vec();
+        v.sort_by(f64::total_cmp);
+        let (Some(min), Some(max)) = (v.first(), v.last()) else {
+            return;
+        };
+        let n = v.len();
+        let median = if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            (v[n / 2 - 1] + v[n / 2]) / 2.0
+        };
+        let line = format!("{name}\t{median:.2}\t{unit}\t{min:.2}\t{max:.2}\t{n}\n");
         match std::env::var_os("SPHERECUT_BENCH_OUT") {
             Some(p) => {
                 let ok = std::fs::OpenOptions::new()
@@ -96,7 +132,7 @@ pub mod bench {
 
 #[cfg(test)]
 mod tests {
-    use super::tier2;
+    use super::{bench, tier2};
 
     #[test]
     fn skip_panics_with_marker() {
@@ -106,5 +142,30 @@ mod tests {
             .and_then(|e| e.downcast_ref::<String>().cloned())
             .unwrap_or_default();
         assert_eq!(msg, "TIER2-SKIP: no GPU");
+    }
+
+    #[test]
+    fn runs_are_recorded_as_median_and_range() {
+        let out = std::env::temp_dir().join(format!("spherecut-bench-{}.tsv", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        // SAFETY: no other test in this crate reads or writes these
+        // variables.
+        unsafe {
+            std::env::set_var("SPHERECUT_BENCH_OUT", &out);
+            std::env::set_var("SPHERECUT_BENCH_RUNS", "4");
+        }
+        let mut calls = 0;
+        bench::measure("m", "fps", || {
+            calls += 1;
+            [0.0, 4.0, 1.0, 3.0, 2.0][calls - 1]
+        });
+        bench::record("one", 5.0, "fps");
+        // The warm-up's 0.0 is left out.
+        assert_eq!(calls, 5);
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "m\t2.50\tfps\t1.00\t4.00\t4\none\t5.00\tfps\t5.00\t5.00\t1\n"
+        );
+        let _ = std::fs::remove_file(&out);
     }
 }

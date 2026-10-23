@@ -165,13 +165,15 @@ fn bench_decode_hevc_4k_and_5k7() {
     for (w, name) in [(3840, "t2-hevc8-4k"), (5760, "t2-hevc8-5k7")] {
         let path = clip(name, Codec::Hevc, 8, w, 60);
         let size = format!("{w}x{}", w / 2);
-        let sw = fps(&path, None).expect("software decode");
-        bench::record(&format!("decode {size} HEVC 8-bit, software"), sw, "fps");
-        let hw = fps(&path, Some(dev.clone())).unwrap_or_else(|e| panic!("{e}"));
-        bench::record(
-            &format!("decode {size} HEVC 8-bit, VA-API (incl. copy to RAM)"),
-            hw,
+        bench::measure(
+            &format!("decode {size} HEVC 8-bit, software"),
             "fps",
+            || fps(&path, None).expect("software decode"),
+        );
+        bench::measure(
+            &format!("decode {size} HEVC 8-bit, VA-API (incl. copy to RAM)"),
+            "fps",
+            || fps(&path, Some(dev.clone())).unwrap_or_else(|e| panic!("{e}")),
         );
     }
 }

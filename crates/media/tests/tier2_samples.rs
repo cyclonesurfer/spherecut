@@ -211,11 +211,13 @@ fn bench_samples_realtime_decode() {
         }
     }
     for (mode, (path, streams, fps, _)) in &modes {
-        // Up to ten seconds of footage.
+        // Up to ten seconds of footage a run.
         let frames = (fps * 10.0).round() as usize;
-        let hw = decode_rate(path, streams, Some(dev.clone()), frames);
-        bench::record(&format!("{mode}: VA-API decode"), hw / fps, "× real time");
-        let sw = decode_rate(path, streams, None, frames);
-        bench::record(&format!("{mode}: software decode"), sw / fps, "× real time");
+        bench::measure(&format!("{mode}: VA-API decode"), "× real time", || {
+            decode_rate(path, streams, Some(dev.clone()), frames) / fps
+        });
+        bench::measure(&format!("{mode}: software decode"), "× real time", || {
+            decode_rate(path, streams, None, frames) / fps
+        });
     }
 }
