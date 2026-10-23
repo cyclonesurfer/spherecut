@@ -1069,11 +1069,35 @@ mod tests {
     }
 
     /// Make a unix socket at `p`. The socket stays when its listener is
-    /// closed.
+    /// closed. A socket's path must fit in 108 bytes, which a long TMPDIR
+    /// can use up, so the socket is made through a short path to the same
+    /// directory: `/proc/self/fd/<n>`, where `n` holds the directory open.
     fn socket(p: &Path) -> Result<(), String> {
-        std::os::unix::net::UnixListener::bind(p)
+        use std::os::fd::AsRawFd;
+        let err = |e: io::Error| format!("bind {}: {e}", p.display());
+        let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else {
+            return Err(err(io::ErrorKind::InvalidInput.into()));
+        };
+        let dir = std::fs::File::open(dir).map_err(err)?;
+        let short = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(name);
+        std::os::unix::net::UnixListener::bind(short)
             .map(drop)
-            .map_err(|e| format!("bind {}: {e}", p.display()))
+            .map_err(err)
+    }
+
+    #[test]
+    fn sockets_are_made_however_long_their_path() {
+        use std::os::unix::fs::FileTypeExt;
+        // A socket's path must fit in sun_path's 108 bytes, and a long
+        // TMPDIR takes most of them. This one is too long with any TMPDIR.
+        let dir = tmpdir("socket-path");
+        let deep = dir.join("d".repeat(108));
+        std::fs::create_dir(&deep).unwrap();
+        let p = deep.join("socket");
+        socket(&p).unwrap();
+        assert!(p.symlink_metadata().unwrap().file_type().is_socket());
+        assert_eq!(listing(&deep), ["socket"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
