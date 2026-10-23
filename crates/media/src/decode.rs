@@ -457,7 +457,7 @@ impl VideoDecoder {
         })
     }
 
-    fn finish_frame(&self, frame: ff::frame::Video) -> Result<DecodedFrame, MediaError> {
+    fn finish_frame(&mut self, frame: ff::frame::Video) -> Result<DecodedFrame, MediaError> {
         let format = ffi::frame_format(&frame);
         let on_device = self.hw.as_ref().is_some_and(|h| format == h.hw_pix_fmt());
         if self.hw.is_some() && !on_device {
@@ -469,6 +469,9 @@ impl VideoDecoder {
                     ffi::pix_fmt_name(format).unwrap_or_else(|| format!("format {format}"))
                 ),
             ));
+        }
+        if on_device {
+            ffi::note_device_frame(&mut self.dec);
         }
         let pts = frame.pts();
         let frame = if on_device {
