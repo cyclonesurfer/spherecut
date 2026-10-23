@@ -1,7 +1,9 @@
 //! Writing synthetic patterns to real media files, plus deliberately broken
 //! files for robustness tests.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use spherecut_core::FrameRate;
 use spherecut_media::encode::{AudioSettings, Mp4Writer, PixelLayout, VideoSettings};
@@ -106,18 +108,63 @@ impl Spec {
     }
 }
 
+/// A uniquely named file in `dir`, removed when dropped unless
+/// [`PartFile::persist`] renamed it into place first.
+struct PartFile {
+    path: PathBuf,
+    persisted: bool,
+}
+
+impl PartFile {
+    fn new(dir: &Path, name: &str) -> Self {
+        // Unique per process and call: tests may write the same spec from
+        // several threads at once. FFmpeg picks the muxer by extension, so
+        // the name ends in .mp4.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        PartFile {
+            path: dir.join(format!(".{name}.{}-{n}.part.mp4", std::process::id())),
+            persisted: false,
+        }
+    }
+
+    fn persist(mut self, dest: &Path) -> Result<(), SynthError> {
+        let io_err = |source| SynthError::Io {
+            path: self.path.clone(),
+            source,
+        };
+        File::open(&self.path)
+            .and_then(|f| f.sync_all())
+            .map_err(io_err)?;
+        std::fs::rename(&self.path, dest).map_err(io_err)?;
+        self.persisted = true;
+        Ok(())
+    }
+}
+
+impl Drop for PartFile {
+    fn drop(&mut self) {
+        // Best effort: it may never have been created, and a leftover
+        // hidden part file is harmless.
+        if !self.persisted {
+            std::fs::remove_file(&self.path).ok();
+        }
+    }
+}
+
 /// Render and encode `spec` into `dir`. Returns the file path.
+///
+/// The file is written under a temporary name in `dir` and renamed into
+/// place when complete (by `inject` for spherical files). So if the path
+/// exists it holds a whole clip, even after an interrupted run, and callers
+/// may cache clips by whether the file exists.
 pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
     std::fs::create_dir_all(dir).map_err(|source| SynthError::Io {
         path: dir.to_path_buf(),
         source,
     })?;
     let out = dir.join(spec.file_name());
-    let raw = if spec.spherical {
-        dir.join(format!(".{}.tmp.mp4", spec.name))
-    } else {
-        out.clone()
-    };
+    let raw = PartFile::new(dir, &spec.name);
     let sample_rate = 48_000u32;
     let audio_settings = match spec.audio {
         Audio::None => None,
@@ -134,7 +181,7 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             bit_rate: 256_000,
         }),
     };
-    let mut w = Mp4Writer::create(&raw, &spec.video_settings(), audio_settings.as_ref())?;
+    let mut w = Mp4Writer::create(&raw.path, &spec.video_settings(), audio_settings.as_ref())?;
     // Exact per-frame sample counts: frame i covers samples
     // [i·sr/fps, (i+1)·sr/fps).
     let fps = spec.rate.as_rational();
@@ -177,11 +224,10 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
                 boxes: write::sa3d_first_order_ambix(),
             });
         }
-        inject::inject(&raw, &out, &edits)?;
-        std::fs::remove_file(&raw).map_err(|source| SynthError::Io {
-            path: raw.clone(),
-            source,
-        })?;
+        // `raw` is removed when it drops.
+        inject::inject(&raw.path, &out, &edits)?;
+    } else {
+        raw.persist(&out)?;
     }
     Ok(out)
 }

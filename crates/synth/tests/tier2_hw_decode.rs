@@ -23,8 +23,13 @@ use spherecut_synth::media::{self, Audio, Codec, Spec, SynthError};
 use spherecut_testkit::{bench, tier2};
 
 /// Generated clips are cached in Cargo's per-target temp dir.
+///
+/// Caching by existence is safe because `media::write` renames a clip into
+/// place only once it is complete: an interrupted run leaves no file at
+/// `path`, at most a hidden part file next to it. The directory name has a
+/// version because writers before that fix could leave a partial clip.
 fn clip(name: &str, codec: Codec, bits: u32, width: u32, frames: u32) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("tier2-media");
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("tier2-media-v2");
     let spec = Spec {
         name: name.into(),
         pattern: Pattern::Grid,

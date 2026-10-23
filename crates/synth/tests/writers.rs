@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use spherecut_core::FrameRate;
 use spherecut_media::inject::{self, EntryEdit, InjectError, TrackKind};
+use spherecut_media::probe;
 use spherecut_media::spherical::write;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Audio, Codec, Spec};
@@ -42,6 +43,54 @@ fn spec(name: &str, width: u32, frames: u32, codec: Codec, bits: u32, audio: Aud
         audio,
         spherical: true,
     }
+}
+
+#[test]
+fn write_leaves_only_complete_files() {
+    let dir = tmp("atomic");
+    let tagged = spec("tagged", 64, 2, Codec::H264, 8, Audio::Stereo);
+    let untagged = Spec {
+        spherical: false,
+        ..spec("untagged", 64, 2, Codec::H264, 8, Audio::None)
+    };
+    for s in [&tagged, &untagged] {
+        let p = media::write(s, &dir).unwrap();
+        assert_eq!(p, dir.join(s.file_name()));
+    }
+    assert_eq!(listing(&dir), ["tagged.mp4", "untagged.mp4"]);
+
+    // When the final rename fails (a directory is in the way), the error
+    // comes back and no part file is left.
+    let blocked = tmp("atomic-blocked");
+    for s in [&tagged, &untagged] {
+        std::fs::create_dir(blocked.join(s.file_name())).unwrap();
+        let r = media::write(s, &blocked);
+        assert!(r.is_err(), "{}: {r:?}", s.name);
+    }
+    assert_eq!(listing(&blocked), ["tagged.mp4", "untagged.mp4"]);
+    assert!(blocked.join("tagged.mp4").is_dir());
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&blocked).ok();
+}
+
+#[test]
+fn concurrent_writes_of_one_clip_all_succeed() {
+    // Tier 2 tests share cached clips, and may generate one from several
+    // threads at once.
+    let dir = tmp("concurrent");
+    let s = spec("shared", 64, 2, Codec::H264, 8, Audio::Stereo);
+    std::thread::scope(|scope| {
+        let writers: Vec<_> = (0..4)
+            .map(|_| scope.spawn(|| media::write(&s, &dir)))
+            .collect();
+        for w in writers {
+            w.join().unwrap().unwrap();
+        }
+    });
+    assert_eq!(listing(&dir), ["shared.mp4"]);
+    let r = probe::probe(&dir.join("shared.mp4")).unwrap();
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
