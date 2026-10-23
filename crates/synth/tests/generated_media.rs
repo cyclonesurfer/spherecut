@@ -177,7 +177,7 @@ fn broken_files_give_errors_not_panics() {
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     assert!(r.ffmpeg_log.is_empty(), "{:?}", r.ffmpeg_log);
     let bad = media::write_bad_files(&good, &dir).unwrap();
-    assert_eq!(bad.len(), 9);
+    assert_eq!(bad.len(), 10);
     let reasons = [
         ("bad-empty.mp4", "the file is empty"),
         ("bad-text.mp4", "not a recognised media file"),
@@ -196,6 +196,10 @@ fn broken_files_give_errors_not_panics() {
         (
             "bad-codec-config.mp4",
             "stream #0 (sample entry `avc1`) has no pixel format",
+        ),
+        (
+            "bad-audio-config.mp4",
+            "stream #1 (sample entry `mp4a`) cannot be opened by FFmpeg's aac decoder",
         ),
     ];
     for b in &bad {
@@ -220,10 +224,19 @@ fn broken_files_give_errors_not_panics() {
         "bad-trak-type.mp4",
         "bad-timescale.mp4",
         "bad-codec-config.mp4",
+        "bad-audio-config.mp4",
     ] {
         let r = probe::probe(&dir.join(name));
         assert!(r.is_ok_and(|r| !r.damage.is_empty()), "{name}");
     }
+    // The stream looks set up: FFmpeg took the sample rate and channels
+    // from the sample entry.
+    let r = probe::probe(&dir.join("bad-audio-config.mp4")).unwrap();
+    let audio = r.streams.iter().find_map(|s| s.audio.as_ref()).unwrap();
+    assert!(
+        audio.channels > 0 && audio.sample_fmt.is_some(),
+        "{audio:?}"
+    );
     // The audio track is gone from what FFmpeg reads.
     let r = probe::probe(&dir.join("bad-trak-type.mp4")).unwrap();
     assert!(r.streams.iter().all(|s| s.kind != StreamKind::Audio));

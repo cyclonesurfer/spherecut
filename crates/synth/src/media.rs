@@ -326,6 +326,7 @@ const CORRUPTIONS: &[(&str, Corruption)] = &[
     ("bad-trak-type.mp4", flip_last_trak_type),
     ("bad-timescale.mp4", zero_first_timescale),
     ("bad-codec-config.mp4", flip_first_codec_config),
+    ("bad-audio-config.mp4", reserve_audio_sample_rate),
 ];
 
 /// The top byte of every chunk offset (`stco`/`co64`) flipped, so the
@@ -411,4 +412,59 @@ fn flip_first_codec_config(tree: &Mp4Tree, out: &mut [u8]) -> bool {
     out.get_mut(start..end)
         .map(|b| b.iter_mut().for_each(|x| *x ^= 0xa5))
         .is_some()
+}
+
+/// The sampling frequency index of the first audio track's AAC setup (the
+/// AudioSpecificConfig in `esds`) set to 13, which is reserved. FFmpeg
+/// opens the file and takes the sample rate and channels from the sample
+/// entry, so the stream looks set up, but its AAC decoder refuses to open.
+fn reserve_audio_sample_rate(tree: &Mp4Tree, out: &mut [u8]) -> bool {
+    let esds = tree
+        .tracks()
+        .filter(|t| mp4::handler_type(t).is_some_and(|h| h.0 == *b"soun"))
+        .find_map(|t| {
+            let stsd = t.path(&[b"mdia", b"minf", b"stbl", b"stsd"])?;
+            stsd.children.first()?.child(b"esds")
+        });
+    let Some((esds, config)) = esds.and_then(|e| Some((e, audio_specific_config(&e.payload)?)))
+    else {
+        return false;
+    };
+    let at = (esds.offset + esds.header_len) as usize + config;
+    let Some(b) = out.get_mut(at..at + 2) else {
+        return false;
+    };
+    // Five bits of object type, then four of sampling frequency index.
+    let v = u16::from_be_bytes([b[0], b[1]]) & !(0xf << 7) | 13 << 7;
+    b.copy_from_slice(&v.to_be_bytes());
+    true
+}
+
+/// Where the AudioSpecificConfig starts in an `esds` payload, laid out as
+/// FFmpeg writes it: the version and flags, an ES descriptor without its
+/// optional fields, then a decoder config descriptor holding the decoder
+/// specific info.
+fn audio_specific_config(esds: &[u8]) -> Option<usize> {
+    let mut at = 4;
+    // Each descriptor's tag, and the fixed fields before the next one.
+    for (tag, fixed) in [(3, 3), (4, 13), (5, 0)] {
+        if *esds.get(at)? != tag {
+            return None;
+        }
+        at += 1;
+        // Up to four length bytes; all but the last have the top bit set.
+        for _ in 0..4 {
+            at += 1;
+            if esds.get(at - 1)? & 0x80 == 0 {
+                break;
+            }
+        }
+        // The ES descriptor's flags, after its ID, say whether optional
+        // fields follow.
+        if tag == 3 && esds.get(at + 2)? & 0xe0 != 0 {
+            return None;
+        }
+        at += fixed;
+    }
+    (at + 2 <= esds.len()).then_some(at)
 }

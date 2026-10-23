@@ -31,8 +31,8 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
-/// A small spherical H.264 file with stereo audio, and the six broken
-/// files derived from it.
+/// A small spherical H.264 file with stereo audio, and the broken files
+/// derived from it.
 fn media(dir: &Path) -> (PathBuf, Vec<PathBuf>) {
     let spec = Spec {
         name: "good".into(),
@@ -92,6 +92,11 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
             "bad-codec-config.mp4",
             "is damaged",
             "stream #0 (sample entry `avc1`) has no pixel format, so its codec setup is damaged",
+        ),
+        (
+            "bad-audio-config.mp4",
+            "is damaged",
+            "stream #1 (sample entry `mp4a`) cannot be opened by FFmpeg's aac decoder (Invalid data found when processing input), so its codec setup is damaged",
         ),
     ];
     assert_eq!(bad.len(), expect.len());
@@ -348,6 +353,48 @@ fn a_codec_ffmpeg_does_not_know_is_a_warning() {
         stdout.contains(
             "  warning    stream #0 (sample entry `zzzz`) has no codec FFmpeg knows and cannot be decoded"
         ),
+        "{stdout}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn an_audio_setup_ffmpeg_does_not_implement_is_a_warning() {
+    // AAC object type 0: FFmpeg sets the stream up from the sample entry,
+    // but its decoder says the object type is not implemented. That may be
+    // a feature this FFmpeg lacks, so it is a warning, not damage.
+    let dir = tmp("aot0");
+    let (good, _) = media(&dir);
+    let mut f = std::fs::read(&good).unwrap();
+    // The AAC setup starts where bad-audio-config.mp4 differs.
+    let bad = std::fs::read(dir.join("bad-audio-config.mp4")).unwrap();
+    let at = f.iter().zip(&bad).position(|(a, b)| a != b).unwrap();
+    f[at] &= 0x07;
+    let path = dir.join("aot0.mp4");
+    std::fs::write(&path, &f).unwrap();
+
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "  warning    stream #1 (sample entry `mp4a`) uses a feature FFmpeg's aac decoder lacks (Function not implemented) and cannot be decoded"
+        ),
+        "{stdout}"
+    );
+    // FFmpeg logs that in two calls, and the report has it as one line.
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l
+                .starts_with("  ffmpeg     [aac] Audio object type 0 is not implemented. Update")),
+        "{stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .filter(|l| l.starts_with("  ffmpeg"))
+            .all(|l| l.starts_with("  ffmpeg     [")),
         "{stdout}"
     );
     std::fs::remove_dir_all(&dir).ok();

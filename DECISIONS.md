@@ -439,10 +439,24 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   samples and its sample entry is a codec FFmpeg reads (the entries we
   know, except the encrypted `encv` and `enca`). Like FFmpeg's own check,
   that is no codec, no frame size, no sample rate or channels, or no pixel
-  or sample format although FFmpeg has a decoder (one named after the
-  codec). Usually the `avcC` or `hvcC` is damaged. With any other sample
-  entry, such as an unknown `zzzz`, the stream is a warning instead: it
-  may be a real codec this FFmpeg lacks.
+  or sample format although FFmpeg has a decoder (the one
+  `avcodec_find_decoder` picks for the codec id, read as an int). Usually
+  the `avcC` or `hvcC` is damaged. With any other sample entry, such as an
+  unknown `zzzz`, or in a track with no samples, where FFmpeg may have had
+  too little to go on, the stream is a warning instead: it may be a real
+  codec this FFmpeg lacks;
+- a video or audio stream whose decoder will not open with its codec
+  parameters. Those can look complete when the codec setup is not: the
+  MOV demuxer takes the channel count from the sample entry and the AAC
+  decoder sets the sample format before it refuses an `esds` with a
+  reserved sample rate. So probe opens each such decoder, as a player
+  would, on one thread (`avcodec_parameters_to_context` and
+  `avcodec_open2` through ffmpeg-next). Opening decodes nothing, and
+  probing Pat's X5 files took no measurably longer. A refusal that says
+  FFmpeg lacks a feature (`ENOSYS`, `AVERROR_PATCHWELCOME`, or
+  `AVERROR_EXPERIMENTAL` for a decoder this build does not enable) is a
+  warning, as is a codec with no decoder in this build; any other
+  refusal is damage, whatever the container.
 
 A file FFmpeg reads as MOV/MP4 is checked even when its first box type is
 unknown; that box alone is a warning, not damage. Matroska is checked
@@ -479,13 +493,16 @@ FFmpeg wrote, of which at least 3000 must be found
 (`crates/synth/tests/generated_media.rs`), and run `spherecut probe` on
 200 000 levels (`crates/cli/tests/probe.rs`). `write_bad_files` makes one
 file for each kind of `moov` damage FFmpeg opens without complaint: chunk
-offsets, a `trak` type, an `mdhd` timescale and a codec configuration.
+offsets, a `trak` type, an `mdhd` timescale, a video codec configuration
+and an AAC setup.
 
 Why: the M0 review found unbounded recursion and quadratic memory in the
 parser (B2), `probe` exiting 0 on corrupt and truncated MP4s (S1), and
 that the parser was not fuzzed as D4 said. The final review (C6) found
 files that still probed clean: a renamed `trak`, a zero `mdhd` timescale
-and a damaged `hvcC`.
+and a damaged `hvcC`. The review of those fixes found more: an `esds`
+whose AAC object type FFmpeg cannot open, which left every field of the
+stream set.
 
 ## D16. `inject` and `Mp4Writer` write atomically
 

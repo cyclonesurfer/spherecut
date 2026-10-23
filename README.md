@@ -104,18 +104,24 @@ MP4/MOV files, probe counts these as damage:
 - a `mvhd` or `mdhd` timescale of 0, or one FFmpeg reads as negative;
 - a video sample entry under an audio handler, or the other way round;
 - a video or audio track that FFmpeg reads as another kind of stream;
-- a video or audio stream FFmpeg could not set up although its sample
-  entry is a codec FFmpeg reads, which usually means a damaged `avcC` or
-  `hvcC`.
+- a video or audio stream FFmpeg could not set up although its track has
+  samples and its sample entry is a codec FFmpeg reads, which usually
+  means a damaged `avcC` or `hvcC`;
+- a video or audio stream whose decoder refuses to open with its codec
+  setup, such as an `esds` that gives a reserved sample rate, although
+  FFmpeg filled in the stream's fields from the sample entry.
 
 Damage that keeps the structure consistent, such as changed sample sizes
 or times, and damage inside `mdat` are not found without decoding. A
 stream whose codec FFmpeg doesn't know, such as a `zzzz` sample entry, is
 a `warning` line and doesn't fail probe: it may be a real codec that this
-FFmpeg lacks. The `ffmpeg` lines hold the warnings and errors FFmpeg
-logged while reading the file, one whole line each, starting with the
-context that logged it, such as `[aac]`. A repeated line is listed once
-with a count, and at most 32 are listed. They often say what FFmpeg
+FFmpeg lacks. So is a stream this FFmpeg has no decoder for, a stream
+FFmpeg could not set up from an empty track, and a stream whose decoder
+says it lacks a feature the stream uses (`Function not implemented`, as
+for AAC object type 0). The `ffmpeg` lines hold the warnings and errors
+FFmpeg logged while reading the file, one whole line each, starting with
+the context that logged it, such as `[aac]`. A repeated line is listed
+once with a count, and at most 32 are listed. They often say what FFmpeg
 could not read, but they don't fail probe either, because healthy files
 can have some: cover art gives a `timescale not set` line. Only MP4/MOV
 structure is checked in full; Matroska files are checked against their

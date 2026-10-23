@@ -53,10 +53,11 @@ planned ones above don't exist yet.
   types, hardware device types and codec hardware configs, `HwDevice` (a
   reference-counted device context, released on drop) and `HwError`, the
   `get_format` callback that refuses software fallback, opening files,
-  reading metadata, opening a video decoder by its int codec id, reading
-  a frame's format and planes as ints, copying hardware frames to system
-  memory, the demuxer index end, setting other streams to
-  `AVDISCARD_ALL`, library versions, and the bridge that sends FFmpeg's
+  reading metadata, finding a stream's decoder and opening a video
+  decoder by its int codec id, reading a frame's format and planes as
+  ints, copying hardware frames to system memory, the demuxer index end,
+  setting other streams to `AVDISCARD_ALL`, library versions, and the
+  bridge that sends FFmpeg's
   `av_log` to `tracing` under the target `ffmpeg`. C enums are never made
   into bindgen's Rust enums (DECISIONS D11). In more detail:
   * The log bridge sends one event per line, each with the `[hevc @
@@ -105,12 +106,18 @@ The other modules are safe Rust:
   missing), and a video or audio `trak` that FFmpeg reads as another kind
   is damage. A video or audio stream FFmpeg could not set up (no codec,
   frame size, sample rate or channels, or no pixel or sample format though
-  FFmpeg has a decoder) is damage when its track has samples and its
-  sample entry is a codec FFmpeg reads (`mp4::is_known_codec`), and a
-  warning otherwise, since FFmpeg may simply lack the codec. A file FFmpeg
-  reads as MOV/MP4 that the strict read refuses is read again with
-  `FirstBox::Any`, which accepts any valid first box. Matroska files are
-  checked against their Segment length. `probe` runs inside
+  FFmpeg has a decoder, which `ffi::find_decoder` looks up by the codec id
+  as an int) is damage when its track has samples and its sample entry is
+  a codec FFmpeg reads (`mp4::is_known_codec`), and a warning otherwise,
+  since FFmpeg may simply lack the codec. Otherwise probe opens the
+  stream's decoder from its codec parameters, on one thread, and closes
+  it: a refusal is damage, unless the error says FFmpeg lacks a feature
+  (`ENOSYS`, `AVERROR_PATCHWELCOME`, `AVERROR_EXPERIMENTAL`), and a codec
+  with no decoder in this build is a warning. `probe::Undecodable` holds
+  the reason and decides which it is. A file FFmpeg reads as MOV/MP4 that
+  the strict read refuses is read again with `FirstBox::Any`, which
+  accepts any valid first box. Matroska files are checked against their
+  Segment length. `probe` runs inside
   `hwprobe::capture_ffmpeg_log` and keeps FFmpeg's warnings and errors in
   `ProbeReport.ffmpeg_log`, apart from `damage` and `warnings`, or in
   `ProbeError.ffmpeg_log` beside the `MediaError` when it fails.

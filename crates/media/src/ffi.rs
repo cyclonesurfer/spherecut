@@ -295,6 +295,19 @@ pub fn codecpar_fields(p: &ff::codec::Parameters) -> CodecParFields {
     f
 }
 
+/// The decoder FFmpeg would pick for a stream's codec, or None when this
+/// build has none. The codec id is read as an int, so a codec our headers
+/// lack is looked up too.
+pub fn find_decoder(p: &ff::codec::Parameters) -> Option<ff::Codec> {
+    // SAFETY: `p` borrows live codec parameters; the enum field is read as
+    // an int.
+    let id = unsafe { enum_int(&raw const (*p.as_ptr()).codec_id) };
+    // SAFETY: accepts any id; NULL when no decoder for it is built in.
+    let codec = unsafe { c::avcodec_find_decoder(id) };
+    // SAFETY: registered codecs are static.
+    (!codec.is_null()).then(|| unsafe { ff::Codec::wrap(codec) })
+}
+
 /// What a stream holds: `Parameters::medium` without making a bindgen enum
 /// of the field. A type our headers lack is `Unknown`.
 pub fn media_type(p: &ff::codec::Parameters) -> ff::media::Type {
