@@ -94,8 +94,9 @@ MP4/MOV files, probe counts these as damage:
 
 - a top-level box cut off by the end of the file, which the `mp4` line
   names: ``truncated `moov` (4847 of 4947 bytes)``;
-- anything the box reader warns about, such as a malformed box, and a
-  missing `moov` box;
+- anything the box reader warns about, such as a malformed box, a box
+  inside `moov` whose size is 0 (it then runs to the end of its parent and
+  hides the boxes after it), and a missing `moov` box;
 - sample tables that disagree with each other, or chunks outside the
   `mdat` data;
 - a box type that isn't printable text inside `moov`, `trak`, `mdia`,

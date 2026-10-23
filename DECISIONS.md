@@ -419,7 +419,14 @@ Limits, so a hostile file costs bounded time and memory:
 
 Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
 
-- every warning from the box parser;
+- every warning from the box parser. One is a box inside a top-level box
+  whose 32-bit size is 0, unless it and everything after it in its parent
+  are zero bytes. ISO/IEC 14496-12 allows size 0 only for the last
+  top-level box. Below that it runs the box to the end of its parent, so
+  FFmpeg reads the boxes after it as its payload: a zeroed `hvcC` or
+  `st3d` size loses the `sv3d` after it, an `stsd` size the sample
+  tables, a `trak` size the tracks after it, all with exit 0 before. None
+  of the healthy files in the sweeps has one;
 - no `moov` box, unless the file is item-based (a top-level `meta`) or the
   cut box may have been `moov`;
 - a top-level box cut off by the end of the file, including a file that

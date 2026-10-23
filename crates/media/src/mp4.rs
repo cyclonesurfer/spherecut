@@ -511,6 +511,8 @@ struct Header {
     fourcc: FourCc,
     size: u64,
     header_len: u64,
+    /// The size field was 0: the box runs to the end of its parent.
+    to_end: bool,
 }
 
 /// Parse a box header from `b`, given how many bytes remain in the parent.
@@ -534,6 +536,7 @@ fn parse_header(b: &[u8], remaining: u64) -> Option<Header> {
         fourcc,
         size,
         header_len,
+        to_end: size32 == 0,
     })
 }
 
@@ -635,6 +638,16 @@ fn parse_children(
         }
         if !walk.add_box(at) {
             break;
+        }
+        // ISO/IEC 14496-12 allows a size of 0 only for the last top-level
+        // box. Inside one it swallows the boxes after it, which FFmpeg
+        // then skips without a word. Zero bytes to the end are padding or
+        // QuickTime's terminator, which unprintable_types allows.
+        if h.to_end && rest.iter().any(|&x| x != 0) {
+            walk.warn(format!(
+                "child box `{}` at {at} has size 0, so it runs to the end of its parent and hides the boxes after it",
+                h.fourcc
+            ));
         }
         // parse_header guarantees header_len <= size, and size fits in rest.
         let (hl, size) = (h.header_len as usize, h.size as usize);
@@ -2112,9 +2125,18 @@ pub(crate) mod tests {
             assert!(t.damage().is_empty(), "{:?}", t.damage());
         }
         let zeroed_at = |at: usize, parent: &str| {
-            [format!(
+            vec![format!(
                 "box `\\x00\\x00\\x00\\x00` at offset {at} in `{parent}` has a type that is not text, so its header is damaged"
             )]
+        };
+        // With its size zeroed too, the box is also sized to the end.
+        let zeroed = |range: &std::ops::Range<usize>, parent: &str| {
+            let at = range.start - if range.len() == 4 { 4 } else { 0 };
+            let mut d = zeroed_at(at, parent);
+            if range.len() == 8 {
+                d.insert(0, sized_to_end(at, "\\x00\\x00\\x00\\x00"));
+            }
+            d
         };
         // Before the entry's other children, it is damage.
         let at = entry + 8 + 78;
@@ -2130,10 +2152,10 @@ pub(crate) mod tests {
         assert!(damage_of(g.clone()).is_empty(), "{:?}", damage_of(g));
         for t in [b"sv3d", b"hvcC"] {
             let at = g.windows(4).position(|w| w == t).unwrap() - 4;
-            for zeroed in [at + 4..at + 8, at..at + 8] {
+            for range in [at + 4..at + 8, at..at + 8] {
                 let mut h = g.clone();
-                h[zeroed].fill(0);
-                assert_eq!(damage_of(h), zeroed_at(at, "hvc1"));
+                h[range.clone()].fill(0);
+                assert_eq!(damage_of(h), zeroed(&range, "hvc1"));
             }
         }
         // Nor is one whose bytes are too many to keep and look at.
@@ -2147,11 +2169,49 @@ pub(crate) mod tests {
         // last child there.
         let f = file_with(&tables(&[10], 1), false);
         let at = f.windows(4).position(|w| w == b"trak").unwrap() - 4;
-        for zeroed in [at + 4..at + 8, at..at + 8] {
+        for range in [at + 4..at + 8, at..at + 8] {
             let mut g = f.clone();
-            g[zeroed].fill(0);
-            assert_eq!(damage_of(g), zeroed_at(at, "moov"));
+            g[range.clone()].fill(0);
+            assert_eq!(damage_of(g), zeroed(&range, "moov"));
         }
+    }
+
+    /// The warning for a child box `t` at `at` whose size field is 0.
+    fn sized_to_end(at: usize, t: &str) -> String {
+        format!(
+            "child box `{t}` at {at} has size 0, so it runs to the end of its parent and hides the boxes after it"
+        )
+    }
+
+    #[test]
+    fn a_box_inside_moov_with_size_0_is_damage() {
+        // Size 0 runs a box to the end of its parent, so FFmpeg reads the
+        // boxes after it as its payload and drops them: an `hvcC` takes the
+        // `sv3d` with it, an `stsd` the sample tables, a `trak` the tracks
+        // after it.
+        let f = minimal();
+        let entry = f.windows(4).position(|w| w == b"hvc1").unwrap() - 4;
+        let size = u32::from_be_bytes(f[entry..entry + 4].try_into().unwrap());
+        let g = insert(&f, entry + size as usize, &sv3d(), AROUND_ENTRY);
+        let f2 = file_with(&tables(&[10], 1), false);
+        let trak = f2.windows(4).position(|w| w == b"trak").unwrap() - 4;
+        let trak_size = u32::from_be_bytes(f2[trak..trak + 4].try_into().unwrap());
+        let two = insert(
+            &f2,
+            trak + trak_size as usize,
+            &f2[trak..trak + trak_size as usize],
+            &[b"moov"],
+        );
+        for (file, t) in [(&g, "hvcC"), (&g, "svhd"), (&f2, "stsd"), (&two, "trak")] {
+            let at = file.windows(4).position(|w| w == t.as_bytes()).unwrap() - 4;
+            let mut h = file.clone();
+            h[at..at + 4].fill(0);
+            let d = damage_of(h);
+            assert!(d.contains(&sized_to_end(at, t)), "{t}: {d:?}");
+        }
+        // The last top-level box may run to the end of the file.
+        let h = cat(&[f, words(&[0]), b"free".to_vec(), vec![1; 10]]);
+        assert!(damage_of(h.clone()).is_empty(), "{:?}", damage_of(h));
     }
 
     /// Structure-aware fuzzing: random box trees, encoded with 32-bit,
@@ -2169,8 +2229,9 @@ pub(crate) mod tests {
         enum Size {
             Short,
             Large,
-            /// Size 0: to the end of the parent (or file). Only the last box
-            /// of a list is encoded this way; others fall back to `Short`.
+            /// Size 0: to the end of the file. Only the last top-level box
+            /// is encoded this way, as ISO/IEC 14496-12 allows; others fall
+            /// back to `Short`.
             ToEnd,
         }
 
@@ -2190,31 +2251,33 @@ pub(crate) mod tests {
             body: Body,
         }
 
-        fn encode_list(list: &[Gen]) -> Vec<u8> {
+        /// Encode the children of a box, or with `top` the top level.
+        fn encode_list(list: &[Gen], top: bool) -> Vec<u8> {
             let mut out = Vec::new();
             for (i, g) in list.iter().enumerate() {
-                encode(g, i + 1 == list.len(), &mut out);
+                encode(g, top && i + 1 == list.len(), &mut out);
             }
             out
         }
 
-        fn encode(g: &Gen, last: bool, out: &mut Vec<u8>) {
+        /// Encode `g`; `to_end` lets it take size 0.
+        fn encode(g: &Gen, to_end: bool, out: &mut Vec<u8>) {
             let (t, body) = match &g.body {
                 Body::Leaf(t, p) => (*t, p.clone()),
                 Body::Uuid(u, p) => (*b"uuid", [&u[..], p].concat()),
-                Body::Container(t, c) => (*t, encode_list(c)),
+                Body::Container(t, c) => (*t, encode_list(c, false)),
                 Body::Stsd(c) => {
                     let mut p = vec![0u8; 4];
                     p.extend_from_slice(&(c.len() as u32).to_be_bytes());
-                    p.extend_from_slice(&encode_list(c));
+                    p.extend_from_slice(&encode_list(c, false));
                     (*b"stsd", p)
                 }
                 Body::Entry(t, c) => {
                     let fixed = if t == b"hvc1" { 78 } else { 28 };
-                    (*t, [vec![0u8; fixed], encode_list(c)].concat())
+                    (*t, [vec![0u8; fixed], encode_list(c, false)].concat())
                 }
             };
-            match (g.size, last) {
+            match (g.size, to_end) {
                 (Size::ToEnd, true) => out.extend_from_slice(&0u32.to_be_bytes()),
                 (Size::Large, _) => {
                     out.extend_from_slice(&1u32.to_be_bytes());
@@ -2303,7 +2366,7 @@ pub(crate) mod tests {
         fn file() -> impl Strategy<Value = (Vec<Gen>, Vec<u8>)> {
             vec(tree(), 1..6).prop_map(|top| {
                 let mut f = bx(b"ftyp", b"isom\0\0\x02\0isom");
-                f.extend_from_slice(&encode_list(&top));
+                f.extend_from_slice(&encode_list(&top, true));
                 (top, f)
             })
         }

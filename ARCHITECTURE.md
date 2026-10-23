@@ -96,7 +96,9 @@ The other modules are safe Rust:
 
 * `probe`: what FFmpeg reports, plus our own checks. MP4/MOV files go
   through `mp4::Mp4Tree::damage()`: a top-level box cut off by the end of
-  the file, including a cut header; malformed boxes; a handler that
+  the file, including a cut header; malformed boxes, among them a box
+  inside a top-level box whose size is 0, which the standard allows only
+  for the last top-level box; a handler that
   disagrees with its sample entry; sample tables checked against each
   other and against the `mdat` ranges; a box type that isn't printable
   text where only registered types belong (in `moov`, `trak`, `mdia`,
