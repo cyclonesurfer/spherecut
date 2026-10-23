@@ -1068,42 +1068,73 @@ mod tests {
         }
     }
 
+    /// Make a unix socket at `p`. The socket stays when its listener is
+    /// closed.
+    fn socket(p: &Path) -> Result<(), String> {
+        std::os::unix::net::UnixListener::bind(p)
+            .map(drop)
+            .map_err(|e| format!("bind {}: {e}", p.display()))
+    }
+
     #[test]
     fn outputs_that_are_not_regular_files_are_refused() {
         use std::os::unix::fs::FileTypeExt;
-        // Renaming over a pipe or a device node (`/dev/null`, say) would
-        // replace the node with an MP4 instead of writing to it.
+        // Renaming over a socket, a pipe or a device node (`/dev/null`,
+        // say) would replace the node with an MP4 instead of writing to it.
+        // A socket needs no tool to make, so it is always checked, and a
+        // FIFO is too when mkfifo is there. Not /dev/null itself: if the
+        // check broke, the test would replace the system's.
         let dir = tmpdir("special");
-        let fifo = dir.join("out.fifo");
-        if let Err(e) = mkfifo(&fifo) {
-            println!("not checked: no FIFO ({e})");
-            return;
-        }
         let a = dir.join("in.mp4");
         std::fs::write(&a, file(false).0).unwrap();
-        // Through a symlink too.
-        let link = dir.join("link.mp4");
-        std::os::unix::fs::symlink(&fifo, &link).unwrap();
-        for out in [&fifo, &link] {
-            match inject(&a, out, &spherical_edits()) {
-                Err(e @ InjectError::Write { .. }) => {
-                    assert!(e.to_string().contains("not a regular file"), "{e}")
+        let mut left = vec!["in.mp4".to_string()];
+        for kind in ["socket", "fifo"] {
+            let make = |p: &Path| match kind {
+                "socket" => socket(p),
+                _ => mkfifo(p),
+            };
+            let is_kind = |p: &Path| {
+                let t = p.metadata().unwrap().file_type();
+                if kind == "socket" {
+                    t.is_socket()
+                } else {
+                    t.is_fifo()
                 }
-                r => panic!("{}: {r:?}", out.display()),
+            };
+            let node = dir.join(kind);
+            if let Err(e) = make(&node) {
+                assert_eq!(kind, "fifo", "{e}");
+                println!("FIFO not checked: {e}");
+                continue;
             }
-            assert!(fifo.metadata().unwrap().file_type().is_fifo());
+            // Through a symlink too.
+            let link = dir.join(format!("{kind}-link.mp4"));
+            std::os::unix::fs::symlink(&node, &link).unwrap();
+            for out in [&node, &link] {
+                match inject(&a, out, &spherical_edits()) {
+                    Err(e @ InjectError::Write { .. }) => {
+                        assert!(e.to_string().contains("not a regular file"), "{e}")
+                    }
+                    r => panic!("{}: {r:?}", out.display()),
+                }
+                assert!(is_kind(&node), "{}", node.display());
+            }
+            assert!(link.symlink_metadata().unwrap().is_symlink());
+            // One that turns up while the file is written is refused too.
+            let late = dir.join(format!("late-{kind}.mp4"));
+            let tmp = TempFile::create(&late).unwrap();
+            make(&late).unwrap();
+            assert!(tmp.persist().is_err());
+            assert!(is_kind(&late), "{}", late.display());
+            left.extend([
+                kind.to_string(),
+                format!("{kind}-link.mp4"),
+                format!("late-{kind}.mp4"),
+            ]);
         }
-        assert!(link.symlink_metadata().unwrap().is_symlink());
-        // One that turns up while the file is written is refused too.
-        let late = dir.join("late.mp4");
-        let tmp = TempFile::create(&late).unwrap();
-        mkfifo(&late).unwrap();
-        assert!(tmp.persist().is_err());
-        assert!(late.metadata().unwrap().file_type().is_fifo());
-        assert_eq!(
-            listing(&dir),
-            ["in.mp4", "late.mp4", "link.mp4", "out.fifo"]
-        );
+        // No temp files left behind.
+        left.sort();
+        assert_eq!(listing(&dir), left);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
