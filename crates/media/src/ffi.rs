@@ -336,10 +336,20 @@ fn create_device(t: c_int, device: Option<&str>) -> Result<*mut sys::AVBufferRef
 
 /// Try to create a hardware device context, then release it.
 pub fn try_hw_device(kind: &str, device: Option<&str>) -> Result<(), HwError> {
-    let mut ctx = create_device(device_type(kind)?, device)?;
+    let r = device_type(kind).and_then(|t| create_device(t, device));
+    log_device(kind, device, r.as_ref().err());
+    let mut ctx = r?;
     // SAFETY: we own the reference returned above.
     unsafe { sys::av_buffer_unref(&mut ctx) };
     Ok(())
+}
+
+fn log_device(kind: &str, device: Option<&str>, e: Option<&HwError>) {
+    let device = device.unwrap_or("default");
+    match e {
+        None => tracing::debug!(kind, device, "opened hardware device"),
+        Some(e) => tracing::debug!(kind, device, "hardware device refused: {e}"),
+    }
 }
 
 /// Hardware device types a decoder can use through `hw_device_ctx`.
@@ -457,18 +467,25 @@ impl HwDevice {
     /// "vulkan"); `device` is e.g. a DRM render node, or `None` for the
     /// default.
     pub fn open(kind: &str, device: Option<&str>) -> Result<Self, HwError> {
-        let t = device_type(kind)?;
-        use sys::AVHWDeviceType as T;
-        let pix_fmt = match t {
-            t if t == T::AV_HWDEVICE_TYPE_VAAPI as c_int => sys::AVPixelFormat::AV_PIX_FMT_VAAPI,
-            t if t == T::AV_HWDEVICE_TYPE_VULKAN as c_int => sys::AVPixelFormat::AV_PIX_FMT_VULKAN,
-            _ => return Err(HwError::Unsupported(kind.into())),
-        };
-        Ok(HwDevice {
-            ptr: create_device(t, device)?,
-            pix_fmt,
-            kind: kind.to_string(),
-        })
+        let r = device_type(kind).and_then(|t| {
+            use sys::AVHWDeviceType as T;
+            let pix_fmt = match t {
+                t if t == T::AV_HWDEVICE_TYPE_VAAPI as c_int => {
+                    sys::AVPixelFormat::AV_PIX_FMT_VAAPI
+                }
+                t if t == T::AV_HWDEVICE_TYPE_VULKAN as c_int => {
+                    sys::AVPixelFormat::AV_PIX_FMT_VULKAN
+                }
+                _ => return Err(HwError::Unsupported(kind.into())),
+            };
+            Ok(HwDevice {
+                ptr: create_device(t, device)?,
+                pix_fmt,
+                kind: kind.to_string(),
+            })
+        });
+        log_device(kind, device, r.as_ref().err());
+        r
     }
 
     pub fn kind(&self) -> &str {

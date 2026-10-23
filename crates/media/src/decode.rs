@@ -180,6 +180,12 @@ impl VideoDecoder {
         index: Option<usize>,
         hw: Option<Arc<HwDevice>>,
     ) -> Result<Self, MediaError> {
+        tracing::debug!(
+            path = %path.display(),
+            format = ictx.format().name(),
+            streams = ictx.nb_streams(),
+            "opened file"
+        );
         let st = match index {
             Some(i) => ictx.stream(i),
             None => ictx.streams().best(ff::media::Type::Video),
@@ -205,6 +211,15 @@ impl VideoDecoder {
             .decoder()
             .video()
             .map_err(|e| err(path, "opening decoder", e))?;
+        let codec = dec.codec();
+        tracing::debug!(
+            path = %path.display(),
+            stream = stream_index,
+            decoder = codec.as_ref().map_or("?", |c| c.name()),
+            size = %format_args!("{}x{}", dec.width(), dec.height()),
+            on = hw.as_ref().map_or("software", |h| h.kind()),
+            "decoding video stream"
+        );
         Ok(VideoDecoder {
             path: path.to_path_buf(),
             ictx,
@@ -261,6 +276,11 @@ impl VideoDecoder {
                 }
                 Err(ff::Error::Eof) => {
                     self.done = true;
+                    tracing::debug!(
+                        path = %self.path.display(),
+                        frames = self.frames,
+                        "end of video stream"
+                    );
                     if self.skipped > 0 {
                         tracing::warn!(
                             path = %self.path.display(),
