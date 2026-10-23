@@ -113,12 +113,14 @@ or times, and damage inside `mdat` are not found without decoding. A
 stream whose codec FFmpeg doesn't know, such as a `zzzz` sample entry, is
 a `warning` line and doesn't fail probe: it may be a real codec that this
 FFmpeg lacks. The `ffmpeg` lines hold the warnings and errors FFmpeg
-logged while reading the file, each repeated line listed once with a
-count, at most 32 lines. They often say what FFmpeg could not read, but
-they don't fail probe either, because healthy files can have some: cover
-art gives a `timescale not set` line. Only MP4/MOV structure is checked
-in full; Matroska files are checked against their Segment length only,
-and other containers not at all, which a `structure` line says.
+logged while reading the file, one whole line each, starting with the
+context that logged it, such as `[aac]`. A repeated line is listed once
+with a count, and at most 32 are listed. They often say what FFmpeg
+could not read, but they don't fail probe either, because healthy files
+can have some: cover art gives a `timescale not set` line. Only MP4/MOV
+structure is checked in full; Matroska files are checked against their
+Segment length only, and other containers not at all, which a
+`structure` line says.
 
 `--json` prints one object per file (an array for several) with `damage`,
 `warnings`, `ffmpeg_log`, `structure` (`{"check": "full" | "length" |
@@ -161,7 +163,9 @@ EnvFilter directives to that default:
   that target (`ffmpeg=warn`, `debug,ffmpeg=debug`) or when its last global
   level is more verbose than `warn` (`info`, `debug`, `trace`). `warn` and
   `error` keep them off, and `off` turns off everything. FFmpeg's verbose
-  level shows as debug, its debug and trace levels as trace.
+  level shows as debug, its debug and trace levels as trace. Each event is
+  one whole line of FFmpeg's log, starting with the context that logged
+  it, such as `[hevc @ 0x...]`.
 - A value that doesn't parse is reported (`warning: ignoring
   SPHERECUT_LOG=...`) and the default applies.
 

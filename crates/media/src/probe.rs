@@ -741,8 +741,11 @@ mod tests {
 
     #[test]
     fn ffmpeg_log_lines_are_counted_not_repeated() {
-        let lines = ["a", "b", "a", "a"].map(String::from).to_vec();
-        assert_eq!(tally(lines), ["a (3 times)", "b"]);
+        // Whole lines, each with its context, as the capture gives them.
+        let aac = "[aac] Audio object type 0 is not implemented. Update your FFmpeg version.";
+        let mov = "[mov,mp4,m4a,3gp,3g2,mj2] Failed to open codec in avformat_find_stream_info";
+        let lines = [aac, mov, aac, aac].map(String::from).to_vec();
+        assert_eq!(tally(lines), [format!("{aac} (3 times)"), mov.into()]);
         let many = (0..40)
             .map(|i| format!("line {i}"))
             .chain(["line 0".into(), "line 39".into()])

@@ -59,6 +59,11 @@ planned ones above don't exist yet.
   `AVDISCARD_ALL`, library versions, and the bridge that sends FFmpeg's
   `av_log` to `tracing` under the target `ffmpeg`. C enums are never made
   into bindgen's Rust enums (DECISIONS D11). In more detail:
+  * The log bridge sends one event per line, each with the `[hevc @
+    0x...]` prefix of its context. A line FFmpeg logs in several calls
+    waits in a thread-local buffer until a call ends it, and a call that
+    holds several lines gives each of them its prefix (D12).
+    `end_log_line` sends a line that never got its end.
   * The `get_format` callback keeps its bookkeeping in the codec context's
     `opaque`: the device's pixel format, and flags that describe the
     latest call. Asked: FFmpeg has called it at all. Taken: the latest
@@ -82,7 +87,9 @@ planned ones above don't exist yet.
   `AVVulkanDeviceContext` with its own `#[repr(C)]` declarations of the
   few Vulkan structs it reads, and `capture_ffmpeg_log`, which collects
   what FFmpeg logs while doctor runs a check or `probe` reads a file (a
-  thread-local `tracing` subscriber that passes everything on).
+  thread-local `tracing` subscriber that passes everything on). It ends
+  any unfinished line before and after, so that each captured line is
+  whole and is the run's own.
 
 The other modules are safe Rust:
 

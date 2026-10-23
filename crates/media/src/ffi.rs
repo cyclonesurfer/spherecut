@@ -23,7 +23,7 @@
 //! read metadata with [`dict_entries`] (ffmpeg-next makes `&str`s of it
 //! without checking that it is UTF-8).
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::panic::AssertUnwindSafe;
@@ -1161,12 +1161,25 @@ fn tracing_level(level: c_int) -> tracing::Level {
     }
 }
 
+/// A line of FFmpeg's log while its calls come in.
+#[derive(Debug)]
+struct LogLine {
+    /// The "[hevc @ 0x…] " of the call that started the line.
+    prefix: String,
+    text: String,
+    /// The most severe level among its calls.
+    level: c_int,
+}
+
+/// A line longer than this goes out without waiting for its end.
+const MAX_LOG_LINE: usize = 4096;
+
 thread_local! {
-    /// av_log_format_line2's "at the start of a line" flag. FFmpeg may log
-    /// one line in several calls, and only the first gets the
-    /// "[hevc @ 0x…]" prefix. Threads log independently, so each keeps its
-    /// own.
-    static PRINT_PREFIX: Cell<c_int> = const { Cell::new(1) };
+    /// The line FFmpeg is logging on this thread, until its end comes.
+    /// FFmpeg may log one line in several calls, of which only the first
+    /// names the context. Threads log independently, so each keeps its own
+    /// and no line holds two threads' text.
+    static PENDING: RefCell<Option<LogLine>> = const { RefCell::new(None) };
 }
 
 /// FFmpeg's log callback. FFmpeg calls it for every message, whatever the
@@ -1179,6 +1192,12 @@ unsafe extern "C" fn log_callback(avcl: *mut c_void, level: c_int, fmt: *const c
     }));
 }
 
+/// Send the lines of one call of FFmpeg's log to `tracing`, each whole
+/// and with its context, as FFmpeg's own log prints them: a line ends at
+/// "\n" or "\r", one call may hold several lines, and a line begun in one
+/// call waits on this thread for the call that ends it. Lines after the
+/// first of one call get the call's context too.
+///
 /// # Safety
 ///
 /// The arguments of one call of FFmpeg's log callback, with `vl` unused.
@@ -1189,10 +1208,11 @@ unsafe fn forward_log(avcl: *mut c_void, level: c_int, fmt: *const c_char, vl: V
     if plain > unsafe { sys::av_log_get_level() } {
         return;
     }
-    let mut line = [0 as c_char; 1024];
-    let mut prefix = PRINT_PREFIX.try_with(Cell::get).unwrap_or(1);
+    let mut buf = [0 as c_char; 1024];
+    // Only the message: the prefix is added to each line below.
+    let mut print_prefix = 0;
     // SAFETY: `avcl`, `fmt` and `vl` are FFmpeg's own and `vl` is consumed
-    // only here; `line` is writable for the size passed, and FFmpeg
+    // only here; `buf` is writable for the size passed, and FFmpeg
     // truncates to it and NUL-terminates.
     let n = unsafe {
         sys::av_log_format_line2(
@@ -1200,29 +1220,159 @@ unsafe fn forward_log(avcl: *mut c_void, level: c_int, fmt: *const c_char, vl: V
             level,
             fmt,
             vl,
-            line.as_mut_ptr(),
-            line.len() as c_int,
-            &mut prefix,
+            buf.as_mut_ptr(),
+            buf.len() as c_int,
+            &mut print_prefix,
         )
     };
-    let _ = PRINT_PREFIX.try_with(|p| p.set(prefix));
     if n < 0 {
         return;
     }
-    // SAFETY: NUL-terminated within `line` (above).
-    let msg = unsafe { CStr::from_ptr(line.as_ptr()) }.to_string_lossy();
-    let msg = msg.trim_end();
-    if msg.is_empty() {
-        return;
+    // SAFETY: NUL-terminated within `buf` (above).
+    let msg = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
+    // SAFETY: `avcl` is the context FFmpeg passed with this message.
+    let prefix = unsafe { log_prefix(avcl) };
+    // Taken out of the cell before any event, so that a subscriber that
+    // logs through FFmpeg finds the cell free.
+    let lines = PENDING
+        .try_with(|p| match p.try_borrow_mut() {
+            Ok(mut p) => end_lines(&mut p, &prefix, plain, &msg),
+            Err(_) => Vec::new(),
+        })
+        .unwrap_or_default();
+    for (level, line) in lines {
+        emit_log_line(level, &line);
     }
+}
+
+/// End the line FFmpeg left unfinished on this thread, if any, and send
+/// it to `tracing` as it is.
+pub(crate) fn end_log_line() {
+    let line = PENDING
+        .try_with(|p| p.try_borrow_mut().ok().and_then(|mut p| p.take()))
+        .ok()
+        .flatten();
+    if let Some((level, line)) = line.and_then(finished) {
+        emit_log_line(level, &line);
+    }
+}
+
+fn emit_log_line(level: c_int, line: &str) {
     use tracing::Level;
-    match tracing_level(plain) {
-        Level::ERROR => tracing::error!(target: "ffmpeg", "{msg}"),
-        Level::WARN => tracing::warn!(target: "ffmpeg", "{msg}"),
-        Level::INFO => tracing::info!(target: "ffmpeg", "{msg}"),
-        Level::DEBUG => tracing::debug!(target: "ffmpeg", "{msg}"),
-        _ => tracing::trace!(target: "ffmpeg", "{msg}"),
+    match tracing_level(level) {
+        Level::ERROR => tracing::error!(target: "ffmpeg", "{line}"),
+        Level::WARN => tracing::warn!(target: "ffmpeg", "{line}"),
+        Level::INFO => tracing::info!(target: "ffmpeg", "{line}"),
+        Level::DEBUG => tracing::debug!(target: "ffmpeg", "{line}"),
+        _ => tracing::trace!(target: "ffmpeg", "{line}"),
     }
+}
+
+/// Add `msg`, the text of one call at `level` from the context `prefix`
+/// names, to the line `pending` holds, and return the lines it ends with
+/// their levels. What is left of `msg` after its last line end waits in
+/// `pending`.
+fn end_lines(
+    pending: &mut Option<LogLine>,
+    prefix: &str,
+    level: c_int,
+    msg: &str,
+) -> Vec<(c_int, String)> {
+    let mut out = Vec::new();
+    let mut parts = msg.split(['\n', '\r']).peekable();
+    while let Some(part) = parts.next() {
+        let ended = parts.peek().is_some();
+        if part.is_empty() && pending.is_none() {
+            // An empty line, or nothing after the last line end.
+            continue;
+        }
+        let line = pending.get_or_insert_with(|| LogLine {
+            prefix: prefix.to_string(),
+            text: String::new(),
+            level,
+        });
+        line.text.push_str(part);
+        line.level = line.level.min(level);
+        if ended || line.text.len() >= MAX_LOG_LINE {
+            out.extend(pending.take().and_then(finished));
+        }
+    }
+    out
+}
+
+/// A line as it goes to `tracing`, or None for one with no text.
+fn finished(line: LogLine) -> Option<(c_int, String)> {
+    let text = line.text.trim_end();
+    (!text.is_empty()).then(|| (line.level, format!("{}{text}", line.prefix)))
+}
+
+/// The "[hevc @ 0x…] " that FFmpeg's own log puts before a line from the
+/// context `avcl`, after its parent's when it has one, made as
+/// av_log_format_line2 makes it.
+///
+/// # Safety
+///
+/// `avcl` is NULL or a context that starts with its `AVClass` pointer, as
+/// av_log requires of the contexts it is given.
+unsafe fn log_prefix(avcl: *mut c_void) -> String {
+    // SAFETY: the caller's guarantee.
+    let Some(class) = (unsafe { context_class(avcl) }) else {
+        return String::new();
+    };
+    // SAFETY: a context's class is a static AVClass; only this int field
+    // is read, never the enum fields.
+    let offset = unsafe { (*class).parent_log_context_offset };
+    let mut prefix = String::new();
+    if offset != 0 {
+        // SAFETY: the class says that a pointer to the parent context, or
+        // NULL, lies at this offset in the context, and FFmpeg reads it
+        // the same way. The parent is a context like `avcl`.
+        prefix = unsafe {
+            let parent = avcl
+                .byte_offset(offset as isize)
+                .cast::<*mut c_void>()
+                .read();
+            context_tag(parent)
+        };
+    }
+    // SAFETY: the caller's guarantee.
+    prefix + &unsafe { context_tag(avcl) }
+}
+
+/// The class of a context, or None for a NULL context or class.
+///
+/// # Safety
+///
+/// As for [`log_prefix`].
+unsafe fn context_class(ctx: *mut c_void) -> Option<*const sys::AVClass> {
+    if ctx.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's guarantee: the context starts with its class.
+    let class = unsafe { ctx.cast::<*const sys::AVClass>().read() };
+    (!class.is_null()).then_some(class)
+}
+
+/// "[name @ 0x…] " for a context, or "" for a NULL one.
+///
+/// # Safety
+///
+/// As for [`log_prefix`].
+unsafe fn context_tag(ctx: *mut c_void) -> String {
+    // SAFETY: the caller's guarantee.
+    let Some(class) = (unsafe { context_class(ctx) }) else {
+        return String::new();
+    };
+    // SAFETY: a static AVClass. FFmpeg's log calls `item_name` on any
+    // thread for every message; it returns a string that lives as long
+    // as the context, copied out here.
+    let name = unsafe {
+        match (*class).item_name {
+            Some(item_name) => cstr_opt(item_name(ctx)),
+            None => cstr_opt((*class).class_name),
+        }
+    };
+    format!("[{} @ {ctx:p}] ", name.unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -1558,6 +1708,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn log_lines_are_put_together_from_their_calls() {
+        let (w, e) = (sys::AV_LOG_WARNING, sys::AV_LOG_ERROR);
+        let mut pending = None;
+        let mut add = |prefix: &str, level, msg: &str| end_lines(&mut pending, prefix, level, msg);
+        // A line in two calls keeps the first call's context, and comes
+        // out at the more severe level.
+        assert!(add("[aac @ 0x1] ", w, "Audio object type 0").is_empty());
+        assert_eq!(
+            add("[mov @ 0x2] ", e, " is not implemented.\n"),
+            [(
+                e,
+                "[aac @ 0x1] Audio object type 0 is not implemented.".into()
+            )]
+        );
+        // Several lines in one call each get its context; empty lines and
+        // trailing spaces are dropped, and "\r" ends a line too.
+        assert_eq!(
+            add("[mov @ 0x2] ", w, "one  \n\ntwo\rthree"),
+            [
+                (w, "[mov @ 0x2] one".to_string()),
+                (w, "[mov @ 0x2] two".to_string())
+            ]
+        );
+        assert_eq!(add("", w, "\n"), [(w, "[mov @ 0x2] three".to_string())]);
+        // A line that never ends still goes out once it is long.
+        let long = "x".repeat(MAX_LOG_LINE / 2);
+        assert!(add("", w, &long).is_empty());
+        let out = add("", w, &long);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].1.len(), MAX_LOG_LINE);
+        assert!(pending.is_none());
+    }
+
     // One test, because the subscriber and FFmpeg's level are global.
     #[test]
     fn ffmpeg_log_reaches_tracing_at_the_level_it_asks_for() {
@@ -1584,12 +1768,14 @@ mod tests {
             assert_eq!(captured(&tag), [(want, tag.clone())]);
         }
 
-        // Several threads at once: every line arrives once and whole.
+        // Several threads at once, each logging its lines in two calls:
+        // every line arrives once and whole, with no other thread's text.
         std::thread::scope(|s| {
             for t in 0..8 {
                 s.spawn(move || {
                     for i in 0..200 {
-                        log(sys::AV_LOG_WARNING, &format!("thread-test {t}/{i} end\n"));
+                        log(sys::AV_LOG_WARNING, &format!("thread-test {t}/{i} "));
+                        log(sys::AV_LOG_WARNING, "end\n");
                     }
                 });
             }
@@ -1603,31 +1789,45 @@ mod tests {
             }
         }
 
-        // A line logged in two calls is prefixed with its context once.
+        // A line logged in several calls, as FFmpeg logs a feature it lacks,
+        // arrives once and whole, with the context of the call that started
+        // it and the most severe level among its calls. A call that holds
+        // several lines gives each of them its context.
         // SAFETY: allocates a context to log with, freed below.
         let fctx = unsafe { sys::avformat_alloc_context() };
         assert!(!fctx.is_null());
-        for part in [
-            c"prefix-test start, ",
-            c"prefix-test end\n",
-            c"prefix-test next\n",
+        for (level, part) in [
+            (sys::AV_LOG_INFO, c"prefix-test Audio object type 0"),
+            (sys::AV_LOG_WARNING, c" is not implemented."),
+            (sys::AV_LOG_INFO, c" Update your FFmpeg.\n"),
+            (sys::AV_LOG_ERROR, c"prefix-test one\nprefix-test two\r\n\n"),
+            (sys::AV_LOG_ERROR, c"prefix-test cut short"),
         ] {
             // SAFETY: `fctx` starts with its AVClass, as av_log requires;
             // the format has no conversions.
-            unsafe { sys::av_log(fctx.cast(), sys::AV_LOG_ERROR, part.as_ptr()) };
+            unsafe { sys::av_log(fctx.cast(), level, part.as_ptr()) };
         }
+        // The last line has no end yet, until a capture ends it.
+        assert_eq!(captured("prefix-test").len(), 3);
+        end_log_line();
         // SAFETY: frees the context allocated above, which nothing else
         // holds.
         unsafe { sys::avformat_free_context(fctx) };
-        let got: Vec<_> = captured("prefix-test")
-            .into_iter()
-            .map(|(_, m)| m)
-            .collect();
-        assert_eq!(got.len(), 3, "{got:?}");
-        assert!(got[0].starts_with("[AVFormatContext @ 0x"), "{got:?}");
-        assert!(got[0].ends_with("] prefix-test start,"), "{got:?}");
-        assert_eq!(got[1], "prefix-test end");
-        assert!(got[2].starts_with("[AVFormatContext @ 0x"), "{got:?}");
+        let at = format!("[AVFormatContext @ {fctx:p}] ");
+        assert_eq!(
+            captured("prefix-test"),
+            [
+                (
+                    Level::WARN,
+                    format!(
+                        "{at}prefix-test Audio object type 0 is not implemented. Update your FFmpeg."
+                    )
+                ),
+                (Level::ERROR, format!("{at}prefix-test one")),
+                (Level::ERROR, format!("{at}prefix-test two")),
+                (Level::ERROR, format!("{at}prefix-test cut short")),
+            ]
+        );
 
         // FFmpeg's level follows the subscriber, so it skips what nobody
         // reads.

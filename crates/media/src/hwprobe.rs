@@ -567,6 +567,9 @@ static CAPTURES: Mutex<usize> = Mutex::new(0);
 /// runs it is at least "warning" (other threads' warnings then get
 /// formatted and dropped), and afterwards it follows the subscriber again.
 pub(crate) fn capture_ffmpeg_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    // A line FFmpeg left unfinished on this thread is not `f`'s, and one
+    // `f` leaves unfinished is.
+    ffi::end_log_line();
     let lines = Arc::new(Mutex::new(Vec::new()));
     let tee = Dispatch::new(Tee {
         outer: tracing::dispatcher::get_default(Dispatch::clone),
@@ -580,7 +583,9 @@ pub(crate) fn capture_ffmpeg_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
             // Sees the tee, so the level becomes at least "warning".
             ffi::sync_log_level();
         }
-        f()
+        let r = f();
+        ffi::end_log_line();
+        r
     });
     drop(tee);
     let mut n = CAPTURES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -657,17 +662,21 @@ impl Subscriber for Tee {
     }
 }
 
-/// FFmpeg's "[hevc @ 0x55d0c0ffee00] msg" as "[hevc] msg": the address
-/// means nothing in a report.
+/// FFmpeg's "[hevc @ 0x55d0c0ffee00] msg" as "[hevc] msg", and the same
+/// for a parent context's tag before it: the address means nothing in a
+/// report.
 fn without_address(line: &str) -> String {
-    if let Some(rest) = line.strip_prefix('[')
-        && let Some((name, msg)) = rest.split_once("] ")
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(tag) = rest.strip_prefix('[')
+        && let Some((name, msg)) = tag.split_once("] ")
         && let Some((name, addr)) = name.split_once(" @ 0x")
         && addr.bytes().all(|b| b.is_ascii_hexdigit())
     {
-        return format!("[{name}] {msg}");
+        out += &format!("[{name}] ");
+        rest = msg;
     }
-    line.to_string()
+    out + rest
 }
 
 struct Message(String);
@@ -701,6 +710,11 @@ mod tests {
         assert_eq!(
             without_address("[AVHWDeviceContext @ 0x1] No VA display found."),
             "[AVHWDeviceContext] No VA display found."
+        );
+        // A parent context's tag comes first.
+        assert_eq!(
+            without_address("[mp4 @ 0xa1] [hevc @ 0xb2] [x @ 0xzz] msg"),
+            "[mp4] [hevc] [x @ 0xzz] msg"
         );
         for plain in ["no prefix", "[x] no address", "[x @ 0xzz] not hex"] {
             assert_eq!(without_address(plain), plain);

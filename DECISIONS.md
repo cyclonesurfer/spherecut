@@ -290,13 +290,20 @@ plane tests) call `Decoder::video`, `Decoder::audio`, `Opened::video`,
 *2026-10-23, M0.*
 
 `spherecut_media::init()` installs an `av_log` callback that sends each
-FFmpeg message to `tracing` under the target `ffmpeg`, formatted by
-FFmpeg with its `[hevc @ 0x...]` prefix. Error and worse map to error,
-warning to warn, info to info, verbose to debug, and FFmpeg's debug and
-trace to trace. A panic in the callback is caught and the message dropped.
-FFmpeg's own level is set to the most verbose level the subscriber
-accepts for `ffmpeg`, so messages nobody would see are never formatted;
-a subscriber installed after `init()` calls `sync_ffmpeg_log_level()`.
+line of FFmpeg's log to `tracing` under the target `ffmpeg`, as one event
+that starts with the `[hevc @ 0x...]` prefix of the context that logged
+it. FFmpeg formats the text; the prefix is made from the context's
+`AVClass` as FFmpeg makes it. FFmpeg may log one line in several calls
+(only the first names the context) and several lines in one call, so
+each thread keeps the line it has started until a call ends it with
+`\n` or `\r`, and gives every line of a call that call's prefix. A line
+takes the most severe level among its calls. Error and worse map to
+error, warning to warn, info to info, verbose to debug, and FFmpeg's
+debug and trace to trace. A panic in the callback is caught and the
+message dropped. FFmpeg's own level is set to the most verbose level the
+subscriber accepts for `ffmpeg`, so messages nobody would see are never
+formatted; a subscriber installed after `init()` calls
+`sync_ffmpeg_log_level()`.
 
 The CLI's default filter is `warn,ffmpeg=off`, and `SPHERECUT_LOG` adds
 EnvFilter directives to it (README, Logging). FFmpeg's messages are off by
@@ -304,7 +311,10 @@ default because doctor's device checks make FFmpeg log errors that are
 expected.
 
 Why: before this, `init()` set FFmpeg's level to fatal, so its
-explanations were lost (the review's minor on errors and logging).
+explanations were lost (the review's minor on errors and logging). Each
+call was later sent as its own event, so "Audio object type 0 is not
+implemented" came out in two pieces, the second without its `[aac]`, and
+the second line of a message started at column 0 in probe's report.
 
 ## D13. What `VideoDecoder` does with a damaged file
 
