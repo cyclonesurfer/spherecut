@@ -1,0 +1,38 @@
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling bitflags v2.13.2
+   Compiling tracing-core v0.1.36
+   Compiling ffmpeg-next v9.0.0
+   Compiling tracing v0.1.44
+   Compiling glam v0.34.1
+   Compiling serde_json v1.0.154
+   Compiling spherecut-core v0.1.0 (~/spherecut/crates/core)
+   Compiling spherecut-media v0.1.0 (~/spherecut/crates/media)
+   Compiling spherecut-sphere v0.1.0 (~/spherecut/crates/sphere)
+   Compiling spherecut-synth v0.1.0 (~/spherecut/crates/synth)
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.54s
+     Running tests/tier2_hw_decode.rs (target/release/deps/tier2_hw_decode-f564ee9d76fc9a8a)
+
+running 5 tests
+test bench_decode_hevc_4k_and_5k7 ... BENCH decode 3840x1920 HEVC 8-bit, software	523.08	fps
+BENCH decode 3840x1920 HEVC 8-bit, VA-API (incl. copy to RAM)	265.04	fps
+BENCH decode 5760x2880 HEVC 8-bit, software	243.90	fps
+BENCH decode 5760x2880 HEVC 8-bit, VA-API (incl. copy to RAM)	67.30	fps
+ok
+test vaapi_h264_matches_software ... ok
+test vaapi_hevc_main10_matches_software ... ok
+test vaapi_hevc_main_matches_software ... ok
+test vulkan_hevc_main_matches_software ... 
+thread 'vulkan_hevc_main_matches_software' (4127118) panicked at crates/synth/tests/tier2_hw_decode.rs:135:19:
+TIER2-SKIP: Vulkan Video HEVC decode unavailable: cannot decode ~/spherecut/target/tmp/tier2-media/t2-hevc8.mp4: decoding: Operation not permitted
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    vulkan_hevc_main_matches_software
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.93s
+
+error: test failed, to rerun pass `-p spherecut-synth --test tier2_hw_decode`
