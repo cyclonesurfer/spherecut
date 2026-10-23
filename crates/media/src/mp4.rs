@@ -566,7 +566,7 @@ fn fill_box(b: &mut Mp4Box, body: &[u8], depth: usize, walk: &mut Walk) {
         b.children = parse_children(body, 8, base, depth + 1, walk, fill_entry);
     } else if body.len() <= MAX_KEPT_LEAF
         || SAMPLE_TABLES.contains(&&b.fourcc.0)
-        || starts_with_tkhd(body)
+        || starts_with_box(body, b"tkhd")
     {
         b.payload = body.to_vec();
     }
@@ -820,10 +820,11 @@ fn all_zero(b: &Mp4Box) -> bool {
     b.payload.len() as u64 == b.size - b.header_len && b.payload.iter().all(|&x| x == 0)
 }
 
-/// Whether `body` starts with a track header box (`tkhd`), as the payload
-/// of a `trak` does.
-fn starts_with_tkhd(body: &[u8]) -> bool {
-    body.get(4..8) == Some(&b"tkhd"[..]) && looks_like_box(body, 0)
+/// Whether `body` starts with a box of type `t`, as the payload of a
+/// `trak` starts with a track header (`tkhd`) and that of an `sv3d` with
+/// a spherical video header (`svhd`).
+fn starts_with_box(body: &[u8], t: &[u8; 4]) -> bool {
+    body.get(4..8) == Some(&t[..]) && looks_like_box(body, 0)
 }
 
 /// List the children of `moov` with a printable type other than `trak`
@@ -835,7 +836,7 @@ fn starts_with_tkhd(body: &[u8]) -> bool {
 fn renamed_traks(moov: &Mp4Box, out: &mut Vec<String>) {
     for c in &moov.children {
         let t = c.fourcc;
-        if is_text(t) && t.0 != *b"trak" && starts_with_tkhd(&c.payload) {
+        if is_text(t) && t.0 != *b"trak" && starts_with_box(&c.payload, b"tkhd") {
             out.push(format!(
                 "box `{t}` at offset {} in `moov` starts with a track header (`tkhd`), so it is a `trak` whose type is damaged and FFmpeg skips its stream",
                 c.offset
@@ -847,13 +848,26 @@ fn renamed_traks(moov: &Mp4Box, out: &mut Vec<String>) {
 /// List each `sv3d` in the tracks' sample entries that lacks a box FFmpeg
 /// needs to read it: `svhd`, `proj`, or the `prhd` in `proj`. FFmpeg then
 /// ignores the whole `sv3d`, so a `proj` whose type reads `qroj` loses the
-/// projection with no more than a line in its log.
+/// projection with no more than a line in its log. Also list each child
+/// of a sample entry with a printable type other than `sv3d` whose
+/// payload starts with `svhd`, which only `sv3d` holds: an `sv3d` whose
+/// type was damaged into another printable one, such as `rv3d`, which
+/// FFmpeg skips with the projection, as it does a type that is not text.
 fn lost_projections(moov: &Mp4Box, out: &mut Vec<String>) {
     let entries = moov
         .children_of(b"trak")
         .filter_map(|t| t.path(&[b"mdia", b"minf", b"stbl", b"stsd"]))
         .flat_map(|stsd| &stsd.children);
     for entry in entries {
+        for c in &entry.children {
+            let t = c.fourcc;
+            if is_text(t) && t.0 != *b"sv3d" && starts_with_box(&c.payload, b"svhd") {
+                out.push(format!(
+                    "box `{t}` at offset {} in `{}` starts with a spherical video header (`svhd`), so it is an `sv3d` whose type is damaged and FFmpeg ignores its projection",
+                    c.offset, entry.fourcc
+                ));
+            }
+        }
         for sv3d in entry.children_of(b"sv3d") {
             let proj = sv3d.child(b"proj");
             let missing: Vec<&str> = [
@@ -2054,6 +2068,31 @@ pub(crate) mod tests {
         // A projection we do not know is not damage: FFmpeg says so in its
         // log, and the file may use a newer one.
         assert!(with(b"equi", b"mshp").is_empty());
+
+        // FFmpeg skips an `sv3d` under another type, and the projection
+        // with it, without a word. Every one-bit flip of the type is found:
+        // those that stay printable, such as `rv3d`, by the `svhd` the box
+        // starts with, and the rest as types that are not text.
+        let renamed = |t: &str| {
+            [format!(
+                "box `{t}` at offset {sv3d} in `hvc1` starts with a spherical video header (`svhd`), so it is an `sv3d` whose type is damaged and FFmpeg ignores its projection"
+            )]
+        };
+        assert_eq!(with(b"sv3d", b"rv3d"), renamed("rv3d"));
+        let mut printable = 0;
+        for bit in 0..32 {
+            let mut t = *b"sv3d";
+            t[bit / 8] ^= 1 << (bit % 8);
+            let d = with(b"sv3d", &t);
+            if is_text(FourCc(t)) {
+                printable += 1;
+                assert_eq!(d, renamed(&FourCc(t).to_string()));
+            } else {
+                assert_eq!(d.len(), 1, "{d:?}");
+                assert!(d[0].ends_with("has a type that is not text, so its header is damaged"));
+            }
+        }
+        assert_eq!(printable, 27);
     }
 
     #[test]

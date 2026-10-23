@@ -454,6 +454,11 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   no more than "Missing projection box" in its log, so a `proj` renamed
   to `qroj` loses the projection. A projection box FFmpeg does not know,
   such as `mshp`, is not damage;
+- a child of a sample entry whose type is printable but not `sv3d` and
+  whose payload starts with an `svhd` box, which only `sv3d` holds: an
+  `sv3d` renamed to `rv3d` or `sv3D`, which FFmpeg skips with the
+  projection, logging nothing. 27 of the 32 one-bit flips of `sv3d` are
+  still printable;
 - a `mvhd` or `mdhd` timescale of 0, or too large for a signed 32-bit
   number, which FFmpeg replaces with 1, so every time is wrong;
 - a video or audio stream FFmpeg could not set up, when its track has
@@ -524,7 +529,9 @@ files that still probed clean: a renamed `trak`, a zero `mdhd` timescale
 and a damaged `hvcC`. The review of those fixes found more: an `esds`
 whose AAC object type FFmpeg cannot open, which left every field of the
 stream set, and printable renames (`Trak`, `qroj`, `wvhd`) that lose a
-stream or the projection.
+stream or the projection. The next review found an `sv3d` whose type, or
+size and type, were zeroed, which passed as QuickTime's terminator, and
+an `sv3d` renamed to `rv3d`.
 
 ## D16. `inject` and `Mp4Writer` write atomically
 

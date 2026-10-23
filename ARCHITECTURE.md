@@ -105,30 +105,32 @@ The other modules are safe Rust:
   QuickTime's terminator; a `moov` child under another printable type
   whose payload starts with a `tkhd` (a renamed `trak`, whose payload is
   kept whatever its size); an `sv3d` without `svhd`, `proj` or
-  `proj/prhd`, which FFmpeg ignores; and a `mvhd` or `mdhd` timescale
-  FFmpeg can't use. Each FFmpeg stream is matched to its `trak` by track
-  ID (by position when IDs repeat or are missing), and a video or audio
-  `trak` that FFmpeg reads as another kind is damage. A video or audio
-  stream FFmpeg could not set up (no codec, frame size, sample rate or
-  channels, or no pixel or sample format though FFmpeg has a decoder,
-  which `ffi::find_decoder` looks up by the codec id as an int) is damage
-  when its track has samples and its sample entry is a codec FFmpeg reads
-  (`mp4::is_known_codec`), and a warning otherwise, since FFmpeg may
-  simply lack the codec. Otherwise probe opens the stream's decoder from
-  its codec parameters, on one thread, and closes it: a refusal is damage,
-  unless the error says FFmpeg lacks a feature (`ENOSYS`,
-  `AVERROR_PATCHWELCOME`, `AVERROR_EXPERIMENTAL`), and a codec with no
-  decoder in this build is a warning. `probe::Undecodable` holds the
-  reason and decides which it is. A file FFmpeg reads as MOV/MP4 that the
-  strict read refuses is read again with `FirstBox::Any`, which accepts
-  any valid first box. Matroska files are checked against their Segment
-  length. `probe` runs inside `hwprobe::capture_ffmpeg_log` and keeps
-  FFmpeg's warnings and errors in `ProbeReport.ffmpeg_log`, apart from
-  `damage` and `warnings`, or in `ProbeError.ffmpeg_log` beside the
-  `MediaError` when it fails. `ProbeReport.structure` records how much was
-  checked (`full`, `length` or `none` with a reason), and `damage` lists
-  what was found. `ProbeReport.path` serializes as lossy UTF-8. The CLI
-  fails on any damage (D15).
+  `proj/prhd`, which FFmpeg ignores, and a sample entry's child under
+  another printable type whose payload starts with an `svhd` (a renamed
+  `sv3d`); and a `mvhd` or `mdhd` timescale FFmpeg can't use. Each FFmpeg
+  stream is matched to its `trak` by track ID (by position when IDs repeat
+  or are missing), and a video or audio `trak` that FFmpeg reads as
+  another kind is damage. A video or audio stream FFmpeg could not set up
+  (no codec, frame size, sample rate or channels, or no pixel or sample
+  format though FFmpeg has a decoder, which `ffi::find_decoder` looks up
+  by the codec id as an int) is damage when its track has samples and its
+  sample entry is a codec FFmpeg reads (`mp4::is_known_codec`), and a
+  warning otherwise, since FFmpeg may simply lack the codec. Otherwise
+  probe opens the stream's decoder from its codec parameters, on one
+  thread, and closes it: a refusal is damage, unless the error says FFmpeg
+  lacks a feature (`ENOSYS`, `AVERROR_PATCHWELCOME`,
+  `AVERROR_EXPERIMENTAL`), and a codec with no decoder in this build is a
+  warning. `probe::Undecodable` holds the reason and decides which it is.
+  A file FFmpeg reads as MOV/MP4 that the strict read refuses is read
+  again with `FirstBox::Any`, which accepts any valid first box. Matroska
+  files are checked against their Segment length. `probe` runs inside
+  `hwprobe::capture_ffmpeg_log` and keeps FFmpeg's warnings and errors in
+  `ProbeReport.ffmpeg_log`, apart from `damage` and `warnings`, or in
+  `ProbeError.ffmpeg_log` beside the `MediaError` when it fails.
+  `ProbeReport.structure` records how much was checked (`full`, `length`
+  or `none` with a reason), and `damage` lists what was found.
+  `ProbeReport.path` serializes as lossy UTF-8. The CLI fails on any
+  damage (D15).
 * `mp4`: the box reader, with fixed limits (DECISIONS D15).
 * `spherical`: Spherical Video V1 and V2 and SA3D, read from the boxes and
   written as box bytes.

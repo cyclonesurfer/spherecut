@@ -107,6 +107,9 @@ MP4/MOV files, probe counts these as damage:
   its stream with it;
 - an `sv3d` without its `svhd`, its `proj` or the `prhd` in `proj`, which
   makes FFmpeg ignore the projection;
+- a box in a sample entry that starts with a spherical video header
+  (`svhd`) but whose type is another printable one, such as `rv3d`: FFmpeg
+  skips it, and the projection with it;
 - a `mvhd` or `mdhd` timescale of 0, or one FFmpeg reads as negative;
 - a video sample entry under an audio handler, or the other way round;
 - a video or audio track that FFmpeg reads as another kind of stream;
