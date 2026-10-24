@@ -2095,7 +2095,10 @@ impl Scaler {
         );
         // Same size both ways, so the filter only matters for chroma that
         // has to be made from neighbours (yuv411p to yuv444p, say).
-        let flags = (sys::SWS_BILINEAR | sys::SWS_ACCURATE_RND | sys::SWS_BITEXACT) as c_int;
+        // ffmpeg-next's flags, because FFmpeg 8 made the SWS_ defines an
+        // enum, which ffmpeg-sys-next binds as `SwsFlags` instead.
+        use ff::software::scaling::Flags;
+        let flags = (Flags::BILINEAR | Flags::ACCURATE_RND | Flags::BITEXACT).bits();
         // SAFETY: formats are checked above; NULL filters and params are
         // allowed. NULL is returned on failure.
         let ctx = unsafe {
