@@ -277,6 +277,53 @@ What this says:
   no Vulkan Video H.264 or HEVC rows until it gets
   `mesa-vulkan-drivers-freeworld` too.
 
+Second run: [`hw-reports/odin-67fa1fda5c.md`](../hw-reports/odin-67fa1fda5c.md)
+at 67fa1fd, 2026-10-24 (PR #4), the same machine and software, 4225 s.
+Tier 2: 15 passed, 4 failed, of 19. The failures were this side's, and
+are fixed after it: both GPU seek tests failed on keyframe seeks in the
+two cropped HEVC clips, since FFmpeg 7.1 and later's HEVC decoder keeps
+the frames it has finished across a flush, and a decoder on one thread,
+as every hardware decoder is, handed one from before a seek out after it
+(D29, D2); and the download pool tests failed on their fault limit and
+their own check of the fault counter (D30, m1-plan amendment 12). Exact
+seeks, colour, decode and every sample matched software.
+
+| Benchmark | Software | VA-API | Vulkan Video |
+|---|---:|---:|---:|
+| X5 2× 1920² @ 119.88 | 0.70 × | 1.03 × | 1.66 × |
+| X5 2× 2880² @ 59.94 | 0.63 × | 0.95 × | 1.61 × |
+| X5 2× 3840² @ 25.00 | 0.51 × | 1.20 × | 2.23 × |
+| X5 2× 3840² @ 29.97 | 0.42 × | 0.83 × (0.82 to 0.91) **unstable** | 1.93 × |
+| 3840×1920 HEVC 8-bit, synthetic | 210 fps (183 to 219) **unstable** | 119 fps | 272 fps |
+| 5760×2880 HEVC 8-bit, synthetic | 90 fps | 45 fps (42 to 47) **unstable** | 136 fps |
+
+Seek latency, median and p95 in ms (`bench_seek_latency`):
+
+| Seek | Software | VA-API | Vulkan Video |
+|---|---:|---:|---:|
+| exact, noisy 5760×2880 HEVC | 678 / 892 | 126 / 245 | 119 / 244 |
+| keyframe, noisy 5760×2880 HEVC | 613 / 722 | 50 / 57 | 46 / 51 |
+| exact, X5 3840² stream (8K30) | 3719 / 6845 | 182 / 372 | 185 / 382 |
+| keyframe, X5 3840² stream | 1659 / 1708 | 22 / 36 | 17 / 28 |
+| exact, LRV 1664×832 | 44 / 53 | 18 / 23 | 17 / 21 |
+| keyframe, LRV 1664×832 | 27 / 32 | 4.4 / 5.6 | 3.7 / 5.7 |
+
+What this adds:
+
+- The decode rows repeat the first run's within a few per cent, so
+  Vulkan Video's lead on odin holds. VA-API's synthetic 3840×1920 row
+  doubled (55 to 119 fps), with slice 2b's pooled download in between;
+  the 5.7K row didn't move (47 to 45). Software's synthetic rows came out
+  lower than the first run's (259 to 210, 118 to 90 fps), not yet
+  explained.
+- Seeking meets the target on proxies by far: an exact seek in the LRV
+  shows its frame in 21 to 53 ms at p95 on every path, against 150 ms.
+  On full-resolution X5 footage only the GPU paths are usable (about
+  0.2 s for an exact seek, 20 ms for a keyframe one); software takes
+  3.7 s, as it decodes a whole GOP of 8K HEVC to reach the frame.
+- VA-API's download faults about 10 times per MB copied on odin (116 per
+  3840×1920 NV12 frame, 227 per P010 frame), the driver's (D30).
+
 ### Framework 13 Pro (Intel Xe3, Arch)
 
 Not available yet.
