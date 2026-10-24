@@ -129,6 +129,15 @@ the sections below, they win.
     the report while each step is in flight as well as once done, and
     runs each input both waited and with two steps in flight, as the
     upload thread does (DECISIONS D31). Found in slice 3b's review.
+12. **The download pool's fault budget** (odin's run at 67fa1fd, PR #4,
+    D30). Section 12.2's limit of 50 minor faults per frame for
+    `vaapi_download_pool_reuses_buffers` and its Vulkan twin is dropped:
+    with the pool allocating nothing after the warm-up, VA-API on odin
+    still took 116 per 3840x1920 NV12 frame and 227 per P010 frame, the
+    driver's as it maps each surface to read it, and at that size the
+    faults can't show a pool that doesn't work (glibc reuses freed
+    frames). The tests check the pool by its allocations and report the
+    faults per frame and per MB.
 
 ## 1. Summary
 
@@ -2245,7 +2254,7 @@ criterion.
 | `bench_upload_5k7` | render | `write_texture` against the test-side belt for 8- and 10-bit 5.7K and an 8K pair; ingest, mips and projection GPU ms at 1920×1080 and 3840×2160, rect 90° and tiny planet 300°; allocator block counts over 300 frames |
 | `vaapi_seek_matches_software` | synth/tests | 50 random seeks per stream (20 above 2880², slice 2b) on the noisy 5.7K clips and every X5 sample stream, with `Fallback::Fail`: VA-API equals software bit for bit, and the pts equal sequential decode |
 | `vaapi_colorinfo_matches_software` | synth/tests | range, matrix, transfer and siting resolved identically from both paths |
-| `vaapi_download_pool_reuses_buffers` | media | under 50 minor faults per frame after 30 warm-up frames |
+| `vaapi_download_pool_reuses_buffers` | media | no buffer allocated by the download pool after 30 warm-up frames; minor faults per frame reported, not limited (amendment 12) |
 | `vaapi_render_matches_software` | cli | the same RGB within 1 LSB |
 | `bench_seek_latency` | synth/tests | median and p95 from `seek()` to frame, exact and keyframe, on the noisy 5.7K clip, the X5 8K and the LRV |
 | `bench_playback_realtime_5k7_8bit`, `_10bit` | playback | the headless engine with hardware decode (the path the backend picks, VA-API or Vulkan Video, amendment 9), a real-time `SystemClock`, an offscreen 1920×1080 present at a simulated 60 Hz, the 20 s noisy clip looped for 60 s (a seek every loop). Records per-second decoded fps (minimum and median), per-stage p50 and p95, and drops. **Passes only with 0 drops after the first second**, and an unthrottled per-second minimum of at least 1.2 × 29.97 |

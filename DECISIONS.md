@@ -1880,7 +1880,8 @@ what playback needs, and keeping the error means a missing device costs
 one try per backend, not one per clip. Downloading only the frame a seek
 returns saves a copy per frame decoded on the way, the copy that makes
 VA-API slow on odin (amendment 9). A pooled buffer saves the page faults
-of a fresh 25 or 50 MB buffer per 5.7K frame, and 256-byte rows let
+of a fresh 25 or 50 MB buffer of ours per 5.7K frame (FFmpeg's VA-API
+download still makes its own, below), and 256-byte rows let
 render's staging belt copy it in one go (`write_texture` copies in one
 go only at its own staging pitch, the row rounded up to the device's
 `optimalBufferCopyRowPitchAlignment`, which 256-byte rows meet where the
@@ -1894,13 +1895,34 @@ Limits:
 - The `*_download_pool_reuses_buffers` tests check the pool by what it
   allocates (`DecodeStats::download_buffers`, counted by the pool's own
   allocator): some buffers in the 30 frames of warm-up, none after.
-  Their limit of 50 minor faults per frame on the decoding thread (plan
-  section 12.2) is a budget for everything that thread does, not a check
-  of the pool: at 3840x1920, glibc hands a freed block of up to 32 MiB
-  back from its heap, so even a fresh buffer per frame faults in nothing
-  (measured with glibc 2.39), and a driver that maps each surface to read
-  it may fault more however the pool does. Over the limit with no buffer
-  allocated after the warm-up, the faults are the driver's.
+  The decoding thread's minor faults per frame are reported, not
+  limited. *Updated 2026-10-24 by odin's run at 67fa1fd (PR #4):* the
+  plan's limit of 50 (section 12.2) was a budget for everything that
+  thread does, and on odin's RX 7600 VA-API took 116 per 3840x1920 NV12
+  frame and 227 per P010 frame, about one per 95 KB copied, with no
+  buffer allocated after the warm-up: the driver's faults, about 10 per
+  MB, as radeonsi maps each plane through a staging copy to read it. At
+  that size the faults can't check the pool either: glibc hands a freed
+  block of up to 32 MiB back from its heap, so even a fresh buffer per
+  frame faults in nothing (measured with glibc 2.39). The same reuse made
+  the tests' check that the fault counter counts see nothing in 8 MiB
+  written, after the VA-API test had freed its frames; it writes 64 MiB
+  now, which glibc always maps afresh, and a counter that still counts
+  nothing leaves the faults out of the report rather than failing the
+  pool check.
+- FFmpeg's VA-API download (`av_hwframe_transfer_data`, from 6.1 to
+  8.1.3) maps the surface for reading without `AV_HWFRAME_MAP_DIRECT`, so
+  it creates a VAImage, which Mesa allocates with `malloc`, has the
+  driver copy the surface into it, copies that into our buffer, and
+  destroys it: a second full copy, and a fresh frame-sized block per
+  frame. Above glibc's 32 MiB (5760x2880 P010, 8K NV12) that block is a
+  new mapping each frame, about 12 000 faults and 18 ms more per frame in
+  a model of it here. The pool tests report a 5760x2880 P010 clip to
+  measure it on the GPU. Slice 5 checks mapping the surface directly
+  (`AV_HWFRAME_MAP_READ | AV_HWFRAME_MAP_DIRECT`, vaDeriveImage, where
+  the driver allows it) or keeping one image per decoder, before its
+  playback benchmarks, unless 5b's zero-copy has replaced the download
+  by then.
 - An `HwFailed` on a damaged packet hides the damage until software
   decodes the packet again; a `Damaged` event can then be reported twice,
   when a seek is done again.
@@ -1908,8 +1930,7 @@ Limits:
   mid-stream fallback costs one seek.
 
 Revisit if: slice 5 needs a device per stream rather than per backend,
-slice 5b's zero-copy replaces the download, or the fault count on a real
-GPU is the driver's rather than the pool's.
+or slice 5b's zero-copy replaces the download.
 
 ## D31. The render pipeline
 

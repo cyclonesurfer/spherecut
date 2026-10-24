@@ -2343,7 +2343,8 @@ pub(crate) const DOWNLOAD_ROW_ALIGN: usize = 256;
 /// one still in use are freed as they come back.
 ///
 /// The one buffer for all planes suits both hwcontexts: VA-API copies
-/// into any strides (`av_frame_copy` from a mapped surface), and Vulkan
+/// into any strides (`av_frame_copy` from a VAImage that FFmpeg creates,
+/// has the driver fill and destroys for each frame), and Vulkan
 /// copies into them through a staging buffer, or maps them for the GPU to
 /// write directly when they qualify (one buffer holding every plane, at
 /// the host pointer alignment), from FFmpeg 6.1 to 8.1.

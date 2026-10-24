@@ -140,13 +140,16 @@ back clean, so M0 is done.
   (Next), so it gives `/dev/dri/renderD128` unless `--render-node` names
   another.
 - `vaapi_download_pool_reuses_buffers` and its Vulkan twin check the
-  pool by the buffers it allocates, none after the warm-up. Their limit
-  of 50 minor faults per frame counts everything the decoding thread
-  does, the driver's own faults included: a driver that maps each
-  surface to read it, as VA-API's download does, may go over it whatever
-  the pool does, and the note's allocation count then says the faults
-  are the driver's. At 3840x1920 the faults can't show a pool that
-  doesn't work, since glibc reuses freed frames' memory (D30).
+  pool by the buffers it allocates, none after the warm-up, and report
+  the decoding thread's minor faults per frame without a limit: on
+  odin, VA-API's driver took 116 per 3840x1920 NV12 frame and 227 per
+  P010 frame mapping each surface to read it, and at that size the
+  faults can't show a pool that doesn't work, since glibc reuses freed
+  frames' memory (D30, m1-plan amendment 12). FFmpeg's VA-API download
+  creates, fills and destroys a frame-sized VAImage per frame, a second
+  copy and, above 32 MiB (5760x2880 P010, 8K NV12), a fresh mapping per
+  frame; the tests now report a 5760x2880 P010 clip to measure it, and
+  slice 5 checks mapping the surface directly instead (D30).
 - On lavapipe with FFmpeg 6.1, H.264 and HEVC are refused as `Withdrawn`
   (FFmpeg has Vulkan hwaccels for them, which can't start without a video
   queue), not `NotOffered`; only a codec without a Vulkan hwaccel, such

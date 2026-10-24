@@ -127,16 +127,19 @@ GPU, which say how near it comes to lavapipe's floors, and
 `goldens_on_host_llvmpipe` the stored images' drift on the machine's own
 llvmpipe (D32). The
 `*_download_pool_reuses_buffers` tests note the minor page faults per
-downloaded 3840×1920 NV12 and P010 frame on the decoding thread, after
-30 frames to warm up, and how many buffers the download pool allocated
-in the warm-up and after it (D30). A pool that works allocates a few in
-the warm-up and none after, which the tests check. The faults, under 50
-a frame, are a budget for the thread, the driver's work included, not a
-measure of the pool: at this size glibc hands a freed frame's 11 or 22
-MB back from its heap, so even a fresh buffer per frame faults in
-nothing. Faults over the budget with nothing allocated after the
-warm-up are the driver's, such as VA-API mapping each surface to read
-it.
+downloaded frame on the decoding thread, per frame and per MB, for
+3840×1920 NV12 and P010 and 5760×2880 P010, after 30 frames to warm up,
+with the kernel's transparent huge page setting, and how many buffers
+the download pool allocated in the warm-up and after it (D30). A pool
+that works allocates a few in the warm-up and none after, which the
+tests check; the faults are reported, not limited (m1-plan amendment
+12). At 3840×1920 glibc hands a freed frame's 11 or 22 MB back from its
+heap, so the faults there are the driver's: on odin, VA-API's 116 and
+227 a frame, about 10 per MB. At 5760×2880 P010 a frame is 50 MB, over
+what glibc keeps, so a fresh frame-sized block per frame, such as the
+VAImage FFmpeg's VA-API download creates for each frame, shows as
+thousands of faults a frame; transparent huge pages set to always hide
+most of them.
 
 How the Vulkan Video rows read:
 
