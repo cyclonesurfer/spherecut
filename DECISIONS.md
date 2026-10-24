@@ -968,5 +968,6 @@ changes enough to matter.
   opens only when he turns attach on (mode 0600, his user only) is IPC,
   not the network access his rule forbids. Before A3 (D23).
 - **Fonts.** egui's default fonts carry OFL-1.1 and Ubuntu Font Licence
-  data. Either add a per-crate license exception for
-  `epaint_default_fonts`, or ship our own OFL fonts. To decide in M1.
+  data. *Decided by Pat on 2026-10-24:* keep egui's fonts, with a
+  `deny.toml` license exception scoped to `epaint_default_fonts`, added
+  with the GUI crates (M1 slice 7) and recorded then as a decision.
