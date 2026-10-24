@@ -26,11 +26,12 @@
 //! a row the file counts as unreadable.
 
 use std::ffi::c_int;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use spherecut_core::{Rational, Time};
+use spherecut_core::{Rational, StopToken, Time};
 
 use crate::doctor::{VulkanDevice, VulkanDeviceType};
 use crate::ffi::{self, HwDevice, HwError, HwRefusal, OpenDecoderError};
@@ -153,6 +154,25 @@ pub struct VideoDecoder {
     refused: Option<HwRefusal>,
     frames: u64,
     skipped: u64,
+    /// Since the last seek, no packet of the stream has been read.
+    awaiting_landing: bool,
+    /// The first packet of the stream read since the last seek: its dts,
+    /// or its pts when it has no dts (Matroska), which is what the
+    /// demuxer's index and `av_seek_frame` compare.
+    landing: Option<i64>,
+    /// The same timestamp of the last packet of the stream read.
+    read_position: Option<i64>,
+    /// Frames nothing refers to are skipped until a packet with a pts at
+    /// or after this one is sent.
+    skip_before: Option<i64>,
+}
+
+/// What [`VideoDecoder::receive`] got.
+pub(crate) enum Received {
+    Frame(ff::frame::Video),
+    End,
+    /// The stop token said to stop, at a packet or frame boundary.
+    Stopped,
 }
 
 impl std::fmt::Debug for VideoDecoder {
@@ -213,11 +233,45 @@ impl VideoDecoder {
         Self::with_input(path, ictx, index, hw)
     }
 
+    /// Open stream `index` (or the best video stream) of `path` to decode
+    /// in software on `threads` threads, or as many as FFmpeg picks
+    /// (D3). Reading stops once `interrupt` is set, as with
+    /// [`open_cancellable`](Self::open_cancellable).
+    ///
+    /// The decoder hands out frames it flags corrupt
+    /// (`AV_CODEC_FLAG_OUTPUT_CORRUPT`), such as the leading pictures of
+    /// an open GOP decoded after a seek without their references, for the
+    /// caller to drop. Dropping them itself, FFmpeg 6.1's H.264 decoder
+    /// also loses the frames still in its reorder buffer at the end of the
+    /// stream: after a seek to the last keyframe of an open-GOP clip, its
+    /// last frame never comes out.
+    pub(crate) fn open_software(
+        path: &Path,
+        index: Option<usize>,
+        threads: Option<NonZeroU32>,
+        interrupt: Arc<AtomicBool>,
+    ) -> Result<Self, MediaError> {
+        init();
+        let ictx = ffi::open_input(path, Some(interrupt)).map_err(|e| open_err(path, e))?;
+        Self::with_input_threads(path, ictx, index, None, threads, true)
+    }
+
     fn with_input(
+        path: &Path,
+        ictx: ff::format::context::Input,
+        index: Option<usize>,
+        hw: Option<Arc<HwDevice>>,
+    ) -> Result<Self, MediaError> {
+        Self::with_input_threads(path, ictx, index, hw, None, false)
+    }
+
+    fn with_input_threads(
         path: &Path,
         mut ictx: ff::format::context::Input,
         index: Option<usize>,
         hw: Option<Arc<HwDevice>>,
+        threads: Option<NonZeroU32>,
+        output_corrupt: bool,
     ) -> Result<Self, MediaError> {
         tracing::debug!(
             path = %path.display(),
@@ -248,14 +302,18 @@ impl VideoDecoder {
         let mut ctx = ff::codec::context::Context::from_parameters(st.parameters())
             .map_err(|e| err(path, "decoder parameters", e))?;
         ffi::discard_other_streams(&mut ictx, stream_index);
+        if output_corrupt {
+            ctx.set_flags(ff::codec::Flags::OUTPUT_CORRUPT);
+        }
         match &hw {
             Some(dev) => {
                 ffi::attach_hw_device(&mut ctx, dev).map_err(|e| err(path, "hardware device", e))?
             }
-            // libavcodec defaults to one thread; let it pick per core.
+            // libavcodec defaults to one thread; let it pick per core
+            // unless told how many.
             None => ctx.set_threading(ff::codec::threading::Config {
                 kind: ff::codec::threading::Type::Frame,
-                count: 0,
+                count: threads.map_or(0, |n| n.get() as usize),
             }),
         }
         let dec = ffi::open_video_decoder(ctx, hw.as_deref()).map_err(|e| match (e, &hw) {
@@ -289,6 +347,10 @@ impl VideoDecoder {
             refused: None,
             frames: 0,
             skipped: 0,
+            awaiting_landing: false,
+            landing: None,
+            read_position: None,
+            skip_before: None,
         })
     }
 
@@ -319,22 +381,39 @@ impl VideoDecoder {
     /// error from the decoder itself is returned once; calling again
     /// carries on with the next packet.
     pub fn next_frame(&mut self) -> Result<Option<DecodedFrame>, MediaError> {
+        match self.receive(None)? {
+            Received::Frame(frame) => self.finish_frame(frame).map(Some),
+            Received::End | Received::Stopped => Ok(None),
+        }
+    }
+
+    /// The next frame as the decoder made it, as [`next_frame`]
+    /// describes, but without a download from the device; or the end; or
+    /// [`Received::Stopped`] once `stop` says to, checked before each
+    /// packet is read and before each frame is taken. Stopping loses
+    /// nothing: the next call goes on from there.
+    ///
+    /// [`next_frame`]: Self::next_frame
+    pub(crate) fn receive(&mut self, stop: Option<&StopToken>) -> Result<Received, MediaError> {
         if let Some(reason) = &self.failed {
             return Err(err(&self.path, "reading", reason));
         }
         if let Some(e) = self.refusal() {
             return Err(e);
         }
+        let stopped = || stop.is_some_and(StopToken::is_stopped);
         let mut frame = ff::frame::Video::empty();
         loop {
             if self.done {
-                return Ok(None);
+                return Ok(Received::End);
+            }
+            if stopped() {
+                return Ok(Received::Stopped);
             }
             match self.dec.receive_frame(&mut frame) {
                 Ok(()) => {
-                    let f = self.finish_frame(frame)?;
                     self.frames += 1;
-                    return Ok(Some(f));
+                    return Ok(Received::Frame(frame));
                 }
                 Err(ff::Error::Eof) => {
                     self.done = true;
@@ -356,7 +435,7 @@ impl VideoDecoder {
                             self.failed = Some(reason.clone());
                             Err(err(&self.path, "reading", reason))
                         }
-                        None => Ok(None),
+                        None => Ok(Received::End),
                     };
                 }
                 Err(ff::Error::Other { errno }) if errno == ff::util::error::EAGAIN => {}
@@ -366,11 +445,20 @@ impl VideoDecoder {
                 // Drained; receive_frame will report Eof next.
                 continue;
             }
+            if stopped() {
+                return Ok(Received::Stopped);
+            }
             match self.next_packet() {
-                Some(pkt) => self
-                    .dec
-                    .send_packet(&pkt)
-                    .map_err(|e| self.decode_error(e))?,
+                Some(pkt) => {
+                    if let Some(until) = self.skip_before
+                        && pkt.pts().is_none_or(|p| p >= until)
+                    {
+                        self.skip_nonref_before(None);
+                    }
+                    self.dec
+                        .send_packet(&pkt)
+                        .map_err(|e| self.decode_error(e))?
+                }
                 None => {
                     self.dec
                         .send_eof()
@@ -379,6 +467,109 @@ impl VideoDecoder {
                 }
             }
         }
+    }
+
+    /// Whether the stream has ended with an error that every later call
+    /// returns, until a seek: a read that failed or was cancelled, or a
+    /// device that turned the stream down (which a seek doesn't clear).
+    pub(crate) fn has_failed(&self) -> bool {
+        self.failed.is_some() || self.refusal().is_some()
+    }
+
+    /// Seek the demuxer to the keyframe at or before `ts` in the stream's
+    /// time base (`AVSEEK_FLAG_BACKWARD`), and flush the decoder. Reading
+    /// failures and the end of the stream are cleared, so a seek back into
+    /// the good part of a truncated file decodes again (D29, updating
+    /// D13); a device's refusal is not.
+    pub(crate) fn seek(&mut self, ts: i64) -> Result<(), MediaError> {
+        ffi::seek_frame(&mut self.ictx, self.stream_index, ts, true)
+            .map_err(|e| err(&self.path, "seeking", e))?;
+        self.after_seek();
+        Ok(())
+    }
+
+    /// Seek back to the start of the stream: to the first entry of the
+    /// demuxer's index, or the stream's start, or byte 0.
+    pub(crate) fn seek_to_start(&mut self) -> Result<(), MediaError> {
+        let start = ffi::index_first(&self.ictx, self.stream_index).or_else(|| {
+            let st = self.ictx.stream(self.stream_index)?;
+            let t = st.start_time();
+            (t != ff::ffi::AV_NOPTS_VALUE).then_some(t)
+        });
+        let by_time = start.map(|ts| ffi::seek_frame(&mut self.ictx, self.stream_index, ts, true));
+        match by_time {
+            Some(Ok(())) => {}
+            _ => ffi::seek_to_byte_zero(&mut self.ictx)
+                .map_err(|e| err(&self.path, "seeking to the start", e))?,
+        }
+        self.after_seek();
+        Ok(())
+    }
+
+    fn after_seek(&mut self) {
+        self.dec.flush();
+        self.lookahead = None;
+        self.read_done = false;
+        self.eof_sent = false;
+        self.done = false;
+        self.read_error = None;
+        self.failed = None;
+        self.awaiting_landing = true;
+        self.landing = None;
+        self.read_position = None;
+    }
+
+    /// The first packet read since the last seek, by the timestamp the
+    /// index compares: where the seek landed. `None` before one is read,
+    /// or when it had no timestamp.
+    pub(crate) fn landing(&self) -> Option<i64> {
+        self.landing
+    }
+
+    /// The last packet read, by the same timestamp; `None` when none has
+    /// been read since opening or seeking.
+    pub(crate) fn read_position(&self) -> Option<i64> {
+        self.read_position
+    }
+
+    /// `Some(pts)`: skip frames that nothing refers to
+    /// (`AVDISCARD_NONREF`) until a packet with a pts at or after `pts`
+    /// is sent. Packets go in in decode order, ahead of the frames coming
+    /// out, so stopping at the first frame out at or after `pts` would
+    /// already have skipped B-frames after it. `None`: skip nothing.
+    pub(crate) fn skip_nonref_before(&mut self, pts: Option<i64>) {
+        self.skip_before = pts;
+        ffi::skip_nonref(&mut self.dec, pts.is_some());
+    }
+
+    pub(crate) fn input(&self) -> &ff::format::context::Input {
+        &self.ictx
+    }
+
+    pub(crate) fn stream_index(&self) -> usize {
+        self.stream_index
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Frames the decoder has made since opening.
+    pub(crate) fn frames_decoded(&self) -> u64 {
+        self.frames
+    }
+
+    /// FFmpeg's name for the decoder's codec, such as `h264`.
+    pub(crate) fn codec_name(&self) -> String {
+        ffi::codecpar_fields(
+            &self
+                .ictx
+                .stream(self.stream_index)
+                .map(|s| s.parameters())
+                .unwrap_or_default(),
+        )
+        .codec_name
+        .unwrap_or_default()
     }
 
     /// A decoder error, or why the device can't decode this stream when
@@ -438,7 +629,15 @@ impl VideoDecoder {
         loop {
             let mut pkt = ff::Packet::empty();
             match pkt.read(&mut self.ictx) {
-                Ok(()) if pkt.stream() == self.stream_index => return Some(pkt),
+                Ok(()) if pkt.stream() == self.stream_index => {
+                    let ts = pkt.dts().or(pkt.pts());
+                    if self.awaiting_landing {
+                        self.awaiting_landing = false;
+                        self.landing = ts;
+                    }
+                    self.read_position = ts.or(self.read_position);
+                    return Some(pkt);
+                }
                 Ok(()) => unreadable = 0,
                 // FFmpeg reports a read error that made the demuxer stop
                 // as that error, not as the end of the file.

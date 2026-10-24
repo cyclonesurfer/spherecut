@@ -42,6 +42,7 @@ const CODES: &[&str] = &[
     "no_video_or_audio",
     "not_a_file",
     "not_found",
+    "not_implemented",
     "not_media",
     "open_failed",
     "too_large",
@@ -49,6 +50,7 @@ const CODES: &[&str] = &[
     "truncated",
     "unexpected_first_box",
     "unsupported_container",
+    "unsupported_pixel_format",
     "usage",
 ];
 

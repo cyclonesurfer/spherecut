@@ -212,6 +212,8 @@ gives probe's file codes above for the file it opens):
 | `too_large` | As the warning above, as an error: the decoder refuses the stream |
 | `hw_unsupported` | The hardware decoder refuses the stream; software may still decode it (exit 3 for `frame --decoder vaapi`) |
 | `hw_unavailable` | The hardware device can't be opened (exit 3 for `frame --decoder vaapi`) |
+| `unsupported_pixel_format` | The decoder's pixel format is neither one Spherecut uploads as it is nor one swscale converts; the message names it |
+| `not_implemented` | A part of the decoding backend a later M1 slice brings, such as decoding audio; the message names it |
 
 Planned with `frame` (M1 slice 4) and the GUI, and not given yet:
 `output_exists`, `not_equirect`, `out_of_range` (exit 1); `no_gpu`,
