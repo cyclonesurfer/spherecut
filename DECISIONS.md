@@ -1958,9 +1958,17 @@ What:
   timestamp features where it has them, wgpu's default limits with 2D
   textures raised to the adapter's own limit up to 16384, performance
   memory hints, and no texture format features. Every device is made in
-  one private function, `gpu::open_device`; `Gpu::from_parts` wraps
-  eframe's (slice 7), which it makes from the same three descriptors.
-  Slice 5b replaces `open_device` alone: it opens the Vulkan device
+  one private function, `gpu::open_device`, and `Gpu::from_parts` wraps
+  it. For that to hold in the GUI too, slice 7 opens render's device
+  itself (the instance from `instance_descriptor`, with the window's
+  display handle where wgpu wants one, then `select_adapter`, checking
+  the window's surface can present from it, and `open_device`) and hands
+  it to eframe through egui-wgpu 0.37's `WgpuSetup::Existing`
+  (`WgpuSetupExisting { instance, adapter, device, queue }`). The plan's
+  `WgpuSetup::CreateNew` (section 7) has egui-wgpu make the device with
+  its own `request_device`, which never passes through `open_device`, so
+  5b's Vulkan Video device wouldn't reach the viewer; the first review
+  found the contradiction. Slice 5b replaces `open_device` alone: it opens the Vulkan device
   itself through wgpu-hal 30's `vulkan::Adapter::open_with_callback`, to
   add the video-decode queues and extensions FFmpeg's Vulkan Video wants
   and the DMA-BUF import extensions, then wraps it with

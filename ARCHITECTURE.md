@@ -420,12 +420,14 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
 
 * **`Gpu`** is one wgpu device on Vulkan, chosen by `AdapterChoice`
   (`Auto`, `Cpu` for lavapipe, or a name); `Gpu::headless` makes one for
-  `frame`, tests and benchmarks, and `Gpu::from_parts` wraps eframe's.
+  `frame`, tests and benchmarks, and `Gpu::from_parts` wraps a device.
   `GpuCaps` says what it can do (timestamps, anisotropy, its largest
   texture). A lost device, or an error no error scope caught, is
   returned by `Gpu::check` as `gpu_failed`, which every entry point calls
-  first; nothing panics in wgpu's error handler. All device creation is in one function that slice 5b
-  replaces to add Vulkan Video and DMA-BUF import.
+  first; nothing panics in wgpu's error handler. All device creation is
+  in one function that slice 5b replaces to add Vulkan Video and DMA-BUF
+  import; the GUI (slice 7) opens its device there too and hands it to
+  eframe through egui-wgpu's `WgpuSetup::Existing`.
 * **Slots** (`GpuFrame`, for a `SlotShape`) hold a frame's planes as
   canonical textures: `R8Unorm`/`Rg8Unorm` for 8-bit planes, and
   `R16Float`/`Rg16Float` holding code / (2^b − 1) for deeper ones, each

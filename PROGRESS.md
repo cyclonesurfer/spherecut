@@ -330,7 +330,10 @@ back clean, so M0 is done.
    adapter gives the render node lookup its GPU; `spherecut frame` on the
    CLI's JSON contract (D27; with exit statuses 3 and 4, SIGINT and
    `--overwrite`) and its strace test; worker threads and the frame
-   cache, audio, then the eframe GUI. H1, after slice 5, runs slice 2b's
+   cache, audio, then the eframe GUI, which hands eframe render's own
+   device through egui-wgpu's `WgpuSetup::Existing` rather than the plan's
+   `CreateNew`, so that slice 5b's Vulkan Video device reaches the viewer
+   (D31). H1, after slice 5, runs slice 2b's
    Tier 2 tests on huginn and odin.
 2. The Insta360 trailer reader (metadata, calibration, IMU), needed from M2.
 3. Agent integration A1 (the MCP server) once M1's code is in, while
