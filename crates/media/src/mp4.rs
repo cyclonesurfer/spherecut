@@ -145,7 +145,7 @@ impl Truncated {
         self.fourcc.is_some_and(|f| f.0 == *t)
     }
 
-    fn reason(&self) -> String {
+    pub(crate) fn reason(&self) -> String {
         let (present, offset) = (self.present, self.offset);
         if let (Some(f), Some(size)) = (self.fourcc, self.size)
             && present >= self.header_len

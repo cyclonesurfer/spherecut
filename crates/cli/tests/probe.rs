@@ -145,7 +145,10 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let damage = v["damage"].as_array().unwrap();
     assert!(
-        damage[0].as_str().unwrap().starts_with("track #0: chunk 1"),
+        damage[0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("track #0: chunk 1"),
         "{v}"
     );
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));

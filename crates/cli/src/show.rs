@@ -2,15 +2,15 @@
 
 use std::fmt::Write as _;
 
-use spherecut_core::Rational;
+use spherecut_core::{Rational, Time};
 use spherecut_media::doctor::{
     Check, CheckResult, DoctorReport, SAMPLE_SIZE, Severity, VulkanDeviceType,
 };
 use spherecut_media::probe::{ProbeReport, StreamInfo, StructureCheck, TruncatedBox};
 use spherecut_media::spherical::{Projection, StereoMode};
 
-fn secs(r: Rational) -> String {
-    format!("{:.3} s", r.to_f64())
+fn secs(t: Time) -> String {
+    format!("{:.3} s", t.to_secs_f64())
 }
 
 fn rate(r: Rational) -> String {

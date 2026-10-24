@@ -202,7 +202,7 @@ fn bench_samples_realtime_decode() {
             vi.height,
             fps.to_f64()
         );
-        let len = v.duration.map(|d| d.to_f64()).unwrap_or(0.0);
+        let len = v.duration.map(|d| d.to_secs_f64()).unwrap_or(0.0);
         let e = modes
             .entry(key)
             .or_insert((p.clone(), streams.clone(), fps.to_f64(), len));

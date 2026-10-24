@@ -181,48 +181,65 @@ fn broken_files_give_errors_not_panics() {
     assert!(r.ffmpeg_log.is_empty(), "{:?}", r.ffmpeg_log);
     let bad = media::write_bad_files(&good, &dir).unwrap();
     assert_eq!(bad.len(), 12);
+    // (file, why, its code in the CLI's JSON)
     let reasons = [
-        ("bad-empty.mp4", "the file is empty"),
-        ("bad-text.mp4", "not a recognised media file"),
-        ("bad-trunc-header.mp4", "`ftyp` box at offset 0"),
-        ("bad-trunc-half.mp4", "`mdat` box at offset"),
-        ("bad-trunc-end.mp4", "`moov` box at offset"),
-        ("bad-corrupt-moov.mp4", "runs past the end of the file"),
+        ("bad-empty.mp4", "the file is empty", "not_media"),
+        ("bad-text.mp4", "not a recognised media file", "not_media"),
+        (
+            "bad-trunc-header.mp4",
+            "`ftyp` box at offset 0",
+            "truncated",
+        ),
+        ("bad-trunc-half.mp4", "`mdat` box at offset", "truncated"),
+        ("bad-trunc-end.mp4", "`moov` box at offset", "truncated"),
+        (
+            "bad-corrupt-moov.mp4",
+            "runs past the end of the file",
+            "damaged",
+        ),
         (
             "bad-trak-type.mp4",
             "has a type that is not text, so its header is damaged",
+            "damaged",
         ),
-        ("bad-trak-renamed.mp4", "box `Trak` at offset"),
+        ("bad-trak-renamed.mp4", "box `Trak` at offset", "damaged"),
         (
             "bad-timescale.mp4",
             "track #0: its `mdhd` gives timescale 0",
+            "damaged",
         ),
         (
             "bad-codec-config.mp4",
             "stream #0 (sample entry `avc1`) has no pixel format",
+            "damaged",
         ),
         (
             "bad-audio-config.mp4",
             "stream #1 (sample entry `mp4a`) cannot be opened by FFmpeg's aac decoder",
+            "damaged",
         ),
         (
             "bad-projection.mp4",
             "in `avc1` has no `proj`, so FFmpeg ignores its projection",
+            "damaged",
         ),
     ];
     for b in &bad {
         let name = b.file_name().unwrap().to_string_lossy().into_owned();
         // Either FFmpeg cannot open the file and the error says why, or it
         // can (late truncation, corrupt tables) and the damage is reported.
-        let why = match probe::probe(b) {
-            Err(e) => e.to_string(),
+        let (why, code) = match probe::probe(b) {
+            Err(e) => (e.to_string(), e.code()),
             Ok(r) => {
                 assert!(!r.damage.is_empty(), "{name} probed cleanly");
-                r.damage.join("; ")
+                let failure = r.failure().unwrap();
+                let damage: Vec<&str> = r.damage.iter().map(|d| d.message.as_str()).collect();
+                (damage.join("; "), failure.code)
             }
         };
-        let want = reasons.iter().find(|(n, _)| *n == name).unwrap().1;
+        let (_, want, want_code) = reasons.iter().find(|(n, ..)| *n == name).unwrap();
         assert!(why.contains(want), "{name}: {why}");
+        assert_eq!(code, *want_code, "{name}: {why}");
     }
     // FFmpeg opens these without complaint; only probe's checks find the
     // damage.
@@ -292,7 +309,7 @@ fn broken_files_give_errors_not_panics() {
         assert!(
             r.damage
                 .iter()
-                .any(|d| d.contains("in `moov` has a type that is not text")),
+                .any(|d| d.message.contains("in `moov` has a type that is not text")),
             "{:?}",
             r.damage
         );
