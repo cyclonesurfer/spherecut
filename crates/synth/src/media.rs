@@ -77,6 +77,13 @@ pub struct Spec {
     /// 1/90000 s. `rate` is then only the encoder's hint, and the clip
     /// can't have audio.
     pub vfr: bool,
+    /// Noise from this seed on every sample, new each frame (1 to 4 levels
+    /// up or down at 8 bits, scaled with the depth), so that the encoder
+    /// needs a camera's bitrate and the decoder does a camera's work: the
+    /// M1 plan's noisy perf clips. A clean grid decodes several times
+    /// faster than footage. At 5760x2880 and 30 fps, x265 (`veryfast`,
+    /// CRF 18) makes about 200 Mbps of it.
+    pub noise: Option<u64>,
 }
 
 /// Keyframes every `keyint` frames, with `bframes` B-frames between
@@ -130,6 +137,7 @@ impl Default for Spec {
             gop: None,
             edit_start: 0,
             vfr: false,
+            noise: None,
         }
     }
 }
@@ -280,7 +288,10 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
     let mut pts = 0;
     for i in 0..spec.frames {
         let img = render_equirect(spec.pattern, spec.width, spec.height, i, 2);
-        let planes = yuv::to_yuv(&img, spec.bits, &format);
+        let mut planes = yuv::to_yuv(&img, spec.bits, &format);
+        if let Some(seed) = spec.noise {
+            add_noise(&mut planes, spec.bits, seed, i);
+        }
         if spec.vfr {
             w.push_video_at(&planes, pts)?;
             pts += vfr_ticks(i);
@@ -313,6 +324,53 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
         w.finish()?;
     }
     Ok(out)
+}
+
+/// Add [`Spec::noise`]'s noise for frame `frame` to `planes`, of `bits`
+/// bits, clamped to the samples' range.
+fn add_noise(planes: &mut YuvPlanes, bits: u32, seed: u64, frame: u32) {
+    // xorshift64*, from a state that is never 0.
+    let mut state = (seed ^ u64::from(frame).wrapping_mul(0x9e37_79b9_7f4a_7c15)) | 1;
+    let mut next = move || {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    };
+    // One draw gives 21 offsets of 3 bits each, -4 to 4 but never 0.
+    let offsets = |n: usize, next: &mut dyn FnMut() -> u64| -> Vec<i32> {
+        const LEVELS: [i32; 8] = [-4, -3, -2, -1, 1, 2, 3, 4];
+        let mut out = Vec::with_capacity(n);
+        while out.len() < n {
+            let mut r = next();
+            for _ in 0..21 {
+                out.push(LEVELS[(r & 7) as usize]);
+                r >>= 3;
+            }
+        }
+        out.truncate(n);
+        out
+    };
+    let scale = 1i32 << bits.saturating_sub(8).min(8);
+    let max = (1i32 << bits.min(16)) - 1;
+    match planes {
+        YuvPlanes::U8(p) => {
+            for plane in p.iter_mut() {
+                let noise = offsets(plane.len(), &mut next);
+                for (v, o) in plane.iter_mut().zip(noise) {
+                    *v = (i32::from(*v) + o).clamp(0, 255) as u8;
+                }
+            }
+        }
+        YuvPlanes::U16(p) => {
+            for plane in p.iter_mut() {
+                let noise = offsets(plane.len(), &mut next);
+                for (v, o) in plane.iter_mut().zip(noise) {
+                    *v = (i32::from(*v) + o * scale).clamp(0, max) as u16;
+                }
+            }
+        }
+    }
 }
 
 /// The standard set written by `cargo xtask gen-media`.
@@ -758,4 +816,43 @@ pub fn remux_to_mkv_at(src: &Path, dst: &Path, rate: FrameRate) -> Result<PathBu
         dst,
         Some(rate),
     )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noise_is_seeded_new_each_frame_and_bounded() {
+        let flat8 = || YuvPlanes::U8([vec![128; 64], vec![128; 16], vec![2; 16]]);
+        let noisy = |seed, frame| {
+            let mut p = flat8();
+            add_noise(&mut p, 8, seed, frame);
+            p
+        };
+        let samples = |p: &YuvPlanes| match p {
+            YuvPlanes::U8(p) => p.concat().into_iter().map(i32::from).collect::<Vec<_>>(),
+            YuvPlanes::U16(p) => p.concat().into_iter().map(i32::from).collect(),
+        };
+        let a = samples(&noisy(7, 0));
+        assert_eq!(a, samples(&noisy(7, 0)));
+        assert_ne!(a, samples(&noisy(7, 1)));
+        assert_ne!(a, samples(&noisy(8, 0)));
+        // 1 to 4 levels around 128, and clamped at 0 near the bottom.
+        assert!(
+            a[..80]
+                .iter()
+                .all(|v| (124..=132).contains(v) && *v != 128),
+            "{a:?}"
+        );
+        assert!(a[80..].iter().all(|v| (0..=6).contains(v)), "{a:?}");
+        assert!(a[80..].contains(&0));
+        // Scaled with the depth at 10 bits.
+        let mut p = YuvPlanes::U16([vec![512; 64], vec![1020; 16], vec![512; 16]]);
+        add_noise(&mut p, 10, 7, 0);
+        let b = samples(&p);
+        assert!(b[..64].iter().all(|v| (496..=528).contains(v)), "{b:?}");
+        assert!(b[64..80].iter().all(|v| *v <= 1023), "{b:?}");
+        assert!(b.iter().any(|v| (v - 512).abs() > 8));
+    }
 }
