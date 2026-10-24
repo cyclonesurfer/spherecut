@@ -65,6 +65,7 @@ const OPEN_GOP: Option<Gop> = Some(Gop {
 const GOP_8: Expect = Expect {
     keyint: Some(8),
     backwards: false,
+    spliced: false,
 };
 
 /// 256x128 clips of 30 frames at 30 fps, in open GOPs of 8 frames with 3
@@ -232,6 +233,9 @@ struct Expect {
     /// it not exactly seekable, and every exact seek then decodes from the
     /// start.
     backwards: bool,
+    /// Its edit list splices pieces of the stream, so a keyframe seek can
+    /// give the first frame a piece shows, its keyframe hidden.
+    spliced: bool,
 }
 
 /// What [`oracle`] saw.
@@ -370,6 +374,17 @@ fn oracle(path: &Path, expect: Expect) -> Report {
     // after one decodes forward to a target at or after it. A stream that
     // isn't exactly seekable gives the exact frame either way.
     let mut forward = 0;
+    // The first frame of each piece of a splice, after a gap.
+    let step = frames
+        .windows(2)
+        .map(|w| w[1].pts - w[0].pts)
+        .filter(|&s| s > 0)
+        .min();
+    let piece_starts: Vec<i64> = frames
+        .windows(2)
+        .filter(|w| Some(w[1].pts - w[0].pts) > step)
+        .map(|w| w[1].pts)
+        .collect();
     for &(t, i) in targets.iter().step_by(4) {
         let (k, e, _) = seek_pts(&mut *d, t, SeekMode::Keyframe);
         if expect.backwards {
@@ -378,7 +393,7 @@ fn oracle(path: &Path, expect: Expect) -> Report {
         }
         assert_eq!(e, Exactness::KeyframeOnly, "{name}");
         assert!(
-            k.key || k.pts == origin,
+            k.key || k.pts == origin || (expect.spliced && piece_starts.contains(&k.pts)),
             "{name}: frame {} is not a keyframe",
             k.pts
         );
@@ -941,6 +956,112 @@ fn a_long_matroska_file_seeks_far_rather_than_decoding_there() {
 /// A frame at 30 fps in ticks of an MP4 video track's 1/15360 s.
 const FRAME_30: i64 = 512;
 
+/// Copy the MP4 `src`, whose `moov` comes after its media data, into
+/// `dst` with its track's edit list replaced by `edits`, each (duration
+/// in the movie's ticks, media time in the track's), played at rate 1,
+/// in version 0. As an editor that splices pieces of a clip writes it.
+fn splice(src: &Path, dst: &Path, edits: &[(u32, i32)]) {
+    let mut elst = (edits.len() as u32).to_be_bytes().to_vec();
+    for &(duration, media_time) in edits {
+        elst.extend_from_slice(&duration.to_be_bytes());
+        elst.extend_from_slice(&media_time.to_be_bytes());
+        elst.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    }
+    let elst = mp4_box(b"elst", &[&[0; 4][..], &elst].concat());
+    // The boxes in `b`, with the `elst` under `moov/trak/edts` replaced.
+    fn rebuild(b: &[u8], elst: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at + 8 <= b.len() {
+            let size = u32::from_be_bytes(b[at..at + 4].try_into().unwrap()) as usize;
+            assert!(size >= 8, "a box of size {size}");
+            let kind: [u8; 4] = b[at + 4..at + 8].try_into().unwrap();
+            match &kind {
+                b"moov" | b"trak" | b"edts" => {
+                    out.extend(mp4_box(&kind, &rebuild(&b[at + 8..at + size], elst)))
+                }
+                b"elst" => out.extend_from_slice(elst),
+                _ => out.extend_from_slice(&b[at..at + size]),
+            }
+            at += size;
+        }
+        out
+    }
+    let bytes = std::fs::read(src).unwrap();
+    let (mdat, moov) = (find_box(&bytes, b"mdat"), find_box(&bytes, b"moov"));
+    // Chunk offsets stay right only when nothing before the media moves.
+    assert!(mdat < moov, "{}: moov first", src.display());
+    let out = rebuild(&bytes, &elst);
+    assert_ne!(out, bytes, "{}: no edit list", src.display());
+    std::fs::write(dst, out).unwrap();
+}
+
+/// A box of type `kind` holding `payload`.
+fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut b = (payload.len() as u32 + 8).to_be_bytes().to_vec();
+    b.extend_from_slice(kind);
+    b.extend_from_slice(payload);
+    b
+}
+
+/// Where the top-level box of type `kind` starts in `file`.
+fn find_box(file: &[u8], kind: &[u8; 4]) -> usize {
+    let mut at = 0;
+    loop {
+        let size = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+        if &file[at + 4..at + 8] == kind {
+            return at;
+        }
+        assert!(size >= 8, "a box of size {size}");
+        at += size;
+    }
+}
+
+/// An edit list of two pieces of the clip, as editors write: FFmpeg drops
+/// frames where they meet, so frames aren't shown a frame apart however
+/// even `stts` is.
+#[test]
+fn an_edit_list_that_splices_two_pieces_seeks_exactly_and_counts_frames() {
+    let dir = TempDir::new("splice");
+    for codec in [Codec::H264, Codec::Hevc] {
+        let name = format!("whole-{codec:?}");
+        let whole = write(
+            &Spec {
+                frames: 60,
+                ..spec(&name, codec)
+            },
+            &dir,
+        );
+        // Frames 0 to 14, then 30 to 44: 500 ms each, after the lead-in
+        // of B-frame delay the clip's own edit hides.
+        let spliced = dir.join(format!("spliced-{codec:?}.mp4"));
+        let lead_in = 2 * FRAME_30 as i32;
+        splice(
+            &whole,
+            &spliced,
+            &[(500, lead_in), (500, lead_in + 30 * FRAME_30 as i32)],
+        );
+        let frames = oracle(
+            &spliced,
+            Expect {
+                spliced: true,
+                ..GOP_8
+            },
+        )
+        .frames;
+        let gaps = frames
+            .windows(2)
+            .filter(|w| w[1].pts - w[0].pts != FRAME_30);
+        assert!(gaps.count() > 0, "{codec:?}: {frames:?}");
+        let d = open(&spliced);
+        assert!(
+            matches!(d.info().timing, Timing::Variable { .. }),
+            "{codec:?}: {:?}",
+            d.info().timing
+        );
+    }
+}
+
 /// Copy `src` into the MP4 `dst`, giving video packet `k` in decode order
 /// the pts `pts(k, its pts)` and keeping its dts: timestamps that tie or
 /// go backwards, which no encoder writes but broken muxers do.
@@ -1031,8 +1152,8 @@ fn timestamps_that_tie_or_go_backwards_seek_by_the_tie_rule() {
         }
     });
     let backwards = Expect {
-        keyint: Some(8),
         backwards: true,
+        ..GOP_8
     };
     let r = oracle(&back, backwards);
     let mkv = dir.join("backwards.mkv");

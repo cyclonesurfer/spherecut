@@ -1196,8 +1196,8 @@ pub struct SampleTiming {
     /// same one, which is not 0, and the samples are also shown that far
     /// apart: their composition offsets (`ctts`) put each at one of the
     /// decode times, shifted alike, so that no two tie and none is left
-    /// out. The last sample's duration is often a muxer's guess, so it
-    /// doesn't count.
+    /// out, and the edit list shows them once, straight through. The last
+    /// sample's duration is often a muxer's guess, so it doesn't count.
     pub constant: Option<u32>,
 }
 
@@ -1267,6 +1267,42 @@ fn shown_evenly(stbl: &Mp4Box, samples: u64, d: u32) -> bool {
     true
 }
 
+/// Whether a track's edit list (`edts/elst`) shows its media once and
+/// straight through: at most one edit that isn't empty (media time −1),
+/// played at rate 1. Edits that splice, repeat or hold the media show
+/// frames at times its `stts` and `ctts` don't say, and FFmpeg drops
+/// frames where one edit meets the next. No edit list shows it all; one
+/// that can't be read counts as not.
+fn plays_once(trak: &Mp4Box) -> bool {
+    let Some(elst) = trak.path(&[b"edts", b"elst"]) else {
+        return true;
+    };
+    let mut c = Cursor::new(&elst.payload);
+    let Some((version, _)) = c.version_flags() else {
+        return false;
+    };
+    // Each edit: its duration, media time and rate, the first two of 4
+    // bytes each in version 0 and 8 in version 1.
+    let field = if version == 1 { 8 } else { 4 };
+    let Ok((_, entries)) = table_entries(elst, 4, 2 * field + 4) else {
+        return false;
+    };
+    let mut shown = 0;
+    for e in entries.chunks_exact(2 * field + 4) {
+        if e.get(field..2 * field)
+            .is_some_and(|t| t.iter().all(|&b| b == 0xff))
+        {
+            continue;
+        }
+        // Rate 1.0: integer part 1, fraction 0.
+        if be_u32(e, 2 * field) != Some(0x0001_0000) {
+            return false;
+        }
+        shown += 1;
+    }
+    shown <= 1
+}
+
 pub fn sample_timing(trak: &Mp4Box) -> Option<SampleTiming> {
     let mdhd = trak.path(&[b"mdia", b"mdhd"])?;
     let mut c = Cursor::new(&mdhd.payload);
@@ -1292,7 +1328,7 @@ pub fn sample_timing(trak: &Mp4Box) -> Option<SampleTiming> {
     let first = deltas.next();
     let constant = first
         .filter(|&d| d > 0 && deltas.all(|e| e == d))
-        .filter(|&d| shown_evenly(stbl, samples, d));
+        .filter(|&d| shown_evenly(stbl, samples, d) && plays_once(trak));
     Some(SampleTiming {
         timescale,
         samples,
@@ -1533,6 +1569,64 @@ pub(crate) mod tests {
         assert_eq!(constant(&[(3, 0), (1, 256)]), None);
         // Offsets for 3 samples of 4.
         assert_eq!(constant(&[(3, 0)]), None);
+    }
+
+    #[test]
+    fn a_constant_rate_needs_an_edit_list_that_plays_the_media_once() {
+        // Edits of (duration, media time, rate), in version 0 or 1.
+        let constant = |version: u8, edits: &[(u32, i32, u32)]| {
+            let mut elst = (edits.len() as u32).to_be_bytes().to_vec();
+            for &(d, t, rate) in edits {
+                match version {
+                    1 => {
+                        elst.extend_from_slice(&u64::from(d).to_be_bytes());
+                        elst.extend_from_slice(&i64::from(t).to_be_bytes());
+                    }
+                    _ => {
+                        elst.extend_from_slice(&d.to_be_bytes());
+                        elst.extend_from_slice(&t.to_be_bytes());
+                    }
+                }
+                elst.extend_from_slice(&rate.to_be_bytes());
+            }
+            let trak = timed_trak(1, 15360, &[(90, 512)]);
+            let edts = bx(b"edts", &full(b"elst", version, 0, &elst));
+            let f = cat(&[
+                bx(b"ftyp", b"isom\0\0\x02\0isom"),
+                bx(b"moov", &bx(b"trak", &cat(&[trak[8..].to_vec(), edts]))),
+            ]);
+            let t = read(&mut io::Cursor::new(f)).unwrap();
+            sample_timing(t.tracks().next().unwrap()).unwrap().constant
+        };
+        let one = 0x0001_0000;
+        for version in [0, 1] {
+            // A lead-in hidden, after an empty edit that delays the start.
+            assert_eq!(constant(version, &[(1000, 1024, one)]), Some(512));
+            assert_eq!(
+                constant(version, &[(500, -1, one), (1000, 0, one)]),
+                Some(512)
+            );
+            // Two pieces of the media spliced, a piece held, and one played
+            // at half speed.
+            assert_eq!(
+                constant(version, &[(1500, 1024, one), (1500, 39424, one)]),
+                None
+            );
+            assert_eq!(constant(version, &[(1500, 1024, 0)]), None);
+            assert_eq!(constant(version, &[(1500, 1024, 0x8000)]), None);
+        }
+        // An edit list too short for the edits it claims.
+        let trak = timed_trak(1, 15360, &[(90, 512)]);
+        let edts = bx(b"edts", &full(b"elst", 0, 0, &2u32.to_be_bytes()));
+        let f = cat(&[
+            bx(b"ftyp", b"isom\0\0\x02\0isom"),
+            bx(b"moov", &bx(b"trak", &cat(&[trak[8..].to_vec(), edts]))),
+        ]);
+        let t = read(&mut io::Cursor::new(f)).unwrap();
+        assert_eq!(
+            sample_timing(t.tracks().next().unwrap()).unwrap().constant,
+            None
+        );
     }
 
     #[test]
