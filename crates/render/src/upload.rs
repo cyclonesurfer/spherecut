@@ -170,6 +170,9 @@ impl Uploader {
         slot: &GpuFrame,
     ) -> Result<UploadStats, RenderError> {
         let start = Instant::now();
+        // Polls the device too, which runs map callbacks: the belt's
+        // chunks and the timers' read-backs.
+        gpu.check()?;
         let whole = SlotShape::of(frame.layout(), frame.size())?;
         let shape = SlotShape::of(frame.layout(), placement.shown(frame.size()))?;
         if !slot.shape().fits(&shape) {
@@ -196,8 +199,6 @@ impl Uploader {
             })
             .collect::<Result<Vec<_>, RenderError>>()?;
         let device = &gpu.device;
-        // Map callbacks: the belt's chunks and the timers' read-backs.
-        let _ = device.poll(wgpu::PollType::Poll);
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("upload"),
         });
@@ -251,9 +252,12 @@ impl Uploader {
     }
 
     /// Runs map callbacks (the timers' read-backs, the belt's chunks)
-    /// without waiting, and gives the latest GPU time read.
+    /// without waiting, and gives the latest GPU time read. On a lost
+    /// device it reads nothing more.
     pub fn poll(&mut self, gpu: &Gpu) -> Option<f32> {
-        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        if gpu.is_lost() {
+            return self.timers.as_ref().and_then(GpuTimers::latest_ms);
+        }
         self.timers.as_mut().and_then(GpuTimers::poll)
     }
 

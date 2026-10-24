@@ -75,6 +75,7 @@ pub fn read_region_in_bands(
     size: (u32, u32),
     band_bytes: u64,
 ) -> Result<Texels, RenderError> {
+    gpu.check()?;
     let format = texture.format();
     let Some(bpt) = format.block_copy_size(None) else {
         return Err(RenderError::Invalid(format!(

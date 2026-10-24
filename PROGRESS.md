@@ -187,7 +187,9 @@ back clean, so M0 is done.
   slice 3b's, so whether the staging belt should replace
   `write_texture` is unmeasured on a GPU; the smoke run here (640×320,
   4 frames) shows the allocator's block count steady on both paths.
-  16-bit sources lose their low 4 bits in the f16 planes, and a 360°
+  A lost device makes every render entry point return `gpu_failed`;
+  recovering from it (a new device, the slots uploaded again) is slice
+  5's. 16-bit sources lose their low 4 bits in the f16 planes, and a 360°
   frame whose width isn't a multiple of its chroma subsampling (odd-width
   4:2:0, which AV1 and VP9 allow) shows a half-texel chroma step at the
   ±180° seam (D31).

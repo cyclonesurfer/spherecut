@@ -1970,10 +1970,25 @@ What:
   `forbid(unsafe_code)`.
 - **Errors** are `RenderError`, each with its code in the CLI contract:
   `no_gpu`, `adapter_not_found`, `gpu_failed` (a device refused, a
-  validation error, a failed readback), `too_large`, `invalid_input` (an
-  empty size, a plane that doesn't match its layout, a PNG that won't
-  read), `internal` (a frame uploaded into a slot of another shape) and
-  `out_of_gpu_memory`.
+  validation error, a failed readback, a lost device), `too_large`,
+  `invalid_input` (an empty size, a plane that doesn't match its layout,
+  a PNG that won't read), `internal` (a frame uploaded into a slot of
+  another shape) and `out_of_gpu_memory`.
+- **A lost device** is an error, never a panic. `Gpu::from_parts` (which
+  `headless` uses too) sets the device's lost callback, which marks the
+  `Gpu` lost, and its uncaptured-error handler, which wgpu's default
+  makes a panic: after a loss the handler ignores the errors every call
+  then raises, and before one it logs an error no scope caught and keeps
+  the first for `Gpu::check`. Every entry point that touches the device
+  calls `check` first and returns `gpu_failed` (`GpuFrame::new`,
+  `Uploader::upload`, `Projector::record`, `LinearTarget::new`,
+  `StillRenderer::render` and `render_still`, readback), and
+  `Uploader::poll` stops reading timers. 3a's first version installed
+  neither, so an upload after a loss panicked in wgpu's handler
+  (`Device::destroy` in a Tier 1 test now shows each entry point
+  returning `gpu_failed`). `Projector::record` returns a `Result` for it,
+  where the plan's returned nothing. What the viewer does then (make the
+  device again, re-upload) is slice 5's.
 - **Canonical planes**, as plan section 4.2 has them: 8-bit planes are
   written straight into `R8Unorm` or `Rg8Unorm`; 9- to 16-bit planes go
   into an `R16Uint` or `Rg16Uint` scratch, and an ingest pass writes

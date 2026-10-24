@@ -165,6 +165,7 @@ impl LinearTarget {
     /// A target `size` pixels large. `Invalid` for an empty size,
     /// `TooLarge` past the device's textures.
     pub fn new(gpu: &Gpu, size: (u32, u32)) -> Result<LinearTarget, RenderError> {
+        gpu.check()?;
         if size.0 == 0 || size.1 == 0 {
             return Err(RenderError::Invalid(format!(
                 "a {}x{} view has no pixels",
@@ -268,8 +269,7 @@ impl LinearTarget {
 /// target of a device.
 #[derive(Debug)]
 pub struct Projector {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    gpu: Gpu,
     module: wgpu::ShaderModule,
     view_layout: wgpu::BindGroupLayout,
     source_layout: wgpu::BindGroupLayout,
@@ -313,8 +313,7 @@ impl Projector {
             [sampler(true, false), sampler(true, true)],
         ];
         Projector {
-            device: device.clone(),
-            queue: gpu.queue.clone(),
+            gpu: gpu.clone(),
             module: layouts::module(device, "project", layouts::PROJECT_WGSL),
             view_layout: layouts::view(device),
             source_layout: layouts::source(device),
@@ -338,7 +337,7 @@ impl Projector {
         map.entry((filter, debug))
             .or_insert_with(|| {
                 layouts::fullscreen_pipeline(
-                    &self.device,
+                    &self.gpu.device,
                     "project",
                     &self.module,
                     "fs_project",
@@ -353,7 +352,8 @@ impl Projector {
     /// Records `slot` seen through `view` into `target`'s extent, timed
     /// by `timers` when given. The view uniform is written through the
     /// queue, so it takes effect at the next submit: one projection per
-    /// target per submission.
+    /// target per submission. `Device` when the device is lost
+    /// ([`Gpu::check`]).
     #[allow(clippy::too_many_arguments)]
     pub fn record(
         &self,
@@ -364,10 +364,12 @@ impl Projector {
         filter: Filter,
         debug: DebugMode,
         timers: Option<&mut GpuTimers>,
-    ) {
+    ) -> Result<(), RenderError> {
+        self.gpu.check()?;
         let (w, h) = target.extent;
         let uniform = ViewUniform::new(view, (w, h));
-        self.queue
+        self.gpu
+            .queue
             .write_buffer(&target.view_uniform, 0, bytemuck::bytes_of(&uniform));
         let pipeline = self.pipeline(filter, debug);
         let wraps = slot.wraps.load(Ordering::Acquire);
@@ -387,5 +389,6 @@ impl Projector {
         if let (Some(t), Some(span)) = (timers, span) {
             t.end(enc, span);
         }
+        Ok(())
     }
 }

@@ -52,6 +52,7 @@ impl GpuFrame {
     /// the device; `OutOfMemory` when the GPU can't hold it, so that a
     /// caller can make do with fewer slots.
     pub fn new(gpu: &Gpu, shape: &SlotShape) -> Result<GpuFrame, RenderError> {
+        gpu.check()?;
         gpu.check_size(shape.size)?;
         let device = &gpu.device;
         let scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);

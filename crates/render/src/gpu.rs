@@ -11,6 +11,8 @@
 //! replaces [`open_device`] and nothing else (DECISIONS D31).
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::error::RenderError;
 
@@ -84,7 +86,8 @@ pub struct GpuCaps {
 }
 
 /// One device and its queue, with the instance and adapter it came from.
-/// Cloning shares them (wgpu's handles are reference counted).
+/// Cloning shares them (wgpu's handles are reference counted), and what
+/// the device has said ([`Gpu::check`]).
 #[derive(Debug, Clone)]
 pub struct Gpu {
     pub instance: wgpu::Instance,
@@ -92,6 +95,21 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub caps: GpuCaps,
+    health: Arc<Health>,
+}
+
+/// What a device has said since [`Gpu::from_parts`] wrapped it: whether
+/// it is lost and why, and the first error no error scope caught since
+/// the last [`Gpu::check`].
+#[derive(Debug, Default)]
+struct Health {
+    lost: AtomicBool,
+    why: Mutex<Option<String>>,
+    uncaught: Mutex<Option<String>>,
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The cap on texture size asked of any adapter. RADV and lavapipe report
@@ -110,15 +128,43 @@ impl Gpu {
         Ok(Self::from_parts(instance, adapter, device, queue))
     }
 
-    /// Wraps a device made elsewhere: eframe's, which it makes from
-    /// [`Gpu::instance_descriptor`], [`Gpu::select_adapter`] and
-    /// [`Gpu::device_descriptor`] (slice 7).
+    /// Wraps a device, and takes over its error handling: wgpu's default
+    /// handler panics on any error no error scope catches, which a lost
+    /// device (a driver reset, the GPU removed) makes of every later call.
+    /// Here a loss is remembered and every entry point then returns
+    /// `gpu_failed`; any other uncaught error is logged and returned by
+    /// the next [`Gpu::check`]. Call it once per device, since a device
+    /// has one handler. [`Gpu::headless`] wraps its own device with it.
     pub fn from_parts(
         instance: wgpu::Instance,
         adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
     ) -> Gpu {
+        let health = Arc::new(Health::default());
+        let h = health.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            tracing::error!(?reason, %message, "the GPU device is lost");
+            *lock(&h.why) = Some(if message.is_empty() {
+                format!("{reason:?}")
+            } else {
+                format!("{reason:?}: {message}")
+            });
+            h.lost.store(true, Ordering::Release);
+        });
+        let h = health.clone();
+        device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
+            if h.lost.load(Ordering::Acquire) {
+                // Whatever touches a lost device's resources fails.
+                tracing::debug!(error = %e, "a GPU error after the device was lost");
+                return;
+            }
+            tracing::error!(error = %e, "a GPU error no error scope caught");
+            let mut first = lock(&h.uncaught);
+            if first.is_none() {
+                *first = Some(e.to_string());
+            }
+        }));
         let info = adapter.get_info();
         let features = device.features();
         let caps = GpuCaps {
@@ -141,7 +187,34 @@ impl Gpu {
             device,
             queue,
             caps,
+            health,
         }
+    }
+
+    /// Whether the device is lost. Polls it first: wgpu reports a
+    /// `Device::destroy` only once the device is polled.
+    pub fn is_lost(&self) -> bool {
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        self.health.lost.load(Ordering::Acquire)
+    }
+
+    /// `Device` when the device is lost, or when wgpu reported an error
+    /// that no error scope caught since the last check (which this one
+    /// then clears). Every entry point that touches the device calls it
+    /// first; the viewer can call it once a frame.
+    pub fn check(&self) -> Result<(), RenderError> {
+        if self.is_lost() {
+            let why = lock(&self.health.why).clone().unwrap_or_default();
+            return Err(RenderError::Device(format!(
+                "the device was lost ({why}); it has to be made again"
+            )));
+        }
+        if let Some(e) = lock(&self.health.uncaught).take() {
+            return Err(RenderError::Device(format!(
+                "an error no error scope caught: {e}"
+            )));
+        }
+        Ok(())
     }
 
     /// The Vulkan backend only, with wgpu's default flags (validation in

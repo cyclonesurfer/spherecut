@@ -354,15 +354,17 @@ fn project(slot: &GpuFrame) -> Vec<u8> {
     let mut enc = gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    projector.record(
-        &mut enc,
-        slot,
-        &view,
-        &target,
-        Filter::Isotropic,
-        DebugMode::Off,
-        None,
-    );
+    projector
+        .record(
+            &mut enc,
+            slot,
+            &view,
+            &target,
+            Filter::Isotropic,
+            DebugMode::Off,
+            None,
+        )
+        .unwrap();
     gpu.queue.submit([enc.finish()]);
     read_texture(gpu, target.texture(), 0).unwrap().data
 }

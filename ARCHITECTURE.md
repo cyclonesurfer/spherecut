@@ -422,7 +422,9 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   (`Auto`, `Cpu` for lavapipe, or a name); `Gpu::headless` makes one for
   `frame`, tests and benchmarks, and `Gpu::from_parts` wraps eframe's.
   `GpuCaps` says what it can do (timestamps, anisotropy, its largest
-  texture). All device creation is in one function that slice 5b
+  texture). A lost device, or an error no error scope caught, is
+  returned by `Gpu::check` as `gpu_failed`, which every entry point calls
+  first; nothing panics in wgpu's error handler. All device creation is in one function that slice 5b
   replaces to add Vulkan Video and DMA-BUF import.
 * **Slots** (`GpuFrame`, for a `SlotShape`) hold a frame's planes as
   canonical textures: `R8Unorm`/`Rg8Unorm` for 8-bit planes, and

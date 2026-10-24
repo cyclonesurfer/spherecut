@@ -167,6 +167,7 @@ impl StillRenderer {
         size: (u32, u32),
         opts: &StillOptions,
     ) -> Result<Image, RenderError> {
+        gpu.check()?;
         if size.0 == 0 || size.1 == 0 {
             return Err(RenderError::Invalid(format!(
                 "a {}x{} still has no pixels",
@@ -197,7 +198,7 @@ impl StillRenderer {
                 label: Some("still"),
             });
         self.projector
-            .record(&mut enc, slot, view, target, opts.filter, opts.debug, None);
+            .record(&mut enc, slot, view, target, opts.filter, opts.debug, None)?;
         let image = match opts.depth {
             Depth::Eight => {
                 let output = match self.output.take() {
