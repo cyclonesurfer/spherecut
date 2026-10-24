@@ -1978,9 +1978,25 @@ What:
   written straight into `R8Unorm` or `Rg8Unorm`; 9- to 16-bit planes go
   into an `R16Uint` or `Rg16Uint` scratch, and an ingest pass writes
   `R16Float` or `Rg16Float` holding min(code >> shift, 2^b − 1) / (2^b −
-  1), with a shift of 16 − b for P010 and 0 for LSB-aligned formats (the
-  clamp keeps stray high bits from reading past 1). Every format is one
-  wgpu guarantees without optional features.
+  1) rounded to the nearest half, with a shift of 16 − b for P010 and 0
+  for LSB-aligned formats (the clamp keeps stray high bits from reading
+  past 1). Every format is one wgpu guarantees without optional
+  features.
+- **f16 stores are rounded in the shaders.** lavapipe converts a
+  fragment's f32 into an f16 attachment by truncating, which Vulkan
+  allows: measured at 3a's first review, 510 of the 1024 10-bit codes
+  came out of the ingest pass a half below their nearest one (up to half
+  a code), 1023 of the 4096 12-bit codes (up to two codes), and 124 of
+  256 grey levels in the linear target. Every pass that writes f16
+  therefore returns a value that is a half already, the nearest one with
+  ties to even, so that the store is exact on any driver: the ingest
+  pass works it out from the code in integers (no GPU division or log2
+  can move a code near a tie, and 12-bit codes come within an f32 ulp of
+  one); the mips of deep planes and the projection round their f32 with
+  `round_f16` in `shaders/common.wgsl` (bit arithmetic, and a scale by
+  2^24 for subnormals). unorm8 targets are left to the driver: lavapipe
+  rounds them to nearest, as Vulkan asks, and the 8-bit mips match an
+  independent area mean rounded to nearest at every texel tested.
 - **Mips**: one area-weighted shader for all four formats, a render pass
   per level, reading the level above with `textureLoad` and weighting
   each texel by its overlap in integer arithmetic, so odd sizes come out
@@ -2022,9 +2038,10 @@ What:
   isn't a full mono sphere (an sv3d crop or a left-right stereo eye).
   `Placement` gives the cover, the crop and the eye.
 - **The CPU reference** (`render::reference`) is the projection in f64,
-  step for step, storing each mip level and the linear target in the
-  GPU's formats (unorm8 rounding, f16 rounding to nearest even). The
-  Tier 1 tests compare `render_still` with it on lavapipe.
+  step for step, storing each mip level and the linear target as the GPU
+  stores them (unorm8 rounded to nearest, and the nearest f16 with ties
+  to even, which the shaders round to themselves). The Tier 1 tests
+  compare `render_still` with it on lavapipe.
 
 Where this differs from the plan, from the evidence:
 
@@ -2064,21 +2081,27 @@ Where this differs from the plan, from the evidence:
   it is, for the heat map.
 
 Measured on lavapipe (Mesa's llvmpipe; `crates/render/tests/render.rs`):
-`render_still` against the reference is 49.6 to 52.6 dB at 8 bits and
-57.4 to 58.5 dB at 10 and 12 bits, through every projection and a morph,
+`render_still` against the reference is 49.6 to 52.7 dB at 8 bits and
+58.9 to 59.0 dB at 10 and 12 bits, through every projection and a morph,
 ten plane layouts, both ranges, BT.601, 709 and 2020 and three sitings,
-with no channel off by more than 0.1; 69 dB at 16 bits; 63 to 78 dB for
-the LOD heat map. Each floor is the measured PSNR less 3 dB. Negative
-controls: level 0 against trilinear is 22.6 to 43.8 dB, and one siting
-against another 19.6 dB, against 52.5 for the right one. The mips match
-an area mean computed independently to one code at 8 bits and an f16
-ulp for deep planes. The upload bench's smoke run (640×320, 4 frames) shows a
+with no channel off by more than 0.1; 89.6 dB at 16 bits; 83.9 to 87.9
+dB for the LOD heat map (57.4 to 58.5, 69 and 63 to 78 before the
+shaders rounded their f16 stores). Each floor is the measured PSNR less
+3 dB. Negative controls: level 0 against trilinear is 22.6 to 43.8 dB,
+and one siting against another 19.6 dB, against 52.5 for the right one.
+The mips match an area mean computed independently to one code at 8
+bits, and exactly (its nearest half) for deep planes unless the mean is
+within a millionth of a tie; every 10- and 12-bit code ingests as its
+nearest half; and the linear target holds the nearest half of every
+grey level's EOTF. The upload bench's smoke run (640×320, 4 frames) shows a
 steady allocator block count on both paths.
 
 Why: as the plan's D29 says. Every format used is guaranteed on every
 driver, and `R16Unorm` isn't renderable without adapter-specific
-features, which would force a second, compute mip path. f16 keeps 10-bit
-within a quarter code. Capping the chain cuts a 5.7K frame's mip passes
+features, which would force a second, compute mip path. Rounded to
+nearest, f16 keeps 10-bit within a quarter code and 12-bit within one;
+truncated, as lavapipe's own conversion would leave it, the bounds are
+half a code and two codes, which is why the shaders round. Capping the chain cuts a 5.7K frame's mip passes
 from 23 or 34 to 11 or 16. Analytic gradients remove the seam and pole
 spikes implicit derivatives give, and make the result independent of
 the GPU's quads, so a CPU twin can check it. Anisotropy is
@@ -2087,7 +2110,13 @@ keeps slice 5b's change to one place.
 
 Limits: the comparison is on lavapipe only until slice 3b's Tier 2
 tests; the floors are lavapipe's and may need recalibrating for another
-Mesa. 16-bit sources lose their low 4 bits in f16. Anisotropic output
+Mesa. 16-bit sources lose their low 4 bits in f16. The goldens'
+`passthrough_exact` (plan section 6) can't hold as written for limited
+range through an f16 linear target, even with every store rounded to
+nearest: flat fields at Y = 86, 159 and 165 come out 81, 166 and 174,
+one code from round((k − 16) · 255 / 219), since those k lie within the
+f16 error of a tie; full range is exact for every k. Slice 3b revises
+that criterion. Anisotropic output
 is checked only for building. An unchanged frame and view skipping the
 projection is the viewer's (slice 7).
 

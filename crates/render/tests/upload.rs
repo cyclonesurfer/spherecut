@@ -64,6 +64,35 @@ fn noise(kind: Kind, size: (u32, u32), pad: usize, seed: u64) -> Frame {
     }
 }
 
+/// A `kind` frame of `size` whose sample `n` of each plane is
+/// `code(n)`, placed where the format puts its bits (P010's high).
+fn coded(kind: Kind, size: (u32, u32), code: impl Fn(usize) -> u16) -> Frame {
+    let layout = kind.layout();
+    let shift = if layout.msb_aligned {
+        16 - layout.bit_depth
+    } else {
+        0
+    };
+    let planes = layout
+        .planes
+        .iter()
+        .map(|desc| {
+            let (w, h) = desc.size(size.0, size.1);
+            let n = w as usize * h as usize * usize::from(desc.components);
+            let bytes = (0..n)
+                .flat_map(|i| (code(i) << shift).to_le_bytes())
+                .collect();
+            (bytes, desc.row_bytes(w), (w, h))
+        })
+        .collect();
+    Frame {
+        layout,
+        size,
+        planes,
+        color: common::color(Range::Full, Matrix::Bt709, ChromaSiting::Left),
+    }
+}
+
 /// Every level of every plane of `slot`, as f32 values.
 fn levels(slot: &GpuFrame) -> Vec<Vec<(u32, u32, Vec<f32>)>> {
     let gpu = gpu();
@@ -175,16 +204,11 @@ fn mips_are_area_means_at_odd_sizes() {
             let comps = p.format.components() as usize;
             assert_eq!(plane.len() as u32, p.levels);
             assert!(p.levels >= 5, "{kind:?} plane {i}: {} levels", p.levels);
-            // Level 0: the codes, exactly for 8 bits, to the f16 for deep
-            // ones (the GPU may round its f32 either way).
+            // Level 0: the codes, exactly for 8 bits (f32 against f64),
+            // and the nearest half of each for deep ones.
             let want = level0(&frame, i);
             for (k, (&g, &w)) in plane[0].2.iter().zip(&want).enumerate() {
-                // (f32 against f64: the same code, to the f32.)
-                let tol = if p.format.is_deep() {
-                    w.abs() * 2f64.powi(-10) + 1e-7
-                } else {
-                    1e-7
-                };
+                let tol = if p.format.is_deep() { 0.0 } else { 1e-7 };
                 assert!(
                     (f64::from(g) - w).abs() <= tol,
                     "{kind:?} plane {i} texel {k}: {g} for {w}"
@@ -201,17 +225,23 @@ fn mips_are_area_means_at_odd_sizes() {
                             let g = f64::from(
                                 this[(j as usize * *dw as usize + x as usize) * comps + c],
                             );
-                            // One code at 8 bits; an f16 ulp and the sum's
-                            // f32 rounding for deep planes.
-                            let tol = if p.format.is_deep() {
-                                want.abs() * 2f64.powi(-10) + 1e-6
+                            // One code at 8 bits. For deep planes the
+                            // nearest half of the mean, unless the mean is
+                            // so near a tie that the shader's f32 sum
+                            // could fall on either side of it.
+                            if p.format.is_deep() {
+                                assert!(
+                                    g == round_f16(want) || near_a_tie(want),
+                                    "{kind:?} plane {i} level {l} ({x}, {j}) c{c}: {g} for {want}, \
+                                     whose nearest half is {}",
+                                    round_f16(want)
+                                );
                             } else {
-                                1.0 / 255.0
-                            };
-                            assert!(
-                                (g - want).abs() <= tol,
-                                "{kind:?} plane {i} level {l} ({x}, {j}) c{c}: {g} for {want}"
-                            );
+                                assert!(
+                                    (g - want).abs() <= 1.0 / 255.0,
+                                    "{kind:?} plane {i} level {l} ({x}, {j}) c{c}: {g} for {want}"
+                                );
+                            }
                         }
                     }
                 }
@@ -240,6 +270,50 @@ fn deep_codes_are_shifted_and_clamped() {
     let l0 = &levels(&slot)[0][0].2;
     assert_eq!(l0[8 + 1], 1.0, "the stray code at (1, 1)");
     assert_eq!(f16_to_f32(0x3c00), 1.0);
+}
+
+#[test]
+fn deep_codes_round_to_the_nearest_half() {
+    // Every 10-bit code, high-aligned (P010) and low (yuv420p10), and
+    // every 12-bit code, through the ingest pass: each texel must be
+    // code / (2^b − 1) rounded to the nearest half, ties to even. The
+    // shader rounds it itself; lavapipe's own conversion into an f16
+    // target truncates, which leaves about half the codes one half
+    // below (DECISIONS D31).
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    for (kind, size) in [
+        (Kind::P010, (64, 16)),
+        (Kind::I420p10, (64, 16)),
+        (Kind::I444p12, (64, 64)),
+    ] {
+        let max = (1usize << kind.bits()) - 1;
+        let frame = coded(kind, size, |n| (n % (max + 1)) as u16);
+        let slot = slot_for(&frame, 1);
+        uploader.upload(gpu, &frame, &slot).unwrap();
+        for (i, plane) in levels(&slot).iter().enumerate() {
+            let got = &plane[0].2;
+            let wrong: Vec<(usize, f32, f64)> = got
+                .iter()
+                .enumerate()
+                .map(|(n, &g)| (n, g, round_f16((n % (max + 1)) as f64 / max as f64)))
+                .filter(|&(_, g, want)| f64::from(g) != want)
+                .collect();
+            assert!(
+                wrong.is_empty(),
+                "{kind:?} plane {i}: {} of {} codes aren't their nearest half, such as {:?}",
+                wrong.len(),
+                got.len(),
+                &wrong[..wrong.len().min(4)]
+            );
+        }
+    }
+}
+
+/// Whether `v` is so near a tie between two halves that an f32 sum of it
+/// could round either way.
+fn near_a_tie(v: f64) -> bool {
+    round_f16(v * (1.0 - 1e-6)) != round_f16(v * (1.0 + 1e-6))
 }
 
 #[test]

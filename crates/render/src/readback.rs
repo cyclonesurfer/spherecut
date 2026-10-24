@@ -153,9 +153,11 @@ pub fn f16_to_f32(h: u16) -> f32 {
     }
 }
 
-/// `v` rounded to the nearest IEEE half, ties to even, as an f64: what a
-/// value becomes when the GPU stores it in an f16 texture. Past the
-/// largest half it is infinite.
+/// `v` rounded to the nearest IEEE half, ties to even, as an f64: what
+/// the shaders write into an f16 texture, since they round to it
+/// themselves (`round_f16` in `shaders/common.wgsl`; a driver's own
+/// conversion may truncate, as lavapipe's does). Past the largest half it
+/// is infinite.
 pub fn round_f16(v: f64) -> f64 {
     if v == 0.0 || !v.is_finite() {
         return v;

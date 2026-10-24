@@ -164,20 +164,22 @@ fn fs_project(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let y = sample_plane(plane0, uv, g, src.size0, src.levels.x);
     let c1 = sample_plane(plane1, cuv, gc, src.size1, src.levels.y);
     let c2 = sample_plane(plane2, cuv, gc, src.size1, src.levels.y);
+    // The target is f16: what is written is rounded to the nearest half
+    // here, so that the store is exact on any driver.
     if DEBUG_MODE == 3u {
         let ly = lod(g, src.size0);
         let lc = lod(gc, src.size1);
-        return vec4<f32>(
+        return round_f16(vec4<f32>(
             clamp(ly, 0.0, src.levels.x - 1.0),
             clamp(lc, 0.0, src.levels.y - 1.0),
             ly,
             1.0,
-        );
+        ));
     }
     let s = vec4<f32>(y.r, c1.r, select(c2.r, c1.g, src.kind == 0u), 1.0);
     let rgb = clamp(vec3<f32>(dot(src.m0, s), dot(src.m1, s), dot(src.m2, s)), vec3<f32>(0.0), vec3<f32>(1.0));
     let lin = select(srgb_eotf(rgb), rgb, src.transfer == 1u);
     // A fisheye past θ = π would show the sphere twice.
     let inside = r.theta <= PI + 1e-4 && all(suv >= src.cover.xy) && all(suv <= src.cover.zw);
-    return vec4<f32>(select(vec3<f32>(0.0), lin, inside), 1.0);
+    return round_f16(vec4<f32>(select(vec3<f32>(0.0), lin, inside), 1.0));
 }

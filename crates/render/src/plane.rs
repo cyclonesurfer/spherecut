@@ -5,7 +5,7 @@
 //! |---|---|---|
 //! | 8-bit, one component | `R8Unorm`, directly | the same |
 //! | 8-bit, interleaved UV | `Rg8Unorm`, directly | the same |
-//! | 9 to 16 bits, one component | `R16Uint` scratch | `R16Float`, code / (2^b − 1) |
+//! | 9 to 16 bits, one component | `R16Uint` scratch | `R16Float`, code / (2^b − 1) to the nearest half |
 //! | 9 to 16 bits, interleaved UV | `Rg16Uint` scratch | `Rg16Float` |
 //!
 //! Every one of these formats is guaranteed by wgpu without optional

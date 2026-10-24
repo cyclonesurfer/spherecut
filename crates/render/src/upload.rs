@@ -106,12 +106,13 @@ impl Uploader {
         let mips = PlaneFormat::ALL
             .into_iter()
             .map(|f| {
+                let f16 = if f.is_deep() { 1.0 } else { 0.0 };
                 let p = layouts::fullscreen_pipeline(
                     device,
                     "mips",
                     &mips_module,
                     "fs_mip",
-                    &[],
+                    &[("F16_TARGET", f16)],
                     &[&mip_layout],
                     f.texture(),
                 );

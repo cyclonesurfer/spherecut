@@ -6,6 +6,11 @@
 // size, so destination texel j spans [j·S, (j + 1)·S) and source texel i
 // spans [i·D, (i + 1)·D).
 
+// 1 for an f16 target (R16Float, Rg16Float): the mean is rounded to the
+// nearest half in the shader, so that the store is exact on any driver.
+// 0 for unorm8, which lavapipe rounds to nearest (Vulkan asks it to).
+override F16_TARGET: u32 = 0u;
+
 @group(0) @binding(0) var src: texture_2d<f32>;
 
 @fragment
@@ -24,6 +29,9 @@ fn fs_mip(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
             let wx = f32(min(hi.x, (x + 1u) * ds.x) - max(lo.x, x * ds.x)) / f32(ss.x);
             acc += wx * wy * textureLoad(src, vec2<u32>(x, y), 0);
         }
+    }
+    if F16_TARGET == 1u {
+        return round_f16(acc);
     }
     return acc;
 }

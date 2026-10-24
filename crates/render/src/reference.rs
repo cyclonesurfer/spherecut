@@ -1,8 +1,11 @@
 //! The CPU reference (M1 plan section 4.5): the projection pass in f64,
 //! with no GPU. It follows `shaders/project.wgsl` step by step, and
-//! stores each mip level and the linear target as the GPU does (unorm8
-//! or f16), so that what remains between the two is the GPU's own
-//! precision: its `atan2`, its filtering weights and its LOD fraction.
+//! stores each mip level and the linear target as the GPU stores them:
+//! unorm8 rounded to nearest, or the nearest f16, ties to even, which the
+//! shaders round to themselves so that no driver's conversion changes it
+//! (`round_f16` in `shaders/common.wgsl`). What remains between the two
+//! is the GPU's own precision: its `atan2`, its filtering weights and its
+//! LOD fraction.
 //! The Tier 1 tests hold `render_still` to it at calibrated tolerances.
 
 use std::f64::consts::{PI, TAU};
