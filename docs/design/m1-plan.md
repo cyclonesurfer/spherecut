@@ -61,9 +61,13 @@ the sections below, they win.
 6. **Confinement** is implemented on branch `m1/ffmpeg-confine` (with
    D24); where its reviewed design differs from section 3.6, the branch
    wins.
-7. **Questions for Pat** went out on 2026-10-24: fonts and screen readers
-   on decision cards; clip 12 and Hyprland in the thread. GNOME
-   decorations wait for H2's screenshots, and odin's run waits for item 3.
+7. **Questions for Pat** went out on 2026-10-24. Pat's answers: **fonts**,
+   keep egui's default fonts with a `deny.toml` exception scoped to
+   `epaint_default_fonts`; **screen readers**, M1 ships without accesskit,
+   listed in PROGRESS as unavailable and revisited when accesskit moves to
+   a maintained zbus. Still open: clip 12 and Hyprland (asked in the
+   thread). GNOME decorations wait for H2's screenshots, and odin's run
+   waits for item 3.
 
 ## 1. Summary
 
