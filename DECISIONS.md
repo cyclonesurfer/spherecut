@@ -22,6 +22,13 @@ Checked 2026-10-23 at 3d06a2e: `cargo +1.88 build --workspace
 passes. Rechecked at 2c8d0c0, after the final review's fixes: `cargo +1.88
 test --workspace` passes.
 
+*Updated 2026-10-24, M1 slice 3a (the MSRV half of the plan's crate
+layout decision):* `rust-version` is **1.95**, from the slice that adds
+wgpu and `spherecut-render`. wgpu 30.0.1 itself needs 1.87, but egui 0.37,
+which pins it (D7), needs 1.95, so the workspace moves once, with wgpu,
+rather than again in slice 7. Fedora 44's RPM is 1.99 (huginn's), not
+1.95 as said above, so Fedora still needs no rustup to build.
+
 ## D2. FFmpeg through ffmpeg-next, hardware paths over ffmpeg-sys-next
 
 *2026-10-22, M0. Research: `docs/research/ffmpeg-bindings.md`.*
@@ -828,14 +835,19 @@ rest, with the versions in `Cargo.lock`:
 | Crate | Used by | Why |
 |---|---|---|
 | anyhow 1.0.104 | cli, xtask | Error context at the program edges; libraries use `thiserror` |
+| bytemuck 1.25.2 (derive) | render | The `#[repr(C)]` uniforms as bytes for `Queue::write_buffer`, and timestamps read back, with no `unsafe`: its derives compile under `forbid(unsafe_code)` (D31) |
 | clap 4.6.7 (derive) | cli, xtask | Argument parsing with generated help and errors, for two binaries with subcommands |
+| image 0.25.10 (png only) | render | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame` and the goldens. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide` and `crc32fast` |
+| pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
 | serde 1.0.229 (derive) | core, sphere, media, cli | Serializable time types, `Projection`, the probe and doctor reports, and the CLI's JSON envelope (D27) |
 | serde_json 1.0.154 | cli; core (dev) | `--json` output, through the `contract` module (D27). core's tests round-trip `ColorInfo` through JSON as the CLI will write it. xtask reads cargo's JSON with a small field reader instead |
-| thiserror 2.0.21 | core, media, synth | Typed library errors without hand-written `Display` impls |
-| tracing 0.1.44 | media, cli | Structured logging, and the target for FFmpeg's log (D12) |
+| thiserror 2.0.21 | core, media, synth, render | Typed library errors without hand-written `Display` impls |
+| tracing 0.1.44 | media, cli, render | Structured logging, and the target for FFmpeg's log (D12) |
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
 | tracing-subscriber 0.3.23 (env-filter) | cli | EnvFilter gives `SPHERECUT_LOG` its syntax, and the fmt layer writes to stderr. env-filter brings in `matchers` and `regex-automata` |
-| proptest 1.12.0 (dev) | core, sphere, media | Property tests and the MP4 fuzzing (D15) |
+| wgpu 30.0.1 (std, parking_lot, vulkan, wgsl) | render | The GPU (D7, D31). Default features off, so only the Vulkan backend and the WGSL front end are built: no GL, Metal, DX12 or WebGPU backend, no SPIR-V or GLSL front end. `std` and `parking_lot` are the two defaults kept: the standard library, and wgpu's locks. A `[[bans.features]]` list in `deny.toml` refuses `web`, `webgpu` and `webgl` (wasm-bindgen, js-sys and web-sys), `angle`, `static-dxc`, `glsl`, `spirv` and `vulkan-portability` if a later crate turns them on; GL, Metal and DX12 aren't banned, since egui_kittest turns them on in test builds (m1-plan section 11). It brings wgpu-core, wgpu-hal, wgpu-types, naga, ash and gpu-allocator among others. With image, bytemuck and pollster, slice 3a adds 46 crates to what a Linux build compiles, all under the existing licence list; `Cargo.lock` gains 90, the rest for other platforms' backends, which Linux never builds |
+| naga 30.0.1 (wgsl-in) (dev) | render | The test that each uniform's Rust layout matches its WGSL struct, member by member, which a driver doesn't check (D31). The same naga wgpu builds, so it adds nothing to the tree |
+| proptest 1.12.0 (dev) | core, sphere, media, render | Property tests and the MP4 fuzzing (D15) |
 | ron 0.12.2 (dev) | core | A serde round-trip test of the time types in a text format |
 
 glam's `serde` feature is on, but no glam type is serialized yet.
