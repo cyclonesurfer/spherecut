@@ -148,13 +148,52 @@ timed each benchmark once, with no warm-up, and gave 1.18× for X5 8K30 on
 VA-API. Its Vulkan Video skip read "Operation not permitted", which was
 how Spherecut's refusal of a software fallback showed before 9300fc0.
 
-### odin (RX 7600, Fedora)
+### odin (RX 7600, Fedora 44)
 
-Not run yet: no report. Its run includes the Vulkan Video checks and
-rows. With Fedora's own `mesa-vulkan-drivers`, H.264 and HEVC have no
-Vulkan Video rows, as on huginn: Fedora builds Mesa's Vulkan drivers
-without them, and RPM Fusion's `mesa-vulkan-drivers-freeworld` adds
-them (DECISIONS D38).
+Report: [`hw-reports/odin-44df411cb7.md`](../hw-reports/odin-44df411cb7.md)
+at 44df411, 2026-10-24 (PR #3). Radeon RX 7600 (Navi 33, discrete, the
+only GPU, behind `renderD128`), Mesa 26.2.5 with RPM Fusion's
+`mesa-vulkan-drivers-freeworld` and `mesa-va-drivers-freeworld`, FFmpeg
+8.1.3 (RPM Fusion), rustc 1.99.0. Each number is the median of 3 runs
+after a warm-up.
+
+Tier 2: 12 passed, 0 failed, 0 skipped. VA-API and Vulkan Video both
+decode H.264, HEVC Main and Main 10 and every X5 sample bit for bit like
+software. Doctor found no problems; with `RADV_PERFTEST=video_decode` its
+decode checks were the same, so nothing is gated behind the flag.
+
+| Benchmark | Software | VA-API | Vulkan Video |
+|---|---:|---:|---:|
+| X5 2× 1920² @ 119.88 | 0.68 × | 1.02 × | 1.66 × |
+| X5 2× 2880² @ 59.94 | 0.63 × | 0.95 × (0.42 to 0.95) **unstable** | 1.61 × |
+| X5 2× 3840² @ 25.00 | 0.51 × | 1.29 × | 2.23 × |
+| X5 2× 3840² @ 29.97 | 0.42 × | 0.81 × (0.48 to 0.82) **unstable** | 2.05 × |
+| LRV 1× 1664×832 @ 25.00 | 26.35 × | 23.50 × | 30.40 × |
+| LRV 1× 1664×832 @ 29.97 | 28.60 × | 24.70 × | 34.54 × |
+| 3840×1920 HEVC 8-bit, synthetic | 259 fps | 55 fps | 288 fps |
+| 5760×2880 HEVC 8-bit, synthetic | 118 fps | 47 fps | 135 fps |
+
+Both hardware columns include copying each frame to RAM.
+
+What this says:
+
+- On odin, only Vulkan Video decodes every X5 mode faster than real
+  time, with at least 1.6 × to spare and runs within 9 % of each other.
+  VA-API falls below real time at 5.7K60 and 8K30, and each of those
+  rows had one run at under half the median.
+- VA-API's copy to RAM is the likely cost, not its decoder: on the
+  synthetic clips it is 4 to 5 times slower than software and than
+  Vulkan Video, whose download has the GPU copy the frame into host
+  memory. VA-API's download maps the decoded surface and reads it with
+  the CPU, which on a discrete GPU is probably a slow read across PCIe
+  from video memory (not yet measured on its own; the M1 overlay will
+  show it). Keeping frames on the GPU removes that copy for
+  both paths, so slice 5b's zero-copy proof (D25) measures both: VA-API
+  frames imported into wgpu as DMA-BUFs, and Vulkan Video decoding on
+  wgpu's own Vulkan device. Which path is the default is decided from
+  those numbers on odin and huginn, before M3.
+- Software decode is far from real time at 5.7K and 8K on odin's CPU,
+  as on huginn.
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 

@@ -1480,11 +1480,17 @@ fn parse_benches(text: &str) -> Vec<Bench> {
 }
 
 /// The notes in `hw-bench.tsv`, one line each, such as why a benchmark
-/// has no result (`spherecut_testkit::bench::note`).
+/// has no result (`spherecut_testkit::bench::note`). Each note is listed
+/// once, where it first appears: two benchmarks on the same device both
+/// say which device it is.
 fn parse_bench_notes(text: &str) -> Vec<&str> {
-    text.lines()
-        .filter_map(|l| l.strip_prefix(NOTE_PREFIX))
-        .collect()
+    let mut notes = Vec::new();
+    for n in text.lines().filter_map(|l| l.strip_prefix(NOTE_PREFIX)) {
+        if !notes.contains(&n) {
+            notes.push(n);
+        }
+    }
+    notes
 }
 
 fn yes_no(b: bool) -> &'static str {
@@ -2331,7 +2337,8 @@ fn main() {
         let text = "a: VA-API\t2\tfps\t1\t3\t3\n\
                     # Vulkan Video rows ran on GPU 0\n\
                     # a: Vulkan Video: not measured: no decode 1\t2\n\
-                    #not a note\t5\tfps\n";
+                    #not a note\t5\tfps\n\
+                    # Vulkan Video rows ran on GPU 0\n";
         let b = parse_benches(text);
         assert_eq!(
             b.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
