@@ -57,7 +57,7 @@ doesn't know by the exit status. Anything else is a new version, such as
 |---|---|---|
 | `schema` | string | The document's name and version |
 | `ok` | bool | Whether the run did what was asked: true exactly when there is no `error` |
-| `result` | object, or absent | The command's result (below). Present whenever the command ran, failed or not: a damaged file still has its report, and doctor's errors come with doctor's report. Absent for a usage error |
+| `result` | object, or absent | The command's result (below). Absent for a `usage` or `internal` error. probe and doctor have one in every other run, failed or not: a damaged file still has its report, and doctor's errors come with doctor's report. `frame` will say when it has one |
 | `error` | error, or absent | Why the run failed. Absent when `ok` is true |
 | `warnings` | array of warnings | About the run as a whole. probe and doctor report what they find in `result`, so for them this is always empty in version 1 |
 
@@ -140,7 +140,7 @@ its `time_base`.
 | Status | Meaning | probe | doctor |
 |---:|---|---|---|
 | 0 | The run did what was asked | Every file is ok (warnings don't count) | No problem of severity error |
-| 1 | An input or a check failed | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18) |
+| 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18) |
 | 2 | Usage error: the command line doesn't parse | yes | yes |
 | 3 | Reserved: a codec or device the command itself needs is missing | never | never |
 | 4 | Reserved: interrupted (SIGINT), leaving no output | never | never |
@@ -163,7 +163,7 @@ The run's `error.code`:
 | `usage` | 2 | The command line doesn't parse; the message is clap's, with the usage line |
 | `files_failed` | 1 | probe: at least one file failed; each file's `error` says why. The message names the first |
 | `doctor_errors` | 1 | doctor: at least one problem is of severity error; the message lists them, and `result.issues` has them in full |
-| `internal` | 1 | A failure of Spherecut's own, such as a panic or a document that can't be made; the message says where. Please report it |
+| `internal` | 1 | A failure of Spherecut's own, such as a panic or a document that can't be made; the message says where, and there is no `result`. Please report it |
 
 A file's `error.code` in probe (`result.files[].error.code`):
 
