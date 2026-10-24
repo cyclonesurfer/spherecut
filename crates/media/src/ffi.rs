@@ -52,6 +52,13 @@ mod c {
         pub fn av_get_pix_fmt_name(fmt: c_int) -> *const c_char;
         pub fn av_pix_fmt_desc_get(fmt: c_int) -> *const AVPixFmtDescriptor;
         pub fn av_image_get_linesize(fmt: c_int, width: c_int, plane: c_int) -> c_int;
+        pub fn av_image_fill_plane_sizes(
+            sizes: *mut usize,
+            fmt: c_int,
+            height: c_int,
+            linesizes: *const isize,
+        ) -> c_int;
+        pub fn av_pix_fmt_count_planes(fmt: c_int) -> c_int;
         pub fn av_get_sample_fmt_name(fmt: c_int) -> *const c_char;
         pub fn av_color_range_name(range: c_int) -> *const c_char;
         pub fn av_color_space_name(space: c_int) -> *const c_char;
@@ -440,7 +447,7 @@ pub fn hw_device_types() -> Vec<String> {
 }
 
 /// Why a hardware device could not be opened or attached to a decoder.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum HwError {
     #[error("this FFmpeg was built without {0} support")]
     NotBuiltIn(String),
@@ -455,6 +462,10 @@ pub enum HwError {
     /// open the one chosen or opened another (`decode::open_vulkan_device`).
     #[error("{0}")]
     Vulkan(String),
+    /// No device of the kind on the render node hardware decoding uses
+    /// (`backend::FfmpegBackend::device`): the node, and why.
+    #[error("{node}: {reason}")]
+    NoDevice { node: String, reason: String },
 }
 
 /// FFmpeg's device type for a name such as "vaapi".
@@ -2157,7 +2168,9 @@ pub(crate) fn skip_nonref(dec: &mut ff::codec::context::Context, skip: bool) {
     unsafe { (*dec.as_mut_ptr()).skip_frame = v };
 }
 
-/// Copy a hardware frame into system memory (NV12 / P010).
+/// Copy a hardware frame into system memory (NV12 / P010) in buffers of
+/// its own, as doctor's one-frame probes do; decoders download into a
+/// [`DownloadPool`].
 pub fn download_frame(src: &ff::frame::Video) -> Result<ff::frame::Video, ff::Error> {
     let mut dst = ff::frame::Video::empty();
     // SAFETY: both frames are valid; transfer_data allocates dst's buffers.
@@ -2171,6 +2184,244 @@ pub fn download_frame(src: &ff::frame::Video) -> Result<ff::frame::Video, ff::Er
         return Err(ff::Error::from(ret));
     }
     Ok(dst)
+}
+
+/// Rows of a downloaded plane start this many bytes apart, at least: wgpu
+/// copies a texture upload whose rows are as far apart as its staging
+/// buffer's in one go (`COPY_BYTES_PER_ROW_ALIGNMENT`).
+pub(crate) const DOWNLOAD_ROW_ALIGN: usize = 256;
+
+/// The buffers a decoder's frames are downloaded into (M1 plan section
+/// 3.5, D30): an `AVBufferPool` of buffers sized for the device frames'
+/// system-memory format (`hw_frames_ctx->sw_format`) and size, each
+/// holding every plane, with rows [`DOWNLOAD_ROW_ALIGN`] bytes apart. A
+/// buffer goes back to the pool when the last frame using it drops, so
+/// after the first frames a download allocates nothing. A frame of
+/// another format or size, as after `LayoutChanged`, rebuilds the pool;
+/// buffers of the old one still in use are freed as they come back.
+///
+/// The one buffer for all planes suits both hwcontexts: VA-API copies
+/// into any strides (`av_frame_copy` from a mapped surface), and Vulkan
+/// copies into them through a staging buffer, or maps them for the GPU to
+/// write directly when they qualify (one buffer holding every plane, at
+/// the host pointer alignment), from FFmpeg 6.1 to 8.1.
+pub(crate) struct DownloadPool {
+    pool: *mut sys::AVBufferPool,
+    /// The format, width and height the pool's buffers are laid out for.
+    key: Option<(c_int, c_int, c_int)>,
+    planes: usize,
+    linesizes: [c_int; 4],
+    offsets: [usize; 4],
+    /// Pools built so far.
+    builds: u64,
+}
+
+// SAFETY: an AVBufferPool is locked internally, and only the pool's
+// owner takes buffers from it or rebuilds it (through `&mut self`).
+unsafe impl Send for DownloadPool {}
+
+impl std::fmt::Debug for DownloadPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DownloadPool")
+            .field("key", &self.key)
+            .field("linesizes", &self.linesizes)
+            .field("builds", &self.builds)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for DownloadPool {
+    fn default() -> Self {
+        DownloadPool {
+            pool: std::ptr::null_mut(),
+            key: None,
+            planes: 0,
+            linesizes: [0; 4],
+            offsets: [0; 4],
+            builds: 0,
+        }
+    }
+}
+
+impl Drop for DownloadPool {
+    fn drop(&mut self) {
+        // SAFETY: NULL or the pool this owns; FFmpeg frees it once every
+        // buffer taken from it has come back.
+        unsafe { sys::av_buffer_pool_uninit(&mut self.pool) };
+    }
+}
+
+impl DownloadPool {
+    /// Lay the pool out for `fmt` frames of `width` × `height`.
+    fn build(&mut self, fmt: c_int, width: c_int, height: c_int) -> Result<(), ff::Error> {
+        // SAFETY: NULL or the pool this owns (see Drop).
+        unsafe { sys::av_buffer_pool_uninit(&mut self.pool) };
+        self.key = None;
+        // SAFETY: accepts any value; negative for one it doesn't know.
+        let planes = unsafe { c::av_pix_fmt_count_planes(fmt) };
+        let planes = match usize::try_from(planes) {
+            Ok(n @ 1..=4) => n,
+            _ => return Err(ff::Error::InvalidData),
+        };
+        let mut linesizes = [0 as c_int; 4];
+        let mut wide = [0isize; 4];
+        for i in 0..planes {
+            // SAFETY: accepts any format, width and plane; negative on
+            // error.
+            let row = unsafe { c::av_image_get_linesize(fmt, width, i as c_int) };
+            let row = usize::try_from(row).map_err(|_| ff::Error::InvalidData)?;
+            let aligned = row
+                .checked_next_multiple_of(DOWNLOAD_ROW_ALIGN)
+                .ok_or(ff::Error::InvalidData)?;
+            linesizes[i] = c_int::try_from(aligned).map_err(|_| ff::Error::InvalidData)?;
+            wide[i] = isize::try_from(aligned).map_err(|_| ff::Error::InvalidData)?;
+        }
+        let mut sizes = [0usize; 4];
+        // SAFETY: four sizes out, four linesizes in, as the function takes.
+        let ret =
+            unsafe { c::av_image_fill_plane_sizes(sizes.as_mut_ptr(), fmt, height, wide.as_ptr()) };
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+        let mut offsets = [0usize; 4];
+        let mut total = 0usize;
+        for i in 0..planes {
+            offsets[i] = total;
+            total = total
+                .checked_add(sizes[i])
+                .and_then(|t| t.checked_next_multiple_of(DOWNLOAD_ROW_ALIGN))
+                .ok_or(ff::Error::InvalidData)?;
+        }
+        // FFmpeg's padding past the last plane, which SIMD readers may
+        // touch.
+        let total = total
+            .checked_add(sys::AV_INPUT_BUFFER_PADDING_SIZE as usize)
+            .ok_or(ff::Error::InvalidData)?;
+        // SAFETY: a size and FFmpeg's default allocator (av_malloc); NULL
+        // when out of memory.
+        let pool = unsafe { sys::av_buffer_pool_init(total, None) };
+        if pool.is_null() {
+            return Err(ff::Error::Other {
+                errno: ff::util::error::ENOMEM,
+            });
+        }
+        *self = DownloadPool {
+            pool,
+            key: Some((fmt, width, height)),
+            planes,
+            linesizes,
+            offsets,
+            builds: self.builds + 1,
+        };
+        Ok(())
+    }
+
+    /// Pools built so far: 1 after the first download, one more for each
+    /// change of format or size.
+    #[cfg(test)]
+    pub(crate) fn builds(&self) -> u64 {
+        self.builds
+    }
+}
+
+/// Copy the hardware frame `src` into a buffer of `pool` (rebuilt first
+/// when the frame's system-memory format or size is new), with its
+/// properties and, as software decoding does, its left and top cropping
+/// applied: FFmpeg crops a device frame only on the right and bottom.
+pub(crate) fn download_into_pool(
+    pool: &mut DownloadPool,
+    src: &ff::frame::Video,
+) -> Result<ff::frame::Video, ff::Error> {
+    // SAFETY: `src` wraps a live AVFrame. A device frame's hw_frames_ctx
+    // holds its AVHWFramesContext, whose sw_format is read as an int.
+    let key = unsafe {
+        let f = src.as_ptr();
+        let frames = (*f).hw_frames_ctx;
+        if frames.is_null() || (*frames).data.is_null() {
+            return Err(ff::Error::InvalidData);
+        }
+        let fc = (*frames).data.cast::<sys::AVHWFramesContext>();
+        (
+            enum_int(&raw const (*fc).sw_format),
+            (*f).width,
+            (*f).height,
+        )
+    };
+    if pool.key != Some(key) {
+        pool.build(key.0, key.1, key.2)?;
+    }
+    // SAFETY: the pool is live (just built or kept); NULL when out of
+    // memory.
+    let buf = unsafe { sys::av_buffer_pool_get(pool.pool) };
+    if buf.is_null() {
+        return Err(ff::Error::Other {
+            errno: ff::util::error::ENOMEM,
+        });
+    }
+    let mut dst = ff::frame::Video::empty();
+    // SAFETY: `dst` is a fresh frame, which takes over the reference to
+    // `buf` (freed with it, which returns the buffer to the pool). Its
+    // planes lie inside `buf` at the offsets and strides the pool was laid
+    // out with for this format and size. `format` is the frames context's
+    // own sw_format, so FFmpeg knows it. With `buf[0]` set,
+    // av_hwframe_transfer_data copies into the planes as given.
+    unsafe {
+        let d = dst.as_mut_ptr();
+        (*d).buf[0] = buf;
+        (*d).format = key.0;
+        (*d).width = key.1;
+        (*d).height = key.2;
+        for i in 0..pool.planes {
+            (*d).data[i] = (*buf).data.add(pool.offsets[i]);
+            (*d).linesize[i] = pool.linesizes[i];
+        }
+        let ret = sys::av_hwframe_transfer_data(d, src.as_ptr(), 0);
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+        let ret = sys::av_frame_copy_props(d, src.as_ptr());
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+        // The flags software decoding crops with, unless a caller sets
+        // AV_CODEC_FLAG_UNALIGNED, which Spherecut never does.
+        let ret = sys::av_frame_apply_cropping(d, 0);
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+    }
+    Ok(dst)
+}
+
+/// What a device frame becomes once downloaded, as far as can be told
+/// before: its frames context's system-memory format, and its size less
+/// the left and top cropping still to apply (which alignment may reduce,
+/// as the download finds). `None` when it has no frames context.
+pub(crate) fn as_downloaded(frame: &ff::frame::Video, fields: FrameFields) -> Option<FrameFields> {
+    // SAFETY: `frame` wraps a live AVFrame; as in `download_into_pool`.
+    unsafe {
+        let f = frame.as_ptr();
+        let frames = (*f).hw_frames_ctx;
+        if frames.is_null() || (*frames).data.is_null() {
+            return None;
+        }
+        let fc = (*frames).data.cast::<sys::AVHWFramesContext>();
+        let less = |n: u32, crop: usize| n.saturating_sub(u32::try_from(crop).unwrap_or(u32::MAX));
+        Some(FrameFields {
+            format: enum_int(&raw const (*fc).sw_format),
+            width: less(fields.width, (*f).crop_left),
+            height: less(fields.height, (*f).crop_top),
+            ..fields
+        })
+    }
+}
+
+/// Have an unopened hardware decoder keep `n` surfaces beyond what it
+/// needs itself, for frames the caller holds (`extra_hw_frames`).
+pub(crate) fn set_extra_hw_frames(ctx: &mut ff::codec::context::Context, n: u8) {
+    // SAFETY: `ctx` owns a live AVCodecContext that is not open yet; a
+    // plain int field read when the decoder sets up its frames context.
+    unsafe { (*ctx.as_mut_ptr()).extra_hw_frames = c_int::from(n) };
 }
 
 /// The `va_list` of FFmpeg's log callback, as bindgen spells the parameter:
@@ -3522,5 +3773,121 @@ mod tests {
             ),
             Err(ScaleError::Refused { .. })
         ));
+    }
+
+    /// A device frame of FFmpeg's Vulkan device on lavapipe, `w`x`h` in
+    /// `sw_format`, holding hwprobe's ramp; the frames context with it.
+    fn lavapipe_frame(
+        sw_format: ff::format::Pixel,
+        w: u32,
+        h: u32,
+    ) -> (
+        ff::frame::Video,
+        ff::frame::Video,
+        crate::hwprobe::BufferRef,
+    ) {
+        let dev = HwDevice::open("vulkan", Some("llvmpipe")).unwrap_or_else(|e| {
+            panic!(
+                "{e}; Tier 1 needs FFmpeg's Vulkan device on Mesa's lavapipe \
+                 (mesa-vulkan-drivers on Fedora and Ubuntu, vulkan-swrast on Arch)"
+            )
+        });
+        let frames = crate::hwprobe::hw_frames(&dev, sw_format, w, h).unwrap();
+        let src = crate::hwprobe::ramp(sw_format, w, h);
+        let mut surface = ff::frame::Video::empty();
+        // SAFETY: `frames` is an initialised frames context, which gives
+        // `surface` one of its frames; `src` is a system-memory frame of
+        // its sw_format and size.
+        unsafe {
+            assert_eq!(
+                sys::av_hwframe_get_buffer(frames.0, surface.as_mut_ptr(), 0),
+                0
+            );
+            assert_eq!(
+                sys::av_hwframe_transfer_data(surface.as_mut_ptr(), src.as_ptr(), 0),
+                0
+            );
+        }
+        (surface, src, frames)
+    }
+
+    /// Plane `i`'s rows of `w` bytes, without padding.
+    fn rows(f: &ff::frame::Video, i: usize, w: usize, h: usize) -> Vec<u8> {
+        let (p, stride) = plane_and_stride(f, i).unwrap();
+        (0..h)
+            .flat_map(|y| p[y * stride..y * stride + w].to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn downloads_reuse_pooled_buffers_with_rows_256_bytes_apart() {
+        // 250 bytes of luma a row, rounded up to 256.
+        let (w, h) = (250, 66);
+        let (surface, src, _frames) = lavapipe_frame(ff::format::Pixel::NV12, w, h);
+        let mut pool = DownloadPool::default();
+        let a = download_into_pool(&mut pool, &surface).unwrap();
+        let nv12 = sys::AVPixelFormat::AV_PIX_FMT_NV12 as c_int;
+        assert_eq!((frame_format(&a), a.width(), a.height()), (nv12, w, h));
+        for i in 0..2 {
+            let (_, stride) = plane_and_stride(&a, i).unwrap();
+            assert_eq!(stride, 256, "plane {i}");
+            let ph = if i == 0 { h } else { h / 2 } as usize;
+            assert_eq!(rows(&a, i, w as usize, ph), rows(&src, i, w as usize, ph));
+        }
+        // Both planes in the one buffer, and FFmpeg's padding.
+        assert_eq!(
+            buffer_bytes(&a),
+            256 * 66 + 256 * 33 + sys::AV_INPUT_BUFFER_PADDING_SIZE as usize
+        );
+        // A frame dropped gives its buffer back to the pool.
+        let first = data_ptr(&a, 0);
+        drop(a);
+        let b = download_into_pool(&mut pool, &surface).unwrap();
+        assert_eq!(data_ptr(&b, 0), first);
+        // One still held isn't handed out again.
+        let c = download_into_pool(&mut pool, &surface).unwrap();
+        assert_ne!(data_ptr(&c, 0), first);
+        assert_eq!(pool.builds(), 1);
+
+        // Another size, as after LayoutChanged, rebuilds the pool; the
+        // frames of the old one stay good.
+        let (small, small_src, _small_frames) = lavapipe_frame(ff::format::Pixel::NV12, 64, 32);
+        let d = download_into_pool(&mut pool, &small).unwrap();
+        assert_eq!(pool.builds(), 2);
+        assert_eq!((d.width(), d.height()), (64, 32));
+        assert_eq!(plane_and_stride(&d, 0).unwrap().1, 256);
+        assert_eq!(rows(&d, 0, 64, 32), rows(&small_src, 0, 64, 32));
+        assert_eq!(
+            rows(&b, 0, w as usize, h as usize),
+            rows(&src, 0, w as usize, h as usize)
+        );
+        let again = data_ptr(&d, 0);
+        drop((b, c, d));
+        let e = download_into_pool(&mut pool, &small).unwrap();
+        assert_eq!(data_ptr(&e, 0), again);
+    }
+
+    #[test]
+    fn a_download_crops_the_top_as_software_decoding_does() {
+        // FFmpeg crops a device frame on the right and bottom only, and
+        // leaves the rest for whoever downloads it.
+        let (mut surface, src, _frames) = lavapipe_frame(ff::format::Pixel::NV12, 64, 36);
+        // SAFETY: plain fields of a live frame.
+        unsafe { (*surface.as_mut_ptr()).crop_top = 4 };
+        let fields = frame_fields(&surface);
+        let predicted = as_downloaded(&surface, fields).unwrap();
+        let nv12 = sys::AVPixelFormat::AV_PIX_FMT_NV12 as c_int;
+        assert_eq!(
+            (predicted.format, predicted.width, predicted.height),
+            (nv12, 64, 32)
+        );
+        let mut pool = DownloadPool::default();
+        let f = download_into_pool(&mut pool, &surface).unwrap();
+        assert_eq!((f.width(), f.height()), (64, 32));
+        assert_eq!(rows(&f, 0, 64, 32), rows(&src, 0, 64, 36)[4 * 64..]);
+        assert_eq!(rows(&f, 1, 64, 16), rows(&src, 1, 64, 18)[2 * 64..]);
+        // A frame in system memory has no frames context to download from.
+        assert!(as_downloaded(&src, frame_fields(&src)).is_none());
+        assert!(download_into_pool(&mut pool, &src).is_err());
     }
 }

@@ -36,7 +36,7 @@ use std::sync::atomic::AtomicBool;
 use spherecut_core::{Rational, StopToken, Time};
 
 use crate::doctor::{VulkanDevice, VulkanDeviceType};
-use crate::ffi::{self, HwDevice, HwError, HwRefusal, OpenDecoderError};
+use crate::ffi::{self, DownloadPool, HwDevice, HwError, HwRefusal, OpenDecoderError};
 use crate::hwprobe::{self, VkDevice, device_label, vk_device_type};
 use crate::{MediaError, TooLarge, ff, init};
 
@@ -179,6 +179,19 @@ pub struct VideoDecoder {
     /// Packets sent while frames nothing refers to were being skipped:
     /// the decoder may have dropped any of them without a frame.
     skip_sent: u64,
+    /// What device frames are downloaded into.
+    pool: DownloadPool,
+}
+
+/// How [`VideoDecoder::with_options`] sets up the decoder.
+#[derive(Debug, Clone, Copy, Default)]
+struct Options {
+    /// Software decoding threads; `None` lets FFmpeg pick.
+    threads: Option<NonZeroU32>,
+    /// Hand out frames flagged corrupt (`AV_CODEC_FLAG_OUTPUT_CORRUPT`).
+    output_corrupt: bool,
+    /// Surfaces a hardware decoder keeps beyond its own needs.
+    extra_hw_frames: Option<u8>,
 }
 
 /// What [`VideoDecoder::receive`] got.
@@ -279,7 +292,33 @@ impl VideoDecoder {
     ) -> Result<Self, MediaError> {
         init();
         let ictx = ffi::open_input(path, Some(interrupt)).map_err(|e| open_err(path, e))?;
-        Self::with_input_threads(path, ictx, index, None, threads, true)
+        let options = Options {
+            threads,
+            output_corrupt: true,
+            extra_hw_frames: None,
+        };
+        Self::with_options(path, ictx, index, None, options)
+    }
+
+    /// Like [`open_software`](Self::open_software), but decoding on `dev`,
+    /// in one thread (D3), with `extra_hw_frames` surfaces in its pool
+    /// beyond what the decoder needs, for the frames the caller holds
+    /// before they are downloaded.
+    pub(crate) fn open_hardware(
+        path: &Path,
+        index: Option<usize>,
+        dev: Arc<HwDevice>,
+        extra_hw_frames: u8,
+        interrupt: Arc<AtomicBool>,
+    ) -> Result<Self, MediaError> {
+        init();
+        let ictx = ffi::open_input(path, Some(interrupt)).map_err(|e| open_err(path, e))?;
+        let options = Options {
+            threads: None,
+            output_corrupt: true,
+            extra_hw_frames: Some(extra_hw_frames),
+        };
+        Self::with_options(path, ictx, index, Some(dev), options)
     }
 
     fn with_input(
@@ -288,16 +327,15 @@ impl VideoDecoder {
         index: Option<usize>,
         hw: Option<Arc<HwDevice>>,
     ) -> Result<Self, MediaError> {
-        Self::with_input_threads(path, ictx, index, hw, None, false)
+        Self::with_options(path, ictx, index, hw, Options::default())
     }
 
-    fn with_input_threads(
+    fn with_options(
         path: &Path,
         mut ictx: ff::format::context::Input,
         index: Option<usize>,
         hw: Option<Arc<HwDevice>>,
-        threads: Option<NonZeroU32>,
-        output_corrupt: bool,
+        options: Options,
     ) -> Result<Self, MediaError> {
         tracing::debug!(
             path = %path.display(),
@@ -328,18 +366,23 @@ impl VideoDecoder {
         let mut ctx = ff::codec::context::Context::from_parameters(st.parameters())
             .map_err(|e| err(path, "decoder parameters", e))?;
         ffi::discard_other_streams(&mut ictx, stream_index);
-        if output_corrupt {
+        if options.output_corrupt {
             ctx.set_flags(ff::codec::Flags::OUTPUT_CORRUPT);
         }
         match &hw {
+            // One thread, libavcodec's default (D3).
             Some(dev) => {
-                ffi::attach_hw_device(&mut ctx, dev).map_err(|e| err(path, "hardware device", e))?
+                ffi::attach_hw_device(&mut ctx, dev)
+                    .map_err(|e| err(path, "hardware device", e))?;
+                if let Some(n) = options.extra_hw_frames {
+                    ffi::set_extra_hw_frames(&mut ctx, n);
+                }
             }
             // libavcodec defaults to one thread; let it pick per core
             // unless told how many.
             None => ctx.set_threading(ff::codec::threading::Config {
                 kind: ff::codec::threading::Type::Frame,
-                count: threads.map_or(0, |n| n.get() as usize),
+                count: options.threads.map_or(0, |n| n.get() as usize),
             }),
         }
         let dec = ffi::open_video_decoder(ctx, hw.as_deref()).map_err(|e| match (e, &hw) {
@@ -381,6 +424,7 @@ impl VideoDecoder {
             key_lag: None,
             skip_before: None,
             skip_sent: 0,
+            pool: DownloadPool::default(),
         })
     }
 
@@ -751,6 +795,17 @@ impl VideoDecoder {
             .is_some_and(|h| ffi::frame_format(frame) == h.hw_pix_fmt())
     }
 
+    /// Copy a frame from the device into the decoder's [`DownloadPool`]:
+    /// rows 256 bytes apart, and buffers that go back to the pool when
+    /// the frame drops (D30). Failing is the device failing.
+    pub(crate) fn download(
+        &mut self,
+        frame: &ff::frame::Video,
+    ) -> Result<ff::frame::Video, MediaError> {
+        ffi::download_into_pool(&mut self.pool, frame)
+            .map_err(|e| self.fail_device(&format!("copying a frame from it: {e}")))
+    }
+
     /// The next packet to decode, or `None` once there are no more (see
     /// `read_packet`).
     ///
@@ -884,10 +939,7 @@ impl VideoDecoder {
         let on_device = self.on_device(&frame);
         let pts = frame.pts();
         let frame = if on_device {
-            match ffi::download_frame(&frame) {
-                Ok(f) => f,
-                Err(e) => return Err(self.fail_device(&format!("copying a frame from it: {e}"))),
-            }
+            self.download(&frame)?
         } else {
             frame
         };

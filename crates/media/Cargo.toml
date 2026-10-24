@@ -16,6 +16,12 @@ tracing-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+[features]
+# Tests only: `VideoRequest::fault` fails a frame "as hardware", to test
+# the fallback to software (DECISIONS D30). Only synth's dev-dependency
+# turns it on.
+fault-injection = []
+
 [dev-dependencies]
 proptest.workspace = true
 spherecut-testkit.workspace = true

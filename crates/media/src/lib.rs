@@ -13,6 +13,7 @@ pub mod decode;
 pub mod detect;
 pub mod doctor;
 pub mod encode;
+mod fallback;
 mod ffi;
 pub mod hw;
 mod hwprobe;

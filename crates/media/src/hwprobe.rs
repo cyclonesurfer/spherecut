@@ -171,7 +171,7 @@ pub(crate) fn decode_one(
 pub(crate) const ENCODE_SIZE: u32 = 256;
 
 /// An `AVBufferRef` we own one reference to.
-struct BufferRef(*mut sys::AVBufferRef);
+pub(crate) struct BufferRef(pub(crate) *mut sys::AVBufferRef);
 
 impl Drop for BufferRef {
     fn drop(&mut self) {
@@ -181,7 +181,7 @@ impl Drop for BufferRef {
 }
 
 /// A frames context on `dev` for `w`x`h` frames of `sw_format`.
-fn hw_frames(
+pub(crate) fn hw_frames(
     dev: &HwDevice,
     sw_format: ff::format::Pixel,
     w: u32,
@@ -211,7 +211,7 @@ fn hw_frames(
 
 /// A system-memory frame with a diagonal luma ramp and neutral chroma, in
 /// NV12 or P010.
-fn ramp(sw_format: ff::format::Pixel, w: u32, h: u32) -> ff::frame::Video {
+pub(crate) fn ramp(sw_format: ff::format::Pixel, w: u32, h: u32) -> ff::frame::Video {
     let mut f = ff::frame::Video::new(sw_format, w, h);
     let (w, h) = (w as usize, h as usize);
     let ten_bit = sw_format == ff::format::Pixel::P010LE;

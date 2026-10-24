@@ -1,7 +1,7 @@
-//! Frame-exact seeking on FFmpeg's software decoder (M1 plan section 3.3,
+//! Frame-exact seeking on FFmpeg's decoders (M1 plan section 3.3,
 //! DECISIONS D29): [`FfmpegVideo`], the [`VideoDecode`] that
 //! [`FfmpegBackend`](crate::backend::FfmpegBackend) opens, on top of
-//! [`VideoDecoder`].
+//! [`VideoDecoder`], in software or on a hardware device.
 //!
 //! `seek(at, Exact)` returns the frame with the greatest pts at or before
 //! T = origin + ⌊at / tb⌋, later frames winning ties. A BACKWARD seek can
@@ -17,6 +17,13 @@
 //! which leaves the demuxer in a known state; the decoder then seeks
 //! again before it goes on. FFmpeg's interrupt flag is for shutdown only
 //! (D13).
+//!
+//! On a device, frames stay on it until they are handed out: a seek holds
+//! its best candidate and the frame after it as device frames, and only
+//! the one it returns is downloaded, into the decoder's pool (D30). That
+//! is two surfaces held at most, which `extra_hw_frames` keeps spare. The
+//! device refusing the stream or failing on it is returned at once and
+//! never taken for damage, for the fallback (`fallback.rs`) to act on.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -26,15 +33,18 @@ use spherecut_core::video::PixelLayout;
 use spherecut_core::{FrameRate, Rational, Rounding, StopToken, Time};
 
 use crate::backend::{
-    DecodePath, DecodeStats, DecoderEvent, Exactness, NextFrame, SeekCost, SeekMode, SeekOutcome,
-    SourceMapping, Timing, VideoDecode, VideoFrame, VideoRequest, VideoStreamInfo,
+    DecodePath, DecodeStats, DecoderEvent, Exactness, FallbackReason, HwKind, NextFrame, SeekCost,
+    SeekMode, SeekOutcome, SourceMapping, Timing, VideoDecode, VideoFrame, VideoRequest,
+    VideoStreamInfo,
 };
+#[cfg(feature = "fault-injection")]
+use crate::backend::{Fault, FaultPlan};
 use crate::color::{self, ColorContext};
 use crate::decode::{Received, VideoDecoder};
 use crate::ffi::{self, FrameFields, Scaler};
 use crate::mp4::{self, FirstBox};
 use crate::spherical::{self, Projection, StereoMode};
-use crate::{MediaError, ff};
+use crate::{HwDevice, MediaError, ff};
 
 /// Seeks to before the landing keyframe, before decoding from the start.
 pub const MAX_ATTEMPTS: u32 = 8;
@@ -64,8 +74,16 @@ const STANDARD_RATES: [FrameRate; 8] = [
 
 /// A decoded frame not yet handed out.
 struct Raw {
+    /// In system memory, or still on the device.
     frame: ff::frame::Video,
+    /// For a device frame, as it will be once downloaded (as far as can
+    /// be told before: `ffi::as_downloaded`).
     fields: FrameFields,
+    on_device: bool,
+    /// Its place among the frames the decoder made since opening, from
+    /// 0, those dropped included.
+    #[cfg_attr(not(feature = "fault-injection"), allow(dead_code))]
+    made: u64,
     pts: i64,
     /// Its place in decode-output order since the last seek.
     seq: u64,
@@ -173,7 +191,66 @@ impl CatchUp {
     }
 }
 
-/// [`VideoDecode`] on FFmpeg's software decoder.
+/// What an [`FfmpegVideo`] decodes on.
+#[derive(Debug)]
+pub(crate) enum On {
+    Software,
+    Device {
+        kind: HwKind,
+        dev: Arc<HwDevice>,
+    },
+    /// Software, single-threaded, in a device's place and labelled as on
+    /// it, for fault injection where no device decodes.
+    #[cfg(feature = "fault-injection")]
+    StandIn(HwKind),
+}
+
+/// A fault armed by a [`FaultPlan`].
+#[cfg(feature = "fault-injection")]
+#[derive(Debug)]
+struct Injection {
+    plan: FaultPlan,
+    /// "VA-API" or "Vulkan", as the error names the device.
+    kind: String,
+    /// Why the device "failed", once it has: every later call fails too,
+    /// as a device's failure is sticky.
+    fired: Option<String>,
+}
+
+#[cfg(feature = "fault-injection")]
+impl Injection {
+    /// `HwFailed`, once it has fired, or now when frame `made` is the
+    /// plan's and `at` its fault.
+    fn check(
+        &mut self,
+        path: &Path,
+        made: Option<u64>,
+        at: Option<Fault>,
+    ) -> Result<(), MediaError> {
+        if self.fired.is_none() && made == Some(self.plan.frame) && at == Some(self.plan.fault) {
+            let reason = format!(
+                "fault injected: frame {} {}",
+                self.plan.frame,
+                match self.plan.fault {
+                    Fault::Decode => "failed to decode",
+                    Fault::Download => "failed to download",
+                }
+            );
+            tracing::warn!(path = %path.display(), "hardware decoding failed: {reason}");
+            self.fired = Some(reason);
+        }
+        match &self.fired {
+            Some(reason) => Err(MediaError::HwFailed {
+                path: path.to_path_buf(),
+                kind: self.kind.clone(),
+                reason: reason.clone(),
+            }),
+            None => Ok(()),
+        }
+    }
+}
+
+/// [`VideoDecode`] on FFmpeg's decoders, in software or on a device.
 pub struct FfmpegVideo {
     dec: VideoDecoder,
     info: VideoStreamInfo,
@@ -238,6 +315,8 @@ pub struct FfmpegVideo {
     events: Vec<DecoderEvent>,
     stats: DecodeStats,
     decode_ms_total: f64,
+    #[cfg(feature = "fault-injection")]
+    injection: Option<Injection>,
 }
 
 impl std::fmt::Debug for FfmpegVideo {
@@ -279,11 +358,56 @@ enum Start {
 }
 
 impl FfmpegVideo {
-    /// Open the stream and decode its first presented frame, which fixes
-    /// the origin of clip time.
+    /// Open the stream to decode in software, and decode its first
+    /// presented frame, which fixes the origin of clip time. A hardware
+    /// [`DecodeMode`](crate::backend::DecodeMode) in `req` is not looked
+    /// at: the backend opens those.
     pub fn open(path: &Path, req: &VideoRequest) -> Result<Self, MediaError> {
-        let mut dec =
-            VideoDecoder::open_software(path, req.stream, req.threads, req.interrupt.clone())?;
+        Self::open_on(path, req, On::Software)
+    }
+
+    /// [`open`](Self::open), decoding on `on`. With a device, a stream it
+    /// can't decode is [`MediaError::HwUnsupported`] and its failure
+    /// [`MediaError::HwFailed`], from here or later, never damage.
+    pub(crate) fn open_on(path: &Path, req: &VideoRequest, on: On) -> Result<Self, MediaError> {
+        let (mut dec, decode_path) = match &on {
+            On::Software => (
+                VideoDecoder::open_software(path, req.stream, req.threads, req.interrupt.clone())?,
+                DecodePath::Software {
+                    threads: req.threads,
+                },
+            ),
+            On::Device { kind, dev } => (
+                VideoDecoder::open_hardware(
+                    path,
+                    req.stream,
+                    dev.clone(),
+                    req.extra_hw_frames,
+                    req.interrupt.clone(),
+                )?,
+                DecodePath::Hardware { kind: *kind },
+            ),
+            #[cfg(feature = "fault-injection")]
+            On::StandIn(kind) => (
+                VideoDecoder::open_software(
+                    path,
+                    req.stream,
+                    std::num::NonZeroU32::new(1),
+                    req.interrupt.clone(),
+                )?,
+                DecodePath::Hardware { kind: *kind },
+            ),
+        };
+        // A fault is injected where a device decodes, or stands in.
+        #[cfg(feature = "fault-injection")]
+        let mut injection = match (&decode_path, req.fault) {
+            (DecodePath::Hardware { kind }, Some(plan)) => Some(Injection {
+                plan,
+                kind: kind.to_string(),
+                fired: None,
+            }),
+            _ => None,
+        };
         // A Matroska track's default duration makes a rate whether its
         // frames come at it or not, so its first packets' timestamps are
         // read to check it.
@@ -298,7 +422,15 @@ impl FfmpegVideo {
         let first = loop {
             match dec.receive(Some(&never))? {
                 Received::Frame(frame) => {
-                    let fields = ffi::frame_fields(&frame);
+                    #[cfg(feature = "fault-injection")]
+                    if let Some(i) = &mut injection {
+                        i.check(
+                            path,
+                            dec.frames_decoded().checked_sub(1),
+                            Some(Fault::Decode),
+                        )?;
+                    }
+                    let fields = Self::fields(&mut dec, &frame)?;
                     if fields.corrupt {
                         continue;
                     }
@@ -371,12 +503,12 @@ impl FfmpegVideo {
             layout = %info.layout.name,
             "opened video stream"
         );
+        let made = dec.frames_decoded().saturating_sub(1);
+        let on_device = dec.on_device(&frame);
         let mut v = FfmpegVideo {
             dec,
             info,
-            decode_path: DecodePath::Software {
-                threads: req.threads,
-            },
+            decode_path,
             conv,
             source_name,
             pending: None,
@@ -404,11 +536,15 @@ impl FfmpegVideo {
             events,
             stats: DecodeStats::default(),
             decode_ms_total: 0.0,
+            #[cfg(feature = "fault-injection")]
+            injection,
         };
         let after_failure = v.dec.reading_failed();
         v.pending = Some(Raw {
             frame,
             fields,
+            on_device,
+            made,
             pts: origin_pts,
             seq: 0,
             after_failure,
@@ -421,6 +557,26 @@ impl FfmpegVideo {
 
     fn path(&self) -> &Path {
         self.dec.path()
+    }
+
+    /// A frame's fields; for a device frame, as it will be downloaded.
+    fn fields(dec: &mut VideoDecoder, frame: &ff::frame::Video) -> Result<FrameFields, MediaError> {
+        let fields = ffi::frame_fields(frame);
+        if !dec.on_device(frame) {
+            return Ok(fields);
+        }
+        ffi::as_downloaded(frame, fields)
+            .ok_or_else(|| dec.fail_device("its frame has no frames context"))
+    }
+
+    /// The injected fault's error, when it has fired or fires now, for
+    /// frame `made` at `at`.
+    #[cfg(feature = "fault-injection")]
+    fn inject(&mut self, made: Option<u64>, at: Option<Fault>) -> Result<(), MediaError> {
+        match &mut self.injection {
+            Some(i) => i.check(self.dec.path(), made, at),
+            None => Ok(()),
+        }
     }
 
     /// What `e`, an error from [`decode`](Self::decode), means.
@@ -445,6 +601,8 @@ impl FfmpegVideo {
     /// among them is reached by seeking to before that keyframe.
     /// Notes timestamps that go backwards.
     fn decode(&mut self, stop: &StopToken) -> Result<Got, MediaError> {
+        #[cfg(feature = "fault-injection")]
+        self.inject(None, None)?;
         loop {
             let started = Instant::now();
             let got = self.dec.receive(Some(stop));
@@ -454,9 +612,14 @@ impl FfmpegVideo {
                 Received::End => return Ok(Got::End),
                 Received::Stopped => return Ok(Got::Stopped),
             };
+            #[cfg(feature = "fault-injection")]
+            self.inject(
+                self.dec.frames_decoded().checked_sub(1),
+                Some(Fault::Decode),
+            )?;
             self.decode_ms_total += ms;
             self.stats.last_decode_ms = ms;
-            let fields = ffi::frame_fields(&frame);
+            let fields = Self::fields(&mut self.dec, &frame)?;
             if fields.corrupt {
                 continue;
             }
@@ -473,6 +636,8 @@ impl FfmpegVideo {
     }
 
     fn decoded(&mut self, frame: ff::frame::Video, fields: FrameFields) -> Got {
+        let on_device = self.dec.on_device(&frame);
+        let made = self.dec.frames_decoded().saturating_sub(1);
         let from_start = self.from_start;
         let index = from_start.unwrap_or(0);
         self.from_start = from_start.map(|n| n + 1);
@@ -528,6 +693,8 @@ impl FfmpegVideo {
         Got::Frame(Raw {
             frame,
             fields,
+            on_device,
+            made,
             pts,
             seq,
             after_failure: self.dec.reading_failed(),
@@ -724,7 +891,25 @@ impl FfmpegVideo {
         raw: Raw,
         next_pts: Option<i64>,
     ) -> Result<Arc<VideoFrame>, MediaError> {
-        let f = raw.fields;
+        #[cfg(feature = "fault-injection")]
+        self.inject(Some(raw.made), Some(Fault::Download))?;
+        // Only now off the device: what a seek decoded on the way stayed
+        // there.
+        let (picture, f) = if raw.on_device {
+            let started = Instant::now();
+            let down = self.dec.download(&raw.frame)?;
+            self.stats.last_download_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let d = ffi::frame_fields(&down);
+            let f = FrameFields {
+                format: d.format,
+                width: d.width,
+                height: d.height,
+                ..raw.fields
+            };
+            (down, f)
+        } else {
+            (raw.frame, raw.fields)
+        };
         if self.conv.source() != (f.format, f.width, f.height) {
             let conv = Conversion::new(self.dec.path(), f.format, f.width, f.height)?;
             self.source_name = ffi::pix_fmt_name(f.format).unwrap_or_default();
@@ -765,10 +950,10 @@ impl FfmpegVideo {
         let at = time(raw.pts)?;
         let layout = self.conv.layout().clone();
         let frame = match &mut self.conv {
-            Conversion::Native { .. } => raw.frame,
+            Conversion::Native { .. } => picture,
             Conversion::Scaled { scaler, .. } => {
                 let started = Instant::now();
-                let out = scaler.scale(&raw.frame).map_err(|e| MediaError::Decode {
+                let out = scaler.scale(&picture).map_err(|e| MediaError::Decode {
                     path: self.dec.path().to_path_buf(),
                     reason: format!("converting {} frame: {e}", self.source_name),
                 })?;
@@ -1319,6 +1504,97 @@ impl FfmpegVideo {
 }
 
 impl FfmpegVideo {
+    /// The pts of the last frame returned, if any.
+    pub(crate) fn last_returned(&self) -> Option<i64> {
+        self.current.as_ref().map(|c| c.pts)
+    }
+
+    /// Become the software decode that a hardware decode of kind `from`
+    /// fell back to for `reason`, just opened on the same stream: frames
+    /// say so ([`DecodePath::FellBack`]), and a [`DecoderEvent::FellBack`]
+    /// comes before this decoder's own events.
+    ///
+    /// When the device failed mid-stream, `failed` is that decoder, and
+    /// this one goes on where it left off (D30): from the frame after the
+    /// last one it returned, found as after a stopped seek, which keeps
+    /// its run when the frame is known to follow on, and so with no gap
+    /// and no repeat; catching up as it was; and knowing what it learned
+    /// of the stream (its end, timestamps that go backwards, ties). Its
+    /// events not yet taken come first, and `LayoutChanged` after the
+    /// fallback's when software's frames have another layout or size than
+    /// the last ones it made.
+    pub(crate) fn fell_back(
+        &mut self,
+        from: HwKind,
+        reason: FallbackReason,
+        failed: Option<&mut FfmpegVideo>,
+    ) {
+        let mut events = Vec::new();
+        let mut changed = None;
+        if let Some(old) = failed {
+            events.append(&mut old.events);
+            self.take_over(old);
+            let (_, w, h) = self.conv.source();
+            let (_, ow, oh) = old.conv.source();
+            if **self.conv.layout() != **old.conv.layout() || (w, h) != (ow, oh) {
+                changed = Some(DecoderEvent::LayoutChanged {
+                    layout: self.conv.layout().clone(),
+                    size: (w, h),
+                });
+            }
+        }
+        events.push(DecoderEvent::FellBack {
+            from,
+            reason: reason.clone(),
+        });
+        events.append(&mut self.events);
+        events.extend(changed);
+        self.events = events;
+        self.decode_path = DecodePath::FellBack { from, reason };
+    }
+
+    /// Take over from `old` (see [`fell_back`](Self::fell_back)).
+    fn take_over(&mut self, old: &FfmpegVideo) {
+        // Run numbers given out stay unique.
+        self.runs = self.runs.max(old.runs);
+        self.ties_seen |= old.ties_seen;
+        if old.not_seekable && !self.not_seekable {
+            self.not_seekable = true;
+            self.info.timing = old.info.timing;
+        }
+        if self
+            .end_pts
+            .is_none_or(|e| old.end_pts.is_some_and(|o| o > e))
+        {
+            self.end_pts = old.end_pts;
+            self.info.duration = old.info.duration;
+        }
+        if let Some((g, d)) = old.greatest
+            && self.greatest.is_none_or(|(s, _)| g > s)
+        {
+            self.greatest = Some((g, d));
+        }
+        if let Some(current) = &old.current {
+            self.current = Some(current.clone());
+            self.current_index = old.current_index;
+            self.current_tie = old.current_tie;
+            self.current_anchored = old.current_anchored;
+            self.current_last_tie = old.current_last_tie;
+            self.run = old.run;
+            self.seq = old.seq;
+            // Found again before the next frame is decoded, from the frame
+            // just decoded at open.
+            self.pending = None;
+            self.position = Position::Lost;
+        }
+        self.catch_up = old.catch_up.map(|c| CatchUp {
+            until: c.until,
+            sent: self.dec.skipping_sent(),
+            dropped: false,
+        });
+        self.set_skipping();
+    }
+
     /// The seek tests' negative control, and nothing else: one BACKWARD
     /// seek to clip time `at` and a decode forward, without seeking again
     /// when the landing keyframe's pts is past the target, as a naive
@@ -1447,9 +1723,7 @@ impl VideoDecode for FfmpegVideo {
                 self.pending = Some(raw);
                 return Ok(NextFrame::Stopped);
             }
-            if let Some(c) = self.catch_up.take()
-                && c.skipped(&self.dec)
-            {
+            if self.catch_up.as_ref().is_some_and(|c| c.skipped(&self.dec)) {
                 // The frame before this one may be one the decoder skipped.
                 self.start_run();
                 raw.seq = self.seq;
@@ -1460,7 +1734,11 @@ impl VideoDecode for FfmpegVideo {
                 }
             }
             let next = self.pending.as_ref().map(|p| p.pts);
-            return self.make_frame(raw, next).map(NextFrame::Frame);
+            let frame = self.make_frame(raw, next)?;
+            // Caught up once it is handed out: a device that fails to
+            // download it leaves catching up for the fallback to go on.
+            self.catch_up = None;
+            return Ok(NextFrame::Frame(frame));
         }
     }
 
