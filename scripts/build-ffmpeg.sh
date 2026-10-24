@@ -97,10 +97,23 @@ if [ -n "$vk_cflags" ]; then
     set -- "$@" --extra-cflags="$vk_cflags"
 fi
 echo "PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-} ./configure $*" >"$prefix.configure-line"
-echo "==> configure $tag (log: $prefix.configure.log)"
-(cd "$src" && ./configure "$@") >"$prefix.configure.log" 2>&1
-echo "==> make $tag (log: $prefix.make.log)"
-(cd "$src" && make -j"$(nproc)") >"$prefix.make.log" 2>&1
-(cd "$src" && make install) >"$prefix.install.log" 2>&1
+
+# step NAME LOG COMMAND...: runs COMMAND in the source directory with its
+# output in LOG, and if it fails, says so with the log's last 20 lines
+# (the source is kept, for a look at what failed).
+step() {
+    step_name=$1
+    step_log=$2
+    shift 2
+    echo "==> $step_name $tag (log: $step_log)"
+    if ! (cd "$src" && "$@") >"$step_log" 2>&1; then
+        echo "$step_name failed: see $step_log, which ends:" >&2
+        tail -n 20 "$step_log" >&2
+        exit 1
+    fi
+}
+step configure "$prefix.configure.log" ./configure "$@"
+step make "$prefix.make.log" make -j"$(nproc)"
+step install "$prefix.install.log" make install
 rm -rf "$src"
 echo "==> FFmpeg $tag in $prefix: libavcodec $(PKG_CONFIG_PATH=$prefix/lib/pkgconfig pkg-config --modversion libavcodec)"
