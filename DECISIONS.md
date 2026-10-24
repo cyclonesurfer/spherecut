@@ -1387,9 +1387,9 @@ with the reason, which the hw-test report lists under its benchmark
 table, so a missing Vulkan path never fails a VA-API benchmark. Another
 note names the device the Vulkan rows ran on.
 
-Doctor still checks FFmpeg's default Vulkan device and names it, so on a
-machine with two GPUs its Vulkan lines can be about another GPU than the
-tests'.
+Doctor still checks FFmpeg's default Vulkan device and names it (its
+JSON marks it `used_by_ffmpeg`), so on a machine with two GPUs its
+Vulkan lines can be about another GPU than the tests'.
 
 Fedora's Mesa: its Vulkan drivers are built without H.264 and HEVC,
 like its VA-API driver. RADV then lacks `VK_KHR_video_decode_h264` and
