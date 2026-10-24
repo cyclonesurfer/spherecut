@@ -119,6 +119,10 @@ struct SyntheticVideo {
     /// The frame last handed out.
     current: Option<Arc<VideoFrame>>,
     catch_up: Option<u64>,
+    /// The run frames decoded now belong to, the last run number given
+    /// out, and the next frame's place in the run: every frame decoded
+    /// takes one, handed out or not, so that seqs that follow on are
+    /// frames that follow on (D29).
     runs: u64,
     run: u64,
     seq: u64,
@@ -262,7 +266,8 @@ impl SyntheticVideo {
     }
 
     /// Decode frames `from..=to`, handing out the last; `None` when
-    /// stopped, leaving the frame last handed out where it was.
+    /// stopped, leaving the frame last handed out where it was, and the
+    /// run.
     fn decode_to(
         &mut self,
         from: u64,
@@ -276,7 +281,16 @@ impl SyntheticVideo {
             }
             cost.frames_decoded += 1;
         }
+        self.seq += to - from;
         self.frame(to).map(Some)
+    }
+
+    /// Start a run at a seek, giving back the one before if it stops.
+    fn start_run(&mut self) -> (u64, u64) {
+        let before = (self.run, self.seq);
+        self.runs += 1;
+        (self.run, self.seq) = (self.runs, 0);
+        before
     }
 }
 
@@ -325,17 +339,18 @@ impl VideoDecode for SyntheticVideo {
                 cost.forward_only = true;
                 self.decode_to(c + 1, n, stop, &mut cost)?
             }
-            (SeekMode::Exact, _) => {
+            // From the keyframe.
+            _ => {
                 cost.seeks = 1;
-                self.runs += 1;
-                (self.run, self.seq) = (self.runs, 0);
-                self.decode_to(key, n, stop, &mut cost)?
-            }
-            (SeekMode::Keyframe, _) => {
-                cost.seeks = 1;
-                self.runs += 1;
-                (self.run, self.seq) = (self.runs, 0);
-                self.decode_to(key, key, stop, &mut cost)?
+                let before = self.start_run();
+                let to = if mode == SeekMode::Keyframe { key } else { n };
+                let frame = self.decode_to(key, to, stop, &mut cost)?;
+                if frame.is_none() {
+                    // Stopped: decoding goes on from the frame last handed
+                    // out, in its run.
+                    (self.run, self.seq) = before;
+                }
+                frame
             }
         };
         Ok(match frame {
@@ -349,11 +364,14 @@ impl VideoDecode for SyntheticVideo {
     }
 
     fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError> {
-        let mut n = self
+        let next = self
             .current
             .as_ref()
             .and_then(|c| u64::try_from(c.pts).ok())
             .map_or(0, |c| c + 1);
+        // Catching up passes frames over until one is handed out; stopped,
+        // it starts again from the frame after the last one.
+        let mut n = next;
         if let Some(until) = self.catch_up {
             while n < until.min(self.clip.frames) {
                 if !self.decode_one(stop) {
@@ -361,7 +379,6 @@ impl VideoDecode for SyntheticVideo {
                 }
                 n += 1;
             }
-            self.catch_up = None;
         }
         if n >= self.clip.frames {
             return Ok(NextFrame::End);
@@ -369,6 +386,8 @@ impl VideoDecode for SyntheticVideo {
         if !self.decode_one(stop) {
             return Ok(NextFrame::Stopped);
         }
+        self.catch_up = None;
+        self.seq += n - next;
         self.frame(n).map(NextFrame::Frame)
     }
 
@@ -588,6 +607,84 @@ mod tests {
         d.catch_up(Some(FrameRate::FPS_30.frame_to_time(10).unwrap()));
         assert_eq!(next(&mut *d), Some(10));
         assert_eq!(next(&mut *d), Some(11));
+    }
+
+    /// Frames of one run whose seq follow on are frames that follow on, as
+    /// `FfmpegVideo`'s are: a forward seek and catching up count each frame
+    /// they pass over, and a stopped seek leaves the run as it was.
+    #[test]
+    fn synthetic_runs_link_only_frames_that_follow_on() {
+        let mut d = SyntheticBackend::default()
+            .open_video(Path::new("runs"), &VideoRequest::default())
+            .unwrap();
+        let d = &mut *d;
+        let never = StopToken::never();
+        let source = StopSource::new();
+        let stopped = source.current();
+        source.next();
+        let at = |n: i64| FrameRate::FPS_30.frame_to_time(n).unwrap();
+        let seek_to = |d: &mut dyn VideoDecode, n: i64, mode: SeekMode| {
+            let got = d.seek(at(n), mode, &never).unwrap();
+            let SeekOutcome::Frame { frame, .. } = got else {
+                panic!("stopped");
+            };
+            frame
+        };
+        let next = |d: &mut dyn VideoDecode| match d.next_frame(&never).unwrap() {
+            NextFrame::Frame(f) => f,
+            got => panic!("{got:?}"),
+        };
+        // Frame by (run, seq), checked against the frames next to it.
+        let mut runs = std::collections::HashMap::new();
+        let mut note = |f: &VideoFrame| {
+            let n = frame_index(f).unwrap();
+            let key = (f.run, f.seq);
+            if let Some(&m) = runs.get(&key) {
+                assert_eq!(m, n, "run {key:?} was frame {m}");
+            }
+            if let Some(&m) = f.seq.checked_sub(1).and_then(|s| runs.get(&(f.run, s))) {
+                assert_eq!(m + 1, n, "run {key:?} follows frame {m}");
+            }
+            if let Some(&m) = runs.get(&(f.run, f.seq + 1)) {
+                assert_eq!(n + 1, m, "run {key:?} comes before frame {m}");
+            }
+            runs.insert(key, n);
+            n
+        };
+
+        // Frame 9, forward in its GOP to 13, then catching up to 20.
+        assert_eq!(note(&seek_to(d, 9, SeekMode::Exact)), 9);
+        assert_eq!(note(&seek_to(d, 13, SeekMode::Exact)), 13);
+        d.catch_up(Some(at(20)));
+        assert_eq!(note(&next(d)), 20);
+        let f21 = next(d);
+        assert_eq!(note(&f21), 21);
+        // A seek stopped before it began: the next frame goes on in the run.
+        assert!(matches!(
+            d.seek(at(3), SeekMode::Exact, &stopped).unwrap(),
+            SeekOutcome::Stopped
+        ));
+        let f22 = next(d);
+        assert_eq!(note(&f22), 22);
+        assert_eq!((f22.run, f22.seq), (f21.run, f21.seq + 1));
+        // Catching up stopped, then called off: the frame after 22.
+        d.catch_up(Some(at(28)));
+        assert!(matches!(
+            d.next_frame(&stopped).unwrap(),
+            NextFrame::Stopped
+        ));
+        d.catch_up(None);
+        assert_eq!(note(&next(d)), 23);
+        // A keyframe, then forward from it.
+        assert_eq!(note(&seek_to(d, 27, SeekMode::Keyframe)), 24);
+        assert_eq!(note(&seek_to(d, 26, SeekMode::Exact)), 26);
+        assert_eq!(note(&next(d)), 27);
+        // Back, and forward again over a catch-up to the end.
+        assert_eq!(note(&seek_to(d, 2, SeekMode::Exact)), 2);
+        assert_eq!(note(&seek_to(d, 5, SeekMode::Exact)), 5);
+        d.catch_up(Some(at(29)));
+        assert_eq!(note(&next(d)), 29);
+        assert!(matches!(d.next_frame(&never).unwrap(), NextFrame::End));
     }
 
     #[test]
