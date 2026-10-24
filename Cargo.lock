@@ -1270,12 +1270,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "glam",
+ "libc",
  "serde",
  "serde_json",
  "spherecut-core",
  "spherecut-media",
  "spherecut-render",
+ "spherecut-sphere",
  "spherecut-synth",
+ "spherecut-testkit",
  "tracing",
  "tracing-subscriber",
 ]

@@ -4,8 +4,7 @@
 //! success and on failure, a panic included, and the exit status says how
 //! the run ended (`contract`, D27). stderr is for people.
 
-// Only `interrupt`, the FFI module slice 4 adds, will be allowed unsafe
-// code (D28).
+// Only `interrupt`, frame's SIGINT handler, is allowed unsafe code (D28).
 #![deny(unsafe_code)]
 
 use std::ffi::OsString;
@@ -14,11 +13,14 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 use spherecut_cli::contract::{self, Envelope, Exit, ProbeFile};
 use spherecut_core::brand;
 
+mod frame;
+#[allow(unsafe_code)]
+mod interrupt;
 mod show;
 
 #[derive(Parser)]
@@ -53,6 +55,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Render one frame of a stitched equirect through a virtual camera
+    /// into a PNG.
+    Frame(frame::FrameArgs),
 }
 
 fn main() -> ExitCode {
@@ -65,7 +70,7 @@ fn main() -> ExitCode {
     // Parsing too, and reporting a command line that doesn't parse, so
     // that under --json a panic anywhere on this thread ends in exit 1.
     let parse_and_run = || match Cli::try_parse_from(&args) {
-        Ok(cli) => run(cli),
+        Ok(cli) => run(cli, &args, json),
         Err(e) => Ok(usage(&e, &args, json)),
     };
     let exit = match std::panic::catch_unwind(parse_and_run) {
@@ -147,6 +152,18 @@ fn usage(e: &clap::Error, args: &[OsString], json: bool) -> Exit {
     Exit::Usage
 }
 
+/// A usage error of `subcommand` that clap's parsing doesn't catch, worded
+/// as clap's own are, with the subcommand's usage.
+fn subcommand_error(subcommand: &str, message: String) -> clap::Error {
+    let mut cli = Cli::command();
+    cli.build();
+    let kind = clap::error::ErrorKind::ValueValidation;
+    match cli.find_subcommand_mut(subcommand) {
+        Some(sub) => sub.error(kind, message),
+        None => cli.error(kind, message),
+    }
+}
+
 /// What the CLI logs by default: warnings, but not FFmpeg's own messages.
 /// FFmpeg logs an error for every device doctor tries that isn't there,
 /// and our errors already say what failed.
@@ -207,10 +224,14 @@ fn log_directives(v: &str) -> String {
         .join(",")
 }
 
-fn run(cli: Cli) -> Result<Exit> {
+fn run(cli: Cli, args: &[OsString], json: bool) -> Result<Exit> {
     #[cfg(debug_assertions)]
     debug_panic("run");
     match cli.cmd {
+        Cmd::Frame(frame) => match frame.check() {
+            Ok(()) => frame::run(frame),
+            Err(message) => Ok(usage(&subcommand_error("frame", message), args, json)),
+        },
         Cmd::Probe { files, json } => probe(&files, json),
         Cmd::Doctor { render_node, json } => {
             // The lookup hardware decoding uses (D30); no adapter is known

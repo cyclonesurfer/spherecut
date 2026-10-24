@@ -273,7 +273,9 @@ pub struct FrameResult {
     /// 8 or 16 bits per channel.
     pub depth: u8,
     pub view: ViewInfo,
-    /// `iso` or `aniso`.
+    /// The filter rendered with, `iso` or `aniso`: `iso` where `--filter
+    /// aniso` met a device without anisotropic filtering, which a warning
+    /// says.
     pub filter: &'static str,
     /// `gpu`, or `reference` for `--reference`'s CPU render.
     pub renderer: &'static str,
