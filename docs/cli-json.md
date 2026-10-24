@@ -141,7 +141,7 @@ A file's `error.code` in probe (`result.files[].error.code`):
 | Code | Has a report | Meaning |
 |---|---|---|
 | `not_found` | no | No such file, including a path that looks like a URL (`http://host/x.mp4` is a path) |
-| `io_error` | no | Another error reading it, such as permission denied or a path through a regular file |
+| `io_error` | no | Another error reading it, such as permission denied, a read error from a failing disk or card, or a path through a regular file. Never `damaged`: the file may be fine |
 | `not_a_file` | no | A directory, pipe, device or socket |
 | `not_media` | no | Empty, or FFmpeg doesn't know it as media |
 | `unsupported_container` | no | FFmpeg reads it as a container Spherecut doesn't open (an HLS playlist, an ffconcat script, WAV, ...); the message names it (D24) |

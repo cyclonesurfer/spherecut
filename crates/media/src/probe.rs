@@ -456,7 +456,7 @@ fn probe_file(path: &Path) -> Result<ProbeReport, Failed> {
     let mut warnings = Vec::new();
     let mut damage = Vec::new();
 
-    let (mut tree, not_mp4) = match mp4::read_file(path) {
+    let (mut tree, not_mp4) = match unless_unreadable(path, mp4::read_file(path))? {
         Ok(t) => (Some(t), false),
         Err(mp4::Mp4Error::NotMp4(_)) => (None, true),
         Err(e) => {
@@ -491,7 +491,7 @@ fn probe_file(path: &Path) -> Result<ProbeReport, Failed> {
     if not_mp4 && mov_family {
         // FFmpeg found MP4/MOV boxes, so the first box is damaged or of a
         // type we do not know. Check the rest of the structure anyway.
-        match mp4::read_file_with(path, FirstBox::Any) {
+        match unless_unreadable(path, mp4::read_file_with(path, FirstBox::Any))? {
             Ok(t) => {
                 let first = t.top.first().map(|b| b.fourcc);
                 let first = first.or(t.truncated.and_then(|c| c.fourcc));
@@ -721,6 +721,22 @@ fn probe_file(path: &Path) -> Result<ProbeReport, Failed> {
         warnings,
         ffmpeg_log: Vec::new(),
     })
+}
+
+/// An MP4 read's result, unless it failed to read the file: that is the
+/// file's own error (permission denied, a failing card), with the code its
+/// I/O error gives, never damage.
+fn unless_unreadable(
+    path: &Path,
+    read: Result<mp4::Mp4Tree, mp4::Mp4Error>,
+) -> Result<Result<mp4::Mp4Tree, mp4::Mp4Error>, MediaError> {
+    match read {
+        Err(mp4::Mp4Error::Io(error)) => Err(MediaError::Io {
+            path: path.to_path_buf(),
+            error,
+        }),
+        read => Ok(read),
+    }
 }
 
 /// Check that a Matroska/WebM file is as long as its Segment says. Live
@@ -1050,6 +1066,42 @@ mod tests {
             segment(f[..at as usize + 10].to_vec()),
             Some((at, Some(300)))
         );
+    }
+
+    /// A file that fails every read with the OS error `errno`, as a card
+    /// going bad does.
+    struct Unreadable(i32);
+
+    impl io::Read for Unreadable {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::from_raw_os_error(self.0))
+        }
+    }
+
+    impl io::Seek for Unreadable {
+        fn seek(&mut self, _: io::SeekFrom) -> io::Result<u64> {
+            Ok(4096)
+        }
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_an_io_error_not_damage() {
+        // Tests run as root can read any file, so the error comes from a
+        // reader here: EACCES, EIO, and ENOENT for a file removed meanwhile.
+        let path = Path::new("x.mp4");
+        for (errno, code) in [(13, "io_error"), (5, "io_error"), (2, "not_found")] {
+            let read = mp4::read(&mut Unreadable(errno));
+            assert!(matches!(read, Err(mp4::Mp4Error::Io(_))), "{read:?}");
+            let e = unless_unreadable(path, read).unwrap_err();
+            assert_eq!(e.code(), code, "{e}");
+            assert!(matches!(e, MediaError::Io { .. }), "{e:?}");
+        }
+        // What the box reader makes of the bytes is left to probe.
+        let not_mp4 = mp4::read(&mut io::Cursor::new(b"not an mp4".to_vec()));
+        assert!(matches!(
+            unless_unreadable(path, not_mp4),
+            Ok(Err(mp4::Mp4Error::NotMp4(_)))
+        ));
     }
 
     #[test]

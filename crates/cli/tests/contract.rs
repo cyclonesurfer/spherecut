@@ -313,6 +313,56 @@ fn every_kind_of_failure_is_one_document_with_its_code() {
 }
 
 #[test]
+fn an_unreadable_file_is_an_io_error_not_damage() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tmp("unreadable");
+    let (good, _) = clip(&dir, FrameRate::FPS_25);
+    let file = dir.join("noread.mp4");
+    std::fs::copy(&good, &file).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let bin = env!("CARGO_BIN_EXE_spherecut");
+    let mut cmd = if std::fs::File::open(&file).is_err() {
+        Command::new(bin)
+    } else {
+        // Root reads any file, so the run drops to nobody, when setpriv
+        // can run the binary so.
+        let nobody = ["--reuid=65534", "--regid=65534", "--clear-groups", bin];
+        let runs = Command::new("setpriv")
+            .args(nobody)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !runs {
+            eprintln!(
+                "not run through the binary: this user reads any file, and setpriv \
+                 can't run it as nobody; probe's unit test covers the code"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+        let mut cmd = Command::new("setpriv");
+        cmd.args(nobody);
+        cmd
+    };
+    let out = cmd
+        .args(["probe", "--json"])
+        .arg(&file)
+        .env_remove("SPHERECUT_LOG")
+        .output()
+        .unwrap();
+    let v = document(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{v}");
+    let f = &v["result"]["files"][0];
+    // The fix is chmod, not another copy.
+    assert_eq!(f["error"]["code"], "io_error", "{v}");
+    let message = f["error"]["message"].as_str().unwrap();
+    assert!(message.contains("Permission denied"), "{message}");
+    assert!(!message.contains("MP4 structure"), "{message}");
+    assert!(f.get("report").is_none(), "{v}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn problems_carry_codes() {
     let dir = tmp("problems");
     let (good, _) = clip(&dir, FrameRate::FPS_25);
