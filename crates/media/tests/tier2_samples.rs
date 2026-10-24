@@ -227,9 +227,17 @@ fn samples_vaapi_decode_matches_software() {
     let files = sample_files();
     let dev = vaapi();
     let mut problems = Vec::new();
+    let mut checked = 0;
     for p in files {
-        let Ok(r) = probe::probe(&p) else { continue };
+        let r = match probe::probe(&p) {
+            Ok(r) => r,
+            Err(e) => {
+                problems.push(format!("{}: probe failed: {e}", p.display()));
+                continue;
+            }
+        };
         for idx in video_streams(&r) {
+            checked += 1;
             let what = format!("{} stream {idx}", p.display());
             let sw = match decode_first(&p, idx, None, 30) {
                 Ok(f) => f,
@@ -253,6 +261,8 @@ fn samples_vaapi_decode_matches_software() {
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+    // Never a pass that compared nothing.
+    assert!(checked > 0, "no video stream in the samples to decode");
 }
 
 #[test]
@@ -266,7 +276,13 @@ fn samples_vulkan_decode_matches_software() {
     let mut refused: BTreeMap<(String, String), (BTreeSet<String>, usize)> = BTreeMap::new();
     let mut matched = 0;
     for p in files {
-        let Ok(r) = probe::probe(&p) else { continue };
+        let r = match probe::probe(&p) {
+            Ok(r) => r,
+            Err(e) => {
+                problems.push(format!("{}: probe failed: {e}", p.display()));
+                continue;
+            }
+        };
         for idx in video_streams(&r) {
             let what = format!("{} stream {idx}", p.display());
             match first_frame(&p, idx, &vk.dev) {
@@ -327,6 +343,11 @@ fn samples_vulkan_decode_matches_software() {
         } else {
             format!("\nVulkan Video can't decode: {refusals}")
         }
+    );
+    // Never a pass that compared nothing.
+    assert!(
+        matched > 0 || !refused.is_empty(),
+        "no video stream in the samples to decode"
     );
     if !refused.is_empty() {
         let n: usize = refused.values().map(|(_, n)| n).sum();
