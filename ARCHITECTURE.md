@@ -433,8 +433,10 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
 * **`Uploader::upload`** copies a frame's planes into a slot
   (`write_texture`, or a staging belt), runs the ingest pass that turns
   deep integer planes into f16 and the mip passes, and submits once,
-  never waiting. A frame already on the GPU can fill level 0 itself,
-  then call `Uploader::record_mips` and `GpuFrame::set_source`.
+  never waiting. Every plane is checked before any is written, so a
+  refused frame leaves the slot as it was. A frame already on the GPU
+  can fill level 0 itself, then call `Uploader::record_mips` and
+  `GpuFrame::set_source`.
 * **`Projector::record`** draws a slot through a `ViewParams`
   (orientation and `Lens`) into a `LinearTarget`: per pixel a ray from
   the lens, rotated into the world, its equirect uv, an LOD from central
