@@ -7,6 +7,7 @@ use std::sync::Once;
 
 use thiserror::Error;
 
+pub mod color;
 pub mod decode;
 pub mod detect;
 pub mod doctor;
