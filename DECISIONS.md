@@ -404,7 +404,10 @@ format again clears the refusal (review C16). `ffi::hw_refusal` reads
 the flags. Doctor's probes (`hwprobe.rs`) use the same callback and
 flags. The Tier 2 Vulkan test skips when there is no render node, when
 FFmpeg has no Vulkan device or no encoder to make its clip, or on
-`HwUnsupported`; any other error fails it.
+`HwUnsupported`; any other error fails it. *Updated by D27:* the Vulkan
+tests no longer need a render node, run on the GPU behind it if there is
+one, skip when FFmpeg's only Vulkan devices run on the CPU, and give the
+device and FFmpeg's own words when they skip.
 
 Limit: a new SPS whose format has no hardware decoder, arriving after
 the format was taken and before the first device frame, reads as
@@ -1170,6 +1173,71 @@ UI types: a switch would replace only `spherecut-app`.
 
 Revisit if: the M2 check fails, or `egui_dock` or egui's text editing
 changes enough to matter.
+
+## D27. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
+
+*2026-10-24, M1. Pat approved Vulkan Video HEVC in odin's hardware run
+(the stack review's third change; PLAN M1's hardware criterion).
+Extends D14.*
+
+How FFmpeg picks the device: `av_hwdevice_ctx_create` for Vulkan with
+no device string takes physical device 0 of its own Vulkan instance
+(`find_device` in `libavutil/hwcontext_vulkan.c`, the same in 6.1.1 and
+8.1.3). A number picks that index, other text the first device whose
+name contains it. Derived from a VA-API device it matches the PCI device
+ID (8.1 with libva 1.15 and up) or only AMD's vendor ID (6.1); derived
+from a DRM device it compares the `st_dev` of the node's `fstat`, which
+is the device of `/dev` itself, not the node's `st_rdev`. The order of
+the list comes from the Vulkan loader and its layers. Current Linux
+loaders list discrete GPUs, then integrated, virtual, other and CPU
+devices, then by PCI address (`loader_linux.c`). Mesa's device-select
+layer (in `mesa-vulkan-drivers`) then moves its default to the front:
+one named by `MESA_VK_DEVICE_SELECT` or `DRI_PRIME`, else the GPU the
+Wayland compositor or X server uses, else the boot VGA device, else the
+first that isn't a CPU. So FFmpeg's default is a GPU whenever one
+works, but with two GPUs it is the one that runs the desktop (over SSH,
+the boot VGA device), which need not be the one behind VA-API's
+`renderD128`. odin has an RX 7600 and may have an integrated GPU too.
+llvmpipe comes first only when no GPU driver works, or with a loader too
+old to sort and no device-select layer.
+
+So `decode::open_vulkan_device(render_node)` lists FFmpeg's devices,
+with their DRM nodes from `VK_EXT_physical_device_drm`, and opens the
+one behind the render node, else the first that isn't a CPU, else
+FFmpeg's default. It opens that one by index and checks that FFmpeg then
+runs on it (an error if not, never a silent other device), and says
+which device it is and why (`VulkanChoice`, whose `Display` names the
+device, its type and driver, and FFmpeg's default when that was another
+one). The Tier 2 Vulkan tests and benchmarks use it with
+`tier2::render_node()` (`SPHERECUT_RENDER_NODE`, default
+`/dev/dri/renderD128`, when present) and skip when the device runs on
+the CPU, naming it. They no longer need the render node itself.
+
+When the driver can't decode a format (`HwUnsupported`), a test skips
+with the device and the lines FFmpeg logged while it tried, caught with
+`capture_ffmpeg_log` (now public), such as huginn's "Device does not
+support decoding hevc!". Any other error fails it. The samples test
+groups refused streams by format and reason, fails on any mismatch or
+other error, and otherwise skips if any stream was refused. A
+benchmark's Vulkan Video row is measured only when the file's first
+frames decode on the device, through `bench::try_measure`, which records
+nothing when a run fails. Otherwise `bench::not_measured` leaves a note
+with the reason, which the hw-test report lists under its benchmark
+table, so a missing Vulkan path never fails a VA-API benchmark. Another
+note names the device the Vulkan rows ran on.
+
+Doctor still checks FFmpeg's default Vulkan device and names it, so on a
+machine with two GPUs its Vulkan lines can be about another GPU than the
+tests'.
+
+Why: odin's discrete RDNA3 may decode HEVC through FFmpeg's Vulkan path
+where huginn's RADV can't. On FFmpeg's default device, odin's run could
+have measured the integrated GPU, or skipped as if Vulkan Video were
+missing when only the device was wrong; and the old skip said only that
+the driver doesn't support the format, not FFmpeg's reason.
+
+Revisit if: doctor or the app should decode on the same device (the app
+will, once it decodes on Vulkan), or FFmpeg changes how it picks one.
 
 ## Open
 

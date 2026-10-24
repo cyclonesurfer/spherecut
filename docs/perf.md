@@ -34,6 +34,14 @@ numbers at full precision. Outside hw-test the same line goes to stderr as
 `BENCH ...`. Tier 2 tests run one at a time (`--test-threads=1`), so
 benchmarks don't compete with other tests.
 
+`bench::try_measure` is `measure` for a path that may fail, such as
+Vulkan Video on a driver that can't decode the file: if the warm-up or
+a run fails, nothing is recorded and the benchmark gets the error.
+`bench::note(text)` and `bench::not_measured(name, reason)` write a line
+that starts with `# ` instead, collapsed to one line, which the report
+lists under its table as "Notes from the benchmarks". That is where a
+row that has no result says why.
+
 The report's Benchmarks table has the columns Benchmark, Median, Range,
 Runs and Spread. hw-test rounds the numbers to two decimals only for the
 table, and works out Spread from the unrounded ones: (max − min) / median,
@@ -49,15 +57,42 @@ left out by `--quick`", and the Benchmarks section says it was skipped.
 Current benchmarks:
 
 - **`bench_decode_hevc_4k_and_5k7`**: decodes all 60 frames of a synthetic
-  3840×1920 and 5760×2880 HEVC 8-bit clip, in software and on VA-API, in
-  frames per second. The VA-API number includes copying each frame to
-  system memory, which the render path will avoid later.
+  3840×1920 and 5760×2880 HEVC 8-bit clip, in software, on VA-API and on
+  Vulkan Video, in frames per second. The VA-API and Vulkan Video numbers
+  include copying each frame to system memory, which the render path will
+  avoid later.
 - **`bench_samples_realtime_decode`**: for each recording mode in
   `samples/`, takes the longest file, decodes up to ten seconds of all its
   video streams at once, one thread per stream as playback does, and
   reports the slowest stream as a multiple of real time (1.0 = just keeps
   up). An Insta360 X5 8K30 file has two 3840² streams, so 1.0 means 60
-  decoded 3840² frames per second.
+  decoded 3840² frames per second. It does so in software, on VA-API and
+  on Vulkan Video; both hardware rows include the copy to system memory.
+
+How the Vulkan Video rows read:
+
+- They are named `decode <size> HEVC 8-bit, Vulkan Video (incl. copy to
+  RAM)` and `<mode>: Vulkan Video decode`, next to the VA-API rows of the
+  same clip or mode, in the same unit, so the two hardware paths compare
+  row for row.
+- They run on the GPU behind VA-API's render node, or the first GPU if
+  no Vulkan device is listed as that one (DECISIONS D27). A note under
+  the table names it, for example "Vulkan Video rows ran on AMD Radeon RX
+  7600 (RADV NAVI33) (discrete GPU, driver radv), the GPU behind
+  /dev/dri/renderD128". If it says "the first GPU listed" instead, the
+  Vulkan and VA-API rows may come from different GPUs.
+- Vulkan Video is optional. A row is measured only when the device
+  decodes the file's first frame (every stream's, for a sample). When it
+  doesn't, or a measured run fails later, the row is missing and a note
+  says why, in FFmpeg's words where it gives them: for example "decode 3840x1920 HEVC 8-bit, Vulkan
+  Video (incl. copy to RAM): not measured: cannot decode … on Vulkan: the
+  driver does not support this format (FFmpeg: [hevc] Device does not
+  support decoding hevc! …)". Without a Vulkan GPU at all, every Vulkan
+  row is missing with that reason. A missing Vulkan row never fails the
+  benchmark, and the VA-API and software rows are measured as before.
+- `vulkan_*_matches_software` and `samples_vulkan_decode_matches_software`
+  in the Tier 2 table say whether those decodes are also bit-exact. A
+  row can be fast and still wrong, so read the two together.
 
 ## Results
 
@@ -108,7 +143,9 @@ how Spherecut's refusal of a software fallback showed before 9300fc0.
 
 ### odin (RX 7600, Fedora)
 
-Not run yet: no report.
+Not run yet: no report. Its run includes the Vulkan Video checks and
+rows, since its discrete RDNA3 may decode HEVC with Vulkan Video where
+huginn's RADV can't.
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 
