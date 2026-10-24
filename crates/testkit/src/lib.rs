@@ -11,6 +11,49 @@
 //! prerequisite is missing they **fail** the test with a `TIER2-SKIP:`
 //! marker, which the hw-test report shows as "skipped" with the reason. A
 //! Tier 2 test therefore never passes on a machine that lacks what it needs.
+//!
+//! # Comparing images
+//!
+//! [`compare`] has the render tests' metrics (PSNR, SSIM and a count of
+//! wrong pixels), and [`fnv64`] the hash the golden manifest identifies a
+//! source's planes by.
+
+#![forbid(unsafe_code)]
+
+pub mod compare;
+
+/// FNV-1a, 64 bits, fed in pieces: the planes of a frame row by row, say,
+/// so that row padding doesn't change the hash.
+#[derive(Debug, Clone, Copy)]
+pub struct Fnv64(u64);
+
+impl Fnv64 {
+    pub const fn new() -> Self {
+        Fnv64(0xcbf2_9ce4_8422_2325)
+    }
+
+    pub fn write(&mut self, bytes: &[u8]) -> &mut Self {
+        for &b in bytes {
+            self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self
+    }
+
+    pub fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for Fnv64 {
+    fn default() -> Self {
+        Fnv64::new()
+    }
+}
+
+/// FNV-1a, 64 bits, of `bytes`.
+pub fn fnv64(bytes: &[u8]) -> u64 {
+    Fnv64::new().write(bytes).finish()
+}
 
 pub mod tier2 {
     use std::path::{Path, PathBuf};
@@ -311,7 +354,20 @@ pub mod bench {
 
 #[cfg(test)]
 mod tests {
-    use super::tier2;
+    use super::{Fnv64, fnv64, tier2};
+
+    #[test]
+    fn fnv64_has_the_reference_values() {
+        // From the FNV reference test suite (FNV-1a, 64 bits).
+        assert_eq!(fnv64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv64(b"foobar"), 0x8594_4171_f739_67e8);
+        // In pieces, the same.
+        assert_eq!(
+            Fnv64::new().write(b"foo").write(b"bar").finish(),
+            fnv64(b"foobar")
+        );
+    }
 
     #[test]
     fn skip_panics_with_marker() {

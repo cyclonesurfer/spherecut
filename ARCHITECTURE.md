@@ -10,7 +10,7 @@ This describes the design as built, plus the planned parts marked
                           \                |                    /
                            +------ export, audio (planned) ----+
                                       |
-                             render (wgpu, WGSL)  (planned)
+                    render (wgpu on Vulkan, WGSL; M1 slice 3a)
                                       |
              motion (IMU, stabilization)   stitch (lens models, blending)  (planned)
                                       |
@@ -25,17 +25,23 @@ This describes the design as built, plus the planned parts marked
 and `testkit` (test helpers) sit beside this stack and are used only by
 tests and `xtask`.
 
+render depends on core and sphere only, not on media: frames reach it
+through `core::video::VideoPlanes`, so the library has no FFmpeg
+dependency, and its tests, the goldens and M3's stitcher make the frames
+they feed it without decoding. Its test binaries do link FFmpeg, through
+synth, which depends on media.
+
 | Crate | Role | Status |
 |---|---|---|
 | `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), what a decoded frame is (`video`: pixel layouts, planes, colour) and stop tokens by generation (`cancel`); later the project model, timeline, keyframes, undo | M0: name and time; M1: `video`, `cancel` |
-| `spherecut-sphere` | CPU reference projection math in f64: equirect, cube/EAC, fisheye lens models, view projections and morphs, rotation helpers | M0 |
+| `spherecut-sphere` | CPU reference projection math in f64: equirect and its uv gradient, cube/EAC, fisheye lens models, view projections and morphs and their inverse (`project_morph`), output pixels to lens coordinates (`pixel`), yaw, pitch and roll (`orient`), rotation helpers | M0; M1 slice 3a: `pixel`, `orient`, `uv_gradient`, `project_morph` |
 | `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software and on VA-API or Vulkan Video with fallback to software, the render node lookup, the colour default rules, a small MP4 writer, `doctor`'s capability checks | M0; `MediaBackend` from M1 slice 2a, hardware from 2b (audio in 6) |
 | `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes, seeded noise for camera bitrates) and broken files, `SyntheticBackend` and `GatedBackend` | M0; M1 slices 2a and 2b |
-| `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, the `TIER2-SKIP:` marker) and benchmark recording (`bench`, with latency percentiles) | M0 |
+| `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, the `TIER2-SKIP:` marker), benchmark recording (`bench`, with latency percentiles), image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics) and FNV-1a hashing (`fnv64`) | M0; M1 slice 3a: `compare`, `fnv64` |
 | `spherecut-camera` | Per-camera raw formats: file pairing, vendor metadata, calibration | M3 |
 | `spherecut-stitch` | Lens calibration models, seam blending, exposure matching | M3 |
 | `spherecut-motion` | IMU ingest, time sync, orientation fusion, stabilization | M4 |
-| `spherecut-render` | wgpu device setup, render graph, projection/color shaders, scopes, golden-image harness | M1 |
+| `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31); later the golden-image harness (slice 3b) and scopes | M1 slice 3a |
 | `spherecut-audio` | Playback clock, mixing, ambisonics, loudness | M1 (playback), M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
 | `spherecut-app` | eframe app, docked panels, viewer paint callbacks | M1 |
@@ -353,14 +359,22 @@ document. Debug builds panic on `SPHERECUT_DEBUG_PANIC` (`main`,
 
 * World and camera space are right-handed: **+X right, +Y up, −Z forward**.
   The centre of an equirect frame is forward.
-* Longitude `atan2(x, −z)`, latitude `asin(y)`. Equirect `u = 0.5 + lon/2π`,
-  `v = 0.5 − lat/π`, `v = 0` at the top.
+* Longitude `atan2(x, −z)`, latitude `asin(y)` (the shader takes it as
+  `atan2(y, |xz|)`, the same angle, for its precision at the poles).
+  Equirect `u = 0.5 + lon/2π`, `v = 0.5 − lat/π`, `v = 0` at the top.
 * Normalised image coordinates `(u, v) ∈ [0, 1]²`; texel centres at
   half-integers.
 * Stored rotations are unit quaternions (`glam::DQuat` on the CPU). A view
   orientation `q` maps view-space rays to world space: `world = q * view`.
   The UI may show yaw/pitch/roll, derived on display.
 * A lens or virtual camera looks down its own −Z axis.
+* Yaw, pitch and roll (`sphere::orient::Ypr`): yaw > 0 turns right, pitch
+  > 0 looks up, roll > 0 rolls the camera clockwise, and
+  `q = R_y(−yaw) · R_x(pitch) · R_z(−roll)`.
+* An output pixel `(i, j)` has its centre at `(i + 0.5, j + 0.5)`, from the
+  top-left corner. `sphere::pixel::to_lens` maps a point of a `w` × `h`
+  view to the lens's `p = (2x/w − 1, (1 − 2y/h) · h/w)`, so `p.x` runs from
+  −1 to 1 across the width and `p.y` up.
 
 ## Time
 
@@ -392,29 +406,68 @@ All stored time is exact (`spherecut_core::time`):
   times are FFmpeg's container timestamps, not clip time
   (`docs/cli-json.md`, "Two timelines").
 
-## Rendering *(planned, M1)*
+## Rendering
 
-Every source type implements, in WGSL, "direction on the unit sphere →
-texel(s)": equirect, the GoPro EAC pair, dual fisheye with calibration. For
-each output pixel the shader:
+Built in M1 slice 3a for equirect sources (`spherecut-render`, DECISIONS
+D31); stitching and stabilization join the same pass later.
 
-1. builds a ray from the output projection (rectilinear / fisheye /
-   stereographic with morph, `sphere::perspective` is the reference),
-2. rotates it by the keyframed view orientation and the stabilization
-   rotation,
-3. maps it into each contributing source and samples the **YUV planes
-   directly** (NV12: R8 + RG8, P010: R16 + RG16), converting with the
-   source's matrix and range,
-4. blends lenses across the seam where relevant, converts to linear light
-   and runs the color pipeline in float, then writes the output.
+```
+VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ LinearTarget ──Encoder──▶ screen or Rgba8Unorm
+ (CPU planes)  write_texture   canonical planes   project.wgsl    Rgba16Float,       encode.wgsl
+               or belt,        + mips, Source     ray, LOD,       linear light       (sRGB OETF)
+               ingest, mips    uniform            sample, colour                     │
+                                                                                     ▼
+                                                     render_still: readback ──▶ Image (RGB 8/16-bit, PNG)
+```
 
-Stitching, stabilization and reframing therefore happen in one pass, shared
-by the viewer and the exporter. An intermediate equirect exists only as the
-output of a 360 export.
+* **`Gpu`** is one wgpu device on Vulkan, chosen by `AdapterChoice`
+  (`Auto`, `Cpu` for lavapipe, or a name); `Gpu::headless` makes one for
+  `frame`, tests and benchmarks, and `Gpu::from_parts` wraps a device.
+  `GpuCaps` says what it can do (timestamps, anisotropy, its largest
+  texture). A lost device, or an error no error scope caught, is
+  returned by `Gpu::check` as `gpu_failed`, which every entry point calls
+  first; nothing panics in wgpu's error handler. All device creation is
+  in one function that slice 5b replaces to add Vulkan Video and DMA-BUF
+  import; the GUI (slice 7) opens its device there too and hands it to
+  eframe through egui-wgpu's `WgpuSetup::Existing`.
+* **Slots** (`GpuFrame`, for a `SlotShape`) hold a frame's planes as
+  canonical textures: `R8Unorm`/`Rg8Unorm` for 8-bit planes, and
+  `R16Float`/`Rg16Float` holding code / (2^b − 1) for deeper ones, each
+  with an area-weighted mip chain capped near 64 pixels, plus the
+  frame's `Source` uniform: its colour matrix, chroma siting and where it
+  sits on the sphere (`Placement`: sv3d crop, stereo eye). Of a stereo
+  frame a slot holds the shown eye alone (`Placement::shown`), so the
+  other eye never bleeds in.
+* **`Uploader::upload`** copies a frame's planes into a slot
+  (`write_texture`, or a staging belt), runs the ingest pass that turns
+  deep integer planes into f16 and the mip passes, and submits once,
+  never waiting. Every plane is checked before any is written, so a
+  refused frame leaves the slot as it was. A frame already on the GPU
+  can fill level 0 itself, then call `Uploader::record_mips` and
+  `GpuFrame::set_source`.
+* **`Projector::record`** draws a slot through a `ViewParams`
+  (orientation and `Lens`) into a `LinearTarget`: per pixel a ray from
+  the lens, rotated into the world, its equirect uv, an LOD from central
+  differences of the direction, a trilinear (or anisotropic) tap of each
+  plane, and the 3×4 colour matrix and the sRGB EOTF. Pipelines exist per
+  `Filter` and `DebugMode` and are built on first use.
+* **`Encoder::draw`** writes a linear target's pixels one to one into a
+  render pass's attachment with the sRGB OETF, at an origin, for egui's
+  frame (slice 7) or an offscreen texture.
+* **`render_still`** (and `StillRenderer`, which keeps its pipelines)
+  does all of it headless and reads back an `Image`: 8-bit through the
+  encode pass, 16-bit or linear from the linear target.
+* **`reference`** is the same projection in f64 on the CPU, with the
+  GPU's storage formats emulated; the Tier 1 tests compare the two on
+  lavapipe.
 
-The ±180° seam and the poles break hardware derivative-based LOD, so the
-shader computes LOD analytically from the output pixel's angular footprint
-and samples with `textureSampleGrad`/`textureSampleLevel`.
+What is still planned, for every source type: in WGSL, "direction on the
+unit sphere → texel(s)" for the GoPro EAC pair and calibrated dual
+fisheye, with the view orientation composed with the stabilization
+rotation, lenses blended across the seam, and the colour pipeline in
+float before the output. Stitching, stabilization and reframing then
+happen in one pass shared by the viewer and the exporter, and an
+intermediate equirect exists only as the output of a 360 export.
 
 ## Threads *(planned, M1)*
 
@@ -439,7 +492,10 @@ and samples with `textureSampleGrad`/`textureSampleLevel`.
   node that isn't there and, with media's `fault-injection` feature, at
   every frame of a software stand-in for the device
   (`crates/synth/tests/fallback.rs`). The Tier 2 backend tests check
-  their own checks the same way. Golden images on lavapipe come with the renderer (M1).
+  their own checks the same way. The renderer's tests run on lavapipe
+  (`crates/render/tests/`): every pipeline, the uniform layouts, the
+  mips, both upload paths, and `render_still` against the CPU reference;
+  golden images come in slice 3b.
   `cargo xtask check` runs all of it.
 * **Tier 2** needs hardware or samples. Tier 2 tests are `#[ignore]`d with a
   reason and call `spherecut_testkit::tier2::require_*`, which fails the

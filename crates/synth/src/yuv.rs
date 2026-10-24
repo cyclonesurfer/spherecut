@@ -5,9 +5,13 @@
 //! The synthetic patterns are display-referred values, written straight to
 //! Y'CbCr the way a camera would; no linearisation happens here.
 
-use spherecut_media::encode::{ColorTags, YuvPlanes};
+use spherecut_media::encode::ColorTags;
 
 use crate::{Rgb, RgbImage};
+
+/// What [`to_yuv`] returns, re-exported for crates that don't otherwise
+/// depend on `spherecut-media` (the render tests).
+pub use spherecut_media::encode::YuvPlanes;
 
 /// Chroma subsampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -68,6 +68,22 @@ deny = [
     { crate = "mozjs", reason = "no JavaScript" },
 ]
 
+# Features that must not come back through another crate (D21, D31).
+# wgpu runs on Vulkan with WGSL only: its web, WebGPU and WebGL features are
+# browser bindings (wasm-bindgen, js-sys, web-sys), ANGLE and DXC are
+# Windows paths, and the SPIR-V and GLSL front ends read shaders
+# Spherecut doesn't have. Its GL, Metal and DX12 features are not listed:
+# egui_kittest turns them on in test builds (m1-plan section 11), and on
+# Linux only GL builds anything; our instance asks for Vulkan only.
+[[bans.features]]
+crate = "wgpu"
+deny = ["web", "webgpu", "webgl", "angle", "glsl", "spirv", "static-dxc", "vulkan-portability"]
+
+# PNG only: no other codec, no rayon (D22).
+[[bans.features]]
+crate = "image"
+allow = ["png"]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

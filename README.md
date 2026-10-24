@@ -40,8 +40,7 @@ an agent, frames included, goes to that agent's model provider.
   an AV1 software decoder (libdav1d), and libx264/libx265, built with
   Vulkan support (the Tier 1 doctor and hardware-refusal tests need
   FFmpeg's Vulkan device).
-- Rust 1.88 or newer (1.95 once the GUI lands), with rustfmt and clippy for
-  development.
+- Rust 1.95 or newer, with rustfmt and clippy for development.
 - clang, for generating the FFmpeg bindings at build time.
 - For the Tier 1 tests: Mesa's lavapipe Vulkan driver and strace (see
   Development).

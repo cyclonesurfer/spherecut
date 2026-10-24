@@ -22,6 +22,16 @@ Checked 2026-10-23 at 3d06a2e: `cargo +1.88 build --workspace
 passes. Rechecked at 2c8d0c0, after the final review's fixes: `cargo +1.88
 test --workspace` passes.
 
+*Updated 2026-10-24, M1 slice 3a (the MSRV half of the plan's crate
+layout decision):* `rust-version` is **1.95**, from the slice that adds
+wgpu and `spherecut-render`. wgpu 30.0.1 itself needs 1.87, but egui 0.37,
+which pins it (D7), needs 1.95, so the workspace moves once, with wgpu,
+rather than again in slice 7. Fedora 44's RPM is 1.99 (huginn's), not
+1.95 as said above, so Fedora still needs no rustup to build. Checked at
+4f5f9dd, and again at 2b11aa7 after the slice's first review:
+`cargo +1.95 build --workspace --all-targets` builds without warnings and
+`cargo +1.95 test --workspace` passes (368 tests, then 377).
+
 ## D2. FFmpeg through ffmpeg-next, hardware paths over ffmpeg-sys-next
 
 *2026-10-22, M0. Research: `docs/research/ffmpeg-bindings.md`.*
@@ -180,6 +190,12 @@ ron used to write a frame rate as `(60000,1001)`; it now writes
 *Updated by D25 and D26:* zero-copy import of VA-API frames is proved in
 M1 and decided before M3, and egui is checked against a timeline
 prototype at the end of M2, with Qt/QML as the fallback.
+
+*Updated by D31:* 10-bit planes upload as `R16Uint` or `Rg16Uint` and
+an ingest pass turns them into `R16Float` or `Rg16Float`, since 16-bit
+normalized formats aren't renderable without optional features and the
+mip pass renders; 8-bit planes stay `R8Unorm` and `Rg8Unorm`. wgpu is
+built with only its Vulkan backend and WGSL front end.
 
 ## D8. Supply chain and no runtime network
 
@@ -828,17 +844,28 @@ rest, with the versions in `Cargo.lock`:
 | Crate | Used by | Why |
 |---|---|---|
 | anyhow 1.0.104 | cli, xtask | Error context at the program edges; libraries use `thiserror` |
+| bytemuck 1.25.2 (derive) | render | The `#[repr(C)]` uniforms as bytes for `Queue::write_buffer`, and timestamps read back, with no `unsafe`: its derives compile under `forbid(unsafe_code)` (D31) |
 | clap 4.6.7 (derive) | cli, xtask | Argument parsing with generated help and errors, for two binaries with subcommands |
+| image 0.25.10 (png only) | render | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame` and the goldens. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
+| pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
 | serde 1.0.229 (derive) | core, sphere, media, cli | Serializable time types, `Projection`, the probe and doctor reports, and the CLI's JSON envelope (D27) |
 | serde_json 1.0.154 | cli; core (dev) | `--json` output, through the `contract` module (D27). core's tests round-trip `ColorInfo` through JSON as the CLI will write it. xtask reads cargo's JSON with a small field reader instead |
-| thiserror 2.0.21 | core, media, synth | Typed library errors without hand-written `Display` impls |
-| tracing 0.1.44 | media, cli | Structured logging, and the target for FFmpeg's log (D12) |
+| thiserror 2.0.21 | core, media, synth, render | Typed library errors without hand-written `Display` impls |
+| tracing 0.1.44 | media, cli, render | Structured logging, and the target for FFmpeg's log (D12) |
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
 | tracing-subscriber 0.3.23 (env-filter) | cli | EnvFilter gives `SPHERECUT_LOG` its syntax, and the fmt layer writes to stderr. env-filter brings in `matchers` and `regex-automata` |
-| proptest 1.12.0 (dev) | core, sphere, media | Property tests and the MP4 fuzzing (D15) |
+| wgpu 30.0.1 (std, parking_lot, vulkan, wgsl) | render | The GPU (D7, D31). Default features off, so only the Vulkan backend and the WGSL front end are built: no GL, Metal, DX12 or WebGPU backend, no SPIR-V or GLSL front end. `std` and `parking_lot` are the two defaults kept: the standard library, and wgpu's locks. A `[[bans.features]]` list in `deny.toml` refuses `web`, `webgpu` and `webgl` (wasm-bindgen, js-sys and web-sys), `angle`, `static-dxc`, `glsl`, `spirv` and `vulkan-portability` if a later crate turns them on; GL, Metal and DX12 aren't banned, since egui_kittest turns them on in test builds (m1-plan section 11). It brings wgpu-core, wgpu-hal, wgpu-types, naga, ash and gpu-allocator among others. With image, bytemuck and pollster, slice 3a adds 57 crates to what a Linux build compiles (`cargo tree --target x86_64-unknown-linux-gnu` on normal and build edges, against ef1a9d1; 56 on normal edges alone), all under the existing licence list; `Cargo.lock` gains 90, the rest for other platforms' backends, which Linux never builds. 3a first said 46, a miscount the first review found |
+| naga 30.0.1 (wgsl-in) (dev) | render | The test that each uniform's Rust layout matches its WGSL struct, member by member, which a driver doesn't check (D31). The same naga wgpu builds, so it adds nothing to the tree |
+| proptest 1.12.0 (dev) | core, sphere, media, render | Property tests and the MP4 fuzzing (D15) |
 | ron 0.12.2 (dev) | core | A serde round-trip test of the time types in a text format |
 
 glam's `serde` feature is on, but no glam type is serialized yet.
+
+*Updated in M1 slice 3a,* with the render crate's rows above: cargo-deny
+now warns of three more crates in two versions, each inside the new
+trees: hashbrown 0.16 (gpu-allocator's) beside 0.17, rustc-hash 1 (naga's)
+beside 2, and miniz_oxide 0.8 beside 0.9, both within png. Duplicates
+warn rather than fail (D21), and none can be unified from here.
 
 ## D23. Agent integration: an MCP server and the JSON CLI
 
@@ -1916,3 +1943,242 @@ will, once it decodes on Vulkan), or FFmpeg changes how it picks one.
   data. *Decided by Pat on 2026-10-24:* keep egui's fonts, with a
   `deny.toml` license exception scoped to `epaint_default_fonts`, added
   with the GUI crates (M1 slice 7) and recorded then as a decision.
+
+## D31. The render pipeline
+
+*2026-10-24, M1 slice 3a. The M1 plan's D29 (sections 4.1 to 4.5);
+updates D7. Slice 3b adds the goldens (D32) and the Tier 2 tests.*
+
+What:
+
+- **The device.** wgpu 30.0.1 on Vulkan only (`Gpu::instance_descriptor`).
+  `AdapterChoice` is `Auto` (discrete, integrated, virtual, then CPU, so a
+  box without a GPU renders on lavapipe), `Cpu`, or a name or PCI bus id;
+  `SPHERECUT_ADAPTER` names one for the CLI and GUI, and tests pass
+  `Cpu` and assert `DeviceType::Cpu`. The device asks for the adapter's
+  timestamp features where it has them, wgpu's default limits with 2D
+  textures raised to the adapter's own limit up to 16384, performance
+  memory hints, and no texture format features. Every device is made in
+  one private function, `gpu::open_device`, and `Gpu::from_parts` wraps
+  it. For that to hold in the GUI too, slice 7 opens render's device
+  itself (the instance from `instance_descriptor`, with the window's
+  display handle where wgpu wants one, then `select_adapter`, checking
+  the window's surface can present from it, and `open_device`) and hands
+  it to eframe through egui-wgpu 0.37's `WgpuSetup::Existing`
+  (`WgpuSetupExisting { instance, adapter, device, queue }`). The plan's
+  `WgpuSetup::CreateNew` (section 7) has egui-wgpu make the device with
+  its own `request_device`, which never passes through `open_device`, so
+  5b's Vulkan Video device wouldn't reach the viewer; the first review
+  found the contradiction. Slice 5b replaces `open_device` alone: it opens the Vulkan device
+  itself through wgpu-hal 30's `vulkan::Adapter::open_with_callback`, to
+  add the video-decode queues and extensions FFmpeg's Vulkan Video wants
+  and the DMA-BUF import extensions, then wraps it with
+  `Adapter::create_device_from_hal`, and imports frames with
+  `vulkan::Device::texture_from_dmabuf_fd` (amendments 2 and 9). Those
+  calls are `unsafe`, so 5b's module is render's first exception to
+  `forbid(unsafe_code)`.
+- **Errors** are `RenderError`, each with its code in the CLI contract:
+  `no_gpu`, `adapter_not_found`, `gpu_failed` (a device refused, a
+  validation error, a failed readback, a lost device), `too_large`,
+  `invalid_input` (an empty size, a plane that doesn't match its layout,
+  a PNG that won't read), `internal` (a frame uploaded into a slot of
+  another shape) and `out_of_gpu_memory`.
+- **A lost device** is an error, never a panic. `Gpu::from_parts` (which
+  `headless` uses too) sets the device's lost callback, which marks the
+  `Gpu` lost, and its uncaptured-error handler, which wgpu's default
+  makes a panic: after a loss the handler ignores the errors every call
+  then raises, and before one it logs an error no scope caught and keeps
+  the first for `Gpu::check`. Every entry point that touches the device
+  calls `check` first and returns `gpu_failed` (`GpuFrame::new`,
+  `Uploader::upload`, `Projector::record`, `LinearTarget::new`,
+  `StillRenderer::render` and `render_still`, readback), and
+  `Uploader::poll` stops reading timers. 3a's first version installed
+  neither, so an upload after a loss panicked in wgpu's handler
+  (`Device::destroy` in a Tier 1 test now shows each entry point
+  returning `gpu_failed`). `Projector::record` returns a `Result` for it,
+  where the plan's returned nothing. What the viewer does then (make the
+  device again, re-upload) is slice 5's.
+- **Canonical planes**, as plan section 4.2 has them: 8-bit planes are
+  written straight into `R8Unorm` or `Rg8Unorm`; 9- to 16-bit planes go
+  into an `R16Uint` or `Rg16Uint` scratch, and an ingest pass writes
+  `R16Float` or `Rg16Float` holding min(code >> shift, 2^b − 1) / (2^b −
+  1) rounded to the nearest half, with a shift of 16 − b for P010 and 0
+  for LSB-aligned formats (the clamp keeps stray high bits from reading
+  past 1). Every format is one wgpu guarantees without optional
+  features.
+- **f16 stores are rounded in the shaders.** lavapipe converts a
+  fragment's f32 into an f16 attachment by truncating, which Vulkan
+  allows: measured at 3a's first review, 510 of the 1024 10-bit codes
+  came out of the ingest pass a half below their nearest one (up to half
+  a code), 1023 of the 4096 12-bit codes (up to two codes), and 124 of
+  256 grey levels in the linear target. Every pass that writes f16
+  therefore returns a value that is a half already, the nearest one with
+  ties to even, so that the store is exact on any driver: the ingest
+  pass works it out from the code in integers (no GPU division or log2
+  can move a code near a tie, and 12-bit codes come within an f32 ulp of
+  one); the mips of deep planes and the projection round their f32 with
+  `round_f16` in `shaders/common.wgsl` (bit arithmetic, and a scale by
+  2^24 for subnormals). unorm8 targets are left to the driver: lavapipe
+  rounds them to nearest, as Vulkan asks, and the 8-bit mips match an
+  independent area mean rounded to nearest at every texel tested.
+- **Mips**: one area-weighted shader for all four formats, a render pass
+  per level, reading the level above with `textureLoad` and weighting
+  each texel by its overlap in integer arithmetic, so odd sizes come out
+  exact. Levels per plane are clamp(1 + ⌊log2(max / 64)⌋, 1, 8).
+- **Slots**: `GpuFrame` holds a frame's planes with their mips, its
+  `Source` uniform and its bind group, for a `SlotShape` (plane formats
+  and sizes; the depth may differ, since the ingest normalises it). Level
+  0 of each plane is an ordinary texture that a buffer copy, a texture
+  copy or a render pass can fill, so a frame already on the GPU (slice
+  5b) fills a slot without `VideoPlanes`: it writes level 0 of
+  `GpuFrame::plane_texture`, records the mips with
+  `Uploader::record_mips` and sets the uniform with
+  `GpuFrame::set_source`, as an upload does (a Tier 1 test fills a slot
+  that way and gets the same levels and projection). Slots are made
+  inside an `OutOfMemory` error scope.
+- **Upload**: `Uploader::upload` writes the planes, then records ingest
+  and mips with GPU timestamps around them where the device has
+  `TIMESTAMP_QUERY_INSIDE_ENCODERS` (so `UploadStats::gpu_ms` is the GPU
+  time of both, on either path; 3a's first span began after the ingest
+  passes and timed only the mips, which a Tier 1 test now catches),
+  writes the `Source` uniform and submits once, never waiting. `UploadPath::WriteTexture` (the default)
+  passes the frame's rows to `write_texture` at their own stride;
+  `UploadPath::StagingBelt` copies them into a reused belt chunk at a
+  256-byte pitch and records `copy_buffer_to_texture`.
+- **The projection** (`shaders/project.wgsl`): rectilinear, equidistant
+  fisheye and stereographic, and a blend of two θ(ρ) curves for a morph.
+  The LOD is the shader's own: central differences of the direction
+  half a pixel either side, through `uv_gradient`, λ = log2 of the
+  longer side of the footprint in texels, clamped to the chain.
+  `Filter::Isotropic` samples with `textureSampleLevel` at λ (goldens,
+  the CPU check, `spherecut frame`); `Filter::Anisotropic` with
+  `textureSampleGrad` and a 16× sampler (the GUI). `DebugMode` replaces
+  that with implicit derivatives, level 0, or a heat map of λ. Colour is
+  one 3×4 matrix from `ColorInfo`, folding the range and Kr/Kb by H.273,
+  applied to samples read as code / (2^b − 1), then clamped, through the
+  sRGB EOTF (or not, for linear sources) into an `Rgba16Float` target;
+  the encode pass applies the OETF into `Rgba8Unorm`, one texel per
+  pixel with no filtering. A 16-bit still reads the linear target back
+  and applies the OETF on the CPU.
+- **Samplers**: U repeats and V clamps; U clamps too for an sv3d crop.
+  `Placement` gives the cover, the crop and the eye.
+- **Stereo**: of a stereo frame only the shown eye, the left, is
+  uploaded (its rows from the frame's top-left corner, at the frame's
+  stride), into a slot of that eye's size (`Placement::shown`). U then
+  wraps at the eye's own ±180°, V clamps at its own poles, its mips never
+  mix in the other eye, and the upload is halved. 3a's first slots held
+  the whole frame, with the eye's half picked in the uv transform, and
+  clamped at the texture's edges, so the other eye bled in where the left
+  eye's edges meet it: measured at the first review, 448 of 4096 pixels
+  looking back across a left-right frame's seam, and 2652 looking down at
+  a top-bottom frame's nadir in a magnified view, since the pole guard
+  picks the coarsest level there. The plan's note that a top-bottom
+  source's coarsest level can blend one row across the eyes (section
+  4.3) no longer applies.
+- **The CPU reference** (`render::reference`) is the projection in f64,
+  step for step, storing each mip level and the linear target as the GPU
+  stores them (unorm8 rounded to nearest, and the nearest f16 with ties
+  to even, which the shaders round to themselves). The Tier 1 tests
+  compare `render_still` with it on lavapipe.
+
+Where this differs from the plan, from the evidence:
+
+- The `Source` uniform's members are ordered by alignment, and it adds
+  `chroma_scale` beside `chroma_offset`: chroma uv = luma uv · scale +
+  offset, with scale = w / (2^s · w_c) and offset = (2^s − 1)(½ − t) /
+  (2^s · w_c) for a siting at t between a block's first and last luma
+  samples, and 2^s the layout's own subsampling (`PlaneShape::log2_sub`;
+  3a's first version took it from the plane sizes, which gave 3 rather
+  than 4 for 4:1:1 at a width of 6). The plan's offset alone (½ / W) is
+  Left's at even sizes; the scale keeps sizes that aren't a multiple of
+  2^s, whose chroma planes round up, aligned away from the ±180° seam,
+  and the general form covers every siting. Its `layout` member is
+  `kind`, since `layout` is a reserved word in WGSL.
+- The `View` uniform holds each projection's constant (`k`: tan(half)
+  for rectilinear, half for fisheye, tan(half / 2) for stereographic,
+  with half capped as `Lens::half` caps it) rather than the half angle,
+  so the shader takes no tangent per pixel.
+- Latitude is `atan2(y, |xz|)` rather than `asin(y)`, which keeps its
+  precision at the poles in f32; the reference does the same.
+- `uv_gradient` has a pole guard the plan's formula lacked: where the
+  step is longer than twice the distance from the axis, the ring is
+  crossed, so du is ±½ and the radius is regularised, rather than du
+  being 0 exactly at a pole and the LOD collapsing there.
+- The `Place` uniform of the encode pass has the target's extent, and
+  outside it the pass writes black: a `textureLoad` past the texture is
+  otherwise implementation-defined.
+- The scratch is one texture per plane index, not one per uploader, since
+  all of a frame's planes are written before its passes run.
+- The StagingBelt is an `UploadPath` of the `Uploader`, not a test-side
+  path, so that `bench_upload_5k7` measures the path the trigger would
+  switch to, and switching changes nothing else.
+- `DebugMode::LodHeatmap` writes luma's λ before clamping in blue, which
+  the clamped values in red and green hide.
+- The reference returns `Result`: it reads a `VideoPlanes`, and refuses
+  a layout the renderer can't sample, as `render_still` does. It also
+  has `lod_map` (the heat map) and `render` with a `Placement`.
+- Readback copies in bands of at most 64 MiB of padded rows through one
+  reused buffer (`readback::BAND_BYTES`). 3a's first readback used one
+  buffer for the whole picture, which passes wgpu's default
+  `max_buffer_size` of 256 MiB at sizes the device's textures take (a
+  16-bit still of 4097×8192, an 8-bit one of 8193×8192) and failed there
+  as `gpu_failed`; the first review found it, and a Tier 1 test reads
+  8193×8192 back. The device keeps wgpu's default buffer limit, as plan
+  section 4.1 has it: an upload's largest plane, 2^27 pixels at 16 bits,
+  is 256 MiB exactly.
+- `StillRenderer` keeps `render_still`'s pipelines, slot and target for
+  more than one still. `Depth::Linear` reads the linear target back as
+  it is, for the heat map.
+
+Measured on lavapipe (Mesa's llvmpipe; `crates/render/tests/render.rs`):
+`render_still` against the reference is 49.6 to 52.7 dB at 8 bits and
+58.9 to 59.0 dB at 10 and 12 bits, through every projection and a morph,
+ten plane layouts, both ranges, BT.601, 709 and 2020 and three sitings,
+with no channel off by more than 0.1; 89.6 dB at 16 bits; 83.9 to 87.9
+dB for the LOD heat map (57.4 to 58.5, 69 and 63 to 78 before the
+shaders rounded their f16 stores). Each floor is the measured PSNR less
+3 dB. Negative controls: level 0 against trilinear is 22.6 to 43.8 dB,
+and one siting against another 19.6 dB, against 52.5 for the right one.
+A raised chroma column or row peaks within 0.001 of a luma texel of
+where each siting's definition puts it (calibrated with luma, not the
+renderer's chroma arithmetic, which the GPU and the reference share: a
+mirrored offset passed every other render test). The mips match an area
+mean computed independently to one code at 8 bits, and exactly (its nearest half) for deep planes unless the mean is
+within a millionth of a tie; every 10- and 12-bit code ingests as its
+nearest half; and the linear target holds the nearest half of every
+grey level's EOTF. The upload bench's smoke run (640×320, 4 frames) shows a
+steady allocator block count on both paths.
+
+Why: as the plan's D29 says. Every format used is guaranteed on every
+driver, and `R16Unorm` isn't renderable without adapter-specific
+features, which would force a second, compute mip path. Rounded to
+nearest, f16 keeps 10-bit within a quarter code and 12-bit within one;
+truncated, as lavapipe's own conversion would leave it, the bounds are
+half a code and two codes, which is why the shaders round. Capping the chain cuts a 5.7K frame's mip passes
+from 23 or 34 to 11 or 16. Analytic gradients remove the seam and pole
+spikes implicit derivatives give, and make the result independent of
+the GPU's quads, so a CPU twin can check it. Anisotropy is
+implementation-defined, so only the GUI uses it. One device function
+keeps slice 5b's change to one place.
+
+Limits: a 360° frame whose width isn't a multiple of its chroma
+subsampling (an odd-width 4:2:0 frame, which AV1 and VP9 can code but
+H.264 and HEVC can't, and which 360° cameras don't make) shows a chroma
+step at the ±180° seam: its chroma texture repeats every 2^s · w_c luma
+texels, one more than the picture, so chroma jumps half a chroma texel
+where U wraps (the first review measured blue jumping 42 codes between
+adjacent pixels of a 301-wide frame, against 3 at 300). The
+comparison is on lavapipe only until slice 3b's Tier 2 tests; the floors are lavapipe's and may need recalibrating for another
+Mesa. 16-bit sources lose their low 4 bits in f16. The goldens'
+`passthrough_exact` (plan section 6) can't hold as written for limited
+range through an f16 linear target, even with every store rounded to
+nearest: flat fields at Y = 86, 159 and 165 come out 81, 166 and 174,
+one code from round((k − 16) · 255 / 219), since those k lie within the
+f16 error of a tie; full range is exact for every k. Slice 3b revises
+that criterion. Anisotropic output
+is checked only for building. An unchanged frame and view skipping the
+projection is the viewer's (slice 7).
+
+Revisit if: the upload bench's trigger holds on huginn or odin (the
+belt becomes the default); a driver can't filter `R16Float`; or M7's
+colour work needs `R16Unorm` behind the optional features.

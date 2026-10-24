@@ -6,7 +6,7 @@ default-members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/cyclonesurfer/spherecut"
 publish = false
@@ -18,12 +18,20 @@ spherecut-media = { path = "crates/media" }
 spherecut-testkit = { path = "crates/testkit" }
 spherecut-cli = { path = "crates/cli" }
 spherecut-synth = { path = "crates/synth" }
+spherecut-render = { path = "crates/render" }
 
 anyhow = "1.0.100"
+bytemuck = { version = "1.25.2", features = ["derive"] }
 clap = { version = "4.5", features = ["derive"] }
 ffmpeg-next = { version = "=9.0.0", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 ffmpeg-sys-next = { version = "=9.0.1", default-features = false, features = ["avcodec", "avformat", "swscale", "swresample"] }
 glam = { version = "0.34", features = ["serde"] }
+# PNG only: 8- and 16-bit output and golden images (D22).
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+# The WGSL front end only, for the uniform layout test (D31). Already in
+# the tree through wgpu, at the same version.
+naga = { version = "=30.0.1", features = ["wgsl-in"] }
+pollster = "1.0.1"
 proptest = "1.8"
 ron = "0.12"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -32,6 +40,9 @@ thiserror = "2.0"
 tracing = "0.1.41"
 tracing-core = "0.1.36"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+# Vulkan only, WGSL only (D7, D31): no GL, Metal, DX12 or WebGPU backend,
+# no SPIR-V or GLSL front end. Pinned with `=`: wgpu moves with egui (D7).
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

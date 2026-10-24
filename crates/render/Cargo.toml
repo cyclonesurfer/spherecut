@@ -1,0 +1,28 @@
+[package]
+name = "spherecut-render"
+description = "The wgpu render core: plane upload, mips, the projection shader, colour, readback and the CPU reference"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+glam.workspace = true
+image.workspace = true
+pollster.workspace = true
+spherecut-core.workspace = true
+spherecut-sphere.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+
+[dev-dependencies]
+naga.workspace = true
+proptest.workspace = true
+spherecut-synth.workspace = true
+spherecut-testkit.workspace = true
+
+[lints]
+workspace = true
