@@ -288,20 +288,67 @@ fn prepend(dir: &Path, existing: Option<OsString>) -> OsString {
     std::env::join_paths(&paths).unwrap_or_else(|_| dir.as_os_str().to_owned())
 }
 
-/// The variables cargo runs with for one FFmpeg. `existing` reads this
-/// process's environment (a parameter, for the tests).
+/// A variable's value in `vars`, this process's environment (a
+/// parameter, for the tests).
+fn get(vars: &[(OsString, OsString)], name: &str) -> Option<OsString> {
+    vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+}
+
+/// The variables among `names` that would have ffmpeg-sys-next bind
+/// another FFmpeg than the one `PKG_CONFIG_PATH` leads to, which `bound`
+/// checks: `FFMPEG_DIR`, which it uses before pkg-config, and the pkg-config
+/// crate's forms of pkg-config's variables for one target
+/// (`PKG_CONFIG_PATH_x86_64-unknown-linux-gnu`, its form with
+/// underscores, `HOST_PKG_CONFIG_PATH`, `TARGET_PKG_CONFIG_PATH`), which
+/// it takes over the plain ones that pkg-config itself reads. Sorted.
+fn overriding<'a>(names: impl Iterator<Item = &'a OsStr>) -> Vec<String> {
+    const BASES: [&str; 4] = [
+        "PKG_CONFIG_PATH",
+        "PKG_CONFIG_LIBDIR",
+        "PKG_CONFIG_SYSROOT_DIR",
+        "PKG_CONFIG",
+    ];
+    let mut out: Vec<String> = names
+        .filter_map(OsStr::to_str)
+        .filter(|n| {
+            *n == "FFMPEG_DIR"
+                || BASES.iter().any(|b| {
+                    let host = n
+                        .strip_prefix("HOST_")
+                        .or_else(|| n.strip_prefix("TARGET_"));
+                    // A target triple is lower case, and pkg-config's own
+                    // variables (`PKG_CONFIG_ALLOW_CROSS`) are upper.
+                    let triple = n.strip_prefix(b).and_then(|r| r.strip_prefix('_'));
+                    host == Some(b)
+                        || triple.is_some_and(|t| {
+                            !t.is_empty() && !t.bytes().any(|c| c.is_ascii_uppercase())
+                        })
+                })
+        })
+        .map(str::to_owned)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The variables cargo runs with for one FFmpeg, given this process's
+/// `vars`: each with its value, or `None` for one it runs without.
 fn cargo_env(
     pc_dir: &Path,
     target: &Path,
     libdir: Option<&Path>,
-    existing: &dyn Fn(&str) -> Option<OsString>,
-) -> Vec<(&'static str, OsString)> {
+    vars: &[(OsString, OsString)],
+) -> Vec<(String, Option<OsString>)> {
     let mut env = vec![
         (
-            "PKG_CONFIG_PATH",
-            prepend(pc_dir, existing("PKG_CONFIG_PATH")),
+            "PKG_CONFIG_PATH".to_owned(),
+            Some(prepend(pc_dir, get(vars, "PKG_CONFIG_PATH"))),
         ),
-        ("CARGO_TARGET_DIR", target.as_os_str().to_owned()),
+        (
+            "CARGO_TARGET_DIR".to_owned(),
+            Some(target.as_os_str().to_owned()),
+        ),
     ];
     // Low debuginfo and no incremental state: one target directory per
     // FFmpeg adds up. Settings already made win.
@@ -309,14 +356,35 @@ fn cargo_env(
         ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"),
         ("CARGO_INCREMENTAL", "0"),
     ] {
-        if existing(var).is_none() {
-            env.push((var, value.into()));
+        if get(vars, var).is_none() {
+            env.push((var.to_owned(), Some(value.into())));
         }
     }
     if let Some(dir) = libdir {
-        env.push(("LD_LIBRARY_PATH", prepend(dir, existing("LD_LIBRARY_PATH"))));
+        env.push((
+            "LD_LIBRARY_PATH".to_owned(),
+            Some(prepend(dir, get(vars, "LD_LIBRARY_PATH"))),
+        ));
     }
+    env.extend(
+        overriding(vars.iter().map(|(k, _)| k.as_os_str()))
+            .into_iter()
+            .map(|n| (n, None)),
+    );
     env
+}
+
+/// `cargo` with `args`, run with `env`.
+fn cargo(args: &[&str], env: &[(String, Option<OsString>)]) -> Command {
+    let mut cmd = Command::new("cargo");
+    cmd.args(args);
+    for (k, v) in env {
+        match v {
+            Some(v) => cmd.env(k, v),
+            None => cmd.env_remove(k),
+        };
+    }
+    cmd
 }
 
 /// What became of one stage for one FFmpeg.
@@ -351,6 +419,7 @@ struct Row {
     prefix: PathBuf,
     bound: Result<Bound, String>,
     clippy: Stage,
+    /// The Tier 1 tests, for the `--test` prefix.
     tier1: Option<Stage>,
 }
 
@@ -406,23 +475,36 @@ fn target_root() -> PathBuf {
 
 fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
     let root = target_root();
-    let existing = |var: &str| std::env::var_os(var);
+    let vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let unset = overriding(vars.iter().map(|(k, _)| k.as_os_str()));
+    if !unset.is_empty() {
+        eprintln!(
+            "==> running cargo without {}: ffmpeg-sys-next would bind the FFmpeg \
+             they lead to rather than each prefix's",
+            unset.join(", ")
+        );
+    }
     let mut rows = Vec::new();
     for b in builds(prefixes)? {
         let target = root.join(&b.label);
         let bound = b.pc_dir.clone().and_then(|pc| {
-            bound(&pc, &prepend(&pc, existing("PKG_CONFIG_PATH"))).map_err(|e| format!("{e:#}"))
+            bound(&pc, &prepend(&pc, get(&vars, "PKG_CONFIG_PATH"))).map_err(|e| format!("{e:#}"))
         });
-        let clippy = match (&b.pc_dir, &bound) {
-            (Ok(pc), Ok(found)) => Stage::of(run_step(
-                &format!(
-                    "clippy against {} at {} (target {})",
-                    found.describe(),
-                    b.prefix.display(),
-                    target.display()
-                ),
-                Command::new("cargo")
-                    .args([
+        let tested = test == Some(b.prefix.as_path());
+        let mut row = Row {
+            label: b.label,
+            prefix: b.prefix,
+            bound,
+            clippy: Stage::NotRun("its FFmpeg was not found".into()),
+            tier1: tested.then(|| Stage::NotRun("Tier 1 needs clippy to pass first".into())),
+        };
+        if let (Ok(pc), Ok(found)) = (&b.pc_dir, &row.bound) {
+            let what = format!("against {} at {}", found.describe(), row.prefix.display());
+            let env = cargo_env(pc, &target, None, &vars);
+            row.clippy = Stage::of(run_step(
+                &format!("clippy {what} (target {})", target.display()),
+                &mut cargo(
+                    &[
                         "clippy",
                         "--workspace",
                         "--all-targets",
@@ -430,47 +512,33 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
                         "--",
                         "-D",
                         "warnings",
-                    ])
-                    .envs(cargo_env(pc, &target, None, &existing)),
-            )),
-            _ => Stage::NotRun("its FFmpeg was not found".into()),
-        };
-        let tier1 = (test == Some(b.prefix.as_path())).then(|| match (&b.pc_dir, &bound) {
-            (Ok(pc), Ok(found)) if clippy == Stage::Passed => {
-                let env = cargo_env(pc, &target, Some(&found.libdir), &existing);
-                let what = format!("against {} at {}", found.describe(), b.prefix.display());
-                Stage::of(
+                    ],
+                    &env,
+                ),
+            ));
+            if row.clippy == Stage::Passed && row.tier1.is_some() {
+                let env = cargo_env(pc, &target, Some(&found.libdir), &vars);
+                row.tier1 = Some(Stage::of(
                     run_step(
                         &format!("tests (Tier 1) {what}"),
-                        Command::new("cargo")
-                            .args(["test", "--workspace", "--all-targets"])
-                            .envs(env.clone()),
+                        &mut cargo(&["test", "--workspace", "--all-targets"], &env),
                     )
                     .and_then(|()| {
                         run_step(
                             &format!("doc tests {what}"),
-                            Command::new("cargo")
-                                .args(["test", "--workspace", "--doc"])
-                                .envs(env),
+                            &mut cargo(&["test", "--workspace", "--doc"], &env),
                         )
                     }),
-                )
+                ));
             }
-            _ => Stage::NotRun("Tier 1 needs clippy to pass first".into()),
-        });
+        }
         if clean && target.exists() {
             match std::fs::remove_dir_all(&target) {
                 Ok(()) => eprintln!("==> removed {}", target.display()),
                 Err(e) => eprintln!("warning: could not remove {}: {e}", target.display()),
             }
         }
-        rows.push(Row {
-            label: b.label,
-            prefix: b.prefix,
-            bound,
-            clippy,
-            tier1,
-        });
+        rows.push(row);
     }
     eprint!("{}", report(&rows));
     let failed: Vec<&str> = rows
@@ -648,50 +716,127 @@ mod tests {
         assert_eq!(ffmpeg_version(""), None);
     }
 
+    fn vars(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs.iter().map(|(k, v)| (k.into(), v.into())).collect()
+    }
+
+    fn value(env: &[(String, Option<OsString>)], k: &str) -> Option<Option<OsString>> {
+        env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
+    }
+
     #[test]
     fn cargo_gets_the_prefix_first_its_own_target_and_low_debuginfo() {
-        let none = |_: &str| None;
         let env = cargo_env(
             Path::new("/ff/lib/pkgconfig"),
             Path::new("/t/compat/ff"),
             None,
-            &none,
+            &[],
         );
-        let get = |env: &[(&str, OsString)], k: &str| {
-            env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
-        };
+        let set = |env: &[(String, Option<OsString>)], k: &str| value(env, k).flatten();
         assert_eq!(
-            get(&env, "PKG_CONFIG_PATH"),
+            set(&env, "PKG_CONFIG_PATH"),
             Some("/ff/lib/pkgconfig".into())
         );
-        assert_eq!(get(&env, "CARGO_TARGET_DIR"), Some("/t/compat/ff".into()));
+        assert_eq!(set(&env, "CARGO_TARGET_DIR"), Some("/t/compat/ff".into()));
         assert_eq!(
-            get(&env, "CARGO_PROFILE_DEV_DEBUG"),
+            set(&env, "CARGO_PROFILE_DEV_DEBUG"),
             Some("line-tables-only".into())
         );
-        assert_eq!(get(&env, "CARGO_INCREMENTAL"), Some("0".into()));
+        assert_eq!(set(&env, "CARGO_INCREMENTAL"), Some("0".into()));
         // The libraries are on the loader's path only for the tests.
-        assert_eq!(get(&env, "LD_LIBRARY_PATH"), None);
+        assert_eq!(value(&env, "LD_LIBRARY_PATH"), None);
+        assert!(env.iter().all(|(_, v)| v.is_some()), "{env:?}");
 
-        let set = |k: &str| match k {
-            "PKG_CONFIG_PATH" => Some("/vk/lib/pkgconfig".into()),
-            "LD_LIBRARY_PATH" => Some("/x/lib:".into()),
-            "CARGO_PROFILE_DEV_DEBUG" => Some("0".into()),
-            _ => None,
-        };
+        let existing = vars(&[
+            ("PKG_CONFIG_PATH", "/vk/lib/pkgconfig"),
+            ("LD_LIBRARY_PATH", "/x/lib:"),
+            ("CARGO_PROFILE_DEV_DEBUG", "0"),
+        ]);
         let env = cargo_env(
             Path::new("/ff/lib/pkgconfig"),
             Path::new("/t/compat/ff"),
             Some(Path::new("/ff/lib")),
-            &set,
+            &existing,
         );
         assert_eq!(
-            get(&env, "PKG_CONFIG_PATH"),
+            set(&env, "PKG_CONFIG_PATH"),
             Some("/ff/lib/pkgconfig:/vk/lib/pkgconfig".into())
         );
-        assert_eq!(get(&env, "LD_LIBRARY_PATH"), Some("/ff/lib:/x/lib".into()));
+        assert_eq!(set(&env, "LD_LIBRARY_PATH"), Some("/ff/lib:/x/lib".into()));
         // The caller's own setting stays.
-        assert_eq!(get(&env, "CARGO_PROFILE_DEV_DEBUG"), None);
+        assert_eq!(value(&env, "CARGO_PROFILE_DEV_DEBUG"), None);
+    }
+
+    #[test]
+    fn cargo_runs_without_what_would_bind_another_ffmpeg() {
+        let existing = vars(&[
+            ("FFMPEG_DIR", "/ff/n7.1"),
+            ("HOST_PKG_CONFIG_PATH", "/ff/n7.1/lib/pkgconfig"),
+            (
+                "PKG_CONFIG_PATH_x86_64-unknown-linux-gnu",
+                "/ff/n7.1/lib/pkgconfig",
+            ),
+            (
+                "PKG_CONFIG_PATH_x86_64_unknown_linux_gnu",
+                "/ff/n7.1/lib/pkgconfig",
+            ),
+            ("TARGET_PKG_CONFIG_LIBDIR", "/x"),
+            ("PKG_CONFIG_SYSROOT_DIR_aarch64-unknown-linux-gnu", "/x"),
+            ("HOST_PKG_CONFIG", "/usr/bin/pkgconf"),
+            // These pkg-config reads as they are, as `bound` does.
+            ("PKG_CONFIG", "/usr/bin/pkgconf"),
+            ("PKG_CONFIG_LIBDIR", "/x"),
+            ("PKG_CONFIG_SYSROOT_DIR", "/x"),
+            ("PKG_CONFIG_ALLOW_CROSS", "1"),
+            ("PKG_CONFIG_ALLOW_SYSTEM_LIBS", "1"),
+            ("HOST_PKG_CONFIG_ALLOW_CROSS", "1"),
+            ("FFMPEG_DIRS", "/x"),
+            ("PATH", "/usr/bin"),
+        ]);
+        let unset: Vec<&str> = [
+            "FFMPEG_DIR",
+            "HOST_PKG_CONFIG",
+            "HOST_PKG_CONFIG_PATH",
+            "PKG_CONFIG_PATH_x86_64-unknown-linux-gnu",
+            "PKG_CONFIG_PATH_x86_64_unknown_linux_gnu",
+            "PKG_CONFIG_SYSROOT_DIR_aarch64-unknown-linux-gnu",
+            "TARGET_PKG_CONFIG_LIBDIR",
+        ]
+        .into();
+        assert_eq!(
+            overriding(existing.iter().map(|(k, _)| k.as_os_str())),
+            unset
+        );
+        let env = cargo_env(
+            Path::new("/ff/n8.1/lib/pkgconfig"),
+            Path::new("/t/compat/n8.1"),
+            None,
+            &existing,
+        );
+        for name in &unset {
+            assert_eq!(value(&env, name), Some(None), "{name}");
+        }
+        for kept in [
+            "PKG_CONFIG",
+            "PKG_CONFIG_LIBDIR",
+            "PKG_CONFIG_ALLOW_CROSS",
+            "PATH",
+        ] {
+            assert_eq!(value(&env, kept), None, "{kept}");
+        }
+        assert_eq!(
+            value(&env, "PKG_CONFIG_PATH"),
+            Some(Some("/ff/n8.1/lib/pkgconfig".into()))
+        );
+        // And a command made with it runs without them.
+        let cmd = cargo(&["clippy"], &env);
+        let removed: Vec<&OsStr> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(removed.len(), unset.len(), "{removed:?}");
+        assert!(unset.iter().all(|n| removed.contains(&OsStr::new(n))));
     }
 
     fn found(v: &str, ff: Option<&str>) -> Result<Bound, String> {
