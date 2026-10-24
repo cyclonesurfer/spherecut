@@ -13,12 +13,13 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use spherecut_core::fs::{TempFile, follow_links};
 use spherecut_core::video::ColorCodes;
 use spherecut_core::{FrameRate, Rational};
 use thiserror::Error;
 
 use crate::ffi;
-use crate::inject::{self, EntryEdit, InjectError, TempFile, follow_links};
+use crate::inject::{self, EntryEdit, InjectError};
 use crate::{ff, init};
 
 #[derive(Debug, Error)]
@@ -729,7 +730,7 @@ impl Mp4Writer {
     pub fn finish(self) -> Result<PathBuf, EncodeError> {
         let (path, tmp) = self.close()?;
         let dest = tmp.dest().to_path_buf();
-        tmp.persist()
+        tmp.persist_replace()
             .map_err(|error| EncodeError::Io { path: dest, error })?;
         Ok(path)
     }
@@ -848,7 +849,7 @@ pub fn remux_to_matroska_at(
     }
     ctx(octx.write_trailer(), || "writing Matroska trailer".into())?;
     drop(octx);
-    tmp.persist().map_err(|error| EncodeError::Io {
+    tmp.persist_replace().map_err(|error| EncodeError::Io {
         path: dest.clone(),
         error,
     })?;
