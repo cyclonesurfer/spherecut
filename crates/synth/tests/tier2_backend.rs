@@ -94,6 +94,26 @@ fn noisy(bits: u32) -> PathBuf {
     })
 }
 
+/// 30 frames of 1000x562 in open GOPs of 8 with 3 B-frames, which H.264
+/// codes as 1008x576 and HEVC as 1000x568: the decoder crops every
+/// picture on the right or at the bottom, on the device too.
+fn cropped(codec: Codec) -> PathBuf {
+    cached(&Spec {
+        name: format!("t2-{}-cropped", format!("{codec:?}").to_lowercase()),
+        width: 1000,
+        height: 562,
+        frames: 30,
+        codec,
+        gop: Some(Gop {
+            keyint: 8,
+            bframes: 3,
+            open: true,
+            radl: 0,
+        }),
+        ..Spec::default()
+    })
+}
+
 /// A small clip of `bits` bits tagged `color`, for the colour tests.
 fn tagged(name: &str, codec: Codec, bits: u32, width: u32, color: ColorTags) -> PathBuf {
     cached(&Spec {
@@ -682,12 +702,20 @@ fn check_seeks(hw: &Hw, s: &Stream) -> Result<Vec<String>, String> {
     Ok(problems)
 }
 
-/// The noisy clips and every sample stream, and the samples that didn't
-/// probe. The samples are listed first, so that a machine without them
-/// skips before generating the clips.
+/// The noisy clips, two cropped ones and every sample stream, and the
+/// samples that didn't probe. The samples are listed first, so that a
+/// machine without them skips before generating the clips.
 fn seek_streams() -> (Vec<Stream>, Vec<String>) {
     let (samples, problems) = video_streams(&sample_files());
-    let mut streams = vec![Stream::clip(noisy(8)), Stream::clip(noisy(10))];
+    let mut streams: Vec<Stream> = [
+        noisy(8),
+        noisy(10),
+        cropped(Codec::H264),
+        cropped(Codec::Hevc),
+    ]
+    .into_iter()
+    .map(Stream::clip)
+    .collect();
     streams.extend(samples);
     (streams, problems)
 }
@@ -999,27 +1027,34 @@ fn stand_in(fail_at: Option<u64>) -> Hw {
     }
 }
 
-/// 256x128 clips of 30 frames in open GOPs of 8 with 3 B-frames, H.264
-/// at 8 bits and HEVC at 10, in `dir`.
+/// Clips of 30 frames in open GOPs of 8 with 3 B-frames, in `dir`: 256x128
+/// H.264 at 8 bits and HEVC at 10, and H.264 that the decoder crops, as
+/// [`cropped`]'s.
 fn small_clips(dir: &TempDir) -> Vec<Stream> {
-    [(Codec::H264, 8), (Codec::Hevc, 10)]
-        .into_iter()
-        .map(|(codec, bits)| {
-            let spec = Spec {
-                name: format!("{codec:?}-{bits}"),
-                codec,
-                bits,
-                gop: Some(Gop {
-                    keyint: 8,
-                    bframes: 3,
-                    open: true,
-                    radl: 0,
-                }),
-                ..Spec::default()
-            };
-            Stream::clip(media::write(&spec, &dir.0).unwrap())
-        })
-        .collect()
+    [
+        (Codec::H264, 8, 256, 128),
+        (Codec::Hevc, 10, 256, 128),
+        (Codec::H264, 8, 1000, 562),
+    ]
+    .into_iter()
+    .map(|(codec, bits, width, height)| {
+        let spec = Spec {
+            name: format!("{codec:?}-{bits}-{width}"),
+            codec,
+            bits,
+            width,
+            height,
+            gop: Some(Gop {
+                keyint: 8,
+                bframes: 3,
+                open: true,
+                radl: 0,
+            }),
+            ..Spec::default()
+        };
+        Stream::clip(media::write(&spec, &dir.0).unwrap())
+    })
+    .collect()
 }
 
 /// The Tier 2 checks must pass where the "device" decodes as software
