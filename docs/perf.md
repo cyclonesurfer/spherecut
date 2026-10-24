@@ -194,6 +194,16 @@ What this says:
   those numbers on odin and huginn, before M3.
 - Software decode is far from real time at 5.7K and 8K on odin's CPU,
   as on huginn.
+- Unified memory against a discrete GPU: huginn's 8060S shares system RAM
+  with the CPU, odin's RX 7600 has its own VRAM. VA-API with its copy
+  does 301 fps on huginn's synthetic 3840×1920 clip and 55 fps on
+  odin's, and X5 8K30 at 2.40 × real time on huginn and 0.81 × on odin.
+  The copy costs on huginn too (software beats VA-API there on the
+  synthetic clips), so zero-copy helps both, and odin the most, where
+  decode and render share the card and nothing need cross PCIe. The
+  Framework's Intel iGPU is expected to behave like huginn. huginn has
+  no Vulkan Video H.264 or HEVC rows until it gets
+  `mesa-vulkan-drivers-freeworld` too.
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 
