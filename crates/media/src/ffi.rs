@@ -1201,10 +1201,15 @@ pub(crate) fn note_device_frame(dec: &mut ff::codec::context::Context) {
 /// The most pixels a decoder may make one picture of: 2^27, 16384 × 8192.
 /// That is twice an 11K equirect (11520 × 5760), and more than any camera
 /// Spherecut reads records (the Insta360 X5's 8K is 7680 × 3840). One
-/// picture at the limit takes at most 768 MiB (16-bit 4:4:4) and 192 MiB
-/// at 8-bit 4:2:0, where FFmpeg's default limit, `INT_MAX` pixels, would
-/// let a file make a decoder ask for 12 GiB per picture. A larger picture
-/// fails to decode.
+/// picture at the limit takes 192 MiB at 8-bit 4:2:0 and 1 GiB at 8 bytes
+/// per pixel, which ProRes 4444 with alpha (decoded as 12-bit 4:4:4:4 in
+/// 16-bit samples) and 16-bit RGBA PNG take.
+///
+/// Without it, FFmpeg's `max_pixels` is `INT_MAX`, but that is not what
+/// stops a picture: its size check (`av_image_check_size2`) refuses one
+/// whose rows, at 8 bytes per pixel plus padding, would come to 2^31
+/// bytes, which is about 2^28 pixels (16384 × 16000 passes). So this
+/// halves the largest picture a file can make a decoder allocate.
 pub const MAX_PIXELS: i64 = 1 << 27;
 
 /// Open decoder `codec` on `ctx`, limited to [`MAX_PIXELS`] per picture.

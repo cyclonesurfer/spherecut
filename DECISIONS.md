@@ -949,11 +949,16 @@ holds FFmpeg to that one file:
   and those Spherecut opens, all through `ffi::open_decoder` (`probe`,
   `VideoDecoder`, doctor's probes). That is twice an 11K equirect
   (11520 × 5760), and far above any camera Spherecut reads (the X5's 8K
-  is 7680 × 3840). One picture at the limit takes at most 768 MiB
-  (16-bit 4:4:4), or 192 MiB at 8-bit 4:2:0. FFmpeg's default, `INT_MAX`
-  pixels, lets a file make a decoder ask for 12 GiB for one picture. A
-  larger picture fails to decode, with FFmpeg's "Picture size ... exceeds
-  specified max pixel count".
+  is 7680 × 3840). One picture at the limit takes 192 MiB at 8-bit 4:2:0
+  and 1 GiB at 8 bytes per pixel, which ProRes 4444 with alpha (decoded
+  as 12-bit 4:4:4:4 in 16-bit samples) and 16-bit RGBA PNG take.
+  FFmpeg's default `max_pixels` is `INT_MAX`, but its size check
+  (`av_image_check_size2`) already refuses a picture whose rows, at 8
+  bytes per pixel plus padding, would come to 2^31 bytes: about 2^28
+  pixels (16384 × 16000 passes, 16384 × 16300 does not, checked with
+  6.1). So `MAX_PIXELS` halves the largest picture a file can make a
+  decoder allocate. A larger picture fails to decode, with FFmpeg's
+  "Picture size ... exceeds specified max pixel count".
 - `clippy.toml` forbids `std::net`'s `TcpStream`, `TcpListener` and
   `UdpSocket`, ffmpeg-next's input opens (`format::open`, `open_with`
   and the `format::input` functions), its decoder opens
