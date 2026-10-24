@@ -45,7 +45,7 @@ this stack and are used only by tests and `xtask`.
 Crates are created when they get real content, not as empty shells. The
 planned ones above don't exist yet.
 
-## Media crate (as built in M0)
+## Media crate (as built in M0, with M1's confinement of FFmpeg)
 
 `unsafe` code lives in two modules, each block with a SAFETY comment:
 
@@ -53,8 +53,9 @@ planned ones above don't exist yet.
   fields (colour, channel layout, display matrix, profile), stream media
   types, hardware device types and codec hardware configs, `HwDevice` (a
   reference-counted device context, released on drop) and `HwError`, the
-  `get_format` callback that refuses software fallback, opening files,
-  reading metadata, finding a stream's decoder and opening a video
+  `get_format` callback that refuses software fallback, opening files
+  with FFmpeg confined to them, reading metadata, finding a stream's
+  decoder, opening decoders under a picture size limit and a video
   decoder by its int codec id, reading a frame's format and planes as
   ints, copying hardware frames to system memory, the demuxer index end,
   setting other streams to `AVDISCARD_ALL`, library versions, and the
@@ -80,8 +81,27 @@ planned ones above don't exist yet.
   * A slice from `plane` ends inside the `AVBufferRef` that holds the
     plane, so a frame the decoder cropped on the left can't make it run
     past its buffer.
-  * `open_input` opens files from the path's raw bytes, because
-    ffmpeg-next's `format::input` panics on a path that isn't UTF-8.
+  * `open_input` opens every file Spherecut demuxes, and holds FFmpeg to
+    that file (D24). It refuses a path that isn't a regular file, and
+    gives FFmpeg `file:` followed by the path's raw bytes, so a name like
+    `concat:x.mp4` is never read as a URL (and a path that isn't UTF-8
+    works, where ffmpeg-next's `format::input` panics). It identifies the
+    demuxer first (`av_probe_input_buffer2` under the file protocol) and
+    refuses any outside `DEMUXERS`, the MOV/MP4 family and
+    Matroska/WebM, by name (`OpenError::Container`), before that demuxer
+    runs. It then opens the file with that demuxer, `protocol_whitelist`
+    `file`, a `format_whitelist` of `DEMUXERS`, MOV's `enable_drefs` 0
+    and its own `io_open`, `open_only_the_file`, which lets FFmpeg's
+    `io_open` open only the context's own input and refuses every other
+    open with EPERM. A thread-local list (`RefusalWatch`) names what was
+    refused during the open (`OpenError::Nested`). The decoders
+    `avformat_find_stream_info` opens get `MAX_PIXELS` through its
+    per-stream options.
+  * `open_decoder` opens every decoder (`probe`, `VideoDecoder`,
+    `open_video_decoder`, doctor's probes) with `max_pixels` =
+    `MAX_PIXELS`, 2^27 pixels (16384 × 8192). `clippy.toml` forbids
+    ffmpeg-next's own file and decoder opens, and `std::net`'s TCP and UDP
+    types, elsewhere.
   * `dict_entries` reads metadata as lossy UTF-8 (U+FFFD for bytes that
     aren't), because ffmpeg-next makes `&str`s of it unchecked.
 * `hwprobe.rs` (private) holds doctor's one-frame hardware decode and
@@ -128,10 +148,11 @@ The other modules are safe Rust:
   warning. `probe::Undecodable` holds the reason and decides which it is.
   A file FFmpeg reads as MOV/MP4 that the strict read refuses is read
   again with `FirstBox::Any`, which accepts any valid first box. Matroska
-  files are checked against their Segment length. `probe` runs inside
-  `hwprobe::capture_ffmpeg_log` and keeps FFmpeg's warnings and errors in
-  `ProbeReport.ffmpeg_log`, apart from `damage` and `warnings`, or in
-  `ProbeError.ffmpeg_log` beside the `MediaError` when it fails.
+  files are checked against their Segment length. No other container
+  gets this far: `open_input` refuses them by name (D24). `probe` runs
+  inside `hwprobe::capture_ffmpeg_log` and keeps FFmpeg's warnings and
+  errors in `ProbeReport.ffmpeg_log`, apart from `damage` and `warnings`,
+  or in `ProbeError.ffmpeg_log` beside the `MediaError` when it fails.
   `ProbeReport.structure` records how much was checked (`full`, `length`
   or `none` with a reason), and `damage` lists what was found.
   `ProbeReport.path` serializes as lossy UTF-8. The CLI fails on any
@@ -165,7 +186,11 @@ The other modules are safe Rust:
   `crates/media/fixtures/`, whose README gives the commands that
   regenerate them byte for byte.
 
-`MediaError` has six variants: `Io`, `NotAFile`, `Open`, `Decode`,
+`MediaError` has seven variants: `Io`, `NotAFile`,
+`UnsupportedContainer { path, format, description }` (FFmpeg would read
+the file with a demuxer outside `DEMUXERS`; the message names it and the
+containers Spherecut opens), `Open` (which includes a nested open
+`io_open` refused), `Decode`,
 `HwUnsupported { path, kind, refusal: HwRefusal }` (the device can't decode
 this stream; software may) and `Hardware { kind, reason: HwError }` (the
 device can't be opened). `VideoDecoder::open` returns `HwUnsupported`

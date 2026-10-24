@@ -1,6 +1,6 @@
 # Progress
 
-Updated 2026-10-24, adding agent integration to the plan. Milestone criteria are in `PLAN.md`;
+Updated 2026-10-24, with FFmpeg confined to the file Spherecut opened (D24). Milestone criteria are in `PLAN.md`;
 decisions and their reasons in `DECISIONS.md`.
 
 ## Status
@@ -8,9 +8,9 @@ decisions and their reasons in `DECISIONS.md`.
 | Milestone | State |
 |---|---|
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because RADV on Strix Halo has no Vulkan Video H.264 or HEVC decode. Evidence below |
-| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice |
+| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion stays unticked until `spherecut frame`, which it also covers, exists and has its strace test |
 | M2–M9 | Not started |
-| Agent integration (track A) | Planned 2026-10-24 at Pat's request (`PLAN.md` track A, DECISIONS D23). The CLI's JSON contract and FFmpeg's confinement are M1 criteria; A1, the MCP server, follows M1's code |
+| Agent integration (track A) | Planned 2026-10-24 at Pat's request (`PLAN.md` track A, DECISIONS D23). The CLI's JSON contract and FFmpeg's confinement are M1 criteria, and the confinement is in (D24); A1, the MCP server, follows M1's code |
 
 ## Environments
 
@@ -19,7 +19,7 @@ decisions and their reasons in `DECISIONS.md`.
 | | |
 |---|---|
 | OS | Ubuntu 24.04.5 LTS, 4 CPUs, 15 GB RAM |
-| Rust | 1.97.0 stable (rustup) with rustfmt, clippy, cargo-deny 0.20.2, cargo-audit 0.22.2; 1.88.0 for the MSRV check. clang 18.1.3 |
+| Rust | 1.97.0 stable (rustup) with rustfmt, clippy, cargo-deny 0.20.2, cargo-audit 0.22.2; 1.88.0 for the MSRV check. clang 18.1.3, strace 6.8 |
 | FFmpeg | 6.1.1 (Ubuntu), with -dev headers, libx264, libx265, libdav1d, SVT-AV1. Also 7.1, 8.1 and 9.0.2 built from upstream tags, for the compatibility checks in D2 |
 | Vulkan | lavapipe only: llvmpipe, Mesa 25.2.8, Vulkan 1.4.318 |
 | Devices | no `/dev/dri`, no GPU, so no VA-API and no Vulkan Video |
@@ -110,10 +110,12 @@ back clean, so M0 is done.
 
 ## Known issues and limits
 
-- FFmpeg isn't confined yet (found 2026-10-24 in the agent integration
-  review): `probe` on an HLS playlist (`.m3u8`) reads the files it lists,
-  even outside its folder, and a playlist with `http://` entries would
-  make FFmpeg use the network. M1 shuts this off first (PLAN M1, D23).
+- Spherecut opens only MP4/MOV and Matroska/WebM files; anything else,
+  WAV, FLAC or MP3 music beds included, needs a DECISIONS entry that
+  widens the demuxer list (D24). Within those containers FFmpeg may run
+  any decoder it has (no `codec_whitelist`), each limited to 2^27 pixels
+  per picture, which doesn't bound how many pictures a decoder keeps.
+  `spherecut frame` has no strace test yet, because it doesn't exist.
 - `VideoDecoder` copies hardware frames to system memory. Zero-copy
   (VA-API to DMA-BUF to Vulkan) is in `PLAN.md`'s M9, if profiling shows
   it matters.
@@ -156,10 +158,10 @@ back clean, so M0 is done.
   have been checked.
 - Fedora's `ffmpeg-free` lacks libx264 and libx265, which `gen-media` and
   the Tier 1 media tests need. Use RPM Fusion's `ffmpeg`. Tier 1 also needs
-  libdav1d, an FFmpeg built with Vulkan, and Mesa's lavapipe. Against a
-  9.0.2 built without Vulkan, every Tier 1 test passes except those that
-  need FFmpeg's Vulkan device: `crates/cli/tests/doctor.rs` and
-  `crates/media/tests/hw_refusal.rs` (D2).
+  libdav1d, an FFmpeg built with Vulkan, Mesa's lavapipe and strace.
+  Against a 9.0.2 built without Vulkan, every Tier 1 test passes except
+  those that need FFmpeg's Vulkan device: `crates/cli/tests/doctor.rs`
+  and `crates/media/tests/hw_refusal.rs` (D2).
 - `hw-test`'s prerequisite check still judges Fedora by installed packages
   (`ffmpeg-free`, `mesa-va-drivers-freeworld`), unlike doctor (D18).
 - `hw-test`'s `vainfo` and prerequisite checks look only at
@@ -178,12 +180,11 @@ back clean, so M0 is done.
 
 1. The first `cargo xtask hw-test` run on odin (any time; the prompt is
    the one huginn used).
-2. M1, starting with FFmpeg's confinement (protocols, demuxers, nested
-   opens). Then the `MediaBackend` trait around `VideoDecoder` (seek,
-   audio, worker threads, frame cache), the wgpu projection shader and
-   `spherecut frame` with the CLI's JSON contract, golden images on
-   lavapipe, then the eframe GUI. Bump `rust-version` to 1.95 with the
-   GUI crates (D1).
+2. M1, now that FFmpeg is confined (D24): the `MediaBackend` trait
+   around `VideoDecoder` (seek, audio, worker threads, frame cache), the
+   wgpu projection shader and `spherecut frame` with the CLI's JSON
+   contract and its strace test, golden images on lavapipe, then the
+   eframe GUI. Bump `rust-version` to 1.95 with the GUI crates (D1).
 3. The Insta360 trailer reader (metadata, calibration, IMU), needed from M2.
 4. Agent integration A1 (the MCP server) once M1's code is in, while
    M1's hardware report is pending, unless Pat wants M2 first.
