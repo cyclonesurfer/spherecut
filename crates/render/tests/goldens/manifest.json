@@ -3,7 +3,7 @@
   "checks": {
     "crop_half": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -56,7 +56,7 @@
     },
     "layout_invariance": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -103,7 +103,7 @@
     },
     "lod_heatmap": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -151,7 +151,7 @@
     },
     "matrix_601_709": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -195,7 +195,7 @@
     },
     "nadir_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -247,7 +247,7 @@
     },
     "passthrough_exact": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -276,7 +276,7 @@
     },
     "range_full_vs_limited": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -328,7 +328,7 @@
     },
     "seam_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -381,19 +381,19 @@
     },
     "shimmer_fisheye360": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
-        "control_level0_rms_change_over_ideal": 3.2181,
-        "ideal_over_level0_db_worst": 9.0367,
-        "ideal_pixels": 36864.0,
-        "ideal_psnr_db": 20.3202,
-        "ideal_rms_change_lsb": 27.0804,
-        "rms_change_lsb": 1.9628,
-        "rms_change_over_ideal_lsb_worst": -25.0552
+        "control_level0_rms_change_over_ideal": 3.2632,
+        "ideal_over_level0_db_worst": 9.3243,
+        "ideal_pixels": 28532.0,
+        "ideal_psnr_db": 19.5206,
+        "ideal_rms_change_lsb": 30.1603,
+        "rms_change_lsb": 2.2083,
+        "rms_change_over_ideal_lsb_worst": -27.8467
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
@@ -413,7 +413,7 @@
         "ideal_min_lod": 2.5,
         "ideal_over_level0_db_worst_min": 3.0,
         "ideal_pixels_min": 1000.0,
-        "ideal_psnr_db_min": 19.32,
+        "ideal_psnr_db_min": 18.52,
         "rms_change_over_ideal_lsb_worst_max": 2.0
       },
       "view": {
@@ -439,7 +439,7 @@
     },
     "shimmer_tinyplanet": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -497,7 +497,7 @@
     },
     "siting_left_center": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -540,7 +540,7 @@
     },
     "tenbit_ramp": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -593,7 +593,7 @@
     },
     "tinyplanet_pole": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -645,7 +645,7 @@
     },
     "zenith_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -699,7 +699,7 @@
   "images": {
     "fisheye_180": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -759,7 +759,7 @@
     },
     "fisheye_360": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -821,7 +821,7 @@
     },
     "morph_half": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -880,7 +880,7 @@
     },
     "rect_forward": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -937,7 +937,7 @@
     },
     "rect_ypr": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -998,7 +998,7 @@
     },
     "stereo_tinyplanet": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fd5dc983f5",
+      "commit": "5b15f88fa4",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",

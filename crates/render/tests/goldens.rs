@@ -316,13 +316,20 @@ fn ideal_dir(v: &ViewParams, size: (u32, u32)) -> impl Fn(f64, f64) -> Option<DV
 
 /// The pixels of a `size` view of `f` that every view in `views`
 /// minifies by [`IDEAL_MIN_LOD`] levels or more, by the CPU's analytic
-/// LOD of luma before clamping.
+/// LOD of luma before clamping, and shows whole: a pixel with a corner
+/// past θ = π is black in the render and partly black in the ideal, and
+/// would only dilute the comparison.
 fn minified(f: &Frame, views: &[ViewParams], size: (u32, u32)) -> Vec<bool> {
     let mut mask = vec![true; size.0 as usize * size.1 as usize];
     for v in views {
         let lod = reference::lod_map(f, v, size, &Placement::default()).unwrap();
-        for (m, l) in mask.iter_mut().zip(lod.data.chunks(3)) {
-            *m &= l[2] >= IDEAL_MIN_LOD;
+        let dir = ideal_dir(v, size);
+        for (k, (m, l)) in mask.iter_mut().zip(lod.data.chunks(3)).enumerate() {
+            let (i, j) = ((k % size.0 as usize) as f64, (k / size.0 as usize) as f64);
+            let whole = [(i, j), (i + 1.0, j), (i, j + 1.0), (i + 1.0, j + 1.0)]
+                .iter()
+                .all(|&(x, y)| dir(x, y).is_some());
+            *m &= whole && l[2] >= IDEAL_MIN_LOD;
         }
     }
     mask
