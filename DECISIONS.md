@@ -28,8 +28,9 @@ wgpu and `spherecut-render`. wgpu 30.0.1 itself needs 1.87, but egui 0.37,
 which pins it (D7), needs 1.95, so the workspace moves once, with wgpu,
 rather than again in slice 7. Fedora 44's RPM is 1.99 (huginn's), not
 1.95 as said above, so Fedora still needs no rustup to build. Checked at
-4f5f9dd: `cargo +1.95 build --workspace --all-targets` builds without
-warnings and `cargo +1.95 test --workspace` passes (368 tests).
+4f5f9dd, and again at 2b11aa7 after the slice's first review:
+`cargo +1.95 build --workspace --all-targets` builds without warnings and
+`cargo +1.95 test --workspace` passes (368 tests, then 377).
 
 ## D2. FFmpeg through ffmpeg-next, hardware paths over ffmpeg-sys-next
 
