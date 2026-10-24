@@ -320,10 +320,14 @@ fn near_a_tie(v: f64) -> bool {
 fn both_upload_paths_fill_a_slot_alike() {
     let gpu = gpu();
     for kind in [Kind::Nv12, Kind::P010, Kind::I422p10, Kind::Gbrp] {
-        // Rows 300 bytes apart for one, the belt's own 256-byte pitch for
-        // the other, so that it copies row by row and at once.
-        for pad in [17usize, 0] {
-            let frame = noise(kind, (70, 33), pad * 2, 11);
+        // 70 wide with 34 bytes of padding: no plane's rows are 256-byte
+        // aligned, so the belt copies them one by one. 256 wide without
+        // padding: every plane's rows are a multiple of 256 bytes, the
+        // belt's own pitch, so it copies each plane at once.
+        for (width, pad) in [(70u32, 34usize), (256, 0)] {
+            let frame = noise(kind, (width, 33), pad, 11);
+            let aligned = frame.planes.iter().all(|(_, stride, _)| stride % 256 == 0);
+            assert_eq!(aligned, pad == 0, "{kind:?} {width}");
             let mut out = Vec::new();
             for path in [UploadPath::WriteTexture, UploadPath::StagingBelt] {
                 let mut uploader = Uploader::with_path(gpu, path);
@@ -340,7 +344,7 @@ fn both_upload_paths_fill_a_slot_alike() {
                 assert_eq!(stats.bytes, bytes as u64);
                 out.push(levels(&slot));
             }
-            assert_eq!(out[0], out[1], "{kind:?}, pad {pad}");
+            assert_eq!(out[0], out[1], "{kind:?}, {width} wide, pad {pad}");
         }
     }
 }
