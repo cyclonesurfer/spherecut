@@ -97,6 +97,9 @@ pub struct PlaneShape {
     pub format: PlaneFormat,
     pub size: (u32, u32),
     pub levels: u32,
+    /// log2 of the subsampling, across and down, as the layout has it:
+    /// (1, 1) for 4:2:0 chroma, (2, 0) for 4:1:1.
+    pub log2_sub: (u8, u8),
 }
 
 /// How the shader picks a frame's samples ([`SlotShape::layout_code`]).
@@ -185,6 +188,7 @@ impl SlotShape {
                     format,
                     size: (w, h),
                     levels: mip_levels(w, h),
+                    log2_sub: p.log2_sub,
                 }
             })
             .collect();
@@ -208,8 +212,9 @@ impl SlotShape {
     }
 
     /// Whether a frame of shape `other` can be uploaded into a slot of
-    /// this one: the same planes at the same sizes. Mip counts and the
-    /// depth don't matter, since the ingest pass normalises any depth.
+    /// this one: the same planes at the same sizes and subsampling. Mip
+    /// counts and the depth don't matter, since the ingest pass
+    /// normalises any depth.
     pub fn fits(&self, other: &SlotShape) -> bool {
         self.size == other.size
             && self.kind == other.kind
@@ -218,7 +223,7 @@ impl SlotShape {
                 .planes
                 .iter()
                 .zip(&other.planes)
-                .all(|(a, b)| a.format == b.format && a.size == b.size)
+                .all(|(a, b)| a.format == b.format && a.size == b.size && a.log2_sub == b.log2_sub)
     }
 
     /// The shader's `layout` code.
@@ -338,6 +343,20 @@ mod tests {
         assert!(a.fits(&SlotShape::of(&i420p12, (64, 32)).unwrap()));
         assert!(!a.fits(&SlotShape::of(&i420p10, (64, 34)).unwrap()));
         assert!(!a.fits(&SlotShape::of(&p010, (64, 32)).unwrap()));
+        // 4:2:0 and 4:2:2 chroma of the same size, at 2×1, don't share a
+        // slot: their chroma sits differently.
+        let i422p10 = layout(
+            "yuv422p10le",
+            &[(1, (0, 0)), (1, (1, 0)), (1, (1, 0))],
+            SampleBytes::Two,
+            10,
+        );
+        let (s420, s422) = (
+            SlotShape::of(&i420p10, (2, 1)).unwrap(),
+            SlotShape::of(&i422p10, (2, 1)).unwrap(),
+        );
+        assert_eq!(s420.planes[1].size, s422.planes[1].size);
+        assert!(!s420.fits(&s422));
 
         // Forced levels stop at what a plane can have.
         let s = SlotShape::of(&i420p10, (45, 23)).unwrap().with_levels(9);

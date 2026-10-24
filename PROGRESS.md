@@ -187,7 +187,10 @@ back clean, so M0 is done.
   slice 3b's, so whether the staging belt should replace
   `write_texture` is unmeasured on a GPU; the smoke run here (640×320,
   4 frames) shows the allocator's block count steady on both paths.
-  16-bit sources lose their low 4 bits in the f16 planes (D31).
+  16-bit sources lose their low 4 bits in the f16 planes, and a 360°
+  frame whose width isn't a multiple of its chroma subsampling (odd-width
+  4:2:0, which AV1 and VP9 allow) shows a half-texel chroma step at the
+  ±180° seam (D31).
 - The M1 plan's Euler table for `frame`'s tests (section 12.1) says
   `--roll 90` puts the U marker on the right edge's side; with the plan's own
   convention, q = R_y(−yaw) · R_x(pitch) · R_z(−roll) with roll > 0

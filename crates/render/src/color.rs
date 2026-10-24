@@ -145,25 +145,25 @@ pub struct SourceUniform {
 /// Where the chroma texture is read for a point of the luma texture:
 /// `chroma_uv = luma_uv · scale + offset`. A chroma sample sits at
 /// `ChromaSiting::offset()` between the first and last luma samples of
-/// its block, so for 2^s luma samples per chroma sample and a luma plane
-/// `w` wide whose chroma plane is `wc` wide, `scale = w / (2^s · wc)` (1
-/// unless the size is odd) and `offset = (2^s − 1)(½ − t) / (2^s · wc)`:
-/// Left 4:2:0 reads half a luma texel to the right, Center reads in
-/// place. A direction that isn't subsampled has no offset.
+/// its block, so for 2^s luma samples per chroma sample (the layout's
+/// subsampling) and a luma plane `w` wide whose chroma plane is `wc`
+/// wide, `scale = w / (2^s · wc)` (1 unless the size isn't a multiple of
+/// 2^s) and `offset = (2^s − 1)(½ − t) / (2^s · wc)`: Left 4:2:0 reads
+/// half a luma texel to the right, Center reads in place. A direction
+/// that isn't subsampled has no offset.
 pub fn chroma_transform(shape: &SlotShape, siting: ChromaSiting) -> ([f64; 2], [f64; 2]) {
     let Some(chroma) = shape.planes.get(1) else {
         return ([1.0, 1.0], [0.0, 0.0]);
     };
     let (tx, ty) = siting.offset();
-    let axis = |luma: u32, c: u32, t: f64| {
+    let axis = |luma: u32, c: u32, log2_sub: u8, t: f64| {
         let (luma, c) = (f64::from(luma), f64::from(c));
-        // Luma samples per chroma sample, 2^s, from the plane sizes.
-        let n = (luma / c).round().max(1.0);
+        let n = f64::from(1u32 << log2_sub.min(4));
         let scale = luma / (n * c);
         (scale, (n - 1.0) * (0.5 - t) / (n * c))
     };
-    let (sx, ox) = axis(shape.size.0, chroma.size.0, tx);
-    let (sy, oy) = axis(shape.size.1, chroma.size.1, ty);
+    let (sx, ox) = axis(shape.size.0, chroma.size.0, chroma.log2_sub.0, tx);
+    let (sy, oy) = axis(shape.size.1, chroma.size.1, chroma.log2_sub.1, ty);
     ([sx, sy], [ox, oy])
 }
 
@@ -331,6 +331,79 @@ mod tests {
         let m = fold(&color(Range::Limited, Matrix::Bt709), LayoutKind::Gray, 8);
         let rgb = apply(&m, [235.0, 0.0, 255.0], 8);
         assert!(rgb.iter().all(|c| (c - 1.0).abs() < 1e-12), "{rgb:?}");
+    }
+
+    fn shape(name: &str, size: (u32, u32), sub: (u8, u8)) -> SlotShape {
+        use spherecut_core::video::{ColorFamily, PixelLayout, PlaneDesc, SampleBytes};
+        let plane = |log2_sub| PlaneDesc {
+            components: 1,
+            bytes: SampleBytes::One,
+            log2_sub,
+        };
+        let layout = PixelLayout {
+            name: name.into(),
+            planes: vec![plane((0, 0)), plane(sub), plane(sub)],
+            family: ColorFamily::Yuv,
+            bit_depth: 8,
+            msb_aligned: false,
+        };
+        SlotShape::of(&layout, size).unwrap()
+    }
+
+    #[test]
+    fn chroma_sits_where_its_siting_says() {
+        // Values worked out by hand from the definition: chroma sample j
+        // of a 2^s block sits at luma position 2^s·j + (2^s − 1)·t, in
+        // samples, so luma uv (that + ½) / w reads chroma uv (j + ½) / wc.
+        let check = |s: &SlotShape, siting, want: ([f64; 2], [f64; 2])| {
+            let got = chroma_transform(s, siting);
+            for a in 0..2 {
+                assert!(
+                    (got.0[a] - want.0[a]).abs() < 1e-15 && (got.1[a] - want.1[a]).abs() < 1e-15,
+                    "{} {siting:?}: {got:?}, not {want:?}",
+                    s.describe()
+                );
+            }
+        };
+        let i420 = shape("yuv420p", (64, 32), (1, 1));
+        // Left: half a luma texel right (¼ of a chroma texel), centred
+        // down. Center: in place. TopLeft: half a texel right and down.
+        check(&i420, ChromaSiting::Left, ([1.0, 1.0], [0.25 / 32.0, 0.0]));
+        check(&i420, ChromaSiting::Center, ([1.0, 1.0], [0.0, 0.0]));
+        check(
+            &i420,
+            ChromaSiting::TopLeft,
+            ([1.0, 1.0], [0.25 / 32.0, 0.25 / 16.0]),
+        );
+        check(
+            &i420,
+            ChromaSiting::BottomLeft,
+            ([1.0, 1.0], [0.25 / 32.0, -0.25 / 16.0]),
+        );
+        // 4:2:2 isn't subsampled down, so only Left's offset across.
+        let i422 = shape("yuv422p", (64, 32), (1, 0));
+        check(
+            &i422,
+            ChromaSiting::TopLeft,
+            ([1.0, 1.0], [0.25 / 32.0, 0.0]),
+        );
+        // An odd width: 5 luma samples, 3 chroma ones covering 6.
+        let odd = shape("yuv420p", (5, 4), (1, 1));
+        check(
+            &odd,
+            ChromaSiting::Left,
+            ([5.0 / 6.0, 1.0], [0.5 / 6.0, 0.0]),
+        );
+        // 4:1:1 at a width that isn't a multiple of 4: 6 luma samples, 2
+        // chroma ones of 4 each. The factor is the layout's 4, not 6 / 2.
+        let i411 = shape("yuv411p", (6, 2), (2, 0));
+        assert_eq!(i411.planes[1].size, (2, 2));
+        check(
+            &i411,
+            ChromaSiting::Left,
+            ([0.75, 1.0], [3.0 * 0.5 / 8.0, 0.0]),
+        );
+        check(&i411, ChromaSiting::Center, ([0.75, 1.0], [0.0, 0.0]));
     }
 
     #[test]

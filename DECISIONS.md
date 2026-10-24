@@ -2063,10 +2063,13 @@ Where this differs from the plan, from the evidence:
   `chroma_scale` beside `chroma_offset`: chroma uv = luma uv · scale +
   offset, with scale = w / (2^s · w_c) and offset = (2^s − 1)(½ − t) /
   (2^s · w_c) for a siting at t between a block's first and last luma
-  samples. The plan's offset alone (½ / W) is Left's at even sizes; the
-  scale keeps odd sizes, whose chroma planes round up, aligned, and the
-  general form covers every siting. Its `layout` member is `kind`, since
-  `layout` is a reserved word in WGSL.
+  samples, and 2^s the layout's own subsampling (`PlaneShape::log2_sub`;
+  3a's first version took it from the plane sizes, which gave 3 rather
+  than 4 for 4:1:1 at a width of 6). The plan's offset alone (½ / W) is
+  Left's at even sizes; the scale keeps sizes that aren't a multiple of
+  2^s, whose chroma planes round up, aligned away from the ±180° seam,
+  and the general form covers every siting. Its `layout` member is
+  `kind`, since `layout` is a reserved word in WGSL.
 - The `View` uniform holds each projection's constant (`k`: tan(half)
   for rectilinear, half for fisheye, tan(half / 2) for stereographic,
   with half capped as `Lens::half` caps it) rather than the half angle,
@@ -2103,8 +2106,11 @@ dB for the LOD heat map (57.4 to 58.5, 69 and 63 to 78 before the
 shaders rounded their f16 stores). Each floor is the measured PSNR less
 3 dB. Negative controls: level 0 against trilinear is 22.6 to 43.8 dB,
 and one siting against another 19.6 dB, against 52.5 for the right one.
-The mips match an area mean computed independently to one code at 8
-bits, and exactly (its nearest half) for deep planes unless the mean is
+A raised chroma column or row peaks within 0.001 of a luma texel of
+where each siting's definition puts it (calibrated with luma, not the
+renderer's chroma arithmetic, which the GPU and the reference share: a
+mirrored offset passed every other render test). The mips match an area
+mean computed independently to one code at 8 bits, and exactly (its nearest half) for deep planes unless the mean is
 within a millionth of a tie; every 10- and 12-bit code ingests as its
 nearest half; and the linear target holds the nearest half of every
 grey level's EOTF. The upload bench's smoke run (640×320, 4 frames) shows a
@@ -2122,8 +2128,14 @@ the GPU's quads, so a CPU twin can check it. Anisotropy is
 implementation-defined, so only the GUI uses it. One device function
 keeps slice 5b's change to one place.
 
-Limits: the comparison is on lavapipe only until slice 3b's Tier 2
-tests; the floors are lavapipe's and may need recalibrating for another
+Limits: a 360° frame whose width isn't a multiple of its chroma
+subsampling (an odd-width 4:2:0 frame, which AV1 and VP9 can code but
+H.264 and HEVC can't, and which 360° cameras don't make) shows a chroma
+step at the ±180° seam: its chroma texture repeats every 2^s · w_c luma
+texels, one more than the picture, so chroma jumps half a chroma texel
+where U wraps (the first review measured blue jumping 42 codes between
+adjacent pixels of a 301-wide frame, against 3 at 300). The
+comparison is on lavapipe only until slice 3b's Tier 2 tests; the floors are lavapipe's and may need recalibrating for another
 Mesa. 16-bit sources lose their low 4 bits in f16. The goldens'
 `passthrough_exact` (plan section 6) can't hold as written for limited
 range through an f16 linear target, even with every store rounded to

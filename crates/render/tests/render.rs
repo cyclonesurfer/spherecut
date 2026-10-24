@@ -303,6 +303,130 @@ fn chroma_siting_is_honoured() {
     }
 }
 
+/// Where along the middle row (`across`) or column of `img` channel `c`
+/// rises above its value at the image's edge: the centroid of the rise,
+/// in output pixels.
+fn peak(img: &Image, across: bool, c: usize) -> f64 {
+    let (n, mid) = if across {
+        (img.width, img.height / 2)
+    } else {
+        (img.height, img.width / 2)
+    };
+    let at = |k: u32| {
+        let (x, y) = if across { (k, mid) } else { (mid, k) };
+        img.unit_at(x, y).unwrap()[c]
+    };
+    let base = at(0);
+    let (mut sum, mut weight) = (0.0, 0.0);
+    for k in 0..n {
+        let rise = at(k) - base;
+        if rise > 1e-3 {
+            sum += (f64::from(k) + 0.5) * rise;
+            weight += rise;
+        }
+    }
+    assert!(weight > 0.0, "nothing rises");
+    sum / weight
+}
+
+#[test]
+fn chroma_sits_where_its_siting_puts_it() {
+    // One raised Cb column (or row) of a 4:2:0 frame, magnified about 27
+    // times, must peak where the siting's definition puts that chroma
+    // sample: chroma sample j at luma sample 2j + t, so at luma texel
+    // coordinate 2j + ½ + t, for t = 0 (Left across, TopLeft down), ½
+    // (Center across, Left down) or 1 (BottomLeft down). The geometry is
+    // calibrated with two raised luma columns (rows), whose peaks are at
+    // their texel centres, so nothing here comes from the renderer's own
+    // chroma arithmetic, which the GPU and the reference share.
+    let (w, h) = (256u32, 128u32);
+    let size = (192, 192);
+    let v = view(0.0, 0.0, 0.0, lens(Projection::Rectilinear, 10.0));
+    let opts = StillOptions {
+        depth: Depth::Sixteen,
+        debug: DebugMode::Level0,
+        ..StillOptions::default()
+    };
+    let grey = RgbImage {
+        width: w,
+        height: h,
+        pixels: vec![[0.5; 3]; (w * h) as usize],
+    };
+    // Plane `p` of an I420 frame at `siting`, flat but for `raised` (luma
+    // or chroma column or row `k`), 60 codes up.
+    let raised = |siting, p: usize, across: bool, k: u32| {
+        let mut f = frame(
+            &grey,
+            Kind::I420,
+            color(Range::Full, Matrix::Bt709, siting),
+            0,
+        );
+        for (i, (bytes, _, _)) in f.planes.iter_mut().enumerate() {
+            bytes.fill(128);
+            if i == p {
+                let (pw, ph) = (
+                    if p == 0 { w } else { w / 2 },
+                    if p == 0 { h } else { h / 2 },
+                );
+                for y in 0..ph {
+                    for x in 0..pw {
+                        if (if across { x } else { y }) == k {
+                            bytes[(y * pw + x) as usize] += 60;
+                        }
+                    }
+                }
+            }
+        }
+        f
+    };
+    let mut r = renderer()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut still = |f: &Frame| r.render(gpu(), f, &v, size, &opts).unwrap();
+    // The view looks at luma texel (128, 64); chroma sample (64, 32).
+    for (across, line, cases) in [
+        (
+            true,
+            127,
+            vec![(ChromaSiting::Left, 0.0), (ChromaSiting::Center, 0.5)],
+        ),
+        (
+            false,
+            63,
+            vec![
+                (ChromaSiting::TopLeft, 0.0),
+                (ChromaSiting::Left, 0.5),
+                (ChromaSiting::BottomLeft, 1.0),
+            ],
+        ),
+    ] {
+        // Luma lines `line` and `line + 2`, centred at `line + ½` and
+        // `line + 2½`: output pixels to luma texels. Green rises with Y.
+        let a = peak(
+            &still(&raised(ChromaSiting::Center, 0, across, line)),
+            across,
+            1,
+        );
+        let b = peak(
+            &still(&raised(ChromaSiting::Center, 0, across, line + 2)),
+            across,
+            1,
+        );
+        let texel = |px: f64| f64::from(line) + 0.5 + (px - a) * 2.0 / (b - a);
+        let j = (line + 1) / 2;
+        for (siting, t) in cases {
+            // Blue rises with Cb.
+            let got = texel(peak(&still(&raised(siting, 1, across, j)), across, 2));
+            let want = f64::from(2 * j) + 0.5 + t;
+            assert!(
+                (got - want).abs() < 0.1,
+                "{siting:?} chroma {} {j} peaks at luma {got:.3}, not {want}",
+                if across { "column" } else { "row" }
+            );
+        }
+    }
+}
+
 #[test]
 fn sixteen_bits_and_linear_light() {
     let f = frame(
