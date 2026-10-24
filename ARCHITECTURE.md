@@ -26,8 +26,10 @@ and `testkit` (test helpers) sit beside this stack and are used only by
 tests and `xtask`.
 
 render depends on core and sphere only, not on media: frames reach it
-through `core::video::VideoPlanes`, so its tests, the goldens and M3's
-stitcher feed it without FFmpeg.
+through `core::video::VideoPlanes`, so the library has no FFmpeg
+dependency, and its tests, the goldens and M3's stitcher make the frames
+they feed it without decoding. Its test binaries do link FFmpeg, through
+synth, which depends on media.
 
 | Crate | Role | Status |
 |---|---|---|
