@@ -1083,26 +1083,37 @@ const RECT: (u32, u32) = (256, 144);
 const SQUARE: (u32, u32) = (192, 192);
 const PLANET: (u32, u32) = (256, 256);
 
-/// A stored view of the grid, checked against the CPU: the first rows.
+/// A stored view of the grid, checked against the CPU and then by `more`,
+/// the row's own checks, before the image is stored, so that the manifest
+/// and a Tier 2 report have every number the row measured: the first rows.
 fn stored_grid_view(
     run: &mut Run<'_>,
     what: &str,
     v: ViewParams,
     size: (u32, u32),
-) -> Option<Image> {
+    more: impl FnOnce(&mut Run<'_>, &Source, &Image),
+) {
     let s = grid_nv12();
-    let got = run.render_with(&s.frame, &v, size, DebugMode::Off)?;
+    let Some(got) = run.render_with(&s.frame, &v, size, DebugMode::Off) else {
+        return;
+    };
     match reference::render_trilinear(&s.frame, &v, size) {
         Ok(cpu) => run.cpu_check("cpu", &got, &cpu),
         Err(e) => run.fail(format!("the CPU reference: {e}")),
     }
+    more(run, &s, &got);
     run.stored(what, &got, &s, view_about(&v, size));
-    Some(got)
 }
 
 fn rect_forward(run: &mut Run<'_>) {
     let v = ViewParams::new(DQuat::IDENTITY, lens(Projection::Rectilinear, 90.0));
-    stored_grid_view(run, "the grid, rectilinear 90°, looking forward", v, RECT);
+    stored_grid_view(
+        run,
+        "the grid, rectilinear 90°, looking forward",
+        v,
+        RECT,
+        |_, _, _| {},
+    );
 }
 
 /// The camera's right, up and forward for a yaw, pitch and roll in
@@ -1151,14 +1162,19 @@ fn rect_pixel(
 fn rect_ypr(run: &mut Run<'_>) {
     let (yaw, pitch, roll) = (30.0, 20.0, 10.0);
     let v = ViewParams::new(ypr(yaw, pitch, roll), lens(Projection::Rectilinear, 90.0));
-    let Some(got) = stored_grid_view(
+    stored_grid_view(
         run,
         "the grid, rectilinear 90°, yaw 30, pitch 20, roll 10",
         v,
         RECT,
-    ) else {
-        return;
-    };
+        |run, _, got| ypr_markers(run, got, (yaw, pitch, roll)),
+    );
+}
+
+/// The markers of `rect_ypr`, where the convention's words put them in
+/// `got`, a 90° view at `angles` (yaw, pitch and roll in degrees).
+fn ypr_markers(run: &mut Run<'_>, got: &Image, angles: (f64, f64, f64)) {
+    let (yaw, pitch, roll) = angles;
     let half = 45f64.to_radians();
     let at = |deg: (f64, f64)| {
         LonLat {
@@ -1240,24 +1256,28 @@ fn black_past_pi(run: &mut Run<'_>, got: &Image, v: &ViewParams) {
 fn fisheye_180(run: &mut Run<'_>) {
     // Looking back, so the seam runs through the middle.
     let v = ViewParams::new(ypr(180.0, 0.0, 0.0), lens(Projection::Fisheye, 180.0));
-    if let Some(got) = stored_grid_view(
+    stored_grid_view(
         run,
         "the grid, fisheye 180°, looking back across the seam",
         v,
         SQUARE,
-    ) {
-        black_past_pi(run, &got, &v);
-    }
+        |run, _, got| black_past_pi(run, got, &v),
+    );
 }
 
 fn fisheye_360(run: &mut Run<'_>) {
     let v = ViewParams::new(ypr(90.0, 30.0, 0.0), lens(Projection::Fisheye, 360.0));
-    if let Some(got) = stored_grid_view(run, "the grid, fisheye 360°, yaw 90, pitch 30", v, SQUARE)
-    {
-        black_past_pi(run, &got, &v);
-        let past = run.measured["pixels_past_pi"].as_f64().unwrap_or(0.0);
-        run.at_least("pixels_past_pi_checked", past, 1.0);
-    }
+    stored_grid_view(
+        run,
+        "the grid, fisheye 360°, yaw 90, pitch 30",
+        v,
+        SQUARE,
+        |run, _, got| {
+            black_past_pi(run, got, &v);
+            let past = run.measured["pixels_past_pi"].as_f64().unwrap_or(0.0);
+            run.at_least("pixels_past_pi_checked", past, 1.0);
+        },
+    );
 }
 
 /// `got` and its level-0 control against the ideal: a calibrated floor,
@@ -1282,35 +1302,25 @@ fn ideal_check(run: &mut Run<'_>, mask: &[bool], got: &Image, level0: &Image, id
 
 fn stereo_tinyplanet(run: &mut Run<'_>) {
     let v = ViewParams::new(ypr(0.0, -90.0, 0.0), lens(Projection::Stereographic, 300.0));
-    let s = grid_nv12();
-    let Some(got) = stored_grid_view(
+    stored_grid_view(
         run,
         "the grid, tiny planet (stereographic 300°, pitch −90)",
         v,
         PLANET,
-    ) else {
-        return;
-    };
-    let Some(level0) = run.render_with(&s.frame, &v, PLANET, DebugMode::Level0) else {
-        return;
-    };
-    let mask = minified(&s.frame, &[v], PLANET);
-    let ideal = render_view_ideal(
-        Pattern::Grid,
-        ideal_dir_in(&v, PLANET, &mask),
-        PLANET,
-        IDEAL_N_GRID,
+        |run, s, got| {
+            let Some(level0) = run.render_with(&s.frame, &v, PLANET, DebugMode::Level0) else {
+                return;
+            };
+            let mask = minified(&s.frame, &[v], PLANET);
+            let ideal = render_view_ideal(
+                Pattern::Grid,
+                ideal_dir_in(&v, PLANET, &mask),
+                PLANET,
+                IDEAL_N_GRID,
+            );
+            ideal_check(run, &mask, got, &level0, &ideal);
+        },
     );
-    ideal_check(run, &mask, &got, &level0, &ideal);
-    // The stored row ended with `stored`; record the ideal's numbers too.
-    let entry = run
-        .images
-        .get_mut("stereo_tinyplanet")
-        .and_then(Value::as_object_mut);
-    if let Some(e) = entry {
-        e.insert("thresholds".into(), Value::Object(run.thresholds.clone()));
-        e.insert("measured".into(), Value::Object(run.measured.clone()));
-    }
 }
 
 fn morph_half(run: &mut Run<'_>) {
@@ -1326,6 +1336,7 @@ fn morph_half(run: &mut Run<'_>) {
         "the grid, rectilinear to stereographic at 0.5, 150°",
         v,
         RECT,
+        |_, _, _| {},
     );
 }
 

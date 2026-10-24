@@ -3,7 +3,7 @@
   "checks": {
     "crop_half": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -56,7 +56,7 @@
     },
     "layout_invariance": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -103,7 +103,7 @@
     },
     "lod_heatmap": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -151,7 +151,7 @@
     },
     "matrix_601_709": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -195,7 +195,7 @@
     },
     "nadir_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -247,7 +247,7 @@
     },
     "passthrough_exact": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -276,7 +276,7 @@
     },
     "range_full_vs_limited": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -328,7 +328,7 @@
     },
     "seam_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -381,7 +381,7 @@
     },
     "shimmer_fisheye360": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -439,7 +439,7 @@
     },
     "shimmer_tinyplanet": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -497,7 +497,7 @@
     },
     "siting_left_center": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -540,7 +540,7 @@
     },
     "tenbit_ramp": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -593,7 +593,7 @@
     },
     "tinyplanet_pole": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -645,7 +645,7 @@
     },
     "zenith_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -699,14 +699,16 @@
   "images": {
     "fisheye_180": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
         "cpu_max_channel": 0.0219,
-        "cpu_psnr_db": 50.0102
+        "cpu_psnr_db": 50.0102,
+        "pixels_past_pi": 0.0,
+        "pixels_past_pi_not_black": 0.0
       },
       "png": "fisheye_180.png",
       "png_fnv64": "01169330bf1f27e2",
@@ -731,6 +733,7 @@
           "psnr_db_min": 48.0,
           "ssim_min": 0.995
         },
+        "pixels_past_pi_not_black_max": 0.0,
         "same_driver": "identical pixels"
       },
       "view": {
@@ -756,14 +759,17 @@
     },
     "fisheye_360": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
         "cpu_max_channel": 0.0197,
-        "cpu_psnr_db": 49.5993
+        "cpu_psnr_db": 49.5993,
+        "pixels_past_pi": 7888.0,
+        "pixels_past_pi_checked": 7888.0,
+        "pixels_past_pi_not_black": 0.0
       },
       "png": "fisheye_360.png",
       "png_fnv64": "d22aee2947194f3b",
@@ -788,6 +794,8 @@
           "psnr_db_min": 48.0,
           "ssim_min": 0.995
         },
+        "pixels_past_pi_checked_min": 1.0,
+        "pixels_past_pi_not_black_max": 0.0,
         "same_driver": "identical pixels"
       },
       "view": {
@@ -813,7 +821,7 @@
     },
     "morph_half": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -872,7 +880,7 @@
     },
     "rect_forward": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -929,14 +937,16 @@
     },
     "rect_ypr": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
+        "control_signs_misplaced": 3.0,
         "cpu_max_channel": 0.0109,
-        "cpu_psnr_db": 53.2003
+        "cpu_psnr_db": 53.2003,
+        "markers_found": 3.0
       },
       "png": "rect_ypr.png",
       "png_fnv64": "2b1d20e311b88ee4",
@@ -954,8 +964,10 @@
       },
       "source_fnv64": "0e2be80e98b1f2c5",
       "thresholds": {
+        "control_signs_misplaced_min": 3.0,
         "cpu_max_channel_max": 0.1,
         "cpu_psnr_db_min": 50.2,
+        "markers_found_min": 3.0,
         "other_driver": {
           "max_lsb": 4.0,
           "psnr_db_min": 48.0,
@@ -986,7 +998,7 @@
     },
     "stereo_tinyplanet": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "5630c516da",
+      "commit": "fd5dc983f5",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
