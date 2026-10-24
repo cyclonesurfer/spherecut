@@ -25,6 +25,19 @@ pub fn run(a: Args) -> Result<()> {
             );
         }
     }
+    // The Tier 1 tests run probe and doctor under strace to check that
+    // they open no network socket (D24), and fail without it.
+    let strace = Command::new("strace")
+        .arg("-V")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !strace {
+        bail!(
+            "strace is not installed, and the Tier 1 tests need it: \
+             sudo dnf install strace (Fedora), sudo pacman -S strace (Arch) \
+             or sudo apt install strace (Ubuntu)"
+        );
+    }
     let mut fmt = Command::new("cargo");
     fmt.args(["fmt", "--all"]);
     if !a.fix {
