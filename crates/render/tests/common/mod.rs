@@ -142,6 +142,8 @@ pub enum Kind {
     I444,
     I444p12,
     Gray,
+    /// 16-bit grey, the bits low: the deepest a plane comes.
+    Gray16,
     Gbrp,
 }
 
@@ -157,6 +159,7 @@ impl Kind {
             Kind::I444 => "yuv444p",
             Kind::I444p12 => "yuv444p12le",
             Kind::Gray => "gray",
+            Kind::Gray16 => "gray16le",
             Kind::Gbrp => "gbrp",
         }
     }
@@ -165,6 +168,7 @@ impl Kind {
         match self {
             Kind::P010 | Kind::I420p10 | Kind::I422p10 => 10,
             Kind::I444p12 => 12,
+            Kind::Gray16 => 16,
             _ => 8,
         }
     }
@@ -192,7 +196,7 @@ impl Kind {
         };
         let (planes, family) = match self {
             Kind::Nv12 | Kind::P010 => (vec![plane(1, (0, 0)), plane(2, sub)], ColorFamily::Yuv),
-            Kind::Gray => (vec![plane(1, (0, 0))], ColorFamily::Gray),
+            Kind::Gray | Kind::Gray16 => (vec![plane(1, (0, 0))], ColorFamily::Gray),
             Kind::Gbrp => (vec![plane(1, (0, 0)); 3], ColorFamily::Rgb),
             _ => (
                 vec![plane(1, (0, 0)), plane(1, sub), plane(1, sub)],
@@ -269,7 +273,7 @@ pub fn frame(img: &RgbImage, kind: Kind, color: ColorInfo, pad: usize) -> Frame 
                 .collect();
             vec![codes[0].clone(), uv]
         }
-        Kind::Gray => vec![codes[0].clone()],
+        Kind::Gray | Kind::Gray16 => vec![codes[0].clone()],
         _ => codes,
     };
     let shift = if kind == Kind::P010 { 6 } else { 0 };

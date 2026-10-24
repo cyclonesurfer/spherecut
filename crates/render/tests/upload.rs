@@ -275,18 +275,21 @@ fn deep_codes_are_shifted_and_clamped() {
 
 #[test]
 fn deep_codes_round_to_the_nearest_half() {
-    // Every 10-bit code, high-aligned (P010) and low (yuv420p10), and
-    // every 12-bit code, through the ingest pass: each texel must be
-    // code / (2^b − 1) rounded to the nearest half, ties to even. The
-    // shader rounds it itself; lavapipe's own conversion into an f16
-    // target truncates, which leaves about half the codes one half
-    // below (DECISIONS D31).
+    // Every 10-bit code, high-aligned (P010) and low (yuv420p10), every
+    // 12-bit code and every 16-bit code, through the ingest pass: each
+    // texel must be code / (2^b − 1) rounded to the nearest half, ties to
+    // even. The shader rounds it itself; lavapipe's own conversion into
+    // an f16 target truncates, which leaves about half the codes one half
+    // below (DECISIONS D31). Only 16 bits reach the subnormal halves
+    // (codes 1 to 3, below 2^−14), and among them are codes an f32
+    // division would put on the wrong side of a tie (65455 and 65519).
     let gpu = gpu();
     let mut uploader = Uploader::new(gpu);
     for (kind, size) in [
         (Kind::P010, (64, 16)),
         (Kind::I420p10, (64, 16)),
         (Kind::I444p12, (64, 64)),
+        (Kind::Gray16, (256, 256)),
     ] {
         let max = (1usize << kind.bits()) - 1;
         let frame = coded(kind, size, |n| (n % (max + 1)) as u16);
