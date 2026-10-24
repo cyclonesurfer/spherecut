@@ -2031,11 +2031,6 @@ fn with_index<T>(
     Some(f(&mut entries))
 }
 
-/// How many entries the demuxer's index of stream `index` has.
-pub(crate) fn index_len(ictx: &ff::format::context::Input, index: usize) -> usize {
-    with_index(ictx, index, |e| e.count()).unwrap_or(0)
-}
-
 /// How many samples of stream `index` the index lists that are not
 /// hidden by an edit list (`AVINDEX_DISCARD_FRAME`). For the MOV demuxer,
 /// whose index lists every sample, that is the number of frames shown.
@@ -2045,6 +2040,17 @@ pub(crate) fn index_shown(ictx: &ff::format::context::Input, index: usize) -> u6
             .count() as u64
     })
     .unwrap_or(0)
+}
+
+/// The timestamps of every entry in the index of stream `index`, in its
+/// order (by timestamp).
+pub(crate) fn index_timestamps(ictx: &ff::format::context::Input, index: usize) -> Vec<i64> {
+    with_index(ictx, index, |e| e.map(|(ts, _)| ts).collect()).unwrap_or_default()
+}
+
+/// The timestamp of the last entry in the index of stream `index`.
+pub(crate) fn index_last(ictx: &ff::format::context::Input, index: usize) -> Option<i64> {
+    with_index(ictx, index, |e| e.last().map(|(ts, _)| ts)).flatten()
 }
 
 /// The timestamp of the first entry in the index of stream `index`.

@@ -39,6 +39,15 @@ use crate::{MediaError, ff};
 /// Seeks to before the landing keyframe, before decoding from the start.
 pub const MAX_ATTEMPTS: u32 = 8;
 
+/// Packets of a Matroska stream whose timestamps are read at open, to
+/// see whether its default duration is its frame rate.
+const SCAN_PACKETS: usize = 64;
+
+/// Of those, the last ones in pts order that aren't checked, since frames
+/// shown before them may come later in decode order: the most frames
+/// H.264 and HEVC reorder.
+const REORDER_WINDOW: usize = 16;
+
 /// The rates a Matroska track's default duration is snapped to: FFmpeg
 /// reads it as a rate reduced to a denominator of at most 30000, which is
 /// a little off for the NTSC rates (59.94 reads as 19001/317).
@@ -223,6 +232,13 @@ impl FfmpegVideo {
     pub fn open(path: &Path, req: &VideoRequest) -> Result<Self, MediaError> {
         let mut dec =
             VideoDecoder::open_software(path, req.stream, req.threads, req.interrupt.clone())?;
+        // A Matroska track's default duration makes a rate whether its
+        // frames come at it or not, so its first packets' timestamps are
+        // read to check it.
+        let scan = match dec.input().format().name().starts_with("matroska") {
+            true => Some(dec.scan_timestamps(SCAN_PACKETS)?),
+            false => None,
+        };
         let index = dec.stream_index();
         let codec = dec.codec_name();
         let tb = dec.time_base();
@@ -271,7 +287,7 @@ impl FfmpegVideo {
                 height: fields.height,
             },
         );
-        let facts = StreamFacts::read(path, &dec, origin_pts);
+        let facts = StreamFacts::read(path, &dec, origin_pts, scan.as_ref());
         let frame_ticks = facts.frame_ticks(tb);
         let par = dec
             .input()
@@ -454,8 +470,8 @@ impl FfmpegVideo {
     /// GOP being decoded. The index lists keyframes by dts, so a
     /// keyframe's pts is taken as its dts plus the least lag of pts
     /// behind dts seen in the keyframes read, as the MOV demuxer itself
-    /// shifts a seek's target. Without an index, `t` at most a second
-    /// ahead.
+    /// shifts a seek's target. Without an index that lists what lies
+    /// ahead, `t` at most a second ahead.
     fn forward_is_cheaper(&self, t: i64) -> bool {
         if self.position != Position::InStep {
             return false;
@@ -470,7 +486,14 @@ impl FfmpegVideo {
         }
         let input = self.dec.input();
         let stream = self.dec.stream_index();
-        if ffi::index_len(input, stream) == 0 {
+        let read = self.dec.read_position();
+        // The index says what lies ahead only when it lists something
+        // after what has been read: a Matroska demuxer's lists only the
+        // keyframes read until it has read its Cues, and a file written to
+        // a pipe has none.
+        let ahead_listed =
+            read.is_some_and(|r| ffi::index_last(input, stream).is_some_and(|l| l > r));
+        if !ahead_listed {
             let here = self
                 .current
                 .as_ref()
@@ -484,7 +507,7 @@ impl FfmpegVideo {
         }
         let lag = self.dec.key_lag();
         match ffi::index_keyframe_before(input, stream, t.saturating_sub(lag)) {
-            Some(k) => self.dec.read_position().is_some_and(|read| k <= read),
+            Some(k) => read.is_some_and(|read| k <= read),
             // Before every keyframe: no seek gets closer.
             None => true,
         }
@@ -1213,7 +1236,14 @@ struct StreamFacts {
 }
 
 impl StreamFacts {
-    fn read(path: &Path, dec: &VideoDecoder, origin_pts: i64) -> StreamFacts {
+    /// `scan`: the pts of a Matroska stream's first packets, and whether
+    /// the stream ended within them.
+    fn read(
+        path: &Path,
+        dec: &VideoDecoder,
+        origin_pts: i64,
+        scan: Option<&(Vec<i64>, bool)>,
+    ) -> StreamFacts {
         let input = dec.input();
         let index = dec.stream_index();
         let tb = dec.time_base();
@@ -1280,8 +1310,15 @@ impl StreamFacts {
                     .flatten()
                     .and_then(|r| FrameRate::new(r).ok())
             }),
+            // FFmpeg sets both rates from the default duration, so they
+            // always agree when there is one: the blocks' timestamps say
+            // whether frames come at it.
             _ if !mov => match (average, real) {
-                (Some(a), Some(r)) if a == r => snap(a),
+                (Some(a), Some(r)) if a == r => snap(a).filter(|&rate| {
+                    let (scanned, ended) = scan.map_or((&[][..], false), |(p, e)| (&p[..], *e));
+                    let cues = ffi::index_timestamps(input, index);
+                    on_rate(rate, tb, scanned, ended, &cues)
+                }),
                 _ => None,
             },
             _ => None,
@@ -1313,6 +1350,42 @@ impl StreamFacts {
             .filter(|&t| t > 0)
             .unwrap_or(1)
     }
+}
+
+/// Whether a Matroska stream's timestamps, in ticks of `tb`, come at
+/// `rate`, to within a tick (Matroska rounds them to its timestamp
+/// scale): `scanned`, the pts of its first packets, sorted, are one frame
+/// apart, all but those the reorder window may still fill unless the
+/// stream `ended` within them; and every entry of its index (the Cues,
+/// keyframes) lies on the same grid. A stream that drops or repeats
+/// frames further on with its timestamps on the grid passes.
+fn on_rate(rate: FrameRate, tb: Rational, scanned: &[i64], ended: bool, cues: &[i64]) -> bool {
+    let mut pts = scanned.to_vec();
+    pts.sort_unstable();
+    if !ended {
+        pts.truncate(pts.len().saturating_sub(REORDER_WINDOW));
+    }
+    let Some(&first) = pts.first() else {
+        return false;
+    };
+    // Tick p is frame k when |p × tb − k / rate| ≤ tb, that is
+    // |p × tn × num − k × den × td| ≤ tn × num.
+    let r = rate.as_rational();
+    let (num, den) = (i128::from(r.num()), i128::from(r.den()));
+    let (tn, td) = (i128::from(tb.num()), i128::from(tb.den()));
+    let tick = tn * num;
+    let frame = den * td;
+    let off = |p: i64, k: i128| (i128::from(p - first) * tick - k * frame).abs();
+    let consecutive = pts
+        .iter()
+        .enumerate()
+        .all(|(k, &p)| off(p, k as i128) <= tick);
+    // The nearest frame to each cue.
+    let on_grid = cues.iter().all(|&c| {
+        let k = (i128::from(c - first) * tick + frame / 2).div_euclid(frame);
+        off(c, k) <= tick
+    });
+    consecutive && on_grid
 }
 
 /// A Matroska `DURATION` tag's time, `HH:MM:SS.fraction` as FFmpeg's
@@ -1504,6 +1577,47 @@ mod tests {
         for bad in ["", "1.5", "00:00:-1.0", "00:00:01.5e3", "a:b:c"] {
             assert_eq!(t(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn a_matroska_rate_needs_blocks_that_come_at_it() {
+        let ms = Rational::new(1, 1000).unwrap();
+        let at = |rate: FrameRate, n: i64| {
+            (0..n)
+                .map(|k| {
+                    rate.frame_to_time(k)
+                        .unwrap()
+                        .to_pts(ms, Rounding::Nearest)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let ntsc = at(FrameRate::FPS_59_94, 30);
+        assert!(on_rate(FrameRate::FPS_59_94, ms, &ntsc, true, &ntsc[..1]));
+        // The last frames in pts order may still be to come in decode
+        // order, unless the stream ended.
+        let mut unread = at(FrameRate::FPS_30, 64);
+        unread.remove(60);
+        assert!(on_rate(FrameRate::FPS_30, ms, &unread, false, &[0, 267]));
+        assert!(!on_rate(FrameRate::FPS_30, ms, &unread, true, &[0, 267]));
+        // A missing frame, two at one millisecond, and a burst.
+        let mut missing = at(FrameRate::FPS_30, 30);
+        missing.remove(5);
+        assert!(!on_rate(FrameRate::FPS_30, ms, &missing, true, &[]));
+        let mut tied = at(FrameRate::FPS_30, 30);
+        tied[5] = tied[4];
+        assert!(!on_rate(FrameRate::FPS_30, ms, &tied, true, &[]));
+        assert!(!on_rate(
+            FrameRate::FPS_30,
+            ms,
+            &[0, 11, 22, 100, 111],
+            true,
+            &[]
+        ));
+        // A keyframe off the grid further on, and no blocks at all.
+        let thirty = at(FrameRate::FPS_30, 30);
+        assert!(!on_rate(FrameRate::FPS_30, ms, &thirty, false, &[0, 1250]));
+        assert!(!on_rate(FrameRate::FPS_30, ms, &[], false, &[]));
     }
 
     #[test]

@@ -264,8 +264,11 @@ impl VideoStreamInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Timing {
     /// Exact: from an MP4's `stts` when every sample but the last lasts
-    /// the same, or from a Matroska track whose default duration is a
-    /// standard rate.
+    /// the same and `ctts` shows them as evenly, or from a Matroska track
+    /// whose default duration is a standard rate that its first blocks'
+    /// timestamps and its Cues keep, to the millisecond. It becomes
+    /// [`Variable`](Timing::Variable) if timestamps turn out to go
+    /// backwards ([`DecoderEvent::NotExactlySeekable`]).
     Constant(FrameRate),
     /// FFmpeg's average rate, when it has one.
     Variable { average: Option<FrameRate> },

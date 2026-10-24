@@ -521,6 +521,14 @@ fn a_variable_frame_rate_seeks_exactly_and_counts_frames() {
             seek::frame_address(d.info(), 7).unwrap(),
             FrameAddress::Counted(7)
         );
+        // In Matroska with a default duration of 30 fps, which its
+        // average rate isn't: the blocks say it varies.
+        let mkv = dir.join(format!("{name}-30.mkv"));
+        media::remux_to_mkv_at(&clip, &mkv, FrameRate::FPS_30).unwrap();
+        let in_mkv = oracle(&mkv, GOP_8).frames;
+        assert_eq!(in_mkv.len(), frames.len());
+        let timing = open(&mkv).info().timing;
+        assert!(matches!(timing, Timing::Variable { .. }), "{timing:?}");
     }
 }
 
@@ -833,6 +841,39 @@ fn faststart(src: &Path, dst: &Path) {
     octx.write_trailer().unwrap();
 }
 
+/// Matroska's demuxer reads its index (the Cues, after the clusters)
+/// only at its first seek; until then the index lists only the keyframes
+/// read, and a far seek must not take it to mean that the target is in
+/// the GOP being decoded.
+#[test]
+fn a_long_matroska_file_seeks_far_rather_than_decoding_there() {
+    let dir = TempDir::new("long-mkv");
+    let clip = write(
+        &Spec {
+            width: 64,
+            height: 32,
+            frames: 300,
+            ..spec("long", Codec::H264)
+        },
+        &dir,
+    );
+    let mkv = media::remux_to_mkv(&clip, &dir).unwrap();
+    let mut d = open(&mkv);
+    play(&mut *d, 20);
+    // Frame 290, at its millisecond.
+    let pts = FrameRate::FPS_30
+        .frame_to_time(290)
+        .unwrap()
+        .to_pts(d.info().time_base, spherecut_core::Rounding::Nearest)
+        .unwrap();
+    let (f, e, cost) = seek_pts(&mut *d, pts, SeekMode::Exact);
+    assert_eq!((f.pts, e), (pts, Exactness::Exact));
+    assert!(
+        cost.seeks >= 1 && !cost.forward_only && cost.frames_decoded <= 2 * 8 + 2,
+        "{cost:?}"
+    );
+}
+
 /// A frame at 30 fps in ticks of an MP4 video track's 1/15360 s.
 const FRAME_30: i64 = 512;
 
@@ -908,6 +949,11 @@ fn timestamps_that_tie_or_go_backwards_seek_by_the_tie_rule() {
     let ten = play(&mut *d, 1);
     assert_eq!(Seen::of(&ten), r.frames[10]);
     assert_eq!((ten.run, ten.seq), (nine.run, nine.seq + 1));
+    // And in Matroska, tied at the millisecond, with a default duration of
+    // 30 fps.
+    let mkv = dir.join("ties.mkv");
+    media::remux_to_mkv_at(&ties, &mkv, FrameRate::FPS_30).unwrap();
+    oracle(&mkv, GOP_8);
 
     // Frames 10 to 14 shown a frame and a half late, so 15 is shown
     // before 14.
@@ -924,6 +970,9 @@ fn timestamps_that_tie_or_go_backwards_seek_by_the_tie_rule() {
         backwards: true,
     };
     let r = oracle(&back, backwards);
+    let mkv = dir.join("backwards.mkv");
+    media::remux_to_mkv_at(&back, &mkv, FrameRate::FPS_30).unwrap();
+    oracle(&mkv, backwards);
     let (f14, f15) = (r.frames[14], r.frames[15]);
     assert!(f15.pts < f14.pts, "{:?}", r.frames);
     // Not yet played: the seek that decodes 15 after 14 finds the step,

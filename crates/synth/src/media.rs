@@ -738,3 +738,15 @@ pub fn remux_to_mkv(src: &Path, dir: &Path) -> Result<PathBuf, SynthError> {
     let dst = dir.join(name).with_extension("mkv");
     Ok(spherecut_media::encode::remux_to_matroska(src, &dst)?)
 }
+
+/// Remux `src` into the Matroska file `dst` with a default duration of
+/// one frame at `rate`, whatever the frames' timestamps: a variable-rate
+/// file that says a standard rate (see
+/// [`spherecut_media::encode::remux_to_matroska_at`]).
+pub fn remux_to_mkv_at(src: &Path, dst: &Path, rate: FrameRate) -> Result<PathBuf, SynthError> {
+    Ok(spherecut_media::encode::remux_to_matroska_at(
+        src,
+        dst,
+        Some(rate),
+    )?)
+}

@@ -509,6 +509,27 @@ impl VideoDecoder {
         Ok(())
     }
 
+    /// The pts of the stream's first `n` packets, read before anything is
+    /// decoded, and whether the stream ended within them; then back to
+    /// the start. The seek back also has a Matroska demuxer read its
+    /// index (Cues) where it comes after the clusters, as FFmpeg writes
+    /// it: until a first seek, the index lists only the keyframes read.
+    pub(crate) fn scan_timestamps(&mut self, n: usize) -> Result<(Vec<i64>, bool), MediaError> {
+        let mut pts = Vec::with_capacity(n);
+        let mut ended = false;
+        for _ in 0..n {
+            match self.demux() {
+                Some(pkt) => pts.extend(pkt.pts()),
+                None => {
+                    ended = true;
+                    break;
+                }
+            }
+        }
+        self.seek_to_start()?;
+        Ok((pts, ended))
+    }
+
     /// Seek back to the start of the stream: to the first entry of the
     /// demuxer's index, or the stream's start, or byte 0.
     pub(crate) fn seek_to_start(&mut self) -> Result<(), MediaError> {

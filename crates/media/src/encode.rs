@@ -691,6 +691,18 @@ impl Mp4Writer {
 /// millisecond. MP4 edit lists are not carried over: `src` should have
 /// none. The file appears at `dst` only once it is complete.
 pub fn remux_to_matroska(src: &Path, dst: &Path) -> Result<PathBuf, EncodeError> {
+    remux_to_matroska_at(src, dst, None)
+}
+
+/// [`remux_to_matroska`], with the video track's default duration that of
+/// `rate` rather than of the source's average rate, whatever the frames'
+/// timestamps: a file whose default duration says a rate its blocks don't
+/// keep, as recorders that set a nominal rate write.
+pub fn remux_to_matroska_at(
+    src: &Path,
+    dst: &Path,
+    rate: Option<FrameRate>,
+) -> Result<PathBuf, EncodeError> {
     init();
     let mut ictx = ffi::open_input(src, None)
         .map_err(|e| crate::MediaError::opening(src, e, |e| e.to_string()))?;
@@ -721,12 +733,16 @@ pub fn remux_to_matroska(src: &Path, dst: &Path) -> Result<PathBuf, EncodeError>
         ) {
             continue;
         }
+        let video = ffi::media_type(&par) == ff::media::Type::Video;
         let mut ost = ctx(octx.add_stream(None::<ff::Codec>), || {
             "adding a stream".into()
         })?;
         ost.set_parameters(par);
         // The Matroska muxer writes a video track's DefaultDuration from it.
-        ost.set_avg_frame_rate(ist.avg_frame_rate());
+        match rate {
+            Some(r) if video => ost.set_avg_frame_rate(ff_rational(r.as_rational())?),
+            _ => ost.set_avg_frame_rate(ist.avg_frame_rate()),
+        }
         // MP4's sample entry type (`avc1`, `hvc1`) means nothing in
         // Matroska, which names codecs its own way.
         ffi::clear_codec_tag(&mut ost);
