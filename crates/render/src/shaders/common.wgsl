@@ -25,5 +25,10 @@ fn round_f16(v: vec4<f32>) -> vec4<f32> {
     // Below 2^-14 the halves are the multiples of 2^-24; scaling by a
     // power of two is exact, and `round` ties to even.
     let subnormal = round(v * 16777216.0) / 16777216.0;
-    return select(normal, subnormal, abs(v) < vec4<f32>(6.103515625e-5));
+    // From 65520 up the nearest half is infinite. Rounded as a normal it
+    // would be 65536, which isn't a half, and lavapipe stores the largest
+    // half for it; an infinity, made from bits, is stored as it is.
+    let inf = bitcast<vec4<f32>>((b & vec4<u32>(0x80000000u)) | vec4<u32>(0x7f800000u));
+    let r = select(normal, subnormal, abs(v) < vec4<f32>(6.103515625e-5));
+    return select(r, inf, abs(normal) >= vec4<f32>(65536.0));
 }
