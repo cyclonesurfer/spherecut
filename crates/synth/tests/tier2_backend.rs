@@ -1028,13 +1028,13 @@ fn stand_in(fail_at: Option<u64>) -> Hw {
 }
 
 /// Clips of 30 frames in open GOPs of 8 with 3 B-frames, in `dir`: 256x128
-/// H.264 at 8 bits and HEVC at 10, and H.264 that the decoder crops, as
-/// [`cropped`]'s.
+/// H.264 at 8 bits and HEVC at 10, and 250x142 H.264, coded as 256x144,
+/// which the decoder crops as it does [`cropped`]'s.
 fn small_clips(dir: &TempDir) -> Vec<Stream> {
     [
         (Codec::H264, 8, 256, 128),
         (Codec::Hevc, 10, 256, 128),
-        (Codec::H264, 8, 1000, 562),
+        (Codec::H264, 8, 250, 142),
     ]
     .into_iter()
     .map(|(codec, bits, width, height)| {
