@@ -85,7 +85,8 @@ pub struct PixelLayout {
     /// Significant bits per sample, 8 to 16.
     pub bit_depth: u8,
     /// The bits are the high ones of each 16-bit sample, as in P010 and
-    /// P016, rather than the low ones, as in `yuv420p10le`.
+    /// P210, rather than the low ones, as in `yuv420p10le`. False at 16
+    /// bits (P016), where they are the same.
     pub msb_aligned: bool,
 }
 

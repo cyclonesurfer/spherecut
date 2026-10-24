@@ -15,7 +15,7 @@ use crate::detect::{self, CameraGuess};
 use crate::ff;
 use crate::ffi;
 use crate::hwprobe;
-use crate::mp4::{self, Cursor, FirstBox, FourCc, Mp4Box};
+use crate::mp4::{self, FirstBox, FourCc, Mp4Box};
 use crate::spherical::{self, TrackSpherical};
 use crate::{MediaError, TooLarge, init};
 
@@ -911,17 +911,6 @@ fn kind_name(k: StreamKind) -> String {
     format!("{k:?}").to_lowercase()
 }
 
-/// The track ID from `tkhd`, which FFmpeg's MOV demuxer uses as the
-/// stream ID.
-fn track_id(trak: &Mp4Box) -> Option<u32> {
-    let tkhd = trak.child(b"tkhd")?;
-    let mut c = Cursor::new(&tkhd.payload);
-    let (version, _) = c.version_flags()?;
-    // Creation and modification times come first.
-    c.take(if version == 1 { 16 } else { 8 })?;
-    c.u32()
-}
-
 /// Match FFmpeg streams to `trak`s: map (stream index, stream ID) to the
 /// position of the stream's `trak`. Cover art in `udta` gives FFmpeg
 /// streams that have no `trak`, so match by track ID when every track has
@@ -930,7 +919,7 @@ fn trak_matcher(traks: &[&Mp4Box]) -> impl Fn(usize, i32) -> Option<usize> + use
     let by_id: HashMap<u32, usize> = traks
         .iter()
         .enumerate()
-        .filter_map(|(i, t)| Some((track_id(t)?, i)))
+        .filter_map(|(i, t)| Some((mp4::track_id(t)?, i)))
         .collect();
     let count = traks.len();
     let use_ids = by_id.len() == count;

@@ -1174,6 +1174,60 @@ const AUDIO_ENTRIES: &[&[u8; 4]] = &[
     b"in24", b"in32", b"fl32", b"enca",
 ];
 
+/// The track ID from `tkhd`, which FFmpeg's MOV demuxer uses as the
+/// stream ID.
+pub fn track_id(trak: &Mp4Box) -> Option<u32> {
+    let tkhd = trak.child(b"tkhd")?;
+    let mut c = Cursor::new(&tkhd.payload);
+    let (version, _) = c.version_flags()?;
+    // Creation and modification times come first.
+    c.take(if version == 1 { 16 } else { 8 })?;
+    c.u32()
+}
+
+/// How long a track's samples last, from its `stts`, in ticks of its
+/// `mdhd` timescale. These are decode-time deltas, which for a stream of
+/// equal frames are the frame duration whatever the frame order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleTiming {
+    pub timescale: u32,
+    pub samples: u64,
+    /// The duration of every sample but the last, when they all have the
+    /// same one, which is not 0. The last sample's is often a muxer's
+    /// guess, so it doesn't count.
+    pub constant: Option<u32>,
+}
+
+pub fn sample_timing(trak: &Mp4Box) -> Option<SampleTiming> {
+    let mdhd = trak.path(&[b"mdia", b"mdhd"])?;
+    let mut c = Cursor::new(&mdhd.payload);
+    let (version, _) = c.version_flags()?;
+    c.take(if version == 1 { 16 } else { 8 })?;
+    let timescale = c.u32().filter(|&t| t > 0)?;
+    let stts = trak.path(&[b"mdia", b"minf", b"stbl", b"stts"])?;
+    let (_, entries) = table_entries(stts, 4, 8).ok()?;
+    let mut runs: Vec<(u64, u32)> = entries
+        .chunks_exact(8)
+        .filter_map(|e| Some((u64::from(be_u32(e, 0)?), be_u32(e, 4)?)))
+        .filter(|&(n, _)| n > 0)
+        .collect();
+    let samples = runs.iter().map(|r| r.0).sum();
+    // Leave out the last sample, unless it is the only one.
+    if samples > 1
+        && let Some(last) = runs.last_mut()
+    {
+        last.0 -= 1;
+    }
+    let mut deltas = runs.iter().filter(|r| r.0 > 0).map(|r| r.1);
+    let first = deltas.next();
+    let constant = first.filter(|&d| d > 0 && deltas.all(|e| e == d));
+    Some(SampleTiming {
+        timescale,
+        samples,
+        constant,
+    })
+}
+
 /// The handler type of a `trak` (`mdia/hdlr`): `vide`, `soun`, `meta`, ...
 pub fn handler_type(trak: &Mp4Box) -> Option<FourCc> {
     let hdlr = trak.path(&[b"mdia", b"hdlr"])?;
@@ -1308,6 +1362,57 @@ pub(crate) mod tests {
         let trak = bx(b"trak", &mdia);
         let moov = bx(b"moov", &trak);
         cat(&[ftyp, moov, bx(b"mdat", &[0; 32])])
+    }
+
+    /// A `trak` with track ID `id`, an `mdhd` timescale and `stts` runs
+    /// of (samples, delta).
+    fn timed_trak(id: u32, timescale: u32, runs: &[(u32, u32)]) -> Vec<u8> {
+        let mut tkhd = vec![0u8; 8];
+        tkhd.extend_from_slice(&id.to_be_bytes());
+        tkhd.extend_from_slice(&[0; 12]);
+        let mut mdhd = vec![0u8; 8];
+        mdhd.extend_from_slice(&timescale.to_be_bytes());
+        mdhd.extend_from_slice(&[0; 8]);
+        let mut stts = (runs.len() as u32).to_be_bytes().to_vec();
+        for (n, d) in runs {
+            stts.extend_from_slice(&n.to_be_bytes());
+            stts.extend_from_slice(&d.to_be_bytes());
+        }
+        let stbl = bx(b"stbl", &full(b"stts", 0, 0, &stts));
+        let mdia = bx(
+            b"mdia",
+            &cat(&[full(b"mdhd", 0, 0, &mdhd), bx(b"minf", &stbl)]),
+        );
+        bx(b"trak", &cat(&[full(b"tkhd", 0, 0, &tkhd), mdia]))
+    }
+
+    #[test]
+    fn sample_timing_leaves_out_the_last_sample() {
+        let timing = |runs: &[(u32, u32)]| {
+            let f = cat(&[
+                bx(b"ftyp", b"isom\0\0\x02\0isom"),
+                bx(b"moov", &timed_trak(7, 15360, runs)),
+            ]);
+            let t = read(&mut io::Cursor::new(f)).unwrap();
+            let trak = t.tracks().next().unwrap();
+            assert_eq!(track_id(trak), Some(7));
+            sample_timing(trak).unwrap()
+        };
+        // 30 fps at 1/15360, with a last sample of a muxer's guess.
+        assert_eq!(
+            timing(&[(29, 512), (1, 300)]),
+            SampleTiming {
+                timescale: 15360,
+                samples: 30,
+                constant: Some(512)
+            }
+        );
+        assert_eq!(timing(&[(30, 512)]).constant, Some(512));
+        assert_eq!(timing(&[(1, 512)]).constant, Some(512));
+        // A variable rate, and samples of no duration.
+        assert_eq!(timing(&[(10, 512), (5, 1024), (1, 512)]).constant, None);
+        assert_eq!(timing(&[(29, 0), (1, 512)]).constant, None);
+        assert_eq!(timing(&[]).samples, 0);
     }
 
     #[test]
