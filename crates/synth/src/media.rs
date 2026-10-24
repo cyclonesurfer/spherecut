@@ -840,9 +840,7 @@ mod tests {
         assert_ne!(a, samples(&noisy(8, 0)));
         // 1 to 4 levels around 128, and clamped at 0 near the bottom.
         assert!(
-            a[..80]
-                .iter()
-                .all(|v| (124..=132).contains(v) && *v != 128),
+            a[..80].iter().all(|v| (124..=132).contains(v) && *v != 128),
             "{a:?}"
         );
         assert!(a[80..].iter().all(|v| (0..=6).contains(v)), "{a:?}");
