@@ -111,6 +111,16 @@ const IDEAL_N_CHECKER: u32 = 16;
 const IDEAL_MIN_LOD: f64 = 2.5;
 /// The fewest pixels an ideal comparison may rest on.
 const IDEAL_MIN_PIXELS: f64 = 1000.0;
+/// The BT.601 and BT.709 codings of the grid, rendered, against each
+/// other: 46.3 dB measured, 24.7 dB with the matrices swapped in the
+/// colour fold (D32).
+const MATRIX_AGREE_DB: f64 = 40.0;
+/// `siting_left_center`'s smooth chroma against its 4:4:4 truth: at its
+/// own siting 51.4 dB measured, and 17.5 dB nearer than tagged as the
+/// other siting, which a Left/Center swap in `chroma_transform` turns
+/// into 17.5 dB further (D32).
+const SITING_SWING_DB: f64 = 45.0;
+const SITING_OVER_DB: f64 = 10.0;
 /// Seams and poles: a pixel is bad past 2/255, and the implicit-LOD
 /// control must give more than 100 of them.
 const TWIN_THRESHOLD: f64 = 2.0 / 255.0;
@@ -2016,11 +2026,21 @@ fn matrix_601_709(run: &mut Run<'_>) {
             return;
         };
         run.cpu_check(&format!("cpu_{name}"), &got, &cpu);
-        psnrs.insert(name, (f, cpu));
+        psnrs.insert(name, (f, cpu, unit(&got)));
+    }
+    // The two codings carry the same picture, so their renders agree,
+    // whatever render::color does with either. The CPU reference can't
+    // say that: it builds its colour from the same `color::fold` as the
+    // GPU, so a matrix swapped inside the fold passes both CPU checks.
+    // The codings are synth's, from core's Kr and Kb.
+    let (a, b) = (&psnrs["601"].2, &psnrs["709"].2);
+    run.measure("601_vs_709_max_lsb", max_diff(a, b) * 255.0);
+    if !run.at_least("601_vs_709_psnr_db", psnr_of(RECT, a, b), MATRIX_AGREE_DB) {
+        run.write_diffs("agree", RECT, a, b);
     }
     // Control: the BT.601 frame decoded as BT.709 misses its own CPU
     // reference by far more than the tolerance's 3 dB.
-    let (f601, cpu601) = &psnrs["601"];
+    let (f601, cpu601, _) = &psnrs["601"];
     let mut swapped = f601.clone();
     swapped.color.matrix = Matrix::Bt709;
     if let Some(got) = run.render_with(&swapped, &v, RECT, DebugMode::Off) {
@@ -2046,6 +2066,18 @@ fn matrix_601_709(run: &mut Run<'_>) {
         &sources.iter().collect::<Vec<_>>(),
         vec![view_about(&v, RECT)],
     );
+}
+
+/// R'G'B' in [0, 1] as BT.709 limited-range Y'CbCr codes at `bits`, by
+/// H.273's equations, written out here rather than taken from synth or
+/// the renderer.
+fn ycbcr709(c: [f64; 3], bits: u32) -> [u16; 3] {
+    let (kr, kb) = (0.2126, 0.0722);
+    let y = kr * c[0] + (1.0 - kr - kb) * c[1] + kb * c[2];
+    let cb = (c[2] - y) / (2.0 * (1.0 - kb));
+    let cr = (c[0] - y) / (2.0 * (1.0 - kr));
+    let k = f64::from(1u32 << (bits - 8));
+    [16.0 + 219.0 * y, 128.0 + 224.0 * cb, 128.0 + 224.0 * cr].map(|v| (v * k).round() as u16)
 }
 
 fn siting_left_center(run: &mut Run<'_>) {
@@ -2107,6 +2139,69 @@ fn siting_left_center(run: &mut Run<'_>) {
             10.0,
         );
     }
+    // Where each siting puts its chroma, against a truth that doesn't go
+    // through `color::chroma_transform`, as the CPU reference does (it
+    // shares the GPU's): red and blue swinging against each other, 32
+    // texels a period, coded at 4:2:0 with each chroma sample taken from
+    // the pattern where the siting says that sample sits, and at 4:4:4,
+    // where no siting applies. Tagged as the other siting, the chroma
+    // lands half a luma texel off.
+    let swing = |x: f64| {
+        let s = (std::f64::consts::TAU * x / 32.0).sin();
+        [0.5 + 0.35 * s, 0.45, 0.5 - 0.35 * s]
+    };
+    let limited = |siting| color(Range::Limited, Matrix::Bt709, siting);
+    let full = coded(
+        Kind::I444p12,
+        (w, h),
+        limited(ChromaSiting::Left),
+        |p, x, _| ycbcr709(swing(f64::from(x) + 0.5), 12)[p],
+    );
+    let Some(truth) = run.render_with(&full, &v, RECT, DebugMode::Off) else {
+        return;
+    };
+    let truth = unit(&truth);
+    // Chroma sample j sits at luma sample 2j + t: t = 0 for Left, ½ for
+    // Center (H.273), at texel coordinate 2j + ½ + t.
+    for (name, siting, t, other) in [
+        ("left", ChromaSiting::Left, 0.0, ChromaSiting::Center),
+        ("center", ChromaSiting::Center, 0.5, ChromaSiting::Left),
+    ] {
+        let f = coded(Kind::P010, (w, h), limited(siting), |p, x, _| {
+            let at = if p == 0 {
+                f64::from(x) + 0.5
+            } else {
+                2.0 * f64::from(x) + 0.5 + t
+            };
+            ycbcr709(swing(at), 10)[p]
+        });
+        let mut wrong = f.clone();
+        wrong.color.siting = other;
+        let (Some(g), Some(c)) = (
+            run.render_with(&f, &v, RECT, DebugMode::Off),
+            run.render_with(&wrong, &v, RECT, DebugMode::Off),
+        ) else {
+            return;
+        };
+        let (g, c) = (unit(&g), unit(&c));
+        let right = psnr_of(RECT, &g, &truth);
+        let control = psnr_of(RECT, &c, &truth);
+        run.at_least(&format!("swing_{name}_psnr_db"), right, SITING_SWING_DB);
+        run.measure(
+            &format!("swing_{name}_max_lsb"),
+            max_diff(&g, &truth) * 255.0,
+        );
+        run.measure(&format!("control_swing_{name}_as_other_psnr_db"), control);
+        if !run.at_least(
+            &format!("swing_{name}_over_control_db"),
+            right - control,
+            SITING_OVER_DB,
+        ) {
+            run.write_diffs(&format!("swing-{name}"), RECT, &g, &truth);
+        }
+        sources.push(Source::new("swing", f));
+    }
+    sources.push(Source::new("swing", full));
     run.end_check(
         "red and blue stripes 5 texels wide, Left and Center sited, magnified, 10-bit (8-bit recorded); \
          control: Left as Center",
