@@ -4,13 +4,15 @@
 //! scene can be rendered into any projection (equirect now; dual fisheye
 //! and EAC for the stitching round trips in M3) and compared against itself.
 //! Rendering is pure CPU `f64` math with fixed supersampling and no
-//! threads, randomness or clock, so a given build renders the same bytes
-//! on every run. Other machines should agree but aren't guaranteed to: the
+//! randomness or clock (rows are split across threads, which changes no
+//! byte), so a given build renders the same bytes on every run. Other machines should agree but aren't guaranteed to: the
 //! trigonometry (in `LonLat` and the marker and frame-code geometry) comes
 //! from the platform's libm, which may round the last bit differently and
 //! so flip a sample at an edge. Agreement across machines has not been
 //! checked, so tests compare against frames rendered by the same build,
 //! not stored ones.
+
+#![forbid(unsafe_code)]
 
 use glam::DVec3;
 use spherecut_sphere::{LonLat, equirect};
