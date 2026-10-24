@@ -48,7 +48,7 @@ pub enum MediaError {
     Hardware { kind: String, reason: HwError },
 }
 
-pub use ffi::{HwDevice, HwError, HwRefusal};
+pub use ffi::{HwDevice, HwError, HwRefusal, MAX_PIXELS};
 
 static INIT: Once = Once::new();
 

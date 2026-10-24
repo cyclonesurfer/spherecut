@@ -775,7 +775,7 @@ fn open_decoder(par: &ff::codec::Parameters, decoder: Option<ff::Codec>) -> Resu
     let decoder = decoder.ok_or(ff::Error::DecoderNotFound)?;
     let mut ctx = ff::codec::context::Context::from_parameters(par.clone())?;
     ctx.set_threading(ff::codec::threading::Config::count(1));
-    ctx.decoder().open_as(decoder).map(drop)
+    ffi::open_decoder(ctx, decoder).map(drop)
 }
 
 fn describe_open_error(e: ff::Error, looked_like_mp4: bool, damage: &[String]) -> String {

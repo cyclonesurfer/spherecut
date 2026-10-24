@@ -124,9 +124,7 @@ pub(crate) fn decode_one(
     if let Some(dev) = dev {
         ffi::attach_hw_device(&mut ctx, dev)?;
     }
-    let mut dec = ctx
-        .decoder()
-        .open_as(codec)
+    let mut dec = ffi::open_decoder(ctx, codec)
         .and_then(|d| d.video())
         .map_err(ffmpeg("opening the decoder"))?;
     let mut frame = ff::frame::Video::empty();

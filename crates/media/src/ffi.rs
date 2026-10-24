@@ -891,6 +891,38 @@ pub(crate) fn note_device_frame(dec: &mut ff::codec::context::Context) {
     }
 }
 
+/// The most pixels a decoder may make one picture of: 2^27, 16384 × 8192.
+/// That is twice an 11K equirect (11520 × 5760), and more than any camera
+/// Spherecut reads records (the Insta360 X5's 8K is 7680 × 3840). One
+/// picture at the limit takes at most 768 MiB (16-bit 4:4:4) and 192 MiB
+/// at 8-bit 4:2:0, where FFmpeg's default limit, `INT_MAX` pixels, would
+/// let a file make a decoder ask for 12 GiB per picture. A larger picture
+/// fails to decode.
+pub const MAX_PIXELS: i64 = 1 << 27;
+
+/// Open decoder `codec` on `ctx`, limited to [`MAX_PIXELS`] per picture.
+/// Every decoder Spherecut uses is opened here (clippy forbids
+/// ffmpeg-next's own decoder opens elsewhere).
+pub(crate) fn open_decoder(
+    ctx: ff::codec::context::Context,
+    codec: ff::Codec,
+) -> Result<ff::decoder::Opened, ff::Error> {
+    open_decoder_with(ctx, codec, MAX_PIXELS)
+}
+
+#[allow(clippy::disallowed_methods)] // The one place decoders open.
+fn open_decoder_with(
+    mut ctx: ff::codec::context::Context,
+    codec: ff::Codec,
+    max_pixels: i64,
+) -> Result<ff::decoder::Opened, ff::Error> {
+    // SAFETY: `ctx` owns a live AVCodecContext that is not open yet;
+    // max_pixels is a plain int64 field that the decoder reads when it
+    // opens and when it sizes each picture.
+    unsafe { (*ctx.as_mut_ptr()).max_pixels = max_pixels };
+    ctx.decoder().open_as(codec)
+}
+
 /// Why [`open_video_decoder`] opened no decoder.
 #[derive(Debug, Error)]
 pub(crate) enum OpenDecoderError {
@@ -936,7 +968,7 @@ pub(crate) fn open_video_decoder(
     // SAFETY: registered codecs are static.
     let codec = unsafe { ff::Codec::wrap(codec) };
     // The media type is checked above, which is all `Opened::video` checks.
-    Ok(ctx.decoder().open_as(codec).map(ff::decoder::Video)?)
+    Ok(open_decoder(ctx, codec).map(ff::decoder::Video)?)
 }
 
 /// The decoder for codec `id` that can decode on a device of type
@@ -1650,9 +1682,7 @@ mod tests {
     #[test]
     fn planes_of_a_frame_cropped_on_the_left_end_inside_their_buffers() {
         let codec = ff::decoder::find_by_name("hevc").unwrap();
-        let mut dec = ff::codec::context::Context::new_with_codec(codec)
-            .decoder()
-            .open_as(codec)
+        let mut dec = open_decoder(ff::codec::context::Context::new_with_codec(codec), codec)
             .and_then(|d| d.video())
             .unwrap();
         // 128 luma bytes: more than the padding FFmpeg leaves after a
@@ -1872,5 +1902,28 @@ mod tests {
         assert_eq!(unsafe { sys::av_log_get_level() }, sys::AV_LOG_QUIET);
         log(sys::AV_LOG_PANIC, "off-test\n");
         assert!(captured("off-test").is_empty());
+    }
+
+    #[test]
+    fn decoders_are_limited_to_max_pixels() {
+        // The frame is 512x128: 65536 pixels.
+        let decode = |max: i64| {
+            let codec = ff::decoder::find_by_name("hevc").unwrap();
+            let ctx = ff::codec::context::Context::new_with_codec(codec);
+            let mut dec = open_decoder_with(ctx, codec, max)?.video()?;
+            for p in hevc_frame() {
+                dec.send_packet(&p)?;
+            }
+            dec.send_eof()?;
+            let mut frame = ff::frame::Video::empty();
+            dec.receive_frame(&mut frame).map(|()| frame.width())
+        };
+        assert_eq!(decode(65536).unwrap(), 512);
+        assert!(decode(65535).is_err());
+
+        let codec = ff::decoder::find_by_name("hevc").unwrap();
+        let dec = open_decoder(ff::codec::context::Context::new_with_codec(codec), codec).unwrap();
+        // SAFETY: an open decoder context; a plain int64 field.
+        assert_eq!(unsafe { (*dec.as_ptr()).max_pixels }, MAX_PIXELS);
     }
 }
