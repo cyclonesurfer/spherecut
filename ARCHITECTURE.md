@@ -16,20 +16,21 @@ This describes the design as built, plus the planned parts marked
                                       |
                        camera (insta360, gopro, dji)  (planned)
                                       |
-             media (FFmpeg, probing, MP4 boxes, doctor; MediaBackend planned)
+     media (FFmpeg, MediaBackend and frame-exact seek, probing, MP4 boxes, doctor)
                                       |
-                 sphere (projection math)      core (time; project model planned)
+   sphere (projection math)      core (time, frames, colour, stop tokens; project model planned)
 ```
 
-`synth` (test patterns and media) and `testkit` (test helpers) sit beside
-this stack and are used only by tests and `xtask`.
+`synth` (test patterns and media, and backends that stand in for FFmpeg)
+and `testkit` (test helpers) sit beside this stack and are used only by
+tests and `xtask`.
 
 | Crate | Role | Status |
 |---|---|---|
-| `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27); later the project model, timeline, keyframes, undo | M0: name and time only |
+| `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), what a decoded frame is (`video`: pixel layouts, planes, colour) and stop tokens by generation (`cancel`); later the project model, timeline, keyframes, undo | M0: name and time; M1: `video`, `cancel` |
 | `spherecut-sphere` | CPU reference projection math in f64: equirect, cube/EAC, fisheye lens models, view projections and morphs, rotation helpers | M0 |
-| `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, a small MP4 writer, `doctor`'s capability checks. The `MediaBackend` trait is planned | M0; `MediaBackend` in M1 |
-| `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion, tones and first-order ambiX, test clips and broken files | M0 |
+| `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software, the colour default rules, a small MP4 writer, `doctor`'s capability checks | M0; `MediaBackend` from M1 slice 2a (hardware in 2b, audio in 6) |
+| `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes) and broken files, `SyntheticBackend` and `GatedBackend` | M0; M1 slice 2a |
 | `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, the `TIER2-SKIP:` marker) and benchmark recording (`bench`) | M0 |
 | `spherecut-camera` | Per-camera raw formats: file pairing, vendor metadata, calibration | M3 |
 | `spherecut-stitch` | Lens calibration models, seam blending, exposure matching | M3 |
@@ -45,7 +46,7 @@ this stack and are used only by tests and `xtask`.
 Crates are created when they get real content, not as empty shells. The
 planned ones above don't exist yet.
 
-## Media crate (as built in M0, with M1's confinement of FFmpeg)
+## Media crate (as built in M0, with M1's confinement of FFmpeg and `MediaBackend`)
 
 `unsafe` code lives in two modules, each block with a SAFETY comment:
 
@@ -56,9 +57,14 @@ planned ones above don't exist yet.
   `get_format` callback that refuses software fallback, opening files
   with FFmpeg confined to them, reading metadata, finding a stream's
   decoder, opening decoders under a picture size limit and a video
-  decoder by its int codec id, reading a frame's format and planes as
-  ints, copying hardware frames to system memory, the demuxer index end,
-  setting other streams to `AVDISCARD_ALL`, library versions, and the
+  decoder by its int codec id, reading a frame's format, planes,
+  timestamps, flags and colour codes as ints (`frame_fields`), the
+  layout a pixel format is uploaded in (`pixel_layout`, from
+  `AVPixFmtDescriptor`) and the format swscale converts the others to
+  (`conversion_target`, `Scaler`), copying hardware frames to system
+  memory, `av_seek_frame` and the demuxer index (its end, its first and
+  shown entries, the keyframe before a time), skipping non-reference
+  frames, setting other streams to `AVDISCARD_ALL`, library versions, and the
   bridge that sends FFmpeg's `av_log` to `tracing` under the target
   `ffmpeg`. C enums are never made into bindgen's Rust enums (DECISIONS
   D11). In more detail:
@@ -181,10 +187,13 @@ The other modules are safe Rust:
   refuses input that `Mp4Tree::damage()` finds damaged, and, when it
   shifts chunk offsets, an edited `moov` whose re-read warns. It replaces
   only a regular file at the output.
-* `encode`: `Mp4Writer`, one video stream from planar YUV and optional
-  planar-f32 audio, written atomically like `inject`, which also means
-  it refuses an output that isn't a regular file. The synthetic media
-  generator uses it today; M2's export builds on it.
+* `encode`: `Mp4Writer`, one video stream from planar YUV (4:2:0, 4:2:2
+  or 4:4:4 at 8 or 10 bits, tagged with any colour, optionally behind an
+  edit list or with its own timestamps) and optional planar-f32 audio,
+  written atomically like `inject`, which also means it refuses an
+  output that isn't a regular file; and `remux_to_matroska`, a stream
+  copy into Matroska. The synthetic media generator uses them today;
+  M2's export builds on the writer.
 * `decode`: `VideoDecoder`, which decodes one video stream in order, in
   software or on a `HwDevice`, and hands out frames in system memory. It
   reads only its own stream (the others are discarded), holds back a
@@ -192,7 +201,36 @@ The other modules are safe Rust:
   an error after the frames it could decode (D13). `open_cancellable`
   stops reading when a flag is set, and `skipped_packets` counts packets
   skipped as invalid data. On a device it opens a decoder that can use the
-  device and never falls back to software (D3, D14).
+  device and never falls back to software (D3, D14). For `seek` it also
+  seeks (clearing a read failure, not a refusal, D29), says where a seek
+  landed and the last packet read (dts, else pts), stops at packet and
+  frame boundaries on a `StopToken`, and skips non-reference frames until
+  a packet at a given pts.
+* `backend`: the traits everything above media opens media through (D29):
+  `MediaBackend` (`probe`, `open_video`, `open_audio`) and `VideoDecode`
+  (`seek`, `next_frame`, `catch_up`, events and stats), with
+  `VideoRequest`, `SeekMode` and `SeekOutcome` (the frame, its
+  `Exactness` and the `SeekCost`), `VideoStreamInfo` (origin, timing,
+  frame count, layout, colour, sphere mapping) and `VideoFrame`. A
+  `VideoFrame` holds an FFmpeg frame or planes made without FFmpeg,
+  implements core's `VideoPlanes` without copying, shares its layout
+  (`Arc<PixelLayout>`), and carries its `run` (the demuxer seek it was
+  decoded after) and `seq` (its place in decode-output order since), so
+  that frames of one run with consecutive `seq` are known to be
+  adjacent. `FfmpegBackend` opens a confined software decoder; hardware
+  (slice 2b) and audio (slice 6) return `MediaError::NotYet`. The types
+  that cross threads are checked `Send`, and `Sync` where they are
+  shared, at compile time.
+* `seek`: `FfmpegVideo`, the `VideoDecode` on `VideoDecoder`, with the
+  frame-exact seek of plan section 3.3 (D29), frame-index addressing
+  (`frame_address`, `seek_frame`) and the stream's timing facts (constant
+  rate from `stts` or a snapped Matroska default duration, the frame
+  count from the MP4 index, the mapping from the track's spherical
+  boxes). It converts frames of a format that isn't uploaded as it is
+  through swscale, once announced with `DecoderEvent::Converted` (D30).
+* `color`: `resolve`, the colour default rules (D30): a frame's codes,
+  as FFmpeg's ints, become the `ColorInfo` the renderer uses, with an
+  `assumed` flag for each field a rule filled in.
 * `detect`: camera and layout guesses from container structure, each with
   its evidence.
 * `doctor`: the capability checks and the fixes (D18). A failed check
@@ -202,7 +240,7 @@ The other modules are safe Rust:
   `crates/media/fixtures/`, whose README gives the commands that
   regenerate them byte for byte.
 
-`MediaError` has nine variants: `Io`, `NotAFile`,
+`MediaError` has eleven variants: `Io`, `NotAFile`,
 `UnsupportedContainer { path, format, description }` (FFmpeg would read
 the file with a demuxer outside `DEMUXERS`; the message names it and the
 containers Spherecut opens), `Open`, `NestedOpenRefused { path, url }`
@@ -210,7 +248,9 @@ containers Spherecut opens), `Open`, `NestedOpenRefused { path, url }`
 `io_open` refused), `Decode`, `PictureTooLarge` (over `MAX_PIXELS`),
 `HwUnsupported { path, kind, refusal: HwRefusal }` (the device can't decode
 this stream; software may) and `Hardware { kind, reason: HwError }` (the
-device can't be opened). `code()` gives each a stable snake_case code for
+device can't be opened), `UnsupportedFormat { path, pix_fmt }` (frames
+in a pixel format swscale can't convert) and `NotYet { what }` (a part of
+the backend a later M1 slice brings). `code()` gives each a stable snake_case code for
 the JSON contract, and `MediaError::CODES` lists them (D27). `VideoDecoder::open` returns `HwUnsupported`
 (`NotOffered`) when no decoder for the codec can use the device, and
 `next_frame` returns it when the device turns the stream down. A software
@@ -275,6 +315,14 @@ All stored time is exact (`spherecut_core::time`):
 * Streams keep integer PTS in their own timebase; conversion to and from
   `Time` is explicit about rounding. Variable-frame-rate sources are
   addressed by PTS, never by frame index.
+* A decoded stream has two axes (D29). Its pts axis is the stream's own
+  ticks of `time_base`; `origin_pts` is the pts of its first presented
+  frame, whatever an edit list or B-frame delay does to it. Clip time is
+  `(pts − origin_pts) × time_base`, so clip time 0 is that frame. A seek
+  to clip time `at` looks for the frame with the greatest pts at or
+  before `origin_pts + ⌊at / time_base⌋`, and frame N of a constant-rate
+  stream is found at `(N + ½)` frame durations, which survives a
+  container that rounds timestamps (Matroska's milliseconds).
 * Serialized (D27), a `Rational` or `FrameRate` is the string `"n/d"`
   (`"n"` for an integer), which `Rational` also parses with `FromStr`; a
   `Time` is `{"exact": "n/d", "seconds": float}`, and a `FrameTime` adds
@@ -315,11 +363,16 @@ and samples with `textureSampleGrad`/`textureSampleLevel`.
   it.
 * Background workers for thumbnails, waveforms, proxies and export, each
   with progress reporting and cancellation tokens.
+* Cancellation (built): `core::cancel`'s `StopSource` hands out
+  `StopToken`s by generation; starting a new generation stops the older
+  tokens, as a new seek stops the last one, and shutdown stops them all
+  and raises the flag a decoder's FFmpeg interrupt reads (D13, D29).
 
 ## Testing tiers
 
 * **Tier 1** runs anywhere: unit and property tests, software decode and
-  encode, synthetic media that the tests generate themselves, doctor run
+  encode, synthetic media that the tests generate themselves (among them
+  the seek oracle, `crates/synth/tests/seek.rs`), doctor run
   against lavapipe, and `VideoDecoder` turning streams down on lavapipe's
   Vulkan device. Golden images on lavapipe come with the renderer (M1).
   `cargo xtask check` runs all of it.

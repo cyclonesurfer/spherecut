@@ -1,6 +1,6 @@
 # Progress
 
-Updated 2026-10-24, with FFmpeg confined to the file Spherecut opened (D24), the CLI's JSON contract for probe and doctor (D27) and odin's first hardware report. Milestone criteria are in `PLAN.md`;
+Updated 2026-10-24, with FFmpeg confined to the file Spherecut opened (D24), the CLI's JSON contract for probe and doctor (D27), odin's first hardware report, and M1 slice 2a: `MediaBackend` with frame-exact seek in software, native pixel layouts and the colour defaults (D29, D30). Milestone criteria are in `PLAN.md`;
 decisions and their reasons in `DECISIONS.md`.
 
 ## Status
@@ -8,7 +8,7 @@ decisions and their reasons in `DECISIONS.md`.
 | Milestone | State |
 |---|---|
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because RADV on Strix Halo has no Vulkan Video H.264 or HEVC decode. Evidence below |
-| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion stays unticked until `spherecut frame`, which it also covers, exists and has its strace test. The CLI's JSON contract for `probe` and `doctor` (D27, `docs/cli-json.md`) is the third; its criterion stays unticked until `frame` joins it, with exit statuses 3 and 4, SIGINT and `--overwrite` |
+| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion stays unticked until `spherecut frame`, which it also covers, exists and has its strace test. The CLI's JSON contract for `probe` and `doctor` (D27, `docs/cli-json.md`) is the third; its criterion stays unticked until `frame` joins it, with exit statuses 3 and 4, SIGINT and `--overwrite`. Slice 2a is the fourth: `core::video` and `core::cancel`, `media::backend` with `FfmpegBackend` and the frame-exact seek of plan section 3.3 in software (D29), native pixel layouts, swscale for the rest and the colour default rules (D30), synth's new clips and its `SyntheticBackend` and `GatedBackend`. The seek oracle (`crates/synth/tests/seek.rs`) is exact on every clip of the set, and its negative controls miss. Slice 2b adds hardware decoding through the backend, fallback and the Tier 2 seek tests; no M1 criterion is ticked yet |
 | M2–M9 | Not started |
 | Agent integration (track A) | Planned 2026-10-24 at Pat's request (`PLAN.md` track A, DECISIONS D23). The CLI's JSON contract and FFmpeg's confinement are M1 criteria; the confinement is in (D24), and so is the contract for probe and doctor (D27); A1, the MCP server, follows M1's code |
 
@@ -120,6 +120,27 @@ back clean, so M0 is done.
   container and whose size FFmpeg takes from the container (MJPEG, for
   one): that fails while decoding, as FFmpeg decides.
   `spherecut frame` has no strace test yet, because it doesn't exist.
+- `MediaBackend` decodes in software only. Hardware decoding through
+  it (VA-API and Vulkan, each with its own device), fallback at open and
+  mid-stream, the pooled download, the render node lookup and the
+  `FaultBackend` are slice 2b; until then a hardware `VideoRequest` and
+  every audio open are `not_implemented`.
+- Exact seeks in a stream whose timestamps go backwards decode it twice
+  from the start, and the path for frames without timestamps can't be
+  reached through MP4 or Matroska, so it has no test. A target among the
+  leading pictures of the next keyframe seeks rather than decoding on
+  (D29).
+- FFmpeg 6.1's H.264 decoder, left to drop the frames it decodes from
+  references a seek skipped, loses the frames still in its reorder buffer
+  at the end of the stream. Spherecut has it output them and drops them
+  itself (D29); FFmpeg 7.1 to 9.0 have not been checked for the bug.
+- swscale's conversion is tested end to end only for UYVY and RGB24, the
+  formats a raw MOV carries; the others by format (D30).
+- synth's clips are tagged centre-sited chroma, which is what their
+  4:2:0 is, so probe's JSON says `center` for them, `gen-media`'s set
+  included.
+- `crates/cli/tests/confinement.rs` leaves its `confinement-<pid>-strace`
+  directory in the target's `tmp` after each run.
 - `VideoDecoder` copies hardware frames to system memory. Zero-copy
   (VA-API to DMA-BUF to wgpu) is proved in M1, and whether it becomes the
   default is decided before M3 (D25).
@@ -213,12 +234,15 @@ back clean, so M0 is done.
 
 ## Next
 
-1. M1, now that FFmpeg is confined (D24): the `MediaBackend` trait
-   around `VideoDecoder` (seek, audio, worker threads, frame cache), the
-   wgpu projection shader and `spherecut frame` on the CLI's JSON
-   contract (D27; with exit statuses 3 and 4, SIGINT and `--overwrite`)
-   and with its strace test, golden images on lavapipe, then the
-   eframe GUI. Bump `rust-version` to 1.95 with the GUI crates (D1).
+1. M1 slice 2b: hardware decoding through `MediaBackend` (VA-API and
+   Vulkan), fallback at open and mid-stream with fault injection, the
+   pooled download and the render node lookup, and the Tier 2 tests
+   `vaapi_seek_matches_software`, `vaapi_colorinfo_matches_software`,
+   `vaapi_download_pool_reuses_buffers` and `bench_seek_latency`. Then
+   the render core and goldens on lavapipe (slice 3, with `rust-version`
+   1.95, D1), `spherecut frame` on the CLI's JSON contract (D27; with
+   exit statuses 3 and 4, SIGINT and `--overwrite`) and its strace test,
+   worker threads and the frame cache, audio, then the eframe GUI.
 2. The Insta360 trailer reader (metadata, calibration, IMU), needed from M2.
 3. Agent integration A1 (the MCP server) once M1's code is in, while
    M1's hardware report is pending (Pat chose this order on 2026-10-24).
@@ -228,6 +252,7 @@ back clean, so M0 is done.
 ```sh
 cargo xtask check                 # everything Tier 1 (add --fix to apply rustfmt)
 cargo xtask gen-media             # synthetic media into test-media/
+cargo test -p spherecut-synth --test seek   # the seek oracle (D29)
 cargo run -p spherecut-cli -- probe <file>... [--json]   # --json: one document, docs/cli-json.md
 cargo run -p spherecut-cli -- doctor [--json]
 cargo xtask hw-test               # on a real machine; report in hw-reports/

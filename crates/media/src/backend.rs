@@ -654,4 +654,12 @@ const _: () = {
     send::<Box<dyn VideoDecode>>();
     send::<FfmpegBackend>();
     sync::<FfmpegBackend>();
+    send::<VideoStreamInfo>();
+    sync::<VideoStreamInfo>();
+    send::<SeekOutcome>();
+    send::<NextFrame>();
+    send::<DecoderEvent>();
+    send::<Box<dyn AudioDecode>>();
+    send::<StopToken>();
+    sync::<StopToken>();
 };

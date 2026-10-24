@@ -370,6 +370,11 @@ EIO mid-file looked like a clean end.
 Limits: the invalid-data skip has no test, and Matroska and fragmented-MP4
 cuts are not detected.
 
+*Updated 2026-10-24 by D29:* a seek clears a read failure, a cut and the
+end of the stream, so a seek back into the good part of a truncated file
+decodes again; a hardware refusal stays. The cancel flag is for shutdown
+only: seeks stop through generation tokens instead.
+
 ## D14. A hardware decoder says why it refused a stream
 
 *2026-10-23, M0. Extends D3.*
@@ -816,7 +821,7 @@ rest, with the versions in `Cargo.lock`:
 | anyhow 1.0.104 | cli, xtask | Error context at the program edges; libraries use `thiserror` |
 | clap 4.6.7 (derive) | cli, xtask | Argument parsing with generated help and errors, for two binaries with subcommands |
 | serde 1.0.229 (derive) | core, sphere, media, cli | Serializable time types, `Projection`, the probe and doctor reports, and the CLI's JSON envelope (D27) |
-| serde_json 1.0.154 | cli | `--json` output, through the `contract` module (D27). xtask reads cargo's JSON with a small field reader instead |
+| serde_json 1.0.154 | cli; core (dev) | `--json` output, through the `contract` module (D27). core's tests round-trip `ColorInfo` through JSON as the CLI will write it. xtask reads cargo's JSON with a small field reader instead |
 | thiserror 2.0.21 | core, media, synth | Typed library errors without hand-written `Display` impls |
 | tracing 0.1.44 | media, cli | Structured logging, and the target for FFmpeg's log (D12) |
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
@@ -1344,6 +1349,186 @@ values, which is a new version, so it is settled now.
 Revisit if: a caller needs codes on doctor's issues or one document per
 file of a long run; or A1's schemas want another time or error shape, in
 which case that is a version 2 of these schemas, never a silent change.
+
+## D29. MediaBackend and frame-exact seek
+
+*2026-10-24, M1 slice 2a. Updates D13. The M1 plan's D27 (section 3.3,
+`docs/design/m1-plan.md`); hardware decoding and fallback join it in
+slice 2b.*
+
+What:
+
+- Everything above media opens media through `backend::MediaBackend`
+  and decodes through `VideoDecode`. `FfmpegBackend` opens a confined
+  (D24) software decoder; synth's `SyntheticBackend` and `GatedBackend`
+  stand in for it in tests. Hardware decoding through the trait (slice
+  2b) and audio (slice 6) return `MediaError::NotYet`, code
+  `not_implemented`, until they land.
+- Clip time 0 is the first presented frame: `origin_pts` is its pts,
+  and clip time is (pts − `origin_pts`) × `time_base`, whatever an edit
+  list or B-frame delay does (ARCHITECTURE.md, "Time").
+- `seek(at, Exact)` returns the frame with the greatest pts at or before
+  T = `origin_pts` + ⌊at / tb⌋, later frames winning ties. It says how
+  that frame relates to `at`: `Exact`; `BeforeFirst` (at < 0, the first
+  frame); `AfterLast` (at or past the end of the last frame's interval,
+  the last frame); `Truncated { last_good_pts }` (the file is damaged
+  before T: the last frame before the damage, with a `Damaged` event; a
+  seek to exactly that frame's pts is `Exact`, with the event).
+- The algorithm is seekprobe's, as the plan gives it: a BACKWARD seek to
+  T, and when the first frame out is after T (and isn't the first frame
+  of the stream), a seek again to just before the keyframe it landed on,
+  up to `MAX_ATTEMPTS` (8) times, then from the start. The landing is
+  the first packet read after the seek, by its dts, or its pts when it
+  has none, as Matroska's packets mostly don't: the timestamp the
+  demuxer's index and `av_seek_frame` compare. A target in the GOP being
+  decoded (the keyframe the index names for T has been read), or within
+  a second without an index, decodes forward with no seek.
+- `seek(at, Keyframe)`, for scrubbing: one BACKWARD seek and its first
+  frame, whatever its pts, flagged `KeyframeOnly`. It is after T when T
+  is one of that keyframe's leading pictures; otherwise an exact seek to
+  T after it decodes forward. Step back is an exact seek to pts − 1.
+- Frame N of a constant-rate stream is at (N + ½) frame durations
+  (`seek::frame_address`, `seek_frame`); of a variable one, counted from
+  the start. A rate is constant when every MP4 sample but the last lasts
+  the same in `stts` (in a time base of one over the track's timescale),
+  or when a Matroska track's average and real rates agree and are within
+  a millionth of a standard rate (FFmpeg reads 59.94's default duration
+  as 19001/317).
+- FFmpeg hands out the frames it flags corrupt
+  (`AV_CODEC_FLAG_OUTPUT_CORRUPT`), and Spherecut drops them: decoded
+  from references a seek skipped, they are not frames of the stream as a
+  decode from the start shows it.
+- Seeks stop through `core::cancel`'s generation tokens, checked before
+  each packet is read and each frame is taken, which leaves the demuxer
+  in a known state; the next call seeks back to the frame handed out
+  last. FFmpeg's interrupt flag (`VideoRequest::interrupt`) is for
+  shutdown only, since it ends the stream for good (D13).
+- A seek clears a read failure and the end of the stream, so a seek back
+  into the good part of a truncated file decodes again. It does not
+  clear a device's refusal. This updates D13, where a read error was
+  sticky.
+- Timestamps that go backwards in decode output mark the stream not
+  exactly seekable (`DecoderEvent::NotExactlySeekable`): exact seeks then
+  decode the whole stream from the start for the best frame and again up
+  to it. A stream whose frames have no timestamps gets index × frame
+  duration and always decodes from the start.
+- A frame carries its `run`, the demuxer seek it was decoded after (a
+  seek that decodes forward goes on with the run before it), and its
+  `seq`, its place in decode output since then, so that frames of one
+  run with consecutive `seq` are adjacent. The cache links runs by them.
+- `catch_up(Some(t))` skips non-reference frames (`AVDISCARD_NONREF`)
+  until a packet with a pts at or after t is sent, and returns no frame
+  before t. Packets go in in decode order ahead of the frames coming out,
+  so stopping at the first frame out at or after t would already have
+  skipped B-frames just after it. A seek ends it.
+
+Where this differs from the plan: the landing falls back to pts
+(Matroska); `forward_is_cheaper` asks whether the index's keyframe for T
+is at or before the last packet read (the plan says the next one to be
+read, the same GOP test); `AfterLast` is decided from the last frame's
+interval (the next frame's pts, else FFmpeg's frame duration, else the
+average frame duration), not from the container's duration; corrupt
+frames are output and dropped rather than left to FFmpeg; Matroska's
+constant rate comes from its rates rather than its block timing; the
+trait method is `decode_path()`, not `path()`, beside the file path;
+frame addressing is free functions; and catch-up ends on a packet's pts.
+
+Why: seekprobe measured a naive BACKWARD seek missing 11 of 40 frames on
+open-GOP HEVC and 8 of 40 on H.264: the leading pictures after a keyframe
+whose dts is at or before T but whose pts is after it are dropped without
+a word. The seek oracle (`crates/synth/tests/seek.rs`) checks every clip
+of the set against a sequential decode, by pts and by a hash of the
+planes, at four times in each frame's interval, in order and shuffled,
+and the frames after each; the naive seek misses frames of both open-GOP
+clips, and n frame durations misses frames of the Matroska remux. FFmpeg
+6.1's H.264 decoder, left to drop corrupt frames itself, also loses the
+frames still in its reorder buffer at the end of the stream: after a
+seek to the last keyframe of an open-GOP clip its last frame never came
+out. The half-frame offset survives Matroska's millisecond timestamps
+(at most 0.5 ms off, against half an interval of at least 8 ms at
+60 fps).
+
+Limits: the timestamp-less path can't be reached through the two
+demuxers Spherecut opens and has no test. A not-exactly-seekable stream
+decodes twice per exact seek. `forward_is_cheaper` doesn't know a
+keyframe's pts, so a target among the leading pictures of the next
+keyframe seeks (and seeks again) rather than decoding on.
+
+Revisit if: the cache or the GUI needs something `run` and `seq` don't
+give; a decoder outputs frames out of pts order in streams that aren't
+broken; or FFmpeg's H.264 drain is fixed and the corrupt frames can be
+left to it.
+
+## D30. Pixel formats and colour defaults
+
+*2026-10-24, M1 slice 2a. The M1 plan's D28, section 3.4 and 3.5; its
+hardware fallback, render node and pooled downloads join this entry in
+slice 2b.*
+
+What:
+
+- A pixel format is uploaded as it is when `AVPixFmtDescriptor`, read as
+  ints (D11), says it is planar or semi-planar (U before V),
+  little-endian, 8 to 16 bits with every colour component at one depth,
+  in the low bits or, at 16-bit samples, the high ones (P010, P210):
+  YUV, planar RGB in FFmpeg's G, B, R order, or gray (`ffi::pixel_layout`).
+  Alpha is left out. That is the plan's list (`nv12`, `nv16`, `p010le`,
+  `p210le`, `p016le`, `yuv{420,422,444}p` and `yuvj*` at 8 to 16 bits,
+  `gray`, `gray10le`, `gray12le`, `gbrp` to `gbrp12le`) and every other
+  format of the same shape (`yuv440p`, 9-bit, `nv24`, `yuv411p`).
+  `PixelLayout::msb_aligned` is false at 16 bits, where high and low are
+  the same.
+- Every other format goes through swscale on the decode worker, to the
+  native format of the same kind at 8, 10, 12 or 16 bits, whichever holds
+  its depth (`ffi::conversion_target`): `gbrp*` for RGB, palette, Bayer
+  and XYZ, `gray*` for gray, and `yuv420p*`, `yuv422p*` or `yuv444p*`
+  for YUV by its subsampling (`yuv444p*` for any other). The range stays
+  what it is, the frame keeps its colour tags, and the flags are
+  bit-exact with accurate rounding, so a repack (UYVY to `yuv422p`, RGB24
+  to `gbrp`) is exact. `DecoderEvent::Converted` says so once. A format
+  without a descriptor, or one swscale doesn't take, is
+  `MediaError::UnsupportedFormat` (`unsupported_pixel_format`).
+- `color::resolve` turns a frame's codes into the colour shown. A field
+  left unspecified, or coded in a way Spherecut doesn't render, takes a
+  default and sets its `assumed` flag:
+
+  | Field | Default |
+  |---|---|
+  | range | full for `yuvj` formats and RGB, else limited |
+  | matrix | BT.709 at width ≥ 1280 or height > 576, else BT.601; identity for RGB |
+  | transfer | SDR |
+  | primaries | BT.709 (coded primaries other than BT.709 and BT.2020 are kept as `Other`) |
+  | siting | centre for MJPEG, else left |
+
+  YCgCo, constant-luminance and ICtCp matrices take the size rule;
+  transfers other than SDR's, PQ, HLG and linear are shown as SDR.
+- synth writes 4:2:0 chroma as the average of each 2×2 block, so its
+  clips are tagged centre-sited (`CLIP_COLOR`, which changes probe's JSON
+  for them from `left` to `center`), and 4:2:2 chroma from the left
+  column, co-sited, which is what H.264 and HEVC mean by 4:2:2: x264 and
+  x265 write no chroma location for it, and FFmpeg reads it as left.
+
+Where this differs from the plan: the plan sent every converted format to
+`yuv444p` or `yuv444p16le`; and its native list is a list, where the
+rule here covers more.
+
+Why: converting 4:2:2 or 4:4:4 to 4:2:0 on the CPU loses chroma and
+costs 10 to 30 ms per 5.7K frame, so what the GPU can sample is uploaded
+as it is. Converting to the same kind, depth and subsampling resamples
+nothing, keeps chroma siting meaningful, and keeps RGB out of a YUV
+matrix; it is also less data than 4:4:4. Untagged files are common, and
+the size rule is mpv's and libplacebo's (swscale assumes BT.601, and
+libavcodec doesn't guess); the flags let a person or an agent see a
+guess.
+
+Limits: only the formats a rawvideo MOV can carry (UYVY, RGB24) are
+converted end to end in a test; the rest are checked by format. Formats
+of more than 16 bits, float and hardware formats are never uploaded as
+they are.
+
+Revisit if: a camera's format falls outside the rule and swscale's
+conversion costs too much (M3's raw formats), or the renderer wants a
+format kept that this converts.
 
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 
