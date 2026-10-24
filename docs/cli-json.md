@@ -313,7 +313,7 @@ indented:
               "video": {
                 "width": 1024, "height": 512, "sample_aspect": null, "pix_fmt": "yuv420p", "bit_depth": 8,
                 "chroma_subsampling": [1, 1],
-                "color": {"range": "tv", "matrix": "bt709", "primaries": "bt709", "transfer": "bt709", "chroma_location": "left"},
+                "color": {"range": "tv", "matrix": "bt709", "primaries": "bt709", "transfer": "bt709", "chroma_location": "center"},
                 "field_order": "progressive", "rotation_deg": null
               },
               "audio": null,

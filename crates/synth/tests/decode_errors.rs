@@ -68,6 +68,7 @@ fn clip(dir: &Path, name: &str, frames: u32) -> PathBuf {
         bits: 8,
         audio: Audio::Stereo,
         spherical: false,
+        ..Spec::default()
     };
     media::write(&spec, dir).unwrap()
 }

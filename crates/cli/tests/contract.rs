@@ -95,6 +95,7 @@ fn clip(dir: &Path, rate: FrameRate) -> (PathBuf, Vec<PathBuf>) {
         bits: 8,
         audio: Audio::Stereo,
         spherical: true,
+        ..Spec::default()
     };
     let good = media::write(&spec, dir).unwrap();
     let bad = media::write_bad_files(&good, dir).unwrap();
@@ -579,7 +580,7 @@ fn colour_and_field_order_are_ffmpegs_names_not_null() {
         ]
         .map(|k| c[k].as_str().unwrap_or_else(|| panic!("{k}: {v}")))
     };
-    assert_eq!(color(0), ["tv", "bt709", "bt709", "bt709", "left"]);
+    assert_eq!(color(0), ["tv", "bt709", "bt709", "bt709", "center"]);
     assert_eq!(video(0)["field_order"], "progressive");
     // What the file doesn't say is FFmpeg's `unknown`, as ffprobe prints
     // it, not null.

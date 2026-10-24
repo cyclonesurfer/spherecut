@@ -122,6 +122,13 @@ pub(crate) fn set_color_tags(enc: &mut ff::encoder::video::Video, tags: ColorCod
     }
 }
 
+/// Clear an output stream's codec tag, so that the muxer picks its own.
+pub(crate) fn clear_codec_tag(st: &mut ff::format::stream::StreamMut<'_>) {
+    // SAFETY: the stream belongs to a live output context that is
+    // mutably borrowed with it, and `codec_tag` is a plain integer.
+    unsafe { (*(*st.as_mut_ptr()).codecpar).codec_tag = 0 };
+}
+
 /// Planar 32-bit float, the only sample format `Mp4Writer` sends.
 pub(crate) const SAMPLE_FMT_FLTP: c_int = sys::AVSampleFormat::AV_SAMPLE_FMT_FLTP as c_int;
 

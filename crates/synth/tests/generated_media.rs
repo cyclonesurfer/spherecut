@@ -32,6 +32,7 @@ fn small(name: &str, codec: Codec, bits: u32, audio: Audio, spherical: bool) -> 
         bits,
         audio,
         spherical,
+        ..Spec::default()
     }
 }
 

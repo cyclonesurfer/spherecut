@@ -34,6 +34,9 @@ pub enum EncodeError {
     Io { path: PathBuf, error: io::Error },
     #[error(transparent)]
     Inject(#[from] InjectError),
+    /// Opening a file to read from it.
+    #[error(transparent)]
+    Media(#[from] crate::MediaError),
 }
 
 fn ctx<T>(r: Result<T, ff::Error>, context: impl FnOnce() -> String) -> Result<T, EncodeError> {
@@ -679,4 +682,74 @@ impl Mp4Writer {
         drop(octx);
         Ok((path, tmp))
     }
+}
+
+/// Copy the video and audio streams of `src` into a new Matroska file at
+/// `dst`, packets as they are, and return `dst`. FFmpeg's Matroska muxer
+/// writes through our own handle, as [`Mp4Writer`] does, and keeps its
+/// default time base of 1/1000 s, so every timestamp is rounded to the
+/// millisecond. MP4 edit lists are not carried over: `src` should have
+/// none. The file appears at `dst` only once it is complete.
+pub fn remux_to_matroska(src: &Path, dst: &Path) -> Result<PathBuf, EncodeError> {
+    init();
+    let mut ictx = ffi::open_input(src, None)
+        .map_err(|e| crate::MediaError::opening(src, e, |e| e.to_string()))?;
+    let dest = follow_links(dst).map_err(|error| EncodeError::Io {
+        path: dst.to_path_buf(),
+        error,
+    })?;
+    let io_err = |error| EncodeError::Io {
+        path: dest.clone(),
+        error,
+    };
+    let tmp = TempFile::create(&dest).map_err(io_err)?;
+    let file = tmp.file().try_clone().map_err(io_err)?;
+    let stream = ctx(ff::format::context::StreamIo::from_write_seek(file), || {
+        format!("opening {}", dest.display())
+    })?;
+    let mut octx = ctx(
+        ff::format::output_to_stream(stream, None, Some("matroska")),
+        || format!("creating {}", dest.display()),
+    )?;
+    // Output stream and input time base, for each input stream copied.
+    let mut map: Vec<Option<(usize, ff::Rational)>> = vec![None; ictx.nb_streams() as usize];
+    for ist in ictx.streams() {
+        let par = ist.parameters();
+        if !matches!(
+            ffi::media_type(&par),
+            ff::media::Type::Video | ff::media::Type::Audio
+        ) {
+            continue;
+        }
+        let mut ost = ctx(octx.add_stream(None::<ff::Codec>), || {
+            "adding a stream".into()
+        })?;
+        ost.set_parameters(par);
+        // The Matroska muxer writes a video track's DefaultDuration from it.
+        ost.set_avg_frame_rate(ist.avg_frame_rate());
+        // MP4's sample entry type (`avc1`, `hvc1`) means nothing in
+        // Matroska, which names codecs its own way.
+        ffi::clear_codec_tag(&mut ost);
+        map[ist.index()] = Some((ost.index(), ist.time_base()));
+    }
+    ctx(octx.write_header(), || "writing Matroska header".into())?;
+    let out_tb: Vec<ff::Rational> = octx.streams().map(|s| s.time_base()).collect();
+    for (ist, mut pkt) in ictx.packets() {
+        let Some((index, in_tb)) = map.get(ist.index()).copied().flatten() else {
+            continue;
+        };
+        pkt.rescale_ts(in_tb, out_tb[index]);
+        pkt.set_position(-1);
+        pkt.set_stream(index);
+        ctx(pkt.write_interleaved(&mut octx), || {
+            "writing Matroska packet".into()
+        })?;
+    }
+    ctx(octx.write_trailer(), || "writing Matroska trailer".into())?;
+    drop(octx);
+    tmp.persist().map_err(|error| EncodeError::Io {
+        path: dest.clone(),
+        error,
+    })?;
+    Ok(dst.to_path_buf())
 }

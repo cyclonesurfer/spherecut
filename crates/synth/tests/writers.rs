@@ -47,6 +47,7 @@ fn spec(name: &str, width: u32, frames: u32, codec: Codec, bits: u32, audio: Aud
         bits,
         audio,
         spherical: true,
+        ..Spec::default()
     }
 }
 
