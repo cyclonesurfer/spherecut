@@ -79,7 +79,10 @@ impl Lens {
         }
     }
 
-    fn half(&self, p: Projection) -> f64 {
+    /// Half of the field of view `p` is drawn with: `hfov`, capped at
+    /// `p`'s [`Projection::max_hfov`]. The renderer passes these to its
+    /// shader.
+    pub fn half(&self, p: Projection) -> f64 {
         self.hfov.min(p.max_hfov()) / 2.0
     }
 
@@ -103,6 +106,51 @@ impl Lens {
         let (st, ct) = theta.sin_cos();
         let a = p / rho;
         DVec3::new(st * a.x, st * a.y, -ct)
+    }
+
+    /// Normalised radius at which this lens shows the angle `theta` off
+    /// axis, for any morph: the blended θ(ρ) increases with ρ, so
+    /// bisection finds it. `None` where no radius reaches `theta` (behind
+    /// a rectilinear lens, or past where a blend's curve levels off).
+    pub fn rho(&self, theta: f64) -> Option<f64> {
+        if theta <= 0.0 {
+            return Some(0.0);
+        }
+        let mut hi = 1.0;
+        while self.theta(hi) < theta {
+            hi *= 2.0;
+            if hi > 1e12 {
+                return None;
+            }
+        }
+        let mut lo = 0.0;
+        for _ in 0..200 {
+            let mid = 0.5 * (lo + hi);
+            if self.theta(mid) < theta {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+            if hi - lo <= f64::EPSILON * hi {
+                break;
+            }
+        }
+        Some(0.5 * (lo + hi))
+    }
+
+    /// View-space direction → output image point for any morph, the
+    /// inverse of [`Lens::unproject`] (by [`Lens::rho`]). `None` where the
+    /// lens can't show `d`.
+    pub fn project_morph(&self, d: DVec3) -> Option<DVec2> {
+        let d = d.normalize();
+        let lateral = DVec2::new(d.x, d.y);
+        let len = lateral.length();
+        let rho = self.rho(len.atan2(-d.z))?;
+        Some(if len < 1e-15 {
+            DVec2::ZERO
+        } else {
+            lateral / len * rho
+        })
     }
 
     /// View-space direction → output image point, for pure (non-morphing)
@@ -161,6 +209,32 @@ mod tests {
             let back = lens.project(d);
             prop_assert!(back.is_some());
             prop_assert!((back.unwrap_or_default() - pt).length() < 1e-7);
+        }
+
+        #[test]
+        fn morphs_round_trip(a in proj(), b in proj(), t in 0.0f64..=1.0,
+                             fov_deg in 10.0f64..330.0, x in -1.0f64..1.0, y in -1.0f64..1.0) {
+            let lens = Lens { from: a, to: b, morph: t, hfov: fov_deg.to_radians() };
+            let pt = DVec2::new(x, y);
+            prop_assume!(lens.theta(pt.length()) < PI - 1e-6);
+            let back = lens.project_morph(lens.unproject(pt));
+            prop_assert!(back.is_some());
+            prop_assert!((back.unwrap_or_default() - pt).length() < 1e-7, "{back:?}");
+        }
+
+        #[test]
+        fn project_morph_is_project_for_a_pure_lens(p in proj(), fov_deg in 10.0f64..330.0,
+                                                    d in crate::testutil::unit_dir()) {
+            let lens = Lens::new(p, fov_deg.to_radians());
+            match (lens.project(d), lens.project_morph(d)) {
+                (Some(a), Some(b)) => prop_assert!((a - b).length() < 1e-9 * a.length().max(1.0)),
+                // Only where the closed form says no, or right at its limit.
+                (None, None) => {}
+                (a, b) => {
+                    let theta = DVec2::new(d.x, d.y).length().atan2(-d.z);
+                    prop_assert!(theta > PI / 2.0 - 1e-6, "{a:?} vs {b:?} at {theta}");
+                }
+            }
         }
 
         #[test]
