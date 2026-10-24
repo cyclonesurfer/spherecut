@@ -2182,13 +2182,27 @@ fn stored_images_follow_the_rules_of_section_6() {
 }
 
 /// A scratch goldens directory and its diffs, for the harness's own
-/// tests, emptied first.
-fn scratch(name: &str) -> (PathBuf, PathBuf) {
+/// tests: emptied first, and removed when the test passes (a failing one
+/// leaves it, with its diffs, to look at).
+struct Scratch {
+    dir: PathBuf,
+    diffs: PathBuf,
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
+fn scratch(name: &str) -> Scratch {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("goldens-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let diffs = dir.join("diffs");
-    (dir, diffs)
+    Scratch { dir, diffs }
 }
 
 /// Blesses `rows` into `dir`.
@@ -2200,7 +2214,8 @@ fn bless_into(dir: &Path, diffs: &Path, rows: &[&str]) {
 
 #[test]
 fn blessing_writes_everything_or_nothing() {
-    let (dir, diffs) = scratch("bless");
+    let s = scratch("bless");
+    let (dir, diffs) = (s.dir.clone(), s.diffs.clone());
     std::fs::write(dir.join(MANIFEST), "{}").unwrap();
     // One failure anywhere and nothing is written, however many rows
     // passed.
@@ -2236,7 +2251,8 @@ fn blessing_writes_everything_or_nothing() {
 
 #[test]
 fn a_changed_source_is_not_compared_as_a_render() {
-    let (dir, diffs) = scratch("source");
+    let s = scratch("source");
+    let (dir, diffs) = (s.dir.clone(), s.diffs.clone());
     bless_into(&dir, &diffs, &["rect_forward"]);
     let path = dir.join(MANIFEST);
     let blessed: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -2302,11 +2318,21 @@ fn the_passthrough_model_and_its_bound() {
     assert_eq!(nearest_half(3.0 * 2f64.powi(-26)), 2f64.powi(-24));
 }
 
+// The two Tier 2 paths run on goldens blessed into a scratch directory,
+// never on `tests/goldens`: `goldens` rewrites that while blessing, in
+// parallel with these, and a read halfway through the rewrite failed the
+// blessing command although it had written everything.
+
 #[test]
 fn the_reference_only_path_runs_on_lavapipe() {
-    // goldens_on_gpu_match_reference's path, on two rows.
-    let mut run = Run::new(gpu(), Mode::References);
-    run_rows(&mut run, Some(&["rect_forward", "tenbit_ramp"]));
+    // goldens_on_gpu_match_reference's path, on two rows, with the floors
+    // their blessing calibrated.
+    let s = scratch("references");
+    let (dir, diffs) = (s.dir.clone(), s.diffs.clone());
+    let rows = ["rect_forward", "tenbit_ramp"];
+    bless_into(&dir, &diffs, &rows);
+    let mut run = Run::at(gpu(), Mode::References, &dir, &diffs);
+    run_rows(&mut run, Some(&rows));
     assert_eq!(run.notes.len(), 2, "{:?}", run.notes);
     assert!(run.pngs.is_empty());
     run.finish();
@@ -2316,7 +2342,10 @@ fn the_reference_only_path_runs_on_lavapipe() {
 fn the_other_driver_path_runs_on_lavapipe() {
     // goldens_on_host_llvmpipe's path, on one stored image: the
     // other-driver rule whatever the build, with the drift noted.
-    let mut run = Run::new(gpu(), Mode::OtherDriver);
+    let s = scratch("other-driver");
+    let (dir, diffs) = (s.dir.clone(), s.diffs.clone());
+    bless_into(&dir, &diffs, &["rect_forward"]);
+    let mut run = Run::at(gpu(), Mode::OtherDriver, &dir, &diffs);
     run_rows(&mut run, Some(&["rect_forward"]));
     assert!(run.notes[0].contains("golden_psnr_db"), "{:?}", run.notes);
     run.finish();
