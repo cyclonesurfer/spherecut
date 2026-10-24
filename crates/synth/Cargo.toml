@@ -18,4 +18,7 @@ thiserror.workspace = true
 workspace = true
 
 [dev-dependencies]
+# The fallback tests fail frames "as hardware" (tests/fallback.rs); only
+# here, so no other build has fault injection (DECISIONS D30).
+spherecut-media = { workspace = true, features = ["fault-injection"] }
 spherecut-testkit.workspace = true
