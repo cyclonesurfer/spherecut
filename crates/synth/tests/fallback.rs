@@ -691,6 +691,8 @@ fn a_render_node_that_is_not_there_falls_back_with_the_reason() {
         panic!("{reason:?}");
     };
     assert!(why.contains("/nonexistent/renderD128, as given"), "{why}");
+    // Named as every other hardware message names the device.
+    assert!(why.starts_with("VA-API device unavailable: "), "{why}");
     assert!(matches!(
         d.next_frame(&StopToken::never()),
         Ok(NextFrame::Frame(_))
@@ -698,7 +700,10 @@ fn a_render_node_that_is_not_there_falls_back_with_the_reason() {
     // The backend opens a device once: the next decoder gets the same
     // answer, and with Fallback::Fail it is the error.
     match backend.open_video(&path, &req(Fallback::Fail)) {
-        Err(e @ MediaError::Hardware { .. }) => assert_eq!(e.to_string(), *why),
+        Err(e @ MediaError::Hardware { .. }) => {
+            assert_eq!(e.to_string(), *why);
+            assert!(matches!(e, MediaError::Hardware { kind, .. } if kind == "VA-API"));
+        }
         other => panic!("{other:?}"),
     }
     assert_eq!(

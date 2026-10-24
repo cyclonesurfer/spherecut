@@ -952,13 +952,14 @@ impl VideoDecoder {
     }
 }
 
-/// Open a hardware device for decoding. `kind` is "vaapi" or "vulkan".
+/// Open a hardware device for decoding. `kind` is "vaapi" or "vulkan";
+/// an error names it "VA-API" or "Vulkan".
 pub fn open_hw_device(kind: &str, device: Option<&str>) -> Result<Arc<HwDevice>, MediaError> {
     init();
     HwDevice::open(kind, device)
         .map(Arc::new)
         .map_err(|reason| MediaError::Hardware {
-            kind: kind.to_string(),
+            kind: hwprobe::device_label(kind).into(),
             reason,
         })
 }
@@ -1050,7 +1051,7 @@ fn describe(d: &VulkanDevice) -> String {
 /// another one.
 pub fn open_vulkan_device(render_node: Option<&Path>) -> Result<VulkanChoice, MediaError> {
     let fail = |reason: String| MediaError::Hardware {
-        kind: "vulkan".into(),
+        kind: hwprobe::device_label("vulkan").into(),
         reason: HwError::Vulkan(reason),
     };
     let list = |dev: &HwDevice| {
@@ -1167,6 +1168,24 @@ mod tests {
 
     use super::*;
     use crate::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+
+    #[test]
+    fn a_device_that_does_not_open_is_named_as_the_other_errors_name_it() {
+        let e = open_hw_device("vaapi", Some("/nonexistent/renderD128")).unwrap_err();
+        assert!(
+            matches!(&e, MediaError::Hardware { kind, .. } if kind == "VA-API"),
+            "{e:?}"
+        );
+        assert!(
+            e.to_string().starts_with("VA-API device unavailable: "),
+            "{e}"
+        );
+        let e = open_hw_device("cuda-ish", None).unwrap_err();
+        assert!(
+            matches!(&e, MediaError::Hardware { kind, .. } if kind == "cuda-ish"),
+            "{e:?}"
+        );
+    }
 
     /// A test's own directory in the system's temp dir (unit tests get no
     /// CARGO_TARGET_TMPDIR), removed with what it holds when dropped, so

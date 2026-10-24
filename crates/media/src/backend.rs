@@ -764,7 +764,7 @@ impl FfmpegBackend {
         })
         .clone()
         .map_err(|reason| MediaError::Hardware {
-            kind: kind.ffmpeg_name().into(),
+            kind: kind.to_string(),
             reason,
         })
     }

@@ -91,7 +91,11 @@ pub enum MediaError {
     /// The reason is part of the message, so it is not also the error's
     /// `source()`, which would print it twice in an error chain.
     #[error("{kind} device unavailable: {reason}")]
-    Hardware { kind: String, reason: HwError },
+    Hardware {
+        /// "VA-API" or "Vulkan", as the other hardware errors say it.
+        kind: String,
+        reason: HwError,
+    },
     /// The decoder's frames are in a pixel format that is neither uploaded
     /// as it is nor converted by swscale (D30).
     #[error("cannot decode {}: swscale cannot convert its {pix_fmt} frames", path.display())]
