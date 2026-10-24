@@ -599,6 +599,14 @@ fn times_and_rationals_read_back_exactly() {
     let s = serde_json::to_string(&f).unwrap();
     assert_eq!(s, r#"{"exact":"1001/10000","seconds":0.1001,"frame":3}"#);
     assert_eq!(serde_json::from_str::<FrameTime>(&s).unwrap(), f);
+    // Without a known index (a variable-rate stream), `frame` is left out.
+    let vfr = FrameTime {
+        time: f.time,
+        frame: None,
+    };
+    let s = serde_json::to_string(&vfr).unwrap();
+    assert_eq!(s, r#"{"exact":"1001/10000","seconds":0.1001}"#);
+    assert_eq!(serde_json::from_str::<FrameTime>(&s).unwrap(), vfr);
     assert_eq!(
         serde_json::to_string(&FrameRate::FPS_25).unwrap(),
         r#""25""#

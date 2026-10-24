@@ -149,7 +149,8 @@ the `Checked*` traits, and which hasn't been released since 2024.
 
 *Updated by D27:* `Rational` serializes as the text `"n/d"` (`"n"` for an
 integer) and parses from it with `FromStr`, `Time` as `{"exact",
-"seconds"}`, and `FrameTime` (a `Time` and its frame index) joins them.
+"seconds"}`, and `FrameTime` (a `Time` and, when known, its frame index)
+joins them.
 ron used to write a frame rate as `(60000,1001)`; it now writes
 `"60000/1001"`, and the old form is refused.
 
@@ -1228,11 +1229,17 @@ What, for `spherecut probe` and `spherecut doctor` now, and for
 - A `Rational` is the string `"n/d"`, reduced, or `"n"` for an integer. A
   `Time` is `{"exact": "<rational>", "seconds": <float>}`, where `exact`
   is the time and `seconds` is for display. The new `core::FrameTime`
-  adds `frame`, the frame's index from the stream's first presented
-  frame. All three read back from these forms, ignoring `seconds`.
-  probe's container `duration` and `start_time` and its streams'
-  `duration` are `Time`s, where they were float seconds; time bases and
-  frame rates stay rationals, and `start_pts` stays an integer in ticks.
+  is a frame's time in clip time (0 at the stream's first presented
+  frame, M1 plan section 3.3) and adds `frame`, the frame's index from
+  that frame, only when it is known: a constant-rate stream, or a frame
+  reached by counting, as the plan's `frame --json` result has it. A
+  reader must allow it to be absent. All three read back from these
+  forms, ignoring `seconds`. probe's container `duration` and
+  `start_time` and its streams' `duration` are `Time`s, where they were
+  float seconds; time bases and frame rates stay rationals, and
+  `start_pts` stays an integer in ticks. probe's times are on the
+  container's timeline, where `start_time` may be far from 0, not in clip
+  time; `docs/cli-json.md` says which is which.
 - Exit statuses, in `contract::Exit`: 0 the run did what was asked; 1 an
   input or a check failed, doctor's errors included; 2 a command line
   that doesn't parse, as a document with clap's message under `--json`

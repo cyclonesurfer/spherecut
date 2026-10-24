@@ -12,13 +12,14 @@
 //! * A stream timestamp is a `pts` integer plus a timebase [`Rational`]
 //!   (seconds per tick), converted with [`Time::from_pts`] / [`Time::to_pts`].
 //! * [`FrameTime`] is the time of a frame of a video stream, with the
-//!   frame's index.
+//!   frame's index when it is known.
 //!
 //! Serialized, as in the CLI's JSON (DECISIONS D27), a [`Rational`] (and a
 //! [`FrameRate`]) is a string: `"30000/1001"`, or `"25"` for an integer. A
 //! [`Time`] is `{"exact": "1001/30000", "seconds": 0.0333…}` and a
-//! [`FrameTime`] adds `"frame"`. `exact` reads back to the same value;
-//! `seconds` is for readers that want a number, and is ignored when read.
+//! [`FrameTime`] adds `"frame"` when it has an index. `exact` reads back to
+//! the same value; `seconds` is for readers that want a number, and is
+//! ignored when read.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -365,24 +366,29 @@ impl fmt::Debug for Time {
     }
 }
 
-/// The time of a frame of a video stream, and the frame's index: frame 0
-/// is the stream's first presented frame. Serialized as a [`Time`] with
-/// `"frame"` added: `{"exact": "1001/10000", "seconds": 0.1001, "frame":
-/// 3}`.
+/// The time of a frame of a video stream in clip time, which is 0 at the
+/// stream's first presented frame (M1 plan, section 3.3), and the frame's
+/// index from that frame (0), when it is known: for a constant-rate
+/// stream, or a frame reached by counting from the start. A
+/// variable-rate stream's frames are addressed by time alone. Serialized
+/// as a [`Time`] with `"frame"` added when there is an index:
+/// `{"exact": "1001/10000", "seconds": 0.1001, "frame": 3}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(from = "FrameTimeRepr", into = "FrameTimeRepr")]
 pub struct FrameTime {
     pub time: Time,
-    pub frame: u64,
+    pub frame: Option<u64>,
 }
 
 impl FrameTime {
-    /// The start of frame `frame` of a stream at the constant rate `rate`.
+    /// The start of frame `frame` of a stream at the constant rate `rate`,
+    /// in clip time: frame n is at n / `rate`, whatever the pts of the
+    /// stream's first frame. Add that frame's time to get the stream's.
     pub fn at(rate: FrameRate, frame: u64) -> Result<Self, TimeError> {
         let index = i64::try_from(frame).map_err(|_| TimeError::Overflow)?;
         Ok(FrameTime {
             time: rate.frame_to_time(index)?,
-            frame,
+            frame: Some(frame),
         })
     }
 }
@@ -393,7 +399,31 @@ struct FrameTimeRepr {
     exact: Rational,
     #[serde(default, skip_deserializing)]
     seconds: f64,
-    frame: u64,
+    /// A bare integer in every format, or absent: ron would otherwise
+    /// write `Some(3)`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "frame_index::serialize",
+        deserialize_with = "frame_index::deserialize"
+    )]
+    frame: Option<u64>,
+}
+
+/// [`FrameTimeRepr::frame`] as a bare integer.
+mod frame_index {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(frame: &Option<u64>, s: S) -> Result<S::Ok, S::Error> {
+        match frame {
+            Some(n) => s.serialize_u64(*n),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+        u64::deserialize(d).map(Some)
+    }
 }
 
 impl From<FrameTimeRepr> for FrameTime {
@@ -633,7 +663,16 @@ mod tests {
         assert!(s.starts_with("(exact:\"1001/10000\",seconds:0.1001"), "{s}");
         assert!(s.ends_with(",frame:3)"), "{s}");
         assert_eq!(ron::from_str::<FrameTime>(&s).unwrap(), f);
-        assert!(ron::from_str::<FrameTime>("(exact:\"1\")").is_err());
+        // Without a known index (a variable-rate stream), it is written as
+        // a plain time, and a plain time reads back as one.
+        let vfr = FrameTime {
+            time: Time(r(3003, 30_000)),
+            frame: None,
+        };
+        let s = ron::to_string(&vfr).unwrap();
+        assert_eq!(s, ron::to_string(&vfr.time).unwrap());
+        assert_eq!(ron::from_str::<FrameTime>(&s).unwrap(), vfr);
+        assert!(ron::from_str::<FrameTime>("(frame:3)").is_err());
     }
 
     fn rates() -> impl Strategy<Value = FrameRate> {

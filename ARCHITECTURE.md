@@ -260,15 +260,19 @@ All stored time is exact (`spherecut_core::time`):
 * `Rational`: reduced `i64/i64`, checked arithmetic in `i128`.
 * `Time`: seconds as a `Rational`; timeline positions are `Time`.
 * `FrameRate`: positive `Rational` (`30000/1001` for 29.97).
-* `FrameTime`: a `Time` that is a frame of a video stream, with the
-  frame's index from the stream's first presented frame.
+* `FrameTime`: a `Time` that is a frame of a video stream, in clip time
+  (0 at the stream's first presented frame), with the frame's index from
+  that frame when it is known (constant frame rate, or counted).
+  `FrameTime::at(rate, n)` is n / rate.
 * Streams keep integer PTS in their own timebase; conversion to and from
   `Time` is explicit about rounding. Variable-frame-rate sources are
   addressed by PTS, never by frame index.
 * Serialized (D27), a `Rational` or `FrameRate` is the string `"n/d"`
   (`"n"` for an integer), which `Rational` also parses with `FromStr`; a
   `Time` is `{"exact": "n/d", "seconds": float}`, and a `FrameTime` adds
-  `"frame"`. Reading ignores `seconds`, so every one reads back exactly.
+  `"frame"` when it has an index. Reading ignores `seconds`, so every one
+  reads back exactly. probe's container times are FFmpeg's container
+  timestamps, not clip time (`docs/cli-json.md`, "Two timelines").
 
 ## Rendering *(planned, M1)*
 

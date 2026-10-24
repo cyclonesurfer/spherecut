@@ -86,22 +86,42 @@ Time in Spherecut is exact, and so is its JSON.
   `exact` is the time in seconds as a rational, and is the time.
   `seconds` is the same value as a float, for display and rough sums;
   never use it to tell frames apart.
-- A **frame time** is a time that is a frame of a video stream. It adds
-  `frame`, the frame's index from the stream's first presented frame
-  (0):
+- A **frame time** is a time that is a frame of a video stream, in clip
+  time (below). It adds `frame`, the frame's index from the stream's
+  first presented frame (0), when the index is known: for a
+  constant-frame-rate stream, or a frame reached by counting from the
+  start. A variable-frame-rate stream's frames are addressed by time
+  alone, so `frame` may be absent, and a reader must allow for that; a
+  frame time without it is a plain time:
 
   ```json
   {"exact": "1001/10000", "seconds": 0.1001, "frame": 3}
+  {"exact": "1001/10000", "seconds": 0.1001}
   ```
 
   probe and doctor have none. `frame` gives one for the frame it
   rendered, and A1's tools give them wherever a time is a frame.
 
+Two timelines, which differ for many files:
+
+- **The container's**, in probe: a container's `start_time` and a
+  stream's `start_pts` are FFmpeg's timestamps as the file has them, and
+  `start_time` may be far from 0 (a file made with `ffmpeg
+  -output_ts_offset 10` has one near 10 s, and its video stream's
+  `start_pts` is 128000 at `time_base` `"1/12800"`). `duration`s are
+  lengths, not positions.
+- **Clip time**, in `frame` and A1's tools: 0 is the stream's first
+  presented frame, whatever the container's `start_time`, edit list or
+  B-frame delay (M1 plan, section 3.3). `--time 0.5` is half a second
+  into the clip, so the first frame of the file above is `frame --time
+  0`, not `--time 10`. A frame time is in clip time: frame n of a
+  constant-rate stream is at n / `avg_frame_rate`.
+
 To read `exact`: split at `/` and parse both parts as 64-bit integers
 (`-?[0-9]+` and `[0-9]+`), never as floats. Spherecut reads its own
 output back to the same value; `spherecut_core::Rational` does it with
 `str::parse`, and `Time` and `FrameTime` deserialize from these objects,
-ignoring `seconds`.
+ignoring `seconds` (a `FrameTime` without `frame` has `frame: None`).
 
 Integer timestamps stay integers: a stream's `start_pts` is in ticks of
 its `time_base`.
