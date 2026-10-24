@@ -218,7 +218,8 @@ command; DECISIONS D27 says why it is this way. In short:
   check failed, 2 for a command line that doesn't parse (also a document
   under `--json`); 3 (a missing codec or device) and 4 (interrupted) are
   reserved for `spherecut frame` and the GUI. A panic is an `internal`
-  error, exit 1; an empty stdout means the run crashed.
+  error, exit 1; an empty stdout means a signal ended the run: Ctrl+C,
+  or a crash.
 
 ### Logging
 

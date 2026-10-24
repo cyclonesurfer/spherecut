@@ -37,7 +37,9 @@ pub enum Exit {
     /// Reserved for `frame` and the GUI: a codec or device the command
     /// itself needs is missing (no GPU, no display, no decoder).
     Missing = 3,
-    /// Reserved for `frame`: interrupted (SIGINT), leaving no output.
+    /// Reserved for `frame`: interrupted (SIGINT), leaving no output
+    /// file. The run's document still goes out, with the code
+    /// `cancelled`.
     Cancelled = 4,
 }
 

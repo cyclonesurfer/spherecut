@@ -25,10 +25,13 @@ With `--json`:
 - A panic, a bug in Spherecut on any thread, is still one document: an
   `internal` error that says where it panicked, with exit 1. Rust's own
   report of it goes to stderr.
-- If stdout holds no document at all, the run crashed: it was killed by
-  a signal (a crash inside FFmpeg is SIGSEGV or SIGABRT; a shell shows
-  128 + the signal's number as `$?`). Treat that as a failed run, and
-  please report it.
+- If stdout holds no document at all, the run was killed by a signal
+  before it wrote one; a shell shows 128 + the signal's number as `$?`.
+  Treat that as a failed run. A kill on purpose, such as SIGINT (Ctrl+C)
+  or SIGTERM (130 or 143), is no bug: probe and doctor don't catch them,
+  and `frame` will catch only the first Ctrl+C. Anything else is a crash,
+  such as SIGSEGV or SIGABRT inside FFmpeg (139 or 134): please report
+  it.
 
 ## Versions
 
@@ -143,7 +146,7 @@ its `time_base`.
 | 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18) |
 | 2 | Usage error: the command line doesn't parse | yes | yes |
 | 3 | Reserved: a codec or device the command itself needs is missing | never | never |
-| 4 | Reserved: interrupted (SIGINT), leaving no output | never | never |
+| 4 | Reserved: interrupted (SIGINT), leaving no output file; the document's code is `cancelled` | never | never |
 
 3 is for `spherecut frame` (no GPU, an unknown adapter, `--decoder
 vaapi` without a working device, no decoder for the codec) and for the

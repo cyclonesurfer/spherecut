@@ -1260,9 +1260,10 @@ What, for `spherecut probe` and `spherecut doctor` now, and for
 - A panic under `--json`, on any thread, is still the run's one
   document: a panic hook writes an `internal` error that says where it
   panicked, with no `result` (as for a usage error), and the run exits
-  1. Only a crash (a signal, such as a fault
-  inside FFmpeg) leaves stdout empty, which `docs/cli-json.md` tells
-  readers to treat as a failure.
+  1. Only a signal leaves stdout empty: a crash, such as a fault inside
+  FFmpeg, or a kill such as Ctrl+C, which probe and doctor don't catch.
+  `docs/cli-json.md` tells readers to treat it as a failure, and to
+  report a crash.
 - Exit statuses, in `contract::Exit`: 0 the run did what was asked; 1 an
   input or a check failed, doctor's errors included; 2 a command line
   that doesn't parse, as a document with clap's message under `--json`
