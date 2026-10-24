@@ -128,7 +128,9 @@ To read `exact`: split at `/` and parse both parts as 64-bit integers
 (`-?[0-9]+` and `[0-9]+`), never as floats. Spherecut reads its own
 output back to the same value; `spherecut_core::Rational` does it with
 `str::parse`, and `Time` and `FrameTime` deserialize from these objects,
-ignoring `seconds` (a `FrameTime` without `frame` has `frame: None`).
+ignoring `seconds`. A `FrameTime` without `frame`, or with `"frame":
+null`, has `frame: None`; Spherecut leaves the field out rather than
+writing null.
 
 Integer timestamps stay integers: a stream's `start_pts` is in ticks of
 its `time_base`.

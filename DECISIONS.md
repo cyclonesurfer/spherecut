@@ -1245,13 +1245,14 @@ What, for `spherecut probe` and `spherecut doctor` now, and for
   that frame, only when it is known: a constant-rate stream, or a frame
   reached by counting, as the plan's `frame --json` result has it. A
   reader must allow it to be absent. All three read back from these
-  forms, ignoring `seconds`. probe's container `duration` and
-  `start_time` and its streams' `duration` are `Time`s, where they were
-  `[num, den]` arrays of exact seconds; time bases and frame rates stay
-  rationals, and
-  `start_pts` stays an integer in ticks. probe's times are on the
-  container's timeline, where `start_time` may be far from 0, not in clip
-  time; `docs/cli-json.md` says which is which.
+  forms, ignoring `seconds`, and a `FrameTime` reads `"frame": null` as
+  absent, as serde reads any other `Option`. probe's container
+  `duration` and `start_time` and its streams' `duration` are `Time`s,
+  where they were `[num, den]` arrays of exact seconds; time bases and
+  frame rates stay rationals, and `start_pts` stays an integer in ticks.
+  probe's times are on the container's timeline, where `start_time` may
+  be far from 0, not in clip time; `docs/cli-json.md` says which is
+  which.
 - A panic under `--json`, on any thread, is still the run's one
   document: a panic hook writes an `internal` error that says where it
   panicked, and the run exits 1. Only a crash (a signal, such as a fault

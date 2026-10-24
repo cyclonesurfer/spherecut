@@ -699,6 +699,16 @@ fn times_and_rationals_read_back_exactly() {
     let s = serde_json::to_string(&vfr).unwrap();
     assert_eq!(s, r#"{"exact":"1001/10000","seconds":0.1001}"#);
     assert_eq!(serde_json::from_str::<FrameTime>(&s).unwrap(), vfr);
+    // A null index, as many JSON writers send for one they don't know, is
+    // no index; one that isn't a whole number of 0 or more is refused.
+    let read = |frame: &str| {
+        serde_json::from_str::<FrameTime>(&format!(r#"{{"exact":"1001/10000","frame":{frame}}}"#))
+    };
+    assert_eq!(read("null").unwrap(), vfr);
+    assert_eq!(read("3").unwrap(), f);
+    for bad in ["-1", "3.5", r#""3""#] {
+        assert!(read(bad).is_err(), "{bad}");
+    }
     assert_eq!(
         serde_json::to_string(&FrameRate::FPS_25).unwrap(),
         r#""25""#

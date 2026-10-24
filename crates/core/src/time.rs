@@ -17,9 +17,9 @@
 //! Serialized, as in the CLI's JSON (DECISIONS D27), a [`Rational`] (and a
 //! [`FrameRate`]) is a string: `"30000/1001"`, or `"25"` for an integer. A
 //! [`Time`] is `{"exact": "1001/30000", "seconds": 0.0333…}` and a
-//! [`FrameTime`] adds `"frame"` when it has an index. `exact` reads back to
-//! the same value; `seconds` is for readers that want a number, and is
-//! ignored when read.
+//! [`FrameTime`] adds `"frame"` when it has an index (null reads as none).
+//! `exact` reads back to the same value; `seconds` is for readers that want
+//! a number, and is ignored when read.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -400,7 +400,7 @@ struct FrameTimeRepr {
     #[serde(default, skip_deserializing)]
     seconds: f64,
     /// A bare integer in every format, or absent: ron would otherwise
-    /// write `Some(3)`.
+    /// write `Some(3)`. Null (ron's `None`) reads as absent.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -412,6 +412,9 @@ struct FrameTimeRepr {
 
 /// [`FrameTimeRepr::frame`] as a bare integer.
 mod frame_index {
+    use std::fmt;
+
+    use serde::de::{self, Unexpected, Visitor};
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(frame: &Option<u64>, s: S) -> Result<S::Ok, S::Error> {
@@ -421,8 +424,43 @@ mod frame_index {
         }
     }
 
+    /// A bare integer, or null, which is no index as for any other
+    /// `Option`: JSON readers often send null for a value they don't know.
+    /// ron's `None` and `Some(3)` read too.
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
-        u64::deserialize(d).map(Some)
+        d.deserialize_any(Index)
+    }
+
+    struct Index;
+
+    impl<'de> Visitor<'de> for Index {
+        type Value = Option<u64>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a frame index (an integer, 0 or more) or null")
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            u64::try_from(v)
+                .map(Some)
+                .map_err(|_| E::invalid_value(Unexpected::Signed(v), &self))
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            u64::deserialize(d).map(Some)
+        }
     }
 }
 
@@ -673,6 +711,15 @@ mod tests {
         assert_eq!(s, ron::to_string(&vfr.time).unwrap());
         assert_eq!(ron::from_str::<FrameTime>(&s).unwrap(), vfr);
         assert!(ron::from_str::<FrameTime>("(frame:3)").is_err());
+        // ron's own spellings of an Option read too; a negative index doesn't.
+        let read = |frame: &str| {
+            ron::from_str::<FrameTime>(&format!("(exact:\"1001/10000\",frame:{frame})"))
+        };
+        assert_eq!(read("None").unwrap(), vfr);
+        assert_eq!(read("Some(3)").unwrap(), f);
+        assert_eq!(read("3").unwrap(), f);
+        assert!(read("-1").is_err());
+        assert!(read("3.0").is_err());
     }
 
     fn rates() -> impl Strategy<Value = FrameRate> {

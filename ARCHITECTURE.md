@@ -278,9 +278,10 @@ All stored time is exact (`spherecut_core::time`):
 * Serialized (D27), a `Rational` or `FrameRate` is the string `"n/d"`
   (`"n"` for an integer), which `Rational` also parses with `FromStr`; a
   `Time` is `{"exact": "n/d", "seconds": float}`, and a `FrameTime` adds
-  `"frame"` when it has an index. Reading ignores `seconds`, so every one
-  reads back exactly. probe's container times are FFmpeg's container
-  timestamps, not clip time (`docs/cli-json.md`, "Two timelines").
+  `"frame"` when it has an index (a null one reads as none). Reading
+  ignores `seconds`, so every one reads back exactly. probe's container
+  times are FFmpeg's container timestamps, not clip time
+  (`docs/cli-json.md`, "Two timelines").
 
 ## Rendering *(planned, M1)*
 
