@@ -1613,14 +1613,17 @@ fn on_rate(rate: FrameRate, tb: Rational, scanned: &[i64], ended: bool, cues: &[
     let (tn, td) = (i128::from(tb.num()), i128::from(tb.den()));
     let tick = tn * num;
     let frame = den * td;
-    let off = |p: i64, k: i128| (i128::from(p - first) * tick - k * frame).abs();
+    // Two pts can be nearly 2^64 apart, and `tb` holds FFmpeg's ints and
+    // `rate` a standard one, so these stay well inside an i128.
+    let since = |p: i64| i128::from(p) - i128::from(first);
+    let off = |p: i64, k: i128| (since(p) * tick - k * frame).abs();
     let consecutive = pts
         .iter()
         .enumerate()
         .all(|(k, &p)| off(p, k as i128) <= tick);
     // The nearest frame to each cue.
     let on_grid = cues.iter().all(|&c| {
-        let k = (i128::from(c - first) * tick + frame / 2).div_euclid(frame);
+        let k = (since(c) * tick + frame / 2).div_euclid(frame);
         off(c, k) <= tick
     });
     consecutive && on_grid
@@ -1856,6 +1859,11 @@ mod tests {
         let thirty = at(FrameRate::FPS_30, 30);
         assert!(!on_rate(FrameRate::FPS_30, ms, &thirty, false, &[0, 1250]));
         assert!(!on_rate(FrameRate::FPS_30, ms, &[], false, &[]));
+        // Cues as far off as an i64 goes, on the grid and off it.
+        let later: Vec<i64> = thirty.iter().map(|p| p + 1000).collect();
+        let far = i64::MIN + 8;
+        assert!(on_rate(FrameRate::FPS_30, ms, &later, false, &[far]));
+        assert!(!on_rate(FrameRate::FPS_30, ms, &later, false, &[i64::MIN]));
     }
 
     #[test]
