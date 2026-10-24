@@ -226,8 +226,12 @@ pub struct VideoStreamInfo {
     pub time_base: Rational,
     /// The pts of the first presented frame: clip time 0.
     pub origin_pts: i64,
-    /// The clip time at which the last frame's interval ends, as the
-    /// container gives it.
+    /// The clip time at which the last frame's interval ends, where a
+    /// seek at or after it is `AfterLast`: the stream's duration (MP4),
+    /// else its `DURATION` tag (Matroska), else the file's. When the
+    /// container says nothing, or ends the stream at or before its last
+    /// frame, it becomes the last frame's pts plus its duration once that
+    /// frame has been decoded.
     pub duration: Option<Time>,
     pub timing: Timing,
     /// Frames shown, when the demuxer's index lists them all (MP4).

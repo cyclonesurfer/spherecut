@@ -122,30 +122,32 @@ fn open(path: &Path) -> Box<dyn VideoDecode> {
 
 /// Every frame of a sequential decode from the start, in output order,
 /// and the pts at which the interval of the frame with the greatest pts
-/// ends: after its duration, or after the average frame duration when it
-/// has none. Timestamps may tie or go backwards; [`shown_at`] says which
-/// frame a time shows.
+/// ends, as the stream's duration says once every frame is decoded.
+/// Timestamps may tie or go backwards; [`shown_at`] says which frame a
+/// time shows.
 fn sequential(path: &Path) -> (Vec<Seen>, i64) {
     let mut d = open(path);
     let never = StopToken::never();
+    let name = path.display();
+    // MP4 and Matroska both say where the stream ends.
+    assert!(d.info().duration.is_some(), "{name}: no duration");
     let mut out = Vec::new();
-    let mut last_end = i64::MIN;
-    let tb = d.info().time_base;
-    let ticks = |t: Time| t.to_pts(tb, spherecut_core::Rounding::Nearest).unwrap();
-    let average = match d.info().timing {
-        Timing::Constant(r) | Timing::Variable { average: Some(r) } => ticks(r.frame_duration()),
-        Timing::Variable { average: None } => 1,
-    };
-    let mut greatest = i64::MIN;
     while let NextFrame::Frame(f) = d.next_frame(&never).unwrap() {
         out.push(Seen::of(&f));
-        if f.pts >= greatest {
-            greatest = f.pts;
-            last_end = f.pts + f.duration.map_or(average, ticks);
-        }
     }
-    assert!(!out.is_empty(), "{}", path.display());
-    (out, last_end)
+    assert!(!out.is_empty(), "{name}");
+    let info = d.info();
+    let end = info.origin_pts
+        + info
+            .duration
+            .unwrap()
+            .to_pts(info.time_base, spherecut_core::Rounding::Floor)
+            .unwrap();
+    assert!(
+        out.iter().all(|f| f.pts < end),
+        "{name}: the stream ends at pts {end}, before a frame"
+    );
+    (out, end)
 }
 
 /// A small deterministic generator for the random targets.
@@ -492,30 +494,34 @@ fn an_edit_list_hides_its_lead_in_and_clip_time_starts_after_it() {
 #[test]
 fn a_variable_frame_rate_seeks_exactly_and_counts_frames() {
     let dir = TempDir::new("vfr");
-    let clip = write(
-        &Spec {
-            vfr: true,
-            ..spec("vfr", Codec::H264)
-        },
-        &dir,
-    );
-    let frames = oracle(&clip, GOP_8).frames;
-    let d = open(&clip);
-    assert!(
-        matches!(d.info().timing, Timing::Variable { .. }),
-        "{:?}",
-        d.info().timing
-    );
-    assert_eq!(d.info().time_base, Rational::new(1, 90_000).unwrap());
-    let mut pts = 0;
-    for (i, f) in frames.iter().enumerate() {
-        assert_eq!(f.pts, pts, "frame {i}");
-        pts += media::vfr_ticks(i as u32);
+    // The HEVC clip's last frame says it lasts a decode-time step, which
+    // isn't how long it's shown; the stream's duration says that.
+    for (name, codec) in [("vfr", Codec::H264), ("vfr-hevc", Codec::Hevc)] {
+        let clip = write(
+            &Spec {
+                vfr: true,
+                ..spec(name, codec)
+            },
+            &dir,
+        );
+        let frames = oracle(&clip, GOP_8).frames;
+        let d = open(&clip);
+        assert!(
+            matches!(d.info().timing, Timing::Variable { .. }),
+            "{:?}",
+            d.info().timing
+        );
+        assert_eq!(d.info().time_base, Rational::new(1, 90_000).unwrap());
+        let mut pts = 0;
+        for (i, f) in frames.iter().enumerate() {
+            assert_eq!(f.pts, pts, "{name}: frame {i}");
+            pts += media::vfr_ticks(i as u32);
+        }
+        assert_eq!(
+            seek::frame_address(d.info(), 7).unwrap(),
+            FrameAddress::Counted(7)
+        );
     }
-    assert_eq!(
-        seek::frame_address(d.info(), 7).unwrap(),
-        FrameAddress::Counted(7)
-    );
 }
 
 #[test]

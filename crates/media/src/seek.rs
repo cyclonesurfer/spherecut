@@ -177,6 +177,13 @@ pub struct FfmpegVideo {
     /// The (average) frame duration in ticks, for the last frame's
     /// interval when the decoder gives it none.
     frame_ticks: i64,
+    /// Where the last frame's interval ends, in ticks: as the container
+    /// says, or once the last frame has been decoded when it says nothing
+    /// or something before that frame.
+    end_pts: Option<i64>,
+    /// The greatest pts decoded since opening, and `AVFrame.duration` of
+    /// its frame.
+    greatest: Option<(i64, i64)>,
     catch_up: Option<i64>,
     events: Vec<DecoderEvent>,
     stats: DecodeStats,
@@ -276,7 +283,9 @@ impl FfmpegVideo {
             size: (fields.width, fields.height),
             time_base: tb,
             origin_pts,
-            duration: facts.duration,
+            duration: facts
+                .end_pts
+                .and_then(|e| Time::from_pts(e.saturating_sub(origin_pts), tb).ok()),
             timing: facts.timing,
             frame_count: facts.frame_count,
             layout: conv.layout().clone(),
@@ -316,6 +325,8 @@ impl FfmpegVideo {
             not_seekable: false,
             no_timestamps,
             frame_ticks,
+            end_pts: facts.end_pts,
+            greatest: Some((origin_pts, fields.duration)),
             catch_up: None,
             events,
             stats: DecodeStats::default(),
@@ -402,6 +413,9 @@ impl FfmpegVideo {
             _ => 0,
         };
         self.ties_seen |= tie > 0;
+        if self.greatest.is_none_or(|(g, _)| pts >= g) {
+            self.greatest = Some((pts, fields.duration));
+        }
         self.last_tie = tie;
         self.last_decoded = Some(pts);
         let seq = self.seq;
@@ -540,14 +554,26 @@ impl FfmpegVideo {
         Ok(Some(Start::Seeked(None)))
     }
 
-    /// The pts at which `frame`'s interval ends.
-    fn end_of(&self, pts: i64, duration: i64) -> i64 {
+    /// The pts at which the interval of the last frame, at `pts` and
+    /// lasting `duration` ticks (0 when unknown), ends: where the
+    /// container says the stream ends, when that is after the frame, as
+    /// `info().duration` says. Else after its duration, or the average
+    /// frame duration, which `info().duration` then says from now on.
+    fn last_end(&mut self, pts: i64, duration: i64) -> i64 {
+        if let Some(end) = self.end_pts
+            && end > pts
+        {
+            return end;
+        }
         let d = if duration > 0 {
             duration
         } else {
             self.frame_ticks
         };
-        pts.saturating_add(d)
+        let end = pts.saturating_add(d);
+        self.end_pts = Some(end);
+        self.info.duration = self.info.clip_time(end).ok();
+        end
     }
 
     /// Make the frame handed out for `raw`, followed by `next_pts` when
@@ -791,7 +817,7 @@ impl FfmpegVideo {
             }
         } else if at_end
             && self.pending.is_none()
-            && t >= self.end_of(frame.pts, self.frame_duration_ticks(&frame))
+            && t >= self.last_end(frame.pts, self.frame_duration_ticks(&frame))
         {
             Exactness::AfterLast
         } else {
@@ -820,8 +846,7 @@ impl FfmpegVideo {
     ) -> Result<Option<(Arc<VideoFrame>, Exactness, SeekCost)>, MediaError> {
         self.seek_to_start(&mut cost)?;
         // The frame shown at `t`, by its place in output order, and its
-        // pts; and the frame with the greatest pts, with where its interval
-        // ends.
+        // pts; and the frame with the greatest pts, with its duration.
         let mut best: Option<(u64, i64)> = None;
         let mut greatest: Option<(u64, i64, i64)> = None;
         let mut damage = None;
@@ -834,8 +859,7 @@ impl FfmpegVideo {
                         best = Some((index, r.pts));
                     }
                     if greatest.is_none_or(|(_, p, _)| r.pts >= p) {
-                        let end = self.end_of(r.pts, r.fields.duration);
-                        greatest = Some((index, r.pts, end));
+                        greatest = Some((index, r.pts, r.fields.duration));
                     }
                     index += 1;
                 }
@@ -854,6 +878,7 @@ impl FfmpegVideo {
                 }),
             }
         }
+        let last = greatest.map(|(i, pts, d)| (i, self.last_end(pts, d)));
         // Before every frame: the first one.
         let target = best.map_or(0, |(i, _)| i);
         self.seek_to_start(&mut cost)?;
@@ -861,7 +886,7 @@ impl FfmpegVideo {
             self.position = Position::Lost;
             return Ok(None);
         };
-        let exactness = match (best, greatest, damage) {
+        let exactness = match (best, last, damage) {
             (_, _, Some(reason)) => {
                 self.events.push(DecoderEvent::Damaged {
                     reason,
@@ -876,7 +901,7 @@ impl FfmpegVideo {
                 }
             }
             (None, _, None) => Exactness::BeforeFirst,
-            (Some((i, _)), Some((last, _, end)), None) if i == last && t >= end => {
+            (Some((i, _)), Some((last, end)), None) if i == last && t >= end => {
                 Exactness::AfterLast
             }
             _ => Exactness::Exact,
@@ -1129,7 +1154,13 @@ impl VideoDecode for FfmpegVideo {
                 Some(r) => r,
                 None => match self.decode(stop)? {
                     Got::Frame(r) => r,
-                    Got::End => return Ok(NextFrame::End),
+                    Got::End => {
+                        // Every frame has been decoded: the last one is known.
+                        if let Some((pts, duration)) = self.greatest {
+                            self.last_end(pts, duration);
+                        }
+                        return Ok(NextFrame::End);
+                    }
                     Got::Stopped => return Ok(NextFrame::Stopped),
                 },
             };
@@ -1173,7 +1204,9 @@ impl VideoDecode for FfmpegVideo {
 
 /// What a stream says about its timing and mapping, besides the frames.
 struct StreamFacts {
-    duration: Option<Time>,
+    /// Where the last frame's interval ends, in the stream's ticks, as
+    /// the container says.
+    end_pts: Option<i64>,
     timing: Timing,
     frame_count: Option<u64>,
     mapping: SourceMapping,
@@ -1193,18 +1226,38 @@ impl StreamFacts {
         };
         let average = st.as_ref().and_then(|s| rate(s.avg_frame_rate()));
         let real = st.as_ref().and_then(|s| rate(s.rate()));
-        let duration = st.as_ref().and_then(|s| {
+        // The stream's own duration (MP4), else the duration Matroska
+        // muxers tag each track with, else the file's, which takes in every
+        // stream.
+        let nopts = ff::ffi::AV_NOPTS_VALUE;
+        let stream_end = st.as_ref().and_then(|s| {
             let (start, d) = (s.start_time(), s.duration());
-            if d == ff::ffi::AV_NOPTS_VALUE || d <= 0 {
+            if d == nopts || d <= 0 {
                 return None;
             }
-            let start = if start == ff::ffi::AV_NOPTS_VALUE {
-                origin_pts
-            } else {
-                start
-            };
-            Time::from_pts(start.saturating_add(d).saturating_sub(origin_pts), tb).ok()
+            let start = if start == nopts { origin_pts } else { start };
+            Some(start.saturating_add(d))
         });
+        let tagged_end = || {
+            let tag = st.as_ref()?.metadata().get("DURATION").map(str::to_owned)?;
+            tag_time(&tag)?.to_pts(tb, Rounding::Nearest).ok()
+        };
+        let file_end = || {
+            let d = input.duration();
+            if d == nopts || d <= 0 {
+                return None;
+            }
+            let start = match ffi::format_start_time(input) {
+                s if s == nopts => 0,
+                s => s,
+            };
+            let micros = Rational::new(start.saturating_add(d), 1_000_000).ok()?;
+            Time::seconds(micros).to_pts(tb, Rounding::Nearest).ok()
+        };
+        let end_pts = stream_end
+            .or_else(tagged_end)
+            .or_else(file_end)
+            .filter(|&e| e > origin_pts);
         let trak_facts = if mov {
             let id = st.as_ref().map(|s| s.id());
             mp4::read_file_with(path, FirstBox::Any)
@@ -1242,7 +1295,7 @@ impl StreamFacts {
             .filter(|&n| n > 0);
         let mapping = trak_facts.map(|(_, s)| mapping(&s)).unwrap_or_default();
         StreamFacts {
-            duration,
+            end_pts,
             timing,
             frame_count,
             mapping,
@@ -1260,6 +1313,32 @@ impl StreamFacts {
             .filter(|&t| t > 0)
             .unwrap_or(1)
     }
+}
+
+/// A Matroska `DURATION` tag's time, `HH:MM:SS.fraction` as FFmpeg's
+/// and mkvmerge's muxers write it.
+fn tag_time(tag: &str) -> Option<Time> {
+    let mut parts = tag.trim().splitn(3, ':');
+    let (h, m, s) = (parts.next()?, parts.next()?, parts.next()?);
+    let int = |p: &str| -> Option<i64> {
+        (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse().ok())
+            .flatten()
+    };
+    let (whole, frac) = s.split_once('.').unwrap_or((s, ""));
+    // Nanoseconds at most.
+    let digits = frac.get(..frac.len().min(9))?;
+    let frac = match digits {
+        "" => Rational::from_integer(0),
+        d => Rational::new(int(d)?, 10i64.pow(d.len() as u32)).ok()?,
+    };
+    let secs = int(h)?
+        .checked_mul(3600)?
+        .checked_add(int(m)?.checked_mul(60)?)?
+        .checked_add(int(whole)?)?;
+    Some(Time::seconds(
+        Rational::from_integer(secs).checked_add(frac).ok()?,
+    ))
 }
 
 /// The standard rate within a millionth of `r`, if there is one.
@@ -1410,6 +1489,20 @@ mod tests {
                 Err(e) => panic!("{name}: {e}"),
                 Ok(_) => panic!("{name} is converted"),
             }
+        }
+    }
+
+    #[test]
+    fn matroska_duration_tags_are_read_to_the_nanosecond() {
+        let t = |s: &str| tag_time(s).map(|t| t.as_rational());
+        let r = |n, d| Some(Rational::new(n, d).unwrap());
+        assert_eq!(t("00:00:01.601000000"), r(1601, 1000));
+        assert_eq!(t("01:02:03.5"), r(7447, 2));
+        assert_eq!(t("00:00:07"), r(7, 1));
+        // Beyond nanoseconds is left out.
+        assert_eq!(t("00:00:00.0000000019"), r(1, 1_000_000_000));
+        for bad in ["", "1.5", "00:00:-1.0", "00:00:01.5e3", "a:b:c"] {
+            assert_eq!(t(bad), None, "{bad}");
         }
     }
 
