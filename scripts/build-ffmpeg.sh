@@ -5,6 +5,8 @@
 #   scripts/build-ffmpeg.sh n8.1.3 ~/ffmpeg      # gives ~/ffmpeg/n8.1.3-full
 #   cargo xtask compat ~/ffmpeg/n8.1.3-full --test ~/ffmpeg/n8.1.3-full
 #
+# n7.1.3 and n8.1.3 have been built with it on Ubuntu 24.04 (PROGRESS.md).
+#
 # The build has what Pat's Fedora FFmpeg uses (D2): VA-API and Vulkan
 # with libdrm, libx264, libx265, libdav1d, libsvtav1, libopus and
 # libvorbis, and libshaderc for the Vulkan filters. Shared libraries, no
@@ -20,7 +22,10 @@
 # FFmpeg 8.1's Vulkan needs headers of 1.3.277 or later (Ubuntu 24.04 has
 # 1.3.275): where pkg-config has none, Khronos Vulkan-Headers v1.4.354 go
 # into <dest>/vulkan-headers-v1.4.354, with a vulkan.pc over the system's
-# loader (libvulkan.so.1), and only the FFmpeg build sees them.
+# loader (libvulkan.so.1), and only the FFmpeg build sees them. Their
+# include directory is also passed with --extra-cflags: 7.1's configure
+# test-compiles vulkan.h without the package's Cflags, and fails to find
+# the vk_video headers it includes.
 set -eu
 
 if [ $# -ne 2 ]; then
@@ -49,6 +54,7 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 
+vk_cflags=
 if ! pkg-config --atleast-version=1.3.277 vulkan 2>/dev/null; then
     if [ ! -f "$vk/lib/pkgconfig/vulkan.pc" ]; then
         loader=$(ldconfig -p | awk '/libvulkan\.so\.1 .*x86-64/ { print $NF; exit }')
@@ -78,6 +84,7 @@ EOF
     fi
     PKG_CONFIG_PATH=$vk/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}
     export PKG_CONFIG_PATH
+    vk_cflags=-I$vk/include
 fi
 
 rm -rf "$src"
@@ -86,6 +93,9 @@ set -- --prefix="$prefix" --enable-shared --disable-static --disable-programs \
     --disable-doc --enable-gpl --enable-vaapi --enable-libx264 --enable-libx265 \
     --enable-libdav1d --enable-vulkan --enable-libshaderc --enable-libdrm \
     --enable-libopus --enable-libvorbis --enable-libsvtav1
+if [ -n "$vk_cflags" ]; then
+    set -- "$@" --extra-cflags="$vk_cflags"
+fi
 echo "PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-} ./configure $*" >"$prefix.configure-line"
 echo "==> configure $tag (log: $prefix.configure.log)"
 (cd "$src" && ./configure "$@") >"$prefix.configure.log" 2>&1
