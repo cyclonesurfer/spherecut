@@ -177,7 +177,7 @@ A file's `error.code` in probe (`result.files[].error.code`):
 | `not_a_file` | no | A directory, pipe, device or socket |
 | `not_media` | no | Empty, or FFmpeg doesn't know it as media |
 | `unsupported_container` | no | FFmpeg reads it as a container Spherecut doesn't open (an HLS playlist, an ffconcat script, WAV, ...); the message names it (D24) |
-| `nested_open_refused` | no | Opening it, FFmpeg tried to open another file or URL, which is refused (D24) |
+| `nested_open_refused` | no | Opening it, FFmpeg tried to open another file or URL, which is refused (D24). A guard: with only the MP4/MOV and Matroska demuxers allowed, and MP4's references to other files off, no file is known to cause it |
 | `truncated` | yes or no | It was cut short: a top-level MP4 box or the Matroska Segment runs past the end of the file, or the file ends before its Matroska Segment starts. Without a report when FFmpeg can't open what is left |
 | `damaged` | yes or no | Its structure is damaged in another way (README, "Build and run", lists what probe checks). Without a report when FFmpeg can't open it |
 | `no_video_or_audio` | yes | It holds only subtitles, data or attachments |
@@ -248,7 +248,7 @@ A report:
 | `structure` | object | How much of the structure was checked for damage: `{"check": "full"}` (MP4/MOV: every top-level box and the sample tables in `moov`, but not a fragmented file's fragments: the sample tables in its `moof` boxes (`trun`) aren't checked), `{"check": "length"}` (Matroska: only the Segment's length), or `{"check": "none", "why": string}` |
 | `damage` | array of problems | Why the file looks truncated or corrupt; empty for a healthy file |
 | `warnings` | array of problems | What may keep a stream from playing, without damage |
-| `ffmpeg_log` | array of strings | FFmpeg's warnings and errors while reading the file, each one whole line starting with the context that logged it (`[aac] ...`); a repeated line once with a count, at most 32. Healthy files can have some |
+| `ffmpeg_log` | array of strings | FFmpeg's warnings and errors while reading the file, each one whole line, starting with the context that logged it (`[aac] ...`) when FFmpeg gives one; a repeated line once with a count, at most 32. Healthy files can have some |
 
 A stream:
 

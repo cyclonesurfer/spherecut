@@ -32,7 +32,8 @@ pub enum MediaError {
     #[error("cannot open {}: {reason}", path.display())]
     Open { path: PathBuf, reason: String },
     /// While opening the file, FFmpeg asked to open another file or URL,
-    /// which was refused (D24).
+    /// which was refused (D24). A guard: the demuxers Spherecut allows,
+    /// with `enable_drefs` off, aren't known to ask.
     #[error(
         "cannot open {}: FFmpeg tried to open `{url}` from inside it, which is refused: Spherecut lets FFmpeg read only the file it was given",
         path.display()
