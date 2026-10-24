@@ -62,9 +62,10 @@ planned ones above don't exist yet.
   layout a pixel format is uploaded in (`pixel_layout`, from
   `AVPixFmtDescriptor`) and the format swscale converts the others to
   (`conversion_target`, `Scaler`), copying hardware frames to system
-  memory, `av_seek_frame` and the demuxer index (its end, its first and
-  shown entries, the keyframe before a time), skipping non-reference
-  frames, setting other streams to `AVDISCARD_ALL`, library versions, and the
+  memory, `av_seek_frame` and the demuxer index (its end, its first,
+  last and shown entries, its timestamps, the keyframe before a time),
+  skipping non-reference frames, the bytes a frame's buffers take
+  (`buffer_bytes`), setting other streams to `AVDISCARD_ALL`, library versions, and the
   bridge that sends FFmpeg's `av_log` to `tracing` under the target
   `ffmpeg`. C enums are never made into bindgen's Rust enums (DECISIONS
   D11). In more detail:
@@ -203,9 +204,12 @@ The other modules are safe Rust:
   skipped as invalid data. On a device it opens a decoder that can use the
   device and never falls back to software (D3, D14). For `seek` it also
   seeks (clearing a read failure, not a refusal, D29), says where a seek
-  landed and the last packet read (dts, else pts), stops at packet and
+  landed and the last packet read (dts, else pts), the least lag of a
+  keyframe's pts behind its dts, and as soon as reading has failed (the
+  frames still to come out may follow frames the damage lost), reads a
+  stream's first packets' timestamps and seeks back, stops at packet and
   frame boundaries on a `StopToken`, and skips non-reference frames until
-  a packet at a given pts.
+  a packet at a given pts, counting the packets sent meanwhile.
 * `backend`: the traits everything above media opens media through (D29):
   `MediaBackend` (`probe`, `open_video`, `open_audio`) and `VideoDecode`
   (`seek`, `next_frame`, `catch_up`, events and stats), with
@@ -214,23 +218,29 @@ The other modules are safe Rust:
   frame count, layout, colour, sphere mapping) and `VideoFrame`. A
   `VideoFrame` holds an FFmpeg frame or planes made without FFmpeg,
   implements core's `VideoPlanes` without copying, shares its layout
-  (`Arc<PixelLayout>`), and carries its `run` (the demuxer seek it was
-  decoded after) and `seq` (its place in decode-output order since), so
-  that frames of one run with consecutive `seq` are known to be
-  adjacent. `FfmpegBackend` opens a confined software decoder; hardware
+  (`Arc<PixelLayout>`), counts the buffers it keeps (`bytes()`, by
+  `AVBufferRef` size, for the cache's budget), and carries its `run`
+  (begun at a demuxer seek, or at the first frame after catching up
+  skipped frames) and `seq` (its place in decode-output order in the
+  run, which every frame decoded takes), so that frames of one run with
+  consecutive `seq` are known to be adjacent. `FfmpegBackend` opens a confined software decoder; hardware
   (slice 2b) and audio (slice 6) return `MediaError::NotYet`. The types
   that cross threads are checked `Send`, and `Sync` where they are
   shared, at compile time.
 * `seek`: `FfmpegVideo`, the `VideoDecode` on `VideoDecoder`, with the
   frame-exact seek of plan section 3.3 (D29), frame-index addressing
   (`frame_address`, `seek_frame`) and the stream's timing facts (constant
-  rate from `stts` or a snapped Matroska default duration, the frame
-  count from the MP4 index, the mapping from the track's spherical
-  boxes). It converts frames of a format that isn't uploaded as it is
+  rate from `stts` and `ctts`, or from a snapped Matroska default
+  duration that the first 64 blocks and the Cues keep to; the end of the
+  stream from the container, else the last frame's interval; the frame
+  count from the MP4 index; the mapping from the track's spherical
+  boxes). Streams whose timestamps tie or go backwards seek by the tie
+  rule, the latter by decoding from the start. It converts frames of a format that isn't uploaded as it is
   through swscale, once announced with `DecoderEvent::Converted` (D30).
 * `color`: `resolve`, the colour default rules (D30): a frame's codes,
   as FFmpeg's ints, become the `ColorInfo` the renderer uses, with an
-  `assumed` flag for each field a rule filled in.
+  `assumed` flag for each field a rule filled in (siting only where the
+  chroma is subsampled).
 * `detect`: camera and layout guesses from container structure, each with
   its evidence.
 * `doctor`: the capability checks and the fixes (D18). A failed check

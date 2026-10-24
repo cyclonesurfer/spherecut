@@ -1373,7 +1373,11 @@ What:
   frame); `AfterLast` (at or past the end of the last frame's interval,
   the last frame); `Truncated { last_good_pts }` (the file is damaged
   before T: the last frame before the damage, with a `Damaged` event; a
-  seek to exactly that frame's pts is `Exact`, with the event).
+  seek to exactly that frame's pts is `Exact`, with the event). A frame
+  that comes out after reading has failed, as the decoder drains, may
+  follow frames the damage lost (a cut inside B-frame 13 loses 13 and 15
+  but not 14 and 16), so a seek whose first frame past T is one is
+  damaged too, and the "already showing it" shortcut doesn't trust it.
 - The algorithm is seekprobe's, as the plan gives it: a BACKWARD seek to
   T, and when the first frame out is after T (and isn't the first frame
   of the stream), a seek again to just before the keyframe it landed on,
@@ -1381,57 +1385,101 @@ What:
   the first packet read after the seek, by its dts, or its pts when it
   has none, as Matroska's packets mostly don't: the timestamp the
   demuxer's index and `av_seek_frame` compare. A target in the GOP being
-  decoded (the keyframe the index names for T has been read), or within
-  a second without an index, decodes forward with no seek.
+  decoded decodes forward with no seek: the keyframe the index names for
+  T has been read. The index lists keyframes by dts, so T is shifted back
+  by the least lag of pts behind dts over the keyframes read, as the MOV
+  demuxer shifts a seek's target. The index is used only when it lists
+  something after the last packet read (a Matroska demuxer's lists only
+  the keyframes read until it has read Cues); otherwise, and with no
+  index, T within a second decodes forward.
 - `seek(at, Keyframe)`, for scrubbing: one BACKWARD seek and its first
   frame, whatever its pts, flagged `KeyframeOnly`. It is after T when T
   is one of that keyframe's leading pictures; otherwise an exact seek to
   T after it decodes forward. Step back is an exact seek to pts − 1.
 - Frame N of a constant-rate stream is at (N + ½) frame durations
   (`seek::frame_address`, `seek_frame`); of a variable one, counted from
-  the start. A rate is constant when every MP4 sample but the last lasts
-  the same in `stts` (in a time base of one over the track's timescale),
-  or when a Matroska track's average and real rates agree and are within
-  a millionth of a standard rate (FFmpeg reads 59.94's default duration
-  as 19001/317).
+  the start. An MP4 track's rate is constant when every sample but the
+  last lasts the same in `stts` (in a time base of one over the track's
+  timescale) and its `ctts` offsets show the frames as evenly: every
+  sample on one slot of the decode-time grid, shifted alike, no two in a
+  slot and none left out, as reordered B-frames are (tracks of more than
+  2^26 samples count as variable). FFmpeg sets a Matroska track's average
+  and real rates both from its default duration, which says nothing of
+  its blocks, so its rate is constant when the two agree within a
+  millionth of a standard rate (FFmpeg reads 59.94 as 19001/317), the
+  first 64 packets' pts, read at open and sorted, lie one frame apart on
+  that rate's grid to the millisecond (bar the last 16, which B-frames
+  may still fill, unless the stream ended), and every Cues entry lies on
+  it. The seek back to the start after that read is the demuxer's first
+  seek, which is when it reads Cues written after the clusters, as FFmpeg
+  writes them.
+- The stream ends where its `duration` says (MP4), else Matroska's
+  per-track `DURATION` tag, else the file's duration: `info().duration`
+  and `AfterLast` both use it. When the container says nothing, or ends
+  the stream at or before its last frame (a raw MOV whose last sample has
+  no duration), the last frame's pts plus its duration, else the average
+  frame duration, takes its place, and `info().duration` says so once
+  that frame has been decoded.
 - FFmpeg hands out the frames it flags corrupt
   (`AV_CODEC_FLAG_OUTPUT_CORRUPT`), and Spherecut drops them: decoded
   from references a seek skipped, they are not frames of the stream as a
   decode from the start shows it.
 - Seeks stop through `core::cancel`'s generation tokens, checked before
   each packet is read and each frame is taken, which leaves the demuxer
-  in a known state; the next call seeks back to the frame handed out
-  last. FFmpeg's interrupt flag (`VideoRequest::interrupt`) is for
-  shutdown only, since it ends the stream for good (D13).
+  in a known state. The next call goes on just after the frame handed
+  out last: it seeks (to just before that frame's pts when the stream has
+  tied pts, from the start where every seek goes there) and decodes up to
+  it without making it again, finding the frame after it by its place
+  from the start where that is known, else by pts and its rank among
+  frames that tie. `next_frame` hands a frame out only once the frame
+  after it is known (for its duration), and keeps it for the next call
+  when stopped first. FFmpeg's interrupt flag (`VideoRequest::interrupt`)
+  is for shutdown only, since it ends the stream for good (D13).
 - A seek clears a read failure and the end of the stream, so a seek back
   into the good part of a truncated file decodes again. It does not
   clear a device's refusal. This updates D13, where a read error was
   sticky.
+- Of frames that tie, the later is shown, and the decode keeps the
+  frame with the greatest pts at or before T, not the last one out.
 - Timestamps that go backwards in decode output mark the stream not
-  exactly seekable (`DecoderEvent::NotExactlySeekable`): exact seeks then
-  decode the whole stream from the start for the best frame and again up
-  to it. A stream whose frames have no timestamps gets index × frame
-  duration and always decodes from the start.
-- A frame carries its `run`, the demuxer seek it was decoded after (a
-  seek that decodes forward goes on with the run before it), and its
-  `seq`, its place in decode output since then, so that frames of one
-  run with consecutive `seq` are adjacent. The cache links runs by them.
+  exactly seekable (`DecoderEvent::NotExactlySeekable`), and its timing
+  variable, since frame N is then the Nth decoded. Exact seeks then
+  decode the whole stream from the start for the frame shown at T and
+  again up to it, before any shortcut, and the seek that first sees the
+  step does itself again so; they say `AfterLast` and `Truncated` as
+  other seeks do. A stream whose frames have no timestamps gets index ×
+  frame duration and always decodes from the start.
+- A frame carries its `run` and its `seq`, its place in decode output in
+  the run, so that frames of one run with consecutive `seq` are adjacent.
+  The cache links runs by them. A run starts at each demuxer seek (a seek
+  that decodes forward goes on with the run before it, and so does the
+  next call after a stopped seek), and at the first frame handed out
+  after packets went in while catching up skipped frames, since a frame
+  the decoder skips leaves no trace. Every frame decoded takes a `seq`,
+  handed out or not, in `FfmpegVideo` and `SyntheticBackend` alike.
 - `catch_up(Some(t))` skips non-reference frames (`AVDISCARD_NONREF`)
   until a packet with a pts at or after t is sent, and returns no frame
   before t. Packets go in in decode order ahead of the frames coming out,
   so stopping at the first frame out at or after t would already have
-  skipped B-frames just after it. A seek ends it.
+  skipped B-frames just after it. A seek ends it; so does
+  `catch_up(None)`, and a later t carries it on. Ended (by a seek, by
+  `None` or by an earlier t) after it passed frames over, it leaves the
+  decoder to find its place again, so the next frame is the one after
+  the last returned and a seek doesn't decode forward over the gap. A
+  stream whose frames are counted from the start skips none.
 
 Where this differs from the plan: the landing falls back to pts
-(Matroska); `forward_is_cheaper` asks whether the index's keyframe for T
-is at or before the last packet read (the plan says the next one to be
-read, the same GOP test); `AfterLast` is decided from the last frame's
-interval (the next frame's pts, else FFmpeg's frame duration, else the
-average frame duration), not from the container's duration; corrupt
-frames are output and dropped rather than left to FFmpeg; Matroska's
-constant rate comes from its rates rather than its block timing; the
-trait method is `decode_path()`, not `path()`, beside the file path;
-frame addressing is free functions; and catch-up ends on a packet's pts.
+(Matroska); `forward_is_cheaper` asks whether the index's keyframe for T,
+shifted by the keyframes' lag, is at or before the last packet read (the
+plan says the next one to be read, the same GOP test), and uses the
+index only when it lists what lies ahead; the end of the stream falls
+back to the last frame's interval when the container says nothing or
+ends it too early; corrupt frames are output and dropped rather than
+left to FFmpeg; Matroska's constant rate is checked on its first 64
+blocks and its Cues, not every block; MP4's needs `ctts` as well as
+`stts`; the trait method is `decode_path()`, not `path()`, beside the
+file path; frame addressing is free functions; and catch-up ends on a
+packet's pts.
 
 Why: seekprobe measured a naive BACKWARD seek missing 11 of 40 frames on
 open-GOP HEVC and 8 of 40 on H.264: the leading pictures after a keyframe
@@ -1446,13 +1494,32 @@ frames still in its reorder buffer at the end of the stream: after a
 seek to the last keyframe of an open-GOP clip its last frame never came
 out. The half-frame offset survives Matroska's millisecond timestamps
 (at most 0.5 ms off, against half an interval of at least 8 ms at
-60 fps).
+60 fps). The review of slice 2a found each later rule by a wrong frame
+returned as `Exact`: a cut mid-GOP gave frame 12 for 13; a stream whose
+pts go backwards gave the last frame out rather than the one shown; a
+variable-rate Matroska file with a 30 fps default duration gave 28 of
+its 30 frames wrong by index, as did an MP4 whose `ctts` tie two frames;
+a seek after a stopped catch-up gave the frame before the target; and
+on one thread (as slice 2b's hardware decoders run) catching up called
+frames adjacent across a frame the decoder skipped. A seek 9 s into a
+300-frame Matroska file decoded 271 frames forward before its Cues were
+read. The oracle now runs on tied and backwards clips, in MP4 and
+Matroska, and checks each seek's cost (one seek and its re-seeks, at
+most two GOPs decoded) and every run link.
 
 Limits: the timestamp-less path can't be reached through the two
 demuxers Spherecut opens and has no test. A not-exactly-seekable stream
-decodes twice per exact seek. `forward_is_cheaper` doesn't know a
-keyframe's pts, so a target among the leading pictures of the next
-keyframe seeks (and seeks again) rather than decoding on.
+decodes twice per exact seek, and is found out only when its timestamps
+are seen to go backwards: seeks before then trust them. `forward_is_cheaper`
+knows a keyframe's pts only as its dts plus the least lag seen, so a
+target among the leading pictures of the next keyframe seeks (and seeks
+again) rather than decoding on. A Matroska file whose blocks leave its
+default duration's grid after the first 64, between Cues entries, still
+reads as constant-rate. The run started after catching up skipped is
+conservative (any packet sent while skipping starts one) and no test
+reaches it: every path a test can drive has decoded the frame after the
+last one before skipping begins. It guards a keyframe seek stopped just
+after its frame and a frame out after a decode error.
 
 Revisit if: the cache or the GUI needs something `run` and `seq` don't
 give; a decoder outputs frames out of pts order in streams that aren't
