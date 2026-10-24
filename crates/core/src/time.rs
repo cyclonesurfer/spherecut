@@ -114,7 +114,7 @@ impl Rational {
         Rational { num: n, den: 1 }
     }
 
-    fn from_i128(num: i128, den: i128) -> Result<Self, TimeError> {
+    pub(crate) fn from_i128(num: i128, den: i128) -> Result<Self, TimeError> {
         if den == 0 {
             return Err(TimeError::ZeroDenominator);
         }
