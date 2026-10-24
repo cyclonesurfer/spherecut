@@ -258,22 +258,27 @@ fn broken_files_give_errors_not_panics() {
         assert!(r.is_ok_and(|r| !r.damage.is_empty()), "{name}");
     }
     // The stream looks set up: FFmpeg took the sample rate and channels
-    // from the sample entry. The decoder's failed open in
-    // avformat_find_stream_info clears its channel layout: 6.1 kept the
-    // channels in the old `channels` field, which 7.0 removed, and 8.1.3
-    // and 9.0.2 put the sample entry's back. In between the stream has
-    // none, and the decoder's refusal above is still the reason (D2).
+    // from the sample entry, and the AAC decoder set the sample format
+    // before it refused the `esds`. Its failed open in
+    // avformat_find_stream_info clears the channel layout: 6.1 kept the
+    // channels in the old `channels` field, which 7.0 removed, and
+    // FFmpeg's fd6dc624be1e puts the sample entry's back (8.1.3 and 9.0.2
+    // have it, 8.1.2 and 9.0.1 don't, and any point release may take it).
+    // Whether the stream has its 2 channels or none is FFmpeg's to say;
+    // the decoder's refusal is the reason either way (D2).
     let r = probe::probe(&dir.join("bad-audio-config.mp4")).unwrap();
     let audio = r.streams.iter().find_map(|s| s.audio.as_ref()).unwrap();
-    let v = ff::format::version();
-    let cleared = match (v >> 16, v >> 8 & 0xff, v & 0xff) {
-        (61, ..) => true,
-        (62, minor, micro) => (minor, micro) < (12, 103),
-        (63, minor, micro) => (minor, micro) < (1, 102),
-        _ => false,
-    };
-    assert_eq!(audio.channels == 0, cleared, "{audio:?}");
+    assert!(matches!(audio.channels, 0 | 2), "{audio:?}");
     assert!(audio.sample_fmt.is_some(), "{audio:?}");
+    let [damage] = &r.damage[..] else {
+        panic!("{:?}", r.damage)
+    };
+    assert!(
+        damage.message.starts_with(
+            "stream #1 (sample entry `mp4a`) cannot be opened by FFmpeg's aac decoder ("
+        ) && damage.message.ends_with("), so its codec setup is damaged"),
+        "{damage:?}"
+    );
     // The audio track is gone from what FFmpeg reads, whether its type is
     // still text or not.
     for name in ["bad-trak-type.mp4", "bad-trak-renamed.mp4"] {

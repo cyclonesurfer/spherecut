@@ -146,8 +146,8 @@ didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
   `avformat_find_stream_info` on the file reads 0 channels against 7.1,
   7.1.3 and 8.1 and 2 against 6.1, 8.1.3 and 9.0.2. probe now asks the
   decoder first (6fabd8b, D15), with a unit test that fails without it,
-  and generated_media expects the channels cleared on exactly those
-  releases. From 6fabd8b every Tier 1 test passes against 8.1.3, 7.1.3
+  and generated_media expected the channels cleared on exactly those
+  releases (no longer, below). From 6fabd8b every Tier 1 test passes against 8.1.3, 7.1.3
   and 6.1, 395 on each with 19 ignored, and clippy and the link pass
   against the minimal 7.1 and the 9.0.2 with VA-API, libx264, libx265
   and libdav1d.
@@ -159,7 +159,13 @@ didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
   decoder that sets the channels up itself is asked now (D15).
   generated_media's `a_pcm_track_without_channels_is_damage_only_with_samples`
   writes a PCM MOV and sets its channels to 0, with its samples and
-  without, and fails without the fix.
+  without, and fails without the fix. The review also found
+  generated_media's check of the channels gated on libavformat's
+  version, which says nothing of which fixes a point release took
+  (FFmpeg's fd6dc624be1e, which puts the channels back, is in 8.1.3 and
+  9.0.2 but not 8.1.2 or 9.0.1). It now takes 2 channels or none, which
+  are FFmpeg's to say, and checks what is probe's: the AAC decoder's
+  refusal as the one damage, and the sample format.
 - `gen-media`'s files from 8.1.3 differ from 6.1's only in FFmpeg's
   version strings (`Lavc`, `Lavf`) and the average bitrate in MP4's
   `btrt` box, which 8.1.3 leaves 0: the streams are the same.
