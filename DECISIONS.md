@@ -1660,8 +1660,12 @@ What:
   it from opening, so every decoder of the backend shares the device and
   the answer. Both kinds open on the render node below, the Vulkan one
   through `open_vulkan_device` (D38), and a Vulkan device on the CPU
-  counts as none. Nothing here prefers one kind: slice 5 picks it from
-  doctor's checks (m1-plan amendment 9).
+  counts as none. Where no Vulkan device is listed as the one behind the
+  node, even a node `--render-node` names, Vulkan takes the first GPU
+  listed, as D38 does, while VA-API fails with `NoDevice`; the log line
+  that says a device opened names the node for VA-API and the GPU for
+  Vulkan, with why it was taken. Nothing here prefers one kind: slice 5
+  picks it from doctor's checks (m1-plan amendment 9).
 - The render node (`media::hw`, over a sysfs root that tests fake) is
   that of the PCI device at the bus id wgpu gives its adapter
   (`<sys>/bus/pci/devices/<id>/drm/renderD*`); else the first

@@ -755,12 +755,16 @@ impl FfmpegBackend {
         };
         cell.get_or_init(|| {
             let node = self.render_node();
-            let r = open_device(kind, &node);
-            match &r {
-                Ok(_) => tracing::info!("hardware decoding with {kind} on {node}"),
-                Err(e) => tracing::info!("no {kind} device for hardware decoding: {e}"),
+            match open_device(kind, &node) {
+                Ok((device, on)) => {
+                    tracing::info!("hardware decoding with {kind} on {on}");
+                    Ok(device)
+                }
+                Err(e) => {
+                    tracing::info!("no {kind} device for hardware decoding: {e}");
+                    Err(e)
+                }
             }
-            r
         })
         .clone()
         .map_err(|reason| MediaError::Hardware {
@@ -770,8 +774,11 @@ impl FfmpegBackend {
     }
 }
 
-/// A device of kind `kind` on `node`, for [`FfmpegBackend::device`].
-fn open_device(kind: HwKind, node: &RenderNode) -> Result<Arc<HwDevice>, HwError> {
+/// A device of kind `kind` on `node`, for [`FfmpegBackend::device`], and
+/// what it runs on: the node for VA-API, and for Vulkan the GPU, which is
+/// the first one listed when none is listed as the one behind the node
+/// (D38), even a node `--render-node` names.
+fn open_device(kind: HwKind, node: &RenderNode) -> Result<(Arc<HwDevice>, String), HwError> {
     let no_device = |reason: String| HwError::NoDevice {
         node: node.to_string(),
         reason,
@@ -783,7 +790,7 @@ fn open_device(kind: HwKind, node: &RenderNode) -> Result<Arc<HwDevice>, HwError
                 .to_str()
                 .ok_or_else(|| no_device("the path is not UTF-8".into()))?;
             HwDevice::open(kind.ffmpeg_name(), Some(path))
-                .map(Arc::new)
+                .map(|d| (Arc::new(d), node.to_string()))
                 .map_err(|e| no_device(e.to_string()))
         }
         HwKind::Vulkan => {
@@ -799,8 +806,8 @@ fn open_device(kind: HwKind, node: &RenderNode) -> Result<Arc<HwDevice>, HwError
                      decode: {choice}"
                 )));
             }
-            tracing::debug!("Vulkan Video on {choice}");
-            Ok(choice.device)
+            let on = choice.to_string();
+            Ok((choice.device, on))
         }
     }
 }
