@@ -258,13 +258,22 @@ fn broken_files_give_errors_not_panics() {
         assert!(r.is_ok_and(|r| !r.damage.is_empty()), "{name}");
     }
     // The stream looks set up: FFmpeg took the sample rate and channels
-    // from the sample entry.
+    // from the sample entry. The decoder's failed open in
+    // avformat_find_stream_info clears its channel layout: 6.1 kept the
+    // channels in the old `channels` field, which 7.0 removed, and 8.1.3
+    // and 9.0.2 put the sample entry's back. In between the stream has
+    // none, and the decoder's refusal above is still the reason (D2).
     let r = probe::probe(&dir.join("bad-audio-config.mp4")).unwrap();
     let audio = r.streams.iter().find_map(|s| s.audio.as_ref()).unwrap();
-    assert!(
-        audio.channels > 0 && audio.sample_fmt.is_some(),
-        "{audio:?}"
-    );
+    let v = ff::format::version();
+    let cleared = match (v >> 16, v >> 8 & 0xff, v & 0xff) {
+        (61, ..) => true,
+        (62, minor, micro) => (minor, micro) < (12, 103),
+        (63, minor, micro) => (minor, micro) < (1, 102),
+        _ => false,
+    };
+    assert_eq!(audio.channels == 0, cleared, "{audio:?}");
+    assert!(audio.sample_fmt.is_some(), "{audio:?}");
     // The audio track is gone from what FFmpeg reads, whether its type is
     // still text or not.
     for name in ["bad-trak-type.mp4", "bad-trak-renamed.mp4"] {
