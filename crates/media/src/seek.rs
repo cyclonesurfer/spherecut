@@ -1779,6 +1779,7 @@ impl VideoDecode for FfmpegVideo {
             } else {
                 0.0
             },
+            download_buffers: self.dec.download_buffers(),
             ..self.stats
         }
     }

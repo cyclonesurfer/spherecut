@@ -1772,6 +1772,8 @@ Where this differs from the plan:
   `veryfast`, CRF 18) rather than 100. hw-test's 20 s clips are slice 5's
   (section 12.4).
 - The pooled download serves Vulkan too, which the plan left open.
+- `DecodeStats` has `download_buffers`, the buffers the download pool
+  has allocated, which the pool tests check.
 - Software frames of a stream cropped on the left are cropped exactly,
   where slice 2a kept FFmpeg's aligned cropping: their planes may start
   off a 32-byte boundary (swscale, converting one, warns once that this
@@ -1790,10 +1792,16 @@ oracle covers, and the fault injection checks it at every frame.
 
 Limits:
 
-- `vaapi_download_pool_reuses_buffers` counts every page fault on the
-  decoding thread, so a driver that maps each surface to read it counts
-  as well as the copy into the pool. Its note says how many distinct
-  buffers the frames came in, which tells the two apart.
+- The `*_download_pool_reuses_buffers` tests check the pool by what it
+  allocates (`DecodeStats::download_buffers`, counted by the pool's own
+  allocator): some buffers in the 30 frames of warm-up, none after.
+  Their limit of 50 minor faults per frame on the decoding thread (plan
+  section 12.2) is a budget for everything that thread does, not a check
+  of the pool: at 3840x1920, glibc hands a freed block of up to 32 MiB
+  back from its heap, so even a fresh buffer per frame faults in nothing
+  (measured with glibc 2.39), and a driver that maps each surface to read
+  it may fault more however the pool does. Over the limit with no buffer
+  allocated after the warm-up, the faults are the driver's.
 - An `HwFailed` on a damaged packet hides the damage until software
   decodes the packet again; a `Damaged` event can then be reported twice,
   when a seek is done again.

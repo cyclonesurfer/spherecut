@@ -433,6 +433,10 @@ pub struct DecodeStats {
     /// in software) and to convert (0 for a native layout).
     pub last_download_ms: f64,
     pub last_convert_ms: f64,
+    /// Buffers allocated so far to download frames into, for every
+    /// format and size (0 in software). Once the decoder's pool holds the
+    /// frames kept alive, a download allocates none (D30).
+    pub download_buffers: u64,
 }
 
 /// A decoded picture: owned, immutable, `Send` and `Sync`, and shared as

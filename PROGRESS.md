@@ -136,11 +136,14 @@ back clean, so M0 is done.
   kind. Slice 5 picks it from doctor's checks (m1-plan amendment 9).
 - No GPU adapter is known before slice 3, so the render node lookup
   gives `/dev/dri/renderD128` unless `--render-node` names another.
-- `vaapi_download_pool_reuses_buffers` counts every minor fault on the
-  decoding thread, the driver's own included: a driver that maps each
-  surface to read it, as VA-API's download does, may fault per frame
-  whatever the pool does. Its note gives how many buffers the frames
-  came in, which tells the two apart (D30).
+- `vaapi_download_pool_reuses_buffers` and its Vulkan twin check the
+  pool by the buffers it allocates, none after the warm-up. Their limit
+  of 50 minor faults per frame counts everything the decoding thread
+  does, the driver's own faults included: a driver that maps each
+  surface to read it, as VA-API's download does, may go over it whatever
+  the pool does, and the note's allocation count then says the faults
+  are the driver's. At 3840x1920 the faults can't show a pool that
+  doesn't work, since glibc reuses freed frames' memory (D30).
 - On lavapipe with FFmpeg 6.1, H.264 and HEVC are refused as `Withdrawn`
   (FFmpeg has Vulkan hwaccels for them, which can't start without a video
   queue), not `NotOffered`; only a codec without a Vulkan hwaccel, such

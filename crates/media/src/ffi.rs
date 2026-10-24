@@ -28,7 +28,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use ffmpeg_next as ff;
@@ -2329,9 +2329,10 @@ pub(crate) const DOWNLOAD_ROW_ALIGN: usize = 256;
 /// system-memory format (`hw_frames_ctx->sw_format`) and size, each
 /// holding every plane, with rows [`DOWNLOAD_ROW_ALIGN`] bytes apart. A
 /// buffer goes back to the pool when the last frame using it drops, so
-/// after the first frames a download allocates nothing. A frame of
-/// another format or size, as after `LayoutChanged`, rebuilds the pool;
-/// buffers of the old one still in use are freed as they come back.
+/// after the first frames a download allocates nothing, which
+/// [`allocated`](Self::allocated) counts. A frame of another format or
+/// size, as after `LayoutChanged`, rebuilds the pool; buffers of the old
+/// one still in use are freed as they come back.
 ///
 /// The one buffer for all planes suits both hwcontexts: VA-API copies
 /// into any strides (`av_frame_copy` from a mapped surface), and Vulkan
@@ -2347,6 +2348,10 @@ pub(crate) struct DownloadPool {
     offsets: [usize; 4],
     /// Pools built so far.
     builds: u64,
+    /// Buffers every pool built so far has allocated: each takes a
+    /// reference, which FFmpeg drops when it frees the pool, and counts
+    /// in [`counted_alloc`].
+    allocated: Arc<AtomicU64>,
 }
 
 // SAFETY: an AVBufferPool is locked internally, and only the pool's
@@ -2359,6 +2364,7 @@ impl std::fmt::Debug for DownloadPool {
             .field("key", &self.key)
             .field("linesizes", &self.linesizes)
             .field("builds", &self.builds)
+            .field("allocated", &self.allocated())
             .finish_non_exhaustive()
     }
 }
@@ -2372,8 +2378,30 @@ impl Default for DownloadPool {
             linesizes: [0; 4],
             offsets: [0; 4],
             builds: 0,
+            allocated: Arc::new(AtomicU64::new(0)),
         }
     }
+}
+
+/// The allocator of a [`DownloadPool`]'s `AVBufferPool`: FFmpeg's default
+/// one, `av_buffer_alloc`, counting each buffer in `opaque`, the pool's
+/// counter. The pool calls it only when it has no buffer to hand back.
+unsafe extern "C" fn counted_alloc(opaque: *mut c_void, size: usize) -> *mut sys::AVBufferRef {
+    // SAFETY: `opaque` is the counter `DownloadPool::build` gave the pool,
+    // which holds a reference to it until `release_counter`.
+    unsafe { (*opaque.cast::<AtomicU64>()).fetch_add(1, Ordering::Relaxed) };
+    // SAFETY: accepts any size; NULL when out of memory, which the pool
+    // passes on.
+    unsafe { sys::av_buffer_alloc(size) }
+}
+
+/// Drop the reference to its counter that a [`DownloadPool`]'s
+/// `AVBufferPool` holds; FFmpeg calls it once, when it frees the pool,
+/// after the last buffer has come back.
+unsafe extern "C" fn release_counter(opaque: *mut c_void) {
+    // SAFETY: the reference `DownloadPool::build` made for this pool with
+    // `Arc::into_raw`, dropped only here.
+    unsafe { drop(Arc::from_raw(opaque.cast::<AtomicU64>().cast_const())) };
 }
 
 impl Drop for DownloadPool {
@@ -2430,10 +2458,19 @@ impl DownloadPool {
         let total = total
             .checked_add(sys::AV_INPUT_BUFFER_PADDING_SIZE as usize)
             .ok_or(ff::Error::InvalidData)?;
-        // SAFETY: a size and FFmpeg's default allocator (av_malloc); NULL
-        // when out of memory.
-        let pool = unsafe { sys::av_buffer_pool_init(total, None) };
+        let counter = Arc::into_raw(Arc::clone(&self.allocated))
+            .cast_mut()
+            .cast::<c_void>();
+        // SAFETY: a size, and an allocator and a release function that
+        // never unwind. The pool takes the counter's new reference, which
+        // `release_counter` drops when FFmpeg frees it; NULL when out of
+        // memory.
+        let pool = unsafe {
+            sys::av_buffer_pool_init2(total, counter, Some(counted_alloc), Some(release_counter))
+        };
         if pool.is_null() {
+            // SAFETY: the reference made above, which no pool took.
+            unsafe { release_counter(counter) };
             return Err(ff::Error::Other {
                 errno: ff::util::error::ENOMEM,
             });
@@ -2445,8 +2482,15 @@ impl DownloadPool {
             linesizes,
             offsets,
             builds: self.builds + 1,
+            allocated: Arc::clone(&self.allocated),
         };
         Ok(())
+    }
+
+    /// Buffers the pool has allocated, for every format and size it was
+    /// laid out for: once it holds the frames kept alive, none more.
+    pub(crate) fn allocated(&self) -> u64 {
+        self.allocated.load(Ordering::Relaxed)
     }
 
     /// Pools built so far: 1 after the first download, one more for each
@@ -4001,7 +4045,10 @@ mod tests {
         let (w, h) = (250, 66);
         let (surface, src, _frames) = lavapipe_frame(ff::format::Pixel::NV12, w, h);
         let mut pool = DownloadPool::default();
+        let counter = Arc::clone(&pool.allocated);
+        assert_eq!(pool.allocated(), 0);
         let a = download_into_pool(&mut pool, &surface).unwrap();
+        assert_eq!(pool.allocated(), 1);
         let nv12 = sys::AVPixelFormat::AV_PIX_FMT_NV12 as c_int;
         assert_eq!((frame_format(&a), a.width(), a.height()), (nv12, w, h));
         for i in 0..2 {
@@ -4020,10 +4067,12 @@ mod tests {
         drop(a);
         let b = download_into_pool(&mut pool, &surface).unwrap();
         assert_eq!(data_ptr(&b, 0), first);
+        assert_eq!(pool.allocated(), 1);
         // One still held isn't handed out again.
         let c = download_into_pool(&mut pool, &surface).unwrap();
         assert_ne!(data_ptr(&c, 0), first);
         assert_eq!(pool.builds(), 1);
+        assert_eq!(pool.allocated(), 2);
 
         // Another size, as after LayoutChanged, rebuilds the pool; the
         // frames of the old one stay good.
@@ -4038,9 +4087,19 @@ mod tests {
             rows(&src, 0, w as usize, h as usize)
         );
         let again = data_ptr(&d, 0);
+        assert_eq!(pool.allocated(), 3);
         drop((b, c, d));
         let e = download_into_pool(&mut pool, &small).unwrap();
         assert_eq!(data_ptr(&e, 0), again);
+        assert_eq!(pool.allocated(), 3);
+        // Each pool keeps the counter until FFmpeg frees it, once its last
+        // buffer is back: the old pool's went with b and c, this one's
+        // goes with e, after the pool itself.
+        assert_eq!(Arc::strong_count(&counter), 3);
+        drop(pool);
+        assert_eq!(Arc::strong_count(&counter), 2);
+        drop(e);
+        assert_eq!(Arc::strong_count(&counter), 1);
     }
 
     #[test]

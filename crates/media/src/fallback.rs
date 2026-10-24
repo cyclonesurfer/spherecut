@@ -121,6 +121,7 @@ struct Before {
     frames_decoded: u64,
     frames_returned: u64,
     decode_ms_total: f64,
+    download_buffers: u64,
 }
 
 /// A hardware decode that falls back to software if the device fails on
@@ -157,6 +158,7 @@ impl FallbackVideo {
             frames_returned: self.before.frames_returned + s.frames_returned,
             decode_ms_total: self.before.decode_ms_total
                 + s.mean_decode_ms * s.frames_decoded as f64,
+            download_buffers: self.before.download_buffers + s.download_buffers,
         };
         self.inner = sw;
         Ok(())
@@ -213,6 +215,7 @@ impl VideoDecode for FallbackVideo {
             frames_decoded: frames,
             frames_returned: self.before.frames_returned + s.frames_returned,
             mean_decode_ms: if frames > 0 { ms / frames as f64 } else { 0.0 },
+            download_buffers: self.before.download_buffers + s.download_buffers,
             ..s
         }
     }

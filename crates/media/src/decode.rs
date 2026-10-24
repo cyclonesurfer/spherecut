@@ -806,6 +806,11 @@ impl VideoDecoder {
             .map_err(|e| self.fail_device(&format!("copying a frame from it: {e}")))
     }
 
+    /// Buffers its [`DownloadPool`] has allocated so far (0 in software).
+    pub(crate) fn download_buffers(&self) -> u64 {
+        self.pool.allocated()
+    }
+
     /// The next packet to decode, or `None` once there are no more (see
     /// `read_packet`).
     ///

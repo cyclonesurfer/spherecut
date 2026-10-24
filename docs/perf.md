@@ -94,9 +94,15 @@ Current benchmarks:
 Not benchmarks, but their numbers are in the same notes: the
 `*_download_pool_reuses_buffers` tests note the minor page faults per
 downloaded 3840×1920 NV12 and P010 frame on the decoding thread, after
-30 frames to warm up, and how many buffers the frames came in (D30). A
-pooled download faults in nothing new; a fresh buffer per frame would
-take about 3000 faults for NV12.
+30 frames to warm up, and how many buffers the download pool allocated
+in the warm-up and after it (D30). A pool that works allocates a few in
+the warm-up and none after, which the tests check. The faults, under 50
+a frame, are a budget for the thread, the driver's work included, not a
+measure of the pool: at this size glibc hands a freed frame's 11 or 22
+MB back from its heap, so even a fresh buffer per frame faults in
+nothing. Faults over the budget with nothing allocated after the
+warm-up are the driver's, such as VA-API mapping each surface to read
+it.
 
 How the Vulkan Video rows read:
 

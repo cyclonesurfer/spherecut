@@ -4,10 +4,18 @@
 //! `ffi::download_into_pool` copies each frame a hardware decoder hands
 //! out into a buffer from an `AVBufferPool`, which gets it back when the
 //! frame is dropped. Once the pool holds what playback keeps alive, a
-//! download touches no page it hasn't touched before. A buffer allocated
-//! per frame instead would fault in every page of it: some 3000 for a 4K
-//! NV12 frame. So after 30 frames to warm up, the decoding thread may take
-//! under 50 minor page faults per frame, everything it does included.
+//! download allocates nothing: after 30 frames to warm up, the decoder's
+//! pool must allocate no buffer more (`DecodeStats::download_buffers`),
+//! and it must have allocated some, so that the frames did come through
+//! it.
+//!
+//! The decoding thread may also take under 50 minor page faults per
+//! frame, everything it does included, the driver's work too (plan
+//! section 12.2). That is a budget, not a check of the pool: at 3840x1920
+//! glibc hands a freed block of up to 32 MiB back from its heap, so even
+//! a fresh buffer per frame need not fault more (none per frame, measured
+//! with glibc 2.39), and a driver that maps each surface to read it may
+//! fault more however the pool does.
 //!
 //! VA-API runs on the backend's own device on the render node under test.
 //! Vulkan Video is the optional path (amendment 9): its test skips with
@@ -19,7 +27,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use spherecut_core::{FrameRate, StopToken};
@@ -243,17 +250,24 @@ fn turned_down(hw: &Hw, path: &Path) -> Option<String> {
     }
 }
 
-/// Minor page faults per frame on the decoding thread, over [`MEASURED`]
-/// frames after [`WARM_UP`], each dropped once the next is out as
-/// playback drops them; and how many buffers their first planes were in.
-fn faults_per_frame(hw: &Hw, path: &Path) -> Result<(f64, usize), MediaError> {
+/// What [`MEASURED`] frames after [`WARM_UP`] cost, each dropped once the
+/// next is out as playback drops them.
+struct Counted {
+    /// Minor page faults per frame on the decoding thread.
+    faults_per_frame: f64,
+    /// Buffers the download pool allocated by the end of the warm-up, and
+    /// by the end.
+    allocated: (u64, u64),
+}
+
+fn count(hw: &Hw, path: &Path) -> Result<Counted, MediaError> {
     let mut d = hw.open(path)?;
     let on = DecodePath::Hardware { kind: hw.kind };
-    let mut step = || -> Result<usize, MediaError> {
+    let step = |d: &mut Box<dyn VideoDecode>| -> Result<(), MediaError> {
         match d.next_frame(&StopToken::never())? {
             NextFrame::Frame(f) => {
                 assert_eq!(f.decoded_on, on);
-                Ok(f.storage_ptr(0) as usize)
+                Ok(())
             }
             other => panic!(
                 "{}: {other:?} before frame {}",
@@ -263,20 +277,24 @@ fn faults_per_frame(hw: &Hw, path: &Path) -> Result<(f64, usize), MediaError> {
         }
     };
     for _ in 0..WARM_UP {
-        step()?;
+        step(&mut d)?;
     }
-    let mut buffers = BTreeSet::new();
+    let warm = d.stats().download_buffers;
     let before = minor_faults();
     for _ in 0..MEASURED {
-        buffers.insert(step()?);
+        step(&mut d)?;
     }
     let faults = minor_faults() - before;
-    Ok((faults as f64 / MEASURED as f64, buffers.len()))
+    Ok(Counted {
+        faults_per_frame: faults as f64 / MEASURED as f64,
+        allocated: (warm, d.stats().download_buffers),
+    })
 }
 
-/// Count faults on 8-bit and 10-bit clips on `hw`, note the numbers for
-/// the report and fail above the limit. Vulkan Video skips, after the
-/// clips it decodes, with the reason for those it can't.
+/// Count buffers and faults on 8-bit and 10-bit clips on `hw`, note the
+/// numbers for the report, and fail if the pool wasn't used, allocated
+/// after the warm-up, or the faults are over the limit. Vulkan Video
+/// skips, after the clips it decodes, with the reason for those it can't.
 fn check_pool(hw: &Hw) {
     check_fault_counter();
     let dir = TempDir::new(hw.kind.ffmpeg_name());
@@ -289,18 +307,31 @@ fn check_pool(hw: &Hw) {
             refused.push(format!("HEVC {bits}-bit 3840x1920: {why}"));
             continue;
         }
-        let (per_frame, buffers) = faults_per_frame(hw, &path)
-            .unwrap_or_else(|e| panic!("{} on {}: {e}", path.display(), hw.about));
+        let c =
+            count(hw, &path).unwrap_or_else(|e| panic!("{} on {}: {e}", path.display(), hw.about));
+        let (warm, end) = c.allocated;
         let counted = format!(
-            "{per_frame:.1} minor faults per 3840x1920 {format} frame, over {MEASURED} frames \
-             after {WARM_UP}, downloaded into {buffers} buffers"
+            "{:.1} minor faults per 3840x1920 {format} frame, over {MEASURED} frames after \
+             {WARM_UP}; the download pool allocated {warm} buffers in those {WARM_UP} and {} \
+             after",
+            c.faults_per_frame,
+            end - warm
         );
         bench::note(format!("{}: {counted}", hw.about));
-        // Few buffers and many faults would be faults the pool can't
-        // prevent, such as the driver mapping each surface to copy it.
-        if per_frame >= MAX_FAULTS_PER_FRAME {
+        if warm == 0 {
+            problems.push(format!("{format}: {counted}: the frames bypassed the pool"));
+        }
+        if end > warm {
             problems.push(format!(
-                "{format}: {counted}; the limit is {MAX_FAULTS_PER_FRAME}"
+                "{format}: {counted}: the pool doesn't reuse its buffers"
+            ));
+        }
+        // With no buffer allocated after the warm-up, faults over the
+        // limit are someone else's, such as the driver mapping each
+        // surface to copy it.
+        if c.faults_per_frame >= MAX_FAULTS_PER_FRAME {
+            problems.push(format!(
+                "{format}: {counted}; the limit is {MAX_FAULTS_PER_FRAME} faults"
             ));
         }
     }
