@@ -189,6 +189,9 @@ back clean, so M0 is done.
 1. The first `cargo xtask hw-test` run on odin (any time; the prompt is
    the one huginn used). It now includes Vulkan Video checks on H.264,
    HEVC Main and Main 10 and the X5 samples, with benchmark rows (D27).
+   On Fedora's own `mesa-vulkan-drivers` the H.264 and HEVC ones skip,
+   as on huginn; RPM Fusion's `mesa-vulkan-drivers-freeworld` has them.
+   Whether odin swaps it in before the run is Pat's call.
 2. M1, now that FFmpeg is confined (D24): the `MediaBackend` trait
    around `VideoDecoder` (seek, audio, worker threads, frame cache), the
    wgpu projection shader and `spherecut frame` with the CLI's JSON

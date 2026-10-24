@@ -84,12 +84,19 @@ How the Vulkan Video rows read:
 - Vulkan Video is optional. A row is measured only when the device
   decodes the file's first frame (every stream's, for a sample). When it
   doesn't, or a measured run fails later, the row is missing and a note
-  says why, in FFmpeg's words where it gives them: for example "decode 3840x1920 HEVC 8-bit, Vulkan
-  Video (incl. copy to RAM): not measured: cannot decode … on Vulkan: the
-  driver does not support this format (FFmpeg: [hevc] Device does not
-  support decoding hevc! …)". Without a Vulkan GPU at all, every Vulkan
-  row is missing with that reason. A missing Vulkan row never fails the
-  benchmark, and the VA-API and software rows are measured as before.
+  says why, in FFmpeg's words where it gives them: for example "decode
+  3840x1920 HEVC 8-bit, Vulkan Video (incl. copy to RAM): not measured:
+  cannot decode … on Vulkan: the driver does not support this format
+  (stream 3840x1920, level 153; FFmpeg: [hevc] Device does not support
+  decoding hevc! …)". "Device does not support decoding …" means the
+  driver lacks the codec; "Unable to initialize video session: … not
+  supported!" that it lacks the profile or pixel format; "Maximum level"
+  and "Width"/"Height: from … to …" lines are the limits FFmpeg checks
+  the stream against without saying which one failed. Levels are
+  FFmpeg's numbers (HEVC 5.1 is 153). Without a Vulkan GPU at all, every
+  Vulkan row is missing with that reason. A missing Vulkan row never
+  fails the benchmark, and the VA-API and software rows are measured as
+  before.
 - `vulkan_*_matches_software` and `samples_vulkan_decode_matches_software`
   in the Tier 2 table say whether those decodes are also bit-exact. A
   row can be fast and still wrong, so read the two together.
@@ -144,8 +151,10 @@ how Spherecut's refusal of a software fallback showed before 9300fc0.
 ### odin (RX 7600, Fedora)
 
 Not run yet: no report. Its run includes the Vulkan Video checks and
-rows, since its discrete RDNA3 may decode HEVC with Vulkan Video where
-huginn's RADV can't.
+rows. With Fedora's own `mesa-vulkan-drivers`, H.264 and HEVC have no
+Vulkan Video rows, as on huginn: Fedora builds Mesa's Vulkan drivers
+without them, and RPM Fusion's `mesa-vulkan-drivers-freeworld` adds
+them (DECISIONS D27).
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 

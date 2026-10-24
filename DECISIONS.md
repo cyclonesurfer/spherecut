@@ -1214,9 +1214,16 @@ one). The Tier 2 Vulkan tests and benchmarks use it with
 the CPU, naming it. They no longer need the render node itself.
 
 When the driver can't decode a format (`HwUnsupported`), a test skips
-with the device and the lines FFmpeg logged while it tried, caught with
-`capture_ffmpeg_log` (now public), such as huginn's "Device does not
-support decoding hevc!". Any other error fails it. The samples test
+with the device and the lines FFmpeg logged while it tried, such as
+huginn's "Device does not support decoding hevc!". They are caught with
+`capture_hw_decode_log`, which also keeps the few lines FFmpeg's Vulkan
+decoder logs at "verbose" about a stream it turns down: "Unable to
+initialize video session: hevc profile "Main 10" not supported!" for a
+profile or pixel format the driver lacks, and, since a stream too big or
+of too high a level is refused without a word, the limits it checked
+("Maximum level: 153 (stream 186)", "Width: from 64 to 4096"). The skip
+also gives the stream's size and level. Any other error fails it,
+including FFmpeg failing to open the GPU chosen. The samples test
 groups refused streams by format and reason, fails on any mismatch or
 other error, and otherwise skips if any stream was refused. A
 benchmark's Vulkan Video row is measured only when the file's first
@@ -1230,8 +1237,21 @@ Doctor still checks FFmpeg's default Vulkan device and names it, so on a
 machine with two GPUs its Vulkan lines can be about another GPU than the
 tests'.
 
-Why: odin's discrete RDNA3 may decode HEVC through FFmpeg's Vulkan path
-where huginn's RADV can't. On FFmpeg's default device, odin's run could
+Fedora's Mesa: its Vulkan drivers are built without H.264 and HEVC,
+like its VA-API driver. RADV then lacks `VK_KHR_video_decode_h264` and
+`_h265`, which is what "Device does not support decoding hevc!" means
+(`vulkan_decode.c`), while AV1 decodes, so video decode itself is on and
+`RADV_PERFTEST=video_decode` changes nothing. RPM Fusion's
+`mesa-vulkan-drivers-freeworld` (built with `video-codecs=h264dec,
+h265dec,...`, and conflicting with `mesa-vulkan-drivers`) has them. So
+on Fedora's stock Mesa, odin's Vulkan H.264 and HEVC checks skip as
+huginn's did. Doctor's fix for a Mesa GPU on Fedora that can't decode
+H.264 or HEVC with Vulkan Video is now that package, as for VA-API;
+whether odin's run swaps it in first is Pat's call.
+
+Why: odin's discrete RDNA3 is the first chance to compare Vulkan Video
+HEVC with VA-API (with the freeworld driver; huginn's stock Vulkan
+driver has no HEVC). On FFmpeg's default device, odin's run could
 have measured the integrated GPU, or skipped as if Vulkan Video were
 missing when only the device was wrong; and the old skip said only that
 the driver doesn't support the format, not FFmpeg's reason.
