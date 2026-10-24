@@ -26,6 +26,10 @@ What works today is the `spherecut` command line tool:
   package fixes it.
 
 See `PLAN.md` for the milestones and `PROGRESS.md` for where things stand.
+The plan also has agent integration: an MCP server and JSON output so that
+AI agents such as Claude Code, Codex or Gemini CLI can use Spherecut.
+Spherecut itself still makes no network requests, but what it returns to
+an agent, frames included, goes to that agent's model provider.
 
 ## Requirements
 

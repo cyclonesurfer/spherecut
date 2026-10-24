@@ -183,6 +183,10 @@ The app makes no network requests. `spherecut doctor` prints the exact
 `dnf`/`pacman` command for a problem; it never runs package managers or
 downloads anything.
 
+*Updated by D23:* `deny.toml` covers Rust crates only, not what the
+system FFmpeg can do. M1 shuts FFmpeg's network protocols and nested
+opens, and bans `std::net`'s TCP and UDP types with clippy.
+
 *Superseded in part by D18:* doctor still never installs or changes
 anything and downloads nothing, but on Fedora it makes one read-only
 `rpm -q` query to word its fixes. `cargo xtask hw-test` also runs `rpm -q`
@@ -602,6 +606,11 @@ example) is refused with a clear error.
 Why: the M0 review (S2) found that `inject` with the same input and
 output grew the file until the disk was full.
 
+*Updated by D23:* the CLI will refuse an existing output unless
+`--overwrite` is given (PLAN M1), and `spherecut mcp` refuses an output
+whose last component is a symlink. The write-through above then applies
+only to the library and to the CLI with `--overwrite`.
+
 ## D17. First-order ambiX in AAC uses the 4.0 layout
 
 *2026-10-23, M0.*
@@ -760,6 +769,10 @@ wildcard versions are denied, and yanked crates are denied.
 Revisit if: a dependency we need pulls in one of these without using the
 network; add a narrow exception with the reason.
 
+*Updated by D23:* a crate can add a network transport without pulling a
+banned crate (rmcp's HTTP server feature is one), so a crate with such
+features gets a `[[bans.features]]` allow list when it is added.
+
 ## D22. Direct dependencies
 
 *2026-10-23, M0.*
@@ -782,6 +795,103 @@ rest, with the versions in `Cargo.lock`:
 
 glam's `serde` feature is on, but no glam type is serialized yet.
 
+## D23. Agent integration: an MCP server and the JSON CLI
+
+*2026-10-24, before M1's code. Pat asked for agent integration so that
+"all the agents" can use Spherecut. PLAN.md track A has the criteria.*
+
+What: `spherecut mcp`, a Model Context Protocol server on stdin/stdout,
+plus a JSON contract for the CLI and `spherecut call <tool> '<json>'`, all
+on one set of request and response types. Read-only by default, with the
+read and write roots enforced by the kernel (`openat2` with
+`RESOLVE_BENEATH`). A few general tools (`probe`, `look`, `analyze`,
+`check`, `doctor`, then `project`, `edit`, `undo`, `redo`, `render`,
+`job`, `compare`); later features add edits and fields, not tools.
+
+Why MCP: every agent checked on 2026-10-24 can start a local stdio MCP
+server (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor, Zed, goose,
+opencode), so one server reaches all of them without vendor code. stdio
+means no port. The CLI path covers agents that only run commands; they
+look at frames through PNG files.
+
+What the research found (each fact with its source in
+`docs/research/agents-2026-10.md`), which shapes PLAN's criteria:
+
+- MCP has split. Revision 2026-07-28 drops the `initialize` handshake
+  (each request carries its version in `_meta`, servers implement
+  `server/discover`), and a client that sends `initialize` fails against
+  a server that only speaks 2026-07-28. Codex's stdio client still uses
+  the handshake by default, Gemini CLI's SDK (1.23.0) tops out at
+  2025-06-18, and Claude Code asks for 2026-07-28 and falls back. So the
+  server serves 2025-06-18 and 2025-11-25 through the handshake, which
+  every client checked can use, and 2026-07-28 too if the MCP layer
+  chosen provides it (rmcp does; our own layer would add it when a
+  client needs it). Under the stateless revision, state that spans calls
+  must be explicit, hence project tools that name the project file.
+- Clients cut long calls off: Codex after 60 s by default, Claude Code at
+  a per-server wall-clock limit that progress doesn't extend (and it
+  moves a call to the background after 2 min), Gemini CLI after 10 min.
+  So `render` returns a job at once.
+- Images count against Claude Code's 25,000-token tool output limit, and
+  a request with over 20 images rejects any over 2000 px. Claude bills
+  ceil(w/28) × ceil(h/28) visual tokens, so twelve 768×432 frames cost
+  about four times one 12-tile contact sheet. Codex replaces images with
+  a placeholder for models without image input. Hence small JPEG
+  defaults, contact sheets, and text results that name every tile.
+- MCP roots are deprecated and were never access control, so the roots
+  are server options. Sampling is deprecated and nothing here needs it.
+- Agent Skills (`SKILL.md`) is a standard that Claude Code, Codex, Gemini
+  CLI and Copilot CLI all read, from `~/.claude/skills` and
+  `~/.agents/skills`. `AGENTS.md` is for agents working on a repository,
+  so it isn't used for this.
+- The official conformance suite and MCP Inspector run on npm, which the
+  prompt rules out, so Spherecut tests its server with its own client.
+
+Not a plugin API: the prompt puts a plugin API out of scope, and this
+stays clear of what makes one: no outside code runs in Spherecut, and
+tools take data only. It is a public interface, though, so the schemas
+are versioned and their changes listed in `docs/agents.md`.
+
+Network: Spherecut makes no network requests, but what a tool returns
+goes to the agent's model provider, which `docs/agents.md` says first.
+A3's attach socket is local IPC, not network access; it is opt-in, a path
+socket with mode 0600, and peers are checked with `SO_PEERCRED`. Pat
+confirms that reading before A3.
+
+*Updates D8 and D21.* The review found that `deny.toml` can't see what
+FFmpeg does, since FFmpeg is a system C library: M0's probe follows an
+HLS playlist to a file outside its folder, and a playlist with `http://`
+entries would make FFmpeg use the network. M1 sets `protocol_whitelist`
+to `file`, limits the demuxers, refuses nested opens through `io_open`
+and adds a clippy ban on `std::net`'s TCP and UDP types, with Tier 1
+tests including an `strace` check for network sockets.
+
+To decide at A1, with a prototype of each:
+
+- **MCP layer.** rmcp 3.7.0 (the official Rust SDK, Apache-2.0, MSRV
+  1.88) serves both sides of the split, and Codex's own client uses it.
+  It needs tokio: `default-features = false, features = ["server"]` with
+  our own tokio stdin/stdout adds 23 crates, none banned, and `cargo
+  deny` passes. Its HTTP server feature would pass `deny.toml` unnoticed,
+  so it would come with a `[[bans.features]]` allow list for rmcp, which
+  was tested to catch that. It has had 15 releases since 2026-07-28, so
+  it would be pinned with `=`. The other choice is our own synchronous
+  JSON-RPC layer on `serde_json` and std threads, about 800 to 1,500
+  lines plus tests (a reviewer's estimate), with no async runtime, at the
+  cost of tracking each MCP revision ourselves.
+- **Schemas** from the Rust types with schemars 1.x (MIT; dyn-clone,
+  ref-cast, serde and serde_json, plus schemars_derive and
+  serde_derive_internals for the derive), or written by hand. Either way
+  they are checked into `docs/agents/schemas/` and a test compares them
+  with what the server advertises.
+- **openat2 and `SO_PEERCRED`**, which std doesn't offer: rustix as a
+  normal dependency (safe wrappers; its openat2 to be checked first), or
+  `libc` calls in an FFI module with SAFETY comments, since `unsafe` is
+  allowed only in FFI and GPU modules.
+
+Revisit if: a new MCP revision changes the split, or agents converge on
+something other than MCP.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360
@@ -790,6 +900,12 @@ glam's `serde` feature is on, but no glam type is serialized yet.
   license, allow that one git revision in `deny.toml`, or write our own
   parsers from `docs/formats/`. To decide at M4, after checking its license
   and what we actually need from it.
+- **MCP layer, tool schemas, openat2** for agent integration: rmcp or our
+  own layer, schemars or hand-written, rustix or `libc`. To decide at A1
+  (D23).
+- **Attach socket** (A3): Pat to confirm that a local socket the GUI
+  opens only when he turns attach on (mode 0600, his user only) is IPC,
+  not the network access his rule forbids. Before A3 (D23).
 - **Fonts.** egui's default fonts carry OFL-1.1 and Ubuntu Font Licence
   data. Either add a per-crate license exception for
   `epaint_default_fonts`, or ship our own OFL fonts. To decide in M1.

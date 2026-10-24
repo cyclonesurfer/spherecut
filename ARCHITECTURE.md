@@ -38,7 +38,8 @@ this stack and are used only by tests and `xtask`.
 | `spherecut-audio` | Playback clock, mixing, ambisonics, loudness | M1 (playback), M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
 | `spherecut-app` | eframe app, docked panels, viewer paint callbacks | M1 |
-| `spherecut-cli` | The `spherecut` binary: `probe` and `doctor` today. `frame` (M1), `render` (M2) and the GUI when run without a subcommand (M1) are planned | M0: `probe`, `doctor` |
+| `spherecut-agent` | Agent integration (D23): the request and response type of each operation, shared by `spherecut mcp` and `spherecut call` (from A1 the `--json` of `probe`, `doctor` and `frame` uses them too, with a schema version bump if M1's shape changes); the MCP server; later the GUI attach bridge | A1 (after M1) |
+| `spherecut-cli` | The `spherecut` binary: `probe` and `doctor` today. `frame` (M1), `render` (M2), the GUI when run without a subcommand (M1), and `mcp` and `call` (A1) are planned | M0: `probe`, `doctor` |
 | `xtask` | `check`, `gen-media`, `hw-test` | M0 |
 
 Crates are created when they get real content, not as empty shells. The

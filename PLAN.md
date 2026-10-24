@@ -14,6 +14,14 @@ least one AMD machine is clean. Until the hardware report is back it is
 Order is as in the prompt. If a milestone is blocked on samples or hardware,
 the next unblocked one starts and the blocked one resumes when unblocked.
 
+Agent integration, which Pat added on 2026-10-24, is a track of its own
+(A1 to A3, at the end of this file). It doesn't change the milestone
+order, and A1 to A3 are never a condition for finishing a milestone. It
+does add three criteria it builds on: FFmpeg's confinement (which also
+fixes a bug found on the way) and the CLI's JSON contract in M1, and
+edits stored as data in M2. From A1 on, each milestone also brings its
+new features to agents, which adds a little work to each.
+
 ---
 
 ## M0 Foundation
@@ -69,6 +77,21 @@ the next unblocked one starts and the blocked one resumes when unblocked.
 - [ ] `MediaBackend` trait with the FFmpeg implementation: open, stream
       info, seek (frame-accurate, by PTS), decode to NV12/P010 frames, both
       software and VA-API (with automatic software fallback), audio decode.
+- [ ] FFmpeg opens only the file Spherecut opened: `protocol_whitelist`
+      is `file`, demuxers are limited to the containers Spherecut supports
+      (MP4/MOV and Matroska for now, widened only by a DECISIONS entry),
+      nested opens are refused through `io_open`, and every decoder gets a
+      `max_pixels` limit. Clippy forbids `std::net`'s TCP and UDP types.
+      Tier 1 tests: an HLS playlist whose segment lies outside its folder,
+      an ffconcat file, a playlist with an `http://` segment and the path
+      `http://127.0.0.1:1/x.mp4` are each refused with the reason, and
+      probe and `frame` run under `strace -f` open no `AF_INET` or
+      `AF_INET6` socket. strace becomes a prerequisite that `cargo xtask
+      check` checks, so that test fails rather than skips without it.
+      probe then refuses other containers by name instead of reporting
+      them with `structure: none`; README, D15 and the `lrc` test change
+      with it. (Found on 2026-10-24: M0's probe follows an HLS playlist to
+      a file outside its folder.)
 - [ ] Projection shader (WGSL) sampling NV12/P010 planes directly, with
       per-source YUV→RGB matrix and range, into a linear-light float target,
       output as sRGB/Rec.709. Equirect source; rectilinear, fisheye and
@@ -78,6 +101,17 @@ the next unblocked one starts and the blocked one resumes when unblocked.
       proven by golden images of the high-frequency pattern.
 - [ ] `spherecut frame <file> --time <t> --yaw/--pitch/--roll --fov
       --projection --size WxH -o out.png` renders one frame headless.
+- [ ] The CLI's JSON contract, for agents and scripts (probe, doctor,
+      frame): with `--json`, stdout carries exactly one compact JSON
+      document per run, on success and on failure, with a schema name and
+      version, an `ok` flag, and errors with a stable `code`. The shape is
+      the same for one file or many, and times are written as
+      `{exact, seconds}`, plus `frame` when the time is a frame of a video
+      stream (the shape MCP uses from A1). stderr carries only logs. Exit
+      codes: 0 ok; 1 an input or check failed, doctor's errors included
+      (as in D18 and the README); 2 usage error; 3 a codec or device the
+      command itself needs is missing; 4 cancelled; each tested. A command
+      that writes refuses an existing output unless given `--overwrite`.
 - [ ] Golden-image tests on lavapipe: each projection, the seam, the poles,
       10-bit input, limited vs full range, compared by PSNR/SSIM with stored
       small references. GPU output matches the CPU reference projection in
@@ -114,8 +148,21 @@ The first version Pat can use for real.
       views of the quaternion track) with easing presets.
 - [ ] Look-at target keyframes.
 - [ ] Full-sphere overview showing where the virtual camera points.
-- [ ] Project save/load (format chosen and recorded in DECISIONS.md) with a
-      schema version and relative media paths; undo/redo for every edit.
+- [ ] Every edit is a value of one `Edit` enum in `spherecut-core` (serde,
+      versioned with the project schema), applied only through
+      `Project::apply(&[Edit])`: all or none, no I/O. The GUI changes the
+      project only by building `Edit`s, and a drag becomes one undo step
+      when it ends. Clips, keyframes, markers and look-at targets have IDs
+      that are never reused, and edits name IDs, not positions. The
+      project has a revision number, and each undo step has a label and an
+      origin (Pat or an agent). Property tests: undoing a random sequence
+      of edits gives back the original, save then load gives an equal
+      project, and a rejected edit changes nothing. This is what agent
+      integration A2 builds on.
+- [ ] Project save/load in a format chosen with Pat and recorded in
+      DECISIONS.md (JSON is the leaning, since agents and `jq` read it),
+      with a schema version and relative media paths; undo/redo for every
+      edit.
 - [ ] Flat export: 16:9, 9:16, 1:1, 4:5 at 1080p/1440p/4K, project frame
       rate, H.264/HEVC/AV1 via VA-API with libx264/libx265/SVT-AV1
       fallback; audio passed through or re-encoded.
@@ -126,7 +173,10 @@ The first version Pat can use for real.
 - [ ] Parity tests: decode exported frames and compare against
       `spherecut frame` renders of the same times (PSNR threshold), flat and
       360.
-- [ ] `spherecut render <project> -o out.mp4 [--preset]` headless.
+- [ ] `spherecut render <project> -o out.mp4 [--preset] [--overwrite]
+      [--json]` headless. With `--json` it prints one progress line a
+      second and a final result line. An existing output is refused without
+      `--overwrite`, and Ctrl+C leaves no partial file.
 - [ ] Synthetic motion blur for fast pans (sub-frame sampling), off by
       default, with a golden test.
 - [ ] Hardware: reframed 4K30 exports at or above real time with VA-API on
@@ -207,3 +257,306 @@ Main camera first (Pat to confirm), then the others.
 Optical-flow seams and frame interpolation, subject tracking driving the
 view, rolling-shutter correction, multicam sync by audio, zero-copy
 decode-to-render (dmabuf/Vulkan interop) if profiling shows it matters.
+
+---
+
+## Agent integration (track A, beside the milestones)
+
+*Added 2026-10-24 at Pat's request: "I want all the agents to be able to
+use it." DECISIONS D23 has the design reasons, and
+`docs/research/agents-2026-10.md` the research behind them.*
+
+Any AI agent on Pat's machine that can start an MCP server or run a
+command will be able to look at footage, check files, edit projects and
+render, through the same core and the same undo as the GUI. All eight
+agents checked on 2026-10-24 can. There are two ways in:
+
+- **`spherecut mcp`**, a Model Context Protocol server on stdin/stdout.
+  Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor, Zed, goose and
+  opencode can all start a local stdio MCP server. The MCP revisions
+  served were checked against Claude Code, Codex and Gemini CLI;
+  `docs/agents.md` records what each other client negotiated when it was
+  tried. Not every client shows images (Zed's docs don't mention them,
+  and goose and opencode weren't confirmed), so every image result also
+  says in text what it shows.
+- **The CLI with `--json`**, for agents and scripts that only run
+  commands. `spherecut call <tool> '<json>'` runs any MCP tool from the
+  shell with the same arguments and the same structured output, and
+  writes images to `--out <dir>` (the current directory by default)
+  without overwriting.
+
+Agents in a browser chat or a cloud workspace can't reach the copy on
+Pat's machine, because Spherecut opens no port. A cloud agent can still
+build and run the CLI on files in its own workspace, without Pat's GPU.
+
+Spherecut itself still makes no network requests. Whatever a tool
+returns does go to the agent's model provider, though, frames of Pat's
+footage included, and `docs/agents.md` says so first.
+
+This is an automation interface, not the plugin API the prompt puts out
+of scope. Nothing from outside is loaded or run inside Spherecut. Tools
+take only data (paths, times, views, edits), never code, expressions,
+FFmpeg filter strings or shell commands, and no tool starts a process or
+deletes or moves a file.
+
+Staging: three small pieces land inside milestones because the rest
+builds on them: FFmpeg's confinement and the CLI's JSON contract in M1,
+and edits stored as data in M2. A1 is mostly Tier 1 work, done once M1's
+code is in, while M1's hardware report is pending. That time would
+otherwise go to M2, so M2 lands later by roughly the time A1 takes; if
+Pat would rather have M2 first, A1 moves to after M2. A2 follows M2 and
+A3 follows M5. None of A1 to A3 is a condition for finishing a
+milestone.
+
+### A1 Look and check (after M1)
+
+What Pat gets: an agent can go through a folder of footage, look at any
+moment from any direction, find where something happens, explain
+stutter or audio problems, and check a file's 360 metadata. It can't
+change or render anything yet.
+
+- [ ] `spherecut mcp` serves MCP revisions 2025-06-18 and 2025-11-25
+      through `initialize`, which every client checked can use (Claude
+      Code asks for 2026-07-28 first and falls back). It also serves
+      2026-07-28 through `server/discover` if the chosen MCP layer
+      provides it; with our own layer, that waits until a client needs
+      it. It answers within 1 s, before any FFmpeg or GPU setup. The
+      supported revisions are rechecked at every milestone review.
+- [ ] A small, fixed set of tools: at most 12 through M9, and a test fails
+      past that or past 12 KB of `tools/list` JSON. A1 and A2 list 12
+      tools between them, so A3 works through `project` and `look`. A1
+      has these:
+      - `probe` takes files or a folder. By default it gives a summary of
+        about 300 bytes per clip (duration, size, frame rate, codec, bit
+        depth, projection and metadata status, camera, audio layout,
+        problems), and the full report on request. A folder groups lens
+        pairs, LRV proxies and chapters into clips, sorted by recording
+        time, a page at a time.
+      - `look` renders one image of one or more times and views: a single
+        view, the full sphere with a labelled yaw/pitch grid, the six cube
+        directions, or a contact sheet of up to 24 times. Each tile is
+        labelled with its time and direction, and the text result lists
+        each tile's exact time and view and the decode path used
+        (`vaapi`, `vulkan` or `software`), so it still makes sense to a
+        client that drops images. It stops with an error after 50 s, under
+        Codex's 60 s default call limit.
+      - `analyze` gives text summaries over a time range in buckets (at
+        most 200): `timing` (frame durations, variable frame rate,
+        duplicate or missing frames, keyframe interval, bitrate), `motion`
+        (frame difference, likely cuts) and `audio` (peak, RMS, clipping,
+        silence). M4 adds `telemetry` (rotation rate, freefall, high g),
+        and M6 adds loudness (EBU R128) and the loudest direction in ambiX
+        audio, using M6's own code.
+      - `check` validates a file's spherical and ambisonic metadata against
+        its streams and, optionally, a target (YouTube 360, 16:9, vertical,
+        archive). It gives pass or fail per rule, with the fix for each
+        failure, in under 2 KB. M2 and M8 add their export checks to it.
+      - `doctor` is the CLI's doctor, plus a `file` argument that names the
+        decode path that file gets (and why hardware refused it) and, on
+        request, its decode speed against real time.
+- [ ] Tool input schemas are JSON Schema draft 2020-12 with an object at
+      the root and no root-level `oneOf`, `anyOf` or `allOf` (so `look`'s
+      mode is a field, not a tagged enum). Property names are snake_case
+      ASCII, each description is under 4,096 characters, and tools are
+      listed in a fixed order. Claude Code drops or mangles tools that
+      break these rules, so a test checks every advertised schema.
+- [ ] Images sent inline default to 768 px on the long edge as JPEG, are
+      capped at 1568 px and 24 tiles, and state their pixel size and bytes.
+      PNG is available on request. A larger image is written to a file
+      under the write root and returned as a path; without
+      `--allow-write`, a request over the cap is refused, naming the limit
+      and the flag. FFmpeg encodes the images, so no image crate is added.
+- [ ] Conventions, stated in the tool descriptions. Times are exact: a
+      string (`"12.5"`, `"1:02.5"`, `"370f"`, `"30000/1001"`) or a
+      `[num, den]` pair. A bare JSON number is refused, with the string to
+      send instead. Every time comes back as `{exact, seconds}`, plus
+      `frame` when it is a frame of a video stream, the same shape as the
+      CLI's `--json`. Angles are in degrees, the descriptions say which
+      way positive yaw and pitch turn and where yaw 0 is in the equirect,
+      and `fov` is horizontal unless `vfov` is given.
+- [ ] Errors an agent can act on: a failed call is a tool result marked
+      `isError`, with a stable `code`, the argument at fault, the valid
+      range or choices and the next step, in under 500 characters.
+      JSON-RPC errors are only for malformed or unknown requests.
+- [ ] Safety:
+      - Read-only by default. `--allow-write --write-root <dir>` adds the
+        tools that write. Footage is read only from `--read-root <dir>`
+        (repeatable; the working directory by default) and from the write
+        root, so `look`, `check` and `compare` work on renders.
+      - The kernel enforces the roots: every input and output is opened
+        with `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` below its
+        root, and probe, the box reader and FFmpeg all read that one open
+        file. Each of these is refused, with a test: `..`, an absolute
+        path outside, a symlink out of the root, a dangling symlink,
+        `/proc/self/fd/N`, and a file swapped for a symlink between calls.
+      - The roots limit what Spherecut opens for an agent, not what the
+        agent itself can do: an agent that can run shell commands can
+        read Pat's files without Spherecut. The roots keep Spherecut from
+        becoming a way around the agent's own sandbox. `docs/agents.md`
+        says this next to the network note.
+      - Nothing is overwritten unless the call asks. Even then, a camera
+        original (`.insv`, `.360`, `.lrv`, DJI raw), a source of an open
+        project, and anything under a read root but outside the write
+        root are never replaced, and an output path ending in a symlink is
+        refused.
+      - Text read from media files (tags, vendor strings, file names,
+        FFmpeg log lines) appears only in JSON string fields, capped at
+        1 KiB, with control, ANSI and bidi characters replaced. It never
+        appears in tool descriptions, server instructions or error
+        messages, and the tool descriptions say that these fields and the
+        pixels of rendered frames are untrusted content. From M3/M4, GPS
+        tracks, camera serial numbers and owner names are left out unless
+        the call asks for them.
+      - Every tool carries MCP annotations: `readOnlyHint`,
+        `destructiveHint` where it can replace a file, and `openWorldHint`
+        false.
+      - Limits live in one module, are listed in `docs/agents.md` and each
+        has a test: message size, image size, decoder `max_pixels`, files
+        per call, edits per call, and `look`'s 50 s.
+- [ ] Each operation has one request type and one response type, shared by
+      MCP and `spherecut call`. A test runs every tool both ways on the
+      same input and requires identical structured JSON, apart from
+      images, which `call` writes to files.
+- [ ] Teaching agents the workflow: the server's `instructions` (under
+      1,500 characters) give the conventions and the cheap-first order:
+      probe, then a contact sheet or the sphere, then `analyze`, then
+      single views. An Agent Skills `SKILL.md`, which Claude Code, Codex,
+      Gemini CLI and Copilot CLI all read, holds three recipes: find where
+      a moving subject is over time, validate a 360 export, and find why a
+      file stutters. (A2 extends the first into reframing the subject to
+      9:16 and rendering it.) `spherecut agents install-skill` links it
+      into `~/.claude/skills` and `~/.agents/skills` when Pat runs it.
+      `docs/agents.md` gives the exact setup for each client, with the
+      timeouts to raise and the environment variables to forward (Codex
+      passes servers only a short list, so the VA-API variables need
+      forwarding), and, for a client installed as a Flatpak, how to start
+      the host's `spherecut` through `flatpak-spawn --host`. Nothing tells
+      Pat to run `npx`.
+- [ ] Tier 1 tests, with our own scripted client written in Rust (the
+      official conformance suite and MCP Inspector are npm tools): a
+      session at 2025-06-18 and one at 2025-11-25 (`initialize`,
+      `notifications/initialized`, `ping`, `tools/list`, `tools/call`); if
+      2026-07-28 is served, a session with `server/discover`, then
+      `tools/list` and `tools/call` with `_meta`, checking `resultType`,
+      `ttlMs`, `cacheScope` and the tool order; an unknown revision (a
+      legacy `initialize` gets 2025-11-25 back, a modern request gets
+      -32022 with the supported list); an unknown tool (-32602); bad
+      arguments (an `isError` result); malformed JSON (its documented
+      outcome, and the next request still answered); cancellation (no
+      response for that id, and the work stops); stdin closing (the server
+      exits within 2 s); every stdout line parsing as one JSON-RPC
+      message; a run with the environment cut down to Codex's list; and
+      the JSON-RPC reader fuzzed with proptest. The three recipes replay on
+      synthetic media and find the planted answers within a stated budget,
+      counted as text characters / 4 plus ceil(w/28) × ceil(h/28) per
+      image. gen-media adds a clip with frame-rate jitter and duplicated
+      frames; the grid clips' moving marker (D9) serves the first recipe.
+- [ ] Hardware: a Tier 2 MCP session decodes one of Pat's samples and
+      checks the result says `vaapi`; without hardware it skips with the
+      reason and never passes. Pat runs the recipes on his samples with two
+      agents, one using each kind of session where possible (Claude Code,
+      and Codex or Gemini CLI). PROGRESS.md records the client versions,
+      the revision each negotiated, the number of calls and the output
+      size, and whether a `look` at the default size and at the 1568 px
+      cap reached the model in each (not refused by Claude Code's output
+      limit, not replaced by a placeholder).
+
+### A2 Edit and render (after M2)
+
+What Pat gets: an agent can open a project, change trims, keyframes and
+views, undo its own changes, render, and check the result, while the
+project isn't open in the GUI.
+
+- [ ] New tools: `project` (create, open, a summary, or one part such as
+      `clips[0].view`, never the whole timeline by default), `edit`,
+      `undo`, `redo`, `render`, `job` and `compare`. The project tools are
+      stateless: every call names the project file, as MCP 2026-07-28
+      expects, so a restarted server loses no project state. There is no
+      save tool: `project` create, `edit`, `undo` and `redo` load the
+      named project and save it in the same call. The project file must
+      be under the write root, and that save doesn't count as an
+      overwrite for the safety rules.
+- [ ] `edit` takes a list of M2's `Edit` values and applies them all or
+      none, as one undo step labelled with the agent's name. It takes
+      `dry_run` and `if_revision`; a stale revision is refused with the
+      current one, and the agent reads the project again. One edit can set
+      a whole view path (time, orientation and FOV per point), for "follow
+      the rider" until M9's tracking exists.
+- [ ] Undo history is saved beside the project and records the revision
+      each step produced; the GUI reads and writes the same history.
+      `undo` and `redo` take `if_revision` like `edit`. An agent's `undo`
+      undoes only a step an agent made, and only when that step is on top
+      and the project is still at its revision; otherwise it is refused
+      (`not_top` or `stale_revision`) and nothing changes. Test: an agent
+      edit, then a GUI edit and save, then the agent's `undo` is refused
+      and the GUI edit survives.
+- [ ] Opening a project to write takes an advisory lock. A project the GUI
+      has open is read-only to `spherecut mcp`: until A3 the error tells
+      the agent to ask Pat to close it in the GUI, and from A3 on to
+      attach. Each save checks that the file hasn't changed on disk since
+      the call loaded it, and writes atomically (D16). Test: two
+      processes, one saves between the other's load and save, and the
+      second save is refused.
+- [ ] `render` checks its arguments and returns a job id within 1 s.
+      `job` reports frames done and total, frames per second, the time
+      left and, when finished, the `check` report. It takes `wait` (at
+      most 50 s, under Codex's 60 s default, the shortest limit found;
+      `docs/agents.md` says how to raise a lower one) and `cancel`. One
+      render runs at a time, with at most 4 queued. The output appears
+      only when it is finished and validated. A render is refused when
+      free space is below an estimate from the preset's bitrate and the
+      duration; if the disk fills anyway, it stops with an error and
+      leaves no file. `range` and a draft size allow a quick preview
+      first. Render jobs are not stateless: when the server exits or its
+      stdin closes, its jobs are cancelled and leave no files, and `job`
+      with an id from an earlier server returns `job_lost`. If the server
+      is killed, its leftover temporary file is removed when the next
+      render starts. Tests on lavapipe: cancel takes under 2 s and leaves
+      no file, stdin closing mid-render leaves no file, and progress only
+      increases.
+- [ ] `compare` takes two files, or a file and a project, and returns
+      PSNR/SSIM per sampled time and the worst time, with an optional
+      difference sheet, using the parity tests' metric code. `look` and
+      `check` accept a project as well as a file.
+- [ ] A test applies one of every `Edit` variant through MCP. GUI actions
+      that aren't edits are listed in `docs/agents.md`, each with its tool
+      or the reason it is GUI-only. Once M5's shortcut map gives the GUI a
+      list of actions, a test fails when a new action is in neither list;
+      until then, each milestone review checks it.
+
+### A3 Work alongside Pat in the GUI (after M5)
+
+What Pat gets: with attach turned on, an agent can see what Pat has open
+in the GUI and make edits there that Pat sees as they happen and can undo
+with Ctrl+Z.
+
+- [ ] Attach is off until Pat turns it on in the GUI. Then the GUI listens
+      on `$XDG_RUNTIME_DIR/spherecut/<pid>.sock` (directory 0700, socket
+      0600), or under `/run/user/<uid>` when the variable isn't passed and
+      that directory is Pat's and 0700. Never `/tmp`, the abstract
+      namespace or TCP. The GUI checks the peer's uid with `SO_PEERCRED`
+      and asks Pat to accept each new agent, showing the name it reports
+      and its executable. Agents start `spherecut mcp --attach`, which
+      relays the same MCP messages to the socket. Pat confirms first that
+      a local socket like this is IPC, not the network access his rule
+      forbids (DECISIONS, Open).
+- [ ] The agent can see the open project, the playhead, the selection, the
+      in and out marks, the performance overlay's counters, and a `look`
+      of the viewer as displayed. That view is rendered again from the
+      view state off the UI thread, never captured from the screen, and at
+      most once a second while Pat plays. A kittest test keeps UI frame
+      times within budget while an agent asks for frames in a loop.
+- [ ] Agent edits are applied on the UI thread between frames, never in
+      the middle of one of Pat's gestures, from a bounded queue. Pat's
+      Ctrl+Z undoes whatever step is on top; an agent's `undo` follows
+      A2's rule. If Pat closes or switches the project, the agent's next
+      call says so. One agent is attached at a time; the GUI shows which,
+      and can disconnect it. kittest Tier 1 tests cover each case.
+
+### Every milestone after A1
+
+New features reach agents as new `Edit` values, `analyze` kinds, `check`
+targets and fields, not as new tools, with schemas, docs and tests in the
+same milestone, so each milestone carries a little more work. The tool
+schemas are a public interface: until 1.0 they may change between
+milestones, and `docs/agents.md` lists the changes.
