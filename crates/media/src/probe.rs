@@ -182,8 +182,9 @@ fn mp4_damage(t: &mp4::Mp4Tree) -> impl Iterator<Item = Problem> + use<> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "check", rename_all = "snake_case")]
 pub enum StructureCheck {
-    /// MP4/MOV: every top-level box, and each track's sample tables
-    /// against the media data.
+    /// MP4/MOV: every top-level box, and each track's sample tables in
+    /// `moov` against the media data. A fragmented file's fragments
+    /// (`moof`, with its `trun` tables) are not checked.
     Full,
     /// Matroska/WebM: only that the file is as long as its header says.
     /// Damage inside goes unnoticed.

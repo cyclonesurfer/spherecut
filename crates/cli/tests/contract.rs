@@ -17,6 +17,7 @@ use spherecut_cli::contract::{self, Exit};
 use spherecut_core::{FrameRate, FrameTime, Rational, Time};
 use spherecut_media::doctor::{self, DoctorReport, Issue, Severity};
 use spherecut_media::encode::{Mp4Writer, PixelLayout, VideoSettings};
+use spherecut_media::ff;
 use spherecut_synth::media::{self, Audio, Codec, Spec};
 use spherecut_synth::{Pattern, render_equirect, yuv};
 
@@ -118,6 +119,33 @@ fn untagged_clip(dir: &Path) -> PathBuf {
         w.push_video(&yuv::to_yuv420(&img, 8)).unwrap();
     }
     w.finish().unwrap()
+}
+
+/// `src` remuxed into `dst` as a fragmented MP4, as live recorders write
+/// one: an empty `moov`, then a `moof` and an `mdat` for each frame.
+// Reads a file this test wrote and writes another with ffmpeg-next alone,
+// apart from Spherecut's confined open (D24), as synth's decode_errors
+// test does.
+#[allow(clippy::disallowed_methods)]
+fn fragmented(src: &Path, dst: &Path) {
+    let mut ictx = ff::format::input(src).unwrap();
+    let mut octx = ff::format::output_as(dst, "mp4").unwrap();
+    for st in ictx.streams() {
+        let mut out = octx
+            .add_stream(ff::encoder::find(ff::codec::Id::None))
+            .unwrap();
+        out.set_parameters(st.parameters());
+        out.set_time_base(st.time_base());
+    }
+    let mut opts = ff::Dictionary::new();
+    opts.set("movflags", "empty_moov+frag_every_frame");
+    octx.write_header_with(opts).unwrap();
+    for (st, mut pkt) in ictx.packets() {
+        pkt.rescale_ts(st.time_base(), octx.stream(st.index()).unwrap().time_base());
+        pkt.set_position(-1);
+        pkt.write_interleaved(&mut octx).unwrap();
+    }
+    octx.write_trailer().unwrap();
 }
 
 /// A Matroska element with an 8-byte size.
@@ -485,6 +513,44 @@ fn long_box_lists_are_cut_and_stereo_modes_are_names() {
     assert_eq!(v2(0)["stereo_value"], 0);
     assert_eq!(v2(1)["stereo"], "unknown");
     assert_eq!(v2(1)["stereo_value"], 7);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_full_check_of_a_fragmented_file_leaves_out_its_fragments() {
+    let dir = tmp("fragmented");
+    let (good, _) = clip(&dir, FrameRate::FPS_25);
+    let frag = dir.join("fragmented.mp4");
+    fragmented(&good, &frag);
+    let mut f = std::fs::read(&frag).unwrap();
+    // The later half of the fragments' samples, moved far past the end of
+    // the file, which loses frames: each `trun`'s data offset (flag 0x1,
+    // after the version, flags and sample count).
+    let truns: Vec<usize> = (0..f.len() - 4)
+        .filter(|&i| &f[i..i + 4] == b"trun")
+        .collect();
+    assert!(truns.len() > 4, "{} truns", truns.len());
+    for &trun in &truns[truns.len() / 2..] {
+        assert_eq!(f[trun + 7] & 1, 1, "no data offset");
+        f[trun + 12..trun + 16].copy_from_slice(&0x7000_0000u32.to_be_bytes());
+    }
+    let moved = dir.join("moved.mp4");
+    std::fs::write(&moved, &f).unwrap();
+
+    let (status, v) = probe_json(&[&frag, &moved]);
+    assert_eq!(status, Some(0), "{v}");
+    for file in v["result"]["files"].as_array().unwrap() {
+        let report = &file["report"];
+        // "full" is every top-level box and `moov`'s sample tables, which
+        // a fragmented file leaves empty; its fragments' `trun`s are not
+        // checked, as docs/cli-json.md says. Checking them would add
+        // damage, which the contract allows within its version.
+        assert_eq!(report["structure"], serde_json::json!({"check": "full"}));
+        assert_eq!(report["damage"], serde_json::json!([]), "{file}");
+        let boxes = &report["mp4"]["top_level"];
+        let moofs = boxes.as_array().unwrap().iter().filter(|b| b[0] == "moof");
+        assert!(moofs.count() > 1, "{boxes}");
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 
