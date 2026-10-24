@@ -403,6 +403,45 @@ fn an_unreadable_file_is_an_io_error_not_damage() {
 }
 
 #[test]
+fn long_box_lists_are_cut_and_stereo_modes_are_names() {
+    let dir = tmp("shapes-mp4");
+    let (good, _) = clip(&dir, FrameRate::FPS_25);
+    let mut f = std::fs::read(&good).unwrap();
+    // A hundred empty boxes after the rest, as a fragmented recording has
+    // a `moof` and an `mdat` per fragment.
+    for _ in 0..100 {
+        f.extend_from_slice(b"\0\0\0\x08free");
+    }
+    // A stereo mode the specification doesn't define.
+    let at = f.windows(4).position(|w| w == b"st3d").unwrap() + 8;
+    assert_eq!(f[at], 0);
+    f[at] = 7;
+    let odd = dir.join("odd.mp4");
+    std::fs::write(&odd, &f).unwrap();
+
+    let (status, v) = probe_json(&[&good, &odd]);
+    assert_eq!(status, Some(0), "{v}");
+    let report = |i: usize| &v["result"]["files"][i]["report"];
+    let (mp4, odd_mp4) = (&report(0)["mp4"], &report(1)["mp4"]);
+    assert_eq!(mp4["top_level"].as_array().unwrap().len(), 4, "{mp4}");
+    assert_eq!(mp4["top_level_omitted"], 0);
+    let listed = odd_mp4["top_level"].as_array().unwrap();
+    assert_eq!(listed.len(), 64);
+    assert_eq!(listed[..4], mp4["top_level"].as_array().unwrap()[..]);
+    assert_eq!(odd_mp4["top_level_omitted"], 104 - 64);
+    // Text lists every box, as before.
+    let out = spherecut(&[OsStr::new("probe"), odd.as_os_str()]);
+    assert_eq!(text(&out.stdout).matches(" free").count(), 101);
+
+    let v2 = |i: usize| &report(i)["streams"][0]["spherical"]["v2"];
+    assert_eq!(v2(0)["stereo"], "mono");
+    assert_eq!(v2(0)["stereo_value"], 0);
+    assert_eq!(v2(1)["stereo"], "unknown");
+    assert_eq!(v2(1)["stereo_value"], 7);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn problems_carry_codes() {
     let dir = tmp("problems");
     let (good, _) = clip(&dir, FrameRate::FPS_25);

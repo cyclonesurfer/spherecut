@@ -275,14 +275,49 @@ pub struct AudioInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(into = "Mp4SummaryJson")]
 pub struct Mp4Summary {
     pub brand: Option<String>,
+    /// Every top-level box, as type and size, in file order. The JSON
+    /// lists the first [`MAX_LISTED_TOP_LEVEL`].
     pub top_level: Vec<(String, u64)>,
     /// Bytes after the last top-level box (vendor trailers).
     pub trailing_bytes: u64,
     /// The top-level box cut off by the end of the file, if any.
     pub truncated: Option<TruncatedBox>,
     pub warnings: Vec<String>,
+}
+
+/// How many top-level boxes the JSON lists. A fragmented recording has a
+/// `moof` and an `mdat` per fragment, thousands in an hour.
+pub const MAX_LISTED_TOP_LEVEL: usize = 64;
+
+/// How [`Mp4Summary`] is written in the CLI's JSON (D27): the first
+/// [`MAX_LISTED_TOP_LEVEL`] top-level boxes, and how many more there are.
+#[derive(Serialize)]
+#[serde(rename = "Mp4Summary")]
+struct Mp4SummaryJson {
+    brand: Option<String>,
+    top_level: Vec<(String, u64)>,
+    top_level_omitted: usize,
+    trailing_bytes: u64,
+    truncated: Option<TruncatedBox>,
+    warnings: Vec<String>,
+}
+
+impl From<Mp4Summary> for Mp4SummaryJson {
+    fn from(mut m: Mp4Summary) -> Self {
+        let top_level_omitted = m.top_level.len().saturating_sub(MAX_LISTED_TOP_LEVEL);
+        m.top_level.truncate(MAX_LISTED_TOP_LEVEL);
+        Mp4SummaryJson {
+            brand: m.brand,
+            top_level: m.top_level,
+            top_level_omitted,
+            trailing_bytes: m.trailing_bytes,
+            truncated: m.truncated,
+            warnings: m.warnings,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

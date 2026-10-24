@@ -15,8 +15,10 @@ pub const SPHERICAL_V1_UUID: [u8; 16] = [
     0xff, 0xcc, 0x82, 0x63, 0xf8, 0x55, 0x4a, 0x93, 0x88, 0x14, 0x58, 0x7a, 0x02, 0x52, 0x1f, 0xdd,
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+/// The `st3d` stereo mode. Serialized as its name, a string: a value the
+/// specification doesn't define is `"unknown"`, and [`SphericalV2`]'s
+/// JSON gives the number beside it (D27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StereoMode {
     Mono,
     TopBottom,
@@ -44,6 +46,22 @@ impl StereoMode {
             StereoMode::Unknown(v) => v,
         }
     }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            StereoMode::Mono => "mono",
+            StereoMode::TopBottom => "top_bottom",
+            StereoMode::LeftRight => "left_right",
+            StereoMode::StereoCustom => "stereo_custom",
+            StereoMode::Unknown(_) => "unknown",
+        }
+    }
+}
+
+impl Serialize for StereoMode {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.name())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -68,6 +86,7 @@ pub enum Projection {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(into = "SphericalV2Json")]
 pub struct SphericalV2 {
     pub stereo: Option<StereoMode>,
     pub metadata_source: Option<String>,
@@ -76,6 +95,34 @@ pub struct SphericalV2 {
     pub pose_pitch: f64,
     pub pose_roll: f64,
     pub projection: Option<Projection>,
+}
+
+/// How [`SphericalV2`] is written in the CLI's JSON (D27): `stereo` is
+/// always a name, and `stereo_value` the `st3d` byte it came from.
+#[derive(Serialize)]
+#[serde(rename = "SphericalV2")]
+struct SphericalV2Json {
+    stereo: Option<StereoMode>,
+    stereo_value: Option<u8>,
+    metadata_source: Option<String>,
+    pose_yaw: f64,
+    pose_pitch: f64,
+    pose_roll: f64,
+    projection: Option<Projection>,
+}
+
+impl From<SphericalV2> for SphericalV2Json {
+    fn from(v: SphericalV2) -> Self {
+        SphericalV2Json {
+            stereo: v.stereo,
+            stereo_value: v.stereo.map(StereoMode::to_u8),
+            metadata_source: v.metadata_source,
+            pose_yaw: v.pose_yaw,
+            pose_pitch: v.pose_pitch,
+            pose_roll: v.pose_roll,
+            projection: v.projection,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

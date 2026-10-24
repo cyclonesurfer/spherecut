@@ -238,7 +238,7 @@ A report:
 | `file_size` | integer | Bytes |
 | `container` | object | `format` (FFmpeg's demuxer name, such as `mov,mp4,m4a,3gp,3g2,mj2`), `format_long` (its description), `duration` and `start_time` (times, or null), `bit_rate` (bits per second, or null), `tags` (an object of strings) |
 | `streams` | array | One per FFmpeg stream, below |
-| `mp4` | object, or null | For MP4/MOV files: `brand` (string or null), `top_level` (an array of `[type, size]` pairs in file order), `trailing_bytes` (after the last whole box, where some cameras put vendor data), `truncated` (the top-level box cut off by the end of the file: `fourcc` (string or null), `offset`, `header_len`, `size` (or null), `present`; or null), `warnings` (the box reader's own, as strings; each is also in `damage`) |
+| `mp4` | object, or null | For MP4/MOV files: `brand` (string or null), `top_level` (the first 64 top-level boxes, as `[type, size]` pairs in file order), `top_level_omitted` (how many more there are; a fragmented recording has thousands), `trailing_bytes` (after the last whole box, where some cameras put vendor data), `truncated` (the top-level box cut off by the end of the file: `fourcc` (string or null), `offset`, `header_len`, `size` (or null), `present`; or null), `warnings` (the box reader's own, as strings; each is also in `damage`) |
 | `camera` | object, or null | `vendor`, `model`, `firmware` (strings or null), `layout` (one of `equirect_tagged`, `equirect_likely`, `insta360_dual_fisheye`, `go_pro_eac`, `dji_dual_fisheye`, `low_res_companion`, `unknown`), `evidence` (strings) |
 | `structure` | object | How much of the structure was checked for damage: `{"check": "full"}` (MP4/MOV: every top-level box and the sample tables), `{"check": "length"}` (Matroska: only the Segment's length), or `{"check": "none", "why": string}` |
 | `damage` | array of problems | Why the file looks truncated or corrupt; empty for a healthy file |
@@ -253,7 +253,8 @@ A stream:
 | `kind` | string | `video`, `audio`, `data`, `subtitle`, `attachment` or `unknown` |
 | `codec` | string or null | FFmpeg's codec name, such as `hevc` |
 | `codec_tag` | string or null | The container's four-character code, such as `hvc1`; bytes that aren't printable are `\xNN` |
-| `profile`, `level` | string, integer, or null | As FFmpeg reads them |
+| `profile` | string or null | As FFmpeg names it, such as `Main 10` |
+| `level` | integer or null | As FFmpeg reads it, such as `31` for H.264 level 3.1 |
 | `time_base` | rational | Seconds per tick |
 | `start_pts` | integer or null | The first timestamp, in ticks |
 | `duration` | time or null | |
@@ -266,7 +267,7 @@ A stream:
 | `language` | string or null | Left out (null) when `und` |
 | `video` | object or null | `width`, `height`, `sample_aspect` (rational or null), `pix_fmt`, `bit_depth`, `chroma_subsampling` (`[log2 horizontal, log2 vertical]`, `[1, 1]` for 4:2:0), `color` (`range`, `matrix`, `primaries`, `transfer`, `chroma_location`, FFmpeg's names), `field_order`, `rotation_deg` (the display matrix's rotation); each null when unknown |
 | `audio` | object or null | `sample_rate`, `channels`, `layout` and `sample_fmt` (strings or null) |
-| `spherical` | object, or absent | Absent when the track has no spherical metadata. `v2` (Spherical Video V2: `stereo` (`mono`, `top_bottom`, `left_right`, `stereo_custom`, `{"unknown": n}` or null), `metadata_source`, `pose_yaw`, `pose_pitch`, `pose_roll` (degrees), `projection` (`{"type": "equirect", "top", "bottom", "left", "right"}` with crop bounds as 0.32 fixed-point fractions, `{"type": "cubemap", "layout", "padding"}`, `{"type": "mesh"}`, `{"type": "other", "fourcc"}`, or null)), `v1` (the V1 XML: `spherical`, `stitched`, `projection_type`, `stereo_mode`, `stitching_software`, `raw_xml`), `spatial_audio` (SA3D: `version`, `ambisonic_type`, `ambisonic_order`, `channel_ordering`, `normalization`, `channel_map`); each null when missing |
+| `spherical` | object, or absent | Absent when the track has no spherical metadata. `v2` (Spherical Video V2: `stereo` (`mono`, `top_bottom`, `left_right`, `stereo_custom`, `unknown` for a value the specification doesn't define, or null), `stereo_value` (the `st3d` byte it came from, or null), `metadata_source`, `pose_yaw`, `pose_pitch`, `pose_roll` (degrees), `projection` (`{"type": "equirect", "top", "bottom", "left", "right"}` with crop bounds as 0.32 fixed-point fractions, `{"type": "cubemap", "layout", "padding"}`, `{"type": "mesh"}`, `{"type": "other", "fourcc"}`, or null)), `v1` (the V1 XML: `spherical`, `stitched`, `projection_type`, `stereo_mode`, `stitching_software`, `raw_xml`), `spatial_audio` (SA3D: `version`, `ambisonic_type`, `ambisonic_order`, `channel_ordering`, `normalization`, `channel_map`); each null when missing |
 | `tags` | object of strings | The stream's metadata |
 
 Text read from the file (tags, handler names, `evidence`, FFmpeg's log)
@@ -311,7 +312,7 @@ indented:
               "audio": null,
               "spherical": {
                 "v2": {
-                  "stereo": "mono", "metadata_source": "Spherecut",
+                  "stereo": "mono", "stereo_value": 0, "metadata_source": "Spherecut",
                   "pose_yaw": 0.0, "pose_pitch": 0.0, "pose_roll": 0.0,
                   "projection": {"type": "equirect", "top": 0, "bottom": 0, "left": 0, "right": 0}
                 },
@@ -333,7 +334,7 @@ indented:
           ],
           "mp4": {
             "brand": "isom",
-            "top_level": [["ftyp", 32], ["free", 8], ["mdat", 68736], ["moov", 2263]],
+            "top_level": [["ftyp", 32], ["free", 8], ["mdat", 68736], ["moov", 2263]], "top_level_omitted": 0,
             "trailing_bytes": 0, "truncated": null, "warnings": []
           },
           "camera": {

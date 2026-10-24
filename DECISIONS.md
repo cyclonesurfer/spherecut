@@ -1290,8 +1290,14 @@ Cost: `seconds` repeats `exact`, and a reader that compares floats can
 still go wrong, which `docs/cli-json.md` warns about. The envelope's
 `warnings` is always empty for probe and doctor in version 1, since
 their findings belong to their results; it is there for `frame` and A1.
-`mp4.top_level` (`[type, size]` pairs) and `mp4.warnings` (strings, each
-also a `damage` problem with a code) keep M0's shapes.
+`mp4.warnings` (strings, each also a `damage` problem with a code) keeps
+M0's shape. `mp4.top_level` keeps its `[type, size]` pairs but lists
+only the first 64 boxes, with `top_level_omitted` counting the rest,
+since a fragmented recording has thousands; the text output still
+lists them all. A spherical `stereo` is always a name, `unknown` for a
+value the specification doesn't define, with the `st3d` byte in
+`stereo_value`, where M0 wrote an unknown one as `{"unknown": n}`: one
+type per field is what typed readers and A1's schemas need.
 
 `frame` brings its result, its codes (`output_exists`, `not_equirect`,
 `out_of_range`, `no_gpu`, `adapter_not_found`, `no_decoder` as an error,
