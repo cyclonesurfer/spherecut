@@ -476,6 +476,22 @@ impl VideoDecoder {
         self.failed.is_some() || self.refusal().is_some()
     }
 
+    /// The error reading stopped with since the last seek, as soon as it
+    /// has: frames that come out after it are the decoder giving up the
+    /// ones it holds, and the frames the damage lost may come before
+    /// them in presentation order. `None` while reading goes on, and
+    /// after a clean end.
+    pub(crate) fn read_failure(&self) -> Option<MediaError> {
+        let reason = self.read_error.as_ref().or(self.failed.as_ref())?;
+        Some(err(&self.path, "reading", reason))
+    }
+
+    /// Whether reading has stopped with an error (see
+    /// [`read_failure`](Self::read_failure)).
+    pub(crate) fn reading_failed(&self) -> bool {
+        self.read_error.is_some() || self.failed.is_some()
+    }
+
     /// Seek the demuxer to the keyframe at or before `ts` in the stream's
     /// time base (`AVSEEK_FLAG_BACKWARD`), and flush the decoder. Reading
     /// failures and the end of the stream are cleared, so a seek back into

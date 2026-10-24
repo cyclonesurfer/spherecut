@@ -611,6 +611,76 @@ fn a_truncated_clip_seeks_before_its_cut_and_says_where_it_ends() {
     // And back before the cut again.
     let (got, e, _) = seek_pts(&mut *d, before[2].pts, SeekMode::Exact);
     assert_eq!((Seen::of(&got), e), (before[2], Exactness::Exact));
+
+    // A cut in the middle of frame 13's packet, a B-frame that comes after
+    // keyframe 16 in decode order: later frames (16 at least) still come
+    // out as the decoder drains, but 13 is lost. A seek to a lost frame
+    // is never Exact, even though a later frame came out.
+    for codec in [Codec::H264, Codec::Hevc] {
+        let whole_clip = match codec {
+            Codec::H264 => fast.clone(),
+            _ => {
+                let fast = dir.join("faststart-hevc.mp4");
+                faststart(&write(&spec("whole-hevc", codec), &dir), &fast);
+                fast
+            }
+        };
+        let (whole, _) = sequential(&whole_clip);
+        let bytes = std::fs::read(&whole_clip).unwrap();
+        let at = packet_at(&whole_clip, whole[13].pts);
+        let cut = dir.join("cut-13.mp4");
+        std::fs::write(&cut, &bytes[..at]).unwrap();
+        let mut d = open(&cut);
+        let mut decoded = Vec::new();
+        while let Ok(NextFrame::Frame(f)) = d.next_frame(&never) {
+            decoded.push(Seen::of(&f));
+        }
+        assert!(!decoded.contains(&whole[13]), "{codec:?}: {decoded:?}");
+        assert!(decoded.contains(&whole[16]), "{codec:?}: {decoded:?}");
+        for (i, want) in whole.iter().enumerate() {
+            let (got, e, _) = seek_pts(&mut *d, want.pts, SeekMode::Exact);
+            let events = d.take_events();
+            if decoded.contains(want) {
+                assert_eq!(
+                    (Seen::of(&got), e),
+                    (*want, Exactness::Exact),
+                    "{codec:?}: frame {i}"
+                );
+                continue;
+            }
+            let shown = *decoded.iter().rev().find(|s| s.pts < want.pts).unwrap();
+            assert_eq!(
+                (Seen::of(&got), e),
+                (
+                    shown,
+                    Exactness::Truncated {
+                        last_good_pts: shown.pts
+                    }
+                ),
+                "{codec:?}: frame {i}, lost to the cut"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, DecoderEvent::Damaged { .. })),
+                "{codec:?}: frame {i}: {events:?}"
+            );
+        }
+    }
+}
+
+/// Where the video packet with pts `pts` lies in the file at `path`: the
+/// byte in the middle of it.
+// Reads a file this test made with ffmpeg-next alone, as `faststart` does.
+#[allow(clippy::disallowed_methods)]
+fn packet_at(path: &Path, pts: i64) -> usize {
+    let mut ictx = ff::format::input(path).unwrap();
+    let pkt = ictx
+        .packets()
+        .map(|(_, p)| p)
+        .find(|p| p.pts() == Some(pts))
+        .unwrap();
+    usize::try_from(pkt.position()).unwrap() + pkt.size() / 2
 }
 
 /// Remux `src` into `dst` with `moov` before `mdat`.

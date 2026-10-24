@@ -60,6 +60,9 @@ struct Raw {
     pts: i64,
     /// Its place in decode-output order since the last seek.
     seq: u64,
+    /// It came out after reading had failed, as the decoder drained: a
+    /// frame the damage lost may come before it.
+    after_failure: bool,
 }
 
 /// How the decoder's frames become [`VideoFrame`]s.
@@ -301,11 +304,13 @@ impl FfmpegVideo {
             stats: DecodeStats::default(),
             decode_ms_total: 0.0,
         };
+        let after_failure = v.dec.reading_failed();
         v.pending = Some(Raw {
             frame,
             fields,
             pts: origin_pts,
             seq: 0,
+            after_failure,
         });
         Ok(v)
     }
@@ -373,6 +378,7 @@ impl FfmpegVideo {
             fields,
             pts,
             seq,
+            after_failure: self.dec.reading_failed(),
         })
     }
 
@@ -603,11 +609,13 @@ impl FfmpegVideo {
         stop: &StopToken,
     ) -> Result<Option<(Arc<VideoFrame>, Exactness, SeekCost)>, MediaError> {
         let mut cost = SeekCost::default();
-        // Already showing it.
+        // Already showing it, unless the next frame came out after a read
+        // failure, when frames between the two may be lost.
         if self.position == Position::InStep
             && let (Some(c), Some(p)) = (&self.current, &self.pending)
             && c.pts <= t
             && t < p.pts
+            && !p.after_failure
         {
             cost.forward_only = true;
             return Ok(Some((c.clone(), Exactness::Exact, cost)));
@@ -681,6 +689,16 @@ impl FfmpegVideo {
             }
         }
         self.position = Position::InStep;
+        // The first frame after the target came out as the decoder drained
+        // after a read failure: the frame shown at the target may be one
+        // the damage lost, which a later frame coming out doesn't rule out.
+        if damage.is_none() && self.pending.as_ref().is_some_and(|p| p.after_failure) {
+            damage = Some(
+                self.dec
+                    .read_failure()
+                    .map_or_else(|| "reading failed".into(), |e| e.to_string()),
+            );
+        }
         let next_pts = self.pending.as_ref().map(|p| p.pts);
         let frame = match (best, previous) {
             (Some(b), _) => self.make_frame(b, next_pts)?,
