@@ -33,6 +33,7 @@ const CODES: &[&str] = &[
     "decode_failed",
     "doctor_errors",
     "files_failed",
+    "hw_failed",
     "hw_unavailable",
     "hw_unsupported",
     "internal",
@@ -117,6 +118,7 @@ fn untagged_clip(dir: &Path) -> PathBuf {
         color: ColorTags::NONE,
         edit_start: 0,
         time_base: None,
+        crop_left: 0,
     };
     let mut w = Mp4Writer::create(&dir.join("untagged.mp4"), &settings, None).unwrap();
     for i in 0..3 {

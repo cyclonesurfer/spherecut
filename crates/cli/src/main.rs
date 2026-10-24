@@ -40,9 +40,11 @@ enum Cmd {
     /// Check codecs and hardware decode/encode support, and print the
     /// command that fixes anything missing.
     Doctor {
-        /// DRM render node to test for VA-API.
-        #[arg(long, default_value = "/dev/dri/renderD128")]
-        render_node: PathBuf,
+        /// DRM render node to test for VA-API: by default the one hardware
+        /// decoding uses (`/dev/dri/renderD128` until the GUI's adapter
+        /// names its GPU).
+        #[arg(long)]
+        render_node: Option<PathBuf>,
         /// Print one JSON document instead of text (docs/cli-json.md).
         #[arg(long)]
         json: bool,
@@ -206,7 +208,12 @@ fn run(cli: Cli) -> Result<Exit> {
     debug_panic("run");
     match cli.cmd {
         Cmd::Probe { files, json } => probe(&files, json),
-        Cmd::Doctor { render_node, json } => doctor(&render_node, json),
+        Cmd::Doctor { render_node, json } => {
+            // The lookup hardware decoding uses (D30); no adapter is known
+            // before the GUI's (M1 slice 3).
+            let node = spherecut_media::hw::render_node(None, render_node.as_deref());
+            doctor(&node.path, json)
+        }
     }
 }
 

@@ -117,7 +117,7 @@ impl Seen {
 }
 
 fn open(path: &Path) -> Box<dyn VideoDecode> {
-    FfmpegBackend
+    FfmpegBackend::new()
         .open_video(path, &VideoRequest::default())
         .unwrap()
 }
@@ -1432,7 +1432,7 @@ fn catching_up_keeps_its_place_and_links_only_frames_that_follow_on() {
     for (name, clip) in clips {
         let (frames, _) = sequential(&clip);
         let backwards = frames.windows(2).any(|w| w[1].pts < w[0].pts);
-        let mut d = FfmpegBackend.open_video(&clip, &req).unwrap();
+        let mut d = FfmpegBackend::new().open_video(&clip, &req).unwrap();
         let d = &mut *d;
         if name == "catch-up-back" {
             assert!(backwards);

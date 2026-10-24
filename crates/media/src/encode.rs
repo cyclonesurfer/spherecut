@@ -183,6 +183,13 @@ pub struct VideoSettings {
     /// per frame, 1 / `rate`. With another, `push_video` needs a frame to
     /// be a whole number of ticks.
     pub time_base: Option<Rational>,
+    /// Luma columns the stream crops on the left, an even number below
+    /// `width`, or 0. Frames are pushed `width` wide and decode
+    /// `crop_left` narrower: FFmpeg's h264_metadata or hevc_metadata
+    /// filter writes the crop into the encoder's SPS (H.264's frame
+    /// cropping, HEVC's conformance window), as no encoder does itself.
+    /// For test media.
+    pub crop_left: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +217,8 @@ pub struct Mp4Writer {
     tmp: TempFile,
     octx: ff::format::context::Output,
     video: ff::encoder::Video,
+    /// What crops the video stream on the left, when it is.
+    crop: Option<ffi::CropFilter>,
     video_index: usize,
     video_tb: ff::Rational,
     width: u32,
@@ -270,10 +279,74 @@ fn variable_frame_size(sample_rate: u32) -> usize {
     (sample_rate as usize / 50).max(1)
 }
 
-/// Write every packet the encoder has ready. EAGAIN (it wants more input)
-/// and EOF (it is fully flushed) end the loop; any other error is real.
+/// Write every packet the encoder has ready, through `crop` when there is
+/// one. EAGAIN (it wants more input) and EOF (it is fully flushed) end the
+/// loop; any other error is real.
 fn drain(
     enc: &mut ff::encoder::Encoder,
+    octx: &mut ff::format::context::Output,
+    index: usize,
+    enc_tb: ff::Rational,
+    what: &str,
+    mut crop: Option<&mut ffi::CropFilter>,
+) -> Result<(), EncodeError> {
+    let mut pkt = ff::Packet::empty();
+    loop {
+        match enc.receive_packet(&mut pkt) {
+            Ok(()) => {}
+            Err(e) if ends_drain(&e) => return Ok(()),
+            Err(error) => {
+                return Err(EncodeError::Ffmpeg {
+                    context: format!("encoding {what}"),
+                    error,
+                });
+            }
+        }
+        match crop.as_deref_mut() {
+            None => write_packet(&mut pkt, octx, index, enc_tb, what)?,
+            Some(f) => {
+                ctx(f.send(Some(&mut pkt)), || format!("cropping {what}"))?;
+                drain_crop(f, octx, index, enc_tb, what)?;
+            }
+        }
+    }
+}
+
+/// Whether `e` is EAGAIN or EOF, which end a drain.
+fn ends_drain(e: &ff::Error) -> bool {
+    match e {
+        ff::Error::Other { errno } => *errno == ff::util::error::EAGAIN,
+        ff::Error::Eof => true,
+        _ => false,
+    }
+}
+
+/// Write every packet `crop` has ready.
+fn drain_crop(
+    crop: &mut ffi::CropFilter,
+    octx: &mut ff::format::context::Output,
+    index: usize,
+    enc_tb: ff::Rational,
+    what: &str,
+) -> Result<(), EncodeError> {
+    let mut out = ff::Packet::empty();
+    loop {
+        match crop.receive(&mut out) {
+            Ok(()) => write_packet(&mut out, octx, index, enc_tb, what)?,
+            Err(e) if ends_drain(&e) => return Ok(()),
+            Err(error) => {
+                return Err(EncodeError::Ffmpeg {
+                    context: format!("cropping {what}"),
+                    error,
+                });
+            }
+        }
+    }
+}
+
+/// Write `pkt`, in the encoder's time base `enc_tb`, to stream `index`.
+fn write_packet(
+    pkt: &mut ff::Packet,
     octx: &mut ff::format::context::Output,
     index: usize,
     enc_tb: ff::Rational,
@@ -283,25 +356,11 @@ fn drain(
         .stream(index)
         .map(|s| s.time_base())
         .ok_or_else(|| EncodeError::Invalid(format!("{what} stream vanished")))?;
-    let mut pkt = ff::Packet::empty();
-    loop {
-        match enc.receive_packet(&mut pkt) {
-            Ok(()) => {}
-            Err(ff::Error::Other { errno }) if errno == ff::util::error::EAGAIN => return Ok(()),
-            Err(ff::Error::Eof) => return Ok(()),
-            Err(error) => {
-                return Err(EncodeError::Ffmpeg {
-                    context: format!("encoding {what}"),
-                    error,
-                });
-            }
-        }
-        pkt.set_stream(index);
-        pkt.rescale_ts(enc_tb, ost_tb);
-        ctx(pkt.write_interleaved(octx), || {
-            format!("writing {what} packet")
-        })?;
-    }
+    pkt.set_stream(index);
+    pkt.rescale_ts(enc_tb, ost_tb);
+    ctx(pkt.write_interleaved(octx), || {
+        format!("writing {what} packet")
+    })
 }
 
 /// The only sample format the writer sends.
@@ -357,6 +416,12 @@ impl Mp4Writer {
             return Err(EncodeError::Invalid(format!(
                 "frame size {}x{} must be non-zero and even",
                 v.width, v.height
+            )));
+        }
+        if !v.crop_left.is_multiple_of(2) || v.crop_left >= v.width {
+            return Err(EncodeError::Invalid(format!(
+                "cropping {} of {} columns: it must be even and leave some",
+                v.crop_left, v.width
             )));
         }
         // Both encoders exist before anything touches the disk.
@@ -432,11 +497,23 @@ impl Mp4Writer {
         let venc = ctx(venc.open_with(dict(&v.options)), || {
             format!("opening {} for {}x{}", v.encoder, v.width, v.height)
         })?;
+        let crop = match v.crop_left {
+            0 => None,
+            left => Some(ctx(
+                ffi::CropFilter::left(&ff::codec::Parameters::from(&venc), video_tb, left),
+                || format!("cropping {left} columns on the left of {}", v.encoder),
+            )?),
+        };
         {
             let mut ost = octx
                 .stream_mut(video_index)
                 .ok_or_else(|| EncodeError::Invalid("video stream vanished".into()))?;
-            ost.set_parameters(&venc);
+            match &crop {
+                None => ost.set_parameters(&venc),
+                Some(f) => ctx(f.parameters_to(&mut ost, v.crop_left), || {
+                    "setting the cropped stream's parameters".into()
+                })?,
+            }
             ost.set_time_base(video_tb);
             ost.set_avg_frame_rate(fps);
         }
@@ -498,6 +575,7 @@ impl Mp4Writer {
             tmp,
             octx,
             video: venc,
+            crop,
             video_index,
             video_tb,
             width: v.width,
@@ -635,6 +713,7 @@ impl Mp4Writer {
             self.video_index,
             self.video_tb,
             "video",
+            self.crop.as_mut(),
         )
     }
 
@@ -642,7 +721,7 @@ impl Mp4Writer {
         let Some(a) = self.audio.as_mut() else {
             return Ok(());
         };
-        drain(&mut a.enc, &mut self.octx, a.index, a.tb, "audio")
+        drain(&mut a.enc, &mut self.octx, a.index, a.tb, "audio", None)
     }
 
     /// Flush the encoders, write the trailer and rename the file into place.
@@ -669,6 +748,10 @@ impl Mp4Writer {
     fn close(mut self) -> Result<(PathBuf, TempFile), EncodeError> {
         ctx(self.video.send_eof(), || "flushing video".into())?;
         self.drain_video()?;
+        if let Some(f) = self.crop.as_mut() {
+            ctx(f.send(None), || "flushing the video's cropping".into())?;
+            drain_crop(f, &mut self.octx, self.video_index, self.video_tb, "video")?;
+        }
         if self.audio.is_some() {
             self.flush_audio_frames(true)?;
             if let Some(a) = self.audio.as_mut() {

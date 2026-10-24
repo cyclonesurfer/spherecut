@@ -28,7 +28,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use ffmpeg_next as ff;
@@ -52,6 +52,13 @@ mod c {
         pub fn av_get_pix_fmt_name(fmt: c_int) -> *const c_char;
         pub fn av_pix_fmt_desc_get(fmt: c_int) -> *const AVPixFmtDescriptor;
         pub fn av_image_get_linesize(fmt: c_int, width: c_int, plane: c_int) -> c_int;
+        pub fn av_image_fill_plane_sizes(
+            sizes: *mut usize,
+            fmt: c_int,
+            height: c_int,
+            linesizes: *const isize,
+        ) -> c_int;
+        pub fn av_pix_fmt_count_planes(fmt: c_int) -> c_int;
         pub fn av_get_sample_fmt_name(fmt: c_int) -> *const c_char;
         pub fn av_color_range_name(range: c_int) -> *const c_char;
         pub fn av_color_space_name(space: c_int) -> *const c_char;
@@ -127,6 +134,126 @@ pub(crate) fn clear_codec_tag(st: &mut ff::format::stream::StreamMut<'_>) {
     // SAFETY: the stream belongs to a live output context that is
     // mutably borrowed with it, and `codec_tag` is a plain integer.
     unsafe { (*(*st.as_mut_ptr()).codecpar).codec_tag = 0 };
+}
+
+/// FFmpeg's h264_metadata or hevc_metadata bitstream filter, set to crop
+/// the pictures of an encoder's stream on the left: it rewrites H.264's
+/// frame cropping or HEVC's conformance window in every SPS, in the
+/// extradata and in packets alike. No encoder crops on the left itself;
+/// test media does, as some streams do.
+pub(crate) struct CropFilter(*mut sys::AVBSFContext);
+
+// SAFETY: the filter context is only used through `&mut self` (or read
+// through `&self`), and a bitstream filter keeps no state outside it.
+unsafe impl Send for CropFilter {}
+
+impl Drop for CropFilter {
+    fn drop(&mut self) {
+        // SAFETY: NULL or the context this owns.
+        unsafe { sys::av_bsf_free(&mut self.0) };
+    }
+}
+
+impl CropFilter {
+    /// A filter for packets of the H.264 or HEVC stream with parameters
+    /// `par`, in time base `tb`, that crops `left` more luma columns on
+    /// the left, an even number.
+    pub(crate) fn left(
+        par: &ff::codec::Parameters,
+        tb: ff::Rational,
+        left: u32,
+    ) -> Result<Self, ff::Error> {
+        let check = |ret: c_int| {
+            if ret < 0 {
+                Err(ff::Error::from(ret))
+            } else {
+                Ok(())
+            }
+        };
+        // SAFETY: `par` wraps live codec parameters; the id is read as an
+        // int.
+        let id = unsafe { enum_int(&raw const (*par.as_ptr()).codec_id) };
+        let name = match id {
+            i if i == sys::AVCodecID::AV_CODEC_ID_H264 as c_int => c"h264_metadata",
+            i if i == sys::AVCodecID::AV_CODEC_ID_HEVC as c_int => c"hevc_metadata",
+            _ => return Err(ff::Error::BsfNotFound),
+        };
+        // SAFETY: a static name; the filter found is static too.
+        let filter = unsafe { sys::av_bsf_get_by_name(name.as_ptr()) };
+        if filter.is_null() {
+            return Err(ff::Error::BsfNotFound);
+        }
+        let mut me = CropFilter(std::ptr::null_mut());
+        // SAFETY: allocates a context into `me.0`, which frees it on any
+        // error below. The context is set up as av_bsf_init requires
+        // before it is called: its input parameters copied from `par`, its
+        // input time base, and an option the filter has, with a value in
+        // its range.
+        unsafe {
+            check(sys::av_bsf_alloc(filter, &mut me.0))?;
+            check(sys::avcodec_parameters_copy((*me.0).par_in, par.as_ptr()))?;
+            (*me.0).time_base_in = tb.into();
+            let left = i64::from(left);
+            check(sys::av_opt_set_int(
+                (*me.0).priv_data,
+                c"crop_left".as_ptr(),
+                left,
+                0,
+            ))?;
+            check(sys::av_bsf_init(me.0))?;
+        }
+        Ok(me)
+    }
+
+    /// Give `stream` the filter's output parameters, whose SPS crops
+    /// `left` columns more, and the width of the picture they leave.
+    pub(crate) fn parameters_to(
+        &self,
+        stream: &mut ff::format::stream::StreamMut<'_>,
+        left: u32,
+    ) -> Result<(), ff::Error> {
+        // SAFETY: the stream belongs to a live output context that is
+        // mutably borrowed with it, and its codecpar is allocated; the
+        // filter's output parameters are set by av_bsf_init. The width is
+        // a plain int.
+        unsafe {
+            let par = (*stream.as_mut_ptr()).codecpar;
+            let ret = sys::avcodec_parameters_copy(par, (*self.0).par_out);
+            if ret < 0 {
+                return Err(ff::Error::from(ret));
+            }
+            let left = c_int::try_from(left).map_err(|_| ff::Error::InvalidData)?;
+            (*par).width = (*par).width.saturating_sub(left);
+        }
+        Ok(())
+    }
+
+    /// Send `packet` through the filter, which takes its data, or with
+    /// `None` the end of the stream.
+    pub(crate) fn send(&mut self, packet: Option<&mut ff::Packet>) -> Result<(), ff::Error> {
+        use ff::codec::packet::Mut;
+        let p = packet.map_or(std::ptr::null_mut(), |p| p.as_mut_ptr());
+        // SAFETY: a context set up in `left`, and NULL or a live packet,
+        // whose reference the filter takes, leaving it blank.
+        let ret = unsafe { sys::av_bsf_send_packet(self.0, p) };
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+        Ok(())
+    }
+
+    /// The next packet out of the filter into `packet`: EAGAIN when it
+    /// needs another, EOF once the end of the stream is out.
+    pub(crate) fn receive(&mut self, packet: &mut ff::Packet) -> Result<(), ff::Error> {
+        use ff::codec::packet::Mut;
+        // SAFETY: a context set up in `left`, and a live packet, which is
+        // given the filtered packet's reference.
+        let ret = unsafe { sys::av_bsf_receive_packet(self.0, packet.as_mut_ptr()) };
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+        Ok(())
+    }
 }
 
 /// Planar 32-bit float, the only sample format `Mp4Writer` sends.
@@ -440,7 +567,7 @@ pub fn hw_device_types() -> Vec<String> {
 }
 
 /// Why a hardware device could not be opened or attached to a decoder.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum HwError {
     #[error("this FFmpeg was built without {0} support")]
     NotBuiltIn(String),
@@ -455,6 +582,10 @@ pub enum HwError {
     /// open the one chosen or opened another (`decode::open_vulkan_device`).
     #[error("{0}")]
     Vulkan(String),
+    /// No device of the kind on the render node hardware decoding uses
+    /// (`backend::FfmpegBackend::device`): the node, and why.
+    #[error("{node}: {reason}")]
+    NoDevice { node: String, reason: String },
 }
 
 /// FFmpeg's device type for a name such as "vaapi".
@@ -1388,6 +1519,14 @@ impl std::fmt::Display for TooLarge {
 /// Open decoder `codec` on `ctx`, limited to [`MAX_PIXELS`] per picture.
 /// Every decoder Spherecut uses is opened here (clippy forbids
 /// ffmpeg-next's own decoder opens elsewhere).
+///
+/// Its frames are cropped exactly as the stream says (H.264's frame
+/// cropping, HEVC's conformance window), as FFmpeg's own ffmpeg tool has
+/// cropped them since 7.1: without `AV_CODEC_FLAG_UNALIGNED`, FFmpeg keeps
+/// up to 63 of the columns a stream crops on the left, so that planes stay
+/// aligned, by a rule that depends on the pixel format. A device frame is
+/// then downloaded and cropped the same way ([`download_into_pool`]), so
+/// both give the same picture, of the size the stream's parameters say.
 pub(crate) fn open_decoder(
     ctx: ff::codec::context::Context,
     codec: ff::Codec,
@@ -1403,8 +1542,13 @@ fn open_decoder_with(
 ) -> Result<ff::decoder::Opened, ff::Error> {
     // SAFETY: `ctx` owns a live AVCodecContext that is not open yet;
     // max_pixels is a plain int64 field that the decoder reads when it
-    // opens and when it sizes each picture.
-    unsafe { (*ctx.as_mut_ptr()).max_pixels = max_pixels };
+    // opens and when it sizes each picture, and flags a plain int that
+    // only decode.c's cropping reads this flag from (FFmpeg 6.1 to 8.1).
+    unsafe {
+        let c = ctx.as_mut_ptr();
+        (*c).max_pixels = max_pixels;
+        (*c).flags |= sys::AV_CODEC_FLAG_UNALIGNED as c_int;
+    }
     ctx.decoder().open_as(codec)
 }
 
@@ -2157,7 +2301,9 @@ pub(crate) fn skip_nonref(dec: &mut ff::codec::context::Context, skip: bool) {
     unsafe { (*dec.as_mut_ptr()).skip_frame = v };
 }
 
-/// Copy a hardware frame into system memory (NV12 / P010).
+/// Copy a hardware frame into system memory (NV12 / P010) in buffers of
+/// its own, as doctor's one-frame probes do; decoders download into a
+/// [`DownloadPool`].
 pub fn download_frame(src: &ff::frame::Video) -> Result<ff::frame::Video, ff::Error> {
     let mut dst = ff::frame::Video::empty();
     // SAFETY: both frames are valid; transfer_data allocates dst's buffers.
@@ -2171,6 +2317,289 @@ pub fn download_frame(src: &ff::frame::Video) -> Result<ff::frame::Video, ff::Er
         return Err(ff::Error::from(ret));
     }
     Ok(dst)
+}
+
+/// Rows of a downloaded plane start this many bytes apart, at least: wgpu
+/// copies a texture upload whose rows are as far apart as its staging
+/// buffer's in one go (`COPY_BYTES_PER_ROW_ALIGNMENT`).
+pub(crate) const DOWNLOAD_ROW_ALIGN: usize = 256;
+
+/// The buffers a decoder's frames are downloaded into (M1 plan section
+/// 3.5, D30): an `AVBufferPool` of buffers sized for the device frames'
+/// system-memory format (`hw_frames_ctx->sw_format`) and size, each
+/// holding every plane, with rows [`DOWNLOAD_ROW_ALIGN`] bytes apart. A
+/// buffer goes back to the pool when the last frame using it drops, so
+/// after the first frames a download allocates nothing, which
+/// [`allocated`](Self::allocated) counts. A frame of another format or
+/// size, as after `LayoutChanged`, rebuilds the pool; buffers of the old
+/// one still in use are freed as they come back.
+///
+/// The one buffer for all planes suits both hwcontexts: VA-API copies
+/// into any strides (`av_frame_copy` from a mapped surface), and Vulkan
+/// copies into them through a staging buffer, or maps them for the GPU to
+/// write directly when they qualify (one buffer holding every plane, at
+/// the host pointer alignment), from FFmpeg 6.1 to 8.1.
+pub(crate) struct DownloadPool {
+    pool: *mut sys::AVBufferPool,
+    /// The format, width and height the pool's buffers are laid out for.
+    key: Option<(c_int, c_int, c_int)>,
+    planes: usize,
+    linesizes: [c_int; 4],
+    offsets: [usize; 4],
+    /// Pools built so far.
+    builds: u64,
+    /// Buffers every pool built so far has allocated: each takes a
+    /// reference, which FFmpeg drops when it frees the pool, and counts
+    /// in [`counted_alloc`].
+    allocated: Arc<AtomicU64>,
+}
+
+// SAFETY: an AVBufferPool is locked internally, and only the pool's
+// owner takes buffers from it or rebuilds it (through `&mut self`).
+unsafe impl Send for DownloadPool {}
+
+impl std::fmt::Debug for DownloadPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DownloadPool")
+            .field("key", &self.key)
+            .field("linesizes", &self.linesizes)
+            .field("builds", &self.builds)
+            .field("allocated", &self.allocated())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for DownloadPool {
+    fn default() -> Self {
+        DownloadPool {
+            pool: std::ptr::null_mut(),
+            key: None,
+            planes: 0,
+            linesizes: [0; 4],
+            offsets: [0; 4],
+            builds: 0,
+            allocated: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+/// The allocator of a [`DownloadPool`]'s `AVBufferPool`: FFmpeg's default
+/// one, `av_buffer_alloc`, counting each buffer in `opaque`, the pool's
+/// counter. The pool calls it only when it has no buffer to hand back.
+unsafe extern "C" fn counted_alloc(opaque: *mut c_void, size: usize) -> *mut sys::AVBufferRef {
+    // SAFETY: `opaque` is the counter `DownloadPool::build` gave the pool,
+    // which holds a reference to it until `release_counter`.
+    unsafe { (*opaque.cast::<AtomicU64>()).fetch_add(1, Ordering::Relaxed) };
+    // SAFETY: accepts any size; NULL when out of memory, which the pool
+    // passes on.
+    unsafe { sys::av_buffer_alloc(size) }
+}
+
+/// Drop the reference to its counter that a [`DownloadPool`]'s
+/// `AVBufferPool` holds; FFmpeg calls it once, when it frees the pool,
+/// after the last buffer has come back.
+unsafe extern "C" fn release_counter(opaque: *mut c_void) {
+    // SAFETY: the reference `DownloadPool::build` made for this pool with
+    // `Arc::into_raw`, dropped only here.
+    unsafe { drop(Arc::from_raw(opaque.cast::<AtomicU64>().cast_const())) };
+}
+
+impl Drop for DownloadPool {
+    fn drop(&mut self) {
+        // SAFETY: NULL or the pool this owns; FFmpeg frees it once every
+        // buffer taken from it has come back.
+        unsafe { sys::av_buffer_pool_uninit(&mut self.pool) };
+    }
+}
+
+impl DownloadPool {
+    /// Lay the pool out for `fmt` frames of `width` × `height`.
+    fn build(&mut self, fmt: c_int, width: c_int, height: c_int) -> Result<(), ff::Error> {
+        // SAFETY: NULL or the pool this owns (see Drop).
+        unsafe { sys::av_buffer_pool_uninit(&mut self.pool) };
+        self.key = None;
+        // SAFETY: accepts any value; negative for one it doesn't know.
+        let planes = unsafe { c::av_pix_fmt_count_planes(fmt) };
+        let planes = match usize::try_from(planes) {
+            Ok(n @ 1..=4) => n,
+            _ => return Err(ff::Error::InvalidData),
+        };
+        let mut linesizes = [0 as c_int; 4];
+        let mut wide = [0isize; 4];
+        for i in 0..planes {
+            // SAFETY: accepts any format, width and plane; negative on
+            // error.
+            let row = unsafe { c::av_image_get_linesize(fmt, width, i as c_int) };
+            let row = usize::try_from(row).map_err(|_| ff::Error::InvalidData)?;
+            let aligned = row
+                .checked_next_multiple_of(DOWNLOAD_ROW_ALIGN)
+                .ok_or(ff::Error::InvalidData)?;
+            linesizes[i] = c_int::try_from(aligned).map_err(|_| ff::Error::InvalidData)?;
+            wide[i] = isize::try_from(aligned).map_err(|_| ff::Error::InvalidData)?;
+        }
+        let mut sizes = [0usize; 4];
+        // SAFETY: four sizes out, four linesizes in, as the function takes.
+        let ret =
+            unsafe { c::av_image_fill_plane_sizes(sizes.as_mut_ptr(), fmt, height, wide.as_ptr()) };
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+        let mut offsets = [0usize; 4];
+        let mut total = 0usize;
+        for i in 0..planes {
+            offsets[i] = total;
+            total = total
+                .checked_add(sizes[i])
+                .and_then(|t| t.checked_next_multiple_of(DOWNLOAD_ROW_ALIGN))
+                .ok_or(ff::Error::InvalidData)?;
+        }
+        // FFmpeg's padding past the last plane, which SIMD readers may
+        // touch.
+        let total = total
+            .checked_add(sys::AV_INPUT_BUFFER_PADDING_SIZE as usize)
+            .ok_or(ff::Error::InvalidData)?;
+        let counter = Arc::into_raw(Arc::clone(&self.allocated))
+            .cast_mut()
+            .cast::<c_void>();
+        // SAFETY: a size, and an allocator and a release function that
+        // never unwind. The pool takes the counter's new reference, which
+        // `release_counter` drops when FFmpeg frees it; NULL when out of
+        // memory.
+        let pool = unsafe {
+            sys::av_buffer_pool_init2(total, counter, Some(counted_alloc), Some(release_counter))
+        };
+        if pool.is_null() {
+            // SAFETY: the reference made above, which no pool took.
+            unsafe { release_counter(counter) };
+            return Err(ff::Error::Other {
+                errno: ff::util::error::ENOMEM,
+            });
+        }
+        *self = DownloadPool {
+            pool,
+            key: Some((fmt, width, height)),
+            planes,
+            linesizes,
+            offsets,
+            builds: self.builds + 1,
+            allocated: Arc::clone(&self.allocated),
+        };
+        Ok(())
+    }
+
+    /// Buffers the pool has allocated, for every format and size it was
+    /// laid out for: once it holds the frames kept alive, none more.
+    pub(crate) fn allocated(&self) -> u64 {
+        self.allocated.load(Ordering::Relaxed)
+    }
+
+    /// Pools built so far: 1 after the first download, one more for each
+    /// change of format or size.
+    #[cfg(test)]
+    pub(crate) fn builds(&self) -> u64 {
+        self.builds
+    }
+}
+
+/// Copy the hardware frame `src` into a buffer of `pool` (rebuilt first
+/// when the frame's system-memory format or size is new), with its
+/// properties and, as software decoding does ([`open_decoder`]), its left
+/// and top cropping applied exactly: FFmpeg crops a device frame only on
+/// the right and bottom.
+pub(crate) fn download_into_pool(
+    pool: &mut DownloadPool,
+    src: &ff::frame::Video,
+) -> Result<ff::frame::Video, ff::Error> {
+    // SAFETY: `src` wraps a live AVFrame. A device frame's hw_frames_ctx
+    // holds its AVHWFramesContext, whose sw_format is read as an int.
+    let key = unsafe {
+        let f = src.as_ptr();
+        let frames = (*f).hw_frames_ctx;
+        if frames.is_null() || (*frames).data.is_null() {
+            return Err(ff::Error::InvalidData);
+        }
+        let fc = (*frames).data.cast::<sys::AVHWFramesContext>();
+        (
+            enum_int(&raw const (*fc).sw_format),
+            (*f).width,
+            (*f).height,
+        )
+    };
+    if pool.key != Some(key) {
+        pool.build(key.0, key.1, key.2)?;
+    }
+    // SAFETY: the pool is live (just built or kept); NULL when out of
+    // memory.
+    let buf = unsafe { sys::av_buffer_pool_get(pool.pool) };
+    if buf.is_null() {
+        return Err(ff::Error::Other {
+            errno: ff::util::error::ENOMEM,
+        });
+    }
+    let mut dst = ff::frame::Video::empty();
+    // SAFETY: `dst` is a fresh frame, which takes over the reference to
+    // `buf` (freed with it, which returns the buffer to the pool). Its
+    // planes lie inside `buf` at the offsets and strides the pool was laid
+    // out with for this format and size. `format` is the frames context's
+    // own sw_format, so FFmpeg knows it. With `buf[0]` set,
+    // av_hwframe_transfer_data copies into the planes as given.
+    unsafe {
+        let d = dst.as_mut_ptr();
+        (*d).buf[0] = buf;
+        (*d).format = key.0;
+        (*d).width = key.1;
+        (*d).height = key.2;
+        for i in 0..pool.planes {
+            (*d).data[i] = (*buf).data.add(pool.offsets[i]);
+            (*d).linesize[i] = pool.linesizes[i];
+        }
+        let ret = sys::av_hwframe_transfer_data(d, src.as_ptr(), 0);
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+        let ret = sys::av_frame_copy_props(d, src.as_ptr());
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+        // Exactly, as software decoding crops (AV_CODEC_FLAG_UNALIGNED).
+        // Aligned cropping would keep columns by NV12's rule where
+        // software uses YUV420P's, and refuses P010 with AVERROR_BUG.
+        let ret = sys::av_frame_apply_cropping(d, sys::AV_FRAME_CROP_UNALIGNED as c_int);
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+    }
+    Ok(dst)
+}
+
+/// What a device frame becomes once downloaded by [`download_into_pool`]:
+/// its frames context's system-memory format, and its size less the left
+/// and top cropping still to apply. `None` when it has no frames context.
+pub(crate) fn as_downloaded(frame: &ff::frame::Video, fields: FrameFields) -> Option<FrameFields> {
+    // SAFETY: `frame` wraps a live AVFrame; as in `download_into_pool`.
+    unsafe {
+        let f = frame.as_ptr();
+        let frames = (*f).hw_frames_ctx;
+        if frames.is_null() || (*frames).data.is_null() {
+            return None;
+        }
+        let fc = (*frames).data.cast::<sys::AVHWFramesContext>();
+        let less = |n: u32, crop: usize| n.saturating_sub(u32::try_from(crop).unwrap_or(u32::MAX));
+        Some(FrameFields {
+            format: enum_int(&raw const (*fc).sw_format),
+            width: less(fields.width, (*f).crop_left),
+            height: less(fields.height, (*f).crop_top),
+            ..fields
+        })
+    }
+}
+
+/// Have an unopened hardware decoder keep `n` surfaces beyond what it
+/// needs itself, for frames the caller holds (`extra_hw_frames`).
+pub(crate) fn set_extra_hw_frames(ctx: &mut ff::codec::context::Context, n: u8) {
+    // SAFETY: `ctx` owns a live AVCodecContext that is not open yet; a
+    // plain int field read when the decoder sets up its frames context.
+    unsafe { (*ctx.as_mut_ptr()).extra_hw_frames = c_int::from(n) };
 }
 
 /// The `va_list` of FFmpeg's log callback, as bindgen spells the parameter:
@@ -2626,7 +3055,16 @@ mod tests {
 
     /// One mid-grey 512x128 frame, encoded as Annex B HEVC by libx265.
     fn hevc_frame() -> Vec<ff::Packet> {
-        use ff::format::Pixel;
+        hevc_picture(ff::format::Pixel::YUV420P, |_, _, _| 128)
+    }
+
+    /// One 512x128 frame of 4:2:0 `format` (YUV420P or YUV420P10LE),
+    /// whose sample at `(x, y)` of plane `i` is `value(i, x, y)`, encoded
+    /// as Annex B HEVC by libx265.
+    fn hevc_picture(
+        format: ff::format::Pixel,
+        value: impl Fn(usize, usize, usize) -> u16,
+    ) -> Vec<ff::Packet> {
         let codec = ff::encoder::find_by_name("libx265").unwrap();
         let mut enc = ff::codec::context::Context::new_with_codec(codec)
             .encoder()
@@ -2634,15 +3072,26 @@ mod tests {
             .unwrap();
         enc.set_width(512);
         enc.set_height(128);
-        enc.set_format(Pixel::YUV420P);
+        enc.set_format(format);
         enc.set_time_base((1, 30));
         let mut opts = ff::Dictionary::new();
         opts.set("preset", "ultrafast");
         opts.set("x265-params", "log-level=error");
         let mut enc = enc.open_as_with(codec, opts).unwrap();
-        let mut frame = ff::frame::Video::new(Pixel::YUV420P, 512, 128);
-        for i in 0..3 {
-            frame.data_mut(i).fill(128);
+        let mut frame = ff::frame::Video::new(format, 512, 128);
+        let wide = format == ff::format::Pixel::YUV420P10LE;
+        for (i, (w, h)) in [(512, 128), (256, 64), (256, 64)].into_iter().enumerate() {
+            let stride = frame.stride(i);
+            for (y, row) in frame.data_mut(i).chunks_mut(stride).take(h).enumerate() {
+                for x in 0..w {
+                    let v = value(i, x, y);
+                    if wide {
+                        row[2 * x..2 * x + 2].copy_from_slice(&v.to_le_bytes());
+                    } else {
+                        row[x] = v as u8;
+                    }
+                }
+            }
         }
         frame.set_pts(Some(0));
         enc.send_frame(&frame).unwrap();
@@ -2658,6 +3107,13 @@ mod tests {
     /// `packets` through FFmpeg's hevc_metadata filter, which sets the
     /// SPS conformance window to crop `left` luma samples on the left.
     fn crop_left(packets: Vec<ff::Packet>, left: i64) -> Vec<ff::Packet> {
+        crop(packets, left, 0)
+    }
+
+    /// `packets` through FFmpeg's hevc_metadata filter, which sets the
+    /// SPS conformance window to crop `left` luma samples on the left and
+    /// `top` at the top.
+    fn crop(packets: Vec<ff::Packet>, left: i64, top: i64) -> Vec<ff::Packet> {
         use ff::codec::packet::Mut;
         let mut out = Vec::new();
         // SAFETY: the filter context is allocated, set up before
@@ -2673,6 +3129,10 @@ mod tests {
             (*(*bsf).par_in).codec_id = sys::AVCodecID::AV_CODEC_ID_HEVC;
             let set = sys::av_opt_set_int((*bsf).priv_data, c"crop_left".as_ptr(), left, 0);
             assert!(set >= 0);
+            if top > 0 {
+                let set = sys::av_opt_set_int((*bsf).priv_data, c"crop_top".as_ptr(), top, 0);
+                assert!(set >= 0);
+            }
             assert!(sys::av_bsf_init(bsf) >= 0);
             let drain = |out: &mut Vec<ff::Packet>| loop {
                 let mut p = ff::Packet::empty();
@@ -3010,6 +3470,7 @@ mod tests {
             color: ColorTags::BT709_LIMITED,
             edit_start: 0,
             time_base: None,
+            crop_left: 0,
         };
         let mut w = Mp4Writer::create(&dir.0.join(name), &settings, None).unwrap();
         for i in 0..3 {
@@ -3522,5 +3983,309 @@ mod tests {
             ),
             Err(ScaleError::Refused { .. })
         ));
+    }
+
+    /// A device frame of FFmpeg's Vulkan device on lavapipe, `w`x`h` in
+    /// `sw_format`, holding hwprobe's ramp; the frames context with it.
+    fn lavapipe_frame(
+        sw_format: ff::format::Pixel,
+        w: u32,
+        h: u32,
+    ) -> (
+        ff::frame::Video,
+        ff::frame::Video,
+        crate::hwprobe::BufferRef,
+    ) {
+        let src = crate::hwprobe::ramp(sw_format, w, h);
+        let (surface, frames) = lavapipe_upload(&src);
+        (surface, src, frames)
+    }
+
+    /// A device frame of FFmpeg's Vulkan device on lavapipe holding `src`,
+    /// a system-memory frame in NV12 or P010; the frames context with it.
+    /// `src` must outlive the device frame's first download: with FFmpeg
+    /// 6.1 on lavapipe, one dropped before it downloads as garbage.
+    fn lavapipe_upload(src: &ff::frame::Video) -> (ff::frame::Video, crate::hwprobe::BufferRef) {
+        let dev = HwDevice::open("vulkan", Some("llvmpipe")).unwrap_or_else(|e| {
+            panic!(
+                "{e}; Tier 1 needs FFmpeg's Vulkan device on Mesa's lavapipe \
+                 (mesa-vulkan-drivers on Fedora and Ubuntu, vulkan-swrast on Arch)"
+            )
+        });
+        let frames =
+            crate::hwprobe::hw_frames(&dev, src.format(), src.width(), src.height()).unwrap();
+        let mut surface = ff::frame::Video::empty();
+        // SAFETY: `frames` is an initialised frames context, which gives
+        // `surface` one of its frames; `src` is a system-memory frame of
+        // its sw_format and size.
+        unsafe {
+            assert_eq!(
+                sys::av_hwframe_get_buffer(frames.0, surface.as_mut_ptr(), 0),
+                0
+            );
+            assert_eq!(
+                sys::av_hwframe_transfer_data(surface.as_mut_ptr(), src.as_ptr(), 0),
+                0
+            );
+        }
+        (surface, frames)
+    }
+
+    /// Plane `i`'s rows of `w` bytes, without padding.
+    fn rows(f: &ff::frame::Video, i: usize, w: usize, h: usize) -> Vec<u8> {
+        let (p, stride) = plane_and_stride(f, i).unwrap();
+        (0..h)
+            .flat_map(|y| p[y * stride..y * stride + w].to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn downloads_reuse_pooled_buffers_with_rows_256_bytes_apart() {
+        // 250 bytes of luma a row, rounded up to 256.
+        let (w, h) = (250, 66);
+        let (surface, src, _frames) = lavapipe_frame(ff::format::Pixel::NV12, w, h);
+        let mut pool = DownloadPool::default();
+        let counter = Arc::clone(&pool.allocated);
+        assert_eq!(pool.allocated(), 0);
+        let a = download_into_pool(&mut pool, &surface).unwrap();
+        assert_eq!(pool.allocated(), 1);
+        let nv12 = sys::AVPixelFormat::AV_PIX_FMT_NV12 as c_int;
+        assert_eq!((frame_format(&a), a.width(), a.height()), (nv12, w, h));
+        for i in 0..2 {
+            let (_, stride) = plane_and_stride(&a, i).unwrap();
+            assert_eq!(stride, 256, "plane {i}");
+            let ph = if i == 0 { h } else { h / 2 } as usize;
+            assert_eq!(rows(&a, i, w as usize, ph), rows(&src, i, w as usize, ph));
+        }
+        // Both planes in the one buffer, and FFmpeg's padding.
+        assert_eq!(
+            buffer_bytes(&a),
+            256 * 66 + 256 * 33 + sys::AV_INPUT_BUFFER_PADDING_SIZE as usize
+        );
+        // A frame dropped gives its buffer back to the pool.
+        let first = data_ptr(&a, 0);
+        drop(a);
+        let b = download_into_pool(&mut pool, &surface).unwrap();
+        assert_eq!(data_ptr(&b, 0), first);
+        assert_eq!(pool.allocated(), 1);
+        // One still held isn't handed out again.
+        let c = download_into_pool(&mut pool, &surface).unwrap();
+        assert_ne!(data_ptr(&c, 0), first);
+        assert_eq!(pool.builds(), 1);
+        assert_eq!(pool.allocated(), 2);
+
+        // Another size, as after LayoutChanged, rebuilds the pool; the
+        // frames of the old one stay good.
+        let (small, small_src, _small_frames) = lavapipe_frame(ff::format::Pixel::NV12, 64, 32);
+        let d = download_into_pool(&mut pool, &small).unwrap();
+        assert_eq!(pool.builds(), 2);
+        assert_eq!((d.width(), d.height()), (64, 32));
+        assert_eq!(plane_and_stride(&d, 0).unwrap().1, 256);
+        assert_eq!(rows(&d, 0, 64, 32), rows(&small_src, 0, 64, 32));
+        assert_eq!(
+            rows(&b, 0, w as usize, h as usize),
+            rows(&src, 0, w as usize, h as usize)
+        );
+        let again = data_ptr(&d, 0);
+        assert_eq!(pool.allocated(), 3);
+        drop((b, c, d));
+        let e = download_into_pool(&mut pool, &small).unwrap();
+        assert_eq!(data_ptr(&e, 0), again);
+        assert_eq!(pool.allocated(), 3);
+        // Each pool keeps the counter until FFmpeg frees it, once its last
+        // buffer is back: the old pool's went with b and c, this one's
+        // goes with e, after the pool itself.
+        assert_eq!(Arc::strong_count(&counter), 3);
+        drop(pool);
+        assert_eq!(Arc::strong_count(&counter), 2);
+        drop(e);
+        assert_eq!(Arc::strong_count(&counter), 1);
+    }
+
+    #[test]
+    fn a_download_crops_the_top_as_software_decoding_does() {
+        // FFmpeg crops a device frame on the right and bottom only, and
+        // leaves the rest for whoever downloads it.
+        let (mut surface, src, _frames) = lavapipe_frame(ff::format::Pixel::NV12, 64, 36);
+        // SAFETY: plain fields of a live frame.
+        unsafe { (*surface.as_mut_ptr()).crop_top = 4 };
+        let fields = frame_fields(&surface);
+        let predicted = as_downloaded(&surface, fields).unwrap();
+        let nv12 = sys::AVPixelFormat::AV_PIX_FMT_NV12 as c_int;
+        assert_eq!(
+            (predicted.format, predicted.width, predicted.height),
+            (nv12, 64, 32)
+        );
+        let mut pool = DownloadPool::default();
+        let f = download_into_pool(&mut pool, &surface).unwrap();
+        assert_eq!((f.width(), f.height()), (64, 32));
+        assert_eq!(rows(&f, 0, 64, 32), rows(&src, 0, 64, 36)[4 * 64..]);
+        assert_eq!(rows(&f, 1, 64, 16), rows(&src, 1, 64, 18)[2 * 64..]);
+        // A frame in system memory has no frames context to download from.
+        assert!(as_downloaded(&src, frame_fields(&src)).is_none());
+        assert!(download_into_pool(&mut pool, &src).is_err());
+    }
+
+    /// The only frame `packets` decode to, decoded in software as
+    /// Spherecut decodes.
+    fn decode_one(packets: &[ff::Packet]) -> ff::frame::Video {
+        let codec = ff::decoder::find_by_name("hevc").unwrap();
+        let mut dec = open_decoder(ff::codec::context::Context::new_with_codec(codec), codec)
+            .and_then(|d| d.video())
+            .unwrap();
+        for p in packets {
+            dec.send_packet(p).unwrap();
+        }
+        dec.send_eof().unwrap();
+        let mut frame = ff::frame::Video::empty();
+        dec.receive_frame(&mut frame).unwrap();
+        frame
+    }
+
+    /// A 4:2:0 frame's samples, plane by plane (Y, U, V), row by row,
+    /// without padding, read from YUV420P, YUV420P10LE, NV12 or P010 (whose
+    /// 10 bits are at the top of each u16): the same picture gives the
+    /// same samples in any of them.
+    fn samples(f: &ff::frame::Video) -> [Vec<u16>; 3] {
+        use sys::AVPixelFormat as P;
+        let (w, h) = (f.width() as usize, f.height() as usize);
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let format = frame_format(f);
+        let wide = [P::AV_PIX_FMT_YUV420P10LE, P::AV_PIX_FMT_P010LE]
+            .iter()
+            .any(|&p| p as c_int == format);
+        let at = |i: usize, x: usize, y: usize| -> u16 {
+            let (p, stride) = plane_and_stride(f, i).unwrap();
+            if wide {
+                let o = y * stride + 2 * x;
+                u16::from_le_bytes([p[o], p[o + 1]])
+            } else {
+                u16::from(p[y * stride + x])
+            }
+        };
+        let semi = [P::AV_PIX_FMT_NV12, P::AV_PIX_FMT_P010LE]
+            .iter()
+            .any(|&p| p as c_int == format);
+        let shift = if format == P::AV_PIX_FMT_P010LE as c_int {
+            6
+        } else {
+            0
+        };
+        let luma = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| at(0, x, y) >> shift)
+            .collect();
+        let chroma = |c: usize| {
+            (0..ch)
+                .flat_map(|y| (0..cw).map(move |x| (x, y)))
+                .map(|(x, y)| match semi {
+                    true => at(1, 2 * x + c, y) >> shift,
+                    false => at(1 + c, x, y),
+                })
+                .collect()
+        };
+        [luma, chroma(0), chroma(1)]
+    }
+
+    /// `f`, a YUV420P or YUV420P10LE frame, as a device would hold it:
+    /// NV12 or P010.
+    fn semi_planar(f: &ff::frame::Video) -> ff::frame::Video {
+        use ff::format::Pixel;
+        let wide = f.format() == Pixel::YUV420P10LE;
+        let format = if wide { Pixel::P010LE } else { Pixel::NV12 };
+        let (w, h) = (f.width() as usize, f.height() as usize);
+        let mut out = ff::frame::Video::new(format, f.width(), f.height());
+        let [y, u, v] = samples(f);
+        let put = |row: &mut [u8], i: usize, s: u16| {
+            if wide {
+                row[2 * i..2 * i + 2].copy_from_slice(&(s << 6).to_le_bytes());
+            } else {
+                row[i] = s as u8;
+            }
+        };
+        let stride = out.stride(0);
+        for (r, row) in out.data_mut(0).chunks_mut(stride).take(h).enumerate() {
+            for x in 0..w {
+                put(row, x, y[r * w + x]);
+            }
+        }
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let stride = out.stride(1);
+        for (r, row) in out.data_mut(1).chunks_mut(stride).take(ch).enumerate() {
+            for x in 0..cw {
+                put(row, 2 * x, u[r * cw + x]);
+                put(row, 2 * x + 1, v[r * cw + x]);
+            }
+        }
+        out
+    }
+
+    /// The samples of `full`, a `w`-wide picture's, from column `left` and
+    /// row `top` on.
+    fn window(full: &[Vec<u16>; 3], w: usize, left: usize, top: usize) -> [Vec<u16>; 3] {
+        let cut = |p: &[u16], w: usize, left: usize, top: usize| {
+            p.chunks(w)
+                .skip(top)
+                .flat_map(|row| row[left..].to_vec())
+                .collect::<Vec<u16>>()
+        };
+        [
+            cut(&full[0], w, left, top),
+            cut(&full[1], w / 2, left / 2, top / 2),
+            cut(&full[2], w / 2, left / 2, top / 2),
+        ]
+    }
+
+    #[test]
+    fn left_and_top_crops_come_out_exactly_in_software_and_downloads() {
+        use ff::format::Pixel;
+        // FFmpeg's aligned cropping would keep up to 63 columns of what
+        // the stream crops on the left, by rules that differ between
+        // YUV420P and NV12, and fail outright on P010; and it leaves device
+        // frames cropped on the right and bottom only.
+        let value = |i: usize, x: usize, y: usize| match i {
+            0 => (x * 7 + y * 3) % 200 + 20,
+            1 => (x * 5 + y) % 160 + 40,
+            _ => (x + y * 9) % 120 + 60,
+        } as u16;
+        for (format, scale) in [(Pixel::YUV420P, 1), (Pixel::YUV420P10LE, 4)] {
+            let packets = hevc_picture(format, |i, x, y| value(i, x, y) * scale);
+            let full = decode_one(&packets);
+            assert_eq!((full.width(), full.height()), (512, 128));
+            let all = samples(&full);
+            let semi = semi_planar(&full);
+            let (mut surface, _frames) = lavapipe_upload(&semi);
+            let mut pool = DownloadPool::default();
+            for (left, top) in [
+                (0u32, 0u32),
+                (8, 0),
+                (16, 0),
+                (32, 0),
+                (48, 0),
+                (64, 0),
+                (48, 2),
+                (0, 6),
+            ] {
+                let what = format!("{format:?} cropped {left} on the left and {top} at the top");
+                let want = (512 - left, 128 - top);
+                let soft = decode_one(&crop(packets.clone(), left.into(), top.into()));
+                assert_eq!((soft.width(), soft.height()), want, "{what}, in software");
+                let window = window(&all, 512, left as usize, top as usize);
+                assert!(samples(&soft) == window, "{what}, in software");
+                // As the decoder hands over a device frame: cropped on
+                // the right and bottom, the rest left for the download.
+                // SAFETY: plain fields of a live frame.
+                unsafe {
+                    (*surface.as_mut_ptr()).crop_left = left as usize;
+                    (*surface.as_mut_ptr()).crop_top = top as usize;
+                }
+                let predicted = as_downloaded(&surface, frame_fields(&surface)).unwrap();
+                assert_eq!((predicted.width, predicted.height), want, "{what}");
+                let down = download_into_pool(&mut pool, &surface)
+                    .unwrap_or_else(|e| panic!("{what}, downloading: {e}"));
+                assert_eq!((down.width(), down.height()), want, "{what}, downloaded");
+                assert!(samples(&down) == window, "{what}, downloaded");
+            }
+        }
     }
 }

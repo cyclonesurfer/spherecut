@@ -100,6 +100,10 @@ slower at 5.7K. A hardware decoder keeps that default.
 *Extended by D14:* the error now says why the device refused the stream
 (`MediaError::HwUnsupported`), and doctor's probes use the same check.
 
+*Updated 2026-10-24 by D30:* the backend's `Fallback::Software` is that
+fallback, with a warning and a `FellBack` event before the next frame;
+any other failure on the device is `MediaError::HwFailed`, never damage.
+
 ## D4. Our own MP4 box parser and injector for spherical metadata
 
 *2026-10-22, M0.*
@@ -420,6 +424,11 @@ FFmpeg has no Vulkan device or no encoder to make its clip, or on
 tests no longer need a render node, run on the GPU behind it if there is
 one, skip when FFmpeg's only Vulkan devices run on the CPU, and give the
 device and FFmpeg's own words when they skip.
+
+*Updated 2026-10-24 by D30:* through the backend, a refusal at open
+falls back as `Refused(refusal)`, and one after frames came out as
+`Failed`; any other error on the device is `HwFailed`, sticky in the same
+way.
 
 Limit: a new SPS whose format has no hardware decoder, arriving after
 the format was taken and before the first device frame, reads as
@@ -1567,9 +1576,8 @@ left to it.
 
 ## D30. Pixel formats and colour defaults
 
-*2026-10-24, M1 slice 2a. The M1 plan's D28, section 3.4 and 3.5; its
-hardware fallback, render node and pooled downloads join this entry in
-slice 2b.*
+*2026-10-24, M1 slice 2a. The M1 plan's D28, sections 3.4 and 3.5;
+extended in slice 2b with hardware decoding, below.*
 
 What:
 
@@ -1638,6 +1646,171 @@ they are.
 Revisit if: a camera's format falls outside the rule and swscale's
 conversion costs too much (M3's raw formats), or the renderer wants a
 format kept that this converts.
+
+*Extended 2026-10-24 in slice 2b: hardware decoding through the
+backend, the render node, fallback and the pooled download (section
+3.5). Updates D3 and D14.*
+
+What:
+
+- `DecodeMode::Hardware { kind, device, fallback }` decodes on VA-API or
+  Vulkan Video, on `device` or, when it is `None`, on the backend's own.
+  `FfmpegBackend` opens one device per kind, the first time a decoder
+  asks for it, and keeps it in a `OnceLock` with the `HwError` that kept
+  it from opening, so every decoder of the backend shares the device and
+  the answer. Both kinds open on the render node below, the Vulkan one
+  through `open_vulkan_device` (D38), and a Vulkan device on the CPU
+  counts as none. Where no Vulkan device is listed as the one behind the
+  node, even a node `--render-node` names, Vulkan takes the first GPU
+  listed, as D38 does, while VA-API fails with `NoDevice`; the log line
+  that says a device opened names the node for VA-API and the GPU for
+  Vulkan, with why it was taken. Nothing here prefers one kind: slice 5
+  picks it from doctor's checks (m1-plan amendment 9).
+- The render node (`media::hw`, over a sysfs root that tests fake) is
+  that of the PCI device at the bus id wgpu gives its adapter
+  (`<sys>/bus/pci/devices/<id>/drm/renderD*`); else the first
+  `renderD*` in `<sys>/class/drm` whose device has the adapter's vendor
+  and device ids, both, since an AMD iGPU and an AMD card differ only by
+  device id; else `/dev/dri/renderD128`. `--render-node` and
+  `FfmpegBackend::on_render_node` override it. wgpu arrives in slice 3,
+  so until then no adapter is known and the lookup gives the default.
+  `RenderNode` says which node and why ("/dev/dri/renderD129, the GPU at
+  PCI 0000:03:00.0").
+- Hardware decoders are single-threaded and keep `extra_hw_frames`
+  surfaces (`VideoRequest::extra_hw_frames`, 2) beyond their own. Frames
+  stay on the device until they are handed out: a seek holds its best
+  candidate and the frame after it as device frames and downloads only
+  the frame it returns, so what it decodes on the way is never copied.
+- `ffi::download_into_pool` copies a device frame into a buffer of the
+  decoder's `DownloadPool`: an `AVBufferPool` of one buffer per frame,
+  holding every plane of the frames context's `sw_format` at the frame's
+  size with rows 256 bytes apart (`av_image_get_linesize` rounded up),
+  each plane starting on a 256-byte boundary, plus FFmpeg's input
+  padding. The buffer goes back to the pool when the last `VideoFrame`
+  holding it drops. A new format or size (the `LayoutChanged` case)
+  rebuilds the pool, and frames from the old one stay valid. FFmpeg
+  crops device frames only on the right and bottom (`decode.c`), so the
+  left and top crop is applied after the copy. Both paths crop exactly
+  where the stream says (H.264's frame cropping, HEVC's conformance
+  window), as `ffmpeg` itself has since 7.1: `open_decoder` sets
+  `AV_CODEC_FLAG_UNALIGNED` on every decoder, and the download crops
+  with `AV_FRAME_CROP_UNALIGNED`. FFmpeg's default, aligned cropping
+  keeps up to 63 of the columns cropped on the left by a rule that
+  depends on the pixel format: YUV420P and NV12 keep different ones, and
+  P010 fails (`AVERROR_BUG`), so a stream cropped on the left would not
+  come out the same on both paths. VA-API and Vulkan both take a
+  destination with any strides (Vulkan may import its memory), so one
+  path serves both, and `VideoDecoder::next_frame` uses it too; doctor's
+  one-frame probes keep `ffi::download_frame`.
+- A device that turns a stream down is `HwUnsupported`. Any other error
+  decoding or downloading a frame on the device is `HwFailed`
+  (`hw_failed`), sticky like a refusal and never the file's damage: a
+  hardware decoder's error can't be told apart from damage it met, and
+  software, after a fallback, says which it was.
+- `Fallback::Software` (`fallback.rs`):
+  - **At open**, a device that won't open (`DeviceUnavailable`, in
+    `MediaError::Hardware`'s words), a refusal (`Refused(HwRefusal)`) or
+    a failure on the first frame (`Failed { after_pts: None }`) opens the
+    stream in software, which queues `DecoderEvent::FellBack { from,
+    reason }` first.
+  - **Mid-stream**, `HwFailed` or `HwUnsupported` from `seek` or
+    `next_frame` reopens the stream in software, once, and the software
+    decoder takes over the hardware one's place: the last frame returned
+    and where it is in its run, the run and `seq` counters, the stream
+    facts learnt so far, and catch-up's target. `next_frame` then
+    repositions as after a stopped seek and returns the frame after the
+    last one returned; a seek the device failed in is done again. So the
+    frames handed out are software's, with no gap and no repeat, and
+    runs link only frames that follow on. The reason is `Failed {
+    after_pts, error }`, after the last frame returned. Events come in
+    order: the hardware decoder's, `FellBack`, software's, and
+    `LayoutChanged` when software's layout or size differs (NV12 to
+    `yuv420p`).
+  - Every frame after carries `DecodePath::FellBack { from, reason }`,
+    `stats()` counts both decoders' frames, and a `tracing::warn!` gives
+    D14's reason: "decoding in software instead of with VA-API:
+    <reason>".
+  - **`Fallback::Fail`** returns the error: `Hardware`, `HwUnsupported`
+    or `HwFailed`. Every Tier 2 test uses it.
+  - The overlay's decoder line and badge, the GUI notice and `frame`'s
+    stderr note and JSON warning come with the overlay, the GUI and
+    `frame`.
+- Media's `fault-injection` feature, which only synth's dev-dependency
+  turns on (so only test builds have it), adds `VideoRequest::fault`. Its
+  `FaultPlan` fails frame k, by the order the decoder makes frames in, as
+  decoding or downloading it on the device fails (`HwFailed`, "fault
+  injected: ..."), on a real device or on a software stand-in labelled as
+  one, so that Tier 1 runs every fallback path (`crates/synth/tests/
+  fallback.rs`, with its `FaultBackend`). The Tier 2 tests check their
+  own checks the same way: they pass on a stand-in and fail on a fault.
+
+Where this differs from the plan:
+
+- `DecodeMode::Hardware`'s `device` is an `Option`, `None` for the
+  backend's own device.
+- The backend's `OnceLock` holds `Result<Arc<HwDevice>, HwError>`, not a
+  `String`; `HwError` is `Clone` and has `NoDevice { node, reason }`.
+- `FallbackReason::Failed` has `after_pts: Option<i64>`, the last frame
+  returned, where the plan had `at`: software goes on after it, and it is
+  `None` when no frame was returned.
+- Mid-stream, software takes over the hardware decoder's place rather
+  than running `seek_exact` to the pts after the last frame returned. It
+  is the same frame, but found without guessing the next pts in a stream
+  whose timestamps tie or go backwards, and with the run and catch-up
+  state the seek oracle checks carried over.
+- A refusal mid-stream (FFmpeg withdrawing the device's format after
+  frames came out) is reported as `Failed`, with the refusal's words.
+- On lavapipe with FFmpeg 6.1, H.264 and HEVC are refused as `Withdrawn`,
+  not `NotOffered`: FFmpeg has Vulkan hwaccels for them, which fail to
+  start because lavapipe has no video queue. MPEG-4 Part 2, with no
+  Vulkan hwaccel, is `NotOffered`. The Tier 1 test expects whatever
+  `VideoDecoder` reports, and checks the MPEG-4 clip is `NotOffered`.
+- `FaultBackend` is in the test file, not `fake.rs`: it needs the
+  feature, which only synth's dev-dependency turns on.
+- The Tier 2 tests' noisy 5.7K clips are 2 s (60 frames), made by the
+  tests and cached in Cargo's temp dir, at about 200 Mbps (x265
+  `veryfast`, CRF 18) rather than 100. hw-test's 20 s clips are slice 5's
+  (section 12.4).
+- The pooled download serves Vulkan too, which the plan left open.
+- `DecodeStats` has `download_buffers`, the buffers the download pool
+  has allocated, which the pool tests check.
+- Software frames of a stream cropped on the left are cropped exactly,
+  where slice 2a kept FFmpeg's aligned cropping: their planes may start
+  off a 32-byte boundary (swscale, converting one, warns once that this
+  is slower), and their size is the one the stream's parameters give,
+  which probe reports too.
+
+Why: one device per kind keeps the GPU's decode sessions and memory to
+what playback needs, and keeping the error means a missing device costs
+one try per backend, not one per clip. Downloading only the frame a seek
+returns saves a copy per frame decoded on the way, the copy that makes
+VA-API slow on odin (amendment 9). A pooled buffer saves the page faults
+of a fresh 25 or 50 MB buffer per 5.7K frame, and 256-byte rows let
+`write_texture` copy it in one go. Taking over the hardware decoder's
+place makes the continuation exact in every kind of stream the seek
+oracle covers, and the fault injection checks it at every frame.
+
+Limits:
+
+- The `*_download_pool_reuses_buffers` tests check the pool by what it
+  allocates (`DecodeStats::download_buffers`, counted by the pool's own
+  allocator): some buffers in the 30 frames of warm-up, none after.
+  Their limit of 50 minor faults per frame on the decoding thread (plan
+  section 12.2) is a budget for everything that thread does, not a check
+  of the pool: at 3840x1920, glibc hands a freed block of up to 32 MiB
+  back from its heap, so even a fresh buffer per frame faults in nothing
+  (measured with glibc 2.39), and a driver that maps each surface to read
+  it may fault more however the pool does. Over the limit with no buffer
+  allocated after the warm-up, the faults are the driver's.
+- An `HwFailed` on a damaged packet hides the damage until software
+  decodes the packet again; a `Damaged` event can then be reported twice,
+  when a seek is done again.
+- The fallback reopens the file and decodes from a keyframe, so a
+  mid-stream fallback costs one seek.
+
+Revisit if: slice 5 needs a device per stream rather than per backend,
+slice 5b's zero-copy replaces the download, or the fault count on a real
+GPU is the driver's rather than the pool's.
 
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 

@@ -7,26 +7,30 @@
 //! [`FfmpegBackend`] is the real one; synth's `SyntheticBackend` and
 //! `GatedBackend` stand in for it in tests.
 //!
-//! This slice (2a) decodes in software. [`DecodeMode::Hardware`],
-//! [`DecodePath::FellBack`] and [`DecoderEvent::FellBack`] are declared
-//! for slice 2b, which adds hardware decoding and fallback without
-//! changing these types, and slice 5b adds a GPU-resident
-//! [`FrameStorage`] variant. Audio decoding arrives in slice 6; until
-//! then [`MediaBackend::open_audio`] says so with
+//! Frames are decoded in software, or with [`DecodeMode::Hardware`] on a
+//! VA-API or Vulkan Video device: the backend's own for its kind, opened
+//! once on the render node of the GPU that renders (`media::hw`), or one
+//! the request brings. A device that can't decode the stream, or fails on
+//! it, either fails the decode ([`Fallback::Fail`]) or hands it to
+//! software, which says so with [`DecoderEvent::FellBack`] and goes on
+//! from the frame after the last one returned (DECISIONS D30). Slice 5b
+//! adds a GPU-resident [`FrameStorage`] variant. Audio decoding arrives
+//! in slice 6; until then [`MediaBackend::open_audio`] says so with
 //! [`MediaError::NotYet`].
 
 use std::num::NonZeroU32;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 
 use spherecut_core::video::{ColorInfo, PixelLayout, PlaneData, VideoPlanes};
 use spherecut_core::{FrameRate, Rational, StopToken, Time};
 use thiserror::Error;
 
+use crate::hw::RenderNode;
 use crate::probe::{ProbeError, ProbeReport};
 use crate::spherical::{Projection, StereoMode};
-use crate::{HwDevice, HwRefusal, MediaError, ff, ffi};
+use crate::{HwDevice, HwError, HwRefusal, MediaError, ff, ffi};
 
 /// Opens media. Every method blocks.
 pub trait MediaBackend: Send + Sync + std::fmt::Debug {
@@ -60,11 +64,14 @@ pub struct VideoRequest {
     /// Software decoding threads; `None` lets FFmpeg pick (D3).
     pub threads: Option<NonZeroU32>,
     /// Surfaces a hardware decoder keeps beyond its own needs: one for the
-    /// best frame held during a seek, one spare (slice 2b).
+    /// best frame held during a seek, one spare (`extra_hw_frames`).
     pub extra_hw_frames: u8,
     /// Set at shutdown only: FFmpeg stops reading inside a read, and the
     /// stream ends for good (D13). Seeks stop through [`StopToken`]s.
     pub interrupt: Arc<AtomicBool>,
+    /// Tests only: fail a frame as the device would.
+    #[cfg(feature = "fault-injection")]
+    pub fault: Option<FaultPlan>,
 }
 
 impl Default for VideoRequest {
@@ -75,18 +82,48 @@ impl Default for VideoRequest {
             threads: None,
             extra_hw_frames: 2,
             interrupt: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "fault-injection")]
+            fault: None,
         }
     }
+}
+
+/// Which frame a test fails "as hardware", and how (the `fault-injection`
+/// feature, which only synth's tests turn on).
+#[cfg(feature = "fault-injection")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultPlan {
+    /// The frame that fails, by the order the decoder makes frames in
+    /// since it opened: 0 is the first. Frames dropped as corrupt or as
+    /// leading pictures count.
+    pub frame: u64,
+    pub fault: Fault,
+    /// Decode in software in the device's place, labelled as on it: for
+    /// machines where no device decodes (Tier 1). The fallback then reopens
+    /// in software for real.
+    pub stand_in: bool,
+}
+
+/// How a [`FaultPlan`]'s frame fails.
+#[cfg(feature = "fault-injection")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// As it comes out of the decoder, as when decoding fails.
+    Decode,
+    /// As it is copied to system memory, when it is about to be handed
+    /// out; a frame never handed out never fails.
+    Download,
 }
 
 #[derive(Debug, Clone)]
 pub enum DecodeMode {
     Software,
-    /// On `device`, a device of kind `kind`; what happens when it can't
-    /// decode the stream is `fallback`'s choice. Slice 2b.
+    /// On a device of kind `kind`: `device`, or the backend's own when
+    /// `None`. What happens when the device can't be opened, can't decode
+    /// the stream or fails on it is `fallback`'s choice (D30).
     Hardware {
         kind: HwKind,
-        device: Arc<HwDevice>,
+        device: Option<Arc<HwDevice>>,
         fallback: Fallback,
     },
 }
@@ -95,6 +132,26 @@ pub enum DecodeMode {
 pub enum HwKind {
     VaApi,
     Vulkan,
+}
+
+impl HwKind {
+    /// FFmpeg's name for the device type.
+    pub fn ffmpeg_name(self) -> &'static str {
+        match self {
+            HwKind::VaApi => "vaapi",
+            HwKind::Vulkan => "vulkan",
+        }
+    }
+}
+
+impl std::fmt::Display for HwKind {
+    /// "VA-API" or "Vulkan", as errors and notices say it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            HwKind::VaApi => "VA-API",
+            HwKind::Vulkan => "Vulkan",
+        })
+    }
 }
 
 /// What a hardware decode does when the device can't decode the stream.
@@ -115,22 +172,46 @@ pub enum DecodePath {
     Hardware {
         kind: HwKind,
     },
-    /// Asked for hardware, decoding in software: slice 2b.
+    /// Asked for hardware, decoding in software ([`Fallback::Software`]).
     FellBack {
         from: HwKind,
         reason: FallbackReason,
     },
 }
 
-/// Why a hardware decode went on in software (slice 2b).
+/// Why a hardware decode went on in software.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FallbackReason {
-    /// The device turned the stream down.
+    /// The device turned the stream down ([`MediaError::HwUnsupported`]).
     Refused(HwRefusal),
-    /// The device could not be opened.
+    /// The device could not be opened: [`MediaError::Hardware`]'s words.
     DeviceUnavailable(String),
-    /// Decoding or downloading frame `at_pts` failed on the device.
-    Failed { at_pts: i64, error: String },
+    /// Decoding or downloading a frame failed on the device
+    /// ([`MediaError::HwFailed`]'s words), after the frame at `after_pts`
+    /// was returned: software goes on from the frame after it. `None`
+    /// when no frame had been returned.
+    Failed {
+        after_pts: Option<i64>,
+        error: String,
+    },
+}
+
+impl std::fmt::Display for FallbackReason {
+    /// D14's reason, for the warning and the notices.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FallbackReason::Refused(r) => write!(f, "{r}"),
+            FallbackReason::DeviceUnavailable(e) => f.write_str(e),
+            FallbackReason::Failed {
+                after_pts: Some(pts),
+                error,
+            } => write!(f, "{error} (after the frame at pts {pts})"),
+            FallbackReason::Failed {
+                after_pts: None,
+                error,
+            } => f.write_str(error),
+        }
+    }
 }
 
 /// One video stream, decoding. Times are clip times: 0 is the first
@@ -314,7 +395,8 @@ impl Default for SourceMapping {
 /// Something a decoder reports alongside its frames.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecoderEvent {
-    /// Decoding went on in software (slice 2b).
+    /// Decoding went on in software, as [`DecodePath::FellBack`] says:
+    /// once per decoder, before the events of the software decode.
     FellBack {
         from: HwKind,
         reason: FallbackReason,
@@ -351,6 +433,10 @@ pub struct DecodeStats {
     /// in software) and to convert (0 for a native layout).
     pub last_download_ms: f64,
     pub last_convert_ms: f64,
+    /// Buffers allocated so far to download frames into, for every
+    /// format and size (0 in software). Once the decoder's pool holds the
+    /// frames kept alive, a download allocates none (D30).
+    pub download_buffers: u64,
 }
 
 /// A decoded picture: owned, immutable, `Send` and `Sync`, and shared as
@@ -629,10 +715,106 @@ pub enum NextAudio {
     Stopped,
 }
 
-/// The FFmpeg backend: every open is confined to the file (D24), and
-/// frames are decoded in software (slice 2a).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct FfmpegBackend;
+/// The FFmpeg backend: every open is confined to the file (D24). Frames
+/// are decoded in software, or on a hardware device. The backend opens
+/// one device of each kind, on the render node of the GPU that renders
+/// (`media::hw`), the first time a decoder asks for it, and every decoder
+/// after shares it, as does the answer when it can't be opened (D30).
+#[derive(Debug, Default)]
+pub struct FfmpegBackend {
+    /// The render node to open devices on instead of the lookup's.
+    render_node: Option<PathBuf>,
+    vaapi: OnceLock<Result<Arc<HwDevice>, HwError>>,
+    vulkan: OnceLock<Result<Arc<HwDevice>, HwError>>,
+}
+
+impl FfmpegBackend {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A backend whose devices open on `node` (`--render-node`).
+    pub fn on_render_node(node: impl Into<PathBuf>) -> Self {
+        FfmpegBackend {
+            render_node: Some(node.into()),
+            ..Self::default()
+        }
+    }
+
+    /// The render node its devices open on, and why that one. No adapter
+    /// is known before the GUI's (M1 slice 3), so without `--render-node`
+    /// it is the default.
+    pub fn render_node(&self) -> RenderNode {
+        crate::hw::render_node(None, self.render_node.as_deref())
+    }
+
+    /// The backend's device of kind `kind`, opened on its render node the
+    /// first time; its error, the same every time, when it can't be. The
+    /// Vulkan device is the one behind the node (D38), and Vulkan devices
+    /// that run on the CPU don't count: they have no video decode.
+    pub fn device(&self, kind: HwKind) -> Result<Arc<HwDevice>, MediaError> {
+        let cell = match kind {
+            HwKind::VaApi => &self.vaapi,
+            HwKind::Vulkan => &self.vulkan,
+        };
+        cell.get_or_init(|| {
+            let node = self.render_node();
+            match open_device(kind, &node) {
+                Ok((device, on)) => {
+                    tracing::info!("hardware decoding with {kind} on {on}");
+                    Ok(device)
+                }
+                Err(e) => {
+                    tracing::info!("no {kind} device for hardware decoding: {e}");
+                    Err(e)
+                }
+            }
+        })
+        .clone()
+        .map_err(|reason| MediaError::Hardware {
+            kind: kind.to_string(),
+            reason,
+        })
+    }
+}
+
+/// A device of kind `kind` on `node`, for [`FfmpegBackend::device`], and
+/// what it runs on: the node for VA-API, and for Vulkan the GPU, which is
+/// the first one listed when none is listed as the one behind the node
+/// (D38), even a node `--render-node` names.
+fn open_device(kind: HwKind, node: &RenderNode) -> Result<(Arc<HwDevice>, String), HwError> {
+    let no_device = |reason: String| HwError::NoDevice {
+        node: node.to_string(),
+        reason,
+    };
+    match kind {
+        HwKind::VaApi => {
+            let path = node
+                .path
+                .to_str()
+                .ok_or_else(|| no_device("the path is not UTF-8".into()))?;
+            HwDevice::open(kind.ffmpeg_name(), Some(path))
+                .map(|d| (Arc::new(d), node.to_string()))
+                .map_err(|e| no_device(e.to_string()))
+        }
+        HwKind::Vulkan => {
+            let choice = crate::decode::open_vulkan_device(Some(&node.path)).map_err(|e| {
+                no_device(match e {
+                    MediaError::Hardware { reason, .. } => reason.to_string(),
+                    e => e.to_string(),
+                })
+            })?;
+            if choice.used.is_cpu() {
+                return Err(no_device(format!(
+                    "every Vulkan device FFmpeg lists runs on the CPU, with no video \
+                     decode: {choice}"
+                )));
+            }
+            let on = choice.to_string();
+            Ok((choice.device, on))
+        }
+    }
+}
 
 impl MediaBackend for FfmpegBackend {
     fn name(&self) -> &'static str {
@@ -650,9 +832,17 @@ impl MediaBackend for FfmpegBackend {
     ) -> Result<Box<dyn VideoDecode>, MediaError> {
         match &req.decode {
             DecodeMode::Software => Ok(Box::new(crate::seek::FfmpegVideo::open(path, req)?)),
-            DecodeMode::Hardware { .. } => Err(MediaError::NotYet {
-                what: "hardware decoding through MediaBackend (M1 slice 2b)",
-            }),
+            DecodeMode::Hardware {
+                kind,
+                device,
+                fallback,
+            } => {
+                let device = || match device {
+                    Some(d) => Ok(d.clone()),
+                    None => self.device(*kind),
+                };
+                crate::fallback::open(path, req, *kind, device, *fallback)
+            }
         }
     }
 

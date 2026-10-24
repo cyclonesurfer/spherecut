@@ -33,6 +33,7 @@ fn clip(path: &Path, width: u32) {
         color: ColorTags::BT709_LIMITED,
         edit_start: 0,
         time_base: None,
+        crop_left: 0,
     };
     let w = width as usize;
     let mut out = Mp4Writer::create(path, &settings, None).unwrap();

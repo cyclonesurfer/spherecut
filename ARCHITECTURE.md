@@ -29,9 +29,9 @@ tests and `xtask`.
 |---|---|---|
 | `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), what a decoded frame is (`video`: pixel layouts, planes, colour) and stop tokens by generation (`cancel`); later the project model, timeline, keyframes, undo | M0: name and time; M1: `video`, `cancel` |
 | `spherecut-sphere` | CPU reference projection math in f64: equirect, cube/EAC, fisheye lens models, view projections and morphs, rotation helpers | M0 |
-| `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software, the colour default rules, a small MP4 writer, `doctor`'s capability checks | M0; `MediaBackend` from M1 slice 2a (hardware in 2b, audio in 6) |
-| `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes) and broken files, `SyntheticBackend` and `GatedBackend` | M0; M1 slice 2a |
-| `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, the `TIER2-SKIP:` marker) and benchmark recording (`bench`) | M0 |
+| `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software and on VA-API or Vulkan Video with fallback to software, the render node lookup, the colour default rules, a small MP4 writer, `doctor`'s capability checks | M0; `MediaBackend` from M1 slice 2a, hardware from 2b (audio in 6) |
+| `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes, seeded noise for camera bitrates) and broken files, `SyntheticBackend` and `GatedBackend` | M0; M1 slices 2a and 2b |
+| `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, the `TIER2-SKIP:` marker) and benchmark recording (`bench`, with latency percentiles) | M0 |
 | `spherecut-camera` | Per-camera raw formats: file pairing, vendor metadata, calibration | M3 |
 | `spherecut-stitch` | Lens calibration models, seam blending, exposure matching | M3 |
 | `spherecut-motion` | IMU ingest, time sync, orientation fusion, stabilization | M4 |
@@ -62,7 +62,9 @@ planned ones above don't exist yet.
   layout a pixel format is uploaded in (`pixel_layout`, from
   `AVPixFmtDescriptor`) and the format swscale converts the others to
   (`conversion_target`, `Scaler`), copying hardware frames to system
-  memory, `av_seek_frame` and the demuxer index (its end, its first,
+  memory (`download_into_pool`, into a `DownloadPool`, and doctor's
+  `download_frame`) and the surfaces a hardware decoder keeps spare
+  (`set_extra_hw_frames`), `av_seek_frame` and the demuxer index (its end, its first,
   last and shown entries, its timestamps, the keyframe before a time),
   skipping non-reference frames, the bytes a frame's buffers take
   (`buffer_bytes`), setting other streams to `AVDISCARD_ALL`, library versions, and the
@@ -108,16 +110,31 @@ planned ones above don't exist yet.
     demuxer read from the container, so that callers can name it.
   * `open_decoder` opens every decoder (`probe`, `VideoDecoder`,
     `open_video_decoder`, doctor's probes) with `max_pixels` =
-    `MAX_PIXELS`, 2^27 pixels (16384 × 8192). `TooLarge::of` says
-    whether a stream's size is over it, with the width padded to 64 as
-    FFmpeg pads rows before it checks; `probe` warns of such a stream and
-    `VideoDecoder` refuses it (`MediaError::PictureTooLarge`), by its
-    size, before any decoder fails on it. `clippy.toml` forbids
+    `MAX_PIXELS`, 2^27 pixels (16384 × 8192), and with
+    `AV_CODEC_FLAG_UNALIGNED`, so a frame is cropped exactly as its
+    stream says, not by as much as keeps its planes aligned (D30).
+    `TooLarge::of` says whether a stream's size is over it, with the
+    width padded to 64 as FFmpeg pads rows before it checks; `probe`
+    warns of such a stream and `VideoDecoder` refuses it
+    (`MediaError::PictureTooLarge`), by its size, before any decoder
+    fails on it. `clippy.toml` forbids
     ffmpeg-next's own input, output and decoder opens (`format::open`,
     `format::input*`, `format::output*`, `Decoder::open*` and the like),
     and `std::net`'s TCP and UDP types, elsewhere.
   * `dict_entries` reads metadata as lossy UTF-8 (U+FFFD for bytes that
     aren't), because ffmpeg-next makes `&str`s of it unchecked.
+  * `download_into_pool` copies a device frame into a buffer of an
+    `AVBufferPool` built for the frames context's `sw_format` and the
+    frame's size: every plane in one buffer, rows 256 bytes apart and
+    planes on 256-byte boundaries, so wgpu's `write_texture` can take
+    them in one copy. The buffer returns to the pool when the frame's
+    last reference drops, and a new format or size rebuilds the pool.
+    The pool's allocator counts the buffers it makes, which
+    `DecodeStats::download_buffers` gives.
+    The left and top crop FFmpeg leaves on device frames is applied after
+    the copy, exactly, as software decoding applies it (`as_downloaded`
+    gives the fields the frame will have). It serves VA-API and Vulkan
+    alike (D30).
 * `hwprobe.rs` (private) holds doctor's one-frame hardware decode and
   encode probes, the Vulkan device listing through FFmpeg's
   `AVVulkanDeviceContext` with its own `#[repr(C)]` declarations of the
@@ -193,19 +210,24 @@ The other modules are safe Rust:
   only a regular file at the output.
 * `encode`: `Mp4Writer`, one video stream from planar YUV (4:2:0, 4:2:2
   or 4:4:4 at 8 or 10 bits, tagged with any colour, optionally behind an
-  edit list or with its own timestamps) and optional planar-f32 audio,
+  edit list, with its own timestamps or cropped on the left, which
+  FFmpeg's `h264_metadata` or `hevc_metadata` filter writes into the
+  SPS, `ffi::CropFilter`) and optional planar-f32 audio,
   written atomically like `inject`, which also means it refuses an
   output that isn't a regular file; and `remux_to_matroska`, a stream
   copy into Matroska. The synthetic media generator uses them today;
   M2's export builds on the writer.
 * `decode`: `VideoDecoder`, which decodes one video stream in order, in
-  software or on a `HwDevice`, and hands out frames in system memory. It
+  software or on a `HwDevice` (single-threaded, with spare surfaces,
+  `open_hardware`), and hands out frames in system memory, downloaded
+  into its pool. It
   reads only its own stream (the others are discarded), holds back a
   packet flagged corrupt until the next read, and ends a damaged file with
   an error after the frames it could decode (D13). `open_cancellable`
   stops reading when a flag is set, and `skipped_packets` counts packets
   skipped as invalid data. On a device it opens a decoder that can use the
-  device and never falls back to software (D3, D14). For `seek` it also
+  device and never falls back to software (D3, D14); any error there that
+  isn't a refusal is `HwFailed`, never damage (D30). For `seek` it also
   seeks (clearing a read failure, not a refusal, D29), says where a seek
   landed (and the pts of a keyframe landed on) and the last packet read
   (dts, else pts), the least lag of a keyframe's pts behind its dts, the
@@ -228,10 +250,15 @@ The other modules are safe Rust:
   (begun at a demuxer seek, or at the first frame after catching up
   skipped frames) and `seq` (its place in decode-output order in the
   run, which every frame decoded takes), so that frames of one run with
-  consecutive `seq` are known to be adjacent. `FfmpegBackend` opens a confined software decoder; hardware
-  (slice 2b) and audio (slice 6) return `MediaError::NotYet`. The types
-  that cross threads are checked `Send`, and `Sync` where they are
-  shared, at compile time.
+  consecutive `seq` are known to be adjacent. `FfmpegBackend` opens a
+  confined decoder in software or, for `DecodeMode::Hardware`, on VA-API
+  or Vulkan Video: on the request's device, or on the backend's own of
+  that kind, opened once on its render node the first time a decoder
+  asks and shared, as is the error when it can't be (D30). Audio (slice
+  6) returns `MediaError::NotYet`. With the `fault-injection` feature,
+  which only synth's tests turn on, a request can fail a frame as the
+  device would. The types that cross threads are checked `Send`, and
+  `Sync` where they are shared, at compile time.
 * `seek`: `FfmpegVideo`, the `VideoDecode` on `VideoDecoder`, with the
   frame-exact seek of plan section 3.3 (D29), which drops the leading
   pictures of the keyframe a seek lands on, frame-index addressing
@@ -243,7 +270,22 @@ The other modules are safe Rust:
   from the track's spherical boxes). Streams whose timestamps tie or go
   backwards seek by the tie rule, the latter by decoding from the start.
   It converts frames of a format that isn't uploaded as it is through
-  swscale, once announced with `DecoderEvent::Converted` (D30).
+  swscale, once announced with `DecoderEvent::Converted` (D30). On a
+  device, frames stay there until handed out: a seek holds its best
+  candidate as a device frame and downloads only the one it returns.
+  `fell_back` has a software decoder take over a failed hardware one's
+  place, so that it goes on from the frame after the last one returned.
+* `fallback`: `Fallback::Software` (D30). A device that can't be opened,
+  turns the stream down or fails on its first frame has the stream
+  opened in software; one that fails later has it reopened in software
+  (`FallbackVideo`), once, with a seek it failed in done again. Either
+  way a `tracing::warn!` and `DecoderEvent::FellBack` say why, and every
+  frame after is `DecodePath::FellBack`. With `Fallback::Fail` the error
+  is returned.
+* `hw`: which render node hardware decoding runs on, the GPU's that
+  renders: by the PCI bus id wgpu gives its adapter, else by its vendor
+  and device ids, else `/dev/dri/renderD128`, over a sysfs root that
+  tests fake; `--render-node` overrides it (D30).
 * `color`: `resolve`, the colour default rules (D30): a frame's codes,
   as FFmpeg's ints, become the `ColorInfo` the renderer uses, with an
   `assumed` flag for each field a rule filled in (siting only where the
@@ -257,15 +299,17 @@ The other modules are safe Rust:
   `crates/media/fixtures/`, whose README gives the commands that
   regenerate them byte for byte.
 
-`MediaError` has eleven variants: `Io`, `NotAFile`,
+`MediaError` has twelve variants: `Io`, `NotAFile`,
 `UnsupportedContainer { path, format, description }` (FFmpeg would read
 the file with a demuxer outside `DEMUXERS`; the message names it and the
 containers Spherecut opens), `Open`, `NestedOpenRefused { path, url }`
 (FFmpeg tried to open something else while opening the file, which
 `io_open` refused), `Decode`, `PictureTooLarge` (over `MAX_PIXELS`),
 `HwUnsupported { path, kind, refusal: HwRefusal }` (the device can't decode
-this stream; software may) and `Hardware { kind, reason: HwError }` (the
-device can't be opened), `UnsupportedFormat { path, pix_fmt }` (frames
+this stream; software may), `HwFailed { path, kind, reason }` (decoding
+or downloading a frame on the device failed; software may still decode
+it) and `Hardware { kind, reason: HwError }` (the device can't be
+opened), `UnsupportedFormat { path, pix_fmt }` (frames
 in a pixel format swscale can't convert) and `NotYet { what }` (a part of
 the backend a later M1 slice brings). `code()` gives each a stable snake_case code for
 the JSON contract, and `MediaError::CODES` lists them (D27). `VideoDecoder::open` returns `HwUnsupported`
@@ -273,8 +317,8 @@ the JSON contract, and `MediaError::CODES` lists them (D27). `VideoDecoder::open
 `next_frame` returns it when the device turns the stream down. A software
 frame from a decoder that never asked for the device's format, or that
 turned it down, is `HwUnsupported` too, not a `Decode` error. Once
-`next_frame` has returned it, every later call returns it again and
-decodes nothing. Messages that include their cause don't also return it
+`next_frame` has returned it, or `HwFailed`, every later call returns it
+again and decodes nothing. Messages that include their cause don't also return it
 from `source()`, so `{e:#}` prints each cause once.
 
 `spherecut_media::init()` initialises FFmpeg once and installs the log
@@ -390,8 +434,12 @@ and samples with `textureSampleGrad`/`textureSampleLevel`.
 * **Tier 1** runs anywhere: unit and property tests, software decode and
   encode, synthetic media that the tests generate themselves (among them
   the seek oracle, `crates/synth/tests/seek.rs`), doctor run
-  against lavapipe, and `VideoDecoder` turning streams down on lavapipe's
-  Vulkan device. Golden images on lavapipe come with the renderer (M1).
+  against lavapipe, `VideoDecoder` turning streams down on lavapipe's
+  Vulkan device, and the fallback to software on lavapipe, on a render
+  node that isn't there and, with media's `fault-injection` feature, at
+  every frame of a software stand-in for the device
+  (`crates/synth/tests/fallback.rs`). The Tier 2 backend tests check
+  their own checks the same way. Golden images on lavapipe come with the renderer (M1).
   `cargo xtask check` runs all of it.
 * **Tier 2** needs hardware or samples. Tier 2 tests are `#[ignore]`d with a
   reason and call `spherecut_testkit::tier2::require_*`, which fails the

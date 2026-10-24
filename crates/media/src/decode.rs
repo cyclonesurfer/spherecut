@@ -4,8 +4,10 @@
 //! decodes one video stream in order, and hands out frames in system memory.
 //! Hardware decoding never silently falls back to software: if the device
 //! can't decode the stream, opening or decoding fails with
-//! [`MediaError::HwUnsupported`] and the reason, as does every call after
-//! it, and the caller chooses what to do.
+//! [`MediaError::HwUnsupported`] and the reason, and if it fails while
+//! decoding or copying a frame, with [`MediaError::HwFailed`], as does
+//! every call after it, and the caller chooses what to do. Neither is ever
+//! reported as damage in the file.
 //!
 //! A read error or a cancelled read ends the stream with an error, after
 //! the frames that could still be decoded, never with `None`. So does a
@@ -34,7 +36,7 @@ use std::sync::atomic::AtomicBool;
 use spherecut_core::{Rational, StopToken, Time};
 
 use crate::doctor::{VulkanDevice, VulkanDeviceType};
-use crate::ffi::{self, HwDevice, HwError, HwRefusal, OpenDecoderError};
+use crate::ffi::{self, DownloadPool, HwDevice, HwError, HwRefusal, OpenDecoderError};
 use crate::hwprobe::{self, VkDevice, device_label, vk_device_type};
 use crate::{MediaError, TooLarge, ff, init};
 
@@ -152,6 +154,9 @@ pub struct VideoDecoder {
     /// Why the device turned the stream down, returned by every later
     /// call.
     refused: Option<HwRefusal>,
+    /// Why decoding or downloading on the device failed, returned by every
+    /// later call: the device's failure, never the file's damage.
+    hw_failed: Option<String>,
     frames: u64,
     skipped: u64,
     /// Since the last seek, no packet of the stream has been read.
@@ -174,6 +179,19 @@ pub struct VideoDecoder {
     /// Packets sent while frames nothing refers to were being skipped:
     /// the decoder may have dropped any of them without a frame.
     skip_sent: u64,
+    /// What device frames are downloaded into.
+    pool: DownloadPool,
+}
+
+/// How [`VideoDecoder::with_options`] sets up the decoder.
+#[derive(Debug, Clone, Copy, Default)]
+struct Options {
+    /// Software decoding threads; `None` lets FFmpeg pick.
+    threads: Option<NonZeroU32>,
+    /// Hand out frames flagged corrupt (`AV_CODEC_FLAG_OUTPUT_CORRUPT`).
+    output_corrupt: bool,
+    /// Surfaces a hardware decoder keeps beyond its own needs.
+    extra_hw_frames: Option<u8>,
 }
 
 /// What [`VideoDecoder::receive`] got.
@@ -210,6 +228,14 @@ fn hw_unsupported(path: &Path, dev: &HwDevice, refusal: HwRefusal) -> MediaError
         path: path.to_path_buf(),
         kind: device_label(dev.kind()).into(),
         refusal,
+    }
+}
+
+fn hw_failed(path: &Path, dev: &HwDevice, reason: &str) -> MediaError {
+    MediaError::HwFailed {
+        path: path.to_path_buf(),
+        kind: device_label(dev.kind()).into(),
+        reason: reason.into(),
     }
 }
 
@@ -266,7 +292,33 @@ impl VideoDecoder {
     ) -> Result<Self, MediaError> {
         init();
         let ictx = ffi::open_input(path, Some(interrupt)).map_err(|e| open_err(path, e))?;
-        Self::with_input_threads(path, ictx, index, None, threads, true)
+        let options = Options {
+            threads,
+            output_corrupt: true,
+            extra_hw_frames: None,
+        };
+        Self::with_options(path, ictx, index, None, options)
+    }
+
+    /// Like [`open_software`](Self::open_software), but decoding on `dev`,
+    /// in one thread (D3), with `extra_hw_frames` surfaces in its pool
+    /// beyond what the decoder needs, for the frames the caller holds
+    /// before they are downloaded.
+    pub(crate) fn open_hardware(
+        path: &Path,
+        index: Option<usize>,
+        dev: Arc<HwDevice>,
+        extra_hw_frames: u8,
+        interrupt: Arc<AtomicBool>,
+    ) -> Result<Self, MediaError> {
+        init();
+        let ictx = ffi::open_input(path, Some(interrupt)).map_err(|e| open_err(path, e))?;
+        let options = Options {
+            threads: None,
+            output_corrupt: true,
+            extra_hw_frames: Some(extra_hw_frames),
+        };
+        Self::with_options(path, ictx, index, Some(dev), options)
     }
 
     fn with_input(
@@ -275,16 +327,15 @@ impl VideoDecoder {
         index: Option<usize>,
         hw: Option<Arc<HwDevice>>,
     ) -> Result<Self, MediaError> {
-        Self::with_input_threads(path, ictx, index, hw, None, false)
+        Self::with_options(path, ictx, index, hw, Options::default())
     }
 
-    fn with_input_threads(
+    fn with_options(
         path: &Path,
         mut ictx: ff::format::context::Input,
         index: Option<usize>,
         hw: Option<Arc<HwDevice>>,
-        threads: Option<NonZeroU32>,
-        output_corrupt: bool,
+        options: Options,
     ) -> Result<Self, MediaError> {
         tracing::debug!(
             path = %path.display(),
@@ -315,18 +366,23 @@ impl VideoDecoder {
         let mut ctx = ff::codec::context::Context::from_parameters(st.parameters())
             .map_err(|e| err(path, "decoder parameters", e))?;
         ffi::discard_other_streams(&mut ictx, stream_index);
-        if output_corrupt {
+        if options.output_corrupt {
             ctx.set_flags(ff::codec::Flags::OUTPUT_CORRUPT);
         }
         match &hw {
+            // One thread, libavcodec's default (D3).
             Some(dev) => {
-                ffi::attach_hw_device(&mut ctx, dev).map_err(|e| err(path, "hardware device", e))?
+                ffi::attach_hw_device(&mut ctx, dev)
+                    .map_err(|e| err(path, "hardware device", e))?;
+                if let Some(n) = options.extra_hw_frames {
+                    ffi::set_extra_hw_frames(&mut ctx, n);
+                }
             }
             // libavcodec defaults to one thread; let it pick per core
             // unless told how many.
             None => ctx.set_threading(ff::codec::threading::Config {
                 kind: ff::codec::threading::Type::Frame,
-                count: threads.map_or(0, |n| n.get() as usize),
+                count: options.threads.map_or(0, |n| n.get() as usize),
             }),
         }
         let dec = ffi::open_video_decoder(ctx, hw.as_deref()).map_err(|e| match (e, &hw) {
@@ -358,6 +414,7 @@ impl VideoDecoder {
             read_error: None,
             failed: None,
             refused: None,
+            hw_failed: None,
             frames: 0,
             skipped: 0,
             awaiting_landing: false,
@@ -367,6 +424,7 @@ impl VideoDecoder {
             key_lag: None,
             skip_before: None,
             skip_sent: 0,
+            pool: DownloadPool::default(),
         })
     }
 
@@ -393,9 +451,10 @@ impl VideoDecoder {
     /// When reading the file fails (see the module docs), the frames
     /// decoded before that come first, then the error, which every later
     /// call returns too. So is [`MediaError::HwUnsupported`], once the
-    /// device turns the stream down: nothing more is decoded. Any other
-    /// error from the decoder itself is returned once; calling again
-    /// carries on with the next packet.
+    /// device turns the stream down, and [`MediaError::HwFailed`], once
+    /// decoding or copying a frame on it fails: nothing more is decoded.
+    /// In software, any other error from the decoder itself is returned
+    /// once; calling again carries on with the next packet.
     pub fn next_frame(&mut self) -> Result<Option<DecodedFrame>, MediaError> {
         match self.receive(None)? {
             Received::Frame(frame) => self.finish_frame(frame).map(Some),
@@ -411,11 +470,11 @@ impl VideoDecoder {
     ///
     /// [`next_frame`]: Self::next_frame
     pub(crate) fn receive(&mut self, stop: Option<&StopToken>) -> Result<Received, MediaError> {
+        if let Some(e) = self.device_error() {
+            return Err(e);
+        }
         if let Some(reason) = &self.failed {
             return Err(err(&self.path, "reading", reason));
-        }
-        if let Some(e) = self.refusal() {
-            return Err(e);
         }
         let stopped = || stop.is_some_and(StopToken::is_stopped);
         let mut frame = ff::frame::Video::empty();
@@ -429,6 +488,7 @@ impl VideoDecoder {
             match self.dec.receive_frame(&mut frame) {
                 Ok(()) => {
                     self.frames += 1;
+                    self.check_on_device(&frame)?;
                     return Ok(Received::Frame(frame));
                 }
                 Err(ff::Error::Eof) => {
@@ -479,20 +539,25 @@ impl VideoDecoder {
                         .map_err(|e| self.decode_error(e))?
                 }
                 None => {
-                    self.dec
-                        .send_eof()
-                        .map_err(|e| err(&self.path, "flushing decoder", e))?;
+                    if let Err(e) = self.dec.send_eof() {
+                        return Err(match &self.hw {
+                            Some(_) => self.fail_device(&format!("flushing the decoder: {e}")),
+                            None => err(&self.path, "flushing decoder", e),
+                        });
+                    }
                     self.eof_sent = true;
                 }
             }
         }
     }
 
-    /// Whether the stream has ended with an error that every later call
-    /// returns, until a seek: a read that failed or was cancelled, or a
-    /// device that turned the stream down (which a seek doesn't clear).
+    /// Whether reading has ended the stream with an error that every
+    /// later call returns, until a seek: a read that failed or was
+    /// cancelled, or a cut. A device that turned the stream down or failed
+    /// on it doesn't count: that is never the file's damage, and its error
+    /// says so ([`MediaError::is_device_failure`]).
     pub(crate) fn has_failed(&self) -> bool {
-        self.failed.is_some() || self.refusal().is_some()
+        self.failed.is_some()
     }
 
     /// The error reading stopped with since the last seek, as soon as it
@@ -651,16 +716,99 @@ impl VideoDecoder {
 
     /// A decoder error, or why the device can't decode this stream when
     /// that is the cause: the decoder's own error then is just "Operation
-    /// not permitted".
+    /// not permitted". On a device, any other decoder error is the
+    /// device's failure (`HwFailed`), not damage: a hardware decoder's
+    /// errors can't be told apart from damage it met, and software, after
+    /// a fallback, decodes past damage and says so (D30).
     fn decode_error(&mut self, e: ff::Error) -> MediaError {
         self.refused = ffi::hw_refusal(&self.dec);
-        self.refusal()
-            .unwrap_or_else(|| err(&self.path, "decoding", e))
+        if let Some(e) = self.refusal() {
+            return e;
+        }
+        match &self.hw {
+            Some(_) => self.fail_device(&format!("decoding: {e}")),
+            None => err(&self.path, "decoding", e),
+        }
     }
 
     /// `HwUnsupported`, once the device has turned the stream down.
     fn refusal(&self) -> Option<MediaError> {
         Some(hw_unsupported(&self.path, self.hw.as_ref()?, self.refused?))
+    }
+
+    /// The device's refusal or failure, once there is one: every later
+    /// call returns it, and a seek doesn't clear it.
+    fn device_error(&self) -> Option<MediaError> {
+        self.refusal().or_else(|| {
+            let reason = self.hw_failed.as_deref()?;
+            Some(hw_failed(&self.path, self.hw.as_ref()?, reason))
+        })
+    }
+
+    /// Record that the device failed, as `reason` says (decoding, or
+    /// copying a frame from it), and return the `HwFailed` that this and
+    /// every later call returns. Without a device, a decode error.
+    pub(crate) fn fail_device(&mut self, reason: &str) -> MediaError {
+        if self.hw.is_none() {
+            return err(&self.path, "decoding", reason);
+        }
+        if self.hw_failed.is_none() {
+            tracing::warn!(path = %self.path.display(), "hardware decoding failed: {reason}");
+            self.hw_failed = Some(reason.into());
+        }
+        self.device_error()
+            .unwrap_or_else(|| err(&self.path, "decoding", reason))
+    }
+
+    /// A frame decoded with a device must have been decoded on it (D3). A
+    /// decoder that never asked for a format doesn't use the device, and
+    /// one that turned the device down may go on in software: either way
+    /// the stream is refused. A software frame after the device's format
+    /// was taken is the device failing.
+    fn check_on_device(&mut self, frame: &ff::frame::Video) -> Result<(), MediaError> {
+        let Some(dev) = &self.hw else {
+            return Ok(());
+        };
+        let format = ffi::frame_format(frame);
+        if format == dev.hw_pix_fmt() {
+            ffi::note_device_frame(&mut self.dec);
+            return Ok(());
+        }
+        self.refused = match ffi::hw_refusal(&self.dec) {
+            None if !ffi::hw_format_asked(&self.dec) => Some(HwRefusal::NotOffered),
+            r => r,
+        };
+        Err(match self.refusal() {
+            Some(e) => e,
+            None => self.fail_device(&format!(
+                "the decoder produced {} frames instead of device frames",
+                ffi::pix_fmt_name(format).unwrap_or_else(|| format!("format {format}"))
+            )),
+        })
+    }
+
+    /// Whether `frame` is on this decoder's device, not yet copied to
+    /// system memory.
+    pub(crate) fn on_device(&self, frame: &ff::frame::Video) -> bool {
+        self.hw
+            .as_ref()
+            .is_some_and(|h| ffi::frame_format(frame) == h.hw_pix_fmt())
+    }
+
+    /// Copy a frame from the device into the decoder's [`DownloadPool`]:
+    /// rows 256 bytes apart, and buffers that go back to the pool when
+    /// the frame drops (D30). Failing is the device failing.
+    pub(crate) fn download(
+        &mut self,
+        frame: &ff::frame::Video,
+    ) -> Result<ff::frame::Video, MediaError> {
+        ffi::download_into_pool(&mut self.pool, frame)
+            .map_err(|e| self.fail_device(&format!("copying a frame from it: {e}")))
+    }
+
+    /// Buffers its [`DownloadPool`] has allocated so far (0 in software).
+    pub(crate) fn download_buffers(&self) -> u64 {
+        self.pool.allocated()
     }
 
     /// The next packet to decode, or `None` once there are no more (see
@@ -790,34 +938,13 @@ impl VideoDecoder {
             .flatten()
     }
 
+    /// A frame from [`receive`](Self::receive), which has checked that a
+    /// frame decoded with a device is on it, copied to system memory.
     fn finish_frame(&mut self, frame: ff::frame::Video) -> Result<DecodedFrame, MediaError> {
-        let format = ffi::frame_format(&frame);
-        let on_device = self.hw.as_ref().is_some_and(|h| format == h.hw_pix_fmt());
-        if self.hw.is_some() && !on_device {
-            // A decoder that never asked for a format doesn't use the
-            // device. One that turned the device down may go on in
-            // software.
-            self.refused = match ffi::hw_refusal(&self.dec) {
-                None if !ffi::hw_format_asked(&self.dec) => Some(HwRefusal::NotOffered),
-                r => r,
-            };
-            return Err(self.refusal().unwrap_or_else(|| {
-                err(
-                    &self.path,
-                    "hardware decode",
-                    format!(
-                        "decoder produced {} frames instead of device frames",
-                        ffi::pix_fmt_name(format).unwrap_or_else(|| format!("format {format}"))
-                    ),
-                )
-            }));
-        }
-        if on_device {
-            ffi::note_device_frame(&mut self.dec);
-        }
+        let on_device = self.on_device(&frame);
         let pts = frame.pts();
         let frame = if on_device {
-            ffi::download_frame(&frame).map_err(|e| err(&self.path, "downloading frame", e))?
+            self.download(&frame)?
         } else {
             frame
         };
@@ -830,13 +957,14 @@ impl VideoDecoder {
     }
 }
 
-/// Open a hardware device for decoding. `kind` is "vaapi" or "vulkan".
+/// Open a hardware device for decoding. `kind` is "vaapi" or "vulkan";
+/// an error names it "VA-API" or "Vulkan".
 pub fn open_hw_device(kind: &str, device: Option<&str>) -> Result<Arc<HwDevice>, MediaError> {
     init();
     HwDevice::open(kind, device)
         .map(Arc::new)
         .map_err(|reason| MediaError::Hardware {
-            kind: kind.to_string(),
+            kind: hwprobe::device_label(kind).into(),
             reason,
         })
 }
@@ -928,7 +1056,7 @@ fn describe(d: &VulkanDevice) -> String {
 /// another one.
 pub fn open_vulkan_device(render_node: Option<&Path>) -> Result<VulkanChoice, MediaError> {
     let fail = |reason: String| MediaError::Hardware {
-        kind: "vulkan".into(),
+        kind: hwprobe::device_label("vulkan").into(),
         reason: HwError::Vulkan(reason),
     };
     let list = |dev: &HwDevice| {
@@ -1046,6 +1174,24 @@ mod tests {
     use super::*;
     use crate::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 
+    #[test]
+    fn a_device_that_does_not_open_is_named_as_the_other_errors_name_it() {
+        let e = open_hw_device("vaapi", Some("/nonexistent/renderD128")).unwrap_err();
+        assert!(
+            matches!(&e, MediaError::Hardware { kind, .. } if kind == "VA-API"),
+            "{e:?}"
+        );
+        assert!(
+            e.to_string().starts_with("VA-API device unavailable: "),
+            "{e}"
+        );
+        let e = open_hw_device("cuda-ish", None).unwrap_err();
+        assert!(
+            matches!(&e, MediaError::Hardware { kind, .. } if kind == "cuda-ish"),
+            "{e:?}"
+        );
+    }
+
     /// A test's own directory in the system's temp dir (unit tests get no
     /// CARGO_TARGET_TMPDIR), removed with what it holds when dropped, so
     /// also when the test fails.
@@ -1078,6 +1224,7 @@ mod tests {
             color: ColorTags::BT709_LIMITED,
             edit_start: 0,
             time_base: None,
+            crop_left: 0,
         };
         let mut w = Mp4Writer::create(&dir.0.join("clip.mp4"), &settings, None).unwrap();
         for i in 0..10 {
@@ -1105,6 +1252,35 @@ mod tests {
                 }) => {}
                 r => panic!("expected HwUnsupported, got {r:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn a_device_failure_is_sticky_and_never_reading_damage() {
+        // As when the driver fails a frame: every later call says so, a
+        // seek doesn't clear it, and it never reads as a failed read.
+        let dir = TempDir::new("device-failed");
+        let mut d = VideoDecoder::open(&clip(&dir), None, None).unwrap();
+        d.hw = Some(Arc::new(HwDevice::vulkan_without_context()));
+        let e = d.fail_device("decoding: Input/output error");
+        assert!(e.is_device_failure(), "{e:?}");
+        assert_eq!(e.code(), "hw_failed");
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "decoding {} on Vulkan failed: decoding: Input/output error",
+                clip(&dir).display()
+            )
+        );
+        for seek in [false, true] {
+            if seek {
+                d.seek(0).unwrap();
+            }
+            match d.next_frame() {
+                Err(e @ MediaError::HwFailed { .. }) => assert!(e.is_device_failure()),
+                r => panic!("expected HwFailed, got {r:?}"),
+            }
+            assert!(!d.has_failed());
         }
     }
 
