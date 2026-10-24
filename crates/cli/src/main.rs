@@ -1,12 +1,18 @@
 //! The `spherecut` command.
+//!
+//! With `--json`, stdout gets exactly one JSON document per run, on
+//! success and on failure, and the exit status says how the run ended
+//! (`contract`, D27). stderr is for people.
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use serde::Serialize;
+use spherecut_cli::contract::{self, Envelope, Exit, ProbeFile};
 use spherecut_core::brand;
-use spherecut_media::probe::StreamKind;
 
 mod show;
 
@@ -24,8 +30,9 @@ enum Cmd {
     /// cannot be read, is not MP4/MOV or Matroska/WebM, is truncated or
     /// corrupt, or has no video or audio.
     Probe {
+        #[arg(required = true)]
         files: Vec<PathBuf>,
-        /// Print JSON instead of text.
+        /// Print one JSON document instead of text (docs/cli-json.md).
         #[arg(long)]
         json: bool,
     },
@@ -35,6 +42,7 @@ enum Cmd {
         /// DRM render node to test for VA-API.
         #[arg(long, default_value = "/dev/dri/renderD128")]
         render_node: PathBuf,
+        /// Print one JSON document instead of text (docs/cli-json.md).
         #[arg(long)]
         json: bool,
     },
@@ -42,13 +50,38 @@ enum Cmd {
 
 fn main() -> ExitCode {
     init_logging();
-    match run(Cli::parse()) {
-        Ok(code) => code,
+    let args: Vec<OsString> = std::env::args_os().collect();
+    let json = contract::wants_json(&args);
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(e) => return usage(&e, &args, json).into(),
+    };
+    match run(cli) {
+        Ok(exit) => exit.into(),
         Err(e) => {
             to_stderr(&format!("error: {e:#}\n"));
-            ExitCode::FAILURE
+            Exit::Failed.into()
         }
     }
+}
+
+/// Report a command line that doesn't parse, or the help or version it
+/// asked for. Help and version are text, with `--json` too.
+fn usage(e: &clap::Error, args: &[OsString], json: bool) -> Exit {
+    // clap's own wording, for people, on stderr (help and version go to
+    // stdout); a closed stream is no reason to fail differently.
+    let _ = e.print();
+    if !e.use_stderr() {
+        return Exit::Ok;
+    }
+    if json {
+        let (envelope, exit) = contract::usage(args, &e.render().to_string());
+        if let Ok(line) = envelope.to_line() {
+            let _ = emit(&line);
+        }
+        return exit;
+    }
+    Exit::Usage
 }
 
 /// What the CLI logs by default: warnings, but not FFmpeg's own messages.
@@ -111,102 +144,72 @@ fn log_directives(v: &str) -> String {
         .join(",")
 }
 
-fn run(cli: Cli) -> Result<ExitCode> {
+fn run(cli: Cli) -> Result<Exit> {
     match cli.cmd {
-        Cmd::Probe { files, json } => {
-            if files.is_empty() {
-                anyhow::bail!("give at least one file to probe");
-            }
-            let mut failed = false;
-            let mut reports = Vec::new();
-            // Cleared when the reader goes away; the rest are still probed
-            // for the exit code and the errors on stderr.
-            let mut reading = true;
-            for f in &files {
-                match spherecut_media::probe::probe(f) {
-                    Ok(r) => {
-                        if !json && reading {
-                            reading = emit(&show::probe(&r))?;
-                        }
-                        if let Some(first) = r.damage.first() {
-                            failed = true;
-                            let more = match r.damage.len() - 1 {
-                                0 => String::new(),
-                                1 => " (and 1 more problem)".into(),
-                                n => format!(" (and {n} more problems)"),
-                            };
-                            to_stderr(&format!(
-                                "error: {} is damaged: {first}{more}\n",
-                                f.display()
-                            ));
-                        } else if !r
-                            .streams
-                            .iter()
-                            .any(|s| matches!(s.kind, StreamKind::Video | StreamKind::Audio))
-                        {
-                            // An MP4 or Matroska file can hold only
-                            // subtitles or data.
-                            failed = true;
-                            to_stderr(&format!(
-                                "error: {} has no video or audio stream; FFmpeg reads it as {}\n",
-                                f.display(),
-                                r.container.format_long
-                            ));
-                        }
-                        reports.push(serde_json::to_value(&r)?);
-                    }
-                    Err(e) => {
-                        failed = true;
-                        // FFmpeg's own word on why it could not open the
-                        // file, under ours.
-                        if json {
-                            to_stderr(&format!("error: {e}\n"));
-                        } else {
-                            to_stderr(&format!(
-                                "error: {e}\n{}",
-                                show::ffmpeg_lines(&e.ffmpeg_log)
-                            ));
-                        }
-                        // Lossy, as in the reports: Linux file names need
-                        // not be UTF-8.
-                        reports.push(serde_json::json!({
-                            "path": f.to_string_lossy(),
-                            "error": e.to_string(),
-                            "ffmpeg_log": e.ffmpeg_log,
-                        }));
-                    }
-                }
-            }
-            if json {
-                let v = if reports.len() == 1 {
-                    reports.remove(0)
-                } else {
-                    serde_json::Value::Array(reports)
-                };
-                emit(&format!("{}\n", serde_json::to_string_pretty(&v)?))?;
-            }
-            Ok(if failed {
-                ExitCode::FAILURE
-            } else {
-                ExitCode::SUCCESS
-            })
+        Cmd::Probe { files, json } => probe(&files, json),
+        Cmd::Doctor { render_node, json } => doctor(&render_node, json),
+    }
+}
+
+fn probe(paths: &[PathBuf], json: bool) -> Result<Exit> {
+    let mut files = Vec::with_capacity(paths.len());
+    // Cleared when the reader goes away; the rest are still probed for the
+    // exit code and the errors on stderr.
+    let mut reading = true;
+    for path in paths {
+        let probed = spherecut_media::probe::probe(path);
+        // FFmpeg's own word on why it could not open the file, under ours.
+        // In JSON it is the error's `ffmpeg_log`.
+        let ffmpeg = match &probed {
+            Err(e) if !json => show::ffmpeg_lines(&e.ffmpeg_log),
+            _ => String::new(),
+        };
+        let file = ProbeFile::new(path, probed);
+        if !json
+            && reading
+            && let Some(r) = &file.report
+        {
+            reading = emit(&show::probe(r))?;
         }
-        Cmd::Doctor { render_node, json } => {
-            let r = spherecut_media::doctor::run(&render_node);
-            if json {
-                emit(&format!("{}\n", serde_json::to_string_pretty(&r)?))?;
-            } else {
-                emit(&show::doctor(&r))?;
-            }
-            let errors = r
-                .issues
-                .iter()
-                .any(|i| i.severity == spherecut_media::doctor::Severity::Error);
-            Ok(if errors {
-                ExitCode::FAILURE
-            } else {
-                ExitCode::SUCCESS
-            })
+        if let Some(e) = &file.error {
+            to_stderr(&format!("error: {}\n{ffmpeg}", e.message));
+        }
+        files.push(file);
+    }
+    let (envelope, exit) = contract::probe(files);
+    if json {
+        print_json(&envelope, exit)
+    } else {
+        Ok(exit)
+    }
+}
+
+fn doctor(render_node: &Path, json: bool) -> Result<Exit> {
+    let report = spherecut_media::doctor::run(render_node);
+    let (envelope, exit) = contract::doctor(&report);
+    if json {
+        print_json(&envelope, exit)
+    } else {
+        emit(&show::doctor(&report))?;
+        Ok(exit)
+    }
+}
+
+/// Print `envelope` as the run's one document, and end the run with
+/// `exit`. A reader that went away gets nothing, and the exit stays.
+fn print_json<T: Serialize>(envelope: &Envelope<T>, exit: Exit) -> Result<Exit> {
+    match envelope.to_line() {
+        Ok(line) => {
+            emit(&line)?;
+            Ok(exit)
+        }
+        Err(e) => {
+            let (envelope, exit) = contract::internal(
+                envelope.schema(),
+                format!("cannot write the JSON document: {e}"),
+            );
+            emit(&envelope.to_line()?)?;
+            Ok(exit)
         }
     }
 }
