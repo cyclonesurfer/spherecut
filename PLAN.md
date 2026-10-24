@@ -303,8 +303,8 @@ Staging: three small pieces land inside milestones because the rest
 builds on them: FFmpeg's confinement and the CLI's JSON contract in M1,
 and edits stored as data in M2. A1 is mostly Tier 1 work, done once M1's
 code is in, while M1's hardware report is pending. That time would
-otherwise go to M2, so M2 lands later by roughly the time A1 takes; if
-Pat would rather have M2 first, A1 moves to after M2. A2 follows M2 and
+otherwise go to M2, so M2 lands later by roughly the time A1 takes; Pat
+chose this order on 2026-10-24. A2 follows M2 and
 A3 follows M5. None of A1 to A3 is a condition for finishing a
 milestone.
 

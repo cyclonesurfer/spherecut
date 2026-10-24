@@ -186,7 +186,7 @@ back clean, so M0 is done.
    GUI crates (D1).
 3. The Insta360 trailer reader (metadata, calibration, IMU), needed from M2.
 4. Agent integration A1 (the MCP server) once M1's code is in, while
-   M1's hardware report is pending, unless Pat wants M2 first.
+   M1's hardware report is pending (Pat chose this order on 2026-10-24).
 
 ## How to run
 
