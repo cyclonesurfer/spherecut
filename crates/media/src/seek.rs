@@ -33,9 +33,9 @@ use spherecut_core::video::PixelLayout;
 use spherecut_core::{FrameRate, Rational, Rounding, StopToken, Time};
 
 use crate::backend::{
-    DecodePath, DecodeStats, DecoderEvent, Exactness, FallbackReason, HwKind, NextFrame, SeekCost,
-    SeekMode, SeekOutcome, SourceMapping, Timing, VideoDecode, VideoFrame, VideoRequest,
-    VideoStreamInfo,
+    DamageCause, DecodePath, DecodeStats, DecoderEvent, Exactness, FallbackReason, HwKind,
+    NextFrame, SeekCost, SeekMode, SeekOutcome, SourceMapping, Timing, VideoDecode, VideoFrame,
+    VideoRequest, VideoStreamInfo,
 };
 #[cfg(feature = "fault-injection")]
 use crate::backend::{Fault, FaultPlan};
@@ -861,6 +861,7 @@ impl FfmpegVideo {
                         Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
                             reason: e.to_string(),
                             last_good_pts: None,
+                            cause: DamageCause::Corrupt,
                         }),
                     },
                 }
@@ -1046,6 +1047,7 @@ impl FfmpegVideo {
                 Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
                     reason: e.to_string(),
                     last_good_pts: self.last_decoded,
+                    cause: DamageCause::Corrupt,
                 }),
             },
         }
@@ -1140,6 +1142,7 @@ impl FfmpegVideo {
                         Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
                             reason: e.to_string(),
                             last_good_pts: best.as_ref().map(|b| b.pts),
+                            cause: DamageCause::Corrupt,
                         }),
                     },
                 }
@@ -1184,6 +1187,7 @@ impl FfmpegVideo {
             self.events.push(DecoderEvent::Damaged {
                 reason: reason.clone(),
                 last_good_pts: Some(frame.pts),
+                cause: self.dec.read_cause().unwrap_or(DamageCause::Read),
             });
             if frame.pts == t {
                 // The damage is after the target, which is shown as it is.
@@ -1261,6 +1265,7 @@ impl FfmpegVideo {
                     Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
                         reason: e.to_string(),
                         last_good_pts: None,
+                        cause: DamageCause::Corrupt,
                     }),
                 },
             }
@@ -1278,6 +1283,7 @@ impl FfmpegVideo {
                 self.events.push(DecoderEvent::Damaged {
                     reason,
                     last_good_pts: Some(frame.pts),
+                    cause: self.dec.read_cause().unwrap_or(DamageCause::Read),
                 });
                 if frame.pts == t {
                     Exactness::Exact
@@ -1368,6 +1374,7 @@ impl FfmpegVideo {
                 Err(e) if !self.dec.has_failed() => self.events.push(DecoderEvent::Damaged {
                     reason: e.to_string(),
                     last_good_pts: None,
+                    cause: DamageCause::Corrupt,
                 }),
                 // Nothing of the stream could be read: the seek landed past
                 // the cut of a file cut short of its index, as in `land`.
@@ -1380,6 +1387,7 @@ impl FfmpegVideo {
                                 self.events.push(DecoderEvent::Damaged {
                                     reason: e.to_string(),
                                     last_good_pts: None,
+                                    cause: DamageCause::Cut,
                                 });
                             }
                             inside = Some(k);
@@ -1502,6 +1510,7 @@ impl FfmpegVideo {
                             self.events.push(DecoderEvent::Damaged {
                                 reason: e.to_string(),
                                 last_good_pts: Some(current.pts),
+                                cause: DamageCause::Corrupt,
                             });
                             continue;
                         }
@@ -1746,6 +1755,7 @@ impl VideoDecode for FfmpegVideo {
                             self.events.push(DecoderEvent::Damaged {
                                 reason: e.to_string(),
                                 last_good_pts: self.last_decoded,
+                                cause: DamageCause::Corrupt,
                             });
                             continue;
                         }

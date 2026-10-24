@@ -414,10 +414,40 @@ pub enum DecoderEvent {
     Damaged {
         reason: String,
         last_good_pts: Option<i64>,
+        cause: DamageCause,
     },
     /// Timestamps went backwards after `at_pts` in decode order, so exact
     /// seeks decode from the start from now on: correct, and slow.
     NotExactlySeekable { at_pts: i64 },
+}
+
+/// What kind of damage a [`DecoderEvent::Damaged`] is, which says the
+/// CLI's code for it (D27, the M1 plan's amendment 8): a seek past it is
+/// [`Exactness::Truncated`] whatever the cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DamageCause {
+    /// The file ends before the data its index lists: it was cut short.
+    Cut,
+    /// Reading the file failed: an I/O error, such as a failing disk.
+    Read,
+    /// A read was interrupted by the decoder's interrupt flag (shutdown).
+    Cancelled,
+    /// The data is damaged: packets the demuxer can't read, or that the
+    /// decoder fails on.
+    Corrupt,
+}
+
+impl DamageCause {
+    /// The code of the CLI's JSON contract for a frame lost to it:
+    /// `truncated`, `io_error`, `cancelled` or `damaged`.
+    pub fn code(self) -> &'static str {
+        match self {
+            DamageCause::Cut => "truncated",
+            DamageCause::Read => "io_error",
+            DamageCause::Cancelled => "cancelled",
+            DamageCause::Corrupt => "damaged",
+        }
+    }
 }
 
 /// How decoding is going, for the overlay.
@@ -722,8 +752,8 @@ pub enum NextAudio {
 /// after shares it, as does the answer when it can't be opened (D30).
 #[derive(Debug, Default)]
 pub struct FfmpegBackend {
-    /// The render node to open devices on instead of the lookup's.
-    render_node: Option<PathBuf>,
+    /// The render node to open devices on instead of the default's.
+    render_node: Option<RenderNode>,
     vaapi: OnceLock<Result<Arc<HwDevice>, HwError>>,
     vulkan: OnceLock<Result<Arc<HwDevice>, HwError>>,
 }
@@ -735,17 +765,24 @@ impl FfmpegBackend {
 
     /// A backend whose devices open on `node` (`--render-node`).
     pub fn on_render_node(node: impl Into<PathBuf>) -> Self {
+        Self::on_node(crate::hw::render_node(None, Some(&node.into())))
+    }
+
+    /// A backend whose devices open on `node`, as [`crate::hw::render_node`]
+    /// found it for the adapter that renders (`spherecut frame`).
+    pub fn on_node(node: RenderNode) -> Self {
         FfmpegBackend {
-            render_node: Some(node.into()),
+            render_node: Some(node),
             ..Self::default()
         }
     }
 
-    /// The render node its devices open on, and why that one. No adapter
-    /// is known before the GUI's (M1 slice 3), so without `--render-node`
-    /// it is the default.
+    /// The render node its devices open on, and why that one: the one it
+    /// was made with, else the default.
     pub fn render_node(&self) -> RenderNode {
-        crate::hw::render_node(None, self.render_node.as_deref())
+        self.render_node
+            .clone()
+            .unwrap_or_else(|| crate::hw::render_node(None, None))
     }
 
     /// The backend's device of kind `kind`, opened on its render node the

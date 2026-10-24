@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use spherecut_core::video::{ColorFamily, Matrix, Range, VideoPlanes};
 use spherecut_core::{FrameRate, Rational, StopSource, StopToken, Time};
 use spherecut_media::backend::{
-    DecoderEvent, Exactness, FfmpegBackend, MediaBackend, NextFrame, SeekCost, SeekMode,
-    SeekOutcome, Timing, VideoDecode, VideoFrame, VideoRequest,
+    DamageCause, DecoderEvent, Exactness, FfmpegBackend, MediaBackend, NextFrame, SeekCost,
+    SeekMode, SeekOutcome, Timing, VideoDecode, VideoFrame, VideoRequest,
 };
 use spherecut_media::encode::ColorTags;
 use spherecut_media::ff;
@@ -875,11 +875,14 @@ fn a_truncated_clip_seeks_before_its_cut_and_says_where_it_ends() {
         cost.seeks == 2 && cost.reseeks == 1 && cost.frames_decoded <= 8 + 3,
         "{cost:?}"
     );
-    assert!(
-        d.take_events()
-            .iter()
-            .any(|e| matches!(e, DecoderEvent::Damaged { .. }))
-    );
+    // Said as a cut, which the CLI reports as `truncated` (D27).
+    assert!(d.take_events().iter().any(|e| matches!(
+        e,
+        DecoderEvent::Damaged {
+            cause: DamageCause::Cut,
+            ..
+        }
+    )));
     // A keyframe seek there gives the last keyframe the file holds, also
     // with a Damaged event, rather than the first frame.
     let (got, e, _) = seek_pts(&mut *d, target, SeekMode::Keyframe);
@@ -944,9 +947,14 @@ fn a_truncated_clip_seeks_before_its_cut_and_says_where_it_ends() {
                 "{codec:?}: frame {i}, lost to the cut"
             );
             assert!(
-                events
-                    .iter()
-                    .any(|e| matches!(e, DecoderEvent::Damaged { .. })),
+                events.iter().any(|e| matches!(
+                    e,
+                    DecoderEvent::Damaged {
+                        cause: DamageCause::Cut,
+                        last_good_pts: Some(p),
+                        ..
+                    } if *p == shown.pts
+                )),
                 "{codec:?}: frame {i}: {events:?}"
             );
         }

@@ -64,6 +64,10 @@ pub enum MediaError {
     },
     #[error("cannot decode {}: {reason}", path.display())]
     Decode { path: PathBuf, reason: String },
+    /// This FFmpeg has no decoder for the stream's codec, which `codec`
+    /// names as FFmpeg does (`hevc`).
+    #[error("cannot decode {}: this FFmpeg has no {codec} decoder", path.display())]
+    NoDecoder { path: PathBuf, codec: String },
     /// The stream's pictures are larger than any decoder Spherecut opens
     /// makes (D24).
     #[error("cannot decode {}: stream #{stream} is {size}", path.display())]
@@ -124,6 +128,7 @@ impl MediaError {
         "nested_open_refused",
         "unsupported_container",
         "decode_failed",
+        "no_decoder",
         "too_large",
         "hw_unsupported",
         "hw_failed",
@@ -146,6 +151,7 @@ impl MediaError {
             MediaError::NestedOpenRefused { .. } => "nested_open_refused",
             MediaError::UnsupportedContainer { .. } => "unsupported_container",
             MediaError::Decode { .. } => "decode_failed",
+            MediaError::NoDecoder { .. } => "no_decoder",
             MediaError::PictureTooLarge { .. } => "too_large",
             MediaError::HwUnsupported { .. } => "hw_unsupported",
             MediaError::HwFailed { .. } => "hw_failed",
@@ -253,6 +259,10 @@ mod tests {
                 path: path(),
                 reason: "r".into(),
             },
+            MediaError::NoDecoder {
+                path: path(),
+                codec: "prores".into(),
+            },
             MediaError::PictureTooLarge {
                 path: path(),
                 stream: 0,
@@ -292,6 +302,7 @@ mod tests {
                 | MediaError::NestedOpenRefused { .. }
                 | MediaError::UnsupportedContainer { .. }
                 | MediaError::Decode { .. }
+                | MediaError::NoDecoder { .. }
                 | MediaError::PictureTooLarge { .. }
                 | MediaError::HwUnsupported { .. }
                 | MediaError::HwFailed { .. }

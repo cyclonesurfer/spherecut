@@ -35,6 +35,7 @@ use std::sync::atomic::AtomicBool;
 
 use spherecut_core::{Rational, StopToken, Time};
 
+use crate::backend::DamageCause;
 use crate::doctor::{VulkanDevice, VulkanDeviceType};
 use crate::ffi::{self, DownloadPool, HwDevice, HwError, HwRefusal, OpenDecoderError};
 use crate::hwprobe::{self, VkDevice, device_label, vk_device_type};
@@ -154,6 +155,8 @@ pub struct VideoDecoder {
     /// Why reading stopped before a clean end of file; reported once the
     /// decoder has given up the frames it holds.
     read_error: Option<String>,
+    /// What kind of failure `read_error`, then `failed`, is.
+    read_cause: Option<DamageCause>,
     /// The error that ended the stream, returned by every later call.
     failed: Option<String>,
     /// Why the device turned the stream down, returned by every later
@@ -394,6 +397,10 @@ impl VideoDecoder {
             (OpenDecoderError::NotOnDevice, Some(dev)) => {
                 hw_unsupported(path, dev, HwRefusal::NotOffered)
             }
+            (OpenDecoderError::Ffmpeg(ff::Error::DecoderNotFound), _) => MediaError::NoDecoder {
+                path: path.to_path_buf(),
+                codec: par.codec_name.clone().unwrap_or_else(|| "this".into()),
+            },
             (e, _) => err(path, "opening decoder", e),
         })?;
         let codec = dec.codec();
@@ -417,6 +424,7 @@ impl VideoDecoder {
             eof_sent: false,
             done: false,
             read_error: None,
+            read_cause: None,
             failed: None,
             refused: None,
             hw_failed: None,
@@ -575,6 +583,11 @@ impl VideoDecoder {
         Some(err(&self.path, "reading", reason))
     }
 
+    /// What kind of failure [`read_failure`](Self::read_failure)'s is.
+    pub(crate) fn read_cause(&self) -> Option<DamageCause> {
+        self.read_cause.filter(|_| self.reading_failed())
+    }
+
     /// Whether reading has stopped with an error (see
     /// [`read_failure`](Self::read_failure)).
     pub(crate) fn reading_failed(&self) -> bool {
@@ -640,6 +653,7 @@ impl VideoDecoder {
         self.eof_sent = false;
         self.done = false;
         self.read_error = None;
+        self.read_cause = None;
         self.failed = None;
         self.awaiting_landing = true;
         self.landing = None;
@@ -900,6 +914,7 @@ impl VideoDecoder {
                 // as that error, not as the end of the file.
                 Err(ff::Error::Eof) => {
                     self.read_error = self.truncation();
+                    self.read_cause = self.read_error.as_ref().map(|_| DamageCause::Cut);
                     return None;
                 }
                 Err(ff::Error::InvalidData) => {
@@ -907,6 +922,7 @@ impl VideoDecoder {
                     unreadable += 1;
                     if unreadable == MAX_UNREADABLE_IN_A_ROW {
                         self.read_error = Some(format!("{unreadable} unreadable packets in a row"));
+                        self.read_cause = Some(DamageCause::Corrupt);
                         return None;
                     }
                     // One warning per file; the total comes at the end.
@@ -926,10 +942,12 @@ impl VideoDecoder {
                 // AVERROR_EXIT only comes from the interrupt callback.
                 Err(ff::Error::Exit) => {
                     self.read_error = Some("cancelled".into());
+                    self.read_cause = Some(DamageCause::Cancelled);
                     return None;
                 }
                 Err(e) => {
                     self.read_error = Some(e.to_string());
+                    self.read_cause = Some(DamageCause::Read);
                     return None;
                 }
             }
