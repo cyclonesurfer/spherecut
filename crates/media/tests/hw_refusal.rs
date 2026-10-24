@@ -14,11 +14,23 @@ use spherecut_media::decode::{VideoDecoder, open_hw_device};
 use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 use spherecut_media::{HwDevice, HwRefusal, MediaError};
 
-fn tmp() -> PathBuf {
-    let d =
-        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("hw-refusal-{}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// A test's own directory, removed with what it holds when dropped, so
+/// also when the test fails.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("hw-refusal-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        TempDir(d)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
 }
 
 /// FFmpeg's Vulkan device on lavapipe: FFmpeg picks the device whose name
@@ -32,8 +44,9 @@ fn lavapipe() -> Arc<HwDevice> {
     })
 }
 
-/// Ten 256x128 frames of a moving ramp, encoded with FFmpeg's `encoder`.
-fn clip(name: &str, encoder: &str, options: &[(&str, &str)]) -> PathBuf {
+/// Ten 256x128 frames of a moving ramp, encoded with FFmpeg's `encoder`,
+/// in `dir`.
+fn clip(dir: &TempDir, name: &str, encoder: &str, options: &[(&str, &str)]) -> PathBuf {
     let (w, h) = (256, 128);
     let settings = VideoSettings {
         encoder: encoder.into(),
@@ -50,7 +63,7 @@ fn clip(name: &str, encoder: &str, options: &[(&str, &str)]) -> PathBuf {
         time_base: None,
     };
     let (w, h) = (w as usize, h as usize);
-    let mut out = Mp4Writer::create(&tmp().join(name), &settings, None).unwrap();
+    let mut out = Mp4Writer::create(&dir.0.join(name), &settings, None).unwrap();
     for i in 0..10 {
         let luma = (0..w * h).map(|p| ((p % w + 8 * i) % 256) as u8).collect();
         let chroma = vec![128; w * h / 4];
@@ -72,7 +85,13 @@ fn refusal(r: Result<impl std::fmt::Debug, MediaError>) -> HwRefusal {
 
 #[test]
 fn a_refused_stream_stays_refused() {
-    let path = clip("hevc.mp4", "libx265", &[("x265-params", "log-level=error")]);
+    let dir = TempDir::new("stays-refused");
+    let path = clip(
+        &dir,
+        "hevc.mp4",
+        "libx265",
+        &[("x265-params", "log-level=error")],
+    );
     let mut d = VideoDecoder::open(&path, None, Some(lavapipe())).unwrap();
     let first = refusal(d.next_frame());
     // FFmpeg's HEVC decoder would go on in software after turning the
@@ -86,7 +105,13 @@ fn a_refused_stream_stays_refused() {
 fn a_refusal_comes_with_ffmpegs_reason_in_its_log() {
     // The Tier 2 Vulkan tests skip with what FFmpeg logged, which is the
     // only place that says why ("Device does not support decoding hevc!").
-    let path = clip("hevc.mp4", "libx265", &[("x265-params", "log-level=error")]);
+    let dir = TempDir::new("reason");
+    let path = clip(
+        &dir,
+        "hevc.mp4",
+        "libx265",
+        &[("x265-params", "log-level=error")],
+    );
     let dev = lavapipe();
     let (r, log) = spherecut_media::capture_ffmpeg_log(|| {
         VideoDecoder::open(&path, None, Some(dev)).and_then(|mut d| d.next_frame())
@@ -129,7 +154,8 @@ fn av1_is_refused_rather_than_decoded_by_a_software_only_decoder() {
 #[test]
 fn a_codec_no_decoder_can_decode_on_the_device_is_refused_at_open() {
     // No FFmpeg has Vulkan Video for MPEG-4 Part 2.
-    let path = clip("mpeg4.mp4", "mpeg4", &[]);
+    let dir = TempDir::new("mpeg4");
+    let path = clip(&dir, "mpeg4.mp4", "mpeg4", &[]);
     assert_eq!(
         refusal(VideoDecoder::open(&path, None, Some(lavapipe()))),
         HwRefusal::NotOffered
