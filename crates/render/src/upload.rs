@@ -173,6 +173,21 @@ impl Uploader {
                 slot: slot.shape().describe(),
             });
         }
+        // Every plane is checked before any is written, so a bad frame
+        // leaves the slot as it was.
+        let planes = shape
+            .planes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let data = frame.plane(i).ok_or_else(|| {
+                    RenderError::Invalid(format!("{} has no plane {i}", frame.layout().name))
+                })?;
+                let row = p.size.0 as usize * p.format.bytes_per_texel() as usize;
+                check_plane(&data, p.size, row, i)?;
+                Ok((data, row))
+            })
+            .collect::<Result<Vec<_>, RenderError>>()?;
         let device = &gpu.device;
         // Map callbacks: the belt's chunks and the timers' read-backs.
         let _ = device.poll(wgpu::PollType::Poll);
@@ -194,19 +209,14 @@ impl Uploader {
             gpu.queue
                 .write_buffer(&self.ingest_uniform, 0, bytemuck::bytes_of(&uniform));
         }
-        for (i, p) in shape.planes.iter().enumerate() {
-            let data = frame.plane(i).ok_or_else(|| {
-                RenderError::Invalid(format!("{} has no plane {i}", frame.layout().name))
-            })?;
-            let row = p.size.0 as usize * p.format.bytes_per_texel() as usize;
-            check_plane(&data, p.size, row, i)?;
+        for (i, (p, (data, row))) in shape.planes.iter().zip(&planes).enumerate() {
             bytes += (row * p.size.1 as usize) as u64;
             if p.format.is_deep() {
                 let scratch = self.scratch_for(gpu, i, p.format, p.size).texture.clone();
-                self.write_plane(gpu, &mut enc, &data, row, &scratch, p.size);
+                self.write_plane(gpu, &mut enc, data, *row, &scratch, p.size)?;
                 self.record_ingest(&mut enc, i, p.format, &slot.planes[i].levels[0]);
             } else {
-                self.write_plane(gpu, &mut enc, &data, row, &slot.planes[i].texture, p.size);
+                self.write_plane(gpu, &mut enc, data, *row, &slot.planes[i].texture, p.size)?;
             }
         }
         let span = self.timers.as_mut().and_then(|t| t.begin(&mut enc));
@@ -336,7 +346,7 @@ impl Uploader {
         row: usize,
         texture: &wgpu::Texture,
         size: (u32, u32),
-    ) {
+    ) -> Result<(), RenderError> {
         let extent = wgpu::Extent3d {
             width: size.0,
             height: size.1,
@@ -368,25 +378,27 @@ impl Uploader {
                 let pitch = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
                 let total = (pitch * size.1 as usize).next_multiple_of(4) as u64;
                 let Some(total) = wgpu::BufferSize::new(total) else {
-                    return;
+                    return Err(RenderError::Invalid("an empty plane".into()));
                 };
                 let align = wgpu::BufferSize::new(256).unwrap_or(wgpu::BufferSize::MIN);
                 let slice = belt.allocate(total, align);
                 let offset = slice.offset();
                 let buffer = slice.buffer().clone();
-                if let Ok(mut mapped) = slice.get_mapped_range_mut() {
-                    if data.stride == pitch {
-                        let n = pitch * (size.1 as usize - 1) + row;
-                        mapped.slice(..n).copy_from_slice(&data.bytes[..n]);
-                    } else {
-                        for y in 0..size.1 as usize {
-                            let src = &data.bytes[y * data.stride..y * data.stride + row];
-                            mapped
-                                .slice(y * pitch..y * pitch + row)
-                                .copy_from_slice(src);
-                        }
+                let mut mapped = slice
+                    .get_mapped_range_mut()
+                    .map_err(|e| RenderError::Device(format!("mapping the staging belt: {e}")))?;
+                if data.stride == pitch {
+                    let n = pitch * (size.1 as usize - 1) + row;
+                    mapped.slice(..n).copy_from_slice(&data.bytes[..n]);
+                } else {
+                    for y in 0..size.1 as usize {
+                        let src = &data.bytes[y * data.stride..y * data.stride + row];
+                        mapped
+                            .slice(y * pitch..y * pitch + row)
+                            .copy_from_slice(src);
                     }
                 }
+                drop(mapped);
                 enc.copy_buffer_to_texture(
                     wgpu::TexelCopyBufferInfo {
                         buffer: &buffer,
@@ -401,6 +413,7 @@ impl Uploader {
                 );
             }
         }
+        Ok(())
     }
 }
 

@@ -365,6 +365,23 @@ fn bad_frames_and_wrong_slots_are_refused() {
     );
     // And the slot still takes a good frame.
     uploader.upload(gpu, &frame, &slot).unwrap();
+    // A refused frame leaves the slot as it was, by either path: every
+    // plane is checked before any is written.
+    for path in [UploadPath::WriteTexture, UploadPath::StagingBelt] {
+        let mut uploader = Uploader::with_path(gpu, path);
+        uploader.upload(gpu, &frame, &slot).unwrap();
+        let before = levels(&slot);
+        let mut short = noise(Kind::Nv12, (64, 32), 0, 6);
+        short.planes[1].0.pop();
+        assert_eq!(
+            uploader.upload(gpu, &short, &slot).unwrap_err().code(),
+            "invalid_input"
+        );
+        assert!(
+            levels(&slot) == before,
+            "{path:?}: a refused frame changed the slot"
+        );
+    }
 }
 
 /// `bench_upload_5k7`'s body: `frames` uploads of each input by each path,
