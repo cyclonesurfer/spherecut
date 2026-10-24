@@ -23,7 +23,7 @@ use std::time::Instant;
 use spherecut_media::decode::{VideoDecoder, open_hw_device, open_vulkan_device};
 use spherecut_media::detect::Layout;
 use spherecut_media::probe::{self, ProbeReport, StreamKind};
-use spherecut_media::{HwDevice, HwError, MediaError, capture_ffmpeg_log};
+use spherecut_media::{HwDevice, HwError, MediaError, capture_hw_decode_log};
 use spherecut_testkit::{bench, tier2};
 
 const EXTENSIONS: &[&str] = &["insv", "lrv", "mp4", "mov", "360", "osv"];
@@ -64,7 +64,9 @@ fn video_streams(r: &ProbeReport) -> Vec<usize> {
         .collect()
 }
 
-/// A stream's codec and profile, e.g. "hevc (Main 10)", and its size.
+/// A stream's codec and profile, e.g. "hevc (Main 10)", and its size and
+/// level, e.g. "3840x3840 at level 153" (FFmpeg's numbering of levels, as
+/// in its own lines).
 fn stream_format(r: &ProbeReport, index: usize) -> (String, String) {
     let s = r.streams.iter().find(|s| s.index == index);
     let mut format = s
@@ -73,9 +75,12 @@ fn stream_format(r: &ProbeReport, index: usize) -> (String, String) {
     if let Some(p) = s.and_then(|s| s.profile.as_ref()) {
         format += &format!(" ({p})");
     }
-    let size = s
+    let mut size = s
         .and_then(|s| s.video.as_ref())
         .map_or("?".into(), |v| format!("{}x{}", v.width, v.height));
+    if let Some(level) = s.and_then(|s| s.level) {
+        size += &format!(" at level {level}");
+    }
     (format, size)
 }
 
@@ -145,11 +150,16 @@ fn vulkan() -> Vulkan {
 }
 
 /// Why `dev` can't decode the first frame of stream `index` of `path`, if
-/// it can't: the error, and what FFmpeg logged meanwhile. For a driver
-/// without the profile, only the log says why ("Device does not support
-/// decoding hevc!").
+/// it can't: the error, and what FFmpeg logged meanwhile. Only the log
+/// says why for a driver without the codec ("Device does not support
+/// decoding hevc!") or the profile ("Unable to initialize video session:
+/// hevc profile "Main 10" not supported!"). For a stream bigger or of a
+/// higher level than the driver decodes, FFmpeg says nothing but the
+/// limits it checked ("Maximum level: 153 (stream 186)"), so
+/// `samples_vulkan_decode_matches_software` adds the stream's size and
+/// level.
 fn first_frame(path: &Path, index: usize, dev: &Arc<HwDevice>) -> Result<(), (MediaError, String)> {
-    let (r, log) = capture_ffmpeg_log(|| {
+    let (r, log) = capture_hw_decode_log(|| {
         VideoDecoder::open(path, Some(index), Some(dev.clone())).and_then(|mut d| d.next_frame())
     });
     let ffmpeg = if log.is_empty() {
@@ -428,7 +438,8 @@ fn bench_samples_realtime_decode() {
             Ok(vk) => streams
                 .iter()
                 .try_for_each(|&idx| {
-                    first_frame(path, idx, &vk.dev).map_err(|(e, ffmpeg)| format!("{e}{ffmpeg}"))
+                    first_frame(path, idx, &vk.dev)
+                        .map_err(|(e, ffmpeg)| format!("stream {idx}: {e}{ffmpeg}"))
                 })
                 .and_then(|()| {
                     bench::try_measure(&row, "× real time", || rate(Some(vk.dev.clone())))

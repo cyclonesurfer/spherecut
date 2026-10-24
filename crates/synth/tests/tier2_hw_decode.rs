@@ -23,7 +23,8 @@ use std::time::Instant;
 use spherecut_core::FrameRate;
 use spherecut_media::decode::{VideoDecoder, open_hw_device, open_vulkan_device};
 use spherecut_media::encode::EncodeError;
-use spherecut_media::{HwDevice, HwError, MediaError, capture_ffmpeg_log};
+use spherecut_media::probe::{self, StreamKind};
+use spherecut_media::{HwDevice, HwError, MediaError, capture_hw_decode_log};
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Audio, Codec, Spec, SynthError};
 use spherecut_testkit::{bench, tier2};
@@ -145,19 +146,44 @@ fn vulkan() -> Vulkan {
 }
 
 /// Why `dev` can't decode the first frame of `path`, if it can't: the
-/// error, and what FFmpeg logged meanwhile. For a driver without the
-/// profile, only the log says why ("Device does not support decoding
-/// hevc!").
+/// error, and after it the stream's size and level and what FFmpeg logged
+/// meanwhile. Only the log says why for a driver without the codec
+/// ("Device does not support decoding hevc!") or the profile ("Unable to
+/// initialize video session: hevc profile "Main 10" not supported!"). For
+/// a stream bigger or of a higher level than the driver decodes, FFmpeg
+/// says nothing but the limits it checked ("Maximum level: 153 (stream
+/// 186)"), so the stream's own size goes with them.
 fn first_frame(path: &Path, dev: &Arc<HwDevice>) -> Result<(), (MediaError, String)> {
-    let (r, log) = capture_ffmpeg_log(|| {
+    let (r, log) = capture_hw_decode_log(|| {
         VideoDecoder::open(path, None, Some(dev.clone())).and_then(|mut d| d.next_frame())
     });
-    let ffmpeg = if log.is_empty() {
-        String::new()
-    } else {
-        format!(" (FFmpeg: {})", log.join(" "))
+    r.map(drop).map_err(|e| {
+        let mut about = vec![video_stream(path)];
+        if !log.is_empty() {
+            about.push(format!("FFmpeg: {}", log.join(" ")));
+        }
+        (e, format!(" ({})", about.join("; ")))
+    })
+}
+
+/// The size and level of `path`'s video stream, e.g. "stream 1024x512,
+/// level 93", in FFmpeg's numbering of levels as in its own lines.
+fn video_stream(path: &Path) -> String {
+    let r = match probe::probe(path) {
+        Ok(r) => r,
+        Err(e) => return format!("stream not probed: {e}"),
     };
-    r.map(drop).map_err(|e| (e, ffmpeg))
+    let Some(s) = r.streams.iter().find(|s| s.kind == StreamKind::Video) else {
+        return "no video stream".into();
+    };
+    let mut out = match &s.video {
+        Some(v) => format!("stream {}x{}", v.width, v.height),
+        None => "stream of unknown size".into(),
+    };
+    if let Some(level) = s.level {
+        out += &format!(", level {level}");
+    }
+    out
 }
 
 /// Decode `path` in software and on `dev`, called `on` in messages, and
@@ -194,12 +220,12 @@ fn check_vulkan_matches_software(format: &str, clip: impl FnOnce() -> PathBuf) {
     let path = clip();
     match first_frame(&path, &vk.dev) {
         Ok(()) => {}
-        Err((e @ MediaError::HwUnsupported { .. }, ffmpeg)) => tier2::skip(format!(
-            "Vulkan Video can't decode {format} on {}: {e}{ffmpeg}",
+        Err((e @ MediaError::HwUnsupported { .. }, why)) => tier2::skip(format!(
+            "Vulkan Video can't decode {format} on {}: {e}{why}",
             vk.about
         )),
-        Err((e, ffmpeg)) => panic!(
-            "Vulkan decode of {} on {} failed: {e}{ffmpeg}",
+        Err((e, why)) => panic!(
+            "Vulkan decode of {} on {} failed: {e}{why}",
             path.display(),
             vk.about
         ),
@@ -282,7 +308,7 @@ fn bench_decode_hevc_4k_and_5k7() {
         let measured = match &vulkan {
             Err(no) => Err(no.reason().to_string()),
             Ok(vk) => first_frame(&path, &vk.dev)
-                .map_err(|(e, ffmpeg)| format!("{e}{ffmpeg}"))
+                .map_err(|(e, why)| format!("{e}{why}"))
                 .and_then(|()| {
                     bench::try_measure(&row, "fps", || fps(&path, Some(vk.dev.clone())))
                         .map_err(|e| e.to_string())
