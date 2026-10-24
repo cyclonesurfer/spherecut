@@ -123,7 +123,10 @@ planned ones above don't exist yet.
   `AVVulkanDeviceContext` with its own `#[repr(C)]` declarations of the
   few Vulkan structs it reads, and `capture_ffmpeg_log`, which collects
   what FFmpeg logs while doctor runs a check or `probe` reads a file (a
-  thread-local `tracing` subscriber that passes everything on). It ends
+  thread-local `tracing` subscriber that passes everything on, beside one
+  that wants nothing and lives as long as the process, so that `tracing`
+  asks every subscriber, the capture's among them, whether it wants a
+  callsite another thread reaches first). It ends
   any unfinished line before and after, so that each captured line is
   whole and is the run's own.
 
@@ -204,8 +207,10 @@ The other modules are safe Rust:
   skipped as invalid data. On a device it opens a decoder that can use the
   device and never falls back to software (D3, D14). For `seek` it also
   seeks (clearing a read failure, not a refusal, D29), says where a seek
-  landed and the last packet read (dts, else pts), the least lag of a
-  keyframe's pts behind its dts, and as soon as reading has failed (the
+  landed (and the pts of a keyframe landed on) and the last packet read
+  (dts, else pts), the least lag of a keyframe's pts behind its dts, the
+  last keyframe the file holds when its index lists more than the file
+  does (an MP4 cut short), and as soon as reading has failed (the
   frames still to come out may follow frames the damage lost), reads a
   stream's first packets' timestamps and seeks back, stops at packet and
   frame boundaries on a `StopToken`, and skips non-reference frames until
@@ -228,15 +233,17 @@ The other modules are safe Rust:
   that cross threads are checked `Send`, and `Sync` where they are
   shared, at compile time.
 * `seek`: `FfmpegVideo`, the `VideoDecode` on `VideoDecoder`, with the
-  frame-exact seek of plan section 3.3 (D29), frame-index addressing
+  frame-exact seek of plan section 3.3 (D29), which drops the leading
+  pictures of the keyframe a seek lands on, frame-index addressing
   (`frame_address`, `seek_frame`) and the stream's timing facts (constant
-  rate from `stts` and `ctts`, or from a snapped Matroska default
-  duration that the first 64 blocks and the Cues keep to; the end of the
-  stream from the container, else the last frame's interval; the frame
-  count from the MP4 index; the mapping from the track's spherical
-  boxes). Streams whose timestamps tie or go backwards seek by the tie
-  rule, the latter by decoding from the start. It converts frames of a format that isn't uploaded as it is
-  through swscale, once announced with `DecoderEvent::Converted` (D30).
+  rate from `stts`, `ctts` and an edit list that shows the track once, or
+  from a snapped Matroska default duration that the first 64 blocks and
+  the Cues keep to; the end of the stream from the container, else the
+  last frame's interval; the frame count from the MP4 index; the mapping
+  from the track's spherical boxes). Streams whose timestamps tie or go
+  backwards seek by the tie rule, the latter by decoding from the start.
+  It converts frames of a format that isn't uploaded as it is through
+  swscale, once announced with `DecoderEvent::Converted` (D30).
 * `color`: `resolve`, the colour default rules (D30): a frame's codes,
   as FFmpeg's ints, become the `ColorInfo` the renderer uses, with an
   `assumed` flag for each field a rule filled in (siting only where the

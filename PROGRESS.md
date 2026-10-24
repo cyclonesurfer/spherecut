@@ -8,7 +8,7 @@ decisions and their reasons in `DECISIONS.md`.
 | Milestone | State |
 |---|---|
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because RADV on Strix Halo has no Vulkan Video H.264 or HEVC decode. Evidence below |
-| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion stays unticked until `spherecut frame`, which it also covers, exists and has its strace test. The CLI's JSON contract for `probe` and `doctor` (D27, `docs/cli-json.md`) is the third; its criterion stays unticked until `frame` joins it, with exit statuses 3 and 4, SIGINT and `--overwrite`. Slice 2a is the fourth: `core::video` and `core::cancel`, `media::backend` with `FfmpegBackend` and the frame-exact seek of plan section 3.3 in software (D29), native pixel layouts, swscale for the rest and the colour default rules (D30), synth's new clips and its `SyntheticBackend` and `GatedBackend`. The seek oracle (`crates/synth/tests/seek.rs`) is exact on every clip of the set, among them clips whose timestamps tie or go backwards and variable-rate Matroska files with a constant default duration; it checks what each seek cost and every run link, and its negative controls miss. The slice's review found 16 faults (wrong frames returned as `Exact` after a cut, in broken timestamps and in variable-rate Matroska, false run links when catching up, a duration missing for Matroska, an index trusted before Cues are read); all are fixed, each with a test that fails without its fix where one can show it (D29, D30). Slice 2b adds hardware decoding through the backend, fallback and the Tier 2 seek tests; no M1 criterion is ticked yet |
+| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion stays unticked until `spherecut frame`, which it also covers, exists and has its strace test. The CLI's JSON contract for `probe` and `doctor` (D27, `docs/cli-json.md`) is the third; its criterion stays unticked until `frame` joins it, with exit statuses 3 and 4, SIGINT and `--overwrite`. Slice 2a is the fourth: `core::video` and `core::cancel`, `media::backend` with `FfmpegBackend` and the frame-exact seek of plan section 3.3 in software (D29), native pixel layouts, swscale for the rest and the colour default rules (D30), synth's new clips and its `SyntheticBackend` and `GatedBackend`. The seek oracle (`crates/synth/tests/seek.rs`) is exact on every clip of the set, among them clips whose timestamps tie or go backwards and variable-rate Matroska files with a constant default duration; it checks what each seek cost and every run link, and its negative controls miss. The slice's review found 16 faults (wrong frames returned as `Exact` after a cut, in broken timestamps and in variable-rate Matroska, false run links when catching up, a duration missing for Matroska, an index trusted before Cues are read); all are fixed, each with a test that fails without its fix where one can show it (D29, D30). Its second review found 10 more (an open-GOP H.264 leading picture and a RADL picture returned after a seek, seeks past an MP4 cut, an MP4 spliced by its edit list read as constant-rate, resuming after a stopped seek in tied and backwards streams, an FFmpeg log capture that lost its lines to another thread, a test that a change in load could fail, and an overflow on a far-off Cues entry); all are fixed too, with tests where one can show it (D29). Slice 2b adds hardware decoding through the backend, fallback and the Tier 2 seek tests; no M1 criterion is ticked yet |
 | M2–M9 | Not started |
 | Agent integration (track A) | Planned 2026-10-24 at Pat's request (`PLAN.md` track A, DECISIONS D23). The CLI's JSON contract and FFmpeg's confinement are M1 criteria; the confinement is in (D24), and so is the contract for probe and doctor (D27); A1, the MCP server, follows M1's code |
 
@@ -132,17 +132,22 @@ back clean, so M0 is done.
   test. A target among the leading pictures of the next keyframe seeks
   rather than decoding on. A Matroska file's constant rate is checked on
   its first 64 blocks and its Cues only. The new run that catching up
-  starts after it skipped frames is a guard no test reaches (D29).
-- Slice 2a adds about 9 s to `cargo xtask check`, nearly all of it the
-  seek oracle's test binary: 8.9 s of a 23 s warm check here (4.6 s
-  before the review's fixes added the tied, backwards, variable-rate
-  Matroska, long Matroska and catch-up clips). Every exact seek in a
-  backwards clip decodes it twice from the start, and the oracle seeks
-  four times in each frame's interval.
+  starts after it skipped frames is a guard no test reaches. Resuming in
+  a backwards stream after a frame handed out before the stream was found
+  out takes the first frame at its pts for it, and starts a run (D29).
+- Slice 2a adds about 12 s to `cargo xtask check`, nearly all of it the
+  seek oracle's test binary: 11.7 s of a 26 s warm check here (8.9 s
+  before the second review's fixes added the 25-frame open-GOP, RADL,
+  spliced and resumed clips, 4.6 s before the first review's added the
+  tied, backwards, variable-rate Matroska, long Matroska and catch-up
+  ones). Every exact seek in a backwards clip decodes it twice from the
+  start, and the oracle seeks four times in each frame's interval.
 - FFmpeg 6.1's H.264 decoder, left to drop the frames it decodes from
   references a seek skipped, loses the frames still in its reorder buffer
-  at the end of the stream. Spherecut has it output them and drops them
-  itself (D29); FFmpeg 7.1 to 9.0 have not been checked for the bug.
+  at the end of the stream, and doesn't flag those it drains then.
+  Spherecut has it output them, drops the flagged ones and, after a seek,
+  every leading picture of the keyframe it landed on, by pts (D29);
+  FFmpeg 7.1 to 9.0 have not been checked for the bug.
 - swscale's conversion is tested end to end only for UYVY and RGB24, the
   formats a raw MOV carries; the others by format (D30).
 - synth's clips are tagged centre-sited chroma, which is what their
