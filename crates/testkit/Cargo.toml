@@ -1,6 +1,6 @@
 [package]
 name = "spherecut-testkit"
-description = "Test helpers: Tier 2 gating and skips, benchmark recording"
+description = "Test helpers: Tier 2 gating and skips, benchmark recording, image metrics and hashing"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
