@@ -1310,7 +1310,12 @@ since a fragmented recording has thousands; the text output still
 lists them all. A spherical `stereo` is always a name, `unknown` for a
 value the specification doesn't define, with the `st3d` byte in
 `stereo_value`, where M0 wrote an unknown one as `{"unknown": n}`: one
-type per field is what typed readers and A1's schemas need.
+type per field is what typed readers and A1's schemas need. A video
+stream's `color` and `field_order` are FFmpeg's names, and what a file
+doesn't say is FFmpeg's `unknown` (`unspecified` for a chroma location),
+as in the text output, not null; null is left for a value this FFmpeg
+has no name for. Mapping `unknown` to null later would change a field's
+values, which is a new version, so it is settled now.
 
 `frame` brings its result, its codes (`output_exists`, `not_equirect`,
 `out_of_range`, `no_gpu`, `adapter_not_found`, `no_decoder` as an error,

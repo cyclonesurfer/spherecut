@@ -16,8 +16,9 @@ use serde_json::Value;
 use spherecut_cli::contract::{self, Exit};
 use spherecut_core::{FrameRate, FrameTime, Rational, Time};
 use spherecut_media::doctor::{self, DoctorReport, Issue, Severity};
-use spherecut_synth::Pattern;
+use spherecut_media::encode::{Mp4Writer, PixelLayout, VideoSettings};
 use spherecut_synth::media::{self, Audio, Codec, Spec};
+use spherecut_synth::{Pattern, render_equirect, yuv};
 
 mod document;
 
@@ -95,6 +96,28 @@ fn clip(dir: &Path, rate: FrameRate) -> (PathBuf, Vec<PathBuf>) {
     let good = media::write(&spec, dir).unwrap();
     let bad = media::write_bad_files(&good, dir).unwrap();
     (good, bad)
+}
+
+/// A short H.264 clip whose stream says nothing of its colour: no range,
+/// matrix, primaries or transfer.
+fn untagged_clip(dir: &Path) -> PathBuf {
+    let settings = VideoSettings {
+        encoder: "libx264".into(),
+        width: 256,
+        height: 128,
+        rate: FrameRate::FPS_25,
+        layout: PixelLayout::Yuv420p,
+        options: [("preset", "veryfast"), ("threads", "1")]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .to_vec(),
+        bt709_limited: false,
+    };
+    let mut w = Mp4Writer::create(&dir.join("untagged.mp4"), &settings, None).unwrap();
+    for i in 0..3 {
+        let img = render_equirect(Pattern::Grid, settings.width, settings.height, i, 1);
+        w.push_video(&yuv::to_yuv420(&img, 8)).unwrap();
+    }
+    w.finish().unwrap()
 }
 
 /// A Matroska element with an 8-byte size.
@@ -462,6 +485,37 @@ fn long_box_lists_are_cut_and_stereo_modes_are_names() {
     assert_eq!(v2(0)["stereo_value"], 0);
     assert_eq!(v2(1)["stereo"], "unknown");
     assert_eq!(v2(1)["stereo_value"], 7);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn colour_and_field_order_are_ffmpegs_names_not_null() {
+    let dir = tmp("colour");
+    let (tagged, _) = clip(&dir, FrameRate::FPS_25);
+    let untagged = untagged_clip(&dir);
+    // Its codec setup is damaged, so FFmpeg knows no chroma location or
+    // field order.
+    let no_setup = dir.join("bad-codec-config.mp4");
+    let (_, v) = probe_json(&[&tagged, &untagged, &no_setup]);
+    let video = |i: usize| &v["result"]["files"][i]["report"]["streams"][0]["video"];
+    let color = |i: usize| {
+        let c = &video(i)["color"];
+        [
+            "range",
+            "matrix",
+            "primaries",
+            "transfer",
+            "chroma_location",
+        ]
+        .map(|k| c[k].as_str().unwrap_or_else(|| panic!("{k}: {v}")))
+    };
+    assert_eq!(color(0), ["tv", "bt709", "bt709", "bt709", "left"]);
+    assert_eq!(video(0)["field_order"], "progressive");
+    // What the file doesn't say is FFmpeg's `unknown`, as ffprobe prints
+    // it, not null.
+    assert_eq!(color(1)[..4], ["unknown"; 4], "{v}");
+    assert_eq!(color(2)[4], "unspecified", "{v}");
+    assert_eq!(video(2)["field_order"], "unknown", "{v}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
