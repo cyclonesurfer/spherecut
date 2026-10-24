@@ -399,7 +399,13 @@ impl VideoDecoder {
             }
             (OpenDecoderError::Ffmpeg(ff::Error::DecoderNotFound), _) => MediaError::NoDecoder {
                 path: path.to_path_buf(),
-                codec: par.codec_name.clone().unwrap_or_else(|| "this".into()),
+                codec: match par.codec_name.as_deref() {
+                    // FFmpeg's names for a codec it doesn't know at all:
+                    // the sample entry's fourcc says more.
+                    Some(name) if name != "none" && name != "unknown_codec" => name.to_string(),
+                    _ => crate::probe::fourcc_str(par.codec_tag)
+                        .map_or_else(|| "this codec's".into(), |tag| format!("\"{tag}\"")),
+                },
             },
             (e, _) => err(path, "opening decoder", e),
         })?;

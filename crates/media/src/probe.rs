@@ -341,7 +341,8 @@ fn rational(r: ff::Rational) -> Option<Rational> {
     Rational::new(r.numerator() as i64, r.denominator() as i64).ok()
 }
 
-fn fourcc_str(tag: u32) -> Option<String> {
+/// A fourcc as text, with bytes that aren't printable escaped.
+pub(crate) fn fourcc_str(tag: u32) -> Option<String> {
     if tag == 0 {
         return None;
     }
