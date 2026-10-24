@@ -404,7 +404,7 @@ format again clears the refusal (review C16). `ffi::hw_refusal` reads
 the flags. Doctor's probes (`hwprobe.rs`) use the same callback and
 flags. The Tier 2 Vulkan test skips when there is no render node, when
 FFmpeg has no Vulkan device or no encoder to make its clip, or on
-`HwUnsupported`; any other error fails it. *Updated by D27:* the Vulkan
+`HwUnsupported`; any other error fails it. *Updated by D38:* the Vulkan
 tests no longer need a render node, run on the GPU behind it if there is
 one, skip when FFmpeg's only Vulkan devices run on the CPU, and give the
 device and FFmpeg's own words when they skip.
@@ -1174,11 +1174,12 @@ UI types: a switch would replace only `spherecut-app`.
 Revisit if: the M2 check fails, or `egui_dock` or egui's text editing
 changes enough to matter.
 
-## D27. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
+## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 
 *2026-10-24, M1. Pat approved Vulkan Video HEVC in odin's hardware run
 (the stack review's third change; PLAN M1's hardware criterion).
-Extends D14.*
+Extends D14. D27 to D37 are kept for the M1 plan's decisions
+(`docs/design/m1-plan.md`, section 0), so this one is D38.*
 
 How FFmpeg picks the device: `av_hwdevice_ctx_create` for Vulkan with
 no device string takes physical device 0 of its own Vulkan instance

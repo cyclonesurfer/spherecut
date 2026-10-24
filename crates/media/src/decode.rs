@@ -613,7 +613,7 @@ fn describe(d: &VulkanDevice) -> String {
 }
 
 /// Open FFmpeg's Vulkan device on a GPU, and on the same GPU as VA-API,
-/// rather than where FFmpeg's default lands (DECISIONS D27).
+/// rather than where FFmpeg's default lands (DECISIONS D38).
 ///
 /// Without a device string, FFmpeg (6.1 to 8.1 at least) opens the first
 /// physical device its Vulkan instance lists, and the Vulkan loader and

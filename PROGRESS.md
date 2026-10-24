@@ -173,7 +173,7 @@ back clean, so M0 is done.
 - Doctor's Vulkan checks run on FFmpeg's default Vulkan device, while the
   Tier 2 Vulkan Video tests use the GPU behind VA-API's render node
   (`open_vulkan_device`). On a machine with two GPUs they can differ;
-  both name the device (D27).
+  both name the device (D38).
 - Doctor doesn't print the full VA-API profile list; the hw-test report
   includes `vainfo`.
 - ambiX AAC plays as 4.0 surround in players that ignore `SA3D` (D17).
@@ -188,7 +188,7 @@ back clean, so M0 is done.
 
 1. The first `cargo xtask hw-test` run on odin (any time; the prompt is
    the one huginn used). It now includes Vulkan Video checks on H.264,
-   HEVC Main and Main 10 and the X5 samples, with benchmark rows (D27).
+   HEVC Main and Main 10 and the X5 samples, with benchmark rows (D38).
    On Fedora's own `mesa-vulkan-drivers` the H.264 and HEVC ones skip,
    as on huginn; RPM Fusion's `mesa-vulkan-drivers-freeworld` has them.
    Whether odin swaps it in before the run is Pat's call.

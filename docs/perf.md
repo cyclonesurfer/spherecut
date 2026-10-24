@@ -76,7 +76,7 @@ How the Vulkan Video rows read:
   same clip or mode, in the same unit, so the two hardware paths compare
   row for row.
 - They run on the GPU behind VA-API's render node, or the first GPU if
-  no Vulkan device is listed as that one (DECISIONS D27). A note under
+  no Vulkan device is listed as that one (DECISIONS D38). A note under
   the table names it, for example "Vulkan Video rows ran on AMD Radeon RX
   7600 (RADV NAVI33) (discrete GPU, driver radv), the GPU behind
   /dev/dri/renderD128". If it says "the first GPU listed" instead, the
@@ -154,7 +154,7 @@ Not run yet: no report. Its run includes the Vulkan Video checks and
 rows. With Fedora's own `mesa-vulkan-drivers`, H.264 and HEVC have no
 Vulkan Video rows, as on huginn: Fedora builds Mesa's Vulkan drivers
 without them, and RPM Fusion's `mesa-vulkan-drivers-freeworld` adds
-them (DECISIONS D27).
+them (DECISIONS D38).
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 

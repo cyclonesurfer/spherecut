@@ -9,7 +9,7 @@
 //! optional: where the driver can't decode a format, its test skips with
 //! FFmpeg's reason and its benchmark rows are left out with it. It runs on
 //! the GPU behind VA-API's render node, or the first GPU, never on
-//! llvmpipe (`open_vulkan_device`, DECISIONS D27).
+//! llvmpipe (`open_vulkan_device`, DECISIONS D38).
 //!
 //! Run with `cargo xtask hw-test`; plain `cargo test` lists them as ignored.
 

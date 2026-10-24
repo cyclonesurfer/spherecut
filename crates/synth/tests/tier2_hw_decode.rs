@@ -10,7 +10,7 @@
 //! optional, and not every driver has it, so its tests skip with FFmpeg's
 //! reason when the driver can't decode the format, and fail on any other
 //! error. They run on the GPU behind VA-API's render node, or the first
-//! GPU, never on llvmpipe (`open_vulkan_device`, DECISIONS D27).
+//! GPU, never on llvmpipe (`open_vulkan_device`, DECISIONS D38).
 //!
 //! Run with `cargo xtask hw-test`; plain `cargo test` lists them as ignored.
 
