@@ -878,8 +878,8 @@ fn a_long_matroska_file_seeks_far_rather_than_decoding_there() {
 const FRAME_30: i64 = 512;
 
 /// Copy `src` into the MP4 `dst`, giving video packet `k` in decode order
-/// the pts `pts(k, dts)` and keeping its dts: timestamps that tie or go
-/// backwards, which no encoder writes but broken muxers do.
+/// the pts `pts(k, its pts)` and keeping its dts: timestamps that tie or
+/// go backwards, which no encoder writes but broken muxers do.
 // Writes a file this test made with ffmpeg-next alone, as `faststart`
 // does.
 #[allow(clippy::disallowed_methods)]
@@ -897,7 +897,7 @@ fn retime(src: &Path, dst: &Path, pts: impl Fn(usize, i64) -> i64) {
     let mut k = 0;
     for (st, mut pkt) in ictx.packets() {
         if st.parameters().medium() == ff::media::Type::Video {
-            pkt.set_pts(Some(pts(k, pkt.dts().unwrap())));
+            pkt.set_pts(Some(pts(k, pkt.pts().unwrap())));
             k += 1;
         }
         pkt.rescale_ts(st.time_base(), octx.stream(st.index()).unwrap().time_base());
@@ -929,8 +929,8 @@ fn timestamps_that_tie_or_go_backwards_seek_by_the_tie_rule() {
     );
     // Frames 9 and 10 at one pts: 9 is never shown.
     let ties = dir.join("ties.mp4");
-    retime(&p_only, &ties, |k, dts| {
-        dts + if k == 10 { 0 } else { FRAME_30 }
+    retime(&p_only, &ties, |k, pts| {
+        pts + if k == 10 { 0 } else { FRAME_30 }
     });
     let r = oracle(&ties, GOP_8);
     assert_eq!(r.frames[9].pts, r.frames[10].pts);
@@ -958,8 +958,8 @@ fn timestamps_that_tie_or_go_backwards_seek_by_the_tie_rule() {
     // Frames 10 to 14 shown a frame and a half late, so 15 is shown
     // before 14.
     let back = dir.join("backwards.mp4");
-    retime(&p_only, &back, |k, dts| {
-        dts + if (10..15).contains(&k) {
+    retime(&p_only, &back, |k, pts| {
+        pts + if (10..15).contains(&k) {
             3 * FRAME_30 / 2
         } else {
             0
@@ -1127,6 +1127,135 @@ fn catching_up_never_returns_a_frame_before_the_target() {
             panic!("no frame");
         };
         assert_eq!(Seen::of(&f), *want);
+    }
+}
+
+/// Catching up hands out frames that follow on from the last one before
+/// it, or that start a run, however it ends: at its target, after a stop,
+/// or called off by a seek or by catching up to an earlier time. On one
+/// thread, as a hardware decoder runs, the frames it skips never come out
+/// of the decoder at all. In a stream whose timestamps go backwards, it
+/// skips none, since every frame is counted from the start.
+#[test]
+fn catching_up_keeps_its_place_and_links_only_frames_that_follow_on() {
+    let dir = TempDir::new("catch-up-runs");
+    let req = VideoRequest {
+        threads: std::num::NonZeroU32::new(1),
+        ..VideoRequest::default()
+    };
+    let never = StopToken::never();
+    let source = StopSource::new();
+    let stopped = source.current();
+    source.next();
+    let h264 = write(&spec("catch-up-h264", Codec::H264), &dir);
+    // Packets 10 to 14 in decode order shown a frame and a half late.
+    let back = dir.join("catch-up-back.mp4");
+    retime(&h264, &back, |k, pts| {
+        pts + if (10..15).contains(&k) {
+            3 * FRAME_30 / 2
+        } else {
+            0
+        }
+    });
+    let hevc = write(&spec("catch-up-hevc", Codec::Hevc), &dir);
+    let clips = [
+        ("catch-up-h264", h264),
+        ("catch-up-hevc", hevc),
+        ("catch-up-back", back),
+    ];
+    for (name, clip) in clips {
+        let (frames, _) = sequential(&clip);
+        let backwards = frames.windows(2).any(|w| w[1].pts < w[0].pts);
+        let mut d = FfmpegBackend.open_video(&clip, &req).unwrap();
+        let d = &mut *d;
+        if name == "catch-up-back" {
+            assert!(backwards);
+            // Found out by playing it through.
+            while let NextFrame::Frame(_) = d.next_frame(&never).unwrap() {}
+            assert!(
+                d.take_events()
+                    .iter()
+                    .any(|e| matches!(e, DecoderEvent::NotExactlySeekable { .. })),
+                "{name}"
+            );
+        }
+        // The first frame from frame `i` on, in output order, shown at or
+        // after `pts`.
+        let first_from = |i: usize, pts: i64| (i..).find(|&j| frames[j].pts >= pts).unwrap();
+        let mut runs = Runs::default();
+        // Which frame of the sequential decode `f` is, noting its run.
+        let mut note = |f: &VideoFrame| {
+            let i = frames.iter().position(|s| s.pts == f.pts).unwrap();
+            assert_eq!(Seen::of(f), frames[i], "{name}");
+            runs.note(name, f, i);
+            i
+        };
+        let next = |d: &mut dyn VideoDecode| match d.next_frame(&never).unwrap() {
+            NextFrame::Frame(f) => f,
+            got => panic!("{name}: {got:?}"),
+        };
+        let seek = |d: &mut dyn VideoDecode, i: usize| {
+            let (f, e, _) = seek_pts(d, frames[i].pts, SeekMode::Exact);
+            assert_eq!(e, Exactness::Exact, "{name}");
+            f
+        };
+        for k in [3, 9, 14] {
+            for gap in [2, 3, 5] {
+                let target = k + 1 + gap;
+                let until = at(d, frames[target].pts);
+                let seen = format!("{name}: frame {k}, catching up to {target}");
+
+                // Stopped before the next frame is known, then catching up.
+                let f = seek(d, k);
+                assert_eq!(note(&f), k, "{seen}");
+                assert!(
+                    matches!(d.next_frame(&stopped).unwrap(), NextFrame::Stopped),
+                    "{seen}"
+                );
+                d.catch_up(Some(until));
+                let reached = first_from(k + 1, frames[target].pts);
+                for want in reached..reached + 3 {
+                    assert_eq!(note(&next(d)), want, "{seen}");
+                }
+                // And then stopped: it goes on from there.
+                stopped_seek(d);
+                assert_eq!(note(&next(d)), reached + 3, "{seen}");
+
+                // Catching up after a seek that was stopped before it began.
+                let f = seek(d, k);
+                note(&f);
+                stopped_seek(d);
+                d.catch_up(Some(at(d, frames[k + gap].pts)));
+                let want = first_from(k + 1, frames[k + gap].pts);
+                assert_eq!(note(&next(d)), want, "{seen}");
+
+                // Stopped after passing a frame over, then called off: what
+                // it passed over is found again.
+                for call_off in 0..3 {
+                    let f = seek(d, k);
+                    note(&f);
+                    d.catch_up(Some(until));
+                    assert!(
+                        matches!(d.next_frame(&stopped).unwrap(), NextFrame::Stopped),
+                        "{seen}"
+                    );
+                    let f = match call_off {
+                        0 => seek(d, k + 1),
+                        1 => {
+                            d.catch_up(None);
+                            next(d)
+                        }
+                        _ => {
+                            d.catch_up(Some(at(d, frames[k + 1].pts)));
+                            next(d)
+                        }
+                    };
+                    let how = format!("{seen}, called off by {call_off}");
+                    assert_eq!(note(&f), k + 1, "{how}");
+                    assert_eq!(note(&next(d)), k + 2, "{how}");
+                }
+            }
+        }
     }
 }
 

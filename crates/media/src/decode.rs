@@ -169,6 +169,9 @@ pub struct VideoDecoder {
     /// Frames nothing refers to are skipped until a packet with a pts at
     /// or after this one is sent.
     skip_before: Option<i64>,
+    /// Packets sent while frames nothing refers to were being skipped:
+    /// the decoder may have dropped any of them without a frame.
+    skip_sent: u64,
 }
 
 /// What [`VideoDecoder::receive`] got.
@@ -356,6 +359,7 @@ impl VideoDecoder {
             read_position: None,
             key_lag: None,
             skip_before: None,
+            skip_sent: 0,
         })
     }
 
@@ -459,6 +463,9 @@ impl VideoDecoder {
                         && pkt.pts().is_none_or(|p| p >= until)
                     {
                         self.skip_nonref_before(None);
+                    }
+                    if self.skip_before.is_some() {
+                        self.skip_sent += 1;
                     }
                     self.dec
                         .send_packet(&pkt)
@@ -589,6 +596,13 @@ impl VideoDecoder {
     pub(crate) fn skip_nonref_before(&mut self, pts: Option<i64>) {
         self.skip_before = pts;
         ffi::skip_nonref(&mut self.dec, pts.is_some());
+    }
+
+    /// How many packets have been sent while skipping frames nothing
+    /// refers to, since opening: when it grows, a frame may be missing
+    /// from what comes out, with nothing to say so.
+    pub(crate) fn skipping_sent(&self) -> u64 {
+        self.skip_sent
     }
 
     pub(crate) fn input(&self) -> &ff::format::context::Input {

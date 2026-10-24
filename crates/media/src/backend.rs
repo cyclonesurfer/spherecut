@@ -146,12 +146,18 @@ pub trait VideoDecode: Send + std::fmt::Debug {
         mode: SeekMode,
         stop: &StopToken,
     ) -> Result<SeekOutcome, MediaError>;
-    /// The frame after the last one `seek` or `next_frame` returned.
+    /// The frame after the last one `seek` or `next_frame` returned, once
+    /// the frame after it is known too (for its duration), or the end, or
+    /// [`NextFrame::Stopped`].
     fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError>;
     /// `Some(t)`: skip frames nothing refers to (`AVDISCARD_NONREF`), and
     /// never return a frame before `t`, until one at or after it has been
-    /// returned. `None`: back to normal, as after a seek. For playback
-    /// that has fallen behind the clock.
+    /// returned. `None`: back to normal, as after a seek: the next frame
+    /// is the one after the last returned, even when catching up had
+    /// passed it over. A later `t` goes on catching up, and an earlier one
+    /// starts again from that frame. For playback that has fallen behind
+    /// the clock. A stream whose frames are counted from the start (whose
+    /// timestamps go backwards, or that has none) skips no frames.
     fn catch_up(&mut self, until: Option<Time>);
     /// What happened since the last call, oldest first.
     fn take_events(&mut self) -> Vec<DecoderEvent>;
@@ -360,8 +366,12 @@ pub struct VideoFrame {
     /// The decoder concealed errors in it.
     pub concealed: bool,
     pub decoded_on: DecodePath,
-    /// The seek it was decoded after, and its place in decode-output
-    /// order since then: the cache links runs of frames by these.
+    /// The run it was decoded in, and its place in decode-output order
+    /// in it: two frames of one run whose seq follow on are adjacent in
+    /// the stream, which is what the cache links runs of frames by. A run
+    /// starts at a seek (one that decodes forward goes on with the run
+    /// before), and at the first frame handed out after catching up may
+    /// have skipped frames.
     pub run: u64,
     pub seq: u64,
     storage: FrameStorage,

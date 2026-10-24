@@ -138,9 +138,34 @@ enum Position {
     /// The next frame decoded follows `pending`, or the last frame
     /// returned.
     InStep,
-    /// A seek stopped part way: seek again to just after the last frame
+    /// A seek stopped part way, or catching up was called off after it
+    /// passed frames over: seek again to just after the last frame
     /// returned (or to the start) before decoding on.
     Lost,
+}
+
+/// Playback catching up ([`VideoDecode::catch_up`]).
+#[derive(Debug, Clone, Copy)]
+struct CatchUp {
+    /// No frame before this pts is handed out.
+    until: i64,
+    /// [`VideoDecoder::skipping_sent`] when it began, or when decoding
+    /// last found its place again.
+    sent: u64,
+    /// A frame decoded since then has been dropped.
+    dropped: bool,
+}
+
+impl CatchUp {
+    /// The decoder may have skipped a frame without a word.
+    fn skipped(&self, dec: &VideoDecoder) -> bool {
+        dec.skipping_sent() > self.sent
+    }
+
+    /// The decoder has gone past the frame after the last one returned.
+    fn moved(&self, dec: &VideoDecoder) -> bool {
+        self.dropped || self.skipped(dec)
+    }
 }
 
 /// [`VideoDecode`] on FFmpeg's software decoder.
@@ -161,7 +186,8 @@ pub struct FfmpegVideo {
     /// The run frames decoded now belong to, the last run number given
     /// out, and the next frame's place in the run (see
     /// [`VideoFrame::run`]). A run starts at each seek of the demuxer, so
-    /// a seek that decodes forward goes on with the one before.
+    /// a seek that decodes forward goes on with the one before, and at
+    /// the first frame handed out after catching up skipped frames.
     run: u64,
     runs: u64,
     seq: u64,
@@ -193,7 +219,7 @@ pub struct FfmpegVideo {
     /// The greatest pts decoded since opening, and `AVFrame.duration` of
     /// its frame.
     greatest: Option<(i64, i64)>,
-    catch_up: Option<i64>,
+    catch_up: Option<CatchUp>,
     events: Vec<DecoderEvent>,
     stats: DecodeStats,
     decode_ms_total: f64,
@@ -416,6 +442,8 @@ impl FfmpegVideo {
             );
             self.events
                 .push(DecoderEvent::NotExactlySeekable { at_pts: last });
+            // Its frames are counted from the start from now on.
+            self.dec.skip_nonref_before(None);
             // Frame n is then the nth decoded, not the one at n frame
             // durations.
             if let Timing::Constant(rate) = self.info.timing {
@@ -452,6 +480,11 @@ impl FfmpegVideo {
         self.pending = None;
         self.last_decoded = None;
         self.from_start = to_start.then_some(0);
+        self.start_run();
+    }
+
+    /// Start a run: the next frame decoded may not follow the last one.
+    fn start_run(&mut self) {
         self.runs += 1;
         self.run = self.runs;
         self.seq = 0;
@@ -678,20 +711,22 @@ impl FfmpegVideo {
     /// frame about to be handed out knows its duration. A stop, the end
     /// or an error leaves `pending` empty: an error that ends the stream
     /// comes back from the next call, and one that doesn't becomes an
-    /// event.
-    fn fill_pending(&mut self, stop: &StopToken) {
+    /// event. `true` on a stop.
+    fn fill_pending(&mut self, stop: &StopToken) -> bool {
         if self.pending.is_some() {
-            return;
+            return false;
         }
         match self.decode(stop) {
             Ok(Got::Frame(r)) => self.pending = Some(r),
-            Ok(Got::End | Got::Stopped) => {}
+            Ok(Got::Stopped) => return true,
+            Ok(Got::End) => {}
             Err(_) if self.dec.has_failed() => {}
             Err(e) => self.events.push(DecoderEvent::Damaged {
                 reason: e.to_string(),
                 last_good_pts: self.current.as_ref().map(|c| c.pts),
             }),
         }
+        false
     }
 
     fn exact(
@@ -1025,6 +1060,37 @@ impl FfmpegVideo {
         if self.position == Position::InStep {
             return Ok(true);
         }
+        // Finding the place again skips no frames: catching up waits.
+        self.dec.skip_nonref_before(None);
+        let found = self.reposition(stop);
+        if let Some(c) = &mut self.catch_up
+            && matches!(found, Ok(true))
+        {
+            c.sent = self.dec.skipping_sent();
+            c.dropped = false;
+        }
+        self.set_skipping();
+        found
+    }
+
+    /// Have the decoder skip frames nothing refers to while catching up,
+    /// except in a stream whose frames are counted from the start: one
+    /// whose timestamps go backwards, or that has none. A frame skipped
+    /// leaves no trace, so places counted from the start are lost.
+    fn set_skipping(&mut self) {
+        let until = self
+            .catch_up
+            .as_ref()
+            .map(|c| c.until)
+            .filter(|_| !self.not_seekable && !self.no_timestamps);
+        if until.is_some() {
+            self.from_start = None;
+        }
+        self.dec.skip_nonref_before(until);
+    }
+
+    /// [`resume`](Self::resume)'s work, once it is known to be needed.
+    fn reposition(&mut self, stop: &StopToken) -> Result<bool, MediaError> {
         let mut cost = SeekCost::default();
         let Some(current) = self.current.clone() else {
             self.seek_to_start(&mut cost)?;
@@ -1146,9 +1212,13 @@ impl VideoDecode for FfmpegVideo {
             })?;
         let before_first = ticks < 0;
         let t = self.info.origin_pts.saturating_add(ticks.max(0));
-        // A seek ends catching up: its decode skips nothing.
-        if self.catch_up.take().is_some() {
+        // A seek ends catching up: its decode skips nothing, and it can't
+        // decode forward over frames catching up passed over.
+        if let Some(c) = self.catch_up.take() {
             self.dec.skip_nonref_before(None);
+            if c.moved(&self.dec) {
+                self.position = Position::Lost;
+            }
         }
         let got = match mode {
             SeekMode::Exact => self.exact(t, stop)?,
@@ -1173,7 +1243,7 @@ impl VideoDecode for FfmpegVideo {
             return Ok(NextFrame::Stopped);
         }
         loop {
-            let raw = match self.pending.take() {
+            let mut raw = match self.pending.take() {
                 Some(r) => r,
                 None => match self.decode(stop)? {
                     Got::Frame(r) => r,
@@ -1187,24 +1257,62 @@ impl VideoDecode for FfmpegVideo {
                     Got::Stopped => return Ok(NextFrame::Stopped),
                 },
             };
-            if let Some(until) = self.catch_up
-                && raw.pts < until
+            if let Some(c) = &mut self.catch_up
+                && raw.pts < c.until
             {
+                c.dropped = true;
                 continue;
             }
-            if self.catch_up.take().is_some() {
+            // Caught up: nothing after this frame is skipped.
+            if self.catch_up.is_some() {
                 self.dec.skip_nonref_before(None);
             }
-            self.fill_pending(stop);
+            if self.fill_pending(stop) {
+                // Handed out once the frame after it is known. Until then
+                // catching up isn't over: a seek, or catching up to before
+                // it, finds the frames it passed over again.
+                self.pending = Some(raw);
+                return Ok(NextFrame::Stopped);
+            }
+            if let Some(c) = self.catch_up.take()
+                && c.skipped(&self.dec)
+            {
+                // The frame before this one may be one the decoder skipped.
+                self.start_run();
+                raw.seq = self.seq;
+                self.seq += 1;
+                if let Some(p) = &mut self.pending {
+                    p.seq = self.seq;
+                    self.seq += 1;
+                }
+            }
             let next = self.pending.as_ref().map(|p| p.pts);
             return self.make_frame(raw, next).map(NextFrame::Frame);
         }
     }
 
     fn catch_up(&mut self, until: Option<Time>) {
-        let t = until.and_then(|t| t.to_pts(self.info.time_base, Rounding::Ceil).ok());
-        self.catch_up = t.map(|t| self.info.origin_pts.saturating_add(t));
-        self.dec.skip_nonref_before(self.catch_up);
+        let t = until
+            .and_then(|t| t.to_pts(self.info.time_base, Rounding::Ceil).ok())
+            .map(|t| self.info.origin_pts.saturating_add(t));
+        let sent = self.dec.skipping_sent();
+        self.catch_up = match (self.catch_up.take(), t) {
+            // Further on: frames passed over are passed over still.
+            (Some(c), Some(until)) if until >= c.until => Some(CatchUp { until, ..c }),
+            (old, t) => {
+                // Called off, or to before where it got to: decoding goes
+                // on from the frame after the last one returned.
+                if old.is_some_and(|c| c.moved(&self.dec)) {
+                    self.position = Position::Lost;
+                }
+                t.map(|until| CatchUp {
+                    until,
+                    sent,
+                    dropped: false,
+                })
+            }
+        };
+        self.set_skipping();
     }
 
     fn take_events(&mut self) -> Vec<DecoderEvent> {
