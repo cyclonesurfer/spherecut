@@ -328,8 +328,20 @@ pub(crate) struct VkDevice {
     pub api_version: u32,
     pub driver_name: Option<String>,
     pub driver_info: Option<String>,
+    /// The `(major, minor)` numbers of its DRM primary and render nodes,
+    /// from `VK_EXT_physical_device_drm`; empty without that extension.
+    pub drm_nodes: Vec<(i64, i64)>,
     /// FFmpeg's Vulkan device context runs on this one.
     pub ffmpeg_uses: bool,
+}
+
+impl VkDevice {
+    /// Whether `other` describes the same physical device, as far as its
+    /// properties tell: two instances' handles for it differ.
+    pub fn same_device(&self, other: &VkDevice) -> bool {
+        let key = |d: &VkDevice| (d.name.clone(), d.device_type, d.vendor_id, d.device_id);
+        key(self) == key(other) && self.drm_nodes == other.drm_nodes
+    }
 }
 
 /// `(major, minor, patch)` of a version packed as `VK_MAKE_API_VERSION`.
@@ -344,6 +356,8 @@ type EnumeratePhysicalDevices = unsafe extern "C" fn(VkHandle, *mut u32, *mut Vk
 type GetPhysicalDeviceProperties = unsafe extern "C" fn(VkHandle, *mut VkPhysicalDeviceProperties);
 type GetPhysicalDeviceProperties2 =
     unsafe extern "C" fn(VkHandle, *mut VkPhysicalDeviceProperties2);
+type EnumerateDeviceExtensionProperties =
+    unsafe extern "C" fn(VkHandle, *const c_char, *mut u32, *mut VkExtensionProperties) -> i32;
 
 /// The start of FFmpeg's `AVVulkanDeviceContext`. These fields have had
 /// these places since the struct was added; later ones changed between
@@ -380,6 +394,8 @@ const _: () = {
     assert!(size_of::<VkPhysicalDeviceProperties>() == 824);
     assert!(size_of::<VkPhysicalDeviceProperties2>() == 840);
     assert!(size_of::<VkPhysicalDeviceDriverProperties>() == 536);
+    assert!(size_of::<VkPhysicalDeviceDrmProperties>() == 56);
+    assert!(size_of::<VkExtensionProperties>() == 260);
 };
 
 impl VkPhysicalDeviceProperties {
@@ -400,6 +416,7 @@ impl VkPhysicalDeviceProperties {
 
 const STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2: i32 = 1_000_059_001;
 const STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES: i32 = 1_000_196_000;
+const STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT: i32 = 1_000_353_000;
 
 #[repr(C)]
 struct VkPhysicalDeviceProperties2 {
@@ -417,6 +434,73 @@ struct VkPhysicalDeviceDriverProperties {
     driver_name: [c_char; 256],
     driver_info: [c_char; 256],
     conformance_version: [u8; 4],
+}
+
+/// `VkPhysicalDeviceDrmPropertiesEXT`.
+#[repr(C)]
+struct VkPhysicalDeviceDrmProperties {
+    s_type: i32,
+    p_next: *mut c_void,
+    has_primary: u32,
+    has_render: u32,
+    primary_major: i64,
+    primary_minor: i64,
+    render_major: i64,
+    render_minor: i64,
+}
+
+impl VkPhysicalDeviceDrmProperties {
+    /// The nodes it says the device has.
+    fn nodes(&self) -> Vec<(i64, i64)> {
+        let mut v = Vec::new();
+        if self.has_primary != 0 {
+            v.push((self.primary_major, self.primary_minor));
+        }
+        if self.has_render != 0 {
+            v.push((self.render_major, self.render_minor));
+        }
+        v
+    }
+}
+
+#[repr(C)]
+struct VkExtensionProperties {
+    extension_name: [c_char; 256],
+    spec_version: u32,
+}
+
+/// Whether the physical device `pd` has the device extension `name`.
+///
+/// # Safety
+///
+/// `enumerate` must be `vkEnumerateDeviceExtensionProperties` of the
+/// live instance that `pd` belongs to.
+unsafe fn has_extension(
+    enumerate: EnumerateDeviceExtensionProperties,
+    pd: VkHandle,
+    name: &CStr,
+) -> bool {
+    let mut n = 0u32;
+    // SAFETY: the caller's guarantee; the counting form of the call, for
+    // the driver's own extensions (no layer name).
+    if unsafe { enumerate(pd, std::ptr::null(), &mut n, std::ptr::null_mut()) } < 0 {
+        return false;
+    }
+    let mut exts: Vec<VkExtensionProperties> = (0..n)
+        .map(|_| VkExtensionProperties {
+            extension_name: [0; 256],
+            spec_version: 0,
+        })
+        .collect();
+    // SAFETY: `exts` has room for the `n` entries asked for. One added
+    // since the first call makes this VK_INCOMPLETE (positive).
+    if unsafe { enumerate(pd, std::ptr::null(), &mut n, exts.as_mut_ptr()) } < 0 {
+        return false;
+    }
+    exts.truncate(n as usize);
+    let name = name.to_bytes();
+    exts.iter()
+        .any(|e| fixed_str(&e.extension_name).is_some_and(|e| e.as_bytes() == name))
 }
 
 fn vulkan_err(msg: impl Into<String>) -> HwProbeError {
@@ -472,7 +556,7 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
         .ok_or_else(|| vulkan_err("FFmpeg's Vulkan device has no vkGetInstanceProcAddr"))?;
     // SAFETY: each type below matches the C prototype of the command it
     // is looked up as, and the instance is FFmpeg's, made through `gipa`.
-    let (enumerate, props, props2) = unsafe {
+    let (enumerate, props, props2, extensions) = unsafe {
         (
             vk_command::<EnumeratePhysicalDevices>(gipa, head.inst, c"vkEnumeratePhysicalDevices")?,
             vk_command::<GetPhysicalDeviceProperties>(
@@ -485,6 +569,12 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
                 gipa,
                 head.inst,
                 c"vkGetPhysicalDeviceProperties2",
+            )
+            .ok(),
+            vk_command::<EnumerateDeviceExtensionProperties>(
+                gipa,
+                head.inst,
+                c"vkEnumerateDeviceExtensionProperties",
             )
             .ok(),
         )
@@ -514,14 +604,33 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
             // SAFETY: `pd` is a physical device of this instance, and `p`
             // has the C layout and size Vulkan writes.
             unsafe { props(pd, &mut p) };
-            let (mut driver_name, mut driver_info) = (None, None);
+            let (mut driver_name, mut driver_info, mut drm_nodes) = (None, None, Vec::new());
             // VkPhysicalDeviceDriverProperties is core from Vulkan 1.2.
             if let Some(props2) = props2
                 && vk_version(p.api_version) >= (1, 2, 0)
             {
+                let mut drm = VkPhysicalDeviceDrmProperties {
+                    s_type: STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT,
+                    p_next: std::ptr::null_mut(),
+                    has_primary: 0,
+                    has_render: 0,
+                    primary_major: 0,
+                    primary_minor: 0,
+                    render_major: 0,
+                    render_minor: 0,
+                };
+                let with_drm = match extensions {
+                    // SAFETY: looked up on the instance `pd` belongs to.
+                    Some(e) => unsafe { has_extension(e, pd, c"VK_EXT_physical_device_drm") },
+                    None => false,
+                };
                 let mut drv = VkPhysicalDeviceDriverProperties {
                     s_type: STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
-                    p_next: std::ptr::null_mut(),
+                    p_next: if with_drm {
+                        (&raw mut drm).cast()
+                    } else {
+                        std::ptr::null_mut()
+                    },
                     driver_id: 0,
                     driver_name: [0; 256],
                     driver_info: [0; 256],
@@ -532,11 +641,15 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
                     p_next: (&raw mut drv).cast(),
                     properties: VkPhysicalDeviceProperties::zeroed(),
                 };
-                // SAFETY: as above, with a pNext chain of one struct that
-                // this device's Vulkan version has.
+                // SAFETY: as above, with a pNext chain of structs that this
+                // device has: the driver properties of its Vulkan version,
+                // then the DRM ones only if it has their extension.
                 unsafe { props2(pd, &mut p2) };
                 driver_name = fixed_str(&drv.driver_name);
                 driver_info = fixed_str(&drv.driver_info);
+                if with_drm {
+                    drm_nodes = drm.nodes();
+                }
             }
             VkDevice {
                 name: fixed_str(&p.device_name).unwrap_or_else(|| "(unnamed)".into()),
@@ -546,6 +659,7 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
                 api_version: p.api_version,
                 driver_name,
                 driver_info,
+                drm_nodes,
                 ffmpeg_uses: pd == head.phys_dev,
             }
         })
