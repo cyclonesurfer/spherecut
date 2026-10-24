@@ -1041,6 +1041,35 @@ pub fn index_end(ictx: &ff::format::context::Input, index: usize) -> Option<u64>
         .max()
 }
 
+/// The timestamp of the last keyframe that the demuxer's index lists for
+/// stream `index` whose data ends at or before byte `size`, and whose
+/// timestamp is before `before` when given: where to seek in a file cut
+/// at `size`. `None` without an index or such an entry.
+pub(crate) fn index_keyframe_inside(
+    ictx: &ff::format::context::Input,
+    index: usize,
+    size: u64,
+    before: Option<i64>,
+) -> Option<i64> {
+    let st = ictx.stream(index)?;
+    // SAFETY: as in `index_end`.
+    let st = unsafe { st.as_ptr() }.cast_mut();
+    // SAFETY: as above.
+    let n = unsafe { sys::avformat_index_get_entries_count(st) };
+    (0..n)
+        .filter_map(|i| {
+            // SAFETY: as in `index_end`.
+            let e = unsafe { sys::avformat_index_get_entry(st, i).as_ref() }?;
+            let pos = u64::try_from(e.pos).ok()?;
+            let end = pos.checked_add(u64::try_from(e.size()).ok()?)?;
+            (e.flags() & sys::AVINDEX_KEYFRAME != 0
+                && end <= size
+                && before.is_none_or(|b| e.timestamp < b))
+            .then_some(e.timestamp)
+        })
+        .max()
+}
+
 /// Have the demuxer skip every stream but `keep`: it then neither reads
 /// their data nor stops at damage in it.
 pub fn discard_other_streams(ictx: &mut ff::format::context::Input, keep: usize) {

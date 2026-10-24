@@ -767,15 +767,20 @@ fn a_truncated_clip_seeks_before_its_cut_and_says_where_it_ends() {
         let (got, e, _) = seek_pts(&mut *d, f.pts, SeekMode::Exact);
         assert_eq!((Seen::of(&got), e), (before[i], Exactness::Exact));
     }
-    // Past the cut: the last good frame, flagged, and a Damaged event.
+    // Past the cut: the last good frame, flagged, and a Damaged event,
+    // decoded from the last keyframe the file holds, not from the start.
     let target = whole.last().unwrap().pts;
-    let (got, e, _) = seek_pts(&mut *d, target, SeekMode::Exact);
+    let (got, e, cost) = seek_pts(&mut *d, target, SeekMode::Exact);
     assert_eq!(Seen::of(&got), last_good);
     assert_eq!(
         e,
         Exactness::Truncated {
             last_good_pts: last_good.pts
         }
+    );
+    assert!(
+        cost.seeks == 2 && cost.reseeks == 1 && cost.frames_decoded <= 8 + 3,
+        "{cost:?}"
     );
     assert!(
         d.take_events()

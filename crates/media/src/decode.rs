@@ -777,6 +777,19 @@ impl VideoDecoder {
         })
     }
 
+    /// Where to seek in a file cut short of the data its index lists, as
+    /// [`truncation`](Self::truncation) finds: the index timestamp (as
+    /// [`landing`](Self::landing) has it) of the last keyframe whose data
+    /// the file holds whole, before `before` when given. `None` when the
+    /// file isn't cut so, or holds no such keyframe.
+    pub(crate) fn keyframe_inside(&self, before: Option<i64>) -> Option<i64> {
+        let size = std::fs::metadata(&self.path).ok()?.len();
+        let end = ffi::index_end(&self.ictx, self.stream_index)?;
+        (end > size)
+            .then(|| ffi::index_keyframe_inside(&self.ictx, self.stream_index, size, before))
+            .flatten()
+    }
+
     fn finish_frame(&mut self, frame: ff::frame::Video) -> Result<DecodedFrame, MediaError> {
         let format = ffi::frame_format(&frame);
         let on_device = self.hw.as_ref().is_some_and(|h| format == h.hw_pix_fmt());

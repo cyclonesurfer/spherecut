@@ -579,6 +579,8 @@ impl FfmpegVideo {
     ) -> Result<Option<Start>, MediaError> {
         let mut ts = t;
         let mut prev: Option<i64> = None;
+        // The last keyframe a cut file holds, once a seek to it was tried.
+        let mut inside: Option<i64> = None;
         for attempt in 0..MAX_ATTEMPTS {
             if stop.is_stopped() {
                 return Ok(None);
@@ -607,10 +609,27 @@ impl FfmpegVideo {
                 }
             };
             let landed = self.dec.landing();
+            let got = first.is_some();
             if let Some(r) = first
                 && (r.pts <= t || r.pts == self.info.origin_pts)
             {
                 return Ok(Some(Start::Seeked(Some(r))));
+            }
+            // Nothing of the stream could be read: the keyframe landed on
+            // lies past the cut of a file cut short of its index. The last
+            // keyframe the file holds is the nearest place to decode from,
+            // and the start may be far before it.
+            if !got
+                && landed.is_none()
+                && self.dec.has_failed()
+                && let Some(k) = self.dec.keyframe_inside(inside)
+            {
+                inside = Some(k);
+                // The index lists keyframes by dts, and the demuxer shifts
+                // a seek's target back by the least lag of pts behind it
+                // (see `forward_is_cheaper`).
+                ts = k.saturating_add(self.dec.key_lag());
+                continue;
             }
             match (landed, prev) {
                 // No timestamp to seek before, or no progress.
