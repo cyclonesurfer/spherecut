@@ -39,7 +39,7 @@ this stack and are used only by tests and `xtask`.
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
 | `spherecut-app` | eframe app, docked panels, viewer paint callbacks | M1 |
 | `spherecut-agent` | Agent integration (D23): the request and response type of each operation, shared by `spherecut mcp` and `spherecut call` (from A1 the `--json` of `probe`, `doctor` and `frame` uses them too, under a new schema version if M1's shape changes, D27); the MCP server; later the GUI attach bridge | A1 (after M1) |
-| `spherecut-cli` | The `spherecut` binary: `probe` and `doctor` today. `frame` (M1), `render` (M2), the GUI when run without a subcommand (M1), and `mcp` and `call` (A1) are planned. Its library half holds `contract`, the JSON contract of `--json` (D27) | M0: `probe`, `doctor`; M1: the JSON contract |
+| `spherecut-cli` | The `spherecut` binary: `probe` and `doctor` today. `frame` (M1), `render` (M2), the GUI when run without a subcommand (M1), and `mcp` and `call` (A1) are planned. Its library half holds `contract`, the JSON contract of `--json` (D27), until A1 moves it to `spherecut-agent` or a crate below both | M0: `probe`, `doctor`; M1: the JSON contract |
 | `xtask` | `check`, `gen-media`, `hw-test` | M0 |
 
 Crates are created when they get real content, not as empty shells. The
@@ -237,7 +237,10 @@ GUI) and `codes` the CLI's own codes; `all_codes()` adds `MediaError`'s
 and probe's. `main.rs` parses with clap's `try_parse_from`, so that a
 command line that doesn't parse is a document too under `--json`
 (`wants_json` looks for `--json` before any `--`), and writes the
-document with `Envelope::to_line()` after the run. Under `--json`, a
+document with `Envelope::to_line()` after the run. The module needs
+only serde, serde_json, core and media. A1 moves it into
+`spherecut-agent` (or a crate below both), which the CLI will depend on
+and which can't depend on the CLI, and the CLI re-exports it (D27). Under `--json`, a
 panic hook writes an `internal` document in the run's schema
 (`schema_for`) unless the document has started, and `main` exits 1
 after any panic; a flag keeps the run to one document. Debug builds

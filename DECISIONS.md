@@ -1201,7 +1201,15 @@ What, for `spherecut probe` and `spherecut doctor` now, and for
   envelope, `{"schema", "ok", "result"?, "error"?, "warnings"}`, and `ok`
   is true exactly when there is no `error`. It is built in
   `spherecut_cli::contract`, the CLI crate's new library half, so that
-  A1's `spherecut call` and `spherecut mcp` can reuse it.
+  A1's `spherecut call` and `spherecut mcp` can reuse it. That is where
+  it lives for M1 only: the `spherecut` binary is to host `mcp` and
+  `call` on spherecut-agent's types, so spherecut-cli will depend on
+  spherecut-agent, and spherecut-agent can't depend back on it for
+  `Envelope`, `ErrorBody` or the codes (Cargo refuses the cycle, and the
+  library half brings clap, anyhow and tracing-subscriber with it). A1
+  moves `contract` into spherecut-agent, or into a small crate below
+  both that needs only serde, serde_json, core and media, as the module
+  does today, and spherecut-cli re-exports it. The JSON doesn't change.
 - `schema` is one string that names the document and its version:
   `spherecut.probe/1`, `spherecut.doctor/1`, and `spherecut/1` for a
   usage error that names no subcommand.
@@ -1236,7 +1244,8 @@ What, for `spherecut probe` and `spherecut doctor` now, and for
   reader must allow it to be absent. All three read back from these
   forms, ignoring `seconds`. probe's container `duration` and
   `start_time` and its streams' `duration` are `Time`s, where they were
-  float seconds; time bases and frame rates stay rationals, and
+  `[num, den]` arrays of exact seconds; time bases and frame rates stay
+  rationals, and
   `start_pts` stays an integer in ticks. probe's times are on the
   container's timeline, where `start_time` may be far from 0, not in clip
   time; `docs/cli-json.md` says which is which.
