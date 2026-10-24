@@ -34,7 +34,7 @@ use spherecut_core::{Rational, Time};
 
 use crate::ffi::{self, HwDevice, HwRefusal, OpenDecoderError};
 use crate::hwprobe::device_label;
-use crate::{MediaError, ff, init};
+use crate::{MediaError, TooLarge, ff, init};
 
 /// A decoded frame in system memory.
 pub struct DecodedFrame {
@@ -171,11 +171,8 @@ fn err(path: &Path, what: &str, e: impl std::fmt::Display) -> MediaError {
     }
 }
 
-fn open_err(path: &Path, e: ff::Error) -> MediaError {
-    MediaError::Open {
-        path: path.to_path_buf(),
-        reason: e.to_string(),
-    }
+fn open_err(path: &Path, e: ffi::OpenError) -> MediaError {
+    MediaError::opening(path, e, |e| e.to_string())
 }
 
 fn hw_unsupported(path: &Path, dev: &HwDevice, refusal: HwRefusal) -> MediaError {
@@ -187,7 +184,9 @@ fn hw_unsupported(path: &Path, dev: &HwDevice, refusal: HwRefusal) -> MediaError
 }
 
 impl VideoDecoder {
-    /// Open the best video stream of `path` (or stream `index`).
+    /// Open the best video stream of `path` (or stream `index`). A stream
+    /// whose pictures are larger than [`crate::MAX_PIXELS`] is refused with
+    /// [`MediaError::PictureTooLarge`].
     pub fn open(
         path: &Path,
         index: Option<usize>,
@@ -234,6 +233,17 @@ impl VideoDecoder {
         let tb = st.time_base();
         let time_base = Rational::new(tb.numerator() as i64, tb.denominator() as i64)
             .map_err(|e| err(path, "bad stream timebase", e))?;
+        // Said here, by size, where the decoder would fail to open with
+        // "Invalid argument" or fail on every frame.
+        let par = ffi::codecpar_fields(&st.parameters());
+        let dim = |n: i32| u32::try_from(n).unwrap_or(0);
+        if let Some(size) = TooLarge::of(dim(par.width), dim(par.height)) {
+            return Err(MediaError::PictureTooLarge {
+                path: path.to_path_buf(),
+                stream: stream_index,
+                size,
+            });
+        }
         let mut ctx = ff::codec::context::Context::from_parameters(st.parameters())
             .map_err(|e| err(path, "decoder parameters", e))?;
         ffi::discard_other_streams(&mut ictx, stream_index);

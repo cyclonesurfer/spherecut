@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use spherecut_core::FrameRate;
-use spherecut_media::MediaError;
 use spherecut_media::decode::VideoDecoder;
 use spherecut_media::ff;
+use spherecut_media::{MediaError, TooLarge};
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Audio, Codec, Spec};
 
@@ -83,6 +83,9 @@ enum Layout {
 }
 
 /// Remux `src` into `dst` laid out as `layout` says.
+// Reads a file this test wrote, and writes another, with ffmpeg-next
+// alone, apart from Spherecut's confined open (D24).
+#[allow(clippy::disallowed_methods)]
 fn remux(src: &Path, dst: &Path, layout: Layout) {
     let mut ictx = ff::format::input(src).unwrap();
     let video = ictx.streams().best(ff::media::Type::Video).unwrap().index();
@@ -123,6 +126,7 @@ fn remux(src: &Path, dst: &Path, layout: Layout) {
 
 /// Where each sample of `path`'s best stream of type `kind` lies, as
 /// (offset, size), in file order.
+#[allow(clippy::disallowed_methods)] // As in `remux`.
 fn samples(path: &Path, kind: ff::media::Type) -> Vec<(u64, u64)> {
     let mut ictx = ff::format::input(path).unwrap();
     let index = ictx.streams().best(kind).unwrap().index();
@@ -253,6 +257,35 @@ fn damage_in_another_stream_does_not_end_the_video_early() {
         std::fs::write(&cut, &bytes[..at as usize]).unwrap();
         assert_decodes_whole(&cut, 90);
     }
+}
+
+#[test]
+fn a_picture_over_max_pixels_is_refused_by_size() {
+    // Where the decoder would fail with "Invalid argument" (D24).
+    let dir = tmp("over-max-pixels");
+    let path = media::write_mjpeg_declaring(&dir, "over.mp4", 16400, 8200).unwrap();
+    let e = VideoDecoder::open(&path, None, None).unwrap_err();
+    assert!(
+        matches!(
+            e,
+            MediaError::PictureTooLarge {
+                stream: 0,
+                size: TooLarge {
+                    width: 16400,
+                    height: 8200
+                },
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "cannot decode {}: stream #0 is 16400x8200, more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes",
+            path.display()
+        )
+    );
 }
 
 #[test]

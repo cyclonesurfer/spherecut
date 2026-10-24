@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use spherecut_core::FrameRate;
-use spherecut_media::encode::{AudioSettings, Mp4Writer, PixelLayout, VideoSettings};
+use spherecut_media::encode::{AudioSettings, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 use spherecut_media::inject::{self, EntryEdit, TrackKind};
 use spherecut_media::mp4::{self, Mp4Tree};
 use spherecut_media::spherical::{StereoMode, write};
@@ -497,4 +497,108 @@ fn audio_specific_config(esds: &[u8]) -> Option<usize> {
         at += fixed;
     }
     (at + 2 <= esds.len()).then_some(at)
+}
+
+/// Two 64x64 frames of MJPEG in MP4 whose sample entry and frame headers
+/// say each picture is `width` × `height`: a file that declares pictures
+/// over [`spherecut_media::MAX_PIXELS`] without being as large as one.
+/// Decoders limited to it stop at the frame header, before they read the
+/// picture data. The file is written and then changed in place.
+pub fn write_mjpeg_declaring(
+    dir: &Path,
+    name: &str,
+    width: u16,
+    height: u16,
+) -> Result<PathBuf, SynthError> {
+    let invalid = |path: &Path, why: &str| SynthError::Io {
+        path: path.to_path_buf(),
+        error: std::io::Error::new(std::io::ErrorKind::InvalidData, why.to_string()),
+    };
+    let path = dir.join(name);
+    let settings = VideoSettings {
+        encoder: "mjpeg".into(),
+        width: 64,
+        height: 64,
+        rate: FrameRate::FPS_30,
+        layout: PixelLayout::Yuv420p,
+        // FFmpeg's MJPEG encoder takes limited-range 4:2:0 only as an
+        // unofficial extension.
+        options: vec![("strict".into(), "-1".into())],
+        bt709_limited: true,
+    };
+    let mut w = Mp4Writer::create(&path, &settings, None)?;
+    for _ in 0..2 {
+        let chroma = vec![128; 32 * 32];
+        w.push_video(&YuvPlanes::U8([vec![100; 64 * 64], chroma.clone(), chroma]))?;
+    }
+    w.finish()?;
+
+    let mut bytes = std::fs::read(&path).map_err(|error| SynthError::Io {
+        path: path.clone(),
+        error,
+    })?;
+    let tree =
+        mp4::read(&mut std::io::Cursor::new(&bytes)).map_err(|e| invalid(&path, &e.to_string()))?;
+    let entry = tree
+        .tracks()
+        .next()
+        .and_then(|t| t.path(&[b"mdia", b"minf", b"stbl", b"stsd"]))
+        .and_then(|stsd| stsd.children.first())
+        .ok_or_else(|| invalid(&path, "no sample entry"))?;
+    // A visual sample entry's width and height follow 24 bytes of
+    // reserved and predefined fields.
+    let at = (entry.offset + entry.header_len) as usize + 24;
+    let size = [width.to_be_bytes(), height.to_be_bytes()].concat();
+    bytes
+        .get_mut(at..at + 4)
+        .ok_or_else(|| invalid(&path, "sample entry cut short"))?
+        .copy_from_slice(&size);
+    let mdat = tree
+        .top
+        .iter()
+        .find(|b| b.fourcc.0 == *b"mdat")
+        .ok_or_else(|| invalid(&path, "no mdat"))?;
+    let data = bytes
+        .get_mut((mdat.offset + mdat.header_len) as usize..(mdat.offset + mdat.size) as usize)
+        .ok_or_else(|| invalid(&path, "mdat cut short"))?;
+    if set_jpeg_frame_sizes(data, width, height) != 2 {
+        return Err(invalid(&path, "not two JPEG frame headers in mdat"));
+    }
+    std::fs::write(&path, &bytes).map_err(|error| SynthError::Io {
+        path: path.clone(),
+        error,
+    })?;
+    Ok(path)
+}
+
+/// Set `width` and `height` in the baseline frame header (SOF0) of each
+/// JPEG picture in `data`, and say how many it changed. Each picture
+/// starts with SOI (FF D8); its header segments follow, each a marker
+/// (FF xx) and a 16-bit length that counts itself. Entropy-coded data
+/// never holds FF D8, since FF is followed there by 00 or a restart
+/// marker.
+fn set_jpeg_frame_sizes(data: &mut [u8], width: u16, height: u16) -> usize {
+    let mut changed = 0;
+    let mut at = 0;
+    while let Some(soi) = data
+        .get(at..)
+        .and_then(|d| d.windows(3).position(|w| w == [0xff, 0xd8, 0xff]))
+    {
+        let mut m = at + soi + 2;
+        while let Some(&[0xff, marker, hi, lo]) = data.get(m..m + 4) {
+            if marker == 0xc0 {
+                // After the length, the sample precision, then the height
+                // and width.
+                let size = [height.to_be_bytes(), width.to_be_bytes()].concat();
+                if let Some(d) = data.get_mut(m + 5..m + 9) {
+                    d.copy_from_slice(&size);
+                    changed += 1;
+                }
+                break;
+            }
+            m += 2 + u16::from_be_bytes([hi, lo]) as usize;
+        }
+        at = m.max(at + soi + 3);
+    }
+    changed
 }

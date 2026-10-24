@@ -1,2 +1,38 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
+
+# Spherecut makes no network connections (docs/PROMPT.md, DECISIONS D8 and
+# D24). A3's attach socket is a Unix socket, which these don't cover.
+disallowed-types = [
+    { path = "std::net::TcpStream", reason = "Spherecut makes no network connections (D8, D24)" },
+    { path = "std::net::TcpListener", reason = "Spherecut makes no network connections (D8, D24)" },
+    { path = "std::net::UdpSocket", reason = "Spherecut makes no network connections (D8, D24)" },
+]
+
+# FFmpeg is confined to the file Spherecut opened, and its decoders to
+# MAX_PIXELS, only through spherecut-media's ffi::open_input and
+# ffi::open_decoder (D24). ffmpeg-next's own functions open files with
+# every protocol and demuxer, and decoders with FFmpeg's default limit.
+# Its output opens take the path as a URL too, so `http://...` would
+# write to the network; Mp4Writer writes through a file it opened itself.
+disallowed-methods = [
+    { path = "ffmpeg_next::format::open", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::open_with", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::input", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::input_with_dictionary", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::input_with_interrupt", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::input_with_interrupt_and_dictionary", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::input_from_stream", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::input_from_stream_with_interrupt", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::output", reason = "opens the path as a URL; write through Mp4Writer (D24)" },
+    { path = "ffmpeg_next::format::output_with", reason = "opens the path as a URL; write through Mp4Writer (D24)" },
+    { path = "ffmpeg_next::format::output_as", reason = "opens the path as a URL; write through Mp4Writer (D24)" },
+    { path = "ffmpeg_next::format::output_as_with", reason = "opens the path as a URL; write through Mp4Writer (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::open", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::open_as", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::open_with", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::open_as_with", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::video", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::audio", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::subtitle", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+]

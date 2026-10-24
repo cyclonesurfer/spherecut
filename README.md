@@ -13,11 +13,12 @@ It runs offline: no accounts, no telemetry, no network access.
 in progress, so there is no GUI yet.
 What works today is the `spherecut` command line tool:
 
-- `spherecut probe <file>...` shows what a file is: container, streams,
-  codecs, colour, exact frame rates and timebases, spherical video and
-  ambisonic metadata, and the camera vendor and layout it most likely came
-  from. It also checks MP4/MOV files for the kinds of damage listed under
-  Build and run. `--json` gives the same as JSON.
+- `spherecut probe <file>...` shows what an MP4/MOV or Matroska/WebM file
+  is: container, streams, codecs, colour, exact frame rates and
+  timebases, spherical video and ambisonic metadata, and the camera
+  vendor and layout it most likely came from. It also checks MP4/MOV
+  files for the kinds of damage listed under Build and run. `--json`
+  gives the same as JSON.
 - `spherecut doctor` checks what your FFmpeg, drivers and GPU can actually
   do. It decodes one small frame each of H.264 High, HEVC Main, HEVC Main 10
   and AV1 in software, on VA-API and on FFmpeg's Vulkan device, encodes one
@@ -41,7 +42,8 @@ an agent, frames included, goes to that agent's model provider.
 - Rust 1.88 or newer (1.95 once the GUI lands), with rustfmt and clippy for
   development.
 - clang, for generating the FFmpeg bindings at build time.
-- For the Tier 1 tests: Mesa's lavapipe Vulkan driver (see Development).
+- For the Tier 1 tests: Mesa's lavapipe Vulkan driver and strace (see
+  Development).
 
 ### Fedora (43 or newer)
 
@@ -52,6 +54,7 @@ and HEVC, which nearly every 360 camera records. Use RPM Fusion's builds
 ```sh
 sudo dnf swap ffmpeg-free ffmpeg --allowerasing  # or, without ffmpeg-free: sudo dnf install ffmpeg --allowerasing
 sudo dnf install ffmpeg-devel clang-devel pkgconf-pkg-config libva-utils vulkan-tools mesa-vulkan-drivers
+sudo dnf install strace                          # for the Tier 1 tests
 # AMD GPUs:
 sudo dnf install mesa-va-drivers-freeworld       # or: dnf swap mesa-va-drivers mesa-va-drivers-freeworld
 # Intel GPUs (RPM Fusion nonfree):
@@ -66,14 +69,15 @@ sudo dnf install rustup && rustup-init -y
 sudo pacman -S --needed rust ffmpeg clang pkgconf libva-utils vulkan-tools
 sudo pacman -S --needed vulkan-radeon                       # AMD
 sudo pacman -S --needed vulkan-intel intel-media-driver     # Intel
-sudo pacman -S --needed vulkan-swrast                       # lavapipe, for the Tier 1 tests
+sudo pacman -S --needed vulkan-swrast strace                # lavapipe and strace, for the Tier 1 tests
 ```
 
 ### Ubuntu 24.04 (development only)
 
 ```sh
 sudo apt install pkg-config clang ffmpeg libavcodec-dev libavformat-dev \
-  libavutil-dev libswscale-dev libswresample-dev mesa-vulkan-drivers vulkan-tools vainfo
+  libavutil-dev libswscale-dev libswresample-dev mesa-vulkan-drivers vulkan-tools vainfo \
+  strace
 ```
 
 Your user needs to be in the `render` group for GPU video
@@ -90,7 +94,8 @@ cargo build --release
 ```
 
 `spherecut probe` exits 0 when every file is healthy, and 1 when any file
-can't be opened, is truncated or corrupt, or has no video or audio stream.
+can't be opened, isn't MP4/MOV or Matroska/WebM, is truncated or corrupt,
+or has no video or audio stream.
 A damaged file that FFmpeg can open still gets its report, with a
 `DAMAGE` line per problem, and stderr gets one line per bad file, such as
 `error: clip.mp4 is damaged: <first reason> (and 2 more problems)`. In
@@ -133,17 +138,28 @@ or times, and damage inside `mdat` are not found without decoding. A
 stream whose codec FFmpeg doesn't know, such as a `zzzz` sample entry, is
 a `warning` line and doesn't fail probe: it may be a real codec that this
 FFmpeg lacks. So is a stream this FFmpeg has no decoder for, a stream
-FFmpeg could not set up from an empty track, and a stream whose decoder
+FFmpeg could not set up from an empty track, a stream whose decoder
 says it lacks a feature the stream uses (`Function not implemented`, as
-for AAC object type 0). The `ffmpeg` lines hold the warnings and errors
+for AAC object type 0), and a stream of pictures larger than the 2^27
+pixels (16384x8192) Spherecut's decoders make (DECISIONS D24): the
+warning gives its size. The `ffmpeg` lines hold the warnings and errors
 FFmpeg logged while reading the file, one whole line each, starting with
 the context that logged it, such as `[aac]`. A repeated line is listed
 once with a count, and at most 32 are listed. They often say what FFmpeg
 could not read, but they don't fail probe either, because healthy files
 can have some: cover art gives a `timescale not set` line. Only MP4/MOV
 structure is checked in full; Matroska files are checked against their
-Segment length only, and other containers not at all, which a
-`structure` line says.
+Segment length only, which a `structure` line says.
+
+Probe opens nothing but MP4/MOV and Matroska/WebM files, and FFmpeg reads
+only the file it was given. A file FFmpeg would read as anything else,
+such as an HLS playlist (`.m3u8`), an ffconcat script or a WAV file, is
+refused, with the container's name, before FFmpeg's demuxer for it
+runs: ``error: FFmpeg reads list.m3u8 as Apple HTTP Live Streaming
+(`hls`), and Spherecut opens only MP4/MOV and Matroska/WebM files``. A
+file name is always a file name, even one like `concat:a.mp4` or
+`http://host/x.mp4`, and FFmpeg gets no network protocols (DECISIONS
+D24).
 
 `--json` prints one object per file (an array for several) with `damage`,
 `warnings`, `ffmpeg_log`, `structure` (`{"check": "full" | "length" |
@@ -207,7 +223,10 @@ cargo xtask hw-test      # Tier 2 run on real hardware; report in hw-reports/
 ```
 
 `cargo xtask check` needs `cargo install --locked cargo-deny cargo-audit`
-once (or `--no-supply-chain` to skip those two).
+once (or `--no-supply-chain` to skip those two), and strace: it stops
+first if `strace -V` fails, with the command that installs it
+(`sudo dnf install strace`, `sudo pacman -S strace` or
+`sudo apt install strace`).
 
 Tests come in two tiers. Tier 1 runs anywhere, including machines without
 a GPU. It needs the FFmpeg codecs listed above and Mesa's lavapipe Vulkan
@@ -215,8 +234,12 @@ driver (`mesa-vulkan-drivers` on Fedora and Ubuntu, `vulkan-swrast` on
 Arch): `crates/cli/tests/doctor.rs` runs doctor with the Vulkan loader
 limited to lavapipe (`VK_DRIVER_FILES`, `VK_ICD_FILENAMES`), and
 `crates/media/tests/hw_refusal.rs` checks that the decoder turns streams
-down on lavapipe's Vulkan device instead of decoding them in software. The
-tests generate the media they need; `gen-media` is not needed first.
+down on lavapipe's Vulkan device instead of decoding them in software.
+`crates/cli/tests/confinement.rs` and `crates/cli/tests/doctor.rs` run
+probe and doctor under `strace -f` and fail on any `AF_INET` or
+`AF_INET6` socket, or on probe opening a file a playlist lists; without
+strace they fail rather than skip. The tests generate the media they
+need; `gen-media` is not needed first.
 
 Tier 2 needs a real GPU or camera samples; a plain `cargo test` lists
 those tests as ignored, and `cargo xtask hw-test` runs them. It needs no

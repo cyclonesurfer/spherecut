@@ -28,8 +28,8 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as sys;
@@ -529,65 +529,407 @@ pub fn ffmpeg_version() -> String {
     cstr_opt(unsafe { sys::av_version_info() }).unwrap_or_else(|| "unknown".into())
 }
 
-/// Open a file for demuxing and read its stream info, as
-/// `ff::format::input` does, or `input_with_interrupt` with `cancel`
-/// (FFmpeg stops reading once it is set). FFmpeg gets the path's bytes as
-/// they are: ffmpeg-next's functions panic on a path that is not UTF-8,
-/// and Linux file names need not be.
+/// The demuxers FFmpeg may read a file with, by FFmpeg's names for them:
+/// the MOV/MP4 family and Matroska/WebM, which hold every camera format
+/// Spherecut reads. FFmpeg 6.1 to 9.0 name them so. Playlists, concat
+/// scripts and the like are read by demuxers that open the files they
+/// list, so a file FFmpeg would read with any other demuxer is refused
+/// before that demuxer runs. Widening this list takes a DECISIONS entry
+/// (D24).
+pub(crate) const DEMUXERS: [&str; 2] = [MOV_DEMUXER, "matroska,webm"];
+
+/// FFmpeg's name for its MOV/MP4 demuxer.
+const MOV_DEMUXER: &str = "mov,mp4,m4a,3gp,3g2,mj2";
+
+/// The containers of [`DEMUXERS`], as errors name them.
+pub const CONTAINERS: &str = "MP4/MOV and Matroska/WebM";
+
+/// Why [`open_input`] opened nothing.
+#[derive(Debug, Error)]
+pub enum OpenError {
+    #[error(transparent)]
+    Io(std::io::Error),
+    #[error("not a regular file")]
+    NotAFile,
+    /// FFmpeg would read the file with a demuxer outside [`DEMUXERS`].
+    #[error("FFmpeg reads it as {description} (`{format}`)")]
+    Container { format: String, description: String },
+    /// The demuxer asked to open another file or URL, which was refused.
+    #[error(
+        "FFmpeg tried to open `{url}` from inside it, which is refused: Spherecut lets FFmpeg read only the file it was given"
+    )]
+    Nested { url: String },
+    #[error(transparent)]
+    Ffmpeg(ff::Error),
+}
+
+/// Open a file for demuxing and read its stream info. Every file
+/// Spherecut demuxes is opened here, with FFmpeg confined to that one
+/// file (D24):
+///
+/// - `path` must be a regular file. FFmpeg gets `file:` and the path's
+///   bytes, so its file protocol opens exactly that path: a name such as
+///   `concat:a.mp4` or `http://host/x.mp4` is never read as a URL. (The
+///   bytes go as they are because ffmpeg-next's own functions panic on a
+///   path that is not UTF-8, and Linux file names need not be.)
+/// - The demuxer is the one FFmpeg picks from the file's first bytes, as
+///   `avformat_open_input` would, and must be one of [`DEMUXERS`];
+///   otherwise the error names the container.
+/// - The format context's `protocol_whitelist` is `file` and its
+///   `format_whitelist` is [`DEMUXERS`], and its `io_open` refuses every
+///   open but the file's own ([`open_only_the_file`]). The MOV demuxer's
+///   `enable_drefs` is 0, so it does not follow references to external
+///   data.
+/// - The decoders `avformat_find_stream_info` opens get [`MAX_PIXELS`].
+///
+/// With `cancel`, FFmpeg stops reading once it is set.
 pub fn open_input(
     path: &Path,
     cancel: Option<Arc<AtomicBool>>,
-) -> Result<ff::format::context::Input, ff::Error> {
-    let url = CString::new(path.as_os_str().as_bytes()).map_err(|_| ff::Error::Other {
-        errno: ff::util::error::EINVAL,
-    })?;
+) -> Result<ff::format::context::Input, OpenError> {
+    open_input_with(path, cancel, &DEMUXERS, MAX_PIXELS)
+}
+
+/// [`open_input`] with other demuxers and another picture size limit, so
+/// that tests can show what the confinement does with a demuxer that
+/// opens other files.
+fn open_input_with(
+    path: &Path,
+    cancel: Option<Arc<AtomicBool>>,
+    demuxers: &[&str],
+    max_pixels: i64,
+) -> Result<ff::format::context::Input, OpenError> {
+    let meta = std::fs::metadata(path).map_err(OpenError::Io)?;
+    if !meta.is_file() {
+        return Err(OpenError::NotAFile);
+    }
+    let url = file_url(path).map_err(OpenError::Ffmpeg)?;
+    // The guard frees the closure when dropped, which is after FFmpeg has
+    // freed the context on every path below.
+    let interrupt = cancel
+        .map(|cancel| ff::util::interrupt::new(Box::new(move || cancel.load(Ordering::Relaxed))));
+    let int_cb = interrupt
+        .as_ref()
+        .map_or(std::ptr::null(), |i| &raw const i.interrupt);
+    // SAFETY: `int_cb` is NULL or the callback in `interrupt`, which lives
+    // to the end of this function.
+    let fmt = unsafe { identify(&url, int_cb) }.map_err(OpenError::Ffmpeg)?;
+    // SAFETY: demuxers are static, and so are their names.
+    let (name, long_name) = unsafe { (cstr_opt((*fmt).name), cstr_opt((*fmt).long_name)) };
+    let name = name.unwrap_or_default();
+    if !demuxers.contains(&name.as_str()) {
+        return Err(OpenError::Container {
+            description: long_name.unwrap_or_else(|| name.clone()),
+            format: name,
+        });
+    }
+
     // SAFETY: allocates a context, which we own until it is handed to
     // avformat_open_input below.
     let mut ps = unsafe { sys::avformat_alloc_context() };
     if ps.is_null() {
-        return Err(ff::Error::Other {
+        return Err(OpenError::Ffmpeg(ff::Error::Other {
             errno: ff::util::error::ENOMEM,
-        });
+        }));
     }
-    // The guard frees the closure when dropped, which is after FFmpeg has
-    // freed the context on every path below.
-    let guard = cancel.map(|cancel| {
-        let i = ff::util::interrupt::new(Box::new(move || cancel.load(Ordering::Relaxed)));
-        // SAFETY: `ps` is live and ours; FFmpeg calls the callback with
-        // its opaque, the closure, which the guard keeps alive.
-        unsafe { (*ps).interrupt_callback = i.interrupt };
-        i.guard
-    });
-    // SAFETY: `ps` is a context from avformat_alloc_context and `url` a
-    // NUL-terminated string that outlives the call. On failure FFmpeg
-    // frees the context.
+    // SAFETY: `ps` is live and ours. FFmpeg calls the interrupt callback
+    // with its opaque, the closure, which `interrupt` keeps alive. Every
+    // context starts with FFmpeg's own io_open, kept for the one open
+    // open_only_the_file lets through.
+    unsafe {
+        if let Some(i) = &interrupt {
+            (*ps).interrupt_callback = i.interrupt;
+        }
+        if let Some(own) = (*ps).io_open {
+            FFMPEG_IO_OPEN.get_or_init(|| own);
+        }
+        (*ps).io_open = Some(open_only_the_file);
+    }
+    let mut opts = ff::Dictionary::new();
+    opts.set("protocol_whitelist", "file");
+    opts.set("format_whitelist", &demuxers.join(","));
+    if name == MOV_DEMUXER {
+        opts.set("enable_drefs", "0");
+    }
+    let watch = RefusalWatch::start();
+    // SAFETY: we own the dictionary until it comes back below.
+    let mut opts = unsafe { opts.disown() };
+    // SAFETY: `ps` is a context from avformat_alloc_context, `url` a
+    // NUL-terminated string that outlives the call, `fmt` a static demuxer
+    // and `opts` a dictionary FFmpeg may change. On failure FFmpeg frees
+    // the context.
+    let ret = unsafe { sys::avformat_open_input(&mut ps, url.as_ptr(), fmt, &mut opts) };
+    // SAFETY: what FFmpeg left of the options, ours again and freed here.
+    drop(unsafe { ff::Dictionary::own(opts) });
+    if ret < 0 {
+        return Err(watch
+            .finish()
+            .unwrap_or(OpenError::Ffmpeg(ff::Error::from(ret))));
+    }
+    // One dictionary per stream, for the decoders FFmpeg opens to find
+    // the streams' parameters.
+    // SAFETY: an open input context.
+    let streams = unsafe { (*ps).nb_streams } as usize;
+    // The frame size the demuxer read for each stream from the container.
+    // SAFETY: an open input context's `streams` holds `nb_streams` live
+    // streams, each with live codec parameters; width and height are
+    // plain ints.
+    let declared: Vec<(c_int, c_int)> = unsafe {
+        (0..streams)
+            .map(|i| {
+                let par = (**(*ps).streams.add(i)).codecpar;
+                ((*par).width, (*par).height)
+            })
+            .collect()
+    };
+    let mut decoder_opts: Vec<*mut sys::AVDictionary> = (0..streams)
+        .map(|_| {
+            let mut d = ff::Dictionary::new();
+            d.set("max_pixels", &max_pixels.to_string());
+            // SAFETY: owned by `decoder_opts` until it is taken back below.
+            unsafe { d.disown() }
+        })
+        .collect();
+    // SAFETY: an open input context and, when it has streams, an array of
+    // one dictionary per stream, as FFmpeg asks.
     let ret = unsafe {
-        sys::avformat_open_input(
-            &mut ps,
-            url.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+        sys::avformat_find_stream_info(
+            ps,
+            if streams == 0 {
+                std::ptr::null_mut()
+            } else {
+                decoder_opts.as_mut_ptr()
+            },
         )
     };
-    if ret < 0 {
-        return Err(ff::Error::from(ret));
+    for d in decoder_opts {
+        // SAFETY: each is one of the dictionaries made above, which FFmpeg
+        // may have changed but not freed.
+        drop(unsafe { ff::Dictionary::own(d) });
     }
-    // SAFETY: an open input context.
-    let ret = unsafe { sys::avformat_find_stream_info(ps, std::ptr::null_mut()) };
-    if ret < 0 {
+    let refused = watch.finish();
+    if ret < 0 || refused.is_some() {
         // SAFETY: closes and frees the context opened above, which nothing
         // else holds.
         unsafe { sys::avformat_close_input(&mut ps) };
-        return Err(ff::Error::from(ret));
+        return Err(refused.unwrap_or(OpenError::Ffmpeg(ff::Error::from(ret))));
     }
+    // A decoder that refuses a picture over `max_pixels` leaves its stream
+    // at 0x0, as if the file gave no size ("Ignoring invalid width/height
+    // values"), unless a parser sets it again from the bitstream, as
+    // H.264's does. The container's size is put back, so that callers can
+    // say the picture is too large (`TooLarge`) rather than missing.
+    for (i, &(width, height)) in declared.iter().enumerate() {
+        let (Ok(w), Ok(h)) = (u32::try_from(width), u32::try_from(height)) else {
+            continue;
+        };
+        if !over_max_pixels(w, h, max_pixels) {
+            continue;
+        }
+        // SAFETY: the context is still open, and avformat_find_stream_info
+        // only adds streams, so stream `i` is one of those read above;
+        // width and height are plain ints.
+        unsafe {
+            let par = (**(*ps).streams.add(i)).codecpar;
+            if (*par).width == 0 && (*par).height == 0 {
+                (*par).width = width;
+                (*par).height = height;
+            }
+        }
+    }
+    tracing::debug!(path = %path.display(), demuxer = name, "opened for demuxing");
     // SAFETY: an open input context, which the wrapper now owns: it closes
     // the context when dropped, and only then drops the guard.
     Ok(unsafe {
-        match guard {
-            Some(guard) => ff::format::context::Input::wrap_with_interrupt(ps, guard),
+        match interrupt {
+            Some(i) => ff::format::context::Input::wrap_with_interrupt(ps, i.guard),
             None => ff::format::context::Input::wrap(ps),
         }
     })
+}
+
+/// `file:` and the bytes of `path`. FFmpeg's file protocol takes the rest
+/// of the URL as the path, as it is.
+fn file_url(path: &Path) -> Result<CString, ff::Error> {
+    let bytes = [b"file:", path.as_os_str().as_bytes()].concat();
+    CString::new(bytes).map_err(|_| ff::Error::Other {
+        errno: ff::util::error::EINVAL,
+    })
+}
+
+/// The demuxer FFmpeg picks for the file at `url`, from its first bytes,
+/// as `avformat_open_input` picks one (it calls the same function).
+///
+/// # Safety
+///
+/// `int_cb` is NULL or points at an interrupt callback that stays valid
+/// during the call.
+unsafe fn identify(
+    url: &CStr,
+    int_cb: *const sys::AVIOInterruptCB,
+) -> Result<*const sys::AVInputFormat, ff::Error> {
+    let mut opts = ff::Dictionary::new();
+    opts.set("protocol_whitelist", "file");
+    // SAFETY: we own the dictionary until it comes back below.
+    let mut opts = unsafe { opts.disown() };
+    let mut pb = std::ptr::null_mut();
+    // SAFETY: `url` is NUL-terminated, `int_cb` is as the caller says, and
+    // `opts` is a dictionary FFmpeg may change.
+    let ret = unsafe {
+        sys::avio_open2(
+            &mut pb,
+            url.as_ptr(),
+            sys::AVIO_FLAG_READ,
+            int_cb,
+            &mut opts,
+        )
+    };
+    // SAFETY: what FFmpeg left of the options, ours again and freed here.
+    drop(unsafe { ff::Dictionary::own(opts) });
+    if ret < 0 {
+        return Err(ff::Error::from(ret));
+    }
+    let mut fmt = std::ptr::null();
+    // SAFETY: `pb` is the context opened above; FFmpeg reads up to its
+    // default probe size from it. A NULL log context is allowed.
+    let ret = unsafe {
+        sys::av_probe_input_buffer2(pb, &mut fmt, url.as_ptr(), std::ptr::null_mut(), 0, 0)
+    };
+    // SAFETY: closes and frees the context avio_open2 opened.
+    unsafe { sys::avio_closep(&mut pb) };
+    if ret < 0 {
+        Err(ff::Error::from(ret))
+    } else if fmt.is_null() {
+        Err(ff::Error::InvalidData)
+    } else {
+        Ok(fmt)
+    }
+}
+
+/// `AVFormatContext.io_open`, as FFmpeg declares it.
+type IoOpen = unsafe extern "C" fn(
+    *mut sys::AVFormatContext,
+    *mut *mut sys::AVIOContext,
+    *const c_char,
+    c_int,
+    *mut *mut sys::AVDictionary,
+) -> c_int;
+
+/// FFmpeg's own `io_open`, which `avformat_alloc_context` gives every
+/// context, for the one open [`open_only_the_file`] lets through.
+static FFMPEG_IO_OPEN: OnceLock<IoOpen> = OnceLock::new();
+
+thread_local! {
+    /// While [`open_input_with`] opens a file on this thread: the nested
+    /// opens refused so far.
+    static REFUSED: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+/// Notes, while it lives, the opens [`open_only_the_file`] refuses on
+/// this thread. FFmpeg opens a file and reads its header on the thread
+/// that calls it.
+struct RefusalWatch;
+
+impl RefusalWatch {
+    fn start() -> Self {
+        REFUSED.with(|r| *r.borrow_mut() = Some(Vec::new()));
+        RefusalWatch
+    }
+
+    /// The first open refused since [`start`](Self::start), as an error.
+    fn finish(self) -> Option<OpenError> {
+        let first = REFUSED.with(|r| r.borrow_mut().as_mut().map(std::mem::take))?;
+        first
+            .into_iter()
+            .next()
+            .map(|url| OpenError::Nested { url })
+    }
+}
+
+impl Drop for RefusalWatch {
+    fn drop(&mut self) {
+        REFUSED.with(|r| *r.borrow_mut() = None);
+    }
+}
+
+/// The `io_open` of every format context [`open_input`] makes. It lets
+/// through only the open that gives the context its input: the one
+/// `avformat_open_input` makes, into the context's `pb` while it has
+/// none, of the URL the context was opened with. FFmpeg's own `io_open`
+/// then opens it, under the context's `protocol_whitelist`. Every other
+/// open, such as a playlist's segment or a MOV file's external data, is
+/// refused with EPERM and logged. While the file is being opened, the
+/// refusal also fails [`open_input`], naming what FFmpeg tried to open.
+///
+/// The closing side stays FFmpeg's own (`io_close2`, and in FFmpeg 6.1
+/// the deprecated `io_close`): the only AVIOContext opened here is opened
+/// by FFmpeg's own `io_open`, which those close.
+///
+/// Not every nested open goes through `io_open`: the concat demuxer opens
+/// its files with a new format context of its own, which gets the
+/// whitelists but FFmpeg's default `io_open`. That is why the demuxers are
+/// limited first.
+unsafe extern "C" fn open_only_the_file(
+    s: *mut sys::AVFormatContext,
+    pb: *mut *mut sys::AVIOContext,
+    url: *const c_char,
+    flags: c_int,
+    options: *mut *mut sys::AVDictionary,
+) -> c_int {
+    let refused = sys::AVERROR(ff::util::error::EPERM);
+    // A panic must not unwind into C; the open is refused.
+    std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: the arguments FFmpeg passes to io_open.
+        let own = unsafe { is_own_input(s, pb, url, flags) };
+        if let (true, Some(open)) = (own, FFMPEG_IO_OPEN.get()) {
+            // SAFETY: FFmpeg's own io_open, with the arguments FFmpeg
+            // passed to this one.
+            return unsafe { open(s, pb, url, flags, options) };
+        }
+        let url = if url.is_null() {
+            String::new()
+        } else {
+            // SAFETY: FFmpeg passes a NUL-terminated URL.
+            unsafe { CStr::from_ptr(url) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        tracing::warn!(url = %url, "refused FFmpeg's request to open another file or URL");
+        REFUSED.with(|r| {
+            if let Some(list) = r.borrow_mut().as_mut() {
+                list.push(url);
+            }
+        });
+        refused
+    }))
+    .unwrap_or(refused)
+}
+
+/// Whether an io_open call is `avformat_open_input` opening the context's
+/// own input: for reading, into `s->pb` while it is NULL, the URL the
+/// context has.
+///
+/// # Safety
+///
+/// The arguments FFmpeg passes to io_open: its live context, where the
+/// AVIOContext goes, and a NUL-terminated URL.
+unsafe fn is_own_input(
+    s: *mut sys::AVFormatContext,
+    pb: *mut *mut sys::AVIOContext,
+    url: *const c_char,
+    flags: c_int,
+) -> bool {
+    if s.is_null() || url.is_null() || flags & sys::AVIO_FLAG_WRITE != 0 {
+        return false;
+    }
+    // SAFETY: `s` is FFmpeg's live context, whose `url` is NULL or a
+    // NUL-terminated string; `url` is NUL-terminated.
+    unsafe {
+        pb == &raw mut (*s).pb
+            && (*s).pb.is_null()
+            && !(*s).url.is_null()
+            && CStr::from_ptr(url) == CStr::from_ptr((*s).url)
+    }
 }
 
 /// The entries of a dictionary, such as a file's or a stream's metadata,
@@ -891,6 +1233,98 @@ pub(crate) fn note_device_frame(dec: &mut ff::codec::context::Context) {
     }
 }
 
+/// The most pixels a decoder may make one picture of: 2^27, 16384 × 8192.
+/// That is twice an 11K equirect (11520 × 5760), and more than any camera
+/// Spherecut reads records (the Insta360 X5's 8K is 7680 × 3840). One
+/// picture at the limit takes 192 MiB at 8-bit 4:2:0 and 1 GiB at 8 bytes
+/// per pixel, which ProRes 4444 with alpha (decoded as 12-bit 4:4:4:4 in
+/// 16-bit samples) and 16-bit RGBA PNG take.
+///
+/// Without it, FFmpeg's `max_pixels` is `INT_MAX`, but that is not what
+/// stops a picture: its size check (`av_image_check_size2`) refuses one
+/// whose rows, at 8 bytes per pixel plus padding, would come to 2^31
+/// bytes, which is about 2^28 pixels (16384 × 16000 passes). So this
+/// halves the largest picture a file can make a decoder allocate.
+pub const MAX_PIXELS: i64 = 1 << 27;
+
+/// A picture size over [`MAX_PIXELS`], which no decoder Spherecut opens
+/// makes. `probe` warns of a stream of such pictures and `VideoDecoder`
+/// refuses one, by its size. FFmpeg's own errors would not say why: its
+/// decoders fail to open or decode with "Invalid argument", or the stream
+/// is left with no size at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooLarge {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The most FFmpeg pads a picture's rows to, in pixels: `STRIDE_ALIGN`,
+/// which is 64 in x86-64 builds with AVX-512, less in others.
+const ROW_ALIGN: u64 = 64;
+
+impl TooLarge {
+    /// `Some` when decoders limited to [`MAX_PIXELS`] may refuse a
+    /// `width` × `height` picture. FFmpeg checks the limit when it
+    /// allocates a picture (`ff_get_buffer`), with the width padded to its
+    /// row alignment: its H.264 and MJPEG decoders refuse 16380 × 8194,
+    /// fewer than 2^27 pixels, as 16384 × 8194. So the width is padded as
+    /// much as FFmpeg ever pads it, which may refuse a picture within 63
+    /// columns of the limit that a build with less padding, or a decoder
+    /// that allocates its own pictures (libdav1d), would decode.
+    pub fn of(width: u32, height: u32) -> Option<Self> {
+        over_max_pixels(width, height, MAX_PIXELS).then_some(TooLarge { width, height })
+    }
+}
+
+/// Whether a `width` × `height` picture is over `max_pixels` once its
+/// width is padded as [`TooLarge::of`] says.
+fn over_max_pixels(width: u32, height: u32, max_pixels: i64) -> bool {
+    let padded = u64::from(width).next_multiple_of(ROW_ALIGN);
+    i128::from(padded) * i128::from(height) > i128::from(max_pixels)
+}
+
+impl std::fmt::Display for TooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (w, h) = (u64::from(self.width), u64::from(self.height));
+        write!(f, "{w}x{h}, ")?;
+        if w * h <= MAX_PIXELS as u64 {
+            write!(
+                f,
+                "which FFmpeg may pad to {}x{h}, ",
+                w.next_multiple_of(ROW_ALIGN)
+            )?;
+        }
+        // `too_large_pictures_are_named_by_size` holds this to MAX_PIXELS.
+        write!(
+            f,
+            "more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes"
+        )
+    }
+}
+
+/// Open decoder `codec` on `ctx`, limited to [`MAX_PIXELS`] per picture.
+/// Every decoder Spherecut uses is opened here (clippy forbids
+/// ffmpeg-next's own decoder opens elsewhere).
+pub(crate) fn open_decoder(
+    ctx: ff::codec::context::Context,
+    codec: ff::Codec,
+) -> Result<ff::decoder::Opened, ff::Error> {
+    open_decoder_with(ctx, codec, MAX_PIXELS)
+}
+
+#[allow(clippy::disallowed_methods)] // The one place decoders open.
+fn open_decoder_with(
+    mut ctx: ff::codec::context::Context,
+    codec: ff::Codec,
+    max_pixels: i64,
+) -> Result<ff::decoder::Opened, ff::Error> {
+    // SAFETY: `ctx` owns a live AVCodecContext that is not open yet;
+    // max_pixels is a plain int64 field that the decoder reads when it
+    // opens and when it sizes each picture.
+    unsafe { (*ctx.as_mut_ptr()).max_pixels = max_pixels };
+    ctx.decoder().open_as(codec)
+}
+
 /// Why [`open_video_decoder`] opened no decoder.
 #[derive(Debug, Error)]
 pub(crate) enum OpenDecoderError {
@@ -936,7 +1370,7 @@ pub(crate) fn open_video_decoder(
     // SAFETY: registered codecs are static.
     let codec = unsafe { ff::Codec::wrap(codec) };
     // The media type is checked above, which is all `Opened::video` checks.
-    Ok(ctx.decoder().open_as(codec).map(ff::decoder::Video)?)
+    Ok(open_decoder(ctx, codec).map(ff::decoder::Video)?)
 }
 
 /// The decoder for codec `id` that can decode on a device of type
@@ -1393,7 +1827,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use std::fmt::Debug;
-    use std::sync::Mutex;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, PoisonError};
 
     use tracing::subscriber::Interest;
     use tracing::{Event, Level, Metadata, Subscriber, field, span};
@@ -1402,6 +1837,9 @@ mod tests {
 
     /// The most verbose "ffmpeg" level [`Capture`] accepts, `None` for none.
     static MAX: Mutex<Option<Level>> = Mutex::new(Some(Level::TRACE));
+    /// Held by tests that set FFmpeg's log level, which is process-wide,
+    /// and by tests that read FFmpeg's log through `capture_ffmpeg_log`.
+    static LOG_LEVEL: Mutex<()> = Mutex::new(());
     static EVENTS: Mutex<Vec<(Level, String)>> = Mutex::new(Vec::new());
 
     /// Records "ffmpeg" events up to [`MAX`], asking on every event.
@@ -1650,9 +2088,7 @@ mod tests {
     #[test]
     fn planes_of_a_frame_cropped_on_the_left_end_inside_their_buffers() {
         let codec = ff::decoder::find_by_name("hevc").unwrap();
-        let mut dec = ff::codec::context::Context::new_with_codec(codec)
-            .decoder()
-            .open_as(codec)
+        let mut dec = open_decoder(ff::codec::context::Context::new_with_codec(codec), codec)
             .and_then(|d| d.video())
             .unwrap();
         // 128 luma bytes: more than the padding FFmpeg leaves after a
@@ -1758,6 +2194,7 @@ mod tests {
     // One test, because the subscriber and FFmpeg's level are global.
     #[test]
     fn ffmpeg_log_reaches_tracing_at_the_level_it_asks_for() {
+        let _level = LOG_LEVEL.lock().unwrap_or_else(PoisonError::into_inner);
         tracing::subscriber::set_global_default(Capture).unwrap();
         crate::init();
         set_max(Some(Level::TRACE));
@@ -1872,5 +2309,267 @@ mod tests {
         assert_eq!(unsafe { sys::av_log_get_level() }, sys::AV_LOG_QUIET);
         log(sys::AV_LOG_PANIC, "off-test\n");
         assert!(captured("off-test").is_empty());
+    }
+
+    /// A test's own directory in the system's temp dir, removed with what
+    /// it holds when dropped.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("spherecut-ffi-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+
+        fn write(&self, name: &str, data: &[u8]) -> PathBuf {
+            let p = self.0.join(name);
+            std::fs::write(&p, data).unwrap();
+            p
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    /// Three 256x128 frames of H.264 in MP4.
+    fn clip(dir: &TempDir, name: &str) -> PathBuf {
+        clip_with(dir, name, "libx264", &[])
+    }
+
+    /// Three 256x128 frames in MP4, from `encoder` with `options`.
+    fn clip_with(dir: &TempDir, name: &str, encoder: &str, options: &[(&str, &str)]) -> PathBuf {
+        use crate::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+        let settings = VideoSettings {
+            encoder: encoder.into(),
+            width: 256,
+            height: 128,
+            rate: spherecut_core::FrameRate::FPS_30,
+            layout: PixelLayout::Yuv420p,
+            options: options
+                .iter()
+                .map(|&(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            bt709_limited: true,
+        };
+        let mut w = Mp4Writer::create(&dir.0.join(name), &settings, None).unwrap();
+        for i in 0..3 {
+            let luma = vec![16 + 20 * i; 256 * 128];
+            let chroma = vec![128; 128 * 64];
+            w.push_video(&YuvPlanes::U8([luma, chroma.clone(), chroma]))
+                .unwrap();
+        }
+        w.finish().unwrap()
+    }
+
+    #[test]
+    fn file_urls_hold_the_path_as_it_is() {
+        use std::ffi::OsStr;
+        for (path, url) in [
+            (&b"concat:x.mp4"[..], &b"file:concat:x.mp4"[..]),
+            (
+                b"http://127.0.0.1:1/x.mp4",
+                b"file:http://127.0.0.1:1/x.mp4",
+            ),
+            (b"file:x.mp4", b"file:file:x.mp4"),
+            (b"/tmp/caf\xe9 %d?.mp4", b"file:/tmp/caf\xe9 %d?.mp4"),
+        ] {
+            let got = file_url(Path::new(OsStr::from_bytes(path))).unwrap();
+            assert_eq!(got.as_bytes(), url);
+        }
+    }
+
+    #[test]
+    fn opened_files_are_confined() {
+        crate::init();
+        let dir = TempDir::new("confined");
+        let ictx = open_input(&clip(&dir, "clip.mp4"), None).unwrap();
+        // SAFETY: `ictx` owns a live, open context; its whitelists are
+        // NULL or strings, and the MOV demuxer's private data has the
+        // enable_drefs option.
+        let (protocols, formats, io_open, drefs) = unsafe {
+            let s = ictx.as_ptr();
+            let mut drefs = -1;
+            let ret = sys::av_opt_get_int((*s).priv_data, c"enable_drefs".as_ptr(), 0, &mut drefs);
+            assert!(ret >= 0);
+            (
+                cstr_opt((*s).protocol_whitelist),
+                cstr_opt((*s).format_whitelist),
+                (*s).io_open,
+                drefs,
+            )
+        };
+        assert_eq!(protocols.as_deref(), Some("file"));
+        assert_eq!(
+            formats.as_deref(),
+            Some("mov,mp4,m4a,3gp,3g2,mj2,matroska,webm")
+        );
+        let ours: IoOpen = open_only_the_file;
+        assert_eq!(io_open.map(|f| f as usize), Some(ours as usize));
+        assert_eq!(
+            drefs, 0,
+            "the MOV demuxer must not follow external references"
+        );
+    }
+
+    #[test]
+    fn other_containers_are_refused_before_their_demuxer_runs() {
+        crate::init();
+        let dir = TempDir::new("refused");
+        let playlist = dir.write(
+            "list.m3u8",
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nhttp://127.0.0.1:1/a.ts\n#EXT-X-ENDLIST\n",
+        );
+        match open_input(&playlist, None) {
+            Err(OpenError::Container {
+                format,
+                description,
+            }) => {
+                assert_eq!(format, "hls");
+                assert_eq!(description, "Apple HTTP Live Streaming");
+            }
+            r => panic!(
+                "expected the playlist to be refused, got {:?}",
+                r.map(|_| ())
+            ),
+        }
+        assert!(matches!(open_input(&dir.0, None), Err(OpenError::NotAFile)));
+        assert!(matches!(
+            open_input(&dir.0.join("missing.mp4"), None),
+            Err(OpenError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound
+        ));
+    }
+
+    #[test]
+    fn nested_opens_are_refused_and_named() {
+        // With the HLS demuxer let in, which Spherecut never does, its
+        // segments are what io_open refuses: one outside the playlist's
+        // folder, and one on the network.
+        crate::init();
+        let dir = TempDir::new("nested");
+        std::fs::create_dir_all(dir.0.join("inside")).unwrap();
+        std::fs::copy(clip(&dir, "outside.mp4"), dir.0.join("outside.ts")).unwrap();
+        for (name, segment, want) in [
+            // FFmpeg resolves the segment against the playlist's URL.
+            ("local.m3u8", "../outside.ts", "inside/../outside.ts"),
+            (
+                "remote.m3u8",
+                "http://127.0.0.1:1/a.ts",
+                "http://127.0.0.1:1/a.ts",
+            ),
+        ] {
+            let playlist = dir.write(
+                &format!("inside/{name}"),
+                format!(
+                    "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\n{segment}\n#EXT-X-ENDLIST\n"
+                )
+                .as_bytes(),
+            );
+            match open_input_with(&playlist, None, &["hls"], MAX_PIXELS) {
+                Err(OpenError::Nested { url }) => assert!(url.ends_with(want), "{url}"),
+                r => panic!("{name}: expected a refused open, got {:?}", r.map(|_| ())),
+            }
+        }
+    }
+
+    #[test]
+    fn the_decoders_that_find_stream_info_opens_are_limited() {
+        let _level = LOG_LEVEL.lock().unwrap_or_else(PoisonError::into_inner);
+        crate::init();
+        let dir = TempDir::new("stream-info");
+        let clip = clip(&dir, "clip.mp4");
+        let (r, log) =
+            crate::hwprobe::capture_ffmpeg_log(|| open_input_with(&clip, None, &DEMUXERS, 1000));
+        r.unwrap();
+        assert!(
+            log.iter()
+                .any(|l| l.contains("Picture size 256x128 exceeds specified max pixel count 1000")),
+            "{log:?}"
+        );
+        let (r, log) = crate::hwprobe::capture_ffmpeg_log(|| open_input(&clip, None));
+        r.unwrap();
+        assert!(log.is_empty(), "{log:?}");
+    }
+
+    #[test]
+    fn a_stream_over_the_limit_keeps_its_size() {
+        // A decoder that refuses the size leaves an MJPEG stream at 0x0,
+        // where H.264's parser sets the size again from the bitstream.
+        // Either way the stream has the size its file gives, for
+        // `TooLarge` to name.
+        let _level = LOG_LEVEL.lock().unwrap_or_else(PoisonError::into_inner);
+        crate::init();
+        let dir = TempDir::new("over-limit");
+        let mjpeg = clip_with(&dir, "mjpeg.mp4", "mjpeg", &[("strict", "-1")]);
+        for clip in [clip(&dir, "h264.mp4"), mjpeg] {
+            let (ictx, log) = crate::hwprobe::capture_ffmpeg_log(|| {
+                open_input_with(&clip, None, &DEMUXERS, 1000).unwrap()
+            });
+            assert!(
+                log.iter()
+                    .any(|l| l.contains("exceeds specified max pixel count 1000")),
+                "{}: {log:?}",
+                clip.display()
+            );
+            let f = codecpar_fields(&ictx.stream(0).unwrap().parameters());
+            assert_eq!((f.width, f.height), (256, 128), "{}", clip.display());
+        }
+    }
+
+    #[test]
+    fn too_large_pictures_are_named_by_size() {
+        // The message says 2^27 and 16384x8192.
+        assert_eq!(MAX_PIXELS, 1 << 27);
+        assert_eq!(MAX_PIXELS, 16384 * 8192);
+        assert_eq!(TooLarge::of(16384, 8192), None);
+        assert_eq!(TooLarge::of(11520, 5760), None);
+        assert_eq!(TooLarge::of(0, u32::MAX), None);
+        // 16383 pads to 16384, and 16320 is padded already.
+        assert_eq!(TooLarge::of(16383, 8192), None);
+        assert_eq!(TooLarge::of(16320, 8224), None);
+        assert_eq!(
+            TooLarge::of(16384, 8193),
+            Some(TooLarge {
+                width: 16384,
+                height: 8193
+            })
+        );
+        assert!(TooLarge::of(u32::MAX, u32::MAX).is_some());
+        assert_eq!(
+            TooLarge::of(16400, 8200).unwrap().to_string(),
+            "16400x8200, more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes"
+        );
+        // Fewer than 2^27 pixels, but not once FFmpeg pads the rows.
+        assert_eq!(
+            TooLarge::of(16380, 8194).unwrap().to_string(),
+            "16380x8194, which FFmpeg may pad to 16384x8194, more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes"
+        );
+    }
+
+    #[test]
+    fn decoders_are_limited_to_max_pixels() {
+        // The frame is 512x128: 65536 pixels.
+        let decode = |max: i64| {
+            let codec = ff::decoder::find_by_name("hevc").unwrap();
+            let ctx = ff::codec::context::Context::new_with_codec(codec);
+            let mut dec = open_decoder_with(ctx, codec, max)?.video()?;
+            for p in hevc_frame() {
+                dec.send_packet(&p)?;
+            }
+            dec.send_eof()?;
+            let mut frame = ff::frame::Video::empty();
+            dec.receive_frame(&mut frame).map(|()| frame.width())
+        };
+        assert_eq!(decode(65536).unwrap(), 512);
+        assert!(decode(65535).is_err());
+
+        let codec = ff::decoder::find_by_name("hevc").unwrap();
+        let dec = open_decoder(ff::codec::context::Context::new_with_codec(codec), codec).unwrap();
+        // SAFETY: an open decoder context; a plain int64 field.
+        assert_eq!(unsafe { (*dec.as_ptr()).max_pixels }, MAX_PIXELS);
     }
 }

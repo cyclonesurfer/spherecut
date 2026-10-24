@@ -11,6 +11,8 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
+mod common;
+
 /// Mesa's lavapipe ICD for this architecture. Tier 1 needs it; it ships in
 /// mesa-vulkan-drivers (Fedora, Ubuntu) and vulkan-swrast (Arch).
 fn lavapipe_icd() -> PathBuf {
@@ -46,8 +48,14 @@ fn missing_node() -> PathBuf {
 
 /// `spherecut doctor` with `args`, on lavapipe and no render node.
 fn doctor(args: &[&str]) -> Output {
+    run_doctor(Command::new(env!("CARGO_BIN_EXE_spherecut")), args)
+}
+
+/// [`doctor`], run by `cmd`, which runs the spherecut binary with what
+/// is appended to it.
+fn run_doctor(mut cmd: Command, args: &[&str]) -> Output {
     let icd = lavapipe_icd();
-    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+    let out = cmd
         .arg("doctor")
         .arg("--render-node")
         .arg(missing_node())
@@ -137,4 +145,25 @@ fn text_lists_the_vulkan_device_and_the_check_tables() {
     ] {
         assert!(text.contains(want), "no {want:?} in:\n{text}");
     }
+}
+
+#[test]
+fn doctor_opens_no_network_socket() {
+    let log = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("doctor-strace-{}.log", std::process::id()));
+    let mut cmd = common::strace(&log, "socket,openat,?open");
+    cmd.arg(env!("CARGO_BIN_EXE_spherecut"));
+    run_doctor(cmd, &[]);
+    let log_text = std::fs::read_to_string(&log).unwrap();
+    std::fs::remove_file(&log).ok();
+    // The trace saw doctor load the Vulkan driver it tests ...
+    assert!(
+        log_text
+            .lines()
+            .any(|l| l.contains("open") && l.contains("lvp_icd")),
+        "strace saw no open of lavapipe's ICD:\n{log_text}"
+    );
+    // ... and no network socket.
+    let sockets = common::inet_sockets(&log_text);
+    assert!(sockets.is_empty(), "{sockets:#?}");
 }

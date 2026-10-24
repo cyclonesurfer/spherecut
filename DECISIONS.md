@@ -191,6 +191,11 @@ downloads anything.
 system FFmpeg can do. M1 shuts FFmpeg's network protocols and nested
 opens, and bans `std::net`'s TCP and UDP types with clippy.
 
+*Updated by D24*, which does that: FFmpeg gets only the `file` protocol,
+the MP4/MOV and Matroska demuxers and no nested opens, clippy forbids
+`std::net`'s TCP and UDP types, and Tier 1 tests run probe and doctor
+under strace and fail on any `AF_INET` or `AF_INET6` socket.
+
 *Superseded in part by D18:* doctor still never installs or changes
 anything and downloads nothing, but on Fedora it makes one read-only
 `rpm -q` query to word its fixes. `cargo xtask hw-test` also runs `rpm -q`
@@ -519,9 +524,12 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
 
 A file FFmpeg reads as MOV/MP4 is checked even when its first box type is
 unknown; that box alone is a warning, not damage. Matroska is checked
-only against its Segment length, other containers not at all, and the
-report says so (`structure`). A file with no video or audio stream also
-fails `probe`.
+only against its Segment length, and the report says so (`structure`).
+A file with no video or audio stream also fails `probe`.
+
+*Updated by D24:* other containers used to be checked not at all, with
+`structure: none`. Now they aren't opened: `probe` fails on them with
+the container's name, before FFmpeg's demuxer for it runs.
 
 What FFmpeg logs at warning or error level while `probe` runs goes into
 the report's `ffmpeg_log` (each line once, with a count, at most 32), even
@@ -870,6 +878,10 @@ to `file`, limits the demuxers, refuses nested opens through `io_open`
 and adds a clippy ban on `std::net`'s TCP and UDP types, with Tier 1
 tests including an `strace` check for network sockets.
 
+*Updated by D24*, which does that, and gives every decoder a
+`max_pixels` limit (`MAX_PIXELS`, one of the limits PLAN.md track A
+lists). `spherecut frame`'s strace test comes with `frame`.
+
 To decide at A1, with a prototype of each:
 
 - **MCP layer.** rmcp 3.7.0 (the official Rust SDK, Apache-2.0, MSRV
@@ -895,6 +907,212 @@ To decide at A1, with a prototype of each:
 
 Revisit if: a new MCP revision changes the split, or agents converge on
 something other than MCP.
+
+## D24. FFmpeg opens only the file Spherecut opened
+
+*2026-10-24, M1. Updates D8, D15 and D23. The criterion is in PLAN.md
+M1.*
+
+What: every file Spherecut demuxes is opened by `ffi::open_input`, which
+holds FFmpeg to that one file:
+
+- The path must be a regular file. FFmpeg gets `file:` followed by the
+  path's bytes, and its file protocol strips the `file:` and opens the
+  rest as it is. So `http://127.0.0.1:1/x.mp4` is the path
+  `http:/127.0.0.1:1/x.mp4`, and a file named `concat:x.mp4`,
+  `subfile,,start,0,end,0,,:x.mp4` or `file:x.mp4` is read as that file.
+  FFmpeg took such names for URLs when no directory came before them:
+  M0's probe of `concat:x.mp4` read `x.mp4`.
+- The demuxer is identified first, with `av_probe_input_buffer2` (the
+  function `avformat_open_input` uses) on an `avio_open2` context
+  limited to the file protocol. It must be one of `ffi::DEMUXERS`,
+  FFmpeg's `mov,mp4,m4a,3gp,3g2,mj2` and `matroska,webm`, which hold
+  every camera format in `docs/formats/` (`.insv`, `.lrv`, `.360`,
+  `.OSV`, `.LRF` and `.mp4` are all MP4). Any other is refused before its
+  demuxer reads anything, with `MediaError::UnsupportedContainer`, which
+  names the container as FFmpeg does: "FFmpeg reads list.m3u8 as Apple
+  HTTP Live Streaming (`hls`), and Spherecut opens only MP4/MOV and
+  Matroska/WebM files". The file is then opened with that demuxer given
+  explicitly, so a file swapped between the two opens is still read only
+  by an allowed demuxer.
+- The format context gets `protocol_whitelist` `file`, a
+  `format_whitelist` of the two demuxers, and `enable_drefs` 0 for MOV.
+  0 is FFmpeg's default, set here so that a MOV file's references to
+  external data are never followed.
+- Its `io_open` is `open_only_the_file`. That passes FFmpeg's own
+  `io_open` only the open that gives the context its input: for reading,
+  into `s->pb` while that is NULL, of the context's own URL, as
+  `avformat_open_input` does in FFmpeg 6.1, 8.1 and 9.0. Every other open
+  is refused with EPERM and a `tracing` warning, and a refusal while the
+  file is being opened fails the open with the URL FFmpeg asked for
+  (`MediaError::Open`). `io_close2`, and FFmpeg 6.1's deprecated
+  `io_close`, stay FFmpeg's own: the only AVIOContext is the one
+  FFmpeg's `io_open` opened.
+- Every decoder gets `max_pixels` = `MAX_PIXELS` = 2^27 (16384 × 8192):
+  those `avformat_find_stream_info` opens, through its per-stream options,
+  and those Spherecut opens, all through `ffi::open_decoder` (`probe`,
+  `VideoDecoder`, doctor's probes). That is twice an 11K equirect
+  (11520 × 5760), and far above any camera Spherecut reads (the X5's 8K
+  is 7680 × 3840). One picture at the limit takes 192 MiB at 8-bit 4:2:0
+  and 1 GiB at 8 bytes per pixel, which ProRes 4444 with alpha (decoded
+  as 12-bit 4:4:4:4 in 16-bit samples) and 16-bit RGBA PNG take.
+  FFmpeg's default `max_pixels` is `INT_MAX`, but its size check
+  (`av_image_check_size2`) already refuses a picture whose rows, at 8
+  bytes per pixel plus padding, would come to 2^31 bytes: about 2^28
+  pixels (16384 × 16000 passes, 16384 × 16300 does not, checked with
+  6.1). So `MAX_PIXELS` halves the largest picture a file can make a
+  decoder allocate.
+- A stream of larger pictures is named by its size, as Spherecut's limit
+  and not damage: `probe` warns "stream #0 (sample entry `avc1`) is
+  16384x8208, more than the 2^27 pixels (16384x8192) per picture that
+  Spherecut decodes" and exits 0, and `VideoDecoder::open` refuses it
+  with `MediaError::PictureTooLarge`, before opening a decoder.
+  FFmpeg's own account was misleading: its H.264 decoder fails to open
+  with "Invalid argument", which `probe` took for a damaged `avcC`, and
+  `avformat_find_stream_info` leaves an MJPEG stream at 0x0, which
+  `probe` took for a missing frame size; FFmpeg's "Picture size ...
+  exceeds specified max pixel count" was only in its log. So
+  `open_input` puts back the size the container gave (MP4's sample
+  entry, Matroska's `PixelWidth` and `PixelHeight`) when FFmpeg left an
+  over-limit stream at 0x0. The check (`TooLarge::of`) pads the width to
+  a multiple of 64 first, because FFmpeg checks the limit when it
+  allocates a picture, with its rows padded to its SIMD alignment (64
+  pixels with AVX-512): its H.264 and MJPEG decoders refuse 16380 × 8194,
+  fewer than 2^27 pixels, as 16384 × 8194, so the warning then says
+  "which FFmpeg may pad to 16384x8194". That may refuse a picture within
+  63 columns of the limit that a build with less padding, or libdav1d,
+  which allocates its own pictures, would decode. 16384 × 8192 itself
+  decodes (checked with H.264 on 6.1).
+- `clippy.toml` forbids `std::net`'s `TcpStream`, `TcpListener` and
+  `UdpSocket`, ffmpeg-next's input opens (`format::open`, `open_with`
+  and the `format::input` functions), its decoder opens
+  (`Decoder::open`, `open_as`, `video` and the like) and its output
+  opens (`format::output`, `output_with`, `output_as`, `output_as_with`),
+  which take the path as a URL too, so `-o http://...` would write to the
+  network. So new code can't open a socket or bypass `open_input`, the
+  limit or `Mp4Writer`'s own file handle by accident. The synth crate's
+  tests read files they wrote themselves with ffmpeg-next directly, and
+  one remuxes into a file of its own, each under an `#[allow]` that says
+  so.
+
+Why: the agent integration review (D23) found that `deny.toml` can't see
+what FFmpeg does, since FFmpeg is a system C library. M0's probe followed
+an HLS playlist to a segment outside its folder, and a playlist with
+`http://` entries would make FFmpeg use the network. Each layer covers
+what another can't. Limiting the demuxers is the main one, because not
+every nested open goes through `io_open`: the concat demuxer opens its
+files through a format context of its own, which gets the whitelists but
+FFmpeg's default `io_open`. `io_open` stops what the allowed demuxers, or
+a later FFmpeg, would open beside the file, and the protocol whitelist
+keeps even FFmpeg's own `io_open` to files. With FFmpeg 6.1, M0's probe
+already refused the `http://` segment, because HLS limits its segments to
+`file,crypto,data`, and the ffconcat file ("Unsafe file name"); the tests
+don't rely on either.
+
+Why `file:` and not our own AVIOContext: FFmpeg's file protocol already
+seeks, reports the size, retries `EINTR` and honours the interrupt
+callback that `VideoDecoder::open_cancellable` uses. ffmpeg-next's custom
+IO can't take an interrupt callback (`StreamIo::set_interrupt` is
+private to the crate), so our own read, seek and buffer would be more
+unsafe code with no more confinement, since `io_open` refuses nested
+opens either way. Why identify first: so that the refusal names the
+container before its demuxer runs, and the open can't end up with another
+demuxer than the one checked. It costs a second open and a read of the
+file's start.
+
+Tier 1 tests:
+
+- `ffi` unit tests: `opened_files_are_confined` reads the whitelists,
+  `io_open` and `enable_drefs` back from a real context;
+  `other_containers_are_refused_before_their_demuxer_runs`;
+  `nested_opens_are_refused_and_named`, which allows `hls` so that
+  `io_open` alone has to stop a segment outside the playlist's folder and
+  an `http://` one; `file_urls_hold_the_path_as_it_is`;
+  `decoders_are_limited_to_max_pixels` (a 512 × 128 frame opens at 65536
+  and fails at 65535),
+  `the_decoders_that_find_stream_info_opens_are_limited`,
+  `a_stream_over_the_limit_keeps_its_size` (H.264 and MJPEG under a limit
+  of 1000 pixels) and `too_large_pictures_are_named_by_size` (the bounds,
+  the padding and the wording).
+- `probe` unit test `a_stream_over_max_pixels_is_a_warning_that_names_the_limit`.
+- `crates/media/tests/confinement.rs`: `VideoDecoder::open` and
+  `probe::probe` refuse a playlist by name, and a URL is a missing path.
+- `crates/cli/tests/confinement.rs`: `spherecut probe` refuses, by name
+  and with exit 1, an HLS playlist whose segment is outside its folder,
+  one with an `http://` segment, an ffconcat file and a WAV file;
+  `http://127.0.0.1:1/x.mp4` is "No such file or directory"; files named
+  `concat:x.mp4`, `concat:x.mp4|x.mp4`, `subfile,,start,0,end,0,,:x.mp4`,
+  `file:x.mp4`, `a:b.mp4` and `http://127.0.0.1:1/x.mp4` are read as
+  themselves, not as the `x.mp4` beside them; and under `strace -f` probe
+  of all of them opens no `AF_INET` or `AF_INET6` socket and none of the
+  files they list. The trace must show the inputs being opened, so a
+  trace that saw nothing fails.
+- `crates/cli/tests/doctor.rs`: `doctor_opens_no_network_socket`, the
+  same strace check, which must see doctor load lavapipe.
+- `crates/cli/tests/probe.rs`: a Matroska file with only subtitles still
+  fails as having no video or audio stream, and an LRC file is refused
+  by name. `a_picture_over_max_pixels_is_a_warning_that_names_the_limit`
+  probes MJPEG files from `spherecut_synth::media::write_mjpeg_declaring`,
+  64 × 64 frames whose sample entry and frame headers say 16400 × 8200,
+  and 16380 × 8194; decoders stop at the header, so the test stays small.
+  The branch's first version called the first damaged ("has no frame
+  size").
+- `crates/synth/tests/decode_errors.rs`:
+  `a_picture_over_max_pixels_is_refused_by_size`, the same file through
+  `VideoDecoder::open`.
+
+M0's binary under the same strace opened `inside/../outside/private.ts`
+and, for `concat:x.mp4`, `x.mp4`, so these tests fail on M0. They pass
+on Ubuntu's 6.1.1 and on D2's 9.0.2 build, where every media, CLI and
+synth test passes but the six that need FFmpeg's Vulkan device, which
+that build lacks (`crates/cli/tests/doctor.rs`, its strace test
+included, and `hw_refusal.rs`). The minimal 8.1 build here has too few
+demuxers and encoders to run them; for 8.1, Pat's version, the
+`io_open` contract was checked in its source.
+
+strace is a Tier 1 prerequisite: `cargo xtask check` stops before
+anything else when `strace -V` fails, printing `sudo dnf install strace`
+(Fedora), `sudo pacman -S strace` (Arch) or `sudo apt install strace`
+(Ubuntu), and the strace tests fail rather than skip without it.
+`cargo xtask hw-test`'s prerequisite check lists it too, with the dnf or
+pacman command. The tests trace with `--seccomp-bpf`, so only the traced
+calls stop the process.
+
+What the confinement changed elsewhere: `probe` refuses other containers
+instead of reporting them with `structure: none` (D15). `none` stays,
+for MP4 boxes that can't be read, a Matroska header that can't be read
+or a Segment with no size, and a container added later without a
+structure check. `hw_refusal`'s AV1 test opened the raw `av1-main.obu`,
+which needs the `obu` demuxer. Instead of widening the list for a test,
+it opens `fixtures/av1-main.mp4`, the same frame remuxed (command in the
+fixtures README); doctor still feeds the raw bitstreams to the decoder
+and demuxes nothing. The tests use the `hls`, `concat`, `wav` and `lrc`
+demuxers only to show that they are refused. `spherecut frame` doesn't
+exist yet; its strace test comes with it.
+
+Widening the list: add FFmpeg's demuxer name to `ffi::DEMUXERS` and the
+container to `ffi::CONTAINERS`, with a DECISIONS entry that says which
+files the demuxer opens besides its input and whether they go through
+`io_open` (concat's don't), what `probe` checks of its structure, and
+the tests: a file of it probes and decodes, and goes through the strace
+test. The likely first are WAV, FLAC or MP3 music beds in M6.
+
+Limits: there is no `codec_whitelist`; any decoder FFmpeg has for a
+stream in these containers may run, each under `MAX_PIXELS`. `max_pixels`
+bounds one picture, not how many a decoder keeps (references, frame
+threads). `TooLarge` checks the size FFmpeg gives the stream, which is
+the container's unless a parser reads it from the bitstream, as H.264's
+does. So an MJPEG frame header over the limit in a stream whose sample
+entry says less still fails while decoding, with FFmpeg's error. A
+nested open refused after the file is open, while packets are read, is
+only logged; the read that needed it fails as FFmpeg decides. Symlinks
+in the path are followed, as by any program; the kernel-enforced roots
+for agents are D23's.
+
+Revisit if: Spherecut needs a container outside MOV/MP4 and Matroska; an
+FFmpeg release renames these demuxers (the names hold from 6.1 to 9.0) or
+opens a format context's input other than through `s->io_open(s,
+&s->pb, ...)`; or a camera records pictures larger than 2^27 pixels.
 
 ## D25. Zero-copy decode-to-render is proved in M1, decided before M3
 

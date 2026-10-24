@@ -472,6 +472,43 @@ fn an_empty_track_ffmpeg_cannot_set_up_is_a_warning() {
 }
 
 #[test]
+fn a_picture_over_max_pixels_is_a_warning_that_names_the_limit() {
+    // Spherecut's decoders stop at 2^27 pixels (D24). FFmpeg's own
+    // account of such a stream is a decoder that fails to open, or no
+    // frame size at all, which would read as damage.
+    let dir = tmp("over-max-pixels");
+    let path = media::write_mjpeg_declaring(&dir, "over.mp4", 16400, 8200).unwrap();
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("  #0  video   mjpeg [mp4v] Baseline, 16400x8200,"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "  warning    stream #0 (sample entry `mp4v`) is 16400x8200, more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("DAMAGE"), "{stdout}");
+
+    // Fewer than 2^27 pixels, but FFmpeg's decoders pad the rows to
+    // 16384 before they check.
+    let path = media::write_mjpeg_declaring(&dir, "padded.mp4", 16380, 8194).unwrap();
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "  warning    stream #0 (sample entry `mp4v`) is 16380x8194, which FFmpeg may pad to 16384x8194, more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes"
+        ),
+        "{stdout}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn deeply_nested_boxes_fail_fast() {
     // A `moov` holding 200 000 nested `udta` boxes once took the parser
     // past 2.8 GB of memory and a stack overflow.
@@ -713,19 +750,64 @@ fn matroska_cut_short_fails() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A Matroska file whose only track is a line of subtitles.
+fn matroska_subtitles() -> Vec<u8> {
+    let e = |id: &[u8], payload: &[u8]| el(id, payload, true);
+    let header = e(
+        b"\x1a\x45\xdf\xa3",
+        &[e(b"\x42\x82", b"matroska"), e(b"\x42\x87", &[4])].concat(),
+    );
+    let info = e(
+        b"\x15\x49\xa9\x66",
+        &e(b"\x2a\xd7\xb1", &[0x0f, 0x42, 0x40]),
+    );
+    let track = [
+        e(b"\xd7", &[1]),
+        e(b"\x73\xc5", &[1]),
+        // Track type 0x11: subtitles.
+        e(b"\x83", &[0x11]),
+        e(b"\x86", b"S_TEXT/UTF8"),
+    ]
+    .concat();
+    let tracks = e(b"\x16\x54\xae\x6b", &e(b"\xae", &track));
+    let block = [&b"\x81\x00\x00\x80"[..], b"not a video"].concat();
+    let cluster = e(
+        b"\x1f\x43\xb6\x75",
+        &[e(b"\xe7", &[0]), e(b"\xa3", &block)].concat(),
+    );
+    let segment = [info, tracks, cluster].concat();
+    [header, el(b"\x18\x53\x80\x67", &segment, true)].concat()
+}
+
 #[test]
 fn files_without_video_or_audio_fail() {
-    // FFmpeg opens a text file that starts like song lyrics, but it is not
-    // a media file.
-    let dir = tmp("lyrics");
+    // A container Spherecut opens, holding only subtitles: FFmpeg reads
+    // it, but there is nothing to show.
+    let dir = tmp("no-av");
+    let path = dir.join("subtitles.mkv");
+    std::fs::write(&path, matroska_subtitles()).unwrap();
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stdout.contains("container  matroska,webm"), "{stdout}");
+    assert!(stdout.contains("#0  subtitle"), "{stdout}");
+    assert!(
+        stderr.contains(
+            "subtitles.mkv has no video or audio stream; FFmpeg reads it as Matroska / WebM"
+        ),
+        "{stderr}"
+    );
+
+    // FFmpeg reads a text file that starts like song lyrics as LRC, which
+    // Spherecut refuses by name, without a report.
     let path = dir.join("lyrics.txt");
     std::fs::write(&path, b"[00:01.00]not a video\n").unwrap();
     let out = probe(&[&path]);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
-    assert!(stdout.contains("container  lrc"), "{stdout}");
+    assert!(stdout.is_empty(), "{stdout}");
     assert!(
-        stderr.contains("lyrics.txt has no video or audio stream; FFmpeg reads it as"),
+        stderr.contains("lyrics.txt as LRC lyrics (`lrc`), and Spherecut opens only MP4/MOV and Matroska/WebM files"),
         "{stderr}"
     );
     std::fs::remove_dir_all(&dir).ok();

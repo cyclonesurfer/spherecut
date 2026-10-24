@@ -17,6 +17,11 @@ frames are small enough to keep in the binary (a few KB each).
 | `hevc-main10.hevc` | HEVC Main 10, 10-bit | 3005 bytes |
 | `av1-main.obu` | AV1 Main (profile 0), 8-bit | 1215 bytes |
 
+`av1-main.mp4` (1986 bytes) is the AV1 frame in MP4, for
+`tests/hw_refusal.rs`, which decodes it through `VideoDecoder`. That opens
+only MP4/MOV and Matroska/WebM files, not raw OBUs (DECISIONS D24).
+Doctor doesn't use it.
+
 ## Regenerating
 
 Made with Ubuntu 24.04's FFmpeg 6.1.1 (x264 0.164.3108, x265 3.5,
@@ -38,6 +43,7 @@ ffmpeg -f lavfi -i $src -frames:v 1 -pix_fmt yuv420p10le \
   -x265-params qp=34:info=0:log-level=error -f hevc hevc-main10.hevc
 ffmpeg -f lavfi -i $src -frames:v 1 -pix_fmt yuv420p \
   -c:v libsvtav1 -preset 6 -crf 45 -f obu av1-main.obu
+ffmpeg -i av1-main.obu -c copy -map_metadata -1 -fflags +bitexact -f mp4 av1-main.mp4
 ```
 
 `filter_units=remove_types=6` drops x264's SEI with its settings string
@@ -45,7 +51,7 @@ ffmpeg -f lavfi -i $src -frames:v 1 -pix_fmt yuv420p \
 result with:
 
 ```sh
-for f in *.h264 *.hevc *.obu; do
+for f in *.h264 *.hevc *.obu *.mp4; do
   ffprobe -v error -show_entries stream=codec_name,profile,width,height,pix_fmt -of compact "$f"
 done
 ```
@@ -56,6 +62,7 @@ which should print
 stream|codec_name=h264|profile=High|width=256|height=256|pix_fmt=yuv420p
 stream|codec_name=hevc|profile=Main|width=256|height=256|pix_fmt=yuv420p
 stream|codec_name=hevc|profile=Main 10|width=256|height=256|pix_fmt=yuv420p10le
+stream|codec_name=av1|profile=Main|width=256|height=256|pix_fmt=yuv420p
 stream|codec_name=av1|profile=Main|width=256|height=256|pix_fmt=yuv420p
 ```
 
