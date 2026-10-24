@@ -684,6 +684,66 @@ static CAPTURES: Mutex<usize> = Mutex::new(0);
 /// Only FFmpeg's work on this thread is caught: a decoder with frame
 /// threads may log from its own (hardware decoding keeps one thread).
 pub fn capture_ffmpeg_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    let (r, lines) = capture(Level::WARN, f);
+    (r, lines.into_iter().map(|(_, line)| line).collect())
+}
+
+/// [`capture_ffmpeg_log`] for opening a decoder on a device and decoding
+/// its first frame, which also keeps what FFmpeg's Vulkan decoder says at
+/// "verbose" about a stream it turns down.
+///
+/// Its error says only "Failed setup for format vulkan: hwaccel
+/// initialisation returned error.". Why comes at "verbose" for a profile
+/// or pixel format the driver lacks ("Unable to initialize video session:
+/// hevc profile "Main 10" not supported!"), and not at all for a stream
+/// bigger or of a higher level than the driver decodes; for those, the
+/// limits it checks are in the capabilities it lists just before
+/// ("Maximum level: 153 (stream 186)", "Width: from 64 to 4096"). Those
+/// lines are kept, without their indent, and FFmpeg's other verbose ones
+/// are not (FFmpeg 6.1 to 8.1, `libavcodec/vulkan_decode.c`). While this
+/// runs FFmpeg's level is at least "verbose", for the whole process.
+pub fn capture_hw_decode_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    // FFmpeg's verbose is `tracing`'s debug.
+    let (r, lines) = capture(Level::DEBUG, f);
+    let lines = lines
+        .into_iter()
+        .filter_map(|(level, line)| {
+            if level <= Level::WARN {
+                Some(line)
+            } else {
+                vulkan_decode_reason(&line)
+            }
+        })
+        .collect();
+    (r, lines)
+}
+
+/// `line`, one of FFmpeg's verbose lines, without the indent of its
+/// message, if FFmpeg's Vulkan decoder says in it why it turned a stream
+/// down or which limits it checked.
+fn vulkan_decode_reason(line: &str) -> Option<String> {
+    // After the tags, such as "[hevc] ": it logs on its codec context.
+    let mut msg = line;
+    while let Some((_, rest)) = msg.strip_prefix('[').and_then(|m| m.split_once("] ")) {
+        msg = rest;
+    }
+    let tag = &line[..line.len() - msg.len()];
+    let msg = msg.trim_start();
+    const SAID: &[&str] = &[
+        "Unable to initialize video session: ",
+        "Decoder capabilities for ",
+        "Maximum level: ",
+        "Width: from ",
+        "Height: from ",
+    ];
+    SAID.iter()
+        .any(|s| msg.starts_with(s))
+        .then(|| format!("{tag}{msg}"))
+}
+
+/// Run `f`, and return FFmpeg's lines up to `level` logged on this thread
+/// meanwhile, each with its level (see [`capture_ffmpeg_log`]).
+fn capture<R>(level: Level, f: impl FnOnce() -> R) -> (R, Vec<(Level, String)>) {
     // FFmpeg's log reaches `tracing` from here on.
     crate::init();
     // A line FFmpeg left unfinished on this thread is not `f`'s, and one
@@ -693,13 +753,14 @@ pub fn capture_ffmpeg_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
     let tee = Dispatch::new(Tee {
         outer: tracing::dispatcher::get_default(Dispatch::clone),
         lines: lines.clone(),
-        max: LevelFilter::current().max(LevelFilter::WARN),
+        level,
+        max: LevelFilter::current().max(LevelFilter::from_level(level)),
     });
     let r = tracing::dispatcher::with_default(&tee, || {
         {
             let mut n = CAPTURES.lock().unwrap_or_else(PoisonError::into_inner);
             *n += 1;
-            // Sees the tee, so the level becomes at least "warning".
+            // Sees the tee, so the level becomes at least `level`.
             ffi::sync_log_level();
         }
         let r = f();
@@ -720,15 +781,18 @@ pub fn capture_ffmpeg_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
     (r, lines)
 }
 
-/// Records FFmpeg's warnings and errors, and hands everything to `outer`.
+/// Records FFmpeg's lines up to `level`, and hands everything to `outer`.
 struct Tee {
     outer: Dispatch,
-    lines: Arc<Mutex<Vec<String>>>,
+    lines: Arc<Mutex<Vec<(Level, String)>>>,
+    level: Level,
     max: LevelFilter,
 }
 
-fn is_captured(m: &Metadata<'_>) -> bool {
-    m.target() == "ffmpeg" && *m.level() <= Level::WARN
+impl Tee {
+    fn is_captured(&self, m: &Metadata<'_>) -> bool {
+        m.target() == "ffmpeg" && *m.level() <= self.level
+    }
 }
 
 impl Subscriber for Tee {
@@ -739,7 +803,7 @@ impl Subscriber for Tee {
         Some(self.max)
     }
     fn enabled(&self, m: &Metadata<'_>) -> bool {
-        is_captured(m) || self.outer.enabled(m)
+        self.is_captured(m) || self.outer.enabled(m)
     }
     fn new_span(&self, attrs: &span::Attributes<'_>) -> span::Id {
         self.outer.new_span(attrs)
@@ -752,13 +816,13 @@ impl Subscriber for Tee {
     }
     fn event(&self, e: &Event<'_>) {
         let m = e.metadata();
-        if is_captured(m) {
+        if self.is_captured(m) {
             let mut msg = Message(String::new());
             e.record(&mut msg);
             self.lines
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push(without_address(&msg.0));
+                .push((*m.level(), without_address(&msg.0)));
         }
         if self.outer.enabled(m) {
             self.outer.event(e);
@@ -837,6 +901,50 @@ mod tests {
         );
         for plain in ["no prefix", "[x] no address", "[x @ 0xzz] not hex"] {
             assert_eq!(without_address(plain), plain);
+        }
+    }
+
+    #[test]
+    fn vulkan_decode_reasons_are_told_from_other_verbose_lines() {
+        // FFmpeg 8.1's words, as the log reaches the capture.
+        for (line, kept) in [
+            (
+                "[hevc] Unable to initialize video session: hevc profile \"Main 10\" not \
+                 supported!",
+                Some(
+                    "[hevc] Unable to initialize video session: hevc profile \"Main 10\" not \
+                     supported!",
+                ),
+            ),
+            (
+                "[h264] Unable to initialize video session: format (yuv420p) not supported!",
+                Some("[h264] Unable to initialize video session: format (yuv420p) not supported!"),
+            ),
+            (
+                "[hevc] Decoder capabilities for hevc profile \"Main\":",
+                Some("[hevc] Decoder capabilities for hevc profile \"Main\":"),
+            ),
+            (
+                "[hevc]     Maximum level: 153 (stream 186)",
+                Some("[hevc] Maximum level: 153 (stream 186)"),
+            ),
+            (
+                "[hevc]     Width: from 64 to 4096",
+                Some("[hevc] Width: from 64 to 4096"),
+            ),
+            (
+                "    Height: from 64 to 2304",
+                Some("Height: from 64 to 2304"),
+            ),
+            (
+                "[mp4] [hevc]     Width: from 64 to 4096",
+                Some("[mp4] [hevc] Width: from 64 to 4096"),
+            ),
+            ("[hevc]     Bitstream offset alignment: 256", None),
+            ("[hevc] Vulkan decoder initialization successful", None),
+            ("[vulkan] Using device: llvmpipe", None),
+        ] {
+            assert_eq!(vulkan_decode_reason(line).as_deref(), kept, "{line}");
         }
     }
 

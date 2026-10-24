@@ -2308,6 +2308,39 @@ mod tests {
             captured("quiet-test"),
             [(Level::WARN, "quiet-test warning".to_string())]
         );
+
+        // A hardware decode's capture also keeps what FFmpeg's Vulkan
+        // decoder says at "verbose" when it turns a stream down, though
+        // the subscriber reads only warnings, and no other verbose line.
+        let ((), lines) = crate::hwprobe::capture_hw_decode_log(|| {
+            // SAFETY: reads a global int.
+            assert_eq!(unsafe { sys::av_log_get_level() }, sys::AV_LOG_VERBOSE);
+            log(
+                sys::AV_LOG_VERBOSE,
+                "Decoder capabilities for hevc profile \"Main\":\n",
+            );
+            log(sys::AV_LOG_VERBOSE, "    Maximum level: 153 (stream 186)\n");
+            log(sys::AV_LOG_VERBOSE, "    Maximum references: 17\n");
+            log(sys::AV_LOG_INFO, "verbose-test info\n");
+            log(
+                sys::AV_LOG_ERROR,
+                "verbose-test Failed setup for format vulkan: hwaccel initialisation returned \
+                 error.\n",
+            );
+        });
+        assert_eq!(
+            lines,
+            [
+                "Decoder capabilities for hevc profile \"Main\":",
+                "Maximum level: 153 (stream 186)",
+                "verbose-test Failed setup for format vulkan: hwaccel initialisation returned \
+                 error.",
+            ]
+        );
+        assert_eq!(captured("verbose-test").len(), 1);
+        assert!(captured("Maximum").is_empty());
+        // SAFETY: reads a global int.
+        assert_eq!(unsafe { sys::av_log_get_level() }, sys::AV_LOG_WARNING);
         set_max(None);
         // SAFETY: reads a global int.
         assert_eq!(unsafe { sys::av_log_get_level() }, sys::AV_LOG_QUIET);

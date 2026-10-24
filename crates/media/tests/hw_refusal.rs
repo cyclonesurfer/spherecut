@@ -91,6 +91,16 @@ fn a_refusal_comes_with_ffmpegs_reason_in_its_log() {
     });
     refusal(r);
     assert!(log.iter().any(|l| l.starts_with("[hevc] ")), "{log:?}");
+
+    // Lavapipe has no video queue, so FFmpeg turns the stream down before
+    // the "verbose" reasons a driver without the profile would get; none
+    // of FFmpeg's other verbose lines is kept.
+    let dev = lavapipe();
+    let (r, verbose) = spherecut_media::capture_hw_decode_log(|| {
+        VideoDecoder::open(&path, None, Some(dev)).and_then(|mut d| d.next_frame())
+    });
+    refusal(r);
+    assert_eq!(verbose, log);
 }
 
 #[test]
