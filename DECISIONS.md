@@ -1216,8 +1216,9 @@ What, for `spherecut probe` and `spherecut doctor` now, and for
   many, each `{"path", "ok", "report"?, "error"?}`. A damaged file that
   FFmpeg can open has both its report and its error. A failed file has
   its own code (`not_found`, `io_error`, `not_a_file`, `not_media`,
-  `unsupported_container`, `nested_open_refused`, `truncated`, `damaged`
-  or `no_video_or_audio`), and the run fails with `files_failed`, whose
+  `unsupported_container`, `nested_open_refused`, `truncated`, `damaged`,
+  `no_video_or_audio`, or `open_failed` when FFmpeg can't open it for a
+  reason probe can't name), and the run fails with `files_failed`, whose
   message names the first. The report's `damage` and `warnings` are
   problems, `{"code", "message"}`, where they were strings: `truncated`
   or `damaged`; `too_large`, `no_decoder`, `cannot_decode`,

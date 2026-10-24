@@ -146,9 +146,10 @@ A file's `error.code` in probe (`result.files[].error.code`):
 | `not_media` | no | Empty, or FFmpeg doesn't know it as media |
 | `unsupported_container` | no | FFmpeg reads it as a container Spherecut doesn't open (an HLS playlist, an ffconcat script, WAV, ...); the message names it (D24) |
 | `nested_open_refused` | no | Opening it, FFmpeg tried to open another file or URL, which is refused (D24) |
-| `truncated` | yes or no | It was cut short: a top-level MP4 box or the Matroska Segment runs past the end of the file. Without a report when FFmpeg can't open what is left |
+| `truncated` | yes or no | It was cut short: a top-level MP4 box or the Matroska Segment runs past the end of the file, or the file ends before its Matroska Segment starts. Without a report when FFmpeg can't open what is left |
 | `damaged` | yes or no | Its structure is damaged in another way (README, "Build and run", lists what probe checks). Without a report when FFmpeg can't open it |
 | `no_video_or_audio` | yes | It holds only subtitles, data or attachments |
+| `open_failed` | no | FFmpeg could not open it for a reason probe can't name more closely, such as a Matroska file damaged inside (probe checks only a Matroska file's length); `ffmpeg_log` often says why |
 
 A report's `damage[].code`: each piece of damage is `truncated` or
 `damaged`, as above; a file with any `truncated` damage fails as
@@ -170,11 +171,11 @@ A report's `warnings[].code`, which don't fail the file:
 | `track_without_stream` | An MP4 `trak` that FFmpeg gives no stream |
 
 Errors of the decoders, which probe and doctor don't give, and which
-`frame` will (each exit 1 unless `frame` says otherwise):
+`frame` will (each exit 1 unless `frame` says otherwise; `frame` also
+gives probe's file codes above for the file it opens):
 
 | Code | Meaning |
 |---|---|
-| `open_failed` | FFmpeg could not open the file, for a reason probe would have named more closely |
 | `decode_failed` | A decoder failed |
 | `too_large` | As the warning above, as an error: the decoder refuses the stream |
 | `hw_unsupported` | The hardware decoder refuses the stream; software may still decode it (exit 3 for `frame --decoder vaapi`) |

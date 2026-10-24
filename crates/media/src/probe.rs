@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek};
+use std::io::{BufReader, ErrorKind, Read, Seek};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -363,10 +363,12 @@ pub struct ProbeError {
 
 impl ProbeError {
     /// The error's stable code (D27). That is [`MediaError::code`], except
-    /// for a file FFmpeg could not read: it is [`codes::TRUNCATED`] or
-    /// [`codes::DAMAGED`] when probe's own checks found it so,
-    /// [`codes::DAMAGED`] when it has MP4 structure FFmpeg calls invalid,
-    /// and [`codes::NOT_MEDIA`] when it is empty or FFmpeg doesn't know it.
+    /// for a file FFmpeg could not open: it is [`codes::TRUNCATED`] or
+    /// [`codes::DAMAGED`] when probe's own checks found it so (its MP4
+    /// boxes, or a Matroska file's length), [`codes::DAMAGED`] when it has
+    /// MP4 structure FFmpeg calls invalid, and [`codes::NOT_MEDIA`] when it
+    /// is empty or FFmpeg doesn't know it. Any other file FFmpeg can't open
+    /// keeps [`MediaError::Open`]'s `open_failed`.
     pub fn code(&self) -> &'static str {
         self.code
     }
@@ -468,23 +470,31 @@ fn probe_file(path: &Path) -> Result<ProbeReport, Failed> {
         damage.extend(mp4_damage(t));
     }
 
-    let ictx = ffi::open_input(path, None).map_err(|e| {
-        // What probe found says more than FFmpeg's error.
-        let code = match &e {
-            ffi::OpenError::Ffmpeg(e) => damage_code(&damage).or(match e {
-                ff::Error::InvalidData if tree.is_some() => Some(codes::DAMAGED),
-                ff::Error::InvalidData => Some(codes::NOT_MEDIA),
+    let ictx = match ffi::open_input(path, None) {
+        Ok(ictx) => ictx,
+        Err(e) => {
+            if not_mp4 && matches!(e, ffi::OpenError::Ffmpeg(_)) {
+                // A Matroska file cut short before FFmpeg could read its
+                // tracks: its header says how long it was.
+                check_matroska(path, meta.len(), &mut damage);
+            }
+            // What probe found says more than FFmpeg's error.
+            let code = match &e {
+                ffi::OpenError::Ffmpeg(e) => damage_code(&damage).or(match e {
+                    ff::Error::InvalidData if tree.is_some() => Some(codes::DAMAGED),
+                    ff::Error::InvalidData => Some(codes::NOT_MEDIA),
+                    _ => None,
+                }),
                 _ => None,
-            }),
-            _ => None,
-        };
-        let error =
-            MediaError::opening(path, e, |e| describe_open_error(e, tree.is_some(), &damage));
-        Failed {
-            code: code.unwrap_or_else(|| error.code()),
-            error,
+            };
+            let error =
+                MediaError::opening(path, e, |e| describe_open_error(e, tree.is_some(), &damage));
+            return Err(Failed {
+                code: code.unwrap_or_else(|| error.code()),
+                error,
+            });
         }
-    })?;
+    };
     let fmt = ictx.format();
 
     let mov_family = fmt.name().split(',').any(|n| n == "mov" || n == "mp4");
@@ -739,14 +749,16 @@ fn unless_unreadable(
     }
 }
 
-/// Check that a Matroska/WebM file is as long as its Segment says. Live
-/// recordings leave the size unknown.
+/// Check that a Matroska/WebM file is as long as its Segment says, and
+/// that it gets as far as the Segment at all. Live recordings leave the
+/// size unknown.
 fn check_matroska(path: &Path, file_size: u64, damage: &mut Vec<Problem>) -> StructureCheck {
-    let segment = File::open(path)
-        .ok()
-        .and_then(|f| matroska_segment(&mut BufReader::new(f)));
+    let segment = match File::open(path) {
+        Ok(f) => matroska_segment(&mut BufReader::new(f)),
+        Err(_) => Err(NoSegment::NotMatroska),
+    };
     match segment {
-        Some((start, Some(size))) => {
+        Ok((start, Some(size))) => {
             if start.saturating_add(size) > file_size {
                 damage.push(Problem::new(
                     codes::TRUNCATED,
@@ -758,10 +770,19 @@ fn check_matroska(path: &Path, file_size: u64, damage: &mut Vec<Problem>) -> Str
             }
             StructureCheck::Length
         }
-        Some((_, None)) => StructureCheck::None {
+        Ok((_, None)) => StructureCheck::None {
             why: "its Matroska Segment does not record its size, as in live recordings".into(),
         },
-        None => StructureCheck::None {
+        Err(NoSegment::CutShort) => {
+            damage.push(Problem::new(
+                codes::TRUNCATED,
+                format!(
+                    "the file ends after {file_size} bytes, before its Matroska Segment starts: it was cut short"
+                ),
+            ));
+            StructureCheck::Length
+        }
+        Err(NoSegment::NotMatroska) => StructureCheck::None {
             why: "its Matroska header could not be read".into(),
         },
     }
@@ -771,13 +792,30 @@ const EBML_HEADER: u64 = 0x1A45_DFA3;
 const EBML_VOID: u64 = 0xEC;
 const MATROSKA_SEGMENT: u64 = 0x1853_8067;
 
+/// Why [`matroska_segment`] found no Segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoSegment {
+    /// The file starts with an EBML header, but ends before the Segment's
+    /// data starts: it was cut short.
+    CutShort,
+    /// It doesn't start as a Matroska file does, or could not be read.
+    NotMatroska,
+}
+
 /// Where the data of a Matroska file's Segment starts, and its size if
 /// known: the EBML header comes first, then the Segment, perhaps after a
 /// few Void elements.
-fn matroska_segment<R: Read + Seek>(r: &mut R) -> Option<(u64, Option<u64>)> {
-    let skip = |r: &mut R, size: Option<u64>| r.seek_relative(i64::try_from(size?).ok()?).ok();
-    if ebml_id(r)? != EBML_HEADER {
-        return None;
+fn matroska_segment<R: Read + Seek>(r: &mut R) -> Result<(u64, Option<u64>), NoSegment> {
+    let skip = |r: &mut R, size: Option<u64>| {
+        let size = size.and_then(|s| i64::try_from(s).ok());
+        // Past the end of the file is fine: the next read says so.
+        r.seek_relative(size.ok_or(NoSegment::NotMatroska)?)
+            .map_err(|_| NoSegment::NotMatroska)
+    };
+    // Only a file that holds the whole EBML header ID is Matroska cut
+    // short; a shorter one is just short.
+    if ebml_id(r).map_err(|_| NoSegment::NotMatroska)? != EBML_HEADER {
+        return Err(NoSegment::NotMatroska);
     }
     let size = ebml_size(r)?;
     skip(r, size)?;
@@ -785,41 +823,52 @@ fn matroska_segment<R: Read + Seek>(r: &mut R) -> Option<(u64, Option<u64>)> {
         let id = ebml_id(r)?;
         let size = ebml_size(r)?;
         match id {
-            MATROSKA_SEGMENT => return Some((r.stream_position().ok()?, size)),
+            MATROSKA_SEGMENT => {
+                let start = r.stream_position().map_err(|_| NoSegment::NotMatroska)?;
+                return Ok((start, size));
+            }
             EBML_VOID => skip(r, size)?,
-            _ => return None,
+            _ => return Err(NoSegment::NotMatroska),
         }
     }
-    None
+    Err(NoSegment::NotMatroska)
 }
 
 /// An EBML variable-length integer of at most `max_len` bytes, still
 /// with its length marker (the first set bit), and its length.
-fn ebml_vint<R: Read>(r: &mut R, max_len: u32) -> Option<(u64, u32)> {
-    let mut b = [0u8; 1];
-    r.read_exact(&mut b).ok()?;
-    let len = b[0].leading_zeros() + 1;
+fn ebml_vint<R: Read>(r: &mut R, max_len: u32) -> Result<(u64, u32), NoSegment> {
+    let first = ebml_byte(r)?;
+    let len = first.leading_zeros() + 1;
     if len > max_len {
-        return None;
+        return Err(NoSegment::NotMatroska);
     }
-    let mut v = u64::from(b[0]);
+    let mut v = u64::from(first);
     for _ in 1..len {
-        r.read_exact(&mut b).ok()?;
-        v = v << 8 | u64::from(b[0]);
+        v = v << 8 | u64::from(ebml_byte(r)?);
     }
-    Some((v, len))
+    Ok((v, len))
+}
+
+/// The next byte, where the end of the file is [`NoSegment::CutShort`].
+fn ebml_byte<R: Read>(r: &mut R) -> Result<u8, NoSegment> {
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b).map_err(|e| match e.kind() {
+        ErrorKind::UnexpectedEof => NoSegment::CutShort,
+        _ => NoSegment::NotMatroska,
+    })?;
+    Ok(b[0])
 }
 
 /// An element ID, which keeps its length marker.
-fn ebml_id<R: Read>(r: &mut R) -> Option<u64> {
+fn ebml_id<R: Read>(r: &mut R) -> Result<u64, NoSegment> {
     ebml_vint(r, 4).map(|(id, _)| id)
 }
 
-/// An element size: Some(None) for the all-ones "unknown" size.
-fn ebml_size<R: Read>(r: &mut R) -> Option<Option<u64>> {
+/// An element size: None for the all-ones "unknown" size.
+fn ebml_size<R: Read>(r: &mut R) -> Result<Option<u64>, NoSegment> {
     let (v, len) = ebml_vint(r, 8)?;
     let mask = (1u64 << (7 * len)) - 1;
-    Some((v & mask != mask).then_some(v & mask))
+    Ok((v & mask != mask).then_some(v & mask))
 }
 
 fn kind_name(k: StreamKind) -> String {
@@ -1039,7 +1088,7 @@ mod tests {
         v
     }
 
-    fn segment(f: Vec<u8>) -> Option<(u64, Option<u64>)> {
+    fn segment(f: Vec<u8>) -> Result<(u64, Option<u64>), NoSegment> {
         matroska_segment(&mut io::Cursor::new(f))
     }
 
@@ -1052,19 +1101,37 @@ mod tests {
         let seg = |size| el(0x1853_8067, &body, size);
 
         let f = [header.clone(), seg(Some(300))].concat();
-        assert_eq!(segment(f), Some((at, Some(300))));
+        assert_eq!(segment(f), Ok((at, Some(300))));
         // Live recordings leave the size unknown.
         let f = [header.clone(), seg(None)].concat();
-        assert_eq!(segment(f), Some((at, None)));
+        assert_eq!(segment(f), Ok((at, None)));
         // Void elements may come first.
         let void = el(0xEC, &[0; 5], Some(5));
         let f = [header.clone(), void.clone(), seg(Some(300))].concat();
-        assert_eq!(segment(f), Some((at + void.len() as u64, Some(300))));
+        assert_eq!(segment(f), Ok((at + void.len() as u64, Some(300))));
         // Cut short, the size still says how long it was.
         let f = [header.clone(), seg(Some(300))].concat();
+        assert_eq!(segment(f[..at as usize + 10].to_vec()), Ok((at, Some(300))));
+        // Cut before the Segment's data starts: in the EBML header, right
+        // after it, in a Void element, or in the Segment's ID or size.
+        for cut in [
+            4,
+            5,
+            header.len() - 2,
+            header.len(),
+            header.len() + 2,
+            at as usize - 1,
+        ] {
+            assert_eq!(
+                segment(f[..cut].to_vec()),
+                Err(NoSegment::CutShort),
+                "{cut}"
+            );
+        }
+        let f = [header.clone(), void.clone(), seg(Some(300))].concat();
         assert_eq!(
-            segment(f[..at as usize + 10].to_vec()),
-            Some((at, Some(300)))
+            segment(f[..header.len() + 4].to_vec()),
+            Err(NoSegment::CutShort)
         );
     }
 
@@ -1303,12 +1370,13 @@ mod tests {
         for f in [
             Vec::new(),
             b"RIFF\x24\0\0\0WAVEfmt ".to_vec(),
-            header[..header.len() - 2].to_vec(),
+            // Less than the EBML header's ID is too little to tell.
+            header[..3].to_vec(),
             [header.clone(), cluster].concat(),
             // An ID longer than 4 bytes.
             [header, vec![0x08, 1, 2, 3, 4]].concat(),
         ] {
-            assert_eq!(segment(f.clone()), None, "{f:?}");
+            assert_eq!(segment(f.clone()), Err(NoSegment::NotMatroska), "{f:?}");
         }
     }
 }

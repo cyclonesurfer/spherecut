@@ -230,7 +230,21 @@ fn every_kind_of_failure_is_one_document_with_its_code() {
         std::fs::write(&p, data).unwrap();
         p
     };
-    let subtitles = write("subtitles.mkv", &subtitles_only());
+    let mkv = subtitles_only();
+    let subtitles = write("subtitles.mkv", &mkv);
+    // Matroska files FFmpeg can't open: cut short in the EBML header, and
+    // in the Segment before its tracks.
+    let segment = mkv
+        .windows(4)
+        .position(|w| w == b"\x18\x53\x80\x67")
+        .unwrap();
+    let mkv_header = write("mkv-cut-header.mkv", &mkv[..segment - 10]);
+    let mkv_segment = write("mkv-cut-segment.mkv", &mkv[..segment + 20]);
+    // As long as its Segment says, which probe checks, but the elements
+    // inside run past it, which FFmpeg finds.
+    let mut inside = mkv[..segment + 20].to_vec();
+    inside[segment + 4..segment + 12].copy_from_slice(&(8u64 | 1 << 56).to_be_bytes());
+    let mkv_inside = write("mkv-damaged-inside.mkv", &inside);
     // FFmpeg reads this as LRC lyrics, which Spherecut doesn't open.
     let lyrics = write("lyrics.txt", b"[00:01.00]not a video\n");
     // (file, its code, whether it still has a report)
@@ -246,6 +260,9 @@ fn every_kind_of_failure_is_one_document_with_its_code() {
         (dir.join("bad-trunc-end.mp4"), "truncated", true),
         (dir.join("bad-corrupt-moov.mp4"), "damaged", true),
         (dir.join("bad-timescale.mp4"), "damaged", true),
+        (mkv_header, "truncated", false),
+        (mkv_segment, "truncated", false),
+        (mkv_inside, "open_failed", false),
         (subtitles, "no_video_or_audio", true),
     ];
     for (path, code, has_report) in &cases {
@@ -274,6 +291,29 @@ fn every_kind_of_failure_is_one_document_with_its_code() {
             assert!(file["error"].get("ffmpeg_log").is_none(), "{v}");
         }
     }
+    // A Matroska file cut short says so, as an MP4 file does.
+    let (_, v) = probe_json(&[&dir.join("mkv-cut-header.mkv")]);
+    let message = v["result"]["files"][0]["error"]["message"]
+        .as_str()
+        .unwrap();
+    assert!(
+        message.ends_with(&format!(
+            "the file ends after {} bytes, before its Matroska Segment starts: it was cut short",
+            segment - 10
+        )),
+        "{message}"
+    );
+    let (_, v) = probe_json(&[&dir.join("mkv-cut-segment.mkv")]);
+    let message = v["result"]["files"][0]["error"]["message"]
+        .as_str()
+        .unwrap();
+    assert!(
+        message.ends_with(&format!(
+            "the file holds 8 of the {} bytes its Matroska Segment says it has: it was cut short",
+            mkv.len() - segment - 12
+        )),
+        "{message}"
+    );
     // FFmpeg's word on a file it could not open is in its error.
     let (_, v) = probe_json(&[&dir.join("bad-trunc-half.mp4")]);
     let log = v["result"]["files"][0]["error"]["ffmpeg_log"].clone();

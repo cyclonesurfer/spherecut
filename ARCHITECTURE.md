@@ -155,7 +155,8 @@ The other modules are safe Rust:
   warning. `probe::Undecodable` holds the reason and decides which it is.
   A file FFmpeg reads as MOV/MP4 that the strict read refuses is read
   again with `FirstBox::Any`, which accepts any valid first box. Matroska
-  files are checked against their Segment length. No other container
+  files are checked against their Segment length, also when FFmpeg can't
+  open them, so that one cut short before its tracks is `truncated`. No other container
   gets this far: `open_input` refuses them by name (D24). `probe` runs
   inside `hwprobe::capture_ffmpeg_log` and keeps FFmpeg's warnings and
   errors in `ProbeReport.ffmpeg_log`, apart from `damage` and `warnings`,
@@ -167,7 +168,9 @@ The other modules are safe Rust:
   cut itself and `damaged` otherwise. `ProbeReport::failure()` says why
   a report fails the file, and `ProbeError::code()` why the file could
   not be read, refining the `MediaError`'s code from what probe found
-  (a file FFmpeg can't open is `truncated`, `damaged` or `not_media`).
+  (a file FFmpeg can't open is `truncated`, `damaged` or `not_media` when
+  probe can tell why, and `open_failed` otherwise). A read error of the
+  file itself is `MediaError::Io`, never damage.
   `ProbeReport.path` serializes as lossy UTF-8, and its durations and
   start time as `Time`s. The CLI fails on any damage (D15).
 * `mp4`: the box reader, with fixed limits (DECISIONS D15).
