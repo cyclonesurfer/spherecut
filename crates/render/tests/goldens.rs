@@ -894,21 +894,42 @@ impl<'g> Run<'g> {
         m
     }
 
-    /// Ends a row that stores no image.
-    fn end_check(&mut self, what: &str, source: Option<&Source>, view: Option<Value>) {
+    /// Ends a row that stores no image, with every source it renders and
+    /// every view it renders them through: one of each is recorded as
+    /// itself, more as a list, in the row's order.
+    fn end_check(&mut self, what: &str, sources: &[&Source], views: Vec<Value>) {
+        let one_or_list = |mut v: Vec<Value>| {
+            if v.len() == 1 {
+                v.remove(0)
+            } else {
+                Value::Array(v)
+            }
+        };
         let mut m = self.stamp();
         m.insert("what".into(), json!(what));
-        if let Some(s) = source {
-            m.insert("source".into(), s.about.clone());
-            m.insert("source_fnv64".into(), json!(format!("{:016x}", s.hash())));
+        if !sources.is_empty() {
+            let about = sources.iter().map(|s| s.about.clone()).collect();
+            let hashes = sources
+                .iter()
+                .map(|s| json!(format!("{:016x}", s.hash())))
+                .collect();
+            m.insert("source".into(), one_or_list(about));
+            m.insert("source_fnv64".into(), one_or_list(hashes));
         }
-        if let Some(v) = view {
-            m.insert("view".into(), v);
+        if !views.is_empty() {
+            m.insert("view".into(), one_or_list(views));
         }
         self.end(m, false);
     }
 
+    /// Ends the row with its manifest entry, which must say what it
+    /// rendered, from what and how (D32).
     fn end(&mut self, entry: Map<String, Value>, image: bool) {
+        for field in ["source", "source_fnv64", "view"] {
+            if !entry.contains_key(field) {
+                self.fail(format!("its manifest entry has no {field}"));
+            }
+        }
         if matches!(self.mode, Mode::References | Mode::OtherDriver) {
             let numbers: Vec<String> = self
                 .measured
@@ -1438,8 +1459,8 @@ fn twin_check(run: &mut Run<'_>, s: &Source, v: &ViewParams, size: (u32, u32)) {
     run.threshold("bad_pixel_over", num(TWIN_THRESHOLD));
     run.end_check(
         "against its roll twin, with the implicit-LOD control",
-        Some(s),
-        Some(view_about(v, size)),
+        &[s],
+        vec![view_about(v, size)],
     );
 }
 
@@ -1596,8 +1617,8 @@ fn shimmer(run: &mut Run<'_>, pitch: f64, l: Lens, size: (u32, u32)) {
     let v = ViewParams::new(ypr(0.0, pitch, 0.0), l);
     run.end_check(
         "8 frames yawing 0.37° each, against the ideal, with the level-0 control",
-        Some(&s),
-        Some(view_about(&v, size)),
+        &[&s],
+        vec![view_about(&v, size)],
     );
 }
 
@@ -1620,16 +1641,16 @@ fn tenbit_ramp(run: &mut Run<'_>) {
             512
         }
     };
-    let p010 = coded(Kind::P010, size, limited709(), code);
-    let i010 = coded(Kind::I420p10, size, limited709(), code);
+    let p010 = Source::new("ramp", coded(Kind::P010, size, limited709(), code));
+    let i010 = Source::new("ramp", coded(Kind::I420p10, size, limited709(), code));
     let v = ViewParams::new(DQuat::IDENTITY, lens(Projection::Rectilinear, 20.0));
     let opts = StillOptions {
         depth: Depth::Sixteen,
         ..StillOptions::default()
     };
     let (Some(a), Some(b)) = (
-        run.render(&p010, &v, RECT, opts),
-        run.render(&i010, &v, RECT, opts),
+        run.render(&p010.frame, &v, RECT, opts),
+        run.render(&i010.frame, &v, RECT, opts),
     ) else {
         return;
     };
@@ -1663,18 +1684,17 @@ fn tenbit_ramp(run: &mut Run<'_>) {
         rise / f64::from(RECT.1) / 3.0 / 65535.0 * 876.0,
         30.0,
     );
-    match reference::render_trilinear(&p010, &v, RECT) {
+    match reference::render_trilinear(&p010.frame, &v, RECT) {
         Ok(cpu) => {
             let m = max_diff(&unit(&a), &cpu.data);
             run.at_most("cpu_max_diff_10bit_codes", m * 1023.0, 2.0);
         }
         Err(e) => run.fail(format!("the CPU reference: {e}")),
     }
-    let s = Source::new("ramp", p010);
     run.end_check(
         "a 10-bit ramp as P010 and yuv420p10, magnified, read back at 16 bits",
-        Some(&s),
-        Some(view_about(&v, RECT)),
+        &[&p010, &i010],
+        vec![view_about(&v, RECT)],
     );
 }
 
@@ -1721,11 +1741,14 @@ fn layout_invariance(run: &mut Run<'_>) {
         }
     }
     run.at_most("renders_not_identical", differ, 0.0);
-    let s = Source::new("grid", frame(img, Kind::Nv12, limited709(), 0));
+    // The hash leaves the padding out, so each layout's three strides
+    // hash alike.
+    let nv12 = Source::new("grid", frame(img, Kind::Nv12, limited709(), 0));
+    let i420 = Source::new("grid", frame(img, Kind::I420, limited709(), 0));
     run.end_check(
         "one picture as NV12 and I420, rows padded to 64 and 256 bytes and 4109 bytes apart",
-        Some(&s),
-        Some(view_about(&v, RECT)),
+        &[&nv12, &i420],
+        vec![view_about(&v, RECT)],
     );
 }
 
@@ -1802,8 +1825,18 @@ fn passthrough_exact(run: &mut Run<'_>) {
     // sampled. A pixel is checked where every texel its taps can touch,
     // at both levels, lies in one field.
     let size = (4096u32, 16u32);
+    let out = (512u32, 8u32);
+    let views: Vec<ViewParams> = (0..8)
+        .map(|m| {
+            ViewParams::new(
+                ypr(22.5 + 45.0 * f64::from(m), 0.0, 0.0),
+                lens(Projection::Rectilinear, 45.0),
+            )
+        })
+        .collect();
     let mut found: BTreeMap<(bool, u8), (u8, usize)> = BTreeMap::new();
     let mut wrong = Vec::new();
+    let mut sources = Vec::new();
     for limited in [false, true] {
         let range = if limited { Range::Limited } else { Range::Full };
         let f = coded(
@@ -1814,19 +1847,14 @@ fn passthrough_exact(run: &mut Run<'_>) {
                 if p == 0 { (x / 16) as u16 } else { 128 }
             },
         );
-        let out = (512u32, 8u32);
-        for m in 0..8 {
-            let v = ViewParams::new(
-                ypr(22.5 + 45.0 * f64::from(m), 0.0, 0.0),
-                lens(Projection::Rectilinear, 45.0),
-            );
-            let Some(got) = run.render_with(&f, &v, out, DebugMode::Off) else {
+        for v in &views {
+            let Some(got) = run.render_with(&f, v, out, DebugMode::Off) else {
                 return;
             };
             for j in 0..out.1 {
                 for i in 0..out.0 {
                     let c = pixel::centre(i, j);
-                    let u = reference::sphere_uv(reference::sphere_dir(&v, out, c.x, c.y)).x;
+                    let u = reference::sphere_uv(reference::sphere_dir(v, out, c.x, c.y)).x;
                     let t = (u * f64::from(size.0)).rem_euclid(f64::from(size.0));
                     let k = (t / 16.0).floor() as u8;
                     if !(4.0..=12.0).contains(&(t % 16.0)) {
@@ -1849,6 +1877,7 @@ fn passthrough_exact(run: &mut Run<'_>) {
                 }
             }
         }
+        sources.push(Source::new("bands", f));
     }
     let (mut ambiguous, mut off_model, mut off_k, mut seen) = (0.0, 0.0, 0.0, 0.0);
     let mut flips = Vec::new();
@@ -1917,8 +1946,8 @@ fn passthrough_exact(run: &mut Run<'_>) {
         .insert("limited_one_code_off".into(), json!(flips));
     run.end_check(
         "flat fields of every 8-bit luma code, full and limited range, through the f16 target",
-        None,
-        None,
+        &sources.iter().collect::<Vec<_>>(),
+        views.iter().map(|v| view_about(v, out)).collect(),
     );
 }
 
@@ -1929,7 +1958,7 @@ fn range_full_vs_limited(run: &mut Run<'_>) {
     // puts an NV12 pair up to 4 LSB apart: that is recorded, and its
     // control asserted too.
     let v = ViewParams::new(DQuat::IDENTITY, lens(Projection::Rectilinear, 90.0));
-    let mut source = None;
+    let mut sources = Vec::new();
     for (kind, key) in [(Kind::P010, ""), (Kind::Nv12, "nv12_")] {
         let full = frame(
             grid(),
@@ -1959,14 +1988,13 @@ fn range_full_vs_limited(run: &mut Run<'_>) {
             max_diff(&ua, &uc) * 255.0,
             10.0,
         );
-        if kind == Kind::P010 {
-            source = Some(Source::new("grid", full));
-        }
+        sources.push(Source::new("grid", full));
+        sources.push(Source::new("grid", limited));
     }
     run.end_check(
         "the grid coded at full and at limited range, 10-bit (8-bit recorded); control: full decoded as limited",
-        source.as_ref(),
-        Some(view_about(&v, RECT)),
+        &sources.iter().collect::<Vec<_>>(),
+        vec![view_about(&v, RECT)],
     );
 }
 
@@ -2009,10 +2037,14 @@ fn matrix_601_709(run: &mut Run<'_>) {
             None => run.fail("no BT.601 tolerance to hold the control against"),
         }
     }
+    let sources: Vec<Source> = ["601", "709"]
+        .iter()
+        .map(|m| Source::new("grid", psnrs[m].0.clone()))
+        .collect();
     run.end_check(
         "the grid coded with BT.601 and with BT.709, each against the CPU; control: 601 decoded as 709",
-        None,
-        Some(view_about(&v, RECT)),
+        &sources.iter().collect::<Vec<_>>(),
+        vec![view_about(&v, RECT)],
     );
 }
 
@@ -2038,6 +2070,7 @@ fn siting_left_center(run: &mut Run<'_>) {
             .collect(),
     };
     let v = ViewParams::new(ypr(10.0, 0.0, 0.0), lens(Projection::Rectilinear, 20.0));
+    let mut sources = Vec::new();
     for (kind, key) in [(Kind::P010, ""), (Kind::Nv12, "nv12_")] {
         let mut cpus = BTreeMap::new();
         let mut gpus = BTreeMap::new();
@@ -2063,6 +2096,7 @@ fn siting_left_center(run: &mut Run<'_>) {
             }
             cpus.insert(name, cpu);
             gpus.insert(name, g);
+            sources.push(Source::new("stripes", f));
         }
         // Control: the Left-sited frame decoded as Center (the planes are
         // the same; only the tag differs) misses Left's CPU reference by
@@ -2076,8 +2110,8 @@ fn siting_left_center(run: &mut Run<'_>) {
     run.end_check(
         "red and blue stripes 5 texels wide, Left and Center sited, magnified, 10-bit (8-bit recorded); \
          control: Left as Center",
-        None,
-        Some(view_about(&v, RECT)),
+        &sources.iter().collect::<Vec<_>>(),
+        vec![view_about(&v, RECT)],
     );
 }
 
@@ -2141,8 +2175,8 @@ fn crop_half(run: &mut Run<'_>) {
     let s = Source::new("grid, the middle half", f);
     run.end_check(
         "a 180° panorama by sv3d bounds, seen past its edge",
-        Some(&s),
-        Some(view_about(&v, RECT)),
+        &[&s],
+        vec![view_about(&v, RECT)],
     );
 }
 
@@ -2183,8 +2217,8 @@ fn lod_heatmap(run: &mut Run<'_>) {
     run.at_most("levels_off_by_more_than_half", over, 0.0);
     run.end_check(
         "DEBUG_MODE 3's levels against the CPU's uv_footprint, fisheye 270°",
-        Some(&s),
-        Some(view_about(&v, SQUARE)),
+        &[&s],
+        vec![view_about(&v, SQUARE)],
     );
 }
 
