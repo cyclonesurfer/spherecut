@@ -81,6 +81,29 @@ fn a_refused_stream_stays_refused() {
 }
 
 #[test]
+fn a_refusal_comes_with_ffmpegs_reason_in_its_log() {
+    // The Tier 2 Vulkan tests skip with what FFmpeg logged, which is the
+    // only place that says why ("Device does not support decoding hevc!").
+    let path = clip("hevc.mp4", "libx265", &[("x265-params", "log-level=error")]);
+    let dev = lavapipe();
+    let (r, log) = spherecut_media::capture_ffmpeg_log(|| {
+        VideoDecoder::open(&path, None, Some(dev)).and_then(|mut d| d.next_frame())
+    });
+    refusal(r);
+    assert!(log.iter().any(|l| l.starts_with("[hevc] ")), "{log:?}");
+
+    // Lavapipe has no video queue, so FFmpeg turns the stream down before
+    // the "verbose" reasons a driver without the profile would get; none
+    // of FFmpeg's other verbose lines is kept.
+    let dev = lavapipe();
+    let (r, verbose) = spherecut_media::capture_hw_decode_log(|| {
+        VideoDecoder::open(&path, None, Some(dev)).and_then(|mut d| d.next_frame())
+    });
+    refusal(r);
+    assert_eq!(verbose, log);
+}
+
+#[test]
 fn av1_is_refused_rather_than_decoded_by_a_software_only_decoder() {
     // FFmpeg lists libdav1d before its own AV1 decoder, and libdav1d never
     // decodes on a device. The clip is doctor's one AV1 frame, in MP4:

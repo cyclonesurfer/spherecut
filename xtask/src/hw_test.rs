@@ -1290,13 +1290,12 @@ pub fn run(a: Args) -> Result<()> {
     }
 
     let _ = writeln!(r, "## Benchmarks\n");
-    let benches = if tier2.is_some() {
-        std::fs::read_to_string(&bench_out)
-            .map(|t| parse_benches(&t))
-            .unwrap_or_default()
+    let bench_text = if tier2.is_some() {
+        std::fs::read_to_string(&bench_out).unwrap_or_default()
     } else {
-        Vec::new()
+        String::new()
     };
+    let benches = parse_benches(&bench_text);
     if a.quick {
         let _ = writeln!(r, "Skipped (`--quick` builds in debug mode).\n");
     } else if benches.is_empty() {
@@ -1319,6 +1318,15 @@ pub fn run(a: Args) -> Result<()> {
         );
         for b in &benches {
             let _ = writeln!(r, "{}", b.row());
+        }
+        let _ = writeln!(r);
+    }
+    // Such as which device a row ran on, or why a row has no result.
+    let notes = parse_bench_notes(&bench_text);
+    if !notes.is_empty() {
+        let _ = writeln!(r, "Notes from the benchmarks:\n");
+        for n in notes {
+            let _ = writeln!(r, "- {n}");
         }
         let _ = writeln!(r);
     }
@@ -1448,10 +1456,15 @@ impl Bench {
     }
 }
 
+/// What a note's line in `hw-bench.tsv` starts with
+/// (`spherecut_testkit::bench::NOTE_PREFIX`).
+const NOTE_PREFIX: &str = "# ";
+
 /// Lines of `name, median, unit[, min, max, runs]`, tab-separated, as
-/// written by `spherecut_testkit::bench`.
+/// written by `spherecut_testkit::bench`. Notes are left out.
 fn parse_benches(text: &str) -> Vec<Bench> {
     text.lines()
+        .filter(|l| !l.starts_with(NOTE_PREFIX))
         .filter_map(|l| {
             let f: Vec<&str> = l.split('\t').collect();
             let num = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
@@ -1463,6 +1476,14 @@ fn parse_benches(text: &str) -> Vec<Bench> {
                 runs: f.get(5).and_then(|v| v.parse().ok()).unwrap_or(1),
             })
         })
+        .collect()
+}
+
+/// The notes in `hw-bench.tsv`, one line each, such as why a benchmark
+/// has no result (`spherecut_testkit::bench::note`).
+fn parse_bench_notes(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter_map(|l| l.strip_prefix(NOTE_PREFIX))
         .collect()
 }
 
@@ -2302,6 +2323,26 @@ fn main() {
         assert_eq!(
             b[4].row(),
             "| stalled | 0.00 fps | 0.00 to 1.50 | 3 | n/a |"
+        );
+    }
+
+    #[test]
+    fn benchmark_notes_are_kept_apart_from_results() {
+        let text = "a: VA-API\t2\tfps\t1\t3\t3\n\
+                    # Vulkan Video rows ran on GPU 0\n\
+                    # a: Vulkan Video: not measured: no decode 1\t2\n\
+                    #not a note\t5\tfps\n";
+        let b = parse_benches(text);
+        assert_eq!(
+            b.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            ["a: VA-API", "#not a note"]
+        );
+        assert_eq!(
+            parse_bench_notes(text),
+            [
+                "Vulkan Video rows ran on GPU 0",
+                "a: Vulkan Video: not measured: no decode 1\t2"
+            ]
         );
     }
 }

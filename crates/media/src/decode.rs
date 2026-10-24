@@ -32,8 +32,9 @@ use std::sync::atomic::AtomicBool;
 
 use spherecut_core::{Rational, Time};
 
-use crate::ffi::{self, HwDevice, HwRefusal, OpenDecoderError};
-use crate::hwprobe::device_label;
+use crate::doctor::{VulkanDevice, VulkanDeviceType};
+use crate::ffi::{self, HwDevice, HwError, HwRefusal, OpenDecoderError};
+use crate::hwprobe::{self, VkDevice, device_label, vk_device_type};
 use crate::{MediaError, TooLarge, ff, init};
 
 /// A decoded frame in system memory.
@@ -544,6 +545,202 @@ pub fn open_hw_device(kind: &str, device: Option<&str>) -> Result<Arc<HwDevice>,
         })
 }
 
+/// Why [`open_vulkan_device`] chose the device it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VulkanPick {
+    /// It is the GPU behind this DRM node, VA-API's render node.
+    Node(PathBuf),
+    /// It is the first device listed that isn't a CPU. None of them is
+    /// listed as the one behind the DRM node, if one was given.
+    FirstGpu { unmatched: Option<PathBuf> },
+    /// Every device listed is a CPU device, so it is FFmpeg's default.
+    NoGpu,
+}
+
+/// FFmpeg's Vulkan device as [`open_vulkan_device`] opened it.
+#[derive(Debug)]
+pub struct VulkanChoice {
+    pub device: Arc<HwDevice>,
+    /// The physical device it runs on.
+    pub used: VulkanDevice,
+    pub why: VulkanPick,
+    /// FFmpeg's default device, when that was another one.
+    pub instead_of: Option<VulkanDevice>,
+    /// Every physical device FFmpeg's Vulkan instance lists, in its order.
+    pub devices: Vec<VulkanDevice>,
+}
+
+impl std::fmt::Display for VulkanChoice {
+    /// e.g. "AMD Radeon RX 7600 (RADV NAVI33) (discrete GPU, driver
+    /// radv), the GPU behind /dev/dri/renderD128".
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", describe(&self.used))?;
+        match &self.why {
+            VulkanPick::Node(node) => write!(f, ", the GPU behind {}", node.display())?,
+            VulkanPick::FirstGpu { unmatched: None } => write!(f, ", the first GPU listed")?,
+            VulkanPick::FirstGpu {
+                unmatched: Some(node),
+            } => write!(
+                f,
+                ", the first GPU listed (none is listed as the one behind {})",
+                node.display()
+            )?,
+            VulkanPick::NoGpu => write!(
+                f,
+                ", FFmpeg's default: every Vulkan device listed runs on the CPU"
+            )?,
+        }
+        if let Some(d) = &self.instead_of {
+            write!(f, "; FFmpeg's default was {}", describe(d))?;
+        }
+        Ok(())
+    }
+}
+
+/// A device's name, kind and driver.
+fn describe(d: &VulkanDevice) -> String {
+    let kind = match d.device_type {
+        VulkanDeviceType::DiscreteGpu => "discrete GPU",
+        VulkanDeviceType::IntegratedGpu => "integrated GPU",
+        VulkanDeviceType::VirtualGpu => "virtual GPU",
+        VulkanDeviceType::Cpu => "CPU",
+        VulkanDeviceType::Other => "other device",
+    };
+    match &d.driver {
+        Some(driver) => format!("{} ({kind}, driver {driver})", d.name),
+        None => format!("{} ({kind})", d.name),
+    }
+}
+
+/// Open FFmpeg's Vulkan device on a GPU, and on the same GPU as VA-API,
+/// rather than where FFmpeg's default lands (DECISIONS D38).
+///
+/// Without a device string, FFmpeg (6.1 to 8.1 at least) opens the first
+/// physical device its Vulkan instance lists, and the Vulkan loader and
+/// Mesa's device-select layer decide that order. The loader lists discrete
+/// GPUs, then integrated ones, then CPU devices; the layer then moves the
+/// GPU the desktop runs on, or else the boot VGA device, to the front. On
+/// a machine with two GPUs that need not be the one behind VA-API's render
+/// node, and with no GPU driver working it is llvmpipe. So this lists the
+/// devices and opens the one behind `render_node`, else the first that
+/// isn't a CPU, else FFmpeg's default, which then runs on the CPU
+/// (`used.is_cpu()`).
+///
+/// The error is [`MediaError::Hardware`]: with FFmpeg's error when it
+/// can't open a Vulkan device at all, or with [`HwError::Vulkan`] when its
+/// devices can't be listed, or it can't open the one chosen, or it opened
+/// another one.
+pub fn open_vulkan_device(render_node: Option<&Path>) -> Result<VulkanChoice, MediaError> {
+    let fail = |reason: String| MediaError::Hardware {
+        kind: "vulkan".into(),
+        reason: HwError::Vulkan(reason),
+    };
+    let list = |dev: &HwDevice| {
+        hwprobe::vulkan_devices(dev).map_err(|e| fail(format!("listing its devices: {e}")))
+    };
+    let default = open_hw_device("vulkan", None)?;
+    let devices = list(&default)?;
+    let Some(default_at) = devices.iter().position(|d| d.ffmpeg_uses) else {
+        return Err(fail(
+            "FFmpeg's device is not among those its instance lists".into(),
+        ));
+    };
+    let (at, pick) = choose(&devices, render_node.and_then(device_numbers), default_at);
+    let why = match (pick, render_node) {
+        (Pick::Node, Some(node)) => VulkanPick::Node(node.to_path_buf()),
+        (Pick::Default, _) => VulkanPick::NoGpu,
+        (_, node) => VulkanPick::FirstGpu {
+            unmatched: node.map(Path::to_path_buf),
+        },
+    };
+    let (device, used) = if at == default_at {
+        (default, devices[at].clone())
+    } else {
+        drop(default);
+        // FFmpeg reads a number as an index into the same list. Its
+        // default opened, so failing to open this one is an error too.
+        let dev = open_hw_device("vulkan", Some(&at.to_string()))
+            .map_err(|e| fail(format!("opening device {at}, {}: {e}", devices[at].name)))?;
+        let now = list(&dev)?;
+        let opened = now.iter().position(|d| d.ffmpeg_uses);
+        let Some(used) = opened
+            .filter(|&i| i == at)
+            .and_then(|i| now.get(i))
+            .filter(|d| d.same_device(&devices[at]))
+        else {
+            return Err(fail(format!(
+                "asked FFmpeg for device {at}, {}, and it opened {}",
+                devices[at].name,
+                opened
+                    .and_then(|i| now.get(i))
+                    .map_or("none of those listed", |d| d.name.as_str())
+            )));
+        };
+        (dev, used.clone())
+    };
+    let instead_of = (at != default_at).then(|| VulkanDevice {
+        used_by_ffmpeg: false,
+        ..VulkanDevice::from(devices[default_at].clone())
+    });
+    let choice = VulkanChoice {
+        device,
+        used: used.into(),
+        why,
+        instead_of,
+        devices: devices
+            .into_iter()
+            .enumerate()
+            .map(|(i, d)| VulkanDevice {
+                used_by_ffmpeg: i == at,
+                ..VulkanDevice::from(d)
+            })
+            .collect(),
+    };
+    tracing::debug!("FFmpeg's Vulkan device: {choice}");
+    Ok(choice)
+}
+
+/// How [`choose`] chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pick {
+    Node,
+    FirstGpu,
+    Default,
+}
+
+/// Which of `devices` to open: the one with the DRM node numbered `node`,
+/// else the first that isn't a CPU, else FFmpeg's default at `default`.
+fn choose(devices: &[VkDevice], node: Option<(i64, i64)>, default: usize) -> (usize, Pick) {
+    if let Some(n) = node
+        && let Some(i) = devices.iter().position(|d| d.drm_nodes.contains(&n))
+    {
+        return (i, Pick::Node);
+    }
+    match devices
+        .iter()
+        .position(|d| d.device_type != vk_device_type::CPU)
+    {
+        Some(i) => (i, Pick::FirstGpu),
+        None => (default, Pick::Default),
+    }
+}
+
+/// The `(major, minor)` numbers of the character device at `path`.
+fn device_numbers(path: &Path) -> Option<(i64, i64)> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let m = std::fs::metadata(path).ok()?;
+    m.file_type()
+        .is_char_device()
+        .then(|| major_minor(m.rdev()))
+}
+
+/// Linux's `dev_t` split as glibc's `major()` and `minor()` do.
+fn major_minor(dev: u64) -> (i64, i64) {
+    let major = ((dev >> 32) & 0xffff_f000) | ((dev >> 8) & 0xfff);
+    let minor = ((dev >> 12) & 0xffff_ff00) | (dev & 0xff);
+    (major as i64, minor as i64)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -658,5 +855,155 @@ mod tests {
         let mut f = grey_frame();
         f.frame.set_format(Pixel::NV12);
         assert!(f.planes_u16().is_none());
+    }
+
+    fn vk(name: &str, device_type: i32, drm_nodes: &[(i64, i64)]) -> VkDevice {
+        VkDevice {
+            name: name.into(),
+            device_type,
+            vendor_id: 0x1002,
+            device_id: 0,
+            api_version: 0,
+            driver_name: None,
+            driver_info: None,
+            drm_nodes: drm_nodes.to_vec(),
+            ffmpeg_uses: false,
+        }
+    }
+
+    #[test]
+    fn vulkan_devices_are_chosen_by_drm_node_then_gpu_then_default() {
+        use vk_device_type::{CPU, DISCRETE_GPU, INTEGRATED_GPU};
+        // As on a desktop with an iGPU driving the display: Mesa's
+        // device-select layer lists it first, and FFmpeg takes it.
+        let igpu = vk("iGPU", INTEGRATED_GPU, &[(226, 1), (226, 129)]);
+        let dgpu = vk("dGPU", DISCRETE_GPU, &[(226, 0), (226, 128)]);
+        let cpu = vk("llvmpipe", CPU, &[]);
+        let three = [igpu.clone(), dgpu.clone(), cpu.clone()];
+        assert_eq!(choose(&three, Some((226, 128)), 0), (1, Pick::Node));
+        assert_eq!(choose(&three, Some((226, 129)), 0), (0, Pick::Node));
+        // A primary node works too, as in FFmpeg's own DRM match.
+        assert_eq!(choose(&three, Some((226, 0)), 0), (1, Pick::Node));
+        // A node no device is listed with, or none: the first GPU.
+        assert_eq!(choose(&three, Some((226, 130)), 0), (0, Pick::FirstGpu));
+        assert_eq!(choose(&three, None, 0), (0, Pick::FirstGpu));
+        // llvmpipe listed first, as an old loader without the layer could.
+        let cpu_first = [cpu.clone(), dgpu.clone()];
+        assert_eq!(choose(&cpu_first, None, 0), (1, Pick::FirstGpu));
+        // A GPU without VK_EXT_physical_device_drm.
+        let no_drm = [cpu.clone(), vk("GPU", DISCRETE_GPU, &[])];
+        assert_eq!(choose(&no_drm, Some((226, 128)), 0), (1, Pick::FirstGpu));
+        // Only CPU devices: FFmpeg's default stays.
+        let cpus = [cpu.clone(), vk("other llvmpipe", CPU, &[])];
+        assert_eq!(choose(&cpus, Some((226, 128)), 1), (1, Pick::Default));
+    }
+
+    #[test]
+    fn ffmpeg_opens_the_vulkan_device_at_the_index_it_is_given() {
+        // What open_vulkan_device relies on to open the device it chose.
+        // Tier 1 needs FFmpeg's Vulkan device, on lavapipe at least.
+        let default = open_hw_device("vulkan", None).unwrap();
+        let listed = hwprobe::vulkan_devices(&default).unwrap();
+        drop(default);
+        for (i, want) in listed.iter().enumerate() {
+            let dev = open_hw_device("vulkan", Some(&i.to_string())).unwrap();
+            let now = hwprobe::vulkan_devices(&dev).unwrap();
+            assert_eq!(now.iter().position(|d| d.ffmpeg_uses), Some(i));
+            assert!(now[i].same_device(want), "{:?} is not {want:?}", now[i]);
+        }
+    }
+
+    /// glibc's `makedev()`.
+    fn makedev(major: u64, minor: u64) -> u64 {
+        ((major & 0xffff_f000) << 32)
+            | ((major & 0xfff) << 8)
+            | ((minor & 0xffff_ff00) << 12)
+            | (minor & 0xff)
+    }
+
+    #[test]
+    fn device_numbers_split_as_glibc_does() {
+        // /dev/dri/renderD128.
+        assert_eq!(makedev(226, 128), 57_984);
+        assert_eq!(major_minor(57_984), (226, 128));
+        assert_eq!(
+            major_minor(makedev(0x1234_5678, 0x9abc_def0)),
+            (0x1234_5678, 0x9abc_def0)
+        );
+        // /dev/null is 1:3 on Linux; a regular file has no device numbers.
+        assert_eq!(device_numbers(Path::new("/dev/null")), Some((1, 3)));
+        assert_eq!(
+            device_numbers(Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/Cargo.toml"
+            ))),
+            None
+        );
+        assert_eq!(device_numbers(Path::new("/nonexistent/renderD128")), None);
+    }
+
+    fn device(name: &str, device_type: VulkanDeviceType, driver: &str) -> VulkanDevice {
+        VulkanDevice {
+            name: name.into(),
+            device_type,
+            vendor_id: "0x1002".into(),
+            device_id: "0x7480".into(),
+            api_version: "1.4.318".into(),
+            driver: Some(driver.into()),
+            driver_info: None,
+            used_by_ffmpeg: true,
+        }
+    }
+
+    #[test]
+    fn a_vulkan_choice_says_which_device_and_why() {
+        let dgpu = device(
+            "AMD Radeon RX 7600 (RADV NAVI33)",
+            VulkanDeviceType::DiscreteGpu,
+            "radv",
+        );
+        let igpu = device(
+            "AMD Radeon Graphics (RADV RAPHAEL_MENDOCINO)",
+            VulkanDeviceType::IntegratedGpu,
+            "radv",
+        );
+        let choice = |why, instead_of| VulkanChoice {
+            device: Arc::new(HwDevice::vulkan_without_context()),
+            used: dgpu.clone(),
+            why,
+            instead_of,
+            devices: Vec::new(),
+        };
+        let node = PathBuf::from("/dev/dri/renderD128");
+        assert_eq!(
+            choice(VulkanPick::Node(node.clone()), Some(igpu)).to_string(),
+            "AMD Radeon RX 7600 (RADV NAVI33) (discrete GPU, driver radv), the GPU behind \
+             /dev/dri/renderD128; FFmpeg's default was AMD Radeon Graphics (RADV \
+             RAPHAEL_MENDOCINO) (integrated GPU, driver radv)"
+        );
+        assert_eq!(
+            choice(
+                VulkanPick::FirstGpu {
+                    unmatched: Some(node)
+                },
+                None
+            )
+            .to_string(),
+            "AMD Radeon RX 7600 (RADV NAVI33) (discrete GPU, driver radv), the first GPU \
+             listed (none is listed as the one behind /dev/dri/renderD128)"
+        );
+        let c = VulkanChoice {
+            used: device(
+                "llvmpipe (LLVM 20.1.2, 256 bits)",
+                VulkanDeviceType::Cpu,
+                "llvmpipe",
+            ),
+            ..choice(VulkanPick::NoGpu, None)
+        };
+        assert_eq!(
+            c.to_string(),
+            "llvmpipe (LLVM 20.1.2, 256 bits) (CPU, driver llvmpipe), FFmpeg's default: \
+             every Vulkan device listed runs on the CPU"
+        );
     }
 }
