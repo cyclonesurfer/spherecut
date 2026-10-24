@@ -16,6 +16,7 @@ use glam::DVec3;
 use spherecut_sphere::{LonLat, equirect};
 
 pub mod audio;
+pub mod fake;
 pub mod media;
 pub mod yuv;
 

@@ -397,6 +397,18 @@ pub struct ProbeError {
     code: &'static str,
 }
 
+impl From<MediaError> for ProbeError {
+    /// `error` with its own code and no FFmpeg log, for a backend that
+    /// doesn't probe with FFmpeg.
+    fn from(error: MediaError) -> Self {
+        ProbeError {
+            code: error.code(),
+            error,
+            ffmpeg_log: Vec::new(),
+        }
+    }
+}
+
 impl ProbeError {
     /// The error's stable code (D27). That is [`MediaError::code`], except
     /// for a file FFmpeg could not open: it is [`codes::TRUNCATED`] or
