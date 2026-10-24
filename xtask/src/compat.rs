@@ -4,17 +4,19 @@
 //! bindings differ between releases (FFmpeg 8 made the `SWS_` defines an
 //! enum, so code that built against 6.1 failed on Pat's 8.1). For each
 //! FFmpeg install prefix this runs clippy on the workspace, all targets
-//! and features with `-D warnings` as `cargo xtask check` does, with
-//! pkg-config pointed at that build and in a target directory of its own:
-//! sharing one would rebind ffmpeg-sys-next, and rebuild everything above
-//! it, each time the FFmpeg changes. A target directory records what it
-//! was built against, and one built against anything else is deleted
-//! first (ffmpeg-sys-next binds again only when its own variables change,
-//! not when the FFmpeg behind a prefix does). `--test` also runs the Tier 1
-//! tests against one of them, loading its libraries through
-//! `LD_LIBRARY_PATH`, and `--clean` deletes each target directory once its
-//! build is checked (one for clippy is about 450 MB, and the tests add
-//! about 1 GB).
+//! and features with `-D warnings` as `cargo xtask check` does, then
+//! builds and links the Tier 1 tests and the binaries without running
+//! them (clippy doesn't link, and a function `ffi.rs` declares that an
+//! FFmpeg doesn't export fails only there), with pkg-config pointed at
+//! that build and in a target directory of its own: sharing one would
+//! rebind ffmpeg-sys-next, and rebuild everything above it, each time the
+//! FFmpeg changes. A target directory records what it was built against,
+//! and one built against anything else is deleted first (ffmpeg-sys-next
+//! binds again only when its own variables change, not when the FFmpeg
+//! behind a prefix does). `--test` also runs the Tier 1 tests against one
+//! of them, loading its libraries through `LD_LIBRARY_PATH`, and `--clean`
+//! deletes each target directory once its build is checked (clippy's
+//! build is about 450 MB, and the link adds about 1 GB).
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -75,8 +77,8 @@ pub fn run(a: Args) -> Result<()> {
     check(&prefixes, test.as_deref(), a.clean)
 }
 
-/// `cargo xtask check`'s stage: clippy against each FFmpeg in
-/// `SPHERECUT_FFMPEG_COMPAT`, or a line saying it was skipped.
+/// `cargo xtask check`'s stage: clippy and the link against each FFmpeg
+/// in `SPHERECUT_FFMPEG_COMPAT`, or a line saying it was skipped.
 pub fn from_check() -> Result<()> {
     let env = std::env::var_os(PREFIXES_ENV);
     let prefixes = prefix_list(&[], env.as_deref(), None);
@@ -87,8 +89,9 @@ pub fn from_check() -> Result<()> {
             "lists no prefix"
         };
         eprintln!(
-            "==> skipping clippy against other FFmpeg builds: {PREFIXES_ENV} {why} \
-             (FFmpeg prefixes separated by colons; see `cargo xtask compat --help`)"
+            "==> skipping clippy and the link against other FFmpeg builds: \
+             {PREFIXES_ENV} {why} (FFmpeg prefixes separated by colons; \
+             see `cargo xtask compat --help`)"
         );
         return Ok(());
     }
@@ -501,6 +504,8 @@ struct Row {
     prefix: PathBuf,
     bound: Result<Bound, String>,
     clippy: Stage,
+    /// The tests and binaries built and linked, once clippy has passed.
+    link: Option<Stage>,
     /// The Tier 1 tests, for the `--test` prefix.
     tier1: Option<Stage>,
 }
@@ -509,6 +514,7 @@ impl Row {
     fn failed(&self) -> bool {
         self.bound.is_err()
             || self.clippy != Stage::Passed
+            || self.link != Some(Stage::Passed)
             || self.tier1.as_ref().is_some_and(|t| *t != Stage::Passed)
     }
 }
@@ -533,12 +539,15 @@ fn report(rows: &[Row]) -> String {
             Err(e) => e.clone(),
             Ok(_) => format!("clippy {}", r.clippy.word()),
         };
+        if let Some(l) = &r.link {
+            let _ = write!(result, ", link {}", l.word());
+        }
         if let Some(t) = &r.tier1 {
             let _ = write!(result, ", Tier 1 {}", t.word());
         }
         let _ = writeln!(out, "  {:lw$}  {w:ww$}  {result}", r.label);
         let _ = writeln!(out, "  {:lw$}  {}", "", r.prefix.display());
-        for s in std::iter::once(&r.clippy).chain(&r.tier1) {
+        for s in std::iter::once(&r.clippy).chain(&r.link).chain(&r.tier1) {
             if let Stage::Failed(why) | Stage::NotRun(why) = s {
                 let _ = writeln!(out, "  {:lw$}  {why}", "");
             }
@@ -578,7 +587,9 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
             prefix: b.prefix,
             bound,
             clippy: Stage::NotRun("its FFmpeg was not found".into()),
-            tier1: tested.then(|| Stage::NotRun("Tier 1 needs clippy to pass first".into())),
+            link: None,
+            tier1: tested
+                .then(|| Stage::NotRun("Tier 1 needs clippy and the link to pass first".into())),
         };
         if let (Ok(pc), Ok(found)) = (&b.pc_dir, &row.bound) {
             let what = format!("against {} at {}", found.describe(), row.prefix.display());
@@ -611,20 +622,27 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
                     ))
                 }
             };
-            if row.clippy == Stage::Passed && row.tier1.is_some() {
-                let env = cargo_env(pc, &target, Some(&found.libdir), &vars);
-                row.tier1 = Some(Stage::of(
-                    run_step(
-                        &format!("tests (Tier 1) {what}"),
-                        &mut cargo(&["test", "--workspace", "--all-targets"], &env),
-                    )
-                    .and_then(|()| {
-                        run_step(
-                            &format!("doc tests {what}"),
-                            &mut cargo(&["test", "--workspace", "--doc"], &env),
-                        )
-                    }),
+            if row.clippy == Stage::Passed {
+                let link = Stage::of(run_step(
+                    &format!("link: the tests and binaries built {what}"),
+                    &mut cargo(&["test", "--workspace", "--all-targets", "--no-run"], &env),
                 ));
+                if link == Stage::Passed && row.tier1.is_some() {
+                    let env = cargo_env(pc, &target, Some(&found.libdir), &vars);
+                    row.tier1 = Some(Stage::of(
+                        run_step(
+                            &format!("tests (Tier 1) {what}"),
+                            &mut cargo(&["test", "--workspace", "--all-targets"], &env),
+                        )
+                        .and_then(|()| {
+                            run_step(
+                                &format!("doc tests {what}"),
+                                &mut cargo(&["test", "--workspace", "--doc"], &env),
+                            )
+                        }),
+                    ));
+                }
+                row.link = Some(link);
             }
         }
         if clean && target.exists() {
@@ -1049,6 +1067,7 @@ mod tests {
                 prefix: p("/ff/n7.1"),
                 bound: found("61.19.100", Some("n7.1")),
                 clippy: Stage::Passed,
+                link: Some(Stage::Passed),
                 tier1: None,
             },
             Row {
@@ -1056,6 +1075,7 @@ mod tests {
                 prefix: p("/ff/n8.1.3-full"),
                 bound: found("62.28.103", Some("n8.1.3")),
                 clippy: Stage::Passed,
+                link: Some(Stage::Passed),
                 tier1: Some(Stage::Failed(
                     "tests (Tier 1) failed (exit status: 101)".into(),
                 )),
@@ -1065,6 +1085,19 @@ mod tests {
                 prefix: p("/ff/n9.0.2"),
                 bound: found("63.3.100", None),
                 clippy: Stage::Failed("clippy failed (exit status: 101)".into()),
+                link: None,
+                tier1: None,
+            },
+            Row {
+                label: "n8.1".into(),
+                prefix: p("/ff/n8.1"),
+                bound: found("62.28.100", Some("n8.1")),
+                clippy: Stage::Passed,
+                link: Some(Stage::Failed(
+                    "link: the tests and binaries built against FFmpeg n8.1 failed \
+                     (exit status: 101)"
+                        .into(),
+                )),
                 tier1: None,
             },
             Row {
@@ -1074,27 +1107,31 @@ mod tests {
                     "not an FFmpeg prefix: no libavcodec.pc in /ff/gone/lib/pkgconfig".into(),
                 ),
                 clippy: Stage::NotRun("its FFmpeg was not found".into()),
+                link: None,
                 tier1: None,
             },
         ];
         let r = report(&rows);
         let want = "\
-==> FFmpeg compatibility: 1 of 4 builds passed
-  n7.1         FFmpeg n7.1, libavcodec 61.19.100    clippy passed
+==> FFmpeg compatibility: 1 of 5 builds passed
+  n7.1         FFmpeg n7.1, libavcodec 61.19.100    clippy passed, link passed
                /ff/n7.1
-  n8.1.3-full  FFmpeg n8.1.3, libavcodec 62.28.103  clippy passed, Tier 1 FAILED
+  n8.1.3-full  FFmpeg n8.1.3, libavcodec 62.28.103  clippy passed, link passed, Tier 1 FAILED
                /ff/n8.1.3-full
                tests (Tier 1) failed (exit status: 101)
   n9.0.2       libavcodec 63.3.100                  clippy FAILED
                /ff/n9.0.2
                clippy failed (exit status: 101)
+  n8.1         FFmpeg n8.1, libavcodec 62.28.100    clippy passed, link FAILED
+               /ff/n8.1
+               link: the tests and binaries built against FFmpeg n8.1 failed (exit status: 101)
   gone         -                                    not an FFmpeg prefix: no libavcodec.pc in /ff/gone/lib/pkgconfig
                /ff/gone
                its FFmpeg was not found
 ";
         assert_eq!(r, want, "\n{r}");
         let failed: Vec<bool> = rows.iter().map(Row::failed).collect();
-        assert_eq!(failed, [false, true, true, true]);
+        assert_eq!(failed, [false, true, true, true, true]);
     }
 
     #[test]
@@ -1104,9 +1141,22 @@ mod tests {
             prefix: p("/ff/n8.1"),
             bound: found("62.28.100", None),
             clippy: Stage::Passed,
-            tier1: Some(Stage::NotRun("Tier 1 needs clippy to pass first".into())),
+            link: Some(Stage::Failed("link failed".into())),
+            tier1: Some(Stage::NotRun(
+                "Tier 1 needs clippy and the link to pass first".into(),
+            )),
         };
         assert!(row.failed());
-        assert!(report(&[row]).contains("clippy passed, Tier 1 not run"));
+        assert!(report(&[row]).contains("clippy passed, link FAILED, Tier 1 not run"));
+        // Nor is a link that did not happen a pass.
+        let row = Row {
+            label: "n8.1".into(),
+            prefix: p("/ff/n8.1"),
+            bound: found("62.28.100", None),
+            clippy: Stage::Passed,
+            link: None,
+            tier1: None,
+        };
+        assert!(row.failed());
     }
 }

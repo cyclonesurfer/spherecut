@@ -21,10 +21,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// fmt, clippy (-D warnings, also against the FFmpeg builds listed in
-    /// SPHERECUT_FFMPEG_COMPAT), Tier 1 tests, cargo-deny and cargo-audit.
+    /// SPHERECUT_FFMPEG_COMPAT, with the tests linked against each), Tier 1
+    /// tests, cargo-deny and cargo-audit.
     Check(check::Args),
-    /// Clippy against other FFmpeg builds, each in its own target
-    /// directory; --test also runs the Tier 1 tests against one.
+    /// Clippy and a link of the tests against other FFmpeg builds, each in
+    /// its own target directory; --test also runs the Tier 1 tests against
+    /// one.
     Compat(compat::Args),
     /// Write the synthetic test-media set to test-media/.
     GenMedia(gen_media::Args),
