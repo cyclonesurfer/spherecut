@@ -1,0 +1,401 @@
+//! Tier 1, on lavapipe: planes into slots (M1 plan sections 4.2 and 4.4).
+//! Level 0 holds each plane's codes, deep ones through the ingest pass
+//! with P010's shift; each mip level is the area-weighted mean of the one
+//! above at odd sizes; both upload paths fill a slot alike; bad frames
+//! and wrong slots are refused; and the upload bench runs.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod common;
+
+use common::{Frame, Kind, Rng, gpu};
+use spherecut_core::video::{ChromaSiting, Matrix, Range, SampleBytes};
+use spherecut_render::readback::{f16_to_f32, read_texture, round_f16};
+use spherecut_render::{GpuFrame, PlaneFormat, SlotShape, UploadPath, Uploader};
+use spherecut_testkit::bench;
+
+/// A `kind` frame of `size` with every sample random, and `pad` bytes
+/// after each row. Deep samples get random bits below their depth too
+/// where the format leaves them unused (P010's low six), and one code past
+/// the depth where the format puts its bits low, to check the clamp.
+fn noise(kind: Kind, size: (u32, u32), pad: usize, seed: u64) -> Frame {
+    let mut rng = Rng(seed);
+    let layout = kind.layout();
+    let bits = u32::from(kind.bits());
+    let planes = layout
+        .planes
+        .iter()
+        .map(|desc| {
+            let (w, h) = desc.size(size.0, size.1);
+            let row = desc.row_bytes(w);
+            let stride = row + pad;
+            let mut bytes = vec![0u8; stride * (h as usize - 1) + row];
+            for y in 0..h as usize {
+                for x in 0..w as usize * usize::from(desc.components) {
+                    let r = rng.next();
+                    match desc.bytes {
+                        SampleBytes::One => bytes[y * stride + x] = r as u8,
+                        SampleBytes::Two => {
+                            let c = if layout.msb_aligned {
+                                r as u16
+                            } else if x == 1 && y == 1 {
+                                u16::MAX
+                            } else {
+                                (r % (1 << bits)) as u16
+                            };
+                            bytes[y * stride + 2 * x..][..2].copy_from_slice(&c.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            (bytes, stride, (w, h))
+        })
+        .collect();
+    Frame {
+        layout,
+        size,
+        planes,
+        color: common::color(Range::Limited, Matrix::Bt709, ChromaSiting::Left),
+    }
+}
+
+/// Every level of every plane of `slot`, as f32 values.
+fn levels(slot: &GpuFrame) -> Vec<Vec<(u32, u32, Vec<f32>)>> {
+    let gpu = gpu();
+    slot.shape()
+        .planes
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let t = slot.plane_texture(i).unwrap();
+            (0..p.levels)
+                .map(|l| {
+                    let texels = read_texture(gpu, t, l).unwrap();
+                    let values = if p.format.is_deep() {
+                        texels.f16_values()
+                    } else {
+                        texels.data.iter().map(|&b| f32::from(b) / 255.0).collect()
+                    };
+                    (texels.width, texels.height, values)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn slot_for(frame: &Frame, levels: u32) -> GpuFrame {
+    let shape = SlotShape::of(&frame.layout, frame.size)
+        .unwrap()
+        .with_levels(levels);
+    GpuFrame::new(gpu(), &shape).unwrap()
+}
+
+/// What level 0 of plane `i` should hold: codes / (2^b − 1), after
+/// P010's shift and the clamp, in f16 for deep planes.
+fn level0(frame: &Frame, i: usize) -> Vec<f64> {
+    let (bytes, stride, (w, h)) = &frame.planes[i];
+    let comps = usize::from(frame.layout.planes[i].components);
+    let deep = frame.layout.bit_depth > 8;
+    let max = f64::from((1u32 << frame.layout.bit_depth) - 1);
+    let shift = if frame.layout.msb_aligned {
+        16 - frame.layout.bit_depth
+    } else {
+        0
+    };
+    let mut out = Vec::new();
+    for y in 0..*h as usize {
+        for x in 0..*w as usize * comps {
+            out.push(if deep {
+                let c =
+                    u16::from_le_bytes([bytes[y * stride + 2 * x], bytes[y * stride + 2 * x + 1]]);
+                round_f16((f64::from(c >> shift)).min(max) / max)
+            } else {
+                f64::from(bytes[y * stride + x]) / 255.0
+            });
+        }
+    }
+    out
+}
+
+/// The area-weighted mean of `above` (`sw` × `sh`, `comps` per texel)
+/// over destination texel `(i, j)` of a `dw` × `dh` level, by coverage of
+/// real intervals: destination texel i spans [i·sw/dw, (i + 1)·sw/dw) of
+/// the source.
+fn area_mean(
+    above: &[f32],
+    (sw, sh): (u32, u32),
+    comps: usize,
+    (dw, dh): (u32, u32),
+    (i, j): (u32, u32),
+    c: usize,
+) -> f64 {
+    let span = |k: u32, s: u32, d: u32| {
+        let (lo, hi) = (
+            f64::from(k) * f64::from(s) / f64::from(d),
+            f64::from(k + 1) * f64::from(s) / f64::from(d),
+        );
+        (0..s)
+            .filter_map(move |t| {
+                let o = (f64::from(t + 1)).min(hi) - f64::from(t).max(lo);
+                (o > 0.0).then_some((t, o / (hi - lo)))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut acc = 0.0;
+    for (y, wy) in span(j, sh, dh) {
+        for (x, wx) in span(i, sw, dw) {
+            acc += wx * wy * f64::from(above[(y as usize * sw as usize + x as usize) * comps + c]);
+        }
+    }
+    acc
+}
+
+#[test]
+fn mips_are_area_means_at_odd_sizes() {
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    // R8 and Rg8 (NV12), R16F and Rg16F (P010), and planar R16F with its
+    // bits low (yuv420p10), at sizes that are odd all the way down.
+    for (kind, size) in [
+        (Kind::Nv12, (45, 23)),
+        (Kind::P010, (45, 23)),
+        (Kind::I420p10, (37, 29)),
+    ] {
+        let frame = noise(kind, size, 12, 7);
+        let slot = slot_for(&frame, 8);
+        uploader.upload(gpu, &frame, &slot).unwrap();
+        let got = levels(&slot);
+        for (i, plane) in got.iter().enumerate() {
+            let p = slot.shape().planes[i];
+            let comps = p.format.components() as usize;
+            assert_eq!(plane.len() as u32, p.levels);
+            assert!(p.levels >= 5, "{kind:?} plane {i}: {} levels", p.levels);
+            // Level 0: the codes, exactly for 8 bits, to the f16 for deep
+            // ones (the GPU may round its f32 either way).
+            let want = level0(&frame, i);
+            for (k, (&g, &w)) in plane[0].2.iter().zip(&want).enumerate() {
+                // (f32 against f64: the same code, to the f32.)
+                let tol = if p.format.is_deep() {
+                    w.abs() * 2f64.powi(-10) + 1e-7
+                } else {
+                    1e-7
+                };
+                assert!(
+                    (f64::from(g) - w).abs() <= tol,
+                    "{kind:?} plane {i} texel {k}: {g} for {w}"
+                );
+            }
+            for l in 1..plane.len() {
+                let (sw, sh, above) = &plane[l - 1];
+                let (dw, dh, this) = &plane[l];
+                assert_eq!((*dw, *dh), ((sw / 2).max(1), (sh / 2).max(1)));
+                for j in 0..*dh {
+                    for x in 0..*dw {
+                        for c in 0..comps {
+                            let want = area_mean(above, (*sw, *sh), comps, (*dw, *dh), (x, j), c);
+                            let g = f64::from(
+                                this[(j as usize * *dw as usize + x as usize) * comps + c],
+                            );
+                            // One code at 8 bits; an f16 ulp and the sum's
+                            // f32 rounding for deep planes.
+                            let tol = if p.format.is_deep() {
+                                want.abs() * 2f64.powi(-10) + 1e-6
+                            } else {
+                                1.0 / 255.0
+                            };
+                            assert!(
+                                (g - want).abs() <= tol,
+                                "{kind:?} plane {i} level {l} ({x}, {j}) c{c}: {g} for {want}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn deep_codes_are_shifted_and_clamped() {
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    // P010: 0x3ff << 6 with the low bits set is still 1023.
+    let mut p010 = noise(Kind::P010, (8, 4), 0, 3);
+    p010.planes[0].0[..2].copy_from_slice(&0xffffu16.to_le_bytes());
+    p010.planes[0].0[2..4].copy_from_slice(&(512u16 << 6 | 0x2a).to_le_bytes());
+    let slot = slot_for(&p010, 1);
+    uploader.upload(gpu, &p010, &slot).unwrap();
+    let l0 = &levels(&slot)[0][0].2;
+    assert_eq!(l0[0], 1.0);
+    assert_eq!(f64::from(l0[1]), round_f16(512.0 / 1023.0));
+    // yuv420p10: 0xffff is past 1023, so it clamps to 1.
+    let i010 = noise(Kind::I420p10, (8, 4), 0, 3);
+    let slot = slot_for(&i010, 1);
+    uploader.upload(gpu, &i010, &slot).unwrap();
+    let l0 = &levels(&slot)[0][0].2;
+    assert_eq!(l0[8 + 1], 1.0, "the stray code at (1, 1)");
+    assert_eq!(f16_to_f32(0x3c00), 1.0);
+}
+
+#[test]
+fn both_upload_paths_fill_a_slot_alike() {
+    let gpu = gpu();
+    for kind in [Kind::Nv12, Kind::P010, Kind::I422p10, Kind::Gbrp] {
+        // Rows 300 bytes apart for one, the belt's own 256-byte pitch for
+        // the other, so that it copies row by row and at once.
+        for pad in [17usize, 0] {
+            let frame = noise(kind, (70, 33), pad * 2, 11);
+            let mut out = Vec::new();
+            for path in [UploadPath::WriteTexture, UploadPath::StagingBelt] {
+                let mut uploader = Uploader::with_path(gpu, path);
+                assert_eq!(uploader.path(), path);
+                let slot = slot_for(&frame, 4);
+                let stats = uploader.upload(gpu, &frame, &slot).unwrap();
+                let bytes: usize = frame
+                    .layout
+                    .planes
+                    .iter()
+                    .zip(&frame.planes)
+                    .map(|(d, (_, _, (w, h)))| d.row_bytes(*w) * *h as usize)
+                    .sum();
+                assert_eq!(stats.bytes, bytes as u64);
+                out.push(levels(&slot));
+            }
+            assert_eq!(out[0], out[1], "{kind:?}, pad {pad}");
+        }
+    }
+}
+
+#[test]
+fn bad_frames_and_wrong_slots_are_refused() {
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    let frame = noise(Kind::Nv12, (64, 32), 0, 5);
+    let other = slot_for(&noise(Kind::Nv12, (64, 34), 0, 5), 1);
+    let e = uploader.upload(gpu, &frame, &other).unwrap_err();
+    assert_eq!(e.code(), "internal", "{e}");
+    let other = slot_for(&noise(Kind::P010, (64, 32), 0, 5), 1);
+    assert_eq!(
+        uploader.upload(gpu, &frame, &other).unwrap_err().code(),
+        "internal"
+    );
+    // A plane one byte short, and one whose rows overlap.
+    let slot = slot_for(&frame, 1);
+    let mut short = frame.clone();
+    short.planes[1].0.pop();
+    assert_eq!(
+        uploader.upload(gpu, &short, &slot).unwrap_err().code(),
+        "invalid_input"
+    );
+    let mut overlapping = frame.clone();
+    overlapping.planes[0].1 = 63;
+    assert_eq!(
+        uploader
+            .upload(gpu, &overlapping, &slot)
+            .unwrap_err()
+            .code(),
+        "invalid_input"
+    );
+    let mut missing = frame.clone();
+    missing.planes.pop();
+    assert_eq!(
+        uploader.upload(gpu, &missing, &slot).unwrap_err().code(),
+        "invalid_input"
+    );
+    // And the slot still takes a good frame.
+    uploader.upload(gpu, &frame, &slot).unwrap();
+}
+
+/// `bench_upload_5k7`'s body: `frames` uploads of each input by each path,
+/// recording the CPU time, the GPU time where the device has timestamps,
+/// and the allocator's block count before and after, which a path that
+/// allocates per frame grows. The inputs are an 8-bit and a 10-bit frame
+/// and a pair (the dual-lens case: two frames into two slots per step).
+pub fn upload_bench(size: (u32, u32), frames: usize) {
+    let gpu = gpu();
+    let inputs = [
+        ("8-bit NV12", vec![noise(Kind::Nv12, size, 0, 1)]),
+        ("10-bit P010", vec![noise(Kind::P010, size, 0, 2)]),
+        (
+            "8-bit NV12 pair",
+            vec![noise(Kind::Nv12, size, 0, 3), noise(Kind::Nv12, size, 0, 4)],
+        ),
+    ];
+    let blocks = || {
+        gpu.device
+            .generate_allocator_report()
+            .map(|r| r.blocks.len())
+    };
+    for (what, input) in &inputs {
+        for path in [UploadPath::WriteTexture, UploadPath::StagingBelt] {
+            let mut uploader = Uploader::with_path(gpu, path);
+            let slots: Vec<GpuFrame> = input.iter().map(|f| slot_for(f, 7)).collect();
+            let mut cpu = Vec::new();
+            let mut gpu_ms = None;
+            // One step first, to make the scratch and the belt's chunks.
+            for (f, s) in input.iter().zip(&slots) {
+                uploader.upload(gpu, f, s).unwrap();
+            }
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            let before = blocks();
+            for _ in 0..frames {
+                let mut step = 0.0;
+                for (f, s) in input.iter().zip(&slots) {
+                    let stats = uploader.upload(gpu, f, s).unwrap();
+                    step += f64::from(stats.cpu_ms);
+                    gpu_ms = stats.gpu_ms.or(gpu_ms);
+                }
+                cpu.push(step);
+                // As the upload thread would, between frames.
+                let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                gpu_ms = uploader.poll(gpu).or(gpu_ms);
+            }
+            let after = blocks();
+            let name = format!("upload {}x{} {what}, {path:?}", size.0, size.1);
+            bench::record_runs(&format!("{name}: CPU"), &cpu, "ms");
+            match gpu_ms {
+                Some(ms) => bench::record(&format!("{name}: GPU (latest)"), f64::from(ms), "ms"),
+                None => {
+                    bench::not_measured(&format!("{name}: GPU"), "no timestamps between passes")
+                }
+            }
+            match (before, after) {
+                (Some(b), Some(a)) => {
+                    bench::note(format!("{name}: {b} allocator blocks before, {a} after"))
+                }
+                _ => {
+                    bench::not_measured(&format!("{name}: allocator blocks"), "no allocator report")
+                }
+            }
+            assert_eq!(cpu.len(), frames);
+        }
+    }
+}
+
+#[test]
+fn upload_bench_smoke() {
+    upload_bench((640, 320), 4);
+}
+
+#[test]
+fn formats_without_mips_still_upload() {
+    // A 1×1 frame: one level, and chroma of one texel.
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    for kind in [Kind::Nv12, Kind::I444p12, Kind::Gray] {
+        let frame = noise(kind, (1, 1), 0, 9);
+        let slot = slot_for(&frame, 8);
+        assert!(slot.shape().planes.iter().all(|p| p.levels == 1));
+        uploader.upload(gpu, &frame, &slot).unwrap();
+        let got = levels(&slot);
+        assert_eq!(got[0][0].2.len(), 1);
+        assert_eq!(
+            slot.shape().planes[0].format,
+            if kind == Kind::I444p12 {
+                PlaneFormat::R16F
+            } else {
+                PlaneFormat::R8
+            }
+        );
+    }
+}
