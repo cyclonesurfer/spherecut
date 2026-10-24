@@ -49,6 +49,7 @@ fn clip(name: &str, codec: Codec, bits: u32, width: u32, frames: u32) -> PathBuf
         bits,
         audio: Audio::None,
         spherical: true,
+        ..Spec::default()
     };
     let path = dir.join(spec.file_name());
     if !path.exists() {

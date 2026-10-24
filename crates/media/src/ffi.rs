@@ -33,6 +33,7 @@ use std::sync::{Arc, OnceLock};
 
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as sys;
+use spherecut_core::video::{ColorCodes, ColorFamily, PixelLayout, PlaneDesc, SampleBytes};
 use thiserror::Error;
 
 /// FFmpeg functions that take or return a C enum, declared with `int`s.
@@ -58,6 +59,20 @@ mod c {
         pub fn av_color_transfer_name(transfer: c_int) -> *const c_char;
         pub fn av_chroma_location_name(location: c_int) -> *const c_char;
         pub fn av_hwdevice_iterate_types(prev: c_int) -> c_int;
+        pub fn sws_isSupportedInput(fmt: c_int) -> c_int;
+        pub fn sws_isSupportedOutput(fmt: c_int) -> c_int;
+        pub fn sws_getContext(
+            src_w: c_int,
+            src_h: c_int,
+            src_format: c_int,
+            dst_w: c_int,
+            dst_h: c_int,
+            dst_format: c_int,
+            flags: c_int,
+            src_filter: *mut ffmpeg_sys_next::SwsFilter,
+            dst_filter: *mut ffmpeg_sys_next::SwsFilter,
+            param: *const f64,
+        ) -> *mut ffmpeg_sys_next::SwsContext;
         pub fn av_hwdevice_find_type_by_name(name: *const c_char) -> c_int;
         pub fn av_hwdevice_get_type_name(kind: c_int) -> *const c_char;
         pub fn av_hwdevice_ctx_create(
@@ -77,6 +92,41 @@ mod c {
             out_num_configs: *mut c_int,
         ) -> c_int;
     }
+}
+
+/// Tag an unopened encoder's stream with `tags`: range, matrix,
+/// primaries, transfer and chroma location, written as the ints they are.
+/// ffmpeg-next has no setter for the chroma location, and its others take
+/// its own enums, which can't hold a value our headers lack.
+pub(crate) fn set_color_tags(enc: &mut ff::encoder::video::Video, tags: ColorCodes) {
+    // SAFETY: the encoder's context is live and not yet opened, when these
+    // fields may be set. Each is a C enum, which is int-sized, and FFmpeg
+    // accepts any value in it (an unknown one is written as coded).
+    unsafe {
+        let c = enc.as_mut_ptr();
+        (&raw mut (*c).color_range)
+            .cast::<c_int>()
+            .write(tags.range);
+        (&raw mut (*c).colorspace)
+            .cast::<c_int>()
+            .write(tags.matrix);
+        (&raw mut (*c).color_primaries)
+            .cast::<c_int>()
+            .write(tags.primaries);
+        (&raw mut (*c).color_trc)
+            .cast::<c_int>()
+            .write(tags.transfer);
+        (&raw mut (*c).chroma_sample_location)
+            .cast::<c_int>()
+            .write(tags.chroma_location);
+    }
+}
+
+/// Clear an output stream's codec tag, so that the muxer picks its own.
+pub(crate) fn clear_codec_tag(st: &mut ff::format::stream::StreamMut<'_>) {
+    // SAFETY: the stream belongs to a live output context that is
+    // mutably borrowed with it, and `codec_tag` is a plain integer.
+    unsafe { (*(*st.as_mut_ptr()).codecpar).codec_tag = 0 };
 }
 
 /// Planar 32-bit float, the only sample format `Mp4Writer` sends.
@@ -991,6 +1041,35 @@ pub fn index_end(ictx: &ff::format::context::Input, index: usize) -> Option<u64>
         .max()
 }
 
+/// The timestamp of the last keyframe that the demuxer's index lists for
+/// stream `index` whose data ends at or before byte `size`, and whose
+/// timestamp is before `before` when given: where to seek in a file cut
+/// at `size`. `None` without an index or such an entry.
+pub(crate) fn index_keyframe_inside(
+    ictx: &ff::format::context::Input,
+    index: usize,
+    size: u64,
+    before: Option<i64>,
+) -> Option<i64> {
+    let st = ictx.stream(index)?;
+    // SAFETY: as in `index_end`.
+    let st = unsafe { st.as_ptr() }.cast_mut();
+    // SAFETY: as above.
+    let n = unsafe { sys::avformat_index_get_entries_count(st) };
+    (0..n)
+        .filter_map(|i| {
+            // SAFETY: as in `index_end`.
+            let e = unsafe { sys::avformat_index_get_entry(st, i).as_ref() }?;
+            let pos = u64::try_from(e.pos).ok()?;
+            let end = pos.checked_add(u64::try_from(e.size()).ok()?)?;
+            (e.flags() & sys::AVINDEX_KEYFRAME != 0
+                && end <= size
+                && before.is_none_or(|b| e.timestamp < b))
+            .then_some(e.timestamp)
+        })
+        .max()
+}
+
 /// Have the demuxer skip every stream but `keep`: it then neither reads
 /// their data nor stops at damage in it.
 pub fn discard_other_streams(ictx: &mut ff::format::context::Input, keep: usize) {
@@ -1443,6 +1522,11 @@ pub fn frame_format(frame: &ff::frame::Video) -> c_int {
 /// for, though, so one whose height was raised by a little still gives
 /// `Some`: its extra rows are the plane's padding, never another plane.
 pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
+    plane_and_stride(frame, index).map(|(p, _)| p)
+}
+
+/// [`plane`], and the bytes from one row to the next (`linesize`).
+pub(crate) fn plane_and_stride(frame: &ff::frame::Video, index: usize) -> Option<(&[u8], usize)> {
     // SAFETY: only takes the pointer to the AVFrame that `frame` wraps.
     let f = unsafe { frame.as_ptr() };
     // SAFETY: `f` is a live AVFrame; these are plain fields.
@@ -1488,7 +1572,8 @@ pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
     // SAFETY: the slice starts at `data` and ends inside the buffer that
     // holds it (`room`), which the frame keeps a reference to. It lives as
     // long as the frame, which stays borrowed.
-    Some(unsafe { std::slice::from_raw_parts(data, linesize.saturating_mul(rows).min(room)) })
+    let p = unsafe { std::slice::from_raw_parts(data, linesize.saturating_mul(rows).min(room)) };
+    Some((p, linesize))
 }
 
 /// How many bytes a plane of `frame` that starts at `p` can have: up to
@@ -1511,22 +1596,60 @@ fn plane_room(frame: *const sys::AVFrame, p: *const u8) -> Option<usize> {
     )
 }
 
-/// How many bytes there are from `p` to the end of the buffer of `frame`
-/// that holds `p`. `None` when no buffer of the frame holds it.
-fn buffer_room(frame: *const sys::AVFrame, p: *const u8) -> Option<usize> {
-    // SAFETY: `frame` is a live AVFrame. `buf` holds NULL or references
-    // the frame owns, and `extended_buf` holds `nb_extended_buf` more.
-    let bufs = unsafe {
+/// The buffer references `frame` holds, in `buf` and then
+/// `extended_buf`, NULLs left out.
+///
+/// # Safety
+///
+/// `frame` is a live AVFrame, and stays so while the iterator is used.
+unsafe fn buffer_refs<'a>(
+    frame: *const sys::AVFrame,
+) -> impl Iterator<Item = *mut sys::AVBufferRef> + 'a {
+    // SAFETY: the caller's. `buf` holds NULL or references the frame
+    // owns, and `extended_buf` holds `nb_extended_buf` more.
+    unsafe {
         let extended = match usize::try_from((*frame).nb_extended_buf) {
             Ok(n) if n > 0 && !(*frame).extended_buf.is_null() => {
                 std::slice::from_raw_parts((*frame).extended_buf, n)
             }
             _ => &[],
         };
-        (*frame).buf.iter().chain(extended).copied()
-    };
+        (*frame)
+            .buf
+            .iter()
+            .chain(extended)
+            .copied()
+            .filter(|b| !b.is_null())
+    }
+}
+
+/// The bytes the buffers `frame` holds take, by `AVBufferRef.size`, with
+/// a buffer that two references share counted once: what keeping the
+/// frame keeps, padding, alignment and the rows past its height included.
+/// 0 for a frame whose data it doesn't own.
+pub(crate) fn buffer_bytes(frame: &ff::frame::Video) -> usize {
+    let mut seen = Vec::new();
+    let mut total = 0usize;
+    // SAFETY: `frame` wraps a live AVFrame, borrowed while this runs.
+    for b in unsafe { buffer_refs(frame.as_ptr()) } {
+        // SAFETY: a live buffer reference; plain fields. The buffer's
+        // pointer is only compared.
+        let (buffer, size) = unsafe { ((*b).buffer.addr(), (*b).size) };
+        if !seen.contains(&buffer) {
+            seen.push(buffer);
+            total = total.saturating_add(size);
+        }
+    }
+    total
+}
+
+/// How many bytes there are from `p` to the end of the buffer of `frame`
+/// that holds `p`. `None` when no buffer of the frame holds it.
+fn buffer_room(frame: *const sys::AVFrame, p: *const u8) -> Option<usize> {
+    // SAFETY: `frame` is a live AVFrame while this runs.
+    let mut bufs = unsafe { buffer_refs(frame) };
     let p = p.addr();
-    bufs.filter(|b| !b.is_null()).find_map(|b| {
+    bufs.find_map(|b| {
         // SAFETY: a live buffer reference; plain fields.
         let (start, size) = unsafe { ((*b).data.addr(), (*b).size) };
         (start..start.checked_add(size)?)
@@ -1539,6 +1662,499 @@ fn buffer_room(frame: *const sys::AVFrame, p: *const u8) -> Option<usize> {
 pub fn pix_fmt_name(fmt: c_int) -> Option<String> {
     // SAFETY: accepts any value and returns NULL for unknown ones.
     cstr_opt(unsafe { c::av_get_pix_fmt_name(fmt) })
+}
+
+/// What the decoder said about a frame, read as ints (D11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameFields {
+    pub format: c_int,
+    pub width: u32,
+    pub height: u32,
+    /// `pts`, else `best_effort_timestamp`, else `None`.
+    pub pts: Option<i64>,
+    /// In the stream's time base; 0 when unknown.
+    pub duration: i64,
+    pub key: bool,
+    /// FFmpeg flagged it corrupt: decoded from missing references, after
+    /// a seek.
+    pub corrupt: bool,
+    /// The decoder concealed errors in it (`decode_error_flags`).
+    pub concealed: bool,
+    pub color: ColorCodes,
+}
+
+pub(crate) fn frame_fields(frame: &ff::frame::Video) -> FrameFields {
+    let ts = |t: i64| (t != sys::AV_NOPTS_VALUE).then_some(t);
+    let dim = |n: c_int| u32::try_from(n).unwrap_or(0);
+    // SAFETY: `frame` wraps a live AVFrame. These are plain fields, and
+    // the enum fields are read as ints.
+    unsafe {
+        let f = frame.as_ptr();
+        FrameFields {
+            format: (*f).format,
+            width: dim((*f).width),
+            height: dim((*f).height),
+            pts: ts((*f).pts).or_else(|| ts((*f).best_effort_timestamp)),
+            duration: (*f).duration,
+            key: (*f).flags & sys::AV_FRAME_FLAG_KEY != 0,
+            corrupt: (*f).flags & sys::AV_FRAME_FLAG_CORRUPT != 0,
+            concealed: (*f).decode_error_flags != 0,
+            color: ColorCodes {
+                primaries: enum_int(&raw const (*f).color_primaries),
+                transfer: enum_int(&raw const (*f).color_trc),
+                matrix: enum_int(&raw const (*f).colorspace),
+                range: enum_int(&raw const (*f).color_range),
+                chroma_location: enum_int(&raw const (*f).chroma_location),
+            },
+        }
+    }
+}
+
+/// Where plane `index` of `frame` starts, as `AVFrame.data` has it, for
+/// tests that check a plane is handed out without a copy.
+pub(crate) fn data_ptr(frame: &ff::frame::Video, index: usize) -> *const u8 {
+    // SAFETY: `frame` wraps a live AVFrame; `data` is a plain array, and
+    // the pointer is only returned, never read here.
+    unsafe {
+        (*frame.as_ptr())
+            .data
+            .get(index)
+            .map_or(std::ptr::null(), |p| p.cast_const())
+    }
+}
+
+/// Pixel-format flags that rule a format out of [`pixel_layout`]:
+/// big-endian, palette, bitstream, hardware, float and Bayer formats.
+const NOT_NATIVE: u64 = (sys::AV_PIX_FMT_FLAG_BE
+    | sys::AV_PIX_FMT_FLAG_PAL
+    | sys::AV_PIX_FMT_FLAG_BITSTREAM
+    | sys::AV_PIX_FMT_FLAG_HWACCEL
+    | sys::AV_PIX_FMT_FLAG_FLOAT
+    | sys::AV_PIX_FMT_FLAG_BAYER) as u64;
+
+/// How frames in pixel format `fmt` lie in memory, when they can be
+/// uploaded as they are (D30): planar or semi-planar, little-endian, 8 to
+/// 16 bits with every colour component at the same depth, in the low bits
+/// or, for 16-bit samples, the high ones (P010). YUV with U before V,
+/// planar RGB in FFmpeg's G, B, R order, or gray. An alpha component is
+/// left out. `None` for every other format, which [`conversion_target`]
+/// converts, and for a format this libavutil doesn't describe.
+///
+/// The rule reads `AVPixFmtDescriptor` as ints (D11), so it covers every
+/// such format, the plan's list (`nv12`, `p010le`, `yuv420p10le`,
+/// `gbrp12le`, ...) and others like it (`yuv440p`, `yuv420p9le`, `nv24`).
+pub(crate) fn pixel_layout(fmt: c_int) -> Option<PixelLayout> {
+    // SAFETY: accepts any value and returns NULL for unknown ones; non-NULL
+    // descriptors point at static tables with no enum fields.
+    let d = unsafe { c::av_pix_fmt_desc_get(fmt).as_ref() }?;
+    if d.flags & NOT_NATIVE != 0 {
+        return None;
+    }
+    let alpha = d.flags & sys::AV_PIX_FMT_FLAG_ALPHA as u64 != 0;
+    // Alpha, when there is one, is the last component.
+    let colour = usize::from(d.nb_components)
+        .min(4)
+        .checked_sub(usize::from(alpha))?;
+    let comps = d.comp.get(..colour)?;
+    let depth = comps.first()?.depth;
+    let shift = comps.first()?.shift;
+    if !(8..=16).contains(&depth) || comps.iter().any(|c| c.depth != depth || c.shift != shift) {
+        return None;
+    }
+    let bytes = if depth > 8 {
+        SampleBytes::Two
+    } else {
+        SampleBytes::One
+    };
+    let b = bytes.get() as c_int;
+    let msb_aligned = shift != 0;
+    if msb_aligned && (b != 2 || shift != 16 - depth) {
+        return None;
+    }
+    // Component `c` alone in `plane`, or interleaved with another at
+    // `offset` samples into each pair.
+    let alone =
+        |c: &sys::AVComponentDescriptor, plane| c.plane == plane && c.step == b && c.offset == 0;
+    let paired = |c: &sys::AVComponentDescriptor, offset| {
+        c.plane == 1 && c.step == 2 * b && c.offset == offset * b
+    };
+    let full = PlaneDesc {
+        components: 1,
+        bytes,
+        log2_sub: (0, 0),
+    };
+    let sub = (d.log2_chroma_w, d.log2_chroma_h);
+    let rgb = d.flags & sys::AV_PIX_FMT_FLAG_RGB as u64 != 0;
+    let (family, planes) = match comps {
+        [y] if !rgb && alone(y, 0) => (ColorFamily::Gray, vec![full]),
+        // The descriptor lists R, G, B; gbrp keeps G, B and R in planes
+        // 0, 1 and 2.
+        [r, g, bl] if rgb && alone(g, 0) && alone(bl, 1) && alone(r, 2) => {
+            (ColorFamily::Rgb, vec![full; 3])
+        }
+        [y, u, v] if !rgb && alone(y, 0) && alone(u, 1) && alone(v, 2) => {
+            let chroma = PlaneDesc {
+                log2_sub: sub,
+                ..full
+            };
+            (ColorFamily::Yuv, vec![full, chroma, chroma])
+        }
+        [y, u, v] if !rgb && alone(y, 0) && paired(u, 0) && paired(v, 1) => {
+            let chroma = PlaneDesc {
+                components: 2,
+                log2_sub: sub,
+                ..full
+            };
+            (ColorFamily::Yuv, vec![full, chroma])
+        }
+        _ => return None,
+    };
+    Some(PixelLayout {
+        name: pix_fmt_name(fmt)?,
+        planes,
+        family,
+        bit_depth: u8::try_from(depth).ok()?,
+        msb_aligned,
+    })
+}
+
+/// The format [`Scaler`] converts frames in `fmt` to, when
+/// [`pixel_layout`] rules `fmt` out (D30): the native planar format of the
+/// same kind, at 8, 10, 12 or 16 bits, whichever holds the source's depth.
+/// RGB, palette, Bayer and XYZ formats go to `gbrp*`, gray to `gray*`, and
+/// YUV to `yuv420p*`, `yuv422p*` or `yuv444p*` by its subsampling, or to
+/// `yuv444p*` for other subsamplings. So nothing is resampled, chroma
+/// keeps its siting, and RGB doesn't go through a YUV matrix. `None` for a
+/// format this libavutil doesn't describe.
+pub(crate) fn conversion_target(fmt: c_int) -> Option<c_int> {
+    use sys::AVPixelFormat as P;
+    // SAFETY: as in `pixel_layout`.
+    let d = unsafe { c::av_pix_fmt_desc_get(fmt).as_ref() }?;
+    let n = usize::from(d.nb_components).min(4);
+    let depth = d.comp[..n].iter().map(|c| c.depth).max()?;
+    // 8, 10, 12 or 16 bits.
+    let class = match depth {
+        ..=8 => 0,
+        9..=10 => 1,
+        11..=12 => 2,
+        _ => 3,
+    };
+    let rgb_like =
+        (sys::AV_PIX_FMT_FLAG_RGB | sys::AV_PIX_FMT_FLAG_PAL | sys::AV_PIX_FMT_FLAG_BAYER) as u64;
+    let alpha = d.flags & sys::AV_PIX_FMT_FLAG_ALPHA as u64 != 0;
+    let gray = n - usize::from(alpha) == 1;
+    let name = pix_fmt_name(fmt).unwrap_or_default();
+    let family: [P; 4] = if d.flags & rgb_like != 0 || name.starts_with("xyz") {
+        [
+            P::AV_PIX_FMT_GBRP,
+            P::AV_PIX_FMT_GBRP10LE,
+            P::AV_PIX_FMT_GBRP12LE,
+            P::AV_PIX_FMT_GBRP16LE,
+        ]
+    } else if gray {
+        [
+            P::AV_PIX_FMT_GRAY8,
+            P::AV_PIX_FMT_GRAY10LE,
+            P::AV_PIX_FMT_GRAY12LE,
+            P::AV_PIX_FMT_GRAY16LE,
+        ]
+    } else {
+        match (d.log2_chroma_w, d.log2_chroma_h) {
+            (1, 1) => [
+                P::AV_PIX_FMT_YUV420P,
+                P::AV_PIX_FMT_YUV420P10LE,
+                P::AV_PIX_FMT_YUV420P12LE,
+                P::AV_PIX_FMT_YUV420P16LE,
+            ],
+            (1, 0) => [
+                P::AV_PIX_FMT_YUV422P,
+                P::AV_PIX_FMT_YUV422P10LE,
+                P::AV_PIX_FMT_YUV422P12LE,
+                P::AV_PIX_FMT_YUV422P16LE,
+            ],
+            _ => [
+                P::AV_PIX_FMT_YUV444P,
+                P::AV_PIX_FMT_YUV444P10LE,
+                P::AV_PIX_FMT_YUV444P12LE,
+                P::AV_PIX_FMT_YUV444P16LE,
+            ],
+        }
+    };
+    Some(family[class] as c_int)
+}
+
+/// Why a [`Scaler`] could not be made.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub(crate) enum ScaleError {
+    #[error("swscale does not take {0} as input")]
+    Input(String),
+    #[error("swscale does not make {0}")]
+    Output(String),
+    #[error("swscale refused to convert {from} at {width}x{height} to {to}")]
+    Refused {
+        from: String,
+        to: String,
+        width: u32,
+        height: u32,
+    },
+}
+
+/// A swscale context converting frames of one format and size to another
+/// format at the same size, with formats as ints (D11). ffmpeg-next's own
+/// `scaling::Context` takes bindgen enums and is not `Send`.
+pub(crate) struct Scaler {
+    ctx: *mut sys::SwsContext,
+    from: c_int,
+    to: c_int,
+    width: u32,
+    height: u32,
+}
+
+// SAFETY: the context is only used through `&mut self`, by one thread at
+// a time, and swscale keeps no thread-local state for it.
+unsafe impl Send for Scaler {}
+
+impl std::fmt::Debug for Scaler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scaler")
+            .field("from", &pix_fmt_name(self.from))
+            .field("to", &pix_fmt_name(self.to))
+            .field("size", &(self.width, self.height))
+            .finish()
+    }
+}
+
+impl Scaler {
+    /// A context for `width` × `height` frames in `from`, to `to`. The
+    /// range stays what it is: a full-range source isn't squeezed to
+    /// limited range (or the other way), and frames keep their colour
+    /// tags.
+    pub fn new(from: c_int, to: c_int, width: u32, height: u32) -> Result<Scaler, ScaleError> {
+        let name = |f| pix_fmt_name(f).unwrap_or_else(|| format!("format {f}"));
+        // SAFETY: both accept any value.
+        if unsafe { c::sws_isSupportedInput(from) } <= 0 {
+            return Err(ScaleError::Input(name(from)));
+        }
+        // SAFETY: as above.
+        if unsafe { c::sws_isSupportedOutput(to) } <= 0 {
+            return Err(ScaleError::Output(name(to)));
+        }
+        let refused = || ScaleError::Refused {
+            from: name(from),
+            to: name(to),
+            width,
+            height,
+        };
+        let (w, h) = (
+            c_int::try_from(width).map_err(|_| refused())?,
+            c_int::try_from(height).map_err(|_| refused())?,
+        );
+        // Same size both ways, so the filter only matters for chroma that
+        // has to be made from neighbours (yuv411p to yuv444p, say).
+        let flags = (sys::SWS_BILINEAR | sys::SWS_ACCURATE_RND | sys::SWS_BITEXACT) as c_int;
+        // SAFETY: formats are checked above; NULL filters and params are
+        // allowed. NULL is returned on failure.
+        let ctx = unsafe {
+            c::sws_getContext(
+                w,
+                h,
+                from,
+                w,
+                h,
+                to,
+                flags,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        if ctx.is_null() {
+            return Err(refused());
+        }
+        let scaler = Scaler {
+            ctx,
+            from,
+            to,
+            width,
+            height,
+        };
+        let (mut inv, mut table) = (std::ptr::null_mut(), std::ptr::null_mut());
+        let (mut src_range, mut dst_range, mut b, mut c, mut s) = (0, 0, 0, 0, 0);
+        // SAFETY: `ctx` is live, and every out-pointer points at a local.
+        // The tables returned belong to the context, and are passed back
+        // to it at once.
+        unsafe {
+            if sys::sws_getColorspaceDetails(
+                ctx,
+                &mut inv,
+                &mut src_range,
+                &mut table,
+                &mut dst_range,
+                &mut b,
+                &mut c,
+                &mut s,
+            ) >= 0
+                && src_range != dst_range
+            {
+                sys::sws_setColorspaceDetails(ctx, inv, src_range, table, src_range, b, c, s);
+            }
+        }
+        Ok(scaler)
+    }
+
+    /// The source format and size it was made for.
+    pub fn source(&self) -> (c_int, u32, u32) {
+        (self.from, self.width, self.height)
+    }
+
+    /// `src` converted, with its timestamps and colour tags. `src` must be
+    /// in the source format and size.
+    pub fn scale(&mut self, src: &ff::frame::Video) -> Result<ff::frame::Video, ff::Error> {
+        let f = frame_fields(src);
+        if (f.format, f.width, f.height) != self.source() {
+            return Err(ff::Error::InvalidData);
+        }
+        let mut dst = ff::frame::Video::empty();
+        // SAFETY: `dst` is a fresh frame without buffers, which
+        // sws_scale_frame allocates for the format and size set here;
+        // `src` is a live frame of the context's input. The properties
+        // are copied onto `dst` after.
+        let ret = unsafe {
+            let d = dst.as_mut_ptr();
+            (*d).format = self.to;
+            (*d).width = self.width as c_int;
+            (*d).height = self.height as c_int;
+            let ret = sys::sws_scale_frame(self.ctx, d, src.as_ptr());
+            if ret < 0 {
+                ret
+            } else {
+                sys::av_frame_copy_props(d, src.as_ptr())
+            }
+        };
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+        Ok(dst)
+    }
+}
+
+impl Drop for Scaler {
+    fn drop(&mut self) {
+        // SAFETY: the context was made by sws_getContext and is freed once.
+        unsafe { sys::sws_freeContext(self.ctx) };
+    }
+}
+
+/// `av_seek_frame` on stream `stream` to `ts`, in its time base, to the
+/// keyframe at or before it when `backward`, else at or after it.
+pub(crate) fn seek_frame(
+    ictx: &mut ff::format::context::Input,
+    stream: usize,
+    ts: i64,
+    backward: bool,
+) -> Result<(), ff::Error> {
+    let flags = if backward {
+        sys::AVSEEK_FLAG_BACKWARD
+    } else {
+        0
+    };
+    let index = c_int::try_from(stream).map_err(|_| ff::Error::StreamNotFound)?;
+    // SAFETY: `ictx` owns a live, opened AVFormatContext.
+    let ret = unsafe { sys::av_seek_frame(ictx.as_mut_ptr(), index, ts, flags) };
+    if ret < 0 {
+        return Err(ff::Error::from(ret));
+    }
+    Ok(())
+}
+
+/// `av_seek_frame` to byte 0 of the file, for a demuxer that can.
+pub(crate) fn seek_to_byte_zero(ictx: &mut ff::format::context::Input) -> Result<(), ff::Error> {
+    // SAFETY: as above; stream -1 with a byte position.
+    let ret = unsafe { sys::av_seek_frame(ictx.as_mut_ptr(), -1, 0, sys::AVSEEK_FLAG_BYTE) };
+    if ret < 0 {
+        return Err(ff::Error::from(ret));
+    }
+    Ok(())
+}
+
+/// The demuxer's index of stream `index`, which `f` reads entry by entry
+/// as (timestamp, flags), timestamps in the stream's time base. `None`
+/// for a stream that doesn't exist.
+fn with_index<T>(
+    ictx: &ff::format::context::Input,
+    index: usize,
+    f: impl FnOnce(&mut dyn Iterator<Item = (i64, c_int)>) -> T,
+) -> Option<T> {
+    let st = ictx.stream(index)?;
+    // SAFETY: as in `index_end`.
+    let st = unsafe { st.as_ptr() }.cast_mut();
+    // SAFETY: as above.
+    let n = unsafe { sys::avformat_index_get_entries_count(st) };
+    let mut entries = (0..n).filter_map(|i| {
+        // SAFETY: as in `index_end`.
+        let e = unsafe { sys::avformat_index_get_entry(st, i).as_ref() }?;
+        Some((e.timestamp, e.flags()))
+    });
+    Some(f(&mut entries))
+}
+
+/// How many samples of stream `index` the index lists that are not
+/// hidden by an edit list (`AVINDEX_DISCARD_FRAME`). For the MOV demuxer,
+/// whose index lists every sample, that is the number of frames shown.
+pub(crate) fn index_shown(ictx: &ff::format::context::Input, index: usize) -> u64 {
+    with_index(ictx, index, |e| {
+        e.filter(|(_, flags)| flags & sys::AVINDEX_DISCARD_FRAME == 0)
+            .count() as u64
+    })
+    .unwrap_or(0)
+}
+
+/// The timestamps of every entry in the index of stream `index`, in its
+/// order (by timestamp).
+pub(crate) fn index_timestamps(ictx: &ff::format::context::Input, index: usize) -> Vec<i64> {
+    with_index(ictx, index, |e| e.map(|(ts, _)| ts).collect()).unwrap_or_default()
+}
+
+/// The timestamp of the last entry in the index of stream `index`.
+pub(crate) fn index_last(ictx: &ff::format::context::Input, index: usize) -> Option<i64> {
+    with_index(ictx, index, |e| e.last().map(|(ts, _)| ts)).flatten()
+}
+
+/// The timestamp of the first entry in the index of stream `index`.
+pub(crate) fn index_first(ictx: &ff::format::context::Input, index: usize) -> Option<i64> {
+    with_index(ictx, index, |e| e.next().map(|(ts, _)| ts)).flatten()
+}
+
+/// The timestamp of the keyframe that `av_index_search_timestamp` names
+/// for `ts` with `AVSEEK_FLAG_BACKWARD`: the last at or before it, as a
+/// seek to `ts` would land. `None` without an index or such an entry.
+pub(crate) fn index_keyframe_before(
+    ictx: &ff::format::context::Input,
+    index: usize,
+    ts: i64,
+) -> Option<i64> {
+    let st = ictx.stream(index)?;
+    // SAFETY: as in `index_end`; the search only reads the index.
+    let st = unsafe { st.as_ptr() }.cast_mut();
+    // SAFETY: as above.
+    let i = unsafe { sys::av_index_search_timestamp(st, ts, sys::AVSEEK_FLAG_BACKWARD) };
+    // SAFETY: `i` came from the search, so it is in range when it is not
+    // negative.
+    let e = unsafe { sys::avformat_index_get_entry(st, i).as_ref() }?;
+    Some(e.timestamp)
+}
+
+/// Have the decoder skip frames no other frame refers to
+/// (`AVDISCARD_NONREF`), or skip none (`AVDISCARD_DEFAULT`).
+pub(crate) fn skip_nonref(dec: &mut ff::codec::context::Context, skip: bool) {
+    let v = if skip {
+        sys::AVDiscard::AVDISCARD_NONREF
+    } else {
+        sys::AVDiscard::AVDISCARD_DEFAULT
+    };
+    // SAFETY: `dec` owns a live AVCodecContext, whose `skip_frame` may be
+    // set between packets. The value is one our headers define.
+    unsafe { (*dec.as_mut_ptr()).skip_frame = v };
 }
 
 /// Copy a hardware frame into system memory (NV12 / P010).
@@ -2380,7 +2996,7 @@ mod tests {
 
     /// Three 256x128 frames in MP4, from `encoder` with `options`.
     fn clip_with(dir: &TempDir, name: &str, encoder: &str, options: &[(&str, &str)]) -> PathBuf {
-        use crate::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+        use crate::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
         let settings = VideoSettings {
             encoder: encoder.into(),
             width: 256,
@@ -2391,7 +3007,9 @@ mod tests {
                 .iter()
                 .map(|&(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            bt709_limited: true,
+            color: ColorTags::BT709_LIMITED,
+            edit_start: 0,
+            time_base: None,
         };
         let mut w = Mp4Writer::create(&dir.0.join(name), &settings, None).unwrap();
         for i in 0..3 {
@@ -2608,5 +3226,301 @@ mod tests {
         let dec = open_decoder(ff::codec::context::Context::new_with_codec(codec), codec).unwrap();
         // SAFETY: an open decoder context; a plain int64 field.
         assert_eq!(unsafe { (*dec.as_ptr()).max_pixels }, MAX_PIXELS);
+    }
+
+    fn fmt(p: sys::AVPixelFormat) -> c_int {
+        p as c_int
+    }
+
+    #[test]
+    fn native_pixel_layouts_come_from_the_descriptor() {
+        use ColorFamily::{Gray, Rgb, Yuv};
+        use sys::AVPixelFormat as P;
+        let plane = |components, bytes, log2_sub| PlaneDesc {
+            components,
+            bytes,
+            log2_sub,
+        };
+        let (one, two) = (SampleBytes::One, SampleBytes::Two);
+        let planar = |bytes, sub| {
+            vec![
+                plane(1, bytes, (0, 0)),
+                plane(1, bytes, sub),
+                plane(1, bytes, sub),
+            ]
+        };
+        let semi = |bytes, sub| vec![plane(1, bytes, (0, 0)), plane(2, bytes, sub)];
+        // Format, family, planes, depth, MSB-aligned.
+        let native: Vec<(P, ColorFamily, Vec<PlaneDesc>, u8, bool)> = vec![
+            (P::AV_PIX_FMT_NV12, Yuv, semi(one, (1, 1)), 8, false),
+            (P::AV_PIX_FMT_NV16, Yuv, semi(one, (1, 0)), 8, false),
+            (P::AV_PIX_FMT_P010LE, Yuv, semi(two, (1, 1)), 10, true),
+            (P::AV_PIX_FMT_P210LE, Yuv, semi(two, (1, 0)), 10, true),
+            // At 16 bits the high and low bits are the same.
+            (P::AV_PIX_FMT_P016LE, Yuv, semi(two, (1, 1)), 16, false),
+            (P::AV_PIX_FMT_YUV420P, Yuv, planar(one, (1, 1)), 8, false),
+            (
+                P::AV_PIX_FMT_YUV420P10LE,
+                Yuv,
+                planar(two, (1, 1)),
+                10,
+                false,
+            ),
+            (
+                P::AV_PIX_FMT_YUV420P12LE,
+                Yuv,
+                planar(two, (1, 1)),
+                12,
+                false,
+            ),
+            (
+                P::AV_PIX_FMT_YUV420P16LE,
+                Yuv,
+                planar(two, (1, 1)),
+                16,
+                false,
+            ),
+            (P::AV_PIX_FMT_YUV422P, Yuv, planar(one, (1, 0)), 8, false),
+            (
+                P::AV_PIX_FMT_YUV422P10LE,
+                Yuv,
+                planar(two, (1, 0)),
+                10,
+                false,
+            ),
+            (
+                P::AV_PIX_FMT_YUV422P12LE,
+                Yuv,
+                planar(two, (1, 0)),
+                12,
+                false,
+            ),
+            (
+                P::AV_PIX_FMT_YUV422P16LE,
+                Yuv,
+                planar(two, (1, 0)),
+                16,
+                false,
+            ),
+            (P::AV_PIX_FMT_YUV444P, Yuv, planar(one, (0, 0)), 8, false),
+            (
+                P::AV_PIX_FMT_YUV444P10LE,
+                Yuv,
+                planar(two, (0, 0)),
+                10,
+                false,
+            ),
+            (
+                P::AV_PIX_FMT_YUV444P12LE,
+                Yuv,
+                planar(two, (0, 0)),
+                12,
+                false,
+            ),
+            (
+                P::AV_PIX_FMT_YUV444P16LE,
+                Yuv,
+                planar(two, (0, 0)),
+                16,
+                false,
+            ),
+            (P::AV_PIX_FMT_YUVJ420P, Yuv, planar(one, (1, 1)), 8, false),
+            (P::AV_PIX_FMT_YUVJ422P, Yuv, planar(one, (1, 0)), 8, false),
+            (P::AV_PIX_FMT_YUVJ444P, Yuv, planar(one, (0, 0)), 8, false),
+            (
+                P::AV_PIX_FMT_GRAY8,
+                Gray,
+                vec![plane(1, one, (0, 0))],
+                8,
+                false,
+            ),
+            (
+                P::AV_PIX_FMT_GRAY10LE,
+                Gray,
+                vec![plane(1, two, (0, 0))],
+                10,
+                false,
+            ),
+            (
+                P::AV_PIX_FMT_GRAY12LE,
+                Gray,
+                vec![plane(1, two, (0, 0))],
+                12,
+                false,
+            ),
+            (
+                P::AV_PIX_FMT_GBRP,
+                Rgb,
+                vec![plane(1, one, (0, 0)); 3],
+                8,
+                false,
+            ),
+            (
+                P::AV_PIX_FMT_GBRP10LE,
+                Rgb,
+                vec![plane(1, two, (0, 0)); 3],
+                10,
+                false,
+            ),
+            (
+                P::AV_PIX_FMT_GBRP12LE,
+                Rgb,
+                vec![plane(1, two, (0, 0)); 3],
+                12,
+                false,
+            ),
+            // Alpha planes are left out.
+            (P::AV_PIX_FMT_YUVA420P, Yuv, planar(one, (1, 1)), 8, false),
+            (
+                P::AV_PIX_FMT_GBRAP,
+                Rgb,
+                vec![plane(1, one, (0, 0)); 3],
+                8,
+                false,
+            ),
+            // Others of the same shape, by the same rule.
+            (P::AV_PIX_FMT_YUV440P, Yuv, planar(one, (0, 1)), 8, false),
+            (P::AV_PIX_FMT_YUV420P9LE, Yuv, planar(two, (1, 1)), 9, false),
+            (P::AV_PIX_FMT_NV24, Yuv, semi(one, (0, 0)), 8, false),
+        ];
+        for (p, family, planes, depth, msb) in native {
+            let name = pix_fmt_name(fmt(p)).unwrap();
+            let l = pixel_layout(fmt(p)).unwrap_or_else(|| panic!("{name} is not native"));
+            assert_eq!(l.name, name);
+            assert_eq!(
+                (l.family, &l.planes, l.bit_depth, l.msb_aligned),
+                (family, &planes, depth, msb),
+                "{name}"
+            );
+        }
+        // Packed, big-endian, palette, RGB in other orders, V before U,
+        // bitstream, float, Bayer and hardware formats are converted.
+        for p in [
+            P::AV_PIX_FMT_YUYV422,
+            P::AV_PIX_FMT_UYVY422,
+            P::AV_PIX_FMT_RGB24,
+            P::AV_PIX_FMT_RGBA,
+            P::AV_PIX_FMT_BGR0,
+            P::AV_PIX_FMT_PAL8,
+            P::AV_PIX_FMT_NV21,
+            P::AV_PIX_FMT_YUV420P10BE,
+            P::AV_PIX_FMT_GRAY16BE,
+            P::AV_PIX_FMT_P010BE,
+            P::AV_PIX_FMT_MONOWHITE,
+            P::AV_PIX_FMT_GBRPF32LE,
+            P::AV_PIX_FMT_BAYER_RGGB8,
+            P::AV_PIX_FMT_XYZ12LE,
+            P::AV_PIX_FMT_X2RGB10LE,
+            P::AV_PIX_FMT_VAAPI,
+        ] {
+            assert!(pixel_layout(fmt(p)).is_none(), "{:?}", pix_fmt_name(fmt(p)));
+        }
+        assert!(pixel_layout(-1).is_none());
+        assert!(pixel_layout(100_000).is_none());
+    }
+
+    #[test]
+    fn converted_formats_keep_their_kind_subsampling_and_depth() {
+        use sys::AVPixelFormat as P;
+        let cases = [
+            (P::AV_PIX_FMT_YUYV422, P::AV_PIX_FMT_YUV422P),
+            (P::AV_PIX_FMT_UYVY422, P::AV_PIX_FMT_YUV422P),
+            (P::AV_PIX_FMT_NV21, P::AV_PIX_FMT_YUV420P),
+            (P::AV_PIX_FMT_YUV420P10BE, P::AV_PIX_FMT_YUV420P10LE),
+            (P::AV_PIX_FMT_Y210LE, P::AV_PIX_FMT_YUV422P10LE),
+            (P::AV_PIX_FMT_YUV411P, P::AV_PIX_FMT_YUV444P),
+            (P::AV_PIX_FMT_RGB24, P::AV_PIX_FMT_GBRP),
+            (P::AV_PIX_FMT_RGBA, P::AV_PIX_FMT_GBRP),
+            (P::AV_PIX_FMT_X2RGB10LE, P::AV_PIX_FMT_GBRP10LE),
+            (P::AV_PIX_FMT_RGB48BE, P::AV_PIX_FMT_GBRP16LE),
+            (P::AV_PIX_FMT_PAL8, P::AV_PIX_FMT_GBRP),
+            (P::AV_PIX_FMT_BAYER_RGGB8, P::AV_PIX_FMT_GBRP),
+            (P::AV_PIX_FMT_XYZ12LE, P::AV_PIX_FMT_GBRP12LE),
+            (P::AV_PIX_FMT_GRAY16BE, P::AV_PIX_FMT_GRAY16LE),
+            (P::AV_PIX_FMT_MONOWHITE, P::AV_PIX_FMT_GRAY8),
+            (P::AV_PIX_FMT_YA8, P::AV_PIX_FMT_GRAY8),
+        ];
+        for (from, to) in cases {
+            let name = |p| pix_fmt_name(fmt(p)).unwrap();
+            assert_eq!(
+                conversion_target(fmt(from)).map(|t| pix_fmt_name(t).unwrap()),
+                Some(name(to)),
+                "{}",
+                name(from)
+            );
+            // Every target is native.
+            assert!(pixel_layout(fmt(to)).is_some(), "{}", name(to));
+        }
+        assert_eq!(conversion_target(100_000), None);
+    }
+
+    #[test]
+    fn swscale_repacks_exactly_and_keeps_timestamps_and_tags() {
+        use sys::AVPixelFormat as P;
+        let (w, h) = (6u32, 4u32);
+        // UYVY: U0 Y0 V0 Y1 for each pair of pixels.
+        let mut src = ff::frame::Video::new(ff::format::Pixel::UYVY422, w, h);
+        let stride = src.stride(0);
+        for y in 0..h as usize {
+            for x in 0..w as usize / 2 {
+                let o = y * stride + x * 4;
+                let px = (y * 3 + x) as u8;
+                src.data_mut(0)[o..o + 4].copy_from_slice(&[
+                    100 + px,
+                    16 + 2 * px,
+                    200 - px,
+                    17 + 2 * px,
+                ]);
+            }
+        }
+        src.set_pts(Some(1234));
+        src.set_color_range(ff::util::color::Range::JPEG);
+        let mut s =
+            Scaler::new(fmt(P::AV_PIX_FMT_UYVY422), fmt(P::AV_PIX_FMT_YUV422P), w, h).unwrap();
+        let out = s.scale(&src).unwrap();
+        let f = frame_fields(&out);
+        assert_eq!(
+            (f.format, f.width, f.height),
+            (fmt(P::AV_PIX_FMT_YUV422P), w, h)
+        );
+        assert_eq!(f.pts, Some(1234));
+        assert_eq!(f.color.range, 2);
+        let (luma, ls) = plane_and_stride(&out, 0).unwrap();
+        let (u, us) = plane_and_stride(&out, 1).unwrap();
+        let (v, vs) = plane_and_stride(&out, 2).unwrap();
+        for y in 0..h as usize {
+            for x in 0..w as usize / 2 {
+                let px = (y * 3 + x) as u8;
+                assert_eq!(u[y * us + x], 100 + px);
+                assert_eq!(v[y * vs + x], 200 - px);
+                assert_eq!(luma[y * ls + 2 * x], 16 + 2 * px);
+                assert_eq!(luma[y * ls + 2 * x + 1], 17 + 2 * px);
+            }
+        }
+        // A frame of another size or format is refused, not misread.
+        let other = ff::frame::Video::new(ff::format::Pixel::UYVY422, w + 2, h);
+        assert!(s.scale(&other).is_err());
+    }
+
+    #[test]
+    fn swscale_refuses_formats_it_does_not_take() {
+        use sys::AVPixelFormat as P;
+        assert_eq!(
+            Scaler::new(fmt(P::AV_PIX_FMT_VAAPI), fmt(P::AV_PIX_FMT_YUV420P), 64, 64).unwrap_err(),
+            ScaleError::Input("vaapi".into())
+        );
+        assert_eq!(
+            Scaler::new(fmt(P::AV_PIX_FMT_YUV420P), fmt(P::AV_PIX_FMT_VAAPI), 64, 64).unwrap_err(),
+            ScaleError::Output("vaapi".into())
+        );
+        assert!(matches!(
+            Scaler::new(
+                fmt(P::AV_PIX_FMT_YUV420P),
+                fmt(P::AV_PIX_FMT_YUV444P),
+                0,
+                64
+            ),
+            Err(ScaleError::Refused { .. })
+        ));
     }
 }

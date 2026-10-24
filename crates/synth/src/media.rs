@@ -3,13 +3,16 @@
 
 use std::path::{Path, PathBuf};
 
-use spherecut_core::FrameRate;
-use spherecut_media::encode::{AudioSettings, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+use spherecut_core::{FrameRate, Rational};
+use spherecut_media::encode::{
+    AudioSettings, ColorTags, EncodeError, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes,
+};
 use spherecut_media::inject::{self, EntryEdit, TrackKind};
 use spherecut_media::mp4::{self, Mp4Tree};
 use spherecut_media::spherical::{StereoMode, write};
 use thiserror::Error;
 
+use crate::yuv::{Chroma, YuvFormat};
 use crate::{Pattern, audio, render_equirect, yuv};
 
 #[derive(Debug, Error)]
@@ -53,12 +56,82 @@ pub struct Spec {
     pub width: u32,
     pub height: u32,
     pub rate: FrameRate,
+    /// Frames written, those an edit list hides included.
     pub frames: u32,
     pub codec: Codec,
     pub bits: u32,
     pub audio: Audio,
     /// Write Spherical Video V2 (and SA3D for ambiX) metadata.
     pub spherical: bool,
+    pub chroma: Chroma,
+    /// The colour the stream is tagged with. The pixels follow its matrix
+    /// and range.
+    pub color: ColorTags,
+    /// The GOP structure, or `None` for the encoder's own.
+    pub gop: Option<Gop>,
+    /// Frames at the start that an edit list hides (see
+    /// [`VideoSettings::edit_start`]). Audio, if any, still starts with
+    /// the first frame written.
+    pub edit_start: u32,
+    /// A true variable frame rate: frame `i` lasts [`vfr_ticks`]`(i)` of
+    /// 1/90000 s. `rate` is then only the encoder's hint, and the clip
+    /// can't have audio.
+    pub vfr: bool,
+}
+
+/// Keyframes every `keyint` frames, with `bframes` B-frames between
+/// references. An open GOP lets the B-frames before a keyframe (in
+/// presentation order) refer to the GOP before it, so they are dropped
+/// when decoding starts at that keyframe: x264's `open-gop`, and x265's
+/// CRA pictures with RASL leading pictures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gop {
+    pub keyint: u32,
+    pub bframes: u32,
+    pub open: bool,
+    /// HEVC only: RADL pictures, B-frames shown before each keyframe but
+    /// decoded after it from it alone (x265's `radl`, for closed GOPs).
+    pub radl: u32,
+}
+
+/// The tags of synth's clips: BT.709, limited range, and centre-sited
+/// chroma, since [`yuv::to_yuv`] averages each 2×2 block of 4:2:0. Its
+/// 4:2:2 is co-sited, which H.264 and HEVC don't code: their encoders
+/// leave this location out for it, and FFmpeg reads it as left.
+pub const CLIP_COLOR: ColorTags = ColorTags::BT709_LIMITED.with_chroma_location(2);
+
+/// Ticks per second in [`Spec::vfr`] clips.
+pub const VFR_TIMESCALE: i64 = 90_000;
+
+/// How long frame `i` of a [`Spec::vfr`] clip lasts, in ticks of
+/// 1/[`VFR_TIMESCALE`] s: 3000 to 6000 ticks (1/30 to 1/15 s) in steps
+/// of 750, in an order with no short period.
+pub fn vfr_ticks(i: u32) -> i64 {
+    3000 + i64::from(i.wrapping_mul(7919) % 5) * 750
+}
+
+impl Default for Spec {
+    /// A 256x128 H.264 grid clip of 30 frames at 30 fps, without audio
+    /// or spherical metadata.
+    fn default() -> Self {
+        Spec {
+            name: "clip".into(),
+            pattern: Pattern::Grid,
+            width: 256,
+            height: 128,
+            rate: FrameRate::FPS_30,
+            frames: 30,
+            codec: Codec::H264,
+            bits: 8,
+            audio: Audio::None,
+            spherical: false,
+            chroma: Chroma::Yuv420,
+            color: CLIP_COLOR,
+            gop: None,
+            edit_start: 0,
+            vfr: false,
+        }
+    }
 }
 
 impl Spec {
@@ -66,44 +139,88 @@ impl Spec {
         format!("{}.mp4", self.name)
     }
 
-    fn video_settings(&self) -> VideoSettings {
-        let (encoder, mut options) = match self.codec {
-            Codec::H264 => ("libx264", vec![("crf", "16"), ("preset", "veryfast")]),
+    /// How the pixels are written.
+    pub fn yuv_format(&self) -> YuvFormat {
+        YuvFormat::tagged(&self.color, self.chroma)
+    }
+
+    fn layout(&self) -> PixelLayout {
+        match (self.chroma, self.bits > 8) {
+            (Chroma::Yuv420, false) => PixelLayout::Yuv420p,
+            (Chroma::Yuv420, true) => PixelLayout::Yuv420p10,
+            (Chroma::Yuv422, false) => PixelLayout::Yuv422p,
+            (Chroma::Yuv422, true) => PixelLayout::Yuv422p10,
+            (Chroma::Yuv444, false) => PixelLayout::Yuv444p,
+            (Chroma::Yuv444, true) => PixelLayout::Yuv444p10,
+        }
+    }
+
+    fn video_settings(&self) -> Result<VideoSettings, EncodeError> {
+        let (encoder, mut options, mut params) = match self.codec {
+            Codec::H264 => (
+                "libx264",
+                vec![("crf", "16"), ("preset", "veryfast")],
+                vec![],
+            ),
             Codec::Hevc => (
                 "libx265",
-                vec![
-                    ("crf", "18"),
-                    ("preset", "veryfast"),
-                    ("x265-params", "log-level=error"),
-                ],
+                vec![("crf", "18"), ("preset", "veryfast")],
+                vec!["log-level=error".to_string()],
             ),
-            Codec::H264Lossless => ("libx264", vec![("qp", "0"), ("preset", "veryfast")]),
+            Codec::H264Lossless => ("libx264", vec![("qp", "0"), ("preset", "veryfast")], vec![]),
             Codec::HevcLossless => (
                 "libx265",
-                vec![
-                    ("preset", "veryfast"),
-                    ("x265-params", "lossless=1:log-level=error"),
-                ],
+                vec![("preset", "veryfast")],
+                vec!["lossless=1".to_string(), "log-level=error".to_string()],
             ),
         };
+        if let Some(g) = self.gop {
+            // x264 and x265 spell these the same.
+            params.push(format!(
+                "keyint={k}:min-keyint={k}:bframes={b}:scenecut=0:open-gop={o}",
+                k = g.keyint,
+                b = g.bframes,
+                o = u8::from(g.open)
+            ));
+            if g.radl > 0 {
+                if encoder != "libx265" {
+                    return Err(EncodeError::Invalid("only HEVC has RADL pictures".into()));
+                }
+                params.push(format!("radl={}", g.radl));
+            }
+        }
         // Single-threaded encodes keep the bitstream reproducible.
         options.push(("threads", "1"));
-        VideoSettings {
+        let mut options: Vec<(String, String)> = options
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        if !params.is_empty() {
+            let key = if encoder == "libx265" {
+                "x265-params"
+            } else {
+                "x264-params"
+            };
+            options.push((key.into(), params.join(":")));
+        }
+        let time_base = match self.vfr {
+            true => Some(
+                Rational::new(1, VFR_TIMESCALE)
+                    .map_err(|e| EncodeError::Invalid(format!("time base: {e}")))?,
+            ),
+            false => None,
+        };
+        Ok(VideoSettings {
             encoder: encoder.into(),
             width: self.width,
             height: self.height,
             rate: self.rate,
-            layout: if self.bits > 8 {
-                PixelLayout::Yuv420p10
-            } else {
-                PixelLayout::Yuv420p
-            },
-            options: options
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            bt709_limited: true,
-        }
+            layout: self.layout(),
+            options,
+            color: self.color,
+            edit_start: self.edit_start,
+            time_base,
+        })
     }
 }
 
@@ -136,7 +253,7 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             options: Vec::new(),
         }),
     };
-    let mut w = Mp4Writer::create(&out, &spec.video_settings(), audio_settings.as_ref())?;
+    let mut w = Mp4Writer::create(&out, &spec.video_settings()?, audio_settings.as_ref())?;
     // Exact per-frame sample counts: frame i covers samples
     // [i·sr/fps, (i+1)·sr/fps).
     let fps = spec.rate.as_rational();
@@ -154,9 +271,22 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             elevation as f64,
         )),
     };
+    if spec.vfr && full_audio.is_some() {
+        return Err(
+            EncodeError::Invalid("a variable frame rate clip can't have audio".into()).into(),
+        );
+    }
+    let format = spec.yuv_format();
+    let mut pts = 0;
     for i in 0..spec.frames {
         let img = render_equirect(spec.pattern, spec.width, spec.height, i, 2);
-        w.push_video(&yuv::to_yuv420(&img, spec.bits))?;
+        let planes = yuv::to_yuv(&img, spec.bits, &format);
+        if spec.vfr {
+            w.push_video_at(&planes, pts)?;
+            pts += vfr_ticks(i);
+        } else {
+            w.push_video(&planes)?;
+        }
         if let Some(a) = &full_audio {
             let (s, e) = (samples_at(i as u64), samples_at(i as u64 + 1));
             let chunk: Vec<Vec<f32>> = a.iter().map(|c| c[s..e].to_vec()).collect();
@@ -198,6 +328,7 @@ pub fn standard_set() -> Vec<Spec> {
         bits: 8,
         audio: Audio::Stereo,
         spherical: true,
+        ..Spec::default()
     };
     vec![
         Spec {
@@ -524,7 +655,9 @@ pub fn write_mjpeg_declaring(
         // FFmpeg's MJPEG encoder takes limited-range 4:2:0 only as an
         // unofficial extension.
         options: vec![("strict".into(), "-1".into())],
-        bt709_limited: true,
+        color: ColorTags::BT709_LIMITED,
+        edit_start: 0,
+        time_base: None,
     };
     let mut w = Mp4Writer::create(&path, &settings, None)?;
     for _ in 0..2 {
@@ -601,4 +734,28 @@ fn set_jpeg_frame_sizes(data: &mut [u8], width: u16, height: u16) -> usize {
         at = m.max(at + soi + 3);
     }
     changed
+}
+
+/// Remux `src` into `dir` as Matroska, with the same name and `.mkv`
+/// (see [`spherecut_media::encode::remux_to_matroska`]: timestamps in
+/// milliseconds, and no edit list).
+pub fn remux_to_mkv(src: &Path, dir: &Path) -> Result<PathBuf, SynthError> {
+    let name = src.file_stem().ok_or_else(|| SynthError::Io {
+        path: src.to_path_buf(),
+        error: std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"),
+    })?;
+    let dst = dir.join(name).with_extension("mkv");
+    Ok(spherecut_media::encode::remux_to_matroska(src, &dst)?)
+}
+
+/// Remux `src` into the Matroska file `dst` with a default duration of
+/// one frame at `rate`, whatever the frames' timestamps: a variable-rate
+/// file that says a standard rate (see
+/// [`spherecut_media::encode::remux_to_matroska_at`]).
+pub fn remux_to_mkv_at(src: &Path, dst: &Path, rate: FrameRate) -> Result<PathBuf, SynthError> {
+    Ok(spherecut_media::encode::remux_to_matroska_at(
+        src,
+        dst,
+        Some(rate),
+    )?)
 }

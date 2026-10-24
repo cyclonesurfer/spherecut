@@ -47,6 +47,7 @@ fn media(dir: &Path) -> (PathBuf, Vec<PathBuf>) {
         bits: 8,
         audio: Audio::Stereo,
         spherical: true,
+        ..Spec::default()
     };
     let good = media::write(&spec, dir).unwrap();
     let bad = media::write_bad_files(&good, dir).unwrap();

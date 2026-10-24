@@ -16,7 +16,7 @@ use serde_json::Value;
 use spherecut_cli::contract::{self, Exit};
 use spherecut_core::{FrameRate, FrameTime, Rational, Time};
 use spherecut_media::doctor::{self, DoctorReport, Issue, Severity};
-use spherecut_media::encode::{Mp4Writer, PixelLayout, VideoSettings};
+use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings};
 use spherecut_media::ff;
 use spherecut_synth::media::{self, Audio, Codec, Spec};
 use spherecut_synth::{Pattern, render_equirect, yuv};
@@ -42,6 +42,7 @@ const CODES: &[&str] = &[
     "no_video_or_audio",
     "not_a_file",
     "not_found",
+    "not_implemented",
     "not_media",
     "open_failed",
     "too_large",
@@ -49,6 +50,7 @@ const CODES: &[&str] = &[
     "truncated",
     "unexpected_first_box",
     "unsupported_container",
+    "unsupported_pixel_format",
     "usage",
 ];
 
@@ -93,6 +95,7 @@ fn clip(dir: &Path, rate: FrameRate) -> (PathBuf, Vec<PathBuf>) {
         bits: 8,
         audio: Audio::Stereo,
         spherical: true,
+        ..Spec::default()
     };
     let good = media::write(&spec, dir).unwrap();
     let bad = media::write_bad_files(&good, dir).unwrap();
@@ -111,7 +114,9 @@ fn untagged_clip(dir: &Path) -> PathBuf {
         options: [("preset", "veryfast"), ("threads", "1")]
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .to_vec(),
-        bt709_limited: false,
+        color: ColorTags::NONE,
+        edit_start: 0,
+        time_base: None,
     };
     let mut w = Mp4Writer::create(&dir.join("untagged.mp4"), &settings, None).unwrap();
     for i in 0..3 {
@@ -575,7 +580,7 @@ fn colour_and_field_order_are_ffmpegs_names_not_null() {
         ]
         .map(|k| c[k].as_str().unwrap_or_else(|| panic!("{k}: {v}")))
     };
-    assert_eq!(color(0), ["tv", "bt709", "bt709", "bt709", "left"]);
+    assert_eq!(color(0), ["tv", "bt709", "bt709", "bt709", "center"]);
     assert_eq!(video(0)["field_order"], "progressive");
     // What the file doesn't say is FFmpeg's `unknown`, as ffprobe prints
     // it, not null.

@@ -7,6 +7,8 @@ use std::sync::Once;
 
 use thiserror::Error;
 
+pub mod backend;
+pub mod color;
 pub mod decode;
 pub mod detect;
 pub mod doctor;
@@ -16,6 +18,7 @@ mod hwprobe;
 pub mod inject;
 pub mod mp4;
 pub mod probe;
+pub mod seek;
 pub mod spherical;
 
 pub use ffmpeg_next as ff;
@@ -74,6 +77,13 @@ pub enum MediaError {
     /// `source()`, which would print it twice in an error chain.
     #[error("{kind} device unavailable: {reason}")]
     Hardware { kind: String, reason: HwError },
+    /// The decoder's frames are in a pixel format that is neither uploaded
+    /// as it is nor converted by swscale (D30).
+    #[error("cannot decode {}: swscale cannot convert its {pix_fmt} frames", path.display())]
+    UnsupportedFormat { path: PathBuf, pix_fmt: String },
+    /// A part of the media backend that a later M1 slice brings.
+    #[error("{what} is not implemented yet")]
+    NotYet { what: &'static str },
 }
 
 pub use ffi::{CONTAINERS, HwDevice, HwError, HwRefusal, MAX_PIXELS, TooLarge};
@@ -92,6 +102,8 @@ impl MediaError {
         "too_large",
         "hw_unsupported",
         "hw_unavailable",
+        "unsupported_pixel_format",
+        "not_implemented",
     ];
 
     /// The error's stable code, as the CLI's JSON gives it (D27): within a
@@ -111,6 +123,8 @@ impl MediaError {
             MediaError::PictureTooLarge { .. } => "too_large",
             MediaError::HwUnsupported { .. } => "hw_unsupported",
             MediaError::Hardware { .. } => "hw_unavailable",
+            MediaError::UnsupportedFormat { .. } => "unsupported_pixel_format",
+            MediaError::NotYet { .. } => "not_implemented",
         }
     }
 
@@ -217,6 +231,11 @@ mod tests {
                 kind: "VA-API".into(),
                 reason: HwError::NotBuiltIn("VA-API".into()),
             },
+            MediaError::UnsupportedFormat {
+                path: path(),
+                pix_fmt: "xyz12le".into(),
+            },
+            MediaError::NotYet { what: "audio" },
         ];
         let mut seen = BTreeSet::new();
         for e in &errors {
@@ -231,7 +250,9 @@ mod tests {
                 | MediaError::Decode { .. }
                 | MediaError::PictureTooLarge { .. }
                 | MediaError::HwUnsupported { .. }
-                | MediaError::Hardware { .. } => {}
+                | MediaError::Hardware { .. }
+                | MediaError::UnsupportedFormat { .. }
+                | MediaError::NotYet { .. } => {}
             }
             assert!(MediaError::CODES.contains(&e.code()), "{e:?}");
             seen.insert(e.code());

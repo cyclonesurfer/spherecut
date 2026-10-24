@@ -749,6 +749,7 @@ dependencies = [
  "proptest",
  "ron",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

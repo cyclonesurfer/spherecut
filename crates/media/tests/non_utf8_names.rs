@@ -11,14 +11,23 @@ use std::sync::atomic::AtomicBool;
 
 use spherecut_core::FrameRate;
 use spherecut_media::decode::VideoDecoder;
-use spherecut_media::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 use spherecut_media::probe;
 
-/// Ten 256x128 frames of H.264, in a file whose name has a Latin-1 "é".
-fn clip() -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("non-utf8-names-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+/// The test's own directory, removed with what it holds when dropped, so
+/// also when the test fails.
+struct TempDir(PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+/// Ten 256x128 frames of H.264, in a file in `dir` whose name has a
+/// Latin-1 "é".
+fn clip(dir: &TempDir) -> PathBuf {
+    let dir = &dir.0;
     let settings = VideoSettings {
         encoder: "libx264".into(),
         width: 256,
@@ -26,7 +35,9 @@ fn clip() -> PathBuf {
         rate: FrameRate::FPS_30,
         layout: PixelLayout::Yuv420p,
         options: Vec::new(),
-        bt709_limited: true,
+        color: ColorTags::BT709_LIMITED,
+        edit_start: 0,
+        time_base: None,
     };
     let mut w = Mp4Writer::create(&dir.join("clip.mp4"), &settings, None).unwrap();
     for i in 0..10 {
@@ -51,7 +62,11 @@ fn frames(mut d: VideoDecoder) -> usize {
 
 #[test]
 fn a_file_whose_name_is_not_utf8_probes_and_decodes() {
-    let path = clip();
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("non-utf8-names-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = TempDir(dir);
+    let path = clip(&dir);
     let r = probe::probe(&path).unwrap();
     assert!(r.damage.is_empty() && r.warnings.is_empty(), "{r:#?}");
     assert_eq!(r.streams.len(), 1);

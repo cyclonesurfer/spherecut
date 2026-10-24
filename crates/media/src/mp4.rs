@@ -1174,6 +1174,168 @@ const AUDIO_ENTRIES: &[&[u8; 4]] = &[
     b"in24", b"in32", b"fl32", b"enca",
 ];
 
+/// The track ID from `tkhd`, which FFmpeg's MOV demuxer uses as the
+/// stream ID.
+pub fn track_id(trak: &Mp4Box) -> Option<u32> {
+    let tkhd = trak.child(b"tkhd")?;
+    let mut c = Cursor::new(&tkhd.payload);
+    let (version, _) = c.version_flags()?;
+    // Creation and modification times come first.
+    c.take(if version == 1 { 16 } else { 8 })?;
+    c.u32()
+}
+
+/// How long a track's samples last, from its `stts`, in ticks of its
+/// `mdhd` timescale. These are decode-time deltas, which for a stream of
+/// equal frames are the frame duration whatever the frame order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleTiming {
+    pub timescale: u32,
+    pub samples: u64,
+    /// The duration of every sample but the last, when they all have the
+    /// same one, which is not 0, and the samples are also shown that far
+    /// apart: their composition offsets (`ctts`) put each at one of the
+    /// decode times, shifted alike, so that no two tie and none is left
+    /// out, and the edit list shows them once, straight through. The last
+    /// sample's duration is often a muxer's guess, so it doesn't count.
+    pub constant: Option<u32>,
+}
+
+/// Samples whose composition offsets are checked one by one at most:
+/// 2^26, 12 days at 60 fps, in a bit set of 8 MiB.
+const MAX_TIMED_SAMPLES: u64 = 1 << 26;
+
+/// Whether `samples` samples `d` ticks apart in decode time, shown at
+/// their decode times plus `stbl`'s composition offsets (`ctts`), are
+/// shown `d` apart too: each offset is the same remainder of `d`, and the
+/// times they are shown at are distinct and leave no slot of the grid
+/// out. Without a `ctts`, every sample is shown at its decode time.
+fn shown_evenly(stbl: &Mp4Box, samples: u64, d: u32) -> bool {
+    let Some(ctts) = stbl.child(b"ctts") else {
+        return true;
+    };
+    let Ok((_, entries)) = table_entries(ctts, 4, 8) else {
+        return false;
+    };
+    if samples > MAX_TIMED_SAMPLES {
+        return false;
+    }
+    let d = i64::from(d);
+    // Offsets are signed in version 1 and, as FFmpeg reads them, in
+    // version 0 too.
+    let runs: Vec<(u64, i64)> = entries
+        .chunks_exact(8)
+        .filter_map(|e| Some((u64::from(be_u32(e, 0)?), i64::from(be_u32(e, 4)? as i32))))
+        .collect();
+    if runs.iter().map(|r| r.0).sum::<u64>() != samples {
+        return false;
+    }
+    // Sample i is shown at grid slot i + (offset - r) / d; the first
+    // slot a run fills is its first sample's.
+    let Some(&(_, first)) = runs.first() else {
+        return samples == 0;
+    };
+    let r = first.rem_euclid(d);
+    let mut start = 0u64;
+    let mut lowest = i64::MAX;
+    for &(n, off) in &runs {
+        if off.rem_euclid(d) != r {
+            return false;
+        }
+        let slot = start as i64 + (off - r) / d;
+        lowest = lowest.min(slot);
+        start += n;
+    }
+    let mut seen = vec![0u64; samples.div_ceil(64) as usize];
+    let mut i = 0u64;
+    for &(n, off) in &runs {
+        for _ in 0..n {
+            let Ok(k) = u64::try_from(i as i64 + (off - r) / d - lowest) else {
+                return false;
+            };
+            if k >= samples {
+                return false;
+            }
+            let (word, bit) = ((k / 64) as usize, 1u64 << (k % 64));
+            if seen[word] & bit != 0 {
+                return false;
+            }
+            seen[word] |= bit;
+            i += 1;
+        }
+    }
+    true
+}
+
+/// Whether a track's edit list (`edts/elst`) shows its media once and
+/// straight through: at most one edit that isn't empty (media time −1),
+/// played at rate 1. Edits that splice, repeat or hold the media show
+/// frames at times its `stts` and `ctts` don't say, and FFmpeg drops
+/// frames where one edit meets the next. No edit list shows it all; one
+/// that can't be read counts as not.
+fn plays_once(trak: &Mp4Box) -> bool {
+    let Some(elst) = trak.path(&[b"edts", b"elst"]) else {
+        return true;
+    };
+    let mut c = Cursor::new(&elst.payload);
+    let Some((version, _)) = c.version_flags() else {
+        return false;
+    };
+    // Each edit: its duration, media time and rate, the first two of 4
+    // bytes each in version 0 and 8 in version 1.
+    let field = if version == 1 { 8 } else { 4 };
+    let Ok((_, entries)) = table_entries(elst, 4, 2 * field + 4) else {
+        return false;
+    };
+    let mut shown = 0;
+    for e in entries.chunks_exact(2 * field + 4) {
+        if e.get(field..2 * field)
+            .is_some_and(|t| t.iter().all(|&b| b == 0xff))
+        {
+            continue;
+        }
+        // Rate 1.0: integer part 1, fraction 0.
+        if be_u32(e, 2 * field) != Some(0x0001_0000) {
+            return false;
+        }
+        shown += 1;
+    }
+    shown <= 1
+}
+
+pub fn sample_timing(trak: &Mp4Box) -> Option<SampleTiming> {
+    let mdhd = trak.path(&[b"mdia", b"mdhd"])?;
+    let mut c = Cursor::new(&mdhd.payload);
+    let (version, _) = c.version_flags()?;
+    c.take(if version == 1 { 16 } else { 8 })?;
+    let timescale = c.u32().filter(|&t| t > 0)?;
+    let stbl = trak.path(&[b"mdia", b"minf", b"stbl"])?;
+    let stts = stbl.child(b"stts")?;
+    let (_, entries) = table_entries(stts, 4, 8).ok()?;
+    let mut runs: Vec<(u64, u32)> = entries
+        .chunks_exact(8)
+        .filter_map(|e| Some((u64::from(be_u32(e, 0)?), be_u32(e, 4)?)))
+        .filter(|&(n, _)| n > 0)
+        .collect();
+    let samples = runs.iter().map(|r| r.0).sum();
+    // Leave out the last sample, unless it is the only one.
+    if samples > 1
+        && let Some(last) = runs.last_mut()
+    {
+        last.0 -= 1;
+    }
+    let mut deltas = runs.iter().filter(|r| r.0 > 0).map(|r| r.1);
+    let first = deltas.next();
+    let constant = first
+        .filter(|&d| d > 0 && deltas.all(|e| e == d))
+        .filter(|&d| shown_evenly(stbl, samples, d) && plays_once(trak));
+    Some(SampleTiming {
+        timescale,
+        samples,
+        constant,
+    })
+}
+
 /// The handler type of a `trak` (`mdia/hdlr`): `vide`, `soun`, `meta`, ...
 pub fn handler_type(trak: &Mp4Box) -> Option<FourCc> {
     let hdlr = trak.path(&[b"mdia", b"hdlr"])?;
@@ -1308,6 +1470,163 @@ pub(crate) mod tests {
         let trak = bx(b"trak", &mdia);
         let moov = bx(b"moov", &trak);
         cat(&[ftyp, moov, bx(b"mdat", &[0; 32])])
+    }
+
+    /// A `trak` with track ID `id`, an `mdhd` timescale and `stts` runs
+    /// of (samples, delta).
+    fn timed_trak(id: u32, timescale: u32, runs: &[(u32, u32)]) -> Vec<u8> {
+        timed_trak_with(id, timescale, runs, None)
+    }
+
+    /// A `trak` with `stts` runs and, if given, `ctts` runs of composition
+    /// offsets.
+    fn timed_trak_with(
+        id: u32,
+        timescale: u32,
+        runs: &[(u32, u32)],
+        offsets: Option<&[(u32, i32)]>,
+    ) -> Vec<u8> {
+        let mut tkhd = vec![0u8; 8];
+        tkhd.extend_from_slice(&id.to_be_bytes());
+        tkhd.extend_from_slice(&[0; 12]);
+        let mut mdhd = vec![0u8; 8];
+        mdhd.extend_from_slice(&timescale.to_be_bytes());
+        mdhd.extend_from_slice(&[0; 8]);
+        let mut stts = (runs.len() as u32).to_be_bytes().to_vec();
+        for (n, d) in runs {
+            stts.extend_from_slice(&n.to_be_bytes());
+            stts.extend_from_slice(&d.to_be_bytes());
+        }
+        let mut tables = full(b"stts", 0, 0, &stts);
+        if let Some(offsets) = offsets {
+            let mut ctts = (offsets.len() as u32).to_be_bytes().to_vec();
+            for (n, o) in offsets {
+                ctts.extend_from_slice(&n.to_be_bytes());
+                ctts.extend_from_slice(&o.to_be_bytes());
+            }
+            tables.extend(full(b"ctts", 1, 0, &ctts));
+        }
+        let stbl = bx(b"stbl", &tables);
+        let mdia = bx(
+            b"mdia",
+            &cat(&[full(b"mdhd", 0, 0, &mdhd), bx(b"minf", &stbl)]),
+        );
+        bx(b"trak", &cat(&[full(b"tkhd", 0, 0, &tkhd), mdia]))
+    }
+
+    #[test]
+    fn sample_timing_leaves_out_the_last_sample() {
+        let timing = |runs: &[(u32, u32)]| {
+            let f = cat(&[
+                bx(b"ftyp", b"isom\0\0\x02\0isom"),
+                bx(b"moov", &timed_trak(7, 15360, runs)),
+            ]);
+            let t = read(&mut io::Cursor::new(f)).unwrap();
+            let trak = t.tracks().next().unwrap();
+            assert_eq!(track_id(trak), Some(7));
+            sample_timing(trak).unwrap()
+        };
+        // 30 fps at 1/15360, with a last sample of a muxer's guess.
+        assert_eq!(
+            timing(&[(29, 512), (1, 300)]),
+            SampleTiming {
+                timescale: 15360,
+                samples: 30,
+                constant: Some(512)
+            }
+        );
+        assert_eq!(timing(&[(30, 512)]).constant, Some(512));
+        assert_eq!(timing(&[(1, 512)]).constant, Some(512));
+        // A variable rate, and samples of no duration.
+        assert_eq!(timing(&[(10, 512), (5, 1024), (1, 512)]).constant, None);
+        assert_eq!(timing(&[(29, 0), (1, 512)]).constant, None);
+        assert_eq!(timing(&[]).samples, 0);
+    }
+
+    #[test]
+    fn a_constant_rate_needs_its_frames_shown_as_evenly_as_decoded() {
+        let constant = |offsets: &[(u32, i32)]| {
+            let f = cat(&[
+                bx(b"ftyp", b"isom\0\0\x02\0isom"),
+                bx(
+                    b"moov",
+                    &timed_trak_with(1, 15360, &[(4, 512)], Some(offsets)),
+                ),
+            ]);
+            let t = read(&mut io::Cursor::new(f)).unwrap();
+            sample_timing(t.tracks().next().unwrap()).unwrap().constant
+        };
+        // I0 P3 B1 B2 in decode order, shown a frame later than decoded:
+        // at 512, 2048, 1024 and 1536.
+        assert_eq!(constant(&[(1, 512), (1, 1536), (2, 0)]), Some(512));
+        // The same with a negative offset (ctts version 1).
+        assert_eq!(constant(&[(1, 0), (1, 1024), (2, -512)]), Some(512));
+        // Two frames shown at 512, and none at 1536.
+        assert_eq!(constant(&[(1, 512), (1, 0), (2, 512)]), None);
+        // Shown 2048 after the decode time of the last: a slot left out.
+        assert_eq!(constant(&[(3, 0), (1, 512)]), None);
+        // Half a frame late.
+        assert_eq!(constant(&[(3, 0), (1, 256)]), None);
+        // Offsets for 3 samples of 4.
+        assert_eq!(constant(&[(3, 0)]), None);
+    }
+
+    #[test]
+    fn a_constant_rate_needs_an_edit_list_that_plays_the_media_once() {
+        // Edits of (duration, media time, rate), in version 0 or 1.
+        let constant = |version: u8, edits: &[(u32, i32, u32)]| {
+            let mut elst = (edits.len() as u32).to_be_bytes().to_vec();
+            for &(d, t, rate) in edits {
+                match version {
+                    1 => {
+                        elst.extend_from_slice(&u64::from(d).to_be_bytes());
+                        elst.extend_from_slice(&i64::from(t).to_be_bytes());
+                    }
+                    _ => {
+                        elst.extend_from_slice(&d.to_be_bytes());
+                        elst.extend_from_slice(&t.to_be_bytes());
+                    }
+                }
+                elst.extend_from_slice(&rate.to_be_bytes());
+            }
+            let trak = timed_trak(1, 15360, &[(90, 512)]);
+            let edts = bx(b"edts", &full(b"elst", version, 0, &elst));
+            let f = cat(&[
+                bx(b"ftyp", b"isom\0\0\x02\0isom"),
+                bx(b"moov", &bx(b"trak", &cat(&[trak[8..].to_vec(), edts]))),
+            ]);
+            let t = read(&mut io::Cursor::new(f)).unwrap();
+            sample_timing(t.tracks().next().unwrap()).unwrap().constant
+        };
+        let one = 0x0001_0000;
+        for version in [0, 1] {
+            // A lead-in hidden, after an empty edit that delays the start.
+            assert_eq!(constant(version, &[(1000, 1024, one)]), Some(512));
+            assert_eq!(
+                constant(version, &[(500, -1, one), (1000, 0, one)]),
+                Some(512)
+            );
+            // Two pieces of the media spliced, a piece held, and one played
+            // at half speed.
+            assert_eq!(
+                constant(version, &[(1500, 1024, one), (1500, 39424, one)]),
+                None
+            );
+            assert_eq!(constant(version, &[(1500, 1024, 0)]), None);
+            assert_eq!(constant(version, &[(1500, 1024, 0x8000)]), None);
+        }
+        // An edit list too short for the edits it claims.
+        let trak = timed_trak(1, 15360, &[(90, 512)]);
+        let edts = bx(b"edts", &full(b"elst", 0, 0, &2u32.to_be_bytes()));
+        let f = cat(&[
+            bx(b"ftyp", b"isom\0\0\x02\0isom"),
+            bx(b"moov", &bx(b"trak", &cat(&[trak[8..].to_vec(), edts]))),
+        ]);
+        let t = read(&mut io::Cursor::new(f)).unwrap();
+        assert_eq!(
+            sample_timing(t.tracks().next().unwrap()).unwrap().constant,
+            None
+        );
     }
 
     #[test]

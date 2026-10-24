@@ -53,6 +53,7 @@ fn clip(dir: &Path, name: &str, width: u32, height: u32) -> PathBuf {
         bits: 8,
         audio: Audio::None,
         spherical: false,
+        ..Spec::default()
     };
     let made = media::write(&spec, dir).unwrap();
     let path = dir.join(name);
