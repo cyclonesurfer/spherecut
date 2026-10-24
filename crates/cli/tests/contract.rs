@@ -511,6 +511,59 @@ fn stdout_carries_only_the_document_whatever_the_log_says() {
 }
 
 #[test]
+fn a_panic_is_one_internal_document_and_exit_1() {
+    // Debug builds panic on SPHERECUT_DEBUG_PANIC, on the main thread or
+    // on another; release builds have no such switch.
+    let dir = tmp("panic");
+    let (good, _) = clip(&dir, FrameRate::FPS_25);
+    let run = |how: &str, json: bool| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
+        cmd.arg("probe");
+        if json {
+            cmd.arg("--json");
+        }
+        cmd.arg(&good)
+            .env_remove("SPHERECUT_LOG")
+            .env("SPHERECUT_DEBUG_PANIC", how)
+            .output()
+            .unwrap()
+    };
+    for how in ["main", "thread"] {
+        let out = run(how, true);
+        let v = document(&out.stdout);
+        if !cfg!(debug_assertions) {
+            assert_eq!(out.status.code(), Some(0), "{v}");
+            assert_eq!(v["ok"], true);
+            continue;
+        }
+        assert_eq!(out.status.code(), Some(1), "{how}: {v}");
+        assert!(
+            has_keys(&v, &["schema", "ok", "error", "warnings"]),
+            "{how}: {v}"
+        );
+        assert_eq!(v["schema"], "spherecut.probe/1");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"]["code"], "internal");
+        let message = v["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("spherecut panicked at "), "{message}");
+        assert!(
+            message.contains(&format!("SPHERECUT_DEBUG_PANIC={how}")),
+            "{message}"
+        );
+        // Rust's own report, for people.
+        let stderr = text(&out.stderr);
+        assert!(stderr.contains("panicked at"), "{stderr}");
+    }
+    // Without --json, a panic is Rust's.
+    if cfg!(debug_assertions) {
+        let out = run("main", false);
+        assert_eq!(out.status.code(), Some(101));
+        assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn a_closed_stdout_keeps_the_exit_status() {
     let dir = tmp("closed");
     let (good, bad) = clip(&dir, FrameRate::FPS_25);

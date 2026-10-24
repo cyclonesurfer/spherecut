@@ -237,7 +237,12 @@ GUI) and `codes` the CLI's own codes; `all_codes()` adds `MediaError`'s
 and probe's. `main.rs` parses with clap's `try_parse_from`, so that a
 command line that doesn't parse is a document too under `--json`
 (`wants_json` looks for `--json` before any `--`), and writes the
-document with `Envelope::to_line()` after the run. A1's `spherecut call`
+document with `Envelope::to_line()` after the run. Under `--json`, a
+panic hook writes an `internal` document in the run's schema
+(`schema_for`) unless the document has started, and `main` exits 1
+after any panic; a flag keeps the run to one document. Debug builds
+panic on `SPHERECUT_DEBUG_PANIC` (`main` or `thread`) for the contract
+test. A1's `spherecut call`
 and `spherecut mcp` are to reuse the module.
 
 ## Coordinates and conventions

@@ -275,9 +275,10 @@ pub fn wants_json(args: &[OsString]) -> bool {
         .any(|a| a == "--json")
 }
 
-/// The schema to report a usage error in: the subcommand's, when the
-/// first argument that isn't an option names one.
-pub fn usage_schema(args: &[OsString]) -> &'static str {
+/// The schema of the document for a command line, which may not parse:
+/// the subcommand's, when the first argument that isn't an option names
+/// one, else [`CLI`]. Usage errors and panics are reported in it.
+pub fn schema_for(args: &[OsString]) -> &'static str {
     let first = args
         .iter()
         .skip(1)
@@ -296,7 +297,7 @@ pub fn usage(args: &[OsString], message: &str) -> (Envelope<()>, Exit) {
     let message = message.strip_prefix("error: ").unwrap_or(message);
     (
         Envelope::new(
-            usage_schema(args),
+            schema_for(args),
             None,
             Some(ErrorBody::new(codes::USAGE, message)),
         ),
@@ -337,13 +338,13 @@ mod tests {
 
     #[test]
     fn usage_errors_name_the_subcommand_when_they_can() {
-        assert_eq!(usage_schema(&args(&["spherecut", "probe", "--x"])), PROBE);
+        assert_eq!(schema_for(&args(&["spherecut", "probe", "--x"])), PROBE);
         assert_eq!(
-            usage_schema(&args(&["spherecut", "--json", "doctor"])),
+            schema_for(&args(&["spherecut", "--json", "doctor"])),
             DOCTOR
         );
-        assert_eq!(usage_schema(&args(&["spherecut", "--json"])), CLI);
-        assert_eq!(usage_schema(&args(&["spherecut", "frobnicate"])), CLI);
+        assert_eq!(schema_for(&args(&["spherecut", "--json"])), CLI);
+        assert_eq!(schema_for(&args(&["spherecut", "frobnicate"])), CLI);
         let (env, exit) = usage(
             &args(&["spherecut", "probe"]),
             "error: the following required arguments were not provided:\n  <FILES>...\n",

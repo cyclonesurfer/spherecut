@@ -217,7 +217,8 @@ command; DECISIONS D27 says why it is this way. In short:
 - Exit statuses: 0 when the run did what was asked, 1 when an input or a
   check failed, 2 for a command line that doesn't parse (also a document
   under `--json`); 3 (a missing codec or device) and 4 (interrupted) are
-  reserved for `spherecut frame` and the GUI.
+  reserved for `spherecut frame` and the GUI. A panic is an `internal`
+  error, exit 1; an empty stdout means the run crashed.
 
 ### Logging
 

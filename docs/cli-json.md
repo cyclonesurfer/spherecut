@@ -22,6 +22,13 @@ With `--json`:
   head -c 0`), the document isn't written and the exit status is the
   same as it would have been. When stdout can't be written at all (a
   full disk), stderr says so and the run exits 1.
+- A panic, a bug in Spherecut on any thread, is still one document: an
+  `internal` error that says where it panicked, with exit 1. Rust's own
+  report of it goes to stderr.
+- If stdout holds no document at all, the run crashed: it was killed by
+  a signal (a crash inside FFmpeg is SIGSEGV or SIGABRT; a shell shows
+  128 + the signal's number as `$?`). Treat that as a failed run, and
+  please report it.
 
 ## Versions
 
@@ -154,7 +161,7 @@ The run's `error.code`:
 | `usage` | 2 | The command line doesn't parse; the message is clap's, with the usage line |
 | `files_failed` | 1 | probe: at least one file failed; each file's `error` says why. The message names the first |
 | `doctor_errors` | 1 | doctor: at least one problem is of severity error; the message lists them, and `result.issues` has them in full |
-| `internal` | 1 | A failure of Spherecut's own, such as a document that can't be made; please report it |
+| `internal` | 1 | A failure of Spherecut's own, such as a panic or a document that can't be made; the message says where. Please report it |
 
 A file's `error.code` in probe (`result.files[].error.code`):
 

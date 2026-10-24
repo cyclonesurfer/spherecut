@@ -1,12 +1,13 @@
 //! The `spherecut` command.
 //!
 //! With `--json`, stdout gets exactly one JSON document per run, on
-//! success and on failure, and the exit status says how the run ended
-//! (`contract`, D27). stderr is for people.
+//! success and on failure, a panic included, and the exit status says how
+//! the run ended (`contract`, D27). stderr is for people.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -52,17 +53,69 @@ fn main() -> ExitCode {
     init_logging();
     let args: Vec<OsString> = std::env::args_os().collect();
     let json = contract::wants_json(&args);
+    if json {
+        report_panics(contract::schema_for(&args));
+    }
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(e) => return usage(&e, &args, json).into(),
     };
-    match run(cli) {
-        Ok(exit) => exit.into(),
-        Err(e) => {
+    let exit = match std::panic::catch_unwind(move || run(cli)) {
+        Ok(Ok(exit)) => exit,
+        Ok(Err(e)) => {
             to_stderr(&format!("error: {e:#}\n"));
-            Exit::Failed.into()
+            Exit::Failed
         }
+        // Without --json, a panic ends the run as Rust's do.
+        Err(panic) if !json => std::panic::resume_unwind(panic),
+        Err(_) => Exit::Failed,
+    };
+    // A panic on another thread fails the run too.
+    if PANICKED.load(Ordering::SeqCst) {
+        Exit::Failed.into()
+    } else {
+        exit.into()
     }
+}
+
+/// Set when this run's one document starts to go out, so that no second
+/// one follows it.
+static DOCUMENT_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Set by [`report_panics`]' hook.
+static PANICKED: AtomicBool = AtomicBool::new(false);
+
+/// Make a panic, on any thread, a failure of the run under `--json`: the
+/// run's one document is an `internal` error of `schema` that says where
+/// it panicked, unless the document has already started, and the exit
+/// status is 1. Rust's own report of the panic still goes to stderr.
+fn report_panics(schema: &'static str) {
+    let rust = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        rust(info);
+        PANICKED.store(true, Ordering::SeqCst);
+        if DOCUMENT_STARTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let at = info
+            .location()
+            .map(|l| format!(" at {l}"))
+            .unwrap_or_default();
+        // `PanicHookInfo::payload_as_str` is newer than our rust-version.
+        let payload = info.payload();
+        let what = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("no message");
+        let (envelope, _) = contract::internal(
+            schema,
+            format!("spherecut panicked{at}: {what}. This is a bug; please report it"),
+        );
+        if let Ok(line) = envelope.to_line() {
+            let _ = emit(&line);
+        }
+    }));
 }
 
 /// Report a command line that doesn't parse, or the help or version it
@@ -77,7 +130,7 @@ fn usage(e: &clap::Error, args: &[OsString], json: bool) -> Exit {
     if json {
         let (envelope, exit) = contract::usage(args, &e.render().to_string());
         if let Ok(line) = envelope.to_line() {
-            let _ = emit(&line);
+            let _ = emit_document(&line);
         }
         return exit;
     }
@@ -145,6 +198,8 @@ fn log_directives(v: &str) -> String {
 }
 
 fn run(cli: Cli) -> Result<Exit> {
+    #[cfg(debug_assertions)]
+    debug_panic();
     match cli.cmd {
         Cmd::Probe { files, json } => probe(&files, json),
         Cmd::Doctor { render_node, json } => doctor(&render_node, json),
@@ -195,23 +250,44 @@ fn doctor(render_node: &Path, json: bool) -> Result<Exit> {
     }
 }
 
+/// In debug builds, panic when `SPHERECUT_DEBUG_PANIC` asks, on this
+/// thread (`main`) or another (`thread`), so that the contract test can
+/// show what a panic prints. Release builds have no such switch.
+#[cfg(debug_assertions)]
+fn debug_panic() {
+    match std::env::var("SPHERECUT_DEBUG_PANIC").as_deref() {
+        Ok("main") => panic!("SPHERECUT_DEBUG_PANIC=main"),
+        Ok("thread") => {
+            let _ = std::thread::spawn(|| panic!("SPHERECUT_DEBUG_PANIC=thread")).join();
+        }
+        _ => {}
+    }
+}
+
 /// Print `envelope` as the run's one document, and end the run with
 /// `exit`. A reader that went away gets nothing, and the exit stays.
 fn print_json<T: Serialize>(envelope: &Envelope<T>, exit: Exit) -> Result<Exit> {
-    match envelope.to_line() {
-        Ok(line) => {
-            emit(&line)?;
-            Ok(exit)
-        }
+    let (line, exit) = match envelope.to_line() {
+        Ok(line) => (line, exit),
         Err(e) => {
             let (envelope, exit) = contract::internal(
                 envelope.schema(),
                 format!("cannot write the JSON document: {e}"),
             );
-            emit(&envelope.to_line()?)?;
-            Ok(exit)
+            (envelope.to_line()?, exit)
         }
+    };
+    emit_document(&line)?;
+    Ok(exit)
+}
+
+/// Write `line` as the run's one document, unless a panic has already
+/// written one (see [`report_panics`]).
+fn emit_document(line: &str) -> Result<bool> {
+    if DOCUMENT_STARTED.swap(true, Ordering::SeqCst) {
+        return Ok(false);
     }
+    emit(line)
 }
 
 /// Write `s` to stderr. Errors are ignored: with nowhere to report them,
