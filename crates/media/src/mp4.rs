@@ -1193,9 +1193,78 @@ pub struct SampleTiming {
     pub timescale: u32,
     pub samples: u64,
     /// The duration of every sample but the last, when they all have the
-    /// same one, which is not 0. The last sample's is often a muxer's
-    /// guess, so it doesn't count.
+    /// same one, which is not 0, and the samples are also shown that far
+    /// apart: their composition offsets (`ctts`) put each at one of the
+    /// decode times, shifted alike, so that no two tie and none is left
+    /// out. The last sample's duration is often a muxer's guess, so it
+    /// doesn't count.
     pub constant: Option<u32>,
+}
+
+/// Samples whose composition offsets are checked one by one at most:
+/// 2^26, 12 days at 60 fps, in a bit set of 8 MiB.
+const MAX_TIMED_SAMPLES: u64 = 1 << 26;
+
+/// Whether `samples` samples `d` ticks apart in decode time, shown at
+/// their decode times plus `stbl`'s composition offsets (`ctts`), are
+/// shown `d` apart too: each offset is the same remainder of `d`, and the
+/// times they are shown at are distinct and leave no slot of the grid
+/// out. Without a `ctts`, every sample is shown at its decode time.
+fn shown_evenly(stbl: &Mp4Box, samples: u64, d: u32) -> bool {
+    let Some(ctts) = stbl.child(b"ctts") else {
+        return true;
+    };
+    let Ok((_, entries)) = table_entries(ctts, 4, 8) else {
+        return false;
+    };
+    if samples > MAX_TIMED_SAMPLES {
+        return false;
+    }
+    let d = i64::from(d);
+    // Offsets are signed in version 1 and, as FFmpeg reads them, in
+    // version 0 too.
+    let runs: Vec<(u64, i64)> = entries
+        .chunks_exact(8)
+        .filter_map(|e| Some((u64::from(be_u32(e, 0)?), i64::from(be_u32(e, 4)? as i32))))
+        .collect();
+    if runs.iter().map(|r| r.0).sum::<u64>() != samples {
+        return false;
+    }
+    // Sample i is shown at grid slot i + (offset - r) / d; the first
+    // slot a run fills is its first sample's.
+    let Some(&(_, first)) = runs.first() else {
+        return samples == 0;
+    };
+    let r = first.rem_euclid(d);
+    let mut start = 0u64;
+    let mut lowest = i64::MAX;
+    for &(n, off) in &runs {
+        if off.rem_euclid(d) != r {
+            return false;
+        }
+        let slot = start as i64 + (off - r) / d;
+        lowest = lowest.min(slot);
+        start += n;
+    }
+    let mut seen = vec![0u64; samples.div_ceil(64) as usize];
+    let mut i = 0u64;
+    for &(n, off) in &runs {
+        for _ in 0..n {
+            let Ok(k) = u64::try_from(i as i64 + (off - r) / d - lowest) else {
+                return false;
+            };
+            if k >= samples {
+                return false;
+            }
+            let (word, bit) = ((k / 64) as usize, 1u64 << (k % 64));
+            if seen[word] & bit != 0 {
+                return false;
+            }
+            seen[word] |= bit;
+            i += 1;
+        }
+    }
+    true
 }
 
 pub fn sample_timing(trak: &Mp4Box) -> Option<SampleTiming> {
@@ -1204,7 +1273,8 @@ pub fn sample_timing(trak: &Mp4Box) -> Option<SampleTiming> {
     let (version, _) = c.version_flags()?;
     c.take(if version == 1 { 16 } else { 8 })?;
     let timescale = c.u32().filter(|&t| t > 0)?;
-    let stts = trak.path(&[b"mdia", b"minf", b"stbl", b"stts"])?;
+    let stbl = trak.path(&[b"mdia", b"minf", b"stbl"])?;
+    let stts = stbl.child(b"stts")?;
     let (_, entries) = table_entries(stts, 4, 8).ok()?;
     let mut runs: Vec<(u64, u32)> = entries
         .chunks_exact(8)
@@ -1220,7 +1290,9 @@ pub fn sample_timing(trak: &Mp4Box) -> Option<SampleTiming> {
     }
     let mut deltas = runs.iter().filter(|r| r.0 > 0).map(|r| r.1);
     let first = deltas.next();
-    let constant = first.filter(|&d| d > 0 && deltas.all(|e| e == d));
+    let constant = first
+        .filter(|&d| d > 0 && deltas.all(|e| e == d))
+        .filter(|&d| shown_evenly(stbl, samples, d));
     Some(SampleTiming {
         timescale,
         samples,
@@ -1367,6 +1439,17 @@ pub(crate) mod tests {
     /// A `trak` with track ID `id`, an `mdhd` timescale and `stts` runs
     /// of (samples, delta).
     fn timed_trak(id: u32, timescale: u32, runs: &[(u32, u32)]) -> Vec<u8> {
+        timed_trak_with(id, timescale, runs, None)
+    }
+
+    /// A `trak` with `stts` runs and, if given, `ctts` runs of composition
+    /// offsets.
+    fn timed_trak_with(
+        id: u32,
+        timescale: u32,
+        runs: &[(u32, u32)],
+        offsets: Option<&[(u32, i32)]>,
+    ) -> Vec<u8> {
         let mut tkhd = vec![0u8; 8];
         tkhd.extend_from_slice(&id.to_be_bytes());
         tkhd.extend_from_slice(&[0; 12]);
@@ -1378,7 +1461,16 @@ pub(crate) mod tests {
             stts.extend_from_slice(&n.to_be_bytes());
             stts.extend_from_slice(&d.to_be_bytes());
         }
-        let stbl = bx(b"stbl", &full(b"stts", 0, 0, &stts));
+        let mut tables = full(b"stts", 0, 0, &stts);
+        if let Some(offsets) = offsets {
+            let mut ctts = (offsets.len() as u32).to_be_bytes().to_vec();
+            for (n, o) in offsets {
+                ctts.extend_from_slice(&n.to_be_bytes());
+                ctts.extend_from_slice(&o.to_be_bytes());
+            }
+            tables.extend(full(b"ctts", 1, 0, &ctts));
+        }
+        let stbl = bx(b"stbl", &tables);
         let mdia = bx(
             b"mdia",
             &cat(&[full(b"mdhd", 0, 0, &mdhd), bx(b"minf", &stbl)]),
@@ -1413,6 +1505,34 @@ pub(crate) mod tests {
         assert_eq!(timing(&[(10, 512), (5, 1024), (1, 512)]).constant, None);
         assert_eq!(timing(&[(29, 0), (1, 512)]).constant, None);
         assert_eq!(timing(&[]).samples, 0);
+    }
+
+    #[test]
+    fn a_constant_rate_needs_its_frames_shown_as_evenly_as_decoded() {
+        let constant = |offsets: &[(u32, i32)]| {
+            let f = cat(&[
+                bx(b"ftyp", b"isom\0\0\x02\0isom"),
+                bx(
+                    b"moov",
+                    &timed_trak_with(1, 15360, &[(4, 512)], Some(offsets)),
+                ),
+            ]);
+            let t = read(&mut io::Cursor::new(f)).unwrap();
+            sample_timing(t.tracks().next().unwrap()).unwrap().constant
+        };
+        // I0 P3 B1 B2 in decode order, shown a frame later than decoded:
+        // at 512, 2048, 1024 and 1536.
+        assert_eq!(constant(&[(1, 512), (1, 1536), (2, 0)]), Some(512));
+        // The same with a negative offset (ctts version 1).
+        assert_eq!(constant(&[(1, 0), (1, 1024), (2, -512)]), Some(512));
+        // Two frames shown at 512, and none at 1536.
+        assert_eq!(constant(&[(1, 512), (1, 0), (2, 512)]), None);
+        // Shown 2048 after the decode time of the last: a slot left out.
+        assert_eq!(constant(&[(3, 0), (1, 512)]), None);
+        // Half a frame late.
+        assert_eq!(constant(&[(3, 0), (1, 256)]), None);
+        // Offsets for 3 samples of 4.
+        assert_eq!(constant(&[(3, 0)]), None);
     }
 
     #[test]
