@@ -357,11 +357,19 @@ fn an_unreadable_file_is_an_io_error_not_damage() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tmp("unreadable");
     let (good, _) = clip(&dir, FrameRate::FPS_25);
+    let mode = |p: &Path, mode: u32| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    // Anyone may reach the directory and read `good`, whatever the umask,
+    // so that only its own mode keeps the run from reading the file.
+    mode(&dir, 0o755);
+    mode(&good, 0o644);
     let file = dir.join("noread.mp4");
     std::fs::copy(&good, &file).unwrap();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    mode(&file, 0o000);
     let bin = env!("CARGO_BIN_EXE_spherecut");
-    let mut cmd = if std::fs::File::open(&file).is_err() {
+    let as_nobody = std::fs::File::open(&file).is_ok();
+    let mut cmd = if !as_nobody {
         Command::new(bin)
     } else {
         // Root reads any file, so the run drops to nobody, when setpriv
@@ -386,13 +394,29 @@ fn an_unreadable_file_is_an_io_error_not_damage() {
     };
     let out = cmd
         .args(["probe", "--json"])
-        .arg(&file)
+        .args([&good, &file])
         .env_remove("SPHERECUT_LOG")
         .output()
         .unwrap();
     let v = document(&out.stdout);
+    // The readable copy beside it is read, so the run reaches the
+    // directory and the error below comes from reading the file: a
+    // directory it can't search gives the same io_error before probe
+    // reads a byte.
+    let reached = &v["result"]["files"][0];
+    if as_nobody && reached["ok"] != true {
+        assert_eq!(reached["error"]["code"], "io_error", "{v}");
+        eprintln!(
+            "not run through the binary: nobody can't reach {}; probe's unit \
+             test covers the code",
+            dir.display()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        return;
+    }
+    assert_eq!(reached["ok"], true, "{v}");
     assert_eq!(out.status.code(), Some(1), "{v}");
-    let f = &v["result"]["files"][0];
+    let f = &v["result"]["files"][1];
     // The fix is chmod, not another copy.
     assert_eq!(f["error"]["code"], "io_error", "{v}");
     let message = f["error"]["message"].as_str().unwrap();

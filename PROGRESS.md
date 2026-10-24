@@ -199,7 +199,9 @@ back clean, so M0 is done.
   `internal` document (exit 1); a crash by signal, such as a fault
   inside FFmpeg, still leaves stdout empty. The unreadable-file test
   runs the binary as nobody through `setpriv` when the tests run as
-  root, and only probe's unit test covers it where neither works.
+  root, with a readable copy beside the file to show that nobody reaches
+  the directory; only probe's unit test covers it where neither works,
+  or where nobody can't reach the target directory.
 
 ## Next
 
