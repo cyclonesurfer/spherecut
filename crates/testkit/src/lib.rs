@@ -64,25 +64,44 @@ pub mod tier2 {
         p
     }
 
+    /// The DRM render node VA-API is tested on: `SPHERECUT_RENDER_NODE`,
+    /// default `/dev/dri/renderD128`.
+    fn configured_render_node() -> PathBuf {
+        std::env::var_os("SPHERECUT_RENDER_NODE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/dev/dri/renderD128"))
+    }
+
     /// A DRM render node for VA-API, or skip.
     #[track_caller]
     pub fn require_render_node() -> PathBuf {
         require_hw_run();
-        let p = std::env::var_os("SPHERECUT_RENDER_NODE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/dev/dri/renderD128"));
+        let p = configured_render_node();
         if !p.exists() {
             skip(format!("no DRM render node at {}", p.display()));
         }
         p
     }
+
+    /// VA-API's render node, if it is there, without skipping. The Vulkan
+    /// tests use it to pick the same GPU, and need none.
+    pub fn render_node() -> Option<PathBuf> {
+        Some(configured_render_node()).filter(|p| p.exists())
+    }
 }
 
 /// Benchmark results from Tier 2 tests. `cargo xtask hw-test` sets
 /// `SPHERECUT_BENCH_OUT` to a file and puts every recorded line into the
-/// report's benchmark table; elsewhere results go to stderr.
+/// report's benchmark table, and every note under it; elsewhere results
+/// and notes go to stderr.
 pub mod bench {
+    use std::convert::Infallible;
+    use std::fmt::Display;
     use std::io::Write;
+
+    /// What a note's line in the results file starts with. Results start
+    /// with their name, so `#` keeps notes apart from them.
+    pub const NOTE_PREFIX: &str = "# ";
 
     /// How many measured runs [`measure`] makes: `SPHERECUT_BENCH_RUNS`,
     /// default 3.
@@ -97,14 +116,45 @@ pub mod bench {
     /// Run `f` once to warm up (file cache, GPU clocks), then [`runs`]
     /// times, and record the median and the range. `f` returns one
     /// measurement in `unit`.
-    pub fn measure(name: &str, unit: &str, f: impl FnMut() -> f64) {
-        record_runs(name, &warm_then_run(runs(), f), unit);
+    pub fn measure(name: &str, unit: &str, mut f: impl FnMut() -> f64) {
+        let Ok(()) = try_measure(name, unit, || Ok::<_, Infallible>(f()));
     }
 
-    /// `f`'s results after one warm-up call, `runs` of them.
-    fn warm_then_run(runs: usize, mut f: impl FnMut() -> f64) -> Vec<f64> {
-        f();
+    /// Like [`measure`], for an `f` that can fail, such as a decode on a
+    /// device that may turn the file down: on the first failure, of the
+    /// warm-up or of a run, nothing is recorded and the error is returned.
+    pub fn try_measure<E>(
+        name: &str,
+        unit: &str,
+        f: impl FnMut() -> Result<f64, E>,
+    ) -> Result<(), E> {
+        record_runs(name, &warm_then_run(runs(), f)?, unit);
+        Ok(())
+    }
+
+    /// `f`'s results after one warm-up call, `runs` of them, or its first
+    /// error.
+    fn warm_then_run<E>(runs: usize, mut f: impl FnMut() -> Result<f64, E>) -> Result<Vec<f64>, E> {
+        f()?;
         (0..runs).map(|_| f()).collect()
+    }
+
+    /// Say why benchmark `name` has no result, e.g. that this machine's
+    /// driver can't decode the format. It becomes a note (see [`note`]).
+    pub fn not_measured(name: &str, reason: impl Display) {
+        note(format!("{name}: not measured: {reason}"));
+    }
+
+    /// A note for the report's Benchmarks section, such as which device a
+    /// benchmark ran on or why one has no result. Its whitespace is
+    /// collapsed, so it stays one line.
+    pub fn note(text: impl Display) {
+        write_line(&note_line(&text.to_string()));
+    }
+
+    fn note_line(text: &str) -> String {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        format!("{NOTE_PREFIX}{}\n", words.join(" "))
     }
 
     /// Record one measurement, e.g. `record("decode 3840x1920 hevc8 vaapi", 212.0, "fps")`.
@@ -117,9 +167,13 @@ pub mod bench {
     /// are written at full precision; hw-test rounds them for its table,
     /// after working out the spread.
     pub fn record_runs(name: &str, values: &[f64], unit: &str) {
-        let Some(line) = line(name, values, unit) else {
-            return;
-        };
+        if let Some(line) = line(name, values, unit) {
+            write_line(&line);
+        }
+    }
+
+    /// Append `line` to the results file, or print it.
+    fn write_line(line: &str) {
         match std::env::var_os("SPHERECUT_BENCH_OUT") {
             Some(p) => {
                 let ok = std::fs::OpenOptions::new()
@@ -158,9 +212,10 @@ pub mod bench {
             let mut calls = 0;
             let v = warm_then_run(4, || {
                 calls += 1;
-                [0.0, 4.0, 1.0, 3.0, 2.0][calls - 1]
+                Ok::<_, Infallible>([0.0, 4.0, 1.0, 3.0, 2.0][calls - 1])
             });
             // The warm-up's 0.0 is left out.
+            let Ok(v) = v;
             assert_eq!(v, [4.0, 1.0, 3.0, 2.0]);
             assert_eq!(
                 line("m", &v, "fps").as_deref(),
@@ -176,6 +231,34 @@ pub mod bench {
                 Some("8K\t0.056\tx\t0.054\t0.058\t3\n")
             );
             assert_eq!(line("none", &[], "fps"), None);
+        }
+
+        #[test]
+        fn a_failure_stops_the_runs() {
+            let calls = std::cell::Cell::new(0);
+            let run = |fail_at| {
+                calls.set(0);
+                warm_then_run(3, || {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == fail_at {
+                        Err(fail_at)
+                    } else {
+                        Ok(1.0)
+                    }
+                })
+            };
+            // The warm-up fails, then the second run: nothing more runs.
+            assert_eq!((run(1), calls.get()), (Err(1), 1));
+            assert_eq!((run(3), calls.get()), (Err(3), 3));
+            assert_eq!((run(9), calls.get()), (Ok(vec![1.0; 3]), 4));
+        }
+
+        #[test]
+        fn notes_are_one_line_apart_from_results() {
+            assert_eq!(
+                note_line("vulkan row: not measured:\n  [hevc]\tno decode"),
+                "# vulkan row: not measured: [hevc] no decode\n"
+            );
         }
     }
 }

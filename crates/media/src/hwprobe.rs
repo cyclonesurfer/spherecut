@@ -328,8 +328,20 @@ pub(crate) struct VkDevice {
     pub api_version: u32,
     pub driver_name: Option<String>,
     pub driver_info: Option<String>,
+    /// The `(major, minor)` numbers of its DRM primary and render nodes,
+    /// from `VK_EXT_physical_device_drm`; empty without that extension.
+    pub drm_nodes: Vec<(i64, i64)>,
     /// FFmpeg's Vulkan device context runs on this one.
     pub ffmpeg_uses: bool,
+}
+
+impl VkDevice {
+    /// Whether `other` describes the same physical device, as far as its
+    /// properties tell: two instances' handles for it differ.
+    pub fn same_device(&self, other: &VkDevice) -> bool {
+        let key = |d: &VkDevice| (d.name.clone(), d.device_type, d.vendor_id, d.device_id);
+        key(self) == key(other) && self.drm_nodes == other.drm_nodes
+    }
 }
 
 /// `(major, minor, patch)` of a version packed as `VK_MAKE_API_VERSION`.
@@ -344,6 +356,8 @@ type EnumeratePhysicalDevices = unsafe extern "C" fn(VkHandle, *mut u32, *mut Vk
 type GetPhysicalDeviceProperties = unsafe extern "C" fn(VkHandle, *mut VkPhysicalDeviceProperties);
 type GetPhysicalDeviceProperties2 =
     unsafe extern "C" fn(VkHandle, *mut VkPhysicalDeviceProperties2);
+type EnumerateDeviceExtensionProperties =
+    unsafe extern "C" fn(VkHandle, *const c_char, *mut u32, *mut VkExtensionProperties) -> i32;
 
 /// The start of FFmpeg's `AVVulkanDeviceContext`. These fields have had
 /// these places since the struct was added; later ones changed between
@@ -380,6 +394,8 @@ const _: () = {
     assert!(size_of::<VkPhysicalDeviceProperties>() == 824);
     assert!(size_of::<VkPhysicalDeviceProperties2>() == 840);
     assert!(size_of::<VkPhysicalDeviceDriverProperties>() == 536);
+    assert!(size_of::<VkPhysicalDeviceDrmProperties>() == 56);
+    assert!(size_of::<VkExtensionProperties>() == 260);
 };
 
 impl VkPhysicalDeviceProperties {
@@ -400,6 +416,7 @@ impl VkPhysicalDeviceProperties {
 
 const STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2: i32 = 1_000_059_001;
 const STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES: i32 = 1_000_196_000;
+const STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT: i32 = 1_000_353_000;
 
 #[repr(C)]
 struct VkPhysicalDeviceProperties2 {
@@ -417,6 +434,73 @@ struct VkPhysicalDeviceDriverProperties {
     driver_name: [c_char; 256],
     driver_info: [c_char; 256],
     conformance_version: [u8; 4],
+}
+
+/// `VkPhysicalDeviceDrmPropertiesEXT`.
+#[repr(C)]
+struct VkPhysicalDeviceDrmProperties {
+    s_type: i32,
+    p_next: *mut c_void,
+    has_primary: u32,
+    has_render: u32,
+    primary_major: i64,
+    primary_minor: i64,
+    render_major: i64,
+    render_minor: i64,
+}
+
+impl VkPhysicalDeviceDrmProperties {
+    /// The nodes it says the device has.
+    fn nodes(&self) -> Vec<(i64, i64)> {
+        let mut v = Vec::new();
+        if self.has_primary != 0 {
+            v.push((self.primary_major, self.primary_minor));
+        }
+        if self.has_render != 0 {
+            v.push((self.render_major, self.render_minor));
+        }
+        v
+    }
+}
+
+#[repr(C)]
+struct VkExtensionProperties {
+    extension_name: [c_char; 256],
+    spec_version: u32,
+}
+
+/// Whether the physical device `pd` has the device extension `name`.
+///
+/// # Safety
+///
+/// `enumerate` must be `vkEnumerateDeviceExtensionProperties` of the
+/// live instance that `pd` belongs to.
+unsafe fn has_extension(
+    enumerate: EnumerateDeviceExtensionProperties,
+    pd: VkHandle,
+    name: &CStr,
+) -> bool {
+    let mut n = 0u32;
+    // SAFETY: the caller's guarantee; the counting form of the call, for
+    // the driver's own extensions (no layer name).
+    if unsafe { enumerate(pd, std::ptr::null(), &mut n, std::ptr::null_mut()) } < 0 {
+        return false;
+    }
+    let mut exts: Vec<VkExtensionProperties> = (0..n)
+        .map(|_| VkExtensionProperties {
+            extension_name: [0; 256],
+            spec_version: 0,
+        })
+        .collect();
+    // SAFETY: `exts` has room for the `n` entries asked for. One added
+    // since the first call makes this VK_INCOMPLETE (positive).
+    if unsafe { enumerate(pd, std::ptr::null(), &mut n, exts.as_mut_ptr()) } < 0 {
+        return false;
+    }
+    exts.truncate(n as usize);
+    let name = name.to_bytes();
+    exts.iter()
+        .any(|e| fixed_str(&e.extension_name).is_some_and(|e| e.as_bytes() == name))
 }
 
 fn vulkan_err(msg: impl Into<String>) -> HwProbeError {
@@ -472,7 +556,7 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
         .ok_or_else(|| vulkan_err("FFmpeg's Vulkan device has no vkGetInstanceProcAddr"))?;
     // SAFETY: each type below matches the C prototype of the command it
     // is looked up as, and the instance is FFmpeg's, made through `gipa`.
-    let (enumerate, props, props2) = unsafe {
+    let (enumerate, props, props2, extensions) = unsafe {
         (
             vk_command::<EnumeratePhysicalDevices>(gipa, head.inst, c"vkEnumeratePhysicalDevices")?,
             vk_command::<GetPhysicalDeviceProperties>(
@@ -485,6 +569,12 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
                 gipa,
                 head.inst,
                 c"vkGetPhysicalDeviceProperties2",
+            )
+            .ok(),
+            vk_command::<EnumerateDeviceExtensionProperties>(
+                gipa,
+                head.inst,
+                c"vkEnumerateDeviceExtensionProperties",
             )
             .ok(),
         )
@@ -514,14 +604,33 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
             // SAFETY: `pd` is a physical device of this instance, and `p`
             // has the C layout and size Vulkan writes.
             unsafe { props(pd, &mut p) };
-            let (mut driver_name, mut driver_info) = (None, None);
+            let (mut driver_name, mut driver_info, mut drm_nodes) = (None, None, Vec::new());
             // VkPhysicalDeviceDriverProperties is core from Vulkan 1.2.
             if let Some(props2) = props2
                 && vk_version(p.api_version) >= (1, 2, 0)
             {
+                let mut drm = VkPhysicalDeviceDrmProperties {
+                    s_type: STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT,
+                    p_next: std::ptr::null_mut(),
+                    has_primary: 0,
+                    has_render: 0,
+                    primary_major: 0,
+                    primary_minor: 0,
+                    render_major: 0,
+                    render_minor: 0,
+                };
+                let with_drm = match extensions {
+                    // SAFETY: looked up on the instance `pd` belongs to.
+                    Some(e) => unsafe { has_extension(e, pd, c"VK_EXT_physical_device_drm") },
+                    None => false,
+                };
                 let mut drv = VkPhysicalDeviceDriverProperties {
                     s_type: STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
-                    p_next: std::ptr::null_mut(),
+                    p_next: if with_drm {
+                        (&raw mut drm).cast()
+                    } else {
+                        std::ptr::null_mut()
+                    },
                     driver_id: 0,
                     driver_name: [0; 256],
                     driver_info: [0; 256],
@@ -532,11 +641,15 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
                     p_next: (&raw mut drv).cast(),
                     properties: VkPhysicalDeviceProperties::zeroed(),
                 };
-                // SAFETY: as above, with a pNext chain of one struct that
-                // this device's Vulkan version has.
+                // SAFETY: as above, with a pNext chain of structs that this
+                // device has: the driver properties of its Vulkan version,
+                // then the DRM ones only if it has their extension.
                 unsafe { props2(pd, &mut p2) };
                 driver_name = fixed_str(&drv.driver_name);
                 driver_info = fixed_str(&drv.driver_info);
+                if with_drm {
+                    drm_nodes = drm.nodes();
+                }
             }
             VkDevice {
                 name: fixed_str(&p.device_name).unwrap_or_else(|| "(unnamed)".into()),
@@ -546,6 +659,7 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
                 api_version: p.api_version,
                 driver_name,
                 driver_info,
+                drm_nodes,
                 ffmpeg_uses: pd == head.phys_dev,
             }
         })
@@ -564,7 +678,74 @@ static CAPTURES: Mutex<usize> = Mutex::new(0);
 /// current one. FFmpeg's log level is process-wide, so while any capture
 /// runs it is at least "warning" (other threads' warnings then get
 /// formatted and dropped), and afterwards it follows the subscriber again.
-pub(crate) fn capture_ffmpeg_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+/// Lines read like "[hevc] Device does not support decoding hevc!", with
+/// FFmpeg's context address left out.
+///
+/// Only FFmpeg's work on this thread is caught: a decoder with frame
+/// threads may log from its own (hardware decoding keeps one thread).
+pub fn capture_ffmpeg_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    let (r, lines) = capture(Level::WARN, f);
+    (r, lines.into_iter().map(|(_, line)| line).collect())
+}
+
+/// [`capture_ffmpeg_log`] for opening a decoder on a device and decoding
+/// its first frame, which also keeps what FFmpeg's Vulkan decoder says at
+/// "verbose" about a stream it turns down.
+///
+/// Its error says only "Failed setup for format vulkan: hwaccel
+/// initialisation returned error.". Why comes at "verbose" for a profile
+/// or pixel format the driver lacks ("Unable to initialize video session:
+/// hevc profile "Main 10" not supported!"), and not at all for a stream
+/// bigger or of a higher level than the driver decodes; for those, the
+/// limits it checks are in the capabilities it lists just before
+/// ("Maximum level: 153 (stream 186)", "Width: from 64 to 4096"). Those
+/// lines are kept, without their indent, and FFmpeg's other verbose ones
+/// are not (FFmpeg 6.1 to 8.1, `libavcodec/vulkan_decode.c`). While this
+/// runs FFmpeg's level is at least "verbose", for the whole process.
+pub fn capture_hw_decode_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    // FFmpeg's verbose is `tracing`'s debug.
+    let (r, lines) = capture(Level::DEBUG, f);
+    let lines = lines
+        .into_iter()
+        .filter_map(|(level, line)| {
+            if level <= Level::WARN {
+                Some(line)
+            } else {
+                vulkan_decode_reason(&line)
+            }
+        })
+        .collect();
+    (r, lines)
+}
+
+/// `line`, one of FFmpeg's verbose lines, without the indent of its
+/// message, if FFmpeg's Vulkan decoder says in it why it turned a stream
+/// down or which limits it checked.
+fn vulkan_decode_reason(line: &str) -> Option<String> {
+    // After the tags, such as "[hevc] ": it logs on its codec context.
+    let mut msg = line;
+    while let Some((_, rest)) = msg.strip_prefix('[').and_then(|m| m.split_once("] ")) {
+        msg = rest;
+    }
+    let tag = &line[..line.len() - msg.len()];
+    let msg = msg.trim_start();
+    const SAID: &[&str] = &[
+        "Unable to initialize video session: ",
+        "Decoder capabilities for ",
+        "Maximum level: ",
+        "Width: from ",
+        "Height: from ",
+    ];
+    SAID.iter()
+        .any(|s| msg.starts_with(s))
+        .then(|| format!("{tag}{msg}"))
+}
+
+/// Run `f`, and return FFmpeg's lines up to `level` logged on this thread
+/// meanwhile, each with its level (see [`capture_ffmpeg_log`]).
+fn capture<R>(level: Level, f: impl FnOnce() -> R) -> (R, Vec<(Level, String)>) {
+    // FFmpeg's log reaches `tracing` from here on.
+    crate::init();
     // A line FFmpeg left unfinished on this thread is not `f`'s, and one
     // `f` leaves unfinished is.
     ffi::end_log_line();
@@ -572,13 +753,14 @@ pub(crate) fn capture_ffmpeg_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
     let tee = Dispatch::new(Tee {
         outer: tracing::dispatcher::get_default(Dispatch::clone),
         lines: lines.clone(),
-        max: LevelFilter::current().max(LevelFilter::WARN),
+        level,
+        max: LevelFilter::current().max(LevelFilter::from_level(level)),
     });
     let r = tracing::dispatcher::with_default(&tee, || {
         {
             let mut n = CAPTURES.lock().unwrap_or_else(PoisonError::into_inner);
             *n += 1;
-            // Sees the tee, so the level becomes at least "warning".
+            // Sees the tee, so the level becomes at least `level`.
             ffi::sync_log_level();
         }
         let r = f();
@@ -599,15 +781,18 @@ pub(crate) fn capture_ffmpeg_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
     (r, lines)
 }
 
-/// Records FFmpeg's warnings and errors, and hands everything to `outer`.
+/// Records FFmpeg's lines up to `level`, and hands everything to `outer`.
 struct Tee {
     outer: Dispatch,
-    lines: Arc<Mutex<Vec<String>>>,
+    lines: Arc<Mutex<Vec<(Level, String)>>>,
+    level: Level,
     max: LevelFilter,
 }
 
-fn is_captured(m: &Metadata<'_>) -> bool {
-    m.target() == "ffmpeg" && *m.level() <= Level::WARN
+impl Tee {
+    fn is_captured(&self, m: &Metadata<'_>) -> bool {
+        m.target() == "ffmpeg" && *m.level() <= self.level
+    }
 }
 
 impl Subscriber for Tee {
@@ -618,7 +803,7 @@ impl Subscriber for Tee {
         Some(self.max)
     }
     fn enabled(&self, m: &Metadata<'_>) -> bool {
-        is_captured(m) || self.outer.enabled(m)
+        self.is_captured(m) || self.outer.enabled(m)
     }
     fn new_span(&self, attrs: &span::Attributes<'_>) -> span::Id {
         self.outer.new_span(attrs)
@@ -631,13 +816,13 @@ impl Subscriber for Tee {
     }
     fn event(&self, e: &Event<'_>) {
         let m = e.metadata();
-        if is_captured(m) {
+        if self.is_captured(m) {
             let mut msg = Message(String::new());
             e.record(&mut msg);
             self.lines
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push(without_address(&msg.0));
+                .push((*m.level(), without_address(&msg.0)));
         }
         if self.outer.enabled(m) {
             self.outer.event(e);
@@ -716,6 +901,50 @@ mod tests {
         );
         for plain in ["no prefix", "[x] no address", "[x @ 0xzz] not hex"] {
             assert_eq!(without_address(plain), plain);
+        }
+    }
+
+    #[test]
+    fn vulkan_decode_reasons_are_told_from_other_verbose_lines() {
+        // FFmpeg 8.1's words, as the log reaches the capture.
+        for (line, kept) in [
+            (
+                "[hevc] Unable to initialize video session: hevc profile \"Main 10\" not \
+                 supported!",
+                Some(
+                    "[hevc] Unable to initialize video session: hevc profile \"Main 10\" not \
+                     supported!",
+                ),
+            ),
+            (
+                "[h264] Unable to initialize video session: format (yuv420p) not supported!",
+                Some("[h264] Unable to initialize video session: format (yuv420p) not supported!"),
+            ),
+            (
+                "[hevc] Decoder capabilities for hevc profile \"Main\":",
+                Some("[hevc] Decoder capabilities for hevc profile \"Main\":"),
+            ),
+            (
+                "[hevc]     Maximum level: 153 (stream 186)",
+                Some("[hevc] Maximum level: 153 (stream 186)"),
+            ),
+            (
+                "[hevc]     Width: from 64 to 4096",
+                Some("[hevc] Width: from 64 to 4096"),
+            ),
+            (
+                "    Height: from 64 to 2304",
+                Some("Height: from 64 to 2304"),
+            ),
+            (
+                "[mp4] [hevc]     Width: from 64 to 4096",
+                Some("[mp4] [hevc] Width: from 64 to 4096"),
+            ),
+            ("[hevc]     Bitstream offset alignment: 256", None),
+            ("[hevc] Vulkan decoder initialization successful", None),
+            ("[vulkan] Using device: llvmpipe", None),
+        ] {
+            assert_eq!(vulkan_decode_reason(line).as_deref(), kept, "{line}");
         }
     }
 

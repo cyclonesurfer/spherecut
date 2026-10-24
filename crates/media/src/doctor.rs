@@ -469,6 +469,7 @@ const FEDORA_PACKAGES: &[&str] = &[
     "libva-intel-media-driver",
     "intel-media-driver",
     "mesa-vulkan-drivers",
+    "mesa-vulkan-drivers-freeworld",
 ];
 
 pub fn run(render_node: &Path) -> DoctorReport {
@@ -1029,6 +1030,48 @@ impl Fixes<'_> {
         ])
     }
 
+    /// More Vulkan Video formats, for the driver on `dev` that can't
+    /// decode `formats`. Fedora builds Mesa's Vulkan drivers, like its
+    /// VA-API one, without H.264 and HEVC: RADV then decodes AV1 but lacks
+    /// their video extensions ("Device does not support decoding hevc!").
+    /// RPM Fusion's mesa-vulkan-drivers-freeworld has them. Otherwise
+    /// vulkaninfo shows what the driver has.
+    fn vulkan_codecs(&self, formats: &[&str], dev: Option<&VulkanDevice>) -> String {
+        const VULKANINFO: &str =
+            "vulkaninfo | grep -i video_decode   (the Vulkan Video formats this driver decodes";
+        let mesa_gpu = dev.is_some_and(|d| {
+            !d.is_cpu()
+                && (d.driver.as_deref() == Some("radv")
+                    || d.driver_info
+                        .as_deref()
+                        .is_some_and(|i| i.starts_with("Mesa")))
+        });
+        let h26x = formats
+            .iter()
+            .any(|f| f.starts_with("H.264") || f.starts_with("HEVC"));
+        if self.distro != Distro::Fedora || !mesa_gpu || !h26x {
+            return format!("{VULKANINFO}; newer Mesa releases add more)");
+        }
+        if self.has("mesa-vulkan-drivers-freeworld") {
+            return format!(
+                "sudo dnf upgrade --refresh   \
+                 (mesa-vulkan-drivers-freeworld must match the installed Mesa)\n{VULKANINFO})"
+            );
+        }
+        let cmd = if self.has("mesa-vulkan-drivers") {
+            "sudo dnf swap mesa-vulkan-drivers mesa-vulkan-drivers-freeworld"
+        } else {
+            "sudo dnf install mesa-vulkan-drivers-freeworld"
+        };
+        lines([
+            self.rpmfusion("free"),
+            Some(format!(
+                "{cmd}   (RPM Fusion free: Fedora's Mesa leaves H.264 and HEVC out of Vulkan \
+                 Video)"
+            )),
+        ])
+    }
+
     /// A newer `driver` (e.g. "radv (Mesa 25.2.8)"), for one that runs a
     /// format and gets it wrong.
     fn newer_driver(&self, driver: &str) -> String {
@@ -1052,7 +1095,8 @@ impl Fixes<'_> {
         }
         // A CPU device was listed, so the Vulkan loader is there, and with
         // Mesa's drivers installed too nothing is left to install.
-        let mesa = self.distro == Distro::Fedora && self.has("mesa-vulkan-drivers");
+        let mesa = self.distro == Distro::Fedora
+            && (self.has("mesa-vulkan-drivers") || self.has("mesa-vulkan-drivers-freeworld"));
         // No driver loads for a GPU that isn't passed through.
         if self.no_gpu_visible {
             return if mesa {
@@ -1550,9 +1594,7 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
                 and_list(&formats)
             ),
             impact: impact(&formats, false),
-            fix: "vulkaninfo | grep -i video_decode   (the Vulkan Video formats this driver \
-                  decodes; newer Mesa releases add more)"
-                .into(),
+            fix: fx.vulkan_codecs(&formats, dev),
         });
     }
     // A driver that decodes a format wrongly still lists it in vulkaninfo,
@@ -2074,11 +2116,13 @@ mod tests {
              extension!)"
         );
         assert_eq!(i.impact, "none while VA-API decodes them, as it does here");
-
-        assert_eq!(
-            i.fix,
-            "vulkaninfo | grep -i video_decode   (the Vulkan Video formats this driver \
-             decodes; newer Mesa releases add more)"
+        // Fedora's Mesa: see fedoras_mesa_vulkan_video_gets_the_freeworld_driver.
+        assert!(
+            i.fix.ends_with(
+                "sudo dnf install mesa-vulkan-drivers-freeworld   (RPM Fusion \
+             free: Fedora's Mesa leaves H.264 and HEVC out of Vulkan Video)"
+            ),
+            "{i:?}"
         );
 
         // VA-API can't decode HEVC Main either: the CPU does, and only that.
@@ -2114,6 +2158,54 @@ mod tests {
             "this FFmpeg cannot use Vulkan Video to decode AV1 Main"
         );
         assert_eq!(i.fix, "sudo pacman -S --needed ffmpeg");
+    }
+
+    #[test]
+    fn fedoras_mesa_vulkan_video_gets_the_freeworld_driver() {
+        // RADV on Fedora's Mesa decodes AV1 with Vulkan Video, not H.264
+        // or HEVC.
+        let mut r = healthy(Distro::Fedora);
+        r.vulkan_devices[0].driver_info = Some("Mesa 26.2.5".into());
+        let h26x = ["H.264 High", "HEVC Main", "HEVC Main 10"];
+        fail(&mut r.decode_checks, "vulkan", &h26x, Fault::Driver);
+        let fix = |r: &DoctorReport, env: &Env| only(&issues(r, env)).fix.clone();
+        let env = installed(&["rpmfusion-free-release", "mesa-vulkan-drivers"]);
+        assert_eq!(
+            fix(&r, &env),
+            "sudo dnf swap mesa-vulkan-drivers mesa-vulkan-drivers-freeworld   (RPM Fusion \
+             free: Fedora's Mesa leaves H.264 and HEVC out of Vulkan Video)"
+        );
+        assert_eq!(
+            fix(&r, &Env::default()),
+            "sudo dnf install https://mirrors.rpmfusion.org/free/fedora/\
+             rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm\n\
+             sudo dnf install mesa-vulkan-drivers-freeworld   (RPM Fusion free: Fedora's Mesa \
+             leaves H.264 and HEVC out of Vulkan Video)"
+        );
+        // The freeworld driver installed, and still no H.264 or HEVC.
+        let env = installed(&["rpmfusion-free-release", "mesa-vulkan-drivers-freeworld"]);
+        assert_eq!(
+            fix(&r, &env),
+            "sudo dnf upgrade --refresh   (mesa-vulkan-drivers-freeworld must match the \
+             installed Mesa)\n\
+             vulkaninfo | grep -i video_decode   (the Vulkan Video formats this driver decodes)"
+        );
+
+        let vulkaninfo = "vulkaninfo | grep -i video_decode   (the Vulkan Video formats this \
+                          driver decodes; newer Mesa releases add more)";
+        // Arch's Mesa has H.264 and HEVC.
+        let mut arch = r.clone();
+        arch.distro = Distro::Arch;
+        assert_eq!(fix(&arch, &Env::default()), vulkaninfo);
+        // The freeworld driver doesn't add AV1, nor a driver that isn't
+        // Mesa's.
+        let mut av1 = healthy(Distro::Fedora);
+        fail(&mut av1.decode_checks, "vulkan", &[AV1], Fault::Driver);
+        assert_eq!(fix(&av1, &Env::default()), vulkaninfo);
+        let mut nvidia = r.clone();
+        nvidia.vulkan_devices[0].driver = Some("NVIDIA".into());
+        nvidia.vulkan_devices[0].driver_info = Some("580.95.05".into());
+        assert_eq!(fix(&nvidia, &Env::default()), vulkaninfo);
     }
 
     fn wrong(checks: &mut [Check], path: &str, format: &str, reason: &str) {
@@ -2156,7 +2248,11 @@ mod tests {
             is[0].what,
             "Vulkan Video on AMD Radeon RX 7600 (RADV NAVI33) cannot decode H.264 High"
         );
-        assert!(is[0].fix.starts_with("vulkaninfo"), "{:?}", is[0]);
+        assert!(
+            is[0].fix.contains("mesa-vulkan-drivers-freeworld"),
+            "{:?}",
+            is[0]
+        );
         assert_eq!(is[1].severity, Severity::Info);
         assert_eq!(
             is[1].what,
