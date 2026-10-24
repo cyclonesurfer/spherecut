@@ -4,4 +4,4 @@
 pub mod brand;
 pub mod time;
 
-pub use time::{FrameRate, Rational, Rounding, Time, TimeError};
+pub use time::{FrameRate, FrameTime, Rational, Rounding, Time, TimeError};
