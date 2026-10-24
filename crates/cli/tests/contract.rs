@@ -163,6 +163,32 @@ fn every_code_is_listed_and_stable() {
     }
 }
 
+/// `docs/cli-json.md` is the contract people read, so it must document
+/// every code, schema and exit status the binary can give.
+#[test]
+fn the_document_describes_every_code_schema_and_status() {
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/cli-json.md");
+    let docs = std::fs::read_to_string(&docs).unwrap();
+    for c in CODES {
+        assert!(
+            docs.contains(&format!("| `{c}` |")),
+            "docs/cli-json.md has no table row for the code {c}"
+        );
+    }
+    for schema in [contract::PROBE, contract::DOCTOR, contract::CLI] {
+        assert!(
+            docs.contains(&format!("`{schema}`")),
+            "docs/cli-json.md doesn't name the schema {schema}"
+        );
+    }
+    for status in 0..=4 {
+        assert!(
+            docs.contains(&format!("| {status} |")),
+            "docs/cli-json.md has no row for exit status {status}"
+        );
+    }
+}
+
 #[test]
 fn one_file_or_many_is_one_document_of_the_same_shape() {
     let dir = tmp("shape");
