@@ -8,7 +8,9 @@
 //! pkg-config pointed at that build and in a target directory of its own:
 //! sharing one would rebind ffmpeg-sys-next, and rebuild everything above
 //! it, each time the FFmpeg changes. `--test` also runs the Tier 1 tests
-//! against one of them, loading its libraries through `LD_LIBRARY_PATH`.
+//! against one of them, loading its libraries through `LD_LIBRARY_PATH`,
+//! and `--clean` deletes each target directory once its build is checked
+//! (one for clippy is about 450 MB, and the tests add about 1 GB).
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -36,6 +38,10 @@ pub struct Args {
     /// if it isn't listed.
     #[arg(long, value_name = "PREFIX")]
     test: Option<PathBuf>,
+    /// Delete each build's target directory once it is checked (by
+    /// default they are kept, and later runs build only what changed).
+    #[arg(long)]
+    clean: bool,
 }
 
 pub fn run(a: Args) -> Result<()> {
@@ -48,7 +54,7 @@ pub fn run(a: Args) -> Result<()> {
         );
     }
     let test = a.test.as_deref().map(absolute);
-    check(&prefixes, test.as_deref())
+    check(&prefixes, test.as_deref(), a.clean)
 }
 
 /// `cargo xtask check`'s stage: clippy against each FFmpeg in
@@ -68,7 +74,7 @@ pub fn from_check() -> Result<()> {
         );
         return Ok(());
     }
-    check(&prefixes, None)
+    check(&prefixes, None, false)
 }
 
 /// The prefixes to check, made absolute: those named, else those in the
@@ -398,7 +404,7 @@ fn target_root() -> PathBuf {
         .unwrap_or_else(|| hw_test::target_dir(&crate::workspace_root()).join("compat"))
 }
 
-fn check(prefixes: &[PathBuf], test: Option<&Path>) -> Result<()> {
+fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
     let root = target_root();
     let existing = |var: &str| std::env::var_os(var);
     let mut rows = Vec::new();
@@ -452,6 +458,12 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>) -> Result<()> {
             }
             _ => Stage::NotRun("Tier 1 needs clippy to pass first".into()),
         });
+        if clean && target.exists() {
+            match std::fs::remove_dir_all(&target) {
+                Ok(()) => eprintln!("==> removed {}", target.display()),
+                Err(e) => eprintln!("warning: could not remove {}: {e}", target.display()),
+            }
+        }
         rows.push(Row {
             label: b.label,
             prefix: b.prefix,
@@ -483,6 +495,31 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    fn parse(argv: &[&str]) -> Result<Args, clap::Error> {
+        use clap::Parser as _;
+        Cli::try_parse_from(std::iter::once("compat").chain(argv.iter().copied())).map(|c| c.args)
+    }
+
+    #[test]
+    fn the_arguments_are_prefixes_a_test_prefix_and_clean() {
+        let a = parse(&["/ff/n8.1", "/ff/n9.0", "--test", "/ff/n8.1.3"]).unwrap();
+        assert_eq!(a.prefixes, [p("/ff/n8.1"), p("/ff/n9.0")]);
+        assert_eq!(a.test, Some(p("/ff/n8.1.3")));
+        assert!(!a.clean);
+        let a = parse(&["--clean", "--test=/ff/n8.1"]).unwrap();
+        assert!(a.prefixes.is_empty());
+        assert_eq!(a.test, Some(p("/ff/n8.1")));
+        assert!(a.clean);
+        assert!(parse(&["--test"]).is_err());
+        assert!(parse(&["--tests", "/ff/n8.1"]).is_err());
     }
 
     #[test]
