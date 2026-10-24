@@ -14,8 +14,8 @@ use common::{Frame, Kind, Rng, gpu};
 use spherecut_core::video::{ChromaSiting, Matrix, Range, SampleBytes};
 use spherecut_render::readback::{f16_to_f32, read_texture, round_f16};
 use spherecut_render::{
-    DebugMode, Filter, Gpu, GpuFrame, GpuTimers, LinearTarget, Placement, PlaneFormat, Projector,
-    SlotShape, UploadPath, Uploader, ViewParams,
+    AdapterChoice, DebugMode, Filter, Gpu, GpuFrame, GpuTimers, LinearTarget, Placement,
+    PlaneFormat, Projector, SlotShape, UploadPath, Uploader, ViewParams,
 };
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_testkit::bench;
@@ -542,11 +542,41 @@ fn wait(gpu: &Gpu) {
     let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
 }
 
-/// The allocator's block count and reserved bytes, when it reports.
-fn allocator(gpu: &Gpu) -> Option<(usize, u64)> {
-    gpu.device
-        .generate_allocator_report()
-        .map(|r| (r.blocks.len(), r.total_reserved_bytes))
+/// The allocator's memory blocks, by size, and its allocated and
+/// reserved bytes. gpu-allocator names no block, so a block freed and
+/// another of its size made between two reports look alike; the bench
+/// reports often enough that a step's own blocks show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Blocks {
+    sizes: Vec<u64>,
+    allocated: u64,
+    reserved: u64,
+}
+
+/// The allocator's report, when it gives one.
+fn allocator(gpu: &Gpu) -> Option<Blocks> {
+    gpu.device.generate_allocator_report().map(|r| {
+        let mut sizes: Vec<u64> = r.blocks.iter().map(|b| b.size).collect();
+        sizes.sort_unstable();
+        Blocks {
+            sizes,
+            allocated: r.total_allocated_bytes,
+            reserved: r.total_reserved_bytes,
+        }
+    })
+}
+
+/// How an upload run paces its steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pace {
+    /// Each step waits for the GPU, as a frame's display would: the GPU
+    /// time of each step's ingest and mips is read back.
+    Waited,
+    /// Steps go into `n` slots in turn and only poll, as the upload
+    /// thread does, so `n` of them may be in flight (the slot ring keeps
+    /// two ready ahead of the shown one); a step waits only for the one
+    /// `n` back, whose slot it fills.
+    InFlight(usize),
 }
 
 /// What one run of upload steps cost, per step.
@@ -554,46 +584,102 @@ fn allocator(gpu: &Gpu) -> Option<(usize, u64)> {
 struct UploadRun {
     cpu_ms: f64,
     /// The mean of the spans read back: each step's ingest and mips, or
-    /// the second frame's of a pair (the two are the same size).
+    /// the second frame's of a pair (the two are the same size). Waited
+    /// runs only.
     gpu_ms: Option<f64>,
-    /// Steps after which the allocator had another number of blocks than
-    /// after the step before, and the fewest and most blocks seen.
-    block_changes: usize,
+    /// Steps in which the allocator's blocks changed: the report taken
+    /// as the step's uploads return (their staging made, the GPU not yet
+    /// done) or once it waits differs from the one before it, so a block
+    /// made for a step and freed when it is done counts, as plan section
+    /// 4.4's "blocks allocated and freed per frame" trigger means.
+    churn: usize,
+    /// The fewest and most blocks in any report, and the most bytes
+    /// reserved and allocated in one.
     blocks: Option<(usize, usize)>,
     reserved_max: u64,
+    allocated_max: u64,
+    /// The bytes allocated once settled, before the run's first step.
+    allocated_settled: u64,
+}
+
+impl UploadRun {
+    /// Takes the allocator's report: whether its blocks differ from
+    /// `last`'s, which it then replaces.
+    fn sample(&mut self, gpu: &Gpu, last: &mut Option<Blocks>) -> bool {
+        let Some(now) = allocator(gpu) else {
+            return false;
+        };
+        let n = now.sizes.len();
+        let (lo, hi) = self.blocks.unwrap_or((n, n));
+        self.blocks = Some((lo.min(n), hi.max(n)));
+        self.reserved_max = self.reserved_max.max(now.reserved);
+        self.allocated_max = self.allocated_max.max(now.allocated);
+        let changed = last.as_ref().is_some_and(|l| l.sizes != now.sizes);
+        *last = Some(now);
+        changed
+    }
 }
 
 /// `frames` steps, each uploading every frame of `input` into its slot as
-/// the upload thread would, then waiting, as a frame's display does.
+/// the upload thread would, paced by `pace`. `slots` has a slot for each
+/// frame of `input`, for each step that may be in flight.
 fn upload_run(
     gpu: &Gpu,
     uploader: &mut Uploader,
     input: &[Frame],
-    slots: &[GpuFrame],
+    slots: &[Vec<GpuFrame>],
     frames: usize,
+    pace: Pace,
 ) -> UploadRun {
     let mut run = UploadRun::default();
     let (mut gpu_sum, mut gpu_n) = (0.0, 0usize);
-    let mut last = allocator(gpu).map(|a| a.0);
-    for _ in 0..frames {
-        for (f, s) in input.iter().zip(slots) {
+    wait(gpu);
+    let mut last = None;
+    run.sample(gpu, &mut last);
+    run.allocated_settled = last.as_ref().map_or(0, |b| b.allocated);
+    let depth = match pace {
+        Pace::Waited => 1,
+        Pace::InFlight(n) => n,
+    };
+    assert_eq!(slots.len(), depth);
+    // Each step's submission, so a later step can wait for it.
+    let mut done = std::collections::VecDeque::new();
+    for step in 0..frames {
+        let mut churned = false;
+        if done.len() == depth
+            && let Some(index) = done.pop_front()
+        {
+            let _ = gpu.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(index),
+                timeout: None,
+            });
+            churned |= run.sample(gpu, &mut last);
+        }
+        for (f, s) in input.iter().zip(&slots[step % depth]) {
             run.cpu_ms += f64::from(uploader.upload(gpu, f, s).unwrap().cpu_ms);
         }
-        wait(gpu);
-        if let Some(ms) = uploader.poll(gpu) {
-            gpu_sum += f64::from(ms);
-            gpu_n += 1;
-        }
-        if let Some((blocks, reserved)) = allocator(gpu) {
-            if last.is_some_and(|l| l != blocks) {
-                run.block_changes += 1;
+        // In flight: the step's write_texture staging is allocated, and
+        // nothing of it is freed until the GPU is done with it.
+        churned |= run.sample(gpu, &mut last);
+        // An empty submission is done when everything before it is.
+        done.push_back(gpu.queue.submit([]));
+        match pace {
+            Pace::Waited => {
+                wait(gpu);
+                if let Some(ms) = uploader.poll(gpu) {
+                    gpu_sum += f64::from(ms);
+                    gpu_n += 1;
+                }
+                churned |= run.sample(gpu, &mut last);
+                done.clear();
             }
-            last = Some(blocks);
-            let (lo, hi) = run.blocks.unwrap_or((blocks, blocks));
-            run.blocks = Some((lo.min(blocks), hi.max(blocks)));
-            run.reserved_max = run.reserved_max.max(reserved);
+            Pace::InFlight(_) => {
+                let _ = uploader.poll(gpu);
+            }
         }
+        run.churn += usize::from(churned);
     }
+    wait(gpu);
     run.cpu_ms /= frames as f64;
     run.gpu_ms = (gpu_n > 0).then(|| gpu_sum / gpu_n as f64);
     run
@@ -640,90 +726,167 @@ fn record_or_not(name: &str, values: &[Option<f64>], unit: &str, why: &str) {
     }
 }
 
+/// `frame` with its rows as the pooled download lays a decoded frame out
+/// (`DOWNLOAD_ROW_ALIGN` in media's `ffi.rs`): each plane's row rounded up
+/// to 256 bytes. Which copy each path takes depends on the stride:
+/// wgpu-core's `write_texture` copies in one go only when the stride is
+/// the row rounded up to the device's `optimalBufferCopyRowPitchAlignment`
+/// (128 on lavapipe), the belt only when it is the row rounded up to 256,
+/// so at a 5760-byte row the two copy row by row and in one go here,
+/// where tight rows would have them the other way round.
+fn pooled(mut frame: Frame) -> Frame {
+    for (desc, (bytes, stride, (w, h))) in frame.layout.planes.iter().zip(frame.planes.iter_mut()) {
+        let row = desc.row_bytes(*w);
+        let pitch = row.next_multiple_of(256);
+        let mut b = vec![0u8; pitch * (*h as usize - 1) + row];
+        for y in 0..*h as usize {
+            b[y * pitch..y * pitch + row].copy_from_slice(&bytes[y * *stride..y * *stride + row]);
+        }
+        *bytes = b;
+        *stride = pitch;
+    }
+    frame
+}
+
+/// How many steps `Pace::InFlight` keeps in flight: the slot ring's two
+/// ready ahead of the shown one (plan section 4.2).
+const IN_FLIGHT: usize = 2;
+
 /// `bench_upload_5k7`'s body (M1 plan section 4.4) on `gpu`. For each
 /// input (8- and 10-bit 5.7K frames, and an 8-bit and a 10-bit pair of
-/// 8K's 3840² frames) and each upload path, `plan.frames` steps per run:
-/// the CPU ms per step, the GPU ms of the ingest and mips, and the
-/// allocator's blocks, whose count changing from step to step is the
-/// plan's second trigger for the belt. Then, on the 5.7K slots: the mips
-/// alone (so the ingest is the upload's span less them) and the
+/// 8K's 3840² frames, with the pooled download's rows) and each upload
+/// path, `plan.frames` steps per run, twice: waiting for each step, for
+/// the CPU ms per step and the GPU ms of the ingest and mips; and with
+/// [`IN_FLIGHT`] steps in flight, only polling, as the upload thread
+/// does. Each counts the steps that made or freed allocator blocks, the
+/// plan's second trigger for the belt, from reports taken both while a
+/// step is in flight and once it is done. Then, on the 5.7K slots: the
+/// mips alone (so the ingest is the upload's span less them) and the
 /// projection at each output size, rectilinear 90° and a 300° tiny
 /// planet. Every number is a run's mean, recorded as the median and
 /// range of `plan.runs` runs after one to warm up (D20).
 fn upload_bench(gpu: &Gpu, plan: &BenchPlan) {
     let started = std::time::Instant::now();
     let tag = |s: (u32, u32)| format!("{}x{}", s.0, s.1);
+    let frame = |kind, size, seed| pooled(noise(kind, size, 0, seed));
     let inputs = [
         (
             format!("{} 8-bit NV12", tag(plan.single)),
-            vec![noise(Kind::Nv12, plan.single, 0, 1)],
+            vec![frame(Kind::Nv12, plan.single, 1)],
         ),
         (
             format!("{} 10-bit P010", tag(plan.single)),
-            vec![noise(Kind::P010, plan.single, 0, 2)],
+            vec![frame(Kind::P010, plan.single, 2)],
         ),
         (
             format!("{} 8-bit NV12 pair", tag(plan.pair)),
             vec![
-                noise(Kind::Nv12, plan.pair, 0, 3),
-                noise(Kind::Nv12, plan.pair, 0, 4),
+                frame(Kind::Nv12, plan.pair, 3),
+                frame(Kind::Nv12, plan.pair, 4),
             ],
         ),
         (
             format!("{} 10-bit P010 pair", tag(plan.pair)),
             vec![
-                noise(Kind::P010, plan.pair, 0, 5),
-                noise(Kind::P010, plan.pair, 0, 6),
+                frame(Kind::P010, plan.pair, 5),
+                frame(Kind::P010, plan.pair, 6),
             ],
         ),
     ];
+    // As a decoded frame comes from the pooled download.
+    for (what, input) in &inputs {
+        for f in input {
+            for (desc, (_, stride, (w, _))) in f.layout.planes.iter().zip(&f.planes) {
+                let row = desc.row_bytes(*w);
+                assert_eq!(*stride, row.next_multiple_of(256), "{what}");
+            }
+        }
+    }
     let no_timer = "no timestamps between passes";
     let slot_of =
         |f: &Frame| GpuFrame::new(gpu, &SlotShape::of(&f.layout, f.size).unwrap()).unwrap();
-    // Each input's and path's median CPU time per step, for the trigger.
+    // Each input's and path's median CPU time per step, for the first
+    // trigger, and whether any run of it made or freed blocks, for the
+    // second.
     let mut medians: Vec<(&str, UploadPath, f64)> = Vec::new();
+    let mut churned: Vec<(&str, UploadPath, bool)> = Vec::new();
     for (what, input) in &inputs {
         for path in [UploadPath::WriteTexture, UploadPath::StagingBelt] {
             let mut uploader = Uploader::with_path(gpu, path);
-            let slots: Vec<GpuFrame> = input.iter().map(slot_of).collect();
-            let runs: Vec<UploadRun> = (0..=plan.runs)
-                .map(|_| upload_run(gpu, &mut uploader, input, &slots, plan.frames))
-                .skip(1)
-                .collect();
-            let name = format!("upload {what}, {path:?}");
-            let cpu: Vec<f64> = runs.iter().map(|r| r.cpu_ms).collect();
-            bench::record_runs(&format!("{name}: CPU per step"), &cpu, "ms");
-            let gpu_ms: Vec<Option<f64>> = runs.iter().map(|r| r.gpu_ms).collect();
-            let per = if input.len() > 1 {
-                "GPU ingest and mips per frame"
-            } else {
-                "GPU ingest and mips"
-            };
-            record_or_not(&format!("{name}: {per}"), &gpu_ms, "ms", no_timer);
-            match runs.iter().map(|r| r.blocks).collect::<Option<Vec<_>>>() {
-                Some(b) => {
-                    let changes: Vec<f64> = runs.iter().map(|r| r.block_changes as f64).collect();
-                    bench::record_runs(
-                        &format!("{name}: steps that changed the allocator's blocks"),
-                        &changes,
-                        "steps",
-                    );
-                    let lo = b.iter().map(|x| x.0).min().unwrap_or(0);
-                    let hi = b.iter().map(|x| x.1).max().unwrap_or(0);
-                    let reserved = runs.iter().map(|r| r.reserved_max).max().unwrap_or(0);
-                    bench::note(format!(
-                        "{name}: {lo} to {hi} allocator blocks over {} runs of {} steps, at most {:.0} MiB reserved",
-                        plan.runs,
-                        plan.frames,
-                        reserved as f64 / f64::from(1u32 << 20)
-                    ));
+            for pace in [Pace::Waited, Pace::InFlight(IN_FLIGHT)] {
+                let depth = if pace == Pace::Waited { 1 } else { IN_FLIGHT };
+                let slots: Vec<Vec<GpuFrame>> = (0..depth)
+                    .map(|_| input.iter().map(slot_of).collect())
+                    .collect();
+                let runs: Vec<UploadRun> = (0..=plan.runs)
+                    .map(|_| upload_run(gpu, &mut uploader, input, &slots, plan.frames, pace))
+                    .skip(1)
+                    .collect();
+                let name = match pace {
+                    Pace::Waited => format!("upload {what}, {path:?}"),
+                    Pace::InFlight(n) => format!("upload {what}, {path:?}, {n} in flight"),
+                };
+                let cpu: Vec<f64> = runs.iter().map(|r| r.cpu_ms).collect();
+                bench::record_runs(&format!("{name}: CPU per step"), &cpu, "ms");
+                if pace == Pace::Waited {
+                    let gpu_ms: Vec<Option<f64>> = runs.iter().map(|r| r.gpu_ms).collect();
+                    let per = if input.len() > 1 {
+                        "GPU ingest and mips per frame"
+                    } else {
+                        "GPU ingest and mips"
+                    };
+                    record_or_not(&format!("{name}: {per}"), &gpu_ms, "ms", no_timer);
+                    medians.push((what.as_str(), path, median(&cpu)));
                 }
-                None => {
-                    bench::not_measured(&format!("{name}: allocator blocks"), "no allocator report")
+                match runs.iter().map(|r| r.blocks).collect::<Option<Vec<_>>>() {
+                    Some(b) => {
+                        let churn: Vec<f64> = runs.iter().map(|r| r.churn as f64).collect();
+                        bench::record_runs(
+                            &format!("{name}: steps that made or freed allocator blocks"),
+                            &churn,
+                            "steps",
+                        );
+                        churned.push((what.as_str(), path, runs.iter().any(|r| r.churn > 0)));
+                        let mib = |b: u64| b as f64 / f64::from(1u32 << 20);
+                        let lo = b.iter().map(|x| x.0).min().unwrap_or(0);
+                        let hi = b.iter().map(|x| x.1).max().unwrap_or(0);
+                        let max = |f: fn(&UploadRun) -> u64| runs.iter().map(f).max().unwrap_or(0);
+                        bench::note(format!(
+                            "{name}: {lo} to {hi} allocator blocks over {} runs of {} steps, at most \
+                             {:.0} MiB reserved and {:.0} MiB allocated ({:.0} MiB settled)",
+                            plan.runs,
+                            plan.frames,
+                            mib(max(|r| r.reserved_max)),
+                            mib(max(|r| r.allocated_max)),
+                            mib(max(|r| r.allocated_settled)),
+                        ));
+                    }
+                    None => bench::not_measured(
+                        &format!("{name}: allocator blocks"),
+                        "no allocator report",
+                    ),
                 }
+                assert_eq!(runs.len(), plan.runs);
             }
-            medians.push((what.as_str(), path, median(&cpu)));
-            assert_eq!(runs.len(), plan.runs);
+        }
+    }
+    // The plan's second trigger: write_texture making or freeing blocks
+    // within a step, waited or in flight.
+    for (what, _) in &inputs {
+        let blocks = churned
+            .iter()
+            .find(|c| c.0 == what && c.1 == UploadPath::WriteTexture)
+            .map(|c| c.2);
+        if let Some(b) = blocks {
+            bench::note(format!(
+                "upload {what}: write_texture {} allocator blocks within a step; the block trigger {}",
+                if b {
+                    "makes or frees"
+                } else {
+                    "neither makes nor frees"
+                },
+                if b { "holds" } else { "doesn't hold" }
+            ));
         }
     }
     // The plan's first trigger, for the 5.7K frames: write_texture above
@@ -839,10 +1002,60 @@ fn upload_bench_smoke() {
 }
 
 #[test]
+fn the_bench_sees_a_steps_own_blocks() {
+    // The allocator's report once a step is done can't show what the
+    // step made and freed: wgpu-core frees a write_texture's staging when
+    // the GPU is done with it, and gpu-allocator then frees a block left
+    // empty unless it is the last of its kind. So the bench reports while
+    // the step is in flight too. On lavapipe (wgpu-core 30, gpu-allocator
+    // 0.28) a pair of 3840² NV12 frames, 22 MB each, settles in one 64
+    // MiB block, and every step makes a 128 MiB block for its staging and
+    // frees it once done: reported only once settled, no step changed
+    // anything. A device of its own, so that no other test's memory is
+    // in its allocator's reports.
+    let gpu = &Gpu::headless(&AdapterChoice::Cpu).unwrap();
+    let input: Vec<Frame> = (0..2)
+        .map(|i| pooled(noise(Kind::Nv12, (3840, 3840), 0, 20 + i)))
+        .collect();
+    let frame_bytes = input[0]
+        .planes
+        .iter()
+        .map(|p| p.0.len() as u64)
+        .sum::<u64>();
+    let slot_of =
+        |f: &Frame| GpuFrame::new(gpu, &SlotShape::of(&f.layout, f.size).unwrap()).unwrap();
+    let steps = 4;
+    for pace in [Pace::Waited, Pace::InFlight(IN_FLIGHT)] {
+        let depth = if pace == Pace::Waited { 1 } else { IN_FLIGHT };
+        let slots: Vec<Vec<GpuFrame>> = (0..depth)
+            .map(|_| input.iter().map(slot_of).collect())
+            .collect();
+        let mut uploader = Uploader::with_path(gpu, UploadPath::WriteTexture);
+        let run = upload_run(gpu, &mut uploader, &input, &slots, steps, pace);
+        eprintln!("{pace:?}: {run:?}");
+        // In flight, a step's staging is there to see: a frame's worth,
+        // less what small buffers came and went meanwhile.
+        assert!(
+            run.allocated_max >= run.allocated_settled + frame_bytes * 9 / 10,
+            "{pace:?}: {run:?}"
+        );
+        // Waited, each step makes a block and frees it. (With two in
+        // flight the staging block may never empty, which the bench
+        // reports as it finds it.)
+        if pace == Pace::Waited {
+            assert_eq!(run.churn, steps, "{run:?}");
+            assert_eq!(run.blocks, Some((1, 2)), "{run:?}");
+        }
+    }
+}
+
+#[test]
 #[ignore = "tier2: benchmark, needs a GPU"]
 fn bench_upload_5k7() {
-    // About 0.3 GB of slots, scratch and belt chunks on the GPU and 0.3
-    // GB of frames in memory: well inside an 8 GB RX 7600.
+    // At most about 1 GB on the GPU (two sets of slots for the 10-bit
+    // pair, 236 MB, its scratch, two steps' staging and the belt's 64
+    // MiB chunks) and 0.3 GB of frames in memory: well inside an 8 GB RX
+    // 7600.
     let gpu = common::hardware_gpu();
     upload_bench(
         &gpu,
