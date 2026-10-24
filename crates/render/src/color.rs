@@ -54,7 +54,9 @@ pub fn fold(color: &ColorInfo, kind: LayoutKind, bit_depth: u8) -> [[f64; 4]; 3]
 
 /// Which part of a stereo frame is the eye shown. M1 shows the left eye
 /// of a stereo source (with a notice), as Spherical Video V2's `st3d`
-/// lays it out.
+/// lays it out. Only that eye is uploaded ([`Placement::shown`]): the
+/// slot holds the eye's own picture, so U wraps at its own ±180°, V
+/// clamps at its own poles, and its mips never mix in the other eye.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Stereo {
     #[default]
@@ -87,34 +89,36 @@ impl Placement {
         stereo: Stereo::Mono,
     };
 
+    /// The part of a `size` frame that is uploaded and shown, from its
+    /// top-left corner: all of a mono frame, the top half of a
+    /// top-bottom one and the left half of a left-right one (the left
+    /// eye either way).
+    pub fn shown(&self, (w, h): (u32, u32)) -> (u32, u32) {
+        match self.stereo {
+            Stereo::Mono => (w, h),
+            Stereo::TopBottom => (w, (h / 2).max(1)),
+            Stereo::LeftRight => ((w / 2).max(1), h),
+        }
+    }
+
     /// The sphere-uv rectangle the picture covers, `(u0, v0, u1, v1)`.
     pub fn cover(&self) -> [f64; 4] {
         [self.left, self.top, 1.0 - self.right, 1.0 - self.bottom]
     }
 
     /// Sphere uv to texture uv: `tex = suv · scale + offset`, the crop
-    /// stretched over the picture, then the eye's half of it.
+    /// stretched over the picture the slot holds (the shown eye's).
     pub fn uv_transform(&self) -> ([f64; 2], [f64; 2]) {
         let [u0, v0, u1, v1] = self.cover();
         let (w, h) = ((u1 - u0).max(1e-9), (v1 - v0).max(1e-9));
-        let (mut scale, mut offset) = ([1.0 / w, 1.0 / h], [-u0 / w, -v0 / h]);
-        let half = match self.stereo {
-            Stereo::Mono => None,
-            Stereo::TopBottom => Some(1),
-            Stereo::LeftRight => Some(0),
-        };
-        if let Some(axis) = half {
-            scale[axis] *= 0.5;
-            offset[axis] *= 0.5;
-        }
-        (scale, offset)
+        ([1.0 / w, 1.0 / h], [-u0 / w, -v0 / h])
     }
 
-    /// Whether U may wrap at the texture's edges: only a mono picture
-    /// that covers all 360°. Anything else clamps, so that a crop's edge
-    /// or the other eye doesn't bleed in.
+    /// Whether U may wrap at the texture's edges: only for a picture that
+    /// covers all 360°, a stereo eye included, since the slot holds that
+    /// eye alone. A crop clamps, so that its edge doesn't bleed in.
     pub fn wraps(&self) -> bool {
-        self.left == 0.0 && self.right == 0.0 && self.stereo != Stereo::LeftRight
+        self.left == 0.0 && self.right == 0.0
     }
 }
 
@@ -340,10 +344,20 @@ mod tests {
         assert_eq!((s[0] * 0.25 + o[0], s[0] * 0.75 + o[0]), (0.0, 1.0));
         assert!(!half.wraps());
         assert!(Placement::FULL.wraps());
-        let tb = Placement {
-            stereo: Stereo::TopBottom,
-            ..Placement::FULL
-        };
-        assert_eq!(tb.uv_transform(), ([1.0, 0.5], [0.0, 0.0]));
+        assert_eq!(Placement::FULL.shown((512, 256)), (512, 256));
+        // A stereo eye is uploaded alone, so it fills the texture and its
+        // U wraps.
+        for (stereo, shown) in [
+            (Stereo::TopBottom, (512, 128)),
+            (Stereo::LeftRight, (256, 256)),
+        ] {
+            let eye = Placement {
+                stereo,
+                ..Placement::FULL
+            };
+            assert_eq!(eye.shown((512, 256)), shown);
+            assert_eq!(eye.uv_transform(), ([1.0, 1.0], [0.0, 0.0]));
+            assert!(eye.wraps());
+        }
     }
 }

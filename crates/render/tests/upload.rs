@@ -414,6 +414,29 @@ fn bad_frames_and_wrong_slots_are_refused() {
         uploader.upload(gpu, &frame, &other).unwrap_err().code(),
         "internal"
     );
+    // A stereo frame is uploaded as its shown eye, into a slot of that
+    // size, not the whole frame's.
+    let whole = slot_for(&frame, 1);
+    let top_bottom = Placement {
+        stereo: spherecut_render::Stereo::TopBottom,
+        ..Placement::FULL
+    };
+    assert_eq!(
+        uploader
+            .upload_placed(gpu, &frame, &top_bottom, &whole)
+            .unwrap_err()
+            .code(),
+        "internal"
+    );
+    let eye = GpuFrame::new(
+        gpu,
+        &SlotShape::of(&frame.layout, top_bottom.shown(frame.size)).unwrap(),
+    )
+    .unwrap();
+    let stats = uploader
+        .upload_placed(gpu, &frame, &top_bottom, &eye)
+        .unwrap();
+    assert_eq!(stats.bytes, 64 * 16 + 64 * 8);
     // A plane one byte short, and one whose rows overlap.
     let slot = slot_for(&frame, 1);
     let mut short = frame.clone();

@@ -174,7 +174,7 @@ impl StillRenderer {
             )));
         }
         gpu.check_size(size)?;
-        let shape = SlotShape::of(frame.layout(), frame.size())?;
+        let shape = SlotShape::of(frame.layout(), opts.placement.shown(frame.size()))?;
         let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let slot = match self.slot.take() {
             Some(s) if s.shape().fits(&shape) => s,

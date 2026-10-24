@@ -156,10 +156,12 @@ impl Uploader {
     }
 
     /// Copies `frame`'s planes into `slot`, records the ingest and mip
-    /// passes, and submits them once. Never waits on the GPU. `slot` must
-    /// be one nothing draws from until the submission (slice 5's slots
-    /// are reused only when no draw holds them; wgpu orders this
-    /// submission after every earlier one that sampled the slot).
+    /// passes, and submits them once. Never waits on the GPU. Of a stereo
+    /// frame only the shown eye is copied, so `slot` is made for
+    /// [`Placement::shown`]'s size. `slot` must be one nothing draws from
+    /// until the submission (slice 5's slots are reused only when no draw
+    /// holds them; wgpu orders this submission after every earlier one
+    /// that sampled the slot).
     pub fn upload_placed(
         &mut self,
         gpu: &Gpu,
@@ -168,26 +170,29 @@ impl Uploader {
         slot: &GpuFrame,
     ) -> Result<UploadStats, RenderError> {
         let start = Instant::now();
-        let shape = SlotShape::of(frame.layout(), frame.size())?;
+        let whole = SlotShape::of(frame.layout(), frame.size())?;
+        let shape = SlotShape::of(frame.layout(), placement.shown(frame.size()))?;
         if !slot.shape().fits(&shape) {
             return Err(RenderError::WrongSlot {
                 got: shape.describe(),
                 slot: slot.shape().describe(),
             });
         }
-        // Every plane is checked before any is written, so a bad frame
-        // leaves the slot as it was.
+        // Every plane is checked, whole, before any is written, so a bad
+        // frame leaves the slot as it was. What is copied is the shown
+        // part's rows, from the top-left corner.
         let planes = shape
             .planes
             .iter()
+            .zip(&whole.planes)
             .enumerate()
-            .map(|(i, p)| {
+            .map(|(i, (p, w))| {
                 let data = frame.plane(i).ok_or_else(|| {
                     RenderError::Invalid(format!("{} has no plane {i}", frame.layout().name))
                 })?;
-                let row = p.size.0 as usize * p.format.bytes_per_texel() as usize;
-                check_plane(&data, p.size, row, i)?;
-                Ok((data, row))
+                let bpt = p.format.bytes_per_texel() as usize;
+                check_plane(&data, w.size, w.size.0 as usize * bpt, i)?;
+                Ok((data, p.size.0 as usize * bpt))
             })
             .collect::<Result<Vec<_>, RenderError>>()?;
         let device = &gpu.device;

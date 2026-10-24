@@ -33,15 +33,17 @@ pub(crate) struct PlaneTexture {
 /// slot without going through [`spherecut_core::video::VideoPlanes`]:
 /// it writes [`GpuFrame::plane_texture`]'s level 0, records the mips with
 /// [`crate::Uploader::record_mips`] and sets the uniform with
-/// [`GpuFrame::set_source`], as an upload does.
+/// [`GpuFrame::set_source`], as an upload does. A slot holds the part of
+/// a frame that is shown ([`crate::Placement::shown`]): of a stereo
+/// frame, the left eye alone.
 #[derive(Debug)]
 pub struct GpuFrame {
     shape: SlotShape,
     pub(crate) planes: Vec<PlaneTexture>,
     pub(crate) source: wgpu::Buffer,
     pub(crate) bind_group: wgpu::BindGroup,
-    /// Whether U wraps for the frame last uploaded (a full, mono
-    /// picture), which picks the projection's sampler.
+    /// Whether U wraps for the frame last uploaded (a picture of all
+    /// 360°), which picks the projection's sampler.
     pub(crate) wraps: std::sync::atomic::AtomicBool,
 }
 

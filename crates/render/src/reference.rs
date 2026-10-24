@@ -220,7 +220,9 @@ struct Sampled {
 
 impl Source {
     fn new(frame: &dyn VideoPlanes, placement: &Placement) -> Result<Source, RenderError> {
-        let shape = SlotShape::of(frame.layout(), frame.size())?;
+        // The shown part only, from the top-left corner, as the upload
+        // copies it.
+        let shape = SlotShape::of(frame.layout(), placement.shown(frame.size()))?;
         let mut planes = Vec::with_capacity(shape.planes.len());
         for (i, p) in shape.planes.iter().enumerate() {
             let data = frame.plane(i).ok_or_else(|| {

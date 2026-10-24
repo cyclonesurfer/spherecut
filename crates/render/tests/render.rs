@@ -440,7 +440,7 @@ fn placement_crops_and_eyes() {
         stereo,
         ..Placement::FULL
     };
-    // Measured 51.78, 49.90 and 50.67 dB.
+    // Measured 51.80, 49.93 and 50.72 dB.
     for (p, floor) in [
         (crop, 48.0),
         (eye(Stereo::TopBottom), 46.0),
@@ -461,5 +461,101 @@ fn placement_crops_and_eyes() {
         )
         .unwrap();
         check(&format!("{p:?}"), &render(&f, &v, opts), &c, floor);
+    }
+}
+
+#[test]
+fn a_stereo_eye_shows_nothing_of_the_other() {
+    // The left eye grey at 50, the right eye a colour at 200, seen across
+    // the left eye's ±180° (left-right) and at its nadir (top-bottom),
+    // where its edges meet the other eye in the frame. Every pixel must
+    // be the left eye's grey, as a mono frame of it renders: 3a's first
+    // slots held the whole frame and clamped at the texture's edges, so
+    // the right eye bled in (448 pixels of 4096 looking back at a
+    // left-right frame, 2652 looking down at a top-bottom one).
+    let (w, h) = (512u32, 256u32);
+    let size = (64, 64);
+    let back = view(180.0, 0.0, 0.0, lens(Projection::Rectilinear, 6.0));
+    let down = view(0.0, -90.0, 0.0, lens(Projection::Rectilinear, 6.0));
+    let base = || {
+        frame(
+            &RgbImage {
+                width: w,
+                height: h,
+                pixels: vec![[0.5; 3]; (w * h) as usize],
+            },
+            Kind::Nv12,
+            color(Range::Full, Matrix::Bt709, ChromaSiting::Left),
+            8,
+        )
+    };
+    // Y, then Cb and Cr: 50 and neutral in the left eye, 200 elsewhere.
+    let coded = |left_eye: &dyn Fn(u32, u32) -> bool| {
+        let mut f = base();
+        for (p, (bytes, stride, (pw, ph))) in f.planes.iter_mut().enumerate() {
+            let comps = if p == 0 { 1 } else { 2 };
+            let (sx, sy) = (w / *pw, h / *ph);
+            for y in 0..*ph {
+                for x in 0..*pw {
+                    let left = left_eye(x * sx, y * sy);
+                    let v = match (p, left) {
+                        (0, true) => 50,
+                        (_, true) => 128,
+                        (_, false) => 200,
+                    };
+                    for c in 0..comps {
+                        bytes[y as usize * *stride + (x * comps + c) as usize] = v;
+                    }
+                }
+            }
+        }
+        f
+    };
+    let mono = coded(&|_, _| true);
+    for (stereo, v, left_eye) in [
+        (
+            Stereo::LeftRight,
+            back,
+            &(|x, _| x < w / 2) as &dyn Fn(u32, u32) -> bool,
+        ),
+        (Stereo::TopBottom, down, &|_, y| y < h / 2),
+    ] {
+        let f = coded(left_eye);
+        for debug in [DebugMode::Off, DebugMode::Level0] {
+            let opts = |placement| StillOptions {
+                debug,
+                placement,
+                ..StillOptions::default()
+            };
+            let mut r = renderer()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let want = r
+                .render(gpu(), &mono, &v, size, &opts(Placement::FULL))
+                .unwrap();
+            let placement = Placement {
+                stereo,
+                ..Placement::FULL
+            };
+            let got = r.render(gpu(), &f, &v, size, &opts(placement)).unwrap();
+            let a = got.unit_rgb();
+            let b = want.unit_rgb();
+            let off = a
+                .iter()
+                .zip(&b)
+                .filter(|(a, b)| (*a - *b).abs() > 1.5 / 255.0)
+                .count();
+            let worst = a
+                .iter()
+                .zip(&b)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max);
+            assert_eq!(
+                off,
+                0,
+                "{stereo:?} {debug:?}: {off} channels show the other eye, by up to {:.0} codes",
+                worst * 255.0
+            );
+        }
     }
 }

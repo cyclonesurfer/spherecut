@@ -2036,9 +2036,21 @@ What:
   the encode pass applies the OETF into `Rgba8Unorm`, one texel per
   pixel with no filtering. A 16-bit still reads the linear target back
   and applies the OETF on the CPU.
-- **Samplers**: U repeats and V clamps; U clamps too for a picture that
-  isn't a full mono sphere (an sv3d crop or a left-right stereo eye).
+- **Samplers**: U repeats and V clamps; U clamps too for an sv3d crop.
   `Placement` gives the cover, the crop and the eye.
+- **Stereo**: of a stereo frame only the shown eye, the left, is
+  uploaded (its rows from the frame's top-left corner, at the frame's
+  stride), into a slot of that eye's size (`Placement::shown`). U then
+  wraps at the eye's own ±180°, V clamps at its own poles, its mips never
+  mix in the other eye, and the upload is halved. 3a's first slots held
+  the whole frame, with the eye's half picked in the uv transform, and
+  clamped at the texture's edges, so the other eye bled in where the left
+  eye's edges meet it: measured at the first review, 448 of 4096 pixels
+  looking back across a left-right frame's seam, and 2652 looking down at
+  a top-bottom frame's nadir in a magnified view, since the pole guard
+  picks the coarsest level there. The plan's note that a top-bottom
+  source's coarsest level can blend one row across the eyes (section
+  4.3) no longer applies.
 - **The CPU reference** (`render::reference`) is the projection in f64,
   step for step, storing each mip level and the linear target as the GPU
   stores them (unorm8 rounded to nearest, and the nearest f16 with ties

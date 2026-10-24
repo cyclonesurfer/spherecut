@@ -429,7 +429,9 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   `R16Float`/`Rg16Float` holding code / (2^b − 1) for deeper ones, each
   with an area-weighted mip chain capped near 64 pixels, plus the
   frame's `Source` uniform: its colour matrix, chroma siting and where it
-  sits on the sphere (`Placement`: sv3d crop, stereo eye).
+  sits on the sphere (`Placement`: sv3d crop, stereo eye). Of a stereo
+  frame a slot holds the shown eye alone (`Placement::shown`), so the
+  other eye never bleeds in.
 * **`Uploader::upload`** copies a frame's planes into a slot
   (`write_texture`, or a staging belt), runs the ingest pass that turns
   deep integer planes into f16 and the mip passes, and submits once,
