@@ -63,6 +63,11 @@ struct Raw {
     /// It came out after reading had failed, as the decoder drained: a
     /// frame the damage lost may come before it.
     after_failure: bool,
+    /// Its place in output order from the start of the stream, when
+    /// decoding started there.
+    index: Option<u64>,
+    /// How many frames came out just before it with the same pts.
+    tie: u32,
 }
 
 /// How the decoder's frames become [`VideoFrame`]s.
@@ -155,8 +160,16 @@ pub struct FfmpegVideo {
     /// stream, when it did; counts positions in a stream whose timestamps
     /// go backwards.
     from_start: Option<u64>,
-    /// The pts of the last frame decoded, to see timestamps go backwards.
+    /// The pts of the last frame decoded, to see timestamps go backwards
+    /// and tie, and how many frames before it had the same.
     last_decoded: Option<i64>,
+    last_tie: u32,
+    /// Two frames have come out with the same pts.
+    ties_seen: bool,
+    /// The last frame returned's place from the start of the stream, when
+    /// known, and its rank among frames that tie with it.
+    current_index: Option<u64>,
+    current_tie: u32,
     not_seekable: bool,
     /// The stream has no timestamps: pts are counted, as frame index times
     /// `frame_ticks`.
@@ -296,6 +309,10 @@ impl FfmpegVideo {
             seq: 1,
             from_start: Some(1),
             last_decoded: Some(origin_pts),
+            last_tie: 0,
+            ties_seen: false,
+            current_index: None,
+            current_tie: 0,
             not_seekable: false,
             no_timestamps,
             frame_ticks,
@@ -311,6 +328,8 @@ impl FfmpegVideo {
             pts: origin_pts,
             seq: 0,
             after_failure,
+            index: Some(0),
+            tie: 0,
         });
         Ok(v)
     }
@@ -344,8 +363,9 @@ impl FfmpegVideo {
     }
 
     fn decoded(&mut self, frame: ff::frame::Video, fields: FrameFields) -> Got {
-        let index = self.from_start.unwrap_or(0);
-        self.from_start = self.from_start.map(|n| n + 1);
+        let from_start = self.from_start;
+        let index = from_start.unwrap_or(0);
+        self.from_start = from_start.map(|n| n + 1);
         let pts = match fields.pts {
             Some(p) if !self.no_timestamps => p,
             // Counted from the start, which is where every seek in such a
@@ -377,6 +397,12 @@ impl FfmpegVideo {
                 };
             }
         }
+        let tie = match self.last_decoded {
+            Some(last) if last == pts => self.last_tie + 1,
+            _ => 0,
+        };
+        self.ties_seen |= tie > 0;
+        self.last_tie = tie;
         self.last_decoded = Some(pts);
         let seq = self.seq;
         self.seq += 1;
@@ -386,6 +412,8 @@ impl FfmpegVideo {
             pts,
             seq,
             after_failure: self.dec.reading_failed(),
+            index: from_start,
+            tie,
         })
     }
 
@@ -589,6 +617,8 @@ impl FfmpegVideo {
         out.decoded_on = self.decode_path.clone();
         out.run = self.run;
         out.seq = raw.seq;
+        self.current_index = raw.index;
+        self.current_tie = raw.tie;
         self.stats.frames_returned += 1;
         let frame = Arc::new(out);
         self.current = Some(frame.clone());
@@ -942,32 +972,74 @@ impl FfmpegVideo {
     }
 
     /// Put the decoder back after a stopped seek: just after the last
-    /// frame handed out, or at the start.
+    /// frame handed out, or at the start. `false` when stopped again.
     fn resume(&mut self, stop: &StopToken) -> Result<bool, MediaError> {
-        match self.position {
-            Position::InStep => Ok(true),
-            Position::Lost => {
-                let Some(current) = self.current.clone() else {
-                    let mut cost = SeekCost::default();
-                    self.seek_to_start(&mut cost)?;
-                    self.position = Position::InStep;
-                    return Ok(true);
-                };
-                // Seek to the frame handed out last; what follows it is
-                // then `pending`, and goes on with its run.
-                let returned = self.stats.frames_returned;
-                let got = self.exact(current.pts, stop)?;
-                self.stats.frames_returned = returned;
-                self.run = current.run;
-                self.seq = current.seq + 1;
-                if let Some(p) = &mut self.pending {
-                    p.seq = self.seq;
-                    self.seq += 1;
-                }
-                self.current = Some(current);
-                Ok(got.is_some())
+        if self.position == Position::InStep {
+            return Ok(true);
+        }
+        let mut cost = SeekCost::default();
+        let Some(current) = self.current.clone() else {
+            self.seek_to_start(&mut cost)?;
+            self.position = Position::InStep;
+            return Ok(true);
+        };
+        // From the start where seeks go there, else from a seek that lands
+        // at or before it: before it when frames tie, so that the frames
+        // tied with it are counted from the first.
+        let from_start = self.not_seekable || self.no_timestamps;
+        let mut next = if from_start {
+            self.seek_to_start(&mut cost)?;
+            None
+        } else {
+            let t = match self.ties_seen {
+                true => current.pts.saturating_sub(1),
+                false => current.pts,
+            };
+            match self.land(t, stop, &mut cost)? {
+                Some(Start::Seeked(first)) => first,
+                Some(Start::Forward) => None,
+                None => return Ok(false),
+            }
+        };
+        // Decode up to it, without making it again: what follows it is then
+        // `pending`, and goes on with its run.
+        let (index, tie) = (self.current_index, self.current_tie);
+        loop {
+            let r = match next.take() {
+                Some(r) => r,
+                None => match self.decode(stop) {
+                    Ok(Got::Frame(r)) => r,
+                    // It was the last frame; an error that ends the stream
+                    // comes back from the next decode.
+                    Ok(Got::End) => break,
+                    Err(_) if self.dec.has_failed() => break,
+                    Ok(Got::Stopped) => return Ok(false),
+                    Err(e) => {
+                        self.events.push(DecoderEvent::Damaged {
+                            reason: e.to_string(),
+                            last_good_pts: Some(current.pts),
+                        });
+                        continue;
+                    }
+                },
+            };
+            let after = match (index, r.index) {
+                (Some(i), Some(j)) if from_start => j > i,
+                _ => r.pts > current.pts || (r.pts == current.pts && r.tie > tie),
+            };
+            if after {
+                self.pending = Some(r);
+                break;
             }
         }
+        self.position = Position::InStep;
+        self.run = current.run;
+        self.seq = current.seq + 1;
+        if let Some(p) = &mut self.pending {
+            p.seq = self.seq;
+            self.seq += 1;
+        }
+        Ok(true)
     }
 }
 

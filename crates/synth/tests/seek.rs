@@ -888,12 +888,20 @@ fn timestamps_that_tie_or_go_backwards_seek_by_the_tie_rule() {
     let r = oracle(&ties, GOP_8);
     assert_eq!(r.frames[9].pts, r.frames[10].pts);
     // `stts` says 30 fps, but frames aren't shown every 30th of a second.
-    let d = open(&ties);
+    let mut d = open(&ties);
     assert!(
         matches!(d.info().timing, Timing::Variable { .. }),
         "{:?}",
         d.info().timing
     );
+    // Played up to 9, then a seek stopped at once: the next frame is 10,
+    // which ties with 9, and it follows on in 9's run.
+    let nine = play(&mut *d, 10);
+    assert_eq!(Seen::of(&nine), r.frames[9]);
+    stopped_seek(&mut *d);
+    let ten = play(&mut *d, 1);
+    assert_eq!(Seen::of(&ten), r.frames[10]);
+    assert_eq!((ten.run, ten.seq), (nine.run, nine.seq + 1));
 
     // Frames 10 to 14 shown a frame and a half late, so 15 is shown
     // before 14.
@@ -933,6 +941,38 @@ fn timestamps_that_tie_or_go_backwards_seek_by_the_tie_rule() {
     assert_eq!(Seen::of(&f), f15);
     let (got, e, _) = seek_pts(&mut *d, f14.pts + 1, SeekMode::Exact);
     assert_eq!((Seen::of(&got), e), (f14, Exactness::Exact));
+    // Played up to 15, then a seek stopped at once: the next frame is 16,
+    // though 14 is the first decoded after it with a greater pts.
+    let mut d = open(&back);
+    let fifteen = play(&mut *d, 16);
+    assert_eq!(Seen::of(&fifteen), f15);
+    stopped_seek(&mut *d);
+    let sixteen = play(&mut *d, 1);
+    assert_eq!(Seen::of(&sixteen), r.frames[16]);
+    assert_eq!((sixteen.run, sixteen.seq), (fifteen.run, fifteen.seq + 1));
+}
+
+/// The last of the next `n` frames.
+fn play(d: &mut dyn VideoDecode, n: usize) -> Arc<VideoFrame> {
+    let mut last = None;
+    for _ in 0..n {
+        match d.next_frame(&StopToken::never()).unwrap() {
+            NextFrame::Frame(f) => last = Some(f),
+            got => panic!("{got:?}"),
+        }
+    }
+    last.unwrap()
+}
+
+/// A seek to the start with a token stopped before it.
+fn stopped_seek(d: &mut dyn VideoDecode) {
+    let source = StopSource::new();
+    let stopped = source.current();
+    source.next();
+    assert!(matches!(
+        d.seek(Time::ZERO, SeekMode::Exact, &stopped).unwrap(),
+        SeekOutcome::Stopped
+    ));
 }
 
 #[test]
