@@ -4,4 +4,6 @@
 //! into `spherecut-agent`, or a crate below both, since the CLI will
 //! depend on that crate and it can't depend back; the CLI re-exports it.
 
+#![forbid(unsafe_code)]
+
 pub mod contract;
