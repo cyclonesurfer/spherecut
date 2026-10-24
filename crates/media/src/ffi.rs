@@ -401,8 +401,8 @@ pub enum HwError {
     /// FFmpeg's own error, e.g. for a missing render node or driver.
     #[error(transparent)]
     Ffmpeg(#[from] ff::Error),
-    /// FFmpeg's Vulkan devices could not be listed, or FFmpeg opened
-    /// another one than the one chosen (`decode::open_vulkan_device`).
+    /// FFmpeg's Vulkan devices could not be listed, or FFmpeg could not
+    /// open the one chosen or opened another (`decode::open_vulkan_device`).
     #[error("{0}")]
     Vulkan(String),
 }

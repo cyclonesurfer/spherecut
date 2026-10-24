@@ -628,7 +628,8 @@ fn describe(d: &VulkanDevice) -> String {
 ///
 /// The error is [`MediaError::Hardware`]: with FFmpeg's error when it
 /// can't open a Vulkan device at all, or with [`HwError::Vulkan`] when its
-/// devices can't be listed or it opened another one than the one chosen.
+/// devices can't be listed, or it can't open the one chosen, or it opened
+/// another one.
 pub fn open_vulkan_device(render_node: Option<&Path>) -> Result<VulkanChoice, MediaError> {
     let fail = |reason: String| MediaError::Hardware {
         kind: "vulkan".into(),
@@ -656,8 +657,10 @@ pub fn open_vulkan_device(render_node: Option<&Path>) -> Result<VulkanChoice, Me
         (default, devices[at].clone())
     } else {
         drop(default);
-        // FFmpeg reads a number as an index into the same list.
-        let dev = open_hw_device("vulkan", Some(&at.to_string()))?;
+        // FFmpeg reads a number as an index into the same list. Its
+        // default opened, so failing to open this one is an error too.
+        let dev = open_hw_device("vulkan", Some(&at.to_string()))
+            .map_err(|e| fail(format!("opening device {at}, {}: {e}", devices[at].name)))?;
         let now = list(&dev)?;
         let opened = now.iter().position(|d| d.ffmpeg_uses);
         let Some(used) = opened
