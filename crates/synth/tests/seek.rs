@@ -1364,32 +1364,47 @@ fn stopped_seek(d: &mut dyn VideoDecode) {
 fn a_stop_token_stops_a_long_seek_and_decoding_goes_on() {
     let dir = TempDir::new("long-gop");
     // One GOP: the last frame is reached only by decoding every frame.
-    // Many small frames make a long decode that is quick to write.
-    let clip = write(
-        &Spec {
-            width: 64,
-            height: 32,
-            frames: 2400,
-            gop: Some(Gop {
-                keyint: 10_000,
-                bframes: 3,
-                open: false,
-                radl: 0,
-            }),
-            ..spec("long-gop", Codec::H264)
-        },
-        &dir,
-    );
-    let mut d = open(&clip);
-    let last = FrameRate::FPS_30.frame_to_time(2399).unwrap();
-    // How long the whole seek takes, from the start.
-    let started = Instant::now();
-    let (end, _, cost) = seek_to(&mut *d, last, SeekMode::Exact);
-    let full = started.elapsed();
-    assert!(cost.frames_decoded >= 2399, "{cost:?}");
+    // Many small frames make a long decode that is quick to write. Where
+    // they decode too fast for the stops below to come part way in (frame
+    // threads on FFmpeg 8.1.3 took 35 ms for 2400 now and then, and about
+    // 100 most times), the clip is written again longer, up to 16 times.
+    let mut frames = 2400;
+    let (mut d, last, end, full) = loop {
+        let clip = write(
+            &Spec {
+                width: 64,
+                height: 32,
+                frames,
+                gop: Some(Gop {
+                    keyint: 100_000,
+                    bframes: 3,
+                    open: false,
+                    radl: 0,
+                }),
+                ..spec(&format!("long-gop-{frames}"), Codec::H264)
+            },
+            &dir,
+        );
+        let mut d = open(&clip);
+        let last = FrameRate::FPS_30
+            .frame_to_time(i64::from(frames) - 1)
+            .unwrap();
+        // How long the whole seek takes, from the start.
+        let started = Instant::now();
+        let (end, _, cost) = seek_to(&mut *d, last, SeekMode::Exact);
+        let full = started.elapsed();
+        assert!(cost.frames_decoded >= frames - 1, "{cost:?}");
+        if full > Duration::from_millis(40) || frames >= 2400 * 16 {
+            break (d, last, end, full);
+        }
+        // Enough frames for about 80 ms at this rate, and at least twice as
+        // many.
+        let times = (Duration::from_millis(80).as_nanos() / full.as_nanos().max(1)).max(1) + 1;
+        frames = (frames * u32::try_from(times).unwrap_or(16)).min(2400 * 16);
+    };
     assert!(
         full > Duration::from_millis(40),
-        "the long seek took only {full:?}"
+        "the long seek of {frames} frames took only {full:?}"
     );
     let (mut first, _, _) = seek_to(&mut *d, Time::ZERO, SeekMode::Exact);
 
