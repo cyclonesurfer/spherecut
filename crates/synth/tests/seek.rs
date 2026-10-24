@@ -10,6 +10,7 @@
 // Test helpers outside #[test] functions; panicking is the point here.
 #![allow(clippy::unwrap_used)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -58,6 +59,12 @@ const OPEN_GOP: Option<Gop> = Some(Gop {
     bframes: 3,
     open: true,
 });
+
+/// What the oracle knows of a clip in GOPs of 8.
+const GOP_8: Expect = Expect {
+    keyint: Some(8),
+    backwards: false,
+};
 
 /// 256x128 clips of 30 frames at 30 fps, in open GOPs of 8 frames with 3
 /// B-frames, unless said otherwise.
@@ -113,28 +120,31 @@ fn open(path: &Path) -> Box<dyn VideoDecode> {
         .unwrap()
 }
 
-/// Every frame of a sequential decode from the start, and the pts at
-/// which the last one's interval ends: after its duration, or after the
-/// average frame duration when it has none.
+/// Every frame of a sequential decode from the start, in output order,
+/// and the pts at which the interval of the frame with the greatest pts
+/// ends: after its duration, or after the average frame duration when it
+/// has none. Timestamps may tie or go backwards; [`shown_at`] says which
+/// frame a time shows.
 fn sequential(path: &Path) -> (Vec<Seen>, i64) {
     let mut d = open(path);
     let never = StopToken::never();
     let mut out = Vec::new();
-    let mut last_end = 0;
+    let mut last_end = i64::MIN;
     let tb = d.info().time_base;
     let ticks = |t: Time| t.to_pts(tb, spherecut_core::Rounding::Nearest).unwrap();
     let average = match d.info().timing {
         Timing::Constant(r) | Timing::Variable { average: Some(r) } => ticks(r.frame_duration()),
         Timing::Variable { average: None } => 1,
     };
+    let mut greatest = i64::MIN;
     while let NextFrame::Frame(f) = d.next_frame(&never).unwrap() {
         out.push(Seen::of(&f));
-        last_end = f.pts + f.duration.map_or(average, ticks);
+        if f.pts >= greatest {
+            greatest = f.pts;
+            last_end = f.pts + f.duration.map_or(average, ticks);
+        }
     }
     assert!(!out.is_empty(), "{}", path.display());
-    for w in out.windows(2) {
-        assert!(w[0].pts < w[1].pts, "{}: pts {:?}", path.display(), w);
-    }
     (out, last_end)
 }
 
@@ -174,12 +184,66 @@ fn seek_to(d: &mut dyn VideoDecode, t: Time, mode: SeekMode) -> Sought {
     }
 }
 
+/// The frame shown at pts `t`, by its place in output order: the one with
+/// the greatest pts at or before `t`, the later of frames that tie.
+fn shown_at(frames: &[Seen], t: i64) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (i, f) in frames.iter().enumerate() {
+        if f.pts <= t && best.is_none_or(|b| f.pts >= frames[b].pts) {
+            best = Some(i);
+        }
+    }
+    best
+}
+
+/// The frames handed out so far, by run and seq: two frames of one run
+/// whose seq follow on must follow on in the sequential decode, which is
+/// what the frame cache links runs by (D29).
+#[derive(Default)]
+struct Runs(HashMap<(u64, u64), usize>);
+
+impl Runs {
+    /// Frame `f`, which is frame `index` of the sequential decode.
+    fn note(&mut self, name: &str, f: &VideoFrame, index: usize) {
+        let key = (f.run, f.seq);
+        if let Some(&j) = self.0.get(&key) {
+            assert_eq!(j, index, "{name}: run {key:?} was frame {j}");
+        }
+        if let Some(&j) = f.seq.checked_sub(1).and_then(|s| self.0.get(&(f.run, s))) {
+            assert_eq!(j + 1, index, "{name}: run {key:?} follows frame {j}");
+        }
+        if let Some(&j) = self.0.get(&(f.run, f.seq + 1)) {
+            assert_eq!(index + 1, j, "{name}: run {key:?} comes before frame {j}");
+        }
+        self.0.insert(key, index);
+    }
+}
+
+/// What the oracle knows of a clip besides its frames.
+#[derive(Debug, Clone, Copy, Default)]
+struct Expect {
+    /// Frames from one keyframe to the next, when the clip has a fixed GOP:
+    /// a seek that doesn't decode forward then decodes at most two GOPs.
+    keyint: Option<u32>,
+    /// Its timestamps go backwards. It is played through first, which marks
+    /// it not exactly seekable, and every exact seek then decodes from the
+    /// start.
+    backwards: bool,
+}
+
+/// What [`oracle`] saw.
+struct Report {
+    frames: Vec<Seen>,
+    /// Seeks again to before the keyframe landed on, over every seek.
+    reseeks: u32,
+}
+
 /// Check every seek the oracle covers on the clip at `path`: a random
 /// time inside each frame's interval, and its first, middle and last
 /// tick, in order and shuffled; the 3 frames after each, which follow on
-/// in the seek's run; before the start and past the end; keyframe seeks;
-/// step back; frames by index.
-fn oracle(path: &Path) -> Vec<Seen> {
+/// in the seek's run; what each seek cost; before the start and past the
+/// end; keyframe seeks; step back; frames by index.
+fn oracle(path: &Path, expect: Expect) -> Report {
     let (frames, last_end) = sequential(path);
     let name = path.file_name().unwrap().to_string_lossy().into_owned();
     let mut d = open(path);
@@ -188,30 +252,59 @@ fn oracle(path: &Path) -> Vec<Seen> {
         frames[0].pts, origin,
         "{name}: the origin is the first frame"
     );
+    let never = StopToken::never();
+    if expect.backwards {
+        while let NextFrame::Frame(_) = d.next_frame(&never).unwrap() {}
+        let events = d.take_events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, DecoderEvent::NotExactlySeekable { .. })),
+            "{name}: {events:?}"
+        );
+    }
+    let mut runs = Runs::default();
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ name.len() as u64);
+    // Each distinct pts shows from there to the next one.
+    let mut starts: Vec<i64> = frames.iter().map(|f| f.pts).collect();
+    starts.sort_unstable();
+    starts.dedup();
     let mut targets = Vec::new();
-    for (i, f) in frames.iter().enumerate() {
-        let end = frames.get(i + 1).map_or(last_end, |n| n.pts);
-        assert!(end > f.pts, "{name}: frame {i} has an empty interval");
-        let span = (end - f.pts) as u64;
+    for (k, &start) in starts.iter().enumerate() {
+        let end = starts.get(k + 1).copied().unwrap_or(last_end);
+        assert!(end > start, "{name}: pts {start} has an empty interval");
+        let span = (end - start) as u64;
         for t in [
-            f.pts,
-            f.pts + (end - f.pts) / 2,
+            start,
+            start + (end - start) / 2,
             end - 1,
-            f.pts + rng.below(span) as i64,
+            start + rng.below(span) as i64,
         ] {
-            targets.push((t, i));
+            targets.push((t, shown_at(&frames, t).unwrap()));
         }
     }
-    let check = |d: &mut dyn VideoDecode, t: i64, i: usize, why: &str| {
-        let (frame, exactness, _) = seek_pts(d, t, SeekMode::Exact);
+    let mut reseeks = 0;
+    let mut check = |d: &mut dyn VideoDecode, runs: &mut Runs, t: i64, i: usize, why: &str| {
+        let (frame, exactness, cost) = seek_pts(d, t, SeekMode::Exact);
         assert_eq!(
             Seen::of(&frame),
             frames[i],
             "{name}: {why} seek to pts {t} should give frame {i}"
         );
         assert_eq!(exactness, Exactness::Exact, "{name}: pts {t}");
-        let never = StopToken::never();
+        runs.note(&name, &frame, i);
+        reseeks += cost.reseeks;
+        if !cost.forward_only && !expect.backwards {
+            // Never back to the start: a seek to before the keyframe
+            // landed on always lands earlier.
+            assert_eq!(cost.seeks, cost.reseeks + 1, "{name}: pts {t}: {cost:?}");
+            if let Some(k) = expect.keyint {
+                assert!(
+                    cost.frames_decoded <= 2 * k + 2,
+                    "{name}: pts {t}: {cost:?}"
+                );
+            }
+        }
         let mut last = frame;
         for k in 1..=3 {
             match (d.next_frame(&never).unwrap(), frames.get(i + k)) {
@@ -223,6 +316,7 @@ fn oracle(path: &Path) -> Vec<Seen> {
                         i + k
                     );
                     assert_eq!((f.run, f.seq), (last.run, last.seq + 1), "{name}: pts {t}");
+                    runs.note(&name, &f, i + k);
                     last = f;
                 }
                 (NextFrame::End, None) => break,
@@ -233,7 +327,7 @@ fn oracle(path: &Path) -> Vec<Seen> {
         }
     };
     for &(t, i) in &targets {
-        check(&mut *d, t, i, "in order:");
+        check(&mut *d, &mut runs, t, i, "in order:");
     }
     // Shuffled, so that seeks go back and forth.
     let mut shuffled = targets.clone();
@@ -241,46 +335,54 @@ fn oracle(path: &Path) -> Vec<Seen> {
         shuffled.swap(k, rng.below(k as u64 + 1) as usize);
     }
     for &(t, i) in &shuffled {
-        check(&mut *d, t, i, "shuffled:");
+        check(&mut *d, &mut runs, t, i, "shuffled:");
     }
 
     // Before the start, and past the end.
+    let first = shown_at(&frames, origin).unwrap();
     let (f, e, _) = seek_to(&mut *d, Time::from_secs(-1), SeekMode::Exact);
     assert_eq!(
         (Seen::of(&f), e),
-        (frames[0], Exactness::BeforeFirst),
+        (frames[first], Exactness::BeforeFirst),
         "{name}"
     );
-    let last = *frames.last().unwrap();
+    let last = shown_at(&frames, i64::MAX).unwrap();
     for t in [at(&*d, last_end), at(&*d, last_end + 1_000_000)] {
         let (f, e, _) = seek_to(&mut *d, t, SeekMode::Exact);
         assert_eq!(
             (Seen::of(&f), e),
-            (last, Exactness::AfterLast),
+            (frames[last], Exactness::AfterLast),
             "{name}: {t:?}"
         );
-        assert!(matches!(
-            d.next_frame(&StopToken::never()).unwrap(),
-            NextFrame::End
-        ));
+        match (d.next_frame(&never).unwrap(), frames.get(last + 1)) {
+            (NextFrame::End, None) => {}
+            (NextFrame::Frame(f), Some(want)) => assert_eq!(Seen::of(&f), *want, "{name}"),
+            (got, want) => panic!("{name}: after the end: {got:?}, expected {want:?}"),
+        }
     }
 
     // A keyframe seek gives the keyframe one seek lands on (or the first
     // frame, which an edit list can make a B-frame), which is after the
     // target when that is one of its leading pictures. An exact seek
-    // after one decodes forward to a target at or after it.
+    // after one decodes forward to a target at or after it. A stream that
+    // isn't exactly seekable gives the exact frame either way.
     let mut forward = 0;
-    for (i, f) in frames.iter().enumerate() {
-        let (k, e, _) = seek_pts(&mut *d, f.pts, SeekMode::Keyframe);
+    for &(t, i) in targets.iter().step_by(4) {
+        let (k, e, _) = seek_pts(&mut *d, t, SeekMode::Keyframe);
+        if expect.backwards {
+            assert_eq!((Seen::of(&k), e), (frames[i], Exactness::Exact), "{name}");
+            continue;
+        }
         assert_eq!(e, Exactness::KeyframeOnly, "{name}");
         assert!(
             k.key || k.pts == origin,
             "{name}: frame {} is not a keyframe",
             k.pts
         );
-        let (x, e, cost) = seek_pts(&mut *d, f.pts, SeekMode::Exact);
+        let (x, e, cost) = seek_pts(&mut *d, t, SeekMode::Exact);
         assert_eq!((Seen::of(&x), e), (frames[i], Exactness::Exact), "{name}");
-        if k.pts <= f.pts {
+        runs.note(&name, &x, i);
+        if k.pts <= t {
             assert!(
                 cost.forward_only && cost.seeks == 0,
                 "{name}: frame {i}: {cost:?}"
@@ -288,32 +390,39 @@ fn oracle(path: &Path) -> Vec<Seen> {
             forward += 1;
         }
     }
-    assert!(forward > frames.len() / 2, "{name}: {forward} forward");
+    assert!(
+        expect.backwards || forward > starts.len() / 2,
+        "{name}: {forward} forward"
+    );
 
     // Step back: the greatest pts below the current one.
     for i in (1..frames.len()).rev().step_by(5) {
         let (cur, _, _) = seek_pts(&mut *d, frames[i].pts, SeekMode::Exact);
+        let Some(want) = shown_at(&frames, cur.pts - 1) else {
+            continue;
+        };
         let (prev, e, _) = seek_pts(&mut *d, cur.pts - 1, SeekMode::Exact);
         assert_eq!(
             (Seen::of(&prev), e),
-            (frames[i - 1], Exactness::Exact),
+            (frames[want], Exactness::Exact),
             "{name}"
         );
     }
 
-    // Frames addressed by index: (n + ½) frame durations at a constant
-    // rate, counted at a variable one.
-    for n in [0, 1, frames.len() / 2, frames.len() - 1] {
-        let (f, e) = seek::seek_frame(&mut *d, n as u64, &StopToken::never())
+    // Frames addressed by index, every one: (n + ½) frame durations at a
+    // constant rate, counted at a variable one.
+    for (n, want) in frames.iter().enumerate() {
+        let (f, e) = seek::seek_frame(&mut *d, n as u64, &never)
             .unwrap()
             .unwrap();
         assert_eq!(
             (Seen::of(&f), e),
-            (frames[n], Exactness::Exact),
-            "{name}: frame {n}"
+            (*want, Exactness::Exact),
+            "{name}: frame {n} ({:?})",
+            d.info().timing
         );
     }
-    frames
+    Report { frames, reseeks }
 }
 
 /// How many frames of `path` a naive BACKWARD seek to each frame's pts
@@ -335,8 +444,10 @@ fn naive_misses(path: &Path, frames: &[Seen]) -> usize {
 fn open_gop_hevc_seeks_exactly_and_a_naive_seek_does_not() {
     let dir = TempDir::new("ogop-hevc");
     let clip = write(&spec("ogop-hevc", Codec::Hevc), &dir);
-    let frames = oracle(&clip);
-    let misses = naive_misses(&clip, &frames);
+    let r = oracle(&clip, GOP_8);
+    // Its RASL pictures are reached by seeking again.
+    assert!(r.reseeks > 0);
+    let misses = naive_misses(&clip, &r.frames);
     assert!(
         misses > 0,
         "the naive seek found every frame of open-GOP HEVC"
@@ -347,8 +458,9 @@ fn open_gop_hevc_seeks_exactly_and_a_naive_seek_does_not() {
 fn open_gop_h264_seeks_exactly_and_a_naive_seek_does_not() {
     let dir = TempDir::new("ogop-h264");
     let clip = write(&spec("ogop-h264", Codec::H264), &dir);
-    let frames = oracle(&clip);
-    let misses = naive_misses(&clip, &frames);
+    let r = oracle(&clip, GOP_8);
+    assert!(r.reseeks > 0);
+    let misses = naive_misses(&clip, &r.frames);
     assert!(
         misses > 0,
         "the naive seek found every frame of open-GOP H.264"
@@ -369,7 +481,7 @@ fn an_edit_list_hides_its_lead_in_and_clip_time_starts_after_it() {
         },
         &dir,
     );
-    let frames = oracle(&clip);
+    let frames = oracle(&clip, GOP_8).frames;
     // The three frames before the edit are decoded but never shown.
     assert_eq!(frames.len(), 24);
     let d = open(&clip);
@@ -387,7 +499,7 @@ fn a_variable_frame_rate_seeks_exactly_and_counts_frames() {
         },
         &dir,
     );
-    let frames = oracle(&clip);
+    let frames = oracle(&clip, GOP_8).frames;
     let d = open(&clip);
     assert!(
         matches!(d.info().timing, Timing::Variable { .. }),
@@ -416,7 +528,7 @@ fn ntsc_rates_and_their_matroska_remux_seek_exactly() {
         },
         &dir,
     );
-    oracle(&ntsc);
+    oracle(&ntsc, GOP_8);
     let mp4 = write(
         &Spec {
             rate: FrameRate::FPS_59_94,
@@ -424,7 +536,7 @@ fn ntsc_rates_and_their_matroska_remux_seek_exactly() {
         },
         &dir,
     );
-    let in_mp4 = oracle(&mp4);
+    let in_mp4 = oracle(&mp4, GOP_8).frames;
     assert_eq!(
         open(&mp4).info().timing,
         Timing::Constant(FrameRate::FPS_59_94)
@@ -432,7 +544,7 @@ fn ntsc_rates_and_their_matroska_remux_seek_exactly() {
     // Matroska rounds every timestamp to the millisecond, so frame n is
     // found at (n + ½) frame durations, not at n of them.
     let mkv = media::remux_to_mkv(&mp4, &dir).unwrap();
-    let in_mkv = oracle(&mkv);
+    let in_mkv = oracle(&mkv, GOP_8).frames;
     assert_eq!(in_mkv.len(), in_mp4.len());
     for (a, b) in in_mp4.iter().zip(&in_mkv) {
         assert_eq!(a.hash, b.hash);
@@ -528,7 +640,14 @@ fn every_format_and_tag_seeks_exactly() {
     ];
     for (s, pix_fmt) in &cases {
         let clip = write(s, &dir);
-        oracle(&clip);
+        let keyint = s.gop.map(|g| g.keyint);
+        oracle(
+            &clip,
+            Expect {
+                keyint,
+                ..Expect::default()
+            },
+        );
         let d = open(&clip);
         let info = d.info();
         assert_eq!(info.source_pix_fmt, *pix_fmt, "{}", s.name);
@@ -943,7 +1062,14 @@ fn formats_swscale_converts_seek_exactly_and_say_so() {
         (&uyvy, "uyvy422", "yuv422p", [0, 1, 2]),
         (&rgb, "rgb24", "gbrp", [1, 2, 0]),
     ] {
-        oracle(clip);
+        // Every frame of rawvideo is a keyframe.
+        oracle(
+            clip,
+            Expect {
+                keyint: Some(1),
+                ..Expect::default()
+            },
+        );
         let mut d = open(clip);
         assert_eq!(d.info().source_pix_fmt, source);
         assert_eq!(d.info().layout.name, target);
