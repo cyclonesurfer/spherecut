@@ -2208,12 +2208,12 @@ criterion.
 | `goldens_on_gpu_match_reference` | render | RADV (or ANV) against the CPU and ideal references, isotropic |
 | `goldens_on_host_llvmpipe` | render | the stored goldens on the machine's llvmpipe; records the drift |
 | `bench_upload_5k7` | render | `write_texture` against the test-side belt for 8- and 10-bit 5.7K and an 8K pair; ingest, mips and projection GPU ms at 1920×1080 and 3840×2160, rect 90° and tiny planet 300°; allocator block counts over 300 frames |
-| `vaapi_seek_matches_software` | synth/tests | 50 random seeks per stream on the noisy 5.7K clips and every X5 sample stream, with `Fallback::Fail`: VA-API equals software bit for bit, and the pts equal sequential decode |
+| `vaapi_seek_matches_software` | synth/tests | 50 random seeks per stream (20 above 2880², slice 2b) on the noisy 5.7K clips and every X5 sample stream, with `Fallback::Fail`: VA-API equals software bit for bit, and the pts equal sequential decode |
 | `vaapi_colorinfo_matches_software` | synth/tests | range, matrix, transfer and siting resolved identically from both paths |
 | `vaapi_download_pool_reuses_buffers` | media | under 50 minor faults per frame after 30 warm-up frames |
 | `vaapi_render_matches_software` | cli | the same RGB within 1 LSB |
 | `bench_seek_latency` | synth/tests | median and p95 from `seek()` to frame, exact and keyframe, on the noisy 5.7K clip, the X5 8K and the LRV |
-| `bench_playback_realtime_5k7_8bit`, `_10bit` | playback | the headless engine with VA-API, a real-time `SystemClock`, an offscreen 1920×1080 present at a simulated 60 Hz, the 20 s noisy clip looped for 60 s (a seek every loop). Records per-second decoded fps (minimum and median), per-stage p50 and p95, and drops. **Passes only with 0 drops after the first second**, and an unthrottled per-second minimum of at least 1.2 × 29.97 |
+| `bench_playback_realtime_5k7_8bit`, `_10bit` | playback | the headless engine with hardware decode (the path the backend picks, VA-API or Vulkan Video, amendment 9), a real-time `SystemClock`, an offscreen 1920×1080 present at a simulated 60 Hz, the 20 s noisy clip looped for 60 s (a seek every loop). Records per-second decoded fps (minimum and median), per-stage p50 and p95, and drops. **Passes only with 0 drops after the first second**, and an unthrottled per-second minimum of at least 1.2 × 29.97 |
 | `bench_playback_x5_raw` | playback | the X5's 8K dual stream decoded and uploaded as two slots in the raw view. This is M3's 8K budget, measured now; it records and does not gate |
 | `bench_playback_stitched_samples` | playback | each stitched equirect in `samples/` (clip 12 when it arrives); skips with the reason otherwise |
 | `audio_output_device_plays` | audio | section 9.3 |
@@ -2585,7 +2585,7 @@ needs a pushed commit.
 | Performance overlay: decode, upload and render ms, dropped frames, cache size | 8 | the overlay kittest; the smoke JSON |
 | Startup codec and hardware check with the doctor's fixes | 7 | the doctor banner kittest; H2 |
 | HiDPI and fractional scaling; GNOME and Hyprland, with a hardware report and screenshots | 7, 8 | the four-scale kittest; `gui_smoke` screenshots from H2 (Hyprland pending a machine) |
-| 5.7K30 stitched equirect in real time on odin and huginn with VA-API; numbers in `docs/perf.md` | 5, 8, 9 | `bench_playback_realtime_5k7_*`, `gui_smoke`, `docs/perf.md` (clip 12 when it arrives) |
+| 5.7K30 stitched equirect in real time on odin and huginn with hardware decode (amendment 9); numbers in `docs/perf.md` | 5, 8, 9 | `bench_playback_realtime_5k7_*`, `gui_smoke`, `docs/perf.md` (clip 12 when it arrives) |
 
 ## 15. Decisions to record
 

@@ -47,6 +47,12 @@ use spherecut_testkit::{bench, tier2};
 /// Random exact seeks per stream.
 const SEEKS: usize = 50;
 
+/// Random exact seeks per stream above 2880² pixels, such as the X5's 8K
+/// takes: each software seek there decodes up to a GOP at about 25 fps on
+/// odin, and there are ten such streams, so 50 each would add about a
+/// quarter of an hour per test to hw-test for little more coverage.
+const SEEKS_LARGE: usize = 20;
+
 /// Problems one stream may report before its check stops.
 const MAX_PROBLEMS: usize = 10;
 
@@ -618,7 +624,8 @@ fn damage(events: Vec<DecoderEvent>) -> Vec<Option<i64>> {
 }
 
 /// Decode `s` from start to end on the device for every frame's pts, then
-/// seek it and software to [`SEEKS`] random times, and to a keyframe
+/// seek it and software to [`SEEKS`] random times ([`SEEKS_LARGE`] above
+/// 2880²), and to a keyframe
 /// after every tenth: each seek must return the frame the sequential
 /// decode shows then, software's bit for bit, and so must the frame after
 /// it.
@@ -646,7 +653,13 @@ fn check_seeks(hw: &Hw, s: &Stream) -> Result<Vec<String>, String> {
     let mut sw = software(s).map_err(|e| format!("opening in software: {e}"))?;
     let path_ok = DecodePath::Hardware { kind: hw.kind };
     let mut rng = Rng::new(0x9e37_79b9_7f4a_7c15 ^ s.index.unwrap_or(0) as u64);
-    for i in 0..SEEKS {
+    let (w, h) = info.size;
+    let seeks = if u64::from(w) * u64::from(h) > 2880 * 2880 {
+        SEEKS_LARGE
+    } else {
+        SEEKS
+    };
+    for i in 0..seeks {
         if problems.len() >= MAX_PROBLEMS {
             problems.push(format!("stopped after {MAX_PROBLEMS} problems"));
             break;

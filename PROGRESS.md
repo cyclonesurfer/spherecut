@@ -154,8 +154,9 @@ back clean, so M0 is done.
   mid-stream fallback reopens the file and decodes from a keyframe.
 - `vaapi_seek_matches_software` and its Vulkan twin decode every sample
   stream from start to end on the device and make 50 exact seeks in each
-  in software and on the device: an estimated 10 to 15 minutes each on
-  huginn or odin for Pat's X5 set, most of it the software seeks at 8K. The noisy
+  (20 above 2880², such as the X5's 8K takes) in software and on the
+  device: an estimated 5 to 10 minutes each on huginn or odin for Pat's
+  X5 set, most of it the software seeks at 8K. The noisy
   5.7K clips they use are 2 s, made the first time by the tests at about
   200 Mbps and cached in the target's `tmp`; hw-test's 20 s clips are
   slice 5's. Their four cropped clips, two of them cropped on the left
