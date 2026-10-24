@@ -94,22 +94,29 @@ Current benchmarks:
   decoded frame on the GPU costs, on the GPU `SPHERECUT_ADAPTER` names or
   the first one Vulkan lists, for 8- and 10-bit 5760×2880 frames (NV12
   and P010) and an 8- and a 10-bit pair of 3840² frames (the X5's 8K is
-  two such streams). For each input and each `Uploader` path
-  (`WriteTexture`, the default, and `StagingBelt`), over 300 steps of
-  uploading the input and waiting for it: `upload <input>, <path>: CPU
-  per step` (the `upload` call, in ms), `…: GPU ingest and mips` (`per
-  frame` for a pair), and `…: steps that changed the allocator's blocks`,
-  with a note of the block count's range and the most memory reserved.
-  Then, on the 5.7K slots, `mips <input>: GPU` and `project <input>,
-  rectilinear 90° | tiny planet 300° to 1920x1080 | 3840x2160: GPU`, each
-  the mean of 60 passes. Each row is a run's mean, recorded as the median
-  and range of `SPHERECUT_BENCH_RUNS` runs after a warm-up. A note for
-  each 5.7K input says whether the plan's CPU trigger holds
-  (`write_texture` above 1.5 times the belt's CPU time, or above 4 ms a
-  frame); the other trigger is any step changing the allocator's blocks.
-  Either holding on huginn or odin makes the belt the default (D31). A
-  last note names the GPU and how long the bench took. A device without
-  timestamps inside encoders has no GPU rows, and a note says so.
+  two such streams), with rows as the pooled download lays a decoded
+  frame out (each rounded up to 256 bytes). For each input and each
+  `Uploader` path (`WriteTexture`, the default, and `StagingBelt`), over
+  300 steps of uploading the input and waiting for it: `upload <input>,
+  <path>: CPU per step` (the `upload` call, in ms), `…: GPU ingest and
+  mips` (`per frame` for a pair), and `…: steps that made or freed
+  allocator blocks`, from the allocator's report taken while each step
+  is in flight and once it is done, with a note of the block count's
+  range and the most memory reserved and allocated. The same rows for
+  `upload <input>, <path>, 2 in flight` come from steps that only poll,
+  two in flight, as the upload thread runs (no GPU row). Then, on the
+  5.7K slots, `mips <input>: GPU` and `project <input>, rectilinear 90° |
+  tiny planet 300° to 1920x1080 | 3840x2160: GPU`, each the mean of 60
+  passes. Each row is a run's mean, recorded as the median and range of
+  `SPHERECUT_BENCH_RUNS` runs after a warm-up. A note for each 5.7K
+  input says whether the plan's CPU trigger holds (`write_texture` above
+  1.5 times the belt's CPU time, or above 4 ms a frame), and a note for
+  each input whether `write_texture` makes or frees allocator blocks
+  within a step, waited or in flight, the other trigger. Either holding
+  on huginn or odin makes the belt the default (D31). A last note names
+  the GPU and how long the bench took. A device without timestamps
+  inside encoders has no GPU rows, and a note says so. It needs at most
+  about 1 GB on the GPU.
 
 Not benchmarks, but their numbers are in the same notes:
 `list_adapters_and_features` notes each Vulkan adapter's info (with its

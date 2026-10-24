@@ -137,9 +137,12 @@ until slice 5b gives render one such module to open its Vulkan device
   * `download_into_pool` copies a device frame into a buffer of an
     `AVBufferPool` built for the frames context's `sw_format` and the
     frame's size: every plane in one buffer, rows 256 bytes apart and
-    planes on 256-byte boundaries, so wgpu's `write_texture` can take
-    them in one copy. The buffer returns to the pool when the frame's
-    last reference drops, and a new format or size rebuilds the pool.
+    planes on 256-byte boundaries, so render's staging belt copies a
+    plane in one go (`write_texture` does where the row is a multiple of
+    256 already, or the device's `optimalBufferCopyRowPitchAlignment` is
+    256, and otherwise copies row by row; D31). The buffer returns to
+    the pool when the frame's last reference drops, and a new format or
+    size rebuilds the pool.
     The pool's allocator counts the buffers it makes, which
     `DecodeStats::download_buffers` gives.
     The left and top crop FFmpeg leaves on device frames is applied after
@@ -540,11 +543,15 @@ plan's table (section 6) on lavapipe, from synth's in-memory planes:
 Every row has a negative control, asserted on every run (implicit
 derivatives must show the seam, level 0 must shimmer, a swapped range,
 matrix or siting must miss), so a check that stops seeing what it checks
-fails. `goldens/manifest.json` records, for every row, the driver build
-and wgpu version, the commit and date, the source and the hash of its
-planes, the view, the thresholds and every measured number. A source
-whose planes hash otherwise than blessed is reported as "the synthetic
-source changed", never compared as a render.
+fails. The colour rows also have truths that don't go through render's
+colour code, which the CPU reference shares: the BT.601 and BT.709
+codings of one picture must render alike, and smooth chroma at 4:2:0
+must match the same chroma at 4:4:4. `goldens/manifest.json` records,
+for every row, the driver build and wgpu version, the commit and date,
+every source it renders and the hash of its planes, every view, the
+thresholds and every measured number. A source whose planes hash
+otherwise than blessed is reported as "the synthetic source changed",
+never compared as a render.
 
 To bless, after a change meant to move the pictures, or a Mesa update:
 
@@ -554,10 +561,14 @@ SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens
 
 It writes the PNGs and the manifest only when every row passes and
 every control fails as it should; otherwise it lists what failed and
-writes nothing. Look at the changed images and the manifest's numbers
-before committing them. A failing run writes
-`<row>-<what>-{got,want,diff}.png` to `golden-diffs/` in the cargo
-target directory (`target/golden-diffs/`, or under `CARGO_TARGET_DIR`).
+writes nothing. It prints every calibrated floor as old → new, and
+refuses one that would drop by more than 0.5 dB: a render that got
+worse, or another driver build. When the drop is meant, as it may be
+after a Mesa update, bless with `SPHERECUT_UPDATE_GOLDENS=lower`. Look
+at the changed images and the manifest's numbers before committing
+them. A failing run writes `<row>-<what>-{got,want,diff}.png` to
+`golden-diffs/` in the cargo target directory (`target/golden-diffs/`,
+or under `CARGO_TARGET_DIR`).
 
 On a real machine, the Tier 2 `goldens_on_gpu_match_reference` runs the
 rows on each GPU against the references and controls only, never

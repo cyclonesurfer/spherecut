@@ -114,6 +114,21 @@ the sections below, they win.
     (the centre stays red, F). Slice 4's `frame.rs` checks it through a
     view wide enough to show U (a fisheye wider than 180°, or a
     rectilinear view pitched up). Found in slice 3a, settled in slice 3b.
+11. **The upload path's single copy and its block trigger** (sections
+    3.5 and 4.4). The pooled download's 256-byte stride doesn't by itself
+    give `write_texture` wgpu-core's single copy: wgpu-core 30 copies in
+    one go only when the rows are as far apart as its own staging's, the
+    row rounded up to the device's `optimalBufferCopyRowPitchAlignment`
+    (128 on lavapipe), so a 256-byte pitch gets it where the row is a
+    multiple of 256 already or the device asks for 256, and otherwise
+    the rows are copied one by one (the same bytes). The staging belt
+    copies in one go at the 256-byte pitch. And "blocks allocated and
+    freed per frame" can't be read from the allocator's report once a
+    frame is done: wgpu-core has freed its staging by then, and
+    gpu-allocator the block it made for it, so `bench_upload_5k7` reads
+    the report while each step is in flight as well as once done, and
+    runs each input both waited and with two steps in flight, as the
+    upload thread does (DECISIONS D31). Found in slice 3b's review.
 
 ## 1. Summary
 
@@ -664,9 +679,11 @@ show the flags.
 
 - buffers come from an `AVBufferPool` sized from
   `hw_frames_ctx->sw_format`;
-- each plane's linesize is rounded up to 256 bytes, so the upload's
-  `write_texture` takes wgpu-core's single-copy path (stage pitch equals
-  source pitch);
+- each plane's linesize is rounded up to 256 bytes, so the staging belt
+  copies a plane in one go, and `write_texture` takes wgpu-core's
+  single-copy path where its stage pitch (the row rounded up to the
+  device's `optimalBufferCopyRowPitchAlignment`) equals that pitch
+  (amendment 11);
 - buffers return to the pool when the cache drops the frame;
 - the pool is rebuilt on `LayoutChanged`.
 
@@ -1033,8 +1050,11 @@ impl Uploader {
 What `upload` does for each frame, on the upload thread:
 
 1. **8-bit planes:** `queue.write_texture` into the slot's level 0, with
-   `bytes_per_row` set to the frame's stride. The pooled download's
-   256-aligned stride makes wgpu-core take its single-copy path. A software
+   `bytes_per_row` set to the frame's stride. wgpu-core takes its
+   single-copy path when that stride equals its stage pitch, the row
+   rounded up to the device's `optimalBufferCopyRowPitchAlignment`, which
+   the pooled download's 256-aligned stride is where the row is a
+   multiple of 256 already or the device asks for 256 (amendment 11). A
    frame with another stride takes the row-by-row path, which copies the
    same bytes.
 2. **Deeper planes:** `write_texture` into the scratch, then the ingest
@@ -1059,7 +1079,8 @@ checks it runs) compares `write_texture` with a test-side
   `finish_and_recall_on_submit`;
 - inputs are 8-bit and 10-bit 5.7K frames and an 8K pair;
 - each run covers 300 frames, recording CPU ms, GPU ms and
-  `device.generate_allocator_report()` block counts.
+  `device.generate_allocator_report()` block counts, read while each
+  frame is in flight as well as once it is done (amendment 11).
 
 **Trigger.** The uploader switches to the belt (inside `Uploader`, with
 nothing else changing) if either of these holds on huginn or odin:

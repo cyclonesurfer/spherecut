@@ -1881,7 +1881,11 @@ one try per backend, not one per clip. Downloading only the frame a seek
 returns saves a copy per frame decoded on the way, the copy that makes
 VA-API slow on odin (amendment 9). A pooled buffer saves the page faults
 of a fresh 25 or 50 MB buffer per 5.7K frame, and 256-byte rows let
-`write_texture` copy it in one go. Taking over the hardware decoder's
+render's staging belt copy it in one go (`write_texture` copies in one
+go only at its own staging pitch, the row rounded up to the device's
+`optimalBufferCopyRowPitchAlignment`, which 256-byte rows meet where the
+row is a multiple of 256 already or the device asks for 256; slice 3b
+found this, D31). Taking over the hardware decoder's
 place makes the continuation exact in every kind of stream the seek
 oracle covers, and the fault injection checks it at every frame.
 
@@ -1980,8 +1984,9 @@ What:
   pass works it out from the code in integers (no GPU division or log2
   can move a code near a tie, and 12-bit codes come within an f32 ulp of
   one); the mips of deep planes and the projection round their f32 with
-  `round_f16` in `shaders/common.wgsl` (bit arithmetic, and a scale by
-  2^24 for subnormals). unorm8 targets are left to the driver: lavapipe
+  `round_f16` in `shaders/common.wgsl` (bit arithmetic, a scale by 2^24
+  for subnormals, and a signed infinity from 65520 up, where the nearest
+  half is infinite). unorm8 targets are left to the driver: lavapipe
   rounds them to nearest, as Vulkan asks, and the 8-bit mips match an
   independent area mean rounded to nearest at every texel tested.
 - **Mips**: one area-weighted shader for all four formats, a render pass
@@ -2107,9 +2112,10 @@ where each siting's definition puts it (calibrated with luma, not the
 renderer's chroma arithmetic, which the GPU and the reference share: a
 mirrored offset passed every other render test). The mips match an area
 mean computed independently to one code at 8 bits, and exactly (its nearest half) for deep planes unless the mean is
-within a millionth of a tie; every 10- and 12-bit code ingests as its
-nearest half; and the linear target holds the nearest half of every
-grey level's EOTF. The upload bench's smoke run (640×320, 4 frames) shows a
+within a millionth of a tie; every 10-, 12- and 16-bit code ingests as
+its nearest half; `round_f16` itself returns the nearest half of every
+value tested (below); and the linear target holds the nearest half of
+every grey level's EOTF. The upload bench's smoke run (640×320, 4 frames) shows a
 steady allocator block count on both paths.
 
 Why: as the plan's D29 says. Every format used is guaranteed on every
@@ -2162,22 +2168,82 @@ are written:
   (D32).
 - `bench_upload_5k7` (`tests/upload.rs`): for 8- and 10-bit 5760×2880
   frames, and an 8- and a 10-bit pair of 3840² frames (the X5's 8K is
-  two 3840² streams), both upload paths' CPU time per step, the GPU time of their ingest and
-  mips, and how many of 300 steps changed the allocator's block count
-  (the plan's second trigger), with the blocks and reserved memory in a
-  note; then, on the 5.7K slots, the mips alone and the projection at
-  1920×1080 and 3840×2160, rectilinear 90° and a 300° tiny planet. Each
-  row is D20's median and range over `SPHERECUT_BENCH_RUNS` runs after a
-  warm-up, and a note says whether the CPU trigger holds for each 5.7K
-  input. It runs on the GPU `SPHERECUT_ADAPTER` names, or the first one
-  Vulkan lists, and skips without one. Its Tier 1 smoke run (640×320
-  frames, 320² pairs, 3 steps) replaces 3a's.
+  two 3840² streams), each laid out as the pooled download lays out a
+  decoded frame (every plane's row rounded up to 256 bytes), both upload
+  paths, 300 steps a run, paced two ways: waiting for each step, as a
+  frame's display would, for the CPU time per step and the GPU time of
+  the ingest and mips; and with two steps in flight, only polling, as
+  the upload thread does with the slot ring's two ready slots. Each pace
+  counts the steps that made or freed allocator blocks (the plan's
+  second trigger), from the allocator's report taken while a step is in
+  flight (its uploads returned, the GPU not done) and once it is done,
+  with the block counts and the most memory reserved and allocated in a
+  note, and a note per input says whether `write_texture` makes or frees
+  blocks within a step. Then, on the 5.7K slots, the mips alone and the
+  projection at 1920×1080 and 3840×2160, rectilinear 90° and a 300° tiny
+  planet. Each row is D20's median and range over `SPHERECUT_BENCH_RUNS`
+  runs after a warm-up, and a note says whether the CPU trigger holds
+  for each 5.7K input. It runs on the GPU `SPHERECUT_ADAPTER` names, or
+  the first one Vulkan lists, and skips without one, or when the name
+  matches no adapter or a CPU one; a GPU that is there and refuses a
+  device fails it. It needs at most about 1 GB on the GPU. Its Tier 1
+  smoke run (640×320 frames, 320² pairs, 3 steps) replaces 3a's.
 
 Where the bench differs from the plan: the pair comes at 10 bits too,
 since 10-bit 8K is twice the bytes; the belt is 3a's
 `UploadPath::StagingBelt` (above), not a test-side path; and a pair's GPU
 row is per frame, since the uploader's timer returns its latest span,
-the pair's second frame, which is the first one's size.
+the pair's second frame, which is the first one's size. Two more came
+from the slice's review:
+
+- **The allocator is read in flight too.** Once a step is done, wgpu-core
+  has freed its `write_texture` staging, and gpu-allocator (0.28) the
+  block it made for it, since it frees an emptied block unless it is the
+  last of its memory type. Reports taken only then, as the bench's first
+  version took them, count growth from one settled state to the next,
+  never a block made and freed within a step, which is what the trigger
+  names: on lavapipe a waited pair of 3840² NV12 frames settles in one
+  64 MiB block and makes and frees a 128 MiB one every step, which that
+  version reported as 0. A Tier 1 test
+  (`the_bench_sees_a_steps_own_blocks`) shows the in-flight report holds
+  a step's staging and, waited, sees the block come and go at every
+  step; with two steps in flight the staging block never empties there.
+- **The frames have the pooled download's stride.** `write_texture`
+  copies a plane in one go only when its rows are as far apart as its
+  own staging's, the row rounded up to the device's
+  `optimalBufferCopyRowPitchAlignment` (wgpu-core 30, `queue.rs`; 128 on
+  lavapipe), and the belt only when they are 256 bytes apart. With tight
+  rows, as the bench's first frames had, a 5.7K NV12 plane's 5760-byte
+  rows went to `write_texture` in one go and through the belt row by
+  row; a decoded frame's 5888-byte rows go the other way round, as they
+  now do. P010 at 5.7K and the 3840-wide planes are multiples of 256
+  already. The plan (sections 3.5 and 4.4) and D30 said the pooled 256-byte
+  stride gives `write_texture` its single copy: that holds only where
+  the row is a multiple of 256 already or the device asks for 256
+  (amendment 11). Copying row by row costs a memcpy per row of the same
+  bytes.
+
+The review also found `round_f16` untested where it matters least and
+inexact where no pass goes. No test reached its subnormal branch (no
+10- or 12-bit code gives a half below 2^−14; 15- and 16-bit codes,
+filtered edges into black and 12-bit limited range near black do), and
+from 65520 up it returned 65536 or more, which isn't a half and which
+lavapipe stored as the largest half, where IEEE rounding and
+`readback::round_f16` give infinity. It now returns a signed infinity
+there, so the store is exact at any magnitude, and a Tier 1 test
+(`round_f16_is_the_nearest_half`, `tests/render.rs`) runs it alone on
+every finite half of both signs, every midpoint between two of them,
+each midpoint an f32 ulp either side and values far past the largest
+half, into an `Rgba32Float` and an `Rgba16Float` target, against a
+bit-level round to nearest even written in the test: none of the 254
+976 values is off, where dropping the subnormal branch puts 6146 off and
+dropping the infinity 12. No pass stores such values today, and no
+golden moved. The ingest test now ingests every 16-bit code too: codes 1
+to 3 are subnormal halves, and 65455 and 65519 are codes an f32 division
+would round to the wrong side of a tie. The ingest's own subnormal
+branch gives the same halves as its normal one for every code of 16
+bits or fewer, so no ingest can show it is needed; it is kept for the
+exactness it states.
 
 ## D32. Golden images
 
@@ -2199,7 +2265,7 @@ What:
   The plan's `mips_area` row is slice 3a's
   `mips_are_area_means_at_odd_sizes` in `tests/upload.rs` (45 to 22 and
   23 to 11, R8, Rg8, R16Float and Rg16Float, against an independent area
-  mean), which covers it whole. The set is 360 kB, 329 kB of it PNGs
+  mean), which covers it whole. The set is 368 kB, 329 kB of it PNGs
   (the plan guessed 0.5 MB). The decode-to-render goldens through
   `spherecut frame` (`crates/cli/tests/frame.rs`) are slice 4's.
 - **The manifest** (`goldens/manifest.json`, schema
@@ -2211,7 +2277,11 @@ What:
   range, matrix, siting) and the FNV-64 of its planes' rows without
   padding, the view (projection, field of view, yaw, pitch, roll, the
   quaternion, the filter, a morph), the PNG's FNV-64, every threshold,
-  and every number the row measured, its controls' among them.
+  and every number the row measured, its controls' among them. A row
+  that renders more than one source, or through more than one view,
+  records each of them, as a list in the row's order
+  (`passthrough_exact` has two sources and eight views), and a row whose
+  entry lacks a source, its hash or a view fails.
 - **The rules:**
 
   | Against | Rule |
@@ -2222,9 +2292,12 @@ What:
   | `reference::render_trilinear` (f64) | PSNR ≥ the floor calibrated at blessing (measured − 3 dB, never below 36 dB), and no channel more than 0.1 off |
   | `synth::render_view_ideal` | over the pixels the analytic LOD puts 2.5 levels down or more, at least 1000 of them: PSNR ≥ the floor calibrated at blessing (measured − 1 dB), and at least 3 dB above the level-0 control |
   | a roll twin (seam and poles) | no pixel more than 2/255 apart; the implicit-LOD control over 100 such pixels |
+  | the same picture in the other matrix (`matrix_601_709`) | the BT.601 and BT.709 codings' renders at least 40 dB apart |
+  | the same smooth chroma at 4:4:4 (`siting_left_center`) | each siting at least 45 dB from it, and 10 dB nearer than tagged as the other |
 
   Every other row's thresholds are the plan's (its table), and its
-  controls must clear the bounds below.
+  controls must clear the bounds below. A bound the plan gives as "over"
+  is strict: 100 bad pixels, or 10 LSB, fails it.
 - **Blessing.** `SPHERECUT_UPDATE_GOLDENS=1 cargo test -p
   spherecut-render --test goldens` runs every row and writes the PNGs
   and the manifest only if all of them pass, every control failing as it
@@ -2232,23 +2305,39 @@ What:
   failed and writes nothing. It removes PNGs no row wrote. A floor
   calibrated at blessing goes into the manifest and every later run
   reads it from there; a row whose floor is missing fails with the
-  command to run. A failing run writes `<row>-<what>-{got,want,diff}.png`
-  (the difference ×16) into `golden-diffs/` in the cargo target
-  directory, which each run clears first.
+  command to run. A blessing compares each floor it calibrates with the
+  one blessed before, prints every floor as old → new on the terminal
+  (past the test harness's capture), and fails a floor that would drop
+  by more than 0.5 dB, naming it and the opt-in:
+  `SPHERECUT_UPDATE_GOLDENS=lower` lets it. A failing run writes
+  `<row>-<what>-{got,want,diff}.png` (the difference ×16) into
+  `golden-diffs/` in the cargo target directory, which each run clears
+  first.
 - **The harness's own tests**, Tier 1, beside it: the drift rule on
   made images (one LSB everywhere is 48.13 dB, which passes between
   builds and fails at the same one; half a pixel's shift fails); a
   blessing into a scratch directory with one failed row writes nothing,
-  and a clean one then passes a plain run, identical; a changed source
-  hash is exactly one failure, the synthetic-source one with the driver
-  build in it, and one pixel a step off fails as not identical and
-  writes its diffs; the passthrough model and its bound (below); the two
-  Tier 2 paths on lavapipe; and telling driver builds apart.
+  and a clean one then passes a plain run, identical; a blessing over a
+  floor blessed 0.4 dB higher goes ahead, over one 2 dB higher refuses,
+  names the floor and the opt-in and writes nothing, and with the opt-in
+  lowers it; an "over" bound fails at the bound; a changed source hash
+  is exactly one failure, the synthetic-source one with the driver build
+  in it, and one pixel a step off fails as not identical and writes its
+  diffs; the passthrough model and its bound (below); the two Tier 2
+  paths on lavapipe; and telling driver builds apart. Each blesses into
+  a scratch directory of its own, which it removes when it passes and
+  keeps, with its diffs, when it fails. The Tier 2 paths' tests ran on
+  `tests/goldens` at first, and the blessing command runs them beside
+  `goldens`, which rewrites it: after a change, they read it halfway
+  through the rewrite and failed the command (exit 101) although it had
+  written everything.
 - **Tier 2.** `goldens_on_gpu_match_reference` runs every row on each
   GPU Vulkan lists (or the one `SPHERECUT_ADAPTER` names) against the
   CPU and ideal references and the controls only, never against the
   PNGs, and notes each row's numbers for the hw-test report. It skips
-  with "no GPU: Vulkan lists only …" when there is none.
+  with "no GPU: Vulkan lists only …" when there is none, or when
+  `SPHERECUT_ADAPTER` names no adapter there or a CPU one; a GPU that is
+  there and refuses a device fails it.
   `goldens_on_host_llvmpipe` runs the whole set on the machine's own
   llvmpipe by the other-driver rule whatever its build, and notes the
   drift. Both hold the rows to the floors lavapipe was blessed with.
@@ -2262,17 +2351,17 @@ has every number). Each control clears its bound:
 | `rect_ypr` | the red F's centre, the prime meridian at 40° N and the equator at 50° E where the convention's words put them | each angle's sign turned moves F's centre off red: 3 of 3 (3) |
 | `fisheye_360` | 7888 pixels past θ = π, all black (`fisheye_180` has none) | |
 | `stereo_tinyplanet` | ideal 30.7 dB on 2600 pixels | level 0 23.9 dB, 6.9 dB below (3 dB) |
-| `seam_quad` | 0 bad pixels (at most 1 LSB apart) | implicit LOD: 288 (100; lodprobe 504) |
-| `zenith_quad`, `nadir_quad` | 0 | 185 and 186 (100; lodprobe 344) |
-| `tinyplanet_pole` | 0 | 175 (100; lodprobe 192) |
+| `seam_quad` | 0 bad pixels (at most 1 LSB apart) | implicit LOD: 288 (over 100; lodprobe 504) |
+| `zenith_quad`, `nadir_quad` | 0 | 185 and 186 (over 100; lodprobe 344) |
+| `tinyplanet_pole` | 0 | 175 (over 100; lodprobe 192) |
 | `shimmer_tinyplanet` | RMS change 7.3 LSB a frame against the ideal's 19.7; ideal 25.3 dB on 10044 pixels | level 0 changes 5.0 times the ideal's (3), and is 14.3 dB further from it in the worst frame (3 dB) |
 | `shimmer_fisheye360` | 2.2 against 30.2; 19.5 dB on 28532 pixels | 3.3 times, 9.3 dB |
 | `tenbit_ramp` | P010 and `yuv420p10` identical, no step down, within 0.14 10-bit codes of the CPU | |
 | `layout_invariance` | NV12 and I420, each at three strides: 6 renders identical | |
 | `passthrough_exact` | full range: every k; limited: as the model says, with 86, 159 and 165 one code off the formula | |
-| `range_full_vs_limited` | 10-bit: 1 LSB apart (8-bit: 4) | full decoded as limited: 22 LSB (10; 8-bit: 21) |
-| `matrix_601_709` | 601 53.3 dB, 709 53.1 dB | 601 decoded as 709: 30.8 dB, 19.5 dB under its floor (10 dB) |
-| `siting_left_center` | 10-bit: Left 0.56 and Center 0.52 LSB from the CPU (8-bit: 1.99, 1.76) | Left decoded as Center: 53 LSB (10; 8-bit: 55) |
+| `range_full_vs_limited` | 10-bit: 1 LSB apart (8-bit: 4) | full decoded as limited: 22 LSB (over 10; 8-bit: 21) |
+| `matrix_601_709` | 601 53.3 dB, 709 53.1 dB from the CPU; the two renders 46.3 dB apart (at most 13 LSB) | 601 decoded as 709: 30.8 dB, 19.5 dB under its floor (10 dB) |
+| `siting_left_center` | stripes, 10-bit: Left 0.56 and Center 0.52 LSB from the CPU (8-bit: 1.99, 1.76); smooth chroma: Left 51.4 and Center 51.5 dB from its 4:4:4 truth | stripes, Left decoded as Center: 53 LSB (over 10; 8-bit: 55); smooth chroma, each tagged as the other: 33.9 and 34.1 dB, 17.5 and 17.4 dB further (10 dB) |
 | `crop_half` | 12096 pixels outside the cover, all black; CPU 54.2 dB | |
 | `lod_heatmap` | levels within 0.002 of `uv_footprint`'s | |
 
@@ -2362,6 +2451,41 @@ Where this differs from the plan, from the evidence:
 - **No channel more than 0.1 off the CPU**, beside the PSNR floor, as
   3a's render tests have it: a seam column or a misplaced rim barely
   moves PSNR.
+- **The colour rows have truths outside render's colour code.** The plan
+  holds `matrix_601_709` and `siting_left_center` to the CPU reference,
+  which builds its colour from the same `color::fold` and
+  `color::chroma_transform` as the GPU's uniform. With BT.601 and BT.709
+  swapped inside the fold, or Left and Center inside `chroma_transform`,
+  both rows passed (the siting row with its two numbers traded), and a
+  blessing rewrote the PNGs; only the stored images, for the matrices
+  `stereo_tinyplanet`'s ideal, and `color.rs`'s unit tests failed (the
+  slice's review found it). So `matrix_601_709` also holds the two
+  codings' renders to each other: synth codes the same picture with
+  core's Kr and Kb, so they agree whatever render does with either, and
+  a swap in the fold takes them from 46.3 to 24.6 dB. And
+  `siting_left_center` also renders red and blue swinging smoothly
+  against each other (32 texels a period), coded at 4:2:0 with each
+  chroma sample taken from the pattern where H.273 puts that siting's
+  sample, its Y′CbCr written out in the test from H.273, against the
+  same pattern coded at 4:4:4, where no siting applies; with Left and
+  Center swapped in `chroma_transform`, each siting falls from 51.4 to
+  33.9 or 34.1 dB and comes out 17.5 dB further from the truth than
+  tagged as the other. Both swaps now fail a plain run, and the
+  blessing. The CPU comparison still shares the colour fold: it shows
+  the GPU computes what render's colour code says, not that the code is
+  right, which these truths, `color.rs`'s unit tests (they code colours
+  by H.273's own formulas) and slice 4's swscale cross-check show.
+- **A blessing won't lower a floor by more than 0.5 dB unasked.** The
+  plan calibrates at blessing; done that way alone, a blessing never
+  read the floors it replaced, so only the 36 dB floor and the 0.1
+  channel check stood between a worse render and a lower floor. With the
+  matrices swapped in the fold, `stereo_tinyplanet`'s ideal fell to
+  27.98 dB and failed its 29.71 dB floor in a plain run, and a blessing
+  set 26.98 and wrote. At one driver build a floor comes out the same at
+  every blessing, so a drop past 0.5 dB is a render that got worse or
+  another driver build, and `SPHERECUT_UPDATE_GOLDENS=lower` says it is
+  meant; the same swap now makes the blessing refuse on that floor, as
+  well as on `matrix_601_709`. Rising floors are written as they come.
 - **`rect_ypr`'s markers** are placed from the convention's words (yaw
   turns right about the world's up, pitch looks up about the camera's
   right, roll turns the camera clockwise as seen from behind; +X right,
@@ -2408,9 +2532,13 @@ changes `driver_info`, and the stored images are then held by the
 other-driver rule until blessed again. On a GPU the rows are held to
 lavapipe's calibrated floors, which a driver's own `atan2` and `asin`
 may miss near the rim (the plan's lodprobe measured 40.8 to 55.8 dB,
-falling toward it); the report's notes then say by how much. The NV12 range and siting numbers are recorded,
-not asserted. A blessing writes the commit and date it was made at, so
-blessing again on another day changes the manifest, though no image.
+falling toward it); the report's notes then say by how much. The NV12
+range and siting numbers are recorded, not asserted. A blessing writes
+the commit and date it was made at, so blessing again on another day
+changes the manifest, though no image. The 0.5 dB rule holds a floor
+against the one blessed before it, not against the first, so blessings
+that each lower a floor by less than that can walk it down; the
+manifest's diff shows each step.
 
 Revisit if: a GPU misses a floor in `goldens_on_gpu_match_reference`
 (per-driver floors in the manifest, never lower ones); a Mesa build
