@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 
 use spherecut_core::FrameRate;
 use spherecut_media::decode::VideoDecoder;
-use spherecut_media::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 use spherecut_media::probe;
 
 /// Ten 256x128 frames of H.264, in a file whose name has a Latin-1 "é".
@@ -26,7 +26,9 @@ fn clip() -> PathBuf {
         rate: FrameRate::FPS_30,
         layout: PixelLayout::Yuv420p,
         options: Vec::new(),
-        bt709_limited: true,
+        color: ColorTags::BT709_LIMITED,
+        edit_start: 0,
+        time_base: None,
     };
     let mut w = Mp4Writer::create(&dir.join("clip.mp4"), &settings, None).unwrap();
     for i in 0..10 {

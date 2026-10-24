@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 
 use spherecut_core::FrameRate;
-use spherecut_media::encode::{AudioSettings, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+use spherecut_media::encode::{
+    AudioSettings, ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes,
+};
 use spherecut_media::inject::{self, EntryEdit, TrackKind};
 use spherecut_media::mp4::{self, Mp4Tree};
 use spherecut_media::spherical::{StereoMode, write};
@@ -102,7 +104,9 @@ impl Spec {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            bt709_limited: true,
+            color: ColorTags::BT709_LIMITED,
+            edit_start: 0,
+            time_base: None,
         }
     }
 }
@@ -524,7 +528,9 @@ pub fn write_mjpeg_declaring(
         // FFmpeg's MJPEG encoder takes limited-range 4:2:0 only as an
         // unofficial extension.
         options: vec![("strict".into(), "-1".into())],
-        bt709_limited: true,
+        color: ColorTags::BT709_LIMITED,
+        edit_start: 0,
+        time_base: None,
     };
     let mut w = Mp4Writer::create(&path, &settings, None)?;
     for _ in 0..2 {

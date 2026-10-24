@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use spherecut_core::FrameRate;
 use spherecut_media::decode::VideoDecoder;
 use spherecut_media::encode::{
-    AudioSettings, EncodeError, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes,
+    AudioSettings, ColorTags, EncodeError, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes,
 };
 use spherecut_media::ff;
 use spherecut_media::inject::{self, EntryEdit, InjectError, TrackKind};
@@ -284,7 +284,9 @@ fn video_settings() -> VideoSettings {
         rate: FrameRate::FPS_30,
         layout: PixelLayout::Yuv420p,
         options: vec![("preset".into(), "ultrafast".into())],
-        bt709_limited: true,
+        color: ColorTags::BT709_LIMITED,
+        edit_start: 0,
+        time_base: None,
     }
 }
 

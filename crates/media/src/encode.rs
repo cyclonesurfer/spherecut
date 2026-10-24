@@ -13,6 +13,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use spherecut_core::video::ColorCodes;
 use spherecut_core::{FrameRate, Rational};
 use thiserror::Error;
 
@@ -42,20 +43,114 @@ fn ctx<T>(r: Result<T, ff::Error>, context: impl FnOnce() -> String) -> Result<T
     })
 }
 
-/// Pixel layouts the writer accepts.
+/// Pixel layouts the writer accepts: planar YUV, 8-bit or 10-bit in the
+/// low bits of little-endian u16 samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelLayout {
-    /// 8-bit 4:2:0 planar.
+    /// 8-bit 4:2:0.
     Yuv420p,
-    /// 10-bit 4:2:0 planar, little-endian u16 samples in the low bits.
+    /// 10-bit 4:2:0.
     Yuv420p10,
+    /// 8-bit 4:2:2.
+    Yuv422p,
+    /// 10-bit 4:2:2.
+    Yuv422p10,
+    /// 8-bit 4:4:4.
+    Yuv444p,
+    /// 10-bit 4:4:4.
+    Yuv444p10,
 }
 
 impl PixelLayout {
     fn ff(self) -> ff::format::Pixel {
+        use ff::format::Pixel;
         match self {
-            PixelLayout::Yuv420p => ff::format::Pixel::YUV420P,
-            PixelLayout::Yuv420p10 => ff::format::Pixel::YUV420P10LE,
+            PixelLayout::Yuv420p => Pixel::YUV420P,
+            PixelLayout::Yuv420p10 => Pixel::YUV420P10LE,
+            PixelLayout::Yuv422p => Pixel::YUV422P,
+            PixelLayout::Yuv422p10 => Pixel::YUV422P10LE,
+            PixelLayout::Yuv444p => Pixel::YUV444P,
+            PixelLayout::Yuv444p10 => Pixel::YUV444P10LE,
+        }
+    }
+
+    /// Whether its samples are 10-bit, in u16s.
+    pub fn ten_bit(self) -> bool {
+        matches!(
+            self,
+            PixelLayout::Yuv420p10 | PixelLayout::Yuv422p10 | PixelLayout::Yuv444p10
+        )
+    }
+
+    /// log2 of the chroma planes' horizontal and vertical subsampling.
+    pub fn chroma_shift(self) -> (u32, u32) {
+        match self {
+            PixelLayout::Yuv420p | PixelLayout::Yuv420p10 => (1, 1),
+            PixelLayout::Yuv422p | PixelLayout::Yuv422p10 => (1, 0),
+            PixelLayout::Yuv444p | PixelLayout::Yuv444p10 => (0, 0),
+        }
+    }
+
+    /// The size of each plane of a `width` × `height` frame.
+    pub fn plane_sizes(self, width: u32, height: u32) -> [(usize, usize); 3] {
+        let (sx, sy) = self.chroma_shift();
+        let (w, h) = (width as usize, height as usize);
+        let c = (w.div_ceil(1 << sx), h.div_ceil(1 << sy));
+        [(w, h), c, c]
+    }
+}
+
+/// The colour a stream is tagged with, as FFmpeg's ints:
+/// [`ColorCodes`] says what they mean. libx264 and libx265 write all
+/// five to the stream's VUI, `chroma_location` included (checked with
+/// FFmpeg 6.1.1's `trace_headers`, DECISIONS D30).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorTags {
+    pub range: i32,
+    pub matrix: i32,
+    pub transfer: i32,
+    pub primaries: i32,
+    pub chroma_location: i32,
+}
+
+impl ColorTags {
+    /// No tags at all: the file leaves every field unspecified.
+    pub const NONE: ColorTags = ColorTags {
+        range: 0,
+        matrix: 2,
+        transfer: 2,
+        primaries: 2,
+        chroma_location: 0,
+    };
+
+    /// BT.709 matrix, primaries and transfer, limited range, and no
+    /// chroma location.
+    pub const BT709_LIMITED: ColorTags = ColorTags {
+        range: 1,
+        matrix: 1,
+        transfer: 1,
+        primaries: 1,
+        chroma_location: 0,
+    };
+
+    /// The same tags with chroma location `loc` (FFmpeg's
+    /// `AVChromaLocation`: 1 left, 2 center, 3 top left).
+    pub const fn with_chroma_location(self, loc: i32) -> ColorTags {
+        ColorTags {
+            chroma_location: loc,
+            ..self
+        }
+    }
+}
+
+impl From<ColorTags> for ColorCodes {
+    fn from(t: ColorTags) -> Self {
+        ColorCodes {
+            primaries: t.primaries,
+            transfer: t.transfer,
+            matrix: t.matrix,
+            range: t.range,
+            chroma_location: t.chroma_location,
         }
     }
 }
@@ -70,8 +165,19 @@ pub struct VideoSettings {
     pub layout: PixelLayout,
     /// Encoder private options, e.g. `[("crf", "18"), ("preset", "fast")]`.
     pub options: Vec<(String, String)>,
-    /// Signal BT.709 matrix/primaries/transfer and limited range.
-    pub bt709_limited: bool,
+    /// What the stream says its colour is.
+    pub color: ColorTags,
+    /// Frames at the start that the file's edit list (`elst`) hides: they
+    /// are encoded and stored, and a player decodes them as references
+    /// but doesn't show them, as in a file trimmed without re-encoding.
+    /// They get negative timestamps, from which FFmpeg's MP4 muxer writes
+    /// the edit. Each frame given to [`Mp4Writer::push_video`] counts;
+    /// [`Mp4Writer::push_video_at`] sets its own timestamps.
+    pub edit_start: u32,
+    /// The stream's time base, in seconds per tick. `None` is one tick
+    /// per frame, 1 / `rate`. With another, `push_video` needs a frame to
+    /// be a whole number of ticks.
+    pub time_base: Option<Rational>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,7 +210,12 @@ pub struct Mp4Writer {
     width: u32,
     height: u32,
     layout: PixelLayout,
+    /// The timestamp `push_video` gives its next frame.
     next_video_pts: i64,
+    /// Ticks of `video_tb` per frame at the stream's rate, when whole.
+    frame_ticks: Option<i64>,
+    /// The timestamp of the last frame pushed.
+    last_video_pts: Option<i64>,
     audio: Option<AudioState>,
 }
 
@@ -280,18 +391,36 @@ impl Mp4Writer {
             || "video encoder context".into(),
         )?;
         let fps = ff_rational(v.rate.as_rational())?;
-        let video_tb = fps.invert();
+        let tb = match v.time_base {
+            Some(tb) if tb.is_positive() => tb,
+            Some(tb) => return Err(EncodeError::Invalid(format!("time base {tb}"))),
+            None => v.rate.frame_duration().as_rational(),
+        };
+        let video_tb = ff_rational(tb)?;
+        // Ticks per frame: (1 / rate) / tb, when that is whole.
+        let frame_ticks = v
+            .rate
+            .frame_duration()
+            .as_rational()
+            .checked_div(tb)
+            .ok()
+            .filter(|t| t.den() == 1)
+            .map(|t| t.num());
+        let first_pts = match frame_ticks {
+            Some(t) => -i64::from(v.edit_start) * t,
+            None if v.edit_start == 0 => 0,
+            None => {
+                return Err(EncodeError::Invalid(format!(
+                    "an edit list needs whole frames of the time base {tb}"
+                )));
+            }
+        };
         venc.set_width(v.width);
         venc.set_height(v.height);
         venc.set_format(v.layout.ff());
         venc.set_time_base(video_tb);
         venc.set_frame_rate(Some(fps));
-        if v.bt709_limited {
-            venc.set_colorspace(ff::color::Space::BT709);
-            venc.set_color_range(ff::color::Range::MPEG);
-            venc.set_color_primaries(ff::color::Primaries::BT709);
-            venc.set_color_transfer_characteristic(ff::color::TransferCharacteristic::BT709);
-        }
+        ffi::set_color_tags(&mut venc, v.color.into());
         if global_header {
             venc.set_flags(ff::codec::Flags::GLOBAL_HEADER);
         }
@@ -369,24 +498,45 @@ impl Mp4Writer {
             width: v.width,
             height: v.height,
             layout: v.layout,
-            next_video_pts: 0,
+            next_video_pts: first_pts,
+            frame_ticks,
+            last_video_pts: None,
             audio,
         })
     }
 
-    /// Append the next video frame.
+    /// Append the next video frame, one frame after the last.
     pub fn push_video(&mut self, planes: &YuvPlanes) -> Result<(), EncodeError> {
+        let Some(ticks) = self.frame_ticks else {
+            return Err(EncodeError::Invalid(
+                "a frame is not a whole number of ticks of the time base: use push_video_at".into(),
+            ));
+        };
+        let pts = self.next_video_pts;
+        self.push_video_at(planes, pts)?;
+        self.next_video_pts = pts + ticks;
+        Ok(())
+    }
+
+    /// Append the next video frame at timestamp `pts`, in ticks of the
+    /// stream's time base, for a variable frame rate. Timestamps must
+    /// increase; negative ones are before the edit list's start.
+    pub fn push_video_at(&mut self, planes: &YuvPlanes, pts: i64) -> Result<(), EncodeError> {
+        if let Some(last) = self.last_video_pts
+            && pts <= last
+        {
+            return Err(EncodeError::Invalid(format!(
+                "video timestamp {pts} after {last}: timestamps must increase"
+            )));
+        }
         let mut frame = ff::frame::Video::new(self.layout.ff(), self.width, self.height);
-        let dims = [
-            (self.width as usize, self.height as usize),
-            (self.width as usize / 2, self.height as usize / 2),
-            (self.width as usize / 2, self.height as usize / 2),
-        ];
+        let dims = self.layout.plane_sizes(self.width, self.height);
+        let ten = self.layout.ten_bit();
         for (i, &(w, h)) in dims.iter().enumerate() {
             let stride = frame.stride(i);
             let data = frame.data_mut(i);
-            match (planes, self.layout) {
-                (YuvPlanes::U8(p), PixelLayout::Yuv420p) => {
+            match planes {
+                YuvPlanes::U8(p) if !ten => {
                     if p[i].len() != w * h {
                         return Err(EncodeError::Invalid(format!("plane {i} has wrong size")));
                     }
@@ -394,7 +544,7 @@ impl Mp4Writer {
                         data[y * stride..y * stride + w].copy_from_slice(&p[i][y * w..(y + 1) * w]);
                     }
                 }
-                (YuvPlanes::U16(p), PixelLayout::Yuv420p10) => {
+                YuvPlanes::U16(p) if ten => {
                     if p[i].len() != w * h {
                         return Err(EncodeError::Invalid(format!("plane {i} has wrong size")));
                     }
@@ -412,8 +562,8 @@ impl Mp4Writer {
                 }
             }
         }
-        frame.set_pts(Some(self.next_video_pts));
-        self.next_video_pts += 1;
+        frame.set_pts(Some(pts));
+        self.last_video_pts = Some(pts);
         ctx(self.video.send_frame(&frame), || {
             "sending video frame".into()
         })?;

@@ -33,6 +33,7 @@ use std::sync::{Arc, OnceLock};
 
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as sys;
+use spherecut_core::video::ColorCodes;
 use thiserror::Error;
 
 /// FFmpeg functions that take or return a C enum, declared with `int`s.
@@ -76,6 +77,34 @@ mod c {
             out_configs: *mut *const std::ffi::c_void,
             out_num_configs: *mut c_int,
         ) -> c_int;
+    }
+}
+
+/// Tag an unopened encoder's stream with `tags`: range, matrix,
+/// primaries, transfer and chroma location, written as the ints they are.
+/// ffmpeg-next has no setter for the chroma location, and its others take
+/// its own enums, which can't hold a value our headers lack.
+pub(crate) fn set_color_tags(enc: &mut ff::encoder::video::Video, tags: ColorCodes) {
+    // SAFETY: the encoder's context is live and not yet opened, when these
+    // fields may be set. Each is a C enum, which is int-sized, and FFmpeg
+    // accepts any value in it (an unknown one is written as coded).
+    unsafe {
+        let c = enc.as_mut_ptr();
+        (&raw mut (*c).color_range)
+            .cast::<c_int>()
+            .write(tags.range);
+        (&raw mut (*c).colorspace)
+            .cast::<c_int>()
+            .write(tags.matrix);
+        (&raw mut (*c).color_primaries)
+            .cast::<c_int>()
+            .write(tags.primaries);
+        (&raw mut (*c).color_trc)
+            .cast::<c_int>()
+            .write(tags.transfer);
+        (&raw mut (*c).chroma_sample_location)
+            .cast::<c_int>()
+            .write(tags.chroma_location);
     }
 }
 
@@ -2380,7 +2409,7 @@ mod tests {
 
     /// Three 256x128 frames in MP4, from `encoder` with `options`.
     fn clip_with(dir: &TempDir, name: &str, encoder: &str, options: &[(&str, &str)]) -> PathBuf {
-        use crate::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+        use crate::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
         let settings = VideoSettings {
             encoder: encoder.into(),
             width: 256,
@@ -2391,7 +2420,9 @@ mod tests {
                 .iter()
                 .map(|&(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            bt709_limited: true,
+            color: ColorTags::BT709_LIMITED,
+            edit_start: 0,
+            time_base: None,
         };
         let mut w = Mp4Writer::create(&dir.0.join(name), &settings, None).unwrap();
         for i in 0..3 {

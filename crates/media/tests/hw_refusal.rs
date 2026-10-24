@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use spherecut_core::FrameRate;
 use spherecut_media::decode::{VideoDecoder, open_hw_device};
-use spherecut_media::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 use spherecut_media::{HwDevice, HwRefusal, MediaError};
 
 fn tmp() -> PathBuf {
@@ -45,7 +45,9 @@ fn clip(name: &str, encoder: &str, options: &[(&str, &str)]) -> PathBuf {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
-        bt709_limited: true,
+        color: ColorTags::BT709_LIMITED,
+        edit_start: 0,
+        time_base: None,
     };
     let (w, h) = (w as usize, h as usize);
     let mut out = Mp4Writer::create(&tmp().join(name), &settings, None).unwrap();

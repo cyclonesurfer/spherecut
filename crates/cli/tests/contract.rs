@@ -16,7 +16,7 @@ use serde_json::Value;
 use spherecut_cli::contract::{self, Exit};
 use spherecut_core::{FrameRate, FrameTime, Rational, Time};
 use spherecut_media::doctor::{self, DoctorReport, Issue, Severity};
-use spherecut_media::encode::{Mp4Writer, PixelLayout, VideoSettings};
+use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings};
 use spherecut_media::ff;
 use spherecut_synth::media::{self, Audio, Codec, Spec};
 use spherecut_synth::{Pattern, render_equirect, yuv};
@@ -111,7 +111,9 @@ fn untagged_clip(dir: &Path) -> PathBuf {
         options: [("preset", "veryfast"), ("threads", "1")]
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .to_vec(),
-        bt709_limited: false,
+        color: ColorTags::NONE,
+        edit_start: 0,
+        time_base: None,
     };
     let mut w = Mp4Writer::create(&dir.join("untagged.mp4"), &settings, None).unwrap();
     for i in 0..3 {

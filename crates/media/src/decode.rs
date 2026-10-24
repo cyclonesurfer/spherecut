@@ -748,7 +748,7 @@ mod tests {
     use spherecut_core::FrameRate;
 
     use super::*;
-    use crate::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+    use crate::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 
     /// A test's own directory in the system's temp dir (unit tests get no
     /// CARGO_TARGET_TMPDIR), removed with what it holds when dropped, so
@@ -779,7 +779,9 @@ mod tests {
             rate: FrameRate::FPS_30,
             layout: PixelLayout::Yuv420p,
             options: Vec::new(),
-            bt709_limited: true,
+            color: ColorTags::BT709_LIMITED,
+            edit_start: 0,
+            time_base: None,
         };
         let mut w = Mp4Writer::create(&dir.0.join("clip.mp4"), &settings, None).unwrap();
         for i in 0..10 {

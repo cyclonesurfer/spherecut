@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use spherecut_core::FrameRate;
 use spherecut_media::MediaError;
 use spherecut_media::decode::VideoDecoder;
-use spherecut_media::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
+use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 
 fn tmp(name: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -30,7 +30,9 @@ fn clip(path: &Path, width: u32) {
         rate: FrameRate::FPS_30,
         layout: PixelLayout::Yuv420p,
         options: Vec::new(),
-        bt709_limited: true,
+        color: ColorTags::BT709_LIMITED,
+        edit_start: 0,
+        time_base: None,
     };
     let w = width as usize;
     let mut out = Mp4Writer::create(path, &settings, None).unwrap();
