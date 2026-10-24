@@ -69,6 +69,7 @@ pub enum MediaError {
 }
 
 pub use ffi::{CONTAINERS, HwDevice, HwError, HwRefusal, MAX_PIXELS, TooLarge};
+pub use hwprobe::capture_ffmpeg_log;
 
 impl MediaError {
     /// The error for `path`, which [`ffi::open_input`] could not open as

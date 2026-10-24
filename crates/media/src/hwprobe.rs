@@ -678,7 +678,14 @@ static CAPTURES: Mutex<usize> = Mutex::new(0);
 /// current one. FFmpeg's log level is process-wide, so while any capture
 /// runs it is at least "warning" (other threads' warnings then get
 /// formatted and dropped), and afterwards it follows the subscriber again.
-pub(crate) fn capture_ffmpeg_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+/// Lines read like "[hevc] Device does not support decoding hevc!", with
+/// FFmpeg's context address left out.
+///
+/// Only FFmpeg's work on this thread is caught: a decoder with frame
+/// threads may log from its own (hardware decoding keeps one thread).
+pub fn capture_ffmpeg_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    // FFmpeg's log reaches `tracing` from here on.
+    crate::init();
     // A line FFmpeg left unfinished on this thread is not `f`'s, and one
     // `f` leaves unfinished is.
     ffi::end_log_line();
