@@ -166,6 +166,11 @@ didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
   9.0.2 but not 8.1.2 or 9.0.1). It now takes 2 channels or none, which
   are FFmpeg's to say, and checks what is probe's: the AAC decoder's
   refusal as the one damage, and the sample format.
+- It found that compat took a prefix for found once pkg-config read its
+  `libavcodec.pc`, though that file's `libdir` or `includedir` could
+  lead to another FFmpeg, and that it ran `pkg-config` from `PATH` where
+  the build runs `$PKG_CONFIG`. Both are checked now, each with a test
+  that fails without its check.
 - `gen-media`'s files from 8.1.3 differ from 6.1's only in FFmpeg's
   version strings (`Lavc`, `Lavf`) and the average bitrate in MP4's
   `btrt` box, which 8.1.3 leaves 0: the streams are the same.
@@ -178,8 +183,11 @@ that `ffi.rs`'s own extern block declares and an FFmpeg no longer
 exports would pass it, and fail only where the tests are built, as
 `hw-test` builds them on Pat's machines. Each prefix has a target
 directory of its own (`<target>/compat/<label>`, with line-tables
-debuginfo and no incremental state), and compat checks that pkg-config
-finds that prefix and prints the FFmpeg and libavcodec it found there.
+debuginfo and no incremental state). compat checks that pkg-config
+(`$PKG_CONFIG` when it is set, as the build runs it) finds that prefix,
+and that the libavcodec library and header its `.pc` file names lie
+inside the prefix, symlinks resolved, and prints the FFmpeg and
+libavcodec it found there.
 A target records what it was built against (the versions, and the size
 and time of each library's pkg-config file and of `ffversion.h`), and
 one built against anything else is deleted first: ffmpeg-sys-next binds
