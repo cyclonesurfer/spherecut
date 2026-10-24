@@ -90,8 +90,35 @@ Current benchmarks:
   one frame. Hardware rows include the copy of the one frame returned to
   system memory: frames decoded on the way stay on the device. The
   target above is the LRV's exact p95.
+- **`bench_upload_5k7`** (M1 slice 3b, DECISIONS D31): what putting a
+  decoded frame on the GPU costs, on the GPU `SPHERECUT_ADAPTER` names or
+  the first one Vulkan lists, for 8- and 10-bit 5760×2880 frames (NV12
+  and P010) and an 8- and a 10-bit pair of 3840² frames (the X5's 8K is
+  two such streams). For each input and each `Uploader` path
+  (`WriteTexture`, the default, and `StagingBelt`), over 300 steps of
+  uploading the input and waiting for it: `upload <input>, <path>: CPU
+  per step` (the `upload` call, in ms), `…: GPU ingest and mips` (`per
+  frame` for a pair), and `…: steps that changed the allocator's blocks`,
+  with a note of the block count's range and the most memory reserved.
+  Then, on the 5.7K slots, `mips <input>: GPU` and `project <input>,
+  rectilinear 90° | tiny planet 300° to 1920x1080 | 3840x2160: GPU`, each
+  the mean of 60 passes. Each row is a run's mean, recorded as the median
+  and range of `SPHERECUT_BENCH_RUNS` runs after a warm-up. A note for
+  each 5.7K input says whether the plan's CPU trigger holds
+  (`write_texture` above 1.5 times the belt's CPU time, or above 4 ms a
+  frame); the other trigger is any step changing the allocator's blocks.
+  Either holding on huginn or odin makes the belt the default (D31). A
+  last note names the GPU and how long the bench took. A device without
+  timestamps inside encoders has no GPU rows, and a note says so.
 
-Not benchmarks, but their numbers are in the same notes: the
+Not benchmarks, but their numbers are in the same notes:
+`list_adapters_and_features` notes each Vulkan adapter's info (with its
+PCI bus id and timestamp period), the features of the formats the
+renderer uses, and its features, downlevel flags and limits;
+`goldens_on_gpu_match_reference` notes each golden row's numbers on each
+GPU, which say how near it comes to lavapipe's floors, and
+`goldens_on_host_llvmpipe` the stored images' drift on the machine's own
+llvmpipe (D32). The
 `*_download_pool_reuses_buffers` tests note the minor page faults per
 downloaded 3840×1920 NV12 and P010 frame on the decoding thread, after
 30 frames to warm up, and how many buffers the download pool allocated

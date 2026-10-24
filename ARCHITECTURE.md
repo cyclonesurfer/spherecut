@@ -10,7 +10,7 @@ This describes the design as built, plus the planned parts marked
                           \                |                    /
                            +------ export, audio (planned) ----+
                                       |
-                    render (wgpu on Vulkan, WGSL; M1 slice 3a)
+                    render (wgpu on Vulkan, WGSL; M1 slice 3)
                                       |
              motion (IMU, stabilization)   stitch (lens models, blending)  (planned)
                                       |
@@ -36,12 +36,12 @@ synth, which depends on media.
 | `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), what a decoded frame is (`video`: pixel layouts, planes, colour) and stop tokens by generation (`cancel`); later the project model, timeline, keyframes, undo | M0: name and time; M1: `video`, `cancel` |
 | `spherecut-sphere` | CPU reference projection math in f64: equirect and its uv gradient, cube/EAC, fisheye lens models, view projections and morphs and their inverse (`project_morph`), output pixels to lens coordinates (`pixel`), yaw, pitch and roll (`orient`), rotation helpers | M0; M1 slice 3a: `pixel`, `orient`, `uv_gradient`, `project_morph` |
 | `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software and on VA-API or Vulkan Video with fallback to software, the render node lookup, the colour default rules, a small MP4 writer, `doctor`'s capability checks | M0; `MediaBackend` from M1 slice 2a, hardware from 2b (audio in 6) |
-| `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes, seeded noise for camera bitrates) and broken files, `SyntheticBackend` and `GatedBackend` | M0; M1 slices 2a and 2b |
+| `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, the supersampled ideal of a view (`render_view_ideal`, which the goldens hold minified views to), tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes, seeded noise for camera bitrates) and broken files, `SyntheticBackend` and `GatedBackend` | M0; M1 slices 2a, 2b and 3b |
 | `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, the `TIER2-SKIP:` marker), benchmark recording (`bench`, with latency percentiles), image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics) and FNV-1a hashing (`fnv64`) | M0; M1 slice 3a: `compare`, `fnv64` |
 | `spherecut-camera` | Per-camera raw formats: file pairing, vendor metadata, calibration | M3 |
 | `spherecut-stitch` | Lens calibration models, seam blending, exposure matching | M3 |
 | `spherecut-motion` | IMU ingest, time sync, orientation fusion, stabilization | M4 |
-| `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31); later the golden-image harness (slice 3b) and scopes | M1 slice 3a |
+| `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); later scopes | M1 slices 3a and 3b |
 | `spherecut-audio` | Playback clock, mixing, ambisonics, loudness | M1 (playback), M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
 | `spherecut-app` | eframe app, docked panels, viewer paint callbacks | M1 |
@@ -50,7 +50,12 @@ synth, which depends on media.
 | `xtask` | `check`, `gen-media`, `hw-test` | M0 |
 
 Crates are created when they get real content, not as empty shells. The
-planned ones above don't exist yet.
+planned ones above don't exist yet. Every crate root forbids `unsafe`
+code except media's and the `spherecut` binary's, which deny it and allow
+it only in named FFI modules (media's `ffi` and `hwprobe`; the binary's
+`interrupt` from slice 4),
+until slice 5b gives render one such module to open its Vulkan device
+(DECISIONS D28).
 
 ## Media crate (as built in M0, with M1's confinement of FFmpeg and `MediaBackend`)
 
@@ -408,8 +413,9 @@ All stored time is exact (`spherecut_core::time`):
 
 ## Rendering
 
-Built in M1 slice 3a for equirect sources (`spherecut-render`, DECISIONS
-D31); stitching and stabilization join the same pass later.
+Built in M1 slice 3 for equirect sources (`spherecut-render`, DECISIONS
+D31; the golden images that hold it, D32, are under Testing tiers);
+stitching and stabilization join the same pass later.
 
 ```
 VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ LinearTarget ──Encoder──▶ screen or Rgba8Unorm
@@ -494,8 +500,8 @@ intermediate equirect exists only as the output of a 360 export.
   (`crates/synth/tests/fallback.rs`). The Tier 2 backend tests check
   their own checks the same way. The renderer's tests run on lavapipe
   (`crates/render/tests/`): every pipeline, the uniform layouts, the
-  mips, both upload paths, and `render_still` against the CPU reference;
-  golden images come in slice 3b.
+  mips, both upload paths, `render_still` against the CPU reference, and
+  the golden images (below).
   `cargo xtask check` runs all of it.
 * **Tier 2** needs hardware or samples. Tier 2 tests are `#[ignore]`d with a
   reason and call `spherecut_testkit::tier2::require_*`, which fails the
@@ -509,3 +515,52 @@ intermediate equirect exists only as the output of a 360 export.
   another binary's skip explains cargo's failure. A test that did not run,
   a failure, or a failed listing marks the run FAILED. DECISIONS D19 has
   the details.
+
+### Golden images
+
+`crates/render/tests/goldens.rs` holds the renderer to pictures known to
+be right (DECISIONS D32). One test, `goldens`, runs each row of the M1
+plan's table (section 6) on lavapipe, from synth's in-memory planes:
+
+* six views of synth's grid are **stored** as PNGs in
+  `crates/render/tests/goldens/`, and must come out pixel for pixel the
+  same at the Mesa build they were blessed on, and within PSNR 48 dB,
+  SSIM 0.995 and 4 LSB on another;
+* views are held to **the f64 CPU reference** at a PSNR floor set when
+  blessing, and minified ones to **the supersampled pattern itself**
+  (`synth::render_view_ideal`), with a margin over a level-0 render;
+* **the seam and the poles** are placed inside a 2×2 pixel quad and
+  compared with a roll twin (the texture rolled by half its width, the
+  view turned 180°), pixel for pixel;
+* the other rows check one property each: shimmer as the view turns, a
+  10-bit ramp, plane layouts and strides, flat fields through the f16
+  target, ranges, matrices, chroma siting, an sv3d crop and the LOD heat
+  map.
+
+Every row has a negative control, asserted on every run (implicit
+derivatives must show the seam, level 0 must shimmer, a swapped range,
+matrix or siting must miss), so a check that stops seeing what it checks
+fails. `goldens/manifest.json` records, for every row, the driver build
+and wgpu version, the commit and date, the source and the hash of its
+planes, the view, the thresholds and every measured number. A source
+whose planes hash otherwise than blessed is reported as "the synthetic
+source changed", never compared as a render.
+
+To bless, after a change meant to move the pictures, or a Mesa update:
+
+```sh
+SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens
+```
+
+It writes the PNGs and the manifest only when every row passes and
+every control fails as it should; otherwise it lists what failed and
+writes nothing. Look at the changed images and the manifest's numbers
+before committing them. A failing run writes
+`<row>-<what>-{got,want,diff}.png` to `golden-diffs/` in the cargo
+target directory (`target/golden-diffs/`, or under `CARGO_TARGET_DIR`).
+
+On a real machine, the Tier 2 `goldens_on_gpu_match_reference` runs the
+rows on each GPU against the references and controls only, never
+against the lavapipe PNGs, and `goldens_on_host_llvmpipe` runs the
+stored set on the machine's own llvmpipe by the other-driver rule; both
+note their numbers for the hw-test report.
