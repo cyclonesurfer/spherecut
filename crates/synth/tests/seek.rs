@@ -1158,6 +1158,33 @@ fn timestamps_that_tie_or_go_backwards_seek_by_the_tie_rule() {
     let mkv = dir.join("ties.mkv");
     media::remux_to_mkv_at(&ties, &mkv, FrameRate::FPS_30).unwrap();
     oracle(&mkv, GOP_8);
+    // Frame 7 shown at keyframe 8's pts, in MP4 and Matroska. Played
+    // through, so that the ties are known: a seek whose first frame is 8
+    // has no frame before it tied with it, and after a stopped seek the
+    // next frame is 9 all the same, in 8's run.
+    let never = StopToken::never();
+    let key_tie = dir.join("key-tie.mp4");
+    retime(&p_only, &key_tie, |k, pts| {
+        pts + if k == 7 { FRAME_30 } else { 0 }
+    });
+    let key_tie_mkv = dir.join("key-tie.mkv");
+    media::remux_to_mkv_at(&key_tie, &key_tie_mkv, FrameRate::FPS_30).unwrap();
+    for clip in [&key_tie, &key_tie_mkv] {
+        let frames = oracle(clip, GOP_8).frames;
+        assert_eq!(frames[7].pts, frames[8].pts);
+        for mode in [SeekMode::Exact, SeekMode::Keyframe] {
+            let mut d = open(clip);
+            while let NextFrame::Frame(_) = d.next_frame(&never).unwrap() {}
+            let (eight, _, _) = seek_pts(&mut *d, frames[8].pts, mode);
+            assert_eq!(Seen::of(&eight), frames[8], "{mode:?}");
+            stopped_seek(&mut *d);
+            let nine = play(&mut *d, 1);
+            assert_eq!(Seen::of(&nine), frames[9], "{mode:?}");
+            let mut runs = Runs::default();
+            runs.note("key-tie", &eight, 8);
+            runs.note("key-tie", &nine, 9);
+        }
+    }
 
     // Frames 10 to 14 shown a frame and a half late, so 15 is shown
     // before 14.
@@ -1176,7 +1203,27 @@ fn timestamps_that_tie_or_go_backwards_seek_by_the_tie_rule() {
     let r = oracle(&back, backwards);
     let mkv = dir.join("backwards.mkv");
     media::remux_to_mkv_at(&back, &mkv, FrameRate::FPS_30).unwrap();
-    oracle(&mkv, backwards);
+    let in_mkv = oracle(&mkv, backwards).frames;
+    // Played on from a seek made before the step was found, so that the
+    // frames handed out have no place counted from the start: after a
+    // stopped seek, the next frame is still the one after the last, and
+    // it follows on in that frame's run only where that is known.
+    for (clip, frames) in [(&back, &r.frames), (&mkv, &in_mkv)] {
+        for n in 12..=16 {
+            let mut d = open(clip);
+            seek_pts(&mut *d, frames[17].pts, SeekMode::Exact);
+            let (nine, e, _) = seek_pts(&mut *d, frames[9].pts, SeekMode::Exact);
+            assert_eq!((Seen::of(&nine), e), (frames[9], Exactness::Exact));
+            let last = play(&mut *d, n - 9);
+            assert_eq!(Seen::of(&last), frames[n], "{n}");
+            stopped_seek(&mut *d);
+            let next = play(&mut *d, 1);
+            assert_eq!(Seen::of(&next), frames[n + 1], "after {n}");
+            let mut runs = Runs::default();
+            runs.note("backwards", &last, n);
+            runs.note("backwards", &next, n + 1);
+        }
+    }
     let (f14, f15) = (r.frames[14], r.frames[15]);
     assert!(f15.pts < f14.pts, "{:?}", r.frames);
     // Not yet played: the seek that decodes 15 after 14 finds the step,

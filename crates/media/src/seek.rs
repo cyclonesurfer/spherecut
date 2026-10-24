@@ -77,6 +77,11 @@ struct Raw {
     index: Option<u64>,
     /// How many frames came out just before it with the same pts.
     tie: u32,
+    /// `tie` counts every frame of the stream before it with its pts:
+    /// decoding began before the first of them. Not so for the first
+    /// frame out after a seek (bar one to the start), nor for the frames
+    /// that tie with it.
+    anchored: bool,
 }
 
 /// How the decoder's frames become [`VideoFrame`]s.
@@ -196,15 +201,21 @@ pub struct FfmpegVideo {
     /// go backwards.
     from_start: Option<u64>,
     /// The pts of the last frame decoded, to see timestamps go backwards
-    /// and tie, and how many frames before it had the same.
+    /// and tie, how many frames before it had the same, and whether that
+    /// count is anchored (see [`Raw::anchored`]).
     last_decoded: Option<i64>,
     last_tie: u32,
+    last_anchored: bool,
     /// Two frames have come out with the same pts.
     ties_seen: bool,
     /// The last frame returned's place from the start of the stream, when
-    /// known, and its rank among frames that tie with it.
+    /// known; its rank among frames that tie with it, and whether that is
+    /// anchored; and whether the frame after it was known not to tie with
+    /// it.
     current_index: Option<u64>,
     current_tie: u32,
+    current_anchored: bool,
+    current_last_tie: bool,
     not_seekable: bool,
     /// Since the last seek away from the start, no frame at or after the
     /// keyframe it landed on has come out: one before it is one of its
@@ -366,9 +377,12 @@ impl FfmpegVideo {
             from_start: Some(1),
             last_decoded: Some(origin_pts),
             last_tie: 0,
+            last_anchored: true,
             ties_seen: false,
             current_index: None,
             current_tie: 0,
+            current_anchored: true,
+            current_last_tie: false,
             not_seekable: false,
             leading: false,
             no_timestamps,
@@ -389,6 +403,7 @@ impl FfmpegVideo {
             after_failure,
             index: Some(0),
             tie: 0,
+            anchored: true,
         });
         Ok(v)
     }
@@ -472,15 +487,19 @@ impl FfmpegVideo {
                 };
             }
         }
-        let tie = match self.last_decoded {
-            Some(last) if last == pts => self.last_tie + 1,
-            _ => 0,
+        let (tie, anchored) = match self.last_decoded {
+            Some(last) if last == pts => (self.last_tie + 1, self.last_anchored),
+            Some(_) => (0, true),
+            // The first frame out after a seek: frames before it with its
+            // pts weren't decoded, unless it is the first of the stream.
+            None => (0, from_start == Some(0)),
         };
         self.ties_seen |= tie > 0;
         if self.greatest.is_none_or(|(g, _)| pts >= g) {
             self.greatest = Some((pts, fields.duration));
         }
         self.last_tie = tie;
+        self.last_anchored = anchored;
         self.last_decoded = Some(pts);
         let seq = self.seq;
         self.seq += 1;
@@ -492,6 +511,7 @@ impl FfmpegVideo {
             after_failure: self.dec.reading_failed(),
             index: from_start,
             tie,
+            anchored,
         })
     }
 
@@ -742,6 +762,8 @@ impl FfmpegVideo {
         out.seq = raw.seq;
         self.current_index = raw.index;
         self.current_tie = raw.tie;
+        self.current_anchored = raw.anchored;
+        self.current_last_tie = next_pts.is_some_and(|n| n != raw.pts);
         self.stats.frames_returned += 1;
         let frame = Arc::new(out);
         self.current = Some(frame.clone());
@@ -1166,15 +1188,19 @@ impl FfmpegVideo {
             self.position = Position::InStep;
             return Ok(true);
         };
+        let (index, tie, anchored) = (self.current_index, self.current_tie, self.current_anchored);
+        let last_tie = self.current_last_tie;
         // From the start where seeks go there, else from a seek that lands
-        // at or before it: before it when frames tie, so that the frames
-        // tied with it are counted from the first.
+        // at or before it. The frames tied with it are counted as they
+        // were: from before the first of them when its rank is anchored,
+        // so the seek goes before its pts; else from the same landing, at
+        // its pts. A frame known to be the last of its ties needs no rank.
         let from_start = self.not_seekable || self.no_timestamps;
         let mut next = if from_start {
             self.seek_to_start(&mut cost)?;
             None
         } else {
-            let t = match self.ties_seen {
+            let t = match self.ties_seen && anchored && !last_tie {
                 true => current.pts.saturating_sub(1),
                 false => current.pts,
             };
@@ -1185,8 +1211,12 @@ impl FfmpegVideo {
             }
         };
         // Decode up to it, without making it again: what follows it is then
-        // `pending`, and goes on with its run.
-        let (index, tie) = (self.current_index, self.current_tie);
+        // `pending`, and goes on with its run when it is known to follow
+        // it. Without its place from the start, a stream whose timestamps
+        // go backwards may show its pts twice, and the first is taken.
+        let mut sure = index.is_some() || !from_start;
+        // The frame decoded last is it, or has its pts.
+        let (mut was_it, mut at_its_pts) = (false, false);
         loop {
             let r = match next.take() {
                 Some(r) => r,
@@ -1208,16 +1238,37 @@ impl FfmpegVideo {
             };
             let after = match (index, r.index) {
                 (Some(i), Some(j)) if from_start => j > i,
-                _ => r.pts > current.pts || (r.pts == current.pts && r.tie > tie),
+                _ if was_it => true,
+                // Past its ties without telling which it was: after the
+                // last of them, as it was when known to be.
+                _ if at_its_pts && r.pts != current.pts => {
+                    sure &= last_tie;
+                    true
+                }
+                // Past it, in a stream whose timestamps don't go backwards.
+                _ if !from_start && r.pts > current.pts => {
+                    sure &= !self.ties_seen;
+                    true
+                }
+                _ => false,
             };
             if after {
                 self.pending = Some(r);
                 break;
             }
+            // Ranks counted alike, or none to count.
+            let comparable = r.anchored == anchored || !self.ties_seen;
+            was_it = r.pts == current.pts && comparable && r.tie == tie;
+            at_its_pts = r.pts == current.pts;
         }
         self.position = Position::InStep;
-        self.run = current.run;
-        self.seq = current.seq + 1;
+        if sure {
+            self.run = current.run;
+            self.seq = current.seq + 1;
+        } else {
+            // The frame after it, as far as can be told: in a run of its own.
+            self.start_run();
+        }
         if let Some(p) = &mut self.pending {
             p.seq = self.seq;
             self.seq += 1;
