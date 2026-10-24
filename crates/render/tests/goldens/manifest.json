@@ -1,0 +1,1055 @@
+{
+  "about": "The render goldens (M1 plan section 6, DECISIONS D32): images rendered on lavapipe from synth's in-memory planes, with each check's thresholds and what it measured when blessed.",
+  "checks": {
+    "crop_half": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "cpu_max_channel": 0.0148,
+        "cpu_psnr_db": 54.1896,
+        "pixels_outside": 12096.0,
+        "pixels_outside_not_black": 0.0
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid, the middle half",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          512,
+          512
+        ]
+      },
+      "source_fnv64": "7ba103e848743ebe",
+      "thresholds": {
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 51.18,
+        "pixels_outside_min": 1000.0,
+        "pixels_outside_not_black_max": 0.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 120.0,
+        "pitch_deg": 0.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.0,
+          -0.49999999999999994,
+          0.0,
+          0.8660254037844387
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": 60.0
+      },
+      "wgpu": "30.0.1",
+      "what": "a 180° panorama by sv3d bounds, seen past its edge"
+    },
+    "layout_invariance": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "renders_not_identical": 0.0
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1100,
+          550
+        ]
+      },
+      "source_fnv64": "a5bcf62aa485d94c",
+      "thresholds": {
+        "renders_not_identical_max": 0.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 90.0,
+        "pitch_deg": 10.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.0858316511774313,
+          0.17298739392508947,
+          -0.015134435901338623,
+          0.9810602621904071
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": -20.0
+      },
+      "wgpu": "30.0.1",
+      "what": "one picture as NV12 and I420, rows padded to 64 and 256 bytes and 4109 bytes apart"
+    },
+    "lod_heatmap": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "levels_off_by_more_than_half": 0.0,
+        "max_level_error": 0.002
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "0e2be80e98b1f2c5",
+      "thresholds": {
+        "levels_off_by_more_than_half_max": 0.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 270.0,
+        "pitch_deg": 30.0,
+        "projection": "fisheye",
+        "quaternion_xyzw": [
+          0.06698729810778066,
+          -0.9330127018922194,
+          0.24999999999999997,
+          0.24999999999999997
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          192,
+          192
+        ],
+        "yaw_deg": 150.0
+      },
+      "wgpu": "30.0.1",
+      "what": "DEBUG_MODE 3's levels against the CPU's uv_footprint, fisheye 270°"
+    },
+    "matrix_601_709": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "control_601_as_709_below_tolerance_db": 19.4862,
+        "control_601_as_709_psnr_db": 30.8238,
+        "cpu_601_max_channel": 0.0108,
+        "cpu_601_psnr_db": 53.3177,
+        "cpu_709_max_channel": 0.012,
+        "cpu_709_psnr_db": 53.1439
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "thresholds": {
+        "control_601_as_709_below_tolerance_db_min": 10.0,
+        "cpu_601_max_channel_max": 0.1,
+        "cpu_601_psnr_db_min": 50.31,
+        "cpu_709_max_channel_max": 0.1,
+        "cpu_709_psnr_db_min": 50.14
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 90.0,
+        "pitch_deg": 15.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.12607862007251908,
+          0.25660481229257065,
+          -0.03378266443126182,
+          0.9576621969425486
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": -30.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the grid coded with BT.601 and with BT.709, each against the CPU; control: 601 decoded as 709"
+    },
+    "nadir_quad": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "bad_pixels": 0.0,
+        "bad_pixels_max_lsb": 1.0,
+        "control_implicit_bad_pixels": 186.0,
+        "control_implicit_bad_pixels_max_lsb": 59.0
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "gray",
+        "matrix": "bt709",
+        "pattern": "hifreq",
+        "range": "full",
+        "siting": "left",
+        "size": [
+          2048,
+          1024
+        ]
+      },
+      "source_fnv64": "b64374faee6c55e5",
+      "thresholds": {
+        "bad_pixel_over": 0.0078,
+        "bad_pixels_max": 0.0,
+        "control_implicit_bad_pixels_min": 100.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 120.0,
+        "pitch_deg": -88.9037,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          -0.7022909177491676,
+          0.004783502804872407,
+          -0.004783502804872406,
+          0.7118579233589125
+        ],
+        "roll_deg": 45.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": -45.0
+      },
+      "wgpu": "30.0.1",
+      "what": "against its roll twin, with the implicit-LOD control"
+    },
+    "passthrough_exact": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "fields_seen": 512.0,
+        "full_range_not_k": 0.0,
+        "limited_one_code_off": [
+          86,
+          159,
+          165
+        ],
+        "model_ambiguous": 0.0,
+        "off_the_model": 0.0,
+        "problems": 0.0
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "thresholds": {
+        "full_range_not_k_max": 0.0,
+        "limited": "equal to the model; round((k − 16) · 255 / 219) except within 0.0547 codes of a tie",
+        "off_the_model_max": 0.0,
+        "problems_max": 0.0
+      },
+      "wgpu": "30.0.1",
+      "what": "flat fields of every 8-bit luma code, full and limited range, through the f16 target"
+    },
+    "range_full_vs_limited": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "control_full_as_limited_max_lsb": 22.0,
+        "max_lsb": 1.0,
+        "nv12_control_full_as_limited_max_lsb": 21.0,
+        "nv12_max_lsb": 4.0
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "p010le",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "full",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "df256f6cb1b513f9",
+      "thresholds": {
+        "control_full_as_limited_max_lsb_min": 10.0,
+        "max_lsb_max": 2.0,
+        "nv12_control_full_as_limited_max_lsb_min": 10.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 90.0,
+        "pitch_deg": 0.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": 0.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the grid coded at full and at limited range, 10-bit (8-bit recorded); control: full decoded as limited"
+    },
+    "seam_quad": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "bad_pixels": 0.0,
+        "bad_pixels_max_lsb": 1.0,
+        "control_implicit_bad_pixels": 288.0,
+        "control_implicit_bad_pixels_max_lsb": 91.0,
+        "yaw_deg": 179.5524
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "gray",
+        "matrix": "bt709",
+        "pattern": "hifreq",
+        "range": "full",
+        "siting": "left",
+        "size": [
+          2048,
+          1024
+        ]
+      },
+      "source_fnv64": "b64374faee6c55e5",
+      "thresholds": {
+        "bad_pixel_over": 0.0078,
+        "bad_pixels_max": 0.0,
+        "control_implicit_bad_pixels_min": 100.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 90.0,
+        "pitch_deg": 0.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.0,
+          -0.9999923709255956,
+          0.0,
+          0.0039061605965569623
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": 179.5524
+      },
+      "wgpu": "30.0.1",
+      "what": "against its roll twin, with the implicit-LOD control"
+    },
+    "shimmer_fisheye360": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "control_level0_rms_change_over_ideal": 3.2181,
+        "ideal_over_level0_db_worst": 9.0367,
+        "ideal_pixels": 36864.0,
+        "ideal_psnr_db": 20.3202,
+        "ideal_rms_change_lsb": 27.0804,
+        "rms_change_lsb": 1.9628,
+        "rms_change_over_ideal_lsb_worst": -25.0552
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "gray",
+        "matrix": "bt709",
+        "pattern": "hifreq",
+        "range": "full",
+        "siting": "left",
+        "size": [
+          2048,
+          1024
+        ]
+      },
+      "source_fnv64": "b64374faee6c55e5",
+      "thresholds": {
+        "control_level0_rms_change_over_ideal_min": 3.0,
+        "ideal_min_lod": 2.5,
+        "ideal_over_level0_db_worst_min": 3.0,
+        "ideal_pixels_min": 1000.0,
+        "ideal_psnr_db_min": 19.32,
+        "rms_change_over_ideal_lsb_worst_max": 2.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 360.0,
+        "pitch_deg": 0.0,
+        "projection": "fisheye",
+        "quaternion_xyzw": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          192,
+          192
+        ],
+        "yaw_deg": 0.0
+      },
+      "wgpu": "30.0.1",
+      "what": "8 frames yawing 0.37° each, against the ideal, with the level-0 control"
+    },
+    "shimmer_tinyplanet": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "control_level0_rms_change_over_ideal": 5.0043,
+        "ideal_over_level0_db_worst": 14.3093,
+        "ideal_pixels": 10044.0,
+        "ideal_psnr_db": 25.312,
+        "ideal_rms_change_lsb": 19.6523,
+        "rms_change_lsb": 7.3397,
+        "rms_change_over_ideal_lsb_worst": -11.7585
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "gray",
+        "matrix": "bt709",
+        "pattern": "hifreq",
+        "range": "full",
+        "siting": "left",
+        "size": [
+          2048,
+          1024
+        ]
+      },
+      "source_fnv64": "b64374faee6c55e5",
+      "thresholds": {
+        "control_level0_rms_change_over_ideal_min": 3.0,
+        "ideal_min_lod": 2.5,
+        "ideal_over_level0_db_worst_min": 3.0,
+        "ideal_pixels_min": 1000.0,
+        "ideal_psnr_db_min": 24.31,
+        "rms_change_over_ideal_lsb_worst_max": 2.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 300.0,
+        "pitch_deg": -90.0,
+        "projection": "stereographic",
+        "quaternion_xyzw": [
+          -0.7071067811865475,
+          0.0,
+          0.0,
+          0.7071067811865476
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          256
+        ],
+        "yaw_deg": 0.0
+      },
+      "wgpu": "30.0.1",
+      "what": "8 frames yawing 0.37° each, against the ideal, with the level-0 control"
+    },
+    "siting_left_center": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "center_cpu_max_lsb": 0.517,
+        "control_left_as_center_max_lsb": 52.9556,
+        "left_cpu_max_lsb": 0.5614,
+        "nv12_center_cpu_max_lsb": 1.7591,
+        "nv12_control_left_as_center_max_lsb": 54.5713,
+        "nv12_left_cpu_max_lsb": 1.9932
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "thresholds": {
+        "center_cpu_max_lsb_max": 1.0,
+        "control_left_as_center_max_lsb_min": 10.0,
+        "left_cpu_max_lsb_max": 1.0,
+        "nv12_control_left_as_center_max_lsb_min": 10.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 20.0,
+        "pitch_deg": 0.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.0,
+          -0.08715574274765817,
+          0.0,
+          0.9961946980917455
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": 10.0
+      },
+      "wgpu": "30.0.1",
+      "what": "red and blue stripes 5 texels wide, Left and Center sited, magnified, 10-bit (8-bit recorded); control: Left as Center"
+    },
+    "tenbit_ramp": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "cpu_max_diff_10bit_codes": 0.1358,
+        "decreasing_steps": 0.0,
+        "layouts_identical": 1.0,
+        "rise_per_row_codes": 48.6956
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "p010le",
+        "matrix": "bt709",
+        "pattern": "ramp",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "1b14050c7e890325",
+      "thresholds": {
+        "cpu_max_diff_10bit_codes_max": 2.0,
+        "decreasing_steps_max": 0.0,
+        "layouts_identical_min": 1.0,
+        "rise_per_row_codes_min": 30.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 20.0,
+        "pitch_deg": 0.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": 0.0
+      },
+      "wgpu": "30.0.1",
+      "what": "a 10-bit ramp as P010 and yuv420p10, magnified, read back at 16 bits"
+    },
+    "tinyplanet_pole": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "bad_pixels": 0.0,
+        "bad_pixels_max_lsb": 1.0,
+        "control_implicit_bad_pixels": 175.0,
+        "control_implicit_bad_pixels_max_lsb": 103.0
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "gray",
+        "matrix": "bt709",
+        "pattern": "hifreq",
+        "range": "full",
+        "siting": "left",
+        "size": [
+          2048,
+          1024
+        ]
+      },
+      "source_fnv64": "b64374faee6c55e5",
+      "thresholds": {
+        "bad_pixel_over": 0.0078,
+        "bad_pixels_max": 0.0,
+        "control_implicit_bad_pixels_min": 100.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 300.0,
+        "pitch_deg": -85.2776,
+        "projection": "stereographic",
+        "quaternion_xyzw": [
+          -0.6859070695600259,
+          0.02059935847902937,
+          -0.020599358479029366,
+          0.7271057865180848
+        ],
+        "roll_deg": 45.0,
+        "size": [
+          256,
+          256
+        ],
+        "yaw_deg": -45.0
+      },
+      "wgpu": "30.0.1",
+      "what": "against its roll twin, with the implicit-LOD control"
+    },
+    "zenith_quad": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "bad_pixels": 0.0,
+        "bad_pixels_max_lsb": 1.0,
+        "control_implicit_bad_pixels": 185.0,
+        "control_implicit_bad_pixels_max_lsb": 59.0
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "gray",
+        "matrix": "bt709",
+        "pattern": "hifreq",
+        "range": "full",
+        "siting": "left",
+        "size": [
+          2048,
+          1024
+        ]
+      },
+      "source_fnv64": "b64374faee6c55e5",
+      "thresholds": {
+        "bad_pixel_over": 0.0078,
+        "bad_pixels_max": 0.0,
+        "control_implicit_bad_pixels_min": 100.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 120.0,
+        "pitch_deg": 88.9037,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.7118579233589125,
+          0.004783502804872408,
+          0.004783502804872407,
+          0.7022909177491679
+        ],
+        "roll_deg": -135.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": -135.0
+      },
+      "wgpu": "30.0.1",
+      "what": "against its roll twin, with the implicit-LOD control"
+    }
+  },
+  "images": {
+    "fisheye_180": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "cpu_max_channel": 0.0219,
+        "cpu_psnr_db": 50.0102
+      },
+      "png": "fisheye_180.png",
+      "png_fnv64": "01169330bf1f27e2",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "0e2be80e98b1f2c5",
+      "thresholds": {
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 47.01,
+        "other_driver": {
+          "max_lsb": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 180.0,
+        "pitch_deg": 0.0,
+        "projection": "fisheye",
+        "quaternion_xyzw": [
+          0.0,
+          -1.0,
+          0.0,
+          6.123233995736766e-17
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          192,
+          192
+        ],
+        "yaw_deg": 180.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the grid, fisheye 180°, looking back across the seam"
+    },
+    "fisheye_360": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "cpu_max_channel": 0.0197,
+        "cpu_psnr_db": 49.5993
+      },
+      "png": "fisheye_360.png",
+      "png_fnv64": "d22aee2947194f3b",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "0e2be80e98b1f2c5",
+      "thresholds": {
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 46.59,
+        "other_driver": {
+          "max_lsb": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 360.0,
+        "pitch_deg": 30.0,
+        "projection": "fisheye",
+        "quaternion_xyzw": [
+          0.18301270189221933,
+          -0.6830127018922193,
+          0.1830127018922193,
+          0.6830127018922194
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          192,
+          192
+        ],
+        "yaw_deg": 90.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the grid, fisheye 360°, yaw 90, pitch 30"
+    },
+    "morph_half": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "cpu_max_channel": 0.0142,
+        "cpu_psnr_db": 51.6814
+      },
+      "png": "morph_half.png",
+      "png_fnv64": "a45966b0956613da",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "0e2be80e98b1f2c5",
+      "thresholds": {
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 48.68,
+        "other_driver": {
+          "max_lsb": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 150.0,
+        "morph": 0.5,
+        "morph_to": "stereographic",
+        "pitch_deg": -10.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          -0.08715574274765817,
+          0.0,
+          0.0,
+          0.9961946980917455
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": 0.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the grid, rectilinear to stereographic at 0.5, 150°"
+    },
+    "rect_forward": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "cpu_max_channel": 0.0116,
+        "cpu_psnr_db": 53.1394
+      },
+      "png": "rect_forward.png",
+      "png_fnv64": "6374766bff6b55cb",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "0e2be80e98b1f2c5",
+      "thresholds": {
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 50.13,
+        "other_driver": {
+          "max_lsb": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 90.0,
+        "pitch_deg": 0.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": 0.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the grid, rectilinear 90°, looking forward"
+    },
+    "rect_ypr": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "cpu_max_channel": 0.0109,
+        "cpu_psnr_db": 53.2003
+      },
+      "png": "rect_ypr.png",
+      "png_fnv64": "2b1d20e311b88ee4",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "0e2be80e98b1f2c5",
+      "thresholds": {
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 50.2,
+        "other_driver": {
+          "max_lsb": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 90.0,
+        "pitch_deg": 20.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.18930785741200007,
+          -0.23929833774473036,
+          -0.038134576474850156,
+          0.9515485246437887
+        ],
+        "roll_deg": 10.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": 30.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the grid, rectilinear 90°, yaw 30, pitch 20, roll 10"
+    },
+    "stereo_tinyplanet": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "5630c516da",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "control_level0_ideal_psnr_db": 23.8617,
+        "cpu_max_channel": 0.0161,
+        "cpu_psnr_db": 51.8976,
+        "ideal_over_level0_db": 6.8534,
+        "ideal_pixels": 2600.0,
+        "ideal_psnr_db": 30.7151
+      },
+      "png": "stereo_tinyplanet.png",
+      "png_fnv64": "f03df275ee73b002",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "0e2be80e98b1f2c5",
+      "thresholds": {
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 48.89,
+        "ideal_min_lod": 2.5,
+        "ideal_over_level0_db_min": 3.0,
+        "ideal_pixels_min": 1000.0,
+        "ideal_psnr_db_min": 29.71,
+        "other_driver": {
+          "max_lsb": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 300.0,
+        "pitch_deg": -90.0,
+        "projection": "stereographic",
+        "quaternion_xyzw": [
+          -0.7071067811865475,
+          0.0,
+          0.0,
+          0.7071067811865476
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          256
+        ],
+        "yaw_deg": 0.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the grid, tiny planet (stereographic 300°, pitch −90)"
+    }
+  },
+  "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+  "schema": "spherecut.goldens/1"
+}

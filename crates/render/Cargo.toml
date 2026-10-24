@@ -21,6 +21,7 @@ wgpu.workspace = true
 [dev-dependencies]
 naga.workspace = true
 proptest.workspace = true
+serde_json.workspace = true
 spherecut-synth.workspace = true
 spherecut-testkit.workspace = true
 
