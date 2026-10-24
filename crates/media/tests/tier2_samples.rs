@@ -309,7 +309,7 @@ fn samples_vulkan_decode_matches_software() {
         .join("; ");
     assert!(
         problems.is_empty(),
-        "on {}:\n{}{}",
+        "Vulkan Video on {}:\n{}{}",
         vk.about,
         problems.join("\n"),
         if refused.is_empty() {
