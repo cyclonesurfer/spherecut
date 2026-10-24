@@ -1274,6 +1274,7 @@ dependencies = [
  "serde_json",
  "spherecut-core",
  "spherecut-media",
+ "spherecut-render",
  "spherecut-synth",
  "tracing",
  "tracing-subscriber",

@@ -2,7 +2,8 @@
 //! `--json`, a run prints exactly one [`Envelope`] on stdout as one line
 //! of compact JSON, on success and on failure, and exits with an [`Exit`]
 //! status. stderr carries only logs for people. A1's `spherecut call` and
-//! `spherecut mcp` are to reuse these types.
+//! `spherecut mcp` are to reuse these types: probe's, doctor's and
+//! frame's ([`FrameResult`]).
 //!
 //! Within a schema version, fields are only added: a field is never
 //! removed, renamed or given another type, and a code never renamed or
@@ -12,14 +13,19 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use serde::Serialize;
+use spherecut_core::FrameTime;
+use spherecut_core::video::ColorInfo;
 use spherecut_media::MediaError;
 use spherecut_media::doctor::{DoctorReport, Severity};
 use spherecut_media::probe::{self, ProbeError, ProbeReport};
+use spherecut_render::RenderError;
 
 /// The schema of `spherecut probe --json`.
 pub const PROBE: &str = "spherecut.probe/1";
 /// The schema of `spherecut doctor --json`.
 pub const DOCTOR: &str = "spherecut.doctor/1";
+/// The schema of `spherecut frame --json`.
+pub const FRAME: &str = "spherecut.frame/1";
 /// The schema of a usage error that names no subcommand.
 pub const CLI: &str = "spherecut/1";
 
@@ -29,17 +35,19 @@ pub const CLI: &str = "spherecut/1";
 pub enum Exit {
     /// The run did what was asked.
     Ok = 0,
-    /// An input or a check failed: a file probe could not read, or a
-    /// problem of severity error that doctor found.
+    /// An input or a check failed: a file probe could not read, a
+    /// problem of severity error that doctor found, or a frame that
+    /// isn't there or can't be written.
     Failed = 1,
     /// The command line is wrong.
     Usage = 2,
-    /// Reserved for `frame` and the GUI: a codec or device the command
-    /// itself needs is missing (no GPU, no display, no decoder).
+    /// `frame` (and the GUI, later): a codec or device the command itself
+    /// needs is missing (no GPU, a hardware decoder asked for that can't
+    /// decode, no decoder; no display). probe and doctor never exit so.
     Missing = 3,
-    /// Reserved for `frame`: interrupted (SIGINT), leaving no output
-    /// file. The run's document still goes out, with the code
-    /// `cancelled`.
+    /// `frame`: interrupted (SIGINT), leaving no output file. The run's
+    /// document still goes out, with the code `cancelled`. probe and
+    /// doctor never exit so.
     Cancelled = 4,
 }
 
@@ -49,9 +57,10 @@ impl From<Exit> for std::process::ExitCode {
     }
 }
 
-/// The CLI's own codes, for `error.code` when the run as a whole failed.
-/// The codes of single files come from [`MediaError::code`] and
-/// [`probe::codes`].
+/// The CLI's own codes, for `error.code` when the run as a whole failed,
+/// and for frame's warnings. The codes of single files come from
+/// [`MediaError::code`] and [`probe::codes`], and the GPU's from
+/// [`RenderError::code`].
 pub mod codes {
     /// The command line is wrong (exit 2).
     pub const USAGE: &str = "usage";
@@ -61,24 +70,88 @@ pub mod codes {
     pub const DOCTOR_ERRORS: &str = "doctor_errors";
     /// A failure of Spherecut's own, to be reported as a bug.
     pub const INTERNAL: &str = "internal";
+    /// frame: something is at the output already, and `--overwrite`
+    /// wasn't given (exit 1).
+    pub const OUTPUT_EXISTS: &str = "output_exists";
+    /// frame: the file isn't a stitched equirect (dual fisheye, a
+    /// cubemap, no spherical metadata), and `--equirect` wasn't given
+    /// (exit 1).
+    pub const NOT_EQUIRECT: &str = "not_equirect";
+    /// frame: no frame at the time or number asked for: it is past the
+    /// end (exit 1).
+    pub const OUT_OF_RANGE: &str = "out_of_range";
+    /// frame: interrupted by SIGINT, leaving no output file (exit 4).
+    pub const CANCELLED: &str = "cancelled";
 
-    /// Every code above.
-    pub const ALL: &[&str] = &[USAGE, FILES_FAILED, DOCTOR_ERRORS, INTERNAL];
+    /// Every error code above.
+    pub const ALL: &[&str] = &[
+        USAGE,
+        FILES_FAILED,
+        DOCTOR_ERRORS,
+        INTERNAL,
+        OUTPUT_EXISTS,
+        NOT_EQUIRECT,
+        OUT_OF_RANGE,
+        CANCELLED,
+    ];
+
+    /// frame's warnings that aren't errors' codes too: what it did with
+    /// the file's spherical metadata, and the filter it could use.
+    pub mod warnings {
+        /// A stereo source: its left eye is rendered.
+        pub const STEREO_LEFT_EYE: &str = "stereo_left_eye";
+        /// A stereo layout frame doesn't know: the picture is rendered
+        /// whole, as mono.
+        pub const STEREO_UNKNOWN: &str = "stereo_unknown";
+        /// Spherical Video V2 crop bounds: the picture covers part of the
+        /// sphere, and the rest is black.
+        pub const CROP_APPLIED: &str = "crop_applied";
+        /// A non-zero Spherical Video V2 pose, which M1 doesn't apply.
+        pub const POSE_NOT_APPLIED: &str = "pose_not_applied";
+        /// `--filter aniso` on a device without anisotropic filtering:
+        /// the render is isotropic.
+        pub const ANISOTROPY_UNAVAILABLE: &str = "anisotropy_unavailable";
+
+        pub const ALL: &[&str] = &[
+            STEREO_LEFT_EYE,
+            STEREO_UNKNOWN,
+            CROP_APPLIED,
+            POSE_NOT_APPLIED,
+            ANISOTROPY_UNAVAILABLE,
+        ];
+    }
 }
 
 /// Every code the JSON can carry, as an error or a warning, sorted and
-/// without repeats: the CLI's own, [`MediaError::CODES`] and
-/// [`probe::codes::ALL`].
+/// without repeats: the CLI's own, [`MediaError::CODES`],
+/// [`probe::codes::ALL`] and [`RenderError::CODES`].
 pub fn all_codes() -> Vec<&'static str> {
     let mut all: Vec<&'static str> = codes::ALL
         .iter()
+        .chain(codes::warnings::ALL)
         .chain(MediaError::CODES)
         .chain(probe::codes::ALL)
+        .chain(RenderError::CODES)
         .copied()
         .collect();
     all.sort_unstable();
     all.dedup();
     all
+}
+
+/// The exit status of a `frame` run that failed with `code`: 2 for a
+/// usage error, 3 for a device or codec the run needs and doesn't have,
+/// 4 when it was cancelled, and 1 for anything else (D27). `hw_*` codes
+/// fail a run only when `--decoder` named the hardware; `auto` falls
+/// back to software instead.
+pub fn frame_exit(code: &str) -> Exit {
+    match code {
+        codes::USAGE => Exit::Usage,
+        "no_gpu" | "adapter_not_found" | "hw_unavailable" | "hw_unsupported" | "hw_failed"
+        | "no_decoder" => Exit::Missing,
+        codes::CANCELLED => Exit::Cancelled,
+        _ => Exit::Failed,
+    }
 }
 
 /// The one document a `--json` run prints. `ok` is true exactly when
@@ -104,6 +177,16 @@ impl<T: Serialize> Envelope<T> {
             error,
             warnings: Vec::new(),
         }
+    }
+
+    /// The same document with `warnings` about the run as a whole.
+    pub fn with_warnings(mut self, warnings: Vec<Warning>) -> Self {
+        self.warnings = warnings;
+        self
+    }
+
+    pub fn warnings(&self) -> &[Warning] {
+        &self.warnings
     }
 
     pub fn schema(&self) -> &'static str {
@@ -154,11 +237,130 @@ impl ErrorBody {
 }
 
 /// Something about the run as a whole that didn't stop it. probe and
-/// doctor report their findings in `result` and have none of these yet.
+/// doctor report their findings in `result` and have none of these yet;
+/// frame's are about its file and its devices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Warning {
     pub code: &'static str,
     pub message: String,
+}
+
+impl Warning {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Warning {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// What `spherecut frame --json` gives in `result` when it wrote the
+/// frame (`docs/cli-json.md` has every field). A failed run has none.
+#[derive(Debug, Clone, Serialize)]
+pub struct FrameResult {
+    /// The PNG written, as given.
+    pub output: String,
+    /// The frame rendered.
+    pub frame: FrameShown,
+    /// What `--time` or `--frame` asked for: a time, with `frame` when a
+    /// frame number was asked for (for a constant-rate stream, the time
+    /// is that frame's start).
+    pub requested: FrameTime,
+    /// How the frame relates to what was asked for: `exact`, the only
+    /// value `frame` writes in version 1 (anything else fails the run).
+    pub exactness: &'static str,
+    pub size: Size,
+    /// 8 or 16 bits per channel.
+    pub depth: u8,
+    pub view: ViewInfo,
+    /// `iso` or `aniso`.
+    pub filter: &'static str,
+    /// `gpu`, or `reference` for `--reference`'s CPU render.
+    pub renderer: &'static str,
+    pub decode: DecodeInfo,
+    /// The adapter rendered on; null for `--reference`.
+    pub gpu: Option<GpuInfo>,
+    /// The colour the frame was decoded as, with what was assumed.
+    pub color: ColorInfo,
+    pub source: SourceInfo,
+}
+
+/// A frame of the stream: its own timestamp, and its clip time.
+#[derive(Debug, Clone, Serialize)]
+pub struct FrameShown {
+    /// In ticks of the stream's time base.
+    pub pts: i64,
+    /// Clip time, with the frame's index when it is known: for a
+    /// constant-rate stream, or a frame reached by counting.
+    pub time: FrameTime,
+}
+
+/// A width and a height, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Size {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The virtual camera, as given: degrees, and the projections by name.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ViewInfo {
+    pub yaw: f64,
+    pub pitch: f64,
+    pub roll: f64,
+    /// Horizontal, in degrees.
+    pub fov: f64,
+    /// `rectilinear`, `fisheye` or `stereographic`.
+    pub projection: &'static str,
+    /// The projection morphed towards, or null.
+    pub morph_to: Option<&'static str>,
+    /// 0 is `projection`, 1 is `morph_to`.
+    pub morph: f64,
+}
+
+/// Where the frame was decoded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DecodeInfo {
+    /// `software`, `vaapi` or `vulkan`.
+    pub path: &'static str,
+    /// Why a hardware decode went on in software, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<FallbackInfo>,
+}
+
+/// A hardware decode that went on in software.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FallbackInfo {
+    /// `vaapi` or `vulkan`.
+    pub from: &'static str,
+    /// `hw_unavailable` (no device), `hw_unsupported` (the device turned
+    /// the stream down) or `hw_failed` (it failed on a frame).
+    pub code: &'static str,
+    pub reason: String,
+}
+
+/// The adapter a frame was rendered on, as wgpu describes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GpuInfo {
+    pub name: String,
+    pub driver: String,
+    pub driver_info: String,
+    /// `discrete_gpu`, `integrated_gpu`, `virtual_gpu`, `cpu` (lavapipe)
+    /// or `other`.
+    pub device_type: &'static str,
+}
+
+/// The stream the frame came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceInfo {
+    /// FFmpeg's stream index.
+    pub stream: usize,
+    /// FFmpeg's codec name, such as `hevc`.
+    pub codec: String,
+    /// The decoded picture, after cropping.
+    pub size: Size,
+    /// The decoder's pixel format, as FFmpeg names it.
+    pub pix_fmt: String,
 }
 
 /// What `spherecut probe --json` gives in `result`: one entry per file,
@@ -288,6 +490,7 @@ pub fn schema_for(args: &[OsString]) -> &'static str {
     match first.and_then(|a| a.to_str()) {
         Some("probe") => PROBE,
         Some("doctor") => DOCTOR,
+        Some("frame") => FRAME,
         _ => CLI,
     }
 }
@@ -345,6 +548,10 @@ mod tests {
             schema_for(&args(&["spherecut", "--json", "doctor"])),
             DOCTOR
         );
+        assert_eq!(
+            schema_for(&args(&["spherecut", "frame", "--json", "a.mp4"])),
+            FRAME
+        );
         assert_eq!(schema_for(&args(&["spherecut", "--json"])), CLI);
         assert_eq!(schema_for(&args(&["spherecut", "frobnicate"])), CLI);
         let (env, exit) = usage(
@@ -357,6 +564,40 @@ mod tests {
         assert_eq!(e.code, codes::USAGE);
         assert!(e.message.starts_with("the following required"), "{e:?}");
         assert!(e.message.ends_with("<FILES>..."), "{e:?}");
+    }
+
+    #[test]
+    fn frame_exits_by_its_code() {
+        assert_eq!(frame_exit("usage"), Exit::Usage);
+        for code in [
+            "no_gpu",
+            "adapter_not_found",
+            "hw_unavailable",
+            "hw_unsupported",
+            "hw_failed",
+            "no_decoder",
+        ] {
+            assert_eq!(frame_exit(code), Exit::Missing, "{code}");
+        }
+        assert_eq!(frame_exit("cancelled"), Exit::Cancelled);
+        for code in [
+            "not_found",
+            "truncated",
+            "not_equirect",
+            "out_of_range",
+            "output_exists",
+            "io_error",
+            "damaged",
+            "gpu_failed",
+            "internal",
+        ] {
+            assert_eq!(frame_exit(code), Exit::Failed, "{code}");
+        }
+        // Every code the run can end with is known.
+        let all = all_codes();
+        for code in codes::ALL.iter().chain(RenderError::CODES) {
+            assert!(all.contains(code), "{code}");
+        }
     }
 
     #[test]
