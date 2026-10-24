@@ -193,12 +193,6 @@ back clean, so M0 is done.
   frame whose width isn't a multiple of its chroma subsampling (odd-width
   4:2:0, which AV1 and VP9 allow) shows a half-texel chroma step at the
   ±180° seam (D31).
-- The M1 plan's Euler table for `frame`'s tests (section 12.1) says
-  `--roll 90` puts the U marker on the right edge's side; with the plan's own
-  convention, q = R_y(−yaw) · R_x(pitch) · R_z(−roll) with roll > 0
-  clockwise, which `sphere::orient` implements and tests, world up then
-  lies on the view's left. Slice 4 has to settle which is meant before
-  that golden is blessed.
 - Slice 3a adds about 2.5 s to a warm `cargo xtask check` (33.6 s
   against 31.1 s at ef1a9d1, both without cargo-deny and cargo-audit,
   which here depend on the advisory database; 33.2 s before its first

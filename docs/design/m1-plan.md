@@ -100,6 +100,20 @@ the sections below, they win.
    always the hardware path: `DecodeMode::Hardware { kind }` already
    takes `Vulkan`, and slice 5 picks the kind from doctor's checks, not
    a fixed order.
+10. **The Euler table's `--roll 90` row** (section 12.1) said the U
+    marker lands on the right edge's side. Under the convention of D33
+    (the plan's D31), q = R_y(−yaw) · R_x(pitch) · R_z(−roll), world = q ·
+    view, with roll > 0 rolling the camera clockwise as seen from behind
+    it, R_z(−90°) takes the view's up (+Y) to world +X, so the camera's
+    up points to the world's right, and its inverse R_z(90°) takes world
+    up to view −X: the world's up, and the U marker 90° off axis, lie on
+    the view's **left**, as a head tilted to the right sees the sky on its
+    left. The formula, the words and `sphere::orient` (whose test asserts
+    `q.conjugate() * Y == −X` at roll 90) agree with each other; the row
+    was the outlier, and now reads "the U marker on the left edge's side"
+    (the centre stays red, F). Slice 4's `frame.rs` checks it through a
+    view wide enough to show U (a fisheye wider than 180°, or a
+    rectilinear view pitched up). Found in slice 3a, settled in slice 3b.
 
 ## 1. Summary
 
@@ -2176,7 +2190,7 @@ The Euler table (`frame` on the grid clip, centre pixel):
 | `--yaw -90` | yellow, L |
 | `--pitch 90` | white, U |
 | `--pitch -90` | black, D |
-| `--roll 90` | the U marker on the right edge's side |
+| `--roll 90` | red, F (roll turns about the view axis); the U marker on the left edge's side (amendment 10) |
 
 **The confinement table** (`crates/cli/tests/confinement.rs` and
 `no_network.rs`). Every file is generated into a temp dir:
