@@ -12,6 +12,8 @@ use spherecut_core::FrameRate;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Audio, Codec, Spec};
 
+mod document;
+
 fn tmp(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("spherecut-cli-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
@@ -134,7 +136,7 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
     assert!(stdout.contains(&good.display().to_string()), "{stdout}");
     assert!(stdout.contains(&corrupt.display().to_string()), "{stdout}");
 
-    // JSON carries the damage list.
+    // JSON carries the damage list, each with its code, and the error.
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
     let out = cmd
         .args(["probe", "--json"])
@@ -142,17 +144,26 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let damage = v["damage"].as_array().unwrap();
+    let v = document::document(&out.stdout);
+    let file = &v["result"]["files"][0];
+    let damage = file["report"]["damage"].as_array().unwrap();
     assert!(
-        damage[0].as_str().unwrap().starts_with("track #0: chunk 1"),
+        damage[0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("track #0: chunk 1"),
         "{v}"
     );
+    assert_eq!(damage[0]["code"], "damaged", "{v}");
+    assert_eq!(file["error"]["code"], "damaged", "{v}");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
     let out = cmd.args(["probe", "--json"]).arg(&good).output().unwrap();
     assert!(out.status.success());
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["damage"], serde_json::json!([]));
+    let v = document::document(&out.stdout);
+    assert_eq!(
+        v["result"]["files"][0]["report"]["damage"],
+        serde_json::json!([])
+    );
 
     // FFmpeg's own messages are shown in the report, though the log hides
     // them by default.
@@ -171,8 +182,10 @@ fn good_files_pass_and_bad_files_fail_with_a_reason() {
         .arg(&timescale)
         .output()
         .unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let log = v["ffmpeg_log"].as_array().unwrap();
+    let v = document::document(&out.stdout);
+    let log = v["result"]["files"][0]["report"]["ffmpeg_log"]
+        .as_array()
+        .unwrap();
     assert!(
         log.iter()
             .any(|l| l.as_str().unwrap().contains("] Invalid mdhd time scale 0")),
@@ -215,22 +228,32 @@ fn ffmpegs_log_is_kept_for_a_file_it_cannot_open() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(v["error"].as_str().unwrap().contains("cannot open"), "{v}");
-    let log = v["ffmpeg_log"].as_array().unwrap();
+    let v = document::document(&out.stdout);
+    let file = &v["result"]["files"][0];
+    assert!(file.get("report").is_none(), "{v}");
+    let error = &file["error"];
+    assert!(
+        error["message"].as_str().unwrap().contains("cannot open"),
+        "{v}"
+    );
+    // Cut in half, it has no `moov` left, but probe's own checks say why.
+    assert_eq!(error["code"], "truncated", "{v}");
+    let log = error["ffmpeg_log"].as_array().unwrap();
     assert!(
         log.iter()
             .any(|l| l.as_str().unwrap().ends_with("moov atom not found")),
         "{v}"
     );
-    // A file we refuse before FFmpeg reads it has an empty log.
+    // A file we refuse before FFmpeg reads it has no log.
     let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
         .args(["probe", "--json"])
         .arg(dir.join("bad-empty.mp4"))
         .output()
         .unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["ffmpeg_log"], serde_json::json!([]), "{v}");
+    let v = document::document(&out.stdout);
+    let error = &v["result"]["files"][0]["error"];
+    assert_eq!(error["code"], "not_media", "{v}");
+    assert!(error.get("ffmpeg_log").is_none(), "{v}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -267,18 +290,21 @@ fn file_names_that_are_not_utf8_are_reported() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let path = |i: usize| v[i]["path"].as_str().unwrap().to_string();
+    let v = document::document(&out.stdout);
+    let files = &v["result"]["files"];
+    let path = |i: usize| files[i]["path"].as_str().unwrap().to_string();
     assert!(path(0).ends_with("empty-\u{fffd}.mp4"), "{v}");
     assert!(
-        v[0]["error"]
+        files[0]["error"]["message"]
             .as_str()
             .unwrap()
             .contains("the file is empty")
     );
+    assert_eq!(files[0]["error"]["path"], path(0).as_str());
     assert!(path(1).ends_with("missing-\u{fffd}.mp4"), "{v}");
+    assert_eq!(files[1]["error"]["code"], "not_found", "{v}");
     assert_eq!(path(2), good.display().to_string());
-    assert_eq!(v[2]["damage"], serde_json::json!([]));
+    assert_eq!(files[2]["report"]["damage"], serde_json::json!([]));
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -303,12 +329,12 @@ fn files_named_in_bytes_that_are_not_utf8_are_probed() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", text(&out.stderr));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(
-        v["path"].as_str().unwrap().ends_with("clip-\u{fffd}.mp4"),
-        "{v}"
-    );
-    assert_eq!(v["damage"], serde_json::json!([]));
+    let v = document::document(&out.stdout);
+    let file = &v["result"]["files"][0];
+    for path in [&file["path"], &file["report"]["path"]] {
+        assert!(path.as_str().unwrap().ends_with("clip-\u{fffd}.mp4"), "{v}");
+    }
+    assert_eq!(file["report"]["damage"], serde_json::json!([]));
     std::fs::remove_dir_all(&dir).ok();
 }
 

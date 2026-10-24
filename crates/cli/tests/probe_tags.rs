@@ -7,7 +7,7 @@
 
 use std::process::Command;
 
-use serde_json::Value;
+mod document;
 
 /// A Matroska element with an 8-byte size.
 fn el(id: &[u8], payload: &[u8]) -> Vec<u8> {
@@ -72,9 +72,10 @@ fn tags_that_are_not_utf8_come_out_as_valid_json() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
-    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["container"]["tags"]["title"], "caf\u{fffd}");
-    assert_eq!(v["streams"][0]["tags"]["title"], "caf\u{fffd}");
+    let v = document::document(&out.stdout);
+    let report = &v["result"]["files"][0]["report"];
+    assert_eq!(report["container"]["tags"]["title"], "caf\u{fffd}");
+    assert_eq!(report["streams"][0]["tags"]["title"], "caf\u{fffd}");
 
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -101,7 +101,7 @@ pub struct DeviceStatus {
     pub device: Option<String>,
     pub ok: bool,
     pub error: Option<String>,
-    /// The physical device FFmpeg runs on (Vulkan).
+    /// The physical device FFmpeg runs on (Vulkan; None for VA-API).
     pub name: Option<String>,
     /// FFmpeg's warnings and errors while opening it.
     pub ffmpeg_log: Vec<String>,
@@ -130,6 +130,9 @@ pub struct VulkanDevice {
     pub driver: Option<String>,
     /// e.g. "Mesa 25.2.8".
     pub driver_info: Option<String>,
+    /// Whether it is FFmpeg's default Vulkan device, which doctor's
+    /// Vulkan checks run on. With two GPUs it need not be the one behind
+    /// the render node, which `decode::open_vulkan_device` picks (D38).
     pub used_by_ffmpeg: bool,
 }
 
@@ -207,6 +210,9 @@ pub struct Issue {
     pub severity: Severity,
     pub what: String,
     pub impact: String,
+    /// Lines for people: each a command, perhaps followed by three spaces
+    /// and a note (`sudo pacman -Syu   (Arch's Mesa has H.264 and HEVC)`),
+    /// or a sentence where no command fixes it (D18).
     pub fix: String,
 }
 

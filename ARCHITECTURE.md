@@ -26,7 +26,7 @@ this stack and are used only by tests and `xtask`.
 
 | Crate | Role | Status |
 |---|---|---|
-| `spherecut-core` | Product name constants (`brand`), exact rational time; later the project model, timeline, keyframes, undo | M0: name and time only |
+| `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27); later the project model, timeline, keyframes, undo | M0: name and time only |
 | `spherecut-sphere` | CPU reference projection math in f64: equirect, cube/EAC, fisheye lens models, view projections and morphs, rotation helpers | M0 |
 | `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, a small MP4 writer, `doctor`'s capability checks. The `MediaBackend` trait is planned | M0; `MediaBackend` in M1 |
 | `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion, tones and first-order ambiX, test clips and broken files | M0 |
@@ -38,8 +38,8 @@ this stack and are used only by tests and `xtask`.
 | `spherecut-audio` | Playback clock, mixing, ambisonics, loudness | M1 (playback), M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
 | `spherecut-app` | eframe app, docked panels, viewer paint callbacks | M1 |
-| `spherecut-agent` | Agent integration (D23): the request and response type of each operation, shared by `spherecut mcp` and `spherecut call` (from A1 the `--json` of `probe`, `doctor` and `frame` uses them too, with a schema version bump if M1's shape changes); the MCP server; later the GUI attach bridge | A1 (after M1) |
-| `spherecut-cli` | The `spherecut` binary: `probe` and `doctor` today. `frame` (M1), `render` (M2), the GUI when run without a subcommand (M1), and `mcp` and `call` (A1) are planned | M0: `probe`, `doctor` |
+| `spherecut-agent` | Agent integration (D23): the request and response type of each operation, shared by `spherecut mcp` and `spherecut call` (from A1 the `--json` of `probe`, `doctor` and `frame` uses them too, under a new schema version if M1's shape changes, D27); the MCP server; later the GUI attach bridge | A1 (after M1) |
+| `spherecut-cli` | The `spherecut` binary: `probe` and `doctor` today. `frame` (M1), `render` (M2), the GUI when run without a subcommand (M1), and `mcp` and `call` (A1) are planned. Its library half holds `contract`, the JSON contract of `--json` (D27), until A1 moves it to `spherecut-agent` or a crate below both | M0: `probe`, `doctor`; M1: the JSON contract |
 | `xtask` | `check`, `gen-media`, `hw-test` | M0 |
 
 Crates are created when they get real content, not as empty shells. The
@@ -155,15 +155,24 @@ The other modules are safe Rust:
   warning. `probe::Undecodable` holds the reason and decides which it is.
   A file FFmpeg reads as MOV/MP4 that the strict read refuses is read
   again with `FirstBox::Any`, which accepts any valid first box. Matroska
-  files are checked against their Segment length. No other container
+  files are checked against their Segment length, also when FFmpeg can't
+  open them, so that one cut short before its tracks is `truncated`. No other container
   gets this far: `open_input` refuses them by name (D24). `probe` runs
   inside `hwprobe::capture_ffmpeg_log` and keeps FFmpeg's warnings and
   errors in `ProbeReport.ffmpeg_log`, apart from `damage` and `warnings`,
   or in `ProbeError.ffmpeg_log` beside the `MediaError` when it fails.
   `ProbeReport.structure` records how much was checked (`full`, `length`
-  or `none` with a reason), and `damage` lists what was found.
-  `ProbeReport.path` serializes as lossy UTF-8. The CLI fails on any
-  damage (D15).
+  or `none` with a reason), and `damage` lists what was found. Each
+  entry of `damage` and `warnings` is a `Problem`, a stable code from
+  `probe::codes` with a message (D27): damage is `truncated` for the
+  cut itself and `damaged` otherwise. `ProbeReport::failure()` says why
+  a report fails the file, and `ProbeError::code()` why the file could
+  not be read, refining the `MediaError`'s code from what probe found
+  (a file FFmpeg can't open is `truncated`, `damaged` or `not_media` when
+  probe can tell why, and `open_failed` otherwise). A read error of the
+  file itself is `MediaError::Io`, never damage.
+  `ProbeReport.path` serializes as lossy UTF-8, and its durations and
+  start time as `Time`s. The CLI fails on any damage (D15).
 * `mp4`: the box reader, with fixed limits (DECISIONS D15).
 * `spherical`: Spherical Video V1 and V2 and SA3D, read from the boxes and
   written as box bytes.
@@ -193,14 +202,16 @@ The other modules are safe Rust:
   `crates/media/fixtures/`, whose README gives the commands that
   regenerate them byte for byte.
 
-`MediaError` has seven variants: `Io`, `NotAFile`,
+`MediaError` has nine variants: `Io`, `NotAFile`,
 `UnsupportedContainer { path, format, description }` (FFmpeg would read
 the file with a demuxer outside `DEMUXERS`; the message names it and the
-containers Spherecut opens), `Open` (which includes a nested open
-`io_open` refused), `Decode`,
+containers Spherecut opens), `Open`, `NestedOpenRefused { path, url }`
+(FFmpeg tried to open something else while opening the file, which
+`io_open` refused), `Decode`, `PictureTooLarge` (over `MAX_PIXELS`),
 `HwUnsupported { path, kind, refusal: HwRefusal }` (the device can't decode
 this stream; software may) and `Hardware { kind, reason: HwError }` (the
-device can't be opened). `VideoDecoder::open` returns `HwUnsupported`
+device can't be opened). `code()` gives each a stable snake_case code for
+the JSON contract, and `MediaError::CODES` lists them (D27). `VideoDecoder::open` returns `HwUnsupported`
 (`NotOffered`) when no decoder for the codec can use the device, and
 `next_frame` returns it when the device turns the stream down. A software
 frame from a decoder that never asked for the device's format, or that
@@ -213,6 +224,29 @@ from `source()`, so `{e:#}` prints each cause once.
 bridge. FFmpeg's own log level follows what the `tracing` subscriber
 accepts for target `ffmpeg`, so a subscriber installed after `init()`
 should call `sync_ffmpeg_log_level()`.
+
+## The CLI's JSON contract
+
+`spherecut_cli::contract` builds what `--json` prints (D27, and
+`docs/cli-json.md` field by field): one envelope per run, `{"schema",
+"ok", "result"?, "error"?, "warnings"}`, with `schema` such as
+`spherecut.probe/1`. probe's result is `{"files": [...]}`, one
+`ProbeFile` per path, and doctor's is its `DoctorReport`. `Exit` holds
+the exit statuses (0 to 2 used, 3 and 4 reserved for `frame` and the
+GUI) and `codes` the CLI's own codes; `all_codes()` adds `MediaError`'s
+and probe's. `main.rs` parses with clap's `try_parse_from`, so that a
+command line that doesn't parse is a document too under `--json`
+(`wants_json` looks for `--json` before any `--`), and writes the
+document with `Envelope::to_line()` after the run. The module needs
+only serde, serde_json, core and media. A1 moves it into
+`spherecut-agent` (or a crate below both), which the CLI will depend on
+and which can't depend on the CLI, and the CLI re-exports it (D27).
+Under `--json`, a panic hook writes an `internal` document in the run's
+schema (`schema_for`) unless the document has started, and `main` exits
+1 after any panic, parsing included; a flag keeps the run to one
+document. Debug builds panic on `SPHERECUT_DEBUG_PANIC` (`main`,
+`thread` or `usage`) for the contract test. A1's `spherecut call` and
+`spherecut mcp` are to reuse the module.
 
 ## Coordinates and conventions
 
@@ -234,9 +268,20 @@ All stored time is exact (`spherecut_core::time`):
 * `Rational`: reduced `i64/i64`, checked arithmetic in `i128`.
 * `Time`: seconds as a `Rational`; timeline positions are `Time`.
 * `FrameRate`: positive `Rational` (`30000/1001` for 29.97).
+* `FrameTime`: a `Time` that is a frame of a video stream, in clip time
+  (0 at the stream's first presented frame), with the frame's index from
+  that frame when it is known (constant frame rate, or counted).
+  `FrameTime::at(rate, n)` is n / rate.
 * Streams keep integer PTS in their own timebase; conversion to and from
   `Time` is explicit about rounding. Variable-frame-rate sources are
   addressed by PTS, never by frame index.
+* Serialized (D27), a `Rational` or `FrameRate` is the string `"n/d"`
+  (`"n"` for an integer), which `Rational` also parses with `FromStr`; a
+  `Time` is `{"exact": "n/d", "seconds": float}`, and a `FrameTime` adds
+  `"frame"` when it has an index (a null one reads as none). Reading
+  ignores `seconds`, so every one reads back exactly. probe's container
+  times are FFmpeg's container timestamps, not clip time
+  (`docs/cli-json.md`, "Two timelines").
 
 ## Rendering *(planned, M1)*
 

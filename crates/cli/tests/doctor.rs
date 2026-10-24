@@ -12,6 +12,7 @@ use std::process::{Command, Output};
 use serde_json::Value;
 
 mod common;
+mod document;
 
 /// Mesa's lavapipe ICD for this architecture. Tier 1 needs it; it ships in
 /// mesa-vulkan-drivers (Fedora, Ubuntu) and vulkan-swrast (Arch).
@@ -79,7 +80,13 @@ fn run_doctor(mut cmd: Command, args: &[&str]) -> Output {
 #[test]
 fn json_flags_lavapipe_as_cpu_and_the_render_node_as_missing() {
     let out = doctor(&["--json"]);
-    let r: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let v = document::document(&out.stdout);
+    // Warnings only, so the run is ok and the report comes without an
+    // error.
+    assert_eq!(v["schema"], "spherecut.doctor/1");
+    assert_eq!(v["ok"], true);
+    assert!(v.get("error").is_none(), "{v}");
+    let r: &Value = &v["result"];
 
     // The keys doctor has always had are still there.
     for k in [

@@ -31,6 +31,14 @@ pub enum MediaError {
     NotAFile(PathBuf),
     #[error("cannot open {}: {reason}", path.display())]
     Open { path: PathBuf, reason: String },
+    /// While opening the file, FFmpeg asked to open another file or URL,
+    /// which was refused (D24). A guard: the demuxers Spherecut allows,
+    /// with `enable_drefs` off, aren't known to ask.
+    #[error(
+        "cannot open {}: FFmpeg tried to open `{url}` from inside it, which is refused: Spherecut lets FFmpeg read only the file it was given",
+        path.display()
+    )]
+    NestedOpenRefused { path: PathBuf, url: String },
     /// FFmpeg would read the file with a demuxer Spherecut doesn't let it
     /// use (D24). `format` is FFmpeg's name for the demuxer, such as `hls`.
     #[error(
@@ -72,6 +80,40 @@ pub use ffi::{CONTAINERS, HwDevice, HwError, HwRefusal, MAX_PIXELS, TooLarge};
 pub use hwprobe::{capture_ffmpeg_log, capture_hw_decode_log};
 
 impl MediaError {
+    /// Every code [`MediaError::code`] gives.
+    pub const CODES: &'static [&'static str] = &[
+        "not_found",
+        "io_error",
+        "not_a_file",
+        "open_failed",
+        "nested_open_refused",
+        "unsupported_container",
+        "decode_failed",
+        "too_large",
+        "hw_unsupported",
+        "hw_unavailable",
+    ];
+
+    /// The error's stable code, as the CLI's JSON gives it (D27): within a
+    /// schema version a code keeps its name and meaning.
+    /// `docs/cli-json.md` lists them all.
+    pub fn code(&self) -> &'static str {
+        match self {
+            MediaError::Io { error, .. } if error.kind() == std::io::ErrorKind::NotFound => {
+                "not_found"
+            }
+            MediaError::Io { .. } => "io_error",
+            MediaError::NotAFile(_) => "not_a_file",
+            MediaError::Open { .. } => "open_failed",
+            MediaError::NestedOpenRefused { .. } => "nested_open_refused",
+            MediaError::UnsupportedContainer { .. } => "unsupported_container",
+            MediaError::Decode { .. } => "decode_failed",
+            MediaError::PictureTooLarge { .. } => "too_large",
+            MediaError::HwUnsupported { .. } => "hw_unsupported",
+            MediaError::Hardware { .. } => "hw_unavailable",
+        }
+    }
+
     /// The error for `path`, which [`ffi::open_input`] could not open as
     /// `e` says. `ffmpeg` words FFmpeg's own errors.
     pub(crate) fn opening(
@@ -95,10 +137,7 @@ impl MediaError {
                 path,
                 reason: ffmpeg(e),
             },
-            e @ ffi::OpenError::Nested { .. } => MediaError::Open {
-                path,
-                reason: e.to_string(),
-            },
+            ffi::OpenError::Nested { url } => MediaError::NestedOpenRefused { path, url },
         }
     }
 }
@@ -124,4 +163,95 @@ pub fn init() {
 /// for target "ffmpeg".
 pub fn sync_ffmpeg_log_level() {
     ffi::sync_log_level();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::io;
+
+    use super::*;
+
+    #[test]
+    fn every_error_has_a_listed_code() {
+        let path = || PathBuf::from("x.mp4");
+        let io = |kind| MediaError::Io {
+            path: path(),
+            error: io::Error::from(kind),
+        };
+        let errors = [
+            io(io::ErrorKind::NotFound),
+            io(io::ErrorKind::PermissionDenied),
+            MediaError::NotAFile(path()),
+            MediaError::Open {
+                path: path(),
+                reason: "r".into(),
+            },
+            MediaError::NestedOpenRefused {
+                path: path(),
+                url: "http://h/x".into(),
+            },
+            MediaError::UnsupportedContainer {
+                path: path(),
+                format: "hls".into(),
+                description: "Apple HTTP Live Streaming".into(),
+            },
+            MediaError::Decode {
+                path: path(),
+                reason: "r".into(),
+            },
+            MediaError::PictureTooLarge {
+                path: path(),
+                stream: 0,
+                size: TooLarge {
+                    width: 16400,
+                    height: 8200,
+                },
+            },
+            MediaError::HwUnsupported {
+                path: path(),
+                kind: "VA-API".into(),
+                refusal: HwRefusal::Withdrawn,
+            },
+            MediaError::Hardware {
+                kind: "VA-API".into(),
+                reason: HwError::NotBuiltIn("VA-API".into()),
+            },
+        ];
+        let mut seen = BTreeSet::new();
+        for e in &errors {
+            // No wildcard, so that a new variant fails to build here until
+            // it is given a code above.
+            match e {
+                MediaError::Io { .. }
+                | MediaError::NotAFile(_)
+                | MediaError::Open { .. }
+                | MediaError::NestedOpenRefused { .. }
+                | MediaError::UnsupportedContainer { .. }
+                | MediaError::Decode { .. }
+                | MediaError::PictureTooLarge { .. }
+                | MediaError::HwUnsupported { .. }
+                | MediaError::Hardware { .. } => {}
+            }
+            assert!(MediaError::CODES.contains(&e.code()), "{e:?}");
+            seen.insert(e.code());
+        }
+        assert_eq!(seen.len(), MediaError::CODES.len(), "{seen:?}");
+    }
+
+    #[test]
+    fn a_refused_nested_open_says_so_as_before() {
+        let e = MediaError::opening(
+            Path::new("list.m3u8"),
+            ffi::OpenError::Nested {
+                url: "http://h/x.ts".into(),
+            },
+            |e| e.to_string(),
+        );
+        assert_eq!(e.code(), "nested_open_refused");
+        assert_eq!(
+            e.to_string(),
+            "cannot open list.m3u8: FFmpeg tried to open `http://h/x.ts` from inside it, which is refused: Spherecut lets FFmpeg read only the file it was given"
+        );
+    }
 }

@@ -147,6 +147,13 @@ converting to a stream's timebase. Considered: num-rational, whose
 `Ratio<i64>` overflows on intermediate products unless every call site uses
 the `Checked*` traits, and which hasn't been released since 2024.
 
+*Updated by D27:* `Rational` serializes as the text `"n/d"` (`"n"` for an
+integer) and parses from it with `FromStr`, `Time` as `{"exact",
+"seconds"}`, and `FrameTime` (a `Time` and, when known, its frame index)
+joins them.
+ron used to write a frame rate as `(60000,1001)`; it now writes
+`"60000/1001"`, and the old form is refused.
+
 ## D7. GUI and GPU stack (for M1)
 
 *2026-10-22, decided ahead of M1. Research: `docs/research/gpu-ui-stack.md`.*
@@ -679,7 +686,11 @@ anything.
 Fixes are exact `dnf` or `pacman` commands where a package fixes the
 problem, on Fedora and Arch. Other problems get the fix that applies
 (`usermod -aG render`, GPU passthrough, `MESA_VK_DEVICE_SELECT`), and
-other distros get the package named in words. Doctor exits 1 only on an
+other distros get the package named in words. A fix is lines for people:
+a command may be followed by three spaces and a note (`sudo dnf install
+mesa-va-drivers-freeworld   (RPM Fusion free)`), so the command is what
+comes before them, and a line with no command is a sentence
+(`docs/cli-json.md`, D27). Doctor exits 1 only on an
 error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes
 AV1. `--json` keeps its old keys and adds `gpu`, `vulkan_devices`,
 `decode_checks` and `encode_checks`.
@@ -708,6 +719,11 @@ opened. It caught Fedora's codec-stripped VA-API driver only through an
 `rpm -q` guess, so the same problem with Intel drivers or on Arch went
 unnoticed, and it reported lavapipe as a working Vulkan device. The review
 also found that D8's "never runs package managers" was not true.
+
+*Updated by D27:* `doctor --json` prints its report, with the keys
+above, as the `result` of a `spherecut.doctor/1` document. An issue of
+severity error makes `ok` false, with the code `doctor_errors`, and still
+exits 1; a command line that doesn't parse exits 2.
 
 ## D19. How `cargo xtask hw-test` reports Tier 2 tests
 
@@ -799,8 +815,8 @@ rest, with the versions in `Cargo.lock`:
 |---|---|---|
 | anyhow 1.0.104 | cli, xtask | Error context at the program edges; libraries use `thiserror` |
 | clap 4.6.7 (derive) | cli, xtask | Argument parsing with generated help and errors, for two binaries with subcommands |
-| serde 1.0.229 (derive) | core, sphere, media | Serializable time types, `Projection`, and the probe and doctor reports |
-| serde_json 1.0.154 | cli | `--json` output. xtask reads cargo's JSON with a small field reader instead |
+| serde 1.0.229 (derive) | core, sphere, media, cli | Serializable time types, `Projection`, the probe and doctor reports, and the CLI's JSON envelope (D27) |
+| serde_json 1.0.154 | cli | `--json` output, through the `contract` module (D27). xtask reads cargo's JSON with a small field reader instead |
 | thiserror 2.0.21 | core, media, synth | Typed library errors without hand-written `Display` impls |
 | tracing 0.1.44 | media, cli | Structured logging, and the target for FFmpeg's log (D12) |
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
@@ -884,6 +900,10 @@ tests including an `strace` check for network sockets.
 *Updated by D24*, which does that, and gives every decoder a
 `max_pixels` limit (`MAX_PIXELS`, one of the limits PLAN.md track A
 lists). `spherecut frame`'s strace test comes with `frame`.
+
+*Updated by D27*, the JSON contract of the CLI for probe and doctor. Its
+envelope, codes and time shapes are in `spherecut_cli::contract` and
+`spherecut_core`, for A1's tools to return.
 
 To decide at A1, with a prototype of each:
 
@@ -1174,6 +1194,144 @@ UI types: a switch would replace only `spherecut-app`.
 Revisit if: the M2 check fails, or `egui_dock` or egui's text editing
 changes enough to matter.
 
+## D27. The CLI JSON contract
+
+*2026-10-24, M1. Updates D6, D18 and D23. The criterion is in PLAN.md
+M1; `docs/cli-json.md` is the contract itself, field by field.*
+
+What, for `spherecut probe` and `spherecut doctor` now, and for
+`spherecut frame` when it lands (M1 slice 4):
+
+- With `--json`, stdout carries exactly one document per run, on success
+  and on failure: one line of compact JSON and a newline. stderr carries
+  only the log and the `error:` lines for people. The document is an
+  envelope, `{"schema", "ok", "result"?, "error"?, "warnings"}`, and `ok`
+  is true exactly when there is no `error`. It is built in
+  `spherecut_cli::contract`, the CLI crate's new library half, so that
+  A1's `spherecut call` and `spherecut mcp` can reuse it. That is where
+  it lives for M1 only: the `spherecut` binary is to host `mcp` and
+  `call` on spherecut-agent's types, so spherecut-cli will depend on
+  spherecut-agent, and spherecut-agent can't depend back on it for
+  `Envelope`, `ErrorBody` or the codes (Cargo refuses the cycle, and the
+  library half brings clap, anyhow and tracing-subscriber with it). A1
+  moves `contract` into spherecut-agent, or into a small crate below
+  both that needs only serde, serde_json, core and media, as the module
+  does today, and spherecut-cli re-exports it. The JSON doesn't change.
+- `schema` is one string that names the document and its version:
+  `spherecut.probe/1`, `spherecut.doctor/1`, and `spherecut/1` for a
+  usage error that names no subcommand.
+- An error is `{"code", "message", "path"?, "ffmpeg_log"?}`. A code is
+  snake_case and stable; the message is for people. The codes come from
+  three places: `MediaError::code()` (every variant has one, listed in
+  `MediaError::CODES`), probe's (`probe::codes`) and the CLI's
+  (`contract::codes`: `usage`, `files_failed`, `doctor_errors`,
+  `internal`). `contract::all_codes()` is their union. A refused nested
+  open is now its own variant, `MediaError::NestedOpenRefused`, with the
+  same message as before, so that it has its own code.
+- probe's `result` is always `{"files": [...]}`, for one file as for
+  many, each `{"path", "ok", "report"?, "error"?}`. A damaged file that
+  FFmpeg can open has both its report and its error. A failed file has
+  its own code (`not_found`, `io_error`, `not_a_file`, `not_media`,
+  `unsupported_container`, `nested_open_refused`, `truncated`, `damaged`,
+  `no_video_or_audio`, or `open_failed` when FFmpeg can't open it for a
+  reason probe can't name), and the run fails with `files_failed`, whose
+  message names the first. The report's `damage` and `warnings` are
+  problems, `{"code", "message"}`, where they were strings: `truncated`
+  or `damaged`; `too_large`, `no_decoder`, `cannot_decode`,
+  `unexpected_first_box` or `track_without_stream`.
+- doctor's `result` is its report, unchanged, whether or not it found
+  errors. An issue of severity error fails the run with `doctor_errors`.
+- A `Rational` is the string `"n/d"`, reduced, or `"n"` for an integer. A
+  `Time` is `{"exact": "<rational>", "seconds": <float>}`, where `exact`
+  is the time and `seconds` is for display. The new `core::FrameTime`
+  is a frame's time in clip time (0 at the stream's first presented
+  frame, M1 plan section 3.3) and adds `frame`, the frame's index from
+  that frame, only when it is known: a constant-rate stream, or a frame
+  reached by counting, as the plan's `frame --json` result has it. A
+  reader must allow it to be absent. All three read back from these
+  forms, ignoring `seconds`, and a `FrameTime` reads `"frame": null` as
+  absent, as serde reads any other `Option`. probe's container
+  `duration` and `start_time` and its streams' `duration` are `Time`s,
+  where they were `[num, den]` arrays of exact seconds; time bases and
+  frame rates stay rationals, and `start_pts` stays an integer in ticks.
+  probe's times are on the container's timeline, where `start_time` may
+  be far from 0, not in clip time; `docs/cli-json.md` says which is
+  which.
+- A panic under `--json`, on any thread, is still the run's one
+  document: a panic hook writes an `internal` error that says where it
+  panicked, with no `result` (as for a usage error), and the run exits
+  1. Only a signal leaves stdout empty: a crash, such as a fault inside
+  FFmpeg, or a kill such as Ctrl+C, which probe and doctor don't catch.
+  `docs/cli-json.md` tells readers to treat it as a failure, and to
+  report a crash.
+- Exit statuses, in `contract::Exit`: 0 the run did what was asked; 1 an
+  input or a check failed, doctor's errors included; 2 a command line
+  that doesn't parse, as a document with clap's message under `--json`
+  and as clap's text otherwise; 3 a codec or device the command itself
+  needs is missing, and 4 interrupted, both reserved for `frame` and the
+  GUI. probe and doctor never exit 3: a missing decoder is a warning in
+  probe, as in M0, and a finding in doctor (D18). `spherecut probe` with
+  no file is now a usage error, exit 2.
+- The versioning rule: within a schema version, fields are only added,
+  never removed, renamed or given another type, and a code keeps its
+  name and meaning. New codes, and new values of fields that list
+  choices (a stream's `kind`, a camera's `layout`), may appear, so a
+  reader ignores fields it doesn't know and handles an unknown code by
+  the exit status. Any other change is a new version, such as
+  `spherecut.probe/2`.
+
+`crates/cli/tests/contract.rs` holds the codes as a literal list, so a
+rename fails a test, and checks that `docs/cli-json.md` has a row for
+each code and each exit status. A test in media matches every
+`MediaError` variant without a wildcard, so a new variant needs a code.
+
+Why: agents and scripts (D23, A1) need one document to parse, with
+stable codes on failure as much as on success. M0 printed one object for
+one file and an array for several, gave an unopenable file a different
+shape, and printed nothing on stdout for a usage error. One shape for
+one file or many saves every caller a special case. Times are exact
+because a frame's identity has to survive JSON: 1001/30000 s has no
+exact float, so a reader of float seconds has to know the rate and
+round to find the frame. A rational as text, not a `[n, d]` pair, reads
+the same in JSON, ron, the text output and FFmpeg's own notation, and
+can't be mistaken for two numbers. Codes on probe's problems let a script
+tell a cut-off copy, worth copying again, from a damaged file without
+reading English.
+
+Considered: a `schema` name with a separate integer `version`, as the M1
+plan had it; one string is one comparison, and a reader can't check one
+half and forget the other. JSON lines, one document per file: a run
+would then not be one parse, and a usage error would have no place.
+Error codes on doctor's issues: their `what` names the codec or device,
+and nothing yet needs to branch on them; they can be added as a field.
+
+Cost: `seconds` repeats `exact`, and a reader that compares floats can
+still go wrong, which `docs/cli-json.md` warns about. The envelope's
+`warnings` is always empty for probe and doctor in version 1, since
+their findings belong to their results; it is there for `frame` and A1.
+`mp4.warnings` (strings, each also a `damage` problem with a code) keeps
+M0's shape. `mp4.top_level` keeps its `[type, size]` pairs but lists
+only the first 64 boxes, with `top_level_omitted` counting the rest,
+since a fragmented recording has thousands; the text output still
+lists them all. A spherical `stereo` is always a name, `unknown` for a
+value the specification doesn't define, with the `st3d` byte in
+`stereo_value`, where M0 wrote an unknown one as `{"unknown": n}`: one
+type per field is what typed readers and A1's schemas need. A video
+stream's `color` and `field_order` are FFmpeg's names, and what a file
+doesn't say is FFmpeg's `unknown` (`unspecified` for a chroma location),
+as in the text output, not null; null is left for a value this FFmpeg
+has no name for. Mapping `unknown` to null later would change a field's
+values, which is a new version, so it is settled now.
+
+`frame` brings its result, its codes (`output_exists`, `not_equirect`,
+`out_of_range`, `no_gpu`, `adapter_not_found`, `no_decoder` as an error,
+`no_display`, `cancelled`), exit statuses 3 and 4 with SIGINT, and
+`--overwrite` with the update to D16, and extends this entry.
+
+Revisit if: a caller needs codes on doctor's issues or one document per
+file of a long run; or A1's schemas want another time or error shape, in
+which case that is a version 2 of these schemas, never a silent change.
+
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 
 *2026-10-24, M1. Pat approved Vulkan Video HEVC in odin's hardware run
@@ -1234,9 +1392,9 @@ with the reason, which the hw-test report lists under its benchmark
 table, so a missing Vulkan path never fails a VA-API benchmark. Another
 note names the device the Vulkan rows ran on.
 
-Doctor still checks FFmpeg's default Vulkan device and names it, so on a
-machine with two GPUs its Vulkan lines can be about another GPU than the
-tests'.
+Doctor still checks FFmpeg's default Vulkan device and names it (its
+JSON marks it `used_by_ffmpeg`), so on a machine with two GPUs its
+Vulkan lines can be about another GPU than the tests'.
 
 Fedora's Mesa: its Vulkan drivers are built without H.264 and HEVC,
 like its VA-API driver. RADV then lacks `VK_KHR_video_decode_h264` and

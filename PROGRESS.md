@@ -1,6 +1,6 @@
 # Progress
 
-Updated 2026-10-24, with FFmpeg confined to the file Spherecut opened (D24). Milestone criteria are in `PLAN.md`;
+Updated 2026-10-24, with FFmpeg confined to the file Spherecut opened (D24) and the CLI's JSON contract for probe and doctor (D27). Milestone criteria are in `PLAN.md`;
 decisions and their reasons in `DECISIONS.md`.
 
 ## Status
@@ -8,9 +8,9 @@ decisions and their reasons in `DECISIONS.md`.
 | Milestone | State |
 |---|---|
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because RADV on Strix Halo has no Vulkan Video H.264 or HEVC decode. Evidence below |
-| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion stays unticked until `spherecut frame`, which it also covers, exists and has its strace test |
+| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion stays unticked until `spherecut frame`, which it also covers, exists and has its strace test. The CLI's JSON contract for `probe` and `doctor` (D27, `docs/cli-json.md`) is the third; its criterion stays unticked until `frame` joins it, with exit statuses 3 and 4, SIGINT and `--overwrite` |
 | M2–M9 | Not started |
-| Agent integration (track A) | Planned 2026-10-24 at Pat's request (`PLAN.md` track A, DECISIONS D23). The CLI's JSON contract and FFmpeg's confinement are M1 criteria, and the confinement is in (D24); A1, the MCP server, follows M1's code |
+| Agent integration (track A) | Planned 2026-10-24 at Pat's request (`PLAN.md` track A, DECISIONS D23). The CLI's JSON contract and FFmpeg's confinement are M1 criteria; the confinement is in (D24), and so is the contract for probe and doctor (D27); A1, the MCP server, follows M1's code |
 
 ## Environments
 
@@ -183,6 +183,27 @@ back clean, so M0 is done.
   performance overlay will show how much.
 - No odin report yet, and no Intel machine until the Framework arrives.
 - No GUI yet, so no GUI smoke run (M1).
+- The JSON contract's doctor error path (an issue of severity error,
+  `doctor_errors`, exit 1) is tested on a constructed report, and the
+  binary only for `ok` matching its exit status: this workspace's FFmpeg
+  has every decoder doctor requires. doctor's issues have no codes of
+  their own, and the envelope's `warnings` is always empty for probe and
+  doctor; their findings are in `result` (D27).
+- `spherecut probe` with no file now exits 2 (a usage error) where M0
+  exited 1, and probe's `--json` shape changed from M0's (an object for
+  one file, an array for several) to the envelope; `docs/cli-json.md` has
+  the new one.
+- In the contract, probe checks a Matroska file only for its length, so
+  one damaged inside that FFmpeg can't open is `open_failed`, with
+  FFmpeg's log, rather than `damaged`. An MP4's `full` check covers
+  `moov`'s sample tables but not a fragmented file's `moof`/`trun`, so
+  fragments whose samples lie past the end of the file pass unnoticed. A panic under `--json` is an
+  `internal` document (exit 1); a crash by signal, such as a fault
+  inside FFmpeg, still leaves stdout empty. The unreadable-file test
+  runs the binary as nobody through `setpriv` when the tests run as
+  root, with a readable copy beside the file to show that nobody reaches
+  the directory; only probe's unit test covers it where neither works,
+  or where nobody can't reach the target directory.
 
 ## Next
 
@@ -194,8 +215,9 @@ back clean, so M0 is done.
    Whether odin swaps it in before the run is Pat's call.
 2. M1, now that FFmpeg is confined (D24): the `MediaBackend` trait
    around `VideoDecoder` (seek, audio, worker threads, frame cache), the
-   wgpu projection shader and `spherecut frame` with the CLI's JSON
-   contract and its strace test, golden images on lavapipe, then the
+   wgpu projection shader and `spherecut frame` on the CLI's JSON
+   contract (D27; with exit statuses 3 and 4, SIGINT and `--overwrite`)
+   and with its strace test, golden images on lavapipe, then the
    eframe GUI. Bump `rust-version` to 1.95 with the GUI crates (D1).
 3. The Insta360 trailer reader (metadata, calibration, IMU), needed from M2.
 4. Agent integration A1 (the MCP server) once M1's code is in, while
@@ -206,7 +228,7 @@ back clean, so M0 is done.
 ```sh
 cargo xtask check                 # everything Tier 1 (add --fix to apply rustfmt)
 cargo xtask gen-media             # synthetic media into test-media/
-cargo run -p spherecut-cli -- probe <file>... [--json]
+cargo run -p spherecut-cli -- probe <file>... [--json]   # --json: one document, docs/cli-json.md
 cargo run -p spherecut-cli -- doctor [--json]
 cargo xtask hw-test               # on a real machine; report in hw-reports/
 ```

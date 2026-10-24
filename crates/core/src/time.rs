@@ -11,9 +11,19 @@
 //! * [`FrameRate`] is frames per second, e.g. `30000/1001` for 29.97.
 //! * A stream timestamp is a `pts` integer plus a timebase [`Rational`]
 //!   (seconds per tick), converted with [`Time::from_pts`] / [`Time::to_pts`].
+//! * [`FrameTime`] is the time of a frame of a video stream, with the
+//!   frame's index when it is known.
+//!
+//! Serialized, as in the CLI's JSON (DECISIONS D27), a [`Rational`] (and a
+//! [`FrameRate`]) is a string: `"30000/1001"`, or `"25"` for an integer. A
+//! [`Time`] is `{"exact": "1001/30000", "seconds": 0.0333…}` and a
+//! [`FrameTime`] adds `"frame"` when it has an index (null reads as none).
+//! `exact` reads back to the same value; `seconds` is for readers that want
+//! a number, and is ignored when read.
 
 use std::cmp::Ordering;
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -26,6 +36,8 @@ pub enum TimeError {
     Overflow,
     #[error("frame rate must be positive")]
     NonPositiveRate,
+    #[error("expected an integer or a fraction n/d, such as 30000/1001")]
+    Syntax,
 }
 
 /// How to map a time that falls between two ticks onto an integer tick.
@@ -39,9 +51,9 @@ pub enum Rounding {
     Nearest,
 }
 
-/// A reduced fraction `num / den` with `den > 0`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "(i64, i64)", into = "(i64, i64)")]
+/// A reduced fraction `num / den` with `den > 0`. It is serialized as the
+/// string [`Display`](fmt::Display) writes, which [`FromStr`] reads back.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rational {
     num: i64,
     den: i64,
@@ -220,10 +232,87 @@ impl From<Rational> for (i64, i64) {
     }
 }
 
-/// A position or duration in seconds.
+/// A decimal integer of ASCII digits, after a `-` when `signed`.
+fn parse_int(s: &str, signed: bool) -> Result<i64, TimeError> {
+    let digits = if signed {
+        s.strip_prefix('-').unwrap_or(s)
+    } else {
+        s
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(TimeError::Syntax);
+    }
+    s.parse().map_err(|_| TimeError::Overflow)
+}
+
+impl FromStr for Rational {
+    type Err = TimeError;
+
+    /// An integer (`"25"`, `"-3"`) or a fraction `n/d` (`"30000/1001"`), as
+    /// [`Display`](fmt::Display) writes them: decimal digits, a `-` only
+    /// before `n`, no spaces. A fraction that isn't reduced reads as the
+    /// reduced one (`"2/4"` is 1/2).
+    fn from_str(s: &str) -> Result<Self, TimeError> {
+        match s.split_once('/') {
+            Some((n, d)) => Rational::new(parse_int(n, true)?, parse_int(d, false)?),
+            None => parse_int(s, true).map(Rational::from_integer),
+        }
+    }
+}
+
+impl Serialize for Rational {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Rational {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = Rational;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an integer or a fraction n/d in a string, such as \"30000/1001\"")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Rational, E> {
+                v.parse().map_err(|e| E::custom(format_args!("{v:?}: {e}")))
+            }
+        }
+        d.deserialize_str(Visitor)
+    }
+}
+
+/// A position or duration in seconds, serialized as `{"exact",
+/// "seconds"}` (see the module docs).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(from = "TimeRepr", into = "TimeRepr")]
 pub struct Time(pub Rational);
+
+/// How a [`Time`] is written: exactly, and as a number of seconds for
+/// readers that want one.
+#[derive(Serialize, Deserialize)]
+#[serde(rename = "Time")]
+struct TimeRepr {
+    exact: Rational,
+    /// Lossy, so never read back.
+    #[serde(default, skip_deserializing)]
+    seconds: f64,
+}
+
+impl From<TimeRepr> for Time {
+    fn from(r: TimeRepr) -> Self {
+        Time(r.exact)
+    }
+}
+
+impl From<Time> for TimeRepr {
+    fn from(t: Time) -> Self {
+        TimeRepr {
+            exact: t.0,
+            seconds: t.to_secs_f64(),
+        }
+    }
+}
 
 impl Time {
     pub const ZERO: Time = Time(Rational::ZERO);
@@ -274,6 +363,123 @@ impl Time {
 impl fmt::Debug for Time {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}s", self.0)
+    }
+}
+
+/// The time of a frame of a video stream in clip time, which is 0 at the
+/// stream's first presented frame (M1 plan, section 3.3), and the frame's
+/// index from that frame (0), when it is known: for a constant-rate
+/// stream, or a frame reached by counting from the start. A
+/// variable-rate stream's frames are addressed by time alone. Serialized
+/// as a [`Time`] with `"frame"` added when there is an index:
+/// `{"exact": "1001/10000", "seconds": 0.1001, "frame": 3}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "FrameTimeRepr", into = "FrameTimeRepr")]
+pub struct FrameTime {
+    pub time: Time,
+    pub frame: Option<u64>,
+}
+
+impl FrameTime {
+    /// The start of frame `frame` of a stream at the constant rate `rate`,
+    /// in clip time: frame n is at n / `rate`, whatever the pts of the
+    /// stream's first frame. Add that frame's time to get the stream's.
+    pub fn at(rate: FrameRate, frame: u64) -> Result<Self, TimeError> {
+        let index = i64::try_from(frame).map_err(|_| TimeError::Overflow)?;
+        Ok(FrameTime {
+            time: rate.frame_to_time(index)?,
+            frame: Some(frame),
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename = "FrameTime")]
+struct FrameTimeRepr {
+    exact: Rational,
+    #[serde(default, skip_deserializing)]
+    seconds: f64,
+    /// A bare integer in every format, or absent: ron would otherwise
+    /// write `Some(3)`. Null (ron's `None`) reads as absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "frame_index::serialize",
+        deserialize_with = "frame_index::deserialize"
+    )]
+    frame: Option<u64>,
+}
+
+/// [`FrameTimeRepr::frame`] as a bare integer.
+mod frame_index {
+    use std::fmt;
+
+    use serde::de::{self, Unexpected, Visitor};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(frame: &Option<u64>, s: S) -> Result<S::Ok, S::Error> {
+        match frame {
+            Some(n) => s.serialize_u64(*n),
+            None => s.serialize_none(),
+        }
+    }
+
+    /// A bare integer, or null, which is no index as for any other
+    /// `Option`: JSON readers often send null for a value they don't know.
+    /// ron's `None` and `Some(3)` read too.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+        d.deserialize_any(Index)
+    }
+
+    struct Index;
+
+    impl<'de> Visitor<'de> for Index {
+        type Value = Option<u64>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a frame index (an integer, 0 or more) or null")
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            u64::try_from(v)
+                .map(Some)
+                .map_err(|_| E::invalid_value(Unexpected::Signed(v), &self))
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            u64::deserialize(d).map(Some)
+        }
+    }
+}
+
+impl From<FrameTimeRepr> for FrameTime {
+    fn from(r: FrameTimeRepr) -> Self {
+        FrameTime {
+            time: Time(r.exact),
+            frame: r.frame,
+        }
+    }
+}
+
+impl From<FrameTime> for FrameTimeRepr {
+    fn from(t: FrameTime) -> Self {
+        FrameTimeRepr {
+            exact: t.time.0,
+            seconds: t.time.to_secs_f64(),
+            frame: t.frame,
+        }
     }
 }
 
@@ -433,14 +639,87 @@ mod tests {
     }
 
     #[test]
+    fn rationals_read_back_from_their_text() {
+        for (text, want) in [
+            ("30000/1001", r(30000, 1001)),
+            ("25", r(25, 1)),
+            ("-1/2", r(-1, 2)),
+            ("0", Rational::ZERO),
+            ("2/4", r(1, 2)),
+            ("-9223372036854775808", Rational::from_integer(i64::MIN)),
+        ] {
+            assert_eq!(text.parse::<Rational>(), Ok(want), "{text}");
+        }
+        assert_eq!(r(30000, 1001).to_string(), "30000/1001");
+        assert_eq!(r(50, 2).to_string(), "25");
+        assert_eq!(r(1, -2).to_string(), "-1/2");
+        for bad in [
+            "", "/", "1/", "/2", "+1", "1/-2", "1/+2", "-", "--1", "1.5", " 1", "1 ", "1/2/3",
+            "0x10", "1e3",
+        ] {
+            assert_eq!(bad.parse::<Rational>(), Err(TimeError::Syntax), "{bad:?}");
+        }
+        assert_eq!("1/0".parse::<Rational>(), Err(TimeError::ZeroDenominator));
+        assert_eq!(
+            "9223372036854775808".parse::<Rational>(),
+            Err(TimeError::Overflow)
+        );
+    }
+
+    #[test]
     fn serde_round_trip() {
+        // The text form of the CLI's JSON (D27), here through RON.
         let fr = FrameRate::FPS_59_94;
         let s = ron::to_string(&fr).unwrap();
-        assert_eq!(s, "(60000,1001)");
+        assert_eq!(s, "\"60000/1001\"");
         let back: FrameRate = ron::from_str(&s).unwrap();
         assert_eq!(back, fr);
-        assert!(ron::from_str::<FrameRate>("(0,1)").is_err());
-        assert!(ron::from_str::<Rational>("(1,0)").is_err());
+        assert_eq!(ron::to_string(&r(25, 1)).unwrap(), "\"25\"");
+        assert!(ron::from_str::<FrameRate>("\"0/1\"").is_err());
+        assert!(ron::from_str::<Rational>("\"1/0\"").is_err());
+        // M0's (num, den) pairs are not read any more.
+        assert!(ron::from_str::<Rational>("(60000,1001)").is_err());
+
+        let t = Time(r(1001, 30_000));
+        let s = ron::to_string(&t).unwrap();
+        assert!(s.starts_with("(exact:\"1001/30000\",seconds:0.0333"), "{s}");
+        assert_eq!(ron::from_str::<Time>(&s).unwrap(), t);
+        // `seconds` is not read: `exact` alone gives the time.
+        assert_eq!(
+            ron::from_str::<Time>("(exact:\"1001/30000\",seconds:7.0)").unwrap(),
+            t
+        );
+        assert_eq!(
+            ron::from_str::<Time>("(exact:\"-3\")").unwrap(),
+            Time::from_secs(-3)
+        );
+        assert!(ron::from_str::<Time>("(seconds:1.0)").is_err());
+
+        let f = FrameTime::at(FrameRate::FPS_29_97, 3).unwrap();
+        assert_eq!(f.time, Time(r(3003, 30_000)));
+        let s = ron::to_string(&f).unwrap();
+        assert!(s.starts_with("(exact:\"1001/10000\",seconds:0.1001"), "{s}");
+        assert!(s.ends_with(",frame:3)"), "{s}");
+        assert_eq!(ron::from_str::<FrameTime>(&s).unwrap(), f);
+        // Without a known index (a variable-rate stream), it is written as
+        // a plain time, and a plain time reads back as one.
+        let vfr = FrameTime {
+            time: Time(r(3003, 30_000)),
+            frame: None,
+        };
+        let s = ron::to_string(&vfr).unwrap();
+        assert_eq!(s, ron::to_string(&vfr.time).unwrap());
+        assert_eq!(ron::from_str::<FrameTime>(&s).unwrap(), vfr);
+        assert!(ron::from_str::<FrameTime>("(frame:3)").is_err());
+        // ron's own spellings of an Option read too; a negative index doesn't.
+        let read = |frame: &str| {
+            ron::from_str::<FrameTime>(&format!("(exact:\"1001/10000\",frame:{frame})"))
+        };
+        assert_eq!(read("None").unwrap(), vfr);
+        assert_eq!(read("Some(3)").unwrap(), f);
+        assert_eq!(read("3").unwrap(), f);
+        assert!(read("-1").is_err());
+        assert!(read("3.0").is_err());
     }
 
     fn rates() -> impl Strategy<Value = FrameRate> {
@@ -491,6 +770,14 @@ mod tests {
             let start = fr.frame_to_time(f).unwrap();
             let next = fr.frame_to_time(f + 1).unwrap();
             prop_assert!(start <= t && t < next);
+        }
+
+        #[test]
+        fn rational_text_round_trips(n in any::<i64>(), d in 1i64..=i64::MAX) {
+            let x = Rational::new(n, d).unwrap();
+            prop_assert_eq!(x.to_string().parse::<Rational>(), Ok(x));
+            let t = Time(x);
+            prop_assert_eq!(ron::from_str::<Time>(&ron::to_string(&t).unwrap()).unwrap(), t);
         }
 
         #[test]

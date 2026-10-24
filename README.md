@@ -18,7 +18,8 @@ What works today is the `spherecut` command line tool:
   timebases, spherical video and ambisonic metadata, and the camera
   vendor and layout it most likely came from. It also checks MP4/MOV
   files for the kinds of damage listed under Build and run. `--json`
-  gives the same as JSON.
+  gives the same as one JSON document, for scripts and AI agents
+  ([docs/cli-json.md](docs/cli-json.md)).
 - `spherecut doctor` checks what your FFmpeg, drivers and GPU can actually
   do. It decodes one small frame each of H.264 High, HEVC Main, HEVC Main 10
   and AV1 in software, on VA-API and on FFmpeg's Vulkan device, encodes one
@@ -93,9 +94,10 @@ cargo build --release
 ./target/release/spherecut probe --json clip.mp4
 ```
 
-`spherecut probe` exits 0 when every file is healthy, and 1 when any file
+`spherecut probe` exits 0 when every file is healthy, 1 when any file
 can't be opened, isn't MP4/MOV or Matroska/WebM, is truncated or corrupt,
-or has no video or audio stream.
+or has no video or audio stream, and 2 when the command line doesn't
+parse, such as `spherecut probe` with no file.
 A damaged file that FFmpeg can open still gets its report, with a
 `DAMAGE` line per problem, and stderr gets one line per bad file, such as
 `error: clip.mp4 is damaged: <first reason> (and 2 more problems)`. In
@@ -161,15 +163,12 @@ file name is always a file name, even one like `concat:a.mp4` or
 `http://host/x.mp4`, and FFmpeg gets no network protocols (DECISIONS
 D24).
 
-`--json` prints one object per file (an array for several) with `damage`,
-`warnings`, `ffmpeg_log`, `structure` (`{"check": "full" | "length" |
-"none", "why"}`) and `mp4.truncated` (`fourcc`, `offset`, `header_len`,
-`size`, `present`, or null). A file that can't be opened is `{"path",
-"error", "ffmpeg_log"}`; without `--json`, its `ffmpeg` lines follow the
-error on stderr, since FFmpeg's log often says why it could not open the
-file (`moov atom not found`). File names don't have to be UTF-8; in the
-text report and in `path`, bytes that aren't UTF-8 show as U+FFFD. When
-the reader of probe's output goes away, as in `spherecut probe *.mp4 |
+When a file can't be opened, its `ffmpeg` lines follow the error on
+stderr (with `--json`, they are in the file's `error.ffmpeg_log`), since
+FFmpeg's log often says why it could not open the file (`moov atom not
+found`). File names don't have to be UTF-8; in the text
+report and in the JSON, bytes that aren't UTF-8 show as U+FFFD. When the
+reader of probe's output goes away, as in `spherecut probe *.mp4 |
 head`, the output stops quietly, and probe still checks the remaining
 files, so the exit code and the errors on stderr cover every file.
 
@@ -190,6 +189,37 @@ FFmpeg's software decoder)`); for the second, the fix is a newer driver.
 In `--json`, a failed check's `fault` is `ffmpeg`, `driver` or
 `wrong_output`. Doctor never installs or changes anything; on Fedora it
 makes one read-only `rpm -q` query to word its fixes.
+
+### JSON output
+
+`spherecut probe --json` and `spherecut doctor --json` print exactly one
+line of JSON on stdout per run, on success and on failure, and keep
+stderr for the log. [docs/cli-json.md](docs/cli-json.md) documents it
+field by field, with the codes, the exit statuses and an example per
+command; DECISIONS D27 says why it is this way. In short:
+
+```json
+{"schema":"spherecut.probe/1","ok":false,"result":{"files":[...]},"error":{"code":"files_failed","message":"..."},"warnings":[]}
+```
+
+- `schema` names the document and its version. Within a version, fields
+  are only ever added.
+- probe's `result` is `{"files": [...]}`, for one file as for many: each
+  has its `path`, `ok`, its `report` whenever FFmpeg could open it, and
+  its `error` when it fails. A damaged file has both.
+- An error is `{"code", "message", ...}`; the code (`truncated`,
+  `not_found`, `not_media`, `usage`, ...) is stable, the message is for
+  people. The report's `damage` and `warnings` are `{"code", "message"}`
+  too.
+- Times are exact: `{"exact": "1001/30000", "seconds": 0.0333...}`, where
+  `exact` is the time and `seconds` only for display. Frame rates and time
+  bases are `"30000/1001"`, or `"25"`.
+- Exit statuses: 0 when the run did what was asked, 1 when an input or a
+  check failed, 2 for a command line that doesn't parse (also a document
+  under `--json`); 3 (a missing codec or device) and 4 (interrupted) are
+  reserved for `spherecut frame` and the GUI. A panic is an `internal`
+  error, exit 1; an empty stdout means a signal ended the run: Ctrl+C,
+  or a crash.
 
 ### Logging
 

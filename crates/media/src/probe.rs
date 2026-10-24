@@ -2,12 +2,13 @@
 //! decoding it.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek};
+use std::io::{BufReader, ErrorKind, Read, Seek};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use spherecut_core::Rational;
+use spherecut_core::{Rational, Time};
 use thiserror::Error;
 
 use crate::detect::{self, CameraGuess};
@@ -31,10 +32,13 @@ pub struct ProbeReport {
     pub camera: Option<CameraGuess>,
     /// How much of the file's structure was checked for `damage`.
     pub structure: StructureCheck,
-    /// Why the file looks truncated or corrupt. A healthy file has none;
-    /// `spherecut probe` fails when there are any.
-    pub damage: Vec<String>,
-    pub warnings: Vec<String>,
+    /// Why the file looks truncated or corrupt, each [`codes::TRUNCATED`]
+    /// or [`codes::DAMAGED`]. A healthy file has none; `spherecut probe`
+    /// fails when there are any.
+    pub damage: Vec<Problem>,
+    /// What may keep a stream from playing, or looks odd, without the
+    /// file being damaged.
+    pub warnings: Vec<Problem>,
     /// The warnings and errors FFmpeg logged while reading the file. They
     /// often say what it could not read, but healthy files can have some
     /// too, so `spherecut probe` does not fail on them.
@@ -46,13 +50,141 @@ fn lossy_path<S: serde::Serializer>(p: &Path, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(&p.to_string_lossy())
 }
 
+impl ProbeReport {
+    /// Why `spherecut probe` fails this file although FFmpeg opened it:
+    /// its damage ([`codes::TRUNCATED`] when it was cut short, else
+    /// [`codes::DAMAGED`]), or that it has no video or audio stream
+    /// ([`codes::NO_VIDEO_OR_AUDIO`]). None for a file that passes.
+    pub fn failure(&self) -> Option<Problem> {
+        if let (Some(first), Some(code)) = (self.damage.first(), damage_code(&self.damage)) {
+            let more = match self.damage.len() - 1 {
+                0 => String::new(),
+                1 => " (and 1 more problem)".into(),
+                n => format!(" (and {n} more problems)"),
+            };
+            return Some(Problem::new(
+                code,
+                format!("{} is damaged: {first}{more}", self.path.display()),
+            ));
+        }
+        // An MP4 or Matroska file can hold only subtitles or data.
+        if !self
+            .streams
+            .iter()
+            .any(|s| matches!(s.kind, StreamKind::Video | StreamKind::Audio))
+        {
+            return Some(Problem::new(
+                codes::NO_VIDEO_OR_AUDIO,
+                format!(
+                    "{} has no video or audio stream; FFmpeg reads it as {}",
+                    self.path.display(),
+                    self.container.format_long
+                ),
+            ));
+        }
+        None
+    }
+}
+
+/// Something probe found wrong with a file, or worth a warning, with a
+/// stable code from [`codes`], as the CLI's JSON gives it (D27).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Problem {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl Problem {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Problem {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for Problem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// The codes of probe's [`Problem`]s, and those of [`ProbeError::code`]
+/// that don't come from [`MediaError::code`]. Within a schema version of
+/// the CLI's JSON a code keeps its name and meaning (D27);
+/// `docs/cli-json.md` lists them all.
+pub mod codes {
+    /// The file ends before its structure does: a top-level MP4 box, or
+    /// the Matroska Segment, runs past the end of the file.
+    pub const TRUNCATED: &str = "truncated";
+    /// Its structure is damaged in another way.
+    pub const DAMAGED: &str = "damaged";
+    /// FFmpeg can't read it as media, or it is empty.
+    pub const NOT_MEDIA: &str = "not_media";
+    /// It has no video or audio stream.
+    pub const NO_VIDEO_OR_AUDIO: &str = "no_video_or_audio";
+    /// A warning: a stream's pictures are larger than Spherecut decodes
+    /// (`MAX_PIXELS`); `MediaError::PictureTooLarge` has the same code.
+    pub const TOO_LARGE: &str = "too_large";
+    /// A warning: this FFmpeg has no decoder for a stream's codec.
+    pub const NO_DECODER: &str = "no_decoder";
+    /// A warning: FFmpeg could not set up a stream, or its decoder lacks
+    /// a feature the stream uses.
+    pub const CANNOT_DECODE: &str = "cannot_decode";
+    /// A warning: FFmpeg reads the file as MP4/MOV although its first box
+    /// is of a type such files don't start with.
+    pub const UNEXPECTED_FIRST_BOX: &str = "unexpected_first_box";
+    /// A warning: a `trak` that FFmpeg gives no stream.
+    pub const TRACK_WITHOUT_STREAM: &str = "track_without_stream";
+
+    /// Every code above.
+    pub const ALL: &[&str] = &[
+        TRUNCATED,
+        DAMAGED,
+        NOT_MEDIA,
+        NO_VIDEO_OR_AUDIO,
+        TOO_LARGE,
+        NO_DECODER,
+        CANNOT_DECODE,
+        UNEXPECTED_FIRST_BOX,
+        TRACK_WITHOUT_STREAM,
+    ];
+}
+
+/// The code for a list of damage: [`codes::TRUNCATED`] when any of it is
+/// truncation, the likelier cause of the rest, else [`codes::DAMAGED`].
+/// None for no damage.
+fn damage_code(damage: &[Problem]) -> Option<&'static str> {
+    if damage.iter().any(|d| d.code == codes::TRUNCATED) {
+        Some(codes::TRUNCATED)
+    } else if damage.is_empty() {
+        None
+    } else {
+        Some(codes::DAMAGED)
+    }
+}
+
+/// An MP4 tree's damage, with its truncation told apart from the rest.
+fn mp4_damage(t: &mp4::Mp4Tree) -> impl Iterator<Item = Problem> + use<> {
+    let cut = t.truncated.map(|c| c.reason());
+    t.damage().into_iter().map(move |d| {
+        let code = if cut.as_ref() == Some(&d) {
+            codes::TRUNCATED
+        } else {
+            codes::DAMAGED
+        };
+        Problem::new(code, d)
+    })
+}
+
 /// How much of a file's structure probe checks for damage, beyond what
 /// FFmpeg needs to open it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "check", rename_all = "snake_case")]
 pub enum StructureCheck {
-    /// MP4/MOV: every top-level box, and each track's sample tables
-    /// against the media data.
+    /// MP4/MOV: every top-level box, and each track's sample tables in
+    /// `moov` against the media data. A fragmented file's fragments
+    /// (`moof`, with its `trun` tables) are not checked.
     Full,
     /// Matroska/WebM: only that the file is as long as its header says.
     /// Damage inside goes unnoticed.
@@ -66,9 +198,8 @@ pub enum StructureCheck {
 pub struct Container {
     pub format: String,
     pub format_long: String,
-    /// Seconds, exact.
-    pub duration: Option<Rational>,
-    pub start_time: Option<Rational>,
+    pub duration: Option<Time>,
+    pub start_time: Option<Time>,
     pub bit_rate: Option<i64>,
     pub tags: BTreeMap<String, String>,
 }
@@ -96,7 +227,7 @@ pub struct StreamInfo {
     /// Seconds per tick.
     pub time_base: Rational,
     pub start_pts: Option<i64>,
-    pub duration: Option<Rational>,
+    pub duration: Option<Time>,
     pub frames: Option<i64>,
     pub avg_frame_rate: Option<Rational>,
     /// FFmpeg's guess at the "real" base frame rate.
@@ -145,14 +276,49 @@ pub struct AudioInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(into = "Mp4SummaryJson")]
 pub struct Mp4Summary {
     pub brand: Option<String>,
+    /// Every top-level box, as type and size, in file order. The JSON
+    /// lists the first [`MAX_LISTED_TOP_LEVEL`].
     pub top_level: Vec<(String, u64)>,
     /// Bytes after the last top-level box (vendor trailers).
     pub trailing_bytes: u64,
     /// The top-level box cut off by the end of the file, if any.
     pub truncated: Option<TruncatedBox>,
     pub warnings: Vec<String>,
+}
+
+/// How many top-level boxes the JSON lists. A fragmented recording has a
+/// `moof` and an `mdat` per fragment, thousands in an hour.
+pub const MAX_LISTED_TOP_LEVEL: usize = 64;
+
+/// How [`Mp4Summary`] is written in the CLI's JSON (D27): the first
+/// [`MAX_LISTED_TOP_LEVEL`] top-level boxes, and how many more there are.
+#[derive(Serialize)]
+#[serde(rename = "Mp4Summary")]
+struct Mp4SummaryJson {
+    brand: Option<String>,
+    top_level: Vec<(String, u64)>,
+    top_level_omitted: usize,
+    trailing_bytes: u64,
+    truncated: Option<TruncatedBox>,
+    warnings: Vec<String>,
+}
+
+impl From<Mp4Summary> for Mp4SummaryJson {
+    fn from(mut m: Mp4Summary) -> Self {
+        let top_level_omitted = m.top_level.len().saturating_sub(MAX_LISTED_TOP_LEVEL);
+        m.top_level.truncate(MAX_LISTED_TOP_LEVEL);
+        Mp4SummaryJson {
+            brand: m.brand,
+            top_level: m.top_level,
+            top_level_omitted,
+            trailing_bytes: m.trailing_bytes,
+            truncated: m.truncated,
+            warnings: m.warnings,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -198,9 +364,9 @@ fn tags(d: ff::DictionaryRef<'_>) -> BTreeMap<String, String> {
 }
 
 /// Time `pts * tb`, or `None` for FFmpeg's "no value" marker.
-fn pts_time(pts: i64, tb: Rational) -> Option<Rational> {
+fn pts_time(pts: i64, tb: Rational) -> Option<Time> {
     (pts != ff::ffi::AV_NOPTS_VALUE)
-        .then(|| Rational::from_integer(pts).checked_mul(tb).ok())
+        .then(|| Time::from_pts(pts, tb).ok())
         .flatten()
 }
 
@@ -228,6 +394,35 @@ pub struct ProbeError {
     /// For a file FFmpeg cannot open they often say why ("moov atom not
     /// found").
     pub ffmpeg_log: Vec<String>,
+    code: &'static str,
+}
+
+impl ProbeError {
+    /// The error's stable code (D27). That is [`MediaError::code`], except
+    /// for a file FFmpeg could not open: it is [`codes::TRUNCATED`] or
+    /// [`codes::DAMAGED`] when probe's own checks found it so (its MP4
+    /// boxes, or a Matroska file's length), [`codes::DAMAGED`] when it has
+    /// MP4 structure FFmpeg calls invalid, and [`codes::NOT_MEDIA`] when it
+    /// is empty or FFmpeg doesn't know it. Any other file FFmpeg can't open
+    /// keeps [`MediaError::Open`]'s `open_failed`.
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+/// [`probe_file`]'s error, with its code.
+struct Failed {
+    error: MediaError,
+    code: &'static str,
+}
+
+impl From<MediaError> for Failed {
+    fn from(error: MediaError) -> Self {
+        Failed {
+            code: error.code(),
+            error,
+        }
+    }
 }
 
 /// Probe a file. Never panics on bad input; fails with
@@ -241,7 +436,11 @@ pub fn probe(path: &Path) -> Result<ProbeReport, ProbeError> {
     let ffmpeg_log = tally(log);
     match report {
         Ok(r) => Ok(ProbeReport { ffmpeg_log, ..r }),
-        Err(error) => Err(ProbeError { error, ffmpeg_log }),
+        Err(Failed { error, code }) => Err(ProbeError {
+            error,
+            ffmpeg_log,
+            code,
+        }),
     }
 }
 
@@ -275,61 +474,92 @@ fn tally(lines: Vec<String>) -> Vec<String> {
     out
 }
 
-fn probe_file(path: &Path) -> Result<ProbeReport, MediaError> {
+fn probe_file(path: &Path) -> Result<ProbeReport, Failed> {
     let meta = std::fs::metadata(path).map_err(|e| MediaError::Io {
         path: path.to_path_buf(),
         error: e,
     })?;
     if !meta.is_file() {
-        return Err(MediaError::NotAFile(path.to_path_buf()));
+        return Err(MediaError::NotAFile(path.to_path_buf()).into());
     }
     if meta.len() == 0 {
-        return Err(MediaError::Open {
-            path: path.to_path_buf(),
-            reason: "the file is empty".into(),
+        return Err(Failed {
+            error: MediaError::Open {
+                path: path.to_path_buf(),
+                reason: "the file is empty".into(),
+            },
+            code: codes::NOT_MEDIA,
         });
     }
     let mut warnings = Vec::new();
     let mut damage = Vec::new();
 
-    let (mut tree, not_mp4) = match mp4::read_file(path) {
+    let (mut tree, not_mp4) = match unless_unreadable(path, mp4::read_file(path))? {
         Ok(t) => (Some(t), false),
         Err(mp4::Mp4Error::NotMp4(_)) => (None, true),
         Err(e) => {
-            damage.push(format!("MP4 structure: {e}"));
+            damage.push(Problem::new(codes::DAMAGED, format!("MP4 structure: {e}")));
             (None, false)
         }
     };
     if let Some(t) = &tree {
-        damage.extend(t.damage());
+        damage.extend(mp4_damage(t));
     }
 
-    let ictx = ffi::open_input(path, None).map_err(|e| {
-        MediaError::opening(path, e, |e| describe_open_error(e, tree.is_some(), &damage))
-    })?;
+    let ictx = match ffi::open_input(path, None) {
+        Ok(ictx) => ictx,
+        Err(e) => {
+            if not_mp4 && matches!(e, ffi::OpenError::Ffmpeg(_)) {
+                // A Matroska file cut short before FFmpeg could read its
+                // tracks: its header says how long it was.
+                check_matroska(path, meta.len(), &mut damage);
+            }
+            // What probe found says more than FFmpeg's error.
+            let code = match &e {
+                ffi::OpenError::Ffmpeg(e) => damage_code(&damage).or(match e {
+                    ff::Error::InvalidData if tree.is_some() => Some(codes::DAMAGED),
+                    ff::Error::InvalidData => Some(codes::NOT_MEDIA),
+                    _ => None,
+                }),
+                _ => None,
+            };
+            let error =
+                MediaError::opening(path, e, |e| describe_open_error(e, tree.is_some(), &damage));
+            return Err(Failed {
+                code: code.unwrap_or_else(|| error.code()),
+                error,
+            });
+        }
+    };
     let fmt = ictx.format();
 
     let mov_family = fmt.name().split(',').any(|n| n == "mov" || n == "mp4");
     if not_mp4 && mov_family {
         // FFmpeg found MP4/MOV boxes, so the first box is damaged or of a
         // type we do not know. Check the rest of the structure anyway.
-        match mp4::read_file_with(path, FirstBox::Any) {
+        match unless_unreadable(path, mp4::read_file_with(path, FirstBox::Any))? {
             Ok(t) => {
                 let first = t.top.first().map(|b| b.fourcc);
                 let first = first.or(t.truncated.and_then(|c| c.fourcc));
-                warnings.push(format!(
-                    "FFmpeg reads this as MP4/MOV, but its first box{} is not of a type MP4/MOV files start with",
-                    first.map(|f| format!(" `{f}`")).unwrap_or_default()
+                warnings.push(Problem::new(
+                    codes::UNEXPECTED_FIRST_BOX,
+                    format!(
+                        "FFmpeg reads this as MP4/MOV, but its first box{} is not of a type MP4/MOV files start with",
+                        first.map(|f| format!(" `{f}`")).unwrap_or_default()
+                    ),
                 ));
-                damage.extend(t.damage());
+                damage.extend(mp4_damage(&t));
                 tree = Some(t);
             }
-            Err(e) => damage.push(format!(
-                "FFmpeg reads this as MP4/MOV, but its structure cannot be checked: {}",
-                match e {
-                    mp4::Mp4Error::NotMp4(why) => why,
-                    e => e.to_string(),
-                }
+            Err(e) => damage.push(Problem::new(
+                codes::DAMAGED,
+                format!(
+                    "FFmpeg reads this as MP4/MOV, but its structure cannot be checked: {}",
+                    match e {
+                        mp4::Mp4Error::NotMp4(why) => why,
+                        e => e.to_string(),
+                    }
+                ),
             )),
         }
     }
@@ -465,18 +695,21 @@ fn probe_file(path: &Path) -> Result<ProbeReport, MediaError> {
             _ => continue,
         };
         let Some(st) = trak_stream[i].and_then(|s| streams.get(s)) else {
-            warnings.push(format!("track #{i} has no FFmpeg stream"));
+            warnings.push(Problem::new(
+                codes::TRACK_WITHOUT_STREAM,
+                format!("track #{i} has no FFmpeg stream"),
+            ));
             continue;
         };
         if st.kind != want {
-            damage.push(format!(
+            damage.push(Problem::new(codes::DAMAGED, format!(
                 "track #{i} is {} (handler `{}`, sample entry `{}`) but FFmpeg reads stream #{} as {}, so its track description is damaged",
                 kind_name(want),
                 handler.map(|t| t.to_string()).unwrap_or_default(),
                 sample_entry_type(trak).map_or_else(|| "none".into(), |t| t.to_string()),
                 st.index,
                 kind_name(st.kind),
-            ));
+            )));
         }
     }
     // A video or audio stream FFmpeg cannot decode: damage when the codec
@@ -498,9 +731,9 @@ fn probe_file(path: &Path) -> Result<ProbeReport, MediaError> {
                 .unwrap_or_default()
         );
         if why.is_damage(entry, st.frames.is_some()) {
-            damage.push(why.describe(&what, true));
+            damage.push(Problem::new(codes::DAMAGED, why.describe(&what, true)));
         } else {
-            warnings.push(why.describe(&what, false));
+            warnings.push(Problem::new(why.warning_code(), why.describe(&what, false)));
         }
     }
     let camera = detect::guess(path, tree.as_ref(), &streams, &container.tags);
@@ -536,26 +769,56 @@ fn probe_file(path: &Path) -> Result<ProbeReport, MediaError> {
     })
 }
 
-/// Check that a Matroska/WebM file is as long as its Segment says. Live
-/// recordings leave the size unknown.
-fn check_matroska(path: &Path, file_size: u64, damage: &mut Vec<String>) -> StructureCheck {
-    let segment = File::open(path)
-        .ok()
-        .and_then(|f| matroska_segment(&mut BufReader::new(f)));
+/// An MP4 read's result, unless it failed to read the file: that is the
+/// file's own error (permission denied, a failing card), with the code its
+/// I/O error gives, never damage.
+fn unless_unreadable(
+    path: &Path,
+    read: Result<mp4::Mp4Tree, mp4::Mp4Error>,
+) -> Result<Result<mp4::Mp4Tree, mp4::Mp4Error>, MediaError> {
+    match read {
+        Err(mp4::Mp4Error::Io(error)) => Err(MediaError::Io {
+            path: path.to_path_buf(),
+            error,
+        }),
+        read => Ok(read),
+    }
+}
+
+/// Check that a Matroska/WebM file is as long as its Segment says, and
+/// that it gets as far as the Segment at all. Live recordings leave the
+/// size unknown.
+fn check_matroska(path: &Path, file_size: u64, damage: &mut Vec<Problem>) -> StructureCheck {
+    let segment = match File::open(path) {
+        Ok(f) => matroska_segment(&mut BufReader::new(f)),
+        Err(_) => Err(NoSegment::NotMatroska),
+    };
     match segment {
-        Some((start, Some(size))) => {
+        Ok((start, Some(size))) => {
             if start.saturating_add(size) > file_size {
-                damage.push(format!(
-                    "the file holds {} of the {size} bytes its Matroska Segment says it has: it was cut short",
-                    file_size.saturating_sub(start)
+                damage.push(Problem::new(
+                    codes::TRUNCATED,
+                    format!(
+                        "the file holds {} of the {size} bytes its Matroska Segment says it has: it was cut short",
+                        file_size.saturating_sub(start)
+                    ),
                 ));
             }
             StructureCheck::Length
         }
-        Some((_, None)) => StructureCheck::None {
+        Ok((_, None)) => StructureCheck::None {
             why: "its Matroska Segment does not record its size, as in live recordings".into(),
         },
-        None => StructureCheck::None {
+        Err(NoSegment::CutShort) => {
+            damage.push(Problem::new(
+                codes::TRUNCATED,
+                format!(
+                    "the file ends after {file_size} bytes, before its Matroska Segment starts: it was cut short"
+                ),
+            ));
+            StructureCheck::Length
+        }
+        Err(NoSegment::NotMatroska) => StructureCheck::None {
             why: "its Matroska header could not be read".into(),
         },
     }
@@ -565,13 +828,30 @@ const EBML_HEADER: u64 = 0x1A45_DFA3;
 const EBML_VOID: u64 = 0xEC;
 const MATROSKA_SEGMENT: u64 = 0x1853_8067;
 
+/// Why [`matroska_segment`] found no Segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoSegment {
+    /// The file starts with an EBML header, but ends before the Segment's
+    /// data starts: it was cut short.
+    CutShort,
+    /// It doesn't start as a Matroska file does, or could not be read.
+    NotMatroska,
+}
+
 /// Where the data of a Matroska file's Segment starts, and its size if
 /// known: the EBML header comes first, then the Segment, perhaps after a
 /// few Void elements.
-fn matroska_segment<R: Read + Seek>(r: &mut R) -> Option<(u64, Option<u64>)> {
-    let skip = |r: &mut R, size: Option<u64>| r.seek_relative(i64::try_from(size?).ok()?).ok();
-    if ebml_id(r)? != EBML_HEADER {
-        return None;
+fn matroska_segment<R: Read + Seek>(r: &mut R) -> Result<(u64, Option<u64>), NoSegment> {
+    let skip = |r: &mut R, size: Option<u64>| {
+        let size = size.and_then(|s| i64::try_from(s).ok());
+        // Past the end of the file is fine: the next read says so.
+        r.seek_relative(size.ok_or(NoSegment::NotMatroska)?)
+            .map_err(|_| NoSegment::NotMatroska)
+    };
+    // Only a file that holds the whole EBML header ID is Matroska cut
+    // short; a shorter one is just short.
+    if ebml_id(r).map_err(|_| NoSegment::NotMatroska)? != EBML_HEADER {
+        return Err(NoSegment::NotMatroska);
     }
     let size = ebml_size(r)?;
     skip(r, size)?;
@@ -579,41 +859,52 @@ fn matroska_segment<R: Read + Seek>(r: &mut R) -> Option<(u64, Option<u64>)> {
         let id = ebml_id(r)?;
         let size = ebml_size(r)?;
         match id {
-            MATROSKA_SEGMENT => return Some((r.stream_position().ok()?, size)),
+            MATROSKA_SEGMENT => {
+                let start = r.stream_position().map_err(|_| NoSegment::NotMatroska)?;
+                return Ok((start, size));
+            }
             EBML_VOID => skip(r, size)?,
-            _ => return None,
+            _ => return Err(NoSegment::NotMatroska),
         }
     }
-    None
+    Err(NoSegment::NotMatroska)
 }
 
 /// An EBML variable-length integer of at most `max_len` bytes, still
 /// with its length marker (the first set bit), and its length.
-fn ebml_vint<R: Read>(r: &mut R, max_len: u32) -> Option<(u64, u32)> {
-    let mut b = [0u8; 1];
-    r.read_exact(&mut b).ok()?;
-    let len = b[0].leading_zeros() + 1;
+fn ebml_vint<R: Read>(r: &mut R, max_len: u32) -> Result<(u64, u32), NoSegment> {
+    let first = ebml_byte(r)?;
+    let len = first.leading_zeros() + 1;
     if len > max_len {
-        return None;
+        return Err(NoSegment::NotMatroska);
     }
-    let mut v = u64::from(b[0]);
+    let mut v = u64::from(first);
     for _ in 1..len {
-        r.read_exact(&mut b).ok()?;
-        v = v << 8 | u64::from(b[0]);
+        v = v << 8 | u64::from(ebml_byte(r)?);
     }
-    Some((v, len))
+    Ok((v, len))
+}
+
+/// The next byte, where the end of the file is [`NoSegment::CutShort`].
+fn ebml_byte<R: Read>(r: &mut R) -> Result<u8, NoSegment> {
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b).map_err(|e| match e.kind() {
+        ErrorKind::UnexpectedEof => NoSegment::CutShort,
+        _ => NoSegment::NotMatroska,
+    })?;
+    Ok(b[0])
 }
 
 /// An element ID, which keeps its length marker.
-fn ebml_id<R: Read>(r: &mut R) -> Option<u64> {
+fn ebml_id<R: Read>(r: &mut R) -> Result<u64, NoSegment> {
     ebml_vint(r, 4).map(|(id, _)| id)
 }
 
-/// An element size: Some(None) for the all-ones "unknown" size.
-fn ebml_size<R: Read>(r: &mut R) -> Option<Option<u64>> {
+/// An element size: None for the all-ones "unknown" size.
+fn ebml_size<R: Read>(r: &mut R) -> Result<Option<u64>, NoSegment> {
     let (v, len) = ebml_vint(r, 8)?;
     let mask = (1u64 << (7 * len)) - 1;
-    Some((v & mask != mask).then_some(v & mask))
+    Ok((v & mask != mask).then_some(v & mask))
 }
 
 fn kind_name(k: StreamKind) -> String {
@@ -686,6 +977,15 @@ impl Undecodable {
             Undecodable::Unconfigured(_) => entry.is_some_and(mp4::is_known_codec) && has_samples,
             Undecodable::NoDecoder(_) => false,
             Undecodable::Refused { error, .. } => !lacks_feature(*error),
+        }
+    }
+
+    /// The code of the warning about it, when it is not damage.
+    fn warning_code(&self) -> &'static str {
+        match self {
+            Undecodable::TooLarge(_) => codes::TOO_LARGE,
+            Undecodable::NoDecoder(_) => codes::NO_DECODER,
+            Undecodable::Unconfigured(_) | Undecodable::Refused { .. } => codes::CANNOT_DECODE,
         }
     }
 
@@ -787,7 +1087,7 @@ fn open_decoder(par: &ff::codec::Parameters, decoder: Option<ff::Codec>) -> Resu
     ffi::open_decoder(ctx, decoder).map(drop)
 }
 
-fn describe_open_error(e: ff::Error, looked_like_mp4: bool, damage: &[String]) -> String {
+fn describe_open_error(e: ff::Error, looked_like_mp4: bool, damage: &[Problem]) -> String {
     let base = e.to_string();
     if let Some(why) = damage.first() {
         return format!("{base}: {why}");
@@ -824,7 +1124,7 @@ mod tests {
         v
     }
 
-    fn segment(f: Vec<u8>) -> Option<(u64, Option<u64>)> {
+    fn segment(f: Vec<u8>) -> Result<(u64, Option<u64>), NoSegment> {
         matroska_segment(&mut io::Cursor::new(f))
     }
 
@@ -837,20 +1137,74 @@ mod tests {
         let seg = |size| el(0x1853_8067, &body, size);
 
         let f = [header.clone(), seg(Some(300))].concat();
-        assert_eq!(segment(f), Some((at, Some(300))));
+        assert_eq!(segment(f), Ok((at, Some(300))));
         // Live recordings leave the size unknown.
         let f = [header.clone(), seg(None)].concat();
-        assert_eq!(segment(f), Some((at, None)));
+        assert_eq!(segment(f), Ok((at, None)));
         // Void elements may come first.
         let void = el(0xEC, &[0; 5], Some(5));
         let f = [header.clone(), void.clone(), seg(Some(300))].concat();
-        assert_eq!(segment(f), Some((at + void.len() as u64, Some(300))));
+        assert_eq!(segment(f), Ok((at + void.len() as u64, Some(300))));
         // Cut short, the size still says how long it was.
         let f = [header.clone(), seg(Some(300))].concat();
+        assert_eq!(segment(f[..at as usize + 10].to_vec()), Ok((at, Some(300))));
+        // Cut before the Segment's data starts: in the EBML header, right
+        // after it, in a Void element, or in the Segment's ID or size.
+        for cut in [
+            4,
+            5,
+            header.len() - 2,
+            header.len(),
+            header.len() + 2,
+            at as usize - 1,
+        ] {
+            assert_eq!(
+                segment(f[..cut].to_vec()),
+                Err(NoSegment::CutShort),
+                "{cut}"
+            );
+        }
+        let f = [header.clone(), void.clone(), seg(Some(300))].concat();
         assert_eq!(
-            segment(f[..at as usize + 10].to_vec()),
-            Some((at, Some(300)))
+            segment(f[..header.len() + 4].to_vec()),
+            Err(NoSegment::CutShort)
         );
+    }
+
+    /// A file that fails every read with the OS error `errno`, as a card
+    /// going bad does.
+    struct Unreadable(i32);
+
+    impl io::Read for Unreadable {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::from_raw_os_error(self.0))
+        }
+    }
+
+    impl io::Seek for Unreadable {
+        fn seek(&mut self, _: io::SeekFrom) -> io::Result<u64> {
+            Ok(4096)
+        }
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_an_io_error_not_damage() {
+        // Tests run as root can read any file, so the error comes from a
+        // reader here: EACCES, EIO, and ENOENT for a file removed meanwhile.
+        let path = Path::new("x.mp4");
+        for (errno, code) in [(13, "io_error"), (5, "io_error"), (2, "not_found")] {
+            let read = mp4::read(&mut Unreadable(errno));
+            assert!(matches!(read, Err(mp4::Mp4Error::Io(_))), "{read:?}");
+            let e = unless_unreadable(path, read).unwrap_err();
+            assert_eq!(e.code(), code, "{e}");
+            assert!(matches!(e, MediaError::Io { .. }), "{e:?}");
+        }
+        // What the box reader makes of the bytes is left to probe.
+        let not_mp4 = mp4::read(&mut io::Cursor::new(b"not an mp4".to_vec()));
+        assert!(matches!(
+            unless_unreadable(path, not_mp4),
+            Ok(Err(mp4::Mp4Error::NotMp4(_)))
+        ));
     }
 
     #[test]
@@ -941,6 +1295,7 @@ mod tests {
             why.describe("stream #0", false),
             "stream #0 has no pixel format and cannot be decoded"
         );
+        assert_eq!(why.warning_code(), codes::CANNOT_DECODE);
         let mut a = stream(StreamKind::Audio);
         a.audio.as_mut().unwrap().sample_fmt = None;
         assert!(matches!(
@@ -970,6 +1325,7 @@ mod tests {
             "{why:?}"
         );
         assert!(!why.is_damage(Some(FourCc::new(b"jpeg")), true));
+        assert_eq!(why.warning_code(), codes::TOO_LARGE);
         assert_eq!(
             why.describe("stream #0 (sample entry `jpeg`)", false),
             "stream #0 (sample entry `jpeg`) is 16400x8200, more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes"
@@ -1002,6 +1358,7 @@ mod tests {
                 "{why:?}"
             );
             assert!(!why.is_damage(Some(FourCc::new(b"avc1")), true));
+            assert_eq!(why.warning_code(), codes::NO_DECODER);
             assert_eq!(
                 why.describe("stream #0", false),
                 "stream #0 cannot be decoded: this FFmpeg has no h264 decoder"
@@ -1033,6 +1390,7 @@ mod tests {
                 !refused(e).is_damage(Some(FourCc::new(b"mp4a")), true),
                 "{e}"
             );
+            assert_eq!(refused(e).warning_code(), codes::CANNOT_DECODE);
         }
         // Only video and audio are checked.
         let mut d = stream(StreamKind::Data);
@@ -1048,12 +1406,13 @@ mod tests {
         for f in [
             Vec::new(),
             b"RIFF\x24\0\0\0WAVEfmt ".to_vec(),
-            header[..header.len() - 2].to_vec(),
+            // Less than the EBML header's ID is too little to tell.
+            header[..3].to_vec(),
             [header.clone(), cluster].concat(),
             // An ID longer than 4 bytes.
             [header, vec![0x08, 1, 2, 3, 4]].concat(),
         ] {
-            assert_eq!(segment(f.clone()), None, "{f:?}");
+            assert_eq!(segment(f.clone()), Err(NoSegment::NotMatroska), "{f:?}");
         }
     }
 }
