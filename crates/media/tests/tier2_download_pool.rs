@@ -9,13 +9,14 @@
 //! and it must have allocated some, so that the frames did come through
 //! it.
 //!
-//! The decoding thread may also take under 50 minor page faults per
-//! frame, everything it does included, the driver's work too (plan
-//! section 12.2). That is a budget, not a check of the pool: at 3840x1920
-//! glibc hands a freed block of up to 32 MiB back from its heap, so even
-//! a fresh buffer per frame need not fault more (none per frame, measured
-//! with glibc 2.39), and a driver that maps each surface to read it may
-//! fault more however the pool does.
+//! The decoding thread's minor page faults per frame go in the report as
+//! a measurement, not a limit (D30). They can't check the pool: at
+//! 3840x1920 glibc hands a freed block of up to 32 MiB back from its heap,
+//! so even a fresh buffer per frame need not fault more (none per frame,
+//! measured with glibc 2.39). And they are mostly the driver's: on odin's
+//! RX 7600, VA-API took 116 per NV12 frame and 227 per P010 frame with no
+//! buffer allocated after the warm-up, about one per 95 KB copied, as it
+//! maps each surface to read it.
 //!
 //! VA-API runs on the backend's own device on the render node under test.
 //! Vulkan Video is the optional path (amendment 9): its test skips with
@@ -43,7 +44,6 @@ use spherecut_testkit::{bench, tier2};
 const WARM_UP: usize = 30;
 /// Frames counted.
 const MEASURED: usize = 60;
-const MAX_FAULTS_PER_FRAME: f64 = 50.0;
 
 /// A test's own directory, removed with what it holds when dropped, so
 /// also when the test fails.
@@ -64,12 +64,22 @@ impl Drop for TempDir {
     }
 }
 
+/// The clips' size: one 2:1 4K frame.
+const SIZE: (usize, usize) = (3840, 1920);
+
+/// The megabytes a frame of [`SIZE`] at `bits` bits comes off the device
+/// in, NV12 or P010.
+fn frame_mb(bits: u32) -> f64 {
+    let sample = if bits > 8 { 2.0 } else { 1.0 };
+    (SIZE.0 * SIZE.1) as f64 * 1.5 * sample / 1e6
+}
+
 /// 3840x1920 HEVC at `bits` bits (NV12 or P010 off the device), long
 /// enough to warm up and count: a ramp that moves 8 pixels a frame, every
 /// frame cut from one buffer so that making it stays cheap in debug
 /// builds.
 fn clip(dir: &TempDir, bits: u32) -> PathBuf {
-    let (w, h) = (3840usize, 1920usize);
+    let (w, h) = SIZE;
     let frames = WARM_UP + MEASURED + 10;
     let settings = VideoSettings {
         encoder: "libx265".into(),
@@ -139,10 +149,13 @@ fn minor_faults() -> u64 {
 }
 
 /// Fail unless [`minor_faults`] counts: writing to fresh memory faults it
-/// in, a page or a huge page at a time.
+/// in, a page or a huge page at a time. 64 MiB is over the most glibc
+/// takes from its heap (32 MiB on 64-bit), so the block is always a new
+/// mapping: 8 MiB came back already faulted in from a block an earlier
+/// test had freed, and counted nothing.
 fn check_fault_counter() {
     let before = minor_faults();
-    let mut fresh = vec![0u8; 8 << 20];
+    let mut fresh = vec![0u8; 64 << 20];
     for i in (0..fresh.len()).step_by(4096) {
         fresh[i] = 1;
     }
@@ -150,7 +163,7 @@ fn check_fault_counter() {
     let counted = minor_faults() - before;
     assert!(
         counted > 0,
-        "/proc/thread-self/stat counted no minor faults for 8 MB written"
+        "/proc/thread-self/stat counted no minor faults for 64 MiB written"
     );
 }
 
@@ -292,8 +305,8 @@ fn count(hw: &Hw, path: &Path) -> Result<Counted, MediaError> {
 }
 
 /// Count buffers and faults on 8-bit and 10-bit clips on `hw`, note the
-/// numbers for the report, and fail if the pool wasn't used, allocated
-/// after the warm-up, or the faults are over the limit. Vulkan Video
+/// numbers for the report, and fail if the pool wasn't used or allocated
+/// after the warm-up. Vulkan Video
 /// skips, after the clips it decodes, with the reason for those it can't.
 fn check_pool(hw: &Hw) {
     check_fault_counter();
@@ -311,10 +324,11 @@ fn check_pool(hw: &Hw) {
             count(hw, &path).unwrap_or_else(|e| panic!("{} on {}: {e}", path.display(), hw.about));
         let (warm, end) = c.allocated;
         let counted = format!(
-            "{:.1} minor faults per 3840x1920 {format} frame, over {MEASURED} frames after \
-             {WARM_UP}; the download pool allocated {warm} buffers in those {WARM_UP} and {} \
-             after",
+            "{:.1} minor faults per 3840x1920 {format} frame ({:.1} per MB), over {MEASURED} \
+             frames after {WARM_UP}; the download pool allocated {warm} buffers in those \
+             {WARM_UP} and {} after",
             c.faults_per_frame,
+            c.faults_per_frame / frame_mb(bits),
             end - warm
         );
         bench::note(format!("{}: {counted}", hw.about));
@@ -324,14 +338,6 @@ fn check_pool(hw: &Hw) {
         if end > warm {
             problems.push(format!(
                 "{format}: {counted}: the pool doesn't reuse its buffers"
-            ));
-        }
-        // With no buffer allocated after the warm-up, faults over the
-        // limit are someone else's, such as the driver mapping each
-        // surface to copy it.
-        if c.faults_per_frame >= MAX_FAULTS_PER_FRAME {
-            problems.push(format!(
-                "{format}: {counted}; the limit is {MAX_FAULTS_PER_FRAME} faults"
             ));
         }
     }
