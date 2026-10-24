@@ -2242,7 +2242,8 @@ Requests are batched, and Tier 1 work continues while waiting:
 - **H3, in slice 9:** both machines on the final commit.
 
 **Pass criteria for "5.7K30 stitched equirect plays in real time"**, on
-both machines with VA-API, for the noisy 5.7K 8-bit and 10-bit clips, and
+both machines with hardware decode (the path the backend picks, VA-API or
+Vulkan Video, amendment 9), for the noisy 5.7K 8-bit and 10-bit clips, and
 for clip 12 once Pat supplies it:
 
 - `bench_playback_realtime_5k7` drops 0 frames after the first second over

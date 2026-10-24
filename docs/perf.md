@@ -11,7 +11,7 @@ table. Numbers from the GPU-less cloud workspace are not recorded here.
 | The UI stays at display refresh even when decode falls behind | GUI smoke run frame times (from M1) |
 | 5.7K30 raw or stitched footage plays in real time with hardware decode on odin and huginn | `bench_samples_realtime_decode`, `bench_decode_hevc_4k_and_5k7`; playback with the overlay from M1 |
 | 8K30 plays in real time, at least on proxies | the same, on 8K samples and their LRV proxies |
-| A random seek shows a frame in under ~150 ms on proxies | seek benchmark (M1) |
+| A random seek shows a frame in under ~150 ms on proxies | `bench_seek_latency` (M1 slice 2b), on the X5's LRV proxy among others |
 | Reframed 4K30 exports at or above real time with hardware encode on odin and huginn | export benchmark (M2) |
 | Frame caches are bounded, sized from available memory, configurable | cache tests (M1) |
 
@@ -33,6 +33,14 @@ numbers, and passes its path to the tests byte for byte. Each line is
 numbers at full precision. Outside hw-test the same line goes to stderr as
 `BENCH ...`. Tier 2 tests run one at a time (`--test-threads=1`), so
 benchmarks don't compete with other tests.
+
+`bench::try_measure_latency(name, unit, batch)` is for latencies: `batch`
+returns a batch of them (a seek's, say), and runs once to warm up, then
+`SPHERECUT_BENCH_RUNS` times. It records two rows, `<name>: median` and
+`<name>: p95`, each the median over the runs of that batch's median or
+95th percentile (by nearest rank), with their range. So a row's spread
+says how much the batches differ, not how much one seek differs from
+another; the p95 row says that.
 
 `bench::try_measure` is `measure` for a path that may fail, such as
 Vulkan Video on a driver that can't decode the file: if the warm-up or
@@ -69,12 +77,33 @@ Current benchmarks:
   decoded 3840² frames per second. It does so in software, on VA-API and
   on Vulkan Video; both hardware rows include the copy to system memory.
 
+- **`bench_seek_latency`**: how long `VideoDecode::seek` takes to hand
+  out its frame, through `FfmpegBackend` as the player seeks, in
+  milliseconds: exact and keyframe seeks, in software, on VA-API and on
+  Vulkan Video, on the noisy 5760×2880 HEVC 8-bit clip (2 s, open GOPs
+  of 30 with B-frames, about 200 Mbps), the longest X5 8K `.insv` (its
+  first 3840² stream) and the longest LRV proxy. A batch is 20 seeks to
+  random times on a decoder opened for it, the same times in every
+  batch; the rows are `<mode> seek, <clip>, <path>: median` and `: p95`.
+  Exact seeks decode from the keyframe before the time, or forward from
+  where the decoder is, so they vary with the GOP; keyframe seeks decode
+  one frame. Hardware rows include the copy of the one frame returned to
+  system memory: frames decoded on the way stay on the device. The
+  target above is the LRV's exact p95.
+
+Not benchmarks, but their numbers are in the same notes: the
+`*_download_pool_reuses_buffers` tests note the minor page faults per
+downloaded 3840×1920 NV12 and P010 frame on the decoding thread, after
+30 frames to warm up, and how many buffers the frames came in (D30). A
+pooled download faults in nothing new; a fresh buffer per frame would
+take about 3000 faults for NV12.
+
 How the Vulkan Video rows read:
 
 - They are named `decode <size> HEVC 8-bit, Vulkan Video (incl. copy to
-  RAM)` and `<mode>: Vulkan Video decode`, next to the VA-API rows of the
-  same clip or mode, in the same unit, so the two hardware paths compare
-  row for row.
+  RAM)`, `<mode>: Vulkan Video decode` and `<mode> seek, <clip>, Vulkan
+  Video: …`, next to the VA-API rows of the same clip or mode, in the
+  same unit, so the two hardware paths compare row for row.
 - They run on the GPU behind VA-API's render node, or the first GPU if
   no Vulkan device is listed as that one (DECISIONS D38). A note under
   the table names it, for example "Vulkan Video rows ran on AMD Radeon RX

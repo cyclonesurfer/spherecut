@@ -1,6 +1,6 @@
 # Progress
 
-Updated 2026-10-24, with FFmpeg confined to the file Spherecut opened (D24), the CLI's JSON contract for probe and doctor (D27), odin's first hardware report, and M1 slice 2a: `MediaBackend` with frame-exact seek in software, native pixel layouts and the colour defaults (D29, D30). Milestone criteria are in `PLAN.md`;
+Updated 2026-10-24, with FFmpeg confined to the file Spherecut opened (D24), the CLI's JSON contract for probe and doctor (D27), odin's first hardware report, M1 slice 2a: `MediaBackend` with frame-exact seek in software, native pixel layouts and the colour defaults (D29, D30), and slice 2b: hardware decoding through the backend, with fallback to software, the pooled download, the render node lookup and the Tier 2 seek tests (D30). Milestone criteria are in `PLAN.md`;
 decisions and their reasons in `DECISIONS.md`.
 
 ## Status
@@ -8,7 +8,7 @@ decisions and their reasons in `DECISIONS.md`.
 | Milestone | State |
 |---|---|
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because RADV on Strix Halo has no Vulkan Video H.264 or HEVC decode. Evidence below |
-| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion stays unticked until `spherecut frame`, which it also covers, exists and has its strace test. The CLI's JSON contract for `probe` and `doctor` (D27, `docs/cli-json.md`) is the third; its criterion stays unticked until `frame` joins it, with exit statuses 3 and 4, SIGINT and `--overwrite`. Slice 2a is the fourth: `core::video` and `core::cancel`, `media::backend` with `FfmpegBackend` and the frame-exact seek of plan section 3.3 in software (D29), native pixel layouts, swscale for the rest and the colour default rules (D30), synth's new clips and its `SyntheticBackend` and `GatedBackend`. The seek oracle (`crates/synth/tests/seek.rs`) is exact on every clip of the set, among them clips whose timestamps tie or go backwards and variable-rate Matroska files with a constant default duration; it checks what each seek cost and every run link, and its negative controls miss. The slice's review found 16 faults (wrong frames returned as `Exact` after a cut, in broken timestamps and in variable-rate Matroska, false run links when catching up, a duration missing for Matroska, an index trusted before Cues are read); all are fixed, each with a test that fails without its fix where one can show it (D29, D30). Its second review found 10 more (an open-GOP H.264 leading picture and a RADL picture returned after a seek, seeks past an MP4 cut, an MP4 spliced by its edit list read as constant-rate, resuming after a stopped seek in tied and backwards streams, an FFmpeg log capture that lost its lines to another thread, a test that a change in load could fail, and an overflow on a far-off Cues entry); all are fixed too, with tests where one can show it (D29). Slice 2b adds hardware decoding through the backend, fallback and the Tier 2 seek tests; no M1 criterion is ticked yet |
+| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion stays unticked until `spherecut frame`, which it also covers, exists and has its strace test. The CLI's JSON contract for `probe` and `doctor` (D27, `docs/cli-json.md`) is the third; its criterion stays unticked until `frame` joins it, with exit statuses 3 and 4, SIGINT and `--overwrite`. Slice 2a is the fourth: `core::video` and `core::cancel`, `media::backend` with `FfmpegBackend` and the frame-exact seek of plan section 3.3 in software (D29), native pixel layouts, swscale for the rest and the colour default rules (D30), synth's new clips and its `SyntheticBackend` and `GatedBackend`. The seek oracle (`crates/synth/tests/seek.rs`) is exact on every clip of the set, among them clips whose timestamps tie or go backwards and variable-rate Matroska files with a constant default duration; it checks what each seek cost and every run link, and its negative controls miss. The slice's review found 16 faults (wrong frames returned as `Exact` after a cut, in broken timestamps and in variable-rate Matroska, false run links when catching up, a duration missing for Matroska, an index trusted before Cues are read); all are fixed, each with a test that fails without its fix where one can show it (D29, D30). Its second review found 10 more (an open-GOP H.264 leading picture and a RADL picture returned after a seek, seeks past an MP4 cut, an MP4 spliced by its edit list read as constant-rate, resuming after a stopped seek in tied and backwards streams, an FFmpeg log capture that lost its lines to another thread, a test that a change in load could fail, and an overflow on a far-off Cues entry); all are fixed too, with tests where one can show it (D29). Slice 2b is the fifth: `DecodeMode::Hardware` decodes through the backend on VA-API or Vulkan Video, on one device per kind per backend opened on the render node `media::hw` finds (bus id, then PCI ids, then `renderD128`; `--render-node` overrides it), single-threaded, with frames kept on the device until handed out and downloaded into a pool of 256-byte-aligned buffers. `Fallback::Software` opens in software when the device can't be opened or turns the stream down, and reopens in software when it fails mid-stream, going on from the frame after the last one returned with no gap and no repeat; `Fallback::Fail` returns the error. A device's refusal or failure is its own error (`HwUnsupported`, the new `HwFailed`), never the file's damage. Media's `fault-injection` feature, turned on only by synth's tests, fails any frame as the device would, and the Tier 1 fallback tests (`crates/synth/tests/fallback.rs`) fail every frame of H.264 and HEVC clips while seeking, catching up and playing; they also fall back on lavapipe and on a render node that isn't there. The Tier 2 tests the plan names are written and listed (`vaapi_seek_matches_software`, `vaapi_colorinfo_matches_software`, `vaapi_download_pool_reuses_buffers`, `bench_seek_latency`, and Vulkan Video versions of the first three), and here they skip with their reasons; their checks pass on software standing in for a device and fail on one that fails. Slice 2 is done once 2b merges; its hardware results come with H1. No M1 criterion is ticked yet |
 | M2–M9 | Not started |
 | Agent integration (track A) | Planned 2026-10-24 at Pat's request (`PLAN.md` track A, DECISIONS D23). The CLI's JSON contract and FFmpeg's confinement are M1 criteria; the confinement is in (D24), and so is the contract for probe and doctor (D27); A1, the MCP server, follows M1's code |
 
@@ -26,9 +26,12 @@ decisions and their reasons in `DECISIONS.md`.
 | Network | crates.io, GitHub and Ubuntu apt reachable through a proxy; ffmpeg.org blocked (recorded at setup) |
 
 Here Tier 1 runs fully. `SPHERECUT_TIER2=1 cargo test --workspace
---no-fail-fast -- --ignored` runs the 9 Tier 2 tests and all 9 skip: 6
-with "no DRM render node at /dev/dri/renderD128" and 3 with "samples
-directory samples not found". A skip counts as a failed test to cargo, so
+--no-fail-fast -- --ignored` runs the 19 Tier 2 tests and all of them
+skip: those that need VA-API with "no DRM render node at
+/dev/dri/renderD128", the Vulkan Video ones with "no GPU for Vulkan
+Video: FFmpeg's Vulkan device is llvmpipe …", and, without
+`SPHERECUT_SAMPLES`, the samples tests with "samples directory samples
+not found". A skip counts as a failed test to cargo, so
 the command exits non-zero, and without `--no-fail-fast` cargo stops after
 the first test binary. `cargo xtask hw-test --quick` runs them the same
 way and reports each one. With `SPHERECUT_SAMPLES` pointing at the
@@ -120,11 +123,39 @@ back clean, so M0 is done.
   container and whose size FFmpeg takes from the container (MJPEG, for
   one): that fails while decoding, as FFmpeg decides.
   `spherecut frame` has no strace test yet, because it doesn't exist.
-- `MediaBackend` decodes in software only. Hardware decoding through
-  it (VA-API and Vulkan, each with its own device), fallback at open and
-  mid-stream, the pooled download, the render node lookup and the
-  `FaultBackend` are slice 2b; until then a hardware `VideoRequest` and
-  every audio open are `not_implemented`.
+- The backend's hardware path has run here only on lavapipe, which
+  decodes nothing, and on a software stand-in for the device (media's
+  `fault-injection`). Its Tier 2 tests are written and skip here; H1 is
+  their first run on a GPU. Every audio open is still
+  `not_implemented` (slice 6).
+- A fallback to software is said only by a `tracing::warn!`, the
+  `FellBack` event and each frame's `DecodePath`. The overlay's decoder
+  line and badge, the GUI notice with doctor's fix and `frame`'s stderr
+  note and JSON warning come with the overlay, the GUI and `frame` (D30).
+- Nothing yet picks between VA-API and Vulkan Video: a caller asks for a
+  kind. Slice 5 picks it from doctor's checks (m1-plan amendment 9).
+- No GPU adapter is known before slice 3, so the render node lookup
+  gives `/dev/dri/renderD128` unless `--render-node` names another.
+- `vaapi_download_pool_reuses_buffers` counts every minor fault on the
+  decoding thread, the driver's own included: a driver that maps each
+  surface to read it, as VA-API's download does, may fault per frame
+  whatever the pool does. Its note gives how many buffers the frames
+  came in, which tells the two apart (D30).
+- On lavapipe with FFmpeg 6.1, H.264 and HEVC are refused as `Withdrawn`
+  (FFmpeg has Vulkan hwaccels for them, which can't start without a video
+  queue), not `NotOffered`; only a codec without a Vulkan hwaccel, such
+  as MPEG-4 Part 2, is `NotOffered` (D30).
+- A device failure on a damaged packet is `HwFailed`, so the damage shows
+  only once software decodes the packet after the fallback, and a
+  `Damaged` event can then come twice when a seek is done again. A
+  mid-stream fallback reopens the file and decodes from a keyframe.
+- `vaapi_seek_matches_software` and its Vulkan twin decode every sample
+  stream from start to end on the device and make 50 exact seeks in each
+  in software and on the device: an estimated 10 to 15 minutes each on
+  huginn or odin for Pat's X5 set, most of it the software seeks at 8K. The noisy
+  5.7K clips they use are 2 s, made the first time by the tests at about
+  200 Mbps and cached in the target's `tmp`; hw-test's 20 s clips are
+  slice 5's.
 - Exact seeks in a stream whose timestamps go backwards decode it twice
   from the start, and such a stream is found out only once its
   timestamps are seen going backwards. The path for frames without
@@ -248,15 +279,12 @@ back clean, so M0 is done.
 
 ## Next
 
-1. M1 slice 2b: hardware decoding through `MediaBackend` (VA-API and
-   Vulkan), fallback at open and mid-stream with fault injection, the
-   pooled download and the render node lookup, and the Tier 2 tests
-   `vaapi_seek_matches_software`, `vaapi_colorinfo_matches_software`,
-   `vaapi_download_pool_reuses_buffers` and `bench_seek_latency`. Then
-   the render core and goldens on lavapipe (slice 3, with `rust-version`
-   1.95, D1), `spherecut frame` on the CLI's JSON contract (D27; with
+1. The render core and goldens on lavapipe (slice 3, with
+   `rust-version` 1.95, D1; wgpu's adapter then gives the render node
+   lookup its GPU), `spherecut frame` on the CLI's JSON contract (D27; with
    exit statuses 3 and 4, SIGINT and `--overwrite`) and its strace test,
-   worker threads and the frame cache, audio, then the eframe GUI.
+   worker threads and the frame cache, audio, then the eframe GUI. H1,
+   after slice 5, runs slice 2b's Tier 2 tests on huginn and odin.
 2. The Insta360 trailer reader (metadata, calibration, IMU), needed from M2.
 3. Agent integration A1 (the MCP server) once M1's code is in, while
    M1's hardware report is pending (Pat chose this order on 2026-10-24).
@@ -267,6 +295,7 @@ back clean, so M0 is done.
 cargo xtask check                 # everything Tier 1 (add --fix to apply rustfmt)
 cargo xtask gen-media             # synthetic media into test-media/
 cargo test -p spherecut-synth --test seek   # the seek oracle (D29)
+cargo test -p spherecut-synth --test fallback   # hardware fallback, with fault injection (D30)
 cargo run -p spherecut-cli -- probe <file>... [--json]   # --json: one document, docs/cli-json.md
 cargo run -p spherecut-cli -- doctor [--json]
 cargo xtask hw-test               # on a real machine; report in hw-reports/

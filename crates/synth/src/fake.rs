@@ -6,6 +6,11 @@
 //! Neither reads a file: the path a test opens is only a name. They let
 //! the playback engine's tests (a decoder that takes 50 ms a frame, one
 //! that never answers) run without FFmpeg or a clock that matters.
+//!
+//! The plan's third, `FaultBackend`, which has a device fail a chosen
+//! frame, needs media's `fault-injection` feature, which only this
+//! crate's dev-dependency turns on (DECISIONS D30), so it lives with the
+//! tests that use it, in `tests/fallback.rs`.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};

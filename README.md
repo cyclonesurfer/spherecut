@@ -172,8 +172,10 @@ reader of probe's output goes away, as in `spherecut probe *.mp4 |
 head`, the output stops quietly, and probe still checks the remaining
 files, so the exit code and the errors on stderr cover every file.
 
-`spherecut doctor [--render-node /dev/dri/renderD128] [--json]` exits 1
-only when a problem is an error: FFmpeg has no H.264, HEVC, ProRes or AAC
+`spherecut doctor [--render-node <PATH>] [--json]` checks the GPU behind
+the render node hardware decoding uses, which is `/dev/dri/renderD128`
+until the GUI knows the GPU it renders on (D30), or the one
+`--render-node` names. It exits 1 only when a problem is an error: FFmpeg has no H.264, HEVC, ProRes or AAC
 decoder, or nothing decodes AV1. Every decoder and encoder in doctor's
 tables that FFmpeg lacks gets a problem that names it, such as `FFmpeg has
 no software AV1 encoder (libsvtav1)`, with the fix for FFmpeg; an FFmpeg
