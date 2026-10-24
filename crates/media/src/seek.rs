@@ -369,6 +369,13 @@ impl FfmpegVideo {
             );
             self.events
                 .push(DecoderEvent::NotExactlySeekable { at_pts: last });
+            // Frame n is then the nth decoded, not the one at n frame
+            // durations.
+            if let Timing::Constant(rate) = self.info.timing {
+                self.info.timing = Timing::Variable {
+                    average: Some(rate),
+                };
+            }
         }
         self.last_decoded = Some(pts);
         let seq = self.seq;
@@ -400,9 +407,13 @@ impl FfmpegVideo {
     }
 
     /// Whether decoding forward from where the decoder is reaches `t`
-    /// with no more work than a seek: `t` is ahead, and the keyframe a
-    /// seek to it would land on has already been read, so `t` lies in the
-    /// GOP being decoded. Without an index, `t` at most a second ahead.
+    /// with no more work than a seek: `t` is ahead, and the last keyframe
+    /// shown at or before it has already been read, so `t` lies in the
+    /// GOP being decoded. The index lists keyframes by dts, so a
+    /// keyframe's pts is taken as its dts plus the least lag of pts
+    /// behind dts seen in the keyframes read, as the MOV demuxer itself
+    /// shifts a seek's target. Without an index, `t` at most a second
+    /// ahead.
     fn forward_is_cheaper(&self, t: i64) -> bool {
         if self.position != Position::InStep {
             return false;
@@ -429,7 +440,8 @@ impl FfmpegVideo {
                 .unwrap_or(i64::MAX);
             return t.saturating_sub(here) <= second;
         }
-        match ffi::index_keyframe_before(input, stream, t) {
+        let lag = self.dec.key_lag();
+        match ffi::index_keyframe_before(input, stream, t.saturating_sub(lag)) {
             Some(k) => self.dec.read_position().is_some_and(|read| k <= read),
             // Before every keyframe: no seek gets closer.
             None => true,
@@ -609,6 +621,11 @@ impl FfmpegVideo {
         stop: &StopToken,
     ) -> Result<Option<(Arc<VideoFrame>, Exactness, SeekCost)>, MediaError> {
         let mut cost = SeekCost::default();
+        // In a stream whose timestamps go backwards, a frame between the
+        // two shown last can be shown at `t`.
+        if self.not_seekable {
+            return self.counted(t, stop, cost);
+        }
         // Already showing it, unless the next frame came out after a read
         // failure, when frames between the two may be lost.
         if self.position == Position::InStep
@@ -619,9 +636,6 @@ impl FfmpegVideo {
         {
             cost.forward_only = true;
             return Ok(Some((c.clone(), Exactness::Exact, cost)));
-        }
-        if self.not_seekable {
-            return self.counted(t, stop, cost);
         }
         let start = if self.forward_is_cheaper(t) {
             cost.forward_only = true;
@@ -663,7 +677,10 @@ impl FfmpegVideo {
                     Ok(Got::Frame(r)) => {
                         cost.frames_decoded += 1;
                         if r.pts <= t {
-                            best = Some(r);
+                            // The greatest pts, later frames winning ties.
+                            if best.as_ref().is_none_or(|b| r.pts >= b.pts) {
+                                best = Some(r);
+                            }
                         } else {
                             self.pending = Some(r);
                             break;
@@ -687,6 +704,11 @@ impl FfmpegVideo {
                     }),
                 }
             }
+        }
+        if self.not_seekable {
+            // This seek found the timestamps going backwards: the frame it
+            // stopped at may not be the one shown at `t`.
+            return self.counted(t, stop, cost);
         }
         self.position = Position::InStep;
         // The first frame after the target came out as the decoder drained
@@ -767,36 +789,67 @@ impl FfmpegVideo {
         mut cost: SeekCost,
     ) -> Result<Option<(Arc<VideoFrame>, Exactness, SeekCost)>, MediaError> {
         self.seek_to_start(&mut cost)?;
+        // The frame shown at `t`, by its place in output order, and its
+        // pts; and the frame with the greatest pts, with where its interval
+        // ends.
         let mut best: Option<(u64, i64)> = None;
-        let mut first: Option<i64> = None;
+        let mut greatest: Option<(u64, i64, i64)> = None;
+        let mut damage = None;
         let mut index = 0u64;
         loop {
-            match self.decode(stop)? {
-                Got::Frame(r) => {
+            match self.decode(stop) {
+                Ok(Got::Frame(r)) => {
                     cost.frames_decoded += 1;
-                    first.get_or_insert(r.pts);
                     if r.pts <= t && best.is_none_or(|(_, p)| r.pts >= p) {
                         best = Some((index, r.pts));
                     }
+                    if greatest.is_none_or(|(_, p, _)| r.pts >= p) {
+                        let end = self.end_of(r.pts, r.fields.duration);
+                        greatest = Some((index, r.pts, end));
+                    }
                     index += 1;
                 }
-                Got::End => break,
-                Got::Stopped => {
+                Ok(Got::End) => break,
+                Ok(Got::Stopped) => {
                     self.position = Position::Lost;
                     return Ok(None);
                 }
+                Err(e) if self.dec.has_failed() => {
+                    damage = Some(e.to_string());
+                    break;
+                }
+                Err(e) => self.events.push(DecoderEvent::Damaged {
+                    reason: e.to_string(),
+                    last_good_pts: None,
+                }),
             }
         }
+        // Before every frame: the first one.
         let target = best.map_or(0, |(i, _)| i);
         self.seek_to_start(&mut cost)?;
         let Some(frame) = self.skip_to(target, stop, &mut cost)? else {
             self.position = Position::Lost;
             return Ok(None);
         };
-        let exactness = if best.is_none() && first.is_some_and(|f| t < f) {
-            Exactness::BeforeFirst
-        } else {
-            Exactness::Exact
+        let exactness = match (best, greatest, damage) {
+            (_, _, Some(reason)) => {
+                self.events.push(DecoderEvent::Damaged {
+                    reason,
+                    last_good_pts: Some(frame.pts),
+                });
+                if frame.pts == t {
+                    Exactness::Exact
+                } else {
+                    Exactness::Truncated {
+                        last_good_pts: frame.pts,
+                    }
+                }
+            }
+            (None, _, None) => Exactness::BeforeFirst,
+            (Some((i, _)), Some((last, _, end)), None) if i == last && t >= end => {
+                Exactness::AfterLast
+            }
+            _ => Exactness::Exact,
         };
         Ok(Some((frame, exactness, cost)))
     }
@@ -811,23 +864,26 @@ impl FfmpegVideo {
     ) -> Result<Option<Arc<VideoFrame>>, MediaError> {
         let mut n = 0u64;
         loop {
-            match self.decode(stop)? {
-                Got::Frame(r) if n == index => {
+            match self.decode(stop) {
+                Ok(Got::Frame(r)) if n == index => {
                     self.position = Position::InStep;
                     // Durations aren't known in such a stream.
                     return self.make_frame(r, None).map(Some);
                 }
-                Got::Frame(_) => {
+                Ok(Got::Frame(_)) => {
                     cost.frames_decoded += 1;
                     n += 1;
                 }
-                Got::End => {
+                Ok(Got::End) => {
                     return Err(MediaError::Decode {
                         path: self.path().to_path_buf(),
                         reason: format!("the stream ended before frame {index}"),
                     });
                 }
-                Got::Stopped => return Ok(None),
+                Ok(Got::Stopped) => return Ok(None),
+                Err(e) if self.dec.has_failed() => return Err(e),
+                // Said by the first decode of the stream already.
+                Err(_) => {}
             }
         }
     }

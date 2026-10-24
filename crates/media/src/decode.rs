@@ -162,6 +162,10 @@ pub struct VideoDecoder {
     landing: Option<i64>,
     /// The same timestamp of the last packet of the stream read.
     read_position: Option<i64>,
+    /// The least that a keyframe's pts has been after its dts, over the
+    /// keyframes read: how far the index's decode times lie before the
+    /// times keyframes are shown.
+    key_lag: Option<i64>,
     /// Frames nothing refers to are skipped until a packet with a pts at
     /// or after this one is sent.
     skip_before: Option<i64>,
@@ -350,6 +354,7 @@ impl VideoDecoder {
             awaiting_landing: false,
             landing: None,
             read_position: None,
+            key_lag: None,
             skip_before: None,
         })
     }
@@ -548,6 +553,13 @@ impl VideoDecoder {
         self.read_position
     }
 
+    /// How far a keyframe's pts is after its dts, at least, over those
+    /// read so far; 0 before one is read, and for Matroska, whose packets
+    /// mostly have no dts and whose index is by pts.
+    pub(crate) fn key_lag(&self) -> i64 {
+        self.key_lag.unwrap_or(0).max(0)
+    }
+
     /// `Some(pts)`: skip frames that nothing refers to
     /// (`AVDISCARD_NONREF`) until a packet with a pts at or after `pts`
     /// is sent. Packets go in in decode order, ahead of the frames coming
@@ -652,6 +664,12 @@ impl VideoDecoder {
                         self.landing = ts;
                     }
                     self.read_position = ts.or(self.read_position);
+                    if pkt.is_key()
+                        && let (Some(pts), Some(dts)) = (pkt.pts(), pkt.dts())
+                    {
+                        let lag = pts.saturating_sub(dts);
+                        self.key_lag = Some(self.key_lag.map_or(lag, |l| l.min(lag)));
+                    }
                     return Some(pkt);
                 }
                 Ok(()) => unreadable = 0,

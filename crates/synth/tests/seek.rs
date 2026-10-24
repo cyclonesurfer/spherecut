@@ -827,6 +827,114 @@ fn faststart(src: &Path, dst: &Path) {
     octx.write_trailer().unwrap();
 }
 
+/// A frame at 30 fps in ticks of an MP4 video track's 1/15360 s.
+const FRAME_30: i64 = 512;
+
+/// Copy `src` into the MP4 `dst`, giving video packet `k` in decode order
+/// the pts `pts(k, dts)` and keeping its dts: timestamps that tie or go
+/// backwards, which no encoder writes but broken muxers do.
+// Writes a file this test made with ffmpeg-next alone, as `faststart`
+// does.
+#[allow(clippy::disallowed_methods)]
+fn retime(src: &Path, dst: &Path, pts: impl Fn(usize, i64) -> i64) {
+    let mut ictx = ff::format::input(src).unwrap();
+    let mut octx = ff::format::output(dst).unwrap();
+    for st in ictx.streams() {
+        let mut out = octx
+            .add_stream(ff::encoder::find(ff::codec::Id::None))
+            .unwrap();
+        out.set_parameters(st.parameters());
+        out.set_time_base(st.time_base());
+    }
+    octx.write_header().unwrap();
+    let mut k = 0;
+    for (st, mut pkt) in ictx.packets() {
+        if st.parameters().medium() == ff::media::Type::Video {
+            pkt.set_pts(Some(pts(k, pkt.dts().unwrap())));
+            k += 1;
+        }
+        pkt.rescale_ts(st.time_base(), octx.stream(st.index()).unwrap().time_base());
+        pkt.set_position(-1);
+        pkt.write_interleaved(&mut octx).unwrap();
+    }
+    octx.write_trailer().unwrap();
+}
+
+/// A broken mux: the tie rule picks the later of frames at one pts, and a
+/// stream whose timestamps go backwards is found out by playing it, and
+/// is then sought exactly by decoding from the start.
+#[test]
+fn timestamps_that_tie_or_go_backwards_seek_by_the_tie_rule() {
+    let dir = TempDir::new("broken-pts");
+    // P-frames only, so that dts are pts, and 20 frames, since every
+    // exact seek in the backwards clip decodes it twice.
+    let p_only = write(
+        &Spec {
+            frames: 20,
+            gop: Some(Gop {
+                keyint: 8,
+                bframes: 0,
+                open: false,
+            }),
+            ..spec("p-only", Codec::H264)
+        },
+        &dir,
+    );
+    // Frames 9 and 10 at one pts: 9 is never shown.
+    let ties = dir.join("ties.mp4");
+    retime(&p_only, &ties, |k, dts| {
+        dts + if k == 10 { 0 } else { FRAME_30 }
+    });
+    let r = oracle(&ties, GOP_8);
+    assert_eq!(r.frames[9].pts, r.frames[10].pts);
+    // `stts` says 30 fps, but frames aren't shown every 30th of a second.
+    let d = open(&ties);
+    assert!(
+        matches!(d.info().timing, Timing::Variable { .. }),
+        "{:?}",
+        d.info().timing
+    );
+
+    // Frames 10 to 14 shown a frame and a half late, so 15 is shown
+    // before 14.
+    let back = dir.join("backwards.mp4");
+    retime(&p_only, &back, |k, dts| {
+        dts + if (10..15).contains(&k) {
+            3 * FRAME_30 / 2
+        } else {
+            0
+        }
+    });
+    let backwards = Expect {
+        keyint: Some(8),
+        backwards: true,
+    };
+    let r = oracle(&back, backwards);
+    let (f14, f15) = (r.frames[14], r.frames[15]);
+    assert!(f15.pts < f14.pts, "{:?}", r.frames);
+    // Not yet played: the seek that decodes 15 after 14 finds the step,
+    // and still gives the frame with the greatest pts, not the last
+    // decoded.
+    let mut d = open(&back);
+    assert!(matches!(d.info().timing, Timing::Variable { .. }));
+    let (got, e, _) = seek_pts(&mut *d, f14.pts + 1, SeekMode::Exact);
+    assert_eq!((Seen::of(&got), e), (f14, Exactness::Exact));
+    assert!(
+        d.take_events()
+            .iter()
+            .any(|e| matches!(e, DecoderEvent::NotExactlySeekable { .. }))
+    );
+    // Showing 15, with 16 next: a frame between the two, 14, is shown
+    // after 15's pts.
+    seek_pts(&mut *d, f14.pts, SeekMode::Exact);
+    let NextFrame::Frame(f) = d.next_frame(&StopToken::never()).unwrap() else {
+        panic!("no frame after 14");
+    };
+    assert_eq!(Seen::of(&f), f15);
+    let (got, e, _) = seek_pts(&mut *d, f14.pts + 1, SeekMode::Exact);
+    assert_eq!((Seen::of(&got), e), (f14, Exactness::Exact));
+}
+
 #[test]
 fn a_stop_token_stops_a_long_seek_and_decoding_goes_on() {
     let dir = TempDir::new("long-gop");
