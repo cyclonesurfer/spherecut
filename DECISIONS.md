@@ -1171,6 +1171,19 @@ types must leave room for a frame that lives on the GPU.
 Revisit if: wgpu gains multi-planar external memory import, or Vulkan
 Video HEVC decode works on both AMD machines.
 
+*Updated 2026-10-24 by odin's first report* (PR #3, `docs/perf.md`): half
+of that revisit condition is met. With RPM Fusion's
+`mesa-vulkan-drivers-freeworld`, Vulkan Video decodes H.264 and HEVC bit
+for bit on odin's discrete RX 7600 and is the only path faster than real
+time on every X5 mode (1.61 to 2.23 ×), while VA-API with its copy falls
+to 0.81 × at 8K30; huginn's Vulkan failure was Fedora's own Mesa build
+lacking the codecs (D38), not the GPU. So the fallback design above is
+no longer only a fallback: slice 5b measures zero-copy both ways, VA-API
+frames imported as DMA-BUFs and FFmpeg's Vulkan Video decoding on wgpu's
+own Vulkan device, and the default path (and its kind, VA-API or Vulkan)
+is chosen from those numbers on odin and huginn before M3 (m1-plan
+amendment 9).
+
 ## D26. egui stays, checked against a timeline prototype at the end of M2
 
 *2026-10-24, before M1's code. Pat approved it from the stack review.

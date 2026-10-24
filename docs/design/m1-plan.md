@@ -85,6 +85,21 @@ the sections below, they win.
    `damaged` or `decode_failed`. `truncated` stays a value of the
    result's own `exactness` field. Exit 4 leaves no output file, and its
    document's code is `cancelled`.
+9. **odin's results** (PR #3, `hw-reports/odin-44df411cb7.md`,
+   `docs/perf.md`). On odin's discrete RX 7600 only Vulkan Video decodes
+   every X5 mode faster than real time (1.61 to 2.23 ×, copy included);
+   VA-API with its copy is 0.81 to 1.29 × and 4 to 5 times slower than
+   software on the synthetic clips, likely its CPU read of the surface
+   from video memory. On huginn's unified memory VA-API keeps up. So
+   slice 5b measures two zero-copy paths, not one: the DMA-BUF import of
+   item 2, and FFmpeg's Vulkan Video decoding on wgpu's own Vulkan device
+   (D25's fallback, designed in 5b rather than only if import fails).
+   `bench_x5_8k30_zero_copy_vs_copy` gains rows for both, and the default
+   decode path is chosen from them on odin and huginn before M3. Slice
+   2's decoder choice and fallback order must not assume VA-API is
+   always the hardware path: `DecodeMode::Hardware { kind }` already
+   takes `Vulkan`, and slice 5 picks the kind from doctor's checks, not
+   a fixed order.
 
 ## 1. Summary
 

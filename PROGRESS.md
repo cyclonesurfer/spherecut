@@ -1,6 +1,6 @@
 # Progress
 
-Updated 2026-10-24, with FFmpeg confined to the file Spherecut opened (D24) and the CLI's JSON contract for probe and doctor (D27). Milestone criteria are in `PLAN.md`;
+Updated 2026-10-24, with FFmpeg confined to the file Spherecut opened (D24), the CLI's JSON contract for probe and doctor (D27) and odin's first hardware report. Milestone criteria are in `PLAN.md`;
 decisions and their reasons in `DECISIONS.md`.
 
 ## Status
@@ -39,7 +39,7 @@ extracted X5 samples, `samples_probe_cleanly` passes.
 | Machine | Hardware | Software | State |
 |---|---|---|---|
 | huginn | Ryzen AI Max+ 395, Radeon 8060S (Strix Halo, RDNA 3.5), 128 GB | Fedora 44, kernel 7.0.9, Mesa 26.2.5 (RADV, radeonsi from `mesa-va-drivers-freeworld`), FFmpeg 8.1.3 (RPM Fusion), rustc 1.99.0 (Fedora RPM) | `hw-test` at 4cd8a0f, 2026-10-23: 8 passed, 1 skipped. VA-API decodes H.264, HEVC Main and Main 10 and every X5 sample bit for bit like software, and encodes H.264, HEVC and AV1. Vulkan Video decodes AV1 but not H.264 or HEVC ("Device does not support decoding hevc!"). Earlier run at a9128cf: PR #1 |
-| odin | RX 7600 (RDNA 3) | Fedora | No report yet |
+| odin | RX 7600 (Navi 33, RDNA 3, discrete; the only GPU) | Fedora 44, kernel 7.2.9, Mesa 26.2.5 (RADV and radeonsi from RPM Fusion's `mesa-vulkan-drivers-freeworld` and `mesa-va-drivers-freeworld`), FFmpeg 8.1.3 (RPM Fusion), rustc 1.99.0 | `hw-test` at 44df411, 2026-10-24 (PR #3): 12 passed, 0 skipped. VA-API and Vulkan Video decode H.264, HEVC Main and Main 10 and every X5 sample bit for bit like software. Only Vulkan Video decodes every X5 mode faster than real time (`docs/perf.md`) |
 | Framework 13 Pro | Intel Xe3 | Arch (Omarchy), Hyprland | Arrives late 2026 |
 
 Access: none direct from the cloud workspace. Remote Control on odin is
@@ -181,7 +181,13 @@ back clean, so M0 is done.
   (1.2 to 2.9 times real time; `docs/perf.md`), which hw-test marks as
   unstable. The copy of each frame to RAM is a likely part of it; the M1
   performance overlay will show how much.
-- No odin report yet, and no Intel machine until the Framework arrives.
+- On odin, VA-API with its copy to RAM is below real time at X5 5.7K60 and
+  8K30 and slower than software on the synthetic clips, while Vulkan Video
+  keeps up; huginn's unified memory doesn't show this (`docs/perf.md`).
+  Slice 5b measures zero-copy for both paths (m1-plan amendment 9).
+- huginn has no Vulkan Video H.264 or HEVC until it gets RPM Fusion's
+  `mesa-vulkan-drivers-freeworld`, as odin has (Pat's call).
+- No Intel machine until the Framework arrives.
 - No GUI yet, so no GUI smoke run (M1).
 - The JSON contract's doctor error path (an issue of severity error,
   `doctor_errors`, exit 1) is tested on a constructed report, and the
@@ -207,20 +213,14 @@ back clean, so M0 is done.
 
 ## Next
 
-1. The first `cargo xtask hw-test` run on odin (any time; the prompt is
-   the one huginn used). It now includes Vulkan Video checks on H.264,
-   HEVC Main and Main 10 and the X5 samples, with benchmark rows (D38).
-   On Fedora's own `mesa-vulkan-drivers` the H.264 and HEVC ones skip,
-   as on huginn; RPM Fusion's `mesa-vulkan-drivers-freeworld` has them.
-   Whether odin swaps it in before the run is Pat's call.
-2. M1, now that FFmpeg is confined (D24): the `MediaBackend` trait
+1. M1, now that FFmpeg is confined (D24): the `MediaBackend` trait
    around `VideoDecoder` (seek, audio, worker threads, frame cache), the
    wgpu projection shader and `spherecut frame` on the CLI's JSON
    contract (D27; with exit statuses 3 and 4, SIGINT and `--overwrite`)
    and with its strace test, golden images on lavapipe, then the
    eframe GUI. Bump `rust-version` to 1.95 with the GUI crates (D1).
-3. The Insta360 trailer reader (metadata, calibration, IMU), needed from M2.
-4. Agent integration A1 (the MCP server) once M1's code is in, while
+2. The Insta360 trailer reader (metadata, calibration, IMU), needed from M2.
+3. Agent integration A1 (the MCP server) once M1's code is in, while
    M1's hardware report is pending (Pat chose this order on 2026-10-24).
 
 ## How to run
