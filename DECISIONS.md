@@ -1822,13 +1822,19 @@ Limits:
 - The `*_download_pool_reuses_buffers` tests check the pool by what it
   allocates (`DecodeStats::download_buffers`, counted by the pool's own
   allocator): some buffers in the 30 frames of warm-up, none after.
-  Their limit of 50 minor faults per frame on the decoding thread (plan
-  section 12.2) is a budget for everything that thread does, not a check
-  of the pool: at 3840x1920, glibc hands a freed block of up to 32 MiB
-  back from its heap, so even a fresh buffer per frame faults in nothing
-  (measured with glibc 2.39), and a driver that maps each surface to read
-  it may fault more however the pool does. Over the limit with no buffer
-  allocated after the warm-up, the faults are the driver's.
+  The decoding thread's minor faults per frame are reported, not
+  limited. *Updated 2026-10-24 by odin's run at 67fa1fd (PR #4):* the
+  plan's limit of 50 (section 12.2) was a budget for everything that
+  thread does, and on odin's RX 7600 VA-API took 116 per 3840x1920 NV12
+  frame and 227 per P010 frame, about one per 95 KB copied, with no
+  buffer allocated after the warm-up: the driver's faults as it maps each
+  surface to read it, which slice 5b's zero-copy paths avoid. The faults
+  can't check the pool either: at 3840x1920 glibc hands a freed block of
+  up to 32 MiB back from its heap, so even a fresh buffer per frame
+  faults in nothing (measured with glibc 2.39). The same reuse made the
+  tests' check that the fault counter counts see nothing in 8 MiB
+  written, after the VA-API test had freed its frames; it writes 64 MiB
+  now, which glibc always maps afresh.
 - An `HwFailed` on a damaged packet hides the damage until software
   decodes the packet again; a `Damaged` event can then be reported twice,
   when a seek is done again.
@@ -1836,8 +1842,7 @@ Limits:
   mid-stream fallback costs one seek.
 
 Revisit if: slice 5 needs a device per stream rather than per backend,
-slice 5b's zero-copy replaces the download, or the fault count on a real
-GPU is the driver's rather than the pool's.
+or slice 5b's zero-copy replaces the download.
 
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 
