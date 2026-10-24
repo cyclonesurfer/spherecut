@@ -114,7 +114,7 @@ const IDEAL_MIN_PIXELS: f64 = 1000.0;
 /// Seams and poles: a pixel is bad past 2/255, and the implicit-LOD
 /// control must give more than 100 of them.
 const TWIN_THRESHOLD: f64 = 2.0 / 255.0;
-const CONTROL_MIN_BAD: usize = 100;
+const CONTROL_BAD_OVER: usize = 100;
 
 // ---------------------------------------------------------------------
 // Sources
@@ -725,6 +725,18 @@ impl<'g> Run<'g> {
         let ok = v >= min;
         if !ok {
             self.fail(format!("{key} is {v:.4}, below {min}"));
+        }
+        ok
+    }
+
+    /// `v` strictly above `bound`: the plan's "over 100" and "over 10
+    /// LSB" bounds on controls.
+    fn over(&mut self, key: &str, v: f64, bound: f64) -> bool {
+        self.measure(key, v);
+        self.threshold(&format!("{key}_over"), num(bound));
+        let ok = v > bound;
+        if !ok {
+            self.fail(format!("{key} is {v:.4}, not over {bound}"));
         }
         ok
     }
@@ -1417,7 +1429,7 @@ fn twin_check(run: &mut Run<'_>, s: &Source, v: &ViewParams, size: (u32, u32)) {
         let ok = if debug == DebugMode::Off {
             run.at_most(key, d.count_over as f64, 0.0)
         } else {
-            run.at_least(key, d.count_over as f64, CONTROL_MIN_BAD as f64)
+            run.over(key, d.count_over as f64, CONTROL_BAD_OVER as f64)
         };
         if !ok {
             run.write_diffs(key, size, &ua, &ub);
@@ -1942,7 +1954,7 @@ fn range_full_vs_limited(run: &mut Run<'_>) {
         } else if !run.at_most("max_lsb", apart, 2.0) {
             run.write_diffs("ranges", RECT, &ua, &ub);
         }
-        run.at_least(
+        run.over(
             &format!("{key}control_full_as_limited_max_lsb"),
             max_diff(&ua, &uc) * 255.0,
             10.0,
@@ -2055,7 +2067,7 @@ fn siting_left_center(run: &mut Run<'_>) {
         // Control: the Left-sited frame decoded as Center (the planes are
         // the same; only the tag differs) misses Left's CPU reference by
         // far.
-        run.at_least(
+        run.over(
             &format!("{key}control_left_as_center_max_lsb"),
             max_diff(&gpus["center"], &cpus["left"].data) * 255.0,
             10.0,
@@ -2296,6 +2308,18 @@ fn blessing_writes_everything_or_nothing() {
     assert!(
         run.checks["lod_heatmap"]["thresholds"]["levels_off_by_more_than_half_max"].is_number()
     );
+}
+
+#[test]
+fn a_bound_over_is_strict() {
+    // "Over 100 bad pixels" fails at 100.
+    let s = scratch("over");
+    let mut run = Run::at(gpu(), Mode::Golden { bless: false }, &s.dir, &s.diffs);
+    run.begin("a_row");
+    assert!(!run.over("control", 100.0, 100.0));
+    assert!(run.over("control", 101.0, 100.0));
+    assert_eq!(run.failures.len(), 1, "{:?}", run.failures);
+    assert_eq!(run.thresholds["control_over"], json!(100.0));
 }
 
 #[test]
