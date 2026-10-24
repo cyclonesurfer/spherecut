@@ -132,6 +132,41 @@ pub mod bench {
         Ok(())
     }
 
+    /// For latencies, such as a seek's: `batch` measures a batch of them
+    /// in `unit`, and runs once to warm up, then [`runs`] times. Two lines
+    /// are recorded, `{name}: median` and `{name}: p95`, each with the
+    /// median over the batches of that batch statistic and their range, so
+    /// that a spread says how much the batches differ, not how much one
+    /// seek differs from another. On the first failure nothing is recorded
+    /// and the error is returned.
+    pub fn try_measure_latency<E>(
+        name: &str,
+        unit: &str,
+        mut batch: impl FnMut() -> Result<Vec<f64>, E>,
+    ) -> Result<(), E> {
+        let mut medians = Vec::new();
+        let mut p95s = Vec::new();
+        warm_then_run(runs(), || {
+            let v = batch()?;
+            medians.push(percentile(&v, 50.0).unwrap_or(f64::NAN));
+            p95s.push(percentile(&v, 95.0).unwrap_or(f64::NAN));
+            Ok(0.0)
+        })?;
+        // The warm-up's are left out.
+        record_runs(&format!("{name}: median"), &medians[1..], unit);
+        record_runs(&format!("{name}: p95"), &p95s[1..], unit);
+        Ok(())
+    }
+
+    /// The `p`th percentile of `values` by the nearest rank: the smallest
+    /// value at least `p`% of them are at or below. `None` for none.
+    pub fn percentile(values: &[f64], p: f64) -> Option<f64> {
+        let mut v = values.to_vec();
+        v.sort_by(f64::total_cmp);
+        let rank = (p / 100.0 * v.len() as f64).ceil() as usize;
+        v.get(rank.clamp(1, v.len().max(1)) - 1).copied()
+    }
+
     /// `f`'s results after one warm-up call, `runs` of them, or its first
     /// error.
     fn warm_then_run<E>(runs: usize, mut f: impl FnMut() -> Result<f64, E>) -> Result<Vec<f64>, E> {
@@ -251,6 +286,17 @@ pub mod bench {
             assert_eq!((run(1), calls.get()), (Err(1), 1));
             assert_eq!((run(3), calls.get()), (Err(3), 3));
             assert_eq!((run(9), calls.get()), (Ok(vec![1.0; 3]), 4));
+        }
+
+        #[test]
+        fn percentiles_are_by_nearest_rank() {
+            let v: Vec<f64> = (1..=20).map(f64::from).rev().collect();
+            assert_eq!(percentile(&v, 50.0), Some(10.0));
+            assert_eq!(percentile(&v, 95.0), Some(19.0));
+            assert_eq!(percentile(&v, 100.0), Some(20.0));
+            assert_eq!(percentile(&v, 0.0), Some(1.0));
+            assert_eq!(percentile(&[3.0], 95.0), Some(3.0));
+            assert_eq!(percentile(&[], 50.0), None);
         }
 
         #[test]
