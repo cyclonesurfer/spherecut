@@ -778,7 +778,11 @@ fn doctors_errors_fail_the_run_and_its_warnings_do_not() {
 
     // The binary, on whatever this machine has: it exits 1 exactly when a
     // problem is an error, in JSON and in text.
-    let node = tmp("doctor").join("no-such-renderD128");
+    // A node that isn't there, in no directory of its own to clean up.
+    let node = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "contract-{}-no-such-renderD128",
+        std::process::id()
+    ));
     let args = [
         OsStr::new("doctor"),
         OsStr::new("--render-node"),
