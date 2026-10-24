@@ -70,8 +70,10 @@ use spherecut_testkit::{Fnv64, bench, tier2};
 /// Where the stored images and the manifest live.
 const GOLDENS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/goldens");
 const MANIFEST: &str = "manifest.json";
-/// Set to bless.
+/// Set to bless; set to [`LOWER`] to let the blessing lower a floor by
+/// more than [`FLOOR_DROP_DB`].
 const UPDATE: &str = "SPHERECUT_UPDATE_GOLDENS";
+const LOWER: &str = "lower";
 /// What rewrites the goldens.
 const REGENERATE: &str = "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens";
 
@@ -85,6 +87,11 @@ const CPU_FLOOR_DB: f64 = 36.0;
 /// No channel may be further than this from the CPU reference, which a
 /// seam column or a misplaced rim would be (as in `tests/render.rs`).
 const CPU_MAX_CHANNEL: f64 = 0.1;
+/// How far a blessing may lower a calibrated floor unasked. At one
+/// driver build a floor comes out the same at every blessing, so a drop
+/// past this is a render that got worse, or another driver, and needs
+/// `SPHERECUT_UPDATE_GOLDENS=lower`.
+const FLOOR_DROP_DB: f64 = 0.5;
 /// The ideal floor: measured − 1 dB when blessing. The comparison is with
 /// the pattern itself, so it moves with filtering, not with the GPU's
 /// rounding, and a 1 dB drop is a real loss of detail or a new alias.
@@ -634,6 +641,14 @@ struct Run<'g> {
     checks: Map<String, Value>,
     pngs: BTreeMap<String, Vec<u8>>,
     notes: Vec<String>,
+    /// A blessing's floors, old and new, and whether it may lower one by
+    /// more than [`FLOOR_DROP_DB`].
+    floors: Vec<String>,
+    lower_floors: bool,
+    /// Whether a blessing says what it wrote on the terminal, past the
+    /// test harness's capture: `goldens` does, the harness's own tests
+    /// don't.
+    tell: bool,
     /// Where the goldens are read and blessed, and where failures' diffs
     /// go: [`GOLDENS`] and [`diff_dir`], or scratch directories for the
     /// harness's own tests.
@@ -669,6 +684,9 @@ impl<'g> Run<'g> {
             checks: Map::new(),
             pngs: BTreeMap::new(),
             notes: Vec::new(),
+            floors: Vec::new(),
+            lower_floors: false,
+            tell: false,
             dir: dir.to_path_buf(),
             diffs: diffs.to_path_buf(),
         }
@@ -737,10 +755,29 @@ impl<'g> Run<'g> {
 
     /// A floor calibrated when blessing, as `measured − margin` (to 0.01
     /// dB) and never below `floor`, and read from the manifest otherwise.
+    /// A blessing that would lower a blessed floor by more than
+    /// [`FLOOR_DROP_DB`] fails, unless it was told it may.
     fn calibrated(&mut self, key: &str, v: f64, margin: f64, floor: f64) -> bool {
         let tkey = format!("{key}_min");
         let min = if self.blessing() {
-            (((v - margin) * 100.0).floor() / 100.0).max(floor)
+            let new = (((v - margin) * 100.0).floor() / 100.0).max(floor);
+            let old = self.blessed(&tkey).ok();
+            self.floors.push(format!(
+                "{} {tkey}: {} → {new}",
+                self.row,
+                old.map_or_else(|| "new".into(), |o| o.to_string())
+            ));
+            if let Some(old) = old
+                && new < old - FLOOR_DROP_DB
+                && !self.lower_floors
+            {
+                self.fail(format!(
+                    "blessing would lower {tkey} from {old} to {new} (measured {v:.2}), by more \
+                     than {FLOOR_DROP_DB} dB: a render that got worse, or another driver build; \
+                     to accept it, bless with {UPDATE}={LOWER}"
+                ));
+            }
+            new
         } else {
             match self.blessed(&tkey) {
                 Ok(m) => m,
@@ -1039,12 +1076,21 @@ impl<'g> Run<'g> {
         });
         let text = serde_json::to_string_pretty(&manifest).unwrap() + "\n";
         std::fs::write(dir.join(MANIFEST), text).unwrap();
-        eprintln!(
-            "blessed {} images and {} checks into {}",
+        let summary = format!(
+            "blessed {} images and {} checks into {}, with these floors (old → new):\n  {}\n",
             self.pngs.len(),
             self.checks.len(),
-            dir.display()
+            dir.display(),
+            self.floors.join("\n  ")
         );
+        if self.tell {
+            // Straight to the terminal: a passing test's eprintln! is
+            // captured, and whoever blesses should see the floors move.
+            use std::io::Write;
+            let _ = std::io::stderr().lock().write_all(summary.as_bytes());
+        } else {
+            eprint!("{summary}");
+        }
     }
 }
 
@@ -2137,9 +2183,12 @@ fn lod_heatmap(run: &mut Run<'_>) {
 fn goldens() {
     let gpu = gpu();
     assert_eq!(gpu.caps.info.device_type, wgpu::DeviceType::Cpu);
-    let bless = std::env::var_os(UPDATE).is_some_and(|v| !v.is_empty() && v != "0");
+    let update = std::env::var_os(UPDATE);
+    let bless = update.as_ref().is_some_and(|v| !v.is_empty() && v != "0");
     let _ = std::fs::remove_dir_all(diff_dir());
     let mut run = Run::new(gpu, Mode::Golden { bless });
+    run.lower_floors = update.is_some_and(|v| v == LOWER);
+    run.tell = true;
     let start = Instant::now();
     run_rows(&mut run, None);
     eprintln!("goldens: {:.1} s", start.elapsed().as_secs_f64());
@@ -2247,6 +2296,55 @@ fn blessing_writes_everything_or_nothing() {
     assert!(
         run.checks["lod_heatmap"]["thresholds"]["levels_off_by_more_than_half_max"].is_number()
     );
+}
+
+#[test]
+fn blessing_wont_lower_a_floor_unasked() {
+    let s = scratch("floors");
+    let (dir, diffs) = (s.dir.clone(), s.diffs.clone());
+    bless_into(&dir, &diffs, &["rect_forward"]);
+    let path = dir.join(MANIFEST);
+    let manifest = |floor: Option<f64>| {
+        let mut m: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let t = &mut m["images"]["rect_forward"]["thresholds"]["cpu_psnr_db_min"];
+        let was = t.as_f64().unwrap();
+        if let Some(f) = floor {
+            *t = json!(f);
+            std::fs::write(&path, m.to_string()).unwrap();
+        }
+        was
+    };
+    let floor = manifest(None);
+    let bless = |lower: bool| {
+        let mut run = Run::at(gpu(), Mode::Golden { bless: true }, &dir, &diffs);
+        run.lower_floors = lower;
+        run_rows(&mut run, Some(&["rect_forward"]));
+        let failures = run.failures.clone();
+        let blessed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run.finish()));
+        (failures, blessed.is_ok())
+    };
+    // Blessed before at a floor 0.4 dB higher: within the margin, so the
+    // blessing goes ahead and writes this build's floor.
+    manifest(Some(floor + 0.4));
+    let (failures, blessed) = bless(false);
+    assert!(blessed && failures.is_empty(), "{failures:?}");
+    assert_eq!(manifest(None), floor);
+    // 2 dB higher: the blessing refuses, says which floor and how to
+    // accept it, and writes nothing.
+    manifest(Some(floor + 2.0));
+    let (failures, blessed) = bless(false);
+    assert!(
+        !blessed
+            && failures.len() == 1
+            && failures[0].contains("would lower cpu_psnr_db_min")
+            && failures[0].contains("SPHERECUT_UPDATE_GOLDENS=lower"),
+        "{failures:?}"
+    );
+    assert_eq!(manifest(None), floor + 2.0);
+    // Told it may, it lowers it.
+    let (failures, blessed) = bless(true);
+    assert!(blessed && failures.is_empty(), "{failures:?}");
+    assert_eq!(manifest(None), floor);
 }
 
 #[test]
