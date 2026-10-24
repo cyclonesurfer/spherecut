@@ -210,6 +210,9 @@ pub struct Issue {
     pub severity: Severity,
     pub what: String,
     pub impact: String,
+    /// Lines for people: each a command, perhaps followed by three spaces
+    /// and a note (`sudo pacman -Syu   (Arch's Mesa has H.264 and HEVC)`),
+    /// or a sentence where no command fixes it (D18).
     pub fix: String,
 }
 

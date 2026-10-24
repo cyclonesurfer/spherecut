@@ -686,7 +686,11 @@ anything.
 Fixes are exact `dnf` or `pacman` commands where a package fixes the
 problem, on Fedora and Arch. Other problems get the fix that applies
 (`usermod -aG render`, GPU passthrough, `MESA_VK_DEVICE_SELECT`), and
-other distros get the package named in words. Doctor exits 1 only on an
+other distros get the package named in words. A fix is lines for people:
+a command may be followed by three spaces and a note (`sudo dnf install
+mesa-va-drivers-freeworld   (RPM Fusion free)`), so the command is what
+comes before them, and a line with no command is a sentence
+(`docs/cli-json.md`, D27). Doctor exits 1 only on an
 error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes
 AV1. `--json` keeps its old keys and adds `gpu`, `vulkan_devices`,
 `decode_checks` and `encode_checks`.
