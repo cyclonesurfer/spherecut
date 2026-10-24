@@ -129,6 +129,8 @@ planned ones above don't exist yet.
     planes on 256-byte boundaries, so wgpu's `write_texture` can take
     them in one copy. The buffer returns to the pool when the frame's
     last reference drops, and a new format or size rebuilds the pool.
+    The pool's allocator counts the buffers it makes, which
+    `DecodeStats::download_buffers` gives.
     The left and top crop FFmpeg leaves on device frames is applied after
     the copy, exactly, as software decoding applies it (`as_downloaded`
     gives the fields the frame will have). It serves VA-API and Vulkan
