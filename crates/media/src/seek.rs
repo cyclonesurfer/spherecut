@@ -7,11 +7,11 @@
 //! T = origin + ⌊at / tb⌋, later frames winning ties. A BACKWARD seek can
 //! land on a keyframe whose dts is at or before T but whose pts is after
 //! it: its leading pictures (HEVC RASL pictures after a CRA, open-GOP
-//! B-frames) are then dropped without a word, and so would be the target.
-//! So when the first frame out is after T, it seeks again to just before
-//! the landing keyframe, up to [`MAX_ATTEMPTS`] times, and then decodes
-//! from the start. A target in the GOP being decoded is reached by
-//! decoding forward, with no seek at all.
+//! B-frames) are then dropped, by FFmpeg or here, and so would be the
+//! target. So when the first frame out is after T, it seeks again to just
+//! before the landing keyframe, up to [`MAX_ATTEMPTS`] times, and then
+//! decodes from the start. A target in the GOP being decoded is reached
+//! by decoding forward, with no seek at all.
 //!
 //! Seeks stop through a [`StopToken`] at packet and frame boundaries,
 //! which leaves the demuxer in a known state; the decoder then seeks
@@ -206,6 +206,10 @@ pub struct FfmpegVideo {
     current_index: Option<u64>,
     current_tie: u32,
     not_seekable: bool,
+    /// Since the last seek away from the start, no frame at or after the
+    /// keyframe it landed on has come out: one before it is one of its
+    /// leading pictures, and is dropped.
+    leading: bool,
     /// The stream has no timestamps: pts are counted, as frame index times
     /// `frame_ticks`.
     no_timestamps: bool,
@@ -366,6 +370,7 @@ impl FfmpegVideo {
             current_index: None,
             current_tie: 0,
             not_seekable: false,
+            leading: false,
             no_timestamps,
             frame_ticks,
             end_pts: facts.end_pts,
@@ -395,6 +400,12 @@ impl FfmpegVideo {
     /// The next frame from the decoder, with its pts. Frames FFmpeg flags
     /// corrupt are dropped: decoded from references a seek skipped, they
     /// are not part of the stream as a decode from the start shows it.
+    /// So are the leading pictures of the keyframe a seek landed on, the
+    /// frames shown before it that come out before it: open-GOP B-frames
+    /// and RASL pictures decoded from references before it, which FFmpeg
+    /// 6.1's H.264 decoder doesn't flag as it drains at the end of the
+    /// stream, and HEVC's RADL pictures, decoded from it alone. A target
+    /// among them is reached by seeking to before that keyframe.
     /// Notes timestamps that go backwards.
     fn decode(&mut self, stop: &StopToken) -> Result<Got, MediaError> {
         loop {
@@ -411,6 +422,14 @@ impl FfmpegVideo {
             let fields = ffi::frame_fields(&frame);
             if fields.corrupt {
                 continue;
+            }
+            if self.leading
+                && let (Some(key), Some(pts)) = (self.dec.landing_key(), fields.pts)
+            {
+                if pts < key {
+                    continue;
+                }
+                self.leading = false;
             }
             return Ok(self.decoded(frame, fields));
         }
@@ -481,6 +500,7 @@ impl FfmpegVideo {
         self.pending = None;
         self.last_decoded = None;
         self.from_start = to_start.then_some(0);
+        self.leading = !to_start;
         self.start_run();
     }
 
@@ -1004,11 +1024,11 @@ impl FfmpegVideo {
     }
 
     /// One BACKWARD seek and its first frame, whatever its pts: the
-    /// keyframe a seek to `t` lands on, or a frame after it when `t` is
-    /// one of that keyframe's leading pictures. From the start when the
-    /// seek finds no frame. The decoder stays where it is, so an exact
-    /// seek to `t` after it decodes forward when the frame is at or before
-    /// `t`.
+    /// keyframe a seek to `t` lands on, since its leading pictures are
+    /// dropped, which is after `t` when `t` is one of them. From the start
+    /// when the seek finds no frame. The decoder stays where it is, so an
+    /// exact seek to `t` after it decodes forward when the frame is at or
+    /// before `t`.
     fn keyframe(
         &mut self,
         t: i64,

@@ -89,6 +89,9 @@ pub struct Gop {
     pub keyint: u32,
     pub bframes: u32,
     pub open: bool,
+    /// HEVC only: RADL pictures, B-frames shown before each keyframe but
+    /// decoded after it from it alone (x265's `radl`, for closed GOPs).
+    pub radl: u32,
 }
 
 /// The tags of synth's clips: BT.709, limited range, and centre-sited
@@ -179,6 +182,12 @@ impl Spec {
                 b = g.bframes,
                 o = u8::from(g.open)
             ));
+            if g.radl > 0 {
+                if encoder != "libx265" {
+                    return Err(EncodeError::Invalid("only HEVC has RADL pictures".into()));
+                }
+                params.push(format!("radl={}", g.radl));
+            }
         }
         // Single-threaded encodes keep the bitstream reproducible.
         options.push(("threads", "1"));

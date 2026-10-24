@@ -160,6 +160,8 @@ pub struct VideoDecoder {
     /// or its pts when it has no dts (Matroska), which is what the
     /// demuxer's index and `av_seek_frame` compare.
     landing: Option<i64>,
+    /// The pts of that packet, when it is a keyframe.
+    landing_key: Option<i64>,
     /// The same timestamp of the last packet of the stream read.
     read_position: Option<i64>,
     /// The least that a keyframe's pts has been after its dts, over the
@@ -251,7 +253,11 @@ impl VideoDecoder {
     /// caller to drop. Dropping them itself, FFmpeg 6.1's H.264 decoder
     /// also loses the frames still in its reorder buffer at the end of the
     /// stream: after a seek to the last keyframe of an open-GOP clip, its
-    /// last frame never comes out.
+    /// last frame never comes out. It doesn't flag the frames it gives up
+    /// there either, so a leading picture decoded without its references
+    /// that comes out as it drains is unflagged: the caller drops the
+    /// leading pictures of the keyframe a seek landed on by their pts
+    /// ([`landing_key`](Self::landing_key)).
     pub(crate) fn open_software(
         path: &Path,
         index: Option<usize>,
@@ -356,6 +362,7 @@ impl VideoDecoder {
             skipped: 0,
             awaiting_landing: false,
             landing: None,
+            landing_key: None,
             read_position: None,
             key_lag: None,
             skip_before: None,
@@ -565,6 +572,7 @@ impl VideoDecoder {
         self.failed = None;
         self.awaiting_landing = true;
         self.landing = None;
+        self.landing_key = None;
         self.read_position = None;
     }
 
@@ -573,6 +581,12 @@ impl VideoDecoder {
     /// or when it had no timestamp.
     pub(crate) fn landing(&self) -> Option<i64> {
         self.landing
+    }
+
+    /// The pts of the keyframe the last seek landed on: the first packet
+    /// read since, when it is a keyframe and has a pts.
+    pub(crate) fn landing_key(&self) -> Option<i64> {
+        self.landing_key
     }
 
     /// The last packet read, by the same timestamp; `None` when none has
@@ -697,6 +711,7 @@ impl VideoDecoder {
                     if self.awaiting_landing {
                         self.awaiting_landing = false;
                         self.landing = ts;
+                        self.landing_key = pkt.pts().filter(|_| pkt.is_key());
                     }
                     self.read_position = ts.or(self.read_position);
                     if pkt.is_key()

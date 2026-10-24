@@ -58,6 +58,7 @@ const OPEN_GOP: Option<Gop> = Some(Gop {
     keyint: 8,
     bframes: 3,
     open: true,
+    radl: 0,
 });
 
 /// What the oracle knows of a clip in GOPs of 8.
@@ -454,6 +455,21 @@ fn open_gop_hevc_seeks_exactly_and_a_naive_seek_does_not() {
         misses > 0,
         "the naive seek found every frame of open-GOP HEVC"
     );
+    // Closed GOPs whose keyframes each have two RADL pictures, decoded
+    // after the keyframe from it alone: a keyframe seek still gives the
+    // keyframe, and an exact seek to a RADL picture seeks again.
+    let radl = write(
+        &Spec {
+            gop: Some(Gop {
+                open: false,
+                radl: 2,
+                ..OPEN_GOP.unwrap()
+            }),
+            ..spec("radl-hevc", Codec::Hevc)
+        },
+        &dir,
+    );
+    assert!(oracle(&radl, GOP_8).reseeks > 0);
 }
 
 #[test]
@@ -470,6 +486,19 @@ fn open_gop_h264_seeks_exactly_and_a_naive_seek_does_not() {
     let d = open(&clip);
     assert_eq!(d.info().timing, Timing::Constant(FrameRate::FPS_30));
     assert_eq!(d.info().frame_count, Some(30));
+    // 25 frames, so the stream ends on keyframe 24 and then its leading
+    // B-frames in decode order, as a file cut at a GOP boundary does: a
+    // seek that lands on 24 decodes them without their references, and
+    // FFmpeg gives them up unflagged as it drains.
+    let short = write(
+        &Spec {
+            frames: 25,
+            ..spec("ogop-h264-25", Codec::H264)
+        },
+        &dir,
+    );
+    oracle(&short, GOP_8);
+    oracle(&media::remux_to_mkv(&short, &dir).unwrap(), GOP_8);
 }
 
 #[test]
@@ -934,6 +963,7 @@ fn timestamps_that_tie_or_go_backwards_seek_by_the_tie_rule() {
                 keyint: 8,
                 bframes: 0,
                 open: false,
+                radl: 0,
             }),
             ..spec("p-only", Codec::H264)
         },
@@ -1056,6 +1086,7 @@ fn a_stop_token_stops_a_long_seek_and_decoding_goes_on() {
                 keyint: 10_000,
                 bframes: 3,
                 open: false,
+                radl: 0,
             }),
             ..spec("long-gop", Codec::H264)
         },
