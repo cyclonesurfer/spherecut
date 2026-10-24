@@ -10,7 +10,7 @@ use spherecut_core::video::{
     Assumed, ChromaSiting, ColorCodes, ColorFamily, ColorInfo, Matrix, PixelLayout, PlaneData,
     PlaneDesc, Primaries, Range, SampleBytes, Transfer, VideoPlanes,
 };
-use spherecut_render::{AdapterChoice, Gpu};
+use spherecut_render::{AdapterChoice, Gpu, RenderError};
 use spherecut_synth::RgbImage;
 use spherecut_synth::yuv::{self, Chroma, YuvFormat};
 use spherecut_testkit::tier2;
@@ -68,21 +68,31 @@ pub fn hardware_gpus() -> (Vec<Gpu>, Vec<String>) {
 pub fn hardware_gpu() -> Gpu {
     tier2::require_hw_run();
     if let Some(choice) = AdapterChoice::from_env() {
-        let gpu = Gpu::headless(&choice)
-            .unwrap_or_else(|e| tier2::skip(format!("{}={choice}: {e}", AdapterChoice::ENV)));
-        if gpu.caps.is_cpu {
-            tier2::skip(format!(
-                "{}={choice} is a CPU adapter, {}",
-                AdapterChoice::ENV,
-                gpu.caps.info.name
-            ));
-        }
-        return gpu;
+        return named_gpu(&choice, Gpu::headless(&choice));
     }
     let (gpus, seen) = hardware_gpus();
     gpus.into_iter()
         .next()
         .unwrap_or_else(|| tier2::skip(format!("no GPU: Vulkan lists only {}", seen.join(", "))))
+}
+
+/// What opening the adapter `choice` names gave: the GPU, or a skip when
+/// there is no such adapter or it is a CPU. An adapter that is there but
+/// won't give a device fails the test, as in [`hardware_gpus`]: that is a
+/// fault to report, not missing hardware.
+pub fn named_gpu(choice: &AdapterChoice, opened: Result<Gpu, RenderError>) -> Gpu {
+    let env = AdapterChoice::ENV;
+    match opened {
+        Ok(gpu) if gpu.caps.is_cpu => tier2::skip(format!(
+            "{env}={choice} is a CPU adapter, {}",
+            gpu.caps.info.name
+        )),
+        Ok(gpu) => gpu,
+        Err(e @ (RenderError::NoAdapter { .. } | RenderError::AdapterNotFound { .. })) => {
+            tier2::skip(format!("{env}={choice}: {e}"))
+        }
+        Err(e) => panic!("{env}={choice} won't open a device: {e}"),
+    }
 }
 
 /// A decoded picture held in memory, with rows `pad` bytes longer than

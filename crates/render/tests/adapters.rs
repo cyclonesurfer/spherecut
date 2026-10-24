@@ -7,8 +7,8 @@
 
 mod common;
 
-use common::gpu;
-use spherecut_render::{Gpu, LinearTarget, PlaneFormat};
+use common::{gpu, named_gpu};
+use spherecut_render::{AdapterChoice, Gpu, LinearTarget, PlaneFormat, RenderError};
 use spherecut_testkit::{bench, tier2};
 use wgpu::{TextureFormat, TextureFormatFeatureFlags, TextureUsages};
 
@@ -161,4 +161,41 @@ fn list_adapters_and_features() {
             seen.join(", ")
         ));
     }
+}
+
+#[test]
+fn a_named_gpu_that_wont_open_fails_rather_than_skips() {
+    // How the Tier 2 tests treat the adapter SPHERECUT_ADAPTER names: no
+    // such adapter, or a CPU one, is a skip; one that is there and
+    // refuses a device is a failure, never shown as skipped.
+    let choice = AdapterChoice::Named("RX 7600".into());
+    let outcome = |opened: Result<Gpu, RenderError>| {
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            named_gpu(&choice, opened);
+        }));
+        let payload = panicked.expect_err("no GPU should come of these");
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let skipped = |m: &str| m.starts_with(tier2::SKIP_MARKER);
+    let none = outcome(Err(RenderError::NoAdapter {
+        tried: vec!["Vulkan".into()],
+    }));
+    assert!(skipped(&none), "{none}");
+    let other = outcome(Err(RenderError::AdapterNotFound {
+        wanted: "RX 7600".into(),
+        available: vec!["llvmpipe (LLVM 20.1.2, 256 bits)".into()],
+    }));
+    assert!(skipped(&other), "{other}");
+    let cpu = outcome(Gpu::headless(&AdapterChoice::Cpu));
+    assert!(skipped(&cpu) && cpu.contains("CPU adapter"), "{cpu}");
+    let refused = outcome(Err(RenderError::Device(
+        "AMD Radeon RX 7600 (RADV NAVI33) refused a device: out of memory".into(),
+    )));
+    assert!(
+        !skipped(&refused) && refused.contains("refused a device"),
+        "{refused}"
+    );
 }
