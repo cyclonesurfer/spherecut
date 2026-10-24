@@ -100,8 +100,9 @@ planned ones above don't exist yet.
   * `open_decoder` opens every decoder (`probe`, `VideoDecoder`,
     `open_video_decoder`, doctor's probes) with `max_pixels` =
     `MAX_PIXELS`, 2^27 pixels (16384 × 8192). `clippy.toml` forbids
-    ffmpeg-next's own file and decoder opens, and `std::net`'s TCP and UDP
-    types, elsewhere.
+    ffmpeg-next's own input, output and decoder opens (`format::open`,
+    `format::input*`, `format::output*`, `Decoder::open*` and the like),
+    and `std::net`'s TCP and UDP types, elsewhere.
   * `dict_entries` reads metadata as lossy UTF-8 (U+FFFD for bytes that
     aren't), because ffmpeg-next makes `&str`s of it unchecked.
 * `hwprobe.rs` (private) holds doctor's one-frame hardware decode and

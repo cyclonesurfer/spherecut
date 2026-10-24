@@ -83,8 +83,8 @@ enum Layout {
 }
 
 /// Remux `src` into `dst` laid out as `layout` says.
-// Reads a file this test wrote with ffmpeg-next alone, apart from
-// Spherecut's confined open (D24).
+// Reads a file this test wrote, and writes another, with ffmpeg-next
+// alone, apart from Spherecut's confined open (D24).
 #[allow(clippy::disallowed_methods)]
 fn remux(src: &Path, dst: &Path, layout: Layout) {
     let mut ictx = ff::format::input(src).unwrap();

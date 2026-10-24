@@ -955,11 +955,16 @@ holds FFmpeg to that one file:
   larger picture fails to decode, with FFmpeg's "Picture size ... exceeds
   specified max pixel count".
 - `clippy.toml` forbids `std::net`'s `TcpStream`, `TcpListener` and
-  `UdpSocket`, ffmpeg-next's `format::input` functions and its decoder
-  opens (`Decoder::open`, `open_as`, `video` and the like), so new code
-  can't open a socket or bypass `open_input` or the limit by accident.
-  The synth crate's tests read files they wrote themselves with
-  ffmpeg-next directly, each under an `#[allow]` that says so.
+  `UdpSocket`, ffmpeg-next's input opens (`format::open`, `open_with`
+  and the `format::input` functions), its decoder opens
+  (`Decoder::open`, `open_as`, `video` and the like) and its output
+  opens (`format::output`, `output_with`, `output_as`, `output_as_with`),
+  which take the path as a URL too, so `-o http://...` would write to the
+  network. So new code can't open a socket or bypass `open_input`, the
+  limit or `Mp4Writer`'s own file handle by accident. The synth crate's
+  tests read files they wrote themselves with ffmpeg-next directly, and
+  one remuxes into a file of its own, each under an `#[allow]` that says
+  so.
 
 Why: the agent integration review (D23) found that `deny.toml` can't see
 what FFmpeg does, since FFmpeg is a system C library. M0's probe followed
