@@ -83,6 +83,9 @@ enum Layout {
 }
 
 /// Remux `src` into `dst` laid out as `layout` says.
+// Reads a file this test wrote with ffmpeg-next alone, apart from
+// Spherecut's confined open (D24).
+#[allow(clippy::disallowed_methods)]
 fn remux(src: &Path, dst: &Path, layout: Layout) {
     let mut ictx = ff::format::input(src).unwrap();
     let video = ictx.streams().best(ff::media::Type::Video).unwrap().index();
@@ -123,6 +126,7 @@ fn remux(src: &Path, dst: &Path, layout: Layout) {
 
 /// Where each sample of `path`'s best stream of type `kind` lies, as
 /// (offset, size), in file order.
+#[allow(clippy::disallowed_methods)] // As in `remux`.
 fn samples(path: &Path, kind: ff::media::Type) -> Vec<(u64, u64)> {
     let mut ictx = ff::format::input(path).unwrap();
     let index = ictx.streams().best(kind).unwrap().index();

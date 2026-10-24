@@ -173,6 +173,9 @@ fn h264_10bit_is_in_the_standard_set_and_round_trips() {
 }
 
 /// All decoded audio of `path`, planar.
+// Reads a file this test wrote with ffmpeg-next alone, apart from
+// Spherecut's confined open (D24).
+#[allow(clippy::disallowed_methods)]
 fn decode_audio(path: &Path) -> (Vec<Vec<f32>>, String) {
     spherecut_media::init();
     let mut ictx = ff::format::input(path).unwrap();

@@ -36,6 +36,9 @@ fn small(name: &str, codec: Codec, bits: u32, audio: Audio, spherical: bool) -> 
 }
 
 /// Decode every video frame in software and return them as planes.
+// Reads a file this test wrote with ffmpeg-next alone, apart from
+// Spherecut's confined open (D24).
+#[allow(clippy::disallowed_methods)]
 fn decode_all(path: &Path) -> Vec<(i64, YuvPlanes, u32, u32, u32)> {
     spherecut_media::init();
     let mut ictx = ff::format::input(path).unwrap();
