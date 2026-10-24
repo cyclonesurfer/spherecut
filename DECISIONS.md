@@ -86,6 +86,55 @@ Revisit if: ffmpeg-next stops tracking new FFmpeg releases.
 *Updated by D11:* `crates/media/src/hwprobe.rs` (doctor's probes) is a
 second FFI module, and C enums are read as ints, never as bindgen enums.
 
+*Updated 2026-10-24, after the FFmpeg 8 break.* The checks above were
+made by hand and nothing made them again. 3a8047d (slice 2a, the
+same day) built swscale's flags from `sys::SWS_BILINEAR`,
+`SWS_ACCURATE_RND` and `SWS_BITEXACT`. FFmpeg 8 made those defines the
+`SwsFlags` enum, which ffmpeg-sys-next 9.0.1 binds as a Rust enum with
+no bare constants, so the media crate built here on 6.1 (and 7.1) and
+didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
+`hw-test` stopped at 09342c6. 67fa1fd takes the flags from ffmpeg-next's
+`scaling::Flags`, which names them for each version. Checked since:
+
+- At 67fa1fd with 3a8047d's flags put back, clippy on the workspace (all
+  targets and features, `-D warnings`) fails against 8.1 and 9.0.2 with
+  Pat's three errors and passes against 7.1 and Ubuntu's 6.1.1.
+- Against an 8.1.3 built from its tag with what Pat's FFmpeg has that the
+  tests use (VA-API and Vulkan with libdrm, libx264, libx265, libdav1d,
+  SVT-AV1, Opus, Vorbis and libshaderc; libavcodec 62.28.103, as on
+  odin), the Tier 1 tests at 67fa1fd gave 375 passed, 2 failed and 19
+  ignored, where 6.1 passes all 377. Both failures were FFmpeg changing
+  between 7.0 and 7.1 (D29). On one thread, as hardware decoders run,
+  the HEVC decoder's queue of output frames survived the flush after a
+  seek, and a frame from before the seek came out after it, as it would
+  on Pat's machines, whose hardware decoders run on one thread on 8.1.3.
+  It is fixed, with a test that fails on 8.1.3 without the fix. And the spliced MP4's second keyframe, an error up to 7.0, is
+  skipped with a warning from 7.1, so the test now expects the event
+  only before 7.1. A third, the stop-token test, failed now and then on
+  8.1.3 because its decode was quicker than its 40 ms precondition; it
+  writes a longer clip where it needs one. At 1771dc8 every Tier 1
+  test passes against 8.1.3 and 6.1, 390 on each with 19 ignored (the
+  one-thread test and compat's 12 unit tests are new), and clippy
+  passes against the minimal 7.1, 8.1.3, and the 9.0.2 with VA-API,
+  libx264, libx265 and libdav1d.
+- `gen-media`'s files from 8.1.3 differ from 6.1's only in FFmpeg's
+  version strings (`Lavc`, `Lavf`) and the average bitrate in MP4's
+  `btrt` box, which 8.1.3 leaves 0: the streams are the same.
+
+`cargo xtask compat` keeps it checked: clippy as `cargo xtask check` runs
+it against each FFmpeg prefix named, or listed in
+`SPHERECUT_FFMPEG_COMPAT` (colon-separated), each in its own target
+directory (`<target>/compat/<label>`, with line-tables debuginfo and no
+incremental state), checking that pkg-config finds that prefix and
+printing the FFmpeg and libavcodec it bound; `--test PREFIX` runs the
+Tier 1 and doc tests against one, with its libraries on
+`LD_LIBRARY_PATH`. `cargo xtask check` runs the clippy part when the
+variable is set and says it skipped it when not, as it is in a fresh
+checkout: only the system FFmpeg is checked then.
+`scripts/build-ffmpeg.sh TAG DIR` builds a release from its GitHub tag
+the way the 8.1.3 above was built (with Khronos Vulkan headers 1.4.354
+where the system's are older than 8.1 needs, as Ubuntu 24.04's are).
+
 ## D3. Hardware decoding never falls back to software silently
 
 *2026-10-23, M0.*
@@ -1600,6 +1649,27 @@ Revisit if: the cache or the GUI needs something `run` and `seq` don't
 give; a decoder outputs frames out of pts order in streams that aren't
 broken; or FFmpeg's H.264 drain is fixed and the corrupt frames can be
 left to it.
+
+*Updated 2026-10-24, against FFmpeg 8.1.3 (D2).* FFmpeg 7.1 and later's
+HEVC decoder queues the frames it outputs (all it has left at the end of
+the stream, several at once where a keyframe empties its picture
+buffer), and `avcodec_flush_buffers` leaves that queue as it is. On one
+thread, as hardware decoders run (D30), a frame from before a seek then
+came out after it: a keyframe seek into the last GOP of the open-GOP
+HEVC clip, after an exact seek there and the frame after it, gave the
+clip's last frame, and an exact seek took such a frame for timestamps
+going backwards. Before a seek's flush the decoder now hands out, and
+the seek drops, whatever it holds ready (at most 64 frames, which don't
+count as decoded): with no packet sent, a decoder gives only what it has
+made, or what its frame threads are finishing. The oracle's
+`on_one_thread_no_frame_from_before_a_seek_comes_out_after_it` opens
+open- and closed-GOP HEVC and open-GOP H.264 on one thread and, for every
+frame, seeks it, takes the frame after, seeks the keyframe there and a
+frame elsewhere; on 8.1.3 it fails without the fix. From 7.1 the HEVC
+decoder also skips the spliced MP4's second keyframe, whose POC it still
+holds, with a warning and no error, where 6.1 fails it as invalid data:
+the same frames come out, and a `Damaged` event comes only where the
+decoder reports the damage.
 
 ## D30. Pixel formats and colour defaults
 
