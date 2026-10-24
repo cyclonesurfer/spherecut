@@ -151,6 +151,15 @@ didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
   and 6.1, 395 on each with 19 ignored, and clippy and the link pass
   against the minimal 7.1 and the 9.0.2 with VA-API, libx264, libx265
   and libdav1d.
+- Its review found that asking the decoder first went too far. A
+  decoder without `AV_CODEC_CAP_CHANNEL_CONF`, such as PCM's, refuses
+  any stream without channels (`EINVAL`), so a `sowt` track whose sample
+  entry gives none was damage even with no samples, where it had been a
+  warning, and the refusal said no more than "has no channels". Only a
+  decoder that sets the channels up itself is asked now (D15).
+  generated_media's `a_pcm_track_without_channels_is_damage_only_with_samples`
+  writes a PCM MOV and sets its channels to 0, with its samples and
+  without, and fails without the fix.
 - `gen-media`'s files from 8.1.3 differ from 6.1's only in FFmpeg's
   version strings (`Lavc`, `Lavf`) and the average bitrate in MP4's
   `btrt` box, which 8.1.3 leaves 0: the streams are the same.
@@ -685,12 +694,16 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   FFmpeg lacks a feature (`ENOSYS`, `AVERROR_PATCHWELCOME`, or
   `AVERROR_EXPERIMENTAL` for a decoder this build does not enable) is a
   warning, as is a codec with no decoder in this build; any other
-  refusal is damage, whatever the container. A decoder that fails to
-  open in `avformat_find_stream_info` also clears the stream's channels
-  from FFmpeg 7.0, until 8.1.3 and 9.0.2 put the sample entry's back
-  (6.1 kept them in the old `channels` field), so an audio stream with
-  no channels is judged by its decoder first: only one that opens leaves
-  "has no channels" as the reason (D2).
+  refusal is damage, whatever the container. A decoder that sets the
+  channels up itself (`AV_CODEC_CAP_CHANNEL_CONF`, as AAC's does) and
+  fails to open in `avformat_find_stream_info` also clears the stream's
+  channels from FFmpeg 7.0, until 8.1.3 and 9.0.2 put the sample entry's
+  back (6.1 kept them in the old `channels` field), so an audio stream
+  with no channels is judged by such a decoder first: only one that
+  opens leaves "has no channels" as the reason (D2). Any other decoder,
+  such as PCM's, refuses a stream without channels (`EINVAL`), which
+  says only that it has none, so it isn't asked: "has no channels" is
+  the reason, and damage only with samples, as above.
 
 A file FFmpeg reads as MOV/MP4 is checked even when its first box type is
 unknown; that box alone is a warning, not damage. Matroska is checked

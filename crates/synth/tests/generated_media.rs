@@ -383,6 +383,108 @@ fn broken_files_give_errors_not_panics() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Write a MOV at `path` holding one track of 48 kHz stereo PCM silence
+/// (sample entry `sowt`).
+// PCM, which Mp4Writer doesn't write, muxed with ffmpeg-next alone.
+#[allow(clippy::disallowed_methods)]
+fn pcm_mov(path: &Path) {
+    spherecut_media::init();
+    let codec = ff::encoder::find(ff::codec::Id::PCM_S16LE).unwrap();
+    let mut octx = ff::format::output_as(path, "mov").unwrap();
+    let mut enc = ff::codec::context::Context::new_with_codec(codec)
+        .encoder()
+        .audio()
+        .unwrap();
+    let tb = ff::Rational::new(1, 48000);
+    enc.set_rate(48000);
+    enc.set_channel_layout(ff::ChannelLayout::default(2));
+    enc.set_format(ff::format::Sample::I16(ff::format::sample::Type::Packed));
+    enc.set_time_base(tb);
+    let enc = enc.open_as(codec).unwrap();
+    let mut ost = octx.add_stream(codec).unwrap();
+    ost.set_parameters(&enc);
+    ost.set_time_base(tb);
+    octx.write_header().unwrap();
+    let out_tb = octx.stream(0).unwrap().time_base();
+    // Ten packets of 1024 frames of 4 bytes.
+    for i in 0..10 {
+        let mut pkt = ff::Packet::copy(&[0; 4096]);
+        pkt.set_stream(0);
+        pkt.set_pts(Some(i * 1024));
+        pkt.set_dts(Some(i * 1024));
+        pkt.set_duration(1024);
+        pkt.rescale_ts(tb, out_tb);
+        pkt.write_interleaved(&mut octx).unwrap();
+    }
+    octx.write_trailer().unwrap();
+}
+
+#[test]
+fn a_pcm_track_without_channels_is_damage_only_with_samples() {
+    // FFmpeg's PCM decoders don't set the channels up themselves, so they
+    // refuse a stream without any (EINVAL), which says no more than that
+    // it has none: as for any stream FFmpeg cannot set up, that is damage
+    // in a track with samples of a codec FFmpeg reads, and without
+    // samples a warning (D2, D15).
+    use spherecut_media::mp4;
+    let dir = tmp("pcm");
+    let good = dir.join("pcm.mov");
+    pcm_mov(&good);
+    let r = probe::probe(&good).unwrap();
+    assert!(r.damage.is_empty(), "{:?}", r.damage);
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    let mut bytes = std::fs::read(&good).unwrap();
+    let tree = mp4::read(&mut std::io::Cursor::new(&bytes)).unwrap();
+    let stbl = tree
+        .tracks()
+        .next()
+        .and_then(|t| t.path(&[b"mdia", b"minf", b"stbl"]))
+        .unwrap();
+    let entry = &stbl.child(b"stsd").unwrap().children[0];
+    assert_eq!(&entry.fourcc.0, b"sowt");
+    // Where byte `i` of box `b`'s payload is in the file.
+    let at = |b: &mp4::Mp4Box, i: usize| usize::try_from(b.offset + b.header_len).unwrap() + i;
+    // A version 0 sound sample description, whose channels are at 16.
+    assert_eq!(entry.payload[8..10], [0, 0]);
+    let channels = at(entry, 16);
+    assert_eq!(bytes[channels..channels + 2], [0, 2]);
+    bytes[channels..channels + 2].fill(0);
+    // A channel layout box would give FFmpeg the channels anyway.
+    for c in entry.children.iter().filter(|c| &c.fourcc.0 == b"chan") {
+        let t = usize::try_from(c.offset).unwrap() + 4;
+        bytes[t..t + 4].copy_from_slice(b"xhan");
+    }
+    let with_samples = dir.join("pcm-ch0.mov");
+    std::fs::write(&with_samples, &bytes).unwrap();
+    // Every sample table's count zeroed: the track has no samples.
+    for (table, count) in [(b"stts", 4), (b"stsc", 4), (b"stsz", 8), (b"stco", 4)] {
+        let i = at(stbl.child(table).unwrap(), count);
+        bytes[i..i + 4].fill(0);
+    }
+    let without_samples = dir.join("pcm-ch0-nosamples.mov");
+    std::fs::write(&without_samples, &bytes).unwrap();
+    let why = "stream #0 (sample entry `sowt`) has no channels";
+    let r = probe::probe(&with_samples).unwrap();
+    assert!(
+        r.damage
+            .iter()
+            .any(|d| d.message == format!("{why}, so its codec setup is damaged")),
+        "{:?}",
+        r.damage
+    );
+    let r = probe::probe(&without_samples).unwrap();
+    assert!(r.damage.is_empty(), "{:?}", r.damage);
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.code == "cannot_decode"
+                && w.message == format!("{why} and cannot be decoded")),
+        "{:?}",
+        r.warnings
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn video_decoder_yields_every_frame_with_exact_times() {
     use spherecut_media::decode::VideoDecoder;
