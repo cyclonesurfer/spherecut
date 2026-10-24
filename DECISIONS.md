@@ -504,13 +504,21 @@ only: seeks stop through generation tokens instead.
 
 *Updated 2026-10-24, against FFmpeg 8.1.3 (D2, D29):* from 7.1 the HEVC
 decoder skips a picture whose slice header or frame start it can't
-decode without returning an error, and from 8.0 it flags as corrupt
-the pictures that refer to it. `VideoDecoder::open` leaves corrupt
-frames to FFmpeg, which drops them, so there such damage loses frames
-up to the next keyframe and `next_frame` returns no error. The
-backend's decoder has corrupt frames handed out, and says one after a
-good frame as a `Damaged` event (D29). On 7.1.x the damage is silent on
-both.
+decode without returning an error, and from 8.0 it treats the pictures
+that refer to it as damaged, where 6.1 decoded them from what it had.
+`VideoDecoder::open` doesn't ask for corrupt frames
+(`AV_CODEC_FLAG_OUTPUT_CORRUPT`), and without that flag 8.x refuses
+those pictures: a reference picture that is missing or corrupt is
+invalid data to `add_candidate_ref`, `hevc_frame_start` drops the
+picture, and `decode_nal_unit` skips it with the same "Skipping invalid
+undecodable NALU" warning, up to the next IRAP picture. So there such
+damage loses those frames and `next_frame` returns no error. The
+backend's decoder asks for corrupt frames, so FFmpeg decodes those
+pictures and flags them corrupt, and for HEVC the backend says the first
+of them after a good frame as a `Damaged` event and drops the rest
+(D29). H.264's flag says only where decoding recovered, not damage, and
+the backend hands those frames out (D29). On 7.1.x the HEVC damage is
+silent on both.
 
 ## D14. A hardware decoder says why it refused a stream
 
@@ -1821,7 +1829,8 @@ flagged corrupt as one decoded from references a seek skipped, so on
 exact seek into it returned an earlier frame as `Exact` with no event.
 Now only the frames flagged corrupt before the first good frame since
 opening or a seek are dropped silently: their references come before
-where decoding began. After it, the first of a run of them is damage,
+where decoding began. After it, for HEVC (and every codec but H.264,
+below), the first of a run of them is damage,
 a `Damaged` event like any other the decode goes on past, and it and
 the rest of the run are dropped. A seek into the frames lost stays
 `Exact` for the frame the decode from the start shows there, with the
@@ -1838,12 +1847,43 @@ fix. FFmpeg 7.1.x (libavcodec 61.19 up to 8.0's 62.11) neither returns
 the error nor flags the frames, so there the damage is silent: the test
 expects no event from HEVC there.
 
+*Updated 2026-10-24, against FFmpeg 8.1.3 and 7.1.3.* That rule took
+H.264's corrupt flag for damage too, and it isn't. The H.264 decoder
+flags a frame only by where it has seen decoding recover since it began
+(an IDR picture, a recovery point SEI, or an I-frame it takes for a
+place to start), never for a reference picture it lacks, which it
+conceals or fails `avcodec_send_packet` over. From 7.0, in a stream with
+B-frames, the frames decoded after such an I-frame and before it comes
+out don't count as recovered, and come out flagged though every
+reference they need is there; 6.1 hands them out unflagged. In a stream
+whose keyframes after the first are I-frames that aren't IDR, with no
+recovery point SEI, every seek to a keyframe but the first then raised
+a `Damaged` event on 7.x and later, and lost those frames. Now the flag
+after the first good frame is damage for every codec but H.264, whose
+flagged frames are handed out (`corrupt_is_damage`); before it the flag
+still marks, for every codec, the frames decoded from references a seek
+skipped. Of FFmpeg's other decoders, VVC's flags as HEVC's does, and
+those for AV1 (FFmpeg's own, libdav1d and libaom), VP8, VP9, MPEG-1, 2
+and 4, ProRes and MJPEG flag none. The oracle's
+`h264_keyframes_without_recovery_points_seek_exactly` strips the SEI
+from open-GOP H.264 with 3 and with 2 B-frames, and from one cut at a
+keyframe that isn't IDR; FFmpeg flags neither those keyframes nor their
+packets as keys, so there the oracle takes the MP4's sync samples
+(`stss`) for keyframes. It fails without the fix on 8.1.3 and 7.1.3. The
+oracle now also fails a clip on any `Damaged` event, from a decode from
+the start or a seek, except the HEVC splice up to 7.0.
+
 Limits (from 8.1.3): on 7.1.x HEVC damage to a slice header or frame
-start is silent, as above. A frame flagged corrupt after the first good
-one is taken for damage; a decoder that flagged a frame of an undamaged
-stream so would raise a `Damaged` event for it. `VideoDecoder::open`,
-which tests and the Tier 2 checks use, still leaves corrupt frames to
-FFmpeg, so from 8.0 it loses those frames without an error (D13).
+start is silent, as above. Outside H.264, a frame flagged corrupt after
+the first good one is taken for damage: a decoder that flagged a frame
+of an undamaged stream so would raise a `Damaged` event for it. The
+oracle cuts only the SEI-less clip with 3 B-frames: a cut of the one
+with 2 fails its cost check, with the SEI kept as well (an exact seek
+seeks once more than it expects), which is the estimate of
+`forward_is_cheaper`, not this rule. `VideoDecoder::open`, which tests
+and the Tier 2 checks use, doesn't ask for corrupt frames, so from 8.0
+FFmpeg refuses the HEVC pictures that refer to a lost one and it loses
+them without an error (D13).
 
 ## D30. Pixel formats and colour defaults
 

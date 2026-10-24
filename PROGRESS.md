@@ -319,10 +319,13 @@ back clean, so M0 is done.
   corrupt, so no `Damaged` event, where 6.1 and 8.0 and later raise one
   (D29). Fedora 43 ships 7.1.
 - `VideoDecoder::open`, the M0 decoder the media tests and Tier 2 checks
-  use, leaves corrupt frames to FFmpeg: from 8.0 a damaged HEVC reference
-  picture loses the frames up to the next keyframe there without an
-  error. The backend's decoder, which everything above media uses,
-  reports it (D13, D29).
+  use, doesn't ask FFmpeg for corrupt frames
+  (`AV_CODEC_FLAG_OUTPUT_CORRUPT`), and without that flag FFmpeg 8.0 and
+  later refuses the HEVC pictures that refer to a damaged reference
+  picture, skipping them with "Skipping invalid undecodable NALU" up to
+  the next IRAP picture: there the damage loses those frames without an
+  error. The backend's decoder, which everything above media uses, asks
+  for them and reports it (D13, D29).
 - With every seek oracle test opened on one thread, as hardware decoders
   run, all of them pass on 6.1 and on 8.1.3 but
   `an_edit_list_hides_its_lead_in_and_clip_time_starts_after_it`, whose
