@@ -203,7 +203,7 @@ fn marker(label: char) -> [f64; 3] {
     AXIS_MARKERS[i].1
 }
 
-/// The plan's Euler table (section 14), on the grid clip: a 10° view, 33
+/// The plan's Euler table (section 12.1), on the grid clip: a 10° view, 33
 /// pixels wide, whose centre pixel looks along the camera's axis.
 ///
 /// At the poles that pixel is the pole itself, where the equirect's
@@ -1182,6 +1182,9 @@ struct Run {
     measured: Map<String, Value>,
     failures: Vec<String>,
     images: Map<String, Value>,
+    /// The entry of the image row under way, which goes into `images`
+    /// with every number it measured once the row ends.
+    pending: Option<Map<String, Value>>,
     checks: Map<String, Value>,
     pngs: BTreeMap<String, Vec<u8>>,
     floors: Vec<String>,
@@ -1208,6 +1211,7 @@ impl Run {
             measured: Map::new(),
             failures: Vec::new(),
             images: Map::new(),
+            pending: None,
             checks: Map::new(),
             pngs: BTreeMap::new(),
             floors: Vec::new(),
@@ -1216,9 +1220,21 @@ impl Run {
     }
 
     fn begin(&mut self, row: &str) {
+        self.end_image();
         self.row = row.into();
         self.thresholds.clear();
         self.measured.clear();
+    }
+
+    /// Ends the image row under way, if any: its entry, with what it
+    /// measured after its image was compared too (its twins and
+    /// controls), goes into the manifest.
+    fn end_image(&mut self) {
+        if let Some(mut entry) = self.pending.take() {
+            let mut m = self.stamp();
+            m.append(&mut entry);
+            self.images.insert(self.row.clone(), Value::Object(m));
+        }
     }
 
     fn describe(&self) -> String {
@@ -1410,8 +1426,9 @@ impl Run {
         self.checks.insert(self.row.clone(), Value::Object(m));
     }
 
-    /// The row's image against its stored PNG, or kept for blessing; then
-    /// the row ends.
+    /// The row's image against its stored PNG, or kept for blessing. The
+    /// row ends at the next [`Run::begin`] or at [`Run::finish`], so that
+    /// the checks after this one are recorded with it.
     fn stored(&mut self, what: &str, got: &Image, source: Value, hash: &str, args: &[&str]) {
         let png = format!("{}.png", self.row);
         let mut entry = Map::new();
@@ -1432,14 +1449,12 @@ impl Run {
             "other_driver".into(),
             json!({"psnr_db_min": OTHER_PSNR_DB, "ssim_min": OTHER_SSIM, "max_lsb": OTHER_MAX_LSB}),
         );
-        let mut m = self.stamp();
-        m.append(&mut entry);
-        m.insert("what".into(), json!(what));
-        m.insert("png".into(), json!(png));
-        m.insert("source".into(), source);
-        m.insert("source_fnv64".into(), json!(hash));
-        m.insert("view".into(), json!(args.join(" ")));
-        self.images.insert(self.row.clone(), Value::Object(m));
+        entry.insert("what".into(), json!(what));
+        entry.insert("png".into(), json!(png));
+        entry.insert("source".into(), source);
+        entry.insert("source_fnv64".into(), json!(hash));
+        entry.insert("view".into(), json!(args.join(" ")));
+        self.pending = Some(entry);
     }
 
     fn compare_stored(&mut self, png: &str, hash: &str, got: &Image) {
@@ -1515,7 +1530,8 @@ impl Run {
         }
     }
 
-    fn finish(self) {
+    fn finish(mut self) {
+        self.end_image();
         let list = self.failures.join("\n  ");
         if self.bless {
             assert!(
@@ -1559,6 +1575,30 @@ impl Run {
             );
             return;
         }
+        // Every number a row measures is in the manifest from its blessing
+        // (the comparison with the stored image is the plain run's own).
+        if let Ok(m) = &self.manifest {
+            let mut missing = Vec::new();
+            for (kind, rows) in [("images", &self.images), ("checks", &self.checks)] {
+                for (row, entry) in rows {
+                    let Some(measured) = entry["measured"].as_object() else {
+                        continue;
+                    };
+                    for key in measured.keys().filter(|k| !k.starts_with("golden_")) {
+                        if m[kind][row]["measured"][key].is_null() {
+                            missing.push(format!("{row}: {key}"));
+                        }
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                self.failures.push(format!(
+                    "the manifest doesn't record {}: bless again with `{REGENERATE}`",
+                    missing.join(", ")
+                ));
+            }
+        }
+        let list = self.failures.join("\n  ");
         assert!(
             self.failures.is_empty(),
             "{} pipeline golden checks failed on {}:\n  {list}",
@@ -1827,7 +1867,7 @@ fn nv12_vs_yuv420p(run: &mut Run) {
     let identical = got.pixels == twin.pixels;
     run.measure("twin_identical", f64::from(u8::from(identical)));
     run.check(identical, "the NV12 and yuv420p renders differ");
-    if let Some(Value::Object(e)) = run.images.get_mut("nv12_vs_yuv420p") {
+    if let Some(e) = run.pending.as_mut() {
         e.insert("twin_fnv64".into(), json!(source_hash(&i420)));
     }
 }
