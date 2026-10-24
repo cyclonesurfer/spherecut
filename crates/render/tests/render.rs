@@ -413,7 +413,7 @@ fn chroma_sits_where_its_siting_puts_it() {
             1,
         );
         let texel = |px: f64| f64::from(line) + 0.5 + (px - a) * 2.0 / (b - a);
-        let j = (line + 1) / 2;
+        let j = line.div_ceil(2);
         for (siting, t) in cases {
             // Blue rises with Cb.
             let got = texel(peak(&still(&raised(siting, 1, across, j)), across, 2));
