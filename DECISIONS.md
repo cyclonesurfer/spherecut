@@ -2093,6 +2093,15 @@ Where this differs from the plan, from the evidence:
 - The reference returns `Result`: it reads a `VideoPlanes`, and refuses
   a layout the renderer can't sample, as `render_still` does. It also
   has `lod_map` (the heat map) and `render` with a `Placement`.
+- Readback copies in bands of at most 64 MiB of padded rows through one
+  reused buffer (`readback::BAND_BYTES`). 3a's first readback used one
+  buffer for the whole picture, which passes wgpu's default
+  `max_buffer_size` of 256 MiB at sizes the device's textures take (a
+  16-bit still of 4097×8192, an 8-bit one of 8193×8192) and failed there
+  as `gpu_failed`; the first review found it, and a Tier 1 test reads
+  8193×8192 back. The device keeps wgpu's default buffer limit, as plan
+  section 4.1 has it: an upload's largest plane, 2^27 pixels at 16 bits,
+  is 256 MiB exactly.
 - `StillRenderer` keeps `render_still`'s pipelines, slot and target for
   more than one still. `Depth::Linear` reads the linear target back as
   it is, for the heat map.

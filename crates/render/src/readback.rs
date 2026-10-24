@@ -50,12 +50,30 @@ pub fn read_texture(gpu: &Gpu, texture: &wgpu::Texture, level: u32) -> Result<Te
     read_region(gpu, texture, level, size)
 }
 
+/// The most bytes one read-back buffer holds. A larger picture is read in
+/// bands of rows, so that a size the device's textures take never needs a
+/// buffer past its `max_buffer_size` (256 MiB by wgpu's default limits,
+/// which a 16-bit still of 4097×8192 passes).
+pub const BAND_BYTES: u64 = 64 << 20;
+
 /// The top-left `size` of level `level` of `texture`. Waits for the GPU.
 pub fn read_region(
     gpu: &Gpu,
     texture: &wgpu::Texture,
     level: u32,
     size: (u32, u32),
+) -> Result<Texels, RenderError> {
+    read_region_in_bands(gpu, texture, level, size, BAND_BYTES)
+}
+
+/// [`read_region`] with bands of at most `band_bytes` of padded rows (one
+/// row at the least), for tests of the banding at small sizes.
+pub fn read_region_in_bands(
+    gpu: &Gpu,
+    texture: &wgpu::Texture,
+    level: u32,
+    size: (u32, u32),
+    band_bytes: u64,
 ) -> Result<Texels, RenderError> {
     let format = texture.format();
     let Some(bpt) = format.block_copy_size(None) else {
@@ -77,61 +95,74 @@ pub fn read_region(
     let row = w as usize * bpt as usize;
     let pitch = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
     let device = &gpu.device;
+    let limit = band_bytes.min(device.limits().max_buffer_size);
+    let band = u32::try_from(limit / pitch as u64)
+        .unwrap_or(u32::MAX)
+        .clamp(1, h);
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
-        size: (pitch * h as usize) as u64,
+        size: (pitch * band as usize) as u64,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("readback"),
-    });
-    enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture,
-            mip_level: level,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(pitch as u32),
-                rows_per_image: None,
-            },
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
-    let (tx, rx) = std::sync::mpsc::channel();
-    enc.map_buffer_on_submit(&buffer, wgpu::MapMode::Read, .., move |r| {
-        let _ = tx.send(r);
-    });
-    gpu.queue.submit([enc.finish()]);
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| RenderError::Readback(e.to_string()))?;
+    let read = || -> Result<Vec<u8>, RenderError> {
+        let mut data = Vec::with_capacity(row * h as usize);
+        for y0 in (0..h).step_by(band as usize) {
+            let rows = band.min(h - y0);
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("readback"),
+            });
+            enc.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: level,
+                    origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(pitch as u32),
+                        rows_per_image: None,
+                    },
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: rows,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let (tx, rx) = std::sync::mpsc::channel();
+            enc.map_buffer_on_submit(&buffer, wgpu::MapMode::Read, .., move |r| {
+                let _ = tx.send(r);
+            });
+            gpu.queue.submit([enc.finish()]);
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .map_err(|e| RenderError::Readback(e.to_string()))?;
+            rx.recv()
+                .map_err(|_| RenderError::Readback("the copy never finished".into()))?
+                .map_err(|e| RenderError::Readback(e.to_string()))?;
+            {
+                let view = buffer
+                    .get_mapped_range(..)
+                    .map_err(|e| RenderError::Readback(e.to_string()))?;
+                for y in 0..rows as usize {
+                    data.extend_from_slice(&view[y * pitch..y * pitch + row]);
+                }
+            }
+            buffer.unmap();
+        }
+        Ok(data)
+    };
+    let data = read();
+    // A validation error says more than the failed map it leads to.
     if let Some(e) = pollster::block_on(scope.pop()) {
         return Err(RenderError::Readback(e.to_string()));
     }
-    rx.recv()
-        .map_err(|_| RenderError::Readback("the copy never finished".into()))?
-        .map_err(|e| RenderError::Readback(e.to_string()))?;
-    let mut data = Vec::with_capacity(row * h as usize);
-    {
-        let view = buffer
-            .get_mapped_range(..)
-            .map_err(|e| RenderError::Readback(e.to_string()))?;
-        for y in 0..h as usize {
-            data.extend_from_slice(&view[y * pitch..y * pitch + row]);
-        }
-    }
-    buffer.unmap();
+    let data = data?;
     Ok(Texels {
         width: w,
         height: h,

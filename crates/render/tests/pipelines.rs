@@ -10,7 +10,7 @@ use std::mem::{offset_of, size_of};
 
 use common::gpu;
 use spherecut_render::layouts::{ENCODE_WGSL, INGEST_WGSL, MIPS_WGSL, PROJECT_WGSL};
-use spherecut_render::readback::{read_region, read_texture};
+use spherecut_render::readback::{read_region, read_region_in_bands, read_texture};
 use spherecut_render::{
     DebugMode, Encoder, Filter, GpuFrame, IngestUniform, LinearTarget, PlaceUniform, Projector,
     RenderError, SlotShape, SourceUniform, StillOptions, Uploader, ViewParams, ViewUniform,
@@ -173,6 +173,9 @@ fn round_trip(format: wgpu::TextureFormat, w: u32, h: u32) {
     let back = read_texture(gpu, &texture, 0).unwrap();
     assert_eq!((back.width, back.height, back.bytes_per_texel), (w, h, bpt));
     assert_eq!(back.data, data, "{format:?} {w}x{h}");
+    // And in bands of one or two padded rows.
+    let banded = read_region_in_bands(gpu, &texture, 0, (w, h), 512).unwrap();
+    assert_eq!(banded, back, "{format:?} {w}x{h} in bands");
     // A region of it, from the top left.
     if w > 1 && h > 1 {
         let part = read_region(gpu, &texture, 0, (w - 1, h - 1)).unwrap();
@@ -205,6 +208,71 @@ fn readback_handles_odd_sizes() {
         read_region(gpu, t.texture(), 0, (5, 1)).unwrap_err().code(),
         "invalid_input"
     );
+}
+
+#[test]
+fn readback_passes_wgpus_buffer_limit() {
+    // 8193×8192 RGBA8 needs 270 532 608 bytes of padded rows, past the
+    // 256 MiB a wgpu buffer may have by default: 3a's first readback, one
+    // buffer for the whole picture, failed with gpu_failed at sizes the
+    // device's textures take (a 16-bit still of 4097×8192, say).
+    let gpu = gpu();
+    let (w, h) = (8193u32, 8192u32);
+    let pitch = u64::from(w * 4).next_multiple_of(256);
+    assert!(pitch * u64::from(h) > gpu.device.limits().max_buffer_size);
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("large readback test"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    // Three rows written, at the top, across a band's edge and at the
+    // bottom; the rest is the zeros wgpu clears a texture to.
+    let row = |y: u32| -> Vec<u8> {
+        (0..w * 4)
+            .map(|i| ((i * 7 + y * 13) % 251) as u8 + 1)
+            .collect()
+    };
+    let band_rows = (spherecut_render::readback::BAND_BYTES / pitch) as u32;
+    let written = [0, band_rows, h - 1];
+    for &y in &written {
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &row(y),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: None,
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    let back = read_texture(gpu, &texture, 0).unwrap();
+    assert_eq!(back.data.len(), (w * 4) as usize * h as usize);
+    let at = |y: u32| &back.data[(y * w * 4) as usize..][..(w * 4) as usize];
+    for &y in &written {
+        assert!(at(y) == row(y), "row {y}");
+    }
+    for y in [1, band_rows - 1, band_rows + 1, h - 2] {
+        assert!(at(y).iter().all(|&b| b == 0), "row {y}");
+    }
 }
 
 #[test]
