@@ -2255,8 +2255,13 @@ pub(crate) fn swscale_rgb48(
     let data = rgb.data(0);
     let mut out = Vec::with_capacity(3 * w * h);
     for y in 0..h {
-        let row = data.get(y * stride..y * stride + 6 * w).ok_or_else(refused)?;
-        out.extend(row.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])));
+        let row = data
+            .get(y * stride..y * stride + 6 * w)
+            .ok_or_else(refused)?;
+        out.extend(
+            row.chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]])),
+        );
     }
     Ok(out)
 }

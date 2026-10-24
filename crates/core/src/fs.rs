@@ -285,8 +285,7 @@ mod tests {
     }
 
     fn tmpdir(name: &str) -> TempDir {
-        let path =
-            std::env::temp_dir().join(format!("spherecut-fs-{}-{name}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("spherecut-fs-{}-{name}", std::process::id()));
         std::fs::remove_dir_all(&path).ok();
         std::fs::create_dir_all(&path).unwrap();
         TempDir(path)
@@ -460,7 +459,13 @@ mod tests {
         assert!(!dir.join("nothing.png").exists());
         assert_eq!(
             listing(&dir),
-            ["dangling.png", "dir.png", "file.png", "link.png", "sock.png"]
+            [
+                "dangling.png",
+                "dir.png",
+                "file.png",
+                "link.png",
+                "sock.png"
+            ]
         );
     }
 
