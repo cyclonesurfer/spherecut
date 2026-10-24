@@ -66,6 +66,7 @@ const GOP_8: Expect = Expect {
     keyint: Some(8),
     backwards: false,
     spliced: false,
+    damaged: false,
 };
 
 /// 256x128 clips of 30 frames at 30 fps, in open GOPs of 8 frames with 3
@@ -126,8 +127,15 @@ fn open(path: &Path) -> Box<dyn VideoDecode> {
 /// and the pts at which the interval of the frame with the greatest pts
 /// ends, as the stream's duration says once every frame is decoded.
 /// Timestamps may tie or go backwards; [`shown_at`] says which frame a
-/// time shows.
+/// time shows. The clip is a good one: nothing in it is damage.
 fn sequential(path: &Path) -> (Vec<Seen>, i64) {
+    let (frames, end, events) = sequential_events(path);
+    assert_no_damage(&path.display().to_string(), &events);
+    (frames, end)
+}
+
+/// [`sequential`]'s frames and end, and the events the decode raised.
+fn sequential_events(path: &Path) -> (Vec<Seen>, i64, Vec<DecoderEvent>) {
     let mut d = open(path);
     let never = StopToken::never();
     let name = path.display();
@@ -149,7 +157,17 @@ fn sequential(path: &Path) -> (Vec<Seen>, i64) {
         out.iter().all(|f| f.pts < end),
         "{name}: the stream ends at pts {end}, before a frame"
     );
-    (out, end)
+    (out, end, d.take_events())
+}
+
+/// Fails if `events` include a `Damaged` event.
+fn assert_no_damage(name: &str, events: &[DecoderEvent]) {
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, DecoderEvent::Damaged { .. })),
+        "{name}: a good clip is damaged: {events:?}"
+    );
 }
 
 /// A small deterministic generator for the random targets.
@@ -236,6 +254,10 @@ struct Expect {
     /// Its edit list splices pieces of the stream, so a keyframe seek can
     /// give the first frame a piece shows, its keyframe hidden.
     spliced: bool,
+    /// FFmpeg says a picture of it is damaged, so decodes and seeks may
+    /// raise `Damaged` events, as the HEVC splice does up to FFmpeg 7.0.
+    /// Otherwise none may: the oracle's clips are good.
+    damaged: bool,
 }
 
 /// What [`oracle`] saw.
@@ -251,8 +273,11 @@ struct Report {
 /// in the seek's run; what each seek cost; before the start and past the
 /// end; keyframe seeks; step back; frames by index.
 fn oracle(path: &Path, expect: Expect) -> Report {
-    let (frames, last_end) = sequential(path);
+    let (frames, last_end, events) = sequential_events(path);
     let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    if !expect.damaged {
+        assert_no_damage(&name, &events);
+    }
     let mut d = open(path);
     let origin = d.info().origin_pts;
     assert_eq!(
@@ -439,6 +464,11 @@ fn oracle(path: &Path, expect: Expect) -> Report {
             "{name}: frame {n} ({:?})",
             d.info().timing
         );
+    }
+    // None of those seeks found damage (a backwards clip's
+    // NotExactlySeekable was taken above).
+    if !expect.damaged {
+        assert_no_damage(&name, &d.take_events());
     }
     Report { frames, reseeks }
 }
@@ -1286,10 +1316,14 @@ fn an_edit_list_that_splices_two_pieces_seeks_exactly_and_counts_frames() {
             &spliced,
             &[(500, lead_in), (500, lead_in + 30 * FRAME_30 as i32)],
         );
+        // Up to FFmpeg 7.0 the HEVC decoder says the splice is damage
+        // (below).
+        let fails_at_splice = codec == Codec::Hevc && ff::codec::version() < (61 << 16 | 19 << 8);
         let frames = oracle(
             &spliced,
             Expect {
                 spliced: true,
+                damaged: fails_at_splice,
                 ..GOP_8
             },
         )
@@ -1310,7 +1344,6 @@ fn an_edit_list_that_splices_two_pieces_seeks_exactly_and_counts_frames() {
         let mut d = open(&spliced);
         while let NextFrame::Frame(_) = d.next_frame(&never).unwrap() {}
         let played = d.take_events();
-        let fails_at_splice = codec == Codec::Hevc && ff::codec::version() < (61 << 16 | 19 << 8);
         assert_eq!(played.is_empty(), !fails_at_splice, "{played:?}");
         for (from, until) in [(10, 15), (10, 16), (12, 14), (5, 17), (13, 15)] {
             seek_pts(&mut *d, frames[from].pts, SeekMode::Exact);
