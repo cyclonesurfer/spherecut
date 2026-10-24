@@ -134,11 +134,11 @@ back clean, so M0 is done.
   its first 64 blocks and its Cues only. The new run that catching up
   starts after it skipped frames is a guard no test reaches (D29).
 - Slice 2a adds about 9 s to `cargo xtask check`, nearly all of it the
-  seek oracle's test binary: 8.9 s of a 34 s check here (4.6 s before
-  the review's fixes added the tied, backwards, variable-rate Matroska,
-  long Matroska and catch-up clips). Every exact seek in a backwards
-  clip decodes it twice from the start, and the oracle seeks four times
-  in each frame's interval.
+  seek oracle's test binary: 8.9 s of a 23 s warm check here (4.6 s
+  before the review's fixes added the tied, backwards, variable-rate
+  Matroska, long Matroska and catch-up clips). Every exact seek in a
+  backwards clip decodes it twice from the start, and the oracle seeks
+  four times in each frame's interval.
 - FFmpeg 6.1's H.264 decoder, left to drop the frames it decodes from
   references a seek skipped, loses the frames still in its reorder buffer
   at the end of the stream. Spherecut has it output them and drops them
