@@ -932,7 +932,7 @@ fn list_and_run<V: AsRef<OsStr>>(dir: &Path, quick: bool, env: &[(&str, V)]) -> 
 
 /// Cargo's target directory as `cargo metadata` gives it, which follows
 /// `CARGO_TARGET_DIR` and `build.target-dir`.
-fn target_dir(root: &Path) -> PathBuf {
+pub(crate) fn target_dir(root: &Path) -> PathBuf {
     let m = capture("cargo", &["metadata", "--format-version", "1", "--no-deps"]);
     if m.ok
         && let Some(dir) = json_str_field(&m.text, "target_directory")
