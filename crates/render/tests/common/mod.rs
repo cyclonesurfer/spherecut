@@ -13,6 +13,7 @@ use spherecut_core::video::{
 use spherecut_render::{AdapterChoice, Gpu};
 use spherecut_synth::RgbImage;
 use spherecut_synth::yuv::{self, Chroma, YuvFormat};
+use spherecut_testkit::tier2;
 
 /// The CPU adapter, as every Tier 1 test renders on: made once, shared by
 /// the binary's tests.
@@ -29,6 +30,59 @@ pub fn gpu() -> &'static Gpu {
         );
         gpu
     })
+}
+
+/// Every Vulkan adapter, described, and a device on each one that isn't
+/// a CPU: what the Tier 2 render tests run on. A GPU that won't open a
+/// device fails the test.
+pub fn hardware_gpus() -> (Vec<Gpu>, Vec<String>) {
+    let instance = wgpu::Instance::new(Gpu::instance_descriptor());
+    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
+    let mut gpus = Vec::new();
+    let mut seen = Vec::new();
+    for a in adapters {
+        let info = a.get_info();
+        seen.push(format!(
+            "{} ({:?}, {} {})",
+            info.name, info.device_type, info.driver, info.driver_info
+        ));
+        if info.device_type == wgpu::DeviceType::Cpu {
+            continue;
+        }
+        let name = if info.device_pci_bus_id.is_empty() {
+            info.name.clone()
+        } else {
+            info.device_pci_bus_id.clone()
+        };
+        match Gpu::headless(&AdapterChoice::Named(name)) {
+            Ok(g) => gpus.push(g),
+            Err(e) => panic!("{} won't open a device: {e}", info.name),
+        }
+    }
+    (gpus, seen)
+}
+
+/// The GPU a Tier 2 test runs on, or a skip: the adapter
+/// `SPHERECUT_ADAPTER` names, else the first GPU Vulkan lists (the loader
+/// puts discrete GPUs first).
+pub fn hardware_gpu() -> Gpu {
+    tier2::require_hw_run();
+    if let Some(choice) = AdapterChoice::from_env() {
+        let gpu = Gpu::headless(&choice)
+            .unwrap_or_else(|e| tier2::skip(format!("{}={choice}: {e}", AdapterChoice::ENV)));
+        if gpu.caps.is_cpu {
+            tier2::skip(format!(
+                "{}={choice} is a CPU adapter, {}",
+                AdapterChoice::ENV,
+                gpu.caps.info.name
+            ));
+        }
+        return gpu;
+    }
+    let (gpus, seen) = hardware_gpus();
+    gpus.into_iter()
+        .next()
+        .unwrap_or_else(|| tier2::skip(format!("no GPU: Vulkan lists only {}", seen.join(", "))))
 }
 
 /// A decoded picture held in memory, with rows `pad` bytes longer than

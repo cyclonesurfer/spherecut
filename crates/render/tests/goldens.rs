@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use common::{Frame, Kind, color, frame, gpu};
+use common::{Frame, Kind, color, frame, gpu, hardware_gpu, hardware_gpus};
 use glam::{DQuat, DVec3};
 use serde_json::{Map, Value, json};
 use spherecut_core::video::{ChromaSiting, ColorInfo, Matrix, Range, SampleBytes};
@@ -2322,42 +2322,20 @@ fn driver_builds_are_told_apart() {
     assert!(wgpu_version().starts_with("30."));
 }
 
-/// Every Vulkan adapter that isn't a CPU, each as its own device.
-fn hardware_gpus() -> (Vec<Gpu>, Vec<String>) {
-    let instance = wgpu::Instance::new(Gpu::instance_descriptor());
-    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
-    let mut gpus = Vec::new();
-    let mut seen = Vec::new();
-    for a in adapters {
-        let info = a.get_info();
-        seen.push(format!(
-            "{} ({:?}, {})",
-            info.name, info.device_type, info.driver_info
-        ));
-        if info.device_type == wgpu::DeviceType::Cpu {
-            continue;
-        }
-        let name = if info.device_pci_bus_id.is_empty() {
-            info.name.clone()
-        } else {
-            info.device_pci_bus_id.clone()
-        };
-        match Gpu::headless(&AdapterChoice::Named(name)) {
-            Ok(g) => gpus.push(g),
-            Err(e) => panic!("{} won't open a device: {e}", info.name),
-        }
-    }
-    (gpus, seen)
-}
-
 #[test]
 #[ignore = "tier2: needs a GPU (RADV or ANV)"]
 fn goldens_on_gpu_match_reference() {
+    // Every GPU, or the one SPHERECUT_ADAPTER names.
     tier2::require_hw_run();
-    let (gpus, seen) = hardware_gpus();
-    if gpus.is_empty() {
-        tier2::skip(format!("no GPU: Vulkan lists only {}", seen.join(", ")));
-    }
+    let gpus = if AdapterChoice::from_env().is_some() {
+        vec![hardware_gpu()]
+    } else {
+        let (gpus, seen) = hardware_gpus();
+        if gpus.is_empty() {
+            tier2::skip(format!("no GPU: Vulkan lists only {}", seen.join(", ")));
+        }
+        gpus
+    };
     let mut failed = Vec::new();
     for g in &gpus {
         let mut run = Run::new(g, Mode::References);
