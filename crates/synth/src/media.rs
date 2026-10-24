@@ -84,6 +84,11 @@ pub struct Spec {
     /// faster than footage. At 5760x2880 and 30 fps, x265 (`veryfast`,
     /// CRF 18) makes about 200 Mbps of it.
     pub noise: Option<u64>,
+    /// Luma columns the stream crops on the left, an even number: the
+    /// clip is rendered and coded `width` wide, and decodes `crop_left`
+    /// narrower, without the pattern's left columns (see
+    /// [`VideoSettings::crop_left`]).
+    pub crop_left: u32,
 }
 
 /// Keyframes every `keyint` frames, with `bframes` B-frames between
@@ -138,6 +143,7 @@ impl Default for Spec {
             edit_start: 0,
             vfr: false,
             noise: None,
+            crop_left: 0,
         }
     }
 }
@@ -228,6 +234,7 @@ impl Spec {
             color: self.color,
             edit_start: self.edit_start,
             time_base,
+            crop_left: self.crop_left,
         })
     }
 }
@@ -716,6 +723,7 @@ pub fn write_mjpeg_declaring(
         color: ColorTags::BT709_LIMITED,
         edit_start: 0,
         time_base: None,
+        crop_left: 0,
     };
     let mut w = Mp4Writer::create(&path, &settings, None)?;
     for _ in 0..2 {

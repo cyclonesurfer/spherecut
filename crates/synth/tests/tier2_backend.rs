@@ -98,7 +98,11 @@ fn noisy(bits: u32) -> PathBuf {
 /// codes as 1008x576 and HEVC as 1000x568: the decoder crops every
 /// picture on the right or at the bottom, on the device too.
 fn cropped(codec: Codec) -> PathBuf {
-    cached(&Spec {
+    cached(&cropped_spec(codec))
+}
+
+fn cropped_spec(codec: Codec) -> Spec {
+    Spec {
         name: format!("t2-{}-cropped", format!("{codec:?}").to_lowercase()),
         width: 1000,
         height: 562,
@@ -111,6 +115,20 @@ fn cropped(codec: Codec) -> PathBuf {
             radl: 0,
         }),
         ..Spec::default()
+    }
+}
+
+/// [`cropped`]'s clip at `bits` bits, whose stream also crops 48 columns
+/// on the left, so it decodes 952 wide. FFmpeg leaves a left crop on a
+/// device frame for the download to apply, and the download must cut the
+/// picture software decodes, in NV12 and P010 alike.
+fn left_cropped(codec: Codec, bits: u32) -> PathBuf {
+    let spec = cropped_spec(codec);
+    cached(&Spec {
+        name: format!("{}{bits}-left", spec.name),
+        bits,
+        crop_left: 48,
+        ..spec
     })
 }
 
@@ -702,7 +720,7 @@ fn check_seeks(hw: &Hw, s: &Stream) -> Result<Vec<String>, String> {
     Ok(problems)
 }
 
-/// The noisy clips, two cropped ones and every sample stream, and the
+/// The noisy clips, four cropped ones and every sample stream, and the
 /// samples that didn't probe. The samples are listed first, so that a
 /// machine without them skips before generating the clips.
 fn seek_streams() -> (Vec<Stream>, Vec<String>) {
@@ -712,6 +730,8 @@ fn seek_streams() -> (Vec<Stream>, Vec<String>) {
         noisy(10),
         cropped(Codec::H264),
         cropped(Codec::Hevc),
+        left_cropped(Codec::H264, 8),
+        left_cropped(Codec::Hevc, 10),
     ]
     .into_iter()
     .map(Stream::clip)
@@ -841,6 +861,9 @@ fn color_streams() -> (Vec<Stream>, Vec<String>) {
         ),
         tagged("t2-color-hevc10-pq", Codec::Hevc, 10, 1024, pq),
         tagged("t2-color-hevc10-hlg", Codec::Hevc, 10, 1024, hlg),
+        // Their size on the device must be software's too.
+        left_cropped(Codec::H264, 8),
+        left_cropped(Codec::Hevc, 10),
         noisy(8),
         noisy(10),
     ]
@@ -1028,22 +1051,25 @@ fn stand_in(fail_at: Option<u64>) -> Hw {
 }
 
 /// Clips of 30 frames in open GOPs of 8 with 3 B-frames, in `dir`: 256x128
-/// H.264 at 8 bits and HEVC at 10, and 250x142 H.264, coded as 256x144,
-/// which the decoder crops as it does [`cropped`]'s.
+/// H.264 at 8 bits and HEVC at 10, 250x142 H.264, coded as 256x144,
+/// which the decoder crops as it does [`cropped`]'s, and HEVC at 10 bits
+/// cropped 48 columns on the left as [`left_cropped`]'s is.
 fn small_clips(dir: &TempDir) -> Vec<Stream> {
     [
-        (Codec::H264, 8, 256, 128),
-        (Codec::Hevc, 10, 256, 128),
-        (Codec::H264, 8, 250, 142),
+        (Codec::H264, 8, 256, 128, 0),
+        (Codec::Hevc, 10, 256, 128, 0),
+        (Codec::H264, 8, 250, 142, 0),
+        (Codec::Hevc, 10, 256, 128, 48),
     ]
     .into_iter()
-    .map(|(codec, bits, width, height)| {
+    .map(|(codec, bits, width, height, crop_left)| {
         let spec = Spec {
-            name: format!("{codec:?}-{bits}-{width}"),
+            name: format!("{codec:?}-{bits}-{width}-{crop_left}"),
             codec,
             bits,
             width,
             height,
+            crop_left,
             gop: Some(Gop {
                 keyint: 8,
                 bframes: 3,

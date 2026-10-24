@@ -136,6 +136,126 @@ pub(crate) fn clear_codec_tag(st: &mut ff::format::stream::StreamMut<'_>) {
     unsafe { (*(*st.as_mut_ptr()).codecpar).codec_tag = 0 };
 }
 
+/// FFmpeg's h264_metadata or hevc_metadata bitstream filter, set to crop
+/// the pictures of an encoder's stream on the left: it rewrites H.264's
+/// frame cropping or HEVC's conformance window in every SPS, in the
+/// extradata and in packets alike. No encoder crops on the left itself;
+/// test media does, as some streams do.
+pub(crate) struct CropFilter(*mut sys::AVBSFContext);
+
+// SAFETY: the filter context is only used through `&mut self` (or read
+// through `&self`), and a bitstream filter keeps no state outside it.
+unsafe impl Send for CropFilter {}
+
+impl Drop for CropFilter {
+    fn drop(&mut self) {
+        // SAFETY: NULL or the context this owns.
+        unsafe { sys::av_bsf_free(&mut self.0) };
+    }
+}
+
+impl CropFilter {
+    /// A filter for packets of the H.264 or HEVC stream with parameters
+    /// `par`, in time base `tb`, that crops `left` more luma columns on
+    /// the left, an even number.
+    pub(crate) fn left(
+        par: &ff::codec::Parameters,
+        tb: ff::Rational,
+        left: u32,
+    ) -> Result<Self, ff::Error> {
+        let check = |ret: c_int| {
+            if ret < 0 {
+                Err(ff::Error::from(ret))
+            } else {
+                Ok(())
+            }
+        };
+        // SAFETY: `par` wraps live codec parameters; the id is read as an
+        // int.
+        let id = unsafe { enum_int(&raw const (*par.as_ptr()).codec_id) };
+        let name = match id {
+            i if i == sys::AVCodecID::AV_CODEC_ID_H264 as c_int => c"h264_metadata",
+            i if i == sys::AVCodecID::AV_CODEC_ID_HEVC as c_int => c"hevc_metadata",
+            _ => return Err(ff::Error::BsfNotFound),
+        };
+        // SAFETY: a static name; the filter found is static too.
+        let filter = unsafe { sys::av_bsf_get_by_name(name.as_ptr()) };
+        if filter.is_null() {
+            return Err(ff::Error::BsfNotFound);
+        }
+        let mut me = CropFilter(std::ptr::null_mut());
+        // SAFETY: allocates a context into `me.0`, which frees it on any
+        // error below. The context is set up as av_bsf_init requires
+        // before it is called: its input parameters copied from `par`, its
+        // input time base, and an option the filter has, with a value in
+        // its range.
+        unsafe {
+            check(sys::av_bsf_alloc(filter, &mut me.0))?;
+            check(sys::avcodec_parameters_copy((*me.0).par_in, par.as_ptr()))?;
+            (*me.0).time_base_in = tb.into();
+            let left = i64::from(left);
+            check(sys::av_opt_set_int(
+                (*me.0).priv_data,
+                c"crop_left".as_ptr(),
+                left,
+                0,
+            ))?;
+            check(sys::av_bsf_init(me.0))?;
+        }
+        Ok(me)
+    }
+
+    /// Give `stream` the filter's output parameters, whose SPS crops
+    /// `left` columns more, and the width of the picture they leave.
+    pub(crate) fn parameters_to(
+        &self,
+        stream: &mut ff::format::stream::StreamMut<'_>,
+        left: u32,
+    ) -> Result<(), ff::Error> {
+        // SAFETY: the stream belongs to a live output context that is
+        // mutably borrowed with it, and its codecpar is allocated; the
+        // filter's output parameters are set by av_bsf_init. The width is
+        // a plain int.
+        unsafe {
+            let par = (*stream.as_mut_ptr()).codecpar;
+            let ret = sys::avcodec_parameters_copy(par, (*self.0).par_out);
+            if ret < 0 {
+                return Err(ff::Error::from(ret));
+            }
+            let left = c_int::try_from(left).map_err(|_| ff::Error::InvalidData)?;
+            (*par).width = (*par).width.saturating_sub(left);
+        }
+        Ok(())
+    }
+
+    /// Send `packet` through the filter, which takes its data, or with
+    /// `None` the end of the stream.
+    pub(crate) fn send(&mut self, packet: Option<&mut ff::Packet>) -> Result<(), ff::Error> {
+        use ff::codec::packet::Mut;
+        let p = packet.map_or(std::ptr::null_mut(), |p| p.as_mut_ptr());
+        // SAFETY: a context set up in `left`, and NULL or a live packet,
+        // whose reference the filter takes, leaving it blank.
+        let ret = unsafe { sys::av_bsf_send_packet(self.0, p) };
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+        Ok(())
+    }
+
+    /// The next packet out of the filter into `packet`: EAGAIN when it
+    /// needs another, EOF once the end of the stream is out.
+    pub(crate) fn receive(&mut self, packet: &mut ff::Packet) -> Result<(), ff::Error> {
+        use ff::codec::packet::Mut;
+        // SAFETY: a context set up in `left`, and a live packet, which is
+        // given the filtered packet's reference.
+        let ret = unsafe { sys::av_bsf_receive_packet(self.0, packet.as_mut_ptr()) };
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+        Ok(())
+    }
+}
+
 /// Planar 32-bit float, the only sample format `Mp4Writer` sends.
 pub(crate) const SAMPLE_FMT_FLTP: c_int = sys::AVSampleFormat::AV_SAMPLE_FMT_FLTP as c_int;
 
@@ -3306,6 +3426,7 @@ mod tests {
             color: ColorTags::BT709_LIMITED,
             edit_start: 0,
             time_base: None,
+            crop_left: 0,
         };
         let mut w = Mp4Writer::create(&dir.0.join(name), &settings, None).unwrap();
         for i in 0..3 {

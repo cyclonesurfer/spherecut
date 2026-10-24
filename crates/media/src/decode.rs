@@ -1200,6 +1200,7 @@ mod tests {
             color: ColorTags::BT709_LIMITED,
             edit_start: 0,
             time_base: None,
+            crop_left: 0,
         };
         let mut w = Mp4Writer::create(&dir.0.join("clip.mp4"), &settings, None).unwrap();
         for i in 0..10 {

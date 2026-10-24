@@ -591,6 +591,7 @@ fn mpeg4_clip(dir: &TempDir) -> PathBuf {
         color: ColorTags::BT709_LIMITED,
         edit_start: 0,
         time_base: None,
+        crop_left: 0,
     };
     let (w, h) = (w as usize, h as usize);
     let mut out = Mp4Writer::create(&dir.0.join("mpeg4.mp4"), &settings, None).unwrap();

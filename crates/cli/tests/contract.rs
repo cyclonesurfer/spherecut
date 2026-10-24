@@ -118,6 +118,7 @@ fn untagged_clip(dir: &Path) -> PathBuf {
         color: ColorTags::NONE,
         edit_start: 0,
         time_base: None,
+        crop_left: 0,
     };
     let mut w = Mp4Writer::create(&dir.join("untagged.mp4"), &settings, None).unwrap();
     for i in 0..3 {

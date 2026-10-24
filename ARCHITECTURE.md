@@ -208,7 +208,9 @@ The other modules are safe Rust:
   only a regular file at the output.
 * `encode`: `Mp4Writer`, one video stream from planar YUV (4:2:0, 4:2:2
   or 4:4:4 at 8 or 10 bits, tagged with any colour, optionally behind an
-  edit list or with its own timestamps) and optional planar-f32 audio,
+  edit list, with its own timestamps or cropped on the left, which
+  FFmpeg's `h264_metadata` or `hevc_metadata` filter writes into the
+  SPS, `ffi::CropFilter`) and optional planar-f32 audio,
   written atomically like `inject`, which also means it refuses an
   output that isn't a regular file; and `remux_to_matroska`, a stream
   copy into Matroska. The synthetic media generator uses them today;

@@ -173,6 +173,55 @@ fn h264_10bit_is_in_the_standard_set_and_round_trips() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn clips_cropped_on_the_left_decode_without_those_columns() {
+    let dir = tmp("crop-left");
+    for (codec, bits) in [(Codec::H264, 8), (Codec::Hevc, 8), (Codec::Hevc, 10)] {
+        let name = format!("{codec:?}{bits}").to_lowercase();
+        let whole = spec(&format!("{name}-whole"), 256, 3, codec, bits, Audio::None);
+        let cropped = Spec {
+            crop_left: 48,
+            ..spec(&format!("{name}-cropped"), 256, 3, codec, bits, Audio::None)
+        };
+        let whole = media::write(&whole, &dir).unwrap();
+        let cropped = media::write(&cropped, &dir).unwrap();
+        let r = probe::probe(&cropped).unwrap();
+        let v = r.streams.iter().find(|s| s.kind == StreamKind::Video);
+        let v = v.and_then(|s| s.video.as_ref()).unwrap();
+        assert_eq!((v.width, v.height), (208, 128), "{name}: probed");
+        let mut a = VideoDecoder::open(&whole, None, None).unwrap();
+        let mut b = VideoDecoder::open(&cropped, None, None).unwrap();
+        let mut n = 0;
+        while let Some(fa) = a.next_frame().unwrap() {
+            let fb = b.next_frame().unwrap().unwrap();
+            let size = (fb.frame.width(), fb.frame.height());
+            assert_eq!(size, (208, 128), "{name}: frame {n}");
+            // The same pictures, but for their first 48 columns.
+            let [y, u, v] = fa.planes_u16().unwrap();
+            let cut = |p: Vec<u16>, w: usize, left: usize| -> Vec<u16> {
+                p.chunks(w).flat_map(|row| row[left..].to_vec()).collect()
+            };
+            let want = [cut(y, 256, 48), cut(u, 128, 24), cut(v, 128, 24)];
+            assert!(fb.planes_u16().unwrap() == want, "{name}: frame {n}");
+            n += 1;
+        }
+        assert!(b.next_frame().unwrap().is_none(), "{name}");
+        assert_eq!(n, 3, "{name}");
+    }
+    // An odd crop, or one that leaves nothing, is refused.
+    for crop_left in [3, 256] {
+        let s = Spec {
+            crop_left,
+            ..spec("bad-crop", 256, 1, Codec::H264, 8, Audio::None)
+        };
+        assert!(matches!(
+            media::write(&s, &dir),
+            Err(media::SynthError::Encode(EncodeError::Invalid(_)))
+        ));
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// All decoded audio of `path`, planar.
 // Reads a file this test wrote with ffmpeg-next alone, apart from
 // Spherecut's confined open (D24).
@@ -288,6 +337,7 @@ fn video_settings() -> VideoSettings {
         color: ColorTags::BT709_LIMITED,
         edit_start: 0,
         time_base: None,
+        crop_left: 0,
     }
 }
 
