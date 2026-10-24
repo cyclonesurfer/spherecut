@@ -166,6 +166,10 @@ the `Checked*` traits, and which hasn't been released since 2024.
 - wgpu and egui-wgpu move together: adopt wgpu 31 only with the egui release
   that moves to it.
 
+*Updated by D25 and D26:* zero-copy import of VA-API frames is proved in
+M1 and decided before M3, and egui is checked against a timeline
+prototype at the end of M2, with Qt/QML as the fallback.
+
 ## D8. Supply chain and no runtime network
 
 *2026-10-22, M0.*
@@ -891,6 +895,63 @@ To decide at A1, with a prototype of each:
 
 Revisit if: a new MCP revision changes the split, or agents converge on
 something other than MCP.
+
+## D25. Zero-copy decode-to-render is proved in M1, decided before M3
+
+*2026-10-24, before M1's code. Pat approved it from the stack review
+(the "Spherecut stack review" doc of 2026-10-24). Updates D7 and PLAN's
+M9.*
+
+The review kept the stack (Rust, FFmpeg through ffmpeg-next with VA-API
+as the main hardware path, wgpu on Vulkan, egui), and found that the
+copy of each decoded frame to RAM is already the bottleneck: on huginn,
+VA-API with the copy decodes synthetic 5760×2880 at 121 fps against 330
+fps in software, and X5 8K30 had one run at 1.17× real time. Leaving
+zero-copy to M9 "if profiling shows it matters" would leave M3's raw 8K
+dual fisheye on that thin margin.
+
+So M1 adds a Tier 2 test that maps VA-API NV12 and P010 frames from an X5
+sample to DRM PRIME (`av_hwframe_map`), imports each plane into wgpu as
+its own texture (R8 and RG8, or R16 and RG16), renders one frame, and
+compares it with the copy path's output, on huginn and odin, plus an 8K30
+X5 playback benchmark done both ways. The decision whether zero-copy
+becomes the default is made before M3, from those numbers. The copy path
+stays as the fallback, and the overlay and doctor say which path is in
+use.
+
+Risk: wgpu 30 imports a DMA-BUF only through wgpu-hal, one plane per
+texture, and nobody has yet shown RADV importing AMD's tiled and DCC
+VA-API planes that way. If per-plane import fails, the fallback design is
+to create the Vulkan device ourselves, give it to both FFmpeg (as its
+Vulkan hwcontext device) and wgpu, map VA-API frames to Vulkan inside
+FFmpeg, and wrap the resulting images for wgpu. So M1's decoder and frame
+types must leave room for a frame that lives on the GPU.
+
+Revisit if: wgpu gains multi-planar external memory import, or Vulkan
+Video HEVC decode works on both AMD machines.
+
+## D26. egui stays, checked against a timeline prototype at the end of M2
+
+*2026-10-24, before M1's code. Pat approved it from the stack review.
+Updates D7.*
+
+egui is the stack's weakest part (hand-drawn timeline, weaker text
+editing and IME than Qt, `egui_tiles` without floating windows), but it
+is the only toolkit where the viewer shares wgpu's device with no
+interop code. Every toolkit leaves the NLE timeline to be drawn by hand,
+so the question is whether egui stays smooth with a real timeline. At
+the end of M2, a prototype with about 500 clips on 6 tracks, drag with
+snapping and ripple trim, has to hold display refresh on huginn and odin
+with fractional scaling, with UI time per frame in the overlay. If it
+doesn't, the problem is written up and Pat decides before any switch.
+The prepared alternative is Qt 6 / QML through cxx-qt, sharing a
+`VkImage` between wgpu and Qt's RHI as Gyroflow does.
+
+To keep a switch cheap, the render core and the project model hold no
+UI types: a switch would replace only `spherecut-app`.
+
+Revisit if: the M2 check fails, or `egui_dock` or egui's text editing
+changes enough to matter.
 
 ## Open
 

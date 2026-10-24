@@ -93,9 +93,10 @@ What this says:
 - VA-API decodes every X5 mode faster than real time, but at 5.7K and 8K
   the runs vary by up to half the median. The slowest 8K30 run, 1.17×,
   leaves little headroom. VA-API times include copying each frame to
-  RAM. Keeping frames on the GPU (DMA-BUF into Vulkan) is in `PLAN.md`'s
-  M9 if profiling shows it matters; the M1 viewer's overlay will show how
-  much of each frame's time the copy and upload take.
+  RAM. Keeping frames on the GPU (DMA-BUF into wgpu) is proved in M1,
+  with an 8K30 benchmark done both ways, and decided before M3 (D25); the
+  M1 viewer's overlay will show how much of each frame's time the copy
+  and upload take.
 - On the synthetic clips, which are easy to decode, the CPU beats VA-API
   including its copy, as in the first run.
 

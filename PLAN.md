@@ -131,7 +131,19 @@ new features to agents, which adds a little work to each.
 - [ ] HiDPI and fractional scaling correct; works under GNOME and Hyprland
       (hardware report + screenshots).
 - [ ] Hardware: 5.7K30 stitched equirect plays in real time on odin and
-      huginn with VA-API decode; numbers in `docs/perf.md`.
+      huginn with VA-API decode; numbers in `docs/perf.md`. Vulkan Video
+      HEVC is measured too (doctor's decode check, a bit-exact check on
+      the X5 samples and the sample benchmark), because odin's discrete
+      RDNA3 may decode HEVC with FFmpeg's Vulkan path where huginn's RADV
+      can't.
+- [ ] Zero-copy proof (Pat, 2026-10-24, from the stack review): a Tier 2
+      test imports VA-API NV12 and P010 frames from an X5 sample into wgpu
+      as DMA-BUF planes on huginn and odin, renders one frame, and matches
+      the copy path's output; a benchmark plays X5 8K30 both ways. It runs
+      with M1's hardware report. Whether zero-copy becomes the default is
+      decided before M3, when raw 8K dual fisheye has to play. The copy
+      path stays as the fallback, and the overlay and doctor say which
+      path is in use (D25).
 
 ## M2 Clip reframer
 
@@ -181,6 +193,14 @@ The first version Pat can use for real.
       default, with a golden test.
 - [ ] Hardware: reframed 4K30 exports at or above real time with VA-API on
       odin and huginn.
+- [ ] Toolkit check at the end of M2 (Pat, 2026-10-24, from the stack
+      review): a timeline prototype with about 500 clips on 6 tracks, drag
+      with snapping and ripple trim, holds display refresh on huginn and
+      odin with fractional scaling, with UI time per frame in the overlay.
+      If it doesn't, the problem is written up and Pat decides before any
+      switch, with Qt/QML through cxx-qt as the prepared alternative. The
+      render core and the project model hold no UI types, so a switch
+      would replace only `spherecut-app` (D26).
 
 ## M3 Raw ingest and stitching
 
@@ -255,8 +275,10 @@ Main camera first (Pat to confirm), then the others.
 ## M9 Advanced
 
 Optical-flow seams and frame interpolation, subject tracking driving the
-view, rolling-shutter correction, multicam sync by audio, zero-copy
-decode-to-render (dmabuf/Vulkan interop) if profiling shows it matters.
+view, rolling-shutter correction, multicam sync by audio, Vulkan Video
+decode where drivers support it, and polish of the zero-copy path. (The
+zero-copy proof moved to M1 on 2026-10-24, with the decision before M3;
+D25.)
 
 ---
 

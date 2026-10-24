@@ -115,8 +115,8 @@ back clean, so M0 is done.
   even outside its folder, and a playlist with `http://` entries would
   make FFmpeg use the network. M1 shuts this off first (PLAN M1, D23).
 - `VideoDecoder` copies hardware frames to system memory. Zero-copy
-  (VA-API to DMA-BUF to Vulkan) is in `PLAN.md`'s M9, if profiling shows
-  it matters.
+  (VA-API to DMA-BUF to wgpu) is proved in M1, and whether it becomes the
+  default is decided before M3 (D25).
 - `VideoDecoder` doesn't detect Matroska cuts or most fragmented-MP4 cuts,
   and `probe` checks Matroska only against its Segment length (D13, D15).
 - Without decoding, `probe` can't find damage inside `mdat`, or damage in
