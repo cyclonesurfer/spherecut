@@ -1686,11 +1686,18 @@ What:
   holding it drops. A new format or size (the `LayoutChanged` case)
   rebuilds the pool, and frames from the old one stay valid. FFmpeg
   crops device frames only on the right and bottom (`decode.c`), so the
-  left and top crop is applied after the copy, as software decoding
-  applies it. VA-API and Vulkan both take a destination with any
-  strides (Vulkan may import its memory), so one path serves both, and
-  `VideoDecoder::next_frame` uses it too; doctor's one-frame probes keep
-  `ffi::download_frame`.
+  left and top crop is applied after the copy. Both paths crop exactly
+  where the stream says (H.264's frame cropping, HEVC's conformance
+  window), as `ffmpeg` itself has since 7.1: `open_decoder` sets
+  `AV_CODEC_FLAG_UNALIGNED` on every decoder, and the download crops
+  with `AV_FRAME_CROP_UNALIGNED`. FFmpeg's default, aligned cropping
+  keeps up to 63 of the columns cropped on the left by a rule that
+  depends on the pixel format: YUV420P and NV12 keep different ones, and
+  P010 fails (`AVERROR_BUG`), so a stream cropped on the left would not
+  come out the same on both paths. VA-API and Vulkan both take a
+  destination with any strides (Vulkan may import its memory), so one
+  path serves both, and `VideoDecoder::next_frame` uses it too; doctor's
+  one-frame probes keep `ffi::download_frame`.
 - A device that turns a stream down is `HwUnsupported`. Any other error
   decoding or downloading a frame on the device is `HwFailed`
   (`hw_failed`), sticky like a refusal and never the file's damage: a
@@ -1761,6 +1768,11 @@ Where this differs from the plan:
   `veryfast`, CRF 18) rather than 100. hw-test's 20 s clips are slice 5's
   (section 12.4).
 - The pooled download serves Vulkan too, which the plan left open.
+- Software frames of a stream cropped on the left are cropped exactly,
+  where slice 2a kept FFmpeg's aligned cropping: their planes may start
+  off a 32-byte boundary (swscale, converting one, warns once that this
+  is slower), and their size is the one the stream's parameters give,
+  which probe reports too.
 
 Why: one device per kind keeps the GPU's decode sessions and memory to
 what playback needs, and keeping the error means a missing device costs

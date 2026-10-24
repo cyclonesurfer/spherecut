@@ -110,11 +110,14 @@ planned ones above don't exist yet.
     demuxer read from the container, so that callers can name it.
   * `open_decoder` opens every decoder (`probe`, `VideoDecoder`,
     `open_video_decoder`, doctor's probes) with `max_pixels` =
-    `MAX_PIXELS`, 2^27 pixels (16384 × 8192). `TooLarge::of` says
-    whether a stream's size is over it, with the width padded to 64 as
-    FFmpeg pads rows before it checks; `probe` warns of such a stream and
-    `VideoDecoder` refuses it (`MediaError::PictureTooLarge`), by its
-    size, before any decoder fails on it. `clippy.toml` forbids
+    `MAX_PIXELS`, 2^27 pixels (16384 × 8192), and with
+    `AV_CODEC_FLAG_UNALIGNED`, so a frame is cropped exactly as its
+    stream says, not by as much as keeps its planes aligned (D30).
+    `TooLarge::of` says whether a stream's size is over it, with the
+    width padded to 64 as FFmpeg pads rows before it checks; `probe`
+    warns of such a stream and `VideoDecoder` refuses it
+    (`MediaError::PictureTooLarge`), by its size, before any decoder
+    fails on it. `clippy.toml` forbids
     ffmpeg-next's own input, output and decoder opens (`format::open`,
     `format::input*`, `format::output*`, `Decoder::open*` and the like),
     and `std::net`'s TCP and UDP types, elsewhere.
@@ -127,8 +130,9 @@ planned ones above don't exist yet.
     them in one copy. The buffer returns to the pool when the frame's
     last reference drops, and a new format or size rebuilds the pool.
     The left and top crop FFmpeg leaves on device frames is applied after
-    the copy, as software decoding applies it (`as_downloaded` gives the
-    fields the frame will have). It serves VA-API and Vulkan alike (D30).
+    the copy, exactly, as software decoding applies it (`as_downloaded`
+    gives the fields the frame will have). It serves VA-API and Vulkan
+    alike (D30).
 * `hwprobe.rs` (private) holds doctor's one-frame hardware decode and
   encode probes, the Vulkan device listing through FFmpeg's
   `AVVulkanDeviceContext` with its own `#[repr(C)]` declarations of the

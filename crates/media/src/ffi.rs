@@ -1399,6 +1399,14 @@ impl std::fmt::Display for TooLarge {
 /// Open decoder `codec` on `ctx`, limited to [`MAX_PIXELS`] per picture.
 /// Every decoder Spherecut uses is opened here (clippy forbids
 /// ffmpeg-next's own decoder opens elsewhere).
+///
+/// Its frames are cropped exactly as the stream says (H.264's frame
+/// cropping, HEVC's conformance window), as FFmpeg's own ffmpeg tool has
+/// cropped them since 7.1: without `AV_CODEC_FLAG_UNALIGNED`, FFmpeg keeps
+/// up to 63 of the columns a stream crops on the left, so that planes stay
+/// aligned, by a rule that depends on the pixel format. A device frame is
+/// then downloaded and cropped the same way ([`download_into_pool`]), so
+/// both give the same picture, of the size the stream's parameters say.
 pub(crate) fn open_decoder(
     ctx: ff::codec::context::Context,
     codec: ff::Codec,
@@ -1414,8 +1422,13 @@ fn open_decoder_with(
 ) -> Result<ff::decoder::Opened, ff::Error> {
     // SAFETY: `ctx` owns a live AVCodecContext that is not open yet;
     // max_pixels is a plain int64 field that the decoder reads when it
-    // opens and when it sizes each picture.
-    unsafe { (*ctx.as_mut_ptr()).max_pixels = max_pixels };
+    // opens and when it sizes each picture, and flags a plain int that
+    // only decode.c's cropping reads this flag from (FFmpeg 6.1 to 8.1).
+    unsafe {
+        let c = ctx.as_mut_ptr();
+        (*c).max_pixels = max_pixels;
+        (*c).flags |= sys::AV_CODEC_FLAG_UNALIGNED as c_int;
+    }
     ctx.decoder().open_as(codec)
 }
 
@@ -2326,8 +2339,9 @@ impl DownloadPool {
 
 /// Copy the hardware frame `src` into a buffer of `pool` (rebuilt first
 /// when the frame's system-memory format or size is new), with its
-/// properties and, as software decoding does, its left and top cropping
-/// applied: FFmpeg crops a device frame only on the right and bottom.
+/// properties and, as software decoding does ([`open_decoder`]), its left
+/// and top cropping applied exactly: FFmpeg crops a device frame only on
+/// the right and bottom.
 pub(crate) fn download_into_pool(
     pool: &mut DownloadPool,
     src: &ff::frame::Video,
@@ -2383,9 +2397,10 @@ pub(crate) fn download_into_pool(
         if ret < 0 {
             return Err(ff::Error::from(ret));
         }
-        // The flags software decoding crops with, unless a caller sets
-        // AV_CODEC_FLAG_UNALIGNED, which Spherecut never does.
-        let ret = sys::av_frame_apply_cropping(d, 0);
+        // Exactly, as software decoding crops (AV_CODEC_FLAG_UNALIGNED).
+        // Aligned cropping would keep columns by NV12's rule where
+        // software uses YUV420P's, and refuses P010 with AVERROR_BUG.
+        let ret = sys::av_frame_apply_cropping(d, sys::AV_FRAME_CROP_UNALIGNED as c_int);
         if ret < 0 {
             return Err(ff::Error::from(ret));
         }
@@ -2393,10 +2408,9 @@ pub(crate) fn download_into_pool(
     Ok(dst)
 }
 
-/// What a device frame becomes once downloaded, as far as can be told
-/// before: its frames context's system-memory format, and its size less
-/// the left and top cropping still to apply (which alignment may reduce,
-/// as the download finds). `None` when it has no frames context.
+/// What a device frame becomes once downloaded by [`download_into_pool`]:
+/// its frames context's system-memory format, and its size less the left
+/// and top cropping still to apply. `None` when it has no frames context.
 pub(crate) fn as_downloaded(frame: &ff::frame::Video, fields: FrameFields) -> Option<FrameFields> {
     // SAFETY: `frame` wraps a live AVFrame; as in `download_into_pool`.
     unsafe {
@@ -2877,7 +2891,16 @@ mod tests {
 
     /// One mid-grey 512x128 frame, encoded as Annex B HEVC by libx265.
     fn hevc_frame() -> Vec<ff::Packet> {
-        use ff::format::Pixel;
+        hevc_picture(ff::format::Pixel::YUV420P, |_, _, _| 128)
+    }
+
+    /// One 512x128 frame of 4:2:0 `format` (YUV420P or YUV420P10LE),
+    /// whose sample at `(x, y)` of plane `i` is `value(i, x, y)`, encoded
+    /// as Annex B HEVC by libx265.
+    fn hevc_picture(
+        format: ff::format::Pixel,
+        value: impl Fn(usize, usize, usize) -> u16,
+    ) -> Vec<ff::Packet> {
         let codec = ff::encoder::find_by_name("libx265").unwrap();
         let mut enc = ff::codec::context::Context::new_with_codec(codec)
             .encoder()
@@ -2885,15 +2908,26 @@ mod tests {
             .unwrap();
         enc.set_width(512);
         enc.set_height(128);
-        enc.set_format(Pixel::YUV420P);
+        enc.set_format(format);
         enc.set_time_base((1, 30));
         let mut opts = ff::Dictionary::new();
         opts.set("preset", "ultrafast");
         opts.set("x265-params", "log-level=error");
         let mut enc = enc.open_as_with(codec, opts).unwrap();
-        let mut frame = ff::frame::Video::new(Pixel::YUV420P, 512, 128);
-        for i in 0..3 {
-            frame.data_mut(i).fill(128);
+        let mut frame = ff::frame::Video::new(format, 512, 128);
+        let wide = format == ff::format::Pixel::YUV420P10LE;
+        for (i, (w, h)) in [(512, 128), (256, 64), (256, 64)].into_iter().enumerate() {
+            let stride = frame.stride(i);
+            for (y, row) in frame.data_mut(i).chunks_mut(stride).take(h).enumerate() {
+                for x in 0..w {
+                    let v = value(i, x, y);
+                    if wide {
+                        row[2 * x..2 * x + 2].copy_from_slice(&v.to_le_bytes());
+                    } else {
+                        row[x] = v as u8;
+                    }
+                }
+            }
         }
         frame.set_pts(Some(0));
         enc.send_frame(&frame).unwrap();
@@ -2909,6 +2943,13 @@ mod tests {
     /// `packets` through FFmpeg's hevc_metadata filter, which sets the
     /// SPS conformance window to crop `left` luma samples on the left.
     fn crop_left(packets: Vec<ff::Packet>, left: i64) -> Vec<ff::Packet> {
+        crop(packets, left, 0)
+    }
+
+    /// `packets` through FFmpeg's hevc_metadata filter, which sets the
+    /// SPS conformance window to crop `left` luma samples on the left and
+    /// `top` at the top.
+    fn crop(packets: Vec<ff::Packet>, left: i64, top: i64) -> Vec<ff::Packet> {
         use ff::codec::packet::Mut;
         let mut out = Vec::new();
         // SAFETY: the filter context is allocated, set up before
@@ -2924,6 +2965,10 @@ mod tests {
             (*(*bsf).par_in).codec_id = sys::AVCodecID::AV_CODEC_ID_HEVC;
             let set = sys::av_opt_set_int((*bsf).priv_data, c"crop_left".as_ptr(), left, 0);
             assert!(set >= 0);
+            if top > 0 {
+                let set = sys::av_opt_set_int((*bsf).priv_data, c"crop_top".as_ptr(), top, 0);
+                assert!(set >= 0);
+            }
             assert!(sys::av_bsf_init(bsf) >= 0);
             let drain = |out: &mut Vec<ff::Packet>| loop {
                 let mut p = ff::Packet::empty();
@@ -3786,14 +3831,24 @@ mod tests {
         ff::frame::Video,
         crate::hwprobe::BufferRef,
     ) {
+        let src = crate::hwprobe::ramp(sw_format, w, h);
+        let (surface, frames) = lavapipe_upload(&src);
+        (surface, src, frames)
+    }
+
+    /// A device frame of FFmpeg's Vulkan device on lavapipe holding `src`,
+    /// a system-memory frame in NV12 or P010; the frames context with it.
+    /// `src` must outlive the device frame's first download: with FFmpeg
+    /// 6.1 on lavapipe, one dropped before it downloads as garbage.
+    fn lavapipe_upload(src: &ff::frame::Video) -> (ff::frame::Video, crate::hwprobe::BufferRef) {
         let dev = HwDevice::open("vulkan", Some("llvmpipe")).unwrap_or_else(|e| {
             panic!(
                 "{e}; Tier 1 needs FFmpeg's Vulkan device on Mesa's lavapipe \
                  (mesa-vulkan-drivers on Fedora and Ubuntu, vulkan-swrast on Arch)"
             )
         });
-        let frames = crate::hwprobe::hw_frames(&dev, sw_format, w, h).unwrap();
-        let src = crate::hwprobe::ramp(sw_format, w, h);
+        let frames =
+            crate::hwprobe::hw_frames(&dev, src.format(), src.width(), src.height()).unwrap();
         let mut surface = ff::frame::Video::empty();
         // SAFETY: `frames` is an initialised frames context, which gives
         // `surface` one of its frames; `src` is a system-memory frame of
@@ -3808,7 +3863,7 @@ mod tests {
                 0
             );
         }
-        (surface, src, frames)
+        (surface, frames)
     }
 
     /// Plane `i`'s rows of `w` bytes, without padding.
@@ -3889,5 +3944,168 @@ mod tests {
         // A frame in system memory has no frames context to download from.
         assert!(as_downloaded(&src, frame_fields(&src)).is_none());
         assert!(download_into_pool(&mut pool, &src).is_err());
+    }
+
+    /// The only frame `packets` decode to, decoded in software as
+    /// Spherecut decodes.
+    fn decode_one(packets: &[ff::Packet]) -> ff::frame::Video {
+        let codec = ff::decoder::find_by_name("hevc").unwrap();
+        let mut dec = open_decoder(ff::codec::context::Context::new_with_codec(codec), codec)
+            .and_then(|d| d.video())
+            .unwrap();
+        for p in packets {
+            dec.send_packet(p).unwrap();
+        }
+        dec.send_eof().unwrap();
+        let mut frame = ff::frame::Video::empty();
+        dec.receive_frame(&mut frame).unwrap();
+        frame
+    }
+
+    /// A 4:2:0 frame's samples, plane by plane (Y, U, V), row by row,
+    /// without padding, read from YUV420P, YUV420P10LE, NV12 or P010 (whose
+    /// 10 bits are at the top of each u16): the same picture gives the
+    /// same samples in any of them.
+    fn samples(f: &ff::frame::Video) -> [Vec<u16>; 3] {
+        use sys::AVPixelFormat as P;
+        let (w, h) = (f.width() as usize, f.height() as usize);
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let format = frame_format(f);
+        let wide = [P::AV_PIX_FMT_YUV420P10LE, P::AV_PIX_FMT_P010LE]
+            .iter()
+            .any(|&p| p as c_int == format);
+        let at = |i: usize, x: usize, y: usize| -> u16 {
+            let (p, stride) = plane_and_stride(f, i).unwrap();
+            if wide {
+                let o = y * stride + 2 * x;
+                u16::from_le_bytes([p[o], p[o + 1]])
+            } else {
+                u16::from(p[y * stride + x])
+            }
+        };
+        let semi = [P::AV_PIX_FMT_NV12, P::AV_PIX_FMT_P010LE]
+            .iter()
+            .any(|&p| p as c_int == format);
+        let shift = if format == P::AV_PIX_FMT_P010LE as c_int {
+            6
+        } else {
+            0
+        };
+        let luma = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| at(0, x, y) >> shift)
+            .collect();
+        let chroma = |c: usize| {
+            (0..ch)
+                .flat_map(|y| (0..cw).map(move |x| (x, y)))
+                .map(|(x, y)| match semi {
+                    true => at(1, 2 * x + c, y) >> shift,
+                    false => at(1 + c, x, y),
+                })
+                .collect()
+        };
+        [luma, chroma(0), chroma(1)]
+    }
+
+    /// `f`, a YUV420P or YUV420P10LE frame, as a device would hold it:
+    /// NV12 or P010.
+    fn semi_planar(f: &ff::frame::Video) -> ff::frame::Video {
+        use ff::format::Pixel;
+        let wide = f.format() == Pixel::YUV420P10LE;
+        let format = if wide { Pixel::P010LE } else { Pixel::NV12 };
+        let (w, h) = (f.width() as usize, f.height() as usize);
+        let mut out = ff::frame::Video::new(format, f.width(), f.height());
+        let [y, u, v] = samples(f);
+        let put = |row: &mut [u8], i: usize, s: u16| {
+            if wide {
+                row[2 * i..2 * i + 2].copy_from_slice(&(s << 6).to_le_bytes());
+            } else {
+                row[i] = s as u8;
+            }
+        };
+        let stride = out.stride(0);
+        for (r, row) in out.data_mut(0).chunks_mut(stride).take(h).enumerate() {
+            for x in 0..w {
+                put(row, x, y[r * w + x]);
+            }
+        }
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let stride = out.stride(1);
+        for (r, row) in out.data_mut(1).chunks_mut(stride).take(ch).enumerate() {
+            for x in 0..cw {
+                put(row, 2 * x, u[r * cw + x]);
+                put(row, 2 * x + 1, v[r * cw + x]);
+            }
+        }
+        out
+    }
+
+    /// The samples of `full`, a `w`-wide picture's, from column `left` and
+    /// row `top` on.
+    fn window(full: &[Vec<u16>; 3], w: usize, left: usize, top: usize) -> [Vec<u16>; 3] {
+        let cut = |p: &[u16], w: usize, left: usize, top: usize| {
+            p.chunks(w)
+                .skip(top)
+                .flat_map(|row| row[left..].to_vec())
+                .collect::<Vec<u16>>()
+        };
+        [
+            cut(&full[0], w, left, top),
+            cut(&full[1], w / 2, left / 2, top / 2),
+            cut(&full[2], w / 2, left / 2, top / 2),
+        ]
+    }
+
+    #[test]
+    fn left_and_top_crops_come_out_exactly_in_software_and_downloads() {
+        use ff::format::Pixel;
+        // FFmpeg's aligned cropping would keep up to 63 columns of what
+        // the stream crops on the left, by rules that differ between
+        // YUV420P and NV12, and fail outright on P010; and it leaves device
+        // frames cropped on the right and bottom only.
+        let value = |i: usize, x: usize, y: usize| match i {
+            0 => (x * 7 + y * 3) % 200 + 20,
+            1 => (x * 5 + y) % 160 + 40,
+            _ => (x + y * 9) % 120 + 60,
+        } as u16;
+        for (format, scale) in [(Pixel::YUV420P, 1), (Pixel::YUV420P10LE, 4)] {
+            let packets = hevc_picture(format, |i, x, y| value(i, x, y) * scale);
+            let full = decode_one(&packets);
+            assert_eq!((full.width(), full.height()), (512, 128));
+            let all = samples(&full);
+            let semi = semi_planar(&full);
+            let (mut surface, _frames) = lavapipe_upload(&semi);
+            let mut pool = DownloadPool::default();
+            for (left, top) in [
+                (0u32, 0u32),
+                (8, 0),
+                (16, 0),
+                (32, 0),
+                (48, 0),
+                (64, 0),
+                (48, 2),
+                (0, 6),
+            ] {
+                let what = format!("{format:?} cropped {left} on the left and {top} at the top");
+                let want = (512 - left, 128 - top);
+                let soft = decode_one(&crop(packets.clone(), left.into(), top.into()));
+                assert_eq!((soft.width(), soft.height()), want, "{what}, in software");
+                let window = window(&all, 512, left as usize, top as usize);
+                assert!(samples(&soft) == window, "{what}, in software");
+                // As the decoder hands over a device frame: cropped on
+                // the right and bottom, the rest left for the download.
+                // SAFETY: plain fields of a live frame.
+                unsafe {
+                    (*surface.as_mut_ptr()).crop_left = left as usize;
+                    (*surface.as_mut_ptr()).crop_top = top as usize;
+                }
+                let predicted = as_downloaded(&surface, frame_fields(&surface)).unwrap();
+                assert_eq!((predicted.width, predicted.height), want, "{what}");
+                let down = download_into_pool(&mut pool, &surface)
+                    .unwrap_or_else(|e| panic!("{what}, downloading: {e}"));
+                assert_eq!((down.width(), down.height()), want, "{what}, downloaded");
+                assert!(samples(&down) == window, "{what}, downloaded");
+            }
+        }
     }
 }
