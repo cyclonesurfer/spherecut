@@ -992,6 +992,178 @@ fn faststart(src: &Path, dst: &Path) {
     octx.write_trailer().unwrap();
 }
 
+/// The video samples of the MP4 at `path` in decode order: each one's
+/// pts, where it starts in the file, its size, and whether it is a
+/// keyframe.
+// Reads a file this test made with ffmpeg-next alone, as `faststart` does.
+#[allow(clippy::disallowed_methods)]
+fn samples(path: &Path) -> Vec<(i64, usize, usize, bool)> {
+    let mut ictx = ff::format::input(path).unwrap();
+    ictx.packets()
+        .filter(|(s, _)| s.parameters().medium() == ff::media::Type::Video)
+        .map(|(_, p)| {
+            (
+                p.pts().unwrap(),
+                usize::try_from(p.position()).unwrap(),
+                p.size(),
+                p.is_key(),
+            )
+        })
+        .collect()
+}
+
+/// Zero the first bytes of the slice header of the first slice in the
+/// sample at `pos`, `size` bytes of NAL units with 4-byte lengths, so the
+/// decoder can't decode that picture: the parameter set (HEVC) or first
+/// macroblock (H.264) it names is out of range.
+fn break_slice_header(bytes: &mut [u8], pos: usize, size: usize, codec: Codec) {
+    let mut at = pos;
+    while at + 4 < pos + size {
+        let len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        let header = bytes[at + 4];
+        let (slice, header_len) = match codec {
+            Codec::H264 => ((1..=5).contains(&(header & 0x1f)), 1),
+            _ => (((header >> 1) & 0x3f) < 32, 2),
+        };
+        if slice {
+            let start = at + 4 + header_len;
+            bytes[start..start + 6.min(len - header_len)].fill(0);
+            return;
+        }
+        at += 4 + len;
+    }
+    panic!("no slice in the sample at byte {pos}");
+}
+
+/// Damage that loses a reference picture is a `Damaged` event, and
+/// seeks agree with the decode from the start (D29). The picture decoded
+/// after a GOP's keyframe has its slice header broken, and every later
+/// picture of the GOP refers to it, directly or not. FFmpeg 6.1 fails it
+/// as invalid data and decodes the rest from a grey stand-in. From 7.1
+/// the HEVC decoder skips it without an error, and from 8.0 it flags the
+/// pictures that refer to it corrupt, which are dropped: only their
+/// flags say the file is damaged. FFmpeg 7.1.x does neither, and nothing
+/// says so (D29's limits).
+#[test]
+fn damage_that_loses_a_reference_picture_is_reported_and_seeks_agree() {
+    let dir = TempDir::new("lost-reference");
+    let v = ff::codec::version();
+    let (v7_1, v8_0) = (61 << 16 | 19 << 8, 62 << 16 | 11 << 8);
+    let hevc_silent = (v7_1..v8_0).contains(&v);
+    let hevc_flags = v >= v8_0;
+    let never = StopToken::never();
+    let damaged = |events: &[DecoderEvent]| -> Vec<Option<i64>> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                DecoderEvent::Damaged { last_good_pts, .. } => Some(*last_good_pts),
+                _ => None,
+            })
+            .collect()
+    };
+    for (name, codec, bframes) in [
+        ("lost-hevc-p", Codec::Hevc, 0),
+        ("lost-hevc-b", Codec::Hevc, 3),
+        ("lost-h264-p", Codec::H264, 0),
+    ] {
+        let gop = Some(Gop {
+            keyint: 8,
+            bframes,
+            open: false,
+            radl: 0,
+        });
+        let clip = write(
+            &Spec {
+                gop,
+                frames: 24,
+                ..spec(name, codec)
+            },
+            &dir,
+        );
+        let (whole, _) = sequential(&clip);
+        let pk = samples(&clip);
+        let keys: Vec<usize> = (0..pk.len()).filter(|&i| pk[i].3).collect();
+        assert_eq!(keys.len(), 3, "{name}: keyframes at {keys:?}");
+        let (key, next) = (keys[1], keys[2]);
+        let (lost_pts, pos, size, _) = pk[key + 1];
+        let mut bytes = std::fs::read(&clip).unwrap();
+        break_slice_header(&mut bytes, pos, size, codec);
+        let bad = dir.join(format!("{name}-damaged.mp4"));
+        std::fs::write(&bad, &bytes).unwrap();
+        // The frames decoded from the lost picture on, to the next
+        // keyframe, which with B-frames include some shown before it.
+        let lost_from = pk[key + 1..next].iter().map(|p| p.0).min().unwrap();
+        let lost = lost_from..pk[next].0;
+        let reported = codec == Codec::H264 || !hevc_silent;
+        for threads in [None, std::num::NonZeroU32::new(1)] {
+            let what = format!("{name} on {threads:?} threads");
+            let req = VideoRequest {
+                threads,
+                ..VideoRequest::default()
+            };
+            let open_bad = || FfmpegBackend::new().open_video(&bad, &req).unwrap();
+            let mut d = open_bad();
+            let mut seen = Vec::new();
+            while let NextFrame::Frame(f) = d.next_frame(&never).unwrap() {
+                seen.push(Seen::of(&f));
+            }
+            let events = d.take_events();
+            let after = damaged(&events);
+            assert_eq!(!after.is_empty(), reported, "{what}: {events:?}");
+            if codec == Codec::Hevc && hevc_flags {
+                // Once, after the last frame decoded before the frames
+                // flagged corrupt: the GOP's keyframe.
+                assert_eq!(after, [Some(pk[key].0)], "{what}: {events:?}");
+            }
+            // Nothing outside the frames that refer to the lost picture is
+            // lost or changed, and that picture never comes out.
+            for w in whole.iter().filter(|w| !lost.contains(&w.pts)) {
+                assert!(seen.contains(w), "{what}: frame at pts {} lost", w.pts);
+            }
+            assert!(
+                seen.iter().all(|s| s.pts != lost_pts),
+                "{what}: the damaged picture came out"
+            );
+            // A seek to any frame of the clip gives the frame the decode
+            // from the start shows then.
+            for w in &whole {
+                let (f, e, _) = seek_pts(&mut *d, w.pts, SeekMode::Exact);
+                let shown = seen[shown_at(&seen, w.pts).unwrap()];
+                assert_eq!(
+                    (Seen::of(&f), e),
+                    (shown, Exactness::Exact),
+                    "{what}: seek to pts {}",
+                    w.pts
+                );
+            }
+            // And one to a frame that refers to the lost picture, from a
+            // decoder just opened, says the file is damaged, as does a
+            // keyframe seek there, which gives the GOP's keyframe.
+            for w in whole.iter().filter(|w| lost.contains(&w.pts)) {
+                for mode in [SeekMode::Exact, SeekMode::Keyframe] {
+                    let mut d = open_bad();
+                    let (f, e, _) = seek_pts(&mut *d, w.pts, mode);
+                    if mode == SeekMode::Keyframe {
+                        assert_eq!(
+                            (f.pts, e),
+                            (pk[key].0, Exactness::KeyframeOnly),
+                            "{what}: keyframe seek to pts {}",
+                            w.pts
+                        );
+                    }
+                    let events = d.take_events();
+                    assert_eq!(
+                        !damaged(&events).is_empty(),
+                        reported,
+                        "{what}: {mode:?} seek to pts {}: {events:?}",
+                        w.pts
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Matroska's demuxer reads its index (the Cues, after the clusters)
 /// only at its first seek; until then the index lists only the keyframes
 /// read, and a far seek must not take it to mean that the target is in

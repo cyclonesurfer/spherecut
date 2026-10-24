@@ -298,6 +298,15 @@ pub struct FfmpegVideo {
     /// keyframe it landed on has come out: one before it is one of its
     /// leading pictures, and is dropped.
     leading: bool,
+    /// Since opening or the last seek, a frame has come out that FFmpeg
+    /// didn't flag corrupt and that isn't a leading picture: a frame
+    /// flagged corrupt after it refers to a picture the file's damage
+    /// lost, not to one before where decoding began.
+    settled: bool,
+    /// The frames coming out are flagged corrupt after a settled one, and
+    /// the damage has been said: the rest are dropped without another
+    /// word, up to the next frame that isn't.
+    losing: bool,
     /// The stream has no timestamps: pts are counted, as frame index times
     /// `frame_ticks`.
     no_timestamps: bool,
@@ -528,6 +537,8 @@ impl FfmpegVideo {
             current_last_tie: false,
             not_seekable: false,
             leading: false,
+            settled: true,
+            losing: false,
             no_timestamps,
             frame_ticks,
             end_pts: facts.end_pts,
@@ -591,9 +602,15 @@ impl FfmpegVideo {
     }
 
     /// The next frame from the decoder, with its pts. Frames FFmpeg flags
-    /// corrupt are dropped: decoded from references a seek skipped, they
-    /// are not part of the stream as a decode from the start shows it.
-    /// So are the leading pictures of the keyframe a seek landed on, the
+    /// corrupt are dropped. Before the first good frame since opening or
+    /// a seek, they were decoded from references a seek skipped (or that
+    /// come before the start of the stream), and are not part of the
+    /// stream as a decode from the start shows it. After it, they refer
+    /// to a picture the file's damage lost, which FFmpeg 7.1 and later's
+    /// HEVC decoder skips without an error, flagging (from 8.0) the
+    /// pictures that refer to it: the first of a run of them is returned
+    /// as a decode error, for the caller to say as damage. Also dropped
+    /// are the leading pictures of the keyframe a seek landed on, the
     /// frames shown before it that come out before it: open-GOP B-frames
     /// and RASL pictures decoded from references before it, which FFmpeg
     /// 6.1's H.264 decoder doesn't flag as it drains at the end of the
@@ -621,6 +638,10 @@ impl FfmpegVideo {
             self.stats.last_decode_ms = ms;
             let fields = Self::fields(&mut self.dec, &frame)?;
             if fields.corrupt {
+                if self.settled && !self.losing {
+                    self.losing = true;
+                    return Err(self.lost_reference(fields.pts));
+                }
                 continue;
             }
             if self.leading
@@ -631,7 +652,29 @@ impl FfmpegVideo {
                 }
                 self.leading = false;
             }
+            self.settled = true;
+            self.losing = false;
             return Ok(self.decoded(frame, fields));
+        }
+    }
+
+    /// The damage [`decode`](Self::decode) returns for the first of a run
+    /// of frames flagged corrupt, at `pts`, after a good one.
+    fn lost_reference(&self, pts: Option<i64>) -> MediaError {
+        let at = pts.map_or_else(|| "a frame".into(), |p| format!("the frame at pts {p}"));
+        let after = self
+            .last_decoded
+            .map_or_else(String::new, |p| format!(" after pts {p}"));
+        tracing::warn!(
+            path = %self.path().display(),
+            "{at} refers to a picture the file's damage lost{after}: it is dropped, \
+             with the frames after it that FFmpeg flags corrupt"
+        );
+        MediaError::Decode {
+            path: self.path().to_path_buf(),
+            reason: format!(
+                "decoding: {at} refers to a picture lost to damage (FFmpeg flags it corrupt)"
+            ),
         }
     }
 
@@ -710,6 +753,8 @@ impl FfmpegVideo {
         self.last_decoded = None;
         self.from_start = to_start.then_some(0);
         self.leading = !to_start;
+        self.settled = false;
+        self.losing = false;
         self.start_run();
     }
 
@@ -984,8 +1029,9 @@ impl FfmpegVideo {
     /// frame about to be handed out knows its duration. A stop, the end
     /// or an error leaves `pending` empty: a read error that ends the
     /// stream comes back from the next call, and damage that doesn't
-    /// becomes an event. The device turning the stream down or failing on
-    /// it is returned. `true` on a stop.
+    /// becomes an event, after the frame about to be handed out, the last
+    /// one decoded. The device turning the stream down or failing on it is
+    /// returned. `true` on a stop.
     fn fill_pending(&mut self, stop: &StopToken) -> Result<bool, MediaError> {
         if self.pending.is_some() {
             return Ok(false);
@@ -999,7 +1045,7 @@ impl FfmpegVideo {
                 Failed::Reading(_) => {}
                 Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
                     reason: e.to_string(),
-                    last_good_pts: self.current.as_ref().map(|c| c.pts),
+                    last_good_pts: self.last_decoded,
                 }),
             },
         }
@@ -1699,7 +1745,7 @@ impl VideoDecode for FfmpegVideo {
                         Failed::Damage(e) => {
                             self.events.push(DecoderEvent::Damaged {
                                 reason: e.to_string(),
-                                last_good_pts: self.current.as_ref().map(|c| c.pts),
+                                last_good_pts: self.last_decoded,
                             });
                             continue;
                         }
