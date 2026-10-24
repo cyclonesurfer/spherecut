@@ -189,6 +189,13 @@ back clean, so M0 is done.
   exited 1, and probe's `--json` shape changed from M0's (an object for
   one file, an array for several) to the envelope; `docs/cli-json.md` has
   the new one.
+- In the contract, probe checks a Matroska file only for its length, so
+  one damaged inside that FFmpeg can't open is `open_failed`, with
+  FFmpeg's log, rather than `damaged`. A panic under `--json` is an
+  `internal` document (exit 1); a crash by signal, such as a fault
+  inside FFmpeg, still leaves stdout empty. The unreadable-file test
+  runs the binary as nobody through `setpriv` when the tests run as
+  root, and only probe's unit test covers it where neither works.
 
 ## Next
 
