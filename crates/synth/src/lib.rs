@@ -5,10 +5,11 @@
 //! and EAC for the stitching round trips in M3) and compared against itself.
 //! Rendering is pure CPU `f64` math with fixed supersampling and no
 //! randomness or clock (rows are split across threads, which changes no
-//! byte), so a given build renders the same bytes on every run. Other machines should agree but aren't guaranteed to: the
-//! trigonometry (in `LonLat` and the marker and frame-code geometry) comes
-//! from the platform's libm, which may round the last bit differently and
-//! so flip a sample at an edge. Agreement across machines has not been
+//! byte), so a given build renders the same bytes on every run. Other
+//! machines should agree but aren't guaranteed to: the trigonometry (in
+//! `LonLat` and the marker and frame-code geometry) comes from the
+//! platform's libm, which may round the last bit differently and so flip
+//! a sample at an edge. Agreement across machines has not been
 //! checked, so tests compare against frames rendered by the same build,
 //! not stored ones.
 
@@ -302,13 +303,25 @@ pub fn render_view_ideal(
     size: (u32, u32),
     n: u32,
 ) -> RgbImage {
-    let (width, height) = size;
-    let n = n.max(1);
-    let inv = 1.0 / f64::from(n * n);
-    let mut pixels = vec![[0.0; 3]; width as usize * height as usize];
     let threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(16);
+    ideal_on_threads(pattern, view_fn, size, n, threads)
+}
+
+/// [`render_view_ideal`] on `threads` threads.
+fn ideal_on_threads(
+    pattern: Pattern,
+    view_fn: impl Fn(f64, f64) -> Option<DVec3> + Sync,
+    size: (u32, u32),
+    n: u32,
+    threads: usize,
+) -> RgbImage {
+    let (width, height) = size;
+    let n = n.max(1);
+    let threads = threads.max(1);
+    let inv = 1.0 / f64::from(n * n);
+    let mut pixels = vec![[0.0; 3]; width as usize * height as usize];
     let mut dealt: Vec<Vec<(usize, &mut [Rgb])>> = (0..threads).map(|_| Vec::new()).collect();
     for (j, row) in pixels.chunks_mut(width.max(1) as usize).enumerate() {
         dealt[j % threads].push((j, row));
@@ -491,8 +504,9 @@ mod tests {
 
     #[test]
     fn the_ideal_is_the_same_on_every_run() {
-        // Rows are split across threads in chunks; a picture taller than
-        // the thread count and one shorter agree on the rows they share.
+        // Rows are dealt to threads in turn and each pixel is worked out
+        // on its own, so neither the run nor the thread count changes a
+        // byte, and a shorter picture agrees on the rows it shares.
         let view = |x: f64, y: f64| {
             Some(
                 LonLat {
@@ -505,6 +519,10 @@ mod tests {
         let a = render_view_ideal(Pattern::Grid, view, (24, 37), 3);
         let b = render_view_ideal(Pattern::Grid, view, (24, 37), 3);
         assert_eq!(a.pixels, b.pixels);
+        for threads in [1, 3, 16, 40] {
+            let c = ideal_on_threads(Pattern::Grid, view, (24, 37), 3, threads);
+            assert_eq!(a.pixels, c.pixels, "{threads} threads");
+        }
         let top = render_view_ideal(Pattern::Grid, view, (24, 2), 3);
         assert_eq!(top.pixels[..], a.pixels[..48]);
     }
