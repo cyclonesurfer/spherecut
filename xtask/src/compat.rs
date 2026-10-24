@@ -15,8 +15,8 @@
 //! binds again only when its own variables change, not when the FFmpeg
 //! behind a prefix does). `--test` also runs the Tier 1 tests against one
 //! of them, loading its libraries through `LD_LIBRARY_PATH`, and `--clean`
-//! deletes each target directory once its build is checked (clippy's
-//! build is about 450 MB, and the link adds about 1 GB).
+//! deletes each target directory once its build is checked (about 1.4 GB
+//! after clippy and the link, and 1.8 GB after the Tier 1 tests).
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;

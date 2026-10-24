@@ -96,9 +96,10 @@ didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
 `hw-test` stopped at 09342c6. 67fa1fd takes the flags from ffmpeg-next's
 `scaling::Flags`, which names them for each version. Checked since:
 
-- At 67fa1fd with 3a8047d's flags put back, clippy on the workspace (all
-  targets and features, `-D warnings`) fails against 8.1 and 9.0.2 with
-  Pat's three errors and passes against 7.1 and Ubuntu's 6.1.1.
+- At fc329d1 with 67fa1fd reverted (and again at 69e9496), `cargo xtask
+  compat`'s clippy (all targets and features, `-D warnings`) fails
+  against 8.1 and 9.0.2 with Pat's three errors and passes against 7.1
+  and Ubuntu's 6.1.1.
 - Against an 8.1.3 built from its tag with what Pat's FFmpeg has that the
   tests use (VA-API and Vulkan with libdrm, libx264, libx265, libdav1d,
   SVT-AV1, Opus, Vorbis and libshaderc; libavcodec 62.28.103, as on
@@ -108,32 +109,86 @@ didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
   the HEVC decoder's queue of output frames survived the flush after a
   seek, and a frame from before the seek came out after it, as it would
   on Pat's machines, whose hardware decoders run on one thread on 8.1.3.
-  It is fixed, with a test that fails on 8.1.3 without the fix. And the spliced MP4's second keyframe, an error up to 7.0, is
-  skipped with a warning from 7.1, so the test now expects the event
+  It is fixed, with a test that fails on 8.1.3 without the fix. And the
+  HEVC decoder no longer fails a picture it can't decode as invalid
+  data, but skips it with a warning; the spliced MP4's second keyframe is
+  one, and the same frames come out, so that test now expects the event
   only before 7.1. A third, the stop-token test, failed now and then on
   8.1.3 because its decode was quicker than its 40 ms precondition; it
-  writes a longer clip where it needs one. At 1771dc8 every Tier 1
-  test passes against 8.1.3 and 6.1, 390 on each with 19 ignored (the
-  one-thread test and compat's 12 unit tests are new), and clippy
-  passes against the minimal 7.1, 8.1.3, and the 9.0.2 with VA-API,
-  libx264, libx265 and libdav1d.
+  writes a longer clip where it needs one. At 1771dc8 every Tier 1 test
+  passed against 8.1.3 and 6.1, 390 on each with 19 ignored (the
+  one-thread test and compat's 12 unit tests are new), and clippy passed
+  against the minimal 7.1, 8.1.3, and the 9.0.2 with VA-API, libx264,
+  libx265 and libdav1d.
+- The review of that work found what else the 7.1 change does. From 8.0
+  the decoder flags as corrupt the pictures that refer to one it skipped,
+  and Spherecut dropped every corrupt frame as one decoded from
+  references a seek skipped: on 8.1.3 a damaged HEVC reference picture
+  lost the rest of its GOP without a `Damaged` event, and an exact seek
+  into it returned an earlier frame as `Exact` with nothing said. It is
+  fixed (1e73826), with a test that fails on 8.1.3 without the fix. On
+  7.1.x the decoder neither returns the error nor flags the frames, so
+  there such damage is silent (D29). The review also found that a device
+  type an FFmpeg was built without (Vulkan, in that 9.0.2) failed with
+  ENOMEM, "Cannot allocate memory", rather than `NotBuiltIn`: FFmpeg knows
+  every type's name. Fixed in 78b1753, with a test.
+- Tier 1 against a 7.1.3 built the same way (libavcodec 61.19.101;
+  Fedora 43 has 7.1) failed three tests. A decoder that fails to open in
+  `avformat_find_stream_info` clears the channel layout FFmpeg copies
+  back to the stream: 6.1 kept the channels in the old `channels` field,
+  which 7.0 removed, and 8.1.3 and 9.0.2 put the sample entry's back. So
+  probe read bad-audio-config.mp4 as "has no channels" rather than as
+  the AAC decoder's refusal, and an object type the decoder doesn't
+  implement became damage rather than a warning. A C program calling
+  `avformat_find_stream_info` on the file reads 0 channels against 7.1,
+  7.1.3 and 8.1 and 2 against 6.1, 8.1.3 and 9.0.2. probe now asks the
+  decoder first (6fabd8b, D15), with a unit test that fails without it,
+  and generated_media expects the channels cleared on exactly those
+  releases. From 6fabd8b every Tier 1 test passes against 8.1.3, 7.1.3
+  and 6.1, 395 on each with 19 ignored, and clippy and the link pass
+  against the minimal 7.1 and the 9.0.2 with VA-API, libx264, libx265
+  and libdav1d.
 - `gen-media`'s files from 8.1.3 differ from 6.1's only in FFmpeg's
   version strings (`Lavc`, `Lavf`) and the average bitrate in MP4's
   `btrt` box, which 8.1.3 leaves 0: the streams are the same.
 
-`cargo xtask compat` keeps it checked: clippy as `cargo xtask check` runs
-it against each FFmpeg prefix named, or listed in
-`SPHERECUT_FFMPEG_COMPAT` (colon-separated), each in its own target
-directory (`<target>/compat/<label>`, with line-tables debuginfo and no
-incremental state), checking that pkg-config finds that prefix and
-printing the FFmpeg and libavcodec it bound; `--test PREFIX` runs the
-Tier 1 and doc tests against one, with its libraries on
-`LD_LIBRARY_PATH`. `cargo xtask check` runs the clippy part when the
-variable is set and says it skipped it when not, as it is in a fresh
-checkout: only the system FFmpeg is checked then.
+`cargo xtask compat` keeps it checked. For each FFmpeg prefix named, or
+listed in `SPHERECUT_FFMPEG_COMPAT` (colon-separated), it runs clippy as
+`cargo xtask check` runs it, then builds and links the Tier 1 tests and
+the binaries without running them: clippy doesn't link, so a function
+that `ffi.rs`'s own extern block declares and an FFmpeg no longer
+exports would pass it, and fail only where the tests are built, as
+`hw-test` builds them on Pat's machines. Each prefix has a target
+directory of its own (`<target>/compat/<label>`, with line-tables
+debuginfo and no incremental state), and compat checks that pkg-config
+finds that prefix and prints the FFmpeg and libavcodec it found there.
+A target records what it was built against (the versions, and the size
+and time of each library's pkg-config file and of `ffversion.h`), and
+one built against anything else is deleted first: ffmpeg-sys-next binds
+again only when the variables it reads change, so a distro upgrade of
+`/usr`, a prefix built again in place or a symlink pointed elsewhere
+kept the old bindings and passed under the new version's name. cargo
+runs without `FFMPEG_DIR`, which ffmpeg-sys-next uses before
+pkg-config, and without the pkg-config crate's per-target variables
+(`HOST_PKG_CONFIG_PATH`, `PKG_CONFIG_PATH_<target>` and the like), which
+it takes over the plain ones. `--test PREFIX` runs the Tier 1 and doc
+tests against one, with its libraries on `LD_LIBRARY_PATH`. On this
+4-CPU machine a prefix takes about 3 minutes (one for clippy, two for
+the link) and 1.4 GB of target, and the Tier 1 and doc tests half a
+minute more and 1.8 GB in all; with `--clean` only one target exists at
+a time.
+`cargo xtask check` runs the clippy and the link when the variable is
+set and says it skipped them when not, as it is in a fresh checkout:
+only the system FFmpeg is checked then. In a throwaway copy of ec3515e
+whose `ffi.rs` declares `avcodec_close` (gone from FFmpeg 8), compat
+through a prefix symlinked to 7.1 passes; with the symlink pointed at
+8.1 and `FFMPEG_DIR` and `HOST_PKG_CONFIG_PATH` naming 7.1, it deletes
+the target, clippy passes and the link fails on the undefined symbol.
 `scripts/build-ffmpeg.sh TAG DIR` builds a release from its GitHub tag
-the way the 8.1.3 above was built (with Khronos Vulkan headers 1.4.354
-where the system's are older than 8.1 needs, as Ubuntu 24.04's are).
+the way the 8.1.3 above was built, with Khronos Vulkan headers 1.4.354
+where the system's are older than 8.1 needs, as Ubuntu 24.04's are. It
+passes their include directory to configure too, which 7.1's configure
+needs (it test-compiles `vulkan.h` without the package's Cflags).
 
 ## D3. Hardware decoding never falls back to software silently
 
@@ -444,6 +499,16 @@ end of the stream, so a seek back into the good part of a truncated file
 decodes again; a hardware refusal stays. The cancel flag is for shutdown
 only: seeks stop through generation tokens instead.
 
+*Updated 2026-10-24, against FFmpeg 8.1.3 (D2, D29):* from 7.1 the HEVC
+decoder skips a picture whose slice header or frame start it can't
+decode without returning an error, and from 8.0 it flags as corrupt
+the pictures that refer to it. `VideoDecoder::open` leaves corrupt
+frames to FFmpeg, which drops them, so there such damage loses frames
+up to the next keyframe and `next_frame` returns no error. The
+backend's decoder has corrupt frames handed out, and says one after a
+good frame as a `Damaged` event (D29). On 7.1.x the damage is silent on
+both.
+
 ## D14. A hardware decoder says why it refused a stream
 
 *2026-10-23, M0. Extends D3.*
@@ -609,7 +674,12 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   FFmpeg lacks a feature (`ENOSYS`, `AVERROR_PATCHWELCOME`, or
   `AVERROR_EXPERIMENTAL` for a decoder this build does not enable) is a
   warning, as is a codec with no decoder in this build; any other
-  refusal is damage, whatever the container.
+  refusal is damage, whatever the container. A decoder that fails to
+  open in `avformat_find_stream_info` also clears the stream's channels
+  from FFmpeg 7.0, until 8.1.3 and 9.0.2 put the sample entry's back
+  (6.1 kept them in the old `channels` field), so an audio stream with
+  no channels is judged by its decoder first: only one that opens leaves
+  "has no channels" as the reason (D2).
 
 A file FFmpeg reads as MOV/MP4 is checked even when its first box type is
 unknown; that box alone is a warning, not damage. Matroska is checked
@@ -1665,11 +1735,47 @@ made, or what its frame threads are finishing. The oracle's
 `on_one_thread_no_frame_from_before_a_seek_comes_out_after_it` opens
 open- and closed-GOP HEVC and open-GOP H.264 on one thread and, for every
 frame, seeks it, takes the frame after, seeks the keyframe there and a
-frame elsewhere; on 8.1.3 it fails without the fix. From 7.1 the HEVC
-decoder also skips the spliced MP4's second keyframe, whose POC it still
-holds, with a warning and no error, where 6.1 fails it as invalid data:
-the same frames come out, and a `Damaged` event comes only where the
-decoder reports the damage.
+frame elsewhere; on 8.1.3 it fails without the fix.
+
+From 7.1 the HEVC decoder no longer returns `AVERROR_INVALIDDATA` for a
+picture whose slice header or frame start it can't decode: unless
+`AV_EF_EXPLODE` is set, it skips the picture with a warning ("Skipping
+invalid undecodable NALU"), where 6.1 returned the error from
+`avcodec_send_packet` and Spherecut said it as a `Damaged` event. And
+from 8.0 it flags the pictures that refer to one it lost
+`AV_FRAME_FLAG_CORRUPT`, up to the next IRAP picture, where 6.1 decoded
+them from what it had. For the spliced MP4's second keyframe, whose POC
+the decoder still holds, the same frames come out either way, none
+flagged, so the splice test expects the event only before 7.1. For a
+damaged reference picture they don't: Spherecut dropped every frame
+flagged corrupt as one decoded from references a seek skipped, so on
+8.1.3 (and 9.0.2) the rest of the GOP was lost without a word, and an
+exact seek into it returned an earlier frame as `Exact` with no event.
+Now only the frames flagged corrupt before the first good frame since
+opening or a seek are dropped silently: their references come before
+where decoding began. After it, the first of a run of them is damage,
+a `Damaged` event like any other the decode goes on past, and it and
+the rest of the run are dropped. A seek into the frames lost stays
+`Exact` for the frame the decode from the start shows there, with the
+event, as damage on 6.1 is. A `Damaged` event raised while decoding
+ahead of the frame handed out now names the last frame decoded as
+`last_good_pts`, as the event's doc says, rather than the one handed out
+before it. `damage_that_loses_a_reference_picture_is_reported_and_seeks_agree`
+breaks the slice header of the picture after a GOP's keyframe in
+closed-GOP HEVC, with and without B-frames, and in H.264, on frame
+threads and on one, and checks the event, that nothing outside the
+frames that refer to it is lost or changed, and every exact and keyframe
+seek against the decode from the start; on 8.1.3 it fails without the
+fix. FFmpeg 7.1.x (libavcodec 61.19 up to 8.0's 62.11) neither returns
+the error nor flags the frames, so there the damage is silent: the test
+expects no event from HEVC there.
+
+Limits (from 8.1.3): on 7.1.x HEVC damage to a slice header or frame
+start is silent, as above. A frame flagged corrupt after the first good
+one is taken for damage; a decoder that flagged a frame of an undamaged
+stream so would raise a `Damaged` event for it. `VideoDecoder::open`,
+which tests and the Tier 2 checks use, still leaves corrupt frames to
+FFmpeg, so from 8.0 it loses those frames without an error (D13).
 
 ## D30. Pixel formats and colour defaults
 

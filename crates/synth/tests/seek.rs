@@ -1299,13 +1299,13 @@ fn an_edit_list_that_splices_two_pieces_seeks_exactly_and_counts_frames() {
             .filter(|w| w[1].pts - w[0].pts != FRAME_30);
         assert!(gaps.count() > 0, "{codec:?}: {frames:?}");
         // Played through, and caught up across the splice from a seek
-        // before it: the first frame from the target comes out, and the
-        // HEVC decoder's error at the splice is an event either way. The
-        // second piece's keyframe has a POC the decoder still holds: up to
-        // FFmpeg 7.0 sending it fails with invalid data, and from 7.1
-        // (libavcodec 61.19) the decoder skips the picture with a warning
-        // and no error, so there is nothing to report. The same frames
-        // come out (D2).
+        // before it: the first frame from the target comes out. The second
+        // piece's keyframe has a POC the HEVC decoder still holds. Up to
+        // FFmpeg 7.0 sending it fails with invalid data, which is a
+        // `Damaged` event. From 7.1 (libavcodec 61.19) the decoder skips a
+        // picture it can't decode with a warning and no error, and none of
+        // the frames after this one comes out flagged corrupt, so there is
+        // nothing to report: the same frames come out (D29).
         let never = StopToken::never();
         let mut d = open(&spliced);
         while let NextFrame::Frame(_) = d.next_frame(&never).unwrap() {}
