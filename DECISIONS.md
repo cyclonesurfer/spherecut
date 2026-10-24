@@ -2,8 +2,10 @@
 
 Each entry says what was decided, why, what else was considered, and what
 would make us revisit it. Heavy dependencies are justified here, as the
-project rules require. Newest entries go at the end; superseded entries stay
-and say so.
+project rules require. Entries go in number order, with the open
+questions last. M1's plan reserved D27 to D37 (`docs/design/m1-plan.md`,
+section 0), so each of those lands in its place with its slice, and D38
+came before some of them. Superseded entries stay and say so.
 
 ## D1. Rust stable, edition 2024, MSRV 1.88 now and 1.95 with the GUI
 
@@ -849,7 +851,7 @@ rest, with the versions in `Cargo.lock`:
 | image 0.25.10 (png only) | render | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame` and the goldens. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
 | serde 1.0.229 (derive) | core, sphere, media, cli | Serializable time types, `Projection`, the probe and doctor reports, and the CLI's JSON envelope (D27) |
-| serde_json 1.0.154 | cli; core (dev) | `--json` output, through the `contract` module (D27). core's tests round-trip `ColorInfo` through JSON as the CLI will write it. xtask reads cargo's JSON with a small field reader instead |
+| serde_json 1.0.154 | cli; core, render (dev) | `--json` output, through the `contract` module (D27). core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
 | thiserror 2.0.21 | core, media, synth, render | Typed library errors without hand-written `Display` impls |
 | tracing 0.1.44 | media, cli, render | Structured logging, and the target for FFmpeg's log (D12) |
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
@@ -1386,6 +1388,71 @@ Revisit if: a caller needs codes on doctor's issues or one document per
 file of a long run; or A1's schemas want another time or error shape, in
 which case that is a version 2 of these schemas, never a silent change.
 
+## D28. Crate layout, rust-version 1.95 and where unsafe may appear
+
+*2026-10-24, M1 slice 3b. The M1 plan's D26 (section 2); updates D1,
+whose 1.95 half landed with slice 3a.*
+
+What:
+
+- **Crates**, as slice 3 leaves them: `core` (exact time, the frame and
+  colour vocabulary, stop tokens), `sphere` (projection maths, the view
+  convention, pixel mapping), `media` (FFmpeg: confinement, probe,
+  doctor, decode and seek, D24 and D29), `render` (wgpu: planes, upload,
+  mips, projection, encode, stills and the CPU reference, D31), `synth`
+  (generated media and the backends that stand in for FFmpeg), `testkit`
+  (Tier 2 gates, benchmark recording, the image metrics, FNV-64), `cli`
+  (the `spherecut` binary) and `xtask`. `playback` (workers, the frame
+  cache and GPU slots), `audio` (cpal and the clock) and `app` (eframe)
+  arrive in slices 5, 6 and 7, with the dependency directions of plan
+  section 2.1.
+- **Directions.** render depends on core and sphere only: never on
+  media, and it holds no UI type (D26). Frames reach it through
+  `core::video::VideoPlanes`, which media's decoded frames and synth's
+  in-memory ones both implement, so the goldens (D32) render without
+  FFmpeg decoding anything. playback will never depend on egui. synth
+  depends on media, so tests that need both live in `crates/synth/tests/`
+  and media's dev-dependencies stay free of synth; render's tests take
+  synth's frames, so their binaries link FFmpeg, though nothing in them
+  opens a file with it. sphere needs nothing from core yet, though the
+  plan drew that edge.
+- **rust-version 1.95** for the whole workspace (D1).
+- **unsafe.** `#![forbid(unsafe_code)]` at the root of core, sphere,
+  render, synth, testkit and xtask; playback, audio and app get it when
+  they land. media has `#![deny(unsafe_code)]` with `#[allow(unsafe_code)]`
+  on `mod ffi` and `mod hwprobe`, the two FFI modules D11 allows and the
+  only files with `unsafe` in them. cli's binary has
+  `#![deny(unsafe_code)]` with nothing allowed until slice 4 adds `mod
+  interrupt`, which wraps `sigaction` for SIGINT (D27); its library half
+  (`contract`) has `forbid`. Every block keeps a SAFETY comment, which
+  the workspace's `clippy::undocumented_unsafe_blocks = "deny"` enforces.
+  render stays `forbid` until slice 5b, whose device module opens the
+  Vulkan device through wgpu-hal and imports DMA-BUFs, both `unsafe`
+  (D31, plan amendments 2 and 9): render then becomes `deny` at its root
+  with that one module allowed, as media is.
+
+Where this differs from the plan:
+
+- Through slice 3a only render, sphere and testkit had `forbid`. Slice 3b
+  adds it to core, synth, xtask and cli's library, and `deny` with its
+  allowances to media and cli's binary, without changing any code: `unsafe` appears only in
+  media's `ffi.rs` and `hwprobe.rs`.
+- The plan has M9's DMA-BUF import as the first GPU-side `unsafe`, in an
+  FFI module of its own. Amendments 2 and 9 moved Vulkan Video and the
+  import into slice 5b, so render's exception comes then, in the one
+  module that opens the device.
+- sphere has no core dependency (above).
+
+Why: M2's export, `spherecut render` and M5 drive the engine with no
+window, and the goldens and M3's stitcher feed render without FFmpeg.
+`forbid` makes the rule mechanical: an `allow` further in can't lift
+it. `deny` at a root with named allowances keeps every exception in one
+visible line. bytemuck's derives compile under `forbid` (D22), so render
+needs no `unsafe` of its own before 5b. egui 0.37 needs 1.95.
+
+Revisit if: any crate but media, cli and, from slice 5b, render needs
+`unsafe`, which then needs an entry that names the module.
+
 ## D29. MediaBackend and frame-exact seek
 
 *2026-10-24, M1 slice 2a. Updates D13. The M1 plan's D27 (section 3.3,
@@ -1839,111 +1906,6 @@ Revisit if: slice 5 needs a device per stream rather than per backend,
 slice 5b's zero-copy replaces the download, or the fault count on a real
 GPU is the driver's rather than the pool's.
 
-## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
-
-*2026-10-24, M1. Pat approved Vulkan Video HEVC in odin's hardware run
-(the stack review's third change; PLAN M1's hardware criterion).
-Extends D14. D27 to D37 are kept for the M1 plan's decisions
-(`docs/design/m1-plan.md`, section 0), so this one is D38.*
-
-How FFmpeg picks the device: `av_hwdevice_ctx_create` for Vulkan with
-no device string takes physical device 0 of its own Vulkan instance
-(`find_device` in `libavutil/hwcontext_vulkan.c`, the same in 6.1.1 and
-8.1.3). A number picks that index, other text the first device whose
-name contains it. Derived from a VA-API device it matches the PCI device
-ID (8.1 with libva 1.15 and up) or only AMD's vendor ID (6.1); derived
-from a DRM device it compares the `st_dev` of the node's `fstat`, which
-is the device of `/dev` itself, not the node's `st_rdev`. The order of
-the list comes from the Vulkan loader and its layers. Current Linux
-loaders list discrete GPUs, then integrated, virtual, other and CPU
-devices, then by PCI address (`loader_linux.c`). Mesa's device-select
-layer (in `mesa-vulkan-drivers`) then moves its default to the front:
-one named by `MESA_VK_DEVICE_SELECT` or `DRI_PRIME`, else the GPU the
-Wayland compositor or X server uses, else the boot VGA device, else the
-first that isn't a CPU. So FFmpeg's default is a GPU whenever one
-works, but with two GPUs it is the one that runs the desktop (over SSH,
-the boot VGA device), which need not be the one behind VA-API's
-`renderD128`. odin has an RX 7600 and may have an integrated GPU too.
-llvmpipe comes first only when no GPU driver works, or with a loader too
-old to sort and no device-select layer.
-
-So `decode::open_vulkan_device(render_node)` lists FFmpeg's devices,
-with their DRM nodes from `VK_EXT_physical_device_drm`, and opens the
-one behind the render node, else the first that isn't a CPU, else
-FFmpeg's default. It opens that one by index and checks that FFmpeg then
-runs on it (an error if not, never a silent other device), and says
-which device it is and why (`VulkanChoice`, whose `Display` names the
-device, its type and driver, and FFmpeg's default when that was another
-one). The Tier 2 Vulkan tests and benchmarks use it with
-`tier2::render_node()` (`SPHERECUT_RENDER_NODE`, default
-`/dev/dri/renderD128`, when present) and skip when the device runs on
-the CPU, naming it. They no longer need the render node itself.
-
-When the driver can't decode a format (`HwUnsupported`), a test skips
-with the device and the lines FFmpeg logged while it tried, such as
-huginn's "Device does not support decoding hevc!". They are caught with
-`capture_hw_decode_log`, which also keeps the few lines FFmpeg's Vulkan
-decoder logs at "verbose" about a stream it turns down: "Unable to
-initialize video session: hevc profile "Main 10" not supported!" for a
-profile or pixel format the driver lacks, and, since a stream too big or
-of too high a level is refused without a word, the limits it checked
-("Maximum level: 153 (stream 186)", "Width: from 64 to 4096"). The skip
-also gives the stream's size and level. Any other error fails it,
-including FFmpeg failing to open the GPU chosen. The samples test
-groups refused streams by format and reason, fails on any mismatch or
-other error, and otherwise skips if any stream was refused. A
-benchmark's Vulkan Video row is measured only when the file's first
-frames decode on the device, through `bench::try_measure`, which records
-nothing when a run fails. Otherwise `bench::not_measured` leaves a note
-with the reason, which the hw-test report lists under its benchmark
-table, so a missing Vulkan path never fails a VA-API benchmark. Another
-note names the device the Vulkan rows ran on.
-
-Doctor still checks FFmpeg's default Vulkan device and names it (its
-JSON marks it `used_by_ffmpeg`), so on a machine with two GPUs its
-Vulkan lines can be about another GPU than the tests'.
-
-Fedora's Mesa: its Vulkan drivers are built without H.264 and HEVC,
-like its VA-API driver. RADV then lacks `VK_KHR_video_decode_h264` and
-`_h265`, which is what "Device does not support decoding hevc!" means
-(`vulkan_decode.c`), while AV1 decodes, so video decode itself is on and
-`RADV_PERFTEST=video_decode` changes nothing. RPM Fusion's
-`mesa-vulkan-drivers-freeworld` (built with `video-codecs=h264dec,
-h265dec,...`, and conflicting with `mesa-vulkan-drivers`) has them. So
-on Fedora's stock Mesa, odin's Vulkan H.264 and HEVC checks skip as
-huginn's did. Doctor's fix for a Mesa GPU on Fedora that can't decode
-H.264 or HEVC with Vulkan Video is now that package, as for VA-API;
-whether odin's run swaps it in first is Pat's call.
-
-Why: odin's discrete RDNA3 is the first chance to compare Vulkan Video
-HEVC with VA-API (with the freeworld driver; huginn's stock Vulkan
-driver has no HEVC). On FFmpeg's default device, odin's run could
-have measured the integrated GPU, or skipped as if Vulkan Video were
-missing when only the device was wrong; and the old skip said only that
-the driver doesn't support the format, not FFmpeg's reason.
-
-Revisit if: doctor or the app should decode on the same device (the app
-will, once it decodes on Vulkan), or FFmpeg changes how it picks one.
-
-## Open
-
-- **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360
-  support is only on its git master, and `deny.toml` rejects git sources.
-  Options for M4: vendor the parts we need at a pinned commit with their
-  license, allow that one git revision in `deny.toml`, or write our own
-  parsers from `docs/formats/`. To decide at M4, after checking its license
-  and what we actually need from it.
-- **MCP layer, tool schemas, openat2** for agent integration: rmcp or our
-  own layer, schemars or hand-written, rustix or `libc`. To decide at A1
-  (D23).
-- **Attach socket** (A3): Pat to confirm that a local socket the GUI
-  opens only when he turns attach on (mode 0600, his user only) is IPC,
-  not the network access his rule forbids. Before A3 (D23).
-- **Fonts.** egui's default fonts carry OFL-1.1 and Ubuntu Font Licence
-  data. *Decided by Pat on 2026-10-24:* keep egui's fonts, with a
-  `deny.toml` license exception scoped to `epaint_default_fonts`, added
-  with the GUI crates (M1 slice 7) and recorded then as a decision.
-
 ## D31. The render pipeline
 
 *2026-10-24, M1 slice 3a. The M1 plan's D29 (sections 4.1 to 4.5);
@@ -2174,11 +2136,388 @@ Mesa. 16-bit sources lose their low 4 bits in f16. The goldens'
 range through an f16 linear target, even with every store rounded to
 nearest: flat fields at Y = 86, 159 and 165 come out 81, 166 and 174,
 one code from round((k − 16) · 255 / 219), since those k lie within the
-f16 error of a tie; full range is exact for every k. Slice 3b revises
-that criterion. Anisotropic output
-is checked only for building. An unchanged frame and view skipping the
+f16 error of a tie; full range is exact for every k. D32 revises that
+criterion. Anisotropic output is checked only for building. An unchanged frame and view skipping the
 projection is the viewer's (slice 7).
 
 Revisit if: the upload bench's trigger holds on huginn or odin (the
 belt becomes the default); a driver can't filter `R16Float`; or M7's
 colour work needs `R16Unorm` behind the optional features.
+
+*Updated in M1 slice 3b:* the goldens (D32) hold this pipeline to
+stored images, the reference and the analytic ideal, with every negative
+control, and revise `passthrough_exact`'s criterion. They found that
+lavapipe filters `R8Unorm` and `Rg8Unorm` textures to whole 8-bit codes,
+which this entry's 8-bit PSNRs already include (D32). The Tier 2 tests
+are written:
+
+- `list_adapters_and_features` (`tests/adapters.rs`) notes every Vulkan
+  adapter (its `AdapterInfo` with the PCI bus id, the timestamp period,
+  the features of the plan's eight formats, its own features, downlevel
+  flags and limits) and fails if one can't render into and filter a
+  canonical format or copy into a scratch one. Its Tier 1 twin checks
+  lavapipe the same way.
+- `goldens_on_gpu_match_reference` and `goldens_on_host_llvmpipe`
+  (D32).
+- `bench_upload_5k7` (`tests/upload.rs`): for 8- and 10-bit 5760×2880
+  frames, and an 8- and a 10-bit pair of 3840² frames (the X5's 8K is
+  two 3840² streams), both upload paths' CPU time per step, the GPU time of their ingest and
+  mips, and how many of 300 steps changed the allocator's block count
+  (the plan's second trigger), with the blocks and reserved memory in a
+  note; then, on the 5.7K slots, the mips alone and the projection at
+  1920×1080 and 3840×2160, rectilinear 90° and a 300° tiny planet. Each
+  row is D20's median and range over `SPHERECUT_BENCH_RUNS` runs after a
+  warm-up, and a note says whether the CPU trigger holds for each 5.7K
+  input. It runs on the GPU `SPHERECUT_ADAPTER` names, or the first one
+  Vulkan lists, and skips without one. Its Tier 1 smoke run (640×320
+  frames, 320² pairs, 3 steps) replaces 3a's.
+
+Where the bench differs from the plan: the pair comes at 10 bits too,
+since 10-bit 8K is twice the bytes; the belt is 3a's
+`UploadPath::StagingBelt` (above), not a test-side path; and a pair's GPU
+row is per frame, since the uploader's timer returns its latest span,
+the pair's second frame, which is the first one's size.
+
+## D32. Golden images
+
+*2026-10-24, M1 slice 3b. The M1 plan's D30 (section 6), adjusted to
+what was built; it holds the renderer of D31 to stored images, its f64
+reference and the analytic ideal.*
+
+What:
+
+- **One test runs every row.** `crates/render/tests/goldens.rs` has a
+  function per row of plan section 6's table, and one test, `goldens`,
+  runs them in order on lavapipe (`AdapterChoice::Cpu`, with
+  `DeviceType::Cpu` asserted), from synth's in-memory planes, with
+  `Filter::Isotropic` throughout. It gathers every failure, each naming
+  the adapter and Mesa's `driver_info`, and fails once with the list.
+  Six rows store an image (`rect_forward`, `rect_ypr`, `fisheye_180`,
+  `fisheye_360`, `stereo_tinyplanet`, `morph_half`: 8-bit PNGs in
+  `crates/render/tests/goldens/`); the other fourteen check without one.
+  The plan's `mips_area` row is slice 3a's
+  `mips_are_area_means_at_odd_sizes` in `tests/upload.rs` (45 to 22 and
+  23 to 11, R8, Rg8, R16Float and Rg16Float, against an independent area
+  mean), which covers it whole. The set is 360 kB, 329 kB of it PNGs
+  (the plan guessed 0.5 MB). The decode-to-render goldens through
+  `spherecut frame` (`crates/cli/tests/frame.rs`) are slice 4's.
+- **The manifest** (`goldens/manifest.json`, schema
+  `spherecut.goldens/1`) has an entry for every row, image or not: the
+  adapter, driver and `driver_info`, the LLVM version, the wgpu version
+  (read from `Cargo.lock`), the commit checked out when it was blessed
+  (HEAD, so the commit before the one that adds the blessing), the date,
+  the command that regenerates it, the source (pattern, size, layout,
+  range, matrix, siting) and the FNV-64 of its planes' rows without
+  padding, the view (projection, field of view, yaw, pitch, roll, the
+  quaternion, the filter, a morph), the PNG's FNV-64, every threshold,
+  and every number the row measured, its controls' among them.
+- **The rules:**
+
+  | Against | Rule |
+  |---|---|
+  | the stored PNG, at the adapter, `driver_info` and source hash it was blessed at | identical pixels |
+  | the stored PNG, another driver build | PSNR ≥ 48 dB, SSIM ≥ 0.995 (BT.709 luma, 11×11 Gaussian) and at most 4 LSB |
+  | a source whose planes hash otherwise | "the synthetic source changed", with both hashes; the render isn't compared |
+  | `reference::render_trilinear` (f64) | PSNR ≥ the floor calibrated at blessing (measured − 3 dB, never below 36 dB), and no channel more than 0.1 off |
+  | `synth::render_view_ideal` | over the pixels the analytic LOD puts 2.5 levels down or more, at least 1000 of them: PSNR ≥ the floor calibrated at blessing (measured − 1 dB), and at least 3 dB above the level-0 control |
+  | a roll twin (seam and poles) | no pixel more than 2/255 apart; the implicit-LOD control over 100 such pixels |
+
+  Every other row's thresholds are the plan's (its table), and its
+  controls must clear the bounds below.
+- **Blessing.** `SPHERECUT_UPDATE_GOLDENS=1 cargo test -p
+  spherecut-render --test goldens` runs every row and writes the PNGs
+  and the manifest only if all of them pass, every control failing as it
+  should; otherwise it panics with "refusing to bless", lists what
+  failed and writes nothing. It removes PNGs no row wrote. A floor
+  calibrated at blessing goes into the manifest and every later run
+  reads it from there; a row whose floor is missing fails with the
+  command to run. A failing run writes `<row>-<what>-{got,want,diff}.png`
+  (the difference ×16) into `golden-diffs/` in the cargo target
+  directory, which each run clears first.
+- **The harness's own tests**, Tier 1, beside it: the drift rule on
+  made images (one LSB everywhere is 48.13 dB, which passes between
+  builds and fails at the same one; half a pixel's shift fails); a
+  blessing into a scratch directory with one failed row writes nothing,
+  and a clean one then passes a plain run, identical; a changed source
+  hash is exactly one failure, the synthetic-source one with the driver
+  build in it, and one pixel a step off fails as not identical and
+  writes its diffs; the passthrough model and its bound (below); the two
+  Tier 2 paths on lavapipe; and telling driver builds apart.
+- **Tier 2.** `goldens_on_gpu_match_reference` runs every row on each
+  GPU Vulkan lists (or the one `SPHERECUT_ADAPTER` names) against the
+  CPU and ideal references and the controls only, never against the
+  PNGs, and notes each row's numbers for the hw-test report. It skips
+  with "no GPU: Vulkan lists only …" when there is none.
+  `goldens_on_host_llvmpipe` runs the whole set on the machine's own
+  llvmpipe by the other-driver rule whatever its build, and notes the
+  drift. Both hold the rows to the floors lavapipe was blessed with.
+
+Measured at blessing (lavapipe, Mesa 25.2.8, LLVM 20.1.2; the manifest
+has every number). Each control clears its bound:
+
+| Row | Check | Control (bound) |
+|---|---|---|
+| the six stored views | CPU 49.6 to 53.2 dB, no channel more than 0.022 off | |
+| `rect_ypr` | the red F's centre, the prime meridian at 40° N and the equator at 50° E where the convention's words put them | each angle's sign turned moves F's centre off red: 3 of 3 (3) |
+| `fisheye_360` | 7888 pixels past θ = π, all black (`fisheye_180` has none) | |
+| `stereo_tinyplanet` | ideal 30.7 dB on 2600 pixels | level 0 23.9 dB, 6.9 dB below (3 dB) |
+| `seam_quad` | 0 bad pixels (at most 1 LSB apart) | implicit LOD: 288 (100; lodprobe 504) |
+| `zenith_quad`, `nadir_quad` | 0 | 185 and 186 (100; lodprobe 344) |
+| `tinyplanet_pole` | 0 | 175 (100; lodprobe 192) |
+| `shimmer_tinyplanet` | RMS change 7.3 LSB a frame against the ideal's 19.7; ideal 25.3 dB on 10044 pixels | level 0 changes 5.0 times the ideal's (3), and is 14.3 dB further from it in the worst frame (3 dB) |
+| `shimmer_fisheye360` | 2.2 against 30.2; 19.5 dB on 28532 pixels | 3.3 times, 9.3 dB |
+| `tenbit_ramp` | P010 and `yuv420p10` identical, no step down, within 0.14 10-bit codes of the CPU | |
+| `layout_invariance` | NV12 and I420, each at three strides: 6 renders identical | |
+| `passthrough_exact` | full range: every k; limited: as the model says, with 86, 159 and 165 one code off the formula | |
+| `range_full_vs_limited` | 10-bit: 1 LSB apart (8-bit: 4) | full decoded as limited: 22 LSB (10; 8-bit: 21) |
+| `matrix_601_709` | 601 53.3 dB, 709 53.1 dB | 601 decoded as 709: 30.8 dB, 19.5 dB under its floor (10 dB) |
+| `siting_left_center` | 10-bit: Left 0.56 and Center 0.52 LSB from the CPU (8-bit: 1.99, 1.76) | Left decoded as Center: 53 LSB (10; 8-bit: 55) |
+| `crop_half` | 12096 pixels outside the cover, all black; CPU 54.2 dB | |
+| `lod_heatmap` | levels within 0.002 of `uv_footprint`'s | |
+
+Three blessings in a row wrote the same bytes, and the whole test takes
+about 7 s here.
+
+Where this differs from the plan, from the evidence:
+
+- **The ideal comparisons cover only pixels at λ ≥ 2.5** (luma's
+  analytic LOD before clamping, from `reference::lod_map`). Over a whole
+  view, isotropic trilinear isn't nearer the ideal than level 0: on the
+  tiny planet's grid it is 28.5 dB against level 0's 29.0, and its
+  shimmer frames give a worst margin of 2.3 dB, with level 0 changing
+  only 1.33 times as much as the ideal from frame to frame, so neither
+  of the plan's margins holds. Where minification is mild, trilinear
+  blurs more than the box-filtered ideal (it blends in the next level),
+  and level 0's bilinear tap reads most of what lies under the pixel, so
+  it neither aliases nor blurs. By threshold, on the tiny planet:
+
+  | λ at least | Pixels | Trilinear | Level 0 | Margin | Shimmer: level 0's change over the ideal's, worst margin |
+  |---|---:|---:|---:|---:|---|
+  | (all) | 65536 | 28.54 dB | 29.01 dB | −0.47 dB | 1.33 times, 2.28 dB |
+  | 1 | 19204 | 29.67 | 28.07 | 1.60 | 1.39, 2.57 |
+  | 2 | 5204 | 26.89 | 24.10 | 2.79 | 2.45, 8.12 |
+  | 2.5 | 2600 | 30.72 | 23.86 | 6.85 | 5.00, 14.31 |
+  | 3 | 1244 | 30.48 | 23.08 | 7.39 | 11.07, 19.32 |
+
+  (the grid with 8 samples a side, which 16 or 32 move by under 0.2 dB;
+  the shimmer on the checker with 16, whose pixel counts differ). From λ
+  = 2.5, a footprint of 5.7 texels of which level 0's tap reads 4 of the
+  32 or more under the pixel, level 0 must alias, and both margins hold
+  with room. The 360° fisheye at 192² is minified that far wherever it
+  shows anything. A shimmer row compares the pixels minified that far in
+  all 8 frames, so that its RMS change measures the flicker of detail
+  too fine to show, not the motion of the detail the view resolves. A
+  pixel with a corner past θ = π is left out too: it is black in the
+  render and the control and partly black in the ideal, and only
+  dilutes the comparison (8332 of the fisheye's 36864).
+- **The ideal floor is measured − 1 dB.** The plan gave a per-view
+  floor without a margin. The ideal is the pattern itself, so the PSNR
+  against it moves with filtering, not with a GPU's rounding; a 1 dB
+  drop is lost detail or a new alias.
+- **Range and siting are asserted at 10 bits, with 8 bits recorded.**
+  lavapipe filters `R8Unorm` and `Rg8Unorm` textures in 8-bit fixed
+  point: a magnified 0-to-255 edge read back at 16 bits is within 0.035
+  of a whole 8-bit code at every pixel, where the f64 reference has
+  fractions (121.85, 110.51 and 99.18 against the GPU's 121.99, 110.99
+  and 100.00). With the two codings' own rounding on top, an NV12
+  full-range and limited-range pair comes out 4 LSB apart (4:4:4 too),
+  and the siting stripes 1.99 (Left) and 1.76 (Center) LSB from the CPU,
+  past the plan's 2 and 1. Deep sources' f16 planes are filtered in
+  floating point, and P010 gives 1 LSB, 0.56 and 0.52. So these rows
+  hold P010 to the plan's thresholds, record NV12's numbers, and assert
+  the controls on both. Every other row's 8-bit sources are held to the
+  PSNR floors D31 measured, which already include this.
+- **`passthrough_exact`'s criterion is revised**, as D31 said it had to
+  be. Limited range maps k to (k − 16) · 255 / 219, whose fraction is
+  r / 219 with r = 36 (k − 16) mod 219, so it never ties; but the f16
+  linear target moves a value by up to 2^−11 of itself, which the OETF
+  turns into at most (1.055 / 2.4) · 2^−11 of full scale, 0.0547 codes.
+  The row now holds that:
+  - full range comes out k for every k;
+  - every field, in both ranges, equals an independent f64 model of the
+    chain (Y′ by H.273, the sRGB EOTF, the nearest half with ties to
+    even, the OETF, the unorm8 store to nearest), or its other candidate
+    where f32's error could tip a tie (no field here);
+  - limited range comes out round((k − 16) · 255 / 219) except where
+    that lies within 0.0547 codes of a tie, and is then at most one code
+    off.
+
+  Measured: 512 fields, 0 off the model, full range exact, and limited
+  k = 86, 159 and 165 one code off (81, 166 and 174), each 0.0068 codes
+  from a tie; 19, 92 and 232 are as near and come out as the formula
+  says. A rectilinear view can't put one texel on each pixel across a
+  whole equirect, so the fields are 16 texels wide in a 4096×16 NV12
+  frame, seen through eight 45° views around the equator at 512×8,
+  about a texel a pixel at their centres, so only levels 0 and 1 are
+  read; a pixel counts where every tap at both levels lies in one field.
+- **Seam and pole placement.** The seam view's yaw (179.55°) puts u's
+  wrap between columns 128 and 129, whose centres 128.5 and 129.5 share a
+  quad, on every row; the CPU asserts that before rendering. At pitch ±90
+  exactly the pole would fall at the image's centre, a corner between
+  four quads, so each pole view is turned until the pole is at the
+  centre of the quad from (128, 72) to (129, 73) (pitch ±88.90° at
+  256×144), or (128, 128) to (129, 129) for the tiny planet (pitch
+  −85.28° at 256²), asserted on the CPU to 1e−12.
+- **No channel more than 0.1 off the CPU**, beside the PSNR floor, as
+  3a's render tests have it: a seam column or a misplaced rim barely
+  moves PSNR.
+- **`rect_ypr`'s markers** are placed from the convention's words (yaw
+  turns right about the world's up, pitch looks up about the camera's
+  right, roll turns the camera clockwise as seen from behind; +X right,
+  +Y up, −Z forward), not from `sphere::orient`, and its control turns
+  each angle's sign in turn.
+- **The manifest has the checks too**, not only the images, so every
+  threshold and control is in one file.
+- **Identical pixels, not bytes**: the stored PNG is decoded and
+  compared pixel for pixel, so a change in the image crate's encoder
+  doesn't fail every row; the PNG's own hash is recorded.
+- **`layout_invariance` uses an 1100×550 source**, so that no row is a
+  multiple of 64 or 256 bytes already, and asserts that every plane
+  really is padded; at 1024 wide both strides would be the rows' own.
+  `crop_half`'s 180° panorama is the grid's middle 512×512.
+- **`render_view_ideal`** samples the pattern itself at frame 0, n × n
+  points a pixel (8 for the grid, 16 for the checker, whose cells a
+  minified pixel covers dozens of), with black where the view shows
+  nothing; it deals rows to threads in turn, and its result doesn't
+  depend on how many there are.
+- **On a GPU** the Tier 2 test runs on every GPU Vulkan lists, not one,
+  so that a machine with two (a laptop with a discrete card) checks
+  both; huginn, odin and the Framework have one each.
+- **render and testkit build at opt-level 2 in dev profiles.** The f64
+  reference, the LOD map, the ideal and the metrics run per pixel: at
+  opt-level 0 the goldens took 16.9 s, at 2 they take 8.0 s (an idle
+  machine). Rust has no fast-math, so the results are the same at any
+  level and the goldens don't move.
+
+Why: as the plan's D30 says. A golden that passes a broken
+implementation is worse than none: at yaw 179.85° or 180° the seam falls
+between quads and implicit LOD shows nothing, so each seam and pole row
+puts its discontinuity inside a quad and shows, by its control, that it
+can see the line. Exact matching catches any change on the reference
+box, and tolerances absorb other Mesa builds. The source hash keeps
+synth or libm drift from passing as a render change. WGSL's loose
+transcendental functions make GPU-to-CPU error grow toward the rim, so
+tolerances are measured, not assumed. The metrics are testkit's own,
+with no dependencies: dssim is AGPL-3.0, and image-compare pulls in
+rayon for two functions.
+
+Limits: the floors, the identical rule and the 8-bit numbers are
+lavapipe's, at Mesa 25.2.8 with LLVM 20.1.2. A Mesa update on this box
+changes `driver_info`, and the stored images are then held by the
+other-driver rule until blessed again. On a GPU the rows are held to
+lavapipe's calibrated floors, which a driver's own `atan2` and `asin`
+may miss near the rim (the plan's lodprobe measured 40.8 to 55.8 dB,
+falling toward it); the report's notes then say by how much. The NV12 range and siting numbers are recorded,
+not asserted. A blessing writes the commit and date it was made at, so
+blessing again on another day changes the manifest, though no image.
+
+Revisit if: a GPU misses a floor in `goldens_on_gpu_match_reference`
+(per-driver floors in the manifest, never lower ones); a Mesa build
+filters unorm8 in floating point (the 8-bit range and siting can then be
+asserted); or a control comes near its bound (`shimmer_fisheye360`'s
+3.26 times is the nearest, against 3).
+
+## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
+
+*2026-10-24, M1. Pat approved Vulkan Video HEVC in odin's hardware run
+(the stack review's third change; PLAN M1's hardware criterion).
+Extends D14. D27 to D37 are kept for the M1 plan's decisions
+(`docs/design/m1-plan.md`, section 0), so this one is D38.*
+
+How FFmpeg picks the device: `av_hwdevice_ctx_create` for Vulkan with
+no device string takes physical device 0 of its own Vulkan instance
+(`find_device` in `libavutil/hwcontext_vulkan.c`, the same in 6.1.1 and
+8.1.3). A number picks that index, other text the first device whose
+name contains it. Derived from a VA-API device it matches the PCI device
+ID (8.1 with libva 1.15 and up) or only AMD's vendor ID (6.1); derived
+from a DRM device it compares the `st_dev` of the node's `fstat`, which
+is the device of `/dev` itself, not the node's `st_rdev`. The order of
+the list comes from the Vulkan loader and its layers. Current Linux
+loaders list discrete GPUs, then integrated, virtual, other and CPU
+devices, then by PCI address (`loader_linux.c`). Mesa's device-select
+layer (in `mesa-vulkan-drivers`) then moves its default to the front:
+one named by `MESA_VK_DEVICE_SELECT` or `DRI_PRIME`, else the GPU the
+Wayland compositor or X server uses, else the boot VGA device, else the
+first that isn't a CPU. So FFmpeg's default is a GPU whenever one
+works, but with two GPUs it is the one that runs the desktop (over SSH,
+the boot VGA device), which need not be the one behind VA-API's
+`renderD128`. odin has an RX 7600 and may have an integrated GPU too.
+llvmpipe comes first only when no GPU driver works, or with a loader too
+old to sort and no device-select layer.
+
+So `decode::open_vulkan_device(render_node)` lists FFmpeg's devices,
+with their DRM nodes from `VK_EXT_physical_device_drm`, and opens the
+one behind the render node, else the first that isn't a CPU, else
+FFmpeg's default. It opens that one by index and checks that FFmpeg then
+runs on it (an error if not, never a silent other device), and says
+which device it is and why (`VulkanChoice`, whose `Display` names the
+device, its type and driver, and FFmpeg's default when that was another
+one). The Tier 2 Vulkan tests and benchmarks use it with
+`tier2::render_node()` (`SPHERECUT_RENDER_NODE`, default
+`/dev/dri/renderD128`, when present) and skip when the device runs on
+the CPU, naming it. They no longer need the render node itself.
+
+When the driver can't decode a format (`HwUnsupported`), a test skips
+with the device and the lines FFmpeg logged while it tried, such as
+huginn's "Device does not support decoding hevc!". They are caught with
+`capture_hw_decode_log`, which also keeps the few lines FFmpeg's Vulkan
+decoder logs at "verbose" about a stream it turns down: "Unable to
+initialize video session: hevc profile "Main 10" not supported!" for a
+profile or pixel format the driver lacks, and, since a stream too big or
+of too high a level is refused without a word, the limits it checked
+("Maximum level: 153 (stream 186)", "Width: from 64 to 4096"). The skip
+also gives the stream's size and level. Any other error fails it,
+including FFmpeg failing to open the GPU chosen. The samples test
+groups refused streams by format and reason, fails on any mismatch or
+other error, and otherwise skips if any stream was refused. A
+benchmark's Vulkan Video row is measured only when the file's first
+frames decode on the device, through `bench::try_measure`, which records
+nothing when a run fails. Otherwise `bench::not_measured` leaves a note
+with the reason, which the hw-test report lists under its benchmark
+table, so a missing Vulkan path never fails a VA-API benchmark. Another
+note names the device the Vulkan rows ran on.
+
+Doctor still checks FFmpeg's default Vulkan device and names it (its
+JSON marks it `used_by_ffmpeg`), so on a machine with two GPUs its
+Vulkan lines can be about another GPU than the tests'.
+
+Fedora's Mesa: its Vulkan drivers are built without H.264 and HEVC,
+like its VA-API driver. RADV then lacks `VK_KHR_video_decode_h264` and
+`_h265`, which is what "Device does not support decoding hevc!" means
+(`vulkan_decode.c`), while AV1 decodes, so video decode itself is on and
+`RADV_PERFTEST=video_decode` changes nothing. RPM Fusion's
+`mesa-vulkan-drivers-freeworld` (built with `video-codecs=h264dec,
+h265dec,...`, and conflicting with `mesa-vulkan-drivers`) has them. So
+on Fedora's stock Mesa, odin's Vulkan H.264 and HEVC checks skip as
+huginn's did. Doctor's fix for a Mesa GPU on Fedora that can't decode
+H.264 or HEVC with Vulkan Video is now that package, as for VA-API;
+whether odin's run swaps it in first is Pat's call.
+
+Why: odin's discrete RDNA3 is the first chance to compare Vulkan Video
+HEVC with VA-API (with the freeworld driver; huginn's stock Vulkan
+driver has no HEVC). On FFmpeg's default device, odin's run could
+have measured the integrated GPU, or skipped as if Vulkan Video were
+missing when only the device was wrong; and the old skip said only that
+the driver doesn't support the format, not FFmpeg's reason.
+
+Revisit if: doctor or the app should decode on the same device (the app
+will, once it decodes on Vulkan), or FFmpeg changes how it picks one.
+
+## Open
+
+- **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360
+  support is only on its git master, and `deny.toml` rejects git sources.
+  Options for M4: vendor the parts we need at a pinned commit with their
+  license, allow that one git revision in `deny.toml`, or write our own
+  parsers from `docs/formats/`. To decide at M4, after checking its license
+  and what we actually need from it.
+- **MCP layer, tool schemas, openat2** for agent integration: rmcp or our
+  own layer, schemars or hand-written, rustix or `libc`. To decide at A1
+  (D23).
+- **Attach socket** (A3): Pat to confirm that a local socket the GUI
+  opens only when he turns attach on (mode 0600, his user only) is IPC,
+  not the network access his rule forbids. Before A3 (D23).
+- **Fonts.** egui's default fonts carry OFL-1.1 and Ubuntu Font Licence
+  data. *Decided by Pat on 2026-10-24:* keep egui's fonts, with a
+  `deny.toml` license exception scoped to `epaint_default_fonts`, added
+  with the GUI crates (M1 slice 7) and recorded then as a decision.
