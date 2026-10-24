@@ -1312,20 +1312,34 @@ fn a_stop_token_stops_a_long_seek_and_decoding_goes_on() {
         full > Duration::from_millis(40),
         "the long seek took only {full:?}"
     );
-    let (first, _, _) = seek_to(&mut *d, Time::ZERO, SeekMode::Exact);
+    let (mut first, _, _) = seek_to(&mut *d, Time::ZERO, SeekMode::Exact);
 
-    // Stopped by a newer generation a little way in.
+    // Stopped by a newer generation a little way in. When the machine's
+    // load drops after `full` was timed, the seek can end before the stop
+    // comes: then it starts again from the first frame, and the stop comes
+    // after half the wait.
     let source = StopSource::new();
-    let token = source.next();
-    let handle = std::thread::spawn(move || {
-        let started = Instant::now();
-        let r = d.seek(last, SeekMode::Exact, &token).unwrap();
-        (d, r, started.elapsed())
-    });
-    std::thread::sleep(full / 8);
-    source.next();
-    let (mut d, outcome, took) = handle.join().unwrap();
-    assert!(matches!(outcome, SeekOutcome::Stopped), "{outcome:?}");
+    let mut wait = full / 8;
+    let mut tries = 0;
+    let (mut d, took) = loop {
+        let token = source.next();
+        let handle = std::thread::spawn(move || {
+            let started = Instant::now();
+            let r = d.seek(last, SeekMode::Exact, &token).unwrap();
+            (d, r, started.elapsed())
+        });
+        std::thread::sleep(wait);
+        source.next();
+        let (back, outcome, took) = handle.join().unwrap();
+        d = back;
+        tries += 1;
+        if matches!(outcome, SeekOutcome::Stopped) {
+            break (d, took);
+        }
+        assert!(tries < 8, "no stop in {tries} tries, the last {outcome:?}");
+        wait /= 2;
+        (first, _, _) = seek_to(&mut *d, Time::ZERO, SeekMode::Exact);
+    };
     assert!(
         took < full,
         "the stopped seek took {took:?}, a whole one {full:?}"
