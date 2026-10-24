@@ -1314,16 +1314,26 @@ impl VideoDecode for FfmpegVideo {
         loop {
             let mut raw = match self.pending.take() {
                 Some(r) => r,
-                None => match self.decode(stop)? {
-                    Got::Frame(r) => r,
-                    Got::End => {
+                None => match self.decode(stop) {
+                    Ok(Got::Frame(r)) => r,
+                    Ok(Got::End) => {
                         // Every frame has been decoded: the last one is known.
                         if let Some((pts, duration)) = self.greatest {
                             self.last_end(pts, duration);
                         }
                         return Ok(NextFrame::End);
                     }
-                    Got::Stopped => return Ok(NextFrame::Stopped),
+                    Ok(Got::Stopped) => return Ok(NextFrame::Stopped),
+                    Err(e) if self.dec.has_failed() => return Err(e),
+                    // One that doesn't end the stream is an event, as where
+                    // the frame after this one is decoded ahead.
+                    Err(e) => {
+                        self.events.push(DecoderEvent::Damaged {
+                            reason: e.to_string(),
+                            last_good_pts: self.current.as_ref().map(|c| c.pts),
+                        });
+                        continue;
+                    }
                 },
             };
             if let Some(c) = &mut self.catch_up

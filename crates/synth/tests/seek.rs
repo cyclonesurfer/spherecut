@@ -1019,7 +1019,7 @@ fn find_box(file: &[u8], kind: &[u8; 4]) -> usize {
 
 /// An edit list of two pieces of the clip, as editors write: FFmpeg drops
 /// frames where they meet, so frames aren't shown a frame apart however
-/// even `stts` is.
+/// even `stts` is, and the HEVC decoder says the splice is damage.
 #[test]
 fn an_edit_list_that_splices_two_pieces_seeks_exactly_and_counts_frames() {
     let dir = TempDir::new("splice");
@@ -1053,7 +1053,25 @@ fn an_edit_list_that_splices_two_pieces_seeks_exactly_and_counts_frames() {
             .windows(2)
             .filter(|w| w[1].pts - w[0].pts != FRAME_30);
         assert!(gaps.count() > 0, "{codec:?}: {frames:?}");
-        let d = open(&spliced);
+        // Played through, and caught up across the splice from a seek
+        // before it: the first frame from the target comes out, and the
+        // HEVC decoder's error at the splice is an event either way.
+        let never = StopToken::never();
+        let mut d = open(&spliced);
+        while let NextFrame::Frame(_) = d.next_frame(&never).unwrap() {}
+        let played = d.take_events();
+        assert_eq!(played.is_empty(), codec == Codec::H264, "{played:?}");
+        for (from, until) in [(10, 15), (10, 16), (12, 14), (5, 17), (13, 15)] {
+            seek_pts(&mut *d, frames[from].pts, SeekMode::Exact);
+            d.catch_up(Some(at(&*d, frames[until].pts)));
+            let got = d.next_frame(&never).unwrap();
+            let NextFrame::Frame(f) = got else {
+                panic!("{codec:?}: {got:?}");
+            };
+            assert_eq!(Seen::of(&f), frames[until], "{codec:?}: {from} to {until}");
+            let events = d.take_events();
+            assert_eq!(events.is_empty(), played.is_empty(), "{events:?}");
+        }
         assert!(
             matches!(d.info().timing, Timing::Variable { .. }),
             "{codec:?}: {:?}",

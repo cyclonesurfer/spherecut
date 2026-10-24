@@ -148,7 +148,10 @@ pub trait VideoDecode: Send + std::fmt::Debug {
     ) -> Result<SeekOutcome, MediaError>;
     /// The frame after the last one `seek` or `next_frame` returned, once
     /// the frame after it is known too (for its duration), or the end, or
-    /// [`NextFrame::Stopped`].
+    /// [`NextFrame::Stopped`]. Damage that the decode goes on past is a
+    /// [`DecoderEvent::Damaged`]; an error is returned only when the stream
+    /// can't go on (a read that failed), and again by every call until a
+    /// seek.
     fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError>;
     /// `Some(t)`: skip frames nothing refers to (`AVDISCARD_NONREF`), and
     /// never return a frame before `t`, until one at or after it has been
