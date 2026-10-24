@@ -1,8 +1,9 @@
-//! The CLI's JSON contract (DECISIONS D27, `docs/cli-json.md`) for probe
-//! and doctor: with `--json`, exactly one compact document on stdout per
-//! run, on success and on every kind of failure; the same shape for one
-//! file or many; the exit statuses; codes that don't change; and times
-//! that read back exactly.
+//! The CLI's JSON contract (DECISIONS D27, `docs/cli-json.md`) for probe,
+//! doctor and frame: with `--json`, exactly one compact document on stdout
+//! per run, on success and on every kind of failure; the same shape for
+//! one file or many; the exit statuses, frame's 3 and 4 included; codes
+//! that don't change; times that read back exactly; and SIGINT, which
+//! cancels frame and ends probe and doctor at once.
 
 // Test helpers outside #[test] functions; panicking is the point here.
 #![allow(clippy::unwrap_used)]
@@ -11,6 +12,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::Instant;
 
 use serde_json::Value;
 use spherecut_cli::contract::{self, Exit};
@@ -21,6 +23,9 @@ use spherecut_media::ff;
 use spherecut_synth::media::{self, Audio, Codec, Spec};
 use spherecut_synth::{Pattern, render_equirect, yuv};
 
+// Only `strace` is used here; confinement.rs uses the rest.
+#[allow(dead_code)]
+mod common;
 mod document;
 
 use document::document;
@@ -28,24 +33,38 @@ use document::document;
 /// Every code the JSON can carry, as `docs/cli-json.md` lists them.
 /// Renaming one is a new schema version (D27), so a rename must fail here.
 const CODES: &[&str] = &[
+    "adapter_not_found",
+    "anisotropy_unavailable",
+    "cancelled",
     "cannot_decode",
+    "crop_applied",
     "damaged",
     "decode_failed",
     "doctor_errors",
     "files_failed",
+    "gpu_failed",
     "hw_failed",
     "hw_unavailable",
     "hw_unsupported",
     "internal",
+    "invalid_input",
     "io_error",
     "nested_open_refused",
     "no_decoder",
+    "no_gpu",
     "no_video_or_audio",
     "not_a_file",
+    "not_equirect",
     "not_found",
     "not_implemented",
     "not_media",
     "open_failed",
+    "out_of_gpu_memory",
+    "out_of_range",
+    "output_exists",
+    "pose_not_applied",
+    "stereo_left_eye",
+    "stereo_unknown",
     "too_large",
     "track_without_stream",
     "truncated",
@@ -53,6 +72,17 @@ const CODES: &[&str] = &[
     "unsupported_container",
     "unsupported_pixel_format",
     "usage",
+];
+
+/// The codes `frame` exits 3 with: a device or a codec the run needs and
+/// this machine doesn't have (D27).
+const MISSING: &[&str] = &[
+    "adapter_not_found",
+    "hw_failed",
+    "hw_unavailable",
+    "hw_unsupported",
+    "no_decoder",
+    "no_gpu",
 ];
 
 fn tmp(name: &str) -> PathBuf {
@@ -207,8 +237,19 @@ fn every_code_is_listed_and_stable() {
             "{c} is not snake_case"
         );
     }
-    // The statuses are part of the contract too; 3 and 4 are reserved for
-    // `frame` and the GUI.
+    // `frame`'s status for each code: 2 for usage, 3 for what is missing,
+    // 4 for a cancel, 1 for everything else.
+    for c in CODES {
+        let want = match *c {
+            "usage" => Exit::Usage,
+            "cancelled" => Exit::Cancelled,
+            c if MISSING.contains(&c) => Exit::Missing,
+            _ => Exit::Failed,
+        };
+        assert_eq!(contract::frame_exit(c), want, "{c}");
+    }
+    // The statuses are part of the contract too; 3 and 4 are `frame`'s
+    // (and the GUI's, later).
     let statuses = [
         (Exit::Ok, 0),
         (Exit::Failed, 1),
@@ -233,7 +274,12 @@ fn the_document_describes_every_code_schema_and_status() {
             "docs/cli-json.md has no table row for the code {c}"
         );
     }
-    for schema in [contract::PROBE, contract::DOCTOR, contract::CLI] {
+    for schema in [
+        contract::PROBE,
+        contract::DOCTOR,
+        contract::FRAME,
+        contract::CLI,
+    ] {
         assert!(
             docs.contains(&format!("`{schema}`")),
             "docs/cli-json.md doesn't name the schema {schema}"
@@ -964,4 +1010,520 @@ fn doctors_errors_fail_the_run_and_its_warnings_do_not() {
     assert_eq!(v.get("error").is_some(), errors);
     let text_run = spherecut(&args);
     assert_eq!(text_run.status.code(), json.status.code());
+}
+
+// ---------------------------------------------------------------------
+// frame
+
+/// A small spherical clip, for `frame`.
+fn sphere_clip(dir: &Path) -> PathBuf {
+    let spec = Spec {
+        name: "sphere".into(),
+        pattern: Pattern::Grid,
+        width: 256,
+        height: 128,
+        rate: FrameRate::FPS_25,
+        frames: 3,
+        codec: Codec::H264,
+        spherical: true,
+        ..Spec::default()
+    };
+    media::write(&spec, dir).unwrap()
+}
+
+/// `spherecut frame CLIP -o OUT --json ARGS` with `env` added and nothing
+/// else from the environment steering it: its status, document and
+/// stderr.
+fn frame_json(
+    clip: &Path,
+    out: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> (Option<i32>, Value, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
+    cmd.arg("frame")
+        .arg(clip)
+        .arg("-o")
+        .arg(out)
+        .arg("--json")
+        .args(args)
+        .env_remove("SPHERECUT_LOG")
+        .env_remove("SPHERECUT_ADAPTER");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let o = cmd.output().unwrap();
+    (o.status.code(), document(&o.stdout), text(&o.stderr))
+}
+
+#[test]
+fn frame_documents_have_the_envelope_too() {
+    let dir = tmp("frame-envelope");
+    let clip = sphere_clip(&dir);
+    let out = dir.join("out.png");
+
+    let (status, v, stderr) = frame_json(
+        &clip,
+        &out,
+        &[
+            "--adapter",
+            "cpu",
+            "--decoder",
+            "software",
+            "--size",
+            "64x32",
+        ],
+        &[],
+    );
+    assert_eq!(status, Some(0), "{v} {stderr}");
+    assert!(has_keys(&v, &["schema", "ok", "result", "warnings"]), "{v}");
+    assert_eq!(v["schema"], "spherecut.frame/1");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["warnings"], serde_json::json!([]));
+    let r = &v["result"];
+    let fields = [
+        "output",
+        "frame",
+        "requested",
+        "exactness",
+        "size",
+        "depth",
+        "view",
+        "filter",
+        "renderer",
+        "decode",
+        "gpu",
+        "color",
+        "source",
+    ];
+    assert!(has_keys(r, &fields), "{r}");
+    assert_eq!(r["output"], out.to_str().unwrap());
+    assert!(has_keys(&r["frame"], &["pts", "time"]), "{r}");
+    assert!(
+        has_keys(&r["frame"]["time"], &["exact", "seconds", "frame"]),
+        "{r}"
+    );
+    assert!(has_keys(&r["requested"], &["exact", "seconds"]), "{r}");
+    assert_eq!(r["exactness"], "exact");
+    assert_eq!(r["size"], serde_json::json!({"width": 64, "height": 32}));
+    assert_eq!(r["depth"], 8);
+    assert!(
+        has_keys(
+            &r["view"],
+            &[
+                "yaw",
+                "pitch",
+                "roll",
+                "fov",
+                "projection",
+                "morph_to",
+                "morph"
+            ]
+        ),
+        "{r}"
+    );
+    assert_eq!(r["view"]["projection"], "rectilinear");
+    assert_eq!(r["view"]["morph_to"], Value::Null);
+    assert_eq!(r["filter"], "iso");
+    assert_eq!(r["renderer"], "gpu");
+    // Software as asked: no fallback to report.
+    assert_eq!(r["decode"], serde_json::json!({"path": "software"}));
+    assert!(
+        has_keys(&r["gpu"], &["name", "driver", "driver_info", "device_type"]),
+        "{r}"
+    );
+    assert_eq!(r["gpu"]["device_type"], "cpu");
+    assert!(
+        has_keys(
+            &r["color"],
+            &[
+                "codes",
+                "range",
+                "matrix",
+                "transfer",
+                "primaries",
+                "siting",
+                "assumed"
+            ]
+        ),
+        "{r}"
+    );
+    assert!(
+        has_keys(&r["source"], &["stream", "codec", "size", "pix_fmt"]),
+        "{r}"
+    );
+    assert_eq!(r["source"]["codec"], "h264");
+
+    // `auto` with no render node goes on in software and says why; the
+    // CPU reference renders with no adapter.
+    let (status, v, _) = frame_json(
+        &clip,
+        &out,
+        &[
+            "--reference",
+            "--size",
+            "64x32",
+            "--overwrite",
+            "--render-node",
+            "/nonexistent",
+        ],
+        &[],
+    );
+    assert_eq!(status, Some(0), "{v}");
+    let r = &v["result"];
+    assert_eq!(r["renderer"], "reference");
+    assert_eq!(r["gpu"], Value::Null);
+    assert_eq!(
+        r["decode"],
+        serde_json::json!({
+            "path": "software",
+            "fallback": {
+                "from": "vaapi",
+                "code": "hw_unavailable",
+                "reason": "no VA-API device: no render node at /nonexistent",
+            },
+        })
+    );
+
+    // A failure: no result, and an error naming the file; a usage error
+    // names none.
+    // (The output is checked first: it mustn't be there.)
+    std::fs::remove_file(&out).unwrap();
+    let (status, v, _) = frame_json(&dir.join("missing.mp4"), &out, &["--adapter", "cpu"], &[]);
+    assert_eq!(status, Some(1), "{v}");
+    assert!(has_keys(&v, &["schema", "ok", "error", "warnings"]), "{v}");
+    assert_eq!(v["ok"], false);
+    assert!(has_keys(&v["error"], &["code", "message", "path"]), "{v}");
+    assert_eq!(v["error"]["code"], "not_found");
+    let (status, v, _) = frame_json(&clip, &out, &["--size", "1x1"], &[]);
+    assert_eq!(status, Some(2), "{v}");
+    assert!(has_keys(&v["error"], &["code", "message"]), "{v}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// frame's exit statuses 0 to 3 (4 is SIGINT's, below), each with its
+/// document: no adapter at all, by running the child with
+/// `VK_DRIVER_FILES` pointing at no ICD, and no VA-API device.
+#[test]
+fn frame_exits_0_to_3_with_one_document_each() {
+    let dir = tmp("frame-exits");
+    let clip = sphere_clip(&dir);
+    let out = dir.join("out.png");
+    let no_icd = dir.join("no-such-icd.json");
+    let no_icd = no_icd.to_str().unwrap();
+    // (arguments, environment, status, code)
+    type Row<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)], i32, &'a str);
+    let rows: &[Row] = &[
+        (&["--adapter", "cpu", "--size", "64x32"], &[], 0, ""),
+        (
+            &["--adapter", "cpu", "--frame", "3"],
+            &[],
+            1,
+            "out_of_range",
+        ),
+        (&["--size", "1x1"], &[], 2, "usage"),
+        (
+            &["--size", "64x32"],
+            &[("VK_DRIVER_FILES", no_icd), ("VK_ICD_FILENAMES", no_icd)],
+            3,
+            "no_gpu",
+        ),
+        (
+            &[
+                "--adapter",
+                "cpu",
+                "--decoder",
+                "vaapi",
+                "--render-node",
+                "/nonexistent",
+            ],
+            &[],
+            3,
+            "hw_unavailable",
+        ),
+    ];
+    for (args, env, status, code) in rows {
+        std::fs::remove_file(&out).ok();
+        let (got, v, stderr) = frame_json(&clip, &out, args, env);
+        assert_eq!(got, Some(*status), "{args:?}: {v} {stderr}");
+        assert_eq!(v["schema"], "spherecut.frame/1");
+        assert_eq!(v["ok"], *status == 0, "{v}");
+        assert_eq!(out.exists(), *status == 0, "{args:?}");
+        if *status != 0 {
+            assert_eq!(v["error"]["code"], *code, "{args:?}: {v}");
+        }
+    }
+    let (_, v, _) = frame_json(
+        &clip,
+        &out,
+        &[],
+        &[("VK_DRIVER_FILES", no_icd), ("VK_ICD_FILENAMES", no_icd)],
+    );
+    let m = v["error"]["message"].as_str().unwrap();
+    assert!(m.contains("spherecut doctor"), "{m}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `long-gop` (M1 plan section 14): 1920x960 lossless HEVC in one GOP of
+/// `frames` frames, so that a seek to the last decodes every one. The
+/// grid moves 2 pixels a frame, so that no two frames are alike.
+fn long_gop(dir: &Path, frames: u32) -> PathBuf {
+    let (w, h) = (1920usize, 960usize);
+    let img = render_equirect(Pattern::Grid, w as u32, h as u32, 0, 1);
+    let yuv::YuvPlanes::U8(base) = yuv::to_yuv420(&img, 8) else {
+        unreachable!()
+    };
+    let params = format!(
+        "lossless=1:keyint={frames}:min-keyint={frames}:scenecut=0:bframes=0:log-level=error"
+    );
+    let settings = VideoSettings {
+        encoder: "libx265".into(),
+        width: w as u32,
+        height: h as u32,
+        rate: FrameRate::FPS_30,
+        layout: PixelLayout::Yuv420p,
+        options: vec![
+            ("preset".into(), "ultrafast".into()),
+            ("x265-params".into(), params),
+        ],
+        color: ColorTags::BT709_LIMITED,
+        edit_start: 0,
+        time_base: None,
+        crop_left: 0,
+    };
+    let path = dir.join(format!("long-gop-{frames}.mp4"));
+    let mut wr = Mp4Writer::create(&path, &settings, None).unwrap();
+    // Rolled left by `by` columns.
+    let roll = |p: &[u8], pw: usize, by: usize| -> Vec<u8> {
+        let mut p = p.to_vec();
+        for row in p.chunks_mut(pw) {
+            row.rotate_left(by % pw);
+        }
+        p
+    };
+    for i in 0..frames as usize {
+        let planes = [
+            roll(&base[0], w, 2 * i),
+            roll(&base[1], w / 2, i),
+            roll(&base[2], w / 2, i),
+        ];
+        wr.push_video(&yuv::YuvPlanes::U8(planes)).unwrap();
+    }
+    wr.finish().unwrap()
+}
+
+/// `frame` on `clip`'s last frame with the log on stderr, running: the
+/// child, when it logged that it is seeking, and its stderr once it ends.
+fn seek_to_last(
+    clip: &Path,
+    out: &Path,
+    frames: u32,
+) -> (
+    std::process::Child,
+    std::sync::mpsc::Receiver<Instant>,
+    std::thread::JoinHandle<String>,
+) {
+    use std::io::BufRead;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .arg("frame")
+        .arg(clip)
+        .arg("-o")
+        .arg(out)
+        .args([
+            "--json",
+            "--equirect",
+            "--adapter",
+            "cpu",
+            "--size",
+            "64x32",
+        ])
+        .args(["--frame", &(frames - 1).to_string()])
+        .env("SPHERECUT_LOG", "info")
+        .env_remove("SPHERECUT_ADAPTER")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut all = String::new();
+        for line in std::io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if line.contains("seeking to") {
+                let _ = tx.send(Instant::now());
+            }
+            all.push_str(&line);
+            all.push('\n');
+        }
+        all
+    });
+    (child, rx, reader)
+}
+
+/// Ctrl+C 300 ms into a seek on `long-gop` (M1 plan section 14): exit 4,
+/// one `cancelled` document, no output and no temporary file, well
+/// before the seek would have ended. The clip is written longer where
+/// the whole seek takes under twice the 300 ms, so that the signal always
+/// comes in the middle of it.
+#[test]
+fn sigint_during_a_seek_cancels_with_exit_4() {
+    use std::time::Duration;
+    let dir = tmp("sigint");
+    let whole = dir.join("whole.png");
+    let mut frames = 600;
+    let (clip, full) = loop {
+        let clip = long_gop(&dir, frames);
+        let (child, seeking, log) = seek_to_last(&clip, &whole, frames);
+        let at = seeking.recv_timeout(Duration::from_secs(60));
+        let o = child.wait_with_output().unwrap();
+        let full = at.map(|at| at.elapsed());
+        let log = log.join().unwrap();
+        assert_eq!(o.status.code(), Some(0), "{log}");
+        let full = full.unwrap_or_else(|e| panic!("no seek logged ({e}): {log}"));
+        // Out of the way of the next, longer clip's run.
+        std::fs::remove_file(&whole).unwrap();
+        if full >= Duration::from_millis(600) || frames >= 4800 {
+            break (clip, full);
+        }
+        std::fs::remove_file(&clip).ok();
+        frames *= 2;
+    };
+    assert!(
+        full >= Duration::from_millis(600),
+        "the whole seek took {full:?}"
+    );
+
+    let out = dir.join("out.png");
+    let (child, seeking, log) = seek_to_last(&clip, &out, frames);
+    let Ok(at) = seeking.recv_timeout(Duration::from_secs(60)) else {
+        let o = child.wait_with_output().unwrap();
+        panic!(
+            "no seek logged ({:?}): {}",
+            o.status.code(),
+            log.join().unwrap()
+        );
+    };
+    std::thread::sleep(Duration::from_millis(300).saturating_sub(at.elapsed()));
+    let kill = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(kill.success());
+    let sent = Instant::now();
+    let o = child.wait_with_output().unwrap();
+    let after = sent.elapsed();
+    eprintln!("{frames} frames: the whole seek took {full:?}; stopped {after:?} after SIGINT");
+    let log = log.join().unwrap();
+    assert_eq!(o.status.code(), Some(4), "{log}");
+    let v = document(&o.stdout);
+    assert!(has_keys(&v, &["schema", "ok", "error", "warnings"]), "{v}");
+    assert_eq!(v["schema"], "spherecut.frame/1");
+    assert_eq!(v["error"]["code"], "cancelled", "{v}");
+    assert_eq!(v["error"]["message"], "interrupted: no frame written");
+    assert!(log.contains("interrupted: stopping"), "{log}");
+    assert!(!out.exists());
+    let temps: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| spherecut_core::fs::is_temp_name(&e.file_name().to_string_lossy()))
+        .collect();
+    assert!(temps.is_empty(), "{temps:?}");
+    // It stopped well before the seek's end, which was 300 ms on.
+    assert!(
+        after + Duration::from_millis(300) < full,
+        "stopped {after:?} after the signal; the whole seek takes {full:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The `rt_sigaction` calls for SIGINT that `args` makes, under strace.
+fn sigint_actions(dir: &Path, name: &str, args: &[&OsStr]) -> Vec<String> {
+    let log = dir.join(format!("{name}.strace"));
+    let out = common::strace(&log, "rt_sigaction")
+        .arg(env!("CARGO_BIN_EXE_spherecut"))
+        .args(args)
+        .env_remove("SPHERECUT_ADAPTER")
+        .output()
+        .unwrap();
+    assert!(
+        matches!(out.status.code(), Some(0 | 1)),
+        "{name}: {}",
+        text(&out.stderr)
+    );
+    std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .filter(|l| l.contains("rt_sigaction(SIGINT,"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// probe and doctor keep SIGINT's default action, which ends them at once
+/// (and they exit only 0, 1 or 2 otherwise); frame alone installs its
+/// handler, once, with `SA_RESETHAND` so that a second Ctrl+C ends it
+/// (D27, D28).
+#[test]
+fn only_frame_handles_sigint() {
+    use std::os::unix::process::ExitStatusExt;
+    let dir = tmp("sigint-default");
+    let clip = sphere_clip(&dir);
+    let out = dir.join("out.png");
+    let probe = sigint_actions(&dir, "probe", &["probe".as_ref(), clip.as_os_str()]);
+    assert_eq!(probe, Vec::<String>::new());
+    let doctor = sigint_actions(&dir, "doctor", &["doctor".as_ref()]);
+    assert_eq!(doctor, Vec::<String>::new());
+    let frame = sigint_actions(
+        &dir,
+        "frame",
+        &[
+            "frame".as_ref(),
+            clip.as_os_str(),
+            "--adapter".as_ref(),
+            "cpu".as_ref(),
+            "-o".as_ref(),
+            out.as_os_str(),
+        ],
+    );
+    assert_eq!(frame.len(), 1, "{frame:#?}");
+    assert!(frame[0].contains("SA_RESETHAND"), "{frame:#?}");
+    assert!(frame[0].contains("SA_RESTART"), "{frame:#?}");
+    assert!(!frame[0].contains("SIG_DFL") && !frame[0].contains("SIG_IGN"));
+
+    // A probe blocked writing its document to a pipe no one reads ends at
+    // the first SIGINT, killed by it.
+    // Twice what fills a pipe (64 KiB).
+    let probe_json_len = |n: usize| {
+        let mut args = vec![OsStr::new("probe"), OsStr::new("--json")];
+        args.extend(std::iter::repeat_n(clip.as_os_str(), n));
+        spherecut(&args).stdout.len()
+    };
+    let per_file = probe_json_len(2) - probe_json_len(1);
+    let copies = 2 * 65_536 / per_file;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .args(["probe", "--json"])
+        .args(std::iter::repeat_n(&clip, copies))
+        .env_remove("SPHERECUT_LOG")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let wchan = format!("/proc/{}/wchan", child.id());
+    let started = Instant::now();
+    while !std::fs::read_to_string(&wchan).is_ok_and(|w| w.contains("pipe_write")) {
+        assert!(child.try_wait().unwrap().is_none(), "probe ended unblocked");
+        assert!(
+            started.elapsed().as_secs() < 30,
+            "probe never blocked on its stdout"
+        );
+        std::thread::yield_now();
+    }
+    let kill = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(kill.success());
+    let status = child.wait().unwrap();
+    assert_eq!(status.signal(), Some(2), "{status:?}");
+    std::fs::remove_dir_all(&dir).ok();
 }

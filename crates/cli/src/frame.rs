@@ -904,7 +904,7 @@ impl Job {
                         return Err(e);
                     }
                     let message = format!(
-                        "no frame {n}: {} has {} frames",
+                        "no frame {n}: {} has {} frames, 0 to {i}",
                         self.file().display(),
                         i + 1
                     );
