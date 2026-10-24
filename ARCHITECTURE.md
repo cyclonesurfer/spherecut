@@ -240,13 +240,13 @@ command line that doesn't parse is a document too under `--json`
 document with `Envelope::to_line()` after the run. The module needs
 only serde, serde_json, core and media. A1 moves it into
 `spherecut-agent` (or a crate below both), which the CLI will depend on
-and which can't depend on the CLI, and the CLI re-exports it (D27). Under `--json`, a
-panic hook writes an `internal` document in the run's schema
-(`schema_for`) unless the document has started, and `main` exits 1
-after any panic; a flag keeps the run to one document. Debug builds
-panic on `SPHERECUT_DEBUG_PANIC` (`main` or `thread`) for the contract
-test. A1's `spherecut call`
-and `spherecut mcp` are to reuse the module.
+and which can't depend on the CLI, and the CLI re-exports it (D27).
+Under `--json`, a panic hook writes an `internal` document in the run's
+schema (`schema_for`) unless the document has started, and `main` exits
+1 after any panic, parsing included; a flag keeps the run to one
+document. Debug builds panic on `SPHERECUT_DEBUG_PANIC` (`main`,
+`thread` or `usage`) for the contract test. A1's `spherecut call` and
+`spherecut mcp` are to reuse the module.
 
 ## Coordinates and conventions
 

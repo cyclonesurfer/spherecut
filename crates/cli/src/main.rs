@@ -56,11 +56,13 @@ fn main() -> ExitCode {
     if json {
         report_panics(contract::schema_for(&args));
     }
-    let cli = match Cli::try_parse_from(&args) {
-        Ok(cli) => cli,
-        Err(e) => return usage(&e, &args, json).into(),
+    // Parsing too, and reporting a command line that doesn't parse, so
+    // that under --json a panic anywhere on this thread ends in exit 1.
+    let parse_and_run = || match Cli::try_parse_from(&args) {
+        Ok(cli) => run(cli),
+        Err(e) => Ok(usage(&e, &args, json)),
     };
-    let exit = match std::panic::catch_unwind(move || run(cli)) {
+    let exit = match std::panic::catch_unwind(parse_and_run) {
         Ok(Ok(exit)) => exit,
         Ok(Err(e)) => {
             to_stderr(&format!("error: {e:#}\n"));
@@ -127,6 +129,8 @@ fn usage(e: &clap::Error, args: &[OsString], json: bool) -> Exit {
     if !e.use_stderr() {
         return Exit::Ok;
     }
+    #[cfg(debug_assertions)]
+    debug_panic("usage");
     if json {
         let (envelope, exit) = contract::usage(args, &e.render().to_string());
         if let Ok(line) = envelope.to_line() {
@@ -199,7 +203,7 @@ fn log_directives(v: &str) -> String {
 
 fn run(cli: Cli) -> Result<Exit> {
     #[cfg(debug_assertions)]
-    debug_panic();
+    debug_panic("run");
     match cli.cmd {
         Cmd::Probe { files, json } => probe(&files, json),
         Cmd::Doctor { render_node, json } => doctor(&render_node, json),
@@ -250,16 +254,19 @@ fn doctor(render_node: &Path, json: bool) -> Result<Exit> {
     }
 }
 
-/// In debug builds, panic when `SPHERECUT_DEBUG_PANIC` asks, on this
-/// thread (`main`) or another (`thread`), so that the contract test can
-/// show what a panic prints. Release builds have no such switch.
+/// In debug builds, panic when `SPHERECUT_DEBUG_PANIC` asks, so that the
+/// contract test can show what a panic prints: as a command starts to
+/// `run`, on this thread (`main`) or another (`thread`), and as a
+/// command line that doesn't parse is reported (`usage`). `stage` is
+/// where this call is. Release builds have no such switch.
 #[cfg(debug_assertions)]
-fn debug_panic() {
-    match std::env::var("SPHERECUT_DEBUG_PANIC").as_deref() {
-        Ok("main") => panic!("SPHERECUT_DEBUG_PANIC=main"),
-        Ok("thread") => {
+fn debug_panic(stage: &str) {
+    match (stage, std::env::var("SPHERECUT_DEBUG_PANIC").as_deref()) {
+        ("run", Ok("main")) => panic!("SPHERECUT_DEBUG_PANIC=main"),
+        ("run", Ok("thread")) => {
             let _ = std::thread::spawn(|| panic!("SPHERECUT_DEBUG_PANIC=thread")).join();
         }
+        ("usage", Ok("usage")) => panic!("SPHERECUT_DEBUG_PANIC=usage"),
         _ => {}
     }
 }

@@ -555,24 +555,27 @@ fn a_panic_is_one_internal_document_and_exit_1() {
     // on another; release builds have no such switch.
     let dir = tmp("panic");
     let (good, _) = clip(&dir, FrameRate::FPS_25);
-    let run = |how: &str, json: bool| {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
-        cmd.arg("probe");
-        if json {
-            cmd.arg("--json");
-        }
-        cmd.arg(&good)
+    let run = |how: &str, args: &[&OsStr]| {
+        Command::new(env!("CARGO_BIN_EXE_spherecut"))
+            .args(args)
             .env_remove("SPHERECUT_LOG")
             .env("SPHERECUT_DEBUG_PANIC", how)
             .output()
             .unwrap()
     };
-    for how in ["main", "thread"] {
-        let out = run(how, true);
+    let probe = [OsStr::new("probe"), OsStr::new("--json"), good.as_os_str()];
+    // As probe starts to run, on its thread or another, and while a
+    // command line that doesn't parse (no file) is reported, which is
+    // before any command runs.
+    let cases: [(&str, &[&OsStr]); 3] =
+        [("main", &probe), ("thread", &probe), ("usage", &probe[..2])];
+    for (how, args) in cases {
+        let out = run(how, args);
         let v = document(&out.stdout);
         if !cfg!(debug_assertions) {
-            assert_eq!(out.status.code(), Some(0), "{v}");
-            assert_eq!(v["ok"], true);
+            let usage = how == "usage";
+            assert_eq!(out.status.code(), Some(if usage { 2 } else { 0 }), "{v}");
+            assert_eq!(v["ok"], !usage);
             continue;
         }
         assert_eq!(out.status.code(), Some(1), "{how}: {v}");
@@ -595,7 +598,7 @@ fn a_panic_is_one_internal_document_and_exit_1() {
     }
     // Without --json, a panic is Rust's.
     if cfg!(debug_assertions) {
-        let out = run("main", false);
+        let out = run("main", &[probe[0], probe[2]]);
         assert_eq!(out.status.code(), Some(101));
         assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
     }
