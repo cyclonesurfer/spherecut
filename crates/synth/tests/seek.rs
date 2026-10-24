@@ -516,6 +516,78 @@ fn open_gop_h264_seeks_exactly_and_a_naive_seek_does_not() {
     oracle(&media::remux_to_mkv(&short, &dir).unwrap(), GOP_8);
 }
 
+/// FFmpeg 7.1 and later's HEVC decoder queues the frames it outputs (all
+/// it has left at the end of the stream, several at once where a keyframe
+/// empties its picture buffer), and its flush leaves that queue as it is.
+/// On one thread, as hardware decoders run (D30), a frame from before a
+/// seek then came out after it: after a seek into the last GOP and the
+/// frame after it, a keyframe seek there gave the clip's last frame and
+/// took it for timestamps going backwards (D2, D29). Here every frame is
+/// sought, then the frame after it, then a keyframe there and a frame
+/// elsewhere, and each must be the sequential decode's.
+#[test]
+fn on_one_thread_no_frame_from_before_a_seek_comes_out_after_it() {
+    let dir = TempDir::new("one-thread");
+    let closed = Some(Gop {
+        open: false,
+        ..OPEN_GOP.unwrap()
+    });
+    for (name, codec, gop) in [
+        ("one-thread-hevc", Codec::Hevc, OPEN_GOP),
+        ("one-thread-closed-hevc", Codec::Hevc, closed),
+        ("one-thread-h264", Codec::H264, OPEN_GOP),
+    ] {
+        let clip = write(
+            &Spec {
+                gop,
+                ..spec(name, codec)
+            },
+            &dir,
+        );
+        let (frames, _) = sequential(&clip);
+        let req = VideoRequest {
+            threads: std::num::NonZeroU32::new(1),
+            ..VideoRequest::default()
+        };
+        let mut d = FfmpegBackend::new().open_video(&clip, &req).unwrap();
+        let never = StopToken::never();
+        let n = frames.len();
+        for k in 0..n {
+            let (f, e, _) = seek_pts(&mut *d, frames[k].pts, SeekMode::Exact);
+            assert_eq!(
+                (Seen::of(&f), e),
+                (frames[k], Exactness::Exact),
+                "{name}: {k}"
+            );
+            match (d.next_frame(&never).unwrap(), frames.get(k + 1)) {
+                (NextFrame::Frame(f), Some(want)) => {
+                    assert_eq!(Seen::of(&f), *want, "{name}: after {k}");
+                }
+                (NextFrame::End, None) => {}
+                (got, want) => panic!("{name}: after {k}: {got:?}, expected {want:?}"),
+            }
+            let (f, e, _) = seek_pts(&mut *d, frames[k].pts, SeekMode::Keyframe);
+            assert_eq!(e, Exactness::KeyframeOnly, "{name}: keyframe at {k}");
+            assert!(f.key, "{name}: keyframe at {k} gave pts {}", f.pts);
+            let i = frames.iter().position(|s| s.pts == f.pts);
+            assert_eq!(
+                i.map(|i| frames[i]),
+                Some(Seen::of(&f)),
+                "{name}: keyframe at {k}"
+            );
+            let j = (k * 7 + 3) % n;
+            let (f, e, _) = seek_pts(&mut *d, frames[j].pts, SeekMode::Exact);
+            assert_eq!(
+                (Seen::of(&f), e),
+                (frames[j], Exactness::Exact),
+                "{name}: {k}, {j}"
+            );
+        }
+        let events = d.take_events();
+        assert!(events.is_empty(), "{name}: {events:?}");
+    }
+}
+
 #[test]
 fn an_edit_list_hides_its_lead_in_and_clip_time_starts_after_it() {
     let dir = TempDir::new("edit");
@@ -920,6 +992,178 @@ fn faststart(src: &Path, dst: &Path) {
     octx.write_trailer().unwrap();
 }
 
+/// The video samples of the MP4 at `path` in decode order: each one's
+/// pts, where it starts in the file, its size, and whether it is a
+/// keyframe.
+// Reads a file this test made with ffmpeg-next alone, as `faststart` does.
+#[allow(clippy::disallowed_methods)]
+fn samples(path: &Path) -> Vec<(i64, usize, usize, bool)> {
+    let mut ictx = ff::format::input(path).unwrap();
+    ictx.packets()
+        .filter(|(s, _)| s.parameters().medium() == ff::media::Type::Video)
+        .map(|(_, p)| {
+            (
+                p.pts().unwrap(),
+                usize::try_from(p.position()).unwrap(),
+                p.size(),
+                p.is_key(),
+            )
+        })
+        .collect()
+}
+
+/// Zero the first bytes of the slice header of the first slice in the
+/// sample at `pos`, `size` bytes of NAL units with 4-byte lengths, so the
+/// decoder can't decode that picture: the parameter set (HEVC) or first
+/// macroblock (H.264) it names is out of range.
+fn break_slice_header(bytes: &mut [u8], pos: usize, size: usize, codec: Codec) {
+    let mut at = pos;
+    while at + 4 < pos + size {
+        let len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        let header = bytes[at + 4];
+        let (slice, header_len) = match codec {
+            Codec::H264 => ((1..=5).contains(&(header & 0x1f)), 1),
+            _ => (((header >> 1) & 0x3f) < 32, 2),
+        };
+        if slice {
+            let start = at + 4 + header_len;
+            bytes[start..start + 6.min(len - header_len)].fill(0);
+            return;
+        }
+        at += 4 + len;
+    }
+    panic!("no slice in the sample at byte {pos}");
+}
+
+/// Damage that loses a reference picture is a `Damaged` event, and
+/// seeks agree with the decode from the start (D29). The picture decoded
+/// after a GOP's keyframe has its slice header broken, and every later
+/// picture of the GOP refers to it, directly or not. FFmpeg 6.1 fails it
+/// as invalid data and decodes the rest from a grey stand-in. From 7.1
+/// the HEVC decoder skips it without an error, and from 8.0 it flags the
+/// pictures that refer to it corrupt, which are dropped: only their
+/// flags say the file is damaged. FFmpeg 7.1.x does neither, and nothing
+/// says so (D29's limits).
+#[test]
+fn damage_that_loses_a_reference_picture_is_reported_and_seeks_agree() {
+    let dir = TempDir::new("lost-reference");
+    let v = ff::codec::version();
+    let (v7_1, v8_0) = (61 << 16 | 19 << 8, 62 << 16 | 11 << 8);
+    let hevc_silent = (v7_1..v8_0).contains(&v);
+    let hevc_flags = v >= v8_0;
+    let never = StopToken::never();
+    let damaged = |events: &[DecoderEvent]| -> Vec<Option<i64>> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                DecoderEvent::Damaged { last_good_pts, .. } => Some(*last_good_pts),
+                _ => None,
+            })
+            .collect()
+    };
+    for (name, codec, bframes) in [
+        ("lost-hevc-p", Codec::Hevc, 0),
+        ("lost-hevc-b", Codec::Hevc, 3),
+        ("lost-h264-p", Codec::H264, 0),
+    ] {
+        let gop = Some(Gop {
+            keyint: 8,
+            bframes,
+            open: false,
+            radl: 0,
+        });
+        let clip = write(
+            &Spec {
+                gop,
+                frames: 24,
+                ..spec(name, codec)
+            },
+            &dir,
+        );
+        let (whole, _) = sequential(&clip);
+        let pk = samples(&clip);
+        let keys: Vec<usize> = (0..pk.len()).filter(|&i| pk[i].3).collect();
+        assert_eq!(keys.len(), 3, "{name}: keyframes at {keys:?}");
+        let (key, next) = (keys[1], keys[2]);
+        let (lost_pts, pos, size, _) = pk[key + 1];
+        let mut bytes = std::fs::read(&clip).unwrap();
+        break_slice_header(&mut bytes, pos, size, codec);
+        let bad = dir.join(format!("{name}-damaged.mp4"));
+        std::fs::write(&bad, &bytes).unwrap();
+        // The frames decoded from the lost picture on, to the next
+        // keyframe, which with B-frames include some shown before it.
+        let lost_from = pk[key + 1..next].iter().map(|p| p.0).min().unwrap();
+        let lost = lost_from..pk[next].0;
+        let reported = codec == Codec::H264 || !hevc_silent;
+        for threads in [None, std::num::NonZeroU32::new(1)] {
+            let what = format!("{name} on {threads:?} threads");
+            let req = VideoRequest {
+                threads,
+                ..VideoRequest::default()
+            };
+            let open_bad = || FfmpegBackend::new().open_video(&bad, &req).unwrap();
+            let mut d = open_bad();
+            let mut seen = Vec::new();
+            while let NextFrame::Frame(f) = d.next_frame(&never).unwrap() {
+                seen.push(Seen::of(&f));
+            }
+            let events = d.take_events();
+            let after = damaged(&events);
+            assert_eq!(!after.is_empty(), reported, "{what}: {events:?}");
+            if codec == Codec::Hevc && hevc_flags {
+                // Once, after the last frame decoded before the frames
+                // flagged corrupt: the GOP's keyframe.
+                assert_eq!(after, [Some(pk[key].0)], "{what}: {events:?}");
+            }
+            // Nothing outside the frames that refer to the lost picture is
+            // lost or changed, and that picture never comes out.
+            for w in whole.iter().filter(|w| !lost.contains(&w.pts)) {
+                assert!(seen.contains(w), "{what}: frame at pts {} lost", w.pts);
+            }
+            assert!(
+                seen.iter().all(|s| s.pts != lost_pts),
+                "{what}: the damaged picture came out"
+            );
+            // A seek to any frame of the clip gives the frame the decode
+            // from the start shows then.
+            for w in &whole {
+                let (f, e, _) = seek_pts(&mut *d, w.pts, SeekMode::Exact);
+                let shown = seen[shown_at(&seen, w.pts).unwrap()];
+                assert_eq!(
+                    (Seen::of(&f), e),
+                    (shown, Exactness::Exact),
+                    "{what}: seek to pts {}",
+                    w.pts
+                );
+            }
+            // And one to a frame that refers to the lost picture, from a
+            // decoder just opened, says the file is damaged, as does a
+            // keyframe seek there, which gives the GOP's keyframe.
+            for w in whole.iter().filter(|w| lost.contains(&w.pts)) {
+                for mode in [SeekMode::Exact, SeekMode::Keyframe] {
+                    let mut d = open_bad();
+                    let (f, e, _) = seek_pts(&mut *d, w.pts, mode);
+                    if mode == SeekMode::Keyframe {
+                        assert_eq!(
+                            (f.pts, e),
+                            (pk[key].0, Exactness::KeyframeOnly),
+                            "{what}: keyframe seek to pts {}",
+                            w.pts
+                        );
+                    }
+                    let events = d.take_events();
+                    assert_eq!(
+                        !damaged(&events).is_empty(),
+                        reported,
+                        "{what}: {mode:?} seek to pts {}: {events:?}",
+                        w.pts
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Matroska's demuxer reads its index (the Cues, after the clusters)
 /// only at its first seek; until then the index lists only the keyframes
 /// read, and a far seek must not take it to mean that the target is in
@@ -1019,7 +1263,8 @@ fn find_box(file: &[u8], kind: &[u8; 4]) -> usize {
 
 /// An edit list of two pieces of the clip, as editors write: FFmpeg drops
 /// frames where they meet, so frames aren't shown a frame apart however
-/// even `stts` is, and the HEVC decoder says the splice is damage.
+/// even `stts` is, and up to FFmpeg 7.0 the HEVC decoder says the splice
+/// is damage.
 #[test]
 fn an_edit_list_that_splices_two_pieces_seeks_exactly_and_counts_frames() {
     let dir = TempDir::new("splice");
@@ -1054,13 +1299,19 @@ fn an_edit_list_that_splices_two_pieces_seeks_exactly_and_counts_frames() {
             .filter(|w| w[1].pts - w[0].pts != FRAME_30);
         assert!(gaps.count() > 0, "{codec:?}: {frames:?}");
         // Played through, and caught up across the splice from a seek
-        // before it: the first frame from the target comes out, and the
-        // HEVC decoder's error at the splice is an event either way.
+        // before it: the first frame from the target comes out. The second
+        // piece's keyframe has a POC the HEVC decoder still holds. Up to
+        // FFmpeg 7.0 sending it fails with invalid data, which is a
+        // `Damaged` event. From 7.1 (libavcodec 61.19) the decoder skips a
+        // picture it can't decode with a warning and no error, and none of
+        // the frames after this one comes out flagged corrupt, so there is
+        // nothing to report: the same frames come out (D29).
         let never = StopToken::never();
         let mut d = open(&spliced);
         while let NextFrame::Frame(_) = d.next_frame(&never).unwrap() {}
         let played = d.take_events();
-        assert_eq!(played.is_empty(), codec == Codec::H264, "{played:?}");
+        let fails_at_splice = codec == Codec::Hevc && ff::codec::version() < (61 << 16 | 19 << 8);
+        assert_eq!(played.is_empty(), !fails_at_splice, "{played:?}");
         for (from, until) in [(10, 15), (10, 16), (12, 14), (5, 17), (13, 15)] {
             seek_pts(&mut *d, frames[from].pts, SeekMode::Exact);
             d.catch_up(Some(at(&*d, frames[until].pts)));
@@ -1285,32 +1536,47 @@ fn stopped_seek(d: &mut dyn VideoDecode) {
 fn a_stop_token_stops_a_long_seek_and_decoding_goes_on() {
     let dir = TempDir::new("long-gop");
     // One GOP: the last frame is reached only by decoding every frame.
-    // Many small frames make a long decode that is quick to write.
-    let clip = write(
-        &Spec {
-            width: 64,
-            height: 32,
-            frames: 2400,
-            gop: Some(Gop {
-                keyint: 10_000,
-                bframes: 3,
-                open: false,
-                radl: 0,
-            }),
-            ..spec("long-gop", Codec::H264)
-        },
-        &dir,
-    );
-    let mut d = open(&clip);
-    let last = FrameRate::FPS_30.frame_to_time(2399).unwrap();
-    // How long the whole seek takes, from the start.
-    let started = Instant::now();
-    let (end, _, cost) = seek_to(&mut *d, last, SeekMode::Exact);
-    let full = started.elapsed();
-    assert!(cost.frames_decoded >= 2399, "{cost:?}");
+    // Many small frames make a long decode that is quick to write. Where
+    // they decode too fast for the stops below to come part way in (frame
+    // threads on FFmpeg 8.1.3 took 35 ms for 2400 now and then, and about
+    // 100 most times), the clip is written again longer, up to 16 times.
+    let mut frames = 2400;
+    let (mut d, last, end, full) = loop {
+        let clip = write(
+            &Spec {
+                width: 64,
+                height: 32,
+                frames,
+                gop: Some(Gop {
+                    keyint: 100_000,
+                    bframes: 3,
+                    open: false,
+                    radl: 0,
+                }),
+                ..spec(&format!("long-gop-{frames}"), Codec::H264)
+            },
+            &dir,
+        );
+        let mut d = open(&clip);
+        let last = FrameRate::FPS_30
+            .frame_to_time(i64::from(frames) - 1)
+            .unwrap();
+        // How long the whole seek takes, from the start.
+        let started = Instant::now();
+        let (end, _, cost) = seek_to(&mut *d, last, SeekMode::Exact);
+        let full = started.elapsed();
+        assert!(cost.frames_decoded >= frames - 1, "{cost:?}");
+        if full > Duration::from_millis(40) || frames >= 2400 * 16 {
+            break (d, last, end, full);
+        }
+        // Enough frames for about 80 ms at this rate, and at least twice as
+        // many.
+        let times = (Duration::from_millis(80).as_nanos() / full.as_nanos().max(1)).max(1) + 1;
+        frames = (frames * u32::try_from(times).unwrap_or(16)).min(2400 * 16);
+    };
     assert!(
         full > Duration::from_millis(40),
-        "the long seek took only {full:?}"
+        "the long seek of {frames} frames took only {full:?}"
     );
     let (mut first, _, _) = seek_to(&mut *d, Time::ZERO, SeekMode::Exact);
 

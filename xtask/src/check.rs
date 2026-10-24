@@ -56,6 +56,8 @@ pub fn run(a: Args) -> Result<()> {
             "warnings",
         ]),
     )?;
+    // The FFmpeg bindings differ between releases (D2).
+    crate::compat::from_check()?;
     run_step(
         "tests (Tier 1)",
         Command::new("cargo").args(["test", "--workspace", "--all-targets"]),

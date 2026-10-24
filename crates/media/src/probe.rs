@@ -1065,6 +1065,19 @@ fn undecodable(
             return unconfigured("has no sample rate");
         }
         if a.channels == 0 {
+            // A decoder that fails to open in avformat_find_stream_info
+            // leaves the stream with no channels in FFmpeg 7.x, 8.0 to
+            // 8.1.2, 9.0 and 9.0.1 (6.1 keeps the sample entry's, and 8.1.3
+            // and 9.0.2 put them back): what the decoder says is the
+            // reason then (D2).
+            if let Some(decoder) = &decoder
+                && let Err(error) = open()
+            {
+                return Some(Undecodable::Refused {
+                    decoder: decoder.clone(),
+                    error,
+                });
+            }
             return unconfigured("has no channels");
         }
         if a.sample_fmt.is_none() && decoder.is_some() {
@@ -1397,6 +1410,45 @@ mod tests {
         let mut d = stream(StreamKind::Data);
         d.codec = None;
         assert!(undecodable(&d, None, || Err(ff::Error::InvalidData)).is_none());
+    }
+
+    #[test]
+    fn an_audio_stream_with_no_channels_is_judged_by_its_decoder_first() {
+        // FFmpeg 7.x zeroes the channels of an audio stream whose decoder
+        // refused its setup in avformat_find_stream_info, so the decoder's
+        // refusal is the reason, as with the channels 6.1 and 8.1.3 keep:
+        // a feature it lacks is not damage.
+        crate::init();
+        let mut a = stream(StreamKind::Audio);
+        a.audio.as_mut().unwrap().channels = 0;
+        let aac = || Some("aac".to_string());
+        let enosys = ff::Error::Other {
+            errno: ff::util::error::ENOSYS,
+        };
+        let why = undecodable(&a, aac(), || Err(enosys)).unwrap();
+        assert!(
+            matches!(why, Undecodable::Refused { error, .. } if error == enosys),
+            "{why:?}"
+        );
+        assert!(!why.is_damage(Some(FourCc::new(b"mp4a")), true));
+        let why = undecodable(&a, aac(), || Err(ff::Error::InvalidData)).unwrap();
+        assert!(why.is_damage(Some(FourCc::new(b"mp4a")), true));
+        assert_eq!(
+            why.describe("stream #1", true),
+            "stream #1 cannot be opened by FFmpeg's aac decoder (Invalid data found when processing input), so its codec setup is damaged"
+        );
+        // A decoder that opens leaves the stream without channels, and
+        // without a decoder there is nothing to ask.
+        for (decoder, opens) in [(aac(), true), (None, false)] {
+            let why = undecodable(&a, decoder, || {
+                assert!(opens, "the decoder was opened");
+                Ok(())
+            });
+            assert!(
+                matches!(why, Some(Undecodable::Unconfigured("has no channels"))),
+                "{why:?}"
+            );
+        }
     }
 
     #[test]

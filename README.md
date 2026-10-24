@@ -251,7 +251,13 @@ cargo xtask check        # rustfmt, clippy -D warnings, Tier 1 tests, doc tests,
 cargo xtask check --fix  # same, applying rustfmt
 cargo xtask gen-media    # synthetic test clips into test-media/ (--quick skips the 4K clip, --out <dir>)
 cargo xtask hw-test      # Tier 2 run on real hardware; report in hw-reports/
+cargo xtask compat PREFIX... [--test PREFIX] [--clean]   # clippy and a link against other FFmpeg builds, Tier 1 against one
 ```
+
+`cargo xtask compat` takes FFmpeg install prefixes, such as those
+`scripts/build-ffmpeg.sh TAG DIR` builds from a release tag, or the
+colon-separated list in `SPHERECUT_FFMPEG_COMPAT`, which `cargo xtask
+check` also runs it on (DECISIONS D2).
 
 `cargo xtask check` needs `cargo install --locked cargo-deny cargo-audit`
 once (or `--no-supply-chain` to skip those two), and strace: it stops

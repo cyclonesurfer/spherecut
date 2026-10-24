@@ -550,6 +550,15 @@ fn display_rotation(par: *const sys::AVCodecParameters) -> Option<f64> {
 
 /// Hardware device types compiled into this FFmpeg.
 pub fn hw_device_types() -> Vec<String> {
+    hw_device_type_ids()
+        .into_iter()
+        // SAFETY: accepts any type value.
+        .filter_map(|t| cstr_opt(unsafe { c::av_hwdevice_get_type_name(t) }))
+        .collect()
+}
+
+/// [`hw_device_types`] as FFmpeg's device type values.
+fn hw_device_type_ids() -> Vec<c_int> {
     let mut out = Vec::new();
     let mut t = HW_NONE;
     loop {
@@ -558,10 +567,7 @@ pub fn hw_device_types() -> Vec<String> {
         if t == HW_NONE {
             break;
         }
-        // SAFETY: accepts any type value.
-        if let Some(n) = cstr_opt(unsafe { c::av_hwdevice_get_type_name(t) }) {
-            out.push(n);
-        }
+        out.push(t);
     }
     out
 }
@@ -588,7 +594,8 @@ pub enum HwError {
     NoDevice { node: String, reason: String },
 }
 
-/// FFmpeg's device type for a name such as "vaapi".
+/// FFmpeg's device type for a name such as "vaapi", when this FFmpeg was
+/// built with it.
 fn device_type(kind: &str) -> Result<c_int, HwError> {
     let kind_c = CString::new(kind).map_err(|_| HwError::Nul {
         what: "device type",
@@ -596,8 +603,18 @@ fn device_type(kind: &str) -> Result<c_int, HwError> {
     })?;
     // SAFETY: valid NUL-terminated string.
     let t = unsafe { c::av_hwdevice_find_type_by_name(kind_c.as_ptr()) };
-    if t == HW_NONE {
-        return Err(HwError::NotBuiltIn(kind.into()));
+    built_in(kind, t, &hw_device_type_ids())
+}
+
+/// `t`, the type FFmpeg names `kind`, if it is among the types `built`
+/// into this FFmpeg. FFmpeg knows every type's name, built in or not, and
+/// fails to create a device of one it lacks with ENOMEM ("Cannot allocate
+/// memory"), as doctor knows (`doctor::open_device`).
+fn built_in(kind: &str, t: c_int, built: &[c_int]) -> Result<c_int, HwError> {
+    if t == HW_NONE || !built.contains(&t) {
+        return Err(HwError::NotBuiltIn(
+            crate::hwprobe::device_label(kind).into(),
+        ));
     }
     Ok(t)
 }
@@ -3024,6 +3041,55 @@ mod tests {
         let mut ctx = wanting(vaapi);
         assert_eq!(offer(&mut ctx, &[yuv]), none);
         assert_eq!(hw_refusal(&ctx), Some(HwRefusal::NotOffered));
+    }
+
+    #[test]
+    fn a_device_type_this_ffmpeg_lacks_is_not_built_in() {
+        use sys::AVHWDeviceType as T;
+        let (vaapi, vulkan) = (
+            T::AV_HWDEVICE_TYPE_VAAPI as c_int,
+            T::AV_HWDEVICE_TYPE_VULKAN as c_int,
+        );
+        assert_eq!(built_in("vaapi", vaapi, &[vaapi, vulkan]).ok(), Some(vaapi));
+        for (kind, t, built) in [
+            ("vulkan", vulkan, &[vaapi][..]),
+            ("vaapi", vaapi, &[vulkan][..]),
+            ("nosuch", HW_NONE, &[vaapi, vulkan][..]),
+        ] {
+            match built_in(kind, t, built) {
+                Err(e @ HwError::NotBuiltIn(_)) => assert!(
+                    e.to_string().ends_with(&format!(
+                        "without {} support",
+                        crate::hwprobe::device_label(kind)
+                    )),
+                    "{e}"
+                ),
+                r => panic!("{kind}: {r:?}"),
+            }
+        }
+        // This FFmpeg knows the names of types no Linux build has, and must
+        // not take them for built in.
+        let built = hw_device_types();
+        for kind in [
+            "videotoolbox",
+            "d3d11va",
+            "dxva2",
+            "mediacodec",
+            "vaapi",
+            "vulkan",
+        ] {
+            match device_type(kind) {
+                Ok(_) => assert!(built.iter().any(|b| b == kind), "{kind}: {built:?}"),
+                Err(HwError::NotBuiltIn(_)) => {
+                    assert!(!built.iter().any(|b| b == kind), "{kind}: {built:?}")
+                }
+                Err(e) => panic!("{kind}: {e}"),
+            }
+        }
+        assert!(matches!(
+            HwDevice::open("videotoolbox", None),
+            Err(HwError::NotBuiltIn(_))
+        ));
     }
 
     #[test]

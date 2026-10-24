@@ -47,7 +47,7 @@ synth, which depends on media.
 | `spherecut-app` | eframe app, docked panels, viewer paint callbacks | M1 |
 | `spherecut-agent` | Agent integration (D23): the request and response type of each operation, shared by `spherecut mcp` and `spherecut call` (from A1 the `--json` of `probe`, `doctor` and `frame` uses them too, under a new schema version if M1's shape changes, D27); the MCP server; later the GUI attach bridge | A1 (after M1) |
 | `spherecut-cli` | The `spherecut` binary: `probe` and `doctor` today. `frame` (M1), `render` (M2), the GUI when run without a subcommand (M1), and `mcp` and `call` (A1) are planned. Its library half holds `contract`, the JSON contract of `--json` (D27), until A1 moves it to `spherecut-agent` or a crate below both | M0: `probe`, `doctor`; M1: the JSON contract |
-| `xtask` | `check`, `gen-media`, `hw-test` | M0 |
+| `xtask` | `check`, `compat` (clippy and a link of the tests against other FFmpeg builds, and Tier 1 against one, D2), `gen-media`, `hw-test` | M0; `compat` from 2026-10-24 |
 
 Crates are created when they get real content, not as empty shells. The
 planned ones above don't exist yet. Every crate root forbids `unsafe`
@@ -505,7 +505,13 @@ intermediate equirect exists only as the output of a 360 export.
   (`crates/render/tests/`): every pipeline, the uniform layouts, the
   mips, both upload paths, `render_still` against the CPU reference, and
   the golden images (below).
-  `cargo xtask check` runs all of it.
+  `cargo xtask check` runs all of it, against the FFmpeg pkg-config
+  finds. `cargo xtask compat` runs clippy against other FFmpeg builds
+  and builds and links the tests against each, in a target directory of
+  its own that is deleted when the FFmpeg behind its prefix changes, and
+  with `--test` runs Tier 1 against one; `check` runs the clippy and the
+  link for the prefixes `SPHERECUT_FFMPEG_COMPAT` lists, and says when it
+  lists none (D2).
 * **Tier 2** needs hardware or samples. Tier 2 tests are `#[ignore]`d with a
   reason and call `spherecut_testkit::tier2::require_*`, which fails the
   test with a `TIER2-SKIP:` marker when a device or sample is missing.
