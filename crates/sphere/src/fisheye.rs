@@ -20,7 +20,8 @@ pub enum Model {
     Equisolid,
     /// `r = 2 tan(θ/2)`.
     Stereographic,
-    /// `r = sin θ`. Only covers θ ≤ 90°.
+    /// `r = sin θ`. Only covers θ_d ≤ 90°: past that, `sin` folds back and
+    /// [`Lens::theta`] gives the mirrored angle.
     Orthographic,
 }
 
@@ -118,8 +119,9 @@ impl Lens {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f64::consts::{FRAC_PI_2, PI};
+
     use crate::angle_between;
-    use crate::testutil::unit_dir;
     use proptest::prelude::*;
 
     fn model() -> impl Strategy<Value = Model> {
@@ -141,13 +143,19 @@ mod tests {
 
     proptest! {
         #[test]
-        fn round_trip(d in unit_dir(), m in model(),
+        fn round_trip(m in model(), along in 0.0f64..1.0, phi in -PI..PI,
                       k1 in -0.05f64..0.05, k2 in -0.01f64..0.01) {
             let lens = Lens { model: m, k: [k1, k2, 0.0, 0.0] };
-            let theta = DVec2::new(d.x, d.y).length().atan2(-d.z);
             // Real 360 lenses cover a little over 90°, i.e. θ up to ~100°.
+            // The angle is drawn inside that range rather than filtered, so
+            // high case counts don't run into proptest's reject limit.
             let max = match m { Model::Orthographic => 1.4, _ => 1.8 };
-            prop_assume!(theta < max);
+            let theta = along * max;
+            // An orthographic lens is one-to-one only up to θ_d = 90°, which
+            // distortion can reach before θ does.
+            prop_assume!(m != Model::Orthographic || lens.distort(theta) <= FRAC_PI_2);
+            let (st, ct) = theta.sin_cos();
+            let d = DVec3::new(st * phi.cos(), st * phi.sin(), -ct);
             let back = lens.unproject(lens.project(d));
             prop_assert!(back.is_some());
             prop_assert!(angle_between(back.unwrap_or_default(), d) < 1e-7);
