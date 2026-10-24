@@ -2012,10 +2012,12 @@ What:
   `GpuFrame::set_source`, as an upload does (a Tier 1 test fills a slot
   that way and gets the same levels and projection). Slots are made
   inside an `OutOfMemory` error scope.
-- **Upload**: `Uploader::upload` writes the planes, records ingest and
-  mips with GPU timestamps around them where the device has
-  `TIMESTAMP_QUERY_INSIDE_ENCODERS`, writes the `Source` uniform and
-  submits once, never waiting. `UploadPath::WriteTexture` (the default)
+- **Upload**: `Uploader::upload` writes the planes, then records ingest
+  and mips with GPU timestamps around them where the device has
+  `TIMESTAMP_QUERY_INSIDE_ENCODERS` (so `UploadStats::gpu_ms` is the GPU
+  time of both, on either path; 3a's first span began after the ingest
+  passes and timed only the mips, which a Tier 1 test now catches),
+  writes the `Source` uniform and submits once, never waiting. `UploadPath::WriteTexture` (the default)
   passes the frame's rows to `write_texture` at their own stride;
   `UploadPath::StagingBelt` copies them into a reused belt chunk at a
   256-byte pitch and records `copy_buffer_to_texture`.

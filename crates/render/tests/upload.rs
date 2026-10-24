@@ -458,6 +458,39 @@ fn bad_frames_and_wrong_slots_are_refused() {
     }
 }
 
+#[test]
+fn the_gpu_time_covers_the_ingest() {
+    // A deep frame into a slot of one level: no mips, so the GPU time is
+    // the ingest passes', which take most of an upload and its wait on
+    // lavapipe. A span that missed them (as 3a's first one did) timed
+    // nothing but its own two timestamps: 0.04 ms of 30.
+    let gpu = gpu();
+    assert!(
+        gpu.caps.timestamps_in_encoders,
+        "lavapipe has timestamps between passes"
+    );
+    let mut uploader = Uploader::new(gpu);
+    let frame = noise(Kind::P010, (2048, 1024), 0, 13);
+    let slot = slot_for(&frame, 1);
+    let mut runs = Vec::new();
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        uploader.upload(gpu, &frame, &slot).unwrap();
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let wall = start.elapsed().as_secs_f64() * 1e3;
+        let timed = f64::from(uploader.poll(gpu).expect("a GPU time once idle"));
+        eprintln!("GPU {timed:.3} ms of {wall:.3} ms");
+        runs.push(timed / wall);
+    }
+    // The best run, since the other tests' work on the device can only
+    // lengthen the wait (measured 0.8 here).
+    let best = runs.iter().copied().fold(0.0, f64::max);
+    assert!(
+        best > 0.25,
+        "the GPU time is at most {best:.4} of the upload's wall time"
+    );
+}
+
 /// `bench_upload_5k7`'s body: `frames` uploads of each input by each path,
 /// recording the CPU time, the GPU time where the device has timestamps,
 /// and the allocator's block count before and after, which a path that

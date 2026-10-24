@@ -47,8 +47,9 @@ pub struct UploadStats {
     /// Plane bytes copied.
     pub bytes: u64,
     /// The GPU time of the latest upload whose timestamps are back (not
-    /// necessarily this one's): ingest and mips. `None` without
-    /// timestamps, or before any is back.
+    /// necessarily this one's): its ingest passes and mips, on either
+    /// path (the belt's copies come before the span, as `write_texture`'s
+    /// do). `None` without timestamps, or before any is back.
     pub gpu_ms: Option<f32>,
 }
 
@@ -210,17 +211,23 @@ impl Uploader {
             gpu.queue
                 .write_buffer(&self.ingest_uniform, 0, bytemuck::bytes_of(&uniform));
         }
+        // The planes first: deep ones into their scratch textures. Then
+        // the GPU's own work, timed: the ingest passes and the mips.
         for (i, (p, (data, row))) in shape.planes.iter().zip(&planes).enumerate() {
             bytes += (row * p.size.1 as usize) as u64;
-            if p.format.is_deep() {
-                let scratch = self.scratch_for(gpu, i, p.format, p.size).texture.clone();
-                self.write_plane(gpu, &mut enc, data, *row, &scratch, p.size)?;
-                self.record_ingest(&mut enc, i, p.format, &slot.planes[i].levels[0]);
+            let texture = if p.format.is_deep() {
+                self.scratch_for(gpu, i, p.format, p.size).texture.clone()
             } else {
-                self.write_plane(gpu, &mut enc, data, *row, &slot.planes[i].texture, p.size)?;
-            }
+                slot.planes[i].texture.clone()
+            };
+            self.write_plane(gpu, &mut enc, data, *row, &texture, p.size)?;
         }
         let span = self.timers.as_mut().and_then(|t| t.begin(&mut enc));
+        for (i, p) in shape.planes.iter().enumerate() {
+            if p.format.is_deep() {
+                self.record_ingest(&mut enc, i, p.format, &slot.planes[i].levels[0]);
+            }
+        }
         self.record_mips(&mut enc, slot);
         if let (Some(t), Some(span)) = (self.timers.as_mut(), span) {
             t.end(&mut enc, span);
