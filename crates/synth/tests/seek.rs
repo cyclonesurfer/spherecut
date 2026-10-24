@@ -750,10 +750,16 @@ fn a_truncated_clip_seeks_before_its_cut_and_says_where_it_ends() {
     let mut d = open(&cut);
     // What a sequential decode gets before the read fails.
     let mut before = Vec::new();
+    let mut last_key = None;
     let never = StopToken::never();
     loop {
         match d.next_frame(&never) {
-            Ok(NextFrame::Frame(f)) => before.push(Seen::of(&f)),
+            Ok(NextFrame::Frame(f)) => {
+                before.push(Seen::of(&f));
+                if f.key {
+                    last_key = before.last().copied();
+                }
+            }
             Ok(NextFrame::End) => panic!("the cut file decoded to its end"),
             Ok(NextFrame::Stopped) => unreachable!(),
             Err(_) => break,
@@ -781,6 +787,18 @@ fn a_truncated_clip_seeks_before_its_cut_and_says_where_it_ends() {
     assert!(
         cost.seeks == 2 && cost.reseeks == 1 && cost.frames_decoded <= 8 + 3,
         "{cost:?}"
+    );
+    assert!(
+        d.take_events()
+            .iter()
+            .any(|e| matches!(e, DecoderEvent::Damaged { .. }))
+    );
+    // A keyframe seek there gives the last keyframe the file holds, also
+    // with a Damaged event, rather than the first frame.
+    let (got, e, _) = seek_pts(&mut *d, target, SeekMode::Keyframe);
+    assert_eq!(
+        (Some(Seen::of(&got)), e),
+        (last_key, Exactness::KeyframeOnly)
     );
     assert!(
         d.take_events()

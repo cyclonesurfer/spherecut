@@ -1044,10 +1044,11 @@ impl FfmpegVideo {
 
     /// One BACKWARD seek and its first frame, whatever its pts: the
     /// keyframe a seek to `t` lands on, since its leading pictures are
-    /// dropped, which is after `t` when `t` is one of them. From the start
-    /// when the seek finds no frame. The decoder stays where it is, so an
-    /// exact seek to `t` after it decodes forward when the frame is at or
-    /// before `t`.
+    /// dropped, which is after `t` when `t` is one of them. Past the cut
+    /// of a file cut short of its index, the last keyframe the file holds,
+    /// with a `Damaged` event. From the start when the seek finds no frame.
+    /// The decoder stays where it is, so an exact seek to `t` after it
+    /// decodes forward when the frame is at or before `t`.
     fn keyframe(
         &mut self,
         t: i64,
@@ -1061,6 +1062,8 @@ impl FfmpegVideo {
         cost.seeks += 1;
         self.after_seek(false);
         let mut from_start = false;
+        // The last keyframe a cut file holds, once a seek to it was tried.
+        let mut inside: Option<i64> = None;
         let first = loop {
             match self.decode(stop) {
                 Ok(Got::Frame(r)) => {
@@ -1075,6 +1078,31 @@ impl FfmpegVideo {
                     reason: e.to_string(),
                     last_good_pts: None,
                 }),
+                // Nothing of the stream could be read: the seek landed past
+                // the cut of a file cut short of its index, as in `land`.
+                // The last keyframe the file holds is the one to show, with
+                // the damage said.
+                Err(e) if !from_start && self.dec.landing().is_none() => {
+                    match self.dec.keyframe_inside(inside) {
+                        Some(k) => {
+                            if inside.is_none() {
+                                self.events.push(DecoderEvent::Damaged {
+                                    reason: e.to_string(),
+                                    last_good_pts: None,
+                                });
+                            }
+                            inside = Some(k);
+                            self.dec.seek(k.saturating_add(self.dec.key_lag()))?;
+                            cost.seeks += 1;
+                            cost.reseeks += 1;
+                            self.after_seek(false);
+                        }
+                        None => {
+                            from_start = true;
+                            self.seek_to_start(&mut cost)?;
+                        }
+                    }
+                }
                 Ok(Got::End) | Err(_) if !from_start => {
                     from_start = true;
                     self.seek_to_start(&mut cost)?;
