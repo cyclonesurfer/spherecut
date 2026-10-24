@@ -411,10 +411,13 @@ impl VideoFrame {
         time: Time,
     ) -> VideoFrame {
         let f = ffi::frame_fields(&frame);
-        let bytes = (0..layout.planes.len())
-            .filter_map(|i| ffi::plane(&frame, i))
-            .map(<[u8]>::len)
-            .sum();
+        let bytes = match ffi::buffer_bytes(&frame) {
+            0 => (0..layout.planes.len())
+                .filter_map(|i| ffi::plane(&frame, i))
+                .map(<[u8]>::len)
+                .sum(),
+            held => held,
+        };
         VideoFrame {
             pts,
             time,
@@ -496,7 +499,10 @@ impl VideoFrame {
         })
     }
 
-    /// The bytes its planes take, padding included.
+    /// The bytes keeping it keeps, for the frame cache's budget (M1 plan
+    /// section 8.3): an FFmpeg frame's buffers by their `AVBufferRef`
+    /// sizes, so with row padding, alignment and the rows a decoder
+    /// allocates past the height; an owned frame's planes.
     pub fn bytes(&self) -> usize {
         self.bytes
     }

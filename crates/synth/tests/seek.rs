@@ -1294,6 +1294,14 @@ fn frames_share_their_layout_and_hand_out_planes_without_a_copy() {
         assert_eq!(a.plane(i).unwrap().bytes.as_ptr(), a.storage_ptr(i));
     }
     assert!(a.plane(3).is_none());
+    // Keeping it keeps its buffers, which hold a little more than the
+    // rows it has (about 2% here).
+    let rows: usize = (0..3).map(|i| a.plane(i).unwrap().bytes.len()).sum();
+    assert!(
+        rows < a.bytes() && a.bytes() < 2 * rows,
+        "{} bytes for {rows} in rows",
+        a.bytes()
+    );
     assert_eq!(a.size(), (256, 128));
     assert_eq!(a.plane(1).unwrap().width, 128);
     assert_eq!(a.duration, Some(FrameRate::FPS_30.frame_duration()));

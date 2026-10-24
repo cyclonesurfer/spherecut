@@ -1567,22 +1567,60 @@ fn plane_room(frame: *const sys::AVFrame, p: *const u8) -> Option<usize> {
     )
 }
 
-/// How many bytes there are from `p` to the end of the buffer of `frame`
-/// that holds `p`. `None` when no buffer of the frame holds it.
-fn buffer_room(frame: *const sys::AVFrame, p: *const u8) -> Option<usize> {
-    // SAFETY: `frame` is a live AVFrame. `buf` holds NULL or references
-    // the frame owns, and `extended_buf` holds `nb_extended_buf` more.
-    let bufs = unsafe {
+/// The buffer references `frame` holds, in `buf` and then
+/// `extended_buf`, NULLs left out.
+///
+/// # Safety
+///
+/// `frame` is a live AVFrame, and stays so while the iterator is used.
+unsafe fn buffer_refs<'a>(
+    frame: *const sys::AVFrame,
+) -> impl Iterator<Item = *mut sys::AVBufferRef> + 'a {
+    // SAFETY: the caller's. `buf` holds NULL or references the frame
+    // owns, and `extended_buf` holds `nb_extended_buf` more.
+    unsafe {
         let extended = match usize::try_from((*frame).nb_extended_buf) {
             Ok(n) if n > 0 && !(*frame).extended_buf.is_null() => {
                 std::slice::from_raw_parts((*frame).extended_buf, n)
             }
             _ => &[],
         };
-        (*frame).buf.iter().chain(extended).copied()
-    };
+        (*frame)
+            .buf
+            .iter()
+            .chain(extended)
+            .copied()
+            .filter(|b| !b.is_null())
+    }
+}
+
+/// The bytes the buffers `frame` holds take, by `AVBufferRef.size`, with
+/// a buffer that two references share counted once: what keeping the
+/// frame keeps, padding, alignment and the rows past its height included.
+/// 0 for a frame whose data it doesn't own.
+pub(crate) fn buffer_bytes(frame: &ff::frame::Video) -> usize {
+    let mut seen = Vec::new();
+    let mut total = 0usize;
+    // SAFETY: `frame` wraps a live AVFrame, borrowed while this runs.
+    for b in unsafe { buffer_refs(frame.as_ptr()) } {
+        // SAFETY: a live buffer reference; plain fields. The buffer's
+        // pointer is only compared.
+        let (buffer, size) = unsafe { ((*b).buffer.addr(), (*b).size) };
+        if !seen.contains(&buffer) {
+            seen.push(buffer);
+            total = total.saturating_add(size);
+        }
+    }
+    total
+}
+
+/// How many bytes there are from `p` to the end of the buffer of `frame`
+/// that holds `p`. `None` when no buffer of the frame holds it.
+fn buffer_room(frame: *const sys::AVFrame, p: *const u8) -> Option<usize> {
+    // SAFETY: `frame` is a live AVFrame while this runs.
+    let mut bufs = unsafe { buffer_refs(frame) };
     let p = p.addr();
-    bufs.filter(|b| !b.is_null()).find_map(|b| {
+    bufs.find_map(|b| {
         // SAFETY: a live buffer reference; plain fields.
         let (start, size) = unsafe { ((*b).data.addr(), (*b).size) };
         (start..start.checked_add(size)?)
