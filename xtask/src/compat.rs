@@ -7,15 +7,20 @@
 //! and features with `-D warnings` as `cargo xtask check` does, with
 //! pkg-config pointed at that build and in a target directory of its own:
 //! sharing one would rebind ffmpeg-sys-next, and rebuild everything above
-//! it, each time the FFmpeg changes. `--test` also runs the Tier 1 tests
-//! against one of them, loading its libraries through `LD_LIBRARY_PATH`,
-//! and `--clean` deletes each target directory once its build is checked
-//! (one for clippy is about 450 MB, and the tests add about 1 GB).
+//! it, each time the FFmpeg changes. A target directory records what it
+//! was built against, and one built against anything else is deleted
+//! first (ffmpeg-sys-next binds again only when its own variables change,
+//! not when the FFmpeg behind a prefix does). `--test` also runs the Tier 1
+//! tests against one of them, loading its libraries through
+//! `LD_LIBRARY_PATH`, and `--clean` deletes each target directory once its
+//! build is checked (one for clippy is about 450 MB, and the tests add
+//! about 1 GB).
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
 
@@ -27,6 +32,19 @@ pub const PREFIXES_ENV: &str = "SPHERECUT_FFMPEG_COMPAT";
 /// Where the per-FFmpeg target directories go, instead of `compat/` in
 /// cargo's target directory.
 pub const TARGET_ENV: &str = "SPHERECUT_FFMPEG_COMPAT_TARGET_DIR";
+/// The file in each target directory that says what it was built against.
+const STAMP_FILE: &str = "spherecut-ffmpeg-stamp";
+/// The libraries ffmpeg-sys-next binds, whose pkg-config files a stamp
+/// covers.
+const STAMPED: [&str; 7] = [
+    "libavcodec",
+    "libavdevice",
+    "libavfilter",
+    "libavformat",
+    "libavutil",
+    "libswresample",
+    "libswscale",
+];
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -197,6 +215,8 @@ struct Bound {
     libavcodec: String,
     /// `FFMPEG_VERSION` from the installed `libavutil/ffversion.h`.
     ffmpeg: Option<String>,
+    /// That header, where pkg-config says it is.
+    version_header: Option<PathBuf>,
     /// libavcodec's library directory, for `LD_LIBRARY_PATH`.
     libdir: PathBuf,
 }
@@ -226,15 +246,77 @@ fn bound(pc_dir: &Path, search: &OsStr) -> Result<Bound> {
         .to_string_lossy()
         .into_owned();
     let libdir = PathBuf::from(pkg_config(search, &["--variable=libdir", "libavcodec"])?);
-    let ffmpeg = pkg_config(search, &["--variable=includedir", "libavutil"])
+    let version_header = pkg_config(search, &["--variable=includedir", "libavutil"])
         .ok()
-        .and_then(|inc| std::fs::read_to_string(Path::new(&inc).join("libavutil/ffversion.h")).ok())
+        .map(|inc| Path::new(&inc).join("libavutil/ffversion.h"));
+    let ffmpeg = version_header
+        .as_deref()
+        .and_then(|h| std::fs::read_to_string(h).ok())
         .and_then(|h| ffmpeg_version(&h));
     Ok(Bound {
         libavcodec,
         ffmpeg,
+        version_header,
         libdir,
     })
+}
+
+/// What a prefix holds now, as a target directory's stamp records it: the
+/// directory pkg-config reads, symlinks resolved, the versions found, and
+/// the size and modification time of each bound library's pkg-config file
+/// and of `ffversion.h`, which change when the FFmpeg there is installed
+/// again.
+fn stamp(pc_dir: &Path, b: &Bound) -> String {
+    let dir = pc_dir
+        .canonicalize()
+        .unwrap_or_else(|_| pc_dir.to_path_buf());
+    let mut out = format!("pkg-config directory {}\n{}\n", dir.display(), b.describe());
+    let files = STAMPED
+        .iter()
+        .map(|lib| dir.join(format!("{lib}.pc")))
+        .chain(b.version_header.clone())
+        .map(|f| f.canonicalize().unwrap_or(f));
+    for f in files {
+        let _ = match std::fs::metadata(&f) {
+            Ok(m) => {
+                let modified = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map_or_else(
+                        || "at an unknown time".into(),
+                        |d| format!("at {}.{:09}", d.as_secs(), d.subsec_nanos()),
+                    );
+                writeln!(
+                    out,
+                    "{} {} bytes, modified {modified}",
+                    f.display(),
+                    m.len()
+                )
+            }
+            Err(_) => writeln!(out, "{} missing", f.display()),
+        };
+    }
+    out
+}
+
+/// Makes `target` ready for a build against what `stamp` describes. One
+/// built against anything else, or with no stamp, is deleted first: cargo
+/// would keep its bindings, since ffmpeg-sys-next binds again only when
+/// its own files or the variables it reads change, not when the FFmpeg
+/// behind a prefix does (a distro upgrade of `/usr`, a prefix built again
+/// in place, a symlink pointed elsewhere). `true` when one was deleted.
+fn prepare_target(target: &Path, stamp: &str) -> Result<bool> {
+    let file = target.join(STAMP_FILE);
+    let stale = target.exists() && std::fs::read_to_string(&file).ok().as_deref() != Some(stamp);
+    if stale {
+        std::fs::remove_dir_all(target)
+            .with_context(|| format!("could not remove {}", target.display()))?;
+    }
+    std::fs::create_dir_all(target)
+        .with_context(|| format!("could not create {}", target.display()))?;
+    std::fs::write(&file, stamp).with_context(|| format!("could not write {}", file.display()))?;
+    Ok(stale)
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
@@ -501,21 +583,34 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
         if let (Ok(pc), Ok(found)) = (&b.pc_dir, &row.bound) {
             let what = format!("against {} at {}", found.describe(), row.prefix.display());
             let env = cargo_env(pc, &target, None, &vars);
-            row.clippy = Stage::of(run_step(
-                &format!("clippy {what} (target {})", target.display()),
-                &mut cargo(
-                    &[
-                        "clippy",
-                        "--workspace",
-                        "--all-targets",
-                        "--all-features",
-                        "--",
-                        "-D",
-                        "warnings",
-                    ],
-                    &env,
-                ),
-            ));
+            row.clippy = match prepare_target(&target, &stamp(pc, found)) {
+                Err(e) => Stage::Failed(format!("{e:#}")),
+                Ok(stale) => {
+                    if stale {
+                        eprintln!(
+                            "==> removed {}: it wasn't built against the FFmpeg {} \
+                             holds now",
+                            target.display(),
+                            row.prefix.display()
+                        );
+                    }
+                    Stage::of(run_step(
+                        &format!("clippy {what} (target {})", target.display()),
+                        &mut cargo(
+                            &[
+                                "clippy",
+                                "--workspace",
+                                "--all-targets",
+                                "--all-features",
+                                "--",
+                                "-D",
+                                "warnings",
+                            ],
+                            &env,
+                        ),
+                    ))
+                }
+            };
             if row.clippy == Stage::Passed && row.tier1.is_some() {
                 let env = cargo_env(pc, &target, Some(&found.libdir), &vars);
                 row.tier1 = Some(Stage::of(
@@ -839,10 +934,109 @@ mod tests {
         assert!(unset.iter().all(|n| removed.contains(&OsStr::new(n))));
     }
 
+    /// A prefix with the files a stamp covers, and what `bound` would say
+    /// of it.
+    fn fake_prefix(dir: &Path, version: &str) -> (PathBuf, Bound) {
+        let pc = dir.join("lib/pkgconfig");
+        std::fs::create_dir_all(&pc).unwrap();
+        for lib in STAMPED {
+            std::fs::write(
+                pc.join(format!("{lib}.pc")),
+                format!("Version: {version}\n"),
+            )
+            .unwrap();
+        }
+        let header = dir.join("include/libavutil/ffversion.h");
+        std::fs::create_dir_all(header.parent().unwrap()).unwrap();
+        std::fs::write(&header, format!("#define FFMPEG_VERSION \"n{version}\"\n")).unwrap();
+        let b = Bound {
+            libavcodec: version.into(),
+            ffmpeg: Some(format!("n{version}")),
+            version_header: Some(header),
+            libdir: dir.join("lib"),
+        };
+        (pc, b)
+    }
+
+    #[test]
+    fn a_target_built_against_another_ffmpeg_is_deleted_first() {
+        let d = scratch("stamp");
+        let target = d.join("compat/ff");
+        let (pc71, b71) = fake_prefix(&d.join("n7.1"), "61.19.100");
+        let (pc81, b81) = fake_prefix(&d.join("n8.1"), "62.28.100");
+        // The prefix is a symlink, as in the review that found this:
+        // pointed at another build, its path and label stay the same.
+        let ff = d.join("ff");
+        std::os::unix::fs::symlink(d.join("n7.1"), &ff).unwrap();
+        let pc = ff.join("lib/pkgconfig");
+        let built = |t: &Path| t.join("debug/build/ffmpeg-sys-next/out/bindings.rs");
+        let build = |t: &Path| {
+            std::fs::create_dir_all(built(t).parent().unwrap()).unwrap();
+            std::fs::write(built(t), "61.19.100").unwrap();
+        };
+
+        let s71 = stamp(&pc, &b71);
+        assert!(!prepare_target(&target, &s71).unwrap());
+        build(&target);
+        // The same FFmpeg again: the build is kept.
+        assert_eq!(stamp(&pc, &b71), s71);
+        assert!(!prepare_target(&target, &stamp(&pc, &b71)).unwrap());
+        assert!(built(&target).is_file());
+        assert_eq!(
+            std::fs::read_to_string(target.join(STAMP_FILE)).unwrap(),
+            s71
+        );
+
+        // The symlink now leads to 8.1: the target is deleted and stamped
+        // for it.
+        std::fs::remove_file(&ff).unwrap();
+        std::os::unix::fs::symlink(d.join("n8.1"), &ff).unwrap();
+        let s81 = stamp(&pc, &b81);
+        assert_ne!(s81, s71);
+        assert_eq!(s81, stamp(&pc81, &b81));
+        assert!(
+            s81.contains("FFmpeg n62.28.100, libavcodec 62.28.100"),
+            "{s81}"
+        );
+        assert!(prepare_target(&target, &s81).unwrap());
+        assert!(!built(&target).exists());
+        assert_eq!(
+            std::fs::read_to_string(target.join(STAMP_FILE)).unwrap(),
+            s81
+        );
+
+        // The same version installed again in place, as a distro upgrade
+        // or a rebuild of the prefix does it: its files change.
+        build(&target);
+        std::fs::write(
+            pc81.join("libavformat.pc"),
+            "Version: 62.12.100\nLibs: -lavformat\n",
+        )
+        .unwrap();
+        let again = stamp(&pc, &b81);
+        assert_ne!(again, s81);
+        assert!(prepare_target(&target, &again).unwrap());
+        assert!(!built(&target).exists());
+
+        // A target with no stamp (from a compat before stamps, or made by
+        // hand) can't be trusted either.
+        build(&target);
+        std::fs::remove_file(target.join(STAMP_FILE)).unwrap();
+        assert!(prepare_target(&target, &again).unwrap());
+        assert!(!built(&target).exists());
+
+        // A file the stamp covers that is gone says so.
+        std::fs::remove_file(pc71.join("libavdevice.pc")).unwrap();
+        let s = stamp(&pc71, &b71);
+        assert!(s.contains("libavdevice.pc missing"), "{s}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     fn found(v: &str, ff: Option<&str>) -> Result<Bound, String> {
         Ok(Bound {
             libavcodec: v.into(),
             ffmpeg: ff.map(Into::into),
+            version_header: None,
             libdir: p("/lib"),
         })
     }
