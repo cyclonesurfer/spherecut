@@ -1,6 +1,8 @@
 //! GPU slots: one uploaded frame each (M1 plan section 4.2).
 
-use crate::color::SourceUniform;
+use spherecut_core::video::ColorInfo;
+
+use crate::color::{Placement, SourceUniform, source_uniform};
 use crate::error::RenderError;
 use crate::gpu::Gpu;
 use crate::layouts;
@@ -28,8 +30,10 @@ pub(crate) struct PlaneTexture {
 /// Level 0 of each plane is an ordinary texture that a buffer copy, a
 /// texture copy or a render pass can fill, so a frame that is already on
 /// the GPU (slice 5b's DMA-BUF import or Vulkan Video decode) can fill a
-/// slot without going through [`spherecut_core::video::VideoPlanes`]; the
-/// mips and the uniform are recorded the same way after.
+/// slot without going through [`spherecut_core::video::VideoPlanes`]:
+/// it writes [`GpuFrame::plane_texture`]'s level 0, records the mips with
+/// [`crate::Uploader::record_mips`] and sets the uniform with
+/// [`GpuFrame::set_source`], as an upload does.
 #[derive(Debug)]
 pub struct GpuFrame {
     shape: SlotShape,
@@ -166,6 +170,22 @@ impl GpuFrame {
 
     pub fn shape(&self) -> &SlotShape {
         &self.shape
+    }
+
+    /// Writes the `Source` uniform for a frame of `bit_depth` bits in
+    /// this slot's planes, with `color`, placed on the sphere by
+    /// `placement`, and picks the sampler that goes with the placement.
+    /// It takes effect at the next submit.
+    pub fn set_source(&self, gpu: &Gpu, bit_depth: u8, color: &ColorInfo, placement: &Placement) {
+        let shape = SlotShape {
+            bit_depth,
+            ..self.shape.clone()
+        };
+        let uniform = source_uniform(&shape, color, placement);
+        gpu.queue
+            .write_buffer(&self.source, 0, bytemuck::bytes_of(&uniform));
+        self.wraps
+            .store(placement.wraps(), std::sync::atomic::Ordering::Release);
     }
 
     /// Plane `i`'s canonical texture, all its levels: for a frame that

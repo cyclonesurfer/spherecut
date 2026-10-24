@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use spherecut_core::video::{PlaneData, VideoPlanes};
 
-use crate::color::{Placement, source_uniform};
+use crate::color::Placement;
 use crate::error::RenderError;
 use crate::frame::GpuFrame;
 use crate::gpu::Gpu;
@@ -215,15 +215,7 @@ impl Uploader {
             t.end(&mut enc, span);
         }
         // The frame's own depth, with the slot's mip counts.
-        let mut placed = shape;
-        for (p, s) in placed.planes.iter_mut().zip(&slot.shape().planes) {
-            p.levels = s.levels;
-        }
-        let uniform = source_uniform(&placed, frame.color(), placement);
-        gpu.queue
-            .write_buffer(&slot.source, 0, bytemuck::bytes_of(&uniform));
-        slot.wraps
-            .store(placement.wraps(), std::sync::atomic::Ordering::Release);
+        slot.set_source(gpu, shape.bit_depth, frame.color(), placement);
         if let Some(belt) = self.belt.as_mut() {
             belt.finish_and_recall_on_submit(&enc);
         }

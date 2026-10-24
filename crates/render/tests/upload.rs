@@ -2,7 +2,8 @@
 //! Level 0 holds each plane's codes, deep ones through the ingest pass
 //! with P010's shift; each mip level is the area-weighted mean of the one
 //! above at odd sizes; both upload paths fill a slot alike; bad frames
-//! and wrong slots are refused; and the upload bench runs.
+//! and wrong slots are refused; a frame already on the GPU fills a slot
+//! as an upload does; and the upload bench runs.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -11,7 +12,11 @@ mod common;
 use common::{Frame, Kind, Rng, gpu};
 use spherecut_core::video::{ChromaSiting, Matrix, Range, SampleBytes};
 use spherecut_render::readback::{f16_to_f32, read_texture, round_f16};
-use spherecut_render::{GpuFrame, PlaneFormat, SlotShape, UploadPath, Uploader};
+use spherecut_render::{
+    DebugMode, Filter, GpuFrame, LinearTarget, Placement, PlaneFormat, Projector, SlotShape,
+    UploadPath, Uploader, ViewParams,
+};
+use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_testkit::bench;
 
 /// A `kind` frame of `size` with every sample random, and `pad` bytes
@@ -263,6 +268,62 @@ fn both_upload_paths_fill_a_slot_alike() {
             }
             assert_eq!(out[0], out[1], "{kind:?}, pad {pad}");
         }
+    }
+}
+
+/// What the projection makes of `slot`, read back from the linear target.
+fn project(slot: &GpuFrame) -> Vec<u8> {
+    let gpu = gpu();
+    let projector = Projector::new(gpu);
+    let target = LinearTarget::new(gpu, (48, 32)).unwrap();
+    let view = ViewParams::new(glam::DQuat::IDENTITY, Lens::new(Projection::Fisheye, 3.0));
+    let mut enc = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    projector.record(
+        &mut enc,
+        slot,
+        &view,
+        &target,
+        Filter::Isotropic,
+        DebugMode::Off,
+        None,
+    );
+    gpu.queue.submit([enc.finish()]);
+    read_texture(gpu, target.texture(), 0).unwrap().data
+}
+
+#[test]
+fn a_frame_already_on_the_gpu_fills_a_slot() {
+    // As slice 5b's import will: level 0 written on the GPU (here copied
+    // from a slot the uploader filled), then the mips and the uniform.
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    for kind in [Kind::Nv12, Kind::P010] {
+        let mut frame = noise(kind, (96, 48), 0, 21);
+        frame.color = common::color(Range::Full, Matrix::Bt601, ChromaSiting::Center);
+        let uploaded = slot_for(&frame, 4);
+        uploader.upload(gpu, &frame, &uploaded).unwrap();
+        let on_gpu = slot_for(&frame, 4);
+        let mut enc = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for (i, p) in on_gpu.shape().planes.iter().enumerate() {
+            enc.copy_texture_to_texture(
+                uploaded.plane_texture(i).unwrap().as_image_copy(),
+                on_gpu.plane_texture(i).unwrap().as_image_copy(),
+                wgpu::Extent3d {
+                    width: p.size.0,
+                    height: p.size.1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        uploader.record_mips(&mut enc, &on_gpu);
+        on_gpu.set_source(gpu, frame.layout.bit_depth, &frame.color, &Placement::FULL);
+        gpu.queue.submit([enc.finish()]);
+        assert_eq!(levels(&on_gpu), levels(&uploaded), "{kind:?}");
+        assert_eq!(project(&on_gpu), project(&uploaded), "{kind:?}");
     }
 }
 
