@@ -3,7 +3,7 @@
   "checks": {
     "crop_half": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -56,7 +56,7 @@
     },
     "layout_invariance": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -65,18 +65,34 @@
         "renders_not_identical": 0.0
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
-      "source": {
-        "layout": "nv12",
-        "matrix": "bt709",
-        "pattern": "grid",
-        "range": "limited",
-        "siting": "left",
-        "size": [
-          1100,
-          550
-        ]
-      },
-      "source_fnv64": "a5bcf62aa485d94c",
+      "source": [
+        {
+          "layout": "nv12",
+          "matrix": "bt709",
+          "pattern": "grid",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            1100,
+            550
+          ]
+        },
+        {
+          "layout": "yuv420p",
+          "matrix": "bt709",
+          "pattern": "grid",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            1100,
+            550
+          ]
+        }
+      ],
+      "source_fnv64": [
+        "a5bcf62aa485d94c",
+        "ab4fd5228f28f378"
+      ],
       "thresholds": {
         "renders_not_identical_max": 0.0
       },
@@ -103,7 +119,7 @@
     },
     "lod_heatmap": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -151,12 +167,14 @@
     },
     "matrix_601_709": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
+        "601_vs_709_max_lsb": 13.0,
+        "601_vs_709_psnr_db": 46.3411,
         "control_601_as_709_below_tolerance_db": 19.4862,
         "control_601_as_709_psnr_db": 30.8238,
         "cpu_601_max_channel": 0.0108,
@@ -165,7 +183,36 @@
         "cpu_709_psnr_db": 53.1439
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": [
+        {
+          "layout": "nv12",
+          "matrix": "bt601",
+          "pattern": "grid",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            1024,
+            512
+          ]
+        },
+        {
+          "layout": "nv12",
+          "matrix": "bt709",
+          "pattern": "grid",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            1024,
+            512
+          ]
+        }
+      ],
+      "source_fnv64": [
+        "fdd760c7fcc38222",
+        "0e2be80e98b1f2c5"
+      ],
       "thresholds": {
+        "601_vs_709_psnr_db_min": 40.0,
         "control_601_as_709_below_tolerance_db_min": 10.0,
         "cpu_601_max_channel_max": 0.1,
         "cpu_601_psnr_db_min": 50.31,
@@ -195,7 +242,7 @@
     },
     "nadir_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -222,7 +269,7 @@
       "thresholds": {
         "bad_pixel_over": 0.0078,
         "bad_pixels_max": 0.0,
-        "control_implicit_bad_pixels_min": 100.0
+        "control_implicit_bad_pixels_over": 100.0
       },
       "view": {
         "filter": "isotropic",
@@ -247,7 +294,7 @@
     },
     "passthrough_exact": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -265,18 +312,192 @@
         "problems": 0.0
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": [
+        {
+          "layout": "nv12",
+          "matrix": "bt709",
+          "pattern": "bands",
+          "range": "full",
+          "siting": "left",
+          "size": [
+            4096,
+            16
+          ]
+        },
+        {
+          "layout": "nv12",
+          "matrix": "bt709",
+          "pattern": "bands",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            4096,
+            16
+          ]
+        }
+      ],
+      "source_fnv64": [
+        "d1064f08281a8325",
+        "d1064f08281a8325"
+      ],
       "thresholds": {
         "full_range_not_k_max": 0.0,
         "limited": "equal to the model; round((k − 16) · 255 / 219) except within 0.0547 codes of a tie",
         "off_the_model_max": 0.0,
         "problems_max": 0.0
       },
+      "view": [
+        {
+          "filter": "isotropic",
+          "hfov_deg": 45.0,
+          "pitch_deg": 0.0,
+          "projection": "rectilinear",
+          "quaternion_xyzw": [
+            0.0,
+            -0.19509032201612825,
+            0.0,
+            0.9807852804032304
+          ],
+          "roll_deg": 0.0,
+          "size": [
+            512,
+            8
+          ],
+          "yaw_deg": 22.5
+        },
+        {
+          "filter": "isotropic",
+          "hfov_deg": 45.0,
+          "pitch_deg": 0.0,
+          "projection": "rectilinear",
+          "quaternion_xyzw": [
+            0.0,
+            -0.5555702330196022,
+            0.0,
+            0.8314696123025452
+          ],
+          "roll_deg": 0.0,
+          "size": [
+            512,
+            8
+          ],
+          "yaw_deg": 67.5
+        },
+        {
+          "filter": "isotropic",
+          "hfov_deg": 45.0,
+          "pitch_deg": 0.0,
+          "projection": "rectilinear",
+          "quaternion_xyzw": [
+            0.0,
+            -0.8314696123025452,
+            0.0,
+            0.5555702330196023
+          ],
+          "roll_deg": 0.0,
+          "size": [
+            512,
+            8
+          ],
+          "yaw_deg": 112.5
+        },
+        {
+          "filter": "isotropic",
+          "hfov_deg": 45.0,
+          "pitch_deg": 0.0,
+          "projection": "rectilinear",
+          "quaternion_xyzw": [
+            0.0,
+            -0.9807852804032304,
+            0.0,
+            0.19509032201612833
+          ],
+          "roll_deg": 0.0,
+          "size": [
+            512,
+            8
+          ],
+          "yaw_deg": 157.5
+        },
+        {
+          "filter": "isotropic",
+          "hfov_deg": 45.0,
+          "pitch_deg": -0.0,
+          "projection": "rectilinear",
+          "quaternion_xyzw": [
+            0.0,
+            -0.9807852804032304,
+            0.0,
+            -0.1950903220161282
+          ],
+          "roll_deg": 0.0,
+          "size": [
+            512,
+            8
+          ],
+          "yaw_deg": -157.5
+        },
+        {
+          "filter": "isotropic",
+          "hfov_deg": 45.0,
+          "pitch_deg": -0.0,
+          "projection": "rectilinear",
+          "quaternion_xyzw": [
+            0.0,
+            -0.8314696123025453,
+            0.0,
+            -0.5555702330196024
+          ],
+          "roll_deg": 0.0,
+          "size": [
+            512,
+            8
+          ],
+          "yaw_deg": -112.5
+        },
+        {
+          "filter": "isotropic",
+          "hfov_deg": 45.0,
+          "pitch_deg": 0.0,
+          "projection": "rectilinear",
+          "quaternion_xyzw": [
+            0.0,
+            -0.5555702330196022,
+            0.0,
+            -0.8314696123025453
+          ],
+          "roll_deg": 0.0,
+          "size": [
+            512,
+            8
+          ],
+          "yaw_deg": -67.5
+        },
+        {
+          "filter": "isotropic",
+          "hfov_deg": 45.0,
+          "pitch_deg": 0.0,
+          "projection": "rectilinear",
+          "quaternion_xyzw": [
+            0.0,
+            -0.19509032201612816,
+            0.0,
+            -0.9807852804032304
+          ],
+          "roll_deg": 0.0,
+          "size": [
+            512,
+            8
+          ],
+          "yaw_deg": -22.5
+        }
+      ],
       "wgpu": "30.0.1",
       "what": "flat fields of every 8-bit luma code, full and limited range, through the f16 target"
     },
     "range_full_vs_limited": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -288,22 +509,62 @@
         "nv12_max_lsb": 4.0
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
-      "source": {
-        "layout": "p010le",
-        "matrix": "bt709",
-        "pattern": "grid",
-        "range": "full",
-        "siting": "left",
-        "size": [
-          1024,
-          512
-        ]
-      },
-      "source_fnv64": "df256f6cb1b513f9",
+      "source": [
+        {
+          "layout": "p010le",
+          "matrix": "bt709",
+          "pattern": "grid",
+          "range": "full",
+          "siting": "left",
+          "size": [
+            1024,
+            512
+          ]
+        },
+        {
+          "layout": "p010le",
+          "matrix": "bt709",
+          "pattern": "grid",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            1024,
+            512
+          ]
+        },
+        {
+          "layout": "nv12",
+          "matrix": "bt709",
+          "pattern": "grid",
+          "range": "full",
+          "siting": "left",
+          "size": [
+            1024,
+            512
+          ]
+        },
+        {
+          "layout": "nv12",
+          "matrix": "bt709",
+          "pattern": "grid",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            1024,
+            512
+          ]
+        }
+      ],
+      "source_fnv64": [
+        "df256f6cb1b513f9",
+        "ec2583a9b79d6a9b",
+        "49d9545158dcd627",
+        "0e2be80e98b1f2c5"
+      ],
       "thresholds": {
-        "control_full_as_limited_max_lsb_min": 10.0,
+        "control_full_as_limited_max_lsb_over": 10.0,
         "max_lsb_max": 2.0,
-        "nv12_control_full_as_limited_max_lsb_min": 10.0
+        "nv12_control_full_as_limited_max_lsb_over": 10.0
       },
       "view": {
         "filter": "isotropic",
@@ -328,7 +589,7 @@
     },
     "seam_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -356,7 +617,7 @@
       "thresholds": {
         "bad_pixel_over": 0.0078,
         "bad_pixels_max": 0.0,
-        "control_implicit_bad_pixels_min": 100.0
+        "control_implicit_bad_pixels_over": 100.0
       },
       "view": {
         "filter": "isotropic",
@@ -381,7 +642,7 @@
     },
     "shimmer_fisheye360": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -439,7 +700,7 @@
     },
     "shimmer_tinyplanet": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -497,7 +758,7 @@
     },
     "siting_left_center": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -505,17 +766,117 @@
       "measured": {
         "center_cpu_max_lsb": 0.517,
         "control_left_as_center_max_lsb": 52.9556,
+        "control_swing_center_as_other_psnr_db": 34.0847,
+        "control_swing_left_as_other_psnr_db": 33.8523,
         "left_cpu_max_lsb": 0.5614,
         "nv12_center_cpu_max_lsb": 1.7591,
         "nv12_control_left_as_center_max_lsb": 54.5713,
-        "nv12_left_cpu_max_lsb": 1.9932
+        "nv12_left_cpu_max_lsb": 1.9932,
+        "swing_center_max_lsb": 2.0,
+        "swing_center_over_control_db": 17.4096,
+        "swing_center_psnr_db": 51.4944,
+        "swing_left_max_lsb": 2.0,
+        "swing_left_over_control_db": 17.5331,
+        "swing_left_psnr_db": 51.3853
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": [
+        {
+          "layout": "p010le",
+          "matrix": "bt709",
+          "pattern": "stripes",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            1024,
+            512
+          ]
+        },
+        {
+          "layout": "p010le",
+          "matrix": "bt709",
+          "pattern": "stripes",
+          "range": "limited",
+          "siting": "center",
+          "size": [
+            1024,
+            512
+          ]
+        },
+        {
+          "layout": "nv12",
+          "matrix": "bt709",
+          "pattern": "stripes",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            1024,
+            512
+          ]
+        },
+        {
+          "layout": "nv12",
+          "matrix": "bt709",
+          "pattern": "stripes",
+          "range": "limited",
+          "siting": "center",
+          "size": [
+            1024,
+            512
+          ]
+        },
+        {
+          "layout": "p010le",
+          "matrix": "bt709",
+          "pattern": "swing",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            1024,
+            512
+          ]
+        },
+        {
+          "layout": "p010le",
+          "matrix": "bt709",
+          "pattern": "swing",
+          "range": "limited",
+          "siting": "center",
+          "size": [
+            1024,
+            512
+          ]
+        },
+        {
+          "layout": "yuv444p12le",
+          "matrix": "bt709",
+          "pattern": "swing",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            1024,
+            512
+          ]
+        }
+      ],
+      "source_fnv64": [
+        "5696c37fd9cec325",
+        "5696c37fd9cec325",
+        "9ee253d1810d8325",
+        "9ee253d1810d8325",
+        "74069712779d2325",
+        "20caf99038f62325",
+        "d2076462fa622325"
+      ],
       "thresholds": {
         "center_cpu_max_lsb_max": 1.0,
-        "control_left_as_center_max_lsb_min": 10.0,
+        "control_left_as_center_max_lsb_over": 10.0,
         "left_cpu_max_lsb_max": 1.0,
-        "nv12_control_left_as_center_max_lsb_min": 10.0
+        "nv12_control_left_as_center_max_lsb_over": 10.0,
+        "swing_center_over_control_db_min": 10.0,
+        "swing_center_psnr_db_min": 45.0,
+        "swing_left_over_control_db_min": 10.0,
+        "swing_left_psnr_db_min": 45.0
       },
       "view": {
         "filter": "isotropic",
@@ -540,7 +901,7 @@
     },
     "tenbit_ramp": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -552,18 +913,34 @@
         "rise_per_row_codes": 48.6956
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
-      "source": {
-        "layout": "p010le",
-        "matrix": "bt709",
-        "pattern": "ramp",
-        "range": "limited",
-        "siting": "left",
-        "size": [
-          1024,
-          512
-        ]
-      },
-      "source_fnv64": "1b14050c7e890325",
+      "source": [
+        {
+          "layout": "p010le",
+          "matrix": "bt709",
+          "pattern": "ramp",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            1024,
+            512
+          ]
+        },
+        {
+          "layout": "yuv420p10le",
+          "matrix": "bt709",
+          "pattern": "ramp",
+          "range": "limited",
+          "siting": "left",
+          "size": [
+            1024,
+            512
+          ]
+        }
+      ],
+      "source_fnv64": [
+        "1b14050c7e890325",
+        "99c72af16f2f2325"
+      ],
       "thresholds": {
         "cpu_max_diff_10bit_codes_max": 2.0,
         "decreasing_steps_max": 0.0,
@@ -593,7 +970,7 @@
     },
     "tinyplanet_pole": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -620,7 +997,7 @@
       "thresholds": {
         "bad_pixel_over": 0.0078,
         "bad_pixels_max": 0.0,
-        "control_implicit_bad_pixels_min": 100.0
+        "control_implicit_bad_pixels_over": 100.0
       },
       "view": {
         "filter": "isotropic",
@@ -645,7 +1022,7 @@
     },
     "zenith_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -672,7 +1049,7 @@
       "thresholds": {
         "bad_pixel_over": 0.0078,
         "bad_pixels_max": 0.0,
-        "control_implicit_bad_pixels_min": 100.0
+        "control_implicit_bad_pixels_over": 100.0
       },
       "view": {
         "filter": "isotropic",
@@ -699,7 +1076,7 @@
   "images": {
     "fisheye_180": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -759,7 +1136,7 @@
     },
     "fisheye_360": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -821,7 +1198,7 @@
     },
     "morph_half": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -880,7 +1257,7 @@
     },
     "rect_forward": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -937,7 +1314,7 @@
     },
     "rect_ypr": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -998,7 +1375,7 @@
     },
     "stereo_tinyplanet": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "faa9c3e290",
+      "commit": "f5dd1fe554",
       "date": "2026-10-24",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
