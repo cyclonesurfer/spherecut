@@ -114,7 +114,11 @@ back clean, so M0 is done.
   WAV, FLAC or MP3 music beds included, needs a DECISIONS entry that
   widens the demuxer list (D24). Within those containers FFmpeg may run
   any decoder it has (no `codec_whitelist`), each limited to 2^27 pixels
-  per picture, which doesn't bound how many pictures a decoder keeps.
+  per picture, which doesn't bound how many pictures a decoder keeps. A
+  stream over the limit is a probe warning and a `VideoDecoder` error
+  that give its size, except one whose frames say more than its
+  container and whose size FFmpeg takes from the container (MJPEG, for
+  one): that fails while decoding, as FFmpeg decides.
   `spherecut frame` has no strace test yet, because it doesn't exist.
 - `VideoDecoder` copies hardware frames to system memory. Zero-copy
   (VA-API to DMA-BUF to Vulkan) is in `PLAN.md`'s M9, if profiling shows

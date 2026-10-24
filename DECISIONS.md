@@ -957,8 +957,28 @@ holds FFmpeg to that one file:
   bytes per pixel plus padding, would come to 2^31 bytes: about 2^28
   pixels (16384 × 16000 passes, 16384 × 16300 does not, checked with
   6.1). So `MAX_PIXELS` halves the largest picture a file can make a
-  decoder allocate. A larger picture fails to decode, with FFmpeg's
-  "Picture size ... exceeds specified max pixel count".
+  decoder allocate.
+- A stream of larger pictures is named by its size, as Spherecut's limit
+  and not damage: `probe` warns "stream #0 (sample entry `avc1`) is
+  16384x8208, more than the 2^27 pixels (16384x8192) per picture that
+  Spherecut decodes" and exits 0, and `VideoDecoder::open` refuses it
+  with `MediaError::PictureTooLarge`, before opening a decoder.
+  FFmpeg's own account was misleading: its H.264 decoder fails to open
+  with "Invalid argument", which `probe` took for a damaged `avcC`, and
+  `avformat_find_stream_info` leaves an MJPEG stream at 0x0, which
+  `probe` took for a missing frame size; FFmpeg's "Picture size ...
+  exceeds specified max pixel count" was only in its log. So
+  `open_input` puts back the size the container gave (MP4's sample
+  entry, Matroska's `PixelWidth` and `PixelHeight`) when FFmpeg left an
+  over-limit stream at 0x0. The check (`TooLarge::of`) pads the width to
+  a multiple of 64 first, because FFmpeg checks the limit when it
+  allocates a picture, with its rows padded to its SIMD alignment (64
+  pixels with AVX-512): its H.264 and MJPEG decoders refuse 16380 × 8194,
+  fewer than 2^27 pixels, as 16384 × 8194, so the warning then says
+  "which FFmpeg may pad to 16384x8194". That may refuse a picture within
+  63 columns of the limit that a build with less padding, or libdav1d,
+  which allocates its own pictures, would decode. 16384 × 8192 itself
+  decodes (checked with H.264 on 6.1).
 - `clippy.toml` forbids `std::net`'s `TcpStream`, `TcpListener` and
   `UdpSocket`, ffmpeg-next's input opens (`format::open`, `open_with`
   and the `format::input` functions), its decoder opens
@@ -1005,8 +1025,12 @@ Tier 1 tests:
   `io_open` alone has to stop a segment outside the playlist's folder and
   an `http://` one; `file_urls_hold_the_path_as_it_is`;
   `decoders_are_limited_to_max_pixels` (a 512 × 128 frame opens at 65536
-  and fails at 65535) and
-  `the_decoders_that_find_stream_info_opens_are_limited`.
+  and fails at 65535),
+  `the_decoders_that_find_stream_info_opens_are_limited`,
+  `a_stream_over_the_limit_keeps_its_size` (H.264 and MJPEG under a limit
+  of 1000 pixels) and `too_large_pictures_are_named_by_size` (the bounds,
+  the padding and the wording).
+- `probe` unit test `a_stream_over_max_pixels_is_a_warning_that_names_the_limit`.
 - `crates/media/tests/confinement.rs`: `VideoDecoder::open` and
   `probe::probe` refuse a playlist by name, and a URL is a missing path.
 - `crates/cli/tests/confinement.rs`: `spherecut probe` refuses, by name
@@ -1023,7 +1047,15 @@ Tier 1 tests:
   same strace check, which must see doctor load lavapipe.
 - `crates/cli/tests/probe.rs`: a Matroska file with only subtitles still
   fails as having no video or audio stream, and an LRC file is refused
-  by name.
+  by name. `a_picture_over_max_pixels_is_a_warning_that_names_the_limit`
+  probes MJPEG files from `spherecut_synth::media::write_mjpeg_declaring`,
+  64 × 64 frames whose sample entry and frame headers say 16400 × 8200,
+  and 16380 × 8194; decoders stop at the header, so the test stays small.
+  The branch's first version called the first damaged ("has no frame
+  size").
+- `crates/synth/tests/decode_errors.rs`:
+  `a_picture_over_max_pixels_is_refused_by_size`, the same file through
+  `VideoDecoder::open`.
 
 M0's binary under the same strace opened `inside/../outside/private.ts`
 and, for `concat:x.mp4`, `x.mp4`, so these tests fail on M0. They pass
@@ -1064,10 +1096,14 @@ test. The likely first are WAV, FLAC or MP3 music beds in M6.
 Limits: there is no `codec_whitelist`; any decoder FFmpeg has for a
 stream in these containers may run, each under `MAX_PIXELS`. `max_pixels`
 bounds one picture, not how many a decoder keeps (references, frame
-threads). A nested open refused after the file is open, while packets are
-read, is only logged; the read that needed it fails as FFmpeg decides.
-Symlinks in the path are followed, as by any program; the kernel-enforced
-roots for agents are D23's.
+threads). `TooLarge` checks the size FFmpeg gives the stream, which is
+the container's unless a parser reads it from the bitstream, as H.264's
+does. So an MJPEG frame header over the limit in a stream whose sample
+entry says less still fails while decoding, with FFmpeg's error. A
+nested open refused after the file is open, while packets are read, is
+only logged; the read that needed it fails as FFmpeg decides. Symlinks
+in the path are followed, as by any program; the kernel-enforced roots
+for agents are D23's.
 
 Revisit if: Spherecut needs a container outside MOV/MP4 and Matroska; an
 FFmpeg release renames these demuxers (the names hold from 6.1 to 9.0) or

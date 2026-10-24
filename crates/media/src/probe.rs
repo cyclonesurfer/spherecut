@@ -16,7 +16,7 @@ use crate::ffi;
 use crate::hwprobe;
 use crate::mp4::{self, Cursor, FirstBox, FourCc, Mp4Box};
 use crate::spherical::{self, TrackSpherical};
-use crate::{MediaError, init};
+use crate::{MediaError, TooLarge, init};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProbeReport {
@@ -661,6 +661,8 @@ fn sample_entry_type(trak: &Mp4Box) -> Option<FourCc> {
 /// Why FFmpeg cannot decode a video or audio stream.
 #[derive(Debug)]
 enum Undecodable {
+    /// Its pictures are larger than Spherecut's decoders make (D24).
+    TooLarge(TooLarge),
     /// FFmpeg could not set it up, for the reason given.
     Unconfigured(&'static str),
     /// This FFmpeg has no decoder for its codec, which it names.
@@ -676,6 +678,8 @@ impl Undecodable {
     /// type, and `has_samples` says whether its track has samples.
     fn is_damage(&self, entry: Option<FourCc>, has_samples: bool) -> bool {
         match self {
+            // A limit of Spherecut's, not of the file.
+            Undecodable::TooLarge(_) => false,
             // FFmpeg sets a stream up from its sample entry and samples.
             // Without samples it may have had too little to go on, and
             // with a sample entry it does not read, it lacks the codec.
@@ -688,6 +692,7 @@ impl Undecodable {
     /// What to say about stream `what`, as damage or as a warning.
     fn describe(&self, what: &str, damage: bool) -> String {
         match (self, damage) {
+            (Undecodable::TooLarge(size), _) => format!("{what} is {size}"),
             (Undecodable::Unconfigured(why), true) => {
                 format!("{what} {why}, so its codec setup is damaged")
             }
@@ -721,7 +726,10 @@ fn lacks_feature(e: ff::Error) -> bool {
 }
 
 /// Why FFmpeg cannot decode the stream `st`, if it is a video or audio
-/// stream it cannot decode. First as FFmpeg judges whether it set the
+/// stream it cannot decode. First whether its pictures are over
+/// [`MAX_PIXELS`](crate::MAX_PIXELS), which every decoder refuses, so the
+/// rest would only say that FFmpeg could not set the stream up or that
+/// the decoder refused it. Then as FFmpeg judges whether it set the
 /// stream up: it needs the codec, the frame size or the sample rate and
 /// channels, and the pixel or sample format when it has a decoder (the
 /// one named `decoder`) to find it with. Then whether that decoder opens
@@ -741,6 +749,9 @@ fn undecodable(
     };
     let unconfigured = |why| Some(Undecodable::Unconfigured(why));
     if let Some(v) = &st.video {
+        if let Some(size) = TooLarge::of(v.width, v.height) {
+            return Some(Undecodable::TooLarge(size));
+        }
         if v.width == 0 || v.height == 0 {
             return unconfigured("has no frame size");
         }
@@ -936,6 +947,43 @@ mod tests {
             undecodable(&a, Some("aac".into()), not_opened),
             Some(Undecodable::Unconfigured("has no sample format"))
         ));
+    }
+
+    #[test]
+    fn a_stream_over_max_pixels_is_a_warning_that_names_the_limit() {
+        // Spherecut's limit, not damage, whatever else FFmpeg could not
+        // find out about the stream once its decoder refused the size.
+        let not_opened = || -> Result<(), ff::Error> { panic!("the decoder was opened") };
+        let mut v = stream(StreamKind::Video);
+        let video = v.video.as_mut().unwrap();
+        (video.width, video.height) = (16400, 8200);
+        video.pix_fmt = None;
+        let why = undecodable(&v, Some("mjpeg".into()), not_opened).unwrap();
+        assert!(
+            matches!(
+                why,
+                Undecodable::TooLarge(TooLarge {
+                    width: 16400,
+                    height: 8200
+                })
+            ),
+            "{why:?}"
+        );
+        assert!(!why.is_damage(Some(FourCc::new(b"jpeg")), true));
+        assert_eq!(
+            why.describe("stream #0 (sample entry `jpeg`)", false),
+            "stream #0 (sample entry `jpeg`) is 16400x8200, more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes"
+        );
+        // Without a decoder too.
+        assert!(matches!(
+            undecodable(&v, None, not_opened),
+            Some(Undecodable::TooLarge(_))
+        ));
+        // At the limit, the decoder is opened as for any stream.
+        let video = v.video.as_mut().unwrap();
+        (video.width, video.height) = (16384, 8192);
+        video.pix_fmt = Some("yuv420p".into());
+        assert!(undecodable(&v, Some("h264".into()), || Ok(())).is_none());
     }
 
     #[test]

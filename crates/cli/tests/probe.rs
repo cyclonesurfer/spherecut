@@ -472,6 +472,43 @@ fn an_empty_track_ffmpeg_cannot_set_up_is_a_warning() {
 }
 
 #[test]
+fn a_picture_over_max_pixels_is_a_warning_that_names_the_limit() {
+    // Spherecut's decoders stop at 2^27 pixels (D24). FFmpeg's own
+    // account of such a stream is a decoder that fails to open, or no
+    // frame size at all, which would read as damage.
+    let dir = tmp("over-max-pixels");
+    let path = media::write_mjpeg_declaring(&dir, "over.mp4", 16400, 8200).unwrap();
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("  #0  video   mjpeg [mp4v] Baseline, 16400x8200,"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "  warning    stream #0 (sample entry `mp4v`) is 16400x8200, more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("DAMAGE"), "{stdout}");
+
+    // Fewer than 2^27 pixels, but FFmpeg's decoders pad the rows to
+    // 16384 before they check.
+    let path = media::write_mjpeg_declaring(&dir, "padded.mp4", 16380, 8194).unwrap();
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "  warning    stream #0 (sample entry `mp4v`) is 16380x8194, which FFmpeg may pad to 16384x8194, more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes"
+        ),
+        "{stdout}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn deeply_nested_boxes_fail_fast() {
     // A `moov` holding 200 000 nested `udta` boxes once took the parser
     // past 2.8 GB of memory and a stack overflow.

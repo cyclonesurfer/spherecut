@@ -45,6 +45,14 @@ pub enum MediaError {
     },
     #[error("cannot decode {}: {reason}", path.display())]
     Decode { path: PathBuf, reason: String },
+    /// The stream's pictures are larger than any decoder Spherecut opens
+    /// makes (D24).
+    #[error("cannot decode {}: stream #{stream} is {size}", path.display())]
+    PictureTooLarge {
+        path: PathBuf,
+        stream: usize,
+        size: TooLarge,
+    },
     /// The stream can't be decoded on the hardware device; software may
     /// still decode it.
     #[error("cannot decode {} on {kind}: {refusal}", path.display())]
@@ -60,7 +68,7 @@ pub enum MediaError {
     Hardware { kind: String, reason: HwError },
 }
 
-pub use ffi::{CONTAINERS, HwDevice, HwError, HwRefusal, MAX_PIXELS};
+pub use ffi::{CONTAINERS, HwDevice, HwError, HwRefusal, MAX_PIXELS, TooLarge};
 
 impl MediaError {
     /// The error for `path`, which [`ffi::open_input`] could not open as

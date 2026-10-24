@@ -670,6 +670,18 @@ fn open_input_with(
     // the streams' parameters.
     // SAFETY: an open input context.
     let streams = unsafe { (*ps).nb_streams } as usize;
+    // The frame size the demuxer read for each stream from the container.
+    // SAFETY: an open input context's `streams` holds `nb_streams` live
+    // streams, each with live codec parameters; width and height are
+    // plain ints.
+    let declared: Vec<(c_int, c_int)> = unsafe {
+        (0..streams)
+            .map(|i| {
+                let par = (**(*ps).streams.add(i)).codecpar;
+                ((*par).width, (*par).height)
+            })
+            .collect()
+    };
     let mut decoder_opts: Vec<*mut sys::AVDictionary> = (0..streams)
         .map(|_| {
             let mut d = ff::Dictionary::new();
@@ -701,6 +713,29 @@ fn open_input_with(
         // else holds.
         unsafe { sys::avformat_close_input(&mut ps) };
         return Err(refused.unwrap_or(OpenError::Ffmpeg(ff::Error::from(ret))));
+    }
+    // A decoder that refuses a picture over `max_pixels` leaves its stream
+    // at 0x0, as if the file gave no size ("Ignoring invalid width/height
+    // values"), unless a parser sets it again from the bitstream, as
+    // H.264's does. The container's size is put back, so that callers can
+    // say the picture is too large (`TooLarge`) rather than missing.
+    for (i, &(width, height)) in declared.iter().enumerate() {
+        let (Ok(w), Ok(h)) = (u32::try_from(width), u32::try_from(height)) else {
+            continue;
+        };
+        if !over_max_pixels(w, h, max_pixels) {
+            continue;
+        }
+        // SAFETY: the context is still open, and avformat_find_stream_info
+        // only adds streams, so stream `i` is one of those read above;
+        // width and height are plain ints.
+        unsafe {
+            let par = (**(*ps).streams.add(i)).codecpar;
+            if (*par).width == 0 && (*par).height == 0 {
+                (*par).width = width;
+                (*par).height = height;
+            }
+        }
     }
     tracing::debug!(path = %path.display(), demuxer = name, "opened for demuxing");
     // SAFETY: an open input context, which the wrapper now owns: it closes
@@ -1211,6 +1246,61 @@ pub(crate) fn note_device_frame(dec: &mut ff::codec::context::Context) {
 /// bytes, which is about 2^28 pixels (16384 × 16000 passes). So this
 /// halves the largest picture a file can make a decoder allocate.
 pub const MAX_PIXELS: i64 = 1 << 27;
+
+/// A picture size over [`MAX_PIXELS`], which no decoder Spherecut opens
+/// makes. `probe` warns of a stream of such pictures and `VideoDecoder`
+/// refuses one, by its size. FFmpeg's own errors would not say why: its
+/// decoders fail to open or decode with "Invalid argument", or the stream
+/// is left with no size at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooLarge {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The most FFmpeg pads a picture's rows to, in pixels: `STRIDE_ALIGN`,
+/// which is 64 in x86-64 builds with AVX-512, less in others.
+const ROW_ALIGN: u64 = 64;
+
+impl TooLarge {
+    /// `Some` when decoders limited to [`MAX_PIXELS`] may refuse a
+    /// `width` × `height` picture. FFmpeg checks the limit when it
+    /// allocates a picture (`ff_get_buffer`), with the width padded to its
+    /// row alignment: its H.264 and MJPEG decoders refuse 16380 × 8194,
+    /// fewer than 2^27 pixels, as 16384 × 8194. So the width is padded as
+    /// much as FFmpeg ever pads it, which may refuse a picture within 63
+    /// columns of the limit that a build with less padding, or a decoder
+    /// that allocates its own pictures (libdav1d), would decode.
+    pub fn of(width: u32, height: u32) -> Option<Self> {
+        over_max_pixels(width, height, MAX_PIXELS).then_some(TooLarge { width, height })
+    }
+}
+
+/// Whether a `width` × `height` picture is over `max_pixels` once its
+/// width is padded as [`TooLarge::of`] says.
+fn over_max_pixels(width: u32, height: u32, max_pixels: i64) -> bool {
+    let padded = u64::from(width).next_multiple_of(ROW_ALIGN);
+    i128::from(padded) * i128::from(height) > i128::from(max_pixels)
+}
+
+impl std::fmt::Display for TooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (w, h) = (u64::from(self.width), u64::from(self.height));
+        write!(f, "{w}x{h}, ")?;
+        if w * h <= MAX_PIXELS as u64 {
+            write!(
+                f,
+                "which FFmpeg may pad to {}x{h}, ",
+                w.next_multiple_of(ROW_ALIGN)
+            )?;
+        }
+        // `too_large_pictures_are_named_by_size` holds this to MAX_PIXELS.
+        write!(
+            f,
+            "more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes"
+        )
+    }
+}
 
 /// Open decoder `codec` on `ctx`, limited to [`MAX_PIXELS`] per picture.
 /// Every decoder Spherecut uses is opened here (clippy forbids
@@ -2248,14 +2338,22 @@ mod tests {
 
     /// Three 256x128 frames of H.264 in MP4.
     fn clip(dir: &TempDir, name: &str) -> PathBuf {
+        clip_with(dir, name, "libx264", &[])
+    }
+
+    /// Three 256x128 frames in MP4, from `encoder` with `options`.
+    fn clip_with(dir: &TempDir, name: &str, encoder: &str, options: &[(&str, &str)]) -> PathBuf {
         use crate::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
         let settings = VideoSettings {
-            encoder: "libx264".into(),
+            encoder: encoder.into(),
             width: 256,
             height: 128,
             rate: spherecut_core::FrameRate::FPS_30,
             layout: PixelLayout::Yuv420p,
-            options: Vec::new(),
+            options: options
+                .iter()
+                .map(|&(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             bt709_limited: true,
         };
         let mut w = Mp4Writer::create(&dir.0.join(name), &settings, None).unwrap();
@@ -2395,6 +2493,61 @@ mod tests {
         let (r, log) = crate::hwprobe::capture_ffmpeg_log(|| open_input(&clip, None));
         r.unwrap();
         assert!(log.is_empty(), "{log:?}");
+    }
+
+    #[test]
+    fn a_stream_over_the_limit_keeps_its_size() {
+        // A decoder that refuses the size leaves an MJPEG stream at 0x0,
+        // where H.264's parser sets the size again from the bitstream.
+        // Either way the stream has the size its file gives, for
+        // `TooLarge` to name.
+        let _level = LOG_LEVEL.lock().unwrap_or_else(PoisonError::into_inner);
+        crate::init();
+        let dir = TempDir::new("over-limit");
+        let mjpeg = clip_with(&dir, "mjpeg.mp4", "mjpeg", &[("strict", "-1")]);
+        for clip in [clip(&dir, "h264.mp4"), mjpeg] {
+            let (ictx, log) = crate::hwprobe::capture_ffmpeg_log(|| {
+                open_input_with(&clip, None, &DEMUXERS, 1000).unwrap()
+            });
+            assert!(
+                log.iter()
+                    .any(|l| l.contains("exceeds specified max pixel count 1000")),
+                "{}: {log:?}",
+                clip.display()
+            );
+            let f = codecpar_fields(&ictx.stream(0).unwrap().parameters());
+            assert_eq!((f.width, f.height), (256, 128), "{}", clip.display());
+        }
+    }
+
+    #[test]
+    fn too_large_pictures_are_named_by_size() {
+        // The message says 2^27 and 16384x8192.
+        assert_eq!(MAX_PIXELS, 1 << 27);
+        assert_eq!(MAX_PIXELS, 16384 * 8192);
+        assert_eq!(TooLarge::of(16384, 8192), None);
+        assert_eq!(TooLarge::of(11520, 5760), None);
+        assert_eq!(TooLarge::of(0, u32::MAX), None);
+        // 16383 pads to 16384, and 16320 is padded already.
+        assert_eq!(TooLarge::of(16383, 8192), None);
+        assert_eq!(TooLarge::of(16320, 8224), None);
+        assert_eq!(
+            TooLarge::of(16384, 8193),
+            Some(TooLarge {
+                width: 16384,
+                height: 8193
+            })
+        );
+        assert!(TooLarge::of(u32::MAX, u32::MAX).is_some());
+        assert_eq!(
+            TooLarge::of(16400, 8200).unwrap().to_string(),
+            "16400x8200, more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes"
+        );
+        // Fewer than 2^27 pixels, but not once FFmpeg pads the rows.
+        assert_eq!(
+            TooLarge::of(16380, 8194).unwrap().to_string(),
+            "16380x8194, which FFmpeg may pad to 16384x8194, more than the 2^27 pixels (16384x8192) per picture that Spherecut decodes"
+        );
     }
 
     #[test]

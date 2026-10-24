@@ -96,10 +96,16 @@ planned ones above don't exist yet.
     open with EPERM. A thread-local list (`RefusalWatch`) names what was
     refused during the open (`OpenError::Nested`). The decoders
     `avformat_find_stream_info` opens get `MAX_PIXELS` through its
-    per-stream options.
+    per-stream options. When one of them refuses a stream's size and
+    FFmpeg leaves the stream at 0x0, `open_input` puts back the size the
+    demuxer read from the container, so that callers can name it.
   * `open_decoder` opens every decoder (`probe`, `VideoDecoder`,
     `open_video_decoder`, doctor's probes) with `max_pixels` =
-    `MAX_PIXELS`, 2^27 pixels (16384 × 8192). `clippy.toml` forbids
+    `MAX_PIXELS`, 2^27 pixels (16384 × 8192). `TooLarge::of` says
+    whether a stream's size is over it, with the width padded to 64 as
+    FFmpeg pads rows before it checks; `probe` warns of such a stream and
+    `VideoDecoder` refuses it (`MediaError::PictureTooLarge`), by its
+    size, before any decoder fails on it. `clippy.toml` forbids
     ffmpeg-next's own input, output and decoder opens (`format::open`,
     `format::input*`, `format::output*`, `Decoder::open*` and the like),
     and `std::net`'s TCP and UDP types, elsewhere.

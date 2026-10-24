@@ -138,9 +138,11 @@ or times, and damage inside `mdat` are not found without decoding. A
 stream whose codec FFmpeg doesn't know, such as a `zzzz` sample entry, is
 a `warning` line and doesn't fail probe: it may be a real codec that this
 FFmpeg lacks. So is a stream this FFmpeg has no decoder for, a stream
-FFmpeg could not set up from an empty track, and a stream whose decoder
+FFmpeg could not set up from an empty track, a stream whose decoder
 says it lacks a feature the stream uses (`Function not implemented`, as
-for AAC object type 0). The `ffmpeg` lines hold the warnings and errors
+for AAC object type 0), and a stream of pictures larger than the 2^27
+pixels (16384x8192) Spherecut's decoders make (DECISIONS D24): the
+warning gives its size. The `ffmpeg` lines hold the warnings and errors
 FFmpeg logged while reading the file, one whole line each, starting with
 the context that logged it, such as `[aac]`. A repeated line is listed
 once with a count, and at most 32 are listed. They often say what FFmpeg
