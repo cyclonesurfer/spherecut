@@ -171,11 +171,8 @@ fn err(path: &Path, what: &str, e: impl std::fmt::Display) -> MediaError {
     }
 }
 
-fn open_err(path: &Path, e: ff::Error) -> MediaError {
-    MediaError::Open {
-        path: path.to_path_buf(),
-        reason: e.to_string(),
-    }
+fn open_err(path: &Path, e: ffi::OpenError) -> MediaError {
+    MediaError::opening(path, e, |e| e.to_string())
 }
 
 fn hw_unsupported(path: &Path, dev: &HwDevice, refusal: HwRefusal) -> MediaError {

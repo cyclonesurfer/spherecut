@@ -304,9 +304,8 @@ fn probe_file(path: &Path) -> Result<ProbeReport, MediaError> {
         damage.extend(t.damage());
     }
 
-    let ictx = ffi::open_input(path, None).map_err(|e| MediaError::Open {
-        path: path.to_path_buf(),
-        reason: describe_open_error(e, tree.is_some(), &damage),
+    let ictx = ffi::open_input(path, None).map_err(|e| {
+        MediaError::opening(path, e, |e| describe_open_error(e, tree.is_some(), &damage))
     })?;
     let fmt = ictx.format();
 
@@ -344,11 +343,10 @@ fn probe_file(path: &Path) -> Result<ProbeReport, MediaError> {
     } else if fmt.name().split(',').any(|n| n == "matroska") {
         check_matroska(path, meta.len(), &mut damage)
     } else {
+        // open_input refuses other containers, so this is only reached if
+        // its list of demuxers grows without a check here.
         StructureCheck::None {
-            why: format!(
-                "spherecut checks MP4/MOV and Matroska files, not {}",
-                fmt.description()
-            ),
+            why: format!("spherecut has no structure check for {}", fmt.description()),
         }
     };
 

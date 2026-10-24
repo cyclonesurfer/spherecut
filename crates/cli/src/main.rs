@@ -21,7 +21,8 @@ struct Cli {
 enum Cmd {
     /// Show container, streams, codecs, color, timing, spherical metadata
     /// and the detected camera for one or more files. Fails if any file
-    /// cannot be read, is truncated or corrupt, or has no video or audio.
+    /// cannot be read, is not MP4/MOV or Matroska/WebM, is truncated or
+    /// corrupt, or has no video or audio.
     Probe {
         files: Vec<PathBuf>,
         /// Print JSON instead of text.
@@ -143,7 +144,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                             .iter()
                             .any(|s| matches!(s.kind, StreamKind::Video | StreamKind::Audio))
                         {
-                            // FFmpeg opens text files as subtitles or lyrics.
+                            // An MP4 or Matroska file can hold only
+                            // subtitles or data.
                             failed = true;
                             to_stderr(&format!(
                                 "error: {} has no video or audio stream; FFmpeg reads it as {}\n",

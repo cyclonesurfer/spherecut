@@ -713,19 +713,64 @@ fn matroska_cut_short_fails() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A Matroska file whose only track is a line of subtitles.
+fn matroska_subtitles() -> Vec<u8> {
+    let e = |id: &[u8], payload: &[u8]| el(id, payload, true);
+    let header = e(
+        b"\x1a\x45\xdf\xa3",
+        &[e(b"\x42\x82", b"matroska"), e(b"\x42\x87", &[4])].concat(),
+    );
+    let info = e(
+        b"\x15\x49\xa9\x66",
+        &e(b"\x2a\xd7\xb1", &[0x0f, 0x42, 0x40]),
+    );
+    let track = [
+        e(b"\xd7", &[1]),
+        e(b"\x73\xc5", &[1]),
+        // Track type 0x11: subtitles.
+        e(b"\x83", &[0x11]),
+        e(b"\x86", b"S_TEXT/UTF8"),
+    ]
+    .concat();
+    let tracks = e(b"\x16\x54\xae\x6b", &e(b"\xae", &track));
+    let block = [&b"\x81\x00\x00\x80"[..], b"not a video"].concat();
+    let cluster = e(
+        b"\x1f\x43\xb6\x75",
+        &[e(b"\xe7", &[0]), e(b"\xa3", &block)].concat(),
+    );
+    let segment = [info, tracks, cluster].concat();
+    [header, el(b"\x18\x53\x80\x67", &segment, true)].concat()
+}
+
 #[test]
 fn files_without_video_or_audio_fail() {
-    // FFmpeg opens a text file that starts like song lyrics, but it is not
-    // a media file.
-    let dir = tmp("lyrics");
+    // A container Spherecut opens, holding only subtitles: FFmpeg reads
+    // it, but there is nothing to show.
+    let dir = tmp("no-av");
+    let path = dir.join("subtitles.mkv");
+    std::fs::write(&path, matroska_subtitles()).unwrap();
+    let out = probe(&[&path]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stdout.contains("container  matroska,webm"), "{stdout}");
+    assert!(stdout.contains("#0  subtitle"), "{stdout}");
+    assert!(
+        stderr.contains(
+            "subtitles.mkv has no video or audio stream; FFmpeg reads it as Matroska / WebM"
+        ),
+        "{stderr}"
+    );
+
+    // FFmpeg reads a text file that starts like song lyrics as LRC, which
+    // Spherecut refuses by name, without a report.
     let path = dir.join("lyrics.txt");
     std::fs::write(&path, b"[00:01.00]not a video\n").unwrap();
     let out = probe(&[&path]);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
-    assert!(stdout.contains("container  lrc"), "{stdout}");
+    assert!(stdout.is_empty(), "{stdout}");
     assert!(
-        stderr.contains("lyrics.txt has no video or audio stream; FFmpeg reads it as"),
+        stderr.contains("lyrics.txt as LRC lyrics (`lrc`), and Spherecut opens only MP4/MOV and Matroska/WebM files"),
         "{stderr}"
     );
     std::fs::remove_dir_all(&dir).ok();

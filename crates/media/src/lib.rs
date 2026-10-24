@@ -2,7 +2,7 @@
 //! ourselves, capability checks, and (from M1) the `MediaBackend` trait
 //! with its FFmpeg implementation.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Once;
 
 use thiserror::Error;
@@ -31,6 +31,18 @@ pub enum MediaError {
     NotAFile(PathBuf),
     #[error("cannot open {}: {reason}", path.display())]
     Open { path: PathBuf, reason: String },
+    /// FFmpeg would read the file with a demuxer Spherecut doesn't let it
+    /// use (D24). `format` is FFmpeg's name for the demuxer, such as `hls`.
+    #[error(
+        "FFmpeg reads {} as {description} (`{format}`), and Spherecut opens only {} files",
+        path.display(),
+        ffi::CONTAINERS
+    )]
+    UnsupportedContainer {
+        path: PathBuf,
+        format: String,
+        description: String,
+    },
     #[error("cannot decode {}: {reason}", path.display())]
     Decode { path: PathBuf, reason: String },
     /// The stream can't be decoded on the hardware device; software may
@@ -48,7 +60,39 @@ pub enum MediaError {
     Hardware { kind: String, reason: HwError },
 }
 
-pub use ffi::{HwDevice, HwError, HwRefusal, MAX_PIXELS};
+pub use ffi::{CONTAINERS, HwDevice, HwError, HwRefusal, MAX_PIXELS};
+
+impl MediaError {
+    /// The error for `path`, which [`ffi::open_input`] could not open as
+    /// `e` says. `ffmpeg` words FFmpeg's own errors.
+    pub(crate) fn opening(
+        path: &Path,
+        e: ffi::OpenError,
+        ffmpeg: impl FnOnce(ff::Error) -> String,
+    ) -> Self {
+        let path = path.to_path_buf();
+        match e {
+            ffi::OpenError::Io(error) => MediaError::Io { path, error },
+            ffi::OpenError::NotAFile => MediaError::NotAFile(path),
+            ffi::OpenError::Container {
+                format,
+                description,
+            } => MediaError::UnsupportedContainer {
+                path,
+                format,
+                description,
+            },
+            ffi::OpenError::Ffmpeg(e) => MediaError::Open {
+                path,
+                reason: ffmpeg(e),
+            },
+            e @ ffi::OpenError::Nested { .. } => MediaError::Open {
+                path,
+                reason: e.to_string(),
+            },
+        }
+    }
+}
 
 static INIT: Once = Once::new();
 
