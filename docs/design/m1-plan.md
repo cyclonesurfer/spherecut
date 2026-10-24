@@ -68,6 +68,14 @@ the sections below, they win.
    a maintained zbus. Still open: clip 12 and Hyprland (asked in the
    thread). GNOME decorations wait for H2's screenshots, and odin's run
    waits for item 3.
+8. **The JSON contract for probe and doctor** is implemented on branch
+   `m1/json-contract` (D27, `docs/cli-json.md`); where it differs from
+   section 5.1, the branch wins: `schema` is one string with its version
+   (`"spherecut.probe/1"`), with no separate `version` field; probe's
+   `damage` and `warnings` are `{code, message}` problems; and the CLI's
+   codes in slice 1 are `usage`, `files_failed`, `doctor_errors` and
+   `internal`, with the rest of section 5.1's list coming with `frame` in
+   slice 4.
 
 ## 1. Summary
 
