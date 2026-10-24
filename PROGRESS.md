@@ -172,7 +172,9 @@ back clean, so M0 is done.
   spliced and resumed clips, 4.6 s before the first review's added the
   tied, backwards, variable-rate Matroska, long Matroska and catch-up
   ones). Every exact seek in a backwards clip decodes it twice from the
-  start, and the oracle seeks four times in each frame's interval.
+  start, and the oracle seeks four times in each frame's interval. Slice
+  2b adds about 5 s more: the fallback tests (3.9 s here), which fail
+  every frame of two clips, and the Tier 1 checks of the Tier 2 checks.
 - FFmpeg 6.1's H.264 decoder, left to drop the frames it decodes from
   references a seek skipped, loses the frames still in its reorder buffer
   at the end of the stream, and doesn't flag those it drains then.
