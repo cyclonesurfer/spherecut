@@ -19,7 +19,7 @@
 //! spelled out.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use ffmpeg_sys_next as sys;
 use thiserror::Error;
@@ -750,6 +750,7 @@ fn capture<R>(level: Level, f: impl FnOnce() -> R) -> (R, Vec<(Level, String)>) 
     // `f` leaves unfinished is.
     ffi::end_log_line();
     let lines = Arc::new(Mutex::new(Vec::new()));
+    UNHEARD.get_or_init(|| Dispatch::new(Unheard));
     let tee = Dispatch::new(Tee {
         outer: tracing::dispatcher::get_default(Dispatch::clone),
         lines: lines.clone(),
@@ -779,6 +780,37 @@ fn capture<R>(level: Level, f: impl FnOnce() -> R) -> (R, Vec<(Level, String)>) 
     drop(n);
     let lines = std::mem::take(&mut *lines.lock().unwrap_or_else(PoisonError::into_inner));
     (r, lines)
+}
+
+/// Lives from the first capture on, so that a tee is never the only
+/// `Dispatch` there is. With just one, `tracing` asks the default of the
+/// thread that reaches a callsite first for its interest, instead of every
+/// `Dispatch`: a thread with no subscriber, logging while a capture runs on
+/// another, would make FFmpeg's callsite one that nobody wants until the
+/// capture ends, and the capture would lose its lines (tracing-core 0.1).
+static UNHEARD: OnceLock<Dispatch> = OnceLock::new();
+
+/// Wants nothing, and says so in its level hint.
+struct Unheard;
+
+impl Subscriber for Unheard {
+    fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
+        Interest::never()
+    }
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(LevelFilter::OFF)
+    }
+    fn enabled(&self, _: &Metadata<'_>) -> bool {
+        false
+    }
+    fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+        span::Id::from_u64(1)
+    }
+    fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+    fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+    fn event(&self, _: &Event<'_>) {}
+    fn enter(&self, _: &span::Id) {}
+    fn exit(&self, _: &span::Id) {}
 }
 
 /// Records FFmpeg's lines up to `level`, and hands everything to `outer`.
