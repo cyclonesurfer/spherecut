@@ -133,6 +133,11 @@ impl DecodedFrame {
 /// failing on it, so this also bounds that.
 pub const MAX_UNREADABLE_IN_A_ROW: u32 = 100;
 
+/// Frames a decoder can hold ready to hand out: more than a picture
+/// buffer (16 in H.264 and HEVC) and FFmpeg's most frame threads (16)
+/// together. A bound for [`VideoDecoder::drop_held_frames`].
+const MAX_HELD_FRAMES: usize = 64;
+
 pub struct VideoDecoder {
     path: PathBuf,
     ictx: ff::format::context::Input,
@@ -628,6 +633,7 @@ impl VideoDecoder {
     }
 
     fn after_seek(&mut self) {
+        self.drop_held_frames();
         self.dec.flush();
         self.lookahead = None;
         self.read_done = false;
@@ -639,6 +645,25 @@ impl VideoDecoder {
         self.landing = None;
         self.landing_key = None;
         self.read_position = None;
+    }
+
+    /// Takes, and drops, the frames the decoder holds ready to hand out,
+    /// so that the flush after a seek leaves none behind. FFmpeg 7.1 and
+    /// later's HEVC decoder queues the frames it outputs (all it has left
+    /// once the stream has ended, several at once where a keyframe empties
+    /// its picture buffer) and its flush leaves the queue as it is: on one
+    /// thread, as hardware decoders run, a frame from before a seek came
+    /// out after it (D2, D29). With no packet sent, a decoder only hands
+    /// out what it has made, or what its frame threads are finishing, then
+    /// says it needs input or has ended. These frames don't count as
+    /// decoded (`frames`): a flush would have dropped them.
+    fn drop_held_frames(&mut self) {
+        let mut frame = ff::frame::Video::empty();
+        for _ in 0..MAX_HELD_FRAMES {
+            if self.dec.receive_frame(&mut frame).is_err() {
+                return;
+            }
+        }
     }
 
     /// The first packet read since the last seek, by the timestamp the

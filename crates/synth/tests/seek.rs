@@ -516,6 +516,78 @@ fn open_gop_h264_seeks_exactly_and_a_naive_seek_does_not() {
     oracle(&media::remux_to_mkv(&short, &dir).unwrap(), GOP_8);
 }
 
+/// FFmpeg 7.1 and later's HEVC decoder queues the frames it outputs (all
+/// it has left at the end of the stream, several at once where a keyframe
+/// empties its picture buffer), and its flush leaves that queue as it is.
+/// On one thread, as hardware decoders run (D30), a frame from before a
+/// seek then came out after it: after a seek into the last GOP and the
+/// frame after it, a keyframe seek there gave the clip's last frame and
+/// took it for timestamps going backwards (D2, D29). Here every frame is
+/// sought, then the frame after it, then a keyframe there and a frame
+/// elsewhere, and each must be the sequential decode's.
+#[test]
+fn on_one_thread_no_frame_from_before_a_seek_comes_out_after_it() {
+    let dir = TempDir::new("one-thread");
+    let closed = Some(Gop {
+        open: false,
+        ..OPEN_GOP.unwrap()
+    });
+    for (name, codec, gop) in [
+        ("one-thread-hevc", Codec::Hevc, OPEN_GOP),
+        ("one-thread-closed-hevc", Codec::Hevc, closed),
+        ("one-thread-h264", Codec::H264, OPEN_GOP),
+    ] {
+        let clip = write(
+            &Spec {
+                gop,
+                ..spec(name, codec)
+            },
+            &dir,
+        );
+        let (frames, _) = sequential(&clip);
+        let req = VideoRequest {
+            threads: std::num::NonZeroU32::new(1),
+            ..VideoRequest::default()
+        };
+        let mut d = FfmpegBackend::new().open_video(&clip, &req).unwrap();
+        let never = StopToken::never();
+        let n = frames.len();
+        for k in 0..n {
+            let (f, e, _) = seek_pts(&mut *d, frames[k].pts, SeekMode::Exact);
+            assert_eq!(
+                (Seen::of(&f), e),
+                (frames[k], Exactness::Exact),
+                "{name}: {k}"
+            );
+            match (d.next_frame(&never).unwrap(), frames.get(k + 1)) {
+                (NextFrame::Frame(f), Some(want)) => {
+                    assert_eq!(Seen::of(&f), *want, "{name}: after {k}");
+                }
+                (NextFrame::End, None) => {}
+                (got, want) => panic!("{name}: after {k}: {got:?}, expected {want:?}"),
+            }
+            let (f, e, _) = seek_pts(&mut *d, frames[k].pts, SeekMode::Keyframe);
+            assert_eq!(e, Exactness::KeyframeOnly, "{name}: keyframe at {k}");
+            assert!(f.key, "{name}: keyframe at {k} gave pts {}", f.pts);
+            let i = frames.iter().position(|s| s.pts == f.pts);
+            assert_eq!(
+                i.map(|i| frames[i]),
+                Some(Seen::of(&f)),
+                "{name}: keyframe at {k}"
+            );
+            let j = (k * 7 + 3) % n;
+            let (f, e, _) = seek_pts(&mut *d, frames[j].pts, SeekMode::Exact);
+            assert_eq!(
+                (Seen::of(&f), e),
+                (frames[j], Exactness::Exact),
+                "{name}: {k}, {j}"
+            );
+        }
+        let events = d.take_events();
+        assert!(events.is_empty(), "{name}: {events:?}");
+    }
+}
+
 #[test]
 fn an_edit_list_hides_its_lead_in_and_clip_time_starts_after_it() {
     let dir = TempDir::new("edit");
