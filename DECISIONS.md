@@ -1032,8 +1032,10 @@ demuxers and encoders to run them; for 8.1, Pat's version, the
 strace is a Tier 1 prerequisite: `cargo xtask check` stops before
 anything else when `strace -V` fails, printing `sudo dnf install strace`
 (Fedora), `sudo pacman -S strace` (Arch) or `sudo apt install strace`
-(Ubuntu), and the strace tests fail rather than skip without it. They
-trace with `--seccomp-bpf`, so only the traced calls stop the process.
+(Ubuntu), and the strace tests fail rather than skip without it.
+`cargo xtask hw-test`'s prerequisite check lists it too, with the dnf or
+pacman command. The tests trace with `--seccomp-bpf`, so only the traced
+calls stop the process.
 
 What the confinement changed elsewhere: `probe` refuses other containers
 instead of reporting them with `structure: none` (D15). `none` stays,

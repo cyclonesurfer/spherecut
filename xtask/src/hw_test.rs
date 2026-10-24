@@ -329,6 +329,15 @@ fn check_prereqs(d: Distro, ffmpeg_info: &str, vainfo: &str) -> Vec<Missing> {
             });
         }
     }
+    // The Tier 1 strace tests (D24) fail without it, and `cargo xtask
+    // check` stops before anything else.
+    if !have("strace") {
+        m.push(Missing {
+            what: "strace".into(),
+            fix: pkg_cmd(d, "strace", "strace"),
+            blocks: "`cargo xtask check` (Tier 1 strace tests)",
+        });
+    }
     if !vainfo.is_empty() && !vainfo.contains("VAProfileHEVCMain") {
         m.push(Missing {
             what: "VA-API HEVC profiles (vainfo lists none)".into(),
