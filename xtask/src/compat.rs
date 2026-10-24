@@ -17,6 +17,11 @@
 //! of them, loading its libraries through `LD_LIBRARY_PATH`, and `--clean`
 //! deletes each target directory once its build is checked (about 1.4 GB
 //! after clippy and the link, and 1.8 GB after the Tier 1 tests).
+//!
+//! compat deletes only what it made: a target directory is
+//! `spherecut-compat-<label>`, and one is deleted only while it holds
+//! compat's stamp. A directory there without one, or a target that is a
+//! prefix, holds one or lies inside one, is refused.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -34,8 +39,13 @@ pub const PREFIXES_ENV: &str = "SPHERECUT_FFMPEG_COMPAT";
 /// Where the per-FFmpeg target directories go, instead of `compat/` in
 /// cargo's target directory.
 pub const TARGET_ENV: &str = "SPHERECUT_FFMPEG_COMPAT_TARGET_DIR";
+/// What each target directory's name starts with, before its label.
+const TARGET_PREFIX: &str = "spherecut-compat-";
 /// The file in each target directory that says what it was built against.
 const STAMP_FILE: &str = "spherecut-ffmpeg-stamp";
+/// The stamp's first line: compat made the directory, so compat may
+/// delete it.
+const STAMP_HEADER: &str = "Made by `cargo xtask compat`, against:\n";
 /// The libraries ffmpeg-sys-next binds, whose pkg-config files a stamp
 /// covers.
 const STAMPED: [&str; 7] = [
@@ -59,7 +69,8 @@ pub struct Args {
     #[arg(long, value_name = "PREFIX")]
     test: Option<PathBuf>,
     /// Delete each build's target directory once it is checked (by
-    /// default they are kept, and later runs build only what changed).
+    /// default they are kept, and later runs build only what changed);
+    /// only one with compat's stamp is deleted.
     #[arg(long)]
     clean: bool,
 }
@@ -181,7 +192,7 @@ fn builds(prefixes: &[PathBuf]) -> Result<Vec<Build>> {
     for (i, a) in builds.iter().enumerate() {
         if let Some(b) = builds[i + 1..].iter().find(|b| b.label == a.label) {
             bail!(
-                "{} and {} would share the target directory compat/{}: \
+                "{} and {} would share the target directory {TARGET_PREFIX}{}: \
                  reach one of them through a symlink of another name",
                 a.prefix.display(),
                 b.prefix.display(),
@@ -300,7 +311,11 @@ fn stamp(pc_dir: &Path, b: &Bound) -> String {
     let dir = pc_dir
         .canonicalize()
         .unwrap_or_else(|_| pc_dir.to_path_buf());
-    let mut out = format!("pkg-config directory {}\n{}\n", dir.display(), b.describe());
+    let mut out = format!(
+        "{STAMP_HEADER}pkg-config directory {}\n{}\n",
+        dir.display(),
+        b.describe()
+    );
     let files = STAMPED
         .iter()
         .map(|lib| dir.join(format!("{lib}.pc")))
@@ -330,15 +345,85 @@ fn stamp(pc_dir: &Path, b: &Bound) -> String {
     out
 }
 
-/// Makes `target` ready for a build against what `stamp` describes. One
-/// built against anything else, or with no stamp, is deleted first: cargo
-/// would keep its bindings, since ffmpeg-sys-next binds again only when
-/// its own files or the variables it reads change, not when the FFmpeg
-/// behind a prefix does (a distro upgrade of `/usr`, a prefix built again
-/// in place, a symlink pointed elsewhere). `true` when one was deleted.
-fn prepare_target(target: &Path, stamp: &str) -> Result<bool> {
+/// The target directory for the prefix labelled `label`, in `root`.
+fn target_dir(root: &Path, label: &str) -> PathBuf {
+    root.join(format!("{TARGET_PREFIX}{label}"))
+}
+
+/// Whether compat made `target`: a directory, not a symlink, holding a
+/// stamp of compat's.
+fn made_by_compat(target: &Path) -> bool {
     let file = target.join(STAMP_FILE);
-    let stale = target.exists() && std::fs::read_to_string(&file).ok().as_deref() != Some(stamp);
+    std::fs::symlink_metadata(target).is_ok_and(|m| m.is_dir())
+        && std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file())
+        && std::fs::read_to_string(&file).is_ok_and(|s| s.starts_with(STAMP_HEADER))
+}
+
+/// `p` with symlinks resolved, for a path that need not exist: its nearest
+/// existing ancestor resolved, and the rest after it.
+fn resolved(p: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = p;
+    loop {
+        if let Ok(real) = at.canonicalize() {
+            return rest.iter().rev().fold(real, |path, name| path.join(name));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                at = parent;
+            }
+            // Nothing of it exists, or it ends in `..`: as it is.
+            _ => return p.to_path_buf(),
+        }
+    }
+}
+
+/// Refuses a target directory that is one of the `prefixes`, holds one or
+/// lies inside one, symlinks resolved: building there, or deleting it,
+/// would change an FFmpeg.
+fn guard(target: &Path, prefixes: &[PathBuf]) -> Result<()> {
+    let t = resolved(target);
+    for p in prefixes {
+        let real = resolved(p);
+        let how = if t == real {
+            "is"
+        } else if real.starts_with(&t) {
+            "holds"
+        } else if t.starts_with(&real) {
+            "lies inside"
+        } else {
+            continue;
+        };
+        bail!(
+            "the target directory {} {how} the FFmpeg prefix {}: set {TARGET_ENV} \
+             to a directory outside every prefix",
+            target.display(),
+            p.display()
+        );
+    }
+    Ok(())
+}
+
+/// Makes `target` ready for a build against what `stamp` describes. One
+/// built against anything else is deleted first: cargo would keep its
+/// bindings, since ffmpeg-sys-next binds again only when its own files or
+/// the variables it reads change, not when the FFmpeg behind a prefix does
+/// (a distro upgrade of `/usr`, a prefix built again in place, a symlink
+/// pointed elsewhere). A directory there that compat didn't make, stamp
+/// and all, is refused rather than deleted. `true` when one was deleted.
+fn prepare_target(target: &Path, stamp: &str) -> Result<bool> {
+    let exists = std::fs::symlink_metadata(target).is_ok();
+    if exists && !made_by_compat(target) {
+        bail!(
+            "{} is there and `cargo xtask compat` didn't make it (it has no stamp \
+             of compat's, {STAMP_FILE}), so compat won't build in it or delete it: \
+             move it, or set {TARGET_ENV} to another directory",
+            target.display()
+        );
+    }
+    let file = target.join(STAMP_FILE);
+    let stale = exists && std::fs::read_to_string(&file).ok().as_deref() != Some(stamp);
     if stale {
         std::fs::remove_dir_all(target)
             .with_context(|| format!("could not remove {}", target.display()))?;
@@ -347,6 +432,46 @@ fn prepare_target(target: &Path, stamp: &str) -> Result<bool> {
         .with_context(|| format!("could not create {}", target.display()))?;
     std::fs::write(&file, stamp).with_context(|| format!("could not write {}", file.display()))?;
     Ok(stale)
+}
+
+/// [`prepare_target`] once [`guard`] allows `target`, then the stamp again
+/// from `restamp`, which must not have changed: deleting a stale target
+/// must leave the FFmpeg it is for as it was, which a prefix whose files
+/// are links into the target would not be.
+fn ready_target(
+    target: &Path,
+    prefixes: &[PathBuf],
+    stamp: &str,
+    restamp: impl FnOnce() -> Result<String>,
+) -> Result<bool> {
+    guard(target, prefixes)?;
+    let stale = prepare_target(target, stamp)?;
+    let now = restamp()?;
+    if now != stamp {
+        bail!(
+            "the FFmpeg changed while its target {} was made ready; it was\n{stamp}and is now\n{now}",
+            target.display()
+        );
+    }
+    Ok(stale)
+}
+
+/// `--clean`'s deletion of `target`, only once compat made it and
+/// [`guard`] allows it. `true` when it was there and is gone.
+fn clean_target(target: &Path, prefixes: &[PathBuf]) -> Result<bool> {
+    if std::fs::symlink_metadata(target).is_err() {
+        return Ok(false);
+    }
+    guard(target, prefixes)?;
+    if !made_by_compat(target) {
+        bail!(
+            "{} has no stamp of compat's ({STAMP_FILE}): it is left as it is",
+            target.display()
+        );
+    }
+    std::fs::remove_dir_all(target)
+        .with_context(|| format!("could not remove {}", target.display()))?;
+    Ok(true)
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
@@ -600,7 +725,8 @@ fn report(rows: &[Row]) -> String {
     out
 }
 
-/// cargo's target directory for one FFmpeg.
+/// Where the target directories go: `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR`,
+/// else `compat/` in cargo's target directory.
 fn target_root() -> PathBuf {
     std::env::var_os(TARGET_ENV)
         .filter(|v| !v.is_empty())
@@ -623,7 +749,7 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
     let search = |pc: &Path| prepend(pc, get(&vars, "PKG_CONFIG_PATH"));
     let mut rows = Vec::new();
     for b in builds(prefixes)? {
-        let target = root.join(&b.label);
+        let target = target_dir(&root, &b.label);
         let found = b.pc_dir.clone().and_then(|pc| {
             bound(&program, &b.prefix, &pc, &search(&pc)).map_err(|e| format!("{e:#}"))
         });
@@ -640,7 +766,9 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
         if let (Ok(pc), Ok(found)) = (&b.pc_dir, &row.bound) {
             let what = format!("against {} at {}", found.describe(), row.prefix.display());
             let env = cargo_env(pc, &target, None, &vars);
-            row.clippy = match prepare_target(&target, &stamp(pc, found)) {
+            let restamp =
+                || bound(&program, &row.prefix, pc, &search(pc)).map(|again| stamp(pc, &again));
+            row.clippy = match ready_target(&target, prefixes, &stamp(pc, found), restamp) {
                 Err(e) => Stage::Failed(format!("{e:#}")),
                 Ok(stale) => {
                     if stale {
@@ -691,10 +819,11 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
                 row.link = Some(link);
             }
         }
-        if clean && target.exists() {
-            match std::fs::remove_dir_all(&target) {
-                Ok(()) => eprintln!("==> removed {}", target.display()),
-                Err(e) => eprintln!("warning: could not remove {}: {e}", target.display()),
+        if clean {
+            match clean_target(&target, prefixes) {
+                Ok(true) => eprintln!("==> removed {}", target.display()),
+                Ok(false) => {}
+                Err(e) => eprintln!("warning: {e:#}"),
             }
         }
         rows.push(row);
@@ -806,7 +935,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("/a/n8.1 and /b/n8.1"), "{e}");
-        assert!(e.contains("compat/n8.1"), "{e}");
+        assert!(e.contains("spherecut-compat-n8.1"), "{e}");
         assert!(builds(&[p("/a/n8.1"), p("/a/n9.0")]).is_ok());
     }
 
@@ -1026,7 +1155,7 @@ mod tests {
     #[test]
     fn a_target_built_against_another_ffmpeg_is_deleted_first() {
         let d = scratch("stamp");
-        let target = d.join("compat/ff");
+        let target = target_dir(&d.join("compat"), "ff");
         let (pc71, b71) = fake_prefix(&d.join("n7.1"), "61.19.100");
         let (pc81, b81) = fake_prefix(&d.join("n8.1"), "62.28.100");
         // The prefix is a symlink, as in the review that found this:
@@ -1083,12 +1212,13 @@ mod tests {
         assert!(prepare_target(&target, &again).unwrap());
         assert!(!built(&target).exists());
 
-        // A target with no stamp (from a compat before stamps, or made by
-        // hand) can't be trusted either.
+        // A target with no stamp can't be trusted either, and compat can't
+        // tell that it made it: it is refused, and left as it is.
         build(&target);
         std::fs::remove_file(target.join(STAMP_FILE)).unwrap();
-        assert!(prepare_target(&target, &again).unwrap());
-        assert!(!built(&target).exists());
+        let e = prepare_target(&target, &again).unwrap_err().to_string();
+        assert!(e.contains("didn't make it"), "{e}");
+        assert!(built(&target).is_file());
 
         // A file the stamp covers that is gone says so.
         std::fs::remove_file(pc71.join("libavdevice.pc")).unwrap();
@@ -1099,6 +1229,129 @@ mod tests {
 
     fn symlink(to: &Path, at: &Path) {
         std::os::unix::fs::symlink(to, at).unwrap();
+    }
+
+    /// A directory with a stamp of compat's, as `prepare_target` leaves
+    /// it.
+    fn made(target: &Path) {
+        std::fs::create_dir_all(target).unwrap();
+        std::fs::write(target.join(STAMP_FILE), format!("{STAMP_HEADER}x\n")).unwrap();
+    }
+
+    #[test]
+    fn a_directory_compat_did_not_make_is_refused_and_kept() {
+        let d = scratch("not-made");
+        let (pc, b) = fake_prefix(&d.join("n8.1"), "62.28.100");
+        let s = stamp(&pc, &b);
+        assert!(s.starts_with(STAMP_HEADER), "{s}");
+        let root = d.join("t");
+        let target = target_dir(&root, "n8.1");
+        assert_eq!(target, root.join("spherecut-compat-n8.1"));
+        // Someone's directory where the target would go, without a stamp,
+        // or with one compat didn't write (compat's stamps before this
+        // one had no header either).
+        std::fs::create_dir_all(&target).unwrap();
+        let keep = target.join("keep");
+        std::fs::write(&keep, "mine").unwrap();
+        for stamp_file in [
+            None,
+            Some("pkg-config directory /x\nlibavcodec 62.28.100\n"),
+        ] {
+            if let Some(text) = stamp_file {
+                std::fs::write(target.join(STAMP_FILE), text).unwrap();
+            }
+            let e = prepare_target(&target, &s).unwrap_err().to_string();
+            assert!(e.contains("didn't make it"), "{e}");
+            assert!(e.contains(TARGET_ENV), "{e}");
+            let e = clean_target(&target, &[]).unwrap_err().to_string();
+            assert!(e.contains("it is left as it is"), "{e}");
+            assert!(keep.is_file());
+        }
+        // A stamp that is a directory, or a symlink, isn't one.
+        let other = target_dir(&root, "other");
+        std::fs::create_dir_all(other.join(STAMP_FILE)).unwrap();
+        assert!(prepare_target(&other, &s).is_err());
+        assert!(other.join(STAMP_FILE).is_dir());
+        // A symlink to a directory compat made isn't one compat made, and
+        // what it leads to is kept.
+        let ours = target_dir(&root, "ours");
+        assert!(!prepare_target(&ours, &s).unwrap());
+        let link = target_dir(&root, "link");
+        symlink(&ours, &link);
+        assert!(prepare_target(&link, &s).is_err());
+        assert!(clean_target(&link, &[]).is_err());
+        assert!(ours.join(STAMP_FILE).is_file());
+        // What compat made, --clean deletes, and a target that isn't there
+        // is nothing to do.
+        assert!(clean_target(&ours, &[]).unwrap());
+        assert!(!ours.exists());
+        assert!(!clean_target(&ours, &[]).unwrap());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_target_that_is_holds_or_lies_inside_a_prefix_is_refused() {
+        let d = scratch("guard");
+        let prefix = d.join("ff/n8.1");
+        std::fs::create_dir_all(prefix.join("lib")).unwrap();
+        let link = d.join("link");
+        symlink(&prefix, &link);
+        let prefixes = [prefix.clone(), d.join("elsewhere/gone")];
+        let never = || -> Result<String> { panic!("the target was made ready") };
+        for (target, how) in [
+            (prefix.clone(), "is"),
+            (d.join("ff"), "holds"),
+            (d.clone(), "holds"),
+            (prefix.join("lib"), "lies inside"),
+            // One that isn't there yet, and one through a symlink.
+            (prefix.join("lib/spherecut-compat-n8.1"), "lies inside"),
+            (link.clone(), "is"),
+            (link.join("spherecut-compat-n8.1"), "lies inside"),
+        ] {
+            let e = guard(&target, &prefixes).unwrap_err().to_string();
+            let want = format!(
+                "{} {how} the FFmpeg prefix {}",
+                target.display(),
+                prefix.display()
+            );
+            assert!(
+                e.starts_with(&format!("the target directory {want}")),
+                "{e}"
+            );
+            assert!(ready_target(&target, &prefixes, "", never).is_err());
+        }
+        // A prefix named through a symlink is resolved too.
+        assert!(guard(&prefix.join("lib"), std::slice::from_ref(&link)).is_err());
+        // Beside the prefixes is where targets go.
+        assert!(guard(&target_dir(&d.join("ff"), "n8.1"), &prefixes).is_ok());
+        assert!(guard(&d.join("other/t"), &prefixes).is_ok());
+        // --clean is held to it, even for a directory with compat's stamp.
+        let inside = prefix.join("lib/spherecut-compat-n8.1");
+        made(&inside);
+        assert!(clean_target(&inside, &prefixes).is_err());
+        assert!(inside.join(STAMP_FILE).is_file());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn an_ffmpeg_that_making_its_target_ready_changes_is_refused() {
+        // A prefix whose libavcodec.pc is a link into its stale target:
+        // deleting the target takes the file with it.
+        let d = scratch("restamp");
+        let (pc, b) = fake_prefix(&d.join("n8.1"), "62.28.100");
+        let target = target_dir(&d.join("t"), "n8.1");
+        let prefixes = [d.join("n8.1")];
+        let restamp = || Ok(stamp(&pc, &b));
+        assert!(!ready_target(&target, &prefixes, &stamp(&pc, &b), restamp).unwrap());
+        std::fs::rename(pc.join("libavcodec.pc"), target.join("libavcodec.pc")).unwrap();
+        symlink(&target.join("libavcodec.pc"), &pc.join("libavcodec.pc"));
+        let s = stamp(&pc, &b);
+        let e = ready_target(&target, &prefixes, &s, restamp)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("the FFmpeg changed"), "{e}");
+        assert!(e.contains("libavcodec.pc missing"), "{e}");
+        std::fs::remove_dir_all(&d).ok();
     }
 
     /// A prefix at `dir` whose libavcodec.pc names `libdir` and

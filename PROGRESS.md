@@ -413,6 +413,6 @@ cargo run -p spherecut-cli -- probe <file>... [--json]   # --json: one document,
 cargo run -p spherecut-cli -- doctor [--json]
 cargo xtask hw-test               # on a real machine; report in hw-reports/
 scripts/build-ffmpeg.sh n8.1.3 ~/ffmpeg   # an FFmpeg release from its tag into ~/ffmpeg/n8.1.3-full (about 4 min on 4 CPUs)
-cargo xtask compat ~/ffmpeg/n7.1.3-full ~/ffmpeg/n8.1.3-full --test ~/ffmpeg/n8.1.3-full   # clippy and a link against each (about 3 min and 1.4 GB a prefix on 4 CPUs), Tier 1 against one (D2); --clean deletes their targets after
+cargo xtask compat ~/ffmpeg/n7.1.3-full ~/ffmpeg/n8.1.3-full --test ~/ffmpeg/n8.1.3-full   # clippy and a link against each (about 3 min and 1.4 GB a prefix on 4 CPUs), Tier 1 against one (D2); targets are spherecut-compat-<label> in $SPHERECUT_FFMPEG_COMPAT_TARGET_DIR or target/compat/, and --clean deletes them after
 SPHERECUT_FFMPEG_COMPAT=~/ffmpeg/n8.1.3-full cargo xtask check   # check lints and links against those too
 ```

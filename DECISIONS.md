@@ -166,6 +166,18 @@ didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
   9.0.2 but not 8.1.2 or 9.0.1). It now takes 2 channels or none, which
   are FFmpeg's to say, and checks what is probe's: the AAC decoder's
   refusal as the one damage, and the sample format.
+- It found compat itself unsafe. Its targets were named by label alone,
+  `<root>/<label>`, and one without a stamp was deleted as stale, before
+  a build or under `--clean`: with `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR`
+  naming the directory that holds the prefixes, each prefix was its own
+  target and was deleted. Targets are now `spherecut-compat-<label>`,
+  and compat deletes only those with its stamp (below). Its unit tests
+  refuse a directory without a stamp, one with a stamp of the old kind
+  (no header), a symlink, and a target that is, holds or lies inside a
+  prefix, under `--clean` too, and an FFmpeg that changed as its target
+  was made ready; each fails without its check. Targets an earlier
+  compat made at `compat/<label>` are left as they are: delete them by
+  hand.
 - It found that compat took a prefix for found once pkg-config read its
   `libavcodec.pc`, though that file's `libdir` or `includedir` could
   lead to another FFmpeg, and that it ran `pkg-config` from `PATH` where
@@ -182,18 +194,27 @@ the binaries without running them: clippy doesn't link, so a function
 that `ffi.rs`'s own extern block declares and an FFmpeg no longer
 exports would pass it, and fail only where the tests are built, as
 `hw-test` builds them on Pat's machines. Each prefix has a target
-directory of its own (`<target>/compat/<label>`, with line-tables
-debuginfo and no incremental state). compat checks that pkg-config
-(`$PKG_CONFIG` when it is set, as the build runs it) finds that prefix,
-and that the libavcodec library and header its `.pc` file names lie
-inside the prefix, symlinks resolved, and prints the FFmpeg and
-libavcodec it found there.
-A target records what it was built against (the versions, and the size
-and time of each library's pkg-config file and of `ffversion.h`), and
-one built against anything else is deleted first: ffmpeg-sys-next binds
-again only when the variables it reads change, so a distro upgrade of
-`/usr`, a prefix built again in place or a symlink pointed elsewhere
-kept the old bindings and passed under the new version's name. cargo
+directory of its own, `spherecut-compat-<label>` (the label is the
+prefix's last component) in the directory
+`SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` names, or else in
+`<target>/compat/`, with line-tables debuginfo and no incremental
+state. compat checks that pkg-config (`$PKG_CONFIG` when it is set, as
+the build runs it) finds that prefix, and that the libavcodec library
+and header its `.pc` file names lie inside the prefix, symlinks
+resolved, and prints the FFmpeg and libavcodec it found there. A target
+records what it was built against (the versions, and the size and time
+of each library's pkg-config file and of `ffversion.h`), and one built
+against anything else is deleted first: ffmpeg-sys-next binds again
+only when the variables it reads change, so a distro upgrade of `/usr`,
+a prefix built again in place or a symlink pointed elsewhere kept the
+old bindings and passed under the new version's name. compat deletes
+only what it made: a target, stale or under `--clean`, only while it
+holds compat's stamp, whose first line says compat wrote it. A
+directory there without one is refused and left, and so is a target
+directory that is a prefix, holds one or lies inside one, symlinks
+resolved. Once a stale target is deleted, compat asks pkg-config again
+and stops if the stamp changed, as it would for a prefix whose files
+are links into the target. cargo
 runs without `FFMPEG_DIR`, which ffmpeg-sys-next uses before
 pkg-config, and without the pkg-config crate's per-target variables
 (`HOST_PKG_CONFIG_PATH`, `PKG_CONFIG_PATH_<target>` and the like), which
