@@ -10,9 +10,10 @@ use spherecut_core::video::{
     Assumed, ChromaSiting, ColorCodes, ColorFamily, ColorInfo, Matrix, PixelLayout, PlaneData,
     PlaneDesc, Primaries, Range, SampleBytes, Transfer, VideoPlanes,
 };
-use spherecut_render::{AdapterChoice, Gpu};
+use spherecut_render::{AdapterChoice, Gpu, RenderError};
 use spherecut_synth::RgbImage;
 use spherecut_synth::yuv::{self, Chroma, YuvFormat};
+use spherecut_testkit::tier2;
 
 /// The CPU adapter, as every Tier 1 test renders on: made once, shared by
 /// the binary's tests.
@@ -29,6 +30,69 @@ pub fn gpu() -> &'static Gpu {
         );
         gpu
     })
+}
+
+/// Every Vulkan adapter, described, and a device on each one that isn't
+/// a CPU: what the Tier 2 render tests run on. A GPU that won't open a
+/// device fails the test.
+pub fn hardware_gpus() -> (Vec<Gpu>, Vec<String>) {
+    let instance = wgpu::Instance::new(Gpu::instance_descriptor());
+    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
+    let mut gpus = Vec::new();
+    let mut seen = Vec::new();
+    for a in adapters {
+        let info = a.get_info();
+        seen.push(format!(
+            "{} ({:?}, {} {})",
+            info.name, info.device_type, info.driver, info.driver_info
+        ));
+        if info.device_type == wgpu::DeviceType::Cpu {
+            continue;
+        }
+        let name = if info.device_pci_bus_id.is_empty() {
+            info.name.clone()
+        } else {
+            info.device_pci_bus_id.clone()
+        };
+        match Gpu::headless(&AdapterChoice::Named(name)) {
+            Ok(g) => gpus.push(g),
+            Err(e) => panic!("{} won't open a device: {e}", info.name),
+        }
+    }
+    (gpus, seen)
+}
+
+/// The GPU a Tier 2 test runs on, or a skip: the adapter
+/// `SPHERECUT_ADAPTER` names, else the first GPU Vulkan lists (the loader
+/// puts discrete GPUs first).
+pub fn hardware_gpu() -> Gpu {
+    tier2::require_hw_run();
+    if let Some(choice) = AdapterChoice::from_env() {
+        return named_gpu(&choice, Gpu::headless(&choice));
+    }
+    let (gpus, seen) = hardware_gpus();
+    gpus.into_iter()
+        .next()
+        .unwrap_or_else(|| tier2::skip(format!("no GPU: Vulkan lists only {}", seen.join(", "))))
+}
+
+/// What opening the adapter `choice` names gave: the GPU, or a skip when
+/// there is no such adapter or it is a CPU. An adapter that is there but
+/// won't give a device fails the test, as in [`hardware_gpus`]: that is a
+/// fault to report, not missing hardware.
+pub fn named_gpu(choice: &AdapterChoice, opened: Result<Gpu, RenderError>) -> Gpu {
+    let env = AdapterChoice::ENV;
+    match opened {
+        Ok(gpu) if gpu.caps.is_cpu => tier2::skip(format!(
+            "{env}={choice} is a CPU adapter, {}",
+            gpu.caps.info.name
+        )),
+        Ok(gpu) => gpu,
+        Err(e @ (RenderError::NoAdapter { .. } | RenderError::AdapterNotFound { .. })) => {
+            tier2::skip(format!("{env}={choice}: {e}"))
+        }
+        Err(e) => panic!("{env}={choice} won't open a device: {e}"),
+    }
 }
 
 /// A decoded picture held in memory, with rows `pad` bytes longer than
@@ -78,6 +142,8 @@ pub enum Kind {
     I444,
     I444p12,
     Gray,
+    /// 16-bit grey, the bits low: the deepest a plane comes.
+    Gray16,
     Gbrp,
 }
 
@@ -93,6 +159,7 @@ impl Kind {
             Kind::I444 => "yuv444p",
             Kind::I444p12 => "yuv444p12le",
             Kind::Gray => "gray",
+            Kind::Gray16 => "gray16le",
             Kind::Gbrp => "gbrp",
         }
     }
@@ -101,6 +168,7 @@ impl Kind {
         match self {
             Kind::P010 | Kind::I420p10 | Kind::I422p10 => 10,
             Kind::I444p12 => 12,
+            Kind::Gray16 => 16,
             _ => 8,
         }
     }
@@ -128,7 +196,7 @@ impl Kind {
         };
         let (planes, family) = match self {
             Kind::Nv12 | Kind::P010 => (vec![plane(1, (0, 0)), plane(2, sub)], ColorFamily::Yuv),
-            Kind::Gray => (vec![plane(1, (0, 0))], ColorFamily::Gray),
+            Kind::Gray | Kind::Gray16 => (vec![plane(1, (0, 0))], ColorFamily::Gray),
             Kind::Gbrp => (vec![plane(1, (0, 0)); 3], ColorFamily::Rgb),
             _ => (
                 vec![plane(1, (0, 0)), plane(1, sub), plane(1, sub)],
@@ -205,7 +273,7 @@ pub fn frame(img: &RgbImage, kind: Kind, color: ColorInfo, pad: usize) -> Frame 
                 .collect();
             vec![codes[0].clone(), uv]
         }
-        Kind::Gray => vec![codes[0].clone()],
+        Kind::Gray | Kind::Gray16 => vec![codes[0].clone()],
         _ => codes,
     };
     let shift = if kind == Kind::P010 { 6 } else { 0 };

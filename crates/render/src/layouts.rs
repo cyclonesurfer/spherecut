@@ -2,6 +2,9 @@
 //! deduplicates identical layouts, so each user makes its own from these
 //! functions and they stay compatible.
 
+/// What every pass starts with: the full-screen triangle and `round_f16`,
+/// which a Tier 1 test runs on its own.
+pub const COMMON_WGSL: &str = include_str!("shaders/common.wgsl");
 /// The projection pass, `shaders/common.wgsl` then `shaders/project.wgsl`.
 pub const PROJECT_WGSL: &str = concat!(
     include_str!("shaders/common.wgsl"),

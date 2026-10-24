@@ -1,6 +1,6 @@
 # Progress
 
-Updated 2026-10-24, with FFmpeg confined to the file Spherecut opened (D24), the CLI's JSON contract for probe and doctor (D27), odin's first hardware report, M1 slice 2a: `MediaBackend` with frame-exact seek in software, native pixel layouts and the colour defaults (D29, D30), slice 2b: hardware decoding through the backend, with fallback to software, the pooled download, the render node lookup and the Tier 2 seek tests (D30), and slice 3a: the render core, checked on lavapipe against its CPU reference (D31). Milestone criteria are in `PLAN.md`;
+Updated 2026-10-24, with FFmpeg confined to the file Spherecut opened (D24), the CLI's JSON contract for probe and doctor (D27), odin's first hardware report, M1 slice 2a: `MediaBackend` with frame-exact seek in software, native pixel layouts and the colour defaults (D29, D30), slice 2b: hardware decoding through the backend, with fallback to software, the pooled download, the render node lookup and the Tier 2 seek tests (D30), slice 3a: the render core, checked on lavapipe against its CPU reference (D31), and slice 3b: the golden images with their negative controls and the render Tier 2 tests (D32), with the unsafe rule at every crate root (D28). Milestone criteria are in `PLAN.md`;
 decisions and their reasons in `DECISIONS.md`.
 
 ## Status
@@ -8,7 +8,7 @@ decisions and their reasons in `DECISIONS.md`.
 | Milestone | State |
 |---|---|
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because RADV on Strix Halo has no Vulkan Video H.264 or HEVC decode. Evidence below |
-| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion stays unticked until `spherecut frame`, which it also covers, exists and has its strace test. The CLI's JSON contract for `probe` and `doctor` (D27, `docs/cli-json.md`) is the third; its criterion stays unticked until `frame` joins it, with exit statuses 3 and 4, SIGINT and `--overwrite`. Slice 2a is the fourth: `core::video` and `core::cancel`, `media::backend` with `FfmpegBackend` and the frame-exact seek of plan section 3.3 in software (D29), native pixel layouts, swscale for the rest and the colour default rules (D30), synth's new clips and its `SyntheticBackend` and `GatedBackend`. The seek oracle (`crates/synth/tests/seek.rs`) is exact on every clip of the set, among them clips whose timestamps tie or go backwards and variable-rate Matroska files with a constant default duration; it checks what each seek cost and every run link, and its negative controls miss. The slice's review found 16 faults (wrong frames returned as `Exact` after a cut, in broken timestamps and in variable-rate Matroska, false run links when catching up, a duration missing for Matroska, an index trusted before Cues are read); all are fixed, each with a test that fails without its fix where one can show it (D29, D30). Its second review found 10 more (an open-GOP H.264 leading picture and a RADL picture returned after a seek, seeks past an MP4 cut, an MP4 spliced by its edit list read as constant-rate, resuming after a stopped seek in tied and backwards streams, an FFmpeg log capture that lost its lines to another thread, a test that a change in load could fail, and an overflow on a far-off Cues entry); all are fixed too, with tests where one can show it (D29). Slice 2b is the fifth: `DecodeMode::Hardware` decodes through the backend on VA-API or Vulkan Video, on one device per kind per backend opened on the render node `media::hw` finds (bus id, then PCI ids, then `renderD128`; `--render-node` overrides it), single-threaded, with frames kept on the device until handed out and downloaded into a pool of 256-byte-aligned buffers. `Fallback::Software` opens in software when the device can't be opened or turns the stream down, and reopens in software when it fails mid-stream, going on from the frame after the last one returned with no gap and no repeat; `Fallback::Fail` returns the error. A device's refusal or failure is its own error (`HwUnsupported`, the new `HwFailed`), never the file's damage. Media's `fault-injection` feature, turned on only by synth's tests, fails any frame as the device would, and the Tier 1 fallback tests (`crates/synth/tests/fallback.rs`) fail every frame of H.264 and HEVC clips while seeking, catching up and playing; they also fall back on lavapipe and on a render node that isn't there. The Tier 2 tests the plan names are written and listed (`vaapi_seek_matches_software`, `vaapi_colorinfo_matches_software`, `vaapi_download_pool_reuses_buffers`, `bench_seek_latency`, and Vulkan Video versions of the first three), and here they skip with their reasons; their checks pass on software standing in for a device and fail on one that fails. The slice's review found 4 faults (a stream cropped on the left came off the device narrower than software's frame, or failed on its first download at 10 bits, since FFmpeg's aligned cropping keeps columns by the pixel format's own rule; the pool tests couldn't tell a pool from a fresh buffer per frame; a device that won't open was named `vaapi`, and the Vulkan device's log line named the node asked rather than the GPU taken); all are fixed, with tests where one can show it. Both paths now crop exactly as the stream says, and the Tier 2 seek and colour sets have clips cropped on the left (D30). Slice 2 is done once 2b merges; its hardware results come with H1. Slice 3a is the sixth: `spherecut-render` on wgpu 30.0.1 (Vulkan only) with `rust-version` 1.95 (D1): the device (`Gpu`, `AdapterChoice`, `GpuCaps`, `RenderError` with contract codes), canonical plane textures (deep planes through an integer scratch and an ingest pass into f16) with area mips capped near 64 px, GPU slots, the `Uploader` (`write_texture` or a staging belt, one submit per frame), the projection shader (every projection and morphs, the shader's own LOD, colour from `ColorInfo`), the encode pass, `render_still` and the f64 CPU reference (D31), with sphere's `pixel`, `orient`, `uv_gradient` and `project_morph` and testkit's `compare` and `fnv64`. On lavapipe `render_still` matches the reference at 49.6 to 59.0 dB through every projection and ten plane layouts at 8 to 12 bits, both ranges, three matrices and three sitings, and the mips match an independent area mean; negative controls tell level 0 from trilinear and one siting from another (`crates/render/tests/`). The slice's first review found 11 faults; all are fixed, each with a test that fails without its fix where one can show it: lavapipe truncates an f32 stored into an f16 target, so half the 10-bit codes ingested a half low (the shaders now round every f16 store to the nearest half themselves); an upload's GPU time left out the ingest; a stereo frame's other eye bled in across the shown eye's edges (only the shown eye is uploaded now); the chroma siting had no check that didn't share the renderer's own arithmetic, and 4:1:1's factor was wrong at small widths; readback failed past wgpu's 256 MiB buffer limit; a lost device panicked in wgpu's error handler (every entry point now returns `gpu_failed`); and D31, D22, ARCHITECTURE and a test comment said things that weren't so (the GUI's device path, the crate count, FFmpeg in render's tests, the belt branch a test covered). An odd-width 360° frame's chroma step at the seam is recorded as a limit (D31). Slice 3b adds the goldens and the Tier 2 tests. No M1 criterion is ticked yet |
+| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion stays unticked until `spherecut frame`, which it also covers, exists and has its strace test. The CLI's JSON contract for `probe` and `doctor` (D27, `docs/cli-json.md`) is the third; its criterion stays unticked until `frame` joins it, with exit statuses 3 and 4, SIGINT and `--overwrite`. Slice 2a is the fourth: `core::video` and `core::cancel`, `media::backend` with `FfmpegBackend` and the frame-exact seek of plan section 3.3 in software (D29), native pixel layouts, swscale for the rest and the colour default rules (D30), synth's new clips and its `SyntheticBackend` and `GatedBackend`. The seek oracle (`crates/synth/tests/seek.rs`) is exact on every clip of the set, among them clips whose timestamps tie or go backwards and variable-rate Matroska files with a constant default duration; it checks what each seek cost and every run link, and its negative controls miss. The slice's review found 16 faults (wrong frames returned as `Exact` after a cut, in broken timestamps and in variable-rate Matroska, false run links when catching up, a duration missing for Matroska, an index trusted before Cues are read); all are fixed, each with a test that fails without its fix where one can show it (D29, D30). Its second review found 10 more (an open-GOP H.264 leading picture and a RADL picture returned after a seek, seeks past an MP4 cut, an MP4 spliced by its edit list read as constant-rate, resuming after a stopped seek in tied and backwards streams, an FFmpeg log capture that lost its lines to another thread, a test that a change in load could fail, and an overflow on a far-off Cues entry); all are fixed too, with tests where one can show it (D29). Slice 2b is the fifth: `DecodeMode::Hardware` decodes through the backend on VA-API or Vulkan Video, on one device per kind per backend opened on the render node `media::hw` finds (bus id, then PCI ids, then `renderD128`; `--render-node` overrides it), single-threaded, with frames kept on the device until handed out and downloaded into a pool of 256-byte-aligned buffers. `Fallback::Software` opens in software when the device can't be opened or turns the stream down, and reopens in software when it fails mid-stream, going on from the frame after the last one returned with no gap and no repeat; `Fallback::Fail` returns the error. A device's refusal or failure is its own error (`HwUnsupported`, the new `HwFailed`), never the file's damage. Media's `fault-injection` feature, turned on only by synth's tests, fails any frame as the device would, and the Tier 1 fallback tests (`crates/synth/tests/fallback.rs`) fail every frame of H.264 and HEVC clips while seeking, catching up and playing; they also fall back on lavapipe and on a render node that isn't there. The Tier 2 tests the plan names are written and listed (`vaapi_seek_matches_software`, `vaapi_colorinfo_matches_software`, `vaapi_download_pool_reuses_buffers`, `bench_seek_latency`, and Vulkan Video versions of the first three), and here they skip with their reasons; their checks pass on software standing in for a device and fail on one that fails. The slice's review found 4 faults (a stream cropped on the left came off the device narrower than software's frame, or failed on its first download at 10 bits, since FFmpeg's aligned cropping keeps columns by the pixel format's own rule; the pool tests couldn't tell a pool from a fresh buffer per frame; a device that won't open was named `vaapi`, and the Vulkan device's log line named the node asked rather than the GPU taken); all are fixed, with tests where one can show it. Both paths now crop exactly as the stream says, and the Tier 2 seek and colour sets have clips cropped on the left (D30). Slice 2 is done once 2b merges; its hardware results come with H1. Slice 3a is the sixth: `spherecut-render` on wgpu 30.0.1 (Vulkan only) with `rust-version` 1.95 (D1): the device (`Gpu`, `AdapterChoice`, `GpuCaps`, `RenderError` with contract codes), canonical plane textures (deep planes through an integer scratch and an ingest pass into f16) with area mips capped near 64 px, GPU slots, the `Uploader` (`write_texture` or a staging belt, one submit per frame), the projection shader (every projection and morphs, the shader's own LOD, colour from `ColorInfo`), the encode pass, `render_still` and the f64 CPU reference (D31), with sphere's `pixel`, `orient`, `uv_gradient` and `project_morph` and testkit's `compare` and `fnv64`. On lavapipe `render_still` matches the reference at 49.6 to 59.0 dB through every projection and ten plane layouts at 8 to 12 bits, both ranges, three matrices and three sitings, and the mips match an independent area mean; negative controls tell level 0 from trilinear and one siting from another (`crates/render/tests/`). The slice's first review found 11 faults; all are fixed, each with a test that fails without its fix where one can show it: lavapipe truncates an f32 stored into an f16 target, so half the 10-bit codes ingested a half low (the shaders now round every f16 store to the nearest half themselves); an upload's GPU time left out the ingest; a stereo frame's other eye bled in across the shown eye's edges (only the shown eye is uploaded now); the chroma siting had no check that didn't share the renderer's own arithmetic, and 4:1:1's factor was wrong at small widths; readback failed past wgpu's 256 MiB buffer limit; a lost device panicked in wgpu's error handler (every entry point now returns `gpu_failed`); and D31, D22, ARCHITECTURE and a test comment said things that weren't so (the GUI's device path, the crate count, FFmpeg in render's tests, the belt branch a test covered). An odd-width 360° frame's chroma step at the seam is recorded as a limit (D31). Slice 3b is the seventh: the golden images (`crates/render/tests/goldens.rs`, D32). One test runs every row of plan section 6 on lavapipe from synth's in-memory planes: six views stored as PNGs that must come back pixel for pixel at the Mesa build they were blessed on, every view against the f64 reference at floors calibrated when blessing, and minified views against synth's new `render_view_ideal`, the supersampled pattern itself. Each row's negative control is asserted on every run: implicit derivatives give 175 to 288 bad pixels at the seam and the poles where the analytic LOD gives none, level 0 shimmers 3.3 to 5.0 times as much as the ideal, and a swapped range, matrix or siting misses by 22 LSB, 19.5 dB and 53 LSB. A manifest records each row's driver build, source hash, view, thresholds and measurements; a changed source is reported as one and never compared as a render; and blessing (`SPHERECUT_UPDATE_GOLDENS=1`) writes nothing unless every row passes and every control fails. The evidence changed four of the plan's rules: the ideal comparisons cover only pixels 2.5 levels down or more, where level 0 must alias (over a whole view isotropic trilinear is softer than the ideal, and level 0 nearer it); range and siting are asserted at 10 bits, with 8 bits recorded, since lavapipe filters 8-bit planes to whole codes; `passthrough_exact` holds limited range to an independent model of the chain, and to round((k − 16) · 255 / 219) except within the f16 store's 0.0547 codes of a tie (86, 159 and 165 come out one code off); and each pole is turned to lie inside a pixel quad, which pitch ±90 exactly doesn't do. The Tier 2 tests `list_adapters_and_features`, `goldens_on_gpu_match_reference`, `goldens_on_host_llvmpipe` and `bench_upload_5k7` are written, each with a Tier 1 run on lavapipe; here the first two and the bench skip with their reasons, and `goldens_on_host_llvmpipe` passes, lavapipe being this machine's llvmpipe. Every crate root now forbids `unsafe`, except media's and the `spherecut` binary's, which deny it and allow it only in their FFI modules (D28). The slice's review found 10 faults; all are fixed, each with a test that fails without its fix where one can show it: a matrix or siting swapped inside render's colour code passed `matrix_601_709` and `siting_left_center` and was blessed, since the CPU reference shares that code (both rows now have truths outside it: the two matrices' codings of one picture must render alike, and smooth 4:2:0 chroma must match its 4:4:4 self); a blessing could lower any calibrated floor (it now prints them old → new and refuses a drop of more than 0.5 dB unless told `SPHERECUT_UPDATE_GOLDENS=lower`); the blessing command exited 101 after a blessing that had written everything (the harness's own tests read `tests/goldens` while it was rewritten, and now bless into scratch directories); three manifest entries lacked their sources or views; the controls' "over" bounds passed at the bound; `bench_upload_5k7` couldn't see a block made and freed within a step, which is its second trigger (it reads the allocator in flight too, and also runs two steps in flight), and timed 5.7K NV12 on the copy a decoded frame doesn't take (its frames now have the pooled download's stride); a GPU named by `SPHERECUT_ADAPTER` that refused a device showed as skipped; `round_f16` had no test of the subnormal halves and stored the largest half where the nearest is infinite; and a test comment was stale (D31, D32, m1-plan amendment 11). No golden image changed. Slice 3 is done once 3b merges. No M1 criterion is ticked yet |
 | M2–M9 | Not started |
 | Agent integration (track A) | Planned 2026-10-24 at Pat's request (`PLAN.md` track A, DECISIONS D23). The CLI's JSON contract and FFmpeg's confinement are M1 criteria; the confinement is in (D24), and so is the contract for probe and doctor (D27); A1, the MCP server, follows M1's code |
 
@@ -26,12 +26,14 @@ decisions and their reasons in `DECISIONS.md`.
 | Network | crates.io, GitHub and Ubuntu apt reachable through a proxy; ffmpeg.org blocked (recorded at setup) |
 
 Here Tier 1 runs fully. `SPHERECUT_TIER2=1 cargo test --workspace
---no-fail-fast -- --ignored` runs the 19 Tier 2 tests and all of them
-skip: those that need VA-API with "no DRM render node at
-/dev/dri/renderD128", the Vulkan Video ones with "no GPU for Vulkan
-Video: FFmpeg's Vulkan device is llvmpipe …", and, without
-`SPHERECUT_SAMPLES`, the samples tests with "samples directory samples
-not found". A skip counts as a failed test to cargo, so
+--no-fail-fast -- --ignored` runs the 23 Tier 2 tests.
+`goldens_on_host_llvmpipe` passes, since lavapipe is this machine's
+llvmpipe, and the others skip: those that need VA-API with "no DRM
+render node at /dev/dri/renderD128", the Vulkan Video ones with "no GPU
+for Vulkan Video: FFmpeg's Vulkan device is llvmpipe …", the render ones
+that need a GPU with "no GPU: Vulkan lists only llvmpipe …", and,
+without `SPHERECUT_SAMPLES`, the samples tests with "samples directory
+samples not found". A skip counts as a failed test to cargo, so
 the command exits non-zero, and without `--no-fail-fast` cargo stops after
 the first test binary. `cargo xtask hw-test --quick` runs them the same
 way and reports each one. With `SPHERECUT_SAMPLES` pointing at the
@@ -134,8 +136,9 @@ back clean, so M0 is done.
   note and JSON warning come with the overlay, the GUI and `frame` (D30).
 - Nothing yet picks between VA-API and Vulkan Video: a caller asks for a
   kind. Slice 5 picks it from doctor's checks (m1-plan amendment 9).
-- No GPU adapter is known before slice 3, so the render node lookup
-  gives `/dev/dri/renderD128` unless `--render-node` names another.
+- The render node lookup doesn't ask wgpu's adapter for its GPU yet
+  (Next), so it gives `/dev/dri/renderD128` unless `--render-node` names
+  another.
 - `vaapi_download_pool_reuses_buffers` and its Vulkan twin check the
   pool by the buffers it allocates, none after the warm-up. Their limit
   of 50 minor faults per frame counts everything the decoding thread
@@ -176,29 +179,53 @@ back clean, so M0 is done.
   starts after it skipped frames is a guard no test reaches. Resuming in
   a backwards stream after a frame handed out before the stream was found
   out takes the first frame at its pts for it, and starts a run (D29).
-- Slice 3a's renderer is checked on lavapipe only (Mesa 25.2.8,
-  llvmpipe with LLVM 20.1.2): its PSNR floors are that driver's, each the
-  measured PSNR less 3 dB, and another Mesa may need them recalibrated.
-  lavapipe truncates an f32 stored into an f16 target, so the shaders
-  round every f16 store to the nearest half themselves (D31).
-  The anisotropic filter and the implicit-derivative debug mode are
-  built and validated but not compared with anything; the goldens'
-  negative controls (slice 3b) use the latter. `bench_upload_5k7` is
-  slice 3b's, so whether the staging belt should replace
-  `write_texture` is unmeasured on a GPU; the smoke run here (640×320,
-  4 frames) shows the allocator's block count steady on both paths.
-  A lost device makes every render entry point return `gpu_failed`;
-  recovering from it (a new device, the slots uploaded again) is slice
-  5's. 16-bit sources lose their low 4 bits in the f16 planes, and a 360°
+- The renderer and its goldens are checked on lavapipe only (Mesa
+  25.2.8, llvmpipe with LLVM 20.1.2): their PSNR floors are that
+  driver's, each the measured PSNR less 3 dB (less 1 dB against the
+  ideal), and another Mesa may need them recalibrated. lavapipe
+  truncates an f32 stored into an f16 target, so the shaders round every
+  f16 store to the nearest half themselves (D31). The anisotropic filter
+  is built and validated but not compared with anything; the
+  implicit-derivative debug mode is the goldens' seam and pole control.
+  The render Tier 2 tests are written but haven't run on a GPU, so
+  whether the staging belt should replace `write_texture` (the triggers
+  `bench_upload_5k7` reports) and how near a GPU comes to lavapipe's
+  floors are unmeasured; H1 runs them on huginn and odin. A lost device
+  makes every render entry point return `gpu_failed`; recovering from it
+  (a new device, the slots uploaded again) is slice 5's. 16-bit sources lose their low 4 bits in the f16 planes, and a 360°
   frame whose width isn't a multiple of its chroma subsampling (odd-width
   4:2:0, which AV1 and VP9 allow) shows a half-texel chroma step at the
   ±180° seam (D31).
-- The M1 plan's Euler table for `frame`'s tests (section 12.1) says
-  `--roll 90` puts the U marker on the right edge's side; with the plan's own
-  convention, q = R_y(−yaw) · R_x(pitch) · R_z(−roll) with roll > 0
-  clockwise, which `sphere::orient` implements and tests, world up then
-  lies on the view's left. Slice 4 has to settle which is meant before
-  that golden is blessed.
+- The stored goldens match exactly only at the Mesa build they were
+  blessed on. After a Mesa update here they are held by the other-driver
+  rule (PSNR ≥ 48 dB, SSIM ≥ 0.995, at most 4 LSB) until blessed again,
+  and a blessing writes its day and commit into the manifest, so blessing
+  again changes the manifest though no image does. lavapipe filters 8-bit
+  planes to whole codes, so `range_full_vs_limited` and
+  `siting_left_center` assert the plan's 2 and 1 LSB at 10 bits and only
+  record NV12's 4 and 1.99. The ideal comparisons rest on the pixels 2.5
+  levels down or more (2600 of the tiny planet's 65536, and 10044 and
+  28532 in the shimmer rows); milder minification is compared with the
+  CPU reference only. `shimmer_fisheye360`'s control has the least room:
+  level 0 changes 3.26 times as much as the ideal, against a bound of 3
+  (D32). A blessing holds each floor to the one blessed before it, within
+  0.5 dB, not to the first, so blessings that each lower a floor a
+  little can walk it down; the manifest's diff shows each step. The CPU
+  comparison shares render's colour fold, so the colour rows' other
+  truths and `color.rs`'s unit tests are what check the fold itself.
+- Slice 3b adds about 8 s to a warm `cargo xtask check` (42.2 s against
+  34.3 s at 09342c6, both without cargo-deny and cargo-audit): the
+  goldens' test binary takes 7.0 s on lavapipe, `goldens` itself 6.9 s
+  of it, and its two shimmer rows 4.5 s of that (each renders 16 views
+  and supersamples 8 ideal ones at 16×16 a pixel). Building render and
+  testkit at opt-level 2 in dev profiles keeps it there: at 0 the
+  goldens took 16.9 s. The adapters test and the bench's smoke run take
+  under a second. The fixes after its review add about 2 s more (41.9 s
+  against 39.6 s with 642ccb4's render and synth, run alternately on the
+  same day, two runs each): the goldens' binary takes 7.2 to 7.4 s
+  against 6.8 to 6.9, since the harness's own tests now bless their rows
+  into scratch directories, and the upload tests 1.7 s against 0.8, for
+  the bench's block test on a pair of 3840² frames and the 16-bit ingest.
 - Slice 3a adds about 2.5 s to a warm `cargo xtask check` (33.6 s
   against 31.1 s at ef1a9d1, both without cargo-deny and cargo-audit,
   which here depend on the advisory database; 33.2 s before its first
@@ -321,22 +348,18 @@ back clean, so M0 is done.
 
 ## Next
 
-1. Slice 3b: the goldens on lavapipe (the manifest, blessing, the
-   level-0 and implicit-LOD negative controls and the supersampled ideal,
-   D32), synth's `render_view_ideal`, the Tier 2 render tests and
-   `bench_upload_5k7`, on the API slice 3a left for them. 3b has to
-   revise `passthrough_exact`'s limited-range criterion first: through
-   the f16 linear target Y = 86, 159 and 165 come out one code from
-   round((k − 16) · 255 / 219) even with every store rounded to nearest
-   (D31). Then wgpu's
-   adapter gives the render node lookup its GPU; `spherecut frame` on the
-   CLI's JSON contract (D27; with exit statuses 3 and 4, SIGINT and
-   `--overwrite`) and its strace test; worker threads and the frame
-   cache, audio, then the eframe GUI, which hands eframe render's own
-   device through egui-wgpu's `WgpuSetup::Existing` rather than the plan's
-   `CreateNew`, so that slice 5b's Vulkan Video device reaches the viewer
-   (D31). H1, after slice 5, runs slice 2b's
-   Tier 2 tests on huginn and odin.
+1. wgpu's adapter gives the render node lookup its GPU; `spherecut
+   frame` on the CLI's JSON contract (D27; with exit statuses 3 and 4,
+   SIGINT and `--overwrite`), its strace test and the pipeline goldens
+   through real lossless clips (plan section 6), with cli's `interrupt`
+   module as its one `unsafe` exception (D28); worker threads and the
+   frame cache, audio, then the eframe GUI, which hands eframe render's
+   own device through egui-wgpu's `WgpuSetup::Existing` rather than the
+   plan's `CreateNew`, so that slice 5b's Vulkan Video device reaches the
+   viewer (D31). H1, after slice 5, runs slice 2b's and 3b's Tier 2 tests
+   on huginn and odin: `bench_upload_5k7` decides whether the staging
+   belt replaces `write_texture`, and `goldens_on_gpu_match_reference`
+   whether the golden floors need a GPU's own entries (D32).
 2. The Insta360 trailer reader (metadata, calibration, IMU), needed from M2.
 3. Agent integration A1 (the MCP server) once M1's code is in, while
    M1's hardware report is pending (Pat chose this order on 2026-10-24).
@@ -349,6 +372,9 @@ cargo xtask gen-media             # synthetic media into test-media/
 cargo test -p spherecut-synth --test seek   # the seek oracle (D29)
 cargo test -p spherecut-synth --test fallback   # hardware fallback, with fault injection (D30)
 cargo test -p spherecut-render    # the render core on lavapipe against its CPU reference (D31)
+cargo test -p spherecut-render --test goldens   # the golden images (D32)
+SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens   # bless them, after a change meant to move them
+SPHERECUT_UPDATE_GOLDENS=lower cargo test -p spherecut-render --test goldens   # bless, letting floors drop by more than 0.5 dB (D32)
 cargo run -p spherecut-cli -- probe <file>... [--json]   # --json: one document, docs/cli-json.md
 cargo run -p spherecut-cli -- doctor [--json]
 cargo xtask hw-test               # on a real machine; report in hw-reports/

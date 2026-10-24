@@ -1,5 +1,7 @@
 //! Developer tasks. Run with `cargo xtask <command>`.
 
+#![forbid(unsafe_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

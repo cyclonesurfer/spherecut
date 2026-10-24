@@ -1315,6 +1315,7 @@ dependencies = [
  "naga",
  "pollster",
  "proptest",
+ "serde_json",
  "spherecut-core",
  "spherecut-sphere",
  "spherecut-synth",

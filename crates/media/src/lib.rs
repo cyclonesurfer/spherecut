@@ -2,6 +2,10 @@
 //! ourselves, capability checks, and (from M1) the `MediaBackend` trait
 //! with its FFmpeg implementation.
 
+// Only `ffi` and `hwprobe`, the FFI modules D11 allows, may use unsafe
+// code (D28).
+#![deny(unsafe_code)]
+
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 
@@ -14,8 +18,10 @@ pub mod detect;
 pub mod doctor;
 pub mod encode;
 mod fallback;
+#[allow(unsafe_code)]
 mod ffi;
 pub mod hw;
+#[allow(unsafe_code)]
 mod hwprobe;
 pub mod inject;
 pub mod mp4;

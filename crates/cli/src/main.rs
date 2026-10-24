@@ -4,6 +4,10 @@
 //! success and on failure, a panic included, and the exit status says how
 //! the run ended (`contract`, D27). stderr is for people.
 
+// Only `interrupt`, the FFI module slice 4 adds, will be allowed unsafe
+// code (D28).
+#![deny(unsafe_code)]
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

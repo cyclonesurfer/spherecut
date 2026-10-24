@@ -66,3 +66,11 @@ opt-level = 3
 
 [profile.dev.package.spherecut-sphere]
 opt-level = 3
+
+# The f64 CPU reference and the goldens' ideal and metrics are hot loops
+# in the render tests (DECISIONS D32).
+[profile.dev.package.spherecut-render]
+opt-level = 2
+
+[profile.dev.package.spherecut-testkit]
+opt-level = 2

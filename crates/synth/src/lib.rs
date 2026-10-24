@@ -4,13 +4,16 @@
 //! scene can be rendered into any projection (equirect now; dual fisheye
 //! and EAC for the stitching round trips in M3) and compared against itself.
 //! Rendering is pure CPU `f64` math with fixed supersampling and no
-//! threads, randomness or clock, so a given build renders the same bytes
-//! on every run. Other machines should agree but aren't guaranteed to: the
-//! trigonometry (in `LonLat` and the marker and frame-code geometry) comes
-//! from the platform's libm, which may round the last bit differently and
-//! so flip a sample at an edge. Agreement across machines has not been
+//! randomness or clock (rows are split across threads, which changes no
+//! byte), so a given build renders the same bytes on every run. Other
+//! machines should agree but aren't guaranteed to: the trigonometry (in
+//! `LonLat` and the marker and frame-code geometry) comes from the
+//! platform's libm, which may round the last bit differently and so flip
+//! a sample at an edge. Agreement across machines has not been
 //! checked, so tests compare against frames rendered by the same build,
 //! not stored ones.
+
+#![forbid(unsafe_code)]
 
 use glam::DVec3;
 use spherecut_sphere::{LonLat, equirect};
@@ -283,6 +286,78 @@ pub fn render_equirect(pattern: Pattern, width: u32, height: u32, frame: u32, ss
     }
 }
 
+/// The supersampled analytic truth of a view (M1 plan section 6): each
+/// of the `size` output pixels is the mean of `n × n` samples of
+/// `pattern` itself at frame 0, not of an equirect texture of it, at
+/// the points `(i + (a + ½) / n, j + (b + ½) / n)` for `a, b < n`.
+/// `view_fn` maps such a point, in pixels from the top-left corner (a
+/// pixel's centre at i + 0.5), to the direction seen there, or to `None`
+/// where the view shows nothing (a fisheye past θ = π), which counts as
+/// black. The render goldens hold minified views to it: what a renderer
+/// that doesn't alias would show. Rows are dealt to threads in turn, so
+/// a view whose costly rows bunch together still spreads; the result
+/// doesn't depend on how many threads there are.
+pub fn render_view_ideal(
+    pattern: Pattern,
+    view_fn: impl Fn(f64, f64) -> Option<DVec3> + Sync,
+    size: (u32, u32),
+    n: u32,
+) -> RgbImage {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(16);
+    ideal_on_threads(pattern, view_fn, size, n, threads)
+}
+
+/// [`render_view_ideal`] on `threads` threads.
+fn ideal_on_threads(
+    pattern: Pattern,
+    view_fn: impl Fn(f64, f64) -> Option<DVec3> + Sync,
+    size: (u32, u32),
+    n: u32,
+    threads: usize,
+) -> RgbImage {
+    let (width, height) = size;
+    let n = n.max(1);
+    let threads = threads.max(1);
+    let inv = 1.0 / f64::from(n * n);
+    let mut pixels = vec![[0.0; 3]; width as usize * height as usize];
+    let mut dealt: Vec<Vec<(usize, &mut [Rgb])>> = (0..threads).map(|_| Vec::new()).collect();
+    for (j, row) in pixels.chunks_mut(width.max(1) as usize).enumerate() {
+        dealt[j % threads].push((j, row));
+    }
+    let view_fn = &view_fn;
+    std::thread::scope(|s| {
+        for rows in dealt {
+            s.spawn(move || {
+                for (j, row) in rows {
+                    for (i, px) in row.iter_mut().enumerate() {
+                        let mut acc = [0.0; 3];
+                        for b in 0..n {
+                            for a in 0..n {
+                                let x = i as f64 + (f64::from(a) + 0.5) / f64::from(n);
+                                let y = j as f64 + (f64::from(b) + 0.5) / f64::from(n);
+                                if let Some(d) = view_fn(x, y) {
+                                    let c = color(pattern, d, 0);
+                                    for (acc, c) in acc.iter_mut().zip(c) {
+                                        *acc += c;
+                                    }
+                                }
+                            }
+                        }
+                        *px = acc.map(|v| v * inv);
+                    }
+                }
+            });
+        }
+    });
+    RgbImage {
+        width,
+        height,
+        pixels,
+    }
+}
+
 /// Read the frame counter back from an equirect image (e.g. a decoded
 /// frame). `None` if any bit is ambiguous.
 pub fn decode_frame_code(img: &RgbImage) -> Option<u32> {
@@ -360,6 +435,96 @@ mod tests {
             let img = render_equirect(Pattern::Grid, 720, 360, n, 1);
             assert_eq!(decode_frame_code(&img), Some(n));
         }
+    }
+
+    /// A view of the 1° checker in which pixel column `i` spans longitude
+    /// `[i + shift, i + 1 + shift)` degrees and every row lies inside one
+    /// cell's latitudes, (10°, 11°): a pixel per cell, offset by `shift`.
+    fn checker_strip(shift: f64) -> impl Fn(f64, f64) -> Option<DVec3> + Sync {
+        move |x: f64, y: f64| {
+            Some(
+                LonLat {
+                    lon: (x + shift).to_radians(),
+                    lat: (10.0 + y.fract().clamp(0.01, 0.99)).to_radians(),
+                }
+                .to_dir(),
+            )
+        }
+    }
+
+    #[test]
+    fn the_ideal_is_the_mean_of_the_pattern_over_each_pixel() {
+        // Aligned with the cells, each pixel is one cell: 0.9 and 0.1 in
+        // turn. Half a cell off, each pixel is half of two: their mean,
+        // 0.5, for any even n. n = 1 samples the centre only, one cell.
+        let aligned = render_view_ideal(Pattern::HighFrequency, checker_strip(0.0), (8, 2), 4);
+        for x in 0..8 {
+            let want = if x % 2 == 0 { 0.9 } else { 0.1 };
+            for y in 0..2 {
+                for c in aligned.get(x, y) {
+                    assert!((c - want).abs() < 1e-12, "({x}, {y}): {c}");
+                }
+            }
+        }
+        let halves = render_view_ideal(Pattern::HighFrequency, checker_strip(0.5), (8, 2), 4);
+        assert!(
+            halves
+                .pixels
+                .iter()
+                .flatten()
+                .all(|c| (c - 0.5).abs() < 1e-12)
+        );
+        let centre = render_view_ideal(Pattern::HighFrequency, checker_strip(0.25), (8, 1), 1);
+        assert_eq!(centre.get(0, 0), [0.9; 3]);
+        assert_eq!(centre.get(1, 0), [0.1; 3]);
+        // A third of a cell off with 3 × 3 samples: two thirds of one
+        // cell and one third of the next.
+        let thirds = render_view_ideal(Pattern::HighFrequency, checker_strip(1.0 / 3.0), (2, 1), 3);
+        assert!((thirds.get(0, 0)[0] - (2.0 * 0.9 + 0.1) / 3.0).abs() < 1e-12);
+        assert!((thirds.get(1, 0)[0] - (2.0 * 0.1 + 0.9) / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_ideal_shows_black_where_the_view_shows_nothing() {
+        // Only the left half of each pixel shows the front marker (red).
+        let half = |x: f64, _y: f64| (x.fract() < 0.5).then_some(DVec3::NEG_Z);
+        let img = render_view_ideal(Pattern::Grid, half, (3, 2), 4);
+        for p in &img.pixels {
+            assert_eq!(*p, [0.5, 0.0, 0.0]);
+        }
+        let none = render_view_ideal(Pattern::Grid, |_, _| None, (2, 2), 2);
+        assert!(none.pixels.iter().flatten().all(|&c| c == 0.0));
+        assert_eq!(
+            render_view_ideal(Pattern::Grid, |_, _| None, (0, 3), 2)
+                .pixels
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn the_ideal_is_the_same_on_every_run() {
+        // Rows are dealt to threads in turn and each pixel is worked out
+        // on its own, so neither the run nor the thread count changes a
+        // byte, and a shorter picture agrees on the rows it shares.
+        let view = |x: f64, y: f64| {
+            Some(
+                LonLat {
+                    lon: (x * 3.7).to_radians(),
+                    lat: (y * 2.9 - 40.0).to_radians(),
+                }
+                .to_dir(),
+            )
+        };
+        let a = render_view_ideal(Pattern::Grid, view, (24, 37), 3);
+        let b = render_view_ideal(Pattern::Grid, view, (24, 37), 3);
+        assert_eq!(a.pixels, b.pixels);
+        for threads in [1, 3, 16, 40] {
+            let c = ideal_on_threads(Pattern::Grid, view, (24, 37), 3, threads);
+            assert_eq!(a.pixels, c.pixels, "{threads} threads");
+        }
+        let top = render_view_ideal(Pattern::Grid, view, (24, 2), 3);
+        assert_eq!(top.pixels[..], a.pixels[..48]);
     }
 
     #[test]

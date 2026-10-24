@@ -2322,9 +2322,14 @@ pub fn download_frame(src: &ff::frame::Video) -> Result<ff::frame::Video, ff::Er
     Ok(dst)
 }
 
-/// Rows of a downloaded plane start this many bytes apart, at least: wgpu
-/// copies a texture upload whose rows are as far apart as its staging
-/// buffer's in one go (`COPY_BYTES_PER_ROW_ALIGNMENT`).
+/// Rows of a downloaded plane start this many bytes apart, at least: the
+/// pitch wgpu asks of a buffer-to-texture copy
+/// (`COPY_BYTES_PER_ROW_ALIGNMENT`), so render's staging belt copies a
+/// plane in one go. `write_texture` does so only when the rows are as far
+/// apart as its own staging's, the row rounded up to the device's
+/// `optimalBufferCopyRowPitchAlignment` (128 on lavapipe), which a
+/// 256-byte pitch meets when the row is a multiple of 256 already or the
+/// device asks for 256; otherwise it copies row by row (DECISIONS D30).
 pub(crate) const DOWNLOAD_ROW_ALIGN: usize = 256;
 
 /// The buffers a decoder's frames are downloaded into (M1 plan section

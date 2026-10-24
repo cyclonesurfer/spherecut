@@ -20,7 +20,7 @@ use std::sync::{Mutex, OnceLock};
 
 use common::{Frame, Kind, color, frame, gpu};
 use spherecut_core::video::{ChromaSiting, Matrix, Range, Transfer};
-use spherecut_render::readback::round_f16;
+use spherecut_render::readback::{f16_to_f32, read_texture, round_f16};
 use spherecut_render::reference::{self, ImageF64};
 use spherecut_render::{
     DebugMode, Depth, Image, Placement, Stereo, StillOptions, StillRenderer, ViewParams,
@@ -681,5 +681,255 @@ fn a_stereo_eye_shows_nothing_of_the_other() {
                 worst * 255.0
             );
         }
+    }
+}
+
+/// The IEEE half nearest `v`, ties to even, worked out from its bits:
+/// what an f16 store of `v` must hold. Written apart from the shader and
+/// from `readback::round_f16`.
+fn half_bits(v: f32) -> u16 {
+    let b = v.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let exp = ((b >> 23) & 0xff) as i32;
+    let mant = b & 0x7f_ffff;
+    if exp == 0xff {
+        return sign | if mant == 0 { 0x7c00 } else { 0x7e00 };
+    }
+    // f32's own subnormals are far below half the least half.
+    if exp == 0 {
+        return sign;
+    }
+    // |v| = m · 2^(e − 23): drop the bits of m below the half's last one,
+    // 13 for a normal half (e ≥ −14), and below 2^−24 for a subnormal one.
+    let (m, e) = (mant | 0x80_0000, exp - 127);
+    let shift = if e >= -14 { 13 } else { (-1 - e) as u32 };
+    if shift > 25 {
+        return sign;
+    }
+    let (q, rest, half) = (m >> shift, m & ((1 << shift) - 1), 1 << (shift - 1));
+    let q = if rest > half || (rest == half && q & 1 == 1) {
+        q + 1
+    } else {
+        q
+    };
+    // A normal half's q is 1024 to 2048, and 2048 carries into the next
+    // exponent; a subnormal's q of 1024 is the least normal half.
+    let bits = if e >= -14 {
+        (e + 15) as u32 * 1024 + q - 1024
+    } else {
+        q
+    };
+    sign | bits.min(0x7c00) as u16
+}
+
+#[test]
+fn round_f16_is_the_nearest_half() {
+    // `round_f16` (shaders/common.wgsl), which every f16 store goes
+    // through, run on its own: for every finite half of both signs, each
+    // midpoint between two of them (and between 65504 and 65536, past
+    // which the nearest is infinite), each midpoint an f32 ulp either
+    // side, and values far past the largest half, it must return the
+    // nearest half, ties to even, as an f32 (an Rgba32Float target) and
+    // as the half an Rgba16Float target stores. The subnormal halves,
+    // which no 10- or 12-bit code reaches, are among them.
+    let gpu = gpu();
+    let mut values = Vec::new();
+    for sign in [1.0f32, -1.0] {
+        for h in 0u16..0x7c00 {
+            let x = f16_to_f32(h);
+            let next = if h + 1 == 0x7c00 {
+                65536.0
+            } else {
+                f16_to_f32(h + 1)
+            };
+            // Exact: a half has 11 bits, an f32 24.
+            let mid = (x + next) / 2.0;
+            let around = [
+                f32::from_bits(mid.to_bits() - 1),
+                f32::from_bits(mid.to_bits() + 1),
+            ];
+            values.extend([x, mid, around[0], around[1]].map(|v| v * sign));
+        }
+        values.extend([65536.0, 7e4, 1e6, 1e30, f32::MAX, f32::INFINITY, 1e-30].map(|v| v * sign));
+    }
+    let width = 256u32;
+    let height = (values.len() as u32).div_ceil(4 * width);
+    values.resize((4 * width * height) as usize, 0.0);
+    let device = &gpu.device;
+    let texture = |label, format, usage| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    };
+    let input = texture(
+        "f32 bits",
+        wgpu::TextureFormat::Rgba32Uint,
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+    );
+    let bytes: Vec<u8> = values
+        .iter()
+        .flat_map(|v| v.to_bits().to_le_bytes())
+        .collect();
+    gpu.queue.write_texture(
+        input.as_image_copy(),
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(16 * width),
+            rows_per_image: None,
+        },
+        input.size(),
+    );
+    let target = |format| {
+        texture(
+            "round_f16",
+            format,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        )
+    };
+    let (wide, narrow) = (
+        target(wgpu::TextureFormat::Rgba32Float),
+        target(wgpu::TextureFormat::Rgba16Float),
+    );
+    let source = format!(
+        "{}{}",
+        spherecut_render::layouts::COMMON_WGSL,
+        r#"
+@group(0) @binding(0) var bits: texture_2d<u32>;
+struct Out { @location(0) wide: vec4<f32>, @location(1) narrow: vec4<f32> };
+@fragment
+fn fs_probe(@builtin(position) frag: vec4<f32>) -> Out {
+    let r = round_f16(bitcast<vec4<f32>>(textureLoad(bits, vec2<u32>(frag.xy), 0)));
+    return Out(r, r);
+}
+"#
+    );
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("round_f16 probe"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("round_f16 probe"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_full"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_probe"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[wide.format(), narrow.format()].map(|format| {
+                Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })
+            }),
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("round_f16 probe"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(&view(&input)),
+        }],
+    });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        let (vw, vn) = (view(&wide), view(&narrow));
+        let attach = |v| {
+            Some(wgpu::RenderPassColorAttachment {
+                view: v,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })
+        };
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("round_f16 probe"),
+            color_attachments: &[attach(&vw), attach(&vn)],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    gpu.queue.submit([enc.finish()]);
+    let wide = read_texture(gpu, &wide, 0).unwrap();
+    let narrow = read_texture(gpu, &narrow, 0).unwrap();
+    let mut wrong = Vec::new();
+    for (i, &v) in values.iter().enumerate() {
+        let want = half_bits(v);
+        let got_wide = f32::from_le_bytes(wide.data[4 * i..4 * i + 4].try_into().unwrap());
+        let got_narrow = u16::from_le_bytes([narrow.data[2 * i], narrow.data[2 * i + 1]]);
+        if got_wide.to_bits() != f16_to_f32(want).to_bits() || got_narrow != want {
+            wrong.push((
+                v,
+                got_wide,
+                format!("{got_narrow:#06x}"),
+                format!("{want:#06x}"),
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} of {} values aren't rounded to their nearest half, such as {:?}",
+        wrong.len(),
+        values.len(),
+        &wrong[..wrong.len().min(6)]
+    );
+}
+
+#[test]
+fn the_probes_half_is_ieees() {
+    // half_bits against values whose halves are known.
+    assert_eq!(half_bits(0.0), 0x0000);
+    assert_eq!(half_bits(-0.0), 0x8000);
+    assert_eq!(half_bits(1.0), 0x3c00);
+    assert_eq!(half_bits(1.0 + 2f32.powi(-11)), 0x3c00, "a tie, to even");
+    assert_eq!(
+        half_bits(1.0 + 3.0 * 2f32.powi(-11)),
+        0x3c02,
+        "a tie, to even"
+    );
+    assert_eq!(half_bits(65504.0), 0x7bff);
+    assert_eq!(half_bits(65519.996), 0x7bff);
+    assert_eq!(half_bits(65520.0), 0x7c00, "a tie with 65536, infinite");
+    assert_eq!(half_bits(-1e6), 0xfc00);
+    assert_eq!(half_bits(2f32.powi(-24)), 0x0001);
+    assert_eq!(half_bits(2f32.powi(-25)), 0x0000, "a tie, to even");
+    assert_eq!(half_bits(3.0 * 2f32.powi(-25)), 0x0002, "a tie, to even");
+    assert_eq!(half_bits(2f32.powi(-14) * (1.0 - 2f32.powi(-12))), 0x0400);
+    assert_eq!(half_bits(f32::NAN) & 0x7c00, 0x7c00);
+    // Every half is its own.
+    for h in (0u16..0x7c00).chain(0x8000..0xfc00) {
+        assert_eq!(half_bits(f16_to_f32(h)), h, "{h:#06x}");
     }
 }

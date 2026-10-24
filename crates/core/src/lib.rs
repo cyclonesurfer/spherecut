@@ -2,6 +2,8 @@
 //! cancellation, and (later) the project model, timeline, keyframes and
 //! undo.
 
+#![forbid(unsafe_code)]
+
 pub mod brand;
 pub mod cancel;
 pub mod time;
