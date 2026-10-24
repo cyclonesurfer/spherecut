@@ -604,6 +604,10 @@ fn every_format_and_tag_seeks_exactly() {
         frames: 12,
         ..spec(name, codec)
     };
+    // With the chroma location FFmpeg reports: x264 and x265 write the
+    // clips' centre siting for 4:2:0 only. For 4:2:2, FFmpeg's H.264
+    // decoder says left, its default; for 4:4:4, its HEVC decoder says
+    // nothing, and no siting is assumed, since none matters.
     let cases = [
         (
             Spec {
@@ -612,6 +616,7 @@ fn every_format_and_tag_seeks_exactly() {
             },
             // FFmpeg's H.264 decoder says full range so.
             "yuvj420p",
+            2,
         ),
         (
             Spec {
@@ -619,6 +624,7 @@ fn every_format_and_tag_seeks_exactly() {
                 ..small("h264-bt601", Codec::H264)
             },
             "yuv420p",
+            2,
         ),
         (
             Spec {
@@ -627,6 +633,7 @@ fn every_format_and_tag_seeks_exactly() {
                 ..small("hevc10-lossless", Codec::HevcLossless)
             },
             "yuv420p10le",
+            2,
         ),
         (
             Spec {
@@ -635,6 +642,7 @@ fn every_format_and_tag_seeks_exactly() {
                 ..small("h264-422-10", Codec::H264)
             },
             "yuv422p10le",
+            1,
         ),
         (
             Spec {
@@ -642,6 +650,7 @@ fn every_format_and_tag_seeks_exactly() {
                 ..small("hevc-444-8", Codec::Hevc)
             },
             "yuv444p",
+            0,
         ),
         (
             Spec {
@@ -650,9 +659,10 @@ fn every_format_and_tag_seeks_exactly() {
                 ..small("hevc-444-10", Codec::Hevc)
             },
             "yuv444p10le",
+            0,
         ),
     ];
-    for (s, pix_fmt) in &cases {
+    for (s, pix_fmt, chroma_location) in &cases {
         let clip = write(s, &dir);
         let keyint = s.gop.map(|g| g.keyint);
         oracle(
@@ -693,6 +703,8 @@ fn every_format_and_tag_seeks_exactly() {
             "{}: {c:?}",
             s.name
         );
+        assert_eq!(c.codes.chroma_location, *chroma_location, "{}", s.name);
+        assert!(!c.assumed.siting, "{}: {c:?}", s.name);
     }
 }
 

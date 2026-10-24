@@ -13,6 +13,11 @@ use spherecut_core::video::{
 pub struct ColorContext<'a> {
     /// The family of the decoded pixel format.
     pub family: ColorFamily,
+    /// Its chroma subsampling ([`PixelLayout::chroma_sub`]): chroma
+    /// siting means something only where it isn't (0, 0).
+    ///
+    /// [`PixelLayout::chroma_sub`]: spherecut_core::video::PixelLayout::chroma_sub
+    pub chroma_sub: (u8, u8),
     /// FFmpeg's name for the decoded pixel format, before any conversion:
     /// a `yuvj` format means full range.
     pub pix_fmt: &'a str,
@@ -31,7 +36,7 @@ pub struct ColorContext<'a> {
 /// | matrix | BT.709 at width ≥ 1280 or height > 576, else BT.601 (mpv's and libplacebo's rule; swscale assumes BT.601 and libavcodec doesn't guess); identity for RGB |
 /// | transfer | SDR |
 /// | primaries | BT.709 |
-/// | siting | centre for MJPEG, else left (H.264, HEVC, AV1, ProRes) |
+/// | siting | centre for MJPEG, else left (H.264, HEVC, AV1, ProRes); not flagged where chroma isn't subsampled (4:4:4, RGB, gray), since none matters there |
 ///
 /// Codes Spherecut doesn't render are assumed too: the YCgCo,
 /// constant-luminance and ICtCp matrices take the size rule, and transfers
@@ -111,7 +116,7 @@ pub fn resolve(codes: ColorCodes, cx: &ColorContext<'_>) -> ColorInfo {
         5 => ChromaSiting::BottomLeft,
         6 => ChromaSiting::Bottom,
         _ => {
-            assumed.siting = true;
+            assumed.siting = cx.chroma_sub != (0, 0);
             // By codec, not by the yuvj range flag.
             if cx.codec == "mjpeg" {
                 ChromaSiting::Center
@@ -142,8 +147,16 @@ mod tests {
         w: u32,
         h: u32,
     ) -> ColorContext<'static> {
+        // The subsampling of the formats these tests name.
+        let chroma_sub = match family {
+            ColorFamily::Yuv if pix_fmt.contains("444") => (0, 0),
+            ColorFamily::Yuv if pix_fmt.contains("422") => (1, 0),
+            ColorFamily::Yuv => (1, 1),
+            ColorFamily::Rgb | ColorFamily::Gray => (0, 0),
+        };
         ColorContext {
             family,
+            chroma_sub,
             pix_fmt,
             codec,
             width: w,
@@ -200,6 +213,20 @@ mod tests {
         let rgb = resolve(UNTAGGED, &cx(ColorFamily::Rgb, "gbrp", "png", 640, 480));
         assert_eq!((rgb.range, rgb.matrix), (Range::Full, Matrix::Identity));
         assert!(rgb.assumed.range && rgb.assumed.matrix);
+    }
+
+    #[test]
+    fn siting_is_assumed_only_where_chroma_is_subsampled() {
+        let assumed = |family, pix_fmt| {
+            resolve(UNTAGGED, &cx(family, pix_fmt, "hevc", 640, 480))
+                .assumed
+                .siting
+        };
+        assert!(assumed(ColorFamily::Yuv, "yuv420p"));
+        assert!(assumed(ColorFamily::Yuv, "yuv422p10le"));
+        assert!(!assumed(ColorFamily::Yuv, "yuv444p"));
+        assert!(!assumed(ColorFamily::Rgb, "gbrp"));
+        assert!(!assumed(ColorFamily::Gray, "gray"));
     }
 
     #[test]

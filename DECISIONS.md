@@ -1498,15 +1498,18 @@ What:
   | matrix | BT.709 at width ≥ 1280 or height > 576, else BT.601; identity for RGB |
   | transfer | SDR |
   | primaries | BT.709 (coded primaries other than BT.709 and BT.2020 are kept as `Other`) |
-  | siting | centre for MJPEG, else left |
+  | siting | centre for MJPEG, else left; not flagged where chroma isn't subsampled (4:4:4, RGB, gray), since none matters there |
 
   YCgCo, constant-luminance and ICtCp matrices take the size rule;
   transfers other than SDR's, PQ, HLG and linear are shown as SDR.
 - synth writes 4:2:0 chroma as the average of each 2×2 block, so its
   clips are tagged centre-sited (`CLIP_COLOR`, which changes probe's JSON
   for them from `left` to `center`), and 4:2:2 chroma from the left
-  column, co-sited, which is what H.264 and HEVC mean by 4:2:2: x264 and
-  x265 write no chroma location for it, and FFmpeg reads it as left.
+  column, co-sited, which is what H.264 and HEVC mean by 4:2:2. x264 and
+  x265 write a chroma location for 4:2:0 only (FFmpeg 6.1.1's
+  `trace_headers`): for 4:2:2 and 4:4:4, FFmpeg's H.264 decoder reports
+  left, its default, and its HEVC decoder unspecified, which
+  `color::resolve` takes as left and flags as assumed for 4:2:2 alone.
 
 Where this differs from the plan: the plan sent every converted format to
 `yuv444p` or `yuv444p16le`; and its native list is a list, where the

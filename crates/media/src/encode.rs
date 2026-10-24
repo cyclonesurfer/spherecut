@@ -104,9 +104,11 @@ impl PixelLayout {
 }
 
 /// The colour a stream is tagged with, as FFmpeg's ints:
-/// [`ColorCodes`] says what they mean. libx264 and libx265 write all
-/// five to the stream's VUI, `chroma_location` included (checked with
-/// FFmpeg 6.1.1's `trace_headers`, DECISIONS D30).
+/// [`ColorCodes`] says what they mean. libx264 and libx265 write the
+/// first four to the stream's VUI, and `chroma_location` only for 4:2:0
+/// (checked with FFmpeg 6.1.1's `trace_headers`, DECISIONS D30). For
+/// 4:2:2 and 4:4:4, FFmpeg's H.264 decoder reports left, its default,
+/// and its HEVC decoder unspecified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorTags {
     pub range: i32,

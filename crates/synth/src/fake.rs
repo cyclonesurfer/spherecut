@@ -161,6 +161,7 @@ impl SyntheticVideo {
             CLIP_COLOR.into(),
             &ColorContext {
                 family: ColorFamily::Yuv,
+                chroma_sub: (1, 1),
                 pix_fmt: "yuv420p",
                 codec: "synthetic",
                 width: clip.width,

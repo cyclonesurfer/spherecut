@@ -307,6 +307,7 @@ impl FfmpegVideo {
             fields.color,
             &ColorContext {
                 family: conv.layout().family,
+                chroma_sub: conv.layout().chroma_sub(),
                 pix_fmt: &source_name,
                 codec: &codec,
                 width: fields.width,
@@ -661,6 +662,7 @@ impl FfmpegVideo {
             f.color,
             &ColorContext {
                 family: self.conv.layout().family,
+                chroma_sub: self.conv.layout().chroma_sub(),
                 pix_fmt: &self.source_name,
                 codec: &self.info.codec,
                 width: f.width,
