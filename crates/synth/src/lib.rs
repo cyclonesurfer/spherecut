@@ -291,8 +291,9 @@ pub fn render_equirect(pattern: Pattern, width: u32, height: u32, frame: u32, ss
 /// pixel's centre at i + 0.5), to the direction seen there, or to `None`
 /// where the view shows nothing (a fisheye past θ = π), which counts as
 /// black. The render goldens hold minified views to it: what a renderer
-/// that doesn't alias would show. Rows are split across threads; the
-/// result doesn't depend on how many.
+/// that doesn't alias would show. Rows are dealt to threads in turn, so
+/// a view whose costly rows bunch together still spreads; the result
+/// doesn't depend on how many threads there are.
 pub fn render_view_ideal(
     pattern: Pattern,
     view_fn: impl Fn(f64, f64) -> Option<DVec3> + Sync,
@@ -306,31 +307,31 @@ pub fn render_view_ideal(
     let threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(16);
-    let rows_per = (height as usize).div_ceil(threads).max(1);
+    let mut dealt: Vec<Vec<(usize, &mut [Rgb])>> = (0..threads).map(|_| Vec::new()).collect();
+    for (j, row) in pixels.chunks_mut(width.max(1) as usize).enumerate() {
+        dealt[j % threads].push((j, row));
+    }
     let view_fn = &view_fn;
     std::thread::scope(|s| {
-        for (chunk_i, chunk) in pixels
-            .chunks_mut((rows_per * width as usize).max(1))
-            .enumerate()
-        {
+        for rows in dealt {
             s.spawn(move || {
-                for (k, px) in chunk.iter_mut().enumerate() {
-                    let i = (k % width as usize) as f64;
-                    let j = (chunk_i * rows_per + k / width as usize) as f64;
-                    let mut acc = [0.0; 3];
-                    for b in 0..n {
-                        for a in 0..n {
-                            let x = i + (f64::from(a) + 0.5) / f64::from(n);
-                            let y = j + (f64::from(b) + 0.5) / f64::from(n);
-                            if let Some(d) = view_fn(x, y) {
-                                let c = color(pattern, d, 0);
-                                for (acc, c) in acc.iter_mut().zip(c) {
-                                    *acc += c;
+                for (j, row) in rows {
+                    for (i, px) in row.iter_mut().enumerate() {
+                        let mut acc = [0.0; 3];
+                        for b in 0..n {
+                            for a in 0..n {
+                                let x = i as f64 + (f64::from(a) + 0.5) / f64::from(n);
+                                let y = j as f64 + (f64::from(b) + 0.5) / f64::from(n);
+                                if let Some(d) = view_fn(x, y) {
+                                    let c = color(pattern, d, 0);
+                                    for (acc, c) in acc.iter_mut().zip(c) {
+                                        *acc += c;
+                                    }
                                 }
                             }
                         }
+                        *px = acc.map(|v| v * inv);
                     }
-                    *px = acc.map(|v| v * inv);
                 }
             });
         }
