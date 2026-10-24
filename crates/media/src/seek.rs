@@ -251,6 +251,17 @@ impl std::fmt::Debug for FfmpegVideo {
     }
 }
 
+/// What an error from the decoder means where it was met.
+enum Failed {
+    /// The device turned the stream down or failed on it: returned at
+    /// once, never taken for damage, so that a fallback can act (D30).
+    Device(MediaError),
+    /// Reading the file failed: the stream ends there, until a seek.
+    Reading(MediaError),
+    /// Damage the decoder goes on past, said with a `Damaged` event.
+    Damage(MediaError),
+}
+
 /// What [`FfmpegVideo::decode`] got.
 enum Got {
     Frame(Raw),
@@ -410,6 +421,17 @@ impl FfmpegVideo {
 
     fn path(&self) -> &Path {
         self.dec.path()
+    }
+
+    /// What `e`, an error from [`decode`](Self::decode), means.
+    fn failed(&self, e: MediaError) -> Failed {
+        if e.is_device_failure() {
+            Failed::Device(e)
+        } else if self.dec.has_failed() {
+            Failed::Reading(e)
+        } else {
+            Failed::Damage(e)
+        }
     }
 
     /// The next frame from the decoder, with its pts. Frames FFmpeg flags
@@ -621,11 +643,14 @@ impl FfmpegVideo {
                     }
                     Ok(Got::End) => break None,
                     Ok(Got::Stopped) => return Ok(None),
-                    Err(_) if self.dec.has_failed() => break None,
-                    Err(e) => self.events.push(DecoderEvent::Damaged {
-                        reason: e.to_string(),
-                        last_good_pts: None,
-                    }),
+                    Err(e) => match self.failed(e) {
+                        Failed::Device(e) => return Err(e),
+                        Failed::Reading(_) => break None,
+                        Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
+                            reason: e.to_string(),
+                            last_good_pts: None,
+                        }),
+                    },
                 }
             };
             let landed = self.dec.landing();
@@ -772,24 +797,28 @@ impl FfmpegVideo {
 
     /// Decode one frame ahead into `pending`, if it isn't there, so the
     /// frame about to be handed out knows its duration. A stop, the end
-    /// or an error leaves `pending` empty: an error that ends the stream
-    /// comes back from the next call, and one that doesn't becomes an
-    /// event. `true` on a stop.
-    fn fill_pending(&mut self, stop: &StopToken) -> bool {
+    /// or an error leaves `pending` empty: a read error that ends the
+    /// stream comes back from the next call, and damage that doesn't
+    /// becomes an event. The device turning the stream down or failing on
+    /// it is returned. `true` on a stop.
+    fn fill_pending(&mut self, stop: &StopToken) -> Result<bool, MediaError> {
         if self.pending.is_some() {
-            return false;
+            return Ok(false);
         }
         match self.decode(stop) {
             Ok(Got::Frame(r)) => self.pending = Some(r),
-            Ok(Got::Stopped) => return true,
+            Ok(Got::Stopped) => return Ok(true),
             Ok(Got::End) => {}
-            Err(_) if self.dec.has_failed() => {}
-            Err(e) => self.events.push(DecoderEvent::Damaged {
-                reason: e.to_string(),
-                last_good_pts: self.current.as_ref().map(|c| c.pts),
-            }),
+            Err(e) => match self.failed(e) {
+                Failed::Device(e) => return Err(e),
+                Failed::Reading(_) => {}
+                Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
+                    reason: e.to_string(),
+                    last_good_pts: self.current.as_ref().map(|c| c.pts),
+                }),
+            },
         }
-        false
+        Ok(false)
     }
 
     fn exact(
@@ -871,14 +900,17 @@ impl FfmpegVideo {
                         self.position = Position::Lost;
                         return Ok(None);
                     }
-                    Err(e) if self.dec.has_failed() => {
-                        damage = Some(e.to_string());
-                        break;
-                    }
-                    Err(e) => self.events.push(DecoderEvent::Damaged {
-                        reason: e.to_string(),
-                        last_good_pts: best.as_ref().map(|b| b.pts),
-                    }),
+                    Err(e) => match self.failed(e) {
+                        Failed::Device(e) => return Err(e),
+                        Failed::Reading(e) => {
+                            damage = Some(e.to_string());
+                            break;
+                        }
+                        Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
+                            reason: e.to_string(),
+                            last_good_pts: best.as_ref().map(|b| b.pts),
+                        }),
+                    },
                 }
             }
         }
@@ -905,7 +937,7 @@ impl FfmpegVideo {
             (None, None) => match self.pending.take() {
                 // Nothing at or before the target: the first frame there is.
                 Some(p) => {
-                    self.fill_pending(stop);
+                    self.fill_pending(stop)?;
                     let next = self.pending.as_ref().map(|q| q.pts);
                     self.make_frame(p, next)?
                 }
@@ -989,14 +1021,17 @@ impl FfmpegVideo {
                     self.position = Position::Lost;
                     return Ok(None);
                 }
-                Err(e) if self.dec.has_failed() => {
-                    damage = Some(e.to_string());
-                    break;
-                }
-                Err(e) => self.events.push(DecoderEvent::Damaged {
-                    reason: e.to_string(),
-                    last_good_pts: None,
-                }),
+                Err(e) => match self.failed(e) {
+                    Failed::Device(e) => return Err(e),
+                    Failed::Reading(e) => {
+                        damage = Some(e.to_string());
+                        break;
+                    }
+                    Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
+                        reason: e.to_string(),
+                        last_good_pts: None,
+                    }),
+                },
             }
         }
         let last = greatest.map(|(i, pts, d)| (i, self.last_end(pts, d)));
@@ -1057,9 +1092,11 @@ impl FfmpegVideo {
                     });
                 }
                 Ok(Got::Stopped) => return Ok(None),
-                Err(e) if self.dec.has_failed() => return Err(e),
-                // Said by the first decode of the stream already.
-                Err(_) => {}
+                Err(e) => match self.failed(e) {
+                    Failed::Device(e) | Failed::Reading(e) => return Err(e),
+                    // Said by the first decode of the stream already.
+                    Failed::Damage(_) => {}
+                },
             }
         }
     }
@@ -1096,6 +1133,7 @@ impl FfmpegVideo {
                     self.position = Position::Lost;
                     return Ok(None);
                 }
+                Err(e) if e.is_device_failure() => return Err(e),
                 Err(e) if !self.dec.has_failed() => self.events.push(DecoderEvent::Damaged {
                     reason: e.to_string(),
                     last_good_pts: None,
@@ -1139,7 +1177,7 @@ impl FfmpegVideo {
             }
         };
         self.position = Position::InStep;
-        self.fill_pending(stop);
+        self.fill_pending(stop)?;
         let next = self.pending.as_ref().map(|p| p.pts);
         let frame = self.make_frame(first, next)?;
         Ok(Some((frame, Exactness::KeyframeOnly, cost)))
@@ -1225,15 +1263,18 @@ impl FfmpegVideo {
                     // It was the last frame; an error that ends the stream
                     // comes back from the next decode.
                     Ok(Got::End) => break,
-                    Err(_) if self.dec.has_failed() => break,
                     Ok(Got::Stopped) => return Ok(false),
-                    Err(e) => {
-                        self.events.push(DecoderEvent::Damaged {
-                            reason: e.to_string(),
-                            last_good_pts: Some(current.pts),
-                        });
-                        continue;
-                    }
+                    Err(e) => match self.failed(e) {
+                        Failed::Device(e) => return Err(e),
+                        Failed::Reading(_) => break,
+                        Failed::Damage(e) => {
+                            self.events.push(DecoderEvent::Damaged {
+                                reason: e.to_string(),
+                                last_good_pts: Some(current.pts),
+                            });
+                            continue;
+                        }
+                    },
                 },
             };
             let after = match (index, r.index) {
@@ -1375,16 +1416,18 @@ impl VideoDecode for FfmpegVideo {
                         return Ok(NextFrame::End);
                     }
                     Ok(Got::Stopped) => return Ok(NextFrame::Stopped),
-                    Err(e) if self.dec.has_failed() => return Err(e),
-                    // One that doesn't end the stream is an event, as where
-                    // the frame after this one is decoded ahead.
-                    Err(e) => {
-                        self.events.push(DecoderEvent::Damaged {
-                            reason: e.to_string(),
-                            last_good_pts: self.current.as_ref().map(|c| c.pts),
-                        });
-                        continue;
-                    }
+                    Err(e) => match self.failed(e) {
+                        Failed::Device(e) | Failed::Reading(e) => return Err(e),
+                        // One that doesn't end the stream is an event, as
+                        // where the frame after this one is decoded ahead.
+                        Failed::Damage(e) => {
+                            self.events.push(DecoderEvent::Damaged {
+                                reason: e.to_string(),
+                                last_good_pts: self.current.as_ref().map(|c| c.pts),
+                            });
+                            continue;
+                        }
+                    },
                 },
             };
             if let Some(c) = &mut self.catch_up
@@ -1397,7 +1440,7 @@ impl VideoDecode for FfmpegVideo {
             if self.catch_up.is_some() {
                 self.dec.skip_nonref_before(None);
             }
-            if self.fill_pending(stop) {
+            if self.fill_pending(stop)? {
                 // Handed out once the frame after it is known. Until then
                 // catching up isn't over: a seek, or catching up to before
                 // it, finds the frames it passed over again.

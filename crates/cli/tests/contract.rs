@@ -33,6 +33,7 @@ const CODES: &[&str] = &[
     "decode_failed",
     "doctor_errors",
     "files_failed",
+    "hw_failed",
     "hw_unavailable",
     "hw_unsupported",
     "internal",

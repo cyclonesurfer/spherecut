@@ -73,6 +73,19 @@ pub enum MediaError {
         kind: String,
         refusal: HwRefusal,
     },
+    /// Decoding or downloading a frame on the hardware device failed, and
+    /// the device can't be told to have turned the stream down. It is the
+    /// device's failure, never the file's damage, even when the device
+    /// failed on a damaged packet (software, after a fallback, says
+    /// whether it was, D30); software may still decode the stream. Once a
+    /// decoder has returned it, every later call returns it again.
+    #[error("decoding {} on {kind} failed: {reason}", path.display())]
+    HwFailed {
+        path: PathBuf,
+        /// "VA-API" or "Vulkan".
+        kind: String,
+        reason: String,
+    },
     /// The reason is part of the message, so it is not also the error's
     /// `source()`, which would print it twice in an error chain.
     #[error("{kind} device unavailable: {reason}")]
@@ -101,6 +114,7 @@ impl MediaError {
         "decode_failed",
         "too_large",
         "hw_unsupported",
+        "hw_failed",
         "hw_unavailable",
         "unsupported_pixel_format",
         "not_implemented",
@@ -122,10 +136,23 @@ impl MediaError {
             MediaError::Decode { .. } => "decode_failed",
             MediaError::PictureTooLarge { .. } => "too_large",
             MediaError::HwUnsupported { .. } => "hw_unsupported",
+            MediaError::HwFailed { .. } => "hw_failed",
             MediaError::Hardware { .. } => "hw_unavailable",
             MediaError::UnsupportedFormat { .. } => "unsupported_pixel_format",
             MediaError::NotYet { .. } => "not_implemented",
         }
+    }
+
+    /// Whether the hardware device, not the file, stopped the decode: it
+    /// turned the stream down ([`HwUnsupported`](MediaError::HwUnsupported))
+    /// or failed on it ([`HwFailed`](MediaError::HwFailed)). A decoder never
+    /// reports either as damage, so that a caller can go on in software
+    /// (D3, D14, D30).
+    pub fn is_device_failure(&self) -> bool {
+        matches!(
+            self,
+            MediaError::HwUnsupported { .. } | MediaError::HwFailed { .. }
+        )
     }
 
     /// The error for `path`, which [`ffi::open_input`] could not open as
@@ -227,6 +254,11 @@ mod tests {
                 kind: "VA-API".into(),
                 refusal: HwRefusal::Withdrawn,
             },
+            MediaError::HwFailed {
+                path: path(),
+                kind: "Vulkan".into(),
+                reason: "r".into(),
+            },
             MediaError::Hardware {
                 kind: "VA-API".into(),
                 reason: HwError::NotBuiltIn("VA-API".into()),
@@ -250,6 +282,7 @@ mod tests {
                 | MediaError::Decode { .. }
                 | MediaError::PictureTooLarge { .. }
                 | MediaError::HwUnsupported { .. }
+                | MediaError::HwFailed { .. }
                 | MediaError::Hardware { .. }
                 | MediaError::UnsupportedFormat { .. }
                 | MediaError::NotYet { .. } => {}
