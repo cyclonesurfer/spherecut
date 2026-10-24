@@ -1091,7 +1091,8 @@ fn find_box(file: &[u8], kind: &[u8; 4]) -> usize {
 
 /// An edit list of two pieces of the clip, as editors write: FFmpeg drops
 /// frames where they meet, so frames aren't shown a frame apart however
-/// even `stts` is, and the HEVC decoder says the splice is damage.
+/// even `stts` is, and up to FFmpeg 7.0 the HEVC decoder says the splice
+/// is damage.
 #[test]
 fn an_edit_list_that_splices_two_pieces_seeks_exactly_and_counts_frames() {
     let dir = TempDir::new("splice");
@@ -1127,12 +1128,18 @@ fn an_edit_list_that_splices_two_pieces_seeks_exactly_and_counts_frames() {
         assert!(gaps.count() > 0, "{codec:?}: {frames:?}");
         // Played through, and caught up across the splice from a seek
         // before it: the first frame from the target comes out, and the
-        // HEVC decoder's error at the splice is an event either way.
+        // HEVC decoder's error at the splice is an event either way. The
+        // second piece's keyframe has a POC the decoder still holds: up to
+        // FFmpeg 7.0 sending it fails with invalid data, and from 7.1
+        // (libavcodec 61.19) the decoder skips the picture with a warning
+        // and no error, so there is nothing to report. The same frames
+        // come out (D2).
         let never = StopToken::never();
         let mut d = open(&spliced);
         while let NextFrame::Frame(_) = d.next_frame(&never).unwrap() {}
         let played = d.take_events();
-        assert_eq!(played.is_empty(), codec == Codec::H264, "{played:?}");
+        let fails_at_splice = codec == Codec::Hevc && ff::codec::version() < (61 << 16 | 19 << 8);
+        assert_eq!(played.is_empty(), !fails_at_splice, "{played:?}");
         for (from, until) in [(10, 15), (10, 16), (12, 14), (5, 17), (13, 15)] {
             seek_pts(&mut *d, frames[from].pts, SeekMode::Exact);
             d.catch_up(Some(at(&*d, frames[until].pts)));
