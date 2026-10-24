@@ -860,6 +860,12 @@ rest, with the versions in `Cargo.lock`:
 
 glam's `serde` feature is on, but no glam type is serialized yet.
 
+*Updated in M1 slice 3a,* with the render crate's rows above: cargo-deny
+now warns of three more crates in two versions, each inside the new
+trees: hashbrown 0.16 (gpu-allocator's) beside 0.17, rustc-hash 1 (naga's)
+beside 2, and miniz_oxide 0.8 beside 0.9, both within png. Duplicates
+warn rather than fail (D21), and none can be unified from here.
+
 ## D23. Agent integration: an MCP server and the JSON CLI
 
 *2026-10-24, before M1's code. Pat asked for agent integration so that
