@@ -87,7 +87,8 @@ const OTHER_SSIM: f64 = 0.995;
 /// a channel more than [`OTHER_PAST_LSB`] off, and none more than
 /// [`OTHER_MAX_LSB`]. LLVM 22.1.8's llvmpipe put `fisheye_180` 5 LSB off
 /// at 62.79 dB; within PSNR and SSIM, implicit LOD puts 11 to 72 pixels
-/// past 4 LSB by up to 9, and a black pole quad is 95 LSB off (D32).
+/// past 4 LSB by up to 9, and a black pole quad is 95 LSB off (D32,
+/// `the_other_driver_rule_catches_local_faults`).
 const OTHER_PAST_LSB: f64 = 4.0;
 const OTHER_PIXELS_PAST: f64 = 4.0;
 const OTHER_MAX_LSB: f64 = 8.0;
@@ -3009,6 +3010,166 @@ fn cpu_checks() -> Vec<CpuCheck> {
 }
 
 // ---------------------------------------------------------------------
+// Local faults, for the other-driver rule (D32)
+//
+// What a localized fault does to a stored golden, against what another
+// llvmpipe build does: `the_other_driver_rule_catches_local_faults`.
+
+/// The rows that store an image, with their views and sizes.
+fn stored_views() -> [(&'static str, ViewParams, (u32, u32)); 6] {
+    [
+        ("rect_forward", rect_forward_view(), RECT),
+        ("rect_ypr", rect_ypr_view(), RECT),
+        ("fisheye_180", fisheye_180_view(), SQUARE),
+        ("fisheye_360", fisheye_360_view(), SQUARE),
+        ("stereo_tinyplanet", stereo_tinyplanet_view(), PLANET),
+        ("morph_half", morph_half_view(), RECT),
+    ]
+}
+
+fn rgb8_of(img: &Image) -> &[u8] {
+    match &img.pixels {
+        Pixels::Rgb8(p) => p,
+        _ => panic!("an 8-bit image was expected"),
+    }
+}
+
+/// `img` moved `(dx, dy)` pixels right and down, its first columns or
+/// rows repeated: a render a pixel off, or cropped a pixel off.
+fn moved(img: &Image, (dx, dy): (u32, u32)) -> Image {
+    let p = rgb8_of(img);
+    let w = img.width as usize;
+    let mut out = p.to_vec();
+    for y in 0..img.height as usize {
+        for x in 0..w {
+            let (sx, sy) = (x.saturating_sub(dx as usize), y.saturating_sub(dy as usize));
+            out[3 * (y * w + x)..][..3].copy_from_slice(&p[3 * (sy * w + sx)..][..3]);
+        }
+    }
+    Image {
+        pixels: Pixels::Rgb8(out),
+        ..img.clone()
+    }
+}
+
+/// `img` with the pixels in `mask` black.
+fn blanked(img: &Image, mask: &[bool]) -> Image {
+    let mut out = rgb8_of(img).to_vec();
+    for (px, m) in out.chunks_mut(3).zip(mask) {
+        if *m {
+            px.fill(0);
+        }
+    }
+    Image {
+        pixels: Pixels::Rgb8(out),
+        ..img.clone()
+    }
+}
+
+/// The pixels of a `size` view along the seam: shown, with u wrapping
+/// between them and the pixel to their right or below.
+fn seam_pixels(v: &ViewParams, size: (u32, u32)) -> Vec<bool> {
+    let p = Placement::default();
+    let u = |i: u32, j: u32| {
+        let c = pixel::centre(i, j);
+        reference::sphere_uv(reference::sphere_dir(v, size, c.x, c.y)).x
+    };
+    let mut mask = vec![false; size.0 as usize * size.1 as usize];
+    for j in 0..size.1 {
+        for i in 0..size.0 {
+            if !shows(v, size, &p, (i, j)) {
+                continue;
+            }
+            let wraps = |n: (u32, u32)| {
+                n.0 < size.0
+                    && n.1 < size.1
+                    && shows(v, size, &p, n)
+                    && (u(i, j) - u(n.0, n.1)).abs() > 0.5
+            };
+            mask[(j * size.0 + i) as usize] = wraps((i + 1, j)) || wraps((i, j + 1));
+        }
+    }
+    mask
+}
+
+/// The four pixels nearest each pole a `size` view shows within a pixel.
+fn pole_pixels(v: &ViewParams, size: (u32, u32)) -> Vec<bool> {
+    let p = Placement::default();
+    let n = size.0 as usize * size.1 as usize;
+    let mut mask = vec![false; n];
+    let dirs: Vec<Option<DVec3>> = (0..n)
+        .map(|k| {
+            let (i, j) = ((k % size.0 as usize) as u32, (k / size.0 as usize) as u32);
+            let c = pixel::centre(i, j);
+            shows(v, size, &p, (i, j)).then(|| reference::sphere_dir(v, size, c.x, c.y))
+        })
+        .collect();
+    for pole in [DVec3::Y, DVec3::NEG_Y] {
+        let mut near: Vec<(f64, usize)> = dirs
+            .iter()
+            .enumerate()
+            .filter_map(|(k, d)| d.map(|d| (d.angle_between(pole), k)))
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let Some(&(a, k)) = near.first() else {
+            continue;
+        };
+        // Within a pixel: nearer than the pixel's own step to its
+        // neighbour.
+        let (i, j) = ((k % size.0 as usize) as u32, (k / size.0 as usize) as u32);
+        let c = pixel::centre(i, j);
+        let step = reference::sphere_dir(v, size, c.x, c.y).angle_between(reference::sphere_dir(
+            v,
+            size,
+            c.x + 1.0,
+            c.y,
+        ));
+        if a <= step {
+            for &(_, k) in near.iter().take(4) {
+                mask[k] = true;
+            }
+        }
+    }
+    mask
+}
+
+/// The pixels of a `size` view within a pixel inside θ = π.
+fn rim_pixels(v: &ViewParams, size: (u32, u32)) -> Vec<bool> {
+    let p = Placement::default();
+    let mut mask = vec![false; size.0 as usize * size.1 as usize];
+    for j in 0..size.1 {
+        for i in 0..size.0 {
+            let c = pixel::centre(i, j);
+            let rho = pixel::to_lens(size, c.x, c.y).length();
+            let further = rho + 2.0 / f64::from(size.0);
+            mask[(j * size.0 + i) as usize] =
+                shows(v, size, &p, (i, j)) && v.lens.theta(further) > PI + 1e-4;
+        }
+    }
+    mask
+}
+
+/// `v` with its field of view changed so that what its left and right
+/// edges show lands `px` pixels further in (`px` < 0: further out), or
+/// `None` where the projection can't widen that far.
+fn widened(v: &ViewParams, size: (u32, u32), px: f64) -> Option<ViewParams> {
+    let edge = 1.0 - 2.0 * px / f64::from(size.0);
+    let want = v.lens.theta(1.0);
+    let lens = |hfov: f64| Lens { hfov, ..v.lens };
+    let (mut lo, mut hi) = (v.lens.hfov / 2.0, v.lens.hfov * 2.0);
+    for _ in 0..200 {
+        let mid = (lo + hi) / 2.0;
+        if lens(mid).theta(edge) < want {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let l = lens((lo + hi) / 2.0);
+    ((l.theta(edge) - want).abs() < 1e-9).then(|| ViewParams::new(v.orientation, l))
+}
+
+// ---------------------------------------------------------------------
 // The tests
 
 #[test]
@@ -3628,5 +3789,108 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
     assert!(
         lavapipe_miss < 1.0,
         "lavapipe's filter misses lavapipe by {lavapipe_miss:.2} dB"
+    );
+}
+
+#[test]
+fn the_other_driver_rule_catches_local_faults() {
+    // Each stored image against faults made from it, or rendered beside
+    // it: moved a pixel right or down, the view a pixel wider or narrower
+    // at its edges, implicit LOD (the seam and pole rows' control), and
+    // the seam, the poles' quads or the pixels within a pixel of the rim
+    // blanked. Every fault fails the rule, but implicit LOD in the rect
+    // views, which show no seam or pole and nothing far minified, and
+    // differ there by no more than 4 LSB. Four pass PSNR and SSIM, and
+    // only the count or the maximum catches them. As drift, the views
+    // widened or narrowed by a hundredth of a pixel at their edges pass.
+    let gpu = gpu();
+    let mut renderer = StillRenderer::new(gpu);
+    let s = grid_nv12();
+    // The faults the averages miss, and whether the count and the
+    // maximum catch them.
+    let averages_miss = [
+        ("fisheye_180", "implicit_lod", true, true),
+        ("stereo_tinyplanet", "implicit_lod", true, false),
+        ("stereo_tinyplanet", "poles_black", false, true),
+        ("morph_half", "implicit_lod", true, false),
+    ];
+    let mut missed = Vec::new();
+    for (row, v, size) in stored_views() {
+        let png = std::fs::read(Path::new(GOLDENS).join(format!("{row}.png"))).unwrap();
+        let want = Image::from_png(&png).unwrap();
+        let mut render = |v: &ViewParams, debug: DebugMode| {
+            let opts = StillOptions {
+                debug,
+                ..StillOptions::default()
+            };
+            renderer.render(gpu, &s.frame, v, size, &opts).unwrap()
+        };
+        for px in [0.01, -0.01] {
+            // A 360° fisheye can't widen.
+            let Some(w) = widened(&v, size, px) else {
+                continue;
+            };
+            let d = drift(&render(&w, DebugMode::Off), &want).unwrap();
+            eprintln!(
+                "{row}: drift, {px} pixel at the edges: {} pixels past {OTHER_PAST_LSB} LSB, max \
+                 {} LSB, {:.2} dB, SSIM {:.5}",
+                d.past, d.max_lsb, d.psnr, d.ssim
+            );
+            assert!(judge(&d, false).is_ok(), "{row}: {px} pixel: {d:?}");
+        }
+        let mut faults = vec![
+            ("moved_right", moved(&want, (1, 0))),
+            ("moved_down", moved(&want, (0, 1))),
+            ("implicit_lod", render(&v, DebugMode::ImplicitLod)),
+        ];
+        for (name, px) in [("wider", 1.0), ("narrower", -1.0)] {
+            // A 360° fisheye can't widen.
+            if let Some(w) = widened(&v, size, px) {
+                faults.push((name, render(&w, DebugMode::Off)));
+            }
+        }
+        for (name, mask) in [
+            ("seam_black", seam_pixels(&v, size)),
+            ("poles_black", pole_pixels(&v, size)),
+            ("rim_black", rim_pixels(&v, size)),
+        ] {
+            if mask.contains(&true) {
+                faults.push((name, blanked(&want, &mask)));
+            }
+        }
+        for (name, got) in &faults {
+            let d = drift(got, &want).unwrap();
+            let averages = d.psnr >= OTHER_PSNR_DB && d.ssim >= OTHER_SSIM;
+            eprintln!(
+                "{row}: {name}: {} pixels past {OTHER_PAST_LSB} LSB, max {} LSB, {:.2} dB, SSIM \
+                 {:.5}{}",
+                d.past,
+                d.max_lsb,
+                d.psnr,
+                d.ssim,
+                if averages {
+                    ", within the averages"
+                } else {
+                    ""
+                }
+            );
+            if *name == "implicit_lod" && row.starts_with("rect_") {
+                assert!(d.past == 0.0 && d.max_lsb <= OTHER_PAST_LSB, "{row}: {d:?}");
+                continue;
+            }
+            assert!(judge(&d, false).is_err(), "{row}: {name} passes: {d:?}");
+            if averages {
+                missed.push((
+                    row,
+                    *name,
+                    d.past > OTHER_PIXELS_PAST,
+                    d.max_lsb > OTHER_MAX_LSB,
+                ));
+            }
+        }
+    }
+    assert_eq!(
+        missed, averages_miss,
+        "the faults within PSNR and SSIM, and whether the count and the maximum catch them"
     );
 }
