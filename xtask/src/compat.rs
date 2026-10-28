@@ -27,7 +27,8 @@
 //! resolved: `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` puts the target
 //! directories elsewhere. Cargo's build directory is the target directory
 //! too, whatever `build.build-dir` says, so that all a build makes is
-//! built against its FFmpeg alone and goes with it.
+//! built against its FFmpeg alone and goes with it; cargo reads that path
+//! as a template, so a target whose path holds a brace is refused.
 //!
 //! A build counts for a prefix only if it bound that prefix's FFmpeg:
 //! pkg-config must find each library ffmpeg-sys-next binds there, its
@@ -513,13 +514,25 @@ fn prepare_target(target: &Path, stamp: &str) -> Result<bool> {
 /// [`prepare_target`] once [`guard`] allows `target`, then the stamp again
 /// from `restamp`, which must not have changed: deleting a stale target
 /// must leave the FFmpeg it is for as it was, which a prefix whose files
-/// are links into the target would not be.
+/// are links into the target would not be. A target whose path holds a
+/// brace is refused first: it is cargo's build directory too
+/// (`CARGO_BUILD_BUILD_DIR`), which cargo reads as a template
+/// (`{workspace-root}`), failing every build on a name in braces it
+/// doesn't know.
 fn ready_target(
     target: &Path,
     prefixes: &[PathBuf],
     stamp: &str,
     restamp: impl FnOnce() -> Result<String>,
 ) -> Result<bool> {
+    if target.to_string_lossy().contains(['{', '}']) {
+        bail!(
+            "the target directory {} has a brace in its path, which cargo would read as a \
+             template in its build directory, compat's target directory too: set \
+             {TARGET_ENV} to a directory whose path has none",
+            target.display()
+        );
+    }
     guard(target, prefixes)?;
     let stale = prepare_target(target, stamp)?;
     let now = restamp()?;
@@ -1008,7 +1021,8 @@ fn cargo_env(
         // Cargo's build directory (`build.build-dir`), where it keeps
         // what it builds on the way: else every FFmpeg's build would
         // share one, rebinding ffmpeg-sys-next each time, and `--clean`
-        // would leave it.
+        // would leave it. Cargo expands `{...}` in it, so `ready_target`
+        // refuses a target whose path holds a brace.
         (
             "CARGO_BUILD_BUILD_DIR".to_owned(),
             Some(target.as_os_str().to_owned()),
@@ -2114,6 +2128,28 @@ mod tests {
             .to_string();
         assert!(e.contains("the FFmpeg changed"), "{e}");
         assert!(e.contains("libavcodec.pc missing"), "{e}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_target_whose_path_holds_a_brace_is_refused_before_a_build() {
+        // Cargo would fail every build there: "unexpected variable `x` in
+        // build.build-dir path".
+        let d = scratch("brace");
+        let (pc, b) = fake_prefix(&d.join("n8.1"), "62.28.100");
+        let prefixes = [d.join("n8.1")];
+        let restamp = || Ok(stamp(&pc, &b));
+        for root in ["ct{x}", "ct}", "{workspace-root}"] {
+            let target = target_dir(&d.join(root), "n8.1");
+            let e = ready_target(&target, &prefixes, &stamp(&pc, &b), restamp)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("has a brace in its path"), "{e}");
+            assert!(e.contains(TARGET_ENV), "{e}");
+            assert!(!d.join(root).exists(), "{root}");
+        }
+        let target = target_dir(&d.join("ct"), "n8.1");
+        assert!(!ready_target(&target, &prefixes, &stamp(&pc, &b), restamp).unwrap());
         std::fs::remove_dir_all(&d).ok();
     }
 
