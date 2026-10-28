@@ -556,6 +556,53 @@ fn with_fallback_fail_a_device_failure_is_the_error() {
     }
 }
 
+/// A device that can't open another decoder for a decode from the
+/// stream's start (which D29 opens afresh where the stream's first
+/// picture is no keyframe; here every one after packets were sent) has
+/// failed: the decode goes on in software, as the script's seek to frame
+/// 5 needs, and nothing is taken for damage. With `Fallback::Fail` that
+/// failure is the error.
+#[test]
+fn a_decoder_the_device_cannot_open_again_goes_on_in_software() {
+    let dir = TempDir::new("reopen-fault");
+    let path = clip(&dir, "h264.mp4", Codec::H264);
+    let frames = sequential(&path);
+    let r = reference(&path, &frames);
+    let damaged = |events: &[DecoderEvent]| {
+        events
+            .iter()
+            .any(|e| matches!(e, DecoderEvent::Damaged { .. }))
+    };
+    let backend = FaultBackend::stand_in(0, Fault::Reopen, Fallback::Software);
+    let mut d = backend.open_video(&path, &VideoRequest::default()).unwrap();
+    let (played, err) = play(&mut *d, &frames, "reopen");
+    assert!(err.is_none(), "{err:?}");
+    assert_eq!(played.steps, r.steps);
+    let reasons = fell_back(&played.events);
+    assert_eq!(reasons.len(), 1, "{:?}", played.events);
+    match reasons[0] {
+        FallbackReason::Failed { error, .. } => {
+            assert!(error.contains("reopening the decoder failed"), "{error}")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!damaged(&played.events), "{:?}", played.events);
+
+    let backend = FaultBackend::stand_in(0, Fault::Reopen, Fallback::Fail);
+    let mut d = backend.open_video(&path, &VideoRequest::default()).unwrap();
+    let (played, err) = play(&mut *d, &frames, "reopen, fail");
+    assert!(
+        matches!(&err, Some(MediaError::HwFailed { reason, .. }) if reason.contains("reopening")),
+        "{err:?}"
+    );
+    assert!(!damaged(&played.events), "{:?}", played.events);
+    let again = d.next_frame(&StopToken::never());
+    assert!(
+        matches!(again, Err(MediaError::HwFailed { .. })),
+        "{again:?}"
+    );
+}
+
 /// FFmpeg's Vulkan device on lavapipe, which has no video decode.
 fn lavapipe() -> Arc<HwDevice> {
     open_hw_device("vulkan", Some("llvmpipe")).unwrap_or_else(|e| {

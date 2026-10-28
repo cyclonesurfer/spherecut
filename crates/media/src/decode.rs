@@ -169,6 +169,15 @@ pub struct VideoDecoder {
     reopening: bool,
     /// Times `dec` has been opened afresh so.
     reopens: u64,
+    /// Why opening `dec` afresh failed, in software: the flushed decoder
+    /// mustn't decode the stream's start, so every call returns it until a
+    /// seek ([`fail_reopen`](Self::fail_reopen)).
+    reopen_failed: Option<String>,
+    /// For fault tests: every decode from the stream's start after packets
+    /// were sent opens `dec` afresh, and that fails
+    /// ([`fail_reopens`](Self::fail_reopens)).
+    #[cfg(any(test, feature = "fault-injection"))]
+    reopens_fail: bool,
     /// A packet read ahead, after one flagged corrupt (see `next_packet`).
     lookahead: Option<ff::Packet>,
     /// The demuxer has nothing more to give.
@@ -488,6 +497,9 @@ impl VideoDecoder {
             first_packet_key: false,
             reopening: false,
             reopens: 0,
+            reopen_failed: None,
+            #[cfg(any(test, feature = "fault-injection"))]
+            reopens_fail: false,
             lookahead: None,
             read_done: false,
             eof_sent: false,
@@ -537,8 +549,10 @@ impl VideoDecoder {
     /// call returns too. So is [`MediaError::HwUnsupported`], once the
     /// device turns the stream down, and [`MediaError::HwFailed`], once
     /// decoding or copying a frame on it fails: nothing more is decoded.
-    /// In software, any other error from the decoder itself is returned
-    /// once; calling again carries on with the next packet.
+    /// In software, a decoder that couldn't be opened afresh to decode the
+    /// stream's start again is an error that every later call returns,
+    /// until a seek; any other error from the decoder itself is returned
+    /// once, and calling again carries on with the next packet.
     pub fn next_frame(&mut self) -> Result<Option<DecodedFrame>, MediaError> {
         match self.receive(None)? {
             Received::Frame(frame) => self.finish_frame(frame).map(Some),
@@ -559,6 +573,9 @@ impl VideoDecoder {
         }
         if let Some(reason) = &self.failed {
             return Err(err(&self.path, "reading", reason));
+        }
+        if let Some(reason) = &self.reopen_failed {
+            return Err(err(&self.path, "reopening the decoder", reason));
         }
         let stopped = || stop.is_some_and(StopToken::is_stopped);
         let mut frame = ff::frame::Video::empty();
@@ -620,8 +637,10 @@ impl VideoDecoder {
                     if self.skip_before.is_some() {
                         self.skip_sent += 1;
                     }
-                    if std::mem::take(&mut self.reopening) {
-                        self.reopen()?;
+                    if std::mem::take(&mut self.reopening)
+                        && let Err(e) = self.reopen()
+                    {
+                        return Err(self.fail_reopen(e));
                     }
                     self.sent = true;
                     self.dec
@@ -645,7 +664,8 @@ impl VideoDecoder {
     /// later call returns, until a seek: a read that failed or was
     /// cancelled, or a cut. A device that turned the stream down or failed
     /// on it doesn't count: that is never the file's damage, and its error
-    /// says so ([`MediaError::is_device_failure`]).
+    /// says so ([`MediaError::is_device_failure`]). Nor does a decoder
+    /// that couldn't be opened afresh ([`reopen_failed`](Self::reopen_failed)).
     pub(crate) fn has_failed(&self) -> bool {
         self.failed.is_some()
     }
@@ -735,6 +755,7 @@ impl VideoDecoder {
         self.read_error = None;
         self.read_cause = None;
         self.failed = None;
+        self.reopen_failed = None;
         self.awaiting_landing = true;
         self.landing = None;
         self.landing_key = None;
@@ -758,6 +779,10 @@ impl VideoDecoder {
     /// an edit list hides; or, where they can't be read so, from FFmpeg's
     /// flag on the first frame decoded.
     fn reopen(&mut self) -> Result<(), MediaError> {
+        #[cfg(any(test, feature = "fault-injection"))]
+        if self.reopens_fail {
+            return Err(err(&self.path, "opening decoder", "fault injected"));
+        }
         let par = self
             .ictx
             .stream(self.stream_index)
@@ -772,6 +797,37 @@ impl VideoDecoder {
             "decoding the stream's start afresh: its first picture is no keyframe"
         );
         Ok(())
+    }
+
+    /// The error for a [`reopen`](Self::reopen) that failed with `e`. The
+    /// flushed decoder mustn't decode the stream's start, so the packet
+    /// read for it is dropped and nothing more is decoded: on a device this
+    /// is the device's failure (`HwFailed`), which every later call
+    /// returns, for a fallback to go on from in software; in software, an
+    /// error that this and every later call returns, until a seek. It is
+    /// never the file's damage, nor a failed read.
+    fn fail_reopen(&mut self, e: MediaError) -> MediaError {
+        let reason = match e {
+            MediaError::Decode { reason, .. } => reason,
+            e => e.to_string(),
+        };
+        if self.hw.is_some() {
+            return self.fail_device(&format!("reopening the decoder: {reason}"));
+        }
+        tracing::warn!(
+            path = %self.path.display(),
+            "reopening the decoder failed: {reason}"
+        );
+        let e = err(&self.path, "reopening the decoder", &reason);
+        self.reopen_failed = Some(reason);
+        e
+    }
+
+    /// Whether opening the decoder afresh failed in software since the
+    /// last seek (see [`fail_reopen`](Self::fail_reopen)): every call
+    /// returns that error until a seek.
+    pub(crate) fn reopen_failed(&self) -> bool {
+        self.reopen_failed.is_some()
     }
 
     /// Takes, and drops, the frames the decoder holds ready to hand out,
@@ -878,6 +934,15 @@ impl VideoDecoder {
     /// start again ([`reopen`](Self::reopen)).
     pub(crate) fn reopens(&self) -> u64 {
         self.reopens
+    }
+
+    /// For fault tests: from now on, every decode from the stream's start
+    /// after packets were sent opens the decoder afresh, as for a stream
+    /// whose first picture is no keyframe, and opening it fails, as when
+    /// memory runs out or a device can make no more decoders.
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub(crate) fn fail_reopens(&mut self) {
+        self.reopens_fail = true;
     }
 
     /// FFmpeg's name for the decoder's codec, such as `h264`.
@@ -1045,10 +1110,10 @@ impl VideoDecoder {
                                 .is_some_and(|nal| pkt.data().is_some_and(|d| nal.keyframe(d)));
                         }
                         let first = *self.first_landing.get_or_insert(ts);
-                        self.reopening = first == ts
-                            && self.sent
-                            && !self.first_packet_key
-                            && self.first_key != Some(true);
+                        let key_start = self.first_packet_key || self.first_key == Some(true);
+                        #[cfg(any(test, feature = "fault-injection"))]
+                        let key_start = key_start && !self.reopens_fail;
+                        self.reopening = first == ts && self.sent && !key_start;
                     }
                     if !pkt.is_key()
                         && let Some(ts) = ts
@@ -1498,6 +1563,62 @@ mod tests {
                 r => panic!("expected HwFailed, got {r:?}"),
             }
             assert!(!d.has_failed());
+        }
+    }
+
+    #[test]
+    fn a_reopen_that_fails_ends_the_stream_until_a_seek() {
+        // In software, as when memory runs out: the stream's first packet
+        // is never sent to the flushed decoder (nor lost to it, which went
+        // on with the next), every call says why until a seek, and it is
+        // neither a failed read nor a device's failure.
+        let dir = TempDir::new("reopen-fails");
+        let mut d = VideoDecoder::open(&clip(&dir), None, None).unwrap();
+        let first = d.next_frame().unwrap().unwrap();
+        d.fail_reopens();
+        d.seek(0).unwrap();
+        let made = d.frames_decoded();
+        for _ in 0..3 {
+            match d.next_frame() {
+                Err(e @ MediaError::Decode { .. }) => {
+                    assert!(e.to_string().contains("reopening the decoder"), "{e}");
+                    assert!(!e.is_device_failure());
+                }
+                r => panic!("expected the reopen's error, got {r:?}"),
+            }
+            assert!(d.reopen_failed());
+            assert!(!d.reading_failed());
+        }
+        assert_eq!(d.frames_decoded(), made);
+        assert_eq!(d.reopens(), 0);
+        // A seek clears it, and the stream's start decodes as at open.
+        d.reopens_fail = false;
+        d.seek(0).unwrap();
+        assert!(!d.reopen_failed());
+        let again = d.next_frame().unwrap().unwrap();
+        assert_eq!(again.pts, first.pts);
+        assert_eq!(again.frame.data(0), first.frame.data(0));
+    }
+
+    #[test]
+    fn a_reopen_that_fails_on_a_device_is_the_devices_failure() {
+        // A device that can't open another decoder has failed: the error
+        // is `HwFailed`, for a fallback to go on in software, and sticks.
+        let dir = TempDir::new("reopen-device");
+        let mut d = VideoDecoder::open(&clip(&dir), None, None).unwrap();
+        d.next_frame().unwrap().unwrap();
+        d.hw = Some(Arc::new(HwDevice::vulkan_without_context()));
+        d.fail_reopens();
+        for _ in 0..2 {
+            d.seek(0).unwrap();
+            match d.next_frame() {
+                Err(e @ MediaError::HwFailed { .. }) => {
+                    assert!(e.to_string().contains("reopening the decoder"), "{e}");
+                    assert!(e.is_device_failure());
+                }
+                r => panic!("expected HwFailed, got {r:?}"),
+            }
+            assert!(!d.reopen_failed());
         }
     }
 

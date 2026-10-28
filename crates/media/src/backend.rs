@@ -113,6 +113,11 @@ pub enum Fault {
     /// As it is copied to system memory, when it is about to be handed
     /// out; a frame never handed out never fails.
     Download,
+    /// Not a frame: every decode from the stream's start after packets
+    /// were sent opens the decoder afresh, as for a stream whose first
+    /// picture is no keyframe (D29), and that fails, as when the device can
+    /// make no more decoders. The plan's `frame` isn't looked at.
+    Reopen,
 }
 
 #[derive(Debug, Clone)]
