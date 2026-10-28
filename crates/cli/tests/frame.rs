@@ -1509,6 +1509,61 @@ fn max_diff(a: &Image, b: &Image) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// Section 6's rule for a stored image (D32), from its PSNR, SSIM, pixels
+/// past [`OTHER_PAST_LSB`] and largest difference in 8-bit steps: what
+/// is wrong, if anything. At the driver build it was blessed on it must
+/// be identical, and elsewhere within the other-driver tolerance.
+fn golden_fault(
+    same_driver: bool,
+    identical: bool,
+    (p, s, n, m): (f64, f64, f64, f64),
+) -> Option<String> {
+    let numbers = format!(
+        "PSNR {p:.2} dB, SSIM {s:.5}, {n} {} more than {OTHER_PAST_LSB} LSB off, max {m:.1} LSB",
+        if n == 1.0 { "pixel" } else { "pixels" }
+    );
+    if same_driver {
+        return (!identical).then(|| {
+            format!("not identical to the golden at the driver build it was blessed on: {numbers}")
+        });
+    }
+    // A hair over a whole step is float's, not the render's.
+    let over = m > OTHER_MAX_LSB + 1e-9;
+    (p < OTHER_PSNR_DB || s < OTHER_SSIM || n > OTHER_PIXELS_PAST || over).then(|| {
+        format!(
+            "outside the other-driver tolerance (PSNR ≥ {OTHER_PSNR_DB} dB, SSIM ≥ {OTHER_SSIM}, \
+             at most {OTHER_PIXELS_PAST} pixels more than {OTHER_PAST_LSB} LSB off, none more \
+             than {OTHER_MAX_LSB}): {numbers}"
+        )
+    })
+}
+
+#[test]
+fn stored_frames_follow_the_rules_of_section_6() {
+    // At the build blessed on, only identical pixels pass.
+    assert_eq!(golden_fault(true, true, (99.0, 1.0, 0.0, 0.0)), None);
+    let f = golden_fault(true, false, (98.6, 1.0, 0.0, 1.0)).unwrap();
+    assert!(f.contains("not identical"), "{f}");
+    // Elsewhere: four pixels past 4 LSB, by up to 8, pass, and a fifth
+    // pixel, a ninth LSB, or either average under its bound fails, with
+    // the count and the maximum in the message.
+    let other = |n: f64, m: f64| golden_fault(false, false, (62.0, 0.9999, n, m));
+    assert_eq!(other(4.0, 8.0), None);
+    assert_eq!(other(4.0, 8.0 + 1e-12), None);
+    let f = other(5.0, 8.0).unwrap();
+    assert!(
+        f.contains("5 pixels more than 4 LSB off, max 8.0 LSB"),
+        "{f}"
+    );
+    let f = other(1.0, 9.0).unwrap();
+    assert!(
+        f.contains("1 pixel more than 4 LSB off, max 9.0 LSB"),
+        "{f}"
+    );
+    assert!(golden_fault(false, false, (47.9, 0.9999, 0.0, 1.0)).is_some());
+    assert!(golden_fault(false, false, (62.0, 0.9949, 0.0, 1.0)).is_some());
+}
+
 /// The pixels with a channel more than `lsb` 8-bit steps apart.
 fn pixels_past(a: &Image, b: &Image, lsb: f64) -> f64 {
     let (a, b) = (unit(a), unit(b));
@@ -1897,28 +1952,7 @@ impl Run {
         self.measure("golden_ssim", s);
         self.measure("golden_pixels_past_4_lsb", n);
         self.measure("golden_max_lsb", m);
-        let numbers = format!(
-            "PSNR {p:.2} dB, SSIM {s:.5}, {n} {} more than {OTHER_PAST_LSB} LSB off, max {m:.1} LSB",
-            if n == 1.0 { "pixel" } else { "pixels" }
-        );
-        let fault = if same_driver {
-            (!identical).then(|| {
-                format!(
-                    "not identical to the golden at the driver build it was blessed on: {numbers}"
-                )
-            })
-        } else {
-            // A hair over a whole step is float's, not the render's.
-            let over = m > OTHER_MAX_LSB + 1e-9;
-            (p < OTHER_PSNR_DB || s < OTHER_SSIM || n > OTHER_PIXELS_PAST || over).then(|| {
-                format!(
-                    "outside the other-driver tolerance (PSNR ≥ {OTHER_PSNR_DB} dB, SSIM ≥ \
-                     {OTHER_SSIM}, at most {OTHER_PIXELS_PAST} pixels more than {OTHER_PAST_LSB} \
-                     LSB off, none more than {OTHER_MAX_LSB}): {numbers}"
-                )
-            })
-        };
-        if let Some(f) = fault {
+        if let Some(f) = golden_fault(same_driver, identical, (p, s, n, m)) {
             self.fail(format!("{png}: {f}"));
             self.write_diffs("golden", got, &want);
         }
