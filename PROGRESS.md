@@ -212,14 +212,17 @@ Checks of `m1/seek-nits` at 56d9200: `cargo xtask check` passed;
 FFmpeg 8.1.3, and Tier 1 against it, the new tests included (5 min).
 
 The review of `m1/seek-nits` found one more minor fault, older than the
-branch (the same at 92db604), and it is left for Pat's decision (D29):
+branch (the same at 92db604), and it is left as a limit for now (D29):
 where FFmpeg starts an H.264 picture from a damaged slice header and
 then fails its slice, it hands the picture out with whatever its buffer
 held, and the frames after it, up to the next IDR picture, depend on
 what the decoder decoded before. An exact seek there returns frames
 unlike the decode from the start's as `Exact`: 9 frames of a 40-frame
 clip, on 6.1, and plain FFmpeg does the same on 6.1, 7.1.3, 8.1.3 and
-9.0.2. Only FFmpeg's log says so, unless another packet fails.
+9.0.2. Only FFmpeg's log says so, unless another packet fails. Once
+said, it is damage before the target like any other (the plan's rule
+and D27's); saying it means reading FFmpeg's log per decoder, which
+comes after slice 5 (Next, item 2).
 
 odin's third run (PR #5, `hw-reports/odin-be38fa409e.md`, at be38fa4):
 21 of 23 Tier 2 tests pass, including all four that failed in PR #4. Two
@@ -722,12 +725,10 @@ The mip fix's review found 6 more, all fixed or corrected (cf50f0d,
 
 ## Next
 
-1. Slice 4's merge, once its review's fixes (18 findings, on
-   `m1/frame`) are checked, and `m1/compat-fixes`' checks and review; the golden fixes for odin's
-   third run (above, on `m1/goldens-hw`, the mip pass's rounding
-   included), whose RADV and LLVM 22 numbers come with Pat's next run;
-   then worker threads and the frame cache (slice
-   5), audio, then the eframe GUI, which hands eframe render's own device
+1. odin's fourth run (`hw-run-5.md` in the project's shared files), at
+   main after the golden fixes, for their RADV and LLVM 22 numbers and
+   slice 4's two Tier 2 tests; then worker threads and the frame cache
+   (slice 5), audio, then the eframe GUI, which hands eframe render's own device
    through egui-wgpu's `WgpuSetup::Existing` rather than the plan's
    `CreateNew`, so that slice 5b's Vulkan Video device reaches the viewer
    (D31). H1, after slice 5, runs slice 2b's, 3b's and 4's Tier 2 tests
@@ -752,8 +753,14 @@ The mip fix's review found 6 more, all fixed or corrected (cf50f0d,
    element, which FFmpeg gives as side data) in probe, so that frame
    takes a tagged Matroska equirect without `--equirect`, waits for a
    slice that needs Matroska sources.
-2. The Insta360 trailer reader (metadata, calibration, IMU), needed from M2.
-3. Agent integration A1 (the MCP server) once M1's code is in, while
+2. H.264 damage FFmpeg hands out from old buffers (D29): read
+   FFmpeg's log per decoder (its callback names the codec context) for
+   "decode_slice_header error" and the like, and treat what it says as
+   damage, so an exact seek past it is `Truncated` and `spherecut frame`
+   fails, as for damage FFmpeg reports; and frame's warning should say
+   where the damage was, before or after the frame.
+3. The Insta360 trailer reader (metadata, calibration, IMU), needed from M2.
+4. Agent integration A1 (the MCP server) once M1's code is in, while
    M1's hardware report is pending (Pat chose this order on 2026-10-24).
 
 ## How to run

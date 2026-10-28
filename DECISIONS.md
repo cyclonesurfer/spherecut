@@ -2567,7 +2567,12 @@ for damage before T (the last good frame, `Truncated`) and D27's
 (damage before the target fails `spherecut frame`), against this
 entry's (a seek into frames FFmpeg decoded past damage is `Exact`, and
 `spherecut frame` warns, in words that put the damage after the
-frame). That is Pat's decision.
+frame). Decided 2026-10-28: the entry's rule is for damage FFmpeg
+says; damage that only its log says is damage all the same, and once
+read from the log it follows the plan's rule and D27's (`Truncated`
+before T, and `spherecut frame` fails). Reading FFmpeg's log per
+decoder (its callback names the codec context) comes after slice 5;
+until then this is a limit.
 
 ## D30. Pixel formats and colour defaults
 
