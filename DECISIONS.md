@@ -2528,6 +2528,47 @@ exact seek to a keyframe right after a keyframe seek there seeks again
 decode on, so the oracle fails such a clip at frame 13. Its frames are
 right, and it is so with these fixes and without them.
 
+*Updated 2026-10-28, after the review of `m1/seek-nits`.* The review
+found one more fault, older than these fixes, and it is left. FFmpeg's
+H.264 decoder can hand out a picture it never decoded. Where a damaged
+slice header still parses as far as the start of its picture, FFmpeg
+starts the picture, fails the slice and hands the picture out with
+whatever its buffer held, with no flag, no `decode_error_flags` and no
+error from `avcodec_send_packet`; only its log says "decode_slice_header
+error". The frames that refer to it, up to the next IDR picture, are
+decoded from those contents, which depend on what the decoder decoded
+before. So a decode from the IDR picture before the damage differs
+there from the decode from the start, and an exact seek returns its own
+decode's frames as `Exact`. Measured on the review's clip, 40 frames of
+x264 without B-frames keeping 3 references, with IDR pictures at 0, 10
+and 22, with the first 6 bytes of packet 12's slice header zeroed
+(`break_slice_header`): in `ffmpeg -threads 1`'s decode, frame 12 is
+frame 8's picture byte for byte, and plain FFmpeg decoding from IDR
+picture 10 on the same decoder after a flush gives other frames 12 to
+21, on one thread and on frame threads, on 6.1, 7.1.3, 8.1.3 and 9.0.2,
+while the decode from the start flags no frame and fails no packet.
+Spherecut's exact seek to frame 13 returns a frame unlike the decode
+from the start's, and so do the 8 frames after it, as `Exact` and with
+no `Damaged` event, on one thread and on frame threads, on a decoder
+just opened and after playing 30 frames (6.1). With packet 11 broken
+too, which fails before its picture starts, `avcodec_send_packet` fails
+on it and the seek says the damage once, but its frames are as wrong:
+on one thread, and on frame threads after playing 30 frames (the
+review's case). The review's case is the same at 92db604, before these
+fixes; HEVC wasn't tried.
+`damage_that_loses_a_reference_picture_is_reported_and_seeks_agree`
+holds because its broken slice header fails before FFmpeg starts the
+picture. Matching the decode from the start would take a decode from
+the start of the stream, on a decoder as it was then, for every exact
+seek past such damage, and on a device not even that, as its surfaces
+aren't zeroed. Saying the damage would take FFmpeg's log, read per
+decoder. And what such a seek should return is open: the plan's rule
+for damage before T (the last good frame, `Truncated`) and D27's
+(damage before the target fails `spherecut frame`), against this
+entry's (a seek into frames FFmpeg decoded past damage is `Exact`, and
+`spherecut frame` warns, in words that put the damage after the
+frame). That is Pat's decision.
+
 ## D30. Pixel formats and colour defaults
 
 *2026-10-24, M1 slice 2a. The M1 plan's D28, sections 3.4 and 3.5;

@@ -211,6 +211,16 @@ Checks of `m1/seek-nits` at 56d9200: `cargo xtask check` passed;
 `cargo xtask compat` passed clippy, the link and the binding against
 FFmpeg 8.1.3, and Tier 1 against it, the new tests included (5 min).
 
+The review of `m1/seek-nits` found one more minor fault, older than the
+branch (the same at 92db604), and it is left for Pat's decision (D29):
+where FFmpeg starts an H.264 picture from a damaged slice header and
+then fails its slice, it hands the picture out with whatever its buffer
+held, and the frames after it, up to the next IDR picture, depend on
+what the decoder decoded before. An exact seek there returns frames
+unlike the decode from the start's as `Exact`: 9 frames of a 40-frame
+clip, on 6.1, and plain FFmpeg does the same on 6.1, 7.1.3, 8.1.3 and
+9.0.2. Only FFmpeg's log says so, unless another packet fails.
+
 odin's third run (PR #5, `hw-reports/odin-be38fa409e.md`, at be38fa4):
 21 of 23 Tier 2 tests pass, including all four that failed in PR #4. Two
 golden tests fail, and the fixes are next:
@@ -337,6 +347,13 @@ golden tests fail, and the fixes are next:
   run of frames referring to a lost picture without a pts, is said each
   time decoding meets it. A trimmed HEVC stream that starts at a picture
   that isn't IRAP still decodes its start on a decoder opened afresh.
+- In damaged H.264, a picture FFmpeg starts from a damaged slice header
+  and then fails comes out with whatever its buffer held, and the frames
+  that refer to it, up to the next IDR picture, depend on what the
+  decoder decoded before: an exact seek there can return frames unlike
+  the decode from the start's as `Exact`, and, unless another packet
+  fails, with no `Damaged` event. Pre-existing, left for a decision on
+  what such a seek should return (D29).
 - `vaapi_seek_matches_software` and its Vulkan twin decode every sample
   stream from start to end on the device and make 50 exact seeks in each
   (20 above 2880², such as the X5's 8K takes) in software and on the
