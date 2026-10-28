@@ -575,6 +575,7 @@ impl VideoDecoder {
     /// until a seek; any other error from the decoder itself is returned
     /// once, and calling again carries on with the next packet.
     pub fn next_frame(&mut self) -> Result<Option<DecodedFrame>, MediaError> {
+        spherecut_core::may_block("decoding a video frame");
         match self.receive(None)? {
             Received::Frame(frame) => self.finish_frame(frame).map(Some),
             Received::End | Received::Stopped => Ok(None),
@@ -1381,6 +1382,7 @@ fn describe(d: &VulkanDevice) -> String {
 /// devices can't be listed, or it can't open the one chosen, or it opened
 /// another one.
 pub fn open_vulkan_device(render_node: Option<&Path>) -> Result<VulkanChoice, MediaError> {
+    spherecut_core::may_block("opening a Vulkan decoding device");
     let fail = |reason: String| MediaError::Hardware {
         kind: hwprobe::device_label("vulkan").into(),
         reason: HwError::Vulkan(reason),

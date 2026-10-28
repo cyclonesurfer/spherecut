@@ -75,6 +75,7 @@ pub fn read_region_in_bands(
     size: (u32, u32),
     band_bytes: u64,
 ) -> Result<Texels, RenderError> {
+    spherecut_core::may_block("reading a texture back from the GPU");
     gpu.check()?;
     let format = texture.format();
     let Some(bpt) = format.block_copy_size(None) else {

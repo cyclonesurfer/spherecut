@@ -93,6 +93,7 @@ impl Sysfs {
     /// [`DEFAULT_RENDER_NODE`]. Nothing is opened, so the node may not
     /// exist; opening a device on it says so.
     pub fn render_node(&self, gpu: Option<&GpuIds>, given: Option<&Path>) -> RenderNode {
+        spherecut_core::may_block("reading the GPUs' render nodes in sysfs");
         if let Some(path) = given {
             return RenderNode {
                 path: path.to_path_buf(),

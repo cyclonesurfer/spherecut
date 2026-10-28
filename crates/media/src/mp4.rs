@@ -299,6 +299,7 @@ pub fn read_file(path: &Path) -> Result<Mp4Tree, Mp4Error> {
 }
 
 pub fn read_file_with(path: &Path, first: FirstBox) -> Result<Mp4Tree, Mp4Error> {
+    spherecut_core::may_block("reading an MP4 file's boxes");
     let mut f = File::open(path)?;
     read_with(&mut f, first)
 }

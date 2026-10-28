@@ -40,6 +40,7 @@ pub enum Distro {
 
 impl Distro {
     pub fn detect() -> Self {
+        spherecut_core::may_block("reading /etc/os-release");
         let os = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
         let ids: String = os
             .lines()
@@ -479,6 +480,7 @@ const FEDORA_PACKAGES: &[&str] = &[
 ];
 
 pub fn run(render_node: &Path) -> DoctorReport {
+    spherecut_core::may_block("running the doctor's checks");
     init();
     let distro = Distro::detect();
     let decoders: Vec<CodecStatus> = DECODERS

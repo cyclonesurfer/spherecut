@@ -816,6 +816,7 @@ fn open_input_with(
     demuxers: &[&str],
     max_pixels: i64,
 ) -> Result<ff::format::context::Input, OpenError> {
+    spherecut_core::may_block("opening a media file");
     let meta = std::fs::metadata(path).map_err(OpenError::Io)?;
     if !meta.is_file() {
         return Err(OpenError::NotAFile);
@@ -1279,6 +1280,7 @@ impl HwDevice {
     /// "vulkan"); `device` is e.g. a DRM render node, or `None` for the
     /// default.
     pub fn open(kind: &str, device: Option<&str>) -> Result<Self, HwError> {
+        spherecut_core::may_block("opening a hardware decoding device");
         let r = device_type(kind).and_then(|t| {
             use sys::AVHWDeviceType as T;
             let pix_fmt = match t {

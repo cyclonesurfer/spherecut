@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use spherecut_core::fs::{TempFile, follow_links};
 use spherecut_core::video::ColorCodes;
-use spherecut_core::{FrameRate, Rational};
+use spherecut_core::{FrameRate, Rational, may_block};
 use thiserror::Error;
 
 use crate::ffi;
@@ -481,6 +481,7 @@ impl Mp4Writer {
         v: &VideoSettings,
         a: Option<&AudioSettings>,
     ) -> Result<Self, EncodeError> {
+        may_block("creating a file to encode into");
         init();
         if !v.width.is_multiple_of(2)
             || !v.height.is_multiple_of(2)
@@ -698,6 +699,7 @@ impl Mp4Writer {
 
     /// Append a video frame at `pts`, coded as an I-frame when `intra`.
     fn push_frame(&mut self, planes: &YuvPlanes, pts: i64, intra: bool) -> Result<(), EncodeError> {
+        may_block("encoding a frame to a file");
         if let Some(last) = self.last_video_pts
             && pts <= last
         {
@@ -720,6 +722,7 @@ impl Mp4Writer {
     /// Append planar audio, `samples[ch][i]`: one slice per channel, all
     /// the same length.
     pub fn push_audio(&mut self, samples: &[Vec<f32>]) -> Result<(), EncodeError> {
+        may_block("encoding audio to a file");
         let Some(a) = self.audio.as_mut() else {
             return Err(EncodeError::Invalid("no audio stream".into()));
         };
@@ -791,6 +794,7 @@ impl Mp4Writer {
     /// Flush the encoders, write the trailer and rename the file into place.
     /// Returns the path it was created with.
     pub fn finish(self) -> Result<PathBuf, EncodeError> {
+        may_block("finishing a file");
         let (path, tmp) = self.close()?;
         let dest = tmp.dest().to_path_buf();
         tmp.persist_replace()
@@ -802,6 +806,7 @@ impl Mp4Writer {
     /// [`inject::inject`] with `edits` applied, so it appears with its
     /// metadata boxes (spherical video and audio, say) already in it.
     pub fn finish_with_edits(self, edits: &[EntryEdit]) -> Result<PathBuf, EncodeError> {
+        may_block("finishing a file");
         let (path, tmp) = self.close()?;
         inject::inject(tmp.path(), tmp.dest(), edits)?;
         // `tmp` is removed as it drops.
@@ -852,6 +857,7 @@ pub fn remux_to_matroska_at(
     dst: &Path,
     rate: Option<FrameRate>,
 ) -> Result<PathBuf, EncodeError> {
+    may_block("remuxing a file");
     init();
     let mut ictx = ffi::open_input(src, None)
         .map_err(|e| crate::MediaError::opening(src, e, |e| e.to_string()))?;

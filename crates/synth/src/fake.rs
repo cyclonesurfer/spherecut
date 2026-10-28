@@ -213,6 +213,7 @@ impl SyntheticVideo {
     /// Spend one frame's decode time, in slices of a millisecond so that a
     /// stop is seen soon. False when stopped.
     fn decode_one(&mut self, stop: &StopToken) -> bool {
+        spherecut_core::may_block("decoding a synthetic frame");
         let started = Instant::now();
         loop {
             if stop.is_stopped() {
@@ -437,6 +438,7 @@ impl Gate {
     /// Wait until the gate opens (true) or `stopped` says to stop (false),
     /// looking every 2 ms.
     fn wait(&self, stopped: impl Fn() -> bool) -> bool {
+        spherecut_core::may_block("waiting for a gated backend");
         let (open, cv) = &*self.0;
         let mut g = open.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
