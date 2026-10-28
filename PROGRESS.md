@@ -178,12 +178,23 @@ golden tests fail, and the fixes are next:
   - `fisheye_360` is 44.67 dB against the CPU reference, below its 46.59
     dB floor, which was calibrated on lavapipe (measured − 3 dB).
     `fisheye_180` (47.78) and `stereo_tinyplanet` (51.45) are lower on
-    RADV too, while `rect_forward` is higher (58.5). Only the wide,
-    minified views lose, which points at the hardware's filtering
-    precision (bilinear weights and the mip blend), not a bug. Next:
-    give hardware its own floor, measured on RADV and recorded in D32,
-    never below 36 dB, after checking in Pat's diff images that the
-    error sits where many mip levels blend.
+    RADV too, while `rect_forward` is higher (58.5). Done on
+    `m1/goldens-hw` (D32): an emulation of the CPU reference puts the
+    cause not in the GPU's filtering precision (8-bit fractions with a
+    blend of 4 bits cost any check at most 1.93 dB) but in the mip
+    pass's 8-bit stores, left to the driver: RADV's export puts every mean on
+    a half code a code low, and the levels compound it (luma level 4 a
+    mean 1.13 codes low on the grid). Emulated, that reproduces all
+    nine of the RX 7600's CPU checks within 0.43 dB. On a GPU each CPU
+    check is now held to the lower of lavapipe's floor and the RX
+    7600's number less 3 dB (`fisheye_360` 41.67, `fisheye_180` 44.77,
+    `stereo_tinyplanet` 48.45; the rest keep lavapipe's), and the notes
+    break its error down by LOD band. Next, to decide: the mip pass
+    rounds its 8-bit means itself, exactly, and the reference the same
+    way, as the encode pass now rounds its output; the emulation then
+    puts a GPU filtering in 8 bits within 0.06 dB of a filter in f64
+    at every check, and the hardware floors should be measured again
+    and dropped.
   - `passthrough_exact`: 11 limited-range codes (74, 86, 129, 135, 141,
     153, 159, 208, 214, 220 and 226) come out one code low, where the
     model of the chain predicts only 86, 159 and 165, and three of them
