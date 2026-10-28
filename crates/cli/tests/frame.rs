@@ -991,6 +991,23 @@ fn an_output_that_is_not_a_file_is_refused() {
     assert_eq!(ran.status, Some(1), "{}", ran.doc);
     assert_eq!(ran.code(), "io_error", "{}", ran.doc);
     assert!(!dir.join("absent").exists());
+    // A name that ends in a slash is a directory's, there or not, and is
+    // refused before any work, as one that is there is.
+    for out in [dir.join("absent"), sub.clone()] {
+        let mut name = out.into_os_string();
+        name.push("/");
+        let out = PathBuf::from(name);
+        let ran = frame(&good, &out, &[]);
+        assert_eq!(ran.status, Some(1), "{}", ran.doc);
+        assert_eq!(ran.code(), "not_a_file", "{}", ran.doc);
+        let m = ran.doc["error"]["message"].as_str().unwrap();
+        assert!(
+            m.ends_with(": the name is a directory's, not a file's"),
+            "{m}"
+        );
+    }
+    assert!(!dir.join("absent").exists());
+    assert_eq!(std::fs::read_dir(&sub).unwrap().count(), 0);
     assert_eq!(temp_files(&dir), Vec::<String>::new());
 }
 

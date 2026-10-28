@@ -7,10 +7,10 @@
 //!    further (exit 2);
 //! 2. the output, before any work: something already there is refused
 //!    unless `--overwrite` is given, and a directory, pipe or device
-//!    either way ([`prepare_output`]);
-//! 3. the SIGINT handler (`crate::interrupt`); the work runs on a worker
-//!    thread while this one waits for it, and the first Ctrl+C stops it
-//!    (exit 4, no output);
+//!    either way ([`check_output`]);
+//! 3. the SIGINT handler (`crate::interrupt`), then the temporary file;
+//!    the work runs on a worker thread while this one waits for it, and
+//!    the first Ctrl+C stops it (exit 4, no output);
 //! 4. probe, through the confinement (D24), and the layout: only a
 //!    stitched equirect renders, unless `--equirect` says it is one;
 //! 5. the GPU, unless `--reference` renders on the CPU (exit 3 without
@@ -371,10 +371,12 @@ struct Done {
 /// Steps 2 and 3, and the worker for the rest: the warnings, and what the
 /// run came to.
 fn work(args: FrameArgs) -> (Vec<Warning>, Result<Done, Failure>) {
-    let tmp = match prepare_output(&args.output, args.overwrite) {
-        Ok(tmp) => tmp,
+    let dest = match check_output(&args.output, args.overwrite) {
+        Ok(dest) => dest,
         Err(e) => return (Vec::new(), Err(e)),
     };
+    // Before the temporary file, so that the first Ctrl+C never leaves
+    // one behind.
     if let Err(e) = interrupt::install() {
         return (
             Vec::new(),
@@ -384,6 +386,10 @@ fn work(args: FrameArgs) -> (Vec<Warning>, Result<Done, Failure>) {
             )),
         );
     }
+    let tmp = match TempFile::create(&dest) {
+        Ok(tmp) => tmp,
+        Err(e) => return (Vec::new(), Err(cannot_write(&args.output, &e))),
+    };
     let stop = StopSource::new();
     let (tx, rx) = mpsc::channel();
     let mut job = Job {
@@ -450,19 +456,24 @@ fn cancelled() -> Failure {
     failure(codes::CANCELLED, "interrupted: no frame written")
 }
 
-/// Step 2: a temporary file next to the output, once nothing is in the
-/// way. Without `--overwrite`, anything at the output is refused, a link
+/// `io_error` for the output `out`.
+fn cannot_write(out: &Path, e: &std::io::Error) -> Failure {
+    about(
+        failure("io_error", format!("cannot write {}: {e}", out.display())),
+        out,
+    )
+}
+
+/// Step 2: where the PNG goes, once nothing is in the way, before any
+/// work. Without `--overwrite`, anything at the output is refused, a link
 /// included (`output_exists`); with it, links are followed and a regular
 /// file there is replaced. A directory, pipe, socket or device is refused
 /// either way (`not_a_file`), since a rename would replace the node
-/// instead of writing to it (D16).
-fn prepare_output(out: &Path, overwrite: bool) -> Result<TempFile, Failure> {
-    let io = |e: std::io::Error| {
-        about(
-            failure("io_error", format!("cannot write {}: {e}", out.display())),
-            out,
-        )
-    };
+/// instead of writing to it (D16), and so is a name that ends in `/`,
+/// which names a directory whether or not there is one.
+fn check_output(out: &Path, overwrite: bool) -> Result<PathBuf, Failure> {
+    use std::os::unix::ffi::OsStrExt;
+    let io = |e: std::io::Error| cannot_write(out, &e);
     let not_a_file = |e: std::io::Error| {
         let why = match e.kind() {
             std::io::ErrorKind::IsADirectory => "it is a directory".to_string(),
@@ -476,6 +487,19 @@ fn prepare_output(out: &Path, overwrite: bool) -> Result<TempFile, Failure> {
             out,
         )
     };
+    let name = out.as_os_str().as_bytes();
+    if name.ends_with(b"/") || name.ends_with(b"/.") || out.file_name().is_none() {
+        return Err(about(
+            failure(
+                "not_a_file",
+                format!(
+                    "cannot write {}: the name is a directory's, not a file's",
+                    out.display()
+                ),
+            ),
+            out,
+        ));
+    }
     let dest = if overwrite {
         follow_links(out).map_err(io)?
     } else {
@@ -495,7 +519,7 @@ fn prepare_output(out: &Path, overwrite: bool) -> Result<TempFile, Failure> {
         }
     };
     replaceable(&dest).map_err(not_a_file)?;
-    TempFile::create(&dest).map_err(io)
+    Ok(dest)
 }
 
 /// Steps 4 to 9, on the worker thread.
@@ -644,12 +668,7 @@ impl Job {
 
         // Step 9.
         let out = &self.args.output;
-        let io = |e: std::io::Error| {
-            about(
-                failure("io_error", format!("cannot write {}: {e}", out.display())),
-                out,
-            )
-        };
+        let io = |e: std::io::Error| cannot_write(out, &e);
         let png = image.to_png().map_err(render_error)?;
         tmp.file_mut().write_all(&png).map_err(io)?;
         self.go_on()?;
