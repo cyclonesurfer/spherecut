@@ -514,11 +514,14 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
 * **Slots** (`GpuFrame`, for a `SlotShape`) hold a frame's planes as
   canonical textures: `R8Unorm`/`Rg8Unorm` for 8-bit planes, and
   `R16Float`/`Rg16Float` holding code / (2^b − 1) for deeper ones, each
-  with an area-weighted mip chain capped near 64 pixels, plus the
-  frame's `Source` uniform: its colour matrix, chroma siting and where it
-  sits on the sphere (`Placement`: sv3d crop, stereo eye). Of a stereo
-  frame a slot holds the shown eye alone (`Placement::shown`), so the
-  other eye never bleeds in.
+  with an area-weighted mip chain capped near 64 pixels (an 8-bit
+  level's means of codes worked out in integers and rounded in the
+  shader to the nearest code, ties to even, a deep level's to the
+  nearest half, so that a driver's conversion has nothing left to round,
+  D31), plus the frame's `Source` uniform: its colour matrix, chroma
+  siting and where it sits on the sphere (`Placement`: sv3d crop, stereo
+  eye). Of a stereo frame a slot holds the shown eye alone
+  (`Placement::shown`), so the other eye never bleeds in.
 * **`Uploader::upload`** copies a frame's planes into a slot
   (`write_texture`, or a staging belt), runs the ingest pass that turns
   deep integer planes into f16 and the mip passes, and submits once,
@@ -668,12 +671,14 @@ On a real machine, the Tier 2 `goldens_on_gpu_match_reference` runs the
 rows on each GPU against the references and controls only, never
 against the lavapipe PNGs, and `goldens_on_host_llvmpipe` runs the
 stored set on the machine's own llvmpipe by the other-driver rule; both
-note their numbers for the hw-test report. On a GPU a CPU check is held
-to the lower of lavapipe's blessed floor and the RX 7600's measurement
-less 3 dB (`GPU_CPU_PSNR` in `goldens.rs`): RADV's export of the 8-bit
-mip levels packs each mean to f16 toward zero first, which, emulated on
-the CPU, costs the wide, minified views the 15 dB the RX 7600 lost
-against the CPU reference (D32).
+note their numbers for the hw-test report, a GPU's CPU checks held to
+lavapipe's blessed floors with their error broken down by LOD band.
+When the mip pass left its 8-bit means to the driver, RADV's export,
+which packs each to f16 toward zero first, cost the RX 7600's wide,
+minified views up to 15 dB against the CPU reference; emulated on the
+CPU, it reproduces those numbers, and with the means rounded in the
+shader the emulation predicts the RX 7600 7.91 dB or more above
+lavapipe's floors (D32).
 
 A second, smaller set, the **pipeline goldens**
 (`pipeline_goldens` in `crates/cli/tests/frame.rs`, PNGs and manifest
