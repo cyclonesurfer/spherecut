@@ -596,6 +596,9 @@ fn every_failure_leaves_nothing_behind() {
         ),
         (&good, vec!["--time", "1:2"], 2, "usage"),
         (&good, vec!["--time", "-1"], 2, "usage"),
+        (&good, vec!["--time", "-1:02.5"], 2, "usage"),
+        (&good, vec!["--frame", "-1"], 2, "usage"),
+        (&good, vec!["--fov", "-5"], 2, "usage"),
         (&good, vec!["--time", "1", "--frame", "2"], 2, "usage"),
         (&good, vec!["--bogus"], 2, "usage"),
         (&good, vec!["--morph", "0.5"], 2, "usage"),
@@ -740,6 +743,26 @@ fn every_failure_leaves_nothing_behind() {
     );
     let m = message(&zzzz, &["--equirect"]);
     assert!(m.contains("\"zzzz\""), "{m}");
+    // A negative value gets frame's own message, not clap's tip to pass
+    // it after `--`.
+    for (args, says) in [
+        (
+            ["--time", "-1"],
+            "a time can't be negative: the clip starts at 0",
+        ),
+        (["--time", "-1:02.5"], "a time can't be negative"),
+        (
+            ["--frame", "-1"],
+            "a frame number can't be negative: the first frame is 0",
+        ),
+        (
+            ["--fov", "-5"],
+            "--fov -5: rectilinear takes more than 0 and at most 170 degrees",
+        ),
+    ] {
+        let m = message(&good, &args);
+        assert!(m.contains(says), "{args:?}: {m}");
+    }
     let m = message(&good, &["--fov", "200"]);
     assert!(
         m.contains("--fov 200: rectilinear takes more than 0 and at most 170 degrees"),

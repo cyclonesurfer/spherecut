@@ -76,10 +76,11 @@ pub struct FrameArgs {
     /// When, in clip time from the first frame: 12, 12.5, 1:02.5,
     /// 01:02:03.250, 30000/1001, or a frame number such as 370f [default:
     /// 0]
-    #[arg(long, value_name = "T", value_parser = time_spec, conflicts_with = "frame")]
+    // Hyphens too, so that a negative time gets its own message.
+    #[arg(long, value_name = "T", value_parser = time_spec, conflicts_with = "frame", allow_hyphen_values = true)]
     pub time: Option<TimeSpec>,
     /// Frame N, counting the first frame shown as 0 (the same as --time Nf).
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", value_parser = frame_number, allow_negative_numbers = true)]
     pub frame: Option<u64>,
     /// Degrees to the right.
     #[arg(long, value_name = "DEG", default_value_t = 0.0, value_parser = angle, allow_negative_numbers = true)]
@@ -92,7 +93,7 @@ pub struct FrameArgs {
     pub roll: f64,
     /// The horizontal field of view in degrees: at most 170 rectilinear,
     /// 360 fisheye and 340 stereographic.
-    #[arg(long, value_name = "DEG", default_value_t = 100.0, value_parser = angle)]
+    #[arg(long, value_name = "DEG", default_value_t = 100.0, value_parser = angle, allow_negative_numbers = true)]
     pub fov: f64,
     #[arg(long, value_enum, default_value_t = ProjectionArg::Rectilinear)]
     pub projection: ProjectionArg,
@@ -198,6 +199,19 @@ pub enum DecoderArg {
 fn time_spec(s: &str) -> Result<TimeSpec, String> {
     s.parse()
         .map_err(|e: spherecut_core::TimeSpecError| e.to_string())
+}
+
+fn frame_number(s: &str) -> Result<u64, String> {
+    match s.parse::<u64>() {
+        Ok(n) => Ok(n),
+        Err(_)
+            if s.strip_prefix('-')
+                .is_some_and(|n| n.parse::<u64>().is_ok()) =>
+        {
+            Err("a frame number can't be negative: the first frame is 0".into())
+        }
+        Err(_) => Err("expected a frame number, counting the first frame as 0".into()),
+    }
 }
 
 fn angle(s: &str) -> Result<f64, String> {
