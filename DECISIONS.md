@@ -2778,9 +2778,11 @@ What:
   one); the mips of deep planes and the projection round their f32 with
   `round_f16` in `shaders/common.wgsl` (bit arithmetic, a scale by 2^24
   for subnormals, and a signed infinity from 65520 up, where the nearest
-  half is infinite). unorm8 targets are left to the driver: lavapipe
-  rounds them to nearest, as Vulkan asks, and the 8-bit mips match an
-  independent area mean rounded to nearest at every texel tested.
+  half is infinite). The 8-bit mips' unorm8 targets are left to the
+  driver: lavapipe rounds them to nearest, as Vulkan asks, and the 8-bit
+  mips match an independent area mean rounded to nearest at every texel
+  tested. The encode pass rounds to its target's codes itself (below,
+  after odin's third run).
 - **Mips**: one area-weighted shader for all four formats, a render pass
   per level, reading the level above with `textureLoad` and weighting
   each texel by its overlap in integer arithmetic, so odd sizes come out
@@ -2818,8 +2820,9 @@ What:
   applied to samples read as code / (2^b − 1), then clamped, through the
   sRGB EOTF (or not, for linear sources) into an `Rgba16Float` target;
   the encode pass applies the OETF into `Rgba8Unorm`, one texel per
-  pixel with no filtering. A 16-bit still reads the linear target back
-  and applies the OETF on the CPU.
+  pixel with no filtering, rounded to 8-bit codes in the shader. A
+  16-bit still reads the linear target back and applies the OETF on the
+  CPU.
 - **Samplers**: U repeats and V clamps; U clamps too for an sv3d crop.
   `Placement` gives the cover, the crop and the eye.
 - **Stereo**: of a stereo frame only the shown eye, the left, is
@@ -3037,6 +3040,69 @@ branch gives the same halves as its normal one for every code of 16
 bits or fewer, so no ingest can show it is needed; it is kept for the
 exactness it states.
 
+*Updated after odin's third run (PR #5, at be38fa4):* the encode pass
+rounds to its target's codes itself. On the RX 7600 (RADV, Mesa 26.2.5)
+`passthrough_exact` found ten limited-range luma codes a code low
+against the model of the chain: 74, 129, 135, 141, 153, 165, 208, 214,
+220 and 226 (`hw-reports/odin-be38fa409e.md`). RADV exports a
+fragment's output to an 8-bit unorm target by packing it to f16 toward
+zero (`v_cvt_pkrtz_f16_f32`) before the colour block converts it to
+unorm, and a half's step in [0.5, 1) is 2^−11, 0.1245 codes at 255, so
+an OETF value that lay less than that above a tie came out below it.
+Vulkan allows this: it asks for a conversion to nearest, and requires
+only that an exact integer f · L converts to itself.
+
+So `shaders/encode.wgsl` computes round(v · L) in f32 (WGSL's `round`,
+ties to even) and returns k / L, with L the override constant
+`CODE_MAX` from the output format (`encode::code_max`): 255 for
+`Rgba8Unorm` and `Bgra8Unorm`, 1023 for `Rgb10a2Unorm`, and 0, no
+rounding, for any other format, which suits a float target. Any other
+unorm format, or an sRGB one, is documented as wrong rather than
+refused, as before. k / L in f32 times L is k in f32 for every k of
+both depths, and packed toward zero k / L stays less than 0.1245 codes
+(8-bit) or 0.4995 codes (10-bit) below k, so every conformant
+conversion to nearest gives k back. The model of the chain in
+`passthrough_exact` now ends with that rounding rather than the unorm8
+store, and its bound is unchanged: the f16 linear target still moves
+the OETF by at most 0.0547 codes, and the store no longer adds RADV's
+pack. The integer target `PROGRESS.md` proposed (`Rgba8Uint` or a
+storage buffer) wasn't needed, and egui's target stays the unorm one it
+is.
+
+Tested on lavapipe (Mesa 25.2.8, LLVM 20.1.2):
+
+- `every_code_comes_through_the_drivers_export` (`encode.rs`, no GPU)
+  emulates the export for every k at 255 and 1023, and each f32 within
+  3 ulp of k / L (WGSL's division may be 2.5 ulp out): unpacked, and
+  packed to f16 toward zero and to nearest, each converts back to k.
+  Its control packs the unrounded values of `passthrough_exact`'s chain
+  toward zero: exactly the ten codes odin measured come out a code low
+  (129 is 131.5735 codes, 131.4844 packed), and none of the 256
+  full-range ones.
+- `the_encode_pass_writes_every_code` (`tests/render.rs`) encodes the
+  nearest half of each code's EOTF into `Rgba8Unorm`, `Bgra8Unorm` and
+  `Rgb10a2Unorm`: all 256 and all 1024 codes come back as themselves;
+  into `Rgba32Float` the OETF comes unrounded, within 1e−5 of the CPU's.
+  With the shader rounding to 255 whatever the format, 768 of the 1024
+  10-bit codes come out otherwise.
+- No golden image moved, and none was blessed again: the six stored
+  PNGs of `goldens` and the four of slice 4's `pipeline_goldens` are
+  identical at the build they were blessed on, `passthrough_exact`
+  equals the model at all 512 fields, and `goldens_on_host_llvmpipe`
+  passes here. lavapipe's own unorm8 conversion already gave the
+  nearest even code to the f32 product v · 255, which is what the
+  shader now computes: a probe of 20655 values within 40 ulp of every
+  tie, 256 of them with the product on the tie, matched it at every
+  value, where rounding the exact product differs at 128.
+
+What this doesn't show: RADV itself, until Pat's next run, where
+`passthrough_exact` should give limited k = 86, 159 and 165 one code
+off the formula, as lavapipe does. The mip pass still leaves its
+`R8Unorm` and `Rg8Unorm` levels to the driver; by the same export, RADV
+can store a mean less than 0.1245 codes above a tie a code low there,
+which the one code `mips_are_area_means_at_odd_sizes` allows. Nothing
+has measured that on RADV.
+
 ## D32. Golden images
 
 *2026-10-24, M1 slice 3b. The M1 plan's D30 (section 6), adjusted to
@@ -3218,8 +3284,9 @@ Where this differs from the plan, from the evidence:
   - full range comes out k for every k;
   - every field, in both ranges, equals an independent f64 model of the
     chain (Y′ by H.273, the sRGB EOTF, the nearest half with ties to
-    even, the OETF, the unorm8 store to nearest), or its other candidate
-    where f32's error could tip a tie (no field here);
+    even, the OETF, and the encode pass's rounding to the nearest code,
+    which the unorm8 store keeps; D31), or its other candidate where
+    f32's error could tip a tie (no field here);
   - limited range comes out round((k − 16) · 255 / 219) except where
     that lies within 0.0547 codes of a tie, and is then at most one code
     off.
@@ -3232,6 +3299,11 @@ Where this differs from the plan, from the evidence:
   frame, seen through eight 45° views around the equator at 512×8,
   about a texel a pixel at their centres, so only levels 0 and 1 are
   read; a pixel counts where every tap at both levels lies in one field.
+  The model ended with the unorm8 store to nearest until odin's third
+  run, where RADV's export, which packs to f16 toward zero first, put
+  ten limited codes a code low against it and three of them outside the
+  bound; the encode pass now rounds to codes itself (D31), and the
+  model, its numbers and the bound are otherwise as they were.
 - **Seam and pole placement.** The seam view's yaw (179.55°) puts u's
   wrap between columns 128 and 129, whose centres 128.5 and 129.5 share a
   quad, on every row; the CPU asserts that before rendering. At pitch ±90

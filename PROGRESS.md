@@ -189,10 +189,14 @@ golden tests fail, and the fixes are next:
     model of the chain predicts only 86, 159 and 165, and three of them
     are outside its f16 bound. The likely cause is RADV's colour export
     to an 8-bit target, which packs the shader's output to f16 with
-    round-toward-zero before the unorm conversion. Next: have the encode
-    pass round to codes itself and write integers (an `Rgba8Uint` target
-    or a storage buffer), so every driver gives the same codes, then
-    re-bless through the gate.
+    round-toward-zero before the unorm conversion. Done on
+    `m1/goldens-hw`: the encode pass rounds to the target's codes itself
+    and returns k / 255 (k / 1023 for `Rgb10a2Unorm`), which packed
+    toward zero stays within 0.1245 codes of k (0.4995 at 10 bits), so
+    no integer target is needed (D31). A unit test emulating the pack on
+    the unrounded values gives exactly the ten codes odin measured off
+    the model, and none once rounded. No golden moved on lavapipe, so
+    nothing was blessed again; RADV's numbers come with Pat's next run.
 - `goldens_on_host_llvmpipe` (LLVM 22.1.8, Mesa 26.2.5): `fisheye_180`
   differs from the PNG blessed on LLVM 20.1.2 by at most 5 LSB, one over
   the other-driver rule's 4, at 62.79 dB and SSIM 0.99994. Next: replace
