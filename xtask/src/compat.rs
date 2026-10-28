@@ -25,18 +25,22 @@
 //! one, or lies inside a directory holding `include/libavcodec/avcodec.h`
 //! (an FFmpeg installed there, listed or not), symlinks and `..`
 //! resolved: `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` puts the target
-//! directories elsewhere.
+//! directories elsewhere. Cargo's build directory is the target directory
+//! too, whatever `build.build-dir` says, so that all a build makes is
+//! built against its FFmpeg alone and goes with it.
 //!
 //! A build counts for a prefix only if it bound that prefix's FFmpeg:
 //! pkg-config must find each library ffmpeg-sys-next binds there, its
 //! library and header inside the prefix, before the build and again
-//! after it, and ffmpeg-sys-next's build must have searched for
-//! libraries only inside the prefix.
+//! after it, and ffmpeg-sys-next's build script, in clippy's build and in
+//! the link's, as cargo's JSON messages report it (wherever cargo put it:
+//! a build directory, a target triple), must have linked libavcodec and
+//! searched for libraries only inside the prefix.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
@@ -49,6 +53,9 @@ pub const PREFIXES_ENV: &str = "SPHERECUT_FFMPEG_COMPAT";
 /// Where the per-FFmpeg target directories go, instead of `compat/` in
 /// cargo's target directory.
 pub const TARGET_ENV: &str = "SPHERECUT_FFMPEG_COMPAT_TARGET_DIR";
+/// Cargo's JSON messages on its standard output, its diagnostics as text
+/// on its standard error, for [`check_built`].
+const JSON: &str = "--message-format=json-render-diagnostics";
 /// What each target directory's name starts with, before its label.
 const TARGET_PREFIX: &str = "spherecut-compat-";
 /// The file in each target directory that says what it was built against.
@@ -535,19 +542,19 @@ fn clean_target(target: &Path, prefixes: &[PathBuf]) -> Result<bool> {
     Ok(true)
 }
 
-/// After the build in `target` against `prefix`, whose stamp was
-/// `before`: fails unless `restamp`, pkg-config asked again, gives the
-/// same, and ffmpeg-sys-next's build there linked libavcodec and searched
-/// for libraries only in directories inside the prefix, symlinks
-/// resolved, as its build scripts' output (`debug/build/*/output`) says.
-/// Checked before the build alone, a prefix that went away or changed
-/// while it ran had pkg-config find another FFmpeg for the build (the
-/// system's), which then passed under the prefix's name.
+/// After the build against `prefix`, whose stamp was `before`: fails
+/// unless `restamp`, pkg-config asked again, gives the same, and
+/// ffmpeg-sys-next's build script, in each build cargo's JSON `messages`
+/// report, linked libavcodec and searched for libraries only in
+/// directories inside the prefix, symlinks resolved. Checked before the
+/// build alone, a prefix that went away or changed while it ran had
+/// pkg-config find another FFmpeg for the build (the system's), which
+/// then passed under the prefix's name.
 fn check_built(
-    target: &Path,
     prefix: &Path,
     before: &str,
     restamp: impl FnOnce() -> Result<String>,
+    messages: &str,
 ) -> Result<()> {
     let now =
         restamp().context("after the build, pkg-config doesn't find the FFmpeg it was for")?;
@@ -560,29 +567,23 @@ fn check_built(
     let home = prefix
         .canonicalize()
         .with_context(|| format!("could not resolve {}", prefix.display()))?;
-    let build = target.join("debug").join("build");
-    let entries =
-        std::fs::read_dir(&build).with_context(|| format!("could not read {}", build.display()))?;
-    let mut linked = false;
-    for e in entries.flatten() {
-        if !e
-            .file_name()
-            .to_string_lossy()
-            .starts_with("ffmpeg-sys-next-")
-        {
-            continue;
+    let runs = build_script_runs(messages, "ffmpeg-sys-next");
+    if runs.is_empty() {
+        bail!("cargo reported no run of ffmpeg-sys-next's build script, to check what it bound");
+    }
+    for run in &runs {
+        // KIND[:MODIFIERS]=NAME[:RENAME], the kind optional.
+        let linked = run.libs.iter().any(|lib| {
+            let name = lib.rsplit('=').next().unwrap_or(lib);
+            name.split(':').next() == Some("avcodec")
+        });
+        if !linked {
+            bail!(
+                "ffmpeg-sys-next's build script linked no libavcodec ({}), to check what it bound",
+                run.libs.join(", ")
+            );
         }
-        // The directory the build script was compiled in has no output.
-        let Ok(output) = std::fs::read_to_string(e.path().join("output")) else {
-            continue;
-        };
-        for line in output.lines() {
-            if let Some(lib) = directive(line, "rustc-link-lib") {
-                linked |= lib.rsplit('=').next() == Some("avcodec");
-            }
-            let Some(search) = directive(line, "rustc-link-search") else {
-                continue;
-            };
+        for search in &run.paths {
             // KIND=PATH, the kind optional.
             let dir = match search.split_once('=') {
                 Some((kind, dir))
@@ -590,39 +591,255 @@ fn check_built(
                 {
                     dir
                 }
-                _ => search,
+                _ => search.as_str(),
             };
             let real = Path::new(dir).canonicalize().with_context(|| {
-                format!(
-                    "ffmpeg-sys-next's build in {} searched {dir} for libraries, which isn't there",
-                    target.display()
-                )
+                format!("ffmpeg-sys-next's build searched {dir} for libraries, which isn't there")
             })?;
             if !real.starts_with(&home) {
                 bail!(
-                    "ffmpeg-sys-next's build in {} searched {} for libraries, outside the prefix {}",
-                    target.display(),
+                    "ffmpeg-sys-next's build searched {} for libraries, outside the prefix {}",
                     real.display(),
                     home.display()
                 );
             }
         }
     }
-    if !linked {
-        bail!(
-            "found no build of ffmpeg-sys-next in {} that links libavcodec, to check what it bound",
-            build.display()
-        );
-    }
     Ok(())
 }
 
-/// The value of a build script's `cargo:KEY=VALUE` (or `cargo::`) line.
-fn directive<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-    line.strip_prefix("cargo::")
-        .or_else(|| line.strip_prefix("cargo:"))?
-        .strip_prefix(key)?
-        .strip_prefix('=')
+/// What a build script had cargo link with, as one of cargo's
+/// `build-script-executed` messages reports it: each `rustc-link-lib`
+/// value and each `rustc-link-search` value it gave.
+#[derive(Debug, Clone, PartialEq)]
+struct BuildScriptRun {
+    libs: Vec<String>,
+    paths: Vec<String>,
+}
+
+/// The runs of package `name`'s build script that cargo's JSON messages
+/// report, one message a line (`--message-format=json`), fresh or not.
+/// Lines that aren't such a message are passed over.
+fn build_script_runs(messages: &str, name: &str) -> Vec<BuildScriptRun> {
+    messages
+        .lines()
+        .filter(|l| l.starts_with('{') && l.contains("\"build-script-executed\""))
+        .filter_map(Json::parse)
+        .filter(|m| m.get("reason").and_then(Json::str) == Some("build-script-executed"))
+        .filter(|m| {
+            m.get("package_id")
+                .and_then(Json::str)
+                .is_some_and(|id| package_name(id) == name)
+        })
+        .filter_map(|m| {
+            Some(BuildScriptRun {
+                libs: m.get("linked_libs")?.strings()?,
+                paths: m.get("linked_paths")?.strings()?,
+            })
+        })
+        .collect()
+}
+
+/// The package a cargo package ID names: `ffmpeg-sys-next` in
+/// `registry+https://...#ffmpeg-sys-next@8.0.1`, in a path package's
+/// `path+file:///src/ffmpeg-sys-next#8.0.1` (its directory's name, when
+/// that is its name), and in the older `ffmpeg-sys-next 8.0.1 (...)`.
+fn package_name(id: &str) -> &str {
+    match id.rsplit_once('#') {
+        Some((_, frag)) if frag.contains('@') => frag.split('@').next().unwrap_or(frag),
+        Some((url, _)) => {
+            let path = url.split(['?', '#']).next().unwrap_or(url);
+            path.trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(path)
+        }
+        None => id.split(' ').next().unwrap_or(id),
+    }
+}
+
+/// A JSON value, as much of one as cargo's messages need: a number is
+/// kept as its text.
+#[derive(Debug, Clone, PartialEq)]
+enum Json {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<Json>),
+    Object(Vec<(String, Json)>),
+}
+
+impl Json {
+    /// `text` as one JSON value, or `None` when it isn't one.
+    fn parse(text: &str) -> Option<Json> {
+        let mut p = JsonParser {
+            text: text.as_bytes(),
+            at: 0,
+        };
+        let v = p.value()?;
+        p.space();
+        (p.at == p.text.len()).then_some(v)
+    }
+
+    /// An object's member.
+    fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Object(members) => members.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    fn str(&self) -> Option<&str> {
+        match self {
+            Json::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// An array of strings.
+    fn strings(&self) -> Option<Vec<String>> {
+        match self {
+            Json::Array(items) => items.iter().map(|i| i.str().map(str::to_owned)).collect(),
+            _ => None,
+        }
+    }
+}
+
+struct JsonParser<'a> {
+    text: &'a [u8],
+    at: usize,
+}
+
+impl JsonParser<'_> {
+    fn space(&mut self) {
+        while self.text.get(self.at).is_some_and(u8::is_ascii_whitespace) {
+            self.at += 1;
+        }
+    }
+
+    /// Past `c`, after any white space, when it comes next.
+    fn eat(&mut self, c: u8) -> bool {
+        self.space();
+        let here = self.text.get(self.at) == Some(&c);
+        if here {
+            self.at += 1;
+        }
+        here
+    }
+
+    fn value(&mut self) -> Option<Json> {
+        self.space();
+        match *self.text.get(self.at)? {
+            b'{' => {
+                self.at += 1;
+                let mut members = Vec::new();
+                if self.eat(b'}') {
+                    return Some(Json::Object(members));
+                }
+                loop {
+                    self.space();
+                    let key = self.string()?;
+                    if !self.eat(b':') {
+                        return None;
+                    }
+                    members.push((key, self.value()?));
+                    if !self.eat(b',') {
+                        return self.eat(b'}').then_some(Json::Object(members));
+                    }
+                }
+            }
+            b'[' => {
+                self.at += 1;
+                let mut items = Vec::new();
+                if self.eat(b']') {
+                    return Some(Json::Array(items));
+                }
+                loop {
+                    items.push(self.value()?);
+                    if !self.eat(b',') {
+                        return self.eat(b']').then_some(Json::Array(items));
+                    }
+                }
+            }
+            b'"' => self.string().map(Json::String),
+            _ => {
+                let start = self.at;
+                while self
+                    .text
+                    .get(self.at)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || b"+-.".contains(c))
+                {
+                    self.at += 1;
+                }
+                match &self.text[start..self.at] {
+                    b"null" => Some(Json::Null),
+                    b"true" => Some(Json::Bool(true)),
+                    b"false" => Some(Json::Bool(false)),
+                    n if n.first().is_some_and(|c| *c == b'-' || c.is_ascii_digit()) => {
+                        Some(Json::Number(String::from_utf8_lossy(n).into_owned()))
+                    }
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// A string, its escapes undone.
+    fn string(&mut self) -> Option<String> {
+        if self.text.get(self.at) != Some(&b'"') {
+            return None;
+        }
+        self.at += 1;
+        let mut out = Vec::new();
+        loop {
+            let c = *self.text.get(self.at)?;
+            self.at += 1;
+            match c {
+                b'"' => return String::from_utf8(out).ok(),
+                b'\\' => {
+                    let e = *self.text.get(self.at)?;
+                    self.at += 1;
+                    let ch = match e {
+                        b'"' | b'\\' | b'/' => char::from(e),
+                        b'b' => '\u{8}',
+                        b'f' => '\u{c}',
+                        b'n' => '\n',
+                        b'r' => '\r',
+                        b't' => '\t',
+                        b'u' => {
+                            let hi = self.hex4()?;
+                            if (0xd800..0xdc00).contains(&hi) {
+                                // A surrogate pair.
+                                if self.text.get(self.at..self.at + 2) != Some(b"\\u") {
+                                    return None;
+                                }
+                                self.at += 2;
+                                let lo = self.hex4()?;
+                                if !(0xdc00..0xe000).contains(&lo) {
+                                    return None;
+                                }
+                                char::from_u32(0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00))?
+                            } else {
+                                char::from_u32(hi)?
+                            }
+                        }
+                        _ => return None,
+                    };
+                    let mut buf = [0; 4];
+                    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                }
+                _ => out.push(c),
+            }
+        }
+    }
+
+    fn hex4(&mut self) -> Option<u32> {
+        let digits = std::str::from_utf8(self.text.get(self.at..self.at + 4)?).ok()?;
+        let v = u32::from_str_radix(digits, 16).ok()?;
+        self.at += 4;
+        Some(v)
+    }
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
@@ -754,6 +971,14 @@ fn cargo_env(
             "CARGO_TARGET_DIR".to_owned(),
             Some(target.as_os_str().to_owned()),
         ),
+        // Cargo's build directory (`build.build-dir`), where it keeps
+        // what it builds on the way: else every FFmpeg's build would
+        // share one, rebinding ffmpeg-sys-next each time, and `--clean`
+        // would leave it.
+        (
+            "CARGO_BUILD_BUILD_DIR".to_owned(),
+            Some(target.as_os_str().to_owned()),
+        ),
     ];
     // Low debuginfo and no incremental state: one target directory per
     // FFmpeg adds up. Settings already made win.
@@ -793,6 +1018,23 @@ fn cargo(args: &[&str], env: &[(String, Option<OsString>)]) -> Command {
         };
     }
     cmd
+}
+
+/// [`run_step`], but returning what the command printed to its standard
+/// output: cargo's JSON messages, with `--message-format=json-render-diagnostics`,
+/// which still prints the diagnostics as text to its standard error.
+fn run_json(name: &str, cmd: &mut Command) -> Result<String> {
+    eprintln!("==> {name}");
+    let out = cmd
+        .current_dir(crate::workspace_root())
+        .stdout(Stdio::piped())
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .with_context(|| format!("could not run {name}"))?;
+    if !out.status.success() {
+        bail!("{name} failed ({})", out.status);
+    }
+    String::from_utf8(out.stdout).with_context(|| format!("{name} printed something not UTF-8"))
 }
 
 /// What became of one stage for one FFmpeg.
@@ -930,6 +1172,9 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
         };
         if let (Ok(pc), Ok(found)) = (&b.pc_dir, &row.bound) {
             let what = format!("against {} at {}", found.describe(), row.prefix.display());
+            // Cargo's messages from clippy and the link, which say what
+            // ffmpeg-sys-next's build script bound.
+            let mut messages = String::new();
             let env = cargo_env(pc, &target, &[], &vars);
             let before = stamp(pc, found);
             let restamp =
@@ -945,28 +1190,38 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
                             row.prefix.display()
                         );
                     }
-                    Stage::of(run_step(
-                        &format!("clippy {what} (target {})", target.display()),
-                        &mut cargo(
-                            &[
-                                "clippy",
-                                "--workspace",
-                                "--all-targets",
-                                "--all-features",
-                                "--",
-                                "-D",
-                                "warnings",
-                            ],
-                            &env,
-                        ),
-                    ))
+                    Stage::of(
+                        run_json(
+                            &format!("clippy {what} (target {})", target.display()),
+                            &mut cargo(
+                                &[
+                                    "clippy",
+                                    "--workspace",
+                                    "--all-targets",
+                                    "--all-features",
+                                    JSON,
+                                    "--",
+                                    "-D",
+                                    "warnings",
+                                ],
+                                &env,
+                            ),
+                        )
+                        .map(|m| messages.push_str(&m)),
+                    )
                 }
             };
             if row.clippy == Stage::Passed {
-                let link = Stage::of(run_step(
-                    &format!("link: the tests and binaries built {what}"),
-                    &mut cargo(&["test", "--workspace", "--all-targets", "--no-run"], &env),
-                ));
+                let link = Stage::of(
+                    run_json(
+                        &format!("link: the tests and binaries built {what}"),
+                        &mut cargo(
+                            &["test", "--workspace", "--all-targets", "--no-run", JSON],
+                            &env,
+                        ),
+                    )
+                    .map(|m| messages.push_str(&m)),
+                );
                 if link == Stage::Passed && row.tier1.is_some() {
                     let env = cargo_env(pc, &target, &found.libdirs, &vars);
                     row.tier1 = Some(Stage::of(
@@ -984,10 +1239,10 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
                 }
                 row.link = Some(link);
                 row.binding = Some(Stage::of(check_built(
-                    &target,
                     &row.prefix,
                     &before,
                     restamp,
+                    &messages,
                 )));
             }
         }
@@ -1199,6 +1454,10 @@ mod tests {
         );
         assert_eq!(set(&env, "CARGO_TARGET_DIR"), Some("/t/compat/ff".into()));
         assert_eq!(
+            set(&env, "CARGO_BUILD_BUILD_DIR"),
+            Some("/t/compat/ff".into())
+        );
+        assert_eq!(
             set(&env, "CARGO_PROFILE_DEV_DEBUG"),
             Some("line-tables-only".into())
         );
@@ -1211,6 +1470,7 @@ mod tests {
             ("PKG_CONFIG_PATH", "/vk/lib/pkgconfig"),
             ("LD_LIBRARY_PATH", "/x/lib:"),
             ("CARGO_PROFILE_DEV_DEBUG", "0"),
+            ("CARGO_BUILD_BUILD_DIR", "/build"),
         ]);
         let env = cargo_env(
             Path::new("/ff/lib/pkgconfig"),
@@ -1223,8 +1483,13 @@ mod tests {
             Some("/ff/lib/pkgconfig:/vk/lib/pkgconfig".into())
         );
         assert_eq!(set(&env, "LD_LIBRARY_PATH"), Some("/ff/lib:/x/lib".into()));
-        // The caller's own setting stays.
+        // The caller's own setting stays, but not a build directory
+        // shared by every FFmpeg.
         assert_eq!(value(&env, "CARGO_PROFILE_DEV_DEBUG"), None);
+        assert_eq!(
+            set(&env, "CARGO_BUILD_BUILD_DIR"),
+            Some("/t/compat/ff".into())
+        );
         // Every bound library's directory, in order, should they differ.
         let env = cargo_env(
             Path::new("/ff/lib/pkgconfig"),
@@ -1594,6 +1859,25 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    /// One of cargo's `build-script-executed` messages, for `package`'s
+    /// build script, which linked `libs` and searched `paths`.
+    fn ran(package: &str, libs: &[&str], paths: &[String]) -> String {
+        let list = |items: &mut dyn Iterator<Item = &str>| {
+            items
+                .map(|i| format!("\"{}\"", i.replace('\\', "\\\\").replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        format!(
+            "{{\"reason\":\"build-script-executed\",\"package_id\":\
+             \"registry+https://github.com/rust-lang/crates.io-index#{package}@8.0.1\",\
+             \"linked_libs\":[{}],\"linked_paths\":[{}],\"cfgs\":[\"feature=\\\"x\\\"\"],\
+             \"env\":[],\"out_dir\":\"/t/debug/build/{package}-0/out\"}}\n",
+            list(&mut libs.iter().copied()),
+            list(&mut paths.iter().map(String::as_str))
+        )
+    }
+
     #[test]
     fn what_the_build_bound_is_checked_after_it() {
         let d = scratch("built");
@@ -1601,73 +1885,182 @@ mod tests {
         let (pc, b) = fake_prefix(&prefix, "62.28.100");
         let before = stamp(&pc, &b);
         let same = || Ok(stamp(&pc, &b));
-        let target = d.join("t");
-        let output = |hash: &str, text: &str| {
-            let dir = target.join(format!("debug/build/ffmpeg-sys-next-{hash}"));
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("output"), text).unwrap();
+        let lib = prefix.join("lib");
+        let native = |dir: &Path| format!("native={}", dir.display());
+        let libs = ["avutil", "avformat", "avcodec"];
+        let check = |restamp: &dyn Fn() -> Result<String>, messages: &str| {
+            check_built(&prefix, &before, restamp, messages).map_err(|e| format!("{e:#}"))
         };
-        // What ffmpeg-sys-next prints, searching `dir` for each library.
-        let searched = |dir: &Path| {
-            ["avutil", "avformat", "avcodec"]
-                .map(|lib| {
-                    format!(
-                        "cargo:rerun-if-env-changed=PKG_CONFIG_PATH\n\
-                         cargo:rustc-link-search=native={}\ncargo:rustc-link-lib={lib}\n",
-                        dir.display()
-                    )
-                })
-                .concat()
-        };
-        let check = |restamp: &dyn Fn() -> Result<String>| {
-            check_built(&target, &prefix, &before, restamp).map_err(|e| format!("{e:#}"))
-        };
-        // Nothing built: nothing says what was bound.
-        assert!(check(&same).unwrap_err().contains("could not read"));
-        // The directory the build script was compiled in, with no output.
-        std::fs::create_dir_all(target.join("debug/build/ffmpeg-sys-next-0")).unwrap();
-        let e = check(&same).unwrap_err();
-        assert!(e.starts_with("found no build of ffmpeg-sys-next"), "{e}");
+        // Nothing built: nothing says what was bound. Nor does another
+        // package's build script.
+        for messages in ["", &ran("ffmpeg-next", &libs, &[native(&lib)])] {
+            let e = check(&same, messages).unwrap_err();
+            assert!(
+                e.starts_with("cargo reported no run of ffmpeg-sys-next"),
+                "{e}"
+            );
+        }
         // Nor does one that didn't link libavcodec.
-        output(
-            "1",
-            &format!(
-                "cargo:rustc-link-search=native={}\ncargo:rustc-link-lib=avutil\n",
-                prefix.join("lib").display()
-            ),
+        let e = check(&same, &ran("ffmpeg-sys-next", &["avutil"], &[native(&lib)])).unwrap_err();
+        assert!(e.contains("linked no libavcodec (avutil)"), "{e}");
+        let good = ran("ffmpeg-sys-next", &libs, &[native(&lib)]);
+        assert_eq!(check(&same, &good), Ok(()));
+        // Among cargo's other messages, and a line that isn't one.
+        let mixed = format!(
+            "{{\"reason\":\"compiler-artifact\",\"fresh\":true}}\nwarning: x\n{good}\
+             {{\"reason\":\"build-finished\",\"success\":true}}\n"
         );
-        let e = check(&same).unwrap_err();
-        assert!(e.starts_with("found no build of ffmpeg-sys-next"), "{e}");
-        output("1", &searched(&prefix.join("lib")));
-        assert_eq!(check(&same), Ok(()));
-        // Another FFmpeg's directory searched, as when the prefix went away
-        // during the build and pkg-config found the system's.
+        assert_eq!(check(&same, &mixed), Ok(()));
+        // Another FFmpeg's directory searched, in either build (clippy's or
+        // the link's), as when the prefix went away during the build and
+        // pkg-config found the system's.
         let other = d.join("other/lib");
         std::fs::create_dir_all(&other).unwrap();
-        output("2", &searched(&other));
-        let e = check(&same).unwrap_err();
-        assert!(e.contains("outside the prefix"), "{e}");
-        // `cargo::`, no kind, and a directory that isn't there.
-        output("2", "cargo::rustc-link-search=/nowhere/lib\n");
-        let e = check(&same).unwrap_err();
+        let elsewhere = ran("ffmpeg-sys-next", &libs, &[native(&other)]);
+        for messages in [format!("{good}{elsewhere}"), format!("{elsewhere}{good}")] {
+            let e = check(&same, &messages).unwrap_err();
+            assert!(e.contains("outside the prefix"), "{e}");
+        }
+        // No kind, and a directory that isn't there.
+        let e = check(
+            &same,
+            &ran("ffmpeg-sys-next", &libs, &["/nowhere/lib".into()]),
+        )
+        .unwrap_err();
         assert!(
             e.contains("searched /nowhere/lib for libraries, which isn't there"),
             "{e}"
         );
-        output(
-            "2",
-            &format!(
-                "cargo::rustc-link-search={}\n",
-                prefix.join("lib").display()
-            ),
+        let plain = ran(
+            "ffmpeg-sys-next",
+            &["dylib=avcodec"],
+            &[lib.display().to_string()],
         );
-        assert_eq!(check(&same), Ok(()));
+        assert_eq!(check(&same, &plain), Ok(()));
         // The FFmpeg changed, or pkg-config finds it no more.
-        let e = check(&|| Ok("another stamp\n".into())).unwrap_err();
+        let e = check(&|| Ok("another stamp\n".into()), &good).unwrap_err();
         assert!(e.contains("changed during the build"), "{e}");
-        let e = check(&|| bail!("pkg-config finds libavutil in /usr/lib")).unwrap_err();
+        let e = check(&|| bail!("pkg-config finds libavutil in /usr/lib"), &good).unwrap_err();
         assert!(e.contains("pkg-config finds libavutil in /usr/lib"), "{e}");
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn what_the_build_bound_is_found_wherever_cargo_builds() {
+        // A package named ffmpeg-sys-next whose build script links
+        // libavcodec from the prefix, built with cargo's build directory
+        // elsewhere (`build.build-dir`) and a target triple named
+        // (`build.target`): the script's output is in the build
+        // directory's `x86_64-unknown-linux-gnu/debug/build`, not in the
+        // target directory's `debug/build`, where compat looked for it.
+        let d = scratch("build-dir");
+        let prefix = d.join("n8.1");
+        let (pc, b) = fake_prefix(&prefix, "62.28.100");
+        let pkg = d.join("ffmpeg-sys-next");
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        std::fs::write(
+            pkg.join("Cargo.toml"),
+            "[package]\nname = \"ffmpeg-sys-next\"\nversion = \"8.0.1\"\nedition = \"2021\"\n\
+             \n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(pkg.join("src/lib.rs"), "").unwrap();
+        let search = format!(
+            "cargo:rustc-link-search=native={}",
+            prefix.join("lib").display()
+        );
+        std::fs::write(
+            pkg.join("build.rs"),
+            format!(
+                "fn main() {{\n    println!({search:?});\n    \
+                 println!(\"cargo:rustc-link-lib=avcodec\");\n}}\n"
+            ),
+        )
+        .unwrap();
+        let rustc = Command::new("rustc").arg("-vV").output().unwrap();
+        let rustc = String::from_utf8(rustc.stdout).unwrap();
+        let host = rustc
+            .lines()
+            .find_map(|l| l.strip_prefix("host: "))
+            .unwrap();
+        let target = d.join("t");
+        let out = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["build", "--offline", JSON])
+            .current_dir(&pkg)
+            .env("CARGO_TARGET_DIR", &target)
+            .env("CARGO_BUILD_BUILD_DIR", d.join("build"))
+            .env("CARGO_BUILD_TARGET", host)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!target.join("debug/build").exists());
+        let messages = String::from_utf8(out.stdout).unwrap();
+        let restamp = || Ok(stamp(&pc, &b));
+        let checked = check_built(&prefix, &stamp(&pc, &b), restamp, &messages);
+        assert_eq!(checked.map_err(|e| format!("{e:#}")), Ok(()));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn cargo_messages_are_read_as_json() {
+        let v = Json::parse(
+            " {\"a\": [1, -2.5e3, true, false, null, {}], \"s\": \"q\\\"b\\\\s\\/\\n\\t\\u00e9\\ud83d\\ude00\"} ",
+        )
+        .unwrap();
+        assert_eq!(
+            v.get("a"),
+            Some(&Json::Array(vec![
+                Json::Number("1".into()),
+                Json::Number("-2.5e3".into()),
+                Json::Bool(true),
+                Json::Bool(false),
+                Json::Null,
+                Json::Object(vec![]),
+            ]))
+        );
+        assert_eq!(
+            v.get("s").and_then(Json::str),
+            Some("q\"b\\s/\n\té\u{1f600}")
+        );
+        assert_eq!(v.get("b"), None);
+        for bad in [
+            "",
+            "{",
+            "{\"a\" 1}",
+            "[1,]",
+            "\"\\x\"",
+            "\"\\ud83d\"",
+            "nul",
+            "{} {}",
+        ] {
+            assert_eq!(Json::parse(bad), None, "{bad}");
+        }
+        assert_eq!(
+            Json::parse("[\"a\", \"b\"]").and_then(|v| v.strings()),
+            Some(vec!["a".to_owned(), "b".to_owned()])
+        );
+        assert_eq!(Json::parse("[\"a\", 1]").and_then(|v| v.strings()), None);
+    }
+
+    #[test]
+    fn a_package_id_names_its_package() {
+        for id in [
+            "registry+https://github.com/rust-lang/crates.io-index#ffmpeg-sys-next@8.0.1",
+            "git+https://github.com/zmwangx/rust-ffmpeg-sys?branch=master#ffmpeg-sys-next@8.0.1",
+            "path+file:///src/ffmpeg-sys-next#8.0.1",
+            "path+file:///src/sys#ffmpeg-sys-next@8.0.1",
+            "ffmpeg-sys-next 8.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+        ] {
+            assert_eq!(package_name(id), "ffmpeg-sys-next", "{id}");
+        }
+        assert_eq!(
+            package_name("registry+https://github.com/rust-lang/crates.io-index#ffmpeg-next@8.0.0"),
+            "ffmpeg-next"
+        );
     }
 
     #[test]
