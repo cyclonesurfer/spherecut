@@ -145,6 +145,8 @@ pub enum Kind {
     /// 16-bit grey, the bits low: the deepest a plane comes.
     Gray16,
     Gbrp,
+    /// NV12's 4:4:4 twin: an `Rg8` plane as large as luma.
+    Nv24,
 }
 
 impl Kind {
@@ -161,6 +163,7 @@ impl Kind {
             Kind::Gray => "gray",
             Kind::Gray16 => "gray16le",
             Kind::Gbrp => "gbrp",
+            Kind::Nv24 => "nv24",
         }
     }
 
@@ -195,7 +198,9 @@ impl Kind {
             log2_sub,
         };
         let (planes, family) = match self {
-            Kind::Nv12 | Kind::P010 => (vec![plane(1, (0, 0)), plane(2, sub)], ColorFamily::Yuv),
+            Kind::Nv12 | Kind::P010 | Kind::Nv24 => {
+                (vec![plane(1, (0, 0)), plane(2, sub)], ColorFamily::Yuv)
+            }
             Kind::Gray | Kind::Gray16 => (vec![plane(1, (0, 0))], ColorFamily::Gray),
             Kind::Gbrp => (vec![plane(1, (0, 0)); 3], ColorFamily::Rgb),
             _ => (
@@ -265,7 +270,7 @@ pub fn frame(img: &RgbImage, kind: Kind, color: ColorInfo, pad: usize) -> Frame 
     let layout = kind.layout();
     let sizes: Vec<(u32, u32)> = layout.planes.iter().map(|p| p.size(w, h)).collect();
     let samples: Vec<Vec<u16>> = match kind {
-        Kind::Nv12 | Kind::P010 => {
+        Kind::Nv12 | Kind::P010 | Kind::Nv24 => {
             let uv = codes[1]
                 .iter()
                 .zip(&codes[2])
@@ -321,4 +326,57 @@ impl Rng {
         self.0 ^= self.0 << 17;
         self.0
     }
+}
+
+// ---------------------------------------------------------------------
+// The 8-bit mip pass before it rounded its means (DECISIONS D31)
+
+/// What the mip pass returned for component `c` of texel `(i, j)` of the
+/// level below `codes` (`size` texels of `comps` components, rows top to
+/// bottom) before it rounded to codes itself: the area mean in f32,
+/// summed as the shader summed it, each weight an overlap over S and
+/// each texel its code / 255.
+pub fn unrounded_mip_mean(
+    codes: &[u8],
+    (sw, sh): (u32, u32),
+    comps: usize,
+    (i, j): (u32, u32),
+    c: usize,
+) -> f32 {
+    let weights = |j: u32, ss: u32| {
+        let ds = (ss / 2).max(1);
+        let (lo, hi) = (j * ss, j * ss + ss);
+        (lo / ds..=(hi - 1) / ds).map(move |x| {
+            (
+                x,
+                (hi.min((x + 1) * ds) - lo.max(x * ds)) as f32 / ss as f32,
+            )
+        })
+    };
+    let mut acc = 0f32;
+    for (y, wy) in weights(j, sh) {
+        for (x, wx) in weights(i, sw) {
+            let code = codes[(y as usize * sw as usize + x as usize) * comps + c];
+            acc += wx * wy * (f32::from(code) / 255.0);
+        }
+    }
+    acc
+}
+
+/// The code RADV's export stores for a fragment's output `v` into an
+/// 8-bit unorm target: `v` packed to f16 toward zero
+/// (`v_cvt_pkrtz_f16_f32`), then converted to the nearest code, which
+/// puts a value on a half code, or less than a half's step above one, a
+/// code low (D31).
+pub fn radv_unorm8(v: f32) -> u8 {
+    let x = f64::from(v.clamp(0.0, 1.0));
+    let e = ((x.to_bits() >> 52) & 0x7ff) as i32 - 1023;
+    let step = 2f64.powi(if e < -14 { -24 } else { e - 10 });
+    ((x / step).floor() * step * 255.0).round_ties_even() as u8
+}
+
+/// The code lavapipe's export stores: the f32 times 255, to the nearest
+/// code, ties to even (D31's probe).
+pub fn lavapipe_unorm8(v: f32) -> u8 {
+    f64::from(v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u8
 }

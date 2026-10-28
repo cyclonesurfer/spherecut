@@ -1,23 +1,26 @@
 //! Tier 1, on lavapipe: planes into slots (M1 plan sections 4.2 and 4.4).
 //! Level 0 holds each plane's codes, deep ones through the ingest pass
 //! with P010's shift; each mip level is the area-weighted mean of the one
-//! above at odd sizes; both upload paths fill a slot alike; bad frames
-//! and wrong slots are refused; a frame already on the GPU fills a slot
-//! as an upload does; and the upload bench runs, small (its Tier 2 form,
-//! `bench_upload_5k7`, is here too).
+//! above at odd sizes, an 8-bit one rounded to the nearest code, ties to
+//! even, the reference's code for code up to 16384 texels a side; both
+//! upload paths fill a slot alike; bad frames and wrong slots are
+//! refused; a frame already on the GPU fills a slot as an upload does;
+//! and the upload bench runs, small (its Tier 2 form, `bench_upload_5k7`,
+//! is here too).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
-use common::{Frame, Kind, Rng, gpu};
+use common::{Frame, Kind, Rng, gpu, lavapipe_unorm8, radv_unorm8, unrounded_mip_mean};
 use spherecut_core::video::{ChromaSiting, Matrix, Range, SampleBytes};
 use spherecut_render::readback::{f16_to_f32, read_texture, round_f16};
 use spherecut_render::{
     AdapterChoice, DebugMode, Filter, Gpu, GpuFrame, GpuTimers, LinearTarget, Placement,
-    PlaneFormat, Projector, SlotShape, UploadPath, Uploader, ViewParams,
+    PlaneFormat, Projector, SlotShape, UploadPath, Uploader, ViewParams, reference,
 };
 use spherecut_sphere::perspective::{Lens, Projection};
+use spherecut_synth::{Pattern, render_equirect};
 use spherecut_testkit::bench;
 
 /// A `kind` frame of `size` with every sample random, and `pad` bytes
@@ -219,6 +222,9 @@ fn mips_are_area_means_at_odd_sizes() {
                 let (sw, sh, above) = &plane[l - 1];
                 let (dw, dh, this) = &plane[l];
                 assert_eq!((*dw, *dh), ((sw / 2).max(1), (sh / 2).max(1)));
+                // An 8-bit level's mean is of its codes, which an f32
+                // code / 255 holds only to 1e-5 of a code.
+                let codes: Vec<f32> = above.iter().map(|v| (v * 255.0).round()).collect();
                 for j in 0..*dh {
                     for x in 0..*dw {
                         for c in 0..comps {
@@ -226,10 +232,11 @@ fn mips_are_area_means_at_odd_sizes() {
                             let g = f64::from(
                                 this[(j as usize * *dw as usize + x as usize) * comps + c],
                             );
-                            // One code at 8 bits. For deep planes the
-                            // nearest half of the mean, unless the mean is
-                            // so near a tie that the shader's f32 sum
-                            // could fall on either side of it.
+                            // At 8 bits the nearest code, ties to even,
+                            // exactly (D31). For deep planes the nearest
+                            // half of the mean, unless the mean is so near
+                            // a tie that the shader's f32 sum could fall
+                            // on either side of it.
                             if p.format.is_deep() {
                                 assert!(
                                     g == round_f16(want) || near_a_tie(want),
@@ -238,15 +245,77 @@ fn mips_are_area_means_at_odd_sizes() {
                                     round_f16(want)
                                 );
                             } else {
+                                let m = area_mean(&codes, (*sw, *sh), comps, (*dw, *dh), (x, j), c);
+                                let code = nearest_code(m, true);
                                 assert!(
-                                    (g - want).abs() <= 1.0 / 255.0,
-                                    "{kind:?} plane {i} level {l} ({x}, {j}) c{c}: {g} for {want}"
+                                    (g * 255.0).round() == f64::from(code),
+                                    "{kind:?} plane {i} level {l} ({x}, {j}) c{c}: {} for {m}, \
+                                     whose nearest code is {code}",
+                                    g * 255.0
                                 );
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn eight_bit_mips_are_exact_at_the_largest_sizes() {
+    // Where Σ ox·oy·code passes a u32, which the pass splits as it sums
+    // (`shaders/mips.wgsl`): R8 and Rg8 (NV24) 16383 × 2051, odd both
+    // ways, so that a destination texel covers parts of three source
+    // texels each way; R8 16384 × 2049, the widest a texture comes; and R8
+    // 2051 × 16383, as tall. Every code is 128 or more, so that each
+    // destination texel's sum is at least 128·Sx·Sy, past 2^32. Level 1
+    // is the reference's, code for code. The control sums in a u32,
+    // wrapping, and is off at every texel.
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    for (kind, size) in [
+        (Kind::Nv24, (16383, 2051)),
+        (Kind::Gray, (16384, 2049)),
+        (Kind::Gray, (2051, 16383)),
+    ] {
+        let mut frame = noise(kind, size, 0, 13);
+        for (bytes, _, _) in &mut frame.planes {
+            for b in bytes.iter_mut() {
+                *b |= 0x80;
+            }
+        }
+        let slot = slot_for(&frame, 2);
+        uploader.upload(gpu, &frame, &slot).unwrap();
+        for (i, p) in slot.shape().planes.iter().enumerate() {
+            let at = format!("{kind:?} {}x{} plane {i} ({:?})", size.0, size.1, p.format);
+            let comps = p.format.components() as usize;
+            let level0 = codes(&frame, i);
+            let area = u64::from(p.size.0) * u64::from(p.size.1);
+            assert!(128 * area > u64::from(u32::MAX), "{at}");
+            let got = read_texture(gpu, slot.plane_texture(i).unwrap(), 1).unwrap();
+            let (w, h, want) = reference::halve_codes(&level0, p.size, comps);
+            assert_eq!((got.width, got.height), (w, h), "{at}");
+            let off = got.data.iter().zip(&want).filter(|(a, b)| a != b).count();
+            assert_eq!(off, 0, "{at}: {off} texels of level 1 off the reference's");
+            let span = |j: u32, ss: u32| {
+                let ds = (ss / 2).max(1);
+                let (lo, hi) = (j * ss, j * ss + ss);
+                (lo / ds..=(hi - 1) / ds).map(move |x| (x, hi.min((x + 1) * ds) - lo.max(x * ds)))
+            };
+            let (_, _, wrapped) = halve_by(p.size, comps, |(x, y), c| {
+                let mut n = 0u32;
+                for (sy, oy) in span(y, p.size.1) {
+                    for (sx, ox) in span(x, p.size.0) {
+                        let code =
+                            level0[(sy as usize * p.size.0 as usize + sx as usize) * comps + c];
+                        n = n.wrapping_add((ox * oy).wrapping_mul(u32::from(code)));
+                    }
+                }
+                ((u64::from(n) * 2 + area) / (2 * area)) as u8
+            });
+            let right = wrapped.iter().zip(&want).filter(|(a, b)| a == b).count();
+            assert_eq!(right, 0, "{at}: a u32 sum gets {right} texels right");
         }
     }
 }
@@ -318,6 +387,206 @@ fn deep_codes_round_to_the_nearest_half() {
 /// could round either way.
 fn near_a_tie(v: f64) -> bool {
     round_f16(v * (1.0 - 1e-6)) != round_f16(v * (1.0 + 1e-6))
+}
+
+/// `m` codes to the nearest code, a tie to even or up. An area mean of
+/// codes is n / (Sx·Sy), at least 1 / (2·Sx·Sy) from a tie it isn't on,
+/// which is 1e-6 at a million texels, so an f64 mean within 1e-9 of a tie
+/// is taken as on it.
+fn nearest_code(m: f64, ties_even: bool) -> u8 {
+    let k = m.floor();
+    let past = m - k - 0.5;
+    let up = if past.abs() < 1e-9 {
+        !ties_even || k % 2.0 == 1.0
+    } else {
+        past > 0.0
+    };
+    (k + f64::from(u8::from(up))) as u8
+}
+
+/// Plane `i` of an 8-bit `frame`, its rows without their padding.
+fn codes(frame: &Frame, i: usize) -> Vec<u8> {
+    let (bytes, stride, (w, h)) = &frame.planes[i];
+    let row = *w as usize * usize::from(frame.layout.planes[i].components);
+    (0..*h as usize)
+        .flat_map(|y| bytes[y * stride..y * stride + row].iter().copied())
+        .collect()
+}
+
+/// A level: its size and its codes, components interleaved.
+type Codes = (u32, u32, Vec<u8>);
+
+/// Every level of 8-bit plane `i` of `slot`, as codes.
+fn level_codes(slot: &GpuFrame, i: usize) -> Vec<Codes> {
+    let t = slot.plane_texture(i).unwrap();
+    (0..slot.shape().planes[i].levels)
+        .map(|l| {
+            let texels = read_texture(gpu(), t, l).unwrap();
+            (texels.width, texels.height, texels.data)
+        })
+        .collect()
+}
+
+/// A chain of `levels` levels from `level0`, each made from the one above
+/// by `halve`.
+fn chain_of(level0: Codes, levels: u32, halve: impl Fn(&[u8], (u32, u32)) -> Codes) -> Vec<Codes> {
+    let mut chain = vec![level0];
+    while chain.len() < levels as usize {
+        let (w, h, above) = chain.last().unwrap();
+        let next = halve(above, (*w, *h));
+        chain.push(next);
+    }
+    chain
+}
+
+/// Each texel of a level made from `above` by `code`, given its
+/// destination texel and component.
+fn halve_by(above: (u32, u32), comps: usize, code: impl Fn((u32, u32), usize) -> u8) -> Codes {
+    let (dw, dh) = ((above.0 / 2).max(1), (above.1 / 2).max(1));
+    let mut out = Vec::with_capacity(dw as usize * dh as usize * comps);
+    for j in 0..dh {
+        for i in 0..dw {
+            for c in 0..comps {
+                out.push(code((i, j), c));
+            }
+        }
+    }
+    (dw, dh, out)
+}
+
+/// Texels of `got` that differ from `want`'s, level by level from level 1.
+fn differ(got: &[Codes], want: &[Codes]) -> Vec<usize> {
+    got.iter()
+        .zip(want)
+        .skip(1)
+        .map(|(g, w)| {
+            assert_eq!((g.0, g.1), (w.0, w.1));
+            g.2.iter().zip(&w.2).filter(|(a, b)| a != b).count()
+        })
+        .collect()
+}
+
+#[test]
+fn eight_bit_mips_are_the_references_code_for_code() {
+    // The mip pass rounds each 8-bit mean to its code itself, ties to
+    // even, as the reference does (`reference::halve_codes`, D31), so that
+    // the driver's conversion has nothing to round. On lavapipe every
+    // level of R8 and Rg8 planes, at even and odd sizes, is the
+    // reference's, code for code. Ties are common: a 2×2 mean of codes is
+    // a whole code or a quarter, a half or three quarters past one. The
+    // controls each differ from the reference: the pass as it was, its
+    // f32 mean left to RADV's export (packed to f16 toward zero, then to
+    // the nearest code), which odin's RX 7600 stored; and the exact mean
+    // with its ties taken up, as the reference's f64 `round` took them.
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    let grid = |w, h| {
+        let img = render_equirect(Pattern::Grid, w, h, 0, 2);
+        common::frame(
+            &img,
+            Kind::Nv12,
+            common::color(Range::Limited, Matrix::Bt709, ChromaSiting::Left),
+            8,
+        )
+    };
+    let frames = [
+        ("noise", noise(Kind::Nv12, (256, 128), 4, 3)),
+        ("noise", noise(Kind::Nv12, (45, 23), 12, 7)),
+        ("noise", noise(Kind::Nv12, (70, 38), 0, 9)),
+        ("grid", grid(1024, 512)),
+        ("grid", grid(1002, 502)),
+    ];
+    for (what, frame) in &frames {
+        let slot = slot_for(frame, 8);
+        uploader.upload(gpu, frame, &slot).unwrap();
+        for (i, p) in slot.shape().planes.iter().enumerate() {
+            let at = format!(
+                "{what} {}x{} plane {i} ({:?})",
+                frame.size.0, frame.size.1, p.format
+            );
+            let comps = p.format.components() as usize;
+            let level0 = (p.size.0, p.size.1, codes(frame, i));
+            let got = level_codes(&slot, i);
+            assert!(got.len() >= 5, "{at}: {} levels", got.len());
+            let want = chain_of(level0.clone(), p.levels, |c, s| {
+                reference::halve_codes(c, s, comps)
+            });
+            assert_eq!(got[0], want[0], "{at}: level 0");
+            for (l, (g, w)) in got.iter().zip(&want).enumerate().skip(1) {
+                let off: Vec<(usize, u8, u8)> =
+                    g.2.iter()
+                        .zip(&w.2)
+                        .enumerate()
+                        .filter(|(_, (a, b))| a != b)
+                        .map(|(n, (a, b))| (n, *a, *b))
+                        .take(4)
+                        .collect();
+                assert!(
+                    (g.0, g.1) == (w.0, w.1) && off.is_empty(),
+                    "{at} level {l} ({}x{}): texels off the reference's, such as {off:?}",
+                    g.0,
+                    g.1
+                );
+            }
+            // How many of each level's means lie on a tie.
+            let ties: Vec<usize> = want
+                .windows(2)
+                .map(|w| {
+                    let (sw, sh, above) = &w[0];
+                    let f: Vec<f32> = above.iter().map(|&c| f32::from(c)).collect();
+                    let (dw, dh, _) = &w[1];
+                    let mut n = 0;
+                    for j in 0..*dh {
+                        for x in 0..*dw {
+                            for c in 0..comps {
+                                let m = area_mean(&f, (*sw, *sh), comps, (*dw, *dh), (x, j), c);
+                                n += usize::from((m - m.floor() - 0.5).abs() < 1e-9);
+                            }
+                        }
+                    }
+                    n
+                })
+                .collect();
+            // The controls.
+            let radv = chain_of(level0.clone(), p.levels, |c, s| {
+                halve_by(s, comps, |d, k| {
+                    radv_unorm8(unrounded_mip_mean(c, s, comps, d, k))
+                })
+            });
+            let lavapipe = chain_of(level0.clone(), p.levels, |c, s| {
+                halve_by(s, comps, |d, k| {
+                    lavapipe_unorm8(unrounded_mip_mean(c, s, comps, d, k))
+                })
+            });
+            let up = chain_of(level0, p.levels, |c, s| {
+                let f: Vec<f32> = c.iter().map(|&v| f32::from(v)).collect();
+                let d = ((s.0 / 2).max(1), (s.1 / 2).max(1));
+                halve_by(s, comps, |at, k| {
+                    nearest_code(area_mean(&f, s, comps, d, at, k), false)
+                })
+            });
+            let (radv, lavapipe, up) = (
+                differ(&radv, &want),
+                differ(&lavapipe, &want),
+                differ(&up, &want),
+            );
+            eprintln!(
+                "{at}: ties by level {ties:?}; off the reference by level: the old pass through \
+                 RADV's export {radv:?}, through lavapipe's {lavapipe:?}; ties up {up:?}"
+            );
+            // A mean over an odd area (Sx·Sy, as the pass counts it) never
+            // ties, so 45 × 23 has none at level 1.
+            assert!(ties.iter().sum::<usize>() > 0, "{at}: no ties");
+            assert!(
+                radv[0] > 0,
+                "{at}: RADV's export of the old pass is the reference's"
+            );
+            assert!(
+                up.iter().sum::<usize>() > 0,
+                "{at}: ties up are the reference's"
+            );
+        }
+    }
 }
 
 #[test]
