@@ -516,9 +516,10 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   `R16Float`/`Rg16Float` holding code / (2^b − 1) for deeper ones, each
   with an area-weighted mip chain capped near 64 pixels (an 8-bit
   level's means of codes worked out in integers and rounded in the
-  shader to the nearest code, ties to even, a deep level's to the
-  nearest half, so that a driver's conversion has nothing left to round,
-  D31), plus the frame's `Source` uniform: its colour matrix, chroma
+  shader to the nearest code, ties to even, which a driver that converts
+  to nearest, as Vulkan asks, stores as that code, and a deep level's to
+  the nearest half, which every driver stores as it is, D31), plus the
+  frame's `Source` uniform: its colour matrix, chroma
   siting and where it sits on the sphere (`Placement`: sv3d crop, stereo
   eye). Of a stereo frame a slot holds the shown eye alone
   (`Placement::shown`), so the other eye never bleeds in.
@@ -538,7 +539,8 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
 * **`Encoder::draw`** writes a linear target's pixels one to one into a
   render pass's attachment with the sRGB OETF, rounded in the shader to
   the attachment's codes (at 10 bits, and into an f16 attachment, to
-  halves) so that a driver's conversion has nothing left to round (D31),
+  halves), which a driver that converts to nearest, as Vulkan asks,
+  stores as they are, packed to f16 first or not (D31),
   at an origin, for egui's frame (slice 7) or an offscreen texture.
 * **`render_still`** (and `StillRenderer`, which keeps its pipelines)
   does all of it headless and reads back an `Image`: 8-bit through the

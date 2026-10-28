@@ -3066,10 +3066,16 @@ format, which suits a float target. A second override, `HALF`
 `Rgb10a2Unorm` and `Rgba16Float`. Any other unorm format, or an sRGB
 one, is documented as wrong rather than refused, as before. k / L in f32
 times L is k in f32 for every k of both depths, so a driver that
-converts the f32 itself has an integer, which Vulkan requires it to
-keep. A pack to f16 leaves one that isn't, and Vulkan lets that convert
-to either of the two nearest codes, so nothing the shader returns makes
-a packed store exact; what it can do is keep the value far from a tie.
+converts the f32 itself, multiplying in f32, has an integer, which
+Vulkan requires it to keep, if the shader's division was correctly
+rounded. WGSL doesn't promise that (it allows 2.5 ulp): divided as a
+multiply by f32 1/255, 126 of the 256 codes come out up to 1.9e−5 of a
+code off a whole one in f32 (a probe, not kept). A pack to f16 never
+leaves an integer. Off an integer, Vulkan asks for the nearest code but
+allows either of the two nearest, so nothing the shader returns makes
+the store exact on every driver Vulkan's letter allows; what it can do
+is keep the value far from a tie, so that a driver that converts to
+nearest stores k whatever its arithmetic.
 Packed toward zero, k / 255 lies less than 0.1245 codes below k, 0.375
 codes or more from either tie. At 10 bits a half's step in [0.5, 1) is
 0.4995 codes, and the branch's review found k / 1023 packed toward zero
@@ -3148,10 +3154,13 @@ mean is Σ ox·oy·code / (Sx·Sy). At 16384 a side that sum reaches
 split into q·Sx + r as it comes, Q = Σ oy·q (at most 255·Sy) into
 a·Sy + b at the end, and the mean is a + (Sx·b + R) / (Sx·Sy), R being
 Σ oy·r, with a numerator under 2·Sx·Sy, 2^29 at most. The pass rounds
-that to the nearest code k, ties to even, and returns k / 255, which
-the encode pass's argument (above) shows every export keeps: a driver
-that converts the f32 gets the integer k, which Vulkan requires it to
-keep, and RADV's pack toward zero lies less than 0.1245 codes below k.
+that to the nearest code k, ties to even, and returns k / 255, which by
+the encode pass's argument (above) a driver that converts to nearest, as
+Vulkan asks, stores as k: every f32 within 3 ulp of k / 255, as WGSL's
+division may give, lies within 6e−5 codes of k, and packed toward zero,
+as RADV packs it, less than 0.1245 codes below k
+(`every_code_comes_through_the_drivers_export`). Vulkan's letter alone,
+which takes only an exact integer to itself, doesn't promise k.
 `reference::halve_codes` computes the same mean in u64 and rounds by the
 same rule, bit for bit, where the reference took the f64 mean to the
 nearest code with ties up (f64's `round`) before. The f16 path for deep
@@ -3629,13 +3638,13 @@ pack on the unrounded values gives exactly the ten codes odin measured
 off the model, and none once rounded. No stored image moved and none was
 blessed for it: lavapipe's store already gave the nearest even code to
 the f32 product, which the shader now computes. Why in the shader, not
-in the test's model: with the rounding in the shader a driver's
-conversion has nothing left to round, so a driver that converts to
-nearest, as Vulkan asks, writes the CPU reference's codes whether it
-packs to f16 first or not, with no integer target; a model widened to
+in the test's model: with the rounding in the shader a driver that
+converts to nearest, as Vulkan asks, writes the CPU reference's codes
+whether it packs to f16 first or not, with no integer target; a model widened to
 RADV's pack would accept a code low on every driver. Vulkan guarantees
-the exact code only where f · L is an integer: in f32 it is for k / L,
-and for a packed value it isn't.
+the exact code only where f · L is an integer: in f32 it is for k / L
+correctly rounded, which WGSL doesn't promise, and for a packed value it
+isn't (D31).
 
 **The wide views on a GPU.** On the RX 7600, at be38fa4,
 `goldens_on_gpu_match_reference` measured `fisheye_360`'s CPU check at
