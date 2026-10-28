@@ -1,0 +1,20 @@
+[package]
+name = "spherecut-playback"
+description = "The headless playback engine: workers, the bounded frame cache, GPU slots, the presenter and its numbers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+spherecut-core.workspace = true
+spherecut-media.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
