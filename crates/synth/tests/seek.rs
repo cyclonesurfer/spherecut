@@ -849,12 +849,15 @@ fn exact_after_keyframe(name: &str, path: &Path, frames: &[Seen]) {
 /// it, the frames after it refer to grey stand-ins for the frames before
 /// it. From d4bfe81 Spherecut took the I-frame for the first good frame
 /// (as it must for a cut that starts there) and handed out the frames
-/// after it, flagged, as `Exact`: 56 of 80 exact seeks were wrong, with
-/// no event, on 6.1 and 8.1.3. An exact seek now never ends where
-/// decoding began at an I-frame FFmpeg flagged (D29). Here an I-frame is
-/// forced at frames 10 and 22 of 40, with 3 B-frames and with 1, and one
-/// clip flashes at frame 10, so that the frames after it refer across it
-/// for most of their pixels.
+/// after it, flagged, as `Exact`: 28 of the 40 exact seeks to each
+/// clip's frames were wrong, with no event, on 6.1 and 8.1.3. An exact
+/// seek now never ends on a frame decoded from an I-frame whose packet
+/// FFmpeg's parser doesn't flag a keyframe (D29). Here an I-frame is
+/// forced at frames 10 and 22 of 40, with 3 B-frames and with 1, one
+/// clip keeps 2 references (few enough for FFmpeg's heuristic to take
+/// the I-frame for a place to start, though frames after it refer across
+/// it), and one flashes at frame 10, so that the frames after it refer
+/// across it for most of their pixels.
 #[test]
 fn h264_i_frames_listed_as_sync_samples_seek_exactly() {
     let dir = TempDir::new("listed-i");

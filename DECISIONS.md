@@ -201,6 +201,32 @@ didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
   build searched for libraries. Each compat check has a unit test that
   fails without it; the staging was checked by hand, with a configure
   and Makefile stubbed to fail at each step.
+- The review of the H.264 landing work (D29) found three more in
+  compat. Its binding check read ffmpeg-sys-next's build-script output
+  from `<target>/debug/build`, where cargo doesn't put it once
+  `build.build-dir` or a target triple is set: every build then failed
+  that check, and what it bound went unseen. It now reads the
+  `build-script-executed` messages cargo prints with
+  `--message-format=json-render-diagnostics` (the diagnostics still go
+  to stderr as text), from clippy's build as well as the link's,
+  wherever cargo ran the script; xtask reads the JSON itself rather than
+  take a crate for it. cargo also runs with its build directory set to
+  the target, so a `build.build-dir` can't have every FFmpeg's build
+  share one, or leave it behind after `--clean`. The libraries compat
+  checks were held to the features on the workspace's `ffmpeg-sys-next`
+  line by a unit test alone, which a feature turned on anywhere else
+  (ffmpeg-next's default features turn on avdevice and avfilter) would
+  have passed; every compat run now fails a build that links an FFmpeg
+  library pkg-config wasn't asked about, or none of one it was. And the
+  module doc said a target inside any FFmpeg's tree is refused, where
+  the guard looks only for a directory holding
+  `include/libavcodec/avcodec.h` (a source tree has no `include/`); the
+  docs say so now, and the error names
+  `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` as the way out.
+  `what_the_build_bound_is_found_wherever_cargo_builds` builds a
+  stand-in ffmpeg-sys-next with a build directory elsewhere and a target
+  triple set, and `the_libraries_checked_are_those_the_build_links`
+  fails without its check.
 - `gen-media`'s files from 8.1.3 differ from 6.1's only in FFmpeg's
   version strings (`Lavc`, `Lavf`) and the average bitrate in MP4's
   `btrt` box, which 8.1.3 leaves 0: the streams are the same.
@@ -216,9 +242,10 @@ directory of its own, `spherecut-compat-<label>` (the label is the
 prefix's last component) in the directory
 `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` names, or else in
 `<target>/compat/`, with line-tables debuginfo and no incremental
-state. compat checks that pkg-config (`$PKG_CONFIG` when it is set, as
-the build runs it) finds each library ffmpeg-sys-next binds (libavutil,
-libavformat, libswscale, libswresample and libavcodec) in that prefix,
+state, and cargo's build directory there too. compat checks that
+pkg-config (`$PKG_CONFIG` when it is set, as the build runs it) finds
+each library ffmpeg-sys-next binds (libavutil, libavformat, libswscale,
+libswresample and libavcodec) in that prefix,
 and that the library and header each one's `.pc` file names lie inside
 the prefix, symlinks resolved, and prints the FFmpeg and libavcodec it
 found there. A target
@@ -233,15 +260,19 @@ holds compat's stamp, whose first line says compat wrote it. A
 directory there without one is refused and left, and so is a target
 directory that is a prefix, holds one or lies inside one, symlinks and
 `..` resolved, or that lies inside any directory holding
-`include/libavcodec/avcodec.h`, such as a prefix the run doesn't name.
+`include/libavcodec/avcodec.h`, such as a prefix the run doesn't name
+(nothing else of an FFmpeg is looked for); the refusal names
+`SPHERECUT_FFMPEG_COMPAT_TARGET_DIR`, which puts the targets elsewhere.
 Once a
 stale target is deleted, compat asks pkg-config again and stops if the
 stamp changed, as it would for a prefix whose files are links into the
 target. Once the build has run (the link, and the Tier 1 tests), it
-asks again and fails the build if the stamp changed, and reads
-ffmpeg-sys-next's build-script output in the target: it must have
-linked libavcodec, and searched for libraries only inside the prefix
-(the report's "binding"). A prefix moved or deleted during a build had
+asks again and fails the build if the stamp changed, and reads what
+ffmpeg-sys-next's build script did in clippy's build and the link's
+from cargo's JSON messages: it must have linked libavcodec and searched
+for libraries only inside the prefix, and the FFmpeg libraries the
+builds linked must be the five pkg-config was asked about (the report's
+"binding"). A prefix moved or deleted during a build had
 pkg-config find another FFmpeg for it, which passed under the prefix's
 name. cargo
 runs without `FFMPEG_DIR`, which ffmpeg-sys-next uses before
@@ -1702,7 +1733,8 @@ What:
   packets mostly don't: the timestamp the demuxer's index and
   `av_seek_frame` compare. A target in the GOP being
   decoded decodes forward with no seek: the keyframe the index names for
-  T has been read. The index lists keyframes by dts, so T is shifted back
+  T has been read (for H.264, the last before T that may start an exact
+  decode, below). The index lists keyframes by dts, so T is shifted back
   by the least lag of pts behind dts over the keyframes read, as the MOV
   demuxer shifts a seek's target. The index is used only when it lists
   something after the last packet read (a Matroska demuxer's lists only
@@ -1712,7 +1744,8 @@ What:
   keyframe it lands on, whatever its pts, flagged `KeyframeOnly` (its
   leading pictures are dropped, below). It is after T when T is one of
   that keyframe's leading pictures; otherwise an exact seek to T after it
-  decodes forward. Past the cut of an MP4 cut short it is the last
+  decodes forward, unless FFmpeg doesn't vouch for an H.264 keyframe
+  (below). Past the cut of an MP4 cut short it is the last
   keyframe the file holds, with a `Damaged` event. Step back is an exact
   seek to pts − 1.
 - Frame N of a constant-rate stream is at (N + ½) frame durations
@@ -1745,13 +1778,16 @@ What:
 - FFmpeg hands out the frames it flags corrupt
   (`AV_CODEC_FLAG_OUTPUT_CORRUPT`), and Spherecut drops them: decoded
   from references a seek skipped, they are not frames of the stream as a
-  decode from the start shows it. After a seek away from the start it
-  also drops, by pts, the frames shown before the keyframe it landed on
-  that come out before it: its leading pictures (open-GOP B-frames, RASL
-  and RADL pictures). FFmpeg 6.1's H.264 decoder flags those it decoded
-  without their references, except as it drains at the end of the
-  stream; RADL pictures decode whole, but are not the keyframe. A target
-  among them is reached by the seek again to before that keyframe.
+  decode from the start shows it. After a seek away from the start, and
+  for H.264 at open and from the start too, it also drops, by pts, the
+  frames shown before the keyframe decoding began at that come out
+  before it: its leading pictures (open-GOP B-frames, RASL and RADL
+  pictures; at the start FFmpeg drops HEVC's RASL pictures itself, and
+  its RADL pictures there are frames of the stream). FFmpeg 6.1's
+  H.264 decoder flags those it decoded without their references, except
+  as it drains at the end of the stream; RADL pictures decode whole,
+  but are not the keyframe. A target among them is reached by the seek
+  again to before that keyframe.
 - `next_frame` returns an error only when the stream can't go on (a
   read failed), and again on every call until a seek; damage it decodes
   past is a `Damaged` event, as in a seek.
@@ -1981,6 +2017,92 @@ clips keeping 3 references, of 30 frames and of 25 (which end on a
 keyframe and its leading pictures), a cut of one, and a cut with 1
 B-frame; each fails without its fix on 6.1 and 8.1.3.
 
+*Updated 2026-10-28, after its review.* That rule handed out, as
+`Exact`, frames that weren't the decode from the start's. Decoding from
+a flagged I-frame is right for a cut that starts there and for a
+keyframe seek's frame, but nothing in the file says that the frames
+after it don't refer to frames before it, and where they do, they refer
+to FFmpeg's grey stand-ins. x264 codes a frame it is made to code as an
+I-frame before `min-keyint` (at a flash or a scene cut) with no recovery
+point, and keeping 3 references it lets the frames after it refer across
+it; some muxers list every I-frame in `stss`. On such clips 28 of the 40
+exact seeks to a clip's frames, each on a fresh decoder, gave a frame
+unlike the decode from the start, with no event, on 6.1 and 8.1.3, and
+17 of a batch of 20 on one decoder did. No margin of frames decoded
+before the target would do: the stand-ins pass on through every chain
+of references. So an exact seek now ends only on frames decoded where
+FFmpeg vouches for the decode (`exact_run`): from the stream's first
+packet (a flush leaves the decoder as opening does), or, for H.264,
+from a packet its parser flags a keyframe (an IDR picture, a recovery
+point SEI, or an I-frame of a stream whose SPS keeps one reference
+frame) when FFmpeg then says decoding has recovered by the first good
+frame: it flags that frame a keyframe, or doesn't flag it corrupt
+before the stream drains (it flags nothing as it drains). The decoder's
+own heuristic doesn't count: it takes an I-frame for a place to start
+wherever the stream allows few references, and with 2 the frames after
+one still referred across it. Every other codec's decoders flag a frame
+that refers to a picture decoding didn't reach, so for them any landing
+counts, as before. Where a seek landed elsewhere, the exact seek seeks
+again to before the landing, as for a leading picture, a keyframe at a
+time and then from the start (`MAX_ATTEMPTS`), and no exact seek
+decodes forward from the frames decoded since: `forward_is_cheaper` and
+the "already showing it" shortcut need `exact_run`, and for H.264 the
+keyframe the index names for T is the last before it that wasn't read
+and seen unflagged. A keyframe seek still gives such an I-frame,
+`KeyframeOnly`, and playing on from it, or from the start of a cut
+there, hands out every frame decoded from it, as d4bfe81 made them. The
+rule is exact as far as the file says: what an exact seek returns comes
+from a decode that began at the start of the stream, or where an IDR
+picture, a recovery point FFmpeg reached, or an I-frame of a
+one-reference stream says nothing before it is needed. Its cost falls
+on H.264 whose sync samples FFmpeg doesn't flag: there an exact seek
+decodes from the start of the stream, so its cost grows with the
+target's place in the stream, not with the GOP. Measured on 6.1 and
+8.1.3 alike, by frames decoded and seeks (`SeekCost`, summed over an
+exact seek to every frame of a clip, each on a fresh decoder, and over
+a batch of 20 random exact seeks on one decoder; the machine's load left
+the times meaningless): 40-frame clips with I-frames listed at 10 and
+22 went from 336 frames and 33 seeks to 900 and 81 (at most 42 frames
+for one seek, from 18), their batch from 168 frames to 304; the 30-frame
+SEI-less clips keeping 3 and 1 references from 191 to 524 (13 to 33 at
+most), their batch from 136 to 244. H.264 with recovery points or
+closed GOPs and HEVC decode the frames they did (open-GOP H.264 191 and
+136, closed 150 and 128, noisy 1920x960 H.264 and HEVC 961 and 296). Of
+`bench_seek_latency`'s clips, the synthetic one and the X5's are HEVC,
+unchanged by construction. The LRV proxy is H.264 with B-frames in GOPs
+of 30: unchanged if its keyframes are IDR pictures or recovery points,
+and if they are neither, each exact seek in it decodes from the start
+of the file. No LRV is at hand here, so the next `hw-test` run on Pat's
+machines says which. `h264_i_frames_listed_as_sync_samples_seek_exactly`
+writes such clips with 3 B-frames and 1, 3 references and 2, and one
+that flashes at the first forced I-frame, checks that FFmpeg's parser
+flags no forced frame and that a cut from each decodes otherwise than
+the clip, and runs the oracle on copies that list them in `stss`;
+without the fix it fails on 6.1 and 8.1.3, on a wrong frame after an
+exact seek. The oracle now expects no exact seek to decode forward from
+a keyframe FFmpeg doesn't flag, and bounds such a seek's cost by a
+decode from the start; `h264_keyframes_without_recovery_points_seek_exactly`
+still checks that a keyframe seek gives the sync sample and that an
+exact seek in a cut decodes forward from its start.
+
+This entry said the frames shown before such an I-frame stay dropped
+by pts, which held only after a seek away from the start. FFmpeg drains
+a stream's last frames unflagged, so a Matroska cut at the last keyframe
+of open-GOP H.264, which keeps that keyframe's leading B-frames (shown
+before it, from pts 0), opened on one of them, decoded without its
+references, and so did decoding from the start again after a stopped
+seek. For H.264 the pts rule now holds at open and on every seek to the
+start too. HEVC keeps it after seeks away from the start only: at the
+start FFmpeg drops RASL pictures itself, and RADL pictures are frames
+of the stream. The decoder's read position, which `forward_is_cheaper`
+compares with the keyframe a seek would land on, is now the greatest
+timestamp read since the landing, not the last: Matroska's pts go back
+at B-frames, and in that cut the last packet read was shown before its
+keyframe, so an exact seek after a keyframe seek sought again.
+`open_gop_h264_seeks_exactly_and_a_naive_seek_does_not` makes the cut
+with the SEI and without; each of the three changes fails it without
+its fix on 6.1.
+
 Limits (from 8.1.3): on 7.1.x HEVC damage to a slice header or frame
 start is silent, as above. Outside H.264, a frame flagged corrupt after
 the first good one is taken for damage: a decoder that flagged a frame
@@ -1998,7 +2120,17 @@ which need not be the decode from the start: in x264 clips with keyint
 with 2 that returned a frame unlike it, as `Exact` and with no event,
 and with 3 B-frames and 3 references a keyframe seek gave the first
 frame FFmpeg took for recovered, not the sync sample. Nothing here
-tells such a stream apart, and the oracle has none.
+tells such a stream apart, and the oracle has none. An exact seek in
+H.264 whose sync samples FFmpeg doesn't flag decodes from the start of
+the stream, however far in its target lies, even where the frames after
+those I-frames refer to nothing before them: nothing in the file says
+so. Stepping back or seeking exactly through a long such file is slow;
+keyframe seeks aren't. After a keyframe seek to such an I-frame,
+playing on hands out the frames decoded from it, which may refer to
+grey stand-ins where the decode from the start doesn't. An H.264
+stream whose first IDR picture has frames shown before it (a picture
+order count that isn't its least) loses them at open; no encoder here
+writes one.
 `VideoDecoder::open`, which tests and the Tier 2 checks use, doesn't
 ask for corrupt frames, so from 8.0 FFmpeg refuses the HEVC pictures
 that refer to a lost one and it loses them without an error (D13).
