@@ -1266,6 +1266,78 @@ fn an_edit_list_hides_its_lead_in_and_clip_time_starts_after_it() {
     assert_eq!(d.info().origin_pts, 0);
 }
 
+/// A stream copied from mid-GOP, as `ffmpeg -ss T -c copy` trims one,
+/// starts at the keyframe before T, with an edit list that hides the
+/// frames shown before T, that keyframe's among them. FFmpeg drops the
+/// frames an edit list hides, so the first frame out wasn't flagged a
+/// keyframe, and every seek that landed on the stream's first packet
+/// opened a new decoder (on a device, a new VA-API context or Vulkan
+/// video session), though that keyframe needs nothing from before and a
+/// flush gives the same frames. Now the first packet's NAL units say
+/// whether it is one (D29). Here the edit list hides an IDR picture
+/// (the first), an I-frame whose recovery point counts no frames
+/// (open-GOP H.264) and a CRA picture (open-GOP HEVC): the oracle agrees
+/// on each, and no seek opens a new decoder.
+#[test]
+fn a_trimmed_stream_seeks_to_its_start_on_the_decoder_it_has() {
+    let dir = TempDir::new("trim");
+    let mut clips = Vec::new();
+    for (name, codec) in [("trim-h264", Codec::H264), ("trim-hevc", Codec::Hevc)] {
+        // The first GOP is closed, its keyframe an IDR picture.
+        let edit = write(
+            &Spec {
+                edit_start: 3,
+                frames: 27,
+                ..spec(&format!("{name}-edit"), codec)
+            },
+            &dir,
+        );
+        clips.push(edit);
+        let clip = write(&spec(name, codec), &dir);
+        let whole = sequential(&clip).0;
+        // From the second keyframe, its frame and the next hidden.
+        let pk = samples(&clip);
+        let from = (1..pk.len()).find(|&k| pk[k].3).unwrap();
+        let key = whole.iter().position(|f| f.pts == pk[from].0).unwrap();
+        let trimmed = dir.join(format!("{name}-trimmed.mp4"));
+        trim(&clip, &trimmed, from, whole[key + 2].pts);
+        clips.push(trimmed);
+    }
+    let never = StopToken::never();
+    for clip in &clips {
+        let name = clip.file_name().unwrap().to_string_lossy().into_owned();
+        // The first packet, a keyframe, is hidden, and so its frame's flag.
+        let pk = samples(clip);
+        assert!(pk[0].3 && pk[0].0 < 0, "{name}: {:?}", pk[0]);
+        let frames = oracle(clip, GOP_8).frames;
+        let mut d = open(clip);
+        let NextFrame::Frame(first) = d.next_frame(&never).unwrap() else {
+            panic!("{name}: no frame");
+        };
+        assert!(!first.key, "{name}");
+        for _ in 0..4 {
+            d.next_frame(&never).unwrap();
+        }
+        // Exact seeks into the first GOP, a keyframe seek there, and a
+        // seek before the start, each from the last GOP and landing on
+        // the first packet.
+        let away = frames[frames.len() - 2].pts;
+        for (t, mode, i) in [
+            (at(&*d, frames[0].pts), SeekMode::Exact, 0),
+            (at(&*d, frames[2].pts), SeekMode::Exact, 2),
+            (at(&*d, frames[1].pts), SeekMode::Keyframe, 0),
+            (at(&*d, frames[1].pts), SeekMode::Exact, 1),
+            (Time::from_secs(-1), SeekMode::Exact, 0),
+        ] {
+            seek_pts(&mut *d, away, SeekMode::Exact);
+            let (f, _, cost) = seek_to(&mut *d, t, mode);
+            assert_eq!(Seen::of(&f), frames[i], "{name}: {mode:?} to {t:?}");
+            assert!(!cost.forward_only, "{name}: {mode:?} to {t:?}: {cost:?}");
+        }
+        assert_eq!(d.stats().reopens, 0, "{name}");
+    }
+}
+
 #[test]
 fn a_variable_frame_rate_seeks_exactly_and_counts_frames() {
     let dir = TempDir::new("vfr");
@@ -1684,6 +1756,36 @@ fn faststart(src: &Path, dst: &Path) {
     opts.set("movflags", "faststart");
     octx.write_header_with(opts).unwrap();
     for (st, mut pkt) in ictx.packets() {
+        pkt.rescale_ts(st.time_base(), octx.stream(st.index()).unwrap().time_base());
+        pkt.set_position(-1);
+        pkt.write_interleaved(&mut octx).unwrap();
+    }
+    octx.write_trailer().unwrap();
+}
+
+/// Copy the MP4 `src` into `dst` as a stream copy trims it (`ffmpeg -ss
+/// T -c copy`): from video sample `from` in decode order, a keyframe,
+/// its timestamps moved back by the pts `start`, so that an edit list
+/// hides the frames shown before `start`, that keyframe's among them.
+// Writes a file this test made with ffmpeg-next alone, as `faststart`
+// does.
+#[allow(clippy::disallowed_methods)]
+fn trim(src: &Path, dst: &Path, from: usize, start: i64) {
+    let mut ictx = ff::format::input(src).unwrap();
+    let mut octx = ff::format::output(dst).unwrap();
+    for st in ictx.streams() {
+        assert_eq!(st.parameters().medium(), ff::media::Type::Video);
+        let mut out = octx
+            .add_stream(ff::encoder::find(ff::codec::Id::None))
+            .unwrap();
+        out.set_parameters(st.parameters());
+        out.set_time_base(st.time_base());
+    }
+    octx.write_header().unwrap();
+    for (k, (st, mut pkt)) in ictx.packets().enumerate().skip(from) {
+        assert!(k > from || pkt.is_key(), "sample {from} is no keyframe");
+        pkt.set_pts(pkt.pts().map(|p| p - start));
+        pkt.set_dts(pkt.dts().map(|d| d - start));
         pkt.rescale_ts(st.time_base(), octx.stream(st.index()).unwrap().time_base());
         pkt.set_position(-1);
         pkt.write_interleaved(&mut octx).unwrap();

@@ -42,6 +42,7 @@ use crate::backend::DamageCause;
 use crate::doctor::{VulkanDevice, VulkanDeviceType};
 use crate::ffi::{self, DownloadPool, HwDevice, HwError, HwRefusal, OpenDecoderError};
 use crate::hwprobe::{self, VkDevice, device_label, vk_device_type};
+use crate::nal::NalFormat;
 use crate::{MediaError, TooLarge, ff, init};
 
 /// A decoded frame in system memory.
@@ -156,6 +157,13 @@ pub struct VideoDecoder {
     /// Whether FFmpeg flagged the first frame decoded since opening a
     /// keyframe; `None` before one comes out.
     first_key: Option<bool>,
+    /// How the stream's packets hold H.264 or HEVC NAL units, to read
+    /// whether its first packet is a keyframe; `None` for other codecs,
+    /// and for streams that hold them otherwise.
+    nal: Option<NalFormat>,
+    /// The stream's first packet holds a picture FFmpeg's decoder flags a
+    /// keyframe, by its NAL units ([`NalFormat::keyframe`]).
+    first_packet_key: bool,
     /// `dec` is to be opened afresh before the next packet is sent: it is
     /// the stream's first, after packets were sent ([`reopen`](Self::reopen)).
     reopening: bool,
@@ -451,6 +459,10 @@ impl VideoDecoder {
                 size,
             });
         }
+        let nal = par
+            .codec_name
+            .as_deref()
+            .and_then(|codec| NalFormat::of(codec, &ffi::extradata(&st.parameters())));
         let dec = open_codec(path, st.parameters(), hw.as_deref(), options)?;
         ffi::discard_other_streams(&mut ictx, stream_index);
         let codec = dec.codec();
@@ -472,6 +484,8 @@ impl VideoDecoder {
             options,
             sent: false,
             first_key: None,
+            nal,
+            first_packet_key: false,
             reopening: false,
             reopens: 0,
             lookahead: None,
@@ -736,9 +750,13 @@ impl VideoDecoder {
     /// (a cut there), the stand-ins it makes for the frames before it
     /// are those pictures rather than the zeroed buffers of a fresh pool,
     /// and so are the frames that refer to them. So the stream's start
-    /// decodes afresh, unless its first frame was a keyframe (an IDR
-    /// picture, or a recovery point with a count of 0), after which the
-    /// decoder needs nothing from before.
+    /// decodes afresh, unless its first picture is a keyframe (an IDR
+    /// picture, a recovery point with a count of 0, or HEVC's IRAP
+    /// picture), after which the decoder needs nothing from before. That
+    /// is read from the first packet's NAL units, since an edit list may
+    /// hide its frame (a trim by stream copy), and FFmpeg drops the frames
+    /// an edit list hides; or, where they can't be read so, from FFmpeg's
+    /// flag on the first frame decoded.
     fn reopen(&mut self) -> Result<(), MediaError> {
         let par = self
             .ictx
@@ -751,7 +769,7 @@ impl VideoDecoder {
         self.reopens += 1;
         tracing::debug!(
             path = %self.path.display(),
-            "decoding the stream's start afresh: its first frame is no keyframe"
+            "decoding the stream's start afresh: its first picture is no keyframe"
         );
         Ok(())
     }
@@ -1021,8 +1039,16 @@ impl VideoDecoder {
                     if landed {
                         self.landing = ts;
                         self.landing_key = pkt.pts();
+                        if self.first_landing.is_none() {
+                            self.first_packet_key = self
+                                .nal
+                                .is_some_and(|nal| pkt.data().is_some_and(|d| nal.keyframe(d)));
+                        }
                         let first = *self.first_landing.get_or_insert(ts);
-                        self.reopening = first == ts && self.sent && self.first_key != Some(true);
+                        self.reopening = first == ts
+                            && self.sent
+                            && !self.first_packet_key
+                            && self.first_key != Some(true);
                     }
                     if !pkt.is_key()
                         && let Some(ts) = ts
