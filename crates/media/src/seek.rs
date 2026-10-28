@@ -1961,6 +1961,7 @@ impl VideoDecode for FfmpegVideo {
                 0.0
             },
             download_buffers: self.dec.download_buffers(),
+            reopens: self.dec.reopens(),
             ..self.stats
         }
     }

@@ -469,6 +469,10 @@ pub struct DecodeStats {
     /// format and size (0 in software). Once the decoder's pool holds the
     /// frames kept alive, a download allocates none (D30).
     pub download_buffers: u64,
+    /// Times the decoder was opened afresh to decode the stream's start
+    /// again (D29): each is a new decoder, and on a device a new VA-API
+    /// context or Vulkan video session.
+    pub reopens: u64,
 }
 
 /// A decoded picture: owned, immutable, `Send` and `Sync`, and shared as

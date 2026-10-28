@@ -159,6 +159,8 @@ pub struct VideoDecoder {
     /// `dec` is to be opened afresh before the next packet is sent: it is
     /// the stream's first, after packets were sent ([`reopen`](Self::reopen)).
     reopening: bool,
+    /// Times `dec` has been opened afresh so.
+    reopens: u64,
     /// A packet read ahead, after one flagged corrupt (see `next_packet`).
     lookahead: Option<ff::Packet>,
     /// The demuxer has nothing more to give.
@@ -471,6 +473,7 @@ impl VideoDecoder {
             sent: false,
             first_key: None,
             reopening: false,
+            reopens: 0,
             lookahead: None,
             read_done: false,
             eof_sent: false,
@@ -745,6 +748,7 @@ impl VideoDecoder {
         self.dec = open_codec(&self.path, par, self.hw.as_deref(), self.options)?;
         ffi::skip_nonref(&mut self.dec, self.skip_before.is_some());
         self.sent = false;
+        self.reopens += 1;
         tracing::debug!(
             path = %self.path.display(),
             "decoding the stream's start afresh: its first frame is no keyframe"
@@ -850,6 +854,12 @@ impl VideoDecoder {
     /// Frames the decoder has made since opening.
     pub(crate) fn frames_decoded(&self) -> u64 {
         self.frames
+    }
+
+    /// Times the decoder has been opened afresh to decode the stream's
+    /// start again ([`reopen`](Self::reopen)).
+    pub(crate) fn reopens(&self) -> u64 {
+        self.reopens
     }
 
     /// FFmpeg's name for the decoder's codec, such as `h264`.

@@ -1161,6 +1161,17 @@ fn a_cut_at_an_i_frame_decodes_from_its_start_as_it_opens() {
             frames,
             "{ext}"
         );
+        // Its first packet is no keyframe, so each decode from its start
+        // after packets were sent runs on a new decoder.
+        let mut d = open(&cut);
+        for (k, t) in [Time::ZERO, Time::from_secs(-1)].into_iter().enumerate() {
+            for _ in 0..5 {
+                d.next_frame(&StopToken::never()).unwrap();
+            }
+            let f = seek_to(&mut *d, t, SeekMode::Exact).0;
+            assert_eq!(Seen::of(&f), frames[0], "{ext}");
+            assert_eq!(d.stats().reopens, k as u64 + 1, "{ext}");
+        }
     }
 }
 
