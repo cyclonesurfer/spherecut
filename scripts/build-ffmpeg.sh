@@ -11,7 +11,11 @@
 # with libdrm, libx264, libx265, libdav1d, libsvtav1, libopus and
 # libvorbis, and libshaderc for the Vulkan filters. Shared libraries, no
 # programs or docs. The configure line and logs are kept next to the
-# prefix, and the source is deleted after.
+# prefix, and the source is deleted after. `make install` writes into
+# <dest>/stage-<tag>, which becomes the prefix only once all of it is in:
+# an install that fails partway (a full disk, say) leaves no prefix with
+# half an FFmpeg, whose missing libraries pkg-config would find in the
+# system's instead.
 #
 # On Ubuntu 24.04 it needs:
 #   sudo apt install build-essential git nasm pkg-config cmake libvulkan1 \
@@ -37,6 +41,7 @@ mkdir -p "$2"
 dest=$(cd "$2" && pwd)
 prefix=$dest/$tag-full
 src=$dest/src-$tag
+stage=$dest/stage-$tag
 vk_tag=v1.4.354
 vk=$dest/vulkan-headers-$vk_tag
 
@@ -100,7 +105,8 @@ echo "PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-} ./configure $*" >"$prefix.configure-l
 
 # step NAME LOG COMMAND...: runs COMMAND in the source directory with its
 # output in LOG, and if it fails, says so with the log's last 20 lines
-# (the source is kept, for a look at what failed).
+# (the source and the staging directory are kept, for a look at what
+# failed; the prefix isn't made).
 step() {
     step_name=$1
     step_log=$2
@@ -109,11 +115,14 @@ step() {
     if ! (cd "$src" && "$@") >"$step_log" 2>&1; then
         echo "$step_name failed: see $step_log, which ends:" >&2
         tail -n 20 "$step_log" >&2
+        echo "$prefix was not made" >&2
         exit 1
     fi
 }
 step configure "$prefix.configure.log" ./configure "$@"
 step make "$prefix.make.log" make -j"$(nproc)"
-step install "$prefix.install.log" make install
-rm -rf "$src"
+rm -rf "$stage"
+step install "$prefix.install.log" make install DESTDIR="$stage"
+mv "$stage$prefix" "$prefix"
+rm -rf "$stage" "$src"
 echo "==> FFmpeg $tag in $prefix: libavcodec $(PKG_CONFIG_PATH=$prefix/lib/pkgconfig pkg-config --modversion libavcodec)"
