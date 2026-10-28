@@ -61,7 +61,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use common::{Frame, Kind, color, frame, gpu, hardware_gpu, hardware_gpus};
+use common::{
+    Frame, Kind, color, frame, gpu, hardware_gpu, hardware_gpus, lavapipe_unorm8, radv_unorm8,
+};
 use glam::{DQuat, DVec2, DVec3};
 use serde_json::{Map, Value, json};
 use spherecut_core::video::{
@@ -2642,14 +2644,15 @@ struct Precision {
 }
 
 impl Precision {
-    /// The CPU reference's own: everything in f64.
+    /// The CPU reference's own: its filter in f64, and its 8-bit mips as
+    /// the mip pass makes them.
     const F64: Precision = Precision {
         texel_bits: None,
         lod_bits: None,
         blend_bits: None,
         truncate: false,
         codes: false,
-        mips: MipStore::F64,
+        mips: MipStore::Rounded,
     };
 
     fn fixed(&self, v: f64, bits: Option<i32>) -> f64 {
@@ -2678,36 +2681,41 @@ impl Precision {
     }
 }
 
-/// How an 8-bit mip level's area mean is stored: the reference's f64
-/// rounded to nearest; the shader's f32 mean, its product with 255
-/// rounded to the nearest even code, as lavapipe's export does (D31); or
-/// that mean packed to f16 toward zero first, as RADV's export does
-/// (D31), which puts a mean on a half code, or up to 0.1245 codes above
+/// How an 8-bit mip level is stored. As the mip pass makes it now: the
+/// exact area mean of the codes to the nearest code, ties to even
+/// (`reference::halve_codes`), returned as k / 255, which `Rounded`
+/// stores as k and `RoundedThroughRadv` as RADV's export stores it, packed
+/// to f16 toward zero first (D31): k again, which is the fix's point. As
+/// the reference stored it before the pass rounded: `TiesUp`, the f64
+/// mean to the nearest code with ties up (f64's `round`), which the RX
+/// 7600's CPU checks at be38fa4 were measured against. Or as the pass made
+/// it then (D31), its f32 area mean left to the export:
+/// `UnroundedLavapipe` that mean times 255 to the nearest even code, as
+/// lavapipe's export does, and `UnroundedRadv` that mean through RADV's
+/// export, which puts a mean on a half code, or up to 0.1245 codes above
 /// one, a code low.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum MipStore {
-    F64,
-    F32NearestEven,
-    F16TowardZero,
+    Rounded,
+    RoundedThroughRadv,
+    TiesUp,
+    UnroundedLavapipe,
+    UnroundedRadv,
 }
 
 impl MipStore {
-    /// A mean, `exact` as the reference sums it and `shader` as the
-    /// shader does in f32, stored: a code / 255.
-    fn store(self, exact: f64, shader: f32) -> f64 {
+    /// A texel stored, from `k`, the code the pass rounds the mean to,
+    /// `exact`, the mean in f64, and `shader`, the mean as the pass summed
+    /// it in f32 before it rounded: a code / 255.
+    fn store(self, k: u8, exact: f64, shader: f32) -> f64 {
         let code = match self {
-            MipStore::F64 => (exact.clamp(0.0, 1.0) * 255.0).round(),
-            MipStore::F32NearestEven => f64::from(shader.clamp(0.0, 1.0) * 255.0).round_ties_even(),
-            MipStore::F16TowardZero => {
-                // The half below, then the colour block's conversion to
-                // nearest.
-                let x = f64::from(shader.clamp(0.0, 1.0));
-                let e = ((x.to_bits() >> 52) & 0x7ff) as i32 - 1023;
-                let step = 2f64.powi(if e < -14 { -24 } else { e - 10 });
-                ((x / step).floor() * step * 255.0).round_ties_even()
-            }
+            MipStore::Rounded => k,
+            MipStore::RoundedThroughRadv => radv_unorm8(f32::from(k) / 255.0),
+            MipStore::TiesUp => (exact.clamp(0.0, 1.0) * 255.0).round() as u8,
+            MipStore::UnroundedLavapipe => lavapipe_unorm8(shader),
+            MipStore::UnroundedRadv => radv_unorm8(shader),
         };
-        code / 255.0
+        f64::from(code) / 255.0
     }
 }
 
@@ -2757,12 +2765,18 @@ impl Chain {
     }
 
     /// The next level down: each texel the area-weighted mean of those
-    /// it covers, in f64 and as the shader sums it in f32, stored in the
-    /// plane's format.
+    /// it covers, stored in the plane's format: a deep one's f64 mean as
+    /// its nearest half, an 8-bit one by `mips`, from the code the pass
+    /// rounds it to, the f64 mean and the f32 mean the pass returned
+    /// before it rounded.
     fn halve(&self, mips: MipStore) -> (u32, u32, Vec<f64>) {
         let (sw, sh, src) = self.levels.last().unwrap();
         let (sw, sh) = (*sw, *sh);
         let (dw, dh) = ((sw / 2).max(1), (sh / 2).max(1));
+        let rounded = (!self.format.is_deep()).then(|| {
+            let codes: Vec<u8> = src.iter().map(|t| (t * 255.0).round() as u8).collect();
+            reference::halve_codes(&codes, (sw, sh), self.comps).2
+        });
         let weights = |j: u32, ss: u32, ds: u32| -> Vec<(u32, f64)> {
             let (lo, hi) = (j * ss, j * ss + ss);
             (lo / ds..=(hi - 1) / ds)
@@ -2786,10 +2800,9 @@ impl Chain {
                             shader += a as f32 * b as f32 * t as f32;
                         }
                     }
-                    data.push(if self.format.is_deep() {
-                        round_f16(acc)
-                    } else {
-                        mips.store(acc, shader)
+                    data.push(match &rounded {
+                        None => round_f16(acc),
+                        Some(k) => mips.store(k[data.len()], acc, shader),
                     });
                 }
             }
@@ -2925,12 +2938,17 @@ impl Emulation {
         }
     }
 
+    /// Every plane's mip chain, each 8-bit level stored by `mips`.
+    fn chains(&self, mips: MipStore) -> Vec<Chain> {
+        (0..self.shape.planes.len())
+            .map(|i| Chain::new(&self.frame, &self.shape, i, mips))
+            .collect()
+    }
+
     /// RGB in [0, 1], as the encode pass computes it before it rounds it
     /// to codes.
     fn render(&self, p: &Precision) -> Vec<f64> {
-        let chains: Vec<Chain> = (0..self.shape.planes.len())
-            .map(|i| Chain::new(&self.frame, &self.shape, i, p.mips))
-            .collect();
+        let chains = self.chains(p.mips);
         let mut out = Vec::with_capacity(3 * self.taps.len());
         for t in &self.taps {
             let Some(t) = t else {
@@ -3757,19 +3775,48 @@ fn goldens_on_host_llvmpipe() {
     run.finish();
 }
 
+/// Every CPU check's PSNR on the RX 7600 (RADV NAVI33, Mesa 26.2.5) at
+/// be38fa4, when the mip pass left its 8-bit means to the driver's
+/// export: `goldens_on_gpu_match_reference`'s notes in
+/// `hw-reports/odin-be38fa409e.md`, by row and key.
+const RX_7600_BE38FA4: &[(&str, &str, f64)] = &[
+    ("rect_forward", "cpu_psnr_db", 58.5452),
+    ("rect_ypr", "cpu_psnr_db", 58.0408),
+    ("fisheye_180", "cpu_psnr_db", 47.7761),
+    ("fisheye_360", "cpu_psnr_db", 44.6747),
+    ("stereo_tinyplanet", "cpu_psnr_db", 51.4508),
+    ("morph_half", "cpu_psnr_db", 52.7078),
+    ("crop_half", "cpu_psnr_db", 56.5701),
+    ("matrix_601_709", "cpu_601_psnr_db", 58.2078),
+    ("matrix_601_709", "cpu_709_psnr_db", 58.0879),
+];
+
 #[test]
 fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
     // Every CPU check, emulated with a GPU's precision ([`Emulation`])
     // and rounded to codes as the encode pass rounds it, against the
-    // reference itself, as a GPU's CPU check measures it; and the
-    // filter's own error, unrounded. The RX 7600 lost up to 15 dB on the
-    // wide, minified views (D32): fixed-point filter weights, even a
-    // 4-bit blend toward zero, come nowhere near that on every row, and
-    // RADV's export of the mip pass's means comes within 1 dB of every
-    // row. lavapipe's own filter, emulated the same way, comes within 1
-    // dB of its render on every row, which is what the method can be
-    // checked against here, where lavapipe filters 8-bit planes to whole
-    // codes as the model has it.
+    // reference, as a GPU's CPU check measures it; and the filter's own
+    // error, unrounded.
+    //
+    // At be38fa4 the mip pass left its 8-bit means to the driver's export
+    // and the reference took their ties up, and the RX 7600 lost up to 15
+    // dB on the wide, minified views (D32). Against that reference,
+    // fixed-point filter weights, even a 4-bit blend toward zero, come
+    // nowhere near its numbers, and RADV's export of those means comes
+    // within 1 dB of every row.
+    //
+    // Now the pass rounds the means itself, ties to even, as the
+    // reference does, and RADV's export of what it returns stores the
+    // reference's codes in every level of every check. RADV's filter as
+    // emulated, on those mips, with the error the emulation missed at
+    // be38fa4 added, predicts each check after the fix: each clears
+    // lavapipe's floor (its PSNR here less 3 dB, as a blessing calibrates
+    // it), where the old means through RADV's export, against the old
+    // reference, miss `fisheye_360`'s, as the RX 7600 did. lavapipe's own
+    // filter, emulated the same way, comes within 1 dB of its render on
+    // every row, which is what the method can be checked against here,
+    // where lavapipe filters 8-bit planes to whole codes as the model has
+    // it.
     let fixed = |blend: i32, truncate: bool| Precision {
         texel_bits: Some(8),
         lod_bits: Some(8),
@@ -3783,19 +3830,35 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
         fixed(4, false),
         fixed(4, true),
     ];
-    let radv = Precision {
-        mips: MipStore::F16TowardZero,
+    // be38fa4's reference, and each filter on its mips.
+    let then = |p: Precision| Precision {
+        mips: MipStore::TiesUp,
+        ..p
+    };
+    // RADV's filter as the emulation finds it, on the old means through
+    // its export and on what the pass returns now.
+    let radv_then = Precision {
+        mips: MipStore::UnroundedRadv,
+        ..fixed(8, false)
+    };
+    let radv_now = Precision {
+        mips: MipStore::RoundedThroughRadv,
         ..fixed(8, false)
     };
     let lavapipe = Precision {
         codes: true,
-        mips: MipStore::F32NearestEven,
         ..fixed(8, false)
     };
     let coded = |v: &[f64]| -> Vec<f64> { v.iter().map(|x| (x * 255.0).round() / 255.0).collect() };
+    // A floor as a blessing calibrates it from a PSNR.
+    let floor = |db: f64| (((db - CPU_MARGIN_DB) * 100.0).floor() / 100.0).max(CPU_FLOOR_DB);
+    // Squared error from PSNR and back.
+    let mse = |db: f64| 10f64.powf(-db / 10.0);
+    let db = |e: f64| -10.0 * e.log10();
     let gpu = gpu();
     let mut renderer = StillRenderer::new(gpu);
     let (mut filter_miss, mut radv_miss, mut lavapipe_miss) = ([0.0f64; 4], 0.0f64, 0.0f64);
+    let mut under = Vec::new();
     for c in cpu_checks() {
         let what = format!("{} {}", c.row, c.key);
         let cpu = reference::render(
@@ -3816,7 +3879,20 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
             off < 1e-12,
             "{what}: the emulation is {off:e} off the reference"
         );
-        let rx = gpu_psnr(GPU_CPU_PSNR, c.row, c.key).unwrap();
+        // RADV's export keeps every code the pass rounds to.
+        let through = e.chains(MipStore::RoundedThroughRadv);
+        for (n, (a, b)) in through.iter().zip(e.chains(MipStore::Rounded)).enumerate() {
+            assert!(
+                a.levels == b.levels,
+                "{what}: RADV's export moves plane {n}'s rounded mips"
+            );
+        }
+        let old = e.render(&then(Precision::F64));
+        let rx = RX_7600_BE38FA4
+            .iter()
+            .find(|(r, k, _)| *r == c.row && *k == c.key)
+            .unwrap()
+            .2;
         let opts = StillOptions {
             placement: c.placement,
             ..StillOptions::default()
@@ -3826,17 +3902,20 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
             .unwrap();
         let here = psnr_of(c.size, &unit(&here), &cpu.data);
         eprintln!(
-            "{what}: RX 7600 {rx:.2} dB, lavapipe {here:.2} dB, a filter in f64 {:.2} dB",
+            "{what}: RX 7600 at be38fa4 {rx:.2} dB, lavapipe {here:.2} dB (its floor {}), a \
+             filter in f64 {:.2} dB",
+            floor(here),
             psnr_of(c.size, &coded(&exact), &cpu.data)
         );
+        // be38fa4: each filter against the reference of the time.
         let mut unrounded = Vec::new();
         for (n, p) in filters.iter().enumerate() {
-            let got = e.render(p);
-            let psnr = psnr_of(c.size, &coded(&got), &cpu.data);
-            let raw = psnr_of(c.size, &got, &cpu.data);
+            let got = e.render(&then(*p));
+            let psnr = psnr_of(c.size, &coded(&got), &old);
+            let raw = psnr_of(c.size, &got, &old);
             eprintln!(
-                "{what}: {}: {psnr:.2} dB ({raw:.2} unrounded)",
-                p.describe()
+                "{what}: at be38fa4, {}: {psnr:.2} dB ({raw:.2} unrounded)",
+                then(*p).describe()
             );
             filter_miss[n] = filter_miss[n].max((psnr - rx).abs());
             unrounded.push(raw);
@@ -3846,20 +3925,35 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
             unrounded.windows(2).all(|w| w[0] >= w[1]),
             "{what}: {unrounded:?}"
         );
-        // Each export alone, the filter in f64.
-        for mips in [MipStore::F16TowardZero, MipStore::F32NearestEven] {
+        // Each export alone, the filter in f64: the old means against the
+        // old reference, and the pass's now against the reference.
+        for (mips, want, at) in [
+            (MipStore::UnroundedRadv, &old, "at be38fa4"),
+            (MipStore::UnroundedLavapipe, &old, "at be38fa4"),
+            (MipStore::RoundedThroughRadv, &cpu.data, "now"),
+        ] {
             let p = Precision {
                 mips,
                 ..Precision::F64
             };
-            let psnr = psnr_of(c.size, &coded(&e.render(&p)), &cpu.data);
-            eprintln!("{what}: {}: {psnr:.2} dB", p.describe());
+            let psnr = psnr_of(c.size, &coded(&e.render(&p)), want);
+            eprintln!("{what}: {at}, {}: {psnr:.2} dB", p.describe());
         }
         let bands = lod_bands(&c.frame, &c.view, c.size, &c.placement);
-        for (name, p) in [("RADV's export", radv), ("lavapipe's filter", lavapipe)] {
+        let mut psnrs = Vec::new();
+        for (name, p, want) in [
+            ("at be38fa4, RADV's export", radv_then, &old),
+            ("now, RADV's export", radv_now, &cpu.data),
+            ("now, lavapipe's filter", lavapipe, &cpu.data),
+            (
+                "RADV's export of the old means against today's reference",
+                radv_then,
+                &cpu.data,
+            ),
+        ] {
             let got = coded(&e.render(&p));
-            let psnr = psnr_of(c.size, &got, &cpu.data);
-            let by: Vec<String> = band_errors(&bands, &got, &cpu.data)
+            let psnr = psnr_of(c.size, &got, want);
+            let by: Vec<String> = band_errors(&bands, &got, want)
                 .iter()
                 .zip(LOD_BANDS)
                 .map(|(b, (band, _))| {
@@ -3872,16 +3966,35 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
                 p.describe(),
                 by.join(", ")
             );
-            if p == radv {
-                radv_miss = radv_miss.max((psnr - rx).abs());
-            } else {
-                lavapipe_miss = lavapipe_miss.max((psnr - here).abs());
-            }
+            psnrs.push(psnr);
+        }
+        let (radv, now, model) = (psnrs[0], psnrs[1], psnrs[2]);
+        radv_miss = radv_miss.max((radv - rx).abs());
+        lavapipe_miss = lavapipe_miss.max((model - here).abs());
+        // The prediction: the emulation now, with the squared error it
+        // missed of the RX 7600 at be38fa4 (RADV's own filter, as far as
+        // the model isn't it) added.
+        let missed = (mse(rx) - mse(radv)).max(0.0);
+        let predicted = db(mse(now) + missed);
+        eprintln!(
+            "{what}: the RX 7600 after the fix: {now:.2} dB emulated, {predicted:.2} dB with the \
+             error the emulation missed at be38fa4 ({:.2} dB alone) added",
+            db(missed)
+        );
+        assert!(
+            predicted >= floor(here),
+            "{what}: the RX 7600 is predicted at {predicted:.2} dB after the fix, under lavapipe's \
+             floor of {}",
+            floor(here)
+        );
+        if radv < floor(here) {
+            under.push(what);
         }
     }
     eprintln!(
-        "worst miss: of the RX 7600, each filter {filter_miss:.2?} dB and RADV's export \
-         {radv_miss:.2} dB; of lavapipe, its filter {lavapipe_miss:.2} dB"
+        "worst miss: of the RX 7600, each filter {filter_miss:.2?} dB and RADV's export of the \
+         old means {radv_miss:.2} dB; of lavapipe, its filter {lavapipe_miss:.2} dB; the old \
+         means through RADV's export under lavapipe's floor: {under:?}"
     );
     for (p, miss) in filters.iter().zip(filter_miss) {
         assert!(
@@ -3893,6 +4006,10 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
     assert!(
         radv_miss < 1.0,
         "RADV's export misses the RX 7600 by {radv_miss:.2} dB"
+    );
+    assert!(
+        under.iter().any(|w| w.starts_with("fisheye_360 ")),
+        "the old means through RADV's export clear lavapipe's floors but {under:?}"
     );
     // The model of lavapipe's filter is a fact about the lavapipe it was
     // made on, which holds what it filters from 8-bit planes to codes; a
