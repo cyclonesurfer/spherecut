@@ -93,6 +93,15 @@ pub struct Spec {
     /// `None` for the preset's own: 1 at `veryfast`, 3 at x264's default
     /// `medium`.
     pub refs: Option<u32>,
+    /// Frames the encoder is made to code as I-frames
+    /// ([`Mp4Writer::push_video_intra`]). In an open GOP they are not
+    /// keyframes unless `keyint`'s `min-keyint` (at most half of it) has
+    /// passed since the last: x264 codes them with no recovery point, and
+    /// the frames after them may refer to frames before them, as it codes
+    /// a flash. Not with `vfr`.
+    pub intra: Vec<u32>,
+    /// Frames shown as a flash: the pattern halfway to white.
+    pub flash: Vec<u32>,
 }
 
 /// Keyframes every `keyint` frames, with `bframes` B-frames between
@@ -149,6 +158,8 @@ impl Default for Spec {
             noise: None,
             crop_left: 0,
             refs: None,
+            intra: Vec::new(),
+            flash: Vec::new(),
         }
     }
 }
@@ -299,10 +310,20 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             EncodeError::Invalid("a variable frame rate clip can't have audio".into()).into(),
         );
     }
+    if spec.vfr && !spec.intra.is_empty() {
+        return Err(
+            EncodeError::Invalid("a variable frame rate clip can't force I-frames".into()).into(),
+        );
+    }
     let format = spec.yuv_format();
     let mut pts = 0;
     for i in 0..spec.frames {
-        let img = render_equirect(spec.pattern, spec.width, spec.height, i, 2);
+        let mut img = render_equirect(spec.pattern, spec.width, spec.height, i, 2);
+        if spec.flash.contains(&i) {
+            for px in &mut img.pixels {
+                *px = px.map(|c| 0.5 + c / 2.0);
+            }
+        }
         let mut planes = yuv::to_yuv(&img, spec.bits, &format);
         if let Some(seed) = spec.noise {
             add_noise(&mut planes, spec.bits, seed, i);
@@ -310,6 +331,8 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
         if spec.vfr {
             w.push_video_at(&planes, pts)?;
             pts += vfr_ticks(i);
+        } else if spec.intra.contains(&i) {
+            w.push_video_intra(&planes)?;
         } else {
             w.push_video(&planes)?;
         }
