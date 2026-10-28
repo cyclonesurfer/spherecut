@@ -621,7 +621,8 @@ plan's table (section 6) on lavapipe, from synth's in-memory planes:
   same at the Mesa build they were blessed on, and on another within
   PSNR 48 dB and SSIM 0.995, with at most 4 pixels more than 4 LSB off
   and none more than 8, which catches the local faults the averages
-  miss (a seam, a pole, a rim a pixel off);
+  miss (implicit LOD round a pole or along a minified line, a black pole
+  quad);
 * views are held to **the f64 CPU reference** at a PSNR floor set when
   blessing, and minified ones to **the supersampled pattern itself**
   (`synth::render_view_ideal`), with a margin over a level-0 render;

@@ -142,15 +142,18 @@ the sections below, they win.
     D32). Section 6's other-driver rule keeps PSNR ≥ 48 dB and SSIM ≥
     0.995, and its "max ≤ 4 LSB" becomes at most 4 pixels with a
     channel more than 4 LSB off and none more than 8: LLVM 22's
-    llvmpipe put one pixel of `fisheye_180` 5 LSB off at 62.79 dB, and
-    the local faults the averages miss put 11 to 72 pixels past 4 LSB
-    (implicit LOD) or one quad 95 LSB off (a black pole). On a GPU a
-    CPU check is held to the lower of lavapipe's calibrated floor and
-    the RX 7600's measurement less 3 dB, since RADV's 8-bit mip stores
-    cost the wide views up to 15 dB. And section 4.3's encode pass
-    rounds to the target's codes itself, since RADV's export packs to
-    f16 toward zero first and put ten of `passthrough_exact`'s codes a
-    code low.
+    llvmpipe put `fisheye_180` at most 5 LSB off at 62.79 dB (how many
+    pixels past 4 LSB wasn't recorded), and the local faults the
+    averages miss put 11 to 72 pixels past 4 LSB (implicit LOD) or one
+    quad 95 LSB off (a black pole). On a GPU a CPU check is held to the
+    lower of lavapipe's calibrated floor and the RX 7600's measurement
+    less 3 dB, since the mip pass leaves its 8-bit stores to the
+    driver, and RADV's export of them cost the wide views up to 15 dB:
+    a defect of the renderer's that the lowered floor accommodates
+    until the mip pass rounds them itself. And section 4.3's encode
+    pass rounds to the target's codes itself (at 10 bits, and into an
+    f16 target, to halves), since RADV's export packs to f16 toward
+    zero first and put ten of `passthrough_exact`'s codes a code low.
 
 ## 1. Summary
 
@@ -1049,7 +1052,8 @@ Notes:
 (non-sRGB `Rgba8Unorm` or `Bgra8Unorm` in egui-wgpu 0.37) or into an
 offscreen `Rgba8Unorm`. It reads the linear target with `textureLoad` at
 `frag.xy − origin`, so pixels map 1:1 with no filtering, applies the
-OETF and rounds to the target's codes itself (amendment 13). A 16-bit PNG reads the `Rgba16Float` target back and applies the
+OETF and rounds to the target's codes itself, at 10 bits to the half
+nearest them (amendment 13). A 16-bit PNG reads the `Rgba16Float` target back and applies the
 OETF on the CPU in f32. f16 linear storage moves an encoded value by at
 most about 2.1e-4, finer than 1/1023.
 

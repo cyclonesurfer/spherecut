@@ -10,8 +10,8 @@
 //!   dB and SSIM ≥ 0.995, with at most 4 pixels more than 4 LSB off and
 //!   none more than 8: the averages miss a fault a few dozen pixels wide,
 //!   which [`the_other_driver_rule_catches_local_faults`] makes from every
-//!   stored image, and one pixel 5 off is a newer LLVM's drift (D32,
-//!   amended 2026-10-28). A source whose planes no longer hash as blessed
+//!   stored view, and a pixel 5 off is the drift made here (D32, amended
+//!   2026-10-28). A source whose planes no longer hash as blessed
 //!   is reported as the synthetic source having changed, never compared
 //!   as a render.
 //! - **The CPU reference** (`reference::render_trilinear`, f64) holds each
@@ -49,7 +49,7 @@
 //! minified views up to 15 dB, as
 //! [`the_wide_views_lose_to_the_mip_stores_not_the_filter`] shows by
 //! emulating it. The encode pass rounds to the output's codes itself,
-//! so the codes don't depend on how a driver converts its output.
+//! so a driver's conversion has nothing left to round.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -96,10 +96,10 @@ const OTHER_PSNR_DB: f64 = 48.0;
 const OTHER_SSIM: f64 = 0.995;
 /// And what the averages miss: at most [`OTHER_PIXELS_PAST`] pixels with
 /// a channel more than [`OTHER_PAST_LSB`] off, and none more than
-/// [`OTHER_MAX_LSB`]. LLVM 22.1.8's llvmpipe put `fisheye_180` 5 LSB off
-/// at 62.79 dB; within PSNR and SSIM, implicit LOD puts 11 to 72 pixels
-/// past 4 LSB by up to 9, and a black pole quad is 95 LSB off (D32,
-/// `the_other_driver_rule_catches_local_faults`).
+/// [`OTHER_MAX_LSB`]. LLVM 22.1.8's llvmpipe put `fisheye_180` at most 5
+/// LSB off at 62.79 dB; within PSNR and SSIM, implicit LOD puts 11 to 72
+/// pixels past 4 LSB by up to 9, and a black pole quad is 95 LSB off
+/// (D32, `the_other_driver_rule_catches_local_faults`).
 const OTHER_PAST_LSB: f64 = 4.0;
 const OTHER_PIXELS_PAST: f64 = 4.0;
 const OTHER_MAX_LSB: f64 = 8.0;

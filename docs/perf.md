@@ -123,9 +123,10 @@ Not benchmarks, but their numbers are in the same notes:
 PCI bus id and timestamp period), the features of the formats the
 renderer uses, and its features, downlevel flags and limits;
 `goldens_on_gpu_match_reference` notes each golden row's numbers on each
-GPU, which say how near it comes to lavapipe's floors, and
-`goldens_on_host_llvmpipe` the stored images' drift on the machine's own
-llvmpipe (D32). The
+GPU, with the floor each CPU check was held to (lavapipe's, or the RX
+7600's measurement less 3 dB where that is lower) and its error by LOD
+band, and `goldens_on_host_llvmpipe` the stored images' drift on the
+machine's own llvmpipe, with the pixels past 4 LSB (D32). The
 `*_download_pool_reuses_buffers` tests note the minor page faults per
 downloaded frame on the decoding thread, per frame and per MB, for
 3840×1920 NV12 and P010 and 5760×2880 P010, after 30 frames to warm up,
