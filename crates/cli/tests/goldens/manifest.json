@@ -3,7 +3,7 @@
   "checks": {
     "swscale_cross_check": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "17425bebd4",
+      "commit": "df4a6680f5",
       "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -99,23 +99,23 @@
   "images": {
     "h264_full_range": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "17425bebd4",
+      "commit": "df4a6680f5",
       "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
-        "cpu_max_channel": 0.0157,
-        "cpu_psnr_db": 50.2066
+        "cpu_max_channel": 0.0118,
+        "cpu_psnr_db": 51.1752
       },
       "png": "h264_full_range.png",
-      "png_fnv64": "601f36e88f337296",
+      "png_fnv64": "bf9492e25138af01",
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame pipeline_goldens",
       "source": "synth grid 1024x512, x264 lossless 8-bit 4:2:0, BT.709 full range",
       "source_fnv64": "70f37e8643b30d87",
       "thresholds": {
         "cpu_max_channel_max": 0.1,
-        "cpu_psnr_db_min": 47.2,
+        "cpu_psnr_db_min": 48.17,
         "other_driver": {
           "max_lsb": 8.0,
           "pixels_past_4_lsb_max": 4.0,
@@ -130,7 +130,7 @@
     },
     "hevc10_lossless": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "17425bebd4",
+      "commit": "df4a6680f5",
       "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -161,7 +161,7 @@
     },
     "nv12_vs_yuv420p": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "17425bebd4",
+      "commit": "df4a6680f5",
       "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -194,7 +194,7 @@
     },
     "yuv422p10_full_chroma": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "17425bebd4",
+      "commit": "df4a6680f5",
       "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
