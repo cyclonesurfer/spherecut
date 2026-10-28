@@ -664,21 +664,40 @@ impl Mp4Writer {
 
     /// Append the next video frame, one frame after the last.
     pub fn push_video(&mut self, planes: &YuvPlanes) -> Result<(), EncodeError> {
-        let Some(ticks) = self.frame_ticks else {
-            return Err(EncodeError::Invalid(
-                "a frame is not a whole number of ticks of the time base: use push_video_at".into(),
-            ));
-        };
-        let pts = self.next_video_pts;
-        self.push_video_at(planes, pts)?;
-        self.next_video_pts = pts + ticks;
-        Ok(())
+        self.push_next(planes, false)
     }
 
     /// Append the next video frame at timestamp `pts`, in ticks of the
     /// stream's time base, for a variable frame rate. Timestamps must
     /// increase; negative ones are before the edit list's start.
     pub fn push_video_at(&mut self, planes: &YuvPlanes, pts: i64) -> Result<(), EncodeError> {
+        self.push_frame(planes, pts, false)
+    }
+
+    /// Append the next video frame, one frame after the last, and have
+    /// the encoder code it as an I-frame (`AV_PICTURE_TYPE_I`). x264 makes
+    /// it a keyframe only when it comes at least `min-keyint` frames after
+    /// the last one, or in a closed GOP; otherwise it is an I-frame with
+    /// no recovery point that the frames after it may refer across, as
+    /// x264 codes a flash. For test media.
+    pub fn push_video_intra(&mut self, planes: &YuvPlanes) -> Result<(), EncodeError> {
+        self.push_next(planes, true)
+    }
+
+    fn push_next(&mut self, planes: &YuvPlanes, intra: bool) -> Result<(), EncodeError> {
+        let Some(ticks) = self.frame_ticks else {
+            return Err(EncodeError::Invalid(
+                "a frame is not a whole number of ticks of the time base: use push_video_at".into(),
+            ));
+        };
+        let pts = self.next_video_pts;
+        self.push_frame(planes, pts, intra)?;
+        self.next_video_pts = pts + ticks;
+        Ok(())
+    }
+
+    /// Append a video frame at `pts`, coded as an I-frame when `intra`.
+    fn push_frame(&mut self, planes: &YuvPlanes, pts: i64, intra: bool) -> Result<(), EncodeError> {
         if let Some(last) = self.last_video_pts
             && pts <= last
         {
@@ -688,6 +707,9 @@ impl Mp4Writer {
         }
         let mut frame = video_frame(self.layout, self.width, self.height, planes)?;
         frame.set_pts(Some(pts));
+        if intra {
+            frame.set_kind(ff::picture::Type::I);
+        }
         self.last_video_pts = Some(pts);
         ctx(self.video.send_frame(&frame), || {
             "sending video frame".into()

@@ -294,9 +294,15 @@ pub struct FfmpegVideo {
     current_anchored: bool,
     current_last_tie: bool,
     not_seekable: bool,
-    /// Since the last seek away from the start, no frame at or after the
-    /// keyframe it landed on has come out: one before it is one of its
-    /// leading pictures, and is dropped.
+    /// Since the last seek away from the start, and for H.264 since
+    /// opening or any seek, no frame at or after the keyframe decoding
+    /// began at has come out: one before it is one of its leading
+    /// pictures, and is dropped. At the start of an H.264 stream they are
+    /// open-GOP B-frames (a cut at a keyframe that isn't IDR keeps them)
+    /// that refer to frames the stream lacks, which FFmpeg drains
+    /// unflagged at its end. HEVC's that do are RASL pictures, which
+    /// FFmpeg drops at the start, and its RADL pictures there are frames
+    /// of the stream.
     leading: bool,
     /// Since opening or the last seek, a frame has come out that FFmpeg
     /// didn't flag corrupt and that isn't a leading picture: a frame
@@ -307,6 +313,19 @@ pub struct FfmpegVideo {
     /// the damage has been said: the rest are dropped without another
     /// word, up to the next frame that isn't.
     losing: bool,
+    /// The frames decoded since opening or the last seek are those a
+    /// decode from the start gives, as far as the file says: decoding
+    /// began at the stream's first packet, with the decoder as opening
+    /// leaves it ([`VideoDecoder::seek`]), or the first good frame is one
+    /// the file says decoding starts at ([`recovered`]). Not so where an
+    /// H.264 seek landed on a keyframe that no IDR picture or recovery
+    /// point with a count of 0 vouches for, which only FFmpeg's
+    /// decoder's heuristic, its count of frames to a recovery point, or
+    /// [`starts_here`] takes for a place to start: the frames after it
+    /// may refer to stand-ins for frames before it. Until the next seek,
+    /// no exact seek ends on a frame decoded since, or decodes forward
+    /// from one: it seeks to before that keyframe.
+    exact_run: bool,
     /// What FFmpeg's corrupt flag says of a frame after a settled one.
     /// `false` for H.264, whose decoder flags only the frames it hasn't
     /// seen decoding recover by since it began: at an IDR picture, a
@@ -461,6 +480,13 @@ impl FfmpegVideo {
                     {
                         continue;
                     }
+                    // H.264's leading pictures (see `leading`).
+                    if !corrupt_is_damage
+                        && let (Some(key), Some(pts)) = (dec.landing_key(), fields.pts)
+                        && pts < key
+                    {
+                        continue;
+                    }
                     break Some((frame, fields));
                 }
                 Received::End | Received::Stopped => break None,
@@ -556,6 +582,7 @@ impl FfmpegVideo {
             not_seekable: false,
             leading: false,
             settled: true,
+            exact_run: true,
             losing: false,
             corrupt_is_damage,
             failure_said: false,
@@ -679,6 +706,10 @@ impl FfmpegVideo {
                 }
                 self.leading = false;
             }
+            if !self.settled {
+                self.exact_run |=
+                    self.dec.landed_at_start() || recovered(self.corrupt_is_damage, &fields);
+            }
             self.settled = true;
             self.losing = false;
             return Ok(self.decoded(frame, fields));
@@ -779,8 +810,9 @@ impl FfmpegVideo {
         self.pending = None;
         self.last_decoded = None;
         self.from_start = to_start.then_some(0);
-        self.leading = !to_start;
+        self.leading = !to_start || !self.corrupt_is_damage;
         self.settled = false;
+        self.exact_run = to_start;
         self.losing = false;
         self.failure_said = false;
         self.start_run();
@@ -827,9 +859,11 @@ impl FfmpegVideo {
     /// keyframe's pts is taken as its dts plus the least lag of pts
     /// behind dts seen in the keyframes read, as the MOV demuxer itself
     /// shifts a seek's target. Without an index that lists what lies
-    /// ahead, `t` at most a second ahead.
+    /// ahead, `t` at most a second ahead. Never where the frames decoded
+    /// since the last seek may not be a decode from the start's
+    /// (`exact_run`).
     fn forward_is_cheaper(&self, t: i64) -> bool {
-        if self.position != Position::InStep {
+        if self.position != Position::InStep || !self.exact_run {
             return false;
         }
         let ahead = match (&self.current, &self.pending) {
@@ -861,11 +895,31 @@ impl FfmpegVideo {
                 .unwrap_or(i64::MAX);
             return t.saturating_sub(here) <= second;
         }
-        let lag = self.dec.key_lag();
-        match ffi::index_keyframe_before(input, stream, t.saturating_sub(lag)) {
+        match self.landing_for(t) {
             Some(k) => read.is_some_and(|read| k <= read),
             // Before every keyframe: no seek gets closer.
             None => true,
+        }
+    }
+
+    /// The keyframe the index names for `t`, by its timestamp: where a
+    /// seek to `t` lands (see [`forward_is_cheaper`](Self::forward_is_cheaper)),
+    /// or, for H.264, the last before it that may start an exact decode
+    /// ([`recovered`]). Those seen not to are passed over, as an exact
+    /// seek goes on to before them: keyframes whose packets were read and
+    /// not flagged keyframes (FFmpeg's parser's flag: no IDR picture, no
+    /// recovery point), and those a seek landed on whose first good frame
+    /// FFmpeg didn't flag one.
+    fn landing_for(&self, t: i64) -> Option<i64> {
+        let input = self.dec.input();
+        let stream = self.dec.stream_index();
+        let mut at = t.saturating_sub(self.dec.key_lag());
+        loop {
+            let k = ffi::index_keyframe_before(input, stream, at)?;
+            if self.corrupt_is_damage || !self.dec.no_start(k) {
+                return Some(k);
+            }
+            at = k.checked_sub(1)?;
         }
     }
 
@@ -917,9 +971,22 @@ impl FfmpegVideo {
             let landed = self.dec.landing();
             let got = first.is_some();
             if let Some(r) = first
+                && self.exact_run
                 && (r.pts <= t || r.pts == self.info.origin_pts)
             {
                 return Ok(Some(Start::Seeked(Some(r))));
+            }
+            if got && !self.exact_run {
+                tracing::debug!(
+                    path = %self.path().display(),
+                    target = t,
+                    landed = ?landed,
+                    "the seek landed on a keyframe the file doesn't say decoding \
+                     starts at: seeking to before it"
+                );
+                if let Some(d) = landed {
+                    self.dec.no_start_at(d);
+                }
             }
             // Nothing of the stream could be read: the keyframe landed on
             // lies past the cut of a file cut short of its index. The last
@@ -1116,6 +1183,7 @@ impl FfmpegVideo {
         // Already showing it, unless the next frame came out after a read
         // failure, when frames between the two may be lost.
         if self.position == Position::InStep
+            && self.exact_run
             && let (Some(c), Some(p)) = (&self.current, &self.pending)
             && c.pts <= t
             && t < p.pts
@@ -2041,8 +2109,40 @@ impl StreamFacts {
 /// The leading pictures shown before such a keyframe stay dropped, and so
 /// do the frames from an intra refresh's random access point, a P-frame,
 /// to where FFmpeg says decoding has recovered.
+///
+/// Nothing in the file says that the frames after such an I-frame don't
+/// refer to frames before it, and where they do (an I-frame x264 put at
+/// a flash, listed as a sync sample), decoded from it they refer to the
+/// stand-ins, grey or whatever the buffers they were given last held. So
+/// a decode that starts here gives a cut that starts here its frames, and
+/// a keyframe seek its keyframe, but no exact seek ends on a frame it
+/// decodes ([`recovered`]).
 fn starts_here(corrupt_is_damage: bool, fields: &FrameFields, landing: Option<i64>) -> bool {
     !corrupt_is_damage && fields.intra && fields.pts.is_some() && fields.pts == landing
+}
+
+/// Whether the frames decoded since a seek are those a decode from the
+/// start gives, as far as the file says, judged at `fields`, the first
+/// good frame. For every codec but H.264 (`corrupt_is_damage`), always:
+/// its decoders flag a frame that refers to a picture decoding didn't
+/// reach. For H.264, only when FFmpeg flags that frame a keyframe, as it
+/// does an IDR picture and a picture whose recovery point SEI counts no
+/// frames to where decoding is right. H.264's corrupt flag says only
+/// whether FFmpeg's decoder has counted decoding recovered, which it
+/// does at an I-frame by a heuristic that needs only that the stream
+/// allow few references (with 2, the frames after the I-frame may refer
+/// to the frame before it), and at the end of a recovery point's count,
+/// which on a P-frame (x264's intra refresh) can end on a frame unlike
+/// the decode from the start's (D29). Its parser's keyframe flag vouches
+/// for no more: it flags every packet with a recovery point SEI, whatever
+/// the SEI counts (after an I-frame whose SEI counts 4 frames, in a
+/// stream that keeps 2 references, the heuristic left frames that
+/// referred to stand-ins unflagged), and every I-frame of a stream that
+/// keeps one reference frame, which nothing here tells from the former.
+/// Such a seek goes on to before its keyframe, as far as the start of
+/// the stream.
+fn recovered(corrupt_is_damage: bool, fields: &FrameFields) -> bool {
+    corrupt_is_damage || fields.key
 }
 
 /// Whether a Matroska stream's timestamps, in ticks of `tb`, come at

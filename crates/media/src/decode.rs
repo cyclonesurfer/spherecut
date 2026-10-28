@@ -29,6 +29,7 @@
 //! [`VideoDecoder::skipped_packets`]; after [`MAX_UNREADABLE_IN_A_ROW`] in
 //! a row the file counts as unreadable.
 
+use std::collections::BTreeSet;
 use std::ffi::c_int;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -148,6 +149,16 @@ pub struct VideoDecoder {
     time_base: Rational,
     dec: ff::decoder::Video,
     hw: Option<Arc<HwDevice>>,
+    /// How `dec` was set up, to set it up again ([`reopen`](Self::reopen)).
+    options: Options,
+    /// Packets have been sent to `dec` since it was opened.
+    sent: bool,
+    /// Whether FFmpeg flagged the first frame decoded since opening a
+    /// keyframe; `None` before one comes out.
+    first_key: Option<bool>,
+    /// `dec` is to be opened afresh before the next packet is sent: it is
+    /// the stream's first, after packets were sent ([`reopen`](Self::reopen)).
+    reopening: bool,
     /// A packet read ahead, after one flagged corrupt (see `next_packet`).
     lookahead: Option<ff::Packet>,
     /// The demuxer has nothing more to give.
@@ -181,8 +192,21 @@ pub struct VideoDecoder {
     /// I-frame that isn't IDR only by its recovery point SEI, though the
     /// index (an MP4's `stss`) lists it and the seek lands on it.
     landing_key: Option<i64>,
-    /// The same timestamp of the last packet of the stream read.
+    /// The greatest of the same timestamps of the packets of the stream
+    /// read since opening or the last seek. An MP4's dts increase in
+    /// decode order, but a Matroska stream's pts go back at its B-frames,
+    /// and in a stream that ends on a keyframe and its leading B-frames,
+    /// the last packet read is shown before the keyframe.
     read_position: Option<i64>,
+    /// Once a packet has been read, the landing since opening: the
+    /// stream's first packet, by the timestamp the index compares.
+    first_landing: Option<Option<i64>>,
+    /// The keyframes the index lists, by its timestamp, seen not to start
+    /// an exact decode (bar the stream's first packet): those whose
+    /// packets the demuxer didn't flag keyframes, of those read so far
+    /// (for H.264, I-frames that aren't IDR and have no recovery point
+    /// SEI), and those the caller found so ([`no_start_at`](Self::no_start_at)).
+    no_starts: BTreeSet<i64>,
     /// The least that a keyframe's pts has been after its dts, over the
     /// keyframes read (and the packets landed on, which are the index's
     /// keyframes): how far the index's decode times lie before the times
@@ -252,6 +276,53 @@ fn hw_failed(path: &Path, dev: &HwDevice, reason: &str) -> MediaError {
         kind: device_label(dev.kind()).into(),
         reason: reason.into(),
     }
+}
+
+/// A decoder for a stream of `path` with parameters `par`, set up as
+/// `options` say, on `hw` when given.
+fn open_codec(
+    path: &Path,
+    par: ff::codec::Parameters,
+    hw: Option<&HwDevice>,
+    options: Options,
+) -> Result<ff::decoder::Video, MediaError> {
+    let fields = ffi::codecpar_fields(&par);
+    let mut ctx = ff::codec::context::Context::from_parameters(par)
+        .map_err(|e| err(path, "decoder parameters", e))?;
+    if options.output_corrupt {
+        ctx.set_flags(ff::codec::Flags::OUTPUT_CORRUPT);
+    }
+    match hw {
+        // One thread, libavcodec's default (D3).
+        Some(dev) => {
+            ffi::attach_hw_device(&mut ctx, dev).map_err(|e| err(path, "hardware device", e))?;
+            if let Some(n) = options.extra_hw_frames {
+                ffi::set_extra_hw_frames(&mut ctx, n);
+            }
+        }
+        // libavcodec defaults to one thread; let it pick per core
+        // unless told how many.
+        None => ctx.set_threading(ff::codec::threading::Config {
+            kind: ff::codec::threading::Type::Frame,
+            count: options.threads.map_or(0, |n| n.get() as usize),
+        }),
+    }
+    ffi::open_video_decoder(ctx, hw).map_err(|e| match (e, hw) {
+        (OpenDecoderError::NotOnDevice, Some(dev)) => {
+            hw_unsupported(path, dev, HwRefusal::NotOffered)
+        }
+        (OpenDecoderError::Ffmpeg(ff::Error::DecoderNotFound), _) => MediaError::NoDecoder {
+            path: path.to_path_buf(),
+            codec: match fields.codec_name.as_deref() {
+                // FFmpeg's names for a codec it doesn't know at all:
+                // the sample entry's fourcc says more.
+                Some(name) if name != "none" && name != "unknown_codec" => name.to_string(),
+                _ => crate::probe::fourcc_str(fields.codec_tag)
+                    .map_or_else(|| "this codec's".into(), |tag| format!("\"{tag}\"")),
+            },
+        },
+        (e, _) => err(path, "opening decoder", e),
+    })
 }
 
 impl VideoDecoder {
@@ -378,44 +449,8 @@ impl VideoDecoder {
                 size,
             });
         }
-        let mut ctx = ff::codec::context::Context::from_parameters(st.parameters())
-            .map_err(|e| err(path, "decoder parameters", e))?;
+        let dec = open_codec(path, st.parameters(), hw.as_deref(), options)?;
         ffi::discard_other_streams(&mut ictx, stream_index);
-        if options.output_corrupt {
-            ctx.set_flags(ff::codec::Flags::OUTPUT_CORRUPT);
-        }
-        match &hw {
-            // One thread, libavcodec's default (D3).
-            Some(dev) => {
-                ffi::attach_hw_device(&mut ctx, dev)
-                    .map_err(|e| err(path, "hardware device", e))?;
-                if let Some(n) = options.extra_hw_frames {
-                    ffi::set_extra_hw_frames(&mut ctx, n);
-                }
-            }
-            // libavcodec defaults to one thread; let it pick per core
-            // unless told how many.
-            None => ctx.set_threading(ff::codec::threading::Config {
-                kind: ff::codec::threading::Type::Frame,
-                count: options.threads.map_or(0, |n| n.get() as usize),
-            }),
-        }
-        let dec = ffi::open_video_decoder(ctx, hw.as_deref()).map_err(|e| match (e, &hw) {
-            (OpenDecoderError::NotOnDevice, Some(dev)) => {
-                hw_unsupported(path, dev, HwRefusal::NotOffered)
-            }
-            (OpenDecoderError::Ffmpeg(ff::Error::DecoderNotFound), _) => MediaError::NoDecoder {
-                path: path.to_path_buf(),
-                codec: match par.codec_name.as_deref() {
-                    // FFmpeg's names for a codec it doesn't know at all:
-                    // the sample entry's fourcc says more.
-                    Some(name) if name != "none" && name != "unknown_codec" => name.to_string(),
-                    _ => crate::probe::fourcc_str(par.codec_tag)
-                        .map_or_else(|| "this codec's".into(), |tag| format!("\"{tag}\"")),
-                },
-            },
-            (e, _) => err(path, "opening decoder", e),
-        })?;
         let codec = dec.codec();
         tracing::debug!(
             path = %path.display(),
@@ -432,6 +467,10 @@ impl VideoDecoder {
             time_base,
             dec,
             hw,
+            options,
+            sent: false,
+            first_key: None,
+            reopening: false,
             lookahead: None,
             read_done: false,
             eof_sent: false,
@@ -447,6 +486,8 @@ impl VideoDecoder {
             landing: None,
             landing_key: None,
             read_position: None,
+            first_landing: None,
+            no_starts: BTreeSet::new(),
             key_lag: None,
             skip_before: None,
             skip_sent: 0,
@@ -514,6 +555,8 @@ impl VideoDecoder {
             match self.dec.receive_frame(&mut frame) {
                 Ok(()) => {
                     self.frames += 1;
+                    self.first_key
+                        .get_or_insert_with(|| ffi::frame_fields(&frame).key);
                     self.check_on_device(&frame)?;
                     return Ok(Received::Frame(frame));
                 }
@@ -560,6 +603,10 @@ impl VideoDecoder {
                     if self.skip_before.is_some() {
                         self.skip_sent += 1;
                     }
+                    if std::mem::take(&mut self.reopening) {
+                        self.reopen()?;
+                    }
+                    self.sent = true;
                     self.dec
                         .send_packet(&pkt)
                         .map_err(|e| self.decode_error(e))?
@@ -608,10 +655,13 @@ impl VideoDecoder {
     }
 
     /// Seek the demuxer to the keyframe at or before `ts` in the stream's
-    /// time base (`AVSEEK_FLAG_BACKWARD`), and flush the decoder. Reading
-    /// failures and the end of the stream are cleared, so a seek back into
-    /// the good part of a truncated file decodes again (D29, updating
-    /// D13); a device's refusal is not.
+    /// time base (`AVSEEK_FLAG_BACKWARD`), and flush the decoder; one that
+    /// lands on the stream's first packet may open it afresh instead
+    /// ([`reopen`](Self::reopen)), so that decoding from there gives what
+    /// decoding from opening did. Reading failures and the end of the
+    /// stream are cleared, so a seek back into the good part of a
+    /// truncated file decodes again (D29, updating D13); a device's
+    /// refusal is not.
     pub(crate) fn seek(&mut self, ts: i64) -> Result<(), MediaError> {
         ffi::seek_frame(&mut self.ictx, self.stream_index, ts, true)
             .map_err(|e| err(&self.path, "seeking", e))?;
@@ -671,7 +721,35 @@ impl VideoDecoder {
         self.awaiting_landing = true;
         self.landing = None;
         self.landing_key = None;
+        self.reopening = false;
         self.read_position = None;
+    }
+
+    /// Replace the decoder with one opened afresh, as
+    /// [`with_options`](Self::with_options) opened it, before the stream's
+    /// first packet is sent again. A flush doesn't leave FFmpeg's H.264
+    /// decoder as opening does: its frame pool keeps the pictures it
+    /// decoded, and where the stream starts at an I-frame that isn't IDR
+    /// (a cut there), the stand-ins it makes for the frames before it
+    /// are those pictures rather than the zeroed buffers of a fresh pool,
+    /// and so are the frames that refer to them. So the stream's start
+    /// decodes afresh, unless its first frame was a keyframe (an IDR
+    /// picture, or a recovery point with a count of 0), after which the
+    /// decoder needs nothing from before.
+    fn reopen(&mut self) -> Result<(), MediaError> {
+        let par = self
+            .ictx
+            .stream(self.stream_index)
+            .map(|s| s.parameters())
+            .ok_or_else(|| err(&self.path, "reopening the decoder", "the stream is gone"))?;
+        self.dec = open_codec(&self.path, par, self.hw.as_deref(), self.options)?;
+        ffi::skip_nonref(&mut self.dec, self.skip_before.is_some());
+        self.sent = false;
+        tracing::debug!(
+            path = %self.path.display(),
+            "decoding the stream's start afresh: its first frame is no keyframe"
+        );
+        Ok(())
     }
 
     /// Takes, and drops, the frames the decoder holds ready to hand out,
@@ -693,9 +771,10 @@ impl VideoDecoder {
         }
     }
 
-    /// The first packet read since the last seek, by the timestamp the
-    /// index compares: where the seek landed. `None` before one is read,
-    /// or when it had no timestamp.
+    /// The first packet read since opening or the last seek, by the
+    /// timestamp the index compares: the stream's first, or where the
+    /// seek landed. `None` before one is read, or when it had no
+    /// timestamp.
     pub(crate) fn landing(&self) -> Option<i64> {
         self.landing
     }
@@ -707,8 +786,27 @@ impl VideoDecoder {
         self.landing_key
     }
 
-    /// The last packet read, by the same timestamp; `None` when none has
-    /// been read since opening or seeking.
+    /// Whether the last seek landed on the stream's first packet, as
+    /// opening does: decoding from there is decoding from the start.
+    pub(crate) fn landed_at_start(&self) -> bool {
+        self.landing.is_some() && Some(self.landing) == self.first_landing
+    }
+
+    /// Whether `ts` is a keyframe the index lists, by its timestamp, seen
+    /// not to start an exact decode (see the field).
+    pub(crate) fn no_start(&self, ts: i64) -> bool {
+        self.no_starts.contains(&ts)
+    }
+
+    /// Note that the keyframe at `ts`, by the index's timestamp, doesn't
+    /// start an exact decode: a seek landed on it and the frames decoded
+    /// from it may not be those a decode from the start gives.
+    pub(crate) fn no_start_at(&mut self, ts: i64) {
+        self.no_starts.insert(ts);
+    }
+
+    /// How far the packets read reach, by the same timestamp (see the
+    /// field); `None` when none has been read since opening or seeking.
     pub(crate) fn read_position(&self) -> Option<i64> {
         self.read_position
     }
@@ -913,8 +1011,17 @@ impl VideoDecoder {
                     if landed {
                         self.landing = ts;
                         self.landing_key = pkt.pts();
+                        let first = *self.first_landing.get_or_insert(ts);
+                        self.reopening = first == ts && self.sent && self.first_key != Some(true);
                     }
-                    self.read_position = ts.or(self.read_position);
+                    if !pkt.is_key()
+                        && let Some(ts) = ts
+                        && self.first_landing != Some(Some(ts))
+                        && ffi::index_keyframe_before(&self.ictx, self.stream_index, ts) == Some(ts)
+                    {
+                        self.no_starts.insert(ts);
+                    }
+                    self.read_position = ts.max(self.read_position);
                     // The landing is the index's keyframe, flagged one or
                     // not (see `landing_key`).
                     if (pkt.is_key() || landed)
