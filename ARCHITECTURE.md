@@ -62,12 +62,12 @@ until slice 5b gives render one such module to open its Vulkan device
 `unsafe` code lives in two modules, each block with a SAFETY comment:
 
 * `ffi.rs` holds what ffmpeg-next doesn't cover safely: codec-parameter
-  fields (colour, channel layout, display matrix, profile), stream media
-  types, hardware device types and codec hardware configs, `HwDevice` (a
-  reference-counted device context, released on drop) and `HwError`, the
-  `get_format` callback that refuses software fallback, opening files
-  with FFmpeg confined to them, reading metadata, finding a stream's
-  decoder, opening decoders under a picture size limit and a video
+  fields (colour, channel layout, display matrix, profile, extradata),
+  stream media types, hardware device types and codec hardware configs,
+  `HwDevice` (a reference-counted device context, released on drop) and
+  `HwError`, the `get_format` callback that refuses software fallback,
+  opening files with FFmpeg confined to them, reading metadata, finding a
+  stream's decoder, opening decoders under a picture size limit and a video
   decoder by its int codec id, reading a frame's format, planes,
   timestamps, flags and colour codes as ints (`frame_fields`), the
   layout a pixel format is uploaded in (`pixel_layout`, from
@@ -215,6 +215,10 @@ The other modules are safe Rust:
   `ProbeReport.path` serializes as lossy UTF-8, and its durations and
   start time as `Time`s. The CLI fails on any damage (D15).
 * `mp4`: the box reader, with fixed limits (DECISIONS D15).
+* `nal`: whether an H.264 or HEVC packet, length-prefixed as its `avcC`
+  or `hvcC` says, holds a picture FFmpeg's decoder flags a keyframe: an
+  IDR picture or a reference picture whose recovery point counts no
+  frames, or an IRAP picture of HEVC's base layer (D29).
 * `spherical`: Spherical Video V1 and V2 and SA3D, read from the boxes and
   written as box bytes.
 * `inject`: adds or replaces boxes in the first video and audio sample
@@ -253,7 +257,13 @@ The other modules are safe Rust:
   frames still to come out may follow frames the damage lost), reads a
   stream's first packets' timestamps and seeks back, stops at packet and
   frame boundaries on a `StopToken`, and skips non-reference frames until
-  a packet at a given pts, counting the packets sent meanwhile.
+  a packet at a given pts, counting the packets sent meanwhile. A decode
+  from the stream's first packet, once packets were sent, runs on a
+  decoder opened afresh, unless the first packet's NAL units (`nal`) or
+  FFmpeg's flag on the first frame say it starts at a keyframe; a reopen
+  that fails is `HwFailed` on a device, and otherwise an error until a
+  seek (D29). It says where its last error came out: the last packet
+  sent, and the errors since.
 * `backend`: the traits everything above media opens media through (D29):
   `MediaBackend` (`probe`, `open_video`, `open_audio`) and `VideoDecode`
   (`seek`, `next_frame`, `catch_up`, events and stats), with
@@ -288,7 +298,8 @@ The other modules are safe Rust:
   backwards seek by the tie rule, the latter by decoding from the start.
   Playing on, `next_frame` says a failed read once, as a `Damaged` event
   with its cause, before the first frame the decoder drains after it or
-  before the error (D13).
+  before the error (D13). Any damage is said once from one seek to the
+  next, however often decoding meets it (D29).
   It converts frames of a format that isn't uploaded as it is through
   swscale, once announced with `DecoderEvent::Converted` (D30). On a
   device, frames stay there until handed out: a seek holds its best
@@ -298,7 +309,8 @@ The other modules are safe Rust:
 * `fallback`: `Fallback::Software` (D30). A device that can't be opened,
   turns the stream down or fails on its first frame has the stream
   opened in software; one that fails later has it reopened in software
-  (`FallbackVideo`), once, with a seek it failed in done again. Either
+  (`FallbackVideo`), once, with a seek it failed in done again, which
+  doesn't say again the damage the device's attempt said. Either
   way a `tracing::warn!` and `DecoderEvent::FellBack` say why, and every
   frame after is `DecodePath::FellBack`. With `Fallback::Fail` the error
   is returned.

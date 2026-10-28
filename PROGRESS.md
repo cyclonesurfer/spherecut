@@ -175,18 +175,36 @@ xtask check` passed, and `cargo xtask compat` passed clippy, the link
 and the binding against FFmpeg 8.1.3 and 9.0.2, and Tier 1 against
 8.1.3. A last review of the decoder reopen and the landing rule
 (hardware paths, the merge's interactions, exact seeks) found no wrong
-frame and three minor faults, which come next:
+frame and three minor faults, fixed on `m1/seek-nits`, each with a test
+that fails without its fix (D29, D30):
 
 - A file trimmed by stream copy mid-GOP (an edit list that hides its
   first IDR picture's frame) reopens the decoder at every seek that
   lands on its first packet, though a flush gives the same frames:
-  20 to 25% more time on those seeks, measured in software.
+  20 to 25% more time on those seeks, measured in software. Fixed in
+  1748d3a: the first packet's NAL units say whether its picture is one
+  FFmpeg flags a keyframe; the new test's first clip reopened 5 times in
+  5 seeks without the fix, and none with it (99f2d6b counts reopens in
+  `DecodeStats`).
 - A reopen that fails (in practice only out of memory) loses the
-  stream's first packet and is taken for the file's damage.
+  stream's first packet and is taken for the file's damage. Fixed in
+  4289173: on a device it is the device's failure, and the fallback goes
+  on in software; in software it is an error until a seek. Injected,
+  it had made an exact seek to frame 2 return frame 6 as `Exact`.
 - When the landing rule turns down a landing, damage met while decoding
   to its first frame is said again by the decode from the earlier
   landing: two `Damaged` events, and two warnings in `spherecut frame`,
-  for one damaged packet.
+  for one damaged packet. Fixed in 62e3be4: damage is said once from one
+  seek to the next, however often decoding meets it, which also ends two
+  older doubles: a keyframe seek past a cut said the cut and playing on
+  to it said it again, and the step after a stopped seek said playback's
+  damage again.
+
+Those tests found that the oracle fails a closed-GOP clip behind an edit
+list of 3 frames, H.264 or HEVC, at frame 13: an exact seek to a
+keyframe right after a keyframe seek there seeks again where decoding
+on was cheaper. Its frames are right, and it was so before the fixes
+(D29).
 
 odin's third run (PR #5, `hw-reports/odin-be38fa409e.md`, at be38fa4):
 21 of 23 Tier 2 tests pass, including all four that failed in PR #4. Two
@@ -307,9 +325,13 @@ golden tests fail, and the fixes are next:
   queue), not `NotOffered`; only a codec without a Vulkan hwaccel, such
   as MPEG-4 Part 2, is `NotOffered` (D30).
 - A device failure on a damaged packet is `HwFailed`, so the damage shows
-  only once software decodes the packet after the fallback, and a
-  `Damaged` event can then come twice when a seek is done again. A
-  mid-stream fallback reopens the file and decodes from a keyframe.
+  only once software decodes the packet after the fallback. A mid-stream
+  fallback reopens the file and decodes from a keyframe.
+- Damage is said once from one seek to the next by what tells it apart
+  (D29): a packet with neither a byte position nor a timestamp, or a
+  run of frames referring to a lost picture without a pts, is said each
+  time decoding meets it. A trimmed HEVC stream that starts at a picture
+  that isn't IRAP still decodes its start on a decoder opened afresh.
 - `vaapi_seek_matches_software` and its Vulkan twin decode every sample
   stream from start to end on the device and make 50 exact seeks in each
   (20 above 2880², such as the X5's 8K takes) in software and on the
