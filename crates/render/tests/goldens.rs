@@ -3639,16 +3639,21 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
     // emulated, on those mips, with the error the emulation missed at
     // be38fa4 added, predicts each check after the fix: each clears
     // lavapipe's floor (its PSNR here less 3 dB, as a blessing calibrates
-    // it), where the old means through RADV's export, against the old
-    // reference, miss `fisheye_360`'s, as the RX 7600 did. lavapipe's own
-    // filter, emulated the same way, comes within 1 dB of its render on
-    // every row, which is what the method can be checked against here.
-    // Both are asserted only where lavapipe filters 8-bit planes to whole
-    // codes, as the model has it and as the lavapipe the goldens are
-    // blessed on does: one that filters them in floating point renders
-    // the wide views nearer the reference (59.97 dB for `fisheye_360`
-    // with GALLIVM_PERF=no_aos_sampling), so its floors aren't the
-    // blessed ones and say nothing of a GPU.
+    // it). lavapipe's own filter, emulated the same way, comes within 1
+    // dB of its render on every row, which is what the method can be
+    // checked against here. Both are asserted only where lavapipe filters
+    // 8-bit planes to whole codes, as the model has it and as the
+    // lavapipe the goldens are blessed on does: one that filters them in
+    // floating point renders the wide views nearer the reference (59.97
+    // dB for `fisheye_360` with GALLIVM_PERF=no_aos_sampling), so its
+    // floors aren't the blessed ones and say nothing of a GPU.
+    //
+    // The control is the old means through RADV's export, predicted the
+    // same way against today's reference. They clear lavapipe's floors
+    // too, so the floors can't tell them from the fix; but on the views
+    // the RX 7600 lost they come out more than 1 dB under the prediction,
+    // which is what D32's Revisit clause looks for in a GPU run (asserted
+    // everywhere: none of it is lavapipe's).
     let fixed = |blend: i32, truncate: bool| Precision {
         texel_bits: Some(8),
         lod_bits: Some(8),
@@ -3690,7 +3695,7 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
     let gpu = gpu();
     let mut renderer = StillRenderer::new(gpu);
     let (mut filter_miss, mut radv_miss, mut lavapipe_miss) = ([0.0f64; 4], 0.0f64, 0.0f64);
-    let (mut under, mut predictions) = (Vec::new(), Vec::new());
+    let (mut under, mut caught, mut predictions) = (Vec::new(), Vec::new(), Vec::new());
     for c in cpu_checks() {
         let what = format!("{} {}", c.row, c.key);
         let cpu = reference::render(
@@ -3800,28 +3805,36 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
             );
             psnrs.push(psnr);
         }
-        let (radv, now, model) = (psnrs[0], psnrs[1], psnrs[2]);
+        let (radv, now, model, old_now) = (psnrs[0], psnrs[1], psnrs[2], psnrs[3]);
         radv_miss = radv_miss.max((radv - rx).abs());
         lavapipe_miss = lavapipe_miss.max((model - here).abs());
         // The prediction: the emulation now, with the squared error it
         // missed of the RX 7600 at be38fa4 (RADV's own filter, as far as
-        // the model isn't it) added.
+        // the model isn't it) added. The control is the old means,
+        // predicted the same way against the same reference.
         let missed = (mse(rx) - mse(radv)).max(0.0);
         let predicted = db(mse(now) + missed);
+        let unfixed = db(mse(old_now) + missed);
         eprintln!(
             "{what}: the RX 7600 after the fix: {now:.2} dB emulated, {predicted:.2} dB with the \
-             error the emulation missed at be38fa4 ({:.2} dB alone) added",
-            db(missed)
+             error the emulation missed at be38fa4 ({:.2} dB alone) added; with the old means \
+             {unfixed:.2} dB, {:.2} dB under it",
+            db(missed),
+            predicted - unfixed
         );
         predictions.push((what.clone(), predicted, floor(here)));
-        if radv < floor(here) {
-            under.push(what);
+        if unfixed < floor(here) {
+            under.push(what.clone());
+        }
+        if predicted - unfixed > 1.0 {
+            caught.push(what);
         }
     }
     eprintln!(
         "worst miss: of the RX 7600, each filter {filter_miss:.2?} dB and RADV's export of the \
          old means {radv_miss:.2} dB; of lavapipe, its filter {lavapipe_miss:.2} dB; the old \
-         means through RADV's export under lavapipe's floor: {under:?}"
+         means through RADV's export, predicted against today's reference, more than 1 dB \
+         under the prediction: {caught:?}; under lavapipe's floor: {under:?}"
     );
     for (p, miss) in filters.iter().zip(filter_miss) {
         assert!(
@@ -3834,10 +3847,13 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
         radv_miss < 1.0,
         "RADV's export misses the RX 7600 by {radv_miss:.2} dB"
     );
-    assert!(
-        under.iter().any(|w| w.starts_with("fisheye_360 ")),
-        "the old means through RADV's export clear lavapipe's floors but {under:?}"
-    );
+    for row in ["fisheye_180", "fisheye_360", "stereo_tinyplanet"] {
+        assert!(
+            caught.iter().any(|w| w.starts_with(&format!("{row} "))),
+            "the old means through RADV's export come within 1 dB of the prediction for {row}: \
+             more than 1 dB under it only {caught:?}"
+        );
+    }
     // The model of lavapipe's filter is a fact about the lavapipe it was
     // made on, which holds what it filters from 8-bit planes to codes, and
     // so are the floors a blessing calibrates; a lavapipe that filters
