@@ -2439,6 +2439,136 @@ writes one.
 ask for corrupt frames, so from 8.0 FFmpeg refuses the HEVC pictures
 that refer to a lost one and it loses them without an error (D13).
 
+*Updated 2026-10-28, after the checks of main at 498d6e1.* A review of
+the reopen and the landing rule found no wrong frame and three faults,
+now fixed; the third's fix also ends two older ways one damage was said
+twice.
+
+A stream copied from mid-GOP (`ffmpeg -ss T -c copy`) starts at the
+keyframe before T, behind an edit list that hides its frame, and FFmpeg
+drops the frames an edit list hides. So the first frame decoded wasn't
+that keyframe, FFmpeg flagged it none, and every seek that landed on the
+stream's first packet opened the decoder afresh (on a device a new
+VA-API context or Vulkan video session), though a flush gives the same
+frames: the review measured 20 to 25% more time on those seeks, in
+software. Now the first packet's NAL units say whether its picture is
+one FFmpeg's decoder flags a keyframe: in H.264 an IDR picture, or a
+reference picture with a recovery point SEI that counts no frames; in
+HEVC an IRAP picture of the base layer (NAL unit types 16 to 23). That
+needs the length-prefixed form an `avcC` or `hvcC` box describes (MP4,
+Matroska); in Annex B and other codecs FFmpeg's flag on the first frame
+decided before and still does. A first packet the units don't vouch for
+leaves the rule as it was, so HEVC that starts at a picture that isn't
+IRAP still reopens: the pool's leftovers were measured for H.264 only,
+and nothing here shows whether HEVC's decoder needs it, so it is left.
+`DecodeStats::reopens` counts reopens.
+`a_trimmed_stream_seeks_to_its_start_on_the_decoder_it_has` hides an IDR
+picture (H.264 and HEVC, behind an edit list of 3 frames), an I-frame
+with a recovery point counting no frames (H.264) and a CRA picture
+(HEVC), each from a trim at 2 frames past the second keyframe, runs the
+oracle on each, and makes 5 seeks that land on the first packet, with
+no reopen; without the fix the first clip reopened 5 times. The cut at
+an I-frame that isn't IDR still reopens, once per such seek, which
+`a_cut_at_an_i_frame_decodes_from_its_start_as_it_opens` now counts.
+
+A reopen that failed (for want of memory, or on a device of decoders)
+dropped the stream's first packet, and the flushed decoder decoded on
+from the second: its error read as damage, with a `Damaged` event, and
+frames decoded without the start came back. With the failure injected,
+an exact seek to frame 2 of a 12-frame clip returned frame 6 as `Exact`
+after three `Damaged` events, and on the stand-in for a device, the
+fallback tests' seek to frame 5 returned frame 8 as `Exact`, with no
+fallback. Now nothing more is decoded. On a device the failure is the
+device's (`HwFailed`, D30), and the fallback goes on in software; in
+software it is an error that this and every later call returns until a
+seek, never damage and never a failed read.
+`a_reopen_that_fails_is_an_error_until_a_seek_and_never_damage` (a hook
+in the decoder, test builds only),
+`a_reopen_that_fails_on_a_device_is_the_devices_failure` and
+`a_decoder_the_device_cannot_open_again_goes_on_in_software`
+(`Fault::Reopen`) fail without the fix.
+
+Decoding can meet one damaged packet more than once between two seeks,
+and it was said each time. From an earlier landing after the landing rule
+turned one down: each exact seek to frames 13, 15, 20 and 25 of
+`h264_i_frames_listed_as_sync_samples_seek_exactly`'s clips, damaged in
+the packet after the first listed I-frame, gave two `Damaged` events,
+where a decode from the start gives one, on frame threads and on one.
+At the cut of a file cut short of its index, after a keyframe seek past
+the cut had said it and play went on to it. And on the way back to the
+last frame handed out after a stopped seek, which said playback's
+damage again with the next frame. `spherecut frame` warns once per
+event. Now damage is said once from one seek that hands out a frame to
+the next, however often decoding meets it. Each event's damage is told
+by what two decodes of the same packets share: a decoder error by the
+last packet sent before it (byte position and decode timestamp) and how
+many errors came out since that packet was sent, since FFmpeg hands out
+packet p's result as packet p + n - 1 is sent on n frame threads, and as
+p is sent on one, wherever decoding began; a run of frames FFmpeg flags
+as referring to a lost picture by its first frame's pts; and the failure
+reading stopped with by its cause, as it ends the stream until a seek.
+A seek that stops or fails goes on with what was said before it and
+what it said. A fallback carries what was said to software, and the
+seek it does again doesn't say what the device's attempt said (D30).
+Dropping a turned-down landing's events instead would have fixed only
+the first case; the event said is the first meeting's, whose
+`last_good_pts` is `None` where it is the landing's.
+`damage_is_said_once_from_one_seek_to_the_next` covers the three, and a
+stand-in for a device failing before and after the damage while playing
+and in an exact seek; each part fails without the fix, and a seek after
+says the damage again. Damage on a packet with neither a byte position
+nor a timestamp, and a lost picture's run without a pts, can't be told
+apart and are said each time.
+
+Also found, and left: in a closed-GOP clip of 27 frames (keyframes every
+8 frames, 3 B-frames) behind an edit list of 3 frames, in H.264 and in
+HEVC, an
+exact seek to a keyframe right after a keyframe seek there seeks again
+(1 seek, 10 frames decoded) where the oracle's cost check expects it to
+decode on, so the oracle fails such a clip at frame 13. Its frames are
+right, and it is so with these fixes and without them.
+
+*Updated 2026-10-28, after the review of `m1/seek-nits`.* The review
+found one more fault, older than these fixes, and it is left. FFmpeg's
+H.264 decoder can hand out a picture it never decoded. Where a damaged
+slice header still parses as far as the start of its picture, FFmpeg
+starts the picture, fails the slice and hands the picture out with
+whatever its buffer held, with no flag, no `decode_error_flags` and no
+error from `avcodec_send_packet`; only its log says "decode_slice_header
+error". The frames that refer to it, up to the next IDR picture, are
+decoded from those contents, which depend on what the decoder decoded
+before. So a decode from the IDR picture before the damage differs
+there from the decode from the start, and an exact seek returns its own
+decode's frames as `Exact`. Measured on the review's clip, 40 frames of
+x264 without B-frames keeping 3 references, with IDR pictures at 0, 10
+and 22, with the first 6 bytes of packet 12's slice header zeroed
+(`break_slice_header`): in `ffmpeg -threads 1`'s decode, frame 12 is
+frame 8's picture byte for byte, and plain FFmpeg decoding from IDR
+picture 10 on the same decoder after a flush gives other frames 12 to
+21, on one thread and on frame threads, on 6.1, 7.1.3, 8.1.3 and 9.0.2,
+while the decode from the start flags no frame and fails no packet.
+Spherecut's exact seek to frame 13 returns a frame unlike the decode
+from the start's, and so do the 8 frames after it, as `Exact` and with
+no `Damaged` event, on one thread and on frame threads, on a decoder
+just opened and after playing 30 frames (6.1). With packet 11 broken
+too, which fails before its picture starts, `avcodec_send_packet` fails
+on it and the seek says the damage once, but its frames are as wrong:
+on one thread, and on frame threads after playing 30 frames (the
+review's case). The review's case is the same at 92db604, before these
+fixes; HEVC wasn't tried.
+`damage_that_loses_a_reference_picture_is_reported_and_seeks_agree`
+holds because its broken slice header fails before FFmpeg starts the
+picture. Matching the decode from the start would take a decode from
+the start of the stream, on a decoder as it was then, for every exact
+seek past such damage, and on a device not even that, as its surfaces
+aren't zeroed. Saying the damage would take FFmpeg's log, read per
+decoder. And what such a seek should return is open: the plan's rule
+for damage before T (the last good frame, `Truncated`) and D27's
+(damage before the target fails `spherecut frame`), against this
+entry's (a seek into frames FFmpeg decoded past damage is `Exact`, and
+`spherecut frame` warns, in words that put the damage after the
+frame). That is Pat's decision.
+
 ## D30. Pixel formats and colour defaults
 
 *2026-10-24, M1 slice 2a. The M1 plan's D28, sections 3.4 and 3.5;
@@ -2571,7 +2701,10 @@ What:
   decoding or downloading a frame on the device is `HwFailed`
   (`hw_failed`), sticky like a refusal and never the file's damage: a
   hardware decoder's error can't be told apart from damage it met, and
-  software, after a fallback, says which it was.
+  software, after a fallback, says which it was. *From 2026-10-28 so is
+  a decoder the device can't open afresh to decode the stream's start
+  again (D29); before, the stream's first packet was lost and the error
+  taken for damage.*
 - `Fallback::Software` (`fallback.rs`):
   - **At open**, a device that won't open (`DeviceUnavailable`, in
     `MediaError::Hardware`'s words), a refusal (`Refused(HwRefusal)`) or
@@ -2590,7 +2723,9 @@ What:
     after_pts, error }`, after the last frame returned. Events come in
     order: the hardware decoder's, `FellBack`, software's, and
     `LayoutChanged` when software's layout or size differs (NV12 to
-    `yuv420p`).
+    `yuv420p`). *From 2026-10-28 software also takes over the damage
+    said since the last seek, and a seek done again doesn't say again
+    what the device's attempt said (D29).*
   - Every frame after carries `DecodePath::FellBack { from, reason }`,
     `stats()` counts both decoders' frames, and a `tracing::warn!` gives
     D14's reason: "decoding in software instead of with VA-API:
@@ -2609,6 +2744,8 @@ What:
   one, so that Tier 1 runs every fallback path (`crates/synth/tests/
   fallback.rs`, with its `FaultBackend`). The Tier 2 tests check their
   own checks the same way: they pass on a stand-in and fail on a fault.
+  *From 2026-10-28 `Fault::Reopen` fails instead every opening of the
+  decoder afresh for the stream's start (D29).*
 
 Where this differs from the plan:
 
@@ -2695,8 +2832,9 @@ Limits:
   playback benchmarks, unless 5b's zero-copy has replaced the download
   by then.
 - An `HwFailed` on a damaged packet hides the damage until software
-  decodes the packet again; a `Damaged` event can then be reported twice,
-  when a seek is done again.
+  decodes the packet again. *Until 2026-10-28 a `Damaged` event could
+  then be reported twice, when a seek was done again; now damage is said
+  once from one seek to the next across the fallback (D29).*
 - The fallback reopens the file and decodes from a keyframe, so a
   mid-stream fallback costs one seek.
 

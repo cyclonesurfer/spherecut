@@ -506,6 +506,20 @@ pub fn media_type(p: &ff::codec::Parameters) -> ff::media::Type {
     .map_or(Type::Unknown, |(_, kind)| kind)
 }
 
+/// A stream's extradata (for H.264 and HEVC in MP4 or Matroska, its
+/// `avcC` or `hvcC`); empty when it has none.
+pub(crate) fn extradata(p: &ff::codec::Parameters) -> Vec<u8> {
+    // SAFETY: `p` borrows live codec parameters; plain fields.
+    let (data, size) = unsafe { ((*p.as_ptr()).extradata, (*p.as_ptr()).extradata_size) };
+    let n = usize::try_from(size).unwrap_or(0);
+    if n == 0 || data.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: a non-NULL `extradata` holds `extradata_size` bytes, owned
+    // by the parameters `p` borrows; they are copied out.
+    unsafe { std::slice::from_raw_parts(data, n) }.to_vec()
+}
+
 /// `l` points at the channel layout of live codec parameters.
 fn describe_layout(l: *const sys::AVChannelLayout) -> Option<String> {
     let mut buf = [0 as c_char; 256];

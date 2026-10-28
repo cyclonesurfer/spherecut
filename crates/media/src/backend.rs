@@ -113,6 +113,11 @@ pub enum Fault {
     /// As it is copied to system memory, when it is about to be handed
     /// out; a frame never handed out never fails.
     Download,
+    /// Not a frame: every decode from the stream's start after packets
+    /// were sent opens the decoder afresh, as for a stream whose first
+    /// picture is no keyframe (D29), and that fails, as when the device can
+    /// make no more decoders. The plan's `frame` isn't looked at.
+    Reopen,
 }
 
 #[derive(Debug, Clone)]
@@ -426,7 +431,7 @@ pub enum DecoderEvent {
 /// What kind of damage a [`DecoderEvent::Damaged`] is, which says the
 /// CLI's code for it (D27, the M1 plan's amendment 8): a seek past it is
 /// [`Exactness::Truncated`] whatever the cause.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DamageCause {
     /// The file ends before the data its index lists: it was cut short.
     Cut,
@@ -469,6 +474,10 @@ pub struct DecodeStats {
     /// format and size (0 in software). Once the decoder's pool holds the
     /// frames kept alive, a download allocates none (D30).
     pub download_buffers: u64,
+    /// Times the decoder was opened afresh to decode the stream's start
+    /// again (D29): each is a new decoder, and on a device a new VA-API
+    /// context or Vulkan video session.
+    pub reopens: u64,
 }
 
 /// A decoded picture: owned, immutable, `Send` and `Sync`, and shared as

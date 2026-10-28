@@ -25,6 +25,7 @@
 //! device refusing the stream or failing on it is returned at once and
 //! never taken for damage, for the fallback (`fallback.rs`) to act on.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -40,7 +41,7 @@ use crate::backend::{
 #[cfg(feature = "fault-injection")]
 use crate::backend::{Fault, FaultPlan};
 use crate::color::{self, ColorContext};
-use crate::decode::{Received, VideoDecoder};
+use crate::decode::{ErrorPlace, Received, VideoDecoder};
 use crate::ffi::{self, FrameFields, Scaler};
 use crate::mp4::{self, FirstBox};
 use crate::spherical::{self, Projection, StereoMode};
@@ -228,16 +229,13 @@ impl Injection {
         at: Option<Fault>,
     ) -> Result<(), MediaError> {
         if self.fired.is_none() && made == Some(self.plan.frame) && at == Some(self.plan.fault) {
-            let reason = format!(
-                "fault injected: frame {} {}",
-                self.plan.frame,
-                match self.plan.fault {
-                    Fault::Decode => "failed to decode",
-                    Fault::Download => "failed to download",
-                }
-            );
-            tracing::warn!(path = %path.display(), "hardware decoding failed: {reason}");
-            self.fired = Some(reason);
+            let what = match self.plan.fault {
+                Fault::Decode => "failed to decode",
+                Fault::Download => "failed to download",
+                // Never a frame's (see `FfmpegVideo::decode`).
+                Fault::Reopen => "failed to reopen",
+            };
+            return Err(self.fire(path, &format!("frame {} {what}", self.plan.frame)));
         }
         match &self.fired {
             Some(reason) => Err(MediaError::HwFailed {
@@ -246,6 +244,19 @@ impl Injection {
                 reason: reason.clone(),
             }),
             None => Ok(()),
+        }
+    }
+
+    /// Fire now, as the device failing for `reason`: the `HwFailed` that
+    /// every later check returns too.
+    fn fire(&mut self, path: &Path, reason: &str) -> MediaError {
+        let reason = format!("fault injected: {reason}");
+        tracing::warn!(path = %path.display(), "hardware decoding failed: {reason}");
+        self.fired = Some(reason.clone());
+        MediaError::HwFailed {
+            path: path.to_path_buf(),
+            kind: self.kind.clone(),
+            reason,
         }
     }
 }
@@ -339,9 +350,21 @@ pub struct FfmpegVideo {
     /// which the file's damage lost, and those for AV1, VP9, ProRes,
     /// MJPEG and MPEG-1, 2 and 4 flag none. See also [`starts_here`].
     corrupt_is_damage: bool,
-    /// Since the last seek, the failure reading stopped with has been
-    /// said as a `Damaged` event.
-    failure_said: bool,
+    /// The damage said with a `Damaged` event since the last seek that
+    /// handed out a frame (or opening), and that said by the seek under
+    /// way (or the last one). Each is said once from one seek to the next,
+    /// however often decoding meets it again (D29): from an earlier
+    /// landing after the landing rule turned one down, on the way back to
+    /// the last frame handed out after a stopped seek, or at the end of a
+    /// cut file after a keyframe seek past the cut. A seek that stops or
+    /// fails goes on with both; one done again after a fallback, with what
+    /// it said ([`seek_again`](Self::seek_again)).
+    said: HashSet<Damage>,
+    said_seeking: HashSet<Damage>,
+    /// A seek is under way: damage is said in `said_seeking`.
+    seeking: bool,
+    /// The damage of the error [`decode`](Self::decode) last returned.
+    met: Option<Damage>,
     /// The stream has no timestamps: pts are counted, as frame index times
     /// `frame_ticks`.
     no_timestamps: bool,
@@ -381,8 +404,26 @@ enum Failed {
     Device(MediaError),
     /// Reading the file failed: the stream ends there, until a seek.
     Reading(MediaError),
+    /// The decoder couldn't be opened afresh to decode the stream's start
+    /// again (D29), in software: returned at once, as every later call
+    /// returns it until a seek; never taken for damage.
+    Reopen(MediaError),
     /// Damage the decoder goes on past, said with a `Damaged` event.
     Damage(MediaError),
+}
+
+/// Damage a `Damaged` event says, by what tells it from other damage
+/// when decoding meets it again ([`FfmpegVideo::said`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Damage {
+    /// A decoder error, by where it came out.
+    Decoder(ErrorPlace),
+    /// The first of a run of frames that refer to a picture the damage
+    /// lost, by its pts ([`FfmpegVideo::lost_reference`]).
+    Lost(i64),
+    /// The failure reading stopped with, by its cause: it ends the stream
+    /// until a seek, so there is one at a time.
+    Read(DamageCause),
 }
 
 /// What [`FfmpegVideo::decode`] got.
@@ -445,11 +486,16 @@ impl FfmpegVideo {
         // A fault is injected where a device decodes, or stands in.
         #[cfg(feature = "fault-injection")]
         let mut injection = match (&decode_path, req.fault) {
-            (DecodePath::Hardware { kind }, Some(plan)) => Some(Injection {
-                plan,
-                kind: kind.to_string(),
-                fired: None,
-            }),
+            (DecodePath::Hardware { kind }, Some(plan)) => {
+                if plan.fault == Fault::Reopen {
+                    dec.fail_reopens();
+                }
+                Some(Injection {
+                    plan,
+                    kind: kind.to_string(),
+                    fired: None,
+                })
+            }
             _ => None,
         };
         // A Matroska track's default duration makes a rate whether its
@@ -585,7 +631,10 @@ impl FfmpegVideo {
             exact_run: true,
             losing: false,
             corrupt_is_damage,
-            failure_said: false,
+            said: HashSet::new(),
+            said_seeking: HashSet::new(),
+            seeking: false,
+            met: None,
             no_timestamps,
             frame_ticks,
             end_pts: facts.end_pts,
@@ -641,6 +690,8 @@ impl FfmpegVideo {
     fn failed(&self, e: MediaError) -> Failed {
         if e.is_device_failure() {
             Failed::Device(e)
+        } else if self.dec.reopen_failed() {
+            Failed::Reopen(e)
         } else if self.dec.has_failed() {
             Failed::Reading(e)
         } else {
@@ -670,16 +721,30 @@ impl FfmpegVideo {
     /// among them is reached by seeking to before that keyframe.
     /// Notes timestamps that go backwards.
     fn decode(&mut self, stop: &StopToken) -> Result<Got, MediaError> {
+        self.met = None;
         #[cfg(feature = "fault-injection")]
         self.inject(None, None)?;
         loop {
             let started = Instant::now();
             let got = self.dec.receive(Some(stop));
             let ms = started.elapsed().as_secs_f64() * 1000.0;
-            let frame = match got? {
-                Received::Frame(frame) => frame,
-                Received::End => return Ok(Got::End),
-                Received::Stopped => return Ok(Got::Stopped),
+            // A device that can't open another decoder has failed; its
+            // stand-in fails so.
+            #[cfg(feature = "fault-injection")]
+            let got = match (&mut self.injection, got) {
+                (Some(i), Err(_)) if i.plan.fault == Fault::Reopen && self.dec.reopen_failed() => {
+                    Err(i.fire(self.dec.path(), "reopening the decoder failed"))
+                }
+                (_, got) => got,
+            };
+            let frame = match got {
+                Ok(Received::Frame(frame)) => frame,
+                Ok(Received::End) => return Ok(Got::End),
+                Ok(Received::Stopped) => return Ok(Got::Stopped),
+                Err(e) => {
+                    self.met = self.dec.error_place().map(Damage::Decoder);
+                    return Err(e);
+                }
             };
             #[cfg(feature = "fault-injection")]
             self.inject(
@@ -694,6 +759,7 @@ impl FfmpegVideo {
             if fields.corrupt && !starts && (!self.settled || self.corrupt_is_damage) {
                 if self.settled && !self.losing {
                     self.losing = true;
+                    self.met = fields.pts.map(Damage::Lost);
                     return Err(self.lost_reference(fields.pts));
                 }
                 continue;
@@ -814,8 +880,44 @@ impl FfmpegVideo {
         self.settled = false;
         self.exact_run = to_start;
         self.losing = false;
-        self.failure_said = false;
         self.start_run();
+    }
+
+    /// Say `damage` as a `Damaged` event, unless it has been said since
+    /// the last seek ([`said`](Self::said)). Damage that can't be told
+    /// from other damage (`None`) is always said.
+    fn say(
+        &mut self,
+        damage: Option<Damage>,
+        reason: String,
+        last_good_pts: Option<i64>,
+        cause: DamageCause,
+    ) {
+        let said = match self.seeking {
+            true => &mut self.said_seeking,
+            false => &mut self.said,
+        };
+        if damage.is_some_and(|d| !said.insert(d)) {
+            return;
+        }
+        self.events.push(DecoderEvent::Damaged {
+            reason,
+            last_good_pts,
+            cause,
+        });
+    }
+
+    /// Say `e`, damage [`decode`](Self::decode) returned, after
+    /// `last_good_pts`.
+    fn say_corrupt(&mut self, e: &MediaError, last_good_pts: Option<i64>) {
+        let damage = self.met.take();
+        self.say(damage, e.to_string(), last_good_pts, DamageCause::Corrupt);
+    }
+
+    /// Say the failure reading stopped with, after `last_good_pts`.
+    fn say_read(&mut self, reason: String, last_good_pts: Option<i64>) {
+        let cause = self.dec.read_cause().unwrap_or(DamageCause::Read);
+        self.say(Some(Damage::Read(cause)), reason, last_good_pts, cause);
     }
 
     /// Say the failure reading stopped with as a `Damaged` event, after
@@ -825,16 +927,8 @@ impl FfmpegVideo {
     /// come after frames the damage lost, and before the error the stream
     /// then ends with.
     fn say_failure(&mut self) {
-        if self.failure_said {
-            return;
-        }
         if let Some(e) = self.dec.read_failure() {
-            self.failure_said = true;
-            self.events.push(DecoderEvent::Damaged {
-                reason: e.to_string(),
-                last_good_pts: self.last_returned(),
-                cause: self.dec.read_cause().unwrap_or(DamageCause::Read),
-            });
+            self.say_read(e.to_string(), self.last_returned());
         }
     }
 
@@ -958,13 +1052,9 @@ impl FfmpegVideo {
                     Ok(Got::End) => break None,
                     Ok(Got::Stopped) => return Ok(None),
                     Err(e) => match self.failed(e) {
-                        Failed::Device(e) => return Err(e),
+                        Failed::Device(e) | Failed::Reopen(e) => return Err(e),
                         Failed::Reading(_) => break None,
-                        Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
-                            reason: e.to_string(),
-                            last_good_pts: None,
-                            cause: DamageCause::Corrupt,
-                        }),
+                        Failed::Damage(e) => self.say_corrupt(&e, None),
                     },
                 }
             };
@@ -1157,13 +1247,9 @@ impl FfmpegVideo {
             Ok(Got::Stopped) => return Ok(true),
             Ok(Got::End) => {}
             Err(e) => match self.failed(e) {
-                Failed::Device(e) => return Err(e),
+                Failed::Device(e) | Failed::Reopen(e) => return Err(e),
                 Failed::Reading(_) => {}
-                Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
-                    reason: e.to_string(),
-                    last_good_pts: self.last_decoded,
-                    cause: DamageCause::Corrupt,
-                }),
+                Failed::Damage(e) => self.say_corrupt(&e, self.last_decoded),
             },
         }
         Ok(false)
@@ -1250,16 +1336,12 @@ impl FfmpegVideo {
                         return Ok(None);
                     }
                     Err(e) => match self.failed(e) {
-                        Failed::Device(e) => return Err(e),
+                        Failed::Device(e) | Failed::Reopen(e) => return Err(e),
                         Failed::Reading(e) => {
                             damage = Some(e.to_string());
                             break;
                         }
-                        Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
-                            reason: e.to_string(),
-                            last_good_pts: best.as_ref().map(|b| b.pts),
-                            cause: DamageCause::Corrupt,
-                        }),
+                        Failed::Damage(e) => self.say_corrupt(&e, best.as_ref().map(|b| b.pts)),
                     },
                 }
             }
@@ -1300,12 +1382,7 @@ impl FfmpegVideo {
             },
         };
         let exactness = if let Some(reason) = damage {
-            self.failure_said = true;
-            self.events.push(DecoderEvent::Damaged {
-                reason: reason.clone(),
-                last_good_pts: Some(frame.pts),
-                cause: self.dec.read_cause().unwrap_or(DamageCause::Read),
-            });
+            self.say_read(reason.clone(), Some(frame.pts));
             if frame.pts == t {
                 // The damage is after the target, which is shown as it is.
                 Exactness::Exact
@@ -1374,16 +1451,12 @@ impl FfmpegVideo {
                     return Ok(None);
                 }
                 Err(e) => match self.failed(e) {
-                    Failed::Device(e) => return Err(e),
+                    Failed::Device(e) | Failed::Reopen(e) => return Err(e),
                     Failed::Reading(e) => {
                         damage = Some(e.to_string());
                         break;
                     }
-                    Failed::Damage(e) => self.events.push(DecoderEvent::Damaged {
-                        reason: e.to_string(),
-                        last_good_pts: None,
-                        cause: DamageCause::Corrupt,
-                    }),
+                    Failed::Damage(e) => self.say_corrupt(&e, None),
                 },
             }
         }
@@ -1397,12 +1470,7 @@ impl FfmpegVideo {
         };
         let exactness = match (best, last, damage) {
             (_, _, Some(reason)) => {
-                self.failure_said = true;
-                self.events.push(DecoderEvent::Damaged {
-                    reason,
-                    last_good_pts: Some(frame.pts),
-                    cause: self.dec.read_cause().unwrap_or(DamageCause::Read),
-                });
+                self.say_read(reason, Some(frame.pts));
                 if frame.pts == t {
                     Exactness::Exact
                 } else {
@@ -1448,7 +1516,7 @@ impl FfmpegVideo {
                 }
                 Ok(Got::Stopped) => return Ok(None),
                 Err(e) => match self.failed(e) {
-                    Failed::Device(e) | Failed::Reading(e) => return Err(e),
+                    Failed::Device(e) | Failed::Reading(e) | Failed::Reopen(e) => return Err(e),
                     // Said by the first decode of the stream already.
                     Failed::Damage(_) => {}
                 },
@@ -1488,12 +1556,8 @@ impl FfmpegVideo {
                     self.position = Position::Lost;
                     return Ok(None);
                 }
-                Err(e) if e.is_device_failure() => return Err(e),
-                Err(e) if !self.dec.has_failed() => self.events.push(DecoderEvent::Damaged {
-                    reason: e.to_string(),
-                    last_good_pts: None,
-                    cause: DamageCause::Corrupt,
-                }),
+                Err(e) if e.is_device_failure() || self.dec.reopen_failed() => return Err(e),
+                Err(e) if !self.dec.has_failed() => self.say_corrupt(&e, None),
                 // Nothing of the stream could be read: the seek landed past
                 // the cut of a file cut short of its index, as in `land`.
                 // The last keyframe the file holds is the one to show, with
@@ -1502,11 +1566,12 @@ impl FfmpegVideo {
                     match self.dec.keyframe_inside(inside) {
                         Some(k) => {
                             if inside.is_none() {
-                                self.events.push(DecoderEvent::Damaged {
-                                    reason: e.to_string(),
-                                    last_good_pts: None,
-                                    cause: DamageCause::Cut,
-                                });
+                                self.say(
+                                    Some(Damage::Read(DamageCause::Cut)),
+                                    e.to_string(),
+                                    None,
+                                    DamageCause::Cut,
+                                );
                             }
                             inside = Some(k);
                             self.dec.seek(k.saturating_add(self.dec.key_lag()))?;
@@ -1622,14 +1687,10 @@ impl FfmpegVideo {
                     Ok(Got::End) => break,
                     Ok(Got::Stopped) => return Ok(false),
                     Err(e) => match self.failed(e) {
-                        Failed::Device(e) => return Err(e),
+                        Failed::Device(e) | Failed::Reopen(e) => return Err(e),
                         Failed::Reading(_) => break,
                         Failed::Damage(e) => {
-                            self.events.push(DecoderEvent::Damaged {
-                                reason: e.to_string(),
-                                last_good_pts: Some(current.pts),
-                                cause: DamageCause::Corrupt,
-                            });
+                            self.say_corrupt(&e, Some(current.pts));
                             continue;
                         }
                     },
@@ -1682,6 +1743,67 @@ impl FfmpegVideo {
         self.current.as_ref().map(|c| c.pts)
     }
 
+    /// [`seek`](VideoDecode::seek), as done again after a fallback: the
+    /// damage the seek said before the device failed isn't said again
+    /// ([`said`](Self::said)).
+    pub(crate) fn seek_again(
+        &mut self,
+        at: Time,
+        mode: SeekMode,
+        stop: &StopToken,
+    ) -> Result<SeekOutcome, MediaError> {
+        self.seeking = true;
+        let got = self.seek_once(at, mode, stop);
+        self.seeking = false;
+        match &got {
+            Ok(SeekOutcome::Frame { .. }) => self.said = std::mem::take(&mut self.said_seeking),
+            _ => self.said.extend(self.said_seeking.iter().copied()),
+        }
+        got
+    }
+
+    /// [`seek`](VideoDecode::seek)'s work.
+    fn seek_once(
+        &mut self,
+        at: Time,
+        mode: SeekMode,
+        stop: &StopToken,
+    ) -> Result<SeekOutcome, MediaError> {
+        let tb = self.info.time_base;
+        let ticks = at
+            .to_pts(tb, Rounding::Floor)
+            .map_err(|e| MediaError::Decode {
+                path: self.path().to_path_buf(),
+                reason: format!("seeking to {at:?}: {e}"),
+            })?;
+        let before_first = ticks < 0;
+        let t = self.info.origin_pts.saturating_add(ticks.max(0));
+        // A seek ends catching up: its decode skips nothing, and it can't
+        // decode forward over frames catching up passed over.
+        if let Some(c) = self.catch_up.take() {
+            self.dec.skip_nonref_before(None);
+            if c.moved(&self.dec) {
+                self.position = Position::Lost;
+            }
+        }
+        let got = match mode {
+            SeekMode::Exact => self.exact(t, stop)?,
+            SeekMode::Keyframe => self.keyframe(t, stop)?,
+        };
+        Ok(match got {
+            None => SeekOutcome::Stopped,
+            Some((frame, exactness, cost)) => SeekOutcome::Frame {
+                frame,
+                exactness: if before_first && !matches!(exactness, Exactness::Truncated { .. }) {
+                    Exactness::BeforeFirst
+                } else {
+                    exactness
+                },
+                cost,
+            },
+        })
+    }
+
     /// Become the software decode that a hardware decode of kind `from`
     /// fell back to for `reason`, just opened on the same stream: frames
     /// say so ([`DecodePath::FellBack`]), and a [`DecoderEvent::FellBack`]
@@ -1730,6 +1852,11 @@ impl FfmpegVideo {
     fn take_over(&mut self, old: &FfmpegVideo) {
         // Run numbers given out stay unique.
         self.runs = self.runs.max(old.runs);
+        // Damage it said isn't said again: what reading met, and frames
+        // FFmpeg flags as referring to a lost picture; the device's own
+        // errors are its failure (D30).
+        self.said = old.said.clone();
+        self.said_seeking = old.said_seeking.clone();
         self.ties_seen |= old.ties_seen;
         if old.not_seekable && !self.not_seekable {
             self.not_seekable = true;
@@ -1813,39 +1940,8 @@ impl VideoDecode for FfmpegVideo {
         mode: SeekMode,
         stop: &StopToken,
     ) -> Result<SeekOutcome, MediaError> {
-        let tb = self.info.time_base;
-        let ticks = at
-            .to_pts(tb, Rounding::Floor)
-            .map_err(|e| MediaError::Decode {
-                path: self.path().to_path_buf(),
-                reason: format!("seeking to {at:?}: {e}"),
-            })?;
-        let before_first = ticks < 0;
-        let t = self.info.origin_pts.saturating_add(ticks.max(0));
-        // A seek ends catching up: its decode skips nothing, and it can't
-        // decode forward over frames catching up passed over.
-        if let Some(c) = self.catch_up.take() {
-            self.dec.skip_nonref_before(None);
-            if c.moved(&self.dec) {
-                self.position = Position::Lost;
-            }
-        }
-        let got = match mode {
-            SeekMode::Exact => self.exact(t, stop)?,
-            SeekMode::Keyframe => self.keyframe(t, stop)?,
-        };
-        Ok(match got {
-            None => SeekOutcome::Stopped,
-            Some((frame, exactness, cost)) => SeekOutcome::Frame {
-                frame,
-                exactness: if before_first && !matches!(exactness, Exactness::Truncated { .. }) {
-                    Exactness::BeforeFirst
-                } else {
-                    exactness
-                },
-                cost,
-            },
-        })
+        self.said_seeking.clear();
+        self.seek_again(at, mode, stop)
     }
 
     fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError> {
@@ -1866,7 +1962,7 @@ impl VideoDecode for FfmpegVideo {
                     }
                     Ok(Got::Stopped) => return Ok(NextFrame::Stopped),
                     Err(e) => match self.failed(e) {
-                        Failed::Device(e) => return Err(e),
+                        Failed::Device(e) | Failed::Reopen(e) => return Err(e),
                         Failed::Reading(e) => {
                             self.say_failure();
                             return Err(e);
@@ -1874,11 +1970,7 @@ impl VideoDecode for FfmpegVideo {
                         // One that doesn't end the stream is an event, as
                         // where the frame after this one is decoded ahead.
                         Failed::Damage(e) => {
-                            self.events.push(DecoderEvent::Damaged {
-                                reason: e.to_string(),
-                                last_good_pts: self.last_decoded,
-                                cause: DamageCause::Corrupt,
-                            });
+                            self.say_corrupt(&e, self.last_decoded);
                             continue;
                         }
                     },
@@ -1961,6 +2053,7 @@ impl VideoDecode for FfmpegVideo {
                 0.0
             },
             download_buffers: self.dec.download_buffers(),
+            reopens: self.dec.reopens(),
             ..self.stats
         }
     }
@@ -2327,7 +2420,88 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
     use crate::ff::ffi::AVPixelFormat as P;
+
+    /// Twelve 256x128 frames of H.264 at 30 fps, a keyframe every 6, as
+    /// `clip.mp4` in a directory of the system's temp dir (unit tests get
+    /// no CARGO_TARGET_TMPDIR) named for `name`, which the caller removes.
+    fn clip(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("spherecut-seek-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = VideoSettings {
+            encoder: "libx264".into(),
+            width: 256,
+            height: 128,
+            rate: FrameRate::FPS_30,
+            layout: PixelLayout::Yuv420p,
+            options: vec![("g".into(), "6".into())],
+            color: ColorTags::BT709_LIMITED,
+            edit_start: 0,
+            time_base: None,
+            crop_left: 0,
+        };
+        let mut w = Mp4Writer::create(&dir.join("clip.mp4"), &settings, None).unwrap();
+        for i in 0..12 {
+            let luma = vec![16 + 16 * i; 256 * 128];
+            let chroma = vec![128; 128 * 64];
+            w.push_video(&YuvPlanes::U8([luma, chroma.clone(), chroma]))
+                .unwrap();
+        }
+        w.finish().unwrap()
+    }
+
+    #[test]
+    fn a_reopen_that_fails_is_an_error_until_a_seek_and_never_damage() {
+        // In software, as when memory runs out: a seek to the stream's
+        // first GOP fails, and so does every call after it until a seek,
+        // with no `Damaged` event and no frame from the flushed decoder.
+        let path = clip("reopen-fails");
+        let never = StopToken::never();
+        let mut v = FfmpegVideo::open(&path, &VideoRequest::default()).unwrap();
+        for _ in 0..8 {
+            assert!(matches!(v.next_frame(&never).unwrap(), NextFrame::Frame(_)));
+        }
+        v.dec.fail_reopens();
+        let frame = |i| FrameRate::FPS_30.frame_to_time(i).unwrap();
+        for mode in [SeekMode::Exact, SeekMode::Keyframe] {
+            match v.seek(frame(2), mode, &never) {
+                Err(e @ MediaError::Decode { .. }) => {
+                    assert!(e.to_string().contains("reopening the decoder"), "{e}")
+                }
+                r => panic!("{mode:?}: expected the reopen's error, got {r:?}"),
+            }
+            for _ in 0..2 {
+                let r = v.next_frame(&never);
+                assert!(
+                    matches!(&r, Err(e) if e.to_string().contains("reopening the decoder")),
+                    "{mode:?}: {r:?}"
+                );
+            }
+        }
+        // A seek away from the start decodes again.
+        match v.seek(frame(8), SeekMode::Exact, &never).unwrap() {
+            SeekOutcome::Frame {
+                frame: f,
+                exactness,
+                ..
+            } => {
+                assert_eq!(f.time, frame(8));
+                assert_eq!(exactness, Exactness::Exact);
+            }
+            SeekOutcome::Stopped => panic!("stopped"),
+        }
+        assert!(matches!(v.next_frame(&never).unwrap(), NextFrame::Frame(_)));
+        let events = v.take_events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, DecoderEvent::Damaged { .. })),
+            "{events:?}"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
 
     #[test]
     fn formats_are_uploaded_converted_or_unsupported() {
