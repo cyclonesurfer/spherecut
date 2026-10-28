@@ -17,9 +17,9 @@
 //!   must match it pixel for pixel; elsewhere by PSNR ≥ 48 dB, SSIM ≥
 //!   0.995 and at most 4 LSB. A source whose decoded planes no longer hash
 //!   as blessed is reported as the source having changed;
-//! - `--reference`, the CPU renderer, holds each to a PSNR floor
-//!   calibrated when blessing (the PSNR then, less 3 dB, never below 36
-//!   dB), with no channel further than 0.1;
+//! - `--reference`, the CPU renderer, run with no Vulkan driver at all,
+//!   holds each to a PSNR floor calibrated when blessing (the PSNR then,
+//!   less 3 dB, never below 36 dB), with no channel further than 0.1;
 //! - `SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame
 //!   pipeline_goldens` rewrites the PNGs and the manifest, only when every
 //!   check passes, and refuses to lower a floor by more than 0.5 dB unless
@@ -32,7 +32,7 @@
 mod document;
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -129,6 +129,11 @@ impl Ran {
 /// `spherecut frame FILE -o OUT --json ARGS`, on lavapipe unless `args`
 /// pick an adapter or `--reference`.
 fn frame(file: &Path, out: &Path, args: &[&str]) -> Ran {
+    frame_in(file, out, args, &[])
+}
+
+/// [`frame`] with `env` set.
+fn frame_in(file: &Path, out: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Ran {
     let mut all: Vec<OsString> = vec!["frame".into(), file.into(), "-o".into(), out.into()];
     all.push("--json".into());
     if !args
@@ -138,7 +143,12 @@ fn frame(file: &Path, out: &Path, args: &[&str]) -> Ran {
         all.extend(["--adapter".into(), "cpu".into()]);
     }
     all.extend(args.iter().map(OsString::from));
-    let out = spherecut().args(&all).output().unwrap();
+    let mut cmd = spherecut();
+    cmd.args(&all);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().unwrap();
     Ran {
         status: out.status.code(),
         doc: document(&out.stdout),
@@ -1302,6 +1312,54 @@ fn what_frame_renders_differently_it_warns_about() {
         };
         assert!(far(behind, want) <= 0.1, "{name}: behind is {behind:?}");
     }
+
+    // A crop on one side and the top only, lon −90° to 180° and lat 67.5°
+    // down: each side lands where its bound says, left from right and top
+    // from bottom, on the GPU and on the CPU reference alike.
+    let (left, top) = (256usize, 64usize);
+    let (w, h) = (1024 - left, 512 - top);
+    let part = RgbImage {
+        width: w as u32,
+        height: h as u32,
+        pixels: (0..w * h)
+            .map(|i| grid.pixels[(i / w + top) * 1024 + left + i % w])
+            .collect(),
+    };
+    let clip = tagged_clip(
+        &dir,
+        "one-sided",
+        &part,
+        mono([0.0; 3], [quarter / 2, 0, quarter, 0]),
+    );
+    let black = [0.0; 3];
+    // (the view, the centre pixel's colour, or None for anything but black)
+    let views: [(&[&str], Option<[f64; 3]>); 5] = [
+        (&[], Some(marker('F'))),
+        (&["--yaw", "90"], Some(marker('R'))),
+        (&["--yaw", "-135"], Some(black)),
+        (&["--pitch", "80"], Some(black)),
+        (&["--pitch", "-80"], None),
+    ];
+    for renderer in [&["--adapter", "cpu"][..], &["--reference"]] {
+        for (view, want) in &views {
+            let mut args = vec!["--fov", "10", "--size", "33x33", "--overwrite"];
+            args.extend_from_slice(renderer);
+            args.extend_from_slice(view);
+            let ran = frame(&clip, &out, &args);
+            ran.ok();
+            assert_eq!(
+                ran.doc["warnings"][0]["message"],
+                "the picture covers part of the sphere (cropped by 0.25 left, 0.125 top, 0 right \
+                 and 0 bottom): the rest is black",
+                "{args:?}"
+            );
+            let centre = rgb(&load(&out), 16, 16);
+            match want {
+                Some(want) => assert!(far(centre, *want) <= 0.1, "{args:?}: {centre:?}"),
+                None => assert!(far(centre, black) > 0.2, "{args:?}: {centre:?}"),
+            }
+        }
+    }
 }
 
 /// Whether a warning has exactly its code and its message.
@@ -1635,10 +1693,21 @@ impl Run {
     /// lavapipe or with `--reference`: the result and the image, or a
     /// failure recorded.
     fn render(&mut self, clip: &Path, name: &str, args: &[&str]) -> Option<(Value, Image)> {
+        self.render_in(clip, name, args, &[])
+    }
+
+    /// [`render`](Self::render) with `env` set.
+    fn render_in(
+        &mut self,
+        clip: &Path,
+        name: &str,
+        args: &[&str],
+        env: &[(&str, &OsStr)],
+    ) -> Option<(Value, Image)> {
         let out = self.scratch.join(format!("{}-{name}.png", self.row));
         let mut a = args.to_vec();
         a.push("--overwrite");
-        let ran = frame(clip, &out, &a);
+        let ran = frame_in(clip, &out, &a, env);
         if ran.status != Some(0) {
             self.fail(format!("frame {args:?}: {} / {}", ran.doc, ran.stderr));
             return None;
@@ -2031,7 +2100,14 @@ fn stored_row(
     let (result, got) = run.render(clip, "gpu", args)?;
     let mut cpu_args = args.to_vec();
     cpu_args.push("--reference");
-    let (cpu_result, cpu) = run.render(clip, "cpu", &cpu_args)?;
+    // With no Vulkan driver at all, so that the CPU renders it whatever
+    // the JSON says: the floors alone would pass a GPU render too.
+    let no_icd = run.scratch.join("no-such-icd.json");
+    let no_gpu = [
+        ("VK_DRIVER_FILES", no_icd.as_os_str()),
+        ("VK_ICD_FILENAMES", no_icd.as_os_str()),
+    ];
+    let (cpu_result, cpu) = run.render_in(clip, "cpu", &cpu_args, &no_gpu)?;
     run.check(
         cpu_result["renderer"] == "reference" && cpu_result["gpu"].is_null(),
         format!("--reference didn't render on the CPU: {cpu_result}"),
