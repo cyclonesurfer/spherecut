@@ -611,16 +611,32 @@ fn without_sei(src: &Path, dst: &Path, from: usize) {
 /// H.264 whose keyframes after the first are I-frames that aren't IDR and
 /// carry no recovery point SEI, in open GOPs with B-frames, as broadcast
 /// streams, TS remuxes and cuts copied from them have them. FFmpeg's
-/// decoder starts at such a keyframe by a heuristic, and from 7.0 it
-/// flags corrupt the frames it decoded after the keyframe and before the
-/// keyframe came out, though every reference they need is there; 6.1
-/// hands them out unflagged. On 8.1.3 Spherecut took them for damage
+/// decoder starts at such a keyframe only by a heuristic, and flags
+/// corrupt the frames it hasn't seen decoding recover by (D29).
+///
+/// With one reference frame (synth's `veryfast`), the heuristic takes the
+/// keyframe, and from 7.0 the decoder flags the frames it decoded after
+/// it and before it came out, though every reference they need is there;
+/// 6.1 hands them out unflagged. On 8.1.3 Spherecut took them for damage
 /// after a seek, said `Damaged` and dropped them, so an exact seek to one
-/// gave the frame before it (D29). Two such clips, and a cut that starts
-/// at a keyframe that isn't IDR, are sought as any good clip, and the cut
-/// plays every frame from that keyframe on. FFmpeg's H.264 parser doesn't
-/// flag those keyframes' packets as keyframes either (only `stss` lists
-/// them), so a remux to Matroska would have none.
+/// gave the frame before it.
+///
+/// With three (x264's default `medium` keeps 3), the gap in `frame_num`
+/// a seek leaves is filled with three stand-in references, more than the
+/// heuristic allows, so the decoder flags every frame after such a
+/// keyframe up to the next IDR picture, the keyframe too, and every
+/// FFmpeg from 6.1 on: Spherecut dropped them all until the frames FFmpeg
+/// drains, unflagged, at the end of the stream. A keyframe seek gave the
+/// clip's last frames, exact seeks decoded from the start, and a cut
+/// opened on its second last frame. With 25 frames the clip ends on a
+/// keyframe and its leading B-frames, which then come out as it drains,
+/// unflagged, and must still be dropped.
+///
+/// Each clip is sought as any good clip, and each cut, which starts at a
+/// keyframe that isn't IDR, plays every frame from that keyframe on.
+/// FFmpeg's H.264 parser doesn't flag those keyframes' packets as
+/// keyframes either (only `stss` lists them), so a remux to Matroska
+/// would have none.
 #[test]
 fn h264_keyframes_without_recovery_points_seek_exactly() {
     let dir = TempDir::new("no-sei");
@@ -628,13 +644,15 @@ fn h264_keyframes_without_recovery_points_seek_exactly() {
         unmarked_keyframes: true,
         ..GOP_8
     };
-    let bare = |name: &str, bframes, from_key: usize| {
+    let bare = |name: &str, bframes, refs, frames, from_key: usize| {
         let clip = write(
             &Spec {
                 gop: Some(Gop {
                     bframes,
                     ..OPEN_GOP.unwrap()
                 }),
+                refs,
+                frames,
                 ..spec(name, Codec::H264)
             },
             &dir,
@@ -645,25 +663,32 @@ fn h264_keyframes_without_recovery_points_seek_exactly() {
         without_sei(&clip, &out, keys[from_key]);
         (clip, out, pk[keys[from_key]].0)
     };
-    for (name, bframes) in [("nosei-h264-b3", 3), ("nosei-h264-b2", 2)] {
-        let (clip, whole, _) = bare(name, bframes, 0);
+    for (name, bframes, refs, frames) in [
+        ("nosei-h264-b3", 3, None, 30),
+        ("nosei-h264-b2", 2, None, 30),
+        ("nosei-h264-ref3", 3, Some(3), 30),
+        ("nosei-h264-ref3-25", 3, Some(3), 25),
+    ] {
+        let (clip, whole, _) = bare(name, bframes, refs, frames, 0);
         // The SEI changes no picture.
         let frames = oracle(&whole, unmarked).frames;
         assert_eq!(frames, sequential(&clip).0, "{name}");
     }
-    // The cut's first frame is its keyframe, whose leading B-frames refer
-    // to the GOP cut off; every frame after it comes out.
-    let (clip, cut, key_pts) = bare("nosei-h264-cut", 3, 1);
-    let whole = sequential(&clip).0;
-    let from = whole.iter().position(|f| f.pts == key_pts).unwrap();
-    let shifted: Vec<Seen> = whole[from..]
-        .iter()
-        .map(|f| Seen {
-            pts: f.pts - key_pts,
-            ..*f
-        })
-        .collect();
-    assert_eq!(oracle(&cut, unmarked).frames, shifted);
+    // A cut's first frame is its keyframe, whose leading B-frames refer to
+    // the GOP cut off; every frame after it comes out.
+    for (name, refs) in [("nosei-h264-cut", None), ("nosei-h264-ref3-cut", Some(3))] {
+        let (clip, cut, key_pts) = bare(name, 3, refs, 30, 1);
+        let whole = sequential(&clip).0;
+        let from = whole.iter().position(|f| f.pts == key_pts).unwrap();
+        let shifted: Vec<Seen> = whole[from..]
+            .iter()
+            .map(|f| Seen {
+                pts: f.pts - key_pts,
+                ..*f
+            })
+            .collect();
+        assert_eq!(oracle(&cut, unmarked).frames, shifted, "{name}");
+    }
 }
 
 /// FFmpeg 7.1 and later's HEVC decoder queues the frames it outputs (all

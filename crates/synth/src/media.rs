@@ -89,6 +89,10 @@ pub struct Spec {
     /// narrower, without the pattern's left columns (see
     /// [`VideoSettings::crop_left`]).
     pub crop_left: u32,
+    /// The reference frames x264 or x265 may keep (their `ref`), or
+    /// `None` for the preset's own: 1 at `veryfast`, 3 at x264's default
+    /// `medium`.
+    pub refs: Option<u32>,
 }
 
 /// Keyframes every `keyint` frames, with `bframes` B-frames between
@@ -144,6 +148,7 @@ impl Default for Spec {
             vfr: false,
             noise: None,
             crop_left: 0,
+            refs: None,
         }
     }
 }
@@ -202,6 +207,9 @@ impl Spec {
                 }
                 params.push(format!("radl={}", g.radl));
             }
+        }
+        if let Some(r) = self.refs {
+            params.push(format!("ref={r}"));
         }
         // Single-threaded encodes keep the bitstream reproducible.
         options.push(("threads", "1"));

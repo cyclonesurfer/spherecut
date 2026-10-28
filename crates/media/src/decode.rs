@@ -164,13 +164,17 @@ pub struct VideoDecoder {
     hw_failed: Option<String>,
     frames: u64,
     skipped: u64,
-    /// Since the last seek, no packet of the stream has been read.
+    /// Since opening or the last seek, no packet of the stream has been
+    /// read.
     awaiting_landing: bool,
-    /// The first packet of the stream read since the last seek: its dts,
-    /// or its pts when it has no dts (Matroska), which is what the
-    /// demuxer's index and `av_seek_frame` compare.
+    /// The first packet of the stream read since opening or the last
+    /// seek: its dts, or its pts when it has no dts (Matroska), which is
+    /// what the demuxer's index and `av_seek_frame` compare.
     landing: Option<i64>,
-    /// The pts of that packet, when it is a keyframe.
+    /// The pts of that packet, the keyframe decoding starts from, whether
+    /// or not the demuxer flags it one: FFmpeg's H.264 parser flags an
+    /// I-frame that isn't IDR only by its recovery point SEI, though the
+    /// index (an MP4's `stss`) lists it and the seek lands on it.
     landing_key: Option<i64>,
     /// The same timestamp of the last packet of the stream read.
     read_position: Option<i64>,
@@ -422,7 +426,7 @@ impl VideoDecoder {
             hw_failed: None,
             frames: 0,
             skipped: 0,
-            awaiting_landing: false,
+            awaiting_landing: true,
             landing: None,
             landing_key: None,
             read_position: None,
@@ -673,8 +677,9 @@ impl VideoDecoder {
         self.landing
     }
 
-    /// The pts of the keyframe the last seek landed on: the first packet
-    /// read since, when it is a keyframe and has a pts.
+    /// The pts of the keyframe the last seek landed on, or decoding began
+    /// at since opening: the first packet read since, flagged a keyframe
+    /// or not (see the field).
     pub(crate) fn landing_key(&self) -> Option<i64> {
         self.landing_key
     }
@@ -884,7 +889,7 @@ impl VideoDecoder {
                     if self.awaiting_landing {
                         self.awaiting_landing = false;
                         self.landing = ts;
-                        self.landing_key = pkt.pts().filter(|_| pkt.is_key());
+                        self.landing_key = pkt.pts();
                     }
                     self.read_position = ts.or(self.read_position);
                     if pkt.is_key()
