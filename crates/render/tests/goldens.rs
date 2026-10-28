@@ -3508,6 +3508,15 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
             unrounded.windows(2).all(|w| w[0] >= w[1]),
             "{what}: {unrounded:?}"
         );
+        // Each export alone, the filter in f64.
+        for mips in [MipStore::F16TowardZero, MipStore::F32NearestEven] {
+            let p = Precision {
+                mips,
+                ..Precision::F64
+            };
+            let psnr = psnr_of(c.size, &coded(&e.render(&p)), &cpu.data);
+            eprintln!("{what}: {}: {psnr:.2} dB", p.describe());
+        }
         let bands = lod_bands(&c.frame, &c.view, c.size, &c.placement);
         for (name, p) in [("RADV's export", radv), ("lavapipe's filter", lavapipe)] {
             let got = coded(&e.render(&p));
