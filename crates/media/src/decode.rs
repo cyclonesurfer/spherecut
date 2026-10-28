@@ -179,8 +179,9 @@ pub struct VideoDecoder {
     /// The same timestamp of the last packet of the stream read.
     read_position: Option<i64>,
     /// The least that a keyframe's pts has been after its dts, over the
-    /// keyframes read: how far the index's decode times lie before the
-    /// times keyframes are shown.
+    /// keyframes read (and the packets landed on, which are the index's
+    /// keyframes): how far the index's decode times lie before the times
+    /// keyframes are shown.
     key_lag: Option<i64>,
     /// Frames nothing refers to are skipped until a packet with a pts at
     /// or after this one is sent.
@@ -886,13 +887,15 @@ impl VideoDecoder {
             match pkt.read(&mut self.ictx) {
                 Ok(()) if pkt.stream() == self.stream_index => {
                     let ts = pkt.dts().or(pkt.pts());
-                    if self.awaiting_landing {
-                        self.awaiting_landing = false;
+                    let landed = std::mem::take(&mut self.awaiting_landing);
+                    if landed {
                         self.landing = ts;
                         self.landing_key = pkt.pts();
                     }
                     self.read_position = ts.or(self.read_position);
-                    if pkt.is_key()
+                    // The landing is the index's keyframe, flagged one or
+                    // not (see `landing_key`).
+                    if (pkt.is_key() || landed)
                         && let (Some(pts), Some(dts)) = (pkt.pts(), pkt.dts())
                     {
                         let lag = pts.saturating_sub(dts);

@@ -675,9 +675,17 @@ fn h264_keyframes_without_recovery_points_seek_exactly() {
         assert_eq!(frames, sequential(&clip).0, "{name}");
     }
     // A cut's first frame is its keyframe, whose leading B-frames refer to
-    // the GOP cut off; every frame after it comes out.
-    for (name, refs) in [("nosei-h264-cut", None), ("nosei-h264-ref3-cut", Some(3))] {
-        let (clip, cut, key_pts) = bare(name, 3, refs, 30, 1);
+    // the GOP cut off; every frame after it comes out. No packet of a cut
+    // is flagged a keyframe, so `forward_is_cheaper` learns how far
+    // keyframes are shown after their decode time from the ones it lands
+    // on: with 1 B-frame, it took them for shown at their decode time, and
+    // an exact seek after a keyframe seek sought again (D29).
+    for (name, bframes, refs) in [
+        ("nosei-h264-cut", 3, None),
+        ("nosei-h264-b1-cut", 1, None),
+        ("nosei-h264-ref3-cut", 3, Some(3)),
+    ] {
+        let (clip, cut, key_pts) = bare(name, bframes, refs, 30, 1);
         let whole = sequential(&clip).0;
         let from = whole.iter().position(|f| f.pts == key_pts).unwrap();
         let shifted: Vec<Seen> = whole[from..]
