@@ -1084,6 +1084,86 @@ fn h264_recovery_points_that_count_frames_seek_exactly() {
     }
 }
 
+/// A cut of H.264 with no B-frames, keeping 3 references, that starts at
+/// an I-frame that isn't IDR and has no recovery point, as x264 codes a
+/// scene cut before `min-keyint`: the frames after it refer to frames the
+/// cut left out, for which FFmpeg's decoder puts in stand-ins. With no
+/// B-frames its heuristic takes the first stand-in for a place to start
+/// before it would colour them grey, so they keep what their buffers
+/// held: zeros from a new decoder's buffer pool, which zeroes what it
+/// allocates, and frames decoded before the seek after a flush. So
+/// decoding from the start again gave other pictures than opening did,
+/// and the exact seeks that went there returned them as `Exact`, with no
+/// event: the review counted 34 to 40 of 40 on one decoder, in MP4 and
+/// Matroska, on 6.1 and 8.1.3. Now a decode from the start of a stream
+/// whose first frame FFmpeg doesn't flag a keyframe runs on a new
+/// decoder, as opening's does (D29). The clip cuts away to another scene
+/// for a frame at 10 and at 22, and back, each cut an I-frame, and the
+/// copy lists every I-frame as a keyframe.
+#[test]
+fn a_cut_at_an_i_frame_decodes_from_its_start_as_it_opens() {
+    let dir = TempDir::new("p-cut");
+    let clip = write(
+        &Spec {
+            gop: Some(Gop {
+                keyint: 100,
+                bframes: 0,
+                open: false,
+                radl: 0,
+            }),
+            refs: Some(3),
+            cut_away: vec![10, 22],
+            scenecut: true,
+            frames: 48,
+            ..spec("p-only", Codec::H264)
+        },
+        &dir,
+    );
+    let whole = sequential(&clip).0;
+    // x264 coded the cuts as I-frames with no recovery point, and FFmpeg's
+    // parser doesn't flag them keyframes.
+    let bytes = std::fs::read(&clip).unwrap();
+    let pk = samples(&clip);
+    let intra: Vec<usize> = (1..pk.len())
+        .filter(|&k| slice_type(&bytes[pk[k].1..pk[k].1 + pk[k].2]) == 2)
+        .collect();
+    assert_eq!(intra, [10, 11, 22, 23]);
+    assert!(intra.iter().all(|&k| !pk[k].3), "{intra:?}");
+    let listed: Vec<i64> = intra.iter().map(|&k| pk[k].0).collect();
+    for ext in ["mp4", "mkv"] {
+        let cut = dir.join(format!("p-only-cut.{ext}"));
+        copy_h264(
+            &clip,
+            &cut,
+            10,
+            |_| true,
+            |pts, _| listed.contains(&pts),
+            None,
+            |_| None,
+        );
+        let frames = sequential(&cut).0;
+        // Its frames refer to frames before the I-frame, which the cut
+        // left out; a new decoder decodes them alike.
+        assert_ne!(
+            frames.iter().map(|f| f.hash).collect::<Vec<_>>(),
+            whole[10..].iter().map(|f| f.hash).collect::<Vec<_>>(),
+            "{ext}"
+        );
+        assert_eq!(sequential(&cut).0, frames, "{ext}");
+        let expect = Expect {
+            keyint: None,
+            unmarked_keyframes: true,
+            ..GOP_8
+        };
+        let cut_listed: Vec<i64> = [0, 1, 12, 13].iter().map(|&i| frames[i].pts).collect();
+        assert_eq!(
+            oracle_listed(&cut, expect, &cut_listed).frames,
+            frames,
+            "{ext}"
+        );
+    }
+}
+
 /// FFmpeg 7.1 and later's HEVC decoder queues the frames it outputs (all
 /// it has left at the end of the stream, several at once where a keyframe
 /// empties its picture buffer), and its flush leaves that queue as it is.

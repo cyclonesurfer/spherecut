@@ -315,7 +315,8 @@ pub struct FfmpegVideo {
     losing: bool,
     /// The frames decoded since opening or the last seek are those a
     /// decode from the start gives, as far as the file says: decoding
-    /// began at the stream's first packet, or the first good frame is one
+    /// began at the stream's first packet, with the decoder as opening
+    /// leaves it ([`VideoDecoder::seek`]), or the first good frame is one
     /// the file says decoding starts at ([`recovered`]). Not so where an
     /// H.264 seek landed on a keyframe that no IDR picture or recovery
     /// point with a count of 0 vouches for, which only FFmpeg's

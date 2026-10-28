@@ -102,6 +102,17 @@ pub struct Spec {
     pub intra: Vec<u32>,
     /// Frames shown as a flash: the pattern halfway to white.
     pub flash: Vec<u32>,
+    /// Frames of another scene, cut to and back from: the pattern with its
+    /// colours inverted.
+    pub cut_away: Vec<u32>,
+    /// With `gop`, the encoder's own scene-cut detection at its default
+    /// threshold (40), which `gop` otherwise turns off: x264 codes a frame
+    /// unlike the one before (a [`cut_away`](Self::cut_away), and the
+    /// frame after it) as an I-frame, an IDR picture once `min-keyint` has
+    /// passed and otherwise one the frames after it may refer across.
+    /// Without B-frames x264 makes every frame [`intra`](Self::intra)
+    /// forces IDR, so this is how such a stream gets the latter.
+    pub scenecut: bool,
 }
 
 /// Keyframes every `keyint` frames, with `bframes` B-frames between
@@ -160,6 +171,8 @@ impl Default for Spec {
             refs: None,
             intra: Vec::new(),
             flash: Vec::new(),
+            cut_away: Vec::new(),
+            scenecut: false,
         }
     }
 }
@@ -207,9 +220,10 @@ impl Spec {
         if let Some(g) = self.gop {
             // x264 and x265 spell these the same.
             params.push(format!(
-                "keyint={k}:min-keyint={k}:bframes={b}:scenecut=0:open-gop={o}",
+                "keyint={k}:min-keyint={k}:bframes={b}:scenecut={s}:open-gop={o}",
                 k = g.keyint,
                 b = g.bframes,
+                s = if self.scenecut { 40 } else { 0 },
                 o = u8::from(g.open)
             ));
             if g.radl > 0 {
@@ -322,6 +336,11 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
         if spec.flash.contains(&i) {
             for px in &mut img.pixels {
                 *px = px.map(|c| 0.5 + c / 2.0);
+            }
+        }
+        if spec.cut_away.contains(&i) {
+            for px in &mut img.pixels {
+                *px = px.map(|c| 1.0 - c);
             }
         }
         let mut planes = yuv::to_yuv(&img, spec.bits, &format);

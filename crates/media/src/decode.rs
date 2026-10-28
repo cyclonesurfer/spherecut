@@ -146,6 +146,16 @@ pub struct VideoDecoder {
     time_base: Rational,
     dec: ff::decoder::Video,
     hw: Option<Arc<HwDevice>>,
+    /// How `dec` was set up, to set it up again ([`reopen`](Self::reopen)).
+    options: Options,
+    /// Packets have been sent to `dec` since it was opened.
+    sent: bool,
+    /// Whether FFmpeg flagged the first frame decoded since opening a
+    /// keyframe; `None` before one comes out.
+    first_key: Option<bool>,
+    /// `dec` is to be opened afresh before the next packet is sent: it is
+    /// the stream's first, after packets were sent ([`reopen`](Self::reopen)).
+    reopening: bool,
     /// A packet read ahead, after one flagged corrupt (see `next_packet`).
     lookahead: Option<ff::Packet>,
     /// The demuxer has nothing more to give.
@@ -261,6 +271,42 @@ fn hw_failed(path: &Path, dev: &HwDevice, reason: &str) -> MediaError {
         kind: device_label(dev.kind()).into(),
         reason: reason.into(),
     }
+}
+
+/// A decoder for a stream of `path` with parameters `par`, set up as
+/// `options` say, on `hw` when given.
+fn open_codec(
+    path: &Path,
+    par: ff::codec::Parameters,
+    hw: Option<&HwDevice>,
+    options: Options,
+) -> Result<ff::decoder::Video, MediaError> {
+    let mut ctx = ff::codec::context::Context::from_parameters(par)
+        .map_err(|e| err(path, "decoder parameters", e))?;
+    if options.output_corrupt {
+        ctx.set_flags(ff::codec::Flags::OUTPUT_CORRUPT);
+    }
+    match hw {
+        // One thread, libavcodec's default (D3).
+        Some(dev) => {
+            ffi::attach_hw_device(&mut ctx, dev).map_err(|e| err(path, "hardware device", e))?;
+            if let Some(n) = options.extra_hw_frames {
+                ffi::set_extra_hw_frames(&mut ctx, n);
+            }
+        }
+        // libavcodec defaults to one thread; let it pick per core
+        // unless told how many.
+        None => ctx.set_threading(ff::codec::threading::Config {
+            kind: ff::codec::threading::Type::Frame,
+            count: options.threads.map_or(0, |n| n.get() as usize),
+        }),
+    }
+    ffi::open_video_decoder(ctx, hw).map_err(|e| match (e, hw) {
+        (OpenDecoderError::NotOnDevice, Some(dev)) => {
+            hw_unsupported(path, dev, HwRefusal::NotOffered)
+        }
+        (e, _) => err(path, "opening decoder", e),
+    })
 }
 
 impl VideoDecoder {
@@ -387,34 +433,8 @@ impl VideoDecoder {
                 size,
             });
         }
-        let mut ctx = ff::codec::context::Context::from_parameters(st.parameters())
-            .map_err(|e| err(path, "decoder parameters", e))?;
+        let dec = open_codec(path, st.parameters(), hw.as_deref(), options)?;
         ffi::discard_other_streams(&mut ictx, stream_index);
-        if options.output_corrupt {
-            ctx.set_flags(ff::codec::Flags::OUTPUT_CORRUPT);
-        }
-        match &hw {
-            // One thread, libavcodec's default (D3).
-            Some(dev) => {
-                ffi::attach_hw_device(&mut ctx, dev)
-                    .map_err(|e| err(path, "hardware device", e))?;
-                if let Some(n) = options.extra_hw_frames {
-                    ffi::set_extra_hw_frames(&mut ctx, n);
-                }
-            }
-            // libavcodec defaults to one thread; let it pick per core
-            // unless told how many.
-            None => ctx.set_threading(ff::codec::threading::Config {
-                kind: ff::codec::threading::Type::Frame,
-                count: options.threads.map_or(0, |n| n.get() as usize),
-            }),
-        }
-        let dec = ffi::open_video_decoder(ctx, hw.as_deref()).map_err(|e| match (e, &hw) {
-            (OpenDecoderError::NotOnDevice, Some(dev)) => {
-                hw_unsupported(path, dev, HwRefusal::NotOffered)
-            }
-            (e, _) => err(path, "opening decoder", e),
-        })?;
         let codec = dec.codec();
         tracing::debug!(
             path = %path.display(),
@@ -431,6 +451,10 @@ impl VideoDecoder {
             time_base,
             dec,
             hw,
+            options,
+            sent: false,
+            first_key: None,
+            reopening: false,
             lookahead: None,
             read_done: false,
             eof_sent: false,
@@ -514,6 +538,8 @@ impl VideoDecoder {
             match self.dec.receive_frame(&mut frame) {
                 Ok(()) => {
                     self.frames += 1;
+                    self.first_key
+                        .get_or_insert_with(|| ffi::frame_fields(&frame).key);
                     self.check_on_device(&frame)?;
                     return Ok(Received::Frame(frame));
                 }
@@ -560,6 +586,10 @@ impl VideoDecoder {
                     if self.skip_before.is_some() {
                         self.skip_sent += 1;
                     }
+                    if std::mem::take(&mut self.reopening) {
+                        self.reopen()?;
+                    }
+                    self.sent = true;
                     self.dec
                         .send_packet(&pkt)
                         .map_err(|e| self.decode_error(e))?
@@ -603,10 +633,13 @@ impl VideoDecoder {
     }
 
     /// Seek the demuxer to the keyframe at or before `ts` in the stream's
-    /// time base (`AVSEEK_FLAG_BACKWARD`), and flush the decoder. Reading
-    /// failures and the end of the stream are cleared, so a seek back into
-    /// the good part of a truncated file decodes again (D29, updating
-    /// D13); a device's refusal is not.
+    /// time base (`AVSEEK_FLAG_BACKWARD`), and flush the decoder; one that
+    /// lands on the stream's first packet may open it afresh instead
+    /// ([`reopen`](Self::reopen)), so that decoding from there gives what
+    /// decoding from opening did. Reading failures and the end of the
+    /// stream are cleared, so a seek back into the good part of a
+    /// truncated file decodes again (D29, updating D13); a device's
+    /// refusal is not.
     pub(crate) fn seek(&mut self, ts: i64) -> Result<(), MediaError> {
         ffi::seek_frame(&mut self.ictx, self.stream_index, ts, true)
             .map_err(|e| err(&self.path, "seeking", e))?;
@@ -665,7 +698,35 @@ impl VideoDecoder {
         self.awaiting_landing = true;
         self.landing = None;
         self.landing_key = None;
+        self.reopening = false;
         self.read_position = None;
+    }
+
+    /// Replace the decoder with one opened afresh, as
+    /// [`with_options`](Self::with_options) opened it, before the stream's
+    /// first packet is sent again. A flush doesn't leave FFmpeg's H.264
+    /// decoder as opening does: its frame pool keeps the pictures it
+    /// decoded, and where the stream starts at an I-frame that isn't IDR
+    /// (a cut there), the stand-ins it makes for the frames before it
+    /// are those pictures rather than the zeroed buffers of a fresh pool,
+    /// and so are the frames that refer to them. So the stream's start
+    /// decodes afresh, unless its first frame was a keyframe (an IDR
+    /// picture, or a recovery point with a count of 0), after which the
+    /// decoder needs nothing from before.
+    fn reopen(&mut self) -> Result<(), MediaError> {
+        let par = self
+            .ictx
+            .stream(self.stream_index)
+            .map(|s| s.parameters())
+            .ok_or_else(|| err(&self.path, "reopening the decoder", "the stream is gone"))?;
+        self.dec = open_codec(&self.path, par, self.hw.as_deref(), self.options)?;
+        ffi::skip_nonref(&mut self.dec, self.skip_before.is_some());
+        self.sent = false;
+        tracing::debug!(
+            path = %self.path.display(),
+            "decoding the stream's start afresh: its first frame is no keyframe"
+        );
+        Ok(())
     }
 
     /// Takes, and drops, the frames the decoder holds ready to hand out,
@@ -927,7 +988,8 @@ impl VideoDecoder {
                     if landed {
                         self.landing = ts;
                         self.landing_key = pkt.pts();
-                        self.first_landing.get_or_insert(ts);
+                        let first = *self.first_landing.get_or_insert(ts);
+                        self.reopening = first == ts && self.sent && self.first_key != Some(true);
                     }
                     if !pkt.is_key()
                         && let Some(ts) = ts
