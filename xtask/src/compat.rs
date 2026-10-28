@@ -20,9 +20,12 @@
 //!
 //! compat deletes only what it made: a target directory is
 //! `spherecut-compat-<label>`, and one is deleted only while it holds
-//! compat's stamp. A directory there without one, or a target that is a
-//! prefix, holds one or lies inside one or inside any FFmpeg's tree, is
-//! refused.
+//! compat's stamp. A directory there without one is refused, and so is a
+//! target that is one of the prefixes listed, holds one or lies inside
+//! one, or lies inside a directory holding `include/libavcodec/avcodec.h`
+//! (an FFmpeg installed there, listed or not), symlinks and `..`
+//! resolved: `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` puts the target
+//! directories elsewhere.
 //!
 //! A build counts for a prefix only if it bound that prefix's FFmpeg:
 //! pkg-config must find each library ffmpeg-sys-next binds there, its
@@ -423,10 +426,11 @@ fn resolved(p: &Path) -> PathBuf {
 }
 
 /// Refuses a target directory that is one of the `prefixes`, holds one or
-/// lies inside one, symlinks and `..` resolved, or that lies inside any
-/// directory holding FFmpeg's headers (`include/libavcodec/avcodec.h`),
-/// a prefix this run doesn't list among them: building there, or
-/// deleting it, would change an FFmpeg.
+/// lies inside one, or that lies inside any directory holding
+/// `include/libavcodec/avcodec.h`, as an FFmpeg installed there does,
+/// listed or not, symlinks and `..` resolved: building there, or deleting
+/// it, would change an FFmpeg. Nothing else of an FFmpeg is looked for:
+/// not its source tree, which has no `include/`.
 fn guard(target: &Path, prefixes: &[PathBuf]) -> Result<()> {
     let t = resolved(target);
     for p in prefixes {
@@ -452,8 +456,9 @@ fn guard(target: &Path, prefixes: &[PathBuf]) -> Result<()> {
         .find(|a| a.join("include/libavcodec/avcodec.h").is_file())
     {
         bail!(
-            "the target directory {} lies inside {}, which holds FFmpeg's headers: \
-             set {TARGET_ENV} to a directory outside every FFmpeg prefix",
+            "the target directory {} lies inside {}, which holds FFmpeg's headers \
+             (include/libavcodec/avcodec.h), so compat won't build or delete anything \
+             there: set {TARGET_ENV} to a directory outside it",
             target.display(),
             ff.display()
         );
@@ -1569,10 +1574,16 @@ mod tests {
         ] {
             let e = guard(&target, &listed).unwrap_err().to_string();
             let want = format!(
-                "lies inside {}, which holds FFmpeg's headers",
+                "lies inside {}, which holds FFmpeg's headers \
+                 (include/libavcodec/avcodec.h)",
                 real.display()
             );
             assert!(e.contains(&want), "{e}");
+            // And says how to build elsewhere.
+            assert!(
+                e.ends_with(&format!("set {TARGET_ENV} to a directory outside it")),
+                "{e}"
+            );
         }
         // Through a symlink too.
         let link = d.join("link");
