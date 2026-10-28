@@ -1794,10 +1794,11 @@ fn oetf(l: f64) -> f64 {
 /// by an independent model of the chain: Y' by H.273 (limited: (k − 16)
 /// / 219, full: k / 255) clamped to [0, 1]; the sRGB EOTF; the nearest
 /// half, as the linear target stores it; the OETF of the encode pass;
-/// and the unorm8 store, to nearest. The GPU does each step in f32, so
-/// where a value lies within its error of a tie (an f16 tie, or a half
-/// code) either neighbour may come out: the second value is the other
-/// candidate, when there is one.
+/// and the encode pass's rounding to the nearest code, whose k / 255 the
+/// unorm8 store keeps on any driver (DECISIONS D31). The GPU does each
+/// step in f32, so where a value lies within its error of a tie (an f16
+/// tie, or a half code) either neighbour may come out: the second value
+/// is the other candidate, when there is one.
 fn passthrough_model(k: u8, limited: bool) -> (u8, Option<u8>) {
     let y = if limited {
         (f64::from(k) - 16.0) / 219.0
@@ -1917,12 +1918,16 @@ fn passthrough_exact(run: &mut Run<'_>) {
                 wrong.push(format!("full k = {k} came out {got}"));
             }
             if limited && (16..=235).contains(&k) {
-                // The bound: the f16 store moves the linear value by at
-                // most 2^−11 of itself, which the OETF turns into at most
-                // (1.055 / 2.4) · 2^−11 of full scale, 0.0547 codes. So
-                // the output is round((k − 16) · 255 / 219) unless that
-                // lies within 0.0547 codes of a tie, and one code off at
-                // most where it does.
+                // The bound: the linear target's f16 store moves the
+                // linear value by at most 2^−11 of itself, which the OETF
+                // turns into at most (1.055 / 2.4) · 2^−11 of full scale,
+                // 0.0547 codes. The encode pass rounds to codes itself,
+                // so the unorm8 store adds nothing (left to RADV, whose
+                // export packs to f16 toward zero, the OETF's value lost
+                // up to 0.1245 codes more, D31). So the output is
+                // round((k − 16) · 255 / 219) unless that lies within
+                // 0.0547 codes of a tie, and one code off at most where
+                // it does.
                 let ideal = (f64::from(k) - 16.0) * 255.0 / 219.0;
                 let bound = 1.055 / 2.4 * 2f64.powi(-11) * 255.0 + 1e-4;
                 if f64::from(got) != ideal.round() {
