@@ -35,7 +35,8 @@
 //! after it, and ffmpeg-sys-next's build script, in clippy's build and in
 //! the link's, as cargo's JSON messages report it (wherever cargo put it:
 //! a build directory, a target triple), must have linked libavcodec and
-//! searched for libraries only inside the prefix.
+//! searched for libraries only inside the prefix, and the FFmpeg
+//! libraries the builds linked must be those pkg-config was asked about.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -66,7 +67,8 @@ const STAMP_HEADER: &str = "Made by `cargo xtask compat`, against:\n";
 /// The libraries ffmpeg-sys-next binds with the workspace's features
 /// (`avcodec`, `avformat`, `swscale` and `swresample`, and libavutil, which
 /// it always binds), each found by pkg-config on its own, and the header
-/// of each that its bindings read.
+/// of each that its bindings read. [`check_built`] fails a build that
+/// links any other FFmpeg library, or none of one of these.
 const BOUND: [(&str, &str); 5] = [
     ("libavutil", "libavutil/avutil.h"),
     ("libavformat", "libavformat/avformat.h"),
@@ -75,7 +77,7 @@ const BOUND: [(&str, &str); 5] = [
     ("libavcodec", "libavcodec/avcodec.h"),
 ];
 /// The libraries ffmpeg-sys-next can bind, whose pkg-config files a stamp
-/// covers.
+/// covers. It can also bind libpostproc, which FFmpeg 8 dropped.
 const STAMPED: [&str; 7] = [
     "libavcodec",
     "libavdevice",
@@ -549,7 +551,12 @@ fn clean_target(target: &Path, prefixes: &[PathBuf]) -> Result<bool> {
 /// directories inside the prefix, symlinks resolved. Checked before the
 /// build alone, a prefix that went away or changed while it ran had
 /// pkg-config find another FFmpeg for the build (the system's), which
-/// then passed under the prefix's name.
+/// then passed under the prefix's name. The FFmpeg libraries the builds
+/// link must also be those of [`BOUND`], which `bound` asks pkg-config
+/// about: a feature of ffmpeg-sys-next turned on anywhere in the
+/// workspace (ffmpeg-next's default features turn on `avdevice` and
+/// `avfilter`) binds one more, whose `.pc` file, library and header no
+/// one checked.
 fn check_built(
     prefix: &Path,
     before: &str,
@@ -571,17 +578,28 @@ fn check_built(
     if runs.is_empty() {
         bail!("cargo reported no run of ffmpeg-sys-next's build script, to check what it bound");
     }
+    let mut linked: Vec<String> = Vec::new();
     for run in &runs {
-        // KIND[:MODIFIERS]=NAME[:RENAME], the kind optional.
-        let linked = run.libs.iter().any(|lib| {
-            let name = lib.rsplit('=').next().unwrap_or(lib);
-            name.split(':').next() == Some("avcodec")
-        });
-        if !linked {
+        let names: Vec<String> = run
+            .libs
+            .iter()
+            .map(|l| format!("lib{}", link_name(l)))
+            .collect();
+        if !names.iter().any(|n| n == "libavcodec") {
             bail!(
                 "ffmpeg-sys-next's build script linked no libavcodec ({}), to check what it bound",
                 run.libs.join(", ")
             );
+        }
+        for name in names {
+            let ffmpeg = STAMPED.contains(&name.as_str()) || name == "libpostproc";
+            if ffmpeg && !BOUND.iter().any(|(b, _)| *b == name) {
+                bail!(
+                    "ffmpeg-sys-next's build script linked {name}, which compat doesn't ask \
+                     pkg-config about: add it to BOUND"
+                );
+            }
+            linked.push(name);
         }
         for search in &run.paths {
             // KIND=PATH, the kind optional.
@@ -605,7 +623,17 @@ fn check_built(
             }
         }
     }
+    if let Some((lib, _)) = BOUND.iter().find(|(b, _)| !linked.iter().any(|l| l == b)) {
+        bail!("no build linked {lib}, which compat asks pkg-config about: take it out of BOUND");
+    }
     Ok(())
+}
+
+/// The library a build script's `rustc-link-lib` value names:
+/// `KIND[:MODIFIERS]=NAME[:RENAME]`, the kind optional.
+fn link_name(value: &str) -> &str {
+    let name = value.rsplit('=').next().unwrap_or(value);
+    name.split(':').next().unwrap_or(name)
 }
 
 /// What a build script had cargo link with, as one of cargo's
@@ -1887,7 +1915,7 @@ mod tests {
         let same = || Ok(stamp(&pc, &b));
         let lib = prefix.join("lib");
         let native = |dir: &Path| format!("native={}", dir.display());
-        let libs = ["avutil", "avformat", "avcodec"];
+        let libs: Vec<&str> = BOUND.iter().map(|(l, _)| &l[3..]).collect();
         let check = |restamp: &dyn Fn() -> Result<String>, messages: &str| {
             check_built(&prefix, &before, restamp, messages).map_err(|e| format!("{e:#}"))
         };
@@ -1931,11 +1959,9 @@ mod tests {
             e.contains("searched /nowhere/lib for libraries, which isn't there"),
             "{e}"
         );
-        let plain = ran(
-            "ffmpeg-sys-next",
-            &["dylib=avcodec"],
-            &[lib.display().to_string()],
-        );
+        let dylib: Vec<String> = libs.iter().map(|l| format!("dylib={l}")).collect();
+        let dylib: Vec<&str> = dylib.iter().map(String::as_str).collect();
+        let plain = ran("ffmpeg-sys-next", &dylib, &[lib.display().to_string()]);
         assert_eq!(check(&same, &plain), Ok(()));
         // The FFmpeg changed, or pkg-config finds it no more.
         let e = check(&|| Ok("another stamp\n".into()), &good).unwrap_err();
@@ -1947,8 +1973,8 @@ mod tests {
 
     #[test]
     fn what_the_build_bound_is_found_wherever_cargo_builds() {
-        // A package named ffmpeg-sys-next whose build script links
-        // libavcodec from the prefix, built with cargo's build directory
+        // A package named ffmpeg-sys-next whose build script links the
+        // bound libraries from the prefix, built with cargo's build directory
         // elsewhere (`build.build-dir`) and a target triple named
         // (`build.target`): the script's output is in the build
         // directory's `x86_64-unknown-linux-gnu/debug/build`, not in the
@@ -1969,12 +1995,13 @@ mod tests {
             "cargo:rustc-link-search=native={}",
             prefix.join("lib").display()
         );
+        let links: String = BOUND
+            .iter()
+            .map(|(lib, _)| format!("    println!(\"cargo:rustc-link-lib={}\");\n", &lib[3..]))
+            .collect();
         std::fs::write(
             pkg.join("build.rs"),
-            format!(
-                "fn main() {{\n    println!({search:?});\n    \
-                 println!(\"cargo:rustc-link-lib=avcodec\");\n}}\n"
-            ),
+            format!("fn main() {{\n    println!({search:?});\n{links}}}\n"),
         )
         .unwrap();
         let rustc = Command::new("rustc").arg("-vV").output().unwrap();
@@ -2198,29 +2225,57 @@ mod tests {
     }
 
     #[test]
-    fn the_libraries_checked_are_those_the_build_binds() {
-        // ffmpeg-sys-next binds libavutil always, and one library for each
-        // feature the workspace turns on.
-        let manifest = std::fs::read_to_string(crate::workspace_root().join("Cargo.toml")).unwrap();
-        let line = manifest
-            .lines()
-            .find(|l| l.starts_with("ffmpeg-sys-next ="))
-            .unwrap();
-        let features = line.split("features = [").nth(1).unwrap();
-        let features = &features[..features.find(']').unwrap()];
-        let mut want: Vec<String> = features
-            .split(',')
-            .map(|f| format!("lib{}", f.trim().trim_matches('"')))
-            .chain(["libavutil".to_owned()])
-            .collect();
-        want.sort();
-        let mut checked: Vec<String> = BOUND.iter().map(|(l, _)| (*l).to_owned()).collect();
-        checked.sort();
-        assert_eq!(checked, want);
+    fn the_libraries_checked_are_those_the_build_links() {
+        let d = scratch("linked");
+        let prefix = d.join("n8.1");
+        let (pc, b) = fake_prefix(&prefix, "62.28.100");
+        let before = stamp(&pc, &b);
+        let lib = format!("native={}", prefix.join("lib").display());
+        let check = |messages: &str| {
+            check_built(&prefix, &before, || Ok(stamp(&pc, &b)), messages)
+                .map_err(|e| format!("{e:#}"))
+        };
+        let linking =
+            |libs: &[&str]| check(&ran("ffmpeg-sys-next", libs, std::slice::from_ref(&lib)));
+        let bound: Vec<&str> = BOUND.iter().map(|(l, _)| &l[3..]).collect();
+        assert_eq!(linking(&bound), Ok(()));
+        // What isn't FFmpeg's isn't asked about.
+        assert_eq!(linking(&[&bound[..], &["z", "static=m"]].concat()), Ok(()));
+        // One more of FFmpeg's, as a feature turned on anywhere binds, in
+        // any form a build script can give it.
+        for (extra, name) in [
+            ("avdevice", "libavdevice"),
+            ("dylib=avfilter", "libavfilter"),
+            ("static:+whole-archive=postproc:pp", "libpostproc"),
+        ] {
+            let e = linking(&[&bound[..], &[extra]].concat()).unwrap_err();
+            let want = format!("linked {name}, which compat doesn't ask pkg-config about");
+            assert!(e.contains(&want), "{e}");
+        }
+        // One fewer: pkg-config is asked about a library no build binds.
+        let e = linking(&["avutil", "avformat", "avcodec", "swscale"]).unwrap_err();
+        assert!(e.starts_with("no build linked libswresample"), "{e}");
+        // One build may link what another doesn't (clippy's has every
+        // feature of the workspace's crates turned on).
+        let split = format!(
+            "{}{}",
+            ran(
+                "ffmpeg-sys-next",
+                &["avutil", "avformat", "avcodec"],
+                std::slice::from_ref(&lib)
+            ),
+            ran(
+                "ffmpeg-sys-next",
+                &["avcodec", "swscale", "swresample"],
+                std::slice::from_ref(&lib)
+            ),
+        );
+        assert_eq!(check(&split), Ok(()));
         for (lib, header) in BOUND {
             assert!(STAMPED.contains(&lib), "{lib}");
             assert!(header.starts_with(&format!("{lib}/")), "{header}");
         }
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]
