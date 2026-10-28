@@ -10,7 +10,7 @@ This describes the design as built, plus the planned parts marked
                           \                |                    /
                            +------ export, audio (planned) ----+
                                       |
-         playback (frame cache and its budget, the engine's numbers; M1 slice 5)
+         playback (Player, decode workers, frame cache, GPU slots, presenter; M1 slice 5)
                                       |
                     render (wgpu on Vulkan, WGSL; M1 slice 3)
                                       |
@@ -44,7 +44,7 @@ synth, which depends on media.
 | `spherecut-stitch` | Lens calibration models, seam blending, exposure matching | M3 |
 | `spherecut-motion` | IMU ingest, time sync, orientation fusion, stabilization | M4 |
 | `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); later scopes | M1 slices 3a and 3b |
-| `spherecut-playback` | The headless playback engine (D34), with no UI type: the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure), its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given), and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`); the `Player`, decode workers, upload thread, GPU slots and presenter come later in slice 5 | M1 slice 5 |
+| `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the seam slice 6's audio fills (`audio`); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slice 5 |
 | `spherecut-audio` | Playback clock, mixing, ambisonics, loudness | M1 (playback), M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
 | `spherecut-app` | eframe app, docked panels, viewer paint callbacks | M1 |
@@ -588,25 +588,52 @@ intermediate equirect exists only as the output of a 360 export.
   thread while the main thread polls the SIGINT flag every 10 ms and
   shuts the `StopSource` down on the first Ctrl+C (`spherecut frame`,
   above).
-* Built in slice 5 so far (D34):
+* Built in slice 5 (D34), in `spherecut-playback`:
   * **The UI thread never blocks.** The GUI marks its thread with
     `core::blocking::mark_ui_thread()`, and test harnesses mark theirs.
     Every helper that can block calls `may_block(what)` first: the
-    frame cache's lock and waits, file I/O, opening, probing, seeking
-    and decoding media, opening a GPU device, and the readback with its
+    frame cache's lock and waits, the player's status lock, a channel's
+    `recv`, a thread's `join`, file I/O, opening, probing, seeking and
+    decoding media, opening a GPU device, and the readback with its
     `Device::poll`. On a marked thread that panics in debug and test
-    builds, and is logged once in release builds.
+    builds, and is logged once in release builds. The `Player`'s
+    methods for the UI thread only send on unbounded channels, `try_lock`
+    and use atomics.
+  * **The threads.** Per player, one `upload` thread for its life. Per
+    open, a transient `open` worker (it picks each stream's decoder,
+    running doctor's decode checks once if it must, opens the audio
+    through slice 6's seam, clears what the file before left, and
+    starts the decode workers), and a `decode-v{i}` worker per video
+    stream. A request (a seek or a step) goes to every stream's worker
+    with a new `StopToken` generation, which stops the one before at
+    its next frame or wait.
   * **The frame cache** (`playback::FrameCache`, a `Mutex` and a
     `Condvar`) sits between the decode workers and the upload thread.
     It holds `Arc<VideoFrame>`s by stream and clip time, linked by run,
     within a budget sized from the memory available and any cgroup
-    limit (`playback::budget`). A worker's frame ahead of the playhead
-    past the window waits for room, in 20 ms slices that check its
-    `StopToken`. A frame at or behind the playhead never waits. The UI
-    thread only `try_set_playhead`s and `try_stats`es.
+    limit (`playback::budget`), rechecked every 5 s on the upload
+    thread. A worker's frame ahead of the playhead past the window
+    waits for room, in 20 ms slices that check its `StopToken`. A frame
+    at or behind the playhead never waits. A seek into frames a run
+    holds is answered from it, and decoding goes on from its end.
+  * **GPU slots** (`playback::SlotRing`): 3 to 6 `GpuFrame`s, each with
+    an atomic state word (Free, Writing, Ready, Shown, Dead, and a
+    version). The upload thread claims a Free slot only when the ring's
+    `Arc` is the only one, so no draw still holds it, uploads the frames
+    the presenter will want next (from the frame at the playhead on
+    while playing; it, the next and the one before while paused), and
+    frees the Ready ones no longer wanted, never the Shown one. The
+    presenter, on the UI thread, shows a Ready slot by compare and swap.
+  * **The presenter** (`Player::present`) picks each stream's latest
+    Ready frame at or before the clock's time at the next refresh, and
+    after a seek keeps the frame on screen until the new one is Ready.
   * **Clocks** (`core::clock`): `SystemClock` and `ManualClock` read
     through a sequence lock of atomics, so the UI thread reads them
-    every frame without a lock.
+    every frame without a lock. A file's audio, from slice 6, brings
+    its own clock, which video then follows.
+  * **Shutdown**: `begin_shutdown` stops every token and raises the
+    decoders' interrupt flag, and returns; `join(budget)` waits for the
+    threads, polling `is_finished`, and says which are left.
   * **Numbers** (`playback::PerfStats`): each thread records its stages
     into rings of atomics, and the overlay reads them without a lock.
 
@@ -628,7 +655,13 @@ intermediate equirect exists only as the output of a 360 export.
   middle of a seek included), FFmpeg's confinement under strace, and
   `frame` on lavapipe (the Euler table, the frame code read back, every
   error row with nothing left behind, the output races, the pipeline
-  goldens).
+  goldens). The playback engine's tests (`crates/playback/tests/`) run
+  on lavapipe, and on a `ManualClock` wherever wall time would make
+  them flaky: the frame cache against a model of its rules, the
+  engine's rules with synthetic and generated media (a 5.7K source in a
+  256 MiB cache among them), and a fake UI loop on a marked thread that
+  must never wait, through a backend that never answers and a storm of
+  seeks (`never_blocks.rs`).
   `cargo xtask check` runs all of it, against the FFmpeg pkg-config
   finds. `cargo xtask compat` runs clippy against other FFmpeg builds
   and builds and links the tests against each, in a target directory of
