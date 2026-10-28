@@ -170,6 +170,24 @@ s); and `cargo xtask compat` passed clippy and the link against FFmpeg
 8.1.3, the new frame tests included (8 min 12 s). `cargo xtask hw-test`
 lists the two new Tier 2 tests.
 
+Checks of main at 498d6e1, the merge of all three branches: `cargo
+xtask check` passed, and `cargo xtask compat` passed clippy, the link
+and the binding against FFmpeg 8.1.3 and 9.0.2, and Tier 1 against
+8.1.3. A last review of the decoder reopen and the landing rule
+(hardware paths, the merge's interactions, exact seeks) found no wrong
+frame and three minor faults, which come next:
+
+- A file trimmed by stream copy mid-GOP (an edit list that hides its
+  first IDR picture's frame) reopens the decoder at every seek that
+  lands on its first packet, though a flush gives the same frames:
+  20 to 25% more time on those seeks, measured in software.
+- A reopen that fails (in practice only out of memory) loses the
+  stream's first packet and is taken for the file's damage.
+- When the landing rule turns down a landing, damage met while decoding
+  to its first frame is said again by the decode from the earlier
+  landing: two `Damaged` events, and two warnings in `spherecut frame`,
+  for one damaged packet.
+
 odin's third run (PR #5, `hw-reports/odin-be38fa409e.md`, at be38fa4):
 21 of 23 Tier 2 tests pass, including all four that failed in PR #4. Two
 golden tests fail, and the fixes are next:
