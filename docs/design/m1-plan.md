@@ -160,8 +160,9 @@ the sections below, they win.
     emulation predicts the RX 7600 clears by 7.91 dB or more (56.11 to
     59.78 dB, D32). The fix moved six stored goldens and one of the
     pipeline goldens by up to 4 LSB where a pixel reads level 1 or
-    more, and raised every CPU floor (`fisheye_360` from 46.59 to
-    48.15 dB).
+    more, and raised all nine CPU floors of the render goldens
+    (`fisheye_360` from 46.59 to 48.15 dB) and that pipeline golden's
+    (47.2 to 48.17 dB); the other three pipeline goldens' didn't move.
 
 ## 1. Summary
 

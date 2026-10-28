@@ -3182,10 +3182,12 @@ moved the stored images least.
 
 Tested on lavapipe (Mesa 25.2.8, LLVM 20.1.2), in `tests/upload.rs`:
 
-- `eight_bit_mips_are_the_references_code_for_code` makes 8 levels of
-  a noise NV12 frame at 256×128, 45×23 and 70×38 and of the grid at
-  1024×512 and 1002×502, and every texel of every level of luma (R8)
-  and chroma (Rg8) is `halve_codes`'s chain's, code for code. The grid
+- `eight_bit_mips_are_the_references_code_for_code` makes up to 8
+  levels of noise NV12 frames at 256×128, 45×23 and 70×38 and of the
+  grid at 1024×512 and 1002×502 (8 of luma and of chroma but at 45×23,
+  6 and 5, and 70×38, 7 and 6, where the chain ends at 1×1), and every
+  texel of every level of luma (R8) and chroma (Rg8) is `halve_codes`'s
+  chain's, code for code. The grid
   at 1024×512 has 27879 ties at luma level 1. Its controls: the old
   pass through RADV's export, emulated, is off at level 1 of every
   frame (13674 texels of the grid's luma), and ties up is off in every
@@ -3208,7 +3210,9 @@ Tested on lavapipe (Mesa 25.2.8, LLVM 20.1.2), in `tests/upload.rs`:
   sizes by hand.
 
 Six of the stored goldens and one of slice 4's changed (D32), where a
-pixel reads level 1 or more, and every CPU floor rose. RADV itself
+pixel reads level 1 or more. All nine CPU floors of the render goldens
+rose, and of slice 4's four only `h264_full_range`'s (47.2 to 48.17
+dB); the other three, and their PSNRs, didn't move. RADV itself
 hasn't run it: D32's emulation predicts the RX 7600's CPU checks at
 56.11 to 59.78 dB.
 
@@ -3544,12 +3548,14 @@ channel more than 0.1 off). The source hash is FNV-64 over the first
 decoded frame's planes. Blessing is `SPHERECUT_UPDATE_GOLDENS=1 cargo
 test -p spherecut-cli --test frame pipeline_goldens`, with the same
 refusals and the same 0.5 dB rule, and a plain run fails if the
-manifest lacks a number the run measured. Measured at blessing:
+manifest lacks a number the run measured. Measured at blessing
+(`h264_full_range` as blessed again on 2026-10-28, after the mip pass
+rounded its 8-bit means; it was 50.2 dB, 0.016, floor 47.2 dB before):
 
 | Row | Source | Check | Measured (bound) |
 |---|---|---|---|
 | `hevc10_lossless` | the grid, x265 lossless 10-bit 4:2:0, decoded as `yuv420p10le`; yaw 30, pitch 20, roll 10, 16-bit PNG | stored; CPU | 90.0 dB, 0.0005 at most (floor 87.0 dB) |
-| `h264_full_range` | the grid, full-range H.264; 180° fisheye | stored; CPU | 50.2 dB, 0.016 (floor 47.2 dB) |
+| `h264_full_range` | the grid, full-range H.264; 180° fisheye | stored; CPU | 51.2 dB, 0.012 (floor 48.2 dB) |
 | `nv12_vs_yuv420p` | the grid as rawvideo NV12 in Matroska, and as `yuv420p` | stored; CPU; the two renders identical | 51.2 dB, 0.012 (floor 48.2 dB); identical |
 | `yuv422p10_full_chroma` | flat luma, Cb and Cr swinging ±160 codes from each row to the next, x265 lossless 4:2:2 10-bit; with its 4:4:4 twin and a 4:2:0 coding, which can only hold their mean | stored; CPU; the twin within 1 LSB; the 4:2:0 control over 10 | 62.9 dB, 0.004 (floor 59.9 dB); twin 0 LSB; control 85 LSB |
 | `swscale_cross_check` | 4:4:4 pictures of 16-texel flat blocks of 128 in-gamut colours, x265 lossless, at BT.601 and BT.709, limited and full, 8 and 10 bits | frame against swscale (`media::encode::swscale_rgb48`, the matrix and range passed with `sws_setColorspaceDetails`), and against the exact conversion | at most 1 LSB from swscale in all 8 (bound 1); 0.51 to 0.60 LSB from exact (bound 0.75); controls 28 to 30 LSB with the other matrix, 18 to 20 with the other range (over 1); 60352 pixels |
