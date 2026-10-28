@@ -12,8 +12,10 @@
 
 pub mod budget;
 pub mod cache;
+pub mod decoder;
 pub mod perf;
 
 pub use budget::{AutoBudget, BudgetError, CacheBudget, auto_budget, read_auto_budget};
 pub use cache::{CacheStats, FrameCache, Insert, MIN_FRAMES};
+pub use decoder::{DecoderChoice, DecoderPreference, HwDecodeCheck, HwSupport, StreamFormat};
 pub use perf::{Counter, PerfSnapshot, PerfStats, Stage, StageSummary};
