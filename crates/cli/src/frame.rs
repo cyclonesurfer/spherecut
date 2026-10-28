@@ -42,7 +42,7 @@ use spherecut_core::{FrameTime, Rounding, Time, TimeSpec};
 use spherecut_media::backend::{
     DamageCause, DecodeMode, DecodePath, DecoderEvent, Exactness, Fallback, FallbackReason,
     FfmpegBackend, HwKind, MediaBackend, NextFrame, SeekMode, SeekOutcome, Timing, VideoDecode,
-    VideoFrame, VideoRequest,
+    VideoFrame, VideoRequest, VideoStreamInfo,
 };
 use spherecut_media::detect::Layout;
 use spherecut_media::hw::{self, GpuIds, RenderNode};
@@ -831,14 +831,14 @@ impl Job {
                 },
             ),
             TimeSpec::Frame(n) => {
-                let address = frame_address(dec.info(), n)
-                    .map_err(|e| failure(codes::OUT_OF_RANGE, format!("no frame {n}: {e}")))?;
+                let address =
+                    frame_address(dec.info(), n).map_err(|_| self.beyond(dec.info(), when))?;
                 match address {
                     FrameAddress::At(t) => {
                         let requested = match rate {
-                            Some(rate) => FrameTime::at(rate, n).map_err(|e| {
-                                failure(codes::OUT_OF_RANGE, format!("no frame {n}: {e}"))
-                            })?,
+                            Some(rate) => {
+                                FrameTime::at(rate, n).map_err(|_| self.beyond(dec.info(), when))?
+                            }
                             None => FrameTime {
                                 time: t,
                                 frame: Some(n),
@@ -850,6 +850,11 @@ impl Job {
                 }
             }
         };
+        // A time that no timestamp of the stream can hold is past its end,
+        // which the seek would only fail on.
+        if at.to_pts(dec.info().time_base, Rounding::Floor).is_err() {
+            return Err(self.beyond(dec.info(), when));
+        }
         let outcome = dec
             .seek(at, SeekMode::Exact, &self.token)
             .map_err(|e| self.media_error(e))?;
@@ -875,6 +880,7 @@ impl Job {
         }
         self.damage_after(&events);
         let shown = shown(dec, &frame);
+        self.check_index(dec, when, &shown)?;
         Ok(Decoded {
             frame,
             requested,
@@ -882,8 +888,83 @@ impl Job {
         })
     }
 
-    /// Frame `n` of a variable-rate stream, counted from the first.
+    /// A frame number on a constant-rate stream must be the frame
+    /// `shown`, which the seek can't tell where frames are missing: past
+    /// the last frame of a stream whose container says it runs on, frame
+    /// `n` is `out_of_range`; before it, frames are missing in its place
+    /// (`damaged`). A cut the decoder can't see (in a Matroska file that
+    /// doesn't say its size, D13) leaves either.
+    fn check_index(
+        &mut self,
+        dec: &mut dyn VideoDecode,
+        when: TimeSpec,
+        shown: &FrameTime,
+    ) -> Result<(), Failure> {
+        let (TimeSpec::Frame(n), Some(_)) = (when, dec.info().frame_rate()) else {
+            return Ok(());
+        };
+        let Some(i) = shown.frame.filter(|&i| i != n) else {
+            return Ok(());
+        };
+        let file = self.file().display().to_string();
+        let e = if self.is_last(dec)? {
+            failure(
+                codes::OUT_OF_RANGE,
+                format!("no frame {n}: {file} has {} frames, 0 to {i}", i + 1),
+            )
+        } else {
+            failure(
+                DamageCause::Corrupt.code(),
+                format!(
+                    "{file} has no frame {n}: at its constant rate frame {i} is shown in its \
+                     place, so frames are missing there"
+                ),
+            )
+        };
+        Err(about(e, self.file()))
+    }
+
+    /// Whether the frame the last seek returned is the stream's last: the
+    /// next one is decoded to see, and damage after it is a warning.
+    fn is_last(&mut self, dec: &mut dyn VideoDecode) -> Result<bool, Failure> {
+        let next = dec.next_frame(&self.token);
+        self.damage_after(&dec.take_events());
+        match next {
+            Ok(NextFrame::Frame(_)) => Ok(false),
+            Ok(NextFrame::End) => Ok(true),
+            Ok(NextFrame::Stopped) => Err(cancelled()),
+            // The device failing is no answer.
+            Err(e) if e.is_device_failure() => Err(self.media_error(e)),
+            // The stream ends there, said as damage.
+            Err(_) => Ok(true),
+        }
+    }
+
+    /// `out_of_range` for `when`, too far on for any timestamp of the
+    /// stream, naming its range as far as `info` knows it.
+    fn beyond(&self, info: &VideoStreamInfo, when: TimeSpec) -> Failure {
+        let file = self.file().display();
+        let what = match when {
+            TimeSpec::Time(t) => format!("no frame at {} s", seconds(t)),
+            TimeSpec::Frame(n) => format!("no frame {n}"),
+        };
+        let message = match (when, info.frame_count, info.duration) {
+            (TimeSpec::Frame(_), Some(c), _) if c > 0 => {
+                format!("{what}: {file} has {c} frames, 0 to {}", c - 1)
+            }
+            (_, _, Some(d)) => format!("{what}: the clip runs from 0 to {} s", seconds(d)),
+            _ => format!("{what}: it is past the end of {file}"),
+        };
+        about(failure(codes::OUT_OF_RANGE, message), self.file())
+    }
+
+    /// Frame `n` of a variable-rate stream, counted from the first. Damage
+    /// before it fails the run, by its cause: frames it lost would go
+    /// uncounted. That includes a read that failed, which the decoder says
+    /// before the first frame it gives up after it, and before the error
+    /// the stream ends with.
     fn count(&mut self, dec: &mut dyn VideoDecode, n: u64) -> Result<Decoded, Failure> {
+        let when = TimeSpec::Frame(n);
         let mut frame = match dec
             .seek(Time::ZERO, SeekMode::Exact, &self.token)
             .map_err(|e| self.media_error(e))?
@@ -892,17 +973,15 @@ impl Job {
             SeekOutcome::Stopped => return Err(cancelled()),
         };
         for i in 0..n {
-            let next = dec
-                .next_frame(&self.token)
-                .map_err(|e| self.media_error(e))?;
+            let next = dec.next_frame(&self.token);
             let events = dec.take_events();
-            frame = match next {
+            if let Some(e) = self.damage_before(dec, &events, when, &frame) {
+                return Err(e);
+            }
+            frame = match next.map_err(|e| self.media_error(e))? {
                 NextFrame::Frame(f) => f,
                 NextFrame::Stopped => return Err(cancelled()),
                 NextFrame::End => {
-                    if let Some(e) = self.damage_before(&events, TimeSpec::Frame(n), &frame) {
-                        return Err(e);
-                    }
                     let message = format!(
                         "no frame {n}: {} has {} frames, 0 to {i}",
                         self.file().display(),
@@ -911,9 +990,6 @@ impl Job {
                     return Err(about(failure(codes::OUT_OF_RANGE, message), self.file()));
                 }
             };
-            if let Some(e) = self.damage_before(&events, TimeSpec::Frame(n), &frame) {
-                return Err(e);
-            }
         }
         self.damage_after(&dec.take_events());
         let at = FrameTime {
@@ -999,26 +1075,38 @@ impl Job {
         )
     }
 
-    /// Damage that a counted frame `when` lies past: the error for it.
+    /// Damage that a counted frame `when` lies past, after `last`, the
+    /// last frame counted: the error for it, naming the last good frame,
+    /// as the damage says it or else `last`.
     fn damage_before(
         &self,
+        dec: &dyn VideoDecode,
         events: &[DecoderEvent],
         when: TimeSpec,
         last: &VideoFrame,
     ) -> Option<Failure> {
         events.iter().find_map(|e| match e {
-            DecoderEvent::Damaged { reason, cause, .. } => Some(about(
-                failure(
-                    cause.code(),
-                    format!(
-                        "{} is damaged before {}: {reason}; the last good frame is at {} s",
-                        self.file().display(),
-                        describe(when),
-                        seconds(last.time)
+            DecoderEvent::Damaged {
+                reason,
+                cause,
+                last_good_pts,
+            } => {
+                let good = last_good_pts
+                    .and_then(|p| dec.info().clip_time(p).ok())
+                    .unwrap_or(last.time);
+                Some(about(
+                    failure(
+                        cause.code(),
+                        format!(
+                            "{} is damaged before {}: {reason}; the last good frame is at {} s",
+                            self.file().display(),
+                            describe(when),
+                            seconds(good)
+                        ),
                     ),
-                ),
-                self.file(),
-            )),
+                    self.file(),
+                ))
+            }
             _ => None,
         })
     }

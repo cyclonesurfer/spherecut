@@ -544,6 +544,30 @@ fn every_failure_leaves_nothing_behind() {
     };
     let cut = cut_at(&gop8, "cut");
     let cut_first = cut_at(&good, "cut-first");
+    // The same cut in Matroska, which says how long the file was in its
+    // Segment; and in a variable-rate clip, whose frames are counted.
+    let mkv = media::remux_to_mkv(&gop8, &dir).unwrap();
+    let bytes = std::fs::read(&mkv).unwrap();
+    let mkv_cut = dir.join("cut.mkv");
+    std::fs::write(&mkv_cut, &bytes[..bytes.len() * 2 / 3]).unwrap();
+    let vfr = media::write(
+        &Spec {
+            name: "vfr".into(),
+            width: 512,
+            height: 256,
+            vfr: true,
+            gop: Some(media::Gop {
+                keyint: 8,
+                bframes: 0,
+                open: false,
+                radl: 0,
+            }),
+            ..Spec::default()
+        },
+        &dir,
+    )
+    .unwrap();
+    let vfr_cut = cut_at(&vfr, "vfr-cut");
     // A sample entry of a codec FFmpeg doesn't know.
     let mut f = std::fs::read(&good).unwrap();
     let at = f.windows(4).position(|w| w == b"stsd").unwrap() + 16;
@@ -592,6 +616,43 @@ fn every_failure_leaves_nothing_behind() {
         (&good, vec!["--time", "1"], 1, "out_of_range"),
         (&good, vec!["--frame", "30"], 1, "out_of_range"),
         (&cut, vec!["--equirect", "--time", "0.9"], 1, "truncated"),
+        (
+            &mkv_cut,
+            vec!["--equirect", "--time", "0.9"],
+            1,
+            "truncated",
+        ),
+        (
+            &mkv_cut,
+            vec!["--equirect", "--frame", "29"],
+            1,
+            "truncated",
+        ),
+        (
+            &vfr_cut,
+            vec!["--equirect", "--frame", "29"],
+            1,
+            "truncated",
+        ),
+        // Too far on for any timestamp of the clip.
+        (
+            &good,
+            vec!["--time", "5000000000000000/1"],
+            1,
+            "out_of_range",
+        ),
+        (
+            &good,
+            vec!["--frame", "1000000000000000000"],
+            1,
+            "out_of_range",
+        ),
+        (
+            &good,
+            vec!["--frame", "18446744073709551615"],
+            1,
+            "out_of_range",
+        ),
         // The decoder's setup fails, before any frame: the probe's damage
         // is in the warnings (below).
         (&cut_first, vec!["--equirect"], 1, "decode_failed"),
@@ -651,6 +712,24 @@ fn every_failure_leaves_nothing_behind() {
     );
     let m = message(&cut, &["--equirect", "--time", "0.9"]);
     assert!(m.contains("is damaged before 0.9 s"), "{m}");
+    let m = message(&mkv_cut, &["--equirect", "--frame", "29"]);
+    assert!(m.contains("is damaged before frame 29"), "{m}");
+    assert!(m.contains("bytes its Matroska Segment says it has"), "{m}");
+    assert!(m.contains("; the last good frame is at "), "{m}");
+    let m = message(&vfr_cut, &["--equirect", "--frame", "29"]);
+    assert!(m.contains("is damaged before frame 29"), "{m}");
+    assert!(m.contains("the file is truncated"), "{m}");
+    assert!(m.contains("; the last good frame is at "), "{m}");
+    let m = message(&good, &["--time", "5000000000000000/1"]);
+    assert_eq!(
+        m,
+        "no frame at 5000000000000000 s: the clip runs from 0 to 1 s"
+    );
+    let m = message(&good, &["--frame", "18446744073709551615"]);
+    assert!(
+        m.starts_with("no frame 18446744073709551615: ") && m.ends_with(" has 30 frames, 0 to 29"),
+        "{m}"
+    );
     let m = message(&zzzz, &["--equirect"]);
     assert!(m.contains("\"zzzz\""), "{m}");
     let m = message(&good, &["--fov", "200"]);
@@ -670,6 +749,177 @@ fn every_failure_leaves_nothing_behind() {
     assert!(!out.exists());
     frame(&untagged, &out, &["--equirect"]).ok();
     assert_eq!(temp_files(&out_dir), Vec::<String>::new());
+}
+
+/// What a cut in the middle of a B-frame's packet leaves of a clip. The
+/// B-frame, shown before the P-frame that came before it in the file, is
+/// lost with everything after it in the file, while that P-frame still
+/// comes out as the decoder drains.
+struct Lost {
+    /// The lost B-frame's number and the P-frame's, from 0.
+    b: u64,
+    p: u64,
+    /// The B-frame's start, as `--time` takes it.
+    b_time: String,
+    /// The start of the last frame before it that the cut file holds, in
+    /// seconds as frame's messages say them.
+    before: String,
+}
+
+/// Cut `clip` into `cut` in the middle of the first packet past its
+/// middle that is a B-frame shown before the packet before it.
+// Reads a file this test wrote with ffmpeg-next alone, as `faststart`
+// does.
+#[allow(clippy::disallowed_methods)]
+fn cut_in_a_b_frame(clip: &Path, cut: &Path) -> Lost {
+    let mut ictx = ff::format::input(clip).unwrap();
+    let st = ictx.streams().best(ff::media::Type::Video).unwrap();
+    let (index, tb) = (st.index(), st.time_base());
+    // (pts, position, size), in the file's order.
+    let packets: Vec<(i64, usize, usize)> = ictx
+        .packets()
+        .filter(|(s, _)| s.index() == index)
+        .map(|(_, p)| {
+            let at = usize::try_from(p.position()).unwrap();
+            (p.pts().unwrap(), at, p.size())
+        })
+        .collect();
+    let i = (packets.len() / 2..packets.len() - 1)
+        .find(|&i| packets[i + 1].0 < packets[i].0)
+        .unwrap_or_else(|| panic!("{}: no B-frame: {packets:?}", clip.display()));
+    let (p, b) = (packets[i], packets[i + 1]);
+    let mut shown: Vec<i64> = packets.iter().map(|q| q.0).collect();
+    shown.sort_unstable();
+    let number = |pts: i64| shown.iter().position(|&q| q == pts).unwrap() as u64;
+    let ticks = |pts: i64| (pts - shown[0]) * i64::from(tb.numerator());
+    let before = packets[..=i]
+        .iter()
+        .map(|q| q.0)
+        .filter(|&q| q < b.0)
+        .max()
+        .unwrap();
+    let secs = ticks(before) as f64 / f64::from(tb.denominator());
+    let before = format!("{secs:.3}");
+    let before = before
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string();
+    let bytes = std::fs::read(clip).unwrap();
+    std::fs::write(cut, &bytes[..b.1 + b.2 / 2]).unwrap();
+    Lost {
+        b: number(b.0),
+        p: number(p.0),
+        b_time: format!("{}/{}", ticks(b.0), tb.denominator()),
+        before,
+    }
+}
+
+/// `mkv` as a live recording leaves it, its Segment's size unknown, so
+/// that nothing can tell a cut from the end.
+fn unknown_size(mkv: &Path, dst: &Path) {
+    let mut f = std::fs::read(mkv).unwrap();
+    let at = f
+        .windows(4)
+        .position(|w| w == [0x18, 0x53, 0x80, 0x67])
+        .unwrap()
+        + 4;
+    // FFmpeg writes the size in 8 bytes; all ones is unknown.
+    assert_eq!(f[at], 0x01);
+    f[at + 1..at + 8].fill(0xFF);
+    std::fs::write(dst, &f).unwrap();
+}
+
+/// A frame the cut lost is never shown in its place, as exact, though a
+/// later frame still came out (D13, D27, the M1 plan's amendment 8): in
+/// Matroska, whose demuxer reads a cut as the end of the file, it is
+/// `truncated`, by a time or a frame number; on a variable-rate MP4,
+/// counting stops at the cut, since a frame given up after it may come
+/// after a lost one. Where nothing can tell a cut from the end (Matroska
+/// that doesn't say its size), a frame number at a constant rate still
+/// never shows another frame: frames are missing there (`damaged`), or
+/// it is past the last (`out_of_range`).
+#[test]
+fn a_frame_lost_to_a_cut_is_never_shown_in_its_place() {
+    let dir = TempDir::new("lost");
+    let spec = |name: &str, vfr| Spec {
+        name: name.into(),
+        width: 512,
+        height: 256,
+        // Long enough for the cut to come after the blocks a Matroska rate
+        // is checked on (D29): in them it would be a gap in the rate.
+        frames: 150,
+        vfr,
+        // As synth's seek oracle has them: the encoder puts B-frames before
+        // each keyframe at least.
+        gop: Some(media::Gop {
+            keyint: 8,
+            bframes: 3,
+            open: true,
+            radl: 0,
+        }),
+        ..Spec::default()
+    };
+    let cfr = media::write(&spec("bframes", false), &dir).unwrap();
+    let mkv = media::remux_to_mkv(&cfr, &dir).unwrap();
+    let vfr = media::write(&spec("vfr-bframes", true), &dir).unwrap();
+    let vfr_fast = dir.join("vfr-bframes-faststart.mp4");
+    faststart(&vfr, &vfr_fast);
+    let out = dir.join("out.png");
+    let none = dir.join("none.png");
+    let refused = |clip: &Path, args: &[&str], code: &str| {
+        let mut all = vec!["--equirect"];
+        all.extend_from_slice(args);
+        let ran = frame(clip, &none, &all);
+        assert_eq!(ran.status, Some(1), "{args:?}: {}", ran.doc);
+        assert_eq!(ran.code(), code, "{args:?}: {}", ran.doc);
+        assert!(!none.exists());
+        ran.doc["error"]["message"].as_str().unwrap().to_string()
+    };
+
+    let mkv_cut = dir.join("cut.mkv");
+    let lost = cut_in_a_b_frame(&mkv, &mkv_cut);
+    let (b, p) = (lost.b.to_string(), lost.p.to_string());
+    let held = (lost.p + 1).to_string();
+    let last_good = format!("; the last good frame is at {} s", lost.before);
+    for args in [["--frame", b.as_str()], ["--time", lost.b_time.as_str()]] {
+        let m = refused(&mkv_cut, &args, "truncated");
+        assert!(m.contains("bytes its Matroska Segment says it has"), "{m}");
+        assert!(m.ends_with(&last_good), "{args:?}: {m}");
+    }
+    refused(&mkv_cut, &["--frame", "149"], "truncated");
+    // Well before the cut, and the frames the decoder gives up after it.
+    let early = lost.b / 2;
+    let (got, _) = shown(
+        &mkv_cut,
+        &out,
+        &["--equirect", "--frame", &early.to_string()],
+    );
+    assert_eq!(u64::from(got), early);
+
+    let vfr_cut = dir.join("vfr-cut.mp4");
+    let lost = cut_in_a_b_frame(&vfr_fast, &vfr_cut);
+    for n in [lost.b, lost.p] {
+        let m = refused(&vfr_cut, &["--frame", &n.to_string()], "truncated");
+        assert!(m.contains("the file is truncated"), "{m}");
+        assert!(m.contains("; the last good frame is at "), "{m}");
+    }
+    let early = lost.b / 2;
+    let (got, _) = shown(
+        &vfr_cut,
+        &out,
+        &["--equirect", "--frame", &early.to_string()],
+    );
+    assert_eq!(u64::from(got), early);
+
+    let live = dir.join("live-cut.mkv");
+    unknown_size(&mkv_cut, &live);
+    let m = refused(&live, &["--frame", &b], "damaged");
+    assert!(m.contains(&format!("has no frame {b}: ")), "{m}");
+    let m = refused(&live, &["--frame", "149"], "out_of_range");
+    assert!(m.ends_with(&format!(" has {held} frames, 0 to {p}")), "{m}");
+    let (got, r) = shown(&live, &out, &["--equirect", "--frame", &p]);
+    assert_eq!(got.to_string(), p, "{r}");
+    assert_eq!(temp_files(&dir), Vec::<String>::new());
 }
 
 /// Where the output can't go: a directory, a device, a directory that
