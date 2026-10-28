@@ -228,6 +228,22 @@ didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
   stand-in ffmpeg-sys-next with a build directory elsewhere and a target
   triple set, and `the_libraries_checked_are_those_the_build_links`
   fails without its check.
+- The review of those fixes found three nits more. That check runs only
+  in compat, so a feature turned on in the workspace that bound another
+  library (ffmpeg-next's `filter`) passed `cargo test` and
+  `cargo xtask check` and failed only a compat run:
+  `the_libraries_checked_are_those_the_workspace_binds` now reads the
+  features cargo metadata resolves for ffmpeg-sys-next, with every
+  feature of the workspace on, and fails unless the libraries they bind
+  are those compat checks (it fails with `filter` on). libavresample,
+  which ffmpeg-sys-next can bind and FFmpeg 5 dropped, didn't count as
+  FFmpeg's, so a build that linked one passed; it counts now, as
+  libpostproc does. And a target root with a brace in its path failed
+  every build, cargo reading its build directory, which compat sets to
+  the target, as a template (`{workspace-root}`); such a target is
+  refused now, before anything is made there, and the refusal names
+  `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR`. Each has a test that fails
+  without its change.
 - `gen-media`'s files from 8.1.3 differ from 6.1's only in FFmpeg's
   version strings (`Lavc`, `Lavf`) and the average bitrate in MP4's
   `btrt` box, which 8.1.3 leaves 0: the streams are the same.
@@ -2036,17 +2052,18 @@ unlike the decode from the start, with no event, on 6.1 and 8.1.3, and
 before the target would do: the stand-ins pass on through every chain
 of references. So an exact seek now ends only on frames decoded where
 FFmpeg vouches for the decode (`exact_run`): from the stream's first
-packet (a flush leaves the decoder as opening does), or, for H.264,
-from a packet its parser flags a keyframe (an IDR picture, a recovery
-point SEI, or an I-frame of a stream whose SPS keeps one reference
-frame) when FFmpeg then says decoding has recovered by the first good
-frame: it flags that frame a keyframe, or doesn't flag it corrupt
-before the stream drains (it flags nothing as it drains). The decoder's
-own heuristic doesn't count: it takes an I-frame for a place to start
-wherever the stream allows few references, and with 2 the frames after
-one still referred across it. Every other codec's decoders flag a frame
-that refers to a picture decoding didn't reach, so for them any landing
-counts, as before. Where a seek landed elsewhere, the exact seek seeks
+packet, or, for H.264, from a packet its parser flags a keyframe (an
+IDR picture, a recovery point SEI, or an I-frame of a stream whose SPS
+keeps one reference frame) when FFmpeg then says decoding has recovered
+by the first good frame: it flags that frame a keyframe, or doesn't flag
+it corrupt before the stream drains (it flags nothing as it drains).
+The decoder's own heuristic was not to count: it takes an I-frame for a
+place to start wherever the stream allows few references, and with 2
+the frames after one still referred across it. (It still counted, and
+the stream's first packet needs a decoder as opening leaves it, which a
+flush isn't: the next update makes both so.) Every other codec's
+decoders flag a frame that refers to a picture decoding didn't reach,
+so for them any landing counts, as before. Where a seek landed elsewhere, the exact seek seeks
 again to before the landing, as for a leading picture, a keyframe at a
 time and then from the start (`MAX_ATTEMPTS`), and no exact seek
 decodes forward from the frames decoded since: `forward_is_cheaper` and
@@ -2055,13 +2072,10 @@ keyframe the index names for T is the last before it that wasn't read
 and seen unflagged. A keyframe seek still gives such an I-frame,
 `KeyframeOnly`, and playing on from it, or from the start of a cut
 there, hands out every frame decoded from it, as d4bfe81 made them. The
-rule is exact as far as the file says: what an exact seek returns comes
-from a decode that began at the start of the stream, or where an IDR
-picture, a recovery point FFmpeg reached, or an I-frame of a
-one-reference stream says nothing before it is needed. Its cost falls
-on H.264 whose sync samples FFmpeg doesn't flag: there an exact seek
-decodes from the start of the stream, so its cost grows with the
-target's place in the stream, not with the GOP. Measured on 6.1 and
+rule was to be exact as far as the file says, and wasn't (next update).
+Its cost falls on H.264 whose sync samples FFmpeg doesn't flag: there
+an exact seek decodes from the start of the stream, so its cost grows
+with the target's place in the stream, not with the GOP. Measured on 6.1 and
 8.1.3 alike, by frames decoded and seeks (`SeekCost`, summed over an
 exact seek to every frame of a clip, each on a fresh decoder, and over
 a batch of 20 random exact seeks on one decoder; the machine's load left
@@ -2073,11 +2087,15 @@ most), their batch from 136 to 244. H.264 with recovery points or
 closed GOPs and HEVC decode the frames they did (open-GOP H.264 191 and
 136, closed 150 and 128, noisy 1920x960 H.264 and HEVC 961 and 296). Of
 `bench_seek_latency`'s clips, the synthetic one and the X5's are HEVC,
-unchanged by construction. The LRV proxy is H.264 with B-frames in GOPs
-of 30: unchanged if its keyframes are IDR pictures or recovery points,
-and if they are neither, each exact seek in it decodes from the start
-of the file. No LRV is at hand here, so the next `hw-test` run on Pat's
-machines says which. `h264_i_frames_listed_as_sync_samples_seek_exactly`
+unchanged by construction. The X5's LRV proxies (seven of them in
+`spherecut-samples`) are H.264 High, 1664x832, of P-frames keeping 1
+reference, with an IDR picture every 30 frames, and their `stss` and
+FFmpeg's packet flags name those alone (64 of the 1904 packets of
+`LRV_20261022_170245_01_009.lrv`), so their exact seeks decode what
+they did: on a 95-frame copy of that one, an exact seek to each frame
+on a fresh decoder decoded 1474 frames in all and at most 31 for one,
+none wrong, before this rule and after it, and after the next update
+too. `h264_i_frames_listed_as_sync_samples_seek_exactly`
 writes such clips with 3 B-frames and 1, 3 references and 2, and one
 that flashes at the first forced I-frame, checks that FFmpeg's parser
 flags no forced frame and that a cut from each decodes otherwise than
@@ -2107,6 +2125,77 @@ keyframe, so an exact seek after a keyframe seek sought again.
 with the SEI and without; each of the three changes fails it without
 its fix on 6.1.
 
+*Updated 2026-10-28, after the review of that rule.* Two things it
+leaned on didn't hold, and where they failed it returned wrong frames as
+`Exact`, with no event.
+
+FFmpeg's heuristic still counted. Its parser flags every packet with a
+recovery point SEI a keyframe, whatever count the SEI gives, so muxers
+list it. Where such an I-frame says decoding is right only some frames
+on (at x264's next keyframe) and the stream keeps 2 references, or 3
+with 1 B-frame on frame threads (the SEI doesn't reach every thread's
+context), FFmpeg's heuristic takes the I-frame for a place to start and
+flags nothing after it. The first good frame was then unflagged, the
+landing counted, and the frames up to the recovery point, decoded from
+stand-ins, came back `Exact`: of 60 exact seeks on fresh decoders, on
+frame threads, the review counted 30 wrong with 1 B-frame and 2
+references, 18 with 3 B-frames and 15 with 1 B-frame and 3 references,
+alike on 6.1, 7.1.3 and 8.1.3. Now, for H.264, only a first
+good frame that FFmpeg flags a keyframe starts an exact run after a
+seek: an IDR picture, or a picture whose recovery point counts no
+frames, where the file says nothing before it is needed. The parser's
+one-reference case goes too: FFmpeg flags no such frame a keyframe, and
+nothing Spherecut reads tells its packet from that of an I-frame whose
+SEI counts frames. A landing that doesn't start an exact run is noted,
+and the keyframe the index names for T passes over it as over a packet
+seen unflagged. `h264_recovery_points_that_count_frames_seek_exactly`
+gives the I-frames forced at 10 and 22 a recovery point counting 4
+frames, with 1 and 3 B-frames, 2 and 3 references and a flash, lists
+them, and runs the oracle in MP4 and Matroska; it fails without the fix
+on 6.1 and 8.1.3.
+
+And a flush doesn't leave FFmpeg's H.264 decoder as opening does: its
+frame pool keeps the pictures it decoded, where a new pool's buffers are
+zeroed (`av_buffer_allocz`). A stream that starts at an I-frame that
+isn't IDR and has no recovery point (a cut there), with no B-frames and
+3 references, refers to stand-ins for the frames the cut left out, and
+FFmpeg's heuristic fires on the first of them before it would colour
+them grey, so they keep what their buffers held: zeros after opening,
+and earlier pictures after a flush, which differ with what was decoded
+before. So decoding from the start again gave other pictures than
+opening did, and every exact seek that went there returned them: the
+review counted 34 to 40 of a batch of 40 on one decoder, in MP4 and
+Matroska, on 6.1 and 8.1.3, and plain FFmpeg gave 34 of 38 frames unlike
+the decode from opening after a flush, on 6.1, 7.1.3 and 8.1.3, and
+none after opening the decoder again. Now a decode from the stream's
+first packet, once packets have been sent, runs on a decoder opened
+afresh as it was at open, unless the first frame decoded since opening
+was a keyframe (an IDR picture, or a recovery point counting no
+frames), after which nothing from before is needed. The flush still
+serves every other seek, and a stream that starts on a keyframe, as
+every encoder's does. `a_cut_at_an_i_frame_decodes_from_its_start_as_it_opens`
+cuts P-only x264, keeping 3 references, at an I-frame its scene-cut
+detection made (synth's clips can now cut away to another scene, with
+that detection on), checks that the cut decodes otherwise than the clip
+and alike twice, and runs the oracle on it with its I-frames listed, in
+MP4 and Matroska; it fails without the fix on 6.1 and 8.1.3.
+
+With both, the rule is exact as far as the file says: what an exact
+seek returns comes from a decode that began at the start of the stream,
+on a decoder as opening leaves it, or at a picture FFmpeg flags a
+keyframe because the file says nothing before it is needed. It costs
+more where seeks leaned on the heuristic. Measured on 6.1 with the
+review's probe (an exact seek to each frame on a fresh decoder, by
+frames decoded summed and most for one seek; frame threads): the
+60-frame clips with I-frames whose SEI counts 8 frames went from 30, 18
+and 15 wrong to none, and from 478 frames (at most 18) to 766 (27), 573
+to 744 and 622 to 766; the P-only cut from 24 wrong to none, at the
+same 843 frames; x264's intra refresh with keyint 8 and no B-frames
+(below) from 8 of 40 wrong to none and from 297 frames (at most 17) to
+931 (44), and with 2 B-frames, which was right, from 399 to 931. An
+SEI-less clip and the LRV decode what they did, and so, by
+construction, do closed GOPs, open GOPs with recovery points, and HEVC.
+
 Limits (from 8.1.3): on 7.1.x HEVC damage to a slice header or frame
 start is silent, as above. Outside H.264, a frame flagged corrupt after
 the first good one is taken for damage: a decoder that flagged a frame
@@ -2116,22 +2205,29 @@ oracle cuts the SEI-less clips with 1 and 3 B-frames, not the one with
 others 3, and the least lag puts the latter a frame early, so in a cut
 of it, with the SEI or without, an exact seek after a keyframe seek
 that landed before its target seeks once more than the oracle allows
-(`forward_is_cheaper`'s estimate, above); its frames are right. H.264
-whose random access points are recovery points on P-frames (x264's
-intra refresh) seeks only to where FFmpeg says decoding has recovered,
-which need not be the decode from the start: in x264 clips with keyint
-8, the review counted 17 of 80 exact seeks without B-frames and 4 of 80
-with 2 that returned a frame unlike it, as `Exact` and with no event,
-and with 3 B-frames and 3 references a keyframe seek gave the first
-frame FFmpeg took for recovered, not the sync sample. Nothing here
-tells such a stream apart, and the oracle has none. An exact seek in
-H.264 whose sync samples FFmpeg doesn't flag decodes from the start of
-the stream, however far in its target lies, even where the frames after
-those I-frames refer to nothing before them: nothing in the file says
-so. Stepping back or seeking exactly through a long such file is slow;
-keyframe seeks aren't. After a keyframe seek to such an I-frame,
-playing on hands out the frames decoded from it, which may refer to
-grey stand-ins where the decode from the start doesn't. An H.264
+(`forward_is_cheaper`'s estimate, above); its frames are right. An
+exact seek in H.264 whose sync samples FFmpeg doesn't flag keyframes as
+frames decodes from the start of the stream, however far in its target
+lies, even where the frames after them refer to nothing before them
+(an I-frame of a stream that keeps one reference frame, or a recovery
+point that told the truth): nothing Spherecut reads says so. So does
+one in H.264 whose random access points are recovery points on P-frames
+(x264's intra refresh), each landing decoded to where FFmpeg counts
+decoding recovered and then sought before, up to `MAX_ATTEMPTS` times.
+There an exact seek returned what FFmpeg took for recovered, which in
+x264 clips with keyint 8 was unlike the decode from the start for 17 of
+80 exact seeks without B-frames and 4 of 80 with 2, as an earlier
+review counted; now none is, at the cost above. The oracle has no
+intra-refresh clip, and with 3 B-frames and 3 references a keyframe
+seek there gives the first frame FFmpeg took for recovered, not the
+sync sample. Stepping back or seeking exactly through a long such file
+is slow; keyframe seeks aren't. After a keyframe seek to such a
+keyframe, playing on hands out the frames decoded from it, which may
+refer to stand-ins where the decode from the start doesn't. On a
+device, whose surfaces FFmpeg doesn't zero (nor colour grey: it leaves
+stand-ins as they are under hardware acceleration), a stream that
+starts at an I-frame that isn't IDR, with no B-frames, need not decode
+alike each time it is opened, and nothing here checks it. An H.264
 stream whose first IDR picture has frames shown before it (a picture
 order count that isn't its least) loses them at open; no encoder here
 writes one.
