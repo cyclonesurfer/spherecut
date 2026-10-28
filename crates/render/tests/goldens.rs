@@ -3642,9 +3642,13 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
     // it), where the old means through RADV's export, against the old
     // reference, miss `fisheye_360`'s, as the RX 7600 did. lavapipe's own
     // filter, emulated the same way, comes within 1 dB of its render on
-    // every row, which is what the method can be checked against here,
-    // where lavapipe filters 8-bit planes to whole codes as the model has
-    // it.
+    // every row, which is what the method can be checked against here.
+    // Both are asserted only where lavapipe filters 8-bit planes to whole
+    // codes, as the model has it and as the lavapipe the goldens are
+    // blessed on does: one that filters them in floating point renders
+    // the wide views nearer the reference (59.97 dB for `fisheye_360`
+    // with GALLIVM_PERF=no_aos_sampling), so its floors aren't the
+    // blessed ones and say nothing of a GPU.
     let fixed = |blend: i32, truncate: bool| Precision {
         texel_bits: Some(8),
         lod_bits: Some(8),
@@ -3686,7 +3690,7 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
     let gpu = gpu();
     let mut renderer = StillRenderer::new(gpu);
     let (mut filter_miss, mut radv_miss, mut lavapipe_miss) = ([0.0f64; 4], 0.0f64, 0.0f64);
-    let mut under = Vec::new();
+    let (mut under, mut predictions) = (Vec::new(), Vec::new());
     for c in cpu_checks() {
         let what = format!("{} {}", c.row, c.key);
         let cpu = reference::render(
@@ -3809,12 +3813,7 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
              error the emulation missed at be38fa4 ({:.2} dB alone) added",
             db(missed)
         );
-        assert!(
-            predicted >= floor(here),
-            "{what}: the RX 7600 is predicted at {predicted:.2} dB after the fix, under lavapipe's \
-             floor of {}",
-            floor(here)
-        );
+        predictions.push((what.clone(), predicted, floor(here)));
         if radv < floor(here) {
             under.push(what);
         }
@@ -3840,19 +3839,31 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
         "the old means through RADV's export clear lavapipe's floors but {under:?}"
     );
     // The model of lavapipe's filter is a fact about the lavapipe it was
-    // made on, which holds what it filters from 8-bit planes to codes; a
-    // lavapipe that filters them in floating point (GALLIVM_PERF=
-    // no_aos_sampling, or another build) is reported, not held to it.
+    // made on, which holds what it filters from 8-bit planes to codes, and
+    // so are the floors a blessing calibrates; a lavapipe that filters
+    // them in floating point (GALLIVM_PERF=no_aos_sampling, or another
+    // build) is reported, not held to either.
     let (to_codes, between) = filters_to_codes(gpu, &mut renderer);
+    let short: Vec<String> = predictions
+        .iter()
+        .filter(|(_, predicted, floor)| predicted < floor)
+        .map(|(what, predicted, floor)| format!("{what} at {predicted:.2} dB, under {floor}"))
+        .collect();
     if to_codes {
         assert!(
             lavapipe_miss < 1.0,
             "lavapipe's filter misses lavapipe by {lavapipe_miss:.2} dB"
         );
+        assert!(
+            short.is_empty(),
+            "the RX 7600 is predicted under lavapipe's floors after the fix: {short:?}"
+        );
     } else {
         eprintln!(
             "lavapipe here filters 8-bit planes between codes ({between} pixels of the probe), \
-             so its filter's model, which misses it by {lavapipe_miss:.2} dB, isn't asserted"
+             so neither its filter's model, which misses it by {lavapipe_miss:.2} dB, nor the \
+             RX 7600's prediction against the floors it calibrates ({short:?} under them) is \
+             asserted"
         );
     }
 }
