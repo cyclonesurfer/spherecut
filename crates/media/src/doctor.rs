@@ -430,6 +430,35 @@ const SAMPLES: &[Sample] = &[
     },
 ];
 
+/// The format of doctor's decode checks that says whether a stream of
+/// codec `codec` (FFmpeg's name), `bit_depth` bits and chroma subsampled
+/// by `chroma_log2` (log2 across and down, as probe gives it) decodes on
+/// a device: its [`Check::format`]. `None` for a stream no check covers:
+/// another codec, 4:2:2 or 4:4:4, or a depth the checks' frames don't
+/// have. H.264 High covers Main and Constrained Baseline, which are its
+/// subsets. The playback engine's decoder choice reads it (DECISIONS
+/// D34).
+pub fn check_format(
+    codec: &str,
+    bit_depth: Option<u32>,
+    chroma_log2: Option<(u32, u32)>,
+) -> Option<&'static str> {
+    if chroma_log2 != Some((1, 1)) {
+        return None;
+    }
+    let format = match (codec, bit_depth?) {
+        ("h264", 8) => "H.264 High",
+        ("hevc", 8) => "HEVC Main",
+        ("hevc", 10) => "HEVC Main 10",
+        ("av1", 8) => AV1,
+        _ => return None,
+    };
+    SAMPLES
+        .iter()
+        .find(|s| s.format == format)
+        .map(|s| s.format)
+}
+
 /// One VA-API encoder to try, and the software decoders that read its
 /// output back.
 struct EncodeTarget {
@@ -1634,6 +1663,29 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    /// Every stream a check covers names one of the checks' formats, and
+    /// nothing else is covered.
+    #[test]
+    fn streams_map_to_the_checks_that_cover_them() {
+        let f = |codec, depth, chroma| check_format(codec, Some(depth), Some(chroma));
+        assert_eq!(f("h264", 8, (1, 1)), Some("H.264 High"));
+        assert_eq!(f("hevc", 8, (1, 1)), Some("HEVC Main"));
+        assert_eq!(f("hevc", 10, (1, 1)), Some("HEVC Main 10"));
+        assert_eq!(f("av1", 8, (1, 1)), Some("AV1 Main"));
+        for name in ["H.264 High", "HEVC Main", "HEVC Main 10", "AV1 Main"] {
+            assert!(SAMPLES.iter().any(|s| s.format == name), "{name}");
+        }
+        // 4:2:2, 4:4:4, depths no check decodes, other codecs.
+        assert_eq!(f("hevc", 10, (1, 0)), None);
+        assert_eq!(f("hevc", 8, (0, 0)), None);
+        assert_eq!(f("hevc", 12, (1, 1)), None);
+        assert_eq!(f("h264", 10, (1, 1)), None);
+        assert_eq!(f("av1", 10, (1, 1)), None);
+        assert_eq!(f("prores", 10, (1, 0)), None);
+        assert_eq!(check_format("hevc", None, Some((1, 1))), None);
+        assert_eq!(check_format("hevc", Some(8), None), None);
+    }
 
     fn codecs(needs: &[Need]) -> Vec<CodecStatus> {
         needs
