@@ -3467,10 +3467,13 @@ fn the_passthrough_model_and_its_bound() {
     assert_eq!(nearest_half(3.0 * 2f64.powi(-26)), 2f64.powi(-24));
 }
 
-// The two Tier 2 paths run on goldens blessed into a scratch directory,
-// never on `tests/goldens`: `goldens` rewrites that while blessing, in
-// parallel with these, and a read halfway through the rewrite failed the
-// blessing command although it had written everything.
+// No Tier 1 test but `goldens` reads `tests/goldens` (the Tier 2 tests,
+// run on their own, do): `goldens` rewrites it while blessing, in
+// parallel with the others, which would read the images it replaces, or
+// one halfway through its rewrite, and fail the blessing command although
+// it had written everything. The two Tier 2 paths' tests run on goldens
+// blessed into a scratch directory, and
+// `the_other_driver_rule_catches_local_faults` renders the stored views.
 
 #[test]
 fn the_reference_only_path_runs_on_lavapipe() {
@@ -3805,15 +3808,18 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
 
 #[test]
 fn the_other_driver_rule_catches_local_faults() {
-    // Each stored image against faults made from it, or rendered beside
-    // it: moved a pixel right or down, the view a pixel wider or narrower
-    // at its edges, implicit LOD (the seam and pole rows' control), and
-    // the seam, the poles' quads or the pixels within a pixel of the rim
-    // blanked. Every fault fails the rule, but implicit LOD in the rect
-    // views, which show no seam or pole and nothing far minified, and
-    // differ there by no more than 4 LSB. Four pass PSNR and SSIM, and
-    // only the count or the maximum catches them. As drift, the views
-    // widened or narrowed by a hundredth of a pixel at their edges pass.
+    // Each stored view's render against faults made from it, or rendered
+    // beside it: moved a pixel right or down, the view a pixel wider or
+    // narrower at its edges, implicit LOD (the seam and pole rows'
+    // control), and the seam, the poles' quads or the pixels within a
+    // pixel of the rim blanked. Every fault fails the rule, but implicit
+    // LOD in the rect views, which show no seam or pole and nothing far
+    // minified, and differ there by no more than 4 LSB. Four pass PSNR
+    // and SSIM, and only the count or the maximum catches them. As drift,
+    // the views widened or narrowed by a hundredth of a pixel at their
+    // edges pass. The render is the stored image wherever `goldens`
+    // passes at the build it was blessed on; the PNG isn't read, since a
+    // blessing rewrites it beside this test.
     let gpu = gpu();
     let mut renderer = StillRenderer::new(gpu);
     let s = grid_nv12();
@@ -3827,8 +3833,6 @@ fn the_other_driver_rule_catches_local_faults() {
     ];
     let mut missed = Vec::new();
     for (row, v, size) in stored_views() {
-        let png = std::fs::read(Path::new(GOLDENS).join(format!("{row}.png"))).unwrap();
-        let want = Image::from_png(&png).unwrap();
         let mut render = |v: &ViewParams, debug: DebugMode| {
             let opts = StillOptions {
                 debug,
@@ -3836,6 +3840,7 @@ fn the_other_driver_rule_catches_local_faults() {
             };
             renderer.render(gpu, &s.frame, v, size, &opts).unwrap()
         };
+        let want = render(&v, DebugMode::Off);
         for px in [0.01, -0.01] {
             // A 360° fisheye can't widen.
             let Some(w) = widened(&v, size, px) else {
