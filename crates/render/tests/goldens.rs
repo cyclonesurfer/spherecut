@@ -2072,8 +2072,9 @@ fn oetf(l: f64) -> f64 {
 /// by an independent model of the chain: Y' by H.273 (limited: (k − 16)
 /// / 219, full: k / 255) clamped to [0, 1]; the sRGB EOTF; the nearest
 /// half, as the linear target stores it; the OETF of the encode pass;
-/// and the encode pass's rounding to the nearest code, whose k / 255 the
-/// unorm8 store keeps on any driver (DECISIONS D31). The GPU does each
+/// and the encode pass's rounding to the nearest code, whose k / 255 a
+/// unorm8 store to nearest keeps, even packed to f16 toward zero first
+/// (DECISIONS D31). The GPU does each
 /// step in f32, so where a value lies within its error of a tie (an f16
 /// tie, or a half code) either neighbour may come out: the second value
 /// is the other candidate, when there is one.

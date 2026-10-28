@@ -616,11 +616,13 @@ fn the_encode_pass_writes_every_code() {
     // A linear target holding the nearest half of each code's EOTF comes
     // out of the encode pass as that code, for every code of the 8-bit
     // targets and of Rgb10a2Unorm: the shader rounds to the target's
-    // codes and returns k / (2^bits − 1) (DECISIONS D31), and the half
-    // moves the OETF by at most 0.22 of a 10-bit code. Into a float
-    // target it writes the OETF unrounded. lavapipe converts to nearest,
-    // so RADV's pack toward zero, which the rounding is for, is
-    // emulated in `encode`'s unit test instead.
+    // codes and returns k / (2^bits − 1), at 10 bits its nearest half
+    // (DECISIONS D31), and the linear target's half moves the OETF by at
+    // most 0.22 of a 10-bit code. Into an f16 target it writes the OETF's
+    // nearest half, which lavapipe's own conversion, truncating, would
+    // miss; into an f32 one the OETF unrounded. lavapipe converts to
+    // unorm to nearest, so RADV's pack toward zero, which the rounding is
+    // for, is emulated in `encode`'s unit test instead.
     for (format, max) in [
         (wgpu::TextureFormat::Rgba8Unorm, 255u32),
         (wgpu::TextureFormat::Bgra8Unorm, 255),
@@ -666,6 +668,40 @@ fn the_encode_pass_writes_every_code() {
     // Rounded to 8-bit codes it would be up to 0.037 codes, 1.5e-4, off.
     assert!(off_oetf < 1e-5, "{off_oetf}");
     assert!(codes_off > 1e-4, "{codes_off}");
+    let format = wgpu::TextureFormat::Rgba16Float;
+    assert!(spherecut_render::encode::returns_half(format));
+    let lin = |k: u32| round_f16(srgb_eotf(f64::from(k) / 1023.0));
+    let got = encode_into(format, 1024, lin);
+    let (mut wrong, mut below, mut compared) = (Vec::new(), 0, 0);
+    for k in 0..1024 {
+        let t = got.texel(k, 0).unwrap();
+        let stored: Vec<u16> = t
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let oetf = srgb_oetf(lin(k) as f32);
+        // The shader's pow and the CPU's may differ by an ulp or two.
+        if near_a_tie(f64::from(oetf)) {
+            continue;
+        }
+        compared += 1;
+        let want = half_bits(oetf);
+        // Where the nearest half lies above, a store that truncates misses.
+        if f16_to_f32(want) > oetf {
+            below += 1;
+        }
+        if stored[..3].iter().any(|h| *h != want) || stored[3] != half_bits(1.0) {
+            wrong.push((k, stored, want));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "Rgba16Float: {} of {compared} values came out other than the OETF's nearest half, such \
+         as {:?}",
+        wrong.len(),
+        &wrong[..wrong.len().min(6)]
+    );
+    assert!(below > 300, "{below} of {compared}");
 }
 
 #[test]

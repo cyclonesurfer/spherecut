@@ -288,9 +288,10 @@ fn rgb8(texels: &Texels) -> Image {
 
 /// The sRGB OETF, as `shaders/encode.wgsl` applies it in f32. The shader
 /// then rounds it to the output's codes itself, round(v · L) / L with
-/// ties to even for L = 255 or 1023 ([`crate::encode::code_max`]), so
-/// that the driver's unorm conversion has nothing left to round; the
-/// 16-bit path rounds it to 65535 on the CPU instead.
+/// ties to even for L = 255 or 1023 ([`crate::encode::code_max`]), at
+/// 1023 as its nearest half ([`crate::encode::returns_half`]), so that
+/// the driver's unorm conversion has nothing left to round; the 16-bit
+/// path rounds it to 65535 on the CPU instead.
 pub fn srgb_oetf(l: f32) -> f32 {
     if l <= 0.003_130_8 {
         l * 12.92
