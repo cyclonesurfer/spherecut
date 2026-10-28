@@ -10,6 +10,8 @@ This describes the design as built, plus the planned parts marked
                           \                |                    /
                            +------ export, audio (planned) ----+
                                       |
+         playback (frame cache and its budget, the engine's numbers; M1 slice 5)
+                                      |
                     render (wgpu on Vulkan, WGSL; M1 slice 3)
                                       |
              motion (IMU, stabilization)   stitch (lens models, blending)  (planned)
@@ -18,7 +20,7 @@ This describes the design as built, plus the planned parts marked
                                       |
      media (FFmpeg, MediaBackend and frame-exact seek, probing, MP4 boxes, doctor)
                                       |
-   sphere (projection math)      core (time, frames, colour, stop tokens, atomic writes; project model planned)
+   sphere (projection math)      core (time, frames, colour, stop tokens, clocks, the UI thread's guard, atomic writes; project model planned)
 ```
 
 `synth` (test patterns and media, and backends that stand in for FFmpeg)
@@ -33,7 +35,7 @@ synth, which depends on media.
 
 | Crate | Role | Status |
 |---|---|---|
-| `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), the `--time` grammar (`TimeSpec`), what a decoded frame is (`video`: pixel layouts, planes, colour), stop tokens by generation (`cancel`) and files written whole or not at all (`fs::TempFile`, D16); later the project model, timeline, keyframes, undo | M0: name and time; M1: `video`, `cancel`; slice 4: `TimeSpec`, `fs` |
+| `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), the `--time` grammar (`TimeSpec`), what a decoded frame is (`video`: pixel layouts, planes, colour), stop tokens by generation (`cancel`), the clocks playback runs on (`clock`: the `Clock` trait, `SystemClock`, the frame-steppable `ManualClock`), the guard that a blocking call never runs on the UI thread (`blocking`: `mark_ui_thread`, `may_block`, D34) and files written whole or not at all (`fs::TempFile`, D16); later the project model, timeline, keyframes, undo | M0: name and time; M1: `video`, `cancel`; slice 4: `TimeSpec`, `fs`; slice 5: `clock`, `blocking` |
 | `spherecut-sphere` | CPU reference projection math in f64: equirect and its uv gradient, cube/EAC, fisheye lens models, view projections and morphs and their inverse (`project_morph`), output pixels to lens coordinates (`pixel`), yaw, pitch and roll (`orient`), rotation helpers | M0; M1 slice 3a: `pixel`, `orient`, `uv_gradient`, `project_morph` |
 | `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software and on VA-API or Vulkan Video with fallback to software, the render node lookup, the colour default rules, a small MP4 writer, `doctor`'s capability checks | M0; `MediaBackend` from M1 slice 2a, hardware from 2b (audio in 6) |
 | `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, the supersampled ideal of a view (`render_view_ideal`, which the goldens hold minified views to), tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes, seeded noise for camera bitrates) and broken files, `SyntheticBackend` and `GatedBackend` | M0; M1 slices 2a, 2b and 3b |
@@ -42,6 +44,7 @@ synth, which depends on media.
 | `spherecut-stitch` | Lens calibration models, seam blending, exposure matching | M3 |
 | `spherecut-motion` | IMU ingest, time sync, orientation fusion, stabilization | M4 |
 | `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); later scopes | M1 slices 3a and 3b |
+| `spherecut-playback` | The headless playback engine (D34), with no UI type: the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure), its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given), and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`); the `Player`, decode workers, upload thread, GPU slots and presenter come later in slice 5 | M1 slice 5 |
 | `spherecut-audio` | Playback clock, mixing, ambisonics, loudness | M1 (playback), M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
 | `spherecut-app` | eframe app, docked panels, viewer paint callbacks | M1 |
@@ -569,7 +572,7 @@ float before the output. Stitching, stabilization and reframing then
 happen in one pass shared by the viewer and the exporter, and an
 intermediate equirect exists only as the output of a 360 export.
 
-## Threads *(planned, M1)*
+## Threads *(M1; partly planned)*
 
 * UI thread: egui, never blocks on decode, disk or GPU readback.
 * Decode workers per open source, feeding a bounded frame cache.
@@ -585,6 +588,27 @@ intermediate equirect exists only as the output of a 360 export.
   thread while the main thread polls the SIGINT flag every 10 ms and
   shuts the `StopSource` down on the first Ctrl+C (`spherecut frame`,
   above).
+* Built in slice 5 so far (D34):
+  * **The UI thread never blocks.** The GUI marks its thread with
+    `core::blocking::mark_ui_thread()`, and test harnesses mark theirs.
+    Every helper that can block calls `may_block(what)` first: the
+    frame cache's lock and waits, file I/O, opening, probing, seeking
+    and decoding media, opening a GPU device, and the readback with its
+    `Device::poll`. On a marked thread that panics in debug and test
+    builds, and is logged once in release builds.
+  * **The frame cache** (`playback::FrameCache`, a `Mutex` and a
+    `Condvar`) sits between the decode workers and the upload thread.
+    It holds `Arc<VideoFrame>`s by stream and clip time, linked by run,
+    within a budget sized from the memory available and any cgroup
+    limit (`playback::budget`). A worker's frame ahead of the playhead
+    past the window waits for room, in 20 ms slices that check its
+    `StopToken`. A frame at or behind the playhead never waits. The UI
+    thread only `try_set_playhead`s and `try_stats`es.
+  * **Clocks** (`core::clock`): `SystemClock` and `ManualClock` read
+    through a sequence lock of atomics, so the UI thread reads them
+    every frame without a lock.
+  * **Numbers** (`playback::PerfStats`): each thread records its stages
+    into rings of atomics, and the overlay reads them without a lock.
 
 ## Testing tiers
 
