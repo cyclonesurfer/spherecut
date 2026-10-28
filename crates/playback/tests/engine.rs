@@ -1,0 +1,828 @@
+//! The engine's rules (M1 plan sections 8.2 to 8.4 and 12.1), on
+//! lavapipe and a `ManualClock` wherever wall time would make a test
+//! flaky: the presenter shows the latest frame at or before the clock
+//! with a variable frame rate; frames passed over while playing are
+//! counted as dropped; a decoder that falls behind catches up without
+//! making the frames it passes; a slot is reused only once nothing else
+//! holds its frame; a seek keeps the frame on screen until the new one
+//! is ready and frees the old run's slots; steps follow runs both ways;
+//! a fallback reaches the snapshot, from a fault and from `Auto` picking
+//! Vulkan on lavapipe; the audio seam holds playback for its preroll;
+//! and a 5.7K source plays inside a 256 MiB cache.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod common;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use spherecut_core::{Clock, FrameRate, ManualClock, Rational, StopToken, Time};
+use spherecut_media::MediaError;
+use spherecut_media::backend::{
+    AudioDecode, AudioRequest, DecodeMode, DecodePath, Fallback, FallbackReason, Fault, FaultPlan,
+    FfmpegBackend, HwKind, MediaBackend, SeekMode, VideoDecode, VideoRequest,
+};
+use spherecut_media::doctor::CheckResult;
+use spherecut_media::probe::{ProbeError, ProbeReport};
+use spherecut_playback::{
+    AudioOutput, AudioOutputFactory, CacheBudget, Counter, DecoderPreference, HwDecodeCheck,
+    HwSupport, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent, PlayerParts, Presented,
+    SlotState,
+};
+use spherecut_render::readback::read_texture;
+use spherecut_synth::fake::{SyntheticBackend, SyntheticClip, frame_index};
+use spherecut_synth::media::{self, Codec, Gop, Spec, VFR_TIMESCALE, vfr_ticks};
+
+use common::{gpu, player, pts, until};
+
+const RATE: FrameRate = FrameRate::FPS_30;
+const WAIT: Duration = Duration::from_secs(20);
+
+fn at(k: i64) -> Time {
+    RATE.frame_to_time(k).unwrap()
+}
+
+fn config(mib: u64) -> PlayerConfig {
+    PlayerConfig {
+        cache: CacheBudget::Bytes(mib << 20),
+        decoder: DecoderPreference::Software,
+        ..PlayerConfig::default()
+    }
+}
+
+fn clip(frames: u64) -> SyntheticBackend {
+    SyntheticBackend::new(SyntheticClip {
+        frames,
+        ..SyntheticClip::default()
+    })
+}
+
+/// Present until stream 0 shows the frame at `at(k)` (frame `k` of a
+/// constant 30 fps), failing after [`WAIT`]; every frame shown on the
+/// way must be at or before the clock. What changed on the way goes into
+/// `seen`.
+fn show_seen(player: &Player, k: i64, seen: &mut Vec<Time>) -> Presented {
+    until(WAIT, || {
+        let p = player.present(Instant::now())?;
+        for f in &p.frames {
+            assert!(
+                f.frame.time <= p.time,
+                "{:?} shown at {:?}",
+                f.frame,
+                p.time
+            );
+        }
+        let t = p.frames[0].frame.time;
+        if seen.last() != Some(&t) {
+            seen.push(t);
+        }
+        (t == at(k)).then_some(p)
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "frame {k} never came up: {:?}",
+            player.present(Instant::now()).map(|p| pts(&p))
+        )
+    })
+}
+
+fn show(player: &Player, k: i64) -> Presented {
+    show_seen(player, k, &mut Vec::new())
+}
+
+/// Opened and showing its first frame.
+fn opened(
+    backend: impl MediaBackend + 'static,
+    clock: Arc<ManualClock>,
+    config: PlayerConfig,
+) -> Player {
+    let player = player(backend, clock, config);
+    player.open("clip.synthetic".into());
+    show(&player, 0);
+    player
+}
+
+/// A test's own directory, removed with what it holds when dropped.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("engine-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        TempDir(d)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+#[test]
+fn the_presenter_shows_the_latest_frame_at_or_before_the_clock() {
+    // A true VFR clip: frames last 1/30 to 1/15 s, in no short period.
+    let dir = TempDir::new("vfr");
+    let path = media::write(
+        &Spec {
+            name: "vfr".into(),
+            vfr: true,
+            frames: 24,
+            ..Spec::default()
+        },
+        &dir.0,
+    )
+    .unwrap();
+    let tick = |n: i64| Time(Rational::new(n, VFR_TIMESCALE).unwrap());
+    let starts: Vec<i64> = (0..24u32)
+        .scan(0, |t, i| {
+            let s = *t;
+            *t += vfr_ticks(i);
+            Some(s)
+        })
+        .collect();
+    let clock = Arc::new(ManualClock::new(tick(3000)));
+    let player = player(FfmpegBackend::new(), clock.clone(), config(64));
+    player.open(path);
+    let first = show(&player, 0);
+    let base = first.frames[0].frame.pts;
+    player.play();
+    // The clock at each frame's start, inside it, and a tick before the
+    // next: always that frame.
+    for k in 0..23usize {
+        let (s, next) = (starts[k], starts[k + 1]);
+        for t in [s, (s + next) / 2, next - 1] {
+            clock.set(tick(t), Instant::now());
+            let p = until(WAIT, || {
+                let p = player.present(Instant::now())?;
+                let f = &p.frames[0].frame;
+                assert!(
+                    f.time <= tick(t),
+                    "frame at {:?} shown at {:?}",
+                    f.time,
+                    tick(t)
+                );
+                (f.time == tick(s)).then_some(p)
+            });
+            assert!(p.is_some(), "frame {k} never came up at tick {t}");
+        }
+    }
+    assert_eq!(player.snapshot().state, PlayState::Playing);
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+    let _ = base;
+}
+
+#[test]
+fn frames_passed_over_while_playing_count_as_dropped() {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(clip(120), clock.clone(), config(64));
+    player.play();
+    // Two frames a step, with the frame two on uploaded before the clock
+    // moves: each step passes one over. Three frames a step after that,
+    // without waiting: the frames between may come up first, and what is
+    // counted must be what was passed.
+    let mut seen = vec![at(0)];
+    for k in (2..=40).step_by(2) {
+        until(WAIT, || {
+            let views = player.slots().views();
+            views.iter().any(|v| v.frame.time == at(k)).then_some(())
+        })
+        .expect("the frame two on never came up");
+        clock.set(at(k), Instant::now());
+        show_seen(&player, k, &mut seen);
+    }
+    assert_eq!(seen.len(), 21, "{seen:?}");
+    assert_eq!(player.perf().count(Counter::Dropped), 20);
+    for k in (43..=70).step_by(3) {
+        clock.set(at(k), Instant::now());
+        show_seen(&player, k, &mut seen);
+    }
+    let frames: Vec<i64> = seen
+        .iter()
+        .map(|&t| {
+            RATE.time_to_frame(t, spherecut_core::Rounding::Floor)
+                .unwrap()
+        })
+        .collect();
+    let passed: i64 = frames.windows(2).map(|w| w[1] - w[0] - 1).sum();
+    eprintln!("shown {frames:?}: {passed} passed over");
+    assert_eq!(player.perf().count(Counter::Dropped), passed as u64);
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+#[test]
+fn frames_are_dropped_only_while_playing() {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(clip(120), clock.clone(), config(64));
+    // Paused, a seek or a step far on drops nothing.
+    player.seek(at(40), SeekMode::Exact);
+    show(&player, 40);
+    player.step(5);
+    show(&player, 45);
+    assert_eq!(player.perf().count(Counter::Dropped), 0);
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+#[test]
+fn a_keyframe_seek_shows_the_keyframe_at_its_own_time() {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    // A keyframe every 8: the keyframe for frame 45 is 40, and the cache
+    // holds nothing past the first window.
+    let player = opened(clip(120), clock.clone(), config(64));
+    player.seek(at(45), SeekMode::Keyframe);
+    show(&player, 40);
+    let snap = player.snapshot();
+    assert_eq!(snap.clock, at(40));
+    assert_eq!(
+        snap.streams[0].landed.unwrap().exactness,
+        Some(spherecut_media::backend::Exactness::KeyframeOnly)
+    );
+    // Playing goes on from it, dropping nothing.
+    player.play();
+    clock.set(at(41), Instant::now());
+    show(&player, 41);
+    assert_eq!(player.perf().count(Counter::Dropped), 0);
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+#[test]
+fn a_decoder_that_falls_behind_catches_up_without_making_the_frames_it_passes() {
+    let backend = SyntheticBackend::new(SyntheticClip {
+        frames: 600,
+        keyint: 1000,
+        frame_cost: Duration::from_millis(2),
+        ..SyntheticClip::default()
+    });
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(backend, clock.clone(), config(64));
+    // Let it decode ahead as far as its window (1 s) while paused.
+    until(WAIT, || {
+        let held = player.cache().held();
+        (held.len() >= 30).then_some(())
+    })
+    .expect("the window ahead never filled");
+    player.play();
+    // The clock leaps 10 s on: the decoder is 270 frames behind it.
+    clock.set(at(300), Instant::now());
+    show(&player, 300);
+    let dropped = player.perf().count(Counter::DecodeDropped);
+    let held: Vec<u64> = player
+        .cache()
+        .held()
+        .iter()
+        .map(|(_, f)| frame_index(f).unwrap())
+        .collect();
+    eprintln!("decode-dropped {dropped}, held {held:?}");
+    // Catching up from the frame after the window's last to 300 made
+    // none of the frames between.
+    let last_ahead = held.iter().copied().filter(|&i| i < 300).max().unwrap();
+    assert!(last_ahead < 60, "{held:?}");
+    assert!(
+        held.iter().all(|&i| i <= last_ahead || i >= 300),
+        "frames passed over were made: {held:?}"
+    );
+    assert_eq!(dropped, 300 - last_ahead - 1);
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+#[test]
+fn a_slot_is_reused_only_once_nothing_else_holds_its_frame() {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(clip(120), clock.clone(), config(64));
+    let p = show(&player, 0);
+    let held = p.frames[0].gpu.clone();
+    let slot = p.frames[0].slot;
+    drop(p);
+    let read = |gpu_frame: &spherecut_render::GpuFrame| {
+        let t = read_texture(gpu(), gpu_frame.plane_texture(0).unwrap(), 0).unwrap();
+        u64::from_le_bytes(t.data[..8].try_into().unwrap())
+    };
+    assert_eq!(read(&held), 0);
+    player.play();
+    // Twenty frames on, through four slots: the held one is freed, and
+    // never written.
+    for k in 1..=20 {
+        clock.set(at(k), Instant::now());
+        show(&player, k);
+    }
+    let state = player.slots().state(slot);
+    assert_eq!(state, Some(SlotState::Free), "slot {slot}");
+    assert_eq!(player.slots().holders(slot), Some(2));
+    assert_eq!(read(&held), 0, "a held slot was written");
+    assert!(player.perf().count(Counter::FramesUploaded) >= 20);
+    // Let go, it is used again.
+    drop(held);
+    let mut reused = false;
+    for k in 21..=40 {
+        clock.set(at(k), Instant::now());
+        show(&player, k);
+        reused |= player.slots().state(slot) != Some(SlotState::Free);
+    }
+    assert!(reused, "slot {slot} was never used again");
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+#[test]
+fn a_seek_keeps_the_frame_up_until_the_new_one_is_ready_and_frees_the_old_run() {
+    // 30 ms a frame from a keyframe 8 back: a seek takes a while.
+    let backend = SyntheticBackend::new(SyntheticClip {
+        frames: 300,
+        keyint: 8,
+        frame_cost: Duration::from_millis(30),
+        ..SyntheticClip::default()
+    });
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(backend, clock.clone(), config(64));
+    player.play();
+    for k in 1..=3 {
+        clock.set(at(k), Instant::now());
+        show(&player, k);
+    }
+    player.seek(at(207), SeekMode::Exact);
+    let start = Instant::now();
+    let mut during = Vec::new();
+    let landed = until(WAIT, || {
+        let p = player.present(Instant::now());
+        let shown = p.as_ref().map(pts);
+        during.push(shown.clone());
+        (shown == Some(vec![207])).then_some(start.elapsed())
+    });
+    let landed = landed.expect("the seek never landed");
+    eprintln!("landed after {landed:?}");
+    // Until then, the frame on screen stayed: no black flash.
+    assert!(during.len() > 1);
+    for s in &during[..during.len() - 1] {
+        assert_eq!(s.as_deref(), Some(&[3][..]), "{during:?}");
+    }
+    // The old run's slots are freed for the new one's frames.
+    let settled = until(WAIT, || {
+        let _ = player.present(Instant::now());
+        let views = player.slots().views();
+        views.iter().all(|v| v.frame.time >= at(206)).then_some(())
+    });
+    assert!(settled.is_some(), "{:?}", player.slots().views());
+    // Playback goes on from there.
+    clock.set(at(209), Instant::now());
+    show(&player, 209);
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+#[test]
+fn a_step_past_the_window_ahead_lands() {
+    // A window of a third of a second, 10 frames, and a decoder that takes
+    // 10 ms a frame: a step of 40 goes well past the window, and the
+    // worker moves the playhead as it goes, so its frames never wait for
+    // room. The presenter must leave the playhead to it meanwhile, though
+    // the clock stood between frames, where the presenter last put it.
+    let backend = SyntheticBackend::new(SyntheticClip {
+        frames: 120,
+        frame_cost: Duration::from_millis(10),
+        ..SyntheticClip::default()
+    });
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(
+        backend,
+        clock.clone(),
+        PlayerConfig {
+            ahead: Duration::from_millis(333),
+            ..config(64)
+        },
+    );
+    // The window filled while paused, so playing to frame 5 needs no
+    // catching up.
+    until(WAIT, || (player.cache().held().len() >= 10).then_some(()))
+        .expect("the window ahead never filled");
+    player.play();
+    let between = Time(Rational::new(11, 60).unwrap());
+    clock.set(between, Instant::now());
+    show(&player, 5);
+    player.pause();
+    let _ = player.present(Instant::now());
+    player.step(40);
+    // The worker is past the window before the presenter looks again.
+    std::thread::sleep(Duration::from_millis(150));
+    show(&player, 45);
+    player.step(-35);
+    show(&player, 10);
+    assert_eq!(player.snapshot().state, PlayState::Paused);
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+#[test]
+fn steps_follow_runs_both_ways() {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(clip(120), clock.clone(), config(64));
+    // The frame after the one shown comes up while paused, so a step to
+    // it is instant: no request reaches the worker.
+    let requests = |player: &Player| player.snapshot().streams[0].seeks.started;
+    until(WAIT, || {
+        player
+            .slots()
+            .views()
+            .iter()
+            .any(|v| v.frame.pts == 1 && v.state == SlotState::Ready)
+            .then_some(())
+    })
+    .expect("the frame after never came up");
+    let before = until(WAIT, || {
+        let s = player.snapshot();
+        (s.state == PlayState::Paused).then(|| s.streams[0].seeks.started)
+    })
+    .unwrap();
+    player.step(1);
+    show(&player, 1);
+    player.step(-1);
+    show(&player, 0);
+    assert_eq!(
+        requests(&player),
+        before,
+        "an instant step went to the worker"
+    );
+    // Farther, through the cache's links.
+    player.step(5);
+    show(&player, 5);
+    player.step(-2);
+    show(&player, 3);
+    // Back from a seek into the cache.
+    player.seek(at(20), SeekMode::Exact);
+    show(&player, 20);
+    player.step(-1);
+    show(&player, 19);
+    // Back from a seek past what the cache holds: decoded.
+    player.seek(at(100), SeekMode::Exact);
+    show(&player, 100);
+    player.step(-3);
+    show(&player, 97);
+    assert_eq!(player.snapshot().state, PlayState::Paused);
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+/// FFmpeg's backend, with a device stood in for by software that fails
+/// frame `plan.frame` "as hardware" (as synth's fallback tests do).
+#[derive(Debug)]
+struct FaultBackend {
+    inner: FfmpegBackend,
+    plan: FaultPlan,
+}
+
+impl MediaBackend for FaultBackend {
+    fn name(&self) -> &'static str {
+        "fault"
+    }
+
+    fn probe(&self, path: &Path) -> Result<ProbeReport, ProbeError> {
+        self.inner.probe(path)
+    }
+
+    fn open_video(
+        &self,
+        path: &Path,
+        req: &VideoRequest,
+    ) -> Result<Box<dyn VideoDecode>, MediaError> {
+        let req = VideoRequest {
+            decode: DecodeMode::Hardware {
+                kind: HwKind::VaApi,
+                device: None,
+                fallback: Fallback::Software,
+            },
+            fault: Some(self.plan),
+            ..req.clone()
+        };
+        self.inner.open_video(path, &req)
+    }
+
+    fn open_audio(
+        &self,
+        path: &Path,
+        req: &AudioRequest,
+    ) -> Result<Box<dyn AudioDecode>, MediaError> {
+        self.inner.open_audio(path, req)
+    }
+}
+
+fn h264(dir: &TempDir) -> PathBuf {
+    media::write(
+        &Spec {
+            name: "h264".into(),
+            codec: Codec::H264,
+            gop: Some(Gop {
+                keyint: 8,
+                bframes: 3,
+                open: true,
+                radl: 0,
+            }),
+            frames: 30,
+            ..Spec::default()
+        },
+        &dir.0,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_fallback_from_a_failing_device_reaches_the_snapshot() {
+    let dir = TempDir::new("fault");
+    let path = h264(&dir);
+    let backend = FaultBackend {
+        inner: FfmpegBackend::new(),
+        plan: FaultPlan {
+            frame: 10,
+            fault: Fault::Decode,
+            stand_in: true,
+        },
+    };
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = player(backend, clock.clone(), config(64));
+    player.open(path);
+    let mut seen = Vec::new();
+    show_seen(&player, 0, &mut seen);
+    player.play();
+    // Every frame in turn, the failing one and those after it included
+    // (the worker decodes ahead, so it fell back by now, or soon).
+    for k in 1..=20 {
+        clock.set(at(k), Instant::now());
+        show_seen(&player, k, &mut seen);
+    }
+    assert_eq!(seen, (0..=20).map(at).collect::<Vec<_>>());
+    let snap = player.snapshot();
+    let s = &snap.streams[0];
+    assert!(
+        matches!(
+            s.fallback,
+            Some((HwKind::VaApi, FallbackReason::Failed { .. }))
+        ),
+        "{:?}",
+        s.fallback
+    );
+    assert!(
+        matches!(s.decode, Some(DecodePath::FellBack { .. })),
+        "{:?}",
+        s.decode
+    );
+    let fell: Vec<_> = player
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, PlayerEvent::FellBack { .. }))
+        .collect();
+    assert_eq!(fell.len(), 1, "{fell:?}");
+    assert_eq!(player.perf().count(Counter::Dropped), 0);
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+#[test]
+fn auto_picks_vulkan_from_doctor_and_falls_back_on_lavapipe() {
+    let dir = TempDir::new("auto");
+    let path = h264(&dir);
+    // Doctor's checks said Vulkan decodes H.264 here and VA-API doesn't;
+    // FFmpeg's only Vulkan device on this box is lavapipe, which
+    // decodes nothing.
+    let check = |kind, result| HwDecodeCheck {
+        format: "H.264 High".into(),
+        kind,
+        result,
+        reason: None,
+    };
+    let hw = HwSupport {
+        checks: vec![
+            check(HwKind::VaApi, CheckResult::Fails),
+            check(HwKind::Vulkan, CheckResult::Works),
+        ],
+    };
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let parts = PlayerParts {
+        hw: Some(hw),
+        ..PlayerParts::new(Arc::new(FfmpegBackend::new()), gpu().clone(), clock)
+    };
+    let player = Player::new(
+        parts,
+        PlayerConfig {
+            decoder: DecoderPreference::Auto,
+            ..config(64)
+        },
+    )
+    .unwrap();
+    player.open(path);
+    show(&player, 0);
+    let snap = player.snapshot();
+    let s = &snap.streams[0];
+    let choice = s.choice.as_deref().unwrap_or_default();
+    assert!(choice.starts_with("Vulkan"), "{choice}");
+    assert!(
+        matches!(s.fallback, Some((HwKind::Vulkan, _))),
+        "{:?}",
+        s.fallback
+    );
+    assert!(player.events().iter().any(|e| matches!(
+        e,
+        PlayerEvent::FellBack {
+            from: HwKind::Vulkan,
+            ..
+        }
+    )));
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+/// Audio that is ready to play only when the test says so, on a clock the
+/// test moves.
+#[derive(Debug)]
+struct FakeAudio {
+    clock: Arc<ManualClock>,
+    ready: AtomicBool,
+}
+
+impl AudioOutput for FakeAudio {
+    fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
+    }
+
+    fn ready(&self, _ahead: Duration) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+struct FakeAudioFactory(Arc<FakeAudio>);
+
+impl AudioOutputFactory for FakeAudioFactory {
+    fn open(
+        &self,
+        _path: &Path,
+        _stop: &StopToken,
+    ) -> Result<Option<Arc<dyn AudioOutput>>, PlayerError> {
+        Ok(Some(self.0.clone()))
+    }
+}
+
+#[test]
+fn playback_after_a_seek_waits_for_the_audio_preroll() {
+    let audio = Arc::new(FakeAudio {
+        clock: Arc::new(ManualClock::new(RATE.frame_duration())),
+        ready: AtomicBool::new(true),
+    });
+    let own = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let parts = PlayerParts {
+        audio: Some(Arc::new(FakeAudioFactory(audio.clone()))),
+        ..PlayerParts::new(Arc::new(clip(120)), gpu().clone(), own.clone())
+    };
+    let player = Player::new(parts, config(64)).unwrap();
+    player.open("clip.synthetic".into());
+    show(&player, 0);
+    assert!(player.snapshot().has_audio);
+    player.play();
+    // Video follows the audio's clock, not its own.
+    let _ = player.present(Instant::now());
+    assert!(audio.clock.is_running() && !own.is_running());
+    audio.ready.store(false, Ordering::Release);
+    player.seek(at(50), SeekMode::Exact);
+    show(&player, 50);
+    // The frame is up; the audio isn't ready, so the clock waits.
+    for _ in 0..20 {
+        let _ = player.present(Instant::now());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(!audio.clock.is_running());
+    assert_eq!(player.snapshot().state, PlayState::Seeking);
+    audio.ready.store(true, Ordering::Release);
+    let _ = player.present(Instant::now());
+    assert!(audio.clock.is_running());
+    assert_eq!(audio.clock.now(), at(50));
+    assert_eq!(player.snapshot().state, PlayState::Playing);
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+/// Audio that takes a while to open, and gives up if its open is
+/// stopped, as a real device's would.
+#[derive(Debug)]
+struct SlowAudioFactory(Arc<FakeAudio>);
+
+impl AudioOutputFactory for SlowAudioFactory {
+    fn open(
+        &self,
+        _path: &Path,
+        stop: &StopToken,
+    ) -> Result<Option<Arc<dyn AudioOutput>>, PlayerError> {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(200) {
+            if stop.is_stopped() {
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(Some(self.0.clone()))
+    }
+}
+
+#[test]
+fn a_seek_while_the_audio_opens_keeps_the_audio() {
+    let audio = Arc::new(FakeAudio {
+        clock: Arc::new(ManualClock::new(RATE.frame_duration())),
+        ready: AtomicBool::new(true),
+    });
+    let parts = PlayerParts {
+        audio: Some(Arc::new(SlowAudioFactory(audio.clone()))),
+        ..PlayerParts::new(
+            Arc::new(clip(120)),
+            gpu().clone(),
+            Arc::new(ManualClock::new(RATE.frame_duration())),
+        )
+    };
+    let player = Player::new(parts, config(64)).unwrap();
+    player.open("clip.synthetic".into());
+    // Seeks stop the requests before them, not the open's audio.
+    player.seek(at(10), SeekMode::Exact);
+    player.seek(at(20), SeekMode::Exact);
+    show(&player, 20);
+    let has_audio = until(WAIT, || {
+        let s = player.snapshot();
+        s.fresh.then_some(s.has_audio)
+    });
+    assert_eq!(has_audio, Some(true));
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+#[test]
+fn new_settings_reach_the_threads() {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(clip(30), clock, config(64));
+    player.set_config(PlayerConfig {
+        gpu_slots: 3,
+        ..config(32)
+    });
+    let budget = until(WAIT, || {
+        let b = player.cache().stats().budget;
+        (b == 32 << 20).then_some(b)
+    });
+    assert!(budget.is_some());
+    assert_eq!(player.slots().active(), 3);
+    let snap = until(WAIT, || {
+        let s = player.snapshot();
+        s.budget.filter(|b| b.bytes == 32 << 20).map(|_| s)
+    });
+    assert!(snap.is_some());
+    assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+/// Risk 11's acceptance (M1 plan, slice 5): 5.7K frames, 25 MB each,
+/// through a 256 MiB cache and four GPU slots on lavapipe, frame by frame
+/// on a `ManualClock`: every frame plays, and the cache never holds more
+/// than its budget.
+#[test]
+fn a_5k7_source_plays_inside_a_256_mib_cache() {
+    let backend = SyntheticBackend::new(SyntheticClip {
+        width: 5760,
+        height: 2880,
+        frames: 60,
+        keyint: 30,
+        ..SyntheticClip::default()
+    });
+    let budget = 256u64 << 20;
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = player(backend, clock.clone(), config(256));
+    player.open("5k7.synthetic".into());
+    let start = Instant::now();
+    let mut peak = 0;
+    let mut watch = |player: &Player| {
+        let s = player.cache().stats();
+        assert!(s.bytes <= budget, "{} bytes held of {budget}", s.bytes);
+        peak = peak.max(s.bytes);
+    };
+    let first = until(WAIT, || {
+        watch(&player);
+        player.present(Instant::now())
+    });
+    assert_eq!(first.map(|p| pts(&p)), Some(vec![0]));
+    player.play();
+    for k in 1..60 {
+        clock.set(at(k), Instant::now());
+        let shown = until(WAIT, || {
+            watch(&player);
+            let p = player.present(Instant::now())?;
+            (pts(&p) == [k]).then_some(())
+        });
+        assert!(shown.is_some(), "frame {k} never came up");
+    }
+    let took = start.elapsed();
+    let snap = player.snapshot();
+    let stats = snap.cache.unwrap();
+    eprintln!(
+        "60 frames of 5.7K in {took:?}; peak {} MiB of {}, {} frames of {} MB, upload cpu {:?}",
+        peak >> 20,
+        budget >> 20,
+        budget / stats.frame_bytes,
+        stats.frame_bytes / 1_000_000,
+        snap.perf.stage(spherecut_playback::Stage::UploadCpu)
+    );
+    assert!(!stats.too_small);
+    assert!(peak > budget / 2, "the cache never filled: {peak}");
+    assert_eq!(snap.perf.counter(Counter::Dropped), 0);
+    assert!(snap.perf.counter(Counter::FramesShown) >= 60);
+    assert!(player.events().iter().all(|e| !matches!(
+        e,
+        PlayerEvent::CacheTooSmall { .. } | PlayerEvent::SlotDropped { .. }
+    )));
+    assert!(player.join(Duration::from_secs(5)).is_clean());
+}
