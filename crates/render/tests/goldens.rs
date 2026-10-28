@@ -3633,12 +3633,19 @@ fn a_gpu_is_held_to_the_lower_floor() {
 #[test]
 fn the_other_driver_path_runs_on_lavapipe() {
     // goldens_on_host_llvmpipe's path, on one stored image: the
-    // other-driver rule whatever the build, with the drift noted.
+    // other-driver rule whatever the build, with the drift noted. Blessed
+    // at this build, the golden is identical; one pixel a step off then
+    // passes, where the exact rule fails it at this build, and five
+    // pixels 5 LSB off fail by the count, which the message gives.
     let s = scratch("other-driver");
     let (dir, diffs) = (s.dir.clone(), s.diffs.clone());
     bless_into(&dir, &diffs, &["rect_forward"]);
-    let mut run = Run::at(gpu(), Mode::OtherDriver, &dir, &diffs);
-    run_rows(&mut run, Some(&["rect_forward"]));
+    let rerun = |mode: Mode| {
+        let mut run = Run::at(gpu(), mode, &dir, &diffs);
+        run_rows(&mut run, Some(&["rect_forward"]));
+        run
+    };
+    let run = rerun(Mode::OtherDriver);
     assert!(
         run.notes[0].contains("golden_psnr_db")
             && run.notes[0].contains("golden_pixels_past_4_lsb 0.0"),
@@ -3646,6 +3653,43 @@ fn the_other_driver_path_runs_on_lavapipe() {
         run.notes
     );
     run.finish();
+    let png = dir.join("rect_forward.png");
+    let blessed = Image::from_png(&std::fs::read(&png).unwrap()).unwrap();
+    let write_off = |pixels: &[usize], by: u8| {
+        let mut img = blessed.clone();
+        if let Pixels::Rgb8(p) = &mut img.pixels {
+            for &n in pixels {
+                let c = &mut p[3 * n];
+                *c = if *c < 128 { *c + by } else { *c - by };
+            }
+        }
+        std::fs::write(&png, img.to_png().unwrap()).unwrap();
+    };
+    write_off(&[1000], 1);
+    let run = rerun(Mode::OtherDriver);
+    assert!(run.failures.is_empty(), "{:?}", run.failures);
+    let m = &run.images["rect_forward"]["measured"];
+    assert!(
+        m["golden_identical"] == json!(0.0) && m["golden_max_lsb"] == json!(1.0),
+        "{m}"
+    );
+    let exact = rerun(Mode::Golden { bless: false });
+    assert!(
+        exact.failures.len() == 1 && exact.failures[0].contains("not identical"),
+        "{:?}",
+        exact.failures
+    );
+    write_off(&[1000, 5000, 9000, 20000, 30000], 5);
+    let run = rerun(Mode::OtherDriver);
+    assert!(
+        run.failures.len() == 1
+            && run.failures[0].contains("outside the other-driver tolerance")
+            && run.failures[0].contains("5 pixels more than 4 LSB off, max 5 LSB"),
+        "{:?}",
+        run.failures
+    );
+    let m = &run.images["rect_forward"]["measured"];
+    assert_eq!(m["golden_pixels_past_4_lsb"], json!(5.0), "{m}");
 }
 
 #[test]
