@@ -186,16 +186,12 @@ pub struct VideoDecoder {
     /// Once a packet has been read, the landing since opening: the
     /// stream's first packet, by the timestamp the index compares.
     first_landing: Option<Option<i64>>,
-    /// The demuxer flagged the packet landed on a keyframe. For H.264 the
-    /// flag is FFmpeg's parser's, not the index's: an IDR picture, a
-    /// recovery point SEI, or an I-frame in a stream that keeps one
-    /// reference frame.
-    landing_flagged: bool,
-    /// The keyframes the index lists, by its timestamp, whose packets
-    /// the demuxer didn't flag keyframes, of those read so far (bar the
-    /// stream's first packet): for H.264, I-frames that aren't IDR and
-    /// have no recovery point SEI.
-    unflagged_keys: BTreeSet<i64>,
+    /// The keyframes the index lists, by its timestamp, seen not to start
+    /// an exact decode (bar the stream's first packet): those whose
+    /// packets the demuxer didn't flag keyframes, of those read so far
+    /// (for H.264, I-frames that aren't IDR and have no recovery point
+    /// SEI), and those the caller found so ([`no_start_at`](Self::no_start_at)).
+    no_starts: BTreeSet<i64>,
     /// The least that a keyframe's pts has been after its dts, over the
     /// keyframes read (and the packets landed on, which are the index's
     /// keyframes): how far the index's decode times lie before the times
@@ -450,8 +446,7 @@ impl VideoDecoder {
             landing_key: None,
             read_position: None,
             first_landing: None,
-            landing_flagged: false,
-            unflagged_keys: BTreeSet::new(),
+            no_starts: BTreeSet::new(),
             key_lag: None,
             skip_before: None,
             skip_sent: 0,
@@ -670,7 +665,6 @@ impl VideoDecoder {
         self.awaiting_landing = true;
         self.landing = None;
         self.landing_key = None;
-        self.landing_flagged = false;
         self.read_position = None;
     }
 
@@ -714,23 +708,17 @@ impl VideoDecoder {
         self.landing.is_some() && Some(self.landing) == self.first_landing
     }
 
-    /// Whether the demuxer flagged the packet the last seek landed on a
-    /// keyframe (see the field).
-    pub(crate) fn landed_on_flagged_key(&self) -> bool {
-        self.landing_flagged
+    /// Whether `ts` is a keyframe the index lists, by its timestamp, seen
+    /// not to start an exact decode (see the field).
+    pub(crate) fn no_start(&self, ts: i64) -> bool {
+        self.no_starts.contains(&ts)
     }
 
-    /// Whether `ts` is a keyframe the index lists, by its timestamp, whose
-    /// packet the demuxer was seen not to flag a keyframe (see the field).
-    pub(crate) fn unflagged_key(&self, ts: i64) -> bool {
-        self.unflagged_keys.contains(&ts)
-    }
-
-    /// Whether the decoder has been told the stream ended: the frames it
-    /// gives now are those it held, drained. FFmpeg's H.264 decoder
-    /// flags none of them corrupt (D29).
-    pub(crate) fn draining(&self) -> bool {
-        self.eof_sent
+    /// Note that the keyframe at `ts`, by the index's timestamp, doesn't
+    /// start an exact decode: a seek landed on it and the frames decoded
+    /// from it may not be those a decode from the start gives.
+    pub(crate) fn no_start_at(&mut self, ts: i64) {
+        self.no_starts.insert(ts);
     }
 
     /// How far the packets read reach, by the same timestamp (see the
@@ -939,7 +927,6 @@ impl VideoDecoder {
                     if landed {
                         self.landing = ts;
                         self.landing_key = pkt.pts();
-                        self.landing_flagged = pkt.is_key();
                         self.first_landing.get_or_insert(ts);
                     }
                     if !pkt.is_key()
@@ -947,7 +934,7 @@ impl VideoDecoder {
                         && self.first_landing != Some(Some(ts))
                         && ffi::index_keyframe_before(&self.ictx, self.stream_index, ts) == Some(ts)
                     {
-                        self.unflagged_keys.insert(ts);
+                        self.no_starts.insert(ts);
                     }
                     self.read_position = ts.max(self.read_position);
                     // The landing is the index's keyframe, flagged one or

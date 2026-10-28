@@ -259,13 +259,14 @@ struct Expect {
     /// raise `Damaged` events, as the HEVC splice does up to FFmpeg 7.0.
     /// Otherwise none may: the oracle's clips are good.
     damaged: bool,
-    /// It is an MP4 whose keyframes after the first are pictures FFmpeg
-    /// doesn't flag as keyframes (H.264 I-frames that aren't IDR, with no
-    /// recovery point SEI), so a keyframe seek gives a sync sample.
-    /// FFmpeg says decoding recovers at none of them, so an exact seek
-    /// never decodes forward from one after a seek but from the start of
-    /// the stream, a keyframe at a time at most: its cost isn't bounded
-    /// by two GOPs (D29).
+    /// Its index lists keyframes after the first that FFmpeg's decoder
+    /// doesn't flag keyframes (H.264 I-frames that aren't IDR, with no
+    /// recovery point SEI or one that counts frames), so a keyframe seek
+    /// gives one of those ([`oracle_listed`]; an MP4's sync samples by
+    /// default). FFmpeg says decoding recovers at none of them, so an
+    /// exact seek never decodes forward from one after a seek but from
+    /// the start of the stream, a keyframe at a time at most: its cost
+    /// isn't bounded by two GOPs (D29).
     unmarked_keyframes: bool,
 }
 
@@ -282,6 +283,17 @@ struct Report {
 /// in the seek's run; what each seek cost; before the start and past the
 /// end; keyframe seeks; step back; frames by index.
 fn oracle(path: &Path, expect: Expect) -> Report {
+    let listed = match expect.unmarked_keyframes {
+        true => sync_samples(path),
+        false => Vec::new(),
+    };
+    oracle_listed(path, expect, &listed)
+}
+
+/// [`oracle`], on a clip whose index lists the keyframes at `listed`, by
+/// pts, that FFmpeg doesn't flag keyframes (see
+/// [`Expect::unmarked_keyframes`]).
+fn oracle_listed(path: &Path, expect: Expect, listed: &[i64]) -> Report {
     let (frames, last_end, events) = sequential_events(path);
     let name = path.file_name().unwrap().to_string_lossy().into_owned();
     if !expect.damaged {
@@ -428,10 +440,6 @@ fn oracle(path: &Path, expect: Expect) -> Report {
         .filter(|w| Some(w[1].pts - w[0].pts) > step)
         .map(|w| w[1].pts)
         .collect();
-    let listed = match expect.unmarked_keyframes {
-        true => sync_samples(path),
-        false => Vec::new(),
-    };
     for &(t, i) in targets.iter().step_by(4) {
         let (k, e, _) = seek_pts(&mut *d, t, SeekMode::Keyframe);
         if expect.backwards {
@@ -591,6 +599,7 @@ fn open_gop_h264_seeks_exactly_and_a_naive_seek_does_not() {
             |t| sei || t != 6,
             |_, key| key,
             Some(lead),
+            |_| None,
         );
         let got = sequential(&cut).0;
         assert_eq!(
@@ -624,15 +633,17 @@ fn open_gop_h264_seeks_exactly_and_a_naive_seek_does_not() {
 /// decode order (a keyframe), its timestamps moved back by that sample's
 /// pts, so a cut from 0 is a whole copy.
 fn without_sei(src: &Path, dst: &Path, from: usize) {
-    copy_h264(src, dst, from, |t| t != 6, |_, key| key, None);
+    copy_h264(src, dst, from, |t| t != 6, |_, key| key, None, |_| None);
 }
 
 /// Copy the H.264 MP4 `src` into `dst` (an MP4, or Matroska by its name)
 /// from video sample `from` in decode order, its timestamps moved back by
 /// `shift`, or else by that sample's pts: of each sample, the NAL units
 /// whose type `keep` keeps, flagged a keyframe (an MP4's sync sample, in
-/// `stss`) when `sync`, given its pts and whether it was one, says so.
-/// The first sample copied must be one.
+/// `stss`) when `sync`, given its pts and whether it was one, says so,
+/// and before its first slice a recovery point SEI with the count
+/// `recovery` gives for its pts, if any. The first sample copied must be
+/// a keyframe.
 // Writes a file this test made with ffmpeg-next alone, as `faststart`
 // does.
 #[allow(clippy::disallowed_methods)]
@@ -643,6 +654,7 @@ fn copy_h264(
     keep: impl Fn(u8) -> bool,
     sync: impl Fn(i64, bool) -> bool,
     shift: Option<i64>,
+    recovery: impl Fn(i64) -> Option<u32>,
 ) {
     let mut ictx = ff::format::input(src).unwrap();
     let mut octx = ff::format::output(dst).unwrap();
@@ -662,15 +674,22 @@ fn copy_h264(
         // NAL units with 4-byte lengths, as FFmpeg's MP4 muxer writes them.
         let data = pkt.data().unwrap();
         let mut kept = Vec::new();
+        let mut sei = recovery(pts).map(recovery_point);
         let mut at = 0;
         while at < data.len() {
             let len = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
             let nal = &data[at..at + 4 + len];
+            if matches!(nal[4] & 0x1f, 1 | 5)
+                && let Some(sei) = sei.take()
+            {
+                kept.extend_from_slice(&sei);
+            }
             if keep(nal[4] & 0x1f) {
                 kept.extend_from_slice(nal);
             }
             at += 4 + len;
         }
+        assert!(sei.is_none(), "no slice at pts {pts}");
         let key = sync(pts, pkt.is_key());
         assert!(k > from || key, "sample {from} is no keyframe");
         let mut out = ff::Packet::copy(&kept);
@@ -688,6 +707,35 @@ fn copy_h264(
         out.write_interleaved(&mut octx).unwrap();
     }
     octx.write_trailer().unwrap();
+}
+
+/// A recovery point SEI NAL unit with a 4-byte length: decoding that
+/// starts at its picture is right from `count` frames (by `frame_num`)
+/// on, exactly (`exact_match_flag`). The payload is `recovery_frame_cnt`
+/// as an Exp-Golomb code, the two flags and `changing_slice_group_idc`,
+/// padded to a byte with a one and zeros; then the NAL unit's stop bit.
+fn recovery_point(count: u32) -> Vec<u8> {
+    let v = count + 1;
+    let n = 32 - v.leading_zeros();
+    let mut bits = vec![false; n as usize - 1];
+    bits.extend((0..n).rev().map(|i| (v >> i) & 1 == 1));
+    bits.extend([true, false, false, false]);
+    if !bits.len().is_multiple_of(8) {
+        bits.push(true);
+        bits.resize(bits.len().next_multiple_of(8), false);
+    }
+    let payload: Vec<u8> = bits
+        .chunks(8)
+        .map(|c| c.iter().fold(0, |b, &x| (b << 1) | u8::from(x)))
+        .collect();
+    // No two zero bytes in a row, so no emulation prevention byte.
+    assert!(payload.iter().all(|&b| b != 0), "{count}");
+    let mut nal = vec![6, 6, u8::try_from(payload.len()).unwrap()];
+    nal.extend(payload);
+    nal.push(0x80);
+    let mut out = u32::try_from(nal.len()).unwrap().to_be_bytes().to_vec();
+    out.extend(nal);
+    out
 }
 
 /// The slice type of the first slice of an H.264 sample, NAL units with
@@ -907,6 +955,7 @@ fn h264_i_frames_listed_as_sync_samples_seek_exactly() {
             |_| true,
             |pts, key| key || forced.contains(&pts),
             None,
+            |_| None,
         );
         assert_eq!(sync_samples(&out), [0, forced[0], forced[1]], "{name}");
         // Frames after each refer to frames before it: decoded from the
@@ -914,7 +963,7 @@ fn h264_i_frames_listed_as_sync_samples_seek_exactly() {
         for (k, &pts) in forced.iter().enumerate() {
             let cut = dir.join(format!("{name}-cut{k}.mp4"));
             let from = pk.iter().position(|s| s.0 == pts).unwrap();
-            copy_h264(&clip, &cut, from, |_| true, |p, _| p == pts, None);
+            copy_h264(&clip, &cut, from, |_| true, |p, _| p == pts, None, |_| None);
             let start = whole.iter().position(|f| f.pts == pts).unwrap();
             let shifted: Vec<Seen> = whole[start..]
                 .iter()
@@ -938,6 +987,100 @@ fn h264_i_frames_listed_as_sync_samples_seek_exactly() {
         let (x, e, cost) = seek_pts(&mut *d, whole[15].pts, SeekMode::Exact);
         assert_eq!((Seen::of(&x), e), (whole[15], Exactness::Exact), "{name}");
         assert!(!cost.forward_only && cost.reseeks > 0, "{name}: {cost:?}");
+    }
+}
+
+/// H.264 whose sync samples include I-frames with a recovery point SEI
+/// that counts frames: a decode that starts there is right only from
+/// `recovery_frame_cnt` frames on, and the frames before those may refer
+/// to frames before the I-frame. FFmpeg's parser flags such a packet a
+/// keyframe, so muxers list it, and its decoder doesn't flag the picture
+/// one; but where the stream keeps few references (2, or 3 with 1 B-frame
+/// on frame threads), its heuristic for keyframes nothing marks takes the
+/// I-frame for a place to start and flags nothing corrupt. Spherecut took
+/// such a landing for one FFmpeg vouched for, and handed out the frames
+/// after it, decoded from FFmpeg's stand-ins for the frames before it, as
+/// `Exact` with no event: the review counted 30 of 60 exact seeks wrong
+/// on 6.1, 7.1.3 and 8.1.3. Now only a first frame FFmpeg flags a
+/// keyframe (an IDR picture, or a recovery point that counts no frames)
+/// starts an exact run after a seek (D29). Here the I-frames forced at 10
+/// and 22 of `h264_i_frames_listed_as_sync_samples_seek_exactly`'s clips
+/// carry a recovery point counting 4 frames, in MP4 and in Matroska.
+#[test]
+fn h264_recovery_points_that_count_frames_seek_exactly() {
+    let dir = TempDir::new("counted");
+    let listed = Expect {
+        keyint: None,
+        unmarked_keyframes: true,
+        ..GOP_8
+    };
+    for (name, bframes, refs, flash) in [
+        ("counted-b1-ref2", 1, 2, vec![]),
+        ("counted-b3-ref2", 3, 2, vec![]),
+        ("counted-b1-ref3", 1, 3, vec![]),
+        ("counted-b1-ref2-flash", 1, 2, vec![10]),
+    ] {
+        let clip = write(
+            &Spec {
+                gop: Some(Gop {
+                    keyint: 100,
+                    bframes,
+                    open: true,
+                    radl: 0,
+                }),
+                refs: Some(refs),
+                intra: vec![10, 22],
+                flash,
+                frames: 40,
+                ..spec(name, Codec::H264)
+            },
+            &dir,
+        );
+        let whole = sequential(&clip).0;
+        let forced = [whole[10].pts, whole[22].pts];
+        let out = dir.join(format!("{name}-sei.mp4"));
+        copy_h264(
+            &clip,
+            &out,
+            0,
+            |_| true,
+            |pts, key| key || forced.contains(&pts),
+            None,
+            |pts| forced.contains(&pts).then_some(4),
+        );
+        // FFmpeg's parser flags them keyframes for their SEI.
+        let pk = samples(&out);
+        for &pts in &forced {
+            assert!(
+                pk.iter().any(|s| s.0 == pts && s.3),
+                "{name}: pts {pts} isn't flagged a keyframe"
+            );
+        }
+        // The SEI changes no picture of the decode from the start.
+        assert_eq!(oracle(&out, listed).frames, whole, "{name}");
+        // A keyframe seek gives the I-frame, which FFmpeg's decoder
+        // doesn't flag a keyframe, and an exact seek after it doesn't
+        // decode on from there.
+        let mut d = open(&out);
+        let (k, e, _) = seek_pts(&mut *d, whole[15].pts, SeekMode::Keyframe);
+        assert_eq!(
+            (Seen::of(&k), e, k.key),
+            (whole[10], Exactness::KeyframeOnly, false),
+            "{name}"
+        );
+        let (x, e, cost) = seek_pts(&mut *d, whole[15].pts, SeekMode::Exact);
+        assert_eq!((Seen::of(&x), e), (whole[15], Exactness::Exact), "{name}");
+        assert!(!cost.forward_only && cost.reseeks > 0, "{name}: {cost:?}");
+        // In Matroska, whose index (Cues) lists the packets FFmpeg flags,
+        // in milliseconds.
+        let mkv = media::remux_to_mkv(&out, &dir).unwrap();
+        let seen = sequential(&mkv).0;
+        let report = oracle_listed(&mkv, listed, &[seen[10].pts, seen[22].pts]);
+        assert_eq!(
+            report.frames.iter().map(|f| f.hash).collect::<Vec<_>>(),
+            whole.iter().map(|f| f.hash).collect::<Vec<_>>(),
+            "{name}: Matroska"
+        );
     }
 }
 
