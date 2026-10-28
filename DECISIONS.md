@@ -221,8 +221,9 @@ didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
   module doc said a target inside any FFmpeg's tree is refused, where
   the guard looks only for a directory holding
   `include/libavcodec/avcodec.h` (a source tree has no `include/`); the
-  docs say so now, and the error names
-  `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` as the way out.
+  docs say so now, and the error names the directory it found and the
+  header file it holds, beside `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR`,
+  which it named before.
   `what_the_build_bound_is_found_wherever_cargo_builds` builds a
   stand-in ffmpeg-sys-next with a build directory elsewhere and a target
   triple set, and `the_libraries_checked_are_those_the_build_links`
@@ -261,7 +262,10 @@ directory there without one is refused and left, and so is a target
 directory that is a prefix, holds one or lies inside one, symlinks and
 `..` resolved, or that lies inside any directory holding
 `include/libavcodec/avcodec.h`, such as a prefix the run doesn't name
-(nothing else of an FFmpeg is looked for); the refusal names
+(nothing else of an FFmpeg is looked for: an install with its headers
+in Debian's and Ubuntu's `include/<triplet>/` or Fedora's
+`include/ffmpeg/` is recognised only if its prefix is listed); the
+refusal names
 `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR`, which puts the targets elsewhere.
 Once a
 stale target is deleted, compat asks pkg-config again and stops if the

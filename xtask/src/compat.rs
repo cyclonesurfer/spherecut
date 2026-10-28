@@ -23,9 +23,11 @@
 //! compat's stamp. A directory there without one is refused, and so is a
 //! target that is one of the prefixes listed, holds one or lies inside
 //! one, or lies inside a directory holding `include/libavcodec/avcodec.h`
-//! (an FFmpeg installed there, listed or not), symlinks and `..`
-//! resolved: `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` puts the target
-//! directories elsewhere. Cargo's build directory is the target directory
+//! (an FFmpeg installed there with its headers straight in `include/`,
+//! listed or not; Debian's `include/<triplet>/` and Fedora's
+//! `include/ffmpeg/` aren't recognised unless their prefix is listed),
+//! symlinks and `..` resolved: `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` puts
+//! the target directories elsewhere. Cargo's build directory is the target directory
 //! too, whatever `build.build-dir` says, so that all a build makes is
 //! built against its FFmpeg alone and goes with it; cargo reads that path
 //! as a template, so a target whose path holds a brace is refused.
@@ -443,10 +445,13 @@ fn resolved(p: &Path) -> PathBuf {
 
 /// Refuses a target directory that is one of the `prefixes`, holds one or
 /// lies inside one, or that lies inside any directory holding
-/// `include/libavcodec/avcodec.h`, as an FFmpeg installed there does,
-/// listed or not, symlinks and `..` resolved: building there, or deleting
-/// it, would change an FFmpeg. Nothing else of an FFmpeg is looked for:
-/// not its source tree, which has no `include/`.
+/// `include/libavcodec/avcodec.h`, as an FFmpeg installed there with its
+/// headers straight in `include/` does, listed or not, symlinks and `..`
+/// resolved: building there, or deleting it, would change an FFmpeg.
+/// Nothing else of an FFmpeg is looked for: not its source tree, which has
+/// no `include/`, nor an install whose headers are in
+/// `include/<triplet>/` (Debian's and Ubuntu's) or `include/ffmpeg/`
+/// (Fedora's), unless its prefix is listed.
 fn guard(target: &Path, prefixes: &[PathBuf]) -> Result<()> {
     let t = resolved(target);
     for p in prefixes {
