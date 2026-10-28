@@ -561,7 +561,8 @@ backend's decoder asks for corrupt frames, so FFmpeg decodes those
 pictures and flags them corrupt, and for HEVC the backend says the first
 of them after a good frame as a `Damaged` event and drops the rest
 (D29). H.264's flag says only where decoding recovered, not damage, and
-the backend hands those frames out (D29). On 7.1.x the HEVC damage is
+the backend hands those frames out, and takes the I-frame decoding
+starts from for good, flagged or not (D29). On 7.1.x the HEVC damage is
 silent on both.
 
 ## D14. A hardware decoder says why it refused a stream
@@ -1921,17 +1922,55 @@ packets as keys, so there the oracle takes the MP4's sync samples
 oracle now also fails a clip on any `Damaged` event, from a decode from
 the start or a seek, except the HEVC splice up to 7.0.
 
+*Updated 2026-10-28.* That rule's clips keep 1 reference frame, as
+synth's `veryfast` does, which FFmpeg's heuristic needs. Keeping 3, as
+x264's default `medium` does, SEI-less open-GOP H.264 lost almost every
+frame after a seek on every FFmpeg from 6.1: the decoder fills the gap
+in `frame_num` a seek (or a cut's start) leaves with 3 stand-in
+references, more than the heuristic allows, so it starts at no keyframe
+but an IDR picture and flags every frame up to the next. Spherecut
+dropped them all but those FFmpeg drains, unflagged, at the end of the
+stream: a cut at the second keyframe of a 40-frame clip opened on its
+second last frame and played 2 of its 32 frames, nearly every keyframe
+seek gave the clip's second last frame, and exact seeks were right but
+decoded from the start, all without an event. For H.264 a flagged
+I-frame decoded from the first packet read since opening or a seek
+(the file's first, or the keyframe the index lists and the seek landed
+on) is now the first good frame (`starts_here`): its slices refer to
+nothing. The frames shown before it stay dropped, by their flag and by
+pts. Since FFmpeg's parser flags such a keyframe's packet only by its
+recovery point SEI, the landing's pts is now taken whatever the
+packet's flags: else the leading B-frames FFmpeg drains unflagged after
+a seek to a clip's last keyframe were handed out. The landing also
+counts now for the keyframes' least lag, which in such a cut no packet
+flagged a keyframe gave: with 1 B-frame, an exact seek after a keyframe
+seek that landed before its target sought again.
+`h264_keyframes_without_recovery_points_seek_exactly` adds SEI-less
+clips keeping 3 references, of 30 frames and of 25 (which end on a
+keyframe and its leading pictures), a cut of one, and a cut with 1
+B-frame; each fails without its fix on 6.1 and 8.1.3.
+
 Limits (from 8.1.3): on 7.1.x HEVC damage to a slice header or frame
 start is silent, as above. Outside H.264, a frame flagged corrupt after
 the first good one is taken for damage: a decoder that flagged a frame
 of an undamaged stream so would raise a `Damaged` event for it. The
-oracle cuts only the SEI-less clip with 3 B-frames: a cut of the one
-with 2 fails its cost check, with the SEI kept as well (an exact seek
-seeks once more than it expects), which is the estimate of
-`forward_is_cheaper`, not this rule. `VideoDecoder::open`, which tests
-and the Tier 2 checks use, doesn't ask for corrupt frames, so from 8.0
-FFmpeg refuses the HEVC pictures that refer to a lost one and it loses
-them without an error (D13).
+oracle cuts the SEI-less clips with 1 and 3 B-frames, not the one with
+2: some of its keyframes are shown 2 frames after their decode time and
+others 3, and the least lag puts the latter a frame early, so in a cut
+of it, with the SEI or without, an exact seek after a keyframe seek
+that landed before its target seeks once more than the oracle allows
+(`forward_is_cheaper`'s estimate, above); its frames are right. H.264
+whose random access points are recovery points on P-frames (x264's
+intra refresh) seeks only to where FFmpeg says decoding has recovered,
+which need not be the decode from the start: in x264 clips with keyint
+8, the review counted 17 of 80 exact seeks without B-frames and 4 of 80
+with 2 that returned a frame unlike it, as `Exact` and with no event,
+and with 3 B-frames and 3 references a keyframe seek gave the first
+frame FFmpeg took for recovered, not the sync sample. Nothing here
+tells such a stream apart, and the oracle has none.
+`VideoDecoder::open`, which tests and the Tier 2 checks use, doesn't
+ask for corrupt frames, so from 8.0 FFmpeg refuses the HEVC pictures
+that refer to a lost one and it loses them without an error (D13).
 
 ## D30. Pixel formats and colour defaults
 
