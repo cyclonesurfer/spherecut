@@ -523,6 +523,96 @@ fn clean_target(target: &Path, prefixes: &[PathBuf]) -> Result<bool> {
     Ok(true)
 }
 
+/// After the build in `target` against `prefix`, whose stamp was
+/// `before`: fails unless `restamp`, pkg-config asked again, gives the
+/// same, and ffmpeg-sys-next's build there linked libavcodec and searched
+/// for libraries only in directories inside the prefix, symlinks
+/// resolved, as its build scripts' output (`debug/build/*/output`) says.
+/// Checked before the build alone, a prefix that went away or changed
+/// while it ran had pkg-config find another FFmpeg for the build (the
+/// system's), which then passed under the prefix's name.
+fn check_built(
+    target: &Path,
+    prefix: &Path,
+    before: &str,
+    restamp: impl FnOnce() -> Result<String>,
+) -> Result<()> {
+    let now =
+        restamp().context("after the build, pkg-config doesn't find the FFmpeg it was for")?;
+    if now != before {
+        bail!(
+            "the FFmpeg at {} changed during the build; it was\n{before}and is now\n{now}",
+            prefix.display()
+        );
+    }
+    let home = prefix
+        .canonicalize()
+        .with_context(|| format!("could not resolve {}", prefix.display()))?;
+    let build = target.join("debug").join("build");
+    let entries =
+        std::fs::read_dir(&build).with_context(|| format!("could not read {}", build.display()))?;
+    let mut linked = false;
+    for e in entries.flatten() {
+        if !e
+            .file_name()
+            .to_string_lossy()
+            .starts_with("ffmpeg-sys-next-")
+        {
+            continue;
+        }
+        // The directory the build script was compiled in has no output.
+        let Ok(output) = std::fs::read_to_string(e.path().join("output")) else {
+            continue;
+        };
+        for line in output.lines() {
+            if let Some(lib) = directive(line, "rustc-link-lib") {
+                linked |= lib.rsplit('=').next() == Some("avcodec");
+            }
+            let Some(search) = directive(line, "rustc-link-search") else {
+                continue;
+            };
+            // KIND=PATH, the kind optional.
+            let dir = match search.split_once('=') {
+                Some((kind, dir))
+                    if ["native", "dependency", "crate", "framework", "all"].contains(&kind) =>
+                {
+                    dir
+                }
+                _ => search,
+            };
+            let real = Path::new(dir).canonicalize().with_context(|| {
+                format!(
+                    "ffmpeg-sys-next's build in {} searched {dir} for libraries, which isn't there",
+                    target.display()
+                )
+            })?;
+            if !real.starts_with(&home) {
+                bail!(
+                    "ffmpeg-sys-next's build in {} searched {} for libraries, outside the prefix {}",
+                    target.display(),
+                    real.display(),
+                    home.display()
+                );
+            }
+        }
+    }
+    if !linked {
+        bail!(
+            "found no build of ffmpeg-sys-next in {} that links libavcodec, to check what it bound",
+            build.display()
+        );
+    }
+    Ok(())
+}
+
+/// The value of a build script's `cargo:KEY=VALUE` (or `cargo::`) line.
+fn directive<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.strip_prefix("cargo::")
+        .or_else(|| line.strip_prefix("cargo:"))?
+        .strip_prefix(key)?
+        .strip_prefix('=')
+}
+
 fn same_dir(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
@@ -729,6 +819,8 @@ struct Row {
     link: Option<Stage>,
     /// The Tier 1 tests, for the `--test` prefix.
     tier1: Option<Stage>,
+    /// What the build bound, checked once it is done ([`check_built`]).
+    binding: Option<Stage>,
 }
 
 impl Row {
@@ -737,6 +829,7 @@ impl Row {
             || self.clippy != Stage::Passed
             || self.link != Some(Stage::Passed)
             || self.tier1.as_ref().is_some_and(|t| *t != Stage::Passed)
+            || self.binding != Some(Stage::Passed)
     }
 }
 
@@ -766,9 +859,16 @@ fn report(rows: &[Row]) -> String {
         if let Some(t) = &r.tier1 {
             let _ = write!(result, ", Tier 1 {}", t.word());
         }
+        if let Some(b) = &r.binding {
+            let _ = write!(result, ", binding {}", b.word());
+        }
         let _ = writeln!(out, "  {:lw$}  {w:ww$}  {result}", r.label);
         let _ = writeln!(out, "  {:lw$}  {}", "", r.prefix.display());
-        for s in std::iter::once(&r.clippy).chain(&r.link).chain(&r.tier1) {
+        let stages = std::iter::once(&r.clippy)
+            .chain(&r.link)
+            .chain(&r.tier1)
+            .chain(&r.binding);
+        for s in stages {
             if let Stage::Failed(why) | Stage::NotRun(why) = s {
                 let _ = writeln!(out, "  {:lw$}  {why}", "");
             }
@@ -814,13 +914,15 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
             link: None,
             tier1: tested
                 .then(|| Stage::NotRun("Tier 1 needs clippy and the link to pass first".into())),
+            binding: None,
         };
         if let (Ok(pc), Ok(found)) = (&b.pc_dir, &row.bound) {
             let what = format!("against {} at {}", found.describe(), row.prefix.display());
             let env = cargo_env(pc, &target, &[], &vars);
+            let before = stamp(pc, found);
             let restamp =
                 || bound(&program, &row.prefix, pc, &search(pc)).map(|again| stamp(pc, &again));
-            row.clippy = match ready_target(&target, prefixes, &stamp(pc, found), restamp) {
+            row.clippy = match ready_target(&target, prefixes, &before, restamp) {
                 Err(e) => Stage::Failed(format!("{e:#}")),
                 Ok(stale) => {
                     if stale {
@@ -869,6 +971,12 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
                     ));
                 }
                 row.link = Some(link);
+                row.binding = Some(Stage::of(check_built(
+                    &target,
+                    &row.prefix,
+                    &before,
+                    restamp,
+                )));
             }
         }
         if clean {
@@ -1469,6 +1577,82 @@ mod tests {
     }
 
     #[test]
+    fn what_the_build_bound_is_checked_after_it() {
+        let d = scratch("built");
+        let prefix = d.join("n8.1");
+        let (pc, b) = fake_prefix(&prefix, "62.28.100");
+        let before = stamp(&pc, &b);
+        let same = || Ok(stamp(&pc, &b));
+        let target = d.join("t");
+        let output = |hash: &str, text: &str| {
+            let dir = target.join(format!("debug/build/ffmpeg-sys-next-{hash}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("output"), text).unwrap();
+        };
+        // What ffmpeg-sys-next prints, searching `dir` for each library.
+        let searched = |dir: &Path| {
+            ["avutil", "avformat", "avcodec"]
+                .map(|lib| {
+                    format!(
+                        "cargo:rerun-if-env-changed=PKG_CONFIG_PATH\n\
+                         cargo:rustc-link-search=native={}\ncargo:rustc-link-lib={lib}\n",
+                        dir.display()
+                    )
+                })
+                .concat()
+        };
+        let check = |restamp: &dyn Fn() -> Result<String>| {
+            check_built(&target, &prefix, &before, restamp).map_err(|e| format!("{e:#}"))
+        };
+        // Nothing built: nothing says what was bound.
+        assert!(check(&same).unwrap_err().contains("could not read"));
+        // The directory the build script was compiled in, with no output.
+        std::fs::create_dir_all(target.join("debug/build/ffmpeg-sys-next-0")).unwrap();
+        let e = check(&same).unwrap_err();
+        assert!(e.starts_with("found no build of ffmpeg-sys-next"), "{e}");
+        // Nor does one that didn't link libavcodec.
+        output(
+            "1",
+            &format!(
+                "cargo:rustc-link-search=native={}\ncargo:rustc-link-lib=avutil\n",
+                prefix.join("lib").display()
+            ),
+        );
+        let e = check(&same).unwrap_err();
+        assert!(e.starts_with("found no build of ffmpeg-sys-next"), "{e}");
+        output("1", &searched(&prefix.join("lib")));
+        assert_eq!(check(&same), Ok(()));
+        // Another FFmpeg's directory searched, as when the prefix went away
+        // during the build and pkg-config found the system's.
+        let other = d.join("other/lib");
+        std::fs::create_dir_all(&other).unwrap();
+        output("2", &searched(&other));
+        let e = check(&same).unwrap_err();
+        assert!(e.contains("outside the prefix"), "{e}");
+        // `cargo::`, no kind, and a directory that isn't there.
+        output("2", "cargo::rustc-link-search=/nowhere/lib\n");
+        let e = check(&same).unwrap_err();
+        assert!(
+            e.contains("searched /nowhere/lib for libraries, which isn't there"),
+            "{e}"
+        );
+        output(
+            "2",
+            &format!(
+                "cargo::rustc-link-search={}\n",
+                prefix.join("lib").display()
+            ),
+        );
+        assert_eq!(check(&same), Ok(()));
+        // The FFmpeg changed, or pkg-config finds it no more.
+        let e = check(&|| Ok("another stamp\n".into())).unwrap_err();
+        assert!(e.contains("changed during the build"), "{e}");
+        let e = check(&|| bail!("pkg-config finds libavutil in /usr/lib")).unwrap_err();
+        assert!(e.contains("pkg-config finds libavutil in /usr/lib"), "{e}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
     fn an_ffmpeg_that_making_its_target_ready_changes_is_refused() {
         // A prefix whose libavcodec.pc is a link into its stale target:
         // deleting the target takes the file with it.
@@ -1670,6 +1854,7 @@ mod tests {
                 clippy: Stage::Passed,
                 link: Some(Stage::Passed),
                 tier1: None,
+                binding: Some(Stage::Passed),
             },
             Row {
                 label: "n8.1.3-full".into(),
@@ -1680,6 +1865,7 @@ mod tests {
                 tier1: Some(Stage::Failed(
                     "tests (Tier 1) failed (exit status: 101)".into(),
                 )),
+                binding: Some(Stage::Passed),
             },
             Row {
                 label: "n9.0.2".into(),
@@ -1688,6 +1874,7 @@ mod tests {
                 clippy: Stage::Failed("clippy failed (exit status: 101)".into()),
                 link: None,
                 tier1: None,
+                binding: None,
             },
             Row {
                 label: "n8.1".into(),
@@ -1700,6 +1887,20 @@ mod tests {
                         .into(),
                 )),
                 tier1: None,
+                binding: Some(Stage::Passed),
+            },
+            Row {
+                label: "moved".into(),
+                prefix: p("/ff/moved"),
+                bound: found("62.28.100", Some("n8.1")),
+                clippy: Stage::Passed,
+                link: Some(Stage::Passed),
+                tier1: None,
+                binding: Some(Stage::Failed(
+                    "ffmpeg-sys-next's build in /t searched /usr/lib for libraries, \
+                     outside the prefix /ff/moved"
+                        .into(),
+                )),
             },
             Row {
                 label: "gone".into(),
@@ -1710,29 +1911,33 @@ mod tests {
                 clippy: Stage::NotRun("its FFmpeg was not found".into()),
                 link: None,
                 tier1: None,
+                binding: None,
             },
         ];
         let r = report(&rows);
         let want = "\
-==> FFmpeg compatibility: 1 of 5 builds passed
-  n7.1         FFmpeg n7.1, libavcodec 61.19.100    clippy passed, link passed
+==> FFmpeg compatibility: 1 of 6 builds passed
+  n7.1         FFmpeg n7.1, libavcodec 61.19.100    clippy passed, link passed, binding passed
                /ff/n7.1
-  n8.1.3-full  FFmpeg n8.1.3, libavcodec 62.28.103  clippy passed, link passed, Tier 1 FAILED
+  n8.1.3-full  FFmpeg n8.1.3, libavcodec 62.28.103  clippy passed, link passed, Tier 1 FAILED, binding passed
                /ff/n8.1.3-full
                tests (Tier 1) failed (exit status: 101)
   n9.0.2       libavcodec 63.3.100                  clippy FAILED
                /ff/n9.0.2
                clippy failed (exit status: 101)
-  n8.1         FFmpeg n8.1, libavcodec 62.28.100    clippy passed, link FAILED
+  n8.1         FFmpeg n8.1, libavcodec 62.28.100    clippy passed, link FAILED, binding passed
                /ff/n8.1
                link: the tests and binaries built against FFmpeg n8.1 failed (exit status: 101)
+  moved        FFmpeg n8.1, libavcodec 62.28.100    clippy passed, link passed, binding FAILED
+               /ff/moved
+               ffmpeg-sys-next's build in /t searched /usr/lib for libraries, outside the prefix /ff/moved
   gone         -                                    not an FFmpeg prefix: no libavcodec.pc in /ff/gone/lib/pkgconfig
                /ff/gone
                its FFmpeg was not found
 ";
         assert_eq!(r, want, "\n{r}");
         let failed: Vec<bool> = rows.iter().map(Row::failed).collect();
-        assert_eq!(failed, [false, true, true, true, true]);
+        assert_eq!(failed, [false, true, true, true, true, true]);
     }
 
     #[test]
@@ -1746,18 +1951,23 @@ mod tests {
             tier1: Some(Stage::NotRun(
                 "Tier 1 needs clippy and the link to pass first".into(),
             )),
+            binding: Some(Stage::Passed),
         };
         assert!(row.failed());
         assert!(report(&[row]).contains("clippy passed, link FAILED, Tier 1 not run"));
-        // Nor is a link that did not happen a pass.
-        let row = Row {
+        // Nor is a link that did not happen a pass, nor a build whose
+        // binding was never checked.
+        let row = |link: Option<Stage>, binding: Option<Stage>| Row {
             label: "n8.1".into(),
             prefix: p("/ff/n8.1"),
             bound: found("62.28.100", None),
             clippy: Stage::Passed,
-            link: None,
+            link,
             tier1: None,
+            binding,
         };
-        assert!(row.failed());
+        assert!(row(None, Some(Stage::Passed)).failed());
+        assert!(row(Some(Stage::Passed), None).failed());
+        assert!(!row(Some(Stage::Passed), Some(Stage::Passed)).failed());
     }
 }
