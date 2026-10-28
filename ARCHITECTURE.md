@@ -533,10 +533,10 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   plane, and the 3×4 colour matrix and the sRGB EOTF. Pipelines exist per
   `Filter` and `DebugMode` and are built on first use.
 * **`Encoder::draw`** writes a linear target's pixels one to one into a
-  render pass's attachment with the sRGB OETF, rounded to the
-  attachment's codes in the shader so that every driver stores the same
-  ones (D31), at an origin, for egui's frame (slice 7) or an offscreen
-  texture.
+  render pass's attachment with the sRGB OETF, rounded in the shader to
+  the attachment's codes (at 10 bits, and into an f16 attachment, to
+  halves) so that a driver's conversion has nothing left to round (D31),
+  at an origin, for egui's frame (slice 7) or an offscreen texture.
 * **`render_still`** (and `StillRenderer`, which keeps its pipelines)
   does all of it headless and reads back an `Image`: 8-bit through the
   encode pass, 16-bit or linear from the linear target.
