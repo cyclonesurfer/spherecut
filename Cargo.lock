@@ -1319,7 +1319,6 @@ dependencies = [
  "spherecut-core",
  "spherecut-media",
  "thiserror",
- "tracing",
 ]
 
 [[package]]

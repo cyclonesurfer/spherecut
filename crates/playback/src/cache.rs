@@ -5,10 +5,12 @@
 //! `BTreeMap` (clip time orders a stream's frames as their pts do, and
 //! compares with the playhead directly). Their bytes are counted from
 //! the frames' own buffers ([`VideoFrame::bytes`]), padding included, and
-//! never pass the budget but in one case: a budget too small to hold a
-//! stream's frame at the playhead and the one after it, which the cache
-//! still holds so that playback goes on (and says it is too small, below
-//! [`MIN_FRAMES`] frames).
+//! never pass the budget but when what the cache must keep doesn't fit:
+//! each stream's current frame and window (below). With frames of one
+//! size, that is a budget too small to hold a stream's frame at the
+//! playhead and the one after it, which the cache still holds so that
+//! playback goes on (and says it is too small, below [`MIN_FRAMES`]
+//! frames).
 //!
 //! **Runs.** A decoder numbers the frames it hands out by run (a seek
 //! starts one) and place in the run, and two frames of one run whose
