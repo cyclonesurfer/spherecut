@@ -185,7 +185,7 @@ impl VideoDecode for FallbackVideo {
         match self.inner.seek(at, mode, stop) {
             Err(e) => {
                 self.fall_back(e)?;
-                self.inner.seek(at, mode, stop)
+                self.inner.seek_again(at, mode, stop)
             }
             ok => ok,
         }

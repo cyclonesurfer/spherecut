@@ -154,6 +154,12 @@ pub struct VideoDecoder {
     options: Options,
     /// Packets have been sent to `dec` since it was opened.
     sent: bool,
+    /// The last packet sent to `dec` since opening or the last seek, by
+    /// byte position and decode timestamp, and how many errors `dec` has
+    /// given since it was sent: where its last error came out
+    /// ([`error_place`](Self::error_place)).
+    last_sent: Option<(i64, Option<i64>)>,
+    errors_since_sent: u32,
     /// Whether FFmpeg flagged the first frame decoded since opening a
     /// keyframe; `None` before one comes out.
     first_key: Option<bool>,
@@ -250,6 +256,19 @@ struct Options {
     output_corrupt: bool,
     /// Surfaces a hardware decoder keeps beyond its own needs.
     extra_hw_frames: Option<u8>,
+}
+
+/// Where a decoder error came out, which tells one damaged packet's error
+/// from another's: the last packet sent before it, and how many errors
+/// came out since that packet was sent, this one included. Where decoding
+/// began doesn't change it: with n frame threads, FFmpeg hands out packet
+/// p's result as packet p + n - 1 is sent, and with one thread as packet p
+/// is sent. So decodes from two landings meet a damaged packet's error at
+/// the same place (D29).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ErrorPlace {
+    sent: (i64, Option<i64>),
+    nth: u32,
 }
 
 /// What [`VideoDecoder::receive`] got.
@@ -498,6 +517,8 @@ impl VideoDecoder {
             reopening: false,
             reopens: 0,
             reopen_failed: None,
+            last_sent: None,
+            errors_since_sent: 0,
             #[cfg(any(test, feature = "fault-injection"))]
             reopens_fail: false,
             lookahead: None,
@@ -643,6 +664,8 @@ impl VideoDecoder {
                         return Err(self.fail_reopen(e));
                     }
                     self.sent = true;
+                    self.last_sent = Some((pkt.position() as i64, pkt.dts().or(pkt.pts())));
+                    self.errors_since_sent = 0;
                     self.dec
                         .send_packet(&pkt)
                         .map_err(|e| self.decode_error(e))?
@@ -651,7 +674,10 @@ impl VideoDecoder {
                     if let Err(e) = self.dec.send_eof() {
                         return Err(match &self.hw {
                             Some(_) => self.fail_device(&format!("flushing the decoder: {e}")),
-                            None => err(&self.path, "flushing decoder", e),
+                            None => {
+                                self.errors_since_sent += 1;
+                                err(&self.path, "flushing decoder", e)
+                            }
                         });
                     }
                     self.eof_sent = true;
@@ -761,6 +787,8 @@ impl VideoDecoder {
         self.landing_key = None;
         self.reopening = false;
         self.read_position = None;
+        self.last_sent = None;
+        self.errors_since_sent = 0;
     }
 
     /// Replace the decoder with one opened afresh, as
@@ -821,6 +849,21 @@ impl VideoDecoder {
         let e = err(&self.path, "reopening the decoder", &reason);
         self.reopen_failed = Some(reason);
         e
+    }
+
+    /// Where the decoder's last error since opening or the last seek came
+    /// out: what [`receive`](Self::receive) returned as the file's damage
+    /// was that error when it came from the decoder. `None` when the last
+    /// packet sent has neither a byte position nor a timestamp to tell it
+    /// by.
+    pub(crate) fn error_place(&self) -> Option<ErrorPlace> {
+        let sent = self
+            .last_sent
+            .filter(|&(pos, ts)| pos >= 0 || ts.is_some())?;
+        Some(ErrorPlace {
+            sent,
+            nth: self.errors_since_sent,
+        })
     }
 
     /// Whether opening the decoder afresh failed in software since the
@@ -965,6 +1008,7 @@ impl VideoDecoder {
     /// errors can't be told apart from damage it met, and software, after
     /// a fallback, decodes past damage and says so (D30).
     fn decode_error(&mut self, e: ff::Error) -> MediaError {
+        self.errors_since_sent += 1;
         self.refused = ffi::hw_refusal(&self.dec);
         if let Some(e) = self.refusal() {
             return e;

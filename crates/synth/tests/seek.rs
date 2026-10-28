@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 use spherecut_core::video::{ColorFamily, Matrix, Range, VideoPlanes};
 use spherecut_core::{FrameRate, Rational, StopSource, StopToken, Time};
 use spherecut_media::backend::{
-    DamageCause, DecoderEvent, Exactness, FfmpegBackend, MediaBackend, NextFrame, SeekCost,
-    SeekMode, SeekOutcome, Timing, VideoDecode, VideoFrame, VideoRequest,
+    DamageCause, DecodeMode, DecoderEvent, Exactness, Fallback, Fault, FaultPlan, FfmpegBackend,
+    HwKind, MediaBackend, NextFrame, SeekCost, SeekMode, SeekOutcome, Timing, VideoDecode,
+    VideoFrame, VideoRequest,
 };
 use spherecut_media::encode::ColorTags;
 use spherecut_media::ff;
@@ -1980,6 +1981,231 @@ fn damage_that_loses_a_reference_picture_is_reported_and_seeks_agree() {
                 }
             }
         }
+    }
+}
+
+/// Damage is said once from one seek to the next, however often decoding
+/// meets it (D29). Decoding met it again, and said it twice, from an
+/// earlier landing after the landing rule turned one down; at the cut
+/// after a keyframe seek past it, played on to; and on the way back to
+/// the last frame handed out after a stopped seek. So would software
+/// after a fallback mid-seek or mid-stream, on damage the stand-in for a
+/// device said. A seek starts afresh: one that decodes the damage says it
+/// again.
+#[test]
+fn damage_is_said_once_from_one_seek_to_the_next() {
+    let dir = TempDir::new("said-once");
+    let never = StopToken::never();
+    let said = |events: &[DecoderEvent]| {
+        events
+            .iter()
+            .filter(|e| matches!(e, DecoderEvent::Damaged { .. }))
+            .count()
+    };
+    let one_thread = std::num::NonZeroU32::new(1);
+    let open_on =
+        |path: &Path, req: &VideoRequest| FfmpegBackend::new().open_video(path, req).unwrap();
+    let on = |threads| VideoRequest {
+        threads,
+        ..VideoRequest::default()
+    };
+
+    // The packet after an I-frame listed as a sync sample, in
+    // `h264_i_frames_listed_as_sync_samples_seek_exactly`'s clips, is
+    // damaged: a seek that lands on the I-frame meets the damage before
+    // the landing is turned down, and again from the start.
+    for (name, bframes) in [("said-b3", 3), ("said-b1", 1)] {
+        let clip = write(
+            &Spec {
+                gop: Some(Gop {
+                    keyint: 100,
+                    bframes,
+                    open: true,
+                    radl: 0,
+                }),
+                refs: Some(3),
+                intra: vec![10, 22],
+                frames: 40,
+                ..spec(name, Codec::H264)
+            },
+            &dir,
+        );
+        let whole = sequential(&clip).0;
+        let forced = [whole[10].pts, whole[22].pts];
+        let listed = dir.join(format!("{name}-listed.mp4"));
+        copy_h264(
+            &clip,
+            &listed,
+            0,
+            |_| true,
+            |pts, key| key || forced.contains(&pts),
+            None,
+            |_| None,
+        );
+        let pk = samples(&listed);
+        let i_frame = pk.iter().position(|s| s.0 == forced[0]).unwrap();
+        let (_, pos, size, _) = pk[i_frame + 1];
+        let mut bytes = std::fs::read(&listed).unwrap();
+        break_slice_header(&mut bytes, pos, size, Codec::H264);
+        let bad = dir.join(format!("{name}-damaged.mp4"));
+        std::fs::write(&bad, &bytes).unwrap();
+        for threads in [None, one_thread] {
+            let what = format!("{name} on {threads:?} threads");
+            let mut d = open_on(&bad, &on(threads));
+            let mut seen = Vec::new();
+            while let NextFrame::Frame(f) = d.next_frame(&never).unwrap() {
+                seen.push(Seen::of(&f));
+            }
+            let damage = said(&d.take_events());
+            assert!(damage > 0, "{what}");
+            for i in [13, 15, 20, 25] {
+                let mut d = open_on(&bad, &on(threads));
+                let (f, e, cost) = seek_pts(&mut *d, whole[i].pts, SeekMode::Exact);
+                let shown = seen[shown_at(&seen, whole[i].pts).unwrap()];
+                assert_eq!(
+                    (Seen::of(&f), e),
+                    (shown, Exactness::Exact),
+                    "{what}: frame {i}"
+                );
+                // A landing was turned down.
+                assert!(cost.reseeks > 0, "{what}: frame {i}: {cost:?}");
+                let events = d.take_events();
+                assert_eq!(said(&events), damage, "{what}: frame {i}: {events:?}");
+            }
+        }
+    }
+
+    // A keyframe seek past the cut of a file cut short of its index says
+    // the cut, and playing on to it doesn't say it again; after a seek
+    // back, it does.
+    let good = write(&spec("said-whole", Codec::H264), &dir);
+    let fast = dir.join("said-faststart.mp4");
+    faststart(&good, &fast);
+    let bytes = std::fs::read(&fast).unwrap();
+    let cut = dir.join("said-cut.mp4");
+    std::fs::write(&cut, &bytes[..bytes.len() * 2 / 3]).unwrap();
+    let whole = sequential(&good).0;
+    let mut d = open(&cut);
+    let to_the_cut = |d: &mut dyn VideoDecode, mut events: Vec<DecoderEvent>| {
+        loop {
+            let next = d.next_frame(&never);
+            events.extend(d.take_events());
+            match next {
+                Ok(NextFrame::Frame(_)) => {}
+                Ok(other) => panic!("the cut file decoded to {other:?}"),
+                Err(_) => return events,
+            }
+        }
+    };
+    let (key, e, _) = seek_pts(&mut *d, whole.last().unwrap().pts, SeekMode::Keyframe);
+    assert_eq!(e, Exactness::KeyframeOnly);
+    let events = d.take_events();
+    let events = to_the_cut(&mut *d, events);
+    assert_eq!(said(&events), 1, "{events:?}");
+    assert!(
+        events.iter().all(|e| !matches!(
+            e,
+            DecoderEvent::Damaged { cause, .. } if *cause != DamageCause::Cut
+        )),
+        "{events:?}"
+    );
+    seek_pts(&mut *d, key.pts, SeekMode::Exact);
+    let events = d.take_events();
+    let events = to_the_cut(&mut *d, events);
+    assert_eq!(said(&events), 1, "{events:?}");
+
+    // Damage that loses a reference picture, as in
+    // `damage_that_loses_a_reference_picture_is_reported_and_seeks_agree`,
+    // said while playing, then a stopped seek and a step.
+    let v = ff::codec::version();
+    let (v7_1, v8_0) = (61 << 16 | 19 << 8, 62 << 16 | 11 << 8);
+    let hevc_silent = (v7_1..v8_0).contains(&v);
+    for (name, codec, bframes) in [
+        ("said-h264-p", Codec::H264, 0),
+        ("said-h264-b", Codec::H264, 3),
+        ("said-hevc-b", Codec::Hevc, 3),
+    ] {
+        let clip = write(
+            &Spec {
+                gop: Some(Gop {
+                    keyint: 8,
+                    bframes,
+                    open: false,
+                    radl: 0,
+                }),
+                frames: 24,
+                ..spec(name, codec)
+            },
+            &dir,
+        );
+        let whole = sequential(&clip).0;
+        let pk = samples(&clip);
+        let keys: Vec<usize> = (0..pk.len()).filter(|&i| pk[i].3).collect();
+        let (_, pos, size, _) = pk[keys[1] + 1];
+        let mut bytes = std::fs::read(&clip).unwrap();
+        break_slice_header(&mut bytes, pos, size, codec);
+        let bad = dir.join(format!("{name}-damaged.mp4"));
+        std::fs::write(&bad, &bytes).unwrap();
+        let reported = codec == Codec::H264 || !hevc_silent;
+        for threads in [None, one_thread] {
+            let what = format!("{name} on {threads:?} threads");
+            let mut d = open_on(&bad, &on(threads));
+            play(&mut *d, 14);
+            let damage = said(&d.take_events());
+            assert_eq!(damage > 0, reported, "{what}");
+            stopped_seek(&mut *d);
+            play(&mut *d, 1);
+            let events = d.take_events();
+            assert_eq!(said(&events), 0, "{what}: {events:?}");
+            seek_pts(&mut *d, whole[14].pts, SeekMode::Exact);
+            let events = d.take_events();
+            assert_eq!(said(&events), damage, "{what}: {events:?}");
+        }
+        // On a stand-in for a device that fails at frame k, played
+        // through and in an exact seek: software goes on, and doesn't say
+        // again the damage the stand-in said, whether the failure comes
+        // before or after it. The stand-in decodes on one thread, as does
+        // software after it here, so that their errors come out at the
+        // same place.
+        let mut failed_after = [false; 2];
+        for k in 0..20 {
+            let what = format!("{name}, frame {k} failing to decode");
+            let req = VideoRequest {
+                decode: DecodeMode::Hardware {
+                    kind: HwKind::VaApi,
+                    device: None,
+                    fallback: Fallback::Software,
+                },
+                fault: Some(FaultPlan {
+                    frame: k,
+                    fault: Fault::Decode,
+                    stand_in: true,
+                }),
+                ..on(one_thread)
+            };
+            let mut d = open_on(&bad, &req);
+            let mut events = Vec::new();
+            while let NextFrame::Frame(_) = d.next_frame(&never).unwrap() {
+                events.extend(d.take_events());
+            }
+            events.extend(d.take_events());
+            let mut d = open_on(&bad, &req);
+            seek_pts(&mut *d, whole[14].pts, SeekMode::Exact);
+            for (j, events) in [events, d.take_events()].iter().enumerate() {
+                let damage = said(events);
+                assert_eq!(damage > 0, reported, "{what}: {events:?}");
+                assert!(damage <= 1, "{what}: {events:?}");
+                let at = |p: fn(&DecoderEvent) -> bool| events.iter().position(p);
+                failed_after[j] |= matches!(
+                    (
+                        at(|e| matches!(e, DecoderEvent::Damaged { .. })),
+                        at(|e| matches!(e, DecoderEvent::FellBack { .. })),
+                    ),
+                    (Some(a), Some(b)) if a < b
+                );
+            }
+        }
+        assert_eq!(failed_after, [reported; 2], "{name}");
     }
 }
 

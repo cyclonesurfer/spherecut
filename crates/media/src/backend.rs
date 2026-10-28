@@ -431,7 +431,7 @@ pub enum DecoderEvent {
 /// What kind of damage a [`DecoderEvent::Damaged`] is, which says the
 /// CLI's code for it (D27, the M1 plan's amendment 8): a seek past it is
 /// [`Exactness::Truncated`] whatever the cause.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DamageCause {
     /// The file ends before the data its index lists: it was cut short.
     Cut,
