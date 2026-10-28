@@ -68,7 +68,9 @@ const STAMP_HEADER: &str = "Made by `cargo xtask compat`, against:\n";
 /// (`avcodec`, `avformat`, `swscale` and `swresample`, and libavutil, which
 /// it always binds), each found by pkg-config on its own, and the header
 /// of each that its bindings read. [`check_built`] fails a build that
-/// links any other FFmpeg library, or none of one of these.
+/// links any other FFmpeg library, or none of one of these, and a unit
+/// test fails once the features cargo resolves for ffmpeg-sys-next say
+/// otherwise, without a compat run.
 const BOUND: [(&str, &str); 5] = [
     ("libavutil", "libavutil/avutil.h"),
     ("libavformat", "libavformat/avformat.h"),
@@ -2281,6 +2283,57 @@ mod tests {
             assert!(header.starts_with(&format!("{lib}/")), "{header}");
         }
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn the_libraries_checked_are_those_the_workspace_binds() {
+        // The features cargo resolves for ffmpeg-sys-next with every
+        // feature of the workspace's crates on, as clippy builds it: each
+        // library's feature binds it, and libavutil is always bound. So a
+        // feature turned on anywhere that binds another library fails
+        // here, before a compat run would.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let out = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["metadata", "--format-version", "1", "--all-features"])
+            .args(["--offline", "--locked"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let meta = Json::parse(&String::from_utf8(out.stdout).unwrap()).unwrap();
+        let Some(Json::Array(packages)) = meta.get("packages") else {
+            panic!("no packages");
+        };
+        let ids: Vec<&str> = packages
+            .iter()
+            .filter(|p| p.get("name").and_then(Json::str) == Some("ffmpeg-sys-next"))
+            .filter_map(|p| p.get("id").and_then(Json::str))
+            .collect();
+        assert_eq!(ids.len(), 1, "{ids:?}");
+        let Some(Json::Array(nodes)) = meta.get("resolve").and_then(|r| r.get("nodes")) else {
+            panic!("no resolve nodes");
+        };
+        let features = nodes
+            .iter()
+            .find(|n| n.get("id").and_then(Json::str) == Some(ids[0]))
+            .and_then(|n| n.get("features"))
+            .and_then(Json::strings)
+            .unwrap();
+        let mut bound: Vec<String> = features
+            .iter()
+            .map(|f| format!("lib{f}"))
+            .filter(|l| STAMPED.contains(&l.as_str()) || DROPPED.contains(&l.as_str()))
+            .chain(["libavutil".to_owned()])
+            .collect();
+        bound.sort();
+        bound.dedup();
+        let mut checked: Vec<&str> = BOUND.iter().map(|(l, _)| *l).collect();
+        checked.sort_unstable();
+        assert_eq!(bound, checked, "ffmpeg-sys-next's features: {features:?}");
     }
 
     #[test]
