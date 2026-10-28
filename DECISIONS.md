@@ -2192,7 +2192,13 @@ and 15 wrong to none, and from 478 frames (at most 18) to 766 (27), 573
 to 744 and 622 to 766; the P-only cut from 24 wrong to none, at the
 same 843 frames; x264's intra refresh with keyint 8 and no B-frames
 (below) from 8 of 40 wrong to none and from 297 frames (at most 17) to
-931 (44), and with 2 B-frames, which was right, from 399 to 931. An
+931 (44), and with 2 B-frames, which was right, from 399 to 931; and
+x264 without B-frames keeping one reference, which was right, remuxed
+with `-c copy` so its 4 I-frames that aren't IDR are listed, from 485
+frames (at most 25) to 1339 (52), in MP4 and Matroska alike: more than
+the 1175 (47) it takes with only its IDR listed, as x264 wrote it, as
+each first landing on such an I-frame is decoded, noted and sought
+before (the parser's one-reference case, below). An
 SEI-less clip and the LRV decode what they did, and so, by
 construction, do closed GOPs, open GOPs with recovery points, and HEVC.
 

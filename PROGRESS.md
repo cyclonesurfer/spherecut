@@ -141,7 +141,9 @@ back clean, so M0 is done.
   decoded other pictures than opening did, both returned as `Exact`, and
   five nits in compat and the docs; all are fixed, with tests where one
   can show it (D2, D29). x264's intra refresh now seeks exactly too,
-  from the start of the stream.
+  from the start of the stream; so does a stream keeping one reference
+  whose I-frames that aren't IDR are listed (a remux), which was right
+  and now decodes about 2.8 times the frames (D29).
 
 odin's third run (PR #5, `hw-reports/odin-be38fa409e.md`, at be38fa4):
 21 of 23 Tier 2 tests pass, including all four that failed in PR #4. Two
