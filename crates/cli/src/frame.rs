@@ -1143,8 +1143,9 @@ fn shown(dec: &dyn VideoDecode, frame: &VideoFrame) -> FrameTime {
 }
 
 /// Whether the file is a stitched equirect: tagged so (Spherical Video
-/// V2's `equi`, or V1's `equirectangular`), or else `not_equirect`, naming
-/// what it is.
+/// V2's `equi`, or V1's `equirectangular`, in an MP4 or MOV file), or
+/// else `not_equirect`, naming what it is, or that its Matroska spherical
+/// metadata isn't read.
 fn check_equirect(report: &ProbeReport, stream: &StreamInfo) -> Result<(), Failure> {
     let file = report.path.display();
     let refuse = |what: String| {
@@ -1199,6 +1200,14 @@ fn check_equirect(report: &ProbeReport, stream: &StreamInfo) -> Result<(), Failu
         .as_ref()
         .map(|v| format!("{}x{}", v.width, v.height))
         .unwrap_or_else(|| "of unknown size".into());
+    // probe reads spherical metadata from MP4 boxes only.
+    if report.container.format.starts_with("matroska") {
+        return Err(refuse(format!(
+            "a {size} Matroska/WebM file, and Spherecut doesn't read Matroska's spherical \
+             metadata yet (Spherical Video V2's Projection element), so it can't tell whether \
+             it is an equirect"
+        )));
+    }
     match report.camera.as_ref().map(|c| c.layout) {
         Some(Layout::Insta360DualFisheye) => Err(refuse(
             "Insta360 dual fisheye: stitching arrives in M3".into(),

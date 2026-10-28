@@ -612,6 +612,7 @@ fn every_failure_leaves_nothing_behind() {
         (&missing, vec![], 1, "not_found"),
         (&text, vec![], 1, "not_media"),
         (&untagged, vec![], 1, "not_equirect"),
+        (&mkv, vec![], 1, "not_equirect"),
         (&good, vec!["--time", "99"], 1, "out_of_range"),
         (&good, vec!["--time", "1"], 1, "out_of_range"),
         (&good, vec!["--frame", "30"], 1, "out_of_range"),
@@ -712,6 +713,13 @@ fn every_failure_leaves_nothing_behind() {
     );
     let m = message(&cut, &["--equirect", "--time", "0.9"]);
     assert!(m.contains("is damaged before 0.9 s"), "{m}");
+    // probe reads spherical metadata from MP4 boxes only, which the
+    // message says rather than that the file has none.
+    let m = message(&mkv, &[]);
+    assert!(
+        m.contains(" is a 512x256 Matroska/WebM file, and Spherecut doesn't read Matroska's spherical metadata yet"),
+        "{m}"
+    );
     let m = message(&mkv_cut, &["--equirect", "--frame", "29"]);
     assert!(m.contains("is damaged before frame 29"), "{m}");
     assert!(m.contains("bytes its Matroska Segment says it has"), "{m}");

@@ -222,7 +222,9 @@ spherecut frame clip.mp4 -o out.png --overwrite --depth 16 --json
   stereographic; `--size WxH`, 16 to 16384 a side and within the GPU's
   limit; `--depth 8|16` for the PNG.
 - **The file** must be tagged as an equirect (Spherical Video V1 or V2
-  metadata); `--equirect` renders an untagged one as an equirect anyway.
+  metadata in an MP4 or MOV file); `--equirect` renders an untagged one
+  as an equirect anyway. Matroska/WebM files need `--equirect` for now:
+  Spherecut doesn't read their spherical metadata yet.
   Dual fisheye files from the cameras wait for stitching in M3. Stereo
   files render the left eye, a cropped picture shows black where it
   doesn't cover the sphere, and a pose in the metadata isn't applied
