@@ -83,7 +83,14 @@ const REGENERATE: &str = "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-ren
 /// The other-driver rule: 48.13 dB is an RMS error of one 8-bit step.
 const OTHER_PSNR_DB: f64 = 48.0;
 const OTHER_SSIM: f64 = 0.995;
-const OTHER_MAX_LSB: f64 = 4.0;
+/// And what the averages miss: at most [`OTHER_PIXELS_PAST`] pixels with
+/// a channel more than [`OTHER_PAST_LSB`] off, and none more than
+/// [`OTHER_MAX_LSB`]. LLVM 22.1.8's llvmpipe put `fisheye_180` 5 LSB off
+/// at 62.79 dB; within PSNR and SSIM, implicit LOD puts 11 to 72 pixels
+/// past 4 LSB by up to 9, and a black pole quad is 95 LSB off (D32).
+const OTHER_PAST_LSB: f64 = 4.0;
+const OTHER_PIXELS_PAST: f64 = 4.0;
+const OTHER_MAX_LSB: f64 = 8.0;
 /// The CPU tolerance: measured − 3 dB when blessing, never below 36.
 const CPU_MARGIN_DB: f64 = 3.0;
 const CPU_FLOOR_DB: f64 = 36.0;
@@ -606,6 +613,8 @@ struct Drift {
     identical: bool,
     psnr: f64,
     ssim: f64,
+    /// Pixels with a channel more than [`OTHER_PAST_LSB`] off.
+    past: f64,
     max_lsb: f64,
 }
 
@@ -618,21 +627,26 @@ fn drift(got: &Image, want: &Image) -> Result<Drift, String> {
     }
     let (a, b) = (unit(got), unit(want));
     let size = (got.width, got.height);
-    // In whole 8-bit steps when both are 8-bit, as the rule counts them.
-    let max_lsb = match (&got.pixels, &want.pixels) {
+    // Each pixel's largest channel difference, in whole 8-bit steps when
+    // both are 8-bit, as the rule counts them.
+    let lsb: Vec<f64> = match (&got.pixels, &want.pixels) {
         (Pixels::Rgb8(x), Pixels::Rgb8(y)) => x
-            .iter()
-            .zip(y)
-            .map(|(p, q)| p.abs_diff(*q))
-            .max()
-            .map_or(0.0, f64::from),
-        _ => max_diff(&a, &b) * 255.0,
+            .chunks(3)
+            .zip(y.chunks(3))
+            .map(|(p, q)| f64::from((0..3).map(|c| p[c].abs_diff(q[c])).max().unwrap_or(0)))
+            .collect(),
+        _ => a
+            .chunks(3)
+            .zip(b.chunks(3))
+            .map(|(p, q)| max_diff(p, q) * 255.0)
+            .collect(),
     };
     Ok(Drift {
         identical: got.pixels == want.pixels,
         psnr: psnr_of(size, &a, &b),
         ssim: ssim_of(size, &a, &b),
-        max_lsb,
+        past: lsb.iter().filter(|d| **d > OTHER_PAST_LSB).count() as f64,
+        max_lsb: lsb.iter().copied().fold(0.0, f64::max),
     })
 }
 
@@ -640,8 +654,12 @@ fn drift(got: &Image, want: &Image) -> Result<Drift, String> {
 /// was blessed on, else within the other-driver tolerance.
 fn judge(d: &Drift, same_driver: bool) -> Result<(), String> {
     let numbers = format!(
-        "PSNR {:.2} dB, SSIM {:.5}, max {:.0} LSB",
-        d.psnr, d.ssim, d.max_lsb
+        "PSNR {:.2} dB, SSIM {:.5}, {:.0} {} more than {OTHER_PAST_LSB} LSB off, max {:.0} LSB",
+        d.psnr,
+        d.ssim,
+        d.past,
+        if d.past == 1.0 { "pixel" } else { "pixels" },
+        d.max_lsb
     );
     if same_driver {
         return if d.identical {
@@ -652,12 +670,17 @@ fn judge(d: &Drift, same_driver: bool) -> Result<(), String> {
             ))
         };
     }
-    if d.psnr >= OTHER_PSNR_DB && d.ssim >= OTHER_SSIM && d.max_lsb <= OTHER_MAX_LSB {
+    if d.psnr >= OTHER_PSNR_DB
+        && d.ssim >= OTHER_SSIM
+        && d.past <= OTHER_PIXELS_PAST
+        && d.max_lsb <= OTHER_MAX_LSB
+    {
         Ok(())
     } else {
         Err(format!(
             "outside the other-driver tolerance (PSNR ≥ {OTHER_PSNR_DB} dB, SSIM ≥ {OTHER_SSIM}, \
-             max ≤ {OTHER_MAX_LSB} LSB): {numbers}"
+             at most {OTHER_PIXELS_PAST} pixels more than {OTHER_PAST_LSB} LSB off, none more \
+             than {OTHER_MAX_LSB}): {numbers}"
         ))
     }
 }
@@ -1213,7 +1236,12 @@ impl<'g> Run<'g> {
         self.threshold("same_driver", json!("identical pixels"));
         self.threshold(
             "other_driver",
-            json!({"psnr_db_min": OTHER_PSNR_DB, "ssim_min": OTHER_SSIM, "max_lsb": OTHER_MAX_LSB}),
+            json!({
+                "psnr_db_min": OTHER_PSNR_DB,
+                "ssim_min": OTHER_SSIM,
+                "pixels_past_4_lsb_max": OTHER_PIXELS_PAST,
+                "max_lsb": OTHER_MAX_LSB,
+            }),
         );
         let mut m = self.stamp();
         m.append(&mut entry);
@@ -1267,6 +1295,7 @@ impl<'g> Run<'g> {
             Ok(d) => {
                 self.measure("golden_psnr_db", d.psnr);
                 self.measure("golden_ssim", d.ssim);
+                self.measure("golden_pixels_past_4_lsb", d.past);
                 self.measure("golden_max_lsb", d.max_lsb);
                 self.measure("golden_identical", f64::from(u8::from(d.identical)));
                 if let Err(e) = judge(&d, same_driver) {
@@ -3026,6 +3055,41 @@ fn stored_images_follow_the_rules_of_section_6() {
     assert!(judge(&d, true).is_err() && judge(&d, false).is_ok());
     let d = drift(&shifted, &want).unwrap();
     assert!(judge(&d, false).is_err(), "{d:?}");
+    // Past 4 LSB: four pixels may be, by up to 8 LSB, in any channel; a
+    // fifth pixel, or a ninth LSB, fails, and the message counts them.
+    let off = |pixels: &[(usize, usize, u8)]| {
+        let mut img = want.clone();
+        if let Pixels::Rgb8(p) = &mut img.pixels {
+            for &(n, c, by) in pixels {
+                p[3 * n + c] += by;
+            }
+        }
+        drift(&img, &want).unwrap()
+    };
+    let d = off(&[(0, 0, 5), (100, 1, 5), (700, 2, 6), (2047, 0, 8)]);
+    assert!(d.past == 4.0 && d.max_lsb == 8.0, "{d:?}");
+    assert!(judge(&d, false).is_ok(), "{d:?}");
+    // Two channels of one pixel are one pixel.
+    let d = off(&[(0, 0, 5), (0, 1, 5), (100, 1, 5), (700, 2, 6), (2047, 0, 8)]);
+    assert!(d.past == 4.0 && judge(&d, false).is_ok(), "{d:?}");
+    let d = off(&[
+        (0, 0, 5),
+        (100, 1, 5),
+        (700, 2, 6),
+        (1000, 2, 5),
+        (2047, 0, 8),
+    ]);
+    let e = judge(&d, false).unwrap_err();
+    assert!(
+        d.past == 5.0 && e.contains("5 pixels more than 4 LSB off, max 8 LSB"),
+        "{e}"
+    );
+    let d = off(&[(0, 0, 9)]);
+    let e = judge(&d, false).unwrap_err();
+    assert!(
+        d.past == 1.0 && e.contains("1 pixel more than 4 LSB off, max 9 LSB"),
+        "{e}"
+    );
     let small = Image {
         width: 32,
         ..want.clone()
@@ -3351,7 +3415,12 @@ fn the_other_driver_path_runs_on_lavapipe() {
     bless_into(&dir, &diffs, &["rect_forward"]);
     let mut run = Run::at(gpu(), Mode::OtherDriver, &dir, &diffs);
     run_rows(&mut run, Some(&["rect_forward"]));
-    assert!(run.notes[0].contains("golden_psnr_db"), "{:?}", run.notes);
+    assert!(
+        run.notes[0].contains("golden_psnr_db")
+            && run.notes[0].contains("golden_pixels_past_4_lsb 0.0"),
+        "{:?}",
+        run.notes
+    );
     run.finish();
 }
 
