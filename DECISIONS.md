@@ -3166,6 +3166,21 @@ from the slice's review:
   (amendment 11). Copying row by row costs a memcpy per row of the same
   bytes.
 
+*Measured on odin (RX 7600, RADV, Mesa 26.2.5) in PR #5 at be38fa4 and
+PR #6 at 918d031:* `write_texture` makes or frees no allocator block
+within a step at any input, so the block trigger doesn't hold. The CPU
+trigger held for both 5.7K inputs at be38fa4 (NV12 4.12 ms a step,
+against the belt's 17.39; P010 4.80, against 4.78) and holds at 918d031
+for P010 alone (4.34, against 4.36; NV12 2.58, against 16.26), each time
+through its 4 ms arm, never its 1.5 times, and the belt was never the
+cheaper by more than 0.4%. Waited for, the belt's 5.7K NV12 step makes
+or frees allocator blocks every time and costs six times
+`write_texture`'s; two in flight it costs 3.68 ms, against 2.63. As
+written, the trigger makes the belt the default where it costs as much
+or more, which isn't what the trigger is for, so the default stays
+`write_texture` until H1, which has huginn's numbers too and should
+restate the trigger as the belt being cheaper.
+
 The review also found `round_f16` untested where it matters least and
 inexact where no pass goes. No test reached its subnormal branch (no
 10- or 12-bit code gives a half below 2^−14; 15- and 16-bit codes,
@@ -3270,9 +3285,10 @@ Tested on lavapipe (Mesa 25.2.8, LLVM 20.1.2):
   tie, 256 of them with the product on the tie, matched it at every
   value, where rounding the exact product differs at 128.
 
-What this doesn't show: RADV itself, until Pat's next run, where
-`passthrough_exact` should give limited k = 86, 159 and 165 one code
-off the formula, as lavapipe does. The mip pass then still left its
+What this didn't show: RADV itself, until odin's fourth run (PR #6, at
+918d031), where `passthrough_exact` gave limited k = 86, 159 and 165
+one code off the formula, as lavapipe does, and nothing off the model.
+The mip pass then still left its
 `R8Unorm` and `Rg8Unorm` levels to the driver, which D32's emulation
 found cost the RX 7600's wide views up to 15 dB; it rounds them itself
 now (next).
@@ -3355,9 +3371,14 @@ Tested on lavapipe (Mesa 25.2.8, LLVM 20.1.2), in `tests/upload.rs`:
 Six of the stored goldens and one of slice 4's changed (D32), where a
 pixel reads level 1 or more. All nine CPU floors of the render goldens
 rose, and of slice 4's four only `h264_full_range`'s (47.2 to 48.17
-dB); the other three, and their PSNRs, didn't move. RADV itself
-hasn't run it: D32's emulation predicts the RX 7600's CPU checks at
-56.11 to 59.78 dB.
+dB); the other three, and their PSNRs, didn't move. On the RX 7600 at
+918d031 (odin's fourth run, PR #6) the CPU checks came out at 58.88 to
+60.75 dB, the numbers D32's emulation gives for the fix, above its
+prediction (56.11 to 59.78 dB). The pass costs more there: a 5.7K NV12
+frame's mips take 1.01 ms of GPU time, against 0.62 ms at be38fa4 when
+the stores were the driver's, and a 3840² pair's ingest and mips 0.89
+ms a frame, against 0.59. P010's mips, on the f16 path, take 0.51 ms
+either way.
 
 ## D32. Golden images
 
@@ -3674,7 +3695,8 @@ manifest's diff shows each step.
 
 Revisit if: a GPU misses a floor in `goldens_on_gpu_match_reference`
 (the RX 7600 did at be38fa4, from the mip pass's 8-bit stores, since
-fixed: below); a Mesa build
+fixed: below; at 918d031 it clears every floor by 8.57 dB or more); a
+Mesa build
 filters unorm8 in floating point (the 8-bit range and siting can then be
 asserted); or a control comes near its bound (`shimmer_fisheye360`'s
 3.26 times is the nearest, against 3).
@@ -3955,6 +3977,18 @@ predict: if the RX 7600 comes in under lavapipe's floors, or more than
 1 dB under its prediction, the emulation or the fix is wrong about it,
 which is a finding for D31, not a floor to lower.
 
+*Measured at 918d031 (odin's fourth run, PR #6,
+`hw-reports/odin-918d03171c.md`):* the RX 7600's CPU checks are the
+table's "Emulated now" to the hundredth of a dB at all nine (58.88 to
+60.75 dB; `fisheye_360` 59.93, `fisheye_180` 58.90), 8.57 to 11.78 dB
+above lavapipe's floors and 0.26 to 3.55 dB above the predictions, the
+fisheyes the most (2.79 and 3.55 dB). So the squared error the
+emulation missed at be38fa4 wasn't RADV's own: it went with the old
+mips' stores or the old encode pass, as the limits below allowed, and
+RADV filters the stored codes as the emulation's 8-bit model does, or
+nearer f64, which these numbers can't tell apart. Its bands are the
+emulation's too (next).
+
 **The error by LOD band.** On a GPU each CPU check also measures its
 error over the pixels the view shows, in three bands of luma's analytic
 LOD before clamping (`reference::lod_map`): below 1, 1 to 2.5, and from
@@ -3972,7 +4006,9 @@ export of the old means, emulated against be38fa4's reference, put
 returns now, 59% and 41% (58.90 and 58.86 dB) and 92% and 8% (58.90 and
 58.92 dB), about level across the bands. The rect
 and matrix views lie wholly below 1. The emulation test prints every
-check's bands.
+check's bands. RADV's at 918d031 are those: `fisheye_360` 58.8% and
+41.2% (58.90 and 58.86 dB), `fisheye_180` 92.0% and 8.0% (58.90 and
+58.92 dB).
 
 Limits: the emulation is of the reference, not of RADV. It shows the
 old means through RADV's export reproduce RADV's numbers at be38fa4,
@@ -3980,16 +4016,17 @@ against that reference, not what RADV's filter holds in fixed point,
 which the numbers can't tell apart from f64 (0.05 dB). The prediction
 takes the squared error the emulation missed then (58.90 to 71.09 dB
 alone) as RADV's own and unchanged by the fix; if part of it came from
-the mips, the fix removes that too and the prediction is low. Nothing
-here ran on a GPU: Pat's next run is the fix's first measurement, and
-brings RADV's bands. Whether RADV packs 10-bit exports toward zero too
+the mips, the fix removes that too and the prediction is low, as it
+was. Until odin's fourth run nothing here had run on a GPU; that run
+measured the fix and RADV's bands (above). Whether RADV packs 10-bit exports toward zero too
 is unknown (D31); the deep planes' mips return halves, which no pack
 moves.
 
-Revisit if: on Pat's next run a CPU check comes in under its floor, or
-more than 1 dB under its prediction (as the old mips' stores would at
-five checks while clearing every floor), or RADV's bands don't look
-like the emulation's (even across the bands, near 59 dB).
+Revisit if: a GPU's CPU check comes in under its floor, or more than 1
+dB under its prediction (as the old mips' stores would at five checks
+while clearing every floor; the RX 7600 came in at the emulation's own
+numbers at 918d031, above the prediction), or a RADV GPU's bands don't
+look like the emulation's (even across the bands, near 59 dB).
 
 **The other-driver rule counts the pixels past 4 LSB.**
 `goldens_on_host_llvmpipe` on odin's llvmpipe (Mesa 26.2.5, LLVM
@@ -4097,18 +4134,20 @@ and 56 of them black already and 171 and 28 with their brightest at 5 to
 
 Why: the averages hold the whole image and the count holds a place in
 it. The drift made here is a pixel or two near a rounding, at 57 dB or
-more (LLVM 22's count comes with odin's next run); the faults the
+more (LLVM 22's, at odin's fourth run, none at all); the faults the
 averages miss are lines and spots of 4 to 72 pixels, and each is more
 than 4 pixels or more than 8 LSB.
 
 Limits: the faults are on the grid, the stored images' only pattern,
 made by editing a stored view's render or by this renderer's own debug
-mode, not by another driver. LLVM 22's count is unknown until odin's next run
-notes it, and C rests on the drift made here. A fault within 4 pixels
-and 8 LSB passes.
+mode, not by another driver. C rests on the drift made here and on
+LLVM 22's, which odin's fourth run (918d031) noted as no pixel past 4
+LSB in any stored image, at most 4 LSB off, at 63.17 to 68.39 dB. A
+fault within 4 pixels and 8 LSB passes.
 
-Revisit if: odin's next run notes more than 2 pixels past 4 LSB for
-LLVM 22, which would leave C less than twice the drift; or a driver
+Revisit if: a run notes more than 2 pixels past 4 LSB for another
+llvmpipe (LLVM 22 put none there at 918d031), which would leave C less
+than twice the drift; or a driver
 build that renders the rows right fails the count or the maximum.
 
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words

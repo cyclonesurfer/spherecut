@@ -163,6 +163,10 @@ the sections below, they win.
     more, and raised all nine CPU floors of the render goldens
     (`fisheye_360` from 46.59 to 48.15 dB) and that pipeline golden's
     (47.2 to 48.17 dB); the other three pipeline goldens' didn't move.
+    odin's fourth run (PR #6, at 918d031) measured the fixes: the RX
+    7600's CPU checks came out at 58.88 to 60.75 dB, the emulation's
+    numbers for the fix and above its prediction, `passthrough_exact`
+    as on lavapipe, and LLVM 22's llvmpipe put no pixel past 4 LSB.
 
 ## 1. Summary
 

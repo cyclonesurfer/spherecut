@@ -113,7 +113,9 @@ Current benchmarks:
   1.5 times the belt's CPU time, or above 4 ms a frame), and a note for
   each input whether `write_texture` makes or frees allocator blocks
   within a step, waited or in flight, the other trigger. Either holding
-  on huginn or odin makes the belt the default (D31). A last note names
+  on huginn or odin makes the belt the default (D31), though on odin
+  only the CPU trigger's 4 ms arm has held, where the belt was no
+  cheaper, so the default stays `write_texture` until H1 (below). A last note names
   the GPU and how long the bench took. A device without timestamps
   inside encoders has no GPU rows, and a note says so. It needs at most
   about 1 GB on the GPU.
@@ -324,6 +326,78 @@ What this adds:
   3.7 s, as it decodes a whole GOP of 8K HEVC to reach the frame.
 - VA-API's download faults about 10 times per MB copied on odin (116 per
   3840×1920 NV12 frame, 227 per P010 frame), the driver's (D30).
+
+Third and fourth runs:
+[`hw-reports/odin-be38fa409e.md`](../hw-reports/odin-be38fa409e.md) at
+be38fa4, 2026-10-24 (PR #5, 4230 s), and
+[`hw-reports/odin-918d03171c.md`](../hw-reports/odin-918d03171c.md) at
+918d031, 2026-10-28 (PR #6, 4124 s), the same machine and software.
+Tier 2: 21 of 23 passed at be38fa4, with both golden tests failing
+(fixed after it, D31, D32), and all 25 at 918d031. The third run is the
+first with `bench_upload_5k7`. Each cell is the third run's, then the
+fourth's:
+
+| Benchmark | Software | VA-API | Vulkan Video |
+|---|---:|---:|---:|
+| X5 2× 1920² @ 119.88 | 0.68 / 0.72 × | 0.99 / 1.08 × | 1.66 / 1.65 × |
+| X5 2× 2880² @ 59.94 | 0.62 / 0.65 × | 0.96 / 1.00 × | 1.61 / 1.64 × |
+| X5 2× 3840² @ 25.00 | 0.50 / 0.52 × | 1.19 / 1.35 × | 2.21 / 2.23 × |
+| X5 2× 3840² @ 29.97 | 0.42 / 0.44 × | 0.73 / 0.95 × | 1.93 / 1.92 × |
+| LRV 1× 1664×832 @ 25.00 | 26.36 / 27.29 × | 23.29 / 25.22 × | 30.22 / 31.87 × |
+| LRV 1× 1664×832 @ 29.97 | 29.49 / 30.28 × | 23.51 / 26.31 × | 34.37 / 34.60 × |
+| 3840×1920 HEVC 8-bit, synthetic | 206 / 228 fps **unstable** | 118 / 123 fps | 285 / 291 fps |
+| 5760×2880 HEVC 8-bit, synthetic | 89 / 98 fps **unstable** | 41 / 45 fps | 131 / 138 fps |
+
+Seek latency at 918d031, median and p95 in ms; the third run's are
+within 8% of these:
+
+| Seek | Software | VA-API | Vulkan Video |
+|---|---:|---:|---:|
+| exact, noisy 5760×2880 HEVC | 634 / 839 | 129 / 244 | 122 / 242 |
+| keyframe, noisy 5760×2880 HEVC | 587 / 712 | 50 / 56 | 46 / 51 |
+| exact, X5 3840² stream (8K30) | 3657 / 6618 | 182 / 370 | 183 / 379 |
+| keyframe, X5 3840² stream | 1621 / 1676 | 22 / 36 | 17 / 29 |
+| exact, LRV 1664×832 | 43 / 51 | 17 / 22 | 17 / 21 |
+| keyframe, LRV 1664×832 | 27 / 30 | 4.4 / 5.1 | 3.6 / 4.5 |
+
+Upload (`bench_upload_5k7`), CPU time a step in ms, waited for and two
+in flight, and the GPU's ingest and mips (`write_texture`'s; a pair's
+per frame), the third run's, then the fourth's:
+
+| Input | `write_texture` | belt | `write_texture`, 2 in flight | belt, 2 in flight | GPU ingest and mips |
+|---|---:|---:|---:|---:|---:|
+| 5760×2880 NV12 | 4.12 / 2.58 | 17.39 / 16.26 | 4.80 / 2.63 | 3.89 / 3.68 | 0.68 / 1.01 |
+| 5760×2880 P010 | 4.80 / 4.34 | 4.78 / 4.36 | 6.54 / 5.82 | 7.58 / 7.71 | 1.24 / 1.24 |
+| 3840² NV12 pair | 6.42 / 4.61 | 6.69 / 4.67 | 7.45 / 4.67 | 7.56 / 6.42 | 0.59 / 0.89 |
+| 3840² P010 pair | 10.38 / 9.37 | 10.37 / 11.94 | 11.94 / 10.46 | 12.66 / 11.42 | 1.09 / 1.09 |
+
+On the 5.7K slots at 918d031, in GPU ms: the mips alone 1.01 (NV12;
+0.62 at be38fa4) and 0.51 (P010), and the projection 0.28 (NV12) and
+0.22 to 0.25 (P010) at 1920×1080, rectilinear 90° or a 300° tiny planet,
+and 0.74 to 0.75 at 3840×2160.
+
+What these add:
+
+- Vulkan Video's lead holds. VA-API's X5 rows rose 4 to 30% at 918d031;
+  its 8K30 row has come out between 0.73 and 0.95 × over the four runs,
+  under real time each time.
+- Uploading and drawing a frame is cheap next to its 33 ms at 30 fps:
+  at 918d031 `write_texture` takes 2.58 ms of CPU for a 5.7K NV12 frame
+  and 4.34 ms for P010, the GPU's ingest and mips 1.01 and 1.24 ms, and
+  the projection under 0.3 ms at 1080p and 0.75 ms at 4K.
+- The 8-bit mips cost 0.39 ms more since the mip pass works its means
+  out in integers (D31); the deep planes' f16 path didn't change.
+- `write_texture` got 28 to 37% cheaper at 8 bits and about 10% at 10
+  bits between the runs, with no change to the upload, and the belt's
+  3840² pair as much: not yet explained.
+- The belt's waited 5.7K NV12 step makes or frees allocator blocks every
+  time and costs 16 to 17 ms; two in flight it costs 3.7 to 3.9 ms.
+  `write_texture` never makes or frees one within a step. The CPU
+  trigger has held only through its 4 ms arm (both 5.7K inputs at
+  be38fa4, P010 alone at 918d031), where the belt was no cheaper, so
+  the default stays `write_texture` until H1 (D31).
+- VA-API's download still faults about 10 times per MB copied (10.2 to
+  10.5); Vulkan Video's none.
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 

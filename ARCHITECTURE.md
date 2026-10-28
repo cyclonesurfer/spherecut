@@ -690,9 +690,10 @@ lavapipe's blessed floors with their error broken down by LOD band.
 When the mip pass left its 8-bit means to the driver, RADV's export,
 which packs each to f16 toward zero first, cost the RX 7600's wide,
 minified views up to 15 dB against the CPU reference; emulated on the
-CPU, it reproduces those numbers, and with the means rounded in the
-shader the emulation predicts the RX 7600 7.91 dB or more above
-lavapipe's floors (D32).
+CPU, it reproduces those numbers. With the means rounded in the
+shader the RX 7600 comes out at the emulation's own numbers, 58.88 to
+60.75 dB, 8.57 dB or more above lavapipe's floors (odin at 918d031,
+D32).
 
 A second, smaller set, the **pipeline goldens**
 (`pipeline_goldens` in `crates/cli/tests/frame.rs`, PNGs and manifest
