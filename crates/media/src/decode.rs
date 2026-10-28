@@ -13,12 +13,14 @@
 //! the frames that could still be decoded, never with `None`. So does a
 //! file that ends before the samples its demuxer's index lists for the
 //! stream, which is how an MP4 or MOV with its `moov` first looks when it
-//! is cut before the end of the stream's data. The sample the cut falls
-//! in is dropped, not handed to the decoder. A cut that the index doesn't
-//! reach goes unnoticed: the stream ends with `None` after the last whole
-//! frame, and only FFmpeg's log mentions it. That is the case for a
-//! Matroska file cut in a cluster, and for most cuts in a fragmented MP4,
-//! whose index only grows as its fragments are read.
+//! is cut before the end of the stream's data, and so does a Matroska
+//! file that ends before its Segment says it does. The sample the cut
+//! falls in is dropped, not handed to the decoder. A cut that neither
+//! reaches goes unnoticed: the stream ends with `None` after the last
+//! whole frame, and only FFmpeg's log mentions it. That is the case for
+//! a Matroska file whose Segment doesn't say its size (a live
+//! recording's), and for most cuts in a fragmented MP4, whose index only
+//! grows as its fragments are read.
 //!
 //! Other streams in the file are not read, so damage in them doesn't end
 //! this one. A packet the demuxer reports as invalid data is skipped,
@@ -35,6 +37,7 @@ use std::sync::atomic::AtomicBool;
 
 use spherecut_core::{Rational, StopToken, Time};
 
+use crate::backend::DamageCause;
 use crate::doctor::{VulkanDevice, VulkanDeviceType};
 use crate::ffi::{self, DownloadPool, HwDevice, HwError, HwRefusal, OpenDecoderError};
 use crate::hwprobe::{self, VkDevice, device_label, vk_device_type};
@@ -154,6 +157,8 @@ pub struct VideoDecoder {
     /// Why reading stopped before a clean end of file; reported once the
     /// decoder has given up the frames it holds.
     read_error: Option<String>,
+    /// What kind of failure `read_error`, then `failed`, is.
+    read_cause: Option<DamageCause>,
     /// The error that ended the stream, returned by every later call.
     failed: Option<String>,
     /// Why the device turned the stream down, returned by every later
@@ -399,6 +404,16 @@ impl VideoDecoder {
             (OpenDecoderError::NotOnDevice, Some(dev)) => {
                 hw_unsupported(path, dev, HwRefusal::NotOffered)
             }
+            (OpenDecoderError::Ffmpeg(ff::Error::DecoderNotFound), _) => MediaError::NoDecoder {
+                path: path.to_path_buf(),
+                codec: match par.codec_name.as_deref() {
+                    // FFmpeg's names for a codec it doesn't know at all:
+                    // the sample entry's fourcc says more.
+                    Some(name) if name != "none" && name != "unknown_codec" => name.to_string(),
+                    _ => crate::probe::fourcc_str(par.codec_tag)
+                        .map_or_else(|| "this codec's".into(), |tag| format!("\"{tag}\"")),
+                },
+            },
             (e, _) => err(path, "opening decoder", e),
         })?;
         let codec = dec.codec();
@@ -422,6 +437,7 @@ impl VideoDecoder {
             eof_sent: false,
             done: false,
             read_error: None,
+            read_cause: None,
             failed: None,
             refused: None,
             hw_failed: None,
@@ -580,6 +596,11 @@ impl VideoDecoder {
         Some(err(&self.path, "reading", reason))
     }
 
+    /// What kind of failure [`read_failure`](Self::read_failure)'s is.
+    pub(crate) fn read_cause(&self) -> Option<DamageCause> {
+        self.read_cause.filter(|_| self.reading_failed())
+    }
+
     /// Whether reading has stopped with an error (see
     /// [`read_failure`](Self::read_failure)).
     pub(crate) fn reading_failed(&self) -> bool {
@@ -645,6 +666,7 @@ impl VideoDecoder {
         self.eof_sent = false;
         self.done = false;
         self.read_error = None;
+        self.read_cause = None;
         self.failed = None;
         self.awaiting_landing = true;
         self.landing = None;
@@ -908,6 +930,7 @@ impl VideoDecoder {
                 // as that error, not as the end of the file.
                 Err(ff::Error::Eof) => {
                     self.read_error = self.truncation();
+                    self.read_cause = self.read_error.as_ref().map(|_| DamageCause::Cut);
                     return None;
                 }
                 Err(ff::Error::InvalidData) => {
@@ -915,6 +938,7 @@ impl VideoDecoder {
                     unreadable += 1;
                     if unreadable == MAX_UNREADABLE_IN_A_ROW {
                         self.read_error = Some(format!("{unreadable} unreadable packets in a row"));
+                        self.read_cause = Some(DamageCause::Corrupt);
                         return None;
                     }
                     // One warning per file; the total comes at the end.
@@ -934,26 +958,43 @@ impl VideoDecoder {
                 // AVERROR_EXIT only comes from the interrupt callback.
                 Err(ff::Error::Exit) => {
                     self.read_error = Some("cancelled".into());
+                    self.read_cause = Some(DamageCause::Cancelled);
                     return None;
                 }
                 Err(e) => {
                     self.read_error = Some(e.to_string());
+                    self.read_cause = Some(DamageCause::Read);
                     return None;
                 }
             }
         }
     }
 
-    /// At the end of the file: whether it ends before the data the
-    /// demuxer's index lists for our stream, i.e. it was cut short. The
-    /// other streams don't count, since the demuxer skips them.
+    /// At the end of the file: whether it was cut short. It ends before
+    /// the data the demuxer's index lists for our stream (the other
+    /// streams don't count, since the demuxer skips them), or, for a
+    /// Matroska file, before the end its Segment says: its demuxer reads
+    /// a cut as the end of the file, and its index (Cues, written last)
+    /// is lost with the cut (D13).
     fn truncation(&self) -> Option<String> {
-        let end = ffi::index_end(&self.ictx, self.stream_index)?;
         let size = std::fs::metadata(&self.path).ok()?.len();
-        (end > size).then(|| {
-            format!(
+        if let Some(end) = ffi::index_end(&self.ictx, self.stream_index)
+            && end > size
+        {
+            return Some(format!(
                 "the file is truncated: it ends at byte {size}, but its index \
                  lists video data up to byte {end}"
+            ));
+        }
+        if !self.ictx.format().name().starts_with("matroska") {
+            return None;
+        }
+        let (start, segment) = crate::probe::matroska_segment_of(&self.path)?;
+        (start.saturating_add(segment) > size).then(|| {
+            format!(
+                "the file is truncated: it holds {} of the {segment} bytes its \
+                 Matroska Segment says it has",
+                size.saturating_sub(start)
             )
         })
     }

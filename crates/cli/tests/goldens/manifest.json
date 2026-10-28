@@ -1,0 +1,229 @@
+{
+  "about": "The pipeline goldens (M1 plan section 6): files encoded by synth, decoded in software and rendered by `spherecut frame` on lavapipe, with each check's thresholds and what it measured when blessed.",
+  "checks": {
+    "swscale_cross_check": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "847459e68e",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "10bit-bt601-full_exact_max_lsb": 0.5921,
+        "10bit-bt601-full_matrix_control_lsb": 28.0,
+        "10bit-bt601-full_max_lsb": 1.0,
+        "10bit-bt601-full_range_control_lsb": 19.0,
+        "10bit-bt601-limited_exact_max_lsb": 0.5665,
+        "10bit-bt601-limited_matrix_control_lsb": 29.0,
+        "10bit-bt601-limited_max_lsb": 1.0,
+        "10bit-bt601-limited_range_control_lsb": 19.0,
+        "10bit-bt709-full_exact_max_lsb": 0.6033,
+        "10bit-bt709-full_matrix_control_lsb": 30.0,
+        "10bit-bt709-full_max_lsb": 1.0,
+        "10bit-bt709-full_range_control_lsb": 20.0,
+        "10bit-bt709-limited_exact_max_lsb": 0.5484,
+        "10bit-bt709-limited_matrix_control_lsb": 30.0,
+        "10bit-bt709-limited_max_lsb": 1.0,
+        "10bit-bt709-limited_range_control_lsb": 19.0,
+        "8bit-bt601-full_exact_max_lsb": 0.5148,
+        "8bit-bt601-full_matrix_control_lsb": 28.0,
+        "8bit-bt601-full_max_lsb": 1.0,
+        "8bit-bt601-full_range_control_lsb": 18.0,
+        "8bit-bt601-limited_exact_max_lsb": 0.5096,
+        "8bit-bt601-limited_matrix_control_lsb": 29.0,
+        "8bit-bt601-limited_max_lsb": 1.0,
+        "8bit-bt601-limited_range_control_lsb": 18.0,
+        "8bit-bt709-full_exact_max_lsb": 0.5322,
+        "8bit-bt709-full_matrix_control_lsb": 29.0,
+        "8bit-bt709-full_max_lsb": 1.0,
+        "8bit-bt709-full_range_control_lsb": 18.0,
+        "8bit-bt709-limited_exact_max_lsb": 0.5062,
+        "8bit-bt709-limited_matrix_control_lsb": 30.0,
+        "8bit-bt709-limited_max_lsb": 1.0,
+        "8bit-bt709-limited_range_control_lsb": 19.0,
+        "pixels_checked": 60352.0,
+        "worst_exact_max_lsb": 0.6033,
+        "worst_max_lsb": 1.0
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame pipeline_goldens",
+      "source": "256x128 4:4:4, 16-texel blocks of 128 in-gamut colours, x265 lossless, 8 variants",
+      "source_fnv64": [
+        "8931cc9bcfba9625",
+        "bc5da00ba3655225",
+        "74ea64f39941bf25",
+        "e811f631330bbb25",
+        "8734af9fe350cd25",
+        "933c089a136d3725",
+        "ce3b2e7891d6a525",
+        "5f7a1296ed4df325"
+      ],
+      "thresholds": {
+        "10bit-bt601-full_exact_max_lsb_max": 0.75,
+        "10bit-bt601-full_matrix_control_lsb_over": 1.0,
+        "10bit-bt601-full_max_lsb_max": 1.0,
+        "10bit-bt601-full_range_control_lsb_over": 1.0,
+        "10bit-bt601-limited_exact_max_lsb_max": 0.75,
+        "10bit-bt601-limited_matrix_control_lsb_over": 1.0,
+        "10bit-bt601-limited_max_lsb_max": 1.0,
+        "10bit-bt601-limited_range_control_lsb_over": 1.0,
+        "10bit-bt709-full_exact_max_lsb_max": 0.75,
+        "10bit-bt709-full_matrix_control_lsb_over": 1.0,
+        "10bit-bt709-full_max_lsb_max": 1.0,
+        "10bit-bt709-full_range_control_lsb_over": 1.0,
+        "10bit-bt709-limited_exact_max_lsb_max": 0.75,
+        "10bit-bt709-limited_matrix_control_lsb_over": 1.0,
+        "10bit-bt709-limited_max_lsb_max": 1.0,
+        "10bit-bt709-limited_range_control_lsb_over": 1.0,
+        "8bit-bt601-full_exact_max_lsb_max": 0.75,
+        "8bit-bt601-full_matrix_control_lsb_over": 1.0,
+        "8bit-bt601-full_max_lsb_max": 1.0,
+        "8bit-bt601-full_range_control_lsb_over": 1.0,
+        "8bit-bt601-limited_exact_max_lsb_max": 0.75,
+        "8bit-bt601-limited_matrix_control_lsb_over": 1.0,
+        "8bit-bt601-limited_max_lsb_max": 1.0,
+        "8bit-bt601-limited_range_control_lsb_over": 1.0,
+        "8bit-bt709-full_exact_max_lsb_max": 0.75,
+        "8bit-bt709-full_matrix_control_lsb_over": 1.0,
+        "8bit-bt709-full_max_lsb_max": 1.0,
+        "8bit-bt709-full_range_control_lsb_over": 1.0,
+        "8bit-bt709-limited_exact_max_lsb_max": 0.75,
+        "8bit-bt709-limited_matrix_control_lsb_over": 1.0,
+        "8bit-bt709-limited_max_lsb_max": 1.0,
+        "8bit-bt709-limited_range_control_lsb_over": 1.0
+      },
+      "view": "--equirect --projection fisheye --fov 360 --size 512x512",
+      "wgpu": "30.0.1",
+      "what": "4:4:4 flat blocks at BT.601 and BT.709, limited and full, 8 and 10 bits, through frame and through swscale with the matrix and range given: within 1 LSB inside the blocks, at |latitude| ≤ 45°"
+    }
+  },
+  "images": {
+    "h264_full_range": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "847459e68e",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "cpu_max_channel": 0.0157,
+        "cpu_psnr_db": 50.2066
+      },
+      "png": "h264_full_range.png",
+      "png_fnv64": "601f36e88f337296",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame pipeline_goldens",
+      "source": "synth grid 1024x512, x264 lossless 8-bit 4:2:0, BT.709 full range",
+      "source_fnv64": "70f37e8643b30d87",
+      "thresholds": {
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 47.2,
+        "other_driver": {
+          "max_lsb": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "view": "--projection fisheye --fov 180 --size 192x192",
+      "wgpu": "30.0.1",
+      "what": "full-range H.264 through the whole pipeline"
+    },
+    "hevc10_lossless": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "847459e68e",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "cpu_max_channel": 0.0005,
+        "cpu_psnr_db": 89.9971
+      },
+      "png": "hevc10_lossless.png",
+      "png_fnv64": "f2b515a81b2884d0",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame pipeline_goldens",
+      "source": "synth grid 1024x512, x265 lossless 10-bit 4:2:0, BT.709 limited",
+      "source_fnv64": "c5d8748217ef8659",
+      "thresholds": {
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 86.99,
+        "other_driver": {
+          "max_lsb": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "view": "--fov 90 --yaw 30 --pitch 20 --roll 10 --size 256x144 --depth 16",
+      "wgpu": "30.0.1",
+      "what": "lossless 10-bit HEVC through the whole pipeline, decoded as yuv420p10le, 16-bit PNG"
+    },
+    "nv12_vs_yuv420p": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "847459e68e",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "cpu_max_channel": 0.0118,
+        "cpu_psnr_db": 51.2382,
+        "twin_identical": 1.0
+      },
+      "png": "nv12_vs_yuv420p.png",
+      "png_fnv64": "6699f644a6502999",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame pipeline_goldens",
+      "source": "synth grid 512x256, rawvideo NV12 in Matroska, BT.709 limited",
+      "source_fnv64": "6fb8c8f0cef2c508",
+      "thresholds": {
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 48.23,
+        "other_driver": {
+          "max_lsb": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "twin_fnv64": "955fa19d1cc3848c",
+      "view": "--fov 90 --yaw 30 --pitch 20 --roll 10 --size 256x144 --equirect",
+      "wgpu": "30.0.1",
+      "what": "an NV12 decode; the same picture as yuv420p must give the same bytes"
+    },
+    "yuv422p10_full_chroma": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "847459e68e",
+      "date": "2026-10-24",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "control_420_max_lsb": 85.0,
+        "cpu_max_channel": 0.0039,
+        "cpu_psnr_db": 62.899,
+        "vs_444_max_lsb": 0.0
+      },
+      "png": "yuv422p10_full_chroma.png",
+      "png_fnv64": "59e6ac84618e0b55",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame pipeline_goldens",
+      "source": "1024x512 10-bit 4:2:2, x265 lossless: flat luma, Cb and Cr alternating row by row, BT.709 limited",
+      "source_fnv64": "168a8f0515c22325",
+      "thresholds": {
+        "control_420_max_lsb_over": 10.0,
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 59.89,
+        "other_driver": {
+          "max_lsb": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels",
+        "vs_444_max_lsb_max": 1.0
+      },
+      "view": "--equirect --fov 20 --size 192x192",
+      "wgpu": "30.0.1",
+      "what": "4:2:2 10-bit keeps its full vertical chroma: the same as its 4:4:4 twin, unlike 4:2:0"
+    }
+  },
+  "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame pipeline_goldens",
+  "schema": "spherecut.goldens/1"
+}

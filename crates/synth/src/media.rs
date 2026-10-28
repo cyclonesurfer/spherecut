@@ -153,6 +153,11 @@ impl Default for Spec {
     }
 }
 
+/// The most frames x265 holds back for B-frames at the presets synth
+/// uses (a B-pyramid): a clip no longer than this is written without
+/// B-frames (see `Spec::video_settings`).
+pub const X265_BFRAME_DELAY: u32 = 2;
+
 impl Spec {
     pub fn file_name(&self) -> String {
         format!("{}.mp4", self.name)
@@ -210,6 +215,17 @@ impl Spec {
         }
         if let Some(r) = self.refs {
             params.push(format!("ref={r}"));
+        }
+        // x265 (3.5, and its master in 2026) leaves the dts of the frames
+        // within its B-frame delay undefined until the frame after that
+        // delay arrives (`Encoder::m_bframeDelayTime` is set only then, and
+        // never initialised), so a clip of no more frames than the delay
+        // (two at the presets here, which use a B-pyramid) gets its pts
+        // minus whatever x265's heap held. FFmpeg 6.1's mov muxer writes
+        // that; 8.1's refuses it now and then ("pts/dts pair unsupported",
+        // `AVERROR_PATCHWELCOME`). Without B-frames the dts is the pts.
+        if encoder == "libx265" && self.frames <= X265_BFRAME_DELAY {
+            params.push("bframes=0".into());
         }
         // Single-threaded encodes keep the bitstream reproducible.
         options.push(("threads", "1"));

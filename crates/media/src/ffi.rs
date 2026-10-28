@@ -2213,6 +2213,63 @@ impl Drop for Scaler {
     }
 }
 
+/// `frame`, planar Y'CbCr, converted by swscale to packed RGB48 (R, G
+/// and B per pixel, rows top to bottom), with the BT.709 matrix or
+/// BT.601's and full or limited range as told rather than as the frame
+/// is tagged. For the cross-check of the renderer's own conversion
+/// (`encode::swscale_rgb48`).
+pub(crate) fn swscale_rgb48(
+    frame: &ff::frame::Video,
+    bt709: bool,
+    full_range: bool,
+) -> Result<Vec<u16>, ScaleError> {
+    // swscale.h's SWS_CS_ITU709 and SWS_CS_ITU601.
+    let colorspace: c_int = if bt709 { 1 } else { 5 };
+    let to = sys::AVPixelFormat::AV_PIX_FMT_RGB48LE as c_int;
+    let f = frame_fields(frame);
+    let mut scaler = Scaler::new(f.format, to, f.width, f.height)?;
+    let refused = || ScaleError::Refused {
+        from: pix_fmt_name(f.format).unwrap_or_else(|| format!("format {}", f.format)),
+        to: "rgb48le".into(),
+        width: f.width,
+        height: f.height,
+    };
+    // SAFETY: the context is live; sws_getCoefficients returns a static
+    // table for any value, which the context only reads. The output is
+    // RGB, so its range flag says nothing.
+    let set = unsafe {
+        let table = sys::sws_getCoefficients(colorspace);
+        sys::sws_setColorspaceDetails(
+            scaler.ctx,
+            table,
+            c_int::from(full_range),
+            table,
+            1,
+            0,
+            1 << 16,
+            1 << 16,
+        )
+    };
+    if set < 0 {
+        return Err(refused());
+    }
+    let rgb = scaler.scale(frame).map_err(|_| refused())?;
+    let (w, h) = (f.width as usize, f.height as usize);
+    let stride = rgb.stride(0);
+    let data = rgb.data(0);
+    let mut out = Vec::with_capacity(3 * w * h);
+    for y in 0..h {
+        let row = data
+            .get(y * stride..y * stride + 6 * w)
+            .ok_or_else(refused)?;
+        out.extend(
+            row.chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]])),
+        );
+    }
+    Ok(out)
+}
+
 /// `av_seek_frame` on stream `stream` to `ts`, in its time base, to the
 /// keyframe at or before it when `backward`, else at or after it.
 pub(crate) fn seek_frame(

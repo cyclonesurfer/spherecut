@@ -115,6 +115,63 @@ fn concurrent_writes_of_one_clip_all_succeed() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A packet's pts and dts.
+type Times = (Option<i64>, Option<i64>);
+
+/// Whether `path`'s video stream reorders frames, as its decoder reads
+/// the parameter sets, and every packet's pts and dts.
+// Reads a file this test wrote with ffmpeg-next alone, apart from
+// Spherecut's confined open (D24).
+#[allow(clippy::disallowed_methods)]
+fn reordering(path: &Path) -> (bool, Vec<Times>) {
+    spherecut_media::init();
+    let mut ictx = ff::format::input(path).unwrap();
+    let st = ictx.streams().best(ff::media::Type::Video).unwrap();
+    let index = st.index();
+    let dec = ff::codec::context::Context::from_parameters(st.parameters())
+        .unwrap()
+        .decoder()
+        .video()
+        .unwrap();
+    let times = ictx
+        .packets()
+        .filter(|(s, _)| s.index() == index)
+        .map(|(_, p)| (p.pts(), p.dts()))
+        .collect();
+    (dec.has_b_frames(), times)
+}
+
+/// x265 leaves the dts of the frames within its B-frame delay undefined
+/// when the clip ends inside that delay, so synth writes clips that short
+/// without B-frames; longer ones keep them, which the seek tests need.
+#[test]
+fn hevc_clips_within_x265s_bframe_delay_have_no_b_frames() {
+    let dir = tmp("bframe-delay");
+    for (frames, codec) in [
+        (1, Codec::HevcLossless),
+        (media::X265_BFRAME_DELAY, Codec::Hevc),
+    ] {
+        let s = spec(
+            &format!("short-{frames}"),
+            128,
+            frames,
+            codec,
+            8,
+            Audio::None,
+        );
+        let (reorders, times) = reordering(&media::write(&s, &dir).unwrap());
+        assert!(!reorders, "{frames} frames: x265 used B-frames");
+        assert_eq!(times.len(), frames as usize);
+        for (pts, dts) in times {
+            assert_eq!(pts, dts, "{frames} frames");
+        }
+    }
+    let longer = spec("longer", 128, 8, Codec::Hevc, 8, Audio::None);
+    let (reorders, _) = reordering(&media::write(&longer, &dir).unwrap());
+    assert!(reorders, "8 frames: x265 used no B-frames");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn inject_refuses_to_overwrite_its_own_input() {
     // This used to truncate the input and then copy it onto itself until

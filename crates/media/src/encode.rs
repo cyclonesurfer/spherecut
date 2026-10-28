@@ -13,12 +13,13 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use spherecut_core::fs::{TempFile, follow_links};
 use spherecut_core::video::ColorCodes;
 use spherecut_core::{FrameRate, Rational};
 use thiserror::Error;
 
 use crate::ffi;
-use crate::inject::{self, EntryEdit, InjectError, TempFile, follow_links};
+use crate::inject::{self, EntryEdit, InjectError};
 use crate::{ff, init};
 
 #[derive(Debug, Error)]
@@ -208,6 +209,79 @@ pub struct AudioSettings {
 pub enum YuvPlanes {
     U8([Vec<u8>; 3]),
     U16([Vec<u16>; 3]),
+}
+
+/// A frame of `layout` holding `planes`, `width` × `height`.
+fn video_frame(
+    layout: PixelLayout,
+    width: u32,
+    height: u32,
+    planes: &YuvPlanes,
+) -> Result<ff::frame::Video, EncodeError> {
+    let mut frame = ff::frame::Video::new(layout.ff(), width, height);
+    let dims = layout.plane_sizes(width, height);
+    let ten = layout.ten_bit();
+    for (i, &(w, h)) in dims.iter().enumerate() {
+        let stride = frame.stride(i);
+        let data = frame.data_mut(i);
+        match planes {
+            YuvPlanes::U8(p) if !ten => {
+                if p[i].len() != w * h {
+                    return Err(EncodeError::Invalid(format!("plane {i} has wrong size")));
+                }
+                for y in 0..h {
+                    data[y * stride..y * stride + w].copy_from_slice(&p[i][y * w..(y + 1) * w]);
+                }
+            }
+            YuvPlanes::U16(p) if ten => {
+                if p[i].len() != w * h {
+                    return Err(EncodeError::Invalid(format!("plane {i} has wrong size")));
+                }
+                for y in 0..h {
+                    let row = &mut data[y * stride..y * stride + 2 * w];
+                    for (x, px) in p[i][y * w..(y + 1) * w].iter().enumerate() {
+                        row[2 * x..2 * x + 2].copy_from_slice(&px.to_le_bytes());
+                    }
+                }
+            }
+            _ => {
+                return Err(EncodeError::Invalid(
+                    "frame bit depth does not match the stream".into(),
+                ));
+            }
+        }
+    }
+    Ok(frame)
+}
+
+/// What swscale makes of `planes`, a `width` × `height` picture in
+/// `layout`, as RGB at 16 bits per channel (R, G, B per pixel, rows top
+/// to bottom), decoding its Y'CbCr with `matrix` and `range` as given,
+/// whatever a file would tag: swscale takes an untagged picture as
+/// BT.601. It is the independent conversion that `spherecut frame`'s
+/// swscale cross-check holds the shader to (M1 plan section 6), so it
+/// offers only BT.601 and BT.709.
+pub fn swscale_rgb48(
+    planes: &YuvPlanes,
+    layout: PixelLayout,
+    (width, height): (u32, u32),
+    matrix: spherecut_core::video::Matrix,
+    range: spherecut_core::video::Range,
+) -> Result<Vec<u16>, EncodeError> {
+    use spherecut_core::video::{Matrix, Range};
+    init();
+    let bt709 = match matrix {
+        Matrix::Bt709 => true,
+        Matrix::Bt601 => false,
+        other => {
+            return Err(EncodeError::Invalid(format!(
+                "swscale_rgb48 takes BT.601 or BT.709, not {other:?}"
+            )));
+        }
+    };
+    let frame = video_frame(layout, width, height, planes)?;
+    ffi::swscale_rgb48(&frame, bt709, range == Range::Full)
+        .map_err(|e| EncodeError::Invalid(format!("swscale: {e}")))
 }
 
 pub struct Mp4Writer {
@@ -612,39 +686,7 @@ impl Mp4Writer {
                 "video timestamp {pts} after {last}: timestamps must increase"
             )));
         }
-        let mut frame = ff::frame::Video::new(self.layout.ff(), self.width, self.height);
-        let dims = self.layout.plane_sizes(self.width, self.height);
-        let ten = self.layout.ten_bit();
-        for (i, &(w, h)) in dims.iter().enumerate() {
-            let stride = frame.stride(i);
-            let data = frame.data_mut(i);
-            match planes {
-                YuvPlanes::U8(p) if !ten => {
-                    if p[i].len() != w * h {
-                        return Err(EncodeError::Invalid(format!("plane {i} has wrong size")));
-                    }
-                    for y in 0..h {
-                        data[y * stride..y * stride + w].copy_from_slice(&p[i][y * w..(y + 1) * w]);
-                    }
-                }
-                YuvPlanes::U16(p) if ten => {
-                    if p[i].len() != w * h {
-                        return Err(EncodeError::Invalid(format!("plane {i} has wrong size")));
-                    }
-                    for y in 0..h {
-                        let row = &mut data[y * stride..y * stride + 2 * w];
-                        for (x, px) in p[i][y * w..(y + 1) * w].iter().enumerate() {
-                            row[2 * x..2 * x + 2].copy_from_slice(&px.to_le_bytes());
-                        }
-                    }
-                }
-                _ => {
-                    return Err(EncodeError::Invalid(
-                        "frame bit depth does not match the stream".into(),
-                    ));
-                }
-            }
-        }
+        let mut frame = video_frame(self.layout, self.width, self.height, planes)?;
         frame.set_pts(Some(pts));
         self.last_video_pts = Some(pts);
         ctx(self.video.send_frame(&frame), || {
@@ -729,7 +771,7 @@ impl Mp4Writer {
     pub fn finish(self) -> Result<PathBuf, EncodeError> {
         let (path, tmp) = self.close()?;
         let dest = tmp.dest().to_path_buf();
-        tmp.persist()
+        tmp.persist_replace()
             .map_err(|error| EncodeError::Io { path: dest, error })?;
         Ok(path)
     }
@@ -848,7 +890,7 @@ pub fn remux_to_matroska_at(
     }
     ctx(octx.write_trailer(), || "writing Matroska trailer".into())?;
     drop(octx);
-    tmp.persist().map_err(|error| EncodeError::Io {
+    tmp.persist_replace().map_err(|error| EncodeError::Io {
         path: dest.clone(),
         error,
     })?;

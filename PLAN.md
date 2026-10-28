@@ -77,7 +77,7 @@ new features to agents, which adds a little work to each.
 - [ ] `MediaBackend` trait with the FFmpeg implementation: open, stream
       info, seek (frame-accurate, by PTS), decode to NV12/P010 frames, both
       software and VA-API (with automatic software fallback), audio decode.
-- [ ] FFmpeg opens only the file Spherecut opened: `protocol_whitelist`
+- [x] FFmpeg opens only the file Spherecut opened: `protocol_whitelist`
       is `file`, demuxers are limited to the containers Spherecut supports
       (MP4/MOV and Matroska for now, widened only by a DECISIONS entry),
       nested opens are refused through `io_open`, and every decoder gets a
@@ -101,7 +101,7 @@ new features to agents, which adds a little work to each.
       proven by golden images of the high-frequency pattern.
 - [ ] `spherecut frame <file> --time <t> --yaw/--pitch/--roll --fov
       --projection --size WxH -o out.png` renders one frame headless.
-- [ ] The CLI's JSON contract, for agents and scripts (probe, doctor,
+- [x] The CLI's JSON contract, for agents and scripts (probe, doctor,
       frame): with `--json`, stdout carries exactly one compact JSON
       document per run, on success and on failure, with a schema name and
       version, an `ok` flag, and errors with a stable `code`. The shape is

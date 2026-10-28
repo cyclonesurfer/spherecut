@@ -233,3 +233,46 @@ fn probe_opens_no_network_socket_and_no_listed_file() {
     assert!(sockets.is_empty(), "{sockets:#?}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The confinement table's last row (M1 plan section 12.1), for frame:
+/// rendering a clip opens no network socket either.
+#[test]
+fn frame_opens_no_network_socket() {
+    let dir = tmp("strace-frame");
+    let spec = Spec {
+        name: "clip".into(),
+        pattern: Pattern::Grid,
+        width: 256,
+        height: 128,
+        rate: FrameRate::FPS_25,
+        frames: 2,
+        codec: Codec::H264,
+        bits: 8,
+        audio: Audio::None,
+        spherical: true,
+        ..Spec::default()
+    };
+    media::write(&spec, &dir).unwrap();
+    let log = dir.join("strace.log");
+    let out = common::strace(&log, "socket,connect,openat")
+        .current_dir(&dir)
+        .arg(env!("CARGO_BIN_EXE_spherecut"))
+        .args(["frame", "clip.mp4", "--adapter", "cpu", "-o", "out.png"])
+        .env_remove("SPHERECUT_ADAPTER")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(dir.join("out.png").is_file());
+    let log = std::fs::read_to_string(&log).unwrap();
+    // The trace saw frame open its input ...
+    assert!(log.contains("\"clip.mp4\""), "{log}");
+    // ... and no network socket, nor a connection anywhere.
+    let sockets = common::inet_sockets(&log);
+    assert!(sockets.is_empty(), "{sockets:#?}");
+    let connects: Vec<&str> = log.lines().filter(|l| l.contains("connect(")).collect();
+    assert!(
+        connects.iter().all(|l| l.contains("AF_UNIX")),
+        "{connects:#?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

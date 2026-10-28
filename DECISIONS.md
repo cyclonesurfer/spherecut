@@ -596,6 +596,22 @@ the backend hands those frames out, and takes the I-frame decoding
 starts from for good, flagged or not (D29). On 7.1.x the HEVC damage is
 silent on both.
 
+*Updated 2026-10-28, M1 slice 4's review:* a Matroska file shorter
+than its Segment says is cut. `VideoDecoder` reads the Segment's start
+and size as probe does (`probe::matroska_segment_of`), and a file that
+ends before the Segment's end ends the stream with the cut, so a seek
+or a count past a Matroska cut is `Truncated`, never the last frame
+returned as the one asked for. Still not detected: a Matroska file
+whose Segment's size is unknown (a live recording), and a fragmented
+MP4 cut between fragments, which reads as a shorter file. The
+backend's `next_frame` also says a failed read as a `Damaged` event
+with its cause, once: before the first frame decoded after it, or
+before the error when none is (D29), so that a caller that only plays
+on learns where the damage was and why. Tested in
+`crates/synth/tests/seek.rs` (a cut clip, as H.264 and HEVC MP4 and as
+Matroska) and `crates/cli/tests/frame.rs` (frames past a Matroska cut,
+and a frame a cut lost, are refused).
+
 ## D14. A hardware decoder says why it refused a stream
 
 *2026-10-23, M0. Extends D3.*
@@ -873,6 +889,58 @@ output grew the file until the disk was full.
 whose last component is a symlink. The write-through above then applies
 only to the library and to the CLI with `--overwrite`.
 
+*Updated in M1 slice 4*, for `spherecut frame`, the first command that
+writes:
+
+- The temporary file is `spherecut_core::fs::TempFile`, moved from
+  `inject`, which uses it as before, as `Mp4Writer` does. It publishes
+  two ways. `persist_replace` is the rename above. `persist_new`
+  publishes only if nothing is at the output, not even a dangling link:
+  it flushes the file, then `link(2)`s it to the output's name, which
+  fails with `EEXIST` whatever turned up there since the check, and
+  removes the temporary name. That error is `AlreadyExists` and leaves
+  what is there alone. On a filesystem without hard links (`EPERM` on
+  FAT, `EOPNOTSUPP` or `ENOSYS` on some network filesystems; any other
+  refusal of the link too) it creates the output with `create_new`
+  (`O_CREAT | O_EXCL`), copies the file into it and flushes it, and
+  removes the output again if the copy fails. The link call is a
+  parameter of a private twin of `persist_new`, so a unit test makes it
+  refuse. A temporary file it couldn't remove is a `tracing` warning,
+  and the copy a debug line (D22).
+- **frame without `--overwrite`** refuses anything at the output before
+  any work, before probe even: a regular file or a link to one (even a
+  dangling link, which the library would write through) is
+  `output_exists`; a directory, pipe, socket or device there, or a link
+  to one, is `not_a_file` (exit 1 both), and so is a name that can only
+  be a directory's (ending in `/` or `/.`), with or without
+  `--overwrite`, whether or not it exists. It then writes next to the
+  output and publishes with `persist_new`, so a file that appears at the output while the frame
+  renders is kept, and the run fails with `output_exists` saying so.
+  Debug builds have a switch, `SPHERECUT_DEBUG_FRAME_RACE`, that writes
+  the output just before the publish, which `crates/cli/tests/frame.rs`
+  uses to lose that race on purpose; release builds don't have it.
+- **With `--overwrite`**, links are followed as above, a regular file is
+  replaced by `persist_replace`, and anything else is `not_a_file`, as
+  before.
+- A failed or interrupted run leaves neither an output nor a temporary
+  file: the first Ctrl+C stops the work and the temporary file is
+  dropped (D27). Only a second Ctrl+C, which kills the process at once,
+  can leave a `.spherecut-….tmp` beside the output. That holds from the
+  first byte: frame installs its SIGINT handler after the output checks
+  and before it makes the temporary file (slice 4's review found it the
+  other way round, leaving a moment in which the first Ctrl+C killed
+  the process with the file made).
+
+Why the link: a check and then a rename can't refuse an existing output
+atomically, since a file can appear between them and the rename would
+replace it. `link(2)` fails if the name exists, never replaces it, and
+gives the name to a file that is already whole. `renameat2` with
+`RENAME_NOREPLACE` would do the same, but std doesn't wrap it, and core
+forbids `unsafe` (D28). Why frame doesn't write through a link without
+`--overwrite`: a link at the output is something there, and writing
+through it replaces the file it names, which is what `--overwrite`
+asks for.
+
 ## D17. First-order ambiX in AAC uses the 4.0 layout
 
 *2026-10-23, M0.*
@@ -1057,11 +1125,12 @@ rest, with the versions in `Cargo.lock`:
 | bytemuck 1.25.2 (derive) | render | The `#[repr(C)]` uniforms as bytes for `Queue::write_buffer`, and timestamps read back, with no `unsafe`: its derives compile under `forbid(unsafe_code)` (D31) |
 | clap 4.6.7 (derive) | cli, xtask | Argument parsing with generated help and errors, for two binaries with subcommands |
 | image 0.25.10 (png only) | render | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame` and the goldens. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
+| libc 0.2.191 | cli | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, the binary's one FFI module (D28): the handler only stores to an atomic. It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
 | serde 1.0.229 (derive) | core, sphere, media, cli | Serializable time types, `Projection`, the probe and doctor reports, and the CLI's JSON envelope (D27) |
 | serde_json 1.0.154 | cli; core, render (dev) | `--json` output, through the `contract` module (D27). core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
 | thiserror 2.0.21 | core, media, synth, render | Typed library errors without hand-written `Display` impls |
-| tracing 0.1.44 | media, cli, render | Structured logging, and the target for FFmpeg's log (D12) |
+| tracing 0.1.44 | core, media, cli, render | Structured logging, and the target for FFmpeg's log (D12). core logs only what `fs::TempFile` can't clean up (M1 slice 4) |
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
 | tracing-subscriber 0.3.23 (env-filter) | cli | EnvFilter gives `SPHERECUT_LOG` its syntax, and the fmt layer writes to stderr. env-filter brings in `matchers` and `regex-automata` |
 | wgpu 30.0.1 (std, parking_lot, vulkan, wgsl) | render | The GPU (D7, D31). Default features off, so only the Vulkan backend and the WGSL front end are built: no GL, Metal, DX12 or WebGPU backend, no SPIR-V or GLSL front end. `std` and `parking_lot` are the two defaults kept: the standard library, and wgpu's locks. A `[[bans.features]]` list in `deny.toml` refuses `web`, `webgpu` and `webgl` (wasm-bindgen, js-sys and web-sys), `angle`, `static-dxc`, `glsl`, `spirv` and `vulkan-portability` if a later crate turns them on; GL, Metal and DX12 aren't banned, since egui_kittest turns them on in test builds (m1-plan section 11). It brings wgpu-core, wgpu-hal, wgpu-types, naga, ash and gpu-allocator among others. With image, bytemuck and pollster, slice 3a adds 57 crates to what a Linux build compiles (`cargo tree --target x86_64-unknown-linux-gnu` on normal and build edges, against ef1a9d1; 56 on normal edges alone), all under the existing licence list; `Cargo.lock` gains 90, the rest for other platforms' backends, which Linux never builds. 3a first said 46, a miscount the first review found |
@@ -1587,10 +1656,137 @@ as in the text output, not null; null is left for a value this FFmpeg
 has no name for. Mapping `unknown` to null later would change a field's
 values, which is a new version, so it is settled now.
 
-`frame` brings its result, its codes (`output_exists`, `not_equirect`,
-`out_of_range`, `no_gpu`, `adapter_not_found`, `no_decoder` as an error,
-`no_display`, `cancelled`), exit statuses 3 and 4 with SIGINT, and
-`--overwrite` with the update to D16, and extends this entry.
+*Updated in M1 slice 4*, for `spherecut frame`, which joins the
+contract as `spherecut.frame/1` (`docs/cli-json.md` has every field):
+
+- **The result** is `contract::FrameResult`, there only when the PNG was
+  written: a failed run has no `result`, and keeps the warnings it gave
+  before it failed. It has `output`; `frame` (`pts` in the stream's
+  ticks, and `time`, a `FrameTime` in clip time); `requested`, a
+  `FrameTime` too, with `frame` when a frame number was asked for;
+  `exactness`; `size`; `depth`; `view` (the angles and projections as
+  given); `filter` (the one rendered with); `renderer` (`gpu` or
+  `reference`); `decode` (`path`, and `fallback` with `from`, `code` and
+  `reason` when a hardware decode went on in software); `gpu` (wgpu's
+  `name`, `driver`, `driver_info` and `device_type`, null for
+  `--reference`); `color` (the resolved `ColorInfo`, with the file's
+  codes and the `assumed` flags, D30); and `source` (`stream`, `codec`,
+  `size`, `pix_fmt`). `depth`, `renderer`, `source.stream` and
+  `requested.frame` are beyond the plan's list, which said
+  `requested` is `{exact, seconds}`: a run asked for frame 17 says so
+  in the shape every other frame time has.
+- **`exactness` is `exact`**, its only value in version 1: a seek that
+  comes back otherwise fails the run (past the end, damage before the
+  target), or is a bug (`internal`). Amendment 8 kept `truncated` as one
+  of its values; frame never writes it, since it writes no frame that
+  isn't the one asked for. The field stays for A1's tools, which may
+  return a keyframe for a fast scrub.
+- **Codes.** `contract::codes` adds `output_exists`, `not_equirect`,
+  `out_of_range` and `cancelled`, and `contract::codes::warnings` frame's
+  warnings: `stereo_left_eye`, `stereo_unknown`, `crop_applied`,
+  `pose_not_applied` and `anisotropy_unavailable`. A Matroska or WebM
+  file is `not_equirect` with its own message: Spherecut doesn't read
+  Matroska's spherical metadata (Spherical Video V2's `Projection`
+  element) yet, so it can't tell, and `--equirect` renders it.
+  `RenderError::CODES`
+  (`no_gpu`, `adapter_not_found`, `gpu_failed`, `too_large`,
+  `invalid_input`, `internal`, `out_of_gpu_memory`) joins
+  `all_codes()`. `no_display` is the GUI's, and joins the list with it.
+  Damage frame may not reach is a warning with probe's code: the damage
+  probe finds (`truncated` or `damaged`) before the seek, and what the
+  decoder meets after the frame (its cause's code).
+- **Exit statuses**, from the code by `contract::frame_exit`: `usage` 2;
+  `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`,
+  `hw_unsupported` and `hw_failed` 3; `cancelled` 4; anything else 1.
+  The `hw_*` codes reach the run's error only when `--decoder vaapi` or
+  `--decoder vulkan` named the hardware (D39): `auto` falls back and
+  says why in `decode.fallback`. The plan's table had `hw_unavailable`
+  and `hw_unsupported` at 3; `hw_failed` is there too, since a device
+  that fails mid-decode is the device's failure, not the file's (D30).
+  What clap can't check is a `usage` error with exit 2 in frame's
+  schema too: a `--fov` past the projection's limit, `--reference` with
+  `--filter aniso`, a `--size` past the GPU's texture limit and a
+  `--stream` that isn't a video stream.
+- **Amendment 8's mapping**: a seek that damage stops short of its
+  target (`Exactness::Truncated`) fails with the damage's cause,
+  `DamageCause::code()`: a cut is `truncated`, a read error `io_error`,
+  a cancelled read `cancelled` and anything else `damaged`, naming the
+  last good frame's time. A cut inside the first frame's own data is
+  `decode_failed` ("the video stream has no frames"), since there is no
+  last good frame; probe's `truncated` comes first as a warning.
+  *Slice 4's review* added: `--frame N` on a variable-rate stream,
+  which counts frames from the first, fails the same way when damage
+  stops the count (it was `decode_failed`, with no time), naming the
+  damage event's last good frame. On a constant-rate stream `--frame N`
+  is the frame shown at N's time, and frame checks that it is frame N:
+  when it is another, frames are missing there (the decoder lost them,
+  or the index skips them), and the run fails `damaged` ("has no frame
+  N: at its constant rate frame M is shown in its place"), or
+  `out_of_range` when M is the last frame. A `--time` or `--frame` so
+  far past the end that the stream's time base can't hold it is
+  `out_of_range`, with the clip's range, like any other past the end
+  (it was `decode_failed`). A Matroska file shorter than its Segment is
+  now a cut the decoder sees (D13), so a frame past it is `truncated`
+  rather than the last frame rendered as the one asked for.
+- **The order of the checks** is the plan's: the output before any work,
+  so a missing input with an existing output is `output_exists`; then
+  probe and the layout, the GPU, the decoder, the seek. Whatever fails
+  first is the error.
+- **SIGINT.** `cli::interrupt`, the binary's one `unsafe` module (D28),
+  installs a handler with `sigaction(2)` once, in frame only, after the
+  output check and before the temporary file is made: `SA_RESETHAND`, so the default action is back as soon as
+  it runs and a second Ctrl+C kills the process (130, no document), and
+  `SA_RESTART`, so the system calls it interrupts on other threads are
+  restarted rather than failing FFmpeg's reads with `EINTR`, which would
+  look like damage. The handler stores `true` in an atomic. The work
+  runs on a worker thread; the main thread polls the flag every 10 ms,
+  and on the first signal calls `StopSource::shutdown()`, which stops a
+  seek between frames and raises FFmpeg's interrupt flag inside a read.
+  The other steps (probe, the GPU's set-up, the render, the PNG's
+  encode) take no stop token: the worker checks between steps, so there
+  the first Ctrl+C takes effect when the step ends, seconds later at a
+  large `--size`. Whatever error the worker then returns, the run's is
+  `cancelled`, with exit 4 and its document, and the temporary file is
+  dropped. When frame starts with SIGINT ignored, as a non-interactive
+  shell starts a background job (`cmd &`), it installs nothing and the
+  signal stays ignored, as Unix has it for such jobs; it asks for the
+  current action first (slice 4's review found the handler replacing
+  `SIG_IGN`). probe and doctor make no `rt_sigaction` call for SIGINT
+  at all, so Ctrl+C ends them at once, as before.
+- Without `--json`, frame prints one line on stdout (`wrote out.png:
+  1920×1080 rectilinear 100° at 0.4 s (frame 12, pts 12012), decoded in
+  software (VA-API: …), rendered on …`), its warnings go to stderr as log
+  lines, and an error as `error:` and FFmpeg's lines.
+
+Tested in `crates/cli/tests/contract.rs`: frame's envelope on success,
+on a missing file and on a usage error; exits 0 to 3 with one document
+each (no Vulkan driver at all through `VK_DRIVER_FILES` and
+`VK_ICD_FILENAMES` naming a file that isn't there, and `--decoder vaapi
+--render-node /nonexistent`); Ctrl+C
+300 ms into a seek on `long-gop`, which must end with exit 4,
+`cancelled`, no output and no temporary file, before the seek would
+have ended; a frame started with SIGINT ignored, which a SIGINT then
+doesn't stop (`/proc`'s `SigIgn` keeps it, `SigCgt` doesn't get it);
+and strace's record of who installs a SIGINT handler (frame: a query,
+then the handler). `crates/cli/tests/frame.rs` runs every other error row, among
+them `adapter_not_found`, `no_decoder` (a sample entry FFmpeg doesn't
+know) and `--decoder vulkan` on lavapipe, which is `hw_unavailable`
+since every Vulkan device FFmpeg lists here runs on the CPU.
+`hw_unsupported`, `hw_failed` and `anisotropy_unavailable` can't be
+reached here: there is no decoding device to refuse a stream or fail,
+and lavapipe has anisotropic filtering. It has the feature only: on
+Mesa 25.2.8 (LLVM 20.1.2) its `--filter aniso` renders byte for byte
+what `iso` does, on views that squeeze the source (rectilinear 160°,
+fisheye 360°, rectilinear 90° at pitch 80°), so `"filter": "aniso"`
+there changes nothing, and no test in any tier yet tells aniso from
+iso (PROGRESS, Next: render's Tier 2 at H1, or the GUI's slice).
+
+Why the worker thread rather than a flag the work polls itself: the
+seek can sit inside one FFmpeg read for a long time, and the main
+thread has to be free to raise FFmpeg's interrupt flag there. Why
+`SA_RESETHAND`: a run that doesn't stop on the first Ctrl+C (a driver
+call that doesn't return) must still die on the second, as the user
+expects.
 
 Revisit if: a caller needs codes on doctor's issues or one document per
 file of a long run; or A1's schemas want another time or error shape, in
@@ -1630,9 +1826,11 @@ What:
   they land. media has `#![deny(unsafe_code)]` with `#[allow(unsafe_code)]`
   on `mod ffi` and `mod hwprobe`, the two FFI modules D11 allows and the
   only files with `unsafe` in them. cli's binary has
-  `#![deny(unsafe_code)]` with nothing allowed until slice 4 adds `mod
-  interrupt`, which wraps `sigaction` for SIGINT (D27); its library half
-  (`contract`) has `forbid`. Every block keeps a SAFETY comment, which
+  `#![deny(unsafe_code)]` with `#[allow(unsafe_code)]` on `mod
+  interrupt` alone, which slice 4 added: three blocks that zero a
+  `sigaction`, empty its mask and install frame's SIGINT handler, whose
+  body only stores to an atomic (D27). Its library half (`contract`)
+  has `forbid`. Every block keeps a SAFETY comment, which
   the workspace's `clippy::undocumented_unsafe_blocks = "deny"` enforces.
   render stays `forbid` until slice 5b, whose device module opens the
   Vulkan device through wgpu-hal and imports DMA-BUFs, both `unsafe`
@@ -2163,7 +2361,8 @@ What:
     or `HwFailed`. Every Tier 2 test uses it.
   - The overlay's decoder line and badge, the GUI notice and `frame`'s
     stderr note and JSON warning come with the overlay, the GUI and
-    `frame`.
+    `frame`. *frame's came in slice 4 as its result's
+    `decode.fallback` and its text line, not as a warning (D39).*
 - Media's `fault-injection` feature, which only synth's dev-dependency
   turns on (so only test builds have it), adds `VideoRequest::fault`. Its
   `FaultPlan` fails frame k, by the order the decoder makes frames in, as
@@ -2901,6 +3100,71 @@ filters unorm8 in floating point (the 8-bit range and siting can then be
 asserted); or a control comes near its bound (`shimmer_fisheye360`'s
 3.26 times is the nearest, against 3).
 
+*Updated in M1 slice 4*, with the pipeline goldens of plan section 6
+(`pipeline_goldens` in `crates/cli/tests/frame.rs`, its PNGs and
+manifest in `crates/cli/tests/goldens/`, 320 kB). Each row encodes a
+file, runs `spherecut frame` on it (decoding in software, rendering on
+lavapipe) and holds the PNG to the rules above: identical pixels at the
+driver build and source hash it was blessed at, the other-driver rule
+elsewhere, and `frame --reference` on the same file at a floor
+calibrated when blessing (measured − 3 dB, never below 36 dB, no
+channel more than 0.1 off). The source hash is FNV-64 over the first
+decoded frame's planes. Blessing is `SPHERECUT_UPDATE_GOLDENS=1 cargo
+test -p spherecut-cli --test frame pipeline_goldens`, with the same
+refusals and the same 0.5 dB rule, and a plain run fails if the
+manifest lacks a number the run measured. Measured at blessing:
+
+| Row | Source | Check | Measured (bound) |
+|---|---|---|---|
+| `hevc10_lossless` | the grid, x265 lossless 10-bit 4:2:0, decoded as `yuv420p10le`; yaw 30, pitch 20, roll 10, 16-bit PNG | stored; CPU | 90.0 dB, 0.0005 at most (floor 87.0 dB) |
+| `h264_full_range` | the grid, full-range H.264; 180° fisheye | stored; CPU | 50.2 dB, 0.016 (floor 47.2 dB) |
+| `nv12_vs_yuv420p` | the grid as rawvideo NV12 in Matroska, and as `yuv420p` | stored; CPU; the two renders identical | 51.2 dB, 0.012 (floor 48.2 dB); identical |
+| `yuv422p10_full_chroma` | flat luma, Cb and Cr swinging ±160 codes from each row to the next, x265 lossless 4:2:2 10-bit; with its 4:4:4 twin and a 4:2:0 coding, which can only hold their mean | stored; CPU; the twin within 1 LSB; the 4:2:0 control over 10 | 62.9 dB, 0.004 (floor 59.9 dB); twin 0 LSB; control 85 LSB |
+| `swscale_cross_check` | 4:4:4 pictures of 16-texel flat blocks of 128 in-gamut colours, x265 lossless, at BT.601 and BT.709, limited and full, 8 and 10 bits | frame against swscale (`media::encode::swscale_rgb48`, the matrix and range passed with `sws_setColorspaceDetails`), and against the exact conversion | at most 1 LSB from swscale in all 8 (bound 1); 0.51 to 0.60 LSB from exact (bound 0.75); controls 28 to 30 LSB with the other matrix, 18 to 20 with the other range (over 1); 60352 pixels |
+
+Where this differs from the plan, from the evidence:
+
+- **The swscale cross-check's view and units.** The plan compares
+  through "an identity view at level 0"; `frame` has no identity view
+  and no way to ask for a level. A 360° fisheye at 512² magnifies the
+  256×128 source at every latitude up to 45°, so the analytic LOD is 0
+  there, and the check takes only the pixels at |latitude| ≤ 45° whose
+  bilinear taps lie inside one block (3 texels from its edge), where
+  filtering can't mix colours: 60352 of them. Within 1 LSB holds
+  between 8-bit codes, the PNG's against swscale's RGB48 rounded to 8
+  bits. Unrounded, swscale's RGB48 was 1.32 to 1.46 LSB from the render
+  when the check was built: its fixed-point coefficients are off the
+  exact conversion by more than the render's own rounding. So the render
+  is also held to the exact conversion, in f64 from H.273's formulas in
+  the test itself, within 0.75 LSB (the 8-bit store's 0.5 and the f16
+  target's error, D31): a stronger check than swscale's, which keeps
+  swscale as an independent second opinion on the matrix and range.
+- **The NV12 row's source is rawvideo in Matroska.** A software decoder
+  gives `yuv420p`, never NV12, so the NV12 decode is FFmpeg's rawvideo
+  decoder reading NV12 planes. The two renders must be identical, as
+  the plan says.
+- **The 4:2:2 row's check** is the plan's "at full chroma resolution"
+  made testable: its render must be its 4:4:4 twin's within 1 LSB (0
+  measured), and the 4:2:0 control, which can't hold chroma that changes
+  every row, must miss by over 10 LSB (85).
+- **The Euler table's pole rows** (plan section 12.1, `the_euler_table`)
+  can't be white and black at the centre pixel. Looking straight up or
+  down, that pixel is the pole itself, where the equirect's columns
+  meet: the analytic LOD there reads a level whose texels span 90° of
+  longitude, and isotropic trilinear filtering blends the U disc with
+  the grid round it to a neutral grey, 0.72 for U and 0.28 for D, as the
+  f64 reference does. The rows assert a neutral centre (channels within
+  2/255), above 0.6 for U and below 0.4 for D; and
+  `the_markers_round_a_fisheye_turn_with_the_camera` checks the
+  markers round the poles in a 200° fisheye looking up and down (B, F,
+  L and R where the convention puts them), as well as amendment 10's
+  `--roll 90` (U on the left) and `--roll -90`.
+
+Revisit if: a GPU's filter or a change of the LOD rule moves the poles'
+greys (the fisheye test's 0.72 and 0.28 are within 0.05), or a swscale
+release lands within 1 LSB unrounded, which would let the cross-check
+compare RGB48 directly.
+
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 
 *2026-10-24, M1. Pat approved Vulkan Video HEVC in odin's hardware run
@@ -2986,6 +3250,82 @@ the driver doesn't support the format, not FFmpeg's reason.
 
 Revisit if: doctor or the app should decode on the same device (the app
 will, once it decodes on Vulkan), or FFmpeg changes how it picks one.
+
+## D39. `frame --decoder auto` tries VA-API on the rendering GPU, then software
+
+*2026-10-24, M1 slice 4. The order the M1 plan's section 5 gives (step
+6), with the node from wgpu's adapter (section 3.5). D27 to D37 are
+kept for the plan's decisions and D38 is taken, so this one is D39.
+Updates D30.*
+
+What `--decoder` does in `spherecut frame`:
+
+- **The render node** is `--render-node` when given, else the node of
+  the GPU that renders: `media::hw::render_node` with the adapter's
+  PCI bus id, vendor and device from wgpu's `AdapterInfo` (D30's
+  lookup: bus id, then the two ids, then `/dev/dri/renderD128`). A CPU
+  adapter (lavapipe) and `--reference` give no ids, so the default node.
+- **`auto`**, the default, decodes on VA-API on that node with
+  `Fallback::Software` (D30): a device that can't be opened, turns the
+  stream down or fails on a frame hands over to software, and the
+  result says so in `decode.fallback` (`from`, `code`: `hw_unavailable`,
+  `hw_unsupported` or `hw_failed`, and `reason`). When the node doesn't
+  exist, `auto` doesn't ask FFmpeg at all: it decodes in software with
+  the fallback `hw_unavailable`, "no VA-API device: no render node at
+  <path>", so a machine without a GPU never shows an FFmpeg error for
+  it. `auto` never picks Vulkan Video.
+- **`vaapi` and `vulkan`** decode on that device with `Fallback::Fail`,
+  and its error is the run's, exit 3 (D27). `vulkan` opens the Vulkan
+  device behind the node through `open_vulkan_device` (D38), and refuses
+  one that runs on the CPU, as lavapipe does, with `hw_unavailable`.
+- **`software`** decodes in software, with no fallback to report.
+
+The fallback is not one of the document's `warnings`, though D30 had
+"frame's stderr note and JSON warning": it is part of the result, where
+an agent reads which path a frame took (amendment 2 asks for that), and
+the frame is the same either way, since software and VA-API decode
+H.264 and HEVC bit for bit alike (D30's Tier 2 checks). On a machine
+without VA-API every run would otherwise carry the same warning. A
+device that was tried and failed is also on stderr, as the backend's
+`tracing::warn!` ("decoding in software instead of with VA-API:
+<reason>"), and the text line names the fallback: "decoded in software
+(VA-API: no VA-API device: no render node at /dev/dri/renderD128)".
+
+Why this order: VA-API is the hardware path Spherecut relies on (D3,
+D30), and decodes H.264 and HEVC on both of Pat's machines bit for bit
+like software; Vulkan Video is optional (D38), and huginn's stock RADV
+can't decode either. One frame costs one download, so the copy that
+makes VA-API slower than Vulkan Video on odin's discrete GPU (amendment
+9) doesn't matter here. The node comes from the GPU that renders, so
+that on a machine with two GPUs the frame is decoded and rendered on
+the same one. The Tier 2 `vaapi_render_matches_software`
+(`crates/cli/tests/tier2_frame.rs`) runs `auto` with no `--render-node`
+(unless `SPHERECUT_RENDER_NODE` names one) and checks that it decoded
+on VA-API with no fallback, on a node frame's info log says it found
+from the adapter's PCI bus id or ids, not the default. That shows the
+lookup ran on the rendering adapter's ids; the result doesn't name the
+node, so no test checks that it is the same GPU beyond `media::hw`'s
+own tests of the lookup on fake sysfs trees.
+
+Tested: `crates/cli/tests/frame.rs` (`--decoder vaapi --render-node
+/nonexistent` and `--decoder vulkan` on lavapipe are `hw_unavailable`,
+exit 3, with nothing written) and `crates/cli/tests/contract.rs` (the
+same for exit 3's document); every other run of those tests is `auto`
+with the no-node fallback, and the envelope test checks the
+`decode` it reports.
+`vaapi_render_matches_software` asserts the hardware path with no
+fallback, for `vaapi` and for `auto`, and `vulkan_render_matches_software`
+skips, with FFmpeg's lines, where the driver turns a clip down (D38).
+`auto`'s fallback after a device that turns the stream down
+(`hw_unsupported`) or fails on a frame (`hw_failed`) has no test of
+frame's in any tier yet: Tier 1 has no device, and the Tier 2 tests
+expect the device to decode. The backend's fallback itself is tested
+with injected faults (`crates/synth/tests/fallback.rs`, D30).
+
+Revisit if: slice 5 picks the hardware kind from doctor's checks for
+playback (amendment 9); `auto` should then use the same choice, so that
+it takes Vulkan Video where doctor shows that it works and VA-API
+doesn't.
 
 ## Open
 

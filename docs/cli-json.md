@@ -1,9 +1,8 @@
 # The CLI's JSON contract
 
-What `spherecut probe --json` and `spherecut doctor --json` print, for
-scripts and AI agents. `spherecut frame` joins the same contract in M1,
-and A1's MCP tools return the same time shapes and codes. DECISIONS D27
-records why it is this way.
+What `spherecut probe --json`, `spherecut doctor --json` and `spherecut
+frame --json` print, for scripts and AI agents. A1's MCP tools return the
+same time shapes and codes. DECISIONS D27 records why it is this way.
 
 ## One document per run
 
@@ -21,7 +20,9 @@ With `--json`:
 - When the reader of stdout goes away (`spherecut probe --json *.mp4 |
   head -c 0`), the document isn't written and the exit status is the
   same as it would have been. When stdout can't be written at all (a
-  full disk), stderr says so and the run exits 1.
+  full disk), stderr says so and the run exits 1. frame writes its
+  document after the PNG is in place, so then the PNG is there despite
+  the exit 1.
 - A panic, a bug in Spherecut on any thread, is still one document: an
   `internal` error that says where it panicked, with exit 1. Rust's own
   report of it goes to stderr.
@@ -29,15 +30,16 @@ With `--json`:
   before it wrote one; a shell shows 128 + the signal's number as `$?`.
   Treat that as a failed run. A kill on purpose, such as SIGINT (Ctrl+C)
   or SIGTERM (130 or 143), is no bug: probe and doctor don't catch them,
-  and `frame` will catch only the first Ctrl+C. Anything else is a crash,
-  such as SIGSEGV or SIGABRT inside FFmpeg (139 or 134): please report
-  it.
+  and `frame` catches only the first Ctrl+C, which ends it with a
+  `cancelled` document and exit 4 (below); a second Ctrl+C kills it.
+  Anything else is a crash, such as SIGSEGV or SIGABRT inside FFmpeg (139
+  or 134): please report it.
 
 ## Versions
 
 `schema` names the document and its version: `spherecut.probe/1`,
-`spherecut.doctor/1`, and `spherecut/1` for a usage error that names no
-subcommand. Check the whole string.
+`spherecut.doctor/1`, `spherecut.frame/1`, and `spherecut/1` for a usage
+error that names no subcommand. Check the whole string.
 
 Within a version:
 
@@ -60,9 +62,9 @@ doesn't know by the exit status. Anything else is a new version, such as
 |---|---|---|
 | `schema` | string | The document's name and version |
 | `ok` | bool | Whether the run did what was asked: true exactly when there is no `error` |
-| `result` | object, or absent | The command's result (below). Absent for a `usage` or `internal` error. probe and doctor have one in every other run, failed or not: a damaged file still has its report, and doctor's errors come with doctor's report. `frame` will say when it has one |
+| `result` | object, or absent | The command's result (below). Absent for a `usage` or `internal` error. probe and doctor have one in every other run, failed or not: a damaged file still has its report, and doctor's errors come with doctor's report. `frame` has one exactly when it wrote the frame: a failed `frame` run has none |
 | `error` | error, or absent | Why the run failed. Absent when `ok` is true |
-| `warnings` | array of warnings | About the run as a whole. probe and doctor report what they find in `result`, so for them this is always empty in version 1 |
+| `warnings` | array of warnings | About the run as a whole. probe and doctor report what they find in `result`, so for them this is always empty in version 1. `frame`'s are about its file and its devices, and a failed run keeps the ones it gave before it failed |
 
 An **error** is:
 
@@ -110,7 +112,8 @@ Time in Spherecut is exact, and so is its JSON.
   ```
 
   probe and doctor have none. `frame` gives one for the frame it
-  rendered, and A1's tools give them wherever a time is a frame.
+  rendered (`result.frame.time`), and A1's tools give them wherever a
+  time is a frame.
 
 Two timelines, which differ for many files:
 
@@ -140,19 +143,19 @@ its `time_base`.
 
 ## Exit statuses
 
-| Status | Meaning | probe | doctor |
-|---:|---|---|---|
-| 0 | The run did what was asked | Every file is ok (warnings don't count) | No problem of severity error |
-| 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18) |
-| 2 | Usage error: the command line doesn't parse | yes | yes |
-| 3 | Reserved: a codec or device the command itself needs is missing | never | never |
-| 4 | Reserved: interrupted (SIGINT), leaving no output file; the document's code is `cancelled` | never | never |
+| Status | Meaning | probe | doctor | frame |
+|---:|---|---|---|---|
+| 0 | The run did what was asked | Every file is ok (warnings don't count) | No problem of severity error | The PNG is written (warnings don't count) |
+| 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18) | No frame: the output is in the way, the file is missing, damaged before the frame or not an equirect, the frame is past the end, the GPU failed, ... (Codes) |
+| 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso` |
+| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, and `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware |
+| 4 | Interrupted (SIGINT), leaving no output file; the document's code is `cancelled` | never | never | The first Ctrl+C |
 
-3 is for `spherecut frame` (no GPU, an unknown adapter, `--decoder
-vaapi` without a working device, no decoder for the codec) and for the
-GUI (no display). 4 is for `frame`. A missing decoder is a warning in
-probe and a finding in doctor, so neither exits 3: doctor checks
-capability and reports it.
+The GUI is to exit 3 too, without a display (`no_display`, M1's last
+slice). A missing decoder is a warning in probe and a finding in doctor,
+so neither exits 3: doctor checks capability and reports it. frame's
+`--decoder auto` never exits 3 for the hardware: it decodes in software
+instead, and says why in `result.decode.fallback`.
 
 ## Codes
 
@@ -167,6 +170,10 @@ The run's `error.code`:
 | `files_failed` | 1 | probe: at least one file failed; each file's `error` says why. The message names the first |
 | `doctor_errors` | 1 | doctor: at least one problem is of severity error; the message lists them, and `result.issues` has them in full |
 | `internal` | 1 | A failure of Spherecut's own, such as a panic or a document that can't be made; the message says where, and there is no `result`. Please report it |
+| `output_exists` | 1 | frame: something is at the output (a file, or a link, even a dangling one) and `--overwrite` wasn't given; or something appeared there while the frame was rendered, which is left alone |
+| `not_equirect` | 1 | frame: the file isn't tagged as a stitched equirect (dual fisheye, a cubemap, an LRV proxy, a 2:1 picture without spherical metadata), or it is Matroska or WebM, whose spherical metadata Spherecut doesn't read yet; the message says what it is. `--equirect` renders it as one anyway |
+| `out_of_range` | 1 | frame: no frame at the time or number asked for: it is past the end, or so far past it that the stream's timestamps can't hold it. The message gives the clip's range, or its frame count |
+| `cancelled` | 4 | frame: interrupted by the first Ctrl+C (SIGINT); no output file is written, and the temporary file is removed |
 
 A file's `error.code` in probe (`result.files[].error.code`):
 
@@ -202,24 +209,70 @@ A report's `warnings[].code`, which don't fail the file:
 | `unexpected_first_box` | FFmpeg reads the file as MP4/MOV although its first box is of a type such files don't start with |
 | `track_without_stream` | An MP4 `trak` that FFmpeg gives no stream |
 
+frame's `error.code` is also one of probe's file codes above, for the
+file it opens (`not_found`, `not_media`, `truncated`, ... with `path`
+and, when FFmpeg couldn't open the file, `ffmpeg_log`), with exit 1;
+`not_a_file` and `io_error` are about the output as well (a directory or
+device at `-o`, a name ending in `/` or `/.`, a directory that doesn't
+exist). A seek that damage stops short of the frame fails with the
+damage's cause: `truncated` (the file is cut short before it, which
+for Matroska includes a file shorter than its Segment says),
+`damaged` (corrupt data), or `io_error` (a read error); the message
+names the last good frame's time. `--frame N` on a variable-rate
+stream, which counts frames from the first, fails the same way when
+damage stops the count. On a constant-rate stream `--frame N` is the
+frame shown at N's time, and when that is another frame, the frames
+are missing there: `damaged` ("has no frame N: at its constant rate
+frame M is shown in its place"), or `out_of_range` when it is the
+last frame. A cut inside the first frame's own data is
+`decode_failed`, since no frame decodes at all.
+
 Errors of the decoders, which probe and doctor don't give, and which
-`frame` will (each exit 1 unless `frame` says otherwise; `frame` also
-gives probe's file codes above for the file it opens):
+frame does (exit 1 unless the table says 3):
 
 | Code | Meaning |
 |---|---|
-| `decode_failed` | A decoder failed |
+| `decode_failed` | A decoder failed, or the file has no video stream |
+| `no_decoder` | This FFmpeg has no decoder for the stream's codec; the message names it, by its four-character code when FFmpeg has no name for it (exit 3) |
 | `too_large` | As the warning above, as an error: the decoder refuses the stream |
-| `hw_unsupported` | The hardware decoder refuses the stream; software may still decode it (exit 3 for `frame --decoder vaapi`) |
-| `hw_failed` | Decoding or downloading a frame on the hardware device failed: the device's failure, not damage in the file (D30); software may still decode it (exit 3 for `frame --decoder vaapi`) |
-| `hw_unavailable` | The hardware device can't be opened (exit 3 for `frame --decoder vaapi`) |
+| `hw_unsupported` | The hardware decoder refuses the stream; software may still decode it (exit 3 when `--decoder vaapi` or `vulkan` named it) |
+| `hw_failed` | Decoding or downloading a frame on the hardware device failed: the device's failure, not damage in the file (D30); software may still decode it (exit 3 when `--decoder` named it) |
+| `hw_unavailable` | The hardware device can't be opened, such as no render node or a Vulkan device that can't decode (exit 3 when `--decoder` named it) |
 | `unsupported_pixel_format` | The decoder's pixel format is neither one Spherecut uploads as it is nor one swscale converts; the message names it |
 | `not_implemented` | A part of the decoding backend a later M1 slice brings, such as decoding audio; the message names it |
 
-Planned with `frame` (M1 slice 4) and the GUI, and not given yet:
-`output_exists`, `not_equirect`, `out_of_range` (exit 1); `no_gpu`,
-`adapter_not_found`, `no_decoder` as an error, `no_display` (exit 3);
-`cancelled` (exit 4). They join the tables above when they land.
+With `--decoder auto`, the `hw_*` codes never fail the run: they are the
+`code` of `result.decode.fallback`.
+
+Errors of the GPU, which frame gives:
+
+| Code | Exit | Meaning |
+|---|---:|---|
+| `no_gpu` | 3 | Vulkan lists no adapter at all: no driver, or no loader. The message names `spherecut doctor`, which gives the command that installs them |
+| `adapter_not_found` | 3 | No adapter matches `--adapter` (or `SPHERECUT_ADAPTER`); the message lists those there are |
+| `gpu_failed` | 1 | The adapter gave no device, the device refused work or was lost, or reading the picture back failed |
+| `out_of_gpu_memory` | 1 | The GPU ran out of memory |
+| `invalid_input` | 1 | A picture the renderer can't use, such as a plane that doesn't match its layout |
+| `too_large` | 1 | The source picture is larger than the GPU's textures (a `--size` past them is a `usage` error) |
+| `internal` | 1 | As above |
+
+frame's `warnings[].code`, which don't fail the run:
+
+| Code | Meaning |
+|---|---|
+| `stereo_left_eye` | A stereo source (Spherical Video V2 top-bottom or left-right): its left eye is rendered |
+| `stereo_unknown` | A stereo layout frame doesn't know (`stereo_custom`, or a value the specification doesn't define): the whole picture is rendered, as mono |
+| `crop_applied` | Spherical Video V2 crop bounds: the picture covers part of the sphere, which the message gives, and the rest is black |
+| `pose_not_applied` | A non-zero Spherical Video V2 pose, which M1 doesn't apply (M2 does); the message gives it |
+| `anisotropy_unavailable` | `--filter aniso` on a device without anisotropic filtering: the render is isotropic, and `result.filter` is `iso` |
+
+`truncated` and `damaged` (and `io_error`, a read error the decoder
+meets) are warnings too, for damage probe finds before the seek and for
+damage the decoder meets after the frame: the frame is still exact, so
+the run goes on. Damage before the frame fails
+the run instead (above).
+
+`no_display` (exit 3) is planned for the GUI, and not given yet.
 
 `crates/cli/tests/contract.rs` lists every code, so a rename fails a
 test.
@@ -450,6 +503,111 @@ adds:
 "error": {"code": "doctor_errors", "message": "doctor found 1 error: FFmpeg has no HEVC decoder"}
 ```
 
+## `spherecut frame <FILE> -o <OUT.png> [options] --json`
+
+One frame of a stitched equirect, rendered through a virtual camera
+into a PNG (`spherecut frame --help` lists the options; the README shows
+them in use). Without `--json`, a run that wrote the frame prints one
+line on stdout (`wrote out.png: 1920×1080 rectilinear 100° at 0.4 s
+(frame 12, pts 12012), decoded on VA-API, rendered on ...`), and its
+warnings and errors go to stderr, as log lines and an `error:` line.
+
+The run, in order: the command line; the output (refused before any
+work if something is there, below); probe, through the same confinement
+as `spherecut probe` (D24), and the layout check; the GPU (`--adapter`),
+or the CPU reference with `--reference`; the decoder (`--decoder`, on
+the rendering GPU's render node, D39); an exact seek; the render; the
+PNG. Whatever fails first is the run's `error`, and nothing is written.
+
+`result`, only when the PNG was written:
+
+| Field | Type | What |
+|---|---|---|
+| `output` | string | The PNG written, as given to `-o` |
+| `frame` | object | The frame rendered: `pts` (integer, in ticks of the stream's time base) and `time` (a frame time, in clip time) |
+| `requested` | frame time | What `--time` or `--frame` asked for (0 when neither was given). With `--time`, a plain time; with `--frame N` (or `--time Nf`), `frame` is N, and the time is that frame's start on a constant-rate stream. `--time 0.5` shows the frame on screen at 0.5 s: the last one that starts at or before it, so `frame.time` may be earlier than `requested` |
+| `exactness` | string | `exact`: the frame is the one asked for. The only value in version 1; a seek that can't be exact fails the run instead |
+| `size` | object | `width`, `height`: the PNG's, as `--size` asked (16 to 16384 each, and within the GPU's texture limit) |
+| `depth` | integer | Bits per channel of the PNG: 8 or 16 (`--depth`) |
+| `view` | object | The virtual camera as given: `yaw` (degrees to the right), `pitch` (up), `roll` (clockwise as seen from behind the camera), `fov` (horizontal, degrees), `projection` (`rectilinear`, `fisheye` or `stereographic`), `morph_to` (one of those, or null) and `morph` (0 is `projection`, 1 is `morph_to`) |
+| `filter` | string | `iso` or `aniso`: the filter rendered with, `iso` where `--filter aniso` met a device without anisotropy (a warning says so) |
+| `renderer` | string | `gpu`, or `reference` for `--reference`'s CPU render |
+| `decode` | object | `path` (`software`, `vaapi` or `vulkan`: where the frame was decoded) and, when a hardware decode went on in software, `fallback`: `from` (`vaapi` or `vulkan`), `code` (`hw_unavailable`, no device; `hw_unsupported`, the device turned the stream down; `hw_failed`, it failed on a frame) and `reason` (for people). `--decoder auto` on a machine without a render node has `fallback` without trying the device |
+| `gpu` | object, or null | The adapter rendered on: `name`, `driver`, `driver_info` (strings, as Vulkan gives them), `device_type` (`discrete_gpu`, `integrated_gpu`, `virtual_gpu`, `cpu` for a software rasterizer such as lavapipe, or `other`). Null for `--reference` |
+| `color` | object | The colour the frame was decoded as: `codes` (the file's H.273 codes as FFmpeg numbers them: `primaries`, `transfer`, `matrix`, `range`, `chroma_location`, integers), and what the renderer used: `range` (`limited` or `full`), `matrix` (`bt709`, `bt601`, `bt2020_ncl`, `smpte240m`, `fcc` or `identity`), `transfer` (`sdr`, `pq`, `hlg` or `linear`), `primaries` (`bt709`, `bt2020` or `other`), `siting` (`left`, `center`, `top_left`, `top`, `bottom_left` or `bottom`), and `assumed`: for each of those five, whether a default rule chose it because the file left it unspecified (D30) |
+| `source` | object | The stream the frame came from: `stream` (FFmpeg's index; `--stream` picks one, the first video stream otherwise), `codec` (FFmpeg's name, such as `hevc`), `size` (`width`, `height`: the decoded picture, after the codec's cropping) and `pix_fmt` (the decoder's pixel format, as FFmpeg names it, such as `yuv420p10le`; a hardware decode names the format it downloads, such as `nv12` or `p010le`) |
+
+Every field is there in every result; `morph_to` and `gpu` are the
+fields that may be null, and `fallback`, `frame.time.frame` and
+`requested.frame` (there only for `--frame N` or `--time Nf`) the ones
+that may be absent.
+
+**The output.** Without `--overwrite`, anything at `-o` fails the run
+with `output_exists` before any work, a link included (even one to
+nothing), and the PNG is written to a temporary file next to it and
+then linked into place only if nothing has appeared there since (D16):
+a file that appeared while the frame was rendered is left alone, and
+the run fails with `output_exists`. With `--overwrite`, links are
+followed and a regular file there is replaced in one rename. A
+directory, pipe, socket or device at `-o` is `not_a_file` either way,
+and so is a name that can only be a directory's (ending in `/` or
+`/.`), whether or not it exists. A failed or interrupted run leaves no
+output and no temporary file; only a second Ctrl+C, which kills the
+process, may leave a temporary file (named
+`.spherecut-<16 hex digits>.tmp`) beside the output.
+
+**Ctrl+C.** frame handles SIGINT; probe and doctor don't. The handler
+is installed after the command line and the output are checked, before
+the temporary file is made; a Ctrl+C before that ends the process
+(130, no document) with nothing to clean up. The first Ctrl+C stops a
+seek or a read at once, a long seek included; during the other steps
+(probe, the GPU's set-up, the render, the PNG's encode) it takes
+effect when that step ends, which at a large `--size` can be seconds.
+The run then ends with `cancelled`, exit 4, and its document. The
+handler is installed once, with the default action restored as it
+runs, so a second Ctrl+C ends the process at once, with no document
+(130). A frame started with SIGINT ignored, as a shell script starts a
+background job (`cmd &`), leaves it ignored: Ctrl+C doesn't stop it.
+
+Example, on a machine without a GPU or a render node (lavapipe), as one
+line, shown here indented:
+
+```json
+{
+  "schema": "spherecut.frame/1",
+  "ok": true,
+  "result": {
+    "output": "out.png",
+    "frame": {"pts": 14014, "time": {"exact": "7007/15000", "seconds": 0.46713333333333334, "frame": 14}},
+    "requested": {"exact": "1/2", "seconds": 0.5},
+    "exactness": "exact",
+    "size": {"width": 1280, "height": 720},
+    "depth": 8,
+    "view": {"yaw": 30.0, "pitch": -10.0, "roll": 0.0, "fov": 90.0, "projection": "rectilinear", "morph_to": null, "morph": 0.0},
+    "filter": "iso",
+    "renderer": "gpu",
+    "decode": {
+      "path": "software",
+      "fallback": {"from": "vaapi", "code": "hw_unavailable", "reason": "no VA-API device: no render node at /dev/dri/renderD128"}
+    },
+    "gpu": {"name": "llvmpipe (LLVM 20.1.2, 256 bits)", "driver": "llvmpipe", "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)", "device_type": "cpu"},
+    "color": {
+      "codes": {"primaries": 1, "transfer": 1, "matrix": 1, "range": 1, "chroma_location": 2},
+      "range": "limited", "matrix": "bt709", "transfer": "sdr", "primaries": "bt709", "siting": "center",
+      "assumed": {"range": false, "matrix": false, "transfer": false, "primaries": false, "siting": false}
+    },
+    "source": {"stream": 0, "codec": "hevc", "size": {"width": 1024, "height": 512}, "pix_fmt": "yuv420p10le"}
+  },
+  "warnings": []
+}
+```
+
+A failed run has no `result`:
+
+```json
+{"schema":"spherecut.frame/1","ok":false,"error":{"code":"out_of_range","message":"no frame at 1.5 s: the clip runs from 0 to 1.001 s (its last frame starts at 0.968 s)","path":"grid-hevc10-2997.mp4"},"warnings":[]}
+```
+
 ## A usage error
 
 ```sh
@@ -460,7 +618,11 @@ $ echo $?
 ```
 
 The schema is the subcommand's when the first argument that isn't an
-option names one (`probe`, `doctor`), and `spherecut/1` otherwise.
+option names one (`probe`, `doctor`, `frame`), and `spherecut/1` otherwise.
+frame's own usage errors, which clap can't find (a `--fov` past the
+projection's limit, a `--size` past the GPU's, a `--stream` that isn't a
+video stream), are `usage` errors with exit 2 too, under
+`spherecut.frame/1`.
 `--json` counts only before a `--`: in `spherecut probe -- --json`,
 `--json` is a file name. Without `--json`, a usage error is clap's text
 on stderr, with exit 2.

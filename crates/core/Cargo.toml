@@ -1,6 +1,6 @@
 [package]
 name = "spherecut-core"
-description = "Core types: exact rational time, the frame and colour vocabulary, cancellation (the project model, keyframes and undo come later)"
+description = "Core types: exact rational time, the frame and colour vocabulary, cancellation, atomic file writes (the project model, keyframes and undo come later)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

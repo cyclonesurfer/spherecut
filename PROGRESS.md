@@ -1,6 +1,6 @@
 # Progress
 
-Updated 2026-10-28, with FFmpeg confined to the file Spherecut opened (D24), the CLI's JSON contract for probe and doctor (D27), odin's first hardware report, M1 slice 2a: `MediaBackend` with frame-exact seek in software, native pixel layouts and the colour defaults (D29, D30), slice 2b: hardware decoding through the backend, with fallback to software, the pooled download, the render node lookup and the Tier 2 seek tests (D30), slice 3a: the render core, checked on lavapipe against its CPU reference (D31), and slice 3b: the golden images with their negative controls and the render Tier 2 tests (D32), with the unsafe rule at every crate root (D28), and FFmpeg 8.1.3: the build break Pat found on odin, two faults Tier 1 found against 8.1.3 and one its review found, and `cargo xtask compat`, which lints and links against other FFmpeg builds (D2). Milestone criteria are in `PLAN.md`;
+Updated 2026-10-28, with FFmpeg confined to the file Spherecut opened (D24), the CLI's JSON contract for probe and doctor (D27), odin's first hardware report, M1 slice 2a: `MediaBackend` with frame-exact seek in software, native pixel layouts and the colour defaults (D29, D30), slice 2b: hardware decoding through the backend, with fallback to software, the pooled download, the render node lookup and the Tier 2 seek tests (D30), slice 3a: the render core, checked on lavapipe against its CPU reference (D31), and slice 3b: the golden images with their negative controls and the render Tier 2 tests (D32), with the unsafe rule at every crate root (D28), and FFmpeg 8.1.3: the build break Pat found on odin, two faults Tier 1 found against 8.1.3 and one its review found, and `cargo xtask compat`, which lints and links against other FFmpeg builds (D2), and slice 4: `spherecut frame`, with the rest of the JSON contract (exit statuses 3 and 4, SIGINT, `--overwrite`), `TimeSpec` and `core::fs::TempFile` (D16, D27, D39). Milestone criteria are in `PLAN.md`;
 decisions and their reasons in `DECISIONS.md`.
 
 ## Status
@@ -8,7 +8,7 @@ decisions and their reasons in `DECISIONS.md`.
 | Milestone | State |
 |---|---|
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because RADV on Strix Halo has no Vulkan Video H.264 or HEVC decode. Evidence below |
-| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion stays unticked until `spherecut frame`, which it also covers, exists and has its strace test. The CLI's JSON contract for `probe` and `doctor` (D27, `docs/cli-json.md`) is the third; its criterion stays unticked until `frame` joins it, with exit statuses 3 and 4, SIGINT and `--overwrite`. Slice 2a is the fourth: `core::video` and `core::cancel`, `media::backend` with `FfmpegBackend` and the frame-exact seek of plan section 3.3 in software (D29), native pixel layouts, swscale for the rest and the colour default rules (D30), synth's new clips and its `SyntheticBackend` and `GatedBackend`. The seek oracle (`crates/synth/tests/seek.rs`) is exact on every clip of the set, among them clips whose timestamps tie or go backwards and variable-rate Matroska files with a constant default duration; it checks what each seek cost and every run link, and its negative controls miss. The slice's review found 16 faults (wrong frames returned as `Exact` after a cut, in broken timestamps and in variable-rate Matroska, false run links when catching up, a duration missing for Matroska, an index trusted before Cues are read); all are fixed, each with a test that fails without its fix where one can show it (D29, D30). Its second review found 10 more (an open-GOP H.264 leading picture and a RADL picture returned after a seek, seeks past an MP4 cut, an MP4 spliced by its edit list read as constant-rate, resuming after a stopped seek in tied and backwards streams, an FFmpeg log capture that lost its lines to another thread, a test that a change in load could fail, and an overflow on a far-off Cues entry); all are fixed too, with tests where one can show it (D29). Slice 2b is the fifth: `DecodeMode::Hardware` decodes through the backend on VA-API or Vulkan Video, on one device per kind per backend opened on the render node `media::hw` finds (bus id, then PCI ids, then `renderD128`; `--render-node` overrides it), single-threaded, with frames kept on the device until handed out and downloaded into a pool of 256-byte-aligned buffers. `Fallback::Software` opens in software when the device can't be opened or turns the stream down, and reopens in software when it fails mid-stream, going on from the frame after the last one returned with no gap and no repeat; `Fallback::Fail` returns the error. A device's refusal or failure is its own error (`HwUnsupported`, the new `HwFailed`), never the file's damage. Media's `fault-injection` feature, turned on only by synth's tests, fails any frame as the device would, and the Tier 1 fallback tests (`crates/synth/tests/fallback.rs`) fail every frame of H.264 and HEVC clips while seeking, catching up and playing; they also fall back on lavapipe and on a render node that isn't there. The Tier 2 tests the plan names are written and listed (`vaapi_seek_matches_software`, `vaapi_colorinfo_matches_software`, `vaapi_download_pool_reuses_buffers`, `bench_seek_latency`, and Vulkan Video versions of the first three), and here they skip with their reasons; their checks pass on software standing in for a device and fail on one that fails. The slice's review found 4 faults (a stream cropped on the left came off the device narrower than software's frame, or failed on its first download at 10 bits, since FFmpeg's aligned cropping keeps columns by the pixel format's own rule; the pool tests couldn't tell a pool from a fresh buffer per frame; a device that won't open was named `vaapi`, and the Vulkan device's log line named the node asked rather than the GPU taken); all are fixed, with tests where one can show it. Both paths now crop exactly as the stream says, and the Tier 2 seek and colour sets have clips cropped on the left (D30). Slice 2 is done once 2b merges; its hardware results come with H1. Slice 3a is the sixth: `spherecut-render` on wgpu 30.0.1 (Vulkan only) with `rust-version` 1.95 (D1): the device (`Gpu`, `AdapterChoice`, `GpuCaps`, `RenderError` with contract codes), canonical plane textures (deep planes through an integer scratch and an ingest pass into f16) with area mips capped near 64 px, GPU slots, the `Uploader` (`write_texture` or a staging belt, one submit per frame), the projection shader (every projection and morphs, the shader's own LOD, colour from `ColorInfo`), the encode pass, `render_still` and the f64 CPU reference (D31), with sphere's `pixel`, `orient`, `uv_gradient` and `project_morph` and testkit's `compare` and `fnv64`. On lavapipe `render_still` matches the reference at 49.6 to 59.0 dB through every projection and ten plane layouts at 8 to 12 bits, both ranges, three matrices and three sitings, and the mips match an independent area mean; negative controls tell level 0 from trilinear and one siting from another (`crates/render/tests/`). The slice's first review found 11 faults; all are fixed, each with a test that fails without its fix where one can show it: lavapipe truncates an f32 stored into an f16 target, so half the 10-bit codes ingested a half low (the shaders now round every f16 store to the nearest half themselves); an upload's GPU time left out the ingest; a stereo frame's other eye bled in across the shown eye's edges (only the shown eye is uploaded now); the chroma siting had no check that didn't share the renderer's own arithmetic, and 4:1:1's factor was wrong at small widths; readback failed past wgpu's 256 MiB buffer limit; a lost device panicked in wgpu's error handler (every entry point now returns `gpu_failed`); and D31, D22, ARCHITECTURE and a test comment said things that weren't so (the GUI's device path, the crate count, FFmpeg in render's tests, the belt branch a test covered). An odd-width 360° frame's chroma step at the seam is recorded as a limit (D31). Slice 3b is the seventh: the golden images (`crates/render/tests/goldens.rs`, D32). One test runs every row of plan section 6 on lavapipe from synth's in-memory planes: six views stored as PNGs that must come back pixel for pixel at the Mesa build they were blessed on, every view against the f64 reference at floors calibrated when blessing, and minified views against synth's new `render_view_ideal`, the supersampled pattern itself. Each row's negative control is asserted on every run: implicit derivatives give 175 to 288 bad pixels at the seam and the poles where the analytic LOD gives none, level 0 shimmers 3.3 to 5.0 times as much as the ideal, and a swapped range, matrix or siting misses by 22 LSB, 19.5 dB and 53 LSB. A manifest records each row's driver build, source hash, view, thresholds and measurements; a changed source is reported as one and never compared as a render; and blessing (`SPHERECUT_UPDATE_GOLDENS=1`) writes nothing unless every row passes and every control fails. The evidence changed four of the plan's rules: the ideal comparisons cover only pixels 2.5 levels down or more, where level 0 must alias (over a whole view isotropic trilinear is softer than the ideal, and level 0 nearer it); range and siting are asserted at 10 bits, with 8 bits recorded, since lavapipe filters 8-bit planes to whole codes; `passthrough_exact` holds limited range to an independent model of the chain, and to round((k − 16) · 255 / 219) except within the f16 store's 0.0547 codes of a tie (86, 159 and 165 come out one code off); and each pole is turned to lie inside a pixel quad, which pitch ±90 exactly doesn't do. The Tier 2 tests `list_adapters_and_features`, `goldens_on_gpu_match_reference`, `goldens_on_host_llvmpipe` and `bench_upload_5k7` are written, each with a Tier 1 run on lavapipe; here the first two and the bench skip with their reasons, and `goldens_on_host_llvmpipe` passes, lavapipe being this machine's llvmpipe. Every crate root now forbids `unsafe`, except media's and the `spherecut` binary's, which deny it and allow it only in their FFI modules (D28). The slice's review found 10 faults; all are fixed, each with a test that fails without its fix where one can show it: a matrix or siting swapped inside render's colour code passed `matrix_601_709` and `siting_left_center` and was blessed, since the CPU reference shares that code (both rows now have truths outside it: the two matrices' codings of one picture must render alike, and smooth 4:2:0 chroma must match its 4:4:4 self); a blessing could lower any calibrated floor (it now prints them old → new and refuses a drop of more than 0.5 dB unless told `SPHERECUT_UPDATE_GOLDENS=lower`); the blessing command exited 101 after a blessing that had written everything (the harness's own tests read `tests/goldens` while it was rewritten, and now bless into scratch directories); three manifest entries lacked their sources or views; the controls' "over" bounds passed at the bound; `bench_upload_5k7` couldn't see a block made and freed within a step, which is its second trigger (it reads the allocator in flight too, and also runs two steps in flight), and timed 5.7K NV12 on the copy a decoded frame doesn't take (its frames now have the pooled download's stride); a GPU named by `SPHERECUT_ADAPTER` that refused a device showed as skipped; `round_f16` had no test of the subnormal halves and stored the largest half where the nearest is infinite; and a test comment was stale (D31, D32, m1-plan amendment 11). No golden image changed. Slice 3 is done. On 2026-10-24 main stopped compiling against FFmpeg 8 (3a8047d's swscale flags; fixed in 67fa1fd), which odin's `hw-test` found and nothing here had checked: Tier 1 now runs against an 8.1.3 built like Pat's, where it found that on one thread, as hardware decoders run, FFmpeg 7.1 and later's HEVC decoder gave a frame from before a seek after it (fixed, with a test, D29); odin's second run (PR #4) failed both GPU seek tests on it, and the download pool tests on a fault limit that counted the driver's faults (m1-plan amendment 12). Its review found that from 8.0 a damaged HEVC reference picture lost the rest of its GOP without a `Damaged` event, and an exact seek into it returned an earlier frame as `Exact`, so slice 2a's "damage the decode goes on past is an event" didn't hold on Pat's FFmpeg (fixed, with a test; on 7.1.x such damage is still silent, D29). Tier 1 against a 7.1.3 found that FFmpeg 7.0 to 8.1.2 leave an audio stream whose decoder they couldn't open without channels, which probe took for "has no channels" rather than the decoder's refusal, so a feature FFmpeg lacks became damage (fixed, with a test, D2, D15). The review of that work found 10 more faults; all are fixed, each with a test that fails without its fix where one can show it: from 7.0 FFmpeg's H.264 decoder flags corrupt the frames decoded after a keyframe that isn't IDR, with no recovery point SEI, before it comes out, though their references are all there, and Spherecut took them for damage after a seek and dropped them (the oracle, which now fails any good clip that raises a `Damaged` event, has two such clips and a cut of one, D29); D13, D29 and this file said what FFmpeg's corrupt flag and its HEVC decoder do in ways that weren't so; probe made a PCM track with no channels damage even without samples (D15); a test gated what it expected on libavformat's version; `cargo xtask compat` deleted any directory without its stamp where a target went, the prefix itself when that directory was the prefixes' own, took a prefix whose `.pc` file led to another FFmpeg for found, and ran another pkg-config than the build does; and `build-ffmpeg.sh` said nothing of a step that failed (D2). Its second review found 7 more; 6 are fixed, each with a test that fails without its fix where one can show it, and one is a limit: such a stream with x264's default 3 reference frames never came out unflagged after a seek or at the start of a cut, so a cut played 2 of 32 frames and keyframe seeks went to the file's end (the I-frame decoding starts from is now taken as good, flagged or not, and the oracle has 3-reference clips and a cut, D29); a cut of the 1-B-frame clip cost a second seek after a keyframe seek (the keyframe a seek lands on now counts for the keyframes' lag); x264's intra refresh seeks only to where FFmpeg says decoding has recovered, which isn't always the decode from the start (a limit, D29); `build-ffmpeg.sh` left a half-installed prefix under its name; and compat checked libavcodec alone of the five libraries the build binds, let a target root with `..` build inside a prefix, and checked nothing once the build had run (D2). `cargo xtask compat` lints the workspace and links its tests against other FFmpeg builds (D2). No M1 criterion is ticked yet |
+| M1 Viewer | In progress. `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion is ticked since slice 4 gave `spherecut frame` its strace test. The CLI's JSON contract for `probe` and `doctor` (D27, `docs/cli-json.md`) is the third; its criterion is ticked since slice 4 brought `frame` into it, with exit statuses 3 and 4, SIGINT and `--overwrite` (evidence under "M1 criteria ticked", below). Slice 2a is the fourth: `core::video` and `core::cancel`, `media::backend` with `FfmpegBackend` and the frame-exact seek of plan section 3.3 in software (D29), native pixel layouts, swscale for the rest and the colour default rules (D30), synth's new clips and its `SyntheticBackend` and `GatedBackend`. The seek oracle (`crates/synth/tests/seek.rs`) is exact on every clip of the set, among them clips whose timestamps tie or go backwards and variable-rate Matroska files with a constant default duration; it checks what each seek cost and every run link, and its negative controls miss. The slice's review found 16 faults (wrong frames returned as `Exact` after a cut, in broken timestamps and in variable-rate Matroska, false run links when catching up, a duration missing for Matroska, an index trusted before Cues are read); all are fixed, each with a test that fails without its fix where one can show it (D29, D30). Its second review found 10 more (an open-GOP H.264 leading picture and a RADL picture returned after a seek, seeks past an MP4 cut, an MP4 spliced by its edit list read as constant-rate, resuming after a stopped seek in tied and backwards streams, an FFmpeg log capture that lost its lines to another thread, a test that a change in load could fail, and an overflow on a far-off Cues entry); all are fixed too, with tests where one can show it (D29). Slice 2b is the fifth: `DecodeMode::Hardware` decodes through the backend on VA-API or Vulkan Video, on one device per kind per backend opened on the render node `media::hw` finds (bus id, then PCI ids, then `renderD128`; `--render-node` overrides it), single-threaded, with frames kept on the device until handed out and downloaded into a pool of 256-byte-aligned buffers. `Fallback::Software` opens in software when the device can't be opened or turns the stream down, and reopens in software when it fails mid-stream, going on from the frame after the last one returned with no gap and no repeat; `Fallback::Fail` returns the error. A device's refusal or failure is its own error (`HwUnsupported`, the new `HwFailed`), never the file's damage. Media's `fault-injection` feature, turned on only by synth's tests, fails any frame as the device would, and the Tier 1 fallback tests (`crates/synth/tests/fallback.rs`) fail every frame of H.264 and HEVC clips while seeking, catching up and playing; they also fall back on lavapipe and on a render node that isn't there. The Tier 2 tests the plan names are written and listed (`vaapi_seek_matches_software`, `vaapi_colorinfo_matches_software`, `vaapi_download_pool_reuses_buffers`, `bench_seek_latency`, and Vulkan Video versions of the first three), and here they skip with their reasons; their checks pass on software standing in for a device and fail on one that fails. The slice's review found 4 faults (a stream cropped on the left came off the device narrower than software's frame, or failed on its first download at 10 bits, since FFmpeg's aligned cropping keeps columns by the pixel format's own rule; the pool tests couldn't tell a pool from a fresh buffer per frame; a device that won't open was named `vaapi`, and the Vulkan device's log line named the node asked rather than the GPU taken); all are fixed, with tests where one can show it. Both paths now crop exactly as the stream says, and the Tier 2 seek and colour sets have clips cropped on the left (D30). Slice 2 is done once 2b merges; its hardware results come with H1. Slice 3a is the sixth: `spherecut-render` on wgpu 30.0.1 (Vulkan only) with `rust-version` 1.95 (D1): the device (`Gpu`, `AdapterChoice`, `GpuCaps`, `RenderError` with contract codes), canonical plane textures (deep planes through an integer scratch and an ingest pass into f16) with area mips capped near 64 px, GPU slots, the `Uploader` (`write_texture` or a staging belt, one submit per frame), the projection shader (every projection and morphs, the shader's own LOD, colour from `ColorInfo`), the encode pass, `render_still` and the f64 CPU reference (D31), with sphere's `pixel`, `orient`, `uv_gradient` and `project_morph` and testkit's `compare` and `fnv64`. On lavapipe `render_still` matches the reference at 49.6 to 59.0 dB through every projection and ten plane layouts at 8 to 12 bits, both ranges, three matrices and three sitings, and the mips match an independent area mean; negative controls tell level 0 from trilinear and one siting from another (`crates/render/tests/`). The slice's first review found 11 faults; all are fixed, each with a test that fails without its fix where one can show it: lavapipe truncates an f32 stored into an f16 target, so half the 10-bit codes ingested a half low (the shaders now round every f16 store to the nearest half themselves); an upload's GPU time left out the ingest; a stereo frame's other eye bled in across the shown eye's edges (only the shown eye is uploaded now); the chroma siting had no check that didn't share the renderer's own arithmetic, and 4:1:1's factor was wrong at small widths; readback failed past wgpu's 256 MiB buffer limit; a lost device panicked in wgpu's error handler (every entry point now returns `gpu_failed`); and D31, D22, ARCHITECTURE and a test comment said things that weren't so (the GUI's device path, the crate count, FFmpeg in render's tests, the belt branch a test covered). An odd-width 360° frame's chroma step at the seam is recorded as a limit (D31). Slice 3b is the seventh: the golden images (`crates/render/tests/goldens.rs`, D32). One test runs every row of plan section 6 on lavapipe from synth's in-memory planes: six views stored as PNGs that must come back pixel for pixel at the Mesa build they were blessed on, every view against the f64 reference at floors calibrated when blessing, and minified views against synth's new `render_view_ideal`, the supersampled pattern itself. Each row's negative control is asserted on every run: implicit derivatives give 175 to 288 bad pixels at the seam and the poles where the analytic LOD gives none, level 0 shimmers 3.3 to 5.0 times as much as the ideal, and a swapped range, matrix or siting misses by 22 LSB, 19.5 dB and 53 LSB. A manifest records each row's driver build, source hash, view, thresholds and measurements; a changed source is reported as one and never compared as a render; and blessing (`SPHERECUT_UPDATE_GOLDENS=1`) writes nothing unless every row passes and every control fails. The evidence changed four of the plan's rules: the ideal comparisons cover only pixels 2.5 levels down or more, where level 0 must alias (over a whole view isotropic trilinear is softer than the ideal, and level 0 nearer it); range and siting are asserted at 10 bits, with 8 bits recorded, since lavapipe filters 8-bit planes to whole codes; `passthrough_exact` holds limited range to an independent model of the chain, and to round((k − 16) · 255 / 219) except within the f16 store's 0.0547 codes of a tie (86, 159 and 165 come out one code off); and each pole is turned to lie inside a pixel quad, which pitch ±90 exactly doesn't do. The Tier 2 tests `list_adapters_and_features`, `goldens_on_gpu_match_reference`, `goldens_on_host_llvmpipe` and `bench_upload_5k7` are written, each with a Tier 1 run on lavapipe; here the first two and the bench skip with their reasons, and `goldens_on_host_llvmpipe` passes, lavapipe being this machine's llvmpipe. Every crate root now forbids `unsafe`, except media's and the `spherecut` binary's, which deny it and allow it only in their FFI modules (D28). The slice's review found 10 faults; all are fixed, each with a test that fails without its fix where one can show it: a matrix or siting swapped inside render's colour code passed `matrix_601_709` and `siting_left_center` and was blessed, since the CPU reference shares that code (both rows now have truths outside it: the two matrices' codings of one picture must render alike, and smooth 4:2:0 chroma must match its 4:4:4 self); a blessing could lower any calibrated floor (it now prints them old → new and refuses a drop of more than 0.5 dB unless told `SPHERECUT_UPDATE_GOLDENS=lower`); the blessing command exited 101 after a blessing that had written everything (the harness's own tests read `tests/goldens` while it was rewritten, and now bless into scratch directories); three manifest entries lacked their sources or views; the controls' "over" bounds passed at the bound; `bench_upload_5k7` couldn't see a block made and freed within a step, which is its second trigger (it reads the allocator in flight too, and also runs two steps in flight), and timed 5.7K NV12 on the copy a decoded frame doesn't take (its frames now have the pooled download's stride); a GPU named by `SPHERECUT_ADAPTER` that refused a device showed as skipped; `round_f16` had no test of the subnormal halves and stored the largest half where the nearest is infinite; and a test comment was stale (D31, D32, m1-plan amendment 11). No golden image changed. Slice 3 is done. On 2026-10-24 main stopped compiling against FFmpeg 8 (3a8047d's swscale flags; fixed in 67fa1fd), which odin's `hw-test` found and nothing here had checked: Tier 1 now runs against an 8.1.3 built like Pat's, where it found that on one thread, as hardware decoders run, FFmpeg 7.1 and later's HEVC decoder gave a frame from before a seek after it (fixed, with a test, D29); odin's second run (PR #4) failed both GPU seek tests on it, and the download pool tests on a fault limit that counted the driver's faults (m1-plan amendment 12). Its review found that from 8.0 a damaged HEVC reference picture lost the rest of its GOP without a `Damaged` event, and an exact seek into it returned an earlier frame as `Exact`, so slice 2a's "damage the decode goes on past is an event" didn't hold on Pat's FFmpeg (fixed, with a test; on 7.1.x such damage is still silent, D29). Tier 1 against a 7.1.3 found that FFmpeg 7.0 to 8.1.2 leave an audio stream whose decoder they couldn't open without channels, which probe took for "has no channels" rather than the decoder's refusal, so a feature FFmpeg lacks became damage (fixed, with a test, D2, D15). `cargo xtask compat` lints the workspace and links its tests against other FFmpeg builds (D2). The review of that work found 10 more faults; all are fixed, each with a test that fails without its fix where one can show it: from 7.0 FFmpeg's H.264 decoder flags corrupt the frames decoded after a keyframe that isn't IDR, with no recovery point SEI, before it comes out, though their references are all there, and Spherecut took them for damage after a seek and dropped them (the oracle, which now fails any good clip that raises a `Damaged` event, has two such clips and a cut of one, D29); D13, D29 and this file said what FFmpeg's corrupt flag and its HEVC decoder do in ways that weren't so; probe made a PCM track with no channels damage even without samples (D15); a test gated what it expected on libavformat's version; `cargo xtask compat` deleted any directory without its stamp where a target went, the prefix itself when that directory was the prefixes' own, took a prefix whose `.pc` file led to another FFmpeg for found, and ran another pkg-config than the build does; and `build-ffmpeg.sh` said nothing of a step that failed (D2). Its second review found 7 more; 6 are fixed, each with a test that fails without its fix where one can show it, and one is a limit: such a stream with x264's default 3 reference frames never came out unflagged after a seek or at the start of a cut, so a cut played 2 of 32 frames and keyframe seeks went to the file's end (the I-frame decoding starts from is now taken as good, flagged or not, and the oracle has 3-reference clips and a cut, D29); a cut of the 1-B-frame clip cost a second seek after a keyframe seek (the keyframe a seek lands on now counts for the keyframes' lag); x264's intra refresh seeks only to where FFmpeg says decoding has recovered, which isn't always the decode from the start (a limit, D29); `build-ffmpeg.sh` left a half-installed prefix under its name; and compat checked libavcodec alone of the five libraries the build binds, let a target root with `..` build inside a prefix, and checked nothing once the build had run (D2). `cargo xtask compat` lints the workspace and links its tests against other FFmpeg builds (D2). Slice 4 is the eighth: `spherecut frame` (`crates/cli/src/frame.rs`) with every flag of plan section 5 and `--decoder vulkan`, on the JSON contract as `spherecut.frame/1` with exit statuses 3 and 4 (D27, `docs/cli-json.md`); `core::TimeSpec`, the exact `--time` grammar, with its proptest; `core::fs::TempFile`, moved from `inject`, with `persist_new` (a hard link, which fails with EEXIST whatever turned up at the output, or an exclusive create and a copy where links are refused) beside D16's `persist_replace`; and `cli::interrupt`, the binary's one FFI module, whose SIGINT handler (`SA_RESETHAND | SA_RESTART`) only stores to an atomic that the main thread polls every 10 ms while a worker thread does the work (D28). `--decoder auto` decodes with VA-API on the render node of the GPU that renders and falls back to software, saying why in the result (D39). On lavapipe the Euler table's centre pixels are F (255, 1, 0), R (0, 255, 1), B (1, 0, 255) and L (254, 255, 0), and at the poles the neutral greys 184 (U) and 72 (D) that the f64 reference gives too, since isotropic filtering at the pole blends the marker disc with the grid round it (D32); `--roll 90` keeps F at the centre and puts U on the view's left (amendment 10), shown in a 200° fisheye. The frame code read back through a 360° fisheye is the frame `--time` and `--frame` ask for on a constant-rate MP4 and on its Matroska remux at 1/1000, and `--frame` counts frames on a variable-rate clip. Every error row of the exit table leaves no output and no temporary file; an existing output, a link or a dangling link is never replaced without `--overwrite`, and a file created between the check and the publish is kept (`output_exists`). Ctrl+C 300 ms into a 600-frame exact seek on `long-gop` ends the run about 25 ms later with exit 4 and `cancelled`. The pipeline goldens (D32) store four PNGs, identical here at the build they were blessed on, that `frame --reference` matches at 50.2 to 90.0 dB, and the swscale cross-check is within 1 LSB of swscale and 0.51 to 0.60 LSB of the exact conversion at BT.601 and BT.709, both ranges and both depths, where a swapped matrix or range misses by 18 to 30 LSB. strace shows no IP socket for `frame`. The Tier 2 `vaapi_render_matches_software` and `vulkan_render_matches_software` are written and listed by hw-test, and skip here with their reasons; the same check passes on lavapipe with software standing in for the device and fails on the next frame. Two M1 criteria are ticked: FFmpeg's confinement and the JSON contract. The slice's review found 18 faults; all are fixed or corrected in the docs, each with a test that fails without its fix where one can show it: a frame past a Matroska cut was rendered as the frame asked for (the decoder now finds a Matroska cut from the Segment's size, D13, and `--frame N` on a constant-rate stream checks that the frame shown is N); `--frame N` past a cut on a variable-rate clip failed `decode_failed` rather than by its cause; a Matroska equirect was refused as having no spherical metadata (frame now says it doesn't read Matroska's yet); `--time` and `--frame` values past what the time base holds failed `decode_failed`; negative values got clap's tip; `-o dir/` was refused only after the render; the SIGINT handler replaced an inherited `SIG_IGN` and was installed after the temporary file was made; the Vulkan Tier 2 test skipped on a broken device, passed with clips left out and lacked FFmpeg's words, and no Tier 2 run tried `--decoder auto`; and the tests couldn't tell `--reference` rendering on a GPU, or a crop's sides swapped. The docs' Ctrl+C, output, timing and field lists are corrected, and that lavapipe's `aniso` renders as `iso` is recorded (D13, D16, D27, D39). No golden image changed |
 | M2–M9 | Not started |
 | Agent integration (track A) | Planned 2026-10-24 at Pat's request (`PLAN.md` track A, DECISIONS D23). The CLI's JSON contract and FFmpeg's confinement are M1 criteria; the confinement is in (D24), and so is the contract for probe and doctor (D27); A1, the MCP server, follows M1's code |
 
@@ -26,12 +26,14 @@ decisions and their reasons in `DECISIONS.md`.
 | Network | crates.io, GitHub and Ubuntu apt reachable through a proxy; ffmpeg.org blocked (recorded at setup) |
 
 Here Tier 1 runs fully. `SPHERECUT_TIER2=1 cargo test --workspace
---no-fail-fast -- --ignored` runs the 23 Tier 2 tests.
+--no-fail-fast -- --ignored` runs the 25 Tier 2 tests.
 `goldens_on_host_llvmpipe` passes, since lavapipe is this machine's
 llvmpipe, and the others skip: those that need VA-API with "no DRM
 render node at /dev/dri/renderD128", the Vulkan Video ones with "no GPU
 for Vulkan Video: FFmpeg's Vulkan device is llvmpipe …", the render ones
-that need a GPU with "no GPU: Vulkan lists only llvmpipe …", and,
+that need a GPU with "no GPU: Vulkan lists only llvmpipe …",
+`vulkan_render_matches_software` with "the only adapter is a CPU:
+"llvmpipe (LLVM 20.1.2, 256 bits)"", and,
 without `SPHERECUT_SAMPLES`, the samples tests with "samples directory
 samples not found". A skip counts as a failed test to cargo, so
 the command exits non-zero, and without `--no-fail-fast` cargo stops after
@@ -115,8 +117,8 @@ back clean, so M0 is done.
 
 ## Resumed 2026-10-28
 
-- `m1/frame` (slice 4, `spherecut frame`) is being finished on its
-  branch: docs, checks, then the slice's review, verify and fix.
+- `m1/frame` (slice 4, `spherecut frame`) is finished, reviewed and
+  merged.
 - `m1/compat-fixes` is merged: the second review of the FFmpeg 8.1.3
   work found that good H.264 without recovery-point SEI raised `Damaged`
   after seeks on FFmpeg 7.1 and later (its corrupt flag comes from
@@ -124,10 +126,31 @@ back clean, so M0 is done.
   3 references could seek to the wrong keyframe; that a zero-channel PCM
   stream became damage instead of a warning; and that `cargo xtask
   compat` could delete a directory it hadn't made and report a pass
-  against the system FFmpeg. All are fixed with tests, and a third
-  review checked the fixes (D2, D13, D15, D29). An x264 intra-refresh
+  against the system FFmpeg. All are fixed with tests (D2, D13, D15, D29). An x264 intra-refresh
   stream still seeks only to the frame FFmpeg calls recovered (D29's
   Limits).
+## M1 criteria ticked
+
+Ticked in `PLAN.md` with slice 4, whose acceptance (m1-plan section 14)
+meets them in full. Neither depends on a GPU or a hardware decoder: both
+are about what FFmpeg may open and what the CLI prints.
+
+| Criterion (`PLAN.md` M1) | Evidence |
+|---|---|
+| FFmpeg opens only the file Spherecut opened | Slice 1 (D24): `ffi::confine` (our own AVIO, the `io_open` refusal, the demuxer allow-list, `protocol_whitelist`, `format_whitelist`, `max_pixels`) under probe, the decoders and doctor; the root `clippy.toml`'s `std::net` ban; `crates/cli/tests/confinement.rs` (the HLS playlist naming a file outside its folder, ffconcat, an `http://` segment and the path `http://127.0.0.1:1/x.mp4` refused with the reason, files named like protocols read as files); probe refusing other containers by name (the `lrc` test in `probe.rs`, the README, D15); strace a prerequisite of `cargo xtask check`. Slice 4 adds `frame_opens_no_network_socket`: `spherecut frame clip.mp4 --adapter cpu -o out.png` under `strace -f` opens no `AF_INET` or `AF_INET6` socket and connects only to Unix sockets, next to `probe_opens_no_network_socket_and_no_listed_file` |
+| The CLI's JSON contract (probe, doctor, frame) | `crates/cli/tests/contract.rs`: one compact document per run on success and failure, a panic and a usage error included (`a_panic_is_one_internal_document_and_exit_1`, `usage_errors_under_json_are_a_document_and_exit_2`, `stdout_carries_only_the_document_whatever_the_log_says`); schema and version in `schema`, `ok`, stable codes listed literally and documented (`every_code_is_listed_and_stable`, `the_document_describes_every_code_schema_and_status`); one shape for one file or many; times as `{exact, seconds}` plus `frame` (`times_and_rationals_read_back_exactly`, and frame's result in `frame_documents_have_the_envelope_too`); exit statuses 0, 1 and 2 for probe and doctor (doctor's errors exit 1), and 0 to 4 for frame: `frame_exits_0_to_3_with_one_document_each` (no Vulkan driver through `VK_DRIVER_FILES`, `--decoder vaapi --render-node /nonexistent`) and `sigint_during_a_seek_cancels_with_exit_4`; `only_frame_handles_sigint` (probe and doctor keep the default action) and `an_ignored_sigint_stays_ignored` (an inherited `SIG_IGN` is kept). `--overwrite`: `an_existing_output_is_kept_unless_overwrite` and `a_race_for_the_output_is_lost_without_replacing` in `frame.rs`, and core's `persist_new` tests |
+
+## odin's third run and slice 4's checks
+
+Checks of `m1/frame` on 2026-10-28, on code unchanged since ff97714 (the
+merge of main; only docs changed after it): `cargo xtask check` passed
+three times, the last two in a row on the branch's last commit;
+`TimeSpec`'s proptests passed at `PROPTEST_CASES=100000` (2 s); `cargo
++1.95 build --workspace --all-targets` built with no warning (3 min 38
+s); and `cargo xtask compat` passed clippy and the link against FFmpeg
+8.1.3 (libavcodec 62.28.103, as Pat's) and 9.0.2, and Tier 1 against
+8.1.3, the new frame tests included (8 min 12 s). `cargo xtask hw-test`
+lists the two new Tier 2 tests.
 
 odin's third run (PR #5, `hw-reports/odin-be38fa409e.md`, at be38fa4):
 21 of 23 Tier 2 tests pass, including all four that failed in PR #4. Two
@@ -169,21 +192,69 @@ golden tests fail, and the fixes are next:
   that give its size, except one whose frames say more than its
   container and whose size FFmpeg takes from the container (MJPEG, for
   one): that fails while decoding, as FFmpeg decides.
-  `spherecut frame` has no strace test yet, because it doesn't exist.
 - The backend's hardware path has run here only on lavapipe, which
   decodes nothing, and on a software stand-in for the device (media's
   `fault-injection`). Its Tier 2 tests are written and skip here; H1 is
   their first run on a GPU. Every audio open is still
   `not_implemented` (slice 6).
-- A fallback to software is said only by a `tracing::warn!`, the
-  `FellBack` event and each frame's `DecodePath`. The overlay's decoder
-  line and badge, the GUI notice with doctor's fix and `frame`'s stderr
-  note and JSON warning come with the overlay, the GUI and `frame` (D30).
-- Nothing yet picks between VA-API and Vulkan Video: a caller asks for a
-  kind. Slice 5 picks it from doctor's checks (m1-plan amendment 9).
-- The render node lookup doesn't ask wgpu's adapter for its GPU yet
-  (Next), so it gives `/dev/dri/renderD128` unless `--render-node` names
-  another.
+- A fallback to software is said by a `tracing::warn!`, the `FellBack`
+  event and each frame's `DecodePath`, and in `spherecut frame` by its
+  result's `decode.fallback` and its text line, not as one of its
+  `warnings` (D39). The overlay's decoder line and badge and the GUI
+  notice with doctor's fix come with the overlay and the GUI (D30).
+- `spherecut frame --decoder auto` tries VA-API and never Vulkan Video
+  (D39); elsewhere a caller asks for a kind. Slice 5 picks it from
+  doctor's checks (m1-plan amendment 9), and `auto` should follow.
+- Only `spherecut frame` asks wgpu's adapter for its GPU's render node
+  (D30's lookup by bus id, then PCI ids). doctor has no adapter yet, so
+  it tests `/dev/dri/renderD128` unless `--render-node` names another; on
+  a machine with two GPUs the two can differ.
+- `spherecut frame` here: every run renders on lavapipe or the CPU
+  reference and decodes in software (`auto` with no render node), so
+  `hw_unsupported` and `hw_failed` as errors, `auto`'s fallback after a
+  device refused or failed, and `anisotropy_unavailable` (lavapipe has
+  anisotropic filtering) have no Tier 1 test; the Tier 2
+  `vaapi_render_matches_software` and `vulkan_render_matches_software`
+  are written and skip here, and H1 is their first run. They hold the
+  hardware decode to software, and `auto` to VA-API on the node found
+  from the rendering adapter's ids (D39), but they expect the device to
+  decode, so `auto`'s fallback after a device refusal or failure and
+  `anisotropy_unavailable` have no test of frame's in any tier yet.
+  lavapipe's `--filter aniso` renders byte for byte what `iso` does
+  (Mesa 25.2.8, on views that squeeze the source), so there the
+  result's `"aniso"` changes nothing and nothing tells the two apart
+  (D27, Next). The first Ctrl+C stops a seek or a read at once, but
+  probe, the GPU's set-up, the render and the PNG's encode take no stop
+  token, so during them it takes effect when the step ends, seconds
+  later at a large `--size`. A frame started with SIGINT ignored keeps
+  it ignored. The race test
+  stages the file that appears at the output with a debug-only switch,
+  `SPHERECUT_DEBUG_FRAME_RACE`; `persist_new`'s copy fallback is tested
+  through a hook that refuses the link, since no filesystem here lacks
+  hard links. A second Ctrl+C kills the run at once and may leave its
+  `.spherecut-….tmp` beside the output. `-o /dev/null` and other
+  non-files are refused (D16). The Euler table's pole rows can't be
+  white and black at the centre pixel: there isotropic filtering at the
+  analytic LOD blends the marker disc with the grid to grey (184 and 72
+  here, as the f64 reference gives), so they assert a neutral centre and
+  `the_markers_round_a_fisheye_turn_with_the_camera` checks the markers
+  round the poles (D32). `--frame N` on a variable-rate stream decodes
+  every frame from the first, so it slows the further in N is.
+  `sigint_during_a_seek_cancels_with_exit_4` doubles `long-gop` to 1200
+  frames when a 600-frame seek takes under 600 ms, which costs it about
+  10 s more; here that is common, not the exception (the seek took
+  0.6 to 0.8 s in slice 4's review, and the test 7.2 to 19.5 s).
+- Matroska/WebM: frame refuses every Matroska file as `not_equirect`
+  unless `--equirect` is given, since Spherecut doesn't read Matroska's
+  spherical metadata (Spherical Video V2's `Projection` element) yet;
+  probe doesn't report it either. A cut is found from the Segment's
+  size (D13), so a Matroska file whose Segment's size is unknown (a live
+  recording) that is cut isn't seen as cut: a `--time` past its end
+  renders the last frame, as for an uncut file; `--frame N` there is
+  checked against the constant rate and refused. Near a cut, frame
+  also refuses a few frames the file still holds: frames the decoder
+  drains after the failed read may follow frames the cut lost, so a
+  seek whose next frame is one of them is `truncated` (D29).
 - `vaapi_download_pool_reuses_buffers` and its Vulkan twin check the
   pool by the buffers it allocates, none after the warm-up, and report
   the decoding thread's minor faults per frame without a limit: on
@@ -261,6 +332,24 @@ golden tests fail, and the fixes are next:
   little can walk it down; the manifest's diff shows each step. The CPU
   comparison shares render's colour fold, so the colour rows' other
   truths and `color.rs`'s unit tests are what check the fold itself.
+- Slice 4 adds about 28 s to a warm `cargo xtask check` here, the sum
+  of what its tests take (76.4 s for the whole check at ff97714, before
+  its review, without cargo-deny and cargo-audit). Its two new test
+  binaries take 13.8 s (`frame.rs`, of which
+  `a_frame_lost_to_a_cut_is_never_shown_in_its_place` is 7.2 s alone,
+  most of it encoding its 150-frame clip, `every_failure_leaves_nothing_behind`
+  4.9 s and `pipeline_goldens` 4.2 s) and 2.6 s (`tier2_frame.rs`'s
+  Tier 1 stand-in), and `contract.rs` goes from 1.4 s without its frame
+  tests to 12 to 17 s with them, nearly all of it
+  `sigint_during_a_seek_cancels_with_exit_4`, which doubles `long-gop`
+  more often than not here (above): it took 7.2 s when it didn't and
+  15.0 to 19.5 s when it did in the review, and the binary 12.6 s in
+  the last run; `an_ignored_sigint_stays_ignored` runs beside it. The
+  strace test for frame and core's new unit tests run beside the others
+  in their binaries and add under 0.2 s. The slices' numbers below were
+  measured on other days, and this box's timings vary by up to a third
+  between runs (render's `goldens.rs` took 10.5 s in this check against
+  7.2 to 7.4 s in slice 3b's).
 - Slice 3b adds about 8 s to a warm `cargo xtask check` (42.2 s against
   34.3 s at 09342c6, both without cargo-deny and cargo-audit): the
   goldens' test binary takes 7.0 s on lavapipe, `goldens` itself 6.9 s
@@ -298,16 +387,29 @@ golden tests fail, and the fixes are next:
   FFmpeg 7.1 to 9.0 have not been checked for the bug.
 - swscale's conversion is tested end to end only for UYVY and RGB24, the
   formats a raw MOV carries; the others by format (D30).
+- x265 (3.5 here, and its master) leaves the dts of the frames within
+  its B-frame delay undefined when a clip ends inside that delay: one
+  frame, or two with a B-pyramid, gets its pts minus whatever x265's
+  heap held. FFmpeg 6.1's mov muxer writes it; 8.1.3's refused it in
+  about half of the runs of `pipeline_goldens` against 8.1.3 in slice
+  4's review ("pts/dts pair unsupported", `AVERROR_PATCHWELCOME`), in
+  its one-frame lossless clips. synth now writes HEVC clips of at most
+  `X265_BFRAME_DELAY` (2) frames, and frame's tests their one-picture
+  clip, without B-frames (`writers.rs`
+  `hevc_clips_within_x265s_bframe_delay_have_no_b_frames`); the
+  pictures, and so the goldens, are the same. gen-media's
+  `hifreq-hevc-lossless` and `seam-hevc-lossless` (two frames) change
+  bytes but not pixels.
 - synth's clips are tagged centre-sited chroma, which is what their
   4:2:0 is, so probe's JSON says `center` for them, `gen-media`'s set
   included.
-- `crates/cli/tests/confinement.rs` leaves its `confinement-<pid>-strace`
-  directory in the target's `tmp` after each run.
 - `VideoDecoder` copies hardware frames to system memory. Zero-copy
   (VA-API to DMA-BUF to wgpu) is proved in M1, and whether it becomes the
   default is decided before M3 (D25).
-- `VideoDecoder` doesn't detect Matroska cuts or most fragmented-MP4 cuts,
-  and `probe` checks Matroska only against its Segment length (D13, D15).
+- `VideoDecoder` finds a Matroska cut by the Segment's size, as `probe`
+  does, but not a cut in a Matroska file whose Segment's size is unknown
+  (a live recording), nor a fragmented MP4 cut between fragments, which
+  reads as a shorter file (D13, D15).
 - Without decoding, `probe` can't find damage inside `mdat`, or damage in
   `moov` that keeps the structure consistent, such as changed sample
   sizes or times (`stts`, `ctts`, `elst`), chunk offsets that still point
@@ -424,18 +526,30 @@ golden tests fail, and the fixes are next:
 
 ## Next
 
-1. wgpu's adapter gives the render node lookup its GPU; `spherecut
-   frame` on the CLI's JSON contract (D27; with exit statuses 3 and 4,
-   SIGINT and `--overwrite`), its strace test and the pipeline goldens
-   through real lossless clips (plan section 6), with cli's `interrupt`
-   module as its one `unsafe` exception (D28); worker threads and the
-   frame cache, audio, then the eframe GUI, which hands eframe render's
-   own device through egui-wgpu's `WgpuSetup::Existing` rather than the
-   plan's `CreateNew`, so that slice 5b's Vulkan Video device reaches the
-   viewer (D31). H1, after slice 5, runs slice 2b's and 3b's Tier 2 tests
+1. Slice 4's merge, once its review's fixes (18 findings, on
+   `m1/frame`) are checked, and `m1/compat-fixes`' checks and review; the golden fixes odin's third
+   run calls for (above); then worker threads and the frame cache (slice
+   5), audio, then the eframe GUI, which hands eframe render's own device
+   through egui-wgpu's `WgpuSetup::Existing` rather than the plan's
+   `CreateNew`, so that slice 5b's Vulkan Video device reaches the viewer
+   (D31). H1, after slice 5, runs slice 2b's, 3b's and 4's Tier 2 tests
    on huginn and odin: `bench_upload_5k7` decides whether the staging
-   belt replaces `write_texture`, and `goldens_on_gpu_match_reference`
-   whether the golden floors need a GPU's own entries (D32).
+   belt replaces `write_texture`, `goldens_on_gpu_match_reference`
+   whether the golden floors need a GPU's own entries (D32), and
+   `vaapi_render_matches_software` and `vulkan_render_matches_software`
+   hold `spherecut frame`'s hardware decode to its software decode, and
+   `--decoder auto` to VA-API on the node found from the rendering
+   adapter (D39). Still with no test in any tier, for H1 or later:
+   `auto`'s fallback after a device that turns a stream down or fails
+   on a frame, `anisotropy_unavailable`, and whether `--filter aniso`
+   does anything: a Tier 2 check on RADV or ANV that a grazing view
+   with `aniso` differs from `iso`, or is closer to `render_view_ideal`,
+   belongs with render's Tier 2 at H1 or the GUI's slice (slice 7),
+   since lavapipe's `aniso` renders as `iso` does (D27). Reading
+   Matroska's spherical metadata (Spherical Video V2's `Projection`
+   element, which FFmpeg gives as side data) in probe, so that frame
+   takes a tagged Matroska equirect without `--equirect`, waits for a
+   slice that needs Matroska sources.
 2. The Insta360 trailer reader (metadata, calibration, IMU), needed from M2.
 3. Agent integration A1 (the MCP server) once M1's code is in, while
    M1's hardware report is pending (Pat chose this order on 2026-10-24).
@@ -453,6 +567,9 @@ SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens   # ble
 SPHERECUT_UPDATE_GOLDENS=lower cargo test -p spherecut-render --test goldens   # bless, letting floors drop by more than 0.5 dB (D32)
 cargo run -p spherecut-cli -- probe <file>... [--json]   # --json: one document, docs/cli-json.md
 cargo run -p spherecut-cli -- doctor [--json]
+cargo run -p spherecut-cli -- frame <file> -o out.png [--time 12.5 | --frame 370] [--yaw 30 --pitch -10 --roll 0] [--fov 90] [--json]   # README, "Rendering a frame"
+cargo test -p spherecut-cli --test frame   # frame end to end, with the pipeline goldens (D32)
+SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame pipeline_goldens   # bless the pipeline goldens
 cargo xtask hw-test               # on a real machine; report in hw-reports/
 scripts/build-ffmpeg.sh n8.1.3 ~/ffmpeg   # an FFmpeg release from its tag into ~/ffmpeg/n8.1.3-full (about 4 min on 4 CPUs)
 cargo xtask compat ~/ffmpeg/n7.1.3-full ~/ffmpeg/n8.1.3-full --test ~/ffmpeg/n8.1.3-full   # clippy and a link against each (about 3 min and 1.4 GB a prefix on 4 CPUs), Tier 1 against one (D2); targets are spherecut-compat-<label> in $SPHERECUT_FFMPEG_COMPAT_TARGET_DIR or target/compat/, and --clean deletes them after

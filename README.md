@@ -26,6 +26,11 @@ What works today is the `spherecut` command line tool:
   frame with each VA-API encoder, and lists the Vulkan devices. For each
   problem it prints a fix: the exact `dnf` or `pacman` command where a
   package fixes it.
+- `spherecut frame <file> -o out.png` renders one frame of a stitched
+  equirect through a virtual camera (yaw, pitch, roll, field of view,
+  rectilinear, fisheye or stereographic, and a morph between two) into a
+  PNG, headless, on the GPU's Vulkan driver or Mesa's lavapipe. The frame
+  is exactly the one asked for, by time or by number.
 
 See `PLAN.md` for the milestones and `PROGRESS.md` for where things stand.
 The plan also has agent integration: an MCP server and JSON output so that
@@ -91,6 +96,7 @@ cargo build --release
 ./target/release/spherecut doctor
 ./target/release/spherecut probe VID_20261022_165451_00_004.insv
 ./target/release/spherecut probe --json clip.mp4
+./target/release/spherecut frame clip.mp4 -o out.png --time 12.5 --yaw 30 --fov 90
 ```
 
 `spherecut probe` exits 0 when every file is healthy, 1 when any file
@@ -174,7 +180,8 @@ files, so the exit code and the errors on stderr cover every file.
 `spherecut doctor [--render-node <PATH>] [--json]` checks the GPU behind
 the render node hardware decoding uses, which is `/dev/dri/renderD128`
 until the GUI knows the GPU it renders on (D30), or the one
-`--render-node` names. It exits 1 only when a problem is an error: FFmpeg has no H.264, HEVC, ProRes or AAC
+`--render-node` names. (`spherecut frame` decodes on the node of the GPU
+it renders on, D39.) It exits 1 only when a problem is an error: FFmpeg has no H.264, HEVC, ProRes or AAC
 decoder, or nothing decodes AV1. Every decoder and encoder in doctor's
 tables that FFmpeg lacks gets a problem that names it, such as `FFmpeg has
 no software AV1 encoder (libsvtav1)`, with the fix for FFmpeg; an FFmpeg
@@ -191,10 +198,80 @@ In `--json`, a failed check's `fault` is `ffmpeg`, `driver` or
 `wrong_output`. Doctor never installs or changes anything; on Fedora it
 makes one read-only `rpm -q` query to word its fixes.
 
+### Rendering a frame
+
+```sh
+spherecut frame clip.mp4 -o out.png                       # frame 0, 1920x1080, rectilinear 100°
+spherecut frame clip.mp4 -o out.png --time 1:02.5 --yaw 90 --pitch -20 --roll 5
+spherecut frame clip.mp4 -o out.png --frame 370 --projection fisheye --fov 360 --size 1024x1024
+spherecut frame clip.mp4 -o out.png --time 30000/1001 --projection stereographic --fov 300 --pitch -90   # a tiny planet
+spherecut frame clip.mp4 -o out.png --morph-to stereographic --morph 0.5 --fov 150
+spherecut frame clip.mp4 -o out.png --overwrite --depth 16 --json
+```
+
+- **When**: `--time` takes seconds (`12`, `12.5`), `m:s` or `h:m:s`
+  (`1:02.5`, `01:02:03.250`), a rational (`30000/1001`) or a frame
+  number (`370f`), all read exactly, in clip time: 0 is the first frame
+  shown, whatever the container's start time or edit list. The frame
+  shown is the one on screen at that time. `--frame N` is `--time Nf`,
+  counting from 0; on a variable-frame-rate file it counts frames from
+  the start. A time past the last frame fails, naming the clip's range,
+  and so does a frame number past it. A frame the file has lost, cut
+  short or with frames missing, fails as damage rather than showing
+  another frame in its place.
+- **The camera**: `--yaw` (degrees right), `--pitch` (up) and `--roll`
+  (clockwise, seen from behind the camera), all 0 by default;
+  `--fov`, horizontal, at most 170 rectilinear, 360 fisheye and 340
+  stereographic; `--size WxH`, 16 to 16384 a side and within the GPU's
+  limit; `--depth 8|16` for the PNG.
+- **The file** must be tagged as an equirect (Spherical Video V1 or V2
+  metadata in an MP4 or MOV file); `--equirect` renders an untagged one
+  as an equirect anyway. Matroska/WebM files need `--equirect` for now:
+  Spherecut doesn't read their spherical metadata yet.
+  Dual fisheye files from the cameras wait for stitching in M3. Stereo
+  files render the left eye, a cropped picture shows black where it
+  doesn't cover the sphere, and a pose in the metadata isn't applied
+  yet; each says so in a warning.
+- **The GPU**: `--adapter auto` (the default, or `$SPHERECUT_ADAPTER`)
+  takes a GPU and falls back to lavapipe; `cpu` is lavapipe, and other
+  text picks an adapter by part of its name or its PCI bus id.
+  `--reference` renders with the slow f64 CPU reference instead.
+  `--filter aniso` is sharper where the view squeezes the source, and
+  the driver's own; `iso`, the default, is the same on every driver.
+- **Decoding**: `--decoder auto` (the default) decodes with VA-API on the
+  render node of the GPU that renders, and in software when that can't
+  (no render node, a stream the GPU turns down, a failure), and says
+  which; `software`, `vaapi` and `vulkan` force one, and the hardware
+  ones fail instead of falling back (DECISIONS D39). `--render-node`
+  names the node.
+- **The output**: something already at `-o` is refused unless
+  `--overwrite` is given, and so is a link there; with `--overwrite` a
+  regular file is replaced, through a link too. The PNG is written next
+  to the output and linked into place whole (with `--overwrite`, renamed
+  into place), so a failed or interrupted run leaves nothing behind, and
+  a file that appears at the output while the frame renders is kept
+  (DECISIONS D16).
+- **Ctrl+C** ends the run with exit 4 and no output. It stops a seek or
+  a read at once; during probe, the GPU's set-up, the render or the
+  PNG's encode it takes effect when that step ends, which at a large
+  `--size` can take seconds. A second Ctrl+C kills it at once. Started
+  with SIGINT ignored, as a script's background job (`cmd &`) is, frame
+  leaves it ignored.
+
+On success it prints one line: `wrote out.png: 1920×1080 rectilinear
+100° at 12.5 s (frame 375, pts 375000), decoded on VA-API, rendered on AMD
+Radeon 8060S (RADV)`. It exits 0 when the PNG is written; 1 when the
+file, the frame or the output is the problem (missing, damaged before
+the frame, not an equirect, past the end, the output in the way); 2 for
+a command line that doesn't parse or a value out of range; 3 when a
+device or codec it needs is missing (no Vulkan driver, no adapter by
+that name, no decoder for the codec, or the hardware `--decoder` named
+not working, which `spherecut doctor` explains); and 4 when interrupted.
+
 ### JSON output
 
-`spherecut probe --json` and `spherecut doctor --json` print exactly one
-line of JSON on stdout per run, on success and on failure, and keep
+`spherecut probe --json`, `spherecut doctor --json` and `spherecut frame
+--json` print exactly one line of JSON on stdout per run, on success and on failure, and keep
 stderr for the log. [docs/cli-json.md](docs/cli-json.md) documents it
 field by field, with the codes, the exit statuses and an example per
 command; DECISIONS D27 says why it is this way. In short:
@@ -215,12 +292,19 @@ command; DECISIONS D27 says why it is this way. In short:
 - Times are exact: `{"exact": "1001/30000", "seconds": 0.0333...}`, where
   `exact` is the time and `seconds` only for display. Frame rates and time
   bases are `"30000/1001"`, or `"25"`.
+- frame's `result` says which frame it rendered (`pts` and its time,
+  with its number where it is known), what was asked for, the view, how
+  it was decoded (and why it fell back, if it did), the GPU, the colour
+  it decoded with and what of it was assumed, and the source stream; a
+  failed run has no `result`. Its `warnings` say what it did with the
+  file's spherical metadata.
 - Exit statuses: 0 when the run did what was asked, 1 when an input or a
   check failed, 2 for a command line that doesn't parse (also a document
-  under `--json`); 3 (a missing codec or device) and 4 (interrupted) are
-  reserved for `spherecut frame` and the GUI. A panic is an `internal`
-  error, exit 1; an empty stdout means a signal ended the run: Ctrl+C,
-  or a crash.
+  under `--json`), 3 when `frame` lacks a codec or device it needs, and
+  4 when `frame` was interrupted (code `cancelled`). A panic is an
+  `internal` error, exit 1; an empty stdout means a signal ended the
+  run: Ctrl+C for probe and doctor, a second Ctrl+C for frame, or a
+  crash.
 
 ### Logging
 
@@ -278,10 +362,13 @@ limited to lavapipe (`VK_DRIVER_FILES`, `VK_ICD_FILENAMES`), and
 `crates/media/tests/hw_refusal.rs` checks that the decoder turns streams
 down on lavapipe's Vulkan device instead of decoding them in software.
 `crates/cli/tests/confinement.rs` and `crates/cli/tests/doctor.rs` run
-probe and doctor under `strace -f` and fail on any `AF_INET` or
+probe, doctor and frame under `strace -f` and fail on any `AF_INET` or
 `AF_INET6` socket, or on probe opening a file a playlist lists; without
-strace they fail rather than skip. The tests generate the media they
-need; `gen-media` is not needed first.
+strace they fail rather than skip. `crates/cli/tests/frame.rs` renders
+on lavapipe, with its own golden images in `crates/cli/tests/goldens/`
+(`SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame
+pipeline_goldens` blesses them, as for render's, DECISIONS D32). The
+tests generate the media they need; `gen-media` is not needed first.
 
 Tier 2 needs a real GPU or camera samples; a plain `cargo test` lists
 those tests as ignored, and `cargo xtask hw-test` runs them. It needs no

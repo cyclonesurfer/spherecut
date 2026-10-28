@@ -18,7 +18,7 @@ This describes the design as built, plus the planned parts marked
                                       |
      media (FFmpeg, MediaBackend and frame-exact seek, probing, MP4 boxes, doctor)
                                       |
-   sphere (projection math)      core (time, frames, colour, stop tokens; project model planned)
+   sphere (projection math)      core (time, frames, colour, stop tokens, atomic writes; project model planned)
 ```
 
 `synth` (test patterns and media, and backends that stand in for FFmpeg)
@@ -33,7 +33,7 @@ synth, which depends on media.
 
 | Crate | Role | Status |
 |---|---|---|
-| `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), what a decoded frame is (`video`: pixel layouts, planes, colour) and stop tokens by generation (`cancel`); later the project model, timeline, keyframes, undo | M0: name and time; M1: `video`, `cancel` |
+| `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), the `--time` grammar (`TimeSpec`), what a decoded frame is (`video`: pixel layouts, planes, colour), stop tokens by generation (`cancel`) and files written whole or not at all (`fs::TempFile`, D16); later the project model, timeline, keyframes, undo | M0: name and time; M1: `video`, `cancel`; slice 4: `TimeSpec`, `fs` |
 | `spherecut-sphere` | CPU reference projection math in f64: equirect and its uv gradient, cube/EAC, fisheye lens models, view projections and morphs and their inverse (`project_morph`), output pixels to lens coordinates (`pixel`), yaw, pitch and roll (`orient`), rotation helpers | M0; M1 slice 3a: `pixel`, `orient`, `uv_gradient`, `project_morph` |
 | `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software and on VA-API or Vulkan Video with fallback to software, the render node lookup, the colour default rules, a small MP4 writer, `doctor`'s capability checks | M0; `MediaBackend` from M1 slice 2a, hardware from 2b (audio in 6) |
 | `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, the supersampled ideal of a view (`render_view_ideal`, which the goldens hold minified views to), tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes, seeded noise for camera bitrates) and broken files, `SyntheticBackend` and `GatedBackend` | M0; M1 slices 2a, 2b and 3b |
@@ -46,14 +46,14 @@ synth, which depends on media.
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
 | `spherecut-app` | eframe app, docked panels, viewer paint callbacks | M1 |
 | `spherecut-agent` | Agent integration (D23): the request and response type of each operation, shared by `spherecut mcp` and `spherecut call` (from A1 the `--json` of `probe`, `doctor` and `frame` uses them too, under a new schema version if M1's shape changes, D27); the MCP server; later the GUI attach bridge | A1 (after M1) |
-| `spherecut-cli` | The `spherecut` binary: `probe` and `doctor` today. `frame` (M1), `render` (M2), the GUI when run without a subcommand (M1), and `mcp` and `call` (A1) are planned. Its library half holds `contract`, the JSON contract of `--json` (D27), until A1 moves it to `spherecut-agent` or a crate below both | M0: `probe`, `doctor`; M1: the JSON contract |
+| `spherecut-cli` | The `spherecut` binary: `probe`, `doctor` and `frame` today. `render` (M2), the GUI when run without a subcommand (M1), and `mcp` and `call` (A1) are planned. Its library half holds `contract`, the JSON contract of `--json` (D27), until A1 moves it to `spherecut-agent` or a crate below both | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame` |
 | `xtask` | `check`, `compat` (clippy and a link of the tests against other FFmpeg builds, and Tier 1 against one, D2), `gen-media`, `hw-test` | M0; `compat` from 2026-10-24 |
 
 Crates are created when they get real content, not as empty shells. The
 planned ones above don't exist yet. Every crate root forbids `unsafe`
 code except media's and the `spherecut` binary's, which deny it and allow
 it only in named FFI modules (media's `ffi` and `hwprobe`; the binary's
-`interrupt` from slice 4),
+`interrupt`, frame's SIGINT handler, from slice 4),
 until slice 5b gives render one such module to open its Vulkan device
 (DECISIONS D28).
 
@@ -218,7 +218,8 @@ The other modules are safe Rust:
 * `spherical`: Spherical Video V1 and V2 and SA3D, read from the boxes and
   written as box bytes.
 * `inject`: adds or replaces boxes in the first video and audio sample
-  entries, fixing sizes and chunk offsets, written atomically (D16). It
+  entries, fixing sizes and chunk offsets, written atomically through
+  `core::fs::TempFile`'s `persist_replace` (D16). It
   refuses input that `Mp4Tree::damage()` finds damaged, and, when it
   shifts chunk offsets, an edited `moov` whose re-read warns. It replaces
   only a regular file at the output.
@@ -237,7 +238,9 @@ The other modules are safe Rust:
   into its pool. It
   reads only its own stream (the others are discarded), holds back a
   packet flagged corrupt until the next read, and ends a damaged file with
-  an error after the frames it could decode (D13). `open_cancellable`
+  an error after the frames it could decode (D13). A cut is a file that
+  ends before what its index lists for the stream (MP4), or before the
+  end its Matroska Segment's size gives. `open_cancellable`
   stops reading when a flag is set, and `skipped_packets` counts packets
   skipped as invalid data. On a device it opens a decoder that can use the
   device and never falls back to software (D3, D14); any error there that
@@ -283,6 +286,9 @@ The other modules are safe Rust:
   last frame's interval; the frame count from the MP4 index; the mapping
   from the track's spherical boxes). Streams whose timestamps tie or go
   backwards seek by the tie rule, the latter by decoding from the start.
+  Playing on, `next_frame` says a failed read once, as a `Damaged` event
+  with its cause, before the first frame the decoder drains after it or
+  before the error (D13).
   It converts frames of a format that isn't uploaded as it is through
   swscale, once announced with `DecoderEvent::Converted` (D30). On a
   device, frames stay there until handed out: a seek holds its best
@@ -346,10 +352,13 @@ should call `sync_ffmpeg_log_level()`.
 `docs/cli-json.md` field by field): one envelope per run, `{"schema",
 "ok", "result"?, "error"?, "warnings"}`, with `schema` such as
 `spherecut.probe/1`. probe's result is `{"files": [...]}`, one
-`ProbeFile` per path, and doctor's is its `DoctorReport`. `Exit` holds
-the exit statuses (0 to 2 used, 3 and 4 reserved for `frame` and the
-GUI) and `codes` the CLI's own codes; `all_codes()` adds `MediaError`'s
-and probe's. `main.rs` parses with clap's `try_parse_from`, so that a
+`ProbeFile` per path, doctor's is its `DoctorReport`, and frame's is a
+`FrameResult` (`spherecut.frame/1`), present only when the PNG was
+written. `Exit` holds the exit statuses: probe and doctor use 0 to 2,
+and frame also 3 (a device or codec it needs is missing) and 4
+(cancelled), mapped from its error's code by `frame_exit`. `codes` holds
+the CLI's own codes and `codes::warnings` frame's warnings; `all_codes()`
+adds `MediaError`'s, probe's and `RenderError`'s. `main.rs` parses with clap's `try_parse_from`, so that a
 command line that doesn't parse is a document too under `--json`
 (`wants_json` looks for `--json` before any `--`), and writes the
 document with `Envelope::to_line()` after the run. The module needs
@@ -362,6 +371,62 @@ schema (`schema_for`) unless the document has started, and `main` exits
 document. Debug builds panic on `SPHERECUT_DEBUG_PANIC` (`main`,
 `thread` or `usage`) for the contract test. A1's `spherecut call` and
 `spherecut mcp` are to reuse the module.
+
+## `spherecut frame`
+
+`crates/cli/src/frame.rs` renders one frame of a stitched equirect into
+a PNG (M1 plan section 5, D27), in the plan's order:
+
+1. clap parses the flags, `--time` through `core::TimeSpec` (exact
+   decimals, `m:s` and `h:m:s`, rationals, `Nf`), and
+   `FrameArgs::check` refuses what clap can't (a `--fov` past the
+   projection's limit, `--reference` with `--filter aniso`): `usage`,
+   exit 2;
+2. the output is checked before any work (`check_output`): something
+   there is `output_exists` without `--overwrite`, and a directory, pipe
+   or device, or a name ending in `/` or `/.`, is `not_a_file` either
+   way;
+3. `cli::interrupt` installs the SIGINT handler, then a
+   `core::fs::TempFile` is created next to the output (D16), so a first
+   Ctrl+C always finds the handler there to drop it; the rest runs on a
+   worker thread named `frame` while the main thread polls the handler's
+   flag every 10 ms (below);
+4. probe, through the confinement (D24), picks the stream (`--stream`,
+   else the first video stream that isn't a cover picture) and refuses a
+   file not tagged as an equirect (`not_equirect`, naming what it is)
+   unless `--equirect`; probe's damage becomes warnings;
+5. `Gpu::headless` takes the adapter `--adapter` (or
+   `SPHERECUT_ADAPTER`) names and checks `--size` against its limit,
+   unless `--reference` renders on the CPU;
+6. the decoder opens on `media::hw::render_node` for that GPU's ids
+   (D30), with `--decoder` choosing the mode (D39: `auto` is VA-API with
+   `Fallback::Software`, or software at once when the node isn't there);
+7. an `Exact` seek, or for `--frame N` on a variable-rate stream a count
+   from the first frame; `AfterLast`, or a target the stream's time base
+   can't hold, is `out_of_range`, damage before the frame (the count's
+   included) fails by its cause and damage after it is a warning; for
+   `--frame N` on a constant-rate stream the frame shown must be frame N
+   (`check_index`), else frames are missing there (`damaged`, or
+   `out_of_range` when it is the last frame);
+8. `render_still`, or for `--reference` the f64 CPU reference
+   (`reference::render`, trilinear as `render_trilinear` is, with the
+   file's placement) rounded to the PNG's codes;
+9. the PNG goes into the temporary file, which `persist_new` publishes
+   (`persist_replace` with `--overwrite`);
+10. one line on stdout, or the `--json` document with the `FrameResult`.
+
+**SIGINT.** `cli::interrupt` is the binary's one FFI module (D28): it
+asks for SIGINT's current action, and unless that is `SIG_IGN` (kept,
+as for a script's background job) installs a handler with
+`SA_RESETHAND | SA_RESTART` that only stores `true` in an atomic. The main thread, polling it, calls
+`StopSource::shutdown()` on the first Ctrl+C, which stops the seek
+between frames and raises the flag the decoder's FFmpeg interrupt
+callback reads inside a read (`VideoRequest::interrupt`). The other
+steps take no stop token: the worker checks between steps, so a Ctrl+C
+during the render or the PNG's encode takes effect when it ends.
+Whatever the worker returns after that, the run ends `cancelled` (exit 4) and the
+temporary file is dropped. The handler is reset as it runs, so a second
+Ctrl+C kills the process. probe and doctor never install it.
 
 ## Coordinates and conventions
 
@@ -413,6 +478,13 @@ All stored time is exact (`spherecut_core::time`):
   ignores `seconds`, so every one reads back exactly. probe's container
   times are FFmpeg's container timestamps, not clip time
   (`docs/cli-json.md`, "Two timelines").
+* `TimeSpec` (`core::timespec`) is what a person types for a time:
+  seconds with exact decimals, `m:ss` and `h:mm:ss`, a fraction, or a
+  frame number with `f`, parsed by `FromStr` without `f64` and never
+  negative. A frame number is counted from the stream's first presented
+  frame; on a constant-rate stream `frame` seeks to it at `(N + ½)`
+  frame durations, and on a variable-rate one it counts frames from the
+  start (`media::seek::frame_address`).
 
 ## Rendering
 
@@ -490,6 +562,10 @@ intermediate equirect exists only as the output of a 360 export.
   `StopToken`s by generation; starting a new generation stops the older
   tokens, as a new seek stops the last one, and shutdown stops them all
   and raises the flag a decoder's FFmpeg interrupt reads (D13, D29).
+* Built in slice 4: `spherecut frame` does its work on one worker
+  thread while the main thread polls the SIGINT flag every 10 ms and
+  shuts the `StopSource` down on the first Ctrl+C (`spherecut frame`,
+  above).
 
 ## Testing tiers
 
@@ -504,7 +580,12 @@ intermediate equirect exists only as the output of a 360 export.
   their own checks the same way. The renderer's tests run on lavapipe
   (`crates/render/tests/`): every pipeline, the uniform layouts, the
   mips, both upload paths, `render_still` against the CPU reference, and
-  the golden images (below).
+  the golden images (below). The CLI's tests (`crates/cli/tests/`) run
+  the binary: the JSON contract with every exit status (a Ctrl+C in the
+  middle of a seek included), FFmpeg's confinement under strace, and
+  `frame` on lavapipe (the Euler table, the frame code read back, every
+  error row with nothing left behind, the output races, the pipeline
+  goldens).
   `cargo xtask check` runs all of it, against the FFmpeg pkg-config
   finds. `cargo xtask compat` runs clippy against other FFmpeg builds
   and builds and links the tests against each, in a target directory of
@@ -583,3 +664,15 @@ rows on each GPU against the references and controls only, never
 against the lavapipe PNGs, and `goldens_on_host_llvmpipe` runs the
 stored set on the machine's own llvmpipe by the other-driver rule; both
 note their numbers for the hw-test report.
+
+A second, smaller set, the **pipeline goldens**
+(`pipeline_goldens` in `crates/cli/tests/frame.rs`, PNGs and manifest
+in `crates/cli/tests/goldens/`), goes from a real lossless file through
+the whole of `spherecut frame`, decoding included, under the same rules,
+blessing gate and manifest fields, with `frame --reference` as the CPU
+check and FNV-64 of the first decoded frame's planes as the source hash:
+10-bit HEVC as `yuv420p10le`, full-range H.264, NV12 against `yuv420p`,
+4:2:2 10-bit at full chroma resolution, and the swscale cross-check of
+4:4:4 at BT.601 and BT.709, both ranges, 8 and 10 bits (D32). Bless it
+with `SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test
+frame pipeline_goldens`.

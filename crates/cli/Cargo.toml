@@ -1,6 +1,6 @@
 [package]
 name = "spherecut-cli"
-description = "The spherecut command: probe, doctor, and (later) frame, render and the GUI; its library half holds the JSON contract"
+description = "The spherecut command: probe, doctor and frame, and (later) render and the GUI; its library half holds the JSON contract"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,15 +17,20 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 spherecut-core.workspace = true
 spherecut-media.workspace = true
+spherecut-render.workspace = true
+spherecut-sphere.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+glam.workspace = true
 spherecut-synth.workspace = true
+spherecut-testkit.workspace = true
 
 [lints]
 workspace = true
