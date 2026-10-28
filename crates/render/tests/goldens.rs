@@ -130,7 +130,7 @@ const TWIN_THRESHOLD: f64 = 2.0 / 255.0;
 const CONTROL_BAD_OVER: usize = 100;
 
 // ---------------------------------------------------------------------
-// Floors on a GPU (D32)
+// On a GPU (D32)
 
 /// Where [`GPU_CPU_PSNR`] was measured.
 const GPU_SOURCE: &str =
@@ -201,6 +201,81 @@ fn gpu_floor(table: &[(&str, &str, f64)], row: &str, key: &str, lavapipe: f64) -
             ),
         }
     }
+}
+
+/// Whether pixel `(i, j)` of a `size` view shows the picture: its centre
+/// within θ = π and inside the cover, as the shader and the reference
+/// have it. Elsewhere both draw black.
+fn shows(v: &ViewParams, size: (u32, u32), placement: &Placement, (i, j): (u32, u32)) -> bool {
+    let c = pixel::centre(i, j);
+    let theta = v.lens.theta(pixel::to_lens(size, c.x, c.y).length());
+    let suv = reference::sphere_uv(reference::sphere_dir(v, size, c.x, c.y));
+    let [u0, v0, u1, v1] = placement.cover();
+    theta <= PI + 1e-4 && suv.x >= u0 && suv.y >= v0 && suv.x <= u1 && suv.y <= v1
+}
+
+/// The bands of luma's analytic LOD before clamping that a CPU check's
+/// error is broken down by, each up to its bound: magnified or at most a
+/// level down, between, and from [`IDEAL_MIN_LOD`] down.
+const LOD_BANDS: [(&str, f64); 3] = [
+    ("lod_below_1", 1.0),
+    ("lod_1_to_2.5", IDEAL_MIN_LOD),
+    ("lod_from_2.5", f64::INFINITY),
+];
+
+/// Each pixel's band in [`LOD_BANDS`], by `reference::lod_map`, or `None`
+/// where the view doesn't show the picture ([`shows`]).
+fn lod_bands(
+    f: &Frame,
+    v: &ViewParams,
+    size: (u32, u32),
+    placement: &Placement,
+) -> Vec<Option<usize>> {
+    let lod = reference::lod_map(f, v, size, placement).unwrap();
+    lod.data
+        .chunks(3)
+        .enumerate()
+        .map(|(k, l)| {
+            let at = ((k % size.0 as usize) as u32, (k / size.0 as usize) as u32);
+            shows(v, size, placement, at)
+                .then(|| LOD_BANDS.iter().position(|b| l[2] < b.1).unwrap())
+        })
+        .collect()
+}
+
+/// A CPU check's error over one band of [`LOD_BANDS`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BandError {
+    pixels: f64,
+    /// Over the band's pixels; `None` when it has none.
+    psnr: Option<f64>,
+    /// Of the squared error over the whole picture.
+    share: f64,
+}
+
+/// `got` against `want` per band, as `bands` deals the pixels.
+fn band_errors(bands: &[Option<usize>], got: &[f64], want: &[f64]) -> Vec<BandError> {
+    let total: f64 = got.iter().zip(want).map(|(a, b)| (a - b).powi(2)).sum();
+    (0..LOD_BANDS.len())
+        .map(|n| {
+            let mask: Vec<bool> = bands.iter().map(|b| *b == Some(n)).collect();
+            let pixels = mask.iter().filter(|m| **m).count();
+            if pixels == 0 {
+                return BandError {
+                    pixels: 0.0,
+                    psnr: None,
+                    share: 0.0,
+                };
+            }
+            let (a, b) = (pick(&mask, got), pick(&mask, want));
+            let sq: f64 = a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum();
+            BandError {
+                pixels: pixels as f64,
+                psnr: Some(psnr_in(&mask, got, want)),
+                share: if total > 0.0 { sq / total } else { 0.0 },
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -958,15 +1033,37 @@ impl<'g> Run<'g> {
         ok
     }
 
-    /// `got` against the CPU's `cpu`: the calibrated PSNR floor (on a GPU
-    /// the one [`gpu_floor`] picks), and no channel off by more than
-    /// [`CPU_MAX_CHANNEL`].
-    fn cpu_check(&mut self, key: &str, got: &Image, cpu: &ImageF64) {
+    /// On a GPU, where a CPU check's error sits: per band of
+    /// [`LOD_BANDS`], its pixels, the PSNR over them and its share of the
+    /// squared error, as measurements for the hw-test report.
+    fn by_lod(&mut self, key: &str, bands: &[Option<usize>], got: &[f64], cpu: &[f64]) {
+        for (b, (band, _)) in band_errors(bands, got, cpu).iter().zip(LOD_BANDS) {
+            self.measure(&format!("{key}_{band}_pixels"), b.pixels);
+            if let Some(p) = b.psnr {
+                self.measure(&format!("{key}_{band}_psnr_db"), p);
+            }
+            self.measure(&format!("{key}_{band}_error_share"), b.share);
+        }
+    }
+
+    /// `got` against the CPU's `cpu`, which renders `f` through `v` with
+    /// `placement`: the calibrated PSNR floor (on a GPU the one
+    /// [`gpu_floor`] picks, with the error by LOD band), and no channel
+    /// off by more than [`CPU_MAX_CHANNEL`].
+    fn cpu_check(
+        &mut self,
+        key: &str,
+        got: &Image,
+        cpu: &ImageF64,
+        (f, v, placement): (&Frame, &ViewParams, &Placement),
+    ) {
         let size = (got.width, got.height);
         let g = unit(got);
         let p = psnr_of(size, &g, &cpu.data);
         let pkey = format!("{key}_psnr_db");
         let ok = if self.mode == Mode::References {
+            let bands = lod_bands(f, v, size, placement);
+            self.by_lod(key, &bands, &g, &cpu.data);
             self.gpu_floor_check(&pkey, p)
         } else {
             self.calibrated(&pkey, p, CPU_MARGIN_DB, CPU_FLOOR_DB)
@@ -1310,7 +1407,7 @@ fn stored_grid_view(
         return;
     };
     match reference::render_trilinear(&s.frame, &v, size) {
-        Ok(cpu) => run.cpu_check("cpu", &got, &cpu),
+        Ok(cpu) => run.cpu_check("cpu", &got, &cpu, (&s.frame, &v, &Placement::default())),
         Err(e) => run.fail(format!("the CPU reference: {e}")),
     }
     more(run, &s, &got);
@@ -2179,7 +2276,8 @@ fn matrix_601_709(run: &mut Run<'_>) {
             run.fail("render or the CPU reference failed");
             return;
         };
-        run.cpu_check(&format!("cpu_{name}"), &got, &cpu);
+        let at = (&f, &v, &Placement::default());
+        run.cpu_check(&format!("cpu_{name}"), &got, &cpu, at);
         psnrs.insert(name, (f, cpu, unit(&got)));
     }
     // The two codings carry the same picture, so their renders agree,
@@ -2426,7 +2524,7 @@ fn crop_half(run: &mut Run<'_>) {
         },
     );
     match cpu {
-        Ok(cpu) => run.cpu_check("cpu", &got, &cpu),
+        Ok(cpu) => run.cpu_check("cpu", &got, &cpu, (&f, &v, &placement)),
         Err(e) => run.fail(format!("the CPU reference: {e}")),
     }
     let s = Source::new("grid, the middle half", f);
@@ -2709,17 +2807,6 @@ impl Chain {
     }
 }
 
-/// Whether pixel `(i, j)` of a `size` view shows the picture: its centre
-/// within θ = π and inside the cover, as the shader and the reference
-/// have it. Elsewhere both draw black.
-fn shows(v: &ViewParams, size: (u32, u32), placement: &Placement, (i, j): (u32, u32)) -> bool {
-    let c = pixel::centre(i, j);
-    let theta = v.lens.theta(pixel::to_lens(size, c.x, c.y).length());
-    let suv = reference::sphere_uv(reference::sphere_dir(v, size, c.x, c.y));
-    let [u0, v0, u1, v1] = placement.cover();
-    theta <= PI + 1e-4 && suv.x >= u0 && suv.y >= v0 && suv.x <= u1 && suv.y <= v1
-}
-
 /// Where a shown pixel samples: luma's and chroma's texture uv, and
 /// their LODs before clamping.
 struct Tap {
@@ -2890,70 +2977,6 @@ fn cpu_checks() -> Vec<CpuCheck> {
             mono,
         ),
     ]
-}
-
-/// The bands of luma's analytic LOD before clamping that a CPU check's
-/// error is broken down by, each up to its bound: magnified or at most a
-/// level down, between, and from [`IDEAL_MIN_LOD`] down.
-const LOD_BANDS: [(&str, f64); 3] = [
-    ("lod_below_1", 1.0),
-    ("lod_1_to_2.5", IDEAL_MIN_LOD),
-    ("lod_from_2.5", f64::INFINITY),
-];
-
-/// Each pixel's band in [`LOD_BANDS`], by `reference::lod_map`, or `None`
-/// where the view doesn't show the picture ([`shows`]).
-fn lod_bands(
-    f: &Frame,
-    v: &ViewParams,
-    size: (u32, u32),
-    placement: &Placement,
-) -> Vec<Option<usize>> {
-    let lod = reference::lod_map(f, v, size, placement).unwrap();
-    lod.data
-        .chunks(3)
-        .enumerate()
-        .map(|(k, l)| {
-            let at = ((k % size.0 as usize) as u32, (k / size.0 as usize) as u32);
-            shows(v, size, placement, at)
-                .then(|| LOD_BANDS.iter().position(|b| l[2] < b.1).unwrap())
-        })
-        .collect()
-}
-
-/// A CPU check's error over one band of [`LOD_BANDS`].
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct BandError {
-    pixels: f64,
-    /// Over the band's pixels; `None` when it has none.
-    psnr: Option<f64>,
-    /// Of the squared error over the whole picture.
-    share: f64,
-}
-
-/// `got` against `want` per band, as `bands` deals the pixels.
-fn band_errors(bands: &[Option<usize>], got: &[f64], want: &[f64]) -> Vec<BandError> {
-    let total: f64 = got.iter().zip(want).map(|(a, b)| (a - b).powi(2)).sum();
-    (0..LOD_BANDS.len())
-        .map(|n| {
-            let mask: Vec<bool> = bands.iter().map(|b| *b == Some(n)).collect();
-            let pixels = mask.iter().filter(|m| **m).count();
-            if pixels == 0 {
-                return BandError {
-                    pixels: 0.0,
-                    psnr: None,
-                    share: 0.0,
-                };
-            }
-            let (a, b) = (pick(&mask, got), pick(&mask, want));
-            let sq: f64 = a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum();
-            BandError {
-                pixels: pixels as f64,
-                psnr: Some(psnr_in(&mask, got, want)),
-                share: if total > 0.0 { sq / total } else { 0.0 },
-            }
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -3229,6 +3252,18 @@ fn the_reference_only_path_runs_on_lavapipe() {
     assert!(
         run.notes[0].contains("cpu_psnr_db held to")
             && run.notes[0].contains("lavapipe's floor, blessed in manifest.json"),
+        "{:?}",
+        run.notes
+    );
+    // The error by LOD band: a 90° view of 1024 texels round, under a
+    // level down everywhere.
+    let m = &run.images["rect_forward"]["measured"];
+    assert_eq!(m["cpu_lod_below_1_pixels"], json!(36864.0), "{m}");
+    assert_eq!(m["cpu_lod_below_1_error_share"], json!(1.0), "{m}");
+    assert_eq!(m["cpu_lod_from_2.5_pixels"], json!(0.0), "{m}");
+    assert!(m["cpu_lod_below_1_psnr_db"].is_number(), "{m}");
+    assert!(
+        run.notes[1].contains("cpu_lod_1_to_2.5_pixels 0.0"),
         "{:?}",
         run.notes
     );
