@@ -396,6 +396,19 @@ golden tests fail, and the fixes are next:
   FFmpeg 7.1 to 9.0 have not been checked for the bug.
 - swscale's conversion is tested end to end only for UYVY and RGB24, the
   formats a raw MOV carries; the others by format (D30).
+- x265 (3.5 here, and its master) leaves the dts of the frames within
+  its B-frame delay undefined when a clip ends inside that delay: one
+  frame, or two with a B-pyramid, gets its pts minus whatever x265's
+  heap held. FFmpeg 6.1's mov muxer writes it; 8.1.3's refused it in
+  about half of the runs of `pipeline_goldens` against 8.1.3 in slice
+  4's review ("pts/dts pair unsupported", `AVERROR_PATCHWELCOME`), in
+  its one-frame lossless clips. synth now writes HEVC clips of at most
+  `X265_BFRAME_DELAY` (2) frames, and frame's tests their one-picture
+  clip, without B-frames (`writers.rs`
+  `hevc_clips_within_x265s_bframe_delay_have_no_b_frames`); the
+  pictures, and so the goldens, are the same. gen-media's
+  `hifreq-hevc-lossless` and `seam-hevc-lossless` (two frames) change
+  bytes but not pixels.
 - synth's clips are tagged centre-sited chroma, which is what their
   4:2:0 is, so probe's JSON says `center` for them, `gen-media`'s set
   included.

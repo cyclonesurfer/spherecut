@@ -1993,7 +1993,9 @@ fn lossless_clip(
         options: [
             ("preset", "veryfast"),
             ("threads", "1"),
-            ("x265-params", "lossless=1:log-level=error"),
+            // One picture, within x265's B-frame delay: without B-frames
+            // its dts is defined (synth's `X265_BFRAME_DELAY`).
+            ("x265-params", "lossless=1:bframes=0:log-level=error"),
         ]
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .to_vec(),
