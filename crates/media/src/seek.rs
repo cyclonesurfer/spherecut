@@ -294,9 +294,15 @@ pub struct FfmpegVideo {
     current_anchored: bool,
     current_last_tie: bool,
     not_seekable: bool,
-    /// Since the last seek away from the start, no frame at or after the
-    /// keyframe it landed on has come out: one before it is one of its
-    /// leading pictures, and is dropped.
+    /// Since the last seek away from the start, and for H.264 since
+    /// opening or any seek, no frame at or after the keyframe decoding
+    /// began at has come out: one before it is one of its leading
+    /// pictures, and is dropped. At the start of an H.264 stream they are
+    /// open-GOP B-frames (a cut at a keyframe that isn't IDR keeps them)
+    /// that refer to frames the stream lacks, which FFmpeg drains
+    /// unflagged at its end. HEVC's that do are RASL pictures, which
+    /// FFmpeg drops at the start, and its RADL pictures there are frames
+    /// of the stream.
     leading: bool,
     /// Since opening or the last seek, a frame has come out that FFmpeg
     /// didn't flag corrupt and that isn't a leading picture: a frame
@@ -467,6 +473,13 @@ impl FfmpegVideo {
                     }
                     let fields = Self::fields(&mut dec, &frame)?;
                     if fields.corrupt && !starts_here(corrupt_is_damage, &fields, dec.landing_key())
+                    {
+                        continue;
+                    }
+                    // H.264's leading pictures (see `leading`).
+                    if !corrupt_is_damage
+                        && let (Some(key), Some(pts)) = (dec.landing_key(), fields.pts)
+                        && pts < key
                     {
                         continue;
                     }
@@ -797,7 +810,7 @@ impl FfmpegVideo {
         self.pending = None;
         self.last_decoded = None;
         self.from_start = to_start.then_some(0);
-        self.leading = !to_start;
+        self.leading = !to_start || !self.corrupt_is_damage;
         self.settled = false;
         self.exact_run = to_start;
         self.losing = false;

@@ -571,6 +571,50 @@ fn open_gop_h264_seeks_exactly_and_a_naive_seek_does_not() {
     );
     oracle(&short, GOP_8);
     oracle(&media::remux_to_mkv(&short, &dir).unwrap(), GOP_8);
+    // A cut to Matroska at keyframe 24 keeps its leading B-frames, shown
+    // before it from pts 0 (as no Matroska timestamp is negative): they
+    // come out first, as FFmpeg drains, unflagged, decoded without the
+    // frames they refer to. The cut opens on the keyframe all the same,
+    // with the SEI and without, as a seek to it gives it (D29).
+    let pk = samples(&short);
+    let last = (0..pk.len()).rfind(|&i| pk[i].3).unwrap();
+    let lead = pk[last..].iter().map(|s| s.0).min().unwrap();
+    assert!(lead < pk[last].0, "keyframe 24 has no leading pictures");
+    let whole = sequential(&short).0;
+    let from = whole.iter().position(|f| f.pts == pk[last].0).unwrap();
+    for sei in [true, false] {
+        let cut = dir.join(format!("ogop-h264-25-cut-{sei}.mkv"));
+        copy_h264(
+            &short,
+            &cut,
+            last,
+            |t| sei || t != 6,
+            |_, key| key,
+            Some(lead),
+        );
+        let got = sequential(&cut).0;
+        assert_eq!(
+            got.iter().map(|f| f.hash).collect::<Vec<_>>(),
+            whole[from..].iter().map(|f| f.hash).collect::<Vec<_>>(),
+            "SEI {sei}"
+        );
+        assert_eq!(got[0].pts, samples(&cut)[0].0, "SEI {sei}");
+        assert_eq!(oracle(&cut, GOP_8).frames, got, "SEI {sei}");
+        // And from the start again, after a seek stopped before it gave
+        // a frame.
+        let mut d = open(&cut);
+        let source = StopSource::new();
+        let stopped = source.current();
+        source.next();
+        assert!(matches!(
+            d.seek(Time::ZERO, SeekMode::Exact, &stopped).unwrap(),
+            SeekOutcome::Stopped
+        ));
+        match d.next_frame(&StopToken::never()).unwrap() {
+            NextFrame::Frame(f) => assert_eq!(Seen::of(&f), got[0], "SEI {sei}"),
+            other => panic!("SEI {sei}: {other:?} after the stopped seek"),
+        }
+    }
 }
 
 /// Copy the H.264 MP4 `src` into the MP4 `dst` without its SEI NAL units
@@ -580,14 +624,15 @@ fn open_gop_h264_seeks_exactly_and_a_naive_seek_does_not() {
 /// decode order (a keyframe), its timestamps moved back by that sample's
 /// pts, so a cut from 0 is a whole copy.
 fn without_sei(src: &Path, dst: &Path, from: usize) {
-    copy_h264(src, dst, from, |t| t != 6, |_, key| key);
+    copy_h264(src, dst, from, |t| t != 6, |_, key| key, None);
 }
 
-/// Copy the H.264 MP4 `src` into the MP4 `dst` from video sample `from`
-/// in decode order, its timestamps moved back by that sample's pts: of
-/// each sample, the NAL units whose type `keep` keeps, and listed as a
-/// sync sample (`stss`) when `sync`, given its pts and whether it was
-/// one, says so. The first sample copied must be one.
+/// Copy the H.264 MP4 `src` into `dst` (an MP4, or Matroska by its name)
+/// from video sample `from` in decode order, its timestamps moved back by
+/// `shift`, or else by that sample's pts: of each sample, the NAL units
+/// whose type `keep` keeps, flagged a keyframe (an MP4's sync sample, in
+/// `stss`) when `sync`, given its pts and whether it was one, says so.
+/// The first sample copied must be one.
 // Writes a file this test made with ffmpeg-next alone, as `faststart`
 // does.
 #[allow(clippy::disallowed_methods)]
@@ -597,6 +642,7 @@ fn copy_h264(
     from: usize,
     keep: impl Fn(u8) -> bool,
     sync: impl Fn(i64, bool) -> bool,
+    shift: Option<i64>,
 ) {
     let mut ictx = ff::format::input(src).unwrap();
     let mut octx = ff::format::output(dst).unwrap();
@@ -609,7 +655,7 @@ fn copy_h264(
         out.set_time_base(st.time_base());
     }
     octx.write_header().unwrap();
-    let mut shift = None;
+    let mut shift = shift;
     for (k, (st, pkt)) in ictx.packets().enumerate().skip(from) {
         let pts = pkt.pts().unwrap();
         let shift = *shift.get_or_insert(pts);
@@ -857,6 +903,7 @@ fn h264_i_frames_listed_as_sync_samples_seek_exactly() {
             0,
             |_| true,
             |pts, key| key || forced.contains(&pts),
+            None,
         );
         assert_eq!(sync_samples(&out), [0, forced[0], forced[1]], "{name}");
         // Frames after each refer to frames before it: decoded from the
@@ -864,7 +911,7 @@ fn h264_i_frames_listed_as_sync_samples_seek_exactly() {
         for (k, &pts) in forced.iter().enumerate() {
             let cut = dir.join(format!("{name}-cut{k}.mp4"));
             let from = pk.iter().position(|s| s.0 == pts).unwrap();
-            copy_h264(&clip, &cut, from, |_| true, |p, _| p == pts);
+            copy_h264(&clip, &cut, from, |_| true, |p, _| p == pts, None);
             let start = whole.iter().position(|f| f.pts == pts).unwrap();
             let shifted: Vec<Seen> = whole[start..]
                 .iter()

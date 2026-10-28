@@ -177,7 +177,11 @@ pub struct VideoDecoder {
     /// I-frame that isn't IDR only by its recovery point SEI, though the
     /// index (an MP4's `stss`) lists it and the seek lands on it.
     landing_key: Option<i64>,
-    /// The same timestamp of the last packet of the stream read.
+    /// The greatest of the same timestamps of the packets of the stream
+    /// read since opening or the last seek. An MP4's dts increase in
+    /// decode order, but a Matroska stream's pts go back at its B-frames,
+    /// and in a stream that ends on a keyframe and its leading B-frames,
+    /// the last packet read is shown before the keyframe.
     read_position: Option<i64>,
     /// Once a packet has been read, the landing since opening: the
     /// stream's first packet, by the timestamp the index compares.
@@ -689,9 +693,10 @@ impl VideoDecoder {
         }
     }
 
-    /// The first packet read since the last seek, by the timestamp the
-    /// index compares: where the seek landed. `None` before one is read,
-    /// or when it had no timestamp.
+    /// The first packet read since opening or the last seek, by the
+    /// timestamp the index compares: the stream's first, or where the
+    /// seek landed. `None` before one is read, or when it had no
+    /// timestamp.
     pub(crate) fn landing(&self) -> Option<i64> {
         self.landing
     }
@@ -728,8 +733,8 @@ impl VideoDecoder {
         self.eof_sent
     }
 
-    /// The last packet read, by the same timestamp; `None` when none has
-    /// been read since opening or seeking.
+    /// How far the packets read reach, by the same timestamp (see the
+    /// field); `None` when none has been read since opening or seeking.
     pub(crate) fn read_position(&self) -> Option<i64> {
         self.read_position
     }
@@ -944,7 +949,7 @@ impl VideoDecoder {
                     {
                         self.unflagged_keys.insert(ts);
                     }
-                    self.read_position = ts.or(self.read_position);
+                    self.read_position = ts.max(self.read_position);
                     // The landing is the index's keyframe, flagged one or
                     // not (see `landing_key`).
                     if (pkt.is_key() || landed)
