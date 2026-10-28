@@ -138,6 +138,31 @@ the sections below, they win.
     faults can't show a pool that doesn't work (glibc reuses freed
     frames). The tests check the pool by its allocations and report the
     faults per frame and per MB.
+13. **The goldens after odin's third run** (PR #5, at be38fa4, D31,
+    D32). Section 6's other-driver rule keeps PSNR ≥ 48 dB and SSIM ≥
+    0.995, and its "max ≤ 4 LSB" becomes at most 4 pixels with a
+    channel more than 4 LSB off and none more than 8: LLVM 22's
+    llvmpipe put `fisheye_180` at most 5 LSB off at 62.79 dB (how many
+    pixels past 4 LSB wasn't recorded), and the local faults the
+    averages miss put 11 to 72 pixels past 4 LSB (implicit LOD) or one
+    quad 95 LSB off (a black pole). Section 4.3's encode pass rounds
+    to the target's codes itself (at 10 bits, and into an f16 target,
+    to halves), since RADV's export packs to f16 toward zero first and
+    put ten of `passthrough_exact`'s codes a code low. Section 4's mip
+    pass works each 8-bit mean of codes out exactly, in integers, and
+    rounds it to the nearest code with ties to even, as the CPU
+    reference now does too: it left the store to the driver, and
+    RADV's export of the unrounded means cost the wide views up to 15
+    dB against the reference (D32's emulation, within 0.43 dB of every
+    RX 7600 check). A lower floor for a GPU, the RX 7600's measurement
+    less 3 dB, stood in for that fix for a while and is gone: a GPU's
+    CPU checks are held to lavapipe's calibrated floors, which the
+    emulation predicts the RX 7600 clears by 7.91 dB or more (56.11 to
+    59.78 dB, D32). The fix moved six stored goldens and one of the
+    pipeline goldens by up to 4 LSB where a pixel reads level 1 or
+    more, and raised all nine CPU floors of the render goldens
+    (`fisheye_360` from 46.59 to 48.15 dB) and that pipeline golden's
+    (47.2 to 48.17 dB); the other three pipeline goldens' didn't move.
 
 ## 1. Summary
 
@@ -1035,8 +1060,9 @@ Notes:
 **The encode pass** (`encode.wgsl`) writes either into egui's target
 (non-sRGB `Rgba8Unorm` or `Bgra8Unorm` in egui-wgpu 0.37) or into an
 offscreen `Rgba8Unorm`. It reads the linear target with `textureLoad` at
-`frag.xy − origin`, so pixels map 1:1 with no filtering, and applies the
-OETF. A 16-bit PNG reads the `Rgba16Float` target back and applies the
+`frag.xy − origin`, so pixels map 1:1 with no filtering, applies the
+OETF and rounds to the target's codes itself, at 10 bits to the half
+nearest them (amendment 13). A 16-bit PNG reads the `Rgba16Float` target back and applies the
 OETF on the CPU in f32. f16 linear storage moves an encoded value by at
 most about 2.1e-4, finer than 1/1023.
 
@@ -1344,9 +1370,9 @@ through real lossless clips.
 | Against | Rule | Why |
 |---|---|---|
 | the stored PNG, same `driver_info` and source hash | identical bytes | lavapipe is deterministic at a fixed Mesa build (3 of 3 runs identical) |
-| the stored PNG, another driver build | PSNR ≥ 48 dB, SSIM ≥ 0.995, max ≤ 4 LSB | 48.13 dB is an RMS error of 1 LSB, which absorbs Mesa or LLVM rounding, while a half-pixel shift or a 0.5 LOD bias falls below 40 dB on these patterns |
+| the stored PNG, another driver build | PSNR ≥ 48 dB, SSIM ≥ 0.995, at most 4 pixels more than 4 LSB off and none more than 8 (amendment 13) | 48.13 dB is an RMS error of 1 LSB, which absorbs Mesa or LLVM rounding, while a half-pixel shift or a 0.5 LOD bias falls below 40 dB on these patterns; the count and the maximum catch the local faults the averages miss |
 | a source-hash mismatch | reported as "the synthetic source changed" (libm drift, a synth edit), never passed as a render difference | keeps synth drift and render drift apart |
-| `reference::render_trilinear` (f64) | PSNR ≥ the per-view tolerance, calibrated when blessing as measured − 3 dB and never below 36 dB | lodprobe measured 40.8 to 55.8 dB, with the error growing toward the rim (section 4.3) |
+| `reference::render_trilinear` (f64) | PSNR ≥ the per-view tolerance, calibrated when blessing as measured − 3 dB and never below 36 dB, on a GPU too (amendment 13) | lodprobe measured 40.8 to 55.8 dB, with the error growing toward the rim (section 4.3) |
 | `render_view_ideal` (minified views) | a per-view PSNR floor, plus a margin of at least 3 dB over the `DEBUG_MODE 2` (level 0) control | proves the test can see aliasing |
 
 **Blessing** is explicit. `SPHERECUT_UPDATE_GOLDENS=1 cargo test -p
@@ -2796,7 +2822,8 @@ and pooled downloads** (slice 2; updates D3, D14 and D18).
   - A manifest records the source-plane hash, `driver_info`, the wgpu
     version and the thresholds.
   - The match is exact at the same driver build and source hash, and
-    otherwise PSNR ≥ 48 dB, SSIM ≥ 0.995 and at most 4 LSB.
+    otherwise PSNR ≥ 48 dB, SSIM ≥ 0.995, at most 4 pixels more than 4
+    LSB off and none more than 8 (amendment 13).
   - The f64 CPU trilinear reference has a per-view tolerance calibrated at
     blessing (measured − 3 dB, never below 36 dB).
   - Minified views are compared with the supersampled ideal, with a margin

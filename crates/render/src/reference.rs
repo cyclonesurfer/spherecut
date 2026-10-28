@@ -1,11 +1,13 @@
 //! The CPU reference (M1 plan section 4.5): the projection pass in f64,
 //! with no GPU. It follows `shaders/project.wgsl` step by step, and
 //! stores each mip level and the linear target as the GPU stores them:
-//! unorm8 rounded to nearest, or the nearest f16, ties to even, which the
-//! shaders round to themselves so that no driver's conversion changes it
-//! (`round_f16` in `shaders/common.wgsl`). What remains between the two
-//! is the GPU's own precision: its `atan2`, its filtering weights and its
-//! LOD fraction.
+//! an 8-bit level as the exact area mean of the codes rounded to the
+//! nearest code ([`halve_codes`]), the rest as the nearest f16, both with
+//! ties to even, which the shaders round to themselves so that no
+//! driver's conversion changes them (`shaders/mips.wgsl`, and `round_f16`
+//! in `shaders/common.wgsl`). What remains between the two is the GPU's
+//! own precision: its `atan2`, its filtering weights and its LOD
+//! fraction.
 //! The Tier 1 tests hold `render_still` to it at calibrated tolerances.
 
 use std::f64::consts::{PI, TAU};
@@ -21,7 +23,7 @@ use crate::project::ViewParams;
 use crate::readback::round_f16;
 
 /// A rendered picture in f64: R, G, B per pixel, rows top to bottom,
-/// as the encode pass computes them before it stores them.
+/// as the encode pass computes them before it rounds them to codes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageF64 {
     pub width: u32,
@@ -366,17 +368,30 @@ impl Level {
 
     /// The next level down, as the mip pass makes it: each destination
     /// texel the area-weighted mean of the source texels it covers, then
-    /// stored in the plane's format.
+    /// stored in the plane's format: an 8-bit one by [`halve_codes`], a
+    /// deep one as the nearest f16.
     fn halve(&self, format: PlaneFormat) -> Level {
         let (sw, sh) = (self.w, self.h);
+        if !format.is_deep() {
+            // The texels are codes / 255, which times 255 round back to
+            // the codes.
+            let codes: Vec<u8> = self
+                .data
+                .iter()
+                .map(|v| (v * 255.0).round() as u8)
+                .collect();
+            let (w, h, next) = halve_codes(&codes, (sw, sh), self.comps);
+            return Level {
+                w,
+                h,
+                comps: self.comps,
+                data: next.iter().map(|&k| f64::from(k) / 255.0).collect(),
+            };
+        }
         let (dw, dh) = ((sw / 2).max(1), (sh / 2).max(1));
         let weights = |j: u32, ss: u32, ds: u32| -> Vec<(u32, f64)> {
-            let (lo, hi) = (j * ss, j * ss + ss);
-            (lo / ds..=(hi - 1) / ds)
-                .map(|x| {
-                    let overlap = hi.min((x + 1) * ds) - lo.max(x * ds);
-                    (x, f64::from(overlap) / f64::from(ss))
-                })
+            overlaps(j, ss, ds)
+                .map(|(x, o)| (x, f64::from(o) / f64::from(ss)))
                 .collect()
         };
         let mut data = Vec::with_capacity(dw as usize * dh as usize * self.comps);
@@ -391,7 +406,7 @@ impl Level {
                             acc += a * b * self.get(x, y, c);
                         }
                     }
-                    data.push(store(format, acc));
+                    data.push(round_f16(acc));
                 }
             }
         }
@@ -435,15 +450,59 @@ impl Level {
     }
 }
 
-/// A value as a texture of `format` stores it.
-fn store(format: PlaneFormat, v: f64) -> f64 {
-    match format {
-        PlaneFormat::R8 | PlaneFormat::Rg8 => (v.clamp(0.0, 1.0) * 255.0).round() / 255.0,
-        PlaneFormat::R16F | PlaneFormat::Rg16F => round_f16(v),
-    }
+/// The source texels destination texel `j` covers, of a level `ss` texels
+/// across halved to `ds`, and the length each shares with it, in units
+/// where the destination texel is `ss` long and a source texel `ds`: so
+/// the lengths sum to `ss`, and at an odd size the first and last are
+/// parts. As `shaders/mips.wgsl` works them out.
+fn overlaps(j: u32, ss: u32, ds: u32) -> impl Iterator<Item = (u32, u32)> {
+    let (lo, hi) = (j * ss, j * ss + ss);
+    (lo / ds..=(hi - 1) / ds).map(move |x| (x, hi.min((x + 1) * ds) - lo.max(x * ds)))
 }
 
-fn srgb_eotf(v: f64) -> f64 {
+/// The next mip level of an 8-bit plane, `size` texels of `comps`
+/// components each (rows top to bottom, components interleaved), as the
+/// mip pass makes it (`shaders/mips.wgsl`, DECISIONS D31): each
+/// destination texel's area-weighted mean of the codes it covers, exact
+/// (in integers), rounded to the nearest code, ties to even. Returns the
+/// level's size and codes.
+///
+/// Ties to even, because a 2×2 mean is a whole code or a quarter, a half
+/// or three quarters past one, so ties are common, and each level is
+/// made from the one above, so a rule that breaks every tie one way
+/// moves each level further that way: on the grid, against the same
+/// chain unrounded, ties up (this reference's f64 `round` until the pass
+/// rounded its means) put luma levels 1 to 5 a mean 0.11 to 0.74 codes
+/// high, and RADV's export of the unrounded means as far low, where ties
+/// to even keeps every level within 0.02 codes. It is also the rule of
+/// every other rounding in the pipeline (`round_f16`, the ingest and
+/// encode passes, WGSL's `round`).
+pub fn halve_codes(codes: &[u8], (sw, sh): (u32, u32), comps: usize) -> (u32, u32, Vec<u8>) {
+    let (dw, dh) = ((sw / 2).max(1), (sh / 2).max(1));
+    let area = u64::from(sw) * u64::from(sh);
+    let columns: Vec<Vec<(u32, u32)>> = (0..dw).map(|i| overlaps(i, sw, dw).collect()).collect();
+    let mut out = Vec::with_capacity(dw as usize * dh as usize * comps);
+    for j in 0..dh {
+        let wy: Vec<(u32, u32)> = overlaps(j, sh, dh).collect();
+        for wx in &columns {
+            for c in 0..comps {
+                let mut n = 0u64;
+                for &(y, a) in &wy {
+                    for &(x, b) in wx {
+                        let code = codes[(y as usize * sw as usize + x as usize) * comps + c];
+                        n += u64::from(a) * u64::from(b) * u64::from(code);
+                    }
+                }
+                let (k, r) = (n / area, n % area);
+                let up = 2 * r > area || (2 * r == area && k % 2 == 1);
+                out.push((k + u64::from(up)) as u8);
+            }
+        }
+    }
+    (dw, dh, out)
+}
+
+pub(crate) fn srgb_eotf(v: f64) -> f64 {
     if v <= 0.040_45 {
         v / 12.92
     } else {
@@ -451,7 +510,7 @@ fn srgb_eotf(v: f64) -> f64 {
     }
 }
 
-fn srgb_oetf(l: f64) -> f64 {
+pub(crate) fn srgb_oetf(l: f64) -> f64 {
     if l <= 0.003_130_8 {
         l * 12.92
     } else {
@@ -515,9 +574,47 @@ mod tests {
     }
 
     #[test]
-    fn unorm_levels_store_codes() {
-        assert_eq!(store(PlaneFormat::R8, 0.5), 128.0 / 255.0);
-        assert_eq!(store(PlaneFormat::Rg8, 1.2), 1.0);
-        assert_eq!(store(PlaneFormat::R16F, 0.1), round_f16(0.1));
+    fn eight_bit_means_round_to_the_nearest_code_ties_to_even() {
+        // 2×2 blocks whose means are 0.25, 0.5, 0.75, 1.5, 2.5 and 3.5
+        // codes past a whole one, in R8; f64's `round` takes each half up.
+        let blocks: [[u8; 4]; 6] = [
+            [0, 0, 0, 1],
+            [0, 0, 1, 1],
+            [0, 1, 1, 1],
+            [1, 1, 2, 2],
+            [2, 3, 2, 3],
+            [3, 4, 3, 4],
+        ];
+        let codes: Vec<u8> = (0..2)
+            .flat_map(|row| {
+                blocks
+                    .iter()
+                    .flat_map(move |b| [b[2 * row], b[2 * row + 1]])
+            })
+            .collect();
+        let (w, h, got) = halve_codes(&codes, (12, 2), 1);
+        assert_eq!((w, h, got), (6, 1, vec![0, 0, 1, 2, 2, 4]));
+        // Rg8: each component alone.
+        let (_, _, got) = halve_codes(&[0, 9, 1, 9, 0, 10, 1, 10], (2, 2), 2);
+        assert_eq!(got, vec![0, 10]);
+        // Odd: 5 across into 2, weights 2, 2 and 1 of 5 for texel 0 and
+        // 1, 2 and 2 for texel 1, so 1, 2, 3, 0, 0 is 9 / 5 and 3 / 5; 5 × 2
+        // into 2 × 1 puts 5 / 10 and 15 / 10 on ties.
+        assert_eq!(halve_codes(&[1, 2, 3, 0, 0], (5, 1), 1).2, vec![2, 1]);
+        let tie = [1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(halve_codes(&tie, (5, 2), 1).2, vec![0, 0]);
+        let tie = [1, 1, 1, 0, 0, 2, 2, 2, 0, 0];
+        assert_eq!(halve_codes(&tie, (5, 2), 1).2, vec![2, 0]);
+        // Every overlap sums to the source size, at the largest sizes too.
+        for (ss, j) in [(5, 1), (16383, 8190), (16384, 8191), (3, 0), (1, 0)] {
+            let ds = (ss / 2).max(1);
+            assert_eq!(overlaps(j, ss, ds).map(|o| o.1).sum::<u32>(), ss);
+        }
+        // At 16383 × 3 the sum of 255s is 255 · 16383 · 3 over the area:
+        // 255 exactly.
+        let full = vec![255u8; 16383 * 3];
+        let (w, h, got) = halve_codes(&full, (16383, 3), 1);
+        assert_eq!((w, h), (8191, 1));
+        assert!(got.iter().all(|&k| k == 255));
     }
 }

@@ -20,10 +20,12 @@ use std::sync::{Mutex, OnceLock};
 
 use common::{Frame, Kind, color, frame, gpu};
 use spherecut_core::video::{ChromaSiting, Matrix, Range, Transfer};
-use spherecut_render::readback::{f16_to_f32, read_texture, round_f16};
+use spherecut_render::readback::{Texels, f16_to_f32, read_texture, round_f16};
 use spherecut_render::reference::{self, ImageF64};
+use spherecut_render::still::srgb_oetf;
 use spherecut_render::{
-    DebugMode, Depth, Image, Placement, Stereo, StillOptions, StillRenderer, ViewParams,
+    DebugMode, Depth, Encoder, Image, LinearTarget, Placement, Stereo, StillOptions, StillRenderer,
+    ViewParams,
 };
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
@@ -533,6 +535,173 @@ fn srgb_eotf(v: f64) -> f64 {
 /// Whether `v` is within a millionth of a tie between two halves.
 fn near_a_tie(v: f64) -> bool {
     round_f16(v * (1.0 - 1e-6)) != round_f16(v * (1.0 + 1e-6))
+}
+
+/// What the encode pass writes into a `width`×1 texture of `format`,
+/// texel k from a linear target that holds `linear(k)`, an exact half.
+fn encode_into(format: wgpu::TextureFormat, width: u32, linear: impl Fn(u32) -> f64) -> Texels {
+    let gpu = gpu();
+    let device = &gpu.device;
+    let output = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("encode output"),
+        size: wgpu::Extent3d {
+            width,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let out_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+    let encoder = Encoder::new(gpu, format);
+    let target = LinearTarget::new(gpu, (1, 1)).unwrap();
+    let target_view = target
+        .texture()
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    fn pass<'e>(
+        enc: &'e mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        load: wgpu::LoadOp<wgpu::Color>,
+    ) -> wgpu::RenderPass<'e> {
+        enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("encode test"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+    // One texel a submit, since the encoder writes its origin through the
+    // queue: the 1×1 target cleared to the value, drawn at (k, 0).
+    for k in 0..width {
+        let l = linear(k);
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let clear = wgpu::Color {
+            r: l,
+            g: l,
+            b: l,
+            a: 1.0,
+        };
+        drop(pass(&mut enc, &target_view, wgpu::LoadOp::Clear(clear)));
+        {
+            let load = if k == 0 {
+                wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+            } else {
+                wgpu::LoadOp::Load
+            };
+            let mut p = pass(&mut enc, &out_view, load);
+            p.set_scissor_rect(k, 0, 1, 1);
+            encoder.draw(&mut p, &target, [k, 0]);
+        }
+        gpu.queue.submit([enc.finish()]);
+    }
+    read_texture(gpu, &output, 0).unwrap()
+}
+
+#[test]
+fn the_encode_pass_writes_every_code() {
+    // A linear target holding the nearest half of each code's EOTF comes
+    // out of the encode pass as that code, for every code of the 8-bit
+    // targets and of Rgb10a2Unorm: the shader rounds to the target's
+    // codes and returns k / (2^bits − 1), at 10 bits its nearest half
+    // (DECISIONS D31), and the linear target's half moves the OETF by at
+    // most 0.22 of a 10-bit code. Into an f16 target it writes the OETF's
+    // nearest half, which lavapipe's own conversion, truncating, would
+    // miss; into an f32 one the OETF unrounded. lavapipe converts to
+    // unorm to nearest, so RADV's pack toward zero, which the rounding is
+    // for, is emulated in `encode`'s unit test instead.
+    for (format, max) in [
+        (wgpu::TextureFormat::Rgba8Unorm, 255u32),
+        (wgpu::TextureFormat::Bgra8Unorm, 255),
+        (wgpu::TextureFormat::Rgb10a2Unorm, 1023),
+    ] {
+        assert_eq!(spherecut_render::encode::code_max(format), Some(max));
+        let lin = |k: u32| round_f16(srgb_eotf(f64::from(k) / f64::from(max)));
+        let got = encode_into(format, max + 1, lin);
+        let mut wrong = Vec::new();
+        for k in 0..=max {
+            let t = got.texel(k, 0).unwrap();
+            let codes = if max == 255 {
+                t.iter().map(|&c| u32::from(c)).collect::<Vec<_>>()
+            } else {
+                let p = u32::from_le_bytes(t.try_into().unwrap());
+                vec![p & 1023, (p >> 10) & 1023, (p >> 20) & 1023, p >> 30]
+            };
+            let alpha = if max == 255 { 255 } else { 3 };
+            if codes != [k, k, k, alpha] {
+                wrong.push((k, codes));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{format:?}: {} of {} codes came out otherwise, such as {:?}",
+            wrong.len(),
+            max + 1,
+            &wrong[..wrong.len().min(6)]
+        );
+    }
+    let format = wgpu::TextureFormat::Rgba32Float;
+    assert_eq!(spherecut_render::encode::code_max(format), None);
+    let lin = |k: u32| round_f16(srgb_eotf(f64::from(k) / 255.0));
+    let got = encode_into(format, 256, lin);
+    let (mut off_oetf, mut codes_off) = (0f64, 0f64);
+    for k in 0..256 {
+        let t = got.texel(k, 0).unwrap();
+        let v = f64::from(f32::from_le_bytes(t[..4].try_into().unwrap()));
+        let want = f64::from(srgb_oetf(lin(k) as f32));
+        off_oetf = off_oetf.max((v - want).abs());
+        codes_off = codes_off.max((want - f64::from(k) / 255.0).abs());
+    }
+    // Rounded to 8-bit codes it would be up to 0.037 codes, 1.5e-4, off.
+    assert!(off_oetf < 1e-5, "{off_oetf}");
+    assert!(codes_off > 1e-4, "{codes_off}");
+    let format = wgpu::TextureFormat::Rgba16Float;
+    assert!(spherecut_render::encode::returns_half(format));
+    let lin = |k: u32| round_f16(srgb_eotf(f64::from(k) / 1023.0));
+    let got = encode_into(format, 1024, lin);
+    let (mut wrong, mut below, mut compared) = (Vec::new(), 0, 0);
+    for k in 0..1024 {
+        let t = got.texel(k, 0).unwrap();
+        let stored: Vec<u16> = t
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let oetf = srgb_oetf(lin(k) as f32);
+        // The shader's pow and the CPU's may differ by an ulp or two.
+        if near_a_tie(f64::from(oetf)) {
+            continue;
+        }
+        compared += 1;
+        let want = half_bits(oetf);
+        // Where the nearest half lies above, a store that truncates misses.
+        if f16_to_f32(want) > oetf {
+            below += 1;
+        }
+        if stored[..3].iter().any(|h| *h != want) || stored[3] != half_bits(1.0) {
+            wrong.push((k, stored, want));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "Rgba16Float: {} of {compared} values came out other than the OETF's nearest half, such \
+         as {:?}",
+        wrong.len(),
+        &wrong[..wrong.len().min(6)]
+    );
+    assert!(below > 300, "{below} of {compared}");
 }
 
 #[test]

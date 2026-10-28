@@ -3,14 +3,14 @@
   "checks": {
     "crop_half": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
-        "cpu_max_channel": 0.0148,
-        "cpu_psnr_db": 54.1896,
+        "cpu_max_channel": 0.0123,
+        "cpu_psnr_db": 54.6157,
         "pixels_outside": 12096.0,
         "pixels_outside_not_black": 0.0
       },
@@ -29,7 +29,7 @@
       "source_fnv64": "7ba103e848743ebe",
       "thresholds": {
         "cpu_max_channel_max": 0.1,
-        "cpu_psnr_db_min": 51.18,
+        "cpu_psnr_db_min": 51.61,
         "pixels_outside_min": 1000.0,
         "pixels_outside_not_black_max": 0.0
       },
@@ -56,8 +56,8 @@
     },
     "layout_invariance": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -119,8 +119,8 @@
     },
     "lod_heatmap": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -167,20 +167,20 @@
     },
     "matrix_601_709": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
         "601_vs_709_max_lsb": 13.0,
-        "601_vs_709_psnr_db": 46.3411,
-        "control_601_as_709_below_tolerance_db": 19.4862,
-        "control_601_as_709_psnr_db": 30.8238,
+        "601_vs_709_psnr_db": 46.3416,
+        "control_601_as_709_below_tolerance_db": 19.5008,
+        "control_601_as_709_psnr_db": 30.8392,
         "cpu_601_max_channel": 0.0108,
-        "cpu_601_psnr_db": 53.3177,
+        "cpu_601_psnr_db": 53.3478,
         "cpu_709_max_channel": 0.012,
-        "cpu_709_psnr_db": 53.1439
+        "cpu_709_psnr_db": 53.1818
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": [
@@ -215,9 +215,9 @@
         "601_vs_709_psnr_db_min": 40.0,
         "control_601_as_709_below_tolerance_db_min": 10.0,
         "cpu_601_max_channel_max": 0.1,
-        "cpu_601_psnr_db_min": 50.31,
+        "cpu_601_psnr_db_min": 50.34,
         "cpu_709_max_channel_max": 0.1,
-        "cpu_709_psnr_db_min": 50.14
+        "cpu_709_psnr_db_min": 50.18
       },
       "view": {
         "filter": "isotropic",
@@ -242,8 +242,8 @@
     },
     "nadir_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -251,7 +251,7 @@
         "bad_pixels": 0.0,
         "bad_pixels_max_lsb": 1.0,
         "control_implicit_bad_pixels": 186.0,
-        "control_implicit_bad_pixels_max_lsb": 59.0
+        "control_implicit_bad_pixels_max_lsb": 58.0
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
@@ -294,8 +294,8 @@
     },
     "passthrough_exact": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -497,8 +497,8 @@
     },
     "range_full_vs_limited": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -589,8 +589,8 @@
     },
     "seam_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -598,7 +598,7 @@
         "bad_pixels": 0.0,
         "bad_pixels_max_lsb": 1.0,
         "control_implicit_bad_pixels": 288.0,
-        "control_implicit_bad_pixels_max_lsb": 91.0,
+        "control_implicit_bad_pixels_max_lsb": 90.0,
         "yaw_deg": 179.5524
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
@@ -642,19 +642,19 @@
     },
     "shimmer_fisheye360": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
         "control_level0_rms_change_over_ideal": 3.2632,
-        "ideal_over_level0_db_worst": 9.3243,
+        "ideal_over_level0_db_worst": 9.3266,
         "ideal_pixels": 28532.0,
-        "ideal_psnr_db": 19.5206,
+        "ideal_psnr_db": 19.5223,
         "ideal_rms_change_lsb": 30.1603,
-        "rms_change_lsb": 2.2083,
-        "rms_change_over_ideal_lsb_worst": -27.8467
+        "rms_change_lsb": 2.2069,
+        "rms_change_over_ideal_lsb_worst": -27.846
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
@@ -700,19 +700,19 @@
     },
     "shimmer_tinyplanet": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
         "control_level0_rms_change_over_ideal": 5.0043,
-        "ideal_over_level0_db_worst": 14.3093,
+        "ideal_over_level0_db_worst": 14.3151,
         "ideal_pixels": 10044.0,
-        "ideal_psnr_db": 25.312,
+        "ideal_psnr_db": 25.3167,
         "ideal_rms_change_lsb": 19.6523,
-        "rms_change_lsb": 7.3397,
-        "rms_change_over_ideal_lsb_worst": -11.7585
+        "rms_change_lsb": 7.3311,
+        "rms_change_over_ideal_lsb_worst": -11.7613
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
@@ -758,8 +758,8 @@
     },
     "siting_left_center": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -901,8 +901,8 @@
     },
     "tenbit_ramp": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -970,16 +970,16 @@
     },
     "tinyplanet_pole": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
         "bad_pixels": 0.0,
         "bad_pixels_max_lsb": 1.0,
-        "control_implicit_bad_pixels": 175.0,
-        "control_implicit_bad_pixels_max_lsb": 103.0
+        "control_implicit_bad_pixels": 178.0,
+        "control_implicit_bad_pixels_max_lsb": 102.0
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
@@ -1022,16 +1022,16 @@
     },
     "zenith_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
         "bad_pixels": 0.0,
         "bad_pixels_max_lsb": 1.0,
-        "control_implicit_bad_pixels": 185.0,
-        "control_implicit_bad_pixels_max_lsb": 59.0
+        "control_implicit_bad_pixels": 186.0,
+        "control_implicit_bad_pixels_max_lsb": 58.0
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
@@ -1076,19 +1076,19 @@
   "images": {
     "fisheye_180": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
-        "cpu_max_channel": 0.0219,
-        "cpu_psnr_db": 50.0102,
+        "cpu_max_channel": 0.0154,
+        "cpu_psnr_db": 51.2084,
         "pixels_past_pi": 0.0,
         "pixels_past_pi_not_black": 0.0
       },
       "png": "fisheye_180.png",
-      "png_fnv64": "01169330bf1f27e2",
+      "png_fnv64": "86a7301cd44085f8",
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
         "layout": "nv12",
@@ -1104,9 +1104,10 @@
       "source_fnv64": "0e2be80e98b1f2c5",
       "thresholds": {
         "cpu_max_channel_max": 0.1,
-        "cpu_psnr_db_min": 47.01,
+        "cpu_psnr_db_min": 48.2,
         "other_driver": {
-          "max_lsb": 4.0,
+          "max_lsb": 8.0,
+          "pixels_past_4_lsb_max": 4.0,
           "psnr_db_min": 48.0,
           "ssim_min": 0.995
         },
@@ -1136,20 +1137,20 @@
     },
     "fisheye_360": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
-        "cpu_max_channel": 0.0197,
-        "cpu_psnr_db": 49.5993,
+        "cpu_max_channel": 0.0143,
+        "cpu_psnr_db": 51.1538,
         "pixels_past_pi": 7888.0,
         "pixels_past_pi_checked": 7888.0,
         "pixels_past_pi_not_black": 0.0
       },
       "png": "fisheye_360.png",
-      "png_fnv64": "d22aee2947194f3b",
+      "png_fnv64": "48a830191644d813",
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
         "layout": "nv12",
@@ -1165,9 +1166,10 @@
       "source_fnv64": "0e2be80e98b1f2c5",
       "thresholds": {
         "cpu_max_channel_max": 0.1,
-        "cpu_psnr_db_min": 46.59,
+        "cpu_psnr_db_min": 48.15,
         "other_driver": {
-          "max_lsb": 4.0,
+          "max_lsb": 8.0,
+          "pixels_past_4_lsb_max": 4.0,
           "psnr_db_min": 48.0,
           "ssim_min": 0.995
         },
@@ -1198,17 +1200,17 @@
     },
     "morph_half": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
-        "cpu_max_channel": 0.0142,
-        "cpu_psnr_db": 51.6814
+        "cpu_max_channel": 0.013,
+        "cpu_psnr_db": 52.2677
       },
       "png": "morph_half.png",
-      "png_fnv64": "a45966b0956613da",
+      "png_fnv64": "6a0e9186f16a60ec",
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
         "layout": "nv12",
@@ -1224,9 +1226,10 @@
       "source_fnv64": "0e2be80e98b1f2c5",
       "thresholds": {
         "cpu_max_channel_max": 0.1,
-        "cpu_psnr_db_min": 48.68,
+        "cpu_psnr_db_min": 49.26,
         "other_driver": {
-          "max_lsb": 4.0,
+          "max_lsb": 8.0,
+          "pixels_past_4_lsb_max": 4.0,
           "psnr_db_min": 48.0,
           "ssim_min": 0.995
         },
@@ -1257,17 +1260,17 @@
     },
     "rect_forward": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
         "cpu_max_channel": 0.0116,
-        "cpu_psnr_db": 53.1394
+        "cpu_psnr_db": 53.1557
       },
       "png": "rect_forward.png",
-      "png_fnv64": "6374766bff6b55cb",
+      "png_fnv64": "42a45a1bb13455e1",
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
         "layout": "nv12",
@@ -1283,9 +1286,10 @@
       "source_fnv64": "0e2be80e98b1f2c5",
       "thresholds": {
         "cpu_max_channel_max": 0.1,
-        "cpu_psnr_db_min": 50.13,
+        "cpu_psnr_db_min": 50.15,
         "other_driver": {
-          "max_lsb": 4.0,
+          "max_lsb": 8.0,
+          "pixels_past_4_lsb_max": 4.0,
           "psnr_db_min": 48.0,
           "ssim_min": 0.995
         },
@@ -1314,19 +1318,19 @@
     },
     "rect_ypr": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
         "control_signs_misplaced": 3.0,
-        "cpu_max_channel": 0.0109,
-        "cpu_psnr_db": 53.2003,
+        "cpu_max_channel": 0.0111,
+        "cpu_psnr_db": 53.25,
         "markers_found": 3.0
       },
       "png": "rect_ypr.png",
-      "png_fnv64": "2b1d20e311b88ee4",
+      "png_fnv64": "a79be0d13499226e",
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
         "layout": "nv12",
@@ -1343,10 +1347,11 @@
       "thresholds": {
         "control_signs_misplaced_min": 3.0,
         "cpu_max_channel_max": 0.1,
-        "cpu_psnr_db_min": 50.2,
+        "cpu_psnr_db_min": 50.24,
         "markers_found_min": 3.0,
         "other_driver": {
-          "max_lsb": 4.0,
+          "max_lsb": 8.0,
+          "pixels_past_4_lsb_max": 4.0,
           "psnr_db_min": 48.0,
           "ssim_min": 0.995
         },
@@ -1375,21 +1380,21 @@
     },
     "stereo_tinyplanet": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "f5dd1fe554",
-      "date": "2026-10-24",
+      "commit": "df4a6680f5",
+      "date": "2026-10-28",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
         "control_level0_ideal_psnr_db": 23.8617,
-        "cpu_max_channel": 0.0161,
-        "cpu_psnr_db": 51.8976,
-        "ideal_over_level0_db": 6.8534,
+        "cpu_max_channel": 0.0128,
+        "cpu_psnr_db": 52.5181,
+        "ideal_over_level0_db": 6.8416,
         "ideal_pixels": 2600.0,
-        "ideal_psnr_db": 30.7151
+        "ideal_psnr_db": 30.7033
       },
       "png": "stereo_tinyplanet.png",
-      "png_fnv64": "f03df275ee73b002",
+      "png_fnv64": "3183e63aedc0e02e",
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
         "layout": "nv12",
@@ -1405,13 +1410,14 @@
       "source_fnv64": "0e2be80e98b1f2c5",
       "thresholds": {
         "cpu_max_channel_max": 0.1,
-        "cpu_psnr_db_min": 48.89,
+        "cpu_psnr_db_min": 49.51,
         "ideal_min_lod": 2.5,
         "ideal_over_level0_db_min": 3.0,
         "ideal_pixels_min": 1000.0,
-        "ideal_psnr_db_min": 29.71,
+        "ideal_psnr_db_min": 29.7,
         "other_driver": {
-          "max_lsb": 4.0,
+          "max_lsb": 8.0,
+          "pixels_past_4_lsb_max": 4.0,
           "psnr_db_min": 48.0,
           "ssim_min": 0.995
         },

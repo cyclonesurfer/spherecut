@@ -2778,13 +2778,17 @@ What:
   one); the mips of deep planes and the projection round their f32 with
   `round_f16` in `shaders/common.wgsl` (bit arithmetic, a scale by 2^24
   for subnormals, and a signed infinity from 65520 up, where the nearest
-  half is infinite). unorm8 targets are left to the driver: lavapipe
-  rounds them to nearest, as Vulkan asks, and the 8-bit mips match an
-  independent area mean rounded to nearest at every texel tested.
+  half is infinite). The 8-bit mips and the encode pass round to codes
+  themselves: the mip pass works each mean of codes out exactly, in
+  integers, and returns its nearest code, ties to even, over 255; the
+  encode pass returns its target's nearest code, and into an f16 target
+  the nearest half (both below, after odin's third run).
 - **Mips**: one area-weighted shader for all four formats, a render pass
   per level, reading the level above with `textureLoad` and weighting
   each texel by its overlap in integer arithmetic, so odd sizes come out
-  exact. Levels per plane are clamp(1 + ⌊log2(max / 64)⌋, 1, 8).
+  exact. At 8 bits the mean of the codes is an integer division too,
+  rounded to the nearest code with ties to even (amended 2026-10-28,
+  below). Levels per plane are clamp(1 + ⌊log2(max / 64)⌋, 1, 8).
 - **Slots**: `GpuFrame` holds a frame's planes with their mips, its
   `Source` uniform and its bind group, for a `SlotShape` (plane formats
   and sizes; the depth may differ, since the ingest normalises it). Level
@@ -2818,8 +2822,9 @@ What:
   applied to samples read as code / (2^b − 1), then clamped, through the
   sRGB EOTF (or not, for linear sources) into an `Rgba16Float` target;
   the encode pass applies the OETF into `Rgba8Unorm`, one texel per
-  pixel with no filtering. A 16-bit still reads the linear target back
-  and applies the OETF on the CPU.
+  pixel with no filtering, rounded to 8-bit codes in the shader. A
+  16-bit still reads the linear target back and applies the OETF on the
+  CPU.
 - **Samplers**: U repeats and V clamps; U clamps too for an sv3d crop.
   `Placement` gives the cover, the crop and the eye.
 - **Stereo**: of a stereo frame only the shown eye, the left, is
@@ -2837,8 +2842,9 @@ What:
   4.3) no longer applies.
 - **The CPU reference** (`render::reference`) is the projection in f64,
   step for step, storing each mip level and the linear target as the GPU
-  stores them (unorm8 rounded to nearest, and the nearest f16 with ties
-  to even, which the shaders round to themselves). The Tier 1 tests
+  stores them (an 8-bit level as the exact mean of the codes to the
+  nearest code, `reference::halve_codes`, and the nearest f16, both with
+  ties to even, which the shaders round to themselves). The Tier 1 tests
   compare `render_still` with it on lavapipe.
 
 Where this differs from the plan, from the evidence:
@@ -2903,8 +2909,10 @@ A raised chroma column or row peaks within 0.001 of a luma texel of
 where each siting's definition puts it (calibrated with luma, not the
 renderer's chroma arithmetic, which the GPU and the reference share: a
 mirrored offset passed every other render test). The mips match an area
-mean computed independently to one code at 8 bits, and exactly (its nearest half) for deep planes unless the mean is
-within a millionth of a tie; every 10-, 12- and 16-bit code ingests as
+mean computed independently exactly at 8 bits (its nearest code, ties to
+even; to one code until the pass rounded, below), and exactly (its
+nearest half) for deep planes unless the mean is within a millionth of a
+tie; every 10-, 12- and 16-bit code ingests as
 its nearest half; `round_f16` itself returns the nearest half of every
 value tested (below); and the linear target holds the nearest half of
 every grey level's EOTF. The upload bench's smoke run (640×320, 4 frames) shows a
@@ -3037,6 +3045,177 @@ branch gives the same halves as its normal one for every code of 16
 bits or fewer, so no ingest can show it is needed; it is kept for the
 exactness it states.
 
+*Updated after odin's third run (PR #5, at be38fa4):* the encode pass
+rounds to its target's codes itself. On the RX 7600 (RADV, Mesa 26.2.5)
+`passthrough_exact` found ten limited-range luma codes a code low
+against the model of the chain: 74, 129, 135, 141, 153, 165, 208, 214,
+220 and 226 (`hw-reports/odin-be38fa409e.md`). RADV exports a
+fragment's output to an 8-bit unorm target by packing it to f16 toward
+zero (`v_cvt_pkrtz_f16_f32`) before the colour block converts it to
+unorm, and a half's step in [0.5, 1) is 2^−11, 0.1245 codes at 255, so
+an OETF value that lay less than that above a tie came out below it.
+Vulkan allows this: it asks for a conversion to nearest, and requires
+only that an exact integer f · L converts to itself.
+
+So `shaders/encode.wgsl` computes round(v · L) in f32 (WGSL's `round`,
+ties to even) and returns k / L, with L the override constant `CODE_MAX`
+from the output format (`encode::code_max`): 255 for `Rgba8Unorm` and
+`Bgra8Unorm`, 1023 for `Rgb10a2Unorm`, and 0, no rounding, for any other
+format, which suits a float target. A second override, `HALF`
+(`encode::returns_half`), has it return the nearest half of that for
+`Rgb10a2Unorm` and `Rgba16Float`. Any other unorm format, or an sRGB
+one, is documented as wrong rather than refused, as before. k / L in f32
+times L is k in f32 for every k of both depths, so a driver that
+converts the f32 itself, multiplying in f32, has an integer, which
+Vulkan requires it to keep, if the shader's division was correctly
+rounded. WGSL doesn't promise that (it allows 2.5 ulp): divided as a
+multiply by f32 1/255, 126 of the 256 codes come out up to 1.9e−5 of a
+code off a whole one in f32 (a probe, not kept). A pack to f16 never
+leaves an integer. Off an integer, Vulkan asks for the nearest code but
+allows either of the two nearest, so nothing the shader returns makes
+the store exact on every driver Vulkan's letter allows; what it can do
+is keep the value far from a tie, so that a driver that converts to
+nearest stores k whatever its arithmetic.
+Packed toward zero, k / 255 lies less than 0.1245 codes below k, 0.375
+codes or more from either tie. At 10 bits a half's step in [0.5, 1) is
+0.4995 codes, and the branch's review found k / 1023 packed toward zero
+as little as 0.0005 codes above the tie below k (at k = 1023, an f32 ulp
+under 1; with the division's error of up to 3 ulp, 102 codes land within
+0.1 codes of a tie), which only an exact conversion to nearest gives
+back. Whether RADV packs its 10-bit exports so, as it does its 8-bit
+ones, nothing here shows. The nearest half of k / 1023 lies within 0.25
+codes of k, and no pack moves it, so the pass returns that. Into
+`Rgba16Float` the pass returned the OETF unrounded, so the half stored
+was the driver's choice (lavapipe's truncates); it now returns the
+nearest half, as every other pass that writes f16 does. 8-bit targets
+keep k / 255, exact for a driver that converts the f32. The model of the
+chain in `passthrough_exact` now ends with that rounding rather than the
+unorm8 store, and its bound is unchanged: the f16 linear target still
+moves the OETF by at most 0.0547 codes, and the store no longer adds
+RADV's pack. The integer target `PROGRESS.md` proposed (`Rgba8Uint` or a
+storage buffer) wasn't needed, and egui's target stays the unorm one it
+is.
+
+Tested on lavapipe (Mesa 25.2.8, LLVM 20.1.2):
+
+- `every_code_comes_through_the_drivers_export` (`encode.rs`, no GPU)
+  emulates the export for every k at 255 and 1023, and each f32 within 3
+  ulp of k / L (WGSL's division may be 2.5 ulp out): what the pass
+  returns (k / 255, or the nearest half of k / 1023), unpacked and
+  packed to f16 toward zero and to nearest, converts back to k, and lies
+  within 0.1246 codes of k at 8 bits and 0.25 at 10, where k / 1023
+  packed toward zero comes within 0.001 codes of a tie. Its control
+  packs the unrounded values of `passthrough_exact`'s chain toward zero:
+  exactly the ten codes odin measured come out a code low (129 is
+  131.5735 codes, 131.4844 packed), and none of the 256 full-range ones.
+- `the_encode_pass_writes_every_code` (`tests/render.rs`) encodes the
+  nearest half of each code's EOTF into `Rgba8Unorm`, `Bgra8Unorm` and
+  `Rgb10a2Unorm`: all 256 and all 1024 codes come back as themselves;
+  into `Rgba32Float` the OETF comes unrounded, within 1e−5 of the CPU's.
+  With the shader rounding to 255 whatever the format, 768 of the 1024
+  10-bit codes come out otherwise. Into `Rgba16Float`, the OETFs of
+  1024 values come out as their nearest halves (1020 compared, 4 lying
+  within a millionth of a tie), where without `HALF` 471 of the 1020
+  came out a half below.
+- No golden image moved, and none was blessed again: the six stored
+  PNGs of `goldens` and the four of slice 4's `pipeline_goldens` are
+  identical at the build they were blessed on, `passthrough_exact`
+  equals the model at all 512 fields, and `goldens_on_host_llvmpipe`
+  passes here. lavapipe's own unorm8 conversion already gave the
+  nearest even code to the f32 product v · 255, which is what the
+  shader now computes: a probe of 20655 values within 40 ulp of every
+  tie, 256 of them with the product on the tie, matched it at every
+  value, where rounding the exact product differs at 128.
+
+What this doesn't show: RADV itself, until Pat's next run, where
+`passthrough_exact` should give limited k = 86, 159 and 165 one code
+off the formula, as lavapipe does. The mip pass then still left its
+`R8Unorm` and `Rg8Unorm` levels to the driver, which D32's emulation
+found cost the RX 7600's wide views up to 15 dB; it rounds them itself
+now (next).
+
+*Amended 2026-10-28: the mip pass rounds its 8-bit means to codes.*
+`shaders/mips.wgsl` summed each 8-bit texel's area mean in f32 from the
+level above and returned it unrounded, so the store was the driver's
+export. A 2×2 mean of codes is a whole code or a quarter, a half or
+three quarters past one, so ties are common, and each level is made
+from the one above, so a store that breaks them one way moves every
+level further that way. RADV's export (above) stored a mean on a half
+code, or less than 0.1245 codes above one, a code low: emulated on the
+grid, 13674 of luma level 1's 131072 texels (D32 finds this is what the
+RX 7600's wide views lost). lavapipe's, the f32 mean times 255 to the
+nearest even code, put 3396 of them a code off the nearest code with
+ties to even, more of them up than down. Vulkan allows both.
+
+Now the pass works the mean out exactly in u32. Positions are scaled by
+the destination size as before, so each overlap is an integer and the
+mean is Σ ox·oy·code / (Sx·Sy). At 16384 a side that sum reaches
+255 · 2^28, past a u32, so each row's h = Σ ox·code (at most 255·Sx) is
+split into q·Sx + r as it comes, Q = Σ oy·q (at most 255·Sy) into
+a·Sy + b at the end, and the mean is a + (Sx·b + R) / (Sx·Sy), R being
+Σ oy·r, with a numerator under 2·Sx·Sy, 2^29 at most. The pass rounds
+that to the nearest code k, ties to even, and returns k / 255, which by
+the encode pass's argument (above) a driver that converts to nearest, as
+Vulkan asks, stores as k: every f32 within 3 ulp of k / 255, as WGSL's
+division may give, lies within 6e−5 codes of k, and packed toward zero,
+as RADV packs it, less than 0.1245 codes below k
+(`every_code_comes_through_the_drivers_export`). Vulkan's letter alone,
+which takes only an exact integer to itself, doesn't promise k.
+`reference::halve_codes` computes the same mean in u64 and rounds by the
+same rule, bit for bit, where the reference took the f64 mean to the
+nearest code with ties up (f64's `round`) before. The f16 path for deep
+planes is unchanged: its mean is f32 and `round_f16` gives its nearest
+half, as tested above.
+
+Why ties to even: each level compounds the one above, so the rule's
+bias matters more than any one texel. Against the grid's chain kept
+unrounded (in f64), ties to even puts luma levels 1 to 5 a mean −0.001,
++0.003, +0.002, −0.018 and −0.019 codes off; ties up, the old
+reference's rule, +0.106, +0.280, +0.485, +0.631 and +0.743; RADV's
+export of the old means −0.105, −0.277, −0.476, −0.615 and −0.742;
+lavapipe's +0.025, +0.068, +0.124, +0.147 and +0.200 (a probe made for
+this amendment, not kept as a test). It is also the rule of every other
+rounding in the pipeline (`round_f16`, the ingest and encode passes,
+WGSL's `round`), and the one lavapipe's old stores were nearest to
+(3396 of luma level 1's 131072 texels off it, 10612 off ties up), so it
+moved the stored images least.
+
+Tested on lavapipe (Mesa 25.2.8, LLVM 20.1.2), in `tests/upload.rs`:
+
+- `eight_bit_mips_are_the_references_code_for_code` makes up to 8
+  levels of noise NV12 frames at 256×128, 45×23 and 70×38 and of the
+  grid at 1024×512 and 1002×502 (8 of luma and of chroma but at 45×23,
+  6 and 5, and 70×38, 7 and 6, where the chain ends at 1×1), and every
+  texel of every level of luma (R8) and chroma (Rg8) is `halve_codes`'s
+  chain's, code for code. The grid
+  at 1024×512 has 27879 ties at luma level 1. Its controls: the old
+  pass through RADV's export, emulated, is off at level 1 of every
+  frame (13674 texels of the grid's luma), and ties up is off in every
+  frame (14008); the old pass through lavapipe's export is printed
+  (3396).
+- `eight_bit_mips_are_exact_at_the_largest_sizes` makes level 1 of a
+  16383×2051 NV24 frame (Rg8 at full size), and 16384×2049 and
+  2051×16383 grey ones, every code 128 or more, so each texel's sum
+  passes a u32: every texel equals `halve_codes`'s, where the sum in a
+  plain, wrapping u32 is off at every one.
+- `mips_are_area_means_at_odd_sizes` now holds the 8-bit levels to the
+  nearest code, ties to even, of an independent f64 area mean, exactly,
+  where it allowed one code.
+- The old shader fails all three (at 256×128 a luma texel came out 161
+  for 160; 139 texels off at 16383×2051); one summing in a plain u32
+  fails the largest sizes at all 8395775 texels; one rounding ties up
+  fails all three (1100 texels off at 16384×2049).
+- `eight_bit_means_round_to_the_nearest_code_ties_to_even`
+  (`reference.rs`) checks `halve_codes` on quarters, halves and odd
+  sizes by hand.
+
+Six of the stored goldens and one of slice 4's changed (D32), where a
+pixel reads level 1 or more. All nine CPU floors of the render goldens
+rose, and of slice 4's four only `h264_full_range`'s (47.2 to 48.17
+dB); the other three, and their PSNRs, didn't move. RADV itself
+hasn't run it: D32's emulation predicts the RX 7600's CPU checks at
+56.11 to 59.78 dB.
+
 ## D32. Golden images
 
 *2026-10-24, M1 slice 3b. The M1 plan's D30 (section 6), adjusted to
@@ -3079,9 +3258,9 @@ What:
   | Against | Rule |
   |---|---|
   | the stored PNG, at the adapter, `driver_info` and source hash it was blessed at | identical pixels |
-  | the stored PNG, another driver build | PSNR ≥ 48 dB, SSIM ≥ 0.995 (BT.709 luma, 11×11 Gaussian) and at most 4 LSB |
+  | the stored PNG, another driver build | PSNR ≥ 48 dB, SSIM ≥ 0.995 (BT.709 luma, 11×11 Gaussian), at most 4 pixels with a channel more than 4 LSB off, and none more than 8 LSB off (amended 2026-10-28, below) |
   | a source whose planes hash otherwise | "the synthetic source changed", with both hashes; the render isn't compared |
-  | `reference::render_trilinear` (f64) | PSNR ≥ the floor calibrated at blessing (measured − 3 dB, never below 36 dB), and no channel more than 0.1 off |
+  | `reference::render_trilinear` (f64) | PSNR ≥ the floor calibrated at blessing (measured − 3 dB, never below 36 dB), on a GPU too (amended 2026-10-28, below); and no channel more than 0.1 off |
   | `synth::render_view_ideal` | over the pixels the analytic LOD puts 2.5 levels down or more, at least 1000 of them: PSNR ≥ the floor calibrated at blessing (measured − 1 dB), and at least 3 dB above the level-0 control |
   | a roll twin (seam and poles) | no pixel more than 2/255 apart; the implicit-LOD control over 100 such pixels |
   | the same picture in the other matrix (`matrix_601_709`) | the BT.601 and BT.709 codings' renders at least 40 dB apart |
@@ -3105,24 +3284,33 @@ What:
   `<row>-<what>-{got,want,diff}.png` (the difference ×16) into
   `golden-diffs/` in the cargo target directory, which each run clears
   first.
-- **The harness's own tests**, Tier 1, beside it: the drift rule on
-  made images (one LSB everywhere is 48.13 dB, which passes between
-  builds and fails at the same one; half a pixel's shift fails); a
-  blessing into a scratch directory with one failed row writes nothing,
-  and a clean one then passes a plain run, identical; a blessing over a
-  floor blessed 0.4 dB higher goes ahead, over one 2 dB higher refuses,
-  names the floor and the opt-in and writes nothing, and with the opt-in
-  lowers it; an "over" bound fails at the bound; a changed source hash
-  is exactly one failure, the synthetic-source one with the driver build
-  in it, and one pixel a step off fails as not identical and writes its
-  diffs; the passthrough model and its bound (below); the two Tier 2
-  paths on lavapipe; and telling driver builds apart. Each blesses into
-  a scratch directory of its own, which it removes when it passes and
-  keeps, with its diffs, when it fails. The Tier 2 paths' tests ran on
-  `tests/goldens` at first, and the blessing command runs them beside
-  `goldens`, which rewrites it: after a change, they read it halfway
-  through the rewrite and failed the command (exit 101) although it had
-  written everything.
+- **The harness's own tests**, Tier 1, beside it: the drift rule on made
+  images (one LSB everywhere is 48.13 dB, which passes between builds
+  and fails at the same one; half a pixel's shift fails; four pixels 5,
+  5, 6 and 8 LSB off pass, two channels of one pixel count once, and a
+  fifth pixel, or one pixel 9 off, fails with its count and maximum in
+  the message); a blessing into a scratch directory with one failed row
+  writes nothing, and a clean one then passes a plain run, identical; a
+  blessing over a floor blessed 0.4 dB higher goes ahead, over one 2 dB
+  higher refuses, names the floor and the opt-in and writes nothing, and
+  with the opt-in lowers it; an "over" bound fails at the bound; a
+  changed source hash is exactly one failure, the synthetic-source one
+  with the driver build in it, and one pixel a step off fails as not
+  identical and writes its diffs; the passthrough model and its bound
+  (below); the two Tier 2 paths on lavapipe (the other-driver one with
+  its golden then changed: one pixel a step off passes it and fails the
+  exact rule, five pixels 5 LSB off fail it by the count); and telling
+  driver builds apart. Each blesses into a scratch directory of its own,
+  which it removes when it passes and keeps, with its diffs, when it
+  fails. The Tier 2 paths' tests ran on `tests/goldens` at first, and
+  the blessing command runs them beside `goldens`, which rewrites it:
+  after a change, they read it halfway through the rewrite and failed
+  the command (exit 101) although it had written everything. The
+  other-driver rule's fault test (below) read the stored PNGs too, and
+  in a blessing compared the images being replaced with the new renders,
+  failing the command the same way (the branch's review reproduced it
+  with a stored image changed, under a private mount); it now renders
+  the views itself. No Tier 1 test but `goldens` reads `tests/goldens`.
 - **Tier 2.** `goldens_on_gpu_match_reference` runs every row on each
   GPU Vulkan lists (or the one `SPHERECUT_ADAPTER` names) against the
   CPU and ideal references and the controls only, never against the
@@ -3132,29 +3320,32 @@ What:
   there and refuses a device fails it.
   `goldens_on_host_llvmpipe` runs the whole set on the machine's own
   llvmpipe by the other-driver rule whatever its build, and notes the
-  drift. Both hold the rows to the floors lavapipe was blessed with.
+  drift. Both hold the rows to the floors lavapipe was blessed with
+  (amended 2026-10-28, below: a lower floor for a GPU's CPU checks came
+  and went with the mip pass's rounding).
 
 Measured at blessing (lavapipe, Mesa 25.2.8, LLVM 20.1.2; the manifest
-has every number). Each control clears its bound:
+has every number; as blessed again on 2026-10-28, after the mip pass
+rounded its 8-bit means, below). Each control clears its bound:
 
 | Row | Check | Control (bound) |
 |---|---|---|
-| the six stored views | CPU 49.6 to 53.2 dB, no channel more than 0.022 off | |
+| the six stored views | CPU 51.15 to 53.25 dB, no channel more than 0.016 off | |
 | `rect_ypr` | the red F's centre, the prime meridian at 40° N and the equator at 50° E where the convention's words put them | each angle's sign turned moves F's centre off red: 3 of 3 (3) |
 | `fisheye_360` | 7888 pixels past θ = π, all black (`fisheye_180` has none) | |
-| `stereo_tinyplanet` | ideal 30.7 dB on 2600 pixels | level 0 23.9 dB, 6.9 dB below (3 dB) |
+| `stereo_tinyplanet` | ideal 30.7 dB on 2600 pixels | level 0 23.9 dB, 6.8 dB below (3 dB) |
 | `seam_quad` | 0 bad pixels (at most 1 LSB apart) | implicit LOD: 288 (over 100; lodprobe 504) |
-| `zenith_quad`, `nadir_quad` | 0 | 185 and 186 (over 100; lodprobe 344) |
-| `tinyplanet_pole` | 0 | 175 (over 100; lodprobe 192) |
+| `zenith_quad`, `nadir_quad` | 0 | 186 and 186 (over 100; lodprobe 344) |
+| `tinyplanet_pole` | 0 | 178 (over 100; lodprobe 192) |
 | `shimmer_tinyplanet` | RMS change 7.3 LSB a frame against the ideal's 19.7; ideal 25.3 dB on 10044 pixels | level 0 changes 5.0 times the ideal's (3), and is 14.3 dB further from it in the worst frame (3 dB) |
 | `shimmer_fisheye360` | 2.2 against 30.2; 19.5 dB on 28532 pixels | 3.3 times, 9.3 dB |
 | `tenbit_ramp` | P010 and `yuv420p10` identical, no step down, within 0.14 10-bit codes of the CPU | |
 | `layout_invariance` | NV12 and I420, each at three strides: 6 renders identical | |
 | `passthrough_exact` | full range: every k; limited: as the model says, with 86, 159 and 165 one code off the formula | |
 | `range_full_vs_limited` | 10-bit: 1 LSB apart (8-bit: 4) | full decoded as limited: 22 LSB (over 10; 8-bit: 21) |
-| `matrix_601_709` | 601 53.3 dB, 709 53.1 dB from the CPU; the two renders 46.3 dB apart (at most 13 LSB) | 601 decoded as 709: 30.8 dB, 19.5 dB under its floor (10 dB) |
+| `matrix_601_709` | 601 53.3 dB, 709 53.2 dB from the CPU; the two renders 46.3 dB apart (at most 13 LSB) | 601 decoded as 709: 30.8 dB, 19.5 dB under its floor (10 dB) |
 | `siting_left_center` | stripes, 10-bit: Left 0.56 and Center 0.52 LSB from the CPU (8-bit: 1.99, 1.76); smooth chroma: Left 51.4 and Center 51.5 dB from its 4:4:4 truth | stripes, Left decoded as Center: 53 LSB (over 10; 8-bit: 55); smooth chroma, each tagged as the other: 33.9 and 34.1 dB, 17.5 and 17.4 dB further (10 dB) |
-| `crop_half` | 12096 pixels outside the cover, all black; CPU 54.2 dB | |
+| `crop_half` | 12096 pixels outside the cover, all black; CPU 54.6 dB | |
 | `lod_heatmap` | levels within 0.002 of `uv_footprint`'s | |
 
 Three blessings in a row wrote the same bytes, and the whole test takes
@@ -3218,8 +3409,9 @@ Where this differs from the plan, from the evidence:
   - full range comes out k for every k;
   - every field, in both ranges, equals an independent f64 model of the
     chain (Y′ by H.273, the sRGB EOTF, the nearest half with ties to
-    even, the OETF, the unorm8 store to nearest), or its other candidate
-    where f32's error could tip a tie (no field here);
+    even, the OETF, and the encode pass's rounding to the nearest code,
+    which the unorm8 store keeps; D31), or its other candidate where
+    f32's error could tip a tie (no field here);
   - limited range comes out round((k − 16) · 255 / 219) except where
     that lies within 0.0547 codes of a tie, and is then at most one code
     off.
@@ -3232,6 +3424,11 @@ Where this differs from the plan, from the evidence:
   frame, seen through eight 45° views around the equator at 512×8,
   about a texel a pixel at their centres, so only levels 0 and 1 are
   read; a pixel counts where every tap at both levels lies in one field.
+  The model ended with the unorm8 store to nearest until odin's third
+  run, where RADV's export, which packs to f16 toward zero first, put
+  ten limited codes a code low against it and three of them outside the
+  bound; the encode pass now rounds to codes itself (D31), and the
+  model, its numbers and the bound are otherwise as they were.
 - **Seam and pole placement.** The seam view's yaw (179.55°) puts u's
   wrap between columns 128 and 129, whose centres 128.5 and 129.5 share a
   quad, on every row; the CPU asserts that before rendering. At pitch ±90
@@ -3322,9 +3519,9 @@ Limits: the floors, the identical rule and the 8-bit numbers are
 lavapipe's, at Mesa 25.2.8 with LLVM 20.1.2. A Mesa update on this box
 changes `driver_info`, and the stored images are then held by the
 other-driver rule until blessed again. On a GPU the rows are held to
-lavapipe's calibrated floors, which a driver's own `atan2` and `asin`
-may miss near the rim (the plan's lodprobe measured 40.8 to 55.8 dB,
-falling toward it); the report's notes then say by how much. The NV12
+lavapipe's calibrated floors, which a driver's own `atan2` and `asin` may miss near the rim
+(the plan's lodprobe measured 40.8 to 55.8 dB, falling toward it); the
+report's notes then say by how much. The NV12
 range and siting numbers are recorded, not asserted. A blessing writes
 the commit and date it was made at, so blessing again on another day
 changes the manifest, though no image. The 0.5 dB rule holds a floor
@@ -3333,7 +3530,8 @@ that each lower a floor by less than that can walk it down; the
 manifest's diff shows each step.
 
 Revisit if: a GPU misses a floor in `goldens_on_gpu_match_reference`
-(per-driver floors in the manifest, never lower ones); a Mesa build
+(the RX 7600 did at be38fa4, from the mip pass's 8-bit stores, since
+fixed: below); a Mesa build
 filters unorm8 in floating point (the 8-bit range and siting can then be
 asserted); or a control comes near its bound (`shimmer_fisheye360`'s
 3.26 times is the nearest, against 3).
@@ -3350,12 +3548,14 @@ channel more than 0.1 off). The source hash is FNV-64 over the first
 decoded frame's planes. Blessing is `SPHERECUT_UPDATE_GOLDENS=1 cargo
 test -p spherecut-cli --test frame pipeline_goldens`, with the same
 refusals and the same 0.5 dB rule, and a plain run fails if the
-manifest lacks a number the run measured. Measured at blessing:
+manifest lacks a number the run measured. Measured at blessing
+(`h264_full_range` as blessed again on 2026-10-28, after the mip pass
+rounded its 8-bit means; it was 50.2 dB, 0.016, floor 47.2 dB before):
 
 | Row | Source | Check | Measured (bound) |
 |---|---|---|---|
 | `hevc10_lossless` | the grid, x265 lossless 10-bit 4:2:0, decoded as `yuv420p10le`; yaw 30, pitch 20, roll 10, 16-bit PNG | stored; CPU | 90.0 dB, 0.0005 at most (floor 87.0 dB) |
-| `h264_full_range` | the grid, full-range H.264; 180° fisheye | stored; CPU | 50.2 dB, 0.016 (floor 47.2 dB) |
+| `h264_full_range` | the grid, full-range H.264; 180° fisheye | stored; CPU | 51.2 dB, 0.012 (floor 48.2 dB) |
 | `nv12_vs_yuv420p` | the grid as rawvideo NV12 in Matroska, and as `yuv420p` | stored; CPU; the two renders identical | 51.2 dB, 0.012 (floor 48.2 dB); identical |
 | `yuv422p10_full_chroma` | flat luma, Cb and Cr swinging ±160 codes from each row to the next, x265 lossless 4:2:2 10-bit; with its 4:4:4 twin and a 4:2:0 coding, which can only hold their mean | stored; CPU; the twin within 1 LSB; the 4:2:0 control over 10 | 62.9 dB, 0.004 (floor 59.9 dB); twin 0 LSB; control 85 LSB |
 | `swscale_cross_check` | 4:4:4 pictures of 16-texel flat blocks of 128 in-gamut colours, x265 lossless, at BT.601 and BT.709, limited and full, 8 and 10 bits | frame against swscale (`media::encode::swscale_rgb48`, the matrix and range passed with `sws_setColorspaceDetails`), and against the exact conversion | at most 1 LSB from swscale in all 8 (bound 1); 0.51 to 0.60 LSB from exact (bound 0.75); controls 28 to 30 LSB with the other matrix, 18 to 20 with the other range (over 1); 60352 pixels |
@@ -3402,6 +3602,371 @@ Revisit if: a GPU's filter or a change of the LOD rule moves the poles'
 greys (the fisheye test's 0.72 and 0.28 are within 0.05), or a swscale
 release lands within 1 LSB unrounded, which would let the cross-check
 compare RGB48 directly.
+
+*Amended 2026-10-28, after odin's third run (PR #5, at be38fa4,
+`hw-reports/odin-be38fa409e.md`).* Two golden tests failed there, for
+three reasons, and branch `m1/goldens-hw` settles each: RADV's colour
+export moved `passthrough_exact`'s codes, so the encode pass now rounds
+to codes itself; RADV's export of the 8-bit mip levels, whose rounding
+the mip pass left to the driver, cost the wide views up to 15 dB
+against the CPU reference, so the mip pass now rounds its means to codes
+itself, exactly, as the reference does (D31), and a GPU is held to
+lavapipe's floors (a lower floor for a GPU, from the RX 7600's
+numbers, stood in for that fix for a while and is gone); and LLVM 22's
+llvmpipe put one stored image 5 LSB off, so the other-driver rule now
+counts the pixels past 4 LSB rather than failing on one. The branch's
+review found what each passage below marks as its own: a race with
+blessing, the encode pass's margins at 10 bits and into f16, a Tier 1
+assertion tied to one lavapipe, a test that couldn't tell two rules
+apart, and numbers and claims these docs had wrong.
+
+**The encode pass rounds to codes.** On the RX 7600 (RADV NAVI33, Mesa
+26.2.5) `passthrough_exact` found 11 limited-range codes one code off
+round((k − 16) · 255 / 219), where the model of the chain predicts 3
+(86, 159 and 165): 10 came out a code low against the model (74, 129,
+135, 141, 153, 165, 208, 214, 220 and 226), and 3 of those (129, 135 and
+208, at 131.5753, 138.5616 and 223.5616 codes exactly) lay outside the
+bound of 0.0547 codes the f16 linear target allows. RADV exports a
+fragment's output to an 8-bit unorm target by packing it to f16 toward
+zero first, and a half's step in [0.5, 1) is 0.1245 codes at 255, so a
+value less than that above a tie came out below it. Vulkan allows this:
+it asks for a conversion to nearest and requires only that an exact
+integer f · L converts to itself. So `shaders/encode.wgsl` now rounds to
+the target's codes in f32 and returns k / 255, which packed toward zero
+lies less than 0.1245 codes below k, so a conversion to nearest gives k
+back. For `Rgb10a2Unorm` it returns the nearest half of k / 1023, within
+0.25 codes of k however it is packed: k / 1023 itself, packed toward
+zero, came within 0.0005 codes of a tie (the branch's review; D31). Into
+`Rgba16Float` it returns the OETF's nearest half, as every pass that
+writes f16 does. The model of the chain ends with that rounding rather
+than the unorm8 store, and the bound is unchanged. A test emulating the
+pack on the unrounded values gives exactly the ten codes odin measured
+off the model, and none once rounded. No stored image moved and none was
+blessed for it: lavapipe's store already gave the nearest even code to
+the f32 product, which the shader now computes. Why in the shader, not
+in the test's model: with the rounding in the shader a driver that
+converts to nearest, as Vulkan asks, writes the CPU reference's codes
+whether it packs to f16 first or not, with no integer target; a model widened to
+RADV's pack would accept a code low on every driver. Vulkan guarantees
+the exact code only where f · L is an integer: in f32 it is for k / L
+correctly rounded, which WGSL doesn't promise, and for a packed value it
+isn't (D31).
+
+**The wide views on a GPU.** On the RX 7600, at be38fa4,
+`goldens_on_gpu_match_reference` measured `fisheye_360`'s CPU check at
+44.67 dB, under its 46.59 dB floor, and `fisheye_180` and
+`stereo_tinyplanet` at 47.78 and 51.45 dB, under lavapipe's 50.01 and
+51.90; every other CPU check came out higher than on lavapipe. PROGRESS
+took the losses for the GPU's filtering precision. An emulation says
+otherwise: they were what RADV's export made of the mip pass's 8-bit
+stores (D31), measured against a reference whose own 8-bit mips ran
+high.
+
+`the_wide_views_lose_to_the_mip_stores_not_the_filter` (Tier 1)
+renders each CPU check through `Emulation`, the reference with its
+filter and its 8-bit mip stores held as a GPU might hold them, rounds
+the result to codes as the encode pass does, and compares it with a
+reference, as a GPU's CPU check does. At f64 it is the reference, to
+1e−12 at every check. The filter can hold its bilinear fractions, its
+LOD and its blend weight between levels in fixed point, to nearest or
+toward zero, and each filtered 8-bit value to codes. An 8-bit level can
+be stored (`MipStore`) as the pass and the reference make it now (the
+exact mean of the codes to the nearest code, ties to even, D31), as
+RADV's export stores that code, as the reference stored it at be38fa4
+(the f64 mean to the nearest code, ties up), or as the pass's unrounded
+f32 mean came out of lavapipe's export (times 255 to the nearest even
+code) or RADV's (packed to f16 toward zero, then to the nearest code).
+The RX 7600 was measured against be38fa4's reference, so the test
+measures be38fa4's filters and exports against that one (a filter in
+f64 is that reference rounded to codes), and gives every number in this
+table, made then, to the hundredth but the lavapipe columns, which are
+lavapipe's then. Measured at be38fa4, in
+dB (the four filter columns with 8-bit fractions and LOD; RADV's
+export with the 8-bit blend; lavapipe's filter with it too, each
+filtered value held to codes, and its export):
+
+| Check | RX 7600 | Filter in f64 | Blend 8 | Blend 6 | Blend 4 | Blend 4 toward zero | RADV's mip export | lavapipe | lavapipe's filter and export |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `rect_forward` | 58.55 | 59.16 | 59.10 | 59.06 | 58.23 | 56.98 | 58.79 | 53.14 | 53.53 |
+| `rect_ypr` | 58.04 | 58.96 | 58.91 | 58.81 | 57.79 | 55.61 | 58.37 | 53.20 | 53.58 |
+| `fisheye_180` | 47.78 | 58.93 | 58.89 | 58.73 | 57.26 | 54.29 | 48.09 | 50.01 | 49.89 |
+| `fisheye_360` | 44.67 | 59.98 | 59.94 | 59.79 | 58.13 | 55.52 | 44.84 | 49.60 | 49.01 |
+| `stereo_tinyplanet` | 51.45 | 58.96 | 58.91 | 58.74 | 57.03 | 53.86 | 51.74 | 51.90 | 51.96 |
+| `morph_half` | 52.71 | 58.93 | 58.89 | 58.79 | 57.68 | 55.19 | 53.03 | 51.68 | 51.70 |
+| `crop_half` | 56.57 | 60.81 | 60.75 | 60.62 | 59.24 | 56.59 | 57.00 | 54.19 | 54.27 |
+| `matrix_601_709`, 601 | 58.21 | 58.97 | 58.93 | 58.87 | 58.18 | 56.53 | 58.46 | 53.32 | 53.73 |
+| `matrix_601_709`, 709 | 58.09 | 59.00 | 58.96 | 58.90 | 58.13 | 56.34 | 58.36 | 53.14 | 53.51 |
+
+- **Filtering precision doesn't explain the RX 7600.** A blend of 8, 6
+  or 4 bits costs each check at most 1.93 dB against a filter in f64
+  (`stereo_tinyplanet` at 4 bits), the wide views little more than the
+  rect views, and comes no nearer than 13.46 dB to the RX 7600's
+  `fisheye_360`. A 4-bit blend toward zero, the worst tried, costs up to
+  5.10 dB and still misses `fisheye_360` by 10.85 dB, while it puts
+  `rect_ypr` 2.43 dB under the RX 7600's. Unrounded, the filter's own
+  error is 77.8 to 80.4 dB at 8 bits, 71.8 to 75.8 at 6 and 61.5 to
+  65.9 at 4; fewer bits never come nearer the reference (asserted).
+- **RADV's mip export does.** The mip pass returned each 8-bit level's
+  area mean unrounded and left the store to the driver. A 2×2 mean of
+  codes is a whole code or a quarter, a half or three quarters past
+  one, and an export that packs to f16 toward zero first puts each mean
+  on a half code a code low. Each level is made from the one above, so
+  it compounds: on the grid, against the reference's of the time, luma
+  levels 1 to 4 came out a mean 0.19, 0.52, 0.89 and 1.13 codes low
+  (19%, 51%, 78% and 90% of their texels low), and chroma levels 1 to 3
+  0.20, 0.48 and 0.74 low. Part of that was the reference's own: it
+  took ties up, so its levels ran high, 0.106 to 0.743 codes on luma
+  levels 1 to 5 against the chain unrounded, as RADV's export of the
+  old means ran as far low (D31). Against the reference as it is now,
+  the old means through RADV's export give `fisheye_360` 49.49 dB and
+  `fisheye_180` 51.85, not 44.84 and 48.09 (the test prints each
+  check). Emulated, this export comes within 0.43 dB of every RX 7600
+  number (asserted within 1 dB; the emulation is 0.17 to 0.43 dB the
+  higher), in the same order: below a filter in f64, `fisheye_360`
+  loses 15.1 dB, `fisheye_180` 10.8, `stereo_tinyplanet` 7.2,
+  `morph_half` 5.9, `crop_half` 3.8 and the rect and matrix views 0.4
+  to 0.6. With the filter in f64 it gives the same within 0.05 dB.
+- **lavapipe, the same way.** With lavapipe's filter (8-bit fractions,
+  LOD and blend, each filtered value held to codes, as found above) and
+  its export, the emulation came within 0.59 dB of lavapipe's own
+  render at every check at be38fa4; on the mips the pass makes now,
+  which lavapipe's export stores as they are, it comes within 0.71 dB
+  (asserted within 1 dB), which is the check on the method this machine
+  allows. The model is of the lavapipe it was
+  made on, so it is asserted only where the machine's lavapipe holds
+  what it filters from 8-bit planes to whole codes, as the model has it:
+  a probe of the checker magnified 2.25 times, read back in linear
+  light, finds every pixel within 0.1 of a code here, where the f64
+  reference puts 13493 between codes (asserted). With
+  `GALLIVM_PERF=no_aos_sampling`, which filters them in floating point,
+  13583 are between codes and the model misses by 8.11 dB (5.53 at
+  be38fa4), which the test reports and doesn't assert (the branch's
+  review found it failed Tier 1 there). At be38fa4 lavapipe's export
+  broke fewer of the ties downward (7.7% of luma level 1's texels a
+  code below the reference's, against RADV's 19.4%), and alone, with a
+  filter in f64, cost `fisheye_360` 8.4 dB (51.55 dB; its luma level 4
+  a mean 0.37 codes low).
+
+**The floor on a GPU.** From be38fa4 until the mip pass rounded its
+means, `goldens_on_gpu_match_reference` held each CPU check to the lower
+of lavapipe's blessed floor and the RX 7600's measurement less 3 dB,
+from a table beside the harness (`GPU_CPU_PSNR`): `fisheye_360` at 41.67
+dB, `fisheye_180` at 44.77 and `stereo_tinyplanet` at 48.45, on every
+GPU, so a loss of up to 4.92 dB there would have passed. The table, its plumbing
+and its test (`a_gpu_is_held_to_the_lower_floor`) are gone: a GPU's CPU
+checks are held to the manifest's floors, calibrated on lavapipe, as
+before be38fa4, and `the_reference_only_path_runs_on_lavapipe` sees
+`rect_forward`, blessed at 99 dB, fail that floor itself.
+
+The emulation's numbers argue for no floor of the hardware's own.
+RADV's export of what the pass now returns, k / 255, stores k
+in every level of every check (asserted), so RADV's filter as emulated
+(8-bit fractions, LOD and blend) puts the RX 7600's checks at 58.88 to
+60.75 dB, within 0.06 dB of a filter in f64. At be38fa4 the emulation
+missed the RX 7600 by up to 0.43 dB, the emulation the higher. The test
+takes that missed squared error as RADV's own (its filter, as far as
+the model isn't it), adds it to the emulation's now, and predicts each
+check; and, as the control, predicts the old means through RADV's
+export the same way, against the same reference (dB; the floors as
+blessed after the fix):
+
+| Check | RX 7600 at be38fa4 | Emulated now | Missed then, alone | Predicted | lavapipe's floor | Margin | Old means, predicted | Under the prediction |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `rect_forward` | 58.55 | 59.10 | 71.09 | 58.84 | 50.15 | 8.69 | 58.67 | 0.16 |
+| `rect_ypr` | 58.04 | 58.90 | 69.36 | 58.53 | 50.24 | 8.29 | 58.28 | 0.25 |
+| `fisheye_180` | 47.78 | 58.90 | 59.34 | 56.11 | 48.2 | 7.91 | 51.14 | 4.97 |
+| `fisheye_360` | 44.67 | 59.93 | 58.90 | 56.38 | 48.15 | 8.23 | 49.02 | 7.36 |
+| `stereo_tinyplanet` | 51.45 | 58.90 | 63.38 | 57.58 | 49.51 | 8.07 | 54.30 | 3.28 |
+| `morph_half` | 52.71 | 58.88 | 64.17 | 57.75 | 49.26 | 8.49 | 54.99 | 2.77 |
+| `crop_half` | 56.57 | 60.75 | 66.79 | 59.78 | 51.61 | 8.17 | 57.97 | 1.81 |
+| `matrix_601_709`, 601 | 58.21 | 58.91 | 70.65 | 58.63 | 50.34 | 8.29 | 58.42 | 0.22 |
+| `matrix_601_709`, 709 | 58.09 | 58.95 | 70.26 | 58.64 | 50.18 | 8.46 | 58.35 | 0.29 |
+
+Every prediction clears lavapipe's floor by 7.91 dB or more, asserted
+where lavapipe filters 8-bit planes to codes, as the one the goldens
+are blessed on does. One that filters them in floating point renders
+the wide views within 0.01 dB of a filter in f64 and calibrates
+`fisheye_360` at 56.96 dB, which the prediction misses by 0.58 dB; the
+test reports that and doesn't assert it (asserted everywhere, the
+prediction failed Tier 1 under `GALLIVM_PERF=no_aos_sampling`).
+
+The floors can't tell the fix from the old mips on RADV: against the
+reference as it is now, the old means through RADV's export clear every
+floor blessed now, `fisheye_360` by 0.87 dB as predicted (49.02 against
+48.15; 49.49 emulated alone), so a Tier 2 run that only clears them
+says nothing of the mips. The prediction can: with the old means the
+views that read level 1 or more come out 1.81 to 7.36 dB under it, and
+the rect and matrix views, which barely do, 0.16 to 0.29. So the control
+is held to the prediction: the test asserts that `fisheye_180`,
+`fisheye_360` and `stereo_tinyplanet`, the views the RX 7600 lost, come
+out more than 1 dB under it with the old means, on any lavapipe, since
+none of it is lavapipe's; fed the fix's mips in their place, it fails.
+Until the review of the mip fix, the control compared the old means
+against be38fa4's reference (44.84 dB for `fisheye_360`) with the floors
+calibrated against today's, and these docs took that to show the floors
+would catch them; they wouldn't. On lavapipe,
+`eight_bit_mips_are_the_references_code_for_code` holds the stored mips
+to the reference's code for code, so the old pass fails Tier 1 there. A
+floor under lavapipe's would make room for a loss the numbers don't
+predict: if the RX 7600 comes in under lavapipe's floors, or more than
+1 dB under its prediction, the emulation or the fix is wrong about it,
+which is a finding for D31, not a floor to lower.
+
+**The error by LOD band.** On a GPU each CPU check also measures its
+error over the pixels the view shows, in three bands of luma's analytic
+LOD before clamping (`reference::lod_map`): below 1, 1 to 2.5, and from
+2.5, the ideal comparisons' bound. Each band's pixels, PSNR and share
+of the squared error go into the row's note
+(`cpu_lod_1_to_2.5_pixels`, `cpu_lod_1_to_2.5_psnr_db`,
+`cpu_lod_1_to_2.5_error_share` and so on). On lavapipe, with the mips
+rounded, `fisheye_360`'s error is 58% from 1 to 2.5 (50.18 dB over
+17098 pixels) and 42% from 2.5 (50.01 dB over 11878), and
+`fisheye_180`'s 90% and 10% (51.29 and 50.36 dB); before, 55% and 45%
+(48.84 and 48.18 dB) and 88% and 12% (50.23 and 48.06 dB). RADV's
+export of the old means, emulated against be38fa4's reference, put
+`fisheye_360`'s 48% and 52% there (44.70 and 42.76 dB) and
+`fisheye_180`'s 73% and 27% (49.12 and 42.74 dB); of the codes the pass
+returns now, 59% and 41% (58.90 and 58.86 dB) and 92% and 8% (58.90 and
+58.92 dB), about level across the bands. The rect
+and matrix views lie wholly below 1. The emulation test prints every
+check's bands.
+
+Limits: the emulation is of the reference, not of RADV. It shows the
+old means through RADV's export reproduce RADV's numbers at be38fa4,
+against that reference, not what RADV's filter holds in fixed point,
+which the numbers can't tell apart from f64 (0.05 dB). The prediction
+takes the squared error the emulation missed then (58.90 to 71.09 dB
+alone) as RADV's own and unchanged by the fix; if part of it came from
+the mips, the fix removes that too and the prediction is low. Nothing
+here ran on a GPU: Pat's next run is the fix's first measurement, and
+brings RADV's bands. Whether RADV packs 10-bit exports toward zero too
+is unknown (D31); the deep planes' mips return halves, which no pack
+moves.
+
+Revisit if: on Pat's next run a CPU check comes in under its floor, or
+more than 1 dB under its prediction (as the old mips' stores would at
+five checks while clearing every floor), or RADV's bands don't look
+like the emulation's (even across the bands, near 59 dB).
+
+**The other-driver rule counts the pixels past 4 LSB.**
+`goldens_on_host_llvmpipe` on odin's llvmpipe (Mesa 26.2.5, LLVM
+22.1.8) failed `fisheye_180` at 5 LSB against the rule's 4, at 62.79 dB
+and SSIM 0.99994; the other five stored images came out 3 or 4 LSB off
+at 63.13 to 68.31 dB. One pixel's maximum is no tolerance for a newer
+LLVM, and the averages alone miss a fault a few dozen pixels wide. The
+rule against a stored image at another driver build is now:
+
+- PSNR ≥ 48 dB and SSIM ≥ 0.995, as before;
+- at most 4 pixels (C) with a channel more than 4 LSB off;
+- no channel more than 8 LSB (H) off.
+
+The count is of pixels: a pixel counts once, by its largest channel
+difference, as `diff_stats` and the seam and pole rows count bad
+pixels. A fault is a place in the view, and the same fault puts 1.1 to
+3 channels past 4 LSB in each pixel by the colours under it (the tiny
+planet's implicit LOD 25 channels in 19 pixels, the pole quads 12 in 4,
+the seam 572 in 192), so a count of channels would hold a grey line to
+a third of what it holds a red one to. `judge` reports both numbers
+(the tiny planet's implicit LOD: "PSNR 53.97 dB, SSIM 0.99972, 19
+pixels more than 4 LSB off, max 7 LSB"), every run notes
+`golden_pixels_past_4_lsb` beside `golden_max_lsb`, so the next run on
+odin records LLVM 22's count, and the manifests' thresholds have
+`pixels_past_4_lsb_max` and `max_lsb`.
+Both manifests were blessed again through `SPHERECUT_UPDATE_GOLDENS=1`
+for those thresholds; their commit and date changed with them, and no
+floor and no PNG did. Slice 4's `pipeline_goldens` holds its PNGs to
+the same rule, through its own `golden_fault`, which
+`stored_frames_follow_the_rules_of_section_6` in
+`crates/cli/tests/frame.rs` holds to the rule with made numbers, since
+lavapipe here always takes the exact branch.
+
+`the_other_driver_rule_catches_local_faults` (Tier 1) makes faults from
+each of the six stored views as rendered, which is its stored PNG
+wherever `goldens` passes at the build it was blessed on (the test reads
+no PNG, since a blessing rewrites them beside it), or renders them
+beside it: moved a pixel right or down (a render, or a crop, a pixel
+off), the view a pixel wider or narrower at its edges (a fisheye's rim a
+pixel off), the seam's pixels, the poles' quads or the pixels within a
+pixel of the rim blacked out, and implicit LOD (the seam and pole rows'
+control). Measured here, where those renders are the stored PNGs:
+
+| Fault | Views | Pixels past 4 LSB | Max LSB | PSNR | Fails |
+|---|---|---:|---:|---:|---|
+| moved a pixel right or down | all six | 6018 to 19979 | 137 to 221 | 24.16 to 26.94 dB | all four parts |
+| a pixel wider or narrower | all six (`fisheye_360` can't widen) | 7217 to 13466 | 49 to 171 | 26.26 to 31.80 | all four |
+| the seam black | `fisheye_180`, `fisheye_360`, `stereo_tinyplanet` | 128 to 192 | 255 | 28.29 to 33.45 | all four |
+| the rim black | `fisheye_360` | 604 | 117 | 29.07 | all four |
+| implicit LOD, along the seam | `fisheye_360` | 154 | 100 | 45.87 (SSIM 0.99741) | PSNR, the count and the maximum |
+| the poles' quads black | `fisheye_180` (8 pixels), `fisheye_360` (4) | 8, 4 | 204, 162 | 41.66, 43.61 | PSNR and the maximum (and the count at 8) |
+| the pole's quad black | `stereo_tinyplanet` | 4 | 95 | 53.62 (SSIM 0.99952) | the maximum only |
+| implicit LOD, round both poles | `fisheye_180` | 72 | 9 | 53.41 | the count and the maximum |
+| implicit LOD, a minified line at the equator | `stereo_tinyplanet` | 19 | 7 | 53.97 | the count only |
+| implicit LOD, the equator's row | `morph_half` | 11 | 6 | 55.06 | the count only |
+| implicit LOD | `rect_forward`, `rect_ypr` | 0 | 4, 3 | 57.90, 57.48 | nothing: no seam or pole is shown, nothing is far minified |
+
+The test asserts that every fault fails the rule, but implicit LOD in
+the rect views, which it asserts stays within 4 LSB; and that exactly
+the four faults within PSNR and SSIM are, with which of the count and
+the maximum catches each, so a fault that moves into or out of the
+averages fails it. The old maximum of 4 caught those four too; the new
+rule catches each by the count or the maximum. With C at 20, or H at
+100, the test fails.
+
+The drift, against the same PNGs:
+
+- **lavapipe's own options.** `LP_NATIVE_VECTOR_WIDTH=128` and
+  `GALLIVM_PERF` set to `nopt`, `brilinear`, `rho_approx` or
+  `no_quad_lod`, alone or together, render all six identically.
+  `GALLIVM_PERF=no_aos_sampling`, which filters 8-bit textures in
+  floating point, puts them 50.50 to 52.56 dB away, SSIM 0.99863 or
+  more, with no pixel past 4 LSB and at most 4; `goldens_on_host_llvmpipe`
+  passes under it, and so does `pipeline_goldens`' other-driver path
+  with its manifest's adapter renamed so that it applies (51.2 dB, at
+  most 3 LSB, no pixel past 4).
+- **The views a hundredth of a pixel wider or narrower** at their edges
+  (asserted to pass): 57.15 to 61.37 dB, 0 or 1 pixel past 4 LSB, at
+  most 5 LSB.
+- **A sweep of sub-pixel turns and scales** (a probe, not committed):
+  wherever PSNR stayed at 56.8 dB or more, an RMS error twice LLVM 22's
+  on `fisheye_180`, at most 1 pixel past 4 LSB and at most 5 LSB; at
+  about a fiftieth of a pixel, 51.5 to 56.2 dB, 0 to 92 pixels past
+  and up to 8 LSB.
+- **LLVM 22 on odin:** at most 5 LSB at 62.79 dB (`fisheye_180`), and
+  3 or 4 at 63.13 to 68.31 dB on the rest. Its count wasn't recorded:
+  at least 1, and by its PSNR (an RMS error of 0.18 LSB) at most 151
+  pixels 5 off; the drift made here at 57 dB or more never put more
+  than 1 past 4.
+
+So H = 8 is 3 LSB over the 5 of LLVM 22 and of the drift made here, and
+under every fault's maximum but the tiny planet's and the morph's
+implicit LOD (7 and 6), which the count catches. C = 4 is over the
+drift's 1 and under every fault the averages miss, the smallest of them
+`morph_half`'s 11 pixels; the faults smaller than that, a pole's quad of
+4 pixels, are 95 LSB or more off and fail the maximum. No C and H
+separate everything: a fault within 4 pixels and 8 LSB passes, such as
+implicit LOD at one pole quad alone, or up to 4 pixels blacked out where
+every channel is under 9 codes. In the darkest pixels the fisheyes, the
+tiny planet and `rect_ypr` show, the brightest channel is 12, 15 and 52,
+so a pixel blacked out there fails. `rect_forward` and `morph_half` have
+dark labels: 1666 and 127 of their pixels have no channel over 8, 1170
+and 56 of them black already and 171 and 28 with their brightest at 5 to
+8, so up to 4 of those blacked out would be 5 to 8 LSB off and pass.
+
+Why: the averages hold the whole image and the count holds a place in
+it. The drift made here is a pixel or two near a rounding, at 57 dB or
+more (LLVM 22's count comes with odin's next run); the faults the
+averages miss are lines and spots of 4 to 72 pixels, and each is more
+than 4 pixels or more than 8 LSB.
+
+Limits: the faults are on the grid, the stored images' only pattern,
+made by editing a stored view's render or by this renderer's own debug
+mode, not by another driver. LLVM 22's count is unknown until odin's next run
+notes it, and C rests on the drift made here. A fault within 4 pixels
+and 8 LSB passes.
+
+Revisit if: odin's next run notes more than 2 pixels past 4 LSB for
+LLVM 22, which would leave C less than twice the drift; or a driver
+build that renders the rows right fails the count or the maximum.
 
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 

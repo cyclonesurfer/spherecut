@@ -514,11 +514,15 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
 * **Slots** (`GpuFrame`, for a `SlotShape`) hold a frame's planes as
   canonical textures: `R8Unorm`/`Rg8Unorm` for 8-bit planes, and
   `R16Float`/`Rg16Float` holding code / (2^b − 1) for deeper ones, each
-  with an area-weighted mip chain capped near 64 pixels, plus the
-  frame's `Source` uniform: its colour matrix, chroma siting and where it
-  sits on the sphere (`Placement`: sv3d crop, stereo eye). Of a stereo
-  frame a slot holds the shown eye alone (`Placement::shown`), so the
-  other eye never bleeds in.
+  with an area-weighted mip chain capped near 64 pixels (an 8-bit
+  level's means of codes worked out in integers and rounded in the
+  shader to the nearest code, ties to even, which a driver that converts
+  to nearest, as Vulkan asks, stores as that code, and a deep level's to
+  the nearest half, which every driver stores as it is, D31), plus the
+  frame's `Source` uniform: its colour matrix, chroma
+  siting and where it sits on the sphere (`Placement`: sv3d crop, stereo
+  eye). Of a stereo frame a slot holds the shown eye alone
+  (`Placement::shown`), so the other eye never bleeds in.
 * **`Uploader::upload`** copies a frame's planes into a slot
   (`write_texture`, or a staging belt), runs the ingest pass that turns
   deep integer planes into f16 and the mip passes, and submits once,
@@ -533,8 +537,11 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   plane, and the 3×4 colour matrix and the sRGB EOTF. Pipelines exist per
   `Filter` and `DebugMode` and are built on first use.
 * **`Encoder::draw`** writes a linear target's pixels one to one into a
-  render pass's attachment with the sRGB OETF, at an origin, for egui's
-  frame (slice 7) or an offscreen texture.
+  render pass's attachment with the sRGB OETF, rounded in the shader to
+  the attachment's codes (at 10 bits, and into an f16 attachment, to
+  halves), which a driver that converts to nearest, as Vulkan asks,
+  stores as they are, packed to f16 first or not (D31),
+  at an origin, for egui's frame (slice 7) or an offscreen texture.
 * **`render_still`** (and `StillRenderer`, which keeps its pipelines)
   does all of it headless and reads back an `Image`: 8-bit through the
   encode pass, 16-bit or linear from the linear target.
@@ -616,8 +623,11 @@ plan's table (section 6) on lavapipe, from synth's in-memory planes:
 
 * six views of synth's grid are **stored** as PNGs in
   `crates/render/tests/goldens/`, and must come out pixel for pixel the
-  same at the Mesa build they were blessed on, and within PSNR 48 dB,
-  SSIM 0.995 and 4 LSB on another;
+  same at the Mesa build they were blessed on, and on another within
+  PSNR 48 dB and SSIM 0.995, with at most 4 pixels more than 4 LSB off
+  and none more than 8, which catches the local faults the averages
+  miss (implicit LOD round a pole or along a minified line, a black pole
+  quad);
 * views are held to **the f64 CPU reference** at a PSNR floor set when
   blessing, and minified ones to **the supersampled pattern itself**
   (`synth::render_view_ideal`), with a margin over a level-0 render;
@@ -663,7 +673,14 @@ On a real machine, the Tier 2 `goldens_on_gpu_match_reference` runs the
 rows on each GPU against the references and controls only, never
 against the lavapipe PNGs, and `goldens_on_host_llvmpipe` runs the
 stored set on the machine's own llvmpipe by the other-driver rule; both
-note their numbers for the hw-test report.
+note their numbers for the hw-test report, a GPU's CPU checks held to
+lavapipe's blessed floors with their error broken down by LOD band.
+When the mip pass left its 8-bit means to the driver, RADV's export,
+which packs each to f16 toward zero first, cost the RX 7600's wide,
+minified views up to 15 dB against the CPU reference; emulated on the
+CPU, it reproduces those numbers, and with the means rounded in the
+shader the emulation predicts the RX 7600 7.91 dB or more above
+lavapipe's floors (D32).
 
 A second, smaller set, the **pipeline goldens**
 (`pipeline_goldens` in `crates/cli/tests/frame.rs`, PNGs and manifest

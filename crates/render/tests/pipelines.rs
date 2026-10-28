@@ -44,9 +44,13 @@ fn every_pipeline_builds() {
     });
     // Ingest for both deep formats, and mips for all four.
     validated("uploader", || Uploader::new(gpu));
+    // Encode into every format whose codes it rounds to, and the f16 one
+    // it rounds to halves.
     for format in [
         wgpu::TextureFormat::Rgba8Unorm,
         wgpu::TextureFormat::Bgra8Unorm,
+        wgpu::TextureFormat::Rgb10a2Unorm,
+        wgpu::TextureFormat::Rgba16Float,
     ] {
         validated("encode", || Encoder::new(gpu, format));
     }

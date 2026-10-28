@@ -6,10 +6,14 @@
 //!
 //! - **Stored images** (`goldens/*.png`, with `goldens/manifest.json`)
 //!   must match the render pixel for pixel at the driver build and source
-//!   hash they were blessed at, and otherwise by PSNR ≥ 48 dB, SSIM ≥
-//!   0.995 and at most 4 LSB. A source whose planes no longer hash as
-//!   blessed is reported as the synthetic source having changed, never
-//!   compared as a render.
+//!   hash they were blessed at. At another build they must keep PSNR ≥ 48
+//!   dB and SSIM ≥ 0.995, with at most 4 pixels more than 4 LSB off and
+//!   none more than 8: the averages miss a fault a few dozen pixels wide,
+//!   which [`the_other_driver_rule_catches_local_faults`] makes from every
+//!   stored view, and a pixel 5 off is the drift made here (D32, amended
+//!   2026-10-28). A source whose planes no longer hash as blessed is
+//!   reported as the synthetic source having changed, never compared as
+//!   a render.
 //! - **The CPU reference** (`reference::render_trilinear`, f64) holds each
 //!   image to a PSNR floor calibrated when blessing: the PSNR measured
 //!   then, less 3 dB, and never below 36 dB.
@@ -37,8 +41,16 @@
 //! Rg16Float, against an independent area mean), which covers it whole.
 //!
 //! The Tier 2 tests at the end run the same rows on a GPU, against the
-//! CPU and ideal references only, and on the machine's own llvmpipe by
-//! the other-driver rule, recording the drift.
+//! CPU and ideal references only, at the floors blessed here, and on the
+//! machine's own llvmpipe by the other-driver rule, recording the drift;
+//! on a GPU each CPU check's error is broken down by LOD band too. The
+//! mip pass rounds its 8-bit means to codes and the encode pass its
+//! output, so a driver that converts to nearest, as Vulkan asks, stores
+//! those codes: when the mip pass left its means to the driver, RADV's
+//! export, which packs them to f16 toward zero first, cost the RX 7600's
+//! wide, minified views up to 15 dB, as
+//! [`the_wide_views_lose_to_the_mip_stores_not_the_filter`] shows by
+//! emulating it, and predicts what they come to now.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -50,14 +62,19 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use common::{Frame, Kind, color, frame, gpu, hardware_gpu, hardware_gpus};
-use glam::{DQuat, DVec3};
+use common::{
+    Frame, Kind, color, frame, gpu, hardware_gpu, hardware_gpus, lavapipe_unorm8, radv_unorm8,
+};
+use glam::{DQuat, DVec2, DVec3};
 use serde_json::{Map, Value, json};
-use spherecut_core::video::{ChromaSiting, ColorInfo, Matrix, Range, SampleBytes};
+use spherecut_core::video::{
+    ChromaSiting, ColorInfo, Matrix, Range, SampleBytes, Transfer, VideoPlanes,
+};
+use spherecut_render::readback::round_f16;
 use spherecut_render::reference::{self, ImageF64};
 use spherecut_render::{
-    AdapterChoice, DebugMode, Depth, Gpu, Image, Pixels, Placement, Stereo, StillOptions,
-    StillRenderer, ViewParams,
+    AdapterChoice, DebugMode, Depth, Gpu, Image, LayoutKind, Pixels, Placement, PlaneFormat,
+    SlotShape, Stereo, StillOptions, StillRenderer, ViewParams,
 };
 use spherecut_sphere::LonLat;
 use spherecut_sphere::orient::Ypr;
@@ -80,7 +97,15 @@ const REGENERATE: &str = "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-ren
 /// The other-driver rule: 48.13 dB is an RMS error of one 8-bit step.
 const OTHER_PSNR_DB: f64 = 48.0;
 const OTHER_SSIM: f64 = 0.995;
-const OTHER_MAX_LSB: f64 = 4.0;
+/// And what the averages miss: at most [`OTHER_PIXELS_PAST`] pixels with
+/// a channel more than [`OTHER_PAST_LSB`] off, and none more than
+/// [`OTHER_MAX_LSB`]. LLVM 22.1.8's llvmpipe put `fisheye_180` at most 5
+/// LSB off at 62.79 dB; within PSNR and SSIM, implicit LOD puts 11 to 72
+/// pixels past 4 LSB by up to 9, and a black pole quad is 95 LSB off
+/// (D32, `the_other_driver_rule_catches_local_faults`).
+const OTHER_PAST_LSB: f64 = 4.0;
+const OTHER_PIXELS_PAST: f64 = 4.0;
+const OTHER_MAX_LSB: f64 = 8.0;
 /// The CPU tolerance: measured − 3 dB when blessing, never below 36.
 const CPU_MARGIN_DB: f64 = 3.0;
 const CPU_FLOOR_DB: f64 = 36.0;
@@ -125,6 +150,84 @@ const SITING_OVER_DB: f64 = 10.0;
 /// control must give more than 100 of them.
 const TWIN_THRESHOLD: f64 = 2.0 / 255.0;
 const CONTROL_BAD_OVER: usize = 100;
+
+// ---------------------------------------------------------------------
+// On a GPU (D32)
+
+/// Whether pixel `(i, j)` of a `size` view shows the picture: its centre
+/// within θ = π and inside the cover, as the shader and the reference
+/// have it. Elsewhere both draw black.
+fn shows(v: &ViewParams, size: (u32, u32), placement: &Placement, (i, j): (u32, u32)) -> bool {
+    let c = pixel::centre(i, j);
+    let theta = v.lens.theta(pixel::to_lens(size, c.x, c.y).length());
+    let suv = reference::sphere_uv(reference::sphere_dir(v, size, c.x, c.y));
+    let [u0, v0, u1, v1] = placement.cover();
+    theta <= PI + 1e-4 && suv.x >= u0 && suv.y >= v0 && suv.x <= u1 && suv.y <= v1
+}
+
+/// The bands of luma's analytic LOD before clamping that a CPU check's
+/// error is broken down by, each up to its bound: magnified or at most a
+/// level down, between, and from [`IDEAL_MIN_LOD`] down.
+const LOD_BANDS: [(&str, f64); 3] = [
+    ("lod_below_1", 1.0),
+    ("lod_1_to_2.5", IDEAL_MIN_LOD),
+    ("lod_from_2.5", f64::INFINITY),
+];
+
+/// Each pixel's band in [`LOD_BANDS`], by `reference::lod_map`, or `None`
+/// where the view doesn't show the picture ([`shows`]).
+fn lod_bands(
+    f: &Frame,
+    v: &ViewParams,
+    size: (u32, u32),
+    placement: &Placement,
+) -> Vec<Option<usize>> {
+    let lod = reference::lod_map(f, v, size, placement).unwrap();
+    lod.data
+        .chunks(3)
+        .enumerate()
+        .map(|(k, l)| {
+            let at = ((k % size.0 as usize) as u32, (k / size.0 as usize) as u32);
+            shows(v, size, placement, at)
+                .then(|| LOD_BANDS.iter().position(|b| l[2] < b.1).unwrap())
+        })
+        .collect()
+}
+
+/// A CPU check's error over one band of [`LOD_BANDS`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BandError {
+    pixels: f64,
+    /// Over the band's pixels; `None` when it has none.
+    psnr: Option<f64>,
+    /// Of the squared error over the whole picture.
+    share: f64,
+}
+
+/// `got` against `want` per band, as `bands` deals the pixels.
+fn band_errors(bands: &[Option<usize>], got: &[f64], want: &[f64]) -> Vec<BandError> {
+    let total: f64 = got.iter().zip(want).map(|(a, b)| (a - b).powi(2)).sum();
+    (0..LOD_BANDS.len())
+        .map(|n| {
+            let mask: Vec<bool> = bands.iter().map(|b| *b == Some(n)).collect();
+            let pixels = mask.iter().filter(|m| **m).count();
+            if pixels == 0 {
+                return BandError {
+                    pixels: 0.0,
+                    psnr: None,
+                    share: 0.0,
+                };
+            }
+            let (a, b) = (pick(&mask, got), pick(&mask, want));
+            let sq: f64 = a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum();
+            BandError {
+                pixels: pixels as f64,
+                psnr: Some(psnr_in(&mask, got, want)),
+                share: if total > 0.0 { sq / total } else { 0.0 },
+            }
+        })
+        .collect()
+}
 
 // ---------------------------------------------------------------------
 // Sources
@@ -454,6 +557,8 @@ struct Drift {
     identical: bool,
     psnr: f64,
     ssim: f64,
+    /// Pixels with a channel more than [`OTHER_PAST_LSB`] off.
+    past: f64,
     max_lsb: f64,
 }
 
@@ -466,21 +571,26 @@ fn drift(got: &Image, want: &Image) -> Result<Drift, String> {
     }
     let (a, b) = (unit(got), unit(want));
     let size = (got.width, got.height);
-    // In whole 8-bit steps when both are 8-bit, as the rule counts them.
-    let max_lsb = match (&got.pixels, &want.pixels) {
+    // Each pixel's largest channel difference, in whole 8-bit steps when
+    // both are 8-bit, as the rule counts them.
+    let lsb: Vec<f64> = match (&got.pixels, &want.pixels) {
         (Pixels::Rgb8(x), Pixels::Rgb8(y)) => x
-            .iter()
-            .zip(y)
-            .map(|(p, q)| p.abs_diff(*q))
-            .max()
-            .map_or(0.0, f64::from),
-        _ => max_diff(&a, &b) * 255.0,
+            .chunks(3)
+            .zip(y.chunks(3))
+            .map(|(p, q)| f64::from((0..3).map(|c| p[c].abs_diff(q[c])).max().unwrap_or(0)))
+            .collect(),
+        _ => a
+            .chunks(3)
+            .zip(b.chunks(3))
+            .map(|(p, q)| max_diff(p, q) * 255.0)
+            .collect(),
     };
     Ok(Drift {
         identical: got.pixels == want.pixels,
         psnr: psnr_of(size, &a, &b),
         ssim: ssim_of(size, &a, &b),
-        max_lsb,
+        past: lsb.iter().filter(|d| **d > OTHER_PAST_LSB).count() as f64,
+        max_lsb: lsb.iter().copied().fold(0.0, f64::max),
     })
 }
 
@@ -488,8 +598,12 @@ fn drift(got: &Image, want: &Image) -> Result<Drift, String> {
 /// was blessed on, else within the other-driver tolerance.
 fn judge(d: &Drift, same_driver: bool) -> Result<(), String> {
     let numbers = format!(
-        "PSNR {:.2} dB, SSIM {:.5}, max {:.0} LSB",
-        d.psnr, d.ssim, d.max_lsb
+        "PSNR {:.2} dB, SSIM {:.5}, {:.0} {} more than {OTHER_PAST_LSB} LSB off, max {:.0} LSB",
+        d.psnr,
+        d.ssim,
+        d.past,
+        if d.past == 1.0 { "pixel" } else { "pixels" },
+        d.max_lsb
     );
     if same_driver {
         return if d.identical {
@@ -500,12 +614,17 @@ fn judge(d: &Drift, same_driver: bool) -> Result<(), String> {
             ))
         };
     }
-    if d.psnr >= OTHER_PSNR_DB && d.ssim >= OTHER_SSIM && d.max_lsb <= OTHER_MAX_LSB {
+    if d.psnr >= OTHER_PSNR_DB
+        && d.ssim >= OTHER_SSIM
+        && d.past <= OTHER_PIXELS_PAST
+        && d.max_lsb <= OTHER_MAX_LSB
+    {
         Ok(())
     } else {
         Err(format!(
             "outside the other-driver tolerance (PSNR ≥ {OTHER_PSNR_DB} dB, SSIM ≥ {OTHER_SSIM}, \
-             max ≤ {OTHER_MAX_LSB} LSB): {numbers}"
+             at most {OTHER_PIXELS_PAST} pixels more than {OTHER_PAST_LSB} LSB off, none more \
+             than {OTHER_MAX_LSB}): {numbers}"
         ))
     }
 }
@@ -848,12 +967,36 @@ impl<'g> Run<'g> {
         )
     }
 
-    /// `got` against the CPU's `cpu`: the calibrated PSNR floor, and no
-    /// channel off by more than [`CPU_MAX_CHANNEL`].
-    fn cpu_check(&mut self, key: &str, got: &Image, cpu: &ImageF64) {
+    /// On a GPU, where a CPU check's error sits: per band of
+    /// [`LOD_BANDS`], its pixels, the PSNR over them and its share of the
+    /// squared error, as measurements for the hw-test report.
+    fn by_lod(&mut self, key: &str, bands: &[Option<usize>], got: &[f64], cpu: &[f64]) {
+        for (b, (band, _)) in band_errors(bands, got, cpu).iter().zip(LOD_BANDS) {
+            self.measure(&format!("{key}_{band}_pixels"), b.pixels);
+            if let Some(p) = b.psnr {
+                self.measure(&format!("{key}_{band}_psnr_db"), p);
+            }
+            self.measure(&format!("{key}_{band}_error_share"), b.share);
+        }
+    }
+
+    /// `got` against the CPU's `cpu`, which renders `f` through `v` with
+    /// `placement`: the calibrated PSNR floor (on a GPU with the error by
+    /// LOD band), and no channel off by more than [`CPU_MAX_CHANNEL`].
+    fn cpu_check(
+        &mut self,
+        key: &str,
+        got: &Image,
+        cpu: &ImageF64,
+        (f, v, placement): (&Frame, &ViewParams, &Placement),
+    ) {
         let size = (got.width, got.height);
         let g = unit(got);
         let p = psnr_of(size, &g, &cpu.data);
+        if self.mode == Mode::References {
+            let bands = lod_bands(f, v, size, placement);
+            self.by_lod(key, &bands, &g, &cpu.data);
+        }
         let ok = self.calibrated(&format!("{key}_psnr_db"), p, CPU_MARGIN_DB, CPU_FLOOR_DB);
         let m = max_diff(&g, &cpu.data);
         let ok = self.at_most(&format!("{key}_max_channel"), m, CPU_MAX_CHANNEL) && ok;
@@ -1000,7 +1143,12 @@ impl<'g> Run<'g> {
         self.threshold("same_driver", json!("identical pixels"));
         self.threshold(
             "other_driver",
-            json!({"psnr_db_min": OTHER_PSNR_DB, "ssim_min": OTHER_SSIM, "max_lsb": OTHER_MAX_LSB}),
+            json!({
+                "psnr_db_min": OTHER_PSNR_DB,
+                "ssim_min": OTHER_SSIM,
+                "pixels_past_4_lsb_max": OTHER_PIXELS_PAST,
+                "max_lsb": OTHER_MAX_LSB,
+            }),
         );
         let mut m = self.stamp();
         m.append(&mut entry);
@@ -1054,6 +1202,7 @@ impl<'g> Run<'g> {
             Ok(d) => {
                 self.measure("golden_psnr_db", d.psnr);
                 self.measure("golden_ssim", d.ssim);
+                self.measure("golden_pixels_past_4_lsb", d.past);
                 self.measure("golden_max_lsb", d.max_lsb);
                 self.measure("golden_identical", f64::from(u8::from(d.identical)));
                 if let Err(e) = judge(&d, same_driver) {
@@ -1194,19 +1343,22 @@ fn stored_grid_view(
         return;
     };
     match reference::render_trilinear(&s.frame, &v, size) {
-        Ok(cpu) => run.cpu_check("cpu", &got, &cpu),
+        Ok(cpu) => run.cpu_check("cpu", &got, &cpu, (&s.frame, &v, &Placement::default())),
         Err(e) => run.fail(format!("the CPU reference: {e}")),
     }
     more(run, &s, &got);
     run.stored(what, &got, &s, view_about(&v, size));
 }
 
+fn rect_forward_view() -> ViewParams {
+    ViewParams::new(DQuat::IDENTITY, lens(Projection::Rectilinear, 90.0))
+}
+
 fn rect_forward(run: &mut Run<'_>) {
-    let v = ViewParams::new(DQuat::IDENTITY, lens(Projection::Rectilinear, 90.0));
     stored_grid_view(
         run,
         "the grid, rectilinear 90°, looking forward",
-        v,
+        rect_forward_view(),
         RECT,
         |_, _, _| {},
     );
@@ -1255,15 +1407,21 @@ fn rect_pixel(
     (x >= 2.0 && y >= 2.0 && x <= w - 2.0 && y <= h - 2.0).then_some((x, y))
 }
 
+/// `rect_ypr`'s yaw, pitch and roll, in degrees.
+const RECT_YPR: (f64, f64, f64) = (30.0, 20.0, 10.0);
+
+fn rect_ypr_view() -> ViewParams {
+    let (yaw, pitch, roll) = RECT_YPR;
+    ViewParams::new(ypr(yaw, pitch, roll), lens(Projection::Rectilinear, 90.0))
+}
+
 fn rect_ypr(run: &mut Run<'_>) {
-    let (yaw, pitch, roll) = (30.0, 20.0, 10.0);
-    let v = ViewParams::new(ypr(yaw, pitch, roll), lens(Projection::Rectilinear, 90.0));
     stored_grid_view(
         run,
         "the grid, rectilinear 90°, yaw 30, pitch 20, roll 10",
-        v,
+        rect_ypr_view(),
         RECT,
-        |run, _, got| ypr_markers(run, got, (yaw, pitch, roll)),
+        |run, _, got| ypr_markers(run, got, RECT_YPR),
     );
 }
 
@@ -1349,9 +1507,13 @@ fn black_past_pi(run: &mut Run<'_>, got: &Image, v: &ViewParams) {
     run.at_most("pixels_past_pi_not_black", lit, 0.0);
 }
 
-fn fisheye_180(run: &mut Run<'_>) {
+fn fisheye_180_view() -> ViewParams {
     // Looking back, so the seam runs through the middle.
-    let v = ViewParams::new(ypr(180.0, 0.0, 0.0), lens(Projection::Fisheye, 180.0));
+    ViewParams::new(ypr(180.0, 0.0, 0.0), lens(Projection::Fisheye, 180.0))
+}
+
+fn fisheye_180(run: &mut Run<'_>) {
+    let v = fisheye_180_view();
     stored_grid_view(
         run,
         "the grid, fisheye 180°, looking back across the seam",
@@ -1361,8 +1523,12 @@ fn fisheye_180(run: &mut Run<'_>) {
     );
 }
 
+fn fisheye_360_view() -> ViewParams {
+    ViewParams::new(ypr(90.0, 30.0, 0.0), lens(Projection::Fisheye, 360.0))
+}
+
 fn fisheye_360(run: &mut Run<'_>) {
-    let v = ViewParams::new(ypr(90.0, 30.0, 0.0), lens(Projection::Fisheye, 360.0));
+    let v = fisheye_360_view();
     stored_grid_view(
         run,
         "the grid, fisheye 360°, yaw 90, pitch 30",
@@ -1396,8 +1562,12 @@ fn ideal_check(run: &mut Run<'_>, mask: &[bool], got: &Image, level0: &Image, id
     }
 }
 
+fn stereo_tinyplanet_view() -> ViewParams {
+    ViewParams::new(ypr(0.0, -90.0, 0.0), lens(Projection::Stereographic, 300.0))
+}
+
 fn stereo_tinyplanet(run: &mut Run<'_>) {
-    let v = ViewParams::new(ypr(0.0, -90.0, 0.0), lens(Projection::Stereographic, 300.0));
+    let v = stereo_tinyplanet_view();
     stored_grid_view(
         run,
         "the grid, tiny planet (stereographic 300°, pitch −90)",
@@ -1419,18 +1589,21 @@ fn stereo_tinyplanet(run: &mut Run<'_>) {
     );
 }
 
-fn morph_half(run: &mut Run<'_>) {
+fn morph_half_view() -> ViewParams {
     let l = Lens {
         from: Projection::Rectilinear,
         to: Projection::Stereographic,
         morph: 0.5,
         hfov: 150f64.to_radians(),
     };
-    let v = ViewParams::new(ypr(0.0, -10.0, 0.0), l);
+    ViewParams::new(ypr(0.0, -10.0, 0.0), l)
+}
+
+fn morph_half(run: &mut Run<'_>) {
     stored_grid_view(
         run,
         "the grid, rectilinear to stereographic at 0.5, 150°",
-        v,
+        morph_half_view(),
         RECT,
         |_, _, _| {},
     );
@@ -1794,10 +1967,12 @@ fn oetf(l: f64) -> f64 {
 /// by an independent model of the chain: Y' by H.273 (limited: (k − 16)
 /// / 219, full: k / 255) clamped to [0, 1]; the sRGB EOTF; the nearest
 /// half, as the linear target stores it; the OETF of the encode pass;
-/// and the unorm8 store, to nearest. The GPU does each step in f32, so
-/// where a value lies within its error of a tie (an f16 tie, or a half
-/// code) either neighbour may come out: the second value is the other
-/// candidate, when there is one.
+/// and the encode pass's rounding to the nearest code, whose k / 255 a
+/// unorm8 store to nearest keeps, even packed to f16 toward zero first
+/// (DECISIONS D31). The GPU does each step in f32, so where a value lies
+/// within its error of a tie (an f16 tie, or a half code) either
+/// neighbour may come out: the second value is the other candidate,
+/// when there is one.
 fn passthrough_model(k: u8, limited: bool) -> (u8, Option<u8>) {
     let y = if limited {
         (f64::from(k) - 16.0) / 219.0
@@ -1917,12 +2092,16 @@ fn passthrough_exact(run: &mut Run<'_>) {
                 wrong.push(format!("full k = {k} came out {got}"));
             }
             if limited && (16..=235).contains(&k) {
-                // The bound: the f16 store moves the linear value by at
-                // most 2^−11 of itself, which the OETF turns into at most
-                // (1.055 / 2.4) · 2^−11 of full scale, 0.0547 codes. So
-                // the output is round((k − 16) · 255 / 219) unless that
-                // lies within 0.0547 codes of a tie, and one code off at
-                // most where it does.
+                // The bound: the linear target's f16 store moves the
+                // linear value by at most 2^−11 of itself, which the OETF
+                // turns into at most (1.055 / 2.4) · 2^−11 of full scale,
+                // 0.0547 codes. The encode pass rounds to codes itself,
+                // so the unorm8 store adds nothing (left to RADV, whose
+                // export packs to f16 toward zero, the OETF's value lost
+                // up to 0.1245 codes more, D31). So the output is
+                // round((k − 16) · 255 / 219) unless that lies within
+                // 0.0547 codes of a tie, and one code off at most where
+                // it does.
                 let ideal = (f64::from(k) - 16.0) * 255.0 / 219.0;
                 let bound = 1.055 / 2.4 * 2f64.powi(-11) * 255.0 + 1e-4;
                 if f64::from(got) != ideal.round() {
@@ -2008,16 +2187,25 @@ fn range_full_vs_limited(run: &mut Run<'_>) {
     );
 }
 
+fn matrix_view() -> ViewParams {
+    ViewParams::new(ypr(-30.0, 15.0, 0.0), lens(Projection::Rectilinear, 90.0))
+}
+
+/// The grid as limited-range NV12 coded with matrix `m`.
+fn grid_coded(m: Matrix) -> Frame {
+    frame(
+        grid(),
+        Kind::Nv12,
+        color(Range::Limited, m, ChromaSiting::Left),
+        0,
+    )
+}
+
 fn matrix_601_709(run: &mut Run<'_>) {
-    let v = ViewParams::new(ypr(-30.0, 15.0, 0.0), lens(Projection::Rectilinear, 90.0));
+    let v = matrix_view();
     let mut psnrs = BTreeMap::new();
     for (name, m) in [("601", Matrix::Bt601), ("709", Matrix::Bt709)] {
-        let f = frame(
-            grid(),
-            Kind::Nv12,
-            color(Range::Limited, m, ChromaSiting::Left),
-            0,
-        );
+        let f = grid_coded(m);
         let (Some(got), Ok(cpu)) = (
             run.render_with(&f, &v, RECT, DebugMode::Off),
             reference::render_trilinear(&f, &v, RECT),
@@ -2025,7 +2213,8 @@ fn matrix_601_709(run: &mut Run<'_>) {
             run.fail("render or the CPU reference failed");
             return;
         };
-        run.cpu_check(&format!("cpu_{name}"), &got, &cpu);
+        let at = (&f, &v, &Placement::default());
+        run.cpu_check(&format!("cpu_{name}"), &got, &cpu, at);
         psnrs.insert(name, (f, cpu, unit(&got)));
     }
     // The two codings carry the same picture, so their renders agree,
@@ -2210,9 +2399,9 @@ fn siting_left_center(run: &mut Run<'_>) {
     );
 }
 
-fn crop_half(run: &mut Run<'_>) {
-    // A 180° panorama: the grid's middle half, with sv3d bounds cropping
-    // a quarter of the sphere's width off each side.
+/// A 180° panorama: the grid's middle half, with sv3d bounds cropping a
+/// quarter of the sphere's width off each side.
+fn crop_half_source() -> (Frame, Placement) {
     let g = grid();
     let half = RgbImage {
         width: 512,
@@ -2221,7 +2410,6 @@ fn crop_half(run: &mut Run<'_>) {
             .map(|i| g.get(256 + i % 512, i / 512))
             .collect(),
     };
-    let f = frame(&half, Kind::Nv12, limited709(), 0);
     let placement = Placement {
         left: 0.25,
         right: 0.25,
@@ -2229,7 +2417,16 @@ fn crop_half(run: &mut Run<'_>) {
         bottom: 0.0,
         stereo: Stereo::Mono,
     };
-    let v = ViewParams::new(ypr(60.0, 0.0, 0.0), lens(Projection::Rectilinear, 120.0));
+    (frame(&half, Kind::Nv12, limited709(), 0), placement)
+}
+
+fn crop_half_view() -> ViewParams {
+    ViewParams::new(ypr(60.0, 0.0, 0.0), lens(Projection::Rectilinear, 120.0))
+}
+
+fn crop_half(run: &mut Run<'_>) {
+    let (f, placement) = crop_half_source();
+    let v = crop_half_view();
     let opts = StillOptions {
         placement,
         ..StillOptions::default()
@@ -2264,7 +2461,7 @@ fn crop_half(run: &mut Run<'_>) {
         },
     );
     match cpu {
-        Ok(cpu) => run.cpu_check("cpu", &got, &cpu),
+        Ok(cpu) => run.cpu_check("cpu", &got, &cpu, (&f, &v, &placement)),
         Err(e) => run.fail(format!("the CPU reference: {e}")),
     }
     let s = Source::new("grid, the middle half", f);
@@ -2318,6 +2515,632 @@ fn lod_heatmap(run: &mut Run<'_>) {
 }
 
 // ---------------------------------------------------------------------
+// A GPU's filter and mip stores, emulated (D32)
+//
+// The CPU reference with its filter's fractions and its 8-bit mip stores
+// held as a GPU might hold them, to see what each costs the CPU checks:
+// `the_wide_views_lose_to_the_mip_stores_not_the_filter`.
+
+/// How a GPU holds the numbers it filters with, for [`Emulation`]: each
+/// bilinear fraction, the LOD and the blend weight between two levels in
+/// fixed point with this many fractional bits, or in f64 (`None`),
+/// rounded to nearest or toward zero; whether each filtered 8-bit value
+/// is held to whole codes; and how the 8-bit mips are stored.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Precision {
+    texel_bits: Option<i32>,
+    lod_bits: Option<i32>,
+    blend_bits: Option<i32>,
+    truncate: bool,
+    codes: bool,
+    mips: MipStore,
+}
+
+impl Precision {
+    /// The CPU reference's own: its filter in f64, and its 8-bit mips as
+    /// the mip pass makes them.
+    const F64: Precision = Precision {
+        texel_bits: None,
+        lod_bits: None,
+        blend_bits: None,
+        truncate: false,
+        codes: false,
+        mips: MipStore::Rounded,
+    };
+
+    fn fixed(&self, v: f64, bits: Option<i32>) -> f64 {
+        let Some(b) = bits else {
+            return v;
+        };
+        let s = 2f64.powi(b);
+        if self.truncate {
+            (v * s).floor() / s
+        } else {
+            (v * s).round() / s
+        }
+    }
+
+    fn describe(&self) -> String {
+        let bits = |b: Option<i32>| b.map_or_else(|| "f64".into(), |b| b.to_string());
+        format!(
+            "texel {}, LOD {}, blend {}{}{}, mips {:?}",
+            bits(self.texel_bits),
+            bits(self.lod_bits),
+            bits(self.blend_bits),
+            if self.truncate { " toward zero" } else { "" },
+            if self.codes { ", 8-bit results" } else { "" },
+            self.mips
+        )
+    }
+}
+
+/// How an 8-bit mip level is stored. As the mip pass makes it now: the
+/// exact area mean of the codes to the nearest code, ties to even
+/// (`reference::halve_codes`), returned as k / 255, which `Rounded`
+/// stores as k and `RoundedThroughRadv` as RADV's export stores it, packed
+/// to f16 toward zero first (D31): k again, which is the fix's point. As
+/// the reference stored it before the pass rounded: `TiesUp`, the f64
+/// mean to the nearest code with ties up (f64's `round`), which the RX
+/// 7600's CPU checks at be38fa4 were measured against. Or as the pass made
+/// it then (D31), its f32 area mean left to the export:
+/// `UnroundedLavapipe` that mean times 255 to the nearest even code, as
+/// lavapipe's export does, and `UnroundedRadv` that mean through RADV's
+/// export, which puts a mean on a half code, or up to 0.1245 codes above
+/// one, a code low.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MipStore {
+    Rounded,
+    RoundedThroughRadv,
+    TiesUp,
+    UnroundedLavapipe,
+    UnroundedRadv,
+}
+
+impl MipStore {
+    /// A texel stored, from `k`, the code the pass rounds the mean to,
+    /// `exact`, the mean in f64, and `shader`, the mean as the pass summed
+    /// it in f32 before it rounded: a code / 255.
+    fn store(self, k: u8, exact: f64, shader: f32) -> f64 {
+        let code = match self {
+            MipStore::Rounded => k,
+            MipStore::RoundedThroughRadv => radv_unorm8(f32::from(k) / 255.0),
+            MipStore::TiesUp => (exact.clamp(0.0, 1.0) * 255.0).round() as u8,
+            MipStore::UnroundedLavapipe => lavapipe_unorm8(shader),
+            MipStore::UnroundedRadv => radv_unorm8(shader),
+        };
+        f64::from(code) / 255.0
+    }
+}
+
+/// One plane's mip chain as the GPU stores it: each level's size and
+/// texels, components interleaved.
+struct Chain {
+    format: PlaneFormat,
+    comps: usize,
+    levels: Vec<(u32, u32, Vec<f64>)>,
+}
+
+impl Chain {
+    /// Plane `i` of `f` and its levels, each 8-bit one stored by `mips`.
+    fn new(f: &Frame, shape: &SlotShape, i: usize, mips: MipStore) -> Chain {
+        let p = shape.planes[i];
+        let comps = p.format.components() as usize;
+        let data = f.plane(i).unwrap();
+        let row_bytes = p.size.0 as usize * p.format.bytes_per_texel() as usize;
+        let shift = if shape.msb_aligned {
+            16 - u32::from(shape.bit_depth)
+        } else {
+            0
+        };
+        let max = (1u32 << shape.bit_depth) - 1;
+        let mut texels = Vec::new();
+        for y in 0..p.size.1 {
+            let row = data.row(y, row_bytes).unwrap();
+            if p.format.is_deep() {
+                texels.extend(row.chunks_exact(2).map(|b| {
+                    let code = (u32::from(u16::from_le_bytes([b[0], b[1]])) >> shift).min(max);
+                    round_f16(f64::from(code) / f64::from(max))
+                }));
+            } else {
+                texels.extend(row.iter().map(|&b| f64::from(b) / 255.0));
+            }
+        }
+        let mut chain = Chain {
+            format: p.format,
+            comps,
+            levels: vec![(p.size.0, p.size.1, texels)],
+        };
+        while chain.levels.len() < p.levels as usize {
+            let next = chain.halve(mips);
+            chain.levels.push(next);
+        }
+        chain
+    }
+
+    /// The next level down: each texel the area-weighted mean of those
+    /// it covers, stored in the plane's format: a deep one's f64 mean as
+    /// its nearest half, an 8-bit one by `mips`, from the code the pass
+    /// rounds it to, the f64 mean and the f32 mean the pass returned
+    /// before it rounded.
+    fn halve(&self, mips: MipStore) -> (u32, u32, Vec<f64>) {
+        let (sw, sh, src) = self.levels.last().unwrap();
+        let (sw, sh) = (*sw, *sh);
+        let (dw, dh) = ((sw / 2).max(1), (sh / 2).max(1));
+        let rounded = (!self.format.is_deep()).then(|| {
+            let codes: Vec<u8> = src.iter().map(|t| (t * 255.0).round() as u8).collect();
+            reference::halve_codes(&codes, (sw, sh), self.comps).2
+        });
+        let weights = |j: u32, ss: u32, ds: u32| -> Vec<(u32, f64)> {
+            let (lo, hi) = (j * ss, j * ss + ss);
+            (lo / ds..=(hi - 1) / ds)
+                .map(|x| {
+                    let overlap = hi.min((x + 1) * ds) - lo.max(x * ds);
+                    (x, f64::from(overlap) / f64::from(ss))
+                })
+                .collect()
+        };
+        let mut data = Vec::with_capacity(dw as usize * dh as usize * self.comps);
+        for j in 0..dh {
+            let wy = weights(j, sh, dh);
+            for i in 0..dw {
+                let wx = weights(i, sw, dw);
+                for c in 0..self.comps {
+                    let (mut acc, mut shader) = (0.0, 0f32);
+                    for &(y, a) in &wy {
+                        for &(x, b) in &wx {
+                            let t = src[(y as usize * sw as usize + x as usize) * self.comps + c];
+                            acc += a * b * t;
+                            shader += a as f32 * b as f32 * t as f32;
+                        }
+                    }
+                    data.push(match &rounded {
+                        None => round_f16(acc),
+                        Some(k) => mips.store(k[data.len()], acc, shader),
+                    });
+                }
+            }
+        }
+        (dw, dh, data)
+    }
+
+    /// A filtered value as `p` holds it.
+    fn held(&self, p: &Precision, v: [f64; 2]) -> [f64; 2] {
+        if p.codes && !self.format.is_deep() {
+            v.map(|x| (x * 255.0).round() / 255.0)
+        } else {
+            v
+        }
+    }
+
+    /// Level `l`'s bilinear blend at `uv`, its fractions held by `p`.
+    fn bilinear(&self, l: usize, uv: DVec2, wrap_u: bool, p: &Precision) -> [f64; 2] {
+        let (w, h, data) = &self.levels[l];
+        let (w, h) = (i64::from(*w), i64::from(*h));
+        let x = uv.x * w as f64 - 0.5;
+        let y = uv.y * h as f64 - 0.5;
+        let (x0, y0) = (x.floor(), y.floor());
+        let (a, b) = (p.fixed(x - x0, p.texel_bits), p.fixed(y - y0, p.texel_bits));
+        let col = |i: i64| {
+            if wrap_u {
+                i.rem_euclid(w)
+            } else {
+                i.clamp(0, w - 1)
+            }
+        };
+        let row = |j: i64| j.clamp(0, h - 1);
+        let (x0, y0) = (x0 as i64, y0 as i64);
+        let mut out = [0.0; 2];
+        for (c, o) in out.iter_mut().enumerate().take(self.comps) {
+            let t = |i: i64, j: i64| data[(row(j) * w + col(i)) as usize * self.comps + c];
+            let top = t(x0, y0) * (1.0 - a) + t(x0 + 1, y0) * a;
+            let bottom = t(x0, y0 + 1) * (1.0 - a) + t(x0 + 1, y0 + 1) * a;
+            *o = top * (1.0 - b) + bottom * b;
+        }
+        self.held(p, out)
+    }
+
+    /// Trilinear at `lod`, already clamped to the chain.
+    fn sample(&self, uv: DVec2, lod: f64, wrap_u: bool, p: &Precision) -> [f64; 2] {
+        let last = self.levels.len() - 1;
+        let lod = p.fixed(lod, p.lod_bits);
+        let l0 = (lod.floor().max(0.0) as usize).min(last);
+        let l1 = (l0 + 1).min(last);
+        let t = p.fixed((lod - l0 as f64).clamp(0.0, 1.0), p.blend_bits);
+        let a = self.bilinear(l0, uv, wrap_u, p);
+        if t == 0.0 || l1 == l0 {
+            return a;
+        }
+        let b = self.bilinear(l1, uv, wrap_u, p);
+        self.held(p, [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
+    }
+}
+
+/// Where a shown pixel samples: luma's and chroma's texture uv, and
+/// their LODs before clamping.
+struct Tap {
+    uv: DVec2,
+    cuv: DVec2,
+    lod: [f64; 2],
+}
+
+/// `reference::render` with its filter at any [`Precision`]: the
+/// source's chains and colour, and where each pixel samples (`None`
+/// where the view shows nothing), worked out once for every precision.
+/// At [`Precision::F64`] it is the reference itself, which
+/// `the_wide_views_lose_to_the_mip_stores_not_the_filter` asserts.
+struct Emulation {
+    frame: Frame,
+    shape: SlotShape,
+    semi_planar: bool,
+    matrix: [[f64; 4]; 3],
+    linear: bool,
+    wraps: bool,
+    levels: [f64; 2],
+    taps: Vec<Option<Tap>>,
+}
+
+impl Emulation {
+    fn new(f: &Frame, v: &ViewParams, size: (u32, u32), placement: &Placement) -> Emulation {
+        let shape = SlotShape::of(&f.layout, placement.shown(f.size)).unwrap();
+        let u = spherecut_render::color::source_uniform(&shape, &f.color, placement);
+        let (scale, offset) = placement.uv_transform();
+        let (scale, offset) = (DVec2::from(scale), DVec2::from(offset));
+        let (cs, co) = if matches!(shape.kind, LayoutKind::SemiPlanar | LayoutKind::Planar) {
+            spherecut_render::color::chroma_transform(&shape, f.color.siting)
+        } else {
+            ([1.0, 1.0], [0.0, 0.0])
+        };
+        let (cs, co) = (DVec2::from(cs), DVec2::from(co));
+        let texels = |i: usize| {
+            let p = shape.planes.get(i).copied().unwrap_or(shape.planes[0]);
+            DVec2::new(f64::from(p.size.0), f64::from(p.size.1))
+        };
+        let lod = |g: [DVec2; 2], s: DVec2| {
+            (g[0] * s)
+                .length()
+                .max((g[1] * s).length())
+                .max(1e-30)
+                .log2()
+        };
+        let mut taps = Vec::with_capacity(size.0 as usize * size.1 as usize);
+        for j in 0..size.1 {
+            for i in 0..size.0 {
+                taps.push(shows(v, size, placement, (i, j)).then(|| {
+                    let c = pixel::centre(i, j);
+                    let suv = reference::sphere_uv(reference::sphere_dir(v, size, c.x, c.y));
+                    let (gx, gy) = reference::uv_footprint(v, size, i, j);
+                    let uv = suv * scale + offset;
+                    let g = [gx * scale, gy * scale];
+                    Tap {
+                        uv,
+                        cuv: uv * cs + co,
+                        lod: [lod(g, texels(0)), lod(g.map(|x| x * cs), texels(1))],
+                    }
+                }));
+            }
+        }
+        Emulation {
+            frame: f.clone(),
+            semi_planar: shape.kind == LayoutKind::SemiPlanar,
+            matrix: spherecut_render::color::fold(&f.color, shape.kind, shape.bit_depth),
+            linear: f.color.transfer == Transfer::Linear,
+            wraps: placement.wraps(),
+            levels: u.levels.map(f64::from),
+            taps,
+            shape,
+        }
+    }
+
+    /// Every plane's mip chain, each 8-bit level stored by `mips`.
+    fn chains(&self, mips: MipStore) -> Vec<Chain> {
+        (0..self.shape.planes.len())
+            .map(|i| Chain::new(&self.frame, &self.shape, i, mips))
+            .collect()
+    }
+
+    /// RGB in [0, 1], as the encode pass computes it before it rounds it
+    /// to codes.
+    fn render(&self, p: &Precision) -> Vec<f64> {
+        let chains = self.chains(p.mips);
+        let mut out = Vec::with_capacity(3 * self.taps.len());
+        for t in &self.taps {
+            let Some(t) = t else {
+                out.extend([0.0; 3]);
+                continue;
+            };
+            let plane = |i: usize, uv: DVec2, lod: f64| {
+                chains
+                    .get(i)
+                    .map_or([0.0; 2], |c| c.sample(uv, lod, self.wraps, p))
+            };
+            let y = plane(0, t.uv, t.lod[0].clamp(0.0, self.levels[0] - 1.0));
+            let chroma = t.lod[1].clamp(0.0, self.levels[1] - 1.0);
+            let (c1, c2) = (plane(1, t.cuv, chroma), plane(2, t.cuv, chroma));
+            let s = [
+                y[0],
+                c1[0],
+                if self.semi_planar { c1[1] } else { c2[0] },
+                1.0,
+            ];
+            let rgb = self
+                .matrix
+                .map(|row| (0..4).map(|i| row[i] * s[i]).sum::<f64>().clamp(0.0, 1.0));
+            out.extend(rgb.map(|v| {
+                let lin = round_f16(if self.linear { v } else { eotf(v) });
+                oetf(lin.clamp(0.0, 1.0))
+            }));
+        }
+        out
+    }
+}
+
+/// One CPU check of the rows: its row and PSNR key, and what it renders.
+struct CpuCheck {
+    row: &'static str,
+    key: &'static str,
+    frame: Frame,
+    view: ViewParams,
+    size: (u32, u32),
+    placement: Placement,
+}
+
+/// Every CPU check of the rows, in their order.
+fn cpu_checks() -> Vec<CpuCheck> {
+    let check = |row, key, frame, view, size, placement| CpuCheck {
+        row,
+        key,
+        frame,
+        view,
+        size,
+        placement,
+    };
+    let grid = || grid_nv12().frame;
+    let mono = Placement::default();
+    let (crop, cropped) = crop_half_source();
+    let key = "cpu_psnr_db";
+    vec![
+        check("rect_forward", key, grid(), rect_forward_view(), RECT, mono),
+        check("rect_ypr", key, grid(), rect_ypr_view(), RECT, mono),
+        check("fisheye_180", key, grid(), fisheye_180_view(), SQUARE, mono),
+        check("fisheye_360", key, grid(), fisheye_360_view(), SQUARE, mono),
+        check(
+            "stereo_tinyplanet",
+            key,
+            grid(),
+            stereo_tinyplanet_view(),
+            PLANET,
+            mono,
+        ),
+        check("morph_half", key, grid(), morph_half_view(), RECT, mono),
+        check("crop_half", key, crop, crop_half_view(), RECT, cropped),
+        check(
+            "matrix_601_709",
+            "cpu_601_psnr_db",
+            grid_coded(Matrix::Bt601),
+            matrix_view(),
+            RECT,
+            mono,
+        ),
+        check(
+            "matrix_601_709",
+            "cpu_709_psnr_db",
+            grid_coded(Matrix::Bt709),
+            matrix_view(),
+            RECT,
+            mono,
+        ),
+    ]
+}
+
+/// Pixels of `display` (RGB in [0, 1]) whose red lies more than 0.1 of
+/// a code from a whole 8-bit one.
+fn between_codes(display: &[f64]) -> usize {
+    display
+        .chunks(3)
+        .filter(|p| {
+            let c = p[0] * 255.0;
+            (c - c.round()).abs() > 0.1
+        })
+        .count()
+}
+
+/// Whether `gpu` holds what it filters from an 8-bit plane to whole
+/// codes, as the emulation's model of lavapipe's filter has it, and how
+/// many pixels say otherwise: the checker's greys of 0.1 and 0.9
+/// magnified 2.25 times, so that its edges are filtered at level 0, read
+/// back in linear light, whose f16 moves a code by up to 0.055 (D32
+/// found every pixel within 0.035 of a code at 16 bits). The f64
+/// reference puts thousands of pixels between codes, which is asserted.
+fn filters_to_codes(gpu: &Gpu, renderer: &mut StillRenderer) -> (bool, usize) {
+    let s = checker_gray();
+    let v = ViewParams::new(ypr(10.0, 0.0, 0.0), lens(Projection::Rectilinear, 20.0));
+    let opts = StillOptions {
+        depth: Depth::Linear,
+        ..StillOptions::default()
+    };
+    let got = renderer.render(gpu, &s.frame, &v, RECT, &opts).unwrap();
+    let display: Vec<f64> = unit(&got).iter().map(|l| oetf(*l)).collect();
+    let mut seen = [false; 256];
+    for p in display.chunks(3) {
+        seen[(p[0].clamp(0.0, 1.0) * 255.0).round() as usize] = true;
+    }
+    let shades = seen.iter().filter(|s| **s).count();
+    assert!(shades > 100, "the probe shows {shades} shades");
+    let cpu = reference::render_trilinear(&s.frame, &v, RECT).unwrap();
+    let reference = between_codes(&cpu.data);
+    assert!(
+        reference > 2000,
+        "a filter in f64 puts {reference} pixels between codes"
+    );
+    let between = between_codes(&display);
+    eprintln!(
+        "the 8-bit filter probe: {shades} shades, {between} pixels between codes ({reference} \
+         in f64)"
+    );
+    (between == 0, between)
+}
+
+// ---------------------------------------------------------------------
+// Local faults, for the other-driver rule (D32)
+//
+// What a localized fault does to a stored golden, against what another
+// llvmpipe build does: `the_other_driver_rule_catches_local_faults`.
+
+/// The rows that store an image, with their views and sizes.
+fn stored_views() -> [(&'static str, ViewParams, (u32, u32)); 6] {
+    [
+        ("rect_forward", rect_forward_view(), RECT),
+        ("rect_ypr", rect_ypr_view(), RECT),
+        ("fisheye_180", fisheye_180_view(), SQUARE),
+        ("fisheye_360", fisheye_360_view(), SQUARE),
+        ("stereo_tinyplanet", stereo_tinyplanet_view(), PLANET),
+        ("morph_half", morph_half_view(), RECT),
+    ]
+}
+
+fn rgb8_of(img: &Image) -> &[u8] {
+    match &img.pixels {
+        Pixels::Rgb8(p) => p,
+        _ => panic!("an 8-bit image was expected"),
+    }
+}
+
+/// `img` moved `(dx, dy)` pixels right and down, its first columns or
+/// rows repeated: a render a pixel off, or cropped a pixel off.
+fn moved(img: &Image, (dx, dy): (u32, u32)) -> Image {
+    let p = rgb8_of(img);
+    let w = img.width as usize;
+    let mut out = p.to_vec();
+    for y in 0..img.height as usize {
+        for x in 0..w {
+            let (sx, sy) = (x.saturating_sub(dx as usize), y.saturating_sub(dy as usize));
+            out[3 * (y * w + x)..][..3].copy_from_slice(&p[3 * (sy * w + sx)..][..3]);
+        }
+    }
+    Image {
+        pixels: Pixels::Rgb8(out),
+        ..img.clone()
+    }
+}
+
+/// `img` with the pixels in `mask` black.
+fn blanked(img: &Image, mask: &[bool]) -> Image {
+    let mut out = rgb8_of(img).to_vec();
+    for (px, m) in out.chunks_mut(3).zip(mask) {
+        if *m {
+            px.fill(0);
+        }
+    }
+    Image {
+        pixels: Pixels::Rgb8(out),
+        ..img.clone()
+    }
+}
+
+/// The pixels of a `size` view along the seam: shown, with u wrapping
+/// between them and the pixel to their right or below.
+fn seam_pixels(v: &ViewParams, size: (u32, u32)) -> Vec<bool> {
+    let p = Placement::default();
+    let u = |i: u32, j: u32| {
+        let c = pixel::centre(i, j);
+        reference::sphere_uv(reference::sphere_dir(v, size, c.x, c.y)).x
+    };
+    let mut mask = vec![false; size.0 as usize * size.1 as usize];
+    for j in 0..size.1 {
+        for i in 0..size.0 {
+            if !shows(v, size, &p, (i, j)) {
+                continue;
+            }
+            let wraps = |n: (u32, u32)| {
+                n.0 < size.0
+                    && n.1 < size.1
+                    && shows(v, size, &p, n)
+                    && (u(i, j) - u(n.0, n.1)).abs() > 0.5
+            };
+            mask[(j * size.0 + i) as usize] = wraps((i + 1, j)) || wraps((i, j + 1));
+        }
+    }
+    mask
+}
+
+/// The four pixels nearest each pole a `size` view shows within a pixel.
+fn pole_pixels(v: &ViewParams, size: (u32, u32)) -> Vec<bool> {
+    let p = Placement::default();
+    let n = size.0 as usize * size.1 as usize;
+    let mut mask = vec![false; n];
+    let dirs: Vec<Option<DVec3>> = (0..n)
+        .map(|k| {
+            let (i, j) = ((k % size.0 as usize) as u32, (k / size.0 as usize) as u32);
+            let c = pixel::centre(i, j);
+            shows(v, size, &p, (i, j)).then(|| reference::sphere_dir(v, size, c.x, c.y))
+        })
+        .collect();
+    for pole in [DVec3::Y, DVec3::NEG_Y] {
+        let mut near: Vec<(f64, usize)> = dirs
+            .iter()
+            .enumerate()
+            .filter_map(|(k, d)| d.map(|d| (d.angle_between(pole), k)))
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let Some(&(a, k)) = near.first() else {
+            continue;
+        };
+        // Within a pixel: nearer than the pixel's own step to its
+        // neighbour.
+        let (i, j) = ((k % size.0 as usize) as u32, (k / size.0 as usize) as u32);
+        let c = pixel::centre(i, j);
+        let step = reference::sphere_dir(v, size, c.x, c.y).angle_between(reference::sphere_dir(
+            v,
+            size,
+            c.x + 1.0,
+            c.y,
+        ));
+        if a <= step {
+            for &(_, k) in near.iter().take(4) {
+                mask[k] = true;
+            }
+        }
+    }
+    mask
+}
+
+/// The pixels of a `size` view within a pixel inside θ = π.
+fn rim_pixels(v: &ViewParams, size: (u32, u32)) -> Vec<bool> {
+    let p = Placement::default();
+    let mut mask = vec![false; size.0 as usize * size.1 as usize];
+    for j in 0..size.1 {
+        for i in 0..size.0 {
+            let c = pixel::centre(i, j);
+            let rho = pixel::to_lens(size, c.x, c.y).length();
+            let further = rho + 2.0 / f64::from(size.0);
+            mask[(j * size.0 + i) as usize] =
+                shows(v, size, &p, (i, j)) && v.lens.theta(further) > PI + 1e-4;
+        }
+    }
+    mask
+}
+
+/// `v` with its field of view changed so that what its left and right
+/// edges show lands `px` pixels further in (`px` < 0: further out), or
+/// `None` where the projection can't widen that far.
+fn widened(v: &ViewParams, size: (u32, u32), px: f64) -> Option<ViewParams> {
+    let edge = 1.0 - 2.0 * px / f64::from(size.0);
+    let want = v.lens.theta(1.0);
+    let lens = |hfov: f64| Lens { hfov, ..v.lens };
+    let (mut lo, mut hi) = (v.lens.hfov / 2.0, v.lens.hfov * 2.0);
+    for _ in 0..200 {
+        let mid = (lo + hi) / 2.0;
+        if lens(mid).theta(edge) < want {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let l = lens((lo + hi) / 2.0);
+    ((l.theta(edge) - want).abs() < 1e-9).then(|| ViewParams::new(v.orientation, l))
+}
+
+// ---------------------------------------------------------------------
 // The tests
 
 #[test]
@@ -2364,6 +3187,41 @@ fn stored_images_follow_the_rules_of_section_6() {
     assert!(judge(&d, true).is_err() && judge(&d, false).is_ok());
     let d = drift(&shifted, &want).unwrap();
     assert!(judge(&d, false).is_err(), "{d:?}");
+    // Past 4 LSB: four pixels may be, by up to 8 LSB, in any channel; a
+    // fifth pixel, or a ninth LSB, fails, and the message counts them.
+    let off = |pixels: &[(usize, usize, u8)]| {
+        let mut img = want.clone();
+        if let Pixels::Rgb8(p) = &mut img.pixels {
+            for &(n, c, by) in pixels {
+                p[3 * n + c] += by;
+            }
+        }
+        drift(&img, &want).unwrap()
+    };
+    let d = off(&[(0, 0, 5), (100, 1, 5), (700, 2, 6), (2047, 0, 8)]);
+    assert!(d.past == 4.0 && d.max_lsb == 8.0, "{d:?}");
+    assert!(judge(&d, false).is_ok(), "{d:?}");
+    // Two channels of one pixel are one pixel.
+    let d = off(&[(0, 0, 5), (0, 1, 5), (100, 1, 5), (700, 2, 6), (2047, 0, 8)]);
+    assert!(d.past == 4.0 && judge(&d, false).is_ok(), "{d:?}");
+    let d = off(&[
+        (0, 0, 5),
+        (100, 1, 5),
+        (700, 2, 6),
+        (1000, 2, 5),
+        (2047, 0, 8),
+    ]);
+    let e = judge(&d, false).unwrap_err();
+    assert!(
+        d.past == 5.0 && e.contains("5 pixels more than 4 LSB off, max 8 LSB"),
+        "{e}"
+    );
+    let d = off(&[(0, 0, 9)]);
+    let e = judge(&d, false).unwrap_err();
+    assert!(
+        d.past == 1.0 && e.contains("1 pixel more than 4 LSB off, max 9 LSB"),
+        "{e}"
+    );
     let small = Image {
         width: 32,
         ..want.clone()
@@ -2569,15 +3427,18 @@ fn the_passthrough_model_and_its_bound() {
     assert_eq!(nearest_half(3.0 * 2f64.powi(-26)), 2f64.powi(-24));
 }
 
-// The two Tier 2 paths run on goldens blessed into a scratch directory,
-// never on `tests/goldens`: `goldens` rewrites that while blessing, in
-// parallel with these, and a read halfway through the rewrite failed the
-// blessing command although it had written everything.
+// No Tier 1 test but `goldens` reads `tests/goldens` (the Tier 2 tests,
+// run on their own, do): `goldens` rewrites it while blessing, in
+// parallel with the others, which would read the images it replaces, or
+// one halfway through its rewrite, and fail the blessing command although
+// it had written everything. The two Tier 2 paths' tests run on goldens
+// blessed into a scratch directory, and
+// `the_other_driver_rule_catches_local_faults` renders the stored views.
 
 #[test]
 fn the_reference_only_path_runs_on_lavapipe() {
     // goldens_on_gpu_match_reference's path, on two rows, with the floors
-    // their blessing calibrated.
+    // their blessing calibrated, which hold a GPU as they hold lavapipe.
     let s = scratch("references");
     let (dir, diffs) = (s.dir.clone(), s.diffs.clone());
     let rows = ["rect_forward", "tenbit_ramp"];
@@ -2585,21 +3446,97 @@ fn the_reference_only_path_runs_on_lavapipe() {
     let mut run = Run::at(gpu(), Mode::References, &dir, &diffs);
     run_rows(&mut run, Some(&rows));
     assert_eq!(run.notes.len(), 2, "{:?}", run.notes);
+    // The error by LOD band: a 90° view of 1024 texels round, under a
+    // level down everywhere.
+    let m = &run.images["rect_forward"]["measured"];
+    assert_eq!(m["cpu_lod_below_1_pixels"], json!(36864.0), "{m}");
+    assert_eq!(m["cpu_lod_below_1_error_share"], json!(1.0), "{m}");
+    assert_eq!(m["cpu_lod_from_2.5_pixels"], json!(0.0), "{m}");
+    assert!(m["cpu_lod_below_1_psnr_db"].is_number(), "{m}");
+    assert!(
+        run.notes[0].contains("cpu_lod_1_to_2.5_pixels 0.0"),
+        "{:?}",
+        run.notes
+    );
     assert!(run.pngs.is_empty());
     run.finish();
+    // Blessed at 99 dB, the floor is 99 dB, which lavapipe's 53.2 dB
+    // fails: no other floor stands in for the blessed one.
+    let path = dir.join(MANIFEST);
+    let mut m: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    m["images"]["rect_forward"]["thresholds"]["cpu_psnr_db_min"] = json!(99.0);
+    std::fs::write(&path, m.to_string()).unwrap();
+    let mut run = Run::at(gpu(), Mode::References, &dir, &diffs);
+    run_rows(&mut run, Some(&["rect_forward"]));
+    assert!(
+        run.failures.len() == 1
+            && run.failures[0].contains("cpu_psnr_db is ")
+            && run.failures[0].contains(", below 99 [on "),
+        "{:?}",
+        run.failures
+    );
 }
 
 #[test]
 fn the_other_driver_path_runs_on_lavapipe() {
     // goldens_on_host_llvmpipe's path, on one stored image: the
-    // other-driver rule whatever the build, with the drift noted.
+    // other-driver rule whatever the build, with the drift noted. Blessed
+    // at this build, the golden is identical; one pixel a step off then
+    // passes, where the exact rule fails it at this build, and five
+    // pixels 5 LSB off fail by the count, which the message gives.
     let s = scratch("other-driver");
     let (dir, diffs) = (s.dir.clone(), s.diffs.clone());
     bless_into(&dir, &diffs, &["rect_forward"]);
-    let mut run = Run::at(gpu(), Mode::OtherDriver, &dir, &diffs);
-    run_rows(&mut run, Some(&["rect_forward"]));
-    assert!(run.notes[0].contains("golden_psnr_db"), "{:?}", run.notes);
+    let rerun = |mode: Mode| {
+        let mut run = Run::at(gpu(), mode, &dir, &diffs);
+        run_rows(&mut run, Some(&["rect_forward"]));
+        run
+    };
+    let run = rerun(Mode::OtherDriver);
+    assert!(
+        run.notes[0].contains("golden_psnr_db")
+            && run.notes[0].contains("golden_pixels_past_4_lsb 0.0"),
+        "{:?}",
+        run.notes
+    );
     run.finish();
+    let png = dir.join("rect_forward.png");
+    let blessed = Image::from_png(&std::fs::read(&png).unwrap()).unwrap();
+    let write_off = |pixels: &[usize], by: u8| {
+        let mut img = blessed.clone();
+        if let Pixels::Rgb8(p) = &mut img.pixels {
+            for &n in pixels {
+                let c = &mut p[3 * n];
+                *c = if *c < 128 { *c + by } else { *c - by };
+            }
+        }
+        std::fs::write(&png, img.to_png().unwrap()).unwrap();
+    };
+    write_off(&[1000], 1);
+    let run = rerun(Mode::OtherDriver);
+    assert!(run.failures.is_empty(), "{:?}", run.failures);
+    let m = &run.images["rect_forward"]["measured"];
+    assert!(
+        m["golden_identical"] == json!(0.0) && m["golden_max_lsb"] == json!(1.0),
+        "{m}"
+    );
+    let exact = rerun(Mode::Golden { bless: false });
+    assert!(
+        exact.failures.len() == 1 && exact.failures[0].contains("not identical"),
+        "{:?}",
+        exact.failures
+    );
+    write_off(&[1000, 5000, 9000, 20000, 30000], 5);
+    let run = rerun(Mode::OtherDriver);
+    assert!(
+        run.failures.len() == 1
+            && run.failures[0].contains("outside the other-driver tolerance")
+            && run.failures[0].contains("5 pixels more than 4 LSB off, max 5 LSB"),
+        "{:?}",
+        run.failures
+    );
+    let m = &run.images["rect_forward"]["measured"];
+    assert_eq!(m["golden_pixels_past_4_lsb"], json!(5.0), "{m}");
 }
 
 #[test]
@@ -2665,4 +3602,393 @@ fn goldens_on_host_llvmpipe() {
     let mut run = Run::new(&gpu, Mode::OtherDriver);
     run_rows(&mut run, None);
     run.finish();
+}
+
+/// Every CPU check's PSNR on the RX 7600 (RADV NAVI33, Mesa 26.2.5) at
+/// be38fa4, when the mip pass left its 8-bit means to the driver's
+/// export: `goldens_on_gpu_match_reference`'s notes in
+/// `hw-reports/odin-be38fa409e.md`, by row and key.
+const RX_7600_BE38FA4: &[(&str, &str, f64)] = &[
+    ("rect_forward", "cpu_psnr_db", 58.5452),
+    ("rect_ypr", "cpu_psnr_db", 58.0408),
+    ("fisheye_180", "cpu_psnr_db", 47.7761),
+    ("fisheye_360", "cpu_psnr_db", 44.6747),
+    ("stereo_tinyplanet", "cpu_psnr_db", 51.4508),
+    ("morph_half", "cpu_psnr_db", 52.7078),
+    ("crop_half", "cpu_psnr_db", 56.5701),
+    ("matrix_601_709", "cpu_601_psnr_db", 58.2078),
+    ("matrix_601_709", "cpu_709_psnr_db", 58.0879),
+];
+
+#[test]
+fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
+    // Every CPU check, emulated with a GPU's precision ([`Emulation`])
+    // and rounded to codes as the encode pass rounds it, against the
+    // reference, as a GPU's CPU check measures it; and the filter's own
+    // error, unrounded.
+    //
+    // At be38fa4 the mip pass left its 8-bit means to the driver's export
+    // and the reference took their ties up, and the RX 7600 lost up to 15
+    // dB on the wide, minified views (D32). Against that reference,
+    // fixed-point filter weights, even a 4-bit blend toward zero, come
+    // nowhere near its numbers, and RADV's export of those means comes
+    // within 1 dB of every row.
+    //
+    // Now the pass rounds the means itself, ties to even, as the
+    // reference does, and RADV's export of what it returns stores the
+    // reference's codes in every level of every check. RADV's filter as
+    // emulated, on those mips, with the error the emulation missed at
+    // be38fa4 added, predicts each check after the fix: each clears
+    // lavapipe's floor (its PSNR here less 3 dB, as a blessing calibrates
+    // it). lavapipe's own filter, emulated the same way, comes within 1
+    // dB of its render on every row, which is what the method can be
+    // checked against here. Both are asserted only where lavapipe filters
+    // 8-bit planes to whole codes, as the model has it and as the
+    // lavapipe the goldens are blessed on does: one that filters them in
+    // floating point renders the wide views nearer the reference (59.97
+    // dB for `fisheye_360` with GALLIVM_PERF=no_aos_sampling), so its
+    // floors aren't the blessed ones and say nothing of a GPU.
+    //
+    // The control is the old means through RADV's export, predicted the
+    // same way against today's reference. They clear lavapipe's floors
+    // too, so the floors can't tell them from the fix; but on the views
+    // the RX 7600 lost they come out more than 1 dB under the prediction,
+    // which is what D32's Revisit clause looks for in a GPU run (asserted
+    // everywhere: none of it is lavapipe's).
+    let fixed = |blend: i32, truncate: bool| Precision {
+        texel_bits: Some(8),
+        lod_bits: Some(8),
+        blend_bits: Some(blend),
+        truncate,
+        ..Precision::F64
+    };
+    let filters = [
+        fixed(8, false),
+        fixed(6, false),
+        fixed(4, false),
+        fixed(4, true),
+    ];
+    // be38fa4's reference, and each filter on its mips.
+    let then = |p: Precision| Precision {
+        mips: MipStore::TiesUp,
+        ..p
+    };
+    // RADV's filter as the emulation finds it, on the old means through
+    // its export and on what the pass returns now.
+    let radv_then = Precision {
+        mips: MipStore::UnroundedRadv,
+        ..fixed(8, false)
+    };
+    let radv_now = Precision {
+        mips: MipStore::RoundedThroughRadv,
+        ..fixed(8, false)
+    };
+    let lavapipe = Precision {
+        codes: true,
+        ..fixed(8, false)
+    };
+    let coded = |v: &[f64]| -> Vec<f64> { v.iter().map(|x| (x * 255.0).round() / 255.0).collect() };
+    // A floor as a blessing calibrates it from a PSNR.
+    let floor = |db: f64| (((db - CPU_MARGIN_DB) * 100.0).floor() / 100.0).max(CPU_FLOOR_DB);
+    // Squared error from PSNR and back.
+    let mse = |db: f64| 10f64.powf(-db / 10.0);
+    let db = |e: f64| -10.0 * e.log10();
+    let gpu = gpu();
+    let mut renderer = StillRenderer::new(gpu);
+    let (mut filter_miss, mut radv_miss, mut lavapipe_miss) = ([0.0f64; 4], 0.0f64, 0.0f64);
+    let (mut under, mut caught, mut predictions) = (Vec::new(), Vec::new(), Vec::new());
+    for c in cpu_checks() {
+        let what = format!("{} {}", c.row, c.key);
+        let cpu = reference::render(
+            &c.frame,
+            &c.view,
+            c.size,
+            &reference::Options {
+                level0: false,
+                placement: c.placement,
+            },
+        )
+        .unwrap();
+        let e = Emulation::new(&c.frame, &c.view, c.size, &c.placement);
+        // At f64 the emulation is the reference.
+        let exact = e.render(&Precision::F64);
+        let off = max_diff(&exact, &cpu.data);
+        assert!(
+            off < 1e-12,
+            "{what}: the emulation is {off:e} off the reference"
+        );
+        // RADV's export keeps every code the pass rounds to.
+        let through = e.chains(MipStore::RoundedThroughRadv);
+        for (n, (a, b)) in through.iter().zip(e.chains(MipStore::Rounded)).enumerate() {
+            assert!(
+                a.levels == b.levels,
+                "{what}: RADV's export moves plane {n}'s rounded mips"
+            );
+        }
+        let old = e.render(&then(Precision::F64));
+        let rx = RX_7600_BE38FA4
+            .iter()
+            .find(|(r, k, _)| *r == c.row && *k == c.key)
+            .unwrap()
+            .2;
+        let opts = StillOptions {
+            placement: c.placement,
+            ..StillOptions::default()
+        };
+        let here = renderer
+            .render(gpu, &c.frame, &c.view, c.size, &opts)
+            .unwrap();
+        let here = psnr_of(c.size, &unit(&here), &cpu.data);
+        // The reference rounded to codes: now, and at be38fa4 against
+        // its own.
+        eprintln!(
+            "{what}: RX 7600 at be38fa4 {rx:.2} dB, lavapipe {here:.2} dB (its floor {}), a \
+             filter in f64 {:.2} dB (at be38fa4 {:.2} dB)",
+            floor(here),
+            psnr_of(c.size, &coded(&exact), &cpu.data),
+            psnr_of(c.size, &coded(&old), &old)
+        );
+        // be38fa4: each filter against the reference of the time.
+        let mut unrounded = Vec::new();
+        for (n, p) in filters.iter().enumerate() {
+            let got = e.render(&then(*p));
+            let psnr = psnr_of(c.size, &coded(&got), &old);
+            let raw = psnr_of(c.size, &got, &old);
+            eprintln!(
+                "{what}: at be38fa4, {}: {psnr:.2} dB ({raw:.2} unrounded)",
+                then(*p).describe()
+            );
+            filter_miss[n] = filter_miss[n].max((psnr - rx).abs());
+            unrounded.push(raw);
+        }
+        // Fewer bits in the blend, or truncated, never come nearer.
+        assert!(
+            unrounded.windows(2).all(|w| w[0] >= w[1]),
+            "{what}: {unrounded:?}"
+        );
+        // Each export alone, the filter in f64: the old means against the
+        // old reference, and the pass's now against the reference.
+        for (mips, want, at) in [
+            (MipStore::UnroundedRadv, &old, "at be38fa4"),
+            (MipStore::UnroundedLavapipe, &old, "at be38fa4"),
+            (MipStore::RoundedThroughRadv, &cpu.data, "now"),
+        ] {
+            let p = Precision {
+                mips,
+                ..Precision::F64
+            };
+            let psnr = psnr_of(c.size, &coded(&e.render(&p)), want);
+            eprintln!("{what}: {at}, {}: {psnr:.2} dB", p.describe());
+        }
+        let bands = lod_bands(&c.frame, &c.view, c.size, &c.placement);
+        let mut psnrs = Vec::new();
+        for (name, p, want) in [
+            ("at be38fa4, RADV's export", radv_then, &old),
+            ("now, RADV's export", radv_now, &cpu.data),
+            ("now, lavapipe's filter", lavapipe, &cpu.data),
+            (
+                "RADV's export of the old means against today's reference",
+                radv_then,
+                &cpu.data,
+            ),
+        ] {
+            let got = coded(&e.render(&p));
+            let psnr = psnr_of(c.size, &got, want);
+            let by: Vec<String> = band_errors(&bands, &got, want)
+                .iter()
+                .zip(LOD_BANDS)
+                .map(|(b, (band, _))| {
+                    let db = b.psnr.map_or_else(|| "-".into(), |d| format!("{d:.2} dB"));
+                    format!("{band} {} pixels {db} {:.1}%", b.pixels, b.share * 100.0)
+                })
+                .collect();
+            eprintln!(
+                "{what}: {name} ({}): {psnr:.2} dB; {}",
+                p.describe(),
+                by.join(", ")
+            );
+            psnrs.push(psnr);
+        }
+        let (radv, now, model, old_now) = (psnrs[0], psnrs[1], psnrs[2], psnrs[3]);
+        radv_miss = radv_miss.max((radv - rx).abs());
+        lavapipe_miss = lavapipe_miss.max((model - here).abs());
+        // The prediction: the emulation now, with the squared error it
+        // missed of the RX 7600 at be38fa4 (RADV's own filter, as far as
+        // the model isn't it) added. The control is the old means,
+        // predicted the same way against the same reference.
+        let missed = (mse(rx) - mse(radv)).max(0.0);
+        let predicted = db(mse(now) + missed);
+        let unfixed = db(mse(old_now) + missed);
+        eprintln!(
+            "{what}: the RX 7600 after the fix: {now:.2} dB emulated, {predicted:.2} dB with the \
+             error the emulation missed at be38fa4 ({:.2} dB alone) added; with the old means \
+             {unfixed:.2} dB, {:.2} dB under it",
+            db(missed),
+            predicted - unfixed
+        );
+        predictions.push((what.clone(), predicted, floor(here)));
+        if unfixed < floor(here) {
+            under.push(what.clone());
+        }
+        if predicted - unfixed > 1.0 {
+            caught.push(what);
+        }
+    }
+    eprintln!(
+        "worst miss: of the RX 7600, each filter {filter_miss:.2?} dB and RADV's export of the \
+         old means {radv_miss:.2} dB; of lavapipe, its filter {lavapipe_miss:.2} dB; the old \
+         means through RADV's export, predicted against today's reference, more than 1 dB \
+         under the prediction: {caught:?}; under lavapipe's floor: {under:?}"
+    );
+    for (p, miss) in filters.iter().zip(filter_miss) {
+        assert!(
+            miss > 5.0,
+            "{} explains the RX 7600 to {miss:.2} dB",
+            p.describe()
+        );
+    }
+    assert!(
+        radv_miss < 1.0,
+        "RADV's export misses the RX 7600 by {radv_miss:.2} dB"
+    );
+    for row in ["fisheye_180", "fisheye_360", "stereo_tinyplanet"] {
+        assert!(
+            caught.iter().any(|w| w.starts_with(&format!("{row} "))),
+            "the old means through RADV's export come within 1 dB of the prediction for {row}: \
+             more than 1 dB under it only {caught:?}"
+        );
+    }
+    // The model of lavapipe's filter is a fact about the lavapipe it was
+    // made on, which holds what it filters from 8-bit planes to codes, and
+    // so are the floors a blessing calibrates; a lavapipe that filters
+    // them in floating point (GALLIVM_PERF=no_aos_sampling, or another
+    // build) is reported, not held to either.
+    let (to_codes, between) = filters_to_codes(gpu, &mut renderer);
+    let short: Vec<String> = predictions
+        .iter()
+        .filter(|(_, predicted, floor)| predicted < floor)
+        .map(|(what, predicted, floor)| format!("{what} at {predicted:.2} dB, under {floor}"))
+        .collect();
+    if to_codes {
+        assert!(
+            lavapipe_miss < 1.0,
+            "lavapipe's filter misses lavapipe by {lavapipe_miss:.2} dB"
+        );
+        assert!(
+            short.is_empty(),
+            "the RX 7600 is predicted under lavapipe's floors after the fix: {short:?}"
+        );
+    } else {
+        eprintln!(
+            "lavapipe here filters 8-bit planes between codes ({between} pixels of the probe), \
+             so neither its filter's model, which misses it by {lavapipe_miss:.2} dB, nor the \
+             RX 7600's prediction against the floors it calibrates ({short:?} under them) is \
+             asserted"
+        );
+    }
+}
+
+#[test]
+fn the_other_driver_rule_catches_local_faults() {
+    // Each stored view's render against faults made from it, or rendered
+    // beside it: moved a pixel right or down, the view a pixel wider or
+    // narrower at its edges, implicit LOD (the seam and pole rows'
+    // control), and the seam, the poles' quads or the pixels within a
+    // pixel of the rim blanked. Every fault fails the rule, but implicit
+    // LOD in the rect views, which show no seam or pole and nothing far
+    // minified, and differ there by no more than 4 LSB. Four pass PSNR
+    // and SSIM, and only the count or the maximum catches them. As drift,
+    // the views widened or narrowed by a hundredth of a pixel at their
+    // edges pass. The render is the stored image wherever `goldens`
+    // passes at the build it was blessed on; the PNG isn't read, since a
+    // blessing rewrites it beside this test.
+    let gpu = gpu();
+    let mut renderer = StillRenderer::new(gpu);
+    let s = grid_nv12();
+    // The faults the averages miss, and whether the count and the
+    // maximum catch them.
+    let averages_miss = [
+        ("fisheye_180", "implicit_lod", true, true),
+        ("stereo_tinyplanet", "implicit_lod", true, false),
+        ("stereo_tinyplanet", "poles_black", false, true),
+        ("morph_half", "implicit_lod", true, false),
+    ];
+    let mut missed = Vec::new();
+    for (row, v, size) in stored_views() {
+        let mut render = |v: &ViewParams, debug: DebugMode| {
+            let opts = StillOptions {
+                debug,
+                ..StillOptions::default()
+            };
+            renderer.render(gpu, &s.frame, v, size, &opts).unwrap()
+        };
+        let want = render(&v, DebugMode::Off);
+        for px in [0.01, -0.01] {
+            // A 360° fisheye can't widen.
+            let Some(w) = widened(&v, size, px) else {
+                continue;
+            };
+            let d = drift(&render(&w, DebugMode::Off), &want).unwrap();
+            eprintln!(
+                "{row}: drift, {px} pixel at the edges: {} pixels past {OTHER_PAST_LSB} LSB, max \
+                 {} LSB, {:.2} dB, SSIM {:.5}",
+                d.past, d.max_lsb, d.psnr, d.ssim
+            );
+            assert!(judge(&d, false).is_ok(), "{row}: {px} pixel: {d:?}");
+        }
+        let mut faults = vec![
+            ("moved_right", moved(&want, (1, 0))),
+            ("moved_down", moved(&want, (0, 1))),
+            ("implicit_lod", render(&v, DebugMode::ImplicitLod)),
+        ];
+        for (name, px) in [("wider", 1.0), ("narrower", -1.0)] {
+            // A 360° fisheye can't widen.
+            if let Some(w) = widened(&v, size, px) {
+                faults.push((name, render(&w, DebugMode::Off)));
+            }
+        }
+        for (name, mask) in [
+            ("seam_black", seam_pixels(&v, size)),
+            ("poles_black", pole_pixels(&v, size)),
+            ("rim_black", rim_pixels(&v, size)),
+        ] {
+            if mask.contains(&true) {
+                faults.push((name, blanked(&want, &mask)));
+            }
+        }
+        for (name, got) in &faults {
+            let d = drift(got, &want).unwrap();
+            let averages = d.psnr >= OTHER_PSNR_DB && d.ssim >= OTHER_SSIM;
+            eprintln!(
+                "{row}: {name}: {} pixels past {OTHER_PAST_LSB} LSB, max {} LSB, {:.2} dB, SSIM \
+                 {:.5}{}",
+                d.past,
+                d.max_lsb,
+                d.psnr,
+                d.ssim,
+                if averages {
+                    ", within the averages"
+                } else {
+                    ""
+                }
+            );
+            if *name == "implicit_lod" && row.starts_with("rect_") {
+                assert!(d.past == 0.0 && d.max_lsb <= OTHER_PAST_LSB, "{row}: {d:?}");
+                continue;
+            }
+            assert!(judge(&d, false).is_err(), "{row}: {name} passes: {d:?}");
+            if averages {
+                missed.push((
+                    row,
+                    *name,
+                    d.past > OTHER_PIXELS_PAST,
+                    d.max_lsb > OTHER_MAX_LSB,
+                ));
+            }
+        }
+    }
+    assert_eq!(
+        missed, averages_miss,
+        "the faults within PSNR and SSIM, and whether the count and the maximum catch them"
+    );
 }
