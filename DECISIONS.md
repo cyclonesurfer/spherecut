@@ -804,10 +804,10 @@ writes:
   refuse. A temporary file it couldn't remove is a `tracing` warning,
   and the copy a debug line (D22).
 - **frame without `--overwrite`** refuses anything at the output before
-  any work, before probe even: a file, a link (even a dangling one,
-  which the library would write through) or a node, as `output_exists`;
-  a directory, pipe, socket or device there is `not_a_file` (exit 1
-  both). It then writes next to the output and publishes with
+  any work, before probe even: a regular file or a link to one (even a
+  dangling link, which the library would write through) is
+  `output_exists`; a directory, pipe, socket or device there, or a link
+  to one, is `not_a_file` (exit 1 both). It then writes next to the output and publishes with
   `persist_new`, so a file that appears at the output while the frame
   renders is kept, and the run fails with `output_exists` saying so.
   Debug builds have a switch, `SPHERECUT_DEBUG_FRAME_RACE`, that writes

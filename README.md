@@ -347,10 +347,13 @@ limited to lavapipe (`VK_DRIVER_FILES`, `VK_ICD_FILENAMES`), and
 `crates/media/tests/hw_refusal.rs` checks that the decoder turns streams
 down on lavapipe's Vulkan device instead of decoding them in software.
 `crates/cli/tests/confinement.rs` and `crates/cli/tests/doctor.rs` run
-probe and doctor under `strace -f` and fail on any `AF_INET` or
+probe, doctor and frame under `strace -f` and fail on any `AF_INET` or
 `AF_INET6` socket, or on probe opening a file a playlist lists; without
-strace they fail rather than skip. The tests generate the media they
-need; `gen-media` is not needed first.
+strace they fail rather than skip. `crates/cli/tests/frame.rs` renders
+on lavapipe, with its own golden images in `crates/cli/tests/goldens/`
+(`SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame
+pipeline_goldens` blesses them, as for render's, DECISIONS D32). The
+tests generate the media they need; `gen-media` is not needed first.
 
 Tier 2 needs a real GPU or camera samples; a plain `cargo test` lists
 those tests as ignored, and `cargo xtask hw-test` runs them. It needs no
