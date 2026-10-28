@@ -206,6 +206,11 @@ keyframe right after a keyframe seek there seeks again where decoding
 on was cheaper. Its frames are right, and it was so before the fixes
 (D29).
 
+Checks of `m1/seek-nits` at 56d9200: `cargo xtask check` passed;
+`nal`'s three proptests passed at `PROPTEST_CASES=100000` (10 s); and
+`cargo xtask compat` passed clippy, the link and the binding against
+FFmpeg 8.1.3, and Tier 1 against it, the new tests included (5 min).
+
 odin's third run (PR #5, `hw-reports/odin-be38fa409e.md`, at be38fa4):
 21 of 23 Tier 2 tests pass, including all four that failed in PR #4. Two
 golden tests fail, and the fixes are next:
