@@ -232,7 +232,9 @@ pub trait VideoDecode: Send + std::fmt::Debug {
     /// [`NextFrame::Stopped`]. Damage that the decode goes on past is a
     /// [`DecoderEvent::Damaged`]; an error is returned only when the stream
     /// can't go on (a read that failed), and again by every call until a
-    /// seek.
+    /// seek. A read that failed is a `Damaged` event too, with its cause,
+    /// once: before the first frame the decoder gives up after it (frames
+    /// the damage lost may come before that one), else before the error.
     fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError>;
     /// `Some(t)`: skip frames nothing refers to (`AVDISCARD_NONREF`), and
     /// never return a frame before `t`, until one at or after it has been

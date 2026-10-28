@@ -307,6 +307,9 @@ pub struct FfmpegVideo {
     /// the damage has been said: the rest are dropped without another
     /// word, up to the next frame that isn't.
     losing: bool,
+    /// Since the last seek, the failure reading stopped with has been
+    /// said as a `Damaged` event.
+    failure_said: bool,
     /// The stream has no timestamps: pts are counted, as frame index times
     /// `frame_ticks`.
     no_timestamps: bool,
@@ -539,6 +542,7 @@ impl FfmpegVideo {
             leading: false,
             settled: true,
             losing: false,
+            failure_said: false,
             no_timestamps,
             frame_ticks,
             end_pts: facts.end_pts,
@@ -755,7 +759,28 @@ impl FfmpegVideo {
         self.leading = !to_start;
         self.settled = false;
         self.losing = false;
+        self.failure_said = false;
         self.start_run();
+    }
+
+    /// Say the failure reading stopped with as a `Damaged` event, after
+    /// the last frame handed out, with its cause, unless it has been said
+    /// since the last seek: [`next_frame`](VideoDecode::next_frame) does
+    /// before the first frame the decoder gives up after it, which may
+    /// come after frames the damage lost, and before the error the stream
+    /// then ends with.
+    fn say_failure(&mut self) {
+        if self.failure_said {
+            return;
+        }
+        if let Some(e) = self.dec.read_failure() {
+            self.failure_said = true;
+            self.events.push(DecoderEvent::Damaged {
+                reason: e.to_string(),
+                last_good_pts: self.last_returned(),
+                cause: self.dec.read_cause().unwrap_or(DamageCause::Read),
+            });
+        }
     }
 
     /// Start a run: the next frame decoded may not follow the last one.
@@ -1184,6 +1209,7 @@ impl FfmpegVideo {
             },
         };
         let exactness = if let Some(reason) = damage {
+            self.failure_said = true;
             self.events.push(DecoderEvent::Damaged {
                 reason: reason.clone(),
                 last_good_pts: Some(frame.pts),
@@ -1280,6 +1306,7 @@ impl FfmpegVideo {
         };
         let exactness = match (best, last, damage) {
             (_, _, Some(reason)) => {
+                self.failure_said = true;
                 self.events.push(DecoderEvent::Damaged {
                     reason,
                     last_good_pts: Some(frame.pts),
@@ -1748,7 +1775,11 @@ impl VideoDecode for FfmpegVideo {
                     }
                     Ok(Got::Stopped) => return Ok(NextFrame::Stopped),
                     Err(e) => match self.failed(e) {
-                        Failed::Device(e) | Failed::Reading(e) => return Err(e),
+                        Failed::Device(e) => return Err(e),
+                        Failed::Reading(e) => {
+                            self.say_failure();
+                            return Err(e);
+                        }
                         // One that doesn't end the stream is an event, as
                         // where the frame after this one is decoded ahead.
                         Failed::Damage(e) => {
@@ -1788,6 +1819,9 @@ impl VideoDecode for FfmpegVideo {
                     p.seq = self.seq;
                     self.seq += 1;
                 }
+            }
+            if raw.after_failure {
+                self.say_failure();
             }
             let next = self.pending.as_ref().map(|p| p.pts);
             let frame = self.make_frame(raw, next)?;

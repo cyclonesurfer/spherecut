@@ -798,6 +798,18 @@ fn unless_unreadable(
     }
 }
 
+/// Where the data of the Matroska file at `path`'s Segment starts, and
+/// its size, when the file says (live recordings don't): what
+/// [`check_matroska`] and the decoder (D13) check a file's length
+/// against.
+pub(crate) fn matroska_segment_of(path: &Path) -> Option<(u64, u64)> {
+    let f = File::open(path).ok()?;
+    match matroska_segment(&mut BufReader::new(f)) {
+        Ok((start, Some(size))) => Some((start, size)),
+        _ => None,
+    }
+}
+
 /// Check that a Matroska/WebM file is as long as its Segment says, and
 /// that it gets as far as the Segment at all. Live recordings leave the
 /// size unknown.

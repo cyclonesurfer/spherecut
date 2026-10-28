@@ -13,12 +13,14 @@
 //! the frames that could still be decoded, never with `None`. So does a
 //! file that ends before the samples its demuxer's index lists for the
 //! stream, which is how an MP4 or MOV with its `moov` first looks when it
-//! is cut before the end of the stream's data. The sample the cut falls
-//! in is dropped, not handed to the decoder. A cut that the index doesn't
-//! reach goes unnoticed: the stream ends with `None` after the last whole
-//! frame, and only FFmpeg's log mentions it. That is the case for a
-//! Matroska file cut in a cluster, and for most cuts in a fragmented MP4,
-//! whose index only grows as its fragments are read.
+//! is cut before the end of the stream's data, and so does a Matroska
+//! file that ends before its Segment says it does. The sample the cut
+//! falls in is dropped, not handed to the decoder. A cut that neither
+//! reaches goes unnoticed: the stream ends with `None` after the last
+//! whole frame, and only FFmpeg's log mentions it. That is the case for
+//! a Matroska file whose Segment doesn't say its size (a live
+//! recording's), and for most cuts in a fragmented MP4, whose index only
+//! grows as its fragments are read.
 //!
 //! Other streams in the file are not read, so damage in them doesn't end
 //! this one. A packet the demuxer reports as invalid data is skipped,
@@ -960,16 +962,31 @@ impl VideoDecoder {
         }
     }
 
-    /// At the end of the file: whether it ends before the data the
-    /// demuxer's index lists for our stream, i.e. it was cut short. The
-    /// other streams don't count, since the demuxer skips them.
+    /// At the end of the file: whether it was cut short. It ends before
+    /// the data the demuxer's index lists for our stream (the other
+    /// streams don't count, since the demuxer skips them), or, for a
+    /// Matroska file, before the end its Segment says: its demuxer reads
+    /// a cut as the end of the file, and its index (Cues, written last)
+    /// is lost with the cut (D13).
     fn truncation(&self) -> Option<String> {
-        let end = ffi::index_end(&self.ictx, self.stream_index)?;
         let size = std::fs::metadata(&self.path).ok()?.len();
-        (end > size).then(|| {
-            format!(
+        if let Some(end) = ffi::index_end(&self.ictx, self.stream_index)
+            && end > size
+        {
+            return Some(format!(
                 "the file is truncated: it ends at byte {size}, but its index \
                  lists video data up to byte {end}"
+            ));
+        }
+        if !self.ictx.format().name().starts_with("matroska") {
+            return None;
+        }
+        let (start, segment) = crate::probe::matroska_segment_of(&self.path)?;
+        (start.saturating_add(segment) > size).then(|| {
+            format!(
+                "the file is truncated: it holds {} of the {segment} bytes its \
+                 Matroska Segment says it has",
+                size.saturating_sub(start)
             )
         })
     }

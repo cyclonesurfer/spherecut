@@ -902,28 +902,60 @@ fn a_truncated_clip_seeks_before_its_cut_and_says_where_it_ends() {
     // A cut in the middle of frame 13's packet, a B-frame that comes after
     // keyframe 16 in decode order: later frames (16 at least) still come
     // out as the decoder drains, but 13 is lost. A seek to a lost frame
-    // is never Exact, even though a later frame came out.
-    for codec in [Codec::H264, Codec::Hevc] {
-        let whole_clip = match codec {
-            Codec::H264 => fast.clone(),
-            _ => {
-                let fast = dir.join("faststart-hevc.mp4");
-                faststart(&write(&spec("whole-hevc", codec), &dir), &fast);
-                fast
-            }
-        };
-        let (whole, _) = sequential(&whole_clip);
-        let bytes = std::fs::read(&whole_clip).unwrap();
-        let at = packet_at(&whole_clip, whole[13].pts);
-        let cut = dir.join("cut-13.mp4");
+    // is never Exact, even though a later frame came out. The same in
+    // Matroska, whose demuxer reads the cut as the end of the file, and
+    // whose index (Cues, written last) is lost with it: the file is
+    // shorter than its Segment says (D13).
+    let hevc = dir.join("faststart-hevc.mp4");
+    faststart(&write(&spec("whole-hevc", Codec::Hevc), &dir), &hevc);
+    let mkv = media::remux_to_mkv(&fast, &dir).unwrap();
+    for whole_clip in [&fast, &hevc, &mkv] {
+        let name = whole_clip.file_name().unwrap().to_string_lossy();
+        let (whole, _) = sequential(whole_clip);
+        let bytes = std::fs::read(whole_clip).unwrap();
+        let at = packet_at(whole_clip, whole[13].pts);
+        let cut = dir
+            .join("cut-13")
+            .with_extension(whole_clip.extension().unwrap());
         std::fs::write(&cut, &bytes[..at]).unwrap();
         let mut d = open(&cut);
+        // Played through, the failure is said once, as a cut: before the
+        // first frame that came out after it, which may come after frames
+        // it lost (16 after 13), and not again with the error the stream
+        // ends with.
         let mut decoded = Vec::new();
-        while let Ok(NextFrame::Frame(f)) = d.next_frame(&never) {
-            decoded.push(Seen::of(&f));
+        let mut said = Vec::new();
+        loop {
+            let next = d.next_frame(&never);
+            for e in d.take_events() {
+                if let DecoderEvent::Damaged {
+                    cause,
+                    last_good_pts,
+                    ..
+                } = e
+                {
+                    said.push((decoded.len(), cause, last_good_pts));
+                }
+            }
+            match next {
+                Ok(NextFrame::Frame(f)) => decoded.push(Seen::of(&f)),
+                Ok(NextFrame::End) => panic!("{name}: the cut file decoded to its end"),
+                Ok(NextFrame::Stopped) => unreachable!(),
+                Err(_) => break,
+            }
         }
-        assert!(!decoded.contains(&whole[13]), "{codec:?}: {decoded:?}");
-        assert!(decoded.contains(&whole[16]), "{codec:?}: {decoded:?}");
+        assert!(!decoded.contains(&whole[13]), "{name}: {decoded:?}");
+        let sixteen = decoded.iter().position(|s| *s == whole[16]);
+        let sixteen = sixteen.unwrap_or_else(|| panic!("{name}: {decoded:?}"));
+        assert_eq!(said.len(), 1, "{name}: {said:?}");
+        let (before, cause, last_good) = said[0];
+        assert_eq!(cause, DamageCause::Cut, "{name}");
+        assert!(before <= sixteen, "{name}: said before frame {before}");
+        assert_eq!(
+            last_good,
+            before.checked_sub(1).map(|i| decoded[i].pts),
+            "{name}"
+        );
         for (i, want) in whole.iter().enumerate() {
             let (got, e, _) = seek_pts(&mut *d, want.pts, SeekMode::Exact);
             let events = d.take_events();
@@ -931,7 +963,7 @@ fn a_truncated_clip_seeks_before_its_cut_and_says_where_it_ends() {
                 assert_eq!(
                     (Seen::of(&got), e),
                     (*want, Exactness::Exact),
-                    "{codec:?}: frame {i}"
+                    "{name}: frame {i}"
                 );
                 continue;
             }
@@ -944,7 +976,7 @@ fn a_truncated_clip_seeks_before_its_cut_and_says_where_it_ends() {
                         last_good_pts: shown.pts
                     }
                 ),
-                "{codec:?}: frame {i}, lost to the cut"
+                "{name}: frame {i}, lost to the cut"
             );
             assert!(
                 events.iter().any(|e| matches!(
@@ -955,7 +987,7 @@ fn a_truncated_clip_seeks_before_its_cut_and_says_where_it_ends() {
                         ..
                     } if *p == shown.pts
                 )),
-                "{codec:?}: frame {i}: {events:?}"
+                "{name}: frame {i}: {events:?}"
             );
         }
     }
