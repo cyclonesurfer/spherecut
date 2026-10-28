@@ -1318,7 +1318,9 @@ dependencies = [
  "proptest",
  "spherecut-core",
  "spherecut-media",
+ "spherecut-render",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

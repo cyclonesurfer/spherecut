@@ -10,7 +10,9 @@ publish.workspace = true
 [dependencies]
 spherecut-core.workspace = true
 spherecut-media.workspace = true
+spherecut-render.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
