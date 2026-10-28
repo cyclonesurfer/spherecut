@@ -643,8 +643,11 @@ The branch's review found 13 things, all fixed or corrected (b741dec,
    (D31). H1, after slice 5, runs slice 2b's, 3b's and 4's Tier 2 tests
    on huginn and odin: `bench_upload_5k7` decides whether the staging
    belt replaces `write_texture`, `goldens_on_gpu_match_reference`
-   whether both GPUs clear lavapipe's floors, as the emulation predicts
-   for the RX 7600 (D32), and
+   whether both GPUs clear lavapipe's floors and the RX 7600's CPU
+   checks come within 1 dB of the emulation's predictions (D32's Revisit
+   clause; the old mips' stores would clear the floors too, and come out
+   1.81 to 7.36 dB under the predictions where a view reads level 1 or
+   more), and
    `vaapi_render_matches_software` and `vulkan_render_matches_software`
    hold `spherecut frame`'s hardware decode to its software decode, and
    `--decoder auto` to VA-API on the node found from the rendering

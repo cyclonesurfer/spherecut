@@ -3671,9 +3671,10 @@ RADV's export stores that code, as the reference stored it at be38fa4
 f32 mean came out of lavapipe's export (times 255 to the nearest even
 code) or RADV's (packed to f16 toward zero, then to the nearest code).
 The RX 7600 was measured against be38fa4's reference, so the test
-measures be38fa4's filters and exports against that one, and gives
-every number in this table, made then, to the hundredth but the
-lavapipe columns, which are lavapipe's then. Measured at be38fa4, in
+measures be38fa4's filters and exports against that one (a filter in
+f64 is that reference rounded to codes), and gives every number in this
+table, made then, to the hundredth but the lavapipe columns, which are
+lavapipe's then. Measured at be38fa4, in
 dB (the four filter columns with 8-bit fractions and LOD; RADV's
 export with the 8-bit blend; lavapipe's filter with it too, each
 filtered value held to codes, and its export):
@@ -3759,19 +3760,21 @@ in every level of every check (asserted), so RADV's filter as emulated
 missed the RX 7600 by up to 0.43 dB, the emulation the higher. The test
 takes that missed squared error as RADV's own (its filter, as far as
 the model isn't it), adds it to the emulation's now, and predicts each
-check (dB; the floors as blessed after the fix):
+check; and, as the control, predicts the old means through RADV's
+export the same way, against the same reference (dB; the floors as
+blessed after the fix):
 
-| Check | RX 7600 at be38fa4 | Emulated now | Missed then, alone | Predicted | lavapipe's floor | Margin |
-|---|---:|---:|---:|---:|---:|---:|
-| `rect_forward` | 58.55 | 59.10 | 71.09 | 58.84 | 50.15 | 8.69 |
-| `rect_ypr` | 58.04 | 58.90 | 69.36 | 58.53 | 50.24 | 8.29 |
-| `fisheye_180` | 47.78 | 58.90 | 59.34 | 56.11 | 48.2 | 7.91 |
-| `fisheye_360` | 44.67 | 59.93 | 58.90 | 56.38 | 48.15 | 8.23 |
-| `stereo_tinyplanet` | 51.45 | 58.90 | 63.38 | 57.58 | 49.51 | 8.07 |
-| `morph_half` | 52.71 | 58.88 | 64.17 | 57.75 | 49.26 | 8.49 |
-| `crop_half` | 56.57 | 60.75 | 66.79 | 59.78 | 51.61 | 8.17 |
-| `matrix_601_709`, 601 | 58.21 | 58.91 | 70.65 | 58.63 | 50.34 | 8.29 |
-| `matrix_601_709`, 709 | 58.09 | 58.95 | 70.26 | 58.64 | 50.18 | 8.46 |
+| Check | RX 7600 at be38fa4 | Emulated now | Missed then, alone | Predicted | lavapipe's floor | Margin | Old means, predicted | Under the prediction |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `rect_forward` | 58.55 | 59.10 | 71.09 | 58.84 | 50.15 | 8.69 | 58.67 | 0.16 |
+| `rect_ypr` | 58.04 | 58.90 | 69.36 | 58.53 | 50.24 | 8.29 | 58.28 | 0.25 |
+| `fisheye_180` | 47.78 | 58.90 | 59.34 | 56.11 | 48.2 | 7.91 | 51.14 | 4.97 |
+| `fisheye_360` | 44.67 | 59.93 | 58.90 | 56.38 | 48.15 | 8.23 | 49.02 | 7.36 |
+| `stereo_tinyplanet` | 51.45 | 58.90 | 63.38 | 57.58 | 49.51 | 8.07 | 54.30 | 3.28 |
+| `morph_half` | 52.71 | 58.88 | 64.17 | 57.75 | 49.26 | 8.49 | 54.99 | 2.77 |
+| `crop_half` | 56.57 | 60.75 | 66.79 | 59.78 | 51.61 | 8.17 | 57.97 | 1.81 |
+| `matrix_601_709`, 601 | 58.21 | 58.91 | 70.65 | 58.63 | 50.34 | 8.29 | 58.42 | 0.22 |
+| `matrix_601_709`, 709 | 58.09 | 58.95 | 70.26 | 58.64 | 50.18 | 8.46 | 58.35 | 0.29 |
 
 Every prediction clears lavapipe's floor by 7.91 dB or more, asserted
 where lavapipe filters 8-bit planes to codes, as the one the goldens
@@ -3779,13 +3782,29 @@ are blessed on does. One that filters them in floating point renders
 the wide views within 0.01 dB of a filter in f64 and calibrates
 `fisheye_360` at 56.96 dB, which the prediction misses by 0.58 dB; the
 test reports that and doesn't assert it (asserted everywhere, the
-prediction failed Tier 1 under `GALLIVM_PERF=no_aos_sampling`). Where
-the old means came out of RADV's export, `fisheye_360` and
-`fisheye_180` fall under the floors blessed now (asserted for
-`fisheye_360`, as the control). A floor under lavapipe's would make
-room for a loss the numbers don't predict: if the RX 7600 comes in
-under lavapipe's floors, the emulation is wrong about it, which is a
-finding for D31, not a floor to lower.
+prediction failed Tier 1 under `GALLIVM_PERF=no_aos_sampling`).
+
+The floors can't tell the fix from the old mips on RADV: against the
+reference as it is now, the old means through RADV's export clear every
+floor blessed now, `fisheye_360` by 0.87 dB as predicted (49.02 against
+48.15; 49.49 emulated alone), so a Tier 2 run that only clears them
+says nothing of the mips. The prediction can: with the old means the
+views that read level 1 or more come out 1.81 to 7.36 dB under it, and
+the rect and matrix views, which barely do, 0.16 to 0.29. So the control
+is held to the prediction: the test asserts that `fisheye_180`,
+`fisheye_360` and `stereo_tinyplanet`, the views the RX 7600 lost, come
+out more than 1 dB under it with the old means, on any lavapipe, since
+none of it is lavapipe's; fed the fix's mips in their place, it fails.
+Until the review of the mip fix, the control compared the old means
+against be38fa4's reference (44.84 dB for `fisheye_360`) with the floors
+calibrated against today's, and these docs took that to show the floors
+would catch them; they wouldn't. On lavapipe,
+`eight_bit_mips_are_the_references_code_for_code` holds the stored mips
+to the reference's code for code, so the old pass fails Tier 1 there. A
+floor under lavapipe's would make room for a loss the numbers don't
+predict: if the RX 7600 comes in under lavapipe's floors, or more than
+1 dB under its prediction, the emulation or the fix is wrong about it,
+which is a finding for D31, not a floor to lower.
 
 **The error by LOD band.** On a GPU each CPU check also measures its
 error over the pixels the view shows, in three bands of luma's analytic
@@ -3819,8 +3838,9 @@ is unknown (D31); the deep planes' mips return halves, which no pack
 moves.
 
 Revisit if: on Pat's next run a CPU check comes in under its floor, or
-more than 1 dB under its prediction, or RADV's bands don't look like
-the emulation's (even across the bands, near 59 dB).
+more than 1 dB under its prediction (as the old mips' stores would at
+five checks while clearing every floor), or RADV's bands don't look
+like the emulation's (even across the bands, near 59 dB).
 
 **The other-driver rule counts the pixels past 4 LSB.**
 `goldens_on_host_llvmpipe` on odin's llvmpipe (Mesa 26.2.5, LLVM
