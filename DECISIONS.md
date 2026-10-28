@@ -3684,9 +3684,10 @@ planet's implicit LOD 25 channels in 19 pixels, the pole quads 12 in 4,
 the seam 572 in 192), so a count of channels would hold a grey line to
 a third of what it holds a red one to. `judge` reports both numbers
 (the tiny planet's implicit LOD: "PSNR 53.97 dB, SSIM 0.99972, 19
-pixels more than 4 LSB off, max 7 LSB"), every run notes `golden_pixels_past_4_lsb` beside
-`golden_max_lsb`, so the next run on odin records LLVM 22's count, and
-the manifests' thresholds have `pixels_past_4_lsb_max` and `max_lsb`.
+pixels more than 4 LSB off, max 7 LSB"), every run notes
+`golden_pixels_past_4_lsb` beside `golden_max_lsb`, so the next run on
+odin records LLVM 22's count, and the manifests' thresholds have
+`pixels_past_4_lsb_max` and `max_lsb`.
 Both manifests were blessed again through `SPHERECUT_UPDATE_GOLDENS=1`
 for those thresholds; their commit and date changed with them, and no
 floor and no PNG did. Slice 4's `pipeline_goldens` holds its PNGs to
@@ -3755,10 +3756,11 @@ them `morph_half`'s 11 pixels; the faults smaller than that, a pole's
 quad of 4 pixels, are 95 LSB or more off and fail the maximum. No C
 and H separate everything: a fault within 4 pixels and 8 LSB passes,
 such as implicit LOD at one pole quad alone, or a pixel blacked out
-where the content is darker than 9 codes. The views' darkest shown
-channels are 12 (the fisheyes) and 15 (the tiny planet), where a black
-pixel fails, but 1 in the black ink of `rect_forward`'s and
-`morph_half`'s labels, where it wouldn't show.
+where every channel is under 9 codes. In the views' darkest shown
+pixels the brightest channel is 12 (the fisheyes), 15 (the tiny
+planet) or 52 (`rect_ypr`), so a pixel blacked out there fails; only in
+the black ink of `rect_forward`'s and `morph_half`'s labels, at 1,
+would it pass, and there it changes next to nothing.
 
 Why: the averages hold the whole image and the count holds a place in
 it. A newer LLVM's drift is a pixel or two near a rounding, at 57 dB or
