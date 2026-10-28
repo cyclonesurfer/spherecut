@@ -509,7 +509,8 @@ intermediate equirect exists only as the output of a 360 export.
   finds. `cargo xtask compat` runs clippy against other FFmpeg builds
   and builds and links the tests against each, in a target directory of
   its own that is deleted when the FFmpeg behind its prefix changes (and
-  only while it holds compat's stamp), and
+  only while it holds compat's stamp), checks before and after that
+  every library the build bound came from the prefix, and
   with `--test` runs Tier 1 against one; `check` runs the clippy and the
   link for the prefixes `SPHERECUT_FFMPEG_COMPAT` lists, and says when it
   lists none (D2).

@@ -37,7 +37,12 @@ enum Cmd {
     /// deletes one (built against another FFmpeg, or with --clean) only
     /// while it holds that stamp: a directory there without it is refused
     /// and left, as is a target directory that is a prefix, holds one or
-    /// lies inside one.
+    /// lies inside one (or inside any directory holding
+    /// include/libavcodec/avcodec.h), symlinks and `..` resolved.
+    ///
+    /// A build passes only if pkg-config finds each library
+    /// ffmpeg-sys-next binds in the prefix, before the build and after it,
+    /// and the build searched for libraries only inside the prefix.
     Compat(compat::Args),
     /// Write the synthetic test-media set to test-media/.
     GenMedia(gen_media::Args),

@@ -21,7 +21,14 @@
 //! compat deletes only what it made: a target directory is
 //! `spherecut-compat-<label>`, and one is deleted only while it holds
 //! compat's stamp. A directory there without one, or a target that is a
-//! prefix, holds one or lies inside one, is refused.
+//! prefix, holds one or lies inside one or inside any FFmpeg's tree, is
+//! refused.
+//!
+//! A build counts for a prefix only if it bound that prefix's FFmpeg:
+//! pkg-config must find each library ffmpeg-sys-next binds there, its
+//! library and header inside the prefix, before the build and again
+//! after it, and ffmpeg-sys-next's build must have searched for
+//! libraries only inside the prefix.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;

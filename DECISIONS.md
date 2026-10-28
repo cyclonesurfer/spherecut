@@ -183,6 +183,24 @@ didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
   lead to another FFmpeg, and that it ran `pkg-config` from `PATH` where
   the build runs `$PKG_CONFIG`. Both are checked now, each with a test
   that fails without its check.
+- Its second review found four more gaps. `build-ffmpeg.sh` left a
+  prefix whose `make install` failed partway under its final name, with
+  libavcodec complete and `libavutil.pc` missing; it now installs into
+  `stage-<tag>` beside the prefix and moves the prefix into place only
+  once the install is done. compat checked libavcodec alone, though
+  ffmpeg-sys-next finds libavutil, libavformat, libswscale,
+  libswresample and libavcodec through pkg-config one by one and puts
+  libavutil's directory first on the link line, so such a prefix bound
+  the system's libavutil; all five are checked now. A target root with
+  `..` after a directory not yet made got past the guard and built
+  inside the prefix, and a prefix the run didn't name was no guard at
+  all; `..` is resolved now, and no target may lie in a directory
+  holding FFmpeg's headers. And nothing was checked once the build had
+  run, so a prefix that went away during it passed against the system's
+  FFmpeg; now the stamp is checked again after it, and so is where the
+  build searched for libraries. Each compat check has a unit test that
+  fails without it; the staging was checked by hand, with a configure
+  and Makefile stubbed to fail at each step.
 - `gen-media`'s files from 8.1.3 differ from 6.1's only in FFmpeg's
   version strings (`Lavc`, `Lavf`) and the average bitrate in MP4's
   `btrt` box, which 8.1.3 leaves 0: the streams are the same.
@@ -199,9 +217,11 @@ prefix's last component) in the directory
 `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` names, or else in
 `<target>/compat/`, with line-tables debuginfo and no incremental
 state. compat checks that pkg-config (`$PKG_CONFIG` when it is set, as
-the build runs it) finds that prefix, and that the libavcodec library
-and header its `.pc` file names lie inside the prefix, symlinks
-resolved, and prints the FFmpeg and libavcodec it found there. A target
+the build runs it) finds each library ffmpeg-sys-next binds (libavutil,
+libavformat, libswscale, libswresample and libavcodec) in that prefix,
+and that the library and header each one's `.pc` file names lie inside
+the prefix, symlinks resolved, and prints the FFmpeg and libavcodec it
+found there. A target
 records what it was built against (the versions, and the size and time
 of each library's pkg-config file and of `ffversion.h`), and one built
 against anything else is deleted first: ffmpeg-sys-next binds again
@@ -211,10 +231,19 @@ old bindings and passed under the new version's name. compat deletes
 only what it made: a target, stale or under `--clean`, only while it
 holds compat's stamp, whose first line says compat wrote it. A
 directory there without one is refused and left, and so is a target
-directory that is a prefix, holds one or lies inside one, symlinks
-resolved. Once a stale target is deleted, compat asks pkg-config again
-and stops if the stamp changed, as it would for a prefix whose files
-are links into the target. cargo
+directory that is a prefix, holds one or lies inside one, symlinks and
+`..` resolved, or that lies inside any directory holding
+`include/libavcodec/avcodec.h`, such as a prefix the run doesn't name.
+Once a
+stale target is deleted, compat asks pkg-config again and stops if the
+stamp changed, as it would for a prefix whose files are links into the
+target. Once the build has run (the link, and the Tier 1 tests), it
+asks again and fails the build if the stamp changed, and reads
+ffmpeg-sys-next's build-script output in the target: it must have
+linked libavcodec, and searched for libraries only inside the prefix
+(the report's "binding"). A prefix moved or deleted during a build had
+pkg-config find another FFmpeg for it, which passed under the prefix's
+name. cargo
 runs without `FFMPEG_DIR`, which ffmpeg-sys-next uses before
 pkg-config, and without the pkg-config crate's per-target variables
 (`HOST_PKG_CONFIG_PATH`, `PKG_CONFIG_PATH_<target>` and the like), which
@@ -235,7 +264,9 @@ the target, clippy passes and the link fails on the undefined symbol.
 the way the 8.1.3 above was built, with Khronos Vulkan headers 1.4.354
 where the system's are older than 8.1 needs, as Ubuntu 24.04's are. It
 passes their include directory to configure too, which 7.1's configure
-needs (it test-compiles `vulkan.h` without the package's Cflags).
+needs (it test-compiles `vulkan.h` without the package's Cflags). It
+installs into `DIR/stage-TAG` and moves the prefix into place once
+`make install` is done, so a failed install leaves no prefix.
 
 ## D3. Hardware decoding never falls back to software silently
 
