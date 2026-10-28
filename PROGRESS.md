@@ -44,7 +44,7 @@ extracted X5 samples, `samples_probe_cleanly` passes.
 | Machine | Hardware | Software | State |
 |---|---|---|---|
 | huginn | Ryzen AI Max+ 395, Radeon 8060S (Strix Halo, RDNA 3.5), 128 GB | Fedora 44, kernel 7.0.9, Mesa 26.2.5 (RADV, radeonsi from `mesa-va-drivers-freeworld`), FFmpeg 8.1.3 (RPM Fusion), rustc 1.99.0 (Fedora RPM) | `hw-test` at 4cd8a0f, 2026-10-23: 8 passed, 1 skipped. VA-API decodes H.264, HEVC Main and Main 10 and every X5 sample bit for bit like software, and encodes H.264, HEVC and AV1. Vulkan Video decodes AV1 but not H.264 or HEVC ("Device does not support decoding hevc!"). Earlier run at a9128cf: PR #1 |
-| odin | RX 7600 (Navi 33, RDNA 3, discrete; the only GPU) | Fedora 44, kernel 7.2.9, Mesa 26.2.5 (RADV and radeonsi from RPM Fusion's `mesa-vulkan-drivers-freeworld` and `mesa-va-drivers-freeworld`), FFmpeg 8.1.3 (RPM Fusion), rustc 1.99.0 | `hw-test` at 67fa1fd, 2026-10-24 (PR #4): 15 passed, 4 failed, all four this side's and fixed after it (the HEVC flush in both GPU seek tests, D29; the download pool's fault limit and fault-counter check, amendment 12). Exact seeks on the GPU take about 0.2 s on 8K30 X5 footage and under 55 ms at p95 on the LRV. Earlier run at 44df411 (PR #3): 12 passed. VA-API and Vulkan Video decode H.264, HEVC Main and Main 10 and every X5 sample bit for bit like software. Only Vulkan Video decodes every X5 mode faster than real time (`docs/perf.md`) |
+| odin | RX 7600 (Navi 33, RDNA 3, discrete; the only GPU) | Fedora 44, kernel 7.2.9, Mesa 26.2.5 (RADV and radeonsi from RPM Fusion's `mesa-vulkan-drivers-freeworld` and `mesa-va-drivers-freeworld`), FFmpeg 8.1.3 (RPM Fusion), rustc 1.99.0 | `hw-test` at be38fa4, 2026-10-24 (PR #5): 21 passed, 2 failed, both goldens (above). At 67fa1fd (PR #4): 15 passed, 4 failed, all four this side's and fixed after it (the HEVC flush in both GPU seek tests, D29; the download pool's fault limit and fault-counter check, amendment 12). Exact seeks on the GPU take about 0.2 s on 8K30 X5 footage and under 55 ms at p95 on the LRV. Earlier run at 44df411 (PR #3): 12 passed. VA-API and Vulkan Video decode H.264, HEVC Main and Main 10 and every X5 sample bit for bit like software. Only Vulkan Video decodes every X5 mode faster than real time (`docs/perf.md`) |
 | Framework 13 Pro | Intel Xe3 | Arch (Omarchy), Hyprland | Arrives late 2026 |
 
 Access: none direct from the cloud workspace. Remote Control on odin is
@@ -112,6 +112,60 @@ writing after a QuickTime terminator (324e224), all fixed with tests.
 
 huginn's rerun at 4cd8a0f (PR #2, `hw-reports/huginn-4cd8a0f744.md`) came
 back clean, so M0 is done.
+
+## Paused 2026-10-24 (resume here)
+
+Work stopped for the week at Pat's request. Two branches are pushed and
+unmerged, with their state:
+
+- `m1/frame` (slice 4, `spherecut frame`): implemented and committed
+  (TimeSpec, `core::fs::TempFile` with `persist_new`, the subcommand with
+  its SIGINT handler, the contract, frame.rs and contract.rs, the
+  pipeline goldens, the Tier 2 render-match tests); the last commit is
+  unfinished DECISIONS and README work. Still to do: finish the docs
+  (D16, D27, D39, D22, PROGRESS, PLAN ticks), the checks (xtask check
+  twice, proptests at 100000, `+1.95`, compat on 8.1.3 and 9.0.2), then
+  the slice's review, verify and fix.
+- `m1/compat-fixes`: fixes for what a second review of the FFmpeg 8.1.3
+  work found on main: good H.264 without recovery-point SEI raised
+  `Damaged` after seeks on FFmpeg 7.1 and later (its corrupt flag comes
+  from recovery state, not a lost reference); a zero-channel PCM stream
+  became damage instead of a warning; `cargo xtask compat` could delete a
+  directory it hadn't made (the FFmpeg prefix itself, when its target
+  root held the prefixes) and then report a pass against the system
+  FFmpeg. The fixes are committed; their checks and a second review
+  haven't run. Until it merges, never point
+  `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` at a folder holding FFmpeg
+  prefixes.
+
+odin's third run (PR #5, `hw-reports/odin-be38fa409e.md`, at be38fa4):
+21 of 23 Tier 2 tests pass, including all four that failed in PR #4. Two
+golden tests fail, and the fixes are next:
+
+- `goldens_on_gpu_match_reference` on the RX 7600:
+  - `fisheye_360` is 44.67 dB against the CPU reference, below its 46.59
+    dB floor, which was calibrated on lavapipe (measured − 3 dB).
+    `fisheye_180` (47.78) and `stereo_tinyplanet` (51.45) are lower on
+    RADV too, while `rect_forward` is higher (58.5). Only the wide,
+    minified views lose, which points at the hardware's filtering
+    precision (bilinear weights and the mip blend), not a bug. Next:
+    give hardware its own floor, measured on RADV and recorded in D32,
+    never below 36 dB, after checking in Pat's diff images that the
+    error sits where many mip levels blend.
+  - `passthrough_exact`: 11 limited-range codes (74, 86, 129, 135, 141,
+    153, 159, 208, 214, 220 and 226) come out one code low, where the
+    model of the chain predicts only 86, 159 and 165, and three of them
+    are outside its f16 bound. The likely cause is RADV's colour export
+    to an 8-bit target, which packs the shader's output to f16 with
+    round-toward-zero before the unorm conversion. Next: have the encode
+    pass round to codes itself and write integers (an `Rgba8Uint` target
+    or a storage buffer), so every driver gives the same codes, then
+    re-bless through the gate.
+- `goldens_on_host_llvmpipe` (LLVM 22.1.8, Mesa 26.2.5): `fisheye_180`
+  differs from the PNG blessed on LLVM 20.1.2 by at most 5 LSB, one over
+  the other-driver rule's 4, at 62.79 dB and SSIM 0.99994. Next: replace
+  the single-pixel maximum with a bound on how many pixels may pass 4
+  LSB (and a hard maximum), measured on both builds and recorded in D32.
 
 ## Known issues and limits
 
