@@ -20,7 +20,9 @@ With `--json`:
 - When the reader of stdout goes away (`spherecut probe --json *.mp4 |
   head -c 0`), the document isn't written and the exit status is the
   same as it would have been. When stdout can't be written at all (a
-  full disk), stderr says so and the run exits 1.
+  full disk), stderr says so and the run exits 1. frame writes its
+  document after the PNG is in place, so then the PNG is there despite
+  the exit 1.
 - A panic, a bug in Spherecut on any thread, is still one document: an
   `internal` error that says where it panicked, with exit 1. Rust's own
   report of it goes to stderr.
@@ -169,8 +171,8 @@ The run's `error.code`:
 | `doctor_errors` | 1 | doctor: at least one problem is of severity error; the message lists them, and `result.issues` has them in full |
 | `internal` | 1 | A failure of Spherecut's own, such as a panic or a document that can't be made; the message says where, and there is no `result`. Please report it |
 | `output_exists` | 1 | frame: something is at the output (a file, or a link, even a dangling one) and `--overwrite` wasn't given; or something appeared there while the frame was rendered, which is left alone |
-| `not_equirect` | 1 | frame: the file isn't tagged as a stitched equirect (dual fisheye, a cubemap, an LRV proxy, a 2:1 picture without spherical metadata); the message says what it is. `--equirect` renders it as one anyway |
-| `out_of_range` | 1 | frame: no frame at the time or number asked for: it is past the end. The message gives the clip's range, or its frame count |
+| `not_equirect` | 1 | frame: the file isn't tagged as a stitched equirect (dual fisheye, a cubemap, an LRV proxy, a 2:1 picture without spherical metadata), or it is Matroska or WebM, whose spherical metadata Spherecut doesn't read yet; the message says what it is. `--equirect` renders it as one anyway |
+| `out_of_range` | 1 | frame: no frame at the time or number asked for: it is past the end, or so far past it that the stream's timestamps can't hold it. The message gives the clip's range, or its frame count |
 | `cancelled` | 4 | frame: interrupted by the first Ctrl+C (SIGINT); no output file is written, and the temporary file is removed |
 
 A file's `error.code` in probe (`result.files[].error.code`):
@@ -211,12 +213,19 @@ frame's `error.code` is also one of probe's file codes above, for the
 file it opens (`not_found`, `not_media`, `truncated`, ... with `path`
 and, when FFmpeg couldn't open the file, `ffmpeg_log`), with exit 1;
 `not_a_file` and `io_error` are about the output as well (a directory or
-device at `-o`, a directory that doesn't exist). A seek that damage
-stops short of the frame fails with the damage's cause: `truncated` (the
-file is cut short before it), `damaged` (corrupt data), or `io_error` (a
-read error); the message names the last good frame's time. A cut inside
-the first frame's own data is `decode_failed`, since no frame decodes
-at all.
+device at `-o`, a name ending in `/` or `/.`, a directory that doesn't
+exist). A seek that damage stops short of the frame fails with the
+damage's cause: `truncated` (the file is cut short before it, which
+for Matroska includes a file shorter than its Segment says),
+`damaged` (corrupt data), or `io_error` (a read error); the message
+names the last good frame's time. `--frame N` on a variable-rate
+stream, which counts frames from the first, fails the same way when
+damage stops the count. On a constant-rate stream `--frame N` is the
+frame shown at N's time, and when that is another frame, the frames
+are missing there: `damaged` ("has no frame N: at its constant rate
+frame M is shown in its place"), or `out_of_range` when it is the
+last frame. A cut inside the first frame's own data is
+`decode_failed`, since no frame decodes at all.
 
 Errors of the decoders, which probe and doctor don't give, and which
 frame does (exit 1 unless the table says 3):
@@ -529,7 +538,8 @@ PNG. Whatever fails first is the run's `error`, and nothing is written.
 | `source` | object | The stream the frame came from: `stream` (FFmpeg's index; `--stream` picks one, the first video stream otherwise), `codec` (FFmpeg's name, such as `hevc`), `size` (`width`, `height`: the decoded picture, after the codec's cropping) and `pix_fmt` (the decoder's pixel format, as FFmpeg names it, such as `yuv420p10le`; a hardware decode names the format it downloads, such as `nv12` or `p010le`) |
 
 Every field is there in every result; `morph_to` and `gpu` are the
-fields that may be null, and `fallback` and `frame.time.frame` the ones
+fields that may be null, and `fallback`, `frame.time.frame` and
+`requested.frame` (there only for `--frame N` or `--time Nf`) the ones
 that may be absent.
 
 **The output.** Without `--overwrite`, anything at `-o` fails the run
@@ -539,16 +549,25 @@ then linked into place only if nothing has appeared there since (D16):
 a file that appeared while the frame was rendered is left alone, and
 the run fails with `output_exists`. With `--overwrite`, links are
 followed and a regular file there is replaced in one rename. A
-directory, pipe, socket or device at `-o` is `not_a_file` either way. A
-failed or interrupted run leaves no output and no temporary file;
-only a second Ctrl+C, which kills the process, may leave a temporary
-file (named `.spherecut-<16 hex digits>.tmp`) beside the output.
+directory, pipe, socket or device at `-o` is `not_a_file` either way,
+and so is a name that can only be a directory's (ending in `/` or
+`/.`), whether or not it exists. A failed or interrupted run leaves no
+output and no temporary file; only a second Ctrl+C, which kills the
+process, may leave a temporary file (named
+`.spherecut-<16 hex digits>.tmp`) beside the output.
 
-**Ctrl+C.** frame handles SIGINT; probe and doctor don't. The first
-Ctrl+C stops the run wherever it is, a long seek included, and the run
-ends with `cancelled`, exit 4, and its document. The handler is
-installed once, with the default action restored as it runs, so a
-second Ctrl+C ends the process at once, with no document (130).
+**Ctrl+C.** frame handles SIGINT; probe and doctor don't. The handler
+is installed after the command line and the output are checked, before
+the temporary file is made; a Ctrl+C before that ends the process
+(130, no document) with nothing to clean up. The first Ctrl+C stops a
+seek or a read at once, a long seek included; during the other steps
+(probe, the GPU's set-up, the render, the PNG's encode) it takes
+effect when that step ends, which at a large `--size` can be seconds.
+The run then ends with `cancelled`, exit 4, and its document. The
+handler is installed once, with the default action restored as it
+runs, so a second Ctrl+C ends the process at once, with no document
+(130). A frame started with SIGINT ignored, as a shell script starts a
+background job (`cmd &`), leaves it ignored: Ctrl+C doesn't stop it.
 
 Example, on a machine without a GPU or a render node (lavapipe), as one
 line, shown here indented:

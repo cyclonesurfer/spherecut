@@ -215,7 +215,10 @@ spherecut frame clip.mp4 -o out.png --overwrite --depth 16 --json
   shown, whatever the container's start time or edit list. The frame
   shown is the one on screen at that time. `--frame N` is `--time Nf`,
   counting from 0; on a variable-frame-rate file it counts frames from
-  the start. A time past the last frame fails, naming the clip's range.
+  the start. A time past the last frame fails, naming the clip's range,
+  and so does a frame number past it. A frame the file has lost, cut
+  short or with frames missing, fails as damage rather than showing
+  another frame in its place.
 - **The camera**: `--yaw` (degrees right), `--pitch` (up) and `--roll`
   (clockwise, seen from behind the camera), all 0 by default;
   `--fov`, horizontal, at most 170 rectilinear, 360 fisheye and 340
@@ -244,11 +247,16 @@ spherecut frame clip.mp4 -o out.png --overwrite --depth 16 --json
 - **The output**: something already at `-o` is refused unless
   `--overwrite` is given, and so is a link there; with `--overwrite` a
   regular file is replaced, through a link too. The PNG is written next
-  to the output and renamed into place whole, so a failed or interrupted
-  run leaves nothing behind, and a file that appears at the output while
-  the frame renders is kept (DECISIONS D16).
-- **Ctrl+C** stops the run, a long seek included, with exit 4 and no
-  output; a second Ctrl+C kills it at once.
+  to the output and linked into place whole (with `--overwrite`, renamed
+  into place), so a failed or interrupted run leaves nothing behind, and
+  a file that appears at the output while the frame renders is kept
+  (DECISIONS D16).
+- **Ctrl+C** ends the run with exit 4 and no output. It stops a seek or
+  a read at once; during probe, the GPU's set-up, the render or the
+  PNG's encode it takes effect when that step ends, which at a large
+  `--size` can take seconds. A second Ctrl+C kills it at once. Started
+  with SIGINT ignored, as a script's background job (`cmd &`) is, frame
+  leaves it ignored.
 
 On success it prints one line: `wrote out.png: 1920×1080 rectilinear
 100° at 12.5 s (frame 375, pts 375000), decoded on VA-API, rendered on AMD

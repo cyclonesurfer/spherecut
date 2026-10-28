@@ -238,7 +238,9 @@ The other modules are safe Rust:
   into its pool. It
   reads only its own stream (the others are discarded), holds back a
   packet flagged corrupt until the next read, and ends a damaged file with
-  an error after the frames it could decode (D13). `open_cancellable`
+  an error after the frames it could decode (D13). A cut is a file that
+  ends before what its index lists for the stream (MP4), or before the
+  end its Matroska Segment's size gives. `open_cancellable`
   stops reading when a flag is set, and `skipped_packets` counts packets
   skipped as invalid data. On a device it opens a decoder that can use the
   device and never falls back to software (D3, D14); any error there that
@@ -284,6 +286,9 @@ The other modules are safe Rust:
   last frame's interval; the frame count from the MP4 index; the mapping
   from the track's spherical boxes). Streams whose timestamps tie or go
   backwards seek by the tie rule, the latter by decoding from the start.
+  Playing on, `next_frame` says a failed read once, as a `Damaged` event
+  with its cause, before the first frame the decoder drains after it or
+  before the error (D13).
   It converts frames of a format that isn't uploaded as it is through
   swscale, once announced with `DecoderEvent::Converted` (D30). On a
   device, frames stay there until handed out: a seek holds its best
@@ -377,11 +382,13 @@ a PNG (M1 plan section 5, D27), in the plan's order:
    `FrameArgs::check` refuses what clap can't (a `--fov` past the
    projection's limit, `--reference` with `--filter aniso`): `usage`,
    exit 2;
-2. the output is checked before any work: something there is
-   `output_exists` without `--overwrite`, and a directory, pipe or device
-   is `not_a_file` either way; a `core::fs::TempFile` is created next to
-   it (D16);
-3. `cli::interrupt` installs the SIGINT handler, and the rest runs on a
+2. the output is checked before any work (`check_output`): something
+   there is `output_exists` without `--overwrite`, and a directory, pipe
+   or device, or a name ending in `/` or `/.`, is `not_a_file` either
+   way;
+3. `cli::interrupt` installs the SIGINT handler, then a
+   `core::fs::TempFile` is created next to the output (D16), so a first
+   Ctrl+C always finds the handler there to drop it; the rest runs on a
    worker thread named `frame` while the main thread polls the handler's
    flag every 10 ms (below);
 4. probe, through the confinement (D24), picks the stream (`--stream`,
@@ -395,8 +402,12 @@ a PNG (M1 plan section 5, D27), in the plan's order:
    (D30), with `--decoder` choosing the mode (D39: `auto` is VA-API with
    `Fallback::Software`, or software at once when the node isn't there);
 7. an `Exact` seek, or for `--frame N` on a variable-rate stream a count
-   from the first frame; `AfterLast` is `out_of_range`, damage before the
-   frame fails by its cause and damage after it is a warning;
+   from the first frame; `AfterLast`, or a target the stream's time base
+   can't hold, is `out_of_range`, damage before the frame (the count's
+   included) fails by its cause and damage after it is a warning; for
+   `--frame N` on a constant-rate stream the frame shown must be frame N
+   (`check_index`), else frames are missing there (`damaged`, or
+   `out_of_range` when it is the last frame);
 8. `render_still`, or for `--reference` the f64 CPU reference
    (`reference::render`, trilinear as `render_trilinear` is, with the
    file's placement) rounded to the PNG's codes;
@@ -404,13 +415,16 @@ a PNG (M1 plan section 5, D27), in the plan's order:
    (`persist_replace` with `--overwrite`);
 10. one line on stdout, or the `--json` document with the `FrameResult`.
 
-**SIGINT.** `cli::interrupt` is the binary's one FFI module (D28): one
-`sigaction(2)` call with `SA_RESETHAND | SA_RESTART`, whose handler only
-stores `true` in an atomic. The main thread, polling it, calls
+**SIGINT.** `cli::interrupt` is the binary's one FFI module (D28): it
+asks for SIGINT's current action, and unless that is `SIG_IGN` (kept,
+as for a script's background job) installs a handler with
+`SA_RESETHAND | SA_RESTART` that only stores `true` in an atomic. The main thread, polling it, calls
 `StopSource::shutdown()` on the first Ctrl+C, which stops the seek
 between frames and raises the flag the decoder's FFmpeg interrupt
-callback reads inside a read (`VideoRequest::interrupt`). Whatever the
-worker returns after that, the run ends `cancelled` (exit 4) and the
+callback reads inside a read (`VideoRequest::interrupt`). The other
+steps take no stop token: the worker checks between steps, so a Ctrl+C
+during the render or the PNG's encode takes effect when it ends.
+Whatever the worker returns after that, the run ends `cancelled` (exit 4) and the
 temporary file is dropped. The handler is reset as it runs, so a second
 Ctrl+C kills the process. probe and doctor never install it.
 

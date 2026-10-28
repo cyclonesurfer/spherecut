@@ -512,6 +512,22 @@ backend's decoder has corrupt frames handed out, and says one after a
 good frame as a `Damaged` event (D29). On 7.1.x the damage is silent on
 both.
 
+*Updated 2026-10-28, M1 slice 4's review:* a Matroska file shorter
+than its Segment says is cut. `VideoDecoder` reads the Segment's start
+and size as probe does (`probe::matroska_segment_of`), and a file that
+ends before the Segment's end ends the stream with the cut, so a seek
+or a count past a Matroska cut is `Truncated`, never the last frame
+returned as the one asked for. Still not detected: a Matroska file
+whose Segment's size is unknown (a live recording), and a fragmented
+MP4 cut between fragments, which reads as a shorter file. The
+backend's `next_frame` also says a failed read as a `Damaged` event
+with its cause, once: before the first frame decoded after it, or
+before the error when none is (D29), so that a caller that only plays
+on learns where the damage was and why. Tested in
+`crates/synth/tests/seek.rs` (a cut clip, as H.264 and HEVC MP4 and as
+Matroska) and `crates/cli/tests/frame.rs` (frames past a Matroska cut,
+and a frame a cut lost, are refused).
+
 ## D14. A hardware decoder says why it refused a stream
 
 *2026-10-23, M0. Extends D3.*
@@ -807,8 +823,10 @@ writes:
   any work, before probe even: a regular file or a link to one (even a
   dangling link, which the library would write through) is
   `output_exists`; a directory, pipe, socket or device there, or a link
-  to one, is `not_a_file` (exit 1 both). It then writes next to the output and publishes with
-  `persist_new`, so a file that appears at the output while the frame
+  to one, is `not_a_file` (exit 1 both), and so is a name that can only
+  be a directory's (ending in `/` or `/.`), with or without
+  `--overwrite`, whether or not it exists. It then writes next to the
+  output and publishes with `persist_new`, so a file that appears at the output while the frame
   renders is kept, and the run fails with `output_exists` saying so.
   Debug builds have a switch, `SPHERECUT_DEBUG_FRAME_RACE`, that writes
   the output just before the publish, which `crates/cli/tests/frame.rs`
@@ -819,7 +837,11 @@ writes:
 - A failed or interrupted run leaves neither an output nor a temporary
   file: the first Ctrl+C stops the work and the temporary file is
   dropped (D27). Only a second Ctrl+C, which kills the process at once,
-  can leave a `.spherecut-….tmp` beside the output.
+  can leave a `.spherecut-….tmp` beside the output. That holds from the
+  first byte: frame installs its SIGINT handler after the output checks
+  and before it makes the temporary file (slice 4's review found it the
+  other way round, leaving a moment in which the first Ctrl+C killed
+  the process with the file made).
 
 Why the link: a check and then a rename can't refuse an existing output
 atomically, since a file can appear between them and the rename would
@@ -1574,7 +1596,11 @@ contract as `spherecut.frame/1` (`docs/cli-json.md` has every field):
 - **Codes.** `contract::codes` adds `output_exists`, `not_equirect`,
   `out_of_range` and `cancelled`, and `contract::codes::warnings` frame's
   warnings: `stereo_left_eye`, `stereo_unknown`, `crop_applied`,
-  `pose_not_applied` and `anisotropy_unavailable`. `RenderError::CODES`
+  `pose_not_applied` and `anisotropy_unavailable`. A Matroska or WebM
+  file is `not_equirect` with its own message: Spherecut doesn't read
+  Matroska's spherical metadata (Spherical Video V2's `Projection`
+  element) yet, so it can't tell, and `--equirect` renders it.
+  `RenderError::CODES`
   (`no_gpu`, `adapter_not_found`, `gpu_failed`, `too_large`,
   `invalid_input`, `internal`, `out_of_gpu_memory`) joins
   `all_codes()`. `no_display` is the GUI's, and joins the list with it.
@@ -1600,13 +1626,27 @@ contract as `spherecut.frame/1` (`docs/cli-json.md` has every field):
   last good frame's time. A cut inside the first frame's own data is
   `decode_failed` ("the video stream has no frames"), since there is no
   last good frame; probe's `truncated` comes first as a warning.
+  *Slice 4's review* added: `--frame N` on a variable-rate stream,
+  which counts frames from the first, fails the same way when damage
+  stops the count (it was `decode_failed`, with no time), naming the
+  damage event's last good frame. On a constant-rate stream `--frame N`
+  is the frame shown at N's time, and frame checks that it is frame N:
+  when it is another, frames are missing there (the decoder lost them,
+  or the index skips them), and the run fails `damaged` ("has no frame
+  N: at its constant rate frame M is shown in its place"), or
+  `out_of_range` when M is the last frame. A `--time` or `--frame` so
+  far past the end that the stream's time base can't hold it is
+  `out_of_range`, with the clip's range, like any other past the end
+  (it was `decode_failed`). A Matroska file shorter than its Segment is
+  now a cut the decoder sees (D13), so a frame past it is `truncated`
+  rather than the last frame rendered as the one asked for.
 - **The order of the checks** is the plan's: the output before any work,
   so a missing input with an existing output is `output_exists`; then
   probe and the layout, the GPU, the decoder, the seek. Whatever fails
   first is the error.
 - **SIGINT.** `cli::interrupt`, the binary's one `unsafe` module (D28),
   installs a handler with `sigaction(2)` once, in frame only, after the
-  output check: `SA_RESETHAND`, so the default action is back as soon as
+  output check and before the temporary file is made: `SA_RESETHAND`, so the default action is back as soon as
   it runs and a second Ctrl+C kills the process (130, no document), and
   `SA_RESTART`, so the system calls it interrupts on other threads are
   restarted rather than failing FFmpeg's reads with `EINTR`, which would
@@ -1614,10 +1654,17 @@ contract as `spherecut.frame/1` (`docs/cli-json.md` has every field):
   runs on a worker thread; the main thread polls the flag every 10 ms,
   and on the first signal calls `StopSource::shutdown()`, which stops a
   seek between frames and raises FFmpeg's interrupt flag inside a read.
-  Whatever error the worker then returns, the run's is `cancelled`, with
-  exit 4 and its document, and the temporary file is dropped. probe and
-  doctor make no `rt_sigaction` call for SIGINT at all, so Ctrl+C ends
-  them at once, as before.
+  The other steps (probe, the GPU's set-up, the render, the PNG's
+  encode) take no stop token: the worker checks between steps, so there
+  the first Ctrl+C takes effect when the step ends, seconds later at a
+  large `--size`. Whatever error the worker then returns, the run's is
+  `cancelled`, with exit 4 and its document, and the temporary file is
+  dropped. When frame starts with SIGINT ignored, as a non-interactive
+  shell starts a background job (`cmd &`), it installs nothing and the
+  signal stays ignored, as Unix has it for such jobs; it asks for the
+  current action first (slice 4's review found the handler replacing
+  `SIG_IGN`). probe and doctor make no `rt_sigaction` call for SIGINT
+  at all, so Ctrl+C ends them at once, as before.
 - Without `--json`, frame prints one line on stdout (`wrote out.png:
   1920×1080 rectilinear 100° at 0.4 s (frame 12, pts 12012), decoded in
   software (VA-API: …), rendered on …`), its warnings go to stderr as log
@@ -1629,15 +1676,22 @@ each (no Vulkan driver at all through `VK_DRIVER_FILES` and
 `VK_ICD_FILENAMES` naming a file that isn't there, and `--decoder vaapi
 --render-node /nonexistent`); Ctrl+C
 300 ms into a seek on `long-gop`, which must end with exit 4,
-`cancelled`, no output and no temporary file, at least 300 ms before
-the seek would have; and strace's record of who installs a SIGINT
-handler. `crates/cli/tests/frame.rs` runs every other error row, among
+`cancelled`, no output and no temporary file, before the seek would
+have ended; a frame started with SIGINT ignored, which a SIGINT then
+doesn't stop (`/proc`'s `SigIgn` keeps it, `SigCgt` doesn't get it);
+and strace's record of who installs a SIGINT handler (frame: a query,
+then the handler). `crates/cli/tests/frame.rs` runs every other error row, among
 them `adapter_not_found`, `no_decoder` (a sample entry FFmpeg doesn't
 know) and `--decoder vulkan` on lavapipe, which is `hw_unavailable`
 since every Vulkan device FFmpeg lists here runs on the CPU.
 `hw_unsupported`, `hw_failed` and `anisotropy_unavailable` can't be
 reached here: there is no decoding device to refuse a stream or fail,
-and lavapipe has anisotropic filtering.
+and lavapipe has anisotropic filtering. It has the feature only: on
+Mesa 25.2.8 (LLVM 20.1.2) its `--filter aniso` renders byte for byte
+what `iso` does, on views that squeeze the source (rectilinear 160°,
+fisheye 360°, rectilinear 90° at pitch 80°), so `"filter": "aniso"`
+there changes nothing, and no test in any tier yet tells aniso from
+iso (PROGRESS, Next: render's Tier 2 at H1, or the GUI's slice).
 
 Why the worker thread rather than a flag the work polls itself: the
 seek can sit inside one FFmpeg read for a long time, and the main
@@ -3086,8 +3140,14 @@ can't decode either. One frame costs one download, so the copy that
 makes VA-API slower than Vulkan Video on odin's discrete GPU (amendment
 9) doesn't matter here. The node comes from the GPU that renders, so
 that on a machine with two GPUs the frame is decoded and rendered on
-the same one; the Tier 2 `vaapi_render_matches_software` checks the
-pair (`crates/cli/tests/tier2_frame.rs`).
+the same one. The Tier 2 `vaapi_render_matches_software`
+(`crates/cli/tests/tier2_frame.rs`) runs `auto` with no `--render-node`
+(unless `SPHERECUT_RENDER_NODE` names one) and checks that it decoded
+on VA-API with no fallback, on a node frame's info log says it found
+from the adapter's PCI bus id or ids, not the default. That shows the
+lookup ran on the rendering adapter's ids; the result doesn't name the
+node, so no test checks that it is the same GPU beyond `media::hw`'s
+own tests of the lookup on fake sysfs trees.
 
 Tested: `crates/cli/tests/frame.rs` (`--decoder vaapi --render-node
 /nonexistent` and `--decoder vulkan` on lavapipe are `hw_unavailable`,
@@ -3095,10 +3155,14 @@ exit 3, with nothing written) and `crates/cli/tests/contract.rs` (the
 same for exit 3's document); every other run of those tests is `auto`
 with the no-node fallback, and the envelope test checks the
 `decode` it reports.
-`hw_unsupported` and `hw_failed` with `auto` need a device, which Tier 2
-has: `vaapi_render_matches_software` asserts the hardware path with no
-fallback, and `vulkan_render_matches_software` skips where the driver
-can't decode the stream.
+`vaapi_render_matches_software` asserts the hardware path with no
+fallback, for `vaapi` and for `auto`, and `vulkan_render_matches_software`
+skips, with FFmpeg's lines, where the driver turns a clip down (D38).
+`auto`'s fallback after a device that turns the stream down
+(`hw_unsupported`) or fails on a frame (`hw_failed`) has no test of
+frame's in any tier yet: Tier 1 has no device, and the Tier 2 tests
+expect the device to decode. The backend's fallback itself is tested
+with injected faults (`crates/synth/tests/fallback.rs`, D30).
 
 Revisit if: slice 5 picks the hardware kind from doctor's checks for
 playback (amendment 9); `auto` should then use the same choice, so that
