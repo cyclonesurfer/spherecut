@@ -382,28 +382,44 @@ fn made_by_compat(target: &Path) -> bool {
 }
 
 /// `p` with symlinks resolved, for a path that need not exist: its nearest
-/// existing ancestor resolved, and the rest after it.
+/// existing ancestor resolved, and the rest after it, where `..` takes
+/// the component before it off, as it will once `create_dir_all` has made
+/// those directories. As it is when nothing of it exists.
 fn resolved(p: &Path) -> PathBuf {
+    use std::path::Component;
     let mut rest = Vec::new();
     let mut at = p;
     loop {
         if let Ok(real) = at.canonicalize() {
-            return rest.iter().rev().fold(real, |path, name| path.join(name));
+            let up = rest.contains(&Component::ParentDir);
+            let path = rest.iter().rev().fold(real, |mut path, c| {
+                match c {
+                    Component::ParentDir => {
+                        path.pop();
+                    }
+                    Component::Normal(name) => path.push(name),
+                    _ => {}
+                }
+                path
+            });
+            // Where `..` led back to may exist, through symlinks of its own.
+            return if up { resolved(&path) } else { path };
         }
-        match (at.parent(), at.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(name.to_owned());
+        match (at.parent(), at.components().next_back()) {
+            (Some(parent), Some(last)) => {
+                rest.push(last);
                 at = parent;
             }
-            // Nothing of it exists, or it ends in `..`: as it is.
             _ => return p.to_path_buf(),
         }
     }
 }
 
 /// Refuses a target directory that is one of the `prefixes`, holds one or
-/// lies inside one, symlinks resolved: building there, or deleting it,
-/// would change an FFmpeg.
+/// lies inside one, symlinks and `..` resolved, or that lies inside any
+/// directory holding FFmpeg's headers (`include/libavcodec/avcodec.h`),
+/// a prefix this run doesn't list among them: building there, or
+/// deleting it, would change an FFmpeg.
 fn guard(target: &Path, prefixes: &[PathBuf]) -> Result<()> {
     let t = resolved(target);
     for p in prefixes {
@@ -422,6 +438,17 @@ fn guard(target: &Path, prefixes: &[PathBuf]) -> Result<()> {
              to a directory outside every prefix",
             target.display(),
             p.display()
+        );
+    }
+    if let Some(ff) = t
+        .ancestors()
+        .find(|a| a.join("include/libavcodec/avcodec.h").is_file())
+    {
+        bail!(
+            "the target directory {} lies inside {}, which holds FFmpeg's headers: \
+             set {TARGET_ENV} to a directory outside every FFmpeg prefix",
+            target.display(),
+            ff.display()
         );
     }
     Ok(())
@@ -1366,6 +1393,78 @@ mod tests {
         made(&inside);
         assert!(clean_target(&inside, &prefixes).is_err());
         assert!(inside.join(STAMP_FILE).is_file());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_target_root_with_dotdot_is_resolved_before_it_is_guarded() {
+        let d = scratch("dotdot");
+        let prefix = d.join("ff/n8.1");
+        std::fs::create_dir_all(prefix.join("lib")).unwrap();
+        let real = d.canonicalize().unwrap();
+        // `..` after a directory that isn't there yet takes it off again,
+        // as `create_dir_all` will make it, and may lead back into what is.
+        assert_eq!(
+            resolved(&d.join("missing/../ff/n8.1/spherecut-compat-n8.1")),
+            real.join("ff/n8.1/spherecut-compat-n8.1")
+        );
+        assert_eq!(
+            resolved(&d.join("ff/new/more/../../n8.1")),
+            real.join("ff/n8.1")
+        );
+        assert_eq!(resolved(&d.join("ff/new/./x/..")), real.join("ff/new"));
+        // And what it leads back into is resolved in turn.
+        symlink(&d.join("ff"), &d.join("ln"));
+        assert_eq!(
+            resolved(&d.join("missing/../ln/n8.1/spherecut-compat-n8.1")),
+            real.join("ff/n8.1/spherecut-compat-n8.1")
+        );
+        // The review's root: compat built inside the prefix.
+        let prefixes = [prefix.clone()];
+        let target = target_dir(&d.join("missing/../ff/n8.1"), "n8.1");
+        let e = guard(&target, &prefixes).unwrap_err().to_string();
+        assert!(e.contains("lies inside the FFmpeg prefix"), "{e}");
+        let never = || -> Result<String> { panic!("the target was made ready") };
+        assert!(ready_target(&target, &prefixes, "", never).is_err());
+        assert!(!d.join("missing").exists());
+        assert!(!prefix.join("spherecut-compat-n8.1").exists());
+        let e = guard(
+            &target_dir(&d.join("missing/../ln/n8.1"), "n8.1"),
+            &prefixes,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("lies inside the FFmpeg prefix"), "{e}");
+        // Elsewhere, `..` and all, is where targets go.
+        assert!(guard(&target_dir(&d.join("missing/../t"), "n8.1"), &prefixes).is_ok());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_target_inside_an_ffmpeg_this_run_does_not_list_is_refused() {
+        let d = scratch("unlisted");
+        let ff = d.join("ff/n8.1");
+        std::fs::create_dir_all(ff.join("include/libavcodec")).unwrap();
+        std::fs::write(ff.join("include/libavcodec/avcodec.h"), "").unwrap();
+        let listed = [d.join("ff2/n9.0")];
+        let real = ff.canonicalize().unwrap();
+        for target in [
+            target_dir(&ff, "n9.0"),
+            target_dir(&ff.join("lib/deeper"), "n9.0"),
+        ] {
+            let e = guard(&target, &listed).unwrap_err().to_string();
+            let want = format!(
+                "lies inside {}, which holds FFmpeg's headers",
+                real.display()
+            );
+            assert!(e.contains(&want), "{e}");
+        }
+        // Through a symlink too.
+        let link = d.join("link");
+        symlink(&ff, &link);
+        assert!(guard(&target_dir(&link, "n9.0"), &listed).is_err());
+        // Beside it is fine.
+        assert!(guard(&target_dir(&d.join("ff"), "n9.0"), &listed).is_ok());
         std::fs::remove_dir_all(&d).ok();
     }
 
