@@ -27,6 +27,7 @@
 //! [`VideoDecoder::skipped_packets`]; after [`MAX_UNREADABLE_IN_A_ROW`] in
 //! a row the file counts as unreadable.
 
+use std::collections::BTreeSet;
 use std::ffi::c_int;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -178,6 +179,19 @@ pub struct VideoDecoder {
     landing_key: Option<i64>,
     /// The same timestamp of the last packet of the stream read.
     read_position: Option<i64>,
+    /// Once a packet has been read, the landing since opening: the
+    /// stream's first packet, by the timestamp the index compares.
+    first_landing: Option<Option<i64>>,
+    /// The demuxer flagged the packet landed on a keyframe. For H.264 the
+    /// flag is FFmpeg's parser's, not the index's: an IDR picture, a
+    /// recovery point SEI, or an I-frame in a stream that keeps one
+    /// reference frame.
+    landing_flagged: bool,
+    /// The keyframes the index lists, by its timestamp, whose packets
+    /// the demuxer didn't flag keyframes, of those read so far (bar the
+    /// stream's first packet): for H.264, I-frames that aren't IDR and
+    /// have no recovery point SEI.
+    unflagged_keys: BTreeSet<i64>,
     /// The least that a keyframe's pts has been after its dts, over the
     /// keyframes read (and the packets landed on, which are the index's
     /// keyframes): how far the index's decode times lie before the times
@@ -431,6 +445,9 @@ impl VideoDecoder {
             landing: None,
             landing_key: None,
             read_position: None,
+            first_landing: None,
+            landing_flagged: false,
+            unflagged_keys: BTreeSet::new(),
             key_lag: None,
             skip_before: None,
             skip_sent: 0,
@@ -649,6 +666,7 @@ impl VideoDecoder {
         self.awaiting_landing = true;
         self.landing = None;
         self.landing_key = None;
+        self.landing_flagged = false;
         self.read_position = None;
     }
 
@@ -683,6 +701,31 @@ impl VideoDecoder {
     /// or not (see the field).
     pub(crate) fn landing_key(&self) -> Option<i64> {
         self.landing_key
+    }
+
+    /// Whether the last seek landed on the stream's first packet, as
+    /// opening does: decoding from there is decoding from the start.
+    pub(crate) fn landed_at_start(&self) -> bool {
+        self.landing.is_some() && Some(self.landing) == self.first_landing
+    }
+
+    /// Whether the demuxer flagged the packet the last seek landed on a
+    /// keyframe (see the field).
+    pub(crate) fn landed_on_flagged_key(&self) -> bool {
+        self.landing_flagged
+    }
+
+    /// Whether `ts` is a keyframe the index lists, by its timestamp, whose
+    /// packet the demuxer was seen not to flag a keyframe (see the field).
+    pub(crate) fn unflagged_key(&self, ts: i64) -> bool {
+        self.unflagged_keys.contains(&ts)
+    }
+
+    /// Whether the decoder has been told the stream ended: the frames it
+    /// gives now are those it held, drained. FFmpeg's H.264 decoder
+    /// flags none of them corrupt (D29).
+    pub(crate) fn draining(&self) -> bool {
+        self.eof_sent
     }
 
     /// The last packet read, by the same timestamp; `None` when none has
@@ -891,6 +934,15 @@ impl VideoDecoder {
                     if landed {
                         self.landing = ts;
                         self.landing_key = pkt.pts();
+                        self.landing_flagged = pkt.is_key();
+                        self.first_landing.get_or_insert(ts);
+                    }
+                    if !pkt.is_key()
+                        && let Some(ts) = ts
+                        && self.first_landing != Some(Some(ts))
+                        && ffi::index_keyframe_before(&self.ictx, self.stream_index, ts) == Some(ts)
+                    {
+                        self.unflagged_keys.insert(ts);
                     }
                     self.read_position = ts.or(self.read_position);
                     // The landing is the index's keyframe, flagged one or
