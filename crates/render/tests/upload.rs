@@ -470,7 +470,7 @@ fn differ(got: &[Codes], want: &[Codes]) -> Vec<usize> {
 fn eight_bit_mips_are_the_references_code_for_code() {
     // The mip pass rounds each 8-bit mean to its code itself, ties to
     // even, as the reference does (`reference::halve_codes`, D31), so that
-    // the driver's conversion has nothing to round. On lavapipe every
+    // a driver that converts to nearest stores that code. On lavapipe every
     // level of R8 and Rg8 planes, at even and odd sizes, is the
     // reference's, code for code. Ties are common: a 2×2 mean of codes is
     // a whole code or a quarter, a half or three quarters past one. The

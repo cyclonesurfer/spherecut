@@ -45,11 +45,12 @@
 //! machine's own llvmpipe by the other-driver rule, recording the drift;
 //! on a GPU each CPU check's error is broken down by LOD band too. The
 //! mip pass rounds its 8-bit means to codes and the encode pass its
-//! output, so a driver's conversion has nothing left to round: when the
-//! mip pass left its means to the driver, RADV's export, which packs
-//! them to f16 toward zero first, cost the RX 7600's wide, minified views
-//! up to 15 dB, as [`the_wide_views_lose_to_the_mip_stores_not_the_filter`]
-//! shows by emulating it, and predicts what they come to now.
+//! output, so a driver that converts to nearest, as Vulkan asks, stores
+//! those codes: when the mip pass left its means to the driver, RADV's
+//! export, which packs them to f16 toward zero first, cost the RX 7600's
+//! wide, minified views up to 15 dB, as
+//! [`the_wide_views_lose_to_the_mip_stores_not_the_filter`] shows by
+//! emulating it, and predicts what they come to now.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

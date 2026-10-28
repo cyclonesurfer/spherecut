@@ -11,11 +11,12 @@
 // nearest half in the shader, so that the store is exact on any driver.
 // 0 for unorm8 (R8Unorm, Rg8Unorm): the mean of the codes is worked out
 // exactly and rounded to the nearest code, ties to even, and the pass
-// returns k / 255, which leaves the driver's conversion nothing to round,
-// as the encode pass does. Left to the driver, the mean of four codes,
-// often on a half code, came out a code low on RADV, which packs a
-// fragment's output to f16 toward zero before converting it, and each
-// level, made from the one above, added to it.
+// returns k / 255, as the encode pass does, which a driver that converts
+// to nearest, as Vulkan asks, stores as k, packed to f16 first or not.
+// Left to the driver, the mean of four codes, often on a half code, came
+// out a code low on RADV, which packs a fragment's output to f16 toward
+// zero before converting it, and each level, made from the one above,
+// added to it.
 override F16_TARGET: u32 = 0u;
 
 @group(0) @binding(0) var src: texture_2d<f32>;

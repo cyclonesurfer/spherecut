@@ -7,12 +7,12 @@
 // The output's largest code, 2^bits − 1 (`encode::code_max`): 255 for an
 // 8-bit unorm target, 1023 for a 10-bit one, or 0 for a float target,
 // which takes the OETF as it is. The pass rounds to the codes itself and
-// returns k / CODE_MAX, which leaves the driver's conversion nothing to
-// round. Left to the driver, the OETF's own value came out a code low on
-// RADV wherever it lay less than 0.1245 codes above a tie, since RADV
-// packs a fragment's output to f16 toward zero before its unorm
-// conversion; k / 255 packed so lies less than 0.1245 codes below k, at
-// least 0.375 codes from either tie.
+// returns k / CODE_MAX, which a driver that converts to nearest, as
+// Vulkan asks, stores as k. Left to the driver, the OETF's own value came
+// out a code low on RADV wherever it lay less than 0.1245 codes above a
+// tie, since RADV packs a fragment's output to f16 toward zero before its
+// unorm conversion; k / 255 packed so lies less than 0.1245 codes below
+// k, at least 0.375 codes from either tie.
 override CODE_MAX: f32;
 
 // Whether the pass returns the nearest half of that
