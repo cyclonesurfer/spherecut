@@ -16,7 +16,8 @@ use crate::upload::Uploader;
 /// What a still is read back as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Depth {
-    /// The encode pass into `Rgba8Unorm`: what the viewer shows.
+    /// The encode pass into `Rgba8Unorm`, rounded to 8-bit codes in the
+    /// shader: what the viewer shows.
     #[default]
     Eight,
     /// The linear target with the sRGB OETF applied on the CPU in f32,
@@ -285,7 +286,11 @@ fn rgb8(texels: &Texels) -> Image {
     }
 }
 
-/// The sRGB OETF, as `shaders/encode.wgsl` applies it.
+/// The sRGB OETF, as `shaders/encode.wgsl` applies it in f32. The shader
+/// then rounds it to the output's codes itself, round(v · L) / L with
+/// ties to even for L = 255 or 1023 ([`crate::encode::code_max`]), so
+/// that the driver's unorm conversion has nothing left to round; the
+/// 16-bit path rounds it to 65535 on the CPU instead.
 pub fn srgb_oetf(l: f32) -> f32 {
     if l <= 0.003_130_8 {
         l * 12.92

@@ -21,7 +21,7 @@ use crate::project::ViewParams;
 use crate::readback::round_f16;
 
 /// A rendered picture in f64: R, G, B per pixel, rows top to bottom,
-/// as the encode pass computes them before it stores them.
+/// as the encode pass computes them before it rounds them to codes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageF64 {
     pub width: u32,
@@ -443,7 +443,7 @@ fn store(format: PlaneFormat, v: f64) -> f64 {
     }
 }
 
-fn srgb_eotf(v: f64) -> f64 {
+pub(crate) fn srgb_eotf(v: f64) -> f64 {
     if v <= 0.040_45 {
         v / 12.92
     } else {
@@ -451,7 +451,7 @@ fn srgb_eotf(v: f64) -> f64 {
     }
 }
 
-fn srgb_oetf(l: f64) -> f64 {
+pub(crate) fn srgb_oetf(l: f64) -> f64 {
     if l <= 0.003_130_8 {
         l * 12.92
     } else {
