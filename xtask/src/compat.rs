@@ -77,7 +77,7 @@ const BOUND: [(&str, &str); 5] = [
     ("libavcodec", "libavcodec/avcodec.h"),
 ];
 /// The libraries ffmpeg-sys-next can bind, whose pkg-config files a stamp
-/// covers. It can also bind libpostproc, which FFmpeg 8 dropped.
+/// covers. It can also bind those of [`DROPPED`].
 const STAMPED: [&str; 7] = [
     "libavcodec",
     "libavdevice",
@@ -87,6 +87,10 @@ const STAMPED: [&str; 7] = [
     "libswresample",
     "libswscale",
 ];
+/// The libraries ffmpeg-sys-next can also bind that FFmpeg no longer
+/// has: libpostproc, which FFmpeg 8 dropped, and libavresample, which 5
+/// did. A build that links one links an older FFmpeg's.
+const DROPPED: [&str; 2] = ["libpostproc", "libavresample"];
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -592,7 +596,7 @@ fn check_built(
             );
         }
         for name in names {
-            let ffmpeg = STAMPED.contains(&name.as_str()) || name == "libpostproc";
+            let ffmpeg = STAMPED.contains(&name.as_str()) || DROPPED.contains(&name.as_str());
             if ffmpeg && !BOUND.iter().any(|(b, _)| *b == name) {
                 bail!(
                     "ffmpeg-sys-next's build script linked {name}, which compat doesn't ask \
@@ -2247,6 +2251,7 @@ mod tests {
             ("avdevice", "libavdevice"),
             ("dylib=avfilter", "libavfilter"),
             ("static:+whole-archive=postproc:pp", "libpostproc"),
+            ("avresample", "libavresample"),
         ] {
             let e = linking(&[&bound[..], &[extra]].concat()).unwrap_err();
             let want = format!("linked {name}, which compat doesn't ask pkg-config about");
