@@ -3738,11 +3738,14 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
             .render(gpu, &c.frame, &c.view, c.size, &opts)
             .unwrap();
         let here = psnr_of(c.size, &unit(&here), &cpu.data);
+        // The reference rounded to codes: now, and at be38fa4 against
+        // its own.
         eprintln!(
             "{what}: RX 7600 at be38fa4 {rx:.2} dB, lavapipe {here:.2} dB (its floor {}), a \
-             filter in f64 {:.2} dB",
+             filter in f64 {:.2} dB (at be38fa4 {:.2} dB)",
             floor(here),
-            psnr_of(c.size, &coded(&exact), &cpu.data)
+            psnr_of(c.size, &coded(&exact), &cpu.data),
+            psnr_of(c.size, &coded(&old), &old)
         );
         // be38fa4: each filter against the reference of the time.
         let mut unrounded = Vec::new();
