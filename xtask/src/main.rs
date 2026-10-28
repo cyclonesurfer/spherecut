@@ -29,6 +29,20 @@ enum Cmd {
     /// Clippy and a link of the tests against other FFmpeg builds, each in
     /// its own target directory; --test also runs the Tier 1 tests against
     /// one.
+    ///
+    /// Each build's target directory is spherecut-compat-<label>, <label>
+    /// being the prefix's last component, in the directory
+    /// SPHERECUT_FFMPEG_COMPAT_TARGET_DIR names, or else in compat/ in
+    /// cargo's target directory. compat stamps each one it makes, and
+    /// deletes one (built against another FFmpeg, or with --clean) only
+    /// while it holds that stamp: a directory there without it is refused
+    /// and left, as is a target directory that is a prefix, holds one or
+    /// lies inside one (or inside any directory holding
+    /// include/libavcodec/avcodec.h), symlinks and `..` resolved.
+    ///
+    /// A build passes only if pkg-config finds each library
+    /// ffmpeg-sys-next binds in the prefix, before the build and after it,
+    /// and the build searched for libraries only inside the prefix.
     Compat(compat::Args),
     /// Write the synthetic test-media set to test-media/.
     GenMedia(gen_media::Args),

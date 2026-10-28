@@ -164,19 +164,24 @@ pub struct VideoDecoder {
     hw_failed: Option<String>,
     frames: u64,
     skipped: u64,
-    /// Since the last seek, no packet of the stream has been read.
+    /// Since opening or the last seek, no packet of the stream has been
+    /// read.
     awaiting_landing: bool,
-    /// The first packet of the stream read since the last seek: its dts,
-    /// or its pts when it has no dts (Matroska), which is what the
-    /// demuxer's index and `av_seek_frame` compare.
+    /// The first packet of the stream read since opening or the last
+    /// seek: its dts, or its pts when it has no dts (Matroska), which is
+    /// what the demuxer's index and `av_seek_frame` compare.
     landing: Option<i64>,
-    /// The pts of that packet, when it is a keyframe.
+    /// The pts of that packet, the keyframe decoding starts from, whether
+    /// or not the demuxer flags it one: FFmpeg's H.264 parser flags an
+    /// I-frame that isn't IDR only by its recovery point SEI, though the
+    /// index (an MP4's `stss`) lists it and the seek lands on it.
     landing_key: Option<i64>,
     /// The same timestamp of the last packet of the stream read.
     read_position: Option<i64>,
     /// The least that a keyframe's pts has been after its dts, over the
-    /// keyframes read: how far the index's decode times lie before the
-    /// times keyframes are shown.
+    /// keyframes read (and the packets landed on, which are the index's
+    /// keyframes): how far the index's decode times lie before the times
+    /// keyframes are shown.
     key_lag: Option<i64>,
     /// Frames nothing refers to are skipped until a packet with a pts at
     /// or after this one is sent.
@@ -422,7 +427,7 @@ impl VideoDecoder {
             hw_failed: None,
             frames: 0,
             skipped: 0,
-            awaiting_landing: false,
+            awaiting_landing: true,
             landing: None,
             landing_key: None,
             read_position: None,
@@ -673,8 +678,9 @@ impl VideoDecoder {
         self.landing
     }
 
-    /// The pts of the keyframe the last seek landed on: the first packet
-    /// read since, when it is a keyframe and has a pts.
+    /// The pts of the keyframe the last seek landed on, or decoding began
+    /// at since opening: the first packet read since, flagged a keyframe
+    /// or not (see the field).
     pub(crate) fn landing_key(&self) -> Option<i64> {
         self.landing_key
     }
@@ -881,13 +887,15 @@ impl VideoDecoder {
             match pkt.read(&mut self.ictx) {
                 Ok(()) if pkt.stream() == self.stream_index => {
                     let ts = pkt.dts().or(pkt.pts());
-                    if self.awaiting_landing {
-                        self.awaiting_landing = false;
+                    let landed = std::mem::take(&mut self.awaiting_landing);
+                    if landed {
                         self.landing = ts;
-                        self.landing_key = pkt.pts().filter(|_| pkt.is_key());
+                        self.landing_key = pkt.pts();
                     }
                     self.read_position = ts.or(self.read_position);
-                    if pkt.is_key()
+                    // The landing is the index's keyframe, flagged one or
+                    // not (see `landing_key`).
+                    if (pkt.is_key() || landed)
                         && let (Some(pts), Some(dts)) = (pkt.pts(), pkt.dts())
                     {
                         let lag = pts.saturating_sub(dts);

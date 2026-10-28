@@ -327,6 +327,7 @@ unsafe fn enum_int<E>(field: *const E) -> c_int {
 }
 
 const HW_NONE: c_int = sys::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE as c_int;
+const PICT_I: c_int = sys::AVPictureType::AV_PICTURE_TYPE_I as c_int;
 
 /// Convert a C string returned by an FFmpeg `*_name` function.
 fn cstr_opt(p: *const c_char) -> Option<String> {
@@ -1841,6 +1842,8 @@ pub(crate) struct FrameFields {
     pub corrupt: bool,
     /// The decoder concealed errors in it (`decode_error_flags`).
     pub concealed: bool,
+    /// An I-frame (`pict_type`; for H.264, by its first slice).
+    pub intra: bool,
     pub color: ColorCodes,
 }
 
@@ -1860,6 +1863,7 @@ pub(crate) fn frame_fields(frame: &ff::frame::Video) -> FrameFields {
             key: (*f).flags & sys::AV_FRAME_FLAG_KEY != 0,
             corrupt: (*f).flags & sys::AV_FRAME_FLAG_CORRUPT != 0,
             concealed: (*f).decode_error_flags != 0,
+            intra: enum_int(&raw const (*f).pict_type) == PICT_I,
             color: ColorCodes {
                 primaries: enum_int(&raw const (*f).color_primaries),
                 transfer: enum_int(&raw const (*f).color_trc),

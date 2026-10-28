@@ -691,7 +691,12 @@ fn probe_file(path: &Path) -> Result<ProbeReport, Failed> {
         let decoder = ffi::find_decoder(&par);
         stream_undecodable.push(undecodable(
             &info,
-            decoder.map(|d| d.name().to_string()),
+            decoder.map(|d| Decoder {
+                name: d.name().to_string(),
+                channel_conf: d
+                    .capabilities()
+                    .contains(ff::codec::Capabilities::CHANNEL_CONF),
+            }),
             || open_decoder(&par, decoder),
         ));
         streams.push(info);
@@ -950,6 +955,17 @@ fn sample_entry_type(trak: &Mp4Box) -> Option<FourCc> {
     Some(stsd.children.first()?.fourcc)
 }
 
+/// The decoder FFmpeg has for a stream's codec.
+#[derive(Debug, Clone)]
+struct Decoder {
+    /// Its name, e.g. `aac`.
+    name: String,
+    /// It sets the channels up from the codec setup itself
+    /// (`AV_CODEC_CAP_CHANNEL_CONF`), so it opens on a stream without
+    /// them, where any other decoder refuses one.
+    channel_conf: bool,
+}
+
 /// Why FFmpeg cannot decode a video or audio stream.
 #[derive(Debug)]
 enum Undecodable {
@@ -1032,14 +1048,14 @@ fn lacks_feature(e: ff::Error) -> bool {
 /// rest would only say that FFmpeg could not set the stream up or that
 /// the decoder refused it. Then as FFmpeg judges whether it set the
 /// stream up: it needs the codec, the frame size or the sample rate and
-/// channels, and the pixel or sample format when it has a decoder (the
-/// one named `decoder`) to find it with. Then whether that decoder opens
+/// channels, and the pixel or sample format when it has a decoder
+/// (`decoder`) to find it with. Then whether that decoder opens
 /// with the stream's codec parameters (`open`), which checks the codec
 /// setup that the parameters alone do not show: FFmpeg fills them in from
 /// the sample entry even when its decoder refuses the `esds`.
 fn undecodable(
     st: &StreamInfo,
-    decoder: Option<String>,
+    decoder: Option<Decoder>,
     open: impl FnOnce() -> Result<(), ff::Error>,
 ) -> Option<Undecodable> {
     if !matches!(st.kind, StreamKind::Video | StreamKind::Audio) {
@@ -1065,16 +1081,18 @@ fn undecodable(
             return unconfigured("has no sample rate");
         }
         if a.channels == 0 {
-            // A decoder that fails to open in avformat_find_stream_info
-            // leaves the stream with no channels in FFmpeg 7.x, 8.0 to
-            // 8.1.2, 9.0 and 9.0.1 (6.1 keeps the sample entry's, and 8.1.3
-            // and 9.0.2 put them back): what the decoder says is the
-            // reason then (D2).
-            if let Some(decoder) = &decoder
+            // A decoder that sets the channels up itself, such as AAC's,
+            // and fails to open in avformat_find_stream_info leaves the
+            // stream with none in FFmpeg 7.x, 8.0 to 8.1.2, 9.0 and 9.0.1
+            // (6.1 keeps the sample entry's, and 8.1.3 and 9.0.2 put them
+            // back): what it says is the reason then (D2). Any other
+            // decoder, such as PCM's, refuses a stream without channels
+            // (EINVAL), which says only that it has none.
+            if let Some(decoder) = decoder.as_ref().filter(|d| d.channel_conf)
                 && let Err(error) = open()
             {
                 return Some(Undecodable::Refused {
-                    decoder: decoder.clone(),
+                    decoder: decoder.name.clone(),
                     error,
                 });
             }
@@ -1087,9 +1105,10 @@ fn undecodable(
     let Some(decoder) = decoder else {
         return Some(Undecodable::NoDecoder(codec.clone()));
     };
-    open()
-        .err()
-        .map(|error| Undecodable::Refused { decoder, error })
+    open().err().map(|error| Undecodable::Refused {
+        decoder: decoder.name,
+        error,
+    })
 }
 
 /// Open `decoder` with a stream's codec parameters, as a player would,
@@ -1285,10 +1304,19 @@ mod tests {
         }
     }
 
+    /// The decoder named `name`, which sets the channels up itself when
+    /// `channel_conf`, as AAC's does.
+    fn decoder(name: &str, channel_conf: bool) -> Option<Decoder> {
+        Some(Decoder {
+            name: name.into(),
+            channel_conf,
+        })
+    }
+
     #[test]
     fn a_stream_ffmpeg_cannot_set_up_is_damage_only_with_samples_it_reads() {
         let not_opened = || -> Result<(), ff::Error> { panic!("the decoder was opened") };
-        let h264 = || Some("h264".to_string());
+        let h264 = || decoder("h264", false);
         let mut v = stream(StreamKind::Video);
         assert!(undecodable(&v, h264(), || Ok(())).is_none());
         v.video.as_mut().unwrap().pix_fmt = None;
@@ -1313,7 +1341,7 @@ mod tests {
         let mut a = stream(StreamKind::Audio);
         a.audio.as_mut().unwrap().sample_fmt = None;
         assert!(matches!(
-            undecodable(&a, Some("aac".into()), not_opened),
+            undecodable(&a, decoder("aac", true), not_opened),
             Some(Undecodable::Unconfigured("has no sample format"))
         ));
     }
@@ -1327,7 +1355,7 @@ mod tests {
         let video = v.video.as_mut().unwrap();
         (video.width, video.height) = (16400, 8200);
         video.pix_fmt = None;
-        let why = undecodable(&v, Some("mjpeg".into()), not_opened).unwrap();
+        let why = undecodable(&v, decoder("mjpeg", false), not_opened).unwrap();
         assert!(
             matches!(
                 why,
@@ -1353,7 +1381,7 @@ mod tests {
         let video = v.video.as_mut().unwrap();
         (video.width, video.height) = (16384, 8192);
         video.pix_fmt = Some("yuv420p".into());
-        assert!(undecodable(&v, Some("h264".into()), || Ok(())).is_none());
+        assert!(undecodable(&v, decoder("h264", false), || Ok(())).is_none());
     }
 
     #[test]
@@ -1385,7 +1413,7 @@ mod tests {
         // ffmpeg-next words its errors once FFmpeg is set up.
         crate::init();
         let a = stream(StreamKind::Audio);
-        let refused = |e| undecodable(&a, Some("aac".into()), || Err(e)).unwrap();
+        let refused = |e| undecodable(&a, decoder("aac", true), || Err(e)).unwrap();
         let why = refused(ff::Error::InvalidData);
         // Whatever the sample entry, and with no samples too.
         assert!(why.is_damage(None, false));
@@ -1413,15 +1441,16 @@ mod tests {
     }
 
     #[test]
-    fn an_audio_stream_with_no_channels_is_judged_by_its_decoder_first() {
-        // FFmpeg 7.x zeroes the channels of an audio stream whose decoder
-        // refused its setup in avformat_find_stream_info, so the decoder's
-        // refusal is the reason, as with the channels 6.1 and 8.1.3 keep:
-        // a feature it lacks is not damage.
+    fn an_audio_stream_with_no_channels_is_judged_by_a_decoder_that_sets_them_up() {
+        // FFmpeg 7.x zeroes the channels of an audio stream whose decoder,
+        // one that sets them up itself, refused its setup in
+        // avformat_find_stream_info, so the decoder's refusal is the
+        // reason, as with the channels 6.1 and 8.1.3 keep: a feature it
+        // lacks is not damage.
         crate::init();
         let mut a = stream(StreamKind::Audio);
         a.audio.as_mut().unwrap().channels = 0;
-        let aac = || Some("aac".to_string());
+        let aac = || decoder("aac", true);
         let enosys = ff::Error::Other {
             errno: ff::util::error::ENOSYS,
         };
@@ -1438,8 +1467,12 @@ mod tests {
             "stream #1 cannot be opened by FFmpeg's aac decoder (Invalid data found when processing input), so its codec setup is damaged"
         );
         // A decoder that opens leaves the stream without channels, and
-        // without a decoder there is nothing to ask.
-        for (decoder, opens) in [(aac(), true), (None, false)] {
+        // without a decoder there is nothing to ask. Nor is there with one
+        // that needs the channels given, such as PCM's: it refuses a
+        // stream without them (EINVAL), which says only that, so whether
+        // that is damage goes by the track's samples.
+        let pcm = || decoder("pcm_s16le", false);
+        for (decoder, opens) in [(aac(), true), (None, false), (pcm(), false)] {
             let why = undecodable(&a, decoder, || {
                 assert!(opens, "the decoder was opened");
                 Ok(())
@@ -1447,6 +1480,21 @@ mod tests {
             assert!(
                 matches!(why, Some(Undecodable::Unconfigured("has no channels"))),
                 "{why:?}"
+            );
+        }
+        let why = undecodable(&a, pcm(), || Err(ff::Error::InvalidData)).unwrap();
+        let sowt = Some(FourCc::new(b"sowt"));
+        assert!(why.is_damage(sowt, true));
+        assert!(!why.is_damage(sowt, false));
+        // As FFmpeg's decoders say of themselves.
+        for (name, channel_conf) in [("aac", true), ("pcm_s16le", false)] {
+            let codec = ff::decoder::find_by_name(name).unwrap();
+            assert_eq!(
+                codec
+                    .capabilities()
+                    .contains(ff::codec::Capabilities::CHANNEL_CONF),
+                channel_conf,
+                "{name}"
             );
         }
     }

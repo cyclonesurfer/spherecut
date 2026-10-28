@@ -146,11 +146,61 @@ didn't compile on Pat's odin and huginn (FFmpeg 8.1.3, RPM Fusion):
   `avformat_find_stream_info` on the file reads 0 channels against 7.1,
   7.1.3 and 8.1 and 2 against 6.1, 8.1.3 and 9.0.2. probe now asks the
   decoder first (6fabd8b, D15), with a unit test that fails without it,
-  and generated_media expects the channels cleared on exactly those
-  releases. From 6fabd8b every Tier 1 test passes against 8.1.3, 7.1.3
+  and generated_media expected the channels cleared on exactly those
+  releases (no longer, below). From 6fabd8b every Tier 1 test passes against 8.1.3, 7.1.3
   and 6.1, 395 on each with 19 ignored, and clippy and the link pass
   against the minimal 7.1 and the 9.0.2 with VA-API, libx264, libx265
   and libdav1d.
+- Its review found that asking the decoder first went too far. A
+  decoder without `AV_CODEC_CAP_CHANNEL_CONF`, such as PCM's, refuses
+  any stream without channels (`EINVAL`), so a `sowt` track whose sample
+  entry gives none was damage even with no samples, where it had been a
+  warning, and the refusal said no more than "has no channels". Only a
+  decoder that sets the channels up itself is asked now (D15).
+  generated_media's `a_pcm_track_without_channels_is_damage_only_with_samples`
+  writes a PCM MOV and sets its channels to 0, with its samples and
+  without, and fails without the fix. The review also found
+  generated_media's check of the channels gated on libavformat's
+  version, which says nothing of which fixes a point release took
+  (FFmpeg's fd6dc624be1e, which puts the channels back, is in 8.1.3 and
+  9.0.2 but not 8.1.2 or 9.0.1). It now takes 2 channels or none, which
+  are FFmpeg's to say, and checks what is probe's: the AAC decoder's
+  refusal as the one damage, and the sample format.
+- It found compat itself unsafe. Its targets were named by label alone,
+  `<root>/<label>`, and one without a stamp was deleted as stale, before
+  a build or under `--clean`: with `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR`
+  naming the directory that holds the prefixes, each prefix was its own
+  target and was deleted. Targets are now `spherecut-compat-<label>`,
+  and compat deletes only those with its stamp (below). Its unit tests
+  refuse a directory without a stamp, one with a stamp of the old kind
+  (no header), a symlink, and a target that is, holds or lies inside a
+  prefix, under `--clean` too, and an FFmpeg that changed as its target
+  was made ready; each fails without its check. Targets an earlier
+  compat made at `compat/<label>` are left as they are: delete them by
+  hand.
+- It found that compat took a prefix for found once pkg-config read its
+  `libavcodec.pc`, though that file's `libdir` or `includedir` could
+  lead to another FFmpeg, and that it ran `pkg-config` from `PATH` where
+  the build runs `$PKG_CONFIG`. Both are checked now, each with a test
+  that fails without its check.
+- Its second review found four more gaps. `build-ffmpeg.sh` left a
+  prefix whose `make install` failed partway under its final name, with
+  libavcodec complete and `libavutil.pc` missing; it now installs into
+  `stage-<tag>` beside the prefix and moves the prefix into place only
+  once the install is done. compat checked libavcodec alone, though
+  ffmpeg-sys-next finds libavutil, libavformat, libswscale,
+  libswresample and libavcodec through pkg-config one by one and puts
+  libavutil's directory first on the link line, so such a prefix bound
+  the system's libavutil; all five are checked now. A target root with
+  `..` after a directory not yet made got past the guard and built
+  inside the prefix, and a prefix the run didn't name was no guard at
+  all; `..` is resolved now, and no target may lie in a directory
+  holding FFmpeg's headers. And nothing was checked once the build had
+  run, so a prefix that went away during it passed against the system's
+  FFmpeg; now the stamp is checked again after it, and so is where the
+  build searched for libraries. Each compat check has a unit test that
+  fails without it; the staging was checked by hand, with a configure
+  and Makefile stubbed to fail at each step.
 - `gen-media`'s files from 8.1.3 differ from 6.1's only in FFmpeg's
   version strings (`Lavc`, `Lavf`) and the average bitrate in MP4's
   `btrt` box, which 8.1.3 leaves 0: the streams are the same.
@@ -162,15 +212,38 @@ the binaries without running them: clippy doesn't link, so a function
 that `ffi.rs`'s own extern block declares and an FFmpeg no longer
 exports would pass it, and fail only where the tests are built, as
 `hw-test` builds them on Pat's machines. Each prefix has a target
-directory of its own (`<target>/compat/<label>`, with line-tables
-debuginfo and no incremental state), and compat checks that pkg-config
-finds that prefix and prints the FFmpeg and libavcodec it found there.
-A target records what it was built against (the versions, and the size
-and time of each library's pkg-config file and of `ffversion.h`), and
-one built against anything else is deleted first: ffmpeg-sys-next binds
-again only when the variables it reads change, so a distro upgrade of
-`/usr`, a prefix built again in place or a symlink pointed elsewhere
-kept the old bindings and passed under the new version's name. cargo
+directory of its own, `spherecut-compat-<label>` (the label is the
+prefix's last component) in the directory
+`SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` names, or else in
+`<target>/compat/`, with line-tables debuginfo and no incremental
+state. compat checks that pkg-config (`$PKG_CONFIG` when it is set, as
+the build runs it) finds each library ffmpeg-sys-next binds (libavutil,
+libavformat, libswscale, libswresample and libavcodec) in that prefix,
+and that the library and header each one's `.pc` file names lie inside
+the prefix, symlinks resolved, and prints the FFmpeg and libavcodec it
+found there. A target
+records what it was built against (the versions, and the size and time
+of each library's pkg-config file and of `ffversion.h`), and one built
+against anything else is deleted first: ffmpeg-sys-next binds again
+only when the variables it reads change, so a distro upgrade of `/usr`,
+a prefix built again in place or a symlink pointed elsewhere kept the
+old bindings and passed under the new version's name. compat deletes
+only what it made: a target, stale or under `--clean`, only while it
+holds compat's stamp, whose first line says compat wrote it. A
+directory there without one is refused and left, and so is a target
+directory that is a prefix, holds one or lies inside one, symlinks and
+`..` resolved, or that lies inside any directory holding
+`include/libavcodec/avcodec.h`, such as a prefix the run doesn't name.
+Once a
+stale target is deleted, compat asks pkg-config again and stops if the
+stamp changed, as it would for a prefix whose files are links into the
+target. Once the build has run (the link, and the Tier 1 tests), it
+asks again and fails the build if the stamp changed, and reads
+ffmpeg-sys-next's build-script output in the target: it must have
+linked libavcodec, and searched for libraries only inside the prefix
+(the report's "binding"). A prefix moved or deleted during a build had
+pkg-config find another FFmpeg for it, which passed under the prefix's
+name. cargo
 runs without `FFMPEG_DIR`, which ffmpeg-sys-next uses before
 pkg-config, and without the pkg-config crate's per-target variables
 (`HOST_PKG_CONFIG_PATH`, `PKG_CONFIG_PATH_<target>` and the like), which
@@ -191,7 +264,9 @@ the target, clippy passes and the link fails on the undefined symbol.
 the way the 8.1.3 above was built, with Khronos Vulkan headers 1.4.354
 where the system's are older than 8.1 needs, as Ubuntu 24.04's are. It
 passes their include directory to configure too, which 7.1's configure
-needs (it test-compiles `vulkan.h` without the package's Cflags).
+needs (it test-compiles `vulkan.h` without the package's Cflags). It
+installs into `DIR/stage-TAG` and moves the prefix into place once
+`make install` is done, so a failed install leaves no prefix.
 
 ## D3. Hardware decoding never falls back to software silently
 
@@ -504,13 +579,22 @@ only: seeks stop through generation tokens instead.
 
 *Updated 2026-10-24, against FFmpeg 8.1.3 (D2, D29):* from 7.1 the HEVC
 decoder skips a picture whose slice header or frame start it can't
-decode without returning an error, and from 8.0 it flags as corrupt
-the pictures that refer to it. `VideoDecoder::open` leaves corrupt
-frames to FFmpeg, which drops them, so there such damage loses frames
-up to the next keyframe and `next_frame` returns no error. The
-backend's decoder has corrupt frames handed out, and says one after a
-good frame as a `Damaged` event (D29). On 7.1.x the damage is silent on
-both.
+decode without returning an error, and from 8.0 it treats the pictures
+that refer to it as damaged, where 6.1 decoded them from what it had.
+`VideoDecoder::open` doesn't ask for corrupt frames
+(`AV_CODEC_FLAG_OUTPUT_CORRUPT`), and without that flag 8.x refuses
+those pictures: a reference picture that is missing or corrupt is
+invalid data to `add_candidate_ref`, `hevc_frame_start` drops the
+picture, and `decode_nal_unit` skips it with the same "Skipping invalid
+undecodable NALU" warning, up to the next IRAP picture. So there such
+damage loses those frames and `next_frame` returns no error. The
+backend's decoder asks for corrupt frames, so FFmpeg decodes those
+pictures and flags them corrupt, and for HEVC the backend says the first
+of them after a good frame as a `Damaged` event and drops the rest
+(D29). H.264's flag says only where decoding recovered, not damage, and
+the backend hands those frames out, and takes the I-frame decoding
+starts from for good, flagged or not (D29). On 7.1.x the HEVC damage is
+silent on both.
 
 ## D14. A hardware decoder says why it refused a stream
 
@@ -677,12 +761,16 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   FFmpeg lacks a feature (`ENOSYS`, `AVERROR_PATCHWELCOME`, or
   `AVERROR_EXPERIMENTAL` for a decoder this build does not enable) is a
   warning, as is a codec with no decoder in this build; any other
-  refusal is damage, whatever the container. A decoder that fails to
-  open in `avformat_find_stream_info` also clears the stream's channels
-  from FFmpeg 7.0, until 8.1.3 and 9.0.2 put the sample entry's back
-  (6.1 kept them in the old `channels` field), so an audio stream with
-  no channels is judged by its decoder first: only one that opens leaves
-  "has no channels" as the reason (D2).
+  refusal is damage, whatever the container. A decoder that sets the
+  channels up itself (`AV_CODEC_CAP_CHANNEL_CONF`, as AAC's does) and
+  fails to open in `avformat_find_stream_info` also clears the stream's
+  channels from FFmpeg 7.0, until 8.1.3 and 9.0.2 put the sample entry's
+  back (6.1 kept them in the old `channels` field), so an audio stream
+  with no channels is judged by such a decoder first: only one that
+  opens leaves "has no channels" as the reason (D2). Any other decoder,
+  such as PCM's, refuses a stream without channels (`EINVAL`), which
+  says only that it has none, so it isn't asked: "has no channels" is
+  the reason, and damage only with samples, as above.
 
 A file FFmpeg reads as MOV/MP4 is checked even when its first box type is
 unknown; that box alone is a warning, not damage. Matroska is checked
@@ -1821,7 +1909,8 @@ flagged corrupt as one decoded from references a seek skipped, so on
 exact seek into it returned an earlier frame as `Exact` with no event.
 Now only the frames flagged corrupt before the first good frame since
 opening or a seek are dropped silently: their references come before
-where decoding began. After it, the first of a run of them is damage,
+where decoding began. After it, for HEVC (and every codec but H.264,
+below), the first of a run of them is damage,
 a `Damaged` event like any other the decode goes on past, and it and
 the rest of the run are dropped. A seek into the frames lost stays
 `Exact` for the frame the decode from the start shows there, with the
@@ -1838,12 +1927,81 @@ fix. FFmpeg 7.1.x (libavcodec 61.19 up to 8.0's 62.11) neither returns
 the error nor flags the frames, so there the damage is silent: the test
 expects no event from HEVC there.
 
+*Updated 2026-10-24, against FFmpeg 8.1.3 and 7.1.3.* That rule took
+H.264's corrupt flag for damage too, and it isn't. The H.264 decoder
+flags a frame only by where it has seen decoding recover since it began
+(an IDR picture, a recovery point SEI, or an I-frame it takes for a
+place to start), never for a reference picture it lacks, which it
+conceals or fails `avcodec_send_packet` over. From 7.0, in a stream with
+B-frames, the frames decoded after such an I-frame and before it comes
+out don't count as recovered, and come out flagged though every
+reference they need is there; 6.1 hands them out unflagged. In a stream
+whose keyframes after the first are I-frames that aren't IDR, with no
+recovery point SEI, every seek to a keyframe but the first then raised
+a `Damaged` event on 7.x and later, and lost those frames. Now the flag
+after the first good frame is damage for every codec but H.264, whose
+flagged frames are handed out (`corrupt_is_damage`); before it the flag
+still marks, for every codec, the frames decoded from references a seek
+skipped. Of FFmpeg's other decoders, VVC's flags as HEVC's does, and
+those for AV1 (FFmpeg's own, libdav1d and libaom), VP8, VP9, MPEG-1, 2
+and 4, ProRes and MJPEG flag none. The oracle's
+`h264_keyframes_without_recovery_points_seek_exactly` strips the SEI
+from open-GOP H.264 with 3 and with 2 B-frames, and from one cut at a
+keyframe that isn't IDR; FFmpeg flags neither those keyframes nor their
+packets as keys, so there the oracle takes the MP4's sync samples
+(`stss`) for keyframes. It fails without the fix on 8.1.3 and 7.1.3. The
+oracle now also fails a clip on any `Damaged` event, from a decode from
+the start or a seek, except the HEVC splice up to 7.0.
+
+*Updated 2026-10-28.* That rule's clips keep 1 reference frame, as
+synth's `veryfast` does, which FFmpeg's heuristic needs. Keeping 3, as
+x264's default `medium` does, SEI-less open-GOP H.264 lost almost every
+frame after a seek on every FFmpeg from 6.1: the decoder fills the gap
+in `frame_num` a seek (or a cut's start) leaves with 3 stand-in
+references, more than the heuristic allows, so it starts at no keyframe
+but an IDR picture and flags every frame up to the next. Spherecut
+dropped them all but those FFmpeg drains, unflagged, at the end of the
+stream: a cut at the second keyframe of a 40-frame clip opened on its
+second last frame and played 2 of its 32 frames, nearly every keyframe
+seek gave the clip's second last frame, and exact seeks were right but
+decoded from the start, all without an event. For H.264 a flagged
+I-frame decoded from the first packet read since opening or a seek
+(the file's first, or the keyframe the index lists and the seek landed
+on) is now the first good frame (`starts_here`): its slices refer to
+nothing. The frames shown before it stay dropped, by their flag and by
+pts. Since FFmpeg's parser flags such a keyframe's packet only by its
+recovery point SEI, the landing's pts is now taken whatever the
+packet's flags: else the leading B-frames FFmpeg drains unflagged after
+a seek to a clip's last keyframe were handed out. The landing also
+counts now for the keyframes' least lag, which in such a cut no packet
+flagged a keyframe gave: with 1 B-frame, an exact seek after a keyframe
+seek that landed before its target sought again.
+`h264_keyframes_without_recovery_points_seek_exactly` adds SEI-less
+clips keeping 3 references, of 30 frames and of 25 (which end on a
+keyframe and its leading pictures), a cut of one, and a cut with 1
+B-frame; each fails without its fix on 6.1 and 8.1.3.
+
 Limits (from 8.1.3): on 7.1.x HEVC damage to a slice header or frame
-start is silent, as above. A frame flagged corrupt after the first good
-one is taken for damage; a decoder that flagged a frame of an undamaged
-stream so would raise a `Damaged` event for it. `VideoDecoder::open`,
-which tests and the Tier 2 checks use, still leaves corrupt frames to
-FFmpeg, so from 8.0 it loses those frames without an error (D13).
+start is silent, as above. Outside H.264, a frame flagged corrupt after
+the first good one is taken for damage: a decoder that flagged a frame
+of an undamaged stream so would raise a `Damaged` event for it. The
+oracle cuts the SEI-less clips with 1 and 3 B-frames, not the one with
+2: some of its keyframes are shown 2 frames after their decode time and
+others 3, and the least lag puts the latter a frame early, so in a cut
+of it, with the SEI or without, an exact seek after a keyframe seek
+that landed before its target seeks once more than the oracle allows
+(`forward_is_cheaper`'s estimate, above); its frames are right. H.264
+whose random access points are recovery points on P-frames (x264's
+intra refresh) seeks only to where FFmpeg says decoding has recovered,
+which need not be the decode from the start: in x264 clips with keyint
+8, the review counted 17 of 80 exact seeks without B-frames and 4 of 80
+with 2 that returned a frame unlike it, as `Exact` and with no event,
+and with 3 B-frames and 3 references a keyframe seek gave the first
+frame FFmpeg took for recovered, not the sync sample. Nothing here
+tells such a stream apart, and the oracle has none.
+`VideoDecoder::open`, which tests and the Tier 2 checks use, doesn't
+ask for corrupt frames, so from 8.0 FFmpeg refuses the HEVC pictures
+that refer to a lost one and it loses them without an error (D13).
 
 ## D30. Pixel formats and colour defaults
 

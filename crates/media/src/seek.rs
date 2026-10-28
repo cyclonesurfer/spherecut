@@ -300,13 +300,26 @@ pub struct FfmpegVideo {
     leading: bool,
     /// Since opening or the last seek, a frame has come out that FFmpeg
     /// didn't flag corrupt and that isn't a leading picture: a frame
-    /// flagged corrupt after it refers to a picture the file's damage
-    /// lost, not to one before where decoding began.
+    /// flagged corrupt after it doesn't refer to one before where
+    /// decoding began, and `corrupt_is_damage` says what it is.
     settled: bool,
     /// The frames coming out are flagged corrupt after a settled one, and
     /// the damage has been said: the rest are dropped without another
     /// word, up to the next frame that isn't.
     losing: bool,
+    /// What FFmpeg's corrupt flag says of a frame after a settled one.
+    /// `false` for H.264, whose decoder flags only the frames it hasn't
+    /// seen decoding recover by since it began: at an IDR picture, a
+    /// recovery point SEI, or an I-frame it takes for a place to start.
+    /// From 7.0, in a stream with B-frames, the frames decoded after such
+    /// an I-frame and before it comes out don't count as recovered, and
+    /// come out flagged though every reference they need is there; 6.1
+    /// hands them out unflagged, and so does Spherecut. `true`, damage,
+    /// for every other codec: HEVC's decoder (from 8.0) and VVC's flag a
+    /// frame for a reference picture that is missing or itself corrupt,
+    /// which the file's damage lost, and those for AV1, VP9, ProRes,
+    /// MJPEG and MPEG-1, 2 and 4 flag none. See also [`starts_here`].
+    corrupt_is_damage: bool,
     /// The stream has no timestamps: pts are counted, as frame index times
     /// `frame_ticks`.
     no_timestamps: bool,
@@ -426,6 +439,7 @@ impl FfmpegVideo {
         };
         let index = dec.stream_index();
         let codec = dec.codec_name();
+        let corrupt_is_damage = codec != "h264";
         let tb = dec.time_base();
         let never = StopToken::never();
         let first = loop {
@@ -440,7 +454,8 @@ impl FfmpegVideo {
                         )?;
                     }
                     let fields = Self::fields(&mut dec, &frame)?;
-                    if fields.corrupt {
+                    if fields.corrupt && !starts_here(corrupt_is_damage, &fields, dec.landing_key())
+                    {
                         continue;
                     }
                     break Some((frame, fields));
@@ -539,6 +554,7 @@ impl FfmpegVideo {
             leading: false,
             settled: true,
             losing: false,
+            corrupt_is_damage,
             no_timestamps,
             frame_ticks,
             end_pts: facts.end_pts,
@@ -602,17 +618,22 @@ impl FfmpegVideo {
     }
 
     /// The next frame from the decoder, with its pts. Frames FFmpeg flags
-    /// corrupt are dropped. Before the first good frame since opening or
-    /// a seek, they were decoded from references a seek skipped (or that
+    /// corrupt before the first good frame since opening or a seek are
+    /// dropped: they were decoded from references a seek skipped (or that
     /// come before the start of the stream), and are not part of the
-    /// stream as a decode from the start shows it. After it, they refer
-    /// to a picture the file's damage lost, which FFmpeg 7.1 and later's
-    /// HEVC decoder skips without an error, flagging (from 8.0) the
-    /// pictures that refer to it: the first of a run of them is returned
-    /// as a decode error, for the caller to say as damage. Also dropped
-    /// are the leading pictures of the keyframe a seek landed on, the
-    /// frames shown before it that come out before it: open-GOP B-frames
-    /// and RASL pictures decoded from references before it, which FFmpeg
+    /// stream as a decode from the start shows it. The H.264 keyframe
+    /// decoding started from is good though flagged ([`starts_here`]),
+    /// and is the first good frame. After the first good frame, the flag
+    /// means what `corrupt_is_damage` says. For HEVC, a frame refers to a
+    /// picture the file's damage lost, which FFmpeg 7.1 and later's
+    /// decoder skips without an error, flagging (from 8.0) the pictures
+    /// that refer to it: the first of a run of them is returned as a
+    /// decode error, for the caller to say as damage, and the run is
+    /// dropped. For H.264 it is only FFmpeg's count of where decoding
+    /// recovered, and the frame is handed out. Also dropped are the
+    /// leading pictures of the keyframe a seek landed on, the frames
+    /// shown before it that come out before it: open-GOP B-frames and
+    /// RASL pictures decoded from references before it, which FFmpeg
     /// 6.1's H.264 decoder doesn't flag as it drains at the end of the
     /// stream, and HEVC's RADL pictures, decoded from it alone. A target
     /// among them is reached by seeking to before that keyframe.
@@ -637,7 +658,9 @@ impl FfmpegVideo {
             self.decode_ms_total += ms;
             self.stats.last_decode_ms = ms;
             let fields = Self::fields(&mut self.dec, &frame)?;
-            if fields.corrupt {
+            let starts = !self.settled
+                && starts_here(self.corrupt_is_damage, &fields, self.dec.landing_key());
+            if fields.corrupt && !starts && (!self.settled || self.corrupt_is_damage) {
                 if self.settled && !self.losing {
                     self.losing = true;
                     return Err(self.lost_reference(fields.pts));
@@ -1956,6 +1979,26 @@ impl StreamFacts {
             .filter(|&t| t > 0)
             .unwrap_or(1)
     }
+}
+
+/// Whether a frame FFmpeg flags corrupt before the first good frame since
+/// opening or a seek is where decoding starts all the same: an H.264
+/// I-frame (`!corrupt_is_damage`) decoded from `landing`, the first packet
+/// read since opening or the seek: the file's first, or the keyframe the
+/// seek landed on. Its slices refer to nothing, and the flag there only
+/// says FFmpeg hasn't seen decoding recover. Its decoder takes such an
+/// I-frame for a place to start, with no IDR picture or recovery point
+/// SEI to say so, only when the stream keeps few references. After a
+/// seek, or at the start of a file cut there, it fills the gap in
+/// `frame_num` with as many stand-ins as the stream may keep, and past 2
+/// of them, in a stream that allows more than 2 references (x264's
+/// default keeps 3), it starts at none and flags every frame up to the
+/// next IDR picture, all but those it drains at the end of the stream.
+/// The leading pictures shown before such a keyframe stay dropped, and so
+/// do the frames from an intra refresh's random access point, a P-frame,
+/// to where FFmpeg says decoding has recovered.
+fn starts_here(corrupt_is_damage: bool, fields: &FrameFields, landing: Option<i64>) -> bool {
+    !corrupt_is_damage && fields.intra && fields.pts.is_some() && fields.pts == landing
 }
 
 /// Whether a Matroska stream's timestamps, in ticks of `tb`, come at

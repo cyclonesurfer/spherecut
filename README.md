@@ -257,7 +257,12 @@ cargo xtask compat PREFIX... [--test PREFIX] [--clean]   # clippy and a link aga
 `cargo xtask compat` takes FFmpeg install prefixes, such as those
 `scripts/build-ffmpeg.sh TAG DIR` builds from a release tag, or the
 colon-separated list in `SPHERECUT_FFMPEG_COMPAT`, which `cargo xtask
-check` also runs it on (DECISIONS D2).
+check` also runs it on (DECISIONS D2). It builds against each in a target
+directory of its own, `spherecut-compat-<label>`, in the directory
+`SPHERECUT_FFMPEG_COMPAT_TARGET_DIR` names or else in `compat/` in
+cargo's target directory, and deletes only directories it made. A
+build passes only if every FFmpeg library it bound came from the
+prefix, checked before the build and after it.
 
 `cargo xtask check` needs `cargo install --locked cargo-deny cargo-audit`
 once (or `--no-supply-chain` to skip those two), and strace: it stops
