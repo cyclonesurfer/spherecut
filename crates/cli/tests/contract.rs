@@ -1437,6 +1437,83 @@ fn sigint_during_a_seek_cancels_with_exit_4() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A SIGINT that frame starts with ignored stays ignored, as a shell
+/// starts a background job (`spherecut frame … &`) or a program that
+/// protects its child: no handler replaces it (D27), and the run goes on
+/// through a Ctrl+C meant for the foreground and writes its frame.
+#[test]
+fn an_ignored_sigint_stays_ignored() {
+    use std::io::BufRead;
+    use std::time::Duration;
+    let dir = tmp("sigint-ignored");
+    let clip = sphere_clip(&dir);
+    let out = dir.join("out.png");
+    // A render that lavapipe takes a second or more over, so that the run
+    // is still going once it has logged its seek.
+    let mut child = Command::new("sh")
+        .args(["-c", "trap '' INT; exec \"$0\" \"$@\""])
+        .arg(env!("CARGO_BIN_EXE_spherecut"))
+        .arg("frame")
+        .arg(&clip)
+        .arg("-o")
+        .arg(&out)
+        .args(["--json", "--adapter", "cpu", "--size", "8192x4096"])
+        .env("SPHERECUT_LOG", "info")
+        .env_remove("SPHERECUT_ADAPTER")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let log = std::thread::spawn(move || {
+        let mut all = String::new();
+        for line in std::io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if line.contains("seeking to") {
+                let _ = tx.send(());
+            }
+            all.push_str(&line);
+            all.push('\n');
+        }
+        all
+    });
+    if rx.recv_timeout(Duration::from_secs(60)).is_err() {
+        let o = child.wait_with_output().unwrap();
+        panic!(
+            "no seek logged ({:?}): {}",
+            o.status.code(),
+            log.join().unwrap()
+        );
+    }
+    // SIGINT is signal 2: bit 1 of the masks.
+    let status = std::fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+    let mask = |key: &str| {
+        let line = status.lines().find(|l| l.starts_with(key)).unwrap();
+        u64::from_str_radix(line[key.len()..].trim(), 16).unwrap()
+    };
+    let state = status.lines().find(|l| l.starts_with("State:")).unwrap();
+    assert!(
+        !state.contains('Z'),
+        "the run ended too soon to look at: {state}"
+    );
+    assert_eq!(mask("SigIgn:") & 2, 2, "{status}");
+    assert_eq!(mask("SigCgt:") & 2, 0, "{status}");
+    let kill = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(kill.success());
+    let o = child.wait_with_output().unwrap();
+    let log = log.join().unwrap();
+    assert_eq!(o.status.code(), Some(0), "{log}");
+    let v = document(&o.stdout);
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(out.exists());
+    assert!(!log.contains("interrupted"), "{log}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// The `rt_sigaction` calls for SIGINT that `args` makes, under strace.
 fn sigint_actions(dir: &Path, name: &str, args: &[&OsStr]) -> Vec<String> {
     let log = dir.join(format!("{name}.strace"));
@@ -1462,7 +1539,7 @@ fn sigint_actions(dir: &Path, name: &str, args: &[&OsStr]) -> Vec<String> {
 /// probe and doctor keep SIGINT's default action, which ends them at once
 /// (and they exit only 0, 1 or 2 otherwise); frame alone installs its
 /// handler, once, with `SA_RESETHAND` so that a second Ctrl+C ends it
-/// (D27, D28).
+/// (D27, D28), after asking for the action it started with.
 #[test]
 fn only_frame_handles_sigint() {
     use std::os::unix::process::ExitStatusExt;
@@ -1485,10 +1562,16 @@ fn only_frame_handles_sigint() {
             out.as_os_str(),
         ],
     );
-    assert_eq!(frame.len(), 1, "{frame:#?}");
-    assert!(frame[0].contains("SA_RESETHAND"), "{frame:#?}");
-    assert!(frame[0].contains("SA_RESTART"), "{frame:#?}");
-    assert!(!frame[0].contains("SIG_DFL") && !frame[0].contains("SIG_IGN"));
+    // It asks first, to leave an ignored SIGINT alone
+    // (`an_ignored_sigint_stays_ignored`), then sets its handler.
+    assert_eq!(frame.len(), 2, "{frame:#?}");
+    assert!(
+        frame[0].contains("rt_sigaction(SIGINT, NULL, "),
+        "{frame:#?}"
+    );
+    assert!(frame[1].contains("SA_RESETHAND"), "{frame:#?}");
+    assert!(frame[1].contains("SA_RESTART"), "{frame:#?}");
+    assert!(!frame[1].contains("SIG_DFL") && !frame[1].contains("SIG_IGN"));
 
     // A probe blocked writing its document to a pipe no one reads ends at
     // the first SIGINT, killed by it.

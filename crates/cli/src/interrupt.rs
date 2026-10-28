@@ -16,6 +16,11 @@
 //! the signal interrupts in other threads, so that FFmpeg's reads don't
 //! fail with `EINTR` and look like damage.
 //!
+//! A SIGINT the process started with ignored stays ignored: a shell
+//! starts a background job (`cmd &`) so, and so does a program that
+//! protects its child from the terminal's Ctrl+C. frame then runs to its
+//! end, as its parent asked.
+//!
 //! probe and doctor never install it: they keep the default action,
 //! which ends them at once.
 
@@ -33,11 +38,23 @@ extern "C" fn on_sigint(_signal: libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
-/// Install the SIGINT handler, once per process (`frame` only).
+/// Install the SIGINT handler, once per process (`frame` only), unless
+/// SIGINT is ignored.
 pub fn install() -> std::io::Result<()> {
     // SAFETY: `sigaction` is a plain C struct, for which all zeroes is a
-    // valid value (no handler, no flags, an empty mask) before the fields
-    // below are set.
+    // valid value (no handler, no flags, an empty mask), which the call
+    // below overwrites.
+    let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: a null new action only asks for the current one, which is
+    // written to `old`, a valid sigaction this function owns.
+    if unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), &mut old) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if old.sa_sigaction == libc::SIG_IGN {
+        tracing::debug!("SIGINT is ignored, as this process started: no handler");
+        return Ok(());
+    }
+    // SAFETY: as for `old` above, before the fields below are set.
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t;
     action.sa_flags = libc::SA_RESETHAND | libc::SA_RESTART;
