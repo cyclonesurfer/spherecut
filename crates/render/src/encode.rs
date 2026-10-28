@@ -121,9 +121,8 @@ mod tests {
     /// `v ≥ 0` packed to a half and read back: toward zero, as RADV's
     /// `v_cvt_pkrtz_f16_f32` packs a fragment's output for an 8-bit unorm
     /// target (and may for a 10-bit one), or to the nearest, ties to
-    /// even. From the
-    /// bits of `v`: halves are 2^(e − 10) apart for 2^e ≤ v < 2^(e+1),
-    /// and 2^−24 apart below 2^−14.
+    /// even. From the bits of `v`: halves are 2^(e − 10) apart for
+    /// 2^e ≤ v < 2^(e+1), and 2^−24 apart below 2^−14.
     fn half(v: f32, toward_zero: bool) -> f64 {
         let e = ((v.to_bits() >> 23) & 0xff) as i32 - 127;
         let step = 2f64.powi(e.max(-14) - 10);

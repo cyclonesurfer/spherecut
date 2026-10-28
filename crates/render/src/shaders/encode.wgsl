@@ -15,13 +15,13 @@
 // least 0.375 codes from either tie.
 override CODE_MAX: f32;
 
-// Whether the pass returns the nearest half of that (`encode::returns_half`).
-// At 10 bits a half's step is half a code, and k / 1023 packed toward zero
-// can land 0.0005 codes above the tie below k, so the pass returns its
-// nearest half, within 0.25 codes of k, which every export keeps as it is.
-// Into an f16 target the half is what the store must hold on any driver,
-// as for every pass that writes f16 (DECISIONS D31): lavapipe's own
-// conversion truncates.
+// Whether the pass returns the nearest half of that
+// (`encode::returns_half`). At 10 bits a half's step is half a code, and
+// k / 1023 packed toward zero can land 0.0005 codes above the tie below
+// k, so the pass returns its nearest half, within 0.25 codes of k, which
+// every export keeps as it is. Into an f16 target the half is what the
+// store must hold on any driver, as for every pass that writes f16
+// (DECISIONS D31): lavapipe's own conversion truncates.
 override HALF: bool;
 
 struct Place {

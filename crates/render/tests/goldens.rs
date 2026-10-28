@@ -11,9 +11,9 @@
 //!   none more than 8: the averages miss a fault a few dozen pixels wide,
 //!   which [`the_other_driver_rule_catches_local_faults`] makes from every
 //!   stored view, and a pixel 5 off is the drift made here (D32, amended
-//!   2026-10-28). A source whose planes no longer hash as blessed
-//!   is reported as the synthetic source having changed, never compared
-//!   as a render.
+//!   2026-10-28). A source whose planes no longer hash as blessed is
+//!   reported as the synthetic source having changed, never compared as
+//!   a render.
 //! - **The CPU reference** (`reference::render_trilinear`, f64) holds each
 //!   image to a PSNR floor calibrated when blessing: the PSNR measured
 //!   then, less 3 dB, and never below 36 dB.
@@ -2074,10 +2074,10 @@ fn oetf(l: f64) -> f64 {
 /// half, as the linear target stores it; the OETF of the encode pass;
 /// and the encode pass's rounding to the nearest code, whose k / 255 a
 /// unorm8 store to nearest keeps, even packed to f16 toward zero first
-/// (DECISIONS D31). The GPU does each
-/// step in f32, so where a value lies within its error of a tie (an f16
-/// tie, or a half code) either neighbour may come out: the second value
-/// is the other candidate, when there is one.
+/// (DECISIONS D31). The GPU does each step in f32, so where a value lies
+/// within its error of a tie (an f16 tie, or a half code) either
+/// neighbour may come out: the second value is the other candidate,
+/// when there is one.
 fn passthrough_model(k: u8, limited: bool) -> (u8, Option<u8>) {
     let y = if limited {
         (f64::from(k) - 16.0) / 219.0
