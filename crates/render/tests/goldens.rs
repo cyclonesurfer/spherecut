@@ -130,6 +130,80 @@ const TWIN_THRESHOLD: f64 = 2.0 / 255.0;
 const CONTROL_BAD_OVER: usize = 100;
 
 // ---------------------------------------------------------------------
+// Floors on a GPU (D32)
+
+/// Where [`GPU_CPU_PSNR`] was measured.
+const GPU_SOURCE: &str =
+    "the RX 7600 (RADV NAVI33, Mesa 26.2.5) at be38fa4, hw-reports/odin-be38fa409e.md";
+
+/// Every CPU check's PSNR on a GPU, by row and key, from [`GPU_SOURCE`]
+/// (`goldens_on_gpu_match_reference`'s notes). On a GPU a check is held
+/// to the lower of lavapipe's blessed floor and this less
+/// [`CPU_MARGIN_DB`] ([`gpu_floor`]).
+const GPU_CPU_PSNR: &[(&str, &str, f64)] = &[
+    ("rect_forward", "cpu_psnr_db", 58.5452),
+    ("rect_ypr", "cpu_psnr_db", 58.0408),
+    ("fisheye_180", "cpu_psnr_db", 47.7761),
+    ("fisheye_360", "cpu_psnr_db", 44.6747),
+    ("stereo_tinyplanet", "cpu_psnr_db", 51.4508),
+    ("morph_half", "cpu_psnr_db", 52.7078),
+    ("crop_half", "cpu_psnr_db", 56.5701),
+    ("matrix_601_709", "cpu_601_psnr_db", 58.2078),
+    ("matrix_601_709", "cpu_709_psnr_db", 58.0879),
+];
+
+/// What `table` has for `row`'s `key`.
+fn gpu_psnr(table: &[(&str, &str, f64)], row: &str, key: &str) -> Option<f64> {
+    table
+        .iter()
+        .find(|(r, k, _)| *r == row && *k == key)
+        .map(|e| e.2)
+}
+
+/// The floor a GPU's CPU check is held to, and where it comes from.
+#[derive(Debug, Clone, PartialEq)]
+struct Floor {
+    min: f64,
+    from_gpu: bool,
+    why: String,
+}
+
+/// The floor for `row`'s `key` on a GPU: the GPU's PSNR in `table` less
+/// [`CPU_MARGIN_DB`] (to 0.01 dB, never below [`CPU_FLOOR_DB`]) where
+/// that is lower than `lavapipe`, the floor blessed on lavapipe, and
+/// `lavapipe` otherwise, or where no GPU has measured the check.
+fn gpu_floor(table: &[(&str, &str, f64)], row: &str, key: &str, lavapipe: f64) -> Floor {
+    let blessed = format!("lavapipe's floor, blessed in {MANIFEST}");
+    let Some(db) = gpu_psnr(table, row, key) else {
+        return Floor {
+            min: lavapipe,
+            from_gpu: false,
+            why: format!("{blessed}; no GPU has measured this check"),
+        };
+    };
+    let hw = (((db - CPU_MARGIN_DB) * 100.0).floor() / 100.0).max(CPU_FLOOR_DB);
+    if hw < lavapipe {
+        Floor {
+            min: hw,
+            from_gpu: true,
+            why: format!(
+                "the hardware floor: {db} dB measured on {GPU_SOURCE}, less {CPU_MARGIN_DB} dB \
+                 and never below {CPU_FLOOR_DB}, under lavapipe's {lavapipe}"
+            ),
+        }
+    } else {
+        Floor {
+            min: lavapipe,
+            from_gpu: false,
+            why: format!(
+                "{blessed}; {db} dB measured on {GPU_SOURCE}, less {CPU_MARGIN_DB} dB, is \
+                 {hw}, no lower"
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // Sources
 
 /// synth's general scene, 1024×512, made once per binary.
@@ -851,13 +925,52 @@ impl<'g> Run<'g> {
         )
     }
 
-    /// `got` against the CPU's `cpu`: the calibrated PSNR floor, and no
-    /// channel off by more than [`CPU_MAX_CHANNEL`].
+    /// On a GPU, a CPU check's PSNR `v` against [`gpu_floor`]'s choice
+    /// of lavapipe's blessed floor and the GPU's, which a failure names
+    /// and the notes give.
+    fn gpu_floor_check(&mut self, key: &str, v: f64) -> bool {
+        let tkey = format!("{key}_min");
+        let blessed = match self.blessed(&tkey) {
+            Ok(m) => m,
+            Err(e) => {
+                self.measure(key, v);
+                self.fail(e);
+                return false;
+            }
+        };
+        let floor = gpu_floor(GPU_CPU_PSNR, &self.row, key, blessed);
+        self.measure(key, v);
+        self.threshold(&tkey, num(floor.min));
+        self.notes.push(format!(
+            "golden {} on {}: {key} held to {} dB, {}",
+            self.row,
+            self.driver.describe(),
+            floor.min,
+            floor.why
+        ));
+        let ok = v >= floor.min;
+        if !ok {
+            self.fail(format!(
+                "{key} is {v:.4}, below {} dB, {}",
+                floor.min, floor.why
+            ));
+        }
+        ok
+    }
+
+    /// `got` against the CPU's `cpu`: the calibrated PSNR floor (on a GPU
+    /// the one [`gpu_floor`] picks), and no channel off by more than
+    /// [`CPU_MAX_CHANNEL`].
     fn cpu_check(&mut self, key: &str, got: &Image, cpu: &ImageF64) {
         let size = (got.width, got.height);
         let g = unit(got);
         let p = psnr_of(size, &g, &cpu.data);
-        let ok = self.calibrated(&format!("{key}_psnr_db"), p, CPU_MARGIN_DB, CPU_FLOOR_DB);
+        let pkey = format!("{key}_psnr_db");
+        let ok = if self.mode == Mode::References {
+            self.gpu_floor_check(&pkey, p)
+        } else {
+            self.calibrated(&pkey, p, CPU_MARGIN_DB, CPU_FLOOR_DB)
+        };
         let m = max_diff(&g, &cpu.data);
         let ok = self.at_most(&format!("{key}_max_channel"), m, CPU_MAX_CHANNEL) && ok;
         if !ok {
@@ -2779,29 +2892,6 @@ fn cpu_checks() -> Vec<CpuCheck> {
     ]
 }
 
-/// Every CPU check's PSNR on a GPU, by row and key: the RX 7600 (RADV
-/// NAVI33, Mesa 26.2.5) at be38fa4, in `goldens_on_gpu_match_reference`'s
-/// notes in `hw-reports/odin-be38fa409e.md`.
-const GPU_CPU_PSNR: &[(&str, &str, f64)] = &[
-    ("rect_forward", "cpu_psnr_db", 58.5452),
-    ("rect_ypr", "cpu_psnr_db", 58.0408),
-    ("fisheye_180", "cpu_psnr_db", 47.7761),
-    ("fisheye_360", "cpu_psnr_db", 44.6747),
-    ("stereo_tinyplanet", "cpu_psnr_db", 51.4508),
-    ("morph_half", "cpu_psnr_db", 52.7078),
-    ("crop_half", "cpu_psnr_db", 56.5701),
-    ("matrix_601_709", "cpu_601_psnr_db", 58.2078),
-    ("matrix_601_709", "cpu_709_psnr_db", 58.0879),
-];
-
-/// What `table` has for `row`'s `key`.
-fn gpu_psnr(table: &[(&str, &str, f64)], row: &str, key: &str) -> Option<f64> {
-    table
-        .iter()
-        .find(|(r, k, _)| *r == row && *k == key)
-        .map(|e| e.2)
-}
-
 /// The bands of luma's analytic LOD before clamping that a CPU check's
 /// error is broken down by, each up to its bound: magnified or at most a
 /// level down, between, and from [`IDEAL_MIN_LOD`] down.
@@ -3126,16 +3216,95 @@ fn the_passthrough_model_and_its_bound() {
 #[test]
 fn the_reference_only_path_runs_on_lavapipe() {
     // goldens_on_gpu_match_reference's path, on two rows, with the floors
-    // their blessing calibrated.
+    // their blessing calibrated. rect_forward's CPU check keeps
+    // lavapipe's floor, which the RX 7600 measured no lower, and a note
+    // says so.
     let s = scratch("references");
     let (dir, diffs) = (s.dir.clone(), s.diffs.clone());
     let rows = ["rect_forward", "tenbit_ramp"];
     bless_into(&dir, &diffs, &rows);
     let mut run = Run::at(gpu(), Mode::References, &dir, &diffs);
     run_rows(&mut run, Some(&rows));
-    assert_eq!(run.notes.len(), 2, "{:?}", run.notes);
+    assert_eq!(run.notes.len(), 3, "{:?}", run.notes);
+    assert!(
+        run.notes[0].contains("cpu_psnr_db held to")
+            && run.notes[0].contains("lavapipe's floor, blessed in manifest.json"),
+        "{:?}",
+        run.notes
+    );
     assert!(run.pngs.is_empty());
     run.finish();
+    // Blessed at 99 dB, the floor is the RX 7600's 58.55 dB less 3, and
+    // lavapipe's 53.1 dB fails it, naming it and where it was measured.
+    let path = dir.join(MANIFEST);
+    let mut m: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    m["images"]["rect_forward"]["thresholds"]["cpu_psnr_db_min"] = json!(99.0);
+    std::fs::write(&path, m.to_string()).unwrap();
+    let mut run = Run::at(gpu(), Mode::References, &dir, &diffs);
+    run_rows(&mut run, Some(&["rect_forward"]));
+    assert!(
+        run.failures.len() == 1
+            && run.failures[0].contains("below 55.54 dB, the hardware floor: 58.5452 dB")
+            && run.failures[0].contains(GPU_SOURCE),
+        "{:?}",
+        run.failures
+    );
+}
+
+#[test]
+fn a_gpu_is_held_to_the_lower_floor() {
+    let table = [
+        ("lost", "cpu_psnr_db", 44.6747),
+        ("gained", "cpu_psnr_db", 58.5452),
+        ("far", "cpu_psnr_db", 30.0),
+    ];
+    // No GPU number for the row, or for that key of it: lavapipe's.
+    for (row, key) in [("unmeasured", "cpu_psnr_db"), ("lost", "cpu_601_psnr_db")] {
+        let f = gpu_floor(&table, row, key, 46.59);
+        assert!(
+            f.min == 46.59 && !f.from_gpu && f.why.contains("no GPU has measured"),
+            "{f:?}"
+        );
+    }
+    // Lower than lavapipe's: the GPU's less 3 dB, to 0.01 dB below.
+    let f = gpu_floor(&table, "lost", "cpu_psnr_db", 46.59);
+    assert!(
+        f.min == 41.67
+            && f.from_gpu
+            && f.why.contains("the hardware floor: 44.6747 dB measured on")
+            && f.why.contains(GPU_SOURCE)
+            && f.why.contains("under lavapipe's 46.59"),
+        "{f:?}"
+    );
+    // Higher: lavapipe's, saying why the GPU's isn't used.
+    let f = gpu_floor(&table, "gained", "cpu_psnr_db", 50.13);
+    assert!(
+        f.min == 50.13 && !f.from_gpu && f.why.contains("is 55.54, no lower"),
+        "{f:?}"
+    );
+    // Never below 36 dB.
+    let f = gpu_floor(&table, "far", "cpu_psnr_db", 46.59);
+    assert!(f.min == CPU_FLOOR_DB && f.from_gpu, "{f:?}");
+    // The table as it stands, with the floors blessed on lavapipe: the
+    // checks the RX 7600 lost on get its floor, the others keep
+    // lavapipe's.
+    for (row, key, lavapipe, want, from_gpu) in [
+        ("rect_forward", "cpu_psnr_db", 50.13, 50.13, false),
+        ("rect_ypr", "cpu_psnr_db", 50.2, 50.2, false),
+        ("fisheye_180", "cpu_psnr_db", 47.01, 44.77, true),
+        ("fisheye_360", "cpu_psnr_db", 46.59, 41.67, true),
+        ("stereo_tinyplanet", "cpu_psnr_db", 48.89, 48.45, true),
+        ("morph_half", "cpu_psnr_db", 48.68, 48.68, false),
+        ("crop_half", "cpu_psnr_db", 51.18, 51.18, false),
+        ("matrix_601_709", "cpu_601_psnr_db", 50.31, 50.31, false),
+        ("matrix_601_709", "cpu_709_psnr_db", 50.14, 50.14, false),
+    ] {
+        let f = gpu_floor(GPU_CPU_PSNR, row, key, lavapipe);
+        assert!(
+            f.min == want && f.from_gpu == from_gpu,
+            "{row} {key}: {f:?}"
+        );
+    }
 }
 
 #[test]
