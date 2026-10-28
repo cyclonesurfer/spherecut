@@ -364,6 +364,43 @@ fn a_waiting_producer_stops_with_its_token_and_at_close() {
 }
 
 #[test]
+fn an_offer_whose_token_stopped_puts_nothing_in() {
+    // A worker of a file closed meanwhile: its token was stopped before
+    // the next file's open cleared the cache, so what it offers after
+    // is refused under the lock, and never reaches the next file's cache.
+    let c = FrameCache::new(1 << 20, Time::from_secs(1));
+    let stops = StopSource::new();
+    let old = stops.next();
+    assert_eq!(
+        c.try_insert_until(0, frame(0, 1, 0, 10), &old),
+        Insert::Stored
+    );
+    let live = stops.next();
+    c.clear();
+    assert_eq!(
+        c.try_insert_until(0, frame(1, 1, 1, 10), &old),
+        Insert::Stopped
+    );
+    assert_eq!(c.stats().frames, 0);
+    // A live token offers as `try_insert` does: the nearest frame ahead
+    // goes in, and one past the window is Full rather than waited for.
+    assert_eq!(
+        c.try_insert_until(0, frame(1, 2, 0, 10), &live),
+        Insert::Stored
+    );
+    assert_eq!(
+        c.try_insert_until(0, frame(60, 3, 0, 10), &live),
+        Insert::Full
+    );
+    assert_eq!(c.stats().frames, 1);
+    c.close();
+    assert_eq!(
+        c.try_insert_until(0, frame(2, 2, 1, 10), &live),
+        Insert::Stopped
+    );
+}
+
+#[test]
 fn a_change_wakes_a_waiter() {
     let c = Arc::new(FrameCache::new(1 << 20, Time::from_secs(1)));
     let seen = c.generation();
@@ -413,6 +450,12 @@ fn the_ui_thread_only_tries_the_lock() {
         (
             |c| {
                 let _ = c.try_insert(0, frame(1, 1, 1, 10));
+            },
+            lock,
+        ),
+        (
+            |c| {
+                let _ = c.try_insert_until(0, frame(1, 1, 1, 10), &StopToken::never());
             },
             lock,
         ),

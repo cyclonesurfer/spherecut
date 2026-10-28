@@ -475,6 +475,30 @@ impl FrameCache {
         }
     }
 
+    /// [`try_insert`](Self::try_insert), unless `stop` says to stop
+    /// ([`Insert::Stopped`]), which it reads under the lock: a worker
+    /// whose file was closed meanwhile never puts a frame of it in the
+    /// cache the next file uses.
+    pub fn try_insert_until(
+        &self,
+        stream: usize,
+        frame: Arc<VideoFrame>,
+        stop: &StopToken,
+    ) -> Insert {
+        let mut g = self.lock();
+        if g.closed || stop.is_stopped() {
+            return Insert::Stopped;
+        }
+        match g.offer(stream, &frame) {
+            Some(r) => {
+                drop(g);
+                self.changed.notify_all();
+                r
+            }
+            None => Insert::Full,
+        }
+    }
+
     /// Move the playhead to clip time `at`, which wakes a decode worker
     /// waiting for room.
     pub fn set_playhead(&self, at: Time) {
@@ -550,6 +574,14 @@ impl FrameCache {
     pub fn wake(&self) {
         let g = self.lock();
         self.changed(g, |_| ());
+    }
+
+    /// Wake everyone waiting without taking the lock, for the UI thread
+    /// after it has stopped their tokens (a seek, shutdown). A waiter
+    /// that was about to wait when this ran misses it, and looks at its
+    /// token within [`WAIT_SLICE`] anyway. Never waits.
+    pub fn notify(&self) {
+        self.changed.notify_all();
     }
 
     /// The frame of `stream` at exactly `time`.
