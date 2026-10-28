@@ -6,10 +6,14 @@
 //!
 //! - **Stored images** (`goldens/*.png`, with `goldens/manifest.json`)
 //!   must match the render pixel for pixel at the driver build and source
-//!   hash they were blessed at, and otherwise by PSNR ≥ 48 dB, SSIM ≥
-//!   0.995 and at most 4 LSB. A source whose planes no longer hash as
-//!   blessed is reported as the synthetic source having changed, never
-//!   compared as a render.
+//!   hash they were blessed at. At another build they must keep PSNR ≥ 48
+//!   dB and SSIM ≥ 0.995, with at most 4 pixels more than 4 LSB off and
+//!   none more than 8: the averages miss a fault a few dozen pixels wide,
+//!   which [`the_other_driver_rule_catches_local_faults`] makes from every
+//!   stored image, and one pixel 5 off is a newer LLVM's drift (D32,
+//!   amended 2026-10-28). A source whose planes no longer hash as blessed
+//!   is reported as the synthetic source having changed, never compared
+//!   as a render.
 //! - **The CPU reference** (`reference::render_trilinear`, f64) holds each
 //!   image to a PSNR floor calibrated when blessing: the PSNR measured
 //!   then, less 3 dB, and never below 36 dB.
@@ -38,7 +42,14 @@
 //!
 //! The Tier 2 tests at the end run the same rows on a GPU, against the
 //! CPU and ideal references only, and on the machine's own llvmpipe by
-//! the other-driver rule, recording the drift.
+//! the other-driver rule, recording the drift. On a GPU a CPU check is
+//! held to the lower of lavapipe's blessed floor and the RX 7600's PSNR
+//! less 3 dB ([`gpu_floor`]): RADV's export of the 8-bit mip levels
+//! packs each mean to f16 toward zero first, which costs the wide,
+//! minified views up to 15 dB, as
+//! [`the_wide_views_lose_to_the_mip_stores_not_the_filter`] shows by
+//! emulating it. The encode pass rounds to the output's codes itself,
+//! so the codes don't depend on how a driver converts its output.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

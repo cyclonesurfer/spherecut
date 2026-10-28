@@ -618,8 +618,10 @@ plan's table (section 6) on lavapipe, from synth's in-memory planes:
 
 * six views of synth's grid are **stored** as PNGs in
   `crates/render/tests/goldens/`, and must come out pixel for pixel the
-  same at the Mesa build they were blessed on, and within PSNR 48 dB,
-  SSIM 0.995 and 4 LSB on another;
+  same at the Mesa build they were blessed on, and on another within
+  PSNR 48 dB and SSIM 0.995, with at most 4 pixels more than 4 LSB off
+  and none more than 8, which catches the local faults the averages
+  miss (a seam, a pole, a rim a pixel off);
 * views are held to **the f64 CPU reference** at a PSNR floor set when
   blessing, and minified ones to **the supersampled pattern itself**
   (`synth::render_view_ideal`), with a margin over a level-0 render;
@@ -665,7 +667,12 @@ On a real machine, the Tier 2 `goldens_on_gpu_match_reference` runs the
 rows on each GPU against the references and controls only, never
 against the lavapipe PNGs, and `goldens_on_host_llvmpipe` runs the
 stored set on the machine's own llvmpipe by the other-driver rule; both
-note their numbers for the hw-test report.
+note their numbers for the hw-test report. On a GPU a CPU check is held
+to the lower of lavapipe's blessed floor and the RX 7600's measurement
+less 3 dB (`GPU_CPU_PSNR` in `goldens.rs`): RADV's export of the 8-bit
+mip levels packs each mean to f16 toward zero first, which, emulated on
+the CPU, costs the wide, minified views the 15 dB the RX 7600 lost
+against the CPU reference (D32).
 
 A second, smaller set, the **pipeline goldens**
 (`pipeline_goldens` in `crates/cli/tests/frame.rs`, PNGs and manifest

@@ -3149,7 +3149,7 @@ What:
   | Against | Rule |
   |---|---|
   | the stored PNG, at the adapter, `driver_info` and source hash it was blessed at | identical pixels |
-  | the stored PNG, another driver build | PSNR ≥ 48 dB, SSIM ≥ 0.995 (BT.709 luma, 11×11 Gaussian) and at most 4 LSB |
+  | the stored PNG, another driver build | PSNR ≥ 48 dB, SSIM ≥ 0.995 (BT.709 luma, 11×11 Gaussian), at most 4 pixels with a channel more than 4 LSB off, and none more than 8 LSB off (amended 2026-10-28, below) |
   | a source whose planes hash otherwise | "the synthetic source changed", with both hashes; the render isn't compared |
   | `reference::render_trilinear` (f64) | PSNR ≥ the floor calibrated at blessing (measured − 3 dB, never below 36 dB), and no channel more than 0.1 off |
   | `synth::render_view_ideal` | over the pixels the analytic LOD puts 2.5 levels down or more, at least 1000 of them: PSNR ≥ the floor calibrated at blessing (measured − 1 dB), and at least 3 dB above the level-0 control |
@@ -3177,7 +3177,10 @@ What:
   first.
 - **The harness's own tests**, Tier 1, beside it: the drift rule on
   made images (one LSB everywhere is 48.13 dB, which passes between
-  builds and fails at the same one; half a pixel's shift fails); a
+  builds and fails at the same one; half a pixel's shift fails; four
+  pixels 5, 5, 6 and 8 LSB off pass, two channels of one pixel count
+  once, and a fifth pixel, or one pixel 9 off, fails with its count and
+  maximum in the message); a
   blessing into a scratch directory with one failed row writes nothing,
   and a clean one then passes a plain run, identical; a blessing over a
   floor blessed 0.4 dB higher goes ahead, over one 2 dB higher refuses,
@@ -3204,7 +3207,7 @@ What:
   llvmpipe by the other-driver rule whatever its build, and notes the
   drift. Both hold the rows to the floors lavapipe was blessed with,
   except that on a GPU a CPU check the RX 7600 measured lower is held to
-  its floor (below, after odin's third run).
+  its floor (below, amended 2026-10-28).
 
 Measured at blessing (lavapipe, Mesa 25.2.8, LLVM 20.1.2; the manifest
 has every number). Each control clears its bound:
@@ -3483,13 +3486,49 @@ greys (the fisheye test's 0.72 and 0.28 are within 0.05), or a swscale
 release lands within 1 LSB unrounded, which would let the cross-check
 compare RGB48 directly.
 
-*Updated after odin's third run (PR #5, at be38fa4):* on the RX 7600
-(RADV NAVI33, Mesa 26.2.5) `goldens_on_gpu_match_reference` measured
-`fisheye_360`'s CPU check at 44.67 dB, under its 46.59 dB floor, and
-`fisheye_180` and `stereo_tinyplanet` at 47.78 and 51.45 dB, under
-lavapipe's 50.01 and 51.90; every other CPU check came out higher than
-on lavapipe (`hw-reports/odin-be38fa409e.md`). PROGRESS took the losses
-for the GPU's filtering precision. An emulation says otherwise: they
+*Amended 2026-10-28, after odin's third run (PR #5, at be38fa4,
+`hw-reports/odin-be38fa409e.md`).* Two golden tests failed there, for
+three reasons, and branch `m1/goldens-hw` settles each: RADV's colour
+export moved `passthrough_exact`'s codes, so the encode pass now rounds
+to codes itself; RADV's mip stores cost the wide views up to 15 dB
+against the CPU reference, so on a GPU a CPU check has a lower floor
+where the RX 7600 measured lower; and LLVM 22's llvmpipe put one stored
+image 5 LSB off, so the other-driver rule now counts the pixels past 4
+LSB rather than failing on one.
+
+**The encode pass rounds to codes.** On the RX 7600 (RADV NAVI33, Mesa
+26.2.5) `passthrough_exact` found 11 limited-range codes one code off
+round((k − 16) · 255 / 219), where the model of the chain predicts 3
+(86, 159 and 165): 10 came out a code low against the model (74, 129,
+135, 141, 153, 165, 208, 214, 220 and 226), and 3 of those (129, 135
+and 208, at 131.5753, 138.5616 and 223.5616 codes exactly) lay outside
+the bound of 0.0547 codes the f16 linear target allows. RADV exports a
+fragment's output to an 8-bit unorm target by packing it to f16 toward
+zero first, and a half's step in [0.5, 1) is 0.1245 codes at 255, so a
+value less than that above a tie came out below it. Vulkan allows this:
+it asks for a conversion to nearest and requires only that an exact
+integer f · L converts to itself. So `shaders/encode.wgsl` now rounds
+to the target's codes in f32 and returns k / 255 (k / 1023 for
+`Rgb10a2Unorm`), which packed toward zero stays less than 0.1245 codes
+below k (0.4995 at 10 bits), and every conformant conversion gives k
+back (D31). The model of the chain ends with that rounding rather than
+the unorm8 store, and the bound is unchanged. A test emulating the pack
+on the unrounded values gives exactly the ten codes odin measured off
+the model, and none once rounded. No stored image moved and none was
+blessed for it: lavapipe's store already gave the nearest even code to
+the f32 product, which the shader now computes. Why in the shader, not
+in the test's model: Vulkan guarantees only that an exact k / L comes
+back as k, so with the rounding in the shader every conformant driver
+writes the same codes as the CPU reference, with no integer target,
+and a model widened to RADV's pack would accept a code low on every
+driver.
+
+**The wide views on a GPU.** On the RX 7600
+`goldens_on_gpu_match_reference` measured `fisheye_360`'s CPU check at
+44.67 dB, under its 46.59 dB floor, and `fisheye_180` and
+`stereo_tinyplanet` at 47.78 and 51.45 dB, under lavapipe's 50.01 and
+51.90; every other CPU check came out higher than on lavapipe. PROGRESS
+took the losses for the GPU's filtering precision. An emulation says otherwise: they
 are what RADV's export makes of the mip pass's 8-bit stores (D31).
 
 `the_wide_views_lose_to_the_mip_stores_not_the_filter` (Tier 1)
@@ -3624,6 +3663,117 @@ filters with 8-bit fractions, LOD and blend within 0.06 dB of a filter
 in f64 at every check (58.89 to 60.75 dB), and the table should be
 measured again and the lowered floors dropped. Also if RADV's
 bands on Pat's next run don't look like the emulation's.
+
+**The other-driver rule counts the pixels past 4 LSB.**
+`goldens_on_host_llvmpipe` on odin's llvmpipe (Mesa 26.2.5, LLVM
+22.1.8) failed `fisheye_180` at 5 LSB against the rule's 4, at 62.79 dB
+and SSIM 0.99994; the other five stored images came out 3 or 4 LSB off
+at 63.13 to 68.31 dB. One pixel's maximum is no tolerance for a newer
+LLVM, and the averages alone miss a fault a few dozen pixels wide. The
+rule against a stored image at another driver build is now:
+
+- PSNR ≥ 48 dB and SSIM ≥ 0.995, as before;
+- at most 4 pixels (C) with a channel more than 4 LSB off;
+- no channel more than 8 LSB (H) off.
+
+The count is of pixels: a pixel counts once, by its largest channel
+difference, as `diff_stats` and the seam and pole rows count bad
+pixels. A fault is a place in the view, and the same fault puts 1.1 to
+3 channels past 4 LSB in each pixel by the colours under it (the tiny
+planet's implicit LOD 25 channels in 19 pixels, the pole quads 12 in 4,
+the seam 572 in 192), so a count of channels would hold a grey line to
+a third of what it holds a red one to. `judge` reports both numbers
+(the tiny planet's implicit LOD: "PSNR 53.97 dB, SSIM 0.99972, 19
+pixels more than 4 LSB off, max 7 LSB"), every run notes `golden_pixels_past_4_lsb` beside
+`golden_max_lsb`, so the next run on odin records LLVM 22's count, and
+the manifests' thresholds have `pixels_past_4_lsb_max` and `max_lsb`.
+Both manifests were blessed again through `SPHERECUT_UPDATE_GOLDENS=1`
+for those thresholds; their commit and date changed with them, and no
+floor and no PNG did. Slice 4's `pipeline_goldens` holds its PNGs to
+the same rule.
+
+`the_other_driver_rule_catches_local_faults` (Tier 1) makes faults from
+each of the six stored images, or renders them beside it: moved a pixel
+right or down (a render, or a crop, a pixel off), the view a pixel
+wider or narrower at its edges (a fisheye's rim a pixel off), the
+seam's pixels, the poles' quads or the pixels within a pixel of the rim
+blacked out, and implicit LOD (the seam and pole rows' control).
+Measured against the stored PNGs:
+
+| Fault | Views | Pixels past 4 LSB | Max LSB | PSNR | Fails |
+|---|---|---:|---:|---:|---|
+| moved a pixel right or down | all six | 6018 to 19979 | 137 to 221 | 24.16 to 26.94 dB | all four parts |
+| a pixel wider or narrower | all six (`fisheye_360` can't widen) | 7217 to 13466 | 49 to 171 | 26.26 to 31.80 | all four |
+| the seam black | `fisheye_180`, `fisheye_360`, `stereo_tinyplanet` | 128 to 192 | 255 | 28.29 to 33.45 | all four |
+| the rim black | `fisheye_360` | 604 | 117 | 29.07 | all four |
+| implicit LOD, along the seam | `fisheye_360` | 154 | 100 | 45.87 | all four |
+| the poles' quads black | `fisheye_180` (8 pixels), `fisheye_360` (4) | 8, 4 | 204, 162 | 41.66, 43.61 | PSNR and the maximum (and the count at 8) |
+| the pole's quad black | `stereo_tinyplanet` | 4 | 95 | 53.62 (SSIM 0.99952) | the maximum only |
+| implicit LOD, round both poles | `fisheye_180` | 72 | 9 | 53.41 | the count and the maximum |
+| implicit LOD, a minified line at the equator | `stereo_tinyplanet` | 19 | 7 | 53.97 | the count only |
+| implicit LOD, the equator's row | `morph_half` | 11 | 6 | 55.06 | the count only |
+| implicit LOD | `rect_forward`, `rect_ypr` | 0 | 4, 3 | 57.90, 57.48 | nothing: no seam or pole is shown, nothing is far minified |
+
+The test asserts that every fault fails the rule, but implicit LOD in
+the rect views, which it asserts stays within 4 LSB; and that exactly
+the four faults within PSNR and SSIM are, with which of the count and
+the maximum catches each, so a fault that moves into or out of the
+averages fails it. The old maximum of 4 caught those four too; the new
+rule catches each by the count or the maximum. With C at 20, or H at
+100, the test fails.
+
+The drift, against the same PNGs:
+
+- **lavapipe's own options.** `LP_NATIVE_VECTOR_WIDTH=128` and
+  `GALLIVM_PERF` set to `nopt`, `brilinear`, `rho_approx` or
+  `no_quad_lod`, alone or together, render all six identically.
+  `GALLIVM_PERF=no_aos_sampling`, which filters 8-bit textures in
+  floating point, puts them 50.50 to 52.56 dB away, SSIM 0.99863 or
+  more, with no pixel past 4 LSB and at most 4; `goldens_on_host_llvmpipe`
+  passes under it, and so does `pipeline_goldens`' other-driver path
+  with its manifest's adapter renamed so that it applies (51.2 dB, at
+  most 3 LSB, no pixel past 4).
+- **The views a hundredth of a pixel wider or narrower** at their edges
+  (asserted to pass): 57.15 to 61.37 dB, 0 or 1 pixel past 4 LSB, at
+  most 5 LSB.
+- **A sweep of sub-pixel turns and scales** (a probe, not committed):
+  wherever PSNR stayed at 56.8 dB or more, an RMS error twice LLVM 22's
+  on `fisheye_180`, at most 1 pixel past 4 LSB and at most 5 LSB; at
+  about a fiftieth of a pixel, 51.5 to 56.2 dB, 0 to 92 pixels past
+  and up to 8 LSB.
+- **LLVM 22 on odin:** at most 5 LSB at 62.79 dB (`fisheye_180`), and
+  3 or 4 at 63.13 to 68.31 dB on the rest. Its count wasn't recorded:
+  at least 1, and by its PSNR (an RMS error of 0.19 LSB) at most 151
+  pixels 5 off; the drift made here at 57 dB or more never put more
+  than 1 past 4.
+
+So H = 8 is 3 LSB over the 5 of LLVM 22 and of the drift made here, and
+under every fault's maximum but the tiny planet's and the morph's
+implicit LOD (7 and 6), which the count catches. C = 4 is over the
+drift's 1 and under every fault the averages miss, the smallest of
+them `morph_half`'s 11 pixels; the faults smaller than that, a pole's
+quad of 4 pixels, are 95 LSB or more off and fail the maximum. No C
+and H separate everything: a fault within 4 pixels and 8 LSB passes,
+such as implicit LOD at one pole quad alone, or a pixel blacked out
+where the content is darker than 9 codes. The views' darkest shown
+channels are 12 (the fisheyes) and 15 (the tiny planet), where a black
+pixel fails, but 1 in the black ink of `rect_forward`'s and
+`morph_half`'s labels, where it wouldn't show.
+
+Why: the averages hold the whole image and the count holds a place in
+it. A newer LLVM's drift is a pixel or two near a rounding, at 57 dB or
+more; the faults the averages miss are lines and spots of 4 to 72
+pixels, and each is more than 4 pixels or more than 8 LSB.
+
+Limits: the faults are on the grid, the stored images' only pattern,
+made by editing the stored image or by this renderer's own debug mode,
+not by another driver. LLVM 22's count is unknown until odin's next run
+notes it, and C rests on the drift made here. A fault within 4 pixels
+and 8 LSB passes.
+
+Revisit if: odin's next run notes more than 2 pixels past 4 LSB for
+LLVM 22, which would leave C less than twice the drift; or a driver
+build that renders the rows right fails the count or the maximum.
 
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 
