@@ -541,15 +541,48 @@ impl Model {
         let limit = self.playhead.checked_add(self.ahead).unwrap();
         nearer.is_empty() || (at(k) <= limit && nearer.iter().sum::<u64>() + bytes <= self.cap())
     }
+
+    /// What is left of `held` once the rules have evicted down to the
+    /// budget: the frame farthest behind its stream's current frame goes
+    /// first, whichever stream it is in (the lower stream on a tie), and
+    /// only when none is left the frame farthest past its stream's window
+    /// (the higher stream on a tie). Current frames and windows stay.
+    fn shrink(&self, held: &Held) -> Held {
+        let mut left = held.clone();
+        while left.values().sum::<u64>() > self.budget {
+            let behind = (0..STREAMS)
+                .filter_map(|s| {
+                    let current = self.current(&left, s)?;
+                    let (&(_, k), _) = left.range((s, 0)..(s, current)).next()?;
+                    Some((k, s))
+                })
+                .min();
+            let past = || {
+                (0..STREAMS)
+                    .filter_map(|s| {
+                        let window = self.window(&left, s);
+                        let (&(_, k), _) = left.range((s, 0)..(s + 1, 0)).next_back()?;
+                        (at(k) > self.playhead && !window.contains(&k)).then_some((k, s))
+                    })
+                    .max()
+            };
+            match behind.or_else(past) {
+                Some((k, s)) => left.remove(&(s, k)),
+                None => break,
+            };
+        }
+        left
+    }
 }
 
-/// Every check after a step. `inserted` is the frame the step offered,
-/// when it offered one, and whether its stream was new to the cache.
+/// Every check after a step. `start` is what the cache held when it
+/// began to evict: what it held before, with the frame the step offered
+/// when it took it in. `inserted` is that frame, when the step offered
+/// one, and whether its stream was new to the cache.
 fn check(
     c: &FrameCache,
     m: &mut Model,
-    before: &Held,
-    after: &Held,
+    (before, start, after): (&Held, &Held, &Held),
     inserted: Option<(usize, i64, bool)>,
     moved: bool,
 ) -> Result<(), TestCaseError> {
@@ -558,6 +591,16 @@ fn check(
     prop_assert_eq!(s.bytes, after.values().sum::<u64>());
     prop_assert_eq!(s.frames, after.len());
     prop_assert!(s.bytes <= s.budget, "{} > {}", s.bytes, s.budget);
+    // The frames evicted are the ones the rules pick, in their order, and
+    // no more than the budget needs.
+    let kept = m.shrink(start);
+    prop_assert_eq!(
+        &kept,
+        after,
+        "the rules keep {:?} of {:?}",
+        kept.keys().collect::<Vec<_>>(),
+        start.keys().collect::<Vec<_>>()
+    );
     // A frame in the window, or the one at the playhead, stays unless the
     // playhead, the budget or the streams moved, or a frame nearer the
     // playhead came in.
@@ -654,7 +697,17 @@ fn offer(
         }
         Insert::Stopped => prop_assert!(false, "stopped"),
     }
-    check(c, m, &before, &after, Some((s, k, new_stream)), false)?;
+    let mut start = before.clone();
+    if r != Insert::Full {
+        start.insert((s, k), bytes);
+    }
+    check(
+        c,
+        m,
+        (&before, &start, &after),
+        Some((s, k, new_stream)),
+        false,
+    )?;
     Ok(r)
 }
 
@@ -693,20 +746,20 @@ proptest! {
                     c.set_playhead(m.playhead);
                     // Moving the playhead evicts nothing.
                     prop_assert_eq!(&before, &held(&c));
-                    check(&c, &mut m, &before, &before, None, true)?;
+                    check(&c, &mut m, (&before, &before, &before), None, true)?;
                 }
                 Op::Budget(b) => {
                     let before = held(&c);
                     m.budget = b;
                     c.set_budget(b);
-                    check(&c, &mut m, &before, &held(&c), None, true)?;
+                    check(&c, &mut m, (&before, &before, &held(&c)), None, true)?;
                 }
                 Op::Clear => {
                     c.clear();
                     m.seen.clear();
                     let after = held(&c);
                     prop_assert!(after.is_empty());
-                    check(&c, &mut m, &Held::new(), &after, None, true)?;
+                    check(&c, &mut m, (&Held::new(), &Held::new(), &after), None, true)?;
                 }
             }
         }
