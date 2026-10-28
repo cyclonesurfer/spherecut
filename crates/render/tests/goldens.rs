@@ -51,13 +51,16 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use common::{Frame, Kind, color, frame, gpu, hardware_gpu, hardware_gpus};
-use glam::{DQuat, DVec3};
+use glam::{DQuat, DVec2, DVec3};
 use serde_json::{Map, Value, json};
-use spherecut_core::video::{ChromaSiting, ColorInfo, Matrix, Range, SampleBytes};
+use spherecut_core::video::{
+    ChromaSiting, ColorInfo, Matrix, Range, SampleBytes, Transfer, VideoPlanes,
+};
+use spherecut_render::readback::round_f16;
 use spherecut_render::reference::{self, ImageF64};
 use spherecut_render::{
-    AdapterChoice, DebugMode, Depth, Gpu, Image, Pixels, Placement, Stereo, StillOptions,
-    StillRenderer, ViewParams,
+    AdapterChoice, DebugMode, Depth, Gpu, Image, LayoutKind, Pixels, Placement, PlaneFormat,
+    SlotShape, Stereo, StillOptions, StillRenderer, ViewParams,
 };
 use spherecut_sphere::LonLat;
 use spherecut_sphere::orient::Ypr;
@@ -1201,12 +1204,15 @@ fn stored_grid_view(
     run.stored(what, &got, &s, view_about(&v, size));
 }
 
+fn rect_forward_view() -> ViewParams {
+    ViewParams::new(DQuat::IDENTITY, lens(Projection::Rectilinear, 90.0))
+}
+
 fn rect_forward(run: &mut Run<'_>) {
-    let v = ViewParams::new(DQuat::IDENTITY, lens(Projection::Rectilinear, 90.0));
     stored_grid_view(
         run,
         "the grid, rectilinear 90°, looking forward",
-        v,
+        rect_forward_view(),
         RECT,
         |_, _, _| {},
     );
@@ -1255,15 +1261,21 @@ fn rect_pixel(
     (x >= 2.0 && y >= 2.0 && x <= w - 2.0 && y <= h - 2.0).then_some((x, y))
 }
 
+/// `rect_ypr`'s yaw, pitch and roll, in degrees.
+const RECT_YPR: (f64, f64, f64) = (30.0, 20.0, 10.0);
+
+fn rect_ypr_view() -> ViewParams {
+    let (yaw, pitch, roll) = RECT_YPR;
+    ViewParams::new(ypr(yaw, pitch, roll), lens(Projection::Rectilinear, 90.0))
+}
+
 fn rect_ypr(run: &mut Run<'_>) {
-    let (yaw, pitch, roll) = (30.0, 20.0, 10.0);
-    let v = ViewParams::new(ypr(yaw, pitch, roll), lens(Projection::Rectilinear, 90.0));
     stored_grid_view(
         run,
         "the grid, rectilinear 90°, yaw 30, pitch 20, roll 10",
-        v,
+        rect_ypr_view(),
         RECT,
-        |run, _, got| ypr_markers(run, got, (yaw, pitch, roll)),
+        |run, _, got| ypr_markers(run, got, RECT_YPR),
     );
 }
 
@@ -1349,9 +1361,13 @@ fn black_past_pi(run: &mut Run<'_>, got: &Image, v: &ViewParams) {
     run.at_most("pixels_past_pi_not_black", lit, 0.0);
 }
 
-fn fisheye_180(run: &mut Run<'_>) {
+fn fisheye_180_view() -> ViewParams {
     // Looking back, so the seam runs through the middle.
-    let v = ViewParams::new(ypr(180.0, 0.0, 0.0), lens(Projection::Fisheye, 180.0));
+    ViewParams::new(ypr(180.0, 0.0, 0.0), lens(Projection::Fisheye, 180.0))
+}
+
+fn fisheye_180(run: &mut Run<'_>) {
+    let v = fisheye_180_view();
     stored_grid_view(
         run,
         "the grid, fisheye 180°, looking back across the seam",
@@ -1361,8 +1377,12 @@ fn fisheye_180(run: &mut Run<'_>) {
     );
 }
 
+fn fisheye_360_view() -> ViewParams {
+    ViewParams::new(ypr(90.0, 30.0, 0.0), lens(Projection::Fisheye, 360.0))
+}
+
 fn fisheye_360(run: &mut Run<'_>) {
-    let v = ViewParams::new(ypr(90.0, 30.0, 0.0), lens(Projection::Fisheye, 360.0));
+    let v = fisheye_360_view();
     stored_grid_view(
         run,
         "the grid, fisheye 360°, yaw 90, pitch 30",
@@ -1396,8 +1416,12 @@ fn ideal_check(run: &mut Run<'_>, mask: &[bool], got: &Image, level0: &Image, id
     }
 }
 
+fn stereo_tinyplanet_view() -> ViewParams {
+    ViewParams::new(ypr(0.0, -90.0, 0.0), lens(Projection::Stereographic, 300.0))
+}
+
 fn stereo_tinyplanet(run: &mut Run<'_>) {
-    let v = ViewParams::new(ypr(0.0, -90.0, 0.0), lens(Projection::Stereographic, 300.0));
+    let v = stereo_tinyplanet_view();
     stored_grid_view(
         run,
         "the grid, tiny planet (stereographic 300°, pitch −90)",
@@ -1419,18 +1443,21 @@ fn stereo_tinyplanet(run: &mut Run<'_>) {
     );
 }
 
-fn morph_half(run: &mut Run<'_>) {
+fn morph_half_view() -> ViewParams {
     let l = Lens {
         from: Projection::Rectilinear,
         to: Projection::Stereographic,
         morph: 0.5,
         hfov: 150f64.to_radians(),
     };
-    let v = ViewParams::new(ypr(0.0, -10.0, 0.0), l);
+    ViewParams::new(ypr(0.0, -10.0, 0.0), l)
+}
+
+fn morph_half(run: &mut Run<'_>) {
     stored_grid_view(
         run,
         "the grid, rectilinear to stereographic at 0.5, 150°",
-        v,
+        morph_half_view(),
         RECT,
         |_, _, _| {},
     );
@@ -2013,16 +2040,25 @@ fn range_full_vs_limited(run: &mut Run<'_>) {
     );
 }
 
+fn matrix_view() -> ViewParams {
+    ViewParams::new(ypr(-30.0, 15.0, 0.0), lens(Projection::Rectilinear, 90.0))
+}
+
+/// The grid as limited-range NV12 coded with matrix `m`.
+fn grid_coded(m: Matrix) -> Frame {
+    frame(
+        grid(),
+        Kind::Nv12,
+        color(Range::Limited, m, ChromaSiting::Left),
+        0,
+    )
+}
+
 fn matrix_601_709(run: &mut Run<'_>) {
-    let v = ViewParams::new(ypr(-30.0, 15.0, 0.0), lens(Projection::Rectilinear, 90.0));
+    let v = matrix_view();
     let mut psnrs = BTreeMap::new();
     for (name, m) in [("601", Matrix::Bt601), ("709", Matrix::Bt709)] {
-        let f = frame(
-            grid(),
-            Kind::Nv12,
-            color(Range::Limited, m, ChromaSiting::Left),
-            0,
-        );
+        let f = grid_coded(m);
         let (Some(got), Ok(cpu)) = (
             run.render_with(&f, &v, RECT, DebugMode::Off),
             reference::render_trilinear(&f, &v, RECT),
@@ -2215,9 +2251,9 @@ fn siting_left_center(run: &mut Run<'_>) {
     );
 }
 
-fn crop_half(run: &mut Run<'_>) {
-    // A 180° panorama: the grid's middle half, with sv3d bounds cropping
-    // a quarter of the sphere's width off each side.
+/// A 180° panorama: the grid's middle half, with sv3d bounds cropping a
+/// quarter of the sphere's width off each side.
+fn crop_half_source() -> (Frame, Placement) {
     let g = grid();
     let half = RgbImage {
         width: 512,
@@ -2226,7 +2262,6 @@ fn crop_half(run: &mut Run<'_>) {
             .map(|i| g.get(256 + i % 512, i / 512))
             .collect(),
     };
-    let f = frame(&half, Kind::Nv12, limited709(), 0);
     let placement = Placement {
         left: 0.25,
         right: 0.25,
@@ -2234,7 +2269,16 @@ fn crop_half(run: &mut Run<'_>) {
         bottom: 0.0,
         stereo: Stereo::Mono,
     };
-    let v = ViewParams::new(ypr(60.0, 0.0, 0.0), lens(Projection::Rectilinear, 120.0));
+    (frame(&half, Kind::Nv12, limited709(), 0), placement)
+}
+
+fn crop_half_view() -> ViewParams {
+    ViewParams::new(ypr(60.0, 0.0, 0.0), lens(Projection::Rectilinear, 120.0))
+}
+
+fn crop_half(run: &mut Run<'_>) {
+    let (f, placement) = crop_half_source();
+    let v = crop_half_view();
     let opts = StillOptions {
         placement,
         ..StillOptions::default()
@@ -2320,6 +2364,506 @@ fn lod_heatmap(run: &mut Run<'_>) {
         &[&s],
         vec![view_about(&v, SQUARE)],
     );
+}
+
+// ---------------------------------------------------------------------
+// A GPU's filter and mip stores, emulated (D32)
+//
+// The CPU reference with its filter's fractions and its 8-bit mip stores
+// held as a GPU might hold them, to see what each costs the CPU checks:
+// `the_wide_views_lose_to_the_mip_stores_not_the_filter`.
+
+/// How a GPU holds the numbers it filters with, for [`Emulation`]: each
+/// bilinear fraction, the LOD and the blend weight between two levels in
+/// fixed point with this many fractional bits, or in f64 (`None`),
+/// rounded to nearest or toward zero; whether each filtered 8-bit value
+/// is held to whole codes; and how the 8-bit mips are stored.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Precision {
+    texel_bits: Option<i32>,
+    lod_bits: Option<i32>,
+    blend_bits: Option<i32>,
+    truncate: bool,
+    codes: bool,
+    mips: MipStore,
+}
+
+impl Precision {
+    /// The CPU reference's own: everything in f64.
+    const F64: Precision = Precision {
+        texel_bits: None,
+        lod_bits: None,
+        blend_bits: None,
+        truncate: false,
+        codes: false,
+        mips: MipStore::F64,
+    };
+
+    fn fixed(&self, v: f64, bits: Option<i32>) -> f64 {
+        let Some(b) = bits else {
+            return v;
+        };
+        let s = 2f64.powi(b);
+        if self.truncate {
+            (v * s).floor() / s
+        } else {
+            (v * s).round() / s
+        }
+    }
+
+    fn describe(&self) -> String {
+        let bits = |b: Option<i32>| b.map_or_else(|| "f64".into(), |b| b.to_string());
+        format!(
+            "texel {}, LOD {}, blend {}{}{}, mips {:?}",
+            bits(self.texel_bits),
+            bits(self.lod_bits),
+            bits(self.blend_bits),
+            if self.truncate { " toward zero" } else { "" },
+            if self.codes { ", 8-bit results" } else { "" },
+            self.mips
+        )
+    }
+}
+
+/// How an 8-bit mip level's area mean is stored: the reference's f64
+/// rounded to nearest; the shader's f32 mean, its product with 255
+/// rounded to the nearest even code, as lavapipe's export does (D31); or
+/// that mean packed to f16 toward zero first, as RADV's export does
+/// (D31), which puts a mean on a half code, or up to 0.1245 codes above
+/// one, a code low.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MipStore {
+    F64,
+    F32NearestEven,
+    F16TowardZero,
+}
+
+impl MipStore {
+    /// A mean, `exact` as the reference sums it and `shader` as the
+    /// shader does in f32, stored: a code / 255.
+    fn store(self, exact: f64, shader: f32) -> f64 {
+        let code = match self {
+            MipStore::F64 => (exact.clamp(0.0, 1.0) * 255.0).round(),
+            MipStore::F32NearestEven => f64::from(shader.clamp(0.0, 1.0) * 255.0).round_ties_even(),
+            MipStore::F16TowardZero => {
+                // The half below, then the colour block's conversion to
+                // nearest.
+                let x = f64::from(shader.clamp(0.0, 1.0));
+                let e = ((x.to_bits() >> 52) & 0x7ff) as i32 - 1023;
+                let step = 2f64.powi(if e < -14 { -24 } else { e - 10 });
+                ((x / step).floor() * step * 255.0).round_ties_even()
+            }
+        };
+        code / 255.0
+    }
+}
+
+/// One plane's mip chain as the GPU stores it: each level's size and
+/// texels, components interleaved.
+struct Chain {
+    format: PlaneFormat,
+    comps: usize,
+    levels: Vec<(u32, u32, Vec<f64>)>,
+}
+
+impl Chain {
+    /// Plane `i` of `f` and its levels, each 8-bit one stored by `mips`.
+    fn new(f: &Frame, shape: &SlotShape, i: usize, mips: MipStore) -> Chain {
+        let p = shape.planes[i];
+        let comps = p.format.components() as usize;
+        let data = f.plane(i).unwrap();
+        let row_bytes = p.size.0 as usize * p.format.bytes_per_texel() as usize;
+        let shift = if shape.msb_aligned {
+            16 - u32::from(shape.bit_depth)
+        } else {
+            0
+        };
+        let max = (1u32 << shape.bit_depth) - 1;
+        let mut texels = Vec::new();
+        for y in 0..p.size.1 {
+            let row = data.row(y, row_bytes).unwrap();
+            if p.format.is_deep() {
+                texels.extend(row.chunks_exact(2).map(|b| {
+                    let code = (u32::from(u16::from_le_bytes([b[0], b[1]])) >> shift).min(max);
+                    round_f16(f64::from(code) / f64::from(max))
+                }));
+            } else {
+                texels.extend(row.iter().map(|&b| f64::from(b) / 255.0));
+            }
+        }
+        let mut chain = Chain {
+            format: p.format,
+            comps,
+            levels: vec![(p.size.0, p.size.1, texels)],
+        };
+        while chain.levels.len() < p.levels as usize {
+            let next = chain.halve(mips);
+            chain.levels.push(next);
+        }
+        chain
+    }
+
+    /// The next level down: each texel the area-weighted mean of those
+    /// it covers, in f64 and as the shader sums it in f32, stored in the
+    /// plane's format.
+    fn halve(&self, mips: MipStore) -> (u32, u32, Vec<f64>) {
+        let (sw, sh, src) = self.levels.last().unwrap();
+        let (sw, sh) = (*sw, *sh);
+        let (dw, dh) = ((sw / 2).max(1), (sh / 2).max(1));
+        let weights = |j: u32, ss: u32, ds: u32| -> Vec<(u32, f64)> {
+            let (lo, hi) = (j * ss, j * ss + ss);
+            (lo / ds..=(hi - 1) / ds)
+                .map(|x| {
+                    let overlap = hi.min((x + 1) * ds) - lo.max(x * ds);
+                    (x, f64::from(overlap) / f64::from(ss))
+                })
+                .collect()
+        };
+        let mut data = Vec::with_capacity(dw as usize * dh as usize * self.comps);
+        for j in 0..dh {
+            let wy = weights(j, sh, dh);
+            for i in 0..dw {
+                let wx = weights(i, sw, dw);
+                for c in 0..self.comps {
+                    let (mut acc, mut shader) = (0.0, 0f32);
+                    for &(y, a) in &wy {
+                        for &(x, b) in &wx {
+                            let t = src[(y as usize * sw as usize + x as usize) * self.comps + c];
+                            acc += a * b * t;
+                            shader += a as f32 * b as f32 * t as f32;
+                        }
+                    }
+                    data.push(if self.format.is_deep() {
+                        round_f16(acc)
+                    } else {
+                        mips.store(acc, shader)
+                    });
+                }
+            }
+        }
+        (dw, dh, data)
+    }
+
+    /// A filtered value as `p` holds it.
+    fn held(&self, p: &Precision, v: [f64; 2]) -> [f64; 2] {
+        if p.codes && !self.format.is_deep() {
+            v.map(|x| (x * 255.0).round() / 255.0)
+        } else {
+            v
+        }
+    }
+
+    /// Level `l`'s bilinear blend at `uv`, its fractions held by `p`.
+    fn bilinear(&self, l: usize, uv: DVec2, wrap_u: bool, p: &Precision) -> [f64; 2] {
+        let (w, h, data) = &self.levels[l];
+        let (w, h) = (i64::from(*w), i64::from(*h));
+        let x = uv.x * w as f64 - 0.5;
+        let y = uv.y * h as f64 - 0.5;
+        let (x0, y0) = (x.floor(), y.floor());
+        let (a, b) = (p.fixed(x - x0, p.texel_bits), p.fixed(y - y0, p.texel_bits));
+        let col = |i: i64| {
+            if wrap_u {
+                i.rem_euclid(w)
+            } else {
+                i.clamp(0, w - 1)
+            }
+        };
+        let row = |j: i64| j.clamp(0, h - 1);
+        let (x0, y0) = (x0 as i64, y0 as i64);
+        let mut out = [0.0; 2];
+        for (c, o) in out.iter_mut().enumerate().take(self.comps) {
+            let t = |i: i64, j: i64| data[(row(j) * w + col(i)) as usize * self.comps + c];
+            let top = t(x0, y0) * (1.0 - a) + t(x0 + 1, y0) * a;
+            let bottom = t(x0, y0 + 1) * (1.0 - a) + t(x0 + 1, y0 + 1) * a;
+            *o = top * (1.0 - b) + bottom * b;
+        }
+        self.held(p, out)
+    }
+
+    /// Trilinear at `lod`, already clamped to the chain.
+    fn sample(&self, uv: DVec2, lod: f64, wrap_u: bool, p: &Precision) -> [f64; 2] {
+        let last = self.levels.len() - 1;
+        let lod = p.fixed(lod, p.lod_bits);
+        let l0 = (lod.floor().max(0.0) as usize).min(last);
+        let l1 = (l0 + 1).min(last);
+        let t = p.fixed((lod - l0 as f64).clamp(0.0, 1.0), p.blend_bits);
+        let a = self.bilinear(l0, uv, wrap_u, p);
+        if t == 0.0 || l1 == l0 {
+            return a;
+        }
+        let b = self.bilinear(l1, uv, wrap_u, p);
+        self.held(p, [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
+    }
+}
+
+/// Whether pixel `(i, j)` of a `size` view shows the picture: its centre
+/// within θ = π and inside the cover, as the shader and the reference
+/// have it. Elsewhere both draw black.
+fn shows(v: &ViewParams, size: (u32, u32), placement: &Placement, (i, j): (u32, u32)) -> bool {
+    let c = pixel::centre(i, j);
+    let theta = v.lens.theta(pixel::to_lens(size, c.x, c.y).length());
+    let suv = reference::sphere_uv(reference::sphere_dir(v, size, c.x, c.y));
+    let [u0, v0, u1, v1] = placement.cover();
+    theta <= PI + 1e-4 && suv.x >= u0 && suv.y >= v0 && suv.x <= u1 && suv.y <= v1
+}
+
+/// Where a shown pixel samples: luma's and chroma's texture uv, and
+/// their LODs before clamping.
+struct Tap {
+    uv: DVec2,
+    cuv: DVec2,
+    lod: [f64; 2],
+}
+
+/// `reference::render` with its filter at any [`Precision`]: the
+/// source's chains and colour, and where each pixel samples (`None`
+/// where the view shows nothing), worked out once for every precision.
+/// At [`Precision::F64`] it is the reference itself, which
+/// `the_wide_views_lose_to_the_mip_stores_not_the_filter` asserts.
+struct Emulation {
+    frame: Frame,
+    shape: SlotShape,
+    semi_planar: bool,
+    matrix: [[f64; 4]; 3],
+    linear: bool,
+    wraps: bool,
+    levels: [f64; 2],
+    taps: Vec<Option<Tap>>,
+}
+
+impl Emulation {
+    fn new(f: &Frame, v: &ViewParams, size: (u32, u32), placement: &Placement) -> Emulation {
+        let shape = SlotShape::of(&f.layout, placement.shown(f.size)).unwrap();
+        let u = spherecut_render::color::source_uniform(&shape, &f.color, placement);
+        let (scale, offset) = placement.uv_transform();
+        let (scale, offset) = (DVec2::from(scale), DVec2::from(offset));
+        let (cs, co) = if matches!(shape.kind, LayoutKind::SemiPlanar | LayoutKind::Planar) {
+            spherecut_render::color::chroma_transform(&shape, f.color.siting)
+        } else {
+            ([1.0, 1.0], [0.0, 0.0])
+        };
+        let (cs, co) = (DVec2::from(cs), DVec2::from(co));
+        let texels = |i: usize| {
+            let p = shape.planes.get(i).copied().unwrap_or(shape.planes[0]);
+            DVec2::new(f64::from(p.size.0), f64::from(p.size.1))
+        };
+        let lod = |g: [DVec2; 2], s: DVec2| {
+            (g[0] * s)
+                .length()
+                .max((g[1] * s).length())
+                .max(1e-30)
+                .log2()
+        };
+        let mut taps = Vec::with_capacity(size.0 as usize * size.1 as usize);
+        for j in 0..size.1 {
+            for i in 0..size.0 {
+                taps.push(shows(v, size, placement, (i, j)).then(|| {
+                    let c = pixel::centre(i, j);
+                    let suv = reference::sphere_uv(reference::sphere_dir(v, size, c.x, c.y));
+                    let (gx, gy) = reference::uv_footprint(v, size, i, j);
+                    let uv = suv * scale + offset;
+                    let g = [gx * scale, gy * scale];
+                    Tap {
+                        uv,
+                        cuv: uv * cs + co,
+                        lod: [lod(g, texels(0)), lod(g.map(|x| x * cs), texels(1))],
+                    }
+                }));
+            }
+        }
+        Emulation {
+            frame: f.clone(),
+            semi_planar: shape.kind == LayoutKind::SemiPlanar,
+            matrix: spherecut_render::color::fold(&f.color, shape.kind, shape.bit_depth),
+            linear: f.color.transfer == Transfer::Linear,
+            wraps: placement.wraps(),
+            levels: u.levels.map(f64::from),
+            taps,
+            shape,
+        }
+    }
+
+    /// RGB in [0, 1], as the encode pass computes it before it rounds it
+    /// to codes.
+    fn render(&self, p: &Precision) -> Vec<f64> {
+        let chains: Vec<Chain> = (0..self.shape.planes.len())
+            .map(|i| Chain::new(&self.frame, &self.shape, i, p.mips))
+            .collect();
+        let mut out = Vec::with_capacity(3 * self.taps.len());
+        for t in &self.taps {
+            let Some(t) = t else {
+                out.extend([0.0; 3]);
+                continue;
+            };
+            let plane = |i: usize, uv: DVec2, lod: f64| {
+                chains
+                    .get(i)
+                    .map_or([0.0; 2], |c| c.sample(uv, lod, self.wraps, p))
+            };
+            let y = plane(0, t.uv, t.lod[0].clamp(0.0, self.levels[0] - 1.0));
+            let chroma = t.lod[1].clamp(0.0, self.levels[1] - 1.0);
+            let (c1, c2) = (plane(1, t.cuv, chroma), plane(2, t.cuv, chroma));
+            let s = [
+                y[0],
+                c1[0],
+                if self.semi_planar { c1[1] } else { c2[0] },
+                1.0,
+            ];
+            let rgb = self
+                .matrix
+                .map(|row| (0..4).map(|i| row[i] * s[i]).sum::<f64>().clamp(0.0, 1.0));
+            out.extend(rgb.map(|v| {
+                let lin = round_f16(if self.linear { v } else { eotf(v) });
+                oetf(lin.clamp(0.0, 1.0))
+            }));
+        }
+        out
+    }
+}
+
+/// One CPU check of the rows: its row and PSNR key, and what it renders.
+struct CpuCheck {
+    row: &'static str,
+    key: &'static str,
+    frame: Frame,
+    view: ViewParams,
+    size: (u32, u32),
+    placement: Placement,
+}
+
+/// Every CPU check of the rows, in their order.
+fn cpu_checks() -> Vec<CpuCheck> {
+    let check = |row, key, frame, view, size, placement| CpuCheck {
+        row,
+        key,
+        frame,
+        view,
+        size,
+        placement,
+    };
+    let grid = || grid_nv12().frame;
+    let mono = Placement::default();
+    let (crop, cropped) = crop_half_source();
+    let key = "cpu_psnr_db";
+    vec![
+        check("rect_forward", key, grid(), rect_forward_view(), RECT, mono),
+        check("rect_ypr", key, grid(), rect_ypr_view(), RECT, mono),
+        check("fisheye_180", key, grid(), fisheye_180_view(), SQUARE, mono),
+        check("fisheye_360", key, grid(), fisheye_360_view(), SQUARE, mono),
+        check(
+            "stereo_tinyplanet",
+            key,
+            grid(),
+            stereo_tinyplanet_view(),
+            PLANET,
+            mono,
+        ),
+        check("morph_half", key, grid(), morph_half_view(), RECT, mono),
+        check("crop_half", key, crop, crop_half_view(), RECT, cropped),
+        check(
+            "matrix_601_709",
+            "cpu_601_psnr_db",
+            grid_coded(Matrix::Bt601),
+            matrix_view(),
+            RECT,
+            mono,
+        ),
+        check(
+            "matrix_601_709",
+            "cpu_709_psnr_db",
+            grid_coded(Matrix::Bt709),
+            matrix_view(),
+            RECT,
+            mono,
+        ),
+    ]
+}
+
+/// Every CPU check's PSNR on a GPU, by row and key: the RX 7600 (RADV
+/// NAVI33, Mesa 26.2.5) at be38fa4, in `goldens_on_gpu_match_reference`'s
+/// notes in `hw-reports/odin-be38fa409e.md`.
+const GPU_CPU_PSNR: &[(&str, &str, f64)] = &[
+    ("rect_forward", "cpu_psnr_db", 58.5452),
+    ("rect_ypr", "cpu_psnr_db", 58.0408),
+    ("fisheye_180", "cpu_psnr_db", 47.7761),
+    ("fisheye_360", "cpu_psnr_db", 44.6747),
+    ("stereo_tinyplanet", "cpu_psnr_db", 51.4508),
+    ("morph_half", "cpu_psnr_db", 52.7078),
+    ("crop_half", "cpu_psnr_db", 56.5701),
+    ("matrix_601_709", "cpu_601_psnr_db", 58.2078),
+    ("matrix_601_709", "cpu_709_psnr_db", 58.0879),
+];
+
+/// What `table` has for `row`'s `key`.
+fn gpu_psnr(table: &[(&str, &str, f64)], row: &str, key: &str) -> Option<f64> {
+    table
+        .iter()
+        .find(|(r, k, _)| *r == row && *k == key)
+        .map(|e| e.2)
+}
+
+/// The bands of luma's analytic LOD before clamping that a CPU check's
+/// error is broken down by, each up to its bound: magnified or at most a
+/// level down, between, and from [`IDEAL_MIN_LOD`] down.
+const LOD_BANDS: [(&str, f64); 3] = [
+    ("lod_below_1", 1.0),
+    ("lod_1_to_2.5", IDEAL_MIN_LOD),
+    ("lod_from_2.5", f64::INFINITY),
+];
+
+/// Each pixel's band in [`LOD_BANDS`], by `reference::lod_map`, or `None`
+/// where the view doesn't show the picture ([`shows`]).
+fn lod_bands(
+    f: &Frame,
+    v: &ViewParams,
+    size: (u32, u32),
+    placement: &Placement,
+) -> Vec<Option<usize>> {
+    let lod = reference::lod_map(f, v, size, placement).unwrap();
+    lod.data
+        .chunks(3)
+        .enumerate()
+        .map(|(k, l)| {
+            let at = ((k % size.0 as usize) as u32, (k / size.0 as usize) as u32);
+            shows(v, size, placement, at)
+                .then(|| LOD_BANDS.iter().position(|b| l[2] < b.1).unwrap())
+        })
+        .collect()
+}
+
+/// A CPU check's error over one band of [`LOD_BANDS`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BandError {
+    pixels: f64,
+    /// Over the band's pixels; `None` when it has none.
+    psnr: Option<f64>,
+    /// Of the squared error over the whole picture.
+    share: f64,
+}
+
+/// `got` against `want` per band, as `bands` deals the pixels.
+fn band_errors(bands: &[Option<usize>], got: &[f64], want: &[f64]) -> Vec<BandError> {
+    let total: f64 = got.iter().zip(want).map(|(a, b)| (a - b).powi(2)).sum();
+    (0..LOD_BANDS.len())
+        .map(|n| {
+            let mask: Vec<bool> = bands.iter().map(|b| *b == Some(n)).collect();
+            let pixels = mask.iter().filter(|m| **m).count();
+            if pixels == 0 {
+                return BandError {
+                    pixels: 0.0,
+                    psnr: None,
+                    share: 0.0,
+                };
+            }
+            let (a, b) = (pick(&mask, got), pick(&mask, want));
+            let sq: f64 = a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum();
+            BandError {
+                pixels: pixels as f64,
+                psnr: Some(psnr_in(&mask, got, want)),
+                share: if total > 0.0 { sq / total } else { 0.0 },
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -2670,4 +3214,137 @@ fn goldens_on_host_llvmpipe() {
     let mut run = Run::new(&gpu, Mode::OtherDriver);
     run_rows(&mut run, None);
     run.finish();
+}
+
+#[test]
+fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
+    // Every CPU check, emulated with a GPU's precision ([`Emulation`])
+    // and rounded to codes as the encode pass rounds it, against the
+    // reference itself, as a GPU's CPU check measures it; and the
+    // filter's own error, unrounded. The RX 7600 lost up to 15 dB on the
+    // wide, minified views (D32): fixed-point filter weights, even a
+    // 4-bit blend toward zero, come nowhere near that on every row, and
+    // RADV's export of the mip pass's means comes within 1 dB of every
+    // row. lavapipe's own filter, emulated the same way, comes within 1
+    // dB of its render on every row, which is what the method can be
+    // checked against here.
+    let fixed = |blend: i32, truncate: bool| Precision {
+        texel_bits: Some(8),
+        lod_bits: Some(8),
+        blend_bits: Some(blend),
+        truncate,
+        ..Precision::F64
+    };
+    let filters = [
+        fixed(8, false),
+        fixed(6, false),
+        fixed(4, false),
+        fixed(4, true),
+    ];
+    let radv = Precision {
+        mips: MipStore::F16TowardZero,
+        ..fixed(8, false)
+    };
+    let lavapipe = Precision {
+        codes: true,
+        mips: MipStore::F32NearestEven,
+        ..fixed(8, false)
+    };
+    let coded = |v: &[f64]| -> Vec<f64> { v.iter().map(|x| (x * 255.0).round() / 255.0).collect() };
+    let gpu = gpu();
+    let mut renderer = StillRenderer::new(gpu);
+    let (mut filter_miss, mut radv_miss, mut lavapipe_miss) = ([0.0f64; 4], 0.0f64, 0.0f64);
+    for c in cpu_checks() {
+        let what = format!("{} {}", c.row, c.key);
+        let cpu = reference::render(
+            &c.frame,
+            &c.view,
+            c.size,
+            &reference::Options {
+                level0: false,
+                placement: c.placement,
+            },
+        )
+        .unwrap();
+        let e = Emulation::new(&c.frame, &c.view, c.size, &c.placement);
+        // At f64 the emulation is the reference.
+        let exact = e.render(&Precision::F64);
+        let off = max_diff(&exact, &cpu.data);
+        assert!(
+            off < 1e-12,
+            "{what}: the emulation is {off:e} off the reference"
+        );
+        let rx = gpu_psnr(GPU_CPU_PSNR, c.row, c.key).unwrap();
+        let opts = StillOptions {
+            placement: c.placement,
+            ..StillOptions::default()
+        };
+        let here = renderer
+            .render(gpu, &c.frame, &c.view, c.size, &opts)
+            .unwrap();
+        let here = psnr_of(c.size, &unit(&here), &cpu.data);
+        eprintln!(
+            "{what}: RX 7600 {rx:.2} dB, lavapipe {here:.2} dB, a filter in f64 {:.2} dB",
+            psnr_of(c.size, &coded(&exact), &cpu.data)
+        );
+        let mut unrounded = Vec::new();
+        for (n, p) in filters.iter().enumerate() {
+            let got = e.render(p);
+            let psnr = psnr_of(c.size, &coded(&got), &cpu.data);
+            let raw = psnr_of(c.size, &got, &cpu.data);
+            eprintln!(
+                "{what}: {}: {psnr:.2} dB ({raw:.2} unrounded)",
+                p.describe()
+            );
+            filter_miss[n] = filter_miss[n].max((psnr - rx).abs());
+            unrounded.push(raw);
+        }
+        // Fewer bits in the blend, or truncated, never come nearer.
+        assert!(
+            unrounded.windows(2).all(|w| w[0] >= w[1]),
+            "{what}: {unrounded:?}"
+        );
+        let bands = lod_bands(&c.frame, &c.view, c.size, &c.placement);
+        for (name, p) in [("RADV's export", radv), ("lavapipe's filter", lavapipe)] {
+            let got = coded(&e.render(&p));
+            let psnr = psnr_of(c.size, &got, &cpu.data);
+            let by: Vec<String> = band_errors(&bands, &got, &cpu.data)
+                .iter()
+                .zip(LOD_BANDS)
+                .map(|(b, (band, _))| {
+                    let db = b.psnr.map_or_else(|| "-".into(), |d| format!("{d:.2} dB"));
+                    format!("{band} {} pixels {db} {:.1}%", b.pixels, b.share * 100.0)
+                })
+                .collect();
+            eprintln!(
+                "{what}: {name} ({}): {psnr:.2} dB; {}",
+                p.describe(),
+                by.join(", ")
+            );
+            if p == radv {
+                radv_miss = radv_miss.max((psnr - rx).abs());
+            } else {
+                lavapipe_miss = lavapipe_miss.max((psnr - here).abs());
+            }
+        }
+    }
+    eprintln!(
+        "worst miss: of the RX 7600, each filter {filter_miss:.2?} dB and RADV's export \
+         {radv_miss:.2} dB; of lavapipe, its filter {lavapipe_miss:.2} dB"
+    );
+    for (p, miss) in filters.iter().zip(filter_miss) {
+        assert!(
+            miss > 5.0,
+            "{} explains the RX 7600 to {miss:.2} dB",
+            p.describe()
+        );
+    }
+    assert!(
+        radv_miss < 1.0,
+        "RADV's export misses the RX 7600 by {radv_miss:.2} dB"
+    );
+    assert!(
+        lavapipe_miss < 1.0,
+        "lavapipe's filter misses lavapipe by {lavapipe_miss:.2} dB"
+    );
 }
