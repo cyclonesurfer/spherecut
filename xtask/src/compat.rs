@@ -46,7 +46,18 @@ const STAMP_FILE: &str = "spherecut-ffmpeg-stamp";
 /// The stamp's first line: compat made the directory, so compat may
 /// delete it.
 const STAMP_HEADER: &str = "Made by `cargo xtask compat`, against:\n";
-/// The libraries ffmpeg-sys-next binds, whose pkg-config files a stamp
+/// The libraries ffmpeg-sys-next binds with the workspace's features
+/// (`avcodec`, `avformat`, `swscale` and `swresample`, and libavutil, which
+/// it always binds), each found by pkg-config on its own, and the header
+/// of each that its bindings read.
+const BOUND: [(&str, &str); 5] = [
+    ("libavutil", "libavutil/avutil.h"),
+    ("libavformat", "libavformat/avformat.h"),
+    ("libswscale", "libswscale/swscale.h"),
+    ("libswresample", "libswresample/swresample.h"),
+    ("libavcodec", "libavcodec/avcodec.h"),
+];
+/// The libraries ffmpeg-sys-next can bind, whose pkg-config files a stamp
 /// covers.
 const STAMPED: [&str; 7] = [
     "libavcodec",
@@ -231,8 +242,9 @@ struct Bound {
     ffmpeg: Option<String>,
     /// That header, where pkg-config says it is.
     version_header: Option<PathBuf>,
-    /// libavcodec's library directory, for `LD_LIBRARY_PATH`.
-    libdir: PathBuf,
+    /// The bound libraries' directories, for `LD_LIBRARY_PATH`: one, in
+    /// any FFmpeg install.
+    libdirs: Vec<PathBuf>,
 }
 
 impl Bound {
@@ -245,48 +257,58 @@ impl Bound {
 }
 
 /// Asks pkg-config (`program`), with the search path the build will
-/// have, which libavcodec it finds, and fails unless it is `prefix`'s:
-/// its `.pc` file in `pc_dir`, and the library and header it names inside
-/// the prefix, symlinks resolved. ffmpeg-sys-next would otherwise bind
-/// another FFmpeg (the system's, say) without a word, as it would through
-/// a prefix's `.pc` file whose `libdir` or `includedir` lead elsewhere.
+/// have, where it finds each library ffmpeg-sys-next binds ([`BOUND`]),
+/// and fails unless each is `prefix`'s: its `.pc` file in `pc_dir`, and
+/// the library and header it names inside the prefix, symlinks resolved.
+/// ffmpeg-sys-next would otherwise bind another FFmpeg (the system's,
+/// say) without a word: a library whose `.pc` file is missing from the
+/// prefix (an install that stopped partway) or names a `libdir` or
+/// `includedir` elsewhere (a prefix moved, its files unchanged) comes from
+/// there, and libavutil, which it finds first, puts its directory first
+/// on the linker's search path, for libavcodec too.
 fn bound(program: &OsStr, prefix: &Path, pc_dir: &Path, search: &OsStr) -> Result<Bound> {
     let query = |args: &[&str]| pkg_config(program, search, args);
-    let found = PathBuf::from(query(&["--variable=pcfiledir", "libavcodec"])?);
-    if !same_dir(&found, pc_dir) {
-        bail!(
-            "pkg-config finds libavcodec in {}, not in {}",
-            found.display(),
-            pc_dir.display()
-        );
+    let home = prefix
+        .canonicalize()
+        .with_context(|| format!("could not resolve {}", prefix.display()))?;
+    let mut libdirs: Vec<PathBuf> = Vec::new();
+    for (lib, header) in BOUND {
+        let found = PathBuf::from(query(&["--variable=pcfiledir", lib])?);
+        if !same_dir(&found, pc_dir) {
+            bail!(
+                "pkg-config finds {lib} in {}, not in {}",
+                found.display(),
+                pc_dir.display()
+            );
+        }
+        let libdir = PathBuf::from(query(&["--variable=libdir", lib])?);
+        let includedir = PathBuf::from(query(&["--variable=includedir", lib])?);
+        for (what, file) in [
+            ("library", libdir.join(format!("{lib}.so"))),
+            ("header", includedir.join(header)),
+        ] {
+            let real = file.canonicalize().with_context(|| {
+                format!(
+                    "{lib}'s {what} {} isn't there, where its pkg-config file says",
+                    file.display()
+                )
+            })?;
+            if !real.starts_with(&home) {
+                bail!(
+                    "{lib}'s {what} {} is {}, outside the prefix {}",
+                    file.display(),
+                    real.display(),
+                    home.display()
+                );
+            }
+        }
+        if !libdirs.contains(&libdir) {
+            libdirs.push(libdir);
+        }
     }
     let libavcodec = query(&["--modversion", "libavcodec"])?
         .to_string_lossy()
         .into_owned();
-    let libdir = PathBuf::from(query(&["--variable=libdir", "libavcodec"])?);
-    let includedir = PathBuf::from(query(&["--variable=includedir", "libavcodec"])?);
-    let home = prefix
-        .canonicalize()
-        .with_context(|| format!("could not resolve {}", prefix.display()))?;
-    for (what, file) in [
-        ("library", libdir.join("libavcodec.so")),
-        ("header", includedir.join("libavcodec/avcodec.h")),
-    ] {
-        let real = file.canonicalize().with_context(|| {
-            format!(
-                "libavcodec's {what} {} isn't there, where its pkg-config file says",
-                file.display()
-            )
-        })?;
-        if !real.starts_with(&home) {
-            bail!(
-                "libavcodec's {what} {} is {}, outside the prefix {}",
-                file.display(),
-                real.display(),
-                home.display()
-            );
-        }
-    }
     let version_header = query(&["--variable=includedir", "libavutil"])
         .ok()
         .map(|inc| Path::new(&inc).join("libavutil/ffversion.h"));
@@ -298,7 +320,7 @@ fn bound(program: &OsStr, prefix: &Path, pc_dir: &Path, search: &OsStr) -> Resul
         libavcodec,
         ffmpeg,
         version_header,
-        libdir,
+        libdirs,
     })
 }
 
@@ -591,7 +613,7 @@ fn overriding<'a>(names: impl Iterator<Item = &'a OsStr>) -> Vec<String> {
 fn cargo_env(
     pc_dir: &Path,
     target: &Path,
-    libdir: Option<&Path>,
+    libdirs: &[PathBuf],
     vars: &[(OsString, OsString)],
 ) -> Vec<(String, Option<OsString>)> {
     let mut env = vec![
@@ -614,11 +636,14 @@ fn cargo_env(
             env.push((var.to_owned(), Some(value.into())));
         }
     }
-    if let Some(dir) = libdir {
-        env.push((
-            "LD_LIBRARY_PATH".to_owned(),
-            Some(prepend(dir, get(vars, "LD_LIBRARY_PATH"))),
-        ));
+    if !libdirs.is_empty() {
+        let path = libdirs
+            .iter()
+            .rev()
+            .fold(get(vars, "LD_LIBRARY_PATH"), |rest, dir| {
+                Some(prepend(dir, rest))
+            });
+        env.push(("LD_LIBRARY_PATH".to_owned(), path));
     }
     env.extend(
         overriding(vars.iter().map(|(k, _)| k.as_os_str()))
@@ -765,7 +790,7 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
         };
         if let (Ok(pc), Ok(found)) = (&b.pc_dir, &row.bound) {
             let what = format!("against {} at {}", found.describe(), row.prefix.display());
-            let env = cargo_env(pc, &target, None, &vars);
+            let env = cargo_env(pc, &target, &[], &vars);
             let restamp =
                 || bound(&program, &row.prefix, pc, &search(pc)).map(|again| stamp(pc, &again));
             row.clippy = match ready_target(&target, prefixes, &stamp(pc, found), restamp) {
@@ -802,7 +827,7 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
                     &mut cargo(&["test", "--workspace", "--all-targets", "--no-run"], &env),
                 ));
                 if link == Stage::Passed && row.tier1.is_some() {
-                    let env = cargo_env(pc, &target, Some(&found.libdir), &vars);
+                    let env = cargo_env(pc, &target, &found.libdirs, &vars);
                     row.tier1 = Some(Stage::of(
                         run_step(
                             &format!("tests (Tier 1) {what}"),
@@ -1017,7 +1042,7 @@ mod tests {
         let env = cargo_env(
             Path::new("/ff/lib/pkgconfig"),
             Path::new("/t/compat/ff"),
-            None,
+            &[],
             &[],
         );
         let set = |env: &[(String, Option<OsString>)], k: &str| value(env, k).flatten();
@@ -1043,7 +1068,7 @@ mod tests {
         let env = cargo_env(
             Path::new("/ff/lib/pkgconfig"),
             Path::new("/t/compat/ff"),
-            Some(Path::new("/ff/lib")),
+            &[p("/ff/lib")],
             &existing,
         );
         assert_eq!(
@@ -1053,6 +1078,17 @@ mod tests {
         assert_eq!(set(&env, "LD_LIBRARY_PATH"), Some("/ff/lib:/x/lib".into()));
         // The caller's own setting stays.
         assert_eq!(value(&env, "CARGO_PROFILE_DEV_DEBUG"), None);
+        // Every bound library's directory, in order, should they differ.
+        let env = cargo_env(
+            Path::new("/ff/lib/pkgconfig"),
+            Path::new("/t/compat/ff"),
+            &[p("/ff/lib"), p("/ff/lib64")],
+            &existing,
+        );
+        assert_eq!(
+            set(&env, "LD_LIBRARY_PATH"),
+            Some("/ff/lib:/ff/lib64:/x/lib".into())
+        );
     }
 
     #[test]
@@ -1099,7 +1135,7 @@ mod tests {
         let env = cargo_env(
             Path::new("/ff/n8.1/lib/pkgconfig"),
             Path::new("/t/compat/n8.1"),
-            None,
+            &[],
             &existing,
         );
         for name in &unset {
@@ -1147,7 +1183,7 @@ mod tests {
             libavcodec: version.into(),
             ffmpeg: Some(format!("n{version}")),
             version_header: Some(header),
-            libdir: dir.join("lib"),
+            libdirs: vec![dir.join("lib")],
         };
         (pc, b)
     }
@@ -1354,27 +1390,39 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// A prefix at `dir` whose libavcodec.pc names `libdir` and
-    /// `includedir`, and the directory holding that file.
+    /// `lib`'s pkg-config file in `pc`, naming `libdir` and `includedir`.
+    fn write_pc(pc: &Path, lib: &str, libdir: &Path, includedir: &Path) {
+        std::fs::create_dir_all(pc).unwrap();
+        let text = format!(
+            "libdir={}\nincludedir={}\n\nName: {lib}\nDescription: FFmpeg\n\
+             Version: 61.19.100\nLibs: -L${{libdir}} -l{}\nCflags: -I${{includedir}}\n",
+            libdir.display(),
+            includedir.display(),
+            &lib[3..]
+        );
+        std::fs::write(pc.join(format!("{lib}.pc")), text).unwrap();
+    }
+
+    /// A prefix at `dir` whose pkg-config files, one for each bound
+    /// library, name `libdir` and `includedir`; and the directory holding
+    /// them.
     fn pc_prefix(dir: &Path, libdir: &Path, includedir: &Path) -> PathBuf {
         let pc = dir.join("lib/pkgconfig");
-        std::fs::create_dir_all(&pc).unwrap();
-        let text = format!(
-            "libdir={}\nincludedir={}\n\nName: libavcodec\nDescription: FFmpeg codec library\n\
-             Version: 61.19.100\nLibs: -L${{libdir}} -lavcodec\nCflags: -I${{includedir}}\n",
-            libdir.display(),
-            includedir.display()
-        );
-        std::fs::write(pc.join("libavcodec.pc"), text).unwrap();
+        for (lib, _) in BOUND {
+            write_pc(&pc, lib, libdir, includedir);
+        }
         pc
     }
 
-    /// libavcodec's library in `lib` and its header in `include`.
+    /// Each bound library in `lib` and its header in `include`.
     fn install(lib: &Path, include: &Path) {
         std::fs::create_dir_all(lib).unwrap();
-        std::fs::write(lib.join("libavcodec.so"), "").unwrap();
-        std::fs::create_dir_all(include.join("libavcodec")).unwrap();
-        std::fs::write(include.join("libavcodec/avcodec.h"), "").unwrap();
+        for (name, header) in BOUND {
+            std::fs::write(lib.join(format!("{name}.so")), "").unwrap();
+            let h = include.join(header);
+            std::fs::create_dir_all(h.parent().unwrap()).unwrap();
+            std::fs::write(h, "").unwrap();
+        }
     }
 
     #[test]
@@ -1391,17 +1439,17 @@ mod tests {
         install(&other.join("lib"), &other.join("include"));
         let b = bind(&ff, &ff.join("lib"), &ff.join("include")).unwrap();
         assert_eq!(b.libavcodec, "61.19.100");
-        assert_eq!(b.libdir, ff.join("lib"));
+        assert_eq!(b.libdirs, [ff.join("lib")]);
         // Through a symlink to the prefix, everything is still inside it.
         let link = d.join("link");
         symlink(&ff, &link);
         assert!(bind(&link, &link.join("lib"), &link.join("include")).is_ok());
         // Another FFmpeg's library or header, named outright.
         let e = bind(&ff, &other.join("lib"), &ff.join("include")).unwrap_err();
-        assert!(e.contains("libavcodec's library"), "{e}");
+        assert!(e.contains("libavutil's library"), "{e}");
         assert!(e.contains("outside the prefix"), "{e}");
         let e = bind(&ff, &ff.join("lib"), &other.join("include")).unwrap_err();
-        assert!(e.contains("libavcodec's header"), "{e}");
+        assert!(e.contains("libavutil's header"), "{e}");
         assert!(e.contains("outside the prefix"), "{e}");
         // Or through a symlink in the prefix.
         let linked = d.join("linked");
@@ -1415,9 +1463,70 @@ mod tests {
         assert!(e.contains("outside the prefix"), "{e}");
         // Or not there at all.
         let e = bind(&ff, &ff.join("lib"), &ff.join("nowhere")).unwrap_err();
-        assert!(e.contains("libavcodec's header"), "{e}");
+        assert!(e.contains("libavutil's header"), "{e}");
         assert!(e.contains("isn't there"), "{e}");
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn every_library_the_build_binds_must_be_the_prefixs() {
+        let d = scratch("every");
+        let ff = d.join("ff");
+        install(&ff.join("lib"), &ff.join("include"));
+        let other = d.join("other");
+        install(&other.join("lib"), &other.join("include"));
+        let bind = |pc: &Path| {
+            bound(OsStr::new("pkg-config"), &ff, pc, pc.as_os_str()).map_err(|e| format!("{e:#}"))
+        };
+        for (lib, _) in BOUND {
+            // Only this library's file leads to another FFmpeg, as when a
+            // moved prefix's libavcodec.pc alone was put right.
+            let pc = pc_prefix(&ff, &ff.join("lib"), &ff.join("include"));
+            assert!(bind(&pc).is_ok());
+            write_pc(&pc, lib, &other.join("lib"), &ff.join("include"));
+            let e = bind(&pc).unwrap_err();
+            assert!(e.starts_with(&format!("{lib}'s library")), "{e}");
+            assert!(e.contains("outside the prefix"), "{e}");
+            write_pc(&pc, lib, &ff.join("lib"), &other.join("include"));
+            let e = bind(&pc).unwrap_err();
+            assert!(e.starts_with(&format!("{lib}'s header")), "{e}");
+            // Or the prefix has none, as an install that stopped partway
+            // left it: pkg-config finds the system's, or nothing.
+            std::fs::remove_file(pc.join(format!("{lib}.pc"))).unwrap();
+            let e = bind(&pc).unwrap_err();
+            assert!(
+                e.starts_with(&format!("pkg-config finds {lib} in "))
+                    || e.starts_with(&format!("pkg-config --variable=pcfiledir {lib} failed")),
+                "{e}"
+            );
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn the_libraries_checked_are_those_the_build_binds() {
+        // ffmpeg-sys-next binds libavutil always, and one library for each
+        // feature the workspace turns on.
+        let manifest = std::fs::read_to_string(crate::workspace_root().join("Cargo.toml")).unwrap();
+        let line = manifest
+            .lines()
+            .find(|l| l.starts_with("ffmpeg-sys-next ="))
+            .unwrap();
+        let features = line.split("features = [").nth(1).unwrap();
+        let features = &features[..features.find(']').unwrap()];
+        let mut want: Vec<String> = features
+            .split(',')
+            .map(|f| format!("lib{}", f.trim().trim_matches('"')))
+            .chain(["libavutil".to_owned()])
+            .collect();
+        want.sort();
+        let mut checked: Vec<String> = BOUND.iter().map(|(l, _)| (*l).to_owned()).collect();
+        checked.sort();
+        assert_eq!(checked, want);
+        for (lib, header) in BOUND {
+            assert!(STAMPED.contains(&lib), "{lib}");
+            assert!(header.starts_with(&format!("{lib}/")), "{header}");
+        }
     }
 
     #[test]
@@ -1437,7 +1546,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            e.starts_with("false --variable=pcfiledir libavcodec failed"),
+            e.starts_with("false --variable=pcfiledir libavutil failed"),
             "{e}"
         );
         std::fs::remove_dir_all(&d).ok();
@@ -1448,7 +1557,7 @@ mod tests {
             libavcodec: v.into(),
             ffmpeg: ff.map(Into::into),
             version_header: None,
-            libdir: p("/lib"),
+            libdirs: vec![p("/lib")],
         })
     }
 
