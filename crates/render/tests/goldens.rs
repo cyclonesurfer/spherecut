@@ -3021,6 +3021,54 @@ fn cpu_checks() -> Vec<CpuCheck> {
     ]
 }
 
+/// Pixels of `display` (RGB in [0, 1]) whose red lies more than 0.1 of
+/// a code from a whole 8-bit one.
+fn between_codes(display: &[f64]) -> usize {
+    display
+        .chunks(3)
+        .filter(|p| {
+            let c = p[0] * 255.0;
+            (c - c.round()).abs() > 0.1
+        })
+        .count()
+}
+
+/// Whether `gpu` holds what it filters from an 8-bit plane to whole
+/// codes, as the emulation's model of lavapipe's filter has it, and how
+/// many pixels say otherwise: the checker's greys of 0.1 and 0.9
+/// magnified 2.25 times, so that its edges are filtered at level 0, read
+/// back in linear light, whose f16 moves a code by up to 0.055 (D32
+/// found every pixel within 0.035 of a code at 16 bits). The f64
+/// reference puts thousands of pixels between codes, which is asserted.
+fn filters_to_codes(gpu: &Gpu, renderer: &mut StillRenderer) -> (bool, usize) {
+    let s = checker_gray();
+    let v = ViewParams::new(ypr(10.0, 0.0, 0.0), lens(Projection::Rectilinear, 20.0));
+    let opts = StillOptions {
+        depth: Depth::Linear,
+        ..StillOptions::default()
+    };
+    let got = renderer.render(gpu, &s.frame, &v, RECT, &opts).unwrap();
+    let display: Vec<f64> = unit(&got).iter().map(|l| oetf(*l)).collect();
+    let mut seen = [false; 256];
+    for p in display.chunks(3) {
+        seen[(p[0].clamp(0.0, 1.0) * 255.0).round() as usize] = true;
+    }
+    let shades = seen.iter().filter(|s| **s).count();
+    assert!(shades > 100, "the probe shows {shades} shades");
+    let cpu = reference::render_trilinear(&s.frame, &v, RECT).unwrap();
+    let reference = between_codes(&cpu.data);
+    assert!(
+        reference > 2000,
+        "a filter in f64 puts {reference} pixels between codes"
+    );
+    let between = between_codes(&display);
+    eprintln!(
+        "the 8-bit filter probe: {shades} shades, {between} pixels between codes ({reference} \
+         in f64)"
+    );
+    (between == 0, between)
+}
+
 // ---------------------------------------------------------------------
 // Local faults, for the other-driver rule (D32)
 //
@@ -3676,7 +3724,8 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
     // RADV's export of the mip pass's means comes within 1 dB of every
     // row. lavapipe's own filter, emulated the same way, comes within 1
     // dB of its render on every row, which is what the method can be
-    // checked against here.
+    // checked against here, where lavapipe filters 8-bit planes to whole
+    // codes as the model has it.
     let fixed = |blend: i32, truncate: bool| Precision {
         texel_bits: Some(8),
         lod_bits: Some(8),
@@ -3801,10 +3850,22 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
         radv_miss < 1.0,
         "RADV's export misses the RX 7600 by {radv_miss:.2} dB"
     );
-    assert!(
-        lavapipe_miss < 1.0,
-        "lavapipe's filter misses lavapipe by {lavapipe_miss:.2} dB"
-    );
+    // The model of lavapipe's filter is a fact about the lavapipe it was
+    // made on, which holds what it filters from 8-bit planes to codes; a
+    // lavapipe that filters them in floating point (GALLIVM_PERF=
+    // no_aos_sampling, or another build) is reported, not held to it.
+    let (to_codes, between) = filters_to_codes(gpu, &mut renderer);
+    if to_codes {
+        assert!(
+            lavapipe_miss < 1.0,
+            "lavapipe's filter misses lavapipe by {lavapipe_miss:.2} dB"
+        );
+    } else {
+        eprintln!(
+            "lavapipe here filters 8-bit planes between codes ({between} pixels of the probe), \
+             so its filter's model, which misses it by {lavapipe_miss:.2} dB, isn't asserted"
+        );
+    }
 }
 
 #[test]
