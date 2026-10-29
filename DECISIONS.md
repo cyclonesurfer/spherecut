@@ -4462,7 +4462,12 @@ What:
     - It records `ShownInterval` and `AvOffset`.
   - **The playhead.** It moves the cache's playhead
     (`try_set_playhead`) to the clock's time, or to a seek's `at` while
-    the seek is on its way. During a step, the worker moves it.
+    the seek is on its way. During a step, the worker moves it. When
+    the cache's lock is taken, the next `present` tries again, and a
+    repaint is asked for so that one comes: until then the upload
+    thread picks frames around the old playhead. Whatever drives the
+    player presents while it waits on it, as the GUI does every frame
+    and the benchmarks do.
   - **The end.** Once the clock passes the first stream's end (its last
     frame's end, else its duration), it pauses on the last frame and
     sends `Ended`. `play` then starts from 0.
@@ -4898,6 +4903,24 @@ Tested:
   them, except with `--quick`) or a perf clip not found, no stitched
   equirect among the samples, and "no GPU: the adapter
   SPHERECUT_ADAPTER=auto picks is a CPU, llvmpipe".
+- The third part's first `cargo xtask check` failed
+  `frames_passed_over_while_playing_count_as_dropped`. Of 18 more runs
+  of the engine binary, two failed it again, one of them
+  `playback_after_a_seek_waits_for_the_audio_preroll` too; 40 runs of
+  the first test alone passed. In the
+  first, the presenter's playhead for frame 8 had found the cache's
+  lock taken, and the test waited 20 s for frame 10 to come up in a
+  slot without presenting again: the cache kept the playhead at 6, so
+  the upload thread wanted 6 to 9, never 10. In the second, a snapshot
+  that found the status lock taken was the copy from before, the empty
+  default, with `has_audio` false (`fresh` says so). The tests now
+  present while they wait and read fresh snapshots (`common::snapshot`,
+  which the benchmarks' stream rate and decode paths use too), and the
+  presenter asks for a repaint when the cache's lock loses its playhead
+  (`a_playhead_the_cache_was_too_busy_for_asks_for_a_repaint`, which
+  holds the lock over a present on a marked thread and fails without
+  it). Then 20 runs of the engine binary passed, and 5 of each
+  playback binary beside 4 busy loops.
 
 Revisit if: H1's bench or the 256 MiB-budget 5.7K run shows decode
 waiting on the cache while the window has room, or the window by time
@@ -5024,6 +5047,19 @@ Tested:
   500 and 4000 kbps (`a_noisy_clip_comes_out_at_the_bitrate_asked_for`).
 - `cargo xtask hw-test --list` lists the six playback benchmarks among
   31 Tier 2 tests.
+- `cargo xtask hw-test --quick --samples …` here, end to end: the
+  first run's Tier 1 failed xtask's
+  `reads_real_cargo_output_whatever_the_users_terminal_settings`, whose
+  control (a user's `[term]` config changes cargo's output when left
+  alone) inherited hw-test's `PLAIN_OUTPUT`, which beats the config.
+  Its assertion printed the scratch workspace's cargo output, which the
+  report then read as 8 binaries of the run's own that "did not
+  finish". The control now runs cargo with those variables unset, and
+  the test quotes the output it prints;
+  `another_cargo_runs_output_in_a_failure_stays_the_failures_when_quoted`
+  reads such a failure both ways. The second run passed: Tier 1 589
+  passed in 43 binaries, Tier 2 2 passed and 19 skipped, and the
+  report has every new section.
 - A real perf clip, on this box's 4 CPUs and FFmpeg 6.1 (libx265 3.5):
   hw-test made `hevc8-5k7-30fps-noisy-20s.mp4` in 26 min 52 s, 254 MB
   at 101.6 Mbit/s (HEVC Main, 600 frames, 20.0 s), and software decoded

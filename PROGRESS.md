@@ -426,13 +426,40 @@ Evidence for the third part, on this box:
   SPHERECUT_ADAPTER=auto picks is a CPU, llvmpipe (LLVM 20.1.2, 256
   bits)".
 - `cargo xtask hw-test --list` lists 31 Tier 2 tests, the six
-  benchmarks among them. xtask's 62 tests pass, among them Tier 1 read
+  benchmarks among them. xtask's 63 tests pass, among them Tier 1 read
   from real cargo output and the perf clips made, cached and made again
   on a tiny spec.
 - hw-test made the 5.7K 8-bit perf clip here in 26 min 52 s: 254 MB at
   101.6 Mbit/s, which FFmpeg 6.1 decodes in software at 27.1 fps on 4
   CPUs, far below the 150 fps that would make it too easy (D37). The
   run was stopped before the other two clips.
+- The part's first `cargo xtask check` failed an engine test of the
+  second part, `frames_passed_over_while_playing_count_as_dropped`, in
+  3 of 19 runs of its binary; one of those also failed
+  `playback_after_a_seek_waits_for_the_audio_preroll`. The first waited
+  for a frame without presenting while the cache kept a playhead the
+  presenter had lost to a taken lock; the second read a snapshot that
+  was the copy from before. The tests now present while they wait and
+  read fresh snapshots, and the presenter asks for a repaint when it
+  loses a playhead, with a test that fails without it (D34). Then 20
+  runs of the engine binary passed, and 5 of each playback binary
+  beside 4 busy loops.
+- `cargo xtask hw-test --quick` with the samples, end to end here,
+  failed its Tier 1 run at first on xtask's own cargo-output test,
+  which inherited hw-test's terminal settings, and the scratch cargo
+  output its assertion printed read as 8 binaries of the run's own.
+  Fixed, with a test (D37); the run then passed: Tier 1 589 passed in
+  43 binaries (115 s), Tier 2 2 passed and 19 skipped (no render
+  node), and every new section of the report written ("Power profile"
+  and "Render nodes" say "not available" and "None" here).
+- Checks of `m1/playback` at 11a9d32 (only docs changed after it):
+  `cargo xtask check` passed (2 min); no proptest is new or touched in
+  this part, and the slice's two passed at `PROPTEST_CASES=100000` in
+  its first and second parts; `cargo +1.95 build --workspace
+  --all-targets` built with no warning (2 min 43 s); and `cargo xtask
+  compat` passed clippy, the link and the binding against FFmpeg 8.1.3
+  (libavcodec 62.28.103, as Pat's) and 9.0.2 (63.1.102), and Tier 1
+  against 8.1.3 (8 min 5 s).
 
 ## Known issues and limits
 
