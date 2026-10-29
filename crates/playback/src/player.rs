@@ -21,9 +21,10 @@
 //! takes two slots a stream; with fewer live (a small setting, or slots
 //! out of memory), each stream's new frame goes up as soon as it is
 //! Ready, which gives its old slot back for the next stream's.
-//! It counts what the overlay shows: UI frame times and hitches, frames
-//! shown, dropped (passed over while playing, by run places, else by the
-//! time between), the interval between frames shown and the A/V offset.
+//! It counts what the overlay shows: UI frame times and hitches (an
+//! interval over 1.5 times the median of the last ones), frames shown,
+//! dropped (passed over while playing, by run places, else by the time
+//! between), the interval between frames shown and the A/V offset.
 //!
 //! **Steps** of one frame either way are instant when the slots hold the
 //! frame next to the one shown in its run (which the upload thread sees
@@ -415,15 +416,19 @@ impl Ui {
         self.last_id
     }
 
-    /// The median UI frame interval: how long until a frame presented now
-    /// is on screen.
-    fn latency(&self) -> Duration {
-        if self.intervals.is_empty() {
-            return Duration::ZERO;
-        }
+    /// The median of the last UI frame intervals, in milliseconds.
+    fn median_interval(&self) -> Option<f32> {
         let mut v: Vec<f32> = self.intervals.iter().copied().collect();
         v.sort_by(f32::total_cmp);
-        Duration::from_secs_f32(v[v.len() / 2].max(0.0) / 1000.0).min(MAX_LATENCY)
+        v.get(v.len() / 2).map(|m| m.max(0.0))
+    }
+
+    /// The median UI frame interval, at most [`MAX_LATENCY`]: how long
+    /// until a frame presented now is on screen.
+    fn latency(&self) -> Duration {
+        self.median_interval().map_or(Duration::ZERO, |m| {
+            Duration::from_secs_f32(m / 1000.0).min(MAX_LATENCY)
+        })
     }
 }
 
@@ -788,8 +793,12 @@ impl Player {
         if let Some(prev) = ui.last_present.replace(now) {
             let interval = now.saturating_duration_since(prev).as_secs_f32() * 1000.0;
             perf.record(Stage::UiFrame, interval);
-            let median = ui.latency().as_secs_f32() * 1000.0;
-            if ui.intervals.len() >= INTERVALS / 2 && interval > 1.5 * median {
+            // Against the intervals as they are: a steady UI slower than
+            // the latency's cap has no hitches.
+            if ui.intervals.len() >= INTERVALS / 2
+                && let Some(median) = ui.median_interval()
+                && interval > 1.5 * median
+            {
                 perf.add(Counter::Hitches, 1);
             }
             if ui.intervals.len() == INTERVALS {

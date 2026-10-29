@@ -1,13 +1,13 @@
 //! The engine's rules (M1 plan sections 8.2 to 8.4 and 12.1), on
 //! lavapipe and a `ManualClock` wherever wall time would make a test
 //! flaky: the presenter shows the latest frame at or before the clock
-//! with a variable frame rate; frames passed over while playing are
-//! counted as dropped; a decoder that falls behind catches up without
-//! making the frames it passes; a slot is reused only once nothing else
-//! holds its frame; a seek keeps the frame on screen until the new one
-//! is ready and frees the old run's slots; steps follow runs both ways;
-//! two streams seek and step on three slots, and with the second's
-//! decoder behind; a keyframe seek back with the cache full lands on its
+//! with a variable frame rate; hitches are intervals over 1.5 times the
+//! median; frames passed over while playing are counted as dropped; a
+//! decoder that falls behind catches up without making the frames it
+//! passes; a slot is reused only once nothing else holds its frame; a
+//! seek keeps the frame on screen until the new one is ready and frees
+//! the old run's slots; steps follow runs both ways; two streams seek
+//! and step on three slots, and with the second's decoder behind; a keyframe seek back with the cache full lands on its
 //! keyframe; a fallback reaches the snapshot, from a fault and from
 //! `Auto` picking Vulkan on lavapipe; the audio seam holds playback for
 //! its preroll; and a 5.7K source plays inside a 256 MiB cache.
@@ -227,6 +227,32 @@ fn frames_passed_over_while_playing_count_as_dropped() {
     eprintln!("shown {frames:?}: {passed} passed over");
     assert_eq!(player.perf().count(Counter::Dropped), passed as u64);
     assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+#[test]
+fn hitches_are_intervals_over_one_and_a_half_times_the_median() {
+    // A steady UI at 12.5 fps, slower than the present latency's 50 ms
+    // cap, has no hitches; a frame that takes 200 ms is one.
+    let player = player(
+        clip(30),
+        Arc::new(ManualClock::new(RATE.frame_duration())),
+        config(64),
+    );
+    let start = Instant::now();
+    let mut now = start;
+    for _ in 0..40 {
+        now += Duration::from_millis(80);
+        let _ = player.present(now);
+    }
+    assert_eq!(player.perf().count(Counter::Hitches), 0);
+    now += Duration::from_millis(200);
+    let _ = player.present(now);
+    for _ in 0..10 {
+        now += Duration::from_millis(80);
+        let _ = player.present(now);
+    }
+    assert_eq!(player.perf().count(Counter::Hitches), 1);
+    common::join(player);
 }
 
 #[test]
