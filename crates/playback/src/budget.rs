@@ -8,7 +8,9 @@
 //! never takes more than half of what the process may still use. The
 //! limits read are those of the process's cgroup and its ancestors up to
 //! the mount's root, which in a container with its own cgroup namespace
-//! is the container's. On the
+//! is the container's. A recheck every few seconds ([`recheck`]) counts
+//! the cache's own frames as free, since both readings count them as
+//! used, and shrinks the budget under memory pressure. On the
 //! machines with an iGPU, `MemAvailable` already counts what the GPU
 //! uses, since it shares the RAM. [`CacheBudget::Bytes`] is a size given
 //! in Settings, with `--cache-mb`, or in `SPHERECUT_FRAME_CACHE_MIB`.
@@ -207,14 +209,20 @@ pub fn cgroup_room(max: Option<&str>, current: Option<&str>) -> Option<u64> {
     Some(max.saturating_sub(current))
 }
 
-/// The budget a recheck sets (every few seconds, on the upload thread):
-/// what `configured` stands for now, and under memory pressure, with
-/// less than [`PRESSURE`] available, no more than ¼ of what is, below the
-/// automatic floor and below an explicit size.
-pub fn recheck(configured: CacheBudget, now: &AutoBudget) -> u64 {
-    let bytes = configured.bytes(now);
+/// The budget a recheck sets (every few seconds, on the upload thread),
+/// from the memory `now` while the cache holds `held` bytes: what
+/// `configured` stands for with the cache's own frames counted as free,
+/// since `MemAvailable` and a cgroup's `memory.current` count them as
+/// used, and Auto would otherwise shrink at each recheck as the cache
+/// fills. Under memory pressure, with less than [`PRESSURE`] available,
+/// no more than ¼ of that, below the automatic floor and below an
+/// explicit size.
+pub fn recheck(configured: CacheBudget, now: &AutoBudget, held: u64) -> u64 {
+    let free = |b: u64| b.saturating_add(held);
+    let own = budget_from(now.mem_available.map(free), now.cgroup_room.map(free));
+    let bytes = configured.bytes(&own);
     match now.mem_available {
-        Some(a) if a < PRESSURE => bytes.min(a / 4),
+        Some(a) if a < PRESSURE => bytes.min(free(a) / 4),
         _ => bytes,
     }
 }
@@ -429,18 +437,55 @@ mod tests {
     #[test]
     fn a_recheck_shrinks_under_pressure() {
         let calm = budget_from(Some(16 * GIB), None);
-        assert_eq!(recheck(CacheBudget::Auto, &calm), 4 * GIB);
-        assert_eq!(recheck(CacheBudget::Bytes(12 * GIB), &calm), 12 * GIB);
+        assert_eq!(recheck(CacheBudget::Auto, &calm, 0), 4 * GIB);
+        assert_eq!(recheck(CacheBudget::Bytes(12 * GIB), &calm, 0), 12 * GIB);
         // 600 MiB available: a quarter, under the floor and under an
         // explicit size.
         let tight = budget_from(Some(600 * MIB), None);
         assert_eq!(tight.bytes, AUTO_MIN);
-        assert_eq!(recheck(CacheBudget::Auto, &tight), 150 * MIB);
-        assert_eq!(recheck(CacheBudget::Bytes(2 * GIB), &tight), 150 * MIB);
-        assert_eq!(recheck(CacheBudget::Bytes(100 * MIB), &tight), 100 * MIB);
+        assert_eq!(recheck(CacheBudget::Auto, &tight, 0), 150 * MIB);
+        assert_eq!(recheck(CacheBudget::Bytes(2 * GIB), &tight, 0), 150 * MIB);
+        assert_eq!(recheck(CacheBudget::Bytes(100 * MIB), &tight, 0), 100 * MIB);
+        // With 400 MiB of it the cache's own: a quarter of the 1000 MiB
+        // the cache may count on.
+        assert_eq!(recheck(CacheBudget::Auto, &tight, 400 * MIB), 250 * MIB);
         // Nothing known: as configured.
         let unknown = budget_from(None, None);
-        assert_eq!(recheck(CacheBudget::Auto, &unknown), AUTO_MIN);
+        assert_eq!(recheck(CacheBudget::Auto, &unknown, 0), AUTO_MIN);
+    }
+
+    /// Each recheck reads the memory with the cache full to the budget
+    /// the last one set, and must set that budget again.
+    fn settles(configured: CacheBudget, read: impl Fn(u64) -> AutoBudget) -> Vec<u64> {
+        let mut held = 0;
+        (0..8)
+            .map(|_| {
+                held = recheck(configured, &read(held), held);
+                held
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_recheck_counts_the_cache_s_own_frames_as_its_own() {
+        // odin: 24 GiB available before playback, a quarter of it the
+        // plan's 6 GiB, however full the cache.
+        let odin = settles(CacheBudget::Auto, |held| {
+            budget_from(Some(24 * GIB - held), None)
+        });
+        assert_eq!(odin, [6 * GIB; 8]);
+        // A container that may use 4 GiB, 1 GiB of it the rest of the
+        // process: half of the 3 GiB left, though `memory.current`
+        // counts the cache.
+        let container = settles(CacheBudget::Auto, |held| {
+            budget_from(Some(64 * GIB - held), Some(3 * GIB - held))
+        });
+        assert_eq!(container, [3 * GIB / 2; 8]);
+        // An explicit size stays as set.
+        let set = settles(CacheBudget::Bytes(2 * GIB), |held| {
+            budget_from(Some(24 * GIB - held), None)
+        });
+        assert_eq!(set, [2 * GIB; 8]);
     }
 
     /// A fake `/proc` and cgroup mount: the process's cgroup has no limit

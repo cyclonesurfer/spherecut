@@ -30,7 +30,8 @@
 //! for good (Dead), and playback goes on with one fewer, with an event.
 //!
 //! **The budget**: set when the thread starts, and rechecked every 5 s
-//! against the memory available ([`crate::budget::recheck`]).
+//! against the memory available, with the cache's own bytes counted as
+//! free ([`crate::budget::recheck`]).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -161,7 +162,8 @@ impl UploadThread {
     fn recheck(&self, st: &mut State) {
         st.budget_at = Instant::now();
         let now = (self.read)();
-        let bytes = budget::recheck(self.configured, &now);
+        let held = self.shared.cache.stats().bytes;
+        let bytes = budget::recheck(self.configured, &now, held);
         let mut status = self.shared.status();
         if status.budget.is_none_or(|b| b.bytes != bytes) {
             tracing::info!("frame cache budget: {} MiB", bytes >> 20);
