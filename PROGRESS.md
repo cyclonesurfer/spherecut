@@ -361,14 +361,15 @@ The mip fix's review found 6 more, all fixed or corrected (cf50f0d,
 
 ## Slice 5: the headless playback engine
 
-On `m1/playback`, in three parts: the clocks, the UI thread's guard and
-the frame cache; the engine; and the Tier 2 playback benchmarks with
-hw-test's H1 additions (D34, D37). The slice's acceptance (m1-plan
+Built on `m1/playback` and merged into main on 2026-10-29, in three
+parts: the clocks, the UI thread's guard and the frame cache; the
+engine; and the Tier 2 playback benchmarks with hw-test's H1 additions
+(D34, D37). The slice's acceptance (m1-plan
 section 14):
 
 | Acceptance | Evidence |
 |---|---|
-| The cache's proptests and the budget's fixtures pass | `the_cache_keeps_its_rules`, against a model of the cache's rules, at `PROPTEST_CASES=100000` (27 s in a release build; 24 s with pins, since the review); it caught each of eleven faults put into the cache by hand. `a_system_clock_adds_up` at 100000 too. `playback::budget`'s fixtures: huginn's 128 GB take the 8 GiB cap, odin's 32 GB a quarter of 24 GiB available, a small machine the floor, a cgroup v2 limit up a fake tree caps it, and a namespaced container's at the root (D34) |
+| The cache's proptests and the budget's fixtures pass | `the_cache_keeps_its_rules`, against a model of the cache's rules, at `PROPTEST_CASES=100000` (27 s in a release build; 24 s with pins, since the review); it caught each of eleven faults put into the cache by hand. `a_system_clock_adds_up` at 100000 too. `playback::budget`'s fixtures: huginn's 128 GB take the 8 GiB cap, odin's 32 GB a quarter of 24 GiB available, a small machine the floor, a cgroup v2 limit up a fake tree caps it, a namespaced container's at the root, page cache the cgroup would give back is room, and rechecks under pressure settle (D34) |
 | `never_blocks` (the engine's part), the seek storm and shutdown pass | `crates/playback/tests/never_blocks.rs`, on a thread marked with `OnBlock::Panic`: with a backend that never answers, UI iterations took 179 µs at the 99th percentile; through 1000 seeks in 2 s, 199 µs, with one of the 1001 requests decoded to completion and the last seek's frame shown; a player stuck at the gate joins cleanly in 12 to 160 ms; the negative control panics. Five runs in a row beside 4 busy loops (D34) |
 | A 256 MiB-budget 5.7K run plays without exceeding its budget | `crates/playback/tests/engine.rs`: 60 frames of 5760×2880 through a 256 MiB cache and four slots, every frame shown in turn, none dropped, the cache peaking at 237 MiB with no "too small" notice (D34) |
 | **H1 is requested** with the list in section 12.3 | Next, item 1 |
@@ -479,6 +480,51 @@ The review's fixes, on this box (D34, D37):
   changed (2 min 12 s, 601 tests passed). No FFmpeg-facing code
   changed, so `cargo xtask compat` wasn't run again.
 
+A fresh re-review of the fixes (93625f4 to 297c739) found one must-fix
+and four minor faults; the tests written for them turned up two more.
+All are fixed, each with a test that fails without its fix (D34):
+
+- **Must-fix: a keyframe seek back on two streams could stay in
+  Seeking.** With fewer than two slots a stream the presenter shows
+  each stream's new frame as it comes; the first stream's landing was
+  unpinned once in a slot, then evicted as the frame farthest behind,
+  and its stream wanted nothing, keeping its old frame's slot from the
+  other. A landing now stays pinned while its request is the target.
+  Two tests (three slots, and four with one Dead, the cache full)
+  stuck at [40, 60] before.
+- The branch where a stream that failed the request wants no slots had
+  no test: the re-review's mutation M3 passed every test. A test now
+  fails the seek of the stream whose next frame holds the third slot.
+- A step during a keyframe seek started from the time asked (46 after
+  `seek(45, Keyframe)`, where the seek shows 40). It now starts where
+  the seek would land.
+- The budget's recheck swung under pressure (512, 358, 512 MiB every
+  5 s with 1.4 GiB available). It now leaves 1 GiB of what the cache
+  and the rest have together, at least a quarter of it, which the
+  cache's evictions don't change; this caps an explicit size and a
+  container's room too.
+- A cgroup's room counted page cache as use: a container reading a
+  large file had a budget of about 2 MiB. Its use is now the working
+  set, `memory.current` less `inactive_file`.
+- Two more, found by the new tests. A step superseding a seek before
+  its worker started it could wait for cache room for good, the
+  playhead left at 0 (2 of 40 runs). And on three slots one lens's
+  next frame could take the slot the other's frame at the playhead
+  needed, the lenses then showing different frames (16 of 16 runs of
+  the new test under the old rule, and 2 of 12 suite runs of the
+  keyframe test).
+- Left as a documented limit: with no more live slots than streams
+  (two Dead of four, on two streams) a seek or a step never lands.
+  Slots die only on GPU out-of-memory; the viewer is to treat that as
+  a GPU failure (Known issues, D34).
+
+Evidence for these fixes, on this box: the playback tests (81 run, the
+6 Tier 2 benchmarks ignored) passed five runs in a row, and three
+beside 4 busy loops; the engine's 26 passed 10 runs in a row after the
+last fix. `cargo xtask check` passed at ce474d0, after which only the
+docs changed (2 min 12 s, 609 tests passed). No proptest was touched:
+the cache's changes are to its docs.
+
 ## Known issues and limits
 
 - Spherecut opens only MP4/MOV and Matroska/WebM files; anything else,
@@ -518,6 +564,11 @@ The review's fixes, on this box (D34, D37):
   still held are alive beside them, about a frame a stream more (88 MB
   with the X5's two 8K streams). With fewer than two GPU slots a
   stream live, the streams' frames after a seek go up one at a time.
+  With no more live slots than streams (two of four Dead, on two
+  streams), a seek or a step never lands, since every live slot holds
+  a frame on screen. Slots die only when the GPU is out of memory, so
+  the viewer is to treat a `SlotDropped` that leaves that few as a GPU
+  failure (D34).
 - Only `spherecut frame` asks wgpu's adapter for its GPU's render node
   (D30's lookup by bus id, then PCI ids). doctor has no adapter yet, so
   it tests `/dev/dri/renderD128` unless `--render-node` names another; on
@@ -604,8 +655,8 @@ The review's fixes, on this box (D34, D37):
   device: an estimated 5 to 10 minutes each on huginn or odin for Pat's
   X5 set, most of it the software seeks at 8K. The noisy
   5.7K clips they use are 2 s, made the first time by the tests at about
-  200 Mbps and cached in the target's `tmp`; hw-test's 20 s clips are
-  slice 5's. Their four cropped clips, two of them cropped on the left
+  200 Mbps and cached in the target's `tmp`; hw-test's 20 s clips came
+  with slice 5 (D37's perf clips). Their four cropped clips, two of them cropped on the left
   through FFmpeg's `h264_metadata` and `hevc_metadata` filters, are the
   only streams with a left crop: none of the X5 samples has one.
 - Frames of a stream cropped on the left are now cropped exactly in
@@ -635,8 +686,10 @@ The review's fixes, on this box (D34, D37):
   emulation's prediction until Pat's next run (D32). Whether the staging
   belt should replace `write_texture` (the triggers `bench_upload_5k7`
   reports) is H1's to decide on huginn and odin. A lost device makes
-  every render entry point return `gpu_failed`; recovering from it (a
-  new device, the slots uploaded again) is slice 5's. 16-bit sources
+  every render entry point return `gpu_failed`, and the engine then
+  stops its uploads and sends `GpuFailed` (D34); recovering from it (a
+  new device, the slots uploaded again) is the viewer's, in slice 7.
+  16-bit sources
   lose their low 4 bits in the f16 planes, and a 360° frame whose width
   isn't a multiple of its chroma subsampling (odd-width 4:2:0, which AV1
   and VP9 allow) shows a half-texel chroma step at the ±180° seam (D31).
@@ -877,8 +930,8 @@ The review's fixes, on this box (D34, D37):
 
 ## Next
 
-1. **H1 is requested**, once main has slice 5: on huginn and odin, from
-   any terminal, `cargo xtask hw-test --samples <samples>` at main,
+1. **H1 is requested**: on huginn and odin (odin's over Remote Control,
+   from `~/spherecut`), `cargo xtask hw-test --samples <samples>` at main,
    without `--quick` so that it makes the perf clips (once; they are
    kept in `<target>/hw-media/`). It covers plan section 12.3's list:
    Tier 1 on the machine; the adapter dump (`list_adapters_and_features`);
@@ -892,7 +945,7 @@ The review's fixes, on this box (D34, D37):
    (`bench_playback_x5_raw`). The report's "Power profile" says how
    each machine was set; the runs should be on the profile Pat uses for
    editing. odin passed all of slice 2b's, 3b's and 4's Tier 2 tests at
-   918d031 (PR #6, on main since this branch left it), its CPU checks
+   918d031 (PR #6), its CPU checks
    where D32's emulation puts them, so there H1 adds slice 5's playback
    benchmarks and Tier 1; huginn hasn't run 3b's or 4's. The belt and
    U2 decisions follow H1's numbers as soon as they come back:

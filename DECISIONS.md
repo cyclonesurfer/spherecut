@@ -2802,8 +2802,8 @@ Where this differs from the plan:
   feature, which only synth's dev-dependency turns on.
 - The Tier 2 tests' noisy 5.7K clips are 2 s (60 frames), made by the
   tests and cached in Cargo's temp dir, at about 200 Mbps (x265
-  `veryfast`, CRF 18) rather than 100. hw-test's 20 s clips are slice 5's
-  (section 12.4).
+  `veryfast`, CRF 18) rather than 100. hw-test's 20 s clips came with
+  slice 5 (section 12.4; D37's perf clips).
 - The pooled download serves Vulkan too, which the plan left open.
 - `DecodeStats` has `download_buffers`, the buffers the download pool
   has allocated, which the pool tests check.
@@ -2923,8 +2923,9 @@ What:
   neither, so an upload after a loss panicked in wgpu's handler
   (`Device::destroy` in a Tier 1 test now shows each entry point
   returning `gpu_failed`). `Projector::record` returns a `Result` for it,
-  where the plan's returned nothing. What the viewer does then (make the
-  device again, re-upload) is slice 5's.
+  where the plan's returned nothing. Slice 5's engine then sets
+  `gpu_error`, sends `GpuFailed` and stops its uploads (D34); what the
+  viewer does next (make the device again, re-upload) is slice 7's.
 - **Canonical planes**, as plan section 4.2 has them: 8-bit planes are
   written straight into `R8Unorm` or `Rg8Unorm`; 9- to 16-bit planes go
   into an `R16Uint` or `Rg16Uint` scratch, and an ingest pass writes
@@ -4253,8 +4254,9 @@ What:
       `generation` to move, for the upload thread.
   - **Pins.** `pin(stream, frame, stop)` puts the frame a request
     landed on in, past the window if it must be, and keeps it from
-    eviction until `unpin` (the upload thread's, once the frame is in a
-    slot), the stream pins another, or `clear`. Every landing goes in
+    eviction until `unpin` (the upload thread's, once the request is no
+    longer the target: the presenter has put every stream's landing up,
+    or a newer request has come), the stream pins another, or `clear`. Every landing goes in
     that way. Without it a keyframe seek back with the cache full lost
     its keyframe to the frames decoded on from it (after a seek back
     all the history is ahead, so the keyframe is the frame farthest
@@ -4278,20 +4280,27 @@ What:
     which never wait for the lock and say when it was taken. Every
     other method calls `may_block` before it locks, naming its caller.
 - **The budget** (`playback::budget`):
-  - `auto_budget(meminfo, cgroup_max, cgroup_current)` is pure, over
-    the files' text: clamp(¼ × `MemAvailable`, 512 MiB, 8 GiB), then
-    capped at ½ × (`memory.max` − `memory.current`).
+  - `auto_budget(meminfo, cgroup_max, cgroup_current, cgroup_stat)` is
+    pure, over the files' text: clamp(¼ × `MemAvailable`, 512 MiB,
+    8 GiB), then capped at ½ × (`memory.max` − the working set). The
+    working set is `memory.current` less `memory.stat`'s
+    `inactive_file`, the page cache the kernel reclaims before it holds
+    a cgroup at its limit, as Kubernetes counts it. A container reading
+    a large file sits near `memory.max` on page cache alone: 4 GiB with
+    4.29e9 bytes current left a budget of about 2 MiB before.
     - `memory.max` reading `max` is no limit.
     - Text that can't be read says nothing: no `MemAvailable` (or one
       not in kB, or not a number) leaves the 512 MiB floor, and a
       `memory.max` that isn't a number is no cap. A `memory.current`
-      that can't be read counts as 0.
+      that can't be read counts as 0, and a `memory.stat` without a
+      readable `inactive_file` as no page cache.
     - The cap applies after the clamp, so it can go below the floor,
       and to 0 when `memory.current` is past `memory.max`. The cache
       then holds only the minimum the "too small" rule keeps.
   - `read_auto_budget()` reads `/proc/meminfo`, the `0::` line of
-    `/proc/self/cgroup`, and `memory.max` and `memory.current` of that
-    cgroup and each of its ancestors under `/sys/fs/cgroup`, up to the
+    `/proc/self/cgroup`, and `memory.max`, `memory.current` and
+    `memory.stat` of that cgroup and each of its ancestors under
+    `/sys/fs/cgroup`, up to the
     mount's root. The tightest room counts, since every ancestor's
     limit applies (a Flatpak's limit can sit on its parent's slice). In
     a container with its own cgroup namespace (Docker and Podman on
@@ -4310,10 +4319,22 @@ What:
     and into the cgroup's room, since both readings count them as used.
     Without that, Auto shrank at each recheck as the cache filled, and
     evicted as it went: odin's 6 GiB settled near 4.8 GiB, and a 4 GiB
-    container's 1.5 GiB at 1 GiB. With less than 1 GiB available it
-    sets no more than ¼ of what is available with the cache's bytes,
-    below the floor and below an explicit size too, and `set_budget`
-    evicts behind frames first.
+    container's 1.5 GiB at 1 GiB.
+    - **Under pressure** it gives memory back. What the cache and the
+      rest have together is `MemAvailable` with the cache's bytes, or
+      the cgroup's room with them where that is tighter (in a
+      container `MemAvailable` is the host's). The cache holds no more
+      than leaves 1 GiB of that free, and no less than ¼ of it, below
+      the floor and below an explicit size too; `set_budget` evicts
+      behind frames first.
+    - What the two have together doesn't change as the cache evicts,
+      so each recheck sets what the one before did. The first rule, ¼
+      of it once less than 1 GiB was available, swung: with 1.4 GiB
+      available before playback Auto went 512, 358, 512, 358 MiB every
+      5 s, evicting about 150 MiB each time (the re-review's finding).
+      Now it holds 410 MiB. A set 30 GiB with 24 GiB available holds
+      23 GiB, where the first rule let the cache fill memory and then
+      cut it to a quarter.
 - **`PerfStats`** (`playback::perf`), the one source of the overlay's,
   the smoke run's and the benchmarks' numbers (plan section 10):
   - stages (`Decode`, `Download`, `Convert`, `UploadCpu`, `UploadGpu`,
@@ -4428,7 +4449,14 @@ What:
     shape and reused for every frame of that shape.
   - **Out of memory** (risk 11). A slot the GPU has no memory for is
     Dead for good: the player sends `SlotDropped`, and playback goes on
-    with one fewer.
+    with one fewer. That holds while more slots live than streams play:
+    two streams need three, since each stream's frame on screen stays
+    Shown until its next is up. With as many live slots as streams, or
+    fewer, every live slot is Shown and a seek or a step never lands
+    (the re-review found two Dead of four stalling two streams). Slots
+    die only when the GPU is out of memory, so the viewer (slice 7) is
+    to treat a `SlotDropped` that leaves no more live slots than
+    streams as a GPU failure.
   - Slots past a smaller setting give their memory back once they are
     Free and unheld.
 - **The upload thread** (plan section 8.3):
@@ -4440,8 +4468,19 @@ What:
       the frame it landed on. Until every stream's landing is in a slot
       the share is one, so a stream that lands late still finds a slot
       Free; a stream that failed the request, or never opened, is left
-      out of the wait. Once its landing is in a slot, it is unpinned;
-    - otherwise, the frame at the playhead;
+      out of the wait. Its landing is unpinned once the request is no
+      longer the target, not once it is in a slot: with too few slots the
+      presenter shows each stream's as it comes, and a landing gone from
+      the cache left its stream wanting nothing, keeping its old frame's
+      slot from the stream still waiting (the re-review's finding);
+    - otherwise, the frame at the playhead. With fewer than two active
+      slots a stream, while any stream's frame at the playhead isn't in
+      a slot, the share is one too: on three slots one lens's next frame
+      took the last free slot while the other's frame at the playhead
+      was still decoding, and with the clock waiting nothing freed it,
+      so the lenses showed different frames (found by the re-review's
+      fixes' tests: [1, 0] while playing, every run, with the second
+      decoder 150 ms a frame);
     - while playing, the frames after it, in order;
     - while paused, the next frame, then the one before (by the run
       links), then more frames after.
@@ -4523,10 +4562,23 @@ What:
     present (two key events in one UI frame) goes on from it.
   - **Steps on their way.** A step made while a seek or a step is on
     its way goes on from where that lands: its frames add to a step's,
-    from the frames that step started from, and a seek's `at` is the
-    frame it starts from. Before, it started from the frame still on
-    screen and superseded the request, so a seek then a step lost the
-    seek.
+    from the frames that step started from, and a seek's frame is the
+    one it starts from, found as the seek finds it. For a keyframe seek
+    that is its keyframe, or the frame shown at its time when the cache
+    holds it, since the seek lands there then; the step carries the
+    mode on (`Want::Step { mode }`), and so do the steps after it.
+    Before, a step started from the frame still on screen and
+    superseded the request, so a seek then a step lost the seek; and
+    until the re-review a step during a keyframe seek started from the
+    time asked, so `seek(45, Keyframe)` then `step(1)` showed 46 where
+    the seek alone shows 40.
+  - **A step's playhead.** The presenter leaves a step's playhead to the
+    worker, which sets it to where the step starts, as a seek's worker
+    does, and then frame by frame. It once moved it only frame by frame:
+    when the seek's playhead had missed the cache's lock and a step
+    superseded the seek before its worker started it, the playhead
+    stayed behind, and the frames the step decoded on from a keyframe
+    far past it waited for room for good.
 - **The `Player`** (`playback::player`), driven from one thread:
   - **Making one.** `Player::new(PlayerParts, PlayerConfig) ->
     Result<Player, PlayerError>`.
@@ -4662,8 +4714,17 @@ Where this differs from the plan:
   re-derives Auto from the memory available every 5 s. Read with the
   cache full, that is a quarter of less each time, and the budget sank
   below the plan's table, evicting at each recheck.
-- **A request's landing is pinned** in the cache until it is in a slot,
-  past the budget by a frame a stream if it must be. The plan has no
+- **Pressure leaves 1 GiB.** The plan shrinks the budget below 1 GiB
+  available. Here the cache holds no more than leaves 1 GiB of what it
+  and the rest have together, and at least a quarter of that, so the
+  budget doesn't swing as the cache's own evictions lift the pressure.
+  It applies to an explicit size, and to a cgroup's room, too.
+- **A cgroup's use is its working set**, `memory.current` less
+  `inactive_file`, so `auto_budget` takes `memory.stat`'s text as a
+  fourth argument. The plan's `memory.current` counts page cache the
+  kernel would reclaim first.
+- **A request's landing is pinned** in the cache while its request is
+  the target, past the budget by a frame a stream if it must be. The plan has no
   such rule; without it a keyframe seek back with the cache full never
   landed.
 - **PerfStats keeps its rings in atomics.** The plan puts each stage's
@@ -4884,13 +4945,21 @@ Tested:
   (`a_recheck_counts_the_cache_s_own_frames_as_its_own`: eight
   rechecks, each read with the cache full to the last budget, keep
   odin's 6 GiB, a 4 GiB container's 1.5 GiB and a set 2 GiB; without
-  the fix odin's went 6, 4.5, 4.875 … 4.8 GiB); the tightest cgroup up
-  a fake tree counts; a cgroup namespace's limit at the root counts
+  the fix odin's went 6, 4.5, 4.875 … 4.8 GiB); a recheck under
+  pressure settles (`a_recheck_under_pressure_settles`: with 1434 MiB
+  available before playback eight rechecks keep 410 MiB, where the
+  first rule went 512, 358, 512 … MiB; a set 30 GiB with 24 GiB
+  available keeps 23 GiB; a set 8 GiB in a container with 3 GiB left
+  keeps 2 GiB); the page cache a cgroup would give back is room (a
+  4 GiB container at its limit, 3 GiB of it `inactive_file`, takes
+  1.5 GiB, and none without `memory.stat`; active page cache is use);
+  the tightest cgroup up a fake tree counts, with an ancestor's
+  `memory.stat`; a cgroup namespace's limit at the root counts
   (`0::/`, and a cgroup below it); this machine has a budget.
 - `playback::perf`: the ring keeps the last samples in order; counters
   add up across threads; percentiles by the nearest rank.
 - The engine, on lavapipe and on a `ManualClock` wherever wall time
-  would make a test flaky (`crates/playback/tests/engine.rs`, 22
+  would make a test flaky (`crates/playback/tests/engine.rs`, 26
   tests):
   - the presenter shows the latest frame at or before the clock, on a
     real variable-rate H.264 clip through `FfmpegBackend`;
@@ -4924,7 +4993,14 @@ Tested:
   - a step made while a seek or a step is on its way goes on from where
     it lands, on a decoder 30 ms a frame: a seek to 207 then a step of
     1 shows 208, 207 never shown; two steps of 5 go 10; a seek to 230,
-    a step of 1 and one back show 230;
+    a step of 1 and one back show 230. A keyframe seek to 213 then two
+    steps of 1 show 210, from its keyframe 208; before the re-review's
+    fix they showed 215. `player::tests::steps_that_supersede_a_seek_before_its_worker_starts_it_land`
+    holds the cache's lock across that seek and the steps, on a thread
+    that panics if it blocks, so the seek's playhead can't reach the
+    cache and the steps supersede the seek before its worker starts it;
+    without the step setting the playhead it stuck on frame 0 every
+    time;
   - two instant steps before a present go 2 frames, with no request to
     the worker, and a step of 1 and one back come back;
   - with an A/V offset of ±50 ms, a paused exact seek to 10 shows 10
@@ -4937,7 +5013,22 @@ Tested:
     (`two_streams_seek_with_the_second_decoder_behind`). Both failed
     without the upload thread's share of one while waiting; the first,
     and `player::tests::two_streams_land_with_a_slot_dead` (four slots,
-    one Dead), without the presenter showing each stream's as it comes;
+    one Dead), without the presenter showing each stream's as it comes.
+    On three slots with the decoder opened first failing its seek while
+    its next frame holds the third slot, the other's frame for the seek
+    lands (`two_streams_on_three_slots_seek_with_one_failing`); it
+    stuck when the failed stream kept its slots, the re-review's
+    mutation M3, which every test passed before. On three slots with
+    the cache full (16 frames, 5 ms a frame), keyframe seeks back to 45,
+    29, 21, 13 and 5 show 40, 24, 16, 8 and 0 on both streams
+    (`two_streams_keyframe_seek_back_on_three_slots_with_the_cache_full`,
+    and `player::tests::two_streams_keyframe_seek_back_with_a_slot_dead_and_the_cache_full`
+    on four slots, one Dead). With a landing unpinned once in a slot,
+    both stuck at [40, 60] (the re-review's finding). Playing on three
+    slots with the second decoder 150 ms a frame, frames 1 to 12 show on
+    both (`two_streams_play_on_three_slots_with_the_second_decoder_behind`);
+    without the share of one while a frame at the playhead waits for a
+    slot it stuck at [1, 0] in 16 of 16 runs;
   - a keyframe seek back with the cache full lands on its keyframe: 8
     frames of budget, played to 60, then keyframe seeks to 45, 37, 29,
     21 and 5 show 40, 32, 24, 16 and 0, with the clock there. It failed
