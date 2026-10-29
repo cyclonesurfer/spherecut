@@ -6,9 +6,9 @@
 //! decoder that falls behind catches up without making the frames it
 //! passes; a slot is reused only once nothing else holds its frame; a
 //! seek keeps the frame on screen until the new one is ready and frees
-//! the old run's slots; steps follow runs both ways, go on from a seek
-//! or step on its way, and instant ones from each other before a
-//! present; the A/V offset moves the frame only while playing; two
+//! the old run's slots; steps follow runs both ways, go on from where a
+//! seek (keyframe ones included) or step on its way lands, and instant
+//! ones from each other before a present; the A/V offset moves the frame only while playing; two
 //! streams seek and step on three slots, with the second's decoder
 //! behind, and with one failing its seek while its next frame holds the
 //! third slot; a keyframe seek back with the cache full lands on its
@@ -535,6 +535,26 @@ fn a_step_while_a_seek_or_step_is_on_its_way_goes_on_from_where_it_lands() {
     show(&player, 230);
     let s = snapshot(&player);
     assert_eq!((s.state, s.clock), (PlayState::Paused, at(230)));
+    common::join(player);
+}
+
+#[test]
+fn a_step_while_a_keyframe_seek_is_on_its_way_goes_on_from_its_keyframe() {
+    // A keyframe every 8 frames: the seek to 213 lands on 208, so the
+    // steps on its way show 210, as they would after it, and not 215.
+    let backend = SyntheticBackend::new(SyntheticClip {
+        frames: 240,
+        frame_cost: Duration::from_millis(30),
+        ..SyntheticClip::default()
+    });
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(backend, clock, config(64));
+    player.seek(at(213), SeekMode::Keyframe);
+    player.step(1);
+    player.step(1);
+    let mut seen = Vec::new();
+    show_seen(&player, 210, &mut seen);
+    assert_eq!(seen, [at(0), at(210)]);
     common::join(player);
 }
 

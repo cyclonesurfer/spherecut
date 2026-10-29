@@ -41,8 +41,13 @@ pub(crate) enum Want {
     /// The frame shown at `at`.
     Seek { at: Time, mode: SeekMode },
     /// `frames` frames on (back, when negative) from the stream's frame
-    /// at `from`.
-    Step { frames: i32, from: Time },
+    /// at `from` (`Exact`), or from where a keyframe seek to it lands
+    /// (`Keyframe`: the step came while that seek was on its way).
+    Step {
+        frames: i32,
+        from: Time,
+        mode: SeekMode,
+    },
 }
 
 #[derive(Debug)]

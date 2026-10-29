@@ -360,7 +360,9 @@ impl Worker {
         self.working = Some(req.id);
         let done = match req.want {
             Want::Seek { at, mode } => self.seek(dec, req.id, at, mode, &req.token),
-            Want::Step { frames, from } => self.step(dec, req.id, frames, from, &req.token),
+            Want::Step { frames, from, mode } => {
+                self.step(dec, req.id, frames, from, mode, &req.token)
+            }
         };
         if let Err(Halt::Stopped) = done {
             self.count(|s| s.superseded += 1);
@@ -409,12 +411,19 @@ impl Worker {
         id: u64,
         frames: i32,
         from: Time,
+        mode: SeekMode,
         token: &StopToken,
     ) -> Result<(), Halt> {
         let cache = self.shared.cache.clone();
-        let mut cur = match cache.get(self.stream, from) {
+        let start = match mode {
+            SeekMode::Exact => cache.get(self.stream, from),
+            // Where `seek` would land: the frame shown there if the
+            // cache can tell, else the keyframe.
+            SeekMode::Keyframe => cache.frame_at(self.stream, from),
+        };
+        let mut cur = match start {
             Some(f) => f,
-            None => self.position(dec, from, token)?,
+            None => self.position(dec, from, mode, token)?,
         };
         for _ in 0..frames.unsigned_abs() {
             if token.is_stopped() {
@@ -441,21 +450,23 @@ impl Worker {
         Ok(())
     }
 
-    /// The decoder at the frame shown at `at`: where it is, or sought
-    /// there.
+    /// The decoder at the frame a seek to `at` by `mode` lands on: where
+    /// it is, or sought there.
     fn position(
         &mut self,
         dec: &mut dyn VideoDecode,
         at: Time,
+        mode: SeekMode,
         token: &StopToken,
     ) -> Result<Arc<VideoFrame>, Halt> {
-        if let Some(last) = &self.last
+        if mode == SeekMode::Exact
+            && let Some(last) = &self.last
             && last.time == at
         {
             return Ok(last.clone());
         }
         self.end_catch_up(dec);
-        let outcome = dec.seek(at, SeekMode::Exact, token);
+        let outcome = dec.seek(at, mode, token);
         self.take_events(dec);
         match outcome {
             Ok(SeekOutcome::Frame { frame, .. }) => {
@@ -475,7 +486,7 @@ impl Worker {
         cur: &VideoFrame,
         token: &StopToken,
     ) -> Result<Option<Arc<VideoFrame>>, Halt> {
-        self.position(dec, cur.time, token)?;
+        self.position(dec, cur.time, SeekMode::Exact, token)?;
         if self.at_end {
             return Ok(None);
         }
@@ -495,7 +506,7 @@ impl Worker {
         let Some(before) = tick.ok().and_then(|t| cur.time.checked_sub(t).ok()) else {
             return Ok(None);
         };
-        let f = self.position(dec, before, token)?;
+        let f = self.position(dec, before, SeekMode::Exact, token)?;
         Ok((f.time < cur.time).then_some(f))
     }
 
@@ -555,7 +566,7 @@ impl Worker {
                 self.unsaved = false;
             }
             if let Some(end) = cache.run_end(self.stream, t) {
-                match self.position(dec, end.time, &token) {
+                match self.position(dec, end.time, SeekMode::Exact, &token) {
                     Ok(_) => {}
                     Err(Halt::Stopped) => {
                         self.resume = Some(t);

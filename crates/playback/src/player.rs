@@ -356,6 +356,9 @@ struct Target {
     at: Time,
     /// A step's frames, from the frames in `Ui::step_from`.
     step: Option<i32>,
+    /// How a seek finds its frame, and a step the frame it starts from:
+    /// `Keyframe` when it goes on from a keyframe seek on its way.
+    mode: SeekMode,
 }
 
 /// Where a stream's frame for the request the presenter waits for is.
@@ -611,6 +614,7 @@ impl Player {
             id,
             at: Time::ZERO,
             step: None,
+            mode: SeekMode::Exact,
         });
         self.shared.target.store(id, Ordering::Release);
         self.shared.playing.store(false, Ordering::Release);
@@ -707,7 +711,12 @@ impl Player {
         if ui.target.is_some() {
             shared.perf.add(Counter::SeeksSuperseded, 1);
         }
-        ui.target = Some(Target { id, at, step: None });
+        ui.target = Some(Target {
+            id,
+            at,
+            step: None,
+            mode,
+        });
         ui.preroll = false;
         ui.at_end = false;
         shared.target.store(id, Ordering::Release);
@@ -726,8 +735,9 @@ impl Player {
 
     /// Pause, and show the frame `frames` on (back, when negative) from
     /// the one shown, or from where the seek or step on its way lands: a
-    /// step's frames add to it, and a seek's time is the frame shown
-    /// there (where an exact seek lands).
+    /// step's frames add to it, and a seek's frame is found as the seek
+    /// finds it (a keyframe seek's is its keyframe, unless the cache
+    /// holds the frame shown at its time).
     pub fn step(&self, frames: i32) {
         let now = Instant::now();
         let Ok(mut ui) = self.ui.try_borrow_mut() else {
@@ -758,9 +768,18 @@ impl Player {
         let id = ui.next_id();
         let clock = ui.clock.time_at(now);
         let n = ui.workers.len();
-        let (frames, from): (i32, Vec<Time>) = match ui.target {
-            Some(Target { step: Some(f), .. }) => (f.saturating_add(frames), ui.step_from.clone()),
-            Some(Target { at, step: None, .. }) => (frames, vec![at; n]),
+        let (frames, from, mode): (i32, Vec<Time>, SeekMode) = match ui.target {
+            Some(Target {
+                step: Some(f),
+                mode,
+                ..
+            }) => (f.saturating_add(frames), ui.step_from.clone(), mode),
+            Some(Target {
+                at,
+                step: None,
+                mode,
+                ..
+            }) => (frames, vec![at; n], mode),
             None => (
                 frames,
                 (0..n)
@@ -771,19 +790,21 @@ impl Player {
                             .map_or(clock, |s| s.view.frame.time)
                     })
                     .collect(),
+                SeekMode::Exact,
             ),
         };
         ui.target = Some(Target {
             id,
             at: from.first().copied().unwrap_or(clock),
             step: Some(frames),
+            mode,
         });
         ui.step_from.clone_from(&from);
         self.shared.target.store(id, Ordering::Release);
         for (w, from) in ui.workers.iter().zip(from) {
             let _ = w.send(Command::Request(Request {
                 id,
-                want: Want::Step { frames, from },
+                want: Want::Step { frames, from, mode },
                 token: token.clone(),
             }));
         }
