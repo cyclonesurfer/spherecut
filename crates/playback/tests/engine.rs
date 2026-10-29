@@ -6,9 +6,11 @@
 //! making the frames it passes; a slot is reused only once nothing else
 //! holds its frame; a seek keeps the frame on screen until the new one
 //! is ready and frees the old run's slots; steps follow runs both ways;
-//! a fallback reaches the snapshot, from a fault and from `Auto` picking
-//! Vulkan on lavapipe; the audio seam holds playback for its preroll;
-//! and a 5.7K source plays inside a 256 MiB cache.
+//! two streams seek and step on three slots, and with the second's
+//! decoder behind; a keyframe seek back with the cache full lands on its
+//! keyframe; a fallback reaches the snapshot, from a fault and from
+//! `Auto` picking Vulkan on lavapipe; the audio seam holds playback for
+//! its preroll; and a 5.7K source plays inside a 256 MiB cache.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -649,6 +651,40 @@ fn two_streams_seek_with_the_second_decoder_behind() {
     for k in [40, 10, 70] {
         player.seek(at(k), SeekMode::Exact);
         lands(&player, &[k, k]);
+    }
+    common::join(player);
+}
+
+/// A keyframe seek back lands on a keyframe the cache doesn't hold, and
+/// decoding on from it to the time asked for fills the cache: the frame
+/// it landed on must stay until it is in a slot, though it is the
+/// farthest behind the playhead.
+#[test]
+fn a_keyframe_seek_back_with_the_cache_full_lands_on_its_keyframe() {
+    let frame = 64 * 32 * 3 / 2;
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = player(
+        clip(120),
+        clock.clone(),
+        PlayerConfig {
+            cache: CacheBudget::Bytes(8 * frame),
+            ..config(64)
+        },
+    );
+    player.open("clip.synthetic".into());
+    show(&player, 0);
+    player.play();
+    for k in 1..=60 {
+        clock.set(at(k), Instant::now());
+        show(&player, k);
+    }
+    player.pause();
+    // Keyframes every 8: 45 lands on 40, then a scrub back, each seek
+    // once the one before is on screen.
+    for (k, key) in [(45, 40), (37, 32), (29, 24), (21, 16), (5, 0)] {
+        player.seek(at(k), SeekMode::Keyframe);
+        lands(&player, &[key]);
+        assert_eq!(snapshot(&player).clock, at(key));
     }
     common::join(player);
 }

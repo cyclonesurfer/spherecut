@@ -6,11 +6,12 @@
 //! compares with the playhead directly). Their bytes are counted from
 //! the frames' own buffers ([`VideoFrame::bytes`]), padding included, and
 //! never pass the budget but when what the cache must keep doesn't fit:
-//! each stream's current frame and window (below). With frames of one
-//! size, that is a budget too small to hold a stream's frame at the
-//! playhead and the one after it, which the cache still holds so that
-//! playback goes on (and says it is too small, below [`MIN_FRAMES`]
-//! frames).
+//! each stream's current frame and window, and its pinned frame (below).
+//! With frames of one size and nothing pinned, that is a budget too
+//! small to hold a stream's frame at the playhead and the one after it,
+//! which the cache still holds so that playback goes on (and says it is
+//! too small, below [`MIN_FRAMES`] frames); a pinned frame can add one
+//! more a stream, for as long as the presenter waits for it.
 //!
 //! **Runs.** A decoder numbers the frames it hands out by run (a seek
 //! starts one) and place in the run, and two frames of one run whose
@@ -34,6 +35,16 @@
 //! farthest ahead past the window. A frame ahead becomes evictable only
 //! once the playhead passes it (a seek, or playing), or nearer frames
 //! fill the window ahead of it.
+//!
+//! **Pins.** Each stream may pin one frame ([`FrameCache::pin`]): the
+//! one a request landed on, which the presenter waits for until it is in
+//! a GPU slot. A pinned frame is never evicted and goes in past the
+//! window too, until it is unpinned, the stream pins another, or the
+//! cache is cleared. Without it, a keyframe seek back would lose the
+//! keyframe it landed on to the frames decoded on from it (all the
+//! history is ahead after a seek back, so the keyframe is the frame
+//! farthest behind), and a step on one stream to the playhead another
+//! stream's worker moved.
 //!
 //! **Back-pressure.** A frame ahead of the playhead goes in only if it
 //! would be in the window: [`FrameCache::insert`] waits on a condition
@@ -112,6 +123,8 @@ struct State {
     /// The bytes of the last frame offered, per stream since the last
     /// clear: one frame of the source.
     frame_bytes: BTreeMap<usize, u64>,
+    /// The time of each stream's pinned frame.
+    pins: BTreeMap<usize, Time>,
     /// Bumped by every change.
     generation: u64,
     closed: bool,
@@ -174,6 +187,10 @@ impl State {
             .map(|(&(_, t), e)| (t, e))
     }
 
+    fn pinned(&self, s: usize, t: Time) -> bool {
+        self.pins.get(&s) == Some(&t)
+    }
+
     fn limit(&self) -> Time {
         self.playhead.checked_add(self.ahead).unwrap_or(LATEST)
     }
@@ -214,16 +231,20 @@ impl State {
     }
 
     /// The frame to evict next: the farthest behind the playhead of any
-    /// stream, else the farthest ahead past a window; `None` when every
-    /// frame is a current one or in a window.
+    /// stream, else the farthest ahead past a window, passing over pinned
+    /// frames; `None` when every frame is a current one, in a window or
+    /// pinned.
     fn victim(&self) -> Option<(usize, Time)> {
         let streams: Vec<usize> = self.frame_bytes.keys().copied().collect();
+        let times = |s: usize| self.stream(s).map(|(&(_, t), _)| t);
         let behind = streams
             .iter()
             .filter_map(|&s| {
                 let current = self.current(s)?;
-                let (&(_, t), _) = self.stream(s).next()?;
-                (t < current).then_some((t, s))
+                let t = times(s)
+                    .take_while(|&t| t < current)
+                    .find(|&t| !self.pinned(s, t))?;
+                Some((t, s))
             })
             .min();
         if let Some((t, s)) = behind {
@@ -232,9 +253,12 @@ impl State {
         streams
             .iter()
             .filter_map(|&s| {
-                let (&(_, t), _) = self.stream(s).next_back()?;
                 let end = self.window_end(s)?;
-                (t > end).then_some((t, s))
+                let t = times(s)
+                    .rev()
+                    .take_while(|&t| t > end)
+                    .find(|&t| !self.pinned(s, t))?;
+                Some((t, s))
             })
             .max()
             .map(|(t, s)| (s, t))
@@ -251,8 +275,8 @@ impl State {
         }
     }
 
-    /// Evict until the budget holds what is left, or only current frames
-    /// and windows are.
+    /// Evict until the budget holds what is left, or only current frames,
+    /// windows and pinned frames are.
     fn shrink(&mut self) {
         while self.bytes > self.budget {
             let Some(key) = self.victim() else {
@@ -263,13 +287,14 @@ impl State {
         }
     }
 
-    /// Put `frame` in, or `None` when it is ahead, past the window.
+    /// Put `frame` in, or `None` when it is ahead, past the window (and
+    /// not pinned).
     fn offer(&mut self, s: usize, frame: &Arc<VideoFrame>) -> Option<Insert> {
         let (t, bytes) = (frame.time, frame.bytes() as u64);
         let place = (frame.run, frame.seq);
         self.frame_bytes.insert(s, bytes);
         let held = self.frames.contains_key(&(s, t));
-        if !held && t > self.playhead && !self.admits(s, t, bytes) {
+        if !held && t > self.playhead && !self.pinned(s, t) && !self.admits(s, t, bytes) {
             return None;
         }
         // A link to another time is a decoder that numbered its runs
@@ -397,6 +422,7 @@ impl FrameCache {
                 links: BTreeMap::new(),
                 bytes: 0,
                 frame_bytes: BTreeMap::new(),
+                pins: BTreeMap::new(),
                 generation: 0,
                 closed: false,
                 evicted: 0,
@@ -506,6 +532,39 @@ impl FrameCache {
         }
     }
 
+    /// Pin `frame`, of stream `stream`: hold it, whatever the playhead
+    /// and the budget say, until [`unpin`](Self::unpin), the stream's
+    /// next pin, or [`clear`](Self::clear). It goes in if it isn't held,
+    /// past the window too; a frame held at its time from another run
+    /// stays, and is pinned. [`Insert::Stopped`], pinning nothing, if
+    /// `stop` says to stop (read under the lock, as
+    /// [`try_insert_until`](Self::try_insert_until) does) or the cache is
+    /// closed. The stream's frame pinned before is let go.
+    pub fn pin(&self, stream: usize, frame: Arc<VideoFrame>, stop: &StopToken) -> Insert {
+        let mut g = self.lock();
+        if g.closed || stop.is_stopped() {
+            return Insert::Stopped;
+        }
+        g.pins.insert(stream, frame.time);
+        // Never `None`: a pinned frame is let in past the window.
+        let r = g.offer(stream, &frame).unwrap_or(Insert::Full);
+        drop(g);
+        self.changed.notify_all();
+        r
+    }
+
+    /// Let stream `stream`'s frame at `time` go as the rules say, if it is
+    /// the one pinned, evicting down to the budget.
+    pub fn unpin(&self, stream: usize, time: Time) {
+        let g = self.lock();
+        self.changed(g, |s| {
+            if s.pinned(stream, time) {
+                s.pins.remove(&stream);
+                s.shrink();
+            }
+        });
+    }
+
     /// Move the playhead to clip time `at`, which wakes a decode worker
     /// waiting for room.
     pub fn set_playhead(&self, at: Time) {
@@ -552,6 +611,7 @@ impl FrameCache {
             s.frames.clear();
             s.links.clear();
             s.frame_bytes.clear();
+            s.pins.clear();
             s.bytes = 0;
         });
     }

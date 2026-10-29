@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 448d265fe16f83a1b8c0c18ddf96d29bb589064a68d371e92306704833d39267 # shrinks to budget = 256, ahead_frames = 0, sizes = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 5, 1, 1, 1, 1, 1, 1, 12, 1, 1, 1, 1, 31, 1, 1, 1, 28, 42, 62, 62, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 20, 1, 1], ops = [Playhead(18), One { s: 1, k: 21, run: 0 }, Run { s: 1, from: 5, count: 6, run: 0 }, One { s: 0, k: 15, run: 0 }, Run { s: 0, from: 1, count: 5, run: 0 }, Pin { s: 1, k: 3, run: 0 }, Run { s: 0, from: 0, count: 9, run: 0 }]

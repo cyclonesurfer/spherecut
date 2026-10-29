@@ -93,6 +93,8 @@ struct State {
     failed: HashSet<(u64, usize, Time)>,
     /// The open the "too small" notice was given for.
     too_small: u64,
+    /// Per stream, the request whose landing was last unpinned.
+    unpinned: Vec<u64>,
     waits: u64,
     budget_at: Instant,
     stats_at: Instant,
@@ -106,6 +108,7 @@ impl UploadThread {
             uploader: Uploader::new(&self.gpu),
             failed: HashSet::new(),
             too_small: 0,
+            unpinned: Vec::new(),
             waits: 0,
             budget_at: Instant::now(),
             stats_at: Instant::now(),
@@ -234,6 +237,18 @@ impl UploadThread {
                 .iter()
                 .any(|v| v.frame.epoch == epoch && v.frame.stream == i && v.frame.time == t)
         };
+        // A landing in a slot needs the cache no more: the presenter
+        // shows it from there.
+        st.unpinned.resize(n, 0);
+        for (i, s) in streams.iter().enumerate() {
+            if let Some(l) = s.landed
+                && st.unpinned[i] != l.id
+                && in_slot(i, l.time)
+            {
+                shared.cache.unpin(i, l.time);
+                st.unpinned[i] = l.id;
+            }
+        }
         // While a stream's frame for the target isn't in a slot, every
         // stream wants its own alone: the frames a stream that landed
         // first would want after its own must leave the slot the others

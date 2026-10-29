@@ -18,7 +18,9 @@
 //! cache: a run holding the frame shown at the time answers it, and
 //! decoding goes on from the end of that run. Otherwise the decoder seeks
 //! and its frame starts a new run in the cache. A step follows the run
-//! links in the cache, decoding only the frames they don't reach.
+//! links in the cache, decoding only the frames they don't reach. The
+//! frame a request lands on is pinned in the cache until the upload
+//! thread has it in a slot ([`crate::FrameCache::pin`]).
 //!
 //! **Decoding ahead.** Between requests the worker decodes on, frame
 //! after frame, into the cache, which holds it back once the window ahead
@@ -380,7 +382,7 @@ impl Worker {
         cache.set_playhead(at);
         if let Some(f) = cache.frame_at(self.stream, at) {
             self.count(|s| s.from_cache += 1);
-            self.land(id, &f, None);
+            self.land(id, &f, None, token)?;
             self.resume = Some(f.time);
             return Ok(());
         }
@@ -394,8 +396,7 @@ impl Worker {
                 self.count(|s| s.decoded += 1);
                 self.took(dec, frame.clone());
                 self.save(token)?;
-                self.land(id, &frame, Some(exactness));
-                Ok(())
+                self.land(id, &frame, Some(exactness), token)
             }
             Ok(SeekOutcome::Stopped) => Err(Halt::Stopped),
             Err(e) => Err(self.fail(e)),
@@ -435,7 +436,7 @@ impl Worker {
             cur = next;
             cache.set_playhead(cur.time);
         }
-        self.land(id, &cur, None);
+        self.land(id, &cur, None, token)?;
         self.resume = Some(cur.time);
         Ok(())
     }
@@ -650,8 +651,20 @@ impl Worker {
         }
     }
 
-    /// Tell the presenter that request `id` found `f`.
-    fn land(&self, id: u64, f: &VideoFrame, exactness: Option<Exactness>) {
+    /// Tell the presenter that request `id` found `f`, pinned in the cache
+    /// until the upload thread has it in a slot: the frames decoded on
+    /// from a keyframe behind the time asked for, or another stream's
+    /// worker moving the playhead, would otherwise have it evicted first.
+    fn land(
+        &self,
+        id: u64,
+        f: &Arc<VideoFrame>,
+        exactness: Option<Exactness>,
+        token: &StopToken,
+    ) -> Result<(), Halt> {
+        if self.shared.cache.pin(self.stream, f.clone(), token) == Insert::Stopped {
+            return Err(Halt::Stopped);
+        }
         let landed = Landed {
             id,
             time: f.time,
@@ -663,6 +676,7 @@ impl Worker {
         // The upload thread looks again, for the frame to upload first.
         self.shared.cache.wake();
         self.shared.repaint();
+        Ok(())
     }
 
     /// The decoder failed with `e`: say so, unless it was shut down.

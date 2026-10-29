@@ -2,8 +2,9 @@
 //! holds more than its budget; frames in the window ahead of the playhead
 //! and the frame at it are never evicted; a decode worker waits at the
 //! limit and goes on when the playhead moves; run links survive
-//! evictions and are never false. A proptest checks them against a model
-//! after every step of random decode runs, seeks and budget changes.
+//! evictions and are never false; a pinned frame stays until it is let
+//! go. A proptest checks them against a model after every step of random
+//! decode runs, seeks, pins and budget changes.
 
 #![allow(clippy::unwrap_used)]
 
@@ -278,6 +279,61 @@ fn a_budget_too_small_still_plays_and_says_so() {
     assert!(!c.stats().too_small);
 }
 
+#[test]
+fn a_pinned_frame_stays_until_it_is_let_go() {
+    // Room for 4 frames of 10 bytes. A keyframe seek to 45 lands on 40,
+    // and decoding on puts 41 to 45 in, at or behind the playhead: 40 is
+    // the farthest behind, but pinned.
+    let c = FrameCache::new(40, Time::from_secs(1));
+    let never = StopToken::never();
+    c.set_playhead(at(45));
+    assert_eq!(c.pin(0, frame(40, 2, 0, 10), &never), Insert::Stored);
+    for k in 41..=45 {
+        c.try_insert(0, frame(k, 2, (k - 40) as u64, 10));
+    }
+    let held = |c: &FrameCache| -> Vec<i64> { c.held().iter().map(|(_, f)| index(f)).collect() };
+    assert_eq!(held(&c), [40, 43, 44, 45]);
+    // Let go, it is history like the rest, and the next frame takes its
+    // room.
+    c.unpin(0, at(40));
+    assert_eq!(held(&c), [40, 43, 44, 45]);
+    assert_eq!(c.try_insert(0, frame(46, 2, 6, 10)), Insert::Stored);
+    assert_eq!(held(&c), [43, 44, 45, 46]);
+
+    // A pinned frame goes in past the window, and over the budget when
+    // nothing else may go; pinning another lets the first go.
+    let c = FrameCache::new(30, at(1));
+    assert_eq!(c.try_insert(0, frame(0, 1, 0, 10)), Insert::Stored);
+    assert_eq!(c.try_insert(0, frame(1, 1, 1, 10)), Insert::Stored);
+    assert_eq!(c.try_insert(0, frame(5, 2, 0, 10)), Insert::Full);
+    assert_eq!(c.pin(0, frame(5, 2, 0, 10), &never), Insert::Stored);
+    assert_eq!(c.pin(0, frame(6, 2, 1, 10), &never), Insert::Stored);
+    assert_eq!(held(&c), [0, 1, 6]);
+    assert_eq!(c.pin(0, frame(7, 2, 2, 10), &never), Insert::Stored);
+    assert_eq!(c.pin(0, frame(8, 2, 3, 10), &never), Insert::Stored);
+    assert_eq!(held(&c), [0, 1, 8]);
+    // A frame held already, from another run, is pinned as it is, and
+    // the new run links to it.
+    c.set_playhead(at(8));
+    assert_eq!(c.pin(0, frame(1, 3, 0, 10), &never), Insert::Known);
+    assert_eq!(c.try_insert(0, frame(2, 3, 1, 10)), Insert::Stored);
+    assert_eq!(held(&c), [1, 2, 8]);
+    assert_eq!(c.next_after(0, at(1)).map(|f| index(&f)), Some(2));
+    // A stopped token pins nothing, as for a worker of a file closed.
+    let source = StopSource::new();
+    let stopped = source.next();
+    source.next();
+    assert_eq!(c.pin(0, frame(20, 4, 0, 10), &stopped), Insert::Stopped);
+    assert_eq!(held(&c), [1, 2, 8]);
+    // A clear lets every pin go: 1, pinned before, is history now.
+    c.clear();
+    c.set_playhead(at(4));
+    for k in 1..=4 {
+        c.try_insert(0, frame(k, 5, k as u64, 10));
+    }
+    assert_eq!(held(&c), [2, 3, 4]);
+}
+
 /// A decode worker on its own thread inserts frames 1 to 40 one after
 /// another, and says after each insert which it was.
 fn producer(
@@ -461,6 +517,13 @@ fn the_ui_thread_only_tries_the_lock() {
         ),
         (
             |c| {
+                let _ = c.pin(0, frame(1, 1, 1, 10), &StopToken::never());
+            },
+            lock,
+        ),
+        (|c| c.unpin(0, at(0)), lock),
+        (
+            |c| {
                 let _ = c.insert(0, frame(1, 1, 1, 10), &StopToken::never());
             },
             "waiting for room in the frame cache",
@@ -509,6 +572,17 @@ enum Op {
     Playhead(i64),
     Budget(u64),
     Clear,
+    /// A request landed on frame `k` of stream `s`, from run `run`.
+    Pin {
+        s: usize,
+        k: i64,
+        run: u64,
+    },
+    /// The frame of stream `s` at `k` let go, if it is the one pinned.
+    Unpin {
+        s: usize,
+        k: i64,
+    },
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -518,16 +592,19 @@ fn op() -> impl Strategy<Value = Op> {
         4 => (0..2 * FRAMES).prop_map(Op::Playhead),
         1 => (2 * STREAMS as u64 * MAX_BYTES..2048).prop_map(Op::Budget),
         1 => Just(Op::Clear),
+        2 => (0..STREAMS, 0..FRAMES, 0..3u64).prop_map(|(s, k, run)| Op::Pin { s, k, run }),
+        1 => (0..STREAMS, 0..FRAMES).prop_map(|(s, k)| Op::Unpin { s, k }),
     ]
 }
 
 /// What the test knows: the runs each held frame was handed out in
-/// while held, the streams offered frames since the last clear, and the
-/// cache's settings.
+/// while held, the streams offered frames since the last clear, each
+/// stream's pinned frame, and the cache's settings.
 #[derive(Debug)]
 struct Model {
     runs: BTreeMap<(usize, i64), BTreeSet<u64>>,
     seen: BTreeSet<usize>,
+    pins: BTreeMap<usize, i64>,
     budget: u64,
     ahead: Time,
     playhead: Time,
@@ -543,6 +620,16 @@ fn held(c: &FrameCache) -> Held {
 }
 
 impl Model {
+    fn pinned(&self, s: usize, k: i64) -> bool {
+        self.pins.get(&s) == Some(&k)
+    }
+
+    /// The bytes of the pinned frames held: what may be held past the
+    /// budget, beyond the current frames and windows.
+    fn pinned_bytes(&self, held: &Held) -> u64 {
+        self.pins.iter().filter_map(|(&s, &k)| held.get(&(s, k))).sum()
+    }
+
     fn cap(&self) -> u64 {
         self.budget / 2 / self.seen.len().max(1) as u64
     }
@@ -589,14 +676,18 @@ impl Model {
     /// budget: the frame farthest behind its stream's current frame goes
     /// first, whichever stream it is in (the lower stream on a tie), and
     /// only when none is left the frame farthest past its stream's window
-    /// (the higher stream on a tie). Current frames and windows stay.
+    /// (the higher stream on a tie). Current frames, windows and pinned
+    /// frames stay.
     fn shrink(&self, held: &Held) -> Held {
         let mut left = held.clone();
         while left.values().sum::<u64>() > self.budget {
             let behind = (0..STREAMS)
                 .filter_map(|s| {
                     let current = self.current(&left, s)?;
-                    let (&(_, k), _) = left.range((s, 0)..(s, current)).next()?;
+                    let k = left
+                        .range((s, 0)..(s, current))
+                        .map(|(&(_, k), _)| k)
+                        .find(|&k| !self.pinned(s, k))?;
                     Some((k, s))
                 })
                 .min();
@@ -604,8 +695,13 @@ impl Model {
                 (0..STREAMS)
                     .filter_map(|s| {
                         let window = self.window(&left, s);
-                        let (&(_, k), _) = left.range((s, 0)..(s + 1, 0)).next_back()?;
-                        (at(k) > self.playhead && !window.contains(&k)).then_some((k, s))
+                        let k = left
+                            .range((s, 0)..(s + 1, 0))
+                            .rev()
+                            .map(|(&(_, k), _)| k)
+                            .take_while(|&k| at(k) > self.playhead && !window.contains(&k))
+                            .find(|&k| !self.pinned(s, k))?;
+                        Some((k, s))
                     })
                     .max()
             };
@@ -630,10 +726,18 @@ fn check(
     moved: bool,
 ) -> Result<(), TestCaseError> {
     let s = c.stats();
-    // Bytes and frames are counted exactly, and never pass the budget.
+    // Bytes and frames are counted exactly, and never pass the budget
+    // but by the pinned frames.
     prop_assert_eq!(s.bytes, after.values().sum::<u64>());
     prop_assert_eq!(s.frames, after.len());
-    prop_assert!(s.bytes <= s.budget, "{} > {}", s.bytes, s.budget);
+    let pinned = m.pinned_bytes(after);
+    prop_assert!(
+        s.bytes <= s.budget + pinned,
+        "{} > {} and {} pinned",
+        s.bytes,
+        s.budget,
+        pinned
+    );
     // The frames evicted are the ones the rules pick, in their order, and
     // no more than the budget needs.
     let kept = m.shrink(start);
@@ -718,7 +822,8 @@ fn offer(
     let new_stream = m.seen.insert(s);
     let was_held = before.contains_key(&(s, k));
     let ahead = at(k) > m.playhead;
-    let admitted = was_held || !ahead || m.admits(&before, s, k, bytes);
+    let pinned = m.pinned(s, k);
+    let admitted = was_held || !ahead || pinned || m.admits(&before, s, k, bytes);
     // Places follow the frame index, so that a run's places that follow
     // on are frames that follow on.
     let r = c.try_insert(s, frame(k, run, k as u64 + 100, bytes as usize));
@@ -735,7 +840,7 @@ fn offer(
             m.runs.entry((s, k)).or_default().insert(run);
         }
         Insert::Dropped => {
-            prop_assert!(!ahead && !was_held, "frame {} dropped", k);
+            prop_assert!(!ahead && !was_held && !pinned, "frame {} dropped", k);
             prop_assert!(!after.contains_key(&(s, k)));
         }
         Insert::Stopped => prop_assert!(false, "stopped"),
@@ -767,6 +872,7 @@ proptest! {
         let mut m = Model {
             runs: BTreeMap::new(),
             seen: BTreeSet::new(),
+            pins: BTreeMap::new(),
             budget,
             ahead,
             playhead: Time::ZERO,
@@ -800,9 +906,34 @@ proptest! {
                 Op::Clear => {
                     c.clear();
                     m.seen.clear();
+                    m.pins.clear();
                     let after = held(&c);
                     prop_assert!(after.is_empty());
                     check(&c, &mut m, (&Held::new(), &Held::new(), &after), None, true)?;
+                }
+                Op::Pin { s, k, run } => {
+                    let before = held(&c);
+                    let bytes = sizes[s * FRAMES as usize + k as usize];
+                    let new_stream = m.seen.insert(s);
+                    let was_held = before.contains_key(&(s, k));
+                    m.pins.insert(s, k);
+                    let r = c.pin(s, frame(k, run, k as u64 + 100, bytes as usize), &StopToken::never());
+                    let after = held(&c);
+                    // Held, past the window and the budget too.
+                    prop_assert!(after.contains_key(&(s, k)), "pinned frame {} not held", k);
+                    prop_assert_eq!(r, if was_held { Insert::Known } else { Insert::Stored });
+                    m.runs.entry((s, k)).or_default().insert(run);
+                    let mut start = before.clone();
+                    start.insert((s, k), bytes);
+                    check(&c, &mut m, (&before, &start, &after), Some((s, k, new_stream)), false)?;
+                }
+                Op::Unpin { s, k } => {
+                    let before = held(&c);
+                    if m.pinned(s, k) {
+                        m.pins.remove(&s);
+                    }
+                    c.unpin(s, at(k));
+                    check(&c, &mut m, (&before, &before, &held(&c)), None, true)?;
                 }
             }
         }
