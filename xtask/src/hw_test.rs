@@ -1791,9 +1791,6 @@ pub fn run(a: Args) -> Result<()> {
     Ok(())
 }
 
-/// Whether the samples directory is there. Its path need not be UTF-8:
-/// it reaches the tests byte for byte, and they open samples from the
-/// path's bytes.
 /// What the benchmarks wrote, once Tier 2 ran.
 fn bench_text_of(tier2: &Option<Tier2>, bench_out: &Path) -> String {
     if tier2.is_some() {
@@ -1803,6 +1800,9 @@ fn bench_text_of(tier2: &Option<Tier2>, bench_out: &Path) -> String {
     }
 }
 
+/// Whether the samples directory is there. Its path need not be UTF-8:
+/// it reaches the tests byte for byte, and they open samples from the
+/// path's bytes.
 fn samples_status(samples: &Path) -> &'static str {
     if samples.is_dir() {
         "present"
