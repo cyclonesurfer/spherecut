@@ -11,7 +11,11 @@
 //! small to hold a stream's frame at the playhead and the one after it,
 //! which the cache still holds so that playback goes on (and says it is
 //! too small, below [`MIN_FRAMES`] frames); a pinned frame can add one
-//! more a stream, for as long as the presenter waits for it.
+//! more a stream, for as long as the presenter waits for it. Frames are
+//! evicted as frames go in, a pin is let go or the budget changes;
+//! moving the playhead evicts nothing, so a cache over its budget (by a
+//! pinned frame, say) may hold, until the next of those, frames the move
+//! left to the rules.
 //!
 //! **Runs.** A decoder numbers the frames it hands out by run (a seek
 //! starts one) and place in the run, and two frames of one run whose
@@ -94,8 +98,11 @@ pub enum Insert {
     /// A frame at its time was held already, from another run, and is
     /// kept; the new frame's run links to it now.
     Known,
-    /// It is behind the playhead, and nothing farther behind made room
-    /// for it, so it isn't held.
+    /// It isn't held: the eviction its coming in set off took it, as the
+    /// rules say. It is behind the playhead, and nothing farther behind
+    /// made room for it; or it was held already, in a cache a playhead
+    /// move left over its budget, and the move left it the next to go
+    /// (ahead past the window, or behind).
     Dropped,
     /// It is ahead of the playhead, past the window: from
     /// [`FrameCache::try_insert`], which doesn't wait.

@@ -332,6 +332,22 @@ fn a_pinned_frame_stays_until_it_is_let_go() {
         c.try_insert(0, frame(k, 5, k as u64, 10));
     }
     assert_eq!(held(&c), [2, 3, 4]);
+
+    // Over the budget by a pinned frame, a seek back to 3 leaves 6 past
+    // the window (two frames, 10 bytes) and evicts nothing; offered
+    // again, 6 sets off the eviction the move didn't, which takes it.
+    let c = FrameCache::new(20, at(2));
+    c.set_playhead(at(4));
+    for k in 4..=6 {
+        assert_eq!(c.try_insert(0, frame(k, 1, k as u64, 5)), Insert::Stored);
+    }
+    assert_eq!(c.pin(0, frame(10, 2, 0, 10), &never), Insert::Stored);
+    assert_eq!(held(&c), [4, 5, 6, 10]);
+    c.set_playhead(at(3));
+    assert_eq!(held(&c), [4, 5, 6, 10]);
+    assert_eq!(c.try_insert(0, frame(6, 3, 0, 5)), Insert::Dropped);
+    assert_eq!(held(&c), [4, 5, 10]);
+    assert_eq!(c.stats().bytes, 20);
 }
 
 /// A decode worker on its own thread inserts frames 1 to 40 one after
@@ -722,13 +738,17 @@ impl Model {
 /// Every check after a step. `start` is what the cache held when it
 /// began to evict: what it held before, with the frame the step offered
 /// when it took it in. `inserted` is that frame, when the step offered
-/// one, and whether its stream was new to the cache.
+/// one, and whether its stream was new to the cache. `moved`: the step
+/// moved the playhead, the budget or the streams. `evicts`: the step
+/// evicts by the rules (all but a playhead move, a frame turned away and
+/// letting go of a frame not pinned).
 fn check(
     c: &FrameCache,
     m: &mut Model,
     (before, start, after): (&Held, &Held, &Held),
     inserted: Option<(usize, i64, bool)>,
     moved: bool,
+    evicts: bool,
 ) -> Result<(), TestCaseError> {
     let s = c.stats();
     // Bytes and frames are counted exactly, and never pass the budget
@@ -744,11 +764,14 @@ fn check(
         pinned
     );
     // The frames evicted are the ones the rules pick, in their order, and
-    // no more than the budget needs.
+    // no more than the budget needs. A playhead move evicts nothing, so
+    // over the budget by a pinned frame the cache may keep, until the
+    // next step that evicts, frames the move left to the rules: only
+    // then do they differ.
     let kept = m.shrink(start);
-    prop_assert_eq!(
-        &kept,
-        after,
+    let lazy = !evicts && start == after && s.bytes > s.budget;
+    prop_assert!(
+        kept == *after || lazy,
         "the rules keep {:?} of {:?}",
         kept.keys().collect::<Vec<_>>(),
         start.keys().collect::<Vec<_>>()
@@ -845,7 +868,16 @@ fn offer(
             m.runs.entry((s, k)).or_default().insert(run);
         }
         Insert::Dropped => {
-            prop_assert!(!ahead && !was_held && !pinned, "frame {} dropped", k);
+            // Not pinned, and behind the playhead with nothing farther
+            // behind to make room; or held already, in a cache a playhead
+            // move left over its budget, and the next to go by the rules
+            // (which `check` holds the eviction to).
+            let over = before.values().sum::<u64>() > m.budget;
+            prop_assert!(
+                !pinned && if was_held { over } else { !ahead },
+                "frame {} dropped",
+                k
+            );
             prop_assert!(!after.contains_key(&(s, k)));
         }
         Insert::Stopped => prop_assert!(false, "stopped"),
@@ -860,6 +892,8 @@ fn offer(
         (&before, &start, &after),
         Some((s, k, new_stream)),
         false,
+        // A frame turned away evicts nothing.
+        r != Insert::Full,
     )?;
     Ok(r)
 }
@@ -898,15 +932,20 @@ proptest! {
                     let before = held(&c);
                     m.playhead = half(k2);
                     c.set_playhead(m.playhead);
-                    // Moving the playhead evicts nothing.
+                    // Moving the playhead evicts nothing. Over the budget
+                    // by a pinned frame, the cache may then hold frames
+                    // the rules would now evict, until the next eviction
+                    // takes them (in the order `check` holds it to), but
+                    // never more bytes than the pinned ones past the
+                    // budget.
                     prop_assert_eq!(&before, &held(&c));
-                    check(&c, &mut m, (&before, &before, &before), None, true)?;
+                    check(&c, &mut m, (&before, &before, &before), None, true, false)?;
                 }
                 Op::Budget(b) => {
                     let before = held(&c);
                     m.budget = b;
                     c.set_budget(b);
-                    check(&c, &mut m, (&before, &before, &held(&c)), None, true)?;
+                    check(&c, &mut m, (&before, &before, &held(&c)), None, true, true)?;
                 }
                 Op::Clear => {
                     c.clear();
@@ -914,7 +953,7 @@ proptest! {
                     m.pins.clear();
                     let after = held(&c);
                     prop_assert!(after.is_empty());
-                    check(&c, &mut m, (&Held::new(), &Held::new(), &after), None, true)?;
+                    check(&c, &mut m, (&Held::new(), &Held::new(), &after), None, true, true)?;
                 }
                 Op::Pin { s, k, run } => {
                     let before = held(&c);
@@ -930,15 +969,22 @@ proptest! {
                     m.runs.entry((s, k)).or_default().insert(run);
                     let mut start = before.clone();
                     start.insert((s, k), bytes);
-                    check(&c, &mut m, (&before, &start, &after), Some((s, k, new_stream)), false)?;
+                    check(&c, &mut m, (&before, &start, &after), Some((s, k, new_stream)), false, true)?;
                 }
                 Op::Unpin { s, k } => {
                     let before = held(&c);
-                    if m.pinned(s, k) {
+                    // Letting go of a frame that isn't the one pinned
+                    // does nothing, and evicts nothing.
+                    let pinned = m.pinned(s, k);
+                    if pinned {
                         m.pins.remove(&s);
                     }
                     c.unpin(s, at(k));
-                    check(&c, &mut m, (&before, &before, &held(&c)), None, true)?;
+                    let after = held(&c);
+                    if !pinned {
+                        prop_assert_eq!(&before, &after);
+                    }
+                    check(&c, &mut m, (&before, &before, &after), None, true, pinned)?;
                 }
             }
         }
