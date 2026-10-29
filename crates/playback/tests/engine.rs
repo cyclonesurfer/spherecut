@@ -22,12 +22,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use spherecut_core::{Clock, FrameRate, ManualClock, Rational, StopToken, Time};
+use spherecut_media::HwDevice;
 use spherecut_media::MediaError;
 use spherecut_media::backend::{
     AudioDecode, AudioRequest, DecodeMode, DecodePath, DecodeStats, DecoderEvent, Fallback,
     FallbackReason, Fault, FaultPlan, FfmpegBackend, HwKind, MediaBackend, NextFrame, SeekMode,
     SeekOutcome, VideoDecode, VideoRequest, VideoStreamInfo,
 };
+use spherecut_media::decode::open_hw_device;
 use spherecut_media::doctor::CheckResult;
 use spherecut_media::probe::{ProbeError, ProbeReport};
 use spherecut_playback::{
@@ -801,13 +803,82 @@ fn a_fallback_from_a_failing_device_reaches_the_snapshot() {
     assert!(player.join(Duration::from_secs(2)).is_clean());
 }
 
+/// FFmpeg's backend, with every Vulkan decode on FFmpeg's device on
+/// lavapipe, which has no video decode, whatever GPU the machine has:
+/// left to itself the backend opens the GPU behind the default render
+/// node, which decodes H.264 on odin. Pinned by name, as synth's fallback
+/// tests do it; a render node that matches no device would not do,
+/// since the backend then takes the first GPU listed.
+#[derive(Debug)]
+struct LavapipeBackend {
+    inner: FfmpegBackend,
+    lavapipe: Arc<HwDevice>,
+}
+
+impl LavapipeBackend {
+    fn new() -> Self {
+        let lavapipe = open_hw_device("vulkan", Some("llvmpipe")).unwrap_or_else(|e| {
+            panic!(
+                "{e}; Tier 1 needs FFmpeg's Vulkan device on Mesa's lavapipe \
+                 (mesa-vulkan-drivers on Fedora and Ubuntu, vulkan-swrast on Arch)"
+            )
+        });
+        LavapipeBackend {
+            inner: FfmpegBackend::new(),
+            lavapipe,
+        }
+    }
+}
+
+impl MediaBackend for LavapipeBackend {
+    fn name(&self) -> &'static str {
+        "lavapipe"
+    }
+
+    fn probe(&self, path: &Path) -> Result<ProbeReport, ProbeError> {
+        self.inner.probe(path)
+    }
+
+    fn open_video(
+        &self,
+        path: &Path,
+        req: &VideoRequest,
+    ) -> Result<Box<dyn VideoDecode>, MediaError> {
+        let decode = match &req.decode {
+            DecodeMode::Hardware {
+                kind: HwKind::Vulkan,
+                fallback,
+                ..
+            } => DecodeMode::Hardware {
+                kind: HwKind::Vulkan,
+                device: Some(self.lavapipe.clone()),
+                fallback: *fallback,
+            },
+            other => other.clone(),
+        };
+        let req = VideoRequest {
+            decode,
+            ..req.clone()
+        };
+        self.inner.open_video(path, &req)
+    }
+
+    fn open_audio(
+        &self,
+        path: &Path,
+        req: &AudioRequest,
+    ) -> Result<Box<dyn AudioDecode>, MediaError> {
+        self.inner.open_audio(path, req)
+    }
+}
+
 #[test]
 fn auto_picks_vulkan_from_doctor_and_falls_back_on_lavapipe() {
     let dir = TempDir::new("auto");
     let path = h264(&dir);
     // Doctor's checks said Vulkan decodes H.264 here and VA-API doesn't;
-    // FFmpeg's only Vulkan device on this box is lavapipe, which
-    // decodes nothing.
+    // the Vulkan device the decoder gets is lavapipe's, which decodes
+    // nothing.
     let check = |kind, result| HwDecodeCheck {
         format: "H.264 High".into(),
         kind,
@@ -823,7 +894,7 @@ fn auto_picks_vulkan_from_doctor_and_falls_back_on_lavapipe() {
     let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
     let parts = PlayerParts {
         hw: Some(hw),
-        ..PlayerParts::new(Arc::new(FfmpegBackend::new()), gpu().clone(), clock)
+        ..PlayerParts::new(Arc::new(LavapipeBackend::new()), gpu().clone(), clock)
     };
     let player = Player::new(
         parts,
@@ -840,7 +911,13 @@ fn auto_picks_vulkan_from_doctor_and_falls_back_on_lavapipe() {
     let choice = s.choice.as_deref().unwrap_or_default();
     assert!(choice.starts_with("Vulkan"), "{choice}");
     assert!(
-        matches!(s.fallback, Some((HwKind::Vulkan, _))),
+        matches!(
+            s.fallback,
+            Some((
+                HwKind::Vulkan,
+                FallbackReason::Refused(_) | FallbackReason::DeviceUnavailable(_)
+            ))
+        ),
         "{:?}",
         s.fallback
     );

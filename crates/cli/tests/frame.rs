@@ -31,6 +31,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod document;
+mod lavapipe;
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -683,18 +684,35 @@ fn every_failure_leaves_nothing_behind() {
             3,
             "hw_unavailable",
         ),
-        // lavapipe's Vulkan has no video decode.
-        (&good, vec!["--decoder", "vulkan"], 3, "hw_unavailable"),
         (&zzzz, vec!["--equirect"], 3, "no_decoder"),
     ];
-    for (file, args, status, code) in &rows {
-        let ran = frame(file, &out, args);
+    // Vulkan decoding with the loader shown lavapipe alone, which has no
+    // video decode: left to itself, frame opens the GPU behind the
+    // default render node, which decodes H.264 on odin, and a render node
+    // that matches no device would get the first GPU listed (D38).
+    let icd = lavapipe::lavapipe_icd();
+    let only_lavapipe = [
+        ("VK_DRIVER_FILES", icd.as_os_str()),
+        ("VK_ICD_FILENAMES", icd.as_os_str()),
+    ];
+    let rows = rows
+        .into_iter()
+        .map(|(file, args, status, code)| (file, args, &[][..], status, code));
+    let vulkan = (
+        good.as_path(),
+        vec!["--decoder", "vulkan"],
+        &only_lavapipe[..],
+        3,
+        "hw_unavailable",
+    );
+    for (file, args, env, status, code) in rows.chain([vulkan]) {
+        let ran = frame_in(file, &out, &args, env);
         let what = format!("{} {args:?}: {} / {}", file.display(), ran.doc, ran.stderr);
-        assert_eq!(ran.status, Some(*status), "{what}");
+        assert_eq!(ran.status, Some(status), "{what}");
         assert_eq!(ran.doc["schema"], "spherecut.frame/1", "{what}");
         assert_eq!(ran.doc["ok"], false, "{what}");
         assert!(ran.doc.get("result").is_none(), "{what}");
-        assert_eq!(ran.code(), *code, "{what}");
+        assert_eq!(ran.code(), code, "{what}");
         assert!(!out.exists(), "{what}: an output was left");
         assert_eq!(temp_files(&out_dir), Vec::<String>::new(), "{what}");
     }
