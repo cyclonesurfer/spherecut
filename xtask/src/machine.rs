@@ -241,13 +241,17 @@ pub(crate) fn lavapipe_icd(root: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// A fixture tree in the temp directory, removed on drop.
+    /// A fixture tree in the temp directory, removed on drop. Each is a
+    /// directory of its own, though two tests running at once make trees
+    /// of one name.
     struct Tree(PathBuf);
 
     impl Tree {
         fn new(name: &str, files: &[(&str, &str)]) -> Tree {
+            static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let dir = std::env::temp_dir().join(format!(
-                "spherecut-xtask-machine-{name}-{}",
+                "spherecut-xtask-machine-{name}-{}-{n}",
                 std::process::id()
             ));
             let _ = std::fs::remove_dir_all(&dir);
@@ -264,6 +268,16 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn trees_of_one_name_are_apart() {
+        let a = Tree::new("same", &[("a", "a\n")]);
+        let b = Tree::new("same", &[("b", "b\n")]);
+        assert_ne!(a.0, b.0);
+        assert_eq!(std::fs::read_to_string(a.0.join("a")).unwrap(), "a\n");
+        drop(b);
+        assert!(a.0.join("a").exists());
     }
 
     #[test]
