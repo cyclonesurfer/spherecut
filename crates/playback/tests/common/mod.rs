@@ -35,6 +35,19 @@ pub fn player(
     .unwrap()
 }
 
+/// How long a test waits for a player's threads at its end. The plan
+/// gives each thread 2 s; under load the upload thread finishes its pass
+/// on lavapipe and then waits up to 1 s for the GPU, and with a build
+/// and busy loops beside it 2 s for them all was too little.
+pub const JOIN: Duration = Duration::from_secs(10);
+
+/// Shut `player` down, and fail, saying what is left, unless every
+/// thread ends within [`JOIN`] and none panicked.
+pub fn join(player: Player) {
+    let report = player.join(JOIN);
+    assert!(report.is_clean(), "{report:?}");
+}
+
 /// `f`'s first `Some`, asked every millisecond for as long as `timeout`.
 pub fn until<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {
     let start = Instant::now();

@@ -17,6 +17,10 @@
 //! stream's request has landed and its frame is Ready, then shows them
 //! together, sets the clock to the time and, if playback is wanted (and
 //! the audio, once there is some, holds [`PREROLL_AUDIO`]), starts it.
+//! Showing every stream's new frame together while the old ones stay up
+//! takes two slots a stream; with fewer live (a small setting, or slots
+//! out of memory), each stream's new frame goes up as soon as it is
+//! Ready, which gives its old slot back for the next stream's.
 //! It counts what the overlay shows: UI frame times and hitches, frames
 //! shown, dropped (passed over while playing, by run places, else by the
 //! time between), the interval between frames shown and the A/V offset.
@@ -343,6 +347,17 @@ struct Target {
     id: u64,
     at: Time,
     step: bool,
+}
+
+/// Where a stream's frame for the request the presenter waits for is.
+#[derive(Debug, Clone, Copy)]
+enum TargetSlot {
+    /// The stream failed the request, or can't open: it shows no new
+    /// frame for it.
+    Out,
+    /// Not landed yet, or not in a slot yet.
+    Waiting,
+    Ready(SlotView),
 }
 
 /// A slot the presenter shows, and its frame for the viewer.
@@ -794,8 +809,26 @@ impl Player {
         };
         let mut changed = false;
         if let Some(target) = ui.target {
-            if let Some(picked) = self.target_ready(ui, target) {
-                changed |= self.show_target(ui, target, picked, now);
+            if let Some(found) = self.target_slots(ui, target) {
+                if found.iter().all(|f| !matches!(f, TargetSlot::Waiting)) {
+                    let picked = found
+                        .iter()
+                        .map(|f| match f {
+                            TargetSlot::Ready(v) => Some(*v),
+                            _ => None,
+                        })
+                        .collect();
+                    changed |= self.show_target(ui, target, picked, now);
+                } else if shared.slots.stats().active < 2 * ui.shown.len() {
+                    // Too few slots for every stream's frame on screen and
+                    // its new one at once: each stream's goes up as it
+                    // comes, which gives its old slot back for the next.
+                    for (i, f) in found.iter().enumerate() {
+                        if let TargetSlot::Ready(v) = f {
+                            changed |= self.show(ui, i, v, now, false);
+                        }
+                    }
+                }
             }
         } else {
             if ui.preroll
@@ -895,26 +928,29 @@ impl Player {
         }
     }
 
-    /// Each stream's slot for `target`, once every stream has landed it
-    /// (or can't) and its frame is Ready.
-    fn target_ready(&self, ui: &Ui, target: Target) -> Option<Vec<Option<SlotView>>> {
+    /// Where each stream's frame for `target` is; `None` until the
+    /// status of this open has been read.
+    fn target_slots(&self, ui: &Ui, target: Target) -> Option<Vec<TargetSlot>> {
         if ui.view.len() != ui.shown.len() {
             return None;
         }
         let views = self.shared.slots.views();
-        let mut picked = Vec::with_capacity(ui.view.len());
-        for (i, s) in ui.view.iter().enumerate() {
+        let found = ui.view.iter().enumerate().map(|(i, s)| {
             if s.failed_request == Some(target.id) || (!s.opened && s.error) {
-                picked.push(None);
-                continue;
+                return TargetSlot::Out;
             }
-            let landed = s.landed.filter(|l| l.id == target.id)?;
-            let v = views.iter().find(|v| {
-                v.frame.epoch == ui.epoch && v.frame.stream == i && v.frame.time == landed.time
-            })?;
-            picked.push(Some(*v));
-        }
-        Some(picked)
+            s.landed
+                .filter(|l| l.id == target.id)
+                .and_then(|landed| {
+                    views.iter().find(|v| {
+                        v.frame.epoch == ui.epoch
+                            && v.frame.stream == i
+                            && v.frame.time == landed.time
+                    })
+                })
+                .map_or(TargetSlot::Waiting, |v| TargetSlot::Ready(*v))
+        });
+        Some(found.collect())
     }
 
     /// Show the target's frames, set the clock to its time, and play if
@@ -1321,7 +1357,73 @@ mod tests {
             let _ = player.present(Instant::now());
             std::thread::sleep(Duration::from_millis(1));
         }
-        assert!(player.join(Duration::from_secs(2)).is_clean());
+        join(player);
+    }
+
+    /// Shut `player` down, failing with the report unless every thread
+    /// ends in 10 s: under load the upload thread on lavapipe takes a
+    /// while (tests/common's `JOIN`).
+    fn join(player: Player) {
+        let report = player.join(Duration::from_secs(10));
+        assert!(report.is_clean(), "{report:?}");
+    }
+
+    #[test]
+    fn two_streams_land_with_a_slot_dead() {
+        use spherecut_core::{FrameRate, ManualClock};
+        use spherecut_synth::fake::{SyntheticBackend, SyntheticClip};
+
+        // Four slots, one of them dead before the open (risk 11: playback
+        // goes on with one fewer). Two streams' frames on screen and the
+        // two new ones need four, so each stream's goes up as it comes.
+        let rate = FrameRate::FPS_30;
+        let at = |k: i64| rate.frame_to_time(k).expect("a frame time");
+        let gpu = spherecut_render::Gpu::headless(&spherecut_render::AdapterChoice::Cpu)
+            .expect("lavapipe");
+        let backend = SyntheticBackend::new(SyntheticClip {
+            frames: 90,
+            ..SyntheticClip::default()
+        });
+        let parts = PlayerParts::new(
+            Arc::new(backend),
+            gpu,
+            Arc::new(ManualClock::new(rate.frame_duration())),
+        );
+        let config = PlayerConfig {
+            cache: CacheBudget::Bytes(64 << 20),
+            decoder: DecoderPreference::Software,
+            ..PlayerConfig::default()
+        };
+        let player = Player::new(parts, config).expect("a player");
+        let claim = player.shared.slots.claim().expect("a free slot");
+        player.shared.slots.kill(claim);
+        assert_eq!(player.slots().stats().active, 3);
+        player.open_streams("two.synthetic".into(), vec![Some(0), Some(1)]);
+        let shows = |k: i64| {
+            let start = Instant::now();
+            loop {
+                let shown = player
+                    .present(Instant::now())
+                    .map(|p| p.frames.iter().map(|f| f.frame.pts).collect::<Vec<_>>());
+                if shown.as_deref() == Some(&[k, k][..]) {
+                    return;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(20),
+                    "frame {k} never came up: showing {shown:?}, slots {:?}",
+                    player.slots().views()
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        shows(0);
+        player.seek(at(40), SeekMode::Exact);
+        shows(40);
+        player.step(1);
+        shows(41);
+        player.step(-3);
+        shows(38);
+        join(player);
     }
 
     #[test]
@@ -1360,6 +1462,6 @@ mod tests {
         }
         let status = player.shared.status().budget.expect("a budget");
         assert_eq!(status.auto, Some(short()));
-        assert!(player.join(Duration::from_secs(2)).is_clean());
+        join(player);
     }
 }

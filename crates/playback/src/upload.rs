@@ -6,7 +6,11 @@
 //! slots (the active slots over the streams, at least 2):
 //!
 //! - after a seek or a step, nothing until the request lands (the frame
-//!   on screen stays up meanwhile), then the frame it landed on;
+//!   on screen stays up meanwhile), then the frame it landed on, and
+//!   while any stream's frame for it isn't in a slot, nothing more: the
+//!   frames a stream that landed first would want next must not take
+//!   the slot another stream's needs. A stream that failed the request
+//!   wants nothing;
 //! - otherwise the frame at the playhead, the latest at or before it,
 //!   which is the one shown or about to be;
 //! - while playing, the frames after it, in order;
@@ -72,6 +76,14 @@ pub(crate) struct UploadThread {
     /// Reads the memory available: [`budget::read_auto_budget`], or a
     /// test's reading.
     pub(crate) read: fn() -> budget::AutoBudget,
+}
+
+/// What a pass reads of a stream's status.
+struct StreamPass {
+    landed: Option<Landed>,
+    /// It failed the target's request, or can't open: it shows no new
+    /// frame for it.
+    out: bool,
 }
 
 /// The upload thread's own state.
@@ -185,7 +197,8 @@ impl UploadThread {
     fn pass(&self, st: &mut State) -> bool {
         let shared = &self.shared;
         let epoch = shared.live.load(Ordering::Acquire);
-        let (landed, placements): (Vec<Option<Landed>>, Vec<Placement>) = {
+        let target = shared.target.load(Ordering::Acquire);
+        let (streams, placements): (Vec<StreamPass>, Vec<Placement>) = {
             let status = shared.status();
             if status.epoch != epoch {
                 return false;
@@ -193,7 +206,14 @@ impl UploadThread {
             status
                 .streams
                 .iter()
-                .map(|s| (s.landed, placement_of(s.info.as_ref())))
+                .map(|s| {
+                    let pass = StreamPass {
+                        landed: s.landed,
+                        out: target != 0
+                            && (s.failed_request == Some(target) || (!s.opened && s.error.is_some())),
+                    };
+                    (pass, placement_of(s.info.as_ref()))
+                })
                 .unzip()
         };
         let slots = &shared.slots;
@@ -203,16 +223,38 @@ impl UploadThread {
                 did |= slots.discard(&v);
             }
         }
-        let n = landed.len();
+        let n = streams.len();
         if n == 0 {
             return did;
         }
-        let target = shared.target.load(Ordering::Acquire);
         let playing = shared.playing.load(Ordering::Acquire);
-        let quota = (slots.stats().active / n).max(2);
+        let views = slots.views();
+        let in_slot = |i: usize, t: Time| {
+            views
+                .iter()
+                .any(|v| v.frame.epoch == epoch && v.frame.stream == i && v.frame.time == t)
+        };
+        // While a stream's frame for the target isn't in a slot, every
+        // stream wants its own alone: the frames a stream that landed
+        // first would want after its own must leave the slot the others
+        // need free (each stream's frame on screen stays up meanwhile).
+        let waiting = target != 0
+            && streams.iter().enumerate().any(|(i, s)| {
+                !s.out
+                    && !s
+                        .landed
+                        .is_some_and(|l| l.id == target && in_slot(i, l.time))
+            });
+        let quota = if waiting {
+            1
+        } else {
+            (slots.stats().active / n).max(2)
+        };
         let playhead = shared.cache.playhead();
-        let wanted: Vec<Option<Vec<Arc<VideoFrame>>>> = (0..n)
-            .map(|i| self.wanted(i, target, landed[i], playing, playhead, quota))
+        let wanted: Vec<Option<Vec<Arc<VideoFrame>>>> = streams
+            .iter()
+            .enumerate()
+            .map(|(i, s)| self.wanted(i, target, s, playing, playhead, quota))
             .collect();
         let views = slots.views();
         for v in &views {
@@ -247,18 +289,22 @@ impl UploadThread {
 
     /// The frames of stream `i` to have in slots, most wanted first;
     /// `None` to leave its slots as they are (its request hasn't landed).
+    /// A stream out of the target (it failed it) wants none.
     fn wanted(
         &self,
         i: usize,
         target: u64,
-        landed: Option<Landed>,
+        stream: &StreamPass,
         playing: bool,
         playhead: Time,
         quota: usize,
     ) -> Option<Vec<Arc<VideoFrame>>> {
         let cache = &self.shared.cache;
         let base = if target != 0 {
-            match landed {
+            if stream.out {
+                return Some(Vec::new());
+            }
+            match stream.landed {
                 Some(l) if l.id == target => cache.get(i, l.time),
                 _ => return None,
             }

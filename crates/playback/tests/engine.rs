@@ -22,8 +22,9 @@ use std::time::{Duration, Instant};
 use spherecut_core::{Clock, FrameRate, ManualClock, Rational, StopToken, Time};
 use spherecut_media::MediaError;
 use spherecut_media::backend::{
-    AudioDecode, AudioRequest, DecodeMode, DecodePath, Fallback, FallbackReason, Fault, FaultPlan,
-    FfmpegBackend, HwKind, MediaBackend, SeekMode, VideoDecode, VideoRequest,
+    AudioDecode, AudioRequest, DecodeMode, DecodePath, DecodeStats, DecoderEvent, Fallback,
+    FallbackReason, Fault, FaultPlan, FfmpegBackend, HwKind, MediaBackend, NextFrame, SeekMode,
+    SeekOutcome, VideoDecode, VideoRequest, VideoStreamInfo,
 };
 use spherecut_media::doctor::CheckResult;
 use spherecut_media::probe::{ProbeError, ProbeReport};
@@ -469,6 +470,187 @@ fn steps_follow_runs_both_ways() {
     show(&player, 97);
     assert_eq!(snapshot(&player).state, PlayState::Paused);
     assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+/// Wait `d`, or until `stop` says to stop: false then.
+fn wait_unless_stopped(d: Duration, stop: &StopToken) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < d {
+        if stop.is_stopped() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    true
+}
+
+/// The synthetic clip, with stream 1's decoder taking `seek` longer a
+/// seek and `next` longer a frame: a lens decoder running behind.
+#[derive(Debug)]
+struct SlowSecond {
+    inner: SyntheticBackend,
+    seek: Duration,
+    next: Duration,
+}
+
+#[derive(Debug)]
+struct SlowVideo {
+    inner: Box<dyn VideoDecode>,
+    seek: Duration,
+    next: Duration,
+}
+
+impl VideoDecode for SlowVideo {
+    fn info(&self) -> &VideoStreamInfo {
+        self.inner.info()
+    }
+
+    fn decode_path(&self) -> &DecodePath {
+        self.inner.decode_path()
+    }
+
+    fn seek(
+        &mut self,
+        at: Time,
+        mode: SeekMode,
+        stop: &StopToken,
+    ) -> Result<SeekOutcome, MediaError> {
+        if !wait_unless_stopped(self.seek, stop) {
+            return Ok(SeekOutcome::Stopped);
+        }
+        self.inner.seek(at, mode, stop)
+    }
+
+    fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError> {
+        if !wait_unless_stopped(self.next, stop) {
+            return Ok(NextFrame::Stopped);
+        }
+        self.inner.next_frame(stop)
+    }
+
+    fn catch_up(&mut self, until: Option<Time>) {
+        self.inner.catch_up(until);
+    }
+
+    fn take_events(&mut self) -> Vec<DecoderEvent> {
+        self.inner.take_events()
+    }
+
+    fn stats(&self) -> DecodeStats {
+        self.inner.stats()
+    }
+}
+
+impl MediaBackend for SlowSecond {
+    fn name(&self) -> &'static str {
+        "slow-second"
+    }
+
+    fn probe(&self, path: &Path) -> Result<ProbeReport, ProbeError> {
+        self.inner.probe(path)
+    }
+
+    fn open_video(
+        &self,
+        path: &Path,
+        req: &VideoRequest,
+    ) -> Result<Box<dyn VideoDecode>, MediaError> {
+        let inner = self.inner.open_video(path, req)?;
+        Ok(match req.stream {
+            Some(1) => Box::new(SlowVideo {
+                inner,
+                seek: self.seek,
+                next: self.next,
+            }),
+            _ => inner,
+        })
+    }
+
+    fn open_audio(
+        &self,
+        path: &Path,
+        req: &AudioRequest,
+    ) -> Result<Box<dyn AudioDecode>, MediaError> {
+        self.inner.open_audio(path, req)
+    }
+}
+
+/// Two streams of a 90-frame clip, as the X5's raw files hold one per
+/// lens, on `slots` GPU slots with stream 1 slowed as [`SlowSecond`]
+/// says: opened and showing both first frames.
+fn two_streams(slots: u8, seek: Duration, next: Duration) -> Player {
+    let backend = SlowSecond {
+        inner: clip(90),
+        seek,
+        next,
+    };
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = player(
+        backend,
+        clock,
+        PlayerConfig {
+            gpu_slots: slots,
+            ..config(64)
+        },
+    );
+    player.open_streams("two.synthetic".into(), vec![Some(0), Some(1)]);
+    lands(&player, &[0, 0]);
+    player
+}
+
+/// Present until the streams show the frames `want` (by pts), failing
+/// after [`WAIT`] with what the slots and the snapshot hold.
+fn lands(player: &Player, want: &[i64]) {
+    let got = until(WAIT, || {
+        let p = player.present(Instant::now())?;
+        (pts(&p) == want).then_some(())
+    });
+    if got.is_none() {
+        let views: Vec<_> = player
+            .slots()
+            .views()
+            .iter()
+            .map(|v| (v.index, v.state, v.frame.stream, v.frame.pts))
+            .collect();
+        let snap = snapshot(player);
+        panic!(
+            "{want:?} never came up: showing {:?}, {:?}, landed {:?}; slots {views:?}, {:?}",
+            player.present(Instant::now()).map(|p| pts(&p)),
+            snap.state,
+            snap.streams.iter().map(|s| s.landed).collect::<Vec<_>>(),
+            player.slots().stats()
+        );
+    }
+}
+
+#[test]
+fn two_streams_on_three_slots_seek_and_step() {
+    // Two old frames on screen and two new ones to put up need four
+    // slots; with three, the presenter puts each stream's up as it comes.
+    let player = two_streams(3, Duration::ZERO, Duration::ZERO);
+    player.seek(at(40), SeekMode::Exact);
+    lands(&player, &[40, 40]);
+    player.step(1);
+    lands(&player, &[41, 41]);
+    player.step(5);
+    lands(&player, &[46, 46]);
+    player.step(-1);
+    lands(&player, &[45, 45]);
+    assert_eq!(snapshot(&player).state, PlayState::Paused);
+    common::join(player);
+}
+
+#[test]
+fn two_streams_seek_with_the_second_decoder_behind() {
+    // Stream 1 decodes a frame in 500 ms and seeks in 300: when the seek
+    // comes, stream 0 has landed long before, and must leave stream 1 a
+    // slot for its frame.
+    let player = two_streams(4, Duration::from_millis(300), Duration::from_millis(500));
+    for k in [40, 10, 70] {
+        player.seek(at(k), SeekMode::Exact);
+        lands(&player, &[k, k]);
+    }
+    common::join(player);
 }
 
 /// FFmpeg's backend, with a device stood in for by software that fails
