@@ -412,6 +412,13 @@ impl FrameCache {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Hold the lock, as a busy decode or upload thread does, for the
+    /// tests of what the UI thread does meanwhile.
+    #[cfg(test)]
+    pub(crate) fn hold_lock(&self) -> impl Sized + '_ {
+        self.lock()
+    }
+
     fn try_lock(&self) -> Option<MutexGuard<'_, State>> {
         match self.state.try_lock() {
             Ok(g) => Some(g),

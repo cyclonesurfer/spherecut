@@ -37,7 +37,7 @@ use spherecut_media::backend::SeekMode;
 use spherecut_playback::{CacheBudget, PlayState, Player, PlayerConfig};
 use spherecut_synth::fake::{GatedBackend, SyntheticBackend, SyntheticClip};
 
-use common::{percentile, player, pts, until};
+use common::{percentile, player, pts, snapshot, until};
 
 /// The most a UI iteration may take, less its waits to run.
 const CEILING: Duration = Duration::from_millis(10);
@@ -291,7 +291,7 @@ fn a_seek_storm_decodes_little_and_lands_on_the_last_seek() {
     });
     judge("storm", &times);
     assert!(landed.is_some(), "the last seek's frame never came up");
-    let snap = player.snapshot();
+    let snap = snapshot(&player);
     let seeks = snap.streams[0].seeks;
     eprintln!("{seeks:?}");
     assert!(

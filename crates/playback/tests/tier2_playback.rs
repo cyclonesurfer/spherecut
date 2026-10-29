@@ -602,8 +602,7 @@ fn ends(f: &SlotFrame, rate: Option<FrameRate>) -> Option<Time> {
 }
 
 fn stream_rate(player: &Player) -> Option<FrameRate> {
-    player
-        .snapshot()
+    common::snapshot(player)
         .streams
         .first()
         .and_then(|s| s.info.as_ref())
@@ -621,8 +620,7 @@ fn join(player: Player) -> Result<(), String> {
 }
 
 fn paths(player: &Player) -> Vec<Option<DecodePath>> {
-    player
-        .snapshot()
+    common::snapshot(player)
         .streams
         .iter()
         .map(|s| s.decode.clone())

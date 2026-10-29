@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use spherecut_core::Clock;
 use spherecut_media::backend::MediaBackend;
-use spherecut_playback::{Player, PlayerConfig, PlayerParts, Presented};
+use spherecut_playback::{Player, PlayerConfig, PlayerParts, PlayerSnapshot, Presented};
 use spherecut_render::{AdapterChoice, Gpu};
 
 /// The CPU adapter, as every Tier 1 test renders on: made once, shared by
@@ -47,6 +47,18 @@ pub fn until<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T
         }
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+/// A snapshot of what the threads report now: `snapshot` gives the copy
+/// from before when a thread holds the status lock, which a test must not
+/// take for the state now. Never waits on a lock, so it does on a thread
+/// marked as the UI thread too.
+pub fn snapshot(player: &Player) -> PlayerSnapshot {
+    until(Duration::from_secs(20), || {
+        let s = player.snapshot();
+        s.fresh.then_some(s)
+    })
+    .expect("no snapshot read the status in 20 s")
 }
 
 /// The pts of each stream's frame on screen.

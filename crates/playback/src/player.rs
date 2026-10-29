@@ -690,11 +690,7 @@ impl Player {
             }));
         }
         shared.cache.notify();
-        if shared.cache.try_set_playhead(at) {
-            ui.playhead = Some(at);
-        } else {
-            ui.playhead = None;
-        }
+        Self::give_playhead(shared, ui, at);
     }
 
     /// Pause, and show the frame `frames` on (back, when negative) from
@@ -714,7 +710,7 @@ impl Player {
             && let Some(t) = self.adjacent(&ui, frames)
         {
             ui.clock.set(t, now);
-            ui.playhead = self.shared.cache.try_set_playhead(t).then_some(t);
+            Self::give_playhead(&self.shared, &mut ui, t);
             return;
         }
         let token = self.shared.stop.next();
@@ -830,9 +826,8 @@ impl Player {
         };
         if let Some(playhead) = playhead
             && ui.playhead != Some(playhead)
-            && shared.cache.try_set_playhead(playhead)
         {
-            ui.playhead = Some(playhead);
+            Self::give_playhead(shared, ui, playhead);
         }
         let frames: Vec<ShownFrame> = ui
             .shown
@@ -853,6 +848,20 @@ impl Player {
             changed,
             time: t,
         })
+    }
+
+    /// Give the cache the playhead `at`, if its lock is free. If it
+    /// isn't, the next [`present`](Self::present) tries again, and a
+    /// repaint is asked for so that one comes: a paused GUI draws no
+    /// other, and the upload thread would go on choosing frames around
+    /// the old playhead.
+    fn give_playhead(shared: &Shared, ui: &mut Ui, at: Time) {
+        if shared.cache.try_set_playhead(at) {
+            ui.playhead = Some(at);
+        } else {
+            ui.playhead = None;
+            shared.repaint();
+        }
     }
 
     /// Read what the presenter needs of the status, if its lock is free.
@@ -1242,6 +1251,77 @@ mod tests {
     fn a_player_is_send() {
         fn send<T: Send>() {}
         send::<Player>();
+    }
+
+    #[test]
+    fn a_playhead_the_cache_was_too_busy_for_asks_for_a_repaint() {
+        use std::sync::atomic::AtomicUsize;
+
+        use spherecut_core::blocking::{OnBlock, mark_ui_thread_with, unmark_ui_thread};
+        use spherecut_core::{FrameRate, ManualClock};
+        use spherecut_synth::fake::{SyntheticBackend, SyntheticClip};
+
+        // The repaints asked for on this thread, the presenter's; the
+        // upload thread asks for its own as frames come up.
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counter = asked.clone();
+        let me = std::thread::current().id();
+        let clock = Arc::new(ManualClock::new(FrameRate::FPS_30.frame_duration()));
+        let gpu = spherecut_render::Gpu::headless(&spherecut_render::AdapterChoice::Cpu)
+            .expect("lavapipe");
+        let backend = SyntheticBackend::new(SyntheticClip {
+            frames: 30,
+            ..SyntheticClip::default()
+        });
+        let parts = PlayerParts {
+            repaint: Some(Arc::new(move || {
+                if std::thread::current().id() == me {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            })),
+            ..PlayerParts::new(Arc::new(backend), gpu, clock.clone())
+        };
+        let config = PlayerConfig {
+            decoder: DecoderPreference::Software,
+            ..PlayerConfig::default()
+        };
+        let player = Player::new(parts, config).expect("a player");
+        player.open("clip.synthetic".into());
+        let start = Instant::now();
+        while player.present(Instant::now()).is_none() {
+            assert!(start.elapsed() < Duration::from_secs(20), "no first frame");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Half a frame on, paused: the same frame stays up, and nothing
+        // but the playhead changes, so a GUI would draw no other frame.
+        let half = Time::seconds(Rational::new(1, 60).expect("1/60"));
+        clock.set(half, Instant::now());
+        let before = player.cache().playhead();
+        let asked_before = asked.load(Ordering::SeqCst);
+        {
+            let _held = player.cache().hold_lock();
+            mark_ui_thread_with(OnBlock::Panic);
+            let shown = player.present(Instant::now());
+            unmark_ui_thread();
+            assert!(shown.is_some());
+        }
+        assert_eq!(player.cache().playhead(), before);
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            asked_before + 1,
+            "a lost playhead asked for no repaint"
+        );
+        // The next frame gives it.
+        let start = Instant::now();
+        while player.cache().playhead() != half {
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "the playhead stayed"
+            );
+            let _ = player.present(Instant::now());
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(player.join(Duration::from_secs(2)).is_clean());
     }
 
     #[test]

@@ -36,7 +36,7 @@ use spherecut_render::readback::read_texture;
 use spherecut_synth::fake::{SyntheticBackend, SyntheticClip, frame_index};
 use spherecut_synth::media::{self, Codec, Gop, Spec, VFR_TIMESCALE, vfr_ticks};
 
-use common::{gpu, player, pts, until};
+use common::{gpu, player, pts, snapshot, until};
 
 const RATE: FrameRate = FrameRate::FPS_30;
 const WAIT: Duration = Duration::from_secs(20);
@@ -171,7 +171,7 @@ fn the_presenter_shows_the_latest_frame_at_or_before_the_clock() {
             assert!(p.is_some(), "frame {k} never came up at tick {t}");
         }
     }
-    assert_eq!(player.snapshot().state, PlayState::Playing);
+    assert_eq!(snapshot(&player).state, PlayState::Playing);
     assert!(player.join(Duration::from_secs(2)).is_clean());
     let _ = base;
 }
@@ -187,11 +187,21 @@ fn frames_passed_over_while_playing_count_as_dropped() {
     // counted must be what was passed.
     let mut seen = vec![at(0)];
     for k in (2..=40).step_by(2) {
+        // Presenting meanwhile, as a GUI does every frame: a playhead the
+        // cache's lock was too busy for reaches it at the next present,
+        // and the upload thread picks the frames to upload around the
+        // playhead (D34). The clock stays on k - 2, so no frame changes.
         until(WAIT, || {
+            let _ = player.present(Instant::now());
             let views = player.slots().views();
             views.iter().any(|v| v.frame.time == at(k)).then_some(())
         })
-        .expect("the frame two on never came up");
+        .unwrap_or_else(|| {
+            panic!(
+                "the frame two on, {k}, never came up; the cache's playhead is {:?}",
+                player.cache().playhead()
+            )
+        });
         clock.set(at(k), Instant::now());
         show_seen(&player, k, &mut seen);
     }
@@ -235,7 +245,7 @@ fn a_keyframe_seek_shows_the_keyframe_at_its_own_time() {
     let player = opened(clip(120), clock.clone(), config(64));
     player.seek(at(45), SeekMode::Keyframe);
     show(&player, 40);
-    let snap = player.snapshot();
+    let snap = snapshot(&player);
     assert_eq!(snap.clock, at(40));
     assert_eq!(
         snap.streams[0].landed.unwrap().exactness,
@@ -408,7 +418,7 @@ fn a_step_past_the_window_ahead_lands() {
     show(&player, 45);
     player.step(-35);
     show(&player, 10);
-    assert_eq!(player.snapshot().state, PlayState::Paused);
+    assert_eq!(snapshot(&player).state, PlayState::Paused);
     assert!(player.join(Duration::from_secs(2)).is_clean());
 }
 
@@ -418,7 +428,7 @@ fn steps_follow_runs_both_ways() {
     let player = opened(clip(120), clock.clone(), config(64));
     // The frame after the one shown comes up while paused, so a step to
     // it is instant: no request reaches the worker.
-    let requests = |player: &Player| player.snapshot().streams[0].seeks.started;
+    let requests = |player: &Player| snapshot(player).streams[0].seeks.started;
     until(WAIT, || {
         player
             .slots()
@@ -429,7 +439,7 @@ fn steps_follow_runs_both_ways() {
     })
     .expect("the frame after never came up");
     let before = until(WAIT, || {
-        let s = player.snapshot();
+        let s = snapshot(&player);
         (s.state == PlayState::Paused).then(|| s.streams[0].seeks.started)
     })
     .unwrap();
@@ -457,7 +467,7 @@ fn steps_follow_runs_both_ways() {
     show(&player, 100);
     player.step(-3);
     show(&player, 97);
-    assert_eq!(player.snapshot().state, PlayState::Paused);
+    assert_eq!(snapshot(&player).state, PlayState::Paused);
     assert!(player.join(Duration::from_secs(2)).is_clean());
 }
 
@@ -548,7 +558,7 @@ fn a_fallback_from_a_failing_device_reaches_the_snapshot() {
         show_seen(&player, k, &mut seen);
     }
     assert_eq!(seen, (0..=20).map(at).collect::<Vec<_>>());
-    let snap = player.snapshot();
+    let snap = snapshot(&player);
     let s = &snap.streams[0];
     assert!(
         matches!(
@@ -607,7 +617,7 @@ fn auto_picks_vulkan_from_doctor_and_falls_back_on_lavapipe() {
     .unwrap();
     player.open(path);
     show(&player, 0);
-    let snap = player.snapshot();
+    let snap = snapshot(&player);
     let s = &snap.streams[0];
     let choice = s.choice.as_deref().unwrap_or_default();
     assert!(choice.starts_with("Vulkan"), "{choice}");
@@ -671,7 +681,7 @@ fn playback_after_a_seek_waits_for_the_audio_preroll() {
     let player = Player::new(parts, config(64)).unwrap();
     player.open("clip.synthetic".into());
     show(&player, 0);
-    assert!(player.snapshot().has_audio);
+    assert!(snapshot(&player).has_audio);
     player.play();
     // Video follows the audio's clock, not its own.
     let _ = player.present(Instant::now());
@@ -685,12 +695,12 @@ fn playback_after_a_seek_waits_for_the_audio_preroll() {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(!audio.clock.is_running());
-    assert_eq!(player.snapshot().state, PlayState::Seeking);
+    assert_eq!(snapshot(&player).state, PlayState::Seeking);
     audio.ready.store(true, Ordering::Release);
     let _ = player.present(Instant::now());
     assert!(audio.clock.is_running());
     assert_eq!(audio.clock.now(), at(50));
-    assert_eq!(player.snapshot().state, PlayState::Playing);
+    assert_eq!(snapshot(&player).state, PlayState::Playing);
     assert!(player.join(Duration::from_secs(2)).is_clean());
 }
 
@@ -806,8 +816,8 @@ fn a_5k7_source_plays_inside_a_256_mib_cache() {
         assert!(shown.is_some(), "frame {k} never came up");
     }
     let took = start.elapsed();
-    let snap = player.snapshot();
-    let stats = snap.cache.unwrap();
+    let snap = snapshot(&player);
+    let stats = player.cache().stats();
     eprintln!(
         "60 frames of 5.7K in {took:?}; peak {} MiB of {}, {} frames of {} MB, upload cpu {:?}",
         peak >> 20,
