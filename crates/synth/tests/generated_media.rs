@@ -172,6 +172,44 @@ fn lossy_h264_untagged_is_flagged_as_likely_equirect() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The perf clips' rate control (M1 plan section 12.4): a noisy clip
+/// comes out near the average bitrate asked for, low or high, in H.264
+/// and in HEVC, rather than where the CRF would put it.
+#[test]
+fn a_noisy_clip_comes_out_at_the_bitrate_asked_for() {
+    let dir = tmp("bitrate");
+    for codec in [Codec::H264, Codec::Hevc] {
+        let kbps = |asked: u32| {
+            let spec = Spec {
+                noise: Some(7),
+                frames: 60,
+                rate: FrameRate::FPS_30,
+                bitrate_kbps: Some(asked),
+                ..small(
+                    &format!("t-abr-{codec:?}-{asked}"),
+                    codec,
+                    8,
+                    Audio::None,
+                    false,
+                )
+            };
+            let path = media::write(&spec, &dir).unwrap();
+            let bytes = std::fs::metadata(&path).unwrap().len();
+            // 60 frames are 2 s.
+            bytes as f64 * 8.0 / 2.0 / 1000.0
+        };
+        for asked in [500, 4000] {
+            let got = kbps(asked);
+            let ratio = got / f64::from(asked);
+            assert!(
+                (0.7..1.3).contains(&ratio),
+                "{codec:?}: {got} kbit/s for {asked}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn broken_files_give_errors_not_panics() {
     let dir = tmp("bad");
