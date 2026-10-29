@@ -29,8 +29,11 @@
 //!
 //! **Steps** of one frame either way are instant when the slots hold the
 //! frame next to the one shown in its run (which the upload thread sees
-//! to while paused); other steps go to the workers, which follow the
-//! cache's run links.
+//! to while paused): it is shown at once, so a second step before the
+//! next present goes on from it. Other steps go to the workers, which
+//! follow the cache's run links. A step made while a seek or step is on
+//! its way goes on from where that lands: its frames add to a step's,
+//! and a seek's time is its frame.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -349,8 +352,10 @@ const INTERVALS: usize = 32;
 #[derive(Debug, Clone, Copy)]
 struct Target {
     id: u64,
+    /// A seek's time, or stream 0's frame a step starts from.
     at: Time,
-    step: bool,
+    /// A step's frames, from the frames in `Ui::step_from`.
+    step: Option<i32>,
 }
 
 /// Where a stream's frame for the request the presenter waits for is.
@@ -390,6 +395,11 @@ struct Ui {
     workers: Vec<Sender<Command>>,
     last_id: u64,
     target: Option<Target>,
+    /// Each stream's frame the step the presenter waits for starts from.
+    step_from: Vec<Time>,
+    /// A frame changed outside `present` (an instant step), which the
+    /// next `present` reports.
+    unpresented: bool,
     /// The target is shown, and playback waits for the audio.
     preroll: bool,
     want_play: bool,
@@ -537,6 +547,8 @@ impl Player {
                 workers: Vec::new(),
                 last_id: 0,
                 target: None,
+                step_from: Vec::new(),
+                unpresented: false,
                 preroll: false,
                 want_play: false,
                 at_end: false,
@@ -598,7 +610,7 @@ impl Player {
         ui.target = Some(Target {
             id,
             at: Time::ZERO,
-            step: false,
+            step: None,
         });
         self.shared.target.store(id, Ordering::Release);
         self.shared.playing.store(false, Ordering::Release);
@@ -695,11 +707,7 @@ impl Player {
         if ui.target.is_some() {
             shared.perf.add(Counter::SeeksSuperseded, 1);
         }
-        ui.target = Some(Target {
-            id,
-            at,
-            step: false,
-        });
+        ui.target = Some(Target { id, at, step: None });
         ui.preroll = false;
         ui.at_end = false;
         shared.target.store(id, Ordering::Release);
@@ -717,41 +725,60 @@ impl Player {
     }
 
     /// Pause, and show the frame `frames` on (back, when negative) from
-    /// the one shown.
+    /// the one shown, or from where the seek or step on its way lands: a
+    /// step's frames add to it, and a seek's time is the frame shown
+    /// there (where an exact seek lands).
     pub fn step(&self, frames: i32) {
         let now = Instant::now();
         let Ok(mut ui) = self.ui.try_borrow_mut() else {
             return;
         };
+        let ui = &mut *ui;
         if frames == 0 || ui.path.is_none() {
             return;
         }
-        Self::pause_ui(&self.shared, &mut ui, now);
+        Self::pause_ui(&self.shared, ui, now);
         ui.at_end = false;
         if frames.abs() == 1
             && ui.target.is_none()
-            && let Some(t) = self.adjacent(&ui, frames)
+            && let Some(next) = self.adjacent(ui, frames)
         {
-            ui.clock.set(t, now);
-            Self::give_playhead(&self.shared, &mut ui, t);
+            // Shown now, so that the next step goes on from it though no
+            // present came between.
+            for (i, v) in next.iter().enumerate() {
+                ui.unpresented |= self.show(ui, i, v, now, false);
+            }
+            if let Some(t) = next.first().map(|v| v.frame.time) {
+                ui.clock.set(t, now);
+                Self::give_playhead(&self.shared, ui, t);
+            }
             return;
         }
         let token = self.shared.stop.next();
         let id = ui.next_id();
         let clock = ui.clock.time_at(now);
-        let from: Vec<Time> = (0..ui.workers.len())
-            .map(|i| {
-                ui.shown
-                    .get(i)
-                    .and_then(|s| s.as_ref())
-                    .map_or(clock, |s| s.view.frame.time)
-            })
-            .collect();
+        let n = ui.workers.len();
+        let (frames, from): (i32, Vec<Time>) = match ui.target {
+            Some(Target { step: Some(f), .. }) => (f.saturating_add(frames), ui.step_from.clone()),
+            Some(Target { at, step: None, .. }) => (frames, vec![at; n]),
+            None => (
+                frames,
+                (0..n)
+                    .map(|i| {
+                        ui.shown
+                            .get(i)
+                            .and_then(|s| s.as_ref())
+                            .map_or(clock, |s| s.view.frame.time)
+                    })
+                    .collect(),
+            ),
+        };
         ui.target = Some(Target {
             id,
             at: from.first().copied().unwrap_or(clock),
-            step: true,
+            step: Some(frames),
         });
+        ui.step_from.clone_from(&from);
         self.shared.target.store(id, Ordering::Release);
         for (w, from) in ui.workers.iter().zip(from) {
             let _ = w.send(Command::Request(Request {
@@ -763,24 +790,29 @@ impl Player {
         self.shared.cache.notify();
     }
 
-    /// The time of the frame next to each shown one in its run, `step`
-    /// (±1) away, if every stream's is in a Ready slot.
-    fn adjacent(&self, ui: &Ui, step: i32) -> Option<Time> {
+    /// The slots of the frames next to each shown one in its run, `step`
+    /// (±1) away, if every stream's is Ready.
+    fn adjacent(&self, ui: &Ui, step: i32) -> Option<Vec<SlotView>> {
         let views = self.shared.slots.views();
-        let mut first = None;
-        for (i, shown) in ui.shown.iter().enumerate() {
-            let s = shown.as_ref()?.view.frame;
-            let seq = s.seq.checked_add_signed(i64::from(step))?;
-            let v = views.iter().find(|v| {
-                v.state == SlotState::Ready
-                    && v.frame.epoch == ui.epoch
-                    && v.frame.stream == i
-                    && v.frame.run == s.run
-                    && v.frame.seq == seq
-            })?;
-            first.get_or_insert(v.frame.time);
-        }
-        first
+        ui.shown
+            .iter()
+            .enumerate()
+            .map(|(i, shown)| {
+                let s = shown.as_ref()?.view.frame;
+                let seq = s.seq.checked_add_signed(i64::from(step))?;
+                views
+                    .iter()
+                    .find(|v| {
+                        v.state == SlotState::Ready
+                            && v.frame.epoch == ui.epoch
+                            && v.frame.stream == i
+                            && v.frame.run == s.run
+                            && v.frame.seq == seq
+                    })
+                    .copied()
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|next| !next.is_empty())
     }
 
     /// The frames to draw now, picked for the clock's time when they will
@@ -825,7 +857,7 @@ impl Player {
                 t
             }
         };
-        let mut changed = false;
+        let mut changed = std::mem::take(&mut ui.unpresented);
         if let Some(target) = ui.target {
             if let Some(found) = self.target_slots(ui, target) {
                 if found.iter().all(|f| !matches!(f, TargetSlot::Waiting)) {
@@ -872,7 +904,7 @@ impl Player {
         // way. A step's moves with the worker, frame by frame.
         let playhead = match ui.target {
             None => Some(t),
-            Some(target) if !target.step => Some(target.at),
+            Some(target) if target.step.is_none() => Some(target.at),
             Some(_) => None,
         };
         if let Some(playhead) = playhead
@@ -991,7 +1023,7 @@ impl Player {
             .iter()
             .find_map(|s| s.landed.filter(|l| l.id == target.id));
         if let Some(l) = landed {
-            let t = if target.step
+            let t = if target.step.is_some()
                 || l.time > target.at
                 || matches!(
                     l.exactness,

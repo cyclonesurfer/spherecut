@@ -6,9 +6,11 @@
 //! decoder that falls behind catches up without making the frames it
 //! passes; a slot is reused only once nothing else holds its frame; a
 //! seek keeps the frame on screen until the new one is ready and frees
-//! the old run's slots; steps follow runs both ways; the A/V offset
-//! moves the frame only while playing; two streams seek and step on
-//! three slots, and with the second's decoder behind; a keyframe seek back with the cache full lands on its
+//! the old run's slots; steps follow runs both ways, go on from a seek
+//! or step on its way, and instant ones from each other before a
+//! present; the A/V offset moves the frame only while playing; two
+//! streams seek and step on three slots, and with the second's decoder
+//! behind; a keyframe seek back with the cache full lands on its
 //! keyframe; a fallback reaches the snapshot, from a fault and from
 //! `Auto` picking Vulkan on lavapipe; the audio seam holds playback for
 //! its preroll; and a 5.7K source plays inside a 256 MiB cache.
@@ -501,6 +503,82 @@ fn steps_follow_runs_both_ways() {
     show(&player, 97);
     assert_eq!(snapshot(&player).state, PlayState::Paused);
     assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+#[test]
+fn a_step_while_a_seek_or_step_is_on_its_way_goes_on_from_where_it_lands() {
+    // 30 ms a frame: each request below is still on its way when the
+    // next comes, as when a key follows a click or repeats.
+    let backend = SyntheticBackend::new(SyntheticClip {
+        frames: 240,
+        frame_cost: Duration::from_millis(30),
+        ..SyntheticClip::default()
+    });
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(backend, clock, config(64));
+    // From the seek's frame, which never shows: the step superseded it.
+    player.seek(at(207), SeekMode::Exact);
+    player.step(1);
+    let mut seen = Vec::new();
+    show_seen(&player, 208, &mut seen);
+    assert_eq!(seen, [at(0), at(208)]);
+    // A step's frames add to those of the step on its way.
+    player.step(5);
+    player.step(5);
+    show(&player, 218);
+    // And come back to the seek's frame.
+    player.seek(at(230), SeekMode::Exact);
+    player.step(1);
+    player.step(-1);
+    show(&player, 230);
+    let s = snapshot(&player);
+    assert_eq!((s.state, s.clock), (PlayState::Paused, at(230)));
+    common::join(player);
+}
+
+#[test]
+fn instant_steps_before_a_present_go_on_from_each_other() {
+    // Two key events in one UI frame: the second step goes on from the
+    // first's frame, though no present came between.
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(clip(120), clock, config(64));
+    let ready = |want: &[i64]| {
+        until(WAIT, || {
+            let views = player.slots().views();
+            want.iter()
+                .all(|&k| {
+                    views
+                        .iter()
+                        .any(|v| v.frame.pts == k && v.state == SlotState::Ready)
+                })
+                .then_some(())
+        })
+        .unwrap_or_else(|| panic!("frames {want:?} never came up"));
+    };
+    let requests = |player: &Player| snapshot(player).streams[0].seeks.started;
+    ready(&[1, 2]);
+    let before = until(WAIT, || {
+        let s = snapshot(&player);
+        (s.state == PlayState::Paused).then(|| s.streams[0].seeks.started)
+    })
+    .unwrap();
+    player.step(1);
+    player.step(1);
+    show(&player, 2);
+    assert_eq!(snapshot(&player).clock, at(2));
+    // There and back is where it started.
+    ready(&[1, 3]);
+    player.step(1);
+    player.step(-1);
+    let p = show(&player, 2);
+    assert!(p.changed, "the steps' frames never showed");
+    assert_eq!(snapshot(&player).clock, at(2));
+    assert_eq!(
+        requests(&player),
+        before,
+        "an instant step went to the worker"
+    );
+    common::join(player);
 }
 
 #[test]
