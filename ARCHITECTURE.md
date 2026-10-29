@@ -623,10 +623,12 @@ intermediate equirect exists only as the output of a 360 export.
     It holds `Arc<VideoFrame>`s by stream and clip time, linked by run,
     within a budget sized from the memory available and any cgroup
     limit (`playback::budget`), rechecked every 5 s on the upload
-    thread. A worker's frame ahead of the playhead past the window
-    waits for room, in 20 ms slices that check its `StopToken`. A frame
-    at or behind the playhead never waits. A seek into frames a run
-    holds is answered from it, and decoding goes on from its end.
+    thread with the cache's own frames counted as free. A worker's
+    frame ahead of the playhead past the window waits for room, in
+    20 ms slices that check its `StopToken`. A frame at or behind the
+    playhead never waits, and the frame a request landed on is pinned
+    until it is in a slot. A seek into frames a run holds is answered
+    from it, and decoding goes on from its end.
   * **GPU slots** (`playback::SlotRing`): 3 to 6 `GpuFrame`s, each with
     an atomic state word (Free, Writing, Ready, Shown, Dead, and a
     version). The upload thread claims a Free slot only when the ring's
@@ -637,7 +639,10 @@ intermediate equirect exists only as the output of a 360 export.
     presenter, on the UI thread, shows a Ready slot by compare and swap.
   * **The presenter** (`Player::present`) picks each stream's latest
     Ready frame at or before the clock's time at the next refresh, and
-    after a seek keeps the frame on screen until the new one is Ready.
+    after a seek keeps the frame on screen until the new one is Ready
+    (with fewer than two slots a stream, each stream's goes up as it
+    comes). A step made while a request is on its way goes on from
+    where that lands.
   * **Clocks** (`core::clock`): `SystemClock` and `ManualClock` read
     through a sequence lock of atomics, so the UI thread reads them
     every frame without a lock. A file's audio, from slice 6, brings

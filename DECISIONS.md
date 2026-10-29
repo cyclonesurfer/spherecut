@@ -1843,7 +1843,9 @@ and strace's record of who installs a SIGINT handler (frame: a query,
 then the handler). `crates/cli/tests/frame.rs` runs every other error row, among
 them `adapter_not_found`, `no_decoder` (a sample entry FFmpeg doesn't
 know) and `--decoder vulkan` on lavapipe, which is `hw_unavailable`
-since every Vulkan device FFmpeg lists here runs on the CPU.
+since the row shows the Vulkan loader lavapipe's ICD alone, so every
+Vulkan device FFmpeg lists runs on the CPU, on a machine with a GPU
+too (D37).
 `hw_unsupported`, `hw_failed` and `anisotropy_unavailable` can't be
 reached here: there is no decoding device to refuse a stream or fail,
 and lavapipe has anisotropic filtering. It has the feature only: on
@@ -4176,6 +4178,10 @@ What:
   - `may_block(what)` is `#[track_caller]`. On a marked thread it
     panics with "<what> would block the UI thread (at file:line:col)",
     or logs that. On any other thread it costs one thread-local read.
+    Playback's lock wrappers (the status lock, the cache's and a
+    slot's) and the public methods that lock through them are
+    `#[track_caller]` too, so the line named is the caller's, which a
+    release build's log needs to say which UI path blocked.
   - It is called, so far, from these blocking helpers:
     - core's `fs`: reading links and metadata, creating and persisting
       a file;
@@ -4245,6 +4251,22 @@ What:
       behind still leaves no room.
     - `wait_for_change(seen, timeout)` waits for the cache's
       `generation` to move, for the upload thread.
+  - **Pins.** `pin(stream, frame, stop)` puts the frame a request
+    landed on in, past the window if it must be, and keeps it from
+    eviction until `unpin` (the upload thread's, once the frame is in a
+    slot), the stream pins another, or `clear`. Every landing goes in
+    that way. Without it a keyframe seek back with the cache full lost
+    its keyframe to the frames decoded on from it (after a seek back
+    all the history is ahead, so the keyframe is the frame farthest
+    behind), and the presenter waited for it for good. A pinned frame
+    may hold the cache past its budget, by a frame a stream at most.
+  - **Frames alive.** The budget counts the frames the cache holds.
+    The frame a worker decoded and waits to insert, and frames evicted
+    while the upload thread or a worker still holds them, are alive
+    beside them, about a frame a stream more: in the 256 MiB 5.7K run
+    below, 261 MiB of frames were alive at worst with 237 MiB held, and
+    with the X5's two 8K streams it is about 88 MB. Auto's quarter of
+    the memory available leaves room for it.
   - **Too small.** Eviction stops when only current frames and windows
     are left, even past the budget, so a budget too small for a
     stream's current frame and the nearest one ahead still holds both,
@@ -4254,7 +4276,7 @@ What:
     stream's last frame offered.
   - **The UI thread** uses only `try_set_playhead` and `try_stats`,
     which never wait for the lock and say when it was taken. Every
-    other method calls `may_block` before it locks.
+    other method calls `may_block` before it locks, naming its caller.
 - **The budget** (`playback::budget`):
   - `auto_budget(meminfo, cgroup_max, cgroup_current)` is pure, over
     the files' text: clamp(¼ × `MemAvailable`, 512 MiB, 8 GiB), then
@@ -4269,9 +4291,12 @@ What:
       then holds only the minimum the "too small" rule keeps.
   - `read_auto_budget()` reads `/proc/meminfo`, the `0::` line of
     `/proc/self/cgroup`, and `memory.max` and `memory.current` of that
-    cgroup and each of its ancestors under `/sys/fs/cgroup`. The
-    tightest room counts, since every ancestor's limit applies (a
-    Flatpak's limit can sit on its parent's slice).
+    cgroup and each of its ancestors under `/sys/fs/cgroup`, up to the
+    mount's root. The tightest room counts, since every ancestor's
+    limit applies (a Flatpak's limit can sit on its parent's slice). In
+    a container with its own cgroup namespace (Docker and Podman on
+    cgroup v2) `/proc/self/cgroup` reads `0::/`, and the container's
+    limit is the root's; the host's root has no `memory.max`.
   - `CacheBudget` is `Auto` (the default) or `Bytes(n)`.
     `CacheBudget::parse_mib` reads `--cache-mb`'s and
     `SPHERECUT_FRAME_CACHE_MIB`'s values: `auto`, or a whole number of
@@ -4279,9 +4304,14 @@ What:
     environment, then Settings. An environment value that can't be read
     is passed over and returned (`env_error`) for the caller to warn
     about.
-  - `budget::recheck(configured, now)` is what the upload thread's
-    5-second recheck sets: what `configured` stands for now. With less
-    than 1 GiB available it sets no more than ¼ of what is available,
+  - `budget::recheck(configured, now, held)` is what the upload
+    thread's 5-second recheck sets: what `configured` stands for, with
+    the `held` bytes the cache holds counted back into `MemAvailable`
+    and into the cgroup's room, since both readings count them as used.
+    Without that, Auto shrank at each recheck as the cache filled, and
+    evicted as it went: odin's 6 GiB settled near 4.8 GiB, and a 4 GiB
+    container's 1.5 GiB at 1 GiB. With less than 1 GiB available it
+    sets no more than ¼ of what is available with the cache's bytes,
     below the floor and below an explicit size too, and `set_budget`
     evicts behind frames first.
 - **`PerfStats`** (`playback::perf`), the one source of the overlay's,
@@ -4407,7 +4437,10 @@ What:
   - **What it uploads**, per stream, as far as its share of the active
     slots (at least 2):
     - while a seek or a step is on its way, nothing until it lands, then
-      the frame it landed on;
+      the frame it landed on. Until every stream's landing is in a slot
+      the share is one, so a stream that lands late still finds a slot
+      Free; a stream that failed the request, or never opened, is left
+      out of the wait. Once its landing is in a slot, it is unpinned;
     - otherwise, the frame at the playhead;
     - while playing, the frames after it, in order;
     - while paused, the next frame, then the one before (by the run
@@ -4433,15 +4466,19 @@ What:
     - Every 250 ms it reads the cache's numbers, for `CacheWaits` and
       the "too small" notice (`CacheTooSmall`, once an open).
     - Every 5 s (`BUDGET_RECHECK`) it reads the memory available
-      (`read_auto_budget`) and sets what `budget::recheck` gives: what
-      the setting stands for, and with under 1 GiB available no more
-      than a quarter of it, below an explicit size too.
+      (`read_auto_budget`) and the cache's bytes, and sets what
+      `budget::recheck` gives: what the setting stands for, and with
+      under 1 GiB available no more than a quarter of it, below an
+      explicit size too.
   - At shutdown it waits for the GPU at most 1 s (`PollType::Wait`),
     then closes the cache, which ends every wait in it.
 - **The presenter** (`Player::present(now)`), once a UI frame:
-  - **The time.** It picks for `clock.time_at(now + latency) +
-    av_offset`. The latency is the median of the last 32 UI frame
-    intervals, at most 50 ms.
+  - **The time.** It picks for `clock.time_at(now + latency)`, plus
+    `av_offset` while the clock runs: a positive offset shows the frame
+    due that much later, video ahead of the audio. Paused, the frame at
+    the clock's time shows, so a frame-exact seek or step keeps its
+    frame whatever the offset. The latency is the median of the last 32
+    UI frame intervals, at most 50 ms.
   - **After a seek or a step** it keeps the frames on screen until
     every stream has landed the request (or failed it) and the frame
     landed on is in a slot. Then it shows them together and sets the
@@ -4451,11 +4488,19 @@ What:
     - to `at` otherwise.
     - Playback, if wanted, starts then, or once the audio is `ready`
       for `PREROLL_AUDIO`. The state is Seeking until it does.
+    - Showing every stream's new frame together while the old ones stay
+      up takes two slots a stream. With fewer live (three slots for two
+      streams, or four with one Dead), each stream's new frame goes up
+      as soon as it is Ready, which gives its old slot back for the next
+      stream's, and the clock is set once every stream's is up. Without
+      that, and the upload thread's share of one while it waits, two
+      streams on three slots deadlocked on every seek.
   - **Otherwise** each stream shows the Ready slot with the latest time
     at or before the clock's, which suits variable frame rates.
   - **Counts.**
-    - It records `UiFrame` and `Hitches` (an interval over 1.5 × the
-      median).
+    - It records `UiFrame` and `Hitches`: an interval over 1.5 × the
+      median of the last 32, not of the latency, whose 50 ms cap made
+      every frame of a steady UI under 20 fps a hitch.
     - It counts `FramesShown`, and `Dropped`: the frames passed over
       while the clock runs, by run places, else by the time between
       over the duration.
@@ -4473,8 +4518,15 @@ What:
     sends `Ended`. `play` then starts from 0.
   - **Instant steps.** A step of one frame either way is instant when
     the frame next in the run is in a Ready slot, which the upload
-    thread sees to while paused. The clock moves there, and no request
-    goes out.
+    thread sees to while paused. It is shown at once, the clock moves
+    there, and no request goes out; so a second step before the next
+    present (two key events in one UI frame) goes on from it.
+  - **Steps on their way.** A step made while a seek or a step is on
+    its way goes on from where that lands: its frames add to a step's,
+    from the frames that step started from, and a seek's `at` is the
+    frame it starts from. Before, it started from the frame still on
+    screen and superseded the request, so a seek then a step lost the
+    seek.
 - **The `Player`** (`playback::player`), driven from one thread:
   - **Making one.** `Player::new(PlayerParts, PlayerConfig) ->
     Result<Player, PlayerError>`.
@@ -4604,7 +4656,16 @@ Where this differs from the plan:
 - **The cgroup cap** can go below the 512 MiB floor, as above, rather
   than being clamped back up: the floor is for small machines, and
   memory a limit doesn't leave can't be used whatever the floor says.
-  Ancestors' limits count too, which the plan didn't say.
+  Ancestors' limits count too, up to the mount's root, which the plan
+  didn't say.
+- **A recheck counts the cache's own frames as free.** The plan
+  re-derives Auto from the memory available every 5 s. Read with the
+  cache full, that is a quarter of less each time, and the budget sank
+  below the plan's table, evicting at each recheck.
+- **A request's landing is pinned** in the cache until it is in a slot,
+  past the budget by a frame a stream if it must be. The plan has no
+  such rule; without it a keyframe seek back with the cache full never
+  landed.
 - **PerfStats keeps its rings in atomics.** The plan puts each stage's
   ring in a `Mutex` that the UI thread `try_lock`s. Here each sample is
   an `AtomicU32` (an `f32`'s bits) and the ring's count is a
@@ -4660,7 +4721,22 @@ Where this differs from the plan:
   back in) returns at once and does nothing.
 - **The present latency** is one UI frame: the median of the last 32
   intervals, capped at 50 ms. What vsync and the compositor add can't
-  be measured headless; slice 7 can measure it.
+  be measured headless; slice 7 can measure it. Hitches are judged
+  against the median itself, as the plan says, not the capped latency.
+- **The A/V offset applies while playing.** The plan adds it to the
+  time picked for, always. Paused, that showed the neighbour of the
+  frame a frame-exact seek or step put up, once the upload thread
+  brought it up. The setting's doc had the sign backwards: a positive
+  offset puts video ahead of the audio.
+- **Two streams on few slots.** The plan keeps every old frame up until
+  every new one is Ready, which takes two slots a stream. Below that
+  (gpu_slots' floor of 3 with the X5's two lenses, or a slot Dead) each
+  stream's frame goes up as it comes, and the upload thread's share is
+  one slot while it waits, so the late stream finds one. The two lenses
+  may then show frames of different times after a seek, until the late
+  one's frame is up.
+- **Steps add up.** The plan says nothing of a step made while a
+  request is on its way. Here it goes on from where that lands.
 - **Slots** keep their state and a version in one `AtomicU64`, not an
   `AtomicU32`, so that a slot freed and filled again between the
   presenter's read and its swap isn't taken for the frame it held.
@@ -4758,18 +4834,37 @@ Tested:
   - the producer waits at the limit and goes on when the playhead moves;
     a waiting producer stops with its token and at `close`; a change
     wakes a waiter;
+  - a pinned frame stays until it is let go
+    (`a_pinned_frame_stays_until_it_is_let_go`): evicted neither as the
+    farthest behind nor past the window, let in past the window, and
+    gone once unpinned, re-pinned or cleared; and over the budget by
+    one, a seek back that leaves a frame past the window evicts
+    nothing, and that frame offered again goes (`Dropped`);
   - the negative control, `the_ui_thread_only_tries_the_lock`: on a
     marked thread `try_stats` and `try_set_playhead` work, and every
-    locking method panics with its own words;
+    locking method panics with its own words, naming the test's line;
   - the proptest `the_cache_keeps_its_rules`, against a model, over runs,
-    single frames, playhead moves, budget changes and clears on two
-    streams. Bytes and frames are counted exactly and never pass the
-    budget; the window and the current frames are never evicted, except
-    where a new stream or a nearer frame changes them; the frames
-    evicted are exactly those the model's rules evict, in their order;
+    single frames, pins and unpins, playhead moves, budget changes and
+    clears on two streams. Bytes and frames are counted exactly and
+    never pass the budget but by the pinned frames; the window and the
+    current frames are never evicted, except where a new stream or a
+    nearer frame changes them; the frames evicted are exactly those the
+    model's rules evict, in their order, at every step that evicts;
     `Full`, `Stored`, `Known` and `Dropped` come exactly when the rules
     say; and the links are exactly the shared runs of adjacent frames
-    held, through every eviction.
+    held, through every eviction. With pins it passes at
+    `PROPTEST_CASES=100000` in 24 s of a release build, eight runs in a
+    row. Before that, runs at that count found the model wrong, not the
+    cache, in four ways, each a state only a pinned frame past the
+    budget reaches: a playhead move, a frame turned away (`Full`) and
+    letting go of a frame not pinned evict nothing, so a cache a move
+    leaves over its budget keeps frames the rules would evict until the
+    next step that evicts (`check` allows that and nothing else); and a
+    frame held already, offered again in that state, can be the one its
+    own offer's eviction takes, `Dropped` though it is ahead of the
+    playhead. `Insert::Dropped`'s doc said only "behind the playhead"
+    and now says that too, and `a_pinned_frame_stays_until_it_is_let_go`
+    shows it. The cases are kept in `cache.proptest-regressions`.
   - Eleven faults put into the cache by hand were each caught by the
     proptest: a window frame evicted, the cap taken as the whole budget,
     no eviction, links kept after their frame went, the current frame
@@ -4785,12 +4880,17 @@ Tested:
   floor too, and to 0 past its limit; `max` is no limit; malformed text
   says nothing; the first `MemAvailable` line counts; the flag, the
   environment and Settings, in that order; a recheck shrinks under
-  pressure; the tightest cgroup up a fake tree counts; this machine has
-  a budget.
+  pressure; a recheck counts the cache's own frames as its own
+  (`a_recheck_counts_the_cache_s_own_frames_as_its_own`: eight
+  rechecks, each read with the cache full to the last budget, keep
+  odin's 6 GiB, a 4 GiB container's 1.5 GiB and a set 2 GiB; without
+  the fix odin's went 6, 4.5, 4.875 … 4.8 GiB); the tightest cgroup up
+  a fake tree counts; a cgroup namespace's limit at the root counts
+  (`0::/`, and a cgroup below it); this machine has a budget.
 - `playback::perf`: the ring keeps the last samples in order; counters
   add up across threads; percentiles by the nearest rank.
 - The engine, on lavapipe and on a `ManualClock` wherever wall time
-  would make a test flaky (`crates/playback/tests/engine.rs`, 15
+  would make a test flaky (`crates/playback/tests/engine.rs`, 22
   tests):
   - the presenter shows the latest frame at or before the clock, on a
     real variable-rate H.264 clip through `FfmpegBackend`;
@@ -4800,10 +4900,14 @@ Tested:
     without waiting. A seek or a step while paused drops nothing;
   - a keyframe seek to frame 45 shows the keyframe, 40, sets the clock
     to it, and plays on from it;
+  - hitches: 40 presents 80 ms apart, a steady UI under 20 fps, count
+    none, and one 200 ms gap counts one;
   - a decoder 2 ms a frame, with no keyframe in reach, whose clock leaps
     from frame 0 to 300 catches up without making the frames it passes:
-    the cache holds 0 to 30 and 300, and `DecodeDropped` is exactly
-    269, the frames between;
+    the cache holds 0 to the window's last frame before the leap and
+    300, and `DecodeDropped` is the frames between. The test asserts
+    300 less that frame less 1; the window ended at 30 or 31 by timing
+    over the runs, so the count was 269 or 268;
   - a slot is reused only once nothing else holds its frame. With a
     clone held, as a paint callback would hold it, the slot is Free with
     2 holders after twenty frames, and its texels, read back, still
@@ -4817,6 +4921,27 @@ Tested:
     from a seek follow the cache's links, or decode where the cache
     holds nothing; a step of 40 frames past a window of 10 lands, the
     worker moving the playhead as it goes;
+  - a step made while a seek or a step is on its way goes on from where
+    it lands, on a decoder 30 ms a frame: a seek to 207 then a step of
+    1 shows 208, 207 never shown; two steps of 5 go 10; a seek to 230,
+    a step of 1 and one back show 230;
+  - two instant steps before a present go 2 frames, with no request to
+    the worker, and a step of 1 and one back come back;
+  - with an A/V offset of ±50 ms, a paused exact seek to 10 shows 10
+    over 100 presents, with the clock at 10, and playing, the time
+    picked is the clock's plus the offset;
+  - two streams, as the X5's lenses: on three slots a seek and steps of
+    1, 5 and −1 land on both (`two_streams_on_three_slots_seek_and_step`),
+    and on four with stream 1's decoder 500 ms a frame and 300 ms a
+    seek, seeks to 40, 10 and 70 do
+    (`two_streams_seek_with_the_second_decoder_behind`). Both failed
+    without the upload thread's share of one while waiting; the first,
+    and `player::tests::two_streams_land_with_a_slot_dead` (four slots,
+    one Dead), without the presenter showing each stream's as it comes;
+  - a keyframe seek back with the cache full lands on its keyframe: 8
+    frames of budget, played to 60, then keyframe seeks to 45, 37, 29,
+    21 and 5 show 40, 32, 24, 16 and 0, with the clock there. It failed
+    without the pins;
   - a fault injected at frame 10 of a VA-API decode (`FaultBackend`,
     with media's `fault-injection` turned on for playback's tests) falls
     back to software. Every frame from 0 to 20 is shown in turn, none is
@@ -4824,7 +4949,11 @@ Tested:
     one `FellBack` event comes;
   - `Auto`, with doctor's checks saying that Vulkan decodes H.264 here
     and VA-API doesn't, picks Vulkan, which falls back on lavapipe, and
-    the snapshot and the events say so;
+    the snapshot and the events say so, with the fallback's reason. The
+    backend hands every Vulkan decode FFmpeg's device on lavapipe, by
+    name, so that a machine whose GPU decodes H.264 with Vulkan Video
+    (odin, where hw-test runs Tier 1) falls back too (D38: a render
+    node that matches no GPU still takes the first GPU listed);
   - with an `AudioOutputFactory`, video follows the audio's clock, and
     after a seek it waits for the audio's preroll, Seeking, before the
     clock runs from the seek's time; seeks made while the audio opens
@@ -4847,17 +4976,31 @@ Tested:
   - **the storm**: 1000 seeks in 2 s, on a decoder that takes 50 ms a
     frame. Iterations took 128 µs at the median, 199 µs at the 99th
     percentile and 264 µs at the most. The last seek's frame came up.
-    One of the 1001 requests decoded to completion (fewer than 100 may)
-    and 1000 were superseded, and the player was Paused at the end;
+    One of the 1001 requests decoded to completion and 1000 were
+    superseded, and the player was Paused at the end. At most 2 plus
+    the gaps of a frame's decode (50 ms) between seeks may decode to
+    completion: the open's first frame, the last seek, and a seek that
+    nothing superseded for a frame's decode, as a preempted UI thread
+    allows. The bound was "fewer than 100", which a worker ignoring its
+    stop token passed with 8; it fails the bound now, with no gap;
   - **shutdown**: a player stuck at the gate joins cleanly, in 12 to
     160 ms over the runs, its upload, open and decode threads all
-    joined. A player
-    dropped while stuck closes its cache, and the gate stays shut;
+    joined, within the plan's 2 s. A player dropped while stuck closes
+    its cache, the gate stays shut, and its open and decode threads
+    end: the last holder of the backend lets go. With `Player`'s `Drop`
+    taken out, the open waited at the gate for good, which the test
+    checked nothing of before;
   - **the negative control**, `a_blocking_snapshot_on_the_ui_thread_panics`:
     `snapshot_blocking` on the marked thread panics with "taking the
-    player's status lock would block the UI thread".
+    player's status lock would block the UI thread", and a slot's
+    `gpu_frame` panics too, each naming the test's line.
   - With 4 busy loops on the 4 CPUs, both binaries passed five runs in
     a row, the engine's in about 20 s.
+  - Every engine and `never_blocks` test but the stuck one ends with
+    `common::join`: 10 s for the threads (`JOIN`), failing with the
+    `ShutdownReport`. Under a build and 4 busy loops, `join(2 s)`
+    failed 1 to 3 tests a run, every one with the upload thread still
+    waiting for lavapipe, and printed nothing.
 - `playback::slots`: a slot goes round its states and is claimed only
   when the ring alone holds it; a view of a slot that moved on is
   refused; a slot without memory is out for good; slots past a smaller
@@ -4887,6 +5030,23 @@ Tested:
   `budget::recheck`'s rule above, has
   `player::tests::a_set_budget_shrinks_too_when_memory_is_short`, on a
   reading of 512 MiB available.
+- The engine's review found 19 faults, all fixed or corrected in the
+  docs, each with a test that fails without its fix where one can show
+  it (the tests above): two streams deadlocked on GPU slots after a
+  seek or step whenever fewer than two slots a stream were live, or
+  the second decoder came late; a keyframe seek back with the cache
+  full never landed; two Tier 1 tests took odin's Vulkan Video for none
+  (D37); the seek storm's bound couldn't fail; a step on its way lost a
+  seek, and an instant step didn't move the next one's base; the cgroup
+  cap missed a namespaced container's limit; a recheck counted the
+  cache against itself; xtask's machine tests raced on one fixture
+  directory (D37); the tests' 2 s joins failed under load and printed
+  nothing; the dropped-player test passed without `Drop`; a block on
+  the UI thread named the helper, not its caller; frames alive past the
+  budget went unsaid; a paused frame moved with the A/V offset, whose
+  doc had the sign backwards; hitches were judged against the capped
+  latency; a doc comment was on the wrong function; and the catch-up
+  count was stated as fixed.
 - The benchmarks' harness runs in Tier 1
   (`the_bench_harness_plays_on_lavapipe`): a second of 30 fps H.264
   through both passes on lavapipe in software, on a marked thread. All
@@ -4950,6 +5110,14 @@ What, so far:
   failure with its output in "Tier 1 on this machine". A failing test,
   a Tier 1 test that skips, a binary that dies, or a run that fails with
   no test binary to blame fails hw-test. `--no-tier1` leaves it out.
+  Tier 1's tests of a machine without Vulkan Video see only lavapipe
+  there: frame's `--decoder vulkan` row runs with the Vulkan loader
+  shown lavapipe's ICD alone, and the engine's `Auto` test hands FFmpeg
+  lavapipe's device by name. On odin they took the RX 7600, which
+  decodes H.264, and would have failed every run; a render node that
+  matches no GPU wouldn't do, since the first GPU listed is taken then
+  (D38). xtask's own machine tests give each fixture tree a directory
+  of its own, since two that shared one raced under libtest.
 - **Prerequisites** gain rustc 1.95 or newer (it blocks the build), a
   lavapipe ICD (`mesa-vulkan-drivers` on Fedora, `vulkan-swrast` on
   Arch; the Tier 1 render and playback tests need it) and the ALSA
@@ -5217,8 +5385,9 @@ node, so no test checks that it is the same GPU beyond `media::hw`'s
 own tests of the lookup on fake sysfs trees.
 
 Tested: `crates/cli/tests/frame.rs` (`--decoder vaapi --render-node
-/nonexistent` and `--decoder vulkan` on lavapipe are `hw_unavailable`,
-exit 3, with nothing written) and `crates/cli/tests/contract.rs` (the
+/nonexistent` and `--decoder vulkan` on lavapipe, the Vulkan loader
+shown lavapipe's ICD alone, are `hw_unavailable`, exit 3, with nothing
+written) and `crates/cli/tests/contract.rs` (the
 same for exit 3's document); every other run of those tests is `auto`
 with the no-node fallback, and the envelope test checks the
 `decode` it reports.
