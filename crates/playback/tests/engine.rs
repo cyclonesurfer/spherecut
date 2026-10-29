@@ -6,8 +6,9 @@
 //! decoder that falls behind catches up without making the frames it
 //! passes; a slot is reused only once nothing else holds its frame; a
 //! seek keeps the frame on screen until the new one is ready and frees
-//! the old run's slots; steps follow runs both ways; two streams seek
-//! and step on three slots, and with the second's decoder behind; a keyframe seek back with the cache full lands on its
+//! the old run's slots; steps follow runs both ways; the A/V offset
+//! moves the frame only while playing; two streams seek and step on
+//! three slots, and with the second's decoder behind; a keyframe seek back with the cache full lands on its
 //! keyframe; a fallback reaches the snapshot, from a fault and from
 //! `Auto` picking Vulkan on lavapipe; the audio seam holds playback for
 //! its preroll; and a 5.7K source plays inside a 256 MiB cache.
@@ -500,6 +501,41 @@ fn steps_follow_runs_both_ways() {
     show(&player, 97);
     assert_eq!(snapshot(&player).state, PlayState::Paused);
     assert!(player.join(Duration::from_secs(2)).is_clean());
+}
+
+#[test]
+fn the_av_offset_moves_the_frame_only_while_playing() {
+    for offset_ms in [50, -50] {
+        let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+        let player = opened(
+            clip(120),
+            clock.clone(),
+            PlayerConfig {
+                av_offset_ms: offset_ms,
+                ..config(64)
+            },
+        );
+        // Paused, a frame-exact seek's frame stays up, while the upload
+        // thread brings the frames beside it up into slots.
+        player.seek(at(10), SeekMode::Exact);
+        show(&player, 10);
+        for _ in 0..100 {
+            let p = player.present(Instant::now()).unwrap();
+            assert_eq!((pts(&p), p.time), (vec![10], at(10)), "{offset_ms} ms");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(snapshot(&player).clock, at(10));
+        // Playing, the frame due the offset after the clock's time.
+        player.play();
+        let offset = Time(Rational::new(i64::from(offset_ms), 1000).unwrap());
+        let p = player.present(Instant::now()).unwrap();
+        assert_eq!(
+            p.time,
+            at(10).checked_add(offset).unwrap(),
+            "{offset_ms} ms"
+        );
+        common::join(player);
+    }
 }
 
 /// Wait `d`, or until `stop` says to stop: false then.

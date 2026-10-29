@@ -11,16 +11,17 @@
 //!
 //! **The presenter** ([`Player::present`]), once a UI frame, picks each
 //! stream's slot for the clock's time when the frame will be on screen
-//! (the time now plus one UI frame, plus the A/V offset): the Ready slot
-//! with the latest time at or before it, which suits variable frame
-//! rates. After a seek or a step it keeps the frame on screen until every
-//! stream's request has landed and its frame is Ready, then shows them
-//! together, sets the clock to the time and, if playback is wanted (and
-//! the audio, once there is some, holds [`PREROLL_AUDIO`]), starts it.
-//! Showing every stream's new frame together while the old ones stay up
-//! takes two slots a stream; with fewer live (a small setting, or slots
-//! out of memory), each stream's new frame goes up as soon as it is
-//! Ready, which gives its old slot back for the next stream's.
+//! (the time now plus one UI frame, plus the A/V offset while playing):
+//! the Ready slot with the latest time at or before it, which suits
+//! variable frame rates. After a seek or a step it keeps the frame on
+//! screen until every stream's request has landed and its frame is
+//! Ready, then shows them together, sets the clock to the time and, if
+//! playback is wanted (and the audio, once there is some, holds
+//! [`PREROLL_AUDIO`]), starts it. Showing every stream's new frame
+//! together while the old ones stay up takes two slots a stream; with
+//! fewer live (a small setting, or slots out of memory), each stream's
+//! new frame goes up as soon as it is Ready, which gives its old slot
+//! back for the next stream's.
 //! It counts what the overlay shows: UI frame times and hitches (an
 //! interval over 1.5 times the median of the last ones), frames shown,
 //! dropped (passed over while playing, by run places, else by the time
@@ -166,8 +167,10 @@ pub struct PlayerConfig {
     pub gpu_slots: u8,
     /// For the files opened after it is set.
     pub decoder: DecoderPreference,
-    /// Shows video this much later than the clock (earlier when
-    /// negative).
+    /// While playing, shows the frame due this much after the clock's
+    /// time: video this much ahead of the audio (behind it when
+    /// negative). Paused, the frame at the clock's time shows, as a
+    /// frame-exact seek or step put it.
     pub av_offset_ms: i32,
 }
 
@@ -812,9 +815,15 @@ impl Player {
         }
         let offset =
             Time(Rational::new(i64::from(ui.config.av_offset_ms), 1000).unwrap_or(Rational::ZERO));
+        // The offset applies while playing: paused, the frame at the
+        // clock's time shows, as a frame-exact seek or step put it.
         let at = |ui: &Ui| {
             let t = ui.clock.time_at(now + ui.latency());
-            t.checked_add(offset).unwrap_or(t)
+            if ui.clock.is_running() {
+                t.checked_add(offset).unwrap_or(t)
+            } else {
+                t
+            }
         };
         let mut changed = false;
         if let Some(target) = ui.target {
