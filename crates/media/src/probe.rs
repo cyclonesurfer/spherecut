@@ -942,6 +942,16 @@ fn kind_name(k: StreamKind) -> String {
     format!("{k:?}").to_lowercase()
 }
 
+/// The `SA3D` box of the `trak` that FFmpeg's stream `index` (stream ID
+/// `id`) comes from, for the audio decoder (D17). `None` when the file
+/// isn't MP4/MOV, its boxes can't be read, or the track has none.
+pub(crate) fn spatial_audio(path: &Path, index: usize, id: i32) -> Option<spherical::SpatialAudio> {
+    let tree = mp4::read_file(path).ok()?;
+    let traks: Vec<&Mp4Box> = tree.tracks().collect();
+    let trak = traks.get(trak_matcher(&traks)(index, id)?)?;
+    spherical::read_track(trak).spatial_audio
+}
+
 /// Match FFmpeg streams to `trak`s: map (stream index, stream ID) to the
 /// position of the stream's `trak`. Cover art in `udta` gives FFmpeg
 /// streams that have no `trak`, so match by track ID when every track has

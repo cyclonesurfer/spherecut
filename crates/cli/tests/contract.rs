@@ -52,6 +52,7 @@ const CODES: &[&str] = &[
     "nested_open_refused",
     "no_decoder",
     "no_gpu",
+    "no_stream",
     "no_video_or_audio",
     "not_a_file",
     "not_equirect",

@@ -14,9 +14,9 @@
 //! it, either fails the decode ([`Fallback::Fail`]) or hands it to
 //! software, which says so with [`DecoderEvent::FellBack`] and goes on
 //! from the frame after the last one returned (DECISIONS D30). Slice 5b
-//! adds a GPU-resident [`FrameStorage`] variant. Audio decoding arrives
-//! in slice 6; until then [`MediaBackend::open_audio`] says so with
-//! [`MediaError::NotYet`].
+//! adds a GPU-resident [`FrameStorage`] variant. Audio streams decode
+//! through their own demuxer and decoder, to the output's rate and
+//! channels on the same clip time axis (`media::audio`, D35).
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -349,6 +349,12 @@ impl VideoStreamInfo {
             Timing::Constant(r) => Some(r),
             Timing::Variable { .. } => None,
         }
+    }
+
+    /// Clip time 0 in the file's own time: the first presented frame's
+    /// pts, in seconds.
+    pub fn origin(&self) -> Result<Time, spherecut_core::TimeError> {
+        Time::from_pts(self.origin_pts, self.time_base)
     }
 
     /// Clip time of stream tick `pts`.
@@ -702,15 +708,22 @@ impl VideoPlanes for VideoFrame {
     }
 }
 
-/// How to open an audio stream (slice 6).
+/// How to open an audio stream.
 #[derive(Debug, Clone)]
 pub struct AudioRequest {
+    /// The stream, by its index in the file; `None` for the first audio
+    /// stream with a decoder.
     pub stream: Option<usize>,
     pub out: AudioOutFormat,
+    /// Clip time 0 in the file's own time: the first presented frame of
+    /// the video that the audio plays with ([`VideoStreamInfo::origin`]).
+    /// `None` puts it at the audio's first sample.
+    pub origin: Option<Time>,
     /// Set at shutdown only, as [`VideoRequest::interrupt`].
     pub interrupt: Arc<AtomicBool>,
 }
 
+/// Packed f32 at `rate`, `channels` to a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioOutFormat {
     pub rate: u32,
@@ -896,12 +909,10 @@ impl MediaBackend for FfmpegBackend {
 
     fn open_audio(
         &self,
-        _path: &Path,
-        _req: &AudioRequest,
+        path: &Path,
+        req: &AudioRequest,
     ) -> Result<Box<dyn AudioDecode>, MediaError> {
-        Err(MediaError::NotYet {
-            what: "audio decoding (M1 slice 6)",
-        })
+        Ok(Box::new(crate::audio::FfmpegAudio::open(path, req)?))
     }
 }
 
@@ -924,6 +935,7 @@ const _: () = {
     send::<NextFrame>();
     send::<DecoderEvent>();
     send::<Box<dyn AudioDecode>>();
+    send::<crate::audio::FfmpegAudio>();
     send::<StopToken>();
     sync::<StopToken>();
 };

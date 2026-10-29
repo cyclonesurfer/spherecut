@@ -11,6 +11,7 @@ use std::sync::Once;
 
 use thiserror::Error;
 
+pub mod audio;
 pub mod backend;
 pub mod color;
 pub mod decode;
@@ -114,6 +115,10 @@ pub enum MediaError {
     /// A part of the media backend that a later M1 slice brings.
     #[error("{what} is not implemented yet")]
     NotYet { what: &'static str },
+    /// The file has no stream of the kind asked for, or none at the index
+    /// asked: `kind` is "audio".
+    #[error("{} has no {kind} stream", path.display())]
+    NoStream { path: PathBuf, kind: &'static str },
 }
 
 pub use ffi::{CONTAINERS, HwDevice, HwError, HwRefusal, MAX_PIXELS, TooLarge};
@@ -136,6 +141,7 @@ impl MediaError {
         "hw_unavailable",
         "unsupported_pixel_format",
         "not_implemented",
+        "no_stream",
     ];
 
     /// The error's stable code, as the CLI's JSON gives it (D27): within a
@@ -159,6 +165,7 @@ impl MediaError {
             MediaError::Hardware { .. } => "hw_unavailable",
             MediaError::UnsupportedFormat { .. } => "unsupported_pixel_format",
             MediaError::NotYet { .. } => "not_implemented",
+            MediaError::NoStream { .. } => "no_stream",
         }
     }
 
@@ -291,6 +298,10 @@ mod tests {
                 pix_fmt: "xyz12le".into(),
             },
             MediaError::NotYet { what: "audio" },
+            MediaError::NoStream {
+                path: path(),
+                kind: "audio",
+            },
         ];
         let mut seen = BTreeSet::new();
         for e in &errors {
@@ -309,7 +320,8 @@ mod tests {
                 | MediaError::HwFailed { .. }
                 | MediaError::Hardware { .. }
                 | MediaError::UnsupportedFormat { .. }
-                | MediaError::NotYet { .. } => {}
+                | MediaError::NotYet { .. }
+                | MediaError::NoStream { .. } => {}
             }
             assert!(MediaError::CODES.contains(&e.code()), "{e:?}");
             seen.insert(e.code());
