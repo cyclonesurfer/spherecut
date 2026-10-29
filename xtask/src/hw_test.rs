@@ -2602,6 +2602,13 @@ fn main() {
         ),
     ];
 
+    /// `text`, another cargo run's output, quoted for an assertion's
+    /// message: as it is, its status and result lines would read as this
+    /// run's to hw-test's own Tier 1 run, binaries and tests of its own.
+    fn quoted(text: &str) -> String {
+        text.lines().map(|l| format!("\n| {l}")).collect()
+    }
+
     #[test]
     fn reads_real_cargo_output_whatever_the_users_terminal_settings() {
         let s = Scratch::new("hw-test", PROBE);
@@ -2626,22 +2633,28 @@ fn main() {
             std::fs::write(s.0.join(".cargo/config.toml"), config).unwrap();
             let env: Vec<(&str, &str)> = base.iter().chain(user_env).copied().collect();
 
-            // The setting does change cargo's output when left alone.
-            let plain = capture_merged(
-                &s.0,
-                "cargo",
-                &["test", "--workspace", "--", "--ignored", "--list"],
-                &env,
+            // The setting does change cargo's output when left alone: with
+            // only the user's settings, not what this test inherits, such
+            // as hw-test's own Tier 1 run's PLAIN_OUTPUT.
+            let mut alone: Vec<String> = PLAIN_OUTPUT
+                .iter()
+                .flat_map(|(k, _)| ["-u".to_string(), k.to_string()])
+                .collect();
+            alone.extend(user_env.iter().map(|(k, v)| format!("{k}={v}")));
+            alone.extend(
+                ["cargo", "test", "--workspace", "--", "--ignored", "--list"].map(String::from),
             );
-            assert!(plain.ok, "{why}: {}", plain.text);
+            let alone: Vec<&str> = alone.iter().map(String::as_str).collect();
+            let plain = capture_merged(&s.0, "env", &alone, &env);
+            assert!(plain.ok, "{why}: {}", quoted(&plain.text));
             assert!(
                 !plain.text.contains("     Running tests/tier2.rs ("),
                 "{why}: {}",
-                plain.text
+                quoted(&plain.text)
             );
 
             let t = list_and_run(&s.0, true, &env);
-            assert!(t.list.ok, "{why}: {}", t.list.text);
+            assert!(t.list.ok, "{why}: {}", quoted(&t.list.text));
             let names: Vec<&str> = t.results.iter().map(|(n, _)| n.as_str()).collect();
             assert_eq!(
                 names,
@@ -2652,7 +2665,7 @@ fn main() {
                     "says_ok_then_dies::dies"
                 ],
                 "{why}: {}",
-                t.run.text
+                quoted(&t.run.text)
             );
             assert_eq!(t.results[0].1, Outcome::Passed, "{why}");
             assert_eq!(t.results[1].1, Outcome::Passed, "{why}");
@@ -2670,7 +2683,7 @@ fn main() {
                     "`says_ok_then_dies` did not finish (exit status: 3)"
                 ],
                 "{why}: {}",
-                t.run.text
+                quoted(&t.run.text)
             );
 
             // Tier 1 on the same workspace: its one Tier 1 test, and the
@@ -2688,7 +2701,7 @@ fn main() {
                     "says_ok_then_dies::dies"
                 ],
                 "{why}: {}",
-                t1.run.text
+                quoted(&t1.run.text)
             );
             assert_eq!(t1.passed(), 2, "{why}");
             assert_eq!(t1.failed().len(), 1, "{why}");
@@ -2701,7 +2714,7 @@ fn main() {
                     "Tier 1 `says_ok_then_dies` did not finish (exit status: 3)"
                 ],
                 "{why}: {}",
-                t1.run.text
+                quoted(&t1.run.text)
             );
             assert!(
                 t1.counts()
@@ -2742,6 +2755,67 @@ error: test failed, to rerun pass `-p probe-a --lib`
         assert_eq!(failed.len(), 1);
         assert!(failed[0].1.contains("may not skip"), "{failed:?}");
         assert_eq!(t1.problems(), ["1 Tier 1 test(s) failed on this machine"]);
+    }
+
+    #[test]
+    fn another_cargo_runs_output_in_a_failure_stays_the_failures_when_quoted() {
+        // What the test above prints when it fails, under hw-test's own
+        // Tier 1 run: another cargo run's status and result lines.
+        let nested = "     Running tests/tier2.rs (target/debug/deps/tier2-0123456789abcdef)
+
+running 1 test
+test same_name ... ok
+
+failures:
+    same_name
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+   Doc-tests probe_b
+";
+        let run = |inner: &str| {
+            format!(
+                "     Running unittests src/main.rs (target/debug/deps/xtask-0123456789abcdef)
+
+running 2 tests
+test a ... ok
+test b ... FAILED
+
+failures:
+
+---- b stdout ----
+
+thread 'b' panicked at src/main.rs:1:1:
+why: {inner}
+
+failures:
+    b
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+
+error: test failed, to rerun pass `-p xtask --bin xtask`
+"
+            )
+        };
+        let t1 = |text: &str| {
+            Tier1::new(
+                captured_text(false, text),
+                &BTreeMap::new(),
+                Path::new("/w"),
+            )
+        };
+        let names = |t: &Tier1| t.results().map(|(n, _)| n).collect::<Vec<_>>();
+        let quoted_run = t1(&run(&quoted(nested)));
+        assert_eq!(names(&quoted_run), ["xtask::a", "xtask::b"]);
+        assert_eq!(
+            quoted_run.problems(),
+            ["1 Tier 1 test(s) failed on this machine"]
+        );
+        assert!(quoted_run.failed()[0].1.contains("| test same_name ... ok"));
+        // As it is, it reads as binaries and tests of this run's.
+        let raw = t1(&run(nested));
+        assert_ne!(names(&raw), ["xtask::a", "xtask::b"]);
+        assert_ne!(raw.problems(), ["1 Tier 1 test(s) failed on this machine"]);
     }
 
     #[test]
