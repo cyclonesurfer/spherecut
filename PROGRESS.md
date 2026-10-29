@@ -862,35 +862,34 @@ Evidence for the third part, on this box:
    Tier 1 on the machine; the adapter dump (`list_adapters_and_features`);
    the goldens on RADV and on the local llvmpipe
    (`goldens_on_gpu_match_reference`); the upload bench
-   (`bench_upload_5k7`, which decides the belt trigger); seek parity and
+   (`bench_upload_5k7`, for the belt); seek parity and
    latency (`vaapi_seek_matches_software`, `vulkan_seek_matches_software`,
    `bench_seek_latency`); the real-time playback benchmarks
    (`bench_playback_realtime_5k7_8bit`, `_10bit` and `_8k_8bit`,
    `bench_playback_stitched_samples`); and the X5 raw bench
    (`bench_playback_x5_raw`). The report's "Power profile" says how
    each machine was set; the runs should be on the profile Pat uses for
-   editing. odin's fourth run (`hw-run-5.md` in the project's shared
-   files), for its RADV and LLVM 22 numbers and slice 4's two Tier 2
-   tests, is part of H1 if it hasn't come back first. The belt and U2
-   decisions follow H1's numbers as soon as they come back: the belt
-   from `bench_upload_5k7` (m1-plan section 4.4's trigger), U2 from the
-   playback benchmarks' `download` and `upload_cpu` stages against a
-   third of a 30 fps frame's 33.4 ms. Audio (slice 6), then the eframe
-   GUI, go on meanwhile; the GUI hands eframe render's own device
-   through egui-wgpu's `WgpuSetup::Existing` rather than the plan's
-   `CreateNew`, so that slice 5b's Vulkan Video device reaches the viewer
-   (D31). H1 also runs slice 2b's, 3b's and 4's Tier 2 tests
-   on huginn and odin: `bench_upload_5k7` decides whether the staging
-   belt replaces `write_texture`, `goldens_on_gpu_match_reference`
-   whether both GPUs clear lavapipe's floors and the RX 7600's CPU
-   checks come within 1 dB of the emulation's predictions (D32's Revisit
-   clause; the old mips' stores would clear the floors too, and come out
-   1.81 to 7.36 dB under the predictions where a view reads level 1 or
-   more), and
-   `vaapi_render_matches_software` and `vulkan_render_matches_software`
-   hold `spherecut frame`'s hardware decode to its software decode, and
-   `--decoder auto` to VA-API on the node found from the rendering
-   adapter (D39). Still with no test in any tier, for H1 or later:
+   editing. odin passed all of slice 2b's, 3b's and 4's Tier 2 tests at
+   918d031 (PR #6, on main since this branch left it), its CPU checks
+   where D32's emulation puts them, so there H1 adds slice 5's playback
+   benchmarks and Tier 1; huginn hasn't run 3b's or 4's. The belt and
+   U2 decisions follow H1's numbers as soon as they come back:
+   `bench_upload_5k7` decides whether the staging belt replaces
+   `write_texture`, though on odin the plan's CPU trigger holds only
+   through its 4 ms arm, where the belt costs the same, so the trigger
+   needs restating before it decides anything (D31, as main has it);
+   U2 is decided from the playback benchmarks' `download` and
+   `upload_cpu` stages against a third of a 30 fps frame's 33.4 ms.
+   `goldens_on_gpu_match_reference` holds huginn's 8060S, RADV too, to
+   lavapipe's floors, and D32's Revisit clause to within 1 dB of the
+   emulation's numbers; and `vaapi_render_matches_software`,
+   `vulkan_render_matches_software` and `--decoder auto` on the node
+   found from the rendering adapter (D39) run on huginn for the first
+   time. Audio (slice 6), then the eframe GUI, go on meanwhile; the GUI
+   hands eframe render's own device through egui-wgpu's
+   `WgpuSetup::Existing` rather than the plan's `CreateNew`, so that
+   slice 5b's Vulkan Video device reaches the viewer (D31).
+   Still with no test in any tier, for H1 or later:
    `auto`'s fallback after a device that turns a stream down or fails
    on a frame, `anisotropy_unavailable`, and whether `--filter aniso`
    does anything: a Tier 2 check on RADV or ANV that a grazing view
