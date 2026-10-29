@@ -242,8 +242,7 @@ fn the_ui_never_waits_on_a_backend_that_never_answers() {
         first < Duration::from_millis(500),
         "the first frame took {first:?}"
     );
-    let report = player.join(Duration::from_secs(2));
-    assert!(report.is_clean(), "{report:?}");
+    common::join(player);
 }
 
 #[test]
@@ -300,8 +299,7 @@ fn a_seek_storm_decodes_little_and_lands_on_the_last_seek() {
         seeks.decoded
     );
     assert_eq!(snap.state, PlayState::Paused);
-    let report = player.join(Duration::from_secs(2));
-    assert!(report.is_clean(), "{report:?}");
+    common::join(player);
 }
 
 #[test]
@@ -313,6 +311,8 @@ fn a_player_stuck_in_its_backend_shuts_down_at_once() {
     player.play();
     // Its threads are all waiting by now: the decoder at the gate.
     std::thread::sleep(Duration::from_millis(100));
+    // The plan's 2 s, not the other tests' [`common::JOIN`]: this is the
+    // test of it, and stuck threads end at once.
     let start = Instant::now();
     let report = player.join(Duration::from_secs(2));
     let took = start.elapsed();
@@ -392,5 +392,5 @@ fn a_blocking_snapshot_on_the_ui_thread_panics() {
     // Off the UI thread it is an ordinary snapshot.
     let player = player.lock().unwrap().take().unwrap();
     assert_eq!(player.snapshot_blocking().state, PlayState::Empty);
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }

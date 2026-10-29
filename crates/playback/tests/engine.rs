@@ -180,7 +180,7 @@ fn the_presenter_shows_the_latest_frame_at_or_before_the_clock() {
         }
     }
     assert_eq!(snapshot(&player).state, PlayState::Playing);
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
     let _ = base;
 }
 
@@ -229,7 +229,7 @@ fn frames_passed_over_while_playing_count_as_dropped() {
     let passed: i64 = frames.windows(2).map(|w| w[1] - w[0] - 1).sum();
     eprintln!("shown {frames:?}: {passed} passed over");
     assert_eq!(player.perf().count(Counter::Dropped), passed as u64);
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 #[test]
@@ -268,7 +268,7 @@ fn frames_are_dropped_only_while_playing() {
     player.step(5);
     show(&player, 45);
     assert_eq!(player.perf().count(Counter::Dropped), 0);
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 #[test]
@@ -290,7 +290,7 @@ fn a_keyframe_seek_shows_the_keyframe_at_its_own_time() {
     clock.set(at(41), Instant::now());
     show(&player, 41);
     assert_eq!(player.perf().count(Counter::Dropped), 0);
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 #[test]
@@ -330,7 +330,7 @@ fn a_decoder_that_falls_behind_catches_up_without_making_the_frames_it_passes() 
         "frames passed over were made: {held:?}"
     );
     assert_eq!(dropped, 300 - last_ahead - 1);
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 #[test]
@@ -367,7 +367,7 @@ fn a_slot_is_reused_only_once_nothing_else_holds_its_frame() {
         reused |= player.slots().state(slot) != Some(SlotState::Free);
     }
     assert!(reused, "slot {slot} was never used again");
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 #[test]
@@ -412,7 +412,7 @@ fn a_seek_keeps_the_frame_up_until_the_new_one_is_ready_and_frees_the_old_run() 
     // Playback goes on from there.
     clock.set(at(209), Instant::now());
     show(&player, 209);
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 #[test]
@@ -453,7 +453,7 @@ fn a_step_past_the_window_ahead_lands() {
     player.step(-35);
     show(&player, 10);
     assert_eq!(snapshot(&player).state, PlayState::Paused);
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 #[test]
@@ -502,7 +502,7 @@ fn steps_follow_runs_both_ways() {
     player.step(-3);
     show(&player, 97);
     assert_eq!(snapshot(&player).state, PlayState::Paused);
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 #[test]
@@ -940,7 +940,7 @@ fn a_fallback_from_a_failing_device_reaches_the_snapshot() {
         .collect();
     assert_eq!(fell.len(), 1, "{fell:?}");
     assert_eq!(player.perf().count(Counter::Dropped), 0);
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 /// FFmpeg's backend, with every Vulkan decode on FFmpeg's device on
@@ -1068,7 +1068,7 @@ fn auto_picks_vulkan_from_doctor_and_falls_back_on_lavapipe() {
             ..
         }
     )));
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 /// Audio that is ready to play only when the test says so, on a clock the
@@ -1136,7 +1136,7 @@ fn playback_after_a_seek_waits_for_the_audio_preroll() {
     assert!(audio.clock.is_running());
     assert_eq!(audio.clock.now(), at(50));
     assert_eq!(snapshot(&player).state, PlayState::Playing);
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 /// Audio that takes a while to open, and gives up if its open is
@@ -1186,7 +1186,7 @@ fn a_seek_while_the_audio_opens_keeps_the_audio() {
         s.fresh.then_some(s.has_audio)
     });
     assert_eq!(has_audio, Some(true));
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 #[test]
@@ -1208,7 +1208,7 @@ fn new_settings_reach_the_threads() {
         s.budget.filter(|b| b.bytes == 32 << 20).map(|_| s)
     });
     assert!(snap.is_some());
-    assert!(player.join(Duration::from_secs(2)).is_clean());
+    common::join(player);
 }
 
 /// Risk 11's acceptance (M1 plan, slice 5): 5.7K frames, 25 MB each,
@@ -1269,5 +1269,5 @@ fn a_5k7_source_plays_inside_a_256_mib_cache() {
         e,
         PlayerEvent::CacheTooSmall { .. } | PlayerEvent::SlotDropped { .. }
     )));
-    assert!(player.join(Duration::from_secs(5)).is_clean());
+    common::join(player);
 }
