@@ -9,8 +9,8 @@
 //! the old run's slots; steps follow runs both ways, go on from where a
 //! seek (keyframe ones included) or step on its way lands, and instant
 //! ones from each other before a present; the A/V offset moves the frame only while playing; two
-//! streams seek and step on three slots, with the second's decoder
-//! behind, and with one failing its seek while its next frame holds the
+//! streams seek, step and play on three slots, with the second's decoder
+//! behind, and seek with one failing while its next frame holds the
 //! third slot; a keyframe seek back with the cache full lands on its
 //! keyframe, on one stream and on two streams on three slots; a
 //! fallback reaches the snapshot, from a fault and from `Auto` picking
@@ -793,11 +793,12 @@ fn lands(player: &Player, want: &[i64]) {
             .collect();
         let snap = snapshot(player);
         panic!(
-            "{want:?} never came up: showing {:?}, {:?}, landed {:?}; slots {views:?}, {:?}",
+            "{want:?} never came up: showing {:?}, {:?}, landed {:?}; slots {views:?}, {:?}; cache {:?}",
             player.present(Instant::now()).map(|p| pts(&p)),
             snap.state,
             snap.streams.iter().map(|s| s.landed).collect::<Vec<_>>(),
-            player.slots().stats()
+            player.slots().stats(),
+            snap.cache
         );
     }
 }
@@ -869,6 +870,37 @@ fn two_streams_on_three_slots_seek_with_one_failing() {
     fail.store(true, Ordering::Release);
     player.seek(at(40), SeekMode::Exact);
     lands(&player, &[0, 40]);
+    common::join(player);
+}
+
+#[test]
+fn two_streams_play_on_three_slots_with_the_second_decoder_behind() {
+    // Stream 0's next frame is ready long before stream 1's frame at the
+    // clock, 150 ms a frame: on three slots it must leave the slot that
+    // frame needs, or the two lenses show different frames until the
+    // clock moves.
+    let backend = SlowSecond {
+        inner: clip(90),
+        seek: Duration::ZERO,
+        next: Duration::from_millis(150),
+        fail: Arc::default(),
+    };
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = player(
+        backend,
+        clock.clone(),
+        PlayerConfig {
+            gpu_slots: 3,
+            ..config(64)
+        },
+    );
+    player.open_streams("two.synthetic".into(), vec![Some(0), Some(1)]);
+    lands(&player, &[0, 0]);
+    player.play();
+    for k in 1..=12 {
+        clock.set(at(k), Instant::now());
+        lands(&player, &[k, k]);
+    }
     common::join(player);
 }
 
