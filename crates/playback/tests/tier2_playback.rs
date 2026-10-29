@@ -930,17 +930,17 @@ fn play_perf_clip(name: &str, gated: bool) {
 fn record_passes(clip: &str, run: &Run, u: &Pass, r: &Pass) {
     let name = format!("{clip}, {}", run.label);
     bench::record_runs(
-        &format!("{name}: decoded fps, unthrottled"),
+        &format!("{name}: decoded per second, unthrottled"),
         &u.decoded_fps(),
         "fps",
     );
     bench::record_runs(
-        &format!("{name}: decoded fps, real time"),
+        &format!("{name}: decoded per second, real time"),
         &r.decoded_fps(),
         "fps",
     );
     bench::record_runs(
-        &format!("{name}: shown fps, real time"),
+        &format!("{name}: shown per second, real time"),
         &r.shown_fps(),
         "fps",
     );
