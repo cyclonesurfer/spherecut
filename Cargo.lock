@@ -1319,7 +1319,9 @@ dependencies = [
  "spherecut-core",
  "spherecut-media",
  "spherecut-render",
+ "spherecut-sphere",
  "spherecut-synth",
+ "spherecut-testkit",
  "thiserror",
  "tracing",
 ]
