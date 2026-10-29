@@ -46,21 +46,23 @@ pub trait Clock: Send + Sync + fmt::Debug {
 /// A sequence lock over `N` integers, in safe Rust: writers take turns
 /// through the sequence number (odd while one writes), and readers retry
 /// until they read the integers between two equal, even sequence
-/// numbers. Neither ever sleeps.
-struct SeqLock<const N: usize> {
+/// numbers. Neither ever sleeps, so a real-time audio callback may use
+/// one (`spherecut-audio`'s clock).
+pub struct SeqLock<const N: usize> {
     seq: AtomicU64,
     data: [AtomicI64; N],
 }
 
 impl<const N: usize> SeqLock<N> {
-    fn new(data: [i64; N]) -> Self {
+    pub fn new(data: [i64; N]) -> Self {
         SeqLock {
             seq: AtomicU64::new(0),
             data: data.map(AtomicI64::new),
         }
     }
 
-    fn read(&self) -> [i64; N] {
+    /// The integers, as one write left them.
+    pub fn read(&self) -> [i64; N] {
         let mut spins = 0u32;
         loop {
             let before = self.seq.load(Ordering::Acquire);
@@ -76,7 +78,7 @@ impl<const N: usize> SeqLock<N> {
     }
 
     /// Replace the integers with `f` of them, as one write.
-    fn update(&self, f: impl FnOnce([i64; N]) -> [i64; N]) {
+    pub fn update(&self, f: impl FnOnce([i64; N]) -> [i64; N]) {
         let mut spins = 0u32;
         let start = loop {
             let s = self.seq.load(Ordering::Relaxed);
@@ -120,7 +122,7 @@ const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
 /// `t` plus `nanos` nanoseconds: exactly, unless the sum's denominator
 /// doesn't fit, when `t` is first rounded down to a nanosecond.
-fn plus_nanos(t: Time, nanos: i64) -> Time {
+pub fn plus_nanos(t: Time, nanos: i64) -> Time {
     let ns = Time(Rational::new(nanos, NANOS_PER_SECOND).unwrap_or(Rational::ZERO));
     t.checked_add(ns).unwrap_or_else(|_| {
         let tick = Rational::new(1, NANOS_PER_SECOND).unwrap_or(Rational::ONE);

@@ -1,0 +1,20 @@
+[package]
+name = "spherecut-audio"
+description = "Audio output: cpal on PulseAudio or ALSA, the chunk ring, the audio clock, and the null and fake devices"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+spherecut-core.workspace = true
+cpal.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

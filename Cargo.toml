@@ -20,10 +20,16 @@ spherecut-cli = { path = "crates/cli" }
 spherecut-synth = { path = "crates/synth" }
 spherecut-render = { path = "crates/render" }
 spherecut-playback = { path = "crates/playback" }
+spherecut-audio = { path = "crates/audio" }
 
 anyhow = "1.0.100"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 clap = { version = "4.5", features = ["derive"] }
+# Audio output (D35): the PulseAudio protocol host, pure Rust, reaching
+# PipeWire through pipewire-pulse, and ALSA, which cpal always builds on
+# Linux and which links libasound. Not `pipewire` or `jack`: both need
+# libraries at build time that no build machine should need (D35).
+cpal = { version = "=0.18.2", default-features = false, features = ["pulseaudio"] }
 ffmpeg-next = { version = "=9.0.0", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 ffmpeg-sys-next = { version = "=9.0.1", default-features = false, features = ["avcodec", "avformat", "swscale", "swresample"] }
 glam = { version = "0.34", features = ["serde"] }
