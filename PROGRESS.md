@@ -475,8 +475,9 @@ The review's fixes, on this box (D34, D37):
   Runs before that found the model wrong in four ways only a pinned
   frame past the budget reaches; the cache was right each time, and
   `Insert::Dropped`'s doc said less than it does (D34).
-- No FFmpeg-facing code changed, so `cargo xtask compat` wasn't run
-  again.
+- `cargo xtask check` passed at a667f82, after which only this file
+  changed (2 min 12 s, 601 tests passed). No FFmpeg-facing code
+  changed, so `cargo xtask compat` wasn't run again.
 
 ## Known issues and limits
 
