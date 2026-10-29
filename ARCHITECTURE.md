@@ -622,27 +622,35 @@ intermediate equirect exists only as the output of a 360 export.
     `Condvar`) sits between the decode workers and the upload thread.
     It holds `Arc<VideoFrame>`s by stream and clip time, linked by run,
     within a budget sized from the memory available and any cgroup
-    limit (`playback::budget`), rechecked every 5 s on the upload
-    thread with the cache's own frames counted as free. A worker's
+    limit (`playback::budget`, a cgroup's use being its working set),
+    rechecked every 5 s on the upload thread with the cache's own
+    frames counted as free, leaving 1 GiB available where it can. A worker's
     frame ahead of the playhead past the window waits for room, in
     20 ms slices that check its `StopToken`. A frame at or behind the
     playhead never waits, and the frame a request landed on is pinned
-    until it is in a slot. A seek into frames a run holds is answered
-    from it, and decoding goes on from its end.
+    while that request is the target. A seek into frames a run holds is
+    answered from it, and decoding goes on from its end. A step's worker
+    moves the playhead to where it starts, then frame by frame.
   * **GPU slots** (`playback::SlotRing`): 3 to 6 `GpuFrame`s, each with
     an atomic state word (Free, Writing, Ready, Shown, Dead, and a
     version). The upload thread claims a Free slot only when the ring's
     `Arc` is the only one, so no draw still holds it, uploads the frames
     the presenter will want next (from the frame at the playhead on
     while playing; it, the next and the one before while paused), and
-    frees the Ready ones no longer wanted, never the Shown one. The
-    presenter, on the UI thread, shows a Ready slot by compare and swap.
+    frees the Ready ones no longer wanted, never the Shown one. While a
+    stream's frame for a request, or with fewer than two slots a stream
+    its frame at the playhead, isn't in a slot, every stream wants its
+    own alone, so no stream's next frame takes the slot another needs.
+    With no more live slots than streams nothing can land: slots die
+    only on GPU out-of-memory, and the viewer is to treat that as a GPU
+    failure. The presenter, on the UI thread, shows a Ready slot by
+    compare and swap.
   * **The presenter** (`Player::present`) picks each stream's latest
     Ready frame at or before the clock's time at the next refresh, and
     after a seek keeps the frame on screen until the new one is Ready
     (with fewer than two slots a stream, each stream's goes up as it
     comes). A step made while a request is on its way goes on from
-    where that lands.
+    where that lands, a keyframe seek's included.
   * **Clocks** (`core::clock`): `SystemClock` and `ManualClock` read
     through a sequence lock of atomics, so the UI thread reads them
     every frame without a lock. A file's audio, from slice 6, brings
