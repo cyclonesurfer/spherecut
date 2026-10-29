@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use spherecut_core::blocking::{OnBlock, mark_ui_thread_with, unmark_ui_thread};
 use spherecut_core::{FrameRate, ManualClock, SystemClock, Time};
 use spherecut_media::backend::SeekMode;
-use spherecut_playback::{CacheBudget, PlayState, Player, PlayerConfig};
+use spherecut_playback::{CacheBudget, PlayState, Player, PlayerConfig, PlayerParts};
 use spherecut_synth::fake::{GatedBackend, SyntheticBackend, SyntheticClip};
 
 use common::{percentile, player, pts, snapshot, until};
@@ -346,20 +346,32 @@ fn a_player_stuck_in_its_backend_shuts_down_at_once() {
 
 #[test]
 fn a_player_dropped_while_stuck_stops_its_threads() {
-    let backend = GatedBackend::new(SyntheticBackend::default());
+    let backend = Arc::new(GatedBackend::new(SyntheticBackend::default()));
     let gate = backend.gate.clone();
-    let player = player(backend, Arc::new(SystemClock::new()), config());
+    // Only the player and its open and decode threads hold the backend.
+    let held = Arc::downgrade(&backend);
+    let parts = PlayerParts::new(backend, common::gpu().clone(), Arc::new(SystemClock::new()));
+    let player = Player::new(parts, config()).unwrap();
     player.open("gated.synthetic".into());
     let cache = player.cache().clone();
+    // The open is at the gate, waiting for it or for the shutdown.
+    std::thread::sleep(Duration::from_millis(100));
     drop(player);
     // Dropped, it shuts down: the upload thread closes the cache as it
-    // ends, and the decoder gave up at the gate, which is still shut.
+    // ends, and the open gives up at the gate, which is still shut, and
+    // its thread ends with the decode worker's.
     let closed = until(Duration::from_secs(5), || {
         (cache.insert(0, test_frame(), &spherecut_core::StopToken::never())
             == spherecut_playback::Insert::Stopped)
             .then_some(())
     });
     assert!(closed.is_some(), "the cache was never closed");
+    let ended = until(common::JOIN, || (held.strong_count() == 0).then_some(()));
+    assert!(
+        ended.is_some(),
+        "{} holders of the backend are still running",
+        held.strong_count()
+    );
     assert!(!gate.is_open());
 }
 
