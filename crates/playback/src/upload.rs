@@ -240,13 +240,20 @@ impl UploadThread {
                 .iter()
                 .any(|v| v.frame.epoch == epoch && v.frame.stream == i && v.frame.time == t)
         };
-        // A landing in a slot needs the cache no more: the presenter
-        // shows it from there.
+        // A landing stays pinned while its request is the target: until
+        // the presenter has put every stream's up and cleared the target,
+        // or a newer request has taken its place. In a slot isn't enough:
+        // with too few slots the presenter shows each stream's as it
+        // comes, and a stream whose landing had left the cache would want
+        // nothing and keep the slot another stream's needs. The target is
+        // read again after the status, since a landing published there
+        // came after its request's target was stored.
+        let current = shared.target.load(Ordering::Acquire);
         st.unpinned.resize(n, 0);
         for (i, s) in streams.iter().enumerate() {
             if let Some(l) = s.landed
                 && st.unpinned[i] != l.id
-                && in_slot(i, l.time)
+                && l.id != current
             {
                 shared.cache.unpin(i, l.time);
                 st.unpinned[i] = l.id;
@@ -256,19 +263,28 @@ impl UploadThread {
         // stream wants its own alone: the frames a stream that landed
         // first would want after its own must leave the slot the others
         // need free (each stream's frame on screen stays up meanwhile).
-        let waiting = target != 0
-            && streams.iter().enumerate().any(|(i, s)| {
+        // With fewer than two slots a stream, the same holds for each
+        // stream's frame at the playhead: one stream's next frame took the
+        // slot another's needed when that one was decoded later, and
+        // while the clock waited (paused, or for that frame) nothing
+        // freed it.
+        let active = slots.stats().active;
+        let playhead = shared.cache.playhead();
+        let waiting = if target != 0 {
+            streams.iter().enumerate().any(|(i, s)| {
                 !s.out
                     && !s
                         .landed
                         .is_some_and(|l| l.id == target && in_slot(i, l.time))
-            });
-        let quota = if waiting {
-            1
+            })
         } else {
-            (slots.stats().active / n).max(2)
+            active < 2 * n
+                && (0..n).any(|i| {
+                    self.at_playhead(i, playhead)
+                        .is_some_and(|f| !in_slot(i, f.time))
+                })
         };
-        let playhead = shared.cache.playhead();
+        let quota = if waiting { 1 } else { (active / n).max(2) };
         let wanted: Vec<Option<Vec<Arc<VideoFrame>>>> = streams
             .iter()
             .enumerate()
@@ -327,9 +343,7 @@ impl UploadThread {
                 _ => return None,
             }
         } else {
-            cache
-                .at_or_before(i, playhead)
-                .or_else(|| cache.following(i, playhead).map(|(f, _)| f))
+            self.at_playhead(i, playhead)
         }?;
         let mut out = vec![base.clone()];
         let mut ahead = base.clone();
@@ -352,6 +366,15 @@ impl UploadThread {
         while out.len() < quota && more(&mut out) {}
         out.truncate(quota);
         Some(out)
+    }
+
+    /// Stream `i`'s frame at the playhead, as the cache holds it: the
+    /// latest at or before it, else the first after it.
+    fn at_playhead(&self, i: usize, playhead: Time) -> Option<Arc<VideoFrame>> {
+        let cache = &self.shared.cache;
+        cache
+            .at_or_before(i, playhead)
+            .or_else(|| cache.following(i, playhead).map(|(f, _)| f))
     }
 
     /// Upload frame `f` of stream `i` into a free slot: whether it did

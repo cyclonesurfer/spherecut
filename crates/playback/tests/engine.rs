@@ -6,14 +6,16 @@
 //! decoder that falls behind catches up without making the frames it
 //! passes; a slot is reused only once nothing else holds its frame; a
 //! seek keeps the frame on screen until the new one is ready and frees
-//! the old run's slots; steps follow runs both ways, go on from a seek
-//! or step on its way, and instant ones from each other before a
-//! present; the A/V offset moves the frame only while playing; two
-//! streams seek and step on three slots, and with the second's decoder
-//! behind; a keyframe seek back with the cache full lands on its
-//! keyframe; a fallback reaches the snapshot, from a fault and from
-//! `Auto` picking Vulkan on lavapipe; the audio seam holds playback for
-//! its preroll; and a 5.7K source plays inside a 256 MiB cache.
+//! the old run's slots; steps follow runs both ways, go on from where a
+//! seek (keyframe ones included) or step on its way lands, and instant
+//! ones from each other before a present; the A/V offset moves the frame only while playing; two
+//! streams seek, step and play on three slots, with the second's decoder
+//! behind, and seek with one failing while its next frame holds the
+//! third slot; a keyframe seek back with the cache full lands on its
+//! keyframe, on one stream and on two streams on three slots; a
+//! fallback reaches the snapshot, from a fault and from `Auto` picking
+//! Vulkan on lavapipe; the audio seam holds playback for its preroll;
+//! and a 5.7K source plays inside a 256 MiB cache.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -537,6 +539,26 @@ fn a_step_while_a_seek_or_step_is_on_its_way_goes_on_from_where_it_lands() {
 }
 
 #[test]
+fn a_step_while_a_keyframe_seek_is_on_its_way_goes_on_from_its_keyframe() {
+    // A keyframe every 8 frames: the seek to 213 lands on 208, so the
+    // steps on its way show 210, as they would after it, and not 215.
+    let backend = SyntheticBackend::new(SyntheticClip {
+        frames: 240,
+        frame_cost: Duration::from_millis(30),
+        ..SyntheticClip::default()
+    });
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(backend, clock, config(64));
+    player.seek(at(213), SeekMode::Keyframe);
+    player.step(1);
+    player.step(1);
+    let mut seen = Vec::new();
+    show_seen(&player, 210, &mut seen);
+    assert_eq!(seen, [at(0), at(210)]);
+    common::join(player);
+}
+
+#[test]
 fn instant_steps_before_a_present_go_on_from_each_other() {
     // Two key events in one UI frame: the second step goes on from the
     // first's frame, though no present came between.
@@ -629,12 +651,14 @@ fn wait_unless_stopped(d: Duration, stop: &StopToken) -> bool {
 }
 
 /// The synthetic clip, with stream 1's decoder taking `seek` longer a
-/// seek and `next` longer a frame: a lens decoder running behind.
+/// seek and `next` longer a frame: a lens decoder running behind. While
+/// `fail` is set, its seeks fail.
 #[derive(Debug)]
 struct SlowSecond {
     inner: SyntheticBackend,
     seek: Duration,
     next: Duration,
+    fail: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -642,6 +666,8 @@ struct SlowVideo {
     inner: Box<dyn VideoDecode>,
     seek: Duration,
     next: Duration,
+    fail: Arc<AtomicBool>,
+    path: PathBuf,
 }
 
 impl VideoDecode for SlowVideo {
@@ -661,6 +687,12 @@ impl VideoDecode for SlowVideo {
     ) -> Result<SeekOutcome, MediaError> {
         if !wait_unless_stopped(self.seek, stop) {
             return Ok(SeekOutcome::Stopped);
+        }
+        if self.fail.load(Ordering::Acquire) {
+            return Err(MediaError::Decode {
+                path: self.path.clone(),
+                reason: "stream 1's seeks fail".into(),
+            });
         }
         self.inner.seek(at, mode, stop)
     }
@@ -705,6 +737,8 @@ impl MediaBackend for SlowSecond {
                 inner,
                 seek: self.seek,
                 next: self.next,
+                fail: self.fail.clone(),
+                path: path.to_path_buf(),
             }),
             _ => inner,
         })
@@ -727,6 +761,7 @@ fn two_streams(slots: u8, seek: Duration, next: Duration) -> Player {
         inner: clip(90),
         seek,
         next,
+        fail: Arc::default(),
     };
     let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
     let player = player(
@@ -758,11 +793,12 @@ fn lands(player: &Player, want: &[i64]) {
             .collect();
         let snap = snapshot(player);
         panic!(
-            "{want:?} never came up: showing {:?}, {:?}, landed {:?}; slots {views:?}, {:?}",
+            "{want:?} never came up: showing {:?}, {:?}, landed {:?}; slots {views:?}, {:?}; cache {:?}",
             player.present(Instant::now()).map(|p| pts(&p)),
             snap.state,
             snap.streams.iter().map(|s| s.landed).collect::<Vec<_>>(),
-            player.slots().stats()
+            player.slots().stats(),
+            snap.cache
         );
     }
 }
@@ -793,6 +829,115 @@ fn two_streams_seek_with_the_second_decoder_behind() {
     for k in [40, 10, 70] {
         player.seek(at(k), SeekMode::Exact);
         lands(&player, &[k, k]);
+    }
+    common::join(player);
+}
+
+#[test]
+fn two_streams_on_three_slots_seek_with_one_failing() {
+    // The failing decoder is opened first, as player stream 0, since the
+    // third slot goes to stream 0's next frame. It fails the seek, so its
+    // frame on screen stays and it wants no slot: its next frame's slot
+    // must go to stream 1's new one.
+    let fail = Arc::new(AtomicBool::new(false));
+    let backend = SlowSecond {
+        inner: clip(90),
+        seek: Duration::ZERO,
+        next: Duration::ZERO,
+        fail: fail.clone(),
+    };
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = player(
+        backend,
+        clock,
+        PlayerConfig {
+            gpu_slots: 3,
+            ..config(64)
+        },
+    );
+    player.open_streams("two.synthetic".into(), vec![Some(1), Some(0)]);
+    lands(&player, &[0, 0]);
+    // Paused, the third slot takes stream 0's frame after the one shown.
+    let third = until(WAIT, || {
+        let _ = player.present(Instant::now());
+        let views = player.slots().views();
+        views
+            .iter()
+            .any(|v| v.state == SlotState::Ready && v.frame.stream == 0 && v.frame.pts == 1)
+            .then_some(())
+    });
+    assert!(third.is_some(), "stream 0's next frame never went up");
+    fail.store(true, Ordering::Release);
+    player.seek(at(40), SeekMode::Exact);
+    lands(&player, &[0, 40]);
+    common::join(player);
+}
+
+#[test]
+fn two_streams_play_on_three_slots_with_the_second_decoder_behind() {
+    // Stream 0's next frame is ready long before stream 1's frame at the
+    // clock, 150 ms a frame: on three slots it must leave the slot that
+    // frame needs, or the two lenses show different frames until the
+    // clock moves.
+    let backend = SlowSecond {
+        inner: clip(90),
+        seek: Duration::ZERO,
+        next: Duration::from_millis(150),
+        fail: Arc::default(),
+    };
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = player(
+        backend,
+        clock.clone(),
+        PlayerConfig {
+            gpu_slots: 3,
+            ..config(64)
+        },
+    );
+    player.open_streams("two.synthetic".into(), vec![Some(0), Some(1)]);
+    lands(&player, &[0, 0]);
+    player.play();
+    for k in 1..=12 {
+        clock.set(at(k), Instant::now());
+        lands(&player, &[k, k]);
+    }
+    common::join(player);
+}
+
+/// Two streams on three slots and the cache at its budget: a keyframe
+/// seek back shows each stream's keyframe as it comes, and the one shown
+/// first must stay in the cache until the other is up, or its stream
+/// would want nothing and keep the slot the other needs.
+#[test]
+fn two_streams_keyframe_seek_back_on_three_slots_with_the_cache_full() {
+    let frame = 64 * 32 * 3 / 2;
+    let backend = SyntheticBackend::new(SyntheticClip {
+        frames: 120,
+        frame_cost: Duration::from_millis(5),
+        ..SyntheticClip::default()
+    });
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = player(
+        backend,
+        clock.clone(),
+        PlayerConfig {
+            gpu_slots: 3,
+            cache: CacheBudget::Bytes(16 * frame),
+            ..config(64)
+        },
+    );
+    player.open_streams("two.synthetic".into(), vec![Some(0), Some(1)]);
+    lands(&player, &[0, 0]);
+    player.play();
+    for k in 1..=60 {
+        clock.set(at(k), Instant::now());
+        lands(&player, &[k, k]);
+    }
+    player.pause();
+    // Keyframes every 8, each seek once the one before is on screen.
+    for (k, key) in [(45, 40), (29, 24), (21, 16), (13, 8), (5, 0)] {
+        player.seek(at(k), SeekMode::Keyframe);
+        lands(&player, &[key, key]);
     }
     common::join(player);
 }

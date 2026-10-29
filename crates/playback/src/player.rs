@@ -356,6 +356,9 @@ struct Target {
     at: Time,
     /// A step's frames, from the frames in `Ui::step_from`.
     step: Option<i32>,
+    /// How a seek finds its frame, and a step the frame it starts from:
+    /// `Keyframe` when it goes on from a keyframe seek on its way.
+    mode: SeekMode,
 }
 
 /// Where a stream's frame for the request the presenter waits for is.
@@ -611,6 +614,7 @@ impl Player {
             id,
             at: Time::ZERO,
             step: None,
+            mode: SeekMode::Exact,
         });
         self.shared.target.store(id, Ordering::Release);
         self.shared.playing.store(false, Ordering::Release);
@@ -707,7 +711,12 @@ impl Player {
         if ui.target.is_some() {
             shared.perf.add(Counter::SeeksSuperseded, 1);
         }
-        ui.target = Some(Target { id, at, step: None });
+        ui.target = Some(Target {
+            id,
+            at,
+            step: None,
+            mode,
+        });
         ui.preroll = false;
         ui.at_end = false;
         shared.target.store(id, Ordering::Release);
@@ -726,8 +735,9 @@ impl Player {
 
     /// Pause, and show the frame `frames` on (back, when negative) from
     /// the one shown, or from where the seek or step on its way lands: a
-    /// step's frames add to it, and a seek's time is the frame shown
-    /// there (where an exact seek lands).
+    /// step's frames add to it, and a seek's frame is found as the seek
+    /// finds it (a keyframe seek's is its keyframe, unless the cache
+    /// holds the frame shown at its time).
     pub fn step(&self, frames: i32) {
         let now = Instant::now();
         let Ok(mut ui) = self.ui.try_borrow_mut() else {
@@ -758,9 +768,18 @@ impl Player {
         let id = ui.next_id();
         let clock = ui.clock.time_at(now);
         let n = ui.workers.len();
-        let (frames, from): (i32, Vec<Time>) = match ui.target {
-            Some(Target { step: Some(f), .. }) => (f.saturating_add(frames), ui.step_from.clone()),
-            Some(Target { at, step: None, .. }) => (frames, vec![at; n]),
+        let (frames, from, mode): (i32, Vec<Time>, SeekMode) = match ui.target {
+            Some(Target {
+                step: Some(f),
+                mode,
+                ..
+            }) => (f.saturating_add(frames), ui.step_from.clone(), mode),
+            Some(Target {
+                at,
+                step: None,
+                mode,
+                ..
+            }) => (frames, vec![at; n], mode),
             None => (
                 frames,
                 (0..n)
@@ -771,19 +790,21 @@ impl Player {
                             .map_or(clock, |s| s.view.frame.time)
                     })
                     .collect(),
+                SeekMode::Exact,
             ),
         };
         ui.target = Some(Target {
             id,
             at: from.first().copied().unwrap_or(clock),
             step: Some(frames),
+            mode,
         });
         ui.step_from.clone_from(&from);
         self.shared.target.store(id, Ordering::Release);
         for (w, from) in ui.workers.iter().zip(from) {
             let _ = w.send(Command::Request(Request {
                 id,
-                want: Want::Step { frames, from },
+                want: Want::Step { frames, from, mode },
                 token: token.clone(),
             }));
         }
@@ -1475,6 +1496,125 @@ mod tests {
         shows(41);
         player.step(-3);
         shows(38);
+        join(player);
+    }
+
+    #[test]
+    fn two_streams_keyframe_seek_back_with_a_slot_dead_and_the_cache_full() {
+        use spherecut_core::{Clock, FrameRate, ManualClock};
+        use spherecut_synth::fake::{SyntheticBackend, SyntheticClip};
+
+        // Four slots, one dead, a 16-frame cache full after playing: a
+        // keyframe seek back shows each stream's keyframe as it comes, and
+        // the one up first must stay in the cache until the other is.
+        let rate = FrameRate::FPS_30;
+        let at = |k: i64| rate.frame_to_time(k).expect("a frame time");
+        let frame = 64 * 32 * 3 / 2;
+        let gpu = spherecut_render::Gpu::headless(&spherecut_render::AdapterChoice::Cpu)
+            .expect("lavapipe");
+        let backend = SyntheticBackend::new(SyntheticClip {
+            frames: 120,
+            frame_cost: Duration::from_millis(5),
+            ..SyntheticClip::default()
+        });
+        let clock = Arc::new(ManualClock::new(rate.frame_duration()));
+        let parts = PlayerParts::new(Arc::new(backend), gpu, clock.clone());
+        let config = PlayerConfig {
+            cache: CacheBudget::Bytes(16 * frame),
+            decoder: DecoderPreference::Software,
+            ..PlayerConfig::default()
+        };
+        let player = Player::new(parts, config).expect("a player");
+        let claim = player.shared.slots.claim().expect("a free slot");
+        player.shared.slots.kill(claim);
+        assert_eq!(player.slots().stats().active, 3);
+        player.open_streams("two.synthetic".into(), vec![Some(0), Some(1)]);
+        let shows = |k: i64| {
+            let start = Instant::now();
+            loop {
+                let shown = player
+                    .present(Instant::now())
+                    .map(|p| p.frames.iter().map(|f| f.frame.pts).collect::<Vec<_>>());
+                if shown.as_deref() == Some(&[k, k][..]) {
+                    return;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(20),
+                    "frame {k} never came up: showing {shown:?}, slots {:?}",
+                    player.slots().views()
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        shows(0);
+        player.play();
+        for k in 1..=60 {
+            clock.set(at(k), Instant::now());
+            shows(k);
+        }
+        player.pause();
+        for (k, key) in [(45, 40), (29, 24), (21, 16)] {
+            player.seek(at(k), SeekMode::Keyframe);
+            shows(key);
+        }
+        join(player);
+    }
+
+    #[test]
+    fn steps_that_supersede_a_seek_before_its_worker_starts_it_land() {
+        use spherecut_core::blocking::{OnBlock, mark_ui_thread_with, unmark_ui_thread};
+        use spherecut_core::{FrameRate, ManualClock};
+        use spherecut_synth::fake::{SyntheticBackend, SyntheticClip};
+
+        // With the cache's lock taken, as a busy thread takes it, the
+        // seek's playhead can't reach the cache, and the steps supersede
+        // the seek before its worker, busy filling the window, starts it.
+        // The step must move the playhead itself: from 0, the frames it
+        // decodes on from the keyframe would wait for room for good.
+        let rate = FrameRate::FPS_30;
+        let at = |k: i64| rate.frame_to_time(k).expect("a frame time");
+        let gpu = spherecut_render::Gpu::headless(&spherecut_render::AdapterChoice::Cpu)
+            .expect("lavapipe");
+        let backend = SyntheticBackend::new(SyntheticClip {
+            frames: 240,
+            frame_cost: Duration::from_millis(30),
+            ..SyntheticClip::default()
+        });
+        let clock = Arc::new(ManualClock::new(rate.frame_duration()));
+        let parts = PlayerParts::new(Arc::new(backend), gpu, clock);
+        let config = PlayerConfig {
+            decoder: DecoderPreference::Software,
+            ..PlayerConfig::default()
+        };
+        let player = Player::new(parts, config).expect("a player");
+        player.open("clip.synthetic".into());
+        let shows = |k: i64| {
+            let start = Instant::now();
+            loop {
+                let shown = player
+                    .present(Instant::now())
+                    .map(|p| p.frames[0].frame.pts);
+                if shown == Some(k) {
+                    return;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(20),
+                    "frame {k} never came up: showing {shown:?}, cache {:?}",
+                    player.cache().stats()
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        shows(0);
+        {
+            let _held = player.cache().hold_lock();
+            mark_ui_thread_with(OnBlock::Panic);
+            player.seek(at(213), SeekMode::Keyframe);
+            player.step(1);
+            player.step(1);
+            unmark_ui_thread();
+        }
+        shows(210);
         join(player);
     }
 
