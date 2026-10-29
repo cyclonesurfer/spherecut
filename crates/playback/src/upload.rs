@@ -213,7 +213,8 @@ impl UploadThread {
                     let pass = StreamPass {
                         landed: s.landed,
                         out: target != 0
-                            && (s.failed_request == Some(target) || (!s.opened && s.error.is_some())),
+                            && (s.failed_request == Some(target)
+                                || (!s.opened && s.error.is_some())),
                     };
                     (pass, placement_of(s.info.as_ref()))
                 })
