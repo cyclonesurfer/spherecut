@@ -117,28 +117,33 @@ pub mod tier2 {
     #[track_caller]
     pub fn require_perf_clip(file_name: &str) -> PathBuf {
         require_hw_run();
+        perf_clip(file_name).unwrap_or_else(|why| skip(why))
+    }
+
+    /// [`require_perf_clip`]'s clip, or why it isn't there, for a test
+    /// that goes on without it.
+    pub fn perf_clip(file_name: &str) -> Result<PathBuf, String> {
         perf_clip_in(
             std::env::var_os(PERF_MEDIA_ENV).map(PathBuf::from),
             file_name,
         )
     }
 
-    #[track_caller]
-    pub(crate) fn perf_clip_in(dir: Option<PathBuf>, file_name: &str) -> PathBuf {
+    pub(crate) fn perf_clip_in(dir: Option<PathBuf>, file_name: &str) -> Result<PathBuf, String> {
         let Some(dir) = dir else {
-            skip(format!(
+            return Err(format!(
                 "no perf clips ({PERF_MEDIA_ENV} unset): `cargo xtask hw-test` makes them, \
                  except with --quick"
             ));
         };
         let p = dir.join(file_name);
         if !p.is_file() {
-            skip(format!(
+            return Err(format!(
                 "perf clip {} not found: hw-test's report says why it wasn't made",
                 p.display()
             ));
         }
-        p
+        Ok(p)
     }
 
     /// The DRM render node VA-API is tested on: `SPHERECUT_RENDER_NODE`,
@@ -450,25 +455,26 @@ mod tests {
         let guard = TempDir(base.clone());
         std::fs::create_dir_all(&base).unwrap();
         std::fs::write(base.join("made.mp4"), b"").unwrap();
-        let find = |dir: Option<std::path::PathBuf>, name: &str| {
-            let name = name.to_string();
-            std::panic::catch_unwind(move || tier2::perf_clip_in(dir, &name))
-                .map_err(|e| e.downcast_ref::<String>().cloned().unwrap_or_default())
-        };
+        let find = tier2::perf_clip_in;
         assert_eq!(
             find(Some(base.clone()), "made.mp4"),
             Ok(base.join("made.mp4"))
         );
         let unset = find(None, "made.mp4").unwrap_err();
         assert!(
-            unset.starts_with("TIER2-SKIP: no perf clips (SPHERECUT_PERF_MEDIA unset)"),
+            unset.starts_with("no perf clips (SPHERECUT_PERF_MEDIA unset)"),
             "{unset}"
         );
         let missing = find(Some(base.clone()), "not-made.mp4").unwrap_err();
         assert!(
-            missing.starts_with("TIER2-SKIP: perf clip ") && missing.contains("not-made.mp4"),
+            missing.starts_with("perf clip ") && missing.contains("not-made.mp4"),
             "{missing}"
         );
+        // require_perf_clip skips with that reason.
+        let skipped = std::panic::catch_unwind(|| tier2::skip(missing.clone()))
+            .map_err(|e| e.downcast_ref::<String>().cloned().unwrap_or_default())
+            .unwrap_err();
+        assert_eq!(skipped, format!("TIER2-SKIP: {missing}"));
         drop(guard);
     }
 }

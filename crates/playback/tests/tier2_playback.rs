@@ -1179,9 +1179,22 @@ fn software_fps(path: &Path, frames: usize, limit: Duration) -> Result<f64, Stri
 #[test]
 #[ignore = "tier2: benchmark, needs hw-test's perf clips"]
 fn bench_perf_clips_software_decode() {
+    tier2::require_hw_run();
+    // A clip hw-test couldn't make leaves the others to measure; with
+    // none, this skips with the reason.
+    let mut missing = None;
+    let mut found = 0;
     for spec in synth_media::perf_clips() {
-        let path = tier2::require_perf_clip(&spec.file_name());
         let name = format!("perf clip {}: software decode", spec.name);
+        let path = match tier2::perf_clip(&spec.file_name()) {
+            Ok(path) => path,
+            Err(why) => {
+                bench::not_measured(&name, &why);
+                missing = Some(why);
+                continue;
+            }
+        };
+        found += 1;
         let frames = usize::try_from(spec.frames).unwrap_or(usize::MAX).min(300);
         let measured = bench::try_measure(&name, "fps", || {
             software_fps(&path, frames, Duration::from_secs(10))
@@ -1189,6 +1202,9 @@ fn bench_perf_clips_software_decode() {
         if let Err(why) = measured {
             bench::not_measured(&name, why);
         }
+    }
+    if let (0, Some(why)) = (found, missing) {
+        tier2::skip(why);
     }
 }
 
