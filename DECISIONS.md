@@ -1129,6 +1129,11 @@ Why: the M0 review found that hw-test silently dropped Tier 2 tests (B1)
 and that a relative `--samples` tested nothing while the report said the
 samples were present (S5).
 
+*Updated by D37* (M1 slice 5): the report gains "Power profile",
+"Render nodes", "Perf clips" and "Tier 1 on this machine", and a Tier 1
+failure or a perf clip that can't be made fails the run. `--list`
+prints the Tier 2 tests and stops.
+
 ## D20. Benchmarks repeat, and report median and spread
 
 *2026-10-23, M0.*
@@ -1142,6 +1147,11 @@ Runs and Spread ((max − min) / median), and marks a spread over 10% as
 Why: huginn's first report used single runs. VA-API decode of the
 synthetic 5760×2880 clip gave 109.96 fps in one run and 67.30 fps in the
 next, on an idle GPU.
+
+*Updated by D37* (M1 slice 5): a row named "… per second" is one run's
+seconds (the playback benchmarks), with Runs counting the seconds and
+Range the slowest and the fastest; its spread says how even playback
+was, not how busy the machine was.
 
 ## D21. The `deny.toml` bans list
 
@@ -1204,6 +1214,9 @@ blocking call on a release build's UI thread (D34). The engine, the
 slice's second part, adds render and tracing to playback's
 dependencies, and synth and media's `fault-injection` to its tests'.
 They are all in the tree already, so it adds no crate either.
+The benchmarks, the third part, add sphere and testkit to its tests'
+dependencies, and hw-test's perf clips use synth, which xtask had.
+Neither adds a crate.
 
 ## D23. Agent integration: an MCP server and the JSON CLI
 
@@ -4128,7 +4141,9 @@ what was built. Slice 5 lands it in parts. The first part is the
 clocks, the UI thread's guard, the frame cache, its budget and the
 numbers the overlay reads. The second is the engine: the `Player`, the
 decode workers with catch-up, the upload thread and its GPU slots, the
-presenter, shutdown, and the seam that slice 6's audio fills.*
+presenter, shutdown, and the seam that slice 6's audio fills. The third
+is the Tier 2 benchmarks that play through it on hardware, in H1; what
+hw-test does for them is D37's.*
 
 What:
 
@@ -4500,6 +4515,55 @@ What:
     (its `set` is the audio's seek), and `ready(ahead)` for the
     preroll.
   - Without one, video plays on the parts' clock.
+- **The Tier 2 benchmarks** (`crates/playback/tests/tier2_playback.rs`,
+  plan sections 12.2 and 12.3, risk 1). Each plays a file through a
+  `Player` on the machine's GPU, as the GUI will:
+  - `present` and `snapshot` at 60 Hz deadlines, on a thread marked with
+    `OnBlock::Panic`, so that any wait there fails the benchmark on the
+    hardware too;
+  - each new frame projected (rectilinear, 90°, anisotropic) into an
+    offscreen 1920×1080 target and encoded into an `Rgba8Unorm`
+    texture, recording `RenderCpu` and the GPU's `RenderGpu`. The raw
+    view's two lenses go side by side, 960×1080 each, through the same
+    projection, since the GUI's raw view comes in slice 7.
+  - The decoders open on the rendering GPU's render node (or
+    `SPHERECUT_RENDER_NODE`'s), where doctor's checks run once per
+    benchmark and are handed to each player.
+  - A run is two passes, each on a player of its own. **Unthrottled**,
+    on a `ManualClock` moved to the next frame as soon as every stream
+    shows the one it is at, through the file once or for 30 s: what the
+    engine can do. **Real time**, on a `SystemClock`, playing from the
+    start again at the end, a seek every loop: what plays.
+  - Each full second gives the frames decoded (per stream) and shown;
+    the real-time pass also counts `Dropped`, `DecodeDropped` and late
+    presents, a present whose frame had ended before the time it was
+    presented for. A note gives every stage's p50 and p95 over the
+    real-time pass (from samples gathered as they come, since the
+    engine keeps only 256 a stage), the loops, the UI ticks missed and
+    each stream's decode path.
+  - **The gate**, for `bench_playback_realtime_5k7_8bit` and `_10bit`
+    on hw-test's 20 s perf clips (D37), on the hardware kind `Auto`
+    picks from doctor's checks: no drop and no decode-drop after the
+    first second of 60 s in real time, every unthrottled second
+    decoding at least 1.2 × 29.97 frames, and every stream on that
+    kind throughout. The rows are recorded before the gate judges, so a
+    failing run's numbers are in the report.
+  - The other kind, where doctor says it decodes the format, and
+    software are recorded, 20 s each, as are `bench_playback_realtime_8k_8bit`
+    (synth's 8K perf clip), `bench_playback_x5_raw` (the longest file
+    of each X5 recording mode, both lenses) and the stitched samples
+    outside the criterion. `bench_playback_stitched_samples` gates a
+    stitched equirect of 5.7K at 30 fps or less as the perf clips are,
+    with 1.2 × its own rate.
+  - A run that only records and fails is a note saying why. Where the
+    GPU (a CPU adapter is none), hardware decode of the format, the
+    perf clips or the samples aren't there, a benchmark records what it
+    can and skips with the reason; `Auto` picking software is a skip
+    that quotes its reason.
+  - `bench_perf_clips_software_decode` records each perf clip's
+    software decode rate, which hw-test holds against "too easy". A
+    clip that wasn't made is a row "not measured" with the reason, and
+    the others are measured; it skips only when there is none.
 
 Where this differs from the plan:
 
@@ -4606,6 +4670,18 @@ Where this differs from the plan:
   `FfmpegBackend` it is given opens the devices. The GUI is to make it
   on the rendering GPU's node (`FfmpegBackend::on_node`), so that
   decoding runs where doctor's checks ran.
+- **The benchmarks' unthrottled pass** is the plan's "unthrottled
+  per-second minimum" made concrete: a player of its own on a
+  `ManualClock`, rather than the real-time player's clock let go, so
+  that its seconds count the engine's work and nothing of the 60 Hz
+  loop's. The plan's 1.2 × 29.97 is kept for the 30 fps perf clips (36
+  would be 1.2 × their own rate), and the stitched samples use their
+  own.
+- **The benchmarks gate on Auto's pick**, the decoder the GUI will use,
+  and record the other kind and software; the plan names "the path the
+  backend picks" only. Late presents, the 8K perf clip and the
+  software rows are additions. The gated run also fails if a stream
+  fell back to software, which would otherwise pass on a fast CPU.
 - **`never_blocks`' bound.** The plan asks that every UI iteration take
   under 2 ms.
   - Here each iteration's time is its wall time less the time the
@@ -4806,6 +4882,22 @@ Tested:
   `budget::recheck`'s rule above, has
   `player::tests::a_set_budget_shrinks_too_when_memory_is_short`, on a
   reading of 512 MiB available.
+- The benchmarks' harness runs in Tier 1
+  (`the_bench_harness_plays_on_lavapipe`): a second of 30 fps H.264
+  through both passes on lavapipe in software, on a marked thread. All
+  29 frames after the first came up unthrottled; the real-time pass
+  counted its 2 seconds, looped twice in 2.5 s and gathered the upload,
+  render and UI stages. It checks what the harness counts, not how
+  fast, and passed three runs in a row beside 4 busy loops. Run once by
+  hand on lavapipe with doctor's checks faked to say Vulkan decodes
+  H.264, the gated path recorded every row and note, and the gate
+  failed as it should, naming the fallback to software and the drops
+  by second.
+- On this box (no GPU), with `SPHERECUT_TIER2` set and the X5 samples,
+  each benchmark skips with its reason: no perf clips (hw-test makes
+  them, except with `--quick`) or a perf clip not found, no stitched
+  equirect among the samples, and "no GPU: the adapter
+  SPHERECUT_ADAPTER=auto picks is a CPU, llvmpipe".
 
 Revisit if: H1's bench or the 256 MiB-budget 5.7K run shows decode
 waiting on the cache while the window has room, or the window by time
@@ -4819,6 +4911,132 @@ or too often; a GUI's paint callback holding slots so long that the
 ring runs dry; the present latency of one UI frame being visibly off
 the vsync's on the GUI (slice 7); or `never_blocks` failing its 10 ms
 ceiling on a machine that isn't a VM.
+
+## D37. Hardware testing in M1
+
+*2026-10-29, M1 slice 5: a draft, from the M1 plan's D35 (section 15).
+Slice 5 lands the headless part, for H1; slice 8 adds the GUI smoke run
+and its session discovery, for H2, and finishes it. Updates D19 and
+D20.*
+
+What, so far:
+
+- **Tier 1 on the hardware machine.** After the Tier 2 tests,
+  `cargo xtask hw-test` runs `cargo test --workspace --all-targets` in
+  the debug build, as `cargo xtask check` does, and reports every
+  failure with its output in "Tier 1 on this machine". A failing test,
+  a Tier 1 test that skips, a binary that dies, or a run that fails with
+  no test binary to blame fails hw-test. `--no-tier1` leaves it out.
+- **Prerequisites** gain rustc 1.95 or newer (it blocks the build), a
+  lavapipe ICD (`mesa-vulkan-drivers` on Fedora, `vulkan-swrast` on
+  Arch; the Tier 1 render and playback tests need it) and the ALSA
+  headers (`alsa-lib-devel`, `alsa-lib`; audio from slice 6, not the
+  build yet). strace was already one (D24).
+- **The machine, read only** (`xtask/src/machine.rs`):
+  - "Power profile": power-profiles-daemon's profile
+    (`powerprofilesctl get`), ACPI's `platform_profile` and its
+    choices, cpu0's frequency driver, governor and energy preference,
+    and each amdgpu card's `power_dpm_force_performance_level` and the
+    active mode of `pp_power_profile_mode`. Each says "not available"
+    and why when it can't be read. Read once, before the build.
+  - "Render nodes": every `renderD<n>` with its PCI slot, vendor,
+    device, driver, and whether it opens for reading and writing.
+- **The perf clips** (`xtask/src/perf_clips.rs`, synth's
+  `media::perf_clips`): synth's moving grid with seeded noise on every
+  frame, 20 s at 30 fps, coded by libx265 in open GOPs of 30 with three
+  B-frames at an average bitrate (one-pass ABR, synth's
+  `Spec::bitrate_kbps`):
+  - `hevc8-5k7-30fps-noisy-20s.mp4` and `hevc10-5k7-30fps-noisy-20s.mp4`,
+    5760×2880 at 100 Mbps;
+  - `hevc8-8k-30fps-noisy-20s.mp4`, 7680×3840 at 120 Mbps (the X5's 8K30
+    is two 3840² streams at about 125 Mbps in all).
+  - They are made once into `<target>/hw-media/` and kept across runs.
+    Each carries the spec it was made from in `<file>.spec`, and is made
+    again when synth's spec changes. A clip is written in `.partial/`
+    and moved into place whole. The Tier 2 tests find them through
+    `SPHERECUT_PERF_MEDIA` (`tier2::require_perf_clip`, which skips while
+    it is unset, as with `--quick`, or a clip is missing).
+  - "Perf clips" gives each clip's size, bitrate, whether it was cached
+    or made (and in how long), and its software decode rate from
+    `bench_perf_clips_software_decode`, flagged **too easy** above
+    150 fps. A clip that can't be made fails hw-test, with why.
+- **The pass rules** for "5.7K30 stitched equirect plays in real time"
+  (plan section 12.3) are the playback benchmarks' gate (D34): on the
+  hardware kind `Auto` picks, no drop and no decode-drop after the first
+  second of 60 s, and every unthrottled second decoding at least
+  1.2 × 29.97 frames. A skip is never a pass.
+- **Benchmarks** (D20): the playback benchmarks record one run's seconds
+  as one row, named "… per second", whose runs are the seconds and whose
+  range is the slowest and the fastest second. The report says so.
+- **`--list`** prints the Tier 2 tests, as the report names them, from a
+  debug build, and stops.
+- **Requests** are batched: H1 (headless, after slice 5, from any
+  terminal), H2 (the GUI, after slice 8, from a terminal inside the
+  desktop) and H3 (the final commit), with the lists in plan section
+  12.3.
+
+Still to come (slice 8): the GUI smoke run as the Tier 2 test
+`gui_smoke`, which finds the Wayland socket from a TTY and fails a
+hidden session; its screenshots in `hw-reports/`; its pass rules (at
+most 0.1% drops, UI p99 under 1.5× the refresh period, |A/V| p95 under
+20 ms on the sync clip); and the environment's session lines
+(`WAYLAND_DISPLAY` set or discovered, `pactl info`'s server,
+mutter's experimental features, `hyprctl`). `cargo xtask check` is to
+check the ALSA headers itself once slice 6 links them.
+
+Why:
+
+- Synthetic grid content decoded at 330 fps in software, so it proved
+  nothing about camera footage; the noise and a camera's bitrate make
+  the decoder do a camera's work, and the "too easy" flag says when it
+  doesn't.
+- A per-second minimum catches the VA-API dips (1.17× to 2.41× real
+  time on huginn) that a mean hides, and the power settings say whether
+  two runs had the machine set the same way.
+- FFmpeg 8.1.3 and Mesa 26 behave differently from this box's 6.1.1 and
+  25.2.8, so Tier 1 has to run where they are.
+- An average bitrate rather than a CRF: at a CRF the noise sets the
+  bitrate (about 200 Mbps at CRF 18), and the plan asks for a camera's.
+- A stamp of the whole spec, not a version number, so that no change to
+  synth's spec can leave an old clip in use.
+
+Tested:
+
+- `xtask/src/machine.rs`: the power settings from a fixture sysfs tree
+  of a desktop (an amdgpu card, an Intel iGPU, a connector), and a bare
+  one that says "not available" for each; amdgpu's active power profile
+  in the old and the new layout; render nodes in order with their
+  devices, one that opens and one with no node; lavapipe's ICD where
+  the loader looks; rustc's version, and that `MIN_RUST` is the
+  workspace's `rust-version`.
+- `xtask/src/perf_clips.rs`: two tiny clips are made, then cached; a
+  changed spec, or a clip without its stamp, is made again; a clip that
+  can't be made says why and leaves nothing behind.
+- `hw_test`: Tier 1 from real cargo output, on the scratch workspace
+  whose binaries die after their summary or before a result, under
+  three sets of user terminal settings; a Tier 1 test that skips has
+  failed; a build failure and a cargo failure with no failing binary are
+  problems; the perf clips' rows with their bitrate, the "too easy"
+  flag and a clip not made; `SPHERECUT_PERF_MEDIA` is set only when
+  hw-test makes the clips (not with `--quick`), and its path reaches
+  the tests unchanged, as the samples' does.
+- synth: an average bitrate is what x264 and x265 make, within 30%, at
+  500 and 4000 kbps (`a_noisy_clip_comes_out_at_the_bitrate_asked_for`).
+- `cargo xtask hw-test --list` lists the six playback benchmarks among
+  31 Tier 2 tests.
+- A real perf clip, on this box's 4 CPUs and FFmpeg 6.1 (libx265 3.5):
+  hw-test made `hevc8-5k7-30fps-noisy-20s.mp4` in 26 min 52 s, 254 MB
+  at 101.6 Mbit/s (HEVC Main, 600 frames, 20.0 s), and software decoded
+  it at 27.1 fps (`bench_perf_clips_software_decode`, the median of 3,
+  27.06 to 27.19): far from too easy, where the plan's easy grid clip
+  decoded at 330 fps and the X5's own 5.7K60 at about 58. The run was stopped there, so the 10-bit and 8K clips were
+  not made here; the bench then measured the clip there was and
+  recorded the other two as not measured, with the reason.
+
+Revisit if: H1's perf clips decode in software above 150 fps on either
+machine (more noise, or a higher bitrate); x265 can't hold 100 Mbps on
+a build Pat uses; or the Tier 1 run on a hardware machine takes so long
+that `--no-tier1` becomes the habit.
 
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 

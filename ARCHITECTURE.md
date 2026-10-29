@@ -589,6 +589,17 @@ intermediate equirect exists only as the output of a 360 export.
   shuts the `StopSource` down on the first Ctrl+C (`spherecut frame`,
   above).
 * Built in slice 5 (D34), in `spherecut-playback`:
+  * **Data flow.** A file's frames go one way: each video stream's
+    `decode-v{i}` worker (on the decoder `playback::decoder` picks from
+    doctor's checks) puts decoded frames into the `FrameCache`; the
+    `upload` thread copies the ones the presenter will want into the
+    `SlotRing`'s GPU slots; `Player::present`, on the UI thread, picks
+    each stream's slot for the next refresh; and the viewport draws it
+    (slice 7; the Tier 2 benchmarks' offscreen target until then).
+    Commands go the other way, on unbounded channels, each request with
+    a `StopToken` of a new generation; what the threads did comes back
+    through the slots' atomics, a status read with `try_lock`, events
+    and `PerfStats`.
   * **The UI thread never blocks.** The GUI marks its thread with
     `core::blocking::mark_ui_thread()`, and test harnesses mark theirs.
     Every helper that can block calls `may_block(what)` first: the
@@ -659,9 +670,10 @@ intermediate equirect exists only as the output of a 360 export.
   on lavapipe, and on a `ManualClock` wherever wall time would make
   them flaky: the frame cache against a model of its rules, the
   engine's rules with synthetic and generated media (a 5.7K source in a
-  256 MiB cache among them), and a fake UI loop on a marked thread that
+  256 MiB cache among them), a fake UI loop on a marked thread that
   must never wait, through a backend that never answers and a storm of
-  seeks (`never_blocks.rs`).
+  seeks (`never_blocks.rs`), and the Tier 2 playback benchmarks'
+  harness, in software on a small clip (`tier2_playback.rs`).
   `cargo xtask check` runs all of it, against the FFmpeg pkg-config
   finds. `cargo xtask compat` runs clippy against other FFmpeg builds
   and builds and links the tests against each, in a target directory of
@@ -682,7 +694,16 @@ intermediate equirect exists only as the output of a 360 export.
   that crashed or died after its tests finished fails the run even when
   another binary's skip explains cargo's failure. A test that did not run,
   a failure, or a failed listing marks the run FAILED. DECISIONS D19 has
-  the details.
+  the details. Unless `--quick`, hw-test first makes the perf clips the
+  playback benchmarks play (synth's noisy 5.7K and 8K HEVC at a camera's
+  bitrate, kept in `<target>/hw-media/` across runs), and after Tier 2
+  it runs Tier 1 on the machine (`--no-tier1` leaves it out). The report
+  also records the power settings and every render node (D37). The
+  playback benchmarks (`crates/playback/tests/tier2_playback.rs`) play
+  the perf clips and the X5's samples through a `Player` on the GPU at
+  60 Hz deadlines into an offscreen 1920×1080 target, unthrottled and in
+  real time, and gate 5.7K real time on the hardware decoder `Auto`
+  picks (D34). `cargo xtask hw-test --list` lists the Tier 2 tests.
 
 ### Golden images
 
