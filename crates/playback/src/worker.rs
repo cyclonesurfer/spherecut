@@ -652,9 +652,10 @@ impl Worker {
     }
 
     /// Tell the presenter that request `id` found `f`, pinned in the cache
-    /// until the upload thread has it in a slot: the frames decoded on
-    /// from a keyframe behind the time asked for, or another stream's
-    /// worker moving the playhead, would otherwise have it evicted first.
+    /// while `id` is the target (until the presenter has every stream's
+    /// up, or a newer request comes): the frames decoded on from a
+    /// keyframe behind the time asked for, or another stream's worker
+    /// moving the playhead, would otherwise have it evicted first.
     fn land(
         &self,
         id: u64,

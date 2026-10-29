@@ -240,13 +240,20 @@ impl UploadThread {
                 .iter()
                 .any(|v| v.frame.epoch == epoch && v.frame.stream == i && v.frame.time == t)
         };
-        // A landing in a slot needs the cache no more: the presenter
-        // shows it from there.
+        // A landing stays pinned while its request is the target: until
+        // the presenter has put every stream's up and cleared the target,
+        // or a newer request has taken its place. In a slot isn't enough:
+        // with too few slots the presenter shows each stream's as it
+        // comes, and a stream whose landing had left the cache would want
+        // nothing and keep the slot another stream's needs. The target is
+        // read again after the status, since a landing published there
+        // came after its request's target was stored.
+        let current = shared.target.load(Ordering::Acquire);
         st.unpinned.resize(n, 0);
         for (i, s) in streams.iter().enumerate() {
             if let Some(l) = s.landed
                 && st.unpinned[i] != l.id
-                && in_slot(i, l.time)
+                && l.id != current
             {
                 shared.cache.unpin(i, l.time);
                 st.unpinned[i] = l.id;

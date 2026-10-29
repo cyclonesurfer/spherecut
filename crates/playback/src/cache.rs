@@ -41,8 +41,8 @@
 //! fill the window ahead of it.
 //!
 //! **Pins.** Each stream may pin one frame ([`FrameCache::pin`]): the
-//! one a request landed on, which the presenter waits for until it is in
-//! a GPU slot. A pinned frame is never evicted and goes in past the
+//! one a request landed on, which the presenter waits for until every
+//! stream's is on screen. A pinned frame is never evicted and goes in past the
 //! window too, until it is unpinned, the stream pins another, or the
 //! cache is cleared. Without it, a keyframe seek back would lose the
 //! keyframe it landed on to the frames decoded on from it (all the

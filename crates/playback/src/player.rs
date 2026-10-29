@@ -1479,6 +1479,67 @@ mod tests {
     }
 
     #[test]
+    fn two_streams_keyframe_seek_back_with_a_slot_dead_and_the_cache_full() {
+        use spherecut_core::{Clock, FrameRate, ManualClock};
+        use spherecut_synth::fake::{SyntheticBackend, SyntheticClip};
+
+        // Four slots, one dead, a 16-frame cache full after playing: a
+        // keyframe seek back shows each stream's keyframe as it comes, and
+        // the one up first must stay in the cache until the other is.
+        let rate = FrameRate::FPS_30;
+        let at = |k: i64| rate.frame_to_time(k).expect("a frame time");
+        let frame = 64 * 32 * 3 / 2;
+        let gpu = spherecut_render::Gpu::headless(&spherecut_render::AdapterChoice::Cpu)
+            .expect("lavapipe");
+        let backend = SyntheticBackend::new(SyntheticClip {
+            frames: 120,
+            frame_cost: Duration::from_millis(5),
+            ..SyntheticClip::default()
+        });
+        let clock = Arc::new(ManualClock::new(rate.frame_duration()));
+        let parts = PlayerParts::new(Arc::new(backend), gpu, clock.clone());
+        let config = PlayerConfig {
+            cache: CacheBudget::Bytes(16 * frame),
+            decoder: DecoderPreference::Software,
+            ..PlayerConfig::default()
+        };
+        let player = Player::new(parts, config).expect("a player");
+        let claim = player.shared.slots.claim().expect("a free slot");
+        player.shared.slots.kill(claim);
+        assert_eq!(player.slots().stats().active, 3);
+        player.open_streams("two.synthetic".into(), vec![Some(0), Some(1)]);
+        let shows = |k: i64| {
+            let start = Instant::now();
+            loop {
+                let shown = player
+                    .present(Instant::now())
+                    .map(|p| p.frames.iter().map(|f| f.frame.pts).collect::<Vec<_>>());
+                if shown.as_deref() == Some(&[k, k][..]) {
+                    return;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(20),
+                    "frame {k} never came up: showing {shown:?}, slots {:?}",
+                    player.slots().views()
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        shows(0);
+        player.play();
+        for k in 1..=60 {
+            clock.set(at(k), Instant::now());
+            shows(k);
+        }
+        player.pause();
+        for (k, key) in [(45, 40), (29, 24), (21, 16)] {
+            player.seek(at(k), SeekMode::Keyframe);
+            shows(key);
+        }
+        join(player);
+    }
+
+    #[test]
     fn a_set_budget_shrinks_too_when_memory_is_short() {
         // 512 MiB available, under the 1 GiB of pressure: a recheck sets
         // a quarter of it, 128 MiB, below the 256 MiB set (D34).
