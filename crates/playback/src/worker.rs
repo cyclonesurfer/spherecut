@@ -415,6 +415,11 @@ impl Worker {
         token: &StopToken,
     ) -> Result<(), Halt> {
         let cache = self.shared.cache.clone();
+        // From where it starts, as a seek's, so that the frames found on
+        // the way never wait for room: the presenter leaves a step's
+        // playhead to the worker, and the playhead a seek superseded
+        // before it started gave may never have reached the cache.
+        cache.set_playhead(from);
         let start = match mode {
             SeekMode::Exact => cache.get(self.stream, from),
             // Where `seek` would land: the frame shown there if the

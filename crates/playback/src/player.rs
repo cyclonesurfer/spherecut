@@ -1561,6 +1561,64 @@ mod tests {
     }
 
     #[test]
+    fn steps_that_supersede_a_seek_before_its_worker_starts_it_land() {
+        use spherecut_core::blocking::{OnBlock, mark_ui_thread_with, unmark_ui_thread};
+        use spherecut_core::{FrameRate, ManualClock};
+        use spherecut_synth::fake::{SyntheticBackend, SyntheticClip};
+
+        // With the cache's lock taken, as a busy thread takes it, the
+        // seek's playhead can't reach the cache, and the steps supersede
+        // the seek before its worker, busy filling the window, starts it.
+        // The step must move the playhead itself: from 0, the frames it
+        // decodes on from the keyframe would wait for room for good.
+        let rate = FrameRate::FPS_30;
+        let at = |k: i64| rate.frame_to_time(k).expect("a frame time");
+        let gpu = spherecut_render::Gpu::headless(&spherecut_render::AdapterChoice::Cpu)
+            .expect("lavapipe");
+        let backend = SyntheticBackend::new(SyntheticClip {
+            frames: 240,
+            frame_cost: Duration::from_millis(30),
+            ..SyntheticClip::default()
+        });
+        let clock = Arc::new(ManualClock::new(rate.frame_duration()));
+        let parts = PlayerParts::new(Arc::new(backend), gpu, clock);
+        let config = PlayerConfig {
+            decoder: DecoderPreference::Software,
+            ..PlayerConfig::default()
+        };
+        let player = Player::new(parts, config).expect("a player");
+        player.open("clip.synthetic".into());
+        let shows = |k: i64| {
+            let start = Instant::now();
+            loop {
+                let shown = player
+                    .present(Instant::now())
+                    .map(|p| p.frames[0].frame.pts);
+                if shown == Some(k) {
+                    return;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(20),
+                    "frame {k} never came up: showing {shown:?}, cache {:?}",
+                    player.cache().stats()
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        shows(0);
+        {
+            let _held = player.cache().hold_lock();
+            mark_ui_thread_with(OnBlock::Panic);
+            player.seek(at(213), SeekMode::Keyframe);
+            player.step(1);
+            player.step(1);
+            unmark_ui_thread();
+        }
+        shows(210);
+        join(player);
+    }
+
+    #[test]
     fn a_set_budget_shrinks_too_when_memory_is_short() {
         // 512 MiB available, under the 1 GiB of pressure: a recheck sets
         // a quarter of it, 128 MiB, below the 256 MiB set (D34).
