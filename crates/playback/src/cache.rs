@@ -53,6 +53,15 @@
 //! [`FrameCache::try_insert`] says [`Insert::Full`] instead. A frame at
 //! or behind the playhead never waits: playback is waiting for it.
 //!
+//! **Frames alive.** The budget counts the frames the cache holds. Others
+//! are alive for a while beside them: the frame a worker decoded and
+//! waits to insert, and frames evicted while the upload thread or a
+//! worker still holds them, until its pass ends or it moves on. So the
+//! decoded frames alive pass the budget by about a frame a stream (5.7K
+//! frames through a 256 MiB cache: 261 MiB alive at worst, 237 MiB of it
+//! held), about 88 MB with the X5's two 8K streams. Auto leaves three
+//! quarters of the memory available for that and the rest.
+//!
 //! **Never blocks the UI.** Every method that takes the lock calls
 //! [`may_block`] first. The UI thread uses the `try_` methods, which
 //! never wait for the lock and say so when it is taken.
