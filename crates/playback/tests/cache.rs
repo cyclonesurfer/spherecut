@@ -627,7 +627,10 @@ impl Model {
     /// The bytes of the pinned frames held: what may be held past the
     /// budget, beyond the current frames and windows.
     fn pinned_bytes(&self, held: &Held) -> u64 {
-        self.pins.iter().filter_map(|(&s, &k)| held.get(&(s, k))).sum()
+        self.pins
+            .iter()
+            .filter_map(|(&s, &k)| held.get(&(s, k)))
+            .sum()
     }
 
     fn cap(&self) -> u64 {
