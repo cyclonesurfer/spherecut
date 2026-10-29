@@ -5,7 +5,10 @@
 //! available: clamp(¼ × `MemAvailable`, 512 MiB, 8 GiB), capped at half
 //! the room a cgroup v2 memory limit leaves (Flatpak, containers, a
 //! systemd slice), `memory.max` − `memory.current`, so that the cache
-//! never takes more than half of what the process may still use. On the
+//! never takes more than half of what the process may still use. The
+//! limits read are those of the process's cgroup and its ancestors up to
+//! the mount's root, which in a container with its own cgroup namespace
+//! is the container's. On the
 //! machines with an iGPU, `MemAvailable` already counts what the GPU
 //! uses, since it shares the RAM. [`CacheBudget::Bytes`] is a size given
 //! in Settings, with `--cache-mb`, or in `SPHERECUT_FRAME_CACHE_MIB`.
@@ -250,13 +253,13 @@ fn cgroup_path(text: &str) -> Option<PathBuf> {
         .map(|p| PathBuf::from(p.trim().trim_start_matches('/')))
 }
 
-/// The cgroup at `rel` under `mount` and each of its ancestors below the
-/// root, whose limits all apply; the root has none.
+/// The cgroup at `rel` under `mount` and each of its ancestors, whose
+/// limits all apply, up to the mount's root. The host's root cgroup has
+/// no `memory.max`; in a container with its own cgroup namespace (Docker
+/// and Podman on cgroup v2), `/proc/self/cgroup` reads `0::/` and the
+/// root is the container's, with its limit.
 fn cgroup_dirs(mount: &Path, rel: &Path) -> Vec<PathBuf> {
-    rel.ancestors()
-        .filter(|a| !a.as_os_str().is_empty())
-        .map(|a| mount.join(a))
-        .collect()
+    rel.ancestors().map(|a| mount.join(a)).collect()
 }
 
 #[cfg(test)]
@@ -476,6 +479,32 @@ mod tests {
         // Nothing to read at all: the floor.
         let d = read_auto_budget_at(&root.join("none"), &root.join("none"));
         assert_eq!(d, budget_from(None, None));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A container with its own cgroup namespace: `/proc/self/cgroup`
+    /// reads `0::/`, and the limit is at the mount's root.
+    #[test]
+    fn a_cgroup_namespace_s_limit_at_the_root_counts() {
+        let root = std::env::temp_dir().join(format!("spherecut-budget-ns-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let proc = root.join("proc");
+        let mount = root.join("cgroup");
+        std::fs::create_dir_all(proc.join("self")).unwrap();
+        std::fs::create_dir_all(&mount).unwrap();
+        std::fs::write(proc.join("meminfo"), meminfo(67_108_864, 32 * KB_PER_GIB)).unwrap();
+        std::fs::write(proc.join("self/cgroup"), "0::/\n").unwrap();
+        std::fs::write(mount.join("memory.max"), format!("{}\n", 2 * GIB)).unwrap();
+        std::fs::write(mount.join("memory.current"), format!("{}\n", GIB)).unwrap();
+        let d = read_auto_budget_at(&proc, &mount);
+        assert_eq!((d.bytes, d.cgroup_room), (GIB / 2, Some(GIB)));
+        // And in a cgroup below it, the root's limit still applies.
+        let leaf = mount.join("app");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(leaf.join("memory.max"), "max\n").unwrap();
+        std::fs::write(proc.join("self/cgroup"), "0::/app\n").unwrap();
+        let d = read_auto_budget_at(&proc, &mount);
+        assert_eq!((d.bytes, d.cgroup_room), (GIB / 2, Some(GIB)));
         std::fs::remove_dir_all(&root).ok();
     }
 
