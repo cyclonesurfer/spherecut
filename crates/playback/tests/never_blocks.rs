@@ -403,21 +403,39 @@ fn a_blocking_snapshot_on_the_ui_thread_panics() {
         let player: &Player = guard.as_ref().unwrap();
         // The snapshot that doesn't wait is fine on the UI thread.
         let _ = player.snapshot();
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            player.snapshot_blocking();
-        }));
+        let panics = |f: &dyn Fn()| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                .err()
+                .map(|e| {
+                    e.downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_default()
+                })
+        };
+        let r = [
+            panics(&|| drop(player.snapshot_blocking())),
+            panics(&|| drop(player.slots().gpu_frame(0))),
+        ];
         unmark_ui_thread();
-        r.err().map(|e| {
-            e.downcast_ref::<String>()
-                .cloned()
-                .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
-                .unwrap_or_default()
-        })
+        r
     })
     .join()
     .unwrap();
-    let msg = got.expect("snapshot_blocking didn't panic on the UI thread");
+    let [snapshot, slot] = got;
+    let msg = snapshot.expect("snapshot_blocking didn't panic on the UI thread");
     assert!(msg.contains("would block the UI thread"), "{msg}");
+    // Naming the caller's line, which a release build logs, not the
+    // player's.
+    assert!(
+        msg.contains("(at crates/playback/tests/never_blocks.rs:"),
+        "{msg}"
+    );
+    let msg = slot.expect("a slot's lock didn't panic on the UI thread");
+    assert!(
+        msg.contains("(at crates/playback/tests/never_blocks.rs:"),
+        "{msg}"
+    );
     // Off the UI thread it is an ordinary snapshot.
     let player = player.lock().unwrap().take().unwrap();
     assert_eq!(player.snapshot_blocking().state, PlayState::Empty);

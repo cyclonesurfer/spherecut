@@ -475,8 +475,8 @@ fn a_change_wakes_a_waiter() {
 }
 
 /// The negative control of M1 plan section 8.6 for the cache: on a thread
-/// marked as the UI thread, every call that takes the lock panics, and
-/// the `try_` calls the UI makes don't.
+/// marked as the UI thread, every call that takes the lock panics, naming
+/// the line that called it, and the `try_` calls the UI makes don't.
 #[test]
 fn the_ui_thread_only_tries_the_lock() {
     let c = Arc::new(FrameCache::new(1 << 20, Time::from_secs(1)));
@@ -540,6 +540,8 @@ fn the_ui_thread_only_tries_the_lock() {
             e.starts_with(&format!("{what} would block the UI thread")),
             "{e}"
         );
+        // The caller's line, which a release build logs, not the cache's.
+        assert!(e.contains("(at crates/playback/tests/cache.rs:"), "{e}");
     }
     // Nothing those calls would have done was done.
     assert_eq!(c.stats().frames, 1);

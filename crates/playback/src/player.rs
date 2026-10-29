@@ -1143,6 +1143,7 @@ impl Player {
     /// negative control of the UI thread's guard (M1 plan section 8.6),
     /// which must panic on a marked thread.
     #[doc(hidden)]
+    #[track_caller]
     pub fn snapshot_blocking(&self) -> PlayerSnapshot {
         let status = self.shared.status();
         self.snapshot_from(Some(&status))
@@ -1271,6 +1272,7 @@ impl Player {
     /// Shut down, and wait as long as `budget` for every thread to end.
     /// Blocks: off the UI thread (after eframe's `run_native` returns, or
     /// in a headless caller).
+    #[track_caller]
     pub fn join(self, budget: Duration) -> ShutdownReport {
         may_block("joining the player's threads");
         self.begin_shutdown();

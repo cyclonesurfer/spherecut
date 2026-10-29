@@ -171,6 +171,7 @@ impl Slot {
         self.duration[1].store(d, r);
     }
 
+    #[track_caller]
     fn lock(&self) -> MutexGuard<'_, Option<Arc<GpuFrame>>> {
         may_block("taking a GPU slot's lock");
         self.gpu.lock().unwrap_or_else(PoisonError::into_inner)
@@ -325,6 +326,7 @@ impl SlotRing {
 
     /// Claim a free slot among the active ones whose GPU frame nothing
     /// but the ring holds, for the upload thread to write.
+    #[track_caller]
     pub(crate) fn claim(&self) -> Option<Claim> {
         let active = self.active();
         for (index, slot) in self.slots.iter().enumerate().take(active) {
@@ -355,11 +357,14 @@ impl SlotRing {
     }
 
     /// The GPU frame a claimed slot holds, to upload into or replace.
+    #[track_caller]
     pub(crate) fn frame_of(&self, claim: &Claim) -> Option<Arc<GpuFrame>> {
-        self.slots.get(claim.index).and_then(|s| s.lock().clone())
+        let slot = self.slots.get(claim.index)?;
+        slot.lock().clone()
     }
 
     /// Give a claimed slot a new GPU frame, dropping the old one.
+    #[track_caller]
     pub(crate) fn replace(&self, claim: &Claim, gpu: Arc<GpuFrame>) {
         if let Some(s) = self.slots.get(claim.index) {
             *s.lock() = Some(gpu);
@@ -385,6 +390,7 @@ impl SlotRing {
 
     /// A claimed slot the GPU has no memory for: Dead from now on, with no
     /// GPU frame.
+    #[track_caller]
     pub(crate) fn kill(&self, claim: Claim) {
         if let Some(s) = self.slots.get(claim.index) {
             *s.lock() = None;
@@ -395,6 +401,7 @@ impl SlotRing {
 
     /// Drop the GPU frames of free slots past the active count that
     /// nothing else holds, which gives their memory back.
+    #[track_caller]
     pub(crate) fn trim(&self) {
         let active = self.active();
         for slot in self.slots.iter().skip(active) {
@@ -467,8 +474,11 @@ impl SlotRing {
 
     /// Slot `index`'s GPU frame, whatever its state, for tests that read
     /// it back. Takes the slot's lock.
+    #[track_caller]
     pub fn gpu_frame(&self, index: usize) -> Option<Arc<GpuFrame>> {
-        self.slots.get(index).and_then(|s| s.lock().clone())
+        // Not in a closure, which would be the caller `lock` names.
+        let slot = self.slots.get(index)?;
+        slot.lock().clone()
     }
 }
 

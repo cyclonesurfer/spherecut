@@ -63,8 +63,9 @@
 //! quarters of the memory available for that and the rest.
 //!
 //! **Never blocks the UI.** Every method that takes the lock calls
-//! [`may_block`] first. The UI thread uses the `try_` methods, which
-//! never wait for the lock and say so when it is taken.
+//! [`may_block`] first, and tracks its caller, so that a report names the
+//! line that called the cache. The UI thread uses the `try_` methods,
+//! which never wait for the lock and say so when it is taken.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -442,6 +443,7 @@ impl FrameCache {
         }
     }
 
+    #[track_caller]
     fn lock(&self) -> MutexGuard<'_, State> {
         may_block("taking the frame cache's lock");
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
@@ -450,6 +452,7 @@ impl FrameCache {
     /// Hold the lock, as a busy decode or upload thread does, for the
     /// tests of what the UI thread does meanwhile.
     #[cfg(test)]
+    #[track_caller]
     pub(crate) fn hold_lock(&self) -> impl Sized + '_ {
         self.lock()
     }
@@ -475,6 +478,7 @@ impl FrameCache {
     /// past the window waits until it would be in it, or `stop` says to
     /// stop, or the cache is closed ([`Insert::Stopped`]). Blocks: never
     /// on the UI thread.
+    #[track_caller]
     pub fn insert(&self, stream: usize, frame: Arc<VideoFrame>, stop: &StopToken) -> Insert {
         may_block("waiting for room in the frame cache");
         let mut g = self.lock();
@@ -502,6 +506,7 @@ impl FrameCache {
 
     /// [`insert`](Self::insert) without waiting for room:
     /// [`Insert::Full`] instead. Still takes the lock.
+    #[track_caller]
     pub fn try_insert(&self, stream: usize, frame: Arc<VideoFrame>) -> Insert {
         let mut g = self.lock();
         if g.closed {
@@ -521,6 +526,7 @@ impl FrameCache {
     /// ([`Insert::Stopped`]), which it reads under the lock: a worker
     /// whose file was closed meanwhile never puts a frame of it in the
     /// cache the next file uses.
+    #[track_caller]
     pub fn try_insert_until(
         &self,
         stream: usize,
@@ -549,6 +555,7 @@ impl FrameCache {
     /// `stop` says to stop (read under the lock, as
     /// [`try_insert_until`](Self::try_insert_until) does) or the cache is
     /// closed. The stream's frame pinned before is let go.
+    #[track_caller]
     pub fn pin(&self, stream: usize, frame: Arc<VideoFrame>, stop: &StopToken) -> Insert {
         let mut g = self.lock();
         if g.closed || stop.is_stopped() {
@@ -564,6 +571,7 @@ impl FrameCache {
 
     /// Let stream `stream`'s frame at `time` go as the rules say, if it is
     /// the one pinned, evicting down to the budget.
+    #[track_caller]
     pub fn unpin(&self, stream: usize, time: Time) {
         let g = self.lock();
         self.changed(g, |s| {
@@ -576,6 +584,7 @@ impl FrameCache {
 
     /// Move the playhead to clip time `at`, which wakes a decode worker
     /// waiting for room.
+    #[track_caller]
     pub fn set_playhead(&self, at: Time) {
         let g = self.lock();
         self.changed(g, |s| s.playhead = at);
@@ -594,11 +603,13 @@ impl FrameCache {
         }
     }
 
+    #[track_caller]
     pub fn playhead(&self) -> Time {
         self.lock().playhead
     }
 
     /// Hold at most `bytes` from now on, evicting down to it.
+    #[track_caller]
     pub fn set_budget(&self, bytes: u64) {
         let g = self.lock();
         self.changed(g, |s| {
@@ -608,12 +619,14 @@ impl FrameCache {
     }
 
     /// Keep frames as far as `ahead` past the playhead.
+    #[track_caller]
     pub fn set_ahead(&self, ahead: Time) {
         let g = self.lock();
         self.changed(g, |s| s.ahead = ahead);
     }
 
     /// Drop every frame and link: a new file.
+    #[track_caller]
     pub fn clear(&self) {
         let g = self.lock();
         self.changed(g, |s| {
@@ -627,6 +640,7 @@ impl FrameCache {
 
     /// Drop stream `stream`'s links, keeping its frames: for a new
     /// decoder on the stream, whose runs are numbered afresh.
+    #[track_caller]
     pub fn forget_runs(&self, stream: usize) {
         let g = self.lock();
         self.changed(g, |s| {
@@ -640,6 +654,7 @@ impl FrameCache {
     }
 
     /// Stop every wait, now and from now on: at shutdown.
+    #[track_caller]
     pub fn close(&self) {
         let g = self.lock();
         self.changed(g, |s| s.closed = true);
@@ -647,6 +662,7 @@ impl FrameCache {
 
     /// Wake everyone waiting, to look at their stop tokens: after a seek
     /// has stopped the ones before it.
+    #[track_caller]
     pub fn wake(&self) {
         let g = self.lock();
         self.changed(g, |_| ());
@@ -661,6 +677,7 @@ impl FrameCache {
     }
 
     /// The frame of `stream` at exactly `time`.
+    #[track_caller]
     pub fn get(&self, stream: usize, time: Time) -> Option<Arc<VideoFrame>> {
         self.lock().get(stream, time)
     }
@@ -669,6 +686,7 @@ impl FrameCache {
     /// before `at`, if the frame linked after it is later than `at`, so
     /// that no frame lies between. A frame whose successor isn't held
     /// can't be told from one followed by frames not decoded yet.
+    #[track_caller]
     pub fn frame_at(&self, stream: usize, at: Time) -> Option<Arc<VideoFrame>> {
         let g = self.lock();
         let (&(_, t), e) = g
@@ -683,6 +701,7 @@ impl FrameCache {
     }
 
     /// The latest frame of `stream` at or before `at`, linked or not.
+    #[track_caller]
     pub fn at_or_before(&self, stream: usize, at: Time) -> Option<Arc<VideoFrame>> {
         let g = self.lock();
         g.frames
@@ -697,6 +716,7 @@ impl FrameCache {
     /// The first frame of `stream` after `time` held, linked or not, and
     /// whether it is linked to the frame at `time`, which says that none
     /// lies between.
+    #[track_caller]
     pub fn following(&self, stream: usize, time: Time) -> Option<(Arc<VideoFrame>, bool)> {
         let g = self.lock();
         let (_, e) = g
@@ -714,11 +734,13 @@ impl FrameCache {
 
     /// The frame after the one of `stream` at `time`, by its run links:
     /// adjacent in the stream.
+    #[track_caller]
     pub fn next_after(&self, stream: usize, time: Time) -> Option<Arc<VideoFrame>> {
         self.lock().linked(stream, time, 1)
     }
 
     /// The frame before the one of `stream` at `time`, by its run links.
+    #[track_caller]
     pub fn prev_before(&self, stream: usize, time: Time) -> Option<Arc<VideoFrame>> {
         self.lock().linked(stream, time, -1)
     }
@@ -726,6 +748,7 @@ impl FrameCache {
     /// The last frame reached from the one of `stream` at `time` through
     /// run links: where a decoder goes on from after a seek into frames
     /// held already. `None` when no frame is held at `time`.
+    #[track_caller]
     pub fn run_end(&self, stream: usize, time: Time) -> Option<Arc<VideoFrame>> {
         let g = self.lock();
         let mut at = g.get(stream, time)?;
@@ -736,6 +759,7 @@ impl FrameCache {
     }
 
     /// Bumped by every change: compare it to see whether anything did.
+    #[track_caller]
     pub fn generation(&self) -> u64 {
         self.lock().generation
     }
@@ -743,6 +767,7 @@ impl FrameCache {
     /// Wait until the generation isn't `seen`, or `timeout` has passed,
     /// and return it. Blocks: for the upload thread, waiting for a frame
     /// to upload.
+    #[track_caller]
     pub fn wait_for_change(&self, seen: u64, timeout: Duration) -> u64 {
         may_block("waiting for the frame cache to change");
         let deadline = Instant::now() + timeout;
@@ -761,6 +786,7 @@ impl FrameCache {
         g.generation
     }
 
+    #[track_caller]
     pub fn stats(&self) -> CacheStats {
         self.lock().stats()
     }
@@ -773,6 +799,7 @@ impl FrameCache {
 
     /// Every frame held, with its stream, in stream and time order: for
     /// tests.
+    #[track_caller]
     pub fn held(&self) -> Vec<(usize, Arc<VideoFrame>)> {
         self.lock()
             .frames

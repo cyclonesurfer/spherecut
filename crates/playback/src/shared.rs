@@ -169,6 +169,7 @@ impl std::fmt::Debug for Shared {
 }
 
 /// `m`, locked; never on the UI thread.
+#[track_caller]
 pub(crate) fn lock<'a, T>(m: &'a Mutex<T>, what: &str) -> MutexGuard<'a, T> {
     may_block(what);
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -185,6 +186,7 @@ pub(crate) fn try_lock<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 
 impl Shared {
     /// The status, locked. Never on the UI thread.
+    #[track_caller]
     pub(crate) fn status(&self) -> MutexGuard<'_, Status> {
         lock(&self.status, "taking the player's status lock")
     }
