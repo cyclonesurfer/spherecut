@@ -245,6 +245,9 @@ fn the_ui_never_waits_on_a_backend_that_never_answers() {
     common::join(player);
 }
 
+/// The storm's decoder's time a frame.
+const FRAME_COST: Duration = Duration::from_millis(50);
+
 #[test]
 fn a_seek_storm_decodes_little_and_lands_on_the_last_seek() {
     let _t = timing();
@@ -252,16 +255,18 @@ fn a_seek_storm_decodes_little_and_lands_on_the_last_seek() {
     let backend = SyntheticBackend::new(SyntheticClip {
         frames: 600,
         keyint: 8,
-        frame_cost: Duration::from_millis(50),
+        frame_cost: FRAME_COST,
         ..SyntheticClip::default()
     });
     let clock = Arc::new(ManualClock::new(rate.frame_duration()));
     let player = player(backend, clock, config());
     let last = 437i64;
-    let (player, times, landed) = on_ui_thread(Duration::from_secs(60), move || {
+    let (player, times, landed, gaps) = on_ui_thread(Duration::from_secs(60), move || {
         player.open("storm.synthetic".into());
         let rq = RunQueue::open();
         let mut times = Times::default();
+        let mut sent = Vec::with_capacity(1001);
+        sent.push(Instant::now());
         let start = Instant::now();
         // 1000 seeks in 2 s: one every 2 ms, scattered over the clip, the
         // last to frame `last`.
@@ -274,6 +279,7 @@ fn a_seek_storm_decodes_little_and_lands_on_the_last_seek() {
             times.time(&rq, || {
                 let _ = player.snapshot();
                 let _ = player.present(Instant::now());
+                sent.push(Instant::now());
                 player.seek(rate.frame_to_time(k).unwrap(), SeekMode::Exact);
                 let _ = player.events();
             });
@@ -286,16 +292,27 @@ fn a_seek_storm_decodes_little_and_lands_on_the_last_seek() {
             (pts(&p) == [last]).then_some(())
         });
         eprintln!("storm took {storm:?}");
-        (player, times, landed)
+        // A seek can run to its end only if nothing supersedes it for a
+        // frame's decode, 50 ms: the gaps that long, which a preempted
+        // UI thread makes.
+        let gaps = sent
+            .windows(2)
+            .filter(|w| w[1] - w[0] >= FRAME_COST)
+            .count() as u64;
+        (player, times, landed, gaps)
     });
     judge("storm", &times);
     assert!(landed.is_some(), "the last seek's frame never came up");
     let snap = snapshot(&player);
     let seeks = snap.streams[0].seeks;
-    eprintln!("{seeks:?}");
+    eprintln!("{seeks:?}, {gaps} gaps of a frame's decode between seeks");
+    // At most one frame decoded per superseded seek (plan 8.4): a worker
+    // stops a seek within the frame it is decoding, so only the open's
+    // first frame, the last seek and a seek with a gap after it run to
+    // their end.
     assert!(
-        seeks.decoded < 100,
-        "{} seeks ran to completion",
+        seeks.decoded <= 2 + gaps,
+        "{} seeks ran to completion, with {gaps} gaps",
         seeks.decoded
     );
     assert_eq!(snap.state, PlayState::Paused);
