@@ -20,9 +20,16 @@
 //! the run are read from cargo's and libtest's text output, so cargo runs
 //! with fixed terminal settings rather than the user's.
 //!
-//! The command exits non-zero when the build fails, a Tier 2 test fails or
-//! does not run, or a test binary dies; skips alone are not a failure. The
-//! report is written either way.
+//! After Tier 2, the Tier 1 tests run as `cargo xtask check` runs them
+//! (`--no-tier1` leaves them out), which catches what this machine's
+//! FFmpeg and Mesa do differently. Before Tier 2, hw-test makes the perf
+//! clips the playback benchmarks play, once (`perf_clips`), unless
+//! `--quick`. The report also records the power settings and every render
+//! node (`machine`). `--list` lists the Tier 2 tests and stops.
+//!
+//! The command exits non-zero when the build fails, a Tier 2 or Tier 1
+//! test fails or does not run, or a test binary dies; skips alone are not
+//! a failure. The report is written either way.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -34,6 +41,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use crate::machine::{self, Access, MIN_RUST};
+use crate::perf_clips::{self, Clip, Made};
 use crate::workspace_root;
 
 /// What a skipped test's panic message starts with
@@ -70,6 +79,13 @@ pub struct Args {
     /// Where to write the report (default: hw-reports/<host>-<commit>.md).
     #[arg(long)]
     out: Option<PathBuf>,
+    /// Leave out the Tier 1 tests on this machine.
+    #[arg(long)]
+    no_tier1: bool,
+    /// List the Tier 2 tests a run would run, by test binary, and stop
+    /// (a debug build, as `--quick` makes).
+    #[arg(long)]
+    list: bool,
 }
 
 /// Output of one external command.
@@ -226,8 +242,30 @@ fn pkg_cmd(d: Distro, fedora: &str, arch: &str) -> String {
     }
 }
 
-fn check_prereqs(d: Distro, ffmpeg_info: &str, vainfo: &str) -> Vec<Missing> {
+fn check_prereqs(d: Distro, ffmpeg_info: &str, vainfo: &str, rustc: &str) -> Vec<Missing> {
     let mut m = Vec::new();
+    if let Some(v) = machine::rustc_version(rustc)
+        && v < MIN_RUST
+    {
+        m.push(Missing {
+            what: format!(
+                "rustc {}.{} or newer (this is {}.{})",
+                MIN_RUST.0, MIN_RUST.1, v.0, v.1
+            ),
+            fix: if have("rustup") {
+                "rustup update stable".into()
+            } else {
+                match d {
+                    Distro::Fedora => "sudo dnf upgrade --refresh rust cargo".into(),
+                    Distro::Arch => "sudo pacman -Syu rust".into(),
+                    Distro::Other => {
+                        "install rustup (https://rustup.rs) and its stable toolchain".into()
+                    }
+                }
+            },
+            blocks: "building Spherecut",
+        });
+    }
     if !have("vulkaninfo") {
         m.push(Missing {
             what: "vulkaninfo".into(),
@@ -336,6 +374,22 @@ fn check_prereqs(d: Distro, ffmpeg_info: &str, vainfo: &str) -> Vec<Missing> {
             what: "strace".into(),
             fix: pkg_cmd(d, "strace", "strace"),
             blocks: "`cargo xtask check` (Tier 1 strace tests)",
+        });
+    }
+    if machine::lavapipe_icd(Path::new("/")).is_none() {
+        m.push(Missing {
+            what: "lavapipe, Mesa's Vulkan CPU driver (no lvp_icd*.json)".into(),
+            fix: pkg_cmd(d, "mesa-vulkan-drivers", "vulkan-swrast"),
+            blocks: "the Tier 1 render and playback tests",
+        });
+    }
+    // cpal links libasound from slice 6 on; nothing builds against it
+    // yet, so it doesn't block the build here.
+    if !capture("pkg-config", &["--exists", "alsa"]).ok {
+        m.push(Missing {
+            what: "the ALSA development headers".into(),
+            fix: pkg_cmd(d, "alsa-lib-devel", "alsa-lib"),
+            blocks: "audio output (M1 slice 6)",
         });
     }
     if !vainfo.is_empty() && !vainfo.contains("VAProfileHEVCMain") {
@@ -875,52 +929,106 @@ impl Tier2 {
 
 /// Lists the workspace's Tier 2 tests, runs them all with what they need
 /// from hw-test, and pairs every listed test with its outcome.
-fn run_tier2(quick: bool, samples: &Path, bench_out: &Path) -> Tier2 {
+fn run_tier2(quick: bool, samples: &Path, bench_out: &Path, perf_media: Option<&Path>) -> Tier2 {
     // A stale file would mix in another run's numbers.
     if let Err(e) = std::fs::remove_file(bench_out)
         && e.kind() != std::io::ErrorKind::NotFound
     {
         eprintln!("warning: could not clear {}: {e}", bench_out.display());
     }
-    list_and_run(&workspace_root(), quick, &tier2_env(samples, bench_out))
+    list_and_run(
+        &workspace_root(),
+        quick,
+        &tier2_env(samples, bench_out, perf_media),
+    )
 }
 
-/// What the Tier 2 tests get from hw-test. The paths go as they are, so
-/// that the tests look at the same directory as the report.
-fn tier2_env<'a>(samples: &'a Path, bench_out: &'a Path) -> [(&'static str, &'a OsStr); 3] {
-    [
+/// What the Tier 2 tests get from hw-test, and the perf clips' directory
+/// when it made them. The paths go as they are, so that the tests look at
+/// the same directory as the report.
+fn tier2_env<'a>(
+    samples: &'a Path,
+    bench_out: &'a Path,
+    perf_media: Option<&'a Path>,
+) -> Vec<(&'static str, &'a OsStr)> {
+    let mut env = vec![
         ("SPHERECUT_TIER2", OsStr::new("1")),
         ("SPHERECUT_SAMPLES", samples.as_os_str()),
         ("SPHERECUT_BENCH_OUT", bench_out.as_os_str()),
-    ]
+    ];
+    if let Some(dir) = perf_media {
+        env.push(("SPHERECUT_PERF_MEDIA", dir.as_os_str()));
+    }
+    env
+}
+
+/// `env` and [`PLAIN_OUTPUT`], for every cargo command hw-test reads.
+fn plain_env<'a, V: AsRef<OsStr>>(env: &'a [(&'a str, V)]) -> Vec<(&'a str, &'a OsStr)> {
+    env.iter()
+        .map(|(k, v)| (*k, v.as_ref()))
+        .chain(PLAIN_OUTPUT.iter().map(|&(k, v)| (k, OsStr::new(v))))
+        .collect()
+}
+
+/// `cargo test` for the workspace in the given profile: `--no-fail-fast`,
+/// since a skip is a test failure to cargo, and without it cargo stops
+/// after the first binary that has one.
+fn cargo_test(quick: bool) -> Vec<&'static str> {
+    let mut cargo = vec!["test", "--workspace", "--no-fail-fast", "--color", "never"];
+    if !quick {
+        cargo.push("--release");
+    }
+    cargo
+}
+
+/// The package of each test executable `cargo` (a `cargo test` command
+/// line) builds: the `Running` lines name only the executable.
+fn packages_of(dir: &Path, cargo: &[&str], env: &[(&str, &OsStr)]) -> BTreeMap<PathBuf, String> {
+    let mut args = cargo.to_vec();
+    args.extend(["--no-run", "--message-format=json-render-diagnostics"]);
+    test_packages(&capture_merged(dir, "cargo", &args, env).text)
+}
+
+/// `cargo test -- --ignored --list` in `dir`, and the packages of its
+/// test executables.
+fn list_tier2(
+    dir: &Path,
+    quick: bool,
+    env: &[(&str, &OsStr)],
+) -> (Captured, BTreeMap<PathBuf, String>) {
+    let cargo = cargo_test(quick);
+    let packages = packages_of(dir, &cargo, env);
+    let mut args = cargo;
+    args.extend(["--", "--ignored", "--list", "--format", "pretty"]);
+    (capture_merged(dir, "cargo", &args, env), packages)
+}
+
+/// `--list`: every Tier 2 test as `binary::test`, as the report names
+/// them, from a debug build.
+pub(crate) fn listed_tests(dir: &Path) -> Result<Vec<String>> {
+    let env = plain_env::<&str>(&[]);
+    let (list, packages) = list_tier2(dir, true, &env);
+    if !list.ok {
+        bail!("`{}` failed:\n{}", list.cmdline, tail(&list.text, 60));
+    }
+    let listed = parse_list(&list.text);
+    let names = binary_names(listed.keys(), &packages, dir);
+    Ok(by_name(listed, &names)
+        .into_iter()
+        .flat_map(|(bin, tests)| tests.into_iter().map(move |t| format!("{bin}::{t}")))
+        .collect())
 }
 
 /// Lists the ignored tests of the cargo workspace in `dir`, runs them, and
 /// pairs every listed test with its outcome. Every cargo command gets
 /// `env`, so that they all build the same way, and [`PLAIN_OUTPUT`].
 fn list_and_run<V: AsRef<OsStr>>(dir: &Path, quick: bool, env: &[(&str, V)]) -> Tier2 {
-    let env: Vec<(&str, &OsStr)> = env
-        .iter()
-        .map(|(k, v)| (*k, v.as_ref()))
-        .chain(PLAIN_OUTPUT.iter().map(|&(k, v)| (k, OsStr::new(v))))
-        .collect();
-    // A skip is a test failure to cargo; without --no-fail-fast it stops
-    // after the first binary that has one.
-    let mut cargo = vec!["test", "--workspace", "--no-fail-fast", "--color", "never"];
-    if !quick {
-        cargo.push("--release");
-    }
+    let env = plain_env(env);
     eprintln!("==> listing Tier 2 tests");
-    // The `Running` lines name only the executable; this says which
-    // package each one is from.
-    let mut args = cargo.clone();
-    args.extend(["--no-run", "--message-format=json-render-diagnostics"]);
-    let packages = test_packages(&capture_merged(dir, "cargo", &args, &env).text);
-    let mut args = cargo.clone();
-    args.extend(["--", "--ignored", "--list", "--format", "pretty"]);
-    let list = capture_merged(dir, "cargo", &args, &env);
+    let (list, packages) = list_tier2(dir, quick, &env);
 
     eprintln!("==> running Tier 2 tests");
+    let cargo = cargo_test(quick);
     let mut args = cargo;
     args.extend(["--", "--ignored", "--test-threads=1", "--format", "pretty"]);
     if quick {
@@ -928,6 +1036,146 @@ fn list_and_run<V: AsRef<OsStr>>(dir: &Path, quick: bool, env: &[(&str, V)]) -> 
     }
     let run = capture_merged(dir, "cargo", &args, &env);
     Tier2::new(list, run, &packages, dir, quick)
+}
+
+/// Tier 1 on this machine: `cargo test --workspace --all-targets`, in the
+/// debug build, as `cargo xtask check` runs it (M1 plan section 12.4).
+struct Tier1 {
+    run: Captured,
+    /// Each test binary's part of the run, by report name.
+    binaries: BTreeMap<String, BinaryRun>,
+}
+
+impl Tier1 {
+    fn new(run: Captured, packages: &BTreeMap<PathBuf, String>, dir: &Path) -> Tier1 {
+        let output: BTreeMap<Binary, String> = split_by_binary(&run.text).into_iter().collect();
+        let names = binary_names(output.keys(), packages, dir);
+        let binaries = by_name(output, &names)
+            .into_iter()
+            .map(|(bin, text)| (bin, parse_run(&text)))
+            .collect();
+        Tier1 { run, binaries }
+    }
+
+    /// Every test with a result, as `binary::test`.
+    fn results(&self) -> impl Iterator<Item = (String, &Outcome)> {
+        self.binaries.iter().flat_map(|(bin, b)| {
+            b.results
+                .iter()
+                .map(move |(t, o)| (format!("{bin}::{t}"), o))
+        })
+    }
+
+    fn passed(&self) -> usize {
+        self.results()
+            .filter(|(_, o)| **o == Outcome::Passed)
+            .count()
+    }
+
+    /// The tests that failed, with their output. A Tier 1 test that skips
+    /// has failed: only Tier 2 tests may skip.
+    fn failed(&self) -> Vec<(String, String)> {
+        self.results()
+            .filter_map(|(n, o)| match o {
+                Outcome::Failed(out) => Some((n, out.clone())),
+                Outcome::Skipped(why) => Some((
+                    n,
+                    format!("{SKIP_MARKER} {why}\n(a Tier 1 test may not skip)"),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Why Tier 1 failed here; empty if it did not.
+    fn problems(&self) -> Vec<String> {
+        let mut p = Vec::new();
+        let failed = self.failed().len();
+        if failed > 0 {
+            p.push(format!("{failed} Tier 1 test(s) failed on this machine"));
+        }
+        for (bin, b) in &self.binaries {
+            if let Some(why) = b.problem() {
+                p.push(format!("Tier 1 `{bin}` {why}"));
+            }
+        }
+        if self.binaries.is_empty() {
+            p.push("the Tier 1 run ran no test binaries".to_string());
+        } else if !self.run.ok && p.is_empty() {
+            p.push("the Tier 1 `cargo test` failed, but no test binary did".to_string());
+        }
+        p
+    }
+
+    fn counts(&self) -> String {
+        format!(
+            "Tier 1 on this machine: {} passed, {} failed, in {} test binaries ({:.0} s)",
+            self.passed(),
+            self.failed().len(),
+            self.binaries.len(),
+            self.run.elapsed.as_secs_f64()
+        )
+    }
+}
+
+/// Runs the Tier 1 tests of the cargo workspace in `dir`, with `env` and
+/// [`PLAIN_OUTPUT`].
+fn run_tier1<V: AsRef<OsStr>>(dir: &Path, env: &[(&str, V)]) -> Tier1 {
+    let env = plain_env(env);
+    let cargo = vec![
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--no-fail-fast",
+        "--color",
+        "never",
+    ];
+    eprintln!("==> running Tier 1 tests");
+    let packages = packages_of(dir, &cargo, &env);
+    let mut args = cargo;
+    args.extend(["--", "--format", "pretty"]);
+    Tier1::new(capture_merged(dir, "cargo", &args, &env), &packages, dir)
+}
+
+/// Software decode faster than this marks a perf clip "too easy" (M1 plan
+/// section 12.4): the clean grid decoded at 330 fps, the X5's own 5.7K60
+/// at about 58.
+const TOO_EASY_FPS: f64 = 150.0;
+
+/// The perf clips section's table rows: each clip's size, bitrate, how it
+/// came to be there, and its software decode rate from the benchmarks,
+/// flagged above [`TOO_EASY_FPS`].
+fn perf_clip_rows(clips: &[Clip], benches: &[Bench]) -> Vec<String> {
+    clips
+        .iter()
+        .map(|c| {
+            let file = c
+                .path
+                .file_name()
+                .map_or_else(|| c.name.clone(), |f| f.to_string_lossy().into_owned());
+            let made = match &c.made {
+                Made::Cached => "cached".to_string(),
+                Made::Now(d) => format!("now, in {:.0} s", d.as_secs_f64()),
+                Made::Failed(why) => format!("**not made**: {why}"),
+            };
+            let size = if c.bytes > 0 {
+                format!("{:.0} MB", c.bytes as f64 / 1e6)
+            } else {
+                String::new()
+            };
+            let rate = c.mbps().map_or(String::new(), |m| format!("{m:.1} Mbit/s"));
+            let row = format!("perf clip {}: software decode", c.name);
+            let decode = match benches.iter().find(|b| b.name == row) {
+                Some(b) if b.median > TOO_EASY_FPS => format!(
+                    "{:.1} fps, **too easy** (over {TOO_EASY_FPS:.0}: it proves nothing about footage)",
+                    b.median
+                ),
+                Some(b) => format!("{:.1} fps", b.median),
+                None => "not measured".to_string(),
+            };
+            format!("| `{file}` | {size} | {rate} | {made} | {decode} |")
+        })
+        .collect()
 }
 
 /// Cargo's target directory as `cargo metadata` gives it, which follows
@@ -1018,6 +1266,14 @@ fn first_line_containing<'a>(text: &'a str, needle: &str) -> Option<&'a str> {
 
 pub fn run(a: Args) -> Result<()> {
     let root = workspace_root();
+    if a.list {
+        let tests = listed_tests(&root)?;
+        for t in &tests {
+            println!("{t}");
+        }
+        eprintln!("==> {} Tier 2 tests", tests.len());
+        return Ok(());
+    }
     let started = Instant::now();
     let host = hostname();
     let commit = short_commit();
@@ -1078,13 +1334,28 @@ pub fn run(a: Args) -> Result<()> {
         .or_else(|| lspci.text.lines().next().map(str::to_string))
         .unwrap_or_else(|| "unknown".into());
 
+    let profiles_daemon = have("powerprofilesctl")
+        .then(|| capture("powerprofilesctl", &["get"]))
+        .filter(|c| c.ok)
+        .map(|c| c.text);
+    let power = machine::power_profile(Path::new("/"), profiles_daemon.as_deref());
+    let nodes = machine::render_nodes(Path::new("/"), Path::new("/dev/dri"));
+
     eprintln!("==> checking prerequisites");
-    let missing = check_prereqs(d, &decoders.text, if vainfo.ok { &vainfo.text } else { "" });
+    let missing = check_prereqs(
+        d,
+        &decoders.text,
+        if vainfo.ok { &vainfo.text } else { "" },
+        &rustc.text,
+    );
     let build_blocked = missing.iter().any(|m| m.blocks == "building Spherecut");
 
     let mut build: Option<Captured> = None;
     let mut tier2: Option<Tier2> = None;
+    let mut tier1: Option<Tier1> = None;
     let mut doctor: Option<Captured> = None;
+    let mut clips: Vec<Clip> = Vec::new();
+    let media_dir = target.join("hw-media");
     if build_blocked {
         eprintln!("==> build prerequisites missing; skipping build and tests");
     } else {
@@ -1099,9 +1370,17 @@ pub fn run(a: Args) -> Result<()> {
         let built = b.ok;
         build = Some(b);
         if built {
-            tier2 = Some(run_tier2(a.quick, &samples, &bench_out));
+            // The benchmarks that play them are left out by --quick.
+            if !a.quick {
+                clips = perf_clips::ensure(&media_dir);
+            }
+            let perf_media = (!a.quick).then_some(media_dir.as_path());
+            tier2 = Some(run_tier2(a.quick, &samples, &bench_out, perf_media));
             let exe = target.join(profile).join("spherecut");
             doctor = Some(capture(&exe.to_string_lossy(), &["doctor"]));
+            if !a.no_tier1 {
+                tier1 = Some(run_tier1::<&str>(&root, &[]));
+            }
         }
     }
 
@@ -1112,6 +1391,14 @@ pub fn run(a: Args) -> Result<()> {
         _ => {}
     }
     if let Some(t) = &tier2 {
+        problems.extend(t.problems());
+    }
+    for c in &clips {
+        if let Made::Failed(_) = c.made {
+            problems.push(format!("the perf clip {} could not be made", c.name));
+        }
+    }
+    if let Some(t) = &tier1 {
         problems.extend(t.problems());
     }
 
@@ -1201,6 +1488,17 @@ pub fn run(a: Args) -> Result<()> {
             let _ = writeln!(r, "**Tier 2: not run.**\n");
         }
     }
+    match &tier1 {
+        Some(t) => {
+            let _ = writeln!(r, "**{}.**\n", t.counts());
+        }
+        None if a.no_tier1 => {
+            let _ = writeln!(r, "**Tier 1 on this machine: left out by `--no-tier1`.**\n");
+        }
+        None => {
+            let _ = writeln!(r, "**Tier 1 on this machine: not run.**\n");
+        }
+    }
     if !problems.is_empty() {
         let _ = writeln!(r, "**This run FAILED:** {}.\n", problems.join("; "));
     }
@@ -1235,6 +1533,72 @@ pub fn run(a: Args) -> Result<()> {
                 let _ = writeln!(r, "```\n{}\n```\n", tail(&b.text, 80));
             }
         }
+    }
+
+    let _ = writeln!(r, "## Power profile\n");
+    let _ = writeln!(
+        r,
+        "Read once, before the build, and never changed: decode speed moves with these.\n"
+    );
+    let _ = writeln!(r, "| Setting | Value |\n|---|---|");
+    for (what, value) in &power {
+        let _ = writeln!(r, "| {what} | {value} |");
+    }
+    let _ = writeln!(r);
+
+    let _ = writeln!(r, "## Render nodes\n");
+    if nodes.is_empty() {
+        let _ = writeln!(
+            r,
+            "None: /sys/class/drm lists no render node (is a GPU driver loaded?).\n"
+        );
+    } else {
+        let _ = writeln!(
+            r,
+            "| Node | PCI slot | Vendor | Device | Driver | Opens |\n|---|---|---|---|---|---|"
+        );
+        for n in &nodes {
+            let opens = match &n.access {
+                Access::Yes => "yes".to_string(),
+                Access::No(why) => format!("**no**: {why}"),
+            };
+            let _ = writeln!(
+                r,
+                "| {} | {} | {} | {} | {} | {opens} |",
+                n.name,
+                n.pci_slot.as_deref().unwrap_or("?"),
+                n.vendor_name(),
+                n.device.as_deref().unwrap_or("?"),
+                n.driver.as_deref().unwrap_or("?"),
+            );
+        }
+        let _ = writeln!(r);
+    }
+
+    let _ = writeln!(r, "## Perf clips\n");
+    if a.quick {
+        let _ = writeln!(
+            r,
+            "Not made: `--quick` leaves out the benchmarks that play them.\n"
+        );
+    } else if clips.is_empty() {
+        let _ = writeln!(r, "Not made: there was no build.\n");
+    } else {
+        let _ = writeln!(
+            r,
+            "synth's noisy grid in HEVC at about a camera's bitrate, made once and kept in \
+             `{}` for the playback benchmarks. Software decode over {TOO_EASY_FPS:.0} fps \
+             would make a clip too easy to say anything about footage.\n",
+            media_dir.display()
+        );
+        let _ = writeln!(
+            r,
+            "| Clip | Size | Bitrate | Made | Software decode |\n|---|---:|---:|---|---|"
+        );
+        for row in perf_clip_rows(&clips, &parse_benches(&bench_text_of(&tier2, &bench_out))) {
+            let _ = writeln!(r, "{row}");
+        }
+        let _ = writeln!(r);
     }
 
     let _ = writeln!(r, "## Tier 2 tests\n");
@@ -1290,11 +1654,7 @@ pub fn run(a: Args) -> Result<()> {
     }
 
     let _ = writeln!(r, "## Benchmarks\n");
-    let bench_text = if tier2.is_some() {
-        std::fs::read_to_string(&bench_out).unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let bench_text = bench_text_of(&tier2, &bench_out);
     let benches = parse_benches(&bench_text);
     if a.quick {
         let _ = writeln!(r, "Skipped (`--quick` builds in debug mode).\n");
@@ -1309,7 +1669,9 @@ pub fn run(a: Args) -> Result<()> {
             "Release build. Each benchmark runs once to warm up, then {} times \
              (`SPHERECUT_BENCH_RUNS`); the result is the median. Spread is the \
              range over the median: over {UNSTABLE}% means the machine was busy \
-             or changing clocks, so take that result with care.\n",
+             or changing clocks, so take that result with care. A row marked \
+             \"per second\" is one run's seconds instead: Runs counts the seconds, \
+             and the range is the slowest and the fastest.\n",
             bench_runs()
         );
         let _ = writeln!(
@@ -1330,6 +1692,45 @@ pub fn run(a: Args) -> Result<()> {
         }
         let _ = writeln!(r);
     }
+    let _ = writeln!(r, "## Tier 1 on this machine\n");
+    match &tier1 {
+        None if a.no_tier1 => {
+            let _ = writeln!(r, "Left out by `--no-tier1`.\n");
+        }
+        None => {
+            let _ = writeln!(r, "Not run: there was no build.\n");
+        }
+        Some(t) => {
+            let _ = writeln!(
+                r,
+                "`{}`, the debug build, as `cargo xtask check` runs it: {}.\n",
+                t.run.cmdline,
+                t.counts()
+            );
+            for (n, out) in t.failed() {
+                let out = if out.trim().is_empty() {
+                    "(libtest printed no output for this failure)".to_string()
+                } else {
+                    tail(&out, 60)
+                };
+                let _ = writeln!(r, "### FAIL `{n}`\n\n```\n{out}\n```\n");
+            }
+            for p in t.problems() {
+                if !p.contains("test(s) failed") {
+                    let _ = writeln!(r, "- {p}");
+                }
+            }
+            if !t.run.ok && t.failed().is_empty() {
+                let _ = writeln!(
+                    r,
+                    "\nThe end of its output:\n\n```\n{}\n```\n",
+                    tail(&t.run.text, 60)
+                );
+            }
+            let _ = writeln!(r);
+        }
+    }
+
     let _ = writeln!(r, "## GUI smoke run\n");
     let _ = writeln!(r, "Not available yet (the GUI arrives in M1).\n");
 
@@ -1388,6 +1789,15 @@ pub fn run(a: Args) -> Result<()> {
         bail!("{}; see {}", problems.join("; "), display_rel(&out, &root));
     }
     Ok(())
+}
+
+/// What the benchmarks wrote, once Tier 2 ran.
+fn bench_text_of(tier2: &Option<Tier2>, bench_out: &Path) -> String {
+    if tier2.is_some() {
+        std::fs::read_to_string(bench_out).unwrap_or_default()
+    } else {
+        String::new()
+    }
 }
 
 /// Whether the samples directory is there. Its path need not be UTF-8:
@@ -2192,6 +2602,13 @@ fn main() {
         ),
     ];
 
+    /// `text`, another cargo run's output, quoted for an assertion's
+    /// message: as it is, its status and result lines would read as this
+    /// run's to hw-test's own Tier 1 run, binaries and tests of its own.
+    fn quoted(text: &str) -> String {
+        text.lines().map(|l| format!("\n| {l}")).collect()
+    }
+
     #[test]
     fn reads_real_cargo_output_whatever_the_users_terminal_settings() {
         let s = Scratch::new("hw-test", PROBE);
@@ -2216,22 +2633,28 @@ fn main() {
             std::fs::write(s.0.join(".cargo/config.toml"), config).unwrap();
             let env: Vec<(&str, &str)> = base.iter().chain(user_env).copied().collect();
 
-            // The setting does change cargo's output when left alone.
-            let plain = capture_merged(
-                &s.0,
-                "cargo",
-                &["test", "--workspace", "--", "--ignored", "--list"],
-                &env,
+            // The setting does change cargo's output when left alone: with
+            // only the user's settings, not what this test inherits, such
+            // as hw-test's own Tier 1 run's PLAIN_OUTPUT.
+            let mut alone: Vec<String> = PLAIN_OUTPUT
+                .iter()
+                .flat_map(|(k, _)| ["-u".to_string(), k.to_string()])
+                .collect();
+            alone.extend(user_env.iter().map(|(k, v)| format!("{k}={v}")));
+            alone.extend(
+                ["cargo", "test", "--workspace", "--", "--ignored", "--list"].map(String::from),
             );
-            assert!(plain.ok, "{why}: {}", plain.text);
+            let alone: Vec<&str> = alone.iter().map(String::as_str).collect();
+            let plain = capture_merged(&s.0, "env", &alone, &env);
+            assert!(plain.ok, "{why}: {}", quoted(&plain.text));
             assert!(
                 !plain.text.contains("     Running tests/tier2.rs ("),
                 "{why}: {}",
-                plain.text
+                quoted(&plain.text)
             );
 
             let t = list_and_run(&s.0, true, &env);
-            assert!(t.list.ok, "{why}: {}", t.list.text);
+            assert!(t.list.ok, "{why}: {}", quoted(&t.list.text));
             let names: Vec<&str> = t.results.iter().map(|(n, _)| n.as_str()).collect();
             assert_eq!(
                 names,
@@ -2242,7 +2665,7 @@ fn main() {
                     "says_ok_then_dies::dies"
                 ],
                 "{why}: {}",
-                t.run.text
+                quoted(&t.run.text)
             );
             assert_eq!(t.results[0].1, Outcome::Passed, "{why}");
             assert_eq!(t.results[1].1, Outcome::Passed, "{why}");
@@ -2260,9 +2683,204 @@ fn main() {
                     "`says_ok_then_dies` did not finish (exit status: 3)"
                 ],
                 "{why}: {}",
-                t.run.text
+                quoted(&t.run.text)
+            );
+
+            // Tier 1 on the same workspace: its one Tier 1 test, and the
+            // binaries that print libtest's output whatever they are asked.
+            let t1 = run_tier1(&s.0, &env);
+            let mut results: Vec<(String, Outcome)> =
+                t1.results().map(|(n, o)| (n, o.clone())).collect();
+            results.sort_by(|a, b| a.0.cmp(&b.0));
+            let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(
+                names,
+                [
+                    "dies_after_summary::passes",
+                    "probe-a/tier2::tier1",
+                    "says_ok_then_dies::dies"
+                ],
+                "{why}: {}",
+                quoted(&t1.run.text)
+            );
+            assert_eq!(t1.passed(), 2, "{why}");
+            assert_eq!(t1.failed().len(), 1, "{why}");
+            assert_eq!(t1.failed()[0].0, "says_ok_then_dies::dies", "{why}");
+            assert_eq!(
+                t1.problems(),
+                [
+                    "1 Tier 1 test(s) failed on this machine",
+                    "Tier 1 `dies_after_summary` exited abnormally after its tests finished (exit status: 3)",
+                    "Tier 1 `says_ok_then_dies` did not finish (exit status: 3)"
+                ],
+                "{why}: {}",
+                quoted(&t1.run.text)
+            );
+            assert!(
+                t1.counts()
+                    .starts_with("Tier 1 on this machine: 2 passed, 1 failed, in "),
+                "{}",
+                t1.counts()
             );
         }
+    }
+
+    #[test]
+    fn a_tier1_test_that_skips_has_failed() {
+        // Cargo indents its `Running` line, which a string continuation
+        // would take off.
+        let out = "     Running unittests src/lib.rs (target/debug/deps/probe_a-0123456789abcdef)
+
+running 2 tests
+test a ... ok
+test b ... FAILED
+
+failures:
+
+---- b stdout ----
+
+thread 'b' panicked at src/lib.rs:1:1:
+TIER2-SKIP: no GPU
+
+failures:
+    b
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+
+error: test failed, to rerun pass `-p probe-a --lib`
+";
+        let t1 = Tier1::new(captured_text(false, out), &BTreeMap::new(), Path::new("/w"));
+        assert_eq!(t1.passed(), 1);
+        let failed = t1.failed();
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].1.contains("may not skip"), "{failed:?}");
+        assert_eq!(t1.problems(), ["1 Tier 1 test(s) failed on this machine"]);
+    }
+
+    #[test]
+    fn another_cargo_runs_output_in_a_failure_stays_the_failures_when_quoted() {
+        // What the test above prints when it fails, under hw-test's own
+        // Tier 1 run: another cargo run's status and result lines.
+        let nested = "     Running tests/tier2.rs (target/debug/deps/tier2-0123456789abcdef)
+
+running 1 test
+test same_name ... ok
+
+failures:
+    same_name
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+   Doc-tests probe_b
+";
+        let run = |inner: &str| {
+            format!(
+                "     Running unittests src/main.rs (target/debug/deps/xtask-0123456789abcdef)
+
+running 2 tests
+test a ... ok
+test b ... FAILED
+
+failures:
+
+---- b stdout ----
+
+thread 'b' panicked at src/main.rs:1:1:
+why: {inner}
+
+failures:
+    b
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+
+error: test failed, to rerun pass `-p xtask --bin xtask`
+"
+            )
+        };
+        let t1 = |text: &str| {
+            Tier1::new(
+                captured_text(false, text),
+                &BTreeMap::new(),
+                Path::new("/w"),
+            )
+        };
+        let names = |t: &Tier1| t.results().map(|(n, _)| n).collect::<Vec<_>>();
+        let quoted_run = t1(&run(&quoted(nested)));
+        assert_eq!(names(&quoted_run), ["xtask::a", "xtask::b"]);
+        assert_eq!(
+            quoted_run.problems(),
+            ["1 Tier 1 test(s) failed on this machine"]
+        );
+        assert!(quoted_run.failed()[0].1.contains("| test same_name ... ok"));
+        // As it is, it reads as binaries and tests of this run's.
+        let raw = t1(&run(nested));
+        assert_ne!(names(&raw), ["xtask::a", "xtask::b"]);
+        assert_ne!(raw.problems(), ["1 Tier 1 test(s) failed on this machine"]);
+    }
+
+    #[test]
+    fn a_tier1_build_failure_is_a_problem() {
+        let t1 = Tier1::new(
+            captured_text(false, "error[E0425]: cannot find value `x` in this scope\n"),
+            &BTreeMap::new(),
+            Path::new("/w"),
+        );
+        assert_eq!(t1.problems(), ["the Tier 1 run ran no test binaries"]);
+        let ok = "     Running unittests src/lib.rs (target/debug/deps/probe_a-0123456789abcdef)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+error: 1 target failed:
+    `-p probe-b --test x`
+";
+        let t1 = Tier1::new(captured_text(false, ok), &BTreeMap::new(), Path::new("/w"));
+        assert_eq!(
+            t1.problems(),
+            ["the Tier 1 `cargo test` failed, but no test binary did"]
+        );
+    }
+
+    fn captured_text(ok: bool, text: &str) -> Captured {
+        Captured {
+            cmdline: "cargo test".into(),
+            ok,
+            text: text.into(),
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn perf_clips_show_their_bitrate_and_whether_they_are_too_easy() {
+        let clip = |name: &str, made| Clip {
+            name: name.into(),
+            path: PathBuf::from(format!("/t/hw-media/{name}.mp4")),
+            made,
+            bytes: 250_000_000,
+            seconds: 20.0,
+        };
+        let clips = [
+            clip("hevc8", Made::Cached),
+            clip("hevc10", Made::Now(Duration::from_secs(312))),
+            Clip {
+                bytes: 0,
+                ..clip("hevc8-8k", Made::Failed("no libx265".into()))
+            },
+        ];
+        let benches = parse_benches(
+            "perf clip hevc8: software decode\t61.24\tfps\t60\t62\t3\n\
+             perf clip hevc10: software decode\t212\tfps\t200\t220\t3\n",
+        );
+        assert_eq!(
+            perf_clip_rows(&clips, &benches),
+            [
+                "| `hevc8.mp4` | 250 MB | 100.0 Mbit/s | cached | 61.2 fps |",
+                "| `hevc10.mp4` | 250 MB | 100.0 Mbit/s | now, in 312 s | 212.0 fps, **too easy** \
+                 (over 150: it proves nothing about footage) |",
+                "| `hevc8-8k.mp4` |  |  | **not made**: no libx265 | not measured |",
+            ]
+        );
     }
 
     #[test]
@@ -2275,9 +2893,12 @@ fn main() {
         let samples = s.0.join(raw);
         std::fs::create_dir_all(&samples).unwrap();
         let bench = s.0.join(raw).join("hw-bench.tsv");
-        let env = tier2_env(&samples, &bench);
+        let media = s.0.join(raw).join("hw-media");
+        assert_eq!(tier2_env(&samples, &bench, None).len(), 3);
+        let env = tier2_env(&samples, &bench, Some(&media));
         assert_eq!(env[1], ("SPHERECUT_SAMPLES", samples.as_os_str()));
         assert_eq!(env[2], ("SPHERECUT_BENCH_OUT", bench.as_os_str()));
+        assert_eq!(env[3], ("SPHERECUT_PERF_MEDIA", media.as_os_str()));
         let child = capture_merged(
             &s.0,
             "sh",

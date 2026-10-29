@@ -317,6 +317,54 @@ mod tests {
         assert_eq!(seen.len(), MediaError::CODES.len(), "{seen:?}");
     }
 
+    /// The helpers that read files and decode say they can block, so a
+    /// thread marked as the UI thread panics in them before anything is
+    /// opened (M1 plan section 8.6). The path doesn't exist: nothing gets
+    /// that far.
+    #[test]
+    fn the_ui_thread_may_not_open_or_probe_media() {
+        use spherecut_core::blocking::{OnBlock, mark_ui_thread_with};
+
+        use crate::backend::{FfmpegBackend, MediaBackend, VideoRequest};
+
+        let on_ui_thread = |f: fn()| {
+            let e = std::thread::spawn(move || {
+                mark_ui_thread_with(OnBlock::Panic);
+                f();
+            })
+            .join()
+            .unwrap_err();
+            e.downcast_ref::<String>().cloned().unwrap_or_default()
+        };
+        fn missing() -> PathBuf {
+            PathBuf::from("/nonexistent/spherecut-ui-thread.mp4")
+        }
+        let m = on_ui_thread(|| drop(probe::probe(&missing())));
+        assert!(
+            m.starts_with("probing a media file would block the UI thread"),
+            "{m}"
+        );
+        let m = on_ui_thread(|| {
+            drop(FfmpegBackend::new().open_video(&missing(), &VideoRequest::default()))
+        });
+        assert!(
+            m.starts_with("opening a media file would block the UI thread"),
+            "{m}"
+        );
+        let m = on_ui_thread(|| drop(mp4::read_file(&missing())));
+        assert!(
+            m.starts_with("reading an MP4 file's boxes would block"),
+            "{m}"
+        );
+        let m = on_ui_thread(|| drop(hw::render_node(None, None)));
+        assert!(
+            m.starts_with("reading the GPUs' render nodes in sysfs would block"),
+            "{m}"
+        );
+        // Unmarked, they go ahead and fail on the path.
+        assert!(probe::probe(&missing()).is_err());
+    }
+
     #[test]
     fn a_refused_nested_open_says_so_as_before() {
         let e = MediaError::opening(

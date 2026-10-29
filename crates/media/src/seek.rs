@@ -1940,11 +1940,13 @@ impl VideoDecode for FfmpegVideo {
         mode: SeekMode,
         stop: &StopToken,
     ) -> Result<SeekOutcome, MediaError> {
+        spherecut_core::may_block("seeking in a video stream");
         self.said_seeking.clear();
         self.seek_again(at, mode, stop)
     }
 
     fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError> {
+        spherecut_core::may_block("decoding a video frame");
         if !self.resume(stop)? {
             return Ok(NextFrame::Stopped);
         }

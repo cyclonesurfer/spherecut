@@ -442,6 +442,7 @@ impl From<MediaError> for Failed {
 /// [`MediaError::Open`] for files FFmpeg can't read at all, and lists in
 /// [`ProbeReport::damage`] the structural damage of files it can.
 pub fn probe(path: &Path) -> Result<ProbeReport, ProbeError> {
+    spherecut_core::may_block("probing a media file");
     init();
     // The CLI hides FFmpeg's log by default, and it is often the only
     // word on what FFmpeg could not read.

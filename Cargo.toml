@@ -19,6 +19,7 @@ spherecut-testkit = { path = "crates/testkit" }
 spherecut-cli = { path = "crates/cli" }
 spherecut-synth = { path = "crates/synth" }
 spherecut-render = { path = "crates/render" }
+spherecut-playback = { path = "crates/playback" }
 
 anyhow = "1.0.100"
 bytemuck = { version = "1.25.2", features = ["derive"] }

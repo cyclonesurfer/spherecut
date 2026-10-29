@@ -113,6 +113,10 @@ pub struct Spec {
     /// Without B-frames x264 makes every frame [`intra`](Self::intra)
     /// forces IDR, so this is how such a stream gets the latter.
     pub scenecut: bool,
+    /// An average bitrate in kbit/s, for x264 or x265 in place of their
+    /// CRF (their one-pass ABR), so that a noisy clip costs the decoder
+    /// what a camera's bitrate does: [`perf_clips`].
+    pub bitrate_kbps: Option<u32>,
 }
 
 /// Keyframes every `keyint` frames, with `bframes` B-frames between
@@ -173,6 +177,7 @@ impl Default for Spec {
             flash: Vec::new(),
             cut_away: Vec::new(),
             scenecut: false,
+            bitrate_kbps: None,
         }
     }
 }
@@ -258,6 +263,17 @@ impl Spec {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+        if let Some(kbps) = self.bitrate_kbps {
+            if !matches!(self.codec, Codec::H264 | Codec::Hevc) {
+                return Err(EncodeError::Invalid(
+                    "a lossless clip has no bitrate to set".into(),
+                ));
+            }
+            // FFmpeg's x264 and x265 wrappers take the context's bit rate
+            // (`b`) only when no CRF is set.
+            options.retain(|(k, _)| k != "crf");
+            options.push(("b".into(), format!("{kbps}k")));
+        }
         if !params.is_empty() {
             let key = if encoder == "libx265" {
                 "x265-params"
@@ -536,6 +552,51 @@ pub fn standard_set() -> Vec<Spec> {
             frames: 30,
             ..base("grid-hevc8-30-4k")
         },
+    ]
+}
+
+/// [`perf_clips`]' names: what hw-test writes and the playback benchmarks
+/// ask for.
+pub const PERF_5K7_8BIT: &str = "hevc8-5k7-30fps-noisy-20s";
+pub const PERF_5K7_10BIT: &str = "hevc10-5k7-30fps-noisy-20s";
+pub const PERF_8K_8BIT: &str = "hevc8-8k-30fps-noisy-20s";
+
+/// The perf clips `cargo xtask hw-test` makes for the playback benchmarks
+/// (M1 plan section 12.4, DECISIONS D37): 20 s of the moving grid at 30
+/// fps with seeded noise on every frame, coded as a camera codes, in HEVC
+/// open GOPs of 30 frames with B-frames, at about a camera's bitrate.
+/// They are 5760x2880 at 8 and 10 bits and 100 Mbps, and 7680x3840 at 8
+/// bits and 120 Mbps (the X5's 8K30 is two 3840² streams at about 125
+/// Mbps in all). A clean grid decodes several times faster than footage,
+/// so it would prove nothing about real time. x265's rate control makes
+/// them differ a little from one FFmpeg build to another, which doesn't
+/// matter here.
+pub fn perf_clips() -> Vec<Spec> {
+    let clip = |name: &str, width: u32, bits: u32, kbps: u32| Spec {
+        name: name.into(),
+        pattern: Pattern::Grid,
+        width,
+        height: width / 2,
+        rate: FrameRate::FPS_30,
+        frames: 600,
+        codec: Codec::Hevc,
+        bits,
+        audio: Audio::None,
+        spherical: true,
+        gop: Some(Gop {
+            keyint: 30,
+            bframes: 3,
+            open: true,
+            radl: 0,
+        }),
+        noise: Some(0x9e7f_0000 + u64::from(width) + u64::from(bits)),
+        bitrate_kbps: Some(kbps),
+        ..Spec::default()
+    };
+    vec![
+        clip(PERF_5K7_8BIT, 5760, 8, 100_000),
+        clip(PERF_5K7_10BIT, 5760, 10, 100_000),
+        clip(PERF_8K_8BIT, 7680, 8, 120_000),
     ]
 }
 
@@ -926,5 +987,60 @@ mod tests {
         assert!(b[..64].iter().all(|v| (496..=528).contains(v)), "{b:?}");
         assert!(b[64..80].iter().all(|v| *v <= 1023), "{b:?}");
         assert!(b.iter().any(|v| (v - 512).abs() > 8));
+    }
+
+    fn option<'a>(v: &'a VideoSettings, key: &str) -> Option<&'a str> {
+        v.options
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn a_bitrate_takes_the_place_of_the_crf() {
+        let spec = |codec, bitrate_kbps| Spec {
+            codec,
+            bitrate_kbps,
+            ..Spec::default()
+        };
+        for codec in [Codec::H264, Codec::Hevc] {
+            let v = spec(codec, None).video_settings().unwrap();
+            assert!(option(&v, "crf").is_some());
+            assert_eq!(option(&v, "b"), None);
+            let v = spec(codec, Some(100_000)).video_settings().unwrap();
+            assert_eq!(option(&v, "crf"), None, "{:?}", v.options);
+            assert_eq!(option(&v, "b"), Some("100000k"));
+            assert_eq!(option(&v, "preset"), Some("veryfast"));
+        }
+        for codec in [Codec::H264Lossless, Codec::HevcLossless] {
+            assert!(matches!(
+                spec(codec, Some(1)).video_settings(),
+                Err(EncodeError::Invalid(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn the_perf_clips_are_a_cameras_streams() {
+        let clips = perf_clips();
+        let names: Vec<&str> = clips.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, [PERF_5K7_8BIT, PERF_5K7_10BIT, PERF_8K_8BIT]);
+        for c in &clips {
+            assert_eq!(
+                (c.width / 2, c.frames, c.rate),
+                (c.height, 600, FrameRate::FPS_30)
+            );
+            assert_eq!(c.codec, Codec::Hevc);
+            assert!(c.noise.is_some() && c.spherical && c.audio == Audio::None);
+            let gop = c.gop.unwrap();
+            assert_eq!((gop.keyint, gop.open), (30, true));
+            assert!(gop.bframes > 0);
+            let v = c.video_settings().unwrap();
+            assert!(option(&v, "b").is_some(), "{:?}", v.options);
+        }
+        assert_eq!(
+            clips.iter().map(|c| (c.width, c.bits)).collect::<Vec<_>>(),
+            [(5760, 8), (5760, 10), (7680, 8)]
+        );
     }
 }

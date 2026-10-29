@@ -335,6 +335,7 @@ cargo xtask check        # rustfmt, clippy -D warnings, Tier 1 tests, doc tests,
 cargo xtask check --fix  # same, applying rustfmt
 cargo xtask gen-media    # synthetic test clips into test-media/ (--quick skips the 4K clip, --out <dir>)
 cargo xtask hw-test      # Tier 2 run on real hardware; report in hw-reports/
+cargo xtask hw-test --list   # the Tier 2 tests it would run
 cargo xtask compat PREFIX... [--test PREFIX] [--clean]   # clippy and a link against other FFmpeg builds, Tier 1 against one
 ```
 
@@ -372,17 +373,25 @@ tests generate the media they need; `gen-media` is not needed first.
 
 Tier 2 needs a real GPU or camera samples; a plain `cargo test` lists
 those tests as ignored, and `cargo xtask hw-test` runs them. It needs no
-sudo. It records the environment, lists missing prerequisites with the
-command that installs them, builds the workspace in release mode, runs
-every Tier 2 test and benchmark, and writes one report to
+sudo. It records the environment (the power settings and every render
+node among it), lists missing prerequisites with the command that
+installs them, builds the workspace in release mode, makes the perf clips
+the playback benchmarks play, runs every Tier 2 test and benchmark, then
+runs Tier 1 on the machine, and writes one report to
 `hw-reports/<host>-<commit>.md` (the commit gets `-dirty` when the checkout
-has changes outside `hw-reports/`). Options:
+has changes outside `hw-reports/`). The perf clips, synth's noisy 5.7K
+and 8K HEVC at a camera's bitrate, take x265 a while the first time
+(27 minutes for one 5.7K clip on 4 CPUs, the 8K one longer); they are kept in `hw-media/` in cargo's target directory and made
+again only when synth's spec of them changes (DECISIONS D37). Options:
 
 - `--samples <dir>`: camera samples (default `samples/` in the checkout; a
   relative path is taken from the current directory). The path reaches the
   tests byte for byte, as `SPHERECUT_BENCH_OUT` (see `docs/perf.md`) does,
   and need not be valid UTF-8.
-- `--quick`: a debug build, with the benchmarks left out.
+- `--quick`: a debug build, with the benchmarks, and so the perf clips,
+  left out.
+- `--no-tier1`: leave out the Tier 1 run on the machine.
+- `--list`: print the Tier 2 tests, as the report names them, and stop.
 - `--out <file>`: where to write the report.
 
 Tier 2 tests use `/dev/dri/renderD128`, or `SPHERECUT_RENDER_NODE`.
@@ -391,8 +400,9 @@ Benchmarks repeat `SPHERECUT_BENCH_RUNS` times (default 3); see
 
 `cargo xtask hw-test` exits 1 when a build prerequisite is missing, the
 build fails, listing the Tier 2 tests fails or finds none, a Tier 2 test
-fails or does not run, or a test binary dies, even after its tests
-reported. Skips alone exit 0. The report is written either way. Your cargo
+fails or does not run, a test binary dies, even after its tests
+reported, a perf clip can't be made, or a Tier 1 test fails on the
+machine. Skips alone exit 0. The report is written either way. Your cargo
 settings `term.verbose`, `term.quiet`, `term.color` and
 `term.progress.when` (in config or as `CARGO_TERM_*`) and
 `RUST_TEST_NOCAPTURE` don't change how it reads cargo's output.

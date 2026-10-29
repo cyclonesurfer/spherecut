@@ -122,6 +122,7 @@ impl Gpu {
     /// A device for rendering without a window: `spherecut frame`, the
     /// tests and the benchmarks.
     pub fn headless(choice: &AdapterChoice) -> Result<Gpu, RenderError> {
+        spherecut_core::may_block("opening a GPU device");
         let instance = wgpu::Instance::new(Self::instance_descriptor());
         let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
         let adapter = Self::select_adapter(&adapters, choice)?;
@@ -341,6 +342,23 @@ fn pick(infos: &[wgpu::AdapterInfo], choice: &AdapterChoice) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opening a device blocks on the driver, so the UI thread may not
+    /// (M1 plan section 8.6): it panics before asking Vulkan for anything.
+    #[test]
+    fn the_ui_thread_may_not_open_a_device() {
+        let e = std::thread::spawn(|| {
+            spherecut_core::blocking::mark_ui_thread_with(spherecut_core::blocking::OnBlock::Panic);
+            drop(Gpu::headless(&AdapterChoice::Cpu));
+        })
+        .join()
+        .unwrap_err();
+        let message = e.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(
+            message.starts_with("opening a GPU device would block the UI thread"),
+            "{message}"
+        );
+    }
 
     fn info(name: &str, t: wgpu::DeviceType, bus: &str) -> wgpu::AdapterInfo {
         wgpu::AdapterInfo {

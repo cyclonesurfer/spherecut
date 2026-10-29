@@ -9,8 +9,8 @@ table. Numbers from the GPU-less cloud workspace are not recorded here.
 | Target | Measured by |
 |---|---|
 | The UI stays at display refresh even when decode falls behind | GUI smoke run frame times (from M1) |
-| 5.7K30 raw or stitched footage plays in real time with hardware decode on odin and huginn | `bench_samples_realtime_decode`, `bench_decode_hevc_4k_and_5k7`; playback with the overlay from M1 |
-| 8K30 plays in real time, at least on proxies | the same, on 8K samples and their LRV proxies |
+| 5.7K30 raw or stitched footage plays in real time with hardware decode on odin and huginn | `bench_playback_realtime_5k7_8bit` and `_10bit` (the gate, M1 slice 5), `bench_playback_stitched_samples`, `bench_samples_realtime_decode`, `bench_decode_hevc_4k_and_5k7`; the GUI smoke run from M1 slice 8 |
+| 8K30 plays in real time, at least on proxies | `bench_playback_x5_raw` and `bench_playback_realtime_8k_8bit` (recorded, M3's budget), and the decode rows on 8K samples and their LRV proxies |
 | A random seek shows a frame in under ~150 ms on proxies | `bench_seek_latency` (M1 slice 2b), on the X5's LRV proxy among others |
 | Reframed 4K30 exports at or above real time with hardware encode on odin and huginn | export benchmark (M2) |
 | Frame caches are bounded, sized from available memory, configurable | cache tests (M1) |
@@ -119,6 +119,48 @@ Current benchmarks:
   the GPU and how long the bench took. A device without timestamps
   inside encoders has no GPU rows, and a note says so. It needs at most
   about 1 GB on the GPU.
+
+- **The playback benchmarks** (M1 slice 5, `crates/playback/tests/tier2_playback.rs`,
+  DECISIONS D34): a file played through the engine's `Player` on the
+  GPU, decoding on its render node, with `present` and `snapshot` at
+  60 Hz deadlines on a thread marked as the UI thread and each new frame
+  projected into an offscreen 1920×1080 target (the X5's two lenses side
+  by side, 960×1080 each). Each run has an unthrottled pass (a
+  `ManualClock` moved to the next frame as soon as it is on screen) and
+  a real-time pass (a `SystemClock`, looping at the end). Rows, under
+  `<clip>, <decoder>` (the decoder `VA-API (Auto)` or `Vulkan (Auto)`
+  for the one `Auto` picks, else `VA-API`, `Vulkan` or `software`):
+  `decoded per second, unthrottled`, `decoded per second, real time` and
+  `shown per second, real time`, each one run's full seconds (Runs is
+  the seconds, Range the slowest and the fastest second, and the spread
+  says how even it was); `dropped after 1 s`, `decode-dropped after 1 s`
+  and `late presents after 1 s` (a present whose frame had already
+  ended). A note per run gives its loops, the UI ticks it missed, each
+  stream's decode path and every stage's p50/p95 in ms (`decode`,
+  `download`, `convert`, `upload_cpu`, `upload_gpu`, `render_cpu`,
+  `render_gpu`, `ui_frame`, `shown_interval`, `av_offset`).
+  - `bench_playback_realtime_5k7_8bit` and `_10bit` play the 5.7K perf
+    clips (below) and **gate**: on `Auto`'s hardware, 0 dropped and 0
+    decode-dropped after the first second of 60 s, every unthrottled
+    second at 1.2 × 29.97 = 35.96 fps or more, and every stream on that
+    hardware throughout. The other hardware kind and software run 20 s
+    and only record.
+  - `bench_playback_realtime_8k_8bit`: the 8K perf clip, recorded.
+  - `bench_playback_x5_raw`: the longest X5 file of each mode, both
+    lenses as two streams, on each decoder, recorded (M3's 8K budget).
+  - `bench_playback_stitched_samples`: each stitched equirect sample,
+    gated as the perf clips are when it is 5.7K at 30 fps or less; skips
+    while there is none.
+  - `bench_perf_clips_software_decode`: `perf clip <name>: software
+    decode`, in fps, which the report's "Perf clips" section shows,
+    flagged **too easy** over 150 fps.
+- **The perf clips** (DECISIONS D37): hw-test makes them once, with
+  libx265 at an average bitrate, into `<cargo target dir>/hw-media/`:
+  `hevc8-5k7-30fps-noisy-20s.mp4` and `hevc10-5k7-30fps-noisy-20s.mp4`
+  (5760×2880, 100 Mbps) and `hevc8-8k-30fps-noisy-20s.mp4` (7680×3840,
+  120 Mbps), 20 s of synth's grid with new noise on every frame, open
+  GOPs of 30 with three B-frames. `--quick` makes none, and the
+  benchmarks that play them skip.
 
 Not benchmarks, but their numbers are in the same notes:
 `list_adapters_and_features` notes each Vulkan adapter's info (with its

@@ -1129,6 +1129,11 @@ Why: the M0 review found that hw-test silently dropped Tier 2 tests (B1)
 and that a relative `--samples` tested nothing while the report said the
 samples were present (S5).
 
+*Updated by D37* (M1 slice 5): the report gains "Power profile",
+"Render nodes", "Perf clips" and "Tier 1 on this machine", and a Tier 1
+failure or a perf clip that can't be made fails the run. `--list`
+prints the Tier 2 tests and stops.
+
 ## D20. Benchmarks repeat, and report median and spread
 
 *2026-10-23, M0.*
@@ -1142,6 +1147,11 @@ Runs and Spread ((max − min) / median), and marks a spread over 10% as
 Why: huginn's first report used single runs. VA-API decode of the
 synthetic 5760×2880 clip gave 109.96 fps in one run and 67.30 fps in the
 next, on an idle GPU.
+
+*Updated by D37* (M1 slice 5): a row named "… per second" is one run's
+seconds (the playback benchmarks), with Runs counting the seconds and
+Range the slowest and the fastest; its spread says how even playback
+was, not how busy the machine was.
 
 ## D21. The `deny.toml` bans list
 
@@ -1180,13 +1190,13 @@ rest, with the versions in `Cargo.lock`:
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
 | serde 1.0.229 (derive) | core, sphere, media, cli | Serializable time types, `Projection`, the probe and doctor reports, and the CLI's JSON envelope (D27) |
 | serde_json 1.0.154 | cli; core, render (dev) | `--json` output, through the `contract` module (D27). core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
-| thiserror 2.0.21 | core, media, synth, render | Typed library errors without hand-written `Display` impls |
-| tracing 0.1.44 | core, media, cli, render | Structured logging, and the target for FFmpeg's log (D12). core logs only what `fs::TempFile` can't clean up (M1 slice 4) |
+| thiserror 2.0.21 | core, media, synth, render, playback | Typed library errors without hand-written `Display` impls |
+| tracing 0.1.44 | core, media, cli, render, playback | Structured logging, and the target for FFmpeg's log (D12). core logs only what `fs::TempFile` can't clean up (M1 slice 4) |
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
 | tracing-subscriber 0.3.23 (env-filter) | cli | EnvFilter gives `SPHERECUT_LOG` its syntax, and the fmt layer writes to stderr. env-filter brings in `matchers` and `regex-automata` |
 | wgpu 30.0.1 (std, parking_lot, vulkan, wgsl) | render | The GPU (D7, D31). Default features off, so only the Vulkan backend and the WGSL front end are built: no GL, Metal, DX12 or WebGPU backend, no SPIR-V or GLSL front end. `std` and `parking_lot` are the two defaults kept: the standard library, and wgpu's locks. A `[[bans.features]]` list in `deny.toml` refuses `web`, `webgpu` and `webgl` (wasm-bindgen, js-sys and web-sys), `angle`, `static-dxc`, `glsl`, `spirv` and `vulkan-portability` if a later crate turns them on; GL, Metal and DX12 aren't banned, since egui_kittest turns them on in test builds (m1-plan section 11). It brings wgpu-core, wgpu-hal, wgpu-types, naga, ash and gpu-allocator among others. With image, bytemuck and pollster, slice 3a adds 57 crates to what a Linux build compiles (`cargo tree --target x86_64-unknown-linux-gnu` on normal and build edges, against ef1a9d1; 56 on normal edges alone), all under the existing licence list; `Cargo.lock` gains 90, the rest for other platforms' backends, which Linux never builds. 3a first said 46, a miscount the first review found |
 | naga 30.0.1 (wgsl-in) (dev) | render | The test that each uniform's Rust layout matches its WGSL struct, member by member, which a driver doesn't check (D31). The same naga wgpu builds, so it adds nothing to the tree |
-| proptest 1.12.0 (dev) | core, sphere, media, render | Property tests and the MP4 fuzzing (D15) |
+| proptest 1.12.0 (dev) | core, sphere, media, render, playback | Property tests and the MP4 fuzzing (D15) |
 | ron 0.12.2 (dev) | core | A serde round-trip test of the time types in a text format |
 
 glam's `serde` feature is on, but no glam type is serialized yet.
@@ -1196,6 +1206,17 @@ now warns of three more crates in two versions, each inside the new
 trees: hashbrown 0.16 (gpu-allocator's) beside 0.17, rustc-hash 1 (naga's)
 beside 2, and miniz_oxide 0.8 beside 0.9, both within png. Duplicates
 warn rather than fail (D21), and none can be unified from here.
+
+*Updated in M1 slice 5,* with the playback crate: it depends on core,
+media and thiserror, and on proptest for its tests, all in the tree
+already, so it adds no crate. core's tracing now also logs the first
+blocking call on a release build's UI thread (D34). The engine, the
+slice's second part, adds render and tracing to playback's
+dependencies, and synth and media's `fault-injection` to its tests'.
+They are all in the tree already, so it adds no crate either.
+The benchmarks, the third part, add sphere and testkit to its tests'
+dependencies, and hw-test's perf clips use synth, which xtask had.
+Neither adds a crate.
 
 ## D23. Agent integration: an MCP server and the JSON CLI
 
@@ -1822,7 +1843,9 @@ and strace's record of who installs a SIGINT handler (frame: a query,
 then the handler). `crates/cli/tests/frame.rs` runs every other error row, among
 them `adapter_not_found`, `no_decoder` (a sample entry FFmpeg doesn't
 know) and `--decoder vulkan` on lavapipe, which is `hw_unavailable`
-since every Vulkan device FFmpeg lists here runs on the CPU.
+since the row shows the Vulkan loader lavapipe's ICD alone, so every
+Vulkan device FFmpeg lists runs on the CPU, on a machine with a GPU
+too (D37).
 `hw_unsupported`, `hw_failed` and `anisotropy_unavailable` can't be
 reached here: there is no decoding device to refuse a stream or fail,
 and lavapipe has anisotropic filtering. It has the feature only: on
@@ -1873,8 +1896,8 @@ What:
   plan drew that edge.
 - **rust-version 1.95** for the whole workspace (D1).
 - **unsafe.** `#![forbid(unsafe_code)]` at the root of core, sphere,
-  render, synth, testkit and xtask; playback, audio and app get it when
-  they land. media has `#![deny(unsafe_code)]` with `#[allow(unsafe_code)]`
+  render, synth, testkit, xtask and, from slice 5, playback; audio and
+  app get it when they land. media has `#![deny(unsafe_code)]` with `#[allow(unsafe_code)]`
   on `mod ffi` and `mod hwprobe`, the two FFI modules D11 allows and the
   only files with `unsafe` in them. cli's binary has
   `#![deny(unsafe_code)]` with `#[allow(unsafe_code)]` on `mod
@@ -2741,13 +2764,15 @@ What:
     stderr note and JSON warning come with the overlay, the GUI and
     `frame`. *frame's came in slice 4 as its result's
     `decode.fallback` and its text line, not as a warning (D39).*
-- Media's `fault-injection` feature, which only synth's dev-dependency
-  turns on (so only test builds have it), adds `VideoRequest::fault`. Its
+- Media's `fault-injection` feature, which only synth's and playback's
+  dev-dependencies turn on (so only test builds have it), adds
+  `VideoRequest::fault`. Its
   `FaultPlan` fails frame k, by the order the decoder makes frames in, as
   decoding or downloading it on the device fails (`HwFailed`, "fault
   injected: ..."), on a real device or on a software stand-in labelled as
   one, so that Tier 1 runs every fallback path (`crates/synth/tests/
-  fallback.rs`, with its `FaultBackend`). The Tier 2 tests check their
+  fallback.rs`, with its `FaultBackend`, and the player's in
+  `crates/playback/tests/engine.rs`, D34). The Tier 2 tests check their
   own checks the same way: they pass on a stand-in and fail on a fault.
   *From 2026-10-28 `Fault::Reopen` fails instead every opening of the
   decoder afresh for the stream's start (D29).*
@@ -4150,6 +4175,1112 @@ llvmpipe (LLVM 22 put none there at 918d031), which would leave C less
 than twice the drift; or a driver
 build that renders the rows right fails the count or the maximum.
 
+## D34. The playback engine
+
+*2026-10-28, M1 slice 5. The M1 plan's D32 (section 8), adjusted to
+what was built. Slice 5 lands it in parts. The first part is the
+clocks, the UI thread's guard, the frame cache, its budget and the
+numbers the overlay reads. The second is the engine: the `Player`, the
+decode workers with catch-up, the upload thread and its GPU slots, the
+presenter, shutdown, and the seam that slice 6's audio fills. The third
+is the Tier 2 benchmarks that play through it on hardware, in H1; what
+hw-test does for them is D37's.*
+
+What:
+
+- **Clocks** (`core::clock`). A `Clock` gives the media time at an
+  `Instant` (`time_at`). The engine starts, stops and sets it (`play`,
+  `pause`, `set`) at the instant that happens. Every method returns at
+  once, from any thread.
+  - `SystemClock` (paused at 0, or `SystemClock::at(time)`) keeps an
+    anchor: an exact time, the instant it was shown at, and whether it
+    runs. While it runs it adds the monotonic nanoseconds since the
+    anchor as an exact fraction of a second, rounded to a nanosecond
+    only where the exact sum doesn't fit `Time`'s `i64` rational. An
+    instant before the anchor shows the anchor.
+  - `ManualClock::new(frame)` ignores instants. It moves only by
+    `advance(by)` or `step(frames)`, and only while it runs, so a test
+    or M2's export steps it frame by frame. A sum past what a `Time`
+    holds leaves it where it was.
+  - Both keep their state in a sequence lock made of atomics, in safe
+    Rust. A writer takes it with a compare-and-swap, and a reader
+    retries while a write is under way. The UI thread reads the clock
+    every frame, and never waits on a mutex.
+- **The UI thread's guard** (`core::blocking`).
+  - `mark_ui_thread()` marks the calling thread with this build's
+    policy, `OnBlock::for_this_build()`. That is `Panic` with debug
+    assertions (debug builds and `cargo test`), and `Log` in release,
+    which counts every call (`blocked_on_ui_thread`) and logs the first
+    with `tracing::error!`.
+  - Test harnesses call `mark_ui_thread_with(OnBlock::Panic)`, so that
+    a test built in release mode panics too.
+  - `may_block(what)` is `#[track_caller]`. On a marked thread it
+    panics with "<what> would block the UI thread (at file:line:col)",
+    or logs that. On any other thread it costs one thread-local read.
+    Playback's lock wrappers (the status lock, the cache's and a
+    slot's) and the public methods that lock through them are
+    `#[track_caller]` too, so the line named is the caller's, which a
+    release build's log needs to say which UI path blocked.
+  - It is called, so far, from these blocking helpers:
+    - core's `fs`: reading links and metadata, creating and persisting
+      a file;
+    - media: opening and probing a file, opening a hardware device and
+      a Vulkan decoding device, seeking and decoding (`FfmpegVideo`,
+      `VideoDecoder`), reading MP4 boxes and the trailer's magic,
+      `inject`, `Mp4Writer`'s create, pushes and finish, the Matroska
+      remux, doctor and its distro check, and the render node lookup in
+      sysfs;
+    - render: `Gpu::headless`, and the banded readback, which holds the
+      `Device::poll` with a wait and the `recv` of the map's result;
+    - synth: the synthetic decode, and the gated backend's wait;
+    - playback: the frame cache's lock and its waits, reading the
+      memory available, the player's status lock and the other locks
+      its threads share, a GPU slot's lock, a decode worker's wait for a
+      request (the channel `recv` of plan section 8.6), the upload
+      thread's wait for the GPU at shutdown, and `Player::join`.
+  - The `Player`'s UI side uses only `try_lock`, `try_recv`,
+    `try_borrow` and atomics, so it calls none of them.
+- **The frame cache** (`playback::FrameCache`):
+  - **Contents.** It holds `Arc<VideoFrame>`s, which it shares with the
+    upload thread, so no plane is copied. They are keyed by (stream,
+    clip time) in a `BTreeMap`. Bytes are counted from each frame's
+    `VideoFrame::bytes()`, its buffers' real sizes, padding included.
+  - **Runs.** Frames are linked by (stream, run, place), from D29's
+    numbering, so the frame after or before a held one is known without
+    a decode (`next_after`, `prev_before`, `following`, `run_end`).
+    `frame_at(at)` answers only when the frame linked after the latest
+    one at or before `at` is later than `at`, since only then can no
+    undecoded frame lie between.
+    - A frame offered at a time already held, from another run, is
+      `Known`: the held frame stays, and the new run links to it too.
+    - Two frames of one run at one time (a broken mux whose timestamps
+      tie) keep the later one, and the run's links pass over the tie.
+    - A (run, place) that comes again at another time is a decoder that
+      numbered its runs afresh: the old link goes, so no false link is
+      made. `forget_runs(stream)` drops a stream's links when a new
+      decoder opens on it.
+    - An evicted frame takes only its own links with it. The links
+      between the frames that are left stay.
+  - **Policy.** The playhead (`set_playhead`, or `try_set_playhead` on
+    the UI thread) splits each stream's frames into four groups:
+    1. the *current* frame, the latest at or before the playhead;
+    2. the frames *behind* it;
+    3. the *window*: the frames after the playhead, nearest first, as
+       long as they are within `ahead` (the decode-ahead target, which
+       the plan's `PlayerConfig` sets to 1 s) of the playhead and their
+       bytes are within
+       the budget's half split evenly between the streams offered
+       frames since the last `clear`. The nearest frame ahead is always
+       in the window;
+    4. frames ahead past the window.
+    - The current frame and the window are never evicted.
+    - Over budget, the frame farthest behind its stream's current frame
+      goes first, across all streams. Only when no stream has a frame
+      behind does the frame farthest past its stream's window go.
+  - **Back-pressure.**
+    - A frame ahead goes in only if it would be in the window.
+      `insert` waits on the cache's `Condvar` until it would be (the
+      playhead moves, the budget grows), until its `StopToken` stops,
+      or until `close()` is called. It wakes every 20 ms to look at the
+      token, and returns `Stopped` when that stops.
+    - `try_insert` returns `Full` instead of waiting.
+    - `wake()` wakes the waiters after a seek has stopped their tokens.
+    - A frame at or behind the playhead never waits, since playback
+      waits for it. It is `Dropped` when evicting every frame farther
+      behind still leaves no room.
+    - `wait_for_change(seen, timeout)` waits for the cache's
+      `generation` to move, for the upload thread.
+  - **Pins.** `pin(stream, frame, stop)` puts the frame a request
+    landed on in, past the window if it must be, and keeps it from
+    eviction until `unpin` (the upload thread's, once the frame is in a
+    slot), the stream pins another, or `clear`. Every landing goes in
+    that way. Without it a keyframe seek back with the cache full lost
+    its keyframe to the frames decoded on from it (after a seek back
+    all the history is ahead, so the keyframe is the frame farthest
+    behind), and the presenter waited for it for good. A pinned frame
+    may hold the cache past its budget, by a frame a stream at most.
+  - **Frames alive.** The budget counts the frames the cache holds.
+    The frame a worker decoded and waits to insert, and frames evicted
+    while the upload thread or a worker still holds them, are alive
+    beside them, about a frame a stream more: in the 256 MiB 5.7K run
+    below, 261 MiB of frames were alive at worst with 237 MiB held, and
+    with the X5's two 8K streams it is about 88 MB. Auto's quarter of
+    the memory available leaves room for it.
+  - **Too small.** Eviction stops when only current frames and windows
+    are left, even past the budget, so a budget too small for a
+    stream's current frame and the nearest one ahead still holds both,
+    and playback goes on. `CacheStats::too_small` (the "frame cache
+    too small" notice) is set while the budget is under `MIN_FRAMES`
+    (6) frames: 6 × the sum, over the streams, of the bytes of each
+    stream's last frame offered.
+  - **The UI thread** uses only `try_set_playhead` and `try_stats`,
+    which never wait for the lock and say when it was taken. Every
+    other method calls `may_block` before it locks, naming its caller.
+- **The budget** (`playback::budget`):
+  - `auto_budget(meminfo, cgroup_max, cgroup_current)` is pure, over
+    the files' text: clamp(¼ × `MemAvailable`, 512 MiB, 8 GiB), then
+    capped at ½ × (`memory.max` − `memory.current`).
+    - `memory.max` reading `max` is no limit.
+    - Text that can't be read says nothing: no `MemAvailable` (or one
+      not in kB, or not a number) leaves the 512 MiB floor, and a
+      `memory.max` that isn't a number is no cap. A `memory.current`
+      that can't be read counts as 0.
+    - The cap applies after the clamp, so it can go below the floor,
+      and to 0 when `memory.current` is past `memory.max`. The cache
+      then holds only the minimum the "too small" rule keeps.
+  - `read_auto_budget()` reads `/proc/meminfo`, the `0::` line of
+    `/proc/self/cgroup`, and `memory.max` and `memory.current` of that
+    cgroup and each of its ancestors under `/sys/fs/cgroup`, up to the
+    mount's root. The tightest room counts, since every ancestor's
+    limit applies (a Flatpak's limit can sit on its parent's slice). In
+    a container with its own cgroup namespace (Docker and Podman on
+    cgroup v2) `/proc/self/cgroup` reads `0::/`, and the container's
+    limit is the root's; the host's root has no `memory.max`.
+  - `CacheBudget` is `Auto` (the default) or `Bytes(n)`.
+    `CacheBudget::parse_mib` reads `--cache-mb`'s and
+    `SPHERECUT_FRAME_CACHE_MIB`'s values: `auto`, or a whole number of
+    MiB above 0. `CacheBudget::choose` takes the flag first, then the
+    environment, then Settings. An environment value that can't be read
+    is passed over and returned (`env_error`) for the caller to warn
+    about.
+  - `budget::recheck(configured, now, held)` is what the upload
+    thread's 5-second recheck sets: what `configured` stands for, with
+    the `held` bytes the cache holds counted back into `MemAvailable`
+    and into the cgroup's room, since both readings count them as used.
+    Without that, Auto shrank at each recheck as the cache filled, and
+    evicted as it went: odin's 6 GiB settled near 4.8 GiB, and a 4 GiB
+    container's 1.5 GiB at 1 GiB. With less than 1 GiB available it
+    sets no more than ¼ of what is available with the cache's bytes,
+    below the floor and below an explicit size too, and `set_budget`
+    evicts behind frames first.
+- **`PerfStats`** (`playback::perf`), the one source of the overlay's,
+  the smoke run's and the benchmarks' numbers (plan section 10):
+  - stages (`Decode`, `Download`, `Convert`, `UploadCpu`, `UploadGpu`,
+    `RenderCpu`, `RenderGpu`, `UiFrame`, `ShownInterval`, `AvOffset`)
+    keep their last 256 samples in milliseconds;
+  - counters (`FramesDecoded`, `FramesUploaded`, `FramesShown`,
+    `Dropped`, `DecodeDropped`, `Hitches`, `Seeks`, `SeeksSuperseded`,
+    `CacheWaits`, `AudioUnderruns`) are `AtomicU64`s;
+  - `summary` gives the count recorded, the last sample, the mean, p50,
+    p95 and p99 by the nearest rank, and the maximum. `snapshot` gives
+    every stage's summary and every count.
+- **Threads** (plan section 8.1). Each is named, and its `JoinHandle`
+  goes on a channel that `join` reads, so the threads a thread starts
+  are joined too:
+  - the UI thread, the caller's, which sends commands on unbounded
+    channels and reads with `try_lock`, `try_recv` and atomics;
+  - `upload`, started by `Player::new`;
+  - `open`, one per open, which ends once it has started the workers;
+  - `decode-v{i}`, one per video stream opened.
+- **Opening** (`Player::open`, or `open_streams` for several video
+  streams). Every open bumps the player's epoch and queues an exact seek
+  to 0 on each stream's channel, so the first frame comes as any seek's
+  does. The open worker then:
+  1. picks each stream's decoder (below);
+  2. opens the file's audio through the seam (below), with a token that
+     a newer open or shutdown stops;
+  3. under a lock that keeps opens in order, and only if no newer open
+     has started, clears what the file before left in the cache and the
+     slots, resets the status, and starts the workers.
+  - Each worker opens its own decoder, with the player's shutdown flag
+    as its interrupt, so `begin_shutdown` ends a blocking read.
+  - A worker of a file closed since writes no status and sends no
+    event, and its frames can't reach the next file's cache:
+    `FrameCache::try_insert_until` checks the open's token under the
+    cache's lock.
+- **The decoder** (`playback::decoder`, amendment 9).
+  `DecoderPreference` is `Auto` (the default), `Software` or
+  `Only(kind)`. `Only` fails rather than fall back, as `frame --decoder
+  vaapi` does.
+  - Under `Auto`, `doctor::check_format` maps the stream's codec, depth
+    and chroma to the doctor check that covers it: H.264 High, HEVC
+    Main, HEVC Main 10 or AV1 Main, all 4:2:0. The kinds whose check of
+    it works then decide:
+    - none: software, saying why;
+    - one: that kind;
+    - both: Vulkan Video on a discrete GPU, where VA-API's copy out of
+      video memory was the slower on odin, and VA-API otherwise.
+  - Hardware falls back to software (`Fallback::Software`). A format no
+    check covers, or a file probe can't read, decodes in software.
+  - The checks come from `PlayerParts::hw` (the GUI's startup doctor).
+    Otherwise the first open that needs them runs them, on its worker,
+    and the player keeps them. They run on the GPU's render node
+    (`media::hw::render_node` from the adapter's PCI ids), or on
+    `PlayerParts::render_node`.
+  - The choice and why go in `StreamStatus::choice`. A decoder's
+    `FellBack` event goes in `StreamStatus::fallback` and `decode`, and
+    out as `PlayerEvent::FellBack`.
+- **Decode workers** (plan sections 8.3 and 8.4):
+  - **Requests**, one at a time, the latest winning. The UI stops the
+    requests before with `StopSource::next()`, then sends, so a seek or
+    a wait for room that the next request makes pointless stops at its
+    next frame. `StreamStatus::seeks` counts the requests started,
+    superseded, decoded and answered from the cache.
+  - **A seek** moves the cache's playhead to `at` first, so the frame it
+    lands on never waits for room.
+    - If a run in the cache holds the frame shown at `at` (`frame_at`),
+      that frame answers it, and decoding goes on from the end of the
+      run. The decoder is sought to the run's last frame, unless it is
+      there already.
+    - Otherwise the decoder seeks, and its frame starts a new run.
+    - The landing (`StreamStatus::landed`: the request, the time, the
+      pts and the `Exactness`) is what the presenter waits for.
+  - **A step** follows `next_after` and `prev_before`. Past the links, a
+    step forward decodes on from the frame there, and a step back seeks
+    to a tick before it.
+  - **Decoding ahead**, between requests: frame after frame into the
+    cache, with the latest request's token, through the cache's
+    back-pressure wait. A frame whose wait a request stopped is kept,
+    and offered again when decoding resumes from it.
+  - **Catch-up.** While the clock runs and the newest frame decoded is
+    more than two frame durations (its own, else the stream's rate)
+    behind the clock, the worker calls `catch_up(Some(clock))`. The
+    frames passed over count as `DecodeDropped`, by run places, else by
+    the time between over the duration. Once a frame at or after that
+    time is out, it calls `catch_up(None)`.
+  - **End and failure.** At the end the worker sends `StreamEnded` and
+    sets the stream's end time. A failure sets the stream's error and
+    the request it failed, so the presenter doesn't wait for it, and
+    sends `DecodeFailed`. A frame decoded after it (a seek past it)
+    clears it.
+  - `Decode`, `Download`, `Convert` and `FramesDecoded` come from the
+    decoder's own numbers.
+- **GPU slots** (`playback::SlotRing`): six slots, of which `gpu_slots`
+  (3 to 6, default 4) are used.
+  - **State.** A slot's state is one `AtomicU64`: Free, Writing, Ready,
+    Shown or Dead, plus a version that every claim bumps.
+    - Its frame's fields (stream, epoch, time, pts, run, place,
+      duration) are atomics written while it is Writing. They are read
+      without a lock, and a read counts only when the word is the same
+      before and after it.
+    - Its `Arc<GpuFrame>` is in a `Mutex` that the UI thread only
+      `try_lock`s.
+  - **Claims.** The upload thread claims only a Free slot whose
+    `Arc<GpuFrame>` the ring alone holds (strong count 1), so no paint
+    callback that sampled it can still be unsubmitted. A slot freed
+    while a callback holds it waits, Free, until the callback lets go.
+  - **Showing.** The presenter shows a Ready slot by compare-and-swap
+    against the word it read (`try_show`). It gives the slot back as
+    Ready (`unshow`) when it shows another, so a frame shown before can
+    be shown again.
+  - **Reuse.** A slot's `GpuFrame` is made for the first frame of its
+    shape and reused for every frame of that shape.
+  - **Out of memory** (risk 11). A slot the GPU has no memory for is
+    Dead for good: the player sends `SlotDropped`, and playback goes on
+    with one fewer.
+  - Slots past a smaller setting give their memory back once they are
+    Free and unheld.
+- **The upload thread** (plan section 8.3):
+  - It builds the `Uploader` (the ingest pipelines) and reads the
+    budget on its own thread, so `Player::new` waits for neither.
+  - **What it uploads**, per stream, as far as its share of the active
+    slots (at least 2):
+    - while a seek or a step is on its way, nothing until it lands, then
+      the frame it landed on. Until every stream's landing is in a slot
+      the share is one, so a stream that lands late still finds a slot
+      Free; a stream that failed the request, or never opened, is left
+      out of the wait. Once its landing is in a slot, it is unpinned;
+    - otherwise, the frame at the playhead;
+    - while playing, the frames after it, in order;
+    - while paused, the next frame, then the one before (by the run
+      links), then more frames after.
+  - **How.** It uploads one frame per pass, the streams taking turns by
+    rank.
+    - It frees the Ready slots no longer wanted: another open's, a run
+      a seek left, frames passed. A Shown slot is never freed, so the
+      frame on screen stays up until the next is Ready.
+    - With nothing to do, it waits for the cache to change, 20 ms at
+      most.
+  - **Uploads** use `upload_placed` with the stream's placement (the
+    crop, and the shown eye of a stereo layout), as `spherecut frame`
+    does. Each records `UploadCpu`, `UploadGpu` and `FramesUploaded`,
+    then asks for a repaint.
+  - **Errors.**
+    - Out of memory, making or writing a slot, kills that slot.
+    - A lost device sets `gpu_error`, sends `GpuFailed` and stops
+      uploads.
+    - Any other error sends `UploadFailed`, and that frame isn't tried
+      again.
+  - **Timers.**
+    - Every 250 ms it reads the cache's numbers, for `CacheWaits` and
+      the "too small" notice (`CacheTooSmall`, once an open).
+    - Every 5 s (`BUDGET_RECHECK`) it reads the memory available
+      (`read_auto_budget`) and the cache's bytes, and sets what
+      `budget::recheck` gives: what the setting stands for, and with
+      under 1 GiB available no more than a quarter of it, below an
+      explicit size too.
+  - At shutdown it waits for the GPU at most 1 s (`PollType::Wait`),
+    then closes the cache, which ends every wait in it.
+- **The presenter** (`Player::present(now)`), once a UI frame:
+  - **The time.** It picks for `clock.time_at(now + latency)`, plus
+    `av_offset` while the clock runs: a positive offset shows the frame
+    due that much later, video ahead of the audio. Paused, the frame at
+    the clock's time shows, so a frame-exact seek or step keeps its
+    frame whatever the offset. The latency is the median of the last 32
+    UI frame intervals, at most 50 ms.
+  - **After a seek or a step** it keeps the frames on screen until
+    every stream has landed the request (or failed it) and the frame
+    landed on is in a slot. Then it shows them together and sets the
+    clock:
+    - to the frame's time after a step, a landing after `at`,
+      `AfterLast`, `Truncated` or `KeyframeOnly`;
+    - to `at` otherwise.
+    - Playback, if wanted, starts then, or once the audio is `ready`
+      for `PREROLL_AUDIO`. The state is Seeking until it does.
+    - Showing every stream's new frame together while the old ones stay
+      up takes two slots a stream. With fewer live (three slots for two
+      streams, or four with one Dead), each stream's new frame goes up
+      as soon as it is Ready, which gives its old slot back for the next
+      stream's, and the clock is set once every stream's is up. Without
+      that, and the upload thread's share of one while it waits, two
+      streams on three slots deadlocked on every seek.
+  - **Otherwise** each stream shows the Ready slot with the latest time
+    at or before the clock's, which suits variable frame rates.
+  - **Counts.**
+    - It records `UiFrame` and `Hitches`: an interval over 1.5 × the
+      median of the last 32, not of the latency, whose 50 ms cap made
+      every frame of a steady UI under 20 fps a hitch.
+    - It counts `FramesShown`, and `Dropped`: the frames passed over
+      while the clock runs, by run places, else by the time between
+      over the duration.
+    - It records `ShownInterval` and `AvOffset`.
+  - **The playhead.** It moves the cache's playhead
+    (`try_set_playhead`) to the clock's time, or to a seek's `at` while
+    the seek is on its way. During a step, the worker moves it. When
+    the cache's lock is taken, the next `present` tries again, and a
+    repaint is asked for so that one comes: until then the upload
+    thread picks frames around the old playhead. Whatever drives the
+    player presents while it waits on it, as the GUI does every frame
+    and the benchmarks do.
+  - **The end.** Once the clock passes the first stream's end (its last
+    frame's end, else its duration), it pauses on the last frame and
+    sends `Ended`. `play` then starts from 0.
+  - **Instant steps.** A step of one frame either way is instant when
+    the frame next in the run is in a Ready slot, which the upload
+    thread sees to while paused. It is shown at once, the clock moves
+    there, and no request goes out; so a second step before the next
+    present (two key events in one UI frame) goes on from it.
+  - **Steps on their way.** A step made while a seek or a step is on
+    its way goes on from where that lands: its frames add to a step's,
+    from the frames that step started from, and a seek's `at` is the
+    frame it starts from. Before, it started from the frame still on
+    screen and superseded the request, so a seek then a step lost the
+    seek.
+- **The `Player`** (`playback::player`), driven from one thread:
+  - **Making one.** `Player::new(PlayerParts, PlayerConfig) ->
+    Result<Player, PlayerError>`.
+    - `PlayerParts { backend, gpu, clock, audio, repaint, hw,
+      render_node }`, with `PlayerParts::new(backend, gpu, clock)`
+      leaving the rest out.
+    - `PlayerConfig { cache, ahead, gpu_slots, decoder, av_offset_ms }`.
+  - **Commands**, which return at once: `open`, `open_streams`, `play`,
+    `pause`, `seek(at, SeekMode)`, `step(frames)` and `set_config`.
+    `set_config` changes the budget and the window at once (on the
+    upload thread), the slot count as slots come free, the decoder at
+    the next open, and the offset at the next frame.
+  - **Reads**, which never wait:
+    - `present(now) -> Option<Presented>`: each stream's `ShownFrame`
+      (its slot, its frame and its `Arc<GpuFrame>`), whether a frame
+      changed, and the time picked;
+    - `snapshot() -> PlayerSnapshot`: the state, path, epoch and clock;
+      whether it plays, and whether that is wanted; whether it is at
+      the end; the frames shown; each stream's status; the audio, the
+      cache, the budget, the slots, the counters and the GPU error; and
+      whether the threads' part is fresh;
+    - `events()`, which is `try_recv` until empty;
+    - `config()`;
+    - `slots()`, `cache()` and `perf()`, which the viewer and the
+      benchmarks read.
+  - `PlayState` is Empty, Opening, Seeking, Paused, Playing or Failed
+    (every stream failed).
+  - Errors are `PlayerError { code, message }`, which carries D27's codes
+    from media and render errors.
+- **Shutdown** (plan section 8.5):
+  - `begin_shutdown`, which `Drop` calls too, returns at once. It sets
+    the flag and shuts down both stop sources: the requests' one, whose
+    flag is FFmpeg's interrupt, and the opens' one. It sends each worker
+    `Close`, pauses the clock and wakes the cache's waiters.
+  - `join(budget)` calls it, then polls the threads' handles every 2 ms
+    until every thread has ended or the budget is spent. It returns
+    `ShutdownReport { joined, panicked, still_running, took }`. Threads
+    still running are left detached, and logged.
+- **The audio seam** (`playback::audio`), for slice 6:
+  - An `AudioOutputFactory` in the parts opens a file's audio on the
+    open worker, or says it has none (`Ok(None)`).
+  - Its `AudioOutput` gives the clock that video follows from then on
+    (its `set` is the audio's seek), and `ready(ahead)` for the
+    preroll.
+  - Without one, video plays on the parts' clock.
+- **The Tier 2 benchmarks** (`crates/playback/tests/tier2_playback.rs`,
+  plan sections 12.2 and 12.3, risk 1). Each plays a file through a
+  `Player` on the machine's GPU, as the GUI will:
+  - `present` and `snapshot` at 60 Hz deadlines, on a thread marked with
+    `OnBlock::Panic`, so that any wait there fails the benchmark on the
+    hardware too;
+  - each new frame projected (rectilinear, 90°, anisotropic) into an
+    offscreen 1920×1080 target and encoded into an `Rgba8Unorm`
+    texture, recording `RenderCpu` and the GPU's `RenderGpu`. The raw
+    view's two lenses go side by side, 960×1080 each, through the same
+    projection, since the GUI's raw view comes in slice 7.
+  - The decoders open on the rendering GPU's render node (or
+    `SPHERECUT_RENDER_NODE`'s), where doctor's checks run once per
+    benchmark and are handed to each player.
+  - A run is two passes, each on a player of its own. **Unthrottled**,
+    on a `ManualClock` moved to the next frame as soon as every stream
+    shows the one it is at, through the file once or for 30 s: what the
+    engine can do. **Real time**, on a `SystemClock`, playing from the
+    start again at the end, a seek every loop: what plays.
+  - Each full second gives the frames decoded (per stream) and shown;
+    the real-time pass also counts `Dropped`, `DecodeDropped` and late
+    presents, a present whose frame had ended before the time it was
+    presented for. A note gives every stage's p50 and p95 over the
+    real-time pass (from samples gathered as they come, since the
+    engine keeps only 256 a stage), the loops, the UI ticks missed and
+    each stream's decode path.
+  - **The gate**, for `bench_playback_realtime_5k7_8bit` and `_10bit`
+    on hw-test's 20 s perf clips (D37), on the hardware kind `Auto`
+    picks from doctor's checks: no drop and no decode-drop after the
+    first second of 60 s in real time, every unthrottled second
+    decoding at least 1.2 × 29.97 frames, and every stream on that
+    kind throughout. The rows are recorded before the gate judges, so a
+    failing run's numbers are in the report.
+  - The other kind, where doctor says it decodes the format, and
+    software are recorded, 20 s each, as are `bench_playback_realtime_8k_8bit`
+    (synth's 8K perf clip), `bench_playback_x5_raw` (the longest file
+    of each X5 recording mode, both lenses) and the stitched samples
+    outside the criterion. `bench_playback_stitched_samples` gates a
+    stitched equirect of 5.7K at 30 fps or less as the perf clips are,
+    with 1.2 × its own rate.
+  - A run that only records and fails is a note saying why. Where the
+    GPU (a CPU adapter is none), hardware decode of the format, the
+    perf clips or the samples aren't there, a benchmark records what it
+    can and skips with the reason; `Auto` picking software is a skip
+    that quotes its reason.
+  - `bench_perf_clips_software_decode` records each perf clip's
+    software decode rate, which hw-test holds against "too easy". A
+    clip that wasn't made is a row "not measured" with the reason, and
+    the others are measured; it skips only when there is none.
+
+Where this differs from the plan:
+
+- **Keyed by clip time, not pts.** The plan keys the cache by (stream,
+  pts). Clip time orders a stream's frames as pts does (D29: clip time
+  is pts less `origin_pts`, times `time_base`). The playhead, `ahead`
+  and the presenter are all in clip time, so the cache compares frames
+  with them directly, with no time base. The key is `VideoFrame::time`,
+  exact.
+- **The window.** The plan bounds the frames ahead by min(ahead × rate
+  × frame_bytes, budget / 2). Here the bound is time (`ahead` past the
+  playhead), so variable-rate streams need no rate, plus bytes (half
+  the budget, split between the streams), counted from the nearest
+  frame out. A gap left in the window by an eviction or a seek is then
+  filled before anything farther ahead is decoded.
+- **Frames past the window can be evicted.** The plan evicts frames
+  ahead "only after a seek moves the playhead past them". After a seek
+  back, the frames decoded before it are all ahead. Under the plan's
+  rule they would hold the budget, the window couldn't fill, and the
+  decode worker would wait for good. Here they are evicted, farthest
+  first, but only after every frame behind.
+- **Over budget, by a minimum.** The plan says only that a budget too
+  small "still plays". Here the cache keeps each stream's current
+  frame and window even past the budget, evicting everything else
+  first. The window's half of the budget bounds it, beyond its nearest
+  frame.
+- **Frames behind never wait.** The plan's back-pressure covers the
+  frames ahead. A frame at or behind the playhead (a seek's landing,
+  a step back) is let in by evicting farther history, or dropped.
+- **Stop and wake.** The plan's wait has a timeout. Here it is 20 ms
+  slices that check a `StopToken`, so a superseded seek's worker stops
+  within one slice, and `close()` at shutdown ends every wait.
+- **The cgroup cap** can go below the 512 MiB floor, as above, rather
+  than being clamped back up: the floor is for small machines, and
+  memory a limit doesn't leave can't be used whatever the floor says.
+  Ancestors' limits count too, up to the mount's root, which the plan
+  didn't say.
+- **A recheck counts the cache's own frames as free.** The plan
+  re-derives Auto from the memory available every 5 s. Read with the
+  cache full, that is a quarter of less each time, and the budget sank
+  below the plan's table, evicting at each recheck.
+- **A request's landing is pinned** in the cache until it is in a slot,
+  past the budget by a frame a stream if it must be. The plan has no
+  such rule; without it a keyframe seek back with the cache full never
+  landed.
+- **PerfStats keeps its rings in atomics.** The plan puts each stage's
+  ring in a `Mutex` that the UI thread `try_lock`s. Here each sample is
+  an `AtomicU32` (an `f32`'s bits) and the ring's count is a
+  `fetch_add`, so recording and reading never lock, and the UI thread,
+  which records `UiFrame` and `RenderCpu` itself, can record without a
+  second path. A read that overlaps a write may see the sample just
+  replaced instead of the new one, which doesn't change an overlay.
+- **`Player::new` takes its parts.** The plan's `new` takes the
+  backend, an `Arc<Gpu>`, a `SlotRing`, the audio factory, the config
+  and the repaint callback, and returns a `Player`. Here
+  `Player::new(PlayerParts, PlayerConfig)` returns a `Result`:
+  - starting the upload thread can fail, and a `Player` without it
+    would never show a frame;
+  - the parts add the clock, which the plan had nowhere to give and the
+    headless runs need to be a `ManualClock`, doctor's checks if the GUI
+    has them, and the render node;
+  - the `Gpu` goes by value, since cloning it shares wgpu's handles;
+  - the player makes its `SlotRing` from `gpu_slots`, so the ring and
+    the setting can't disagree, and lends it out with `slots()`;
+  - the audio factory and the repaint callback are optional: slice 6
+    brings the first, and a headless run needs neither.
+- **`present` returns `Option<Presented>`**, not `Option<Arc<GpuFrame>>`.
+  It gives a `ShownFrame` per stream (its slot, its frame's time, pts
+  and run, and the `Arc<GpuFrame>`), whether any changed since the last
+  call, and the time picked.
+  - The X5's raw files hold two video streams, one per lens, which the
+    viewer stitches, so one frame isn't enough.
+  - A paused viewer that knows nothing changed needn't repaint.
+  - Slice 7's paint callback takes `ShownFrame::gpu`. While it holds a
+    clone, until eframe has submitted the draw, the slot isn't reused.
+- **`open_streams(path, streams)`** opens several video streams, by
+  index. `open` is `open_streams(path, vec![None])`, the best one.
+- **Seek kinds** are media's `SeekMode` (`Exact` or `Keyframe`): the
+  plan's `SeekKind`, under the name it already had.
+- **`DecoderPreference::Only(HwKind)`** takes the place of the plan's
+  `VaApiOnly`. Amendment 9 makes Vulkan Video a hardware kind like
+  VA-API, so either can be asked for alone. `Auto` picks by doctor's
+  checks rather than in a fixed order, as amendment 9 asks.
+- **`join`'s budget is for all the threads**, not 2 s for each: with
+  five threads, a stuck backend would hold the GUI's exit for 10 s.
+  Threads still running when it is spent are named in the report and
+  left detached, since the process is exiting.
+- **The snapshot on contention.** The plan gives the previous copy.
+  Here only the part the threads write (each stream's status, the
+  budget, the GPU error) is the previous copy. What the UI thread holds
+  or reads with atomics is read each time: the state, the clock, the
+  frames shown, the slots, the counters, and the cache's numbers when
+  its lock is free. `fresh` says whether the threads' part is new.
+- **One driving thread.** The `Player` is `Send`, not `Sync`. The UI
+  thread's state (the target, the frames shown, the intervals) is in a
+  `RefCell` that the `&self` methods borrow, so it needs no lock. A
+  call made while another is under way (a repaint callback calling
+  back in) returns at once and does nothing.
+- **The present latency** is one UI frame: the median of the last 32
+  intervals, capped at 50 ms. What vsync and the compositor add can't
+  be measured headless; slice 7 can measure it. Hitches are judged
+  against the median itself, as the plan says, not the capped latency.
+- **The A/V offset applies while playing.** The plan adds it to the
+  time picked for, always. Paused, that showed the neighbour of the
+  frame a frame-exact seek or step put up, once the upload thread
+  brought it up. The setting's doc had the sign backwards: a positive
+  offset puts video ahead of the audio.
+- **Two streams on few slots.** The plan keeps every old frame up until
+  every new one is Ready, which takes two slots a stream. Below that
+  (gpu_slots' floor of 3 with the X5's two lenses, or a slot Dead) each
+  stream's frame goes up as it comes, and the upload thread's share is
+  one slot while it waits, so the late stream finds one. The two lenses
+  may then show frames of different times after a seek, until the late
+  one's frame is up.
+- **Steps add up.** The plan says nothing of a step made while a
+  request is on its way. Here it goes on from where that lands.
+- **Slots** keep their state and a version in one `AtomicU64`, not an
+  `AtomicU32`, so that a slot freed and filled again between the
+  presenter's read and its swap isn't taken for the frame it held.
+  - The plan's "Released" is a Free slot whose `GpuFrame` a draw still
+    holds (`SlotStats::held`). Dead is a slot out of memory.
+  - Freeing covers more than a stale run after a seek: it covers any
+    Ready frame no longer wanted.
+- **The preroll's 2 s limit**, and the switch to `SystemClock` with a
+  notice (plan section 8.4, step 6), need audio, and come with slice 6.
+  The preroll itself is here, through `AudioOutput::ready`.
+- **The hardware device** isn't the player's to choose: the
+  `FfmpegBackend` it is given opens the devices. The GUI is to make it
+  on the rendering GPU's node (`FfmpegBackend::on_node`), so that
+  decoding runs where doctor's checks ran.
+- **The benchmarks' unthrottled pass** is the plan's "unthrottled
+  per-second minimum" made concrete: a player of its own on a
+  `ManualClock`, rather than the real-time player's clock let go, so
+  that its seconds count the engine's work and nothing of the 60 Hz
+  loop's. The plan's 1.2 × 29.97 is kept for the 30 fps perf clips (36
+  would be 1.2 × their own rate), and the stitched samples use their
+  own.
+- **The benchmarks gate on Auto's pick**, the decoder the GUI will use,
+  and record the other kind and software; the plan names "the path the
+  backend picks" only. Late presents, the 8K perf clip and the
+  software rows are additions. The gated run also fails if a stream
+  fell back to software, which would otherwise pass on a fast CPU.
+- **`never_blocks`' bound.** The plan asks that every UI iteration take
+  under 2 ms.
+  - Here each iteration's time is its wall time less the time the
+    kernel kept the thread waiting to run, the run-queue wait of
+    `/proc/thread-self/schedstat`. The 99th percentile of that must be
+    under 2 ms and the slowest under 10 ms, and the wall times' median
+    under 2 ms.
+  - Measured: with 4 busy loops beside the test on this 4-CPU box, the
+    storm's 99th percentile came to 4 ms of wall time (4.4 ms with 6),
+    every one of those iterations a preemption. Less the waits to run,
+    its 99th percentile stayed between 118 and 189 µs and its slowest
+    at 310 µs or under.
+  - This box is a VM whose host takes its CPUs away now and then (4543
+    ticks of steal in 3 h 51 min), which no run-queue wait shows. The
+    10 ms ceiling leaves room for that, and still fails a wait on one
+    of the storm's 50 ms decodes.
+  - The guard makes a wait on a lock, a channel or a join on the marked
+    thread a panic anyway, so the times are there to catch work that
+    grows, not waits.
+
+Why: as the plan's D32 says. PLAN requires that the UI never block and
+that the cache be bounded and configurable. An egui-free crate is what
+M2's export and the benchmarks reuse. `try_lock` turns contention into
+one repeated frame instead of a stall. Clippy's configuration is per
+crate and can't see into other crates, so the runtime guard, with its
+negative control, covers what clippy can't. The cache's two lists of
+evictable frames (behind, then ahead past the window) keep what the
+next second of playback and a step back both need, and the window by
+time is what the presenter asks for.
+
+For the engine, beyond the plan's reasons:
+
+- One request at a time, the latest winning, each with its own token, is
+  what keeps a seek storm to one decode.
+- The UI reaches the threads only through unbounded channels, the
+  requests' tokens and a `try_lock` of the cache's playhead, and reads
+  what they did through the slots' atomics and a `try_lock` of the
+  status. So no command or read can wait.
+- Picking frames by time, not by index, is what makes the presenter
+  right for variable frame rates, and the same for every stream.
+- Counting drops by run places, where a run says how many frames lie
+  between, and by time only where it can't, keeps `Dropped` and
+  `DecodeDropped` exact for a constant rate.
+
+Tested:
+
+- `core::clock`: a system clock runs only while playing; a seek shows
+  its time exactly; instants before the clock was made work; a sum past
+  what's exact rounds to a nanosecond; a manual clock moves only when
+  told and running; frame steps land on frame times; a reader never
+  sees a torn write from two writers; and a proptest
+  (`a_system_clock_adds_up`) that whatever the plays, pauses and seeks,
+  the clock shows the time they add up to. Both proptests here pass at
+  `PROPTEST_CASES=100000` (the cache's in 181 s).
+- `core::blocking`: unmarked threads may block; the negative control,
+  `a_marked_thread_panics_when_it_would_block`; this build's policy
+  panics in tests; the mark is per thread and comes off; the log policy
+  counts and goes on. Media (`the_ui_thread_may_not_open_or_probe_media`),
+  render (`the_ui_thread_may_not_open_a_device`) and core's `fs`
+  (`the_ui_thread_may_not_write_files`) each check a marked thread
+  panics before it touches anything.
+- `crates/playback/tests/cache.rs`:
+  - frames link by run and place; tied frames keep the later one, and
+    links pass over the tie; a decoder that numbers its runs afresh
+    makes no false link;
+  - eviction takes the farthest behind first, then the farthest past the
+    window; the window is half the budget and `ahead`; a budget too
+    small still plays and says so;
+  - the producer waits at the limit and goes on when the playhead moves;
+    a waiting producer stops with its token and at `close`; a change
+    wakes a waiter;
+  - a pinned frame stays until it is let go
+    (`a_pinned_frame_stays_until_it_is_let_go`): evicted neither as the
+    farthest behind nor past the window, let in past the window, and
+    gone once unpinned, re-pinned or cleared; and over the budget by
+    one, a seek back that leaves a frame past the window evicts
+    nothing, and that frame offered again goes (`Dropped`);
+  - the negative control, `the_ui_thread_only_tries_the_lock`: on a
+    marked thread `try_stats` and `try_set_playhead` work, and every
+    locking method panics with its own words, naming the test's line;
+  - the proptest `the_cache_keeps_its_rules`, against a model, over runs,
+    single frames, pins and unpins, playhead moves, budget changes and
+    clears on two streams. Bytes and frames are counted exactly and
+    never pass the budget but by the pinned frames; the window and the
+    current frames are never evicted, except where a new stream or a
+    nearer frame changes them; the frames evicted are exactly those the
+    model's rules evict, in their order, at every step that evicts;
+    `Full`, `Stored`, `Known` and `Dropped` come exactly when the rules
+    say; and the links are exactly the shared runs of adjacent frames
+    held, through every eviction. With pins it passes at
+    `PROPTEST_CASES=100000` in 24 s of a release build, eight runs in a
+    row. Before that, runs at that count found the model wrong, not the
+    cache, in four ways, each a state only a pinned frame past the
+    budget reaches: a playhead move, a frame turned away (`Full`) and
+    letting go of a frame not pinned evict nothing, so a cache a move
+    leaves over its budget keeps frames the rules would evict until the
+    next step that evicts (`check` allows that and nothing else); and a
+    frame held already, offered again in that state, can be the one its
+    own offer's eviction takes, `Dropped` though it is ahead of the
+    playhead. `Insert::Dropped`'s doc said only "behind the playhead"
+    and now says that too, and `a_pinned_frame_stays_until_it_is_let_go`
+    shows it. The cases are kept in `cache.proptest-regressions`.
+  - Eleven faults put into the cache by hand were each caught by the
+    proptest: a window frame evicted, the cap taken as the whole budget,
+    no eviction, links kept after their frame went, the current frame
+    unprotected, a `Known` frame counted twice, the time limit ignored,
+    the nearest frame behind evicted first, the nearest frame past the
+    window evicted first, frames past the window evicted before those
+    behind, and one frame too many evicted. The nearest-behind fault
+    passed until the model evicted by the rules itself.
+- `playback::budget`: huginn's 128 GB take the cap, 8 GiB or 345
+  frames of 5.7K NV12; odin's 32 GB with 24 GiB available take a
+  quarter, 6 GiB or 258 frames, as the plan's table has it; a small
+  machine keeps the floor; a container's limit caps it, below the
+  floor too, and to 0 past its limit; `max` is no limit; malformed text
+  says nothing; the first `MemAvailable` line counts; the flag, the
+  environment and Settings, in that order; a recheck shrinks under
+  pressure; a recheck counts the cache's own frames as its own
+  (`a_recheck_counts_the_cache_s_own_frames_as_its_own`: eight
+  rechecks, each read with the cache full to the last budget, keep
+  odin's 6 GiB, a 4 GiB container's 1.5 GiB and a set 2 GiB; without
+  the fix odin's went 6, 4.5, 4.875 … 4.8 GiB); the tightest cgroup up
+  a fake tree counts; a cgroup namespace's limit at the root counts
+  (`0::/`, and a cgroup below it); this machine has a budget.
+- `playback::perf`: the ring keeps the last samples in order; counters
+  add up across threads; percentiles by the nearest rank.
+- The engine, on lavapipe and on a `ManualClock` wherever wall time
+  would make a test flaky (`crates/playback/tests/engine.rs`, 22
+  tests):
+  - the presenter shows the latest frame at or before the clock, on a
+    real variable-rate H.264 clip through `FfmpegBackend`;
+  - frames passed over while playing count as dropped: exactly 20 for a
+    clock moved two frames at a time, each frame waited for, then as
+    many as were passed over (32 in the last run) while it moves on
+    without waiting. A seek or a step while paused drops nothing;
+  - a keyframe seek to frame 45 shows the keyframe, 40, sets the clock
+    to it, and plays on from it;
+  - hitches: 40 presents 80 ms apart, a steady UI under 20 fps, count
+    none, and one 200 ms gap counts one;
+  - a decoder 2 ms a frame, with no keyframe in reach, whose clock leaps
+    from frame 0 to 300 catches up without making the frames it passes:
+    the cache holds 0 to the window's last frame before the leap and
+    300, and `DecodeDropped` is the frames between. The test asserts
+    300 less that frame less 1; the window ended at 30 or 31 by timing
+    over the runs, so the count was 269 or 268;
+  - a slot is reused only once nothing else holds its frame. With a
+    clone held, as a paint callback would hold it, the slot is Free with
+    2 holders after twenty frames, and its texels, read back, still
+    hold its frame's index. Let go, it is written again. With the strong
+    count check taken out of `claim`, this test and the ring's own fail;
+  - a seek keeps the frame on screen until the new one is Ready (242 ms
+    on a decoder that takes 30 ms a frame), then frees the old run's
+    slots, and playback goes on from there;
+  - steps of one frame either way are instant, with no request to the
+    worker, when the slots hold the frame; longer steps and steps back
+    from a seek follow the cache's links, or decode where the cache
+    holds nothing; a step of 40 frames past a window of 10 lands, the
+    worker moving the playhead as it goes;
+  - a step made while a seek or a step is on its way goes on from where
+    it lands, on a decoder 30 ms a frame: a seek to 207 then a step of
+    1 shows 208, 207 never shown; two steps of 5 go 10; a seek to 230,
+    a step of 1 and one back show 230;
+  - two instant steps before a present go 2 frames, with no request to
+    the worker, and a step of 1 and one back come back;
+  - with an A/V offset of ±50 ms, a paused exact seek to 10 shows 10
+    over 100 presents, with the clock at 10, and playing, the time
+    picked is the clock's plus the offset;
+  - two streams, as the X5's lenses: on three slots a seek and steps of
+    1, 5 and −1 land on both (`two_streams_on_three_slots_seek_and_step`),
+    and on four with stream 1's decoder 500 ms a frame and 300 ms a
+    seek, seeks to 40, 10 and 70 do
+    (`two_streams_seek_with_the_second_decoder_behind`). Both failed
+    without the upload thread's share of one while waiting; the first,
+    and `player::tests::two_streams_land_with_a_slot_dead` (four slots,
+    one Dead), without the presenter showing each stream's as it comes;
+  - a keyframe seek back with the cache full lands on its keyframe: 8
+    frames of budget, played to 60, then keyframe seeks to 45, 37, 29,
+    21 and 5 show 40, 32, 24, 16 and 0, with the clock there. It failed
+    without the pins;
+  - a fault injected at frame 10 of a VA-API decode (`FaultBackend`,
+    with media's `fault-injection` turned on for playback's tests) falls
+    back to software. Every frame from 0 to 20 is shown in turn, none is
+    dropped, the snapshot shows the fallback and the decode path, and
+    one `FellBack` event comes;
+  - `Auto`, with doctor's checks saying that Vulkan decodes H.264 here
+    and VA-API doesn't, picks Vulkan, which falls back on lavapipe, and
+    the snapshot and the events say so, with the fallback's reason. The
+    backend hands every Vulkan decode FFmpeg's device on lavapipe, by
+    name, so that a machine whose GPU decodes H.264 with Vulkan Video
+    (odin, where hw-test runs Tier 1) falls back too (D38: a render
+    node that matches no GPU still takes the first GPU listed);
+  - with an `AudioOutputFactory`, video follows the audio's clock, and
+    after a seek it waits for the audio's preroll, Seeking, before the
+    clock runs from the seek's time; seeks made while the audio opens
+    leave its open alone;
+  - `set_config` reaches the upload thread (the budget, in the cache and
+    the snapshot) and the slots;
+  - risk 11's acceptance: 60 frames of 5.7K (5760 × 2880, 24 MB each)
+    through a 256 MiB cache and four slots, frame by frame. Every frame
+    is shown in turn and none dropped. The cache peaked at 237 MiB and
+    never passed its budget, with no "too small" notice and no slot
+    dropped. It took 7.7 s; the upload's CPU time on lavapipe was
+    125 ms at the median and 150 ms at the most.
+- `crates/playback/tests/never_blocks.rs` (plan section 8.6), on a
+  thread marked with `OnBlock::Panic`:
+  - **gated**: a backend gated forever, and 3 s of a 60 Hz UI loop with
+    a seek every fifth iteration and play and pause toggled. Iterations
+    took 96 µs at the median, 179 µs at the 99th percentile and 248 µs
+    at the most. The state was only Opening or Seeking. After the
+    release the first frame came up in 1.3 ms;
+  - **the storm**: 1000 seeks in 2 s, on a decoder that takes 50 ms a
+    frame. Iterations took 128 µs at the median, 199 µs at the 99th
+    percentile and 264 µs at the most. The last seek's frame came up.
+    One of the 1001 requests decoded to completion and 1000 were
+    superseded, and the player was Paused at the end. At most 2 plus
+    the gaps of a frame's decode (50 ms) between seeks may decode to
+    completion: the open's first frame, the last seek, and a seek that
+    nothing superseded for a frame's decode, as a preempted UI thread
+    allows. The bound was "fewer than 100", which a worker ignoring its
+    stop token passed with 8; it fails the bound now, with no gap;
+  - **shutdown**: a player stuck at the gate joins cleanly, in 12 to
+    160 ms over the runs, its upload, open and decode threads all
+    joined, within the plan's 2 s. A player dropped while stuck closes
+    its cache, the gate stays shut, and its open and decode threads
+    end: the last holder of the backend lets go. With `Player`'s `Drop`
+    taken out, the open waited at the gate for good, which the test
+    checked nothing of before;
+  - **the negative control**, `a_blocking_snapshot_on_the_ui_thread_panics`:
+    `snapshot_blocking` on the marked thread panics with "taking the
+    player's status lock would block the UI thread", and a slot's
+    `gpu_frame` panics too, each naming the test's line.
+  - With 4 busy loops on the 4 CPUs, both binaries passed five runs in
+    a row, the engine's in about 20 s.
+  - Every engine and `never_blocks` test but the stuck one ends with
+    `common::join`: 10 s for the threads (`JOIN`), failing with the
+    `ShutdownReport`. Under a build and 4 busy loops, `join(2 s)`
+    failed 1 to 3 tests a run, every one with the upload thread still
+    waiting for lavapipe, and printed nothing.
+- `playback::slots`: a slot goes round its states and is claimed only
+  when the ring alone holds it; a view of a slot that moved on is
+  refused; a slot without memory is out for good; slots past a smaller
+  setting give their memory back.
+- `playback::decoder`: `Auto` picks the kind doctor found working, for
+  each pair of results and on a discrete GPU or not; it decodes in
+  software what no check covers; set preferences are kept.
+  `doctor::check_format` maps streams to the checks that cover them.
+- `frames_between` counts by run places, else by time.
+- `crates/playback/tests/cache.rs` gains `an_offer_whose_token_stopped_puts_nothing_in`,
+  and its negative control covers `try_insert_until`. The cache's
+  proptest passes again at `PROPTEST_CASES=100000`, in 27 s of a release
+  build.
+- Three faults found while the engine was written each have a test that
+  fails without its fix: a worker of a file closed meanwhile could put
+  a frame into the next file's cache, between the next open's clear and
+  its own stop (`an_offer_whose_token_stopped_puts_nothing_in`); a seek
+  made while the audio opened stopped the audio's open, since both took
+  the requests' token (`a_seek_while_the_audio_opens_keeps_the_audio`,
+  now that opens have their own `StopSource`); and the presenter put
+  the playhead back to a step's start once, under the worker that had
+  moved it on, which left the step waiting for room for good
+  (`a_step_past_the_window_ahead_lands`). A fourth, a keyframe seek
+  setting the clock to the time asked for rather than the keyframe's,
+  has `a_keyframe_seek_shows_the_keyframe_at_its_own_time`. A fifth, the
+  upload thread keeping an explicit size whatever the memory, against
+  `budget::recheck`'s rule above, has
+  `player::tests::a_set_budget_shrinks_too_when_memory_is_short`, on a
+  reading of 512 MiB available.
+- The engine's review found 19 faults, all fixed or corrected in the
+  docs, each with a test that fails without its fix where one can show
+  it (the tests above): two streams deadlocked on GPU slots after a
+  seek or step whenever fewer than two slots a stream were live, or
+  the second decoder came late; a keyframe seek back with the cache
+  full never landed; two Tier 1 tests took odin's Vulkan Video for none
+  (D37); the seek storm's bound couldn't fail; a step on its way lost a
+  seek, and an instant step didn't move the next one's base; the cgroup
+  cap missed a namespaced container's limit; a recheck counted the
+  cache against itself; xtask's machine tests raced on one fixture
+  directory (D37); the tests' 2 s joins failed under load and printed
+  nothing; the dropped-player test passed without `Drop`; a block on
+  the UI thread named the helper, not its caller; frames alive past the
+  budget went unsaid; a paused frame moved with the A/V offset, whose
+  doc had the sign backwards; hitches were judged against the capped
+  latency; a doc comment was on the wrong function; and the catch-up
+  count was stated as fixed.
+- The benchmarks' harness runs in Tier 1
+  (`the_bench_harness_plays_on_lavapipe`): a second of 30 fps H.264
+  through both passes on lavapipe in software, on a marked thread. All
+  29 frames after the first came up unthrottled; the real-time pass
+  counted its 2 seconds, looped twice in 2.5 s and gathered the upload,
+  render and UI stages. It checks what the harness counts, not how
+  fast, and passed three runs in a row beside 4 busy loops. Run once by
+  hand on lavapipe with doctor's checks faked to say Vulkan decodes
+  H.264, the gated path recorded every row and note, and the gate
+  failed as it should, naming the fallback to software and the drops
+  by second.
+- On this box (no GPU), with `SPHERECUT_TIER2` set and the X5 samples,
+  each benchmark skips with its reason: no perf clips (hw-test makes
+  them, except with `--quick`) or a perf clip not found, no stitched
+  equirect among the samples, and "no GPU: the adapter
+  SPHERECUT_ADAPTER=auto picks is a CPU, llvmpipe".
+- The third part's first `cargo xtask check` failed
+  `frames_passed_over_while_playing_count_as_dropped`. Of 18 more runs
+  of the engine binary, two failed it again, one of them
+  `playback_after_a_seek_waits_for_the_audio_preroll` too; 40 runs of
+  the first test alone passed. In the
+  first, the presenter's playhead for frame 8 had found the cache's
+  lock taken, and the test waited 20 s for frame 10 to come up in a
+  slot without presenting again: the cache kept the playhead at 6, so
+  the upload thread wanted 6 to 9, never 10. In the second, a snapshot
+  that found the status lock taken was the copy from before, the empty
+  default, with `has_audio` false (`fresh` says so). The tests now
+  present while they wait and read fresh snapshots (`common::snapshot`,
+  which the benchmarks' stream rate and decode paths use too), and the
+  presenter asks for a repaint when the cache's lock loses its playhead
+  (`a_playhead_the_cache_was_too_busy_for_asks_for_a_repaint`, which
+  holds the lock over a present on a marked thread and fails without
+  it). Then 20 runs of the engine binary passed, and 5 of each
+  playback binary beside 4 busy loops.
+
+Revisit if: H1's bench or the 256 MiB-budget 5.7K run shows decode
+waiting on the cache while the window has room, or the window by time
+starving a stream with large frames; a cgroup limit that sits on an
+ancestor isn't seen in a Flatpak; or the overlay needs samples that an
+atomic ring can't give (more than one value per sample).
+
+For the engine: H1's real-time benches show the presenter dropping
+frames with decode and upload keeping up, or catch-up starting too late
+or too often; a GUI's paint callback holding slots so long that the
+ring runs dry; the present latency of one UI frame being visibly off
+the vsync's on the GUI (slice 7); or `never_blocks` failing its 10 ms
+ceiling on a machine that isn't a VM.
+
+## D37. Hardware testing in M1
+
+*2026-10-29, M1 slice 5: a draft, from the M1 plan's D35 (section 15).
+Slice 5 lands the headless part, for H1; slice 8 adds the GUI smoke run
+and its session discovery, for H2, and finishes it. Updates D19 and
+D20.*
+
+What, so far:
+
+- **Tier 1 on the hardware machine.** After the Tier 2 tests,
+  `cargo xtask hw-test` runs `cargo test --workspace --all-targets` in
+  the debug build, as `cargo xtask check` does, and reports every
+  failure with its output in "Tier 1 on this machine". A failing test,
+  a Tier 1 test that skips, a binary that dies, or a run that fails with
+  no test binary to blame fails hw-test. `--no-tier1` leaves it out.
+  Tier 1's tests of a machine without Vulkan Video see only lavapipe
+  there: frame's `--decoder vulkan` row runs with the Vulkan loader
+  shown lavapipe's ICD alone, and the engine's `Auto` test hands FFmpeg
+  lavapipe's device by name. On odin they took the RX 7600, which
+  decodes H.264, and would have failed every run; a render node that
+  matches no GPU wouldn't do, since the first GPU listed is taken then
+  (D38). xtask's own machine tests give each fixture tree a directory
+  of its own, since two that shared one raced under libtest.
+- **Prerequisites** gain rustc 1.95 or newer (it blocks the build), a
+  lavapipe ICD (`mesa-vulkan-drivers` on Fedora, `vulkan-swrast` on
+  Arch; the Tier 1 render and playback tests need it) and the ALSA
+  headers (`alsa-lib-devel`, `alsa-lib`; audio from slice 6, not the
+  build yet). strace was already one (D24).
+- **The machine, read only** (`xtask/src/machine.rs`):
+  - "Power profile": power-profiles-daemon's profile
+    (`powerprofilesctl get`), ACPI's `platform_profile` and its
+    choices, cpu0's frequency driver, governor and energy preference,
+    and each amdgpu card's `power_dpm_force_performance_level` and the
+    active mode of `pp_power_profile_mode`. Each says "not available"
+    and why when it can't be read. Read once, before the build.
+  - "Render nodes": every `renderD<n>` with its PCI slot, vendor,
+    device, driver, and whether it opens for reading and writing.
+- **The perf clips** (`xtask/src/perf_clips.rs`, synth's
+  `media::perf_clips`): synth's moving grid with seeded noise on every
+  frame, 20 s at 30 fps, coded by libx265 in open GOPs of 30 with three
+  B-frames at an average bitrate (one-pass ABR, synth's
+  `Spec::bitrate_kbps`):
+  - `hevc8-5k7-30fps-noisy-20s.mp4` and `hevc10-5k7-30fps-noisy-20s.mp4`,
+    5760×2880 at 100 Mbps;
+  - `hevc8-8k-30fps-noisy-20s.mp4`, 7680×3840 at 120 Mbps (the X5's 8K30
+    is two 3840² streams at about 125 Mbps in all).
+  - They are made once into `<target>/hw-media/` and kept across runs.
+    Each carries the spec it was made from in `<file>.spec`, and is made
+    again when synth's spec changes. A clip is written in `.partial/`
+    and moved into place whole. The Tier 2 tests find them through
+    `SPHERECUT_PERF_MEDIA` (`tier2::require_perf_clip`, which skips while
+    it is unset, as with `--quick`, or a clip is missing).
+  - "Perf clips" gives each clip's size, bitrate, whether it was cached
+    or made (and in how long), and its software decode rate from
+    `bench_perf_clips_software_decode`, flagged **too easy** above
+    150 fps. A clip that can't be made fails hw-test, with why.
+- **The pass rules** for "5.7K30 stitched equirect plays in real time"
+  (plan section 12.3) are the playback benchmarks' gate (D34): on the
+  hardware kind `Auto` picks, no drop and no decode-drop after the first
+  second of 60 s, and every unthrottled second decoding at least
+  1.2 × 29.97 frames. A skip is never a pass.
+- **Benchmarks** (D20): the playback benchmarks record one run's seconds
+  as one row, named "… per second", whose runs are the seconds and whose
+  range is the slowest and the fastest second. The report says so.
+- **`--list`** prints the Tier 2 tests, as the report names them, from a
+  debug build, and stops.
+- **Requests** are batched: H1 (headless, after slice 5, from any
+  terminal), H2 (the GUI, after slice 8, from a terminal inside the
+  desktop) and H3 (the final commit), with the lists in plan section
+  12.3.
+
+Still to come (slice 8): the GUI smoke run as the Tier 2 test
+`gui_smoke`, which finds the Wayland socket from a TTY and fails a
+hidden session; its screenshots in `hw-reports/`; its pass rules (at
+most 0.1% drops, UI p99 under 1.5× the refresh period, |A/V| p95 under
+20 ms on the sync clip); and the environment's session lines
+(`WAYLAND_DISPLAY` set or discovered, `pactl info`'s server,
+mutter's experimental features, `hyprctl`). `cargo xtask check` is to
+check the ALSA headers itself once slice 6 links them.
+
+Why:
+
+- Synthetic grid content decoded at 330 fps in software, so it proved
+  nothing about camera footage; the noise and a camera's bitrate make
+  the decoder do a camera's work, and the "too easy" flag says when it
+  doesn't.
+- A per-second minimum catches the VA-API dips (1.17× to 2.41× real
+  time on huginn) that a mean hides, and the power settings say whether
+  two runs had the machine set the same way.
+- FFmpeg 8.1.3 and Mesa 26 behave differently from this box's 6.1.1 and
+  25.2.8, so Tier 1 has to run where they are.
+- An average bitrate rather than a CRF: at a CRF the noise sets the
+  bitrate (about 200 Mbps at CRF 18), and the plan asks for a camera's.
+- A stamp of the whole spec, not a version number, so that no change to
+  synth's spec can leave an old clip in use.
+
+Tested:
+
+- `xtask/src/machine.rs`: the power settings from a fixture sysfs tree
+  of a desktop (an amdgpu card, an Intel iGPU, a connector), and a bare
+  one that says "not available" for each; amdgpu's active power profile
+  in the old and the new layout; render nodes in order with their
+  devices, one that opens and one with no node; lavapipe's ICD where
+  the loader looks; rustc's version, and that `MIN_RUST` is the
+  workspace's `rust-version`.
+- `xtask/src/perf_clips.rs`: two tiny clips are made, then cached; a
+  changed spec, or a clip without its stamp, is made again; a clip that
+  can't be made says why and leaves nothing behind.
+- `hw_test`: Tier 1 from real cargo output, on the scratch workspace
+  whose binaries die after their summary or before a result, under
+  three sets of user terminal settings; a Tier 1 test that skips has
+  failed; a build failure and a cargo failure with no failing binary are
+  problems; the perf clips' rows with their bitrate, the "too easy"
+  flag and a clip not made; `SPHERECUT_PERF_MEDIA` is set only when
+  hw-test makes the clips (not with `--quick`), and its path reaches
+  the tests unchanged, as the samples' does.
+- synth: an average bitrate is what x264 and x265 make, within 30%, at
+  500 and 4000 kbps (`a_noisy_clip_comes_out_at_the_bitrate_asked_for`).
+- `cargo xtask hw-test --list` lists the six playback benchmarks among
+  31 Tier 2 tests.
+- `cargo xtask hw-test --quick --samples …` here, end to end: the
+  first run's Tier 1 failed xtask's
+  `reads_real_cargo_output_whatever_the_users_terminal_settings`, whose
+  control (a user's `[term]` config changes cargo's output when left
+  alone) inherited hw-test's `PLAIN_OUTPUT`, which beats the config.
+  Its assertion printed the scratch workspace's cargo output, which the
+  report then read as 8 binaries of the run's own that "did not
+  finish". The control now runs cargo with those variables unset, and
+  the test quotes the output it prints;
+  `another_cargo_runs_output_in_a_failure_stays_the_failures_when_quoted`
+  reads such a failure both ways. The second run passed: Tier 1 589
+  passed in 43 binaries, Tier 2 2 passed and 19 skipped, and the
+  report has every new section.
+- A real perf clip, on this box's 4 CPUs and FFmpeg 6.1 (libx265 3.5):
+  hw-test made `hevc8-5k7-30fps-noisy-20s.mp4` in 26 min 52 s, 254 MB
+  at 101.6 Mbit/s (HEVC Main, 600 frames, 20.0 s), and software decoded
+  it at 27.1 fps (`bench_perf_clips_software_decode`, the median of 3,
+  27.06 to 27.19): far from too easy, where the plan's easy grid clip
+  decoded at 330 fps and the X5's own 5.7K60 at about 58. The run was stopped there, so the 10-bit and 8K clips were
+  not made here; the bench then measured the clip there was and
+  recorded the other two as not measured, with the reason.
+
+Revisit if: H1's perf clips decode in software above 150 fps on either
+machine (more noise, or a higher bitrate); x265 can't hold 100 Mbps on
+a build Pat uses; or the Tier 1 run on a hardware machine takes so long
+that `--no-tier1` becomes the habit.
+
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 
 *2026-10-24, M1. Pat approved Vulkan Video HEVC in odin's hardware run
@@ -4293,8 +5424,9 @@ node, so no test checks that it is the same GPU beyond `media::hw`'s
 own tests of the lookup on fake sysfs trees.
 
 Tested: `crates/cli/tests/frame.rs` (`--decoder vaapi --render-node
-/nonexistent` and `--decoder vulkan` on lavapipe are `hw_unavailable`,
-exit 3, with nothing written) and `crates/cli/tests/contract.rs` (the
+/nonexistent` and `--decoder vulkan` on lavapipe, the Vulkan loader
+shown lavapipe's ICD alone, are `hw_unavailable`, exit 3, with nothing
+written) and `crates/cli/tests/contract.rs` (the
 same for exit 3's document); every other run of those tests is `auto`
 with the no-node fallback, and the envelope test checks the
 `decode` it reports.
@@ -4311,6 +5443,16 @@ Revisit if: slice 5 picks the hardware kind from doctor's checks for
 playback (amendment 9); `auto` should then use the same choice, so that
 it takes Vulkan Video where doctor shows that it works and VA-API
 doesn't.
+
+*Slice 5 does (D34): the player's `Auto` picks from doctor's checks.
+When both kinds decode the format it takes Vulkan Video on a discrete
+GPU and VA-API on any other, and when only one does, that one. `frame
+--decoder auto` keeps VA-API, then software. Its choice from doctor's checks would mean running doctor
+(every device and decode check, and the encode checks) in each `frame`
+run, which costs more than the one frame it decodes. Where only
+Vulkan Video decodes, `frame` still gives the frame, decoded in
+software. Revisit when the checks are kept where `frame` can read them
+(the GUI's Settings), or when a frame on such a machine is too slow.*
 
 ## Open
 

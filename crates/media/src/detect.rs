@@ -81,6 +81,7 @@ fn sample_entry_types(trak: &Mp4Box) -> Vec<[u8; 4]> {
 }
 
 fn has_trailer_magic(path: &Path) -> bool {
+    spherecut_core::may_block("reading a file's trailer");
     let Ok(mut f) = File::open(path) else {
         return false;
     };

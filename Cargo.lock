@@ -1312,6 +1312,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "spherecut-playback"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "spherecut-core",
+ "spherecut-media",
+ "spherecut-render",
+ "spherecut-sphere",
+ "spherecut-synth",
+ "spherecut-testkit",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "spherecut-render"
 version = "0.1.0"
 dependencies = [

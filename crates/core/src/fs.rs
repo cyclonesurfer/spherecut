@@ -23,6 +23,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::blocking::may_block;
 use crate::brand::APP_SLUG;
 
 /// How many names [`TempFile::create`] tries before giving up.
@@ -51,6 +52,7 @@ pub fn is_temp_name(name: &str) -> bool {
 /// a symlink there points to, through any chain of links. A dangling link
 /// gives the file that writing through it would create.
 pub fn follow_links(path: &Path) -> io::Result<PathBuf> {
+    may_block("reading symbolic links");
     let mut p = path.to_path_buf();
     // The kernel's own limit for one lookup.
     for _ in 0..40 {
@@ -77,6 +79,7 @@ pub fn follow_links(path: &Path) -> io::Result<PathBuf> {
 /// pipe, device or socket (`/dev/null`, say) replaces the node instead of
 /// writing to it. Links are followed.
 pub fn replaceable(dest: &Path) -> io::Result<Option<std::fs::Metadata>> {
+    may_block("reading a file's metadata");
     match std::fs::metadata(dest) {
         Ok(m) if m.is_dir() => Err(io::ErrorKind::IsADirectory.into()),
         Ok(m) if !m.is_file() => Err(io::Error::new(
@@ -133,6 +136,7 @@ impl TempFile {
     /// (by another writer, or left over from a killed one) is skipped for
     /// the next, since `create_new` never opens an existing file.
     fn create_named(dest: &Path, mut name: impl FnMut() -> String) -> io::Result<Self> {
+        may_block("creating a file");
         if dest.file_name().is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -173,6 +177,7 @@ impl TempFile {
     /// Flush to disk and rename onto `dest`, replacing the regular file
     /// there, if any (D16).
     pub fn persist_replace(mut self) -> io::Result<()> {
+        may_block("writing a file to disk");
         self.file.sync_all()?;
         // Something may have turned up at `dest` while the file was written.
         replaceable(&self.dest)?;
@@ -196,6 +201,7 @@ impl TempFile {
         mut self,
         link: impl FnOnce(&Path, &Path) -> io::Result<()>,
     ) -> io::Result<()> {
+        may_block("writing a file to disk");
         self.file.sync_all()?;
         match link(&self.path, &self.dest) {
             Ok(()) => {}
@@ -282,6 +288,29 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).ok();
         }
+    }
+
+    /// Writing a file can block, so the UI thread may not (M1 plan
+    /// section 8.6): marked as the UI thread, a thread that makes a
+    /// temporary file panics before anything is created.
+    #[test]
+    fn the_ui_thread_may_not_write_files() {
+        let dir = tmpdir("ui-thread");
+        let dest = dir.join("out.png");
+        let e = std::thread::spawn(move || {
+            crate::blocking::mark_ui_thread_with(crate::blocking::OnBlock::Panic);
+            TempFile::create(&dest)
+        })
+        .join()
+        .unwrap_err();
+        let message = e.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(
+            message.starts_with("creating a file would block the UI thread"),
+            "{message}"
+        );
+        assert_eq!(listing(&dir), Vec::<String>::new());
+        // Unmarked, the same call goes ahead.
+        TempFile::create(&dir.join("out.png")).unwrap();
     }
 
     fn tmpdir(name: &str) -> TempDir {

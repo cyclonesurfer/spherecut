@@ -153,6 +153,7 @@ fn write_err(path: &Path) -> impl Fn(io::Error) -> InjectError + '_ {
 /// replaced and the link is kept, as writing the file in place would. A
 /// directory, pipe, device or socket at `output` is refused.
 pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), InjectError> {
+    spherecut_core::may_block("rewriting an MP4 file");
     check_not_same_file(input, output)?;
     for (i, e) in edits.iter().enumerate() {
         if edits[..i].iter().any(|o| o.track == e.track) {

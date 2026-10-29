@@ -12,6 +12,8 @@ mod check;
 mod compat;
 mod gen_media;
 mod hw_test;
+mod machine;
+mod perf_clips;
 
 #[derive(Parser)]
 #[command(about = "Spherecut developer tasks")]
