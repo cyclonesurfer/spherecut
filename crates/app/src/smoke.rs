@@ -123,6 +123,8 @@ struct Run {
     /// `logic` alone) with them.
     ui_frames: u64,
     passes: u64,
+    /// eframe's count of each UI pass's own work, in ms.
+    work: Vec<f32>,
 }
 
 impl SmokeDriver {
@@ -170,6 +172,16 @@ impl SmokeDriver {
     pub fn set_refresh_hz(&mut self, hz: Option<f64>) {
         if hz.is_some() {
             self.refresh_hz = hz;
+        }
+    }
+
+    /// eframe's count of the last UI pass's own work, in seconds: its
+    /// time without acquiring the surface, the submit and the present
+    /// (`IntegrationInfo::cpu_usage`). With the intervals, it says
+    /// whether a slow UI was its own work or waiting.
+    pub fn set_work(&mut self, secs: Option<f32>) {
+        if let (Phase::Playing(run), Some(s)) = (&mut self.phase, secs) {
+            run.work.push(s * 1000.0);
         }
     }
 
@@ -228,6 +240,7 @@ impl SmokeDriver {
                         missed: [0; Stage::ALL.len()],
                         ui_frames: 0,
                         passes: 0,
+                        work: Vec::new(),
                     };
                     run.gather(perf);
                     if !s.snapshot.want_play {
@@ -645,6 +658,9 @@ pub struct UiReport {
     pub p99: Option<f32>,
     pub max: Option<f32>,
     pub hitches: u64,
+    /// Each pass's own work, as eframe counts it: without acquiring the
+    /// surface, the submit and the present.
+    pub work: Percentiles,
 }
 
 #[derive(Debug, Serialize)]
@@ -841,6 +857,7 @@ impl SmokeDriver {
                 p99: ui.p99,
                 max: ui.max,
                 hitches: counted(Counter::Hitches),
+                work: Percentiles::of(&run.work, 0),
             },
             stages,
             av,

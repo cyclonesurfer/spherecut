@@ -9,9 +9,11 @@
 //! A run fails when:
 //!
 //! - the process fails, or its document isn't `ok`;
-//! - fewer than 90% of the UI frames expected were presented: the
-//!   compositor didn't draw (a locked session, or one on another VT), so
-//!   nothing else the run measured counts;
+//! - fewer than 90% of the UI frames expected were presented. With as
+//!   many passes without the UI as half the frames missing, the
+//!   compositor didn't draw the window (a locked session, or one on
+//!   another VT), so nothing else the run measured counts; with fewer,
+//!   the window was drawn and the UI was slow;
 //! - more than 0.1% of the frames were dropped;
 //! - the UI's p99 is over 1.5 × the refresh period;
 //! - on the sync clip, |A/V|'s p95 is 20 ms or more;
@@ -97,14 +99,28 @@ fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
     }
     let r = &doc["result"];
     let f = |v: &Value| v.as_f64();
-    let presented = f(&r["ui"]["presented"]).unwrap_or(0.0);
+    let ui = &r["ui"];
+    let presented = f(&ui["presented"]).unwrap_or(0.0);
     if presented < MIN_PRESENTED {
+        // eframe runs passes without the UI while the compositor draws
+        // nothing of the window; a window drawn but slow has none.
+        let expected = f(&ui["expected"]).unwrap_or(0.0);
+        let frames = f(&ui["frames"]).unwrap_or(0.0);
+        let hidden = f(&ui["passes"]).unwrap_or(0.0) - frames;
+        if hidden >= (expected - frames) / 2.0 {
+            why.push(format!(
+                "{:.0}% of the UI frames expected were presented: the compositor didn't draw \
+                 the window (a locked session, or one on another VT), so the rest doesn't count",
+                presented * 100.0
+            ));
+            return why;
+        }
         why.push(format!(
-            "{:.0}% of the UI frames expected were presented: the compositor didn't draw the \
-             window (a locked session, or one on another VT), so the rest doesn't count",
-            presented * 100.0
+            "{:.0}% of the UI frames expected were presented, the window drawn ({hidden:.0} \
+             passes without the UI): the UI was slow, each pass's own work {} ms at p95",
+            presented * 100.0,
+            f(&ui["work"]["p95"]).map_or("unmeasured".into(), |w| format!("{w:.1}"))
         ));
-        return why;
     }
     let shown = f(&r["frames"]["shown"]).unwrap_or(0.0);
     let dropped = f(&r["frames"]["dropped"]).unwrap_or(0.0);
@@ -433,7 +449,7 @@ fn the_gates_fail_what_they_say() {
             "ok": true,
             "result": {
                 "refresh_hz": 60.0,
-                "ui": {"presented": 0.99, "p99": 20.0},
+                "ui": {"presented": 0.99, "p99": 20.0, "expected": 1200.0, "frames": 1188, "passes": 1188},
                 "frames": {"shown": 600, "dropped": 0},
                 "av": {"p95_abs_ms": 8.0},
                 "streams": [{"format": "hevc 5760×2880 yuv420p10le limited/709", "decoder": "vaapi", "decode": "VA-API"}],
@@ -465,10 +481,30 @@ fn the_gates_fail_what_they_say() {
         false,
         "the run failed: gone (not_found)",
     );
-    // A hidden window: only that is said.
-    let hidden = with(&["result", "ui", "presented"], json!(0.4));
+    // A hidden window, eframe's logic running without the UI in the
+    // frames missing: only that is said.
+    let mut hidden = good();
+    hidden["result"]["ui"] =
+        json!({"presented": 0.4, "p99": 90.0, "expected": 1200.0, "frames": 480, "passes": 1180});
     assert_eq!(judge(&hidden, true, &gates).len(), 1);
     fails(&hidden, false, "40% of the UI frames");
+    fails(&hidden, false, "the compositor didn't draw");
+    // A window drawn but slow: said, and the other gates still judge.
+    let mut slow = good();
+    slow["result"]["ui"] = json!({"presented": 0.69, "p99": 54.8, "expected": 1200.0, "frames": 828, "passes": 830, "work": {"p95": 3.25}});
+    let why = judge(&slow, true, &gates);
+    assert_eq!(why.len(), 2, "{why:?}");
+    fails(
+        &slow,
+        false,
+        "69% of the UI frames expected were presented, the window drawn (2 passes",
+    );
+    fails(
+        &slow,
+        false,
+        "the UI was slow, each pass's own work 3.2 ms at p95",
+    );
+    fails(&slow, false, "UI p99 54.8 ms");
     fails(
         &with(&["result", "frames", "dropped"], json!(1)),
         false,

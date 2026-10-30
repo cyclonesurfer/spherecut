@@ -119,7 +119,7 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
                 let _ = writeln!(
                     r,
                     "{} ({}, {}); {} at {} pixels a point (the window's own {}), the window \
-                     {} and the viewer {} pixels; {}; played {:.1} s{}.\n",
+                     {} and the viewer {} pixels; {}; {}; played {:.1} s{}.\n",
                     res["adapter"]["name"].as_str().unwrap_or("?"),
                     res["adapter"]["driver"].as_str().unwrap_or("?"),
                     res["adapter"]["driver_info"].as_str().unwrap_or("?"),
@@ -129,6 +129,7 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
                     size(&res["window"]),
                     size(&res["viewer"]),
                     stages(&res["stages"]),
+                    passes(&res["ui"]),
                     res["played_s"].as_f64().unwrap_or(0.0),
                     if res["ended"] == true {
                         ", to the clip's end"
@@ -213,6 +214,23 @@ fn size(v: &Value) -> String {
     }
 }
 
+/// "1188 UI passes of 1190, their own work 2.1 / 3.3 ms": the passes
+/// with the UI of all passes, and eframe's count of their work, p50 and
+/// p95.
+fn passes(ui: &Value) -> String {
+    let work = &ui["work"];
+    format!(
+        "{} UI passes of {}, their own work {}",
+        ui["frames"].as_u64().unwrap_or(0),
+        ui["passes"].as_u64().unwrap_or(0),
+        if work["samples"].as_u64().unwrap_or(0) > 0 {
+            format!("{} / {} ms", ms(&work["p50"]), ms(&work["p95"]))
+        } else {
+            "unmeasured".into()
+        }
+    )
+}
+
 /// "decode 4.1 / 6.0 ms, upload_cpu ..." for the stages with samples:
 /// p50 and p95.
 fn stages(v: &Value) -> String {
@@ -256,7 +274,8 @@ mod tests {
                 "surface_format": "Bgra8UnormSrgb", "scale": 1.25, "native_scale": 1.25,
                 "window": [1600, 1000], "viewer": [1167, 776], "refresh_hz": 59.95,
                 "played_s": 20.0, "ended": false,
-                "ui": {"presented": 0.998, "p50": 16.7, "p99": 18.2},
+                "ui": {"presented": 0.998, "p50": 16.7, "p99": 18.2, "frames": 1188, "passes": 1190,
+                       "work": {"samples": 1187, "p50": 2.1, "p95": 3.3}},
                 "frames": {"shown": 600, "dropped": 0, "decode_dropped": 0},
                 "streams": [{"decode": "VA-API", "decoder": "vaapi"}],
                 "av": {"median_ms": 2.0, "p95_abs_ms": 6.5},
@@ -303,7 +322,10 @@ mod tests {
         assert!(md.contains(
             "AMD Radeon RX 7600 (RADV NAVI33) (radv, Mesa 26.2.5); Bgra8UnormSrgb at 1.25"
         ));
-        assert!(md.contains("p50 / p95: decode 4.1 / 6.0 ms; played 20.0 s."));
+        assert!(md.contains(
+            "p50 / p95: decode 4.1 / 6.0 ms; 1188 UI passes of 1190, their own work 2.1 / 3.3 ms; \
+             played 20.0 s."
+        ));
         assert!(!md.contains("convert"));
         assert!(md.contains("![noisy 5.7K 8-bit](odin-abc-gui-0.png)"));
         assert_eq!(

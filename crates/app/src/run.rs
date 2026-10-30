@@ -334,6 +334,7 @@ impl eframe::App for EframeApp {
                 .and_then(|m| m.refresh_rate_millihertz())
                 .map(|mhz| f64::from(mhz) / 1000.0);
             smoke.set_refresh_hz(hz);
+            smoke.set_work(frame.info().cpu_usage);
         }
         self.app.ui(ui);
     }
