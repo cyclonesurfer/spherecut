@@ -319,6 +319,24 @@ needs (it test-compiles `vulkan.h` without the package's Cflags). It
 installs into `DIR/stage-TAG` and moves the prefix into place once
 `make install` is done, so a failed install leaves no prefix.
 
+*Updated in M1 slice 6.* The audio crate's ALSA bindings broke compat's
+link against 8.1.3: alsa-sys's pkg-config puts the system's library
+directory (`/usr/lib/x86_64-linux-gnu`) on the linker's search path,
+and in playback's test binaries, which depend on audio and media, it
+came ahead of ffmpeg-sys-next's prefix, so they linked Ubuntu's FFmpeg
+6.1 against 8.1.3's headers and failed on `avcodec_get_supported_config`
+(a library with every symbol would have linked without a word, and the
+tests run against the wrong FFmpeg). compat now runs every build with
+the prefix's library directories as rustc's own `-L` flags
+(`CARGO_ENCODED_RUSTFLAGS`, ahead of the caller's flags; rustflags in
+cargo's config files don't apply under compat), which rustc searches
+before a build script's, and the link fails unless every test
+executable and binary loads each FFmpeg library it needs from the
+prefix, as `ldd` resolves them with the prefix's libraries on the
+loader's path. Its test runs the check on xtask's own test binary,
+which links the FFmpeg it was built against: it passes for `/` and
+fails for an empty directory, naming libavcodec.
+
 ## D3. Hardware decoding never falls back to software silently
 
 *2026-10-23, M0.*

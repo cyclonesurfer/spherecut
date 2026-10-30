@@ -40,6 +40,19 @@
 //! a build directory, a target triple), must have linked libavcodec and
 //! searched for libraries only inside the prefix, and the FFmpeg
 //! libraries the builds linked must be those pkg-config was asked about.
+//!
+//! The linker takes a library from the first directory on its search
+//! path that has it, and a crate's build scripts put theirs on it in an
+//! order compat doesn't choose: alsa-sys's pkg-config puts the system's
+//! library directory there (`/usr/lib/x86_64-linux-gnu`), ahead of
+//! ffmpeg-sys-next's in a crate that depends on both, which would link
+//! the system's FFmpeg against the prefix's headers. So every build runs
+//! with the prefix's library directories first, as `-L` flags of rustc's
+//! own (`CARGO_ENCODED_RUSTFLAGS`, ahead of the caller's
+//! `CARGO_ENCODED_RUSTFLAGS` or `RUSTFLAGS`; rustflags in cargo's config
+//! files don't apply), and once linked, each test executable and binary
+//! must load every FFmpeg library it needs from the prefix, as `ldd`
+//! resolves them with the prefix's libraries on the loader's path.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -1007,11 +1020,15 @@ fn overriding<'a>(names: impl Iterator<Item = &'a OsStr>) -> Vec<String> {
 }
 
 /// The variables cargo runs with for one FFmpeg, given this process's
-/// `vars`: each with its value, or `None` for one it runs without.
+/// `vars`: each with its value, or `None` for one it runs without. The
+/// bound libraries' directories, `libdirs`, go first on rustc's search
+/// path ([`rustflags`]), and on the loader's too when `load` (for the
+/// tests, run).
 fn cargo_env(
     pc_dir: &Path,
     target: &Path,
     libdirs: &[PathBuf],
+    load: bool,
     vars: &[(OsString, OsString)],
 ) -> Vec<(String, Option<OsString>)> {
     let mut env = vec![
@@ -1043,14 +1060,11 @@ fn cargo_env(
             env.push((var.to_owned(), Some(value.into())));
         }
     }
-    if !libdirs.is_empty() {
-        let path = libdirs
-            .iter()
-            .rev()
-            .fold(get(vars, "LD_LIBRARY_PATH"), |rest, dir| {
-                Some(prepend(dir, rest))
-            });
-        env.push(("LD_LIBRARY_PATH".to_owned(), path));
+    if let Some(flags) = rustflags(libdirs, vars) {
+        env.push(("CARGO_ENCODED_RUSTFLAGS".to_owned(), Some(flags)));
+    }
+    if load && !libdirs.is_empty() {
+        env.push(("LD_LIBRARY_PATH".to_owned(), loader_path(libdirs, vars)));
     }
     env.extend(
         overriding(vars.iter().map(|(k, _)| k.as_os_str()))
@@ -1058,6 +1072,156 @@ fn cargo_env(
             .map(|n| (n, None)),
     );
     env
+}
+
+/// `libdirs` ahead of this process's `LD_LIBRARY_PATH` in `vars`.
+fn loader_path(libdirs: &[PathBuf], vars: &[(OsString, OsString)]) -> Option<OsString> {
+    libdirs
+        .iter()
+        .rev()
+        .fold(get(vars, "LD_LIBRARY_PATH"), |rest, dir| {
+            Some(prepend(dir, rest))
+        })
+}
+
+/// `CARGO_ENCODED_RUSTFLAGS` for one FFmpeg's builds: `-L native=DIR` for
+/// each of `libdirs`, ahead of the flags `vars` give rustc already
+/// (`CARGO_ENCODED_RUSTFLAGS`, else `RUSTFLAGS`, split on spaces as cargo
+/// splits it). Rustc searches its `-L` directories in order, and those a
+/// build script gives come after these (see the module docs). `None`
+/// with no directories.
+fn rustflags(libdirs: &[PathBuf], vars: &[(OsString, OsString)]) -> Option<OsString> {
+    if libdirs.is_empty() {
+        return None;
+    }
+    let mut flags: Vec<OsString> = Vec::new();
+    for dir in libdirs {
+        flags.push("-L".into());
+        let mut d = OsString::from("native=");
+        d.push(dir);
+        flags.push(d);
+    }
+    match (get(vars, "CARGO_ENCODED_RUSTFLAGS"), get(vars, "RUSTFLAGS")) {
+        (Some(encoded), _) => {
+            if !encoded.is_empty() {
+                flags.push(encoded);
+            }
+        }
+        (None, Some(plain)) => flags.extend(
+            plain
+                .to_string_lossy()
+                .split(' ')
+                .filter(|f| !f.trim().is_empty())
+                .map(|f| OsString::from(f.trim())),
+        ),
+        (None, None) => {}
+    }
+    let mut out = OsString::new();
+    for (i, f) in flags.iter().enumerate() {
+        if i > 0 {
+            out.push("\x1f");
+        }
+        out.push(f);
+    }
+    Some(out)
+}
+
+/// The test executables and binaries cargo's JSON messages say it
+/// linked, fresh or not, each once.
+fn executables(messages: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = messages
+        .lines()
+        .filter(|l| l.starts_with('{') && l.contains("\"compiler-artifact\""))
+        .filter_map(Json::parse)
+        .filter(|m| m.get("reason").and_then(Json::str) == Some("compiler-artifact"))
+        .filter_map(|m| m.get("executable").and_then(Json::str).map(PathBuf::from))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The FFmpeg libraries in `ldd`'s output, each with where it resolves
+/// (`None` for "not found").
+fn ffmpeg_loads(ldd: &str) -> Vec<(String, Option<PathBuf>)> {
+    ldd.lines()
+        .filter_map(|l| {
+            let (name, to) = l.trim().split_once(" => ")?;
+            let lib = name.split(".so").next()?;
+            let ffmpeg = STAMPED.contains(&lib) || DROPPED.contains(&lib);
+            ffmpeg.then(|| {
+                let path = to.split(" (").next().unwrap_or(to).trim();
+                (
+                    name.to_owned(),
+                    (path != "not found" && !path.is_empty()).then(|| PathBuf::from(path)),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Fails unless each of `exes` loads every FFmpeg library it needs from
+/// inside `prefix`, as `ldd` resolves them with `libdirs` first on the
+/// loader's path, as the Tier 1 tests run.
+fn check_loads(
+    exes: &[PathBuf],
+    prefix: &Path,
+    libdirs: &[PathBuf],
+    vars: &[(OsString, OsString)],
+) -> Result<()> {
+    if exes.is_empty() {
+        bail!("cargo reported no test executable or binary, to check what it loads");
+    }
+    let home = prefix
+        .canonicalize()
+        .with_context(|| format!("could not resolve {}", prefix.display()))?;
+    let mut cmd_env = Vec::new();
+    if let Some(path) = loader_path(libdirs, vars) {
+        cmd_env.push(("LD_LIBRARY_PATH", path));
+    }
+    let mut wrong = Vec::new();
+    let mut checked = 0;
+    for exe in exes {
+        let out = Command::new("ldd")
+            .arg(exe)
+            .envs(cmd_env.iter().map(|(k, v)| (*k, v)))
+            .stderr(Stdio::null())
+            .output()
+            .with_context(|| format!("could not run ldd on {}", exe.display()))?;
+        if !out.status.success() {
+            bail!("ldd failed on {} ({})", exe.display(), out.status);
+        }
+        for (lib, at) in ffmpeg_loads(&String::from_utf8_lossy(&out.stdout)) {
+            checked += 1;
+            let inside = at
+                .as_deref()
+                .and_then(|p| p.canonicalize().ok())
+                .is_some_and(|p| p.starts_with(&home));
+            if !inside {
+                let name = exe.file_name().unwrap_or(exe.as_os_str()).to_string_lossy();
+                wrong.push(match at {
+                    Some(p) => format!("{name} loads {lib} from {}", p.display()),
+                    None => format!("{name} needs {lib}, which isn't found"),
+                });
+            }
+        }
+    }
+    if checked == 0 {
+        bail!(
+            "ldd found no FFmpeg library in any of the {} executables",
+            exes.len()
+        );
+    }
+    if !wrong.is_empty() {
+        wrong.sort();
+        wrong.dedup();
+        bail!(
+            "linked against FFmpeg libraries outside the prefix {}: {}",
+            home.display(),
+            wrong.join("; ")
+        );
+    }
+    Ok(())
 }
 
 /// `cargo` with `args`, run with `env`.
@@ -1228,7 +1392,7 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
             // Cargo's messages from clippy and the link, which say what
             // ffmpeg-sys-next's build script bound.
             let mut messages = String::new();
-            let env = cargo_env(pc, &target, &[], &vars);
+            let env = cargo_env(pc, &target, &found.libdirs, false, &vars);
             let before = stamp(pc, found);
             let restamp =
                 || bound(&program, &row.prefix, pc, &search(pc)).map(|again| stamp(pc, &again));
@@ -1273,10 +1437,13 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
                             &env,
                         ),
                     )
-                    .map(|m| messages.push_str(&m)),
+                    .and_then(|m| {
+                        messages.push_str(&m);
+                        check_loads(&executables(&m), &row.prefix, &found.libdirs, &vars)
+                    }),
                 );
                 if link == Stage::Passed && row.tier1.is_some() {
-                    let env = cargo_env(pc, &target, &found.libdirs, &vars);
+                    let env = cargo_env(pc, &target, &found.libdirs, true, &vars);
                     row.tier1 = Some(Stage::of(
                         run_step(
                             &format!("tests (Tier 1) {what}"),
@@ -1498,6 +1665,7 @@ mod tests {
             Path::new("/ff/lib/pkgconfig"),
             Path::new("/t/compat/ff"),
             &[],
+            false,
             &[],
         );
         let set = |env: &[(String, Option<OsString>)], k: &str| value(env, k).flatten();
@@ -1515,8 +1683,8 @@ mod tests {
             Some("line-tables-only".into())
         );
         assert_eq!(set(&env, "CARGO_INCREMENTAL"), Some("0".into()));
-        // The libraries are on the loader's path only for the tests.
         assert_eq!(value(&env, "LD_LIBRARY_PATH"), None);
+        assert_eq!(value(&env, "CARGO_ENCODED_RUSTFLAGS"), None);
         assert!(env.iter().all(|(_, v)| v.is_some()), "{env:?}");
 
         let existing = vars(&[
@@ -1525,11 +1693,30 @@ mod tests {
             ("CARGO_PROFILE_DEV_DEBUG", "0"),
             ("CARGO_BUILD_BUILD_DIR", "/build"),
         ]);
+        // The libraries go first on rustc's search path for every build,
+        // and on the loader's only for the tests.
         let env = cargo_env(
             Path::new("/ff/lib/pkgconfig"),
             Path::new("/t/compat/ff"),
             &[p("/ff/lib")],
+            false,
             &existing,
+        );
+        assert_eq!(
+            set(&env, "CARGO_ENCODED_RUSTFLAGS"),
+            Some("-L\x1fnative=/ff/lib".into())
+        );
+        assert_eq!(value(&env, "LD_LIBRARY_PATH"), None);
+        let env = cargo_env(
+            Path::new("/ff/lib/pkgconfig"),
+            Path::new("/t/compat/ff"),
+            &[p("/ff/lib")],
+            true,
+            &existing,
+        );
+        assert_eq!(
+            set(&env, "CARGO_ENCODED_RUSTFLAGS"),
+            Some("-L\x1fnative=/ff/lib".into())
         );
         assert_eq!(
             set(&env, "PKG_CONFIG_PATH"),
@@ -1548,11 +1735,105 @@ mod tests {
             Path::new("/ff/lib/pkgconfig"),
             Path::new("/t/compat/ff"),
             &[p("/ff/lib"), p("/ff/lib64")],
+            true,
             &existing,
         );
         assert_eq!(
             set(&env, "LD_LIBRARY_PATH"),
             Some("/ff/lib:/ff/lib64:/x/lib".into())
+        );
+        assert_eq!(
+            set(&env, "CARGO_ENCODED_RUSTFLAGS"),
+            Some("-L\x1fnative=/ff/lib\x1f-L\x1fnative=/ff/lib64".into())
+        );
+    }
+
+    #[test]
+    fn the_prefixs_libraries_go_ahead_of_the_callers_rustflags() {
+        let dirs = [p("/ff/lib")];
+        assert_eq!(rustflags(&[], &vars(&[("RUSTFLAGS", "-Cx")])), None);
+        assert_eq!(
+            rustflags(&dirs, &vars(&[("RUSTFLAGS", " -C  opt-level=1 --cfg x ")])),
+            Some("-L\x1fnative=/ff/lib\x1f-C\x1fopt-level=1\x1f--cfg\x1fx".into())
+        );
+        // Cargo takes the encoded form over the plain one, as given.
+        assert_eq!(
+            rustflags(
+                &dirs,
+                &vars(&[
+                    ("RUSTFLAGS", "-Cignored"),
+                    ("CARGO_ENCODED_RUSTFLAGS", "--cfg\x1fa b")
+                ])
+            ),
+            Some("-L\x1fnative=/ff/lib\x1f--cfg\x1fa b".into())
+        );
+        assert_eq!(
+            rustflags(&dirs, &vars(&[("CARGO_ENCODED_RUSTFLAGS", "")])),
+            Some("-L\x1fnative=/ff/lib".into())
+        );
+    }
+
+    #[test]
+    fn executables_are_read_from_cargos_messages() {
+        let messages = "\
+{\"reason\":\"compiler-artifact\",\"executable\":\"/t/debug/deps/engine-1\",\"fresh\":true}
+{\"reason\":\"compiler-artifact\",\"executable\":null}
+{\"reason\":\"build-script-executed\",\"executable\":\"/not/this\"}
+warning: something
+{\"reason\":\"compiler-artifact\",\"executable\":\"/t/debug/spherecut\"}
+{\"reason\":\"compiler-artifact\",\"executable\":\"/t/debug/deps/engine-1\"}
+";
+        assert_eq!(
+            executables(messages),
+            [p("/t/debug/deps/engine-1"), p("/t/debug/spherecut")]
+        );
+    }
+
+    #[test]
+    fn the_load_check_fails_an_executable_loading_ffmpeg_from_elsewhere() {
+        // This test binary links the FFmpeg it was built against (xtask
+        // has synth, for hw-test's perf clips), which is inside `/` and
+        // not inside an empty directory.
+        let me = std::env::current_exe().unwrap();
+        check_loads(std::slice::from_ref(&me), Path::new("/"), &[], &[]).unwrap();
+        let elsewhere =
+            std::env::temp_dir().join(format!("spherecut-compat-loads-{}", std::process::id()));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let e = check_loads(&[me], &elsewhere, &[], &[]).unwrap_err();
+        let _ = std::fs::remove_dir(&elsewhere);
+        let e = format!("{e:#}");
+        assert!(
+            e.contains("outside the prefix") && e.contains("loads libavcodec"),
+            "{e}"
+        );
+        let e = check_loads(&[], Path::new("/"), &[], &[]).unwrap_err();
+        assert!(format!("{e:#}").contains("no test executable"), "{e:#}");
+    }
+
+    #[test]
+    fn ldd_output_gives_each_ffmpeg_library_and_where_it_loads() {
+        let ldd = "\
+\tlinux-vdso.so.1 (0x00007ffd5a7f2000)
+\tlibasound.so.2 => /lib/x86_64-linux-gnu/libasound.so.2 (0x00007f0a1c000000)
+\tlibavcodec.so.62 => /ff/n8.1/lib/libavcodec.so.62 (0x00007f0a1a000000)
+\tlibavutil.so.60 => /lib/x86_64-linux-gnu/libavutil.so.60 (0x00007f0a19000000)
+\tlibswresample.so.6 => not found
+\tlibavcodec-extra.so.1 => /x/libavcodec-extra.so.1 (0x1)
+\t/lib64/ld-linux-x86-64.so.2 (0x00007f0a1d000000)
+";
+        assert_eq!(
+            ffmpeg_loads(ldd),
+            [
+                (
+                    "libavcodec.so.62".to_owned(),
+                    Some(p("/ff/n8.1/lib/libavcodec.so.62"))
+                ),
+                (
+                    "libavutil.so.60".to_owned(),
+                    Some(p("/lib/x86_64-linux-gnu/libavutil.so.60"))
+                ),
+                ("libswresample.so.6".to_owned(), None),
+            ]
         );
     }
 
@@ -1601,6 +1882,7 @@ mod tests {
             Path::new("/ff/n8.1/lib/pkgconfig"),
             Path::new("/t/compat/n8.1"),
             &[],
+            false,
             &existing,
         );
         for name in &unset {
