@@ -38,8 +38,9 @@ With `--json`:
 ## Versions
 
 `schema` names the document and its version: `spherecut.probe/1`,
-`spherecut.doctor/1`, `spherecut.frame/1`, and `spherecut/1` for a usage
-error that names no subcommand. Check the whole string.
+`spherecut.doctor/1`, `spherecut.frame/1`, `spherecut.call/1`, and
+`spherecut/1` for a usage error that names no subcommand. Check the
+whole string.
 
 Within a version:
 
@@ -628,6 +629,36 @@ A failed run has no `result`:
 {"schema":"spherecut.frame/1","ok":false,"error":{"code":"out_of_range","message":"no frame at 1.5 s: the clip runs from 0 to 1.001 s (its last frame starts at 0.968 s)","path":"grid-hevc10-2997.mp4"},"warnings":[]}
 ```
 
+## `spherecut call <TOOL> [<JSON>] [--read-root <DIR>]...`
+
+Runs one of the tools `spherecut mcp` serves to agents (docs/agents.md),
+with the same argument checks, roots and limits, and always prints JSON:
+there is no `--json`. `<JSON>` is the tool's arguments as an agent sends
+them, `{}` by default. `--read-root`, `--allow-write` and `--write-root`
+are mcp's.
+
+```sh
+$ spherecut call probe '{"files": ["grid-hevc10-2997.mp4"]}'
+{"schema":"spherecut.call/1","ok":true,"result":{"complete":true,"files":[{"audio":"stereo, 48 kHz","bit_depth":10,"camera":null,"codec":"hevc","duration":{"exact":"1001/1000","seconds":1.001},"file":"grid-hevc10-2997.mp4","fps":29.97,"metadata":"spherical_v2","ok":true,"problems":[],"projection":"equirect","size":[1024,512]}],"warnings":[]},"warnings":[]}
+```
+
+`result` is exactly what an MCP client gets as the call's
+`structuredContent`, and `warnings` repeats the result's own. A tool's
+error is `error`, the object an MCP client gets under `error` in the
+call's text: `code`, `argument` (the JSON path of the argument at
+fault, or null), `message`, and `valid` and `next` when there is
+something to say. Its codes are the agent tools' (docs/agents.md), not
+this document's, except `usage` for arguments that aren't JSON or a root
+that can't be used, and `cancelled`.
+
+| Exit | When |
+|---|---|
+| 0 | The tool ran. A probe whose files failed still ran: each file's entry says so |
+| 1 | The tool's error |
+| 2 | Arguments that aren't JSON, an unknown tool, `bad_argument`, a root that can't be used |
+| 3 | `no_gpu` |
+| 4 | SIGINT: the call was cancelled (`cancelled`) |
+
 ## `spherecut --smoke <CLIP> --smoke-out <JSON>` (hidden; hw-test's)
 
 The GUI with a script: it opens `CLIP` in a window of 1280 × 800 points
@@ -685,7 +716,8 @@ $ echo $?
 ```
 
 The schema is the subcommand's when the first argument that isn't an
-option names one (`probe`, `doctor`, `frame`), and `spherecut/1` otherwise.
+option names one (`probe`, `doctor`, `frame`, `call`), and `spherecut/1`
+otherwise. `call`'s are JSON without `--json`.
 frame's own usage errors, which clap can't find (a `--fov` past the
 projection's limit, a `--size` past the GPU's, a `--stream` that isn't a
 video stream), are `usage` errors with exit 2 too, under

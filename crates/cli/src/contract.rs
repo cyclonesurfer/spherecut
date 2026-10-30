@@ -26,6 +26,9 @@ pub const PROBE: &str = "spherecut.probe/1";
 pub const DOCTOR: &str = "spherecut.doctor/1";
 /// The schema of `spherecut frame --json`.
 pub const FRAME: &str = "spherecut.frame/1";
+/// The schema of `spherecut call`, which always prints JSON: an agent
+/// tool's Response as `result`, or its error (a1-plan amendment 7).
+pub const CALL: &str = "spherecut.call/1";
 /// The schema of a usage error that names no subcommand.
 pub const CLI: &str = "spherecut/1";
 
@@ -488,14 +491,16 @@ pub fn doctor(report: &DoctorReport) -> (Envelope<&DoctorReport>, Exit) {
     (Envelope::new(DOCTOR, Some(report), error), exit)
 }
 
-/// Whether the command line asks for JSON: `--json` before any `--`.
-/// Checked before parsing, so that a command line that doesn't parse can
-/// still be answered in JSON.
+/// Whether the command line asks for JSON: `--json` before any `--`, or
+/// `call`, which has no other output. Checked before parsing, so that a
+/// command line that doesn't parse can still be answered in JSON.
 pub fn wants_json(args: &[OsString]) -> bool {
-    args.iter()
-        .skip(1)
-        .take_while(|a| *a != "--")
-        .any(|a| a == "--json")
+    schema_for(args) == CALL
+        || args
+            .iter()
+            .skip(1)
+            .take_while(|a| *a != "--")
+            .any(|a| a == "--json")
 }
 
 /// The schema of the document for a command line, which may not parse:
@@ -510,6 +515,7 @@ pub fn schema_for(args: &[OsString]) -> &'static str {
         Some("probe") => PROBE,
         Some("doctor") => DOCTOR,
         Some("frame") => FRAME,
+        Some("call") => CALL,
         _ => CLI,
     }
 }
@@ -558,6 +564,8 @@ mod tests {
         assert!(!wants_json(&args(&["spherecut", "probe", "--json=1"])));
         // argv[0] is the program, whatever it is called.
         assert!(!wants_json(&args(&["--json", "probe"])));
+        assert!(wants_json(&args(&["spherecut", "call", "probe", "{}"])));
+        assert_eq!(schema_for(&args(&["spherecut", "call"])), CALL);
     }
 
     #[test]

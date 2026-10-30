@@ -11,9 +11,8 @@ use std::sync::OnceLock;
 
 use serde_json::{Map, Value, json};
 
-use crate::error::ToolError;
-#[cfg(test)]
-use crate::error::codes;
+use crate::error::{ToolError, codes};
+use crate::limits::RESULT_CHARS;
 use crate::roots::Roots;
 use crate::rpc::{CallCx, Output, Tools};
 use crate::{ops, schema, text};
@@ -29,11 +28,18 @@ pub struct Tool {
 }
 
 /// Every tool, in `tools/list`'s order.
-pub const TOOLS: &[Tool] = &[Tool {
-    name: "doctor",
-    title: "Check this machine's decoders",
-    schema: include_str!("../../../docs/agents/schemas/doctor.json"),
-}];
+pub const TOOLS: &[Tool] = &[
+    Tool {
+        name: "probe",
+        title: "Read what media files are",
+        schema: include_str!("../../../docs/agents/schemas/probe.json"),
+    },
+    Tool {
+        name: "doctor",
+        title: "Check this machine's decoders",
+        schema: include_str!("../../../docs/agents/schemas/doctor.json"),
+    },
+];
 
 /// The most tools `tools/list` may hold: past a dozen, agents choose
 /// worse (a1-plan section 4.4).
@@ -141,13 +147,34 @@ impl Tools for Spherecut {
             )));
         };
         schema::validate(&p.schema, &args)?;
+        let cx = ops::Ctx {
+            roots: &self.roots,
+            call: cx,
+        };
         let mut result = match name {
-            "doctor" => ops::doctor::run(ops::request(args)?, cx)?,
+            "probe" => ops::probe::run(ops::request(args)?, &cx)?,
+            "doctor" => ops::doctor::run(ops::request(args)?, &cx)?,
             _ => return Err(ToolError::internal(format!("{name} has no op"))),
         };
         text::sanitize(&mut result);
+        fits(&result)?;
         Ok(Output::json(result))
     }
+}
+
+/// Err when a result's text would pass [`RESULT_CHARS`]: the ops keep
+/// under it, so this is the backstop.
+fn fits(result: &Value) -> Result<(), ToolError> {
+    let n = result.to_string().chars().count();
+    if n <= RESULT_CHARS {
+        return Ok(());
+    }
+    tracing::warn!("mcp: a result of {n} characters, past {RESULT_CHARS}");
+    Err(ToolError::new(
+        codes::OUT_OF_RANGE,
+        format!("the result would take {n} characters, past the {RESULT_CHARS} a client shows"),
+    )
+    .next("ask for less: fewer files, a smaller page_size, or detail \"summary\""))
 }
 
 #[cfg(test)]
@@ -191,6 +218,10 @@ mod tests {
     /// that mode allows (a1-plan amendment 30).
     fn examples(name: &str) -> Vec<Value> {
         match name {
+            "probe" => vec![
+                json!({"files": ["a.mp4", "/media/b.insv"], "detail": "full"}),
+                json!({"folder": "DCIM", "detail": "summary", "page_size": 10, "cursor": "10:00000000000000ff"}),
+            ],
             "doctor" => vec![json!({"render_node": "/dev/dri/renderD128"})],
             _ => vec![],
         }
@@ -199,6 +230,7 @@ mod tests {
     /// Whether the tool's request type takes `args`.
     fn accepts(name: &str, args: Value) -> Result<(), ToolError> {
         match name {
+            "probe" => ops::request::<ops::probe::Request>(args).map(drop),
             "doctor" => ops::request::<ops::doctor::Request>(args).map(drop),
             _ => Err(ToolError::internal(format!("no request type for {name}"))),
         }
@@ -262,6 +294,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The schemas' numbers are the limits'.
+    #[test]
+    fn schemas_hold_the_limits() {
+        use crate::limits::{FILES_PER_CALL, MAX_PAGE_SIZE};
+        let probe = parsed()
+            .iter()
+            .find(|(t, _)| t.name == "probe")
+            .map(|(_, s)| s.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            probe["properties"]["files"]["maxItems"],
+            json!(FILES_PER_CALL)
+        );
+        assert_eq!(
+            probe["properties"]["page_size"]["maximum"],
+            json!(MAX_PAGE_SIZE)
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ use serde::Serialize;
 use spherecut_cli::contract::{self, Envelope, Exit, ProbeFile};
 use spherecut_core::brand;
 
+mod call;
 #[allow(unsafe_code)]
 mod exit;
 mod frame;
@@ -121,6 +122,19 @@ enum Cmd {
         #[command(flatten)]
         roots: RootArgs,
     },
+    /// Run one of the agent tools that `spherecut mcp` serves, with the
+    /// same roots and limits, and print its result as one JSON document
+    /// (docs/agents.md).
+    Call {
+        /// The tool: probe or doctor.
+        tool: String,
+        /// Its arguments, a JSON object, as an agent sends them, such as
+        /// '{"files": ["a.mp4"]}'.
+        #[arg(default_value = "{}")]
+        args: String,
+        #[command(flatten)]
+        roots: RootArgs,
+    },
 }
 
 /// Where an agent's files may be read from and written to (D45).
@@ -141,10 +155,15 @@ struct RootArgs {
 }
 
 impl RootArgs {
-    /// The roots, opened; a root that can't be used is the command line's
+    /// The roots, opened. A root that can't be used is the command line's
     /// fault, and stops the command before it starts.
+    fn roots(&self) -> std::result::Result<spherecut_agent::Roots, spherecut_agent::RootsError> {
+        spherecut_agent::Roots::new(&self.read_roots, self.write_root.as_deref())
+    }
+
+    /// [`roots`](Self::roots), or the usage error on stderr.
     fn open(&self, command: &str) -> std::result::Result<spherecut_agent::Roots, Exit> {
-        spherecut_agent::Roots::new(&self.read_roots, self.write_root.as_deref()).map_err(|e| {
+        self.roots().map_err(|e| {
             eprintln!("spherecut {command}: {e}");
             Exit::Usage
         })
@@ -334,6 +353,7 @@ fn run(cli: Cli, args: &[OsString], json: bool) -> Result<Exit> {
             doctor(&node.path, json)
         }
         Cmd::Mcp { roots } => mcp(&roots),
+        Cmd::Call { tool, args, roots } => call::run(&tool, &args, &roots),
     }
 }
 
