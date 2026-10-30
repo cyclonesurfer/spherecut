@@ -282,7 +282,7 @@ stderr:
 | Code | Exit | Meaning |
 |---|---:|---|
 | `no_display` | 3 | No display to open a window on: `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` and `DISPLAY` are all unset or empty (winit's own rule). The message names the commands that work without one |
-| `timed_out` | 1 | The smoke run (below): no frame of the clip within 60 s of opening it |
+| `timed_out` | 1 | The smoke run (below): no frame of the clip within 60 s of opening it, or no UI pass for 15 s (the window isn't drawn) |
 
 The smoke run's own failures also use `cancelled` (exit 4: the window
 closed before the run had ended), `io_error` (its JSON can't be written)
@@ -636,6 +636,16 @@ wide, its aspect kept), writes one document to `JSON`, and closes. The
 exit status is the GUI's: 0 when the document says `ok`, and otherwise
 by its code (above). hw-test's `gui_smoke` runs it; the flags are hidden
 from `--help`, and the schema may grow fields as the GUI does.
+
+A window the compositor doesn't draw (a locked or blanked screen, a
+minimized window, another virtual terminal) has no UI passes, and the
+run's own limits are checked in them. A watchdog thread ends such a
+run: after 15 s with no UI pass it writes a `timed_out` document whose
+message says how long after the window opened, in which phase, and
+whether eframe's logic still ran (a hidden window) or not (a UI thread
+stuck in presenting), then exits 1. Once the run's document is being
+written it writes nothing, and exits 1 only if the process hasn't ended
+15 s later.
 
 The document has the envelope above, with the schema `spherecut.smoke/1`
 and no `path` in its `error`. Its `result`:

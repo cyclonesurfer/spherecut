@@ -12,10 +12,19 @@
 //! worth too late to read. The screenshot is downscaled to at most
 //! [`SCREENSHOT_WIDTH`] pixels wide, and the files are written on a
 //! worker: the UI thread never waits on the disk.
+//!
+//! The run's own limits are checked in its UI passes, which stop where
+//! the compositor draws nothing of the window: eframe then runs only its
+//! `logic`, or the UI thread waits in presenting (a locked GNOME session,
+//! 2026-10-30). A watchdog thread ([`SmokeDriver::watch`]) ends such a
+//! run: after [`STALL`] with no UI pass it writes a `timed_out` document
+//! saying when the passes stopped and whether eframe's logic still ran,
+//! and exits the process.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -38,6 +47,13 @@ const FIRST_FRAME: Duration = Duration::from_secs(60);
 /// The longest the screenshot is: eframe reads it back with the frame it
 /// was asked in.
 const SCREENSHOT: Duration = Duration::from_secs(5);
+
+/// The longest the window may go without a UI pass before the watchdog
+/// ends the run.
+pub const STALL: Duration = Duration::from_secs(15);
+
+/// How the watchdog ends the process: with this exit status.
+pub type ExitHook = Box<dyn FnOnce(i32) + Send>;
 
 /// What `--smoke` and its flags ask for.
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +82,7 @@ pub struct SmokeDriver {
     refresh_hz: Option<f64>,
     phase: Phase,
     outcome: Option<Outcome>,
+    watchdog: Option<Watchdog>,
 }
 
 #[derive(Debug)]
@@ -114,6 +131,29 @@ impl SmokeDriver {
                 since: Instant::now(),
             },
             outcome: None,
+            watchdog: None,
+        }
+    }
+
+    /// Start the watchdog: from now, `stall` with no UI pass ends the run
+    /// with a `timed_out` document and `exit(1)`, unless its document is
+    /// being written already, when only `exit(1)` is left (the window
+    /// didn't close). Its thread is never joined: it ends with the
+    /// process, or once the driver has gone without the run's end.
+    pub fn watch(&mut self, stall: Duration, exit: ExitHook) {
+        let (beats, rx) = mpsc::channel();
+        let args = self.args.clone();
+        let spawned = std::thread::Builder::new()
+            .name("smoke-watchdog".into())
+            .spawn(move || watchdog(&rx, stall, &args, exit));
+        match spawned {
+            Ok(_detached) => {
+                self.watchdog = Some(Watchdog {
+                    beats,
+                    written: false,
+                });
+            }
+            Err(e) => tracing::warn!(error = %e, "the smoke run's watchdog didn't start"),
         }
     }
 
@@ -140,6 +180,9 @@ impl SmokeDriver {
 
     /// Every pass, the window shown or not: the stages' new samples.
     pub fn logic(&mut self, s: &AppState) {
+        if let Some(w) = &self.watchdog {
+            let _ = w.beats.send(Beat::Logic);
+        }
         if let Phase::Playing(run) = &mut self.phase {
             run.passes += 1;
             if let Some(p) = &s.player {
@@ -150,6 +193,13 @@ impl SmokeDriver {
 
     /// Each UI pass, after the UI: start, end, shoot, write, close.
     pub fn ui(&mut self, s: &mut AppState, ctx: &egui::Context) {
+        self.step(s, ctx);
+        if let Some(w) = &mut self.watchdog {
+            w.beat(&self.phase);
+        }
+    }
+
+    fn step(&mut self, s: &mut AppState, ctx: &egui::Context) {
         let now = Instant::now();
         match &mut self.phase {
             Phase::Waiting { since } => {
@@ -287,8 +337,12 @@ impl SmokeDriver {
     }
 
     /// The writer's thread, for the app's shutdown to join: the files it
-    /// writes are whole or not there.
-    pub fn take_thread(&mut self) -> Option<std::thread::JoinHandle<()>> {
+    /// writes are whole or not there. The window is closing, so the
+    /// watchdog writes nothing from now.
+    pub fn take_thread(&mut self) -> Option<JoinHandle<()>> {
+        if let Some(w) = &mut self.watchdog {
+            w.written();
+        }
         if !matches!(self.phase, Phase::Writing { .. }) {
             return None;
         }
@@ -296,6 +350,134 @@ impl SmokeDriver {
             Phase::Writing { job } => job.into_thread(),
             _ => None,
         }
+    }
+}
+
+impl Phase {
+    /// As the watchdog's document says it.
+    fn name(&self) -> &'static str {
+        match self {
+            Phase::Waiting { .. } => "waiting for the first frame",
+            Phase::Playing(_) => "playing",
+            Phase::Shooting { .. } => "taking the screenshot",
+            Phase::Writing { .. } => "writing its document",
+            Phase::Done { .. } => "done",
+        }
+    }
+}
+
+/// The driver's side of the watchdog.
+#[derive(Debug)]
+struct Watchdog {
+    beats: mpsc::Sender<Beat>,
+    /// The run's document is being written, or the window is closing.
+    written: bool,
+}
+
+impl Watchdog {
+    /// A UI pass ran, and left the run in `phase`.
+    fn beat(&mut self, phase: &Phase) {
+        if matches!(phase, Phase::Writing { .. } | Phase::Done { .. }) {
+            self.written();
+        } else if !self.written {
+            let _ = self.beats.send(Beat::Ui(phase.name()));
+        }
+    }
+
+    fn written(&mut self) {
+        if !std::mem::replace(&mut self.written, true) {
+            let _ = self.beats.send(Beat::Written);
+        }
+    }
+}
+
+/// What the driver tells the watchdog.
+#[derive(Debug)]
+enum Beat {
+    /// A UI pass ran, and the run is in this phase.
+    Ui(&'static str),
+    /// eframe's logic ran, the window shown or not.
+    Logic,
+    /// The run's document is being written, or the window is closing.
+    Written,
+}
+
+/// The watchdog's thread: [`SmokeDriver::watch`].
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the watchdog's own thread, never the UI's: it waits out the window's close"
+)]
+fn watchdog(beats: &mpsc::Receiver<Beat>, stall: Duration, args: &SmokeArgs, exit: ExitHook) {
+    let opened = Instant::now();
+    let mut deadline = opened + stall;
+    // When the last UI pass ran, after the window opened, and the phase
+    // it left; logic passes since.
+    let mut last: Option<(Duration, &'static str)> = None;
+    let mut logic = 0u64;
+    let mut written = false;
+    loop {
+        match beats.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Beat::Ui(phase)) => {
+                last = Some((opened.elapsed(), phase));
+                logic = 0;
+                deadline = Instant::now() + stall;
+            }
+            Ok(Beat::Logic) => logic += 1,
+            Ok(Beat::Written) => {
+                written = true;
+                deadline = Instant::now() + stall;
+            }
+            // The driver went before the run ended: nothing to watch.
+            Err(mpsc::RecvTimeoutError::Disconnected) if !written => return,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+        }
+    }
+    if written {
+        tracing::error!(
+            "the window didn't close within {} s of the smoke run's end",
+            stall.as_secs_f64()
+        );
+    } else {
+        let message = stalled(stall, last, logic);
+        tracing::error!(code = "timed_out", message, "the smoke run failed");
+        match write_out(args, Document::failed("timed_out", message), None) {
+            Err((code, e)) if code != "timed_out" => {
+                tracing::error!(error = e, "the watchdog's document");
+            }
+            _ => {}
+        }
+    }
+    exit(1);
+}
+
+/// The watchdog's message: no UI pass for `stall` since `last` (when
+/// the last ran, after the window opened, and the phase it left), with
+/// `logic` passes of eframe's since.
+fn stalled(stall: Duration, last: Option<(Duration, &str)>, logic: u64) -> String {
+    let stall = stall.as_secs_f64();
+    let head = match last {
+        None => format!("the window had no UI pass in the {stall} s after it opened"),
+        Some((at, phase)) => format!(
+            "the window's UI passes stopped {:.1} s after it opened, while {phase}, and none \
+             came for {stall} s",
+            at.as_secs_f64()
+        ),
+    };
+    if logic > 0 {
+        format!(
+            "{head}, though eframe's logic ran {logic} times: the compositor shows nothing of \
+             the window (a locked or blanked screen, a minimized window, another virtual \
+             terminal)"
+        )
+    } else {
+        format!(
+            "{head}, nor did eframe's logic: the UI thread is stuck, likely presenting to a \
+             compositor that draws nothing of the window (a locked or blanked screen)"
+        )
     }
 }
 
@@ -768,6 +950,24 @@ mod tests {
         assert_eq!(downscale(&img(1001, 333), 960).dimensions(), (960, 319));
         // Narrow enough already: as it is.
         assert_eq!(downscale(&img(800, 500), 960).dimensions(), (800, 500));
+    }
+
+    #[test]
+    fn the_watchdog_says_when_and_how_the_window_stalled() {
+        let stall = Duration::from_secs(15);
+        assert_eq!(
+            stalled(stall, None, 0),
+            "the window had no UI pass in the 15 s after it opened, nor did eframe's logic: the \
+             UI thread is stuck, likely presenting to a compositor that draws nothing of the \
+             window (a locked or blanked screen)"
+        );
+        assert_eq!(
+            stalled(stall, Some((Duration::from_millis(22_140), "playing")), 840),
+            "the window's UI passes stopped 22.1 s after it opened, while playing, and none \
+             came for 15 s, though eframe's logic ran 840 times: the compositor shows nothing \
+             of the window (a locked or blanked screen, a minimized window, another virtual \
+             terminal)"
+        );
     }
 
     #[test]

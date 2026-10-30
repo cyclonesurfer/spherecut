@@ -6413,9 +6413,30 @@ What:
     player's (`not_found`, ...), `timed_out` (a new code: no frame within
     60 s), `cancelled` (the window closed before the end), `io_error`
     and `internal`.
+  - *(Slice 9.)* A watchdog thread (`SmokeDriver::watch`, run.rs starts
+    it) ends a run whose window has had no UI pass for 15 s
+    (`smoke::STALL`): it writes a `timed_out` document saying how long
+    after the window opened, in which phase, and whether eframe's logic
+    still ran, then calls `std::process::exit(1)`. The driver beats it
+    from `ui` and `logic`; once the document is being written, or the
+    window is closing, it writes nothing and exits 1 only if the process
+    is still there 15 s later. hw-test's `gui_smoke` runs nothing while
+    logind's `LockedHint` says the session is locked
+    (`tier2::session_locked`), fails at once when it is at the start,
+    and says on a failed run whether the screen had locked by its end.
 
 Why: hw-test's report, the overlay and `docs/perf.md` have to agree,
-which one set of counters gives. A ring's percentiles would describe the
+which one set of counters gives. The watchdog came from H2 on odin
+(2026-10-30): the screen had locked after 2.5 hours idle, every smoke
+run's window got no UI pass, so neither the 60 s first-frame limit nor
+the run's end, both checked in UI passes, ever came, and `gui_smoke`
+killed each run after 120 s with no document. The UI thread may be
+stuck in presenting, where no timer of its own can fire, so the
+watchdog is a thread of its own and exits the process rather than ask
+the window to close; `std::process::exit` over `libc::_exit` keeps the
+app free of unsafe code, at the risk of an exit handler that waits on
+the stuck thread, which `gui_smoke`'s 120 s kill still covers, the
+document already written. A ring's percentiles would describe the
 last four seconds of a 20 s run, which is how a hitch at the start goes
 unseen. A refresh rate from the compositor is the only way to tell a
 hidden window from a slow one: a window the compositor doesn't draw
@@ -6445,7 +6466,12 @@ Tested (kittest on lavapipe, `crates/app/tests`):
 - `smoke.rs`: the run plays, measures, shoots and writes, every field
   checked (the screenshot 960 × 600 from a 1600 × 1000 window, no stage
   sample missed, presented 1.0 with no refresh rate); a clip that can't
-  open ends the run with `not_found`. `contract.rs`: the hidden flags'
+  open ends the run with `not_found`. The watchdog (slice 9): with no
+  pass at all it writes `timed_out` saying the UI thread is stuck, and
+  exits 1; with logic alone it says that logic ran; a finished run's
+  document is left alone, and only the exit comes after the stall.
+  testkit's `the_lock_is_read_from_the_users_graphical_session` checks
+  the `loginctl` rule, and xtask's report test the locked summary. `contract.rs`: the hidden flags'
   usage errors, `no_display` before any window, and not in `--help`.
 
 Revisit if: H2's screenshots show the overlay unreadable over bright

@@ -204,3 +204,128 @@ fn a_clip_that_cant_open_ends_the_run_with_its_code() {
     assert!(!args.screenshot.unwrap().exists());
     eprintln!("{code}: {message}");
 }
+
+/// The watchdog's exit, as a test sees it: the status, on a channel.
+fn exit_hook() -> (
+    spherecut_app::smoke::ExitHook,
+    std::sync::mpsc::Receiver<i32>,
+) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    (
+        Box::new(move |code| {
+            let _ = tx.send(code);
+        }),
+        rx,
+    )
+}
+
+/// A window that has no UI pass, as on a locked GNOME session, where
+/// the UI thread waits in presenting: the watchdog writes why and exits.
+#[test]
+fn the_watchdog_ends_a_run_whose_window_has_no_pass() {
+    let dir = common::tmp().join("smoke-stuck");
+    std::fs::create_dir_all(&dir).unwrap();
+    let args = SmokeArgs {
+        clip: clip().to_path_buf(),
+        seconds: 1.0,
+        out: dir.join("smoke.json"),
+        screenshot: Some(dir.join("smoke.png")),
+    };
+    let mut d = SmokeDriver::new(args.clone(), "Bgra8UnormSrgb".into());
+    let (hook, exited) = exit_hook();
+    d.watch(Duration::from_millis(300), hook);
+    assert_eq!(exited.recv_timeout(Duration::from_secs(20)), Ok(1));
+    let doc = read_json(&args.out);
+    assert_eq!(doc["schema"], SCHEMA);
+    assert_eq!(doc["ok"], false);
+    assert_eq!(doc["error"]["code"], "timed_out");
+    let message = doc["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(
+            "the window had no UI pass in the 0.3 s after it opened, nor did eframe's logic: \
+             the UI thread is stuck"
+        ),
+        "{message}"
+    );
+    assert!(!args.screenshot.unwrap().exists());
+    drop(d);
+}
+
+/// eframe's logic alone, as for a window the compositor hides: the
+/// watchdog says that it ran.
+#[test]
+fn the_watchdog_tells_a_hidden_window_from_a_stuck_one() {
+    let gpu = common::gpu();
+    let rs = common::render_state(&gpu);
+    let dir = common::tmp().join("smoke-hidden");
+    std::fs::create_dir_all(&dir).unwrap();
+    let args = SmokeArgs {
+        clip: clip().to_path_buf(),
+        seconds: 1.0,
+        out: dir.join("smoke.json"),
+        screenshot: None,
+    };
+    let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
+    // One UI pass, then logic alone.
+    let (hook, exited) = exit_hook();
+    h.state_mut()
+        .smoke
+        .as_mut()
+        .unwrap()
+        .watch(Duration::from_secs(5), hook);
+    h.step();
+    let app = h.state_mut();
+    let code = loop {
+        app.logic(&egui::Context::default());
+        match exited.recv_timeout(Duration::from_millis(20)) {
+            Ok(code) => break code,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(e) => panic!("{e}"),
+        }
+    };
+    assert_eq!(code, 1);
+    let doc = read_json(&args.out);
+    assert_eq!(doc["error"]["code"], "timed_out");
+    let message = doc["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("the window's UI passes stopped ")
+            && message.contains(" s after it opened, while ")
+            && message.contains(", and none came for 5 s, though eframe's logic ran ")
+            && message.contains("the compositor shows nothing of the window"),
+        "{message}"
+    );
+}
+
+/// A run longer than the stall goes on while its passes come, writes
+/// its own document, which the watchdog leaves alone, and past the
+/// stall with the window still open is only exited.
+#[test]
+fn the_watchdog_leaves_a_finished_runs_document() {
+    let gpu = common::gpu();
+    let rs = common::render_state(&gpu);
+    let dir = common::tmp().join("smoke-watched");
+    std::fs::create_dir_all(&dir).unwrap();
+    let args = SmokeArgs {
+        clip: clip().to_path_buf(),
+        // To the clip's end, 3 s in.
+        seconds: 10.0,
+        out: dir.join("smoke.json"),
+        screenshot: None,
+    };
+    let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
+    let (hook, exited) = exit_hook();
+    // Shorter than the run, longer than lavapipe's slowest pass here.
+    let stall = Duration::from_secs(2);
+    h.state_mut().smoke.as_mut().unwrap().watch(stall, hook);
+    run_to_end(&mut h);
+    assert_eq!(h.state().smoke.as_ref().unwrap().outcome(), Some(&Ok(())));
+    assert_eq!(
+        exited.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty),
+        "the watchdog fired while the passes came"
+    );
+    assert_eq!(read_json(&args.out)["ok"], true);
+    // The window "didn't close": nothing here ends the process.
+    assert_eq!(exited.recv_timeout(stall * 3), Ok(1));
+    assert_eq!(read_json(&args.out)["ok"], true);
+}

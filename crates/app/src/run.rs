@@ -18,7 +18,7 @@ use spherecut_render::{AdapterChoice, Gpu, RenderError};
 
 use crate::app::{AppParts, DoctorRun, Pane, SpherecutApp};
 use crate::settings::Settings;
-use crate::smoke::{Outcome, SmokeArgs, SmokeDriver};
+use crate::smoke::{Outcome, STALL, SmokeArgs, SmokeDriver};
 use crate::viewer::ViewerResources;
 
 /// eframe storage keys.
@@ -222,9 +222,13 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
                 open,
             });
             let mut app = app;
-            app.smoke = args
-                .smoke
-                .map(|a| SmokeDriver::new(a, format!("{:?}", rs.target_format)));
+            app.smoke = args.smoke.map(|a| {
+                let mut d = SmokeDriver::new(a, format!("{:?}", rs.target_format));
+                // The run's limits come in its UI passes, and a window the
+                // compositor doesn't draw has none.
+                d.watch(STALL, Box::new(|code| std::process::exit(code)));
+                d
+            });
             Ok(Box::new(EframeApp { app, leftover }))
         }),
     );

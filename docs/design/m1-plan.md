@@ -299,6 +299,23 @@ the sections below, they win.
     - Section 14's slice 8: "D35 final" is D37 (amendment 1), and D40
       records the slice's own choices. The cached ranges came with
       slice 7 (amendment 16).
+20. **Slice 9, before H3** (D37, D40). Added to section 12.4's item 5
+    and to hw-test, from H2 on odin:
+    - The smoke run has a watchdog thread: 15 s without a UI pass ends
+      it with a `timed_out` document saying whether eframe's logic
+      still ran, and exit 1, since the run's own limits are checked in
+      UI passes, which a window the compositor doesn't draw never gets.
+    - `gui_smoke` reads logind's `LockedHint` for the user's graphical
+      session: locked at the start, it fails at once with the rerun
+      command; it runs no clip while locked; a failed run says whether
+      the screen had locked by its end. The summary and the report
+      carry the lock state.
+    - `cargo xtask hw-test --only <name>` runs the Tier 2 tests whose
+      `binary::test` contains a name given, for reruns such as the GUI
+      part after an unlock or at a fractional scale.
+    - doctor reports each Vulkan device's `shared_decode` (with the
+      reason when false), planned by `core::vkplan` as render plans the
+      shared device, and `zero_copy`.
 
 ## 1. Summary
 

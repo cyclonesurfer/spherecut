@@ -25,10 +25,16 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
         let _ = writeln!(r, "No run: `gui_smoke` {test}.\n");
         return r;
     };
+    // As logind had it; not known without loginctl.
+    let lock = match s["locked"].as_bool() {
+        Some(true) => " The screen was locked when the runs began, so none ran.",
+        Some(false) => " The screen was unlocked when the runs began.",
+        None => "",
+    };
     let _ = writeln!(
         r,
         "`gui_smoke` {test}. The session: {} ({}). VA-API decodes {} by doctor's check, so \
-         those clips must decode there.\n",
+         those clips must decode there.{lock}\n",
         s["session"].as_str().unwrap_or("?"),
         list(&s["env"]),
         match list(&s["vaapi_hevc"]) {
@@ -268,6 +274,7 @@ mod tests {
         let summary = serde_json::json!({
             "session": "Wayland socket discovered",
             "env": ["WAYLAND_DISPLAY=wayland-0"],
+            "locked": false,
             "vaapi_hevc": ["HEVC Main", "HEVC Main 10"],
             "runs": [
                 {"n": 0, "label": "noisy 5.7K 8-bit", "clip": "/m/a.mp4",
@@ -283,7 +290,10 @@ mod tests {
         let md = section(&dir, &report, "passed");
         eprintln!("{md}");
         assert!(md.contains("The session: Wayland socket discovered (WAYLAND_DISPLAY=wayland-0)"));
-        assert!(md.contains("VA-API decodes HEVC Main, HEVC Main 10"));
+        assert!(md.contains(
+            "VA-API decodes HEVC Main, HEVC Main 10 by doctor's check, so those clips must \
+             decode there. The screen was unlocked when the runs began.\n"
+        ));
         assert!(md.contains(
             "| 0 | noisy 5.7K 8-bit | pass | 100% | 16.7 / 18.2 | 59.95 Hz | 600 / 0 / 0 | VA-API | 2.0 / 6.5 | PulseAudio, 41 ms |"
         ));
@@ -302,6 +312,22 @@ mod tests {
         );
         assert!(md.contains("No measurements: no frame."));
         assert!(md.contains("- X5 raw view: no samples directory"));
+        // Locked from the start: nothing ran, and the report says why.
+        std::fs::write(
+            dir.join(SUMMARY),
+            serde_json::json!({
+                "session": "WAYLAND_DISPLAY set", "env": ["WAYLAND_DISPLAY=wayland-0"],
+                "locked": true, "vaapi_hevc": [], "runs": [],
+                "not_run": [{"label": "every run", "why": "the screen is locked"}],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let locked = section(&dir, &report, "failed");
+        assert!(locked.contains("no HEVC profile by doctor's check"));
+        assert!(locked.contains("The screen was locked when the runs began, so none ran."));
+        assert!(locked.contains("- every run: the screen is locked"));
+        assert!(!locked.contains("| # |"));
         // No summary: why, from the test's outcome.
         let none = section(
             &s.0.join("nothing"),
