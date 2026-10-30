@@ -41,7 +41,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -51,6 +51,7 @@ use spherecut_media::backend::{
     DecoderEvent, Exactness, FallbackReason, HwKind, MediaBackend, SeekMode, VideoStreamInfo,
 };
 use spherecut_media::hw::GpuIds;
+use spherecut_render::vkshare::SharedVideo;
 use spherecut_render::{Gpu, GpuFrame, RenderError};
 use thiserror::Error;
 
@@ -186,10 +187,13 @@ pub struct PlayerConfig {
     /// negative). Paused, the frame at the clock's time shows, as a
     /// frame-exact seek or step put it.
     pub av_offset_ms: i32,
-    /// Slice 5b's path A: VA-API frames stay on the device as DMA-BUFs
-    /// and are imported into the GPU, instead of downloaded and uploaded,
-    /// when the device can import them. Off by default until the decision
-    /// before M3 (D25); [`ZERO_COPY_ENV`] turns it on.
+    /// Slice 5b: frames stay on the decoder's device and reach their
+    /// slots on the GPU, instead of downloaded and uploaded. VA-API
+    /// frames are exported as DMA-BUFs and imported (path A) when the
+    /// device can import them; Vulkan Video frames are decoded on the
+    /// renderer's own device and copied out there (path B) when that
+    /// device was made shared (`Gpu::for_window_shared`). Off by default
+    /// until the decision before M3 (D25); [`ZERO_COPY_ENV`] turns it on.
     pub zero_copy: bool,
 }
 
@@ -329,7 +333,7 @@ pub struct PlayerSnapshot {
     pub slots: SlotStats,
     pub perf: PerfSnapshot,
     pub gpu_error: Option<PlayerError>,
-    /// Why the GPU wouldn't import a frame exported as DMA-BUFs (zero
+    /// Why the GPU wouldn't take a frame left on the decoder's device (zero
     /// copy, slice 5b), once it hasn't: the frames are copied from then
     /// on.
     pub import_refused: Option<String>,
@@ -533,6 +537,8 @@ pub struct Player {
     render_node: Option<PathBuf>,
     /// The device imports DMA-BUFs ([`PlayerConfig::zero_copy`]).
     dmabuf_import: bool,
+    /// The device was made shared with FFmpeg's Vulkan Video.
+    shared_video: Option<Arc<SharedVideo>>,
     base_clock: Arc<dyn Clock>,
     upload: Sender<UploadCommand>,
     handles_tx: Sender<(String, JoinHandle<()>)>,
@@ -587,6 +593,7 @@ impl Player {
             shutdown: AtomicBool::new(false),
             open_lock: Mutex::new(()),
             hw: Mutex::new(parts.hw),
+            vulkan_device: OnceLock::new(),
             events: events_tx,
             handles: handles_tx.clone(),
             repaint: parts.repaint,
@@ -599,9 +606,17 @@ impl Player {
             device: info.device,
         };
         let dmabuf_import = parts.gpu.caps.dmabuf_import;
+        let shared_video = parts.gpu.shared_video().ok().cloned();
         if config.zero_copy && !dmabuf_import {
             tracing::info!(
-                "zero copy is on, but this device can't import DMA-BUFs: frames are copied"
+                "zero copy is on, but this device can't import DMA-BUFs: VA-API frames are copied"
+            );
+        }
+        if config.zero_copy && shared_video.is_none() {
+            tracing::info!(
+                "zero copy is on, but the device isn't shared with the decoder: Vulkan Video \
+                 frames are copied ({})",
+                parts.gpu.shared_video().err().unwrap_or_default()
             );
         }
         let thread = UploadThread {
@@ -623,6 +638,7 @@ impl Player {
             gpu_ids,
             render_node: parts.render_node,
             dmabuf_import,
+            shared_video,
             base_clock: clock.clone(),
             upload,
             handles_tx,
@@ -738,6 +754,7 @@ impl Player {
             gpu_ids: self.gpu_ids.clone(),
             render_node: self.render_node.clone(),
             zero_copy: ui.config.zero_copy && self.dmabuf_import,
+            shared_video: self.shared_video.clone().filter(|_| ui.config.zero_copy),
         };
         if let Err(e) = spawn_into(&self.handles_tx, "open".into(), move || job.run()) {
             self.shared.event(PlayerEvent::OpenFailed {

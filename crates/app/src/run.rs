@@ -105,7 +105,14 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
         .clone()
         .or_else(AdapterChoice::from_env)
         .unwrap_or(AdapterChoice::Auto);
-    let gpu = Gpu::for_window(&choice)?;
+    // Zero copy (slice 5b) makes the device shareable with FFmpeg's
+    // Vulkan Video too, where the adapter can be (path B).
+    let zero_copy = spherecut_playback::zero_copy_from_env(|k| std::env::var(k).ok());
+    let gpu = if zero_copy {
+        Gpu::for_window_shared(&choice)?
+    } else {
+        Gpu::for_window(&choice)?
+    };
     // Decoding runs on the rendering GPU's node, where doctor's checks run.
     let info = &gpu.caps.info;
     let ids = GpuIds {
@@ -169,7 +176,7 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
             }
             let config = PlayerConfig {
                 cache: chosen.budget,
-                zero_copy: spherecut_playback::zero_copy_from_env(|k| std::env::var(k).ok()),
+                zero_copy,
                 ..PlayerConfig::default()
             };
             let audio = DeviceAudio::new(backend.clone(), AudioDevice::Default);

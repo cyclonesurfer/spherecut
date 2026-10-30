@@ -97,14 +97,17 @@ pub enum Counter {
     /// Times the audio ring ran dry while playing (slice 6).
     AudioUnderruns,
     /// Of the frames uploaded, those whose planes were imported as
-    /// DMA-BUFs and copied on the GPU (slice 5b), and those exported so
-    /// that the import refused and the upload thread downloaded instead.
+    /// DMA-BUFs and copied on the GPU (slice 5b's path A), those copied
+    /// out of the Vulkan decoder's images on the GPU (path B), and those
+    /// left on the decoder's device that the GPU refused, which the
+    /// upload thread downloaded instead.
     FramesImported,
+    VulkanCopies,
     ImportsRefused,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 12] = [
+    pub const ALL: [Counter; 13] = [
         Counter::FramesDecoded,
         Counter::FramesUploaded,
         Counter::FramesShown,
@@ -116,6 +119,7 @@ impl Counter {
         Counter::CacheWaits,
         Counter::AudioUnderruns,
         Counter::FramesImported,
+        Counter::VulkanCopies,
         Counter::ImportsRefused,
     ];
 
@@ -132,6 +136,7 @@ impl Counter {
             Counter::CacheWaits => "cache_waits",
             Counter::AudioUnderruns => "audio_underruns",
             Counter::FramesImported => "frames_imported",
+            Counter::VulkanCopies => "vulkan_copies",
             Counter::ImportsRefused => "imports_refused",
         }
     }

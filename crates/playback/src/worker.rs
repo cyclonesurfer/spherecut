@@ -42,12 +42,13 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 
 use spherecut_core::{Clock, StopToken, Time, may_block};
-use spherecut_media::MediaError;
 use spherecut_media::backend::{
-    DecodeMode, DecodeStats, DecoderEvent, Exactness, HwOutput, MediaBackend, NextFrame, SeekMode,
-    SeekOutcome, VideoDecode, VideoFrame, VideoRequest,
+    DecodeMode, DecodeStats, DecoderEvent, Exactness, HwKind, HwOutput, MediaBackend, NextFrame,
+    SeekMode, SeekOutcome, VideoDecode, VideoFrame, VideoRequest,
 };
 use spherecut_media::hw::GpuIds;
+use spherecut_media::{HwDevice, MediaError};
+use spherecut_render::vkshare::SharedVideo;
 
 use crate::audio::{AudioOutputFactory, PlayerThreads};
 use crate::cache::Insert;
@@ -87,6 +88,9 @@ pub(crate) struct OpenJob {
     /// VA-API streams decode to DMA-BUFs (slice 5b): zero copy is on and
     /// the device imports them.
     pub(crate) zero_copy: bool,
+    /// Vulkan Video streams decode on the renderer's device, shared so
+    /// (path B): zero copy is on and the device was made shared.
+    pub(crate) shared_video: Option<Arc<SharedVideo>>,
 }
 
 impl OpenJob {
@@ -160,16 +164,28 @@ impl OpenJob {
         // this one's frames are downloaded by the decoder, as without zero
         // copy, not one by one by the upload thread.
         let refused = shared.status().import_refused.clone();
-        let output = match (self.zero_copy, refused) {
-            (true, None) => HwOutput::DrmPrime,
-            (true, Some(why)) => {
-                tracing::info!("zero copy is off for this file: {why}");
-                HwOutput::Download
-            }
-            (false, _) => HwOutput::Download,
+        if let (Some(why), true) = (&refused, self.zero_copy || self.shared_video.is_some()) {
+            tracing::info!("zero copy is off for this file: {why}");
+        }
+        let zero_copy = refused.is_none();
+        let dmabuf = zero_copy && self.zero_copy;
+        let wants_vulkan = choices.iter().any(|c| {
+            matches!(
+                c.mode,
+                DecodeMode::Hardware {
+                    kind: HwKind::Vulkan,
+                    device: None,
+                    ..
+                }
+            )
+        });
+        let vulkan = match &self.shared_video {
+            Some(video) if zero_copy && wants_vulkan => shared.vulkan_device(video),
+            _ => None,
         };
         for (stream, ((asked, rx), choice)) in self.streams.into_iter().zip(choices).enumerate() {
             tracing::info!(stream, "decoding {}", choice.why);
+            let (mode, output) = on_device(choice.mode, dmabuf, vulkan.as_ref());
             let worker = Worker {
                 shared: shared.clone(),
                 backend: self.backend.clone(),
@@ -177,7 +193,7 @@ impl OpenJob {
                 stream,
                 path: self.path.clone(),
                 asked,
-                mode: choice.mode,
+                mode,
                 output,
                 rx,
                 clock: clock.clone(),
@@ -241,6 +257,41 @@ impl OpenJob {
     }
 }
 
+/// A stream's decoder and what it hands frames out as, with zero copy
+/// on: VA-API's exported as DMA-BUFs when `dmabuf`, Vulkan Video's left
+/// on the renderer's device when FFmpeg's context on it is `vulkan`.
+fn on_device(
+    mode: DecodeMode,
+    dmabuf: bool,
+    vulkan: Option<&Arc<HwDevice>>,
+) -> (DecodeMode, HwOutput) {
+    match (mode, vulkan) {
+        (
+            DecodeMode::Hardware {
+                kind: HwKind::Vulkan,
+                device: None,
+                fallback,
+            },
+            Some(dev),
+        ) => (
+            DecodeMode::Hardware {
+                kind: HwKind::Vulkan,
+                device: Some(dev.clone()),
+                fallback,
+            },
+            HwOutput::Vulkan,
+        ),
+        (
+            mode @ DecodeMode::Hardware {
+                kind: HwKind::VaApi,
+                ..
+            },
+            _,
+        ) if dmabuf => (mode, HwOutput::DrmPrime),
+        (mode, _) => (mode, HwOutput::Download),
+    }
+}
+
 /// Why a step of a request didn't get its frame.
 enum Halt {
     /// A newer request, or shutdown, stopped it.
@@ -259,7 +310,7 @@ struct Worker {
     path: PathBuf,
     asked: Option<usize>,
     mode: DecodeMode,
-    /// What a VA-API decoder hands frames out as.
+    /// What a device decoder hands frames out as.
     output: HwOutput,
     rx: Receiver<Command>,
     clock: Arc<dyn Clock>,

@@ -5,13 +5,15 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::thread::JoinHandle;
 
 use spherecut_core::{Rational, Rounding, StopSource, StopToken, Time, may_block};
+use spherecut_media::HwDevice;
 use spherecut_media::backend::{
     DecodePath, Exactness, FallbackReason, HwKind, SeekMode, VideoFrame, VideoStreamInfo,
 };
+use spherecut_render::vkshare::SharedVideo;
 
 use crate::audio::AudioOutput;
 use crate::budget::{AutoBudget, CacheBudget};
@@ -127,8 +129,10 @@ pub(crate) struct Status {
     pub(crate) audio: Option<Arc<dyn AudioOutput>>,
     pub(crate) budget: Option<BudgetStatus>,
     pub(crate) gpu_error: Option<PlayerError>,
-    /// Why the upload thread couldn't import a frame exported as DMA-BUFs
-    /// (slice 5b), the first time: the opens after it don't export.
+    /// Why a frame left on its decoder's device couldn't be taken by the
+    /// GPU (slice 5b: an import of DMA-BUFs, a copy out of a Vulkan
+    /// image, or FFmpeg's context on the renderer's device), the first
+    /// time: the opens after it download.
     pub(crate) import_refused: Option<String>,
 }
 
@@ -160,6 +164,10 @@ pub(crate) struct Shared {
     pub(crate) open_lock: Mutex<()>,
     /// Doctor's checks, once given or run.
     pub(crate) hw: Mutex<Option<HwSupport>>,
+    /// FFmpeg's Vulkan context on the renderer's device (slice 5b's path
+    /// B), made by the first open that wants it: `None` when FFmpeg
+    /// refused the device, which the status's `import_refused` says.
+    pub(crate) vulkan_device: OnceLock<Option<Arc<HwDevice>>>,
     pub(crate) events: Sender<PlayerEvent>,
     pub(crate) handles: Sender<(String, JoinHandle<()>)>,
     pub(crate) repaint: Option<Repaint>,
@@ -193,6 +201,30 @@ pub(crate) fn try_lock<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 }
 
 impl Shared {
+    /// FFmpeg's Vulkan context on the renderer's device, `video`, made
+    /// the first time (blocking on the driver, off the UI thread); `None`
+    /// when FFmpeg refuses it, which the status keeps as the reason zero
+    /// copy is off.
+    pub(crate) fn vulkan_device(&self, video: &SharedVideo) -> Option<Arc<HwDevice>> {
+        self.vulkan_device
+            .get_or_init(|| match HwDevice::vulkan_shared(&video.handles) {
+                Ok(d) => {
+                    tracing::info!("Vulkan Video decodes on the renderer's own device");
+                    Some(Arc::new(d))
+                }
+                Err(e) => {
+                    let why = format!("FFmpeg can't decode on the renderer's Vulkan device: {e}");
+                    tracing::warn!("{why}");
+                    let mut st = self.status();
+                    if st.import_refused.is_none() {
+                        st.import_refused = Some(why);
+                    }
+                    None
+                }
+            })
+            .clone()
+    }
+
     /// The status, locked. Never on the UI thread.
     #[track_caller]
     pub(crate) fn status(&self) -> MutexGuard<'_, Status> {

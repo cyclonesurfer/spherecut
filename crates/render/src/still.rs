@@ -12,6 +12,7 @@ use crate::plane::SlotShape;
 use crate::project::{DebugMode, Filter, LinearTarget, Projector, ViewParams};
 use crate::readback::{self, Texels};
 use crate::upload::Uploader;
+use crate::vkshare::BufferPlane;
 
 /// What a still is read back as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -168,7 +169,7 @@ impl StillRenderer {
         size: (u32, u32),
         opts: &StillOptions,
     ) -> Result<Image, RenderError> {
-        self.render_from(gpu, frame, None, view, size, opts)
+        self.render_from(gpu, frame, Source::Bytes, view, size, opts)
     }
 
     /// [`render`](Self::render) of a frame whose planes are on the GPU
@@ -185,14 +186,33 @@ impl StillRenderer {
         size: (u32, u32),
         opts: &StillOptions,
     ) -> Result<Image, RenderError> {
-        self.render_from(gpu, frame, Some(planes), view, size, opts)
+        self.render_from(gpu, frame, Source::Imported(planes), view, size, opts)
+    }
+
+    /// [`render`](Self::render) of a frame whose shown planes are in a
+    /// GPU buffer, laid out as `planes` says, as
+    /// [`Uploader::upload_from_buffer`](crate::Uploader::upload_from_buffer)
+    /// takes them: slice 5b's copies out of FFmpeg's Vulkan images.
+    /// `frame` gives the layout, size and colour.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_copied(
+        &mut self,
+        gpu: &Gpu,
+        frame: &dyn VideoPlanes,
+        buffer: &wgpu::Buffer,
+        planes: &[BufferPlane],
+        view: &ViewParams,
+        size: (u32, u32),
+        opts: &StillOptions,
+    ) -> Result<Image, RenderError> {
+        self.render_from(gpu, frame, Source::Buffer(buffer, planes), view, size, opts)
     }
 
     fn render_from(
         &mut self,
         gpu: &Gpu,
         frame: &dyn VideoPlanes,
-        planes: Option<&[wgpu::Texture]>,
+        source: Source<'_>,
         view: &ViewParams,
         size: (u32, u32),
         opts: &StillOptions,
@@ -212,14 +232,22 @@ impl StillRenderer {
             _ => GpuFrame::new(gpu, &shape)?,
         };
         let slot = &*self.slot.insert(slot);
-        match planes {
-            Some(planes) => {
+        match source {
+            Source::Bytes => self
+                .uploader
+                .upload_placed(gpu, frame, &opts.placement, slot)?,
+            Source::Imported(planes) => {
                 self.uploader
                     .upload_imported(gpu, frame, planes, &opts.placement, slot)?
             }
-            None => self
-                .uploader
-                .upload_placed(gpu, frame, &opts.placement, slot)?,
+            Source::Buffer(buffer, planes) => self.uploader.upload_from_buffer(
+                gpu,
+                frame,
+                buffer,
+                planes,
+                &opts.placement,
+                slot,
+            )?,
         };
         let target = match self.target.take() {
             Some(mut t) => {
@@ -277,6 +305,16 @@ impl StillRenderer {
         }
         Ok(image)
     }
+}
+
+/// Where a still's planes come from.
+enum Source<'a> {
+    /// The frame's own bytes.
+    Bytes,
+    /// Textures on the GPU, one a plane.
+    Imported(&'a [wgpu::Texture]),
+    /// A buffer on the GPU holding the shown planes.
+    Buffer(&'a wgpu::Buffer, &'a [BufferPlane]),
 }
 
 /// One frame, headless: upload, project, encode, read back. Makes its

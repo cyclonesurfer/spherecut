@@ -637,12 +637,6 @@ fn every_failure_leaves_nothing_behind() {
         ),
         (
             &good,
-            vec!["--zero-copy", "--decoder", "vulkan"],
-            2,
-            "usage",
-        ),
-        (
-            &good,
             vec!["--zero-copy", "--reference", "--decoder", "auto"],
             2,
             "usage",
@@ -708,6 +702,13 @@ fn every_failure_leaves_nothing_behind() {
             "hw_unavailable",
         ),
         (&zzzz, vec!["--equirect"], 3, "no_decoder"),
+        // Path B refused: lavapipe has no video decode queue to share.
+        (
+            &good,
+            vec!["--zero-copy", "--decoder", "vulkan"],
+            3,
+            "import_failed",
+        ),
         // Zero copy refused whichever way this host's lavapipe goes: if
         // it can't import DMA-BUFs, at once; if it can, once the decode
         // has gone on in software for want of a render node.
