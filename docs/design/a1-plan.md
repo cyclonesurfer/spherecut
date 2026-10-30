@@ -312,6 +312,48 @@ win; D46 has the whole of it.
       plan trims A1's descriptions if its tools need more. A read-only
       tool no longer lists `idempotentHint`, which MCP defines only for
       a tool that isn't read-only; `look` writing keeps it, true.
+35. **A1.7, as built:**
+    - **The instructions** name the five tools in the cheap-first order
+      and say `look` writes only with `output` on a server that allows
+      it: 1,138 characters. That is more than `FIELD_BYTES`, so their
+      test checks that no character in them is one `text` refuses
+      rather than passing them through `text::field`.
+    - **The skill** is compiled in (`spherecut_agent::SKILL`, from
+      `crates/agent/skill/spherecut/SKILL.md`). A test checks its
+      frontmatter (the name is the folder's, the description at most
+      1,024 characters with no angle brackets), that it names every
+      served tool, and that it has three recipes. Recipe 1 confirms
+      each sighting with a 60° view and the marker's offset in it;
+      recipe 3 reads doctor's `file.decode` and `file.speed.realtime`.
+    - **install-skill** (`crates/cli/src/skill.rs`) writes through
+      `TempFile` and `persist_replace`, so a `SKILL.md` from an older
+      Spherecut is replaced whole. A link is never replaced: a link
+      elsewhere counts as something else, and the skill is still
+      written when a link's name is taken (exit 1). A relative
+      `XDG_DATA_HOME` is ignored, as the XDG spec says.
+    - **`docs/agents.md`** is held to the code by
+      `crates/agent/tests/docs.rs`: every `pub const` in `limits.rs`,
+      with `MAX_PIXELS`, `MAX_TOOLS`, `MAX_LIST_BYTES`, `A1_LIST_BYTES`
+      and `INSTRUCTIONS_CHARS`, has a row; the error table is
+      `codes::ALL` in order; every code of media, probe and render has a
+      row saying what it becomes; every client has its heading, Codex's
+      config names the variables to forward, and nothing says `npx`.
+      The clients' facts were checked on 2026-10-30 against their docs:
+      Codex's `env_vars` and its 60 s tool timeout, opencode's `timeout`
+      (it covers tool calls, 30 s by default, so the setup gives 60000),
+      goose's in seconds, `copilot mcp add`, Zed's `context_servers`.
+    - **The recipes** (`crates/agent/tests/recipes.rs`) ask for PNG,
+      since the test reads the pixels and its `image` crate decodes no
+      JPEG; the cost counts pixels, the same in either format. They
+      cost 3,119 of 12,000, 1,234 of 4,000 and 3,463 of 8,000. In
+      recipe 1 the sheet sees the marker in at least 7 of 12 tiles, not
+      all, because the axis discs hide it as it passes them.
+    - **The Tier 2 test** is `crates/cli/tests/tier2_mcp.rs`, not
+      `crates/agent/tests` (amendment 15: it spawns the binary), and
+      the scripted client moved to `crates/cli/tests/mcp_client/` for
+      both it and `mcp.rs`. Where doctor says VA-API doesn't decode the
+      LRV's codec it skips with doctor's reasons. `hw-test` picks it up
+      as it does every ignored test.
 
 ## 0. What A1 is for
 

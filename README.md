@@ -40,11 +40,20 @@ in progress. What works today:
   PNG, headless, on the GPU's Vulkan driver or Mesa's lavapipe. The frame
   is exactly the one asked for, by time or by number.
 
+- `spherecut mcp` lets an AI agent on this machine (Claude Code, Codex,
+  Gemini CLI, Copilot CLI, Cursor, Zed, goose, opencode) go through your
+  footage: probe a folder, look at any moment from any direction as
+  labelled images, measure timing, motion and audio over a clip, check a
+  file's 360 metadata against YouTube's or another target, and ask what
+  this machine decodes. It reads only under the folders you give it and
+  changes no file; at most, if you allow it, `look` writes its image to a
+  new one. `spherecut call` runs the same tools from a shell, and
+  `spherecut agents install-skill` installs the recipes agents follow.
+  [docs/agents.md](docs/agents.md) has each client's setup. Spherecut
+  itself makes no network requests, but what it returns to an agent,
+  frames of your footage included, goes to that agent's model provider.
+
 See `PLAN.md` for the milestones and `PROGRESS.md` for where things stand.
-The plan also has agent integration: an MCP server and JSON output so that
-AI agents such as Claude Code, Codex or Gemini CLI can use Spherecut.
-Spherecut itself still makes no network requests, but what it returns to
-an agent, frames included, goes to that agent's model provider.
 
 ## Requirements
 

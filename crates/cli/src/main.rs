@@ -25,6 +25,7 @@ mod exit;
 mod frame;
 #[allow(unsafe_code)]
 mod interrupt;
+mod skill;
 
 #[derive(Parser)]
 #[command(
@@ -116,8 +117,9 @@ enum Cmd {
     /// Render one frame of a stitched equirect through a virtual camera
     /// into a PNG.
     Frame(frame::FrameArgs),
-    /// Serve Spherecut's read-only tools to an AI agent over MCP, on stdin
-    /// and stdout (docs/agents.md). Logs go to stderr.
+    /// Serve Spherecut's tools to an AI agent over MCP, on stdin and
+    /// stdout (docs/agents.md); they only read unless --allow-write. Logs
+    /// go to stderr.
     Mcp {
         #[command(flatten)]
         agent: AgentArgs,
@@ -139,6 +141,26 @@ enum Cmd {
         /// `images` lists them.
         #[arg(long, value_name = "DIR")]
         image_dir: Option<PathBuf>,
+    },
+    /// Set up what AI agents read about Spherecut (docs/agents.md).
+    Agents {
+        #[command(subcommand)]
+        cmd: AgentsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentsCmd {
+    /// Write Spherecut's skill, the recipes agents follow with its tools,
+    /// to $XDG_DATA_HOME/spherecut/skills/spherecut/SKILL.md, and link
+    /// that folder as ~/.claude/skills/spherecut (Claude Code) and
+    /// ~/.agents/skills/spherecut (Codex, Gemini CLI, Copilot CLI).
+    /// Anything else already at either name is left alone, and the run
+    /// fails.
+    InstallSkill {
+        /// Say what it would do, and do nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -396,6 +418,13 @@ fn run(cli: Cli, args: &[OsString], json: bool) -> Result<Exit> {
             agent,
             image_dir,
         } => call::run(&tool, &args, &agent, image_dir.as_deref()),
+        Cmd::Agents {
+            cmd: AgentsCmd::InstallSkill { dry_run },
+        } => skill::install(
+            &skill::Places::from_env()?,
+            dry_run,
+            &mut std::io::stdout().lock(),
+        ),
     }
 }
 

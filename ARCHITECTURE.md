@@ -49,8 +49,8 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
 | `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside the Info, Doctor and Files tabs); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); the overlay (`overlay`), the settings and their window (`settings`), the raw view, and the smoke run (`smoke`); `run`, which the CLI calls with no command. `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs. Later the timeline (M2) | M1 slices 7 and 8 |
-| `spherecut-agent` | Agent integration (D23, D43 to D46): the MCP server (`rpc`), the tools and their hand-written schemas (`tools`, `ops`), the roots (`roots`), the JSON contract of `--json` (`contract`, D27), frame's core that look renders through (`still`), look's canvas and font (`image`, `font`); later the GUI attach bridge | A1.1 to A1.5 |
-| `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor`, `frame`, `mcp` and `call` (A1). `render` (M2) is planned. Its library half re-exports `spherecut_agent::contract` as `contract` | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI; A1: `mcp`, `call` |
+| `spherecut-agent` | Agent integration (D23, D43 to D46): the MCP server (`rpc`), the tools and their hand-written schemas (`tools`, `ops`), the roots (`roots`), the JSON contract of `--json` (`contract`, D27), frame's core that look renders through (`still`), look's canvas and font (`image`, `font`), the instructions and the skill; later the GUI attach bridge | A1 |
+| `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor`, `frame`, `mcp`, `call` and `agents install-skill` (A1). `render` (M2) is planned. Its library half re-exports `spherecut_agent::contract` as `contract` | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI; A1: `mcp`, `call`, `agents install-skill` |
 | `xtask` | `check`, `compat` (clippy and a link of the tests against other FFmpeg builds, and Tier 1 against one, D2), `gen-media`, `hw-test` | M0; `compat` from 2026-10-24 |
 
 Crates are created when they get real content, not as empty shells. The
@@ -510,6 +510,14 @@ shell. The crate has no `unsafe`.
   under 2 KiB.
 - **`contract`**: the CLI's JSON contract (D27), here since A1.4 so that
   `still` can return its errors and the CLI re-exports it.
+- **Teaching** (A1.7): `initialize` gives the instructions (the
+  conventions and the cheap-first order, under 1,500 characters), and
+  `SKILL` is the Agent Skills file (`skill/spherecut/SKILL.md`, three
+  recipes) that `spherecut agents install-skill` (the CLI's `skill`)
+  writes to `$XDG_DATA_HOME/spherecut/skills/spherecut` and links into
+  `~/.claude/skills` and `~/.agents/skills`. `docs/agents.md` is the
+  user's guide, and tests keep its limits and codes in step with the
+  code; `tests/recipes.rs` replays the recipes within their budgets.
 
 ## Coordinates and conventions
 

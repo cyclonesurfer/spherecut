@@ -136,8 +136,8 @@ new features to agents, which adds a little work to each.
       instructions.
 - [ ] HiDPI and fractional scaling correct; works under GNOME and Hyprland
       (hardware report + screenshots). Pending hardware: GNOME at 1.0 on
-      odin passes (H3); a fractional scale on a real display, and
-      Hyprland, wait for a machine.
+      odin passes (H3), and at 125 % on odin (2026-10-30); Hyprland
+      waits for a machine.
 - [ ] Hardware: 5.7K30 stitched equirect plays in real time on odin and
       huginn with VA-API decode; numbers in `docs/perf.md`. Vulkan Video
       HEVC is measured too (doctor's decode check, a bit-exact check on
@@ -359,14 +359,14 @@ moment from any direction, find where something happens, explain
 stutter or audio problems, and check a file's 360 metadata. It can't
 change or render anything yet.
 
-- [ ] `spherecut mcp` serves MCP revisions 2025-06-18 and 2025-11-25
+- [x] `spherecut mcp` serves MCP revisions 2025-06-18 and 2025-11-25
       through `initialize`, which every client checked can use (Claude
       Code asks for 2026-07-28 first and falls back). It also serves
       2026-07-28 through `server/discover` if the chosen MCP layer
       provides it; with our own layer, that waits until a client needs
       it. It answers within 1 s, before any FFmpeg or GPU setup. The
       supported revisions are rechecked at every milestone review.
-- [ ] A small, fixed set of tools: at most 12 through M9, and a test fails
+- [x] A small, fixed set of tools: at most 12 through M9, and a test fails
       past that or past 12 KB of `tools/list` JSON. A1 and A2 list 12
       tools between them, so A3 works through `project` and `look`. A1
       has these:
@@ -398,19 +398,19 @@ change or render anything yet.
       - `doctor` is the CLI's doctor, plus a `file` argument that names the
         decode path that file gets (and why hardware refused it) and, on
         request, its decode speed against real time.
-- [ ] Tool input schemas are JSON Schema draft 2020-12 with an object at
+- [x] Tool input schemas are JSON Schema draft 2020-12 with an object at
       the root and no root-level `oneOf`, `anyOf` or `allOf` (so `look`'s
       mode is a field, not a tagged enum). Property names are snake_case
       ASCII, each description is under 4,096 characters, and tools are
       listed in a fixed order. Claude Code drops or mangles tools that
       break these rules, so a test checks every advertised schema.
-- [ ] Images sent inline default to 768 px on the long edge as JPEG, are
+- [x] Images sent inline default to 768 px on the long edge as JPEG, are
       capped at 1568 px and 24 tiles, and state their pixel size and bytes.
       PNG is available on request. A larger image is written to a file
       under the write root and returned as a path; without
       `--allow-write`, a request over the cap is refused, naming the limit
       and the flag. FFmpeg encodes the images, so no image crate is added.
-- [ ] Conventions, stated in the tool descriptions. Times are exact: a
+- [x] Conventions, stated in the tool descriptions. Times are exact: a
       string (`"12.5"`, `"1:02.5"`, `"370f"`, `"30000/1001"`) or a
       `[num, den]` pair. A bare JSON number is refused, with the string to
       send instead. Every time comes back as `{exact, seconds}`, plus
@@ -418,11 +418,11 @@ change or render anything yet.
       CLI's `--json`. Angles are in degrees, the descriptions say which
       way positive yaw and pitch turn and where yaw 0 is in the equirect,
       and `fov` is horizontal unless `vfov` is given.
-- [ ] Errors an agent can act on: a failed call is a tool result marked
+- [x] Errors an agent can act on: a failed call is a tool result marked
       `isError`, with a stable `code`, the argument at fault, the valid
       range or choices and the next step, in under 500 characters.
       JSON-RPC errors are only for malformed or unknown requests.
-- [ ] Safety:
+- [x] Safety:
       - Read-only by default. `--allow-write --write-root <dir>` adds the
         tools that write. Footage is read only from `--read-root <dir>`
         (repeatable; the working directory by default) and from the write
@@ -457,11 +457,11 @@ change or render anything yet.
       - Limits live in one module, are listed in `docs/agents.md` and each
         has a test: message size, image size, decoder `max_pixels`, files
         per call, edits per call, and `look`'s 50 s.
-- [ ] Each operation has one request type and one response type, shared by
+- [x] Each operation has one request type and one response type, shared by
       MCP and `spherecut call`. A test runs every tool both ways on the
       same input and requires identical structured JSON, apart from
       images, which `call` writes to files.
-- [ ] Teaching agents the workflow: the server's `instructions` (under
+- [x] Teaching agents the workflow: the server's `instructions` (under
       1,500 characters) give the conventions and the cheap-first order:
       probe, then a contact sheet or the sphere, then `analyze`, then
       single views. An Agent Skills `SKILL.md`, which Claude Code, Codex,
@@ -476,7 +476,7 @@ change or render anything yet.
       forwarding), and, for a client installed as a Flatpak, how to start
       the host's `spherecut` through `flatpak-spawn --host`. Nothing tells
       Pat to run `npx`.
-- [ ] Tier 1 tests, with our own scripted client written in Rust (the
+- [x] Tier 1 tests, with our own scripted client written in Rust (the
       official conformance suite and MCP Inspector are npm tools): a
       session at 2025-06-18 and one at 2025-11-25 (`initialize`,
       `notifications/initialized`, `ping`, `tools/list`, `tools/call`); if
@@ -497,7 +497,7 @@ change or render anything yet.
       frames; the grid clips' moving marker (D9) serves the first recipe.
 - [ ] Hardware: a Tier 2 MCP session decodes one of Pat's samples and
       checks the result says `vaapi`; without hardware it skips with the
-      reason and never passes. Pat runs the recipes on his samples with two
+      reason and never passes. Pat runs the recipes on the samples with two
       agents, one using each kind of session where possible (Claude Code,
       and Codex or Gemini CLI). PROGRESS.md records the client versions,
       the revision each negotiated, the number of calls and the output
