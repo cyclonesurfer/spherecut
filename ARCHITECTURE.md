@@ -588,13 +588,23 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   semaphore, into a buffer of its own; `Copier::order_before` makes
   wgpu's next submission wait for the copy, and
   `Uploader::upload_from_buffer` fills the slot from the buffer as the
-  copy path does from its staging.
+  copy path does from its staging. What a device needs to be shared (its
+  extensions, Vulkan 1.3, a decode family and a compute family with two
+  queues besides wgpu's) is planned by `core::vkplan`, which media's
+  doctor uses too, so that doctor's `shared_decode` is the renderer's
+  answer (slice 9).
 * **`Projector::record`** draws a slot through a `ViewParams`
   (orientation and `Lens`) into a `LinearTarget`: per pixel a ray from
   the lens, rotated into the world, its equirect uv, an LOD from central
   differences of the direction, a trilinear (or anisotropic) tap of each
   plane, and the 3×4 colour matrix and the sRGB EOTF. Pipelines exist per
   `Filter` and `DebugMode` and are built on first use.
+  `Projector::record_flat_unchecked` is the flat pass (`fs_flat`, slice
+  8): the picture's own texels through the clamp sampler, for the raw
+  view and `StillOptions.flat`, against `reference::render_flat`.
+  `GpuTimers` time the projection with timestamps inside the encoder
+  where the device has them, read back a frame or two late and never
+  waited for.
 * **`Encoder::draw`** writes a linear target's pixels one to one into a
   render pass's attachment with the sRGB OETF, rounded in the shader to
   the attachment's codes (at 10 bits, and into an f16 attachment, to
@@ -608,7 +618,7 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   GPU's storage formats emulated; the Tier 1 tests compare the two on
   lavapipe.
 
-What is still planned, for every source type: in WGSL, "direction on the
+What is still planned *(M3 on)*, for every source type: in WGSL, "direction on the
 unit sphere → texel(s)" for the GoPro EAC pair and calibrated dual
 fisheye, with the view orientation composed with the stabilization
 rotation, lenses blended across the seam, and the colour pipeline in
@@ -730,15 +740,26 @@ intermediate equirect exists only as the output of a 360 export.
   clip in the desktop session it finds, and kittest runs it with no
   compositor.
 
-## Threads *(M1; partly planned)*
+## Threads *(as built in M1)*
 
-* UI thread: egui, never blocks on decode, disk or GPU readback.
-* Decode workers per open source, feeding a bounded frame cache.
-* Audio (built in slice 6, below): the output's clock is the playback
-  clock, and video presentation follows it.
-* Background workers for thumbnails, waveforms, proxies and export, each
-  with progress reporting and cancellation tokens.
-* Cancellation (built): `core::cancel`'s `StopSource` hands out
+* UI thread: egui, never blocks on decode, disk or GPU readback; the
+  runtime guard and `crates/app/clippy.toml`'s bans hold it to that
+  (slices 5 and 7, below and under the GUI).
+* Decode workers per open source, feeding a bounded frame cache (slice
+  5, below).
+* Audio (slice 6, below): the output's clock is the playback clock, and
+  video presentation follows it.
+* The GUI's jobs (`app::jobs::Job`, slices 7 and 8): a named thread per
+  piece of work the UI would otherwise wait for, whose result the UI
+  polls each frame: `doctor` (the startup check), `probe` (the Info
+  pane), `files` (a folder's listing) and `smoke-out` (the smoke run's
+  PNG and JSON). A job whose thread panics or can't start is lost,
+  which the UI reports, and at exit
+  `run` joins them beside the player's threads, with 3 s.
+* *(planned, M2 on)* Background workers for thumbnails, waveforms,
+  proxies and export, each with progress reporting and cancellation
+  tokens.
+* Cancellation: `core::cancel`'s `StopSource` hands out
   `StopToken`s by generation; starting a new generation stops the older
   tokens, as a new seek stops the last one, and shutdown stops them all
   and raises the flag a decoder's FFmpeg interrupt reads (D13, D29).

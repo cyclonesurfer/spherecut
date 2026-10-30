@@ -1727,6 +1727,7 @@ mod tests {
             drm_nodes: drm_nodes.to_vec(),
             ffmpeg_uses: false,
             dmabuf_import: false,
+            shared_decode: Err("a test's device".into()),
         }
     }
 
@@ -1812,6 +1813,8 @@ mod tests {
             driver_info: None,
             used_by_ffmpeg: true,
             dmabuf_import: false,
+            shared_decode: false,
+            shared_decode_reason: Some("a test's device".into()),
         }
     }
 

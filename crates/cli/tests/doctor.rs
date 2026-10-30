@@ -41,6 +41,7 @@ fn run_doctor(mut cmd: Command, args: &[&str]) -> Output {
         .env("VK_DRIVER_FILES", &icd)
         .env("VK_ICD_FILENAMES", &icd)
         .env_remove("SPHERECUT_LOG")
+        .env_remove("SPHERECUT_ZERO_COPY")
         .output()
         .unwrap();
     // Warnings only: a missing GPU slows things down but opens everything.
@@ -84,6 +85,15 @@ fn json_flags_lavapipe_as_cpu_and_the_render_node_as_missing() {
     assert_eq!(vk[0]["driver"], "llvmpipe");
     assert_eq!(vk[0]["used_by_ffmpeg"], true);
     assert!(vk[0]["name"].as_str().unwrap().starts_with("llvmpipe"));
+    // lavapipe has no video queue, so path B can't run on it, and doctor
+    // says why as the renderer does when it opens the device.
+    assert_eq!(vk[0]["shared_decode"], false);
+    let why = vk[0]["shared_decode_reason"].as_str().unwrap();
+    assert_eq!(why, "the device lacks VK_KHR_video_queue");
+    let gpu =
+        spherecut_render::Gpu::headless_shared(&spherecut_render::AdapterChoice::Cpu).unwrap();
+    assert_eq!(gpu.shared_video().unwrap_err(), why);
+    assert_eq!(r["zero_copy"], false);
 
     let issues = r["issues"].as_array().unwrap();
     let what = |prefix: &str| {
@@ -121,6 +131,9 @@ fn text_lists_the_vulkan_device_and_the_check_tables() {
     for want in [
         "\nVulkan devices\n  llvmpipe",
         "CPU: no GPU acceleration; driver llvmpipe",
+        "    zero copy: DMA-BUF import ",
+        "; shared with FFmpeg's Vulkan Video no: the device lacks VK_KHR_video_queue\n",
+        "\nZero copy: off, so every frame is copied through RAM (SPHERECUT_ZERO_COPY=1 turns it on)\n",
         "\nDecode check: one 256x256 frame each",
         "  HEVC Main 10   works",
         "\nEncode check: one 256x256 frame each on VA-API",
@@ -128,6 +141,29 @@ fn text_lists_the_vulkan_device_and_the_check_tables() {
     ] {
         assert!(text.contains(want), "no {want:?} in:\n{text}");
     }
+}
+
+#[test]
+fn zero_copy_is_on_as_the_viewer_reads_the_variable() {
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_spherecut"))
+            .arg("doctor")
+            .arg("--render-node")
+            .arg(missing_node())
+            .args(args)
+            .env("VK_DRIVER_FILES", lavapipe_icd())
+            .env("VK_ICD_FILENAMES", lavapipe_icd())
+            .env("SPHERECUT_ZERO_COPY", " 1\n")
+            .output()
+            .unwrap()
+    };
+    let r = &document::document(&run(&["--json"]).stdout)["result"];
+    assert_eq!(r["zero_copy"], true);
+    let text = String::from_utf8_lossy(&run(&[]).stdout).into_owned();
+    assert!(
+        text.contains("\nZero copy: on (SPHERECUT_ZERO_COPY=1): VA-API frames are imported"),
+        "{text}"
+    );
 }
 
 #[test]

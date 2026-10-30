@@ -75,8 +75,12 @@ new features to agents, which adds a little work to each.
 ## M1 Viewer
 
 - [ ] `MediaBackend` trait with the FFmpeg implementation: open, stream
-      info, seek (frame-accurate, by PTS), decode to NV12/P010 frames, both
-      software and VA-API (with automatic software fallback), audio decode.
+      info, seek (frame-accurate, by PTS), decode to the frame's native
+      planar or semi-planar YUV (NV12/P010 from VA-API), uploaded
+      unconverted, both software and VA-API (with automatic software
+      fallback), audio decode. (Reworded from "decode to NV12/P010
+      frames" in M1, DECISIONS D30 and D31: no CPU colour conversion, as
+      meant.)
 - [x] FFmpeg opens only the file Spherecut opened: `protocol_whitelist`
       is `file`, demuxers are limited to the containers Spherecut supports
       (MP4/MOV and Matroska for now, widened only by a DECISIONS entry),
@@ -92,7 +96,8 @@ new features to agents, which adds a little work to each.
       them with `structure: none`; README, D15 and the `lrc` test change
       with it. (Found on 2026-10-24: M0's probe follows an HLS playlist to
       a file outside its folder.)
-- [ ] Projection shader (WGSL) sampling NV12/P010 planes directly, with
+- [ ] Projection shader (WGSL) sampling the frame's planes directly (deep
+      planes normalised on the GPU, RGB only in the shader), with
       per-source YUV→RGB matrix and range, into a linear-light float target,
       output as sRGB/Rec.709. Equirect source; rectilinear, fisheye and
       stereographic output with morph.

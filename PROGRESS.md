@@ -945,8 +945,11 @@ slot, with nothing through the CPU. Off by default, as path A is:
   9 % ahead of Vulkan Video copied and of VA-API imported, at a quarter
   to two thirds of Vulkan Video copied's upload CPU time
   (`docs/perf.md`).
-- doctor doesn't yet say whether a device can be shared: the log and
-  frame's `import_failed` give the reason.
+- doctor says whether each Vulkan device could be shared with Vulkan
+  Video (`shared_decode`, and why not), planned by `core::vkplan` as the
+  renderer plans it, and whether `SPHERECUT_ZERO_COPY` turns zero copy on
+  (slice 9). Tier 2's `doctor_and_the_renderer_agree_on_sharing` holds
+  doctor's answer for the GPU to the renderer's own.
 
 ## Slice 8: the overlay, settings, raw view and smoke run
 

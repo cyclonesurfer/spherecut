@@ -1,6 +1,7 @@
 //! Spherecut core: names, exact time and the `--time` grammar, the frame
 //! and colour vocabulary, cancellation, the playback clocks, the guard
-//! that keeps blocking calls off the UI thread, atomic file writes, and
+//! that keeps blocking calls off the UI thread, atomic file writes, the
+//! plan of a Vulkan device shared with FFmpeg, and
 //! (later) the project model, timeline, keyframes and undo.
 
 #![forbid(unsafe_code)]
@@ -13,6 +14,7 @@ pub mod fs;
 pub mod time;
 pub mod timespec;
 pub mod video;
+pub mod vkplan;
 
 pub use blocking::may_block;
 pub use cancel::{StopSource, StopToken};

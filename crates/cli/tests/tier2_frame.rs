@@ -517,6 +517,54 @@ fn shared_vulkan_frame_matches_the_copy() {
     );
 }
 
+/// doctor plans a device for path B as the renderer opens it: on the
+/// machine's GPU (`auto`), doctor's `shared_decode` for it and whether
+/// `Gpu::headless_shared` shared its device agree, and where they can't
+/// share, they give the same reason. Neither is checked on lavapipe here
+/// but the refusal (doctor.rs); this is the GPU's queue families and
+/// video extensions, read by doctor through FFmpeg's instance.
+#[test]
+#[ignore = "tier2: needs a GPU"]
+fn doctor_and_the_renderer_agree_on_sharing() {
+    tier2::require_hw_run();
+    let gpu = match spherecut_render::Gpu::headless_shared(&spherecut_render::AdapterChoice::Auto) {
+        Ok(g) if !g.caps.is_cpu => g,
+        Ok(g) => tier2::skip(format!("no GPU: the adapter is {}", g.caps.info.name)),
+        Err(e) => tier2::skip(format!("no GPU: {e}")),
+    };
+    let info = &gpu.caps.info;
+    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .args(["doctor", "--json"])
+        .env_remove("SPHERECUT_LOG")
+        .output()
+        .unwrap();
+    let doc = document(&out.stdout);
+    let devices = doc["result"]["vulkan_devices"].as_array().unwrap();
+    let id = |n: u32| format!("{n:#06x}");
+    let Some(d) = devices.iter().find(|d| {
+        d["vendor_id"] == id(info.vendor)
+            && d["device_id"] == id(info.device)
+            && d["name"] == info.name
+    }) else {
+        panic!(
+            "doctor doesn't list the renderer's {} ({:#06x}:{:#06x}): {devices:#?}",
+            info.name, info.vendor, info.device
+        );
+    };
+    eprintln!(
+        "{}: doctor {d}, renderer {:?}",
+        info.name,
+        gpu.shared_video().map(|_| ())
+    );
+    match gpu.shared_video() {
+        Ok(_) => assert_eq!(d["shared_decode"], true, "{d:#}"),
+        Err(why) => {
+            assert_eq!(d["shared_decode"], false, "{d:#}");
+            assert_eq!(d["shared_decode_reason"], why, "{d:#}");
+        }
+    }
+}
+
 /// Each clip's frame through every view with `zero_copy` and with
 /// `--decoder decoder`, 0 LSB apart, the first's JSON saying it took
 /// `transfer` and the second's that it was downloaded; a skip with

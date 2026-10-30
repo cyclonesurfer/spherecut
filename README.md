@@ -446,6 +446,10 @@ again only when synth's spec of them changes (DECISIONS D37). Options:
 - `--quick`: a debug build, with the benchmarks, and so the perf clips,
   left out.
 - `--no-tier1`: leave out the Tier 1 run on the machine.
+- `--only <name>`: run only the Tier 2 tests whose names, as `--list`
+  prints them, contain `<name>` (repeatable); the report lists the rest as
+  left out. `cargo xtask hw-test --only gui_smoke --no-tier1` runs the GUI
+  smoke run again in a few minutes.
 - `--list`: print the Tier 2 tests, as the report names them, and stop.
 - `--out <file>`: where to write the report.
 

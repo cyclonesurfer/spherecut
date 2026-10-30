@@ -197,14 +197,9 @@ pub struct PlayerConfig {
     pub zero_copy: bool,
 }
 
-/// `SPHERECUT_ZERO_COPY=1` turns [`PlayerConfig::zero_copy`] on.
-pub const ZERO_COPY_ENV: &str = "SPHERECUT_ZERO_COPY";
-
-/// Whether `get` (the environment, or a test's) asks for zero copy: `1`
-/// does, anything else doesn't.
-pub fn zero_copy_from_env(get: impl Fn(&str) -> Option<String>) -> bool {
-    get(ZERO_COPY_ENV).is_some_and(|v| v.trim() == "1")
-}
+/// `SPHERECUT_ZERO_COPY=1` turns [`PlayerConfig::zero_copy`] on; media
+/// has them, for doctor to say so too.
+pub use spherecut_media::backend::{ZERO_COPY_ENV, zero_copy_from_env};
 
 /// The frames exported from a VA-API decoder each stream's cache holds
 /// at most: its pool's spare surfaces less 8 for the frames on their way
