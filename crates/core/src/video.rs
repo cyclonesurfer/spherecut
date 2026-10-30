@@ -149,6 +149,11 @@ pub trait VideoPlanes: Send + Sync + std::fmt::Debug {
     fn dmabuf(&self) -> Option<&[DmabufLayer]> {
         None
     }
+    /// A picture still on the decoding device as Vulkan images on the
+    /// renderer's own device (slice 5b's path B). `None` for any other.
+    fn vulkan(&self) -> Option<&dyn VkPicture> {
+        None
+    }
 }
 
 /// One plane of a picture exported as a DMA-BUF (FFmpeg's DRM PRIME
@@ -166,6 +171,93 @@ pub struct DmabufLayer {
     pub pitch: u64,
     /// The plane's size in texels.
     pub size: (u32, u32),
+}
+
+/// A picture decoded into Vulkan images on the device that renders (a
+/// `AVVkFrame` of FFmpeg's, slice 5b's path B). The handles are raw
+/// Vulkan ones, valid while the picture lives; whoever reads the images
+/// does so under [`with_locked`](Self::with_locked), by FFmpeg's rules
+/// for a frame: wait for each image's semaphore at its value, signal it
+/// at the value after, and say so in the state it is handed back.
+pub trait VkPicture: Send + Sync + std::fmt::Debug {
+    /// Each plane's image and aspect, in plane order.
+    fn planes(&self) -> &[VkPlane];
+    /// Runs `f` with the state of each of the picture's images while it
+    /// holds the frame's lock, then stores what `f` left there.
+    fn with_locked(&self, f: &mut dyn FnMut(&mut [VkImageState]));
+}
+
+/// Where one plane of a [`VkPicture`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VkPlane {
+    /// Which of the picture's images holds it.
+    pub image: usize,
+    /// Its `VkImageAspectFlags`: `COLOR` for an image a plane,
+    /// `PLANE_0` and `PLANE_1` of a multi-planar one.
+    pub aspect: u32,
+    /// The plane's size in texels.
+    pub size: (u32, u32),
+}
+
+/// One image of a [`VkPicture`] as its frame records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VkImageState {
+    /// The `VkImage`.
+    pub image: u64,
+    /// Its `VkImageLayout`.
+    pub layout: i32,
+    /// The access its last use made, as `VkAccessFlags2`.
+    pub access: u64,
+    /// The queue family that owns it, or `VK_QUEUE_FAMILY_IGNORED`.
+    pub queue_family: u32,
+    /// Its timeline semaphore and the value its last use signals.
+    pub semaphore: u64,
+    pub value: u64,
+}
+
+/// A Vulkan device as FFmpeg is handed it (slice 5b's path B): the
+/// renderer's own, with the queues set aside for FFmpeg. The handles are
+/// raw (dispatchable ones are pointers), valid while `keepalive` lives,
+/// which holds the device.
+#[derive(Clone)]
+pub struct VkDeviceHandles {
+    /// `vkGetInstanceProcAddr`, as a function pointer's address.
+    pub get_instance_proc_addr: usize,
+    pub instance: usize,
+    pub physical_device: usize,
+    pub device: usize,
+    /// The instance's API version, as Vulkan packs it.
+    pub api_version: u32,
+    pub instance_extensions: Vec<String>,
+    pub device_extensions: Vec<String>,
+    /// The queue families FFmpeg may submit to, and how many of each
+    /// family's queues, from index 0.
+    pub queues: Vec<VkQueueGrant>,
+    pub keepalive: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl std::fmt::Debug for VkDeviceHandles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VkDeviceHandles")
+            .field("device", &format_args!("{:#x}", self.device))
+            .field("api_version", &self.api_version)
+            .field("device_extensions", &self.device_extensions)
+            .field("queues", &self.queues)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Queues of one family that FFmpeg may use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VkQueueGrant {
+    pub family: u32,
+    /// Queues 0 to `count` − 1.
+    pub count: u32,
+    /// What FFmpeg may use them for, as `VkQueueFlags`.
+    pub flags: u32,
+    /// The video codec operations of a video family
+    /// (`VkVideoCodecOperationFlagsKHR`), 0 for others.
+    pub video_ops: u32,
 }
 
 /// The DRM fourccs a plane can have (`drm_fourcc.h`).

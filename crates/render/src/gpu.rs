@@ -10,13 +10,16 @@
 //! `Adapter::open_with_callback`, to add the video-decode extensions and
 //! queues FFmpeg's Vulkan Video needs and the DMA-BUF import extensions,
 //! then wraps it with `wgpu::Adapter::create_device_from_hal`; that
-//! replaces [`open_device`] and nothing else (DECISIONS D31).
+//! replaces [`open_device`] and nothing else (DECISIONS D31). As built,
+//! only path B's device is made so ([`Gpu::headless_shared`],
+//! [`crate::vkshare`]): path A needs no more than a feature.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::error::RenderError;
+use crate::vkshare::{self, SharedVideo};
 
 /// Which adapter to render on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +106,16 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     pub caps: GpuCaps,
     health: Arc<Health>,
+    video: SharedState,
+}
+
+/// Whether the device is shared with FFmpeg's Vulkan Video (slice 5b's
+/// path B), and if not, why.
+#[derive(Debug, Clone)]
+enum SharedState {
+    NotAsked,
+    Shared(Arc<SharedVideo>),
+    Refused(String),
 }
 
 /// What a device has said since [`Gpu::from_parts`] wrapped it: whether
@@ -139,14 +152,91 @@ impl Gpu {
         Self::open(choice, "rendering for the window")
     }
 
+    /// [`Gpu::headless`]'s device, made to be shared with FFmpeg's Vulkan
+    /// Video where the adapter can be ([`vkshare::open_shared`]); where it
+    /// can't, the usual device, and [`Gpu::shared_video`] says why.
+    pub fn headless_shared(choice: &AdapterChoice) -> Result<Gpu, RenderError> {
+        Self::open_shared(choice, "rendering headless")
+    }
+
+    /// [`Gpu::for_window`]'s device, shared as [`Gpu::headless_shared`]'s.
+    pub fn for_window_shared(choice: &AdapterChoice) -> Result<Gpu, RenderError> {
+        Self::open_shared(choice, "rendering for the window")
+    }
+
     fn open(choice: &AdapterChoice, what: &str) -> Result<Gpu, RenderError> {
         spherecut_core::may_block("opening a GPU device");
-        let instance = wgpu::Instance::new(Self::instance_descriptor());
-        let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
-        let adapter = Self::select_adapter(&adapters, choice)?;
+        let (instance, adapter) = Self::adapter(choice)?;
         let (device, queue) = open_device(&adapter)?;
         tracing::info!(adapter = %describe(&adapter.get_info()), %choice, "{what}");
         Ok(Self::from_parts(instance, adapter, device, queue))
+    }
+
+    fn open_shared(choice: &AdapterChoice, what: &str) -> Result<Gpu, RenderError> {
+        spherecut_core::may_block("opening a GPU device");
+        let (instance, adapter) = Self::adapter(choice)?;
+        let adapter_name = describe(&adapter.get_info());
+        match vkshare::open_shared(&adapter, &Self::device_descriptor(&adapter)) {
+            Ok((device, queue, shared)) => {
+                tracing::info!(
+                    adapter = %adapter_name, %choice, plan = ?shared.plan,
+                    "{what}, on a device shared with FFmpeg's Vulkan Video"
+                );
+                Ok(Self::from_parts(instance, adapter, device, queue).with_shared(shared))
+            }
+            Err(why) => {
+                tracing::info!(adapter = %adapter_name, %choice, "{what}; not shared: {why}");
+                let (device, queue) = open_device(&adapter)?;
+                let mut gpu = Self::from_parts(instance, adapter, device, queue);
+                gpu.video = SharedState::Refused(why);
+                Ok(gpu)
+            }
+        }
+    }
+
+    /// The device a test of path B on a one-queue GPU (lavapipe) uses:
+    /// [`vkshare::open_single_queue`]'s, whose safety rules the caller
+    /// keeps.
+    #[doc(hidden)]
+    pub fn single_queue_parts(
+        choice: &AdapterChoice,
+    ) -> Result<
+        (
+            wgpu::Instance,
+            wgpu::Adapter,
+            wgpu::DeviceDescriptor<'static>,
+        ),
+        RenderError,
+    > {
+        let (instance, adapter) = Self::adapter(choice)?;
+        let desc = Self::device_descriptor(&adapter);
+        Ok((instance, adapter, desc))
+    }
+
+    /// This device, shared as `shared` says.
+    pub(crate) fn with_shared(mut self, shared: SharedVideo) -> Gpu {
+        self.video = SharedState::Shared(Arc::new(shared));
+        self
+    }
+
+    fn adapter(choice: &AdapterChoice) -> Result<(wgpu::Instance, wgpu::Adapter), RenderError> {
+        let instance = wgpu::Instance::new(Self::instance_descriptor());
+        let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
+        let adapter = Self::select_adapter(&adapters, choice)?;
+        Ok((instance, adapter))
+    }
+
+    /// The device's share with FFmpeg's Vulkan Video, or why it has none:
+    /// it was made by [`Gpu::headless`] or [`Gpu::for_window`], or the
+    /// adapter can't share (the reason [`vkshare::open_shared`] gave).
+    pub fn shared_video(&self) -> Result<&Arc<SharedVideo>, String> {
+        match &self.video {
+            SharedState::Shared(s) => Ok(s),
+            SharedState::Refused(why) => Err(why.clone()),
+            SharedState::NotAsked => {
+                Err("the device wasn't made to be shared with the decoder".into())
+            }
+        }
     }
 
     /// Wraps a device, and takes over its error handling: wgpu's default
@@ -210,6 +300,7 @@ impl Gpu {
             queue,
             caps,
             health,
+            video: SharedState::NotAsked,
         }
     }
 

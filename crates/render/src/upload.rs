@@ -1,7 +1,8 @@
 //! Frames into slots (M1 plan section 4.4): plane bytes into level 0,
 //! deep planes through the ingest pass, then the mip chain, in one
 //! submission per frame that never waits on the GPU. Planes already on
-//! the GPU (slice 5b's DMA-BUF imports) take the same way, copied there.
+//! the GPU (slice 5b's DMA-BUF imports) take the same way, copied there,
+//! and so do planes a copier put in a GPU buffer (path B).
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -15,6 +16,7 @@ use crate::gpu::Gpu;
 use crate::layouts;
 use crate::plane::{PlaneFormat, SlotShape};
 use crate::timers::GpuTimers;
+use crate::vkshare::{BufferPlane, PlaneRegion};
 
 /// The ingest pass's uniform (`shaders/ingest.wgsl`).
 #[repr(C)]
@@ -317,6 +319,105 @@ impl Uploader {
         })
     }
 
+    /// Fills `slot` from planes already in a GPU buffer, laid out as
+    /// `planes` say (slice 5b's path B: a [`Copier`](crate::vkshare::Copier)
+    /// copied the decoder's picture there, each plane the shown part, from
+    /// the top-left corner). The rest is the copy path's: an 8-bit plane
+    /// into level 0, a deep one into its scratch texture and the ingest
+    /// pass, then the mips, in one submission. `frame` gives the layout,
+    /// size and colour; its bytes aren't read. The GPU time covers the
+    /// copies too. Never waits on the GPU; `buffer` must stay as it is
+    /// until it is done (`Queue::on_submitted_work_done`).
+    pub fn upload_from_buffer(
+        &mut self,
+        gpu: &Gpu,
+        frame: &dyn VideoPlanes,
+        buffer: &wgpu::Buffer,
+        planes: &[BufferPlane],
+        placement: &Placement,
+        slot: &GpuFrame,
+    ) -> Result<UploadStats, RenderError> {
+        let start = Instant::now();
+        let (_, shape) = shapes(gpu, frame, placement, slot)?;
+        if planes.len() != shape.planes.len() {
+            return Err(RenderError::Invalid(format!(
+                "{} buffer planes for {}'s {} planes",
+                planes.len(),
+                frame.layout().name,
+                shape.planes.len()
+            )));
+        }
+        for (i, (b, p)) in planes.iter().zip(&shape.planes).enumerate() {
+            let row = u64::from(p.size.0) * u64::from(p.format.bytes_per_texel());
+            let end = b.offset + u64::from(b.bytes_per_row) * u64::from(p.size.1);
+            if b.size != p.size
+                || b.bytes_per_texel != p.format.bytes_per_texel()
+                || u64::from(b.bytes_per_row) < row
+                || b.bytes_per_row % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT != 0
+                || end > buffer.size()
+            {
+                return Err(RenderError::Invalid(format!(
+                    "buffer plane {i} is {}x{} at {} with {}-byte rows in {} bytes, for a \
+                     {}x{} plane of {row}-byte rows",
+                    b.size.0,
+                    b.size.1,
+                    b.offset,
+                    b.bytes_per_row,
+                    buffer.size(),
+                    p.size.0,
+                    p.size.1
+                )));
+            }
+        }
+        let mut enc = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("upload from buffer"),
+            });
+        self.write_ingest_uniform(gpu, &shape);
+        let span = self.timers.as_mut().and_then(|t| t.begin(&mut enc));
+        for (i, (p, b)) in shape.planes.iter().zip(planes).enumerate() {
+            let texture = if p.format.is_deep() {
+                self.scratch_for(gpu, i, p.format, p.size).texture.clone()
+            } else {
+                slot.planes[i].texture.clone()
+            };
+            enc.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: b.offset,
+                        bytes_per_row: Some(b.bytes_per_row),
+                        rows_per_image: Some(p.size.1),
+                    },
+                },
+                texture.as_image_copy(),
+                wgpu::Extent3d {
+                    width: p.size.0,
+                    height: p.size.1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        for (i, p) in shape.planes.iter().enumerate() {
+            if let Some(Some(scratch)) = self.scratch.get(i).filter(|_| p.format.is_deep()) {
+                let input = &scratch.bind_group;
+                self.record_ingest(&mut enc, p.format, input, &slot.planes[i].levels[0]);
+            }
+        }
+        self.record_mips(&mut enc, slot);
+        if let (Some(t), Some(span)) = (self.timers.as_mut(), span) {
+            t.end(&mut enc, span);
+        }
+        slot.set_source(gpu, shape.bit_depth, frame.color(), placement);
+        gpu.queue.submit([enc.finish()]);
+        Ok(UploadStats {
+            cpu_ms: start.elapsed().as_secs_f32() * 1e3,
+            bytes: 0,
+            gpu_ms: self.timers.as_mut().and_then(GpuTimers::poll),
+        })
+    }
+
     /// Runs map callbacks (the timers' read-backs, the belt's chunks)
     /// without waiting, and gives the latest GPU time read. On a lost
     /// device it reads nothing more.
@@ -528,6 +629,24 @@ impl Uploader {
 /// `frame`'s shape whole and as `placement` shows it, after checking the
 /// device (which polls it too, running map callbacks: the belt's chunks
 /// and the timers' read-backs) and that the shown part fits `slot`.
+/// What a [`Copier`](crate::vkshare::Copier) copies of `frame` for
+/// `placement`, plane by plane: the shown part from the top-left corner,
+/// as [`Uploader::upload_from_buffer`] takes it.
+pub fn shown_regions(
+    frame: &dyn VideoPlanes,
+    placement: &Placement,
+) -> Result<Vec<PlaneRegion>, RenderError> {
+    let shape = SlotShape::of(frame.layout(), placement.shown(frame.size()))?;
+    Ok(shape
+        .planes
+        .iter()
+        .map(|p| PlaneRegion {
+            bytes_per_texel: p.format.bytes_per_texel(),
+            size: p.size,
+        })
+        .collect())
+}
+
 fn shapes(
     gpu: &Gpu,
     frame: &dyn VideoPlanes,
