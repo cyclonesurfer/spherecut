@@ -461,6 +461,19 @@ fn the_null_output_keeps_time() {
     assert_eq!(stats.underruns, 0);
     assert!(!stats.on_system_clock);
     assert_eq!(stats.host, "null");
+    // Its callbacks come on its schedule, whenever its thread wakes: a
+    // period apart, to the nanosecond's rounding (but for one, if a
+    // loaded machine kept the thread 8 periods behind and it started
+    // its schedule again).
+    let period = Duration::from_nanos(1024 * 1_000_000_000 / 48_000);
+    let off: Vec<Duration> = (0..20)
+        .map(|_| {
+            std::thread::sleep(Duration::from_millis(7));
+            out.stats().interval
+        })
+        .filter(|i| i.abs_diff(period) > Duration::from_nanos(1))
+        .collect();
+    assert!(off.len() <= 1, "{off:?}, not {period:?}");
 }
 
 #[test]

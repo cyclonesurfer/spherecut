@@ -47,11 +47,16 @@ fn run(shared: &Arc<Shared>, stop: &AtomicBool) {
             std::thread::park_timeout(due - now);
             continue;
         }
-        if now - due > period * BEHIND {
+        // The callback's instant is the one its schedule gives, as a
+        // device's would be, not the one the thread woke at.
+        let at = if now - due > period * BEHIND {
             start = now;
             done = 0;
-        }
-        cb.render(&mut buf, now, Duration::ZERO);
+            now
+        } else {
+            due
+        };
+        cb.render(&mut buf, at, Duration::ZERO);
         done += 1;
     }
 }
