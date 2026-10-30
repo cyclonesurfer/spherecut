@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use serde_json::{Map, Value, json};
 
 use crate::error::{ToolError, codes};
-use crate::limits::RESULT_CHARS;
+use crate::limits::{INLINE_IMAGE_BYTES, RESULT_CHARS};
 use crate::roots::Roots;
 use crate::rpc::{CallCx, Output, Tools};
 use crate::{ops, schema, text};
@@ -35,6 +35,11 @@ pub const TOOLS: &[Tool] = &[
         schema: include_str!("../../../docs/agents/schemas/probe.json"),
     },
     Tool {
+        name: "look",
+        title: "See frames of a video",
+        schema: include_str!("../../../docs/agents/schemas/look.json"),
+    },
+    Tool {
         name: "doctor",
         title: "Check this machine's decoders",
         schema: include_str!("../../../docs/agents/schemas/doctor.json"),
@@ -50,8 +55,9 @@ pub const MAX_TOOLS: usize = 12;
 pub const MAX_LIST_BYTES: usize = 12 << 10;
 
 /// A1's share of [`MAX_LIST_BYTES`], for its five tools, so that A2's
-/// seven have the rest (a1-plan amendment 8).
-pub const A1_LIST_BYTES: usize = 5 << 10;
+/// seven have the rest (a1-plan amendments 8 and 32: look's schema alone
+/// takes 2.4 KB, so the share is 6 KiB rather than 5).
+pub const A1_LIST_BYTES: usize = 6 << 10;
 
 /// A tool with its schema parsed.
 #[derive(Debug)]
@@ -60,12 +66,14 @@ struct Parsed {
     schema: Value,
 }
 
-/// The tools Spherecut serves, and the roots they open files under.
+/// The tools Spherecut serves, the roots they open files under, and how
+/// much base64 an image inline may take.
 #[derive(Debug)]
 pub struct Spherecut {
     tools: Vec<Parsed>,
     list: Value,
     roots: Roots,
+    image_budget: usize,
 }
 
 impl Spherecut {
@@ -77,8 +85,20 @@ impl Spherecut {
                 schema: schema.clone(),
             })
             .collect();
-        let list = Value::Array(tools.iter().map(listed).collect());
-        Self { tools, list, roots }
+        let writes = roots.writes();
+        let list = Value::Array(tools.iter().map(|p| listed(p, writes)).collect());
+        Self {
+            tools,
+            list,
+            roots,
+            image_budget: INLINE_IMAGE_BYTES,
+        }
+    }
+
+    /// The same, with images inline held to `bytes` of base64.
+    pub fn image_budget(mut self, bytes: usize) -> Self {
+        self.image_budget = bytes;
+        self
     }
 
     /// The roots the tools open files under.
@@ -109,24 +129,44 @@ fn parsed() -> &'static [(&'static Tool, Value)] {
     })
 }
 
+/// `name`'s schema, parsed.
+pub(crate) fn schema(name: &str) -> Option<&'static Value> {
+    parsed()
+        .iter()
+        .find(|(t, _)| t.name == name)
+        .map(|(_, s)| s)
+}
+
+/// The tools that write a file when asked to and writing is on.
+const WRITERS: &[&str] = &["look"];
+
 /// A tool as `tools/list` has it. The schema's own title and description
 /// move up to the tool, where clients read them, rather than appear
-/// twice.
-fn listed(p: &Parsed) -> Value {
+/// twice, and its `$schema` goes: 2020-12 is MCP's default dialect
+/// (2025-11-25), and the schemas use nothing that differs from draft 7.
+/// A tool that writes with writing on (`--allow-write`) isn't read-only,
+/// but never destroys: it only creates new files.
+fn listed(p: &Parsed, writes: bool) -> Value {
     let mut input: Map<String, Value> = p.schema.as_object().cloned().unwrap_or_default();
     let description = input.remove("description").unwrap_or(Value::Null);
     input.remove("title");
+    input.remove("$schema");
+    let mut annotations = json!({
+        "title": p.tool.title,
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+    });
+    if writes && WRITERS.contains(&p.tool.name) {
+        annotations["readOnlyHint"] = json!(false);
+        annotations["destructiveHint"] = json!(false);
+    }
     json!({
         "name": p.tool.name,
         "title": p.tool.title,
         "description": description,
         "inputSchema": input,
-        "annotations": {
-            "title": p.tool.title,
-            "readOnlyHint": true,
-            "idempotentHint": true,
-            "openWorldHint": false,
-        },
+        "annotations": annotations,
     })
 }
 
@@ -150,15 +190,17 @@ impl Tools for Spherecut {
         let cx = ops::Ctx {
             roots: &self.roots,
             call: cx,
+            image_budget: self.image_budget,
         };
-        let mut result = match name {
-            "probe" => ops::probe::run(ops::request(args)?, &cx)?,
-            "doctor" => ops::doctor::run(ops::request(args)?, &cx)?,
+        let (mut result, images) = match name {
+            "probe" => (ops::probe::run(ops::request(args)?, &cx)?, Vec::new()),
+            "look" => ops::look::run(ops::request(args)?, &cx)?,
+            "doctor" => (ops::doctor::run(ops::request(args)?, &cx)?, Vec::new()),
             _ => return Err(ToolError::internal(format!("{name} has no op"))),
         };
         text::sanitize(&mut result);
         fits(&result)?;
-        Ok(Output::json(result))
+        Ok(Output { result, images })
     }
 }
 
@@ -210,7 +252,24 @@ mod tests {
             );
             assert_eq!(t["inputSchema"]["type"], "object");
             assert!(t["inputSchema"].get("description").is_none());
+            assert!(t["inputSchema"].get("$schema").is_none());
             assert_eq!(t["annotations"]["readOnlyHint"], true);
+        }
+    }
+
+    #[test]
+    fn with_writing_on_look_says_it_writes_but_never_destroys() {
+        let dir = std::env::temp_dir();
+        let s = Spherecut::new(Roots::new(&[], Some(&dir)).unwrap());
+        let list = s.list();
+        let bytes = json!({ "tools": list }).to_string().len();
+        assert!(bytes <= A1_LIST_BYTES, "{bytes} bytes, past A1's share");
+        for t in list.as_array().into_iter().flatten() {
+            let writer = t["name"] == "look";
+            assert_eq!(t["annotations"]["readOnlyHint"], !writer, "{t}");
+            if writer {
+                assert_eq!(t["annotations"]["destructiveHint"], false);
+            }
         }
     }
 
@@ -222,7 +281,18 @@ mod tests {
                 json!({"files": ["a.mp4", "/media/b.insv"], "detail": "full"}),
                 json!({"folder": "DCIM", "detail": "summary", "page_size": 10, "cursor": "10:00000000000000ff"}),
             ],
-            "doctor" => vec![json!({"render_node": "/dev/dri/renderD128"})],
+            "look" => vec![
+                json!({"file": "a.mp4", "mode": "view", "times": ["1.5", [30000, 1001]],
+                       "view": {"yaw": 90, "pitch": -20, "roll": 5, "fov": 100,
+                                "projection": "fisheye"},
+                       "size": 1024, "format": "png", "seek": "keyframe",
+                       "output": "out/a.png", "assume_equirect": true}),
+                json!({"file": "a.mp4", "times": ["0", "10"], "count": 5,
+                       "views": [{"yaw": 0, "vfov": 60}, {"yaw": 180}]}),
+            ],
+            "doctor" => {
+                vec![json!({"file": "a.mp4", "speed": true, "render_node": "/dev/dri/renderD128"})]
+            }
             _ => vec![],
         }
     }
@@ -231,6 +301,7 @@ mod tests {
     fn accepts(name: &str, args: Value) -> Result<(), ToolError> {
         match name {
             "probe" => ops::request::<ops::probe::Request>(args).map(drop),
+            "look" => ops::request::<ops::look::Request>(args).map(drop),
             "doctor" => ops::request::<ops::doctor::Request>(args).map(drop),
             _ => Err(ToolError::internal(format!("no request type for {name}"))),
         }

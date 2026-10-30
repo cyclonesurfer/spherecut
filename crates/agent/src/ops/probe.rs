@@ -198,11 +198,11 @@ fn one(job: Job, detail: Detail, share: usize, cx: &Ctx) -> Value {
     }
 }
 
-/// A probe's failure as the agent's error: A1's codes (amendment 28),
-/// and never FFmpeg's words, which `detail: "full"` gives as
-/// `ffmpeg_log`.
-fn media_error(arg: &str, e: &ProbeError, detail: Detail) -> ToolError {
-    let (code, message) = match e.code() {
+/// A failure to open or probe a file, by its media code, as A1's code
+/// and words for the file's argument (amendment 28); `look` uses them
+/// too.
+pub(crate) fn words(code: &str) -> (&'static str, &'static str) {
+    match code {
         "not_media" | "unsupported_container" | "nested_open_refused" => (
             codes::UNSUPPORTED_CONTAINER,
             "is empty, or isn't MP4, MOV, Matroska or WebM",
@@ -213,7 +213,14 @@ fn media_error(arg: &str, e: &ProbeError, detail: Detail) -> ToolError {
         "not_a_file" => (codes::NOT_A_FILE, "isn't a regular file"),
         "io_error" => (codes::DAMAGED, "can't be read: an I/O error"),
         _ => (codes::DAMAGED, "can't be probed"),
-    };
+    }
+}
+
+/// A probe's failure as the agent's error: A1's codes (amendment 28),
+/// and never FFmpeg's words, which `detail: "full"` gives as
+/// `ffmpeg_log`.
+fn media_error(arg: &str, e: &ProbeError, detail: Detail) -> ToolError {
+    let (code, message) = words(e.code());
     let next = match detail {
         Detail::Summary => "call probe on it with detail \"full\" for FFmpeg's own words",
         Detail::Full => "ffmpeg_log has FFmpeg's own words",
@@ -730,6 +737,7 @@ mod tests {
         let cx = Ctx {
             roots: &roots,
             call: &call,
+            image_budget: crate::limits::INLINE_IMAGE_BYTES,
         };
         let mut n = 0;
         let (entries, stopped) = probe_all(jobs(5), 10_000, &cx, |_, _| {
@@ -751,6 +759,7 @@ mod tests {
         let cx = Ctx {
             roots: &roots,
             call: &call,
+            image_budget: crate::limits::INLINE_IMAGE_BYTES,
         };
         let e = probe_all(jobs(3), 10_000, &cx, |_, _| {
             call.expire();
@@ -766,6 +775,7 @@ mod tests {
         let cx = Ctx {
             roots: &roots,
             call: &call,
+            image_budget: crate::limits::INLINE_IMAGE_BYTES,
         };
         let mut n = 0;
         let e = probe_all(jobs(3), 10_000, &cx, |_, _| {
@@ -785,6 +795,7 @@ mod tests {
         let cx = Ctx {
             roots: &roots,
             call: &call,
+            image_budget: crate::limits::INLINE_IMAGE_BYTES,
         };
         // 49 characters and a comma each.
         let entry = json!({ "s": "x".repeat(41) });

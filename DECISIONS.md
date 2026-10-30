@@ -1213,7 +1213,7 @@ rest, with the versions in `Cargo.lock`:
 | egui 0.37.0 | app | The immediate-mode UI (D7, D26). Its own `accesskit` dependency is the data types only, with no zbus. It brings epaint, emath, ecolor, epaint_default_fonts (the fonts' licence exception, D36) and, inside epaint, vello_cpu, skrifa and harfrust for text |
 | egui-wgpu 0.37.0 | app | egui's renderer on wgpu, and the paint callback the viewer draws through (D36). Default features off |
 | egui_tiles 0.18.0 | app | The tiles: the viewer beside the Info, Doctor and Files tabs, saved by eframe's persistence (D7: egui_dock has no release for egui 0.37) |
-| image 0.25.10 (png only) | render; app (dev) | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame` and the goldens. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
+| image 0.25.10 (png only) | render; app, agent (dev) | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame`, look's PNGs and the goldens; agent's tests decode look's PNGs with it. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
 | libc 0.2.191 | cli, media | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, one of the binary's two FFI modules (D28): the handler only stores to an atomic. `_exit(2)` in `cli::exit`, the other, for `spherecut mcp` when a call is stuck (D44). In media's `ffi`, `mmap`, `madvise` and `munmap` for the download pool's buffers on huge pages (D30). It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
 | rustix 1.1.5 (std, fs, stdio) | agent, cli | `openat2` below a root, a directory read through its descriptor (A1's roots, D43), and `spherecut mcp`'s stdout guard: the protocol's copy of fd 1 (`fcntl_dupfd_cloexec`) and fd 1 pointed at stderr (`dup2_stdout`), all without `unsafe`. Pinned with `=` to the version already in the tree through tempfile and the Wayland crates, so it adds no crate |
@@ -1788,7 +1788,9 @@ What, for `spherecut probe` and `spherecut doctor` now, and for
   library half brings clap, anyhow and tracing-subscriber with it). A1
   moves `contract` into spherecut-agent, or into a small crate below
   both that needs only serde, serde_json, core and media, as the module
-  does today, and spherecut-cli re-exports it. The JSON doesn't change.
+  does today, and spherecut-cli re-exports it. The JSON doesn't change. *A1.4 did:* it is `spherecut_agent::contract`, since frame's core
+  moved there too (`spherecut_agent::still`, a1-plan amendment 13), and
+  `spherecut_cli::contract` re-exports it.
 - `schema` is one string that names the document and its version:
   `spherecut.probe/1`, `spherecut.doctor/1`, and `spherecut/1` for a
   usage error that names no subcommand.
@@ -6821,6 +6823,17 @@ What, as `crates/agent/src/rpc.rs` serves it:
 - **Results.** `content[0]` is the response as JSON text;
   `structuredContent` repeats it unless the result has an image (Claude
   Code's issue 54737). Every response has `warnings`.
+- **Images (A1.4).** look's image follows its text as `{"type":
+  "image", "data": <base64>, "mimeType": "image/jpeg" | "image/png"}`,
+  and the result then has no `structuredContent`. Its base64 stays
+  within the image budget, 60 KB unless `--image-budget-kb` says (1 to
+  5,000; amendment 19): a JPEG's quantizer steps up from 3 to 12 until
+  it fits, and a PNG past it is `image_too_large` at `format`. JPEG is
+  FFmpeg's mjpeg encoder (`media::encode_jpeg`), PNG the render crate's
+  (amendment 9), so no image crate is added. The text says what each
+  tile holds, where it is (`rect`), and how its frame was decoded.
+  With `output`, the image is written under the write root instead (up
+  to 4096 px) and only its path is returned.
 - **Threads and time.** A reader answers `initialize`, `ping`,
   `tools/list` and notifications at once; calls wait in a FIFO (at most
   8, then `busy`) for one of 2 workers. A call has 50 s from its
@@ -6860,8 +6873,12 @@ What, as `crates/agent/src/rpc.rs` serves it:
   Tests hold every schema to the lint (draft 2020-12, an object root,
   `additionalProperties: false`, known keywords only, a description on
   every node, snake_case names) and to its request type, A1's list to
-  5 KiB of the 12 KiB PLAN allows through M9, and the instructions to
-  1,500 characters.
+  6 KiB of the 12 KiB PLAN allows through M9 (5 KiB until look's schema
+  alone took 2.4 KB, amendment 32), and the instructions to 1,500
+  characters. `tools/list` leaves each schema's `$schema` out: 2020-12
+  is the dialect both revisions assume. With `--allow-write`, look's
+  annotations say it writes (`readOnlyHint` false) but never destroys
+  (`destructiveHint` false), since it only creates new files.
 - **Results that end early (A1.3).** A result's text stays under 40,000
   characters (`limits::RESULT_CHARS`), below the 50,000 past which
   Claude Code saves a result to a file instead of showing it. An op
@@ -6880,7 +6897,11 @@ What, as `crates/agent/src/rpc.rs` serves it:
   `structuredContent` would be (a test runs each tool both ways), and an
   error is the object MCP's text holds under `error`. Exits are D27's:
   1 for a tool's error, 2 for usage (JSON that doesn't parse, an unknown
-  tool, `bad_argument`, a bad root), 3 for `no_gpu`, 4 for SIGINT.
+  tool, `bad_argument`, a bad root), 3 for `no_gpu`, 4 for SIGINT. A
+  tool's image (A1.4) is written to a new file in `--image-dir` (the
+  temporary folder by default), `spherecut-<tool>-<ms>-<n>.jpg`, never
+  over another, and the envelope's `images` lists the paths; the test
+  checks the file's bytes against MCP's base64.
 
 Why: each rule is one a client or the spec forces, or one the review of
 the A1 plan found missing (its amendments 4, 6, 20, 21 and 26). The
@@ -6899,7 +6920,9 @@ revisions, the stdout guard, Codex's ten variables, `initialize` before
 FFmpeg, the exit when stdin closes; and `call` against `tools/call`, its
 exits and its SIGINT). probe's partial results are tested in
 `ops/probe.rs` with a call made to expire between two files, and the
-largest results in `crates/agent/tests/probe.rs`.
+largest results in `crates/agent/tests/probe.rs`. look's images, modes,
+labels and limits are tested in `crates/agent/tests/look.rs` on lavapipe,
+and doctor's file and speed in `crates/agent/tests/doctor.rs`.
 
 Revisit if: a client sends batches (then serve them for the revisions
 that had them), a client needs 2026-07-28 (D43), or the 2 s grace proves

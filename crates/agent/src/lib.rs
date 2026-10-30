@@ -10,12 +10,16 @@
 #![forbid(unsafe_code)]
 
 mod b64;
+pub mod contract;
 pub mod error;
+mod font;
+mod image;
 pub mod limits;
 pub mod ops;
 pub mod roots;
 pub mod rpc;
 pub mod schema;
+pub mod still;
 pub mod text;
 pub mod tools;
 
@@ -58,6 +62,19 @@ pub fn info() -> rpc::Info {
 pub struct Options {
     /// Where the agent's files are read from and written to.
     pub roots: Roots,
+    /// The most base64 an image inline may take, in bytes
+    /// ([`limits::INLINE_IMAGE_BYTES`] by default, `--image-budget-kb`).
+    pub image_budget: usize,
+}
+
+impl Options {
+    /// `roots`, with the default image budget.
+    pub fn new(roots: Roots) -> Self {
+        Options {
+            roots,
+            image_budget: limits::INLINE_IMAGE_BYTES,
+        }
+    }
 }
 
 /// Serve one MCP session on `input` and `output`, as `spherecut mcp` does
@@ -70,7 +87,7 @@ pub fn serve(
     rpc::serve(
         input,
         output,
-        Arc::new(tools::Spherecut::new(options.roots)),
+        Arc::new(tools::Spherecut::new(options.roots).image_budget(options.image_budget)),
         info(),
         rpc::Timing::default(),
     )
@@ -87,7 +104,7 @@ pub fn call(
     cx: &rpc::CallCx,
 ) -> Result<rpc::Output, ToolError> {
     use rpc::Tools;
-    let tools = tools::Spherecut::new(options.roots);
+    let tools = tools::Spherecut::new(options.roots).image_budget(options.image_budget);
     if !tools.has(tool) {
         let names: Vec<&str> = tools::TOOLS.iter().map(|t| t.name).collect();
         return Err(

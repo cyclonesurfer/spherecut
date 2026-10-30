@@ -1,9 +1,10 @@
 //! The CLI's JSON contract (DECISIONS D27, `docs/cli-json.md`). With
 //! `--json`, a run prints exactly one [`Envelope`] on stdout as one line
 //! of compact JSON, on success and on failure, and exits with an [`Exit`]
-//! status. stderr carries only logs for people. A1's `spherecut call` and
-//! `spherecut mcp` are to reuse these types: probe's, doctor's and
-//! frame's ([`FrameResult`]).
+//! status. stderr carries only logs for people. It lives here, below the
+//! CLI, since A1.4 (a1-plan amendment 13): [`crate::still`], frame's core,
+//! fails with its [`ErrorBody`] and reports in its types, and the CLI
+//! re-exports it as `spherecut_cli::contract`.
 //!
 //! Within a schema version, fields are only added: a field is never
 //! removed, renamed or given another type, and a code never renamed or

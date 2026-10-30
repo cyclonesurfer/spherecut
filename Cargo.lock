@@ -3067,12 +3067,15 @@ dependencies = [
 name = "spherecut-agent"
 version = "0.1.0"
 dependencies = [
+ "image",
  "proptest",
  "rustix 1.1.5",
  "serde",
  "serde_json",
  "spherecut-core",
  "spherecut-media",
+ "spherecut-render",
+ "spherecut-sphere",
  "spherecut-synth",
  "thiserror 2.0.21",
  "tracing",

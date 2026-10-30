@@ -120,21 +120,58 @@ enum Cmd {
     /// and stdout (docs/agents.md). Logs go to stderr.
     Mcp {
         #[command(flatten)]
-        roots: RootArgs,
+        agent: AgentArgs,
     },
     /// Run one of the agent tools that `spherecut mcp` serves, with the
     /// same roots and limits, and print its result as one JSON document
     /// (docs/agents.md).
     Call {
-        /// The tool: probe or doctor.
+        /// The tool: probe, look or doctor.
         tool: String,
         /// Its arguments, a JSON object, as an agent sends them, such as
         /// '{"files": ["a.mp4"]}'.
         #[arg(default_value = "{}")]
         args: String,
         #[command(flatten)]
-        roots: RootArgs,
+        agent: AgentArgs,
+        /// Where look's images go, as spherecut-look-<ms>-<n>.jpg (or
+        /// .png): the temporary folder by default. The document's
+        /// `images` lists them.
+        #[arg(long, value_name = "DIR")]
+        image_dir: Option<PathBuf>,
     },
+}
+
+/// The largest `--image-budget-kb`: 5 MB of base64, Bedrock's limit on
+/// an image and half the API's.
+const MAX_IMAGE_BUDGET_KB: i64 = (spherecut_agent::limits::MAX_IMAGE_BUDGET / 1000) as i64;
+
+/// What `spherecut mcp` and `spherecut call` share: the roots, and how
+/// large an image inline may be.
+#[derive(clap::Args)]
+struct AgentArgs {
+    #[command(flatten)]
+    roots: RootArgs,
+    /// The most base64 an image in a result may take, in kilobytes of
+    /// 1000 bytes: look lowers its JPEG quality to fit, then refuses.
+    /// Claude Code counts images against MAX_MCP_OUTPUT_TOKENS
+    /// (docs/agents.md).
+    #[arg(
+        long,
+        value_name = "KB",
+        default_value_t = (spherecut_agent::limits::INLINE_IMAGE_BYTES / 1000) as u32,
+        value_parser = clap::value_parser!(u32).range(1..=MAX_IMAGE_BUDGET_KB)
+    )]
+    image_budget_kb: u32,
+}
+
+impl AgentArgs {
+    fn options(&self, roots: spherecut_agent::Roots) -> spherecut_agent::Options {
+        spherecut_agent::Options {
+            roots,
+            image_budget: self.image_budget_kb as usize * 1000,
+        }
+    }
 }
 
 /// Where an agent's files may be read from and written to (D45).
@@ -352,14 +389,19 @@ fn run(cli: Cli, args: &[OsString], json: bool) -> Result<Exit> {
             let node = spherecut_media::hw::render_node(None, render_node.as_deref());
             doctor(&node.path, json)
         }
-        Cmd::Mcp { roots } => mcp(&roots),
-        Cmd::Call { tool, args, roots } => call::run(&tool, &args, &roots),
+        Cmd::Mcp { agent } => mcp(&agent),
+        Cmd::Call {
+            tool,
+            args,
+            agent,
+            image_dir,
+        } => call::run(&tool, &args, &agent, image_dir.as_deref()),
     }
 }
 
 /// An MCP session on stdin and stdout, until stdin closes (A1, D43).
-fn mcp(roots: &RootArgs) -> Result<Exit> {
-    let roots = match roots.open("mcp") {
+fn mcp(agent: &AgentArgs) -> Result<Exit> {
+    let roots = match agent.roots.open("mcp") {
         Ok(roots) => roots,
         Err(exit) => return Ok(exit),
     };
@@ -378,7 +420,7 @@ fn mcp(roots: &RootArgs) -> Result<Exit> {
     let ended = spherecut_agent::serve(
         std::io::BufReader::new(std::io::stdin()),
         std::fs::File::from(protocol),
-        spherecut_agent::Options { roots },
+        agent.options(roots),
     );
     if ended.gave_up {
         exit::now(Exit::Failed as u8);

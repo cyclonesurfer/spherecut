@@ -173,10 +173,12 @@ fn a_session_at_each_revision() {
         let tools = list["result"]["tools"].as_array().unwrap();
         let doctor = tools.iter().find(|t| t["name"] == "doctor").unwrap();
         assert_eq!(doctor["annotations"]["readOnlyHint"], true);
-        assert_eq!(
-            doctor["inputSchema"]["$schema"],
-            "https://json-schema.org/draft/2020-12/schema"
-        );
+        // 2020-12 is the dialect either revision assumes, so the listing
+        // leaves `$schema` out (a1-plan amendment 32).
+        assert_eq!(doctor["inputSchema"]["type"], "object");
+        assert!(doctor["inputSchema"].get("$schema").is_none());
+        let look = tools.iter().find(|t| t["name"] == "look").unwrap();
+        assert_eq!(look["annotations"]["readOnlyHint"], true);
         let r = s.call(3, "tools/call", json!({"name": "doctor", "arguments": {}}));
         assert!(
             r["result"]["structuredContent"]["decode_checks"].is_array(),
@@ -378,6 +380,7 @@ fn call_and_mcp_agree() {
         ),
         ("probe", json!({"folder": ".", "page_size": 1})),
         ("doctor", json!({})),
+        ("doctor", json!({"file": "clip.mp4"})),
     ];
     let mut s = Server::spawn(|c| {
         c.arg("--read-root").arg(&dir.0);
@@ -402,6 +405,96 @@ fn call_and_mcp_agree() {
     assert_eq!(code, Some(2));
     assert_eq!(doc["error"], mcp["error"]);
     assert!(s.close().0.success());
+}
+
+/// RFC 4648 base64, as `tools/call` sends an image.
+fn unbase64(s: &str) -> Vec<u8> {
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => c - b'A',
+        b'a'..=b'z' => c - b'a' + 26,
+        b'0'..=b'9' => c - b'0' + 52,
+        b'+' => 62,
+        b'/' => 63,
+        _ => panic!("not base64: {c}"),
+    };
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    for quad in s.as_bytes().chunks(4) {
+        let digits: Vec<u8> = quad
+            .iter()
+            .take_while(|&&c| c != b'=')
+            .map(|&c| value(c))
+            .collect();
+        let n = digits
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, &d)| n | u32::from(d) << (18 - 6 * i));
+        out.extend_from_slice(&n.to_be_bytes()[1..digits.len()]);
+    }
+    out
+}
+
+/// look by `call` and by `tools/call`: the same JSON, and the same image,
+/// `call`'s written to `--image-dir` and named in `images` (amendment 32).
+#[test]
+fn look_by_call_and_mcp_agree() {
+    let dir = media_dir("look");
+    let images = dir.0.join("images");
+    std::fs::create_dir(&images).unwrap();
+    let args = json!({
+        "file": "clip.mp4",
+        "times": ["0", "3f"],
+        "view": {"yaw": 90, "fov": 100},
+        "size": 256,
+    });
+    let mut s = Server::spawn(|c| {
+        c.arg("--read-root").arg(&dir.0);
+    });
+    s.initialize("2025-11-25");
+    let r = s.call(1, "tools/call", json!({"name": "look", "arguments": args}));
+    let result = &r["result"];
+    assert!(result.get("isError").is_none(), "{r}");
+    assert!(result.get("structuredContent").is_none(), "{r}");
+    let content = result["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2, "{r}");
+    let mcp: Value = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["mimeType"], "image/jpeg");
+    let sent = unbase64(content[1]["data"].as_str().unwrap());
+    assert!(sent.starts_with(&[0xff, 0xd8]), "a JPEG");
+    assert_eq!(mcp["image"]["bytes"], sent.len());
+    assert_eq!(mcp["tiles"].as_array().unwrap().len(), 2, "{mcp}");
+    assert!(s.close().0.success());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .args(["call", "look", &args.to_string(), "--read-root"])
+        .arg(&dir.0)
+        .arg("--image-dir")
+        .arg(&images)
+        .env_remove("SPHERECUT_DEBUG_PANIC")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["result"], mcp);
+    let written = doc["images"].as_array().unwrap();
+    assert_eq!(written.len(), 1, "{doc}");
+    let path = std::path::Path::new(written[0].as_str().unwrap());
+    assert_eq!(path.parent(), Some(images.as_path()));
+    let name = path.file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.starts_with("spherecut-look-") && name.ends_with(".jpg"),
+        "{name}"
+    );
+    assert_eq!(std::fs::read(path).unwrap(), sent, "the same JPEG");
+    // A tool without images gives no `images`.
+    let (_, doc) = call(&dir.0, "doctor", "{}");
+    assert!(doc.get("images").is_none(), "{doc}");
 }
 
 /// D27's exit statuses: 2 for usage (arguments that aren't JSON, an

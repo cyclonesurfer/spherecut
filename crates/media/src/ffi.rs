@@ -1730,6 +1730,17 @@ pub fn plane(frame: &ff::frame::Video, index: usize) -> Option<&[u8]> {
     plane_and_stride(frame, index).map(|(p, _)| p)
 }
 
+/// FFmpeg's `FF_QP2LAMBDA`: a quantizer scale times this is a lambda,
+/// what `global_quality` and a frame's `quality` hold.
+pub(crate) const QP2LAMBDA: i32 = 118;
+
+/// Set `frame`'s `quality`, the lambda an encoder with a fixed quantizer
+/// (`AV_CODEC_FLAG_QSCALE`) codes it at. ffmpeg-next reads it only.
+pub(crate) fn set_frame_quality(frame: &mut ff::frame::Video, lambda: i32) {
+    // SAFETY: `frame` is a live AVFrame we own; `quality` is a plain int.
+    unsafe { (*frame.as_mut_ptr()).quality = lambda };
+}
+
 /// [`plane`], and the bytes from one row to the next (`linesize`).
 pub(crate) fn plane_and_stride(frame: &ff::frame::Video, index: usize) -> Option<(&[u8], usize)> {
     // SAFETY: only takes the pointer to the AVFrame that `frame` wraps.
