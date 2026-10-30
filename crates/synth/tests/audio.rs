@@ -1,7 +1,8 @@
 //! The audio decoder (M1 plan sections 9.1 and 12.1, DECISIONS D35), on
 //! clips synth writes: exact sample counts and rates, the tones' pitches,
 //! AAC's priming gone and the audio on the video's time axis, seeks that
-//! give a sequential decode's samples, 44.1 kHz resampled to 48 kHz to the
+//! give a sequential decode's samples in MP4 and Matroska, a Matroska
+//! remux with every sample of the MP4's, 44.1 kHz resampled to 48 kHz to the
 //! sample, mono duplicated, ambiX decoded to two cardioids, the output's
 //! channels, origins before and after the audio, and `sync-flash-beep`'s
 //! beeps on its white frames.
@@ -205,41 +206,63 @@ fn priming_is_gone_and_the_audio_starts_on_the_video_axis() {
 fn a_seek_gives_a_sequential_decodes_samples() {
     for (name, rate) in [("seek-48", 48_000), ("seek-441", 44_100)] {
         let path = clip(name, Audio::Stereo, rate, 3);
-        let origin = Some(video_origin(&path));
-        let mut dec = open(&path, STEREO_48K, origin);
-        let (_, all) = drain(dec.as_mut(), None);
-        let never = StopToken::never();
-        for at in [
-            Time::seconds(Rational::new(1, 10).unwrap()),
-            Time::seconds(Rational::new(1, 2).unwrap()),
-            Time::seconds(Rational::new(1_234_567, 1_000_000).unwrap()),
-            Time::seconds(Rational::new(1001, 30_000).unwrap()),
-            Time::from_secs(2),
-        ] {
-            dec.seek(at, &never).unwrap();
-            let (start, data) = drain(dec.as_mut(), Some(9600));
-            let want = (at.to_secs_f64() * 48_000.0).round() as i64;
-            assert_eq!(start, want, "{name} at {at:?}");
-            let from = start as usize * 2;
-            let worst = data
-                .iter()
-                .zip(&all[from..])
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0f32, f32::max);
-            assert!(worst <= 1e-6, "{name} at {at:?}: off by {worst}");
-            assert_eq!(data.len(), 9600 * 2, "{name} at {at:?}");
+        let mkv = media::remux_to_mkv(&path, &dir(&format!("{name}-mkv"))).unwrap();
+        for path in [path, mkv] {
+            seek_parity(&path);
         }
-        // Before the start, the samples before 0 are silence; past the
-        // end there are none.
-        dec.seek(Time::seconds(Rational::new(-1, 10).unwrap()), &never)
-            .unwrap();
-        let (start, data) = drain(dec.as_mut(), Some(9600));
-        assert_eq!(start, -4800);
-        assert!(data[..4800 * 2].iter().all(|&x| x == 0.0));
-        assert_eq!(&data[4800 * 2..], &all[..4800 * 2]);
-        dec.seek(Time::from_secs(5), &never).unwrap();
-        assert!(matches!(dec.next_chunk(&never).unwrap(), NextAudio::End));
     }
+}
+
+/// Seeks into `path`: each gives the samples a decode from the start
+/// gives, from the seek's sample on.
+fn seek_parity(path: &Path) {
+    let name = path.file_name().unwrap().to_string_lossy();
+    let origin = Some(video_origin(path));
+    let mut dec = open(path, STEREO_48K, origin);
+    let (first, all) = drain(dec.as_mut(), None);
+    assert_eq!(first, 0, "{name}");
+    let never = StopToken::never();
+    for at in [
+        Time::seconds(Rational::new(1, 10).unwrap()),
+        Time::seconds(Rational::new(1, 2).unwrap()),
+        Time::seconds(Rational::new(1_234_567, 1_000_000).unwrap()),
+        Time::seconds(Rational::new(1001, 30_000).unwrap()),
+        Time::from_secs(2),
+    ] {
+        dec.seek(at, &never).unwrap();
+        let (start, data) = drain(dec.as_mut(), Some(9600));
+        let want = (at.to_secs_f64() * 48_000.0).round() as i64;
+        assert_eq!(start, want, "{name} at {at:?}");
+        let from = start as usize * 2;
+        let worst = data
+            .iter()
+            .zip(&all[from..])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst <= 1e-6, "{name} at {at:?}: off by {worst}");
+        assert_eq!(data.len(), 9600 * 2, "{name} at {at:?}");
+    }
+    // Before the start, the samples before the stream's first are
+    // silence (Matroska's start before 0 with AAC's priming in it); past
+    // the end there are none.
+    dec.seek(Time::seconds(Rational::new(-1, 10).unwrap()), &never)
+        .unwrap();
+    let (start, data) = drain(dec.as_mut(), Some(9600));
+    assert_eq!(start, -4800, "{name}");
+    let first = (dec.info().start.to_secs_f64() * 48_000.0).round() as i64;
+    let silent = (first.clamp(-4800, 0) + 4800) as usize;
+    assert!(data[..silent * 2].iter().all(|&x| x == 0.0), "{name}");
+    let worst = data[4800 * 2..]
+        .iter()
+        .zip(&all)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(worst <= 1e-6, "{name} from before 0: off by {worst}");
+    dec.seek(Time::from_secs(5), &never).unwrap();
+    assert!(
+        matches!(dec.next_chunk(&never).unwrap(), NextAudio::End),
+        "{name}"
+    );
 }
 
 #[test]
@@ -379,34 +402,38 @@ fn a_file_without_audio_has_no_stream() {
 }
 
 /// Matroska keeps times to the millisecond: a remux's samples are the
-/// MP4's, placed on the clip's axis within a millisecond of where the MP4
-/// puts them, and it ends where its last block's duration says, since it
-/// has no count of AAC's padding.
+/// MP4's, every one from its first on, placed on the clip's axis within
+/// a millisecond of where the MP4 puts them, and it ends where its last
+/// block's duration says, since it has no count of AAC's padding. Each
+/// is decoded at its own rate, so that no resampler's phase is between
+/// them.
 #[test]
 fn a_matroska_remux_decodes_as_the_mp4_does_within_a_millisecond() {
-    let path = clip("mkv", Audio::Stereo, 48_000, 2);
-    let mkv = media::remux_to_mkv(&path, &dir("mkv-remux")).unwrap();
-    let (s0, mp4) = drain(
-        open(&path, STEREO_48K, Some(video_origin(&path))).as_mut(),
-        None,
-    );
-    let mut dec = open(&mkv, STEREO_48K, Some(video_origin(&mkv)));
-    let (s1, data) = drain(dec.as_mut(), None);
-    assert_eq!((s0, s1), (0, 0));
-    let (l0, l1) = (channel(&mp4, 2, 0), channel(&data, 2, 0));
-    let off = |lag: i64| {
-        (5000..90_000i64)
-            .map(|i| (l1[i as usize] - l0[(i + lag) as usize]).abs())
-            .fold(0.0f32, f32::max)
-    };
-    let lag = (-48..=48).find(|&lag| off(lag) <= 1e-6);
-    assert!(lag.is_some(), "no lag within 1 ms matches");
-    assert!(
-        l1.len().abs_diff(l0.len()) <= 1024 + 48,
-        "{} {}",
-        l1.len(),
-        l0.len()
-    );
+    for (name, rate) in [("mkv-48", 48_000), ("mkv-441", 44_100)] {
+        let out = AudioOutFormat { rate, channels: 2 };
+        let path = clip(name, Audio::Stereo, rate, 2);
+        let mkv = media::remux_to_mkv(&path, &dir(&format!("{name}-remux"))).unwrap();
+        let (s0, mp4) = drain(open(&path, out, Some(video_origin(&path))).as_mut(), None);
+        let (s1, data) = drain(open(&mkv, out, Some(video_origin(&mkv))).as_mut(), None);
+        assert_eq!((s0, s1), (0, 0), "{name}");
+        let (l0, l1) = (channel(&mp4, 2, 0), channel(&data, 2, 0));
+        // Every sample both have, at one lag: none lost or repeated.
+        let off = |lag: i64| {
+            let to = (l1.len() as i64).min(l0.len() as i64 - lag);
+            ((-lag).max(0)..to)
+                .map(|i| (l1[i as usize] - l0[(i + lag) as usize]).abs())
+                .fold(0.0f32, f32::max)
+        };
+        let ms = i64::from(rate) / 1000;
+        let lag = (-ms..=ms).find(|&lag| off(lag) <= 1e-6);
+        assert!(lag.is_some(), "{name}: no lag within 1 ms matches");
+        assert!(
+            l1.len().abs_diff(l0.len()) <= 1024 + ms as usize,
+            "{name}: {} {}",
+            l1.len(),
+            l0.len()
+        );
+    }
 }
 
 /// `sync-flash-beep`: each beep starts within 1 ms of the white frame it

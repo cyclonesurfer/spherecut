@@ -150,8 +150,11 @@ pub struct FfmpegAudio {
     /// The output sample the next chunk starts at.
     want: i64,
     /// Where the packets read so far end, in ticks of the time base: the
-    /// last frame's padding (AAC codes whole frames of 1024) is cut there.
+    /// last frame's padding (AAC codes whole frames of 1024) is cut there,
+    /// when the frame goes past it by more than a tick ([`slack`]).
     /// `None` once a packet came without a duration.
+    ///
+    /// [`slack`]: Self::slack
     end_pts: Option<i64>,
     /// A tick of the stream's time base, in input samples, at least 1:
     /// how far a frame's timestamp may be from where the frames before it
@@ -507,13 +510,16 @@ impl FfmpegAudio {
         {
             self.end_run()?;
         }
-        // The last frame's padding, past where its packet ends.
+        // The last frame's padding, past where its packet ends. With a
+        // time base coarser than a sample, every packet's end is rounded,
+        // so only a frame past it by more than a tick has padding.
         let end = match self.end_pts {
             Some(end) if end > i64::MIN => Some(self.input_position(end)?),
             _ => None,
         };
+        let rounding = if self.slack > 1 { self.slack } else { 0 };
         let n = match end {
-            Some(end) if pos + n > end => (end - pos).max(0),
+            Some(end) if pos + n > end + rounding => (end - pos).max(0),
             _ => n,
         };
         if n == 0 {
