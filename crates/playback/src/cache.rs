@@ -51,8 +51,8 @@
 //! stream's worker moved.
 //!
 //! **Surfaces** (slice 5b). A frame left on its decoder's device
-//! ([`VideoFrame::on_device`]: exported from VA-API, or a Vulkan Video
-//! image) holds one of the surfaces of its decoder's pool, which on
+//! ([`Transfer::DrmPrime`], exported from VA-API, or
+//! [`Transfer::Vulkan`], a Vulkan Video image) holds one of the surfaces of its decoder's pool, which on
 //! VA-API has only so many and on Vulkan takes video memory the budget
 //! doesn't count: the cache holds at most
 //! [`set_surface_cap`](FrameCache::set_surface_cap) such frames a
@@ -90,7 +90,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use spherecut_core::{Rational, StopToken, Time, may_block};
-use spherecut_media::backend::VideoFrame;
+use spherecut_media::backend::{Transfer, VideoFrame};
 
 /// A budget below this many frames of the source raises the "frame cache
 /// too small" notice; playback goes on.
@@ -388,7 +388,7 @@ impl State {
     /// not pinned).
     fn offer(&mut self, s: usize, frame: &Arc<VideoFrame>) -> Option<Insert> {
         let (t, bytes) = (frame.time, frame.bytes() as u64);
-        let surface = frame.on_device();
+        let surface = matches!(frame.transfer, Transfer::DrmPrime | Transfer::Vulkan);
         let place = (frame.run, frame.seq);
         self.frame_bytes.insert(s, bytes);
         let held = self.frames.contains_key(&(s, t));

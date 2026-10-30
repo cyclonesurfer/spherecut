@@ -70,6 +70,15 @@ fn frame(k: i64, run: u64, seq: u64, bytes: usize) -> Arc<VideoFrame> {
 /// [`frame`], holding a decoder's surface when `surface` (as a VA-API
 /// frame exported as DMA-BUFs does).
 fn frame_on(k: i64, run: u64, seq: u64, bytes: usize, surface: bool) -> Arc<VideoFrame> {
+    let mut f = unshared(k, run, seq, bytes);
+    if surface {
+        f.transfer = backend::Transfer::DrmPrime;
+    }
+    Arc::new(f)
+}
+
+/// [`frame_on`]'s frame in system memory, not yet shared.
+fn unshared(k: i64, run: u64, seq: u64, bytes: usize) -> VideoFrame {
     let width = u32::try_from(bytes).unwrap();
     let mut f = VideoFrame::owned(
         layout(),
@@ -84,10 +93,7 @@ fn frame_on(k: i64, run: u64, seq: u64, bytes: usize, surface: bool) -> Arc<Vide
     f.duration = Some(RATE.frame_duration());
     f.run = run;
     f.seq = seq;
-    if surface {
-        f.transfer = backend::Transfer::DrmPrime;
-    }
-    Arc::new(f)
+    f
 }
 
 /// The frame index of a frame made by [`frame`].
@@ -603,6 +609,22 @@ fn the_ui_thread_only_tries_the_lock() {
     // Nothing those calls would have done was done.
     assert_eq!(c.stats().frames, 1);
     assert_eq!(c.playhead(), at(1));
+}
+
+#[test]
+fn frames_left_on_a_vulkan_device_count_as_surfaces() {
+    // Path B: a Vulkan Video frame holds an image of FFmpeg's pool in
+    // video memory, which the budget doesn't count, so the cap holds it.
+    let c = FrameCache::new(1 << 30, Time::from_secs(10)).with_surface_cap(Some(2));
+    let vulkan = |k: i64| {
+        let mut f = unshared(k, 1, k as u64, 0);
+        f.transfer = backend::Transfer::Vulkan;
+        Arc::new(f)
+    };
+    assert_eq!(c.try_insert(0, vulkan(0)), Insert::Stored);
+    assert_eq!(c.try_insert(0, vulkan(1)), Insert::Stored);
+    assert_eq!(c.try_insert(0, vulkan(2)), Insert::Full);
+    assert_eq!(c.stats().surfaces, 2);
 }
 
 #[test]
