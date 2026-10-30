@@ -6717,9 +6717,11 @@ What:
   server sends. Tests hold each to its Rust request type: every
   property in the schema deserializes, nothing else does, and the
   required ones are required.
-- **rustix** (`=1.1.6`, features `std` and `fs`) for `openat2` and for
-  reading a directory through its descriptor; its `net` feature gives
-  `SO_PEERCRED` in A3. The agent crate has no `unsafe`.
+- **rustix** (`=1.1.5`, the version the lock already has through
+  tempfile and Wayland; features `std`, `fs` and `stdio`) for `openat2`,
+  for reading a directory through its descriptor, and for the stdout
+  guard; its `net` feature gives `SO_PEERCRED` in A3. The agent crate
+  has no `unsafe`.
 
 Why, from the prototypes (scratch crates in the cloud workspace,
 kernel 6.18, 2026-10-30):

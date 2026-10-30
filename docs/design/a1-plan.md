@@ -5,6 +5,194 @@ PLAN.md track A1, DECISIONS D23 and D43, `docs/research/agents-2026-10.md`,
 docs/PROMPT.md and the code as M1 left it. Where this plan and PLAN.md
 differ, PLAN.md wins until the difference is recorded there.*
 
+## Amendments, 2026-10-30, after the fresh review (read first)
+
+A fresh subagent reviewed this plan against PLAN.md's A1 criteria and the
+code. These changes follow from its 31 findings (numbered as it numbered
+them) and win over the sections below where they differ.
+
+**Criteria.**
+
+1. **Times out** (4.1) are `core::Time` and `core::FrameTime` as they
+   serialize already: `{"exact": "1001/30000", "seconds": 0.0333…}`
+   plus `frame`, D27's shape. `exact` is a Rational string, which reads
+   back as a time going in. Not `[num, den]`.
+2. **No file name in an error, and no proxy advice** (6.2, 13). The X5's
+   and the MAX's proxies are dual fisheye like their masters, so
+   "use the proxy" would loop. `not_equirect`'s `next` says
+   `mode: "raw"`, or `assume_equirect: true` for a stitched file without
+   metadata. `timed_out`'s `next` says `seek: "keyframe"`, fewer times,
+   or "a clip's `files.proxy` from probe" for speed, without a name.
+3. **The Tier 2 criterion in full** (11.4). The Tier 2 test's `look` on
+   the X5 LRV uses `mode: "raw"`. PROGRESS records each client's
+   version, the revision it negotiated, the calls, the output sizes, and
+   whether a default-size and a 1568 px `look` reached the model. Pat's
+   runs use Claude Code and one of Codex or Gemini CLI, as PLAN says.
+4. **No tool starts a process; no descriptor leaks** (6.5, 3.1, 5).
+   `media::doctor::run_with(node, Options { query_packages: false })`
+   skips `rpm -q` for agents. The fixes then use the "install" wording,
+   and the doctor tool's description says `spherecut doctor` in a
+   terminal gives the exact Fedora commands. The protocol's copy of
+   stdout is `fcntl_dupfd_cloexec`, not `dup`. Every `openat2` in 5,
+   roots (`O_PATH`) and folders included, has `O_CLOEXEC`.
+5. **`render_node`** (6.5) is a device, not media, so it is outside the
+   roots by design. It must be `/dev/dri/renderD` and digits, and an
+   `lstat` must say character device (not a symlink) before doctor
+   opens it. `/dev/dri` is root's, so no agent can swap what is there.
+6. **Untrusted text** (4.3), two functions:
+   - `text::field`, for every field typed as media text (tags and their
+     keys, vendor strings, names from a folder listing, camera names,
+     FFmpeg's log lines): replaces Cc (C0, C1, DEL), Cf (bidi controls,
+     zero-width characters U+200B to U+200F, U+2060 to U+2064, U+FEFF,
+     the tag characters U+E0000 to U+E007F, U+00AD and the rest of Cf),
+     Zl and Zp (U+2028, U+2029), and the variation selectors (U+FE00 to
+     U+FE0F, U+E0100 to U+E01EF), and cuts to 1 KiB.
+   - `text::sanitize`, over the whole Response as a backstop: the same
+     replacements except newline, and no cut, so our own multi-line
+     text (doctor's `fix`) survives and a field an op forgot to type
+     still can't carry an invisible or reordering character.
+   The test on a synthetic file with hostile tags and names (11.1) finds
+   any field an op forgot.
+7. **D27 for `call`, and warnings** (8, 6.2). Every Response has
+   `warnings: [{code, message}]`. `look`'s carries frame's
+   `stereo_left_eye`, `crop_applied` and `pose_not_applied`. `call`
+   prints D27's envelope, `{"schema": "spherecut.call/1", "ok",
+   "result", "error", "warnings"}`, with `result` the Response. Its exit
+   statuses are D27's: 1 for a tool error, 2 for usage (bad JSON, an
+   unknown tool, `bad_argument`), 3 for `no_gpu` and a missing decoder,
+   4 for SIGINT. The identity test compares `result` with MCP's
+   Response.
+8. **A1's share of `tools/list`** (4.4): at most 5 KiB for A1's five
+   tools, with a test, so A2's seven have the other 7 KiB.
+9. **PNG** goes through `render::Image::to_png`, as `frame` does: the
+   `image` crate is the render crate's already, so no image crate is
+   added, which is PLAN's point. JPEG is FFmpeg's. D44 records it.
+
+**Facts.**
+
+10. **Media gets a display name** (5). `detect::guess` reads the
+    extension (`.lrv`, `.lrf`), and probe's messages and
+    `ProbeReport.path` carry the path. So media gains `Source { open,
+    name }`: `open` is `/proc/self/fd/N`, and `name` is the agent's
+    path, which detection, messages and the report use. A1.2 threads it
+    through probe and detect, and A1.4 through the video opener.
+11. **Per-channel audio** (6.3). `media::audio` resamples and mixes to
+    stereo, so `analyze audio` needs a new raw path in media: decode at
+    the stream's rate, every channel, as planar f32. Added to A1.5.
+12. **`look`'s decoder is frame's** (6.2): D39's `auto`, VA-API then
+    software, never Vulkan. D34's choice lives in the playback crate,
+    and only frame's choice is what `still.rs` moves with frame's tests.
+    doctor with a file reports that path, and says it is `look`'s and
+    `frame`'s.
+13. **`contract` moves** (2). Frame's core uses `spherecut_cli::contract`
+    (its codes, `DecodeInfo`, `FallbackInfo`, `ViewInfo`), and
+    `crates/cli/src/lib.rs` says A1 moves it below the agent crate. A1.4
+    moves `contract.rs` to `spherecut-agent::contract`, before
+    `still.rs`, and the CLI re-exports it. The layout in 2 gains
+    `contract.rs` and `still.rs`.
+14. **One renderer a call** (6.2). `render_still` builds its pipelines
+    each time. `still.rs` gets a `StillRenderer` made once a call, which
+    renders every view of a decoded frame before the next seek.
+15. **Spawned tests live in `crates/cli/tests/`** (11), where
+    `CARGO_BIN_EXE_spherecut` exists. In-process tests of the protocol
+    stay in `crates/agent`. The stray print is a debug-build hook
+    (`SPHERECUT_DEBUG_PANIC=mcp_print`), and the slow backend for the
+    cancellation and deadline tests is an in-process fake. Neither is a
+    tool, so neither is in `tools/list`.
+16. **Layout** (7.1, 6.2). The column count is searched, not fixed: for
+    24 tiles at 2:1, 5 columns come closer to 16:9 than 6. Line 2 of a
+    label is short (`y90 p-20 f100`, 13 glyphs, 104 px), and a tile is
+    at least 112 px wide; past that, fewer tiles fit, and `out_of_range`
+    says how many do.
+17. **`EAGAIN`** from `openat2` (a rename racing `..`): retried up to
+    three times, then `outside_roots`.
+18. **rustix is pinned to the lock's `=1.1.5`**, not 1.1.6, so adding
+    it changes no other crate's version.
+
+**Design.**
+
+19. **Images inside clients' output limits** (7.1, 9). Claude Code
+    counts images against `MAX_MCP_OUTPUT_TOKENS` (25,000 by default)
+    in a way its docs don't give, and #9152 looked like base64 counted
+    as text. So an inline result has a budget,
+    `limits::INLINE_IMAGE_BYTES` (60,000 bytes of base64, 15,000 tokens
+    even if counted as text), set by `--image-budget-kb`. The JPEG's
+    qscale rises from 3 until it fits, up to 12. Past that, an
+    `image_too_large` error names `size`, `output` and the flag.
+    `docs/agents.md` says how to raise `MAX_MCP_OUTPUT_TOKENS`. `probe`'s
+    `full` takes at most `limits::FULL_PER_CALL` (8) files, and any
+    result's text stays under `limits::RESULT_CHARS` (40,000, under
+    Claude Code's 50,000 point where it saves a result to a file), with
+    a test on the largest.
+20. **The deadline holds when the work doesn't cooperate** (3.1). The
+    deadline counts from the request's receipt, as it does now. At the
+    deadline plus `limits::STUCK_GRACE` (2 s), a call that hasn't ended
+    gets `timed_out` from the reaper. Its worker is abandoned (its late
+    result is dropped) and a new one is started. After
+    `limits::MAX_ABANDONED` (4) the server logs why and exits 1, and the
+    client restarts it. At most `limits::MAX_QUEUED` (8) calls wait. One
+    more gets a `busy` error. probe's open gets the call's interrupt.
+21. **Exiting with a stuck worker** (3.1). `serve` says whether every
+    worker stopped. If one didn't, the CLI flushes and calls `_exit(0)`
+    from a small FFI module (`cli::exit`, D28 lists it). Mesa's and
+    libva's exit handlers then never run under a thread that is inside
+    them.
+22. **Absolute paths through symlinked roots** (5). Each root keeps the
+    absolute form it was given (lexically normalized) beside its
+    canonical one. An agent's absolute path is matched against both.
+23. **No partial output** (5). The image is encoded in memory first. The
+    file is then created `O_EXCL` under the write root and written. On a
+    failure or a cancel it is unlinked through the root's descriptor
+    (`unlinkat`), so a retry doesn't get `output_exists`.
+24. **Descriptor numbers can't be reused under a call** (5). `Opened`
+    owns the `OwnedFd` and lends `/proc/self/fd/N` only for as long as
+    it is borrowed, so the number can't name another call's file.
+25. **Timing on real files** (6.3). Durations come from pts in
+    presentation order, not packet order. "Equal" allows one timebase
+    tick: Matroska's millisecond ticks make 29.97 fps alternate 33 and
+    34 ms, which is constant rate. `vfr` needs a spread past 1 % plus a
+    tick.
+26. **Revisions** (3.2). `SUPPORTED` adds 2025-03-26 and 2024-11-05, for
+    clients not yet on 2025-06-18 (Zed, goose and opencode are
+    unverified). Those revisions allowed batches. We refuse them (-32600,
+    documented), since no client is known to send them. The modern check
+    comes before "initialize first", and `server/discover` gets -32022
+    with or without `_meta`, as the code has it. Its `data` is
+    `{supported: string[], requested: string}`, checked against
+    2026-07-28's `schema.ts` (`requested` is `""` when the request named
+    none).
+
+**Ambiguities settled.**
+
+27. **`size`**: the schema allows 64 to 4096. Over 1568 needs `output`
+    (and `--allow-write`). Without it, `image_too_large` names the limit
+    and both. 4096 keeps a composed image under 64 MiB of RGBA.
+28. **Error codes**: the image one is `image_too_large`, since D27's
+    `too_large` means a picture over `MAX_PIXELS`. `busy` is new (20).
+    A table in `docs/agents.md` maps every `MediaError` and
+    `RenderError` code (`no_decoder`, `not_media`, `io_error`, `hw_*`,
+    `nested_open_refused`, `too_large`) to A1's.
+29. **`check archive`** is redefined: nothing truncated or damaged,
+    every stream FFmpeg finds is readable, and the camera's own metadata
+    is still there (an `.insv`'s trailer, a GoPro's GPMF track, the
+    spherical boxes). There is no "originals kept" comparison, since
+    there is nothing to compare with.
+30. **The schema–type test** builds one argument object per mode
+    (`files` or `folder`, `times` or `span`, `view` or `views`), each
+    with every property that mode allows.
+31. **Smaller gaps:**
+    - `probe` at the deadline returns what it finished, with `complete:
+      false` and the rest named by index.
+    - `vfov` gives `fov` from the tile's aspect through the projection's
+      own mapping (rectilinear by tangent, fisheye and stereographic by
+      their angle functions, as `sphere::view` has them).
+    - `outside_roots`'s `valid` lists the roots until 500 characters,
+      then "and N more".
+    - Grouping adds `PRO_VID_…`, `-trim` copies and the ONE X2's
+      `LRV_…_11_….insv` (insta360.md:181-188).
+    - A1.1's `doctor` is the real one, without `file` and `speed`, which
+      A1.3 adds: not a stub.
+
 ## 0. What A1 is for
 
 An agent (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor, Zed,
@@ -76,7 +264,7 @@ docs/agents/schemas/{probe,look,analyze,check,doctor}.json
 ```
 
 Dependencies: spherecut-core, -sphere, -media, -render; serde,
-serde_json, thiserror, tracing; **rustix** `=1.1.6` with `std`, `fs` and
+serde_json, thiserror, tracing; **rustix** `=1.1.5` with `std`, `fs` and
 `stdio` (D43; in the lock already through tempfile). No other new crate.
 JPEG goes through FFmpeg's `mjpeg` encoder in media (7.3), PNG through
 the `image` crate the render crate already has.
