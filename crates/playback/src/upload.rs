@@ -135,7 +135,16 @@ struct State {
 impl UploadThread {
     pub(crate) fn run(mut self) {
         let mut st = State {
-            uploader: Uploader::new(&self.gpu),
+            uploader: Uploader::with_path(&self.gpu, {
+                // Diagnosis only (odin's GUI at 5.7K): not for main.
+                let belt = std::env::var("SPHERECUT_DIAG_UPLOAD").is_ok_and(|v| v == "belt");
+                tracing::info!(belt, "the upload thread's path");
+                if belt {
+                    spherecut_render::UploadPath::StagingBelt
+                } else {
+                    spherecut_render::UploadPath::WriteTexture
+                }
+            }),
             importer: Importer::new(),
             failed: HashSet::new(),
             too_small: 0,
