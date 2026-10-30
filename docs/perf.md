@@ -739,6 +739,45 @@ clocks under amdgpu's automatic power levels, the CPU 94 % idle, and a
 browser was playing video in the background. The headless
 `bench_playback_realtime_5k7_8bit` passed meanwhile.
 
+With zero copy the default, `gui_smoke` at 36041f7 (PR #11) presented
+95 %, 94 % and 99 % on the noisy 5.7K 8- and 10-bit clips and the X5
+pair, with 39, 44 and 16 late UI passes after the first second, the
+UI's own work under 1.5 ms and its acquire under 0.2 ms. Each late gap
+came after the present: RADV lists the swapchain image the UI holds in
+every submission on its device, amdgpu makes each a writer of it, and
+mutter waits for them, an I-frame decode's 40 ms included (D41).
+Diagnostic smoke runs (branch `diag/late-ui`, 20 s each): the late UI
+passes after the first second in each run, and presented and the UI's
+p99 in the first:
+
+| Run | Late | Presented | UI p99 |
+|---|---:|---:|---:|
+| 5.7K 8-bit | 27, 37, 28 | 95.8 % | 49.9 ms |
+| 5.7K 8-bit, the gate | 1, 2 | 99.9 % | 17.05 ms |
+| 5.7K 8-bit, the gate held 5 ms | 2 | | |
+| 5.7K 8-bit, no mips | 16 | 98 % | 33 ms |
+| 5.7K 10-bit | 54 | 91.7 % | |
+| 5.7K 10-bit, the gate | 2 | 99.8 % | 17.08 ms |
+| X5 8K30 pair | 5 | 99.55 % | |
+| X5 8K30 pair, the gate | 3 | 99.7 % | |
+
+The gate's longest wait was 2.1 ms (5.1 ms held 5 ms), and no run with
+it dropped a frame. Of the late passes without it, 20 of 27, 32 of 37,
+25 of 28, 53 of 54 and 5 of 5 had a decode or upload submitted between
+the acquire and the present; the rest an I-frame decode still running.
+The few left with it are 26 to 33 ms gaps with nothing submitted: the
+compositor's own.
+
+`gui_smoke` with the gate (branch `m1/submit-gate` at 0a72983, an
+early check before main) passed all five runs: presented 99.8 % to
+99.9 %, the UI's p50 / p99 16.7 / 17.0 to 17.1 ms, nothing dropped,
+one late pass a run of 28 to 30 ms with nothing slow in its gap, and
+the UI's own work 0.9 / 1.1 ms (1.0 / 1.4 on the X5 pair). The gate
+held 813, 829, 230, 14 and 1023 submissions (the 5.7K clips, the seam,
+the sync clip, the X5 pair), the longest 2.3 ms. The `decode` and
+`upload_cpu` stages now count those waits: their p50 went from about
+0.7 to 2.8 ms and from 1.2 to 3.1 ms at 5.7K.
+
 ### Framework 13 Pro (Intel Xe3, Arch)
 
 Not available yet.

@@ -326,6 +326,37 @@ fn an_unchanged_frame_and_view_only_encode() {
     assert_eq!(common::draws(&rs).0, p1 + 1);
 }
 
+/// The submit gate (D41): `prepare` closes it before the surface is
+/// acquired and `paint` opens it a hold after, on every pass; the next
+/// pass's logic opens one that no paint followed.
+#[test]
+fn the_viewer_closes_the_submit_gate_around_each_paint() {
+    let gpu = common::gpu();
+    let rs = common::render_state(&gpu);
+    let mut h = common::harness(common::grid_app(&gpu), &rs, [640.0, 420.0], 1.0);
+    common::until_shown(&mut h, &rs);
+    let gate = gpu.submit_gate().clone();
+    let marks = |g: &spherecut_core::gate::SubmitGate| {
+        let (closed, acquired) = g.marks();
+        (
+            closed.expect("prepare closed the gate"),
+            acquired.expect("paint opened it"),
+        )
+    };
+    let (c0, a0) = marks(&gate);
+    assert!(c0 <= a0);
+    h.step();
+    let (c1, a1) = marks(&gate);
+    assert!(a0 < c1 && c1 <= a1, "each pass closes and opens it again");
+    // A prepare that no paint followed: the next logic opens the gate.
+    // (This thread isn't marked as the UI's, so it would wait.)
+    assert!(!spherecut_core::blocking::is_ui_thread());
+    gate.close();
+    let ctx = h.ctx.clone();
+    h.state_mut().logic(&ctx);
+    assert_eq!(gate.wait(), std::time::Duration::ZERO, "logic opened it");
+}
+
 /// egui-wgpu runs the callbacks' `prepare` before it acquires the
 /// window's surface, and drops what `prepare` recorded when that fails
 /// (Outdated, Lost, Timeout, Occluded): `paint` doesn't follow. Such a
@@ -491,7 +522,7 @@ fn a_resize_sweep_never_panics() {
 
 /// While the window is minimized or occluded, eframe runs only the app's
 /// `logic`: the presenter goes on with it, frame by frame, and ends the
-/// clip. Without it, nothing ends the clip.
+/// clip on its last frame. Without it, nothing ends the clip.
 #[test]
 fn playback_goes_on_while_the_window_is_hidden() {
     use std::time::{Duration, Instant};
@@ -503,28 +534,39 @@ fn playback_goes_on_while_the_window_is_hidden() {
     let snapshot = |h: &egui_kittest::Harness<'_, spherecut_app::SpherecutApp>| {
         h.state().state.player.as_ref().unwrap().snapshot()
     };
-    // Hidden from here: logic alone, at eframe's 10 ms a pass.
-    let hidden =
-        |h: &mut egui_kittest::Harness<'_, spherecut_app::SpherecutApp>,
-         done: &dyn Fn(&egui_kittest::Harness<'_, spherecut_app::SpherecutApp>) -> bool| {
-            let start = Instant::now();
-            let mut times = std::collections::BTreeSet::new();
-            while !done(h) {
-                assert!(
-                    start.elapsed() < Duration::from_secs(10),
-                    "not done: {:?}",
-                    snapshot(h)
-                );
-                h.state_mut().logic(&ctx);
-                if let Some(p) = &h.state().state.presented {
-                    times.extend(p.frames.iter().map(|f| f.frame.time));
-                }
-                common::pace(Duration::from_millis(10));
+    // Hidden from here: logic alone, at eframe's 10 ms a pass, until
+    // `done` holds with the frames presented so far.
+    type Times = std::collections::BTreeSet<spherecut_core::Time>;
+    let hidden = |h: &mut egui_kittest::Harness<'_, spherecut_app::SpherecutApp>,
+                  done: &dyn Fn(
+        &egui_kittest::Harness<'_, spherecut_app::SpherecutApp>,
+        &Times,
+    ) -> bool| {
+        let start = Instant::now();
+        let mut times = Times::new();
+        while !done(h, &times) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "not done: {:?}",
+                snapshot(h)
+            );
+            h.state_mut().logic(&ctx);
+            if let Some(p) = &h.state().state.presented {
+                times.extend(p.frames.iter().map(|f| f.frame.time));
             }
-            times
-        };
+            common::pace(Duration::from_millis(10));
+        }
+        times
+    };
+    // The clip's 12th and last frame. A frame whose upload came too late
+    // for its time is passed over (on lavapipe, with the other tests
+    // busy, all but the first and last can be); the end's comes up once
+    // it is uploaded.
+    let last = spherecut_core::Time(spherecut_core::Rational::new(11, 30).unwrap());
     h.state_mut().state.toggle_play();
-    let times = hidden(&mut h, &|h| snapshot(h).at_end);
+    let times = hidden(&mut h, &|h, times| {
+        snapshot(h).at_end && times.last() == Some(&last)
+    });
     assert_eq!(snapshot(&h).state, spherecut_playback::PlayState::Paused);
     assert!(times.len() >= 2, "frames presented while hidden: {times:?}");
     // Shown again, as eframe runs a pass (logic, then the UI): the app is
@@ -544,7 +586,7 @@ fn playback_goes_on_while_the_window_is_hidden() {
         spherecut_core::Time::ZERO,
         spherecut_media::backend::SeekMode::Exact,
     );
-    hidden(&mut h, &|h| {
+    hidden(&mut h, &|h, _| {
         let s = snapshot(h);
         !s.at_end && s.state == spherecut_playback::PlayState::Paused
     });

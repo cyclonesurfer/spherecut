@@ -139,7 +139,7 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
                 let _ = writeln!(
                     r,
                     "{} ({}, {}); {} at {} pixels a point (the window's own {}), the window \
-                     {} and the viewer {} pixels; {}; {}{}; played {:.1} s{}.\n",
+                     {} and the viewer {} pixels; {}; {}{}{}; played {:.1} s{}.\n",
                     res["adapter"]["name"].as_str().unwrap_or("?"),
                     res["adapter"]["driver"].as_str().unwrap_or("?"),
                     res["adapter"]["driver_info"].as_str().unwrap_or("?"),
@@ -151,6 +151,7 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
                     stages(&res["stages"]),
                     passes(&res["ui"]),
                     late(res),
+                    gate(&res["submit_gate"]),
                     res["played_s"].as_f64().unwrap_or(0.0),
                     if res["ended"] == true {
                         ", to the clip's end"
@@ -295,6 +296,20 @@ fn late(res: &Value) -> String {
     )
 }
 
+/// "; the submit gate held 412 submissions back, the longest 2.1 ms":
+/// what waited for the UI's presents (D41). Empty for a document from
+/// before the gate.
+fn gate(g: &Value) -> String {
+    let Some(waits) = g["waits"].as_u64() else {
+        return String::new();
+    };
+    format!(
+        "; the submit gate held {waits} submission{} back, the longest {} ms",
+        if waits == 1 { "" } else { "s" },
+        ms(&g["longest_ms"])
+    )
+}
+
 /// "decode 4.1 / 6.0 ms, upload_cpu ..." for the stages with samples:
 /// p50 and p95.
 fn stages(v: &Value) -> String {
@@ -353,6 +368,7 @@ mod tests {
                     {"at_s": 9.8, "interval_ms": 99.9, "work_ms": null,
                      "slowest": {"decode": 29.5, "upload_gpu": 2.1}},
                 ],
+                "submit_gate": {"waits": 412, "longest_ms": 2.06},
             }
         });
         std::fs::write(dir.join("gui-0.json"), doc.to_string()).unwrap();
@@ -398,7 +414,8 @@ mod tests {
         assert!(md.contains(
             "p50 / p95: decode 4.1 / 6.0 ms; 1188 UI passes of 1190, their own work 2.1 / 3.3 ms; \
              2 late UI passes after the first second, the longest 99.9 ms; the slowest in their \
-             gaps decode 29.5 ms, upload_gpu 2.1 ms; played 20.0 s."
+             gaps decode 29.5 ms, upload_gpu 2.1 ms; the submit gate held 412 submissions \
+             back, the longest 2.1 ms; played 20.0 s."
         ));
         assert!(!md.contains("convert"));
         assert!(md.contains("![noisy 5.7K 8-bit](odin-abc-gui-0.png)"));

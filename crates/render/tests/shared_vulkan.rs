@@ -5,6 +5,8 @@
 //! from the copy, byte for byte as the copy path fills one from the
 //! frame's bytes. FFmpeg then downloads the frame again, after the copy
 //! (its next use waits for the copier's signal), and gets the bytes back.
+//! FFmpeg's queue locks, the copier and the uploader each wait at the
+//! device's submit gate while it is closed (DECISIONS D41).
 //!
 //! lavapipe has one queue, so FFmpeg, the copier and wgpu share it, which
 //! `vkshare::single_queue_gpu` allows only one thing at a time from one
@@ -21,6 +23,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use common::Kind;
 use spherecut_core::Time;
@@ -157,4 +160,57 @@ fn ffmpegs_vulkan_frames_fill_a_slot_as_their_bytes_do() {
             );
         }
     }
+
+    // Each submitter waits at a closed gate: one that no acquire follows
+    // opens CLOSED_AT_MOST after it closed.
+    let gate = gpu.submit_gate();
+    assert!(Arc::ptr_eq(gate, &shared.handles.gate), "one gate a device");
+    let closed = |what: &str, f: &mut dyn FnMut()| {
+        let before = gate.stats().waits;
+        gate.close();
+        let start = Instant::now();
+        f();
+        let took = start.elapsed();
+        assert!(
+            gate.stats().waits > before,
+            "{what} didn't wait at the gate"
+        );
+        assert!(
+            took + Duration::from_millis(2) >= spherecut_core::gate::CLOSED_AT_MOST,
+            "{what} took {took:?}"
+        );
+    };
+    let size = (96u32, 48u32);
+    let frame = frame(Kind::Nv12, size, 0);
+    let mut vk = None;
+    closed("FFmpeg's upload", &mut || {
+        vk = Some(frame.uploaded_to_vulkan(&device).unwrap());
+    });
+    let vk = vk.unwrap();
+    let regions = upload::shown_regions(&vk, &Placement::FULL).unwrap();
+    let mut copied = None;
+    closed("the copier", &mut || {
+        copied = Some(shared.copier.copy(vk.vulkan().unwrap(), &regions).unwrap());
+    });
+    let copied = copied.unwrap();
+    shared.copier.wait(&copied).unwrap();
+    shared.copier.order_before(&gpu.queue, &copied);
+    let shape = SlotShape::of(
+        &frame.layout_arc().as_ref().clone(),
+        Placement::FULL.shown(size),
+    )
+    .unwrap();
+    let slot = GpuFrame::new(&gpu, &shape).unwrap();
+    closed("the uploader", &mut || {
+        uploader
+            .upload_from_buffer(
+                &gpu,
+                &vk,
+                &copied.buffer,
+                &copied.planes,
+                &Placement::FULL,
+                &slot,
+            )
+            .unwrap();
+    });
 }
