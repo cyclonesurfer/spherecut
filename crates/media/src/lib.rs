@@ -123,6 +123,8 @@ pub enum MediaError {
 
 pub use ffi::{CONTAINERS, HwDevice, HwError, HwRefusal, MAX_PIXELS, TooLarge};
 pub use hwprobe::{capture_ffmpeg_log, capture_hw_decode_log};
+#[doc(hidden)]
+pub use ffi::DOWNLOAD_ALLOC;
 
 impl MediaError {
     /// Every code [`MediaError::code`] gives.

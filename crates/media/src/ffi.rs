@@ -2821,7 +2821,70 @@ unsafe extern "C" fn counted_alloc(opaque: *mut c_void, size: usize) -> *mut sys
     // SAFETY: `opaque` is the counter `DownloadPool::build` gave the pool,
     // which holds a reference to it until `release_counter`.
     unsafe { (*opaque.cast::<AtomicU64>()).fetch_add(1, Ordering::Relaxed) };
-    huge_alloc(size)
+    match DOWNLOAD_ALLOC.load(Ordering::Relaxed) {
+        // SAFETY: accepts any size.
+        1 => unsafe { sys::av_buffer_alloc(size) },
+        2 => offset_alloc(size, true, 64),
+        3 => offset_alloc(size, false, 0),
+        4 => offset_alloc(size, false, 64),
+        _ => huge_alloc(size),
+    }
+}
+
+/// Diagnostic only (branch diag/vaapi-8k-alloc): the download pool's
+/// allocator. 0 huge_alloc (main), 1 av_buffer_alloc (43abcda), 2 a 2 MiB
+/// aligned mapping with the data 64 bytes in, 3 a plain mapping (page
+/// aligned, no advice), 4 a plain mapping with the data 64 bytes in.
+pub static DOWNLOAD_ALLOC: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// A diagnostic buffer: a mapping of its own, 2 MiB aligned and advised
+/// MADV_HUGEPAGE when `huge`, else wherever mmap puts it with no advice;
+/// the data starts `offset` bytes in.
+fn offset_alloc(size: usize, huge: bool, offset: usize) -> *mut sys::AVBufferRef {
+    let len = size + offset;
+    let span = if huge { len.next_multiple_of(HUGE_PAGE) + HUGE_PAGE } else { len };
+    // SAFETY: a new private anonymous mapping.
+    let base = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            span,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if base == libc::MAP_FAILED {
+        return std::ptr::null_mut();
+    }
+    let start = if huge {
+        let head = base.cast::<u8>().align_offset(HUGE_PAGE);
+        // SAFETY: inside the mapping.
+        let s = unsafe { base.cast::<u8>().add(head) };
+        // SAFETY: inside the mapping; advice only.
+        unsafe { libc::madvise(s.cast(), len.next_multiple_of(HUGE_PAGE), libc::MADV_HUGEPAGE) };
+        s
+    } else {
+        base.cast::<u8>()
+    };
+    let keep = Box::into_raw(Box::new((base.expose_provenance(), span)));
+    // SAFETY: `start + offset` has `size` bytes inside the mapping.
+    let buf = unsafe {
+        sys::av_buffer_create(start.add(offset), size, Some(offset_free), keep.cast(), 0)
+    };
+    if buf.is_null() {
+        // SAFETY: as offset_free.
+        unsafe { offset_free(keep.cast(), std::ptr::null_mut()) };
+    }
+    buf
+}
+
+unsafe extern "C" fn offset_free(opaque: *mut c_void, _data: *mut u8) {
+    // SAFETY: the box offset_alloc made, and its whole mapping.
+    unsafe {
+        let keep = Box::from_raw(opaque.cast::<(usize, usize)>());
+        libc::munmap(std::ptr::with_exposed_provenance_mut(keep.0), keep.1);
+    }
 }
 
 /// A transparent huge page, on x86-64 and on arm64 with 4 KiB pages.

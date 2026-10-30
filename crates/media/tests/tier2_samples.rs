@@ -472,3 +472,81 @@ fn bench_samples_realtime_decode() {
         }
     }
 }
+
+/// Diagnostic only (branch diag/vaapi-8k-alloc): the X5 VA-API modes at
+/// 2880² and up, decoded as `bench_samples_realtime_decode` does, with
+/// each of the download pool's allocators in turn, round after round, so
+/// a drift over time hits every allocator alike. Prints a line a run:
+/// round, mode, allocator, × real time, minor faults, wall seconds.
+#[test]
+#[ignore = "diagnostic: VA-API download allocators, needs camera samples"]
+fn diag_vaapi_8k_alloc() {
+    use std::sync::atomic::Ordering;
+    let files = sample_files();
+    let dev = vaapi();
+    let rounds: usize = std::env::var("SPHERECUT_DIAG_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let allocs: Vec<u8> = std::env::var("SPHERECUT_DIAG_ALLOCS")
+        .ok()
+        .map(|v| v.split(',').filter_map(|a| a.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![0, 1, 2, 3, 4]);
+    let names = ["huge", "malloc", "huge+64", "mmap", "mmap+64"];
+    let mut modes: BTreeMap<String, (PathBuf, Vec<usize>, f64, f64)> = BTreeMap::new();
+    for p in files {
+        let Ok(r) = probe::probe(&p) else { continue };
+        let streams = video_streams(&r);
+        let Some(v) = r.streams.iter().find(|s| s.kind == StreamKind::Video) else {
+            continue;
+        };
+        let (Some(vi), Some(fps)) = (&v.video, v.avg_frame_rate) else {
+            continue;
+        };
+        if vi.width < 2880 {
+            continue;
+        }
+        let key = format!("{}× {}x{} @ {:.2}", streams.len(), vi.width, vi.height, fps.to_f64());
+        let len = v.duration.map(|d| d.to_secs_f64()).unwrap_or(0.0);
+        let e = modes
+            .entry(key)
+            .or_insert((p.clone(), streams.clone(), fps.to_f64(), len));
+        if len > e.3 {
+            *e = (p, streams, fps.to_f64(), len);
+        }
+    }
+    let faults = || {
+        // SAFETY: getrusage fills the struct it is given.
+        let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) };
+        u.ru_minflt
+    };
+    println!("round\tmode\talloc\tx_realtime\tminflt\tsecs");
+    let mut all: BTreeMap<(String, u8), Vec<f64>> = BTreeMap::new();
+    for round in 0..rounds {
+        for (mode, (path, streams, fps, _)) in &modes {
+            let frames = (fps * 10.0).round() as usize;
+            for &a in &allocs {
+                spherecut_media::DOWNLOAD_ALLOC.store(a, Ordering::Relaxed);
+                let f0 = faults();
+                let t = Instant::now();
+                let r = decode_rate(path, streams, Some(dev.clone()), frames)
+                    .unwrap_or_else(|e| panic!("{e}"))
+                    / fps;
+                println!(
+                    "{round}\t{mode}\t{}\t{r:.4}\t{}\t{:.1}",
+                    names[a as usize],
+                    faults() - f0,
+                    t.elapsed().as_secs_f64()
+                );
+                all.entry((mode.clone(), a)).or_default().push(r);
+            }
+        }
+    }
+    spherecut_media::DOWNLOAD_ALLOC.store(0, Ordering::Relaxed);
+    println!("mode\talloc\truns (× real time)");
+    for ((mode, a), runs) in &all {
+        let v: Vec<String> = runs.iter().map(|r| format!("{r:.3}")).collect();
+        println!("{mode}\t{}\t{}", names[*a as usize], v.join(" "));
+    }
+}
