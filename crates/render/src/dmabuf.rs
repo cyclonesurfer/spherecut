@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn a_device_without_import_says_so() {
-        let gpu = Gpu::headless(&crate::AdapterChoice::Cpu).unwrap();
+        let mut gpu = Gpu::headless(&crate::AdapterChoice::Cpu).unwrap();
         let shape = SlotShape::of(&layout(SampleBytes::One), (64, 32)).unwrap();
         let planes = plan(
             &shape,
@@ -433,9 +433,11 @@ mod tests {
             ],
         )
         .unwrap();
-        // lavapipe has the DMA-BUF extension but not the modifier one, so
-        // wgpu doesn't offer the feature (D25).
-        assert!(!gpu.caps.dmabuf_import);
+        // This box's lavapipe has the DMA-BUF extension but not the
+        // modifier one, so wgpu doesn't offer the feature (D25); odin's,
+        // Mesa 26.2.5's, has both. The refusal is the importer's, so the
+        // device here is made one without.
+        gpu.caps.dmabuf_import = false;
         let e = Importer::new().import(&gpu, &planes).unwrap_err();
         assert!(
             matches!(&e, RenderError::Import(m) if m.contains("no DMA-BUF import")),

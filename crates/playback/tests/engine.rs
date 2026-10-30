@@ -41,8 +41,8 @@ use spherecut_media::doctor::CheckResult;
 use spherecut_media::probe::{ProbeError, ProbeReport};
 use spherecut_playback::{
     AudioOutput, AudioOutputFactory, CacheBudget, Counter, DecoderPreference, HwDecodeCheck,
-    HwSupport, PREROLL_FRAMES, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent,
-    PlayerParts, PlayerThreads, Presented, SlotState,
+    HwPromise, HwSupport, PREROLL_FRAMES, PlayState, Player, PlayerConfig, PlayerError,
+    PlayerEvent, PlayerParts, PlayerThreads, Presented, SlotState,
 };
 use spherecut_render::readback::read_texture;
 use spherecut_synth::fake::{SyntheticBackend, SyntheticClip, frame_index};
@@ -1376,44 +1376,59 @@ fn auto_picks_vulkan_from_doctor_and_falls_back_on_lavapipe() {
             check(HwKind::Vulkan, CheckResult::Works),
         ],
     };
-    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
-    let parts = PlayerParts {
-        hw: Some(hw),
-        ..PlayerParts::new(Arc::new(LavapipeBackend::new()), gpu().clone(), clock)
-    };
-    let player = Player::new(
-        parts,
-        PlayerConfig {
-            decoder: DecoderPreference::Auto,
-            ..config(64)
-        },
-    )
-    .unwrap();
-    player.open(path);
-    show(&player, 0);
-    let snap = snapshot(&player);
-    let s = &snap.streams[0];
-    let choice = s.choice.as_deref().unwrap_or_default();
-    assert!(choice.starts_with("Vulkan"), "{choice}");
-    assert!(
-        matches!(
-            s.fallback,
-            Some((
-                HwKind::Vulkan,
-                FallbackReason::Refused(_) | FallbackReason::DeviceUnavailable(_)
-            ))
-        ),
-        "{:?}",
-        s.fallback
-    );
-    assert!(player.events().iter().any(|e| matches!(
-        e,
-        PlayerEvent::FellBack {
-            from: HwKind::Vulkan,
-            ..
+    // The checks given with the parts, then kept by the GUI's startup
+    // check after the open asked for them: the open waits for those
+    // rather than running its own, which would find Vulkan failing here.
+    for later in [false, true] {
+        let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+        let mut parts = PlayerParts::new(Arc::new(LavapipeBackend::new()), gpu().clone(), clock);
+        let mut keeper = None;
+        if later {
+            let (k, promise) = HwPromise::new();
+            keeper = Some(k);
+            parts.hw_later = Some(promise);
+        } else {
+            parts.hw = Some(hw.clone());
         }
-    )));
-    common::join(player);
+        let player = Player::new(
+            parts,
+            PlayerConfig {
+                decoder: DecoderPreference::Auto,
+                ..config(64)
+            },
+        )
+        .unwrap();
+        player.open(path.clone());
+        if let Some(k) = keeper {
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(snapshot(&player).state, PlayState::Opening);
+            k.keep(hw.clone());
+        }
+        show(&player, 0);
+        let snap = snapshot(&player);
+        let s = &snap.streams[0];
+        let choice = s.choice.as_deref().unwrap_or_default();
+        assert!(choice.starts_with("Vulkan"), "later {later}: {choice}");
+        assert!(
+            matches!(
+                s.fallback,
+                Some((
+                    HwKind::Vulkan,
+                    FallbackReason::Refused(_) | FallbackReason::DeviceUnavailable(_)
+                ))
+            ),
+            "{:?}",
+            s.fallback
+        );
+        assert!(player.events().iter().any(|e| matches!(
+            e,
+            PlayerEvent::FellBack {
+                from: HwKind::Vulkan,
+                ..
+            }
+        )));
+        common::join(player);
+    }
 }
 
 /// Audio that is ready to play only when the test says so, on a clock the

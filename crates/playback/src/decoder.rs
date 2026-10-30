@@ -22,7 +22,10 @@
 //! does (D39).
 
 use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
+use spherecut_core::may_block;
 use spherecut_media::backend::{DecodeMode, Fallback, HwKind};
 use spherecut_media::doctor::{self, CheckResult, DoctorReport};
 use spherecut_media::probe::{ProbeReport, StreamInfo, StreamKind};
@@ -98,6 +101,88 @@ impl HwSupport {
     pub fn works(&self, format: &str, kind: HwKind) -> bool {
         self.get(format, kind)
             .is_some_and(|c| c.result == CheckResult::Works)
+    }
+}
+
+/// Doctor's checks that another thread is running (the GUI's startup
+/// check), for the opens that need them: the first waits for them rather
+/// than running them a second time on the same devices.
+#[derive(Debug, Clone)]
+pub struct HwPromise(Arc<Promised>);
+
+/// The other end of an [`HwPromise`], for the thread running the checks.
+/// Dropped without [`keep`](HwKeeper::keep) (the checks panicked), it
+/// breaks the promise, and the open waiting runs them itself.
+#[derive(Debug)]
+pub struct HwKeeper(Option<Arc<Promised>>);
+
+#[derive(Debug, Default)]
+struct Promised {
+    state: Mutex<Kept>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+enum Kept {
+    #[default]
+    Pending,
+    Given(HwSupport),
+    Broken,
+}
+
+impl HwPromise {
+    pub fn new() -> (HwKeeper, HwPromise) {
+        let p = Arc::new(Promised::default());
+        (HwKeeper(Some(p.clone())), HwPromise(p))
+    }
+
+    /// The checks, once kept; `None` if the promise broke or `limit`
+    /// passed first. Blocks: on a worker, never the UI thread.
+    #[track_caller]
+    pub fn wait(&self, limit: Duration) -> Option<HwSupport> {
+        may_block("waiting for doctor's checks");
+        let deadline = Instant::now() + limit;
+        let mut g = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            match &*g {
+                Kept::Given(s) => return Some(s.clone()),
+                Kept::Broken => return None,
+                Kept::Pending => {}
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            g = self
+                .0
+                .changed
+                .wait_timeout(g, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
+impl HwKeeper {
+    pub fn keep(mut self, support: HwSupport) {
+        if let Some(p) = self.0.take() {
+            p.settle(Kept::Given(support));
+        }
+    }
+}
+
+impl Drop for HwKeeper {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            p.settle(Kept::Broken);
+        }
+    }
+}
+
+impl Promised {
+    fn settle(&self, to: Kept) {
+        *self.state.lock().unwrap_or_else(PoisonError::into_inner) = to;
+        self.changed.notify_all();
     }
 }
 
@@ -347,5 +432,30 @@ mod tests {
             true,
         );
         assert_eq!(kind_of(&c), Some((HwKind::VaApi, Fallback::Fail)));
+    }
+
+    #[test]
+    fn a_promise_gives_the_checks_kept_or_none_once_broken_or_late() {
+        let support = support(&[("HEVC Main", HwKind::VaApi, true)]);
+        let (keeper, promise) = HwPromise::new();
+        let waiter = {
+            let promise = promise.clone();
+            std::thread::spawn(move || promise.wait(Duration::from_secs(60)))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        keeper.keep(support.clone());
+        assert_eq!(waiter.join().unwrap(), Some(support.clone()));
+        assert_eq!(promise.wait(Duration::ZERO), Some(support));
+
+        // The keeper dropped (its thread panicked): the wait ends at once.
+        let (keeper, promise) = HwPromise::new();
+        let t0 = Instant::now();
+        let waiter = std::thread::spawn(move || promise.wait(Duration::from_secs(60)));
+        drop(keeper);
+        assert_eq!(waiter.join().unwrap(), None);
+        assert!(t0.elapsed() < Duration::from_secs(30));
+
+        let (_keeper, promise) = HwPromise::new();
+        assert_eq!(promise.wait(Duration::from_millis(20)), None);
     }
 }

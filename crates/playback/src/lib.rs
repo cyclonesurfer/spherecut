@@ -35,7 +35,9 @@ pub use audio::{
 };
 pub use budget::{AutoBudget, BudgetError, CacheBudget, auto_budget, read_auto_budget};
 pub use cache::{CacheStats, FrameCache, Insert, MIN_FRAMES};
-pub use decoder::{DecoderChoice, DecoderPreference, HwDecodeCheck, HwSupport, StreamFormat};
+pub use decoder::{
+    DecoderChoice, DecoderPreference, HwDecodeCheck, HwKeeper, HwPromise, HwSupport, StreamFormat,
+};
 pub use perf::{Counter, MemoryStats, PerfSnapshot, PerfStats, Stage, StageSummary};
 pub use player::{
     PREROLL_FRAMES, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent, PlayerParts,

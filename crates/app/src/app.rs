@@ -14,8 +14,8 @@ use spherecut_core::clock::Clock;
 use spherecut_media::backend::{MediaBackend, SeekMode, VideoStreamInfo};
 use spherecut_media::doctor::{DoctorReport, Issue, Severity};
 use spherecut_playback::{
-    AudioOutputFactory, PlayState, Player, PlayerConfig, PlayerEvent, PlayerParts, PlayerSnapshot,
-    Presented, Repaint,
+    AudioOutputFactory, HwPromise, HwSupport, PlayState, Player, PlayerConfig, PlayerEvent,
+    PlayerParts, PlayerSnapshot, Presented, Repaint,
 };
 use spherecut_render::{Filter, Gpu, ViewParams};
 use spherecut_sphere::grab::{GrabFit, GrabStart};
@@ -216,8 +216,19 @@ impl SpherecutApp {
         let mut parts = PlayerParts::new(backend, gpu.clone(), clock);
         parts.audio = audio;
         parts.repaint = repaint;
-        if let DoctorRun::Node(node) = &doctor {
-            parts.render_node = Some(node.clone());
+        // The player's opens decide by the startup check's decode checks
+        // rather than run their own (two runs of them, at once, on the
+        // same devices).
+        let mut keeper = None;
+        match &doctor {
+            DoctorRun::Node(node) => {
+                let (k, later) = HwPromise::new();
+                keeper = Some(k);
+                parts.hw_later = Some(later);
+                parts.render_node = Some(node.clone());
+            }
+            DoctorRun::Report(r) => parts.hw = Some(HwSupport::from_report(r)),
+            DoctorRun::Never => {}
         }
         let player = match Player::new(parts, config) {
             Ok(p) => Some(p),
@@ -236,7 +247,11 @@ impl SpherecutApp {
         };
         let doctor = match doctor {
             DoctorRun::Node(node) => DoctorState::Pending(Job::spawn("doctor", move || {
-                spherecut_media::doctor::run(&node)
+                let report = spherecut_media::doctor::run(&node);
+                if let Some(k) = keeper {
+                    k.keep(HwSupport::from_report(&report));
+                }
+                report
             })),
             // As though the check had just ended: the first tick makes its
             // banners.

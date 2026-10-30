@@ -58,7 +58,7 @@ use thiserror::Error;
 use crate::audio::{AudioOutput, AudioOutputFactory, PREROLL_AUDIO, PREROLL_LIMIT};
 use crate::budget::{AUTO_MIN, AutoBudget, CacheBudget, read_auto_budget};
 use crate::cache::{CacheStats, FrameCache};
-use crate::decoder::{DecoderPreference, HwSupport};
+use crate::decoder::{DecoderPreference, HwPromise, HwSupport};
 use crate::perf::{Counter, MemoryStats, PerfSnapshot, PerfStats, Stage};
 use crate::shared::{
     BudgetStatus, Command, Place, Repaint, Request, Shared, Status, StreamStatus, Want, av_offset,
@@ -233,6 +233,8 @@ pub struct PlayerParts {
     /// Doctor's decode checks, if the GUI ran them already; otherwise the
     /// first open that needs them runs them, on its own thread.
     pub hw: Option<HwSupport>,
+    /// The checks the GUI is running, which that open waits for instead.
+    pub hw_later: Option<HwPromise>,
     /// The render node hardware decoding uses (`--render-node`), for
     /// doctor's checks; otherwise the GPU's.
     pub render_node: Option<PathBuf>,
@@ -245,6 +247,7 @@ impl std::fmt::Debug for PlayerParts {
             .field("clock", &self.clock)
             .field("audio", &self.audio)
             .field("hw", &self.hw)
+            .field("hw_later", &self.hw_later)
             .field("render_node", &self.render_node)
             .finish_non_exhaustive()
     }
@@ -260,6 +263,7 @@ impl PlayerParts {
             audio: None,
             repaint: None,
             hw: None,
+            hw_later: None,
             render_node: None,
         }
     }
@@ -591,6 +595,7 @@ impl Player {
             shutdown: AtomicBool::new(false),
             open_lock: Mutex::new(()),
             hw: Mutex::new(parts.hw),
+            hw_later: parts.hw_later,
             vulkan_device: OnceLock::new(),
             events: events_tx,
             handles: handles_tx.clone(),
