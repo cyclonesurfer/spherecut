@@ -10,7 +10,7 @@
 mod mcp_client;
 
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use mcp_client::{Server, assert_jsonrpc};
 use serde_json::{Value, json};
@@ -454,7 +454,7 @@ fn sigint_cancels_a_call_with_exit_4() {
         .status()
         .unwrap();
     assert!(kill.success());
-    let sent = Instant::now();
+    let sent = std::time::Instant::now();
     let out = child.wait_with_output().unwrap();
     assert!(
         sent.elapsed() < Duration::from_secs(2),

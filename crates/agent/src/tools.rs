@@ -394,20 +394,25 @@ mod tests {
     /// The schemas' numbers are the limits'.
     #[test]
     fn schemas_hold_the_limits() {
-        use crate::limits::{FILES_PER_CALL, MAX_PAGE_SIZE};
-        let probe = parsed()
-            .iter()
-            .find(|(t, _)| t.name == "probe")
-            .map(|(_, s)| s.clone())
-            .unwrap_or_default();
-        assert_eq!(
-            probe["properties"]["files"]["maxItems"],
-            json!(FILES_PER_CALL)
-        );
-        assert_eq!(
-            probe["properties"]["page_size"]["maximum"],
-            json!(MAX_PAGE_SIZE)
-        );
+        use crate::limits::{
+            FILES_PER_CALL, IMAGE_LIMIT_EDGE, MAX_BUCKETS, MAX_PAGE_SIZE, MAX_TILES,
+        };
+        let schema = |name: &str| {
+            parsed()
+                .iter()
+                .find(|(t, _)| t.name == name)
+                .map(|(_, s)| s["properties"].clone())
+                .unwrap_or_default()
+        };
+        let probe = schema("probe");
+        assert_eq!(probe["files"]["maxItems"], json!(FILES_PER_CALL));
+        assert_eq!(probe["page_size"]["maximum"], json!(MAX_PAGE_SIZE));
+        let look = schema("look");
+        assert_eq!(look["times"]["maxItems"], json!(MAX_TILES));
+        assert_eq!(look["count"]["maximum"], json!(MAX_TILES));
+        assert_eq!(look["views"]["maxItems"], json!(MAX_TILES));
+        assert_eq!(look["size"]["maximum"], json!(IMAGE_LIMIT_EDGE));
+        assert_eq!(schema("analyze")["buckets"]["maximum"], json!(MAX_BUCKETS));
     }
 
     #[test]

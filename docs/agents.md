@@ -60,8 +60,9 @@ spherecut agents install-skill [--dry-run]
   image in a result may take. See [Images and output limits](#images-and-output-limits).
 - `spherecut call` prints `{"schema": "spherecut.call/1", "ok", "result",
   "error", "warnings", "images"}` and exits 0, 1 for a tool's error, 2
-  for usage (bad JSON, an unknown tool, `bad_argument`), 3 for `no_gpu`
-  or a missing decoder, 4 on Ctrl-C (D27). Images go to `--image-dir`
+  for usage (bad JSON, an unknown tool, `bad_argument`), 3 for `no_gpu`,
+  4 on Ctrl-C (D27). A decoder FFmpeg lacks is a tool's error,
+  `decode_failed`, so 1. Images go to `--image-dir`
   (the temporary folder by default) as new files, listed in `images`.
 - `spherecut agents install-skill` writes Spherecut's skill (below) to
   `$XDG_DATA_HOME/spherecut/skills/spherecut/SKILL.md` and links that
@@ -284,8 +285,12 @@ since it writes a new file when a call gives `output`.
   durations, `vfr`, duplicate timestamps, gaps and frames missing,
   repeated pictures, keyframes, Mb/s), `motion` (decodes: change from
   frame to frame, 0 to 255, and likely cuts), `audio` (peak and RMS
-  dBFS, clipped samples, silences). Out of time, it returns the buckets
-  it finished with `complete: false` and `next_from`.
+  dBFS, clipped samples, silences). The summary's moments (gaps,
+  duplicates, repeated pictures, cuts, the most motion, silences) are
+  times as `look` takes them back, `{exact, seconds}`, the first 20 of
+  each list with its `count`; a bucket's `from` is plain seconds. Out of
+  time, it returns the buckets it finished with `complete: false` and
+  `next_from`.
 - **`check`**: a file's spherical and ambiX metadata against its
   streams, and the file against a `target` (`youtube_360`,
   `flat_16_9`, `vertical`, `archive`). `{target, pass, rules: [{id, ok,

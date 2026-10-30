@@ -67,7 +67,8 @@ fn at(link: &Path, folder: &Path) -> io::Result<At> {
 
 /// Write the skill and link it, or with `dry_run` say what that would
 /// do, a line a step on `out`. [`Exit::Failed`] when something else is
-/// at a link's name, which is left as it is.
+/// at a link's name, which is left as it is, or a link can't be made;
+/// each link is tried either way.
 pub fn install(places: &Places, dry_run: bool, out: &mut impl Write) -> Result<Exit> {
     let file = places.folder.join("SKILL.md");
     let skill = spherecut_agent::SKILL.as_bytes();
@@ -86,33 +87,51 @@ pub fn install(places: &Places, dry_run: bool, out: &mut impl Write) -> Result<E
             .with_context(|| format!("writing {}", file.display()))?;
         writeln!(out, "wrote {}", file.display())?;
     }
-    let folder = places.folder.display();
     let mut exit = Exit::Ok;
     for link in &places.links {
-        let shown = link.display();
-        match at(link, &places.folder).with_context(|| format!("reading {shown}"))? {
-            At::Ours => writeln!(out, "{shown} links to {folder} already")?,
-            At::Other => {
+        match place(link, &places.folder, dry_run) {
+            Ok(Placed::Done(said)) => writeln!(out, "{said}")?,
+            Ok(Placed::LeftAlone(said)) => {
                 exit = Exit::Failed;
-                writeln!(
-                    out,
-                    "left {shown} alone: something else is there. Move it, or link it to \
-                     {folder} yourself"
-                )?;
+                writeln!(out, "{said}")?;
             }
-            At::Nothing if dry_run => writeln!(out, "would link {shown} to {folder}")?,
+            Err(e) => {
+                exit = Exit::Failed;
+                writeln!(out, "couldn't link {}: {e:#}", link.display())?;
+            }
+        }
+    }
+    Ok(exit)
+}
+
+/// What [`place`] did about a link.
+enum Placed {
+    Done(String),
+    LeftAlone(String),
+}
+
+/// Link `link` to `folder` unless something is at its name.
+fn place(link: &Path, folder: &Path, dry_run: bool) -> Result<Placed> {
+    let (shown, target) = (link.display(), folder.display());
+    Ok(
+        match at(link, folder).with_context(|| format!("reading {shown}"))? {
+            At::Ours => Placed::Done(format!("{shown} links to {target} already")),
+            At::Other => Placed::LeftAlone(format!(
+                "left {shown} alone: something else is there. Move it, or link it to \
+                 {target} yourself"
+            )),
+            At::Nothing if dry_run => Placed::Done(format!("would link {shown} to {target}")),
             At::Nothing => {
                 if let Some(parent) = link.parent() {
                     std::fs::create_dir_all(parent)
                         .with_context(|| format!("creating {}", parent.display()))?;
                 }
-                std::os::unix::fs::symlink(&places.folder, link)
+                std::os::unix::fs::symlink(folder, link)
                     .with_context(|| format!("linking {shown}"))?;
-                writeln!(out, "linked {shown} to {folder}")?;
+                Placed::Done(format!("linked {shown} to {target}"))
             }
-        }
-    }
-    Ok(exit)
+        },
+    )
 }
 
 #[cfg(test)]
@@ -205,5 +224,21 @@ mod tests {
         assert_eq!(std::fs::read_link(agents).unwrap(), d.0);
         // The skill itself was still written.
         assert!(places.folder.join("SKILL.md").is_file());
+    }
+
+    #[test]
+    fn a_link_that_cant_be_made_doesnt_stop_the_other() {
+        let d = dir("blocked");
+        let places = Places::new(&d.0.join("home"), &d.0.join("data"));
+        let [claude, agents] = &places.links;
+        // ~/.claude is a file, so nothing can go under it.
+        let dot_claude = claude.parent().unwrap().parent().unwrap();
+        std::fs::create_dir_all(dot_claude.parent().unwrap()).unwrap();
+        std::fs::write(dot_claude, "a file").unwrap();
+        let (exit, said) = run(&places, false);
+        assert_eq!(exit, Exit::Failed);
+        assert!(said.contains("couldn't link"), "{said}");
+        assert_eq!(std::fs::read_to_string(dot_claude).unwrap(), "a file");
+        assert_eq!(std::fs::read_link(agents).unwrap(), places.folder);
     }
 }

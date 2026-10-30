@@ -4,7 +4,7 @@
 //! channel in dBFS and the clipped samples, and the silences.
 
 use serde_json::{Value, json};
-use spherecut_core::Time;
+use spherecut_core::{Rational, Time};
 use spherecut_media::backend::{AudioDecode, AudioOutFormat, AudioRequest, NextAudio};
 use spherecut_media::probe::{ProbeReport, StreamInfo, StreamKind};
 use spherecut_media::{MediaError, Source, audio::FfmpegAudio};
@@ -297,7 +297,7 @@ impl Meter {
             self.keep_silence(from, self.window_at.min(edge));
         }
         let rate = f64::from(self.rate);
-        let at = |s: i64| secs(s as f64 / rate);
+        let at = |s: i64| Rational::new(s, i64::from(self.rate)).map(Time).ok();
         let silences: Vec<(i64, i64)> = self
             .silences
             .iter()
@@ -398,7 +398,10 @@ mod tests {
         assert_eq!(s["clipped"], 1000);
         assert_eq!(s["peak_db"], 0.0);
         assert_eq!(s["silences"]["count"], 1);
-        assert_eq!(s["silences"]["at"], json!([[1.0, 2.0]]));
+        assert_eq!(
+            s["silences"]["at"],
+            json!([[{"exact": "1", "seconds": 1.0}, {"exact": "2", "seconds": 2.0}]])
+        );
         assert_eq!(s["seconds"], 4.0);
     }
 
@@ -415,7 +418,10 @@ mod tests {
         assert_eq!(b.len(), 2);
         // 0.4 s is too short; the one from 1.2 s goes on past the edge,
         // and is given up to it.
-        assert_eq!(s["silences"]["at"], json!([[1.2, 2.0]]));
+        assert_eq!(
+            s["silences"]["at"],
+            json!([[{"exact": "6/5", "seconds": 1.2}, {"exact": "2", "seconds": 2.0}]])
+        );
         assert_eq!(s["seconds"], 2.0);
     }
 

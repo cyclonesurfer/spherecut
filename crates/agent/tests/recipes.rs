@@ -2,10 +2,11 @@
 //! calls an agent following `SKILL.md` makes, on synthetic media with a
 //! planted answer, each within its budget. A call costs what its result
 //! puts before a model: the text of `tools/call`'s content, a character
-//! for every 4, plus ceil(w / 28) × ceil(h / 28) for each image. The test
-//! reads the pixels an agent would look at, so its looks ask for PNG
-//! (the image crate here decodes no JPEG); the cost counts pixels, the
-//! same in either format.
+//! for every 4, plus ceil(w / 28) × ceil(h / 28) for each image. Where
+//! the test reads the pixels an agent would look at (recipe 1), its looks
+//! ask for PNG, since the image crate here decodes no JPEG; the cost
+//! counts pixels, the same in either format. Recipe 2 runs on the
+//! defaults: JPEG, within the default image budget.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use spherecut_agent::limits::MAX_IMAGE_BUDGET;
+use spherecut_agent::limits::{IMAGE_DEFAULT_EDGE, INLINE_IMAGE_BYTES, MAX_IMAGE_BUDGET};
 use spherecut_agent::rpc::{self, CallCx, Tools};
 use spherecut_agent::tools::Spherecut;
 use spherecut_agent::{Roots, SKILL};
@@ -49,16 +50,24 @@ struct Agent {
 }
 
 impl Agent {
+    /// A session with images as large as PNG needs.
     fn new(root: &Path) -> Agent {
+        Agent::with_budget(root, MAX_IMAGE_BUDGET)
+    }
+
+    /// A session with `spherecut mcp`'s image budget, `budget` bytes.
+    fn with_budget(root: &Path, budget: usize) -> Agent {
         let roots = Roots::new(&[root.to_path_buf()], None).unwrap();
         Agent {
-            tools: Spherecut::new(roots).image_budget(MAX_IMAGE_BUDGET),
+            tools: Spherecut::new(roots).image_budget(budget),
             cost: 0,
             calls: Vec::new(),
         }
     }
 
-    /// Call `tool` as `tools/call` does, and count what the model is shown.
+    /// Call `tool` as `tools/call` does, and count what the model is
+    /// shown. A PNG comes back decoded; a JPEG is counted by the size the
+    /// result gives.
     fn call(&mut self, tool: &str, args: Value) -> (Value, Vec<image::RgbImage>) {
         let cx = CallCx::standalone(Instant::now() + Duration::from_secs(50));
         let out = self
@@ -72,13 +81,20 @@ impl Agent {
                 cost += text.chars().count().div_ceil(4);
             }
         }
-        let images: Vec<image::RgbImage> = out
-            .images
-            .iter()
-            .map(|i| image::load_from_memory(&i.data).unwrap().to_rgb8())
-            .collect();
-        for i in &images {
-            cost += i.width().div_ceil(28) as usize * i.height().div_ceil(28) as usize;
+        let tokens = |w: u32, h: u32| w.div_ceil(28) as usize * h.div_ceil(28) as usize;
+        let mut images = Vec::new();
+        for i in &out.images {
+            if i.mime == "image/png" {
+                let png = image::load_from_memory(&i.data).unwrap().to_rgb8();
+                cost += tokens(png.width(), png.height());
+                images.push(png);
+            } else {
+                assert_eq!(i.mime, "image/jpeg");
+                assert_eq!(out.images.len(), 1, "one image a look");
+                let size = &out.result["image"];
+                let side = |k: &str| u32::try_from(size[k].as_u64().unwrap()).unwrap();
+                cost += tokens(side("width"), side("height"));
+            }
         }
         self.cost += cost;
         self.calls.push(format!("{tool} {args}: {cost}"));
@@ -256,7 +272,7 @@ fn recipe_validates_a_360_export() {
         }],
     )
     .unwrap();
-    let mut agent = Agent::new(&d.0);
+    let mut agent = Agent::with_budget(&d.0, INLINE_IMAGE_BYTES);
 
     // 1. check.
     let (r, _) = agent.call("check", json!({"file": file, "target": "youtube_360"}));
@@ -274,12 +290,11 @@ fn recipe_validates_a_360_export() {
     let (r, _) = agent.call("probe", json!({"files": [file], "detail": "full"}));
     assert!(r.to_string().contains("\"stereo\":\"top_bottom\""), "{r}");
 
-    // 3. A sphere look: the picture as the tags have it, one eye.
-    let (r, images) = agent.call(
-        "look",
-        json!({"file": file, "mode": "sphere", "format": "png"}),
-    );
-    assert_eq!(images.len(), 1);
+    // 3. A sphere look on the defaults: the picture as the tags have it,
+    // one eye, as a JPEG 768 pixels wide.
+    let (r, _) = agent.call("look", json!({"file": file, "mode": "sphere"}));
+    assert_eq!(r["image"]["format"], "jpeg", "{r}");
+    assert_eq!(r["image"]["width"], IMAGE_DEFAULT_EDGE, "{r}");
     let warnings = r["warnings"].to_string();
     assert!(warnings.contains("stereo"), "{r}");
     agent.within(4_000);
@@ -306,7 +321,7 @@ fn recipe_finds_why_a_file_stutters() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v.as_f64().unwrap())
+        .map(|v| v["seconds"].as_f64().unwrap())
         .collect();
     assert!(
         (at[0] - 5.0).abs() < 0.1 && (at[1] - 7.0).abs() < 0.1,
@@ -340,5 +355,8 @@ fn recipe_finds_why_a_file_stutters() {
         }),
     );
     assert_eq!(r["complete"], true, "{r}");
+    // Motion measured every frame there is: the window's 45 slots less
+    // the gap's.
+    assert_eq!(r["summary"]["frames"], 45 - media::JITTER_GAP_SLOTS, "{r}");
     agent.within(8_000);
 }

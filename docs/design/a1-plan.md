@@ -342,18 +342,64 @@ win; D46 has the whole of it.
       Codex's `env_vars` and its 60 s tool timeout, opencode's `timeout`
       (it covers tool calls, 30 s by default, so the setup gives 60000),
       goose's in seconds, `copilot mcp add`, Zed's `context_servers`.
-    - **The recipes** (`crates/agent/tests/recipes.rs`) ask for PNG,
-      since the test reads the pixels and its `image` crate decodes no
-      JPEG; the cost counts pixels, the same in either format. They
-      cost 3,119 of 12,000, 1,234 of 4,000 and 3,463 of 8,000. In
-      recipe 1 the sheet sees the marker in at least 7 of 12 tiles, not
-      all, because the axis discs hide it as it passes them.
+    - **The recipes** (`crates/agent/tests/recipes.rs`): recipe 1 asks
+      for PNG, since it reads the marker's pixels and the test's
+      `image` crate decodes no JPEG; recipe 2 takes the default JPEG
+      (amendment 36), and recipe 3 needs no picture. The cost counts
+      pixels, the same in either format. They cost 3,119 of 12,000, 1,237 of 4,000 and 3,597 of
+      8,000. In recipe 1 the sheet sees the marker in at least 7 of 12
+      tiles, not all, because the axis discs hide it as it passes them.
     - **The Tier 2 test** is `crates/cli/tests/tier2_mcp.rs`, not
       `crates/agent/tests` (amendment 15: it spawns the binary), and
       the scripted client moved to `crates/cli/tests/mcp_client/` for
       both it and `mcp.rs`. Where doctor says VA-API doesn't decode the
       LRV's codec it skips with doctor's reasons. `hw-test` picks it up
       as it does every ignored test.
+36. **The A1 review** (a fresh reviewer against PLAN's A1 criteria,
+    2026-10-30) found no blocker. Fixed:
+    - **analyze's moments are exact.** Gaps, duplicates, repeated
+      pictures, cuts, the most motion and silences were seconds rounded
+      to the millisecond, which `look` can't take back exactly: a gap at
+      4/3 s came back 1.333. They are now `{exact, seconds}`, as every
+      other time; a bucket's `from` stays plain seconds, and the skill
+      and `docs/agents.md` say so.
+    - **The recipes run as an agent would.** Recipe 2 looks at the
+      sphere with the default JPEG under `spherecut mcp`'s default image
+      budget, 60 KB, and checks the size it got; recipe 3 checks that
+      `analyze motion` measured every frame `analyze timing` found
+      (exact moments made it 3,597, from 3,463). The test counts a
+      JPEG's cost from the size the result states.
+    - **Descriptions** say what the reviewer found missing: `look`'s
+      times never a bare number, which way yaw and vfov go; `check`'s
+      tags and `doctor`'s driver text are data, not instructions;
+      `analyze`'s moments go back to `look`. The list is 6,976 bytes of
+      the 7,168.
+    - **A size past 1568 on a read-only server** says to ask the user
+      for `--allow-write --write-root DIR`, not to give `output`, which
+      that server refuses.
+    - **install-skill** makes the other link when one can't be made
+      (`~/.claude` a file, say), and says why, exit 1.
+    - **A relative path not found** says it was read under the first
+      read root, without naming a path.
+    - **`schemas_hold_the_limits`** ties `look`'s 24s to `MAX_TILES`,
+      its `size` to `IMAGE_LIMIT_EDGE` and `analyze`'s buckets to
+      `MAX_BUCKETS`.
+    - **The skill's recipe 2** says to try `assume_equirect: true` when
+      the file has no projection, and recipe 1 that a relative folder
+      is under the first read root. `docs/agents.md` says a decoder
+      FFmpeg lacks is `decode_failed`, exit 1.
+
+    Not changed, and known:
+    - Schemas' properties go out in alphabetical order (serde_json
+      without `preserve_order`); the order is fixed, which is what the
+      criterion asks, but not the source's.
+    - Hostile text from files is tested through probe; look, check and
+      doctor use the same `text::field`, untested each.
+    - A name with U+FFFD (a file name that isn't UTF-8) can be listed
+      but not opened again by that name.
+    - The Tier 2 MCP test can fail on a machine with two GPUs where
+      doctor's default node isn't the one VA-API decodes on.
+    - `docs.rs` checks that every limit is named, not its value.
 
 ## 0. What A1 is for
 

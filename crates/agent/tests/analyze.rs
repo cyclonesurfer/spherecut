@@ -15,7 +15,7 @@ use spherecut_agent::limits::{ANALYZE_RESERVE, RESULT_CHARS};
 use spherecut_agent::rpc::{CallCx, Tools};
 use spherecut_agent::tools::Spherecut;
 use spherecut_agent::{Roots, ToolError};
-use spherecut_core::FrameRate;
+use spherecut_core::{FrameRate, Rational};
 use spherecut_synth::audio::{LEVELS_CLIPPED, LEVELS_LOUD, LEVELS_QUIET, LEVELS_SILENT};
 use spherecut_synth::media::{self, Spec};
 
@@ -68,6 +68,20 @@ fn f(v: &Value) -> f64 {
     v.as_f64().unwrap_or_else(|| panic!("not a number: {v}"))
 }
 
+/// A time's seconds, to the millisecond, after checking that its
+/// `exact` reads back to them.
+fn ms(t: &Value) -> f64 {
+    let exact: Rational = t["exact"].as_str().unwrap().parse().unwrap();
+    let s = f(&t["seconds"]);
+    assert!((exact.to_f64() - s).abs() < 1e-9, "{t}");
+    (s * 1000.0).round() / 1000.0
+}
+
+/// A list of times, as [`at`] gives them.
+fn when(list: &Value) -> Value {
+    json!(list.as_array().unwrap().iter().map(ms).collect::<Vec<_>>())
+}
+
 /// What `jitter-dups` plants, as timing should find it in `file`, whose
 /// durations are within `ms` of the planted ones.
 fn finds_what_jitter_dups_plants(tools: &Spherecut, file: &Path, ms: f64) {
@@ -85,11 +99,14 @@ fn finds_what_jitter_dups_plants(tools: &Spherecut, file: &Path, ms: f64) {
     let gaps: Vec<u32> = media::JITTER_GAPS.iter().map(|g| g - 1).collect();
     assert_eq!(s["gaps"]["count"], 2, "{s}");
     assert_eq!(s["gaps"]["missing"], 2 * media::JITTER_GAP_SLOTS);
-    assert_eq!(s["gaps"]["at"], at(&gaps));
+    assert_eq!(when(&s["gaps"]["at"]), at(&gaps));
     assert_eq!(s["dups"]["count"], 2, "{s}");
-    assert_eq!(s["dups"]["at"], at(&media::JITTER_DUPS_AFTER));
+    assert_eq!(when(&s["dups"]["at"]), at(&media::JITTER_DUPS_AFTER));
     assert_eq!(s["repeated_pictures"]["count"], 10, "{s}");
-    assert_eq!(s["repeated_pictures"]["at"], at(&media::JITTER_REPEATS));
+    assert_eq!(
+        when(&s["repeated_pictures"]["at"]),
+        at(&media::JITTER_REPEATS)
+    );
     assert_eq!(s["keyframes"], 10);
     // The jitter: 0.8 and 1.2 slots by turns, in the buckets from 2 s.
     let jitter = &r["buckets"][11];
@@ -176,7 +193,7 @@ fn from_and_to_pick_the_stretch() {
     // Slots 61 to 119, with slot 103 a repeat: slot 60 is shown early,
     // before 2 s.
     assert_eq!(r["summary"]["frames"], 59);
-    assert_eq!(r["summary"]["repeated_pictures"]["at"], at(&[103]));
+    assert_eq!(when(&r["summary"]["repeated_pictures"]["at"]), at(&[103]));
     // To past the end is the end.
     let r = analyze(
         &tools,
@@ -231,9 +248,10 @@ fn motion_finds_a_cut_and_nothing_else() {
     assert_eq!(s["frames"], 60, "{s}");
     // Into the other scene at frame 30, and out of it at 31.
     assert_eq!(s["cuts"]["count"], 2, "{s}");
-    assert_eq!(s["cuts"]["at"], at(&[30, 31]));
+    assert_eq!(when(&s["cuts"]["at"]), at(&[30, 31]));
+    assert_eq!(s["cuts"]["at"][0]["exact"], "1", "{s}");
     assert!(f(&s["max"]) > 50.0, "{s}");
-    assert!([json!(1.0), json!(1.033)].contains(&s["max_at"]), "{s}");
+    assert!([1.0, 1.033].contains(&ms(&s["max_at"])), "{s}");
     let b = r["buckets"].as_array().unwrap();
     assert_eq!(b[2]["cuts"], 2);
     assert!(f(&b[0]["max"]) < 12.0, "{}", b[0]);
@@ -283,8 +301,8 @@ fn audio_measures_each_section() {
     // One silence, the section's, give or take an AAC frame's smear.
     assert_eq!(s["silences"]["count"], 1, "{s}");
     let range = &s["silences"]["at"][0];
-    assert!((f(&range[0]) - LEVELS_SILENT.0).abs() < 0.05, "{range}");
-    assert!((f(&range[1]) - LEVELS_SILENT.1).abs() < 0.05, "{range}");
+    assert!((ms(&range[0]) - LEVELS_SILENT.0).abs() < 0.05, "{range}");
+    assert!((ms(&range[1]) - LEVELS_SILENT.1).abs() < 0.05, "{range}");
     assert_eq!(s["clipped"], clipped["clipped"]);
 }
 

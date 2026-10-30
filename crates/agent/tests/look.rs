@@ -570,6 +570,10 @@ fn each_limit_names_its_argument() {
             "no file name in an error: {json}"
         );
     }
+    // Without writing, the way to a larger image is the user's flag.
+    let e = failed(&tools, json!({"file": clip, "size": 2000}));
+    let next = e.next.clone().unwrap_or_default();
+    assert!(next.contains("--allow-write"), "{e:?}");
     let e = failed(&tools, json!({"file": "missing.mp4"}));
     assert_eq!(
         (e.code, e.argument.as_deref()),

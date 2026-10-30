@@ -246,8 +246,16 @@ fn the_first_root_takes_relative_paths_and_any_root_absolute_ones() {
     t.file("b/two.mp4", b"two");
     let roots = Roots::new(&[t.path("a"), t.path("b")], None).unwrap();
     assert_eq!(read(&roots, Path::new("one.mp4")).unwrap(), b"one");
-    assert_eq!(code(read(&roots, Path::new("two.mp4"))), codes::NOT_FOUND);
+    let e = read(&roots, Path::new("two.mp4")).unwrap_err();
+    assert_eq!(e.code, codes::NOT_FOUND);
+    let next = e.next.clone().unwrap_or_default();
+    assert!(
+        next.contains("relative path") && !next.contains('/'),
+        "{e:?}"
+    );
     assert_eq!(read(&roots, &t.path("b/two.mp4")).unwrap(), b"two");
+    let e = read(&roots, &t.path("b/three.mp4")).unwrap_err();
+    assert!(e.next.is_none(), "{e:?}");
 }
 
 #[test]

@@ -600,7 +600,14 @@ fn plan(req: &Request, cx: &Ctx) -> Result<Plan, ToolError> {
         )
         .at("size")
         .valid(format!("64 to {IMAGE_MAX_EDGE}, or up to 4096 with output"))
-        .next("give output, a new file under the write root, for the larger image"));
+        .next(if cx.roots.writes() {
+            "give output, a new file under the write root, for the larger image".to_owned()
+        } else {
+            format!(
+                "size {IMAGE_MAX_EDGE} or less; a larger image needs the user to start the \
+                 server with --allow-write --write-root DIR, then output"
+            )
+        }));
     }
     if let Some(out) = &req.output {
         check_output(out, req.format)?;

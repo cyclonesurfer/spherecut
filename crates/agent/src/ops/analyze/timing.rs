@@ -417,22 +417,21 @@ pub(super) fn measure(
         let Some(b) = span.bucket(time).filter(|&b| b < done) else {
             continue;
         };
-        let t = time.to_secs_f64();
         let tally = &mut tallies[b];
         tally.frames += 1;
         tally.bytes += f.size;
         bytes += f.size;
         if f.key {
             tally.keys += 1;
-            keys.push(t);
+            keys.push(time.to_secs_f64());
         } else if repeat_under.is_some_and(|u| (f.size as f64) < u) {
             tally.repeats += 1;
-            repeats.push(t);
+            repeats.push(time);
         }
         let Some(d) = f.dur else { continue };
         if d <= 1 {
             tally.dups += 1;
-            dups.push(t);
+            dups.push(time);
             continue;
         }
         tally.durs.push(d as f64);
@@ -442,7 +441,7 @@ pub(super) fn measure(
                 let m = ((d as f64 / n).round() as u64).saturating_sub(1).max(1);
                 tally.missing += m;
                 missing += m;
-                gaps.push(t);
+                gaps.push(time);
             }
             None => regular.push(d),
         }
@@ -586,9 +585,9 @@ mod tests {
         assert_eq!(s["nominal_fps"], 30.0);
         assert_eq!(s["gaps"]["count"], 1);
         assert_eq!(s["gaps"]["missing"], 3);
-        assert_eq!(s["gaps"]["at"], json!([1.333]));
+        assert_eq!(s["gaps"]["at"][0]["exact"], "4/3");
         assert_eq!(s["dups"]["count"], 1);
-        assert_eq!(s["dups"]["at"], json!([2.0]));
+        assert_eq!(s["dups"]["at"], json!([{"exact": "2", "seconds": 2.0}]));
         assert_eq!(b[1]["missing"], 3, "{b:?}");
         assert_eq!(b[1]["max_ms"], 133.333);
         assert_eq!(b[0]["min_ms"], 26.667);
@@ -604,7 +603,7 @@ mod tests {
         f[45].size = 100;
         let (b, s) = measure(&f, tb(90_000), 0, &span(2, 2), 1, None);
         assert_eq!(b.len(), 1);
-        assert_eq!(s["repeated_pictures"]["at"], json!([0.233]));
+        assert_eq!(s["repeated_pictures"]["at"][0]["exact"], "7/30");
         assert_eq!(s["frames"], 30);
         assert_eq!(b[0]["repeats"], 1);
         // 28 × 10 kB, the repeat's 100 bytes and a 50 kB keyframe in a

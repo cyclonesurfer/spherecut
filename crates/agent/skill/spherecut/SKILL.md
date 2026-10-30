@@ -22,7 +22,8 @@ Ground rules:
 - **Times** are strings (`"12.5"`, `"1:02.5"`, `"30000/1001"`, `"120f"`
   for frame 120) or `[num, den]` pairs, never bare numbers. Every time
   comes back as `{exact, seconds}`, and `frame` for a video's frame: send
-  `exact` back to name the same frame.
+  `exact` back to name the same frame. Only a bucket's `from` in
+  `analyze` is plain seconds; any time in a bucket will do.
 - **Angles** are degrees. Yaw 0 is the centre of the equirect and yaw > 0
   turns right; pitch > 0 looks up; roll > 0 rolls clockwise. `fov` is
   across the view, 90 by default.
@@ -34,7 +35,8 @@ Ground rules:
 
 ## Find where a moving subject is over time
 
-1. `probe` the folder (`{"folder": "Videos/trip"}`) or the files. Note
+1. `probe` the folder (`{"folder": "trip"}`: a relative path is under
+   the server's first read root) or the files. Note
    each clip's `duration`, `fps` and `projection`. A camera's lens files
    and proxy come as one clip; work on its stitched file if there is one.
    If the projection isn't `equirect` (an unstitched camera file), say
@@ -66,7 +68,8 @@ Ground rules:
    the fields that show it: the projection and stereo boxes, the
    spatial audio box, the streams.
 3. `look` with `mode: "sphere"` at one time to see whether the picture
-   matches the metadata: one scene, straight horizon across the middle,
+   matches the metadata (with `assume_equirect: true` if the file has
+   none, to see whether it should): one scene, straight horizon across the middle,
    is equirect as tagged. A stretched or doubled scene means the stereo
    tags are wrong; `mode: "raw"` then shows the picture as coded (two
    scenes stacked are top-bottom stereo, side by side left-right).

@@ -34,7 +34,7 @@
           "string",
           "array"
         ],
-        "description": "A time."
+        "description": "A time: a string (\"12.5\", \"1:02.5\", \"370f\" for frame 370, \"30000/1001\") or [num, den], never a bare number."
       }
     },
     "count": {
@@ -50,7 +50,7 @@
       "properties": {
         "yaw": {
           "type": "number",
-          "description": "Degrees right."
+          "description": "Degrees right of the equirect's centre, yaw 0."
         },
         "pitch": {
           "type": "number",
@@ -70,7 +70,7 @@
         },
         "vfov": {
           "type": "number",
-          "description": "Degrees down, instead of fov.",
+          "description": "Degrees top to bottom, instead of fov.",
           "minimum": 1,
           "maximum": 360
         },

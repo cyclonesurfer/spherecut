@@ -365,12 +365,12 @@ fn median(v: &mut [f64]) -> Option<f64> {
     })
 }
 
-/// A list of times, as a summary gives it: how many, and the first
-/// [`LISTED`].
-fn listed(times: &[f64]) -> Value {
+/// A list of moments, as a summary gives it: how many, and the first
+/// [`LISTED`], exact, so that each can be sent back to `look`.
+fn listed(times: &[Time]) -> Value {
     json!({
         "count": times.len(),
-        "at": times.iter().take(LISTED).map(|&t| secs(t)).collect::<Vec<_>>(),
+        "at": &times[..times.len().min(LISTED)],
     })
 }
 
