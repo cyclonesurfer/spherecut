@@ -166,7 +166,10 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
         (&settled["ui"]["passes"], &ui["passes"]),
         (&settled["frames"]["shown"], &r["frames"]["shown"]),
     ] {
-        assert!(part.as_u64().unwrap() <= whole.as_u64().unwrap(), "{settled}");
+        assert!(
+            part.as_u64().unwrap() <= whole.as_u64().unwrap(),
+            "{settled}"
+        );
     }
     assert!(settled["ui"]["frames"].as_u64().unwrap() > 0, "{settled}");
     assert!(r["cache"]["bytes"].as_u64().unwrap() > 0);
