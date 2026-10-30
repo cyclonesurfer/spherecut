@@ -90,6 +90,9 @@ struct Rig {
     /// Callbacks looked at, and the ones checked against the clock.
     looked: usize,
     checked: usize,
+    /// How far ahead of a sample heard the clock may be: after a late
+    /// callback its floor holds it until the audio catches up.
+    hold: Duration,
 }
 
 impl Rig {
@@ -144,6 +147,7 @@ impl Rig {
             patient: true,
             looked: 0,
             checked: 0,
+            hold: Duration::ZERO,
         }
     }
 
@@ -240,7 +244,8 @@ impl Rig {
 
     /// The latest callback anchors the clock: at its first frame's
     /// instant, the clock shows that sample's time (to within half a
-    /// sample), and the buffer holds that sample. Earlier callbacks of
+    /// sample, or up to [`Rig::hold`] ahead), and the buffer holds that
+    /// sample. Earlier callbacks of
     /// the same run were checked as the latest, or are past.
     fn check_callbacks(&mut self) {
         let played = self.dev.played();
@@ -260,8 +265,10 @@ impl Rig {
         let from = p.rendered.from.unwrap();
         let shown = self.clock.time_at(p.heard).to_secs_f64();
         let rate = f64::from(self.rate);
+        let ahead = shown - from as f64 / rate;
+        let slack = 0.5 / rate + 1e-9;
         assert!(
-            (shown - from as f64 / rate).abs() <= 0.5 / rate + 1e-9,
+            (-slack..=self.hold.as_secs_f64() + slack).contains(&ahead),
             "{shown} as sample {from} is heard"
         );
         if p.rendered.fill.copied > 0 && p.rendered.fill.gap == 0 {
@@ -416,6 +423,30 @@ fn a_decode_stall_keeps_the_clock_and_video_running_and_skips_the_debt() {
     assert!(rig.checked > checked + 30);
     let stats = rig.output_stats();
     assert_eq!(stats.underruns, 1, "one dry spell");
+    assert_eq!(stats.fallbacks, 0);
+    rig.finish();
+}
+
+#[test]
+fn a_late_callback_never_takes_the_video_back() {
+    // A callback 30 ms late makes the clock correct its rate, which can
+    // bring a time read a present's latency ahead of it below the one
+    // read at the present before (D35).
+    const LATE: Duration = Duration::from_millis(30);
+    let mut rig = Rig::new(FrameRate::FPS_29_97, 48_000, 20);
+    rig.hold = LATE;
+    rig.player.play_at(rig.t);
+    let mut last = rig.run_for(Duration::from_secs(1)).last().unwrap().time;
+    for _ in 0..20 {
+        rig.dev.stall(LATE);
+        for p in rig.run_for(Duration::from_millis(250)) {
+            assert!(p.time >= last, "back from {last:?} to {:?}", p.time);
+            last = p.time;
+        }
+    }
+    assert!(rig.shown > 150);
+    let stats = rig.output_stats();
+    assert_eq!(stats.underruns, 0);
     assert_eq!(stats.fallbacks, 0);
     rig.finish();
 }

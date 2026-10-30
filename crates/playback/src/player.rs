@@ -422,6 +422,9 @@ struct Ui {
     /// The clock video plays on now: the player's, or the open file's
     /// audio's.
     clock: Arc<dyn Clock>,
+    /// The clock's time at the last present's instant and ahead of it,
+    /// while playing ([`Ui::clock_time`]).
+    ahead: Option<(Time, Time)>,
     audio: Option<Arc<dyn AudioOutput>>,
     shown: Vec<Option<Shown>>,
     /// The status as last read: its open, and each stream's part.
@@ -457,6 +460,30 @@ impl Ui {
         self.median_interval().map_or(Duration::ZERO, |m| {
             Duration::from_secs_f32(m / 1000.0).min(MAX_LATENCY)
         })
+    }
+
+    /// The clock's time for a present at `now`: at `now` plus the
+    /// latency, and while playing never less than the last present's
+    /// unless the clock itself went back at its instant (a seek, a set,
+    /// another file). The audio clock never goes back at the instant it
+    /// is read, but a correction it takes when a callback comes late
+    /// can bring a time read ahead of it below the one read before
+    /// (D35); the frame on screen would go back one.
+    fn clock_time(&mut self, now: Instant) -> Time {
+        let at = self.clock.time_at(now);
+        let mut ahead = self.clock.time_at(now + self.latency());
+        if self.clock.is_running() {
+            if let Some((at0, ahead0)) = self.ahead
+                && at >= at0
+                && ahead < ahead0
+            {
+                ahead = ahead0;
+            }
+            self.ahead = Some((at, ahead));
+        } else {
+            self.ahead = None;
+        }
+        ahead
     }
 }
 
@@ -569,6 +596,7 @@ impl Player {
                 want_play: false,
                 at_end: false,
                 clock,
+                ahead: None,
                 audio: None,
                 shown: Vec::new(),
                 view_epoch: 0,
@@ -613,6 +641,7 @@ impl Player {
         ui.clock = self.base_clock.clone();
         ui.clock.pause(now);
         ui.clock.set(Time::ZERO, now);
+        ui.ahead = None;
         ui.audio = None;
         ui.want_play = false;
         ui.at_end = false;
@@ -896,8 +925,8 @@ impl Player {
             Time(Rational::new(i64::from(ui.config.av_offset_ms), 1000).unwrap_or(Rational::ZERO));
         // The offset applies while playing: paused, the frame at the
         // clock's time shows, as a frame-exact seek or step put it.
-        let at = |ui: &Ui| {
-            let t = ui.clock.time_at(now + ui.latency());
+        let at = |ui: &mut Ui| {
+            let t = ui.clock_time(now);
             if ui.clock.is_running() {
                 t.checked_add(offset).unwrap_or(t)
             } else {
