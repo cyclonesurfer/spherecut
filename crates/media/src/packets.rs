@@ -32,7 +32,9 @@ pub enum NextPacket {
     Packet(PacketInfo),
     /// The end of the stream. `damaged` when a read failed before the end
     /// of the file, so that the packets after it couldn't be read.
-    End { damaged: bool },
+    End {
+        damaged: bool,
+    },
     /// The interrupt flag was raised during a read.
     Stopped,
 }
@@ -59,11 +61,7 @@ impl std::fmt::Debug for PacketReader {
 impl PacketReader {
     /// Stream `index` of the file at `path`. FFmpeg's reads stop once
     /// `interrupt` is raised.
-    pub fn open(
-        path: &Path,
-        index: usize,
-        interrupt: Arc<AtomicBool>,
-    ) -> Result<Self, MediaError> {
+    pub fn open(path: &Path, index: usize, interrupt: Arc<AtomicBool>) -> Result<Self, MediaError> {
         init();
         let mut ictx = ffi::open_input(path, Some(interrupt))
             .map_err(|e| MediaError::opening(path, e, |e| e.to_string()))?;

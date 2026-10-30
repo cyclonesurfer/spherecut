@@ -53,6 +53,45 @@ pub fn beeps(sample_rate: u32, n: usize, onsets: &[usize]) -> Vec<Vec<f32>> {
     vec![out.clone(), out]
 }
 
+/// [`levels`]' sections, in seconds from its start: a tone loud in the
+/// left channel and half as loud in the right, silence, a tone clipped at
+/// full scale, and a quiet tone.
+pub const LEVELS_LOUD: (f64, f64) = (0.0, 1.0);
+pub const LEVELS_SILENT: (f64, f64) = (1.0, 2.0);
+pub const LEVELS_CLIPPED: (f64, f64) = (2.0, 2.5);
+pub const LEVELS_QUIET: (f64, f64) = (2.5, 3.0);
+
+/// [`LEVELS_LOUD`]'s peaks, left and right: −6 and −12 dBFS.
+pub const LEVELS_LOUD_PEAKS: [f64; 2] = [0.5, 0.25];
+
+/// [`LEVELS_QUIET`]'s peak in both channels: −20 dBFS.
+pub const LEVELS_QUIET_PEAK: f64 = 0.1;
+
+/// Stereo, `n` samples of 1 kHz in [`levels`]' sections, for `analyze`'s
+/// audio measures: [`LEVELS_LOUD`] at [`LEVELS_LOUD_PEAKS`],
+/// [`LEVELS_SILENT`] all zeros, [`LEVELS_CLIPPED`] a tone of twice full
+/// scale cut at ±1, and [`LEVELS_QUIET`] at [`LEVELS_QUIET_PEAK`]. Each
+/// tone fades in and out over 10 ms.
+pub fn levels(sample_rate: u32, n: usize) -> Vec<Vec<f32>> {
+    let at = |s: f64| ((s * f64::from(sample_rate)).round() as usize).min(n);
+    let mut ch = vec![vec![0.0f32; n]; 2];
+    let mut put = |(a, b): (f64, f64), amp: [f64; 2], clip: bool| {
+        let (a, b) = (at(a), at(b));
+        for (c, amp) in ch.iter_mut().zip(amp) {
+            for (i, v) in tone(1000.0, sample_rate, b - a, amp)
+                .into_iter()
+                .enumerate()
+            {
+                c[a + i] = if clip { v.clamp(-1.0, 1.0) } else { v } as f32;
+            }
+        }
+    };
+    put(LEVELS_LOUD, LEVELS_LOUD_PEAKS, false);
+    put(LEVELS_CLIPPED, [2.0, 2.0], true);
+    put(LEVELS_QUIET, [LEVELS_QUIET_PEAK; 2], false);
+    ch
+}
+
 /// Stereo: 440 Hz left, 660 Hz right.
 pub fn stereo(sample_rate: u32, n: usize) -> Vec<Vec<f32>> {
     [440.0, 660.0]

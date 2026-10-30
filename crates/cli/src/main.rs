@@ -126,7 +126,7 @@ enum Cmd {
     /// same roots and limits, and print its result as one JSON document
     /// (docs/agents.md).
     Call {
-        /// The tool: probe, look or doctor.
+        /// The tool: probe, look, analyze or doctor.
         tool: String,
         /// Its arguments, a JSON object, as an agent sends them, such as
         /// '{"files": ["a.mp4"]}'.

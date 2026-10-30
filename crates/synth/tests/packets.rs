@@ -1,7 +1,8 @@
 //! media's packet reader (a1-plan section 6.3), on clips synth writes:
 //! one packet a frame with the clip's timestamps, keyframes where the GOP
 //! puts them, frames an edit list hides passed over, a seek that lands on
-//! the keyframe before, and the interrupt.
+//! the keyframe before, and the interrupt; and `jitter-dups`, analyze's
+//! clip, holding what it plants.
 
 #![allow(clippy::unwrap_used)]
 
@@ -12,15 +13,28 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use spherecut_media::packets::{NextPacket, PacketInfo, PacketReader};
 use spherecut_synth::media::{self, Gop, Spec};
 
-fn dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("spherecut-packets-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// The test's own directory, removed with what it holds when dropped.
+struct TempDir(PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
 }
 
-fn clip(spec: Spec) -> PathBuf {
+fn dir(name: &str) -> TempDir {
+    let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("packets-{name}-{}", std::process::id()));
+    std::fs::remove_dir_all(&d).ok();
+    std::fs::create_dir_all(&d).unwrap();
+    TempDir(d)
+}
+
+/// `spec` written into its own directory, which goes with the guard.
+fn clip(spec: Spec) -> (TempDir, PathBuf) {
     let d = dir(&spec.name);
-    media::write(&spec, &d).unwrap()
+    let path = media::write(&spec, &d.0).unwrap();
+    (d, path)
 }
 
 /// Every packet from the reader's position to the end.
@@ -45,17 +59,14 @@ fn open(path: &Path) -> PacketReader {
 /// pts in presentation order, as seconds.
 fn shown(packets: &[PacketInfo], r: &PacketReader) -> Vec<f64> {
     let tb = r.time_base().to_f64();
-    let mut pts: Vec<f64> = packets
-        .iter()
-        .map(|p| p.pts.unwrap() as f64 * tb)
-        .collect();
+    let mut pts: Vec<f64> = packets.iter().map(|p| p.pts.unwrap() as f64 * tb).collect();
     pts.sort_by(f64::total_cmp);
     pts
 }
 
 #[test]
 fn one_packet_a_frame_with_keyframes_where_the_gop_puts_them() {
-    let path = clip(Spec {
+    let (_dir, path) = clip(Spec {
         name: "gop".into(),
         frames: 40,
         gop: Some(Gop {
@@ -83,7 +94,7 @@ fn one_packet_a_frame_with_keyframes_where_the_gop_puts_them() {
 
 #[test]
 fn frames_an_edit_list_hides_are_passed_over() {
-    let path = clip(Spec {
+    let (_dir, path) = clip(Spec {
         name: "edit".into(),
         frames: 30,
         edit_start: 3,
@@ -93,13 +104,15 @@ fn frames_an_edit_list_hides_are_passed_over() {
     let packets = all(&mut r);
     assert_eq!(packets.len(), 27);
     let pts = shown(&packets, &r);
-    let start = r.start_pts().map_or(0.0, |s| s as f64 * r.time_base().to_f64());
+    let start = r
+        .start_pts()
+        .map_or(0.0, |s| s as f64 * r.time_base().to_f64());
     assert!((pts[0] - start).abs() < 1e-6, "{} vs {start}", pts[0]);
 }
 
 #[test]
 fn a_seek_lands_on_the_keyframe_before() {
-    let path = clip(Spec {
+    let (_dir, path) = clip(Spec {
         name: "seek".into(),
         frames: 40,
         gop: Some(Gop {
@@ -124,7 +137,7 @@ fn a_seek_lands_on_the_keyframe_before() {
 fn the_interrupt_stops_a_read() {
     // Noisy frames, so that the file is far larger than what the demuxer
     // buffers and reads go on reaching the file.
-    let path = clip(Spec {
+    let (_dir, path) = clip(Spec {
         name: "stop".into(),
         frames: 60,
         width: 512,
@@ -140,4 +153,43 @@ fn the_interrupt_stops_a_read() {
     // stops.
     let stopped = (0..20).any(|_| matches!(r.next_packet(), NextPacket::Stopped));
     assert!(stopped);
+}
+
+#[test]
+fn jitter_dups_holds_what_it_plants() {
+    let d = dir("jitter");
+    let path = media::write_jitter_dups(&d.0).unwrap();
+    let planned = media::jitter_dups_frames();
+    let mut r = open(&path);
+    let packets = all(&mut r);
+    assert_eq!(packets.len(), planned.len());
+    // No B-frames: file order is presentation order, and the timestamps
+    // are the plan's, from the first.
+    let first = packets[0].pts.unwrap();
+    let tb = r.time_base();
+    for (p, f) in packets.iter().zip(&planned) {
+        let ticks = (p.pts.unwrap() - first) as f64 * tb.to_f64() * media::VFR_TIMESCALE as f64;
+        assert!((ticks - f.pts as f64).abs() < 0.5, "{p:?} vs {f:?}");
+    }
+    let keys: Vec<usize> = (0..packets.len()).filter(|&i| packets[i].key).collect();
+    let want: Vec<usize> = (0..packets.len())
+        .step_by(media::JITTER_KEYINT as usize)
+        .collect();
+    assert_eq!(keys, want);
+    let mut sizes: Vec<usize> = packets
+        .iter()
+        .zip(&planned)
+        .filter(|(p, f)| !p.key && !f.repeat)
+        .map(|(p, _)| p.size)
+        .collect();
+    sizes.sort_unstable();
+    let median = sizes[sizes.len() / 2];
+    // analyze's line is 5 % of the median (limits::REPEAT_UNDER).
+    for (p, f) in packets.iter().zip(&planned) {
+        if f.repeat {
+            assert!(p.size * 20 < median, "{f:?}: {} of {median}", p.size);
+        } else if !p.key {
+            assert!(p.size * 5 > median, "{f:?}: {} of {median}", p.size);
+        }
+    }
 }

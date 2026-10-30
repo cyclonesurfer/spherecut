@@ -60,6 +60,19 @@ pub fn run(a: Args) -> Result<()> {
             );
         }
     }
+    // analyze's timing measures (a1-plan section 6.3): its frames are
+    // placed one by one, so it isn't a Spec of the set.
+    let t = Instant::now();
+    let path = media::write_jitter_dups(&dir).context("writing jitter-dups")?;
+    eprintln!("  {} ({:.1} s)", path.display(), t.elapsed().as_secs_f64());
+    let _ = writeln!(
+        manifest,
+        "- `{}`: 256x128 H.264, 10 s on a 30 fps grid with jitter, two gaps, two duplicate \
+         timestamps and ten repeated pictures planted (`synth::media::jitter_dups_frames`)",
+        path.file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default()
+    );
     std::fs::write(dir.join("MANIFEST.md"), manifest)?;
     eprintln!("==> test media in {}", dir.display());
     Ok(())

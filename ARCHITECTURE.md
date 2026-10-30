@@ -49,7 +49,7 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
 | `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside the Info, Doctor and Files tabs); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); the overlay (`overlay`), the settings and their window (`settings`), the raw view, and the smoke run (`smoke`); `run`, which the CLI calls with no command. `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs. Later the timeline (M2) | M1 slices 7 and 8 |
-| `spherecut-agent` | Agent integration (D23, D43 to D45): the MCP server (`rpc`), the tools and their hand-written schemas (`tools`, `ops`), the roots (`roots`), the JSON contract of `--json` (`contract`, D27), frame's core that look renders through (`still`), look's canvas and font (`image`, `font`); later the GUI attach bridge | A1.1 to A1.4 |
+| `spherecut-agent` | Agent integration (D23, D43 to D46): the MCP server (`rpc`), the tools and their hand-written schemas (`tools`, `ops`), the roots (`roots`), the JSON contract of `--json` (`contract`, D27), frame's core that look renders through (`still`), look's canvas and font (`image`, `font`); later the GUI attach bridge | A1.1 to A1.5 |
 | `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor`, `frame`, `mcp` and `call` (A1). `render` (M2) is planned. Its library half re-exports `spherecut_agent::contract` as `contract` | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI; A1: `mcp`, `call` |
 | `xtask` | `check`, `compat` (clippy and a link of the tests against other FFmpeg builds, and Tier 1 against one, D2), `gen-media`, `hw-test` | M0; `compat` from 2026-10-24 |
 
@@ -469,7 +469,7 @@ Whatever the worker returns after that, the run ends `cancelled` (exit 4) and th
 temporary file is dropped. The handler is reset as it runs, so a second
 Ctrl+C kills the process. probe and doctor never install it.
 
-## The agent server *(A1, D43 to D45)*
+## The agent server *(A1, D43 to D46)*
 
 `spherecut mcp` serves the tools of `crates/agent` over MCP on stdio;
 `spherecut call <tool> '<json>'` runs one of them the same way from a
@@ -487,8 +487,8 @@ shell. The crate has no `unsafe`.
 - **`roots`**: every path an agent names is opened with `openat2`
   beneath a read or write root, and media reads the descriptor through
   `/proc/self/fd` (D45).
-- **`ops`**: `probe` (summaries, folders a page at a time), `look`, and
-  `doctor`. look opens the file through `still` (frame's core: probe,
+- **`ops`**: `probe` (summaries, folders a page at a time), `look`,
+  `analyze`, and `doctor`. look opens the file through `still` (frame's core: probe,
   the decoder D39 picks, the seek and the render, shared with `spherecut
   frame`), decodes each time once in order, renders every tile of that
   time from the frame on the one GPU a process keeps (made on the first
@@ -496,7 +496,13 @@ shell. The crate has no `unsafe`.
   canvas (`image`, with the 8×8 public-domain font in `font`), and
   encodes it as JPEG (`media::encode_jpeg`) or PNG within the image
   budget. doctor with a file opens it the same way and reports the
-  decode path look gets.
+  decode path look gets. analyze (D46) cuts a stretch into buckets
+  whose edges are fractions: `timing` reads the stream's packets
+  (`media::packets`) without decoding, `motion` decodes through `still`
+  as look does and compares each frame's 64×32 luma with the last, and
+  `audio` decodes every channel at the stream's rate
+  (`FfmpegAudio::open_raw`) on the video's clip time. Each stops at a
+  bucket's end before the deadline and says where to go on from.
 - **`contract`**: the CLI's JSON contract (D27), here since A1.4 so that
   `still` can return its errors and the CLI re-exports it.
 

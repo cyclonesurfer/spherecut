@@ -381,6 +381,14 @@ fn call_and_mcp_agree() {
         ("probe", json!({"folder": ".", "page_size": 1})),
         ("doctor", json!({})),
         ("doctor", json!({"file": "clip.mp4"})),
+        (
+            "analyze",
+            json!({"file": "clip.mp4", "kind": "timing", "buckets": 2}),
+        ),
+        (
+            "analyze",
+            json!({"file": "clip.mp4", "kind": "audio", "buckets": 2}),
+        ),
     ];
     let mut s = Server::spawn(|c| {
         c.arg("--read-root").arg(&dir.0);
@@ -397,7 +405,7 @@ fn call_and_mcp_agree() {
         assert_eq!(doc["warnings"], mcp["warnings"]);
     }
     let bad = json!({"files": ["clip.mp4"], "cursor": "0:00"});
-    let r = s.call(9, "tools/call", json!({"name": "probe", "arguments": bad}));
+    let r = s.call(99, "tools/call", json!({"name": "probe", "arguments": bad}));
     assert_eq!(r["result"]["isError"], true, "{r}");
     let text = r["result"]["content"][0]["text"].as_str().unwrap();
     let mcp: Value = serde_json::from_str(text).unwrap();
