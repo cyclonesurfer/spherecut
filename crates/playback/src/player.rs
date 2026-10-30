@@ -329,6 +329,10 @@ pub struct PlayerSnapshot {
     pub slots: SlotStats,
     pub perf: PerfSnapshot,
     pub gpu_error: Option<PlayerError>,
+    /// Why the GPU wouldn't import a frame exported as DMA-BUFs (zero
+    /// copy, slice 5b), once it hasn't: the frames are copied from then
+    /// on.
+    pub import_refused: Option<String>,
     /// Whether what the threads report was read now; false when its lock
     /// was taken, and it is the copy from before.
     pub fresh: bool,
@@ -352,6 +356,7 @@ impl Default for PlayerSnapshot {
             slots: SlotStats::default(),
             perf: PerfSnapshot::default(),
             gpu_error: None,
+            import_refused: None,
             fresh: false,
         }
     }
@@ -1356,6 +1361,7 @@ impl Player {
         if let Some(st) = status {
             s.budget = st.budget;
             s.gpu_error = st.gpu_error.clone();
+            s.import_refused = st.import_refused.clone();
             s.streams = st.streams.clone();
             s.has_audio = st.audio.is_some();
             ui.snapshot_epoch = st.epoch;

@@ -79,11 +79,20 @@ pub mod tier2 {
     #[track_caller]
     pub fn require_samples_dir() -> PathBuf {
         require_hw_run();
-        usable_samples_dir(
-            std::env::var_os("SPHERECUT_SAMPLES")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("samples")),
-        )
+        usable_samples_dir(samples_path())
+    }
+
+    /// The samples directory when there is one, for a test that goes on
+    /// without it.
+    pub fn samples_dir() -> Option<PathBuf> {
+        Some(samples_path()).filter(|d| d.is_dir())
+    }
+
+    /// `SPHERECUT_SAMPLES`, or `samples`.
+    fn samples_path() -> PathBuf {
+        std::env::var_os("SPHERECUT_SAMPLES")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("samples"))
     }
 
     /// `dir`, or skip if it is missing. Its path need not be UTF-8: the
