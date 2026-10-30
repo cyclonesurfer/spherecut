@@ -225,8 +225,13 @@ fn probe_opens_no_network_socket_and_no_listed_file() {
     ] {
         assert!(opened(name), "strace saw no open of {name}:\n{log}");
     }
-    // ... and nothing they list, and no network socket.
-    let private: Vec<&str> = log.lines().filter(|l| l.contains("private")).collect();
+    // ... and nothing they list, and no network socket. (By the listed
+    // files' path: Fedora's libavformat loads libsmbclient, and with it
+    // a few hundred of samba's `*-private-samba.so`.)
+    let private: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("outside/private"))
+        .collect();
     assert!(private.is_empty(), "{private:#?}");
     assert!(!opened("x.mp4"), "{log}");
     let sockets = common::inet_sockets(&log);

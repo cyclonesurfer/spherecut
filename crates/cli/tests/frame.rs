@@ -5,8 +5,10 @@
 //! goldens with the swscale cross-check.
 //!
 //! Every run renders on lavapipe (`--adapter cpu`) or with `--reference`,
-//! and decodes in software: this machine has no render node, so `auto`
-//! falls back, which the JSON says.
+//! and decodes in software (`--decoder software`) unless it says how:
+//! `auto` decodes on the machine's GPU where it has a render node, as
+//! odin does, in that decoder's pixel format (p010le for 10-bit HEVC
+//! where software gives yuv420p10le).
 //!
 //! **The pipeline goldens** follow the render goldens' rules
 //! (`crates/render/tests/goldens.rs`, D32). Each row renders a file
@@ -143,6 +145,9 @@ fn frame_in(file: &Path, out: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> R
         .any(|a| *a == "--adapter" || *a == "--reference")
     {
         all.extend(["--adapter".into(), "cpu".into()]);
+    }
+    if !args.contains(&"--decoder") {
+        all.extend(["--decoder".into(), "software".into()]);
     }
     all.extend(args.iter().map(OsString::from));
     let mut cmd = spherecut();
