@@ -394,6 +394,24 @@ pub struct CodecParFields {
     /// Display rotation in degrees (counter-clockwise), from the display
     /// matrix side data, if present.
     pub rotation_deg: Option<f64>,
+    /// FFmpeg's spherical mapping side data, as its demuxer read it: how
+    /// a Matroska or WebM file's projection reaches us.
+    pub spherical: Option<FfSpherical>,
+}
+
+/// `AVSphericalMapping` and `AVStereo3D`'s leading fields, as numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FfSpherical {
+    /// `AV_SPHERICAL_*`: 0 equirectangular, 1 cubemap, 2 equirectangular
+    /// with bounds (a tile), others newer.
+    pub projection: c_int,
+    /// Yaw, pitch and roll in 16.16 fixed-point degrees.
+    pub pose: [i32; 3],
+    /// Left, top, right, bottom: 0.32 fixed-point crops for a tile.
+    pub bounds: [u32; 4],
+    pub padding: u32,
+    /// `AV_STEREO3D_*` and its flags, when the stream has that side data.
+    pub stereo: Option<(c_int, c_int)>,
 }
 
 pub fn codecpar_fields(p: &ff::codec::Parameters) -> CodecParFields {
@@ -488,6 +506,7 @@ pub fn codecpar_fields(p: &ff::codec::Parameters) -> CodecParFields {
             .to_string(),
         );
         f.rotation_deg = display_rotation(par);
+        f.spherical = spherical(par);
     } else if codec_type == sys::AVMediaType::AVMEDIA_TYPE_AUDIO as c_int {
         if format >= 0 {
             // SAFETY: `format` holds a sample format for audio streams;
@@ -565,16 +584,13 @@ fn describe_layout(l: *const sys::AVChannelLayout) -> Option<String> {
     )
 }
 
-/// `par` points at live codec parameters.
-fn display_rotation(par: *const sys::AVCodecParameters) -> Option<f64> {
+/// `par` points at live codec parameters. A copy of its side data of type
+/// `t`, when it has some.
+fn side_data(par: *const sys::AVCodecParameters, t: sys::AVPacketSideDataType) -> Option<Vec<u8>> {
     // SAFETY: coded_side_data/nb_coded_side_data describe an array owned by
     // `par`; av_packet_side_data_get only reads it.
     let sd = unsafe {
-        sys::av_packet_side_data_get(
-            (*par).coded_side_data,
-            (*par).nb_coded_side_data,
-            sys::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
-        )
+        sys::av_packet_side_data_get((*par).coded_side_data, (*par).nb_coded_side_data, t)
     };
     if sd.is_null() {
         return None;
@@ -582,11 +598,55 @@ fn display_rotation(par: *const sys::AVCodecParameters) -> Option<f64> {
     // SAFETY: non-NULL entry of the array above; only its plain fields are
     // read.
     let (size, data) = unsafe { ((*sd).size, (*sd).data) };
-    if size < 36 || data.is_null() {
+    if data.is_null() {
         return None;
     }
-    // SAFETY: a display matrix is nine int32 values, size checked above.
-    let r = unsafe { sys::av_display_rotation_get(data as *const i32) };
+    // SAFETY: `data` holds `size` bytes, owned by `par`; they are copied
+    // out.
+    Some(unsafe { std::slice::from_raw_parts(data, size) }.to_vec())
+}
+
+/// The first `n` native-endian 32-bit words of `bytes`, if it has them.
+fn words(bytes: &[u8], n: usize) -> Option<Vec<u32>> {
+    let words: Vec<u32> = bytes
+        .chunks_exact(4)
+        .take(n)
+        .map(|w| u32::from_ne_bytes([w[0], w[1], w[2], w[3]]))
+        .collect();
+    (words.len() == n).then_some(words)
+}
+
+/// `par` points at live codec parameters. Read by offset rather than as
+/// bindgen's structs, whose enum fields may not hold a newer FFmpeg's
+/// values: the fields read have kept their places since FFmpeg 3.3.
+fn spherical(par: *const sys::AVCodecParameters) -> Option<FfSpherical> {
+    // projection, yaw, pitch, roll, bound_left, bound_top, bound_right,
+    // bound_bottom, padding: nine 32-bit fields.
+    let m = words(
+        &side_data(par, sys::AVPacketSideDataType::AV_PKT_DATA_SPHERICAL)?,
+        9,
+    )?;
+    // type, flags.
+    let stereo = side_data(par, sys::AVPacketSideDataType::AV_PKT_DATA_STEREO3D)
+        .and_then(|b| words(&b, 2))
+        .map(|w| (w[0] as c_int, w[1] as c_int));
+    Some(FfSpherical {
+        projection: m[0] as c_int,
+        pose: [m[1] as i32, m[2] as i32, m[3] as i32],
+        bounds: [m[4], m[5], m[6], m[7]],
+        padding: m[8],
+        stereo,
+    })
+}
+
+/// `par` points at live codec parameters.
+fn display_rotation(par: *const sys::AVCodecParameters) -> Option<f64> {
+    let m = words(
+        &side_data(par, sys::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX)?,
+        9,
+    )?;
+    // SAFETY: a display matrix is nine int32 values, as `m` holds.
+    let r = unsafe { sys::av_display_rotation_get(m.as_ptr().cast::<i32>()) };
     r.is_finite().then_some(r)
 }
 

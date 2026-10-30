@@ -488,7 +488,7 @@ shell. The crate has no `unsafe`.
   beneath a read or write root, and media reads the descriptor through
   `/proc/self/fd` (D45).
 - **`ops`**: `probe` (summaries, folders a page at a time), `look`,
-  `analyze`, and `doctor`. look opens the file through `still` (frame's core: probe,
+  `analyze`, `check` and `doctor`. look opens the file through `still` (frame's core: probe,
   the decoder D39 picks, the seek and the render, shared with `spherecut
   frame`), decodes each time once in order, renders every tile of that
   time from the frame on the one GPU a process keeps (made on the first
@@ -502,7 +502,12 @@ shell. The crate has no `unsafe`.
   as look does and compares each frame's 64×32 luma with the last, and
   `audio` decodes every channel at the stream's rate
   (`FfmpegAudio::open_raw`) on the video's clip time. Each stops at a
-  bucket's end before the deadline and says where to go on from.
+  bucket's end before the deadline and says where to go on from. check
+  (D46) reads only probe's report: rules that always run (nothing
+  damaged, the projection fits one eye's picture, V1 and V2 agree, SA3D
+  fits its track) and a target's (YouTube 360, from its help pages as
+  fetched on 2026-10-30; flat 16:9 or 9:16; archive), each with its fix,
+  under 2 KiB.
 - **`contract`**: the CLI's JSON contract (D27), here since A1.4 so that
   `still` can return its errors and the CLI re-exports it.
 

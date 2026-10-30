@@ -7008,8 +7008,9 @@ projects open media through the same path.
 
 ## D46. A1's analyze and check: what each measures
 
-*2026-10-30, A1.5 (analyze; check follows in A1.6). From
-`docs/design/a1-plan.md` section 6.3 and its amendment 33.*
+*2026-10-30, A1.5 (analyze) and A1.6 (check). From
+`docs/design/a1-plan.md` sections 6.3 and 6.4 and their amendments 33
+and 34.*
 
 What `analyze` does, as `crates/agent/src/ops/analyze/` has it. A call
 names a `file`, a `kind`, optionally `from` and `to` (look's times: the
@@ -7101,6 +7102,132 @@ stretch, and the count fixes the size).
 
 Revisit if: real footage shows repeats over 5 % (a camera's encoder
 refining more), or agents ask for more than 200 buckets.
+
+### check
+
+What `check` does, as `crates/agent/src/ops/check.rs` has it. A call
+names a `file` and optionally a `target`, and gets `rules`, each `{id,
+ok, message, fix}` with `fix` only when it failed, `pass` (every rule
+ok), `advice` (what the target recommends and the file doesn't do,
+which never fails it) and `warnings`. It reads probe's report and
+decodes nothing, so it takes as long as probe. A file FFmpeg can't open
+for its damage gets one failed `readable` rule rather than an error, so
+that `check archive` on a cut copy answers; a missing file or one that
+isn't media is the call's error, as in the other tools.
+
+**The rules that always run, where they apply:**
+
+- `readable`: probe found nothing cut short or damaged. The message says
+  how far it looked (Matroska: the length only).
+- `projection_fits_picture`, on each video stream with a projection (V2,
+  or V1's `Spherical`): one eye's picture, its pixels' aspect applied,
+  is within 1 % of the projection's shape. An equirect is 2 × (1 −
+  left − right) / (1 − top − bottom) across its bounds (2:1 for the
+  whole sphere), a cubemap's layout 0 is 3:2; mono takes the whole
+  picture, top-bottom half its height, left-right (and V2's right-left,
+  value 4) half its width. Bounds that crop the whole picture fail, and
+  a layout the specification doesn't define. Custom stereo and a mesh
+  pass, their shape the file's own. A failure says which stereo mode
+  would fit, if one does.
+- `v1_v2_agree`, where a stream has both: the same projection and the
+  same stereo mode. Players read V2 first.
+- `spatial_audio_fits`, on each audio track with SA3D: ambiX (ACN,
+  SN3D, periphonic), (order + 1)² channels plus two for head-locked
+  stereo, and a channel map that long. Head-locked stereo is the type
+  byte's top bit, as FFmpeg reads it; before A1.6 media took that byte
+  whole and called a head-locked file not ambiX.
+
+**`youtube_360`**, from YouTube's help pages as fetched on 2026-10-30
+(`docs/research/youtube-360-2026-10.md`, which quotes them; fetch them
+again before trusting a rule that fails, since they change without
+notice):
+
+- `spherical_metadata` and `equirect`: the first video stream has V1
+  or V2 metadata, and it is equirect. No page says YouTube takes a
+  cubemap or mesh upload. The fix depends on the picture: a camera's
+  unstitched recording is stitched first; an untagged 2:1 picture gets
+  metadata (the spatial-media injector's, the pages' own tool); anything
+  else is exported as 360.
+- `container`: MP4, MOV or WebM. Matroska isn't on the supported list,
+  so it fails although YouTube may well take it; a Matroska file whose
+  streams are all WebM's codecs (VP8, VP9, AV1; Vorbis, Opus) counts as
+  WebM, since FFmpeg's demuxer doesn't say which it read.
+- `video_codec`: a codec of the supported list: H.264, HEVC, MPEG-1,
+  MPEG-2, MPEG-4 Part 2, ProRes, DNxHD/HR, CineForm, and WebM's VP8, VP9
+  and AV1.
+- `progressive`: not interlaced (field order tt, bb, tb or bt).
+- With an SA3D track, `spatial_audio_youtube`: first-order ambiX in 4
+  channels, or 6 with head-locked stereo; 48 kHz; AAC in MP4 or MOV at
+  256 kb/s or more, Opus in MP4 at 512 (768 with head-locked) or more
+  with channel mapping family 2 (from its `dOps` box), or PCM in MOV. A
+  rate 1 % under passes, since an encoder set to 256 kb/s averages 255;
+  a rate the file doesn't record isn't checked, and the message says
+  so. And `one_audio_track`: YouTube uses one, and not spatial beside
+  stereo.
+- Advice: H.264, 4:2:0, BT.709 for SDR (a matrix that is set and isn't
+  BT.709, unless the transfer is PQ or HLG), one of the common frame
+  rates (24, 25, 30, 48, 50, 60 and their 1000/1001 forms), AAC-LC or
+  Opus, and 48 kHz.
+- Not checked, since no page gives a number: resolution, bitrate of the
+  video, an aspect beyond the projection's own.
+
+**`flat_16_9` and `vertical`:** `not_spherical` (a flat video tagged
+spherical plays wrapped round a sphere; a stereo box alone is flat 3D
+and passes), `aspect` (the picture as shown, its pixels' aspect and a
+quarter-turn rotation applied, within 1 % of 16:9 or 9:16) and
+`square_pixels`.
+
+**`archive`** (amendment 29): `streams_decodable` (no stream this
+FFmpeg has no decoder for or can't set up) and `camera_metadata`: an
+`.insv` still has Insta360's trailer, a `.360` GoPro's GPMF track, an
+`.osv` DJI's metadata track. A file the detector knows as one of those
+cameras says which it kept; any other passes, with nothing known to
+keep. Advice: a 2:1 picture with no spherical metadata may be 360 that
+lost it.
+
+**Words.** Messages and fixes are ours: no file name, tag or FFmpeg
+text (rule 4.2), codec names through `text::field`. Fixes are plain
+words, never a command. M2's flat and 360 exports will be named in them
+once they exist; until then they say what to make ("export it as
+equirect with Spherical Video V2 metadata").
+
+**Size.** A result is under `limits::CHECK_BYTES` (2 KiB): the most a
+synthetic file fails (HEVC 4:2:2 at 15 fps, tagged top-bottom on a 2:1
+picture, head-locked SA3D on 44.1 kHz stereo) takes 1.3 KB. Past the
+limit, passed rules lose their messages, then the advice goes, each
+with a `result_cut` warning; failed rules are never cut.
+
+**What media gained for it:** probe reads a Matroska or WebM file's
+projection and stereo mode from FFmpeg's side data (`AVSphericalMapping`,
+`AVStereo3D`), which before A1.6 it ignored, so such files were flat;
+a stereo box without a projection is flat 3D, not equirect (detect
+called it `EquirectTagged`); SA3D's head-locked bit; an Opus track's
+mapping family; `spherical::write::sv3d` for any projection with bounds.
+`media/audio.rs` still mixes only 4-channel ambiX for playback, so a
+6-channel head-locked file plays as plain channels (M6).
+
+Tests: `crates/agent/tests/check.rs` (a tagged ambiX clip passes
+`youtube_360` and `archive`; a 2:1 picture tagged top-bottom, and the
+mono that fits; a 4:1 one tagged left-right; SA3D on stereo, and
+head-locked SA3D on four channels; an untagged 2:1 clip's fix; a
+cubemap's shape and its `equirect` failure; bounds; a Matroska remux;
+the flat targets; every one of gen-media's bad
+files; an `.insv` without its trailer; the worst file's size; errors),
+unit tests in `check.rs` (V1 against V2, YouTube's spatial audio by
+codec, container, rate and mapping family, two audio tracks,
+interlacing, rotation, anamorphic pixels, the advice, bounds, cutting a
+result), `synth/tests/generated_media.rs` (Matroska's projection through
+probe, a stereo box alone), and media's unit tests (SA3D's head-locked
+bit, `sv3d` with bounds and a cubemap, an Opus `dOps` box).
+
+Rejected: checking resolution or bitrate for YouTube (no page gives a
+number, and a made-up one would fail good files); fixes as commands (an
+agent would run them, and they would be FFmpeg's, not Spherecut's);
+failing a file over advice.
+
+Revisit if: YouTube's pages change (refetch them), or M2's exports
+exist (name them in the fixes), or Pat's footage shows a camera file
+`archive` misreads.
 
 ## Open
 

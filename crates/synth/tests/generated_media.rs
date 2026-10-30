@@ -154,6 +154,95 @@ fn lossless_hevc10_round_trips_frames_timing_and_metadata() {
 }
 
 #[test]
+fn matroska_keeps_the_projection_and_probe_reads_it_from_ffmpeg() {
+    use spherecut_media::inject::{self, EntryEdit, TrackKind};
+    use spherecut_media::spherical::{Projection, StereoMode, write};
+    let dir = tmp("mkv-spherical");
+    let mono = media::write(&small("t-sph", Codec::H264, 8, Audio::None, true), &dir).unwrap();
+    // A stereo one: the same picture tagged top-bottom.
+    let flat = media::write(&small("t-flat", Codec::H264, 8, Audio::None, false), &dir).unwrap();
+    let tb = dir.join("t-tb.mp4");
+    let boxes = [
+        write::st3d(StereoMode::TopBottom),
+        write::sv3d_equirect("test"),
+    ]
+    .concat();
+    inject::inject(
+        &flat,
+        &tb,
+        &[EntryEdit {
+            track: TrackKind::Video,
+            boxes,
+        }],
+    )
+    .unwrap();
+    for (mp4, stereo) in [(&mono, StereoMode::Mono), (&tb, StereoMode::TopBottom)] {
+        let mkv = media::remux_to_mkv(mp4, &dir).unwrap();
+        let r = probe::probe(&mkv).unwrap();
+        let v = r
+            .streams
+            .iter()
+            .find(|s| s.kind == StreamKind::Video)
+            .unwrap();
+        let v2 = v.spherical.v2.as_ref().unwrap();
+        assert_eq!(
+            v2.projection,
+            Some(Projection::Equirect {
+                top: 0,
+                bottom: 0,
+                left: 0,
+                right: 0
+            }),
+            "{mkv:?}"
+        );
+        // Matroska writes no StereoMode for mono, which reads as none.
+        let want = (stereo != StereoMode::Mono).then_some(stereo);
+        assert_eq!(
+            v2.stereo.filter(|s| *s != StereoMode::Mono),
+            want,
+            "{mkv:?}"
+        );
+        assert_eq!(r.camera.as_ref().unwrap().layout, Layout::EquirectTagged);
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_stereo_box_alone_is_flat_3d_not_equirect() {
+    use spherecut_media::inject::{self, EntryEdit, TrackKind};
+    use spherecut_media::spherical::{StereoMode, write};
+    let dir = tmp("st3d-alone");
+    let flat = media::write(
+        &Spec {
+            width: 512,
+            height: 128,
+            ..small("t-flat3d", Codec::H264, 8, Audio::None, false)
+        },
+        &dir,
+    )
+    .unwrap();
+    let out = dir.join("t-lr.mp4");
+    inject::inject(
+        &flat,
+        &out,
+        &[EntryEdit {
+            track: TrackKind::Video,
+            boxes: write::st3d(StereoMode::LeftRight),
+        }],
+    )
+    .unwrap();
+    let r = probe::probe(&out).unwrap();
+    assert!(
+        r.camera
+            .as_ref()
+            .is_none_or(|c| c.layout != Layout::EquirectTagged),
+        "{:?}",
+        r.camera
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn lossy_h264_untagged_is_flagged_as_likely_equirect() {
     let dir = tmp("untagged");
     let path = media::write(

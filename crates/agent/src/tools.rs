@@ -45,6 +45,11 @@ pub const TOOLS: &[Tool] = &[
         schema: include_str!("../../../docs/agents/schemas/analyze.json"),
     },
     Tool {
+        name: "check",
+        title: "Check a file's metadata and fit",
+        schema: include_str!("../../../docs/agents/schemas/check.json"),
+    },
+    Tool {
         name: "doctor",
         title: "Check this machine's decoders",
         schema: include_str!("../../../docs/agents/schemas/doctor.json"),
@@ -60,9 +65,10 @@ pub const MAX_TOOLS: usize = 12;
 pub const MAX_LIST_BYTES: usize = 12 << 10;
 
 /// A1's share of [`MAX_LIST_BYTES`], for its five tools, so that A2's
-/// seven have the rest (a1-plan amendments 8 and 32: look's schema alone
-/// takes 2.4 KB, so the share is 6 KiB rather than 5).
-pub const A1_LIST_BYTES: usize = 6 << 10;
+/// seven have the rest (a1-plan amendments 8, 32 and 34: look's schema
+/// alone takes 2.4 KB, and the five 6.7 KB, so the share is 7 KiB rather
+/// than 5).
+pub const A1_LIST_BYTES: usize = 7 << 10;
 
 /// A tool with its schema parsed.
 #[derive(Debug)]
@@ -150,7 +156,10 @@ const WRITERS: &[&str] = &["look"];
 /// twice, and its `$schema` goes: 2020-12 is MCP's default dialect
 /// (2025-11-25), and the schemas use nothing that differs from draft 7.
 /// A tool that writes with writing on (`--allow-write`) isn't read-only,
-/// but never destroys: it only creates new files.
+/// but never destroys: it only creates new files, so a second call the
+/// same has no more effect (it is refused, `output_exists`). The other
+/// hints mean something only for a tool that isn't read-only, so a
+/// read-only one leaves them out.
 fn listed(p: &Parsed, writes: bool) -> Value {
     let mut input: Map<String, Value> = p.schema.as_object().cloned().unwrap_or_default();
     let description = input.remove("description").unwrap_or(Value::Null);
@@ -159,12 +168,12 @@ fn listed(p: &Parsed, writes: bool) -> Value {
     let mut annotations = json!({
         "title": p.tool.title,
         "readOnlyHint": true,
-        "idempotentHint": true,
         "openWorldHint": false,
     });
     if writes && WRITERS.contains(&p.tool.name) {
         annotations["readOnlyHint"] = json!(false);
         annotations["destructiveHint"] = json!(false);
+        annotations["idempotentHint"] = json!(true);
     }
     json!({
         "name": p.tool.name,
@@ -201,6 +210,7 @@ impl Tools for Spherecut {
             "probe" => (ops::probe::run(ops::request(args)?, &cx)?, Vec::new()),
             "look" => ops::look::run(ops::request(args)?, &cx)?,
             "analyze" => (ops::analyze::run(ops::request(args)?, &cx)?, Vec::new()),
+            "check" => (ops::check::run(ops::request(args)?, &cx)?, Vec::new()),
             "doctor" => (ops::doctor::run(ops::request(args)?, &cx)?, Vec::new()),
             _ => return Err(ToolError::internal(format!("{name} has no op"))),
         };
@@ -275,6 +285,9 @@ mod tests {
             assert_eq!(t["annotations"]["readOnlyHint"], !writer, "{t}");
             if writer {
                 assert_eq!(t["annotations"]["destructiveHint"], false);
+                assert_eq!(t["annotations"]["idempotentHint"], true);
+            } else {
+                assert!(t["annotations"].get("idempotentHint").is_none(), "{t}");
             }
         }
     }
@@ -298,6 +311,7 @@ mod tests {
             ],
             "analyze" => vec![json!({"file": "a.mp4", "kind": "timing", "from": "1.5",
                                     "to": [30000, 1001], "buckets": 20, "stream": 0})],
+            "check" => vec![json!({"file": "a.mp4", "target": "youtube_360"})],
             "doctor" => {
                 vec![json!({"file": "a.mp4", "speed": true, "render_node": "/dev/dri/renderD128"})]
             }
@@ -311,6 +325,7 @@ mod tests {
             "probe" => ops::request::<ops::probe::Request>(args).map(drop),
             "look" => ops::request::<ops::look::Request>(args).map(drop),
             "analyze" => ops::request::<ops::analyze::Request>(args).map(drop),
+            "check" => ops::request::<ops::check::Request>(args).map(drop),
             "doctor" => ops::request::<ops::doctor::Request>(args).map(drop),
             _ => Err(ToolError::internal(format!("no request type for {name}"))),
         }

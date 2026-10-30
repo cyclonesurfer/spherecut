@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "check",
+  "description": "Check a file's spherical and ambiX metadata against its streams, and the file against a target. Rules pass or fail, each failure with its fix; pass is all of them. advice lists what a target recommends that the file doesn't do.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "file"
+  ],
+  "properties": {
+    "file": {
+      "type": "string",
+      "description": "A video.",
+      "minLength": 1
+    },
+    "target": {
+      "type": "string",
+      "description": "Also check for a YouTube 360 upload, a flat 16:9 or 9:16 video, or a copy to keep in place of the camera's original.",
+      "enum": [
+        "youtube_360",
+        "flat_16_9",
+        "vertical",
+        "archive"
+      ]
+    }
+  }
+}
