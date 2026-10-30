@@ -127,6 +127,9 @@ pub(crate) struct Status {
     pub(crate) audio: Option<Arc<dyn AudioOutput>>,
     pub(crate) budget: Option<BudgetStatus>,
     pub(crate) gpu_error: Option<PlayerError>,
+    /// Why the upload thread couldn't import a frame exported as DMA-BUFs
+    /// (slice 5b), the first time: the opens after it don't export.
+    pub(crate) import_refused: Option<String>,
 }
 
 /// Shared by every thread of a player.

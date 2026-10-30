@@ -186,7 +186,26 @@ pub struct PlayerConfig {
     /// negative). Paused, the frame at the clock's time shows, as a
     /// frame-exact seek or step put it.
     pub av_offset_ms: i32,
+    /// Slice 5b's path A: VA-API frames stay on the device as DMA-BUFs
+    /// and are imported into the GPU, instead of downloaded and uploaded,
+    /// when the device can import them. Off by default until the decision
+    /// before M3 (D25); [`ZERO_COPY_ENV`] turns it on.
+    pub zero_copy: bool,
 }
+
+/// `SPHERECUT_ZERO_COPY=1` turns [`PlayerConfig::zero_copy`] on.
+pub const ZERO_COPY_ENV: &str = "SPHERECUT_ZERO_COPY";
+
+/// Whether `get` (the environment, or a test's) asks for zero copy: `1`
+/// does, anything else doesn't.
+pub fn zero_copy_from_env(get: impl Fn(&str) -> Option<String>) -> bool {
+    get(ZERO_COPY_ENV).is_some_and(|v| v.trim() == "1")
+}
+
+/// The frames exported from a VA-API decoder each stream's cache holds
+/// at most: its pool's spare surfaces less 8 for the frames on their way
+/// (the decoder's next, the upload thread's, those the GPU still reads).
+pub const SURFACE_CAP: usize = spherecut_media::backend::ZERO_COPY_SURFACES as usize - 8;
 
 impl Default for PlayerConfig {
     fn default() -> Self {
@@ -196,6 +215,7 @@ impl Default for PlayerConfig {
             gpu_slots: DEFAULT_SLOTS,
             decoder: DecoderPreference::Auto,
             av_offset_ms: 0,
+            zero_copy: false,
         }
     }
 }
@@ -506,6 +526,8 @@ pub struct Player {
     discrete: bool,
     gpu_ids: GpuIds,
     render_node: Option<PathBuf>,
+    /// The device imports DMA-BUFs ([`PlayerConfig::zero_copy`]).
+    dmabuf_import: bool,
     base_clock: Arc<dyn Clock>,
     upload: Sender<UploadCommand>,
     handles_tx: Sender<(String, JoinHandle<()>)>,
@@ -544,8 +566,10 @@ impl Player {
             // Until the upload thread has read the memory available.
             CacheBudget::Auto => AUTO_MIN,
         };
+        let cache =
+            FrameCache::new(budget, time_of(config.ahead)).with_surface_cap(Some(SURFACE_CAP));
         let shared = Arc::new(Shared {
-            cache: Arc::new(FrameCache::new(budget, time_of(config.ahead))),
+            cache: Arc::new(cache),
             slots: Arc::new(SlotRing::new(config.gpu_slots)),
             perf: Arc::new(PerfStats::new()),
             status: Mutex::new(Status::default()),
@@ -569,6 +593,12 @@ impl Player {
             vendor: info.vendor,
             device: info.device,
         };
+        let dmabuf_import = parts.gpu.caps.dmabuf_import;
+        if config.zero_copy && !dmabuf_import {
+            tracing::info!(
+                "zero copy is on, but this device can't import DMA-BUFs: frames are copied"
+            );
+        }
         let thread = UploadThread {
             shared: shared.clone(),
             gpu: parts.gpu,
@@ -587,6 +617,7 @@ impl Player {
             discrete,
             gpu_ids,
             render_node: parts.render_node,
+            dmabuf_import,
             base_clock: clock.clone(),
             upload,
             handles_tx,
@@ -701,6 +732,7 @@ impl Player {
             discrete: self.discrete,
             gpu_ids: self.gpu_ids.clone(),
             render_node: self.render_node.clone(),
+            zero_copy: ui.config.zero_copy && self.dmabuf_import,
         };
         if let Err(e) = spawn_into(&self.handles_tx, "open".into(), move || job.run()) {
             self.shared.event(PlayerEvent::OpenFailed {
@@ -1758,6 +1790,26 @@ mod tests {
         }
         shows(210);
         join(player);
+    }
+
+    #[test]
+    fn zero_copy_is_asked_for_with_a_1() {
+        let env = |v: Option<&'static str>| {
+            move |k: &str| {
+                (k == ZERO_COPY_ENV)
+                    .then_some(v)
+                    .flatten()
+                    .map(String::from)
+            }
+        };
+        assert!(zero_copy_from_env(env(Some("1"))));
+        assert!(zero_copy_from_env(env(Some(" 1\n"))));
+        for v in [None, Some(""), Some("0"), Some("yes"), Some("true")] {
+            assert!(!zero_copy_from_env(env(v)), "{v:?}");
+        }
+        assert!(!PlayerConfig::default().zero_copy);
+        // The cap leaves room in the pool for the frames on their way.
+        assert_eq!(SURFACE_CAP, 16);
     }
 
     #[test]

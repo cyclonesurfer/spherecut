@@ -169,6 +169,7 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
             }
             let config = PlayerConfig {
                 cache: chosen.budget,
+                zero_copy: spherecut_playback::zero_copy_from_env(|k| std::env::var(k).ok()),
                 ..PlayerConfig::default()
             };
             let audio = DeviceAudio::new(backend.clone(), AudioDevice::Default);

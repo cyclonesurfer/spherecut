@@ -39,7 +39,8 @@ pub use decoder::{DecoderChoice, DecoderPreference, HwDecodeCheck, HwSupport, St
 pub use perf::{Counter, PerfSnapshot, PerfStats, Stage, StageSummary};
 pub use player::{
     PREROLL_FRAMES, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent, PlayerParts,
-    PlayerSnapshot, Presented, ShownFrame, ShutdownReport,
+    PlayerSnapshot, Presented, SURFACE_CAP, ShownFrame, ShutdownReport, ZERO_COPY_ENV,
+    zero_copy_from_env,
 };
 pub use shared::{BudgetStatus, Landed, Repaint, SeekCounts, StreamStatus};
 pub use slots::{SlotFrame, SlotRing, SlotState, SlotStats, SlotView};
