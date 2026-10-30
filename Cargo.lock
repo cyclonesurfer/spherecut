@@ -1735,6 +1735,7 @@ version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
  "ffmpeg-sys-next",
+ "libc",
  "proptest",
  "serde",
  "spherecut-core",

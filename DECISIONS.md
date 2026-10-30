@@ -1205,7 +1205,7 @@ rest, with the versions in `Cargo.lock`:
 | clap 4.6.7 (derive) | cli, xtask | Argument parsing with generated help and errors, for two binaries with subcommands |
 | cpal 0.18.2 (pulseaudio) | audio | The audio output (D35): the PulseAudio protocol host, pure Rust, which reaches PipeWire through pipewire-pulse, and ALSA, which cpal always builds on Linux and which links libasound (so its headers are a build prerequisite). Default features off; a `[[bans.features]]` allow list keeps `pipewire`, `jack`, `realtime` and the browser hosts off. On Linux it brings `alsa`, `alsa-sys`, `pulseaudio` and its `byteorder`, `enum-primitive-derive`, `mio`, `thiserror` 1 and the `futures` crates, and `dasp_sample` for its sample conversions |
 | image 0.25.10 (png only) | render | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame` and the goldens. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
-| libc 0.2.191 | cli | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, the binary's one FFI module (D28): the handler only stores to an atomic. It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
+| libc 0.2.191 | cli, media | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, the binary's one FFI module (D28): the handler only stores to an atomic. In media's `ffi`, `mmap`, `madvise` and `munmap` for the download pool's buffers on huge pages (D30). It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
 | serde 1.0.229 (derive) | core, sphere, media, cli | Serializable time types, `Projection`, the probe and doctor reports, and the CLI's JSON envelope (D27) |
 | serde_json 1.0.154 | cli; core, render (dev) | `--json` output, through the `contract` module (D27). core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
@@ -2899,6 +2899,21 @@ Limits:
   once from one seek to the next across the fallback (D29).*
 - The fallback reopens the file and decodes from a keyframe, so a
   mid-stream fallback costs one seek.
+- *Updated 2026-10-30 by H1 on odin (PR #7, and the timelines of the
+  5.7K benchmarks at f87dc2a):* while the frame cache filled, every
+  frame downloaded into a buffer the pool had just allocated, and each
+  of its 4 KiB pages faulted in on first touch: about 270 000 faults a
+  second, 12 000 a 5.7K P010 frame (one a page of its 50 MB), with
+  THP set to `madvise` as Fedora sets it. Vulkan Video's 10-bit download
+  took 40 to 51 ms (p50 a second) then, against 18 to 21 once the cache
+  was full and buffers came back to the pool, and the decoder ran at 20
+  to 24 fps for the first 7 s, under real time; 8-bit took 21 ms against
+  9 to 11. The pool's buffers are now mappings of their own, 2 MiB
+  aligned and advised `MADV_HUGEPAGE`, so a new 50 MB buffer faults in
+  25 huge pages. Here (a VM, THP `madvise`) the first copy into a fresh
+  5.7K P010 buffer takes 13.9 ms on huge pages against 172.8 ms on 4 KiB
+  ones, and 5.0 ms into one reused. The kernel still zeroes each page it
+  hands out; where THP is `never` nothing changes.
 
 Revisit if: slice 5 needs a device per stream rather than per backend,
 or slice 5b's zero-copy replaces the download.
