@@ -142,7 +142,7 @@ pub enum PlayerEvent {
     },
     /// The file has no audio: video plays on its own clock.
     NoAudio,
-    /// A preroll waited [`PREROLL_LIMIT`](crate::PREROLL_LIMIT) for the
+    /// A preroll waited [`PREROLL_LIMIT`] for the
     /// audio: video plays on the system clock until it comes.
     AudioLate,
     /// The GPU had no memory for a slot: playback goes on with one fewer

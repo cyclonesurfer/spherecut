@@ -21,6 +21,8 @@
 //! the real-time pass, the loops, the UI ticks missed and where each
 //! stream decoded. With `SPHERECUT_PLAYBACK_TIMELINE` naming a
 //! directory, each pass also writes its [`Timeline`] there, tick by tick.
+//! The cache's budget is Auto's, or `SPHERECUT_FRAME_CACHE_MIB`'s, as the
+//! GUI's would be.
 //!
 //! What gates, and what only records:
 //!
@@ -70,8 +72,8 @@ use spherecut_media::hw::{self, GpuIds, RenderNode};
 use spherecut_media::probe::{self, ProbeReport, StreamKind};
 use spherecut_playback::decoder::choose;
 use spherecut_playback::{
-    Counter, DecoderPreference, HwSupport, PerfStats, Player, PlayerConfig, PlayerParts,
-    PlayerSnapshot, Presented, SlotFrame, Stage, StreamFormat,
+    CacheBudget, Counter, DecoderPreference, HwSupport, PerfStats, Player, PlayerConfig,
+    PlayerParts, PlayerSnapshot, Presented, SlotFrame, Stage, StreamFormat,
 };
 use spherecut_render::wgpu;
 use spherecut_render::{
@@ -209,6 +211,12 @@ impl Rig {
         parts.render_node = Some(self.node.path.clone());
         let config = PlayerConfig {
             decoder,
+            cache: CacheBudget::choose(
+                None,
+                CacheBudget::env_value().as_deref(),
+                CacheBudget::Auto,
+            )
+            .budget,
             ..PlayerConfig::default()
         };
         Player::new(parts, config).map_err(|e| e.to_string())
