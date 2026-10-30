@@ -745,7 +745,7 @@ acceptance (m1-plan section 14):
 
 | Acceptance | Evidence |
 |---|---|
-| The whole kittest suite passes on lavapipe, the byte-identical fractional-scale test, the marker drag at 1.25 and GUI `never_blocks` included | `crates/app/tests`, 14 tests (about 25 s). `viewer.rs`: the viewer's crop of the harness render is `render_still` byte for byte at 1, 1.25, 1.5 and 2 pixels a point, with the same view and filter; the pointer maps through the rounding `prepare` uses (at 1.25 and 1.5 and odd sizes, rect corners on whole pixels, lens points to 1e-5); the marker drag at 1 and 1.25 lands the red marker's centroid 0.09 and 0.34 px from the release point, with the app's q `solve_level`'s to 1e-9; zoom by wheel and `zoom_delta` keeps the direction under the pointer to 1e-9; the switch takes 15 frames at 60 Hz; an unchanged frame and view only encode, and a resize projects once; steps show the next and previous frames and Home and End the ends; a resize sweep from 1×1 to 3840×2160 never panics. `never_blocks.rs`: above, under "M1 criteria ticked". `panes.rs`: the doctor's errors and warnings are banners and its notes aren't, Dismiss keeps one gone, the Doctor tab shows the whole report and, before it, "Checking codecs and hardware…"; lavapipe's own warning with its fix; the Files pane lists a folder (folders first, videos only, hidden files left out), opens a clip and goes in and up; and the notices for a file without audio, a null output and a hardware fallback |
+| The whole kittest suite passes on lavapipe, the byte-identical fractional-scale test, the marker drag at 1.25 and GUI `never_blocks` included | `crates/app/tests`, 16 tests (about 30 s). `viewer.rs`: the viewer's crop of the harness render is `render_still` byte for byte at 1, 1.25, 1.5 and 2 pixels a point, with the same view and filter; the pointer maps through the viewport egui-wgpu gives the callback, and `prepare` made its target that size (at 1.25 and 1.5 and odd sizes, rect corners on whole pixels, lens points to 1e-5); the marker drag at 1 and 1.25 lands the red marker's centroid 0.09 and 0.34 px from the release point, with the app's q `solve_level`'s to 1e-9; zoom by wheel and `zoom_delta` keeps the direction under the pointer to 1e-9; the switch takes 15 frames at 60 Hz; an unchanged frame and view only encode, and a resize projects once; steps show the next and previous frames and Home and End the ends; a resize sweep from 1×1 to 3840×2160 never panics; a projection `prepare` recorded but `paint` never followed (a failed surface acquire) is projected again; and with `logic` alone, as eframe runs a hidden window, playback presents frame after frame and ends the clip, which nothing ends without it. `never_blocks.rs`: above, under "M1 criteria ticked". `panes.rs`: the doctor's errors and warnings are banners and its notes aren't, Dismiss keeps one gone, the Doctor tab shows the whole report and, before it, "Checking codecs and hardware…"; lavapipe's own warning with its fix; the Files pane lists a folder (folders first, videos only, hidden files left out), opens a clip and goes in and up; and the notices for a file without audio, a null output (dismissed, it stays so across the next open) and a hardware fallback |
 | `cargo deny check` is green with only the font exception | advisories, bans, licences and sources pass with no ignores; the one licence exception added is `epaint_default_fonts`'s (Pat's answer, D36). The graph is Linux's only, which leaves out arboard's Windows and macOS image codecs |
 
 Also in the slice:
@@ -762,8 +762,17 @@ Also in the slice:
 - `no_display`, exit 3, joins the CLI contract (`docs/cli-json.md`).
 - Departures from the plan's section 7, recorded in D36 and amendment
   16: the viewer's rect is inset by a pixel, the redraw is a `DrawKey`
-  `prepare` compares rather than a flag, `logic` isn't used, and the
+  `prepare` compares rather than a flag (a projection counting as drawn
+  once `paint` ran), `logic` presents so playback goes on while the
+  window is hidden, the jobs' threads are joined at exit, and the
   marker drag test looks through the fisheye.
+- The fresh review's eight findings were fixed in the slice: a
+  projection whose surface acquire failed stayed unprojected; nothing
+  presented while the window was hidden; the jobs' threads were left
+  running at exit; a focused text field kept the scrub's exact seek
+  back; machine notices came back undismissed on each open; two tests
+  checked less than they said; docs claimed more than the code did; and
+  the viewer polled the device on the UI thread.
 - The GUI adds 90 crates to a Linux build (D22).
 - Slice 8 has the overlay's GPU timestamps and sparklines (slice 7's
   overlay is the engine's numbers as text), the settings beyond the
@@ -776,7 +785,11 @@ Also in the slice:
   (the command line and the Files pane open files), and on GNOME sctk's
   plain window frame. No screen reader in M1 (no accesskit). egui's
   fonts have no emoji or arrows, so the buttons are words. It has run
-  here only under kittest, with no compositor; H2 runs it on GNOME.
+  here only under kittest and Xvfb, with no compositor; H2 runs it on
+  GNOME. A switch started during another jumps once to the nearer
+  projection (D33). A worker of the last file that checked its open was
+  current just before the next open can send one event after it, which
+  lands on the next file's notices (D36).
 
 - Spherecut opens only MP4/MOV and Matroska/WebM files; anything else,
   WAV, FLAC or MP3 music beds included, needs a DECISIONS entry that

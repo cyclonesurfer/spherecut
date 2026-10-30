@@ -59,9 +59,10 @@ an agent, frames included, goes to that agent's model provider.
   ALSA; with no sound device, playback is silent.
 - For the viewer, a Wayland or X11 desktop session. It loads
   libwayland-client and libxkbcommon (Wayland), or libX11, libXcursor,
-  libXrandr and libXi (X11), when its window opens, as it loads the
-  Vulkan loader; a desktop has them. With no display, `spherecut` exits 3
-  and says so, and the other commands work as before.
+  libXrandr, libXi and libxkbcommon-x11 (X11), when its window opens, as
+  it loads the Vulkan loader; a desktop has them. With no display,
+  `spherecut` exits 3 and says so, and the other commands work as
+  before.
 - For the Tier 1 tests: Mesa's lavapipe Vulkan driver and strace (see
   Development).
 
@@ -224,7 +225,8 @@ spherecut clip.mp4 --adapter cpu           # render on lavapipe (or part of a GP
 ```
 
 Drag the picture to look around; with Ctrl held the drag is free to
-roll. Scroll (or Ctrl+scroll, or + and −) to zoom about the pointer.
+roll. Scroll (or Ctrl+scroll) to zoom about the pointer, or + and − to
+zoom about the centre.
 Touchpad pinch doesn't reach applications under winit on Linux yet, so
 two-finger scrolling zooms. 1, 2 and 3 switch to rectilinear, fisheye
 and tiny planet, and R looks forward and level again. Space or K plays

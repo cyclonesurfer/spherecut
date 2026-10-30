@@ -4314,8 +4314,9 @@ What:
 - **Zoom keeps the direction under the pointer** (`grab::zoom_about`).
   Scrolling divides hfov by exp(0.0015 · points scrolled). egui's
   `zoom_delta` (Ctrl+scroll, a touchscreen pinch) divides it by the
-  delta. + and − step by 1.15. hfov stays between 10° and the
-  projection's maximum. Zoom waits while a switch is under way.
+  delta. + and − step by 1.15 about the view's centre. hfov stays
+  between 10° and the projection's maximum. Zoom input is dropped while
+  a switch is under way, which sets the field of view itself.
 - **Pointer to lens point.** The pointer's points times the pixels per
   point, less the viewer's origin in whole pixels, go through
   `sphere::pixel::to_lens` at pixel centres, over the same rect the paint
@@ -4326,7 +4327,10 @@ What:
   orientation with it. Rectilinear eases to 170° at most, and fisheye to
   180° at least. Tiny planet is stereographic 300° looking straight down
   (pitch −90°, roll 0), and leaving it levels the view. A drag cancels a
-  switch under way. The View menu's slider sets the morph directly.
+  switch under way. A switch started during another starts from the
+  nearer of the two projections the lens is blending, so the picture
+  jumps once: a lens blends two projections, not three. The View menu's
+  slider sets the morph directly.
 - **Metadata.** sv3d crop bounds are applied (D31). An sv3d pose is read
   and shown in a notice, not applied. A stereo source shows its left
   eye.
@@ -4347,7 +4351,9 @@ Tested:
   fields of view and points. An `Exact` fit puts the direction within
   1e-9 rad of the pointer's and its lens point within 1e-6. A `Clamped`
   fit has no closer pitch on a 0.01° grid around it. The roll is kept to
-  1e-12. `zoom_about` keeps the direction under the point.
+  1e-9, at pitches more than 1e-4 rad from a pole (at the pole
+  `Ypr::from_quat` folds the roll into the yaw). `zoom_about` keeps the
+  direction under the point.
 - kittest on lavapipe (`crates/app/tests/viewer.rs`):
   - the marker drag at 1 and 1.25 pixels a point: press on the red F
     marker's centroid, drag 30 by 18 points in 6 moves and let go. The
@@ -5791,20 +5797,49 @@ What:
     inside the inset, every pixel is the projection's alone.
   - Whether to project again is a `DrawKey` (the slot, the frame in it,
     the view and the filter) that `prepare` compares with the last one
-    it projected, not a `redraw` flag set in `ui()`. eframe runs
-    `prepare` only for a pass it paints; a flag cleared by a pass that
-    was never painted would have lost its redraw. A resize projects
-    again too.
-  - `eframe::App::logic` isn't used: `SpherecutApp::ui` polls the
-    player's events, the doctor and the jobs itself, so that kittest,
-    which calls only `ui`, runs everything eframe does.
+    projected, not a `redraw` flag set in `ui()`: a flag cleared by a
+    pass that was never rendered would have lost its redraw. A resize
+    projects again too.
+  - A projection counts as drawn only once `paint` ran after it (an
+    atomic flag in `ViewerResources`). egui-wgpu records `prepare`'s
+    commands before it acquires the window's surface, and drops them
+    when the acquire fails (Outdated, Lost, Timeout, Occluded); the next
+    pass, with the same key, would otherwise only encode a target that
+    was never drawn, or was drawn at the old size.
+  - `prepare` records with `Projector::record_unchecked` and makes the
+    target with `LinearTarget::new_unchecked`: no `Gpu::check`, which
+    polls the device on the UI thread and takes the shared error slot
+    that the upload thread watches (D31). The upload thread reports a
+    lost device (`GpuFailed`); both filters' pipelines are built with
+    the resources, before the first frame.
+  - `SpherecutApp::logic` takes the player's events, the doctor's
+    result and the jobs, and picks the frames to show (`present`).
+    eframe calls it before each `ui`, and alone while the window is
+    minimized or occluded, when it runs no egui pass: the presenter
+    moves the cache's playhead and ends the clip, so playback goes on
+    hidden. `ui` runs `logic` itself when nothing ran it first, so
+    kittest, which calls only `ui`, runs all of it.
+  - Jobs keep their threads' handles. One given up (a listing for a
+    folder left since, a probe for a file closed since, any at exit) is
+    kept in `jobs::Threads`, and `run` joins them after the event loop
+    with 3 s, beside the player's 2 s, so that none is inside a driver
+    or FFmpeg while the process's exit tears those down. One still
+    running then is left, and logged.
+  - Notices of the machine (the doctor's, the CPU adapter's, a failed
+    GPU, no audio device, a slot the GPU dropped) outlive a file, and a
+    dismissed one stays dismissed when the next file raises it again.
+    `open` takes the last file's pending events before it forgets that
+    file's notices. A worker that checked its open was current just
+    before the next open can still send one event after it, which then
+    lands on the next file: the events carry no open (a playback
+    change, if it ever shows).
 - **The UI thread never blocks** (D34). `crates/app/clippy.toml`
   repeats the workspace's (a crate's file replaces it) and bans std's
   and egui's (epaint's) lock, read and write, the condvar waits,
   `Receiver::recv`, `JoinHandle::join`, `thread::sleep`, the blocking
   `fs` reads, `wgpu::Device::poll`, `pollster::block_on` and the
   player's `join`. The startup write into egui-wgpu's callback
-  resources, the directory listing on its worker, the join after the
+  resources, the directory listing on its worker, the joins after the
   event loop and the tests' pacing say why with `#[expect]`. Jobs on
   workers (the doctor, the listing, the Info pane's probe) come back
   through a channel the UI only `try_recv`s.
@@ -5823,11 +5858,16 @@ question, which the prompt makes Pat's. Comparing what was drawn,
 rather than remembering a flag, can't lose a frame however eframe
 schedules its passes.
 
-Tested: the kittest suite on lavapipe (`crates/app/tests`, 14 tests):
+Tested: the kittest suite on lavapipe (`crates/app/tests`, 16 tests):
 the viewer is `render_still` byte for byte at 1, 1.25, 1.5 and 2 pixels
 a point; an unchanged frame and view only encode, and a resize projects
-once; a resize sweep from 1×1 to 3840×2160 never panics; GUI
-`never_blocks` (D34); the panes and notices. `cargo deny check` passes
+once; a projection never painted is projected again, by `prepare` and
+`paint` called as egui-wgpu calls them; `logic` alone presents frame
+after frame and ends the clip, which nothing ends without it; a resize
+sweep from 1×1 to 3840×2160 never panics; GUI `never_blocks` (D34); the
+panes and notices, a dismissed machine notice kept across an open. Unit
+tests: a job given up leaves its thread until it ends, and the exit's
+join takes the threads that end by its deadline and names the rest. `cargo deny check` passes
 with the font exception the only licence exception added.
 
 Revisit if: accesskit moves to a maintained zbus (screen readers),

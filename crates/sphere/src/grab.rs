@@ -221,7 +221,8 @@ mod tests {
 
         /// Level mode puts the grabbed direction under the point to 1e-9
         /// rad when it says Exact (and project_morph gives the point back
-        /// to 1e-6), keeps the roll to 1e-12, and when it says Clamped no
+        /// to 1e-6), keeps the roll to 1e-9 (away from the poles, where
+        /// from_quat folds it into the yaw), and when it says Clamped no
         /// pitch on a 0.01° grid about its own gets closer.
         #[test]
         fn level_grabs_land_or_come_as_close_as_any_pitch(

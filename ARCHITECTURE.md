@@ -604,9 +604,13 @@ intermediate equirect exists only as the output of a 360 export.
   that lock, before any frame), reads the saved tiles and settings,
   starts the `Player` with the device's audio, and opens the first file
   given.
-* **One frame** is `SpherecutApp::ui`: it polls the player's events and
-  snapshot, the doctor's job and the panes' jobs (never waiting), then
-  draws the menu, the notices, and the tiles: the viewer (the picture
+* **One frame** is eframe's `logic` then `ui`. `SpherecutApp::logic`
+  polls the player's events and snapshot, the doctor's job and the
+  panes' jobs (never waiting) and picks the frames to show
+  (`Player::present`); eframe runs it alone while the window is
+  minimized or occluded, so playback goes on hidden, and `ui` runs it
+  when nothing did (kittest). `ui` draws the menu, the notices, and the
+  tiles: the viewer (the picture
   over the transport bar) beside the Info, Doctor and Files tabs. It
   asks for a repaint while anything moves (playback, a seek, a switch, a
   scrub) and every 50 ms while a job runs; the player's repaint
@@ -617,7 +621,11 @@ intermediate equirect exists only as the output of a 360 export.
   into the viewer's own linear target, of the rect's pixel size, only
   when its `DrawKey` (the slot, the frame in it, the view, the filter)
   differs from the last one drawn, or the size changed; `paint` encodes
-  the target one pixel per pixel into egui's pass. A 30 fps clip on a
+  the target one pixel per pixel into egui's pass. A projection counts
+  as drawn once `paint` ran after it: egui-wgpu drops what `prepare`
+  recorded when the window's surface can't be acquired. `prepare`
+  records without `Gpu::check`, so the UI thread never polls the
+  device. A 30 fps clip on a
   144 Hz display projects 30 times a second.
 * **Input.** A drag grabs the world direction under the pointer and
   keeps it there, level (Ctrl: free); scrolling and `zoom_delta` zoom
@@ -635,13 +643,17 @@ intermediate equirect exists only as the output of a 360 export.
   and turns the player's events into notices (a fallback to software, a
   file without audio, a file that can't be opened or decoded, the GPU
   short of memory or lost, a cache too small). A notice of a kind shows
-  once and stays dismissed; a file's notices go with it.
+  once and stays dismissed; a file's notices go with it, and the
+  machine's (the doctor's, the adapter's, a failed GPU, no audio device,
+  a dropped slot) stay.
 * **Files.** The Files pane lists a folder on a worker (folders first,
   then the video extensions, hidden files left out) in place of a file
   dialog, and remembers the last folder.
 * **Shutdown.** `on_exit` tells the player's threads to stop and leaves
-  the player for `run`, which joins it after the event loop with a 2 s
-  budget, off the UI thread.
+  the player and the jobs' threads (`jobs::Threads`, which also holds
+  those of jobs given up for newer ones) for `run`, which joins them
+  after the event loop, off the UI thread: the player with 2 s, the jobs
+  with 3 s.
 * **Never blocking.** `crates/app/clippy.toml` bans the blocking calls
   (locks, waits, `recv`, `join`, `sleep`, file reads, `Device::poll`,
   `block_on`, `Player::join`); workers and the code around the event loop

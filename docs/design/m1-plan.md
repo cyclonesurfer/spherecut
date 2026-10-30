@@ -190,16 +190,24 @@ the sections below, they win.
     - 7.1: the device is `Gpu::for_window`'s, handed over with
       `WgpuSetup::Existing`, not `CreateNew` (D31, found in slice 3a's
       review). `run` returns `Result<(), GuiError>`, whose codes are the
-      contract's (`no_display`, then render's). `eframe::App::logic`
-      isn't used: `SpherecutApp::ui` polls the player and the jobs
-      itself, so kittest, which calls only `ui`, runs it all. The app is
+      contract's (`no_display`, then render's). `SpherecutApp::logic`
+      polls the player and the jobs and presents; eframe calls it
+      before each `ui` and alone while the window is hidden, and `ui`
+      calls it when nothing did, so kittest, which calls only `ui`,
+      runs it all. On exit the jobs' threads are joined beside the
+      player's, with 3 s. (Slice 7's review: at first `logic` wasn't
+      used, and nothing presented while the window was hidden.) The app is
       made from `AppParts` (device, backend, clock, audio, doctor run),
       so tests give it a gated or faulting backend and a fixture report.
     - 7.3: the callback carries a `DrawKey` (the slot, its frame, the
       view, the filter), and `prepare` projects when it differs from the
       last one projected, or the size changed, in place of a `redraw`
-      flag: eframe runs `prepare` only for a pass it paints, so a flag
-      cleared by an unpainted pass would lose its redraw. The rect is
+      flag: a flag cleared by a pass never rendered would lose its
+      redraw. A projection counts as drawn only once `paint` ran after
+      it, since egui-wgpu records `prepare`'s commands before it
+      acquires the surface and drops them when that fails; `prepare`
+      records unchecked, so the UI thread never polls the device
+      (slice 7's review). The rect is
       rounded inward to whole pixels and inset by one pixel each side,
       since at 1.25 the tiles' separator antialiased into the last
       column. The GPU timers are slice 8's, with the overlay.
@@ -1766,9 +1774,11 @@ Audio is muted while scrubbing. Audio scrubbing is M5, with JKL shuttle.
     io.github.cyclonesurfer.Spherecut`.
 - **No file drop on Wayland.** winit 0.30.13 delivers `DroppedFile` only on
   X11. The CLI argument and the Files pane cover opening files.
-- **Occlusion.** eframe 0.37 keeps running when Wayland frame callbacks
-  stop for an occluded window. Playback follows the clock, never
-  `request_repaint`, so nothing breaks. Drops are not counted while no UI
+- **Occlusion.** eframe 0.37 runs no egui pass for a minimized or
+  occluded window, only `App::logic`, every 10 ms while a repaint is
+  asked for. Spherecut's `logic` presents (amendment 16), so the cache's
+  playhead moves and the clip ends while hidden. Playback follows the
+  clock, never `request_repaint`. Drops are not counted while no UI
   frames are painted (a gap over 100 ms).
 
 ### 7.8 Notices
