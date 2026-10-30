@@ -21,9 +21,9 @@ use spherecut_core::video::{ColorFamily, PixelLayout, PlaneDesc, SampleBytes, Vi
 use spherecut_core::{FrameRate, Rounding, StopToken, Time};
 use spherecut_media::MediaError;
 use spherecut_media::backend::{
-    AudioDecode, AudioRequest, DecodePath, DecodeStats, DecoderEvent, Exactness, MediaBackend,
-    NextFrame, SeekCost, SeekMode, SeekOutcome, SourceMapping, Timing, VideoDecode, VideoFrame,
-    VideoRequest, VideoStreamInfo,
+    AudioChunk, AudioDecode, AudioRequest, AudioStreamInfo, DecodePath, DecodeStats, DecoderEvent,
+    Exactness, MediaBackend, NextAudio, NextFrame, SeekCost, SeekMode, SeekOutcome, SourceMapping,
+    Timing, VideoDecode, VideoFrame, VideoRequest, VideoStreamInfo,
 };
 use spherecut_media::color::{self, ColorContext};
 use spherecut_media::probe::{ProbeError, ProbeReport};
@@ -62,16 +62,62 @@ impl Default for SyntheticClip {
 /// Decodes [`SyntheticClip`]s, whatever the path. A seek decodes from the
 /// keyframe before its target, or forward from the frame last handed out
 /// when that is closer, at `frame_cost` a frame, and stops between frames
-/// (and every millisecond within one) once its token says to.
+/// (and every millisecond within one) once its token says to. With
+/// `audio`, the clip has [`SyntheticAudio`]; without, it has no audio
+/// stream.
 #[derive(Debug, Clone, Default)]
 pub struct SyntheticBackend {
     pub clip: SyntheticClip,
+    pub audio: Option<SyntheticAudio>,
 }
 
 impl SyntheticBackend {
     pub fn new(clip: SyntheticClip) -> Self {
-        SyntheticBackend { clip }
+        SyntheticBackend { clip, audio: None }
     }
+
+    /// `clip`, with `audio`.
+    pub fn with_audio(clip: SyntheticClip, audio: SyntheticAudio) -> Self {
+        SyntheticBackend {
+            clip,
+            audio: Some(audio),
+        }
+    }
+}
+
+/// The audio a [`SyntheticBackend`] decodes, at whatever rate and channel
+/// count the output asks for: from clip time 0 for `duration`, sample `i`
+/// is [`audio_sample`]`(i)` in every channel, in chunks of
+/// [`AUDIO_CHUNK`] frames; before 0 it is silence. A seek lands exactly
+/// on sample round(at × rate). While `valve` is closed, decoding waits
+/// (a decode stall).
+#[derive(Debug, Clone)]
+pub struct SyntheticAudio {
+    pub duration: Time,
+    pub valve: Gate,
+}
+
+impl SyntheticAudio {
+    /// `duration` of audio, its valve open.
+    pub fn new(duration: Time) -> Self {
+        let valve = Gate::new();
+        valve.release();
+        SyntheticAudio { duration, valve }
+    }
+}
+
+/// Frames in a [`SyntheticAudio`] chunk.
+pub const AUDIO_CHUNK: usize = 1024;
+
+/// Sample `i` of [`SyntheticAudio`]: a ramp that says which it is, exactly
+/// (see [`audio_index`]), and stays within ±1.
+pub fn audio_sample(i: i64) -> f32 {
+    (i.rem_euclid(1 << 20) as f32) / (1 << 20) as f32 * 2.0 - 1.0
+}
+
+/// Which sample of [`SyntheticAudio`] `v` is, modulo 2^20.
+pub fn audio_index(v: f32) -> i64 {
+    (((f64::from(v) + 1.0) / 2.0) * f64::from(1u32 << 20)).round() as i64
 }
 
 impl MediaBackend for SyntheticBackend {
@@ -97,12 +143,83 @@ impl MediaBackend for SyntheticBackend {
 
     fn open_audio(
         &self,
-        _path: &Path,
-        _req: &AudioRequest,
+        path: &Path,
+        req: &AudioRequest,
     ) -> Result<Box<dyn AudioDecode>, MediaError> {
-        Err(MediaError::NotYet {
-            what: "synthetic audio (M1 slice 6)",
-        })
+        let Some(audio) = &self.audio else {
+            return Err(MediaError::NoStream {
+                path: path.to_path_buf(),
+                kind: "audio",
+            });
+        };
+        let rate = req.out.rate.max(1);
+        let tick =
+            spherecut_core::Rational::new(1, i64::from(rate)).map_err(|e| MediaError::Decode {
+                path: path.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+        let end = audio.duration.to_pts(tick, Rounding::Nearest).unwrap_or(0);
+        Ok(Box::new(SyntheticAudioDecode {
+            info: AudioStreamInfo {
+                index: 1,
+                codec: "synthetic".into(),
+                rate,
+                channels: req.out.channels.max(1),
+                layout: None,
+                ambisonic: false,
+                start: Time::ZERO,
+            },
+            tick,
+            channels: usize::from(req.out.channels.max(1)),
+            pos: 0,
+            end,
+            valve: audio.valve.clone(),
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct SyntheticAudioDecode {
+    info: AudioStreamInfo,
+    tick: spherecut_core::Rational,
+    channels: usize,
+    /// The next chunk's first sample.
+    pos: i64,
+    end: i64,
+    valve: Gate,
+}
+
+impl AudioDecode for SyntheticAudioDecode {
+    fn info(&self) -> &AudioStreamInfo {
+        &self.info
+    }
+
+    fn seek(&mut self, at: Time, _stop: &StopToken) -> Result<(), MediaError> {
+        self.pos = at.to_pts(self.tick, Rounding::Nearest).unwrap_or(0);
+        Ok(())
+    }
+
+    fn next_chunk(&mut self, stop: &StopToken) -> Result<NextAudio, MediaError> {
+        if !self.valve.wait(|| stop.is_stopped()) {
+            return Ok(NextAudio::Stopped);
+        }
+        if self.pos >= self.end {
+            return Ok(NextAudio::End);
+        }
+        let n = (self.end - self.pos).min(AUDIO_CHUNK as i64);
+        let data = (self.pos..self.pos + n)
+            .flat_map(|i| {
+                let v = if i < 0 { 0.0 } else { audio_sample(i) };
+                std::iter::repeat_n(v, self.channels)
+            })
+            .collect();
+        let chunk = AudioChunk {
+            start: self.pos,
+            channels: self.info.channels,
+            data,
+        };
+        self.pos += n;
+        Ok(NextAudio::Chunk(chunk))
     }
 }
 
@@ -429,6 +546,11 @@ impl Gate {
         let (open, cv) = &*self.0;
         *open.lock().unwrap_or_else(PoisonError::into_inner) = true;
         cv.notify_all();
+    }
+
+    /// Hold everything from now on, until released again.
+    pub fn close(&self) {
+        *self.0.0.lock().unwrap_or_else(PoisonError::into_inner) = false;
     }
 
     pub fn is_open(&self) -> bool {

@@ -84,6 +84,15 @@ deny = ["web", "webgpu", "webgl", "angle", "glsl", "spirv", "static-dxc", "vulka
 crate = "image"
 allow = ["png"]
 
+# The PulseAudio protocol host only, with ALSA, which cpal always builds
+# on Linux (D35): `pipewire` and `jack` link libraries no build machine
+# should need, `asio` is Windows, `audioworklet` and `wasm-bindgen` are
+# browser bindings, and `realtime` asks the system for real-time priority
+# over D-Bus.
+[[bans.features]]
+crate = "cpal"
+allow = ["pulseaudio"]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

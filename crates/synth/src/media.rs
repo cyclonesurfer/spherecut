@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use spherecut_core::{FrameRate, Rational};
+use spherecut_core::{FrameRate, Rational, Time};
 use spherecut_media::encode::{
     AudioSettings, ColorTags, EncodeError, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes,
 };
@@ -41,12 +41,22 @@ pub enum Codec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Audio {
     None,
+    /// 440 Hz left, 660 Hz right ([`audio::stereo`]).
     Stereo,
+    /// 440 Hz in one channel ([`audio::mono`]).
+    Mono,
+    /// 5.1: 440 Hz front left, 660 Hz front right, the rest silent
+    /// ([`audio::surround`]).
+    Surround,
     /// First-order ambiX with a source at (azimuth, elevation) degrees.
     AmbiX {
         azimuth: i32,
         elevation: i32,
     },
+    /// Stereo silence with a 1 kHz beep of [`audio::BEEP_MS`] starting at
+    /// the presentation time of each of [`Spec::white`]'s frames, the same
+    /// in both channels ([`audio::beeps`]): `sync-flash-beep`'s.
+    Beeps,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +112,10 @@ pub struct Spec {
     pub intra: Vec<u32>,
     /// Frames shown as a flash: the pattern halfway to white.
     pub flash: Vec<u32>,
+    /// Frames shown pure white (the flashes of `sync-flash-beep`).
+    pub white: Vec<u32>,
+    /// The audio's sample rate.
+    pub sample_rate: u32,
     /// Frames of another scene, cut to and back from: the pattern with its
     /// colours inverted.
     pub cut_away: Vec<u32>,
@@ -175,6 +189,8 @@ impl Default for Spec {
             refs: None,
             intra: Vec::new(),
             flash: Vec::new(),
+            white: Vec::new(),
+            sample_rate: 48_000,
             cut_away: Vec::new(),
             scenecut: false,
             bitrate_kbps: None,
@@ -315,22 +331,41 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
         error,
     })?;
     let out = dir.join(spec.file_name());
-    let sample_rate = 48_000u32;
+    let sample_rate = spec.sample_rate;
+    // No perceptual noise substitution: FFmpeg's AAC decoder fills those
+    // bands from a random generator that a seek restarts, so a clip that
+    // used it would decode differently after a seek, at its noise floor
+    // (D35).
+    let aac_options = vec![("aac_pns".to_string(), "0".to_string())];
     let audio_settings = match spec.audio {
         Audio::None => None,
-        Audio::Stereo => Some(AudioSettings {
+        Audio::Stereo | Audio::Beeps => Some(AudioSettings {
             encoder: "aac".into(),
             sample_rate,
             channels: 2,
             bit_rate: 192_000,
-            options: Vec::new(),
+            options: aac_options.clone(),
+        }),
+        Audio::Mono => Some(AudioSettings {
+            encoder: "aac".into(),
+            sample_rate,
+            channels: 1,
+            bit_rate: 96_000,
+            options: aac_options.clone(),
+        }),
+        Audio::Surround => Some(AudioSettings {
+            encoder: "aac".into(),
+            sample_rate,
+            channels: 6,
+            bit_rate: 384_000,
+            options: aac_options.clone(),
         }),
         Audio::AmbiX { .. } => Some(AudioSettings {
             encoder: "aac".into(),
             sample_rate,
             channels: 4,
             bit_rate: 256_000,
-            options: Vec::new(),
+            options: aac_options.clone(),
         }),
     };
     let mut w = Mp4Writer::create(&out, &spec.video_settings()?, audio_settings.as_ref())?;
@@ -344,6 +379,16 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
     let full_audio = match spec.audio {
         Audio::None => None,
         Audio::Stereo => Some(audio::stereo(sample_rate, total)),
+        Audio::Mono => Some(audio::mono(sample_rate, total)),
+        Audio::Surround => Some(audio::surround(sample_rate, total)),
+        Audio::Beeps => {
+            let onsets: Vec<usize> = spec
+                .white
+                .iter()
+                .map(|&i| samples_at(u64::from(i)))
+                .collect();
+            Some(audio::beeps(sample_rate, total, &onsets))
+        }
         Audio::AmbiX { azimuth, elevation } => Some(audio::ambix_source(
             sample_rate,
             total,
@@ -368,6 +413,11 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
         if spec.flash.contains(&i) {
             for px in &mut img.pixels {
                 *px = px.map(|c| 0.5 + c / 2.0);
+            }
+        }
+        if spec.white.contains(&i) {
+            for px in &mut img.pixels {
+                *px = px.map(|_| 1.0);
             }
         }
         if spec.cut_away.contains(&i) {
@@ -462,6 +512,40 @@ fn add_noise(planes: &mut YuvPlanes, bits: u32, seed: u64, frame: u32) {
     }
 }
 
+/// `sync-flash-beep`'s name.
+pub const SYNC_FLASH_BEEP: &str = "sync-flash-beep-2997";
+
+/// `sync-flash-beep` (M1 plan section 9.3): 10 s of the grid at 29.97 fps,
+/// where the frame shown at each whole second (the last at or before it)
+/// is white, and a 1 kHz beep starts at that frame's presentation time.
+/// For checking A/V sync by eye and ear, and for the decode test that
+/// each beep starts within 1 ms of its frame.
+pub fn sync_flash_beep() -> Spec {
+    let rate = FrameRate::FPS_29_97;
+    let frames = 300u32;
+    let white = (0..10i64)
+        .filter_map(|s| {
+            rate.time_to_frame(Time::from_secs(s), spherecut_core::Rounding::Floor)
+                .ok()
+                .and_then(|f| u32::try_from(f).ok())
+        })
+        .filter(|&f| f < frames)
+        .collect();
+    Spec {
+        name: SYNC_FLASH_BEEP.into(),
+        pattern: Pattern::Grid,
+        width: 1024,
+        height: 512,
+        rate,
+        frames,
+        codec: Codec::H264,
+        audio: Audio::Beeps,
+        spherical: true,
+        white,
+        ..Spec::default()
+    }
+}
+
 /// The standard set written by `cargo xtask gen-media`.
 pub fn standard_set() -> Vec<Spec> {
     let base = |name: &str| Spec {
@@ -552,6 +636,8 @@ pub fn standard_set() -> Vec<Spec> {
             frames: 30,
             ..base("grid-hevc8-30-4k")
         },
+        // A/V sync by eye and ear (M1 plan section 9.3).
+        sync_flash_beep(),
     ]
 }
 

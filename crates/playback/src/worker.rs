@@ -49,7 +49,7 @@ use spherecut_media::backend::{
 };
 use spherecut_media::hw::GpuIds;
 
-use crate::audio::AudioOutputFactory;
+use crate::audio::{AudioOutputFactory, PlayerThreads};
 use crate::cache::Insert;
 use crate::decoder::{self, DecoderChoice, DecoderPreference, HwSupport, StreamFormat};
 use crate::perf::{Counter, Stage};
@@ -97,8 +97,25 @@ impl OpenJob {
             return;
         }
         let audio = match &self.audio {
-            Some(factory) => match factory.open(&self.path, &self.open_token) {
-                Ok(a) => a,
+            Some(factory) => match factory.open(
+                &self.path,
+                &self.open_token,
+                &PlayerThreads::new(
+                    self.shared.handles.clone(),
+                    self.shared.stop.shutdown_flag(),
+                ),
+            ) {
+                Ok(a) => {
+                    if !self.stale() {
+                        self.shared.event(match &a {
+                            Some(a) => PlayerEvent::AudioOpened {
+                                output: a.stats().map(Box::new),
+                            },
+                            None => PlayerEvent::NoAudio,
+                        });
+                    }
+                    a
+                }
                 Err(error) => {
                     tracing::warn!("no audio from {}: {error}", self.path.display());
                     if !self.stale() {
@@ -117,7 +134,7 @@ impl OpenJob {
         shared.cache.clear();
         shared.slots.discard_all();
         let clock = audio.as_ref().map_or(self.clock.clone(), |a| a.clock());
-        {
+        let old_audio = {
             let mut st = shared.status();
             st.epoch = self.epoch;
             st.path = Some(self.path.clone());
@@ -131,8 +148,10 @@ impl OpenJob {
                     ..StreamStatus::default()
                 })
                 .collect();
-            st.audio = audio;
-        }
+            std::mem::replace(&mut st.audio, audio)
+        };
+        // The last open's audio, if this holds it last, outside the lock.
+        drop(old_audio);
         shared.live.store(self.epoch, Ordering::Release);
         for (stream, ((asked, rx), choice)) in self.streams.into_iter().zip(choices).enumerate() {
             tracing::info!(stream, "decoding {}", choice.why);
@@ -292,6 +311,7 @@ impl Worker {
                     s.info = Some(info.clone());
                     s.decode = Some(path);
                 });
+                self.start_audio(info.origin().ok());
                 self.take_events(dec.as_mut());
                 self.tell(PlayerEvent::Opened {
                     stream: self.stream,
@@ -310,9 +330,25 @@ impl Worker {
                         stream: self.stream,
                         error,
                     });
+                    self.start_audio(None);
                 }
                 None
             }
+        }
+    }
+
+    /// The first stream's first frame is clip time 0 for the audio too:
+    /// start it decoding from there (only the first open counts).
+    fn start_audio(&self, origin: Option<Time>) {
+        if self.stream != 0 {
+            return;
+        }
+        let audio = {
+            let st = self.shared.status();
+            (st.epoch == self.epoch).then(|| st.audio.clone()).flatten()
+        };
+        if let Some(audio) = audio {
+            audio.start(origin);
         }
     }
 

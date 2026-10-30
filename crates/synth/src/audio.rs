@@ -14,6 +14,45 @@ fn tone(freq: f64, sample_rate: u32, n: usize, amp: f64) -> Vec<f64> {
         .collect()
 }
 
+/// Mono: 440 Hz.
+pub fn mono(sample_rate: u32, n: usize) -> Vec<Vec<f32>> {
+    vec![
+        tone(440.0, sample_rate, n, 0.25)
+            .into_iter()
+            .map(|v| v as f32)
+            .collect(),
+    ]
+}
+
+/// 5.1 (FFmpeg's default six-channel layout: FL, FR, FC, LFE, BL, BR):
+/// [`stereo`]'s tones in the front pair, the other four silent.
+pub fn surround(sample_rate: u32, n: usize) -> Vec<Vec<f32>> {
+    let mut ch = stereo(sample_rate, n);
+    ch.extend((0..4).map(|_| vec![0.0; n]));
+    ch
+}
+
+/// How long each of [`beeps`]' beeps lasts.
+pub const BEEP_MS: usize = 100;
+
+/// Stereo silence of `n` samples with a 1 kHz beep of [`BEEP_MS`] at
+/// amplitude 0.5 starting at each sample of `onsets`, the same in both
+/// channels. Each beep fades in and out over 0.25 ms, so that its onset
+/// is sharp and still makes no click.
+pub fn beeps(sample_rate: u32, n: usize, onsets: &[usize]) -> Vec<Vec<f32>> {
+    let mut out = vec![0.0f32; n];
+    let len = sample_rate as usize * BEEP_MS / 1000;
+    let fade = (sample_rate as usize / 4000).max(1);
+    for &start in onsets {
+        for i in 0..len.min(n.saturating_sub(start)) {
+            let env = (i.min(len - 1 - i) as f64 / fade as f64).min(1.0);
+            out[start + i] =
+                (0.5 * env * (TAU * 1000.0 * i as f64 / sample_rate as f64).sin()) as f32;
+        }
+    }
+    vec![out.clone(), out]
+}
+
 /// Stereo: 440 Hz left, 660 Hz right.
 pub fn stereo(sample_rate: u32, n: usize) -> Vec<Vec<f32>> {
     [440.0, 660.0]

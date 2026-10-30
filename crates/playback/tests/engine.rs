@@ -39,8 +39,8 @@ use spherecut_media::doctor::CheckResult;
 use spherecut_media::probe::{ProbeError, ProbeReport};
 use spherecut_playback::{
     AudioOutput, AudioOutputFactory, CacheBudget, Counter, DecoderPreference, HwDecodeCheck,
-    HwSupport, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent, PlayerParts, Presented,
-    SlotState,
+    HwSupport, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent, PlayerParts,
+    PlayerThreads, Presented, SlotState,
 };
 use spherecut_render::readback::read_texture;
 use spherecut_synth::fake::{SyntheticBackend, SyntheticClip, frame_index};
@@ -1242,6 +1242,7 @@ impl AudioOutputFactory for FakeAudioFactory {
         &self,
         _path: &Path,
         _stop: &StopToken,
+        _threads: &PlayerThreads,
     ) -> Result<Option<Arc<dyn AudioOutput>>, PlayerError> {
         Ok(Some(self.0.clone()))
     }
@@ -1294,6 +1295,7 @@ impl AudioOutputFactory for SlowAudioFactory {
         &self,
         _path: &Path,
         stop: &StopToken,
+        _threads: &PlayerThreads,
     ) -> Result<Option<Arc<dyn AudioOutput>>, PlayerError> {
         let start = Instant::now();
         while start.elapsed() < Duration::from_millis(200) {

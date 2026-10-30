@@ -239,7 +239,8 @@ frame does (exit 1 unless the table says 3):
 | `hw_failed` | Decoding or downloading a frame on the hardware device failed: the device's failure, not damage in the file (D30); software may still decode it (exit 3 when `--decoder` named it) |
 | `hw_unavailable` | The hardware device can't be opened, such as no render node or a Vulkan device that can't decode (exit 3 when `--decoder` named it) |
 | `unsupported_pixel_format` | The decoder's pixel format is neither one Spherecut uploads as it is nor one swscale converts; the message names it |
-| `not_implemented` | A part of the decoding backend a later M1 slice brings, such as decoding audio; the message names it |
+| `not_implemented` | A part of the decoding backend a later M1 slice brings; the message names it |
+| `no_stream` | The file has no stream of the kind playback asked for, such as audio (not yet given by a CLI command) |
 
 With `--decoder auto`, the `hw_*` codes never fail the run: they are the
 `code` of `result.decode.fallback`.

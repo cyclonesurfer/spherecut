@@ -89,6 +89,28 @@ mod c {
             opts: *mut AVDictionary,
             flags: c_int,
         ) -> c_int;
+        pub fn av_sample_fmt_is_planar(fmt: c_int) -> c_int;
+        pub fn av_get_bytes_per_sample(fmt: c_int) -> c_int;
+        pub fn swr_alloc_set_opts2(
+            ps: *mut *mut ffmpeg_sys_next::SwrContext,
+            out_ch_layout: *const ffmpeg_sys_next::AVChannelLayout,
+            out_sample_fmt: c_int,
+            out_sample_rate: c_int,
+            in_ch_layout: *const ffmpeg_sys_next::AVChannelLayout,
+            in_sample_fmt: c_int,
+            in_sample_rate: c_int,
+            log_offset: c_int,
+            log_ctx: *mut std::ffi::c_void,
+        ) -> c_int;
+        // FFmpeg 7.0 made both arrays `* const`, which changes bindgen's
+        // types but not the ABI.
+        pub fn swr_convert(
+            s: *mut ffmpeg_sys_next::SwrContext,
+            out: *const *mut u8,
+            out_count: c_int,
+            in_: *const *const u8,
+            in_count: c_int,
+        ) -> c_int;
         #[cfg(ffmpeg_7_1)]
         pub fn avcodec_get_supported_config(
             avctx: *const ffmpeg_sys_next::AVCodecContext,
@@ -2226,6 +2248,306 @@ impl Drop for Scaler {
     fn drop(&mut self) {
         // SAFETY: the context was made by sws_getContext and is freed once.
         unsafe { sys::sws_freeContext(self.ctx) };
+    }
+}
+
+/// The audio frame fields Spherecut reads, as plain values: the sample
+/// format is the int it is in C (D11), and the channel layout's order is
+/// read as an int too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioFrameFields {
+    pub format: c_int,
+    pub rate: u32,
+    pub channels: usize,
+    pub samples: usize,
+    pub pts: Option<i64>,
+}
+
+pub(crate) fn audio_frame_fields(frame: &ff::frame::Audio) -> AudioFrameFields {
+    // SAFETY: `frame` wraps a live AVFrame; plain fields and an enum field
+    // read as the int it is.
+    unsafe {
+        let f = frame.as_ptr();
+        let pts = match (*f).pts {
+            sys::AV_NOPTS_VALUE => (*f).best_effort_timestamp,
+            p => p,
+        };
+        AudioFrameFields {
+            format: (*f).format,
+            rate: u32::try_from((*f).sample_rate).unwrap_or(0),
+            channels: usize::try_from((*f).ch_layout.nb_channels).unwrap_or(0),
+            samples: usize::try_from((*f).nb_samples).unwrap_or(0),
+            pts: (pts != sys::AV_NOPTS_VALUE).then_some(pts),
+        }
+    }
+}
+
+/// FFmpeg's name for sample format `fmt`, such as `fltp`.
+pub(crate) fn sample_fmt_name(fmt: c_int) -> Option<String> {
+    // SAFETY: accepts any value; NULL for one it doesn't know.
+    cstr_opt(unsafe { c::av_get_sample_fmt_name(fmt) })
+}
+
+/// Open the decoder for a codec context made from an audio stream's
+/// parameters, looked up by its codec id as an int, for the reason
+/// [`open_video_decoder`] gives.
+pub(crate) fn open_audio_decoder(
+    ctx: ff::codec::context::Context,
+) -> Result<ff::decoder::Audio, ff::Error> {
+    // SAFETY: `ctx` owns a live AVCodecContext; its enum fields are read as
+    // ints.
+    let (kind, id) = unsafe {
+        let c = ctx.as_ptr();
+        (
+            enum_int(&raw const (*c).codec_type),
+            enum_int(&raw const (*c).codec_id),
+        )
+    };
+    if kind != sys::AVMediaType::AVMEDIA_TYPE_AUDIO as c_int {
+        return Err(ff::Error::InvalidData);
+    }
+    // SAFETY: accepts any id; NULL when no decoder for it is built in.
+    let codec = unsafe { c::avcodec_find_decoder(id) };
+    if codec.is_null() {
+        return Err(ff::Error::DecoderNotFound);
+    }
+    // SAFETY: registered codecs are static.
+    let codec = unsafe { ff::Codec::wrap(codec) };
+    open_decoder(ctx, codec).map(ff::decoder::Audio)
+}
+
+/// Tell an unopened decoder the time base of the packets it will get,
+/// which ffmpeg-next has no setter for. libavcodec needs it to move a
+/// frame's timestamp past the samples it drops (AAC's priming, D35).
+pub(crate) fn set_packet_time_base(ctx: &mut ff::codec::context::Context, tb: ff::Rational) {
+    // SAFETY: `ctx` owns a live AVCodecContext; a plain field.
+    unsafe { (*ctx.as_mut_ptr()).pkt_timebase = tb.into() };
+}
+
+/// A channel layout a [`Resampler`] reads or writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Channels {
+    /// The frame's own layout, for swresample to mix down from.
+    Frame,
+    /// FFmpeg's default layout for this many channels: mono, stereo.
+    Default(usize),
+    /// This many channels in no order, which swresample passes through
+    /// as they are, one for one: first-order ambiX (D17, kept from being
+    /// remixed as 4.0 surround), and any stream whose channels are kept.
+    Unordered(usize),
+}
+
+/// A channel layout of our own, which FFmpeg reads.
+struct Layout(sys::AVChannelLayout);
+
+impl Layout {
+    fn new(channels: Channels) -> Option<Layout> {
+        let n = match channels {
+            Channels::Frame => return None,
+            Channels::Default(n) | Channels::Unordered(n) => c_int::try_from(n).ok()?,
+        };
+        // SAFETY: all zeroes is a valid AVChannelLayout: order 0 is
+        // AV_CHANNEL_ORDER_UNSPEC, with no channels, mask or map.
+        let mut l: sys::AVChannelLayout = unsafe { std::mem::zeroed() };
+        match channels {
+            // SAFETY: `l` is a valid layout to overwrite; for an order that
+            // isn't custom FFmpeg allocates nothing in it.
+            Channels::Default(_) => unsafe { sys::av_channel_layout_default(&mut l, n) },
+            _ => l.nb_channels = n,
+        }
+        Some(Layout(l))
+    }
+}
+
+impl Drop for Layout {
+    fn drop(&mut self) {
+        // SAFETY: a layout made by `new`; uninit frees nothing for its
+        // orders and is safe to call on any valid layout.
+        unsafe { sys::av_channel_layout_uninit(&mut self.0) };
+    }
+}
+
+/// A swresample context converting one stream's decoded frames to packed
+/// f32 at another rate, with sample formats as ints (D11). ffmpeg-next's
+/// own resampler takes bindgen enums and, before FFmpeg 7, the bitflags
+/// channel layouts.
+pub(crate) struct Resampler {
+    ctx: *mut sys::SwrContext,
+    from: (c_int, u32, usize),
+    to: (u32, usize),
+}
+
+// SAFETY: the context is only used through `&mut self`, by one thread at
+// a time, and swresample keeps no thread-local state for it.
+unsafe impl Send for Resampler {}
+
+impl std::fmt::Debug for Resampler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Resampler")
+            .field(
+                "from",
+                &(sample_fmt_name(self.from.0), self.from.1, self.from.2),
+            )
+            .field("to", &self.to)
+            .finish()
+    }
+}
+
+/// Packed f32, as a [`Resampler`] writes.
+const SAMPLE_FMT_FLT: c_int = sys::AVSampleFormat::AV_SAMPLE_FMT_FLT as c_int;
+
+impl Resampler {
+    /// A context for frames like `frame`, read as `input`, to `rate` and
+    /// `output`.
+    pub fn new(
+        frame: &ff::frame::Audio,
+        input: Channels,
+        rate: u32,
+        output: Channels,
+    ) -> Result<Resampler, ff::Error> {
+        let f = audio_frame_fields(frame);
+        let in_rate = c_int::try_from(f.rate).map_err(|_| ff::Error::InvalidData)?;
+        let out_rate = c_int::try_from(rate).map_err(|_| ff::Error::InvalidData)?;
+        let out_layout = Layout::new(output).ok_or(ff::Error::InvalidData)?;
+        let own_in = Layout::new(input);
+        let in_ptr = match &own_in {
+            Some(l) => &raw const l.0,
+            // SAFETY: `frame` wraps a live AVFrame; swresample copies the
+            // layout it points at.
+            None => unsafe { &raw const (*frame.as_ptr()).ch_layout },
+        };
+        let mut ctx = std::ptr::null_mut();
+        // SAFETY: both layouts are valid for the call, which copies them;
+        // the formats are ints FFmpeg checks; `ctx` receives a new context
+        // or stays NULL.
+        let ret = unsafe {
+            c::swr_alloc_set_opts2(
+                &mut ctx,
+                &out_layout.0,
+                SAMPLE_FMT_FLT,
+                out_rate,
+                in_ptr,
+                f.format,
+                in_rate,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if ret < 0 || ctx.is_null() {
+            // SAFETY: frees a context made above, or does nothing on NULL.
+            unsafe { sys::swr_free(&mut ctx) };
+            return Err(ff::Error::from(ret.min(-1)));
+        }
+        let channels = |c: Channels| match c {
+            Channels::Frame => f.channels,
+            Channels::Default(n) | Channels::Unordered(n) => n,
+        };
+        let r = Resampler {
+            ctx,
+            from: (f.format, f.rate, channels(input)),
+            to: (rate, channels(output)),
+        };
+        // SAFETY: a context configured above; `r` frees it on failure.
+        let ret = unsafe { sys::swr_init(r.ctx) };
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+        Ok(r)
+    }
+
+    /// Whether `frame` is in the format, rate and channel count this
+    /// context reads.
+    pub fn reads(&self, frame: &ff::frame::Audio) -> bool {
+        let f = audio_frame_fields(frame);
+        (f.format, f.rate, f.channels) == self.from
+    }
+
+    /// Converts `count` of `frame`'s samples from `skip` on, appending the
+    /// output, interleaved, to `out`.
+    pub fn convert(
+        &mut self,
+        frame: &ff::frame::Audio,
+        skip: usize,
+        count: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<(), ff::Error> {
+        if !self.reads(frame) {
+            return Err(ff::Error::InvalidData);
+        }
+        let f = audio_frame_fields(frame);
+        let n = f.samples.saturating_sub(skip).min(count);
+        // SAFETY: accepts any int.
+        let planar = unsafe { c::av_sample_fmt_is_planar(f.format) } != 0;
+        // SAFETY: as above; 0 for a format FFmpeg doesn't know, which
+        // swr_init has refused.
+        let bytes = usize::try_from(unsafe { c::av_get_bytes_per_sample(f.format) })
+            .map_err(|_| ff::Error::InvalidData)?;
+        let planes = if planar { f.channels } else { 1 };
+        let step = if planar { bytes } else { bytes * f.channels };
+        // SAFETY: `frame` wraps a live AVFrame of `f.samples` samples in
+        // `f.format` with `f.channels` channels, so `extended_data` holds
+        // `planes` pointers to planes of `f.samples × step` bytes, and
+        // `skip × step` is within them when skip ≤ samples.
+        let input: Vec<*const u8> = unsafe {
+            let data = (*frame.as_ptr()).extended_data;
+            (0..planes)
+                .map(|p| (*data.add(p)).cast_const().add(skip.min(f.samples) * step))
+                .collect()
+        };
+        self.run(Some(&input), n, out)
+    }
+
+    /// The samples held back for the filter, appended to `out`; the
+    /// context then starts afresh.
+    pub fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), ff::Error> {
+        self.run(None, 0, out)
+    }
+
+    fn run(
+        &mut self,
+        input: Option<&[*const u8]>,
+        samples: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<(), ff::Error> {
+        let in_count = c_int::try_from(samples).map_err(|_| ff::Error::InvalidData)?;
+        // SAFETY: a live context; accepts any count.
+        let room = unsafe { sys::swr_get_out_samples(self.ctx, in_count) };
+        let room = usize::try_from(room).map_err(|_| ff::Error::from(room))?;
+        let channels = self.to.1;
+        let start = out.len();
+        out.resize(start + room * channels, 0.0);
+        let out_ptr = out[start..].as_mut_ptr().cast::<u8>();
+        let in_ptr = input.map_or(std::ptr::null(), <[*const u8]>::as_ptr);
+        // SAFETY: `out_ptr` has room for `room` packed frames of
+        // `channels` f32s, the count swresample said it may write;
+        // `in_ptr` is NULL (flush) or holds a pointer per plane to
+        // `samples` samples of the format the context was made for.
+        let ret = unsafe {
+            c::swr_convert(
+                self.ctx,
+                &raw const out_ptr,
+                c_int::try_from(room).unwrap_or(c_int::MAX),
+                in_ptr,
+                in_count,
+            )
+        };
+        let written = match usize::try_from(ret) {
+            Ok(n) => n.min(room),
+            Err(_) => {
+                out.truncate(start);
+                return Err(ff::Error::from(ret));
+            }
+        };
+        out.truncate(start + written * channels);
+        Ok(())
+    }
+}
+
+impl Drop for Resampler {
+    fn drop(&mut self) {
+        // SAFETY: the context was made by swr_alloc_set_opts2 and is
+        // freed once.
+        unsafe { sys::swr_free(&mut self.ctx) };
     }
 }
 

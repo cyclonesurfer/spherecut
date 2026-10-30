@@ -8,11 +8,11 @@ This describes the design as built, plus the planned parts marked
 ```
           app (egui GUI, planned)   cli (`spherecut` binary)   tests
                           \                |                    /
-                           +------ export, audio (planned) ----+
+                           +--------- export (planned) --------+
                                       |
-         playback (Player, decode workers, frame cache, GPU slots, presenter; M1 slice 5)
-                                      |
-                    render (wgpu on Vulkan, WGSL; M1 slice 3)
+   playback (Player, decode workers, frame cache, GPU slots, presenter, the file's audio; M1 slices 5 and 6)
+                     |                                    |
+   render (wgpu on Vulkan, WGSL; M1 slice 3)   audio (cpal output, chunk ring, audio clock; M1 slice 6)
                                       |
              motion (IMU, stabilization)   stitch (lens models, blending)  (planned)
                                       |
@@ -31,21 +31,22 @@ render depends on core and sphere only, not on media: frames reach it
 through `core::video::VideoPlanes`, so the library has no FFmpeg
 dependency, and its tests, the goldens and M3's stitcher make the frames
 they feed it without decoding. Its test binaries do link FFmpeg, through
-synth, which depends on media.
+synth, which depends on media. audio depends on core alone: the decoded
+samples reach it from playback's `audio-decode` thread.
 
 | Crate | Role | Status |
 |---|---|---|
 | `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), the `--time` grammar (`TimeSpec`), what a decoded frame is (`video`: pixel layouts, planes, colour), stop tokens by generation (`cancel`), the clocks playback runs on (`clock`: the `Clock` trait, `SystemClock`, the frame-steppable `ManualClock`), the guard that a blocking call never runs on the UI thread (`blocking`: `mark_ui_thread`, `may_block`, D34) and files written whole or not at all (`fs::TempFile`, D16); later the project model, timeline, keyframes, undo | M0: name and time; M1: `video`, `cancel`; slice 4: `TimeSpec`, `fs`; slice 5: `clock`, `blocking` |
 | `spherecut-sphere` | CPU reference projection math in f64: equirect and its uv gradient, cube/EAC, fisheye lens models, view projections and morphs and their inverse (`project_morph`), output pixels to lens coordinates (`pixel`), yaw, pitch and roll (`orient`), rotation helpers | M0; M1 slice 3a: `pixel`, `orient`, `uv_gradient`, `project_morph` |
-| `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software and on VA-API or Vulkan Video with fallback to software, the render node lookup, the colour default rules, a small MP4 writer, `doctor`'s capability checks | M0; `MediaBackend` from M1 slice 2a, hardware from 2b (audio in 6) |
+| `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software and on VA-API or Vulkan Video with fallback to software, the render node lookup, the colour default rules, audio decoding to the output's rate and channels on the clip's time axis (`audio`, D35), a small MP4 writer, `doctor`'s capability checks | M0; `MediaBackend` from M1 slice 2a, hardware from 2b, audio from 6 |
 | `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, the supersampled ideal of a view (`render_view_ideal`, which the goldens hold minified views to), tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes, seeded noise for camera bitrates) and broken files, `SyntheticBackend` and `GatedBackend` | M0; M1 slices 2a, 2b and 3b |
-| `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, the `TIER2-SKIP:` marker), benchmark recording (`bench`, with latency percentiles), image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics) and FNV-1a hashing (`fnv64`) | M0; M1 slice 3a: `compare`, `fnv64` |
+| `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, `require_audio_device` among them, the `TIER2-SKIP:` marker), benchmark recording (`bench`, with latency percentiles), image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics) and FNV-1a hashing (`fnv64`) | M0; M1 slice 3a: `compare`, `fnv64` |
 | `spherecut-camera` | Per-camera raw formats: file pairing, vendor metadata, calibration | M3 |
 | `spherecut-stitch` | Lens calibration models, seam blending, exposure matching | M3 |
 | `spherecut-motion` | IMU ingest, time sync, orientation fusion, stabilization | M4 |
 | `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); later scopes | M1 slices 3a and 3b |
-| `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the seam slice 6's audio fills (`audio`); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slice 5 |
-| `spherecut-audio` | Playback clock, mixing, ambisonics, loudness | M1 (playback), M6 |
+| `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slices 5 and 6 |
+| `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
 | `spherecut-app` | eframe app, docked panels, viewer paint callbacks | M1 |
 | `spherecut-agent` | Agent integration (D23): the request and response type of each operation, shared by `spherecut mcp` and `spherecut call` (from A1 the `--json` of `probe`, `doctor` and `frame` uses them too, under a new schema version if M1's shape changes, D27); the MCP server; later the GUI attach bridge | A1 (after M1) |
@@ -81,7 +82,11 @@ until slice 5b gives render one such module to open its Vulkan device
   (`set_extra_hw_frames`), `av_seek_frame` and the demuxer index (its end, its first,
   last and shown entries, its timestamps, the keyframe before a time),
   skipping non-reference frames, the bytes a frame's buffers take
-  (`buffer_bytes`), setting other streams to `AVDISCARD_ALL`, library versions, and the
+  (`buffer_bytes`), setting other streams to `AVDISCARD_ALL`, an audio
+  decoder opened by its int codec id with its sample format and channel
+  layout read as ints (`open_audio_decoder`, `audio_frame_fields`), the
+  RAII `Resampler` (`swr_alloc_set_opts2`, `swr_init`, `swr_convert`)
+  to packed f32 (D35), library versions, and the
   bridge that sends FFmpeg's `av_log` to `tracing` under the target
   `ffmpeg`. C enums are never made into bindgen's Rust enums (DECISIONS
   D11). In more detail:
@@ -284,8 +289,8 @@ The other modules are safe Rust:
   confined decoder in software or, for `DecodeMode::Hardware`, on VA-API
   or Vulkan Video: on the request's device, or on the backend's own of
   that kind, opened once on its render node the first time a decoder
-  asks and shared, as is the error when it can't be (D30). Audio (slice
-  6) returns `MediaError::NotYet`. With the `fault-injection` feature,
+  asks and shared, as is the error when it can't be (D30). `open_audio`
+  opens `audio`'s `FfmpegAudio` (below). With the `fault-injection` feature,
   which only synth's tests turn on, a request can fail a frame as the
   device would. The types that cross threads are checked `Send`, and
   `Sync` where they are shared, at compile time.
@@ -317,6 +322,19 @@ The other modules are safe Rust:
   way a `tracing::warn!` and `DecoderEvent::FellBack` say why, and every
   frame after is `DecodePath::FellBack`. With `Fallback::Fail` the error
   is returned.
+* `audio`: `FfmpegAudio`, the `AudioDecode` behind `open_audio` (D35).
+  Its own confined demuxer and decoder hand out packed f32 at the
+  output's rate and channels in chunks on the clip's axis (sample `s` is
+  clip time `s / rate`, 0 being the video's first frame): AAC's priming
+  and the last frame's padding gone, edit lists applied, audio before 0
+  dropped and audio after it led by silence. Mono is duplicated, stereo
+  passed through, first-order ambiX decoded to two cardioids, the rest
+  mixed down by swresample, and stereo spread to the output's channels.
+  The resampler starts only on a grid of input samples whose phase a
+  decode from the start has, so a seek, which decodes from 100 ms
+  before its time and drops what comes before round(at × rate), gives a
+  sequential decode's samples. A coarse time base (Matroska's
+  milliseconds) is snapped to where the frames' sizes put them.
 * `hw`: which render node hardware decoding runs on, the GPU's that
   renders: by the PCI bus id wgpu gives its adapter, else by its vendor
   and device ids, else `/dev/dri/renderD128`, over a sysfs root that
@@ -576,8 +594,8 @@ intermediate equirect exists only as the output of a 360 export.
 
 * UI thread: egui, never blocks on decode, disk or GPU readback.
 * Decode workers per open source, feeding a bounded frame cache.
-* Audio thread (cpal): owns the playback clock; video presentation follows
-  it.
+* Audio (built in slice 6, below): the output's clock is the playback
+  clock, and video presentation follows it.
 * Background workers for thumbnails, waveforms, proxies and export, each
   with progress reporting and cancellation tokens.
 * Cancellation (built): `core::cancel`'s `StopSource` hands out
@@ -612,8 +630,8 @@ intermediate equirect exists only as the output of a 360 export.
     and use atomics.
   * **The threads.** Per player, one `upload` thread for its life. Per
     open, a transient `open` worker (it picks each stream's decoder,
-    running doctor's decode checks once if it must, opens the audio
-    through slice 6's seam, clears what the file before left, and
+    running doctor's decode checks once if it must, opens the file's
+    audio (slice 6, below), clears what the file before left, and
     starts the decode workers), and a `decode-v{i}` worker per video
     stream. A request (a seek or a step) goes to every stream's worker
     with a new `StopToken` generation, which stops the one before at
@@ -653,13 +671,46 @@ intermediate equirect exists only as the output of a 360 export.
     where that lands, a keyframe seek's included.
   * **Clocks** (`core::clock`): `SystemClock` and `ManualClock` read
     through a sequence lock of atomics, so the UI thread reads them
-    every frame without a lock. A file's audio, from slice 6, brings
-    its own clock, which video then follows.
+    every frame without a lock. A file's audio brings its own clock,
+    which video then follows (slice 6, below).
   * **Shutdown**: `begin_shutdown` stops every token and raises the
     decoders' interrupt flag, and returns; `join(budget)` waits for the
     threads, polling `is_finished`, and says which are left.
   * **Numbers** (`playback::PerfStats`): each thread records its stages
     into rings of atomics, and the overlay reads them without a lock.
+* Built in slice 6 (D35), in `spherecut-audio` and `playback::audio`:
+  * **Data flow.** For a file with audio, the open worker opens an
+    `Output` (the default device, else the null output) and starts
+    `audio-decode`, which waits for stream 0's worker to give clip time
+    0 and then decodes into the output's chunk ring: an SPSC ring of
+    512-frame chunks, about 500 ms, of atomics, each chunk stamped with
+    its epoch and first sample. The output's callback, on cpal's
+    real-time thread (or `audio-null`'s, or a test's for the fake
+    device), fills each buffer from the ring by sample index and
+    anchors the clock to it. It takes no lock, allocates nothing and
+    logs nothing.
+  * **The clock** (`AudioClock`) is a `Clock` in a sequence lock. A seek
+    or a pause starts an epoch, which the decoder seeks to and the
+    callback flushes by. Playing, it waits at its base time until the
+    epoch's audio plays, then runs from each callback's anchor, at most
+    the latency and two buffers past it, never back. When the device is
+    lost, stalls for 500 ms or brings no audio for 2 s it runs on the
+    system clock, and a callback brings it back to the audio without a
+    jump.
+  * **`audio-out`** owns the cpal stream: it plays and pauses it with
+    the clock, runs the watchdog every 50 ms, counts xruns, and on a
+    lost device tries the default one again every 2 s at the same rate
+    and channels.
+  * **The UI thread** reads the clock through the sequence lock and the
+    output's numbers with `try_lock` (`Player::audio_stats`). A preroll
+    waits for 100 ms of audio queued, at most 2 s (`AudioLate`). Read a
+    present's latency ahead, the clock's time is held at the last
+    present's while playing, so a late callback never takes video back.
+  * **Ending.** `audio-decode` and the output's thread are the player's
+    (`PlayerThreads`): `audio-decode` ends with the open's token, at a
+    newer open or the shutdown, which also interrupts its reads, and
+    hands the output's thread over as it goes, so `join` waits for and
+    reports both. Dropping an output never waits.
 
 ## Testing tiers
 
@@ -685,8 +736,14 @@ intermediate equirect exists only as the output of a 360 export.
   engine's rules with synthetic and generated media (a 5.7K source in a
   256 MiB cache among them), a fake UI loop on a marked thread that
   must never wait, through a backend that never answers and a storm of
-  seeks (`never_blocks.rs`), and the Tier 2 playback benchmarks'
-  harness, in software on a small clip (`tier2_playback.rs`).
+  seeks (`never_blocks.rs`), the Tier 2 playback benchmarks'
+  harness, in software on a small clip (`tier2_playback.rs`), and A/V
+  sync through the engine on the fake audio device, whose callbacks come
+  at scripted instants, and on the null output (`av_sync.rs`). The audio
+  decoder's tests (`crates/synth/tests/audio.rs`) check samples, seeks,
+  resampling and channels on clips synth writes, and the audio crate's
+  (`crates/audio/tests/clock.rs`) the clock on the fake and null
+  devices.
   `cargo xtask check` runs all of it, against the FFmpeg pkg-config
   finds. `cargo xtask compat` runs clippy against other FFmpeg builds
   and builds and links the tests against each, in a target directory of
