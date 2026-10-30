@@ -38,8 +38,8 @@ pub use cache::{CacheStats, FrameCache, Insert, MIN_FRAMES};
 pub use decoder::{DecoderChoice, DecoderPreference, HwDecodeCheck, HwSupport, StreamFormat};
 pub use perf::{Counter, PerfSnapshot, PerfStats, Stage, StageSummary};
 pub use player::{
-    PlayState, Player, PlayerConfig, PlayerError, PlayerEvent, PlayerParts, PlayerSnapshot,
-    Presented, ShownFrame, ShutdownReport,
+    PREROLL_FRAMES, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent, PlayerParts,
+    PlayerSnapshot, Presented, ShownFrame, ShutdownReport,
 };
 pub use shared::{BudgetStatus, Landed, Repaint, SeekCounts, StreamStatus};
 pub use slots::{SlotFrame, SlotRing, SlotState, SlotStats, SlotView};

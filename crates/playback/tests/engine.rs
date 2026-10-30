@@ -12,8 +12,10 @@
 //! streams seek, step and play on three slots, with the second's decoder
 //! behind, and seek with one failing while its next frame holds the
 //! third slot; a keyframe seek back with the cache full lands on its
-//! keyframe, on one stream and on two streams on three slots; a
-//! fallback reaches the snapshot, from a fault and from `Auto` picking
+//! keyframe, on one stream and on two streams on three slots; a seek
+//! back, as at a loop, leaves the frames held from before it out of the
+//! slots and starts the clock once the next two frames are Ready, or at
+//! once at the last frame; a fallback reaches the snapshot, from a fault and from `Auto` picking
 //! Vulkan on lavapipe; the audio seam holds playback for its preroll;
 //! and a 5.7K source plays inside a 256 MiB cache.
 
@@ -23,7 +25,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use spherecut_core::{Clock, FrameRate, ManualClock, Rational, StopToken, Time};
@@ -751,6 +753,204 @@ impl MediaBackend for SlowSecond {
     ) -> Result<Box<dyn AudioDecode>, MediaError> {
         self.inner.open_audio(path, req)
     }
+}
+
+/// The synthetic clip, its frames coming `delay_ms` apart once that is
+/// set (seeks keep their own cost): a decoder that turns slow when a
+/// test says so.
+#[derive(Debug)]
+struct Slowed {
+    inner: SyntheticBackend,
+    delay_ms: Arc<AtomicU64>,
+}
+
+#[derive(Debug)]
+struct SlowedVideo {
+    inner: Box<dyn VideoDecode>,
+    delay_ms: Arc<AtomicU64>,
+}
+
+impl VideoDecode for SlowedVideo {
+    fn info(&self) -> &VideoStreamInfo {
+        self.inner.info()
+    }
+
+    fn decode_path(&self) -> &DecodePath {
+        self.inner.decode_path()
+    }
+
+    fn seek(
+        &mut self,
+        at: Time,
+        mode: SeekMode,
+        stop: &StopToken,
+    ) -> Result<SeekOutcome, MediaError> {
+        self.inner.seek(at, mode, stop)
+    }
+
+    fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError> {
+        let delay = Duration::from_millis(self.delay_ms.load(Ordering::Acquire));
+        if !wait_unless_stopped(delay, stop) {
+            return Ok(NextFrame::Stopped);
+        }
+        self.inner.next_frame(stop)
+    }
+
+    fn catch_up(&mut self, until: Option<Time>) {
+        self.inner.catch_up(until);
+    }
+
+    fn take_events(&mut self) -> Vec<DecoderEvent> {
+        self.inner.take_events()
+    }
+
+    fn stats(&self) -> DecodeStats {
+        self.inner.stats()
+    }
+}
+
+impl MediaBackend for Slowed {
+    fn name(&self) -> &'static str {
+        "slowed"
+    }
+
+    fn probe(&self, path: &Path) -> Result<ProbeReport, ProbeError> {
+        self.inner.probe(path)
+    }
+
+    fn open_video(
+        &self,
+        path: &Path,
+        req: &VideoRequest,
+    ) -> Result<Box<dyn VideoDecode>, MediaError> {
+        Ok(Box::new(SlowedVideo {
+            inner: self.inner.open_video(path, req)?,
+            delay_ms: self.delay_ms.clone(),
+        }))
+    }
+
+    fn open_audio(
+        &self,
+        path: &Path,
+        req: &AudioRequest,
+    ) -> Result<Box<dyn AudioDecode>, MediaError> {
+        self.inner.open_audio(path, req)
+    }
+}
+
+/// A 120-frame clip of 512x256 frames through a cache of about 42, its
+/// decoder slowed to `delay_ms` a frame once that is set: opened, played
+/// on `clock` to frame 90 (so that the cache holds frames from about 69
+/// to 111).
+fn played_to_90(clock: &Arc<ManualClock>, delay_ms: &Arc<AtomicU64>) -> Player {
+    let backend = Slowed {
+        inner: SyntheticBackend::new(SyntheticClip {
+            width: 512,
+            height: 256,
+            frames: 120,
+            keyint: 30,
+            ..SyntheticClip::default()
+        }),
+        delay_ms: delay_ms.clone(),
+    };
+    let config = PlayerConfig {
+        cache: CacheBudget::Bytes(8 << 20),
+        ..config(8)
+    };
+    let player = opened(backend, clock.clone(), config);
+    player.play();
+    for k in 1..=90 {
+        clock.set(at(k), Instant::now());
+        show(&player, k);
+    }
+    let held = until(WAIT, || {
+        let s = player.cache().stats();
+        (s.ahead >= 15).then_some(s)
+    });
+    assert!(held.is_some(), "{:?}", player.cache().stats());
+    player
+}
+
+/// Present until stream 0 shows frame `k`, whatever the clock says (the
+/// frame before a seek stays up until the seek's is ready).
+fn lands_on(player: &Player, k: i64) {
+    let shown = until(WAIT, || {
+        let p = player.present(Instant::now())?;
+        (p.frames[0].frame.time == at(k)).then_some(())
+    });
+    assert!(shown.is_some(), "frame {k} never came up");
+}
+
+#[test]
+fn a_seek_back_leaves_the_old_run_ahead_out_of_the_slots_and_prerolls() {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let delay_ms = Arc::new(AtomicU64::new(0));
+    let player = played_to_90(&clock, &delay_ms);
+    // From here a frame comes every 120 ms after the seek's own, as at
+    // odin's loop points, where the decoder was only just ahead of the
+    // clock and the cache held frames from before the loop.
+    delay_ms.store(120, Ordering::Release);
+    player.seek(at(0), SeekMode::Exact);
+    lands_on(&player, 0);
+    // The frames held from 69 on are ahead of the playhead, but past a
+    // gap: none of them takes a slot the frames after 0 need (90, on
+    // screen until 0 was, is Ready until the upload thread frees it).
+    // And the clock waits, the seek's frame up, until frames 1 and 2 are
+    // Ready.
+    let start = Instant::now();
+    let mut started = None;
+    while start.elapsed() < Duration::from_millis(600) {
+        let p = player.present(Instant::now()).unwrap();
+        assert_eq!(pts(&p), [0], "the clock hasn't moved");
+        let ready: Vec<Time> = player
+            .slots()
+            .views()
+            .iter()
+            .filter(|v| v.state == SlotState::Ready)
+            .map(|v| v.frame.time)
+            .collect();
+        assert!(
+            ready.iter().all(|&t| t <= at(3) || t == at(90)),
+            "a frame the seek left took a slot: {ready:?}"
+        );
+        if clock.is_running() {
+            started.get_or_insert(ready);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let ready = started.expect("the clock never started");
+    assert!(
+        ready.contains(&at(1)) && ready.contains(&at(2)),
+        "the clock started with {ready:?} ready"
+    );
+    for k in 1..=4 {
+        clock.set(at(k), Instant::now());
+        show(&player, k);
+    }
+    assert_eq!(snapshot(&player).perf.counter(Counter::Dropped), 0);
+    common::join(player);
+}
+
+#[test]
+fn a_preroll_at_the_last_frame_waits_for_nothing_more() {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let delay_ms = Arc::new(AtomicU64::new(0));
+    let player = played_to_90(&clock, &delay_ms);
+    let start = Instant::now();
+    player.seek(at(119), SeekMode::Exact);
+    lands_on(&player, 119);
+    // No frame comes after it, so the clock starts as soon as it is up,
+    // not after the preroll's limit.
+    let started = until(WAIT, || {
+        let _ = player.present(Instant::now());
+        clock.is_running().then(|| start.elapsed())
+    });
+    let started = started.expect("the clock never started");
+    assert!(
+        started < spherecut_playback::PREROLL_LIMIT / 2,
+        "it started after {started:?}"
+    );
+    common::join(player);
 }
 
 /// Two streams of a 90-frame clip, as the X5's raw files hold one per
