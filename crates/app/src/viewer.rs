@@ -3,6 +3,7 @@
 //! then encoded into egui's own render pass, one pixel per pixel.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use egui::epaint::ViewportInPixels;
 use egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor};
@@ -17,7 +18,10 @@ use spherecut_sphere::pixel;
 /// and filter. A draw with the key of the last one, at the same size,
 /// only encodes (section 7.3), so a 30 fps video on a 144 Hz display
 /// projects 30 times a second. `prepare` compares keys itself, so a UI
-/// pass that is never painted (egui discards some) can't lose a redraw.
+/// pass that is never painted (egui discards some) can't lose a redraw;
+/// and a projection counts as drawn only once `paint` ran after it, since
+/// egui-wgpu records `prepare`'s commands before it acquires the
+/// window's surface, and drops them when that fails.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DrawKey {
     pub slot: usize,
@@ -35,6 +39,10 @@ pub struct ViewerResources {
     target: Option<LinearTarget>,
     /// What the target holds, if a projection: `paint` encodes it.
     last: Option<DrawKey>,
+    /// `paint` ran since `last` was recorded, so the projection was
+    /// submitted with it. Set by `paint`, which has the resources only
+    /// shared.
+    painted: AtomicBool,
     /// Draws that projected, and draws that only encoded: for the tests.
     pub projected: u64,
     pub encoded_only: u64,
@@ -46,6 +54,7 @@ impl std::fmt::Debug for ViewerResources {
             .field("format", &self.encoder.format())
             .field("target", &self.target.as_ref().map(LinearTarget::extent))
             .field("last", &self.last)
+            .field("painted", &self.painted)
             .field("projected", &self.projected)
             .field("encoded_only", &self.encoded_only)
             .finish_non_exhaustive()
@@ -66,6 +75,7 @@ impl ViewerResources {
             encoder: Encoder::new(gpu, target_format),
             target: None,
             last: None,
+            painted: AtomicBool::new(false),
             projected: 0,
             encoded_only: 0,
         }
@@ -76,9 +86,11 @@ impl ViewerResources {
         self.target.as_ref().map(LinearTarget::extent)
     }
 
-    /// What the target holds.
+    /// What the target holds, once a pass with it was painted.
     pub fn last(&self) -> Option<&DrawKey> {
-        self.last.as_ref()
+        self.last
+            .as_ref()
+            .filter(|_| self.painted.load(Ordering::Relaxed))
     }
 }
 
@@ -167,14 +179,14 @@ impl CallbackTrait for ViewerCallback {
         match &mut r.target {
             Some(t) if t.extent() == size => {}
             Some(t) => {
-                if let Err(e) = t.resize(&r.gpu, size) {
+                if let Err(e) = t.resize_unchecked(&r.gpu, size) {
                     tracing::warn!(error = %e, ?size, "the viewer's target can't be resized");
                     r.last = None;
                     return Vec::new();
                 }
                 resized = true;
             }
-            None => match LinearTarget::new(&r.gpu, size) {
+            None => match LinearTarget::new_unchecked(&r.gpu, size) {
                 Ok(t) => {
                     r.target = Some(t);
                     resized = true;
@@ -189,15 +201,16 @@ impl CallbackTrait for ViewerCallback {
             r.last = None;
             return Vec::new();
         };
-        if !resized && r.last.as_ref() == Some(key) {
+        if !resized && r.last.as_ref() == Some(key) && r.painted.load(Ordering::Relaxed) {
             r.encoded_only += 1;
             return Vec::new();
         }
         let Some(target) = &r.target else {
             return Vec::new();
         };
-        r.projector.prepare(key.filter, DebugMode::Off);
-        match r.projector.record(
+        // Both filters' pipelines were built with the resources. The
+        // device's health is the upload thread's to check (D36).
+        r.projector.record_unchecked(
             enc,
             frame,
             &key.view,
@@ -205,16 +218,10 @@ impl CallbackTrait for ViewerCallback {
             key.filter,
             DebugMode::Off,
             None,
-        ) {
-            Ok(()) => {
-                r.last = Some(key.clone());
-                r.projected += 1;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "the viewer's projection failed");
-                r.last = None;
-            }
-        }
+        );
+        r.last = Some(key.clone());
+        r.painted.store(false, Ordering::Relaxed);
+        r.projected += 1;
         Vec::new()
     }
 
@@ -239,5 +246,6 @@ impl CallbackTrait for ViewerCallback {
             u32::try_from(vp.top_px).unwrap_or(0),
         ];
         r.encoder.draw(pass, target, origin);
+        r.painted.store(true, Ordering::Relaxed);
     }
 }
