@@ -492,8 +492,43 @@ fn vulkan_render_matches_software() {
 fn zero_copy_frame_matches_the_copy() {
     let node = tier2::require_render_node();
     let node_arg = Some(node.to_string_lossy().into_owned());
+    zero_copy_against_copy(&node_arg, "vaapi", &["--zero-copy"], "drm_prime");
+}
+
+/// `frame --zero-copy --decoder vulkan` (slice 5b's path B) renders what
+/// `--decoder vulkan` does, byte for byte, through every view: the frame
+/// Vulkan Video decoded on the renderer's own device and copied out there
+/// and the frame FFmpeg downloaded are the same picture. Skips, with
+/// frame's reason, where the device can't be shared, FFmpeg won't decode
+/// on it or the copier refuses a frame; never a pass with a clip left
+/// out.
+#[test]
+#[ignore = "tier2: needs Vulkan Video decode (optional path)"]
+fn shared_vulkan_frame_matches_the_copy() {
+    tier2::require_hw_run();
+    let node = tier2::render_node();
+    let node_arg = node.as_ref().map(|n| n.to_string_lossy().into_owned());
+    vulkan_gpu(node.as_deref());
+    zero_copy_against_copy(
+        &node_arg,
+        "vulkan",
+        &["--zero-copy", "--decoder", "vulkan"],
+        "vulkan",
+    );
+}
+
+/// Each clip's frame through every view with `zero_copy` and with
+/// `--decoder decoder`, 0 LSB apart, the first's JSON saying it took
+/// `transfer` and the second's that it was downloaded; a skip with
+/// frame's reasons when zero copy was refused for a clip.
+fn zero_copy_against_copy(
+    node_arg: &Option<String>,
+    decoder: &str,
+    zero_copy: &[&str],
+    transfer: &str,
+) {
     let dir = TempDir::new("zero-copy");
-    let common = hardware_args(&node_arg);
+    let common = hardware_args(node_arg);
     require_gpu(&dir, &common);
     let mut refused = Vec::new();
     'clips: for (name, clip) in &clips(&dir) {
@@ -508,7 +543,7 @@ fn zero_copy_frame_matches_the_copy() {
             };
             let got = dir.join(format!("zero-copy-{i}.png"));
             let want = dir.join(format!("copy-{i}.png"));
-            let z = run(&got, &["--zero-copy"]);
+            let z = run(&got, zero_copy);
             if z.status == Some(3) && z.doc["error"]["code"] == "import_failed" {
                 refused.push(format!(
                     "{name}: {}",
@@ -519,10 +554,10 @@ fn zero_copy_frame_matches_the_copy() {
             assert_eq!(z.status, Some(0), "{name}: {} {}", z.doc, z.stderr);
             assert_eq!(
                 z.doc["result"]["decode"],
-                serde_json::json!({"path": "vaapi", "transfer": "drm_prime"}),
+                serde_json::json!({"path": decoder, "transfer": transfer}),
                 "{name}"
             );
-            let c = run(&want, &["--decoder", "vaapi"]);
+            let c = run(&want, &["--decoder", decoder]);
             assert_eq!(c.status, Some(0), "{name}: {} {}", c.doc, c.stderr);
             assert_eq!(
                 c.doc["result"]["decode"]["transfer"], "downloaded",

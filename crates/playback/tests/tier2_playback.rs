@@ -66,6 +66,7 @@ use std::time::{Duration, Instant};
 use spherecut_core::blocking::{OnBlock, mark_ui_thread_with, unmark_ui_thread};
 use spherecut_core::video::VideoPlanes;
 use spherecut_core::{Clock, FrameRate, ManualClock, StopToken, SystemClock, Time};
+use spherecut_media::HwDevice;
 use spherecut_media::backend::{
     DecodeMode, DecodePath, Fallback, FfmpegBackend, HwKind, HwOutput, MediaBackend, NextFrame,
     Transfer, VideoFrame, VideoRequest,
@@ -80,10 +81,11 @@ use spherecut_playback::{
     PlayerParts, PlayerSnapshot, Presented, SURFACE_CAP, SlotFrame, Stage, StreamFormat,
 };
 use spherecut_render::dmabuf::{self, Importer};
+use spherecut_render::vkshare::Copied;
 use spherecut_render::wgpu;
 use spherecut_render::{
-    AdapterChoice, DebugMode, Encoder, Filter, Gpu, GpuTimers, Image, LinearTarget, Projector,
-    RenderError, SlotShape, StillOptions, StillRenderer, ViewParams,
+    AdapterChoice, DebugMode, Encoder, Filter, Gpu, GpuTimers, Image, LinearTarget, Placement,
+    Projector, RenderError, SlotShape, StillOptions, StillRenderer, ViewParams, upload,
 };
 use spherecut_sphere::DQuat;
 use spherecut_sphere::orient::Ypr;
@@ -149,15 +151,17 @@ impl Drop for UiThread {
     }
 }
 
-/// The GPU a benchmark renders on: the adapter `SPHERECUT_ADAPTER` names,
-/// else the best one there is, or a skip when that is a CPU or there is
-/// none. An adapter that is there but won't give a device fails the
-/// test: that is a fault to report, not missing hardware.
-fn hardware_gpu() -> Gpu {
+/// The GPU a benchmark renders on, opened by `open` (`Gpu::headless`, or
+/// `headless_shared` for slice 5b's path B): the adapter
+/// `SPHERECUT_ADAPTER` names, else the best one there is, or a skip when
+/// that is a CPU or there is none. An adapter that is there but won't
+/// give a device fails the test: that is a fault to report, not missing
+/// hardware.
+fn hardware_gpu(open: fn(&AdapterChoice) -> Result<Gpu, RenderError>) -> Gpu {
     tier2::require_hw_run();
     let choice = AdapterChoice::from_env().unwrap_or(AdapterChoice::Auto);
     let env = AdapterChoice::ENV;
-    match Gpu::headless(&choice) {
+    match open(&choice) {
         Ok(gpu) if gpu.caps.is_cpu => tier2::skip(format!(
             "no GPU: the adapter {env}={choice} picks is a CPU, {}",
             gpu.caps.info.name
@@ -182,7 +186,7 @@ impl Rig {
     /// On the machine's GPU, decoding on its render node (or
     /// `SPHERECUT_RENDER_NODE`'s), with doctor's checks run there.
     fn hardware() -> Rig {
-        let gpu = hardware_gpu();
+        let gpu = hardware_gpu(Gpu::headless);
         let info = &gpu.caps.info;
         let ids = GpuIds {
             pci_bus_id: info.device_pci_bus_id.clone(),
@@ -193,6 +197,19 @@ impl Rig {
         let node = hw::render_node(Some(&ids), given.as_deref());
         let hw = HwSupport::check(&node.path);
         Rig { gpu, node, hw }
+    }
+
+    /// The same GPU opened again with its device shared with FFmpeg's
+    /// Vulkan Video (slice 5b's path B), decoding on the same node with
+    /// the same checks; why not, when the device can't be shared.
+    fn shared(&self) -> Result<Rig, String> {
+        let gpu = hardware_gpu(Gpu::headless_shared);
+        gpu.shared_video()?;
+        Ok(Rig {
+            gpu,
+            node: self.node.clone(),
+            hw: self.hw.clone(),
+        })
     }
 
     fn discrete(&self) -> bool {
@@ -282,7 +299,9 @@ struct Run {
     label: String,
     /// The hardware it decodes on, when it is hardware.
     kind: Option<HwKind>,
-    /// Frames imported from VA-API's DMA-BUFs, not copied (slice 5b).
+    /// Frames left on the decoder's device and taken into the slots on the
+    /// GPU (slice 5b): VA-API's imported as DMA-BUFs, Vulkan Video's
+    /// decoded on the renderer's own device and copied out there.
     zero_copy: bool,
 }
 
@@ -445,8 +464,9 @@ struct Pass {
     stages: BTreeMap<&'static str, Vec<f32>>,
     /// Where each stream decoded at the end, and whether it fell back.
     paths: Vec<Option<DecodePath>>,
-    /// Frames imported into slots (zero copy), and imports the GPU
-    /// refused, with why the first was.
+    /// Frames taken into slots on the GPU (zero copy: imported, or
+    /// copied out of FFmpeg's Vulkan images), and frames the GPU refused,
+    /// with why the first was.
     imported: u64,
     refused: u64,
     refusal: Option<String>,
@@ -555,7 +575,11 @@ impl Meter {
     }
 
     fn import_counts(&self) -> [u64; 2] {
-        [Counter::FramesImported, Counter::ImportsRefused].map(|c| self.perf.count(c))
+        let imported = self.perf.count(Counter::FramesImported);
+        [
+            imported + self.perf.count(Counter::VulkanCopies),
+            self.perf.count(Counter::ImportsRefused),
+        ]
     }
 
     fn counts(&self) -> [u64; 3] {
@@ -1428,15 +1452,48 @@ fn zero_copy_views() -> [(ViewParams, (u32, u32)); 2] {
     ]
 }
 
+/// The zero-copy path a check takes.
+enum OnDevice {
+    /// VA-API's frames exported as DMA-BUFs and imported (path A).
+    DmaBuf,
+    /// Vulkan Video's frames decoded on the renderer's own device, through
+    /// FFmpeg's context on it, and copied out there (path B).
+    Shared(Arc<HwDevice>),
+}
+
+impl OnDevice {
+    fn decoder(&self) -> &'static str {
+        match self {
+            OnDevice::DmaBuf => "VA-API",
+            OnDevice::Shared(_) => "Vulkan Video",
+        }
+    }
+
+    /// What a frame taken this way is called.
+    fn taken(&self) -> &'static str {
+        match self {
+            OnDevice::DmaBuf => "the import",
+            OnDevice::Shared(_) => "the copy out of FFmpeg's image",
+        }
+    }
+}
+
 /// Why a clip's frames couldn't be compared: the decoder or the GPU
 /// turned zero copy down here.
 enum NotCompared {
-    /// VA-API won't decode the stream.
+    /// The decoder won't decode the stream.
     Decode(String),
-    /// VA-API decoded it but didn't export the frame as DMA-BUFs.
+    /// It decoded it but didn't leave the frame on its device.
     Export(String),
-    /// The GPU's driver wouldn't import its planes.
+    /// The GPU wouldn't take the frame: its driver refused the planes, or
+    /// the copier the image.
     Import(String),
+}
+
+/// A frame taken on the GPU, as the upload thread takes it.
+enum Taken {
+    Imported(Vec<wgpu::Texture>),
+    Copied(Copied),
 }
 
 /// `frame`'s planes imported into `gpu`, as `frame --zero-copy` and the
@@ -1448,33 +1505,59 @@ fn import_planes(gpu: &Gpu, frame: &VideoFrame) -> Result<Vec<wgpu::Texture>, No
     let whole = SlotShape::of(frame.layout(), frame.size())
         .map_err(|e| NotCompared::Import(e.to_string()))?;
     let planes = dmabuf::plan(&whole, layers).map_err(NotCompared::Import)?;
-    Importer::new().import(gpu, &planes).map_err(|e| match e {
-        RenderError::Import(why) => NotCompared::Import(why),
-        e => panic!("importing a frame: {e}"),
-    })
+    Importer::new().import(gpu, &planes).map_err(refused)
 }
 
-/// Decodes `count` frames of `stream` of `path` on VA-API as DMA-BUFs
-/// and renders each through the copy (the frame downloaded as it comes)
-/// and, [`SURFACE_CAP`] − 1 frames later, through its import, holding
-/// the frames in between as the frame cache would: the two renders must
-/// be the same bytes. A surface the decoder took back while it was held
-/// would show a later picture. Returns the frames compared.
+/// `frame`'s planes copied out of its Vulkan image on `gpu`, waited for
+/// and ordered before wgpu's next submit, as `frame --zero-copy --decoder
+/// vulkan` and the upload thread copy them.
+fn copy_planes(gpu: &Gpu, frame: &VideoFrame) -> Result<Copied, NotCompared> {
+    let picture = frame
+        .vulkan()
+        .ok_or_else(|| NotCompared::Export(format!("the frame came as {:?}", frame.transfer)))?;
+    let video = gpu.shared_video().map_err(NotCompared::Import)?;
+    let regions = upload::shown_regions(frame, &Placement::FULL).map_err(refused)?;
+    let copied = video.copier.copy(picture, &regions).map_err(refused)?;
+    video.copier.wait(&copied).map_err(refused)?;
+    video.copier.order_before(&gpu.queue, &copied);
+    Ok(copied)
+}
+
+/// A refusal of the GPU's as one; any other error fails the test.
+fn refused(e: RenderError) -> NotCompared {
+    match e {
+        RenderError::Import(why) => NotCompared::Import(why),
+        e => panic!("taking a frame on the GPU: {e}"),
+    }
+}
+
+/// Decodes `count` frames of `stream` of `path` on the device `how` says,
+/// leaving them there, and renders each through the copy (the frame
+/// downloaded as it comes) and, [`SURFACE_CAP`] − 1 frames later, as the
+/// GPU takes it, holding the frames in between as the frame cache would:
+/// the two renders must be the same bytes. A surface the decoder took
+/// back while it was held would show a later picture. Returns the frames
+/// compared.
 fn compare_zero_copy(
     rig: &Rig,
+    how: &OnDevice,
     path: &Path,
     stream: Option<usize>,
     count: usize,
 ) -> Result<usize, NotCompared> {
     let backend = FfmpegBackend::on_node(rig.node.clone());
+    let (kind, device, output) = match how {
+        OnDevice::DmaBuf => (HwKind::VaApi, None, HwOutput::DrmPrime),
+        OnDevice::Shared(dev) => (HwKind::Vulkan, Some(dev.clone()), HwOutput::Vulkan),
+    };
     let req = VideoRequest {
         stream,
         decode: DecodeMode::Hardware {
-            kind: HwKind::VaApi,
-            device: None,
+            kind,
+            device,
             fallback: Fallback::Fail,
         },
-        output: HwOutput::DrmPrime,
+        output,
         ..VideoRequest::default()
     };
     let mut decoder = backend
@@ -1491,15 +1574,31 @@ fn compare_zero_copy(
     let mut check = |renderer: &mut StillRenderer,
                      (k, frame, want): (usize, Arc<VideoFrame>, Vec<Image>)|
      -> Result<(), NotCompared> {
-        let planes = import_planes(&rig.gpu, &frame)?;
+        let taken = match how {
+            OnDevice::DmaBuf => Taken::Imported(import_planes(&rig.gpu, &frame)?),
+            OnDevice::Shared(_) => Taken::Copied(copy_planes(&rig.gpu, &frame)?),
+        };
         for (i, (view, size)) in views.iter().enumerate() {
-            let got = renderer
-                .render_imported(&rig.gpu, frame.as_ref(), &planes, view, *size, &opts)
-                .unwrap_or_else(|e| panic!("frame {k}: rendering the import: {e}"));
+            let got = match &taken {
+                Taken::Imported(planes) => {
+                    renderer.render_imported(&rig.gpu, frame.as_ref(), planes, view, *size, &opts)
+                }
+                Taken::Copied(c) => renderer.render_copied(
+                    &rig.gpu,
+                    frame.as_ref(),
+                    &c.buffer,
+                    &c.planes,
+                    view,
+                    *size,
+                    &opts,
+                ),
+            }
+            .unwrap_or_else(|e| panic!("frame {k}: rendering {}: {e}", how.taken()));
             assert!(
                 got == want[i],
-                "{}: frame {k}, view {i}: the import renders other bytes than the copy",
-                path.display()
+                "{}: frame {k}, view {i}: {} renders other bytes than the copy",
+                path.display(),
+                how.taken()
             );
         }
         compared += 1;
@@ -1548,6 +1647,78 @@ fn compare_zero_copy(
     Ok(compared)
 }
 
+/// The zero-copy checks' clips: synthetic HEVC Main and Main 10 (NV12
+/// and P010) written to `dir`, and an X5 lens when the samples are there.
+fn zero_copy_clips(dir: &Path) -> Vec<(String, PathBuf, Option<usize>)> {
+    let mut clips: Vec<(String, PathBuf, Option<usize>)> = [("hevc-main", 8), ("hevc-main10", 10)]
+        .into_iter()
+        .map(|(name, bits)| {
+            let spec = Spec {
+                name: name.into(),
+                width: 1920,
+                height: 960,
+                frames: ZERO_COPY_FRAMES as u32,
+                codec: Codec::Hevc,
+                bits,
+                spherical: true,
+                ..Spec::default()
+            };
+            (
+                name.to_owned(),
+                synth_media::write(&spec, dir).unwrap(),
+                None,
+            )
+        })
+        .collect();
+    let samples = tier2::samples_dir().map(|d| x5_modes(probe_samples(&d)));
+    match samples.as_ref().and_then(|m| m.iter().next()) {
+        Some((mode, (path, report))) => {
+            clips.push((
+                mode.clone(),
+                path.clone(),
+                video_streams(report).first().copied(),
+            ));
+        }
+        None => eprintln!("no X5 raw sample: synthetic clips only"),
+    }
+    clips
+}
+
+/// [`compare_zero_copy`] over the clips of [`zero_copy_clips`], `how`
+/// says; a skip naming each clip left out, and why, never a pass.
+fn compare_clips(rig: &Rig, how: &OnDevice) {
+    eprintln!("{}", rig.about());
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("tier2-zero-copy-{}", std::process::id()));
+    let clips = zero_copy_clips(&dir);
+    let decoder = how.decoder();
+    let mut left_out = Vec::new();
+    for (name, path, stream) in &clips {
+        match compare_zero_copy(rig, how, path, *stream, ZERO_COPY_FRAMES) {
+            Ok(n) => eprintln!(
+                "{name}: {n} frames, {} byte-identical to the copy",
+                how.taken()
+            ),
+            Err(NotCompared::Decode(why)) => left_out.push(format!("{name}: {decoder}: {why}")),
+            Err(NotCompared::Export(why)) => left_out.push(format!(
+                "{name}: {decoder} didn't leave it on the device: {why}"
+            )),
+            Err(NotCompared::Import(why)) => {
+                left_out.push(format!("{name}: the GPU won't take it: {why}"))
+            }
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+    if !left_out.is_empty() {
+        tier2::skip(format!(
+            "{} of {} clips not compared: {}",
+            left_out.len(),
+            clips.len(),
+            left_out.join("; ")
+        ));
+    }
+}
+
 /// Zero copy against the copy (slice 5b): synthetic HEVC Main and Main
 /// 10 clips (NV12 and P010), and an X5 lens when the samples are there,
 /// each frame byte-identical through its import and its download, with
@@ -1565,62 +1736,30 @@ fn zero_copy_matches_copy_path() {
             rig.gpu.caps.info.name
         ));
     }
-    eprintln!("{}", rig.about());
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("tier2-zero-copy-{}", std::process::id()));
-    let mut clips: Vec<(String, PathBuf, Option<usize>)> = [("hevc-main", 8), ("hevc-main10", 10)]
-        .into_iter()
-        .map(|(name, bits)| {
-            let spec = Spec {
-                name: name.into(),
-                width: 1920,
-                height: 960,
-                frames: ZERO_COPY_FRAMES as u32,
-                codec: Codec::Hevc,
-                bits,
-                spherical: true,
-                ..Spec::default()
-            };
-            (
-                name.to_owned(),
-                synth_media::write(&spec, &dir).unwrap(),
-                None,
-            )
-        })
-        .collect();
-    let samples = tier2::samples_dir().map(|d| x5_modes(probe_samples(&d)));
-    match samples.as_ref().and_then(|m| m.iter().next()) {
-        Some((mode, (path, report))) => {
-            clips.push((
-                mode.clone(),
-                path.clone(),
-                video_streams(report).first().copied(),
-            ));
-        }
-        None => eprintln!("no X5 raw sample: synthetic clips only"),
-    }
-    let mut left_out = Vec::new();
-    for (name, path, stream) in &clips {
-        match compare_zero_copy(&rig, path, *stream, ZERO_COPY_FRAMES) {
-            Ok(n) => eprintln!("{name}: {n} frames, the import byte-identical to the copy"),
-            Err(NotCompared::Decode(why)) => left_out.push(format!("{name}: VA-API: {why}")),
-            Err(NotCompared::Export(why)) => {
-                left_out.push(format!("{name}: VA-API didn't export it: {why}"))
-            }
-            Err(NotCompared::Import(why)) => {
-                left_out.push(format!("{name}: the driver won't import it: {why}"))
-            }
-        }
-    }
-    std::fs::remove_dir_all(&dir).ok();
-    if !left_out.is_empty() {
-        tier2::skip(format!(
-            "{} of {} clips not compared: {}",
-            left_out.len(),
-            clips.len(),
-            left_out.join("; ")
-        ));
-    }
+    compare_clips(&rig, &OnDevice::DmaBuf);
+}
+
+/// Path B against the copy (slice 5b): the clips of
+/// [`zero_copy_matches_copy_path`] decoded by Vulkan Video on the
+/// renderer's own device, each frame byte-identical through the GPU's
+/// copy out of FFmpeg's image and through its download, as many frames
+/// held as the frame cache holds. Skips, with the reason, when the device
+/// can't be shared or FFmpeg won't take it, or Vulkan Video won't decode
+/// a clip, or the copier refuses its frames; never a pass with a clip
+/// left out.
+#[test]
+#[ignore = "tier2: needs a GPU with Vulkan Video decode"]
+fn shared_vulkan_matches_copy_path() {
+    let plain = Rig::hardware();
+    let name = plain.gpu.caps.info.name.clone();
+    let rig = plain
+        .shared()
+        .unwrap_or_else(|why| tier2::skip(format!("{name} can't share its device: {why}")));
+    drop(plain);
+    let video = rig.gpu.shared_video().expect("a shared device");
+    let device = HwDevice::vulkan_shared(&video.handles)
+        .unwrap_or_else(|e| tier2::skip(format!("FFmpeg won't decode on {name}'s device: {e}")));
+    compare_clips(&rig, &OnDevice::Shared(Arc::new(device)));
 }
 
 /// A run's real-time upload stages, p50 and p99.
@@ -1635,54 +1774,71 @@ fn record_uploads(clip: &str, run: &Run, r: &Pass) {
     }
 }
 
-/// Each X5 raw mode through VA-API with the copy, VA-API with zero copy
-/// and Vulkan Video with the copy (where doctor says it decodes the
-/// mode): decoded and shown fps, drops, and the upload stages' p50 and
+/// Each X5 raw mode through VA-API with the copy, VA-API with zero copy,
+/// Vulkan Video with the copy and Vulkan Video with zero copy (path B, on
+/// the renderer's device opened shared), where doctor says each decodes
+/// the mode: decoded and shown fps, drops, and the upload stages' p50 and
 /// p99, the rows D25's choice before M3 takes. Recorded; a stall fails
-/// it. It skips when the GPU can't import, and when an import was
-/// refused, saying why.
+/// it. It skips when the GPU can't import or share its device, and when
+/// a frame was refused, saying why.
 #[test]
-#[ignore = "tier2: benchmark, needs camera samples and a VA-API GPU that imports DMA-BUFs"]
+#[ignore = "tier2: benchmark, needs camera samples and a GPU that imports DMA-BUFs or shares its device"]
 fn bench_x5_8k30_zero_copy_vs_copy() {
     let modes = require_x5_modes();
     let rig = Rig::hardware();
-    if !rig.gpu.caps.dmabuf_import {
-        tier2::skip(format!(
-            "{} can't import DMA-BUFs: it lacks VK_EXT_external_memory_dma_buf or \
-             VK_EXT_image_drm_format_modifier",
-            rig.gpu.caps.info.name
-        ));
-    }
+    let name = &rig.gpu.caps.info.name;
+    // Each zero-copy path's rig, or why it can't run here.
+    let dmabuf: Result<&Rig, String> = if rig.gpu.caps.dmabuf_import {
+        Ok(&rig)
+    } else {
+        Err(format!(
+            "{name} can't import DMA-BUFs: it lacks VK_EXT_external_memory_dma_buf or \
+             VK_EXT_image_drm_format_modifier"
+        ))
+    };
+    let shared = rig
+        .shared()
+        .map_err(|why| format!("{name} can't share its device: {why}"));
     bench::note(format!("X5 zero copy against the copy: {}", rig.about()));
     let mut stalls = Vec::new();
     let mut refused = Vec::new();
-    let mut imported = 0;
+    // Frames each path took on the GPU, VA-API's then Vulkan Video's.
+    let mut taken = [0u64; 2];
     for (mode, (path, report)) in &modes {
         let streams: Vec<Option<usize>> = video_streams(report).into_iter().map(Some).collect();
         let format = format_of(report, streams[0]);
         let check = format.check_format().unwrap_or("this format");
         let mut runs = Vec::new();
         for kind in [HwKind::VaApi, HwKind::Vulkan] {
-            if rig.hw.works(check, kind) {
-                runs.push(Run::only(kind));
-                if kind == HwKind::VaApi {
-                    runs.push(Run {
-                        label: format!("{kind}, zero copy"),
-                        zero_copy: true,
-                        ..Run::only(kind)
-                    });
-                }
-            } else {
+            if !rig.hw.works(check, kind) {
                 let why = rig
                     .hw
                     .get(check, kind)
                     .and_then(|c| c.reason.clone())
                     .unwrap_or_else(|| format!("doctor didn't check {check} on {kind}"));
                 bench::not_measured(&format!("{mode}, {kind}"), why);
+                continue;
+            }
+            runs.push((&rig, Run::only(kind)));
+            let on = match kind {
+                HwKind::VaApi => dmabuf.clone(),
+                HwKind::Vulkan => shared.as_ref().map_err(String::clone),
+            };
+            let label = format!("{kind}, zero copy");
+            match on {
+                Ok(on) => runs.push((
+                    on,
+                    Run {
+                        label,
+                        zero_copy: true,
+                        ..Run::only(kind)
+                    },
+                )),
+                Err(why) => bench::not_measured(&format!("{mode}, {label}"), why),
             }
         }
-        for run in &runs {
-            let passes = record(&rig, mode, path, &streams, run, RECORDED, RECORDED);
+        for (on, run) in &runs {
+            let passes = record(on, mode, path, &streams, run, RECORDED, RECORDED);
             stalls.extend(stall(mode, run, &passes));
             let Some((u, r)) = &passes else {
                 continue;
@@ -1692,29 +1848,42 @@ fn bench_x5_8k30_zero_copy_vs_copy() {
                 let (n, k) = (u.imported + r.imported, u.refused + r.refused);
                 let why = u.refusal.as_ref().or(r.refusal.as_ref());
                 bench::note(format!(
-                    "{mode}, {}: {n} frames imported, {k} imports refused{}",
+                    "{mode}, {}: {n} frames taken on the GPU, {k} refused{}",
                     run.label,
                     why.map_or(String::new(), |w| format!(" ({w})"))
                 ));
                 if k > 0 || n == 0 {
                     refused.push(format!(
-                        "{mode}: {n} imported, {k} refused: {}",
-                        why.map_or("no import was tried", String::as_str)
+                        "{mode}, {}: {n} taken, {k} refused: {}",
+                        run.label,
+                        why.map_or("no frame was tried", String::as_str)
                     ));
                 }
-                imported += n;
+                taken[usize::from(run.kind == Some(HwKind::Vulkan))] += n;
             }
         }
     }
     assert!(stalls.is_empty(), "{}", stalls.join("; "));
-    if !refused.is_empty() || imported == 0 {
-        tier2::skip(format!(
-            "zero copy didn't import throughout: {}",
-            if refused.is_empty() {
-                "VA-API decodes no X5 mode here".to_owned()
-            } else {
-                refused.join("; ")
+    let mut short = refused;
+    for (path, (kind, on)) in [
+        (HwKind::VaApi, dmabuf.map(|_| ())),
+        (HwKind::Vulkan, shared.map(|_| ())),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        match on {
+            Err(why) => short.push(why),
+            Ok(()) if taken[path] == 0 => {
+                short.push(format!("{kind} took no X5 mode's frames on the GPU here"))
             }
+            Ok(()) => {}
+        }
+    }
+    if !short.is_empty() {
+        tier2::skip(format!(
+            "zero copy didn't take every frame: {}",
+            short.join("; ")
         ));
     }
 }

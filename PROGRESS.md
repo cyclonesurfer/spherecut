@@ -879,6 +879,57 @@ default; `SPHERECUT_ZERO_COPY=1` turns it on in the viewer, and
 - Path B, FFmpeg's Vulkan Video on wgpu's own device, follows on a
   branch of its own.
 
+## Slice 5b: zero copy, path B
+
+Built on `m1/zero-copy-b` (D25, D28, `docs/design/m1-5b.md`): FFmpeg's
+Vulkan Video decodes on wgpu's own device, and each frame is copied on
+the GPU out of FFmpeg's image into a buffer and from there into the
+slot, with nothing through the CPU. Off by default, as path A is:
+`SPHERECUT_ZERO_COPY=1` opens the viewer's device shared, and
+`spherecut frame --zero-copy --decoder vulkan` renders one frame so.
+
+- **render**: `render::vkshare`, render's second `unsafe` module.
+  `Gpu::headless_shared` and `for_window_shared` open the device through
+  wgpu-hal's `open_with_callback` with the video extensions,
+  synchronization2 and the queues the plan picks (a decode queue and two
+  compute queues wgpu never uses), or say why the device can't be
+  shared (below Vulkan 1.3, no decode family, no second compute queue).
+  `Copier` copies a frame's planes under FFmpeg's frame lock, waiting
+  for and signalling its timeline semaphore, and `order_before` makes
+  wgpu's next submission wait for the copy. `Uploader::upload_from_buffer`
+  and `StillRenderer::render_copied` fill a slot from the buffer.
+- **media**: `HwDevice::vulkan_shared` makes FFmpeg's context from the
+  raw handles (`qf[]` from 7.1, the old fields on 6.1, the 9.0 fields
+  behind `cfg(ffmpeg_9_0)`). `HwOutput::Vulkan` leaves frames on the
+  device (`Transfer::Vulkan`), and `VideoFrame::vulkan()` gives core's
+  `VkPicture`; a frame cropped on the left or top, or in a format the
+  copy path converts, is downloaded, and its transfer says why.
+- **playback, app, frame**: with zero copy on, a Vulkan Video stream
+  decodes through FFmpeg's context on the viewer's device, made by the
+  first open that wants it; the upload thread copies each frame out,
+  lets it go and holds the buffer until the GPU has read it. A refusal
+  turns zero copy off for the opens after, as path A's does. The
+  overlay counts `vulkan` copies beside imports. frame's JSON says
+  `"transfer": "vulkan"`, and it exits with `import_failed` where the
+  device can't be shared, as on lavapipe.
+- **Tests**: lavapipe has one queue and no decode, so Tier 1 checks the
+  queue plans against RADV's, ANV's and lavapipe's families, the
+  refusals, `upload_from_buffer` against the copy path for every
+  layout, and, on a test-only device whose one queue FFmpeg, the copier
+  and wgpu share, NV12 and P010 frames FFmpeg uploads into its images,
+  copied out and into slots byte for byte as their bytes fill them, then
+  downloaded by FFmpeg unchanged. Under the Khronos validation layer it
+  reports none of the copier's or wgpu's work, only FFmpeg's own frame
+  barriers (16, on 6.1 and 8.1 alike). Tier 2 has
+  `shared_vulkan_matches_copy_path` (the clips of path A's check on
+  Vulkan Video, 48 frames each, rendered through the copier 15 frames
+  after they came, as through their download),
+  `shared_vulkan_frame_matches_the_copy` (frame) and Vulkan Video's
+  zero-copy rows in `bench_x5_8k30_zero_copy_vs_copy`; they run on odin
+  next.
+- doctor doesn't yet say whether a device can be shared: the log and
+  frame's `import_failed` give the reason.
+
 ## Known issues and limits
 
 - The GUI under winit 0.30.13 (D36): no touchpad pinch on Wayland or
@@ -1324,8 +1375,10 @@ default; `SPHERECUT_ZERO_COPY=1` turns it on in the viewer, and
    `zero_copy_frame_matches_the_copy` and
    `bench_x5_8k30_zero_copy_vs_copy`, and `bench_samples_realtime_decode`
    at 43abcda and at main, to tell whether VA-API's 8K slowdown is the
-   code's. Path B, FFmpeg's Vulkan Video on wgpu's own device, follows on
-   a branch of its own. huginn runs `cargo xtask hw-test --samples
+   code's. Path B, FFmpeg's Vulkan Video on wgpu's own device, is built
+   on `m1/zero-copy-b` and runs there next: `shared_vulkan_matches_copy_path`,
+   `shared_vulkan_frame_matches_the_copy` and the bench's Vulkan Video
+   zero-copy rows. huginn runs `cargo xtask hw-test --samples
    <samples>` at main, without `--quick` so that it makes the perf clips,
    on the power profile Pat edits with. It hasn't run slice 3b's to 6's
    Tier 2 tests: the goldens hold its 8060S, RADV too, to lavapipe's
