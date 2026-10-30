@@ -436,11 +436,13 @@ impl AppState {
 
     /// The open file again, with each of its lenses' streams: a camera's
     /// raw file, which the probe found after the file opened on its best
-    /// stream alone. Its notices stay.
+    /// stream alone. It goes on where it was, playing or not, and its
+    /// notices stay.
     fn open_lenses(&mut self, path: PathBuf, lenses: Vec<usize>) {
         let Some(player) = &self.player else {
             return;
         };
+        let (at, play) = (self.snapshot.clock, self.snapshot.want_play);
         tracing::info!(?lenses, "opening the lenses of {}", path.display());
         self.notices.push(
             Notice::new(
@@ -455,6 +457,12 @@ impl AppState {
         );
         self.streams.clear();
         player.open_streams(path, lenses.into_iter().map(Some).collect());
+        if at > Time::ZERO {
+            player.seek(at, SeekMode::Exact);
+        }
+        if play {
+            player.play();
+        }
     }
 
     /// The viewer's columns: one a video stream.

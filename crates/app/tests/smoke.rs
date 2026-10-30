@@ -153,7 +153,11 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
     // One interval a pass, the first pass's before the run.
     assert_eq!(stages["ui_frame"]["samples"], ui["frames"]);
     assert!(r["av"]["samples"].as_u64().unwrap() > 0, "{}", r["av"]);
-    assert!(r["av"]["p95_abs_ms"].as_f64().unwrap() >= 0.0);
+    // Each frame shown within its interval counts as in sync: frame by
+    // frame, the median would be half a frame, 17 ms.
+    let av_median = r["av"]["median_ms"].as_f64().unwrap();
+    assert!(av_median.abs() < 8.0, "{}", r["av"]);
+    assert!(r["av"]["p95_abs_ms"].as_f64().unwrap() >= av_median.abs());
     assert!(r["audio"].is_null(), "no audio device here");
     assert!(r["cache"]["bytes"].as_u64().unwrap() > 0);
     assert!(r["slots"]["active"].as_u64().unwrap() > 0);
@@ -203,6 +207,60 @@ fn a_clip_that_cant_open_ends_the_run_with_its_code() {
     assert!(doc.get("result").is_none());
     assert!(!args.screenshot.unwrap().exists());
     eprintln!("{code}: {message}");
+}
+
+/// A camera's raw file: the run starts once the probe has opened both
+/// lenses, and measures them side by side.
+#[test]
+fn the_smoke_run_plays_a_cameras_lenses_together() {
+    let gpu = common::gpu();
+    let rs = common::render_state(&gpu);
+    let dir = common::tmp().join("smoke-lenses");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lens = |name: &str, pattern| {
+        media::write(
+            &Spec {
+                name: name.into(),
+                pattern,
+                width: 384,
+                height: 384,
+                frames: 45,
+                codec: Codec::H264Lossless,
+                ..Spec::default()
+            },
+            &dir,
+        )
+        .unwrap()
+    };
+    let a = lens("lens-a", spherecut_synth::Pattern::Grid);
+    let b = lens("lens-b", spherecut_synth::Pattern::Seam);
+    let clip =
+        spherecut_media::encode::mux_video_streams(&[&a, &b], &dir.join("lenses.mkv")).unwrap();
+    let args = SmokeArgs {
+        clip,
+        seconds: 10.0,
+        out: dir.join("smoke.json"),
+        screenshot: None,
+    };
+    let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
+    run_to_end(&mut h);
+    let doc = read_json(&args.out);
+    assert_eq!(doc["ok"], true, "{doc}");
+    let r = &doc["result"];
+    assert_eq!(r["raw_view"], true);
+    assert_eq!(
+        r["streams"].as_array().unwrap().len(),
+        2,
+        "{}",
+        r["streams"]
+    );
+    assert_eq!(r["ended"], true);
+    // To the end of 1.5 s: each lens's frames, from the first.
+    assert!(
+        r["frames"]["shown"].as_u64().unwrap() >= 60,
+        "{}",
+        r["frames"]
+    );
 }
 
 /// The watchdog's exit, as a test sees it: the status, on a channel.

@@ -1,5 +1,6 @@
 //! The smoke run (M1 plan section 12, item 5): `spherecut --smoke <clip>`
-//! opens the clip with the overlay on, waits for its first frame, plays
+//! opens the clip with the overlay on, waits for its first frame and the
+//! Info pane's probe (a camera's lenses open together after it), plays
 //! it for `--smoke-seconds` (or to its end), takes a screenshot, writes
 //! what the player's numbers saw to `--smoke-out` as one JSON document
 //! (`spherecut.smoke/1`, `docs/cli-json.md`), and closes the window.
@@ -89,6 +90,9 @@ pub struct SmokeDriver {
 enum Phase {
     Waiting {
         since: Instant,
+        /// The Info pane's probe had ended by a pass before this one, so
+        /// a camera's lenses have opened (`AppState::tick`).
+        probed: bool,
     },
     Playing(Box<Run>),
     Shooting {
@@ -129,6 +133,7 @@ impl SmokeDriver {
             refresh_hz: None,
             phase: Phase::Waiting {
                 since: Instant::now(),
+                probed: false,
             },
             outcome: None,
             watchdog: None,
@@ -202,9 +207,14 @@ impl SmokeDriver {
     fn step(&mut self, s: &mut AppState, ctx: &egui::Context) {
         let now = Instant::now();
         match &mut self.phase {
-            Phase::Waiting { since } => {
+            Phase::Waiting { since, probed } => {
                 if let Some((code, message)) = failed(s) {
                     self.fail(code, message);
+                } else if !*probed {
+                    // The pass the probe ends in reopens a camera's file
+                    // with its lenses after its snapshot: the next pass's
+                    // is the reopened file's.
+                    *probed = !s.info.pending();
                 } else if s.shown.is_some()
                     && matches!(s.snapshot.state, PlayState::Paused | PlayState::Playing)
                 {
@@ -680,7 +690,8 @@ fn rank(v: &[f32], p: f32) -> Option<f32> {
 
 #[derive(Debug, Serialize)]
 pub struct Av {
-    /// The clock's time less the shown frame's: signed, and its size.
+    /// How far the clock is from the shown frame's interval: signed, and
+    /// its size.
     pub median_ms: f32,
     pub p95_abs_ms: f32,
     pub samples: usize,

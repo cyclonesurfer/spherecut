@@ -34,7 +34,7 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
     let _ = writeln!(
         r,
         "`gui_smoke` {test}. The session: {} ({}). VA-API decodes {} by doctor's check, so \
-         those clips must decode there.{lock}\n",
+         those clips must decode in hardware.{lock}\n",
         s["session"].as_str().unwrap_or("?"),
         list(&s["env"]),
         match list(&s["vaapi_hevc"]) {
@@ -292,7 +292,7 @@ mod tests {
         assert!(md.contains("The session: Wayland socket discovered (WAYLAND_DISPLAY=wayland-0)"));
         assert!(md.contains(
             "VA-API decodes HEVC Main, HEVC Main 10 by doctor's check, so those clips must \
-             decode there. The screen was unlocked when the runs began.\n"
+             decode in hardware. The screen was unlocked when the runs began.\n"
         ));
         assert!(md.contains(
             "| 0 | noisy 5.7K 8-bit | pass | 100% | 16.7 / 18.2 | 59.95 Hz | 600 / 0 / 0 | VA-API | 2.0 / 6.5 | PulseAudio, 41 ms |"

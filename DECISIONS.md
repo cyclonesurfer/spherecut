@@ -6424,6 +6424,21 @@ What:
     logind's `LockedHint` says the session is locked
     (`tier2::session_locked`), fails at once when it is at the start,
     and says on a failed run whether the screen had locked by its end.
+  - *(Slice 9, from M1's review.)* The A/V offset (`Stage::AvOffset`,
+    the overlay's A/V line, the document's `av`) is how far the clock a
+    present is for lies from the shown frame's interval, from its time
+    for its duration: 0 inside it, positive past its end (late),
+    negative before its start. It was the clock's time less the frame's,
+    which showing each frame for its interval keeps between 0 and a
+    frame (half a frame's median, 30 ms at p95 at 29.97 fps), so the
+    sync clip's 20 ms gate could never pass and nothing out of sync
+    showed. `gui_smoke`'s decoder gate fails an HEVC stream that decodes
+    in software where doctor says VA-API decodes its profile; it failed
+    any but VA-API, Vulkan Video included, which `Auto` picks on a
+    discrete GPU such as odin's. The smoke run starts once the Info
+    pane's probe has ended, so a camera's lenses have opened together,
+    and that reopen goes on from where the file was, playing or paused,
+    where it went back to its first frame, paused.
 
 Why: hw-test's report, the overlay and `docs/perf.md` have to agree,
 which one set of counters gives. The watchdog came from H2 on odin

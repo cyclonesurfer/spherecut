@@ -38,7 +38,9 @@ pub enum Stage {
     UiFrame,
     /// Between one video frame shown and the next (presenter).
     ShownInterval,
-    /// The clock's time less the shown frame's, signed (presenter).
+    /// How far the clock is from the shown frame's interval: 0 inside
+    /// it, positive when the frame is late, negative when early
+    /// (presenter).
     AvOffset,
 }
 

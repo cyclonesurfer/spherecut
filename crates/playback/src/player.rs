@@ -61,7 +61,7 @@ use crate::cache::{CacheStats, FrameCache};
 use crate::decoder::{DecoderPreference, HwSupport};
 use crate::perf::{Counter, MemoryStats, PerfSnapshot, PerfStats, Stage};
 use crate::shared::{
-    BudgetStatus, Command, Place, Repaint, Request, Shared, Status, StreamStatus, Want,
+    BudgetStatus, Command, Place, Repaint, Request, Shared, Status, StreamStatus, Want, av_offset,
     frames_between, ms, spawn_into, time_of,
 };
 use crate::slots::{DEFAULT_SLOTS, SlotFrame, SlotRing, SlotState, SlotStats, SlotView};
@@ -1048,7 +1048,7 @@ impl Player {
         let running = ui.clock.is_running();
         if running
             && let Some(Some(s)) = ui.shown.first()
-            && let Ok(d) = t.checked_sub(s.view.frame.time)
+            && let Some(d) = av_offset(t, s.view.frame.time, s.view.frame.duration)
         {
             perf.record(Stage::AvOffset, ms(d));
         }

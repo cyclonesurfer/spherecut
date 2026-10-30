@@ -28,7 +28,7 @@ use spherecut_core::{Clock, FrameRate, Rounding, SystemClock, Time};
 use spherecut_media::backend::SeekMode;
 use spherecut_playback::{
     AudioDevice, CacheBudget, DecoderPreference, DeviceAudio, PREROLL_AUDIO, PREROLL_LIMIT,
-    PlayState, Player, PlayerConfig, PlayerEvent, PlayerParts, SlotState,
+    PlayState, Player, PlayerConfig, PlayerEvent, PlayerParts, SlotState, Stage,
 };
 use spherecut_synth::fake::{SyntheticAudio, SyntheticBackend, SyntheticClip, audio_index};
 
@@ -349,6 +349,22 @@ fn video_follows_the_audio_clock_at_every_rate() {
             let stats = rig.output_stats();
             assert_eq!(stats.underruns, 0, "{fps:?} at {rate}");
             assert_eq!(stats.fallbacks, 0, "{fps:?} at {rate}");
+            // Each frame shown within its interval is in sync: the A/V
+            // offset is 0 but where the rig presented before its frame
+            // was up (it decodes in step with the presents), late by
+            // under a refresh.
+            let av = rig.player.perf().samples(Stage::AvOffset);
+            let off: Vec<f32> = av.iter().copied().filter(|v| *v != 0.0).collect();
+            eprintln!(
+                "{fps:?} at {rate}: {} of {} A/V samples off: {off:?}",
+                off.len(),
+                av.len()
+            );
+            assert!(av.len() >= 200, "{} A/V samples", av.len());
+            // The median is 0 (frame by frame, it was half a frame).
+            assert!(off.len() * 2 < av.len(), "{fps:?} at {rate}: {off:?}");
+            let refresh_ms = REFRESH.as_secs_f32() * 1000.0;
+            assert!(off.iter().all(|v| *v > 0.0 && *v <= refresh_ms), "{off:?}");
             rig.finish();
         }
     }

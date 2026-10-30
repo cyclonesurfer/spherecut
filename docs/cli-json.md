@@ -659,7 +659,7 @@ and no `path` in its `error`. Its `result`:
 | `ui` | `frames` (UI passes) and `passes` (with those eframe ran hidden, without the UI), `expected` (`refresh_hz` × `played_s`, or the passes without a rate) and `presented` (frames over expected), the intervals' `p50`, `p95`, `p99` and `max` in ms, and `hitches` |
 | `frames` | `shown`, `dropped` and `decode_dropped` over the run, and `expected` (the first stream's rate × `played_s`) |
 | `stages` | Per stage (`decode`, `download`, `convert`, `upload_cpu`, `upload_gpu`, `render_cpu`, `render_gpu`, `ui_frame`, `shown_interval`): `samples`, `missed` (recorded but gone from the ring before the next pass read it), and `p50`, `p95`, `p99`, `max` in ms over the whole run, by the nearest rank |
-| `av` | The clock's time less the shown frame's: `median_ms` (signed), `p95_abs_ms` and `samples`; `null` with none |
+| `av` | How far the clock, at each present, is from the shown frame's interval (its time to the next frame's): 0 inside it, positive when the frame is late, negative when early. `median_ms` (signed), `p95_abs_ms` and `samples`; `null` with none |
 | `audio` | `host`, `device`, `rate`, `latency_ms`, `underruns` and `on_system_clock`; `null` without an audio device |
 | `cache`, `slots`, `memory` | The cache's `budget`, `bytes` and `frames`; the GPU slots `active` and `dead`; `rss`, `gpu_allocated` and `gpu_reserved` in bytes |
 | `blocked_on_ui_thread` | Blocking calls on the UI thread: 0 unless something is wrong |
