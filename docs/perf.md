@@ -642,8 +642,30 @@ Vulkan Video copied, and its upload's CPU time falls to a third or
 less; the "download" left is the map. At 3840² it is three times as
 fast at 25 fps and half again at 29.97, where Vulkan Video copied
 stays ahead. VA-API's copied 3840² @ 25 row, 24 fps, is under the
-sixth run's 42, as the slow allocator above would make it; path B's
-rows and the allocator's fix come with the next runs.
+sixth run's 42, as the slow allocator above would make it.
+
+Zero copy, path B (slice 5b, at a13ee07, PR #10,
+`hw-reports/odin-5b-b-a13ee07/`): `shared_vulkan_matches_copy_path`
+passed (the same clips on Vulkan Video, 48 frames each, every copy out
+of FFmpeg's image byte-identical to the download),
+`shared_vulkan_frame_matches_the_copy` passed, and path A's check again.
+The bench, VA-API copied / VA-API imported / Vulkan Video copied /
+Vulkan Video copied out on the shared device (still on the slow
+allocator, so VA-API's copied 8K rows are low):
+
+| X5 mode | Unthrottled | `upload_cpu` p50 | `upload_gpu` p50 | `download` p50 | Dropped after 1 s (decode-dropped) |
+|---|---:|---:|---:|---:|---:|
+| 2× 1920² @ 119.88 | 136 / 256 / 255 / 277 | 0.82 / 0.27 / 0.83 / 0.56 | 0.28 / 0.40 / 0.28 / 0.35 | 6.16 / 1.89 / 3.00 / 0 | at the 60 Hz display's rate, none decode-dropped |
+| 2× 2880² @ 59.94 | 68 / 136 / 133 / 143 | 1.51 / 0.29 / 1.52 / 0.76 | 0.55 / 0.82 / 0.56 / 0.74 | 13.77 / 0.01 / 6.08 / 0 | 0 on all four |
+| 2× 3840² @ 25 | 43 / 76 / 74 / 78 | 2.49 / 0.33 / 2.50 / 1.46 | 1.70 / 2.07 / 1.71 / 2.06 | 21.84 / 0.02 / 9.94 / 0 | 0 / 19 (19) / 0 / 2 (2) |
+| 2× 3840² @ 29.97 | 20 / 78 / 78 / 81 | 3.40 / 0.37 / 3.92 / 1.07 | 0.91 / 1.55 / 0.93 / 1.35 | 24.55 / 0.02 / 3.80 / 0 | 0 on all four |
+
+No frame was refused on either path (1183 to 4440 a mode). Path B is
+the fastest unthrottled in every mode, 3 to 9 % ahead of Vulkan Video
+copied and VA-API imported, with a quarter to two thirds of Vulkan
+Video copied's upload CPU time (its wait for the copy is in
+`upload_cpu`) and no download at all. 3840² @ 25 is the one mode where zero copy decode-dropped in real
+time, 19 frames imported and 2 copied out, as path A's 25 before.
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 

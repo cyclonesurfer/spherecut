@@ -1703,6 +1703,19 @@ tests (`shared_vulkan_matches_copy_path`,
 `shared_vulkan_frame_matches_the_copy`) and the bench's Vulkan Video
 zero-copy rows run on odin next.
 
+*Measured on odin, 2026-10-30* (PR #10, at a13ee07, `docs/perf.md`).
+Path B's Tier 2 tests pass, every frame byte for byte through the copy
+out of FFmpeg's image, none refused, and path A's again. Path B is the
+fastest unthrottled path in every X5 mode (277, 143, 78 and 81 fps a
+lens), 3 to 9 % ahead of Vulkan Video copied and of VA-API imported,
+with no download and a quarter to two thirds of Vulkan Video copied's
+upload CPU time. On odin, then, the order is path B, VA-API imported
+and Vulkan Video copied about level, and VA-API copied far behind. The
+choice before M3 waits for huginn, whose Fedora Mesa has no Vulkan
+Video H.264 or HEVC until it gets RPM Fusion's
+`mesa-vulkan-drivers-freeworld` (Pat's call), so that only path A can
+lift its VA-API copy there for now.
+
 ## D26. egui stays, checked against a timeline prototype at the end of M2
 
 *2026-10-24, before M1's code. Pat approved it from the stack review.
