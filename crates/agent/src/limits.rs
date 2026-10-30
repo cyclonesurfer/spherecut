@@ -68,6 +68,10 @@ pub const FIELD_BYTES: usize = 1024;
 /// The longest error a tool returns, in characters of its JSON.
 pub const ERROR_CHARS: usize = 500;
 
+/// How long doctor's `speed` decodes a file for, at most: less when the
+/// call has less than twice this left.
+pub const SPEED_TIME: Duration = Duration::from_secs(5);
+
 /// The most tiles one `look` draws: times × views.
 pub const MAX_TILES: usize = 24;
 

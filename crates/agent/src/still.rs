@@ -498,11 +498,30 @@ impl<'g> Still<'g> {
 
     /// Where `decoded` was decoded, and how it left the decoder.
     pub fn decode_info(&self, decoded: &Decoded) -> DecodeInfo {
-        decode_info(
-            &decoded.frame.decoded_on,
-            &decoded.frame.transfer,
-            self.skipped.clone(),
-        )
+        self.frame_decode_info(&decoded.frame)
+    }
+
+    /// Where `frame` was decoded, and how it left the decoder.
+    pub fn frame_decode_info(&self, frame: &VideoFrame) -> DecodeInfo {
+        decode_info(&frame.decoded_on, &frame.transfer, self.skipped.clone())
+    }
+
+    /// The frame after the last one decoded, or `None` at the stream's
+    /// end: doctor's speed test, which decodes on from a seek. Damage the
+    /// decoder goes on past is a warning.
+    pub fn next(
+        &mut self,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<Option<Arc<VideoFrame>>, Failure> {
+        let next = self.dec.next_frame(&self.stop.token);
+        let events = self.dec.take_events();
+        self.damage_after(&events, warnings);
+        match next {
+            Ok(NextFrame::Frame(f)) => Ok(Some(f)),
+            Ok(NextFrame::End) => Ok(None),
+            Ok(NextFrame::Stopped) => Err(stopped()),
+            Err(e) => Err(self.media_error(e)),
+        }
     }
 
     fn media_error(&self, e: MediaError) -> Failure {

@@ -380,6 +380,7 @@ fn call_and_mcp_agree() {
         ),
         ("probe", json!({"folder": ".", "page_size": 1})),
         ("doctor", json!({})),
+        ("doctor", json!({"file": "clip.mp4"})),
     ];
     let mut s = Server::spawn(|c| {
         c.arg("--read-root").arg(&dir.0);

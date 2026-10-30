@@ -656,7 +656,7 @@ fn check_output(out: &Path, format: Format) -> Result<(), ToolError> {
 /// again after it is lost.
 static GPU: Mutex<Option<Arc<Gpu>>> = Mutex::new(None);
 
-fn gpu() -> Result<Arc<Gpu>, ToolError> {
+pub(crate) fn gpu() -> Result<Arc<Gpu>, ToolError> {
     let mut slot = GPU.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(g) = slot.as_ref().filter(|g| !g.is_lost()) {
         return Ok(g.clone());
@@ -678,8 +678,8 @@ fn forget_if_lost(g: &Arc<Gpu>) {
     }
 }
 
-/// A failure opening or probing the file, in look's words.
-fn file_failed(f: &Failure) -> ToolError {
+/// A failure opening or probing the file, in look's words (doctor's too).
+pub(crate) fn file_failed(f: &Failure) -> ToolError {
     let (code, message, next) = match f.code {
         contract::codes::NOT_EQUIRECT => (
             codes::NOT_EQUIRECT,
@@ -723,7 +723,7 @@ fn file_failed(f: &Failure) -> ToolError {
 
 /// A failure at a time, the argument `arg`, in look's words. A stop is
 /// the caller's to word.
-fn time_failed(f: &Failure, arg: &str, info: &VideoStreamInfo) -> ToolError {
+pub(crate) fn time_failed(f: &Failure, arg: &str, info: &VideoStreamInfo) -> ToolError {
     match f.code {
         codes::OUT_OF_RANGE => {
             let mut e = ToolError::new(codes::OUT_OF_RANGE, "is past the end of the video").at(arg);
@@ -924,6 +924,17 @@ fn order(spec: TimeSpec, info: &VideoStreamInfo) -> f64 {
 
 /// Look's words for a still's warning: Spherecut's own words are kept,
 /// and the rest, whose messages can quote the file, are said by code.
+/// `warnings` in look's words, each once.
+pub(crate) fn warnings_json(warnings: &[Warning]) -> Vec<Value> {
+    let mut seen = BTreeSet::new();
+    warnings
+        .iter()
+        .map(warning)
+        .filter(|w| seen.insert(w.clone()))
+        .map(|(code, message)| json!({"code": code, "message": message}))
+        .collect()
+}
+
 fn warning(w: &Warning) -> (&'static str, String) {
     if contract::codes::warnings::ALL.contains(&w.code) {
         return (w.code, w.message.clone());
@@ -1240,13 +1251,7 @@ pub fn run(req: Request, cx: &Ctx) -> Result<(Value, Vec<rpc::Image>), ToolError
             data: encoded.bytes,
         }),
     }
-    let mut seen = BTreeSet::new();
-    let warnings: Vec<Value> = warnings
-        .iter()
-        .map(warning)
-        .filter(|w| seen.insert(w.clone()))
-        .map(|(code, message)| json!({"code": code, "message": message}))
-        .collect();
+    let warnings = warnings_json(&warnings);
     let mut result = json!({
         "file": text::field(&req.file.to_string_lossy()),
         "mode": req.mode.name(),

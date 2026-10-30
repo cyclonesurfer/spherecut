@@ -193,6 +193,57 @@ them) and win over the sections below where they differ.
     - A1.1's `doctor` is the real one, without `file` and `speed`, which
       A1.3 adds: not a stub.
 
+**As built in A1.4** (2026-10-30). Where these differ from 6.2, 6.5 and
+the amendments above, these win.
+
+32. **look and doctor's file:**
+    - **`count`, not `span`.** `times` takes strings (`TimeSpec`'s forms)
+      or `[num, den]` pairs of seconds; `count` (2 to 24) spreads that
+      many evenly between `times[0]` and `times[1]`, or over the clip
+      without them (by frame on a constant-rate stream whose frames are
+      counted, else by time, to 1/2000 s before the end). A sheet without
+      `times` or `count` spreads 12. One property fewer than a `span`
+      object, in a list that is short of room.
+    - **`views`' items** are `{"type": "object"}` in the schema, and the
+      op checks each against `view`'s rules: the same view schema twice
+      would cost 600 bytes of the list.
+    - **The list.** `tools/list` leaves `$schema` out of every schema
+      (2020-12 is what both revisions assume), and A1's share is 6 KiB
+      instead of amendment 8's 5: look's schema alone is 2.3 KB. A2's
+      seven tools keep 6 KiB. A1.6 checks the share again with check's
+      schema in.
+    - **Tiles.** Each entry has `rect: [x, y, w, h]`, the picture's place
+      in the image without its label band, so an agent can crop or point.
+      `sphere` tiles are 2:1, `view` 16:9, `cube` square, `sheet` 2:1
+      (16:9 with a `view`), `raw` the coded picture's aspect, letterboxed.
+      The labels are `12.512s f375` and `y90 p-20 f100` (`r15` added when
+      the view rolls, and a tag for a fisheye or stereographic one), so
+      that they fit a tile 112 pixels wide.
+    - **Errors in look's words** (amendment 10, rule 4.2). Still's
+      failures carry the file's name and FFmpeg's words, which are
+      frame's to print; look maps each by its code to its own message
+      and `next`, and keeps only still's warnings whose codes the
+      contract lists (stereo, crop, pose), giving others generic words.
+      So no name or FFmpeg text reaches an agent's error, and none had to
+      be threaded through still.
+    - **The image budget** is the JPEG's base64 (60 KB, 1 to 5,000 KB by
+      `--image-budget-kb` on `mcp` and `call`). The quantizer steps 3,
+      4, 5, 6, 8, 10, 12 to fit; past 12, or a PNG past the budget, is
+      `image_too_large` at `format` or `size`. A dense sheet at 768 px
+      lands near 10.
+    - **`spherecut call`** writes a tool's images to `--image-dir` (the
+      temporary folder by default) as new files and lists them in the
+      envelope's `images`.
+    - **doctor's `file`** opens the file as look does (the GPU look
+      renders on picks the render node, `render_node` overrides it, any
+      video is tried, equirect or not), decodes its first frame, and
+      reports `file: {path, stream, codec, size, pix_fmt, decode}` with
+      `decode` exactly look's tile `decode` (a test compares them).
+      `speed` decodes the frames after it for 5 s or half the call's time
+      left, whichever is less, and adds `speed: {frames, seconds, fps,
+      stream_fps, realtime, ended}`; `speed` without `file` is
+      `bad_argument`.
+
 ## 0. What A1 is for
 
 An agent (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor, Zed,
@@ -918,7 +969,8 @@ PLAN's A1 criteria, and the note to Pat.
 4. **A1.4 look, and doctor's file.** frame's core moved to `still.rs`
    first (frame's tests green before and after); then tiles, modes,
    labels, the font, JPEG in media, base64, the size caps, `output`;
-   doctor with a file and speed; look's tests; D44's images.
+   doctor with a file and speed; look's tests; D44's images. (Done
+   2026-10-30, as amendment 32 says.)
 5. **A1.5 analyze.** Packet timing in media, motion, audio,
    `jitter_dups.mp4`; analyze's tests; D46's analyze half.
 6. **A1.6 check.** YouTube's requirements fetched and cited; the rules;

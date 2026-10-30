@@ -290,7 +290,9 @@ mod tests {
                 json!({"file": "a.mp4", "times": ["0", "10"], "count": 5,
                        "views": [{"yaw": 0, "vfov": 60}, {"yaw": 180}]}),
             ],
-            "doctor" => vec![json!({"render_node": "/dev/dri/renderD128"})],
+            "doctor" => {
+                vec![json!({"file": "a.mp4", "speed": true, "render_node": "/dev/dri/renderD128"})]
+            }
             _ => vec![],
         }
     }
