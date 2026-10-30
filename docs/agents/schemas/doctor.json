@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "doctor",
+  "description": "Check what this machine's FFmpeg, drivers and GPU can decode, as `spherecut doctor --json` does: the FFmpeg build, the decoders and encoders it has, the VA-API and Vulkan devices, each format decoded in software, on VA-API and on Vulkan Video, and every problem found with the command that fixes it (on Fedora the fixes say \"install\" where a package may need swapping instead; `spherecut doctor` in a terminal gives the exact commands). Call it when a file decodes slowly or in software, or before a long job, to know what the machine can do. It reads no media file and starts no process.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "render_node": {
+      "type": "string",
+      "description": "The DRM render node to test VA-API on, such as \"/dev/dri/renderD129\". By default the one hardware decoding uses (/dev/dri/renderD128 unless the GPU names another).",
+      "minLength": 1
+    }
+  }
+}

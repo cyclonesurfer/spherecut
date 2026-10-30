@@ -4,7 +4,8 @@
 //! success and on failure, a panic included, and the exit status says how
 //! the run ended (`contract`, D27). stderr is for people.
 
-// Only `interrupt`, frame's SIGINT handler, is allowed unsafe code (D28).
+// Only `interrupt`, frame's SIGINT handler, and `exit`, mcp's way out
+// past a stuck call, are allowed unsafe code (D28).
 #![deny(unsafe_code)]
 
 use std::ffi::OsString;
@@ -18,6 +19,8 @@ use serde::Serialize;
 use spherecut_cli::contract::{self, Envelope, Exit, ProbeFile};
 use spherecut_core::brand;
 
+#[allow(unsafe_code)]
+mod exit;
 mod frame;
 #[allow(unsafe_code)]
 mod interrupt;
@@ -112,6 +115,9 @@ enum Cmd {
     /// Render one frame of a stitched equirect through a virtual camera
     /// into a PNG.
     Frame(frame::FrameArgs),
+    /// Serve Spherecut's read-only tools to an AI agent over MCP, on stdin
+    /// and stdout (docs/agents.md). Logs go to stderr.
+    Mcp,
 }
 
 fn main() -> ExitCode {
@@ -296,7 +302,35 @@ fn run(cli: Cli, args: &[OsString], json: bool) -> Result<Exit> {
             let node = spherecut_media::hw::render_node(None, render_node.as_deref());
             doctor(&node.path, json)
         }
+        Cmd::Mcp => mcp(),
     }
+}
+
+/// An MCP session on stdin and stdout, until stdin closes (A1, D43).
+fn mcp() -> Result<Exit> {
+    // stdout is the protocol's alone (a1-plan section 3.1): the server
+    // writes to a copy of it, and fd 1 itself goes to stderr from here
+    // on, so that a stray print from FFmpeg, a driver or a dependency
+    // lands among the logs rather than in the middle of a message.
+    // Close-on-exec, so that no child of a library inherits it.
+    let protocol = rustix::io::fcntl_dupfd_cloexec(std::io::stdout(), 3)?;
+    rustix::stdio::dup2_stdout(std::io::stderr())?;
+    #[cfg(debug_assertions)]
+    if std::env::var("SPHERECUT_DEBUG_PANIC").as_deref() == Ok("mcp_print") {
+        // The guard's test: this must reach stderr.
+        println!("SPHERECUT_DEBUG_PANIC=mcp_print: a stray print");
+    }
+    let ended = spherecut_agent::serve(
+        std::io::BufReader::new(std::io::stdin()),
+        std::fs::File::from(protocol),
+    );
+    if ended.gave_up {
+        exit::now(Exit::Failed as u8);
+    }
+    if ended.stuck > 0 {
+        exit::now(Exit::Ok as u8);
+    }
+    Ok(Exit::Ok)
 }
 
 /// The viewer, until its window closes. Without a display it exits 3
