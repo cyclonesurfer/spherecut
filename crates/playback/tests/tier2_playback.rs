@@ -28,11 +28,15 @@
 //!
 //! - `bench_playback_realtime_5k7_8bit` and `_10bit` play hw-test's 20 s
 //!   perf clip on the hardware decoder [`DecoderPreference::Auto`] picks
-//!   from doctor's checks, and pass only with no drop and no decode-drop
-//!   after the first second of 60 s in real time, every unthrottled
-//!   second decoding at least 1.2 × 29.97 frames, and every stream on
-//!   that hardware throughout (section 12.3). The other hardware kind,
-//!   where doctor says it decodes the clip, and software are recorded.
+//!   from doctor's checks, as the app plays it by default (D25): Vulkan
+//!   Video's frames decoded on the renderer's own device and kept there
+//!   (path B) where the device can be shared, else copied. They pass only
+//!   with no drop and no decode-drop after the first second of 60 s in
+//!   real time, every unthrottled second decoding at least 1.2 × 29.97
+//!   frames, and every stream on that hardware, and every frame kept on
+//!   the GPU where they are kept, throughout (section 12.3). Auto's copy
+//!   path where that differs, the other hardware kind where doctor says
+//!   it decodes the clip, and software are recorded.
 //! - `bench_playback_realtime_8k_8bit`: the 8K perf clip, recorded.
 //! - `bench_playback_x5_raw`: the longest file of each X5 recording mode,
 //!   its two lenses as two streams: M3's 8K budget, recorded, failing
@@ -212,6 +216,28 @@ impl Rig {
         })
     }
 
+    /// Where and how the app plays `auto`, Auto's run, by default (D25):
+    /// on this GPU opened again with its device shared, Vulkan Video's
+    /// frames kept there (path B). Why not, when Auto picks VA-API, whose
+    /// frames the app copies, or the device can't be shared: the app
+    /// copies then too, as `auto` does here.
+    fn as_app_plays(&self, auto: &Run) -> Result<(Rig, Run), String> {
+        match auto.kind {
+            Some(HwKind::Vulkan) => {}
+            Some(kind) => return Err(format!("the app copies {kind}'s frames")),
+            None => return Err("software's frames are copied".into()),
+        }
+        let shared = self
+            .shared()
+            .map_err(|why| format!("{} can't share its device: {why}", self.gpu.caps.info.name))?;
+        let run = Run {
+            label: format!("{} (Auto, zero copy)", HwKind::Vulkan),
+            zero_copy: ZeroCopy::default(),
+            ..auto.clone()
+        };
+        Ok((shared, run))
+    }
+
     fn discrete(&self) -> bool {
         self.gpu.caps.info.device_type == wgpu::DeviceType::DiscreteGpu
     }
@@ -234,12 +260,7 @@ impl Rig {
         parts.render_node = Some(self.node.path.clone());
         let config = PlayerConfig {
             decoder: run.decoder,
-            // The copy path, or every path where the device can.
-            zero_copy: if run.zero_copy {
-                ZeroCopy::All
-            } else {
-                ZeroCopy::Off
-            },
+            zero_copy: run.zero_copy,
             cache: CacheBudget::choose(
                 None,
                 CacheBudget::env_value().as_deref(),
@@ -271,7 +292,7 @@ impl Rig {
                 decoder: DecoderPreference::Auto,
                 label: format!("{kind} (Auto)"),
                 kind: Some(kind),
-                zero_copy: false,
+                zero_copy: ZeroCopy::Off,
             }),
             None => Err(auto.why),
         };
@@ -304,10 +325,11 @@ struct Run {
     label: String,
     /// The hardware it decodes on, when it is hardware.
     kind: Option<HwKind>,
-    /// Frames left on the decoder's device and taken into the slots on the
-    /// GPU (slice 5b): VA-API's imported as DMA-BUFs, Vulkan Video's
-    /// decoded on the renderer's own device and copied out there.
-    zero_copy: bool,
+    /// Which frames are left on the decoder's device and taken into the
+    /// slots on the GPU (slice 5b): VA-API's imported as DMA-BUFs, Vulkan
+    /// Video's decoded on the renderer's own device and copied out there;
+    /// the rest are copied.
+    zero_copy: ZeroCopy,
 }
 
 impl Run {
@@ -317,7 +339,7 @@ impl Run {
             decoder: DecoderPreference::Only(kind),
             label: kind.to_string(),
             kind: Some(kind),
-            zero_copy: false,
+            zero_copy: ZeroCopy::Off,
         }
     }
 
@@ -326,7 +348,7 @@ impl Run {
             decoder: DecoderPreference::Software,
             label: "software".into(),
             kind: None,
-            zero_copy: false,
+            zero_copy: ZeroCopy::Off,
         }
     }
 }
@@ -1033,10 +1055,12 @@ fn record(
     Some((u, r))
 }
 
-/// What a gated run must show (section 12.3): on `kind` throughout, no
-/// drop or decode-drop after the first second of `length`, and every
-/// unthrottled second at `fps` or more.
-fn gate(name: &str, (u, r): &(Pass, Pass), kind: HwKind, length: Duration, fps: f64) {
+/// What a gated run must show (section 12.3): on `run`'s hardware
+/// throughout, its frames kept on the GPU throughout where `run` keeps
+/// them there, no drop or decode-drop after the first second of
+/// `length`, and every unthrottled second at `fps` or more.
+fn gate(name: &str, (u, r): &(Pass, Pass), run: &Run, length: Duration, fps: f64) {
+    let kind = run.kind.expect("a gated run is on hardware");
     let mut failed = Vec::new();
     let on_kind = |p: &Pass| {
         p.paths
@@ -1048,6 +1072,13 @@ fn gate(name: &str, (u, r): &(Pass, Pass), kind: HwKind, length: Duration, fps: 
             "not on {kind} throughout: unthrottled {}; real time {}",
             u.paths_line(),
             r.paths_line()
+        ));
+    }
+    let (taken, refused, why) = on_gpu(u, r);
+    if run.zero_copy != ZeroCopy::Off && (taken == 0 || refused > 0) {
+        failed.push(format!(
+            "not kept on the GPU throughout: {taken} frames taken there, {refused} refused{}",
+            because(why)
         ));
     }
     let dropped = r.after_first(|s| s.dropped);
@@ -1130,24 +1161,43 @@ fn play_perf_clip(name: &str, gated: bool) {
     bench::note(format!("{name}: {}", rig.about()));
     let report = probe_file(&path);
     let format = format_of(&report, None);
-    let (auto, others) = rig.decoders(&format, name);
+    let (auto, mut others) = rig.decoders(&format, name);
     let streams = [None];
     let (length, limit) = if gated {
         (GATED, GATED_UNTHROTTLED)
     } else {
         (RECORDED, RECORDED)
     };
+    // A gated run plays as the app does by default; where that keeps
+    // the frames on the GPU, Auto's copy path is recorded with the rest.
+    let mut shared = None;
+    let auto = auto.map(|run| match rig.as_app_plays(&run) {
+        Ok((on, kept)) if gated => {
+            shared = Some(on);
+            others.insert(0, run);
+            kept
+        }
+        Err(why) if gated => {
+            bench::note(format!(
+                "{name}, {}: gated on the copy path: {why}",
+                run.label
+            ));
+            run
+        }
+        _ => run,
+    });
+    let on = shared.as_ref().unwrap_or(&rig);
     let auto = auto.map(|run| {
         let passes = if gated {
             // A gated run that fails says why in the assertion.
-            let u = unthrottled(&rig, &path, &streams, &run, limit)
+            let u = unthrottled(on, &path, &streams, &run, limit)
                 .unwrap_or_else(|e| panic!("{name}, {}: unthrottled: {e}", run.label));
-            let r = realtime(&rig, &path, &streams, &run, length)
+            let r = realtime(on, &path, &streams, &run, length)
                 .unwrap_or_else(|e| panic!("{name}, {}: real time: {e}", run.label));
             record_passes(name, &run, &u, &r);
             Some((u, r))
         } else {
-            record(&rig, name, &path, &streams, &run, length, limit)
+            record(on, name, &path, &streams, &run, length, limit)
         };
         (run, passes)
     });
@@ -1159,12 +1209,27 @@ fn play_perf_clip(name: &str, gated: bool) {
         Ok((run, Some(passes))) if gated => gate(
             &format!("{name}, {}", run.label),
             &passes,
-            run.kind.expect("Auto's run is on hardware"),
+            &run,
             length,
             GATE_FPS,
         ),
         Ok(_) => {}
     }
+}
+
+/// The frames a run's passes took on the GPU, those the GPU refused, and
+/// the first reason it gave.
+fn on_gpu<'a>(u: &'a Pass, r: &'a Pass) -> (u64, u64, Option<&'a String>) {
+    (
+        u.imported + r.imported,
+        u.refused + r.refused,
+        u.refusal.as_ref().or(r.refusal.as_ref()),
+    )
+}
+
+/// ` (why)`, or nothing.
+fn because(why: Option<&String>) -> String {
+    why.map_or(String::new(), |w| format!(" ({w})"))
 }
 
 /// [`record`]'s rows for passes already run.
@@ -1212,6 +1277,13 @@ fn record_passes(clip: &str, run: &Run, u: &Pass, r: &Pass) {
     ));
     if let Some(why) = &u.stalled {
         bench::note(format!("{name}: the unthrottled pass stalled: {why}"));
+    }
+    if run.zero_copy != ZeroCopy::Off {
+        let (n, k, why) = on_gpu(u, r);
+        bench::note(format!(
+            "{name}: {n} frames taken on the GPU, {k} refused{}",
+            because(why)
+        ));
     }
 }
 
@@ -1390,7 +1462,7 @@ fn bench_playback_stitched_samples() {
         let ((w, h), fps, _) = shape(report).unwrap_or(((0, 0), 0.0, 0.0));
         // Within the criterion: 5.7K at 30 fps or less (section 12.3).
         let within = u64::from(w) * u64::from(h) <= 5760 * 2880 && fps <= 30.0 && fps > 0.0;
-        let (auto, others) = rig.decoders(&format, &name);
+        let (auto, mut others) = rig.decoders(&format, &name);
         match auto {
             Ok(run) => {
                 let (length, limit) = if within {
@@ -1398,7 +1470,25 @@ fn bench_playback_stitched_samples() {
                 } else {
                     (RECORDED, RECORDED)
                 };
-                match record(&rig, &name, path, &[None], &run, length, limit) {
+                // Gated as the app plays it by default, as the perf clips
+                // are.
+                let shared;
+                let (on, run) = match rig.as_app_plays(&run) {
+                    Ok((s, kept)) if within => {
+                        shared = s;
+                        others.insert(0, run);
+                        (&shared, kept)
+                    }
+                    Err(why) if within => {
+                        bench::note(format!(
+                            "{name}, {}: gated on the copy path: {why}",
+                            run.label
+                        ));
+                        (&rig, run)
+                    }
+                    _ => (&rig, run),
+                };
+                match record(on, &name, path, &[None], &run, length, limit) {
                     Some(passes) if within => gated.push((name.clone(), run, passes, fps)),
                     None if within => panic!("{name}, {}: see the note", run.label),
                     _ => {}
@@ -1413,11 +1503,10 @@ fn bench_playback_stitched_samples() {
     }
     assert!(stalls.is_empty(), "{}", stalls.join("; "));
     for (name, run, passes, fps) in &gated {
-        let kind = run.kind.expect("Auto's run is on hardware");
         gate(
             &format!("{name}, {}", run.label),
             passes,
-            kind,
+            run,
             GATED,
             1.2 * fps,
         );
@@ -1501,6 +1590,86 @@ enum Taken {
     Copied(Copied),
 }
 
+/// `frame` taken on `gpu` as `how` takes it.
+fn take(gpu: &Gpu, how: &OnDevice, frame: &VideoFrame) -> Result<Taken, NotCompared> {
+    Ok(match how {
+        OnDevice::DmaBuf => Taken::Imported(import_planes(gpu, frame)?),
+        OnDevice::Shared(_) => Taken::Copied(copy_planes(gpu, frame)?),
+    })
+}
+
+/// `frame`, taken as `taken`, rendered at `view`.
+fn render_taken(
+    gpu: &Gpu,
+    renderer: &mut StillRenderer,
+    frame: &VideoFrame,
+    taken: &Taken,
+    view: &ViewParams,
+    size: (u32, u32),
+    opts: &StillOptions,
+) -> Result<Image, RenderError> {
+    match taken {
+        Taken::Imported(planes) => renderer.render_imported(gpu, frame, planes, view, size, opts),
+        Taken::Copied(c) => {
+            renderer.render_copied(gpu, frame, &c.buffer, &c.planes, view, size, opts)
+        }
+    }
+}
+
+/// What a zero-copy render `got` that differs from the copy's `want`
+/// says about why: how much differs; whether the same take, rendered
+/// again, and a fresh take render as `got` or as `want`; and whether
+/// the frame downloads now as it did before (if not, its surface changed
+/// under the frame that holds it).
+#[allow(clippy::too_many_arguments)]
+fn mismatch(
+    gpu: &Gpu,
+    renderer: &mut StillRenderer,
+    how: &OnDevice,
+    frame: &VideoFrame,
+    taken: &Taken,
+    got: &Image,
+    want: &Image,
+    view: &ViewParams,
+    size: (u32, u32),
+    opts: &StillOptions,
+) -> String {
+    let (g, w) = (got.unit_rgb(), want.unit_rgb());
+    let differ = g.iter().zip(&w).filter(|(a, b)| a != b).count();
+    let most = g
+        .iter()
+        .zip(&w)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f64::max);
+    let like = |image: Result<Image, String>| match image {
+        Ok(i) if i == *want => "as the copy".to_string(),
+        Ok(i) if i == *got => "as the first time".to_string(),
+        Ok(_) => "a third way".to_string(),
+        Err(e) => format!("not at all ({e})"),
+    };
+    let again = like(
+        render_taken(gpu, renderer, frame, taken, view, size, opts).map_err(|e| e.to_string()),
+    );
+    let fresh = like(match take(gpu, how, frame) {
+        Ok(t) => {
+            render_taken(gpu, renderer, frame, &t, view, size, opts).map_err(|e| e.to_string())
+        }
+        Err(NotCompared::Decode(e) | NotCompared::Export(e) | NotCompared::Import(e)) => Err(e),
+    });
+    let downloaded = like(match frame.to_system() {
+        Some(Ok(copy)) => renderer
+            .render(gpu, &copy, view, size, opts)
+            .map_err(|e| e.to_string()),
+        Some(Err(e)) => Err(e.to_string()),
+        None => Err("not on its device".into()),
+    });
+    format!(
+        "{differ} of {} channel values differ, by {most:.4} at most; rendered again it \
+         renders {again}, taken again {fresh}, and downloaded again {downloaded}",
+        w.len()
+    )
+}
+
 /// `frame`'s planes imported into `gpu`, as `frame --zero-copy` and the
 /// upload thread import them.
 fn import_planes(gpu: &Gpu, frame: &VideoFrame) -> Result<Vec<wgpu::Texture>, NotCompared> {
@@ -1579,32 +1748,20 @@ fn compare_zero_copy(
     let mut check = |renderer: &mut StillRenderer,
                      (k, frame, want): (usize, Arc<VideoFrame>, Vec<Image>)|
      -> Result<(), NotCompared> {
-        let taken = match how {
-            OnDevice::DmaBuf => Taken::Imported(import_planes(&rig.gpu, &frame)?),
-            OnDevice::Shared(_) => Taken::Copied(copy_planes(&rig.gpu, &frame)?),
-        };
+        let taken = take(&rig.gpu, how, &frame)?;
         for (i, (view, size)) in views.iter().enumerate() {
-            let got = match &taken {
-                Taken::Imported(planes) => {
-                    renderer.render_imported(&rig.gpu, frame.as_ref(), planes, view, *size, &opts)
-                }
-                Taken::Copied(c) => renderer.render_copied(
-                    &rig.gpu,
-                    frame.as_ref(),
-                    &c.buffer,
-                    &c.planes,
-                    view,
-                    *size,
-                    &opts,
-                ),
+            let got = render_taken(&rig.gpu, renderer, &frame, &taken, view, *size, &opts)
+                .unwrap_or_else(|e| panic!("frame {k}: rendering {}: {e}", how.taken()));
+            if got != want[i] {
+                let why = mismatch(
+                    &rig.gpu, renderer, how, &frame, &taken, &got, &want[i], view, *size, &opts,
+                );
+                panic!(
+                    "{}: frame {k}, view {i}: {} renders other bytes than the copy: {why}",
+                    path.display(),
+                    how.taken()
+                );
             }
-            .unwrap_or_else(|e| panic!("frame {k}: rendering {}: {e}", how.taken()));
-            assert!(
-                got == want[i],
-                "{}: frame {k}, view {i}: {} renders other bytes than the copy",
-                path.display(),
-                how.taken()
-            );
         }
         compared += 1;
         Ok(())
@@ -1835,7 +1992,7 @@ fn bench_x5_8k30_zero_copy_vs_copy() {
                     on,
                     Run {
                         label,
-                        zero_copy: true,
+                        zero_copy: ZeroCopy::All,
                         ..Run::only(kind)
                     },
                 )),
@@ -1849,14 +2006,8 @@ fn bench_x5_8k30_zero_copy_vs_copy() {
                 continue;
             };
             record_uploads(mode, run, r);
-            if run.zero_copy {
-                let (n, k) = (u.imported + r.imported, u.refused + r.refused);
-                let why = u.refusal.as_ref().or(r.refusal.as_ref());
-                bench::note(format!(
-                    "{mode}, {}: {n} frames taken on the GPU, {k} refused{}",
-                    run.label,
-                    why.map_or(String::new(), |w| format!(" ({w})"))
-                ));
+            if run.zero_copy != ZeroCopy::Off {
+                let (n, k, why) = on_gpu(u, r);
                 if k > 0 || n == 0 {
                     refused.push(format!(
                         "{mode}, {}: {n} taken, {k} refused: {}",
