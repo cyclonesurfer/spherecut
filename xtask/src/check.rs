@@ -38,6 +38,20 @@ pub fn run(a: Args) -> Result<()> {
              or sudo apt install strace (Ubuntu)"
         );
     }
+    // cpal's ALSA host, always built on Linux, links libasound (D35):
+    // without its headers the build fails in alsa-sys.
+    let alsa = Command::new("pkg-config")
+        .args(["--exists", "alsa"])
+        .status()
+        .is_ok_and(|s| s.success());
+    if !alsa {
+        bail!(
+            "the ALSA development headers are not installed (pkg-config finds no `alsa`), \
+             and the audio output links libasound: \
+             sudo dnf install alsa-lib-devel (Fedora), sudo pacman -S alsa-lib (Arch) \
+             or sudo apt install libasound2-dev (Ubuntu)"
+        );
+    }
     let mut fmt = Command::new("cargo");
     fmt.args(["fmt", "--all"]);
     if !a.fix {

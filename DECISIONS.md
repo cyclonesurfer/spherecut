@@ -1185,13 +1185,14 @@ rest, with the versions in `Cargo.lock`:
 | anyhow 1.0.104 | cli, xtask | Error context at the program edges; libraries use `thiserror` |
 | bytemuck 1.25.2 (derive) | render | The `#[repr(C)]` uniforms as bytes for `Queue::write_buffer`, and timestamps read back, with no `unsafe`: its derives compile under `forbid(unsafe_code)` (D31) |
 | clap 4.6.7 (derive) | cli, xtask | Argument parsing with generated help and errors, for two binaries with subcommands |
+| cpal 0.18.2 (pulseaudio) | audio | The audio output (D35): the PulseAudio protocol host, pure Rust, which reaches PipeWire through pipewire-pulse, and ALSA, which cpal always builds on Linux and which links libasound (so its headers are a build prerequisite). Default features off; a `[[bans.features]]` allow list keeps `pipewire`, `jack`, `realtime` and the browser hosts off. On Linux it brings `alsa`, `alsa-sys`, `pulseaudio` and its `byteorder`, `enum-primitive-derive`, `mio`, `thiserror` 1 and the `futures` crates, and `dasp_sample` for its sample conversions |
 | image 0.25.10 (png only) | render | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame` and the goldens. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
 | libc 0.2.191 | cli | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, the binary's one FFI module (D28): the handler only stores to an atomic. It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
 | serde 1.0.229 (derive) | core, sphere, media, cli | Serializable time types, `Projection`, the probe and doctor reports, and the CLI's JSON envelope (D27) |
 | serde_json 1.0.154 | cli; core, render (dev) | `--json` output, through the `contract` module (D27). core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
-| thiserror 2.0.21 | core, media, synth, render, playback | Typed library errors without hand-written `Display` impls |
-| tracing 0.1.44 | core, media, cli, render, playback | Structured logging, and the target for FFmpeg's log (D12). core logs only what `fs::TempFile` can't clean up (M1 slice 4) |
+| thiserror 2.0.21 | core, media, synth, render, playback, audio | Typed library errors without hand-written `Display` impls |
+| tracing 0.1.44 | core, media, cli, render, playback, audio | Structured logging, and the target for FFmpeg's log (D12). core logs only what `fs::TempFile` can't clean up (M1 slice 4) |
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
 | tracing-subscriber 0.3.23 (env-filter) | cli | EnvFilter gives `SPHERECUT_LOG` its syntax, and the fmt layer writes to stderr. env-filter brings in `matchers` and `regex-automata` |
 | wgpu 30.0.1 (std, parking_lot, vulkan, wgsl) | render | The GPU (D7, D31). Default features off, so only the Vulkan backend and the WGSL front end are built: no GL, Metal, DX12 or WebGPU backend, no SPIR-V or GLSL front end. `std` and `parking_lot` are the two defaults kept: the standard library, and wgpu's locks. A `[[bans.features]]` list in `deny.toml` refuses `web`, `webgpu` and `webgl` (wasm-bindgen, js-sys and web-sys), `angle`, `static-dxc`, `glsl`, `spirv` and `vulkan-portability` if a later crate turns them on; GL, Metal and DX12 aren't banned, since egui_kittest turns them on in test builds (m1-plan section 11). It brings wgpu-core, wgpu-hal, wgpu-types, naga, ash and gpu-allocator among others. With image, bytemuck and pollster, slice 3a adds 57 crates to what a Linux build compiles (`cargo tree --target x86_64-unknown-linux-gnu` on normal and build edges, against ef1a9d1; 56 on normal edges alone), all under the existing licence list; `Cargo.lock` gains 90, the rest for other platforms' backends, which Linux never builds. 3a first said 46, a miscount the first review found |
@@ -1217,6 +1218,19 @@ They are all in the tree already, so it adds no crate either.
 The benchmarks, the third part, add sphere and testkit to its tests'
 dependencies, and hw-test's perf clips use synth, which xtask had.
 Neither adds a crate.
+
+*Updated in M1 slice 6,* with the audio crate (cpal's row above). It
+depends on core, cpal, thiserror and tracing, and on testkit for its
+Tier 2 test; playback depends on it. It adds 20 crates to what a Linux build
+compiles (`cargo tree --target x86_64-unknown-linux-gnu` on normal and
+build edges, against 43abcda): `cpal`, `alsa`, `alsa-sys`, `dasp_sample`,
+`pulseaudio`, `byteorder`, `enum-primitive-derive`, `mio`, `slab`,
+`thiserror` and `thiserror-impl` 1, and nine `futures` crates, all under
+the existing licence list. `Cargo.lock` gains 44, the rest for other
+platforms' hosts (Android's `ndk` and `jni`, CoreAudio, WASAPI), which
+Linux never builds. cargo-deny warns of two more duplicates: thiserror 1
+(pulseaudio's) beside 2, and jni-sys 0.3 beside 0.4, both within cpal's
+Android tree.
 
 ## D23. Agent integration: an MCP server and the JSON CLI
 

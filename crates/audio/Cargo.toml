@@ -14,7 +14,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-proptest.workspace = true
+spherecut-testkit.workspace = true
 
 [lints]
 workspace = true

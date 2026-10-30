@@ -383,13 +383,12 @@ fn check_prereqs(d: Distro, ffmpeg_info: &str, vainfo: &str, rustc: &str) -> Vec
             blocks: "the Tier 1 render and playback tests",
         });
     }
-    // cpal links libasound from slice 6 on; nothing builds against it
-    // yet, so it doesn't block the build here.
+    // cpal's ALSA host, always built on Linux, links libasound (D35).
     if !capture("pkg-config", &["--exists", "alsa"]).ok {
         m.push(Missing {
             what: "the ALSA development headers".into(),
             fix: pkg_cmd(d, "alsa-lib-devel", "alsa-lib"),
-            blocks: "audio output (M1 slice 6)",
+            blocks: "building Spherecut",
         });
     }
     if !vainfo.is_empty() && !vainfo.contains("VAProfileHEVCMain") {

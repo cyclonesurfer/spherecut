@@ -1691,8 +1691,8 @@ name = "spherecut-audio"
 version = "0.1.0"
 dependencies = [
  "cpal",
- "proptest",
  "spherecut-core",
+ "spherecut-testkit",
  "thiserror 2.0.21",
  "tracing",
 ]

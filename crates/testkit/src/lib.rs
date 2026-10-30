@@ -170,6 +170,19 @@ pub mod tier2 {
     pub fn render_node() -> Option<PathBuf> {
         Some(configured_render_node()).filter(|p| p.exists())
     }
+
+    /// The default audio output device, as `open` opens it, or skip with
+    /// the reason `open` gives when there is none. `open` panics, failing
+    /// the test, when there is a device that won't play: that isn't a
+    /// skip. (testkit has no dependencies, so the caller opens it.)
+    #[track_caller]
+    pub fn require_audio_device<T>(open: impl FnOnce() -> Result<T, String>) -> T {
+        require_hw_run();
+        match open() {
+            Ok(device) => device,
+            Err(why) => skip(format!("no audio output device: {why}")),
+        }
+    }
 }
 
 /// Benchmark results from Tier 2 tests. `cargo xtask hw-test` sets
