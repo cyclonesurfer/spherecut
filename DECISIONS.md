@@ -6599,12 +6599,18 @@ What:
   presented 95.8 % → 99.9 % and 91.7 % → 99.8 %, the UI's p99 49.9 →
   17.05 ms, nothing dropped. The longest wait was 2.1 ms. A hold of
   5 ms did no better. The 1 to 3 left are 26 to 33 ms with nothing
-  submitted in the window: the compositor's own.
+  submitted in the window: the compositor's own. Built as here
+  (0a72983), `gui_smoke` on odin passed all five runs: 99.8 % to
+  99.9 % presented, the UI's p99 17.0 to 17.1 ms, nothing dropped, one
+  late pass a run (28 to 30 ms, nothing slow in its gap); 14 to 1023
+  submissions waited a run, the longest 2.3 ms.
 - **What it costs**: a submission waits at most egui's pass after the
   acquire plus the hold, about 2 ms a refresh, and FFmpeg's other
   threads find that queue held meanwhile. The runs with the gate
   dropped no frame; the Tier 2 playback benches have no window, so
-  nothing closes the gate there.
+  nothing closes the gate there. The `decode` and `upload_cpu` stages
+  count the waits: in the window on odin their p50 went from about 0.7
+  to 2.8 ms and from 1.2 to 3.1 ms at 5.7K.
 - **Tests**: core's unit tests (a submission waits from the close to
   the hold after the acquire; a close with no acquire, or one opened,
   lets it through; the UI thread never waits). render's

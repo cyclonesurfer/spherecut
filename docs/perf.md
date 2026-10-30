@@ -768,6 +768,16 @@ the acquire and the present; the rest an I-frame decode still running.
 The few left with it are 26 to 33 ms gaps with nothing submitted: the
 compositor's own.
 
+`gui_smoke` with the gate (branch `m1/submit-gate` at 0a72983, an
+early check before main) passed all five runs: presented 99.8 % to
+99.9 %, the UI's p50 / p99 16.7 / 17.0 to 17.1 ms, nothing dropped,
+one late pass a run of 28 to 30 ms with nothing slow in its gap, and
+the UI's own work 0.9 / 1.1 ms (1.0 / 1.4 on the X5 pair). The gate
+held 813, 829, 230, 14 and 1023 submissions (the 5.7K clips, the seam,
+the sync clip, the X5 pair), the longest 2.3 ms. The `decode` and
+`upload_cpu` stages now count those waits: their p50 went from about
+0.7 to 2.8 ms and from 1.2 to 3.1 ms at 5.7K.
+
 ### Framework 13 Pro (Intel Xe3, Arch)
 
 Not available yet.

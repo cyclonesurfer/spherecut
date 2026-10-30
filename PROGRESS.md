@@ -1119,7 +1119,9 @@ On `m1/slice9` (D37, D40):
   uploader wait at it before they submit. On odin's diagnostic runs
   that took the late passes from 27 to 1 (8-bit), 54 to 2 (10-bit) and
   5 to 3 (X5), 99.8 % to 99.9 % presented, the UI's p99 at 17 ms,
-  nothing dropped, no wait over 2.1 ms. Tests: core's unit tests,
+  nothing dropped, no wait over 2.1 ms. Built as merged, `gui_smoke`
+  on odin passed all five runs (99.8 % to 99.9 % presented, the UI's
+  p99 17.1 ms at most, nothing dropped). Tests: core's unit tests,
   `shared_vulkan`'s three waits on lavapipe (FFmpeg's checked by
   unsetting the locks), and the viewer's kittest; the smoke document
   says how many submissions waited (`submit_gate`).
