@@ -334,6 +334,10 @@ pub struct ViewInfo {
 pub struct DecodeInfo {
     /// `software`, `vaapi` or `vulkan`.
     pub path: &'static str,
+    /// How the frame left its decoder: `system` (decoded in system
+    /// memory), `downloaded` (copied from the device) or `drm_prime`
+    /// (exported as DMA-BUFs, `--zero-copy`).
+    pub transfer: &'static str,
     /// Why a hardware decode went on in software, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback: Option<FallbackInfo>,

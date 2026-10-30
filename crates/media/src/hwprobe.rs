@@ -333,6 +333,10 @@ pub(crate) struct VkDevice {
     pub drm_nodes: Vec<(i64, i64)>,
     /// FFmpeg's Vulkan device context runs on this one.
     pub ffmpeg_uses: bool,
+    /// It has `VK_EXT_external_memory_dma_buf` and
+    /// `VK_EXT_image_drm_format_modifier`: it can import DMA-BUFs, which
+    /// slice 5b's zero copy needs of the GPU that renders.
+    pub dmabuf_import: bool,
 }
 
 impl VkDevice {
@@ -651,6 +655,14 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
                     drm_nodes = drm.nodes();
                 }
             }
+            let dmabuf_import = match extensions {
+                // SAFETY: looked up on the instance `pd` belongs to.
+                Some(e) => unsafe {
+                    has_extension(e, pd, c"VK_EXT_external_memory_dma_buf")
+                        && has_extension(e, pd, c"VK_EXT_image_drm_format_modifier")
+                },
+                None => false,
+            };
             VkDevice {
                 name: fixed_str(&p.device_name).unwrap_or_else(|| "(unnamed)".into()),
                 device_type: p.device_type,
@@ -661,6 +673,7 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
                 driver_info,
                 drm_nodes,
                 ffmpeg_uses: pd == head.phys_dev,
+                dmabuf_import,
             }
         })
         .collect())

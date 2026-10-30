@@ -285,7 +285,12 @@ spherecut frame clip.mp4 -o out.png --overwrite --depth 16 --json
   (no render node, a stream the GPU turns down, a failure), and says
   which; `software`, `vaapi` and `vulkan` force one, and the hardware
   ones fail instead of falling back (DECISIONS D39). `--render-node`
-  names the node.
+  names the node. `--zero-copy` keeps the frame on the device: VA-API
+  exports it as DMA-BUFs and the GPU imports them, with no copy through
+  the CPU; it fails (exit 3, `import_failed`) when the GPU, its driver
+  or the decoder can't, and the JSON's `decode.transfer` says which way
+  a frame came (slice 5b, DECISIONS D25). The viewer does the same with
+  `SPHERECUT_ZERO_COPY=1`, and copies whatever it can't import.
 - **The output**: something already at `-o` is refused unless
   `--overwrite` is given, and so is a link there; with `--overwrite` a
   regular file is replaced, through a link too. The PNG is written next

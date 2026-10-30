@@ -41,17 +41,18 @@ use spherecut_core::video::VideoPlanes;
 use spherecut_core::{FrameTime, Rounding, Time, TimeSpec};
 use spherecut_media::backend::{
     DamageCause, DecodeMode, DecodePath, DecoderEvent, Exactness, Fallback, FallbackReason,
-    FfmpegBackend, HwKind, MediaBackend, NextFrame, SeekMode, SeekOutcome, Timing, VideoDecode,
-    VideoFrame, VideoRequest, VideoStreamInfo,
+    FfmpegBackend, HwKind, HwOutput, MediaBackend, NextFrame, SeekMode, SeekOutcome, Timing,
+    Transfer, VideoDecode, VideoFrame, VideoRequest, VideoStreamInfo,
 };
 use spherecut_media::detect::Layout;
 use spherecut_media::hw::{self, GpuIds, RenderNode};
 use spherecut_media::probe::{self, ProbeReport, StreamInfo, StreamKind};
 use spherecut_media::seek::{FrameAddress, frame_address};
 use spherecut_media::spherical::{Projection as SvProjection, StereoMode};
+use spherecut_render::dmabuf::{self, Importer};
 use spherecut_render::{
-    AdapterChoice, Depth, Filter, Gpu, Image, Pixels, Placement, RenderError, Stereo, StillOptions,
-    ViewParams, reference, render_still, wgpu,
+    AdapterChoice, Depth, Filter, Gpu, Image, Pixels, Placement, RenderError, SlotShape, Stereo,
+    StillOptions, StillRenderer, ViewParams, reference, render_still, wgpu,
 };
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
@@ -136,6 +137,11 @@ pub struct FrameArgs {
     /// Render with the CPU reference (f64, slow) instead of the GPU.
     #[arg(long)]
     pub reference: bool,
+    /// Keep the frame on the device: VA-API exports it as DMA-BUFs and
+    /// the GPU imports them, with no copy through the CPU (slice 5b).
+    /// Fails (exit 3) when the device, its driver or the decoder can't.
+    #[arg(long, conflicts_with = "reference")]
+    pub zero_copy: bool,
     /// Replace what is at the output, if it is a regular file.
     #[arg(long)]
     pub overwrite: bool,
@@ -258,6 +264,11 @@ impl FrameArgs {
         }
         if self.reference && self.filter == FilterArg::Aniso {
             return Err("--reference renders with --filter iso only".into());
+        }
+        if self.zero_copy && matches!(self.decoder, DecoderArg::Software | DecoderArg::Vulkan) {
+            return Err(
+                "--zero-copy decodes on VA-API: give --decoder auto or vaapi with it".into(),
+            );
         }
         Ok(())
     }
@@ -592,6 +603,13 @@ impl Job {
             let gpu = Gpu::headless(&self.args.adapter()).map_err(render_error)?;
             gpu.check_size(self.args.size)
                 .map_err(|e| failure(codes::USAGE, format!("--size: {e}")))?;
+            if self.args.zero_copy && !gpu.caps.dmabuf_import {
+                return Err(render_error(RenderError::Import(format!(
+                    "{} can't import DMA-BUFs (it lacks \
+                     VK_EXT_external_memory_dma_buf or VK_EXT_image_drm_format_modifier)",
+                    gpu.caps.info.name
+                ))));
+            }
             if self.args.filter == FilterArg::Aniso && !gpu.caps.anisotropy {
                 self.warn(
                     codes::warnings::ANISOTROPY_UNAVAILABLE,
@@ -617,6 +635,11 @@ impl Job {
         let req = VideoRequest {
             stream: Some(stream.index),
             decode,
+            output: if self.args.zero_copy {
+                HwOutput::DrmPrime
+            } else {
+                HwOutput::Download
+            },
             interrupt: self.stop.shutdown_flag(),
             ..VideoRequest::default()
         };
@@ -633,23 +656,24 @@ impl Job {
         // Step 8.
         let size = self.args.size;
         let view = self.args.view();
+        let opts = StillOptions {
+            filter: match filter {
+                FilterArg::Iso => Filter::Isotropic,
+                FilterArg::Aniso => Filter::Anisotropic,
+            },
+            depth: self.args.depth(),
+            placement,
+            ..StillOptions::default()
+        };
         let image = match &gpu {
-            Some(gpu) => render_still(
-                gpu,
-                decoded.frame.as_ref(),
-                &view,
-                size,
-                StillOptions {
-                    filter: match filter {
-                        FilterArg::Iso => Filter::Isotropic,
-                        FilterArg::Aniso => Filter::Anisotropic,
-                    },
-                    depth: self.args.depth(),
-                    placement,
-                    ..StillOptions::default()
-                },
-            )
-            .map_err(render_error)?,
+            Some(gpu) if self.args.zero_copy => {
+                let planes = import(gpu, &decoded.frame)?;
+                StillRenderer::new(gpu)
+                    .render_imported(gpu, decoded.frame.as_ref(), &planes, &view, size, &opts)
+                    .map_err(render_error)?
+            }
+            Some(gpu) => render_still(gpu, decoded.frame.as_ref(), &view, size, opts)
+                .map_err(render_error)?,
             None => {
                 let f64s = reference::render(
                     decoded.frame.as_ref(),
@@ -697,7 +721,7 @@ impl Job {
         }
 
         // Step 10.
-        let decode = decode_info(&decoded.frame.decoded_on, skipped);
+        let decode = decode_info(&decoded.frame.decoded_on, &decoded.frame.transfer, skipped);
         let result = FrameResult {
             output: out.to_string_lossy().into_owned(),
             frame: FrameShown {
@@ -1293,19 +1317,65 @@ fn decode_mode(decoder: DecoderArg, node: &RenderNode) -> (DecodeMode, Option<Fa
     }
 }
 
-/// Where the frame was decoded, for the JSON.
-fn decode_info(path: &DecodePath, skipped: Option<FallbackInfo>) -> DecodeInfo {
+/// `frame`'s planes imported into `gpu` (`--zero-copy`): `import_failed`
+/// when the decoder didn't export it, or the GPU can't import it.
+fn import(gpu: &Gpu, frame: &VideoFrame) -> Result<Vec<wgpu::Texture>, Failure> {
+    let refused = |why: String| render_error(RenderError::Import(why));
+    let layers = match (&frame.transfer, frame.dmabuf()) {
+        (Transfer::DrmPrime, Some(layers)) => layers,
+        (
+            Transfer::Downloaded {
+                not_exported: Some(why),
+            },
+            _,
+        ) => return Err(refused(format!("VA-API didn't export the frame: {why}"))),
+        (Transfer::System, _) => {
+            return Err(refused(
+                "the frame was decoded in software, not on VA-API".into(),
+            ));
+        }
+        _ => {
+            return Err(refused(
+                "the decoder copied the frame from its device".into(),
+            ));
+        }
+    };
+    let whole = SlotShape::of(frame.layout(), frame.size()).map_err(render_error)?;
+    let planes = dmabuf::plan(&whole, layers).map_err(refused)?;
+    Importer::new().import(gpu, &planes).map_err(render_error)
+}
+
+/// How the frame left its decoder, as the JSON names it.
+fn transfer_name(t: &Transfer) -> &'static str {
+    match t {
+        Transfer::System => "system",
+        Transfer::Downloaded { .. } => "downloaded",
+        Transfer::DrmPrime => "drm_prime",
+    }
+}
+
+/// Where the frame was decoded, and how it left the decoder, for the
+/// JSON.
+fn decode_info(
+    path: &DecodePath,
+    transfer: &Transfer,
+    skipped: Option<FallbackInfo>,
+) -> DecodeInfo {
+    let transfer = transfer_name(transfer);
     match path {
         DecodePath::Software { .. } => DecodeInfo {
             path: "software",
+            transfer,
             fallback: skipped,
         },
         DecodePath::Hardware { kind } => DecodeInfo {
             path: kind.ffmpeg_name(),
+            transfer,
             fallback: None,
         },
         DecodePath::FellBack { from, reason } => DecodeInfo {
             path: "software",
+            transfer,
             fallback: Some(FallbackInfo {
                 from: from.ffmpeg_name(),
                 code: match reason {

@@ -629,6 +629,24 @@ fn every_failure_leaves_nothing_behind() {
         (&good, vec!["--reference", "--adapter", "cpu"], 2, "usage"),
         (&good, vec!["--reference", "--filter", "aniso"], 2, "usage"),
         (&good, vec!["--stream", "5"], 2, "usage"),
+        (
+            &good,
+            vec!["--zero-copy", "--decoder", "software"],
+            2,
+            "usage",
+        ),
+        (
+            &good,
+            vec!["--zero-copy", "--decoder", "vulkan"],
+            2,
+            "usage",
+        ),
+        (
+            &good,
+            vec!["--zero-copy", "--reference", "--decoder", "auto"],
+            2,
+            "usage",
+        ),
         (&missing, vec![], 1, "not_found"),
         (&text, vec![], 1, "not_media"),
         (&untagged, vec![], 1, "not_equirect"),
@@ -690,6 +708,21 @@ fn every_failure_leaves_nothing_behind() {
             "hw_unavailable",
         ),
         (&zzzz, vec!["--equirect"], 3, "no_decoder"),
+        // Zero copy refused whichever way this host's lavapipe goes: if
+        // it can't import DMA-BUFs, at once; if it can, once the decode
+        // has gone on in software for want of a render node.
+        (
+            &good,
+            vec![
+                "--zero-copy",
+                "--decoder",
+                "auto",
+                "--render-node",
+                "/nonexistent",
+            ],
+            3,
+            "import_failed",
+        ),
     ];
     // Vulkan decoding with the loader shown lavapipe alone, which has no
     // video decode: left to itself, frame opens the GPU behind the

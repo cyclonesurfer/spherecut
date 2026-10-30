@@ -1726,6 +1726,7 @@ mod tests {
             driver_info: None,
             drm_nodes: drm_nodes.to_vec(),
             ffmpeg_uses: false,
+            dmabuf_import: false,
         }
     }
 
@@ -1810,6 +1811,7 @@ mod tests {
             driver: Some(driver.into()),
             driver_info: None,
             used_by_ffmpeg: true,
+            dmabuf_import: false,
         }
     }
 
