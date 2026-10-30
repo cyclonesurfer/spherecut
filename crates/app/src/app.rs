@@ -309,7 +309,12 @@ impl SpherecutApp {
     pub fn logic(&mut self, ctx: &egui::Context) {
         let s = &mut self.state;
         s.tick();
-        s.presented = s.player.as_ref().and_then(|p| p.present(Instant::now()));
+        s.presented = s.player.as_ref().and_then(|p| {
+            // As eframe decides whether to paint: frames passed over
+            // while nothing is painted aren't dropped.
+            p.set_painted(ctx.input(|i| i.viewport().visible()).unwrap_or(true));
+            p.present(Instant::now())
+        });
         s.request_repaint(ctx);
         s.logic_ran = true;
         if let Some(smoke) = &mut self.smoke {
@@ -570,16 +575,8 @@ impl AppState {
                 Severity::Info,
                 "This file has no audio",
             )),
-            PlayerEvent::SlotDropped { error, .. } => self.notices.push(
-                Notice::new(
-                    K::SlotDropped,
-                    Severity::Warning,
-                    "The GPU is short of memory",
-                )
-                .impact(format!(
-                    "{}; playback goes on with one GPU slot fewer",
-                    error.message
-                )),
+            PlayerEvent::SlotDropped { error, live, .. } => self.notices.push(
+                Notice::slot_dropped(&error.message, live, self.streams.len().max(1)),
             ),
             PlayerEvent::UploadFailed { error, .. } => self.notices.push(
                 Notice::new(K::UploadFailed, Severity::Warning, "A frame can't be shown")

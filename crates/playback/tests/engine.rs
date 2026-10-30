@@ -233,6 +233,30 @@ fn frames_passed_over_while_playing_count_as_dropped() {
     let passed: i64 = frames.windows(2).map(|w| w[1] - w[0] - 1).sum();
     eprintln!("shown {frames:?}: {passed} passed over");
     assert_eq!(player.perf().count(Counter::Dropped), passed as u64);
+    // Not painted (the window hidden): frames passed over aren't dropped.
+    player.set_painted(false);
+    for k in (73..=82).step_by(3) {
+        clock.set(at(k), Instant::now());
+        show_seen(&player, k, &mut seen);
+    }
+    assert_eq!(player.perf().count(Counter::Dropped), passed as u64);
+    // Painted again: what is passed over from the frame shown last.
+    player.set_painted(true);
+    let from = seen.len() - 1;
+    clock.set(at(88), Instant::now());
+    show_seen(&player, 88, &mut seen);
+    let index = |t: &Time| {
+        RATE.time_to_frame(*t, spherecut_core::Rounding::Floor)
+            .unwrap()
+    };
+    let later: i64 = seen[from..]
+        .windows(2)
+        .map(|w| index(&w[1]) - index(&w[0]) - 1)
+        .sum();
+    assert_eq!(
+        player.perf().count(Counter::Dropped),
+        (passed + later) as u64
+    );
     common::join(player);
 }
 

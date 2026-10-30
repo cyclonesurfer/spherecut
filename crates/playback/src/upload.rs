@@ -486,6 +486,7 @@ impl UploadThread {
                     shared.event(PlayerEvent::SlotDropped {
                         slot,
                         error: PlayerError::from(&e),
+                        live: slots.stats().active,
                     });
                     return true;
                 }
@@ -532,6 +533,7 @@ impl UploadThread {
                 shared.event(PlayerEvent::SlotDropped {
                     slot,
                     error: PlayerError::from(&e),
+                    live: slots.stats().active,
                 });
             }
             Err(e) => {

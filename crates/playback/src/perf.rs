@@ -10,7 +10,7 @@
 //! stores and loads, never a lock: the UI thread records too, and reads
 //! once a frame.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Samples kept per stage: about 4 s of UI frames at 60 Hz, 8 s of
@@ -153,40 +153,62 @@ impl Counter {
     }
 }
 
-/// One stage's last samples: f32 bits in atomics, and how many were ever
-/// recorded, whose remainder by [`RING`] is where the next one goes.
+/// One stage's last samples, and how many were ever recorded, whose
+/// remainder by [`RING`] is where the next one goes. Each slot holds the
+/// sample's f32 bits with the low 32 bits of its number, so that a
+/// reader tells a slot written for that number from one still holding
+/// the sample it replaces.
 #[derive(Debug)]
 struct Ring {
-    samples: [AtomicU32; RING],
+    samples: [AtomicU64; RING],
     recorded: AtomicU64,
 }
+
+/// A slot no sample has been written to: its number is no index's until
+/// 2^32 - 1 samples have been, and by then every slot has been written.
+const EMPTY: u64 = 0xffff_ffff << 32;
 
 impl Ring {
     fn new() -> Self {
         Ring {
-            samples: std::array::from_fn(|_| AtomicU32::new(f32::NAN.to_bits())),
+            samples: std::array::from_fn(|_| AtomicU64::new(EMPTY)),
             recorded: AtomicU64::new(0),
         }
     }
 
     fn push(&self, v: f32) {
         let i = self.recorded.fetch_add(1, Ordering::AcqRel);
-        self.samples[(i % RING as u64) as usize].store(v.to_bits(), Ordering::Release);
+        let word = (u64::from(i as u32) << 32) | u64::from(v.to_bits());
+        self.samples[(i % RING as u64) as usize].store(word, Ordering::Release);
     }
 
-    /// The samples kept, oldest first. A sample recorded while this reads
-    /// may stand in for the one it replaced; one being recorded, whose
-    /// slot is still empty, is left out.
+    /// The samples kept, oldest first, each with its number, and the
+    /// first number still being recorded while this reads (or how many
+    /// were recorded): a reader counts as read only those before it, and
+    /// gets the rest in a later read.
+    fn read(&self) -> (u64, Vec<(u64, f32)>) {
+        let recorded = self.recorded.load(Ordering::Acquire);
+        let first = recorded.saturating_sub(RING as u64);
+        let mut upto = recorded;
+        let mut kept = Vec::with_capacity((recorded - first) as usize);
+        for i in first..recorded {
+            let word = self.samples[(i % RING as u64) as usize].load(Ordering::Acquire);
+            let number = (word >> 32) as u32;
+            if number == i as u32 {
+                kept.push((i, f32::from_bits(word as u32)));
+            } else if number != (i + RING as u64) as u32 {
+                // Not yet written; one a ring later replaced it otherwise.
+                upto = upto.min(i);
+            }
+        }
+        (upto, kept)
+    }
+
+    /// The samples kept, oldest first, and how many were ever recorded.
     fn samples(&self) -> (u64, Vec<f32>) {
         let recorded = self.recorded.load(Ordering::Acquire);
-        let kept = recorded.min(RING as u64);
-        let samples = (recorded - kept..recorded)
-            .map(|i| {
-                f32::from_bits(self.samples[(i % RING as u64) as usize].load(Ordering::Acquire))
-            })
-            .filter(|v| !v.is_nan())
-            .collect();
-        (recorded, samples)
+        let (_, kept) = self.read();
+        (recorded, kept.into_iter().map(|(_, v)| v).collect())
     }
 }
 
@@ -245,9 +267,13 @@ impl PerfStats {
     /// every sample, but for those it was a ring's worth too late for
     /// (the smoke run).
     pub fn samples_after(&self, stage: Stage, seen: u64) -> (u64, Vec<f32>) {
-        let (recorded, kept) = self.rings[stage as usize].samples();
-        let new = recorded.saturating_sub(seen).min(kept.len() as u64) as usize;
-        (recorded, kept[kept.len() - new..].to_vec())
+        let (upto, kept) = self.rings[stage as usize].read();
+        let new = kept
+            .into_iter()
+            .filter(|(i, _)| *i >= seen && *i < upto)
+            .map(|(_, v)| v)
+            .collect();
+        (upto.max(seen), new)
     }
 
     pub fn summary(&self, stage: Stage) -> StageSummary {
@@ -418,6 +444,25 @@ mod tests {
         assert_eq!(s.last(), Some(&((RING * 3 + 6) as f32)));
         assert!(s.windows(2).all(|w| w[1] == w[0] + 1.0));
         assert_eq!(p.summary(Stage::UiFrame).recorded, RING as u64 * 3 + 7);
+    }
+
+    #[test]
+    fn a_sample_being_recorded_is_read_later_not_as_the_one_it_replaces() {
+        let p = PerfStats::new();
+        for v in 0..RING + 3 {
+            p.record(Stage::Decode, v as f32);
+        }
+        let (seen, _) = p.samples_after(Stage::Decode, 0);
+        assert_eq!(seen, (RING + 3) as u64);
+        // A push that has its number and hasn't stored its sample yet:
+        // its slot still holds sample 3.
+        let ring = &p.rings[Stage::Decode as usize];
+        let i = ring.recorded.fetch_add(1, Ordering::AcqRel);
+        assert_eq!(p.samples_after(Stage::Decode, seen), (seen, vec![]));
+        assert!(!p.samples(Stage::Decode).contains(&3.0));
+        let word = (u64::from(i as u32) << 32) | u64::from(99.0f32.to_bits());
+        ring.samples[(i % RING as u64) as usize].store(word, Ordering::Release);
+        assert_eq!(p.samples_after(Stage::Decode, seen), (seen + 1, vec![99.0]));
     }
 
     #[test]

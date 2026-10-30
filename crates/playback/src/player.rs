@@ -147,10 +147,13 @@ pub enum PlayerEvent {
     /// audio: video plays on the system clock until it comes.
     AudioLate,
     /// The GPU had no memory for a slot: playback goes on with one fewer
-    /// (risk 11).
+    /// (risk 11), `live` of them. With no more than the file's streams, a
+    /// seek or a step never lands (D34): the viewer takes that as the
+    /// GPU failing.
     SlotDropped {
         slot: usize,
         error: PlayerError,
+        live: usize,
     },
     /// A frame can't be uploaded; it isn't tried again.
     UploadFailed {
@@ -473,6 +476,9 @@ struct Ui {
     view: Vec<StreamView>,
     last_present: Option<Instant>,
     intervals: VecDeque<f32>,
+    /// Whether what is presented is painted: frames passed over while
+    /// it isn't (the window hidden) aren't dropped.
+    painted: bool,
     /// When stream 0's frame last changed while playing.
     last_new: Option<Instant>,
     /// The playhead the presenter last gave the cache.
@@ -668,6 +674,7 @@ impl Player {
                 view: Vec::new(),
                 last_present: None,
                 intervals: VecDeque::with_capacity(INTERVALS),
+                painted: true,
                 last_new: None,
                 playhead: None,
                 snapshot: PlayerSnapshot::default(),
@@ -959,6 +966,16 @@ impl Player {
             })
             .collect::<Option<Vec<_>>>()
             .filter(|next| !next.is_empty())
+    }
+
+    /// Whether the frames [`present`](Self::present) picks are painted:
+    /// false while the window is hidden, when eframe runs no UI, so that
+    /// the frames passed over then aren't counted as dropped (plan
+    /// section 10). True until said otherwise. Never waits.
+    pub fn set_painted(&self, painted: bool) {
+        if let Ok(mut ui) = self.ui.try_borrow_mut() {
+            ui.painted = painted;
+        }
     }
 
     /// The frames to draw now, picked for the clock's time when they will
@@ -1271,13 +1288,14 @@ impl Player {
     fn pick(&self, ui: &mut Ui, t: Time, now: Instant) -> bool {
         let views = self.shared.slots.views();
         let mut changed = false;
+        let count = ui.painted;
         for i in 0..ui.shown.len() {
             let best = views
                 .iter()
                 .filter(|v| v.frame.epoch == ui.epoch && v.frame.stream == i && v.frame.time <= t)
                 .max_by_key(|v| v.frame.time);
             if let Some(v) = best {
-                changed |= self.show(ui, i, v, now, true);
+                changed |= self.show(ui, i, v, now, count);
             }
         }
         changed
