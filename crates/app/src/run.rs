@@ -261,6 +261,12 @@ struct EframeApp {
 }
 
 impl eframe::App for EframeApp {
+    /// eframe calls this before each `ui`, and alone while the window is
+    /// hidden: playback goes on.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.app.logic(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.app.ui(ui);
     }
@@ -283,6 +289,36 @@ impl eframe::App for EframeApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// eframe's hidden passes reach the app's `logic`: without the
+    /// forward, eframe's default does nothing and playback stops while
+    /// the window is hidden.
+    #[test]
+    fn eframes_logic_reaches_the_apps() {
+        let gpu = Gpu::headless(&AdapterChoice::Cpu).expect("lavapipe");
+        let app = SpherecutApp::new(AppParts {
+            gpu: gpu.clone(),
+            backend: Arc::new(FfmpegBackend::new()),
+            clock: Arc::new(SystemClock::new()),
+            audio: None,
+            repaint: None,
+            config: PlayerConfig::default(),
+            doctor: DoctorRun::Never,
+            list_dirs: false,
+            settings: Settings::default(),
+            tree: None,
+            open: Vec::new(),
+        });
+        let mut app = EframeApp {
+            app,
+            leftover: Rc::default(),
+        };
+        assert!(!app.app.state.logic_ran);
+        let ctx = egui::Context::default();
+        eframe::App::logic(&mut app, &ctx, &mut eframe::Frame::_new_kittest());
+        assert!(app.app.state.logic_ran);
+        app.app.begin_shutdown();
+    }
 
     #[test]
     fn a_display_is_found_by_winits_rule() {
