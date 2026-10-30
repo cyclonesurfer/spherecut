@@ -256,6 +256,34 @@ fn a_silent_file_and_a_null_output_each_say_so() {
     );
     let _ = h.get_by_label("No audio output device: playing silently");
     let _ = h.get_by_label_contains("systemctl --user status pipewire");
+
+    // The machine's notice outlives the file: dismissed, it stays so
+    // when the next file with audio says it again.
+    h.state_mut()
+        .state
+        .notices
+        .dismiss(&NoticeKind::NoAudioDevice);
+    h.state_mut().state.open(stereo_clip());
+    common::step_until(&mut h, WAIT, "the next file's audio", |a| {
+        a.state
+            .player
+            .as_ref()
+            .is_some_and(|p| p.audio_stats().is_some())
+    });
+    for _ in 0..3 {
+        h.step();
+    }
+    let n = h
+        .state()
+        .state
+        .notices
+        .get(&NoticeKind::NoAudioDevice)
+        .expect("kept across the open");
+    assert!(n.dismissed);
+    assert!(
+        h.query_by_label("No audio output device: playing silently")
+            .is_none()
+    );
 }
 
 /// FFmpeg's backend, failing frame 2 "as hardware": decoding in software
@@ -311,9 +339,13 @@ fn a_hardware_fallback_is_a_warning() {
     parts.open = vec![common::grid_clip().to_path_buf()];
     let mut h = common::harness(SpherecutApp::new(parts), &rs, SIZE, 1.0);
     common::until_shown(&mut h, &rs);
-    // Frames on, past the failing one.
+    // Frames on, each shown, past the failing one.
     for _ in 0..4 {
+        let before = h.state().state.shown.clone();
         h.key_press(egui::Key::ArrowRight);
+        common::step_until(&mut h, WAIT, "the next frame", |a| {
+            a.state.shown.is_some() && a.state.shown != before
+        });
         common::until_shown(&mut h, &rs);
     }
     common::step_until(&mut h, WAIT, "the fallback notice", |a| {

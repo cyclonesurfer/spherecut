@@ -11,7 +11,7 @@ use spherecut_media::spherical::{Projection, StereoMode};
 use spherecut_playback::{Counter, Stage};
 
 use crate::app::{AppState, DoctorState};
-use crate::jobs::{Job, Poll};
+use crate::jobs::{Job, Poll, Threads};
 use crate::notices::{Notice, NoticeKind};
 
 /// The extensions the Files pane lists: MP4 and MOV, Matroska and WebM,
@@ -67,6 +67,8 @@ pub struct FilesPane {
     dir: Option<PathBuf>,
     listing: Option<Listing>,
     job: Option<Job<(PathBuf, Listing)>>,
+    /// Listings given up for a newer one.
+    threads: Threads,
     enabled: bool,
     /// Bring the pane's tab forward on the next frame (File, Open…).
     pub focus: bool,
@@ -86,6 +88,7 @@ impl FilesPane {
             dir: None,
             listing: None,
             job: None,
+            threads: Threads::default(),
             enabled,
             focus: false,
         };
@@ -109,11 +112,22 @@ impl FilesPane {
         self.dir = Some(dir.clone());
         self.listing = None;
         if self.enabled {
-            self.job = Some(Job::spawn("files", move || {
+            let job = Job::spawn("files", move || {
                 let l = list_dir(&dir);
                 (dir, l)
-            }));
+            });
+            if let Some(old) = self.job.replace(job) {
+                self.threads.keep(old);
+            }
         }
+    }
+
+    /// The listings' threads still running, for the join at exit.
+    pub fn take_threads(&mut self) -> Vec<std::thread::JoinHandle<()>> {
+        if let Some(job) = self.job.take() {
+            self.threads.keep(job);
+        }
+        self.threads.take()
     }
 
     /// Take a listing the worker finished.
@@ -205,6 +219,8 @@ impl FilesPane {
 pub struct InfoPane {
     path: Option<PathBuf>,
     job: Option<Job<Result<String, String>>>,
+    /// Probes given up for a newer file's.
+    threads: Threads,
     text: Option<Result<String, String>>,
 }
 
@@ -214,11 +230,22 @@ impl InfoPane {
         let p = path.to_path_buf();
         self.path = Some(p.clone());
         self.text = None;
-        self.job = Some(Job::spawn("probe", move || {
+        let job = Job::spawn("probe", move || {
             spherecut_media::probe::probe(&p)
                 .map(|r| spherecut_media::probe::render_text(&r))
                 .map_err(|e| e.error.to_string())
-        }));
+        });
+        if let Some(old) = self.job.replace(job) {
+            self.threads.keep(old);
+        }
+    }
+
+    /// The probes' threads still running, for the join at exit.
+    pub fn take_threads(&mut self) -> Vec<std::thread::JoinHandle<()>> {
+        if let Some(job) = self.job.take() {
+            self.threads.keep(job);
+        }
+        self.threads.take()
     }
 
     pub fn pending(&self) -> bool {

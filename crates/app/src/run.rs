@@ -5,7 +5,8 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use spherecut_core::brand;
 use spherecut_core::clock::SystemClock;
@@ -20,6 +21,14 @@ use crate::viewer::ViewerResources;
 /// eframe storage keys.
 const SETTINGS_KEY: &str = "spherecut-settings";
 const TREE_KEY: &str = "spherecut-tiles";
+
+/// The longest the player's threads are waited for once the window has
+/// gone.
+const PLAYER_BUDGET: Duration = Duration::from_secs(2);
+
+/// The longest the jobs' threads are, from the same start: the doctor's
+/// checks take up to 3 s.
+const JOBS_BUDGET: Duration = Duration::from_secs(3);
 
 /// What the CLI passes when it has no subcommand.
 #[derive(Debug, Clone, Default)]
@@ -84,7 +93,8 @@ pub fn install(render_state: &egui_wgpu::RenderState, gpu: &Gpu) {
 
 /// The GUI: open the device, then the window, and run until it closes.
 /// The player's threads are joined after the event loop, with a 2 s
-/// budget; one still in a driver call is left behind, and logged.
+/// budget, and the jobs' (the doctor's checks, a listing, a probe) with
+/// 3 s; one still in a driver call is left behind, and logged.
 pub fn run(args: GuiArgs) -> Result<(), GuiError> {
     if !has_display(|k| std::env::var(k).ok()) {
         return Err(GuiError::NoDisplay);
@@ -105,7 +115,7 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
     };
     let node = spherecut_media::hw::render_node(Some(&ids), None);
     let backend: Arc<FfmpegBackend> = Arc::new(FfmpegBackend::on_node(node.clone()));
-    let left = Rc::new(RefCell::new(None::<Player>));
+    let left = Rc::new(RefCell::new(Leftover::default()));
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         // egui's pass then has one sample and no depth, as the viewer's
@@ -179,32 +189,75 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
         }),
     );
     spherecut_core::blocking::unmark_ui_thread();
-    if let Some(player) = left.borrow_mut().take() {
-        join(player);
-    }
+    join(std::mem::take(&mut *left.borrow_mut()));
     result.map_err(|e| GuiError::Window(e.to_string()))
+}
+
+/// What `on_exit` leaves for [`run`] to join.
+#[derive(Default)]
+struct Leftover {
+    player: Option<Player>,
+    threads: Vec<JoinHandle<()>>,
 }
 
 #[expect(
     clippy::disallowed_methods,
     reason = "after the event loop, on no UI thread: the player's join, with its own budget"
 )]
-fn join(player: Player) {
-    let report = player.join(Duration::from_secs(2));
-    if !report.is_clean() {
-        tracing::warn!(
-            panicked = ?report.panicked,
-            still_running = ?report.still_running,
-            "the player's threads didn't all end"
-        );
+fn join(left: Leftover) {
+    let start = Instant::now();
+    if let Some(player) = left.player {
+        let report = player.join(PLAYER_BUDGET);
+        if !report.is_clean() {
+            tracing::warn!(
+                panicked = ?report.panicked,
+                still_running = ?report.still_running,
+                "the player's threads didn't all end"
+            );
+        }
     }
+    let still_running = join_threads(left.threads, start + JOBS_BUDGET);
+    if !still_running.is_empty() {
+        tracing::warn!(?still_running, "the jobs' threads didn't all end");
+    }
+}
+
+/// Join `threads` as they end, until `deadline`. Those still running
+/// are left detached; their names come back.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "after the event loop, on no UI thread: the jobs' joins, with a budget"
+)]
+fn join_threads(mut threads: Vec<JoinHandle<()>>, deadline: Instant) -> Vec<String> {
+    spherecut_core::may_block("joining the jobs' threads");
+    let name = |h: &JoinHandle<()>| h.thread().name().unwrap_or("a job").to_owned();
+    loop {
+        let mut i = 0;
+        while i < threads.len() {
+            if threads[i].is_finished() {
+                let h = threads.swap_remove(i);
+                let n = name(&h);
+                if h.join().is_err() {
+                    tracing::warn!(thread = n, "a job's thread panicked");
+                }
+            } else {
+                i += 1;
+            }
+        }
+        if threads.is_empty() || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    threads.iter().map(name).collect()
 }
 
 /// The app, as eframe runs it.
 struct EframeApp {
     app: SpherecutApp,
-    /// Where `on_exit` leaves the player, for [`run`] to join.
-    leftover: Rc<RefCell<Option<Player>>>,
+    /// Where `on_exit` leaves the player and the jobs' threads, for
+    /// [`run`] to join.
+    leftover: Rc<RefCell<Leftover>>,
 }
 
 impl eframe::App for EframeApp {
@@ -221,7 +274,8 @@ impl eframe::App for EframeApp {
         // Tells the threads to stop, and never waits.
         self.app.begin_shutdown();
         if let Ok(mut left) = self.leftover.try_borrow_mut() {
-            *left = self.app.state.player.take();
+            left.player = self.app.state.player.take();
+            left.threads = self.app.take_threads();
         }
     }
 }
@@ -249,5 +303,37 @@ mod tests {
         assert!(has_display(env(&[("WAYLAND_SOCKET", "3")])));
         assert!(has_display(env(&[("DISPLAY", ":0")])));
         assert_eq!(GuiError::NoDisplay.code(), "no_display");
+    }
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a test's worker waits to be let go"
+    )]
+    fn the_jobs_threads_are_joined_until_the_deadline() {
+        let ends = std::thread::Builder::new()
+            .name("ends".into())
+            .spawn(|| {})
+            .unwrap();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let waits = std::thread::Builder::new()
+            .name("waits".into())
+            .spawn(move || {
+                let _ = wait.recv();
+            })
+            .unwrap();
+        let start = Instant::now();
+        let left = join_threads(vec![ends, waits], start + Duration::from_millis(100));
+        assert_eq!(left, ["waits"]);
+        assert!(start.elapsed() >= Duration::from_millis(100));
+        go.send(()).unwrap();
+        // A thread that ends in time is joined, and the wait ends with it.
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let waits = std::thread::spawn(move || {
+            let _ = wait.recv();
+        });
+        go.send(()).unwrap();
+        let left = join_threads(vec![waits], Instant::now() + Duration::from_secs(10));
+        assert!(left.is_empty());
     }
 }

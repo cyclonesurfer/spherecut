@@ -193,6 +193,18 @@ pub fn draws(rs: &egui_wgpu::RenderState) -> (u64, u64) {
     (v.projected, v.encoded_only)
 }
 
+/// The size of the viewer's target, as `prepare` made it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test's read of the renderer lock, between frames"
+)]
+pub fn target_extent(rs: &egui_wgpu::RenderState) -> Option<(u32, u32)> {
+    let r = rs.renderer.read();
+    r.callback_resources
+        .get::<ViewerResources>()
+        .and_then(ViewerResources::target_extent)
+}
+
 /// What the viewer's target last projected.
 #[expect(
     clippy::disallowed_methods,

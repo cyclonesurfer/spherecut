@@ -1,12 +1,15 @@
 //! The viewer on lavapipe (M1 plan sections 7.3, 7.4 and 7.7): one
 //! pixel per pixel at fractional scales, input rounded as the paint
-//! callback rounds, the marker drag, zoom about the pointer, and resizes.
+//! callback rounds, the marker drag, zoom about the pointer, resizes, and
+//! a projection that egui-wgpu recorded but never painted.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
 use egui::epaint::ViewportInPixels;
+use egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor};
+use spherecut_app::viewer::{ViewerCallback, ViewerResources};
 use spherecut_render::{Pixels, StillOptions, render_still};
 
 /// The viewer's rect in the rendered image, as `prepare` rounds it.
@@ -134,6 +137,12 @@ fn input_maps_through_the_rounding_prepare_uses() {
                 prepare_side.width_px,
                 prepare_side.height_px
             ),
+            "{ppp} {size:?}"
+        );
+        // And the target prepare made is the size input maps through.
+        assert_eq!(
+            common::target_extent(&rs),
+            Some(spherecut_app::viewer::physical(&ui_side)),
             "{ppp} {size:?}"
         );
         // The rect's corners are whole pixels, so nothing is rounded.
@@ -317,6 +326,115 @@ fn an_unchanged_frame_and_view_only_encode() {
     assert_eq!(common::draws(&rs).0, p1 + 1);
 }
 
+/// egui-wgpu runs the callbacks' `prepare` before it acquires the
+/// window's surface, and drops what `prepare` recorded when that fails
+/// (Outdated, Lost, Timeout, Occluded): `paint` doesn't follow. Such a
+/// projection is made again, and only one that was painted is encoded
+/// alone.
+#[test]
+fn a_projection_never_painted_is_projected_again() {
+    let gpu = common::gpu();
+    let rs = common::render_state(&gpu);
+    let size = [640u32, 420u32];
+    let mut h = common::harness(
+        common::grid_app(&gpu),
+        &rs,
+        [size[0] as f32, size[1] as f32],
+        1.0,
+    );
+    common::until_shown(&mut h, &rs);
+    let key = h.state().state.shown.clone().unwrap();
+    let rect = h.state().state.viewer_rect.unwrap();
+    let presented = h
+        .state()
+        .state
+        .player
+        .as_ref()
+        .unwrap()
+        .present(std::time::Instant::now())
+        .expect("a frame on screen");
+    let frame = presented.frames.first().unwrap();
+    assert_eq!((frame.slot, frame.frame), (key.slot, key.frame));
+    let cb = ViewerCallback {
+        rect,
+        shown: Some((frame.gpu.clone(), key.clone())),
+    };
+    let mut res = CallbackResources::new();
+    res.insert(ViewerResources::new(&gpu, rs.target_format));
+    let sd = ScreenDescriptor {
+        size_in_pixels: size,
+        pixels_per_point: 1.0,
+    };
+    let prepare = |res: &mut CallbackResources| {
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        let extra = cb.prepare(&gpu.device, &gpu.queue, &sd, &mut enc, res);
+        assert!(extra.is_empty());
+        gpu.queue.submit([enc.finish()]);
+    };
+    let draws = |res: &CallbackResources| {
+        let v = res.get::<ViewerResources>().unwrap();
+        (v.projected, v.encoded_only)
+    };
+
+    prepare(&mut res);
+    assert_eq!(draws(&res), (1, 0));
+    assert_eq!(res.get::<ViewerResources>().unwrap().last(), None);
+    // The surface wasn't acquired: no paint. The same frame and view are
+    // projected again.
+    prepare(&mut res);
+    assert_eq!(draws(&res), (2, 0));
+
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("a window's surface"),
+        size: wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: rs.target_format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = enc
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui's pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            })
+            .forget_lifetime();
+        let info = egui::PaintCallbackInfo {
+            viewport: rect,
+            clip_rect: rect,
+            pixels_per_point: 1.0,
+            screen_size_px: size,
+        };
+        cb.paint(info, &mut pass, &res);
+    }
+    gpu.queue.submit([enc.finish()]);
+    assert_eq!(res.get::<ViewerResources>().unwrap().last(), Some(&key));
+    // Painted: the next draw of it only encodes.
+    prepare(&mut res);
+    assert_eq!(draws(&res), (2, 1));
+    drop(presented);
+}
+
 #[test]
 fn steps_show_the_next_and_previous_frames() {
     let gpu = common::gpu();
@@ -366,4 +484,70 @@ fn a_resize_sweep_never_panics() {
         h.step();
         h.step();
     }
+}
+
+/// While the window is minimized or occluded, eframe runs only the app's
+/// `logic`: the presenter goes on with it, frame by frame, and ends the
+/// clip. Without it, nothing ends the clip.
+#[test]
+fn playback_goes_on_while_the_window_is_hidden() {
+    use std::time::{Duration, Instant};
+    let gpu = common::gpu();
+    let rs = common::render_state(&gpu);
+    let mut h = common::harness(common::grid_app(&gpu), &rs, [640.0, 420.0], 1.0);
+    common::until_shown(&mut h, &rs);
+    let ctx = h.ctx.clone();
+    let snapshot = |h: &egui_kittest::Harness<'_, spherecut_app::SpherecutApp>| {
+        h.state().state.player.as_ref().unwrap().snapshot()
+    };
+    // Hidden from here: logic alone, at eframe's 10 ms a pass.
+    let hidden =
+        |h: &mut egui_kittest::Harness<'_, spherecut_app::SpherecutApp>,
+         done: &dyn Fn(&egui_kittest::Harness<'_, spherecut_app::SpherecutApp>) -> bool| {
+            let start = Instant::now();
+            let mut times = std::collections::BTreeSet::new();
+            while !done(h) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "not done: {:?}",
+                    snapshot(h)
+                );
+                h.state_mut().logic(&ctx);
+                if let Some(p) = &h.state().state.presented {
+                    times.extend(p.frames.iter().map(|f| f.frame.time));
+                }
+                common::pace(Duration::from_millis(10));
+            }
+            times
+        };
+    h.state_mut().state.toggle_play();
+    let times = hidden(&mut h, &|h| snapshot(h).at_end);
+    assert_eq!(snapshot(&h).state, spherecut_playback::PlayState::Paused);
+    assert!(times.len() >= 2, "frames presented while hidden: {times:?}");
+    // Shown again, as eframe runs a pass (logic, then the UI): the app is
+    // where logic left it.
+    h.state_mut().logic(&ctx);
+    h.step();
+    let s = &h.state().state;
+    assert!(s.snapshot.at_end);
+    assert_eq!(
+        s.shown.as_ref().map(|k| k.frame.time),
+        times.last().copied()
+    );
+
+    // The control: back to the start, and played with no passes at all.
+    // The clock runs past the 0.4 s clip's end, and nothing ends it.
+    h.state_mut().state.seek(
+        spherecut_core::Time::ZERO,
+        spherecut_media::backend::SeekMode::Exact,
+    );
+    hidden(&mut h, &|h| {
+        let s = snapshot(h);
+        !s.at_end && s.state == spherecut_playback::PlayState::Paused
+    });
+    h.state_mut().state.toggle_play();
+    common::pace(Duration::from_secs(1));
+    assert!(!snapshot(&h).at_end);
+    h.state_mut().logic(&ctx);
+    assert!(snapshot(&h).at_end);
 }

@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use egui_tiles::{Container, Tile, TileId, Tiles, Tree};
@@ -167,6 +168,10 @@ pub struct AppState {
     pub viewer_rect: Option<egui::Rect>,
     /// What the last UI frame gave the viewer to draw.
     pub shown: Option<DrawKey>,
+    /// The frames [`SpherecutApp::logic`] picked, for the viewer to draw.
+    pub presented: Option<Presented>,
+    /// `logic` ran for the coming `ui`, as eframe runs it before each.
+    pub logic_ran: bool,
 }
 
 /// The app.
@@ -277,6 +282,8 @@ impl SpherecutApp {
             streams: Vec::new(),
             viewer_rect: None,
             shown: None,
+            presented: None,
+            logic_ran: false,
         };
         if let Some(path) = open.into_iter().next() {
             state.open(path);
@@ -287,17 +294,36 @@ impl SpherecutApp {
         }
     }
 
+    /// What runs every pass, the window shown or not: the player's events
+    /// and the doctor's result taken, the jobs polled, and the frames to
+    /// show picked. eframe calls only this while the window is minimized
+    /// or occluded: the presenter moves the cache's playhead and ends the
+    /// clip, so playback goes on hidden. It asks for the next pass while
+    /// anything moves. Never waits.
+    pub fn logic(&mut self, ctx: &egui::Context) {
+        let s = &mut self.state;
+        s.tick();
+        s.presented = s.player.as_ref().and_then(|p| p.present(Instant::now()));
+        s.request_repaint(ctx);
+        s.logic_ran = true;
+    }
+
     /// The whole UI, for one frame: the menu bar, the notices and the
-    /// tiles. It also does what eframe's `logic` would (the player's
-    /// events and the doctor's result), so that kittest runs it too.
+    /// tiles. eframe runs [`logic`](Self::logic) before it; when nothing
+    /// did (kittest), it runs `logic` itself.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        if !self.state.logic_ran {
+            self.logic(ui.ctx());
+        }
+        self.state.logic_ran = false;
         let now = Instant::now();
-        self.state.tick(ui.ctx());
         egui::Panel::top("menu").show(ui, |ui| self.state.menu_ui(ui));
         if !self.state.notices.shown().is_empty() {
             egui::Panel::top("notices").show(ui, |ui| self.state.notices.ui(ui));
         }
-        self.state.keys(ui, now);
+        self.state.keys(ui);
+        // A text field's focus holds the keys, not a scrub's settle.
+        self.state.scrub.settle(self.state.player.as_ref(), now);
         if std::mem::take(&mut self.state.files.focus) {
             self.tree
                 .make_active(|_, tile| matches!(tile, Tile::Pane(Pane::Files)));
@@ -319,29 +345,60 @@ impl SpherecutApp {
             p.begin_shutdown();
         }
     }
+
+    /// The threads of the jobs still running (the doctor's checks, a
+    /// listing, a probe), given up, for [`crate::run`] to join after the
+    /// event loop.
+    pub fn take_threads(&mut self) -> Vec<JoinHandle<()>> {
+        let s = &mut self.state;
+        let mut threads = s.files.take_threads();
+        threads.extend(s.info.take_threads());
+        if matches!(s.doctor, DoctorState::Pending(_))
+            && let DoctorState::Pending(job) = std::mem::replace(&mut s.doctor, DoctorState::Lost)
+        {
+            threads.extend(job.into_thread());
+        }
+        threads
+    }
 }
 
 impl AppState {
     /// Open `path` in the player, and forget the last file's notices.
+    /// The machine's stay, dismissed or not: the doctor's, the adapter's,
+    /// a failed GPU, a missing audio device, a slot the GPU dropped.
     pub fn open(&mut self, path: PathBuf) {
         let Some(player) = &self.player else {
             return;
         };
+        // The last file's events, sent since this frame's tick, go with
+        // its notices rather than onto the next file's. Once the player
+        // has the new file, it sends none of the last one's (but for one
+        // already past its check: D36).
+        let events = player.events();
+        for e in events {
+            self.event(e);
+        }
         self.notices.retain(|k| {
             matches!(
                 k,
-                NoticeKind::CpuAdapter | NoticeKind::Doctor(_) | NoticeKind::GpuFailed
+                NoticeKind::CpuAdapter
+                    | NoticeKind::Doctor(_)
+                    | NoticeKind::GpuFailed
+                    | NoticeKind::NoAudioDevice
+                    | NoticeKind::SlotDropped
             )
         });
         self.streams.clear();
         self.info.open(&path);
         self.view.reset();
-        player.open(path);
+        if let Some(player) = &self.player {
+            player.open(path);
+        }
     }
 
     /// The player's events into notices, the doctor's result into
     /// banners, and the jobs polled. Never waits.
-    fn tick(&mut self, ctx: &egui::Context) {
+    fn tick(&mut self) {
         if let DoctorState::Pending(job) = &self.doctor {
             match job.poll() {
                 Poll::Pending => {}
@@ -369,7 +426,6 @@ impl AppState {
         for e in events {
             self.event(e);
         }
-        let _ = ctx;
     }
 
     fn event(&mut self, e: PlayerEvent) {
@@ -578,7 +634,7 @@ impl AppState {
     }
 
     /// The transport and view keys, while no text field has focus.
-    fn keys(&mut self, ui: &mut egui::Ui, now: Instant) {
+    fn keys(&mut self, ui: &mut egui::Ui) {
         if ui.ctx().text_edit_focused() {
             return;
         }
@@ -631,7 +687,6 @@ impl AppState {
                 self.view.switch_to(preset, t);
             }
         }
-        self.scrub.settle(self.player.as_ref(), now);
     }
 
     pub fn toggle_play(&mut self) {
@@ -707,11 +762,11 @@ impl AppState {
         });
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
-            .show(ui, |ui| self.picture_ui(ui, now));
+            .show(ui, |ui| self.picture_ui(ui));
     }
 
     /// The projected picture, and the drag and zoom on it.
-    fn picture_ui(&mut self, ui: &mut egui::Ui, now: Instant) {
+    fn picture_ui(&mut self, ui: &mut egui::Ui) {
         let t = ui.input(|i| i.time);
         self.view.settle(t);
         let area = ui.available_rect_before_wrap();
@@ -758,7 +813,7 @@ impl AppState {
 
         // What to draw: the first stream's frame on screen (the raw view of
         // a two-lens source is slice 8's).
-        let presented: Option<Presented> = self.player.as_ref().and_then(|p| p.present(now));
+        let presented = self.presented.take();
         let shown = presented.as_ref().and_then(|p| p.frames.first());
         let view = ViewParams::new(self.view.q, self.view.lens);
         let filter = self.view.filter;
