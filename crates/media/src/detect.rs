@@ -202,8 +202,13 @@ pub fn guess(
     }
 
     if g.vendor.is_none() {
+        // A stereo box alone (`st3d` without `sv3d`) is flat 3D.
         if streams.iter().any(|s| {
-            s.spherical.v2.is_some() || s.spherical.v1.as_ref().is_some_and(|v| v.spherical)
+            s.spherical
+                .v2
+                .as_ref()
+                .is_some_and(|v| v.projection.is_some())
+                || s.spherical.v1.as_ref().is_some_and(|v| v.spherical)
         }) {
             g.layout = Layout::EquirectTagged;
             g.evidence.push("spherical video metadata present".into());

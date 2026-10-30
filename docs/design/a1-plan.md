@@ -278,6 +278,41 @@ win; D46 has the whole of it.
       duplicate timestamps, ten repeats) and `levels-3s.mp4` (a loud
       tone, silence, a tone clipped twice over, a quiet tone).
 
+**As built in A1.6** (2026-10-30). Where these differ from 6.4, these
+win; D46 has the whole of it.
+
+34. **check:**
+    - **YouTube's numbers** are from its help pages fetched on
+      2026-10-30, quoted in `docs/research/youtube-360-2026-10.md`: MP4,
+      MOV or WebM; the supported list's codecs; progressive; equirect;
+      spatial audio as first-order ambiX in 4 channels (6 with
+      head-locked stereo) at 48 kHz, as AAC (256 kb/s), Opus in MP4
+      (512 or 768 kb/s, mapping family 2) or PCM in MOV, on the one
+      audio track. The pages give no size, aspect or video bitrate, so
+      none is checked; their recommendations (H.264, 4:2:0, BT.709,
+      common rates, AAC-LC or Opus, 48 kHz) are `advice`, which never
+      fails a file. Cubemaps fail `youtube_360`: no page says YouTube
+      takes one.
+    - **The response** is `{target, pass, rules, advice, warnings}`. A
+      rule that doesn't apply (V1 against V2 without both, SA3D without
+      an SA3D track) isn't listed. A file FFmpeg can't open for its
+      damage gets one failed `readable` rule, not an error.
+    - **The aspect rule** compares one eye's picture with the
+      projection's shape, so bounds and a cubemap's 3:2 are checked too,
+      not only 2:1, 1:1 and 4:1.
+    - **The fixes** are plain words until M2's exports exist to be named.
+    - **media** gained what check needed: Matroska and WebM projections
+      from FFmpeg's side data (probe called those files flat), a stereo
+      box alone as flat 3D (detect called it equirect), SA3D's
+      head-locked bit (a head-locked file read as not ambiX), an Opus
+      track's mapping family, and `spherical::write::sv3d` for any
+      projection.
+    - **The list** is 6.7 KB with check, past amendment 32's 6 KiB. The
+      share is now 7 KiB, leaving A2's seven tools 5 KiB of the 12; A2's
+      plan trims A1's descriptions if its tools need more. A read-only
+      tool no longer lists `idempotentHint`, which MCP defines only for
+      a tool that isn't read-only; `look` writing keeps it, true.
+
 ## 0. What A1 is for
 
 An agent (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor, Zed,
@@ -548,7 +583,8 @@ A failed call is a tool result with `isError: true` and one text block:
   property and requires a `bad_argument`. Request types have
   `#[serde(deny_unknown_fields)]`.
 - **Annotations** on every tool: `readOnlyHint: true`,
-  `openWorldHint: false`, `idempotentHint: true`. The exception is
+  `openWorldHint: false` (amendment 34: no `idempotentHint`, which
+  means something only for a tool that isn't read-only). The exception is
   `look` when the server runs with `--allow-write`, since it may then
   create a file under the write root: `readOnlyHint: false` and
   `destructiveHint: false` (it never replaces anything).

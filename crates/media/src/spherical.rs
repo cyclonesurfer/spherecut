@@ -139,8 +139,12 @@ pub struct SphericalV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SpatialAudio {
     pub version: u8,
-    /// 0 = periphonic (full-sphere) ambisonics.
+    /// 0 = periphonic (full-sphere) ambisonics, in the low 7 bits; the
+    /// top bit is `head_locked_stereo`.
     pub ambisonic_type: u8,
+    /// Two head-locked (non-diegetic) stereo channels follow the
+    /// ambisonic ones: the top bit of the type byte, as FFmpeg reads it.
+    pub head_locked_stereo: bool,
     pub ambisonic_order: u32,
     /// 0 = ACN.
     pub channel_ordering: u8,
@@ -152,7 +156,15 @@ pub struct SpatialAudio {
 impl SpatialAudio {
     /// Whether this is ambiX (ACN order, SN3D normalization, periphonic).
     pub fn is_ambix(&self) -> bool {
-        self.ambisonic_type == 0 && self.channel_ordering == 0 && self.normalization == 0
+        self.ambisonic_type & 0x7f == 0 && self.channel_ordering == 0 && self.normalization == 0
+    }
+
+    /// The channel count the box says the track has: (order + 1)² ambisonic
+    /// channels plus two when head-locked stereo follows.
+    pub fn expected_channels(&self) -> Option<u64> {
+        let n = u64::from(self.ambisonic_order).checked_add(1)?;
+        n.checked_mul(n)?
+            .checked_add(if self.head_locked_stereo { 2 } else { 0 })
     }
 }
 
@@ -210,6 +222,58 @@ pub fn read_track(trak: &Mp4Box) -> TrackSpherical {
         out.v1 = Some(parse_v1(&u.payload));
     }
     out
+}
+
+/// V2's metadata as FFmpeg's demuxer exported it, for a file whose boxes
+/// we don't read: Matroska and WebM's `Projection` and `StereoMode`
+/// elements. FFmpeg's stereo types beyond the three V2 names become
+/// `StereoCustom` ("determined elsewhere"), and right-left is `st3d`'s
+/// value 4.
+pub(crate) fn from_ffmpeg(f: &crate::ffi::FfSpherical) -> SphericalV2 {
+    let [left, top, right, bottom] = f.bounds;
+    let projection = match f.projection {
+        0 => Projection::Equirect {
+            top: 0,
+            bottom: 0,
+            left: 0,
+            right: 0,
+        },
+        1 => Projection::Cubemap {
+            layout: 0,
+            padding: f.padding,
+        },
+        2 => Projection::Equirect {
+            top,
+            bottom,
+            left,
+            right,
+        },
+        n => Projection::Other {
+            fourcc: match n {
+                3 => "half_equirect".into(),
+                4 => "rectilinear".into(),
+                5 => "fisheye".into(),
+                6 => "parametric_immersive".into(),
+                n => format!("#{n}"),
+            },
+        },
+    };
+    // AV_STEREO3D_FLAG_INVERT: the right eye first.
+    let stereo = f.stereo.map(|(kind, flags)| match (kind, flags & 1 != 0) {
+        (0, _) => StereoMode::Mono,
+        (1, false) => StereoMode::LeftRight,
+        (1, true) => StereoMode::Unknown(4),
+        (2, false) => StereoMode::TopBottom,
+        _ => StereoMode::StereoCustom,
+    });
+    SphericalV2 {
+        stereo,
+        metadata_source: None,
+        pose_yaw: fixed16(f.pose[0]),
+        pose_pitch: fixed16(f.pose[1]),
+        pose_roll: fixed16(f.pose[2]),
+        projection: Some(projection),
+    }
 }
 
 fn parse_st3d(b: &Mp4Box) -> Option<StereoMode> {
@@ -290,6 +354,7 @@ pub fn parse_sa3d(payload: &[u8]) -> Option<SpatialAudio> {
     Some(SpatialAudio {
         version,
         ambisonic_type,
+        head_locked_stereo: ambisonic_type >> 7 == 1,
         ambisonic_order,
         channel_ordering,
         normalization,
@@ -342,22 +407,54 @@ pub mod write {
 
     /// `sv3d` for a full-sphere equirect with zero pose.
     pub fn sv3d_equirect(metadata_source: &str) -> Vec<u8> {
+        sv3d(
+            metadata_source,
+            &Projection::Equirect {
+                top: 0,
+                bottom: 0,
+                left: 0,
+                right: 0,
+            },
+        )
+    }
+
+    /// `sv3d` with zero pose for an equirect (with its bounds) or a
+    /// cubemap. A mesh or another projection has no box here, and gets a
+    /// `proj` with only its header, which readers ignore.
+    pub fn sv3d(metadata_source: &str, projection: &Projection) -> Vec<u8> {
         let mut src = metadata_source.as_bytes().to_vec();
         src.push(0);
         let svhd = full(b"svhd", &src);
         let prhd = full(b"prhd", &[0; 12]);
-        let equi = full(b"equi", &[0; 16]);
-        let proj = bx(b"proj", &[prhd, equi].concat());
+        let words = |w: &[u32]| w.iter().flat_map(|w| w.to_be_bytes()).collect::<Vec<u8>>();
+        let body = match *projection {
+            Projection::Equirect {
+                top,
+                bottom,
+                left,
+                right,
+            } => full(b"equi", &words(&[top, bottom, left, right])),
+            Projection::Cubemap { layout, padding } => full(b"cbmp", &words(&[layout, padding])),
+            Projection::Mesh | Projection::Other { .. } => Vec::new(),
+        };
+        let proj = bx(b"proj", &[prhd, body].concat());
         bx(b"sv3d", &[svhd, proj].concat())
     }
 
     /// First-order ambiX (ACN/SN3D) SA3D box with an identity channel map.
     pub fn sa3d_first_order_ambix() -> Vec<u8> {
-        let mut p = vec![0u8, 0];
-        p.extend_from_slice(&1u32.to_be_bytes());
+        sa3d_ambix(1, false)
+    }
+
+    /// An ambiX SA3D box of this order, with head-locked stereo after it
+    /// or not, and an identity channel map of the count that implies.
+    pub fn sa3d_ambix(order: u32, head_locked_stereo: bool) -> Vec<u8> {
+        let n = (order + 1) * (order + 1) + if head_locked_stereo { 2 } else { 0 };
+        let mut p = vec![0u8, if head_locked_stereo { 0x80 } else { 0 }];
+        p.extend_from_slice(&order.to_be_bytes());
         p.extend_from_slice(&[0, 0]);
-        p.extend_from_slice(&4u32.to_be_bytes());
-        for i in 0..4u32 {
+        p.extend_from_slice(&n.to_be_bytes());
+        for i in 0..n {
             p.extend_from_slice(&i.to_be_bytes());
         }
         bx(b"SA3D", &p)
@@ -430,5 +527,41 @@ mod tests {
     fn garbage_sa3d_is_rejected() {
         assert!(parse_sa3d(&[0, 0, 0, 0, 0, 1, 0, 0, 0xff, 0xff, 0xff, 0xff]).is_none());
         assert!(parse_sa3d(&[]).is_none());
+    }
+
+    #[test]
+    fn sv3d_writes_bounds_and_cubemaps() {
+        for p in [
+            Projection::Equirect {
+                top: 1 << 30,
+                bottom: 1 << 30,
+                left: 0,
+                right: 7,
+            },
+            Projection::Cubemap {
+                layout: 0,
+                padding: 16,
+            },
+        ] {
+            let b = write::sv3d("t", &p);
+            let tree = mp4::read(&mut std::io::Cursor::new(file_with(b, vec![], vec![]))).unwrap();
+            let v2 = read_tracks(&tree)[0].v2.clone().unwrap();
+            assert_eq!(v2.projection, Some(p));
+        }
+    }
+
+    #[test]
+    fn head_locked_stereo_is_the_type_bytes_top_bit() {
+        // FFmpeg's mov_read_SA3D: `type & 0x7f` is the ambisonic type and
+        // `type >> 7` adds two non-diegetic channels.
+        let b = write::sa3d_ambix(1, true);
+        let sa = parse_sa3d(&b[8..]).unwrap();
+        assert!(sa.head_locked_stereo);
+        assert!(sa.is_ambix());
+        assert_eq!(sa.expected_channels(), Some(6));
+        assert_eq!(sa.channel_map.len(), 6);
+        let plain = parse_sa3d(&write::sa3d_ambix(2, false)[8..]).unwrap();
+        assert!(!plain.head_locked_stereo);
+        assert_eq!(plain.expected_channels(), Some(9));
     }
 }

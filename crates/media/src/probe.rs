@@ -275,6 +275,9 @@ pub struct AudioInfo {
     pub channels: u32,
     pub layout: Option<String>,
     pub sample_fmt: Option<String>,
+    /// An MP4 Opus track's channel mapping family, from its `dOps` box:
+    /// 2 for ambisonics, as YouTube's spatial audio asks.
+    pub opus_mapping_family: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -663,7 +666,15 @@ fn probe_file(src: Source<'_>, cancel: Option<Arc<AtomicBool>>) -> Result<ProbeR
         }
         stream_trak.push(trak_index);
         let trak = trak_index.and_then(|i| traks.get(i));
-        let track_sph = trak.map(|t| spherical::read_track(t)).unwrap_or_default();
+        // Our own reading of an MP4's boxes; else what FFmpeg's demuxer
+        // exported (Matroska and WebM).
+        let track_sph = match trak {
+            Some(t) => spherical::read_track(t),
+            None => TrackSpherical {
+                v2: f.spherical.as_ref().map(spherical::from_ffmpeg),
+                ..TrackSpherical::default()
+            },
+        };
         let handler = trak
             .and_then(|t| detect::handler_name(t))
             .or_else(|| st_tags.get("handler_name").cloned());
@@ -710,6 +721,7 @@ fn probe_file(src: Source<'_>, cancel: Option<Arc<AtomicBool>>) -> Result<ProbeR
                 channels: f.channels.max(0) as u32,
                 layout: f.channel_layout.clone(),
                 sample_fmt: f.sample_fmt.clone(),
+                opus_mapping_family: trak.and_then(|t| opus_mapping_family(t)),
             }),
             spherical: track_sph,
             tags: st_tags,
@@ -998,6 +1010,15 @@ fn trak_matcher(traks: &[&Mp4Box]) -> impl Fn(usize, i32) -> Option<usize> + use
 }
 
 /// The type of a track's first sample entry, e.g. `hvc1`.
+/// The channel mapping family of a track's Opus sample entry: the
+/// `dOps` box's byte after its version, output channel count, pre-skip,
+/// input sample rate and output gain (Opus in ISOBMFF, 4.3.2).
+fn opus_mapping_family(trak: &Mp4Box) -> Option<u8> {
+    let stsd = trak.path(&[b"mdia", b"minf", b"stbl", b"stsd"])?;
+    let dops = stsd.children_of(b"Opus").find_map(|e| e.child(b"dOps"))?;
+    dops.payload.get(10).copied()
+}
+
 fn sample_entry_type(trak: &Mp4Box) -> Option<FourCc> {
     let stsd = trak.path(&[b"mdia", b"minf", b"stbl", b"stsd"])?;
     Some(stsd.children.first()?.fourcc)
@@ -1441,12 +1462,17 @@ mod text {
         if let Some(sa) = &st.spherical.spatial_audio {
             let _ = writeln!(
                 s,
-                "             spatial audio: order {}, {}, channel map {:?}",
+                "             spatial audio: order {}, {}{}, channel map {:?}",
                 sa.ambisonic_order,
                 if sa.is_ambix() {
                     "ambiX (ACN/SN3D)"
                 } else {
                     "non-ambiX ordering/normalization"
+                },
+                if sa.head_locked_stereo {
+                    " with head-locked stereo"
+                } else {
+                    ""
                 },
                 sa.channel_map
             );
@@ -1577,6 +1603,26 @@ mod tests {
         assert_eq!(t[MAX_LOG_LINES], "9 more lines not listed");
     }
 
+    #[test]
+    fn opus_mapping_family_is_read_from_dops() {
+        use crate::mp4::tests::{bx, cat, full};
+        // Version, 4 channels, pre-skip 312, 48 kHz, gain 0, family 2,
+        // then family 2's stream counts and mapping.
+        let dops = bx(
+            b"dOps",
+            &[
+                0, 4, 0x01, 0x38, 0, 0, 0xbb, 0x80, 0, 0, 2, 4, 0, 0, 1, 2, 3,
+            ],
+        );
+        let entry = bx(b"Opus", &cat(&[vec![0u8; 28], dops]));
+        let stsd = full(b"stsd", 0, 0, &cat(&[1u32.to_be_bytes().to_vec(), entry]));
+        let trak = bx(b"trak", &bx(b"mdia", &bx(b"minf", &bx(b"stbl", &stsd))));
+        let file = cat(&[bx(b"ftyp", b"isom\0\0\x02\0isom"), bx(b"moov", &trak)]);
+        let tree = mp4::read(&mut io::Cursor::new(file)).unwrap();
+        let trak = tree.tracks().next().unwrap();
+        assert_eq!(opus_mapping_family(trak), Some(2));
+    }
+
     /// A video or audio stream with everything FFmpeg needs to decode it.
     fn stream(kind: StreamKind) -> StreamInfo {
         StreamInfo {
@@ -1618,6 +1664,7 @@ mod tests {
                 channels: 2,
                 layout: None,
                 sample_fmt: Some("fltp".into()),
+                opus_mapping_family: None,
             }),
             spherical: TrackSpherical::default(),
             tags: BTreeMap::new(),

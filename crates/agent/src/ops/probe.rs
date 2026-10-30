@@ -413,7 +413,7 @@ fn audio(r: &ProbeReport) -> Value {
     json!(format!("{channels}, {khz} kHz{more}"))
 }
 
-fn ordinal(n: u32) -> String {
+pub(crate) fn ordinal(n: u32) -> String {
     let suffix = match (n % 10, n % 100) {
         (_, 11..=13) => "th",
         (1, _) => "st",

@@ -68,6 +68,10 @@ pub const FIELD_BYTES: usize = 1024;
 /// The longest error a tool returns, in characters of its JSON.
 pub const ERROR_CHARS: usize = 500;
 
+/// The most bytes of JSON one `check` result takes (a1-plan section
+/// 6.4): passed rules' messages, then the advice, go first to fit.
+pub const CHECK_BYTES: usize = 2 << 10;
+
 /// How long doctor's `speed` decodes a file for, at most: less when the
 /// call has less than twice this left.
 pub const SPEED_TIME: Duration = Duration::from_secs(5);

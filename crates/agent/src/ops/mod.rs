@@ -2,6 +2,7 @@
 //! response type each, the same for `spherecut mcp` and `spherecut call`.
 
 pub mod analyze;
+pub mod check;
 pub mod clips;
 pub mod doctor;
 pub mod look;

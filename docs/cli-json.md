@@ -343,8 +343,8 @@ A stream:
 | `handler` | string or null | The track's handler name |
 | `language` | string or null | Left out (null) when `und` |
 | `video` | object or null | `width` and `height` (integers, 0 when FFmpeg doesn't know them); `sample_aspect` (rational), `pix_fmt`, `bit_depth`, `chroma_subsampling` (`[log2 horizontal, log2 vertical]`, `[1, 1]` for 4:2:0) and `rotation_deg` (the display matrix's rotation), each null when unknown; `color` (`range`, `matrix`, `primaries`, `transfer`, `chroma_location`) and `field_order` (`progressive`, `tt`, `bb`, `tb` or `bt`), FFmpeg's names: `unknown` when the file doesn't say (`unspecified` for `chroma_location`), and null only for a value this FFmpeg has no name for |
-| `audio` | object or null | `sample_rate`, `channels`, `layout` and `sample_fmt` (strings or null) |
-| `spherical` | object, or absent | Absent when the track has no spherical metadata. `v2` (Spherical Video V2: `stereo` (`mono`, `top_bottom`, `left_right`, `stereo_custom`, `unknown` for a value the specification doesn't define, or null), `stereo_value` (the `st3d` byte it came from, or null), `metadata_source`, `pose_yaw`, `pose_pitch`, `pose_roll` (degrees), `projection` (`{"type": "equirect", "top", "bottom", "left", "right"}` with crop bounds as 0.32 fixed-point fractions, `{"type": "cubemap", "layout", "padding"}`, `{"type": "mesh"}`, `{"type": "other", "fourcc"}`, or null)), `v1` (the V1 XML: `spherical`, `stitched`, `projection_type`, `stereo_mode`, `stitching_software`, `raw_xml`), `spatial_audio` (SA3D: `version`, `ambisonic_type`, `ambisonic_order`, `channel_ordering`, `normalization`, `channel_map`); each null when missing |
+| `audio` | object or null | `sample_rate`, `channels`, `layout` and `sample_fmt` (strings or null), and `opus_mapping_family` (an MP4 Opus track's channel mapping family from its `dOps` box, 2 for ambisonics; null otherwise) |
+| `spherical` | object, or absent | Absent when the track has no spherical metadata. `v2` (Spherical Video V2: `stereo` (`mono`, `top_bottom`, `left_right`, `stereo_custom`, `unknown` for a value the specification doesn't define, or null), `stereo_value` (the `st3d` byte it came from, or null), `metadata_source`, `pose_yaw`, `pose_pitch`, `pose_roll` (degrees), `projection` (`{"type": "equirect", "top", "bottom", "left", "right"}` with crop bounds as 0.32 fixed-point fractions, `{"type": "cubemap", "layout", "padding"}`, `{"type": "mesh"}`, `{"type": "other", "fourcc"}`, or null)), `v1` (the V1 XML: `spherical`, `stitched`, `projection_type`, `stereo_mode`, `stitching_software`, `raw_xml`), `spatial_audio` (SA3D: `version`, `ambisonic_type` (the byte as stored: its top bit is head-locked stereo), `head_locked_stereo` (two non-diegetic channels follow the ambisonic ones), `ambisonic_order`, `channel_ordering`, `normalization`, `channel_map`); each null when missing. An MP4's come from its boxes; a Matroska or WebM file's `v2` comes from what FFmpeg's demuxer read (`ProjectionType` and `StereoMode`), with `metadata_source` null and no `v1` or `spatial_audio` |
 | `tags` | object of strings | The stream's metadata |
 
 Text read from the file (tags, handler names, `evidence`, FFmpeg's log)
@@ -405,7 +405,7 @@ indented:
               "frames": 48, "avg_frame_rate": null, "r_frame_rate": null, "bit_rate": 184472,
               "disposition": ["default"], "handler": "SoundHandler", "language": null,
               "video": null,
-              "audio": {"sample_rate": 48000, "channels": 2, "layout": "stereo", "sample_fmt": "fltp"},
+              "audio": {"sample_rate": 48000, "channels": 2, "layout": "stereo", "sample_fmt": "fltp", "opus_mapping_family": null},
               "tags": {"handler_name": "SoundHandler", "language": "und", "vendor_id": "[0][0][0][0]"}
             }
           ],

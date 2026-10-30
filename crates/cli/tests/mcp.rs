@@ -389,6 +389,10 @@ fn call_and_mcp_agree() {
             "analyze",
             json!({"file": "clip.mp4", "kind": "audio", "buckets": 2}),
         ),
+        (
+            "check",
+            json!({"file": "clip.mp4", "target": "youtube_360"}),
+        ),
     ];
     let mut s = Server::spawn(|c| {
         c.arg("--read-root").arg(&dir.0);
