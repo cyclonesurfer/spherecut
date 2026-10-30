@@ -18,10 +18,11 @@
 //! structs needed are declared here with only the fields that are read
 //! spelled out.
 
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use ffmpeg_sys_next as sys;
+use spherecut_core::vkplan;
 use thiserror::Error;
 use tracing::level_filters::LevelFilter;
 use tracing::subscriber::Interest;
@@ -337,6 +338,10 @@ pub(crate) struct VkDevice {
     /// `VK_EXT_image_drm_format_modifier`: it can import DMA-BUFs, which
     /// slice 5b's zero copy needs of the GPU that renders.
     pub dmabuf_import: bool,
+    /// Whether wgpu's device on it could be shared with FFmpeg's Vulkan
+    /// Video (slice 5b's path B), as `spherecut_core::vkplan` plans it,
+    /// or why not.
+    pub shared_decode: Result<(), String>,
 }
 
 impl VkDevice {
@@ -362,6 +367,8 @@ type GetPhysicalDeviceProperties2 =
     unsafe extern "C" fn(VkHandle, *mut VkPhysicalDeviceProperties2);
 type EnumerateDeviceExtensionProperties =
     unsafe extern "C" fn(VkHandle, *const c_char, *mut u32, *mut VkExtensionProperties) -> i32;
+type GetPhysicalDeviceQueueFamilyProperties2 =
+    unsafe extern "C" fn(VkHandle, *mut u32, *mut VkQueueFamilyProperties2);
 
 /// The start of FFmpeg's `AVVulkanDeviceContext`. These fields have had
 /// these places since the struct was added; later ones changed between
@@ -400,6 +407,8 @@ const _: () = {
     assert!(size_of::<VkPhysicalDeviceDriverProperties>() == 536);
     assert!(size_of::<VkPhysicalDeviceDrmProperties>() == 56);
     assert!(size_of::<VkExtensionProperties>() == 260);
+    assert!(size_of::<VkQueueFamilyProperties2>() == 40);
+    assert!(size_of::<VkQueueFamilyVideoProperties>() == 24);
 };
 
 impl VkPhysicalDeviceProperties {
@@ -421,6 +430,8 @@ impl VkPhysicalDeviceProperties {
 const STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2: i32 = 1_000_059_001;
 const STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES: i32 = 1_000_196_000;
 const STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT: i32 = 1_000_353_000;
+const STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2: i32 = 1_000_059_005;
+const STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR: i32 = 1_000_023_012;
 
 #[repr(C)]
 struct VkPhysicalDeviceProperties2 {
@@ -473,22 +484,42 @@ struct VkExtensionProperties {
     spec_version: u32,
 }
 
-/// Whether the physical device `pd` has the device extension `name`.
+/// `VkQueueFamilyProperties2`, its `VkQueueFamilyProperties` inline: the
+/// flags, the count, the timestamp bits and the transfer granularity.
+#[repr(C)]
+struct VkQueueFamilyProperties2 {
+    s_type: i32,
+    p_next: *mut c_void,
+    queue_flags: u32,
+    queue_count: u32,
+    timestamp_valid_bits: u32,
+    min_image_transfer_granularity: [u32; 3],
+}
+
+/// `VkQueueFamilyVideoPropertiesKHR`.
+#[repr(C)]
+struct VkQueueFamilyVideoProperties {
+    s_type: i32,
+    p_next: *mut c_void,
+    video_codec_operations: u32,
+}
+
+/// The device extensions of the physical device `pd` (the driver's own,
+/// no layer's); empty if they can't be listed.
 ///
 /// # Safety
 ///
 /// `enumerate` must be `vkEnumerateDeviceExtensionProperties` of the
 /// live instance that `pd` belongs to.
-unsafe fn has_extension(
+unsafe fn device_extensions(
     enumerate: EnumerateDeviceExtensionProperties,
     pd: VkHandle,
-    name: &CStr,
-) -> bool {
+) -> Vec<CString> {
     let mut n = 0u32;
     // SAFETY: the caller's guarantee; the counting form of the call, for
     // the driver's own extensions (no layer name).
     if unsafe { enumerate(pd, std::ptr::null(), &mut n, std::ptr::null_mut()) } < 0 {
-        return false;
+        return Vec::new();
     }
     let mut exts: Vec<VkExtensionProperties> = (0..n)
         .map(|_| VkExtensionProperties {
@@ -499,12 +530,67 @@ unsafe fn has_extension(
     // SAFETY: `exts` has room for the `n` entries asked for. One added
     // since the first call makes this VK_INCOMPLETE (positive).
     if unsafe { enumerate(pd, std::ptr::null(), &mut n, exts.as_mut_ptr()) } < 0 {
-        return false;
+        return Vec::new();
     }
     exts.truncate(n as usize);
-    let name = name.to_bytes();
     exts.iter()
-        .any(|e| fixed_str(&e.extension_name).is_some_and(|e| e.as_bytes() == name))
+        .filter_map(|e| fixed_str(&e.extension_name))
+        .filter_map(|e| CString::new(e).ok())
+        .collect()
+}
+
+/// The queue families of the physical device `pd`, with their video
+/// operations when `video` (it has `VK_KHR_video_queue`, without which
+/// the video struct mustn't be chained).
+///
+/// # Safety
+///
+/// `get` must be `vkGetPhysicalDeviceQueueFamilyProperties2` of the live
+/// instance that `pd` belongs to.
+unsafe fn queue_families(
+    get: GetPhysicalDeviceQueueFamilyProperties2,
+    pd: VkHandle,
+    video: bool,
+) -> Vec<vkplan::Family> {
+    let mut n = 0u32;
+    // SAFETY: the caller's guarantee; the counting form of the call.
+    unsafe { get(pd, &mut n, std::ptr::null_mut()) };
+    let mut videos: Vec<VkQueueFamilyVideoProperties> = (0..n)
+        .map(|_| VkQueueFamilyVideoProperties {
+            s_type: STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR,
+            p_next: std::ptr::null_mut(),
+            video_codec_operations: 0,
+        })
+        .collect();
+    let mut props: Vec<VkQueueFamilyProperties2> = videos
+        .iter_mut()
+        .map(|v| VkQueueFamilyProperties2 {
+            s_type: STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2,
+            p_next: if video {
+                std::ptr::from_mut(v).cast()
+            } else {
+                std::ptr::null_mut()
+            },
+            queue_flags: 0,
+            queue_count: 0,
+            timestamp_valid_bits: 0,
+            min_image_transfer_granularity: [0; 3],
+        })
+        .collect();
+    // SAFETY: as many structs as the count said, each a valid chain (the
+    // video struct only where the device has its extension), and `videos`
+    // outlives the call.
+    unsafe { get(pd, &mut n, props.as_mut_ptr()) };
+    props.truncate(n as usize);
+    props
+        .iter()
+        .zip(&videos)
+        .map(|(p, v)| vkplan::Family {
+            flags: p.queue_flags,
+            count: p.queue_count,
+            video_ops: if video { v.video_codec_operations } else { 0 },
+        })
+        .collect()
 }
 
 fn vulkan_err(msg: impl Into<String>) -> HwProbeError {
@@ -560,7 +646,7 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
         .ok_or_else(|| vulkan_err("FFmpeg's Vulkan device has no vkGetInstanceProcAddr"))?;
     // SAFETY: each type below matches the C prototype of the command it
     // is looked up as, and the instance is FFmpeg's, made through `gipa`.
-    let (enumerate, props, props2, extensions) = unsafe {
+    let (enumerate, props, props2, extensions, queues) = unsafe {
         (
             vk_command::<EnumeratePhysicalDevices>(gipa, head.inst, c"vkEnumeratePhysicalDevices")?,
             vk_command::<GetPhysicalDeviceProperties>(
@@ -579,6 +665,13 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
                 gipa,
                 head.inst,
                 c"vkEnumerateDeviceExtensionProperties",
+            )
+            .ok(),
+            // Core in Vulkan 1.1, as above.
+            vk_command::<GetPhysicalDeviceQueueFamilyProperties2>(
+                gipa,
+                head.inst,
+                c"vkGetPhysicalDeviceQueueFamilyProperties2",
             )
             .ok(),
         )
@@ -609,6 +702,12 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
             // has the C layout and size Vulkan writes.
             unsafe { props(pd, &mut p) };
             let (mut driver_name, mut driver_info, mut drm_nodes) = (None, None, Vec::new());
+            let exts = match extensions {
+                // SAFETY: looked up on the instance `pd` belongs to.
+                Some(e) => unsafe { device_extensions(e, pd) },
+                None => Vec::new(),
+            };
+            let has = |name: &CStr| exts.iter().any(|e| e.as_c_str() == name);
             // VkPhysicalDeviceDriverProperties is core from Vulkan 1.2.
             if let Some(props2) = props2
                 && vk_version(p.api_version) >= (1, 2, 0)
@@ -623,11 +722,7 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
                     render_major: 0,
                     render_minor: 0,
                 };
-                let with_drm = match extensions {
-                    // SAFETY: looked up on the instance `pd` belongs to.
-                    Some(e) => unsafe { has_extension(e, pd, c"VK_EXT_physical_device_drm") },
-                    None => false,
-                };
+                let with_drm = has(c"VK_EXT_physical_device_drm");
                 let mut drv = VkPhysicalDeviceDriverProperties {
                     s_type: STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
                     p_next: if with_drm {
@@ -655,13 +750,16 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
                     drm_nodes = drm.nodes();
                 }
             }
-            let dmabuf_import = match extensions {
-                // SAFETY: looked up on the instance `pd` belongs to.
-                Some(e) => unsafe {
-                    has_extension(e, pd, c"VK_EXT_external_memory_dma_buf")
-                        && has_extension(e, pd, c"VK_EXT_image_drm_format_modifier")
-                },
-                None => false,
+            let dmabuf_import =
+                has(c"VK_EXT_external_memory_dma_buf") && has(c"VK_EXT_image_drm_format_modifier");
+            let shared_decode = match (extensions, queues) {
+                (Some(_), Some(q)) => {
+                    // SAFETY: looked up on the instance `pd` belongs to.
+                    let families = unsafe { queue_families(q, pd, has(vkplan::VIDEO_QUEUE)) };
+                    let names: Vec<&CStr> = exts.iter().map(CString::as_c_str).collect();
+                    vkplan::shareable(&names, p.api_version, &families)
+                }
+                _ => Err("Vulkan can't list the device's extensions or queue families".into()),
             };
             VkDevice {
                 name: fixed_str(&p.device_name).unwrap_or_else(|| "(unnamed)".into()),
@@ -674,6 +772,7 @@ pub(crate) fn vulkan_devices(dev: &HwDevice) -> Result<Vec<VkDevice>, HwProbeErr
                 drm_nodes,
                 ffmpeg_uses: pd == head.phys_dev,
                 dmabuf_import,
+                shared_decode,
             }
         })
         .collect())

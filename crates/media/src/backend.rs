@@ -123,6 +123,16 @@ pub enum HwOutput {
 /// cache's, those in flight to the GPU and those on screen.
 pub const ZERO_COPY_SURFACES: u8 = 24;
 
+/// `SPHERECUT_ZERO_COPY=1` turns zero copy on in the viewer (slice 5b,
+/// D25): playback's `PlayerConfig::zero_copy`, and doctor's report of it.
+pub const ZERO_COPY_ENV: &str = "SPHERECUT_ZERO_COPY";
+
+/// Whether `get` (the environment, or a test's) asks for zero copy: `1`
+/// does, anything else doesn't.
+pub fn zero_copy_from_env(get: impl Fn(&str) -> Option<String>) -> bool {
+    get(ZERO_COPY_ENV).is_some_and(|v| v.trim() == "1")
+}
+
 /// How a frame left its decoder.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Transfer {

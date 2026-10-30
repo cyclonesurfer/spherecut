@@ -15,7 +15,6 @@
 //! wgpu-hal's device creation with a callback, raw Vulkan through ash on
 //! the queue wgpu doesn't know, and buffers handed to wgpu.
 
-use std::cmp::Reverse;
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -41,172 +40,8 @@ const KEEP_BUFFERS: usize = 8;
 /// wgpu's `COPY_BYTES_PER_ROW_ALIGNMENT`.
 pub const ROW_ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 
-/// The codecs FFmpeg's Vulkan Video decodes for Spherecut.
-const CODECS: vk::VideoCodecOperationFlagsKHR = vk::VideoCodecOperationFlagsKHR::from_raw(
-    vk::VideoCodecOperationFlagsKHR::DECODE_H264.as_raw()
-        | vk::VideoCodecOperationFlagsKHR::DECODE_H265.as_raw(),
-);
-
-/// One queue family as the device lists it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Family {
-    pub flags: vk::QueueFlags,
-    pub count: u32,
-    /// Its video codec operations; empty for a family without video.
-    pub video_ops: vk::VideoCodecOperationFlagsKHR,
-}
-
-/// The queues a shared device is made with besides wgpu's own (family 0,
-/// queue 0, which no one else submits to).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QueuePlan {
-    /// A compute family other than wgpu's: its queue 0 is FFmpeg's (frame
-    /// preparation, uploads and downloads), its queue 1 the copier's.
-    pub compute: u32,
-    /// A video-decode family, whose queue 0 is FFmpeg's. It may be the
-    /// compute family.
-    pub decode: u32,
-    pub decode_ops: vk::VideoCodecOperationFlagsKHR,
-}
-
-impl QueuePlan {
-    /// The queue the copier submits to: family and index.
-    pub fn copy_queue(&self) -> (u32, u32) {
-        (self.compute, 1)
-    }
-
-    /// Each family besides wgpu's and how many of its queues the device
-    /// is made with.
-    pub fn queue_counts(&self) -> Vec<(u32, u32)> {
-        if self.decode == self.compute {
-            vec![(self.compute, 2)]
-        } else {
-            vec![(self.compute, 2), (self.decode, 1)]
-        }
-    }
-
-    /// The queues FFmpeg is given: queue 0 of each family, for what each
-    /// is for. The copier's queue shares the compute family, so FFmpeg's
-    /// frames, made `CONCURRENT` over these families, are its to read.
-    pub fn grants(&self) -> Vec<VkQueueGrant> {
-        let compute = (vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER).as_raw();
-        let decode = vk::QueueFlags::VIDEO_DECODE_KHR.as_raw();
-        let ops = self.decode_ops.as_raw();
-        if self.decode == self.compute {
-            return vec![VkQueueGrant {
-                family: self.compute,
-                count: 1,
-                flags: compute | decode,
-                video_ops: ops,
-            }];
-        }
-        vec![
-            VkQueueGrant {
-                family: self.compute,
-                count: 1,
-                flags: compute,
-                video_ops: 0,
-            },
-            VkQueueGrant {
-                family: self.decode,
-                count: 1,
-                flags: decode,
-                video_ops: ops,
-            },
-        ]
-    }
-}
-
-/// The queues a shared device needs from `families` (the device's, in
-/// its order), or why it can't have them. Family 0 is wgpu's and is
-/// never planned. The decode family is the one with H.265 first, then
-/// the most codecs; the compute family one without graphics first.
-pub fn plan_queues(families: &[Family]) -> Result<QueuePlan, String> {
-    let (decode, d) = families
-        .iter()
-        .enumerate()
-        .skip(1)
-        .filter(|(_, f)| {
-            f.flags.contains(vk::QueueFlags::VIDEO_DECODE_KHR)
-                && f.count >= 1
-                && f.video_ops.intersects(CODECS)
-        })
-        .max_by_key(|(i, f)| {
-            (
-                f.video_ops
-                    .contains(vk::VideoCodecOperationFlagsKHR::DECODE_H265),
-                f.video_ops.as_raw().count_ones(),
-                Reverse(*i),
-            )
-        })
-        .ok_or_else(|| {
-            if families
-                .iter()
-                .any(|f| f.flags.contains(vk::QueueFlags::VIDEO_DECODE_KHR))
-            {
-                "no video-decode queue family besides wgpu's decodes H.264 or H.265".to_owned()
-            } else {
-                "the device has no video-decode queue family".to_owned()
-            }
-        })?;
-    let compute = families
-        .iter()
-        .enumerate()
-        .skip(1)
-        .filter(|(_, f)| f.flags.contains(vk::QueueFlags::COMPUTE) && f.count >= 2)
-        .min_by_key(|(i, f)| (f.flags.contains(vk::QueueFlags::GRAPHICS), *i))
-        .map(|(i, _)| i)
-        .ok_or_else(|| {
-            "no compute queue family besides wgpu's has two queues (one for FFmpeg, one for \
-             the copies)"
-                .to_owned()
-        })?;
-    Ok(QueuePlan {
-        compute: compute as u32,
-        decode: decode as u32,
-        decode_ops: d.video_ops & (CODECS | vk::VideoCodecOperationFlagsKHR::DECODE_AV1),
-    })
-}
-
-/// The device extensions a shared device adds to wgpu's, from those the
-/// device has (`available`), or why it can't be one. `api_version` is
-/// what the device runs at: FFmpeg calls 1.3's entry points.
-pub fn plan_extensions(
-    available: &[&CStr],
-    api_version: u32,
-) -> Result<Vec<&'static CStr>, String> {
-    if api_version < vk::API_VERSION_1_3 {
-        return Err(format!(
-            "the device runs Vulkan {}.{}, and FFmpeg's Vulkan Video needs 1.3",
-            vk::api_version_major(api_version),
-            vk::api_version_minor(api_version)
-        ));
-    }
-    let has = |name: &CStr| available.contains(&name);
-    let mut add = Vec::new();
-    for name in [
-        ash::khr::video_queue::NAME,
-        ash::khr::video_decode_queue::NAME,
-    ] {
-        if !has(name) {
-            return Err(format!("the device lacks {}", name.to_string_lossy()));
-        }
-        add.push(name);
-    }
-    let codecs = [
-        ash::khr::video_decode_h264::NAME,
-        ash::khr::video_decode_h265::NAME,
-    ];
-    if !codecs.iter().any(|c| has(c)) {
-        return Err("the device decodes neither H.264 nor H.265 through Vulkan Video".into());
-    }
-    let optional = [
-        ash::khr::video_decode_av1::NAME,
-        ash::khr::video_maintenance1::NAME,
-    ];
-    add.extend(codecs.into_iter().chain(optional).filter(|c| has(c)));
-    Ok(add)
-}
+// The plan is core's, so that doctor plans a device the same way.
+pub use spherecut_core::vkplan::{Family, QueuePlan, plan_extensions, plan_queues};
 
 /// What a shared device gives beside wgpu's device: the handles FFmpeg
 /// is made from, and the copier.
@@ -404,9 +239,9 @@ fn families(instance: &ash::Instance, physical: vk::PhysicalDevice, video: bool)
         .into_iter()
         .zip(&videos)
         .map(|((flags, count), v)| Family {
-            flags,
+            flags: flags.as_raw(),
             count,
-            video_ops: v.video_codec_operations,
+            video_ops: v.video_codec_operations.as_raw(),
         })
         .collect()
 }
@@ -1042,13 +877,19 @@ impl Drop for Inner {
 mod tests {
     use super::*;
 
+    /// A family in ash's flags, which checks core's bits against them.
     fn family(flags: vk::QueueFlags, count: u32, ops: vk::VideoCodecOperationFlagsKHR) -> Family {
         Family {
-            flags,
+            flags: flags.as_raw(),
             count,
-            video_ops: ops,
+            video_ops: ops.as_raw(),
         }
     }
+
+    const CODECS: vk::VideoCodecOperationFlagsKHR = vk::VideoCodecOperationFlagsKHR::from_raw(
+        vk::VideoCodecOperationFlagsKHR::DECODE_H264.as_raw()
+            | vk::VideoCodecOperationFlagsKHR::DECODE_H265.as_raw(),
+    );
 
     const GCT: vk::QueueFlags = vk::QueueFlags::from_raw(
         vk::QueueFlags::GRAPHICS.as_raw()
@@ -1080,7 +921,7 @@ mod tests {
             QueuePlan {
                 compute: 1,
                 decode: 2,
-                decode_ops: ALL
+                decode_ops: ALL.as_raw()
             }
         );
         assert_eq!(plan.copy_queue(), (1, 1));

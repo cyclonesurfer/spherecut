@@ -139,6 +139,12 @@ pub struct VulkanDevice {
     /// `VK_EXT_image_drm_format_modifier`), which zero copy needs of the
     /// GPU that renders (slice 5b).
     pub dmabuf_import: bool,
+    /// Whether the renderer's device on it could be shared with FFmpeg's
+    /// Vulkan Video (slice 5b's path B): Vulkan 1.3, the video extensions,
+    /// a decode queue family and a second compute queue besides wgpu's.
+    pub shared_decode: bool,
+    /// Why not, when it can't be.
+    pub shared_decode_reason: Option<String>,
 }
 
 impl VulkanDevice {
@@ -167,6 +173,8 @@ impl From<hwprobe::VkDevice> for VulkanDevice {
             driver_info: d.driver_info,
             used_by_ffmpeg: d.ffmpeg_uses,
             dmabuf_import: d.dmabuf_import,
+            shared_decode: d.shared_decode.is_ok(),
+            shared_decode_reason: d.shared_decode.err(),
         }
     }
 }
@@ -244,6 +252,9 @@ pub struct DoctorReport {
     pub gpu: Gpu,
     pub devices: Vec<DeviceStatus>,
     pub vulkan_devices: Vec<VulkanDevice>,
+    /// Whether `SPHERECUT_ZERO_COPY=1` turns zero copy on for the viewer
+    /// (slice 5b, D25); off, every frame is copied through RAM.
+    pub zero_copy: bool,
     /// Each format decoded in software, on VA-API and on Vulkan.
     pub decode_checks: Vec<Check>,
     /// Each VA-API encoder, one frame each.
@@ -580,6 +591,7 @@ pub fn run(render_node: &Path) -> DoctorReport {
         gpu,
         devices: vec![vaapi_status, vulkan_status],
         vulkan_devices,
+        zero_copy: crate::backend::zero_copy_from_env(|k| std::env::var(k).ok()),
         decode_checks,
         encode_checks,
         issues: Vec::new(),
@@ -1748,8 +1760,29 @@ pub fn render_text(r: &DoctorReport) -> String {
                 d.vendor_id,
                 d.device_id
             );
+            let _ = writeln!(
+                s,
+                "    zero copy: DMA-BUF import {}; shared with FFmpeg's Vulkan Video {}",
+                if d.dmabuf_import { "yes" } else { "no" },
+                match (&d.shared_decode, &d.shared_decode_reason) {
+                    (true, _) => "yes".to_string(),
+                    (false, Some(why)) => format!("no: {why}"),
+                    (false, None) => "no".to_string(),
+                }
+            );
         }
     }
+    let _ = writeln!(
+        s,
+        "\nZero copy: {}",
+        if r.zero_copy {
+            "on (SPHERECUT_ZERO_COPY=1): VA-API frames are imported where the rendering GPU has \
+             DMA-BUF import, and Vulkan Video decodes on the renderer's own device where it can \
+             be shared; the rest are copied through RAM"
+        } else {
+            "off, so every frame is copied through RAM (SPHERECUT_ZERO_COPY=1 turns it on)"
+        }
+    );
     let _ = writeln!(
         s,
         "\nDecode check: one {n}x{n} frame each, no fallback to software; the hardware's\n\
@@ -1913,6 +1946,8 @@ mod tests {
             driver_info: None,
             used_by_ffmpeg: true,
             dmabuf_import: true,
+            shared_decode: true,
+            shared_decode_reason: None,
         }
     }
 
@@ -1941,6 +1976,7 @@ mod tests {
                 "AMD Radeon RX 7600 (RADV NAVI33)",
                 VulkanDeviceType::DiscreteGpu,
             )],
+            zero_copy: false,
             decode_checks,
             encode_checks: ENCODE_TARGETS
                 .iter()
