@@ -5239,6 +5239,262 @@ ring runs dry; the present latency of one UI frame being visibly off
 the vsync's on the GUI (slice 7); or `never_blocks` failing its 10 ms
 ceiling on a machine that isn't a VM.
 
+## D35. Audio and A/V sync
+
+*2026-10-30, M1 slice 6. The M1 plan's D33 (section 9), adjusted to
+what was built: the file's audio decoded onto the clip's time axis, an
+output crate whose clock is the sound card's, and the engine's video
+following that clock. The GUI's notices and the overlay's numbers are
+slice 7's and 8's; the device itself is tested in H2.*
+
+What:
+
+- **Decoding** (`media::audio`, `FfmpegAudio`, through
+  `MediaBackend::open_audio`).
+  - Its own confined demuxer and decoder (D24), opened by the codec id
+    as an int, with the sample format and channel layout read as ints
+    (D11). The first audio stream with a decoder, unless the request
+    names one; a file with none is `MediaError::NoStream`, code
+    `no_stream` in the CLI contract.
+  - Out comes packed f32 at the output's rate and channel count, in
+    chunks placed on the clip's axis: output sample `s` is clip time
+    `s / rate`, and clip time 0 is the first video stream's first
+    presented frame (D29), which the request gives as `origin` (`None`
+    puts 0 at the audio's first sample). Samples before 0 are dropped,
+    and audio that starts after 0, or after a seek's time, is led by
+    silence, so chunks follow each other without a gap.
+  - libavcodec removes AAC's priming and the demuxer applies edit lists.
+    The last frame's padding (AAC codes whole frames of 1024) is cut
+    where the packets' durations say the stream ends.
+  - Channels: mono is duplicated and stereo passes through. First-order
+    ambiX (`SA3D`, D17) is read as four channels in no order, so that
+    swresample can't remix it as 4.0 surround, and decoded here to two
+    virtual cardioids at ±90°: L = ½(W + Y), R = ½(W − Y) (ACN, SN3D).
+    Anything else is swresample's default downmix to stereo. Stereo then
+    goes to the output's channels: averaged for one, into the first two
+    of more, with silence in the rest.
+  - **The resampling grid.** The resampler only ever starts at an input
+    sample a whole number of periods from the stream's first, the period
+    being the input rate over the two rates' greatest common divisor
+    (147 samples for 44.1 to 48 kHz). There its phase is the one a decode
+    from the start has, so a seek's output after its preroll is a
+    sequential decode's.
+  - **Seeking** goes back to 100 ms before the time (at least two AAC
+    frames, for the MDCT's overlap) and to the grid point at or before
+    that, flushes, decodes, and drops what comes before the exact
+    sample: the next chunk starts at sample round(at × rate).
+  - **Coarse time bases.** Matroska's are milliseconds, coarser than a
+    sample, so each frame's time is rounded. A frame within a tick of
+    where the frames before it end is placed there, from the stream's
+    first sample, so a seek lands each frame where a decode from the
+    start puts it.
+  - 50 packets in a row refused make the stream undecodable.
+- **The output crate** (`spherecut-audio`).
+  - cpal 0.18.2 with only its `pulseaudio` feature: the PulseAudio
+    protocol host, a pure-Rust client that reaches PipeWire through
+    `pipewire-pulse`, and ALSA, which cpal always builds on Linux.
+    `alsa-sys` links libasound, so the ALSA headers and pkg-config are a
+    build prerequisite: `cargo xtask check` stops with the install
+    command when pkg-config finds no `alsa`, and hw-test's prerequisites
+    say the headers block the build. A `[[bans.features]]` allow list in
+    `deny.toml` keeps cpal to `pulseaudio` (D21).
+  - **The device** (`Output::open_device`, on the `audio-out` thread):
+    cpal's default host (PulseAudio when a server answers, else ALSA),
+    its default output device, at its default rate and channel count.
+    f32 when the device takes it at that rate and channels, else its
+    default format, else i32, i16 or i24, converted from f32 in the
+    callback with cpal's `FromSample` through a scratch buffer allocated
+    when the stream is built. The buffer asked for is
+    `BufferSize::Fixed(1024)` (21.3 ms at 48 kHz) clamped to the
+    device's range, `Default` when the range is unknown, and `Default`
+    again if the fixed size is refused.
+  - **The latency** is cpal's `playback − callback` from the callback's
+    timestamp, plus the frames already rendered when a buffer is
+    rendered in pieces.
+  - **The chunk ring** is the plan's: SPSC, 512-frame chunks, about
+    500 ms, samples as `AtomicU32` f32 bits, atomic chunk headers (epoch,
+    first sample, frames), head and tail Release and Acquire, and a
+    decode thread that sleeps 5 ms while it is full. The consumer asks
+    for samples by their index (placement), and while the ring is full
+    the producer may reclaim the oldest chunk by compare-and-swap if it
+    is of an older epoch, since a paused stream's callback may not run
+    to drop it.
+  - **The clock** (`AudioClock`, a `Clock`). Its state is one
+    `SeqLock<12>` (core's, now public): epoch, base and seek times,
+    running, on the system clock, on audio, and the anchor's wall
+    instant, time heard, limit and floor.
+    - A seek (`set`) and a pause each start an epoch: the decoder seeks
+      to its time and the callback drops every other epoch's chunks.
+    - Paused, it shows the base time. Playing, it waits at the base
+      until the epoch's first audio plays. Then each callback anchors
+      it: at the callback's instant the time heard is the buffer's first
+      sample less the latency, and the clock runs on from there for at
+      most the latency plus two buffers (the end of the buffer written
+      plus one more), so a stalled callback freezes it. It never shows
+      less than it showed when the anchor was made, so jitter in the
+      callback's timing holds it instead of moving it back.
+    - **The system clock.** When the device is lost, or the callbacks
+      stop for 500 ms while playing (`STALL`, a suspended sink), or no
+      audio arrives for 2 s after playing starts (`WAIT_LIMIT`), the
+      clock runs on the monotonic clock from the time it showed, and
+      asks the decoder for audio 300 ms ahead (`RESYNC_LEAD`). A
+      callback that finds the clock there plays the sample due when its
+      buffer is heard, if the ring has it, and anchors the clock to the
+      audio again without a jump; if the audio is more than twice the
+      lead late, it asks again from the clock's time.
+  - **The callback** (`render`) is the same code for all three outputs.
+    It takes no lock, allocates nothing and logs nothing; its numbers
+    go to atomics that `audio-out` and `stats()` read. When the ring
+    runs dry while playing it plays silence and the clock runs on: the
+    next buffer asks for the sample due then, so the samples that
+    weren't there are skipped (the plan's underrun debt). A dry spell
+    counts as one underrun, and none past the end of the audio.
+  - **`audio-out`** keeps the stream, plays it when the clock runs and
+    pauses it 200 ms after the clock pauses (so the device's queue is
+    silence by then; a stream that can't pause plays silence), runs the
+    watchdog every 50 ms, and reads the stream's errors. `Xrun` is
+    counted. `DeviceChanged` (cpal 0.18 rerouted the stream to a new
+    default device, which goes on) and `RealtimeDenied` are logged. Any
+    other error loses the device: the clock goes to the system clock and
+    the default device is tried again every 2 s at the same rate and
+    channel count, which the decoder already resamples to. A stall that
+    lasts 2 s on the system clock drops the stream and opens it again.
+  - **No device**: `Output::null` runs the callback from an
+    `audio-null` thread every 1024 frames on a schedule kept from its
+    start, with no latency, starting the schedule again when it is 8
+    periods behind (a suspended machine). The engine runs the same code
+    on it.
+  - **`FakeAudioDevice`**, for the Tier 1 A/V tests: callbacks at
+    scripted instants (a period, a stated latency, stalls, loss and a
+    new stream), the real callback and the watchdog every 50 ms of
+    scripted time, and a record of each callback (instant, when heard,
+    epoch and first sample, fill, first sample value). Scripted time
+    runs ahead of real time, so before each callback the fake waits, in
+    real time, for the audio that callback will play.
+- **The engine** (`playback::audio`).
+  - `DeviceAudio` is the `AudioOutputFactory`. On the open worker it
+    opens the file's audio once to see that there is a stream the
+    backend can decode (`NoStream`: the file has no audio, the event
+    `NoAudio`, and video runs on its own clock); then the output, the
+    default device or else the null output at 48 kHz stereo with a
+    warning, or one given beforehand (`AudioDevice`); then the
+    `audio-decode` thread.
+  - `audio-decode` waits for `AudioOutput::start(origin)`, which stream
+    0's decode worker sends when it opens, then opens the decoder at the
+    output's rate and channels and decodes each epoch the clock starts
+    into the ring. A seek or decode error ends the epoch there, so the
+    clock runs on silence; a decoder that won't open leaves every epoch
+    ending where it starts.
+  - The player follows the output's clock once the open is done
+    (playing it at once if the player's clock was playing), and emits
+    `AudioOpened` with the output's numbers. A preroll ends when the
+    video target is ready and 100 ms of audio is queued, or after
+    `PREROLL_LIMIT` (2 s) without the audio, when the clock falls back
+    to the system clock and the player emits `AudioLate`.
+    `Player::audio_stats()` reads the output's numbers without waiting.
+    `play_at`, `pause_at` and `seek_at` take the instant, for tests on
+    scripted time.
+- **Test clips.** synth's audio clips are AAC without perceptual noise
+  substitution (`aac_pns=0`): FFmpeg's decoder fills those bands from a
+  random generator that a seek restarts, so a clip that used it would
+  decode differently after a seek, at its noise floor.
+
+Where this differs from the plan:
+
+- The underrun debt is placement: the callback asks the ring for the
+  sample due instead of counting the samples owed. The effect is the
+  plan's, and nothing has to be kept or reset across a seek.
+- A pause starts an epoch at the paused time, where the plan froze the
+  clock and played silence. Without it the samples queued in the device
+  when it paused would not be heard, and playing again would go on from
+  after them, a latency's worth ahead of the clock.
+- `DeviceChanged` doesn't lose the device: in cpal 0.18 it says the
+  stream was rerouted and goes on.
+- The clock goes back to the audio from the system clock when callbacks
+  come again, without a jump; the plan stopped at the system clock.
+- `WAIT_LIMIT` and `PREROLL_LIMIT` are new: a device that takes a stream
+  but never calls back, or audio that never comes, would otherwise hold
+  video still.
+- testkit's `require_audio_device` takes the function that opens the
+  device, since testkit has no dependencies.
+- The Tier 2 test checks the median latency, not each callback's.
+
+Why: the plan's (section 9.3): the DAC's clock is the master, so video
+repeats or drops frames to follow it and there is no drift to correct.
+One callback for the device, the null output and the fake device means
+the Tier 1 A/V tests run the code that plays. The PulseAudio protocol
+host needs no C library and is what Fedora and Arch serve through
+PipeWire; cpal's `pipewire` and `jack` hosts link libraries no build
+machine should need (libpipewire's development files and libclang, for
+`pipewire`). The stream lives on `audio-out`, since building or dropping
+one can block on the sound server, and epochs flush the ring without a
+lock in the real-time callback.
+
+Tested:
+
+- `synth/tests/audio.rs`, 13 tests on clips synth writes: exact sample
+  counts, the tones' pitches, priming gone and the audio on the video's
+  axis, seeks equal to a sequential decode within 1e-6 at 48 kHz and
+  44.1 resampled, 44.1 kHz resampling to exactly 10 s at 48, mono,
+  5.1, ambiX, the output's channels, origins before and after the
+  audio, `NoStream`, a Matroska remux within a millisecond, and
+  `sync-flash-beep`'s beeps within 1 ms of their white frames.
+- The audio crate: the ring's unit tests (placement, gaps and other
+  epochs, reclaim, and a two-thread stress test), the clock's (rounding,
+  packing, the floor and the limit), and 13 tests in `tests/clock.rs`,
+  most on the fake device: the clock waiting for audio and then running
+  by the samples played; never going back, and freezing when callbacks
+  stop; an underrun skipping its debt, and the end of the audio not
+  counting as one; a seek to round(at × rate), and one past the end;
+  a pause and play resuming at its sample; `ready`; loss and a stall
+  falling back without a jump and the audio taking over again; the wait
+  limit; the null output; and opening the device here.
+- `playback/tests/av_sync.rs`, 8 tests through the whole engine, most
+  on the fake device (the synthetic backend's audio, the real decode thread
+  and presenter): 60 s of scripted time at each of 29.97 and 59.94 fps
+  with 44.1 and 48 kHz, the shown frame at every present the one whose
+  interval holds the clock's time; a seek restarting audio at
+  round(at × rate); a 200 ms decode stall leaving the clock running,
+  video continuous and the sample heard after it equal to the clock;
+  device loss without a jump over 1 ms; a preroll that waits its limit;
+  the null output within ±5% over 2 s; `AudioDevice::Default` on the
+  null output when no device opens, as here; and a file without audio.
+- `audio_output_device_plays` (Tier 2): a 440 Hz tone on the default
+  device for 2 s, passing when the clock advances 2.0 s ± 50 ms and is
+  monotonic, no callback comes over twice its buffer after the last,
+  the median latency is 5 to 200 ms, nothing underran and the clock
+  stayed on the device; it notes the host, device, format, buffer and
+  latency, and records the numbers. Here it skips with ALSA's "The
+  requested audio device is not available". Run once by hand on the
+  null output, it measured 1.99992 to 1.99999 s over 2 s and a worst gap
+  of 1.009 buffers in three runs.
+
+Limits:
+
+- A file whose AAC used perceptual noise substitution decodes those
+  bands differently after a seek than from the start, at their noise
+  floor; the 1e-6 seek equality is shown on clips without it.
+- Matroska audio is placed within a millisecond of where the MP4 puts
+  it, and, with no count of AAC's padding, may end up to a frame later.
+- The output's format is fixed when it opens. A new default device that
+  can't play that rate and channel count isn't used, and the clock stays
+  on the system clock, silent, until one can or the file is opened
+  again.
+- The latency is what the host reports; nothing here measures sound
+  against a microphone. The A/V offset setting (slice 8) covers the
+  rest, and H2's `gui_smoke` measures |A/V| on the sync clip.
+- On this box (no audio device) the cpal stream, `audio-out`'s loop,
+  the error handling and the retry are only built, not run: H2 runs the
+  device test.
+- Ambisonic audio is a basic stereo decode, not steered by the view
+  (M6 adds binaural).
+
+Revisit if: H2's `audio_output_device_plays` fails on a machine's
+PulseAudio or PipeWire, or `gui_smoke`'s |A/V| p95 reaches 20 ms on the
+sync clip; a camera's AAC uses noise substitution and its seeks sound
+different; someone needs to choose the output device; or cpal changes
+what `DeviceChanged` means.
+
 ## D37. Hardware testing in M1
 
 *2026-10-29, M1 slice 5: a draft, from the M1 plan's D35 (section 15).

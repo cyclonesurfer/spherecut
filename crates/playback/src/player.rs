@@ -1196,8 +1196,6 @@ impl Player {
         }
     }
 
-    /// The player's state. Never waits: when the threads' status is
-    /// locked, their part is the copy from before.
     /// The audio output's numbers, while a file with audio is open and
     /// the presenter has taken its clock. Never waits.
     pub fn audio_stats(&self) -> Option<spherecut_audio::OutputStats> {
@@ -1205,6 +1203,8 @@ impl Player {
         ui.audio.as_ref()?.stats()
     }
 
+    /// The player's state. Never waits: when the threads' status is
+    /// locked, their part is the copy from before.
     pub fn snapshot(&self) -> PlayerSnapshot {
         let status = self.shared.try_status();
         self.snapshot_from(status.as_deref())

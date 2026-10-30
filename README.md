@@ -47,6 +47,10 @@ an agent, frames included, goes to that agent's model provider.
   FFmpeg's Vulkan device).
 - Rust 1.95 or newer, with rustfmt and clippy for development.
 - clang, for generating the FFmpeg bindings at build time.
+- The ALSA library's development files (libasound) and pkg-config, which
+  the audio output links. Sound plays through PulseAudio's protocol,
+  which PipeWire serves on Fedora and Arch (`pipewire-pulse`), or else
+  ALSA; with no sound device, playback is silent.
 - For the Tier 1 tests: Mesa's lavapipe Vulkan driver and strace (see
   Development).
 
@@ -58,7 +62,7 @@ and HEVC, which nearly every 360 camera records. Use RPM Fusion's builds
 
 ```sh
 sudo dnf swap ffmpeg-free ffmpeg --allowerasing  # or, without ffmpeg-free: sudo dnf install ffmpeg --allowerasing
-sudo dnf install ffmpeg-devel clang-devel pkgconf-pkg-config libva-utils vulkan-tools mesa-vulkan-drivers
+sudo dnf install ffmpeg-devel clang-devel pkgconf-pkg-config alsa-lib-devel libva-utils vulkan-tools mesa-vulkan-drivers
 sudo dnf install strace                          # for the Tier 1 tests
 # AMD GPUs:
 sudo dnf install mesa-va-drivers-freeworld       # or: dnf swap mesa-va-drivers mesa-va-drivers-freeworld
@@ -71,7 +75,7 @@ sudo dnf install rustup && rustup-init -y
 ### Arch
 
 ```sh
-sudo pacman -S --needed rust ffmpeg clang pkgconf libva-utils vulkan-tools
+sudo pacman -S --needed rust ffmpeg clang pkgconf alsa-lib libva-utils vulkan-tools
 sudo pacman -S --needed vulkan-radeon                       # AMD
 sudo pacman -S --needed vulkan-intel intel-media-driver     # Intel
 sudo pacman -S --needed vulkan-swrast strace                # lavapipe and strace, for the Tier 1 tests
@@ -81,8 +85,8 @@ sudo pacman -S --needed vulkan-swrast strace                # lavapipe and strac
 
 ```sh
 sudo apt install pkg-config clang ffmpeg libavcodec-dev libavformat-dev \
-  libavutil-dev libswscale-dev libswresample-dev mesa-vulkan-drivers vulkan-tools vainfo \
-  strace
+  libavutil-dev libswscale-dev libswresample-dev libasound2-dev mesa-vulkan-drivers \
+  vulkan-tools vainfo strace
 ```
 
 Your user needs to be in the `render` group for GPU video
@@ -350,10 +354,11 @@ build passes only if every FFmpeg library it bound came from the
 prefix, checked before the build and after it.
 
 `cargo xtask check` needs `cargo install --locked cargo-deny cargo-audit`
-once (or `--no-supply-chain` to skip those two), and strace: it stops
-first if `strace -V` fails, with the command that installs it
-(`sudo dnf install strace`, `sudo pacman -S strace` or
-`sudo apt install strace`).
+once (or `--no-supply-chain` to skip those two), strace, and ALSA's
+development files: it stops first if `strace -V` fails or pkg-config
+finds no `alsa`, with the command that installs it (`sudo dnf install
+strace alsa-lib-devel`, `sudo pacman -S strace alsa-lib` or `sudo apt
+install strace libasound2-dev`).
 
 Tests come in two tiers. Tier 1 runs anywhere, including machines without
 a GPU. It needs the FFmpeg codecs listed above and Mesa's lavapipe Vulkan
@@ -395,6 +400,8 @@ again only when synth's spec of them changes (DECISIONS D37). Options:
 - `--out <file>`: where to write the report.
 
 Tier 2 tests use `/dev/dri/renderD128`, or `SPHERECUT_RENDER_NODE`.
+`audio_output_device_plays` plays a quiet 440 Hz tone for about 2 s on
+the default output device.
 Benchmarks repeat `SPHERECUT_BENCH_RUNS` times (default 3); see
 `docs/perf.md`.
 

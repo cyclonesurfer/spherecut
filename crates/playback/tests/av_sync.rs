@@ -500,19 +500,54 @@ fn a_preroll_waits_its_limit_for_the_audio_and_then_plays_without_it() {
     rig.finish();
 }
 
-fn null_player(backend: SyntheticBackend) -> Player {
+fn player_on(backend: SyntheticBackend, device: AudioDevice) -> Player {
     let backend = Arc::new(backend);
     let parts = PlayerParts {
-        audio: Some(Arc::new(DeviceAudio::new(
-            backend.clone(),
-            AudioDevice::Null {
-                rate: 48_000,
-                channels: 2,
-            },
-        ))),
+        audio: Some(Arc::new(DeviceAudio::new(backend.clone(), device))),
         ..PlayerParts::new(backend, gpu().clone(), Arc::new(SystemClock::new()))
     };
     Player::new(parts, config()).unwrap()
+}
+
+fn null_player(backend: SyntheticBackend) -> Player {
+    player_on(
+        backend,
+        AudioDevice::Null {
+            rate: 48_000,
+            channels: 2,
+        },
+    )
+}
+
+/// The output `AudioOpened` names, once frame 0 is up.
+fn opened_on(player: &Player) -> Option<OutputKind> {
+    assert!(
+        until(WAIT, || player
+            .present(Instant::now())
+            .filter(|p| pts(p) == [0]))
+        .is_some()
+    );
+    until(WAIT, || {
+        player.events().into_iter().find_map(|e| match e {
+            PlayerEvent::AudioOpened { output } => output.map(|s| s.kind),
+            _ => None,
+        })
+    })
+}
+
+/// `AudioDevice::Default` plays on the default device when it opens,
+/// and on the null output when it doesn't, as here.
+#[test]
+fn the_default_device_is_the_null_output_without_one() {
+    let expected = match spherecut_audio::Output::open_device() {
+        Ok(_) => OutputKind::Device,
+        Err(_) => OutputKind::Null,
+    };
+    let (backend, _audio) = backend(FrameRate::FPS_29_97, 2);
+    let player = player_on(backend, AudioDevice::Default);
+    player.open("default.synthetic".into());
+    assert_eq!(opened_on(&player), Some(expected));
+    common::join(player);
 }
 
 #[test]
@@ -520,17 +555,7 @@ fn the_null_output_keeps_time() {
     let (backend, _audio) = backend(FrameRate::FPS_29_97, 10);
     let player = null_player(backend);
     player.open("null.synthetic".into());
-    assert!(
-        until(WAIT, || player
-            .present(Instant::now())
-            .filter(|p| pts(p) == [0]))
-        .is_some()
-    );
-    let opened = player.events().into_iter().find_map(|e| match e {
-        PlayerEvent::AudioOpened { output } => output,
-        _ => None,
-    });
-    assert_eq!(opened.map(|s| s.kind), Some(OutputKind::Null));
+    assert_eq!(opened_on(&player), Some(OutputKind::Null));
     player.play();
     // Playing starts once the first audio is heard.
     let start = until(WAIT, || {
