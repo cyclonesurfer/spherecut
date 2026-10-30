@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.10s
+     Running tests/tier2_playback.rs (/home/pat/spherecut-zcb-target/release/deps/tier2_playback-11e2a3b16c416598)
+
+running 1 test
+test bench_x5_8k30_zero_copy_vs_copy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 429.39s
+
