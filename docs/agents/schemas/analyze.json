@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "analyze",
+  "description": "Measure a video over time, in buckets. timing reads packets only: frame durations, duplicate timestamps, gaps (frames missing), keyframes, Mb/s, vfr, and pictures coded as repeats. motion decodes: the change from frame to frame (0 to 255) and cuts. audio: peak and RMS dBFS, clipped samples, silences. Out of time, it returns the buckets done with complete false and next_from to call again from.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "file",
+    "kind"
+  ],
+  "properties": {
+    "file": {
+      "type": "string",
+      "description": "A video.",
+      "minLength": 1
+    },
+    "kind": {
+      "type": "string",
+      "description": "What to measure.",
+      "enum": [
+        "timing",
+        "motion",
+        "audio"
+      ]
+    },
+    "from": {
+      "type": [
+        "string",
+        "array"
+      ],
+      "description": "A time, as look's: the start by default."
+    },
+    "to": {
+      "type": [
+        "string",
+        "array"
+      ],
+      "description": "A time: the end by default."
+    },
+    "buckets": {
+      "type": "integer",
+      "description": "50 by default.",
+      "minimum": 1,
+      "maximum": 200
+    },
+    "stream": {
+      "type": "integer",
+      "description": "Its index in probe's full report: the first video stream, or audio for audio, by default.",
+      "minimum": 0
+    }
+  }
+}

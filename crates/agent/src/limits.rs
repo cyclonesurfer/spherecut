@@ -109,3 +109,71 @@ pub const JPEG_QSCALE_MAX: u8 = 12;
 
 /// The most video streams `look`'s `raw` mode draws side by side.
 pub const RAW_STREAMS: usize = 4;
+
+/// `analyze`'s buckets, unless `buckets` says.
+pub const BUCKETS: u32 = 50;
+
+/// The most buckets `analyze` gives: each is about 120 bytes of JSON.
+pub const MAX_BUCKETS: u32 = 200;
+
+/// How long before its deadline `analyze` stops to answer with the
+/// buckets it finished, plus twice the longest step it took (a packet, a
+/// frame, a chunk of audio).
+pub const ANALYZE_RESERVE: Duration = Duration::from_millis(1500);
+
+/// The most packets `timing` holds: 4.8 hours at 60 fps.
+pub const TIMING_PACKETS: usize = 1 << 20;
+
+/// The most times a list in `analyze`'s summary gives; its `count` says
+/// how many there were.
+pub const LISTED: usize = 20;
+
+// `analyze`'s thresholds (a1-plan section 6.3). They aren't limits, but
+// one place keeps them findable; docs/agents.md gives each.
+
+/// A frame lasting more than this many nominal frames is a gap, and
+/// round(its duration over the nominal) − 1 frames are missing.
+pub const GAP_OVER: f64 = 1.5;
+
+/// Durations varying by more than this share of the nominal one, plus a
+/// tick of the time base, are a variable frame rate (amendment 25).
+pub const VFR_SPREAD: f64 = 0.01;
+
+/// A non-key packet under this share of the median non-key packet is a
+/// picture coded as a repeat of the one before. An encoder refines a
+/// lossy picture when it repeats, so the first of a run costs a few
+/// percent of a P-frame (`jitter-dups`' cost 4 %); the rest are a few
+/// bytes. A scene that doesn't move codes the same way.
+pub const REPEAT_UNDER: f64 = 0.05;
+
+/// The grid `motion` area-averages each frame's luma to, columns × rows.
+pub const MOTION_GRID: (usize, usize) = (64, 32);
+
+/// A frame whose change from the one before is more than this many times
+/// the median change of the frames around it, and more than
+/// [`CUT_FLOOR`], is a cut.
+pub const CUT_OVER_MEDIAN: f64 = 6.0;
+
+/// The least change (0 to 255) that is a cut.
+pub const CUT_FLOOR: f64 = 12.0;
+
+/// Frames in the window [`CUT_OVER_MEDIAN`]'s median is taken over,
+/// centred on the frame.
+pub const CUT_WINDOW: usize = 15;
+
+/// A sample at or past this magnitude, in a run of [`CLIP_RUN`] or more,
+/// is clipped.
+pub const CLIP_LEVEL: f32 = 0.999;
+
+/// Samples in a row at [`CLIP_LEVEL`] that are clipping.
+pub const CLIP_RUN: usize = 3;
+
+/// Audio quieter than this on every channel, as RMS over 10 ms windows,
+/// is silent.
+pub const SILENCE_DBFS: f64 = -60.0;
+
+/// The shortest run of silent windows that is a silence.
+pub const SILENCE_MIN: Duration = Duration::from_millis(500);
+
+/// How loud nothing is: the floor of every dBFS `analyze` gives.
+pub const DBFS_FLOOR: f64 = -120.0;

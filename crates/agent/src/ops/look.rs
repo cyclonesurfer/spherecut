@@ -438,7 +438,7 @@ fn bad(arg: impl Into<String>, message: impl Into<String>) -> ToolError {
 }
 
 /// `t`, the argument `arg`, as a time.
-fn time(arg: &str, t: &TimeArg) -> Result<TimeSpec, ToolError> {
+pub(crate) fn time(arg: &str, t: &TimeArg) -> Result<TimeSpec, ToolError> {
     match t {
         TimeArg::Text(s) => s.parse::<TimeSpec>().map_err(|e| {
             ToolError::new(codes::BAD_ARGUMENT, e.to_string())
@@ -836,7 +836,7 @@ fn over_clip(count: u32, arg: &str, info: &VideoStreamInfo) -> Result<Vec<When>,
 
 /// The time `i / last` of the way from `a` to `b`: exact, or to the
 /// microsecond where the fraction would overflow.
-fn lerp(a: Time, b: Time, i: u32, last: u32) -> Time {
+pub(crate) fn lerp(a: Time, b: Time, i: u32, last: u32) -> Time {
     let exact = || {
         let f = Rational::new(i64::from(i), i64::from(last))?;
         let d = b

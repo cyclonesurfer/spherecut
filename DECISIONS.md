@@ -7006,6 +7006,102 @@ guarantee.
 Revisit if: `/proc` can't be relied on (a sandbox without it), or M2's
 projects open media through the same path.
 
+## D46. A1's analyze and check: what each measures
+
+*2026-10-30, A1.5 (analyze; check follows in A1.6). From
+`docs/design/a1-plan.md` section 6.3 and its amendment 33.*
+
+What `analyze` does, as `crates/agent/src/ops/analyze/` has it. A call
+names a `file`, a `kind`, optionally `from` and `to` (look's times: the
+whole clip by default, `to` past the end clamped to it) and `buckets`
+(1 to 200, 50 by default), and gets that many buckets of equal length,
+each with its `from` and its measures, a `summary` over them, and
+`complete`.
+
+- **The stream.** `stream` is an index in probe's full report: a video
+  stream for timing and motion, an audio one for audio; by default the
+  first video stream (not an attached picture), or the first audio.
+  Anything else is `bad_argument` at `stream`, whose `valid` lists the
+  right kind's indices. A frame number in `from` or `to` needs a
+  constant rate (the stream's average rate equal to its base rate), as
+  look's times do.
+- **Clip time** is D29's: 0 at the first frame shown. Timing takes it
+  as the least pts of the stream's packets up to its second keyframe
+  (at most 300), which is where media's decoders put it; audio is
+  placed on the first video stream's clip time, so that levels and
+  frames line up as look and timing give them.
+- **Buckets** are exact: bucket i of n starts at from + i/n of the
+  stretch as a fraction, and a frame's time is compared as a fraction,
+  so a frame on a boundary starts the bucket a call from that boundary
+  finds it in. (In floats, 1.2 / 0.4 is 2.9999999999999996, and frame 36
+  at 30 fps was counted by two calls.)
+- **timing** reads packets only (`media::packets`). Each frame lasts to
+  the next pts in presentation order; the last to the first packet past
+  `to`, or its own duration at the end. A duration of a tick or less is
+  a duplicate timestamp. The nominal duration is the mean of the others
+  within 1.5× their median, snapped to a standard rate or the declared
+  one when within 0.2 % (or a tick); a duration over 1.5× nominal is a
+  gap of round(d / nominal) − 1 frames missing. `vfr` is a spread of
+  those regular durations over 1 % of nominal plus a tick. A non-key
+  packet under 5 % of the median non-key size is a repeated picture.
+  Per bucket: frames, min/mean/max ms, dups, missing, keys, repeats,
+  Mb/s; the summary adds the nominal, declared and measured rates, the
+  keyframe interval and where each event is (the first 20 times).
+- **motion** decodes as look does (D39's choice, the GPU look renders
+  on, a download for a frame still on it) from an exact seek to `from`,
+  area-averages plane 0 to 64×32 at 0 to 255, and takes the mean
+  absolute difference from the frame before. A cut is a difference over
+  6× the median of the 15 around it and over 12. The summary says how
+  it decoded (`decode`, look's).
+- **audio** decodes the stream raw (every channel at its own rate,
+  `FfmpegAudio::open_raw`): per bucket the peak and RMS of the loudest
+  channel in dBFS (floored at −120), and `clipped`, samples at ±0.999 or
+  past in runs of 3 or more on a channel; overall the silences, runs of
+  10 ms windows at or below −60 dBFS RMS lasting 0.5 s or more.
+- **The deadline.** Every kind measures in order and, once the time
+  left is under 1.5 s plus twice its longest step, stops: the result
+  holds the buckets finished, `complete: false`, and `next_from`, the
+  exact time the next bucket starts, from which a call measures the
+  rest. None finished is `timed_out`, whose `next` asks for a shorter
+  stretch.
+- **Errors** are the agent's (D44): a file that won't open or decode in
+  probe's and look's words, `no_audio` at `file`, `out_of_range` at
+  `from` past the end, `bad_argument` at `to` not after `from`.
+
+Why: an agent explaining stutter or a bad cut needs numbers over time
+that cost a few kilobytes, not frames. Timing without a decode reads an
+hour of camera footage in seconds. Buckets keep the answer's size fixed
+(200 of them stay under 25,000 characters) whatever the stretch, and
+stopping at a bucket's end makes a partial answer one the next call
+continues without overlap.
+
+Thresholds, measured on synthetic clips: x264 codes a repeated picture
+in 12 bytes once the frame before has been refined, but the first of a
+run, after a lossy frame, carries refinement bits: 3.8 % of a P-frame
+at CRF 24 with heavy noise, and 10 to 22 % at CRF 16. So 5 %, not the
+plan's 2 %, and a repeat after a fine frame can go unseen. AAC lifts a
+tone's peaks by up to a dB (FFmpeg's `astats` reads the same) and
+ripples a clipped stretch's flat tops below and past full scale: of a
+tone clipped twice over, 134 samples count as clipped in its first
+quarter second and none in its second, whose peak is −0.34 dBFS. A peak
+at or near 0 dBFS is the surer sign in lossy audio; `clipped` is exact
+on PCM.
+
+Tests: `crates/agent/tests/analyze.rs` (`jitter-dups`' jitter, gaps,
+duplicates and repeats in MP4 and in a Matroska remux; a constant 29.97
+in both; `from`, `to` and frame numbers; the largest result's size; a
+planted cut; `levels`' sections; a call short of time continued from
+`next_from` with every frame counted once; errors), unit tests in each
+module, and `synth/tests/packets.rs` (the clip holds what it plants).
+
+Rejected: decoding for timing (a decode can't see a duplicate timestamp
+it drops, and costs a hundred times more); per-frame output (an hour at
+30 fps is 108,000 rows); a fixed bucket length (an agent asks about a
+stretch, and the count fixes the size).
+
+Revisit if: real footage shows repeats over 5 % (a camera's encoder
+refining more), or agents ask for more than 200 buckets.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360

@@ -244,6 +244,40 @@ the amendments above, these win.
       stream_fps, realtime, ended}`; `speed` without `file` is
       `bad_argument`.
 
+**As built in A1.5** (2026-10-30). Where these differ from 6.3, these
+win; D46 has the whole of it.
+
+33. **analyze:**
+    - **Repeated pictures** are non-key packets under **5 %** of the
+      median non-key size, not 2 %: x264 codes a repeat in 12 bytes
+      once the frame before is refined, but the first of a run after a
+      lossy frame carries refinement bits, 3.8 % of a P-frame on
+      `jitter-dups` (CRF 24, heavy noise, `force-cfr` so that timestamps
+      don't steer the rate control).
+    - **Duplicates** are durations of a tick or less, so that an MP4's
+      frame a tick after the last (90 kHz) and a Matroska remux's exact
+      tie both count. **The nominal duration** is the regular durations'
+      mean snapped to a standard or the declared rate within 0.2 % or a
+      tick; **`vfr`** is their spread over 1 % of it plus a tick, so a
+      Matroska file's millisecond rounding isn't variable.
+    - **Every kind stops at a bucket boundary** and gives `next_from`
+      (motion, timing and audio alike, not motion only): the exact time
+      the next bucket starts. Buckets are computed in fractions, so a
+      frame on a boundary is counted once across the two calls.
+    - **`stream`** is a video stream for timing and motion and an audio
+      one for audio; `valid` lists the right kind's. `to` past the end
+      is the end. A frame number needs a constant rate, as look's do.
+    - **Audio** is placed on the first video stream's clip time (D29),
+      found as timing finds it, so its silences line up with frames.
+      `clipped` is the plan's rule; after AAC it undercounts (D46), and
+      the peak near 0 dBFS is the better sign.
+    - **motion's summary** includes `decode`, look's account of the path
+      taken, and the time of the largest change (`max_at`).
+    - **The clips**: `gen-media` writes `jitter-dups.mp4` (10 s, 256×128,
+      jitter of ±20 % for a second, two gaps of three frames, two
+      duplicate timestamps, ten repeats) and `levels-3s.mp4` (a loud
+      tone, silence, a tone clipped twice over, a quiet tone).
+
 ## 0. What A1 is for
 
 An agent (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor, Zed,

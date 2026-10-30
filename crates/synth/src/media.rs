@@ -57,6 +57,9 @@ pub enum Audio {
     /// the presentation time of each of [`Spec::white`]'s frames, the same
     /// in both channels ([`audio::beeps`]): `sync-flash-beep`'s.
     Beeps,
+    /// Stereo 1 kHz at known levels, silence and clipping, by time
+    /// ([`audio::levels`]): `levels`'.
+    Levels,
 }
 
 #[derive(Debug, Clone)]
@@ -339,7 +342,7 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
     let aac_options = vec![("aac_pns".to_string(), "0".to_string())];
     let audio_settings = match spec.audio {
         Audio::None => None,
-        Audio::Stereo | Audio::Beeps => Some(AudioSettings {
+        Audio::Stereo | Audio::Beeps | Audio::Levels => Some(AudioSettings {
             encoder: "aac".into(),
             sample_rate,
             channels: 2,
@@ -389,6 +392,7 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
                 .collect();
             Some(audio::beeps(sample_rate, total, &onsets))
         }
+        Audio::Levels => Some(audio::levels(sample_rate, total)),
         Audio::AmbiX { azimuth, elevation } => Some(audio::ambix_source(
             sample_rate,
             total,
@@ -546,6 +550,172 @@ pub fn sync_flash_beep() -> Spec {
     }
 }
 
+/// `levels`' name.
+pub const LEVELS: &str = "levels-3s";
+
+/// `levels`: 3 s of the grid at 30 fps with [`Audio::Levels`]: a loud
+/// tone, silence, a clipped tone and a quiet one, at the times
+/// [`audio::LEVELS_LOUD`] and the others give. For `analyze`'s audio
+/// measures.
+pub fn levels() -> Spec {
+    Spec {
+        name: LEVELS.into(),
+        frames: 90,
+        audio: Audio::Levels,
+        ..Spec::default()
+    }
+}
+
+/// `jitter-dups`' name.
+pub const JITTER_DUPS: &str = "jitter-dups";
+
+/// `jitter-dups`' slots: 30 a second for 10 s.
+pub const JITTER_SLOTS: u32 = 300;
+
+/// Ticks of 1/[`VFR_TIMESCALE`] s from one slot to the next: 1/30 s.
+pub const JITTER_SLOT_TICKS: i64 = 3000;
+
+/// Slots shown [`JITTER_TICKS`] early (even ones) or late (odd ones), so
+/// that the frames there last 0.8 and 1.2 slots by turns: ±20 %.
+pub const JITTER_RANGE: std::ops::Range<u32> = 60..90;
+
+/// How far [`JITTER_RANGE`]'s slots move, in ticks: a tenth of a slot.
+pub const JITTER_TICKS: i64 = 300;
+
+/// The first of each run of [`JITTER_GAP_SLOTS`] slots that no frame
+/// fills: the frame before each run lasts four slots.
+pub const JITTER_GAPS: [u32; 2] = [150, 210];
+
+/// Slots in each of [`JITTER_GAPS`]' runs.
+pub const JITTER_GAP_SLOTS: u32 = 3;
+
+/// Slots followed by an extra frame one tick later: a duplicate
+/// timestamp within a tick in the MP4, and the very same timestamp in a
+/// Matroska remux, whose ticks are milliseconds.
+pub const JITTER_DUPS_AFTER: [u32; 2] = [120, 240];
+
+/// Slots whose picture is exactly the frame before's, which the encoder
+/// codes as a P-frame of a few bytes. None is a keyframe.
+pub const JITTER_REPEATS: [u32; 10] = [12, 13, 14, 44, 103, 136, 177, 199, 255, 287];
+
+/// Frames every [`JITTER_KEYINT`] are keyframes, counted as written.
+pub const JITTER_KEYINT: u32 = 30;
+
+/// One frame of `jitter-dups`, as [`jitter_dups_frames`] plans it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlantedFrame {
+    pub slot: u32,
+    /// In ticks of 1/[`VFR_TIMESCALE`] s.
+    pub pts: i64,
+    /// The extra frame after a slot of [`JITTER_DUPS_AFTER`].
+    pub dup: bool,
+    /// Its picture is the frame before's ([`JITTER_REPEATS`]).
+    pub repeat: bool,
+}
+
+/// `jitter-dups`' frames in order, each with its pts.
+pub fn jitter_dups_frames() -> Vec<PlantedFrame> {
+    let mut out = Vec::new();
+    for slot in 0..JITTER_SLOTS {
+        if JITTER_GAPS
+            .iter()
+            .any(|&g| (g..g + JITTER_GAP_SLOTS).contains(&slot))
+        {
+            continue;
+        }
+        let shift = match (JITTER_RANGE.contains(&slot), slot % 2) {
+            (false, _) => 0,
+            (true, 0) => -JITTER_TICKS,
+            (true, _) => JITTER_TICKS,
+        };
+        let pts = i64::from(slot) * JITTER_SLOT_TICKS + shift;
+        out.push(PlantedFrame {
+            slot,
+            pts,
+            dup: false,
+            repeat: JITTER_REPEATS.contains(&slot),
+        });
+        if JITTER_DUPS_AFTER.contains(&slot) {
+            out.push(PlantedFrame {
+                slot,
+                pts: pts + 1,
+                dup: true,
+                repeat: false,
+            });
+        }
+    }
+    out
+}
+
+/// Write `jitter-dups.mp4` into `dir` (a1-plan section 6.3): 10 s of
+/// the noisy grid, 256×128 H.264 with no B-frames, its frames on a 30 fps
+/// grid of [`JITTER_SLOTS`] slots but for what is planted: jitter in
+/// [`JITTER_RANGE`], two gaps of three frames ([`JITTER_GAPS`]), two
+/// duplicate timestamps ([`JITTER_DUPS_AFTER`]) and ten repeated
+/// pictures ([`JITTER_REPEATS`]). [`jitter_dups_frames`] lists every
+/// frame. Heavy noise makes every other P-frame large, as a camera's are.
+pub fn write_jitter_dups(dir: &Path) -> Result<PathBuf, SynthError> {
+    std::fs::create_dir_all(dir).map_err(|error| SynthError::Io {
+        path: dir.to_path_buf(),
+        error,
+    })?;
+    const SEED: u64 = 7;
+    let frames = jitter_dups_frames();
+    let spec = Spec {
+        name: JITTER_DUPS.into(),
+        frames: u32::try_from(frames.len()).unwrap_or(u32::MAX),
+        gop: Some(Gop {
+            keyint: JITTER_KEYINT,
+            bframes: 0,
+            open: false,
+            radl: 0,
+        }),
+        vfr: true,
+        noise: Some(SEED),
+        ..Spec::default()
+    };
+    let out = dir.join(spec.file_name());
+    let mut settings = spec.video_settings()?;
+    // x264 sizes a frame by how long it lasts, given timestamps: a frame
+    // a tick long would come out tiny, as a repeated picture does. As
+    // though at a constant rate, every frame is coded alike.
+    for (k, v) in &mut settings.options {
+        if k == "x264-params" {
+            v.push_str(":force-cfr=1");
+        }
+        // Coarse enough that a repeated picture is all skipped blocks
+        // once the frame before it is refined: 12 bytes, and the first of
+        // a run under 4 % of a P-frame.
+        if k == "crf" {
+            *v = "24".into();
+        }
+    }
+    let mut w = Mp4Writer::create(&out, &settings, None)?;
+    let format = spec.yuv_format();
+    let mut last: Option<YuvPlanes> = None;
+    for f in frames {
+        let planes = match last.take() {
+            Some(p) if f.repeat => p,
+            _ => {
+                let img = render_equirect(spec.pattern, spec.width, spec.height, f.slot, 2);
+                let mut planes = yuv::to_yuv(&img, spec.bits, &format);
+                // The extra frame is a picture of its own.
+                let noise = if f.dup { 10_000 + f.slot } else { f.slot };
+                // Sixteen layers, about ±11 levels, which the encoder codes
+                // at its CRF: every other P-frame 3 KB or more.
+                for layer in 0..16 {
+                    add_noise(&mut planes, spec.bits, SEED + 31 * layer, noise);
+                }
+                planes
+            }
+        };
+        w.push_video_at(&planes, f.pts)?;
+        last = Some(planes);
+    }
+    w.finish()?;
+    Ok(out)
+}
+
 /// The standard set written by `cargo xtask gen-media`.
 pub fn standard_set() -> Vec<Spec> {
     let base = |name: &str| Spec {
@@ -638,6 +808,8 @@ pub fn standard_set() -> Vec<Spec> {
         },
         // A/V sync by eye and ear (M1 plan section 9.3).
         sync_flash_beep(),
+        // analyze's audio measures (a1-plan section 6.3).
+        levels(),
     ]
 }
 

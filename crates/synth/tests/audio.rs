@@ -16,6 +16,7 @@ use std::sync::atomic::AtomicBool;
 
 use spherecut_core::{FrameRate, Rational, StopToken, Time};
 use spherecut_media::MediaError;
+use spherecut_media::audio::FfmpegAudio;
 use spherecut_media::backend::{
     AudioDecode, AudioOutFormat, AudioRequest, FfmpegBackend, MediaBackend, NextAudio, NextFrame,
     VideoRequest,
@@ -297,6 +298,54 @@ fn surround_is_mixed_down_to_stereo() {
         "{}",
         pitch(&r, 48_000)
     );
+}
+
+/// Raw decoding (a1-plan amendment 11) keeps every channel at the
+/// stream's own rate: 5.1 is six channels, the tones in the first two and
+/// silence in the rest; 44.1 kHz stays 44.1 kHz; and ambiX stays four
+/// channels, W loudest.
+#[test]
+fn raw_keeps_every_channel_at_the_streams_rate() {
+    let path = clip("raw-surround", Audio::Surround, 48_000, 1);
+    let mut dec = FfmpegAudio::open_raw(&path, &request(STEREO_48K, None)).unwrap();
+    assert_eq!((dec.info().rate, dec.info().channels), (48_000, 6));
+    let (_, data) = drain(&mut dec, None);
+    assert_eq!(data.len(), 48_000 * 6);
+    let middle = &data[9600 * 6..86_400 * 3];
+    assert!((pitch(&channel(middle, 6, 0), 48_000) - 440.0).abs() < 2.0);
+    assert!((pitch(&channel(middle, 6, 1), 48_000) - 660.0).abs() < 2.0);
+    for c in 2..6 {
+        let e = energy(&channel(middle, 6, c));
+        assert!(e < 1e-6, "channel {c}: {e}");
+    }
+
+    let path = clip("raw-441", Audio::Stereo, 44_100, 2);
+    let mut dec = FfmpegAudio::open_raw(&path, &request(STEREO_48K, None)).unwrap();
+    assert_eq!((dec.info().rate, dec.info().channels), (44_100, 2));
+    let (_, data) = drain(&mut dec, None);
+    assert_eq!(data.len() / 2, 88_200, "2 s at 44.1 kHz");
+    let l = channel(&data[44_100..88_200], 2, 0);
+    assert!((pitch(&l, 44_100) - 440.0).abs() < 2.0);
+
+    let ambix = Spec {
+        name: "raw-ambix".into(),
+        frames: 30,
+        audio: Audio::AmbiX {
+            azimuth: 90,
+            elevation: 0,
+        },
+        spherical: true,
+        ..Spec::default()
+    };
+    let path = media::write(&ambix, &dir(&ambix.name)).unwrap();
+    let mut dec = FfmpegAudio::open_raw(&path, &request(STEREO_48K, None)).unwrap();
+    assert_eq!(dec.info().channels, 4);
+    let (_, data) = drain(&mut dec, None);
+    // A source at +90° is all W and Y (ACN 0 and 1), with nothing in Z
+    // or X.
+    let e: Vec<f64> = (0..4).map(|c| energy(&channel(&data, 4, c))).collect();
+    assert!(e[1] > e[0] * 0.5, "{e:?}");
+    assert!(e[2] < e[0] * 0.01 && e[3] < e[0] * 0.01, "{e:?}");
 }
 
 /// A source at azimuth +90° is on the left, where the left cardioid

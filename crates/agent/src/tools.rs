@@ -40,6 +40,11 @@ pub const TOOLS: &[Tool] = &[
         schema: include_str!("../../../docs/agents/schemas/look.json"),
     },
     Tool {
+        name: "analyze",
+        title: "Measure a video over time",
+        schema: include_str!("../../../docs/agents/schemas/analyze.json"),
+    },
+    Tool {
         name: "doctor",
         title: "Check this machine's decoders",
         schema: include_str!("../../../docs/agents/schemas/doctor.json"),
@@ -195,6 +200,7 @@ impl Tools for Spherecut {
         let (mut result, images) = match name {
             "probe" => (ops::probe::run(ops::request(args)?, &cx)?, Vec::new()),
             "look" => ops::look::run(ops::request(args)?, &cx)?,
+            "analyze" => (ops::analyze::run(ops::request(args)?, &cx)?, Vec::new()),
             "doctor" => (ops::doctor::run(ops::request(args)?, &cx)?, Vec::new()),
             _ => return Err(ToolError::internal(format!("{name} has no op"))),
         };
@@ -290,6 +296,8 @@ mod tests {
                 json!({"file": "a.mp4", "times": ["0", "10"], "count": 5,
                        "views": [{"yaw": 0, "vfov": 60}, {"yaw": 180}]}),
             ],
+            "analyze" => vec![json!({"file": "a.mp4", "kind": "timing", "from": "1.5",
+                                    "to": [30000, 1001], "buckets": 20, "stream": 0})],
             "doctor" => {
                 vec![json!({"file": "a.mp4", "speed": true, "render_node": "/dev/dri/renderD128"})]
             }
@@ -302,6 +310,7 @@ mod tests {
         match name {
             "probe" => ops::request::<ops::probe::Request>(args).map(drop),
             "look" => ops::request::<ops::look::Request>(args).map(drop),
+            "analyze" => ops::request::<ops::analyze::Request>(args).map(drop),
             "doctor" => ops::request::<ops::doctor::Request>(args).map(drop),
             _ => Err(ToolError::internal(format!("no request type for {name}"))),
         }
