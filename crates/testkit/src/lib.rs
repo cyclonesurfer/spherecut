@@ -180,6 +180,116 @@ pub mod tier2 {
         Some(configured_render_node()).filter(|p| p.exists())
     }
 
+    /// The display a GUI test's child process opens its window on: the
+    /// variables to set on it, and how they were found.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct GraphicalSession {
+        pub env: Vec<(&'static str, std::ffi::OsString)>,
+        pub found: SessionFrom,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum SessionFrom {
+        /// `WAYLAND_DISPLAY` was set.
+        WaylandDisplay,
+        /// The one Wayland socket of the user's in `XDG_RUNTIME_DIR`
+        /// (`/run/user/<uid>` without it): hw-test was started from a
+        /// TTY while the user's desktop runs.
+        Discovered,
+        /// `DISPLAY` was set (X11, or Xwayland).
+        X11,
+    }
+
+    impl SessionFrom {
+        /// As the hw-test report says it.
+        pub fn describe(self) -> &'static str {
+            match self {
+                SessionFrom::WaylandDisplay => "WAYLAND_DISPLAY set",
+                SessionFrom::Discovered => "Wayland socket discovered",
+                SessionFrom::X11 => "DISPLAY set",
+            }
+        }
+    }
+
+    /// Why there is no session to run in.
+    pub const NO_SESSION: &str = "no graphical session: run from a terminal inside GNOME or \
+         Hyprland, or leave the desktop unlocked and on screen";
+
+    /// The graphical session to open a window in, or skip: `WAYLAND_DISPLAY`
+    /// when set; otherwise, from a TTY, the single `wayland-*` socket the
+    /// user owns in `XDG_RUNTIME_DIR`, for the child process only;
+    /// otherwise `DISPLAY` (M1 plan section 12, item 5).
+    #[track_caller]
+    pub fn require_graphical_session() -> GraphicalSession {
+        require_hw_run();
+        graphical_session(|k| std::env::var_os(k), own_uid()).unwrap_or_else(|why| skip(why))
+    }
+
+    /// [`require_graphical_session`]'s rule, on these variables, for the
+    /// user `uid` (its sockets, and its `/run/user/<uid>`).
+    pub fn graphical_session(
+        var: impl Fn(&str) -> Option<std::ffi::OsString>,
+        uid: Option<u32>,
+    ) -> Result<GraphicalSession, String> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let set = |k: &str| var(k).filter(|v| !v.is_empty());
+        if let Some(v) = set("WAYLAND_DISPLAY") {
+            return Ok(GraphicalSession {
+                env: vec![("WAYLAND_DISPLAY", v)],
+                found: SessionFrom::WaylandDisplay,
+            });
+        }
+        let runtime = set("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .or_else(|| uid.map(|u| PathBuf::from(format!("/run/user/{u}"))));
+        let mut sockets: Vec<String> = runtime
+            .as_deref()
+            .and_then(|d| std::fs::read_dir(d).ok())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                let meta = e.metadata().ok()?;
+                let ours = uid.is_none_or(|u| meta.uid() == u);
+                (name.starts_with("wayland-") && meta.file_type().is_socket() && ours)
+                    .then_some(name)
+            })
+            .collect();
+        sockets.sort();
+        if let ([one], Some(dir)) = (&sockets[..], &runtime) {
+            let mut env = vec![("WAYLAND_DISPLAY", one.into())];
+            if set("XDG_RUNTIME_DIR").is_none() {
+                env.push(("XDG_RUNTIME_DIR", dir.clone().into_os_string()));
+            }
+            return Ok(GraphicalSession {
+                env,
+                found: SessionFrom::Discovered,
+            });
+        }
+        if let Some(v) = set("DISPLAY") {
+            return Ok(GraphicalSession {
+                env: vec![("DISPLAY", v)],
+                found: SessionFrom::X11,
+            });
+        }
+        Err(if sockets.len() > 1 {
+            format!(
+                "{NO_SESSION} (or set WAYLAND_DISPLAY to one of {})",
+                sockets.join(", ")
+            )
+        } else {
+            NO_SESSION.to_owned()
+        })
+    }
+
+    /// The process's real user id, from `/proc/self/status`.
+    pub fn own_uid() -> Option<u32> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
+        line.split_whitespace().next()?.parse().ok()
+    }
+
     /// The default audio output device, as `open` opens it, or skip with
     /// the reason `open` gives when there is none. `open` panics, failing
     /// the test, when there is a device that won't play: that isn't a
@@ -469,6 +579,93 @@ mod tests {
         );
         drop(guard);
         assert!(!base.exists());
+    }
+
+    #[test]
+    fn a_graphical_session_is_set_or_found_or_none() {
+        use std::ffi::OsString;
+        use std::os::unix::fs::MetadataExt;
+        use tier2::{SessionFrom, graphical_session};
+        let base = std::env::temp_dir().join(format!("spherecut-session-{}", std::process::id()));
+        let guard = TempDir(base.clone());
+        std::fs::create_dir_all(&base).unwrap();
+        let uid = std::fs::metadata(&base).unwrap().uid();
+        let env = |pairs: Vec<(&'static str, OsString)>| {
+            move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
+        };
+        let runtime = || ("XDG_RUNTIME_DIR", base.clone().into_os_string());
+        // Set, first; empty counts as unset.
+        let s = graphical_session(
+            env(vec![
+                ("WAYLAND_DISPLAY", "wayland-1".into()),
+                ("DISPLAY", ":0".into()),
+            ]),
+            Some(uid),
+        )
+        .unwrap();
+        assert_eq!(s.found, SessionFrom::WaylandDisplay);
+        assert_eq!(s.env, [("WAYLAND_DISPLAY", OsString::from("wayland-1"))]);
+        // From a TTY: no socket, so DISPLAY, else none.
+        let x = graphical_session(
+            env(vec![
+                ("WAYLAND_DISPLAY", "".into()),
+                runtime(),
+                ("DISPLAY", ":1".into()),
+            ]),
+            Some(uid),
+        )
+        .unwrap();
+        assert_eq!(
+            (x.found, &x.env[..]),
+            (SessionFrom::X11, &[("DISPLAY", OsString::from(":1"))][..])
+        );
+        let none = graphical_session(env(vec![runtime()]), Some(uid)).unwrap_err();
+        assert_eq!(none, tier2::NO_SESSION);
+        // A lock file and a plain file named like a socket aren't one.
+        std::fs::write(base.join("wayland-0.lock"), b"").unwrap();
+        std::fs::write(base.join("wayland-9"), b"").unwrap();
+        assert!(graphical_session(env(vec![runtime()]), Some(uid)).is_err());
+        // The one socket: found, over DISPLAY.
+        let _a = std::os::unix::net::UnixListener::bind(base.join("wayland-0")).unwrap();
+        let found =
+            graphical_session(env(vec![runtime(), ("DISPLAY", ":0".into())]), Some(uid)).unwrap();
+        assert_eq!(found.found, SessionFrom::Discovered);
+        assert_eq!(
+            found.env,
+            [("WAYLAND_DISPLAY", OsString::from("wayland-0"))]
+        );
+        // Another user's isn't ours.
+        assert!(graphical_session(env(vec![runtime()]), Some(uid + 1)).is_err());
+        // Two: which is the desktop's isn't known, so DISPLAY or none,
+        // and the reason names them.
+        let _b = std::os::unix::net::UnixListener::bind(base.join("wayland-1")).unwrap();
+        let two = graphical_session(env(vec![runtime()]), Some(uid)).unwrap_err();
+        assert!(
+            two.ends_with("(or set WAYLAND_DISPLAY to one of wayland-0, wayland-1)"),
+            "{two}"
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn a_session_found_without_the_runtime_dir_brings_it() {
+        // /run/user/<uid> is where a login puts it; a temp dir stands in
+        // through XDG_RUNTIME_DIR, so only the variable's own case is
+        // checked here: it isn't added when it was set.
+        use std::ffi::OsString;
+        let base = std::env::temp_dir().join(format!("spherecut-rt-{}", std::process::id()));
+        let guard = TempDir(base.clone());
+        std::fs::create_dir_all(&base).unwrap();
+        let _s = std::os::unix::net::UnixListener::bind(base.join("wayland-0")).unwrap();
+        let dir = base.clone().into_os_string();
+        let found =
+            tier2::graphical_session(move |k| (k == "XDG_RUNTIME_DIR").then(|| dir.clone()), None)
+                .unwrap();
+        assert_eq!(
+            found.env,
+            [("WAYLAND_DISPLAY", OsString::from("wayland-0"))]
+        );
+        drop(guard);
     }
 
     #[test]

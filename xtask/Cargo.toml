@@ -10,7 +10,11 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+# The GUI smoke run's documents, for the report.
+serde_json.workspace = true
 spherecut-synth.workspace = true
+# How the GUI smoke run finds the desktop session, for the report.
+spherecut-testkit.workspace = true
 
 [lints]
 workspace = true
