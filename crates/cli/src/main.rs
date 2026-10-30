@@ -21,13 +21,42 @@ use spherecut_core::brand;
 mod frame;
 #[allow(unsafe_code)]
 mod interrupt;
-mod show;
 
 #[derive(Parser)]
-#[command(name = brand::APP_SLUG, version = brand::VERSION, about = "Native Linux 360° video editor")]
+#[command(
+    name = brand::APP_SLUG,
+    version = brand::VERSION,
+    about = "Native Linux 360° video editor",
+    long_about = "Native Linux 360° video editor. With no command, opens the viewer \
+                  (the files given, the first of them shown); the commands below \
+                  work without a display.",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
+    #[command(flatten)]
+    gui: GuiCli,
+}
+
+/// The viewer's options, with no command.
+#[derive(clap::Args)]
+struct GuiCli {
+    /// Videos to open; the first is shown.
+    files: Vec<PathBuf>,
+    /// The frame cache's size in MiB, or `auto` (a quarter of the memory
+    /// available, 512 MiB to 8 GiB). Over SPHERECUT_FRAME_CACHE_MIB.
+    #[arg(long, value_name = "MIB", value_parser = cache_mib)]
+    cache_mb: Option<spherecut_playback::CacheBudget>,
+    /// The Vulkan adapter to render on: auto (a GPU, else lavapipe), cpu
+    /// (lavapipe), or part of an adapter's name or its PCI bus id. Over
+    /// SPHERECUT_ADAPTER.
+    #[arg(long)]
+    adapter: Option<String>,
+}
+
+fn cache_mib(s: &str) -> Result<spherecut_playback::CacheBudget, String> {
+    spherecut_playback::CacheBudget::parse_mib(s).map_err(|e| e.to_string())
 }
 
 #[derive(Subcommand)]
@@ -227,7 +256,10 @@ fn log_directives(v: &str) -> String {
 fn run(cli: Cli, args: &[OsString], json: bool) -> Result<Exit> {
     #[cfg(debug_assertions)]
     debug_panic("run");
-    match cli.cmd {
+    let Some(cmd) = cli.cmd else {
+        return Ok(gui(cli.gui));
+    };
+    match cmd {
         Cmd::Frame(frame) => match frame.check() {
             Ok(()) => frame::run(frame),
             Err(message) => Ok(usage(&subcommand_error("frame", message), args, json)),
@@ -242,6 +274,26 @@ fn run(cli: Cli, args: &[OsString], json: bool) -> Result<Exit> {
     }
 }
 
+/// The viewer, until its window closes. Without a display it exits 3
+/// (`no_display`), as it does without a GPU (D27).
+fn gui(args: GuiCli) -> Exit {
+    let gui = spherecut_app::GuiArgs {
+        files: args.files,
+        cache: args.cache_mb,
+        adapter: args
+            .adapter
+            .as_deref()
+            .map(spherecut_render::AdapterChoice::parse),
+    };
+    match spherecut_app::run(gui) {
+        Ok(()) => Exit::Ok,
+        Err(e) => {
+            to_stderr(&format!("error: {e}\n"));
+            contract::frame_exit(e.code())
+        }
+    }
+}
+
 fn probe(paths: &[PathBuf], json: bool) -> Result<Exit> {
     let mut files = Vec::with_capacity(paths.len());
     // Cleared when the reader goes away; the rest are still probed for the
@@ -252,7 +304,7 @@ fn probe(paths: &[PathBuf], json: bool) -> Result<Exit> {
         // FFmpeg's own word on why it could not open the file, under ours.
         // In JSON it is the error's `ffmpeg_log`.
         let ffmpeg = match &probed {
-            Err(e) if !json => show::ffmpeg_lines(&e.ffmpeg_log),
+            Err(e) if !json => spherecut_media::probe::ffmpeg_lines(&e.ffmpeg_log),
             _ => String::new(),
         };
         let file = ProbeFile::new(path, probed);
@@ -260,7 +312,7 @@ fn probe(paths: &[PathBuf], json: bool) -> Result<Exit> {
             && reading
             && let Some(r) = &file.report
         {
-            reading = emit(&show::probe(r))?;
+            reading = emit(&spherecut_media::probe::render_text(r))?;
         }
         if let Some(e) = &file.error {
             to_stderr(&format!("error: {}\n{ffmpeg}", e.message));
@@ -281,7 +333,7 @@ fn doctor(render_node: &Path, json: bool) -> Result<Exit> {
     if json {
         print_json(&envelope, exit)
     } else {
-        emit(&show::doctor(&report))?;
+        emit(&spherecut_media::doctor::render_text(&report))?;
         Ok(exit)
     }
 }

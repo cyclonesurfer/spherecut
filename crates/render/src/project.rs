@@ -166,6 +166,12 @@ impl LinearTarget {
     /// `TooLarge` past the device's textures.
     pub fn new(gpu: &Gpu, size: (u32, u32)) -> Result<LinearTarget, RenderError> {
         gpu.check()?;
+        Self::new_unchecked(gpu, size)
+    }
+
+    /// [`Self::new`] without checking the device first: for the GUI's
+    /// viewer, as [`Projector::record_unchecked`].
+    pub fn new_unchecked(gpu: &Gpu, size: (u32, u32)) -> Result<LinearTarget, RenderError> {
         if size.0 == 0 || size.1 == 0 {
             return Err(RenderError::Invalid(format!(
                 "a {}x{} view has no pixels",
@@ -239,6 +245,21 @@ impl LinearTarget {
     /// Makes the drawn part `size`, reallocating only when the texture is
     /// smaller than that.
     pub fn resize(&mut self, gpu: &Gpu, size: (u32, u32)) -> Result<(), RenderError> {
+        self.resize_with(gpu, size, LinearTarget::new)
+    }
+
+    /// [`Self::resize`] without checking the device first: for the GUI's
+    /// viewer, as [`Projector::record_unchecked`].
+    pub fn resize_unchecked(&mut self, gpu: &Gpu, size: (u32, u32)) -> Result<(), RenderError> {
+        self.resize_with(gpu, size, LinearTarget::new_unchecked)
+    }
+
+    fn resize_with(
+        &mut self,
+        gpu: &Gpu,
+        size: (u32, u32),
+        make: fn(&Gpu, (u32, u32)) -> Result<LinearTarget, RenderError>,
+    ) -> Result<(), RenderError> {
         let have = (self.texture.width(), self.texture.height());
         if size.0 == 0 || size.1 == 0 {
             return Err(RenderError::Invalid(format!(
@@ -247,7 +268,7 @@ impl LinearTarget {
             )));
         }
         if size.0 > have.0 || size.1 > have.1 {
-            *self = LinearTarget::new(gpu, (size.0.max(have.0), size.1.max(have.1)))?;
+            *self = make(gpu, (size.0.max(have.0), size.1.max(have.1)))?;
         }
         self.extent = size;
         Ok(())
@@ -366,6 +387,26 @@ impl Projector {
         timers: Option<&mut GpuTimers>,
     ) -> Result<(), RenderError> {
         self.gpu.check()?;
+        self.record_unchecked(enc, slot, view, target, filter, debug, timers);
+        Ok(())
+    }
+
+    /// [`Self::record`] without checking the device first: for the GUI's
+    /// viewer, which records on the UI thread inside egui's frame, where
+    /// [`Gpu::check`]'s poll and locks have no place, and which leaves the
+    /// device's health to the player's upload thread (a lost device, or
+    /// an error no scope caught, comes back as its `GpuFailed`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_unchecked(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        slot: &GpuFrame,
+        view: &ViewParams,
+        target: &LinearTarget,
+        filter: Filter,
+        debug: DebugMode,
+        timers: Option<&mut GpuTimers>,
+    ) {
         let (w, h) = target.extent;
         let uniform = ViewUniform::new(view, (w, h));
         self.gpu
@@ -389,6 +430,5 @@ impl Projector {
         if let (Some(t), Some(span)) = (timers, span) {
             t.end(enc, span);
         }
-        Ok(())
     }
 }

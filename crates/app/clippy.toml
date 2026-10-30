@@ -1,0 +1,66 @@
+# spherecut-app's own clippy.toml (M1 plan section 7.9). A crate's
+# clippy.toml replaces the workspace's, so this repeats it, and adds the
+# calls that block: the UI thread must never wait. Workers and the code
+# around the event loop that make them say why, with #[expect]; the
+# runtime guard (core::blocking) covers other crates' code the UI calls.
+# egui's own locks are epaint's parking_lot wrappers, re-exported as
+# egui::mutex: egui-wgpu's RenderState.renderer is one.
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# Spherecut makes no network connections (docs/PROMPT.md, DECISIONS D8 and
+# D24). A3's attach socket is a Unix socket, which these don't cover.
+disallowed-types = [
+    { path = "std::net::TcpStream", reason = "Spherecut makes no network connections (D8, D24)" },
+    { path = "std::net::TcpListener", reason = "Spherecut makes no network connections (D8, D24)" },
+    { path = "std::net::UdpSocket", reason = "Spherecut makes no network connections (D8, D24)" },
+]
+
+# FFmpeg is confined to the file Spherecut opened, and its decoders to
+# MAX_PIXELS, only through spherecut-media's ffi::open_input and
+# ffi::open_decoder (D24). ffmpeg-next's own functions open files with
+# every protocol and demuxer, and decoders with FFmpeg's default limit.
+# Its output opens take the path as a URL too, so `http://...` would
+# write to the network; Mp4Writer writes through a file it opened itself.
+disallowed-methods = [
+
+    { path = "ffmpeg_next::format::open", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::open_with", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::input", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::input_with_dictionary", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::input_with_interrupt", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::input_with_interrupt_and_dictionary", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::input_from_stream", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::input_from_stream_with_interrupt", reason = "unconfined; use ffi::open_input (D24)" },
+    { path = "ffmpeg_next::format::output", reason = "opens the path as a URL; write through Mp4Writer (D24)" },
+    { path = "ffmpeg_next::format::output_with", reason = "opens the path as a URL; write through Mp4Writer (D24)" },
+    { path = "ffmpeg_next::format::output_as", reason = "opens the path as a URL; write through Mp4Writer (D24)" },
+    { path = "ffmpeg_next::format::output_as_with", reason = "opens the path as a URL; write through Mp4Writer (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::open", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::open_as", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::open_with", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::open_as_with", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::video", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::audio", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "ffmpeg_next::codec::decoder::Decoder::subtitle", reason = "no max_pixels; use ffi::open_decoder (D24)" },
+    { path = "std::sync::Mutex::lock", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "std::sync::RwLock::read", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "std::sync::RwLock::write", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "epaint::mutex::Mutex::lock", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "epaint::mutex::RwLock::read", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "epaint::mutex::RwLock::write", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "std::sync::Condvar::wait", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "std::sync::Condvar::wait_while", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "std::sync::Condvar::wait_timeout", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "std::sync::mpsc::Receiver::recv", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "std::thread::JoinHandle::join", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "std::thread::sleep", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "std::fs::read", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "std::fs::read_to_string", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "std::fs::read_dir", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "std::fs::File::open", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "wgpu::Device::poll", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "pollster::block_on", reason = "the UI thread must not block (PLAN M1)" },
+    { path = "spherecut_playback::Player::join", reason = "the UI thread must not block (PLAN M1)" },
+]

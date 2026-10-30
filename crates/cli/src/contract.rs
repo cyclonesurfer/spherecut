@@ -82,6 +82,8 @@ pub mod codes {
     pub const OUT_OF_RANGE: &str = "out_of_range";
     /// frame: interrupted by SIGINT, leaving no output file (exit 4).
     pub const CANCELLED: &str = "cancelled";
+    /// The GUI: no Wayland or X11 display to open its window on (exit 3).
+    pub const NO_DISPLAY: &str = "no_display";
 
     /// Every error code above.
     pub const ALL: &[&str] = &[
@@ -93,6 +95,7 @@ pub mod codes {
         NOT_EQUIRECT,
         OUT_OF_RANGE,
         CANCELLED,
+        NO_DISPLAY,
     ];
 
     /// frame's warnings that aren't errors' codes too: what it did with
@@ -139,16 +142,21 @@ pub fn all_codes() -> Vec<&'static str> {
     all
 }
 
-/// The exit status of a `frame` run that failed with `code`: 2 for a
-/// usage error, 3 for a device or codec the run needs and doesn't have,
-/// 4 when it was cancelled, and 1 for anything else (D27). `hw_*` codes
-/// fail a run only when `--decoder` named the hardware; `auto` falls
-/// back to software instead.
+/// The exit status of a `frame` run, or the GUI's, that failed with
+/// `code`: 2 for a usage error, 3 for a device, codec or display the run
+/// needs and doesn't have, 4 when it was cancelled, and 1 for anything
+/// else (D27). `hw_*` codes fail a run only when `--decoder` named the
+/// hardware; `auto` falls back to software instead.
 pub fn frame_exit(code: &str) -> Exit {
     match code {
         codes::USAGE => Exit::Usage,
-        "no_gpu" | "adapter_not_found" | "hw_unavailable" | "hw_unsupported" | "hw_failed"
-        | "no_decoder" => Exit::Missing,
+        "no_gpu"
+        | "adapter_not_found"
+        | "hw_unavailable"
+        | "hw_unsupported"
+        | "hw_failed"
+        | "no_decoder"
+        | codes::NO_DISPLAY => Exit::Missing,
         codes::CANCELLED => Exit::Cancelled,
         _ => Exit::Failed,
     }

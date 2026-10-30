@@ -10,8 +10,14 @@ with FFmpeg, in software or on the GPU through VA-API.
 It runs offline: no accounts, no telemetry, no network access.
 
 **Status: early.** Milestone M0 (foundations) is done; M1, the viewer, is
-in progress, so there is no GUI yet.
-What works today is the `spherecut` command line tool:
+in progress. What works today:
+
+- `spherecut [file]` opens the viewer: a stitched equirect played on the
+  GPU with its audio, looked around by dragging (the point you grab stays
+  under the pointer), zoomed about the pointer, shown rectilinear,
+  fisheye or as a tiny planet, stepped frame by frame and scrubbed. It
+  checks your codecs and GPU at startup and shows the fixes it finds.
+  The performance overlay's graphs and saved settings come next.
 
 - `spherecut probe <file>...` shows what an MP4/MOV or Matroska/WebM file
   is: container, streams, codecs, colour, exact frame rates and
@@ -51,6 +57,12 @@ an agent, frames included, goes to that agent's model provider.
   the audio output links. Sound plays through PulseAudio's protocol,
   which PipeWire serves on Fedora and Arch (`pipewire-pulse`), or else
   ALSA; with no sound device, playback is silent.
+- For the viewer, a Wayland or X11 desktop session. It loads
+  libwayland-client and libxkbcommon (Wayland), or libX11, libXcursor,
+  libXrandr, libXi and libxkbcommon-x11 (X11), when its window opens, as
+  it loads the Vulkan loader; a desktop has them. With no display,
+  `spherecut` exits 3 and says so, and the other commands work as
+  before.
 - For the Tier 1 tests: Mesa's lavapipe Vulkan driver and strace (see
   Development).
 
@@ -97,6 +109,7 @@ checks the FFmpeg codecs, the GPU drivers and access to the render node.
 
 ```sh
 cargo build --release
+./target/release/spherecut clip.mp4
 ./target/release/spherecut doctor
 ./target/release/spherecut probe VID_20261022_165451_00_004.insv
 ./target/release/spherecut probe --json clip.mp4
@@ -201,6 +214,31 @@ FFmpeg's software decoder)`); for the second, the fix is a newer driver.
 In `--json`, a failed check's `fault` is `ffmpeg`, `driver` or
 `wrong_output`. Doctor never installs or changes anything; on Fedora it
 makes one read-only `rpm -q` query to word its fixes.
+
+### The viewer
+
+```sh
+spherecut                                  # the viewer, with its Files pane to open one
+spherecut clip.mp4                         # clip.mp4 shown
+spherecut clip.mp4 --cache-mb 4096         # a 4 GiB frame cache (default: a quarter of free memory, 512 MiB to 8 GiB)
+spherecut clip.mp4 --adapter cpu           # render on lavapipe (or part of a GPU's name, or its PCI bus id)
+```
+
+Drag the picture to look around; with Ctrl held the drag is free to
+roll. Scroll (or Ctrl+scroll) to zoom about the pointer, or + and − to
+zoom about the centre.
+Touchpad pinch doesn't reach applications under winit on Linux yet, so
+two-finger scrolling zooms. 1, 2 and 3 switch to rectilinear, fisheye
+and tiny planet, and R looks forward and level again. Space or K plays
+and pauses, Right and Left (or . and ,) step a frame, Shift with them
+jumps a second, Home and End go to the first and last frames, and
+dragging the bar under the picture scrubs. F3 shows the overlay. The
+Files pane opens videos (there is no file dialog, and files can't be
+dropped on the window under Wayland). The Info pane shows the file's
+probe report, and the Doctor pane the startup check's whole report; its
+errors and warnings also show as banners above the viewer, each with its
+fix and a Copy button. `SPHERECUT_FRAME_CACHE_MIB` and
+`SPHERECUT_ADAPTER` set the cache and the GPU as the options do.
 
 ### Rendering a frame
 

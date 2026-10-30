@@ -1,0 +1,39 @@
+[package]
+name = "spherecut-app"
+description = "The GUI viewer: eframe on render's device, the viewer pane, transport and the side panes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui_tiles.workspace = true
+glam.workspace = true
+serde.workspace = true
+spherecut-audio.workspace = true
+spherecut-core.workspace = true
+spherecut-media.workspace = true
+spherecut-playback.workspace = true
+spherecut-render.workspace = true
+spherecut-sphere.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+# Not used directly: named so that eframe's winit gets `wayland-dlopen`
+# (libwayland loaded at run time) by feature unification (D34).
+winit.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true
+image.workspace = true
+spherecut-synth.workspace = true
+# The fallback notice's test fails a frame "as hardware" (tests/panes.rs);
+# only here, so only test builds have fault injection (DECISIONS D30).
+spherecut-media = { workspace = true, features = ["fault-injection"] }
+
+[lints]
+workspace = true

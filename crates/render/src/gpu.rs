@@ -122,12 +122,25 @@ impl Gpu {
     /// A device for rendering without a window: `spherecut frame`, the
     /// tests and the benchmarks.
     pub fn headless(choice: &AdapterChoice) -> Result<Gpu, RenderError> {
+        Self::open(choice, "rendering headless")
+    }
+
+    /// The GUI's device, made before its window, which eframe then takes
+    /// through egui-wgpu's `WgpuSetup::Existing` (D31). On Vulkan wgpu
+    /// needs no display handle for that; egui-wgpu checks that the
+    /// window's surface can present from the adapter when it makes the
+    /// surface, and fails the window if it can't.
+    pub fn for_window(choice: &AdapterChoice) -> Result<Gpu, RenderError> {
+        Self::open(choice, "rendering for the window")
+    }
+
+    fn open(choice: &AdapterChoice, what: &str) -> Result<Gpu, RenderError> {
         spherecut_core::may_block("opening a GPU device");
         let instance = wgpu::Instance::new(Self::instance_descriptor());
         let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
         let adapter = Self::select_adapter(&adapters, choice)?;
         let (device, queue) = open_device(&adapter)?;
-        tracing::info!(adapter = %describe(&adapter.get_info()), %choice, "rendering headless");
+        tracing::info!(adapter = %describe(&adapter.get_info()), %choice, "{what}");
         Ok(Self::from_parts(instance, adapter, device, queue))
     }
 

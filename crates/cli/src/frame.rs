@@ -56,7 +56,7 @@ use spherecut_render::{
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
 
-use crate::{emit, interrupt, print_json, show, to_stderr};
+use crate::{emit, interrupt, print_json, to_stderr};
 
 /// How often the main thread looks for a Ctrl+C while the worker works.
 const POLL: Duration = Duration::from_millis(10);
@@ -353,7 +353,7 @@ pub fn run(args: FrameArgs) -> Result<Exit> {
                 to_stderr(&format!(
                     "error: {}\n{}",
                     e.message,
-                    show::ffmpeg_lines(&e.ffmpeg_log)
+                    spherecut_media::probe::ffmpeg_lines(&e.ffmpeg_log)
                 ));
                 Ok(exit)
             }

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc dd6679fa95d9e616d4e88f6a692339fbde2af889b7fe0fdbd79c84b59cc16e33 # shrinks to yaw = 0.0, pitch = 0.0, roll = 0.0, from = Rectilinear, to = Rectilinear, morph = 0.0, hfov_deg = 20.0, p0 = (0.0, 0.0), p = (0.4208675139264732, 0.0)
+cc 5654031855bb973f21c2acda21f9c685e274fcf9dbd910dde995e67168d44b39 # shrinks to yaw = 0.0, pitch = -1.4191041530649227, roll = -2.581522489011343, from = Rectilinear, to = Rectilinear, morph = 0.0, hfov_deg = 191.0822099678132, p0 = (0.0, 0.0), p = (0.0, -0.4920189047161527)

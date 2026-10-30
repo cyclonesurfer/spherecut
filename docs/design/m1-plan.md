@@ -185,6 +185,44 @@ the sections below, they win.
     trigger stands. Neither holds on odin, and U2's doesn't: download
     plus copy is 10.9 ms at p50 for a 10-bit 5.7K frame, under a third
     of the frame budget. huginn's H1 can still turn either on.
+16. **The GUI as built** (slice 7, D31, D33, D36). Where it differs
+    from section 7:
+    - 7.1: the device is `Gpu::for_window`'s, handed over with
+      `WgpuSetup::Existing`, not `CreateNew` (D31, found in slice 3a's
+      review). `run` returns `Result<(), GuiError>`, whose codes are the
+      contract's (`no_display`, then render's). `SpherecutApp::logic`
+      polls the player and the jobs and presents; eframe calls it
+      before each `ui` and alone while the window is hidden, and `ui`
+      calls it when nothing did, so kittest, which calls only `ui`,
+      runs it all. On exit the jobs' threads are joined beside the
+      player's, with 3 s. (Slice 7's review: at first `logic` wasn't
+      used, and nothing presented while the window was hidden.) The app is
+      made from `AppParts` (device, backend, clock, audio, doctor run),
+      so tests give it a gated or faulting backend and a fixture report.
+    - 7.3: the callback carries a `DrawKey` (the slot, its frame, the
+      view, the filter), and `prepare` projects when it differs from the
+      last one projected, or the size changed, in place of a `redraw`
+      flag: a flag cleared by a pass never rendered would lose its
+      redraw. A projection counts as drawn only once `paint` ran after
+      it, since egui-wgpu records `prepare`'s commands before it
+      acquires the surface and drops them when that fails; `prepare`
+      records unchecked, so the UI thread never polls the device
+      (slice 7's review). The rect is
+      rounded inward to whole pixels and inset by one pixel each side,
+      since at 1.25 the tiles' separator antialiased into the last
+      column. The GPU timers are slice 8's, with the overlay.
+    - 7.4: the marker drag test runs at 1 and 1.25 through the fisheye:
+      rectilinear's stretch moved the 8° disc's centroid 0.7 px off the
+      grabbed point over the drag, though the grabbed point lands
+      exactly.
+    - 7.9: `spherecut_playback::Player::join` joins the bans, so that
+      `run`'s join after the event loop is the `#[expect]` the section
+      names.
+    - Section 11: `deny.toml`'s graph is Linux's only, since arboard
+      turns on image's `bmp` and `tiff` for the Windows and macOS
+      clipboards; cpal's bans were already an allow list (D35).
+    - Slice 8's cached ranges on the scrub bar came with slice 7
+      (`FrameCache::try_ranges`).
 
 ## 1. Summary
 
@@ -1736,9 +1774,11 @@ Audio is muted while scrubbing. Audio scrubbing is M5, with JKL shuttle.
     io.github.cyclonesurfer.Spherecut`.
 - **No file drop on Wayland.** winit 0.30.13 delivers `DroppedFile` only on
   X11. The CLI argument and the Files pane cover opening files.
-- **Occlusion.** eframe 0.37 keeps running when Wayland frame callbacks
-  stop for an occluded window. Playback follows the clock, never
-  `request_repaint`, so nothing breaks. Drops are not counted while no UI
+- **Occlusion.** eframe 0.37 runs no egui pass for a minimized or
+  occluded window, only `App::logic`, every 10 ms while a repaint is
+  asked for. Spherecut's `logic` presents (amendment 16), so the cache's
+  playhead moves and the clip ends while hidden. Playback follows the
+  clock, never `request_repaint`. Drops are not counted while no UI
   frames are painted (a gap over 100 ms).
 
 ### 7.8 Notices

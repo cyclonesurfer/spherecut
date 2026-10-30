@@ -21,6 +21,7 @@ spherecut-synth = { path = "crates/synth" }
 spherecut-render = { path = "crates/render" }
 spherecut-playback = { path = "crates/playback" }
 spherecut-audio = { path = "crates/audio" }
+spherecut-app = { path = "crates/app" }
 
 anyhow = "1.0.100"
 bytemuck = { version = "1.25.2", features = ["derive"] }
@@ -33,6 +34,24 @@ cpal = { version = "=0.18.2", default-features = false, features = ["pulseaudio"
 ffmpeg-next = { version = "=9.0.0", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 ffmpeg-sys-next = { version = "=9.0.1", default-features = false, features = ["avcodec", "avformat", "swscale", "swresample"] }
 glam = { version = "0.34", features = ["serde"] }
+# The GUI (D7, D22, m1-plan section 11), pinned with `=`: egui and wgpu
+# move in lockstep. eframe without its defaults: wgpu without wgpu's own
+# defaults (Vulkan only), Wayland and X11, egui's fonts (the deny.toml
+# exception), copying for the doctor banner and persistence for the
+# layout; never accesskit (zbus advisories), links (opens a browser),
+# system_fonts or glow.
+eframe = { version = "=0.37.0", default-features = false, features = ["wgpu_no_default_features", "wayland", "x11", "default_fonts", "persistence", "clipboard"] }
+egui = "=0.37.0"
+egui-wgpu = { version = "=0.37.0", default-features = false }
+egui_tiles = "=0.18.0"
+# Tests only: kittest on lavapipe through our own device. Its `wgpu`
+# feature turns on wgpu's GL, Metal and DX12 features in test builds;
+# the shipped binary has none of them.
+egui_kittest = { version = "=0.37.0", features = ["wgpu"] }
+# Only to turn `wayland-dlopen` back on, which eframe without its
+# defaults drops (no libwayland at build time); never
+# `wayland-csd-adwaita` (RUSTSEC-2026-0192 through ttf-parser).
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
 # PNG only: 8- and 16-bit output and golden images (D22).
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # sigaction for frame's SIGINT handler (D22, D28). Already in the tree.

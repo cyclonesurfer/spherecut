@@ -1191,6 +1191,10 @@ network; add a narrow exception with the reason.
 banned crate (rmcp's HTTP server feature is one), so a crate with such
 features gets a `[[bans.features]]` allow list when it is added.
 
+*Updated by D36:* `[[bans.features]]` also keeps eframe's `accesskit`
+and `links`, winit's `wayland-csd-adwaita` and egui_kittest's `eframe`
+off, and the graph is Linux's only.
+
 ## D22. Direct dependencies
 
 *2026-10-23, M0.*
@@ -1204,7 +1208,11 @@ rest, with the versions in `Cargo.lock`:
 | bytemuck 1.25.2 (derive) | render | The `#[repr(C)]` uniforms as bytes for `Queue::write_buffer`, and timestamps read back, with no `unsafe`: its derives compile under `forbid(unsafe_code)` (D31) |
 | clap 4.6.7 (derive) | cli, xtask | Argument parsing with generated help and errors, for two binaries with subcommands |
 | cpal 0.18.2 (pulseaudio) | audio | The audio output (D35): the PulseAudio protocol host, pure Rust, which reaches PipeWire through pipewire-pulse, and ALSA, which cpal always builds on Linux and which links libasound (so its headers are a build prerequisite). Default features off; a `[[bans.features]]` allow list keeps `pipewire`, `jack`, `realtime` and the browser hosts off. On Linux it brings `alsa`, `alsa-sys`, `pulseaudio` and its `byteorder`, `enum-primitive-derive`, `mio`, `thiserror` 1 and the `futures` crates, and `dasp_sample` for its sample conversions |
-| image 0.25.10 (png only) | render | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame` and the goldens. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
+| eframe 0.37.0 (wgpu_no_default_features, wayland, x11, default_fonts, persistence, clipboard) | app | The GUI's window, event loop and persistence (D7, D36), on render's own device through egui-wgpu's `WgpuSetup::Existing` (D31). Default features off: no `accesskit` (zbus advisories), `links`, `system_fonts` or `glow`, which `[[bans.features]]` keep off. It brings egui-winit, winit, arboard and smithay-clipboard (the clipboard), ron for its storage, and the Wayland and X11 client crates |
+| egui 0.37.0 | app | The immediate-mode UI (D7, D26). Its own `accesskit` dependency is the data types only, with no zbus. It brings epaint, emath, ecolor, epaint_default_fonts (the fonts' licence exception, D36) and, inside epaint, vello_cpu, skrifa and harfrust for text |
+| egui-wgpu 0.37.0 | app | egui's renderer on wgpu, and the paint callback the viewer draws through (D36). Default features off |
+| egui_tiles 0.18.0 | app | The tiles: the viewer beside the Info, Doctor and Files tabs, saved by eframe's persistence (D7: egui_dock has no release for egui 0.37) |
+| image 0.25.10 (png only) | render; app (dev) | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame` and the goldens. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
 | libc 0.2.191 | cli, media | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, the binary's one FFI module (D28): the handler only stores to an atomic. In media's `ffi`, `mmap`, `madvise` and `munmap` for the download pool's buffers on huge pages (D30). It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
 | serde 1.0.229 (derive) | core, sphere, media, cli | Serializable time types, `Projection`, the probe and doctor reports, and the CLI's JSON envelope (D27) |
@@ -1214,7 +1222,9 @@ rest, with the versions in `Cargo.lock`:
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
 | tracing-subscriber 0.3.23 (env-filter) | cli | EnvFilter gives `SPHERECUT_LOG` its syntax, and the fmt layer writes to stderr. env-filter brings in `matchers` and `regex-automata` |
 | wgpu 30.0.1 (std, parking_lot, vulkan, wgsl) | render | The GPU (D7, D31). Default features off, so only the Vulkan backend and the WGSL front end are built: no GL, Metal, DX12 or WebGPU backend, no SPIR-V or GLSL front end. `std` and `parking_lot` are the two defaults kept: the standard library, and wgpu's locks. A `[[bans.features]]` list in `deny.toml` refuses `web`, `webgpu` and `webgl` (wasm-bindgen, js-sys and web-sys), `angle`, `static-dxc`, `glsl`, `spirv` and `vulkan-portability` if a later crate turns them on; GL, Metal and DX12 aren't banned, since egui_kittest turns them on in test builds (m1-plan section 11). It brings wgpu-core, wgpu-hal, wgpu-types, naga, ash and gpu-allocator among others. With image, bytemuck and pollster, slice 3a adds 57 crates to what a Linux build compiles (`cargo tree --target x86_64-unknown-linux-gnu` on normal and build edges, against ef1a9d1; 56 on normal edges alone), all under the existing licence list; `Cargo.lock` gains 90, the rest for other platforms' backends, which Linux never builds. 3a first said 46, a miscount the first review found |
+| winit 0.30.13 (rwh_06, wayland, wayland-dlopen, x11) | app | Not called: named so that eframe's winit gets `wayland-dlopen` back by feature unification, and libwayland is loaded at run time (D36). Never `wayland-csd-adwaita` (RUSTSEC-2026-0192 through ttf-parser), which `[[bans.features]]` refuses |
 | naga 30.0.1 (wgsl-in) (dev) | render | The test that each uniform's Rust layout matches its WGSL struct, member by member, which a driver doesn't check (D31). The same naga wgpu builds, so it adds nothing to the tree |
+| egui_kittest 0.37.0 (wgpu) (dev) | app | The GUI's tests on lavapipe, through our device with `WgpuTestRenderer::from_render_state` (D36), and its accessibility tree for finding widgets. Not its `eframe` feature, which turns eframe's accesskit on and `[[bans.features]]` refuses. In test builds it turns on wgpu's `gles`, `metal` and `dx12` (D31's row); the shipped binary has none |
 | proptest 1.12.0 (dev) | core, sphere, media, render, playback | Property tests and the MP4 fuzzing (D15) |
 | ron 0.12.2 (dev) | core | A serde round-trip test of the time types in a text format |
 
@@ -1249,6 +1259,24 @@ platforms' hosts (Android's `ndk` and `jni`, CoreAudio, WASAPI), which
 Linux never builds. cargo-deny warns of two more duplicates: thiserror 1
 (pulseaudio's) beside 2, and jni-sys 0.3 beside 0.4, both within cpal's
 Android tree.
+
+*Updated in M1 slice 7,* with the app crate (the eframe, egui,
+egui-wgpu, egui_tiles, winit and egui_kittest rows above). It adds 90
+crates to what a Linux build compiles (`cargo tree --target
+x86_64-unknown-linux-gnu` on normal and build edges, against 303e364:
+142 to 232; the same 90 on normal edges alone), close to the plan's
+estimate of about 220 on normal edges (217), all under the existing
+licence list but the fonts' (D36). `Cargo.lock` gains 177, the rest for
+other platforms' windowing and clipboards. `deny.toml`'s graph is now
+Linux's alone (D36), so the duplicates it warns of are Linux's: the GUI
+adds calloop 0.13 beside 0.14, calloop-wayland-source 0.3 beside 0.4 and
+smithay-client-toolkit 0.19 beside 0.20 (winit's and smithay-clipboard's
+Wayland stacks), rustix 0.38 beside 1 and linux-raw-sys 0.4 beside
+0.12, nom 7 beside 8, foldhash 0.1 beside 0.2, and a third hashbrown
+(0.15); jni-sys's pair, Android's, no longer counts. The cli depends on
+app and playback; app on audio, core, media, playback, render, sphere,
+glam, serde, thiserror, tracing and wgpu, and on synth and media's
+`fault-injection` for its tests.
 
 ## D23. Agent integration: an MCP server and the JSON CLI
 
@@ -1795,7 +1823,8 @@ contract as `spherecut.frame/1` (`docs/cli-json.md` has every field):
   `RenderError::CODES`
   (`no_gpu`, `adapter_not_found`, `gpu_failed`, `too_large`,
   `invalid_input`, `internal`, `out_of_gpu_memory`) joins
-  `all_codes()`. `no_display` is the GUI's, and joins the list with it.
+  `all_codes()`. So does `no_display`, the GUI's, with slice 7: the GUI
+  prints no document, and exits 3 with the message.
   Damage frame may not reach is a warning with probe's code: the damage
   probe finds (`truncated` or `damaged`) before the seek, and what the
   decoder meets after the frame (its cause's code).
@@ -2950,11 +2979,14 @@ What:
   memory hints, and no texture format features. Every device is made in
   one private function, `gpu::open_device`, and `Gpu::from_parts` wraps
   it. For that to hold in the GUI too, slice 7 opens render's device
-  itself (the instance from `instance_descriptor`, with the window's
-  display handle where wgpu wants one, then `select_adapter`, checking
-  the window's surface can present from it, and `open_device`) and hands
-  it to eframe through egui-wgpu 0.37's `WgpuSetup::Existing`
-  (`WgpuSetupExisting { instance, adapter, device, queue }`). The plan's
+  itself and hands it to eframe through egui-wgpu 0.37's
+  `WgpuSetup::Existing` (`WgpuSetupExisting { instance, adapter, device,
+  queue }`): `Gpu::for_window` is `headless`'s path (the instance from
+  `instance_descriptor`, `select_adapter`, `open_device`), run before the
+  window. On Vulkan the instance needs no display handle; egui-wgpu
+  checks that the window's surface can present from the adapter when it
+  makes the surface, and fails the window if not, so no check of ours
+  comes before it. The plan's
   `WgpuSetup::CreateNew` (section 7) has egui-wgpu make the device with
   its own `request_device`, which never passes through `open_device`, so
   5b's Vulkan Video device wouldn't reach the viewer; the first review
@@ -4256,6 +4288,89 @@ Revisit if: a run notes more than 2 pixels past 4 LSB for another
 llvmpipe (LLVM 22 put none there at 918d031), which would leave C less
 than twice the drift; or a driver
 build that renders the rows right fails the count or the maximum.
+
+## D33. View conventions
+
+*2026-10-30, M1 slice 7. The M1 plan's D31 (section 7.4), as built:
+`sphere::orient` has held the convention since slice 3a, and slice 7
+adds the drag, the zoom and the projection switch on it, in
+`sphere::grab` and the app's `view` module.*
+
+What:
+
+- **Orientation.** yaw > 0 turns right (from −Z toward +X), pitch > 0
+  looks up, and roll > 0 rolls the camera clockwise as the viewer sees
+  it, so the horizon turns counter-clockwise: q = R_y(−yaw) · R_x(pitch)
+  · R_z(−roll), and world = q · view. At |pitch| = 90°, `to_ypr` puts all
+  the heading into yaw. The GUI, `frame`'s flags, M2's keyframes and the
+  MCP tools all use it.
+- **The drag** (`grab::start`, `solve_level`, `solve_free`). A press
+  records the world direction under the pointer and the roll. Dragging
+  keeps the roll and solves for the pitch and yaw that put that
+  direction under the pointer: the pitch root nearest the current pitch,
+  clamped to ±90°. Near a pole, where no orientation with that roll
+  reaches it, the closest one is taken and the fit is `Clamped`. With
+  Ctrl the drag is free: the smallest rotation, which may roll.
+- **Zoom keeps the direction under the pointer** (`grab::zoom_about`).
+  Scrolling divides hfov by exp(0.0015 · points scrolled). egui's
+  `zoom_delta` (Ctrl+scroll, a touchscreen pinch) divides it by the
+  delta. + and − step by 1.15 about the view's centre. hfov stays
+  between 10° and the projection's maximum. Zoom input is dropped while
+  a switch is under way, which sets the field of view itself.
+- **Pointer to lens point.** The pointer's points times the pixels per
+  point, less the viewer's origin in whole pixels, go through
+  `sphere::pixel::to_lens` at pixel centres, over the same rect the paint
+  callback draws into (D36). The point under the pointer is the pixel the
+  shader drew there, at any scale.
+- **The presets** (Rect, Fisheye and Tiny planet; buttons and keys 1, 2
+  and 3) morph the lens over 250 ms with smoothstep, and slerp the
+  orientation with it. Rectilinear eases to 170° at most, and fisheye to
+  180° at least. Tiny planet is stereographic 300° looking straight down
+  (pitch −90°, roll 0), and leaving it levels the view. A drag cancels a
+  switch under way. A switch started during another starts from the
+  nearer of the two projections the lens is blending, so the picture
+  jumps once: a lens blends two projections, not three. The View menu's
+  slider sets the morph directly.
+- **Metadata.** sv3d crop bounds are applied (D31). An sv3d pose is read
+  and shown in a notice, not applied. A stereo source shows its left
+  eye.
+
+Why: one convention serves the UI, `frame`, M2's keyframes and the MCP
+tools. A level horizon is what people expect when they drag 360° video.
+Mapping the pointer in physical pixels, with the callback's own rounding,
+makes "the point under the cursor stays under it" exact at fractional
+scales. Without the crop, padded or partial equirects would be
+misprojected. The Spherical Video V2 wording leaves the pose's direction
+ambiguous, so applying it waits for a tagged file checked against
+YouTube in M2.
+
+Tested:
+
+- `sphere::grab`'s proptests, 10 000 cases by default and 100 000 in
+  the slice's check, over random orientations, projections, morphs,
+  fields of view and points. An `Exact` fit puts the direction within
+  1e-9 rad of the pointer's and its lens point within 1e-6. A `Clamped`
+  fit has no closer pitch on a 0.01° grid around it. The roll is kept to
+  1e-9, at pitches more than 1e-4 rad from a pole (at the pole
+  `Ypr::from_quat` folds the roll into the yaw). `zoom_about` keeps the
+  direction under the point.
+- kittest on lavapipe (`crates/app/tests/viewer.rs`):
+  - the marker drag at 1 and 1.25 pixels a point: press on the red F
+    marker's centroid, drag 30 by 18 points in 6 moves and let go. The
+    centroid in the rendered image lands 0.09 and 0.34 px from the
+    release point (the limit is 0.5), and the app's q equals
+    `solve_level`'s to 1e-9;
+  - zoom by the wheel and by `zoom_delta` keeps the direction under the
+    pointer within 1e-9;
+  - the switch takes 15 frames at 60 Hz, and ends on the preset's lens
+    alone.
+- The drag test looks through the fisheye. An equidistant lens moves a
+  disc's image nearly rigidly, but rectilinear's stretch away from the
+  centre moved the 8° disc's centroid 0.7 px off the grabbed point over
+  the same drag, though the grabbed point itself lands exactly.
+
+Revisit if: M2's keyframes need a convention for roll at the poles that
+`to_ypr` doesn't give, or a tagged sv3d pose file arrives.
 
 ## D34. The playback engine
 
@@ -5635,6 +5750,131 @@ sync clip; a camera's AAC uses noise substitution and its seeks sound
 different; someone needs to choose the output device; or cpal changes
 what `DeviceChanged` means.
 
+## D36. The GUI's dependencies, features and Wayland gaps
+
+*2026-10-30, M1 slice 7. The M1 plan's D34 (sections 7 and 11), as
+built. Updates D21 and D22, and records Pat's answer on the fonts.*
+
+What:
+
+- **The crates** (D7): eframe, egui and egui-wgpu `=0.37.0`, egui_tiles
+  `=0.18.0`, winit 0.30.13, and egui_kittest `=0.37.0` for the tests
+  (D22's rows). eframe has no default features: `wgpu_no_default_features`
+  (Vulkan only, as render's wgpu), `wayland`, `x11`, `default_fonts`,
+  `persistence` (the layout and settings) and `clipboard` (the notices'
+  Copy). winit is named only to turn `wayland-dlopen` back on, which
+  eframe without its defaults drops, so libwayland is loaded at run time
+  as libxkbcommon is.
+- **Not used:** eframe's `accesskit` (zbus 5 and RUSTSEC-2026-0370 to
+  -0372; Pat's M1 answer is no screen reader until accesskit is on a
+  maintained zbus), `links` (it opens a browser), `system_fonts` and
+  `glow`; winit's `wayland-csd-adwaita` (RUSTSEC-2026-0192 through
+  ttf-parser); `rfd` (zbus through its portal, or GTK 3), so the Files
+  pane stands in for a file dialog. egui still depends on the `accesskit`
+  crate itself, the tree's data types, which bring no zbus.
+- **deny.toml.** `[[bans.features]]` entries keep eframe's `accesskit`
+  and `links`, winit's `wayland-csd-adwaita` and egui_kittest's `eframe`
+  (which turns eframe's accesskit on) from coming back (D21). The graph
+  is Linux's only (`[graph] targets`, x86_64 and aarch64): arboard, the
+  clipboard, turns on image's `bmp` and `tiff` for its Windows and macOS
+  clipboards, which Linux never builds, and image's PNG-only allow list
+  (D22) holds for Linux. Advisories pass with no ignores.
+- **Fonts.** egui's default fonts (Ubuntu-Light and Hack in
+  `epaint_default_fonts`) are OFL-1.1 and Ubuntu-font-1.0. *Pat decided
+  on 2026-10-24:* keep them, with a license exception in `deny.toml` for
+  that crate only. Both licences allow the fonts to be embedded in a
+  GPL program. They have no emoji or arrows: a missing glyph is drawn
+  as a box (and fails a kittest), so the UI's buttons and the keys' help
+  are words ("Play", "Prev", "Dismiss").
+- **The device.** eframe takes render's own device through
+  `WgpuSetup::Existing` (D31), made by `Gpu::for_window` before the
+  window, with `multisampling: 0` and `depth_buffer: 0` so that egui's
+  pass has one sample and no depth, as the viewer's pipelines do.
+- **The viewer's callback** (plan section 7.3, adjusted):
+  - The rect is rounded inward to whole physical pixels and inset by one
+    pixel on each side (`viewer::pixel_rect`). At 1.25 pixels a point the
+    tiles' separator, antialiased, drew over the viewer's last column;
+    inside the inset, every pixel is the projection's alone.
+  - Whether to project again is a `DrawKey` (the slot, the frame in it,
+    the view and the filter) that `prepare` compares with the last one
+    projected, not a `redraw` flag set in `ui()`: a flag cleared by a
+    pass that was never rendered would have lost its redraw. A resize
+    projects again too.
+  - A projection counts as drawn only once `paint` ran after it (an
+    atomic flag in `ViewerResources`). egui-wgpu records `prepare`'s
+    commands before it acquires the window's surface, and drops them
+    when the acquire fails (Outdated, Lost, Timeout, Occluded); the next
+    pass, with the same key, would otherwise only encode a target that
+    was never drawn, or was drawn at the old size.
+  - `prepare` records with `Projector::record_unchecked` and makes the
+    target with `LinearTarget::new_unchecked`: no `Gpu::check`, which
+    polls the device on the UI thread and takes the shared error slot
+    that the upload thread watches (D31). The upload thread reports a
+    lost device (`GpuFailed`); both filters' pipelines are built with
+    the resources, before the first frame.
+  - `SpherecutApp::logic` takes the player's events, the doctor's
+    result and the jobs, and picks the frames to show (`present`).
+    eframe calls it before each `ui`, and alone while the window is
+    minimized or occluded, when it runs no egui pass: the presenter
+    moves the cache's playhead and ends the clip, so playback goes on
+    hidden. `ui` runs `logic` itself when nothing ran it first, so
+    kittest, which calls only `ui`, runs all of it.
+  - Jobs keep their threads' handles. One given up (a listing for a
+    folder left since, a probe for a file closed since, any at exit) is
+    kept in `jobs::Threads`, and `run` joins them after the event loop
+    with 3 s, beside the player's 2 s, so that none is inside a driver
+    or FFmpeg while the process's exit tears those down. One still
+    running then is left, and logged.
+  - Notices of the machine (the doctor's, the CPU adapter's, a failed
+    GPU, no audio device, a slot the GPU dropped) outlive a file, and a
+    dismissed one stays dismissed when the next file raises it again.
+    `open` takes the last file's pending events before it forgets that
+    file's notices. A worker that checked its open was current just
+    before the next open can still send one event after it, which then
+    lands on the next file: the events carry no open (a playback
+    change, if it ever shows).
+- **The UI thread never blocks** (D34). `crates/app/clippy.toml`
+  repeats the workspace's (a crate's file replaces it) and bans std's
+  and egui's (epaint's) lock, read and write, the condvar waits,
+  `Receiver::recv`, `JoinHandle::join`, `thread::sleep`, the blocking
+  `fs` reads, `wgpu::Device::poll`, `pollster::block_on` and the
+  player's `join`. The startup write into egui-wgpu's callback
+  resources, the directory listing on its worker, the joins after the
+  event loop and the tests' pacing say why with `#[expect]`. Jobs on
+  workers (the doctor, the listing, the Info pane's probe) come back
+  through a channel the UI only `try_recv`s.
+- **Recorded limits of winit 0.30.13:** no touchpad pinch on Wayland or
+  X11 (two-finger scroll and Ctrl+scroll zoom instead), and no file drop
+  on Wayland (the command line and the Files pane open files). GNOME
+  draws sctk's plain frame, as `wayland-csd-adwaita` stays off. Without
+  `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` or `DISPLAY` (winit's own rule)
+  the GUI exits 3 with `no_display` (D27).
+
+Why: this graph passes advisories with no ignores. accesskit brings
+zbus's three unmaintained-crate advisories, and csd-adwaita brings
+ttf-parser's. The cost is no screen reader in M1 and a plain GNOME
+frame, both revisited when upstream moves. Bundled fonts were a licence
+question, which the prompt makes Pat's. Comparing what was drawn,
+rather than remembering a flag, can't lose a frame however eframe
+schedules its passes.
+
+Tested: the kittest suite on lavapipe (`crates/app/tests`, 16 tests):
+the viewer is `render_still` byte for byte at 1, 1.25, 1.5 and 2 pixels
+a point; an unchanged frame and view only encode, and a resize projects
+once; a projection never painted is projected again, by `prepare` and
+`paint` called as egui-wgpu calls them; `logic` alone presents frame
+after frame and ends the clip, which nothing ends without it; a resize
+sweep from 1×1 to 3840×2160 never panics; GUI `never_blocks` (D34); the
+panes and notices, a dismissed machine notice kept across an open. Unit
+tests: a job given up leaves its thread until it ends, and the exit's
+join takes the threads that end by its deadline and names the rest. `cargo deny check` passes
+with the font exception the only licence exception added.
+
+Revisit if: accesskit moves to a maintained zbus (screen readers),
+winit gains Wayland pointer gestures or file drop, egui_dock is
+published for this egui (floating panels, D7), or GNOME's frame looks
+wrong in H2's screenshots.
+
 ## D37. Hardware testing in M1
 
 *2026-10-29, M1 slice 5: a draft, from the M1 plan's D35 (section 15).
@@ -5969,7 +6209,3 @@ software. Revisit when the checks are kept where `frame` can read them
 - **Attach socket** (A3): Pat to confirm that a local socket the GUI
   opens only when he turns attach on (mode 0600, his user only) is IPC,
   not the network access his rule forbids. Before A3 (D23).
-- **Fonts.** egui's default fonts carry OFL-1.1 and Ubuntu Font Licence
-  data. *Decided by Pat on 2026-10-24:* keep egui's fonts, with a
-  `deny.toml` license exception scoped to `epaint_default_fonts`, added
-  with the GUI crates (M1 slice 7) and recorded then as a decision.

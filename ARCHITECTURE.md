@@ -6,7 +6,7 @@ This describes the design as built, plus the planned parts marked
 ## Crates
 
 ```
-          app (egui GUI, planned)   cli (`spherecut` binary)   tests
+          app (eframe viewer; M1 slice 7)   cli (`spherecut` binary)   tests
                           \                |                    /
                            +--------- export (planned) --------+
                                       |
@@ -48,9 +48,9 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slices 5 and 6 |
 | `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
-| `spherecut-app` | eframe app, docked panels, viewer paint callbacks | M1 |
+| `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside the Info, Doctor and Files tabs); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); `run`, which the CLI calls with no command. `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs. Later the overlay's sparklines, settings and `--smoke` (slice 8), the timeline (M2) | M1 slice 7 |
 | `spherecut-agent` | Agent integration (D23): the request and response type of each operation, shared by `spherecut mcp` and `spherecut call` (from A1 the `--json` of `probe`, `doctor` and `frame` uses them too, under a new schema version if M1's shape changes, D27); the MCP server; later the GUI attach bridge | A1 (after M1) |
-| `spherecut-cli` | The `spherecut` binary: `probe`, `doctor` and `frame` today. `render` (M2), the GUI when run without a subcommand (M1), and `mcp` and `call` (A1) are planned. Its library half holds `contract`, the JSON contract of `--json` (D27), until A1 moves it to `spherecut-agent` or a crate below both | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame` |
+| `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor` and `frame`. `render` (M2), and `mcp` and `call` (A1) are planned. Its library half holds `contract`, the JSON contract of `--json` (D27), until A1 moves it to `spherecut-agent` or a crate below both | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI |
 | `xtask` | `check`, `compat` (clippy and a link of the tests against other FFmpeg builds, and Tier 1 against one, D2), `gen-media`, `hw-test` | M0; `compat` from 2026-10-24 |
 
 Crates are created when they get real content, not as empty shells. The
@@ -542,8 +542,9 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   returned by `Gpu::check` as `gpu_failed`, which every entry point calls
   first; nothing panics in wgpu's error handler. All device creation is
   in one function that slice 5b replaces to add Vulkan Video and DMA-BUF
-  import; the GUI (slice 7) opens its device there too and hands it to
-  eframe through egui-wgpu's `WgpuSetup::Existing`.
+  import; the GUI opens its device there too, with `Gpu::for_window`
+  before the window, and hands it to eframe through egui-wgpu's
+  `WgpuSetup::Existing` (D31).
 * **Slots** (`GpuFrame`, for a `SlotShape`) hold a frame's planes as
   canonical textures: `R8Unorm`/`Rg8Unorm` for 8-bit planes, and
   `R16Float`/`Rg16Float` holding code / (2^b − 1) for deeper ones, each
@@ -589,6 +590,76 @@ rotation, lenses blended across the seam, and the colour pipeline in
 float before the output. Stitching, stabilization and reframing then
 happen in one pass shared by the viewer and the exporter, and an
 intermediate equirect exists only as the output of a 360 export.
+
+## The GUI *(M1 slice 7)*
+
+`spherecut` with no command (`spherecut-app`, D33, D36):
+
+* **Startup.** `run` finds a display by winit's rule (else exit 3,
+  `no_display`), opens render's device with `Gpu::for_window` and an
+  FFmpeg backend on that GPU's render node, and hands the device to
+  eframe (`WgpuSetup::Existing`, one sample, no depth). eframe's creation
+  callback marks the UI thread (`core::blocking`), puts
+  `ViewerResources` into egui-wgpu's callback resources (the one write of
+  that lock, before any frame), reads the saved tiles and settings,
+  starts the `Player` with the device's audio, and opens the first file
+  given.
+* **One frame** is eframe's `logic` then `ui`. `SpherecutApp::logic`
+  polls the player's events and snapshot, the doctor's job and the
+  panes' jobs (never waiting) and picks the frames to show
+  (`Player::present`); eframe runs it alone while the window is
+  minimized or occluded, so playback goes on hidden, and `ui` runs it
+  when nothing did (kittest). `ui` draws the menu, the notices, and the
+  tiles: the viewer (the picture
+  over the transport bar) beside the Info, Doctor and Files tabs. It
+  asks for a repaint while anything moves (playback, a seek, a switch, a
+  scrub) and every 50 ms while a job runs; the player's repaint
+  callback wakes it when a frame comes up.
+* **The viewer.** The picture's rect is rounded inward to whole physical
+  pixels and inset by one (`viewer::pixel_rect`). `Player::present`
+  gives the slot to show, and the paint callback's `prepare` projects it
+  into the viewer's own linear target, of the rect's pixel size, only
+  when its `DrawKey` (the slot, the frame in it, the view, the filter)
+  differs from the last one drawn, or the size changed; `paint` encodes
+  the target one pixel per pixel into egui's pass. A projection counts
+  as drawn once `paint` ran after it: egui-wgpu drops what `prepare`
+  recorded when the window's surface can't be acquired. `prepare`
+  records without `Gpu::check`, so the UI thread never polls the
+  device. A 30 fps clip on a
+  144 Hz display projects 30 times a second.
+* **Input.** A drag grabs the world direction under the pointer and
+  keeps it there, level (Ctrl: free); scrolling and `zoom_delta` zoom
+  about the pointer; double-click plays or pauses; the keys of the Help
+  menu step, jump, seek to the ends, reset the view, zoom and switch the
+  projection. The pointer is mapped through the rect `prepare` draws
+  into, so the point under it is the pixel drawn there at any scale.
+  Scrubbing seeks to keyframes while the pointer moves, the latest
+  superseding the one before, and exactly once it rests 150 ms or lets
+  go; the bar shades the cache's spans (`FrameCache::try_ranges`).
+* **Notices.** The doctor runs on a worker at startup on the rendering
+  GPU's node; its errors and warnings become banners with the fix and a
+  Copy button, and its whole report is the Doctor tab's. The app adds its
+  own issues (a CPU adapter, no audio device, no anisotropic filtering)
+  and turns the player's events into notices (a fallback to software, a
+  file without audio, a file that can't be opened or decoded, the GPU
+  short of memory or lost, a cache too small). A notice of a kind shows
+  once and stays dismissed; a file's notices go with it, and the
+  machine's (the doctor's, the adapter's, a failed GPU, no audio device,
+  a dropped slot) stay.
+* **Files.** The Files pane lists a folder on a worker (folders first,
+  then the video extensions, hidden files left out) in place of a file
+  dialog, and remembers the last folder.
+* **Shutdown.** `on_exit` tells the player's threads to stop and leaves
+  the player and the jobs' threads (`jobs::Threads`, which also holds
+  those of jobs given up for newer ones) for `run`, which joins them
+  after the event loop, off the UI thread: the player with 2 s, the jobs
+  with 3 s.
+* **Never blocking.** `crates/app/clippy.toml` bans the blocking calls
+  (locks, waits, `recv`, `join`, `sleep`, file reads, `Device::poll`,
+  `block_on`, `Player::join`); workers and the code around the event loop
+  that make them say why. The runtime guard covers the other crates'
+  code the UI calls, and the GUI's `never_blocks` test runs the whole
+  app on a backend that never answers.
 
 ## Threads *(M1; partly planned)*
 

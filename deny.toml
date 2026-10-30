@@ -2,6 +2,10 @@
 
 [graph]
 all-features = true
+# Spherecut runs on Linux only: other platforms' dependencies (arboard's
+# image codecs for the Windows and macOS clipboards, objc2, windows-sys)
+# are never built.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 
 [advisories]
 version = 2
@@ -38,6 +42,10 @@ unused-allowed-license = "allow"
 exceptions = [
     { crate = "ffmpeg-next", allow = ["WTFPL"] },
     { crate = "ffmpeg-sys-next", allow = ["WTFPL"] },
+    # egui's default fonts, Ubuntu-Light and Hack, are OFL-1.1 and
+    # Ubuntu-font-1.0, both GPL-compatible for fonts embedded in a program
+    # (Pat's M1 answer; DECISIONS D34). Allowed for that crate only.
+    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
 ]
 
 [bans]
@@ -92,6 +100,23 @@ allow = ["png"]
 [[bans.features]]
 crate = "cpal"
 allow = ["pulseaudio"]
+
+# The GUI's stack (D34): eframe's `accesskit` brings zbus 5 and
+# RUSTSEC-2026-0370 to -0372 (no accesskit in M1, Pat's answer), and
+# `links` opens a browser; winit's `wayland-csd-adwaita` brings
+# RUSTSEC-2026-0192 through ttf-parser; egui_kittest's `eframe` turns on
+# eframe's accesskit.
+[[bans.features]]
+crate = "eframe"
+deny = ["accesskit", "links"]
+
+[[bans.features]]
+crate = "winit"
+deny = ["wayland-csd-adwaita"]
+
+[[bans.features]]
+crate = "egui_kittest"
+deny = ["eframe"]
 
 [sources]
 unknown-registry = "deny"
