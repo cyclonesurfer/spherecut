@@ -235,10 +235,14 @@ impl ViewState {
     }
 
     /// Move a drag to lens point `p`: level mode keeps the roll, free
-    /// mode (Ctrl) takes the smallest rotation.
+    /// mode (Ctrl) takes the smallest rotation. A drag that goes back to
+    /// level from free keeps the roll free mode left.
     pub fn drag_to(&mut self, start: &mut GrabStart, p: DVec2, free: bool) -> GrabFit {
         if free {
             self.q = grab::solve_free(self.q, start, &self.lens, p);
+            start.roll = self.ypr().roll;
+            start.yaw = self.ypr().yaw;
+            start.pitch = self.ypr().pitch;
             return GrabFit::Exact;
         }
         let (q, fit) = grab::solve_level(start, &self.lens, p);
@@ -257,6 +261,20 @@ impl ViewState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_drag_back_from_free_to_level_keeps_the_roll_free_mode_left() {
+        let mut v = ViewState::default();
+        let mut start = v.grab(DVec2::new(0.4, 0.3));
+        // A free drag across the view, off its centre, rolls it.
+        v.drag_to(&mut start, DVec2::new(-0.4, -0.3), true);
+        let rolled = v.ypr().roll;
+        assert!(rolled.abs() > 1e-2, "{rolled}");
+        // Level again: the roll stays.
+        let fit = v.drag_to(&mut start, DVec2::new(-0.41, -0.3), false);
+        assert_eq!(fit, GrabFit::Exact);
+        assert!((v.ypr().roll - rolled).abs() < 1e-9, "{:?}", v.ypr());
+    }
 
     #[test]
     fn a_switch_ends_on_its_projection_alone_and_eases_between() {
