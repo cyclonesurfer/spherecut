@@ -272,7 +272,9 @@ pub struct ShownFrame {
     pub gpu: Arc<GpuFrame>,
 }
 
-/// What [`Player::present`] picked.
+/// What [`Player::present`] picked. Drop it once it is drawn: while it
+/// is held, so are its frames' slots ([`ShownFrame::gpu`]), and with two
+/// streams on four slots, holding one keeps both from their next frames.
 #[derive(Debug, Clone)]
 pub struct Presented {
     /// Each stream's frame on screen, in stream order; a stream without

@@ -32,7 +32,9 @@
 //!   where doctor says it decodes the clip, and software are recorded.
 //! - `bench_playback_realtime_8k_8bit`: the 8K perf clip, recorded.
 //! - `bench_playback_x5_raw`: the longest file of each X5 recording mode,
-//!   its two lenses as two streams: M3's 8K budget, recorded.
+//!   its two lenses as two streams: M3's 8K budget, recorded, failing
+//!   only when a pass stalls (no frame for 5 s), as it does when the
+//!   engine stops.
 //! - `bench_playback_stitched_samples`: each stitched equirect among the
 //!   samples, gated as the perf clips are when it is within the criterion
 //!   (5.7K at 30 fps or less) and recorded otherwise; a skip saying so
@@ -43,8 +45,9 @@
 //! Where the GPU, hardware decode of the format, the perf clips or the
 //! samples aren't there, a benchmark records what it can and skips with
 //! the reason, which never counts as a pass. A run that only records and
-//! fails is a note saying why. `the_bench_harness_plays_on_lavapipe` runs
-//! the same harness in Tier 1, in software on a small clip, so that it
+//! fails is a note saying why, but a stall fails the benchmark.
+//! `the_bench_harness_plays_on_lavapipe` runs the same harness in Tier 1,
+//! in software on a small clip, with one stream and with two, so that it
 //! can't rot between hardware runs. Run the rest with
 //! `cargo xtask hw-test`.
 
@@ -645,6 +648,9 @@ fn unthrottled(
         let first = first_frame(&player, streams.len())?;
         let rate = stream_rate(&player);
         let mut shown = first.frames[0].frame;
+        // Held, its frames' slots would stay out of use: with two streams,
+        // two of the four, and no stream could show its next frame.
+        drop(first);
         player.play();
         let mut meter = Meter::new(player.perf().clone(), streams.len(), Instant::now());
         'pass: while meter.begun.elapsed() < limit {
@@ -710,6 +716,7 @@ fn realtime(
         screen.draw(&first, &perf).map_err(|e| e.to_string())?;
         let rate = stream_rate(&player);
         let mut last = first.frames[0].frame;
+        drop(first);
         player.play();
         let start = Instant::now();
         let mut meter = Meter::new(perf.clone(), streams.len(), start);
@@ -849,6 +856,17 @@ fn gate(name: &str, (u, r): &(Pass, Pass), kind: HwKind, length: Duration, fps: 
         ));
     }
     assert!(failed.is_empty(), "{name}: {}", failed.join("; "));
+}
+
+/// A recorded run whose unthrottled pass stalled: the engine stopped
+/// bringing frames up, which no speed of decoder explains.
+fn stall(clip: &str, run: &Run, passes: &Option<(Pass, Pass)>) -> Option<String> {
+    let (u, _) = passes.as_ref()?;
+    let why = u.stalled.as_ref()?;
+    Some(format!(
+        "{clip}, {}: the unthrottled pass stalled: {why}",
+        run.label
+    ))
 }
 
 /// The video streams of a probed file, by index.
@@ -1062,6 +1080,7 @@ fn bench_playback_x5_raw() {
     let rig = Rig::hardware();
     bench::note(format!("X5 raw: {}", rig.about()));
     let mut no_hardware = Vec::new();
+    let mut stalls = Vec::new();
     for (mode, (path, report, _)) in &modes {
         let streams: Vec<Option<usize>> = video_streams(report).into_iter().map(Some).collect();
         let format = format_of(report, streams[0]);
@@ -1072,14 +1091,17 @@ fn bench_playback_x5_raw() {
         let (auto, others) = rig.decoders(&format, mode);
         match auto {
             Ok(run) => {
-                record(&rig, mode, path, &streams, &run, RECORDED, RECORDED);
+                let passes = record(&rig, mode, path, &streams, &run, RECORDED, RECORDED);
+                stalls.extend(stall(mode, &run, &passes));
             }
             Err(why) => no_hardware.push(format!("{mode}: {why}")),
         }
         for run in &others {
-            record(&rig, mode, path, &streams, run, RECORDED, RECORDED);
+            let passes = record(&rig, mode, path, &streams, run, RECORDED, RECORDED);
+            stalls.extend(stall(mode, run, &passes));
         }
     }
+    assert!(stalls.is_empty(), "{}", stalls.join("; "));
     if no_hardware.len() == modes.len() {
         tier2::skip(format!(
             "Auto decodes in software here: {}",
@@ -1112,6 +1134,7 @@ fn bench_playback_stitched_samples() {
     bench::note(format!("stitched samples: {}", rig.about()));
     let mut gated = Vec::new();
     let mut no_hardware = Vec::new();
+    let mut stalls = Vec::new();
     for (path, report) in &stitched {
         let name = path
             .file_name()
@@ -1139,9 +1162,11 @@ fn bench_playback_stitched_samples() {
             Err(why) => no_hardware.push(format!("{name}: {why}")),
         }
         for run in &others {
-            record(&rig, &name, path, &[None], run, RECORDED, RECORDED);
+            let passes = record(&rig, &name, path, &[None], run, RECORDED, RECORDED);
+            stalls.extend(stall(&name, run, &passes));
         }
     }
+    assert!(stalls.is_empty(), "{}", stalls.join("; "));
     for (name, run, passes, fps) in &gated {
         let kind = run.kind.expect("Auto's run is on hardware");
         gate(
@@ -1239,7 +1264,15 @@ fn the_bench_harness_plays_on_lavapipe() {
     };
     let u = unthrottled(&rig, &path, &[None], &run, Duration::from_secs(60)).unwrap();
     let r = realtime(&rig, &path, &[None], &run, Duration::from_millis(2500)).unwrap();
+    // Two streams, as an X5's two lenses: the stream twice. Each needs a
+    // slot on screen and one for its next frame, all four of them.
+    let both = [Some(0), Some(0)];
+    let u2 = unthrottled(&rig, &path, &both, &run, Duration::from_secs(60)).unwrap();
+    let r2 = realtime(&rig, &path, &both, &run, Duration::from_millis(2500)).unwrap();
     std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(u2.stalled, None, "two streams");
+    assert_eq!(u2.shown, 29, "two streams");
+    assert!(r2.shown > 0, "two streams");
     eprintln!(
         "unthrottled: {} shown in {:?}, {:?} fps; real time: {:?}, {} loops, {} missed; {}",
         u.shown,
