@@ -23,10 +23,40 @@ mod frame;
 mod interrupt;
 
 #[derive(Parser)]
-#[command(name = brand::APP_SLUG, version = brand::VERSION, about = "Native Linux 360° video editor")]
+#[command(
+    name = brand::APP_SLUG,
+    version = brand::VERSION,
+    about = "Native Linux 360° video editor",
+    long_about = "Native Linux 360° video editor. With no command, opens the viewer \
+                  (the files given, the first of them shown); the commands below \
+                  work without a display.",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
+    #[command(flatten)]
+    gui: GuiCli,
+}
+
+/// The viewer's options, with no command.
+#[derive(clap::Args)]
+struct GuiCli {
+    /// Videos to open; the first is shown.
+    files: Vec<PathBuf>,
+    /// The frame cache's size in MiB, or `auto` (a quarter of the memory
+    /// available, 512 MiB to 8 GiB). Over SPHERECUT_FRAME_CACHE_MIB.
+    #[arg(long, value_name = "MIB", value_parser = cache_mib)]
+    cache_mb: Option<spherecut_playback::CacheBudget>,
+    /// The Vulkan adapter to render on: auto (a GPU, else lavapipe), cpu
+    /// (lavapipe), or part of an adapter's name or its PCI bus id. Over
+    /// SPHERECUT_ADAPTER.
+    #[arg(long)]
+    adapter: Option<String>,
+}
+
+fn cache_mib(s: &str) -> Result<spherecut_playback::CacheBudget, String> {
+    spherecut_playback::CacheBudget::parse_mib(s).map_err(|e| e.to_string())
 }
 
 #[derive(Subcommand)]
@@ -226,7 +256,10 @@ fn log_directives(v: &str) -> String {
 fn run(cli: Cli, args: &[OsString], json: bool) -> Result<Exit> {
     #[cfg(debug_assertions)]
     debug_panic("run");
-    match cli.cmd {
+    let Some(cmd) = cli.cmd else {
+        return Ok(gui(cli.gui));
+    };
+    match cmd {
         Cmd::Frame(frame) => match frame.check() {
             Ok(()) => frame::run(frame),
             Err(message) => Ok(usage(&subcommand_error("frame", message), args, json)),
@@ -237,6 +270,26 @@ fn run(cli: Cli, args: &[OsString], json: bool) -> Result<Exit> {
             // before the GUI's (M1 slice 3).
             let node = spherecut_media::hw::render_node(None, render_node.as_deref());
             doctor(&node.path, json)
+        }
+    }
+}
+
+/// The viewer, until its window closes. Without a display it exits 3
+/// (`no_display`), as it does without a GPU (D27).
+fn gui(args: GuiCli) -> Exit {
+    let gui = spherecut_app::GuiArgs {
+        files: args.files,
+        cache: args.cache_mb,
+        adapter: args
+            .adapter
+            .as_deref()
+            .map(spherecut_render::AdapterChoice::parse),
+    };
+    match spherecut_app::run(gui) {
+        Ok(()) => Exit::Ok,
+        Err(e) => {
+            to_stderr(&format!("error: {e}\n"));
+            contract::frame_exit(e.code())
         }
     }
 }

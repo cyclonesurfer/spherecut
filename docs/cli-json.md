@@ -151,8 +151,10 @@ its `time_base`.
 | 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, and `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware |
 | 4 | Interrupted (SIGINT), leaving no output file; the document's code is `cancelled` | never | never | The first Ctrl+C |
 
-The GUI is to exit 3 too, without a display (`no_display`, M1's last
-slice). A missing decoder is a warning in probe and a finding in doctor,
+The GUI (`spherecut` with no command) exits 3 too: without a display
+(`no_display`), without a GPU (`no_gpu`), or when no adapter matches
+`--adapter` (`adapter_not_found`). It prints no document, only the
+message on stderr. A missing decoder is a warning in probe and a finding in doctor,
 so neither exits 3: doctor checks capability and reports it. frame's
 `--decoder auto` never exits 3 for the hardware: it decodes in software
 instead, and says why in `result.decode.fallback`.
@@ -273,7 +275,12 @@ damage the decoder meets after the frame: the frame is still exact, so
 the run goes on. Damage before the frame fails
 the run instead (above).
 
-`no_display` (exit 3) is planned for the GUI, and not given yet.
+The GUI's, which it gives only as its exit status and a message on
+stderr:
+
+| Code | Exit | Meaning |
+|---|---:|---|
+| `no_display` | 3 | No display to open a window on: `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` and `DISPLAY` are all unset or empty (winit's own rule). The message names the commands that work without one |
 
 `crates/cli/tests/contract.rs` lists every code, so a rename fails a
 test.

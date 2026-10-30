@@ -51,6 +51,7 @@ const CODES: &[&str] = &[
     "io_error",
     "nested_open_refused",
     "no_decoder",
+    "no_display",
     "no_gpu",
     "no_stream",
     "no_video_or_audio",
@@ -83,6 +84,7 @@ const MISSING: &[&str] = &[
     "hw_unavailable",
     "hw_unsupported",
     "no_decoder",
+    "no_display",
     "no_gpu",
 ];
 
