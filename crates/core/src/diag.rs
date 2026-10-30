@@ -94,3 +94,66 @@ pub fn calls_between(from: Instant, to: Instant) -> Vec<(&'static str, f32, f32)
         })
         .collect()
 }
+
+/// The submit gate (`guard`, `guard5`): closed from the viewer's
+/// `prepare` (before the surface is acquired) until a little after its
+/// `paint`, so that no other thread submits to the device while the UI
+/// holds a swapchain image. RADV lists an owned swapchain image in every
+/// submission, and the kernel then marks each one a writer of it, which
+/// the compositor waits for.
+static GATE: Mutex<Option<Instant>> = Mutex::new(None);
+static GATE_MOVED: Condvar = Condvar::new();
+
+/// The gate's hold after `paint`, when a guard switch is on.
+pub fn guard() -> Option<Duration> {
+    if has("guard5") {
+        Some(Duration::from_millis(5))
+    } else if has("guard") {
+        Some(Duration::from_millis(2))
+    } else {
+        None
+    }
+}
+
+/// `prepare`: the gate closes (for 30 ms at most).
+pub fn close_gate() {
+    if guard().is_some() {
+        *lock(&GATE) = Some(Instant::now() + Duration::from_millis(30));
+        GATE_MOVED.notify_all();
+    }
+}
+
+/// `paint`: the gate opens after the guard's hold.
+pub fn open_gate_soon() {
+    if let Some(hold) = guard() {
+        *lock(&GATE) = Some(Instant::now() + hold);
+        GATE_MOVED.notify_all();
+    }
+}
+
+/// Waits for the gate to open, noting the wait as `what` when it waited.
+pub fn wait_gate(what: &'static str) {
+    if guard().is_none() {
+        return;
+    }
+    let start = Instant::now();
+    let mut g = lock(&GATE);
+    let mut waited = false;
+    loop {
+        let now = Instant::now();
+        match *g {
+            Some(until) if until > now => {
+                waited = true;
+                g = GATE_MOVED
+                    .wait_timeout(g, until - now)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+            _ => break,
+        }
+    }
+    drop(g);
+    if waited {
+        note_call(what, start);
+    }
+}

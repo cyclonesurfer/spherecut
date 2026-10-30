@@ -648,6 +648,7 @@ impl UploadThread {
         if skipping && diag::has("skip_copy") {
             return Ok(skipped());
         }
+        diag::wait_gate("gate_copy");
         let t = Instant::now();
         let copied = shared.copier.copy(picture, &regions)?;
         shared.copier.wait(&copied)?;
@@ -662,6 +663,7 @@ impl UploadThread {
             diag::note_call("gate", t);
         }
         shared.copier.order_before(&self.gpu.queue, &copied);
+        diag::wait_gate("gate_upload");
         let t = Instant::now();
         let mut stats = st.uploader.upload_from_buffer(
             &self.gpu,

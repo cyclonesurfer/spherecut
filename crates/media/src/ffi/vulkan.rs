@@ -13,8 +13,10 @@
 //! enums.
 
 use std::any::Any;
+use std::cell::Cell;
 use std::ffi::{CString, c_char, c_int};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Instant;
 
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as sys;
@@ -165,6 +167,8 @@ impl HwDevice {
             (*hw).nb_enabled_dev_extensions = nb_device;
             (*dev).user_opaque = Box::into_raw(kept).cast();
             (*dev).free = Some(free_kept);
+            (*hw).lock_queue = Some(lock_queue);
+            (*hw).unlock_queue = Some(unlock_queue);
             if let Err(e) = set_queues(hw, handles) {
                 sys::av_buffer_unref(&mut r);
                 return Err(e);
@@ -185,6 +189,39 @@ impl HwDevice {
             kind: "vulkan".into(),
         })
     }
+}
+
+/// Diag (diag/late-ui): FFmpeg's queue locks, which also wait for the
+/// submit gate and note each submission's time.
+static HELD: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+static FREED: Condvar = Condvar::new();
+
+thread_local! {
+    static SUBMIT_AT: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+unsafe extern "C" fn lock_queue(_ctx: *mut sys::AVHWDeviceContext, family: u32, index: u32) {
+    let _ = std::panic::catch_unwind(|| {
+        spherecut_core::diag::wait_gate("gate_ffmpeg");
+        let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+        while held.contains(&(family, index)) {
+            held = FREED.wait(held).unwrap_or_else(PoisonError::into_inner);
+        }
+        held.push((family, index));
+        SUBMIT_AT.with(|c| c.set(Some(Instant::now())));
+    });
+}
+
+unsafe extern "C" fn unlock_queue(_ctx: *mut sys::AVHWDeviceContext, family: u32, index: u32) {
+    let _ = std::panic::catch_unwind(|| {
+        let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+        held.retain(|&q| q != (family, index));
+        drop(held);
+        FREED.notify_all();
+        if let Some(at) = SUBMIT_AT.with(Cell::take) {
+            spherecut_core::diag::note_call("ffmpeg", at);
+        }
+    });
 }
 
 /// The granted queues, as `qf[]`.

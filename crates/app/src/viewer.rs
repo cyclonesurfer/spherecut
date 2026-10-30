@@ -288,6 +288,7 @@ impl CallbackTrait for ViewerCallback {
         res: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         spherecut_core::diag::mark(spherecut_core::diag::Mark::Prepare);
+        spherecut_core::diag::close_gate();
         let start = Instant::now();
         let Some(r) = res.get_mut::<ViewerResources>() else {
             return Vec::new();
@@ -369,6 +370,7 @@ impl CallbackTrait for ViewerCallback {
         res: &CallbackResources,
     ) {
         spherecut_core::diag::mark(spherecut_core::diag::Mark::Paint);
+        spherecut_core::diag::open_gate_soon();
         let Some(r) = res.get::<ViewerResources>() else {
             return;
         };
