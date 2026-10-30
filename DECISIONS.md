@@ -5298,14 +5298,17 @@ What:
     from the start has, so a seek's output after its preroll is a
     sequential decode's.
   - **Seeking** goes back to 100 ms before the time (at least two AAC
-    frames, for the MDCT's overlap) and to the grid point at or before
-    that, flushes, decodes, and drops what comes before the exact
-    sample: the next chunk starts at sample round(at × rate).
+    frames, for the MDCT's overlap), flushes and decodes; the resampler
+    starts at the first grid point in the first frame decoded, and what
+    comes before the exact sample is dropped: the next chunk starts at
+    sample round(at × rate).
   - **Coarse time bases.** Matroska's are milliseconds, coarser than a
     sample, so each frame's time is rounded. A frame within a tick of
     where the frames before it end is placed there, from the stream's
     first sample, so a seek lands each frame where a decode from the
-    start puts it.
+    start puts it. Each packet's end is rounded too, so the last frame's
+    padding is cut only from a frame that goes past its packet's end by
+    more than a tick.
   - 50 packets in a row refused make the stream undecodable.
 - **The output crate** (`spherecut-audio`).
   - cpal 0.18.2 with only its `pulseaudio` feature: the PulseAudio
@@ -5336,7 +5339,10 @@ What:
     for samples by their index (placement), and while the ring is full
     the producer may reclaim the oldest chunk by compare-and-swap if it
     is of an older epoch, since a paused stream's callback may not run
-    to drop it.
+    to drop it. The consumer reads a chunk's header and then its samples
+    with the tail checked after each (Acquire fences), and the producer
+    writes a slot after a Release fence, so a chunk reclaimed while it
+    is read is read again rather than taken as a gap.
   - **The clock** (`AudioClock`, a `Clock`). Its state is one
     `SeqLock<12>` (core's, now public): epoch, base and seek times,
     running, on the system clock, on audio, and the anchor's wall
@@ -5350,7 +5356,9 @@ What:
       most the latency plus two buffers (the end of the buffer written
       plus one more), so a stalled callback freezes it. It never shows
       less than it showed when the anchor was made, so jitter in the
-      callback's timing holds it instead of moving it back.
+      callback's timing holds it instead of moving it back. That holds
+      for a time read at the instant it is read; the presenter reads it a
+      present's latency ahead, so it keeps its own hold (below).
     - **The system clock.** When the device is lost, or the callbacks
       stop for 500 ms while playing (`STALL`, a suspended sink), or no
       audio arrives for 2 s after playing starts (`WAIT_LIMIT`), the
@@ -5376,12 +5384,13 @@ What:
     other error loses the device: the clock goes to the system clock and
     the default device is tried again every 2 s at the same rate and
     channel count, which the decoder already resamples to. A stall that
-    lasts 2 s on the system clock drops the stream and opens it again.
+    lasts 2 s on the system clock drops the stream and opens it again,
+    and a new stream gets 2 s to call back before it is opened again.
   - **No device**: `Output::null` runs the callback from an
     `audio-null` thread every 1024 frames on a schedule kept from its
-    start, with no latency, starting the schedule again when it is 8
-    periods behind (a suspended machine). The engine runs the same code
-    on it.
+    start, at the schedule's instants (not when the thread wakes), with
+    no latency, starting the schedule again when it is 8 periods behind
+    (a suspended machine). The engine runs the same code on it.
   - **`FakeAudioDevice`**, for the Tier 1 A/V tests: callbacks at
     scripted instants (a period, a stated latency, stalls, loss and a
     new stream), the real callback and the watchdog every 50 ms of
@@ -5403,6 +5412,16 @@ What:
     into the ring. A seek or decode error ends the epoch there, so the
     clock runs on silence; a decoder that won't open leaves every epoch
     ending where it starts.
+  - **The threads are the player's.** The factory gets the player's
+    `PlayerThreads`, which starts `audio-decode` and adopts the output's
+    thread, so that `Player::join` waits for both within its budget and
+    reports them. `audio-decode` ends when the open's token stops (a
+    newer open, or the player's shutdown, whose flag interrupts its
+    reads and the probe's), and stops the output's thread as it goes
+    (`Output::stop`, which hands the thread over without waiting).
+    Dropping the output stops both without waiting, so it may be
+    dropped anywhere, the UI thread included; a newer open drops the
+    last file's outside the status lock, and pauses its clock at once.
   - The player follows the output's clock once the open is done
     (playing it at once if the player's clock was playing), and emits
     `AudioOpened` with the output's numbers. A preroll ends when the
@@ -5410,6 +5429,11 @@ What:
     `PREROLL_LIMIT` (2 s) without the audio, when the clock falls back
     to the system clock and the player emits `AudioLate`.
     `Player::audio_stats()` reads the output's numbers without waiting.
+    The presenter reads the clock a present's latency ahead (D34); while
+    playing it never takes a time less than the last present's unless
+    the clock went back at its own instant (a seek), since a late
+    callback's correction can bring a time read ahead below the one
+    read before.
     `play_at`, `pause_at` and `seek_at` take the instant, for tests on
     scripted time.
 - **Test clips.** synth's audio clips are AAC without perceptual noise
@@ -5453,30 +5477,49 @@ Tested:
 - `synth/tests/audio.rs`, 13 tests on clips synth writes: exact sample
   counts, the tones' pitches, priming gone and the audio on the video's
   axis, seeks equal to a sequential decode within 1e-6 at 48 kHz and
-  44.1 resampled, 44.1 kHz resampling to exactly 10 s at 48, mono,
-  5.1, ambiX, the output's channels, origins before and after the
-  audio, `NoStream`, a Matroska remux within a millisecond, and
-  `sync-flash-beep`'s beeps within 1 ms of their white frames.
+  44.1 resampled, in MP4 and in a Matroska remux, 44.1 kHz resampling
+  to exactly 10 s at 48, mono, 5.1, ambiX, the output's channels,
+  origins before and after the audio, `NoStream`, a Matroska remux
+  with every sample of the MP4's from its first, at one lag within a
+  millisecond, at 48 and 44.1 kHz, and `sync-flash-beep`'s beeps within
+  1 ms of their white frames.
 - The audio crate: the ring's unit tests (placement, gaps and other
-  epochs, reclaim, and a two-thread stress test), the clock's (rounding,
-  packing, the floor and the limit), and 13 tests in `tests/clock.rs`,
+  epochs, reclaim, a two-thread stress test, and a reclaim racing an
+  epoch's first fill), the clock's (rounding, packing, the floor and the
+  limit), `audio-out`'s stall rule (a stalled stream opened again once
+  each 2 s), and 13 tests in `tests/clock.rs`,
   most on the fake device: the clock waiting for audio and then running
   by the samples played; never going back, and freezing when callbacks
   stop; an underrun skipping its debt, and the end of the audio not
   counting as one; a seek to round(at × rate), and one past the end;
   a pause and play resuming at its sample; `ready`; loss and a stall
   falling back without a jump and the audio taking over again; the wait
-  limit; the null output; and opening the device here.
-- `playback/tests/av_sync.rs`, 8 tests through the whole engine, most
+  limit; the null output, its callbacks a period apart; and opening the
+  device here.
+- `playback/tests/av_sync.rs`, 10 tests through the whole engine, most
   on the fake device (the synthetic backend's audio, the real decode thread
   and presenter): 60 s of scripted time at each of 29.97 and 59.94 fps
   with 44.1 and 48 kHz, the shown frame at every present the one whose
   interval holds the clock's time; a seek restarting audio at
   round(at × rate); a 200 ms decode stall leaving the clock running,
   video continuous and the sample heard after it equal to the clock;
-  device loss without a jump over 1 ms; a preroll that waits its limit;
-  the null output within ±5% over 2 s; `AudioDevice::Default` on the
-  null output when no device opens, as here; and a file without audio.
+  device loss without a jump over 1 ms; 20 callbacks 30 ms late without
+  the time presented going back; a preroll that waits its limit; the
+  null output within ±5% over 2 s; `AudioDevice::Default` on the null
+  output when no device opens, as here; a file without audio; and the
+  audio's threads ending with a newer open and joined, a stuck decoder
+  included, by the player's join. A unit test drops an output on a
+  marked UI thread and gets both its threads handed over.
+- The slice's review found 8 faults, all fixed, each with a test that
+  fails without its fix but the last two: a stalled stream was opened again
+  every 50 ms instead of every 2 s; a chunk reclaimed while the callback
+  read it could be taken as a gap; the time presented could go back up
+  to 9 ms after a late callback; Matroska's end cut took 16 samples off
+  each of the first frames, and no test caught a broken `place()`; the
+  audio's threads weren't the player's (not stopped by its shutdown,
+  not in its join or report, joined inside the status lock); the null
+  output anchored at its wakeups; the probe's interrupt flag was never
+  set; and this entry gave the seek's grid point the wrong way round.
 - `audio_output_device_plays` (Tier 2): a 440 Hz tone on the default
   device for 2 s, passing when the clock advances 2.0 s ± 50 ms and is
   monotonic, no callback comes over twice its buffer after the last,
@@ -5493,7 +5536,8 @@ Limits:
   bands differently after a seek than from the start, at their noise
   floor; the 1e-6 seek equality is shown on clips without it.
 - Matroska audio is placed within a millisecond of where the MP4 puts
-  it, and, with no count of AAC's padding, may end up to a frame later.
+  it, and, with no count of AAC's padding, may end up to a frame later;
+  a frame within a tick of its packet's end keeps that much padding.
 - The output's format is fixed when it opens. A new default device that
   can't play that rate and channel count isn't used, and the clock stays
   on the system clock, silent, until one can or the file is opened

@@ -592,17 +592,27 @@ acceptance (m1-plan section 14):
 
 | Acceptance | Evidence |
 |---|---|
-| The audio decode tests pass | `crates/synth/tests/audio.rs`, 13 tests (26 s) on clips synth writes: exact sample counts; the tones at 440 and 660 Hz; 44.1 kHz resampled to exactly 10 s at 48; priming gone and the audio on the video's axis; seeks at five times, sub-frame and 1001/30000 among them, starting at round(at × rate) with a sequential decode's samples within 1e-6, at 48 kHz and from 44.1; mono, 5.1, ambiX and the output's channels; origins before and after the audio; a file without audio (`no_stream`); a Matroska remux within a millisecond; and `sync-flash-beep`'s beeps within 1 ms of their white frames |
-| The fake-device A/V tests pass at all four rate combinations | `crates/playback/tests/av_sync.rs`, 8 tests (5 s) through the whole engine, most on `FakeAudioDevice`: `video_follows_the_audio_clock_at_every_rate` plays 60 s of scripted time at 29.97 and 59.94 fps with 44.1 and 48 kHz, the frame shown at every present the one whose interval holds the clock's time; a seek restarts audio at round(at × rate); a 200 ms decode stall leaves the clock running, video continuous and the sample heard after it the clock's; losing the device moves to the system clock without a jump over 1 ms; a preroll waits its 2 s limit; and a file without audio plays on the player's clock |
+| The audio decode tests pass | `crates/synth/tests/audio.rs`, 13 tests (26 s) on clips synth writes: exact sample counts; the tones at 440 and 660 Hz; 44.1 kHz resampled to exactly 10 s at 48; priming gone and the audio on the video's axis; seeks at five times, sub-frame and 1001/30000 among them, starting at round(at × rate) with a sequential decode's samples within 1e-6, at 48 kHz and from 44.1, in MP4 and in a Matroska remux; mono, 5.1, ambiX and the output's channels; origins before and after the audio; a file without audio (`no_stream`); a Matroska remux with every sample of the MP4's from the first, within a millisecond, at 48 and 44.1 kHz; and `sync-flash-beep`'s beeps within 1 ms of their white frames |
+| The fake-device A/V tests pass at all four rate combinations | `crates/playback/tests/av_sync.rs`, 10 tests (5 s) through the whole engine, most on `FakeAudioDevice`: `video_follows_the_audio_clock_at_every_rate` plays 60 s of scripted time at 29.97 and 59.94 fps with 44.1 and 48 kHz, the frame shown at every present the one whose interval holds the clock's time; a seek restarts audio at round(at × rate); a 200 ms decode stall leaves the clock running, video continuous and the sample heard after it the clock's; losing the device moves to the system clock without a jump over 1 ms; 20 callbacks 30 ms late never take the time presented back; a preroll waits its 2 s limit; a file without audio plays on the player's clock; and the audio's threads end with a newer open and the player's join, which reports them |
 | NullOutput keeps time on this box | `the_null_output_keeps_time` in `av_sync.rs` (within ±5% over 2 s through the engine) and in `crates/audio/tests/clock.rs`; `the_default_device_is_the_null_output_without_one`: with no device here, `AudioDevice::Default` plays on the null output |
 | Tier 2 `audio_output_device_plays` is written | `crates/audio/tests/tier2_device.rs`, listed by `cargo xtask hw-test --list` (32 Tier 2 tests). Here it skips with ALSA's "The requested audio device is not available"; its measuring, run once by hand on the null output, gave 1.99992 to 1.99999 s of clock over 2 s and a worst callback gap of 1.009 buffers in three runs. It runs on a device in H2 |
 
 Also in the slice:
 
-- The audio crate's own tests: 8 unit tests (the ring's placement,
-  epochs and reclaim, and a two-thread stress test; the clock's
-  rounding, packing, floor and limit) and the 13 of `tests/clock.rs`
-  (2 s), most on the fake device (D35's "Tested").
+- The audio crate's own tests: 10 unit tests (the ring's placement,
+  epochs and reclaim, a two-thread stress test and a reclaim racing an
+  epoch's first fill; the clock's rounding, packing, floor and limit;
+  `audio-out`'s stall rule) and the 13 of `tests/clock.rs` (2 s), most
+  on the fake device (D35's "Tested").
+- The slice's review (a fresh subagent's, against the acceptance
+  above, which it found met) found 8 faults, all fixed (D35's
+  "Tested"): a stalled stream opened again every 50 ms; a reclaimed
+  chunk read as a gap; the time presented going back up to 9 ms after
+  a late callback; Matroska's end cut taking 16 samples off each of the
+  first frames, with `place()` untested; the audio's threads outside
+  the player's shutdown and join; the probe's interrupt never set; the
+  null output anchoring at its wakeups; and D35's grid point the wrong
+  way round.
 - `cargo xtask check` stops, with the install command, when pkg-config
   finds no `alsa`; hw-test's prerequisites say ALSA's headers block the
   build. `deny.toml` allows cpal only `pulseaudio`. cpal's D22 row:

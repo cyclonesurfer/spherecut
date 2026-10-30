@@ -703,7 +703,14 @@ intermediate equirect exists only as the output of a 360 export.
     and channels.
   * **The UI thread** reads the clock through the sequence lock and the
     output's numbers with `try_lock` (`Player::audio_stats`). A preroll
-    waits for 100 ms of audio queued, at most 2 s (`AudioLate`).
+    waits for 100 ms of audio queued, at most 2 s (`AudioLate`). Read a
+    present's latency ahead, the clock's time is held at the last
+    present's while playing, so a late callback never takes video back.
+  * **Ending.** `audio-decode` and the output's thread are the player's
+    (`PlayerThreads`): `audio-decode` ends with the open's token, at a
+    newer open or the shutdown, which also interrupts its reads, and
+    hands the output's thread over as it goes, so `join` waits for and
+    reports both. Dropping an output never waits.
 
 ## Testing tiers
 
