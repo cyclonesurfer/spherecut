@@ -175,11 +175,24 @@ fn a_stray_print_reaches_stderr_not_the_protocol() {
     );
 }
 
-/// Codex passes only a short list of variables to an MCP server.
+/// Codex passes only a short list of variables to an MCP server. The
+/// loader's path is kept too: `cargo xtask compat` finds the FFmpeg under
+/// test through it, where an installed Spherecut finds its libraries
+/// without.
 #[test]
 fn codex_s_environment_is_enough() {
     let keep = [
-        "HOME", "LOGNAME", "PATH", "SHELL", "USER", "LANG", "LC_ALL", "TERM", "TMPDIR", "TZ",
+        "HOME",
+        "LOGNAME",
+        "PATH",
+        "SHELL",
+        "USER",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "TMPDIR",
+        "TZ",
+        "LD_LIBRARY_PATH",
     ];
     let mut s = Server::spawn(|c| {
         c.env_clear();
