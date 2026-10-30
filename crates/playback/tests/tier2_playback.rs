@@ -19,7 +19,8 @@
 //! (decode-dropped), and the presents whose frame had already ended when
 //! it went on screen (late). A note gives each stage's p50 and p95 over
 //! the real-time pass, the loops, the UI ticks missed and where each
-//! stream decoded.
+//! stream decoded. With `SPHERECUT_PLAYBACK_TIMELINE` naming a
+//! directory, each pass also writes its [`Timeline`] there, tick by tick.
 //!
 //! What gates, and what only records:
 //!
@@ -69,8 +70,8 @@ use spherecut_media::hw::{self, GpuIds, RenderNode};
 use spherecut_media::probe::{self, ProbeReport, StreamKind};
 use spherecut_playback::decoder::choose;
 use spherecut_playback::{
-    Counter, DecoderPreference, HwSupport, PerfStats, Player, PlayerConfig, PlayerParts, Presented,
-    SlotFrame, Stage, StreamFormat,
+    Counter, DecoderPreference, HwSupport, PerfStats, Player, PlayerConfig, PlayerParts,
+    PlayerSnapshot, Presented, SlotFrame, Stage, StreamFormat,
 };
 use spherecut_render::wgpu;
 use spherecut_render::{
@@ -109,6 +110,19 @@ const OUTPUT: (u32, u32) = (1920, 1080);
 /// Where hw-test says the render node VA-API is tested on is; unset, the
 /// node is the rendering GPU's own.
 const RENDER_NODE_ENV: &str = "SPHERECUT_RENDER_NODE";
+
+/// A directory each pass writes its [`Timeline`] to; unset, none is
+/// kept.
+const TIMELINE_ENV: &str = "SPHERECUT_PLAYBACK_TIMELINE";
+
+/// The stages a timeline row gives, each as the samples taken since the
+/// row before and the longest of them.
+const TIMELINE_STAGES: [Stage; 4] = [
+    Stage::Decode,
+    Stage::Download,
+    Stage::UploadCpu,
+    Stage::UploadGpu,
+];
 
 /// This thread marked as the UI thread, as the GUI's is, until dropped: a
 /// wait in the engine's calls from it panics.
@@ -564,6 +578,125 @@ impl Meter {
     }
 }
 
+/// A pass as CSV, for a gate that fails at a moment (a loop point) or
+/// for a while (as the cache fills): a row per UI tick in real time, per
+/// frame shown unthrottled, with the clock, the frame on screen, the
+/// engine's counters, the cache and the slots, the stages' samples since
+/// the row before, and the process's minor page faults. Written to
+/// `<file>-<run>-<pass>.csv` in [`TIMELINE_ENV`]'s directory.
+struct Timeline {
+    path: PathBuf,
+    begun: Instant,
+    seen: [u64; TIMELINE_STAGES.len()],
+    csv: String,
+}
+
+impl Timeline {
+    /// `pass` of `run` on `file`'s timeline, when [`TIMELINE_ENV`] asks
+    /// for one.
+    fn new(file: &Path, run: &Run, pass: &str, perf: &PerfStats, begun: Instant) -> Option<Self> {
+        let dir = PathBuf::from(std::env::var_os(TIMELINE_ENV)?);
+        let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+        let name: String = format!("{stem}-{}-{pass}", run.label)
+            .chars()
+            .map(|c| match c {
+                'a'..='z' | '0'..='9' | '-' => c,
+                'A'..='Z' => c.to_ascii_lowercase(),
+                _ => '_',
+            })
+            .collect();
+        let mut csv = String::from(
+            "t_ms,clock_s,shown_s,playing,at_end,loops,decoded,uploaded,shown,dropped,\
+             decode_dropped,cache_waits,cache_frames,cache_ahead,cache_mib,slots_ready,\
+             slots_writing,slots_free,minflt",
+        );
+        for s in TIMELINE_STAGES {
+            csv.push_str(&format!(",{0}_n,{0}_max_ms", s.name()));
+        }
+        csv.push('\n');
+        Some(Timeline {
+            path: dir.join(format!("{name}.csv")),
+            begun,
+            seen: TIMELINE_STAGES.map(|s| perf.summary(s).recorded),
+            csv,
+        })
+    }
+
+    fn row(&mut self, now: Instant, snap: &PlayerSnapshot, loops: u64, perf: &PerfStats) {
+        use std::fmt::Write as _;
+        let shown = snap
+            .shown
+            .first()
+            .copied()
+            .flatten()
+            .map(|f| format!("{:.4}", f.time.to_secs_f64()))
+            .unwrap_or_default();
+        let count = |c| snap.perf.counter(c);
+        let (frames, ahead, bytes) = snap
+            .cache
+            .as_ref()
+            .map_or((0, 0, 0), |c| (c.frames, c.ahead, c.bytes));
+        let slots = &snap.slots;
+        let _ = write!(
+            self.csv,
+            "{:.2},{:.4},{shown},{},{},{loops},{},{},{},{},{},{},{frames},{ahead},{},{},{},{},{}",
+            now.saturating_duration_since(self.begun).as_secs_f64() * 1000.0,
+            snap.clock.to_secs_f64(),
+            u8::from(snap.playing),
+            u8::from(snap.at_end),
+            count(Counter::FramesDecoded),
+            count(Counter::FramesUploaded),
+            count(Counter::FramesShown),
+            count(Counter::Dropped),
+            count(Counter::DecodeDropped),
+            count(Counter::CacheWaits),
+            bytes >> 20,
+            slots.ready,
+            slots.writing,
+            slots.free,
+            minor_faults(),
+        );
+        for (seen, s) in self.seen.iter_mut().zip(TIMELINE_STAGES) {
+            let recorded = perf.summary(s).recorded;
+            let new = recorded.saturating_sub(*seen);
+            *seen = recorded;
+            let kept = perf.samples(s);
+            let take = usize::try_from(new).unwrap_or(usize::MAX).min(kept.len());
+            let longest = kept[kept.len() - take..]
+                .iter()
+                .copied()
+                .fold(0.0, f32::max);
+            let _ = write!(self.csv, ",{new},{longest:.2}");
+        }
+        self.csv.push('\n');
+    }
+
+    fn write(self) {
+        let written = self
+            .path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&self.path, &self.csv));
+        match written {
+            Ok(()) => bench::note(format!("timeline: {}", self.path.display())),
+            Err(e) => bench::note(format!("timeline {}: {e}", self.path.display())),
+        }
+    }
+}
+
+/// The process's minor page faults so far: the 10th field of
+/// `/proc/self/stat`, counted from after the command's name (which may
+/// hold spaces); 0 where it can't be read.
+fn minor_faults() -> u64 {
+    std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|stat| {
+            let (_, rest) = stat.rsplit_once(')')?;
+            rest.split_whitespace().nth(7)?.parse().ok()
+        })
+        .unwrap_or(0)
+}
+
 /// The first present with a frame of every stream, failing on an error
 /// the streams report.
 fn first_frame(player: &Player, streams: usize) -> Result<Presented, String> {
@@ -653,6 +786,7 @@ fn unthrottled(
         drop(first);
         player.play();
         let mut meter = Meter::new(player.perf().clone(), streams.len(), Instant::now());
+        let mut timeline = Timeline::new(path, run, "unthrottled", player.perf(), meter.begun);
         'pass: while meter.begun.elapsed() < limit {
             let Some(next) = ends(&shown, rate) else {
                 return Err(format!("frame at {:?} has no duration", shown.time));
@@ -668,6 +802,9 @@ fn unthrottled(
                     shown = p.frames[0].frame;
                     meter.shown();
                     meter.tick(now);
+                    if let Some(t) = &mut timeline {
+                        t.row(now, &player.snapshot(), 0, player.perf());
+                    }
                     break;
                 }
                 stream_error(&player)?;
@@ -688,6 +825,9 @@ fn unthrottled(
         let mut pass = meter.finish(Instant::now());
         pass.paths = paths(&player);
         drop(ui);
+        if let Some(t) = timeline {
+            t.write();
+        }
         Ok(pass)
     })();
     let joined = join(player);
@@ -720,6 +860,7 @@ fn realtime(
         player.play();
         let start = Instant::now();
         let mut meter = Meter::new(perf.clone(), streams.len(), start);
+        let mut timeline = Timeline::new(path, run, "realtime", &perf, start);
         let mut deadline = start;
         while start.elapsed() < length {
             deadline += TICK;
@@ -735,6 +876,9 @@ fn realtime(
             let now = Instant::now();
             let presented = player.present(now);
             let snap = player.snapshot();
+            if let Some(t) = &mut timeline {
+                t.row(now, &snap, meter.pass.loops, &perf);
+            }
             if let Some(p) = &presented {
                 if p.changed {
                     screen.draw(p, &perf).map_err(|e| e.to_string())?;
@@ -770,6 +914,9 @@ fn realtime(
         let mut pass = meter.finish(Instant::now());
         pass.paths = paths(&player);
         drop(ui);
+        if let Some(t) = timeline {
+            t.write();
+        }
         Ok(pass)
     })();
     let joined = join(player);
