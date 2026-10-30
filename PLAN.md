@@ -74,7 +74,7 @@ new features to agents, which adds a little work to each.
 
 ## M1 Viewer
 
-- [ ] `MediaBackend` trait with the FFmpeg implementation: open, stream
+- [x] `MediaBackend` trait with the FFmpeg implementation: open, stream
       info, seek (frame-accurate, by PTS), decode to the frame's native
       planar or semi-planar YUV (NV12/P010 from VA-API), uploaded
       unconverted, both software and VA-API (with automatic software
@@ -96,15 +96,15 @@ new features to agents, which adds a little work to each.
       them with `structure: none`; README, D15 and the `lrc` test change
       with it. (Found on 2026-10-24: M0's probe follows an HLS playlist to
       a file outside its folder.)
-- [ ] Projection shader (WGSL) sampling the frame's planes directly (deep
+- [x] Projection shader (WGSL) sampling the frame's planes directly (deep
       planes normalised on the GPU, RGB only in the shader), with
       per-source YUV→RGB matrix and range, into a linear-light float target,
       output as sRGB/Rec.709. Equirect source; rectilinear, fisheye and
       stereographic output with morph.
-- [ ] No seam line at ±180° and no shimmer in wide-FOV/tiny-planet views:
+- [x] No seam line at ±180° and no shimmer in wide-FOV/tiny-planet views:
       analytic LOD (explicit gradients) plus mipmaps or supersampling,
       proven by golden images of the high-frequency pattern.
-- [ ] `spherecut frame <file> --time <t> --yaw/--pitch/--roll --fov
+- [x] `spherecut frame <file> --time <t> --yaw/--pitch/--roll --fov
       --projection --size WxH -o out.png` renders one frame headless.
 - [x] The CLI's JSON contract, for agents and scripts (probe, doctor,
       frame): with `--json`, stdout carries exactly one compact JSON
@@ -117,30 +117,37 @@ new features to agents, which adds a little work to each.
       (as in D18 and the README); 2 usage error; 3 a codec or device the
       command itself needs is missing; 4 cancelled; each tested. A command
       that writes refuses an existing output unless given `--overwrite`.
-- [ ] Golden-image tests on lavapipe: each projection, the seam, the poles,
+- [x] Golden-image tests on lavapipe: each projection, the seam, the poles,
       10-bit input, limited vs full range, compared by PSNR/SSIM with stored
       small references. GPU output matches the CPU reference projection in
       `spherecut-sphere` within tolerance.
-- [ ] GUI (eframe + wgpu + dock): open a file, viewer panel with a custom
+- [x] GUI (eframe + wgpu + dock): open a file, viewer panel with a custom
       wgpu paint callback, drag-to-grab-the-sphere (the point under the
       cursor stays under it, tested numerically), scroll/pinch FOV zoom,
       projection switch, play/pause, scrubbing, frame step, audio playback
-      with the audio clock driving A/V sync.
+      with the audio clock driving A/V sync. (Pinch is two-finger scroll
+      and Ctrl+scroll until winit has touchpad gestures on Wayland, D36.)
 - [x] Decode, audio and texture upload on workers; UI never blocks on them
       (asserted by a test harness that injects a slow decoder). Bounded frame
       cache sized from available memory, configurable.
 - [x] Performance overlay: decode ms, upload ms, render ms, dropped frames,
       cache size.
-- [ ] Startup codec/hardware check in the GUI with the doctor's fix
+- [x] Startup codec/hardware check in the GUI with the doctor's fix
       instructions.
 - [ ] HiDPI and fractional scaling correct; works under GNOME and Hyprland
-      (hardware report + screenshots).
+      (hardware report + screenshots). Pending hardware: GNOME at 1.0 on
+      odin passes (H3); a fractional scale on a real display, and
+      Hyprland, wait for a machine.
 - [ ] Hardware: 5.7K30 stitched equirect plays in real time on odin and
       huginn with VA-API decode; numbers in `docs/perf.md`. Vulkan Video
       HEVC is measured too (doctor's decode check, a bit-exact check on
       the X5 samples and the sample benchmark), because odin's discrete
       RDNA3 may decode HEVC with FFmpeg's Vulkan path where huginn's RADV
-      can't.
+      can't. Pending hardware: on odin the noisy 5.7K clips play in real
+      time with Vulkan Video, which `Auto` picks there, headless and in
+      the window (H3, D42), but not with VA-API, whose copy decodes them
+      at 14 to 22 fps; huginn's run and clip 12, a stitched camera
+      export, are still to come.
 - [ ] Zero-copy proof (Pat, 2026-10-24, from the stack review): a Tier 2
       test imports VA-API NV12 and P010 frames from an X5 sample into wgpu
       as DMA-BUF planes on huginn and odin, renders one frame, and matches
@@ -151,7 +158,9 @@ new features to agents, which adds a little work to each.
       path is in use (D25). Decided for Vulkan Video on 2026-10-30 (Pat,
       from odin's window): it decodes on the renderer's own device by
       default where that can be shared; VA-API's import stays opt-in
-      until huginn's numbers.
+      until huginn's numbers. Pending hardware: odin's test passes (one
+      unexplained mismatch in about a dozen runs, PROGRESS's known
+      issues), and huginn's run is still to come.
 
 ## M2 Clip reframer
 

@@ -128,8 +128,9 @@ Current benchmarks:
   by side, 960×1080 each). Each run has an unthrottled pass (a
   `ManualClock` moved to the next frame as soon as it is on screen) and
   a real-time pass (a `SystemClock`, looping at the end). Rows, under
-  `<clip>, <decoder>` (the decoder `VA-API (Auto)` or `Vulkan (Auto)`
-  for the one `Auto` picks, else `VA-API`, `Vulkan` or `software`):
+  `<clip>, <decoder>` (the decoder `VA-API (Auto)`, `Vulkan (Auto)` or
+  `Vulkan (Auto, zero copy)` for the one `Auto` picks, else `VA-API`,
+  `Vulkan` or `software`):
   `decoded per second, unthrottled`, `decoded per second, real time` and
   `shown per second, real time`, each one run's full seconds (Runs is
   the seconds, Range the slowest and the fastest second, and the spread
@@ -140,11 +141,15 @@ Current benchmarks:
   `download`, `convert`, `upload_cpu`, `upload_gpu`, `render_cpu`,
   `render_gpu`, `ui_frame`, `shown_interval`, `av_offset`).
   - `bench_playback_realtime_5k7_8bit` and `_10bit` play the 5.7K perf
-    clips (below) and **gate**: on `Auto`'s hardware, 0 dropped and 0
-    decode-dropped after the first second of 60 s, every unthrottled
-    second at 1.2 × 29.97 = 35.96 fps or more, and every stream on that
-    hardware throughout. The other hardware kind and software run 20 s
-    and only record.
+    clips (below) and **gate**: on `Auto`'s hardware as the app plays
+    it by default (D42), 0 dropped and 0 decode-dropped after the first
+    second of 60 s, every unthrottled second at 1.2 × 29.97 = 35.96 fps
+    or more, and every stream on that hardware throughout. Where `Auto`
+    picks Vulkan Video and the device can be shared, the gated run keeps
+    the frames on the GPU (path B), is named `Vulkan (Auto, zero copy)`
+    with a note of the frames taken there and refused, and fails if any
+    was refused; `Auto`'s copy path is then recorded as `Vulkan (Auto)`.
+    The other hardware kind and software run 20 s and only record.
   - `bench_playback_realtime_8k_8bit`: the 8K perf clip, recorded.
   - `bench_playback_x5_raw`: the longest X5 file of each mode, both
     lenses as two streams, on each decoder, recorded (M3's 8K budget).
@@ -777,6 +782,53 @@ held 813, 829, 230, 14 and 1023 submissions (the 5.7K clips, the seam,
 the sync clip, the X5 pair), the longest 2.3 ms. The `decode` and
 `upload_cpu` stages now count those waits: their p50 went from about
 0.7 to 2.8 ms and from 1.2 to 3.1 ms at 5.7K.
+
+
+Eighth run, H3:
+[`hw-reports/odin-0d491ae.md`](../hw-reports/odin-0d491ae.md) at
+0d491ae, 2026-10-30 (PR #12, 5868 s), the same machine and software,
+with the submit gate (D41). Tier 1 on odin: 767 of 767. Tier 2: 36 of
+40 passed, the stitched-samples bench skipped (no clip 12), and three
+failed. `gui_smoke` passed all five runs at 100 % presented, the UI's
+p99 at 17.0 to 17.2 ms and nothing dropped, the gate's longest wait
+2.48 ms.
+
+- Both 5.7K gates failed on Vulkan Video's copy path, the gated run
+  then: the 10-bit clip's unthrottled seconds fell to 11 to 15 fps for
+  five seconds (61, 43, 14, 11, 15, 14, 11, 31, then 95 to 99) and its
+  real-time pass dropped 69 frames between seconds 5 and 9; the 8-bit
+  clip's fell to 27 (109, 110, 66, 32, 27, 87, 130). The 10-bit rerun,
+  with 15.7 GB free, passed; an 8-bit rerun with 4.5 GB free fell to
+  21. The machine had about 46 GB of page cache: each new huge-page
+  download buffer compacted memory directly (THP defrag `madvise`;
+  `compact_stall` up about 15 000 and `thp_fault_fallback` 12 500 over
+  the failing run) while the cache filled. The gated run is now the
+  app's own path, zero copy (D42).
+- `zero_copy_matches_copy_path` (path A, opt-in) failed once: an X5
+  lens's frame 26 imported rendered other bytes than its download. Its
+  rerun passed, and so did ten more with the diagnostics that would say
+  how (below); the cause isn't known.
+
+At 8d5c943 (branch `m1/h3`, over Remote Control), with about 15.5 GB
+free and no compaction, both gates passed twice, on path B. Each gated
+run's 60 s, and `Auto`'s copy path recorded for 20 s, run 1 / run 2:
+
+| Clip, path | Unthrottled | Real time, decoded | Dropped, decode-dropped, late | `decode` p50 / p95 | `upload_cpu` p50 / p95 | `upload_gpu` p50 / p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| 5.7K 8-bit, zero copy | 129.5 (128 to 131) / 129 (129 to 131) | 30 (12 to 46) | 0, 0, 0 | 0.66 / 23.82 | 1.29 / 1.49 | 1.77 / 1.85 |
+| 5.7K 8-bit, copied | 110 (108 to 128) / 109 (108 to 129) | 30 (0 to 61) | 0, 0, 0 | 1.17 / 21.44 | 3.60 / 3.93 | 1.04 / 2.07 |
+| 5.7K 10-bit, zero copy | 129 (129 to 130) / 129.5 (128 to 130) | 30 (12 to 46) | 0, 0, 0 | 0.54 / 31.23 | 1.63 / 1.91 | 2.52 / 2.87 |
+| 5.7K 10-bit, copied | 84 (63 to 107) / 88.5 (64 to 109) | 29.5 (0 to 61) | 0, 0, 0 | 1.15 / 20.69 | 6.43 / 7.26 | 1.49 / 4.08 |
+
+The stages are run 1's; run 2's were within 0.2 ms. Path B took 2385
+to 2388 frames on the GPU a run and refused none, and downloaded
+nothing; the copied rows' `download` was 5.05 / 28.76 ms (10-bit) and
+6.57 / 27.18 ms (8-bit). Zero copy decodes the 10-bit clip half again
+as fast as the copy, and the 8-bit clip a sixth faster, unthrottled;
+its real-time decode keeps no more than the decoder's surfaces ahead
+(12 to 46 a second), where the copy fills the cache at up to 61. These
+runs had memory to spare, so they don't show the copy path's slump.
+`zero_copy_matches_copy_path` passed 10 of 10 meanwhile.
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 
