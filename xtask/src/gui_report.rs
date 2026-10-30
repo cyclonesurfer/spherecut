@@ -61,9 +61,8 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
         };
         let label = run["label"].as_str().unwrap_or("?");
         let res = doc.as_ref().map(|d| &d["result"]);
-        let cell = |f: &dyn Fn(&Value) -> Option<String>| {
-            res.and_then(f).unwrap_or_else(|| "-".into())
-        };
+        let cell =
+            |f: &dyn Fn(&Value) -> Option<String>| res.and_then(f).unwrap_or_else(|| "-".into());
         let _ = writeln!(
             r,
             "| {n} | {label} | {verdict} | {} | {} | {} | {} | {} | {} | {} |",
