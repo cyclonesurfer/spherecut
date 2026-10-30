@@ -13,6 +13,7 @@ mod b64;
 pub mod error;
 pub mod limits;
 pub mod ops;
+pub mod roots;
 pub mod rpc;
 pub mod schema;
 pub mod text;
@@ -24,6 +25,7 @@ use std::sync::Arc;
 use spherecut_core::brand;
 
 pub use error::ToolError;
+pub use roots::{Roots, RootsError};
 
 /// What `initialize` tells the agent about using the tools (a1-plan
 /// section 10.1): the conventions and the cheap-first order, in under
@@ -50,16 +52,24 @@ pub fn info() -> rpc::Info {
     }
 }
 
+/// How a server is set up: what `spherecut mcp`'s flags give.
+#[derive(Debug)]
+pub struct Options {
+    /// Where the agent's files are read from and written to.
+    pub roots: Roots,
+}
+
 /// Serve one MCP session on `input` and `output`, as `spherecut mcp` does
 /// on stdin and its copy of stdout, until the input ends.
 pub fn serve(
     input: impl BufRead + Send + 'static,
     output: impl Write + Send + 'static,
+    options: Options,
 ) -> rpc::Ended {
     rpc::serve(
         input,
         output,
-        Arc::new(tools::Spherecut::new()),
+        Arc::new(tools::Spherecut::new(options.roots)),
         info(),
         rpc::Timing::default(),
     )

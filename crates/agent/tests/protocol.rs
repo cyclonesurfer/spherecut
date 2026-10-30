@@ -478,7 +478,8 @@ fn progress_only_with_a_token_and_always_increasing() {
 
 #[test]
 fn spherecut_lists_its_tools_and_runs_doctor() {
-    let mut s = Session::start(Arc::new(spherecut_agent::tools::Spherecut::new()));
+    let roots = spherecut_agent::Roots::new(&[], None).unwrap();
+    let mut s = Session::start(Arc::new(spherecut_agent::tools::Spherecut::new(roots)));
     s.initialize("2025-11-25");
     let list = s.call_method(1, "tools/list", json!({}));
     let tools = list["result"]["tools"].as_array().unwrap();

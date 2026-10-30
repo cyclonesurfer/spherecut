@@ -6882,6 +6882,84 @@ Revisit if: a client sends batches (then serve them for the revisions
 that had them), a client needs 2026-07-28 (D43), or the 2 s grace proves
 too short for a call that does stop.
 
+## D45. A1's roots: how an agent's paths are opened
+
+*2026-10-30, A1.2. From `docs/design/a1-plan.md` section 5 and its
+amendments 4, 10, 17, 22, 23 and 24.*
+
+What, as `crates/agent/src/roots.rs` does it:
+
+- **The roots.** `spherecut mcp --read-root DIR` (repeatable; the
+  working directory when none is given) and `--allow-write --write-root
+  DIR` (both or neither; the write root is read from too). Each is
+  opened at start as an `O_PATH | O_DIRECTORY` descriptor, and its
+  canonical path read back from `/proc/self/fd`. A root that doesn't
+  exist or isn't a folder, a kernel without `openat2` (before Linux
+  5.6), or no `/proc` stops the server with exit 2 and a line on
+  stderr: the roots are the user's configuration, and couldn't be
+  enforced.
+- **Which root.** A relative path is under the first read root (the
+  write root, for an output). An absolute one is under the root whose
+  given or canonical form is its longest prefix, by component, so a
+  root given through a symlink matches both ways. The match is lexical;
+  the kernel resolves the rest.
+- **Opening.** Every open is `openat2(root, rest, flags | O_CLOEXEC,
+  RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)`, `EAGAIN` tried three times.
+  A file is opened `O_RDONLY | O_NOCTTY | O_NONBLOCK`, must be a regular
+  file by `fstat` (so a FIFO or a device is refused without blocking),
+  and is then made blocking. A folder is opened `O_DIRECTORY` and read
+  with rustix's `Dir`, sorted by name, at most 10,000 entries, symlinks
+  listed as links rather than followed.
+- **The kernel's answers as codes.** `EXDEV` (`..` out, an absolute
+  symlink, a link out) and `EAGAIN` after the retries are
+  `outside_roots`, whose `valid` lists the roots to 250 characters;
+  `ENOENT` (a dangling link included) and `ELOOP` are `not_found`;
+  `ENOTDIR` is `not_a_folder`; `EACCES` is `not_found`, "can't be read".
+  No error carries a name from the file system, only the argument's.
+- **Media reads what was opened.** An `Opened` holds the descriptor and
+  lends media a `Source { open: /proc/self/fd/N, name }` for as long as
+  it is borrowed, so the number can't come to name another call's file.
+  Opening that path reopens the file itself, not a name in the folder:
+  a file renamed, replaced or swapped for a symlink after the check is
+  not what is read. probe and detection read `open`, and report and
+  match extensions on `name`, the agent's path (A1.4 brings the video
+  opener). FFmpeg's confinement (D24) applies unchanged on top.
+- **Outputs.** Only with `--allow-write`, else `write_refused`. The
+  output's folder is opened beneath the write root (`O_PATH`), and the
+  file created in it `O_WRONLY | O_CREAT | O_EXCL`, mode 0644: anything
+  at the name, a symlink or a dangling one included, is
+  `output_exists`, and nothing is followed or replaced. A path outside
+  the write root is `outside_roots`. The file is unlinked through its
+  folder's descriptor unless the op keeps it, so a failed or cancelled
+  call leaves nothing for a retry to trip on.
+
+Why: a string check on paths fails to `..` races, symlinks and
+`/proc/self/fd`, and FFmpeg, probe's box reader and detection all open
+by path. `openat2` makes the kernel enforce the root on every open, and
+the `/proc` path makes every later open of the same call read the same
+file without changing a `MediaBackend` signature.
+
+What the roots don't do: they limit what Spherecut opens for an agent,
+not what the agent can do. An agent that runs commands can read the
+user's files without Spherecut; the roots keep Spherecut from being a
+way around the agent's own sandbox (`docs/agents.md`, A1.7).
+
+Tests: `crates/agent/tests/roots.rs` (`..`, absolute paths out, symlinks
+out and in, dangling and looping links, `/proc/self/fd/N`, a FIFO
+without blocking, a folder as a file, a file swapped after the open and
+one swapped for a symlink between calls, a symlinked root, two roots,
+bad roots, the error's size with forty roots, listings, and every
+output case), and `crates/media/tests/source.rs` (probe reads `open`
+and names `name`, in its report and its errors).
+
+Rejected: a custom `AVIOContext` over the descriptor for FFmpeg and
+positional reads for the box reader, which would be cleaner but change
+every `MediaBackend` signature, the fakes and the GUI for the same
+guarantee.
+
+Revisit if: `/proc` can't be relied on (a sandbox without it), or M2's
+projects open media through the same path.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360

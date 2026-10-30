@@ -18,8 +18,8 @@ pub mod codes {
     /// An argument outside its range: a time past the end, too many
     /// files or tiles.
     pub const OUT_OF_RANGE: &str = "out_of_range";
-    /// A path outside every read root (or outside the write root, for an
-    /// output).
+    /// A path outside every read root, or outside the write root for an
+    /// output, or one that leads out of them (`..`, a symlink out).
     pub const OUTSIDE_ROOTS: &str = "outside_roots";
     pub const NOT_FOUND: &str = "not_found";
     pub const NOT_A_FILE: &str = "not_a_file";
@@ -39,7 +39,8 @@ pub mod codes {
     /// An image over the inline cap or budget, with no file to write it
     /// to. (D27's `too_large` is a picture over `MAX_PIXELS`.)
     pub const IMAGE_TOO_LARGE: &str = "image_too_large";
-    /// Writing is off, or the path is outside the write root.
+    /// Writing is off, or the file system refused the new file. A path
+    /// outside the write root is `outside_roots`.
     pub const WRITE_REFUSED: &str = "write_refused";
     /// Something is already at the output path; nothing is replaced.
     pub const OUTPUT_EXISTS: &str = "output_exists";

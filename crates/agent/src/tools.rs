@@ -14,6 +14,7 @@ use serde_json::{Map, Value, json};
 use crate::error::ToolError;
 #[cfg(test)]
 use crate::error::codes;
+use crate::roots::Roots;
 use crate::rpc::{CallCx, Output, Tools};
 use crate::{ops, schema, text};
 
@@ -53,15 +54,16 @@ struct Parsed {
     schema: Value,
 }
 
-/// The tools Spherecut serves.
+/// The tools Spherecut serves, and the roots they open files under.
 #[derive(Debug)]
 pub struct Spherecut {
     tools: Vec<Parsed>,
     list: Value,
+    roots: Roots,
 }
 
 impl Spherecut {
-    pub fn new() -> Self {
+    pub fn new(roots: Roots) -> Self {
         let tools: Vec<Parsed> = parsed()
             .iter()
             .map(|(tool, schema)| Parsed {
@@ -70,17 +72,16 @@ impl Spherecut {
             })
             .collect();
         let list = Value::Array(tools.iter().map(listed).collect());
-        Self { tools, list }
+        Self { tools, list, roots }
+    }
+
+    /// The roots the tools open files under.
+    pub fn roots(&self) -> &Roots {
+        &self.roots
     }
 
     fn find(&self, name: &str) -> Option<&Parsed> {
         self.tools.iter().find(|p| p.tool.name == name)
-    }
-}
-
-impl Default for Spherecut {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -168,7 +169,7 @@ mod tests {
 
     #[test]
     fn the_list_fits() {
-        let s = Spherecut::new();
+        let s = Spherecut::new(Roots::new(&[], None).unwrap());
         let list = s.list();
         let tools = list.as_array().map_or(0, Vec::len);
         assert!(tools <= MAX_TOOLS, "{tools} tools");

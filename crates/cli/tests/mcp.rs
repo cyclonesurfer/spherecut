@@ -239,3 +239,48 @@ fn the_server_exits_when_stdin_closes() {
         assert!(!l.contains("\"id\":9"), "answered after EOF: {l}");
     }
 }
+
+/// A root that can't be used is the command line's fault: exit 2, a line
+/// on stderr, nothing on stdout, before any session.
+#[test]
+fn a_bad_root_stops_the_server() {
+    let missing = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-such-root");
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let cases: [Vec<std::ffi::OsString>; 4] = [
+        vec!["--read-root".into(), missing.clone().into()],
+        vec!["--read-root".into(), file.into()],
+        vec!["--allow-write".into()],
+        vec!["--write-root".into(), missing.into()],
+    ];
+    for args in cases {
+        let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+            .arg("mcp")
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        assert!(!stderr.is_empty(), "{args:?}");
+    }
+}
+
+/// Roots given on the command line serve a session.
+#[test]
+fn roots_from_the_command_line() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("mcp-roots-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = Server::spawn(|c| {
+        c.arg("--read-root")
+            .arg(&dir)
+            .arg("--allow-write")
+            .arg("--write-root")
+            .arg(&dir);
+    });
+    s.initialize("2025-06-18");
+    assert_eq!(s.call(1, "ping", json!({}))["result"], json!({}));
+    assert!(s.close().0.success());
+    std::fs::remove_dir_all(&dir).ok();
+}

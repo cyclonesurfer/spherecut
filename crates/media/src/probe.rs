@@ -17,7 +17,7 @@ use crate::ffi;
 use crate::hwprobe;
 use crate::mp4::{self, FirstBox, FourCc, Mp4Box};
 use crate::spherical::{self, TrackSpherical};
-use crate::{MediaError, TooLarge, init};
+use crate::{MediaError, Source, TooLarge, init};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProbeReport {
@@ -442,11 +442,17 @@ impl From<MediaError> for Failed {
 /// [`MediaError::Open`] for files FFmpeg can't read at all, and lists in
 /// [`ProbeReport::damage`] the structural damage of files it can.
 pub fn probe(path: &Path) -> Result<ProbeReport, ProbeError> {
+    probe_source(Source::path(path))
+}
+
+/// [`probe`] a file opened by one path and named by another: the report
+/// and every message carry [`Source::name`].
+pub fn probe_source(src: Source<'_>) -> Result<ProbeReport, ProbeError> {
     spherecut_core::may_block("probing a media file");
     init();
     // The CLI hides FFmpeg's log by default, and it is often the only
     // word on what FFmpeg could not read.
-    let (report, log) = hwprobe::capture_ffmpeg_log(|| probe_file(path));
+    let (report, log) = hwprobe::capture_ffmpeg_log(|| probe_file(src));
     let ffmpeg_log = tally(log);
     match report {
         Ok(r) => Ok(ProbeReport { ffmpeg_log, ..r }),
@@ -488,8 +494,10 @@ fn tally(lines: Vec<String>) -> Vec<String> {
     out
 }
 
-fn probe_file(path: &Path) -> Result<ProbeReport, Failed> {
-    let meta = std::fs::metadata(path).map_err(|e| MediaError::Io {
+fn probe_file(src: Source<'_>) -> Result<ProbeReport, Failed> {
+    // `open` is read, and `path` named.
+    let Source { open, name: path } = src;
+    let meta = std::fs::metadata(open).map_err(|e| MediaError::Io {
         path: path.to_path_buf(),
         error: e,
     })?;
@@ -508,7 +516,7 @@ fn probe_file(path: &Path) -> Result<ProbeReport, Failed> {
     let mut warnings = Vec::new();
     let mut damage = Vec::new();
 
-    let (mut tree, not_mp4) = match unless_unreadable(path, mp4::read_file(path))? {
+    let (mut tree, not_mp4) = match unless_unreadable(path, mp4::read_file(open))? {
         Ok(t) => (Some(t), false),
         Err(mp4::Mp4Error::NotMp4(_)) => (None, true),
         Err(e) => {
@@ -520,13 +528,13 @@ fn probe_file(path: &Path) -> Result<ProbeReport, Failed> {
         damage.extend(mp4_damage(t));
     }
 
-    let ictx = match ffi::open_input(path, None) {
+    let ictx = match ffi::open_input(open, None) {
         Ok(ictx) => ictx,
         Err(e) => {
             if not_mp4 && matches!(e, ffi::OpenError::Ffmpeg(_)) {
                 // A Matroska file cut short before FFmpeg could read its
                 // tracks: its header says how long it was.
-                check_matroska(path, meta.len(), &mut damage);
+                check_matroska(open, meta.len(), &mut damage);
             }
             // What probe found says more than FFmpeg's error.
             let code = match &e {
@@ -551,7 +559,7 @@ fn probe_file(path: &Path) -> Result<ProbeReport, Failed> {
     if not_mp4 && mov_family {
         // FFmpeg found MP4/MOV boxes, so the first box is damaged or of a
         // type we do not know. Check the rest of the structure anyway.
-        match unless_unreadable(path, mp4::read_file_with(path, FirstBox::Any))? {
+        match unless_unreadable(path, mp4::read_file_with(open, FirstBox::Any))? {
             Ok(t) => {
                 let first = t.top.first().map(|b| b.fourcc);
                 let first = first.or(t.truncated.and_then(|c| c.fourcc));
@@ -585,7 +593,7 @@ fn probe_file(path: &Path) -> Result<ProbeReport, Failed> {
             why: "its MP4/MOV boxes could not be read".into(),
         }
     } else if fmt.name().split(',').any(|n| n == "matroska") {
-        check_matroska(path, meta.len(), &mut damage)
+        check_matroska(open, meta.len(), &mut damage)
     } else {
         // open_input refuses other containers, so this is only reached if
         // its list of demuxers grows without a check here.
@@ -755,7 +763,7 @@ fn probe_file(path: &Path) -> Result<ProbeReport, Failed> {
             warnings.push(Problem::new(why.warning_code(), why.describe(&what, false)));
         }
     }
-    let camera = detect::guess(path, tree.as_ref(), &streams, &container.tags);
+    let camera = detect::guess(src, tree.as_ref(), &streams, &container.tags);
     let mp4 = tree.as_ref().map(|t| Mp4Summary {
         brand: t.ftyp_brand().map(|b| b.to_string()),
         top_level: t

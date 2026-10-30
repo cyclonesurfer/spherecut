@@ -117,7 +117,38 @@ enum Cmd {
     Frame(frame::FrameArgs),
     /// Serve Spherecut's read-only tools to an AI agent over MCP, on stdin
     /// and stdout (docs/agents.md). Logs go to stderr.
-    Mcp,
+    Mcp {
+        #[command(flatten)]
+        roots: RootArgs,
+    },
+}
+
+/// Where an agent's files may be read from and written to (D45).
+#[derive(clap::Args)]
+struct RootArgs {
+    /// A folder the agent may read files from, and everything under it;
+    /// repeat it for more. By default, the working directory. The agent's
+    /// relative paths are under the first.
+    #[arg(long = "read-root", value_name = "DIR")]
+    read_roots: Vec<PathBuf>,
+    /// Let tools write the output files an agent asks for, under
+    /// --write-root only, and never over anything already there.
+    #[arg(long, requires = "write_root")]
+    allow_write: bool,
+    /// The folder outputs go in, with --allow-write. It is read from too.
+    #[arg(long, value_name = "DIR", requires = "allow_write")]
+    write_root: Option<PathBuf>,
+}
+
+impl RootArgs {
+    /// The roots, opened; a root that can't be used is the command line's
+    /// fault, and stops the command before it starts.
+    fn open(&self, command: &str) -> std::result::Result<spherecut_agent::Roots, Exit> {
+        spherecut_agent::Roots::new(&self.read_roots, self.write_root.as_deref()).map_err(|e| {
+            eprintln!("spherecut {command}: {e}");
+            Exit::Usage
+        })
+    }
 }
 
 fn main() -> ExitCode {
@@ -302,12 +333,16 @@ fn run(cli: Cli, args: &[OsString], json: bool) -> Result<Exit> {
             let node = spherecut_media::hw::render_node(None, render_node.as_deref());
             doctor(&node.path, json)
         }
-        Cmd::Mcp => mcp(),
+        Cmd::Mcp { roots } => mcp(&roots),
     }
 }
 
 /// An MCP session on stdin and stdout, until stdin closes (A1, D43).
-fn mcp() -> Result<Exit> {
+fn mcp(roots: &RootArgs) -> Result<Exit> {
+    let roots = match roots.open("mcp") {
+        Ok(roots) => roots,
+        Err(exit) => return Ok(exit),
+    };
     // stdout is the protocol's alone (a1-plan section 3.1): the server
     // writes to a copy of it, and fd 1 itself goes to stderr from here
     // on, so that a stray print from FFmpeg, a driver or a dependency
@@ -323,6 +358,7 @@ fn mcp() -> Result<Exit> {
     let ended = spherecut_agent::serve(
         std::io::BufReader::new(std::io::stdin()),
         std::fs::File::from(protocol),
+        spherecut_agent::Options { roots },
     );
     if ended.gave_up {
         exit::now(Exit::Failed as u8);

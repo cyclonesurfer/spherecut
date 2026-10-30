@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use common::{Fake, Session};
 use proptest::prelude::*;
+use proptest::test_runner::TestRunner;
 use serde_json::{Value, json};
 use spherecut_agent::rpc;
 
@@ -101,14 +102,17 @@ proptest! {
     }
 }
 
-proptest! {
-    // A server per case: its cost is threads, so the count is its own.
-    #![proptest_config(ProptestConfig::with_cases(
-        std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(64).min(20_000)
-    ))]
-
-    #[test]
-    fn every_request_is_answered_once(lines in prop::collection::vec(line(), 1..24)) {
+/// A server per case: its cost is threads, so the property has a count
+/// of its own, PROPTEST_CASES's but at most 20,000. (`proptest!` would
+/// let the variable override any count the test sets.)
+#[test]
+fn every_request_is_answered_once() {
+    let mut config = ProptestConfig::default();
+    config.cases = config.cases.min(20_000);
+    config.source_file = Some(file!());
+    config.test_name = Some("every_request_is_answered_once");
+    let mut runner = TestRunner::new(config);
+    let result = runner.run(&prop::collection::vec(line(), 1..24), |lines| {
         let mut s = Session::start(Arc::new(Fake::default()));
         s.initialize("2025-06-18");
         let mut expected: Vec<Value> = Vec::new();
@@ -120,7 +124,11 @@ proptest! {
                 Line::Bytes(b) => b.clone(),
                 Line::Json(v) => v.to_string().into_bytes(),
                 Line::Request(method, string_id) => {
-                    let id = if *string_id { json!(format!("r{i}")) } else { json!(1000 + i) };
+                    let id = if *string_id {
+                        json!(format!("r{i}"))
+                    } else {
+                        json!(1000 + i)
+                    };
                     let params = match *method {
                         "tools/call" => json!({"name": "echo", "arguments": {"i": i}}),
                         "initialize" => json!({"protocolVersion": "2025-06-18"}),
@@ -148,9 +156,15 @@ proptest! {
         let mut seen: Vec<Value> = Vec::new();
         let mut responses = 0usize;
         let until = Instant::now() + Duration::from_secs(10);
-        let collect = |s: &Session, seen: &mut Vec<Value>, responses: &mut usize, stop: &dyn Fn(&[Value]) -> bool| {
+        let collect = |s: &Session,
+                       seen: &mut Vec<Value>,
+                       responses: &mut usize,
+                       stop: &dyn Fn(&[Value]) -> bool| {
             while !stop(seen) {
-                prop_assert!(Instant::now() < until, "waiting for {expected:?}, have {seen:?}");
+                prop_assert!(
+                    Instant::now() < until,
+                    "waiting for {expected:?}, have {seen:?}"
+                );
                 if let Some(m) = s.recv_for(Duration::from_millis(100))
                     && m.get("id").is_some()
                 {
@@ -160,17 +174,34 @@ proptest! {
             }
             Ok(())
         };
-        collect(&s, &mut seen, &mut responses, &|seen| expected.iter().all(|id| seen.contains(id)))?;
+        collect(&s, &mut seen, &mut responses, &|seen| {
+            expected.iter().all(|id| seen.contains(id))
+        })?;
         s.send(&json!({"jsonrpc": "2.0", "id": "end", "method": "ping"}));
-        collect(&s, &mut seen, &mut responses, &|seen| seen.contains(&json!("end")))?;
-        prop_assert!(responses <= sent + 1, "{responses} responses to {sent} lines");
+        collect(&s, &mut seen, &mut responses, &|seen| {
+            seen.contains(&json!("end"))
+        })?;
+        prop_assert!(
+            responses <= sent + 1,
+            "{responses} responses to {sent} lines"
+        );
         for id in &expected {
-            prop_assert_eq!(seen.iter().filter(|s| *s == id).count(), 1, "{} in {:?}", id, seen);
+            prop_assert_eq!(
+                seen.iter().filter(|s| *s == id).count(),
+                1,
+                "{} in {:?}",
+                id,
+                seen
+            );
         }
         for id in &seen {
             let ok = id.is_null() || *id == json!("end") || carried.contains(id);
             prop_assert!(ok, "an id never sent: {}", id);
         }
         s.close();
+        Ok(())
+    });
+    if let Err(e) = result {
+        panic!("{e}");
     }
 }

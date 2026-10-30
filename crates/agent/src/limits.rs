@@ -38,6 +38,9 @@ pub const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// Files in one `probe` call.
 pub const FILES_PER_CALL: usize = 64;
 
+/// The most entries a folder's listing keeps (`roots::Listing`).
+pub const FOLDER_ENTRIES: usize = 10_000;
+
 /// The most a string read from a file may take in a result, in bytes
 /// (a1-plan section 4.3). Longer ones are cut, and end in `…`.
 pub const FIELD_BYTES: usize = 1024;
