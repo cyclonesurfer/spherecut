@@ -150,6 +150,8 @@ struct Run {
     last_ui: Option<Instant>,
     slowest: [Option<f32>; Stage::ALL.len()],
     late: Vec<Late>,
+    /// Diag: every settled pass's gap, split as [`LateDiag`] does.
+    gaps: [Vec<f32>; 4],
 }
 
 /// The counters, UI samples and passes at a moment of the run.
@@ -280,6 +282,7 @@ impl SmokeDriver {
                         last_ui: None,
                         slowest: [None; Stage::ALL.len()],
                         late: Vec::new(),
+                        gaps: Default::default(),
                     };
                     run.gather(perf);
                     if !s.snapshot.want_play {
@@ -579,6 +582,20 @@ impl Run {
             return;
         };
         let interval = now.saturating_duration_since(last).as_secs_f64() * 1000.0;
+        let diag = LateDiag::of(last, now);
+        for (i, v) in [
+            diag.to_prepare_ms,
+            diag.acquire_ms,
+            diag.to_update_ms,
+            diag.update_ms,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if let Some(v) = v {
+                self.gaps[i].push(v);
+            }
+        }
         if interval <= 1500.0 / hz || self.late.len() >= LATE_KEPT {
             return;
         }
@@ -590,6 +607,7 @@ impl Run {
                 .into_iter()
                 .filter_map(|st| slowest[st as usize].map(|v| (st.name(), v)))
                 .collect(),
+            diag: Some(diag),
         });
     }
 
@@ -688,6 +706,8 @@ pub struct Report {
     /// The first [`LATE_KEPT`] UI passes after it that came more than one
     /// and a half refresh periods after the pass before.
     pub late: Vec<Late>,
+    /// Diag: every settled pass's gap split as [`LateDiag`] does.
+    pub diag_gaps: BTreeMap<&'static str, Percentiles>,
     /// Each stage's milliseconds by its name ([`Stage::name`]).
     pub stages: BTreeMap<&'static str, Percentiles>,
     pub av: Option<Av>,
@@ -759,6 +779,43 @@ pub struct Late {
     pub work_ms: Option<f32>,
     /// Per stage, by its name, the slowest sample recorded in between.
     pub slowest: BTreeMap<&'static str, f32>,
+    pub diag: Option<LateDiag>,
+}
+
+/// Diag: where a gap between two smoke steps went.
+#[derive(Debug, Clone, Serialize)]
+pub struct LateDiag {
+    /// The step before to its pass's viewer `prepare` (the rest of that
+    /// pass's UI, tessellation, texture updates).
+    pub to_prepare_ms: Option<f32>,
+    /// `prepare` to `paint`: acquiring the surface texture.
+    pub acquire_ms: Option<f32>,
+    /// `paint` to this pass's start: the submit, the present, and the
+    /// wait for the compositor's frame callback.
+    pub to_update_ms: Option<f32>,
+    /// This pass's start to its step.
+    pub update_ms: Option<f32>,
+    /// The upload thread's calls that overlap the gap: what, its start in
+    /// ms after the step before, its length.
+    pub calls: Vec<(&'static str, f32, f32)>,
+}
+
+impl LateDiag {
+    fn of(last: Instant, now: Instant) -> LateDiag {
+        let [update, prepare, paint] = spherecut_core::diag::marks();
+        let ms = |a: Instant, b: Instant| b.saturating_duration_since(a).as_secs_f32() * 1e3;
+        let inside = |t: Option<Instant>| t.filter(|t| *t > last && *t <= now);
+        let (update, prepare, paint) = (inside(update), inside(prepare), inside(paint));
+        let prepare = prepare.filter(|p| paint.is_some_and(|q| q >= *p));
+        let paint = paint.filter(|q| update.is_some_and(|u| u >= *q));
+        LateDiag {
+            to_prepare_ms: prepare.map(|p| ms(last, p)),
+            acquire_ms: prepare.zip(paint).map(|(p, q)| ms(p, q)),
+            to_update_ms: paint.zip(update).map(|(q, u)| ms(q, u)),
+            update_ms: update.map(|u| ms(u, now)),
+            calls: spherecut_core::diag::calls_between(last, now),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1001,6 +1058,11 @@ impl SmokeDriver {
             streams,
             settled,
             late: run.late.clone(),
+            diag_gaps: ["to_prepare", "acquire", "to_update", "update"]
+                .into_iter()
+                .zip(&run.gaps)
+                .map(|(k, v)| (k, Percentiles::of(v, 0)))
+                .collect(),
             ui: UiReport {
                 frames: run.ui_frames,
                 passes: run.passes,
@@ -1142,6 +1204,7 @@ mod tests {
             last_ui: None,
             slowest: [None; Stage::ALL.len()],
             late: Vec::new(),
+            gaps: Default::default(),
         };
         // Before the mark, late or not, nothing is listed.
         run.note_late(at(0), 0.0, Some(60.0));

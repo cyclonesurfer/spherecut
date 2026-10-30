@@ -369,13 +369,21 @@ impl Uploader {
                 )));
             }
         }
-        let mut enc = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("upload from buffer"),
-            });
+        let split = spherecut_core::diag::has("split");
+        let no_mips = spherecut_core::diag::has("no_mips");
+        let new_enc = || {
+            gpu.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("upload from buffer"),
+                })
+        };
+        let mut enc = new_enc();
         self.write_ingest_uniform(gpu, &shape);
-        let span = self.timers.as_mut().and_then(|t| t.begin(&mut enc));
+        let span = if split {
+            None
+        } else {
+            self.timers.as_mut().and_then(|t| t.begin(&mut enc))
+        };
         for (i, (p, b)) in shape.planes.iter().zip(planes).enumerate() {
             let texture = if p.format.is_deep() {
                 self.scratch_for(gpu, i, p.format, p.size).texture.clone()
@@ -399,13 +407,41 @@ impl Uploader {
                 },
             );
         }
+        if split {
+            gpu.queue
+                .submit([std::mem::replace(&mut enc, new_enc()).finish()]);
+        }
         for (i, p) in shape.planes.iter().enumerate() {
             if let Some(Some(scratch)) = self.scratch.get(i).filter(|_| p.format.is_deep()) {
                 let input = &scratch.bind_group;
                 self.record_ingest(&mut enc, p.format, input, &slot.planes[i].levels[0]);
+                if split {
+                    gpu.queue
+                        .submit([std::mem::replace(&mut enc, new_enc()).finish()]);
+                }
             }
         }
-        self.record_mips(&mut enc, slot);
+        if no_mips {
+        } else if split {
+            // Diag: each mip level its own submission.
+            for (p, shape) in slot.planes.iter().zip(&slot.shape().planes) {
+                let Some(pipeline) = self.mips.get(&shape.format) else {
+                    continue;
+                };
+                for (target, input) in p.levels[1..].iter().zip(&p.mip_inputs) {
+                    let mut e = new_enc();
+                    {
+                        let mut pass = layouts::fullscreen_pass(&mut e, "mip", target);
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, input, &[]);
+                        pass.draw(0..3, 0..1);
+                    }
+                    gpu.queue.submit([e.finish()]);
+                }
+            }
+        } else {
+            self.record_mips(&mut enc, slot);
+        }
         if let (Some(t), Some(span)) = (self.timers.as_mut(), span) {
             t.end(&mut enc, span);
         }

@@ -10,6 +10,7 @@ pub mod blocking;
 pub mod brand;
 pub mod cancel;
 pub mod clock;
+pub mod diag;
 pub mod fs;
 pub mod time;
 pub mod timespec;

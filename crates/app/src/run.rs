@@ -120,6 +120,7 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
     // makes the device shareable with FFmpeg's Vulkan Video too, where
     // the adapter can be (path B).
     let zero_copy = spherecut_playback::zero_copy_from_env(|k| std::env::var(k).ok());
+    tracing::info!(switches = ?spherecut_core::diag::words(), "diag build");
     let gpu = if zero_copy.vulkan() {
         Gpu::for_window_shared(&choice)?
     } else {
@@ -158,6 +159,23 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
                 device: gpu.device.clone(),
                 queue: gpu.queue.clone(),
             }),
+            // Diag: the swapchain's latency and present mode.
+            surface: egui_wgpu::SurfaceConfig {
+                present_mode: if spherecut_core::diag::has("mailbox") {
+                    egui_wgpu::wgpu::PresentMode::Mailbox
+                } else {
+                    egui_wgpu::wgpu::PresentMode::AutoVsync
+                },
+                desired_maximum_frame_latency: if spherecut_core::diag::has("latency3") {
+                    Some(3)
+                } else if spherecut_core::diag::has("latency1") {
+                    Some(1)
+                } else {
+                    egui_wgpu::WgpuConfiguration::default()
+                        .surface
+                        .desired_maximum_frame_latency
+                },
+            },
             ..Default::default()
         },
         ..Default::default()
@@ -324,6 +342,7 @@ impl eframe::App for EframeApp {
     /// eframe calls this before each `ui`, and alone while the window is
     /// hidden: playback goes on.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        spherecut_core::diag::mark(spherecut_core::diag::Mark::Update);
         self.app.logic(ctx);
     }
 

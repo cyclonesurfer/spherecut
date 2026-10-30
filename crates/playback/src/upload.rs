@@ -59,7 +59,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use spherecut_core::video::VideoPlanes;
-use spherecut_core::{Time, may_block};
+use spherecut_core::{Time, diag, may_block};
 use spherecut_media::backend::{VideoFrame, VideoStreamInfo};
 use spherecut_media::spherical::StereoMode;
 use spherecut_render::dmabuf::{self, Importer};
@@ -637,9 +637,32 @@ impl UploadThread {
             .vulkan()
             .ok_or_else(|| RenderError::Invalid("a frame without a Vulkan image".into()))?;
         let regions = upload::shown_regions(f.as_ref(), placement)?;
+        // Diag: after the first 30, the copy or the GPU's part skipped.
+        static COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let skipping = COPIES.fetch_add(1, Ordering::Relaxed) >= 30;
+        let skipped = || UploadStats {
+            cpu_ms: start.elapsed().as_secs_f32() * 1e3,
+            bytes: 0,
+            gpu_ms: None,
+        };
+        if skipping && diag::has("skip_copy") {
+            return Ok(skipped());
+        }
+        let t = Instant::now();
         let copied = shared.copier.copy(picture, &regions)?;
         shared.copier.wait(&copied)?;
+        diag::note_call("copy", t);
+        if skipping && diag::has("skip_gpu") {
+            drop(copied);
+            return Ok(skipped());
+        }
+        if diag::has("gate") {
+            let t = Instant::now();
+            diag::wait_next_pass(Duration::from_millis(20));
+            diag::note_call("gate", t);
+        }
         shared.copier.order_before(&self.gpu.queue, &copied);
+        let t = Instant::now();
         let mut stats = st.uploader.upload_from_buffer(
             &self.gpu,
             f.as_ref(),
@@ -648,6 +671,7 @@ impl UploadThread {
             placement,
             slot,
         )?;
+        diag::note_call("upload", t);
         self.gpu.queue.on_submitted_work_done(move || drop(copied));
         stats.cpu_ms = start.elapsed().as_secs_f32() * 1e3;
         self.shared.perf.add(Counter::VulkanCopies, 1);
