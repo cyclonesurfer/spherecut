@@ -6,7 +6,8 @@
 //! `require_graphical_session` finds. It skips without one, so here,
 //! with no desktop, it reports TIER2-SKIP and never a pass.
 //!
-//! A run fails when:
+//! A run fails when, after its first second (the document's `settled`,
+//! as the playback benches leave out the cache's filling):
 //!
 //! - the process fails, or its document isn't `ok`;
 //! - fewer than 90% of the UI frames expected were presented. With as
@@ -99,7 +100,14 @@ fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
     }
     let r = &doc["result"];
     let f = |v: &Value| v.as_f64();
-    let ui = &r["ui"];
+    // After the first second, while the cache fills, as the playback
+    // benches judge; the whole run where it ended sooner.
+    let judged = if r["settled"].is_object() {
+        &r["settled"]
+    } else {
+        r
+    };
+    let ui = &judged["ui"];
     let presented = f(&ui["presented"]).unwrap_or(0.0);
     if presented < MIN_PRESENTED {
         // eframe runs passes without the UI while the compositor draws
@@ -119,11 +127,11 @@ fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
             "{:.0}% of the UI frames expected were presented, the window drawn ({hidden:.0} \
              passes without the UI): the UI was slow, each pass's own work {} ms at p95",
             presented * 100.0,
-            f(&ui["work"]["p95"]).map_or("unmeasured".into(), |w| format!("{w:.1}"))
+            f(&r["ui"]["work"]["p95"]).map_or("unmeasured".into(), |w| format!("{w:.1}"))
         ));
     }
-    let shown = f(&r["frames"]["shown"]).unwrap_or(0.0);
-    let dropped = f(&r["frames"]["dropped"]).unwrap_or(0.0);
+    let shown = f(&judged["frames"]["shown"]).unwrap_or(0.0);
+    let dropped = f(&judged["frames"]["dropped"]).unwrap_or(0.0);
     if shown + dropped > 0.0 && dropped / (shown + dropped) > MAX_DROPPED {
         why.push(format!(
             "{dropped} of {} frames dropped ({:.2}%, over {:.1}%)",
@@ -132,7 +140,7 @@ fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
             MAX_DROPPED * 100.0
         ));
     }
-    if let (Some(hz), Some(p99)) = (f(&r["refresh_hz"]), f(&r["ui"]["p99"])) {
+    if let (Some(hz), Some(p99)) = (f(&r["refresh_hz"]), f(&ui["p99"])) {
         let limit = MAX_UI_P99_PERIODS * 1000.0 / hz;
         if p99 > limit {
             why.push(format!(
@@ -525,6 +533,18 @@ fn the_gates_fail_what_they_say() {
         "UI p99 25.5 ms",
     );
     assert!(judge(&with(&["result", "refresh_hz"], Value::Null), false, &gates).is_empty());
+    // After the first second when the document has it: the startup's
+    // drops and slow frames aren't judged.
+    let mut startup = with(&["result", "frames", "dropped"], json!(9));
+    startup["result"]["ui"]["p99"] = json!(60.0);
+    startup["result"]["settled"] = json!({
+        "from_s": 1.0,
+        "ui": {"presented": 0.99, "p99": 17.5, "expected": 1140.0, "frames": 1129, "passes": 1129},
+        "frames": {"shown": 570, "dropped": 0},
+    });
+    assert!(judge(&startup, false, &gates).is_empty());
+    startup["result"]["settled"]["frames"]["dropped"] = json!(2);
+    fails(&startup, false, "2 of 572 frames dropped");
     // A/V only on the sync clip.
     let late = with(&["result", "av", "p95_abs_ms"], json!(20.0));
     fails(&late, true, "|A/V| p95 20.0 ms");

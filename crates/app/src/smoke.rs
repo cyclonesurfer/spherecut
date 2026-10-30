@@ -49,6 +49,10 @@ const FIRST_FRAME: Duration = Duration::from_secs(60);
 /// was asked in.
 const SCREENSHOT: Duration = Duration::from_secs(5);
 
+/// The run's first second, while the cache fills, which `settled` leaves
+/// out as the playback benches do.
+pub const SETTLE: Duration = Duration::from_secs(1);
+
 /// The longest the window may go without a UI pass before the watchdog
 /// ends the run.
 pub const STALL: Duration = Duration::from_secs(15);
@@ -125,6 +129,18 @@ struct Run {
     passes: u64,
     /// eframe's count of each UI pass's own work, in ms.
     work: Vec<f32>,
+    /// Where things stood [`SETTLE`] in.
+    settled: Option<Mark>,
+}
+
+/// The counters, UI samples and passes at a moment of the run.
+#[derive(Debug)]
+struct Mark {
+    played_s: f64,
+    counters: [u64; Counter::ALL.len()],
+    ui_samples: usize,
+    ui_frames: u64,
+    passes: u64,
 }
 
 impl SmokeDriver {
@@ -241,6 +257,7 @@ impl SmokeDriver {
                         ui_frames: 0,
                         passes: 0,
                         work: Vec::new(),
+                        settled: None,
                     };
                     run.gather(perf);
                     if !s.snapshot.want_play {
@@ -266,6 +283,19 @@ impl SmokeDriver {
                     return;
                 }
                 let played = now.saturating_duration_since(run.since).as_secs_f64();
+                if run.settled.is_none()
+                    && played >= SETTLE.as_secs_f64()
+                    && let Some(p) = &s.player
+                {
+                    run.gather(p.perf());
+                    run.settled = Some(Mark {
+                        played_s: played,
+                        counters: Counter::ALL.map(|c| p.perf().count(c)),
+                        ui_samples: run.samples(Stage::UiFrame).len(),
+                        ui_frames: run.ui_frames,
+                        passes: run.passes,
+                    });
+                }
                 if played < self.args.seconds && !s.snapshot.at_end {
                     return;
                 }
@@ -603,6 +633,9 @@ pub struct Report {
     pub streams: Vec<StreamReport>,
     pub ui: UiReport,
     pub frames: Frames,
+    /// The same after the first second ([`SETTLE`]), which the gates
+    /// judge; `None` for a run that ended sooner.
+    pub settled: Option<Settled>,
     /// Each stage's milliseconds by its name ([`Stage::name`]).
     pub stages: BTreeMap<&'static str, Percentiles>,
     pub av: Option<Av>,
@@ -661,6 +694,26 @@ pub struct UiReport {
     /// Each pass's own work, as eframe counts it: without acquiring the
     /// surface, the submit and the present.
     pub work: Percentiles,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Settled {
+    /// How far into the run it begins, in seconds.
+    pub from_s: f64,
+    pub ui: SettledUi,
+    pub frames: Frames,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettledUi {
+    pub frames: u64,
+    pub passes: u64,
+    pub expected: f64,
+    pub presented: f64,
+    pub p50: Option<f32>,
+    pub p95: Option<f32>,
+    pub p99: Option<f32>,
+    pub max: Option<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -814,6 +867,40 @@ impl SmokeDriver {
             None => (None, None),
         };
         let counted = |c| perf.as_ref().map_or(0, |p| run.counted(p, c));
+        let settled = run.settled.as_ref().zip(perf.as_ref()).map(|(m, p)| {
+            let since = |c: Counter| p.count(c).saturating_sub(m.counters[c as usize]);
+            let ui = Percentiles::of(&run.samples(Stage::UiFrame)[m.ui_samples..], 0);
+            let frames = run.ui_frames - m.ui_frames;
+            let expected = refresh_hz.map_or((run.passes - m.passes) as f64, |hz| {
+                hz * (played_s - m.played_s)
+            });
+            Settled {
+                from_s: m.played_s,
+                ui: SettledUi {
+                    frames,
+                    passes: run.passes - m.passes,
+                    expected,
+                    presented: if expected > 0.0 {
+                        frames as f64 / expected
+                    } else {
+                        0.0
+                    },
+                    p50: ui.p50,
+                    p95: ui.p95,
+                    p99: ui.p99,
+                    max: ui.max,
+                },
+                frames: Frames {
+                    shown: since(Counter::FramesShown),
+                    dropped: since(Counter::Dropped),
+                    decode_dropped: since(Counter::DecodeDropped),
+                    expected: streams
+                        .first()
+                        .and_then(|st| st.fps)
+                        .map(|f| f * (played_s - m.played_s)),
+                },
+            }
+        });
         Report {
             version: spherecut_core::brand::VERSION,
             clip: self.args.clip.display().to_string(),
@@ -843,6 +930,7 @@ impl SmokeDriver {
                 expected: streams.first().and_then(|st| st.fps).map(|f| f * played_s),
             },
             streams,
+            settled,
             ui: UiReport {
                 frames: run.ui_frames,
                 passes: run.passes,

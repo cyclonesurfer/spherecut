@@ -171,8 +171,10 @@ fn a_scrub_seeks_keyframes_while_moving_and_exactly_at_rest() {
         let now = h.state().state.player.as_ref().unwrap().snapshot();
         let f = now.shown.first().copied().flatten().map(|f| f.time);
         let k = f.and_then(|t| RATE.time_to_frame(t, spherecut_core::Rounding::Floor).ok());
-        if k.is_some() && k == shown(&h) {
-            break k.unwrap();
+        if let Some(k) = k
+            && Some(k) == shown(&h)
+        {
+            break k;
         }
         assert!(
             start.elapsed() < Duration::from_secs(5),

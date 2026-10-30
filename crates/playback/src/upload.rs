@@ -64,7 +64,8 @@ use spherecut_media::backend::{VideoFrame, VideoStreamInfo};
 use spherecut_media::spherical::StereoMode;
 use spherecut_render::dmabuf::{self, Importer};
 use spherecut_render::{
-    Gpu, GpuFrame, Placement, RenderError, SlotShape, Stereo, UploadStats, Uploader, upload,
+    Gpu, GpuFrame, Placement, RenderError, SlotShape, Stereo, UploadPath, UploadStats, Uploader,
+    upload,
 };
 
 use crate::budget::{self, CacheBudget};
@@ -135,7 +136,11 @@ struct State {
 impl UploadThread {
     pub(crate) fn run(mut self) {
         let mut st = State {
-            uploader: Uploader::new(&self.gpu),
+            // The belt, not `write_texture`: wgpu holds the queue's
+            // pending writes locked through `write_texture`'s copy of a
+            // frame, which the UI thread's own writes and submit then
+            // wait for (D31, odin's GUI in slice 9).
+            uploader: Uploader::with_path(&self.gpu, UploadPath::StagingBelt),
             importer: Importer::new(),
             failed: HashSet::new(),
             too_small: 0,
