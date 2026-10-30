@@ -3317,6 +3317,21 @@ Revisit if: the upload bench's trigger holds on huginn or odin (the
 belt becomes the default); a driver can't filter `R16Float`; or M7's
 colour work needs `R16Unorm` behind the optional features.
 
+*Updated in M1 slice 9 by odin's GUI (diag/gui-5k7):* the player's
+upload thread now uses the belt (`UploadPath::StagingBelt`); the
+`Uploader`'s own default stays `write_texture`. wgpu-core 30 holds the
+queue's pending writes locked through `write_texture`, its staging
+buffer made and the whole frame copied inside the lock, and egui-wgpu's
+buffer writes and submit on the UI thread take the same lock, so the
+UI waited for each upload's copy, which the bench's CPU time of the
+upload alone can't see. In the window on the RX 7600, each UI pass's
+own work (eframe's count) was 3.0, 6.4 and 4.6 ms at p50 with
+`write_texture` on the noisy 5.7K 8-bit, 10-bit and the X5 pair, and
+1.3, 1.5 and 1.3 with the belt; the frames presented went from 84%,
+51% and 64% to 86%, 81% and 98%, the uploads' own CPU time the same
+(3.5 to 6.9 ms). The belt's chunks are 64 MiB and reused once each
+submit's work is done, which every submit's maintenance finds.
+
 *Updated in M1 slice 3b:* the goldens (D32) hold this pipeline to
 stored images, the reference and the analytic ideal, with every negative
 control, and revise `passthrough_exact`'s criterion. They found that
@@ -6440,15 +6455,31 @@ What:
     pane's probe has ended, so a camera's lenses have opened together,
     and that reopen goes on from where the file was, playing or paused,
     where it went back to its first frame, paused.
+  - *(Slice 9, after odin's GUI rerun.)* A window drawn but slow is no
+    longer read as one the compositor didn't draw: `gui_smoke` says the
+    compositor only when the passes eframe ran without the UI make up
+    half the UI frames missing, and otherwise that the UI was slow,
+    judging the rest too. The document's `ui.work` is eframe's count of
+    each UI pass's own work (`IntegrationInfo::cpu_usage`: without the
+    surface acquire, the submit and the present), and its `settled`
+    part counts presented, the UI's intervals and the frames after the
+    run's first second, while the cache fills, as the playback benches
+    do; `gui_smoke` judges `settled`. The player knows whether what it
+    presents is painted (`Player::set_painted`, from the viewport's
+    visibility as eframe decides it), and frames passed over while it
+    isn't are not dropped (plan section 10).
 
 Why: hw-test's report, the overlay and `docs/perf.md` have to agree,
 which one set of counters gives. The watchdog came from H2 on odin
 (2026-10-30): the screen had locked after 2.5 hours idle, every smoke
 run's window got no UI pass, so neither the 60 s first-frame limit nor
 the run's end, both checked in UI passes, ever came, and `gui_smoke`
-killed each run after 120 s with no document. The UI thread may be
-stuck in presenting, where no timer of its own can fire, so the
-watchdog is a thread of its own and exits the process rather than ask
+killed each run after 120 s with no document. The slow-UI gate came
+from the rerun with the screen unlocked (45267d1): the 5.7K 10-bit and
+X5 runs presented 69% and 75% of their frames with the windows drawn,
+the UI at about 30 Hz, and the gate blamed the compositor. The UI
+thread may be stuck in presenting, where no timer of its own can fire,
+so the watchdog is a thread of its own and exits the process rather than ask
 the window to close; `std::process::exit` over `libc::_exit` keeps the
 app free of unsafe code, at the risk of an exit handler that waits on
 the stuck thread, which `gui_smoke`'s 120 s kill still covers, the
