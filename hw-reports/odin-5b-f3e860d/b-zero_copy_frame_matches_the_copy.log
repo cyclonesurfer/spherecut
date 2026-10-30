@@ -1,0 +1,13 @@
+   Compiling spherecut-synth v0.1.0 (/home/pat/spherecut/crates/synth)
+   Compiling spherecut-cli v0.1.0 (/home/pat/spherecut/crates/cli)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.90s
+     Running tests/tier2_frame.rs (target/release/deps/tier2_frame-5e4cd6d8d9305ddc)
+
+running 1 test
+h264: zero copy byte-identical to the copy
+hevc-main: zero copy byte-identical to the copy
+hevc-main10: zero copy byte-identical to the copy
+test zero_copy_frame_matches_the_copy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 16.40s
+
