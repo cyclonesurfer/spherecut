@@ -714,6 +714,30 @@ impl Copier {
         }
     }
 
+    /// Has wgpu's next submission on `queue` wait for `copied`'s copy on
+    /// the GPU too, at the transfer stage. Vulkan orders the copy's
+    /// writes before wgpu's reads of the buffer only so: [`wait`]'s host
+    /// wait shows the copy is done, but doesn't make its writes visible
+    /// to a later submission. The copy is done by then, so the wait costs
+    /// nothing, and whichever submission takes it (another thread's, if
+    /// it submits first), wgpu chains its submissions one after another,
+    /// so the one that reads the buffer is ordered after it.
+    ///
+    /// [`wait`]: Self::wait
+    pub fn order_before(&self, queue: &wgpu::Queue, copied: &Copied) {
+        let timeline = lock(&self.inner).timeline;
+        // SAFETY: only stages a wait on wgpu's queue, on the copier's
+        // semaphore, which lives as long as the copier, and so as the
+        // device; wgpu consumes it at its next submit.
+        if let Some(q) = unsafe { queue.as_hal::<Vulkan>() } {
+            q.add_wait_semaphore(
+                timeline,
+                Some(copied.value),
+                vk::PipelineStageFlags::TRANSFER,
+            );
+        }
+    }
+
     /// A free buffer of `size` bytes, or a new one.
     fn buffer(&self, size: u64) -> Result<PooledBuffer, RenderError> {
         {

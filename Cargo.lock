@@ -3178,6 +3178,7 @@ dependencies = [
  "proptest",
  "serde_json",
  "spherecut-core",
+ "spherecut-media",
  "spherecut-sphere",
  "spherecut-synth",
  "spherecut-testkit",
