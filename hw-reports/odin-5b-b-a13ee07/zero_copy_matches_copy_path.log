@@ -1,0 +1,12 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.17s
+     Running tests/tier2_playback.rs (/home/pat/spherecut-zcb-target/release/deps/tier2_playback-11e2a3b16c416598)
+
+running 1 test
+test zero_copy_matches_copy_path ... rendered on AMD Radeon RX 7600 (RADV NAVI33) (radv Mesa 26.2.5), decoded on /dev/dri/renderD128, the GPU at PCI 0000:0c:00.0
+hevc-main: 48 frames, the import byte-identical to the copy
+hevc-main10: 48 frames, the import byte-identical to the copy
+X5 raw 2× 1920x1920 at 119.88 fps: 48 frames, the import byte-identical to the copy
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 16.68s
+

@@ -1,0 +1,172 @@
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling log v0.4.34
+   Compiling memchr v2.8.3
+   Compiling rustix v1.1.5
+   Compiling linux-raw-sys v0.12.1
+   Compiling wayland-sys v0.31.11
+   Compiling dlib v0.5.3
+   Compiling wayland-backend v0.3.17
+   Compiling downcast-rs v1.2.1
+   Compiling scoped-tls v1.0.1
+   Compiling wayland-client v0.31.15
+   Compiling slab v0.4.12
+   Compiling polycool v0.4.0
+   Compiling getrandom v0.3.4
+   Compiling version_check v0.9.5
+   Compiling color v0.3.3
+   Compiling euclid v0.22.14
+   Compiling rustix v0.38.44
+   Compiling tracing v0.1.44
+   Compiling linebender_resource_handle v0.1.1
+   Compiling gpu-allocator v0.28.0
+   Compiling unicode-general-category v1.1.0
+   Compiling xkeysym v0.2.1
+   Compiling ahash v0.8.12
+   Compiling linux-raw-sys v0.4.15
+   Compiling typeid v1.0.3
+   Compiling fearless_simd v0.4.1
+   Compiling xcursor v0.3.11
+   Compiling quick-xml v0.41.0
+   Compiling nom v7.1.3
+   Compiling cursor-icon v1.2.0
+   Compiling memmap2 v0.9.12
+   Compiling foldhash v0.1.5
+   Compiling futures-util v0.3.34
+   Compiling guillotiere v0.7.0
+   Compiling hashbrown v0.15.5
+   Compiling enumn v0.1.14
+   Compiling x11-dl v2.21.0
+   Compiling smithay-client-toolkit v0.19.2
+   Compiling either v1.19.0
+   Compiling x11rb-protocol v0.13.2
+   Compiling unicode-segmentation v1.13.3
+   Compiling as-raw-xcb-connection v1.0.1
+   Compiling wayland-scanner v0.31.11
+   Compiling self_cell v1.3.0
+   Compiling unicode-properties v0.1.4
+   Compiling fixedbitset v0.5.7
+   Compiling epaint_default_fonts v0.37.0
+   Compiling nohash-hasher v0.2.0
+   Compiling itertools v0.15.0
+   Compiling nom v8.0.0
+   Compiling winit v0.30.13
+   Compiling petgraph v0.8.3
+   Compiling percent-encoding v2.3.2
+   Compiling smithay-client-toolkit v0.20.0
+   Compiling mio v1.2.4
+   Compiling os_pipe v1.2.3
+   Compiling smol_str v0.2.2
+   Compiling spherecut-media v0.1.0 (/home/pat/spherecut-zcb/crates/media)
+   Compiling dpi v0.1.2
+   Compiling cexpr v0.6.0
+   Compiling rustc-hash v2.1.3
+   Compiling utf8parse v0.2.2
+   Compiling web-time v1.1.0
+   Compiling anstyle-parse v1.0.0
+   Compiling type-map v0.5.1
+   Compiling anstyle-query v1.1.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling colorchoice v1.0.5
+   Compiling zmij v1.0.23
+   Compiling anstyle v1.0.14
+   Compiling regex-syntax v0.8.11
+   Compiling anyhow v1.0.104
+   Compiling bindgen v0.73.2
+   Compiling anstream v1.0.0
+   Compiling clap_lex v1.1.1
+   Compiling lazy_static v1.5.1
+   Compiling bitflags v2.13.2
+   Compiling uuid v1.29.0
+   Compiling glam v0.34.1
+   Compiling spirv v0.4.0+sdk-1.4.341.0
+   Compiling wgpu-types v30.0.1
+   Compiling png v0.18.1
+   Compiling smallvec v1.16.3
+   Compiling font-types v0.12.7
+   Compiling parking_lot_core v0.9.12
+   Compiling parking_lot v0.12.5
+   Compiling kurbo v0.13.1
+   Compiling read-fonts v0.41.0
+   Compiling emath v0.37.0
+   Compiling naga v30.0.1
+   Compiling ecolor v0.37.0
+   Compiling peniko v0.6.1
+   Compiling vello_common v0.2.0
+   Compiling image v0.25.10
+   Compiling futures-executor v0.3.34
+   Compiling spherecut-core v0.1.0 (/home/pat/spherecut-zcb/crates/core)
+   Compiling accesskit v0.25.2
+   Compiling vello_cpu v0.2.0
+   Compiling polling v3.11.0
+   Compiling gethostname v1.1.0
+   Compiling calloop v0.13.0
+   Compiling calloop v0.14.5
+   Compiling ron v0.12.2
+   Compiling ffmpeg-sys-next v9.0.1
+   Compiling wayland-csd-frame v0.3.0
+   Compiling futures v0.3.34
+   Compiling tree_magic_mini v3.2.2
+   Compiling xkbcommon-dl v0.4.2
+   Compiling pulseaudio v0.3.2
+   Compiling alsa v0.11.0
+   Compiling regex-automata v0.4.18
+   Compiling wayland-protocols v0.32.13
+   Compiling wayland-cursor v0.31.14
+   Compiling calloop-wayland-source v0.3.0
+   Compiling calloop-wayland-source v0.4.1
+   Compiling spherecut-sphere v0.1.0 (/home/pat/spherecut-zcb/crates/sphere)
+   Compiling skrifa v0.44.0
+   Compiling harfrust v0.12.0
+   Compiling cpal v0.18.2
+   Compiling serde_json v1.0.154
+   Compiling heck v0.5.0
+   Compiling spherecut-audio v0.1.0 (/home/pat/spherecut-zcb/crates/audio)
+   Compiling wgpu-naga-bridge v30.0.1
+   Compiling strsim v0.11.1
+   Compiling wgpu-hal v30.0.1
+   Compiling x11rb v0.13.2
+   Compiling ffmpeg-next v9.0.0
+   Compiling clap_builder v4.6.7
+   Compiling epaint v0.37.0
+   Compiling wayland-protocols-wlr v0.3.12
+   Compiling wgpu-core-deps-windows-linux-android v30.0.1
+   Compiling wgpu-core v30.0.1
+   Compiling egui v0.37.0
+   Compiling wayland-protocols-experimental v20250721.0.1
+   Compiling wayland-protocols-plasma v0.3.12
+   Compiling wayland-protocols-misc v0.3.12
+   Compiling wl-clipboard-rs v0.9.5
+   Compiling wgpu v30.0.1
+   Compiling smithay-clipboard v0.7.3
+   Compiling arboard v3.7.0
+   Compiling egui_tiles v0.18.0
+   Compiling spherecut-render v0.1.0 (/home/pat/spherecut-zcb/crates/render)
+   Compiling clap_derive v4.6.7
+   Compiling matchers v0.2.0
+   Compiling sharded-slab v0.1.7
+   Compiling tracing-log v0.2.0
+   Compiling egui-wgpu v0.37.0
+   Compiling egui-winit v0.37.0
+   Compiling spherecut-playback v0.1.0 (/home/pat/spherecut-zcb/crates/playback)
+   Compiling thread_local v1.1.10
+   Compiling nu-ansi-term v0.50.3
+   Compiling eframe v0.37.0
+   Compiling itoa v1.0.18
+   Compiling tracing-subscriber v0.3.23
+   Compiling clap v4.6.7
+   Compiling spherecut-app v0.1.0 (/home/pat/spherecut-zcb/crates/app)
+   Compiling spherecut-synth v0.1.0 (/home/pat/spherecut-zcb/crates/synth)
+   Compiling spherecut-cli v0.1.0 (/home/pat/spherecut-zcb/crates/cli)
+    Finished `release` profile [optimized + debuginfo] target(s) in 56.15s
+     Running tests/tier2_frame.rs (/home/pat/spherecut-zcb-target/release/deps/tier2_frame-5e4cd6d8d9305ddc)
+
+running 1 test
+Vulkan device: AMD Radeon RX 7600 (RADV NAVI33) (discrete GPU, driver radv), the GPU behind /dev/dri/renderD128
+h264: zero copy byte-identical to the copy
+hevc-main: zero copy byte-identical to the copy
+hevc-main10: zero copy byte-identical to the copy
+test shared_vulkan_frame_matches_the_copy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 17.55s
+

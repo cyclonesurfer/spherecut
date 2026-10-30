@@ -1,0 +1,185 @@
+# X5 zero copy against the copy: rendered on AMD Radeon RX 7600 (RADV NAVI33) (radv Mesa 26.2.5), decoded on /dev/dri/renderD128, the GPU at PCI 0000:0c:00.0
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API: decoded per second, unthrottled	135.75	fps	125.5	140	4
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API: decoded per second, real time	0	fps	0	154	20
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API: shown per second, real time	60	fps	60	60	20
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API: dropped after 1 s	2248	frames	2248	2248	1
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API: late presents after 1 s	1128	presents	1128	1128	1
+# X5 raw 2× 1920x1920 at 119.88 fps, VA-API: 20 s in real time, 4 loops, 0 UI ticks missed; stream 0 on VA-API; stream 1 on VA-API; stage p50/p95 ms: decode 0.36/0.54, download 6.16/7.57, upload_cpu 0.82/1.58, upload_gpu 0.28/0.29, render_cpu 0.86/1.76, render_gpu 0.34/0.36, ui_frame 16.67/16.67, shown_interval 16.67/16.67, av_offset 22.54/24.76
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API: upload_cpu p50	0.8212730288505554	ms	0.8212730288505554	0.8212730288505554	1
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API: upload_cpu p99	1.9903090000152588	ms	1.9903090000152588	1.9903090000152588	1
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API: upload_gpu p50	0.28327998518943787	ms	0.28327998518943787	0.28327998518943787	1
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API: upload_gpu p99	0.6557199954986572	ms	0.6557199954986572	0.6557199954986572	1
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API, zero copy: decoded per second, unthrottled	256	fps	256	256	2
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API, zero copy: decoded per second, real time	120	fps	110.5	136	20
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API, zero copy: shown per second, real time	60	fps	60	60	20
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API, zero copy: dropped after 1 s	2248	frames	2248	2248	1
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API, zero copy: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API, zero copy: late presents after 1 s	1128	presents	1128	1128	1
+# X5 raw 2× 1920x1920 at 119.88 fps, VA-API, zero copy: 20 s in real time, 4 loops, 0 UI ticks missed; stream 0 on VA-API; stream 1 on VA-API; stage p50/p95 ms: decode 0.32/0.48, download 1.89/4.09, upload_cpu 0.27/0.45, upload_gpu 0.40/0.41, render_cpu 0.43/0.57, render_gpu 0.36/0.36, ui_frame 16.67/16.67, shown_interval 16.67/16.67, av_offset 22.53/24.75
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API, zero copy: upload_cpu p50	0.27257201075553894	ms	0.27257201075553894	0.27257201075553894	1
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API, zero copy: upload_cpu p99	0.5720849633216858	ms	0.5720849633216858	0.5720849633216858	1
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API, zero copy: upload_gpu p50	0.4043999910354614	ms	0.4043999910354614	0.4043999910354614	1
+X5 raw 2× 1920x1920 at 119.88 fps, VA-API, zero copy: upload_gpu p99	0.4185599982738495	ms	0.4185599982738495	0.4185599982738495	1
+# X5 raw 2× 1920x1920 at 119.88 fps, VA-API, zero copy: 3577 frames taken on the GPU, 0 refused
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan: decoded per second, unthrottled	254.5	fps	252	257	2
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan: decoded per second, real time	0	fps	0	240	20
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan: shown per second, real time	60	fps	60	60	20
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan: dropped after 1 s	2248	frames	2248	2248	1
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan: late presents after 1 s	1128	presents	1128	1128	1
+# X5 raw 2× 1920x1920 at 119.88 fps, Vulkan: 20 s in real time, 4 loops, 0 UI ticks missed; stream 0 on Vulkan; stream 1 on Vulkan; stage p50/p95 ms: decode 0.28/0.99, download 3.00/5.38, upload_cpu 0.83/1.23, upload_gpu 0.28/0.29, render_cpu 0.87/1.24, render_gpu 0.35/0.70, ui_frame 16.67/16.68, shown_interval 16.67/16.68, av_offset 22.53/24.75
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan: upload_cpu p50	0.832082986831665	ms	0.832082986831665	0.832082986831665	1
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan: upload_cpu p99	1.457056999206543	ms	1.457056999206543	1.457056999206543	1
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan: upload_gpu p50	0.28356000781059265	ms	0.28356000781059265	0.28356000781059265	1
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan: upload_gpu p99	0.5896400213241577	ms	0.5896400213241577	0.5896400213241577	1
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan, zero copy: decoded per second, unthrottled	276.5	fps	276.5	276.5	2
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan, zero copy: decoded per second, real time	120	fps	112	135.5	20
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan, zero copy: shown per second, real time	60	fps	60	60	20
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan, zero copy: dropped after 1 s	2248	frames	2248	2248	1
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan, zero copy: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan, zero copy: late presents after 1 s	1128	presents	1128	1128	1
+# X5 raw 2× 1920x1920 at 119.88 fps, Vulkan, zero copy: 20 s in real time, 4 loops, 0 UI ticks missed; stream 0 on Vulkan; stream 1 on Vulkan; stage p50/p95 ms: decode 2.24/4.57, download 0.00/0.00, upload_cpu 0.56/0.91, upload_gpu 0.35/0.37, render_cpu 0.23/0.30, render_gpu 0.39/0.70, ui_frame 16.67/16.67, shown_interval 16.67/16.67, av_offset 22.54/24.75
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan, zero copy: upload_cpu p50	0.5570569634437561	ms	0.5570569634437561	0.5570569634437561	1
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan, zero copy: upload_cpu p99	1.02040696144104	ms	1.02040696144104	1.02040696144104	1
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan, zero copy: upload_gpu p50	0.3508000075817108	ms	0.3508000075817108	0.3508000075817108	1
+X5 raw 2× 1920x1920 at 119.88 fps, Vulkan, zero copy: upload_gpu p99	0.41907998919487	ms	0.41907998919487	0.41907998919487	1
+# X5 raw 2× 1920x1920 at 119.88 fps, Vulkan, zero copy: 3573 frames taken on the GPU, 0 refused
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API: decoded per second, unthrottled	67.75	fps	67	68.5	2
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API: decoded per second, real time	0	fps	0	68.5	20
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API: shown per second, real time	60	fps	58	60	20
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API: dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API: late presents after 1 s	130	presents	130	130	1
+# X5 raw 2× 2880x2880 at 59.94 fps, VA-API: 20 s in real time, 6 loops, 0 UI ticks missed; stream 0 on VA-API; stream 1 on VA-API; stage p50/p95 ms: decode 0.61/0.91, download 13.77/14.67, upload_cpu 1.51/2.72, upload_gpu 0.55/0.57, render_cpu 1.56/2.94, render_gpu 0.35/0.36, ui_frame 16.67/16.67, shown_interval 16.67/16.67, av_offset 15.07/16.48
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API: upload_cpu p50	1.5114389657974243	ms	1.5114389657974243	1.5114389657974243	1
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API: upload_cpu p99	3.4541690349578857	ms	3.4541690349578857	3.4541690349578857	1
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API: upload_gpu p50	0.5541999936103821	ms	0.5541999936103821	0.5541999936103821	1
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API: upload_gpu p99	0.8713600039482117	ms	0.8713600039482117	0.8713600039482117	1
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API, zero copy: decoded per second, unthrottled	135.5	fps	135.5	135.5	1
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API, zero copy: decoded per second, real time	60	fps	44	75.5	20
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API, zero copy: shown per second, real time	60	fps	57	60	20
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API, zero copy: dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API, zero copy: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API, zero copy: late presents after 1 s	0	presents	0	0	1
+# X5 raw 2× 2880x2880 at 59.94 fps, VA-API, zero copy: 20 s in real time, 6 loops, 0 UI ticks missed; stream 0 on VA-API; stream 1 on VA-API; stage p50/p95 ms: decode 0.51/0.78, download 0.01/7.34, upload_cpu 0.29/0.48, upload_gpu 0.82/1.10, render_cpu 0.45/0.60, render_gpu 0.35/0.65, ui_frame 16.67/16.67, shown_interval 16.67/16.67, av_offset 15.12/16.51
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API, zero copy: upload_cpu p50	0.29104700684547424	ms	0.29104700684547424	0.29104700684547424	1
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API, zero copy: upload_cpu p99	0.6218580007553101	ms	0.6218580007553101	0.6218580007553101	1
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API, zero copy: upload_gpu p50	0.8212000131607056	ms	0.8212000131607056	0.8212000131607056	1
+X5 raw 2× 2880x2880 at 59.94 fps, VA-API, zero copy: upload_gpu p99	1.121880054473877	ms	1.121880054473877	1.121880054473877	1
+# X5 raw 2× 2880x2880 at 59.94 fps, VA-API, zero copy: 2747 frames taken on the GPU, 0 refused
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan: decoded per second, unthrottled	133	fps	133	133	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan: decoded per second, real time	0	fps	0	119.5	20
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan: shown per second, real time	60	fps	58	60	20
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan: dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan: late presents after 1 s	2	presents	2	2	1
+# X5 raw 2× 2880x2880 at 59.94 fps, Vulkan: 20 s in real time, 6 loops, 0 UI ticks missed; stream 0 on Vulkan; stream 1 on Vulkan; stage p50/p95 ms: decode 0.71/1.85, download 6.08/8.65, upload_cpu 1.52/2.03, upload_gpu 0.56/0.57, render_cpu 1.57/2.19, render_gpu 0.35/0.37, ui_frame 16.67/16.67, shown_interval 16.67/16.67, av_offset 15.13/16.51
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan: upload_cpu p50	1.5204859972000122	ms	1.5204859972000122	1.5204859972000122	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan: upload_cpu p99	2.4257469177246094	ms	2.4257469177246094	2.4257469177246094	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan: upload_gpu p50	0.5555199980735779	ms	0.5555199980735779	0.5555199980735779	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan: upload_gpu p99	0.8902400135993958	ms	0.8902400135993958	0.8902400135993958	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan, zero copy: decoded per second, unthrottled	142.5	fps	142.5	142.5	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan, zero copy: decoded per second, real time	60	fps	44	75.5	20
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan, zero copy: shown per second, real time	60	fps	57	60	20
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan, zero copy: dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan, zero copy: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan, zero copy: late presents after 1 s	0	presents	0	0	1
+# X5 raw 2× 2880x2880 at 59.94 fps, Vulkan, zero copy: 20 s in real time, 6 loops, 0 UI ticks missed; stream 0 on Vulkan; stream 1 on Vulkan; stage p50/p95 ms: decode 0.35/7.19, download 0.00/0.00, upload_cpu 0.76/1.16, upload_gpu 0.74/1.06, render_cpu 0.27/0.37, render_gpu 0.41/0.66, ui_frame 16.67/16.67, shown_interval 16.67/16.67, av_offset 15.12/16.51
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan, zero copy: upload_cpu p50	0.755308985710144	ms	0.755308985710144	0.755308985710144	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan, zero copy: upload_cpu p99	1.2648160457611084	ms	1.2648160457611084	1.2648160457611084	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan, zero copy: upload_gpu p50	0.7402799725532532	ms	0.7402799725532532	0.7402799725532532	1
+X5 raw 2× 2880x2880 at 59.94 fps, Vulkan, zero copy: upload_gpu p99	1.102560043334961	ms	1.102560043334961	1.102560043334961	1
+# X5 raw 2× 2880x2880 at 59.94 fps, Vulkan, zero copy: 2747 frames taken on the GPU, 0 refused
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API: decoded per second, unthrottled	43	fps	42.5	43.5	2
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API: decoded per second, real time	0	fps	0	43.5	20
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API: shown per second, real time	25	fps	24	25	20
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API: dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API: late presents after 1 s	0	presents	0	0	1
+# X5 raw 2× 3840x3840 at 25.00 fps, VA-API: 20 s in real time, 4 loops, 0 UI ticks missed; stream 0 on VA-API; stream 1 on VA-API; stage p50/p95 ms: decode 1.01/16.12, download 21.84/39.51, upload_cpu 2.49/3.76, upload_gpu 1.70/1.72, render_cpu 2.52/4.28, render_gpu 0.62/0.80, ui_frame 16.67/16.68, shown_interval 33.34/50.00, av_offset 20.00/39.99
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API: upload_cpu p50	2.487654209136963	ms	2.487654209136963	2.487654209136963	1
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API: upload_cpu p99	4.838630199432373	ms	4.838630199432373	4.838630199432373	1
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API: upload_gpu p50	1.698799967765808	ms	1.698799967765808	1.698799967765808	1
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API: upload_gpu p99	1.7306400537490845	ms	1.7306400537490845	1.7306400537490845	1
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API, zero copy: decoded per second, unthrottled	75.5	fps	75.5	75.5	1
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API, zero copy: decoded per second, real time	25	fps	7.5	45	20
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API, zero copy: shown per second, real time	25	fps	14	26	20
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API, zero copy: dropped after 1 s	19	frames	19	19	1
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API, zero copy: decode-dropped after 1 s	19	frames	19	19	1
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API, zero copy: late presents after 1 s	47	presents	47	47	1
+# X5 raw 2× 3840x3840 at 25.00 fps, VA-API, zero copy: 20 s in real time, 4 loops, 0 UI ticks missed; stream 0 on VA-API; stream 1 on VA-API; stage p50/p95 ms: decode 0.93/1.72, download 0.02/31.35, upload_cpu 0.33/0.70, upload_gpu 2.07/2.34, render_cpu 0.56/0.93, render_gpu 0.63/0.64, ui_frame 16.67/16.67, shown_interval 33.34/50.00, av_offset 20.00/40.00
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API, zero copy: upload_cpu p50	0.3280770182609558	ms	0.3280770182609558	0.3280770182609558	1
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API, zero copy: upload_cpu p99	1.3670680522918701	ms	1.3670680522918701	1.3670680522918701	1
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API, zero copy: upload_gpu p50	2.0693600177764893	ms	2.0693600177764893	2.0693600177764893	1
+X5 raw 2× 3840x3840 at 25.00 fps, VA-API, zero copy: upload_gpu p99	2.4041600227355957	ms	2.4041600227355957	2.4041600227355957	1
+# X5 raw 2× 3840x3840 at 25.00 fps, VA-API, zero copy: 1183 frames taken on the GPU, 0 refused
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan: decoded per second, unthrottled	74	fps	74	74	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan: decoded per second, real time	0	fps	0	51	20
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan: shown per second, real time	25	fps	24	25	20
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan: dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan: late presents after 1 s	0	presents	0	0	1
+# X5 raw 2× 3840x3840 at 25.00 fps, Vulkan: 20 s in real time, 4 loops, 0 UI ticks missed; stream 0 on Vulkan; stream 1 on Vulkan; stage p50/p95 ms: decode 1.35/3.13, download 9.94/29.08, upload_cpu 2.50/3.66, upload_gpu 1.71/1.88, render_cpu 2.55/3.80, render_gpu 0.63/0.81, ui_frame 16.67/16.67, shown_interval 33.34/50.00, av_offset 20.01/39.99
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan: upload_cpu p50	2.5023109912872314	ms	2.5023109912872314	2.5023109912872314	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan: upload_cpu p99	4.149525165557861	ms	4.149525165557861	4.149525165557861	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan: upload_gpu p50	1.7075200080871582	ms	1.7075200080871582	1.7075200080871582	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan: upload_gpu p99	2.5337600708007813	ms	2.5337600708007813	2.5337600708007813	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan, zero copy: decoded per second, unthrottled	78	fps	78	78	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan, zero copy: decoded per second, real time	25	fps	7.5	42	20
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan, zero copy: shown per second, real time	25	fps	16	27	20
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan, zero copy: dropped after 1 s	2	frames	2	2	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan, zero copy: decode-dropped after 1 s	2	frames	2	2	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan, zero copy: late presents after 1 s	83	presents	83	83	1
+# X5 raw 2× 3840x3840 at 25.00 fps, Vulkan, zero copy: 20 s in real time, 4 loops, 0 UI ticks missed; stream 0 on Vulkan; stream 1 on Vulkan; stage p50/p95 ms: decode 0.81/48.77, download 0.00/0.00, upload_cpu 1.46/2.26, upload_gpu 2.06/2.25, render_cpu 0.35/0.63, render_gpu 0.77/1.04, ui_frame 16.67/16.67, shown_interval 33.34/50.00, av_offset 20.06/70.00
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan, zero copy: upload_cpu p50	1.4550429582595825	ms	1.4550429582595825	1.4550429582595825	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan, zero copy: upload_cpu p99	3.696254014968872	ms	3.696254014968872	3.696254014968872	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan, zero copy: upload_gpu p50	2.0603599548339844	ms	2.0603599548339844	2.0603599548339844	1
+X5 raw 2× 3840x3840 at 25.00 fps, Vulkan, zero copy: upload_gpu p99	2.356640100479126	ms	2.356640100479126	2.356640100479126	1
+# X5 raw 2× 3840x3840 at 25.00 fps, Vulkan, zero copy: 1193 frames taken on the GPU, 0 refused
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API: decoded per second, unthrottled	20	fps	18	28.5	20
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API: decoded per second, real time	30	fps	29	44.5	20
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API: shown per second, real time	30	fps	29	30	20
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API: dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API: late presents after 1 s	0	presents	0	0	1
+# X5 raw 2× 3840x3840 at 29.97 fps, VA-API: 20 s in real time, 0 loops, 0 UI ticks missed; stream 0 on VA-API; stream 1 on VA-API; stage p50/p95 ms: decode 1.51/14.64, download 24.55/46.37, upload_cpu 3.40/4.81, upload_gpu 0.91/1.22, render_cpu 3.59/4.85, render_gpu 0.36/1.20, ui_frame 16.67/16.71, shown_interval 33.33/33.37, av_offset 16.70/32.31
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API: upload_cpu p50	3.403563976287842	ms	3.403563976287842	3.403563976287842	1
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API: upload_cpu p99	5.342787265777588	ms	5.342787265777588	5.342787265777588	1
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API: upload_gpu p50	0.9115200042724609	ms	0.9115200042724609	0.9115200042724609	1
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API: upload_gpu p99	2.7462399005889893	ms	2.7462399005889893	2.7462399005889893	1
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API, zero copy: decoded per second, unthrottled	78	fps	76.5	79.5	20
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API, zero copy: decoded per second, real time	30	fps	29	44.5	20
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API, zero copy: shown per second, real time	30	fps	29	30	20
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API, zero copy: dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API, zero copy: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API, zero copy: late presents after 1 s	0	presents	0	0	1
+# X5 raw 2× 3840x3840 at 29.97 fps, VA-API, zero copy: 20 s in real time, 0 loops, 0 UI ticks missed; stream 0 on VA-API; stream 1 on VA-API; stage p50/p95 ms: decode 1.04/1.39, download 0.02/0.26, upload_cpu 0.37/0.72, upload_gpu 1.55/2.08, render_cpu 0.65/0.90, render_gpu 0.37/0.63, ui_frame 16.67/16.67, shown_interval 33.33/33.34, av_offset 16.69/32.26
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API, zero copy: upload_cpu p50	0.37289997935295105	ms	0.37289997935295105	0.37289997935295105	1
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API, zero copy: upload_cpu p99	0.8653860092163086	ms	0.8653860092163086	0.8653860092163086	1
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API, zero copy: upload_gpu p50	1.5549999475479126	ms	1.5549999475479126	1.5549999475479126	1
+X5 raw 2× 3840x3840 at 29.97 fps, VA-API, zero copy: upload_gpu p99	2.3145999908447266	ms	2.3145999908447266	2.3145999908447266	1
+# X5 raw 2× 3840x3840 at 29.97 fps, VA-API, zero copy: 4319 frames taken on the GPU, 0 refused
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan: decoded per second, unthrottled	78	fps	76	79.5	20
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan: decoded per second, real time	30	fps	29.5	60	20
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan: shown per second, real time	30	fps	29	30	20
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan: dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan: late presents after 1 s	0	presents	0	0	1
+# X5 raw 2× 3840x3840 at 29.97 fps, Vulkan: 20 s in real time, 0 loops, 0 UI ticks missed; stream 0 on Vulkan; stream 1 on Vulkan; stage p50/p95 ms: decode 1.51/2.16, download 3.80/14.96, upload_cpu 3.92/5.20, upload_gpu 0.93/1.37, render_cpu 3.89/4.92, render_gpu 0.37/0.93, ui_frame 16.67/16.68, shown_interval 33.33/33.34, av_offset 16.76/32.30
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan: upload_cpu p50	3.92049503326416	ms	3.92049503326416	3.92049503326416	1
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan: upload_cpu p99	5.424580097198486	ms	5.424580097198486	5.424580097198486	1
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan: upload_gpu p50	0.9279999732971191	ms	0.9279999732971191	0.9279999732971191	1
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan: upload_gpu p99	1.8753199577331543	ms	1.8753199577331543	1.8753199577331543	1
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan, zero copy: decoded per second, unthrottled	81	fps	80	82.5	20
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan, zero copy: decoded per second, real time	30	fps	29.5	44.5	20
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan, zero copy: shown per second, real time	30	fps	29	30	20
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan, zero copy: dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan, zero copy: decode-dropped after 1 s	0	frames	0	0	1
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan, zero copy: late presents after 1 s	0	presents	0	0	1
+# X5 raw 2× 3840x3840 at 29.97 fps, Vulkan, zero copy: 20 s in real time, 0 loops, 0 UI ticks missed; stream 0 on Vulkan; stream 1 on Vulkan; stage p50/p95 ms: decode 0.72/1.09, download 0.00/0.00, upload_cpu 1.07/1.48, upload_gpu 1.35/1.55, render_cpu 0.34/0.54, render_gpu 0.60/0.89, ui_frame 16.67/16.67, shown_interval 33.33/33.34, av_offset 16.73/32.26
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan, zero copy: upload_cpu p50	1.0661829710006714	ms	1.0661829710006714	1.0661829710006714	1
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan, zero copy: upload_cpu p99	1.5749889612197876	ms	1.5749889612197876	1.5749889612197876	1
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan, zero copy: upload_gpu p50	1.3540799617767334	ms	1.3540799617767334	1.3540799617767334	1
+X5 raw 2× 3840x3840 at 29.97 fps, Vulkan, zero copy: upload_gpu p99	1.61899995803833	ms	1.61899995803833	1.61899995803833	1
+# X5 raw 2× 3840x3840 at 29.97 fps, Vulkan, zero copy: 4440 frames taken on the GPU, 0 refused

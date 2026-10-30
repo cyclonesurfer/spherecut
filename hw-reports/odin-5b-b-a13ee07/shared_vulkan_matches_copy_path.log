@@ -1,0 +1,156 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling libc v0.2.191
+   Compiling cfg-if v1.0.5
+   Compiling bitflags v2.13.2
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+   Compiling once_cell v1.21.4
+   Compiling thiserror v2.0.21
+   Compiling cfg_aliases v0.2.2
+   Compiling pkg-config v0.3.34
+   Compiling foldhash v0.2.0
+   Compiling log v0.4.34
+   Compiling glob v0.3.4
+   Compiling equivalent v1.0.3
+   Compiling regex-syntax v0.8.11
+   Compiling minimal-lexical v0.2.1
+   Compiling memchr v2.8.3
+   Compiling pin-project-lite v0.2.17
+   Compiling hashbrown v0.17.1
+   Compiling libloading v0.8.9
+   Compiling shlex v2.0.1
+   Compiling bindgen v0.73.2
+   Compiling zerocopy v0.8.63
+   Compiling serde_core v1.0.229
+   Compiling clang-sys v1.9.1
+   Compiling num-traits v0.2.19
+   Compiling rustc-hash v2.1.3
+   Compiling find-msvc-tools v0.1.15
+   Compiling rustc-hash v1.1.0
+   Compiling naga v30.0.1
+   Compiling ash v0.38.0+1.3.281
+   Compiling bit-vec v0.9.1
+   Compiling cc v1.9.0
+   Compiling nom v7.1.3
+   Compiling serde v1.0.229
+   Compiling parking_lot_core v0.9.12
+   Compiling unicode-width v0.2.2
+   Compiling spirv v0.4.0+sdk-1.4.341.0
+   Compiling bit-set v0.10.0
+   Compiling allocator-api2 v0.2.21
+   Compiling scopeguard v1.2.0
+   Compiling codespan-reporting v0.13.1
+   Compiling arrayvec v0.7.8
+   Compiling futures-core v0.3.34
+   Compiling simd-adler32 v0.3.10
+   Compiling syn v3.0.9
+   Compiling syn v2.0.119
+   Compiling indexmap v2.14.2
+   Compiling futures-sink v0.3.34
+   Compiling raw-window-handle v0.6.2
+   Compiling smallvec v1.16.3
+   Compiling static_assertions v1.1.0
+   Compiling hashbrown v0.16.1
+   Compiling regex-automata v0.4.18
+   Compiling futures-channel v0.3.34
+   Compiling num_cpus v1.17.0
+   Compiling lock_api v0.4.14
+   Compiling tracing-core v0.1.36
+   Compiling wgpu-hal v30.0.1
+   Compiling cexpr v0.6.0
+   Compiling crc32fast v1.5.3
+   Compiling slab v0.4.12
+   Compiling rand_core v0.10.1
+   Compiling adler2 v2.0.1
+   Compiling futures-task v0.3.34
+   Compiling futures-io v0.3.34
+   Compiling presser v0.3.1
+   Compiling ordered-float v5.5.0
+   Compiling parking_lot v0.12.5
+   Compiling alsa-sys v0.4.0
+   Compiling renderdoc-sys v1.1.0
+   Compiling profiling v1.0.18
+   Compiling getrandom v0.4.3
+   Compiling thiserror v1.0.69
+   Compiling miniz_oxide v0.9.1
+   Compiling wgpu-core v30.0.1
+   Compiling rustix v1.1.5
+   Compiling litrs v1.0.1
+   Compiling regex v1.13.1
+   Compiling ffmpeg-next v9.0.0
+   Compiling glam v0.34.1
+   Compiling flate2 v1.1.10
+   Compiling document-features v0.2.12
+   Compiling miniz_oxide v0.8.9
+   Compiling mio v1.2.4
+   Compiling fdeflate v0.3.7
+   Compiling wgpu v30.0.1
+   Compiling byteorder v1.5.0
+   Compiling linux-raw-sys v0.12.1
+   Compiling pxfm v0.1.30
+   Compiling spherecut-media v0.1.0 (/home/pat/spherecut-zcb/crates/media)
+   Compiling cpal v0.18.2
+   Compiling alsa v0.11.0
+   Compiling png v0.18.1
+   Compiling dasp_sample v0.11.0
+   Compiling byteorder-lite v0.1.0
+   Compiling fastrand v2.5.0
+   Compiling wait-timeout v0.2.1
+   Compiling bit-vec v0.10.1
+   Compiling pollster v1.0.1
+   Compiling quick-error v1.2.3
+   Compiling cpufeatures v0.3.1
+   Compiling fnv v1.0.7
+   Compiling chacha20 v0.10.2
+   Compiling bit-set v0.11.1
+   Compiling rand v0.10.3
+   Compiling rand_xorshift v0.5.0
+   Compiling core_detect v1.0.0
+   Compiling unarray v0.1.4
+   Compiling spherecut-testkit v0.1.0 (/home/pat/spherecut-zcb/crates/testkit)
+   Compiling thiserror-impl v2.0.21
+   Compiling bytemuck_derive v1.12.1
+   Compiling zerocopy-derive v0.8.63
+   Compiling serde_derive v1.0.229
+   Compiling tracing-attributes v0.1.31
+   Compiling futures-macro v0.3.34
+   Compiling thiserror-impl v1.0.69
+   Compiling enum-primitive-derive v0.3.0
+   Compiling tempfile v3.27.0
+   Compiling rusty-fork v0.3.1
+   Compiling futures-util v0.3.34
+   Compiling bytemuck v1.25.2
+   Compiling naga-types v30.0.1
+   Compiling tracing v0.1.44
+   Compiling moxcms v0.8.1
+   Compiling proptest v1.12.0
+   Compiling wgpu-types v30.0.1
+   Compiling spherecut-core v0.1.0 (/home/pat/spherecut-zcb/crates/core)
+   Compiling futures-executor v0.3.34
+   Compiling ffmpeg-sys-next v9.0.1
+   Compiling futures v0.3.34
+   Compiling pulseaudio v0.3.2
+   Compiling image v0.25.10
+   Compiling spherecut-sphere v0.1.0 (/home/pat/spherecut-zcb/crates/sphere)
+   Compiling half v2.7.1
+   Compiling spherecut-audio v0.1.0 (/home/pat/spherecut-zcb/crates/audio)
+   Compiling gpu-allocator v0.28.0
+   Compiling wgpu-naga-bridge v30.0.1
+   Compiling spherecut-synth v0.1.0 (/home/pat/spherecut-zcb/crates/synth)
+   Compiling wgpu-core-deps-windows-linux-android v30.0.1
+   Compiling spherecut-render v0.1.0 (/home/pat/spherecut-zcb/crates/render)
+   Compiling spherecut-playback v0.1.0 (/home/pat/spherecut-zcb/crates/playback)
+    Finished `release` profile [optimized + debuginfo] target(s) in 36.76s
+     Running tests/tier2_playback.rs (/home/pat/spherecut-zcb-target/release/deps/tier2_playback-11e2a3b16c416598)
+
+running 1 test
+test shared_vulkan_matches_copy_path ... rendered on AMD Radeon RX 7600 (RADV NAVI33) (radv Mesa 26.2.5), decoded on /dev/dri/renderD128, the GPU at PCI 0000:0c:00.0
+hevc-main: 48 frames, the copy out of FFmpeg's image byte-identical to the copy
+hevc-main10: 48 frames, the copy out of FFmpeg's image byte-identical to the copy
+X5 raw 2× 1920x1920 at 119.88 fps: 48 frames, the copy out of FFmpeg's image byte-identical to the copy
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 17.27s
+

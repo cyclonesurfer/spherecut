@@ -1,0 +1,9 @@
+   Compiling spherecut-render v0.1.0 (/home/pat/spherecut-zcb/crates/render)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.70s
+     Running tests/shared_vulkan.rs (/home/pat/spherecut-zcb-target/debug/deps/shared_vulkan-febbd4144a844d76)
+
+running 1 test
+test ffmpegs_vulkan_frames_fill_a_slot_as_their_bytes_do ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
