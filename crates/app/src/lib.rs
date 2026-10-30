@@ -11,11 +11,14 @@
 pub mod app;
 pub mod jobs;
 pub mod notices;
+pub mod overlay;
 pub mod panes;
 pub mod run;
+pub mod settings;
 pub mod transport;
 pub mod view;
 pub mod viewer;
 
-pub use app::{AppParts, AppState, DoctorRun, Pane, Settings, SpherecutApp};
+pub use app::{AppParts, AppState, DoctorRun, Pane, SpherecutApp};
 pub use run::{GuiArgs, GuiError, install, run};
+pub use settings::Settings;

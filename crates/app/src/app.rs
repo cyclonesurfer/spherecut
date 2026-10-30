@@ -22,7 +22,9 @@ use spherecut_sphere::grab::{GrabFit, GrabStart};
 
 use crate::jobs::{Job, Poll};
 use crate::notices::{Notice, NoticeKind, Notices};
+use crate::overlay::OverlayState;
 use crate::panes::{FilesPane, InfoPane};
+use crate::settings::{self, Settings};
 use crate::transport::{self, Scrub};
 use crate::view::{Preset, ViewState, ZOOM_PER_POINT, ZOOM_STEP};
 use crate::viewer::{self, DrawKey, ViewerCallback};
@@ -65,29 +67,6 @@ pub fn default_tree() -> Tree<Pane> {
     Tree::new(egui::Id::unique("spherecut-tiles"), root, tiles)
 }
 
-/// What the app keeps between runs (eframe persistence). Slice 8 adds
-/// the cache, decoder, slots and A/V settings.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-pub struct Settings {
-    /// The Files pane's directory.
-    pub last_dir: Option<PathBuf>,
-    /// The anisotropic filter, else the isotropic one.
-    pub anisotropic: bool,
-    /// The overlay (F3).
-    pub overlay: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Settings {
-            last_dir: None,
-            anisotropic: true,
-            overlay: false,
-        }
-    }
-}
-
 /// How the startup doctor check runs.
 #[derive(Debug)]
 pub enum DoctorRun {
@@ -114,6 +93,9 @@ pub struct AppParts {
     /// don't want the file system).
     pub list_dirs: bool,
     pub settings: Settings,
+    /// What set the cache's budget over the settings (`--cache-mb`, the
+    /// environment), if anything did.
+    pub cache_override: Option<String>,
     pub tree: Option<Tree<Pane>>,
     /// Files to open, from the command line: the first opens.
     pub open: Vec<PathBuf>,
@@ -126,6 +108,7 @@ impl std::fmt::Debug for AppParts {
             .field("config", &self.config)
             .field("doctor", &self.doctor)
             .field("settings", &self.settings)
+            .field("cache_override", &self.cache_override)
             .field("open", &self.open)
             .finish_non_exhaustive()
     }
@@ -160,6 +143,9 @@ pub struct AppState {
     pub files: FilesPane,
     pub info: InfoPane,
     pub settings: Settings,
+    /// The Settings window is open.
+    pub settings_open: bool,
+    pub cache_override: Option<String>,
     pub snapshot: PlayerSnapshot,
     /// Each stream's info, once it opened.
     pub streams: Vec<Option<VideoStreamInfo>>,
@@ -172,6 +158,7 @@ pub struct AppState {
     pub presented: Option<Presented>,
     /// `logic` ran for the coming `ui`, as eframe runs it before each.
     pub logic_ran: bool,
+    pub overlay: OverlayState,
 }
 
 /// The app.
@@ -194,6 +181,7 @@ impl SpherecutApp {
             doctor,
             list_dirs,
             settings,
+            cache_override,
             tree,
             open,
         } = parts;
@@ -258,11 +246,7 @@ impl SpherecutApp {
             }
         };
         let mut view = ViewState::default();
-        view.filter = if settings.anisotropic && gpu.caps.anisotropy {
-            Filter::Anisotropic
-        } else {
-            Filter::Isotropic
-        };
+        view.filter = settings::filter(&settings, gpu.caps.anisotropy);
         let files = FilesPane::new(settings.last_dir.clone(), list_dirs);
         let mut state = AppState {
             gpu,
@@ -278,12 +262,15 @@ impl SpherecutApp {
             files,
             info: InfoPane::default(),
             settings,
+            settings_open: false,
+            cache_override,
             snapshot: PlayerSnapshot::default(),
             streams: Vec::new(),
             viewer_rect: None,
             shown: None,
             presented: None,
             logic_ran: false,
+            overlay: OverlayState::default(),
         };
         if let Some(path) = open.into_iter().next() {
             state.open(path);
@@ -335,6 +322,7 @@ impl SpherecutApp {
             };
             self.tree.ui(&mut behavior, ui);
         });
+        settings::window(&mut self.state, ui.ctx());
         self.state.request_repaint(ui.ctx());
     }
 
@@ -423,6 +411,7 @@ impl AppState {
         };
         let events = player.events();
         self.snapshot = player.snapshot();
+        self.overlay.tick(Instant::now(), &self.snapshot.perf);
         for e in events {
             self.event(e);
         }
@@ -567,6 +556,10 @@ impl AppState {
                     self.files.focus = true;
                     ui.close();
                 }
+                if ui.button("Settings…").clicked() {
+                    self.settings_open = true;
+                    ui.close();
+                }
                 if ui.button("Quit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -686,6 +679,18 @@ impl AppState {
             if pressed(ui, Modifiers::NONE, key) {
                 self.view.switch_to(preset, t);
             }
+        }
+    }
+
+    /// The settings into the view and the player, after the window
+    /// changed them.
+    pub fn apply_settings(&mut self) {
+        self.view.filter = settings::filter(&self.settings, self.gpu.caps.anisotropy);
+        if let Some(p) = &self.player {
+            let mut config = p.config();
+            self.settings
+                .apply(&mut config, self.cache_override.is_some());
+            p.set_config(config);
         }
     }
 
@@ -829,9 +834,10 @@ impl AppState {
             )
         });
         self.shown = shown.as_ref().map(|(_, k)| k.clone());
+        let perf = self.player.as_ref().map(|p| p.perf().clone());
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
-            ViewerCallback { rect, shown },
+            ViewerCallback { rect, shown, perf },
         ));
         drop(presented);
         let placeholder = self.placeholder();
@@ -852,7 +858,9 @@ impl AppState {
             );
         }
         if self.settings.overlay {
-            crate::panes::overlay_ui(self, ui, rect);
+            crate::overlay::overlay_ui(self, ui, rect);
+        } else {
+            self.overlay.last = None;
         }
     }
 }

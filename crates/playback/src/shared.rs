@@ -19,7 +19,7 @@ use crate::audio::AudioOutput;
 use crate::budget::{AutoBudget, CacheBudget};
 use crate::cache::FrameCache;
 use crate::decoder::HwSupport;
-use crate::perf::PerfStats;
+use crate::perf::{MemoryStats, PerfStats};
 use crate::player::{PlayerError, PlayerEvent};
 use crate::slots::SlotRing;
 
@@ -96,6 +96,8 @@ pub struct StreamStatus {
     pub choice: Option<String>,
     /// Where it decodes now.
     pub decode: Option<DecodePath>,
+    /// The decoder skips frames to catch up with the clock (section 8.2).
+    pub catching_up: bool,
     /// Why hardware decoding went on in software, once it did.
     pub fallback: Option<(HwKind, FallbackReason)>,
     /// Why it can't open or go on.
@@ -134,6 +136,8 @@ pub(crate) struct Status {
     /// image, or FFmpeg's context on the renderer's device), the first
     /// time: the opens after it download.
     pub(crate) import_refused: Option<String>,
+    /// The upload thread's last reading of the memory, once a second.
+    pub(crate) memory: Option<MemoryStats>,
 }
 
 /// Shared by every thread of a player.

@@ -1,16 +1,20 @@
 //! The viewer's paint callback (M1 plan section 7.3): the frame on
 //! screen projected into a linear target of the viewer's physical size,
-//! then encoded into egui's own render pass, one pixel per pixel.
+//! then encoded into egui's own render pass, one pixel per pixel. A
+//! projection's time to record and its time on the GPU go to the
+//! player's numbers (section 10), with the draws that projected and
+//! those that only encoded.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use egui::epaint::ViewportInPixels;
 use egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor};
 use glam::DVec2;
-use spherecut_playback::SlotFrame;
+use spherecut_playback::{Counter, PerfStats, SlotFrame, Stage};
 use spherecut_render::{
-    DebugMode, Encoder, Filter, Gpu, GpuFrame, LinearTarget, Projector, ViewParams,
+    DebugMode, Encoder, Filter, Gpu, GpuFrame, GpuTimers, LinearTarget, Projector, ViewParams,
 };
 use spherecut_sphere::pixel;
 
@@ -36,6 +40,8 @@ pub struct ViewerResources {
     gpu: Gpu,
     projector: Projector,
     encoder: Encoder,
+    /// The projection pass's GPU time, when the device has timestamps.
+    timers: Option<GpuTimers>,
     target: Option<LinearTarget>,
     /// What the target holds, if a projection: `paint` encodes it.
     last: Option<DrawKey>,
@@ -73,6 +79,7 @@ impl ViewerResources {
             gpu: gpu.clone(),
             projector,
             encoder: Encoder::new(gpu, target_format),
+            timers: GpuTimers::new(gpu, "projection"),
             target: None,
             last: None,
             painted: AtomicBool::new(false),
@@ -102,6 +109,8 @@ pub struct ViewerCallback {
     /// frame keeps the slot from being reused until egui has submitted
     /// this frame and dropped the callback.
     pub shown: Option<(Arc<GpuFrame>, DrawKey)>,
+    /// The player's numbers, which the draw adds to.
+    pub perf: Option<Arc<PerfStats>>,
 }
 
 impl std::fmt::Debug for ViewerCallback {
@@ -109,7 +118,7 @@ impl std::fmt::Debug for ViewerCallback {
         f.debug_struct("ViewerCallback")
             .field("rect", &self.rect)
             .field("shown", &self.shown.as_ref().map(|(_, k)| k))
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -169,6 +178,7 @@ impl CallbackTrait for ViewerCallback {
         enc: &mut wgpu::CommandEncoder,
         res: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
+        let start = Instant::now();
         let Some(r) = res.get_mut::<ViewerResources>() else {
             return Vec::new();
         };
@@ -203,6 +213,9 @@ impl CallbackTrait for ViewerCallback {
         };
         if !resized && r.last.as_ref() == Some(key) && r.painted.load(Ordering::Relaxed) {
             r.encoded_only += 1;
+            if let Some(perf) = &self.perf {
+                perf.add(Counter::EncodedOnly, 1);
+            }
             return Vec::new();
         }
         let Some(target) = &r.target else {
@@ -217,11 +230,20 @@ impl CallbackTrait for ViewerCallback {
             target,
             key.filter,
             DebugMode::Off,
-            None,
+            r.timers.as_mut(),
         );
         r.last = Some(key.clone());
         r.painted.store(false, Ordering::Relaxed);
         r.projected += 1;
+        if let Some(perf) = &self.perf {
+            perf.record_since(Stage::RenderCpu, start);
+            perf.add(Counter::Projected, 1);
+            // The latest span read back, a frame or two old: the device is
+            // polled by the upload thread and by every submit.
+            if let Some(ms) = r.timers.as_mut().and_then(GpuTimers::poll) {
+                perf.record(Stage::RenderGpu, ms);
+            }
+        }
         Vec::new()
     }
 

@@ -12,10 +12,12 @@ use spherecut_core::brand;
 use spherecut_core::clock::SystemClock;
 use spherecut_media::backend::FfmpegBackend;
 use spherecut_media::hw::GpuIds;
+use spherecut_playback::budget::BudgetFrom;
 use spherecut_playback::{AudioDevice, CacheBudget, DeviceAudio, Player, PlayerConfig, Repaint};
 use spherecut_render::{AdapterChoice, Gpu, RenderError};
 
-use crate::app::{AppParts, DoctorRun, Pane, Settings, SpherecutApp};
+use crate::app::{AppParts, DoctorRun, Pane, SpherecutApp};
+use crate::settings::Settings;
 use crate::viewer::ViewerResources;
 
 /// eframe storage keys.
@@ -157,10 +159,11 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
                 .as_ref()
                 .ok_or("eframe made no wgpu render state")?;
             install(rs, &gpu);
-            let settings: Settings = cc
+            let settings = cc
                 .storage
-                .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
-                .unwrap_or_default();
+                .and_then(|s| eframe::get_value::<Settings>(s, SETTINGS_KEY))
+                .unwrap_or_default()
+                .sanitized();
             let tree = cc
                 .storage
                 .and_then(|s| eframe::get_value::<egui_tiles::Tree<Pane>>(s, TREE_KEY));
@@ -169,15 +172,21 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
             let chosen = CacheBudget::choose(
                 args.cache,
                 CacheBudget::env_value().as_deref(),
-                CacheBudget::Auto,
+                settings.cache(),
             );
             if let Some(e) = &chosen.env_error {
                 tracing::warn!(error = %e, "ignoring {}", spherecut_playback::budget::ENV);
             }
-            let config = PlayerConfig {
+            let mut config = PlayerConfig {
                 cache: chosen.budget,
                 zero_copy,
                 ..PlayerConfig::default()
+            };
+            settings.apply(&mut config, true);
+            let cache_override = match chosen.from {
+                BudgetFrom::Flag => Some("--cache-mb".to_owned()),
+                BudgetFrom::Env => Some(spherecut_playback::budget::ENV.to_owned()),
+                BudgetFrom::Settings => None,
             };
             let audio = DeviceAudio::new(backend.clone(), AudioDevice::Default);
             let app = SpherecutApp::new(AppParts {
@@ -190,6 +199,7 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
                 doctor: DoctorRun::Node(node.path.clone()),
                 list_dirs: true,
                 settings,
+                cache_override,
                 tree,
                 open: args.files,
             });
@@ -314,6 +324,7 @@ mod tests {
             doctor: DoctorRun::Never,
             list_dirs: false,
             settings: Settings::default(),
+            cache_override: None,
             tree: None,
             open: Vec::new(),
         });

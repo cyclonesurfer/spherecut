@@ -59,7 +59,7 @@ use crate::audio::{AudioOutput, AudioOutputFactory, PREROLL_AUDIO, PREROLL_LIMIT
 use crate::budget::{AUTO_MIN, AutoBudget, CacheBudget, read_auto_budget};
 use crate::cache::{CacheStats, FrameCache};
 use crate::decoder::{DecoderPreference, HwSupport};
-use crate::perf::{Counter, PerfSnapshot, PerfStats, Stage};
+use crate::perf::{Counter, MemoryStats, PerfSnapshot, PerfStats, Stage};
 use crate::shared::{
     BudgetStatus, Command, Place, Repaint, Request, Shared, Status, StreamStatus, Want,
     frames_between, ms, spawn_into, time_of,
@@ -337,6 +337,8 @@ pub struct PlayerSnapshot {
     /// copy, slice 5b), once it hasn't: the frames are copied from then
     /// on.
     pub import_refused: Option<String>,
+    /// The process's memory and the GPU's, read once a second.
+    pub memory: Option<MemoryStats>,
     /// Whether what the threads report was read now; false when its lock
     /// was taken, and it is the copy from before.
     pub fresh: bool,
@@ -361,6 +363,7 @@ impl Default for PlayerSnapshot {
             perf: PerfSnapshot::default(),
             gpu_error: None,
             import_refused: None,
+            memory: None,
             fresh: false,
         }
     }
@@ -1379,6 +1382,7 @@ impl Player {
             s.budget = st.budget;
             s.gpu_error = st.gpu_error.clone();
             s.import_refused = st.import_refused.clone();
+            s.memory = st.memory;
             s.streams = st.streams.clone();
             s.has_audio = st.audio.is_some();
             ui.snapshot_epoch = st.epoch;

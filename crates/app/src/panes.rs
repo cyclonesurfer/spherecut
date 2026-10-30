@@ -8,7 +8,6 @@ use spherecut_core::video::Primaries;
 use spherecut_media::backend::{DecodePath, VideoStreamInfo};
 use spherecut_media::doctor::Severity;
 use spherecut_media::spherical::{Projection, StereoMode};
-use spherecut_playback::{Counter, Stage};
 
 use crate::app::{AppState, DoctorState};
 use crate::jobs::{Job, Poll, Threads};
@@ -268,7 +267,7 @@ impl InfoPane {
     }
 }
 
-fn decode_path(p: &DecodePath) -> String {
+pub(crate) fn decode_path(p: &DecodePath) -> String {
     match p {
         DecodePath::Software { threads } => match threads {
             Some(n) => format!("software, {n} threads"),
@@ -456,84 +455,6 @@ pub fn doctor_ui(s: &mut AppState, ui: &mut egui::Ui) {
                 }
             }
         });
-}
-
-fn ms(v: Option<f32>) -> String {
-    v.map_or_else(|| "-".into(), |v| format!("{v:.1}"))
-}
-
-/// The overlay (F3): what the engine is doing, in the viewer's corner.
-/// Slice 8 adds the GPU timestamps and sparklines.
-pub fn overlay_ui(s: &AppState, ui: &egui::Ui, rect: egui::Rect) {
-    let snap = &s.snapshot;
-    let p = &snap.perf;
-    let shown = p.stage(Stage::ShownInterval).p50;
-    let mut lines = vec![
-        format!(
-            "{:?}{}",
-            snap.state,
-            if snap.playing { ", playing" } else { "" }
-        ),
-        format!(
-            "fps {}  dropped {}  decode-dropped {}  hitches {}",
-            shown.map_or_else(|| "-".into(), |v| format!("{:.1}", 1000.0 / v.max(0.001))),
-            p.counter(Counter::Dropped),
-            p.counter(Counter::DecodeDropped),
-            p.counter(Counter::Hitches)
-        ),
-        format!(
-            "decode {}  download {}  upload {} ms (p50)",
-            ms(p.stage(Stage::Decode).p50),
-            ms(p.stage(Stage::Download).p50),
-            ms(p.stage(Stage::UploadCpu).p50)
-        ),
-        format!(
-            "slots {} ready {} shown {} dead {}",
-            snap.slots.active, snap.slots.ready, snap.slots.shown, snap.slots.dead
-        ),
-    ];
-    if let Some(c) = &snap.cache {
-        lines.push(format!(
-            "cache {} / {} MiB, {} frames ({} ahead)",
-            c.bytes >> 20,
-            c.budget >> 20,
-            c.frames,
-            c.ahead
-        ));
-    }
-    for st in &snap.streams {
-        if let Some(d) = &st.decode {
-            lines.push(format!("decoding on {}", decode_path(d)));
-        }
-    }
-    // Zero copy (slice 5b): how the frames reached their slots.
-    let imported = p.counter(Counter::FramesImported);
-    let vulkan = p.counter(Counter::VulkanCopies);
-    let refused = p.counter(Counter::ImportsRefused);
-    if imported + vulkan + refused > 0 {
-        lines.push(format!(
-            "into slots: dmabuf {imported}  vulkan {vulkan}  copy {}  refused {refused}",
-            p.counter(Counter::FramesUploaded)
-                .saturating_sub(imported + vulkan)
-        ));
-    }
-    lines.push(format!(
-        "{}  {}x{} px",
-        spherecut_render::gpu::describe(&s.gpu.caps.info),
-        (rect.width() * ui.ctx().pixels_per_point()).round(),
-        (rect.height() * ui.ctx().pixels_per_point()).round()
-    ));
-    let text = lines.join("\n");
-    let painter = ui.painter_at(rect);
-    let font = egui::FontId::monospace(12.0);
-    let galley = painter.layout_no_wrap(text, font, egui::Color32::WHITE);
-    let at = rect.left_top() + egui::vec2(8.0, 8.0);
-    painter.rect_filled(
-        egui::Rect::from_min_size(at, galley.size()).expand(4.0),
-        4.0,
-        egui::Color32::from_black_alpha(160),
-    );
-    painter.galley(at, galley, egui::Color32::WHITE);
 }
 
 #[cfg(test)]

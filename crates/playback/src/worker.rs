@@ -718,13 +718,18 @@ impl Worker {
             .is_some_and(|(lag, two)| lag > two);
         if behind && self.catching_up.is_none_or(|until| now > until) {
             dec.catch_up(Some(now));
-            self.catching_up = Some(now);
+            if self.catching_up.replace(now).is_none() {
+                self.shared
+                    .stream(self.epoch, self.stream, |s| s.catching_up = true);
+            }
         }
     }
 
     fn end_catch_up(&mut self, dec: &mut dyn VideoDecode) {
         if self.catching_up.take().is_some() {
             dec.catch_up(None);
+            self.shared
+                .stream(self.epoch, self.stream, |s| s.catching_up = false);
         }
     }
 
