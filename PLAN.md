@@ -148,7 +148,10 @@ new features to agents, which adds a little work to each.
       with M1's hardware report. Whether zero-copy becomes the default is
       decided before M3, when raw 8K dual fisheye has to play. The copy
       path stays as the fallback, and the overlay and doctor say which
-      path is in use (D25).
+      path is in use (D25). Decided for Vulkan Video on 2026-10-30 (Pat,
+      from odin's window): it decodes on the renderer's own device by
+      default where that can be shared; VA-API's import stays opt-in
+      until huginn's numbers.
 
 ## M2 Clip reframer
 

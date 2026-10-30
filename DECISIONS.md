@@ -1716,6 +1716,30 @@ Video H.264 or HEVC until it gets RPM Fusion's
 `mesa-vulkan-drivers-freeworld` (Pat's call), so that only path A can
 lift its VA-API copy there for now.
 
+*Decided for Vulkan Video, 2026-10-30, before M3 (Pat, from a decision
+card; M1 slice 9).* Zero copy is the default for Vulkan Video: the
+viewer opens its device shared where the GPU lets it, and Vulkan
+Video's frames are copied out on the GPU there (path B). VA-API's
+import (path A) stays opt-in until huginn's numbers, and the copy path
+stays the fallback for whatever can't be kept on the GPU.
+`SPHERECUT_ZERO_COPY` now sets a `ZeroCopy`: `0` copies every frame,
+`1` imports VA-API's frames too, and anything else, or nothing, is the
+default; doctor's report says which (`zero_copy_mode`, beside the old
+`zero_copy`, now true unless it is off). What decided it was odin's
+window, not the benches: the noisy 5.7K clips and the X5 pair
+presented 51 % to 84 % of the UI frames with `write_texture`'s copy,
+81 % to 98 % with the staging belt's (D31) and 94 % to 99 % with path
+B. The belt and path B were level on the X5 pair; on the 5.7K clips the
+belt was at 86 % and 81 %, path B at 96 % and 94 %, the frames'
+download and upload being the traffic the belt leaves on the one queue
+the window presents from (`docs/perf.md`, odin's seventh run).
+
+Revisit if: path B fails or is refused on a GPU that doctor said could
+share its device (the copy path takes over, said once a file); huginn's
+numbers favour VA-API imported over the copy there (then path A becomes
+the default where Vulkan Video can't decode); or the GUI on odin misses
+frames with path B where the belt doesn't.
+
 ## D26. egui stays, checked against a timeline prototype at the end of M2
 
 *2026-10-24, before M1's code. Pat approved it from the stack review.

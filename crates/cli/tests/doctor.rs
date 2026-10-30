@@ -160,17 +160,19 @@ fn zero_copy_is_as_the_viewer_reads_the_variable() {
         }
         cmd.output().unwrap()
     };
+    let vulkan = "Vulkan Video's frames";
     for (value, on, mode, says) in [
-        (None, true, "vulkan", "\nZero copy: Vulkan Video's frames, decoded on"),
-        (Some("yes"), true, "vulkan", "\nZero copy: Vulkan Video's frames, decoded on"),
-        (Some(" 1\n"), true, "all", "\nZero copy: on (SPHERECUT_ZERO_COPY=1): VA-API frames"),
-        (Some("0"), false, "off", "\nZero copy: off (SPHERECUT_ZERO_COPY=0), so every frame"),
+        (None, true, "vulkan", vulkan),
+        (Some("yes"), true, "vulkan", vulkan),
+        (Some(" 1\n"), true, "all", "on (SPHERECUT_ZERO_COPY=1)"),
+        (Some("0"), false, "off", "off (SPHERECUT_ZERO_COPY=0)"),
     ] {
         let r = &document::document(&run(value, &["--json"]).stdout)["result"];
         assert_eq!(r["zero_copy"], on, "{value:?}");
         assert_eq!(r["zero_copy_mode"], mode, "{value:?}");
         let text = String::from_utf8_lossy(&run(value, &[]).stdout).into_owned();
-        assert!(text.contains(says), "{value:?}: {text}");
+        let says = format!("\nZero copy: {says}");
+        assert!(text.contains(&says), "{value:?}: {text}");
     }
 }
 
