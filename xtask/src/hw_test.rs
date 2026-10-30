@@ -18,7 +18,9 @@
 //! that dies after its tests reported: each binary's exit is judged on its
 //! own, since a skip anywhere already makes `cargo test` fail. The list and
 //! the run are read from cargo's and libtest's text output, so cargo runs
-//! with fixed terminal settings rather than the user's.
+//! with fixed terminal settings rather than the user's. `--only` runs the
+//! tests whose report names contain its names, and lists the rest as left
+//! out, as `--quick` lists the benchmarks.
 //!
 //! After Tier 2, the Tier 1 tests run as `cargo xtask check` runs them
 //! (`--no-tier1` leaves them out), which catches what this machine's
@@ -82,6 +84,10 @@ pub struct Args {
     /// Leave out the Tier 1 tests on this machine.
     #[arg(long)]
     no_tier1: bool,
+    /// Run only the Tier 2 tests whose names, as `--list` prints them,
+    /// contain this (repeatable); the rest are listed as left out.
+    #[arg(long, value_name = "NAME")]
+    only: Vec<String>,
     /// List the Tier 2 tests a run would run, by test binary, and stop
     /// (a debug build, as `--quick` makes).
     #[arg(long)]
@@ -421,8 +427,9 @@ enum Outcome {
     Failed(String),
     /// With the `TIER2-SKIP:` reason.
     Skipped(String),
-    /// A benchmark, left out by `--quick`.
-    LeftOut,
+    /// Left out on purpose, by the flag named: a benchmark by `--quick`,
+    /// or a test `--only` didn't pick.
+    LeftOut(&'static str),
     /// Listed, but no result came back.
     DidNotRun,
 }
@@ -747,25 +754,64 @@ fn failure(text: &str) -> Outcome {
     Outcome::Failed(text.to_string())
 }
 
+/// Which Tier 2 tests a run means to run: `--quick` leaves out the
+/// benchmarks, and `--only` keeps the tests it names.
+#[derive(Default)]
+struct Selection {
+    quick: bool,
+    only: Vec<String>,
+}
+
+impl Selection {
+    /// The flag that leaves out test `test` of binary `bin`, if one does.
+    fn left_out(&self, bin: &str, test: &str) -> Option<&'static str> {
+        let name = format!("{bin}::{test}");
+        if self.quick && test.contains(BENCH) {
+            Some("`--quick`")
+        } else if !self.only.is_empty() && !self.only.iter().any(|f| name.contains(f.as_str())) {
+            Some("`--only`")
+        } else {
+            None
+        }
+    }
+
+    /// The `--only` names that pick no listed test.
+    fn unmatched(&self, listed: &BTreeMap<String, Vec<String>>) -> Vec<String> {
+        self.only
+            .iter()
+            .filter(|f| {
+                !listed.iter().any(|(bin, tests)| {
+                    tests
+                        .iter()
+                        .any(|t| format!("{bin}::{t}").contains(f.as_str()))
+                })
+            })
+            .cloned()
+            .collect()
+    }
+}
+
 /// Every listed test exactly once, as `binary::test` in name order, with how
-/// it ended. A listed test without a result did not run, unless it is a
-/// benchmark that `--quick` leaves out. Results for tests that were not
-/// listed are kept too.
+/// it ended. A listed test without a result did not run. One `sel` leaves
+/// out is left out even if it ran: libtest runs a picked test's namesakes
+/// in other binaries too. Results for tests that were not listed are kept.
 fn merge(
     listed: &BTreeMap<String, Vec<String>>,
     ran: &BTreeMap<String, BinaryRun>,
-    quick: bool,
+    sel: &Selection,
 ) -> Vec<(String, Outcome)> {
     let mut all: BTreeMap<(&str, &str), Outcome> = BTreeMap::new();
     for (bin, tests) in listed {
         for t in tests {
-            let missing = if quick && t.contains(BENCH) {
-                Outcome::LeftOut
-            } else {
-                Outcome::DidNotRun
+            let o = match sel.left_out(bin, t) {
+                Some(flag) => Outcome::LeftOut(flag),
+                None => ran
+                    .get(bin)
+                    .and_then(|r| r.results.get(t))
+                    .cloned()
+                    .unwrap_or(Outcome::DidNotRun),
             };
-            let o = ran.get(bin).and_then(|r| r.results.get(t)).cloned();
-            all.insert((bin.as_str(), t.as_str()), o.unwrap_or(missing));
+            all.insert((bin.as_str(), t.as_str()), o);
         }
     }
     for (bin, run) in ran {
@@ -790,6 +836,8 @@ struct Tier2 {
     binaries: BTreeMap<String, BinaryRun>,
     /// Every Tier 2 test once.
     results: Vec<(String, Outcome)>,
+    /// The `--only` names that picked no test.
+    unmatched: Vec<String>,
 }
 
 impl Tier2 {
@@ -800,7 +848,7 @@ impl Tier2 {
         run: Captured,
         packages: &BTreeMap<PathBuf, String>,
         dir: &Path,
-        quick: bool,
+        sel: &Selection,
     ) -> Tier2 {
         let listed = parse_list(&list.text);
         let output: BTreeMap<Binary, String> = split_by_binary(&run.text).into_iter().collect();
@@ -810,13 +858,15 @@ impl Tier2 {
             .into_iter()
             .map(|(bin, text)| (bin, parse_run(&text)))
             .collect();
-        let results = merge(&listed, &binaries, quick);
+        let results = merge(&listed, &binaries, sel);
+        let unmatched = sel.unmatched(&listed);
         Tier2 {
             list,
             listed,
             run,
             binaries,
             results,
+            unmatched,
         }
     }
 
@@ -892,6 +942,9 @@ impl Tier2 {
         if missing > 0 {
             p.push(format!("{missing} Tier 2 test(s) did not run"));
         }
+        for f in &self.unmatched {
+            p.push(format!("`--only {f}` picks no Tier 2 test"));
+        }
         // Judged per binary: a skip in one binary explains only its own
         // failure to cargo, not another binary's crash.
         for (bin, b) in &self.binaries {
@@ -906,15 +959,17 @@ impl Tier2 {
     }
 
     /// One line with every count, so nothing missing can look clean.
-    fn counts(&self, quick: bool) -> String {
-        let left_out = if quick {
-            format!(
-                "{} left out by `--quick`, ",
-                self.count(|o| *o == Outcome::LeftOut)
-            )
-        } else {
-            String::new()
-        };
+    fn counts(&self) -> String {
+        let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+        for (_, o) in &self.results {
+            if let Outcome::LeftOut(flag) = o {
+                *by.entry(flag).or_default() += 1;
+            }
+        }
+        let left_out: String = by
+            .iter()
+            .map(|(flag, n)| format!("{n} left out by {flag}, "))
+            .collect();
         format!(
             "Tier 2: {} passed, {} failed, {} skipped, {left_out}{} did not run ({} tests)",
             self.count(|o| *o == Outcome::Passed),
@@ -929,7 +984,7 @@ impl Tier2 {
 /// Lists the workspace's Tier 2 tests, runs them all with what they need
 /// from hw-test, and pairs every listed test with its outcome.
 fn run_tier2(
-    quick: bool,
+    sel: &Selection,
     samples: &Path,
     bench_out: &Path,
     gui_out: &Path,
@@ -949,7 +1004,7 @@ fn run_tier2(
     }
     list_and_run(
         &workspace_root(),
-        quick,
+        sel,
         &tier2_env(samples, bench_out, gui_out, perf_media),
     )
 }
@@ -1035,20 +1090,47 @@ pub(crate) fn listed_tests(dir: &Path) -> Result<Vec<String>> {
 /// Lists the ignored tests of the cargo workspace in `dir`, runs them, and
 /// pairs every listed test with its outcome. Every cargo command gets
 /// `env`, so that they all build the same way, and [`PLAIN_OUTPUT`].
-fn list_and_run<V: AsRef<OsStr>>(dir: &Path, quick: bool, env: &[(&str, V)]) -> Tier2 {
+fn list_and_run<V: AsRef<OsStr>>(dir: &Path, sel: &Selection, env: &[(&str, V)]) -> Tier2 {
     let env = plain_env(env);
     eprintln!("==> listing Tier 2 tests");
-    let (list, packages) = list_tier2(dir, quick, &env);
+    let (list, packages) = list_tier2(dir, sel.quick, &env);
 
-    eprintln!("==> running Tier 2 tests");
-    let cargo = cargo_test(quick);
-    let mut args = cargo;
-    args.extend(["--", "--ignored", "--test-threads=1", "--format", "pretty"]);
-    if quick {
-        args.extend(["--skip", BENCH]);
+    // `--only` matches the names the report gives, which libtest doesn't
+    // know, so libtest gets the picked tests' own names, exactly.
+    let mut picked = Vec::new();
+    if !sel.only.is_empty() {
+        let listed = parse_list(&list.text);
+        let names = binary_names(listed.keys(), &packages, dir);
+        for (bin, tests) in by_name(listed, &names) {
+            for t in tests {
+                if sel.left_out(&bin, &t).is_none() && !picked.contains(&t) {
+                    picked.push(t);
+                }
+            }
+        }
     }
-    let run = capture_merged(dir, "cargo", &args, &env);
-    Tier2::new(list, run, &packages, dir, quick)
+    let run = if !sel.only.is_empty() && picked.is_empty() {
+        eprintln!("==> no Tier 2 test to run");
+        Captured {
+            cmdline: "(none: `--only` picked no test)".into(),
+            ok: true,
+            text: String::new(),
+            elapsed: Duration::ZERO,
+        }
+    } else {
+        eprintln!("==> running Tier 2 tests");
+        let mut args = cargo_test(sel.quick);
+        args.extend(["--", "--ignored", "--test-threads=1", "--format", "pretty"]);
+        if sel.quick {
+            args.extend(["--skip", BENCH]);
+        }
+        if !picked.is_empty() {
+            args.push("--exact");
+            args.extend(picked.iter().map(String::as_str));
+        }
+        capture_merged(dir, "cargo", &args, &env)
+    };
+    Tier2::new(list, run, &packages, dir, sel)
 }
 
 /// Tier 1 on this machine: `cargo test --workspace --all-targets`, in the
@@ -1430,9 +1512,11 @@ pub fn run(a: Args) -> Result<()> {
                 clips = perf_clips::ensure(&media_dir);
             }
             let perf_media = (!a.quick).then_some(media_dir.as_path());
-            tier2 = Some(run_tier2(
-                a.quick, &samples, &bench_out, &gui_out, perf_media,
-            ));
+            let sel = Selection {
+                quick: a.quick,
+                only: a.only.clone(),
+            };
+            tier2 = Some(run_tier2(&sel, &samples, &bench_out, &gui_out, perf_media));
             let exe = target.join(profile).join("spherecut");
             doctor = Some(capture(&exe.to_string_lossy(), &["doctor"]));
             if !a.no_tier1 {
@@ -1462,10 +1546,15 @@ pub fn run(a: Args) -> Result<()> {
     // ---- report ----
     let mut r = String::new();
     let _ = writeln!(r, "# Hardware report: {host} @ {commit}\n");
+    let flags: String = a
+        .quick
+        .then_some(" --quick".to_string())
+        .into_iter()
+        .chain(a.only.iter().map(|f| format!(" --only {f}")))
+        .collect();
     let _ = writeln!(
         r,
-        "Generated by `cargo xtask hw-test{}` in {:.0} s.\n",
-        if a.quick { " --quick" } else { "" },
+        "Generated by `cargo xtask hw-test{flags}` in {:.0} s.\n",
         started.elapsed().as_secs_f64()
     );
     let _ = writeln!(r, "## Summary\n");
@@ -1555,7 +1644,7 @@ pub fn run(a: Args) -> Result<()> {
 
     match &tier2 {
         Some(t) => {
-            let _ = writeln!(r, "**{}.**\n", t.counts(a.quick));
+            let _ = writeln!(r, "**{}.**\n", t.counts());
         }
         None => {
             let _ = writeln!(r, "**Tier 2: not run.**\n");
@@ -1686,7 +1775,7 @@ pub fn run(a: Args) -> Result<()> {
                     Outcome::Passed => "pass".to_string(),
                     Outcome::Failed(_) => "**FAIL**".to_string(),
                     Outcome::Skipped(why) => format!("skipped: {why}"),
-                    Outcome::LeftOut => "skipped: benchmark, left out by `--quick`".to_string(),
+                    Outcome::LeftOut(flag) => format!("left out by {flag}"),
                     Outcome::DidNotRun => "**did not run**".to_string(),
                 };
                 let _ = writeln!(r, "| `{n}` | {result} |");
@@ -1814,7 +1903,7 @@ pub fn run(a: Args) -> Result<()> {
                 "**FAILED** (its output is under Tier 2 tests)".to_string()
             }
             Some((_, Outcome::Skipped(why))) => format!("skipped: {why}"),
-            Some((_, Outcome::LeftOut)) => "was left out".to_string(),
+            Some((_, Outcome::LeftOut(flag))) => format!("was left out by {flag}"),
             Some((_, Outcome::DidNotRun)) => "**did not run**".to_string(),
         },
     };
@@ -1872,7 +1961,7 @@ pub fn run(a: Args) -> Result<()> {
     std::fs::write(&out, &r).with_context(|| format!("writing {}", out.display()))?;
     eprintln!("==> report written to {}", display_rel(&out, &root));
     if let Some(t) = &tier2 {
-        eprintln!("==> {}", t.counts(a.quick));
+        eprintln!("==> {}", t.counts());
     }
     if !missing.is_empty() {
         eprintln!(
@@ -2296,7 +2385,7 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
             },
             &packages,
             Path::new("/w"),
-            false,
+            &Selection::default(),
         );
         let expect = [
             ("probe-a/tier2::same_name", Outcome::DidNotRun),
@@ -2410,7 +2499,7 @@ error: test failed, to rerun pass `-p spherecut-synth --test tier2_hw_decode`
                 ("surprise", Outcome::Failed("x".into())),
             ]),
         )]);
-        let full = merge(&listed, &ran, false);
+        let full = merge(&listed, &ran, &Selection::default());
         let expect = [
             ("tier2_hw_decode::bench_decode", Outcome::DidNotRun),
             ("tier2_hw_decode::vaapi_h264", Outcome::DidNotRun),
@@ -2425,13 +2514,72 @@ error: test failed, to rerun pass `-p spherecut-synth --test tier2_hw_decode`
         assert_eq!(full, expect);
 
         // `--quick` leaves the benchmarks out on purpose.
-        let quick = merge(&listed, &ran, true);
+        let quick = merge(&listed, &ran, &QUICK);
         assert_eq!(
             quick[0],
-            ("tier2_hw_decode::bench_decode".into(), Outcome::LeftOut)
+            (
+                "tier2_hw_decode::bench_decode".into(),
+                Outcome::LeftOut("`--quick`")
+            )
         );
         assert_eq!(quick[1].1, Outcome::DidNotRun);
-        assert_eq!(quick[2].1, Outcome::LeftOut);
+        assert_eq!(quick[2].1, Outcome::LeftOut("`--quick`"));
+    }
+
+    const QUICK: Selection = Selection {
+        quick: true,
+        only: Vec::new(),
+    };
+
+    fn only(names: &[&str]) -> Selection {
+        Selection {
+            quick: false,
+            only: names.iter().map(|n| n.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn only_picks_by_the_reports_names_and_leaves_the_rest_out() {
+        let listed = listed(&[
+            ("tier2_gui", &["gui_smoke"]),
+            ("tier2_samples", &["samples_probe_cleanly", "bench_samples"]),
+        ]);
+        let ran = BTreeMap::from([(
+            "tier2_gui".to_string(),
+            ran(&[("gui_smoke", Outcome::Passed)]),
+        )]);
+        // A test's own name, or the binary's, as `--list` prints them.
+        for sel in [only(&["gui_smoke"]), only(&["tier2_gui::"]), only(&["gui"])] {
+            let m = merge(&listed, &ran, &sel);
+            assert_eq!(m[0], ("tier2_gui::gui_smoke".into(), Outcome::Passed));
+            assert_eq!(m[1].1, Outcome::LeftOut("`--only`"));
+            assert_eq!(m[2].1, Outcome::LeftOut("`--only`"));
+            assert!(sel.unmatched(&listed).is_empty());
+        }
+        // A picked test that didn't come back still did not run.
+        let m = merge(&listed, &ran, &only(&["samples_probe"]));
+        assert_eq!(m[2].1, Outcome::DidNotRun);
+        // A name that picks nothing is a problem, not a clean run.
+        let sel = only(&["gui_smoke", "nonesuch"]);
+        assert_eq!(sel.unmatched(&listed), ["nonesuch"]);
+        let mut t = tier2(true, &[("tier2_gui", &["gui_smoke"])], vec![]);
+        t.unmatched = sel.unmatched(&listed);
+        t.results = merge(&t.listed, &ran, &sel);
+        assert_eq!(t.problems(), ["`--only nonesuch` picks no Tier 2 test"]);
+        assert_eq!(
+            t.counts(),
+            "Tier 2: 1 passed, 0 failed, 0 skipped, 0 did not run (1 tests)"
+        );
+        // With `--quick`, a benchmark `--only` picks is still left out.
+        let sel = Selection {
+            quick: true,
+            only: vec!["samples".into()],
+        };
+        assert_eq!(
+            sel.left_out("tier2_samples", "bench_samples"),
+            Some("`--quick`")
+        );
+        assert_eq!(sel.left_out("tier2_samples", "samples_probe_cleanly"), None);
     }
 
     fn captured(ok: bool) -> Captured {
@@ -2471,13 +2619,14 @@ error: test failed, to rerun pass `-p spherecut-synth --test tier2_hw_decode`
             .map(|(bin, b)| (bin.to_string(), b))
             .collect();
         let listed = listed(list);
-        let results = merge(&listed, &binaries, true);
+        let results = merge(&listed, &binaries, &QUICK);
         Tier2 {
             list: captured(true),
             listed,
             run: captured(run_ok),
             binaries,
             results,
+            unmatched: Vec::new(),
         }
     }
 
@@ -2500,7 +2649,7 @@ error: test failed, to rerun pass `-p spherecut-synth --test tier2_hw_decode`
             &[("a", &["passes", "bench_x"])],
             vec![("a", ran(&[("passes", Outcome::Passed)]))],
         );
-        assert_eq!(t.results[0].1, Outcome::LeftOut);
+        assert_eq!(t.results[0].1, Outcome::LeftOut("`--quick`"));
         assert!(t.problems().is_empty());
     }
 
@@ -2512,7 +2661,7 @@ error: test failed, to rerun pass `-p spherecut-synth --test tier2_hw_decode`
             vec![("a", ran(&[("skips", skip())]))],
         );
         assert_eq!(t.problems(), ["1 Tier 2 test(s) did not run"]);
-        assert!(t.counts(false).contains("1 did not run"));
+        assert!(t.counts().contains("1 did not run"));
         assert_eq!(t.did_not_run(), BTreeMap::from([("b", 1)]));
         let notes = t.binary_notes();
         assert_eq!(notes.len(), 1);
@@ -2554,7 +2703,7 @@ error: test failed, to rerun pass `-p spherecut-synth --test tier2_hw_decode`
         // Cargo output this module could not read must not look clean.
         let t = tier2(true, &[], vec![]);
         assert_eq!(t.problems(), ["the listing found no test binaries"]);
-        assert!(t.counts(false).contains("(0 tests)"));
+        assert!(t.counts().contains("(0 tests)"));
         let t = tier2(true, &[("a", &[]), ("b", &[])], vec![]);
         assert_eq!(t.problems(), ["the listing found no Tier 2 tests"]);
     }
@@ -2748,7 +2897,7 @@ fn main() {
                 quoted(&plain.text)
             );
 
-            let t = list_and_run(&s.0, true, &env);
+            let t = list_and_run(&s.0, &QUICK, &env);
             assert!(t.list.ok, "{why}: {}", quoted(&t.list.text));
             let names: Vec<&str> = t.results.iter().map(|(n, _)| n.as_str()).collect();
             assert_eq!(
@@ -2818,6 +2967,40 @@ fn main() {
                 t1.counts()
             );
         }
+
+        // `--only`: libtest gets the picked test's own name, exactly, and
+        // the report leaves out the rest, its namesake in probe-a and the
+        // binaries that print results whatever they're asked included.
+        std::fs::write(s.0.join(".cargo/config.toml"), "").unwrap();
+        let t = list_and_run(&s.0, &only(&["probe-b/"]), &base);
+        assert!(
+            t.run.cmdline.ends_with("--exact same_name"),
+            "{}",
+            t.run.cmdline
+        );
+        let expect = [
+            ("dies_after_summary::passes", Outcome::LeftOut("`--only`")),
+            ("probe-a/tier2::same_name", Outcome::LeftOut("`--only`")),
+            (
+                "probe-b/tier2::same_name",
+                Outcome::Skipped("nothing here".into()),
+            ),
+            ("says_ok_then_dies::dies", Outcome::LeftOut("`--only`")),
+        ];
+        let expect: Vec<(String, Outcome)> = expect
+            .into_iter()
+            .map(|(n, o)| (n.to_string(), o))
+            .collect();
+        assert_eq!(t.results, expect, "{}", quoted(&t.run.text));
+        // A name that picks nothing runs nothing and fails the run.
+        let t = list_and_run(&s.0, &only(&["nonesuch"]), &base);
+        assert!(t.run.text.is_empty());
+        assert!(
+            t.results
+                .iter()
+                .all(|(_, o)| *o == Outcome::LeftOut("`--only`"))
+        );
+        assert_eq!(t.problems(), ["`--only nonesuch` picks no Tier 2 test"]);
     }
 
     #[test]
