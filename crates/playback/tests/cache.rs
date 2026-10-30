@@ -3,8 +3,9 @@
 //! and the frame at it are never evicted; a decode worker waits at the
 //! limit and goes on when the playhead moves; run links survive
 //! evictions and are never false; a pinned frame stays until it is let
-//! go. A proptest checks them against a model after every step of random
-//! decode runs, seeks, pins and budget changes.
+//! go; frames holding a decoder's surface stay under the stream's cap.
+//! A proptest checks them against a model after every step of random
+//! decode runs, seeks, pins and budget changes, with and without a cap.
 
 #![allow(clippy::unwrap_used)]
 
@@ -20,7 +21,7 @@ use spherecut_core::video::{
     Primaries, Range, SampleBytes, Transfer,
 };
 use spherecut_core::{FrameRate, Rational, StopSource, StopToken, Time};
-use spherecut_media::backend::VideoFrame;
+use spherecut_media::backend::{self, VideoFrame};
 use spherecut_playback::{FrameCache, Insert, MIN_FRAMES};
 
 const RATE: FrameRate = FrameRate::FPS_30;
@@ -63,6 +64,12 @@ fn color() -> ColorInfo {
 /// Frame `k` of a 30 fps stream, `bytes` big, handed out as place `seq`
 /// of run `run`.
 fn frame(k: i64, run: u64, seq: u64, bytes: usize) -> Arc<VideoFrame> {
+    frame_on(k, run, seq, bytes, false)
+}
+
+/// [`frame`], holding a decoder's surface when `surface` (as a VA-API
+/// frame exported as DMA-BUFs does).
+fn frame_on(k: i64, run: u64, seq: u64, bytes: usize, surface: bool) -> Arc<VideoFrame> {
     let width = u32::try_from(bytes).unwrap();
     let mut f = VideoFrame::owned(
         layout(),
@@ -77,6 +84,9 @@ fn frame(k: i64, run: u64, seq: u64, bytes: usize) -> Arc<VideoFrame> {
     f.duration = Some(RATE.frame_duration());
     f.run = run;
     f.seq = seq;
+    if surface {
+        f.transfer = backend::Transfer::DrmPrime;
+    }
     Arc::new(f)
 }
 
@@ -595,6 +605,61 @@ fn the_ui_thread_only_tries_the_lock() {
     assert_eq!(c.playhead(), at(1));
 }
 
+#[test]
+fn frames_holding_a_surface_stay_under_their_streams_cap() {
+    // Slice 5b: a stream decoding into VA-API surfaces holds at most the
+    // cap of them, its window the cap less one; past it the frame
+    // farthest behind goes, as over a budget. A stream of frames in
+    // system memory beside it isn't held to it.
+    let c = FrameCache::new(1 << 30, Time::from_secs(10)).with_surface_cap(Some(4));
+    let stop = StopToken::never();
+    for k in 0..10 {
+        let r = c.try_insert(0, frame_on(k, 1, k as u64, 0, true));
+        let want = if k <= 3 { Insert::Stored } else { Insert::Full };
+        assert_eq!(r, want, "{k}");
+        assert_eq!(
+            c.insert(1, frame(k, 1, k as u64, 10), &stop),
+            Insert::Stored
+        );
+    }
+    // The current frame (0) and a window of three.
+    let s = c.stats();
+    assert_eq!(s.surfaces, 4);
+    assert_eq!(s.frames, 14);
+    // The playhead moves on: the frames behind it go as new ones come.
+    c.set_playhead(at(3));
+    for k in 4..7 {
+        assert_eq!(
+            c.try_insert(0, frame_on(k, 1, k as u64, 0, true)),
+            Insert::Stored
+        );
+    }
+    let kept: Vec<i64> = c
+        .held()
+        .into_iter()
+        .filter(|(st, _)| *st == 0)
+        .map(|(_, f)| index(&f))
+        .collect();
+    assert_eq!(kept, [3, 4, 5, 6]);
+    assert_eq!(c.try_insert(0, frame_on(7, 1, 7, 0, true)), Insert::Full);
+    // A pinned frame past the window adds one; a smaller cap evicts down
+    // to it, the farthest behind first; no cap holds them all.
+    assert_eq!(c.pin(0, frame_on(9, 2, 9, 0, true), &stop), Insert::Stored);
+    assert_eq!(c.stats().surfaces, 5);
+    c.set_playhead(at(5));
+    c.set_surface_cap(Some(2));
+    let kept: Vec<i64> = c
+        .held()
+        .into_iter()
+        .filter(|(st, _)| *st == 0)
+        .map(|(_, f)| index(&f))
+        .collect();
+    assert_eq!(kept, [5, 6, 9]);
+    c.set_surface_cap(None);
+    assert_eq!(c.try_insert(0, frame_on(7, 1, 7, 0, true)), Insert::Stored);
+    assert_eq!(c.stats().surfaces, 4);
+}
+
 // The model-checked property test.
 
 const FRAMES: i64 = 24;
@@ -648,7 +713,8 @@ fn op() -> impl Strategy<Value = Op> {
 
 /// What the test knows: the runs each held frame was handed out in
 /// while held, the streams offered frames since the last clear, each
-/// stream's pinned frame, and the cache's settings.
+/// stream's pinned frame, and the cache's settings: with a surface cap,
+/// the streams whose frames hold a surface.
 #[derive(Debug)]
 struct Model {
     runs: BTreeMap<(usize, i64), BTreeSet<u64>>,
@@ -657,6 +723,8 @@ struct Model {
     budget: u64,
     ahead: Time,
     playhead: Time,
+    surface_cap: Option<usize>,
+    surfaces: [bool; STREAMS],
 }
 
 type Held = BTreeMap<(usize, i64), u64>;
@@ -686,9 +754,18 @@ impl Model {
         self.budget / 2 / self.seen.len().max(1) as u64
     }
 
+    /// The frames stream `s`'s window may hold: the surface cap less one
+    /// for a stream holding surfaces, else any number.
+    fn window_frames(&self, s: usize) -> usize {
+        match self.surface_cap {
+            Some(c) if self.surfaces[s] => c - 1,
+            _ => usize::MAX,
+        }
+    }
+
     /// Stream `s`'s window: the frames ahead of the playhead, nearest
-    /// first, while within `ahead` and half the budget, and the nearest
-    /// whatever.
+    /// first, while within `ahead`, half the budget and the surface cap
+    /// less one, and the nearest whatever.
     fn window(&self, held: &Held, s: usize) -> BTreeSet<i64> {
         let limit = self.playhead.checked_add(self.ahead).unwrap();
         let mut out = BTreeSet::new();
@@ -698,12 +775,24 @@ impl Model {
                 continue;
             }
             bytes += b;
-            if !out.is_empty() && (at(k) > limit || bytes > self.cap()) {
+            if !out.is_empty()
+                && (at(k) > limit || bytes > self.cap() || out.len() >= self.window_frames(s))
+            {
                 break;
             }
             out.insert(k);
         }
         out
+    }
+
+    /// The streams holding more frames than the surface cap, in order.
+    fn over_cap(&self, held: &Held) -> Vec<usize> {
+        let Some(cap) = self.surface_cap else {
+            return Vec::new();
+        };
+        (0..STREAMS)
+            .filter(|&s| self.surfaces[s] && held.range((s, 0)..(s + 1, 0)).count() > cap)
+            .collect()
     }
 
     fn current(&self, held: &Held, s: usize) -> Option<i64> {
@@ -721,48 +810,68 @@ impl Model {
             .map(|(_, &b)| b)
             .collect();
         let limit = self.playhead.checked_add(self.ahead).unwrap();
-        nearer.is_empty() || (at(k) <= limit && nearer.iter().sum::<u64>() + bytes <= self.cap())
+        nearer.is_empty()
+            || (at(k) <= limit
+                && nearer.iter().sum::<u64>() + bytes <= self.cap()
+                && nearer.len() < self.window_frames(s))
     }
 
     /// What is left of `held` once the rules have evicted down to the
-    /// budget: the frame farthest behind its stream's current frame goes
-    /// first, whichever stream it is in (the lower stream on a tie), and
-    /// only when none is left the frame farthest past its stream's window
-    /// (the higher stream on a tie). Current frames, windows and pinned
-    /// frames stay.
+    /// budget and the surface cap: the frame farthest behind its stream's
+    /// current frame goes first, whichever stream it is in (the lower
+    /// stream on a tie), and only when none is left the frame farthest
+    /// past its stream's window (the higher stream on a tie). Over the
+    /// cap, the same of the first stream over it that has one to evict.
+    /// Current frames, windows and pinned frames stay.
     fn shrink(&self, held: &Held) -> Held {
         let mut left = held.clone();
-        while left.values().sum::<u64>() > self.budget {
-            let behind = (0..STREAMS)
-                .filter_map(|s| {
-                    let current = self.current(&left, s)?;
-                    let k = left
-                        .range((s, 0)..(s, current))
-                        .map(|(&(_, k), _)| k)
-                        .find(|&k| !self.pinned(s, k))?;
-                    Some((k, s))
-                })
-                .min();
-            let past = || {
-                (0..STREAMS)
-                    .filter_map(|s| {
-                        let window = self.window(&left, s);
-                        let k = left
-                            .range((s, 0)..(s + 1, 0))
-                            .rev()
-                            .map(|(&(_, k), _)| k)
-                            .take_while(|&k| at(k) > self.playhead && !window.contains(&k))
-                            .find(|&k| !self.pinned(s, k))?;
-                        Some((k, s))
-                    })
-                    .max()
+        loop {
+            let pick = if left.values().sum::<u64>() > self.budget {
+                self.victim(&left, &(0..STREAMS).collect::<Vec<_>>())
+            } else {
+                self.over_cap(&left)
+                    .into_iter()
+                    .find_map(|s| self.victim(&left, &[s]))
             };
-            match behind.or_else(past) {
+            match pick {
                 Some((k, s)) => left.remove(&(s, k)),
                 None => break,
             };
         }
         left
+    }
+
+    /// The frame the rules evict next among `streams`' frames.
+    fn victim(&self, left: &Held, streams: &[usize]) -> Option<(i64, usize)> {
+        let behind = streams
+            .iter()
+            .copied()
+            .filter_map(|s| {
+                let current = self.current(left, s)?;
+                let k = left
+                    .range((s, 0)..(s, current))
+                    .map(|(&(_, k), _)| k)
+                    .find(|&k| !self.pinned(s, k))?;
+                Some((k, s))
+            })
+            .min();
+        let past = || {
+            streams
+                .iter()
+                .copied()
+                .filter_map(|s| {
+                    let window = self.window(left, s);
+                    let k = left
+                        .range((s, 0)..(s + 1, 0))
+                        .rev()
+                        .map(|(&(_, k), _)| k)
+                        .take_while(|&k| at(k) > self.playhead && !window.contains(&k))
+                        .find(|&k| !self.pinned(s, k))?;
+                    Some((k, s))
+                })
+                .max()
+        };
+        behind.or_else(past)
     }
 }
 
@@ -794,13 +903,37 @@ fn check(
         s.budget,
         pinned
     );
+    // Frames holding a surface are counted, and never pass the cap but
+    // by a pinned frame.
+    let surfaces = |st: usize| after.range((st, 0)..(st + 1, 0)).count();
+    let counted: usize = (0..STREAMS)
+        .filter(|&st| m.surfaces[st])
+        .map(surfaces)
+        .sum();
+    prop_assert_eq!(s.surfaces, counted);
+    if let Some(cap) = m.surface_cap {
+        for st in (0..STREAMS).filter(|&st| m.surfaces[st]) {
+            let pin = m
+                .pins
+                .get(&st)
+                .is_some_and(|&k| after.contains_key(&(st, k)));
+            prop_assert!(
+                surfaces(st) <= cap + usize::from(pin),
+                "stream {} holds {} surfaces, over its cap of {}",
+                st,
+                surfaces(st),
+                cap
+            );
+        }
+    }
     // The frames evicted are the ones the rules pick, in their order, and
-    // no more than the budget needs. A playhead move evicts nothing, so
-    // over the budget by a pinned frame the cache may keep, until the
-    // next step that evicts, frames the move left to the rules: only
-    // then do they differ.
+    // no more than the budget and the cap need. A playhead move evicts
+    // nothing, so over the budget or the cap by a pinned frame the cache
+    // may keep, until the next step that evicts, frames the move left to
+    // the rules: only then do they differ.
     let kept = m.shrink(start);
-    let lazy = !evicts && start == after && s.bytes > s.budget;
+    let over = s.bytes > s.budget || !m.over_cap(after).is_empty();
+    let lazy = !evicts && start == after && over;
     prop_assert!(
         kept == *after || lazy,
         "the rules keep {:?} of {:?}",
@@ -885,7 +1018,10 @@ fn offer(
     let admitted = was_held || !ahead || pinned || m.admits(&before, s, k, bytes);
     // Places follow the frame index, so that a run's places that follow
     // on are frames that follow on.
-    let r = c.try_insert(s, frame(k, run, k as u64 + 100, bytes as usize));
+    let r = c.try_insert(
+        s,
+        frame_on(k, run, k as u64 + 100, bytes as usize, m.surfaces[s]),
+    );
     let after = held(c);
     match r {
         Insert::Full => {
@@ -901,9 +1037,9 @@ fn offer(
         Insert::Dropped => {
             // Not pinned, and behind the playhead with nothing farther
             // behind to make room; or held already, in a cache a playhead
-            // move left over its budget, and the next to go by the rules
-            // (which `check` holds the eviction to).
-            let over = before.values().sum::<u64>() > m.budget;
+            // move left over its budget or the surface cap, and the next
+            // to go by the rules (which `check` holds the eviction to).
+            let over = before.values().sum::<u64>() > m.budget || !m.over_cap(&before).is_empty();
             prop_assert!(
                 !pinned && if was_held { over } else { !ahead },
                 "frame {} dropped",
@@ -936,9 +1072,12 @@ proptest! {
         ahead_frames in 0..12i64,
         sizes in proptest::collection::vec(1..=MAX_BYTES, FRAMES as usize * STREAMS),
         ops in proptest::collection::vec(op(), 1..40),
+        surface_cap in proptest::option::of(2..8usize),
+        surfaces in any::<[bool; STREAMS]>(),
     ) {
         let ahead = at(ahead_frames);
         let c = FrameCache::new(budget, ahead);
+        c.set_surface_cap(surface_cap);
         let mut m = Model {
             runs: BTreeMap::new(),
             seen: BTreeSet::new(),
@@ -946,6 +1085,8 @@ proptest! {
             budget,
             ahead,
             playhead: Time::ZERO,
+            surface_cap,
+            surfaces,
         };
         for op in ops {
             match op {
@@ -992,7 +1133,7 @@ proptest! {
                     let new_stream = m.seen.insert(s);
                     let was_held = before.contains_key(&(s, k));
                     m.pins.insert(s, k);
-                    let r = c.pin(s, frame(k, run, k as u64 + 100, bytes as usize), &StopToken::never());
+                    let r = c.pin(s, frame_on(k, run, k as u64 + 100, bytes as usize, m.surfaces[s]), &StopToken::never());
                     let after = held(&c);
                     // Held, past the window and the budget too.
                     prop_assert!(after.contains_key(&(s, k)), "pinned frame {} not held", k);

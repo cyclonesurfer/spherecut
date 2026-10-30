@@ -50,6 +50,17 @@
 //! farthest behind), and a step on one stream to the playhead another
 //! stream's worker moved.
 //!
+//! **Surfaces** (slice 5b). A frame exported from a VA-API decoder
+//! ([`Transfer::DrmPrime`]) holds one of the surfaces of its decoder's
+//! pool, which has only so many: the cache holds at most
+//! [`set_surface_cap`](FrameCache::set_surface_cap) such frames a
+//! stream. They are counted beside the bytes (they hold none of system
+//! memory): a stream's window takes at most the cap less one of them,
+//! leaving room for its current frame, and past the cap the stream's
+//! frame farthest behind goes, then its frame farthest past its window,
+//! as over the budget. A pinned frame may add one more. Without a cap
+//! (the default) they are only bytes, of which they have none.
+//!
 //! **Back-pressure.** A frame ahead of the playhead goes in only if it
 //! would be in the window: [`FrameCache::insert`] waits on a condition
 //! variable until it would (the playhead moves on, the budget grows) or
@@ -77,7 +88,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use spherecut_core::{Rational, StopToken, Time, may_block};
-use spherecut_media::backend::VideoFrame;
+use spherecut_media::backend::{Transfer, VideoFrame};
 
 /// A budget below this many frames of the source raises the "frame cache
 /// too small" notice; playback goes on.
@@ -101,8 +112,8 @@ pub enum Insert {
     /// It isn't held: the eviction its coming in set off took it, as the
     /// rules say. It is behind the playhead, and nothing farther behind
     /// made room for it; or it was held already, in a cache a playhead
-    /// move left over its budget, and the move left it the next to go
-    /// (ahead past the window, or behind).
+    /// move left over its budget or its surface cap, and the move left it
+    /// the next to go (ahead past the window, or behind).
     Dropped,
     /// It is ahead of the playhead, past the window: from
     /// [`FrameCache::try_insert`], which doesn't wait.
@@ -124,6 +135,8 @@ pub struct FrameCache {
 struct Entry {
     frame: Arc<VideoFrame>,
     bytes: u64,
+    /// It holds one of its decoder's surfaces.
+    surface: bool,
     /// Every (run, place) the frame was handed out as.
     runs: Vec<(u64, u64)>,
 }
@@ -131,6 +144,12 @@ struct Entry {
 #[derive(Debug)]
 struct State {
     budget: u64,
+    /// The frames holding a surface each stream may hold.
+    surface_cap: Option<usize>,
+    /// The frames holding a surface each stream holds, kept as frames
+    /// come and go: counting them under the lock at each offer slows the
+    /// presenter's tries for it.
+    surfaces: BTreeMap<usize, usize>,
     ahead: Time,
     playhead: Time,
     frames: BTreeMap<(usize, Time), Entry>,
@@ -174,6 +193,8 @@ pub struct CacheStats {
     pub evicted: u64,
     pub dropped: u64,
     pub waits: u64,
+    /// The frames holding a decoder's surface, of every stream.
+    pub surfaces: usize,
 }
 
 impl State {
@@ -217,14 +238,22 @@ impl State {
         self.budget / 2 / self.frame_bytes.len().max(1) as u64
     }
 
+    /// The frames holding a surface each stream's window may hold: the
+    /// cap less one, for the current frame.
+    fn window_surfaces(&self) -> usize {
+        self.surface_cap.map_or(usize::MAX, |c| c.saturating_sub(1))
+    }
+
     /// The time of the farthest frame in stream `s`'s window.
     fn window_end(&self, s: usize) -> Option<Time> {
         let (limit, cap) = (self.limit(), self.cap());
         let mut bytes = 0u64;
+        let mut surfaces = 0usize;
         let mut end = None;
         for (t, e) in self.ahead_of(s) {
             bytes = bytes.saturating_add(e.bytes);
-            if end.is_some() && (t > limit || bytes > cap) {
+            surfaces += usize::from(e.surface);
+            if end.is_some() && (t > limit || bytes > cap || surfaces > self.window_surfaces()) {
                 break;
             }
             end = Some(t);
@@ -233,18 +262,34 @@ impl State {
     }
 
     /// Whether a frame of `bytes` at `t`, ahead of the playhead, would be
-    /// in stream `s`'s window.
-    fn admits(&self, s: usize, t: Time, bytes: u64) -> bool {
+    /// in stream `s`'s window; `surface` when it holds one.
+    fn admits(&self, s: usize, t: Time, bytes: u64, surface: bool) -> bool {
         let mut before = 0u64;
         let mut nearer = 0usize;
+        let mut surfaces = usize::from(surface);
         for (u, e) in self.ahead_of(s) {
             if u >= t {
                 break;
             }
             before = before.saturating_add(e.bytes);
             nearer += 1;
+            surfaces += usize::from(e.surface);
         }
-        nearer == 0 || (t <= self.limit() && before.saturating_add(bytes) <= self.cap())
+        nearer == 0
+            || (t <= self.limit()
+                && before.saturating_add(bytes) <= self.cap()
+                && surfaces <= self.window_surfaces())
+    }
+
+    /// The frame to evict next for the surface cap: of the first stream
+    /// over it that has one to evict, the one [`victim`](Self::victim)'s
+    /// order picks among its frames with a surface.
+    fn surface_victim(&self) -> Option<(usize, Time)> {
+        let cap = self.surface_cap?;
+        self.surfaces
+            .iter()
+            .filter(|&(_, &n)| n > cap)
+            .find_map(|(&s, _)| self.victim_among(&[s], |e| e.surface))
     }
 
     /// The frame to evict next: the farthest behind the playhead of any
@@ -253,7 +298,20 @@ impl State {
     /// pinned.
     fn victim(&self) -> Option<(usize, Time)> {
         let streams: Vec<usize> = self.frame_bytes.keys().copied().collect();
-        let times = |s: usize| self.stream(s).map(|(&(_, t), _)| t);
+        self.victim_among(&streams, |_| true)
+    }
+
+    /// [`victim`](Self::victim) among `streams`' frames that `take` takes.
+    fn victim_among(
+        &self,
+        streams: &[usize],
+        take: impl Fn(&Entry) -> bool,
+    ) -> Option<(usize, Time)> {
+        let times = |s: usize| {
+            self.stream(s)
+                .filter(|(_, e)| take(e))
+                .map(|(&(_, t), _)| t)
+        };
         let behind = streams
             .iter()
             .filter_map(|&s| {
@@ -281,8 +339,22 @@ impl State {
             .map(|(t, s)| (s, t))
     }
 
+    /// Count a frame holding a surface in or out of stream `s`.
+    fn count_surface(&mut self, s: usize, surface: bool, add: bool) {
+        if !surface {
+            return;
+        }
+        let n = self.surfaces.entry(s).or_default();
+        if add {
+            *n += 1;
+        } else {
+            *n = n.saturating_sub(1);
+        }
+    }
+
     fn remove(&mut self, key: (usize, Time)) {
         if let Some(e) = self.frames.remove(&key) {
+            self.count_surface(key.0, e.surface, false);
             self.bytes -= e.bytes;
             for (run, place) in e.runs {
                 if self.links.get(&(key.0, run, place)) == Some(&key.1) {
@@ -292,11 +364,17 @@ impl State {
         }
     }
 
-    /// Evict until the budget holds what is left, or only current frames,
+    /// Evict until the budget holds what is left and no stream holds
+    /// more frames with a surface than the cap, or only current frames,
     /// windows and pinned frames are.
     fn shrink(&mut self) {
-        while self.bytes > self.budget {
-            let Some(key) = self.victim() else {
+        loop {
+            let key = if self.bytes > self.budget {
+                self.victim()
+            } else {
+                self.surface_victim()
+            };
+            let Some(key) = key else {
                 break;
             };
             self.remove(key);
@@ -308,10 +386,11 @@ impl State {
     /// not pinned).
     fn offer(&mut self, s: usize, frame: &Arc<VideoFrame>) -> Option<Insert> {
         let (t, bytes) = (frame.time, frame.bytes() as u64);
+        let surface = frame.transfer == Transfer::DrmPrime;
         let place = (frame.run, frame.seq);
         self.frame_bytes.insert(s, bytes);
         let held = self.frames.contains_key(&(s, t));
-        if !held && t > self.playhead && !self.pinned(s, t) && !self.admits(s, t, bytes) {
+        if !held && t > self.playhead && !self.pinned(s, t) && !self.admits(s, t, bytes, surface) {
             return None;
         }
         // A link to another time is a decoder that numbered its runs
@@ -340,6 +419,9 @@ impl State {
                     self.bytes = self.bytes - e.bytes + bytes;
                     e.frame = frame.clone();
                     e.bytes = bytes;
+                    let was = std::mem::replace(&mut e.surface, surface);
+                    let n = self.surfaces.entry(s).or_default();
+                    *n = (*n + usize::from(surface)).saturating_sub(usize::from(was));
                     Insert::Stored
                 } else {
                     Insert::Known
@@ -351,10 +433,12 @@ impl State {
                     Entry {
                         frame: frame.clone(),
                         bytes,
+                        surface,
                         runs: vec![place],
                     },
                 );
                 self.bytes += bytes;
+                self.count_surface(s, surface, true);
                 Insert::Stored
             }
         };
@@ -422,6 +506,7 @@ impl State {
             evicted: self.evicted,
             dropped: self.dropped,
             waits: self.waits,
+            surfaces: self.surfaces.values().sum(),
         }
     }
 }
@@ -433,6 +518,8 @@ impl FrameCache {
         FrameCache {
             state: Mutex::new(State {
                 budget,
+                surface_cap: None,
+                surfaces: BTreeMap::new(),
                 ahead,
                 playhead: Time::ZERO,
                 frames: BTreeMap::new(),
@@ -625,6 +712,27 @@ impl FrameCache {
         });
     }
 
+    /// Hold at most `cap` frames with a decoder's surface a stream from
+    /// now on, evicting down to it; `None` for no cap. A cap below 2 is 2:
+    /// the current frame and the next.
+    #[track_caller]
+    pub fn set_surface_cap(&self, cap: Option<usize>) {
+        let g = self.lock();
+        self.changed(g, |s| {
+            s.surface_cap = cap.map(|c| c.max(2));
+            s.shrink();
+        });
+    }
+
+    /// This cache with [`set_surface_cap`](Self::set_surface_cap)'s cap,
+    /// before it is shared: it takes no lock, so the UI thread can make
+    /// one.
+    pub fn with_surface_cap(mut self, cap: Option<usize>) -> Self {
+        let s = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
+        s.surface_cap = cap.map(|c| c.max(2));
+        self
+    }
+
     /// Keep frames as far as `ahead` past the playhead.
     #[track_caller]
     pub fn set_ahead(&self, ahead: Time) {
@@ -638,6 +746,7 @@ impl FrameCache {
         let g = self.lock();
         self.changed(g, |s| {
             s.frames.clear();
+            s.surfaces.clear();
             s.links.clear();
             s.frame_bytes.clear();
             s.pins.clear();
