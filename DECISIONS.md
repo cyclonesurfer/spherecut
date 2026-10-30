@@ -1669,6 +1669,15 @@ takes, run on odin next; odin's sixth run (PR #8) has VA-API's download
 at 31 to 122 ms a frame at p50 (5.7K 8-bit to 8K), the cost this
 removes. Path B follows on a branch of its own.
 
+*Measured on odin, 2026-10-30* (PR #9, at f3e860d, `docs/perf.md`).
+Path A's Tier 2 tests pass: every frame of HEVC Main, Main 10 and an X5
+lens came through its import byte for byte, and no import was refused.
+Imported, VA-API decodes the X5's 1920² and 2880² modes about twice as
+fast as copied (265 and 136 fps a lens unthrottled), level with Vulkan
+Video copied, and its 8K modes three times and half again as fast (76
+and 59), where Vulkan Video copied makes 63 and 78. The choice before
+M3 waits for path B's rows and huginn's.
+
 ## D26. egui stays, checked against a timeline prototype at the end of M2
 
 *2026-10-24, before M1's code. Pat approved it from the stack review.

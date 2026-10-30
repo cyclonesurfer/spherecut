@@ -1,0 +1,34 @@
+== main-1 1793342749.144542772
+always [madvise] never
+always defer defer+madvise [madvise] never
+               total        used        free      shared  buff/cache   available
+Mem:              62          13          14           0          34          49
+Swap:              7           3           4
+== 43abcda 1793343125.730577516
+always [madvise] never
+always defer defer+madvise [madvise] never
+               total        used        free      shared  buff/cache   available
+Mem:              62          13          14           0          34          49
+Swap:              7           3           4
+== main-2 1793343452.840479968
+always [madvise] never
+always defer defer+madvise [madvise] never
+               total        used        free      shared  buff/cache   available
+Mem:              62          13          14           0          34          49
+Swap:              7           3           4
+== main-2 1793343670.059367745
+always [madvise] never
+always defer defer+madvise [madvise] never
+               total        used        free      shared  buff/cache   available
+Mem:              62          13          14           0          34          49
+Swap:              7           3           4
+AnonHugePages:         0 kB
+== C-nothp 1793344039.880770656
+always [madvise] never
+always defer defer+madvise [madvise] never
+               total        used        free      shared  buff/cache   available
+Mem:              62          13          14           0          35          49
+Swap:              7           3           4
+AnonHugePages:         0 kB
+== after-C 1793344421.068147594
+AnonHugePages:         0 kB

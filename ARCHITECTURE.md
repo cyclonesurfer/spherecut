@@ -78,7 +78,8 @@ until slice 5b gives render one such module to open its Vulkan device
   `AVPixFmtDescriptor`) and the format swscale converts the others to
   (`conversion_target`, `Scaler`), copying hardware frames to system
   memory (`download_into_pool`, into a `DownloadPool` of buffers mapped on
-  huge pages, and doctor's `download_frame`) and the surfaces a hardware decoder keeps spare
+  huge pages for Vulkan and from `av_buffer_alloc` for VA-API, and
+  doctor's `download_frame`) and the surfaces a hardware decoder keeps spare
   (`set_extra_hw_frames`), `av_seek_frame` and the demuxer index (its end, its first,
   last and shown entries, its timestamps, the keyframe before a time),
   skipping non-reference frames, the bytes a frame's buffers take

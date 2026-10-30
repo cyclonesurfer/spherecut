@@ -581,7 +581,7 @@ per lens. What these add:
   dropped. Every Vulkan Video run plays in real time, X5 8K30 included,
   with 2.6 × to spare unthrottled.
 - VA-API's download is still the wall (31, 110 and 122 ms at p50), and
-  zero copy (slice 5b, its runs to come) is what would lift it.
+  zero copy (slice 5b, below) is what lifts it.
 - VA-API's decode of the X5's 8K modes in `bench_samples_realtime_decode`
   came out at 0.60 and 0.43 × against the fifth run's 1.38 and 1.04,
   every run of the three alike, while the other modes and the
@@ -589,6 +589,61 @@ per lens. What these add:
   of each 8K30 and 2.9K60 at under half the median, so VA-API at these
   sizes has been slow before; slice 5b's odin run runs the bench at
   43abcda and at main to tell code from machine.
+- It was the code: 43abcda ran at 1.32 and 0.93 ×, main at 0.61 and
+  0.46 ×, and with transparent huge pages off (`PR_SET_THP_DISABLE`)
+  main stayed at 0.60 and 0.43 ×. A test that played the 3840² modes
+  with each of five allocators for the download pool, five rounds,
+  twice (branch `diag/vaapi-8k-alloc`), had `av_buffer_alloc` at 1.32
+  to 1.39 × at 25 fps and 0.95 to 1.08 × at 29.97 in all 20 runs, and
+  every mapping (2 MiB aligned or not, advised or not, the data at the
+  start or 64 bytes in) at about half on most runs. The speed followed
+  the minor faults: 93 000 to 208 000 a run when fast, 0.7 to 3.4
+  million when slow. 2880² was 1.0 × under every allocator. The faults
+  aren't the pool's own: that bench's decoders take two buffers each,
+  some 11 000 faults at 3840², and why the driver's side faults more
+  beside mappings isn't known. So the pool takes VA-API's buffers from
+  `av_buffer_alloc` again, and keeps the huge-page mappings for Vulkan
+  Video's, which they made play (m1-plan amendment 18).
+- With that fix (d8a9054) `bench_samples_realtime_decode` ran twice:
+  VA-API at 1.39 and 1.39 × on the X5's 8K25 and 1.04 and 1.02 × on
+  8K30, every run of three within 0.04 of its median; the 1920² and
+  2880² modes, software and Vulkan Video within 4 % of before, and the
+  LRV proxies within 16 % either way, as their small, fast decodes have
+  moved before. Both 5.7K
+  gates passed, Vulkan Video's rows as in the table above (unthrottled
+  122.5 and 87 fps, nothing dropped) and VA-API's as before (download
+  36 and 148 ms at p50): the noisy 5.7K clips weren't slowed by the
+  mappings, and the copy is still VA-API's wall there. The download
+  pool tests passed; VA-API's 3840×1920 NV12 took 1787 minor faults a
+  frame in two runs of three where earlier runs took 116, the same two
+  states as the 8K decode's, with the pool allocating nothing after
+  the warm-up. The faults are the driver's (amendment 12).
+
+Zero copy, path A (slice 5b, at f3e860d, PR #9,
+`hw-reports/odin-5b-f3e860d/`): `zero_copy_matches_copy_path` passed
+(HEVC Main, Main 10 and an X5 lens, 48 frames each, every import
+byte-identical to the copy), `zero_copy_frame_matches_the_copy` passed
+(H.264, HEVC Main and Main 10), and an 8K perf clip frame rendered
+through `frame --zero-copy` was the same PNG as through `--decoder
+vaapi`. `bench_x5_8k30_zero_copy_vs_copy`, unthrottled fps per lens and
+the stages' p50 in ms, VA-API copied / VA-API imported / Vulkan Video
+copied:
+
+| X5 mode | Unthrottled | `upload_cpu` | `download` | Dropped after 1 s |
+|---|---:|---:|---:|---:|
+| 2× 1920² @ 119.88 | 142 / 265 / 259 | 1.03 / 0.32 / 1.00 | 6.24 / 1.70 / 2.94 | at the 60 Hz display's rate on all three, none decode-dropped |
+| 2× 2880² @ 59.94 | 66 / 136 / 135 | 1.67 / 0.31 / 1.67 | 13.94 / 0.02 / 5.93 | 0 / 0 / 0 |
+| 2× 3840² @ 25 | 24 / 76 / 63 | 2.55 / 0.50 / 3.61 | 22.46 / 0.03 / 13.00 | 0 / 25 (23 decode-dropped) / 0 |
+| 2× 3840² @ 29.97 | 41 / 59 / 78 | 4.27 / 0.95 / 3.82 | 26.03 / 0.02 / 3.76 | 0 / 0 / 0 |
+
+No import was refused (1175 to 3579 a mode). Imported, VA-API decodes
+the 1920² and 2880² modes about twice as fast as copied, level with
+Vulkan Video copied, and its upload's CPU time falls to a third or
+less; the "download" left is the map. At 3840² it is three times as
+fast at 25 fps and half again at 29.97, where Vulkan Video copied
+stays ahead. VA-API's copied 3840² @ 25 row, 24 fps, is under the
+sixth run's 42, as the slow allocator above would make it; path B's
+rows and the allocator's fix come with the next runs.
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 
