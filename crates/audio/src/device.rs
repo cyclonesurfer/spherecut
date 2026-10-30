@@ -277,6 +277,7 @@ pub(crate) fn open() -> Result<(Arc<Shared>, Worker), AudioError> {
                     "audio output opened"
                 );
                 AudioOut {
+                    opened: shared.nanos(Instant::now()),
                     shared,
                     stream: Some(stream),
                     playing: true,
@@ -320,6 +321,9 @@ struct AudioOut {
     pause_failed: bool,
     paused_since: Option<Instant>,
     retry_at: Option<Instant>,
+    /// When the stream was opened, in the clock's nanoseconds: a new
+    /// stream gets [`RETRY`] to call back before it is opened again.
+    opened: i64,
     errors: Receiver<cpal::Error>,
     error_tx: Sender<cpal::Error>,
     fallbacks: u64,
@@ -368,15 +372,15 @@ impl AudioOut {
     }
 
     /// On the system clock while playing, with no callback for
-    /// [`RETRY`]: the stream won't come back by itself.
+    /// [`RETRY`] since the fallback or since the stream opened: the
+    /// stream won't come back by itself.
     fn rebuild_if_stalled(&mut self, now: Instant) {
         let s = self.shared.read();
         if self.stream.is_none() || !s.running || !s.system {
             return;
         }
         let last = self.shared.last_callback.load(Ordering::Acquire);
-        let quiet = self.shared.nanos(now).saturating_sub(last.max(s.wall));
-        if quiet > crate::clock::nanos_of(RETRY) {
+        if quiet_too_long(self.shared.nanos(now), last, s.wall, self.opened) {
             tracing::warn!("audio output stalled: opening it again");
             self.stream = None;
             self.retry_at = None;
@@ -401,6 +405,7 @@ impl AudioOut {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner) = found.info;
                 self.stream = Some(stream);
+                self.opened = self.shared.nanos(now);
                 self.playing = false;
                 self.pause_failed = false;
                 self.paused_since = None;
@@ -457,9 +462,31 @@ impl AudioOut {
     }
 }
 
+/// Whether, at `now`, a stream has had no callback for longer than
+/// [`RETRY`] since the last one (`last`), the clock's fallback (`wall`)
+/// and its own opening (`opened`), all in the clock's nanoseconds.
+fn quiet_too_long(now: i64, last: i64, wall: i64, opened: i64) -> bool {
+    now.saturating_sub(last.max(wall).max(opened)) > crate::clock::nanos_of(RETRY)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stalled_stream_is_opened_again_once_each_retry() {
+        let s = 1_000_000_000i64;
+        // A callback 1 s ago, the fallback 3 s ago: not yet.
+        assert!(!quiet_too_long(10 * s, 9 * s, 7 * s, 0));
+        // Quiet since the fallback 3 s ago (callbacks stopped before it).
+        assert!(quiet_too_long(10 * s, 6 * s, 7 * s, 0));
+        // Opened again 50 ms ago, still no callback: it gets its 2 s.
+        assert!(!quiet_too_long(10 * s, 6 * s, 7 * s, 10 * s - s / 20));
+        assert!(!quiet_too_long(11 * s, 6 * s, 7 * s, 10 * s - s / 20));
+        assert!(quiet_too_long(12 * s, 6 * s, 7 * s, 10 * s - s / 20));
+        // The clock's `NEVER` for no callback yet.
+        assert!(quiet_too_long(10 * s, i64::MIN, 7 * s, 0));
+    }
 
     #[test]
     fn the_buffer_is_1024_or_the_nearest_the_device_allows() {

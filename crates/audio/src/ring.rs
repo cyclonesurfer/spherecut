@@ -26,9 +26,13 @@
 //! chunk of the epoch it plays, and the producer reclaims only chunks of
 //! an older one, so a reclaimed chunk is never one being played (except
 //! across a seek's first callback, whose samples are the old epoch's
-//! anyway).
+//! anyway). The producer writes a reclaimed slot after a release fence,
+//! and the consumer reads `tail` again after an acquire fence once it
+//! has read a chunk's header, and again once it has copied its samples:
+//! if it saw anything written after the reclaim, it finds `tail` moved,
+//! and acts on nothing it read.
 
-use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering, fence};
 
 /// Frames in a chunk.
 pub const CHUNK_FRAMES: usize = 512;
@@ -137,6 +141,11 @@ impl ChunkRing {
             let head = self.head.load(Ordering::Relaxed);
             let tail = self.tail.load(Ordering::Acquire);
             if head.saturating_sub(tail) < self.chunks.len() as u64 {
+                // The slot may be one just reclaimed, which the consumer
+                // may still be reading: it reads `tail` again after an
+                // acquire fence, and finds it moved if it saw any of
+                // this.
+                fence(Ordering::Release);
                 let c = self.slot(head);
                 for (cell, &v) in c.samples.iter().zip(&data[..frames * self.channels]) {
                     cell.store(v.to_bits(), Ordering::Relaxed);
@@ -181,6 +190,13 @@ impl ChunkRing {
                 c.start.load(Ordering::Relaxed),
                 i64::from(c.frames.load(Ordering::Relaxed)),
             );
+            // The producer may have reclaimed the chunk and be writing
+            // another's header over it: with `tail` where it was, the
+            // header is the chunk's (see `push`'s fence).
+            fence(Ordering::Acquire);
+            if self.tail.load(Ordering::Relaxed) != tail {
+                continue;
+            }
             if e != epoch || start + n <= pos {
                 let _ =
                     self.tail
@@ -206,7 +222,8 @@ impl ChunkRing {
             }
             // A chunk reclaimed while being read was of an older epoch
             // than the producer's, so of no use: say silence.
-            if self.tail.load(Ordering::Acquire) != tail {
+            fence(Ordering::Acquire);
+            if self.tail.load(Ordering::Relaxed) != tail {
                 out[i * ch..(i + take) * ch].fill(0.0);
                 continue;
             }
@@ -348,5 +365,55 @@ mod tests {
         }
         producer.join().unwrap();
         assert!(flushes >= 9);
+    }
+
+    /// A seek's first callbacks race the producer reclaiming the old
+    /// epoch's chunks: the producer may write the new epoch's header into
+    /// a slot whose old header the consumer is reading. The new epoch's
+    /// audio starts where the consumer asks, so it must never get a gap,
+    /// nor anything but its samples. Before `fill` read `tail` again
+    /// after a chunk's header, 1 000 000 rounds of this in a release
+    /// build gave a gap 3 and 5 times; after, none in 3 000 000. Here it
+    /// runs far fewer, as a guard.
+    #[test]
+    fn a_reclaim_racing_the_first_fill_of_an_epoch_leaves_no_gap() {
+        const ROUNDS: u64 = 20_000;
+        for round in 0..ROUNDS {
+            let ring = Arc::new(ChunkRing::with_chunks(4, 1));
+            let (old, new) = (2 * round + 1, 2 * round + 2);
+            // Full of the old epoch, starting far after the new audio,
+            // so that a header torn between the two reads as a gap.
+            for k in 0..4 {
+                assert_eq!(ring.push(old, 1_000_000 + 512 * k, &[7.0; 512]), 512);
+            }
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let producer = {
+                let (ring, barrier) = (ring.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let mut pos = 0i64;
+                    while pos < 512 * 4 {
+                        let v: Vec<f32> = (0..512).map(|i| (pos + i) as f32).collect();
+                        let n = ring.push(new, pos, &v);
+                        if n == 0 {
+                            std::hint::spin_loop();
+                        }
+                        pos += n as i64;
+                    }
+                })
+            };
+            barrier.wait();
+            let mut out = [0.0f32; 64];
+            let mut next = 0i64;
+            while next < 512 * 4 {
+                let f = ring.fill(&mut out, next, new);
+                assert_eq!(f.gap, 0, "round {round}: a gap at {next}");
+                for (k, &v) in out[..f.copied].iter().enumerate() {
+                    assert_eq!(v, (next + k as i64) as f32, "round {round}");
+                }
+                next += f.copied as i64;
+            }
+            producer.join().unwrap();
+        }
     }
 }
