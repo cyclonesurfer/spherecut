@@ -2616,9 +2616,21 @@ warning: something
         // feature turned on anywhere that binds another library fails
         // here, before a compat run would.
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        // This machine's packages only: a cargo cache that has built the
+        // workspace here (odin's) has no Android or Windows crates, and
+        // offline, metadata for every platform would need them.
+        let rustc = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+            .arg("-vV")
+            .output()
+            .unwrap();
+        let rustc = String::from_utf8(rustc.stdout).unwrap();
+        let host = rustc
+            .lines()
+            .find_map(|l| l.strip_prefix("host: "))
+            .unwrap();
         let out = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
             .args(["metadata", "--format-version", "1", "--all-features"])
-            .args(["--offline", "--locked"])
+            .args(["--offline", "--locked", "--filter-platform", host])
             .current_dir(&root)
             .output()
             .unwrap();

@@ -77,8 +77,8 @@ until slice 5b gives render one such module to open its Vulkan device
   layout a pixel format is uploaded in (`pixel_layout`, from
   `AVPixFmtDescriptor`) and the format swscale converts the others to
   (`conversion_target`, `Scaler`), copying hardware frames to system
-  memory (`download_into_pool`, into a `DownloadPool`, and doctor's
-  `download_frame`) and the surfaces a hardware decoder keeps spare
+  memory (`download_into_pool`, into a `DownloadPool` of buffers mapped on
+  huge pages, and doctor's `download_frame`) and the surfaces a hardware decoder keeps spare
   (`set_extra_hw_frames`), `av_seek_frame` and the demuxer index (its end, its first,
   last and shown entries, its timestamps, the keyframe before a time),
   skipping non-reference frames, the bytes a frame's buffers take
@@ -654,7 +654,9 @@ intermediate equirect exists only as the output of a 360 export.
     version). The upload thread claims a Free slot only when the ring's
     `Arc` is the only one, so no draw still holds it, uploads the frames
     the presenter will want next (from the frame at the playhead on
-    while playing; it, the next and the one before while paused), and
+    while playing, as far as the frames follow on, so that frames a seek
+    back left ahead past a gap wait; it, the next and the one before
+    while paused), and
     frees the Ready ones no longer wanted, never the Shown one. While a
     stream's frame for a request, or with fewer than two slots a stream
     its frame at the playhead, isn't in a slot, every stream wants its
@@ -667,7 +669,8 @@ intermediate equirect exists only as the output of a 360 export.
     Ready frame at or before the clock's time at the next refresh, and
     after a seek keeps the frame on screen until the new one is Ready
     (with fewer than two slots a stream, each stream's goes up as it
-    comes). A step made while a request is on its way goes on from
+    comes), and while playing starts the clock once the two frames after
+    it are Ready too, or the stream ends. A step made while a request is on its way goes on from
     where that lands, a keyframe seek's included.
   * **Clocks** (`core::clock`): `SystemClock` and `ManualClock` read
     through a sequence lock of atomics, so the UI thread reads them

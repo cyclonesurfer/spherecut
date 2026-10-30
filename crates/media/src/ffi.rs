@@ -2758,6 +2758,12 @@ pub(crate) const DOWNLOAD_ROW_ALIGN: usize = 256;
 /// size, as after `LayoutChanged`, rebuilds the pool; buffers of the old
 /// one still in use are freed as they come back.
 ///
+/// Each buffer is a mapping of its own, 2 MiB aligned, that the kernel is
+/// asked to back with transparent huge pages ([`huge_alloc`]): a new 5.7K
+/// P010 frame in 4 KiB pages took about 12 000 faults, which on odin
+/// doubled its download while the frame cache filled (D30). Where THP is
+/// off the advice does nothing, and the pages are 4 KiB as before.
+///
 /// The one buffer for all planes suits both hwcontexts: VA-API copies
 /// into any strides (`av_frame_copy` from a VAImage that FFmpeg creates,
 /// has the driver fill and destroys for each frame), and Vulkan
@@ -2808,16 +2814,87 @@ impl Default for DownloadPool {
     }
 }
 
-/// The allocator of a [`DownloadPool`]'s `AVBufferPool`: FFmpeg's default
-/// one, `av_buffer_alloc`, counting each buffer in `opaque`, the pool's
-/// counter. The pool calls it only when it has no buffer to hand back.
+/// The allocator of a [`DownloadPool`]'s `AVBufferPool`: [`huge_alloc`],
+/// counting each buffer in `opaque`, the pool's counter. The pool calls it
+/// only when it has no buffer to hand back.
 unsafe extern "C" fn counted_alloc(opaque: *mut c_void, size: usize) -> *mut sys::AVBufferRef {
     // SAFETY: `opaque` is the counter `DownloadPool::build` gave the pool,
     // which holds a reference to it until `release_counter`.
     unsafe { (*opaque.cast::<AtomicU64>()).fetch_add(1, Ordering::Relaxed) };
-    // SAFETY: accepts any size; NULL when out of memory, which the pool
-    // passes on.
-    unsafe { sys::av_buffer_alloc(size) }
+    huge_alloc(size)
+}
+
+/// A transparent huge page, on x86-64 and on arm64 with 4 KiB pages.
+const HUGE_PAGE: usize = 2 << 20;
+
+/// A buffer of `size` bytes in a zeroed anonymous mapping of its own,
+/// starting on a [`HUGE_PAGE`] boundary and rounded up to one, advised
+/// `MADV_HUGEPAGE`, so that its first touch (the device's write, or
+/// FFmpeg's copy) faults in 2 MiB at a time where THP is `madvise` or
+/// `always`; freed with `munmap` ([`huge_free`]). NULL when out of
+/// memory, as `av_buffer_alloc` would be.
+fn huge_alloc(size: usize) -> *mut sys::AVBufferRef {
+    let Some(len) = size.max(1).checked_next_multiple_of(HUGE_PAGE) else {
+        return std::ptr::null_mut();
+    };
+    let Some(span) = len.checked_add(HUGE_PAGE) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: a new private anonymous mapping, at an address the kernel
+    // picks; nothing else refers to it.
+    let base = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            span,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if base == libc::MAP_FAILED {
+        return std::ptr::null_mut();
+    }
+    // The aligned `len` bytes inside the span; the rest goes back.
+    let head = base.cast::<u8>().align_offset(HUGE_PAGE);
+    let tail = HUGE_PAGE - head;
+    // SAFETY: `head` and `tail` are multiples of the page size (mmap
+    // returns page-aligned addresses, and HUGE_PAGE is one), and each
+    // range lies inside the mapping made above, which nothing uses yet.
+    let data = unsafe {
+        let data = base.cast::<u8>().add(head);
+        if head > 0 {
+            libc::munmap(base, head);
+        }
+        libc::munmap(data.add(len).cast(), tail);
+        // Advice only: EINVAL where THP isn't built in, and nothing
+        // where it is off.
+        libc::madvise(data.cast(), len, libc::MADV_HUGEPAGE);
+        data
+    };
+    // SAFETY: `data` is `len` ≥ `size` bytes, which the buffer owns from
+    // here and frees with `huge_free`, given `len` as its opaque.
+    let buf = unsafe {
+        sys::av_buffer_create(
+            data,
+            size,
+            Some(huge_free),
+            std::ptr::without_provenance_mut(len),
+            0,
+        )
+    };
+    if buf.is_null() {
+        // SAFETY: the mapping made above, which no buffer took.
+        unsafe { libc::munmap(data.cast(), len) };
+    }
+    buf
+}
+
+/// Unmap a [`huge_alloc`] buffer: `opaque` is its mapping's length.
+unsafe extern "C" fn huge_free(opaque: *mut c_void, data: *mut u8) {
+    // SAFETY: `data` and the length are the mapping `huge_alloc` made for
+    // this buffer, whose last reference has just gone.
+    unsafe { libc::munmap(data.cast(), opaque.addr()) };
 }
 
 /// Drop the reference to its counter that a [`DownloadPool`]'s
@@ -4523,6 +4600,8 @@ mod tests {
         assert_eq!(pool.allocated(), 0);
         let a = download_into_pool(&mut pool, &surface).unwrap();
         assert_eq!(pool.allocated(), 1);
+        // A huge_alloc buffer, the luma plane at its start.
+        assert_eq!(data_ptr(&a, 0).addr() % HUGE_PAGE, 0);
         let nv12 = sys::AVPixelFormat::AV_PIX_FMT_NV12 as c_int;
         assert_eq!((frame_format(&a), a.width(), a.height()), (nv12, w, h));
         for i in 0..2 {
@@ -4574,6 +4653,65 @@ mod tests {
         assert_eq!(Arc::strong_count(&counter), 2);
         drop(e);
         assert_eq!(Arc::strong_count(&counter), 1);
+    }
+
+    /// The range and lines of the `/proc/self/smaps` entry for the
+    /// mapping that holds `addr`.
+    fn smaps_entry(addr: usize) -> Option<((usize, usize), Vec<String>)> {
+        let text = std::fs::read_to_string("/proc/self/smaps").ok()?;
+        let mut found: Option<((usize, usize), Vec<String>)> = None;
+        for line in text.lines() {
+            // An entry starts with its range; its other lines with a key.
+            let range = line.split_whitespace().next().and_then(|r| {
+                let (a, b) = r.split_once('-')?;
+                Some((
+                    usize::from_str_radix(a, 16).ok()?,
+                    usize::from_str_radix(b, 16).ok()?,
+                ))
+            });
+            match (range, &mut found) {
+                (Some(_), Some(_)) => break,
+                (Some(r), None) if (r.0..r.1).contains(&addr) => found = Some((r, Vec::new())),
+                (None, Some((_, lines))) => lines.push(line.to_owned()),
+                _ => {}
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn download_buffers_are_aligned_mappings_on_huge_pages() {
+        let size = 5 * 1024 * 1024 + 123;
+        let mut buf = huge_alloc(size);
+        assert!(!buf.is_null());
+        // SAFETY: a buffer huge_alloc made, which this test owns; its
+        // `size` bytes are writable.
+        let data = unsafe {
+            assert_eq!((*buf).size, size);
+            std::ptr::write_bytes((*buf).data, 7, size);
+            (*buf).data
+        };
+        let at = data.addr();
+        assert_eq!(at % HUGE_PAGE, 0);
+        // Its mapping covers whole huge pages (the kernel may have merged
+        // it with a neighbour another test made the same way).
+        let ((start, end), lines) = smaps_entry(at).expect("the buffer's mapping");
+        assert!(
+            start <= at && at + 3 * HUGE_PAGE <= end,
+            "{start:#x}..{end:#x}"
+        );
+        let thp = std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled")
+            .unwrap_or_default();
+        if thp.contains("[madvise]") || thp.contains("[always]") {
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.split_whitespace().eq(["THPeligible:", "1"])),
+                "THP is {thp:?}, but the mapping isn't eligible: {lines:#?}"
+            );
+        }
+        // SAFETY: the one reference to the buffer, dropped here.
+        unsafe { sys::av_buffer_unref(&mut buf) };
     }
 
     #[test]

@@ -1161,8 +1161,10 @@ fn upload_bench(gpu: &Gpu, plan: &BenchPlan) {
             ));
         }
     }
-    // The plan's first trigger, for the 5.7K frames: write_texture above
-    // 1.5 times the belt's CPU time, or above 4 ms a frame.
+    // The first trigger, for the 5.7K frames, as H1 restated it (D31):
+    // the belt's CPU time under 0.9 times write_texture's. The plan's
+    // "above 1.5 times, or above 4 ms" held on odin through its 4 ms arm
+    // where the belt cost the same.
     for (what, _) in inputs.iter().take(2) {
         let of = |path| {
             medians
@@ -1173,12 +1175,8 @@ fn upload_bench(gpu: &Gpu, plan: &BenchPlan) {
         let (w, b) = (of(UploadPath::WriteTexture), of(UploadPath::StagingBelt));
         bench::note(format!(
             "upload {what}: write_texture {w:.2} ms against the belt's {b:.2} ms a frame; the CPU trigger \
-             (over 1.5 times, or over 4 ms) {}",
-            if w > 1.5 * b || w > 4.0 {
-                "holds"
-            } else {
-                "doesn't hold"
-            }
+             (the belt under 0.9 times) {}",
+            if b < 0.9 * w { "holds" } else { "doesn't hold" }
         ));
     }
     // The GPU's own passes on the 5.7K slots.

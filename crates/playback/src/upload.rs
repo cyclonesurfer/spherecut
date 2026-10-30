@@ -13,7 +13,10 @@
 //!   wants nothing;
 //! - otherwise the frame at the playhead, the latest at or before it,
 //!   which is the one shown or about to be;
-//! - while playing, the frames after it, in order;
+//! - while playing, the frames after it, in order, as far as they follow
+//!   on: linked to the one before, or starting where it ends. A later
+//!   frame past a gap (one a seek back left ahead of the playhead) waits
+//!   until the frames between are in;
 //! - while paused, the frame after it and the one before (by the run
 //!   links, so the one adjacent in the stream), so that a step either
 //!   way is instant, then more frames after.
@@ -49,7 +52,7 @@ use crate::budget::{self, CacheBudget};
 use crate::cache::WAIT_SLICE;
 use crate::perf::{Counter, Stage};
 use crate::player::{PlayerError, PlayerEvent};
-use crate::shared::{BudgetStatus, Landed, Shared, time_of};
+use crate::shared::{BudgetStatus, Landed, Place, Shared, frames_between, time_of};
 use crate::slots::{SlotFrame, SlotState};
 
 /// How often the budget is rechecked against the memory available.
@@ -348,7 +351,17 @@ impl UploadThread {
         let mut out = vec![base.clone()];
         let mut ahead = base.clone();
         let mut more = |out: &mut Vec<Arc<VideoFrame>>| {
-            let next = cache.following(i, ahead.time).map(|(f, _)| f);
+            // The frame after `ahead` in the stream: linked to it, or of
+            // another run but starting where it ends (decoding went on
+            // from the end of a run held). One past a gap waits for the
+            // frames between: it is a run a seek left, and would hold the
+            // slot they need (the frames past a seek back, at a loop).
+            let next = cache
+                .following(i, ahead.time)
+                .filter(|(f, linked)| {
+                    *linked || frames_between(&Place::of_frame(&ahead), &Place::of_frame(f)) == 0
+                })
+                .map(|(f, _)| f);
             if let Some(f) = &next {
                 ahead = f.clone();
                 out.push(f.clone());

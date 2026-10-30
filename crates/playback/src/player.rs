@@ -16,8 +16,9 @@
 //! variable frame rates. After a seek or a step it keeps the frame on
 //! screen until every stream's request has landed and its frame is
 //! Ready, then shows them together, sets the clock to the time and, if
-//! playback is wanted (and the audio, once there is some, holds
-//! [`PREROLL_AUDIO`]), starts it. Showing every stream's new frame
+//! playback is wanted, starts it once each stream has the frames after
+//! its own Ready too ([`PREROLL_FRAMES`]) and the audio, once there is
+//! some, holds [`PREROLL_AUDIO`]. Showing every stream's new frame
 //! together while the old ones stay up takes two slots a stream; with
 //! fewer live (a small setting, or slots out of memory), each stream's
 //! new frame goes up as soon as it is Ready, which gives its old slot
@@ -141,7 +142,7 @@ pub enum PlayerEvent {
     },
     /// The file has no audio: video plays on its own clock.
     NoAudio,
-    /// A preroll waited [`PREROLL_LIMIT`](crate::PREROLL_LIMIT) for the
+    /// A preroll waited [`PREROLL_LIMIT`] for the
     /// audio: video plays on the system clock until it comes.
     AudioLate,
     /// The GPU had no memory for a slot: playback goes on with one fewer
@@ -272,7 +273,9 @@ pub struct ShownFrame {
     pub gpu: Arc<GpuFrame>,
 }
 
-/// What [`Player::present`] picked.
+/// What [`Player::present`] picked. Drop it once it is drawn: while it
+/// is held, so are its frames' slots ([`ShownFrame::gpu`]), and with two
+/// streams on four slots, holding one keeps both from their next frames.
 #[derive(Debug, Clone)]
 pub struct Presented {
     /// Each stream's frame on screen, in stream order; a stream without
@@ -355,6 +358,13 @@ impl ShutdownReport {
 /// The longest a UI frame is taken to last, for the present latency.
 const MAX_LATENCY: Duration = Duration::from_millis(50);
 
+/// Frames after a seek's own that its preroll waits to have in slots
+/// before the clock starts, as far as the stream's share of the slots
+/// holds them: a decoder only just faster than real time then has them
+/// in hand, where with the seek's frame alone each next one came late
+/// (odin's loop points at H1, D34).
+pub const PREROLL_FRAMES: usize = 2;
+
 /// UI frame intervals kept for their median.
 const INTERVALS: usize = 32;
 
@@ -413,8 +423,8 @@ struct Ui {
     /// A frame changed outside `present` (an instant step), which the
     /// next `present` reports.
     unpresented: bool,
-    /// The target is shown, and playback waits for the audio, since
-    /// this instant.
+    /// The target is shown, and playback waits for the frames after it
+    /// ([`PREROLL_FRAMES`]) and the audio, since this instant.
     preroll: bool,
     preroll_since: Option<Instant>,
     want_play: bool,
@@ -973,7 +983,7 @@ impl Player {
                     audio.fall_back(now);
                     shared.event(PlayerEvent::AudioLate);
                 }
-                if ready || late {
+                if (ready && self.video_ready(ui)) || late {
                     ui.preroll = false;
                     ui.clock.play(now);
                 }
@@ -1138,7 +1148,7 @@ impl Player {
         self.shared.target.store(0, Ordering::Release);
         ui.playhead = None;
         if ui.want_play {
-            if ui.audio.as_ref().is_none_or(|a| a.ready(PREROLL_AUDIO)) {
+            if self.video_ready(ui) && ui.audio.as_ref().is_none_or(|a| a.ready(PREROLL_AUDIO)) {
                 ui.clock.play(now);
             } else {
                 ui.preroll = true;
@@ -1147,6 +1157,56 @@ impl Player {
         }
         self.shared.repaint();
         changed
+    }
+
+    /// Whether every stream has the frames after the one on screen that
+    /// a preroll waits for in Ready slots: [`PREROLL_FRAMES`], or one
+    /// fewer than its share of the slots holds, following on from it (as
+    /// the upload thread brings them), or as many as reach the stream's
+    /// end. A stream that failed, or shows nothing, waits for none.
+    fn video_ready(&self, ui: &Ui) -> bool {
+        let n = ui.shown.len();
+        if n == 0 {
+            return true;
+        }
+        let share = (self.shared.slots.stats().active / n).max(2);
+        let need = PREROLL_FRAMES.min(share - 1);
+        let views = self.shared.slots.views();
+        ui.shown.iter().enumerate().all(|(i, shown)| {
+            let Some(shown) = shown else {
+                return true;
+            };
+            let view = ui.view.get(i).copied().unwrap_or_default();
+            if view.error {
+                return true;
+            }
+            let mut ahead: Vec<SlotFrame> = views
+                .iter()
+                .filter(|v| {
+                    v.state == SlotState::Ready
+                        && v.frame.epoch == ui.epoch
+                        && v.frame.stream == i
+                        && v.frame.time > shown.view.frame.time
+                })
+                .map(|v| v.frame)
+                .collect();
+            ahead.sort_by_key(|f| f.time);
+            let mut last = shown.view.frame;
+            let mut have = 0;
+            for f in ahead {
+                if have == need || frames_between(&Place::of_slot(&last), &Place::of_slot(&f)) > 0 {
+                    break;
+                }
+                last = f;
+                have += 1;
+            }
+            have == need
+                || view.end.is_some_and(|end| {
+                    last.duration
+                        .and_then(|d| last.time.checked_add(d).ok())
+                        .is_some_and(|t| t >= end)
+                })
+        })
     }
 
     /// Show each stream's latest Ready frame at or before `t`. Whether a

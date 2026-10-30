@@ -1205,7 +1205,7 @@ rest, with the versions in `Cargo.lock`:
 | clap 4.6.7 (derive) | cli, xtask | Argument parsing with generated help and errors, for two binaries with subcommands |
 | cpal 0.18.2 (pulseaudio) | audio | The audio output (D35): the PulseAudio protocol host, pure Rust, which reaches PipeWire through pipewire-pulse, and ALSA, which cpal always builds on Linux and which links libasound (so its headers are a build prerequisite). Default features off; a `[[bans.features]]` allow list keeps `pipewire`, `jack`, `realtime` and the browser hosts off. On Linux it brings `alsa`, `alsa-sys`, `pulseaudio` and its `byteorder`, `enum-primitive-derive`, `mio`, `thiserror` 1 and the `futures` crates, and `dasp_sample` for its sample conversions |
 | image 0.25.10 (png only) | render | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame` and the goldens. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
-| libc 0.2.191 | cli | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, the binary's one FFI module (D28): the handler only stores to an atomic. It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
+| libc 0.2.191 | cli, media | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, the binary's one FFI module (D28): the handler only stores to an atomic. In media's `ffi`, `mmap`, `madvise` and `munmap` for the download pool's buffers on huge pages (D30). It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
 | serde 1.0.229 (derive) | core, sphere, media, cli | Serializable time types, `Projection`, the probe and doctor reports, and the CLI's JSON envelope (D27) |
 | serde_json 1.0.154 | cli; core, render (dev) | `--json` output, through the `contract` module (D27). core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
@@ -2899,9 +2899,39 @@ Limits:
   once from one seek to the next across the fallback (D29).*
 - The fallback reopens the file and decodes from a keyframe, so a
   mid-stream fallback costs one seek.
+- *Updated 2026-10-30 by H1 on odin (PR #7, and the timelines of the
+  5.7K benchmarks at f87dc2a):* while the frame cache filled, every
+  frame downloaded into a buffer the pool had just allocated, and each
+  of its 4 KiB pages faulted in on first touch: about 270 000 faults a
+  second, 12 000 a 5.7K P010 frame (one a page of its 50 MB), with
+  THP set to `madvise` as Fedora sets it. Vulkan Video's 10-bit download
+  took 40 to 51 ms (p50 a second) then, against 18 to 21 once the cache
+  was full and buffers came back to the pool, and the decoder ran at 20
+  to 24 fps for the first 7 s, under real time; 8-bit took 21 ms against
+  9 to 11. The pool's buffers are now mappings of their own, 2 MiB
+  aligned and advised `MADV_HUGEPAGE`, so a new 50 MB buffer faults in
+  25 huge pages. Here (a VM, THP `madvise`) the first copy into a fresh
+  5.7K P010 buffer takes 13.9 ms on huge pages against 172.8 ms on 4 KiB
+  ones, and 5.0 ms into one reused. The kernel still zeroes each page it
+  hands out; where THP is `never` nothing changes. On odin at 1991a98
+  the cache sat in 8.1 to 8.6 GiB of huge pages, a new frame's 10-bit
+  download took about 14 ms and a reused one's 5 to 6 (18 to 21 before),
+  and the cache filled in 2.5 s rather than 7. The process still counts
+  12 150 minor faults for each new frame, as before: most likely the
+  GPU's import of the buffer walks it a 4 KiB page at a time and counts
+  every page it touches, huge or not; Vulkan Video's reused buffers
+  count none. With free memory left in single pages, the kernel
+  compacted 395 times in the first 4.6 s, and a new frame's download
+  took 15 to 18 ms. Once in four runs, a new frame's download took 50
+  to 56 ms for 3 s while the cache passed 5 GiB (a reused one's still 5
+  to 6), for a reason not known; `/proc/vmstat` wasn't sampled then.
 
 Revisit if: slice 5 needs a device per stream rather than per backend,
-or slice 5b's zero-copy replaces the download.
+slice 5b's zero-copy replaces the download, or new frames' downloads
+take 50 ms again while the cache fills (then with `/proc/vmstat`
+sampled beside the timeline: a pool that makes its buffers ahead on a
+thread of its own, using huge pages only while the kernel has free ones,
+is the fix to try).
 
 ## D31. The render pipeline
 
@@ -3238,6 +3268,25 @@ written, the trigger makes the belt the default where it costs as much
 or more, which isn't what the trigger is for, so the default stays
 `write_texture` until H1, which has huginn's numbers too and should
 restate the trigger as the belt being cheaper.
+
+*Updated 2026-10-30 by H1 on odin (PR #7, at 43abcda):* the belt was
+never cheaper again. One step in flight, 5.7K NV12 costs 2.57 ms a step
+with `write_texture` against the belt's 15.84, P010 4.31 against 4.32,
+and the 3840² pairs 5.83 against 5.86 (NV12) and 9.26 against 9.31
+(P010); two in flight the belt is dearer at every input but the NV12
+pair (6.63 against 6.64), and `write_texture` makes or frees no block.
+The CPU trigger is now the belt's CPU time under 0.9 times
+`write_texture`'s, which `bench_upload_5k7` reports, and the block
+trigger stands: the default stays `write_texture`, and huginn's H1 can
+still turn the belt on. U2 (the VA surface downloaded straight into a
+mapped belt chunk, m1-plan section 4.4) isn't needed on odin either:
+its trigger is download plus copy over a third of a 30 fps frame, 11.1
+ms, and with the download pool on huge pages (D30) 10-bit's Vulkan
+Video download and `write_texture` take 5.0 and 5.9 ms at p50 (8-bit
+2.6 and 3.0), on two threads, with nothing dropped. VA-API's own
+download, 31 ms a 5.7K NV12 frame and 109 ms a P010 one, is far over
+it, but that is the CPU reading the surface across PCIe, which U2
+wouldn't remove; slice 5b's zero-copy would.
 
 The review also found `round_f16` untested where it matters least and
 inexact where no pass goes. No test reached its subnormal branch (no
@@ -4552,7 +4601,14 @@ What:
       so the lenses showed different frames (found by the re-review's
       fixes' tests: [1, 0] while playing, every run, with the second
       decoder 150 ms a frame);
-    - while playing, the frames after it, in order;
+    - while playing, the frames after it, in order, as far as they
+      follow on: linked to the one before, or of another run but
+      starting where it ends (decoding goes on from the end of a run
+      the cache held in a run of its own). *Updated 2026-10-30 by H1:*
+      it took the next frame by time, so after a seek back (each loop
+      of odin's real-time benchmark) the frames the cache held from
+      before it, ahead of the new playhead past a gap, filled the slots
+      while the decoder brought the frames after the seek's one by one;
     - while paused, the next frame, then the one before (by the run
       links), then more frames after.
   - **How.** It uploads one frame per pass, the streams taking turns by
@@ -4596,8 +4652,17 @@ What:
     - to the frame's time after a step, a landing after `at`,
       `AfterLast`, `Truncated` or `KeyframeOnly`;
     - to `at` otherwise.
-    - Playback, if wanted, starts then, or once the audio is `ready`
-      for `PREROLL_AUDIO`. The state is Seeking until it does.
+    - Playback, if wanted, starts once each stream has the frames
+      after its own Ready too, following on from it: `PREROLL_FRAMES`
+      (2), or one fewer than its share of the slots, or as many as
+      reach its end; and once the audio is `ready` for
+      `PREROLL_AUDIO`. After `PREROLL_LIMIT` (2 s) it starts anyway.
+      The state is Seeking until it does. *Updated 2026-10-30 by H1:*
+      it started with the seek's frame alone, so a decoder only just
+      ahead of real time after a seek (Vulkan Video at 5.7K, bringing
+      the frames after a loop's seek every 17 to 33 ms) had each next
+      frame come late, and the presenter passed over 4 to 9 at each of
+      odin's loop points.
     - Showing every stream's new frame together while the old ones stay
       up takes two slots a stream. With fewer live (three slots for two
       streams, or four with one Dead), each stream's new frame goes up
@@ -4879,6 +4944,11 @@ Where this differs from the plan:
 - **The preroll's 2 s limit**, and the switch to `SystemClock` with a
   notice (plan section 8.4, step 6), need audio, and come with slice 6.
   The preroll itself is here, through `AudioOutput::ready`.
+- **The preroll waits for video too.** The plan's step 6 resumes once a
+  Ready slot holds the target. Here it waits for the frames after it
+  as well (above), which cost a seek about two frames' decoding while
+  playing and none paused, since H1 showed the target alone dropping
+  frames after every seek a decoder only just keeps up with.
 - **The hardware device** isn't the player's to choose: the
   `FfmpegBackend` it is given opens the devices. The GUI is to make it
   on the rendering GPU's node (`FfmpegBackend::on_node`), so that
@@ -5459,7 +5529,12 @@ Where this differs from the plan:
   video still.
 - testkit's `require_audio_device` takes the function that opens the
   device, since testkit has no dependencies.
-- The Tier 2 test checks the median latency, not each callback's.
+- The Tier 2 test checks the median latency, not each callback's, and
+  up to 400 ms, not 200: on odin it passed at 182 ms on Bluetooth (A2DP,
+  the Edifiers Pat listens on) and 64 ms on HDMI, with the clock within
+  0.01 and 0.14 ms over 2 s and no xruns, and a weaker link or another
+  codec would go past 200, while A/V sync follows whatever latency the
+  host reports.
 
 Why: the plan's (section 9.3): the DAC's clock is the master, so video
 repeats or drops frames to follow it and there is no drift to correct.
@@ -5523,7 +5598,7 @@ Tested:
 - `audio_output_device_plays` (Tier 2): a 440 Hz tone on the default
   device for 2 s, passing when the clock advances 2.0 s ± 50 ms and is
   monotonic, no callback comes over twice its buffer after the last,
-  the median latency is 5 to 200 ms, nothing underran and the clock
+  the median latency is 5 to 400 ms, nothing underran and the clock
   stayed on the device; it notes the host, device, format, buffer and
   latency, and records the numbers. Here it skips with ALSA's "The
   requested audio device is not available". Run once by hand on the
@@ -5546,8 +5621,11 @@ Limits:
   against a microphone. The A/V offset setting (slice 8) covers the
   rest, and H2's `gui_smoke` measures |A/V| on the sync clip.
 - On this box (no audio device) the cpal stream, `audio-out`'s loop,
-  the error handling and the retry are only built, not run: H2 runs the
-  device test.
+  the error handling and the retry are only built, not run. On odin the
+  device test has run (at 855bb54, PulseAudio's protocol to PipeWire,
+  f32 at 48 kHz, 1024-frame buffers, on Bluetooth and on HDMI); losing
+  the device, the retry and the stall rule have still only run on the
+  fake device.
 - Ambisonic audio is a basic stereo decode, not steered by the view
   (M6 adds binaural).
 

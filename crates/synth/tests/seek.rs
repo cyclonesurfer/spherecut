@@ -2049,7 +2049,9 @@ fn damage_is_said_once_from_one_seek_to_the_next() {
         break_slice_header(&mut bytes, pos, size, Codec::H264);
         let bad = dir.join(format!("{name}-damaged.mp4"));
         std::fs::write(&bad, &bytes).unwrap();
-        for threads in [None, one_thread] {
+        // The default, one, and 16 as on odin's 3700X: with frame threads
+        // the decoder has read ahead when it opens.
+        for threads in [None, one_thread, std::num::NonZeroU32::new(16)] {
             let what = format!("{name} on {threads:?} threads");
             let mut d = open_on(&bad, &on(threads));
             let mut seen = Vec::new();
@@ -2059,7 +2061,12 @@ fn damage_is_said_once_from_one_seek_to_the_next() {
             let damage = said(&d.take_events());
             assert!(damage > 0, "{what}");
             for i in [13, 15, 20, 25] {
+                // From the end, so that the seek goes back and lands: just
+                // opened, a decoder may reach frame 13 by decoding on, and
+                // with 16 threads it does.
                 let mut d = open_on(&bad, &on(threads));
+                while let NextFrame::Frame(_) = d.next_frame(&never).unwrap() {}
+                d.take_events();
                 let (f, e, cost) = seek_pts(&mut *d, whole[i].pts, SeekMode::Exact);
                 let shown = seen[shown_at(&seen, whole[i].pts).unwrap()];
                 assert_eq!(

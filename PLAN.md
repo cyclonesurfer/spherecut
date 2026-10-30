@@ -206,6 +206,11 @@ The first version Pat can use for real.
 
 Main camera first (Pat to confirm), then the others.
 
+How it is built: Pat asked on 2026-10-30 for ultracode from M3 on, so
+each M3 step (understanding, design, implementation, review) runs as a
+multi-agent workflow. A session that starts M3 turns ultracode on in its
+settings, or has "ultracode" in its prompt, before the first workflow.
+
 - [ ] Format notes in `docs/formats/<camera>.md` verified against Pat's
       samples, per model and firmware.
 - [ ] Container and metadata parsing (vendor trailer / GPMF / DJI metadata)
