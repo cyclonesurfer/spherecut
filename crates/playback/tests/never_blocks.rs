@@ -1,6 +1,6 @@
 //! The UI thread never waits on the engine (M1 plan section 8.6): a fake
 //! UI loop on a marked thread drives a player whose backend never
-//! answers, and one whose decoder takes 50 ms a frame through a storm of
+//! answers (presents, seeks, plays, pauses, steps, a new config), and one whose decoder takes 50 ms a frame through a storm of
 //! seeks; a player shuts down while its backend is stuck; and the guard
 //! itself is live, so a wait on the marked thread would have panicked.
 //!
@@ -211,7 +211,15 @@ fn the_ui_never_waits_on_a_backend_that_never_answers() {
                     player.play();
                 } else if i % 20 == 10 {
                     player.pause();
+                } else if i % 20 == 5 {
+                    player.step(1);
+                } else if i % 20 == 15 {
+                    player.step(-1);
                 }
+                if i % 60 == 30 {
+                    player.set_config(config());
+                }
+                player.set_painted(i % 30 != 7);
                 let _ = player.events();
                 snap
             });
@@ -316,6 +324,51 @@ fn a_seek_storm_decodes_little_and_lands_on_the_last_seek() {
         seeks.decoded
     );
     assert_eq!(snap.state, PlayState::Paused);
+    common::join(player);
+}
+
+#[test]
+fn steps_never_wait_on_the_ui_thread() {
+    let _t = timing();
+    let rate = FrameRate::FPS_30;
+    let backend = SyntheticBackend::new(SyntheticClip {
+        frames: 120,
+        keyint: 8,
+        frame_cost: Duration::from_millis(5),
+        ..SyntheticClip::default()
+    });
+    let clock = Arc::new(ManualClock::new(rate.frame_duration()));
+    let player = player(backend, clock, config());
+    let (player, times, landed) = on_ui_thread(Duration::from_secs(60), move || {
+        player.open("steps.synthetic".into());
+        let shown = until(Duration::from_secs(10), || player.present(Instant::now()));
+        assert!(shown.is_some(), "the first frame never came up");
+        let rq = RunQueue::open();
+        let mut times = Times::default();
+        // Forward and back, a step a UI frame or two: the frame next door
+        // is in a slot already (`adjacent`) or is decoded first.
+        let mut want = 0i64;
+        for i in 0..90u32 {
+            times.time(&rq, || {
+                let _ = player.present(Instant::now());
+                if i % 2 == 0 {
+                    let by = if (i / 2) % 12 < 8 { 1 } else { -1 };
+                    want = (want + i64::from(by)).max(0);
+                    player.step(by);
+                }
+                let _ = player.snapshot();
+                let _ = player.events();
+            });
+            tick(Instant::now(), 0);
+        }
+        let landed = until(Duration::from_secs(10), || {
+            let p = player.present(Instant::now())?;
+            (pts(&p) == [want]).then_some(want)
+        });
+        (player, times, landed)
+    });
+    judge("steps", &times);
+    assert!(landed.is_some(), "the last step's frame never came up");
     common::join(player);
 }
 

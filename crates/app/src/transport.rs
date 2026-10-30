@@ -213,6 +213,9 @@ pub fn bar_ui(s: &mut AppState, ui: &mut egui::Ui, now: Instant) {
 fn scrub_bar(s: &mut AppState, ui: &mut egui::Ui, at: Time, duration: Option<Time>, now: Instant) {
     let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y * 0.6);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Slider, ui.is_enabled(), "Scrub bar")
+    });
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals();
     painter.rect_filled(rect, 2.0, visuals.extreme_bg_color);
