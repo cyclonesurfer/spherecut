@@ -23,6 +23,7 @@ use glam::DVec3;
 
 pub mod cube;
 pub mod fisheye;
+pub mod grab;
 pub mod orient;
 pub mod perspective;
 pub mod pixel;
