@@ -541,10 +541,11 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   texture). A lost device, or an error no error scope caught, is
   returned by `Gpu::check` as `gpu_failed`, which every entry point calls
   first; nothing panics in wgpu's error handler. All device creation is
-  in one function that slice 5b replaces to add Vulkan Video and DMA-BUF
-  import; the GUI opens its device there too, with `Gpu::for_window`
-  before the window, and hands it to eframe through egui-wgpu's
-  `WgpuSetup::Existing` (D31).
+  in one function, which asks for DMA-BUF import where the adapter has
+  it (`GpuCaps.dmabuf_import`, slice 5b) and which path B will replace
+  to add Vulkan Video; the GUI opens its device there too, with
+  `Gpu::for_window` before the window, and hands it to eframe through
+  egui-wgpu's `WgpuSetup::Existing` (D31).
 * **Slots** (`GpuFrame`, for a `SlotShape`) hold a frame's planes as
   canonical textures: `R8Unorm`/`Rg8Unorm` for 8-bit planes, and
   `R16Float`/`Rg16Float` holding code / (2^b − 1) for deeper ones, each
@@ -564,6 +565,15 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   refused frame leaves the slot as it was. A frame already on the GPU
   can fill level 0 itself, then call `Uploader::record_mips` and
   `GpuFrame::set_source`.
+* **Zero copy** (slice 5b, D25): `render::dmabuf`, render's one `unsafe`
+  module (D28), imports a VA-API frame's DMA-BUF layers as textures
+  (`R8Unorm`, `Rg8Unorm`, `R16Uint`, `Rg16Uint`, one a plane), once the
+  driver has said, through ash, that it takes the format's modifier
+  from a DMA-BUF at that size. `Uploader::upload_imported` copies the
+  8-bit planes GPU to GPU into the slot's level 0 and runs deep ones
+  through the ingest pass, then the mips, as `upload` does. Each frame
+  is imported afresh, and the caller keeps the frame until the GPU work
+  that read it is done.
 * **`Projector::record`** draws a slot through a `ViewParams`
   (orientation and `Lens`) into a `LinearTarget`: per pixel a ray from
   the lens, rotated into the world, its equirect uv, an LOD from central
@@ -719,7 +729,18 @@ intermediate equirect exists only as the output of a 360 export.
     playhead never waits, and the frame a request landed on is pinned
     while that request is the target. A seek into frames a run holds is
     answered from it, and decoding goes on from its end. A step's worker
-    moves the playhead to where it starts, then frame by frame.
+    moves the playhead to where it starts, then frame by frame. Frames
+    still on a decoder's surface (zero copy, slice 5b) are held to
+    `SURFACE_CAP` a stream, the window one fewer, on top of the budget,
+    since the decoder's pool has only so many.
+  * **Zero copy** (slice 5b, D25, off unless `PlayerConfig.zero_copy`
+    or `SPHERECUT_ZERO_COPY=1`): on a device that imports DMA-BUFs a
+    VA-API stream's worker asks for DRM PRIME frames, and the upload
+    thread imports their planes (`render::dmabuf`) in place of the copy,
+    keeping each frame until `Queue::on_submitted_work_done` for the
+    submission that read it. A refused import is copied, said once in
+    the snapshot (`import_refused`), and the next opens ask for
+    downloads.
   * **GPU slots** (`playback::SlotRing`): 3 to 6 `GpuFrame`s, each with
     an atomic state word (Free, Writing, Ready, Shown, Dead, and a
     version). The upload thread claims a Free slot only when the ring's
