@@ -1084,11 +1084,28 @@ On `m1/slice9` (D37, D40):
   to 1.3 to 1.5 ms and is now the player's upload path (D31). The
   rest is the copy path's own: zero copy on Vulkan (path B), with no
   download or upload of the frame, presented 94% to 99% of the UI
-  frames with the UI's p95 at 17 ms, against 51% to 86% with the copy
-  path. Whether zero copy becomes the default now rather than at M3
-  is Pat's call (D25). The GPU sat at its middle shader clock and its
+  frames with the UI's p95 at 17 ms, against 81% to 98% with the belt
+  (86% and 81% on the 5.7K clips) and 51% to 84% before it. Pat made
+  zero copy the default for Vulkan Video (D25, below). The GPU sat at its middle shader clock and its
   second-lowest memory clock, 16% busy, under amdgpu's automatic
   power levels.
+- **Zero copy is the default for Vulkan Video** (Pat, D25): the viewer
+  opens its device shared where the GPU lets it, and Vulkan Video's
+  frames are copied out on the GPU there (path B); VA-API's import
+  stays opt-in until huginn's numbers. `SPHERECUT_ZERO_COPY` sets a
+  `ZeroCopy` (`0` off, `1` VA-API's too), and doctor says which
+  (`zero_copy_mode`).
+- **The GUI rerun at d72b756** (PR #11): with the belt the noisy 5.7K
+  clips presented 80% and 78% of the UI frames after the first second
+  and dropped 29 and 19 frames, the X5 pair 96% with 10; with zero copy
+  97%, 95% and 98%, dropping 3, 1 and 0, the UI's p99 33 to 50 ms. The
+  seam and sync runs pass either way, and every screenshot is right.
+  The UI's own work was 2.2 ms at p95 with the belt and 1.1 with zero
+  copy, so what is left is the window waiting, not the UI's work. The
+  smoke document now lists its late UI passes (`late`: each gap, the
+  work before it and the slowest stage samples in it), for odin's next
+  run to say what the gaps line up with, and its `frames.expected`
+  counts every stream, as `shown` does.
 - **huginn's H1 and H2** are a prompt for Pat to paste into Claude Code
   there (`/mnt/project-files/spherecut/hw-run-6.md`): the full run under
   `gnome-session-inhibit`, a 125 % rerun of the GUI part, and Pat's

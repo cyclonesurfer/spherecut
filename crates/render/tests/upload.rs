@@ -903,7 +903,18 @@ fn the_gpu_time_covers_the_ingest() {
         uploader.upload(gpu, &frame, &slot).unwrap();
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         let wall = start.elapsed().as_secs_f64() * 1e3;
-        let timed = f64::from(uploader.poll(gpu).expect("a GPU time once idle"));
+        // The other tests poll the same device, and the one whose poll
+        // finds the read-back done runs its callback after letting the
+        // device go, so the reading can come a moment after this wait.
+        let timed = (0..1000)
+            .find_map(|_| {
+                uploader.poll(gpu).or_else(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    None
+                })
+            })
+            .expect("a GPU time once idle");
+        let timed = f64::from(timed);
         eprintln!("GPU {timed:.3} ms of {wall:.3} ms");
         runs.push(timed / wall);
     }

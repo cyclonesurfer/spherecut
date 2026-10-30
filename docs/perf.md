@@ -666,6 +666,78 @@ copied and VA-API imported, with a quarter to two thirds of Vulkan
 Video copied's upload CPU time (its wait for the copy is in
 `upload_cpu`) and no download at all. 3840² @ 25 is the one mode where zero copy decode-dropped in real
 time, 19 frames imported and 2 copied out, as path A's 25 before.
+Seventh run, H2:
+[`hw-reports/odin-c9a4a55c18.md`](../hw-reports/odin-c9a4a55c18.md) at
+c9a4a55, 2026-10-30 (PR #11, 6391 s), the same machine and software.
+Tier 2: 37 of 39 passed, `gui_smoke` lost every run to a locked screen
+(the rerun is below) and `bench_playback_stitched_samples` skipped (no
+clip 12). Decode, seek and upload were within 10 % of the sixth run's,
+except VA-API on the X5's 3840² streams: its decode back at 1.40 and
+1.04 × real time with the download pool's allocator fix (d8a9054), and
+its keyframe seek at 33 ms against 22. Playback, as in the sixth run's
+table:
+
+| Clip, decoder | Unthrottled | Real time | Dropped, decode-dropped | `download` | `upload_cpu` |
+|---|---:|---:|---:|---:|---:|
+| 5.7K 8-bit, Vulkan (Auto) | 123 (121 to 131) | 29.5 (0 to 129) | 0, 0 | 2.56 / 11.32 | 2.89 / 3.33 |
+| 5.7K 8-bit, VA-API | 22 (21 to 30) | 28 (24 to 39) | 135, 135 | 33.06 / 93.60 | 3.55 / 3.96 |
+| 5.7K 8-bit, software | 50 (44 to 57) | 30 (0 to 54) | 0, 0 | | 4.38 / 6.02 |
+| 5.7K 10-bit, Vulkan (Auto) | 85 (64 to 109) | 30 (0 to 111) | 0, 0 | 5.16 / 24.09 | 6.09 / 6.87 |
+| 5.7K 10-bit, VA-API | 14 (13 to 18) | 24 (21 to 26) | 448, 450 | 144.47 / 190.30 | 5.95 / 6.48 |
+| 5.7K 10-bit, software | 37 (31 to 41) | 30 (0 to 41) | 0, 0 | | 10.89 / 14.98 |
+| 8K 8-bit, Vulkan (Auto) | 81 (73 to 85) | 30 (0 to 61) | 0, 0 | 4.64 / 27.11 | 5.25 / 6.18 |
+| 8K 8-bit, VA-API | 12.5 (10 to 15) | 24.5 (17 to 31) | 452, 455 | 115.86 / 215.29 | 5.70 / 6.03 |
+| 8K 8-bit, software | 30 (26 to 37) | 30 (0 to 37) | 72, 56 | | 9.40 / 13.28 |
+| X5 8K30, Vulkan (Auto) | 77 (75 to 80.5) | 30 (29.5 to 60) | 0, 0 | 4.86 / 11.51 | 3.99 / 5.05 |
+| X5 8K30, VA-API | 23 (18 to 39.5) | 30 (25.5 to 42) | 0, 0 | 26.24 / 47.38 | 4.73 / 6.31 |
+| X5 8K25, Vulkan (Auto) | 75 | 0 (0 to 50.5) | 0, 0 | 9.59 / 28.96 | 2.43 / 3.68 |
+| X5 8K25, VA-API | 43.75 (43 to 44.5) | 0 (0 to 44.5) | 0, 0 | 22.57 / 43.11 | 2.46 / 3.52 |
+
+What these add:
+
+- Every Vulkan Video row plays in real time with nothing dropped, as
+  in the sixth run, and the headless benches are clean where the
+  window, below, wasn't.
+- Vulkan Video's `upload_cpu` at 8 bits is a fifth lower than the
+  sixth run's (2.89 against 3.69 ms at 5.7K, 5.25 against 6.10 at 8K),
+  not yet explained.
+- VA-API copied is still the slow path, and noisy: its X5 8K30 decode
+  ran at 23 fps a lens here and 43 in the zero-copy bench's run of the
+  same mode. The zero-copy bench's imported, Vulkan Video and path B
+  rows were within 2 % of PR #10's, path B again the fastest
+  unthrottled in every mode, and both zero-copy paths again dropped at
+  3840² @ 25 in real time (29 frames imported and 26 on path B, all
+  but one of each decode-dropped).
+
+The GUI, `gui_smoke` (D40), rerun with the screen unlocked at 45267d1
+(PR #11, [`hw-reports/odin-45267d1-gui.md`](../hw-reports/odin-45267d1-gui.md)):
+the seam clip and the sync flash and beep passed at 100 % presented
+and a UI p99 of 17.0 ms, and all five screenshots were right. The
+noisy 5.7K 8-bit clip dropped 140 of 599 frames with a UI p99 of
+49.9 ms, and the 10-bit clip and the X5 pair presented 69 % and 75 %
+of the UI frames expected, the UI at about 30 Hz for stretches, which
+the gate then read as the compositor not drawing (fixed: D40). In the
+window, Vulkan Video's `download` was 19.2 / 73.4 ms at 5.7K 8-bit,
+against 2.56 / 11.32 headless. Smoke runs of the three on their own
+(branch `diag/gui-5k7`, 20 s each), the presented share of the UI
+frames expected and eframe's own work per UI pass at p50:
+
+| Clip | Copy, `write_texture` | Copy, staging belt | Zero copy, path B |
+|---|---:|---:|---:|
+| 5.7K 8-bit | 84 % and 77 %, 3.0 ms | 86 %, 1.3 ms | 96 %, 0.9 ms |
+| 5.7K 10-bit | 51 %, 6.4 ms | 81 %, 1.5 ms | 94 %, 0.9 ms |
+| X5 8K30 pair | 64 %, 4.6 ms | 98 %, 1.3 ms | 99 %, 1.05 ms |
+
+`write_texture` holds wgpu's queue locked through its copy of each
+frame, and the UI thread's own buffer writes and submit wait for it;
+the belt doesn't, and is now the player's upload path (D31). What the
+belt leaves is the copy path's own traffic, the download and the
+upload of every frame on the one queue the window presents from. Zero
+copy has neither, and missed 3 to 5 frames in 20 s (UI p99 22 to
+50 ms); it is now the default for Vulkan Video (D25). The GPU was 16 % busy at 1065 MHz shader and 456 MHz memory
+clocks under amdgpu's automatic power levels, the CPU 94 % idle, and a
+browser was playing video in the background. The headless
+`bench_playback_realtime_5k7_8bit` passed meanwhile.
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 

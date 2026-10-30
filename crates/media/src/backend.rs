@@ -123,14 +123,46 @@ pub enum HwOutput {
 /// cache's, those in flight to the GPU and those on screen.
 pub const ZERO_COPY_SURFACES: u8 = 24;
 
-/// `SPHERECUT_ZERO_COPY=1` turns zero copy on in the viewer (slice 5b,
-/// D25): playback's `PlayerConfig::zero_copy`, and doctor's report of it.
+/// `SPHERECUT_ZERO_COPY` sets the viewer's [`ZeroCopy`] (slice 5b, D25):
+/// playback's `PlayerConfig::zero_copy`, and doctor's report of it.
 pub const ZERO_COPY_ENV: &str = "SPHERECUT_ZERO_COPY";
 
-/// Whether `get` (the environment, or a test's) asks for zero copy: `1`
-/// does, anything else doesn't.
-pub fn zero_copy_from_env(get: impl Fn(&str) -> Option<String>) -> bool {
-    get(ZERO_COPY_ENV).is_some_and(|v| v.trim() == "1")
+/// Which decoded frames the viewer keeps on the GPU (slice 5b, D25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ZeroCopy {
+    /// Every frame is copied through RAM: `SPHERECUT_ZERO_COPY=0`.
+    Off,
+    /// Vulkan Video's frames, decoded on the renderer's own device where
+    /// it can be shared (path B); VA-API's are copied. The default.
+    #[default]
+    Vulkan,
+    /// VA-API's frames too, imported as DMA-BUFs where the rendering GPU
+    /// can (path A): `SPHERECUT_ZERO_COPY=1`.
+    All,
+}
+
+impl ZeroCopy {
+    /// Vulkan Video's frames stay on the GPU where the device is shared.
+    pub fn vulkan(self) -> bool {
+        self != ZeroCopy::Off
+    }
+
+    /// VA-API's frames are imported where the device can.
+    pub fn dmabuf(self) -> bool {
+        self == ZeroCopy::All
+    }
+}
+
+/// What `get` (the environment, or a test's) asks for: `1` is
+/// [`ZeroCopy::All`], `0` [`ZeroCopy::Off`], anything else or nothing the
+/// default.
+pub fn zero_copy_from_env(get: impl Fn(&str) -> Option<String>) -> ZeroCopy {
+    match get(ZERO_COPY_ENV).as_deref().map(str::trim) {
+        Some("1") => ZeroCopy::All,
+        Some("0") => ZeroCopy::Off,
+        _ => ZeroCopy::default(),
+    }
 }
 
 /// How a frame left its decoder.
