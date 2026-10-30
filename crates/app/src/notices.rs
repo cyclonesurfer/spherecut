@@ -71,6 +71,29 @@ impl Notice {
         self
     }
 
+    /// A GPU slot dropped for want of memory, `live` left for `streams`
+    /// streams: with none spare, no frame lands after a seek or a step
+    /// (D34), so it is the GPU failing.
+    pub fn slot_dropped(message: &str, live: usize, streams: usize) -> Notice {
+        if live <= streams {
+            return Notice::new(
+                NoticeKind::GpuFailed,
+                Severity::Error,
+                "The GPU is out of memory",
+            )
+            .impact(format!(
+                "{message}; {live} GPU slots are left for {streams} streams, too few to seek \
+                 or step: close programs using the GPU and restart Spherecut"
+            ));
+        }
+        Notice::new(
+            NoticeKind::SlotDropped,
+            Severity::Warning,
+            "The GPU is short of memory",
+        )
+        .impact(format!("{message}; playback goes on with {live} GPU slots"))
+    }
+
     /// A doctor's issue as a banner.
     pub fn from_issue(issue: &Issue) -> Notice {
         Notice::new(
@@ -234,6 +257,30 @@ mod tests {
         assert_eq!(
             n.copy_text(),
             "what\nimpact: slow\nfix:\n  sudo dnf install a\n  sudo dnf install b\n"
+        );
+    }
+
+    #[test]
+    fn a_dropped_slot_is_the_gpu_failing_once_none_is_spare() {
+        let n = Notice::slot_dropped("out of memory", 3, 2);
+        assert_eq!(
+            (n.kind, n.severity, n.impact.as_str()),
+            (
+                NoticeKind::SlotDropped,
+                Severity::Warning,
+                "out of memory; playback goes on with 3 GPU slots"
+            )
+        );
+        let n = Notice::slot_dropped("out of memory", 2, 2);
+        assert_eq!(
+            (n.kind, n.severity),
+            (NoticeKind::GpuFailed, Severity::Error)
+        );
+        assert!(
+            n.impact
+                .contains("2 GPU slots are left for 2 streams, too few to seek or step"),
+            "{}",
+            n.impact
         );
     }
 }

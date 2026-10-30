@@ -58,7 +58,7 @@ use thiserror::Error;
 use crate::audio::{AudioOutput, AudioOutputFactory, PREROLL_AUDIO, PREROLL_LIMIT};
 use crate::budget::{AUTO_MIN, AutoBudget, CacheBudget, read_auto_budget};
 use crate::cache::{CacheStats, FrameCache};
-use crate::decoder::{DecoderPreference, HwSupport};
+use crate::decoder::{DecoderPreference, HwPromise, HwSupport};
 use crate::perf::{Counter, MemoryStats, PerfSnapshot, PerfStats, Stage};
 use crate::shared::{
     BudgetStatus, Command, Place, Repaint, Request, Shared, Status, StreamStatus, Want, av_offset,
@@ -147,10 +147,13 @@ pub enum PlayerEvent {
     /// audio: video plays on the system clock until it comes.
     AudioLate,
     /// The GPU had no memory for a slot: playback goes on with one fewer
-    /// (risk 11).
+    /// (risk 11), `live` of them. With no more than the file's streams, a
+    /// seek or a step never lands (D34): the viewer takes that as the
+    /// GPU failing.
     SlotDropped {
         slot: usize,
         error: PlayerError,
+        live: usize,
     },
     /// A frame can't be uploaded; it isn't tried again.
     UploadFailed {
@@ -233,6 +236,8 @@ pub struct PlayerParts {
     /// Doctor's decode checks, if the GUI ran them already; otherwise the
     /// first open that needs them runs them, on its own thread.
     pub hw: Option<HwSupport>,
+    /// The checks the GUI is running, which that open waits for instead.
+    pub hw_later: Option<HwPromise>,
     /// The render node hardware decoding uses (`--render-node`), for
     /// doctor's checks; otherwise the GPU's.
     pub render_node: Option<PathBuf>,
@@ -245,6 +250,7 @@ impl std::fmt::Debug for PlayerParts {
             .field("clock", &self.clock)
             .field("audio", &self.audio)
             .field("hw", &self.hw)
+            .field("hw_later", &self.hw_later)
             .field("render_node", &self.render_node)
             .finish_non_exhaustive()
     }
@@ -260,6 +266,7 @@ impl PlayerParts {
             audio: None,
             repaint: None,
             hw: None,
+            hw_later: None,
             render_node: None,
         }
     }
@@ -469,6 +476,9 @@ struct Ui {
     view: Vec<StreamView>,
     last_present: Option<Instant>,
     intervals: VecDeque<f32>,
+    /// Whether what is presented is painted: frames passed over while
+    /// it isn't (the window hidden) aren't dropped.
+    painted: bool,
     /// When stream 0's frame last changed while playing.
     last_new: Option<Instant>,
     /// The playhead the presenter last gave the cache.
@@ -591,6 +601,7 @@ impl Player {
             shutdown: AtomicBool::new(false),
             open_lock: Mutex::new(()),
             hw: Mutex::new(parts.hw),
+            hw_later: parts.hw_later,
             vulkan_device: OnceLock::new(),
             events: events_tx,
             handles: handles_tx.clone(),
@@ -663,6 +674,7 @@ impl Player {
                 view: Vec::new(),
                 last_present: None,
                 intervals: VecDeque::with_capacity(INTERVALS),
+                painted: true,
                 last_new: None,
                 playhead: None,
                 snapshot: PlayerSnapshot::default(),
@@ -954,6 +966,16 @@ impl Player {
             })
             .collect::<Option<Vec<_>>>()
             .filter(|next| !next.is_empty())
+    }
+
+    /// Whether the frames [`present`](Self::present) picks are painted:
+    /// false while the window is hidden, when eframe runs no UI, so that
+    /// the frames passed over then aren't counted as dropped (plan
+    /// section 10). True until said otherwise. Never waits.
+    pub fn set_painted(&self, painted: bool) {
+        if let Ok(mut ui) = self.ui.try_borrow_mut() {
+            ui.painted = painted;
+        }
     }
 
     /// The frames to draw now, picked for the clock's time when they will
@@ -1266,13 +1288,14 @@ impl Player {
     fn pick(&self, ui: &mut Ui, t: Time, now: Instant) -> bool {
         let views = self.shared.slots.views();
         let mut changed = false;
+        let count = ui.painted;
         for i in 0..ui.shown.len() {
             let best = views
                 .iter()
                 .filter(|v| v.frame.epoch == ui.epoch && v.frame.stream == i && v.frame.time <= t)
                 .max_by_key(|v| v.frame.time);
             if let Some(v) = best {
-                changed |= self.show(ui, i, v, now, true);
+                changed |= self.show(ui, i, v, now, count);
             }
         }
         changed

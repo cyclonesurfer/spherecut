@@ -6,12 +6,15 @@
 //! `require_graphical_session` finds. It skips without one, so here,
 //! with no desktop, it reports TIER2-SKIP and never a pass.
 //!
-//! A run fails when:
+//! A run fails when, after its first second (the document's `settled`,
+//! as the playback benches leave out the cache's filling):
 //!
 //! - the process fails, or its document isn't `ok`;
-//! - fewer than 90% of the UI frames expected were presented: the
-//!   compositor didn't draw (a locked session, or one on another VT), so
-//!   nothing else the run measured counts;
+//! - fewer than 90% of the UI frames expected were presented. With as
+//!   many passes without the UI as half the frames missing, the
+//!   compositor didn't draw the window (a locked session, or one on
+//!   another VT), so nothing else the run measured counts; with fewer,
+//!   the window was drawn and the UI was slow;
 //! - more than 0.1% of the frames were dropped;
 //! - the UI's p99 is over 1.5 × the refresh period;
 //! - on the sync clip, |A/V|'s p95 is 20 ms or more;
@@ -97,17 +100,38 @@ fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
     }
     let r = &doc["result"];
     let f = |v: &Value| v.as_f64();
-    let presented = f(&r["ui"]["presented"]).unwrap_or(0.0);
+    // After the first second, while the cache fills, as the playback
+    // benches judge; the whole run where it ended sooner.
+    let judged = if r["settled"].is_object() {
+        &r["settled"]
+    } else {
+        r
+    };
+    let ui = &judged["ui"];
+    let presented = f(&ui["presented"]).unwrap_or(0.0);
     if presented < MIN_PRESENTED {
+        // eframe runs passes without the UI while the compositor draws
+        // nothing of the window; a window drawn but slow has none.
+        let expected = f(&ui["expected"]).unwrap_or(0.0);
+        let frames = f(&ui["frames"]).unwrap_or(0.0);
+        let hidden = f(&ui["passes"]).unwrap_or(0.0) - frames;
+        if hidden >= (expected - frames) / 2.0 {
+            why.push(format!(
+                "{:.0}% of the UI frames expected were presented: the compositor didn't draw \
+                 the window (a locked session, or one on another VT), so the rest doesn't count",
+                presented * 100.0
+            ));
+            return why;
+        }
         why.push(format!(
-            "{:.0}% of the UI frames expected were presented: the compositor didn't draw the \
-             window (a locked session, or one on another VT), so the rest doesn't count",
-            presented * 100.0
+            "{:.0}% of the UI frames expected were presented, the window drawn ({hidden:.0} \
+             passes without the UI): the UI was slow, each pass's own work {} ms at p95",
+            presented * 100.0,
+            f(&r["ui"]["work"]["p95"]).map_or("unmeasured".into(), |w| format!("{w:.1}"))
         ));
-        return why;
     }
-    let shown = f(&r["frames"]["shown"]).unwrap_or(0.0);
-    let dropped = f(&r["frames"]["dropped"]).unwrap_or(0.0);
+    let shown = f(&judged["frames"]["shown"]).unwrap_or(0.0);
+    let dropped = f(&judged["frames"]["dropped"]).unwrap_or(0.0);
     if shown + dropped > 0.0 && dropped / (shown + dropped) > MAX_DROPPED {
         why.push(format!(
             "{dropped} of {} frames dropped ({:.2}%, over {:.1}%)",
@@ -116,7 +140,7 @@ fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
             MAX_DROPPED * 100.0
         ));
     }
-    if let (Some(hz), Some(p99)) = (f(&r["refresh_hz"]), f(&r["ui"]["p99"])) {
+    if let (Some(hz), Some(p99)) = (f(&r["refresh_hz"]), f(&ui["p99"])) {
         let limit = MAX_UI_P99_PERIODS * 1000.0 / hz;
         if p99 > limit {
             why.push(format!(
@@ -433,7 +457,7 @@ fn the_gates_fail_what_they_say() {
             "ok": true,
             "result": {
                 "refresh_hz": 60.0,
-                "ui": {"presented": 0.99, "p99": 20.0},
+                "ui": {"presented": 0.99, "p99": 20.0, "expected": 1200.0, "frames": 1188, "passes": 1188},
                 "frames": {"shown": 600, "dropped": 0},
                 "av": {"p95_abs_ms": 8.0},
                 "streams": [{"format": "hevc 5760×2880 yuv420p10le limited/709", "decoder": "vaapi", "decode": "VA-API"}],
@@ -465,10 +489,30 @@ fn the_gates_fail_what_they_say() {
         false,
         "the run failed: gone (not_found)",
     );
-    // A hidden window: only that is said.
-    let hidden = with(&["result", "ui", "presented"], json!(0.4));
+    // A hidden window, eframe's logic running without the UI in the
+    // frames missing: only that is said.
+    let mut hidden = good();
+    hidden["result"]["ui"] =
+        json!({"presented": 0.4, "p99": 90.0, "expected": 1200.0, "frames": 480, "passes": 1180});
     assert_eq!(judge(&hidden, true, &gates).len(), 1);
     fails(&hidden, false, "40% of the UI frames");
+    fails(&hidden, false, "the compositor didn't draw");
+    // A window drawn but slow: said, and the other gates still judge.
+    let mut slow = good();
+    slow["result"]["ui"] = json!({"presented": 0.69, "p99": 54.8, "expected": 1200.0, "frames": 828, "passes": 830, "work": {"p95": 3.25}});
+    let why = judge(&slow, true, &gates);
+    assert_eq!(why.len(), 2, "{why:?}");
+    fails(
+        &slow,
+        false,
+        "69% of the UI frames expected were presented, the window drawn (2 passes",
+    );
+    fails(
+        &slow,
+        false,
+        "the UI was slow, each pass's own work 3.2 ms at p95",
+    );
+    fails(&slow, false, "UI p99 54.8 ms");
     fails(
         &with(&["result", "frames", "dropped"], json!(1)),
         false,
@@ -489,6 +533,18 @@ fn the_gates_fail_what_they_say() {
         "UI p99 25.5 ms",
     );
     assert!(judge(&with(&["result", "refresh_hz"], Value::Null), false, &gates).is_empty());
+    // After the first second when the document has it: the startup's
+    // drops and slow frames aren't judged.
+    let mut startup = with(&["result", "frames", "dropped"], json!(9));
+    startup["result"]["ui"]["p99"] = json!(60.0);
+    startup["result"]["settled"] = json!({
+        "from_s": 1.0,
+        "ui": {"presented": 0.99, "p99": 17.5, "expected": 1140.0, "frames": 1129, "passes": 1129},
+        "frames": {"shown": 570, "dropped": 0},
+    });
+    assert!(judge(&startup, false, &gates).is_empty());
+    startup["result"]["settled"]["frames"]["dropped"] = json!(2);
+    fails(&startup, false, "2 of 572 frames dropped");
     // A/V only on the sync clip.
     let late = with(&["result", "av", "p95_abs_ms"], json!(20.0));
     fails(&late, true, "|A/V| p95 20.0 ms");

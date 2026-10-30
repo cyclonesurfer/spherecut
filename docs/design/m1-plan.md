@@ -2281,7 +2281,10 @@ memory    RSS 2.3 GiB   GPU alloc 0.42 GiB   minflt 12/s
     numbers are labelled CPU timings.
 - **Recording.** Per-stage rings of 256 f32 samples sit in a `Mutex` that
   only their one producer locks. The UI `try_lock`s once a frame and
-  shows the previous copy on contention. Counters are `AtomicU64`.
+  shows the previous copy on contention. Counters are `AtomicU64`. (As
+  built, the rings are atomics too: each slot holds a sample with its
+  number, so a reader never waits and never takes a sample being
+  replaced for a new one.)
 - **One source of numbers.** The same `PerfStats` feed the overlay, the
   `--smoke` JSON and the Tier 2 benchmarks, so the overlay, the hardware
   report and `docs/perf.md` agree.
@@ -2410,8 +2413,9 @@ The Euler table (`frame` on the grid clip, centre pixel):
 | `--pitch -90` | black, D |
 | `--roll 90` | red, F (roll turns about the view axis); the U marker on the left edge's side (amendment 10) |
 
-**The confinement table** (`crates/cli/tests/confinement.rs` and
-`no_network.rs`). Every file is generated into a temp dir:
+**The confinement table** (`crates/cli/tests/confinement.rs`; no
+network socket is `doctor.rs`'s `doctor_opens_no_network_socket` and
+clippy's ban on `std::net`, as built). Every file is generated into a temp dir:
 
 | Input | Expected |
 |---|---|
@@ -2806,7 +2810,7 @@ needs a pushed commit.
 | PLAN M1 criterion | Slices | Evidence |
 |---|---|---|
 | `MediaBackend` with FFmpeg: open, stream info, frame-accurate seek by PTS, decode to NV12/P010 (native layouts), software and VA-API with automatic fallback, audio decode | 2, 6 | the seek oracle and its control; the fallback tests; the audio tests; `vaapi_seek_matches_software` |
-| FFmpeg opens only the file Spherecut opened, with the strace test, the clippy ban and probe's refusal by name | 1 | `confinement.rs`, `no_network.rs`, the `lrc` test, the README and D15 |
+| FFmpeg opens only the file Spherecut opened, with the strace test, the clippy ban and probe's refusal by name | 1 | `confinement.rs`, `doctor.rs`'s `doctor_opens_no_network_socket`, the `lrc` test, the README and D15 |
 | Projection shader sampling the planes, per-source matrix and range, linear float target, sRGB output, equirect to rectilinear, fisheye and stereographic with morph | 3 | the goldens (projection, morph, range, matrix, siting, 10-bit); all pipelines build |
 | No seam at ±180° and no shimmer: analytic LOD plus mipmaps, proven by goldens of the high-frequency pattern | 3 | `seam_quad`, `zenith_quad`, `nadir_quad`, `tinyplanet_pole` with the implicit-LOD control; `shimmer_*` with the level-0 control |
 | `spherecut frame` | 4 | `frame.rs` |

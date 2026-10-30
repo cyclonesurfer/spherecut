@@ -63,6 +63,10 @@ use crate::shared::{
 /// shutdown flag again.
 const IDLE_WAIT: Duration = Duration::from_millis(50);
 
+/// How long an open waits for the GUI's hardware checks before it runs
+/// them itself. They take a few seconds; a minute means they hung.
+const HW_LATER: Duration = Duration::from_secs(60);
+
 /// What an open worker needs.
 pub(crate) struct OpenJob {
     pub(crate) shared: Arc<Shared>,
@@ -243,10 +247,19 @@ impl OpenJob {
             .collect()
     }
 
-    /// Doctor's checks: the player's, or run now on the GPU's render node
-    /// and kept for the opens after.
+    /// Doctor's checks: the player's, the GUI's once they end, or run now
+    /// on the GPU's render node; kept for the opens after.
     fn hw_support(&self) -> Option<HwSupport> {
         let mut hw = lock(&self.shared.hw, "waiting for doctor's checks");
+        if hw.is_none()
+            && !self.stale()
+            && let Some(later) = &self.shared.hw_later
+        {
+            *hw = later.wait(HW_LATER);
+            if hw.is_none() {
+                tracing::warn!("the GUI's hardware checks didn't come; running them again");
+            }
+        }
         if hw.is_none() && !self.stale() {
             let node =
                 spherecut_media::hw::render_node(Some(&self.gpu_ids), self.render_node.as_deref());

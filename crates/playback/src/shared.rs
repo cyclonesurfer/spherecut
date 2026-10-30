@@ -18,7 +18,7 @@ use spherecut_render::vkshare::SharedVideo;
 use crate::audio::AudioOutput;
 use crate::budget::{AutoBudget, CacheBudget};
 use crate::cache::FrameCache;
-use crate::decoder::HwSupport;
+use crate::decoder::{HwPromise, HwSupport};
 use crate::perf::{MemoryStats, PerfStats};
 use crate::player::{PlayerError, PlayerEvent};
 use crate::slots::SlotRing;
@@ -168,6 +168,8 @@ pub(crate) struct Shared {
     pub(crate) open_lock: Mutex<()>,
     /// Doctor's checks, once given or run.
     pub(crate) hw: Mutex<Option<HwSupport>>,
+    /// The GUI's checks, still running when the player started.
+    pub(crate) hw_later: Option<HwPromise>,
     /// FFmpeg's Vulkan context on the renderer's device (slice 5b's path
     /// B), made by the first open that wants it: `None` when FFmpeg
     /// refused the device, which the status's `import_refused` says.

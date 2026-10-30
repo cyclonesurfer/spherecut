@@ -158,6 +158,20 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
     let av_median = r["av"]["median_ms"].as_f64().unwrap();
     assert!(r["av"]["p95_abs_ms"].as_f64().unwrap() >= av_median.abs());
     assert!(r["audio"].is_null(), "no audio device here");
+    // After the first second, what the gates judge: a part of the run.
+    let settled = &r["settled"];
+    assert!(settled["from_s"].as_f64().unwrap() >= 1.0, "{settled}");
+    for (part, whole) in [
+        (&settled["ui"]["frames"], &ui["frames"]),
+        (&settled["ui"]["passes"], &ui["passes"]),
+        (&settled["frames"]["shown"], &r["frames"]["shown"]),
+    ] {
+        assert!(
+            part.as_u64().unwrap() <= whole.as_u64().unwrap(),
+            "{settled}"
+        );
+    }
+    assert!(settled["ui"]["frames"].as_u64().unwrap() > 0, "{settled}");
     assert!(r["cache"]["bytes"].as_u64().unwrap() > 0);
     assert!(r["slots"]["active"].as_u64().unwrap() > 0);
     assert_eq!(r["blocked_on_ui_thread"], 0);

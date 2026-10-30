@@ -635,7 +635,11 @@ screenshot to `--smoke-screenshot <PNG>` if given (at most 960 pixels
 wide, its aspect kept), writes one document to `JSON`, and closes. The
 exit status is the GUI's: 0 when the document says `ok`, and otherwise
 by its code (above). hw-test's `gui_smoke` runs it; the flags are hidden
-from `--help`, and the schema may grow fields as the GUI does.
+from `--help`, and the schema may grow fields as the GUI does. Unlike
+the commands, which refuse an existing output without `--overwrite`,
+the smoke run replaces its document and screenshot (each written to a
+temporary file and renamed over the old): they are hw-test's own
+outputs, which `gui_smoke` clears before each run anyway.
 
 A window the compositor doesn't draw (a locked or blanked screen, a
 minimized window, another virtual terminal) has no UI passes, and the
@@ -656,8 +660,9 @@ and no `path` in its `error`. Its `result`:
 | `adapter` | `name`, `vendor`, `device`, `device_type`, `driver`, `driver_info` as wgpu has them, and `cpu` for lavapipe |
 | `surface_format`, `scale`, `native_scale`, `window`, `viewer`, `refresh_hz` | The window surface's format, pixels a point and the window's own scale, the window's and the viewer's size in pixels, and the monitor's refresh rate (`null` when winit doesn't know it) |
 | `raw_view`, `streams[]` | Whether the viewer showed the raw view; each video stream's `format` (as the overlay has it), `fps`, `decoder` (`software`, `vaapi` or `vulkan`), `fell_back_from` and `decode` (the Info pane's words) |
-| `ui` | `frames` (UI passes) and `passes` (with those eframe ran hidden, without the UI), `expected` (`refresh_hz` × `played_s`, or the passes without a rate) and `presented` (frames over expected), the intervals' `p50`, `p95`, `p99` and `max` in ms, and `hitches` |
+| `ui` | `frames` (UI passes) and `passes` (with those eframe ran hidden, without the UI), `expected` (`refresh_hz` × `played_s`, or the passes without a rate) and `presented` (frames over expected), the intervals' `p50`, `p95`, `p99` and `max` in ms, `hitches`, and `work`: each pass's own work as eframe counts it, without acquiring the surface, the submit and the present, as `samples`, `missed` (0), `p50`, `p95`, `p99` and `max` in ms |
 | `frames` | `shown`, `dropped` and `decode_dropped` over the run, and `expected` (the first stream's rate × `played_s`) |
+| `settled` | The same after the run's first second, while the cache fills, as the playback benches count them: `from_s` (how far in it begins), `ui` (`frames`, `passes`, `expected`, `presented`, `p50`, `p95`, `p99`, `max`) and `frames` (`shown`, `dropped`, `decode_dropped`, `expected`); `null` for a run that ended within its first second. `gui_smoke` judges these |
 | `stages` | Per stage (`decode`, `download`, `convert`, `upload_cpu`, `upload_gpu`, `render_cpu`, `render_gpu`, `ui_frame`, `shown_interval`): `samples`, `missed` (recorded but gone from the ring before the next pass read it), and `p50`, `p95`, `p99`, `max` in ms over the whole run, by the nearest rank |
 | `av` | How far the clock, at each present, is from the shown frame's interval (its time to the next frame's): 0 inside it, positive when the frame is late, negative when early. `median_ms` (signed), `p95_abs_ms` and `samples`; `null` with none |
 | `audio` | `host`, `device`, `rate`, `latency_ms`, `underruns` and `on_system_clock`; `null` without an audio device |

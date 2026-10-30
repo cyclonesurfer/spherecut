@@ -419,11 +419,11 @@ impl Uploader {
     }
 
     /// Runs map callbacks (the timers' read-backs, the belt's chunks)
-    /// without waiting, and gives the latest GPU time read. On a lost
-    /// device it reads nothing more.
+    /// without waiting, and gives the GPU time read since the last call,
+    /// if any. On a lost device it reads nothing more.
     pub fn poll(&mut self, gpu: &Gpu) -> Option<f32> {
         if gpu.is_lost() {
-            return self.timers.as_ref().and_then(GpuTimers::latest_ms);
+            return None;
         }
         self.timers.as_mut().and_then(GpuTimers::poll)
     }

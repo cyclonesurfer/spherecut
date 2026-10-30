@@ -34,7 +34,9 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
     let _ = writeln!(
         r,
         "`gui_smoke` {test}. The session: {} ({}). VA-API decodes {} by doctor's check, so \
-         those clips must decode in hardware.{lock}\n",
+         those clips must decode in hardware.{lock} Presented, the UI's intervals and the \
+         frames are counted after each run's first second, while the cache fills, as the \
+         playback benches count them.\n",
         s["session"].as_str().unwrap_or("?"),
         list(&s["env"]),
         match list(&s["vaapi_hevc"]) {
@@ -69,16 +71,34 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
         let res = doc.as_ref().map(|d| &d["result"]);
         let cell =
             |f: &dyn Fn(&Value) -> Option<String>| res.and_then(f).unwrap_or_else(|| "-".into());
+        // What the gates judge: after the first second, where the run
+        // lasted that long.
+        let judged = |r: &Value| {
+            if r["settled"].is_object() {
+                r["settled"].clone()
+            } else {
+                r.clone()
+            }
+        };
         let _ = writeln!(
             r,
             "| {n} | {label} | {verdict} | {} | {} | {} | {} | {} | {} | {} |",
-            cell(&|r| Some(format!("{:.0}%", r["ui"]["presented"].as_f64()? * 100.0))),
-            cell(&|r| Some(format!("{} / {}", ms(&r["ui"]["p50"]), ms(&r["ui"]["p99"])))),
-            cell(&|r| r["refresh_hz"].as_f64().map(|hz| format!("{hz:.2} Hz"))),
             cell(&|r| Some(format!(
-                "{} / {} / {}",
-                r["frames"]["shown"], r["frames"]["dropped"], r["frames"]["decode_dropped"]
+                "{:.0}%",
+                judged(r)["ui"]["presented"].as_f64()? * 100.0
             ))),
+            cell(&|r| {
+                let j = judged(r);
+                Some(format!("{} / {}", ms(&j["ui"]["p50"]), ms(&j["ui"]["p99"])))
+            }),
+            cell(&|r| r["refresh_hz"].as_f64().map(|hz| format!("{hz:.2} Hz"))),
+            cell(&|r| {
+                let j = judged(r);
+                Some(format!(
+                    "{} / {} / {}",
+                    j["frames"]["shown"], j["frames"]["dropped"], j["frames"]["decode_dropped"]
+                ))
+            }),
             cell(&|r| {
                 let ds: Vec<String> = r["streams"]
                     .as_array()?
@@ -119,7 +139,7 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
                 let _ = writeln!(
                     r,
                     "{} ({}, {}); {} at {} pixels a point (the window's own {}), the window \
-                     {} and the viewer {} pixels; {}; played {:.1} s{}.\n",
+                     {} and the viewer {} pixels; {}; {}; played {:.1} s{}.\n",
                     res["adapter"]["name"].as_str().unwrap_or("?"),
                     res["adapter"]["driver"].as_str().unwrap_or("?"),
                     res["adapter"]["driver_info"].as_str().unwrap_or("?"),
@@ -129,6 +149,7 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
                     size(&res["window"]),
                     size(&res["viewer"]),
                     stages(&res["stages"]),
+                    passes(&res["ui"]),
                     res["played_s"].as_f64().unwrap_or(0.0),
                     if res["ended"] == true {
                         ", to the clip's end"
@@ -213,6 +234,23 @@ fn size(v: &Value) -> String {
     }
 }
 
+/// "1188 UI passes of 1190, their own work 2.1 / 3.3 ms": the passes
+/// with the UI of all passes, and eframe's count of their work, p50 and
+/// p95.
+fn passes(ui: &Value) -> String {
+    let work = &ui["work"];
+    format!(
+        "{} UI passes of {}, their own work {}",
+        ui["frames"].as_u64().unwrap_or(0),
+        ui["passes"].as_u64().unwrap_or(0),
+        if work["samples"].as_u64().unwrap_or(0) > 0 {
+            format!("{} / {} ms", ms(&work["p50"]), ms(&work["p95"]))
+        } else {
+            "unmeasured".into()
+        }
+    )
+}
+
 /// "decode 4.1 / 6.0 ms, upload_cpu ..." for the stages with samples:
 /// p50 and p95.
 fn stages(v: &Value) -> String {
@@ -256,8 +294,12 @@ mod tests {
                 "surface_format": "Bgra8UnormSrgb", "scale": 1.25, "native_scale": 1.25,
                 "window": [1600, 1000], "viewer": [1167, 776], "refresh_hz": 59.95,
                 "played_s": 20.0, "ended": false,
-                "ui": {"presented": 0.998, "p50": 16.7, "p99": 18.2},
-                "frames": {"shown": 600, "dropped": 0, "decode_dropped": 0},
+                "ui": {"presented": 0.998, "p50": 16.7, "p99": 18.2, "frames": 1188, "passes": 1190,
+                       "work": {"samples": 1187, "p50": 2.1, "p95": 3.3}},
+                "frames": {"shown": 600, "dropped": 3, "decode_dropped": 1},
+                "settled": {"from_s": 1.0,
+                            "ui": {"presented": 0.999, "p50": 16.7, "p99": 17.9},
+                            "frames": {"shown": 570, "dropped": 0, "decode_dropped": 0}},
                 "streams": [{"decode": "VA-API", "decoder": "vaapi"}],
                 "av": {"median_ms": 2.0, "p95_abs_ms": 6.5},
                 "audio": {"host": "PulseAudio", "latency_ms": 41.2},
@@ -292,10 +334,11 @@ mod tests {
         assert!(md.contains("The session: Wayland socket discovered (WAYLAND_DISPLAY=wayland-0)"));
         assert!(md.contains(
             "VA-API decodes HEVC Main, HEVC Main 10 by doctor's check, so those clips must \
-             decode in hardware. The screen was unlocked when the runs began.\n"
+             decode in hardware. The screen was unlocked when the runs began. Presented, the \
+             UI's intervals and the frames are counted after each run's first second"
         ));
         assert!(md.contains(
-            "| 0 | noisy 5.7K 8-bit | pass | 100% | 16.7 / 18.2 | 59.95 Hz | 600 / 0 / 0 | VA-API | 2.0 / 6.5 | PulseAudio, 41 ms |"
+            "| 0 | noisy 5.7K 8-bit | pass | 100% | 16.7 / 17.9 | 59.95 Hz | 570 / 0 / 0 | VA-API | 2.0 / 6.5 | PulseAudio, 41 ms |"
         ));
         assert!(md.contains(
             "| 1 | sync flash and beep | **FAILED**: the run failed: no frame (timed_out) | - |"
@@ -303,7 +346,10 @@ mod tests {
         assert!(md.contains(
             "AMD Radeon RX 7600 (RADV NAVI33) (radv, Mesa 26.2.5); Bgra8UnormSrgb at 1.25"
         ));
-        assert!(md.contains("p50 / p95: decode 4.1 / 6.0 ms; played 20.0 s."));
+        assert!(md.contains(
+            "p50 / p95: decode 4.1 / 6.0 ms; 1188 UI passes of 1190, their own work 2.1 / 3.3 ms; \
+             played 20.0 s."
+        ));
         assert!(!md.contains("convert"));
         assert!(md.contains("![noisy 5.7K 8-bit](odin-abc-gui-0.png)"));
         assert_eq!(
