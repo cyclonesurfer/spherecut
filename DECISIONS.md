@@ -1384,6 +1384,8 @@ To decide at A1, with a prototype of each:
   `libc` calls in an FFI module with SAFETY comments, since `unsafe` is
   allowed only in FFI and GPU modules.
 
+*Decided by D43*: our own layer, schemas by hand, rustix.
+
 Revisit if: a new MCP revision changes the split, or agents converge on
 something other than MCP.
 
@@ -6696,6 +6698,89 @@ device can't be shared runs the gate on the copy path and slumps; or
 the copy path's buffers are allocated ahead of the decode, off its
 thread.
 
+## D43. A1's MCP layer, schemas and roots
+
+*2026-10-30, at A1's start, with a prototype of each of D23's three
+open choices. Updates D23.*
+
+What:
+
+- **Our own MCP layer**, synchronous, on `serde_json` and std threads,
+  in a new crate, `spherecut-agent`. It serves 2025-06-18 and
+  2025-11-25 through `initialize`. A request that carries 2026-07-28's
+  `_meta` gets -32022 with those two listed, which is how a client that
+  asks for 2026-07-28 first learns to fall back. 2026-07-28 itself
+  (`server/discover`, stateless requests) waits until a client needs
+  it, as PLAN says for our own layer.
+- **Schemas written by hand**, as JSON in `docs/agents/schemas/`,
+  compiled in with `include_str!`, so what the docs show is what the
+  server sends. Tests hold each to its Rust request type: every
+  property in the schema deserializes, nothing else does, and the
+  required ones are required.
+- **rustix** (`=1.1.6`, features `std` and `fs`) for `openat2` and for
+  reading a directory through its descriptor; its `net` feature gives
+  `SO_PEERCRED` in A3. The agent crate has no `unsafe`.
+
+Why, from the prototypes (scratch crates in the cloud workspace,
+kernel 6.18, 2026-10-30):
+
+- **rmcp 3.8.0** (2026-10-26; 3.7.0 was D23's), `default-features =
+  false, features = ["server"]` on tokio's stdin and stdout, did
+  everything asked of it: `initialize` at 2025-06-18 and 2025-11-25
+  (an unknown revision got 2025-11-25), `ping`, `tools/list`,
+  `tools/call`, cancellation (the call's token fired at once and no
+  response followed), `server/discover` and a modern `tools/list`, and
+  -32022 for an unknown modern revision. It is 51 crates: tokio becomes
+  a normal dependency, and 12 are new to `Cargo.lock` (chrono,
+  dyn-clone, pastey, ref-cast and its derive, rmcp, schemars and its
+  derive, serde_derive_internals, tokio-macros, tokio-util). The
+  stripped server was 2.5 MB, against 0.7 MB for ours. Two things went
+  against what PLAN asks. Every tool here is blocking work (FFmpeg, the
+  GPU), so each runs in `spawn_blocking`, and when stdin closed with a
+  call in flight the server waited for the call to finish (1.4 s of a
+  1.5 s call; `look` may run 50 s, and PLAN says the server exits within
+  2 s). And a malformed line got no answer, where JSON-RPC answers
+  -32700 with a null id. Both could be fixed with our own reader in
+  front of rmcp, which is a good part of our own layer anyway.
+- **Our own layer's prototype**, 132 lines, answered the same session
+  in about 1 ms a request, answered the malformed line with -32700 and
+  then the next request, stopped a cancelled call (no response for it),
+  stopped the call in flight and exited 5 ms after stdin closed, and
+  answered modern requests with -32022. The real layer adds framing
+  limits, progress, a limit on calls at once and a guarded stdout; D23's
+  estimate was 800 to 1,500 lines. PLAN's tests need our own Rust client
+  that speaks the protocol in either case.
+- **The cost** is that we track MCP's revisions ourselves. Every client
+  D23 checked can use the handshake; Claude Code asks for 2026-07-28
+  first and falls back.
+- **schemars 1.2.3** on `look`'s request type gave draft 2020-12, but
+  with `$defs` and a `$ref` for every nested type, `anyOf` with `null`
+  for every `Option`, `oneOf` of constants for each enum, formats JSON
+  Schema doesn't define (`uint32`, `double`) and the properties in
+  alphabetical order. Each needs a setting or a rewrite to give the flat
+  schema clients handle best (Claude Code leaves out tools whose schemas
+  it can't read; D23's research). By hand, the schema is exactly what
+  clients get, and its descriptions are the documentation.
+- **openat2** through rustix and through a `libc` syscall behaved alike
+  on all eleven cases: a file in the root, one in a subfolder and a link
+  inside opened; `..`, `sub/../..`, an absolute path outside, a link out
+  of the root, `/proc/self/fd/N` and a link to it failed with `EXDEV`;
+  a dangling link with `ENOENT`. `libc` needs `unsafe` for the syscall
+  and for `open_how`, which is `non_exhaustive` there and so has to be
+  zeroed, and more for reading a directory from a descriptor
+  (`fdopendir`). rustix wraps all three safely and is in the tree
+  already (1.1.5 through tempfile, and the Wayland crates), with
+  bitflags and linux-raw-sys.
+
+Rejected: rmcp, for the runtime it brings to blocking work, its
+handling of stdin closing and of malformed lines, and its pace (16
+releases since 2026-07-28); schemars, for the rewriting its output needs;
+`libc` calls, for the `unsafe` they add to a crate that needs none.
+
+Revisit if: a client Pat uses needs 2026-07-28 (then `server/discover`
+and requests with `_meta`, from D23's research), or the schemas outgrow
+what is easy to keep by hand (M9's tool count is still 12).
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360
@@ -6704,9 +6789,6 @@ thread.
   license, allow that one git revision in `deny.toml`, or write our own
   parsers from `docs/formats/`. To decide at M4, after checking its license
   and what we actually need from it.
-- **MCP layer, tool schemas, openat2** for agent integration: rmcp or our
-  own layer, schemars or hand-written, rustix or `libc`. To decide at A1
-  (D23).
 - **Attach socket** (A3): Pat to confirm that a local socket the GUI
   opens only when Pat turns attach on (mode 0600, Pat's user only) is
   IPC, not the network access Pat's rule forbids. Before A3 (D23).
