@@ -1205,7 +1205,7 @@ rest, with the versions in `Cargo.lock`:
 | Crate | Used by | Why |
 |---|---|---|
 | anyhow 1.0.104 | cli, xtask | Error context at the program edges; libraries use `thiserror` |
-| ash 0.38.0 (std) | render | Vulkan's own calls in `render::dmabuf` that wgpu-hal doesn't make (slice 5b): asking the driver which DRM format modifiers it has for a format and whether it imports an image with one from a DMA-BUF, and how large (`vkGetPhysicalDeviceFormatProperties2`, `vkGetPhysicalDeviceImageFormatProperties2`), through the instance wgpu-hal opened. Pinned with `=` to the version wgpu-hal 30.0.1 uses, so that its types are wgpu-hal's; default features off, so no loader of its own. Already in the tree through wgpu-hal, so it adds no crate |
+| ash 0.38.0 (std) | render | Vulkan's own calls that wgpu-hal doesn't make (slice 5b): in `render::dmabuf`, asking the driver which DRM format modifiers it has for a format and whether it imports an image with one from a DMA-BUF, and how large (`vkGetPhysicalDeviceFormatProperties2`, `vkGetPhysicalDeviceImageFormatProperties2`), through the instance wgpu-hal opened; in `render::vkshare` (path B), the shared device's extensions, features and queues, and the copier's command buffers, barriers, image-to-buffer copies, timeline semaphore and buffers. Pinned with `=` to the version wgpu-hal 30.0.1 uses, so that its types are wgpu-hal's; default features off, so no loader of its own. Already in the tree through wgpu-hal, so it adds no crate |
 | bytemuck 1.25.2 (derive) | render | The `#[repr(C)]` uniforms as bytes for `Queue::write_buffer`, and timestamps read back, with no `unsafe`: its derives compile under `forbid(unsafe_code)` (D31) |
 | clap 4.6.7 (derive) | cli, xtask | Argument parsing with generated help and errors, for two binaries with subcommands |
 | cpal 0.18.2 (pulseaudio) | audio | The audio output (D35): the PulseAudio protocol host, pure Rust, which reaches PipeWire through pipewire-pulse, and ALSA, which cpal always builds on Linux and which links libasound (so its headers are a build prerequisite). Default features off; a `[[bans.features]]` allow list keeps `pipewire`, `jack`, `realtime` and the browser hosts off. On Linux it brings `alsa`, `alsa-sys`, `pulseaudio` and its `byteorder`, `enum-primitive-derive`, `mio`, `thiserror` 1 and the `futures` crates, and `dasp_sample` for its sample conversions |
@@ -1678,6 +1678,31 @@ Video copied, and its 8K modes three times and half again as fast (76
 and 59), where Vulkan Video copied makes 63 and 78. The choice before
 M3 waits for path B's rows and huginn's.
 
+*Updated 2026-10-30 by slice 5b's path B, as built* (`docs/design/m1-5b.md`).
+FFmpeg's Vulkan Video decodes on wgpu's own device:
+`Gpu::headless_shared` and `for_window_shared` open it through wgpu-hal's
+`open_with_callback` with the video extensions, synchronization2, and
+two compute queues and a decode queue that wgpu never uses, and
+`HwDevice::vulkan_shared` gives FFmpeg the raw handles and those queues
+(through `qf[]` from 7.1, the old per-kind fields on 6.1). Wrapping the
+decoded image for wgpu is ruled out: it sits in decode layouts wgpu
+can't name, and on RADV it is a reference the decoder goes on reading.
+So `render::vkshare::Copier` copies it, on a queue of Spherecut's own
+and under FFmpeg's frame lock, into a device-local buffer, waiting for
+and signalling the frame's timeline semaphore as FFmpeg's own work does;
+the upload thread waits for the copy, lets the frame go, stages a wait
+on the copy for wgpu's next submit, and fills the slot from the buffer
+as the copy path does from its staging. That is one GPU copy of the
+picture per frame, and none through the CPU. Zero copy on in the viewer
+opens the device shared and takes Vulkan Video's frames this way; a
+refusal is copied, said once and asked for no more, as path A's is;
+`frame --zero-copy --decoder vulkan` renders one frame through it. On
+lavapipe, which has no decode queue, a test-only device with one queue
+for all checks FFmpeg's frames into the slots byte for byte; the Tier 2
+tests (`shared_vulkan_matches_copy_path`,
+`shared_vulkan_frame_matches_the_copy`) and the bench's Vulkan Video
+zero-copy rows run on odin next.
+
 ## D26. egui stays, checked against a timeline prototype at the end of M2
 
 *2026-10-24, before M1's code. Pat approved it from the stack review.
@@ -2045,6 +2070,18 @@ the device module stays `unsafe`-free; path B's device through
 `open_with_callback` will be the next exception, named here when it
 comes. media's `hwprobe` gains one block, the device extension query
 behind doctor's `dmabuf_import`, under its existing allowance.
+
+*Updated by slice 5b's path B:* render's second exception is
+`#[allow(unsafe_code)]` on `pub mod vkshare`: the shared device through
+wgpu-hal's `open_with_callback` and `create_device_from_hal`, the raw
+handles given to FFmpeg, and the copier's own Vulkan objects and
+submissions through ash (its queue, command buffers, timeline semaphore
+and buffers handed to wgpu with `create_buffer_from_hal`). Its one
+test-only entry, `single_queue_gpu`, which lets FFmpeg and the copier
+share wgpu's queue on lavapipe, is an `unsafe fn` whose contract says
+so. media's FFmpeg side, `ffi::vulkan` (the `AVVulkanDeviceContext` made
+from the handles, and the frame lock around the copy), sits under
+`ffi`'s allowance.
 
 ## D29. MediaBackend and frame-exact seek
 

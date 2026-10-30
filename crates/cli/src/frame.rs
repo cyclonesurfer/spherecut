@@ -39,6 +39,7 @@ use spherecut_core::cancel::{StopSource, StopToken};
 use spherecut_core::fs::{TempFile, follow_links, replaceable};
 use spherecut_core::video::VideoPlanes;
 use spherecut_core::{FrameTime, Rounding, Time, TimeSpec};
+use spherecut_media::HwDevice;
 use spherecut_media::backend::{
     DamageCause, DecodeMode, DecodePath, DecoderEvent, Exactness, Fallback, FallbackReason,
     FfmpegBackend, HwKind, HwOutput, MediaBackend, NextFrame, SeekMode, SeekOutcome, Timing,
@@ -50,9 +51,10 @@ use spherecut_media::probe::{self, ProbeReport, StreamInfo, StreamKind};
 use spherecut_media::seek::{FrameAddress, frame_address};
 use spherecut_media::spherical::{Projection as SvProjection, StereoMode};
 use spherecut_render::dmabuf::{self, Importer};
+use spherecut_render::vkshare::Copied;
 use spherecut_render::{
     AdapterChoice, Depth, Filter, Gpu, Image, Pixels, Placement, RenderError, SlotShape, Stereo,
-    StillOptions, StillRenderer, ViewParams, reference, render_still, wgpu,
+    StillOptions, StillRenderer, ViewParams, reference, render_still, upload, wgpu,
 };
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
@@ -137,9 +139,11 @@ pub struct FrameArgs {
     /// Render with the CPU reference (f64, slow) instead of the GPU.
     #[arg(long)]
     pub reference: bool,
-    /// Keep the frame on the device: VA-API exports it as DMA-BUFs and
-    /// the GPU imports them, with no copy through the CPU (slice 5b).
-    /// Fails (exit 3) when the device, its driver or the decoder can't.
+    /// Keep the frame on the device, with no copy through the CPU (slice
+    /// 5b): VA-API exports it as DMA-BUFs and the GPU imports them, or,
+    /// with `--decoder vulkan`, Vulkan Video decodes on the renderer's own
+    /// device and the frame is copied out on the GPU. Fails (exit 3) when
+    /// the device, its driver or the decoder can't.
     #[arg(long, conflicts_with = "reference")]
     pub zero_copy: bool,
     /// Replace what is at the output, if it is a regular file.
@@ -265,9 +269,10 @@ impl FrameArgs {
         if self.reference && self.filter == FilterArg::Aniso {
             return Err("--reference renders with --filter iso only".into());
         }
-        if self.zero_copy && matches!(self.decoder, DecoderArg::Software | DecoderArg::Vulkan) {
+        if self.zero_copy && self.decoder == DecoderArg::Software {
             return Err(
-                "--zero-copy decodes on VA-API: give --decoder auto or vaapi with it".into(),
+                "--zero-copy decodes on the GPU: give --decoder auto, vaapi or vulkan with it"
+                    .into(),
             );
         }
         Ok(())
@@ -597,13 +602,25 @@ impl Job {
         // Step 5. The filter is the one rendered with: iso where aniso was
         // asked for and the device can't.
         let mut filter = self.args.filter;
+        let shared = self.args.zero_copy && self.args.decoder == DecoderArg::Vulkan;
         let gpu = if self.args.reference {
             None
         } else {
-            let gpu = Gpu::headless(&self.args.adapter()).map_err(render_error)?;
+            let gpu = if shared {
+                Gpu::headless_shared(&self.args.adapter())
+            } else {
+                Gpu::headless(&self.args.adapter())
+            }
+            .map_err(render_error)?;
             gpu.check_size(self.args.size)
                 .map_err(|e| failure(codes::USAGE, format!("--size: {e}")))?;
-            if self.args.zero_copy && !gpu.caps.dmabuf_import {
+            if shared && let Err(why) = gpu.shared_video() {
+                return Err(render_error(RenderError::Import(format!(
+                    "{} can't share its device with FFmpeg's Vulkan Video: {why}",
+                    gpu.caps.info.name
+                ))));
+            }
+            if self.args.zero_copy && !shared && !gpu.caps.dmabuf_import {
                 return Err(render_error(RenderError::Import(format!(
                     "{} can't import DMA-BUFs (it lacks \
                      VK_EXT_external_memory_dma_buf or VK_EXT_image_drm_format_modifier)",
@@ -630,15 +647,22 @@ impl Job {
             .filter(|g| !g.caps.is_cpu)
             .map(|g| gpu_ids(&g.caps.info));
         let node = hw::render_node(ids.as_ref(), self.args.render_node.as_deref());
-        let (decode, skipped) = decode_mode(self.args.decoder, &node);
+        let (mut decode, skipped) = decode_mode(self.args.decoder, &node);
+        if let (true, Some(gpu)) = (shared, &gpu) {
+            decode = DecodeMode::Hardware {
+                kind: HwKind::Vulkan,
+                device: Some(shared_device(gpu)?),
+                fallback: Fallback::Fail,
+            };
+        }
         let backend = FfmpegBackend::on_node(node);
         let req = VideoRequest {
             stream: Some(stream.index),
             decode,
-            output: if self.args.zero_copy {
-                HwOutput::DrmPrime
-            } else {
-                HwOutput::Download
+            output: match (self.args.zero_copy, shared) {
+                (true, true) => HwOutput::Vulkan,
+                (true, false) => HwOutput::DrmPrime,
+                (false, _) => HwOutput::Download,
             },
             interrupt: self.stop.shutdown_flag(),
             ..VideoRequest::default()
@@ -666,6 +690,20 @@ impl Job {
             ..StillOptions::default()
         };
         let image = match &gpu {
+            Some(gpu) if shared => {
+                let copied = copy_out(gpu, &decoded.frame, &placement)?;
+                StillRenderer::new(gpu)
+                    .render_copied(
+                        gpu,
+                        decoded.frame.as_ref(),
+                        &copied.buffer,
+                        &copied.planes,
+                        &view,
+                        size,
+                        &opts,
+                    )
+                    .map_err(render_error)?
+            }
             Some(gpu) if self.args.zero_copy => {
                 let planes = import(gpu, &decoded.frame)?;
                 StillRenderer::new(gpu)
@@ -1345,12 +1383,62 @@ fn import(gpu: &Gpu, frame: &VideoFrame) -> Result<Vec<wgpu::Texture>, Failure> 
     Importer::new().import(gpu, &planes).map_err(render_error)
 }
 
+/// FFmpeg's Vulkan context on `gpu`'s device, shared with it
+/// (`--zero-copy --decoder vulkan`): `import_failed` when FFmpeg refuses
+/// it.
+fn shared_device(gpu: &Gpu) -> Result<Arc<HwDevice>, Failure> {
+    let video = gpu
+        .shared_video()
+        .map_err(|why| render_error(RenderError::Import(why)))?;
+    HwDevice::vulkan_shared(&video.handles)
+        .map(Arc::new)
+        .map_err(|e| {
+            render_error(RenderError::Import(format!(
+                "FFmpeg can't decode on {}'s device: {e}",
+                gpu.caps.info.name
+            )))
+        })
+}
+
+/// `frame`'s shown planes copied out of its Vulkan image on `gpu`
+/// (`--zero-copy --decoder vulkan`), the copy done and ordered before
+/// wgpu's next submit: `import_failed` when the decoder downloaded the
+/// frame instead, or the copier refuses it.
+fn copy_out(gpu: &Gpu, frame: &VideoFrame, placement: &Placement) -> Result<Copied, Failure> {
+    let refused = |why: String| render_error(RenderError::Import(why));
+    let picture = match (&frame.transfer, frame.vulkan()) {
+        (Transfer::Vulkan, Some(p)) => p,
+        (
+            Transfer::Downloaded {
+                not_exported: Some(why),
+            },
+            _,
+        ) => {
+            return Err(refused(format!(
+                "the frame wasn't left on the Vulkan device: {why}"
+            )));
+        }
+        _ => {
+            return Err(refused(
+                "the decoder copied the frame from its device".into(),
+            ));
+        }
+    };
+    let video = gpu.shared_video().map_err(refused)?;
+    let regions = upload::shown_regions(frame, placement).map_err(render_error)?;
+    let copied = video.copier.copy(picture, &regions).map_err(render_error)?;
+    video.copier.wait(&copied).map_err(render_error)?;
+    video.copier.order_before(&gpu.queue, &copied);
+    Ok(copied)
+}
+
 /// How the frame left its decoder, as the JSON names it.
 fn transfer_name(t: &Transfer) -> &'static str {
     match t {
         Transfer::System => "system",
         Transfer::Downloaded { .. } => "downloaded",
         Transfer::DrmPrime => "drm_prime",
+        Transfer::Vulkan => "vulkan",
     }
 }
 

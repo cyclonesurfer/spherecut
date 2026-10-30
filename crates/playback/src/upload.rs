@@ -31,9 +31,14 @@
 //! exported as DMA-BUFs has its planes imported and copied on the GPU
 //! ([`spherecut_render::dmabuf`]), and is held until the GPU has read
 //! them (`Queue::on_submitted_work_done`), since its decoder writes the
-//! surface again once it is let go. When the import is refused, the frame
-//! is downloaded here and uploaded as bytes, and the reason, kept in the
-//! status, turns the export off for the opens after.
+//! surface again once it is let go. A Vulkan Video frame decoded on the
+//! renderer's own device (path B) is copied out of FFmpeg's image into a
+//! buffer by the device's copier ([`spherecut_render::vkshare`]), waited
+//! for here, and let go at once; the slot is filled from the buffer,
+//! which goes back to the copier once the GPU has read it. When the
+//! import or the copy is refused, the frame is downloaded here and
+//! uploaded as bytes, and the reason, kept in the status, turns zero copy
+//! off for the opens after.
 //!
 //! **GPU memory** (risk 11): a slot is made the first time a frame of
 //! its shape goes in, inside the out-of-memory error scope
@@ -56,7 +61,7 @@ use spherecut_media::backend::{VideoFrame, VideoStreamInfo};
 use spherecut_media::spherical::StereoMode;
 use spherecut_render::dmabuf::{self, Importer};
 use spherecut_render::{
-    Gpu, GpuFrame, Placement, RenderError, SlotShape, Stereo, UploadStats, Uploader,
+    Gpu, GpuFrame, Placement, RenderError, SlotShape, Stereo, UploadStats, Uploader, upload,
 };
 
 use crate::budget::{self, CacheBudget};
@@ -450,8 +455,8 @@ impl UploadThread {
                 }
             },
         };
-        let uploaded = if f.dmabuf().is_some() {
-            self.upload_dmabuf(st, f, placement, &gpu_frame)
+        let uploaded = if f.dmabuf().is_some() || f.vulkan().is_some() {
+            self.upload_on_device(st, f, placement, &gpu_frame)
         } else {
             st.uploader
                 .upload_placed(&self.gpu, f.as_ref(), placement, &gpu_frame)
@@ -497,17 +502,23 @@ impl UploadThread {
         true
     }
 
-    /// Uploads `f`, exported as DMA-BUFs, into `slot`: imported, or
-    /// downloaded when the import is refused (whose reason the status
-    /// keeps, the first time).
-    fn upload_dmabuf(
+    /// Uploads `f`, left on its decoder's device, into `slot`: imported
+    /// (DMA-BUFs) or copied out on the GPU (a Vulkan image), or
+    /// downloaded when the GPU refuses it (whose reason the status keeps,
+    /// the first time).
+    fn upload_on_device(
         &self,
         st: &mut State,
         f: &Arc<VideoFrame>,
         placement: &Placement,
         slot: &GpuFrame,
     ) -> Result<UploadStats, RenderError> {
-        let why = match self.import(st, f, placement, slot) {
+        let taken = if f.vulkan().is_some() {
+            self.copy_out(st, f, placement, slot)
+        } else {
+            self.import(st, f, placement, slot)
+        };
+        let why = match taken {
             Err(RenderError::Import(why)) => why,
             other => return other,
         };
@@ -515,7 +526,7 @@ impl UploadThread {
         {
             let mut status = self.shared.status();
             if status.import_refused.is_none() {
-                tracing::warn!("can't import the decoder's frames ({why}): downloading them");
+                tracing::warn!("the GPU can't take the decoder's frames ({why}): downloading them");
                 status.import_refused = Some(why);
             }
         }
@@ -558,6 +569,40 @@ impl UploadThread {
         let keep = f.clone();
         self.gpu.queue.on_submitted_work_done(move || drop(keep));
         self.shared.perf.add(Counter::FramesImported, 1);
+        Ok(stats)
+    }
+
+    /// `f`'s planes copied out of its Vulkan image by the device's copier
+    /// and into `slot`. The copy is waited for, so that `f` can go back to
+    /// its decoder; the buffer is held until the GPU has read it. `Import`
+    /// when the device isn't shared or the copier can't take the frame.
+    fn copy_out(
+        &self,
+        st: &mut State,
+        f: &Arc<VideoFrame>,
+        placement: &Placement,
+        slot: &GpuFrame,
+    ) -> Result<UploadStats, RenderError> {
+        let start = Instant::now();
+        let shared = self.gpu.shared_video().map_err(RenderError::Import)?;
+        let picture = f
+            .vulkan()
+            .ok_or_else(|| RenderError::Invalid("a frame without a Vulkan image".into()))?;
+        let regions = upload::shown_regions(f.as_ref(), placement)?;
+        let copied = shared.copier.copy(picture, &regions)?;
+        shared.copier.wait(&copied)?;
+        shared.copier.order_before(&self.gpu.queue, &copied);
+        let mut stats = st.uploader.upload_from_buffer(
+            &self.gpu,
+            f.as_ref(),
+            &copied.buffer,
+            &copied.planes,
+            placement,
+            slot,
+        )?;
+        self.gpu.queue.on_submitted_work_done(move || drop(copied));
+        stats.cpu_ms = start.elapsed().as_secs_f32() * 1e3;
+        self.shared.perf.add(Counter::VulkanCopies, 1);
         Ok(stats)
     }
 

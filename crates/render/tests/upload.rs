@@ -18,7 +18,8 @@ use spherecut_core::video::{ChromaSiting, Matrix, Range, SampleBytes};
 use spherecut_render::readback::{f16_to_f32, read_texture, round_f16};
 use spherecut_render::{
     AdapterChoice, DebugMode, Filter, Gpu, GpuFrame, GpuTimers, LinearTarget, Placement,
-    PlaneFormat, Projector, SlotShape, UploadPath, Uploader, ViewParams, dmabuf, reference,
+    PlaneFormat, Projector, SlotShape, UploadPath, Uploader, ViewParams, dmabuf, reference, upload,
+    vkshare,
 };
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_synth::{Pattern, render_equirect};
@@ -1483,4 +1484,103 @@ fn formats_without_mips_still_upload() {
             }
         );
     }
+}
+
+/// `frame`'s shown planes in a GPU buffer, laid out as a
+/// `vkshare::Copier` lays its copies out: what path B hands the uploader.
+fn in_buffer(frame: &Frame, placement: &Placement) -> (wgpu::Buffer, Vec<vkshare::BufferPlane>) {
+    let gpu = gpu();
+    let regions = upload::shown_regions(frame, placement).unwrap();
+    let (planes, size) = vkshare::buffer_layout(&regions);
+    let mut bytes = vec![0u8; size as usize];
+    for ((at, r), (data, stride, _)) in planes.iter().zip(&regions).zip(&frame.planes) {
+        let row = (r.size.0 * r.bytes_per_texel) as usize;
+        for y in 0..r.size.1 as usize {
+            let dst = at.offset as usize + y * at.bytes_per_row as usize;
+            bytes[dst..dst + row].copy_from_slice(&data[y * stride..y * stride + row]);
+        }
+    }
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("planes in a buffer"),
+        size,
+        usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    gpu.queue.write_buffer(&buffer, 0, &bytes);
+    (buffer, planes)
+}
+
+#[test]
+fn planes_in_a_buffer_fill_a_slot_as_their_bytes_do() {
+    // Slice 5b's path B with a buffer written here in place of the
+    // copier's: the same levels and projection as the copy path, byte for
+    // byte, for the layouts Vulkan Video decodes to (NV12, P010) and one
+    // with three deep planes; whole frames and a stereo frame's shown eye.
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    let top_bottom = Placement {
+        stereo: spherecut_render::Stereo::TopBottom,
+        ..Placement::FULL
+    };
+    for kind in [Kind::Nv12, Kind::P010, Kind::I420p10] {
+        for (size, pad) in [((96u32, 48u32), 0usize), ((70, 34), 34)] {
+            let mut frame = noise(kind, size, pad, 41);
+            frame.color = common::color(Range::Limited, Matrix::Bt709, ChromaSiting::Left);
+            for placement in [Placement::FULL, top_bottom] {
+                let (buffer, planes) = in_buffer(&frame, &placement);
+                let shape = SlotShape::of(&frame.layout, placement.shown(frame.size))
+                    .unwrap()
+                    .with_levels(4);
+                let uploaded = GpuFrame::new(gpu, &shape).unwrap();
+                uploader
+                    .upload_placed(gpu, &frame, &placement, &uploaded)
+                    .unwrap();
+                let copied = GpuFrame::new(gpu, &shape).unwrap();
+                let stats = uploader
+                    .upload_from_buffer(gpu, &frame, &buffer, &planes, &placement, &copied)
+                    .unwrap();
+                assert_eq!(stats.bytes, 0);
+                let what = format!("{kind:?} {size:?} {:?}", placement.stereo);
+                assert_eq!(levels(&copied), levels(&uploaded), "{what}");
+                assert_eq!(project(&copied), project(&uploaded), "{what}");
+            }
+        }
+    }
+}
+
+#[test]
+fn buffers_that_dont_fit_are_refused() {
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    let frame = noise(Kind::P010, (64, 32), 0, 8);
+    let (buffer, planes) = in_buffer(&frame, &Placement::FULL);
+    let slot = slot_for(&frame, 1);
+    let mut refused = |planes: &[vkshare::BufferPlane], buffer: &wgpu::Buffer, slot: &GpuFrame| {
+        uploader
+            .upload_from_buffer(gpu, &frame, buffer, planes, &Placement::FULL, slot)
+            .unwrap_err()
+            .code()
+    };
+    assert_eq!(refused(&planes[..1], &buffer, &slot), "invalid_input");
+    // A plane of another size, rows too short or off wgpu's alignment, and
+    // a plane past the buffer's end.
+    let mut wrong = planes.clone();
+    wrong[1].size.1 -= 1;
+    assert_eq!(refused(&wrong, &buffer, &slot), "invalid_input");
+    let mut short = planes.clone();
+    short[0].bytes_per_row = 64;
+    assert_eq!(refused(&short, &buffer, &slot), "invalid_input");
+    let mut odd = planes.clone();
+    odd[0].bytes_per_row = 384;
+    assert_eq!(refused(&odd, &buffer, &slot), "invalid_input");
+    let mut past = planes.clone();
+    past[1].offset = buffer.size() - 256;
+    assert_eq!(refused(&past, &buffer, &slot), "invalid_input");
+    // A slot for another size.
+    let other = slot_for(&noise(Kind::P010, (64, 34), 0, 8), 1);
+    assert_eq!(refused(&planes, &buffer, &other), "internal");
+    // And the good planes still fill the slot.
+    uploader
+        .upload_from_buffer(gpu, &frame, &buffer, &planes, &Placement::FULL, &slot)
+        .unwrap();
 }

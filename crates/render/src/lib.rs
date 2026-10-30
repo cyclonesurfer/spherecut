@@ -8,10 +8,13 @@
 //! → [`Uploader`] → a [`GpuFrame`] slot → [`Projector`] → a
 //! [`LinearTarget`] → [`Encoder`] → the screen, or a readback
 //! ([`render_still`]). A decoder's picture can arrive as DMA-BUF planes
-//! instead ([`dmabuf`]), which the uploader copies from on the GPU.
+//! instead ([`dmabuf`]), which the uploader copies from on the GPU, or as
+//! Vulkan images on the renderer's own device ([`vkshare`]), copied into
+//! a buffer the uploader reads.
 
-// Only `dmabuf`, the DMA-BUF import, may use unsafe (M1 plan section
-// 2.4, DECISIONS D25).
+// Only `dmabuf`, the DMA-BUF import, and `vkshare`, the device shared
+// with FFmpeg's Vulkan Video, may use unsafe (M1 plan section 2.4,
+// DECISIONS D25).
 #![deny(unsafe_code)]
 
 pub mod color;
@@ -29,6 +32,8 @@ pub mod reference;
 pub mod still;
 pub mod timers;
 pub mod upload;
+#[allow(unsafe_code)]
+pub mod vkshare;
 
 pub use color::{Placement, SourceUniform, Stereo};
 pub use encode::{Encoder, PlaceUniform};

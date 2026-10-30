@@ -383,9 +383,11 @@ pub struct FfmpegVideo {
     stats: DecodeStats,
     decode_ms_total: f64,
     /// Frames are exported as DMA-BUFs rather than downloaded
-    /// ([`HwOutput::DrmPrime`] on VA-API), and why the last one that
-    /// wasn't, once said.
+    /// ([`HwOutput::DrmPrime`] on VA-API), or left on the Vulkan device
+    /// ([`HwOutput::Vulkan`]), and why the last one that wasn't, once
+    /// said.
     drm_prime: bool,
+    vulkan_out: bool,
     not_exported: Option<String>,
     #[cfg(feature = "fault-injection")]
     injection: Option<Injection>,
@@ -465,6 +467,14 @@ impl FfmpegVideo {
                 &on,
                 On::Device {
                     kind: HwKind::VaApi,
+                    ..
+                }
+            );
+        let vulkan_out = req.output == HwOutput::Vulkan
+            && matches!(
+                &on,
+                On::Device {
+                    kind: HwKind::Vulkan,
                     ..
                 }
             );
@@ -661,6 +671,7 @@ impl FfmpegVideo {
             stats: DecodeStats::default(),
             decode_ms_total: 0.0,
             drm_prime,
+            vulkan_out,
             not_exported: None,
             #[cfg(feature = "fault-injection")]
             injection,
@@ -1247,10 +1258,23 @@ impl FfmpegVideo {
             .map(|n| n.saturating_sub(raw.pts))
             .filter(|&d| d > 0)
             .or((f.duration > 0).then_some(f.duration));
-        let mut out = if let Some((mapped, layers)) = exported {
+        // A Vulkan frame left on its device is handed out as it is, for
+        // the GPU to copy its planes, else it is downloaded after all.
+        let (picture, kept) = if raw.on_device && self.vulkan_out {
+            match self.keep_on_vulkan(raw.frame, &layout) {
+                Ok(vk) => (None, Some(vk)),
+                Err(frame) => (Some(frame), None),
+            }
+        } else {
+            (Some(raw.frame), None)
+        };
+        let mut out = if let Some(vk) = kept {
+            self.stats.last_download_ms = started.elapsed().as_secs_f64() * 1000.0;
+            VideoFrame::from_vulkan(vk, layout, color, (f.width, f.height), (raw.pts, at))
+        } else if let Some((mapped, layers)) = exported {
             self.stats.last_download_ms = started.elapsed().as_secs_f64() * 1000.0;
             VideoFrame::from_drm_prime(
-                raw.frame,
+                picture.ok_or_else(|| self.lost_frame())?,
                 mapped,
                 layers,
                 layout,
@@ -1259,13 +1283,14 @@ impl FfmpegVideo {
                 (raw.pts, at),
             )
         } else {
+            let picture = picture.ok_or_else(|| self.lost_frame())?;
             let picture = match raw.on_device {
                 true => {
-                    let down = self.dec.download(&raw.frame)?;
+                    let down = self.dec.download(&picture)?;
                     self.stats.last_download_ms = started.elapsed().as_secs_f64() * 1000.0;
                     down
                 }
-                false => raw.frame,
+                false => picture,
             };
             let frame = match &mut self.conv {
                 Conversion::Native { .. } => picture,
@@ -1282,7 +1307,9 @@ impl FfmpegVideo {
             let mut out = VideoFrame::from_ffmpeg(frame, layout, color, raw.pts, at);
             if raw.on_device {
                 out.transfer = Transfer::Downloaded {
-                    not_exported: self.drm_prime.then(|| self.not_exported.clone()).flatten(),
+                    not_exported: (self.drm_prime || self.vulkan_out)
+                        .then(|| self.not_exported.clone())
+                        .flatten(),
                 };
             }
             out
@@ -1318,6 +1345,44 @@ impl FfmpegVideo {
         }
     }
 
+    /// `frame`, on the Vulkan device, as a [`ffi::VkFrame`] of `layout`;
+    /// the frame back, the reason said once, when it can't be one:
+    /// cropped on the left or top (a copy starts at a plane's first
+    /// texel), converted on the CPU, or in images that don't hold the
+    /// layout's planes.
+    fn keep_on_vulkan(
+        &mut self,
+        frame: ff::frame::Video,
+        layout: &PixelLayout,
+    ) -> Result<ffi::VkFrame, ff::frame::Video> {
+        let why = if ffi::crop_left_top(&frame) != (0, 0) {
+            "the frame is cropped on the left or top".to_owned()
+        } else if !matches!(self.conv, Conversion::Native { .. }) {
+            format!(
+                "its {} frames are converted to {} on the CPU",
+                self.source_name, layout.name
+            )
+        } else {
+            match ffi::VkFrame::new(frame, layout) {
+                Ok(vk) => return Ok(vk),
+                Err((frame, why)) => {
+                    self.refuse_kept(why);
+                    return Err(frame);
+                }
+            }
+        };
+        self.refuse_kept(why);
+        Err(frame)
+    }
+
+    /// The error for a frame the paths above lost, which they never do.
+    fn lost_frame(&self) -> MediaError {
+        MediaError::Decode {
+            path: self.dec.path().to_path_buf(),
+            reason: "a decoded frame went missing on its way out".into(),
+        }
+    }
+
     /// A frame that was to be exported is downloaded, for `why`: logged
     /// the first time, and the frame's transfer says it.
     fn refuse_export(&mut self, why: String) {
@@ -1325,6 +1390,18 @@ impl FfmpegVideo {
             tracing::warn!(
                 path = %self.dec.path().display(),
                 "a VA-API frame isn't exported, so it is downloaded: {why}"
+            );
+        }
+        self.not_exported = Some(why);
+    }
+
+    /// A frame that was to be left on the Vulkan device is downloaded,
+    /// for `why`: logged the first time, and the frame's transfer says it.
+    fn refuse_kept(&mut self, why: String) {
+        if self.not_exported.as_ref() != Some(&why) {
+            tracing::warn!(
+                path = %self.dec.path().display(),
+                "a Vulkan frame isn't left on the device, so it is downloaded: {why}"
             );
         }
         self.not_exported = Some(why);

@@ -50,9 +50,11 @@
 //! farthest behind), and a step on one stream to the playhead another
 //! stream's worker moved.
 //!
-//! **Surfaces** (slice 5b). A frame exported from a VA-API decoder
-//! ([`Transfer::DrmPrime`]) holds one of the surfaces of its decoder's
-//! pool, which has only so many: the cache holds at most
+//! **Surfaces** (slice 5b). A frame left on its decoder's device
+//! ([`Transfer::DrmPrime`], exported from VA-API, or
+//! [`Transfer::Vulkan`], a Vulkan Video image) holds one of the surfaces of its decoder's pool, which on
+//! VA-API has only so many and on Vulkan takes video memory the budget
+//! doesn't count: the cache holds at most
 //! [`set_surface_cap`](FrameCache::set_surface_cap) such frames a
 //! stream. They are counted beside the bytes (they hold none of system
 //! memory): a stream's window takes at most the cap less one of them,
@@ -386,7 +388,7 @@ impl State {
     /// not pinned).
     fn offer(&mut self, s: usize, frame: &Arc<VideoFrame>) -> Option<Insert> {
         let (t, bytes) = (frame.time, frame.bytes() as u64);
-        let surface = frame.transfer == Transfer::DrmPrime;
+        let surface = matches!(frame.transfer, Transfer::DrmPrime | Transfer::Vulkan);
         let place = (frame.run, frame.seq);
         self.frame_bytes.insert(s, bytes);
         let held = self.frames.contains_key(&(s, t));

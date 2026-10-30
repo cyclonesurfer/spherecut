@@ -58,8 +58,8 @@ planned ones above don't exist yet. Every crate root forbids `unsafe`
 code except media's and the `spherecut` binary's, which deny it and allow
 it only in named FFI modules (media's `ffi` and `hwprobe`; the binary's
 `interrupt`, frame's SIGINT handler, from slice 4),
-until slice 5b gives render one such module to open its Vulkan device
-(DECISIONS D28).
+and render's, which allows it in `dmabuf` and `vkshare` alone (slice
+5b's zero copy, DECISIONS D28).
 
 ## Media crate (as built in M0, with M1's confinement of FFmpeg and `MediaBackend`)
 
@@ -89,8 +89,12 @@ until slice 5b gives render one such module to open its Vulkan device
   RAII `Resampler` (`swr_alloc_set_opts2`, `swr_init`, `swr_convert`)
   to packed f32 (D35), library versions, and the
   bridge that sends FFmpeg's `av_log` to `tracing` under the target
-  `ffmpeg`. C enums are never made into bindgen's Rust enums (DECISIONS
-  D11). In more detail:
+  `ffmpeg`. Its child `ffi::vulkan` (slice 5b's path B) makes FFmpeg's
+  Vulkan device context on the renderer's own device from its raw
+  handles and queues (`HwDevice::vulkan_shared`), and gives a Vulkan
+  Video frame's images and their state under FFmpeg's frame lock
+  (`VkFrame`, core's `VkPicture`). C enums are never made into bindgen's
+  Rust enums (DECISIONS D11). In more detail:
   * The log bridge sends one event per line, each with the `[hevc @
     0x...]` prefix of its context. A line FFmpeg logs in several calls
     waits in a thread-local buffer until a call ends it, and a call that
@@ -543,10 +547,13 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   returned by `Gpu::check` as `gpu_failed`, which every entry point calls
   first; nothing panics in wgpu's error handler. All device creation is
   in one function, which asks for DMA-BUF import where the adapter has
-  it (`GpuCaps.dmabuf_import`, slice 5b) and which path B will replace
-  to add Vulkan Video; the GUI opens its device there too, with
-  `Gpu::for_window` before the window, and hands it to eframe through
-  egui-wgpu's `WgpuSetup::Existing` (D31).
+  it (`GpuCaps.dmabuf_import`, slice 5b); the GUI opens its device there
+  too, with `Gpu::for_window` before the window, and hands it to eframe
+  through egui-wgpu's `WgpuSetup::Existing` (D31). `Gpu::headless_shared`
+  and `for_window_shared` open it through `render::vkshare` instead,
+  with Vulkan Video's extensions and queues for FFmpeg (slice 5b's path
+  B); `Gpu::shared_video` gives the handles and the copier, or why the
+  device couldn't be shared.
 * **Slots** (`GpuFrame`, for a `SlotShape`) hold a frame's planes as
   canonical textures: `R8Unorm`/`Rg8Unorm` for 8-bit planes, and
   `R16Float`/`Rg16Float` holding code / (2^b − 1) for deeper ones, each
@@ -574,7 +581,14 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   8-bit planes GPU to GPU into the slot's level 0 and runs deep ones
   through the ingest pass, then the mips, as `upload` does. Each frame
   is imported afresh, and the caller keeps the frame until the GPU work
-  that read it is done.
+  that read it is done. Path B: `render::vkshare` opens the device
+  shared, planning a decode queue and two compute queues wgpu never
+  uses, one FFmpeg's and one its `Copier`'s. The copier copies a Vulkan
+  Video frame's planes, under FFmpeg's frame lock and its timeline
+  semaphore, into a buffer of its own; `Copier::order_before` makes
+  wgpu's next submission wait for the copy, and
+  `Uploader::upload_from_buffer` fills the slot from the buffer as the
+  copy path does from its staging.
 * **`Projector::record`** draws a slot through a `ViewParams`
   (orientation and `Lens`) into a `LinearTarget`: per pixel a ray from
   the lens, rotated into the world, its equirect uv, an LOD from central
@@ -739,9 +753,13 @@ intermediate equirect exists only as the output of a 360 export.
     VA-API stream's worker asks for DRM PRIME frames, and the upload
     thread imports their planes (`render::dmabuf`) in place of the copy,
     keeping each frame until `Queue::on_submitted_work_done` for the
-    submission that read it. A refused import is copied, said once in
-    the snapshot (`import_refused`), and the next opens ask for
-    downloads.
+    submission that read it. On a device opened shared (path B) a
+    Vulkan Video stream decodes through FFmpeg's context on it, made by
+    the first open that wants one, and the upload thread copies each
+    frame out with the copier, waits, lets the frame go and holds the
+    buffer until the GPU has read it. A refused import or copy is
+    copied through the CPU, said once in the snapshot
+    (`import_refused`), and the next opens ask for downloads.
   * **GPU slots** (`playback::SlotRing`): 3 to 6 `GpuFrame`s, each with
     an atomic state word (Free, Writing, Ready, Shown, Dead, and a
     version). The upload thread claims a Free slot only when the ring's

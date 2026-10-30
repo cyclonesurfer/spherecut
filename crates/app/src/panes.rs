@@ -508,11 +508,13 @@ pub fn overlay_ui(s: &AppState, ui: &egui::Ui, rect: egui::Rect) {
     }
     // Zero copy (slice 5b): how the frames reached their slots.
     let imported = p.counter(Counter::FramesImported);
+    let vulkan = p.counter(Counter::VulkanCopies);
     let refused = p.counter(Counter::ImportsRefused);
-    if imported + refused > 0 {
+    if imported + vulkan + refused > 0 {
         lines.push(format!(
-            "into slots: dmabuf {imported}  copy {}  import refused {refused}",
-            p.counter(Counter::FramesUploaded).saturating_sub(imported)
+            "into slots: dmabuf {imported}  vulkan {vulkan}  copy {}  refused {refused}",
+            p.counter(Counter::FramesUploaded)
+                .saturating_sub(imported + vulkan)
         ));
     }
     lines.push(format!(

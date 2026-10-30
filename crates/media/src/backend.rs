@@ -24,7 +24,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use spherecut_core::video::{
-    ColorInfo, DmabufLayer, PixelLayout, PlaneData, PlaneDesc, SampleBytes, VideoPlanes, fourcc,
+    ColorInfo, DmabufLayer, PixelLayout, PlaneData, PlaneDesc, SampleBytes, VideoPlanes, VkPicture,
+    fourcc,
 };
 use spherecut_core::{FrameRate, Rational, StopToken, Time};
 use thiserror::Error;
@@ -107,6 +108,14 @@ pub enum HwOutput {
     /// [`VideoFrame::transfer`] says so. Vulkan Video frames are always
     /// downloaded.
     DrmPrime,
+    /// On Vulkan, left on the device as FFmpeg's image
+    /// ([`VideoPlanes::vulkan`]), for the GPU that shares the device to
+    /// copy (slice 5b's path B, `HwDevice::vulkan_shared`). A frame that
+    /// can't be (cropped on the left or top, a format that needs
+    /// converting, images that don't hold its planes) is downloaded, and
+    /// its [`VideoFrame::transfer`] says so. VA-API frames are always
+    /// downloaded.
+    Vulkan,
 }
 
 /// Surfaces a VA-API decoder keeps beyond its own with
@@ -125,6 +134,8 @@ pub enum Transfer {
     Downloaded { not_exported: Option<String> },
     /// Exported as DMA-BUFs, still on the device.
     DrmPrime,
+    /// Left on the Vulkan device as FFmpeg's image.
+    Vulkan,
 }
 
 /// Which frame a test fails "as hardware", and how (the `fault-injection`
@@ -575,6 +586,8 @@ pub(crate) enum FrameStorage {
         _mapped: ff::frame::Video,
         layers: Vec<DmabufLayer>,
     },
+    /// A Vulkan Video frame, and where its planes are in its images.
+    Vulkan(ffi::VkFrame),
 }
 
 /// The DRM fourcc a plane exports as, with a layer per plane.
@@ -780,18 +793,84 @@ impl VideoFrame {
         }
     }
 
-    /// Whether the frame is still on its device ([`Transfer::DrmPrime`]):
-    /// its planes are imported, not read.
+    /// A frame left on its Vulkan device: `device`, as `vk` has its
+    /// planes, as `layout`'s planes at `size`. It keeps no system memory,
+    /// so it counts no bytes.
+    pub(crate) fn from_vulkan(
+        vk: ffi::VkFrame,
+        layout: Arc<PixelLayout>,
+        color: ColorInfo,
+        size: (u32, u32),
+        (pts, time): (i64, Time),
+    ) -> VideoFrame {
+        let f = ffi::frame_fields(vk.frame());
+        VideoFrame {
+            pts,
+            time,
+            duration: None,
+            key: f.key,
+            concealed: f.concealed,
+            decoded_on: DecodePath::Software { threads: None },
+            run: 0,
+            seq: 0,
+            transfer: Transfer::Vulkan,
+            storage: FrameStorage::Vulkan(vk),
+            layout,
+            color,
+            size,
+            bytes: 0,
+        }
+    }
+
+    /// This system-memory frame uploaded by FFmpeg onto `device`, a
+    /// Vulkan device, as a frame left there would be: for tests of what
+    /// reads such frames, without a Vulkan Video decoder.
+    #[doc(hidden)]
+    pub fn uploaded_to_vulkan(&self, device: &HwDevice) -> Result<VideoFrame, MediaError> {
+        let fail = |reason: String| MediaError::Decode {
+            path: PathBuf::new(),
+            reason: format!("uploading a frame to Vulkan: {reason}"),
+        };
+        let planes = (0..self.layout.planes.len())
+            .map(|i| self.plane(i).map(|p| (p.bytes, p.stride)))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| fail("the frame isn't in system memory".into()))?;
+        let frame =
+            ffi::upload_to_vulkan(device, &self.layout, self.size, &planes).map_err(fail)?;
+        let vk = ffi::VkFrame::new(frame, &self.layout).map_err(|(_, why)| fail(why))?;
+        let mut out = VideoFrame::from_vulkan(
+            vk,
+            self.layout.clone(),
+            self.color,
+            self.size,
+            (self.pts, self.time),
+        );
+        out.duration = self.duration;
+        out.key = self.key;
+        out.decoded_on = self.decoded_on.clone();
+        out.run = self.run;
+        out.seq = self.seq;
+        Ok(out)
+    }
+
+    /// Whether the frame is still on its device ([`Transfer::DrmPrime`]
+    /// or [`Transfer::Vulkan`]): its planes are imported or copied on the
+    /// GPU, not read.
     pub fn on_device(&self) -> bool {
-        matches!(self.storage, FrameStorage::DrmPrime { .. })
+        matches!(
+            self.storage,
+            FrameStorage::DrmPrime { .. } | FrameStorage::Vulkan(_)
+        )
     }
 
     /// A frame still on its device, copied into system memory: what a
     /// caller that can't import it reads (`None` for one that isn't on a
     /// device). Blocks while the device copies.
     pub fn to_system(&self) -> Option<Result<VideoFrame, MediaError>> {
-        let FrameStorage::DrmPrime { device, .. } = &self.storage else {
-            return None;
+        let device = match &self.storage {
+            FrameStorage::DrmPrime { device, .. } => device,
+            FrameStorage::Vulkan(vk) => vk.frame(),
+            _ => return None,
         };
         let down = match ffi::download(device) {
             Ok(d) => d,
@@ -812,7 +891,13 @@ impl VideoFrame {
         out.seq = self.seq;
         out.transfer = Transfer::Downloaded {
             not_exported: Some(
-                "downloaded after the export, for a reader that can't import".into(),
+                match self.transfer {
+                    Transfer::Vulkan => {
+                        "downloaded from its Vulkan image, for a reader that can't copy it"
+                    }
+                    _ => "downloaded after the export, for a reader that can't import",
+                }
+                .into(),
             ),
         };
         Some(Ok(out))
@@ -840,7 +925,7 @@ impl VideoFrame {
             FrameStorage::Owned { planes, .. } => {
                 planes.get(index).map_or(std::ptr::null(), |p| p.as_ptr())
             }
-            FrameStorage::DrmPrime { .. } => std::ptr::null(),
+            FrameStorage::DrmPrime { .. } | FrameStorage::Vulkan(_) => std::ptr::null(),
         }
     }
 }
@@ -878,7 +963,7 @@ impl VideoPlanes for VideoFrame {
             FrameStorage::Owned { planes, strides } => {
                 (planes.get(index)?.as_slice(), *strides.get(index)?)
             }
-            FrameStorage::DrmPrime { .. } => return None,
+            FrameStorage::DrmPrime { .. } | FrameStorage::Vulkan(_) => return None,
         };
         Some(PlaneData {
             bytes,
@@ -895,6 +980,13 @@ impl VideoPlanes for VideoFrame {
     fn dmabuf(&self) -> Option<&[DmabufLayer]> {
         match &self.storage {
             FrameStorage::DrmPrime { layers, .. } => Some(layers),
+            _ => None,
+        }
+    }
+
+    fn vulkan(&self) -> Option<&dyn VkPicture> {
+        match &self.storage {
+            FrameStorage::Vulkan(vk) => Some(vk),
             _ => None,
         }
     }

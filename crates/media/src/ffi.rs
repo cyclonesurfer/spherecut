@@ -36,6 +36,9 @@ use ffmpeg_sys_next as sys;
 use spherecut_core::video::{ColorCodes, ColorFamily, PixelLayout, PlaneDesc, SampleBytes};
 use thiserror::Error;
 
+mod vulkan;
+pub(crate) use vulkan::{VkFrame, upload as upload_to_vulkan};
+
 /// FFmpeg functions that take or return a C enum, declared with `int`s.
 /// All of them accept any value. The name functions return static strings:
 /// `avcodec_get_name` names an id it doesn't know "unknown_codec", and the
@@ -82,6 +85,8 @@ mod c {
         ) -> *mut ffmpeg_sys_next::SwsContext;
         pub fn av_hwdevice_find_type_by_name(name: *const c_char) -> c_int;
         pub fn av_hwdevice_get_type_name(kind: c_int) -> *const c_char;
+        pub fn av_hwdevice_ctx_alloc(kind: c_int) -> *mut AVBufferRef;
+        pub fn av_get_pix_fmt(name: *const c_char) -> c_int;
         pub fn av_hwdevice_ctx_create(
             device_ctx: *mut *mut AVBufferRef,
             kind: c_int,
