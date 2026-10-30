@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+spherecut-audio.workspace = true
 spherecut-core.workspace = true
 spherecut-media.workspace = true
 spherecut-render.workspace = true

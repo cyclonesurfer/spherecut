@@ -68,16 +68,22 @@ impl Callback {
         }
     }
 
-    /// The epoch and sample the next buffer will start with, if it will
-    /// play audio: for the fake device, which waits for it.
-    pub(crate) fn wants(&self) -> Option<(u64, i64)> {
-        let s = self.shared.read();
-        if !s.running || s.system {
+    /// The epoch and sample the next buffer, at `now` and heard
+    /// `latency` later, will start with, if it will play audio: for the
+    /// fake device, which waits for it.
+    pub(crate) fn wants(&self, now: Instant, latency: Duration) -> Option<(u64, i64)> {
+        let sh = &self.shared;
+        let s = sh.read();
+        if !s.running {
             return None;
+        }
+        if s.system {
+            let due = s.shown(sh.nanos(now + latency.min(MAX_LATENCY)));
+            return Some((s.epoch, sh.sample_at(due).max(sh.sample_at(s.seek))));
         }
         match self.run {
             Some(run) if s.epoch == self.epoch => Some((s.epoch, run.next)),
-            _ if !s.audio => Some((s.epoch, self.shared.sample_at(s.seek))),
+            _ if !s.audio => Some((s.epoch, sh.sample_at(s.seek))),
             _ => None,
         }
     }

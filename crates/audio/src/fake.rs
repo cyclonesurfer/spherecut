@@ -42,13 +42,15 @@ impl Default for FakeConfig {
 }
 
 /// One callback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Played {
     /// The callback's instant.
     pub at: Instant,
     /// When its first frame is heard.
     pub heard: Instant,
     pub rendered: Rendered,
+    /// The buffer's first sample, in its first channel.
+    pub first: f32,
 }
 
 /// The fake device (see the module docs).
@@ -120,13 +122,14 @@ impl FakeAudioDevice {
     /// device is lost.
     pub fn tick(&mut self) -> Option<Played> {
         let at = self.next_callback()?;
-        self.wait_for_audio();
+        self.wait_for_audio(at);
         let rendered = self.callback.render(&mut self.buf, at, self.cfg.latency);
         self.done += 1;
         let played = Played {
             at,
             heard: at + self.cfg.latency,
             rendered,
+            first: self.buf.first().copied().unwrap_or(0.0),
         };
         self.played.push(played);
         Some(played)
@@ -190,8 +193,8 @@ impl FakeAudioDevice {
     /// up.
     ///
     /// [`set_wait`]: Self::set_wait
-    fn wait_for_audio(&self) {
-        let Some((epoch, first)) = self.callback.wants() else {
+    fn wait_for_audio(&self, at: Instant) {
+        let Some((epoch, first)) = self.callback.wants(at, self.cfg.latency) else {
             return;
         };
         let need = first + i64::from(self.cfg.period);

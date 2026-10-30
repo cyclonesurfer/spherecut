@@ -8,7 +8,9 @@
 //!
 //! Threads (plan section 8.1): the UI thread, which only sends commands
 //! and reads with `try_lock` and atomics; a transient `open` worker per
-//! file; `decode-v{i}` per stream; and one `upload` thread.
+//! file; `decode-v{i}` per stream; one `upload` thread; and, for a file
+//! with audio, `audio-decode` and the output's (`audio-out`, or
+//! `audio-null` with no device) from [`audio`].
 //!
 //! No UI type is in here: the GUI, `spherecut render` and the Tier 2
 //! benchmarks drive the same engine, the last two with no window
@@ -27,7 +29,10 @@ pub mod slots;
 mod upload;
 mod worker;
 
-pub use audio::{AudioOutput, AudioOutputFactory, PREROLL_AUDIO};
+pub use audio::{
+    AudioDevice, AudioOutput, AudioOutputFactory, DeviceAudio, PREROLL_AUDIO, PREROLL_LIMIT,
+    PlayingAudio,
+};
 pub use budget::{AutoBudget, BudgetError, CacheBudget, auto_budget, read_auto_budget};
 pub use cache::{CacheStats, FrameCache, Insert, MIN_FRAMES};
 pub use decoder::{DecoderChoice, DecoderPreference, HwDecodeCheck, HwSupport, StreamFormat};

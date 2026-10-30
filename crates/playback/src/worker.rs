@@ -98,7 +98,17 @@ impl OpenJob {
         }
         let audio = match &self.audio {
             Some(factory) => match factory.open(&self.path, &self.open_token) {
-                Ok(a) => a,
+                Ok(a) => {
+                    if !self.stale() {
+                        self.shared.event(match &a {
+                            Some(a) => PlayerEvent::AudioOpened {
+                                output: a.stats().map(Box::new),
+                            },
+                            None => PlayerEvent::NoAudio,
+                        });
+                    }
+                    a
+                }
                 Err(error) => {
                     tracing::warn!("no audio from {}: {error}", self.path.display());
                     if !self.stale() {
@@ -292,6 +302,7 @@ impl Worker {
                     s.info = Some(info.clone());
                     s.decode = Some(path);
                 });
+                self.start_audio(info.origin().ok());
                 self.take_events(dec.as_mut());
                 self.tell(PlayerEvent::Opened {
                     stream: self.stream,
@@ -310,9 +321,25 @@ impl Worker {
                         stream: self.stream,
                         error,
                     });
+                    self.start_audio(None);
                 }
                 None
             }
+        }
+    }
+
+    /// The first stream's first frame is clip time 0 for the audio too:
+    /// start it decoding from there (only the first open counts).
+    fn start_audio(&self, origin: Option<Time>) {
+        if self.stream != 0 {
+            return;
+        }
+        let audio = {
+            let st = self.shared.status();
+            (st.epoch == self.epoch).then(|| st.audio.clone()).flatten()
+        };
+        if let Some(audio) = audio {
+            audio.start(origin);
         }
     }
 

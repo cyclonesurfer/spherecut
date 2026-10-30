@@ -471,6 +471,14 @@ fn lead() -> Rational {
 #[derive(Clone)]
 pub struct AudioClock(pub(crate) Arc<Shared>);
 
+impl AudioClock {
+    /// [`Output::ready`](crate::Output::ready), for whoever holds only
+    /// the clock.
+    pub fn ready(&self, ahead: Duration) -> bool {
+        self.0.ready(ahead, Instant::now())
+    }
+}
+
 impl Clock for AudioClock {
     fn time_at(&self, at: Instant) -> Time {
         self.0.read().shown(self.0.nanos(at))

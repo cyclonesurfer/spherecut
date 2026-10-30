@@ -53,7 +53,7 @@ use spherecut_media::hw::GpuIds;
 use spherecut_render::{Gpu, GpuFrame, RenderError};
 use thiserror::Error;
 
-use crate::audio::{AudioOutput, AudioOutputFactory, PREROLL_AUDIO};
+use crate::audio::{AudioOutput, AudioOutputFactory, PREROLL_AUDIO, PREROLL_LIMIT};
 use crate::budget::{AUTO_MIN, AutoBudget, CacheBudget, read_auto_budget};
 use crate::cache::{CacheStats, FrameCache};
 use crate::decoder::{DecoderPreference, HwSupport};
@@ -134,6 +134,16 @@ pub enum PlayerEvent {
     AudioFailed {
         error: PlayerError,
     },
+    /// The file's audio plays on this output (on the null output, with
+    /// no device: "No audio output device: playing silently").
+    AudioOpened {
+        output: Option<Box<spherecut_audio::OutputStats>>,
+    },
+    /// The file has no audio: video plays on its own clock.
+    NoAudio,
+    /// A preroll waited [`PREROLL_LIMIT`](crate::PREROLL_LIMIT) for the
+    /// audio: video plays on the system clock until it comes.
+    AudioLate,
     /// The GPU had no memory for a slot: playback goes on with one fewer
     /// (risk 11).
     SlotDropped {
@@ -403,8 +413,10 @@ struct Ui {
     /// A frame changed outside `present` (an instant step), which the
     /// next `present` reports.
     unpresented: bool,
-    /// The target is shown, and playback waits for the audio.
+    /// The target is shown, and playback waits for the audio, since
+    /// this instant.
     preroll: bool,
+    preroll_since: Option<Instant>,
     want_play: bool,
     at_end: bool,
     /// The clock video plays on now: the player's, or the open file's
@@ -553,6 +565,7 @@ impl Player {
                 step_from: Vec::new(),
                 unpresented: false,
                 preroll: false,
+                preroll_since: None,
                 want_play: false,
                 at_end: false,
                 clock,
@@ -658,7 +671,12 @@ impl Player {
     /// Play, from the start when at the end. A seek in flight plays once
     /// it lands.
     pub fn play(&self) {
-        let now = Instant::now();
+        self.play_at(Instant::now());
+    }
+
+    /// [`play`](Self::play) at the instant `now`, as the presents are
+    /// given theirs: for a caller on scripted time (the A/V tests).
+    pub fn play_at(&self, now: Instant) {
         let Ok(mut ui) = self.ui.try_borrow_mut() else {
             return;
         };
@@ -676,7 +694,11 @@ impl Player {
     }
 
     pub fn pause(&self) {
-        let now = Instant::now();
+        self.pause_at(Instant::now());
+    }
+
+    /// [`pause`](Self::pause) at the instant `now`.
+    pub fn pause_at(&self, now: Instant) {
         let Ok(mut ui) = self.ui.try_borrow_mut() else {
             return;
         };
@@ -694,7 +716,11 @@ impl Player {
     /// lands on for scrubbing. Playback, if it runs, goes on from there
     /// once the frame is ready.
     pub fn seek(&self, at: Time, mode: SeekMode) {
-        let now = Instant::now();
+        self.seek_at(at, mode, Instant::now());
+    }
+
+    /// [`seek`](Self::seek) at the instant `now`.
+    pub fn seek_at(&self, at: Time, mode: SeekMode, now: Instant) {
         let Ok(mut ui) = self.ui.try_borrow_mut() else {
             return;
         };
@@ -902,12 +928,23 @@ impl Player {
                 }
             }
         } else {
-            if ui.preroll
-                && ui.want_play
-                && ui.audio.as_ref().is_none_or(|a| a.ready(PREROLL_AUDIO))
-            {
-                ui.preroll = false;
-                ui.clock.play(now);
+            if ui.preroll && ui.want_play {
+                let ready = ui.audio.as_ref().is_none_or(|a| a.ready(PREROLL_AUDIO));
+                let late = ui
+                    .preroll_since
+                    .is_some_and(|since| now.saturating_duration_since(since) >= PREROLL_LIMIT);
+                if !ready
+                    && late
+                    && let Some(audio) = &ui.audio
+                {
+                    tracing::warn!("the audio is late: playing on without it");
+                    audio.fall_back(now);
+                    shared.event(PlayerEvent::AudioLate);
+                }
+                if ready || late {
+                    ui.preroll = false;
+                    ui.clock.play(now);
+                }
             }
             let t = at(ui);
             changed |= self.pick(ui, t, now);
@@ -990,10 +1027,15 @@ impl Player {
         if ui.audio.is_none()
             && let Some(audio) = &st.audio
         {
-            // The open's audio: video follows its clock from now on.
+            // The open's audio: video follows its clock from now on,
+            // playing if the player's was.
             let now = Instant::now();
             let clock = audio.clock();
             clock.set(ui.clock.time_at(now), now);
+            if ui.clock.is_running() {
+                ui.clock.pause(now);
+                clock.play(now);
+            }
             ui.clock = clock;
             ui.audio = Some(audio.clone());
         }
@@ -1068,6 +1110,7 @@ impl Player {
                 ui.clock.play(now);
             } else {
                 ui.preroll = true;
+                ui.preroll_since = Some(now);
             }
         }
         self.shared.repaint();
@@ -1155,6 +1198,13 @@ impl Player {
 
     /// The player's state. Never waits: when the threads' status is
     /// locked, their part is the copy from before.
+    /// The audio output's numbers, while a file with audio is open and
+    /// the presenter has taken its clock. Never waits.
+    pub fn audio_stats(&self) -> Option<spherecut_audio::OutputStats> {
+        let ui = self.ui.try_borrow().ok()?;
+        ui.audio.as_ref()?.stats()
+    }
+
     pub fn snapshot(&self) -> PlayerSnapshot {
         let status = self.shared.try_status();
         self.snapshot_from(status.as_deref())

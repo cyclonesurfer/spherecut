@@ -177,9 +177,23 @@ impl Output {
         self.shared.ready(ahead, Instant::now())
     }
 
+    /// Run on the system clock from the time shown at `at`, without
+    /// waiting for audio: a preroll that waited too long. The audio
+    /// takes the clock over again when it comes.
+    pub fn fall_back(&self, at: Instant) {
+        self.shared.to_system(at, Fallback::Starved);
+    }
+
+    /// Never waits: the overlay reads it on the UI thread. (Only
+    /// `audio-out` takes the device's lock, to replace it when it opens
+    /// the device again; meanwhile the device shows as unknown.)
     pub fn stats(&self) -> OutputStats {
         let sh = &self.shared;
-        let info = sh.device.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let info = match sh.device.try_lock() {
+            Ok(d) => d.clone(),
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().clone(),
+            Err(std::sync::TryLockError::WouldBlock) => DeviceInfo::default(),
+        };
         let duration = |ns: i64| Duration::from_nanos(u64::try_from(ns).unwrap_or(0));
         OutputStats {
             kind: self.kind,
