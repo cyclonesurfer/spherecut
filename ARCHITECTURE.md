@@ -818,9 +818,11 @@ intermediate equirect exists only as the output of a 360 export.
     still on a decoder's surface (zero copy, slice 5b) are held to
     `SURFACE_CAP` a stream, the window one fewer, on top of the budget,
     since the decoder's pool has only so many.
-  * **Zero copy** (slice 5b, D25, off unless `PlayerConfig.zero_copy`
-    or `SPHERECUT_ZERO_COPY=1`): on a device that imports DMA-BUFs a
-    VA-API stream's worker asks for DRM PRIME frames, and the upload
+  * **Zero copy** (slice 5b, D25, `PlayerConfig.zero_copy`, set by
+    `SPHERECUT_ZERO_COPY`: Vulkan Video's frames by default, VA-API's
+    too with `1`, none with `0`): on a device that imports DMA-BUFs, and
+    with VA-API's asked for, a VA-API stream's worker asks for DRM PRIME
+    frames, and the upload
     thread imports their planes (`render::dmabuf`) in place of the copy,
     keeping each frame until `Queue::on_submitted_work_done` for the
     submission that read it. On a device opened shared (path B) a

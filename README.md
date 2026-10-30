@@ -296,8 +296,11 @@ spherecut frame clip.mp4 -o out.png --overwrite --depth 16 --json
   exports it as DMA-BUFs and the GPU imports them, with no copy through
   the CPU; it fails (exit 3, `import_failed`) when the GPU, its driver
   or the decoder can't, and the JSON's `decode.transfer` says which way
-  a frame came (slice 5b, DECISIONS D25). The viewer does the same with
-  `SPHERECUT_ZERO_COPY=1`, and copies whatever it can't import.
+  a frame came (slice 5b, DECISIONS D25). The viewer keeps Vulkan
+  Video's frames on the GPU by default, decoding on its own device where
+  the GPU lets it be shared; `SPHERECUT_ZERO_COPY=1` imports VA-API's
+  too, `SPHERECUT_ZERO_COPY=0` copies every frame, and whatever can't
+  stay on the GPU is copied.
 - **The output**: something already at `-o` is refused unless
   `--overwrite` is given, and so is a link there; with `--overwrite` a
   regular file is replaced, through a link too. The PNG is written next

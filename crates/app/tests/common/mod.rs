@@ -89,6 +89,7 @@ pub fn doctor_report(issues: Vec<Issue>) -> DoctorReport {
         devices: Vec::new(),
         vulkan_devices: Vec::new(),
         zero_copy: false,
+        zero_copy_mode: spherecut_media::backend::ZeroCopy::Off,
         decode_checks: Vec::new(),
         encode_checks: Vec::new(),
         issues,

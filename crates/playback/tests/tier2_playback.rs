@@ -78,7 +78,7 @@ use spherecut_media::probe::{self, ProbeReport, StreamKind};
 use spherecut_playback::decoder::choose;
 use spherecut_playback::{
     CacheBudget, Counter, DecoderPreference, HwSupport, PerfStats, Player, PlayerConfig,
-    PlayerParts, PlayerSnapshot, Presented, SURFACE_CAP, SlotFrame, Stage, StreamFormat,
+    PlayerParts, PlayerSnapshot, Presented, SURFACE_CAP, SlotFrame, Stage, StreamFormat, ZeroCopy,
 };
 use spherecut_render::dmabuf::{self, Importer};
 use spherecut_render::vkshare::Copied;
@@ -234,7 +234,12 @@ impl Rig {
         parts.render_node = Some(self.node.path.clone());
         let config = PlayerConfig {
             decoder: run.decoder,
-            zero_copy: run.zero_copy,
+            // The copy path, or every path where the device can.
+            zero_copy: if run.zero_copy {
+                ZeroCopy::All
+            } else {
+                ZeroCopy::Off
+            },
             cache: CacheBudget::choose(
                 None,
                 CacheBudget::env_value().as_deref(),

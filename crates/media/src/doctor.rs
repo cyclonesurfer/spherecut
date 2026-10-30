@@ -26,6 +26,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::backend::ZeroCopy;
 use crate::decode::DecodedFrame;
 use crate::hwprobe::{self, ENCODE_SIZE, HwProbeError, device_label, vk_device_type};
 use crate::{HwDevice, HwError, ff, ffi, init};
@@ -252,9 +253,12 @@ pub struct DoctorReport {
     pub gpu: Gpu,
     pub devices: Vec<DeviceStatus>,
     pub vulkan_devices: Vec<VulkanDevice>,
-    /// Whether `SPHERECUT_ZERO_COPY=1` turns zero copy on for the viewer
-    /// (slice 5b, D25); off, every frame is copied through RAM.
+    /// Whether the viewer keeps any frames on the GPU: `zero_copy_mode`
+    /// isn't [`ZeroCopy::Off`].
     pub zero_copy: bool,
+    /// Which frames the viewer keeps on the GPU, as `SPHERECUT_ZERO_COPY`
+    /// sets it (slice 5b, D25).
+    pub zero_copy_mode: ZeroCopy,
     /// Each format decoded in software, on VA-API and on Vulkan.
     pub decode_checks: Vec<Check>,
     /// Each VA-API encoder, one frame each.
@@ -578,6 +582,7 @@ pub fn run(render_node: &Path) -> DoctorReport {
         ..gpu_vendor(render_node, &vulkan_devices)
     };
     let env = Env::detect(render_node, distro, vulkan_error);
+    let zero_copy = crate::backend::zero_copy_from_env(|k| std::env::var(k).ok());
     let mut report = DoctorReport {
         distro,
         ffmpeg_version: ffi::ffmpeg_version(),
@@ -591,7 +596,8 @@ pub fn run(render_node: &Path) -> DoctorReport {
         gpu,
         devices: vec![vaapi_status, vulkan_status],
         vulkan_devices,
-        zero_copy: crate::backend::zero_copy_from_env(|k| std::env::var(k).ok()),
+        zero_copy: zero_copy.vulkan(),
+        zero_copy_mode: zero_copy,
         decode_checks,
         encode_checks,
         issues: Vec::new(),
@@ -1775,12 +1781,18 @@ pub fn render_text(r: &DoctorReport) -> String {
     let _ = writeln!(
         s,
         "\nZero copy: {}",
-        if r.zero_copy {
-            "on (SPHERECUT_ZERO_COPY=1): VA-API frames are imported where the rendering GPU has \
-             DMA-BUF import, and Vulkan Video decodes on the renderer's own device where it can \
-             be shared; the rest are copied through RAM"
-        } else {
-            "off, so every frame is copied through RAM (SPHERECUT_ZERO_COPY=1 turns it on)"
+        match r.zero_copy_mode {
+            ZeroCopy::All => {
+                "on (SPHERECUT_ZERO_COPY=1): VA-API frames are imported where the rendering GPU \
+                 has DMA-BUF import, and Vulkan Video decodes on the renderer's own device where \
+                 it can be shared; the rest are copied through RAM"
+            }
+            ZeroCopy::Vulkan => {
+                "Vulkan Video's frames, decoded on the renderer's own device where it can be \
+                 shared; VA-API's and the rest are copied through RAM (SPHERECUT_ZERO_COPY=1 \
+                 imports VA-API's too, 0 copies every frame)"
+            }
+            ZeroCopy::Off => "off (SPHERECUT_ZERO_COPY=0), so every frame is copied through RAM",
         }
     );
     let _ = writeln!(
@@ -1977,6 +1989,7 @@ mod tests {
                 VulkanDeviceType::DiscreteGpu,
             )],
             zero_copy: false,
+            zero_copy_mode: ZeroCopy::Off,
             decode_checks,
             encode_checks: ENCODE_TARGETS
                 .iter()

@@ -190,19 +190,20 @@ pub struct PlayerConfig {
     /// negative). Paused, the frame at the clock's time shows, as a
     /// frame-exact seek or step put it.
     pub av_offset_ms: i32,
-    /// Slice 5b: frames stay on the decoder's device and reach their
-    /// slots on the GPU, instead of downloaded and uploaded. VA-API
-    /// frames are exported as DMA-BUFs and imported (path A) when the
-    /// device can import them; Vulkan Video frames are decoded on the
-    /// renderer's own device and copied out there (path B) when that
-    /// device was made shared (`Gpu::for_window_shared`). Off by default
-    /// until the decision before M3 (D25); [`ZERO_COPY_ENV`] turns it on.
-    pub zero_copy: bool,
+    /// Slice 5b: which frames stay on the decoder's device and reach
+    /// their slots on the GPU, instead of downloaded and uploaded. Vulkan
+    /// Video frames are decoded on the renderer's own device and copied
+    /// out there (path B) when that device was made shared
+    /// (`Gpu::for_window_shared`), by default (D25); with
+    /// [`ZeroCopy::All`], VA-API frames are exported as DMA-BUFs and
+    /// imported (path A) too, when the device can import them.
+    /// [`ZERO_COPY_ENV`] sets it.
+    pub zero_copy: ZeroCopy,
 }
 
-/// `SPHERECUT_ZERO_COPY=1` turns [`PlayerConfig::zero_copy`] on; media
-/// has them, for doctor to say so too.
-pub use spherecut_media::backend::{ZERO_COPY_ENV, zero_copy_from_env};
+/// `SPHERECUT_ZERO_COPY` sets [`PlayerConfig::zero_copy`]; media has
+/// them, for doctor to say so too.
+pub use spherecut_media::backend::{ZERO_COPY_ENV, ZeroCopy, zero_copy_from_env};
 
 /// The frames exported from a VA-API decoder each stream's cache holds
 /// at most: its pool's spare surfaces less 8 for the frames on their way
@@ -217,7 +218,7 @@ impl Default for PlayerConfig {
             gpu_slots: DEFAULT_SLOTS,
             decoder: DecoderPreference::Auto,
             av_offset_ms: 0,
-            zero_copy: false,
+            zero_copy: ZeroCopy::default(),
         }
     }
 }
@@ -616,15 +617,14 @@ impl Player {
         };
         let dmabuf_import = parts.gpu.caps.dmabuf_import;
         let shared_video = parts.gpu.shared_video().ok().cloned();
-        if config.zero_copy && !dmabuf_import {
+        if config.zero_copy.dmabuf() && !dmabuf_import {
             tracing::info!(
                 "zero copy is on, but this device can't import DMA-BUFs: VA-API frames are copied"
             );
         }
-        if config.zero_copy && shared_video.is_none() {
+        if config.zero_copy.vulkan() && shared_video.is_none() {
             tracing::info!(
-                "zero copy is on, but the device isn't shared with the decoder: Vulkan Video \
-                 frames are copied ({})",
+                "the device isn't shared with the decoder, so Vulkan Video frames are copied ({})",
                 parts.gpu.shared_video().err().unwrap_or_default()
             );
         }
@@ -763,8 +763,11 @@ impl Player {
             discrete: self.discrete,
             gpu_ids: self.gpu_ids.clone(),
             render_node: self.render_node.clone(),
-            zero_copy: ui.config.zero_copy && self.dmabuf_import,
-            shared_video: self.shared_video.clone().filter(|_| ui.config.zero_copy),
+            zero_copy: ui.config.zero_copy.dmabuf() && self.dmabuf_import,
+            shared_video: self
+                .shared_video
+                .clone()
+                .filter(|_| ui.config.zero_copy.vulkan()),
         };
         if let Err(e) = spawn_into(&self.handles_tx, "open".into(), move || job.run()) {
             self.shared.event(PlayerEvent::OpenFailed {
@@ -1838,7 +1841,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_copy_is_asked_for_with_a_1() {
+    fn zero_copy_is_vulkan_unless_a_1_or_a_0_says_otherwise() {
         let env = |v: Option<&'static str>| {
             move |k: &str| {
                 (k == ZERO_COPY_ENV)
@@ -1847,12 +1850,17 @@ mod tests {
                     .map(String::from)
             }
         };
-        assert!(zero_copy_from_env(env(Some("1"))));
-        assert!(zero_copy_from_env(env(Some(" 1\n"))));
-        for v in [None, Some(""), Some("0"), Some("yes"), Some("true")] {
-            assert!(!zero_copy_from_env(env(v)), "{v:?}");
+        assert_eq!(zero_copy_from_env(env(Some("1"))), ZeroCopy::All);
+        assert_eq!(zero_copy_from_env(env(Some(" 1\n"))), ZeroCopy::All);
+        assert_eq!(zero_copy_from_env(env(Some("0"))), ZeroCopy::Off);
+        assert_eq!(zero_copy_from_env(env(Some(" 0 "))), ZeroCopy::Off);
+        for v in [None, Some(""), Some("yes"), Some("true"), Some("2")] {
+            assert_eq!(zero_copy_from_env(env(v)), ZeroCopy::Vulkan, "{v:?}");
         }
-        assert!(!PlayerConfig::default().zero_copy);
+        assert_eq!(PlayerConfig::default().zero_copy, ZeroCopy::Vulkan);
+        assert!(ZeroCopy::Vulkan.vulkan() && !ZeroCopy::Vulkan.dmabuf());
+        assert!(ZeroCopy::All.vulkan() && ZeroCopy::All.dmabuf());
+        assert!(!ZeroCopy::Off.vulkan() && !ZeroCopy::Off.dmabuf());
         // The cap leaves room in the pool for the frames on their way.
         assert_eq!(SURFACE_CAP, 16);
     }

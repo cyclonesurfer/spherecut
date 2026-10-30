@@ -116,10 +116,11 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
         .clone()
         .or_else(AdapterChoice::from_env)
         .unwrap_or(AdapterChoice::Auto);
-    // Zero copy (slice 5b) makes the device shareable with FFmpeg's
-    // Vulkan Video too, where the adapter can be (path B).
+    // Zero copy (slice 5b, on for Vulkan Video unless turned off: D25)
+    // makes the device shareable with FFmpeg's Vulkan Video too, where
+    // the adapter can be (path B).
     let zero_copy = spherecut_playback::zero_copy_from_env(|k| std::env::var(k).ok());
-    let gpu = if zero_copy {
+    let gpu = if zero_copy.vulkan() {
         Gpu::for_window_shared(&choice)?
     } else {
         Gpu::for_window(&choice)?

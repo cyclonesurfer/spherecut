@@ -93,7 +93,6 @@ fn json_flags_lavapipe_as_cpu_and_the_render_node_as_missing() {
     let gpu =
         spherecut_render::Gpu::headless_shared(&spherecut_render::AdapterChoice::Cpu).unwrap();
     assert_eq!(gpu.shared_video().unwrap_err(), why);
-    assert_eq!(r["zero_copy"], false);
 
     let issues = r["issues"].as_array().unwrap();
     let what = |prefix: &str| {
@@ -133,7 +132,9 @@ fn text_lists_the_vulkan_device_and_the_check_tables() {
         "CPU: no GPU acceleration; driver llvmpipe",
         "    zero copy: DMA-BUF import ",
         "; shared with FFmpeg's Vulkan Video no: the device lacks VK_KHR_video_queue\n",
-        "\nZero copy: off, so every frame is copied through RAM (SPHERECUT_ZERO_COPY=1 turns it on)\n",
+        "\nZero copy: Vulkan Video's frames, decoded on the renderer's own device where it can be \
+         shared; VA-API's and the rest are copied through RAM (SPHERECUT_ZERO_COPY=1 imports \
+         VA-API's too, 0 copies every frame)\n",
         "\nDecode check: one 256x256 frame each",
         "  HEVC Main 10   works",
         "\nEncode check: one 256x256 frame each on VA-API",
@@ -144,26 +145,33 @@ fn text_lists_the_vulkan_device_and_the_check_tables() {
 }
 
 #[test]
-fn zero_copy_is_on_as_the_viewer_reads_the_variable() {
-    let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_spherecut"))
-            .arg("doctor")
+fn zero_copy_is_as_the_viewer_reads_the_variable() {
+    let run = |value: Option<&str>, args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
+        cmd.arg("doctor")
             .arg("--render-node")
             .arg(missing_node())
             .args(args)
             .env("VK_DRIVER_FILES", lavapipe_icd())
             .env("VK_ICD_FILENAMES", lavapipe_icd())
-            .env("SPHERECUT_ZERO_COPY", " 1\n")
-            .output()
-            .unwrap()
+            .env_remove("SPHERECUT_ZERO_COPY");
+        if let Some(v) = value {
+            cmd.env("SPHERECUT_ZERO_COPY", v);
+        }
+        cmd.output().unwrap()
     };
-    let r = &document::document(&run(&["--json"]).stdout)["result"];
-    assert_eq!(r["zero_copy"], true);
-    let text = String::from_utf8_lossy(&run(&[]).stdout).into_owned();
-    assert!(
-        text.contains("\nZero copy: on (SPHERECUT_ZERO_COPY=1): VA-API frames are imported"),
-        "{text}"
-    );
+    for (value, on, mode, says) in [
+        (None, true, "vulkan", "\nZero copy: Vulkan Video's frames, decoded on"),
+        (Some("yes"), true, "vulkan", "\nZero copy: Vulkan Video's frames, decoded on"),
+        (Some(" 1\n"), true, "all", "\nZero copy: on (SPHERECUT_ZERO_COPY=1): VA-API frames"),
+        (Some("0"), false, "off", "\nZero copy: off (SPHERECUT_ZERO_COPY=0), so every frame"),
+    ] {
+        let r = &document::document(&run(value, &["--json"]).stdout)["result"];
+        assert_eq!(r["zero_copy"], on, "{value:?}");
+        assert_eq!(r["zero_copy_mode"], mode, "{value:?}");
+        let text = String::from_utf8_lossy(&run(value, &[]).stdout).into_owned();
+        assert!(text.contains(says), "{value:?}: {text}");
+    }
 }
 
 #[test]
