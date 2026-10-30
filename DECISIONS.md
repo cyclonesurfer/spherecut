@@ -1205,6 +1205,7 @@ rest, with the versions in `Cargo.lock`:
 | Crate | Used by | Why |
 |---|---|---|
 | anyhow 1.0.104 | cli, xtask | Error context at the program edges; libraries use `thiserror` |
+| ash 0.38.0 (std) | render | Vulkan's own calls in `render::dmabuf` that wgpu-hal doesn't make (slice 5b): asking the driver which DRM format modifiers it has for a format and whether it imports an image with one from a DMA-BUF, and how large (`vkGetPhysicalDeviceFormatProperties2`, `vkGetPhysicalDeviceImageFormatProperties2`), through the instance wgpu-hal opened. Pinned with `=` to the version wgpu-hal 30.0.1 uses, so that its types are wgpu-hal's; default features off, so no loader of its own. Already in the tree through wgpu-hal, so it adds no crate |
 | bytemuck 1.25.2 (derive) | render | The `#[repr(C)]` uniforms as bytes for `Queue::write_buffer`, and timestamps read back, with no `unsafe`: its derives compile under `forbid(unsafe_code)` (D31) |
 | clap 4.6.7 (derive) | cli, xtask | Argument parsing with generated help and errors, for two binaries with subcommands |
 | cpal 0.18.2 (pulseaudio) | audio | The audio output (D35): the PulseAudio protocol host, pure Rust, which reaches PipeWire through pipewire-pulse, and ALSA, which cpal always builds on Linux and which links libasound (so its headers are a build prerequisite). Default features off; a `[[bans.features]]` allow list keeps `pipewire`, `jack`, `realtime` and the browser hosts off. On Linux it brings `alsa`, `alsa-sys`, `pulseaudio` and its `byteorder`, `enum-primitive-derive`, `mio`, `thiserror` 1 and the `futures` crates, and `dasp_sample` for its sample conversions |
@@ -1277,6 +1278,9 @@ Wayland stacks), rustix 0.38 beside 1 and linux-raw-sys 0.4 beside
 app and playback; app on audio, core, media, playback, render, sphere,
 glam, serde, thiserror, tracing and wgpu, and on synth and media's
 `fault-injection` for its tests.
+
+*Updated in M1 slice 5b,* with ash's row above, which adds no crate: it
+was wgpu-hal's already, at the same version.
 
 ## D23. Agent integration: an MCP server and the JSON CLI
 
@@ -1636,6 +1640,35 @@ own Vulkan device, and the default path (and its kind, VA-API or Vulkan)
 is chosen from those numbers on odin and huginn before M3 (m1-plan
 amendment 9).
 
+*Updated 2026-10-30 by slice 5b's path A, as built* (`docs/design/m1-5b.md`).
+VA-API frames map to DRM PRIME (`HwOutput::DrmPrime`), each layer one
+plane of one object (NV12 as `R8` and `GR88`, P010 as `R16` and
+`GR1616`), and `render::dmabuf` imports each layer with wgpu-hal's
+`texture_from_dmabuf_fd`. A frame that won't export so (a modifier with
+a second memory plane, such as DCC metadata, or a crop on the left or
+top) is downloaded instead, and `VideoFrame::transfer` says why.
+wgpu-hal doesn't check that the driver can take an image, and an
+image it can't is undefined behaviour, so `Importer` asks first,
+through ash: the format's modifiers with one memory plane, sampling and
+copies, then an image format query with the DMA-BUF handle type for
+importability and the largest size. Each frame is imported afresh,
+since wgpu tracks a wrapped texture's layout itself and a cached import
+would see no barrier when the decoder writes the surface again; the
+upload thread keeps the frame until the GPU work that read it is done,
+and the frame cache holds at most `SURFACE_CAP` (16) frames on surfaces
+a stream, eight under the decoder's extra 24. Ownership isn't moved
+from `VK_QUEUE_FAMILY_FOREIGN_EXT`, which wgpu has no hook for; RADV and
+ANV read imported DMA-BUFs without it, and the Tier 2 comparison
+catches a driver that doesn't. The copy stays the default: zero copy is
+`SPHERECUT_ZERO_COPY=1` in the viewer and `frame --zero-copy`, the
+overlay counts frames imported, copied and refused, doctor says whether
+each Vulkan device can import, and a refused import is copied, said once,
+and asked for no more on that player. The Tier 2 tests and
+`bench_x5_8k30_zero_copy_vs_copy`, whose rows the choice before M3
+takes, run on odin next; odin's sixth run (PR #8) has VA-API's download
+at 31 to 122 ms a frame at p50 (5.7K 8-bit to 8K), the cost this
+removes. Path B follows on a branch of its own.
+
 ## D26. egui stays, checked against a timeline prototype at the end of M2
 
 *2026-10-24, before M1's code. Pat approved it from the stack review.
@@ -1993,6 +2026,16 @@ needs no `unsafe` of its own before 5b. egui 0.37 needs 1.95.
 
 Revisit if: any crate but media, cli and, from slice 5b, render needs
 `unsafe`, which then needs an entry that names the module.
+
+*Updated in M1 slice 5b:* render's root is `#![deny(unsafe_code)]`, with
+`#[allow(unsafe_code)]` on `pub mod dmabuf` alone: the DMA-BUF import
+(an fd duplicated with `BorrowedFd::borrow_raw`, wgpu-hal's
+`texture_from_dmabuf_fd` and `create_texture_from_hal`) and the
+driver's answers through ash. Path A needs no device of its own, so
+the device module stays `unsafe`-free; path B's device through
+`open_with_callback` will be the next exception, named here when it
+comes. media's `hwprobe` gains one block, the device extension query
+behind doctor's `dmabuf_import`, under its existing allowance.
 
 ## D29. MediaBackend and frame-exact seek
 

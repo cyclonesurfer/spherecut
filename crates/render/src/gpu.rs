@@ -85,6 +85,11 @@ pub struct GpuCaps {
     pub max_texture_2d: u32,
     /// Nanoseconds per timestamp tick.
     pub timestamp_period_ns: f32,
+    /// `VULKAN_EXTERNAL_MEMORY_DMA_BUF`: DMA-BUF planes can be imported
+    /// ([`crate::dmabuf`], slice 5b), which needs
+    /// `VK_EXT_external_memory_dma_buf` and
+    /// `VK_EXT_image_drm_format_modifier`.
+    pub dmabuf_import: bool,
 }
 
 /// One device and its queue, with the instance and adapter it came from.
@@ -196,6 +201,7 @@ impl Gpu {
                 .contains(wgpu::DownlevelFlags::ANISOTROPIC_FILTERING),
             max_texture_2d: device.limits().max_texture_dimension_2d,
             timestamp_period_ns: queue.get_timestamp_period(),
+            dmabuf_import: features.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF),
         };
         Gpu {
             instance,
@@ -263,14 +269,16 @@ impl Gpu {
 
     /// What every device is asked for:
     /// - the adapter's timestamp features, when it has them;
+    /// - DMA-BUF import, when it has it (slice 5b);
     /// - wgpu's default limits, with 2D textures raised to the adapter's
     ///   own limit, capped at [`MAX_TEXTURE_2D`];
     /// - no texture format features: every format the renderer uses is
     ///   guaranteed without them (DECISIONS D31);
     /// - memory hints for performance.
     pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
-        let wanted =
-            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        let wanted = wgpu::Features::TIMESTAMP_QUERY
+            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+            | wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
         let limits = adapter.limits();
         wgpu::DeviceDescriptor {
             label: Some("spherecut"),

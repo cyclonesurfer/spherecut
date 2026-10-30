@@ -7,11 +7,16 @@
 //! Data flows one way: [`VideoPlanes`](spherecut_core::video::VideoPlanes)
 //! → [`Uploader`] → a [`GpuFrame`] slot → [`Projector`] → a
 //! [`LinearTarget`] → [`Encoder`] → the screen, or a readback
-//! ([`render_still`]).
+//! ([`render_still`]). A decoder's picture can arrive as DMA-BUF planes
+//! instead ([`dmabuf`]), which the uploader copies from on the GPU.
 
-#![forbid(unsafe_code)]
+// Only `dmabuf`, the DMA-BUF import, may use unsafe (M1 plan section
+// 2.4, DECISIONS D25).
+#![deny(unsafe_code)]
 
 pub mod color;
+#[allow(unsafe_code)]
+pub mod dmabuf;
 pub mod encode;
 pub mod error;
 pub mod frame;

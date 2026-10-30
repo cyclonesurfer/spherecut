@@ -168,6 +168,35 @@ impl StillRenderer {
         size: (u32, u32),
         opts: &StillOptions,
     ) -> Result<Image, RenderError> {
+        self.render_from(gpu, frame, None, view, size, opts)
+    }
+
+    /// [`render`](Self::render) of a frame whose planes are on the GPU
+    /// already, one texture a plane, as
+    /// [`Uploader::upload_imported`](crate::Uploader::upload_imported)
+    /// takes them: slice 5b's DMA-BUF imports. `frame` gives the layout,
+    /// size and colour.
+    pub fn render_imported(
+        &mut self,
+        gpu: &Gpu,
+        frame: &dyn VideoPlanes,
+        planes: &[wgpu::Texture],
+        view: &ViewParams,
+        size: (u32, u32),
+        opts: &StillOptions,
+    ) -> Result<Image, RenderError> {
+        self.render_from(gpu, frame, Some(planes), view, size, opts)
+    }
+
+    fn render_from(
+        &mut self,
+        gpu: &Gpu,
+        frame: &dyn VideoPlanes,
+        planes: Option<&[wgpu::Texture]>,
+        view: &ViewParams,
+        size: (u32, u32),
+        opts: &StillOptions,
+    ) -> Result<Image, RenderError> {
         gpu.check()?;
         if size.0 == 0 || size.1 == 0 {
             return Err(RenderError::Invalid(format!(
@@ -183,8 +212,15 @@ impl StillRenderer {
             _ => GpuFrame::new(gpu, &shape)?,
         };
         let slot = &*self.slot.insert(slot);
-        self.uploader
-            .upload_placed(gpu, frame, &opts.placement, slot)?;
+        match planes {
+            Some(planes) => {
+                self.uploader
+                    .upload_imported(gpu, frame, planes, &opts.placement, slot)?
+            }
+            None => self
+                .uploader
+                .upload_placed(gpu, frame, &opts.placement, slot)?,
+        };
         let target = match self.target.take() {
             Some(mut t) => {
                 t.resize(gpu, size)?;

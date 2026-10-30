@@ -96,10 +96,15 @@ pub enum Counter {
     CacheWaits,
     /// Times the audio ring ran dry while playing (slice 6).
     AudioUnderruns,
+    /// Of the frames uploaded, those whose planes were imported as
+    /// DMA-BUFs and copied on the GPU (slice 5b), and those exported so
+    /// that the import refused and the upload thread downloaded instead.
+    FramesImported,
+    ImportsRefused,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 10] = [
+    pub const ALL: [Counter; 12] = [
         Counter::FramesDecoded,
         Counter::FramesUploaded,
         Counter::FramesShown,
@@ -110,6 +115,8 @@ impl Counter {
         Counter::SeeksSuperseded,
         Counter::CacheWaits,
         Counter::AudioUnderruns,
+        Counter::FramesImported,
+        Counter::ImportsRefused,
     ];
 
     pub fn name(self) -> &'static str {
@@ -124,6 +131,8 @@ impl Counter {
             Counter::SeeksSuperseded => "seeks_superseded",
             Counter::CacheWaits => "cache_waits",
             Counter::AudioUnderruns => "audio_underruns",
+            Counter::FramesImported => "frames_imported",
+            Counter::ImportsRefused => "imports_refused",
         }
     }
 }

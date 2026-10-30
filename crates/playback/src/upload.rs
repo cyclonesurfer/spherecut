@@ -27,6 +27,14 @@
 //! for the cache to change, 20 ms at most, so that it looks at slots a
 //! draw has let go of, its commands and the shutdown flag.
 //!
+//! **Frames on the device** (slice 5b): a frame a VA-API decoder
+//! exported as DMA-BUFs has its planes imported and copied on the GPU
+//! ([`spherecut_render::dmabuf`]), and is held until the GPU has read
+//! them (`Queue::on_submitted_work_done`), since its decoder writes the
+//! surface again once it is let go. When the import is refused, the frame
+//! is downloaded here and uploaded as bytes, and the reason, kept in the
+//! status, turns the export off for the opens after.
+//!
 //! **GPU memory** (risk 11): a slot is made the first time a frame of
 //! its shape goes in, inside the out-of-memory error scope
 //! [`GpuFrame::new`] pushes. A slot the GPU has no memory for is dropped
@@ -46,7 +54,10 @@ use spherecut_core::video::VideoPlanes;
 use spherecut_core::{Time, may_block};
 use spherecut_media::backend::{VideoFrame, VideoStreamInfo};
 use spherecut_media::spherical::StereoMode;
-use spherecut_render::{Gpu, GpuFrame, Placement, RenderError, SlotShape, Stereo, Uploader};
+use spherecut_render::dmabuf::{self, Importer};
+use spherecut_render::{
+    Gpu, GpuFrame, Placement, RenderError, SlotShape, Stereo, UploadStats, Uploader,
+};
 
 use crate::budget::{self, CacheBudget};
 use crate::cache::WAIT_SLICE;
@@ -93,6 +104,7 @@ struct StreamPass {
 /// The upload thread's own state.
 struct State {
     uploader: Uploader,
+    importer: Importer,
     /// Frames that failed to upload, which aren't tried again.
     failed: HashSet<(u64, usize, Time)>,
     /// The open the "too small" notice was given for.
@@ -110,6 +122,7 @@ impl UploadThread {
     pub(crate) fn run(mut self) {
         let mut st = State {
             uploader: Uploader::new(&self.gpu),
+            importer: Importer::new(),
             failed: HashSet::new(),
             too_small: 0,
             unpinned: Vec::new(),
@@ -437,10 +450,13 @@ impl UploadThread {
                 }
             },
         };
-        match st
-            .uploader
-            .upload_placed(&self.gpu, f.as_ref(), placement, &gpu_frame)
-        {
+        let uploaded = if f.dmabuf().is_some() {
+            self.upload_dmabuf(st, f, placement, &gpu_frame)
+        } else {
+            st.uploader
+                .upload_placed(&self.gpu, f.as_ref(), placement, &gpu_frame)
+        };
+        match uploaded {
             Ok(stats) => {
                 drop(gpu_frame);
                 slots.publish(
@@ -479,6 +495,70 @@ impl UploadThread {
             }
         }
         true
+    }
+
+    /// Uploads `f`, exported as DMA-BUFs, into `slot`: imported, or
+    /// downloaded when the import is refused (whose reason the status
+    /// keeps, the first time).
+    fn upload_dmabuf(
+        &self,
+        st: &mut State,
+        f: &Arc<VideoFrame>,
+        placement: &Placement,
+        slot: &GpuFrame,
+    ) -> Result<UploadStats, RenderError> {
+        let why = match self.import(st, f, placement, slot) {
+            Err(RenderError::Import(why)) => why,
+            other => return other,
+        };
+        self.shared.perf.add(Counter::ImportsRefused, 1);
+        {
+            let mut status = self.shared.status();
+            if status.import_refused.is_none() {
+                tracing::warn!("can't import the decoder's frames ({why}): downloading them");
+                status.import_refused = Some(why);
+            }
+        }
+        let start = Instant::now();
+        let down = match f.to_system() {
+            Some(Ok(d)) => d,
+            Some(Err(e)) => {
+                return Err(RenderError::Invalid(format!(
+                    "downloading a frame the GPU can't import: {e}"
+                )));
+            }
+            None => return Err(RenderError::Invalid("a frame without planes".into())),
+        };
+        let mut stats = st
+            .uploader
+            .upload_placed(&self.gpu, &down, placement, slot)?;
+        stats.cpu_ms = start.elapsed().as_secs_f32() * 1e3;
+        Ok(stats)
+    }
+
+    /// `f`'s planes imported and copied into `slot`, and `f` held until
+    /// the GPU has read them. `Import` when the device or its driver
+    /// can't take them.
+    fn import(
+        &self,
+        st: &mut State,
+        f: &Arc<VideoFrame>,
+        placement: &Placement,
+        slot: &GpuFrame,
+    ) -> Result<UploadStats, RenderError> {
+        let layers = f.dmabuf().unwrap_or_default();
+        let whole = SlotShape::of(f.layout(), f.size())?;
+        let planes = dmabuf::plan(&whole, layers).map_err(RenderError::Import)?;
+        let textures = st.importer.import(&self.gpu, &planes)?;
+        let stats =
+            st.uploader
+                .upload_imported(&self.gpu, f.as_ref(), &textures, placement, slot)?;
+        // The decoder writes the surface again once the frame is let go:
+        // not before the GPU has read it. The textures wgpu keeps itself.
+        let keep = f.clone();
+        self.gpu.queue.on_submitted_work_done(move || drop(keep));
+        self.shared.perf.add(Counter::FramesImported, 1);
+        Ok(stats)
     }
 
     /// An upload failed with `e`: the GPU, which stops uploading, or the

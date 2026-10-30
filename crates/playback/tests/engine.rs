@@ -41,8 +41,8 @@ use spherecut_media::doctor::CheckResult;
 use spherecut_media::probe::{ProbeError, ProbeReport};
 use spherecut_playback::{
     AudioOutput, AudioOutputFactory, CacheBudget, Counter, DecoderPreference, HwDecodeCheck,
-    HwSupport, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent, PlayerParts,
-    PlayerThreads, Presented, SlotState,
+    HwSupport, PREROLL_FRAMES, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent,
+    PlayerParts, PlayerThreads, Presented, SlotState,
 };
 use spherecut_render::readback::read_texture;
 use spherecut_synth::fake::{SyntheticBackend, SyntheticClip, frame_index};
@@ -1470,7 +1470,26 @@ fn playback_after_a_seek_waits_for_the_audio_preroll() {
     audio.ready.store(false, Ordering::Release);
     player.seek(at(50), SeekMode::Exact);
     show(&player, 50);
-    // The frame is up; the audio isn't ready, so the clock waits.
+    // The frame is up, and then the frames after it that the video's
+    // preroll waits for (which a loaded machine takes a while to upload:
+    // odin, running the engine tests side by side, took more than the
+    // 40 ms this once gave); the audio isn't ready, so the clock waits.
+    let prerolled = until(WAIT, || {
+        let _ = player.present(Instant::now());
+        let views = player.slots().views();
+        (1..=PREROLL_FRAMES as i64)
+            .all(|k| {
+                views
+                    .iter()
+                    .any(|v| v.state == SlotState::Ready && v.frame.time == at(50 + k))
+            })
+            .then_some(())
+    });
+    assert!(
+        prerolled.is_some(),
+        "the video's preroll never came in: {:?}",
+        player.slots().views()
+    );
     for _ in 0..20 {
         let _ = player.present(Instant::now());
         std::thread::sleep(Duration::from_millis(2));

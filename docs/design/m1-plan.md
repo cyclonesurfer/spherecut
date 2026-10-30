@@ -223,6 +223,26 @@ the sections below, they win.
       clipboards; cpal's bans were already an allow list (D35).
     - Slice 8's cached ranges on the scrub bar came with slice 7
       (`FrameCache::try_ranges`).
+17. **Slice 5b's path A as built** (D25, D28, `docs/design/m1-5b.md`).
+    Where it differs from amendment 2 and section 14's slice 5b:
+    - render's `unsafe` is in `render::dmabuf`, not the device module:
+      path A needs only the import, and the device stays as it is
+      until path B opens it through `open_with_callback`.
+    - The import isn't cached by inode. Each frame's planes are
+      imported afresh, after the driver has said through ash (a new
+      direct dependency, already in the tree through wgpu-hal) that it
+      takes the format's modifier from a DMA-BUF at that size.
+    - The frame cache holds mapped frames under a cap a stream
+      (`SURFACE_CAP`, 16, eight under the decoder's extra 24), counted
+      beside its byte budget, which they take none of: their pictures
+      are in VRAM.
+    - `frame --zero-copy` fails with `import_failed` (exit 3), a new
+      code, rather than `unsupported`, and JSON's `decode.transfer` and
+      doctor's `vulkan_devices[].dmabuf_import` are additive fields of
+      version 1.
+    - The Tier 2 check holds 48 frames of each clip (amendment 2 had
+      one) and renders each through its import 15 frames after it came,
+      so that a surface reused while held shows.
 
 ## 1. Summary
 

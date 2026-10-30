@@ -24,6 +24,11 @@
 //! tries (caught here, in-process, as D38's tests catch them). Any other
 //! error fails it.
 //!
+//! `zero_copy_frame_matches_the_copy` runs `--zero-copy` (slice 5b)
+//! against `--decoder vaapi`: the same bytes, the frame imported from
+//! VA-API's DMA-BUFs in one and copied from the device in the other. It
+//! skips where the GPU or its driver can't import.
+//!
 //! `the_check_runs_on_lavapipe_with_software_standing_in` is the Tier 1
 //! run of the same check, with software in the hardware's place, and a
 //! different frame, which must fail it.
@@ -473,6 +478,67 @@ fn vulkan_render_matches_software() {
                 String::new()
             }
         ));
+    }
+}
+
+/// `frame --zero-copy` (slice 5b) renders what `--decoder vaapi` does,
+/// byte for byte, through every view: the frame imported from VA-API's
+/// DMA-BUFs and the frame copied from the device are the same picture,
+/// and the JSON says which way each came. Skips, with frame's reason,
+/// where the GPU, its driver or VA-API turn zero copy down; never a pass
+/// with a clip left out.
+#[test]
+#[ignore = "tier2: needs a VA-API GPU that imports DMA-BUFs"]
+fn zero_copy_frame_matches_the_copy() {
+    let node = tier2::require_render_node();
+    let node_arg = Some(node.to_string_lossy().into_owned());
+    let dir = TempDir::new("zero-copy");
+    let common = hardware_args(&node_arg);
+    require_gpu(&dir, &common);
+    let mut refused = Vec::new();
+    'clips: for (name, clip) in &clips(&dir) {
+        let mut worst: f64 = 0.0;
+        for (i, view) in VIEWS.iter().enumerate() {
+            let run = |out: &Path, extra: &[&str]| {
+                let mut args: Vec<&str> = view.to_vec();
+                args.extend(&common);
+                args.extend(extra);
+                args.extend(["--frame", "17"]);
+                frame(clip, out, &args)
+            };
+            let got = dir.join(format!("zero-copy-{i}.png"));
+            let want = dir.join(format!("copy-{i}.png"));
+            let z = run(&got, &["--zero-copy"]);
+            if z.status == Some(3) && z.doc["error"]["code"] == "import_failed" {
+                refused.push(format!(
+                    "{name}: {}",
+                    z.doc["error"]["message"].as_str().unwrap_or("")
+                ));
+                continue 'clips;
+            }
+            assert_eq!(z.status, Some(0), "{name}: {} {}", z.doc, z.stderr);
+            assert_eq!(
+                z.doc["result"]["decode"],
+                serde_json::json!({"path": "vaapi", "transfer": "drm_prime"}),
+                "{name}"
+            );
+            let c = run(&want, &["--decoder", "vaapi"]);
+            assert_eq!(c.status, Some(0), "{name}: {} {}", c.doc, c.stderr);
+            assert_eq!(
+                c.doc["result"]["decode"]["transfer"], "downloaded",
+                "{name}"
+            );
+            assert_eq!(
+                z.doc["result"]["gpu"], c.doc["result"]["gpu"],
+                "rendered on two adapters"
+            );
+            worst = worst.max(max_lsb(&got, &want));
+        }
+        assert_eq!(worst, 0.0, "{name}: zero copy is {worst} LSB from the copy");
+        eprintln!("{name}: zero copy byte-identical to the copy");
+    }
+    if !refused.is_empty() {
+        tier2::skip(format!("zero copy refused: {}", refused.join("; ")));
     }
 }
 

@@ -506,6 +506,15 @@ pub fn overlay_ui(s: &AppState, ui: &egui::Ui, rect: egui::Rect) {
             lines.push(format!("decoding on {}", decode_path(d)));
         }
     }
+    // Zero copy (slice 5b): how the frames reached their slots.
+    let imported = p.counter(Counter::FramesImported);
+    let refused = p.counter(Counter::ImportsRefused);
+    if imported + refused > 0 {
+        lines.push(format!(
+            "into slots: dmabuf {imported}  copy {}  import refused {refused}",
+            p.counter(Counter::FramesUploaded).saturating_sub(imported)
+        ));
+    }
     lines.push(format!(
         "{}  {}x{} px",
         spherecut_render::gpu::describe(&s.gpu.caps.info),

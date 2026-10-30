@@ -34,7 +34,8 @@ use spherecut_core::video::{SampleBytes, VideoPlanes};
 use spherecut_core::{FrameRate, Rounding, StopToken, Time};
 use spherecut_media::backend::{
     DecodeMode, DecodePath, DecoderEvent, Exactness, Fallback, Fault, FaultPlan, FfmpegBackend,
-    HwKind, MediaBackend, NextFrame, SeekMode, SeekOutcome, VideoDecode, VideoFrame, VideoRequest,
+    HwKind, HwOutput, MediaBackend, NextFrame, SeekMode, SeekOutcome, Transfer, VideoDecode,
+    VideoFrame, VideoRequest,
 };
 use spherecut_media::decode::open_vulkan_device;
 use spherecut_media::encode::{ColorTags, EncodeError};
@@ -275,6 +276,21 @@ impl Hw {
                 fallback: Fallback::Fail,
             },
             fault: self.stand_in,
+            ..VideoRequest::default()
+        };
+        self.backend.open_video(&s.path, &req)
+    }
+
+    /// [`open`](Self::open), handing frames out as `output` (slice 5b).
+    fn open_as(&self, s: &Stream, output: HwOutput) -> Result<Box<dyn VideoDecode>, MediaError> {
+        let req = VideoRequest {
+            stream: s.index,
+            decode: DecodeMode::Hardware {
+                kind: self.kind,
+                device: None,
+                fallback: Fallback::Fail,
+            },
+            output,
             ..VideoRequest::default()
         };
         self.backend.open_video(&s.path, &req)
@@ -759,6 +775,84 @@ fn vaapi_seek_matches_software() {
     let hw = vaapi();
     let (streams, problems) = seek_streams();
     check_all(&hw, &streams, problems, check_seeks);
+}
+
+/// Frames a stream's exported frames are checked against downloads for.
+const EXPORTED_FRAMES: usize = 8;
+
+/// Exported (slice 5b), `s`'s first frames are a download's: each one,
+/// copied back with `to_system`, has the downloaded frame's channels, pts
+/// and size, and its layers are its planes, each its own fd's. A frame
+/// that isn't exported is a problem, with the reason: VA-API on odin and
+/// huginn exports every X5 mode. The noisy clips cropped on the left are
+/// the exception: they are downloaded, and say so.
+fn check_export(hw: &Hw, s: &Stream) -> Result<Vec<String>, String> {
+    let on = hw.about.as_str();
+    let mut ex = hw
+        .open_as(s, HwOutput::DrmPrime)
+        .map_err(|e| format!("opening on {on} to export: {e}"))?;
+    let mut down = hw
+        .open_as(s, HwOutput::Download)
+        .map_err(|e| format!("opening on {on} to download: {e}"))?;
+    let left_cropped = s.name.contains("left");
+    let mut problems = Vec::new();
+    for i in 0..EXPORTED_FRAMES {
+        let (Some(a), Some(b)) = (
+            next(&mut *ex).map_err(|e| format!("exported frame {i}: {e}"))?,
+            next(&mut *down).map_err(|e| format!("downloaded frame {i}: {e}"))?,
+        ) else {
+            break;
+        };
+        match (&a.transfer, left_cropped) {
+            (Transfer::DrmPrime, false) => {}
+            (
+                Transfer::Downloaded {
+                    not_exported: Some(why),
+                },
+                true,
+            ) if why.contains("cropped on the left or top") => {
+                continue;
+            }
+            (t, _) => {
+                problems.push(format!("frame {i} on {on} left the decoder as {t:?}"));
+                continue;
+            }
+        }
+        let layers = a.dmabuf().expect("an exported frame's layers");
+        if layers.len() != a.layout().planes.len() {
+            problems.push(format!("frame {i}: {} layers", layers.len()));
+        }
+        if a.plane(0).is_some() {
+            problems.push(format!("frame {i}: an exported frame gave its bytes"));
+        }
+        let back = a
+            .to_system()
+            .expect("a frame on the device")
+            .map_err(|e| format!("frame {i} back from the device: {e}"))?;
+        if (back.pts, back.size()) != (b.pts, b.size()) {
+            problems.push(format!(
+                "frame {i}: exported {} {:?}, downloaded {} {:?}",
+                back.pts,
+                back.size(),
+                b.pts,
+                b.size()
+            ));
+        } else if channel_hashes(&back) != channel_hashes(&b) {
+            problems.push(format!(
+                "frame {i} (pts {}): exported and downloaded differ",
+                b.pts
+            ));
+        }
+    }
+    Ok(problems)
+}
+
+#[test]
+#[ignore = "tier2: needs a VA-API GPU and camera samples"]
+fn vaapi_exports_match_downloads() {
+    let hw = vaapi();
+    let (streams, problems) = seek_streams();
+    check_all(&hw, &streams, problems, check_export);
 }
 
 #[test]

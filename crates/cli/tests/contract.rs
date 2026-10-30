@@ -46,6 +46,7 @@ const CODES: &[&str] = &[
     "hw_failed",
     "hw_unavailable",
     "hw_unsupported",
+    "import_failed",
     "internal",
     "invalid_input",
     "io_error",
@@ -83,6 +84,7 @@ const MISSING: &[&str] = &[
     "hw_failed",
     "hw_unavailable",
     "hw_unsupported",
+    "import_failed",
     "no_decoder",
     "no_display",
     "no_gpu",
@@ -1129,8 +1131,11 @@ fn frame_documents_have_the_envelope_too() {
     assert_eq!(r["view"]["morph_to"], Value::Null);
     assert_eq!(r["filter"], "iso");
     assert_eq!(r["renderer"], "gpu");
-    // Software as asked: no fallback to report.
-    assert_eq!(r["decode"], serde_json::json!({"path": "software"}));
+    // Software as asked: in system memory, and no fallback to report.
+    assert_eq!(
+        r["decode"],
+        serde_json::json!({"path": "software", "transfer": "system"})
+    );
     assert!(
         has_keys(&r["gpu"], &["name", "driver", "driver_info", "device_type"]),
         "{r}"
@@ -1180,6 +1185,7 @@ fn frame_documents_have_the_envelope_too() {
         r["decode"],
         serde_json::json!({
             "path": "software",
+            "transfer": "system",
             "fallback": {
                 "from": "vaapi",
                 "code": "hw_unavailable",

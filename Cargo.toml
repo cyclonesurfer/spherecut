@@ -24,6 +24,9 @@ spherecut-audio = { path = "crates/audio" }
 spherecut-app = { path = "crates/app" }
 
 anyhow = "1.0.100"
+# Vulkan's types, for asking the driver what DMA-BUFs it imports (slice
+# 5b, D22). Already in the tree through wgpu-hal, at the same version.
+ash = { version = "=0.38.0", default-features = false, features = ["std"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 clap = { version = "4.5", features = ["derive"] }
 # Audio output (D35): the PulseAudio protocol host, pure Rust, reaching

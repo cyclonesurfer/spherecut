@@ -3169,6 +3169,7 @@ dependencies = [
 name = "spherecut-render"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "bytemuck",
  "glam",
  "image",

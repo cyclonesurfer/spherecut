@@ -139,9 +139,58 @@ pub trait VideoPlanes: Send + Sync + std::fmt::Debug {
     fn layout(&self) -> &PixelLayout;
     /// The picture's size in pixels, after cropping.
     fn size(&self) -> (u32, u32);
-    /// Plane `index`, `None` past the last one.
+    /// Plane `index`, `None` past the last one, and for a picture still
+    /// on the decoding device (see [`dmabuf`](Self::dmabuf)).
     fn plane(&self, index: usize) -> Option<PlaneData<'_>>;
     fn color(&self) -> &ColorInfo;
+    /// A picture still on the decoding device, exported as DMA-BUFs: one
+    /// layer a plane, in plane order (M1 plan slice 5b). `None` for a
+    /// picture in system memory.
+    fn dmabuf(&self) -> Option<&[DmabufLayer]> {
+        None
+    }
+}
+
+/// One plane of a picture exported as a DMA-BUF (FFmpeg's DRM PRIME
+/// layer of one plane): what a GPU needs to import it. The fd is the
+/// picture's, valid while it lives; an importer dups it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmabufLayer {
+    pub fd: i32,
+    /// The DRM fourcc of the plane: `R8`, `GR88`, `R16` or `GR1616`.
+    pub fourcc: u32,
+    /// The buffer's DRM format modifier (its tiling).
+    pub modifier: u64,
+    /// Where the plane starts in the buffer, and its rows apart, in bytes.
+    pub offset: u64,
+    pub pitch: u64,
+    /// The plane's size in texels.
+    pub size: (u32, u32),
+}
+
+/// The DRM fourccs a plane can have (`drm_fourcc.h`).
+pub mod fourcc {
+    const fn code(c: &[u8; 4]) -> u32 {
+        u32::from_le_bytes(*c)
+    }
+    pub const R8: u32 = code(b"R8  ");
+    pub const GR88: u32 = code(b"GR88");
+    pub const R16: u32 = code(b"R16 ");
+    pub const GR1616: u32 = code(b"GR32");
+
+    /// A fourcc as its four characters, trailing spaces dropped.
+    pub fn name(code: u32) -> String {
+        code.to_le_bytes()
+            .iter()
+            .map(|&b| match b {
+                b' ' => ' ',
+                b if b.is_ascii_graphic() => b as char,
+                _ => '?',
+            })
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
 }
 
 /// The colour fields as the file codes them, as FFmpeg's ints. FFmpeg's

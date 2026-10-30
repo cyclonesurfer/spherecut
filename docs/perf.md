@@ -148,6 +148,12 @@ Current benchmarks:
   - `bench_playback_realtime_8k_8bit`: the 8K perf clip, recorded.
   - `bench_playback_x5_raw`: the longest X5 file of each mode, both
     lenses as two streams, on each decoder, recorded (M3's 8K budget).
+  - `bench_x5_8k30_zero_copy_vs_copy` (slice 5b, D25): each X5 mode
+    on VA-API with the copy, VA-API with zero copy (frames imported as
+    DMA-BUFs) and Vulkan Video with the copy, recorded with the
+    `upload_cpu` and `upload_gpu` p50 and p99 beside the rows above,
+    and a note of the frames imported and the imports refused. It skips
+    where the GPU can't import, or an import was refused, saying why.
   - `bench_playback_stitched_samples`: each stitched equirect sample,
     gated as the perf clips are when it is 5.7K at 30 fps or less; skips
     while there is none.
@@ -516,6 +522,73 @@ What these add:
   1991a98, while the cache passed 5 GiB, and at 48 fps or more in the
   next three, one with free memory fragmented (PROGRESS, "odin's fifth
   run").
+
+Sixth run, H1 at main:
+[`hw-reports/odin-303e3644be.md`](../hw-reports/odin-303e3644be.md) at
+303e364, 2026-10-30 (PR #8, 9032 s, of which 3875 s made the perf
+clips), the same machine and software. Tier 2: 31 of 32 passed and
+`bench_playback_stitched_samples` skipped (no clip 12); Tier 1 failed
+one engine test that needed more time under load (PROGRESS, "odin's
+sixth run"). Decode and seek, against the fifth run's:
+
+| Benchmark | Software | VA-API | Vulkan Video |
+|---|---:|---:|---:|
+| X5 2× 1920² @ 119.88 | 0.72 × | 1.07 × | 1.66 × |
+| X5 2× 2880² @ 59.94 | 0.65 × | 0.99 × | 1.61 × |
+| X5 2× 3840² @ 25.00 | 0.52 × | 0.60 × | 2.23 × |
+| X5 2× 3840² @ 29.97 | 0.44 × | 0.43 × | 1.94 × |
+| LRV 1× 1664×832 @ 25.00 | 27.83 × | 24.08 × | 29.84 × |
+| LRV 1× 1664×832 @ 29.97 | 31.88 × | 25.45 × | 34.55 × |
+| 3840×1920 HEVC 8-bit, synthetic | 219 fps (180 to 229) **unstable** | 124 fps (57 to 125) **unstable** | 287 fps |
+| 5760×2880 HEVC 8-bit, synthetic | 95 fps | 43 fps | 134 fps |
+
+| Seek (median / p95, ms) | Software | VA-API | Vulkan Video |
+|---|---:|---:|---:|
+| exact, noisy 5760×2880 HEVC | 642 / 846 | 126 / 245 | 119 / 244 |
+| keyframe, noisy 5760×2880 HEVC | 592 / 694 | 55 / 62 | 45 / 51 |
+| exact, X5 3840² stream (8K30) | 3623 / 6653 | 182 / 370 | 183 / 380 |
+| keyframe, X5 3840² stream | 1614 / 1656 | 22 / 35 | 17 / 28 |
+| exact, LRV 1664×832 | 42 / 50 | 18 / 22 | 17 / 21 |
+| keyframe, LRV 1664×832 | 26 / 29 | 4.3 / 5.0 | 3.7 / 5.0 |
+
+Upload (`bench_upload_5k7`): within 4 % of the fifth run's at every
+input (5.7K NV12 2.63 ms with `write_texture`, P010 4.47, the 3840²
+pairs 5.85 and 9.44; GPU ingest and mips 1.01, 1.24, 0.89 and 1.09).
+
+Playback, after H1's fixes, as in the table above:
+
+| Clip, decoder | Unthrottled | Real time | Dropped, decode-dropped | `download` | `upload_cpu` |
+|---|---:|---:|---:|---:|---:|
+| 5.7K 8-bit, Vulkan (Auto) | 121 (119 to 130) | 30 (0 to 129) | 0, 0 | 2.59 / 11.30 | 3.69 / 5.04 |
+| 5.7K 8-bit, VA-API | 27 (25 to 49) | 28 (25 to 49) | 30, 30 | 31.20 / 55.27 | 5.58 / 6.47 |
+| 5.7K 8-bit, software | 47.5 (40 to 56) | 30 (0 to 54) | 0, 0 | | 4.35 / 6.39 |
+| 5.7K 10-bit, Vulkan (Auto) | 90 (60 to 98) | 30 (0 to 102) | 0, 0 | 5.08 / 23.98 | 6.37 / 7.71 |
+| 5.7K 10-bit, VA-API | 17 (16 to 18) | 25 (23 to 28) | 408, 408 | 109.92 / 146.69 | 6.07 / 6.94 |
+| 5.7K 10-bit, software | 35 (26 to 38) | 30 (0 to 40) | 5, 0 | | 12.03 / 15.84 |
+| 8K 8-bit, Vulkan (Auto) | 81 (67 to 84) | 30 (0 to 61) | 0, 0 | 4.59 / 27.06 | 6.10 / 7.04 |
+| 8K 8-bit, VA-API | 14 (12 to 18) | 24 (21 to 31) | 434, 434 | 121.90 / 187.45 | 5.81 / 6.50 |
+| 8K 8-bit, software | 30 (24 to 33) | 30 (13 to 36) | 158, 125 | | 10.35 / 14.42 |
+| X5 8K30, Vulkan (Auto) | 79 (76 to 81) | 30 (29.5 to 60) | 0, 0 | 3.83 / 14.70 | 3.78 / 5.65 |
+| X5 8K30, VA-API | 24 (22 to 28.5) | 30 (27 to 31.5) | 249, 244 | 35.07 / 69.57 | 4.96 / 6.08 |
+| X5 8K25, Vulkan (Auto) | 75 | 25 (0 to 51) | 0, 0 | 9.96 / 29.20 | 2.55 / 3.50 |
+| X5 8K25, VA-API | 42 (42 to 42.5) | 25 (0 to 44.5) | 0, 0 | 21.90 / 40.56 | 2.51 / 3.73 |
+
+The X5 rows decode two lenses, each with its own decoder; their fps is
+per lens. What these add:
+
+- The 8K row measured again after the huge pages: Vulkan Video's
+  download fell from 22 to 4.6 ms at p50, and 8K plays with nothing
+  dropped. Every Vulkan Video run plays in real time, X5 8K30 included,
+  with 2.6 × to spare unthrottled.
+- VA-API's download is still the wall (31, 110 and 122 ms at p50), and
+  zero copy (slice 5b, its runs to come) is what would lift it.
+- VA-API's decode of the X5's 8K modes in `bench_samples_realtime_decode`
+  came out at 0.60 and 0.43 × against the fifth run's 1.38 and 1.04,
+  every run of the three alike, while the other modes and the
+  synthetic decodes moved by 10 % or less. The first run had one run
+  of each 8K30 and 2.9K60 at under half the median, so VA-API at these
+  sizes has been slow before; slice 5b's odin run runs the bench at
+  43abcda and at main to tell code from machine.
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 

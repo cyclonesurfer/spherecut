@@ -147,8 +147,8 @@ its `time_base`.
 |---:|---|---|---|---|
 | 0 | The run did what was asked | Every file is ok (warnings don't count) | No problem of severity error | The PNG is written (warnings don't count) |
 | 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18) | No frame: the output is in the way, the file is missing, damaged before the frame or not an equirect, the frame is past the end, the GPU failed, ... (Codes) |
-| 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso` |
-| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, and `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware |
+| 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso`, `--zero-copy` with `--decoder software` or `vulkan` |
+| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware, and `import_failed` with `--zero-copy` |
 | 4 | Interrupted (SIGINT), leaving no output file; the document's code is `cancelled` | never | never | The first Ctrl+C |
 
 The GUI (`spherecut` with no command) exits 3 too: without a display
@@ -255,6 +255,7 @@ Errors of the GPU, which frame gives:
 | `adapter_not_found` | 3 | No adapter matches `--adapter` (or `SPHERECUT_ADAPTER`); the message lists those there are |
 | `gpu_failed` | 1 | The adapter gave no device, the device refused work or was lost, or reading the picture back failed |
 | `out_of_gpu_memory` | 1 | The GPU ran out of memory |
+| `import_failed` | 3 | `--zero-copy`: the frame can't reach the GPU without a copy: the device has no DMA-BUF import, its driver refuses the picture's format, modifier or size, or the decoder didn't export it (it decoded in software, or VA-API refused); the message says which. Without `--zero-copy` the frame is copied instead |
 | `invalid_input` | 1 | A picture the renderer can't use, such as a plane that doesn't match its layout |
 | `too_large` | 1 | The source picture is larger than the GPU's textures (a `--size` past them is a `usage` error) |
 | `internal` | 1 | As above |
@@ -457,7 +458,7 @@ error; parts of that entry:
 | `decoders`, `encoders` | arrays | The codecs doctor looks for: `name`, `available` (bool), `hw` (the device types a decoder can use; empty for encoders) |
 | `gpu` | object | `render_node` (the node checked for VA-API), `vendor` (`amd`, `intel`, `other` or `unknown`), `vendor_id` (`"0x1002"`, or null) |
 | `devices` | array | Each hardware device opened: `kind` (`vaapi`, `vulkan`), `device` (or null for the default), `ok`, `error` (or null), `name` (for `vulkan`, the Vulkan device the context runs on, which may be a CPU device such as llvmpipe; null for `vaapi`, and when it didn't open), `ffmpeg_log` |
-| `vulkan_devices` | array | Every Vulkan device FFmpeg's Vulkan instance lists: `name`, `device_type` (`integrated_gpu`, `discrete_gpu`, `virtual_gpu`, `cpu` (a software rasterizer: no GPU acceleration) or `other`), `vendor_id` and `device_id` (hex strings), `api_version`, `driver` and `driver_info` (or null), `used_by_ffmpeg` (whether doctor's Vulkan checks ran on it: FFmpeg's default Vulkan device, which on a machine with two GPUs need not be the GPU behind `render_node`, D38) |
+| `vulkan_devices` | array | Every Vulkan device FFmpeg's Vulkan instance lists: `name`, `device_type` (`integrated_gpu`, `discrete_gpu`, `virtual_gpu`, `cpu` (a software rasterizer: no GPU acceleration) or `other`), `vendor_id` and `device_id` (hex strings), `api_version`, `driver` and `driver_info` (or null), `used_by_ffmpeg` (whether doctor's Vulkan checks ran on it: FFmpeg's default Vulkan device, which on a machine with two GPUs need not be the GPU behind `render_node`, D38), `dmabuf_import` (whether it has `VK_EXT_external_memory_dma_buf` and `VK_EXT_image_drm_format_modifier`, which zero copy needs of the GPU that renders, slice 5b) |
 | `decode_checks`, `encode_checks` | arrays | One decode or encode of one format on one path: `format` (such as `HEVC Main 10`), `path` (`software`, `vaapi` or `vulkan`), `codec` (the FFmpeg decoder or encoder), `result` (`works`, `fails` or `not_tested`), `reason` (or null), `fault` (`ffmpeg`, `driver`, `wrong_output`, or null), `ffmpeg_log` |
 | `issues` | array | Each problem: `severity` (`error`, `warning` or `info`), `what`, `impact`, `fix` (for people: lines separated by `\n`, each a shell command, the exact `dnf` or `pacman` command where a package fixes it, or a sentence where no command does. A command may be followed by three spaces and a note, as in `sudo dnf swap mesa-vulkan-drivers mesa-vulkan-drivers-freeworld   (RPM Fusion free: ...)` or `sudo usermod -aG render "$USER"   then log out and back in`, so the command is what comes before the first three spaces. Nothing marks a sentence apart from a command: don't run a line unread) |
 
@@ -484,7 +485,7 @@ GPU (lavapipe only), with the lists shortened:
     ],
     "vulkan_devices": [
       {"name": "llvmpipe (LLVM 20.1.2, 256 bits)", "device_type": "cpu", "vendor_id": "0x10005", "device_id": "0x0000",
-       "api_version": "1.4.318", "driver": "llvmpipe", "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)", "used_by_ffmpeg": true}
+       "api_version": "1.4.318", "driver": "llvmpipe", "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)", "used_by_ffmpeg": true, "dmabuf_import": false}
     ],
     "decode_checks": [
       {"format": "H.264 High", "path": "software", "codec": "h264", "result": "works", "reason": null, "fault": null, "ffmpeg_log": []},
@@ -540,7 +541,7 @@ PNG. Whatever fails first is the run's `error`, and nothing is written.
 | `view` | object | The virtual camera as given: `yaw` (degrees to the right), `pitch` (up), `roll` (clockwise as seen from behind the camera), `fov` (horizontal, degrees), `projection` (`rectilinear`, `fisheye` or `stereographic`), `morph_to` (one of those, or null) and `morph` (0 is `projection`, 1 is `morph_to`) |
 | `filter` | string | `iso` or `aniso`: the filter rendered with, `iso` where `--filter aniso` met a device without anisotropy (a warning says so) |
 | `renderer` | string | `gpu`, or `reference` for `--reference`'s CPU render |
-| `decode` | object | `path` (`software`, `vaapi` or `vulkan`: where the frame was decoded) and, when a hardware decode went on in software, `fallback`: `from` (`vaapi` or `vulkan`), `code` (`hw_unavailable`, no device; `hw_unsupported`, the device turned the stream down; `hw_failed`, it failed on a frame) and `reason` (for people). `--decoder auto` on a machine without a render node has `fallback` without trying the device |
+| `decode` | object | `path` (`software`, `vaapi` or `vulkan`: where the frame was decoded), `transfer` (how it left the decoder: `system`, decoded in system memory; `downloaded`, copied from the device; `drm_prime`, exported as DMA-BUFs and imported by the GPU, which only `--zero-copy` asks for) and, when a hardware decode went on in software, `fallback`: `from` (`vaapi` or `vulkan`), `code` (`hw_unavailable`, no device; `hw_unsupported`, the device turned the stream down; `hw_failed`, it failed on a frame) and `reason` (for people). `--decoder auto` on a machine without a render node has `fallback` without trying the device |
 | `gpu` | object, or null | The adapter rendered on: `name`, `driver`, `driver_info` (strings, as Vulkan gives them), `device_type` (`discrete_gpu`, `integrated_gpu`, `virtual_gpu`, `cpu` for a software rasterizer such as lavapipe, or `other`). Null for `--reference` |
 | `color` | object | The colour the frame was decoded as: `codes` (the file's H.273 codes as FFmpeg numbers them: `primaries`, `transfer`, `matrix`, `range`, `chroma_location`, integers), and what the renderer used: `range` (`limited` or `full`), `matrix` (`bt709`, `bt601`, `bt2020_ncl`, `smpte240m`, `fcc` or `identity`), `transfer` (`sdr`, `pq`, `hlg` or `linear`), `primaries` (`bt709`, `bt2020` or `other`), `siting` (`left`, `center`, `top_left`, `top`, `bottom_left` or `bottom`), and `assumed`: for each of those five, whether a default rule chose it because the file left it unspecified (D30) |
 | `source` | object | The stream the frame came from: `stream` (FFmpeg's index; `--stream` picks one, the first video stream otherwise), `codec` (FFmpeg's name, such as `hevc`), `size` (`width`, `height`: the decoded picture, after the codec's cropping) and `pix_fmt` (the decoder's pixel format, as FFmpeg names it, such as `yuv420p10le`; a hardware decode names the format it downloads, such as `nv12` or `p010le`) |
@@ -596,6 +597,7 @@ line, shown here indented:
     "renderer": "gpu",
     "decode": {
       "path": "software",
+      "transfer": "system",
       "fallback": {"from": "vaapi", "code": "hw_unavailable", "reason": "no VA-API device: no render node at /dev/dri/renderD128"}
     },
     "gpu": {"name": "llvmpipe (LLVM 20.1.2, 256 bits)", "driver": "llvmpipe", "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)", "device_type": "cpu"},

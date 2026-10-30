@@ -135,6 +135,10 @@ pub struct VulkanDevice {
     /// Vulkan checks run on. With two GPUs it need not be the one behind
     /// the render node, which `decode::open_vulkan_device` picks (D38).
     pub used_by_ffmpeg: bool,
+    /// It can import DMA-BUFs (`VK_EXT_external_memory_dma_buf` and
+    /// `VK_EXT_image_drm_format_modifier`), which zero copy needs of the
+    /// GPU that renders (slice 5b).
+    pub dmabuf_import: bool,
 }
 
 impl VulkanDevice {
@@ -162,6 +166,7 @@ impl From<hwprobe::VkDevice> for VulkanDevice {
             driver: d.driver_name,
             driver_info: d.driver_info,
             used_by_ffmpeg: d.ffmpeg_uses,
+            dmabuf_import: d.dmabuf_import,
         }
     }
 }
@@ -1907,6 +1912,7 @@ mod tests {
             driver: Some("radv".into()),
             driver_info: None,
             used_by_ffmpeg: true,
+            dmabuf_import: true,
         }
     }
 

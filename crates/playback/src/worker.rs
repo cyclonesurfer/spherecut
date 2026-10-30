@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 use spherecut_core::{Clock, StopToken, Time, may_block};
 use spherecut_media::MediaError;
 use spherecut_media::backend::{
-    DecodeMode, DecodeStats, DecoderEvent, Exactness, MediaBackend, NextFrame, SeekMode,
+    DecodeMode, DecodeStats, DecoderEvent, Exactness, HwOutput, MediaBackend, NextFrame, SeekMode,
     SeekOutcome, VideoDecode, VideoFrame, VideoRequest,
 };
 use spherecut_media::hw::GpuIds;
@@ -84,6 +84,9 @@ pub(crate) struct OpenJob {
     pub(crate) discrete: bool,
     pub(crate) gpu_ids: GpuIds,
     pub(crate) render_node: Option<PathBuf>,
+    /// VA-API streams decode to DMA-BUFs (slice 5b): zero copy is on and
+    /// the device imports them.
+    pub(crate) zero_copy: bool,
 }
 
 impl OpenJob {
@@ -153,6 +156,18 @@ impl OpenJob {
         // The last open's audio, if this holds it last, outside the lock.
         drop(old_audio);
         shared.live.store(self.epoch, Ordering::Release);
+        // An import the driver refused for an open before stays refused:
+        // this one's frames are downloaded by the decoder, as without zero
+        // copy, not one by one by the upload thread.
+        let refused = shared.status().import_refused.clone();
+        let output = match (self.zero_copy, refused) {
+            (true, None) => HwOutput::DrmPrime,
+            (true, Some(why)) => {
+                tracing::info!("zero copy is off for this file: {why}");
+                HwOutput::Download
+            }
+            (false, _) => HwOutput::Download,
+        };
         for (stream, ((asked, rx), choice)) in self.streams.into_iter().zip(choices).enumerate() {
             tracing::info!(stream, "decoding {}", choice.why);
             let worker = Worker {
@@ -163,6 +178,7 @@ impl OpenJob {
                 path: self.path.clone(),
                 asked,
                 mode: choice.mode,
+                output,
                 rx,
                 clock: clock.clone(),
                 token: self.token.clone(),
@@ -243,6 +259,8 @@ struct Worker {
     path: PathBuf,
     asked: Option<usize>,
     mode: DecodeMode,
+    /// What a VA-API decoder hands frames out as.
+    output: HwOutput,
     rx: Receiver<Command>,
     clock: Arc<dyn Clock>,
     /// The latest request's token: decoding ahead after it stops with it.
@@ -299,6 +317,7 @@ impl Worker {
         let req = VideoRequest {
             stream: self.asked,
             decode: self.mode.clone(),
+            output: self.output,
             interrupt: self.shared.stop.shutdown_flag(),
             ..VideoRequest::default()
         };
