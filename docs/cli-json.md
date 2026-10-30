@@ -635,7 +635,11 @@ screenshot to `--smoke-screenshot <PNG>` if given (at most 960 pixels
 wide, its aspect kept), writes one document to `JSON`, and closes. The
 exit status is the GUI's: 0 when the document says `ok`, and otherwise
 by its code (above). hw-test's `gui_smoke` runs it; the flags are hidden
-from `--help`, and the schema may grow fields as the GUI does.
+from `--help`, and the schema may grow fields as the GUI does. Unlike
+the commands, which refuse an existing output without `--overwrite`,
+the smoke run replaces its document and screenshot (each written to a
+temporary file and renamed over the old): they are hw-test's own
+outputs, which `gui_smoke` clears before each run anyway.
 
 A window the compositor doesn't draw (a locked or blanked screen, a
 minimized window, another virtual terminal) has no UI passes, and the

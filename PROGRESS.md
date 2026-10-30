@@ -960,7 +960,8 @@ Built on `m1/slice8` (D37, D40; m1-plan sections 7.1, 7.8, 8.2, 10 and
   monospace labels over the viewer. The decode path and GPU, the stream
   (codec, size, pixel format, range, matrix) and its rate; decode, the
   download and the uploads, against what playback needs; the
-  projection's CPU and GPU time with their sparklines; UI frames, frames
+  projection's CPU and GPU time; UI frames, with sparklines of the UI
+  frame interval and the shown video frame interval; frames
   shown and dropped, the draws that only encoded; the A/V offset's
   median and p95; the viewer's size and scale; the cache, the slots,
   imports and copies; RSS, faults and wgpu's allocator; and the audio
@@ -1092,10 +1093,11 @@ On `m1/slice9` (D37, D40):
   is dropped; lavapipe can't run out, so only the ring's own test covers
   it, not a player's. The 5-second budget recheck has no test of its
   timer, only of what it sets (a set size shrinks when memory is short)
-  and of `set_config`'s new budget reaching the cache. The present latency is one UI frame, not vsync's, until
-  the GUI (slice 7). The GUI must make its `FfmpegBackend` on the
-  rendering GPU's node (`FfmpegBackend::on_node`), so that decoding runs
-  where doctor's checks ran. The cache's budget counts the frames it
+  and of `set_config`'s new budget reaching the cache. The present latency is one UI frame in the GUI too, not the
+  surface's: eframe says nothing of when a frame reaches the screen. The
+  GUI makes its `FfmpegBackend` on the rendering GPU's node
+  (`FfmpegBackend::on_node`), so that decoding runs where doctor's
+  checks ran. The cache's budget counts the frames it
   holds; the frame a worker waits to insert and frames evicted while
   still held are alive beside them, about a frame a stream more (88 MB
   with the X5's two 8K streams). With fewer than two GPU slots a
@@ -1103,12 +1105,13 @@ On `m1/slice9` (D37, D40):
   With no more live slots than streams (two of four Dead, on two
   streams), a seek or a step never lands, since every live slot holds
   a frame on screen. Slots die only when the GPU is out of memory, so
-  the viewer is to treat a `SlotDropped` that leaves that few as a GPU
-  failure (D34).
-- Only `spherecut frame` asks wgpu's adapter for its GPU's render node
-  (D30's lookup by bus id, then PCI ids). doctor has no adapter yet, so
-  it tests `/dev/dri/renderD128` unless `--render-node` names another; on
-  a machine with two GPUs the two can differ.
+  the viewer treats a `SlotDropped` that leaves that few as the GPU
+  failing (slice 9): its notice says so and to restart (D34).
+- `spherecut frame` and the GUI ask wgpu's adapter for its GPU's render
+  node (D30's lookup by bus id, then PCI ids), and the GUI's startup
+  check runs there. `spherecut doctor` has no adapter, so it tests
+  `/dev/dri/renderD128` unless `--render-node` names another; on a
+  machine with two GPUs the two can differ.
 - `spherecut frame` here: every run renders on lavapipe or the CPU
   reference and decodes in software (`auto` with no render node), so
   `hw_unsupported` and `hw_failed` as errors, `auto`'s fallback after a
@@ -1220,12 +1223,14 @@ On `m1/slice9` (D37, D40):
   The render Tier 2 tests have run on one GPU, odin's RX 7600: at
   918d031 (PR #6) its CPU checks are the emulation's numbers, 8.57 dB or
   more above the floors, and huginn's 8060S hasn't run them (D32).
-  The staging belt stays off: at H1 on odin it was never cheaper than
-  `write_texture`, and the CPU trigger now asks it to be (D31); huginn's
-  numbers can still turn it on. A lost device makes
+  The player's uploads go through the staging belt since slice 9:
+  never cheaper than `write_texture` in the bench's CPU time, but
+  `write_texture` holds wgpu's queue locked through its copy, which the
+  GUI's UI thread then waits for (D31). A lost device makes
   every render entry point return `gpu_failed`, and the engine then
-  stops its uploads and sends `GpuFailed` (D34); recovering from it (a
-  new device, the slots uploaded again) is the viewer's, in slice 7.
+  stops its uploads and sends `GpuFailed` (D34); the viewer says the GPU
+  failed and to restart Spherecut. Nothing makes a new device and
+  uploads the slots again: that recovery is left for after M1.
   16-bit sources
   lose their low 4 bits in the f16 planes, and a 360° frame whose width
   isn't a multiple of its chroma subsampling (odd-width 4:2:0, which AV1

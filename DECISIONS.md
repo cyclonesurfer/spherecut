@@ -3120,8 +3120,9 @@ What:
   (`Device::destroy` in a Tier 1 test now shows each entry point
   returning `gpu_failed`). `Projector::record` returns a `Result` for it,
   where the plan's returned nothing. Slice 5's engine then sets
-  `gpu_error`, sends `GpuFailed` and stops its uploads (D34); what the
-  viewer does next (make the device again, re-upload) is slice 7's.
+  `gpu_error`, sends `GpuFailed` and stops its uploads (D34); the
+  viewer (slice 7) says the GPU failed and to restart Spherecut. Making
+  the device again and uploading the slots again is left for after M1.
 - **Canonical planes**, as plan section 4.2 has them: 8-bit planes are
   written straight into `R8Unorm` or `Rg8Unorm`; 9- to 16-bit planes go
   into an `R16Uint` or `Rg16Uint` scratch, and an ingest pass writes
