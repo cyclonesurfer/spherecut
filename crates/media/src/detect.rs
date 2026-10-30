@@ -13,6 +13,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::Source;
 use crate::mp4::{Cursor, Mp4Box, Mp4Tree};
 use crate::probe::{StreamInfo, StreamKind};
 
@@ -102,13 +103,16 @@ fn gopro_firmware(tree: &Mp4Tree) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// The camera that made the file, from its structure and from the
+/// extension of [`Source::name`] (`.lrv`, `.lrf`).
 pub fn guess(
-    path: &Path,
+    src: Source<'_>,
     tree: Option<&Mp4Tree>,
     streams: &[StreamInfo],
     tags: &BTreeMap<String, String>,
 ) -> Option<CameraGuess> {
-    let ext = path
+    let ext = src
+        .name
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
@@ -178,7 +182,7 @@ pub fn guess(
         // Insta360: metadata trailer ending in a fixed magic, either loose
         // after `moov` or (newer X5 firmware) wrapped in a top-level `inst`
         // box. See docs/formats/insta360.md section 3.
-        if g.vendor.is_none() && has_trailer_magic(path) {
+        if g.vendor.is_none() && has_trailer_magic(src.open) {
             g.vendor = Some("Insta360".into());
             let wrapped = tree.top.iter().any(|b| b.fourcc.0 == *b"inst");
             g.evidence.push(if wrapped {

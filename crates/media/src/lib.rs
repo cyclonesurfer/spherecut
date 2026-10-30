@@ -33,6 +33,30 @@ pub mod spherical;
 
 pub use ffmpeg_next as ff;
 
+/// A file to read, and the name to call it by (a1-plan amendment 10).
+/// The two differ for an agent's file: it is opened beneath a root once,
+/// and media reads that open file through its `/proc/self/fd/N` link, so
+/// a file swapped after the check isn't what gets read (D45). The
+/// agent's own path names it in messages and reports, and its extension
+/// is the one detection reads.
+#[derive(Debug, Clone, Copy)]
+pub struct Source<'a> {
+    /// The path to open.
+    pub open: &'a Path,
+    /// The path to name it by.
+    pub name: &'a Path,
+}
+
+impl<'a> Source<'a> {
+    /// A file opened and named by the same path.
+    pub fn path(path: &'a Path) -> Self {
+        Source {
+            open: path,
+            name: path,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum MediaError {
     #[error("{}: {error}", path.display())]

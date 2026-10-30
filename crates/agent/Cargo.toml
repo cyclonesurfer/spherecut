@@ -1,0 +1,23 @@
+[package]
+name = "spherecut-agent"
+description = "Agent integration (PLAN track A, D23, D43): the MCP server behind `spherecut mcp`, and the tools it and `spherecut call` share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+spherecut-core.workspace = true
+spherecut-media.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

@@ -1214,19 +1214,20 @@ rest, with the versions in `Cargo.lock`:
 | egui-wgpu 0.37.0 | app | egui's renderer on wgpu, and the paint callback the viewer draws through (D36). Default features off |
 | egui_tiles 0.18.0 | app | The tiles: the viewer beside the Info, Doctor and Files tabs, saved by eframe's persistence (D7: egui_dock has no release for egui 0.37) |
 | image 0.25.10 (png only) | render; app (dev) | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame` and the goldens. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
-| libc 0.2.191 | cli, media | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, the binary's one FFI module (D28): the handler only stores to an atomic. In media's `ffi`, `mmap`, `madvise` and `munmap` for the download pool's buffers on huge pages (D30). It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
+| libc 0.2.191 | cli, media | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, one of the binary's two FFI modules (D28): the handler only stores to an atomic. `_exit(2)` in `cli::exit`, the other, for `spherecut mcp` when a call is stuck (D44). In media's `ffi`, `mmap`, `madvise` and `munmap` for the download pool's buffers on huge pages (D30). It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
-| serde 1.0.229 (derive) | core, sphere, media, cli | Serializable time types, `Projection`, the probe and doctor reports, and the CLI's JSON envelope (D27) |
-| serde_json 1.0.154 | cli; core, render (dev) | `--json` output, through the `contract` module (D27). core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
-| thiserror 2.0.21 | core, media, synth, render, playback, audio | Typed library errors without hand-written `Display` impls |
-| tracing 0.1.44 | core, media, cli, render, playback, audio | Structured logging, and the target for FFmpeg's log (D12). core logs only what `fs::TempFile` can't clean up (M1 slice 4) |
+| rustix 1.1.5 (std, fs, stdio) | agent, cli | `openat2` below a root, a directory read through its descriptor (A1's roots, D43), and `spherecut mcp`'s stdout guard: the protocol's copy of fd 1 (`fcntl_dupfd_cloexec`) and fd 1 pointed at stderr (`dup2_stdout`), all without `unsafe`. Pinned with `=` to the version already in the tree through tempfile and the Wayland crates, so it adds no crate |
+| serde 1.0.229 (derive) | core, sphere, media, cli, agent | Serializable time types, `Projection`, the probe and doctor reports, the CLI's JSON envelope (D27), and the agent's requests |
+| serde_json 1.0.154 | cli, agent; core, render (dev) | `--json` output, through the `contract` module (D27), and the MCP server's messages, schemas and results (D43, D44). core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
+| thiserror 2.0.21 | core, media, synth, render, playback, audio, agent | Typed library errors without hand-written `Display` impls |
+| tracing 0.1.44 | core, media, cli, render, playback, audio, agent | Structured logging, and the target for FFmpeg's log (D12). core logs only what `fs::TempFile` can't clean up (M1 slice 4) |
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
 | tracing-subscriber 0.3.23 (env-filter) | cli | EnvFilter gives `SPHERECUT_LOG` its syntax, and the fmt layer writes to stderr. env-filter brings in `matchers` and `regex-automata` |
 | wgpu 30.0.1 (std, parking_lot, vulkan, wgsl) | render | The GPU (D7, D31). Default features off, so only the Vulkan backend and the WGSL front end are built: no GL, Metal, DX12 or WebGPU backend, no SPIR-V or GLSL front end. `std` and `parking_lot` are the two defaults kept: the standard library, and wgpu's locks. A `[[bans.features]]` list in `deny.toml` refuses `web`, `webgpu` and `webgl` (wasm-bindgen, js-sys and web-sys), `angle`, `static-dxc`, `glsl`, `spirv` and `vulkan-portability` if a later crate turns them on; GL, Metal and DX12 aren't banned, since egui_kittest turns them on in test builds (m1-plan section 11). It brings wgpu-core, wgpu-hal, wgpu-types, naga, ash and gpu-allocator among others. With image, bytemuck and pollster, slice 3a adds 57 crates to what a Linux build compiles (`cargo tree --target x86_64-unknown-linux-gnu` on normal and build edges, against ef1a9d1; 56 on normal edges alone), all under the existing licence list; `Cargo.lock` gains 90, the rest for other platforms' backends, which Linux never builds. 3a first said 46, a miscount the first review found |
 | winit 0.30.13 (rwh_06, wayland, wayland-dlopen, x11) | app | Not called: named so that eframe's winit gets `wayland-dlopen` back by feature unification, and libwayland is loaded at run time (D36). Never `wayland-csd-adwaita` (RUSTSEC-2026-0192 through ttf-parser), which `[[bans.features]]` refuses |
 | naga 30.0.1 (wgsl-in) (dev) | render | The test that each uniform's Rust layout matches its WGSL struct, member by member, which a driver doesn't check (D31). The same naga wgpu builds, so it adds nothing to the tree |
 | egui_kittest 0.37.0 (wgpu) (dev) | app | The GUI's tests on lavapipe, through our device with `WgpuTestRenderer::from_render_state` (D36), and its accessibility tree for finding widgets. Not its `eframe` feature, which turns eframe's accesskit on and `[[bans.features]]` refuses. In test builds it turns on wgpu's `gles`, `metal` and `dx12` (D31's row); the shipped binary has none |
-| proptest 1.12.0 (dev) | core, sphere, media, render, playback | Property tests and the MP4 fuzzing (D15) |
+| proptest 1.12.0 (dev) | core, sphere, media, render, playback, agent | Property tests, the MP4 fuzzing (D15) and the JSON-RPC reader's (D44) |
 | ron 0.12.2 (dev) | core | A serde round-trip test of the time types in a text format |
 
 glam's `serde` feature is on, but no glam type is serialized yet.
@@ -1383,6 +1384,8 @@ To decide at A1, with a prototype of each:
   normal dependency (safe wrappers; its openat2 to be checked first), or
   `libc` calls in an FFI module with SAFETY comments, since `unsafe` is
   allowed only in FFI and GPU modules.
+
+*Decided by D43*: our own layer, schemas by hand, rustix.
 
 Revisit if: a new MCP revision changes the split, or agents converge on
 something other than MCP.
@@ -2107,6 +2110,15 @@ the device module stays `unsafe`-free; path B's device through
 `open_with_callback` will be the next exception, named here when it
 comes. media's `hwprobe` gains one block, the device extension query
 behind doctor's `dmabuf_import`, under its existing allowance.
+
+*Updated in A1.1:* a new crate, `agent` (the MCP server and the tools
+`spherecut mcp` and `spherecut call` share, D43, D44), depends on core
+and media (render and sphere from A1.4), and cli on it; it has
+`#![forbid(unsafe_code)]`, its descriptors coming through rustix (D22).
+cli's binary gains a second exception, `#[allow(unsafe_code)] mod
+exit`: one block that calls `_exit(2)`, so that `spherecut mcp` can
+leave while a worker is stuck inside a driver without running exit
+handlers under it (D44).
 
 *Updated by slice 5b's path B:* render's second exception is
 `#[allow(unsafe_code)]` on `pub mod vkshare`: the shared device through
@@ -6696,6 +6708,258 @@ device can't be shared runs the gate on the copy path and slumps; or
 the copy path's buffers are allocated ahead of the decode, off its
 thread.
 
+## D43. A1's MCP layer, schemas and roots
+
+*2026-10-30, at A1's start, with a prototype of each of D23's three
+open choices. Updates D23.*
+
+What:
+
+- **Our own MCP layer**, synchronous, on `serde_json` and std threads,
+  in a new crate, `spherecut-agent`. It serves 2025-06-18 and
+  2025-11-25 through `initialize`. A request that carries 2026-07-28's
+  `_meta` gets -32022 with those two listed, which is how a client that
+  asks for 2026-07-28 first learns to fall back. 2026-07-28 itself
+  (`server/discover`, stateless requests) waits until a client needs
+  it, as PLAN says for our own layer.
+- **Schemas written by hand**, as JSON in `docs/agents/schemas/`,
+  compiled in with `include_str!`, so what the docs show is what the
+  server sends. Tests hold each to its Rust request type: every
+  property in the schema deserializes, nothing else does, and the
+  required ones are required.
+- **rustix** (`=1.1.5`, the version the lock already has through
+  tempfile and Wayland; features `std`, `fs` and `stdio`) for `openat2`,
+  for reading a directory through its descriptor, and for the stdout
+  guard; its `net` feature gives `SO_PEERCRED` in A3. The agent crate
+  has no `unsafe`.
+
+Why, from the prototypes (scratch crates in the cloud workspace,
+kernel 6.18, 2026-10-30):
+
+- **rmcp 3.8.0** (2026-10-26; 3.7.0 was D23's), `default-features =
+  false, features = ["server"]` on tokio's stdin and stdout, did
+  everything asked of it: `initialize` at 2025-06-18 and 2025-11-25
+  (an unknown revision got 2025-11-25), `ping`, `tools/list`,
+  `tools/call`, cancellation (the call's token fired at once and no
+  response followed), `server/discover` and a modern `tools/list`, and
+  -32022 for an unknown modern revision. It is 51 crates: tokio becomes
+  a normal dependency, and 12 are new to `Cargo.lock` (chrono,
+  dyn-clone, pastey, ref-cast and its derive, rmcp, schemars and its
+  derive, serde_derive_internals, tokio-macros, tokio-util). The
+  stripped server was 2.5 MB, against 0.7 MB for ours. Two things went
+  against what PLAN asks. Every tool here is blocking work (FFmpeg, the
+  GPU), so each runs in `spawn_blocking`, and when stdin closed with a
+  call in flight the server waited for the call to finish (1.4 s of a
+  1.5 s call; `look` may run 50 s, and PLAN says the server exits within
+  2 s). And a malformed line got no answer, where JSON-RPC answers
+  -32700 with a null id. Both could be fixed with our own reader in
+  front of rmcp, which is a good part of our own layer anyway.
+- **Our own layer's prototype**, 132 lines, answered the same session
+  in about 1 ms a request, answered the malformed line with -32700 and
+  then the next request, stopped a cancelled call (no response for it),
+  stopped the call in flight and exited 5 ms after stdin closed, and
+  answered modern requests with -32022. The real layer adds framing
+  limits, progress, a limit on calls at once and a guarded stdout; D23's
+  estimate was 800 to 1,500 lines. PLAN's tests need our own Rust client
+  that speaks the protocol in either case.
+- **The cost** is that we track MCP's revisions ourselves. Every client
+  D23 checked can use the handshake; Claude Code asks for 2026-07-28
+  first and falls back.
+- **schemars 1.2.3** on `look`'s request type gave draft 2020-12, but
+  with `$defs` and a `$ref` for every nested type, `anyOf` with `null`
+  for every `Option`, `oneOf` of constants for each enum, formats JSON
+  Schema doesn't define (`uint32`, `double`) and the properties in
+  alphabetical order. Each needs a setting or a rewrite to give the flat
+  schema clients handle best (Claude Code leaves out tools whose schemas
+  it can't read; D23's research). By hand, the schema is exactly what
+  clients get, and its descriptions are the documentation.
+- **openat2** through rustix and through a `libc` syscall behaved alike
+  on all eleven cases: a file in the root, one in a subfolder and a link
+  inside opened; `..`, `sub/../..`, an absolute path outside, a link out
+  of the root, `/proc/self/fd/N` and a link to it failed with `EXDEV`;
+  a dangling link with `ENOENT`. `libc` needs `unsafe` for the syscall
+  and for `open_how`, which is `non_exhaustive` there and so has to be
+  zeroed, and more for reading a directory from a descriptor
+  (`fdopendir`). rustix wraps all three safely and is in the tree
+  already (1.1.5 through tempfile, and the Wayland crates), with
+  bitflags and linux-raw-sys.
+
+Rejected: rmcp, for the runtime it brings to blocking work, its
+handling of stdin closing and of malformed lines, and its pace (16
+releases since 2026-07-28); schemars, for the rewriting its output needs;
+`libc` calls, for the `unsafe` they add to a crate that needs none.
+
+Revisit if: a client Pat uses needs 2026-07-28 (then `server/discover`
+and requests with `_meta`, from D23's research), or the schemas outgrow
+what is easy to keep by hand (M9's tool count is still 12).
+
+## D44. A1's MCP server: the protocol and its conventions
+
+*2026-10-30, A1.1. The protocol half; A1.4 adds images. From
+`docs/design/a1-plan.md` sections 3 and 4 and its amendments.*
+
+What, as `crates/agent/src/rpc.rs` serves it:
+
+- **Revisions.** `initialize` serves 2025-11-25, 2025-06-18, 2025-03-26
+  and 2024-11-05, answering with the client's when it is one of them and
+  2025-11-25 otherwise. A request in 2026-07-28's form (its revision in
+  `_meta`, or `server/discover`) gets -32022 with `data: {supported,
+  requested}`, as 2026-07-28's `schema.ts` has it, which is the signal
+  for a client to fall back to `initialize` (D43). The two oldest
+  revisions allowed JSON-RPC batches; a batch gets -32600 here, since
+  no client is known to send one.
+- **Lifecycle and errors.** Before `initialize`, everything but `ping`
+  gets -32600; so does a second `initialize`. Malformed JSON gets -32700
+  with a null id; a batch, a bad id or a line over 1 MiB gets -32600; an
+  unknown method -32601; `tools/call` naming no tool or an unknown one,
+  or with arguments that aren't an object, -32602. Everything else that
+  fails is a tool's error: an `isError` result whose text is
+  `{"error": {code, argument, message, valid, next}}`, under 500
+  characters, with no text from a media file in it. The codes are in
+  `error::codes` and `docs/agents.md`.
+- **Results.** `content[0]` is the response as JSON text;
+  `structuredContent` repeats it unless the result has an image (Claude
+  Code's issue 54737). Every response has `warnings`.
+- **Threads and time.** A reader answers `initialize`, `ping`,
+  `tools/list` and notifications at once; calls wait in a FIFO (at most
+  8, then `busy`) for one of 2 workers. A call has 50 s from its
+  request's arrival. At its deadline its stop token fires, which
+  FFmpeg's interrupt callback sees; 2 s later, a call still running is
+  answered `timed_out` by the reaper, its worker is retired and
+  replaced, and its late result is dropped. After 4 such workers the
+  server exits 1 so that the client starts a fresh one. A cancelled
+  call gets no response. Progress goes out only for a request with a
+  `progressToken`, at most every 250 ms, always increasing.
+- **Ending.** When stdin closes, every call is stopped, and the server
+  waits up to 1.5 s for them. If one is still inside a call, the CLI
+  leaves through `_exit` (D28), so that no exit handler of Mesa or libva
+  runs under it.
+- **stdout is the protocol's alone.** Before anything else, `spherecut
+  mcp` takes a close-on-exec copy of fd 1 for the protocol and points fd
+  1 at stderr, where tracing's logs go too. A stray print from FFmpeg, a
+  driver or a dependency can't corrupt a message.
+- **Lazy setup.** `initialize` is answered before FFmpeg or a GPU is
+  touched (well under PLAN's 1 s); the first call that needs them sets
+  them up.
+- **Untrusted text, two levels.** Fields typed as media text (tags and
+  their keys, vendor strings, names from a folder, FFmpeg's log lines)
+  go through `text::field`: Cc, Cf (bidi controls, zero-width
+  characters, the BOM, the tag characters), Zl, Zp and the variation
+  selectors become U+FFFD, and the string is cut at 1 KiB. The whole
+  response then goes through `text::sanitize`, the same replacements
+  but newlines and no cut, as a backstop for a field an op forgot.
+- **No tool starts a process.** The doctor tool runs media's doctor
+  without its `rpm -q` package query, so its Fedora fixes say "install"
+  where `spherecut doctor` in a terminal would say "swap", and its
+  description says so. Its `render_node` must be `/dev/dri/renderD`
+  and digits, and a character device.
+- **Tools.** Each is a hand-written schema in `docs/agents/schemas/`
+  (D43); its root description is the tool's description. Annotations:
+  `readOnlyHint` true, `idempotentHint` true, `openWorldHint` false.
+  Tests hold every schema to the lint (draft 2020-12, an object root,
+  `additionalProperties: false`, known keywords only, a description on
+  every node, snake_case names) and to its request type, A1's list to
+  5 KiB of the 12 KiB PLAN allows through M9, and the instructions to
+  1,500 characters.
+
+Why: each rule is one a client or the spec forces, or one the review of
+the A1 plan found missing (its amendments 4, 6, 20, 21 and 26). The
+reaper answers for a stuck call because a deadline that only works when
+the work cooperates fails exactly when a driver or a network mount
+hangs, and two such calls would stall every tool for good. The older
+revisions cost one line each, and some clients (Zed, goose, opencode)
+are not yet known to be on 2025-06-18.
+
+Tests: `crates/agent/tests/protocol.rs` (in process, with fake tools
+that are slow, stuck, panicking or busy), `crates/agent/tests/fuzz.rs`
+(the reader under arbitrary bytes and JSON: no panic, at most one
+response a line, every request's id back once and of the same type),
+and `crates/cli/tests/mcp.rs` (the real `spherecut mcp`: both current
+revisions, the stdout guard, Codex's ten variables, `initialize` before
+FFmpeg, the exit when stdin closes).
+
+Revisit if: a client sends batches (then serve them for the revisions
+that had them), a client needs 2026-07-28 (D43), or the 2 s grace proves
+too short for a call that does stop.
+
+## D45. A1's roots: how an agent's paths are opened
+
+*2026-10-30, A1.2. From `docs/design/a1-plan.md` section 5 and its
+amendments 4, 10, 17, 22, 23 and 24.*
+
+What, as `crates/agent/src/roots.rs` does it:
+
+- **The roots.** `spherecut mcp --read-root DIR` (repeatable; the
+  working directory when none is given) and `--allow-write --write-root
+  DIR` (both or neither; the write root is read from too). Each is
+  opened at start as an `O_PATH | O_DIRECTORY` descriptor, and its
+  canonical path read back from `/proc/self/fd`. A root that doesn't
+  exist or isn't a folder, a kernel without `openat2` (before Linux
+  5.6), or no `/proc` stops the server with exit 2 and a line on
+  stderr: the roots are the user's configuration, and couldn't be
+  enforced.
+- **Which root.** A relative path is under the first read root (the
+  write root, for an output). An absolute one is under the root whose
+  given or canonical form is its longest prefix, by component, so a
+  root given through a symlink matches both ways. The match is lexical;
+  the kernel resolves the rest.
+- **Opening.** Every open is `openat2(root, rest, flags | O_CLOEXEC,
+  RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)`, `EAGAIN` tried three times.
+  A file is opened `O_RDONLY | O_NOCTTY | O_NONBLOCK`, must be a regular
+  file by `fstat` (so a FIFO or a device is refused without blocking),
+  and is then made blocking. A folder is opened `O_DIRECTORY` and read
+  with rustix's `Dir`, sorted by name, at most 10,000 entries, symlinks
+  listed as links rather than followed.
+- **The kernel's answers as codes.** `EXDEV` (`..` out, an absolute
+  symlink, a link out) and `EAGAIN` after the retries are
+  `outside_roots`, whose `valid` lists the roots to 250 characters;
+  `ENOENT` (a dangling link included) and `ELOOP` are `not_found`;
+  `ENOTDIR` is `not_a_folder`; `EACCES` is `not_found`, "can't be read".
+  No error carries a name from the file system, only the argument's.
+- **Media reads what was opened.** An `Opened` holds the descriptor and
+  lends media a `Source { open: /proc/self/fd/N, name }` for as long as
+  it is borrowed, so the number can't come to name another call's file.
+  Opening that path reopens the file itself, not a name in the folder:
+  a file renamed, replaced or swapped for a symlink after the check is
+  not what is read. probe and detection read `open`, and report and
+  match extensions on `name`, the agent's path (A1.4 brings the video
+  opener). FFmpeg's confinement (D24) applies unchanged on top.
+- **Outputs.** Only with `--allow-write`, else `write_refused`. The
+  output's folder is opened beneath the write root (`O_PATH`), and the
+  file created in it `O_WRONLY | O_CREAT | O_EXCL`, mode 0644: anything
+  at the name, a symlink or a dangling one included, is
+  `output_exists`, and nothing is followed or replaced. A path outside
+  the write root is `outside_roots`. The file is unlinked through its
+  folder's descriptor unless the op keeps it, so a failed or cancelled
+  call leaves nothing for a retry to trip on.
+
+Why: a string check on paths fails to `..` races, symlinks and
+`/proc/self/fd`, and FFmpeg, probe's box reader and detection all open
+by path. `openat2` makes the kernel enforce the root on every open, and
+the `/proc` path makes every later open of the same call read the same
+file without changing a `MediaBackend` signature.
+
+What the roots don't do: they limit what Spherecut opens for an agent,
+not what the agent can do. An agent that runs commands can read the
+user's files without Spherecut; the roots keep Spherecut from being a
+way around the agent's own sandbox (`docs/agents.md`, A1.7).
+
+Tests: `crates/agent/tests/roots.rs` (`..`, absolute paths out, symlinks
+out and in, dangling and looping links, `/proc/self/fd/N`, a FIFO
+without blocking, a folder as a file, a file swapped after the open and
+one swapped for a symlink between calls, a symlinked root, two roots,
+bad roots, the error's size with forty roots, listings, and every
+output case), and `crates/media/tests/source.rs` (probe reads `open`
+and names `name`, in its report and its errors).
+
+Rejected: a custom `AVIOContext` over the descriptor for FFmpeg and
+positional reads for the box reader, which would be cleaner but change
+every `MediaBackend` signature, the fakes and the GUI for the same
+guarantee.
+
+Revisit if: `/proc` can't be relied on (a sandbox without it), or M2's
+projects open media through the same path.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360
@@ -6704,9 +6968,6 @@ thread.
   license, allow that one git revision in `deny.toml`, or write our own
   parsers from `docs/formats/`. To decide at M4, after checking its license
   and what we actually need from it.
-- **MCP layer, tool schemas, openat2** for agent integration: rmcp or our
-  own layer, schemars or hand-written, rustix or `libc`. To decide at A1
-  (D23).
 - **Attach socket** (A3): Pat to confirm that a local socket the GUI
   opens only when Pat turns attach on (mode 0600, Pat's user only) is
   IPC, not the network access Pat's rule forbids. Before A3 (D23).

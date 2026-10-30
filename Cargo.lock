@@ -3064,6 +3064,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "spherecut-agent"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "spherecut-core",
+ "spherecut-media",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "spherecut-app"
 version = "0.1.0"
 dependencies = [
@@ -3108,8 +3122,10 @@ dependencies = [
  "clap",
  "glam",
  "libc",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
+ "spherecut-agent",
  "spherecut-app",
  "spherecut-core",
  "spherecut-media",

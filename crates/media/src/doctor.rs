@@ -528,7 +528,31 @@ const FEDORA_PACKAGES: &[&str] = &[
     "mesa-vulkan-drivers-freeworld",
 ];
 
+/// What [`run_with`] may do besides decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    /// Ask the package manager which packages are installed (`rpm -q` on
+    /// Fedora, a child process), so that a fix says "swap" where a
+    /// package must be replaced. The agent's doctor doesn't: no agent
+    /// tool starts a process (PLAN A1), so its fixes say "install", and
+    /// `spherecut doctor` in a terminal gives the exact commands.
+    pub query_packages: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            query_packages: true,
+        }
+    }
+}
+
+/// [`run_with`] the default options, as `spherecut doctor` and the GUI do.
 pub fn run(render_node: &Path) -> DoctorReport {
+    run_with(render_node, Options::default())
+}
+
+pub fn run_with(render_node: &Path, options: Options) -> DoctorReport {
     spherecut_core::may_block("running the doctor's checks");
     init();
     let distro = Distro::detect();
@@ -581,7 +605,7 @@ pub fn run(render_node: &Path) -> DoctorReport {
         render_node: node,
         ..gpu_vendor(render_node, &vulkan_devices)
     };
-    let env = Env::detect(render_node, distro, vulkan_error);
+    let env = Env::detect(render_node, distro, vulkan_error, options);
     let zero_copy = crate::backend::zero_copy_from_env(|k| std::env::var(k).ok());
     let mut report = DoctorReport {
         distro,
@@ -873,7 +897,12 @@ struct Env {
 }
 
 impl Env {
-    fn detect(render_node: &Path, distro: Distro, vulkan_error: Option<String>) -> Self {
+    fn detect(
+        render_node: &Path,
+        distro: Distro,
+        vulkan_error: Option<String>,
+        options: Options,
+    ) -> Self {
         let node_error = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -883,7 +912,7 @@ impl Env {
         Env {
             node_error,
             other_nodes: other_render_nodes(render_node),
-            installed: if distro == Distro::Fedora {
+            installed: if distro == Distro::Fedora && options.query_packages {
                 rpm_installed(FEDORA_PACKAGES)
             } else {
                 BTreeSet::new()
