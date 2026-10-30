@@ -120,6 +120,7 @@ pub fn parts(gpu: &Gpu, backend: Arc<dyn MediaBackend>) -> AppParts {
         doctor: DoctorRun::Never,
         list_dirs: false,
         settings: Settings::default(),
+        cache_override: None,
         tree: None,
         open: Vec::new(),
     }

@@ -48,6 +48,9 @@
 //! **The budget**: set when the thread starts, and rechecked every 5 s
 //! against the memory available, with the cache's own bytes counted as
 //! free ([`crate::budget::recheck`]).
+//!
+//! **The memory**, for the overlay: the process's resident set and minor
+//! faults, and wgpu's allocator report, read once a second.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -66,7 +69,7 @@ use spherecut_render::{
 
 use crate::budget::{self, CacheBudget};
 use crate::cache::WAIT_SLICE;
-use crate::perf::{Counter, Stage};
+use crate::perf::{self, Counter, MemoryStats, Stage};
 use crate::player::{PlayerError, PlayerEvent};
 use crate::shared::{BudgetStatus, Landed, Place, Shared, frames_between, time_of};
 use crate::slots::{SlotFrame, SlotState};
@@ -77,6 +80,9 @@ pub const BUDGET_RECHECK: Duration = Duration::from_secs(5);
 /// How often the cache's numbers are read for the counters and the "too
 /// small" notice.
 const STATS_EVERY: Duration = Duration::from_millis(250);
+
+/// How often the memory is read for the overlay.
+const MEMORY_EVERY: Duration = Duration::from_secs(1);
 
 /// How long the thread waits at shutdown for the GPU to finish its work.
 const FINISH: Duration = Duration::from_secs(1);
@@ -119,6 +125,9 @@ struct State {
     waits: u64,
     budget_at: Instant,
     stats_at: Instant,
+    memory_at: Instant,
+    /// The minor faults at the last reading, and when.
+    faults: Option<(Instant, u64)>,
     /// The GPU failed: nothing more is uploaded.
     lost: bool,
 }
@@ -134,9 +143,12 @@ impl UploadThread {
             waits: 0,
             budget_at: Instant::now(),
             stats_at: Instant::now(),
+            memory_at: Instant::now(),
+            faults: None,
             lost: false,
         };
         self.recheck(&mut st);
+        self.memory(&mut st);
         while !self.shared.is_shut_down() {
             if !self.commands(&mut st) {
                 break;
@@ -146,6 +158,9 @@ impl UploadThread {
             }
             if st.stats_at.elapsed() >= STATS_EVERY {
                 self.cache_stats(&mut st);
+            }
+            if st.memory_at.elapsed() >= MEMORY_EVERY {
+                self.memory(&mut st);
             }
             let seen = self.shared.cache.generation();
             let did = !st.lost && self.pass(&mut st);
@@ -216,6 +231,32 @@ impl UploadThread {
                 frame_bytes: stats.frame_bytes,
             });
         }
+    }
+
+    /// Read the process's memory and the GPU's into the status.
+    fn memory(&self, st: &mut State) {
+        let now = Instant::now();
+        st.memory_at = now;
+        let read = |path: &str| std::fs::read_to_string(path).ok();
+        let faults = read("/proc/self/stat")
+            .as_deref()
+            .and_then(perf::minor_faults_of);
+        let per_s = st.faults.zip(faults).and_then(|((at, before), n)| {
+            let dt = now.duration_since(at).as_secs_f64();
+            (dt > 0.0).then(|| n.saturating_sub(before) as f64 / dt)
+        });
+        if let Some(n) = faults {
+            st.faults = Some((now, n));
+        }
+        let report = self.gpu.device.generate_allocator_report();
+        let memory = MemoryStats {
+            rss: read("/proc/self/status").as_deref().and_then(perf::rss_of),
+            minor_faults: faults,
+            minor_faults_per_s: per_s,
+            gpu_allocated: report.as_ref().map(|r| r.total_allocated_bytes),
+            gpu_reserved: report.as_ref().map(|r| r.total_reserved_bytes),
+        };
+        self.shared.status().memory = Some(memory);
     }
 
     /// Free what isn't wanted and upload the next frame that is. Whether

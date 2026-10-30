@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand};
 mod check;
 mod compat;
 mod gen_media;
+mod gui_report;
 mod hw_test;
 mod machine;
 mod perf_clips;

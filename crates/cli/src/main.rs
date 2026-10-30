@@ -53,6 +53,31 @@ struct GuiCli {
     /// SPHERECUT_ADAPTER.
     #[arg(long)]
     adapter: Option<String>,
+    /// For hw-test: play this clip, write what was measured to
+    /// --smoke-out as JSON (spherecut.smoke/1), and close.
+    #[arg(
+        long,
+        hide = true,
+        value_name = "CLIP",
+        requires = "smoke_out",
+        conflicts_with = "files"
+    )]
+    smoke: Option<PathBuf>,
+    /// How long the smoke run plays, from the clip's first frame.
+    #[arg(long, hide = true, value_name = "SECONDS", requires = "smoke", default_value_t = 20.0, value_parser = smoke_seconds)]
+    smoke_seconds: f64,
+    #[arg(long, hide = true, value_name = "JSON", requires = "smoke")]
+    smoke_out: Option<PathBuf>,
+    /// A screenshot at the run's end, at most 960 pixels wide.
+    #[arg(long, hide = true, value_name = "PNG", requires = "smoke")]
+    smoke_screenshot: Option<PathBuf>,
+}
+
+fn smoke_seconds(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() && v > 0.0 => Ok(v),
+        _ => Err(format!("{s:?} isn't a number of seconds above 0")),
+    }
 }
 
 fn cache_mib(s: &str) -> Result<spherecut_playback::CacheBudget, String> {
@@ -284,6 +309,12 @@ fn gui(args: GuiCli) -> Exit {
             .adapter
             .as_deref()
             .map(spherecut_render::AdapterChoice::parse),
+        smoke: args.smoke.map(|clip| spherecut_app::smoke::SmokeArgs {
+            clip,
+            seconds: args.smoke_seconds,
+            out: args.smoke_out.unwrap_or_default(),
+            screenshot: args.smoke_screenshot,
+        }),
     };
     match spherecut_app::run(gui) {
         Ok(()) => Exit::Ok,

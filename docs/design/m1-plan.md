@@ -251,6 +251,54 @@ the sections below, they win.
     minor faults, huge pages or not; in malloc's memory they ran at
     full speed in 20 runs of 20. The pool's key gains the device's
     type.
+19. **Slice 8 as built** (D37, D40). Where it differs from sections
+    7.8, 10, 12.4 and 14's slice 8:
+    - 7.8: a camera's raw file opens on its best stream, as every file
+      does, and opens again with each lens's stream once the Info
+      pane's probe finds two or more video streams of one size (cover
+      art aside). `Player::open_streams` needs the streams' indices,
+      which only the probe gives, and waiting for it would delay every
+      file's first frame. The notice says "its 2 lenses side by side",
+      with "stitching arrives in M3". Each column has its own target
+      and scissor, since the encode pass blacks out the rest of its
+      viewport.
+    - 10: RSS is `VmRSS` from `/proc/self/status`, not `statm`'s
+      pages.
+    - 12.4, item 5: `gui_smoke` is the cli crate's
+      (`crates/cli/tests/tier2_gui.rs`), not app's, since it runs the
+      `spherecut` binary cargo builds beside it (release under
+      hw-test, debug under `--quick`), and kills a run past 120 s.
+      - Finding the session: with `XDG_RUNTIME_DIR` unset,
+        `/run/user/<uid>`, which the child then gets too; with two
+        sockets it skips and names them. `testkit::tier2::
+        require_graphical_session` returns the child's environment and
+        where it came from, which the report's "GUI display" row shows.
+      - The expected UI frames are the monitor's refresh rate (winit's,
+        read each pass) times the seconds played, or the passes when
+        winit has no rate. The 90 % gate, when it fails, is the only
+        failure reported, so a hidden session reads as one and not as
+        drops.
+      - The software-decode gate is per clip, against doctor's VA-API
+        check for its profile (HEVC Main, or Main 10 from a 10-bit
+        pixel format), so a machine whose VA-API decodes Main but not
+        Main 10 fails only the 8-bit clip.
+      - The seam clip is synth's, made by the test (3840×1920 HEVC,
+        300 frames); the X5 raw view is the largest dual-fisheye
+        sample with two video streams.
+      - The JSON has more than the list: each stage's samples, missed,
+        p50, p95, p99 and max over the whole run
+        (`PerfStats::samples_after`, not the rings' last 256), the
+        presented share, each stream's decoder and fallback, memory and
+        the screenshot's size, in the CLI's envelope as
+        `spherecut.smoke/1` (`docs/cli-json.md`). No first frame within
+        60 s is `timed_out`, a new code.
+      - The screenshots go to `SPHERECUT_GUI_OUT` (hw-test's
+        `target/hw-gui`) with a `gui-smoke.json` summary, and hw-test
+        copies them beside the report as `<stem>-gui-<n>.png`, which is
+        `<host>-<commit>-gui-<n>.png` under the default `--out`.
+    - Section 14's slice 8: "D35 final" is D37 (amendment 1), and D40
+      records the slice's own choices. The cached ranges came with
+      slice 7 (amendment 16).
 
 ## 1. Summary
 

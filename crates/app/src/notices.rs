@@ -15,6 +15,8 @@ pub enum NoticeKind {
     AudioFailed,
     CpuAdapter,
     NotEquirect,
+    /// A camera's raw file, its lenses side by side.
+    Lenses,
     Stereo,
     Hdr,
     Pose,

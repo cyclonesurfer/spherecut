@@ -22,10 +22,13 @@ use spherecut_sphere::grab::{GrabFit, GrabStart};
 
 use crate::jobs::{Job, Poll};
 use crate::notices::{Notice, NoticeKind, Notices};
+use crate::overlay::OverlayState;
 use crate::panes::{FilesPane, InfoPane};
+use crate::settings::{self, Settings};
+use crate::smoke::SmokeDriver;
 use crate::transport::{self, Scrub};
 use crate::view::{Preset, ViewState, ZOOM_PER_POINT, ZOOM_STEP};
-use crate::viewer::{self, DrawKey, ViewerCallback};
+use crate::viewer::{self, DrawKey, RawDraw, RawKey, ViewerCallback};
 
 /// The panes the tiles hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -65,29 +68,6 @@ pub fn default_tree() -> Tree<Pane> {
     Tree::new(egui::Id::unique("spherecut-tiles"), root, tiles)
 }
 
-/// What the app keeps between runs (eframe persistence). Slice 8 adds
-/// the cache, decoder, slots and A/V settings.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-pub struct Settings {
-    /// The Files pane's directory.
-    pub last_dir: Option<PathBuf>,
-    /// The anisotropic filter, else the isotropic one.
-    pub anisotropic: bool,
-    /// The overlay (F3).
-    pub overlay: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Settings {
-            last_dir: None,
-            anisotropic: true,
-            overlay: false,
-        }
-    }
-}
-
 /// How the startup doctor check runs.
 #[derive(Debug)]
 pub enum DoctorRun {
@@ -114,6 +94,9 @@ pub struct AppParts {
     /// don't want the file system).
     pub list_dirs: bool,
     pub settings: Settings,
+    /// What set the cache's budget over the settings (`--cache-mb`, the
+    /// environment), if anything did.
+    pub cache_override: Option<String>,
     pub tree: Option<Tree<Pane>>,
     /// Files to open, from the command line: the first opens.
     pub open: Vec<PathBuf>,
@@ -126,6 +109,7 @@ impl std::fmt::Debug for AppParts {
             .field("config", &self.config)
             .field("doctor", &self.doctor)
             .field("settings", &self.settings)
+            .field("cache_override", &self.cache_override)
             .field("open", &self.open)
             .finish_non_exhaustive()
     }
@@ -160,6 +144,9 @@ pub struct AppState {
     pub files: FilesPane,
     pub info: InfoPane,
     pub settings: Settings,
+    /// The Settings window is open.
+    pub settings_open: bool,
+    pub cache_override: Option<String>,
     pub snapshot: PlayerSnapshot,
     /// Each stream's info, once it opened.
     pub streams: Vec<Option<VideoStreamInfo>>,
@@ -172,6 +159,7 @@ pub struct AppState {
     pub presented: Option<Presented>,
     /// `logic` ran for the coming `ui`, as eframe runs it before each.
     pub logic_ran: bool,
+    pub overlay: OverlayState,
 }
 
 /// The app.
@@ -179,6 +167,8 @@ pub struct AppState {
 pub struct SpherecutApp {
     pub tree: Tree<Pane>,
     pub state: AppState,
+    /// `--smoke`: the run that drives the app, then closes it.
+    pub smoke: Option<SmokeDriver>,
 }
 
 impl SpherecutApp {
@@ -194,6 +184,7 @@ impl SpherecutApp {
             doctor,
             list_dirs,
             settings,
+            cache_override,
             tree,
             open,
         } = parts;
@@ -258,11 +249,7 @@ impl SpherecutApp {
             }
         };
         let mut view = ViewState::default();
-        view.filter = if settings.anisotropic && gpu.caps.anisotropy {
-            Filter::Anisotropic
-        } else {
-            Filter::Isotropic
-        };
+        view.filter = settings::filter(&settings, gpu.caps.anisotropy);
         let files = FilesPane::new(settings.last_dir.clone(), list_dirs);
         let mut state = AppState {
             gpu,
@@ -278,12 +265,15 @@ impl SpherecutApp {
             files,
             info: InfoPane::default(),
             settings,
+            settings_open: false,
+            cache_override,
             snapshot: PlayerSnapshot::default(),
             streams: Vec::new(),
             viewer_rect: None,
             shown: None,
             presented: None,
             logic_ran: false,
+            overlay: OverlayState::default(),
         };
         if let Some(path) = open.into_iter().next() {
             state.open(path);
@@ -291,6 +281,7 @@ impl SpherecutApp {
         SpherecutApp {
             tree: tree.unwrap_or_else(default_tree),
             state,
+            smoke: None,
         }
     }
 
@@ -306,6 +297,9 @@ impl SpherecutApp {
         s.presented = s.player.as_ref().and_then(|p| p.present(Instant::now()));
         s.request_repaint(ctx);
         s.logic_ran = true;
+        if let Some(smoke) = &mut self.smoke {
+            smoke.logic(s);
+        }
     }
 
     /// The whole UI, for one frame: the menu bar, the notices and the
@@ -335,7 +329,11 @@ impl SpherecutApp {
             };
             self.tree.ui(&mut behavior, ui);
         });
+        settings::window(&mut self.state, ui.ctx());
         self.state.request_repaint(ui.ctx());
+        if let Some(smoke) = &mut self.smoke {
+            smoke.ui(&mut self.state, ui.ctx());
+        }
     }
 
     /// The player's threads are told to stop; [`crate::run`] joins them
@@ -358,6 +356,7 @@ impl SpherecutApp {
         {
             threads.extend(job.into_thread());
         }
+        threads.extend(self.smoke.as_mut().and_then(SmokeDriver::take_thread));
         threads
     }
 }
@@ -423,9 +422,58 @@ impl AppState {
         };
         let events = player.events();
         self.snapshot = player.snapshot();
+        self.overlay.tick(Instant::now(), &self.snapshot.perf);
         for e in events {
             self.event(e);
         }
+        if let Some((path, lenses)) = self.info.take_lenses()
+            && lenses.len() >= 2
+            && self.snapshot.path.as_ref() == Some(&path)
+        {
+            self.open_lenses(path, lenses);
+        }
+    }
+
+    /// The open file again, with each of its lenses' streams: a camera's
+    /// raw file, which the probe found after the file opened on its best
+    /// stream alone. Its notices stay.
+    fn open_lenses(&mut self, path: PathBuf, lenses: Vec<usize>) {
+        let Some(player) = &self.player else {
+            return;
+        };
+        tracing::info!(?lenses, "opening the lenses of {}", path.display());
+        self.notices.push(
+            Notice::new(
+                NoticeKind::Lenses,
+                Severity::Info,
+                format!(
+                    "A camera's raw file: its {} lenses side by side",
+                    lenses.len()
+                ),
+            )
+            .impact("stitching arrives in M3"),
+        );
+        self.streams.clear();
+        player.open_streams(path, lenses.into_iter().map(Some).collect());
+    }
+
+    /// The viewer's columns: one a video stream.
+    pub fn columns(&self) -> usize {
+        self.snapshot.streams.len().max(self.streams.len()).max(1)
+    }
+
+    /// Whether the viewer shows the raw view (section 7.8): each stream's
+    /// picture flat, for a source that isn't equirect or a camera's raw
+    /// file's lenses, until M3 stitches them.
+    pub fn raw_view(&self) -> bool {
+        use spherecut_media::spherical::Projection;
+        self.columns() > 1
+            || self.streams.iter().flatten().any(|i| {
+                !matches!(
+                    i.mapping.projection,
+                    None | Some(Projection::Equirect { .. })
+                )
+            })
     }
 
     fn event(&mut self, e: PlayerEvent) {
@@ -567,6 +615,10 @@ impl AppState {
                     self.files.focus = true;
                     ui.close();
                 }
+                if ui.button("Settings…").clicked() {
+                    self.settings_open = true;
+                    ui.close();
+                }
                 if ui.button("Quit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -689,6 +741,18 @@ impl AppState {
         }
     }
 
+    /// The settings into the view and the player, after the window
+    /// changed them.
+    pub fn apply_settings(&mut self) {
+        self.view.filter = settings::filter(&self.settings, self.gpu.caps.anisotropy);
+        if let Some(p) = &self.player {
+            let mut config = p.config();
+            self.settings
+                .apply(&mut config, self.cache_override.is_some());
+            p.set_config(config);
+        }
+    }
+
     pub fn toggle_play(&mut self) {
         let Some(p) = &self.player else { return };
         if self.snapshot.want_play {
@@ -776,48 +840,24 @@ impl AppState {
         self.viewer_rect = Some(rect);
         let vp = viewer::viewport(rect, ui.ctx());
         let free = ui.input(|i| i.modifiers.ctrl);
-        if response.drag_started_by(egui::PointerButton::Primary)
-            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
-        {
-            self.view.cancel_morph();
-            self.drag = Some(self.view.grab(viewer::lens_point(origin, &vp, ppp)));
-        }
-        if response.dragged_by(egui::PointerButton::Primary)
-            && let (Some(mut start), Some(pos)) = (self.drag, response.interact_pointer_pos())
-        {
-            let fit = self
-                .view
-                .drag_to(&mut start, viewer::lens_point(pos, &vp, ppp), free);
-            self.drag = Some(start);
-            self.last_fit = Some(fit);
-        }
-        if response.drag_stopped() {
+        // The raw view's pictures are flat: nothing to look around in.
+        let raw = self.raw_view();
+        if raw {
             self.drag = None;
-        }
-        if response.hovered()
-            && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
-        {
-            let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
-            let p = viewer::lens_point(pos, &vp, ppp);
-            if scroll != 0.0 {
-                self.view
-                    .zoom((ZOOM_PER_POINT * f64::from(scroll)).exp(), p);
-            }
-            if zoom != 1.0 {
-                self.view.zoom(f64::from(zoom), p);
-            }
+        } else {
+            self.look_ui(ui, &response, &vp, ppp, free);
         }
         if response.double_clicked() {
             self.toggle_play();
         }
 
-        // What to draw: the first stream's frame on screen (the raw view of
-        // a two-lens source is slice 8's).
+        // What to draw: the first stream's frame on screen, projected, or
+        // in the raw view every stream's, flat.
         let presented = self.presented.take();
-        let shown = presented.as_ref().and_then(|p| p.frames.first());
+        let frames = presented.as_ref().map_or(&[][..], |p| &p.frames[..]);
         let view = ViewParams::new(self.view.q, self.view.lens);
         let filter = self.view.filter;
-        let shown = shown.map(|s| {
+        let shown = frames.first().map(|s| {
             (
                 s.gpu.clone(),
                 DrawKey {
@@ -829,11 +869,82 @@ impl AppState {
             )
         });
         self.shown = shown.as_ref().map(|(_, k)| k.clone());
+        let raw = if raw {
+            frames
+                .iter()
+                .map(|s| RawDraw {
+                    column: s.stream,
+                    frame: s.gpu.clone(),
+                    key: RawKey {
+                        slot: s.slot,
+                        frame: s.frame,
+                        filter,
+                    },
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let shown = shown.filter(|_| raw.is_empty());
+        let perf = self.player.as_ref().map(|p| p.perf().clone());
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
-            ViewerCallback { rect, shown },
+            ViewerCallback {
+                rect,
+                shown,
+                raw,
+                columns: self.columns(),
+                perf,
+            },
         ));
         drop(presented);
+        self.picture_notes(ui, &response, rect);
+    }
+
+    /// Drag to look around, and zoom with the wheel or a pinch.
+    fn look_ui(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        vp: &egui::epaint::ViewportInPixels,
+        ppp: f32,
+        free: bool,
+    ) {
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+        {
+            self.view.cancel_morph();
+            self.drag = Some(self.view.grab(viewer::lens_point(origin, vp, ppp)));
+        }
+        if response.dragged_by(egui::PointerButton::Primary)
+            && let (Some(mut start), Some(pos)) = (self.drag, response.interact_pointer_pos())
+        {
+            let fit = self
+                .view
+                .drag_to(&mut start, viewer::lens_point(pos, vp, ppp), free);
+            self.drag = Some(start);
+            self.last_fit = Some(fit);
+        }
+        if response.drag_stopped() {
+            self.drag = None;
+        }
+        if response.hovered()
+            && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
+        {
+            let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+            let p = viewer::lens_point(pos, vp, ppp);
+            if scroll != 0.0 {
+                self.view
+                    .zoom((ZOOM_PER_POINT * f64::from(scroll)).exp(), p);
+            }
+            if zoom != 1.0 {
+                self.view.zoom(f64::from(zoom), p);
+            }
+        }
+    }
+
+    /// The picture's label, its placeholder, and the overlay over it.
+    fn picture_notes(&mut self, ui: &egui::Ui, response: &egui::Response, rect: egui::Rect) {
         let placeholder = self.placeholder();
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
@@ -852,7 +963,9 @@ impl AppState {
             );
         }
         if self.settings.overlay {
-            crate::panes::overlay_ui(self, ui, rect);
+            crate::overlay::overlay_ui(self, ui, rect);
+        } else {
+            self.overlay.last = None;
         }
     }
 }

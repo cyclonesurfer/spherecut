@@ -104,10 +104,15 @@ pub enum Counter {
     FramesImported,
     VulkanCopies,
     ImportsRefused,
+    /// Draws of the viewer that projected its frame, and those that only
+    /// encoded the projection already in its target (UI thread, section
+    /// 7.3).
+    Projected,
+    EncodedOnly,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 13] = [
+    pub const ALL: [Counter; 15] = [
         Counter::FramesDecoded,
         Counter::FramesUploaded,
         Counter::FramesShown,
@@ -121,6 +126,8 @@ impl Counter {
         Counter::FramesImported,
         Counter::VulkanCopies,
         Counter::ImportsRefused,
+        Counter::Projected,
+        Counter::EncodedOnly,
     ];
 
     pub fn name(self) -> &'static str {
@@ -138,6 +145,8 @@ impl Counter {
             Counter::FramesImported => "frames_imported",
             Counter::VulkanCopies => "vulkan_copies",
             Counter::ImportsRefused => "imports_refused",
+            Counter::Projected => "projected",
+            Counter::EncodedOnly => "encoded_only",
         }
     }
 }
@@ -228,6 +237,17 @@ impl PerfStats {
         self.rings[stage as usize].samples().1
     }
 
+    /// The samples of `stage` recorded after the first `seen`, as far as
+    /// the ring still keeps them, oldest first, and how many were ever
+    /// recorded: a reader that passes back that count each time gathers
+    /// every sample, but for those it was a ring's worth too late for
+    /// (the smoke run).
+    pub fn samples_after(&self, stage: Stage, seen: u64) -> (u64, Vec<f32>) {
+        let (recorded, kept) = self.rings[stage as usize].samples();
+        let new = recorded.saturating_sub(seen).min(kept.len() as u64) as usize;
+        (recorded, kept[kept.len() - new..].to_vec())
+    }
+
     pub fn summary(&self, stage: Stage) -> StageSummary {
         let (recorded, samples) = self.rings[stage as usize].samples();
         StageSummary::of(recorded, samples)
@@ -299,6 +319,38 @@ impl PerfSnapshot {
     }
 }
 
+/// The process's memory and the GPU's, read by the upload thread once a
+/// second (M1 plan section 10).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MemoryStats {
+    /// The resident set: `VmRSS` in `/proc/self/status`.
+    pub rss: Option<u64>,
+    /// Minor page faults since the process started (`/proc/self/stat`),
+    /// and per second since the reading before.
+    pub minor_faults: Option<u64>,
+    pub minor_faults_per_s: Option<f64>,
+    /// What wgpu's allocator has handed out of its blocks, and the
+    /// blocks' size (`Device::generate_allocator_report`); `None` when
+    /// the backend keeps no report.
+    pub gpu_allocated: Option<u64>,
+    pub gpu_reserved: Option<u64>,
+}
+
+/// `VmRSS` from the text of `/proc/self/status`, in bytes.
+pub fn rss_of(status: &str) -> Option<u64> {
+    let kb = status.lines().find_map(|l| l.strip_prefix("VmRSS:"))?;
+    let kb: u64 = kb.trim().strip_suffix("kB")?.trim_end().parse().ok()?;
+    kb.checked_mul(1024)
+}
+
+/// The minor faults, the 10th field, from the text of `/proc/self/stat`.
+/// The 2nd, the command's name, is in parentheses and may hold spaces
+/// and parentheses itself, so the fields are counted from its last `)`.
+pub fn minor_faults_of(stat: &str) -> Option<u64> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_ascii_whitespace().nth(7)?.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -367,6 +419,28 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_gathers_each_sample_once_or_misses_it() {
+        let p = PerfStats::new();
+        assert_eq!(p.samples_after(Stage::Decode, 0), (0, vec![]));
+        for v in 0..5 {
+            p.record(Stage::Decode, v as f32);
+        }
+        let (seen, got) = p.samples_after(Stage::Decode, 0);
+        assert_eq!((seen, got), (5, vec![0.0, 1.0, 2.0, 3.0, 4.0]));
+        assert_eq!(p.samples_after(Stage::Decode, seen), (5, vec![]));
+        p.record(Stage::Decode, 5.0);
+        assert_eq!(p.samples_after(Stage::Decode, seen), (6, vec![5.0]));
+        // Read a ring and ten too late: the ten oldest are gone.
+        for v in 0..(RING as u32 + 10) {
+            p.record(Stage::Decode, v as f32);
+        }
+        let (seen, got) = p.samples_after(Stage::Decode, 6);
+        assert_eq!(seen, 6 + RING as u64 + 10);
+        assert_eq!(got.len(), RING);
+        assert_eq!(got.first(), Some(&10.0));
+    }
+
+    #[test]
     fn counters_add_up_across_threads() {
         let p = Arc::new(PerfStats::new());
         let threads: Vec<_> = (0..4)
@@ -401,5 +475,22 @@ mod tests {
         let ms = p.record_since(Stage::UploadCpu, start);
         assert!(ms >= 5.0, "{ms}");
         assert_eq!(p.summary(Stage::UploadCpu).last, Some(ms));
+    }
+
+    #[test]
+    fn memory_from_procs_text() {
+        let status = "Name:\tspherecut\nVmPeak:\t 9000 kB\nVmRSS:\t   2048 kB\nRssAnon:\t 1 kB\n";
+        assert_eq!(rss_of(status), Some(2048 * 1024));
+        assert_eq!(rss_of("Name:\tx\n"), None);
+        assert_eq!(rss_of("VmRSS:\t lots kB\n"), None);
+        // A name with spaces and parentheses of its own.
+        let stat = "4242 (a (b) c) S 1 4242 4242 0 -1 4194560 12345 0 7 0 3 1 0 0 20 0 9 0 100";
+        assert_eq!(minor_faults_of(stat), Some(12345));
+        assert_eq!(minor_faults_of("4242 (x) S 1 2"), None);
+        assert_eq!(minor_faults_of("no name"), None);
+        // This process's own.
+        let read = |p| std::fs::read_to_string(p).unwrap();
+        assert!(rss_of(&read("/proc/self/status")).is_some_and(|b| b > 0));
+        assert!(minor_faults_of(&read("/proc/self/stat")).is_some_and(|n| n > 0));
     }
 }

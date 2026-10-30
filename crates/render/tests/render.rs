@@ -159,6 +159,32 @@ fn every_projection_matches_the_reference() {
     }
 }
 
+/// The raw view's flat pass (slice 8): the picture as coded, scaled to
+/// the target, at its own size, minified into the mips and magnified.
+#[test]
+fn the_flat_pass_matches_the_reference() {
+    let f = nv12();
+    let mut r = renderer()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let flat = StillOptions {
+        flat: true,
+        ..StillOptions::default()
+    };
+    let any = views()[0].1;
+    // Measured 52.76, 50.73 and 52.38 dB.
+    for (size, floor) in [((512, 256), 49.0), ((200, 100), 47.0), ((900, 450), 49.0)] {
+        let g = r.render(gpu(), &f, &any, size, &flat).unwrap();
+        let cpu = reference::render_flat(&f, size, &reference::Options::default()).unwrap();
+        check(&format!("flat at {size:?}"), &g, &cpu, floor);
+    }
+    // Negative control: the flat pass isn't the projection.
+    let g = r.render(gpu(), &f, &any, OUT, &flat).unwrap();
+    let (p, _) = measure(&g, &reference::render_trilinear(&f, &any, OUT).unwrap());
+    eprintln!("the flat pass against the projection: {p:.2} dB");
+    assert!(p < 20.0, "the flat pass is {p:.2} dB from the projection");
+}
+
 #[test]
 fn every_layout_matches_the_reference() {
     let v = views()[1].1;

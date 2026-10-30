@@ -282,6 +282,12 @@ stderr:
 | Code | Exit | Meaning |
 |---|---:|---|
 | `no_display` | 3 | No display to open a window on: `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` and `DISPLAY` are all unset or empty (winit's own rule). The message names the commands that work without one |
+| `timed_out` | 1 | The smoke run (below): no frame of the clip within 60 s of opening it |
+
+The smoke run's own failures also use `cancelled` (exit 4: the window
+closed before the run had ended), `io_error` (its JSON can't be written)
+and `internal`, and the player's code when the clip can't be opened or
+played (`not_found`, `gpu_failed`, ...).
 
 `crates/cli/tests/contract.rs` lists every code, so a rename fails a
 test.
@@ -617,6 +623,36 @@ A failed run has no `result`:
 ```json
 {"schema":"spherecut.frame/1","ok":false,"error":{"code":"out_of_range","message":"no frame at 1.5 s: the clip runs from 0 to 1.001 s (its last frame starts at 0.968 s)","path":"grid-hevc10-2997.mp4"},"warnings":[]}
 ```
+
+## `spherecut --smoke <CLIP> --smoke-out <JSON>` (hidden; hw-test's)
+
+The GUI with a script: it opens `CLIP` in a window of 1280 × 800 points
+with the default settings and the overlay on (the stored settings and
+layout are neither read nor written), waits for its first frame, plays
+it for `--smoke-seconds` (20 by default) or to its end, takes a
+screenshot to `--smoke-screenshot <PNG>` if given (at most 960 pixels
+wide, its aspect kept), writes one document to `JSON`, and closes. The
+exit status is the GUI's: 0 when the document says `ok`, and otherwise
+by its code (above). hw-test's `gui_smoke` runs it; the flags are hidden
+from `--help`, and the schema may grow fields as the GUI does.
+
+The document has the envelope above, with the schema `spherecut.smoke/1`
+and no `path` in its `error`. Its `result`:
+
+| Field | What |
+|---|---|
+| `version`, `clip`, `seconds`, `played_s`, `ended` | The build, the clip, the seconds asked for and played, and whether the clip ended first |
+| `adapter` | `name`, `vendor`, `device`, `device_type`, `driver`, `driver_info` as wgpu has them, and `cpu` for lavapipe |
+| `surface_format`, `scale`, `native_scale`, `window`, `viewer`, `refresh_hz` | The window surface's format, pixels a point and the window's own scale, the window's and the viewer's size in pixels, and the monitor's refresh rate (`null` when winit doesn't know it) |
+| `raw_view`, `streams[]` | Whether the viewer showed the raw view; each video stream's `format` (as the overlay has it), `fps`, `decoder` (`software`, `vaapi` or `vulkan`), `fell_back_from` and `decode` (the Info pane's words) |
+| `ui` | `frames` (UI passes) and `passes` (with those eframe ran hidden, without the UI), `expected` (`refresh_hz` × `played_s`, or the passes without a rate) and `presented` (frames over expected), the intervals' `p50`, `p95`, `p99` and `max` in ms, and `hitches` |
+| `frames` | `shown`, `dropped` and `decode_dropped` over the run, and `expected` (the first stream's rate × `played_s`) |
+| `stages` | Per stage (`decode`, `download`, `convert`, `upload_cpu`, `upload_gpu`, `render_cpu`, `render_gpu`, `ui_frame`, `shown_interval`): `samples`, `missed` (recorded but gone from the ring before the next pass read it), and `p50`, `p95`, `p99`, `max` in ms over the whole run, by the nearest rank |
+| `av` | The clock's time less the shown frame's: `median_ms` (signed), `p95_abs_ms` and `samples`; `null` with none |
+| `audio` | `host`, `device`, `rate`, `latency_ms`, `underruns` and `on_system_clock`; `null` without an audio device |
+| `cache`, `slots`, `memory` | The cache's `budget`, `bytes` and `frames`; the GPU slots `active` and `dead`; `rss`, `gpu_allocated` and `gpu_reserved` in bytes |
+| `blocked_on_ui_thread` | Blocking calls on the UI thread: 0 unless something is wrong |
+| `screenshot`, `screenshot_size` | Where the PNG went and its size, or `null` when none was asked for or it couldn't be taken (a warning says why) |
 
 ## A usage error
 

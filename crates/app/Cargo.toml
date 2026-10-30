@@ -13,7 +13,11 @@ egui.workspace = true
 egui-wgpu.workspace = true
 egui_tiles.workspace = true
 glam.workspace = true
+# The smoke run's screenshot, downscaled and written as a PNG.
+image.workspace = true
 serde.workspace = true
+# The smoke run's JSON; the settings' tests.
+serde_json.workspace = true
 spherecut-audio.workspace = true
 spherecut-core.workspace = true
 spherecut-media.workspace = true
@@ -23,13 +27,13 @@ spherecut-sphere.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 wgpu.workspace = true
-# Not used directly: named so that eframe's winit gets `wayland-dlopen`
-# (libwayland loaded at run time) by feature unification (D34).
+# Named so that eframe's winit gets `wayland-dlopen` (libwayland loaded at
+# run time) by feature unification (D34); the smoke run reads the
+# monitor's refresh rate through it.
 winit.workspace = true
 
 [dev-dependencies]
 egui_kittest.workspace = true
-image.workspace = true
 spherecut-synth.workspace = true
 # The fallback notice's test fails a frame "as hardware" (tests/panes.rs);
 # only here, so only test builds have fault injection (DECISIONS D30).

@@ -12,10 +12,13 @@ use spherecut_core::brand;
 use spherecut_core::clock::SystemClock;
 use spherecut_media::backend::FfmpegBackend;
 use spherecut_media::hw::GpuIds;
+use spherecut_playback::budget::BudgetFrom;
 use spherecut_playback::{AudioDevice, CacheBudget, DeviceAudio, Player, PlayerConfig, Repaint};
 use spherecut_render::{AdapterChoice, Gpu, RenderError};
 
-use crate::app::{AppParts, DoctorRun, Pane, Settings, SpherecutApp};
+use crate::app::{AppParts, DoctorRun, Pane, SpherecutApp};
+use crate::settings::Settings;
+use crate::smoke::{Outcome, SmokeArgs, SmokeDriver};
 use crate::viewer::ViewerResources;
 
 /// eframe storage keys.
@@ -40,6 +43,10 @@ pub struct GuiArgs {
     pub cache: Option<CacheBudget>,
     /// `--adapter`, else `SPHERECUT_ADAPTER`, else the first GPU.
     pub adapter: Option<AdapterChoice>,
+    /// `--smoke`: play this clip, write what was measured, and close
+    /// ([`crate::smoke`]). The stored settings and layout are neither
+    /// read nor written.
+    pub smoke: Option<SmokeArgs>,
 }
 
 /// Why the GUI can't run.
@@ -55,6 +62,9 @@ pub enum GuiError {
     Gpu(#[from] RenderError),
     #[error("the window failed: {0}")]
     Window(String),
+    /// The smoke run failed; its document says why, if it was written.
+    #[error("the smoke run failed: {message}")]
+    Smoke { code: &'static str, message: String },
 }
 
 impl GuiError {
@@ -64,6 +74,7 @@ impl GuiError {
             GuiError::NoDisplay => "no_display",
             GuiError::Gpu(e) => e.code(),
             GuiError::Window(_) => "internal",
+            GuiError::Smoke { code, .. } => code,
         }
     }
 }
@@ -123,6 +134,7 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
     let node = spherecut_media::hw::render_node(Some(&ids), None);
     let backend: Arc<FfmpegBackend> = Arc::new(FfmpegBackend::on_node(node.clone()));
     let left = Rc::new(RefCell::new(Leftover::default()));
+    let smoke = args.smoke.clone();
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         // egui's pass then has one sample and no depth, as the viewer's
@@ -135,6 +147,9 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
             .with_decorations(true)
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([480.0, 320.0]),
+        // A smoke run's window is the default size, and leaves the next
+        // run's alone.
+        persist_window: smoke.is_none(),
         wgpu_options: egui_wgpu::WgpuConfiguration {
             wgpu_setup: egui_wgpu::WgpuSetup::Existing(egui_wgpu::WgpuSetupExisting {
                 instance: gpu.instance.clone(),
@@ -157,27 +172,39 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
                 .as_ref()
                 .ok_or("eframe made no wgpu render state")?;
             install(rs, &gpu);
-            let settings: Settings = cc
-                .storage
-                .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
-                .unwrap_or_default();
-            let tree = cc
-                .storage
-                .and_then(|s| eframe::get_value::<egui_tiles::Tree<Pane>>(s, TREE_KEY));
+            // A smoke run plays with the defaults, the overlay on.
+            let storage = cc.storage.filter(|_| args.smoke.is_none());
+            let mut settings = storage
+                .and_then(|s| eframe::get_value::<Settings>(s, SETTINGS_KEY))
+                .unwrap_or_default()
+                .sanitized();
+            let tree =
+                storage.and_then(|s| eframe::get_value::<egui_tiles::Tree<Pane>>(s, TREE_KEY));
+            let mut open = args.files;
+            if let Some(smoke) = &args.smoke {
+                settings.overlay = true;
+                open = vec![smoke.clip.clone()];
+            }
             let ctx = cc.egui_ctx.clone();
             let repaint: Repaint = Arc::new(move || ctx.request_repaint());
             let chosen = CacheBudget::choose(
                 args.cache,
                 CacheBudget::env_value().as_deref(),
-                CacheBudget::Auto,
+                settings.cache(),
             );
             if let Some(e) = &chosen.env_error {
                 tracing::warn!(error = %e, "ignoring {}", spherecut_playback::budget::ENV);
             }
-            let config = PlayerConfig {
+            let mut config = PlayerConfig {
                 cache: chosen.budget,
                 zero_copy,
                 ..PlayerConfig::default()
+            };
+            settings.apply(&mut config, true);
+            let cache_override = match chosen.from {
+                BudgetFrom::Flag => Some("--cache-mb".to_owned()),
+                BudgetFrom::Env => Some(spherecut_playback::budget::ENV.to_owned()),
+                BudgetFrom::Settings => None,
             };
             let audio = DeviceAudio::new(backend.clone(), AudioDevice::Default);
             let app = SpherecutApp::new(AppParts {
@@ -190,15 +217,33 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
                 doctor: DoctorRun::Node(node.path.clone()),
                 list_dirs: true,
                 settings,
+                cache_override,
                 tree,
-                open: args.files,
+                open,
             });
+            let mut app = app;
+            app.smoke = args
+                .smoke
+                .map(|a| SmokeDriver::new(a, format!("{:?}", rs.target_format)));
             Ok(Box::new(EframeApp { app, leftover }))
         }),
     );
     spherecut_core::blocking::unmark_ui_thread();
-    join(std::mem::take(&mut *left.borrow_mut()));
-    result.map_err(|e| GuiError::Window(e.to_string()))
+    let mut left = std::mem::take(&mut *left.borrow_mut());
+    let smoke_outcome = left.smoke.take();
+    join(left);
+    result.map_err(|e| GuiError::Window(e.to_string()))?;
+    match (smoke, smoke_outcome) {
+        (None, _) | (Some(_), Some(Ok(()))) => Ok(()),
+        (Some(_), Some(Err((code, message)))) => Err(GuiError::Smoke { code, message }),
+        (Some(a), None) => Err(GuiError::Smoke {
+            code: "cancelled",
+            message: format!(
+                "the window closed before the run ended; {} may be missing",
+                a.out.display()
+            ),
+        }),
+    }
 }
 
 /// What `on_exit` leaves for [`run`] to join.
@@ -206,6 +251,8 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
 struct Leftover {
     player: Option<Player>,
     threads: Vec<JoinHandle<()>>,
+    /// How the smoke run ended, if there was one and it did.
+    smoke: Option<Outcome>,
 }
 
 #[expect(
@@ -275,11 +322,22 @@ impl eframe::App for EframeApp {
         self.app.logic(ctx);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if let Some(smoke) = &mut self.app.smoke {
+            let hz = frame
+                .winit_window()
+                .and_then(|w| w.current_monitor())
+                .and_then(|m| m.refresh_rate_millihertz())
+                .map(|mhz| f64::from(mhz) / 1000.0);
+            smoke.set_refresh_hz(hz);
+        }
         self.app.ui(ui);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if self.app.smoke.is_some() {
+            return;
+        }
         eframe::set_value(storage, SETTINGS_KEY, &self.app.state.settings);
         eframe::set_value(storage, TREE_KEY, &self.app.tree);
     }
@@ -290,6 +348,7 @@ impl eframe::App for EframeApp {
         if let Ok(mut left) = self.leftover.try_borrow_mut() {
             left.player = self.app.state.player.take();
             left.threads = self.app.take_threads();
+            left.smoke = self.app.smoke.as_ref().and_then(|s| s.outcome().cloned());
         }
     }
 }
@@ -314,6 +373,7 @@ mod tests {
             doctor: DoctorRun::Never,
             list_dirs: false,
             settings: Settings::default(),
+            cache_override: None,
             tree: None,
             open: Vec::new(),
         });

@@ -838,6 +838,88 @@ impl Mp4Writer {
     }
 }
 
+/// Copy the first video stream of each of `srcs` into one new Matroska
+/// file at `dst`, in that order, packets as they are, and return `dst`:
+/// a camera's raw file, which holds one video stream a lens (the X5's
+/// `.insv`), for tests. The packets are read from each source in turn,
+/// so that the muxer interleaves them as it goes. Timestamps are
+/// rounded to the millisecond, as [`remux_to_matroska`]'s are.
+pub fn mux_video_streams(srcs: &[&Path], dst: &Path) -> Result<PathBuf, EncodeError> {
+    may_block("muxing files");
+    init();
+    let mut inputs = Vec::with_capacity(srcs.len());
+    for src in srcs {
+        let ictx = ffi::open_input(src, None)
+            .map_err(|e| crate::MediaError::opening(src, e, |e| e.to_string()))?;
+        inputs.push(ictx);
+    }
+    let dest = follow_links(dst).map_err(|error| EncodeError::Io {
+        path: dst.to_path_buf(),
+        error,
+    })?;
+    let io_err = |error| EncodeError::Io {
+        path: dest.clone(),
+        error,
+    };
+    let tmp = TempFile::create(&dest).map_err(io_err)?;
+    let file = tmp.file().try_clone().map_err(io_err)?;
+    let stream = ctx(ff::format::context::StreamIo::from_write_seek(file), || {
+        format!("opening {}", dest.display())
+    })?;
+    let mut octx = ctx(
+        ff::format::output_to_stream(stream, None, Some("matroska")),
+        || format!("creating {}", dest.display()),
+    )?;
+    // Per input: its video stream's index, the output stream's, and the
+    // input's time base.
+    let mut map = Vec::with_capacity(inputs.len());
+    for (ictx, src) in inputs.iter().zip(srcs) {
+        let ist = ictx
+            .streams()
+            .find(|s| ffi::media_type(&s.parameters()) == ff::media::Type::Video)
+            .ok_or_else(|| EncodeError::Invalid(format!("{} has no video", src.display())))?;
+        let mut ost = ctx(octx.add_stream(None::<ff::Codec>), || {
+            "adding a stream".into()
+        })?;
+        ost.set_parameters(ist.parameters());
+        ost.set_avg_frame_rate(ist.avg_frame_rate());
+        ffi::clear_codec_tag(&mut ost);
+        map.push((ist.index(), ost.index(), ist.time_base()));
+    }
+    ctx(octx.write_header(), || "writing Matroska header".into())?;
+    let out_tb: Vec<ff::Rational> = octx.streams().map(|s| s.time_base()).collect();
+    let mut packets: Vec<_> = inputs.iter_mut().map(|i| i.packets()).collect();
+    let mut open = vec![true; packets.len()];
+    while open.iter().any(|o| *o) {
+        for (i, it) in packets.iter_mut().enumerate() {
+            if !open[i] {
+                continue;
+            }
+            let (from, to, in_tb) = map[i];
+            // The next packet of this input's video stream, if any.
+            let next = it.by_ref().find(|(s, _)| s.index() == from);
+            let Some((_, mut pkt)) = next else {
+                open[i] = false;
+                continue;
+            };
+            pkt.rescale_ts(in_tb, out_tb[to]);
+            pkt.set_position(-1);
+            pkt.set_stream(to);
+            ctx(pkt.write_interleaved(&mut octx), || {
+                "writing Matroska packet".into()
+            })?;
+        }
+    }
+    drop(packets);
+    ctx(octx.write_trailer(), || "writing Matroska trailer".into())?;
+    drop(octx);
+    tmp.persist_replace().map_err(|error| EncodeError::Io {
+        path: dest.clone(),
+        error,
+    })?;
+    Ok(dst.to_path_buf())
+}
+
 /// Copy the video and audio streams of `src` into a new Matroska file at
 /// `dst`, packets as they are, and return `dst`. FFmpeg's Matroska muxer
 /// writes through our own handle, as [`Mp4Writer`] does, and keeps its

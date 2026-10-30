@@ -3075,6 +3075,7 @@ dependencies = [
  "glam",
  "image",
  "serde",
+ "serde_json",
  "spherecut-audio",
  "spherecut-core",
  "spherecut-media",
@@ -4373,7 +4374,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde_json",
  "spherecut-synth",
+ "spherecut-testkit",
 ]
 
 [[package]]

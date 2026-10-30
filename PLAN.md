@@ -124,7 +124,7 @@ new features to agents, which adds a little work to each.
 - [x] Decode, audio and texture upload on workers; UI never blocks on them
       (asserted by a test harness that injects a slow decoder). Bounded frame
       cache sized from available memory, configurable.
-- [ ] Performance overlay: decode ms, upload ms, render ms, dropped frames,
+- [x] Performance overlay: decode ms, upload ms, render ms, dropped frames,
       cache size.
 - [ ] Startup codec/hardware check in the GUI with the doctor's fix
       instructions.

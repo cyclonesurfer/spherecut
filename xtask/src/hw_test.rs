@@ -928,17 +928,29 @@ impl Tier2 {
 
 /// Lists the workspace's Tier 2 tests, runs them all with what they need
 /// from hw-test, and pairs every listed test with its outcome.
-fn run_tier2(quick: bool, samples: &Path, bench_out: &Path, perf_media: Option<&Path>) -> Tier2 {
+fn run_tier2(
+    quick: bool,
+    samples: &Path,
+    bench_out: &Path,
+    gui_out: &Path,
+    perf_media: Option<&Path>,
+) -> Tier2 {
     // A stale file would mix in another run's numbers.
     if let Err(e) = std::fs::remove_file(bench_out)
         && e.kind() != std::io::ErrorKind::NotFound
     {
         eprintln!("warning: could not clear {}: {e}", bench_out.display());
     }
+    // And another run's GUI smoke runs into this report.
+    if let Err(e) = std::fs::remove_dir_all(gui_out)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("warning: could not clear {}: {e}", gui_out.display());
+    }
     list_and_run(
         &workspace_root(),
         quick,
-        &tier2_env(samples, bench_out, perf_media),
+        &tier2_env(samples, bench_out, gui_out, perf_media),
     )
 }
 
@@ -948,12 +960,14 @@ fn run_tier2(quick: bool, samples: &Path, bench_out: &Path, perf_media: Option<&
 fn tier2_env<'a>(
     samples: &'a Path,
     bench_out: &'a Path,
+    gui_out: &'a Path,
     perf_media: Option<&'a Path>,
 ) -> Vec<(&'static str, &'a OsStr)> {
     let mut env = vec![
         ("SPHERECUT_TIER2", OsStr::new("1")),
         ("SPHERECUT_SAMPLES", samples.as_os_str()),
         ("SPHERECUT_BENCH_OUT", bench_out.as_os_str()),
+        ("SPHERECUT_GUI_OUT", gui_out.as_os_str()),
     ];
     if let Some(dir) = perf_media {
         env.push(("SPHERECUT_PERF_MEDIA", dir.as_os_str()));
@@ -1287,6 +1301,11 @@ pub fn run(a: Args) -> Result<()> {
     let target = target_dir(&root);
     let profile = if a.quick { "debug" } else { "release" };
     let bench_out = target.join("hw-bench.tsv");
+    let gui_out = target.join("hw-gui");
+    let report_path = a
+        .out
+        .clone()
+        .unwrap_or_else(|| root.join("hw-reports").join(format!("{host}-{commit}.md")));
 
     eprintln!("==> recording environment");
     let uname = capture("uname", &["-srvm"]);
@@ -1317,6 +1336,43 @@ pub fn run(a: Args) -> Result<()> {
         std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "?".into()),
         std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "?".into())
     );
+    // Where the GUI smoke run opens its window: as gui_smoke finds it.
+    let display = match spherecut_testkit::tier2::graphical_session(
+        |k| std::env::var_os(k),
+        spherecut_testkit::tier2::own_uid(),
+    ) {
+        Ok(s) => format!(
+            "{}: {}",
+            s.found.describe(),
+            s.env
+                .iter()
+                .map(|(k, v)| format!("{k}={}", v.to_string_lossy()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        Err(why) => why,
+    };
+    let pactl = have("pactl").then(|| capture("pactl", &["info"]));
+    let audio_server = pactl
+        .as_ref()
+        .filter(|c| c.ok)
+        .and_then(|c| first_line_containing(&c.text, "Server Name:"))
+        .map_or_else(
+            || "unknown (pactl unavailable or failed)".to_string(),
+            |l| l.trim_start_matches("Server Name:").trim().to_string(),
+        );
+    let mutter = have("gsettings").then(|| {
+        capture(
+            "gsettings",
+            &["get", "org.gnome.mutter", "experimental-features"],
+        )
+    });
+    let hyprland = have("hyprctl").then(|| {
+        (
+            capture("hyprctl", &["version"]),
+            capture("hyprctl", &["monitors"]),
+        )
+    });
     let mesa = first_line_containing(&vulkan.text, "driverInfo")
         .map(|l| {
             l.trim_start_matches("driverInfo")
@@ -1374,7 +1430,9 @@ pub fn run(a: Args) -> Result<()> {
                 clips = perf_clips::ensure(&media_dir);
             }
             let perf_media = (!a.quick).then_some(media_dir.as_path());
-            tier2 = Some(run_tier2(a.quick, &samples, &bench_out, perf_media));
+            tier2 = Some(run_tier2(
+                a.quick, &samples, &bench_out, &gui_out, perf_media,
+            ));
             let exe = target.join(profile).join("spherecut");
             doctor = Some(capture(&exe.to_string_lossy(), &["doctor"]));
             if !a.no_tier1 {
@@ -1420,6 +1478,22 @@ pub fn run(a: Args) -> Result<()> {
     );
     let _ = writeln!(r, "| Kernel | {} |", uname.text.trim());
     let _ = writeln!(r, "| Session | {session} |");
+    let _ = writeln!(r, "| GUI display | {display} |");
+    let _ = writeln!(r, "| Audio server | {audio_server} |");
+    if let Some(m) = &mutter {
+        let _ = writeln!(
+            r,
+            "| GNOME mutter experimental features | {} |",
+            if m.ok { m.text.trim() } else { "not read" }
+        );
+    }
+    if let Some((v, _)) = &hyprland {
+        let _ = writeln!(
+            r,
+            "| Hyprland | {} |",
+            v.text.lines().next().unwrap_or("?").trim()
+        );
+    }
     let _ = writeln!(r, "| GPU (Vulkan) | {gpu} |");
     let _ = writeln!(r, "| Mesa | {mesa} |");
     let _ = writeln!(
@@ -1731,13 +1805,37 @@ pub fn run(a: Args) -> Result<()> {
     }
 
     let _ = writeln!(r, "## GUI smoke run\n");
-    let _ = writeln!(r, "Not available yet (the GUI arrives in M1).\n");
+    let gui_test = match &tier2 {
+        None => "didn't run: there was no build".to_string(),
+        Some(t) => match t.results.iter().find(|(n, _)| n.ends_with("::gui_smoke")) {
+            None => "wasn't listed".to_string(),
+            Some((_, Outcome::Passed)) => "passed".to_string(),
+            Some((_, Outcome::Failed(_))) => {
+                "**FAILED** (its output is under Tier 2 tests)".to_string()
+            }
+            Some((_, Outcome::Skipped(why))) => format!("skipped: {why}"),
+            Some((_, Outcome::LeftOut)) => "was left out".to_string(),
+            Some((_, Outcome::DidNotRun)) => "**did not run**".to_string(),
+        },
+    };
+    r.push_str(&crate::gui_report::section(
+        &gui_out,
+        &report_path,
+        &gui_test,
+    ));
 
     let _ = writeln!(r, "## Raw environment\n");
     if let Some(dc) = &doctor {
         details(&mut r, "spherecut doctor", dc);
     }
     details(&mut r, "rustc", &rustc);
+    if let Some(p) = &pactl {
+        details(&mut r, "pactl info", p);
+    }
+    if let Some((v, m)) = &hyprland {
+        details(&mut r, "hyprctl version", v);
+        details(&mut r, "hyprctl monitors", m);
+    }
     details(&mut r, "GPUs (lspci)", &lspci);
     details(&mut r, "vulkaninfo --summary", &vulkan);
     details(&mut r, "vainfo", &vainfo);
@@ -1767,9 +1865,7 @@ pub fn run(a: Args) -> Result<()> {
         details(&mut r, "test output", &c);
     }
 
-    let out = a
-        .out
-        .unwrap_or_else(|| root.join("hw-reports").join(format!("{host}-{commit}.md")));
+    let out = report_path;
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -2892,12 +2988,14 @@ error: 1 target failed:
         let samples = s.0.join(raw);
         std::fs::create_dir_all(&samples).unwrap();
         let bench = s.0.join(raw).join("hw-bench.tsv");
+        let gui = s.0.join(raw).join("hw-gui");
         let media = s.0.join(raw).join("hw-media");
-        assert_eq!(tier2_env(&samples, &bench, None).len(), 3);
-        let env = tier2_env(&samples, &bench, Some(&media));
+        assert_eq!(tier2_env(&samples, &bench, &gui, None).len(), 4);
+        let env = tier2_env(&samples, &bench, &gui, Some(&media));
         assert_eq!(env[1], ("SPHERECUT_SAMPLES", samples.as_os_str()));
         assert_eq!(env[2], ("SPHERECUT_BENCH_OUT", bench.as_os_str()));
-        assert_eq!(env[3], ("SPHERECUT_PERF_MEDIA", media.as_os_str()));
+        assert_eq!(env[3], ("SPHERECUT_GUI_OUT", gui.as_os_str()));
+        assert_eq!(env[4], ("SPHERECUT_PERF_MEDIA", media.as_os_str()));
         let child = capture_merged(
             &s.0,
             "sh",
