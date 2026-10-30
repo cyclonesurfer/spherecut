@@ -198,7 +198,9 @@ on the machine passed 662 and failed one.
   speed in 20 runs of 20 and every mapping at about half on most runs,
   with ten times the minor faults (`docs/perf.md`). The pool takes
   VA-API's buffers from `av_buffer_alloc` again, keeping huge pages for
-  Vulkan Video's (m1-plan amendment 18); odin runs the fix next.
+  Vulkan Video's (m1-plan amendment 18). With the fix odin ran the 8K
+  modes at 1.39 and 1.02 to 1.04 × in every run, and both 5.7K gates
+  passed as before.
 - **Seeks** on hardware: exact at 5.7K 126 ms median on VA-API and 119
   on Vulkan Video (245 and 244 p95), keyframe 55 and 45; an X5 8K
   lens's exact seek 182 and 183.
@@ -1330,9 +1332,9 @@ default; `SPHERECUT_ZERO_COPY=1` turns it on in the viewer, and
 
 1. **Slice 5b on odin, path B, and huginn's H1.** odin's sixth run
    (PR #8) is clean but for the Tier 1 test now fixed, and slice 5b's
-   path A passed there (PR #9). The download pool's fix for VA-API's
-   8K slowdown runs there next, then path B, FFmpeg's Vulkan Video on
-   wgpu's own device, built on a branch of its own. huginn runs `cargo xtask hw-test --samples
+   path A passed there (PR #9), and so did the download pool's fix for
+   VA-API's 8K slowdown. Path B, FFmpeg's Vulkan Video on wgpu's own
+   device, built on a branch of its own, runs there next. huginn runs `cargo xtask hw-test --samples
    <samples>` at main, without `--quick` so that it makes the perf clips,
    on the power profile Pat edits with. It hasn't run slice 3b's to 6's
    Tier 2 tests: the goldens hold its 8060S, RADV too, to lavapipe's

@@ -604,6 +604,20 @@ per lens. What these add:
   beside mappings isn't known. So the pool takes VA-API's buffers from
   `av_buffer_alloc` again, and keeps the huge-page mappings for Vulkan
   Video's, which they made play (m1-plan amendment 18).
+- With that fix (d8a9054) `bench_samples_realtime_decode` ran twice:
+  VA-API at 1.39 and 1.39 × on the X5's 8K25 and 1.04 and 1.02 × on
+  8K30, every run of three within 0.04 of its median; the 1920² and
+  2880² modes, software and Vulkan Video within 4 % of before, and the
+  LRV proxies within 16 % either way, as their small, fast decodes have
+  moved before. Both 5.7K
+  gates passed, Vulkan Video's rows as in the table above (unthrottled
+  122.5 and 87 fps, nothing dropped) and VA-API's as before (download
+  36 and 148 ms at p50): the noisy 5.7K clips weren't slowed by the
+  mappings, and the copy is still VA-API's wall there. The download
+  pool tests passed; VA-API's 3840×1920 NV12 took 1787 minor faults a
+  frame in two runs of three where earlier runs took 116, the same two
+  states as the 8K decode's, with the pool allocating nothing after
+  the warm-up. The faults are the driver's (amendment 12).
 
 Zero copy, path A (slice 5b, at f3e860d, PR #9,
 `hw-reports/odin-5b-f3e860d/`): `zero_copy_matches_copy_path` passed
