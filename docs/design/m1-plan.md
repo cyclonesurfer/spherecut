@@ -167,6 +167,16 @@ the sections below, they win.
     7600's CPU checks came out at 58.88 to 60.75 dB, the emulation's
     numbers for the fix and above its prediction, `passthrough_exact`
     as on lavapipe, and LLVM 22's llvmpipe put no pixel past 4 LSB.
+14. **Seeking while playing, after H1 on odin** (PR #7, at 43abcda,
+    D30, D34). Section 8.4's step 6 resumes once a Ready slot holds the
+    target and, now, the frames after it (two, or what the stream's
+    share of the slots holds, or as many as reach its end); and step 5's
+    upload thread follows the target with frames that follow on from
+    it, never with frames a seek back left ahead past a gap. Section
+    3.5's download pool maps its buffers on huge pages. odin's real-time
+    benchmarks dropped 4 to 9 frames at every loop point and, at 10
+    bits, ran under real time for 7 s while the cache filled, each new
+    5.7K P010 buffer faulting in 12 000 pages.
 
 ## 1. Summary
 

@@ -4567,7 +4567,14 @@ What:
       so the lenses showed different frames (found by the re-review's
       fixes' tests: [1, 0] while playing, every run, with the second
       decoder 150 ms a frame);
-    - while playing, the frames after it, in order;
+    - while playing, the frames after it, in order, as far as they
+      follow on: linked to the one before, or of another run but
+      starting where it ends (decoding goes on from the end of a run
+      the cache held in a run of its own). *Updated 2026-10-30 by H1:*
+      it took the next frame by time, so after a seek back (each loop
+      of odin's real-time benchmark) the frames the cache held from
+      before it, ahead of the new playhead past a gap, filled the slots
+      while the decoder brought the frames after the seek's one by one;
     - while paused, the next frame, then the one before (by the run
       links), then more frames after.
   - **How.** It uploads one frame per pass, the streams taking turns by
@@ -4611,8 +4618,17 @@ What:
     - to the frame's time after a step, a landing after `at`,
       `AfterLast`, `Truncated` or `KeyframeOnly`;
     - to `at` otherwise.
-    - Playback, if wanted, starts then, or once the audio is `ready`
-      for `PREROLL_AUDIO`. The state is Seeking until it does.
+    - Playback, if wanted, starts once each stream has the frames
+      after its own Ready too, following on from it: `PREROLL_FRAMES`
+      (2), or one fewer than its share of the slots, or as many as
+      reach its end; and once the audio is `ready` for
+      `PREROLL_AUDIO`. After `PREROLL_LIMIT` (2 s) it starts anyway.
+      The state is Seeking until it does. *Updated 2026-10-30 by H1:*
+      it started with the seek's frame alone, so a decoder only just
+      ahead of real time after a seek (Vulkan Video at 5.7K, bringing
+      the frames after a loop's seek every 17 to 33 ms) had each next
+      frame come late, and the presenter passed over 4 to 9 at each of
+      odin's loop points.
     - Showing every stream's new frame together while the old ones stay
       up takes two slots a stream. With fewer live (three slots for two
       streams, or four with one Dead), each stream's new frame goes up
@@ -4894,6 +4910,11 @@ Where this differs from the plan:
 - **The preroll's 2 s limit**, and the switch to `SystemClock` with a
   notice (plan section 8.4, step 6), need audio, and come with slice 6.
   The preroll itself is here, through `AudioOutput::ready`.
+- **The preroll waits for video too.** The plan's step 6 resumes once a
+  Ready slot holds the target. Here it waits for the frames after it
+  as well (above), which cost a seek about two frames' decoding while
+  playing and none paused, since H1 showed the target alone dropping
+  frames after every seek a decoder only just keeps up with.
 - **The hardware device** isn't the player's to choose: the
   `FfmpegBackend` it is given opens the devices. The GUI is to make it
   on the rendering GPU's node (`FfmpegBackend::on_node`), so that
