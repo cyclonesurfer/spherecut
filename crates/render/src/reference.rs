@@ -115,48 +115,23 @@ pub fn render(
     let source = Source::new(frame, &opts.placement)?;
     let linear = frame.color().transfer == Transfer::Linear;
     Ok(per_pixel(size, |px| {
-        let s = source.footprint(view, size, px);
-        let lods = if opts.level0 {
-            [0.0, 0.0]
-        } else {
-            [
-                s.lod[0].clamp(0.0, s.levels[0] - 1.0),
-                s.lod[1].clamp(0.0, s.levels[1] - 1.0),
-            ]
-        };
-        let y = source.planes[0].sample(s.uv, lods[0], source.wraps);
-        let c1 = source
-            .planes
-            .get(1)
-            .map_or([0.0; 2], |p| p.sample(s.cuv, lods[1], source.wraps));
-        let c2 = source
-            .planes
-            .get(2)
-            .map_or([0.0; 2], |p| p.sample(s.cuv, lods[1], source.wraps));
-        let samples = [
-            y[0],
-            c1[0],
-            if source.kind == LayoutKind::SemiPlanar {
-                c1[1]
-            } else {
-                c2[0]
-            },
-            1.0,
-        ];
-        let rgb = source.matrix.map(|row| {
-            (0..4)
-                .map(|i| row[i] * samples[i])
-                .sum::<f64>()
-                .clamp(0.0, 1.0)
-        });
-        if !s.inside {
-            return [0.0; 3];
-        }
-        rgb.map(|v| {
-            // The linear target is f16; the encode pass undoes the EOTF.
-            let lin = round_f16(if linear { v } else { srgb_eotf(v) });
-            srgb_oetf(lin.clamp(0.0, 1.0))
-        })
+        source.shade(&source.footprint(view, size, px), opts.level0, linear)
+    }))
+}
+
+/// What the flat pass draws (`fs_flat`, the GUI's raw view, and
+/// `StillOptions::flat`): `frame`'s picture scaled to `size`, clamped at
+/// its edges, as the encode pass computes it.
+pub fn render_flat(
+    frame: &dyn VideoPlanes,
+    size: (u32, u32),
+    opts: &Options,
+) -> Result<ImageF64, RenderError> {
+    let mut source = Source::new(frame, &opts.placement)?;
+    source.wraps = false;
+    let linear = frame.color().transfer == Transfer::Linear;
+    Ok(per_pixel(size, |px| {
+        source.shade(&source.flat_footprint(size, px), opts.level0, linear)
     }))
 }
 
@@ -277,13 +252,6 @@ impl Source {
         let uv = suv * self.uv_scale + self.uv_offset;
         let g = [gx * self.uv_scale, gy * self.uv_scale];
         let gc = g.map(|v| v * self.chroma_scale);
-        let lod = |g: [DVec2; 2], size: DVec2| {
-            (g[0] * size)
-                .length()
-                .max((g[1] * size).length())
-                .max(1e-30)
-                .log2()
-        };
         let [u0, v0, u1, v1] = self.cover;
         Sampled {
             uv,
@@ -293,6 +261,83 @@ impl Source {
             inside: theta <= PI + 1e-4 && suv.x >= u0 && suv.y >= v0 && suv.x <= u1 && suv.y <= v1,
         }
     }
+
+    /// Where pixel `(i, j)` of the flat pass samples: the picture's uv
+    /// at the pixel's centre over `size`, a pixel's footprint 1 / size.
+    fn flat_footprint(&self, size: (u32, u32), (i, j): (u32, u32)) -> Sampled {
+        let c = pixel::centre(i, j);
+        let (w, h) = (f64::from(size.0), f64::from(size.1));
+        let uv = DVec2::new(c.x / w, c.y / h) * self.uv_scale + self.uv_offset;
+        let g = [
+            DVec2::new(self.uv_scale.x / w, 0.0),
+            DVec2::new(0.0, self.uv_scale.y / h),
+        ];
+        let gc = g.map(|v| v * self.chroma_scale);
+        Sampled {
+            uv,
+            cuv: uv * self.chroma_scale + self.chroma_offset,
+            lod: [lod(g, self.size0), lod(gc, self.size1)],
+            levels: self.levels,
+            inside: true,
+        }
+    }
+
+    /// The colour at `s`, as the encode pass computes it: trilinear
+    /// taps (level 0 alone when `level0`), the matrix, the EOTF unless
+    /// the values are `linear`, f16, then the OETF.
+    fn shade(&self, s: &Sampled, level0: bool, linear: bool) -> [f64; 3] {
+        let lods = if level0 {
+            [0.0, 0.0]
+        } else {
+            [
+                s.lod[0].clamp(0.0, s.levels[0] - 1.0),
+                s.lod[1].clamp(0.0, s.levels[1] - 1.0),
+            ]
+        };
+        let y = self.planes[0].sample(s.uv, lods[0], self.wraps);
+        let c1 = self
+            .planes
+            .get(1)
+            .map_or([0.0; 2], |p| p.sample(s.cuv, lods[1], self.wraps));
+        let c2 = self
+            .planes
+            .get(2)
+            .map_or([0.0; 2], |p| p.sample(s.cuv, lods[1], self.wraps));
+        let samples = [
+            y[0],
+            c1[0],
+            if self.kind == LayoutKind::SemiPlanar {
+                c1[1]
+            } else {
+                c2[0]
+            },
+            1.0,
+        ];
+        let rgb = self.matrix.map(|row| {
+            (0..4)
+                .map(|i| row[i] * samples[i])
+                .sum::<f64>()
+                .clamp(0.0, 1.0)
+        });
+        if !s.inside {
+            return [0.0; 3];
+        }
+        rgb.map(|v| {
+            // The linear target is f16; the encode pass undoes the EOTF.
+            let lin = round_f16(if linear { v } else { srgb_eotf(v) });
+            srgb_oetf(lin.clamp(0.0, 1.0))
+        })
+    }
+}
+
+/// log2 of the longer side of a footprint `g`, in texels of a `size`
+/// texture (`lod` in `shaders/project.wgsl`).
+fn lod(g: [DVec2; 2], size: DVec2) -> f64 {
+    (g[0] * size)
+        .length()
+        .max((g[1] * size).length())
+        .max(1e-30)
+        .log2()
 }
 
 /// One plane's mip chain.

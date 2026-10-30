@@ -4,6 +4,11 @@
 //! projection's time to record and its time on the GPU go to the
 //! player's numbers (section 10), with the draws that projected and
 //! those that only encoded.
+//!
+//! A source that isn't equirect, or has more than one video stream (a
+//! camera's lenses, before M3 stitches them), is shown in the raw view
+//! instead: each stream's picture flat, in a column of its own, as large
+//! as its aspect fits, each in a target of its own size.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +39,77 @@ pub struct DrawKey {
     pub filter: Filter,
 }
 
+/// What a raw view's column drew: the slot and the frame in it, with a
+/// filter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawKey {
+    pub slot: usize,
+    pub frame: SlotFrame,
+    pub filter: Filter,
+}
+
+/// One stream's picture in the raw view, in its column.
+pub struct RawDraw {
+    pub column: usize,
+    /// Held as [`ViewerCallback::shown`]'s is.
+    pub frame: Arc<GpuFrame>,
+    pub key: RawKey,
+}
+
+impl std::fmt::Debug for RawDraw {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawDraw")
+            .field("column", &self.column)
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a raw view column shows: its frame, where in the viewer, and how
+/// large, in pixels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawShown {
+    pub key: RawKey,
+    pub origin: [u32; 2],
+    pub size: (u32, u32),
+}
+
+/// A raw view column's target, where it sits in the viewer, and what it
+/// holds.
+struct RawTarget {
+    target: LinearTarget,
+    origin: [u32; 2],
+    last: Option<RawKey>,
+}
+
+/// Where column `column` of `columns` puts a `picture` in a viewer of
+/// `size` pixels: the columns split the width, and the picture is as
+/// large as its aspect fits in its column, centred. The origin, and the
+/// size, at least 1 × 1.
+pub fn raw_place(
+    size: (u32, u32),
+    columns: usize,
+    column: usize,
+    picture: (u32, u32),
+) -> ([u32; 2], (u32, u32)) {
+    let n = columns.max(1) as u64;
+    let c = (column as u64).min(n - 1);
+    let (w, h) = (u64::from(size.0.max(1)), u64::from(size.1.max(1)));
+    let x0 = w * c / n;
+    let cw = (w * (c + 1) / n - x0).max(1);
+    let (pw, ph) = (u64::from(picture.0.max(1)), u64::from(picture.1.max(1)));
+    let (tw, th) = if pw * h <= ph * cw {
+        ((pw * h / ph).clamp(1, cw), h)
+    } else {
+        (cw, (ph * cw / pw).clamp(1, h))
+    };
+    let int = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+    (
+        [int(x0 + (cw - tw) / 2), int((h - th) / 2)],
+        (int(tw), int(th)),
+    )
+}
+
 /// What the callbacks share, kept in egui-wgpu's `callback_resources`:
 /// inserted once, on the UI thread, before the first frame.
 pub struct ViewerResources {
@@ -45,6 +121,8 @@ pub struct ViewerResources {
     target: Option<LinearTarget>,
     /// What the target holds, if a projection: `paint` encodes it.
     last: Option<DrawKey>,
+    /// The raw view's targets, by column.
+    raw: Vec<Option<RawTarget>>,
     /// `paint` ran since `last` was recorded, so the projection was
     /// submitted with it. Set by `paint`, which has the resources only
     /// shared.
@@ -60,6 +138,7 @@ impl std::fmt::Debug for ViewerResources {
             .field("format", &self.encoder.format())
             .field("target", &self.target.as_ref().map(LinearTarget::extent))
             .field("last", &self.last)
+            .field("raw", &self.raw_last())
             .field("painted", &self.painted)
             .field("projected", &self.projected)
             .field("encoded_only", &self.encoded_only)
@@ -74,6 +153,7 @@ impl ViewerResources {
         let projector = Projector::new(gpu);
         for filter in [Filter::Anisotropic, Filter::Isotropic] {
             projector.prepare(filter, DebugMode::Off);
+            projector.prepare_flat(filter);
         }
         ViewerResources {
             gpu: gpu.clone(),
@@ -82,6 +162,7 @@ impl ViewerResources {
             timers: GpuTimers::new(gpu, "projection"),
             target: None,
             last: None,
+            raw: Vec::new(),
             painted: AtomicBool::new(false),
             projected: 0,
             encoded_only: 0,
@@ -99,6 +180,21 @@ impl ViewerResources {
             .as_ref()
             .filter(|_| self.painted.load(Ordering::Relaxed))
     }
+
+    /// What each raw view column holds, by column.
+    pub fn raw_last(&self) -> Vec<Option<RawShown>> {
+        self.raw
+            .iter()
+            .map(|t| {
+                let t = t.as_ref()?;
+                Some(RawShown {
+                    key: t.last.clone()?,
+                    origin: t.origin,
+                    size: t.target.extent(),
+                })
+            })
+            .collect()
+    }
 }
 
 /// One frame's draw of the viewer.
@@ -109,6 +205,10 @@ pub struct ViewerCallback {
     /// frame keeps the slot from being reused until egui has submitted
     /// this frame and dropped the callback.
     pub shown: Option<(Arc<GpuFrame>, DrawKey)>,
+    /// The raw view's pictures, in `columns` columns; when there are
+    /// any, `shown` isn't drawn.
+    pub raw: Vec<RawDraw>,
+    pub columns: usize,
     /// The player's numbers, which the draw adds to.
     pub perf: Option<Arc<PerfStats>>,
 }
@@ -118,6 +218,15 @@ impl std::fmt::Debug for ViewerCallback {
         f.debug_struct("ViewerCallback")
             .field("rect", &self.rect)
             .field("shown", &self.shown.as_ref().map(|(_, k)| k))
+            .field(
+                "raw",
+                &self
+                    .raw
+                    .iter()
+                    .map(|d| (d.column, &d.key))
+                    .collect::<Vec<_>>(),
+            )
+            .field("columns", &self.columns)
             .finish_non_exhaustive()
     }
 }
@@ -185,6 +294,11 @@ impl CallbackTrait for ViewerCallback {
         // The rounding paint gets, from the surface's real size.
         let vp = ViewportInPixels::from_points(&self.rect, sd.pixels_per_point, sd.size_in_pixels);
         let size = physical(&vp);
+        if !self.raw.is_empty() {
+            self.prepare_raw(r, enc, size, start);
+            return Vec::new();
+        }
+        r.raw.clear();
         let mut resized = false;
         match &mut r.target {
             Some(t) if t.extent() == size => {}
@@ -256,6 +370,11 @@ impl CallbackTrait for ViewerCallback {
         let Some(r) = res.get::<ViewerResources>() else {
             return;
         };
+        if !self.raw.is_empty() {
+            paint_raw(r, &info, pass);
+            r.painted.store(true, Ordering::Relaxed);
+            return;
+        }
         if self.shown.is_none() || r.last.is_none() {
             return;
         }
@@ -269,5 +388,163 @@ impl CallbackTrait for ViewerCallback {
         ];
         r.encoder.draw(pass, target, origin);
         r.painted.store(true, Ordering::Relaxed);
+    }
+}
+
+impl ViewerCallback {
+    /// The raw view's `prepare`: each column's target made or resized to
+    /// its picture's place, and drawn flat when its frame changed or its
+    /// last draw wasn't painted.
+    fn prepare_raw(
+        &self,
+        r: &mut ViewerResources,
+        enc: &mut wgpu::CommandEncoder,
+        size: (u32, u32),
+        start: Instant,
+    ) {
+        r.last = None;
+        let columns = self.columns.max(1);
+        r.raw.resize_with(columns, || None);
+        r.raw.truncate(columns);
+        let painted = r.painted.load(Ordering::Relaxed);
+        let mut drawn = vec![false; columns];
+        let mut recorded = false;
+        for d in &self.raw {
+            let Some(slot) = r.raw.get_mut(d.column) else {
+                continue;
+            };
+            drawn[d.column] = true;
+            let (origin, extent) = raw_place(size, columns, d.column, d.frame.shape().size);
+            let t = match slot {
+                Some(t) if t.target.extent() == extent => t,
+                Some(t) => {
+                    if let Err(e) = t.target.resize_unchecked(&r.gpu, extent) {
+                        tracing::warn!(error = %e, ?extent, "a raw view target can't be resized");
+                        *slot = None;
+                        continue;
+                    }
+                    t.last = None;
+                    t
+                }
+                None => match LinearTarget::new_unchecked(&r.gpu, extent) {
+                    Ok(target) => slot.insert(RawTarget {
+                        target,
+                        origin,
+                        last: None,
+                    }),
+                    Err(e) => {
+                        tracing::warn!(error = %e, ?extent, "a raw view target can't be made");
+                        continue;
+                    }
+                },
+            };
+            t.origin = origin;
+            if painted && t.last.as_ref() == Some(&d.key) {
+                continue;
+            }
+            r.projector.record_flat_unchecked(
+                enc,
+                &d.frame,
+                &t.target,
+                d.key.filter,
+                r.timers.as_mut(),
+            );
+            t.last = Some(d.key.clone());
+            recorded = true;
+        }
+        // A column with no picture this draw shows none.
+        for (t, drawn) in r.raw.iter_mut().zip(drawn) {
+            if !drawn && let Some(t) = t {
+                t.last = None;
+            }
+        }
+        if recorded {
+            r.painted.store(false, Ordering::Relaxed);
+            r.projected += 1;
+        } else {
+            r.encoded_only += 1;
+        }
+        if let Some(perf) = &self.perf {
+            if recorded {
+                perf.record_since(Stage::RenderCpu, start);
+                perf.add(Counter::Projected, 1);
+                if let Some(ms) = r.timers.as_mut().and_then(GpuTimers::poll) {
+                    perf.record(Stage::RenderGpu, ms);
+                }
+            } else {
+                perf.add(Counter::EncodedOnly, 1);
+            }
+        }
+    }
+}
+
+/// The raw view's `paint`: each column's target at its place, scissored
+/// to it, since the encode pass blacks out the rest of the viewport.
+fn paint_raw(
+    r: &ViewerResources,
+    info: &egui::PaintCallbackInfo,
+    pass: &mut wgpu::RenderPass<'static>,
+) {
+    let vp = info.viewport_in_pixels();
+    let clip = info.clip_rect_in_pixels();
+    for t in r.raw.iter().flatten() {
+        if t.last.is_none() {
+            continue;
+        }
+        let (w, h) = t.target.extent();
+        let int = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+        let x = vp.left_px.saturating_add(int(t.origin[0]));
+        let y = vp.top_px.saturating_add(int(t.origin[1]));
+        let x0 = x.max(clip.left_px).max(0);
+        let y0 = y.max(clip.top_px).max(0);
+        let x1 = x
+            .saturating_add(int(w))
+            .min(clip.left_px.saturating_add(clip.width_px));
+        let y1 = y
+            .saturating_add(int(h))
+            .min(clip.top_px.saturating_add(clip.height_px));
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        let px = |v: i32| u32::try_from(v).unwrap_or(0);
+        pass.set_scissor_rect(px(x0), px(y0), px(x1 - x0), px(y1 - y0));
+        r.encoder
+            .draw(pass, &t.target, [px(x.max(0)), px(y.max(0))]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_raw_view_fits_each_picture_in_its_column() {
+        // Two square lenses in a wide viewer: side by side, full height.
+        assert_eq!(
+            raw_place((1000, 400), 2, 0, (3840, 3840)),
+            ([50, 0], (400, 400))
+        );
+        assert_eq!(
+            raw_place((1000, 400), 2, 1, (3840, 3840)),
+            ([550, 0], (400, 400))
+        );
+        // In a tall one: full column width, centred down.
+        assert_eq!(
+            raw_place((600, 900), 2, 1, (100, 100)),
+            ([300, 300], (300, 300))
+        );
+        // One 2:1 picture in a 4:3 viewer: full width, letterboxed.
+        assert_eq!(
+            raw_place((800, 600), 1, 0, (2000, 1000)),
+            ([0, 100], (800, 400))
+        );
+        // An odd width: the columns cover it, none wider than its share.
+        let a = raw_place((1001, 1000), 2, 0, (1, 1));
+        let b = raw_place((1001, 1000), 2, 1, (1, 1));
+        assert_eq!((a, b), (([0, 250], (500, 500)), ([500, 249], (501, 501))));
+        // Nothing smaller than a pixel, nothing out of range.
+        assert_eq!(raw_place((0, 0), 0, 5, (0, 0)), ([0, 0], (1, 1)));
+        let (o, s) = raw_place((7, 3), 3, 2, (1000, 1));
+        assert!(o[0] + s.0 <= 7 && o[1] + s.1 <= 3, "{o:?} {s:?}");
     }
 }

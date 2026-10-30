@@ -36,6 +36,10 @@ pub struct StillOptions {
     pub debug: DebugMode,
     pub depth: Depth,
     pub placement: Placement,
+    /// The picture as coded, scaled to the size, as the GUI's raw view
+    /// draws it ([`Projector::record_flat_unchecked`]): the view and
+    /// `debug` go unused.
+    pub flat: bool,
 }
 
 /// A rendered picture's pixels: R, G, B per pixel, rows top to bottom.
@@ -262,8 +266,14 @@ impl StillRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("still"),
             });
-        self.projector
-            .record(&mut enc, slot, view, target, opts.filter, opts.debug, None)?;
+        if opts.flat {
+            gpu.check()?;
+            self.projector
+                .record_flat_unchecked(&mut enc, slot, target, opts.filter, None);
+        } else {
+            self.projector
+                .record(&mut enc, slot, view, target, opts.filter, opts.debug, None)?;
+        }
         let image = match opts.depth {
             Depth::Eight => {
                 let output = match self.output.take() {

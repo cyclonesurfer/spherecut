@@ -183,3 +183,26 @@ fn fs_project(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let inside = r.theta <= PI + 1e-4 && all(suv >= src.cover.xy) && all(suv <= src.cover.zw);
     return round_f16(vec4<f32>(select(vec3<f32>(0.0), lin, inside), 1.0));
 }
+
+// The raw view (M1 slice 8): the picture as it is coded, flat over the
+// target's extent, for a source that isn't equirect (a camera's lenses
+// before M3 stitches them). Each target pixel is a footprint of
+// 1 / size of the picture; the sampling and the colour are fs_project's.
+@fragment
+fn fs_flat(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    let suv = frag.xy / view.size;
+    let uv = suv * src.uv_scale + src.uv_offset;
+    let g = mat2x2<f32>(
+        vec2<f32>(src.uv_scale.x / view.size.x, 0.0),
+        vec2<f32>(0.0, src.uv_scale.y / view.size.y),
+    );
+    let cuv = uv * src.chroma_scale + src.chroma_offset;
+    let gc = mat2x2<f32>(g[0] * src.chroma_scale, g[1] * src.chroma_scale);
+    let y = sample_plane(plane0, uv, g, src.size0, src.levels.x);
+    let c1 = sample_plane(plane1, cuv, gc, src.size1, src.levels.y);
+    let c2 = sample_plane(plane2, cuv, gc, src.size1, src.levels.y);
+    let s = vec4<f32>(y.r, c1.r, select(c2.r, c1.g, src.kind == 0u), 1.0);
+    let rgb = clamp(vec3<f32>(dot(src.m0, s), dot(src.m1, s), dot(src.m2, s)), vec3<f32>(0.0), vec3<f32>(1.0));
+    let lin = select(srgb_eotf(rgb), rgb, src.transfer == 1u);
+    return round_f16(vec4<f32>(lin, 1.0));
+}

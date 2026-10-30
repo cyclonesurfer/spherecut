@@ -358,6 +358,8 @@ fn a_projection_never_painted_is_projected_again() {
     let cb = ViewerCallback {
         rect,
         shown: Some((frame.gpu.clone(), key.clone())),
+        raw: Vec::new(),
+        columns: 1,
         perf: None,
     };
     let mut res = CallbackResources::new();

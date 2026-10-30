@@ -213,14 +213,42 @@ impl FilesPane {
     }
 }
 
-/// The Info pane's probe of the open file.
+/// What a probe found: its text, and the file's lens streams.
+type Probed = Result<(String, Vec<usize>), String>;
+
+/// The Info pane's probe of the open file. It also finds a camera's raw
+/// file's lenses, which the app opens together (the raw view).
 #[derive(Debug, Default)]
 pub struct InfoPane {
     path: Option<PathBuf>,
-    job: Option<Job<Result<String, String>>>,
+    job: Option<Job<Probed>>,
     /// Probes given up for a newer file's.
     threads: Threads,
     text: Option<Result<String, String>>,
+    /// The lens streams of the last probe, until taken.
+    lenses: Option<(PathBuf, Vec<usize>)>,
+}
+
+/// A camera's raw file's lenses: its video streams, two or more, all of
+/// the first one's size, by their indices in the file (the X5's `.insv`
+/// holds one a lens). Empty for a file of one picture. Cover art (an
+/// attached picture) is no lens.
+pub fn lenses(report: &spherecut_media::probe::ProbeReport) -> Vec<usize> {
+    use spherecut_media::probe::StreamKind;
+    let video: Vec<_> = report
+        .streams
+        .iter()
+        .filter(|s| {
+            s.kind == StreamKind::Video && !s.disposition.iter().any(|d| d == "attached_pic")
+        })
+        .filter_map(|s| s.video.as_ref().map(|v| (s.index, (v.width, v.height))))
+        .collect();
+    match video.first() {
+        Some((_, size)) if video.len() >= 2 && video.iter().all(|(_, s)| s == size) => {
+            video.iter().map(|(i, _)| *i).collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 impl InfoPane {
@@ -229,9 +257,10 @@ impl InfoPane {
         let p = path.to_path_buf();
         self.path = Some(p.clone());
         self.text = None;
+        self.lenses = None;
         let job = Job::spawn("probe", move || {
             spherecut_media::probe::probe(&p)
-                .map(|r| spherecut_media::probe::render_text(&r))
+                .map(|r| (spherecut_media::probe::render_text(&r), lenses(&r)))
                 .map_err(|e| e.error.to_string())
         });
         if let Some(old) = self.job.replace(job) {
@@ -256,7 +285,12 @@ impl InfoPane {
         match job.poll() {
             Poll::Pending => {}
             Poll::Done(t) => {
-                self.text = Some(t);
+                self.text = Some(t.map(|(text, lenses)| {
+                    if let Some(p) = &self.path {
+                        self.lenses = Some((p.clone(), lenses));
+                    }
+                    text
+                }));
                 self.job = None;
             }
             Poll::Lost => {
@@ -264,6 +298,11 @@ impl InfoPane {
                 self.job = None;
             }
         }
+    }
+
+    /// The lens streams the last probe found, and its file, once.
+    pub fn take_lenses(&mut self) -> Option<(PathBuf, Vec<usize>)> {
+        self.lenses.take()
     }
 }
 
@@ -334,10 +373,7 @@ pub fn stream_notices(info: &VideoStreamInfo) -> Vec<Notice> {
         Some(Projection::Equirect { .. }) | None => {}
         Some(p) => v.push(
             Notice::new(K::NotEquirect, Severity::Warning, "Not an equirect source").impact(
-                format!(
-                    "it is {p:?}, projected as if it were equirect; its raw view comes in M1's \
-                     next slice, and stitching arrives in M3"
-                ),
+                format!("it is {p:?}, shown flat in the raw view; stitching arrives in M3"),
             ),
         ),
     }

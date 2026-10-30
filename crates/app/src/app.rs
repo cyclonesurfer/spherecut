@@ -27,7 +27,7 @@ use crate::panes::{FilesPane, InfoPane};
 use crate::settings::{self, Settings};
 use crate::transport::{self, Scrub};
 use crate::view::{Preset, ViewState, ZOOM_PER_POINT, ZOOM_STEP};
-use crate::viewer::{self, DrawKey, ViewerCallback};
+use crate::viewer::{self, DrawKey, RawDraw, RawKey, ViewerCallback};
 
 /// The panes the tiles hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -415,6 +415,54 @@ impl AppState {
         for e in events {
             self.event(e);
         }
+        if let Some((path, lenses)) = self.info.take_lenses()
+            && lenses.len() >= 2
+            && self.snapshot.path.as_ref() == Some(&path)
+        {
+            self.open_lenses(path, lenses);
+        }
+    }
+
+    /// The open file again, with each of its lenses' streams: a camera's
+    /// raw file, which the probe found after the file opened on its best
+    /// stream alone. Its notices stay.
+    fn open_lenses(&mut self, path: PathBuf, lenses: Vec<usize>) {
+        let Some(player) = &self.player else {
+            return;
+        };
+        tracing::info!(?lenses, "opening the lenses of {}", path.display());
+        self.notices.push(
+            Notice::new(
+                NoticeKind::Lenses,
+                Severity::Info,
+                format!(
+                    "A camera's raw file: its {} lenses side by side",
+                    lenses.len()
+                ),
+            )
+            .impact("stitching arrives in M3"),
+        );
+        self.streams.clear();
+        player.open_streams(path, lenses.into_iter().map(Some).collect());
+    }
+
+    /// The viewer's columns: one a video stream.
+    pub fn columns(&self) -> usize {
+        self.snapshot.streams.len().max(self.streams.len()).max(1)
+    }
+
+    /// Whether the viewer shows the raw view (section 7.8): each stream's
+    /// picture flat, for a source that isn't equirect or a camera's raw
+    /// file's lenses, until M3 stitches them.
+    pub fn raw_view(&self) -> bool {
+        use spherecut_media::spherical::Projection;
+        self.columns() > 1
+            || self.streams.iter().flatten().any(|i| {
+                !matches!(
+                    i.mapping.projection,
+                    None | Some(Projection::Equirect { .. })
+                )
+            })
     }
 
     fn event(&mut self, e: PlayerEvent) {
@@ -781,48 +829,24 @@ impl AppState {
         self.viewer_rect = Some(rect);
         let vp = viewer::viewport(rect, ui.ctx());
         let free = ui.input(|i| i.modifiers.ctrl);
-        if response.drag_started_by(egui::PointerButton::Primary)
-            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
-        {
-            self.view.cancel_morph();
-            self.drag = Some(self.view.grab(viewer::lens_point(origin, &vp, ppp)));
-        }
-        if response.dragged_by(egui::PointerButton::Primary)
-            && let (Some(mut start), Some(pos)) = (self.drag, response.interact_pointer_pos())
-        {
-            let fit = self
-                .view
-                .drag_to(&mut start, viewer::lens_point(pos, &vp, ppp), free);
-            self.drag = Some(start);
-            self.last_fit = Some(fit);
-        }
-        if response.drag_stopped() {
+        // The raw view's pictures are flat: nothing to look around in.
+        let raw = self.raw_view();
+        if raw {
             self.drag = None;
-        }
-        if response.hovered()
-            && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
-        {
-            let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
-            let p = viewer::lens_point(pos, &vp, ppp);
-            if scroll != 0.0 {
-                self.view
-                    .zoom((ZOOM_PER_POINT * f64::from(scroll)).exp(), p);
-            }
-            if zoom != 1.0 {
-                self.view.zoom(f64::from(zoom), p);
-            }
+        } else {
+            self.look_ui(ui, &response, &vp, ppp, free);
         }
         if response.double_clicked() {
             self.toggle_play();
         }
 
-        // What to draw: the first stream's frame on screen (the raw view of
-        // a two-lens source is slice 8's).
+        // What to draw: the first stream's frame on screen, projected, or
+        // in the raw view every stream's, flat.
         let presented = self.presented.take();
-        let shown = presented.as_ref().and_then(|p| p.frames.first());
+        let frames = presented.as_ref().map_or(&[][..], |p| &p.frames[..]);
         let view = ViewParams::new(self.view.q, self.view.lens);
         let filter = self.view.filter;
-        let shown = shown.map(|s| {
+        let shown = frames.first().map(|s| {
             (
                 s.gpu.clone(),
                 DrawKey {
@@ -834,12 +858,82 @@ impl AppState {
             )
         });
         self.shown = shown.as_ref().map(|(_, k)| k.clone());
+        let raw = if raw {
+            frames
+                .iter()
+                .map(|s| RawDraw {
+                    column: s.stream,
+                    frame: s.gpu.clone(),
+                    key: RawKey {
+                        slot: s.slot,
+                        frame: s.frame,
+                        filter,
+                    },
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let shown = shown.filter(|_| raw.is_empty());
         let perf = self.player.as_ref().map(|p| p.perf().clone());
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
-            ViewerCallback { rect, shown, perf },
+            ViewerCallback {
+                rect,
+                shown,
+                raw,
+                columns: self.columns(),
+                perf,
+            },
         ));
         drop(presented);
+        self.picture_notes(ui, &response, rect);
+    }
+
+    /// Drag to look around, and zoom with the wheel or a pinch.
+    fn look_ui(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        vp: &egui::epaint::ViewportInPixels,
+        ppp: f32,
+        free: bool,
+    ) {
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+        {
+            self.view.cancel_morph();
+            self.drag = Some(self.view.grab(viewer::lens_point(origin, vp, ppp)));
+        }
+        if response.dragged_by(egui::PointerButton::Primary)
+            && let (Some(mut start), Some(pos)) = (self.drag, response.interact_pointer_pos())
+        {
+            let fit = self
+                .view
+                .drag_to(&mut start, viewer::lens_point(pos, vp, ppp), free);
+            self.drag = Some(start);
+            self.last_fit = Some(fit);
+        }
+        if response.drag_stopped() {
+            self.drag = None;
+        }
+        if response.hovered()
+            && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
+        {
+            let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+            let p = viewer::lens_point(pos, vp, ppp);
+            if scroll != 0.0 {
+                self.view
+                    .zoom((ZOOM_PER_POINT * f64::from(scroll)).exp(), p);
+            }
+            if zoom != 1.0 {
+                self.view.zoom(f64::from(zoom), p);
+            }
+        }
+    }
+
+    /// The picture's label, its placeholder, and the overlay over it.
+    fn picture_notes(&mut self, ui: &egui::Ui, response: &egui::Response, rect: egui::Rect) {
         let placeholder = self.placeholder();
         response.widget_info(|| {
             egui::WidgetInfo::labeled(

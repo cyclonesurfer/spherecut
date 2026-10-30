@@ -1,5 +1,6 @@
 //! The projection pass (M1 plan section 4.3): a slot, seen through a
-//! view, into a linear `Rgba16Float` target.
+//! view, into a linear `Rgba16Float` target; and its flat twin, the GUI's
+//! raw view of a source that isn't equirect.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -84,6 +85,15 @@ impl DebugMode {
             DebugMode::LodHeatmap => 3.0,
         }
     }
+}
+
+/// The projection shader's two fragment stages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Pass {
+    /// `fs_project`: through the view's lens.
+    Project,
+    /// `fs_flat`: the picture as coded.
+    Flat,
 }
 
 /// The projection shader's `View` uniform (`shaders/project.wgsl`; a naga
@@ -295,7 +305,7 @@ pub struct Projector {
     view_layout: wgpu::BindGroupLayout,
     source_layout: wgpu::BindGroupLayout,
     sampler_layout: wgpu::BindGroupLayout,
-    pipelines: Mutex<HashMap<(Filter, DebugMode), wgpu::RenderPipeline>>,
+    pipelines: Mutex<HashMap<(Filter, DebugMode, Pass), wgpu::RenderPipeline>>,
     /// Indexed by whether U wraps, then by whether it is anisotropic.
     samplers: [[wgpu::BindGroup; 2]; 2],
 }
@@ -347,21 +357,30 @@ impl Projector {
     /// Builds the pipeline for `filter` and `debug` now rather than at its
     /// first draw.
     pub fn prepare(&self, filter: Filter, debug: DebugMode) {
-        self.pipeline(filter, debug);
+        self.pipeline(filter, debug, Pass::Project);
     }
 
-    fn pipeline(&self, filter: Filter, debug: DebugMode) -> wgpu::RenderPipeline {
+    /// Builds the flat pass's pipeline for `filter` now.
+    pub fn prepare_flat(&self, filter: Filter) {
+        self.pipeline(filter, DebugMode::Off, Pass::Flat);
+    }
+
+    fn pipeline(&self, filter: Filter, debug: DebugMode, pass: Pass) -> wgpu::RenderPipeline {
         let mut map = self
             .pipelines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.entry((filter, debug))
+        map.entry((filter, debug, pass))
             .or_insert_with(|| {
+                let (label, entry) = match pass {
+                    Pass::Project => ("project", "fs_project"),
+                    Pass::Flat => ("flat", "fs_flat"),
+                };
                 layouts::fullscreen_pipeline(
                     &self.gpu.device,
-                    "project",
+                    label,
                     &self.module,
-                    "fs_project",
+                    entry,
                     &[("FILTER", filter.code()), ("DEBUG_MODE", debug.code())],
                     &[&self.view_layout, &self.source_layout, &self.sampler_layout],
                     LinearTarget::FORMAT,
@@ -412,8 +431,48 @@ impl Projector {
         self.gpu
             .queue
             .write_buffer(&target.view_uniform, 0, bytemuck::bytes_of(&uniform));
-        let pipeline = self.pipeline(filter, debug);
+        let pipeline = self.pipeline(filter, debug, Pass::Project);
         let wraps = slot.wraps.load(Ordering::Acquire);
+        self.draw(enc, slot, target, &pipeline, wraps, filter, timers);
+    }
+
+    /// Records `slot`'s picture flat into `target`'s extent, scaled to
+    /// fill it: the GUI's raw view, which keeps the picture's aspect by
+    /// the extent it gives. Unchecked, as
+    /// [`Self::record_unchecked`]; one draw per target per submission.
+    pub fn record_flat_unchecked(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        slot: &GpuFrame,
+        target: &LinearTarget,
+        filter: Filter,
+        timers: Option<&mut GpuTimers>,
+    ) {
+        let (w, h) = target.extent;
+        let uniform = ViewUniform {
+            size: [w as f32, h as f32],
+            ..ViewUniform::default()
+        };
+        self.gpu
+            .queue
+            .write_buffer(&target.view_uniform, 0, bytemuck::bytes_of(&uniform));
+        let pipeline = self.pipeline(filter, DebugMode::Off, Pass::Flat);
+        // Clamped at the picture's edges: its sides don't meet.
+        self.draw(enc, slot, target, &pipeline, false, filter, timers);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        slot: &GpuFrame,
+        target: &LinearTarget,
+        pipeline: &wgpu::RenderPipeline,
+        wraps: bool,
+        filter: Filter,
+        timers: Option<&mut GpuTimers>,
+    ) {
+        let (w, h) = target.extent;
         let sampler =
             &self.samplers[usize::from(wraps)][usize::from(filter == Filter::Anisotropic)];
         let mut timers = timers;
@@ -421,7 +480,7 @@ impl Projector {
         {
             let mut pass = layouts::fullscreen_pass(enc, "project", &target.view);
             pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
-            pass.set_pipeline(&pipeline);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &target.view_group, &[]);
             pass.set_bind_group(1, &slot.bind_group, &[]);
             pass.set_bind_group(2, sampler, &[]);
