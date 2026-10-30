@@ -21,7 +21,6 @@ use spherecut_core::brand;
 mod frame;
 #[allow(unsafe_code)]
 mod interrupt;
-mod show;
 
 #[derive(Parser)]
 #[command(name = brand::APP_SLUG, version = brand::VERSION, about = "Native Linux 360° video editor")]
@@ -252,7 +251,7 @@ fn probe(paths: &[PathBuf], json: bool) -> Result<Exit> {
         // FFmpeg's own word on why it could not open the file, under ours.
         // In JSON it is the error's `ffmpeg_log`.
         let ffmpeg = match &probed {
-            Err(e) if !json => show::ffmpeg_lines(&e.ffmpeg_log),
+            Err(e) if !json => spherecut_media::probe::ffmpeg_lines(&e.ffmpeg_log),
             _ => String::new(),
         };
         let file = ProbeFile::new(path, probed);
@@ -260,7 +259,7 @@ fn probe(paths: &[PathBuf], json: bool) -> Result<Exit> {
             && reading
             && let Some(r) = &file.report
         {
-            reading = emit(&show::probe(r))?;
+            reading = emit(&spherecut_media::probe::render_text(r))?;
         }
         if let Some(e) = &file.error {
             to_stderr(&format!("error: {}\n{ffmpeg}", e.message));
@@ -281,7 +280,7 @@ fn doctor(render_node: &Path, json: bool) -> Result<Exit> {
     if json {
         print_json(&envelope, exit)
     } else {
-        emit(&show::doctor(&report))?;
+        emit(&spherecut_media::doctor::render_text(&report))?;
         Ok(exit)
     }
 }
