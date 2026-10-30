@@ -9,8 +9,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use spherecut_media::doctor::Options;
 
+use super::Ctx;
 use crate::error::{ToolError, codes};
-use crate::rpc::CallCx;
 use crate::text;
 
 #[derive(Debug, Deserialize)]
@@ -45,11 +45,11 @@ fn check_node(node: &Path) -> Result<(), ToolError> {
     }
 }
 
-pub fn run(req: Request, cx: &CallCx) -> Result<Value, ToolError> {
+pub fn run(req: Request, cx: &Ctx) -> Result<Value, ToolError> {
     if let Some(node) = &req.render_node {
         check_node(node)?;
     }
-    cx.check()?;
+    cx.call.check()?;
     // The lookup hardware decoding uses (D30), as the CLI's doctor does.
     let node = spherecut_media::hw::render_node(None, req.render_node.as_deref());
     let report = spherecut_media::doctor::run_with(

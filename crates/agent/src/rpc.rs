@@ -284,6 +284,16 @@ pub struct CallCx {
     progress: Option<Progress>,
 }
 
+/// Cancels a call ([`CallCx::canceller`]).
+#[derive(Debug, Clone)]
+pub struct Canceller(StopSource);
+
+impl Canceller {
+    pub fn cancel(&self) {
+        self.0.shutdown();
+    }
+}
+
 struct Progress {
     token: Value,
     out: Arc<Writer>,
@@ -318,6 +328,20 @@ impl CallCx {
                 stop.shutdown();
             });
         cx
+    }
+
+    /// A way to cancel the call from another thread, as a client's
+    /// `notifications/cancelled` does: `spherecut call`'s on SIGINT.
+    pub fn canceller(&self) -> Canceller {
+        Canceller(self.stop.clone())
+    }
+
+    /// Stop the call as its deadline would, for tests of an op whose time
+    /// runs out midway.
+    #[cfg(test)]
+    pub(crate) fn expire(&self) {
+        self.timed_out.store(true, Ordering::Release);
+        self.stop.shutdown();
     }
 
     /// A token that stops when the call does.

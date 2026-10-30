@@ -38,6 +38,26 @@ pub const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// Files in one `probe` call.
 pub const FILES_PER_CALL: usize = 64;
 
+/// Files, or a folder's clips, that one `probe` gives in full (`detail:
+/// "full"`, amendment 19): a report can take several thousand
+/// characters.
+pub const FULL_PER_CALL: usize = 8;
+
+/// A folder's clips in a page of `probe`, unless `page_size` says.
+pub const PAGE_SIZE: usize = 20;
+
+/// The most clips a page of `probe` may hold.
+pub const MAX_PAGE_SIZE: usize = 50;
+
+/// The most characters of subfolder names a page of `probe` lists; the
+/// rest are counted in `folders_left_out`.
+pub const FOLDERS_CHARS: usize = 4_000;
+
+/// The most characters a result's text may take (amendment 19): under
+/// the 50,000 past which Claude Code saves a result to a file rather
+/// than showing it. Images are counted apart.
+pub const RESULT_CHARS: usize = 40_000;
+
 /// The most entries a folder's listing keeps (`roots::Listing`).
 pub const FOLDER_ENTRIES: usize = 10_000;
 

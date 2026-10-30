@@ -284,6 +284,7 @@ fn the_document_describes_every_code_schema_and_status() {
         contract::PROBE,
         contract::DOCTOR,
         contract::FRAME,
+        contract::CALL,
         contract::CLI,
     ] {
         assert!(

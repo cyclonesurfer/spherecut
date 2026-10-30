@@ -6,6 +6,8 @@ use std::fmt;
 use std::fs::File;
 use std::io::{BufReader, ErrorKind, Read, Seek};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use serde::Serialize;
 use spherecut_core::{Rational, Time};
@@ -448,11 +450,25 @@ pub fn probe(path: &Path) -> Result<ProbeReport, ProbeError> {
 /// [`probe`] a file opened by one path and named by another: the report
 /// and every message carry [`Source::name`].
 pub fn probe_source(src: Source<'_>) -> Result<ProbeReport, ProbeError> {
+    probe_with(src, None)
+}
+
+/// [`probe_source`], stopping when `cancel` is set: FFmpeg's open checks
+/// it between reads, so that a probe of a file on a mount that hangs ends
+/// when its caller gives up.
+pub fn probe_cancellable(
+    src: Source<'_>,
+    cancel: Arc<AtomicBool>,
+) -> Result<ProbeReport, ProbeError> {
+    probe_with(src, Some(cancel))
+}
+
+fn probe_with(src: Source<'_>, cancel: Option<Arc<AtomicBool>>) -> Result<ProbeReport, ProbeError> {
     spherecut_core::may_block("probing a media file");
     init();
     // The CLI hides FFmpeg's log by default, and it is often the only
     // word on what FFmpeg could not read.
-    let (report, log) = hwprobe::capture_ffmpeg_log(|| probe_file(src));
+    let (report, log) = hwprobe::capture_ffmpeg_log(|| probe_file(src, cancel));
     let ffmpeg_log = tally(log);
     match report {
         Ok(r) => Ok(ProbeReport { ffmpeg_log, ..r }),
@@ -494,7 +510,7 @@ fn tally(lines: Vec<String>) -> Vec<String> {
     out
 }
 
-fn probe_file(src: Source<'_>) -> Result<ProbeReport, Failed> {
+fn probe_file(src: Source<'_>, cancel: Option<Arc<AtomicBool>>) -> Result<ProbeReport, Failed> {
     // `open` is read, and `path` named.
     let Source { open, name: path } = src;
     let meta = std::fs::metadata(open).map_err(|e| MediaError::Io {
@@ -528,7 +544,7 @@ fn probe_file(src: Source<'_>) -> Result<ProbeReport, Failed> {
         damage.extend(mp4_damage(t));
     }
 
-    let ictx = match ffi::open_input(open, None) {
+    let ictx = match ffi::open_input(open, cancel) {
         Ok(ictx) => ictx,
         Err(e) => {
             if not_mp4 && matches!(e, ffi::OpenError::Ffmpeg(_)) {

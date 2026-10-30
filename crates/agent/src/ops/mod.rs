@@ -1,12 +1,24 @@
 //! The tools' operations (a1-plan section 6): one request type and one
 //! response type each, the same for `spherecut mcp` and `spherecut call`.
 
+pub mod clips;
 pub mod doctor;
+pub mod probe;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::error::{ToolError, codes};
+use crate::roots::Roots;
+use crate::rpc::CallCx;
+
+/// What an op runs with: the roots its paths open under, and its call's
+/// deadline, stop and progress.
+#[derive(Debug, Clone, Copy)]
+pub struct Ctx<'a> {
+    pub roots: &'a Roots,
+    pub call: &'a CallCx,
+}
 
 /// `args` as the tool's request type. The schema has already passed
 /// them, so this fails only where the schema can't say (a bug, which the

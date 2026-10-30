@@ -910,12 +910,15 @@ PLAN's A1 criteria, and the note to Pat.
    protocol half.
 2. **A1.2 Roots.** `roots.rs` and its tests; `/proc/self/fd` handed to
    media; `--read-root`, `--allow-write`, `--write-root`. D45.
-3. **A1.3 probe and doctor, and `call`.** The summary, the folder
-   grouping and paging, doctor with a file and speed; `spherecut call`;
-   the mcp/call identity test.
-4. **A1.4 look.** frame's core moved to `still.rs` first (frame's tests
-   green before and after); then tiles, modes, labels, the font, JPEG in
-   media, base64, the size caps, `output`; look's tests; D44's images.
+3. **A1.3 probe and `call`.** The summary, the folder grouping and
+   paging; `spherecut call`; the mcp/call identity test. (Doctor with a
+   file and speed moved to A1.4, 2026-10-30: it reports the decoder
+   `look` and `frame` would use, and that choice moves to `still.rs`
+   there.)
+4. **A1.4 look, and doctor's file.** frame's core moved to `still.rs`
+   first (frame's tests green before and after); then tiles, modes,
+   labels, the font, JPEG in media, base64, the size caps, `output`;
+   doctor with a file and speed; look's tests; D44's images.
 5. **A1.5 analyze.** Packet timing in media, motion, audio,
    `jitter_dups.mp4`; analyze's tests; D46's analyze half.
 6. **A1.6 check.** YouTube's requirements fetched and cited; the rules;

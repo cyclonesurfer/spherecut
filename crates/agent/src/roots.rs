@@ -212,13 +212,14 @@ impl Roots {
                 left_out += 1;
                 continue;
             }
-            let mut file_type = entry.file_type();
-            if file_type == FileType::Unknown
-                && let Ok(fd) = dir.fd()
-                && let Ok(st) = rustix::fs::statat(fd, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)
-            {
-                file_type = FileType::from_raw_mode(st.st_mode);
-            }
+            // The entry itself, not what a link points to.
+            let st = dir.fd().ok().and_then(|fd| {
+                rustix::fs::statat(fd, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW).ok()
+            });
+            let file_type = match (entry.file_type(), &st) {
+                (FileType::Unknown, Some(st)) => FileType::from_raw_mode(st.st_mode),
+                (t, _) => t,
+            };
             entries.push(Entry {
                 name: OsStr::from_bytes(name).to_owned(),
                 kind: match file_type {
@@ -227,6 +228,7 @@ impl Roots {
                     FileType::Symlink => EntryKind::Link,
                     _ => EntryKind::Other,
                 },
+                modified: st.map(|st| st.st_mtime),
             });
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -482,6 +484,8 @@ pub struct Listing {
 pub struct Entry {
     pub name: OsString,
     pub kind: EntryKind,
+    /// When it was last modified, in seconds since 1970 (UTC).
+    pub modified: Option<i64>,
 }
 
 /// What an entry is, without following it: a symlink is a `Link`, which

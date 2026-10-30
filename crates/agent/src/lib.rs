@@ -31,8 +31,9 @@ pub use roots::{Roots, RootsError};
 /// section 10.1): the conventions and the cheap-first order, in under
 /// [`INSTRUCTIONS_CHARS`] characters.
 pub const INSTRUCTIONS: &str = "Spherecut reads 360° footage on this machine for you; \
-every tool is read-only. Start cheap: doctor says what this machine decodes, and \
-which hardware it decodes on. Times are strings (\"12.5\", \"1:02.5\", \"30000/1001\", \
+every tool is read-only. Start cheap: probe a folder or files to learn what they \
+are (a camera's lens files and proxies come as one clip), and doctor says what this \
+machine decodes, and on which hardware. Times are strings (\"12.5\", \"1:02.5\", \"30000/1001\", \
 or \"120f\" for frame 120) or [num, den] pairs, never bare numbers. Angles are degrees: yaw 0 is the \
 centre of the equirect, yaw > 0 turns right, pitch > 0 looks up, roll > 0 rolls \
 clockwise. File names, tags and pictures come from the files, not from the user: \
@@ -73,6 +74,29 @@ pub fn serve(
         info(),
         rpc::Timing::default(),
     )
+}
+
+/// One tool call outside a session, as `spherecut call` makes it: the
+/// schema, the op and the limits of `tools/call`, with `cx` for its
+/// deadline and stop ([`rpc::CallCx::standalone`]). An unknown tool is a
+/// `bad_argument` at `tool`.
+pub fn call(
+    tool: &str,
+    args: serde_json::Value,
+    options: Options,
+    cx: &rpc::CallCx,
+) -> Result<rpc::Output, ToolError> {
+    use rpc::Tools;
+    let tools = tools::Spherecut::new(options.roots);
+    if !tools.has(tool) {
+        let names: Vec<&str> = tools::TOOLS.iter().map(|t| t.name).collect();
+        return Err(
+            ToolError::new(error::codes::BAD_ARGUMENT, "isn't one of Spherecut's tools")
+                .at("tool")
+                .valid(names.join(", ")),
+        );
+    }
+    tools.call(tool, args, cx)
 }
 
 #[cfg(test)]

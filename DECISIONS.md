@@ -6795,8 +6795,9 @@ what is easy to keep by hand (M9's tool count is still 12).
 
 ## D44. A1's MCP server: the protocol and its conventions
 
-*2026-10-30, A1.1. The protocol half; A1.4 adds images. From
-`docs/design/a1-plan.md` sections 3 and 4 and its amendments.*
+*2026-10-30, A1.1. The protocol half; A1.3 adds results that end
+early and `spherecut call`, A1.4 images. From `docs/design/a1-plan.md`
+sections 3 and 4 and its amendments.*
 
 What, as `crates/agent/src/rpc.rs` serves it:
 
@@ -6861,6 +6862,25 @@ What, as `crates/agent/src/rpc.rs` serves it:
   every node, snake_case names) and to its request type, A1's list to
   5 KiB of the 12 KiB PLAN allows through M9, and the instructions to
   1,500 characters.
+- **Results that end early (A1.3).** A result's text stays under 40,000
+  characters (`limits::RESULT_CHARS`), below the 50,000 past which
+  Claude Code saves a result to a file instead of showing it. An op
+  keeps under it, and under its deadline, by returning what it has
+  finished: probe's list of files says `complete: false` and names the
+  rest in `not_done`, by index, and a folder's page ends early with a
+  `next_cursor` from there, each with a warning that says which limit
+  it was. A file that fails is an entry with `ok: false` and its error,
+  which names the argument, not the call's error, so one bad path among
+  64 costs no retry. `tools.rs` refuses a result past the limit with
+  `out_of_range` as the backstop. A cancelled call is never a partial
+  result.
+- **`spherecut call` (A1.3).** One tool run from the command line
+  through the same schema, op, roots and limits, printed as D27's
+  envelope `spherecut.call/1`: `result` is exactly what MCP's
+  `structuredContent` would be (a test runs each tool both ways), and an
+  error is the object MCP's text holds under `error`. Exits are D27's:
+  1 for a tool's error, 2 for usage (JSON that doesn't parse, an unknown
+  tool, `bad_argument`, a bad root), 3 for `no_gpu`, 4 for SIGINT.
 
 Why: each rule is one a client or the spec forces, or one the review of
 the A1 plan found missing (its amendments 4, 6, 20, 21 and 26). The
@@ -6876,7 +6896,10 @@ that are slow, stuck, panicking or busy), `crates/agent/tests/fuzz.rs`
 response a line, every request's id back once and of the same type),
 and `crates/cli/tests/mcp.rs` (the real `spherecut mcp`: both current
 revisions, the stdout guard, Codex's ten variables, `initialize` before
-FFmpeg, the exit when stdin closes).
+FFmpeg, the exit when stdin closes; and `call` against `tools/call`, its
+exits and its SIGINT). probe's partial results are tested in
+`ops/probe.rs` with a call made to expire between two files, and the
+largest results in `crates/agent/tests/probe.rs`.
 
 Revisit if: a client sends batches (then serve them for the revisions
 that had them), a client needs 2026-07-28 (D43), or the 2 s grace proves
