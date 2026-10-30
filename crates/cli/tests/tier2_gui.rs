@@ -144,7 +144,8 @@ fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
         } else {
             "HEVC Main"
         };
-        if gates.vaapi_hevc.iter().any(|p| p == profile) && st["decoder"] != "vaapi" {
+        // Vulkan Video is hardware too, and Auto's pick on a discrete GPU.
+        if gates.vaapi_hevc.iter().any(|p| p == profile) && st["decoder"] == "software" {
             why.push(format!(
                 "stream {i} ({profile}) decodes on {} where doctor says VA-API decodes it",
                 st["decode"].as_str().unwrap_or("?")
@@ -498,6 +499,11 @@ fn the_gates_fail_what_they_say() {
     sw["result"]["streams"][0]["decoder"] = json!("software");
     sw["result"]["streams"][0]["decode"] = json!("software");
     fails(&sw, false, "stream 0 (HEVC Main 10) decodes on software");
+    // Vulkan Video, as Auto picks on a discrete GPU, is hardware.
+    let mut vk = good();
+    vk["result"]["streams"][0]["decoder"] = json!("vulkan");
+    vk["result"]["streams"][0]["decode"] = json!("Vulkan Video");
+    assert!(judge(&vk, false, &gates).is_empty());
     let only8 = Gates {
         vaapi_hevc: vec!["HEVC Main".into()],
     };

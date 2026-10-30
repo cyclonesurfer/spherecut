@@ -220,3 +220,44 @@ fn a_cameras_lenses_show_side_by_side_and_flat() {
     assert!(s.notices.get(&NoticeKind::Lenses).is_none());
     assert!(raw_last(&rs).is_empty());
 }
+
+/// The lenses open after the probe, which lands while the file plays or
+/// after it was moved: the reopened file goes on from there, playing or
+/// paused as it was.
+#[test]
+fn the_lenses_open_where_the_file_was() {
+    let gpu = common::gpu();
+    let frame = |k: i64| spherecut_core::Time(spherecut_core::Rational::new(k, 30).unwrap());
+    for play in [false, true] {
+        let rs = common::render_state(&gpu);
+        let mut parts = common::parts(&gpu, Arc::new(FfmpegBackend::new()));
+        parts.open = vec![lenses_clip().to_path_buf()];
+        let mut app = SpherecutApp::new(parts);
+        // Before the first pass, which takes the probe's lenses.
+        app.state
+            .seek(frame(6), spherecut_media::backend::SeekMode::Exact);
+        if play {
+            app.state.player.as_ref().unwrap().play();
+        }
+        let mut h = common::harness(app, &rs, [800.0, 600.0], 1.0);
+        common::step_until(&mut h, Duration::from_secs(20), "both lenses open", |a| {
+            a.state.snapshot.streams.len() == 2
+        });
+        let snap = &h.state().state.snapshot;
+        assert_eq!(snap.want_play, play, "playing: {play}");
+        if play {
+            common::step_until(&mut h, Duration::from_secs(20), "playing on", |a| {
+                a.state.snapshot.playing && a.state.snapshot.clock > frame(6)
+            });
+        } else {
+            common::step_until(&mut h, Duration::from_secs(20), "frame 6", |a| {
+                let s = &a.state.snapshot;
+                s.shown.len() == 2
+                    && s.shown
+                        .iter()
+                        .all(|f| f.is_some_and(|f| f.time == frame(6)))
+            });
+            assert!(!h.state().state.snapshot.playing);
+        }
+    }
+}

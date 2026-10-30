@@ -316,6 +316,12 @@ the sections below, they win.
     - doctor reports each Vulkan device's `shared_decode` (with the
       reason when false), planned by `core::vkplan` as render plans the
       shared device, and `zero_copy`.
+    - From M1's review: section 10's A/V row is how far the clock is
+      from the shown frame's interval (0 inside it), not clock − shown
+      pts, which frame-rate steps alone keep up to a frame apart; the
+      software-decode gate fails software only, not Vulkan Video; and
+      the smoke run starts once the probe has opened a camera's lenses
+      (D40).
 
 ## 1. Summary
 

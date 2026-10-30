@@ -349,6 +349,23 @@ pub(crate) fn time_of(d: std::time::Duration) -> Time {
     Time(Rational::new(nanos, 1_000_000_000).unwrap_or(Rational::ZERO))
 }
 
+/// How far `t`, the clock's time a present is for, is from the shown
+/// frame's interval, from its `time` for its `duration`: 0 inside it,
+/// positive past its end (the video is late), negative before its start
+/// (early). A frame without a duration is a point. Showing each frame
+/// for its interval is in sync, so the frame rate's own steps count as
+/// none.
+pub(crate) fn av_offset(t: Time, time: Time, duration: Option<Time>) -> Option<Time> {
+    let from_start = t.checked_sub(time).ok()?;
+    if from_start < Time::ZERO {
+        return Some(from_start);
+    }
+    let past_end = from_start
+        .checked_sub(duration.unwrap_or(Time::ZERO))
+        .ok()?;
+    Some(past_end.max(Time::ZERO))
+}
+
 /// `t` in milliseconds, for the numbers.
 pub(crate) fn ms(t: Time) -> f32 {
     (t.to_secs_f64() * 1000.0) as f32
@@ -357,6 +374,23 @@ pub(crate) fn ms(t: Time) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_av_offset_is_the_clocks_distance_from_the_frames_interval() {
+        let t = |n: i64, d: i64| Time(Rational::new(n, d).unwrap_or(Rational::ZERO));
+        let ms_at = |clock: Time| av_offset(clock, t(1, 1), Some(t(1001, 30000))).map(ms);
+        // Anywhere inside the frame's 33.37 ms: in sync.
+        assert_eq!(ms_at(t(1, 1)), Some(0.0));
+        assert_eq!(ms_at(t(1033, 1000)), Some(0.0));
+        assert_eq!(ms_at(t(31000, 30000)), Some(0.0));
+        assert!(ms_at(t(31002, 30000)).unwrap() > 0.0);
+        // Past its end: late by the rest; before its start: early.
+        assert!((ms_at(t(1043, 1000)).unwrap() - 9.633).abs() < 0.001);
+        assert!((ms_at(t(990, 1000)).unwrap() + 10.0).abs() < 0.001);
+        // No duration: a point.
+        assert_eq!(av_offset(t(1, 1), t(1, 1), None), Some(Time::ZERO));
+        assert!((ms(av_offset(t(1020, 1000), t(1, 1), None).unwrap()) - 20.0).abs() < 0.001);
+    }
 
     fn place(run: u64, seq: u64, k: i64, duration: Option<i64>) -> Place {
         let t = |k: i64| Time(Rational::new(k, 30).unwrap_or(Rational::ZERO));

@@ -1033,6 +1033,18 @@ On `m1/slice9` (D37, D40):
   was locked when the runs began and at the end. kittest checks the
   watchdog both ways and that it leaves a finished run's document
   alone; testkit checks the `loginctl` rule.
+- **M1's review** (a fresh reviewer against PLAN's M1, before H2's
+  GUI rerun) found two `gui_smoke` gates that would have failed every
+  run on odin: the decoder gate failed Vulkan Video, which `Auto` picks
+  there, where it meant to fail software; and the A/V offset, the
+  clock's time less the shown frame's, sits between 0 and a frame when
+  every frame is shown in time, so the sync clip's 20 ms gate couldn't
+  pass. The offset is now the clock's distance from the shown frame's
+  interval (0 in sync; D40), checked in `av_sync.rs` and the smoke
+  kittest, and the gate fails software only. A camera's file reopened
+  with its lenses went back to its first frame, paused; it now goes on
+  where it was, and the smoke run starts after the probe
+  (`raw.rs`, `smoke.rs`). The review's other findings follow.
 - **huginn's H1 and H2** are a prompt for Pat to paste into Claude Code
   there (`/mnt/project-files/spherecut/hw-run-6.md`): the full run under
   `gnome-session-inhibit`, a 125 % rerun of the GUI part, and Pat's
