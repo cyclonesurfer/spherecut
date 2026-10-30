@@ -17,7 +17,9 @@ in progress. What works today:
   under the pointer), zoomed about the pointer, shown rectilinear,
   fisheye or as a tiny planet, stepped frame by frame and scrubbed. It
   checks your codecs and GPU at startup and shows the fixes it finds.
-  The performance overlay's graphs and saved settings come next.
+  F3 shows the performance overlay, File ▸ Settings keeps the cache,
+  decoder, filter, slots and A/V offset, and a camera's raw file with a
+  stream a lens shows its lenses flat, side by side.
 
 - `spherecut probe <file>...` shows what an MP4/MOV or Matroska/WebM file
   is: container, streams, codecs, colour, exact frame rates and
@@ -232,7 +234,12 @@ two-finger scrolling zooms. 1, 2 and 3 switch to rectilinear, fisheye
 and tiny planet, and R looks forward and level again. Space or K plays
 and pauses, Right and Left (or . and ,) step a frame, Shift with them
 jumps a second, Home and End go to the first and last frames, and
-dragging the bar under the picture scrubs. F3 shows the overlay. The
+dragging the bar under the picture scrubs. F3 shows the overlay: the
+decode path, each stage's time on the CPU and the GPU, frames shown
+and dropped, the A/V offset, the cache, the slots, memory and the
+audio output. File ▸ Settings changes the cache's budget, the decoder,
+the filter, the GPU slots and the A/V offset at once, and keeps them;
+`--cache-mb` and `SPHERECUT_FRAME_CACHE_MIB` win over the setting. The
 Files pane opens videos (there is no file dialog, and files can't be
 dropped on the window under Wayland). The Info pane shows the file's
 probe report, and the Doctor pane the startup check's whole report; its
@@ -443,6 +450,11 @@ again only when synth's spec of them changes (DECISIONS D37). Options:
 - `--out <file>`: where to write the report.
 
 Tier 2 tests use `/dev/dri/renderD128`, or `SPHERECUT_RENDER_NODE`.
+`gui_smoke` opens the viewer on each perf clip and sample, plays it with
+the overlay on and judges what it measured; it needs a desktop session
+(GNOME or Hyprland, unlocked and on screen), which it finds from a
+terminal inside it or from an SSH shell, and skips without one. Its
+screenshots go next to the report.
 `audio_output_device_plays` plays a quiet 440 Hz tone for about 2 s on
 the default output device.
 Benchmarks repeat `SPHERECUT_BENCH_RUNS` times (default 3); see

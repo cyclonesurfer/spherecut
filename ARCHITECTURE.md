@@ -48,7 +48,7 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slices 5 and 6 |
 | `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
-| `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside the Info, Doctor and Files tabs); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); `run`, which the CLI calls with no command. `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs. Later the overlay's sparklines, settings and `--smoke` (slice 8), the timeline (M2) | M1 slice 7 |
+| `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside the Info, Doctor and Files tabs); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); the overlay (`overlay`), the settings and their window (`settings`), the raw view, and the smoke run (`smoke`); `run`, which the CLI calls with no command. `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs. Later the timeline (M2) | M1 slices 7 and 8 |
 | `spherecut-agent` | Agent integration (D23): the request and response type of each operation, shared by `spherecut mcp` and `spherecut call` (from A1 the `--json` of `probe`, `doctor` and `frame` uses them too, under a new schema version if M1's shape changes, D27); the MCP server; later the GUI attach bridge | A1 (after M1) |
 | `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor` and `frame`. `render` (M2), and `mcp` and `call` (A1) are planned. Its library half holds `contract`, the JSON contract of `--json` (D27), until A1 moves it to `spherecut-agent` or a crate below both | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI |
 | `xtask` | `check`, `compat` (clippy and a link of the tests against other FFmpeg builds, and Tier 1 against one, D2), `gen-media`, `hw-test` | M0; `compat` from 2026-10-24 |
@@ -616,7 +616,7 @@ float before the output. Stitching, stabilization and reframing then
 happen in one pass shared by the viewer and the exporter, and an
 intermediate equirect exists only as the output of a 360 export.
 
-## The GUI *(M1 slice 7)*
+## The GUI *(M1 slices 7 and 8)*
 
 `spherecut` with no command (`spherecut-app`, D33, D36):
 
@@ -685,6 +685,50 @@ intermediate equirect exists only as the output of a 360 export.
   that make them say why. The runtime guard covers the other crates'
   code the UI calls, and the GUI's `never_blocks` test runs the whole
   app on a backend that never answers.
+* **The overlay** (F3 or View ▸ Overlay, slice 8, D40) is labels over
+  the viewer's top-left corner, read once a UI frame from `PerfStats`,
+  the snapshot and the audio output's stats, all without a lock that
+  waits: where the first stream decodes and on which GPU; decode and
+  download; upload's CPU and GPU time; the projection's CPU time and
+  its GPU time from timestamps (`GpuTimers`, read back a frame late,
+  "n/a" without `TIMESTAMP_QUERY_INSIDE_ENCODERS`, "(CPU timing)" on
+  lavapipe); the viewer's size, scale and filter, and the share of the
+  last second's draws that only encoded; UI frame times and hitches;
+  frames shown, dropped and decode-dropped; the A/V offset's median and
+  p95 over the last second; audio; the cache and the slots; RSS, minor
+  faults a second and the GPU allocator's bytes, which the upload
+  thread reads once a second. Sparklines show the UI's and the stages'
+  last samples.
+* **Settings** (File ▸ Settings…, slice 8, D40) are kept in eframe's
+  storage beside the tiles: the cache's MiB or automatic, the decoder
+  (automatic, software, VA-API or Vulkan Video only), the GPU slots,
+  the A/V offset, anisotropic filtering and the overlay. A change
+  reaches the player at once (`Player::set_config`). `--cache-mb` and
+  `SPHERECUT_FRAME_CACHE_MIB` win over the cache setting, which the
+  window then shows as theirs and greys out. A stored copy out of range,
+  or from an older version, loads with its values brought into range
+  and the missing ones at their defaults.
+* **The raw view** (slice 8, D40) shows a source that isn't equirect,
+  or a camera's raw file with one video stream a lens, flat: a column
+  per stream, each picture as large as its aspect fits and centred,
+  black around it (render's flat pass, `Projector::record_flat_unchecked`,
+  into a `LinearTarget` per column, painted under a scissor each). A
+  drag does nothing there. The file opens on its best stream; when the
+  Info pane's probe finds two or more video streams of one size (cover
+  art aside), the app opens it again with all of them, and a notice says
+  stitching arrives in M3.
+* **The smoke run** (`spherecut --smoke <clip> --smoke-out <json>`,
+  hidden, slice 8, D37 and D40) drives the app from its own passes
+  (`smoke::SmokeDriver`): it opens the clip with the default settings
+  and the overlay on, waits for its first frame, plays it for
+  `--smoke-seconds` or to its end, gathers every stage's samples as they
+  come (`PerfStats::samples_after`), takes a screenshot
+  (`ctx.request_screenshot`, downscaled to 960 pixels wide), writes
+  `spherecut.smoke/1` (`docs/cli-json.md`) and closes the window. The
+  files are written on a worker. The stored settings and layout are
+  neither read nor written. hw-test's Tier 2 `gui_smoke` runs it on each
+  clip in the desktop session it finds, and kittest runs it with no
+  compositor.
 
 ## Threads *(M1; partly planned)*
 
@@ -882,7 +926,18 @@ intermediate equirect exists only as the output of a 360 export.
   playback benchmarks play (synth's noisy 5.7K and 8K HEVC at a camera's
   bitrate, kept in `<target>/hw-media/` across runs), and after Tier 2
   it runs Tier 1 on the machine (`--no-tier1` leaves it out). The report
-  also records the power settings and every render node (D37). The
+  also records the power settings and every render node, the display the
+  GUI opens on (`WAYLAND_DISPLAY`, or from a TTY the user's one Wayland
+  socket, or `DISPLAY`), the audio server, GNOME's mutter features and
+  Hyprland's version (D37). Its "GUI smoke run" is `gui_smoke`'s
+  (`crates/cli/tests/tier2_gui.rs`): `spherecut --smoke` for 20 s on the
+  perf clips, a seam clip, the sync clip, each stitched sample and an X5
+  raw file, each run's numbers and verdict in a table and its screenshot
+  beside the report (`<report>-gui-<n>.png`). A run fails when under 90%
+  of the UI frames expected were presented (a hidden session), over
+  0.1% of the frames dropped, UI p99 is over 1.5× the refresh period,
+  |A/V| p95 reaches 20 ms on the sync clip, or HEVC decodes in software
+  where doctor says VA-API decodes it; without a session it skips. The
   playback benchmarks (`crates/playback/tests/tier2_playback.rs`) play
   the perf clips and the X5's samples through a `Player` on the GPU at
   60 Hz deadlines into an offscreen 1920×1080 target, unthrottled and in

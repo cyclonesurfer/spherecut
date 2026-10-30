@@ -5864,9 +5864,11 @@ What:
   (D22's rows). eframe has no default features: `wgpu_no_default_features`
   (Vulkan only, as render's wgpu), `wayland`, `x11`, `default_fonts`,
   `persistence` (the layout and settings) and `clipboard` (the notices'
-  Copy). winit is named only to turn `wayland-dlopen` back on, which
+  Copy). winit is named to turn `wayland-dlopen` back on, which
   eframe without its defaults drops, so libwayland is loaded at run time
-  as libxkbcommon is.
+  as libxkbcommon is; from slice 8 the smoke run also reads the
+  monitor's refresh rate through it. image (PNG only, D22) is the app's
+  from slice 8 too, for the smoke run's screenshot.
 - **Not used:** eframe's `accesskit` (zbus 5 and RUSTSEC-2026-0370 to
   -0372; Pat's M1 answer is no screen reader until accesskit is on a
   maintained zbus), `links` (it opens a browser), `system_fonts` and
@@ -5979,12 +5981,12 @@ wrong in H2's screenshots.
 
 ## D37. Hardware testing in M1
 
-*2026-10-29, M1 slice 5: a draft, from the M1 plan's D35 (section 15).
-Slice 5 lands the headless part, for H1; slice 8 adds the GUI smoke run
-and its session discovery, for H2, and finishes it. Updates D19 and
-D20.*
+*2026-10-29, M1 slice 5, from the M1 plan's D35 (section 15); finished
+2026-10-30 in slice 8. Slice 5 landed the headless part, for H1; slice 8
+added the GUI smoke run and its session discovery, for H2. Updates D19
+and D20.*
 
-What, so far:
+What:
 
 - **Tier 1 on the hardware machine.** After the Tier 2 tests,
   `cargo xtask hw-test` runs `cargo test --workspace --all-targets` in
@@ -6048,14 +6050,45 @@ What, so far:
   desktop) and H3 (the final commit), with the lists in plan section
   12.3.
 
-Still to come (slice 8): the GUI smoke run as the Tier 2 test
-`gui_smoke`, which finds the Wayland socket from a TTY and fails a
-hidden session; its screenshots in `hw-reports/`; its pass rules (at
-most 0.1% drops, UI p99 under 1.5× the refresh period, |A/V| p95 under
-20 ms on the sync clip); and the environment's session lines
-(`WAYLAND_DISPLAY` set or discovered, `pactl info`'s server,
-mutter's experimental features, `hyprctl`). `cargo xtask check` is to
-check the ALSA headers itself once slice 6 links them.
+- **The GUI smoke run** (slice 8). The Tier 2 test `gui_smoke`
+  (`crates/cli/tests/tier2_gui.rs`) runs `spherecut --smoke <clip>
+  --smoke-seconds 20 --smoke-out <json> --smoke-screenshot <png>`
+  (D40) on the noisy 5.7K 8- and 10-bit perf clips, a seam clip
+  (synth's seam pattern, 3840×1920 HEVC, 10 s), the sync clip
+  (`sync-flash-beep`), each stitched sample (probe's
+  `EquirectTagged`) and the largest X5 raw file with two lenses (its
+  raw view). A clip that isn't there is listed as not run, with why.
+  - **The session** (`tier2::require_graphical_session`):
+    `WAYLAND_DISPLAY` when set; otherwise, from a TTY, the single
+    `wayland-*` socket the user owns in `XDG_RUNTIME_DIR` (or
+    `/run/user/<uid>`, which then goes to the child too), set for the
+    child only; otherwise `DISPLAY`; otherwise TIER2-SKIP: "no graphical
+    session: run from a terminal inside GNOME or Hyprland, or leave the
+    desktop unlocked and on screen". Two sockets aren't guessed between:
+    the skip names them.
+  - **A run fails** when the process fails or its document isn't `ok`;
+    when under 90% of the UI frames expected were presented (the
+    monitor's refresh rate, from winit, × the seconds played), which
+    means the compositor didn't draw (a locked session, or one on
+    another VT: eframe then runs only `logic`, every 250 ms), and then
+    nothing else is judged; at over 0.1% of the frames dropped; at UI
+    p99 over 1.5× the refresh period; at |A/V| p95 of 20 ms or more on
+    the sync clip; or when an HEVC stream decodes in software where
+    doctor's check (run in the test) says VA-API decodes its profile.
+  - **The report** (`xtask/src/gui_report.rs`): the test leaves each
+    run's document and screenshot, and `gui-smoke.json` with the runs
+    and their verdicts, in `SPHERECUT_GUI_OUT` (`<target>/hw-gui`,
+    cleared before each run). "GUI smoke run" gives a row a run (the
+    verdict, presented share, UI p50 and p99, the refresh rate, shown,
+    dropped and decode-dropped, the decoder, A/V, audio), then for each
+    the adapter, surface format, scale, window and stage times, and its
+    screenshot, copied beside the report as `<report>-gui-<n>.png`
+    (`hw-reports/<host>-<commit>-gui-<n>.png`).
+- **The environment** gains the GUI's display as `gui_smoke` finds it
+  (set or discovered, and the variables), the audio server (`pactl
+  info`'s server name), GNOME mutter's experimental features
+  (`gsettings`), and Hyprland's version, with `pactl info`, `hyprctl
+  version` and `hyprctl monitors` in the raw environment.
 
 Why:
 
@@ -6119,10 +6152,23 @@ Tested:
   not made here; the bench then measured the clip there was and
   recorded the other two as not measured, with the reason.
 
+- Slice 8: the session rule with real sockets in a scratch runtime
+  directory (set first, empty as unset, a lock file and a plain file
+  aren't sockets, another user's isn't ours, two are named, not
+  guessed); each gate on documents made to fail it
+  (`the_gates_fail_what_they_say`), the hidden session saying only that;
+  the report's section from a fixture run, with the screenshot copied
+  and named, and without a summary. Here, with no desktop,
+  `SPHERECUT_TIER2=1 cargo test -p spherecut-cli --test tier2_gui --
+  --ignored` skips with the reason, and `hw-test --list` lists
+  `tier2_gui::gui_smoke` among 39 Tier 2 tests.
+
 Revisit if: H1's perf clips decode in software above 150 fps on either
 machine (more noise, or a higher bitrate); x265 can't hold 100 Mbps on
-a build Pat uses; or the Tier 1 run on a hardware machine takes so long
-that `--no-tier1` becomes the habit.
+a build Pat uses; the Tier 1 run on a hardware machine takes so long
+that `--no-tier1` becomes the habit; or H2's `gui_smoke` fails a
+session that was on screen (winit reporting the wrong refresh rate, or
+a compositor that paces a visible window below it).
 
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 
@@ -6296,6 +6342,117 @@ run, which costs more than the one frame it decodes. Where only
 Vulkan Video decodes, `frame` still gives the frame, decoded in
 software. Revisit when the checks are kept where `frame` can read them
 (the GUI's Settings), or when a frame on such a machine is too slow.*
+
+## D40. The overlay, the settings, the raw view and the smoke run
+
+*2026-10-30, M1 slice 8. The M1 plan's sections 7.1, 7.8, 8.2, 10 and
+12 (item 5), as built. The plan gives them no entry of their own; this
+one records the choices it left open. Updates D34, D35 and D36.*
+
+What:
+
+- **One source of numbers** (D34). The overlay, the smoke run and the
+  benchmarks read the same `PerfStats`. Slice 8 adds the counters
+  `projected` and `encoded_only` (the viewer's draws), the projection's
+  CPU and GPU time (`render_cpu`, `render_gpu`), and `MemoryStats`,
+  which the upload thread reads once a second: `VmRSS` from
+  `/proc/self/status`, minor faults from `/proc/self/stat` (and a rate
+  from the reading before), and wgpu's allocator report.
+- **The overlay** (F3, plan section 10) is monospace labels in an
+  `egui::Area` over the viewer, so a screen reader would read them
+  (D36's accesskit tree) and kittest queries them, with sparklines of
+  the last samples. Rates (frames decoded, the draws that only encoded)
+  are over the last second of UI frames, from the counters each frame
+  read; the A/V offset's median and p95 of its size are over the last
+  second's samples. The projection's GPU time is `GpuTimers`', read a
+  frame or two late and never waited for; on lavapipe it says "(CPU
+  timing)", and without `TIMESTAMP_QUERY_INSIDE_ENCODERS` "n/a".
+- **Settings** (plan sections 7.1 and 8.2) are a `Settings` in eframe's
+  storage beside the tiles, serde with `#[serde(default)]` so a copy
+  from an older version loads, and `sanitized()` brings each value into
+  the window's range (cache 256 MiB to 64 GiB or automatic, slots 2 to
+  6, A/V offset ±500 ms). A change goes to the player at once
+  (`set_config`): the cache's budget and the slot count as the upload
+  thread reaches them, the A/V offset from the next frame, the decoder
+  for the files opened after. `--cache-mb` and
+  `SPHERECUT_FRAME_CACHE_MIB` win over the setting (`CacheBudget::choose`
+  says which), and the window then greys the field out with "set by …".
+- **The raw view** (plan section 7.8). A source that isn't equirect, or
+  a camera's raw file whose lenses are separate video streams, is shown
+  flat, a column a stream, by render's flat pass (`fs_flat`: the
+  picture's own texels with the clamp sampler, as `render_still`'s
+  `StillOptions.flat` renders them, checked against
+  `reference::render_flat`). Each column has its own `LinearTarget`,
+  sized by `viewer::raw_place`, painted under a scissor of its own,
+  since the encode pass blacks out the rest of its viewport. The look
+  drag is off. `Player::open_streams` needs the streams' indices up
+  front, which only a probe gives, so the file opens on its best
+  stream, and when the Info pane's probe finds two or more video
+  streams of one size (cover art aside) the app opens it again with all
+  of them and raises a `Lenses` notice.
+- **The smoke run** (`spherecut --smoke`, plan section 12 item 5,
+  `docs/cli-json.md`). `smoke::SmokeDriver` rides the app's passes: it
+  counts every pass in `logic` and the UI's in `ui`, starts playing at
+  the first frame shown, and at the end builds a `spherecut.smoke/1`
+  document in the CLI's envelope.
+  - The stages' percentiles are over the whole run, not the rings' last
+    256 samples: each pass takes the samples recorded since the one
+    before (`PerfStats::samples_after`), and counts as `missed` those a
+    ring's worth too late to read.
+  - The UI frames expected are the monitor's refresh rate (winit's
+    `refresh_rate_millihertz`, read each pass) times the seconds played,
+    or the passes when winit doesn't know the rate (kittest); a hidden
+    window runs passes without the UI, so its `presented` share falls.
+  - The screenshot is `ctx.request_screenshot`'s, kept to 960 pixels
+    wide with a triangle filter. It and the document are written on a
+    worker through `TempFile` (whole, or the file as it was), so the UI
+    thread never waits on the disk.
+  - The run uses the default settings with the overlay on, and neither
+    reads nor writes the stored settings, the layout or the window's
+    place (`persist_window` off). Its failures exit by their codes: the
+    player's (`not_found`, ...), `timed_out` (a new code: no frame within
+    60 s), `cancelled` (the window closed before the end), `io_error`
+    and `internal`.
+
+Why: hw-test's report, the overlay and `docs/perf.md` have to agree,
+which one set of counters gives. A ring's percentiles would describe the
+last four seconds of a 20 s run, which is how a hitch at the start goes
+unseen. A refresh rate from the compositor is the only way to tell a
+hidden window from a slow one: a window the compositor doesn't draw
+gets no frame callbacks, and eframe then runs only `logic`, every
+250 ms. Writing on a worker keeps the smoke run under the GUI's own
+never-block rule. Reopening with the lenses costs one open, where
+waiting for the probe before the first open would delay every file's
+first frame by the probe.
+
+Tested (kittest on lavapipe, `crates/app/tests`):
+
+- `overlay.rs`: after 2 s of playing, every line has its number
+  (decode, upload and render on the CPU and through lavapipe's
+  timestamps, UI frames, frames shown, draws, the viewer's size and
+  scale, the cache, the slots, RSS and faults), and F3 takes it away.
+- `settings.rs`: each setting reaches the player's config at once, past
+  the range lands on the range's end, the budget in force is shown,
+  Restore defaults keeps the folder; a cache the flag set stays its own,
+  greyed out. Unit tests: an old stored copy and a wild one load.
+- `raw.rs`: a two-lens Matroska file (`media::encode::mux_video_streams`)
+  opens on one stream, then both; each column is pixel for pixel the
+  flat still of its frame at `raw_place`'s place, black around them
+  (a paint one pixel off fails it, checked by mutation); a drag leaves
+  the view; the grid equirect after it is projected again. render's
+  `the_flat_pass_matches_the_reference`: 52.76, 50.73 and 52.38 dB
+  against floors of 49, 47 and 49, with a control at 10 dB.
+- `smoke.rs`: the run plays, measures, shoots and writes, every field
+  checked (the screenshot 960 × 600 from a 1600 × 1000 window, no stage
+  sample missed, presented 1.0 with no refresh rate); a clip that can't
+  open ends the run with `not_found`. `contract.rs`: the hidden flags'
+  usage errors, `no_display` before any window, and not in `--help`.
+
+Revisit if: H2's screenshots show the overlay unreadable over bright
+footage; a camera writes its lenses in streams of different sizes (the
+raw view's reopen then doesn't fire); M3's stitcher replaces the raw
+view; or winit stops reporting the refresh rate on a compositor Pat
+uses.
 
 ## Open
 
