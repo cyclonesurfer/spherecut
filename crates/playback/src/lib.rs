@@ -31,7 +31,7 @@ mod worker;
 
 pub use audio::{
     AudioDevice, AudioOutput, AudioOutputFactory, DeviceAudio, PREROLL_AUDIO, PREROLL_LIMIT,
-    PlayingAudio,
+    PlayerThreads, PlayingAudio,
 };
 pub use budget::{AutoBudget, BudgetError, CacheBudget, auto_budget, read_auto_budget};
 pub use cache::{CacheStats, FrameCache, Insert, MIN_FRAMES};

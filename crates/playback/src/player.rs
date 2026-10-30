@@ -638,6 +638,9 @@ impl Player {
             self.shared.slots.unshow(s.view.index, s.view.word);
         }
         ui.shown = vec![None; streams.len()];
+        // The last file's audio goes quiet now; its threads end with the
+        // newer open's token.
+        ui.clock.pause(now);
         ui.clock = self.base_clock.clone();
         ui.clock.pause(now);
         ui.clock.set(Time::ZERO, now);

@@ -609,6 +609,36 @@ fn the_null_output_keeps_time() {
     common::join(player);
 }
 
+/// The audio's threads are the player's: a newer open ends the last
+/// file's, and the player's join waits for them, a decoder stuck waiting
+/// for its read included, and reports them.
+#[test]
+fn the_audio_threads_end_with_their_open_and_the_players_join() {
+    let (backend, audio) = backend(FrameRate::FPS_29_97, 10);
+    let player = null_player(backend);
+    for name in ["first.synthetic", "second.synthetic"] {
+        player.open(name.into());
+        assert_eq!(opened_on(&player), Some(OutputKind::Null), "{name}");
+        player.play();
+        let playing = until(WAIT, || {
+            player
+                .present(Instant::now())
+                .filter(|p| p.time > Time::ZERO)
+        });
+        assert!(playing.is_some(), "{name} never played");
+    }
+    audio.valve.close();
+    std::thread::sleep(Duration::from_millis(50));
+    let report = player.join(common::JOIN);
+    assert!(report.is_clean(), "{report:?}");
+    let count = |name: &str| report.joined.iter().filter(|j| *j == name).count();
+    assert_eq!(
+        (count("audio-decode"), count("audio-null")),
+        (2, 2),
+        "{report:?}"
+    );
+}
+
 #[test]
 fn a_file_without_audio_plays_on_the_players_clock() {
     let player = null_player(SyntheticBackend::new(SyntheticClip {

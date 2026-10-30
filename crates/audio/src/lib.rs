@@ -27,8 +27,8 @@ mod null;
 pub mod render;
 pub mod ring;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -91,30 +91,55 @@ pub struct OutputStats {
     pub last_fallback: Option<Fallback>,
 }
 
-/// A thread an output runs, stopped and joined on drop.
+/// A thread an output runs, stopped and joined on drop unless it was
+/// handed over ([`Output::stop`]).
 #[derive(Debug)]
 struct Worker {
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Worker {
+    fn new(stop: Arc<AtomicBool>, thread: Option<JoinHandle<()>>) -> Self {
+        Worker {
+            stop,
+            thread: Mutex::new(thread),
+        }
+    }
+
+    /// Tell the thread to end, and hand it over if it wasn't already.
+    fn stop(&self) -> Option<JoinHandle<()>> {
+        self.stop.store(true, Ordering::Release);
+        let thread = self
+            .thread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(t) = &thread {
+            t.thread().unpark();
+        }
+        thread
+    }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(t) = self.thread.take() {
-            t.thread().unpark();
+        if let Some(t) = self.stop() {
+            spherecut_core::may_block("joining an audio output's thread");
             let _ = t.join();
         }
     }
 }
 
-/// An audio output (see the crate docs). Dropping it stops its device.
+/// An audio output (see the crate docs). Dropping it stops its device
+/// and waits for its thread, unless [`stop`](Output::stop) handed the
+/// thread over.
 #[derive(Debug)]
 pub struct Output {
     shared: Arc<Shared>,
     clock: Arc<AudioClock>,
     kind: OutputKind,
-    _worker: Option<Worker>,
+    worker: Option<Worker>,
 }
 
 impl Output {
@@ -126,7 +151,7 @@ impl Output {
             clock: Arc::new(AudioClock(shared.clone())),
             shared,
             kind,
-            _worker: worker,
+            worker,
         };
         (out, sink)
     }
@@ -134,7 +159,9 @@ impl Output {
     /// The default output device, at its default rate and channel count:
     /// PulseAudio if a server is there, else ALSA. Blocks while the
     /// device opens; [`AudioError::NoDevice`] when there is none.
+    #[track_caller]
     pub fn open_device() -> Result<(Output, Sink), AudioError> {
+        spherecut_core::may_block("opening the audio output device");
         let (shared, worker) = device::open()?;
         Ok(Self::new(shared, OutputKind::Device, Some(worker)))
     }
@@ -151,6 +178,14 @@ impl Output {
         );
         let worker = null::spawn(shared.clone());
         Self::new(shared, OutputKind::Null, Some(worker))
+    }
+
+    /// Stop the device without waiting: its thread (`audio-out` or
+    /// `audio-null`) ends within a tick, and is handed over to be joined
+    /// by whoever runs the threads. Once it has been, `None`, and
+    /// dropping the output doesn't wait. Never waits.
+    pub fn stop(&self) -> Option<JoinHandle<()>> {
+        self.worker.as_ref().and_then(Worker::stop)
     }
 
     /// The clock video follows while this plays.

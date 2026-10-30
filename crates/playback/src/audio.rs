@@ -23,19 +23,28 @@
 //! the clock starts. The audio's clip time 0 is the first video
 //! stream's first frame, which the decoder knows only once it opens, so
 //! the thread waits for [`AudioOutput::start`] to open its decoder.
+//!
+//! **Ending.** The output's threads are the player's ([`PlayerThreads`]):
+//! `audio-decode` ends when a newer open starts or the player shuts
+//! down, its reads interrupted by the shutdown, and stops the output's
+//! thread as it goes, so that [`Player::join`](crate::Player::join)
+//! waits for both within its budget and reports them. Dropping the
+//! output stops them too, without waiting, wherever it is dropped.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use spherecut_audio::{Output, OutputKind, OutputStats, Sink};
-use spherecut_core::{Clock, StopSource, StopToken, Time};
+use spherecut_core::{Clock, StopToken, Time};
 use spherecut_media::MediaError;
 use spherecut_media::backend::{AudioOutFormat, AudioRequest, MediaBackend, NextAudio};
 
 use crate::player::PlayerError;
+use crate::shared::spawn_into;
 
 /// How much audio from the seek's time must be queued before playback
 /// resumes after a seek (plan section 8.4, step 6).
@@ -51,16 +60,54 @@ const FULL_SLEEP: Duration = Duration::from_millis(5);
 const NULL_RATE: u32 = 48_000;
 const NULL_CHANNELS: u16 = 2;
 
+/// The player's threads, for an [`AudioOutputFactory`]'s: a thread
+/// started or adopted here is one that
+/// [`Player::join`](crate::Player::join) waits for and reports.
+#[derive(Debug, Clone)]
+pub struct PlayerThreads {
+    handles: Sender<(String, JoinHandle<()>)>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl PlayerThreads {
+    pub(crate) fn new(
+        handles: Sender<(String, JoinHandle<()>)>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Self {
+        PlayerThreads { handles, shutdown }
+    }
+
+    /// Start a thread named `name`.
+    pub fn spawn(&self, name: &str, f: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
+        spawn_into(&self.handles, name.into(), f)
+    }
+
+    /// A thread started elsewhere, ending: the player joins it with its
+    /// own.
+    pub fn adopt(&self, thread: JoinHandle<()>) {
+        let name = thread.thread().name().unwrap_or("unnamed").to_owned();
+        let _ = self.handles.send((name, thread));
+    }
+
+    /// The player's shutdown flag, for a decoder's interrupt.
+    pub fn interrupt(&self) -> Arc<AtomicBool> {
+        self.shutdown.clone()
+    }
+}
+
 /// Opens a file's audio for playback.
 pub trait AudioOutputFactory: Send + Sync + std::fmt::Debug {
     /// The audio of `path`, ready to play on its own clock, paused at 0;
     /// `Ok(None)` when the file has none, so the player keeps its own
-    /// clock. Blocks: the player calls it on its open worker, never the
-    /// UI thread.
+    /// clock. `stop` stops when a newer open starts or the player shuts
+    /// down: the audio's threads, started through `threads`, end then.
+    /// Blocks: the player calls it on its open worker, never the UI
+    /// thread.
     fn open(
         &self,
         path: &Path,
         stop: &StopToken,
+        threads: &PlayerThreads,
     ) -> Result<Option<Arc<dyn AudioOutput>>, PlayerError>;
 }
 
@@ -140,6 +187,7 @@ impl AudioOutputFactory for DeviceAudio {
         &self,
         path: &Path,
         stop: &StopToken,
+        threads: &PlayerThreads,
     ) -> Result<Option<Arc<dyn AudioOutput>>, PlayerError> {
         // Whether the file has audio the backend can decode: open it once
         // to see, at any format.
@@ -150,7 +198,7 @@ impl AudioOutputFactory for DeviceAudio {
                 channels: NULL_CHANNELS,
             },
             origin: None,
-            interrupt: StopSource::new().shutdown_flag(),
+            interrupt: threads.interrupt(),
         };
         match self.backend.open_audio(path, &check) {
             Ok(dec) => tracing::info!(info = ?dec.info(), "audio"),
@@ -164,50 +212,50 @@ impl AudioOutputFactory for DeviceAudio {
         Ok(Some(Arc::new(PlayingAudio::start(
             self.backend.clone(),
             path.to_path_buf(),
-            output,
-            sink,
+            (output, sink),
+            stop.clone(),
+            threads,
         )?)))
     }
 }
 
 /// A [`DeviceAudio`] output: the [`Output`] and its `audio-decode`
-/// thread, stopped and joined on drop.
+/// thread (see the module docs on how they end).
 #[derive(Debug)]
 pub struct PlayingAudio {
-    output: Output,
+    output: Arc<Output>,
     clock: Arc<dyn Clock>,
     origin: Mutex<Option<Sender<Option<Time>>>>,
-    stop: StopSource,
-    thread: Option<JoinHandle<()>>,
+    /// Set when this is dropped: `audio-decode` ends at its next chunk.
+    dropped: Arc<AtomicBool>,
+    threads: PlayerThreads,
 }
 
 impl PlayingAudio {
     fn start(
         backend: Arc<dyn MediaBackend>,
         path: PathBuf,
-        output: Output,
-        sink: Sink,
+        (output, sink): (Output, Sink),
+        token: StopToken,
+        threads: &PlayerThreads,
     ) -> Result<Self, PlayerError> {
         let (tx, rx) = mpsc::channel();
-        let stop = StopSource::new();
-        let thread = {
-            let stop = stop.clone();
-            std::thread::Builder::new()
-                .name("audio-decode".into())
-                .spawn(move || {
-                    Decode {
-                        backend,
-                        path,
-                        sink,
-                        token: stop.current(),
-                        stop,
-                    }
-                    .run(&rx);
-                })
-                .map_err(|e| {
-                    PlayerError::new("thread_failed", format!("starting audio-decode: {e}"))
-                })?
+        let output = Arc::new(output);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let decode = Decode {
+            backend,
+            path,
+            sink,
+            output: output.clone(),
+            token,
+            dropped: dropped.clone(),
+            threads: threads.clone(),
         };
+        threads
+            .spawn("audio-decode", move || decode.run(&rx))
+            .map_err(|e| {
+                PlayerError::new("thread_failed", format!("starting audio-decode: {e}"))
+            })?;
         if output.kind() == OutputKind::Null {
             tracing::warn!("no audio output device: playing silently");
         }
@@ -215,21 +263,22 @@ impl PlayingAudio {
             clock: output.clock(),
             output,
             origin: Mutex::new(Some(tx)),
-            stop,
-            thread: Some(thread),
+            dropped,
+            threads: threads.clone(),
         })
     }
 }
 
 impl Drop for PlayingAudio {
+    /// Never waits: it can be dropped on the UI thread.
     fn drop(&mut self) {
-        self.stop.shutdown();
+        self.dropped.store(true, Ordering::Release);
         self.origin
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+        if let Some(t) = self.output.stop() {
+            self.threads.adopt(t);
         }
     }
 }
@@ -268,19 +317,37 @@ struct Decode {
     backend: Arc<dyn MediaBackend>,
     path: PathBuf,
     sink: Sink,
-    stop: StopSource,
+    output: Arc<Output>,
+    /// The open's: stops with a newer open, or at shutdown.
     token: StopToken,
+    dropped: Arc<AtomicBool>,
+    threads: PlayerThreads,
 }
 
 impl Decode {
     fn run(self, origin: &Receiver<Option<Time>>) {
+        self.play(origin);
+        // The output's thread ends with this one.
+        if let Some(t) = self.output.stop() {
+            self.threads.adopt(t);
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.token.is_stopped() || self.dropped.load(Ordering::Acquire)
+    }
+
+    fn play(&self, origin: &Receiver<Option<Time>>) {
         let origin = loop {
             match origin.recv_timeout(Duration::from_millis(50)) {
                 Ok(o) => break o,
-                Err(RecvTimeoutError::Timeout) if !self.token.is_stopped() => {}
+                Err(RecvTimeoutError::Timeout) if !self.stopped() => {}
                 Err(_) => return,
             }
         };
+        if self.stopped() {
+            return;
+        }
         let req = AudioRequest {
             stream: None,
             out: AudioOutFormat {
@@ -288,7 +355,7 @@ impl Decode {
                 channels: self.sink.channels(),
             },
             origin,
-            interrupt: self.stop.shutdown_flag(),
+            interrupt: self.threads.interrupt(),
         };
         match self.backend.open_audio(&self.path, &req) {
             Ok(dec) => self.decode(dec),
@@ -308,7 +375,7 @@ impl Decode {
         // A chunk, and how many of its frames the ring has taken.
         let mut pending: Option<(spherecut_media::backend::AudioChunk, usize)> = None;
         let mut ended = false;
-        while !self.token.is_stopped() {
+        while !self.stopped() {
             let want = sink.want();
             if want.epoch != epoch {
                 epoch = want.epoch;
@@ -316,7 +383,7 @@ impl Decode {
                 ended = false;
                 pos = want.start;
                 if let Err(e) = dec.seek(want.at, &self.token) {
-                    if self.token.is_stopped() {
+                    if self.stopped() {
                         return;
                     }
                     tracing::warn!("audio: seeking to {:?}: {e}", want.at);
@@ -361,7 +428,7 @@ impl Decode {
     /// on silence.
     fn silent(&self) {
         let mut epoch = 0;
-        while !self.token.is_stopped() {
+        while !self.stopped() {
             let want = self.sink.want();
             if want.epoch != epoch {
                 epoch = want.epoch;
@@ -369,5 +436,51 @@ impl Decode {
             }
             std::thread::sleep(FULL_SLEEP);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use spherecut_core::FrameRate;
+    use spherecut_core::blocking::{OnBlock, mark_ui_thread_with, unmark_ui_thread};
+    use spherecut_synth::fake::{SyntheticAudio, SyntheticBackend, SyntheticClip};
+
+    #[test]
+    fn dropped_on_the_ui_thread_the_output_hands_its_threads_to_the_player() {
+        let (tx, rx) = mpsc::channel();
+        let threads = PlayerThreads::new(tx, Arc::new(AtomicBool::new(false)));
+        let clip = SyntheticClip {
+            rate: FrameRate::FPS_30,
+            frames: 30,
+            ..SyntheticClip::default()
+        };
+        let backend = SyntheticBackend::with_audio(clip, SyntheticAudio::new(Time::from_secs(1)));
+        let device = AudioDevice::Null {
+            rate: 48_000,
+            channels: 2,
+        };
+        let audio = DeviceAudio::new(Arc::new(backend), device)
+            .open(Path::new("a.synthetic"), &StopToken::never(), &threads)
+            .unwrap()
+            .unwrap();
+        audio.start(Some(Time::ZERO));
+        std::thread::spawn(move || {
+            mark_ui_thread_with(OnBlock::Panic);
+            drop(audio);
+            unmark_ui_thread();
+        })
+        .join()
+        .expect("dropping it waited");
+        let mut names: Vec<String> = (0..2)
+            .map(|_| {
+                let (name, thread) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                thread.join().unwrap();
+                name
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, ["audio-decode", "audio-null"]);
     }
 }

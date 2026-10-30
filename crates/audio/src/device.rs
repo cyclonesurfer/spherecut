@@ -294,13 +294,7 @@ pub(crate) fn open() -> Result<(Arc<Shared>, Worker), AudioError> {
             .map_err(stream_error)?
     };
     match rx.recv() {
-        Ok(Ok(shared)) => Ok((
-            shared,
-            Worker {
-                stop,
-                thread: Some(thread),
-            },
-        )),
+        Ok(Ok(shared)) => Ok((shared, Worker::new(stop, Some(thread)))),
         Ok(Err(e)) => {
             let _ = thread.join();
             Err(e)

@@ -49,7 +49,7 @@ use spherecut_media::backend::{
 };
 use spherecut_media::hw::GpuIds;
 
-use crate::audio::AudioOutputFactory;
+use crate::audio::{AudioOutputFactory, PlayerThreads};
 use crate::cache::Insert;
 use crate::decoder::{self, DecoderChoice, DecoderPreference, HwSupport, StreamFormat};
 use crate::perf::{Counter, Stage};
@@ -97,7 +97,14 @@ impl OpenJob {
             return;
         }
         let audio = match &self.audio {
-            Some(factory) => match factory.open(&self.path, &self.open_token) {
+            Some(factory) => match factory.open(
+                &self.path,
+                &self.open_token,
+                &PlayerThreads::new(
+                    self.shared.handles.clone(),
+                    self.shared.stop.shutdown_flag(),
+                ),
+            ) {
                 Ok(a) => {
                     if !self.stale() {
                         self.shared.event(match &a {
@@ -127,7 +134,7 @@ impl OpenJob {
         shared.cache.clear();
         shared.slots.discard_all();
         let clock = audio.as_ref().map_or(self.clock.clone(), |a| a.clock());
-        {
+        let old_audio = {
             let mut st = shared.status();
             st.epoch = self.epoch;
             st.path = Some(self.path.clone());
@@ -141,8 +148,10 @@ impl OpenJob {
                     ..StreamStatus::default()
                 })
                 .collect();
-            st.audio = audio;
-        }
+            std::mem::replace(&mut st.audio, audio)
+        };
+        // The last open's audio, if this holds it last, outside the lock.
+        drop(old_audio);
         shared.live.store(self.epoch, Ordering::Release);
         for (stream, ((asked, rx), choice)) in self.streams.into_iter().zip(choices).enumerate() {
             tracing::info!(stream, "decoding {}", choice.why);

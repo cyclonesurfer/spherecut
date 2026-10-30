@@ -29,7 +29,7 @@ pub(crate) fn spawn(shared: Arc<Shared>) -> Worker {
     if thread.is_none() {
         tracing::warn!("audio: the null output's thread didn't start");
     }
-    Worker { stop, thread }
+    Worker::new(stop, thread)
 }
 
 fn run(shared: &Arc<Shared>, stop: &AtomicBool) {
