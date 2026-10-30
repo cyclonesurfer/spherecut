@@ -8,7 +8,7 @@
 //!
 //! - the clock advances 2.0 s ± 50 ms and never goes back;
 //! - no gap between callbacks is over twice the callback's buffer;
-//! - the median reported latency is 5 to 200 ms;
+//! - the median reported latency is 5 to 400 ms ([`LATENCY`]);
 //! - the ring never ran dry and the clock never left the device's.
 //!
 //! The host, device, format, buffer and latency go into the report's
@@ -28,6 +28,12 @@ const RUN: Duration = Duration::from_secs(2);
 const TOLERANCE: Duration = Duration::from_millis(50);
 /// How long the clock may take to start moving after `play`.
 const START_LIMIT: Duration = Duration::from_secs(2);
+
+/// The median latency's bounds, in ms. The plan's ceiling was 200 ms;
+/// Bluetooth's A2DP took 182 on odin, where HDMI took 64, so a weaker
+/// link or another codec would pass 200, while A/V sync follows any
+/// latency the host reports (DECISIONS D35).
+const LATENCY: std::ops::RangeInclusive<f64> = 5.0..=400.0;
 
 const TONE_HZ: f64 = 440.0;
 /// −12 dBFS.
@@ -192,8 +198,10 @@ fn audio_output_device_plays() {
         "callbacks over twice their buffer apart: {late:?}"
     );
     assert!(
-        (5.0..=200.0).contains(&latency),
-        "the median latency is {latency:.1} ms, not 5 to 200"
+        LATENCY.contains(&latency),
+        "the median latency is {latency:.1} ms, not {} to {}",
+        LATENCY.start(),
+        LATENCY.end()
     );
     assert_eq!(stats.underruns, 0, "the ring ran dry: {stats:?}");
     assert_eq!(stats.fallbacks, 0, "the clock left the device's: {stats:?}");

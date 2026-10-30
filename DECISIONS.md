@@ -5459,7 +5459,12 @@ Where this differs from the plan:
   video still.
 - testkit's `require_audio_device` takes the function that opens the
   device, since testkit has no dependencies.
-- The Tier 2 test checks the median latency, not each callback's.
+- The Tier 2 test checks the median latency, not each callback's, and
+  up to 400 ms, not 200: on odin it passed at 182 ms on Bluetooth (A2DP,
+  the Edifiers Pat listens on) and 64 ms on HDMI, with the clock within
+  0.01 and 0.14 ms over 2 s and no xruns, and a weaker link or another
+  codec would go past 200, while A/V sync follows whatever latency the
+  host reports.
 
 Why: the plan's (section 9.3): the DAC's clock is the master, so video
 repeats or drops frames to follow it and there is no drift to correct.
@@ -5523,7 +5528,7 @@ Tested:
 - `audio_output_device_plays` (Tier 2): a 440 Hz tone on the default
   device for 2 s, passing when the clock advances 2.0 s ± 50 ms and is
   monotonic, no callback comes over twice its buffer after the last,
-  the median latency is 5 to 200 ms, nothing underran and the clock
+  the median latency is 5 to 400 ms, nothing underran and the clock
   stayed on the device; it notes the host, device, format, buffer and
   latency, and records the numbers. Here it skips with ALSA's "The
   requested audio device is not available". Run once by hand on the
@@ -5546,8 +5551,11 @@ Limits:
   against a microphone. The A/V offset setting (slice 8) covers the
   rest, and H2's `gui_smoke` measures |A/V| on the sync clip.
 - On this box (no audio device) the cpal stream, `audio-out`'s loop,
-  the error handling and the retry are only built, not run: H2 runs the
-  device test.
+  the error handling and the retry are only built, not run. On odin the
+  device test has run (at 855bb54, PulseAudio's protocol to PipeWire,
+  f32 at 48 kHz, 1024-frame buffers, on Bluetooth and on HDMI); losing
+  the device, the retry and the stall rule have still only run on the
+  fake device.
 - Ambisonic audio is a basic stereo decode, not steered by the view
   (M6 adds binaural).
 
