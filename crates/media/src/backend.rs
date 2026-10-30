@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
-use spherecut_core::video::{ColorInfo, PixelLayout, PlaneData, VideoPlanes};
+use spherecut_core::video::{
+    ColorInfo, DmabufLayer, PixelLayout, PlaneData, PlaneDesc, SampleBytes, VideoPlanes, fourcc,
+};
 use spherecut_core::{FrameRate, Rational, StopToken, Time};
 use thiserror::Error;
 
@@ -65,7 +67,10 @@ pub struct VideoRequest {
     pub threads: Option<NonZeroU32>,
     /// Surfaces a hardware decoder keeps beyond its own needs: one for the
     /// best frame held during a seek, one spare (`extra_hw_frames`).
+    /// With [`HwOutput::DrmPrime`] it is at least [`ZERO_COPY_SURFACES`].
     pub extra_hw_frames: u8,
+    /// What a device decoder hands frames out as (slice 5b).
+    pub output: HwOutput,
     /// Set at shutdown only: FFmpeg stops reading inside a read, and the
     /// stream ends for good (D13). Seeks stop through [`StopToken`]s.
     pub interrupt: Arc<AtomicBool>,
@@ -81,11 +86,45 @@ impl Default for VideoRequest {
             decode: DecodeMode::Software,
             threads: None,
             extra_hw_frames: 2,
+            output: HwOutput::Download,
             interrupt: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "fault-injection")]
             fault: None,
         }
     }
+}
+
+/// What a device decoder hands frames out as (M1 plan slice 5b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HwOutput {
+    /// Copied into system memory (D30).
+    #[default]
+    Download,
+    /// On VA-API, left on the device and exported as DMA-BUFs, a layer a
+    /// plane ([`VideoPlanes::dmabuf`]), for a GPU to import. A frame that
+    /// doesn't export so (a compressed layout, cropping on the left or
+    /// top, a format that needs converting) is downloaded, and its
+    /// [`VideoFrame::transfer`] says so. Vulkan Video frames are always
+    /// downloaded.
+    DrmPrime,
+}
+
+/// Surfaces a VA-API decoder keeps beyond its own with
+/// [`HwOutput::DrmPrime`], for the exported frames others hold: the frame
+/// cache's, those in flight to the GPU and those on screen.
+pub const ZERO_COPY_SURFACES: u8 = 24;
+
+/// How a frame left its decoder.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Transfer {
+    /// Decoded in system memory.
+    #[default]
+    System,
+    /// Copied from the device; with the reason when it was to have been
+    /// exported ([`HwOutput::DrmPrime`]).
+    Downloaded { not_exported: Option<String> },
+    /// Exported as DMA-BUFs, still on the device.
+    DrmPrime,
 }
 
 /// Which frame a test fails "as hardware", and how (the `fault-injection`
@@ -510,6 +549,8 @@ pub struct VideoFrame {
     /// have skipped frames.
     pub run: u64,
     pub seq: u64,
+    /// How it left the decoder.
+    pub transfer: Transfer,
     storage: FrameStorage,
     layout: Arc<PixelLayout>,
     color: ColorInfo,
@@ -527,6 +568,87 @@ pub(crate) enum FrameStorage {
         planes: Vec<Vec<u8>>,
         strides: Vec<usize>,
     },
+    /// A VA-API frame, and its mapping to DRM PRIME, which holds the
+    /// exported fds the layers name.
+    DrmPrime {
+        device: ff::frame::Video,
+        _mapped: ff::frame::Video,
+        layers: Vec<DmabufLayer>,
+    },
+}
+
+/// The DRM fourcc a plane exports as, with a layer per plane.
+fn plane_fourcc(plane: &PlaneDesc) -> Option<u32> {
+    match (plane.components, plane.bytes) {
+        (1, SampleBytes::One) => Some(fourcc::R8),
+        (2, SampleBytes::One) => Some(fourcc::GR88),
+        (1, SampleBytes::Two) => Some(fourcc::R16),
+        (2, SampleBytes::Two) => Some(fourcc::GR1616),
+        _ => None,
+    }
+}
+
+/// `layers` as `layout`'s planes for a `size` picture: a layer of one
+/// memory plane for each plane, of the plane's own fourcc. What doesn't
+/// match is the reason the frame is downloaded instead.
+pub(crate) fn match_layers(
+    layout: &PixelLayout,
+    size: (u32, u32),
+    layers: &[ffi::DrmLayer],
+) -> Result<Vec<DmabufLayer>, String> {
+    if layers.len() != layout.planes.len() {
+        return Err(format!(
+            "it exported {} layers for {}'s {} planes",
+            layers.len(),
+            layout.name,
+            layout.planes.len()
+        ));
+    }
+    layout
+        .planes
+        .iter()
+        .zip(layers)
+        .enumerate()
+        .map(|(i, (plane, l))| {
+            if l.planes != 1 {
+                return Err(format!(
+                    "layer {i} has {} memory planes (modifier {:#x}), \
+                     a compressed layout a single-plane import can't take",
+                    l.planes, l.modifier
+                ));
+            }
+            let want = plane_fourcc(plane).ok_or_else(|| format!("plane {i} has no fourcc"))?;
+            if l.fourcc != want {
+                return Err(format!(
+                    "layer {i} is {} where {} was expected",
+                    fourcc_name(l.fourcc),
+                    fourcc_name(want)
+                ));
+            }
+            Ok(DmabufLayer {
+                fd: l.fd,
+                fourcc: l.fourcc,
+                modifier: l.modifier,
+                offset: l.offset,
+                pitch: l.pitch,
+                size: plane.size(size.0, size.1),
+            })
+        })
+        .collect()
+}
+
+/// A fourcc as its four characters.
+pub fn fourcc_name(code: u32) -> String {
+    code.to_le_bytes()
+        .iter()
+        .map(|&b| match b {
+            b' ' => ' ',
+            b if b.is_ascii_graphic() => b as char,
+            _ => '?',
+        })
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
 }
 
 /// A plane of an owned frame doesn't hold its rows.
@@ -563,6 +685,7 @@ impl VideoFrame {
             decoded_on: DecodePath::Software { threads: None },
             run: 0,
             seq: 0,
+            transfer: Transfer::System,
             storage: FrameStorage::Ffmpeg(frame),
             layout,
             color,
@@ -627,12 +750,91 @@ impl VideoFrame {
             decoded_on: DecodePath::Software { threads: None },
             run: 0,
             seq: 0,
+            transfer: Transfer::System,
             storage: FrameStorage::Owned { planes, strides },
             layout,
             color,
             size,
             bytes,
         })
+    }
+
+    /// A frame left on its VA-API device: `device`, mapped to DRM PRIME as
+    /// `mapped` (whose fds `layers` name), as `layout`'s planes at `size`.
+    /// It keeps no system memory, so it counts no bytes.
+    pub(crate) fn from_drm_prime(
+        device: ff::frame::Video,
+        mapped: ff::frame::Video,
+        layers: Vec<DmabufLayer>,
+        layout: Arc<PixelLayout>,
+        color: ColorInfo,
+        size: (u32, u32),
+        (pts, time): (i64, Time),
+    ) -> VideoFrame {
+        let f = ffi::frame_fields(&device);
+        VideoFrame {
+            pts,
+            time,
+            duration: None,
+            key: f.key,
+            concealed: f.concealed,
+            decoded_on: DecodePath::Software { threads: None },
+            run: 0,
+            seq: 0,
+            transfer: Transfer::DrmPrime,
+            storage: FrameStorage::DrmPrime {
+                device,
+                _mapped: mapped,
+                layers,
+            },
+            layout,
+            color,
+            size,
+            bytes: 0,
+        }
+    }
+
+    /// Whether the frame is still on its device ([`Transfer::DrmPrime`]):
+    /// its planes are imported, not read.
+    pub fn on_device(&self) -> bool {
+        matches!(self.storage, FrameStorage::DrmPrime { .. })
+    }
+
+    /// A frame still on its device, copied into system memory: what a
+    /// caller that can't import it reads (`None` for one that isn't on a
+    /// device). Blocks while the device copies.
+    pub fn to_system(&self) -> Option<Result<VideoFrame, MediaError>> {
+        let FrameStorage::DrmPrime { device, .. } = &self.storage else {
+            return None;
+        };
+        let down = match ffi::download(device) {
+            Ok(d) => d,
+            Err(e) => {
+                return Some(Err(MediaError::Decode {
+                    path: PathBuf::new(),
+                    reason: format!("copying a frame from its device: {e}"),
+                }));
+            }
+        };
+        let mut out = VideoFrame::from_ffmpeg(
+            down,
+            self.layout.clone(),
+            self.color.clone(),
+            self.pts,
+            self.time,
+        );
+        out.duration = self.duration;
+        out.key = self.key;
+        out.concealed = self.concealed;
+        out.decoded_on = self.decoded_on.clone();
+        out.run = self.run;
+        out.seq = self.seq;
+        out.transfer = Transfer::Downloaded {
+            not_exported: Some(
+                "downloaded after the export, for a reader that can't import".into(),
+            ),
+        };
+        Some(Ok(out))
     }
 
     /// The bytes keeping it keeps, for the frame cache's budget (M1 plan
@@ -657,6 +859,7 @@ impl VideoFrame {
             FrameStorage::Owned { planes, .. } => {
                 planes.get(index).map_or(std::ptr::null(), |p| p.as_ptr())
             }
+            FrameStorage::DrmPrime { .. } => std::ptr::null(),
         }
     }
 }
@@ -694,6 +897,7 @@ impl VideoPlanes for VideoFrame {
             FrameStorage::Owned { planes, strides } => {
                 (planes.get(index)?.as_slice(), *strides.get(index)?)
             }
+            FrameStorage::DrmPrime { .. } => return None,
         };
         Some(PlaneData {
             bytes,
@@ -705,6 +909,13 @@ impl VideoPlanes for VideoFrame {
 
     fn color(&self) -> &ColorInfo {
         &self.color
+    }
+
+    fn dmabuf(&self) -> Option<&[DmabufLayer]> {
+        match &self.storage {
+            FrameStorage::DrmPrime { layers, .. } => Some(layers),
+            _ => None,
+        }
     }
 }
 
@@ -939,3 +1150,79 @@ const _: () = {
     send::<StopToken>();
     sync::<StopToken>();
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layout(fmt: ffmpeg_sys_next::AVPixelFormat) -> PixelLayout {
+        ffi::pixel_layout(fmt as i32).expect("a layout")
+    }
+
+    fn layer(fourcc: u32, offset: u64, pitch: u64) -> ffi::DrmLayer {
+        ffi::DrmLayer {
+            fourcc,
+            planes: 1,
+            fd: 7,
+            modifier: 0x0200_0000_0004_0b01,
+            offset,
+            pitch,
+        }
+    }
+
+    #[test]
+    fn nv12_and_p010_export_a_layer_a_plane_of_their_own_fourcc() {
+        use ffmpeg_sys_next::AVPixelFormat as F;
+        let nv12 = layout(F::AV_PIX_FMT_NV12);
+        let got = match_layers(
+            &nv12,
+            (5761, 2881),
+            &[
+                layer(fourcc::R8, 0, 6144),
+                layer(fourcc::GR88, 6144 * 2944, 6144),
+            ],
+        )
+        .unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].size, (5761, 2881));
+        // Chroma rounds up, as FFmpeg's planes do.
+        assert_eq!(got[1].size, (2881, 1441));
+        assert_eq!((got[1].offset, got[1].pitch), (6144 * 2944, 6144));
+        assert_eq!(got[1].fd, 7);
+        let p010 = layout(F::AV_PIX_FMT_P010LE);
+        let got = match_layers(
+            &p010,
+            (64, 32),
+            &[layer(fourcc::R16, 0, 256), layer(fourcc::GR1616, 8192, 256)],
+        )
+        .unwrap();
+        assert_eq!(
+            got.iter().map(|l| l.fourcc).collect::<Vec<_>>(),
+            [fourcc::R16, fourcc::GR1616]
+        );
+    }
+
+    #[test]
+    fn layers_that_aren_t_the_planes_are_refused_with_the_reason() {
+        use ffmpeg_sys_next::AVPixelFormat as F;
+        let nv12 = layout(F::AV_PIX_FMT_NV12);
+        let size = (64, 32);
+        // One composed layer for both planes.
+        let why = match_layers(&nv12, size, &[layer(fourcc::R8, 0, 64)]).unwrap_err();
+        assert!(why.contains("1 layers for nv12's 2 planes"), "{why}");
+        // A compression modifier's metadata plane.
+        let mut dcc = layer(fourcc::GR88, 2048, 64);
+        dcc.planes = 2;
+        let why = match_layers(&nv12, size, &[layer(fourcc::R8, 0, 64), dcc]).unwrap_err();
+        assert!(why.contains("layer 1 has 2 memory planes"), "{why}");
+        // A 10-bit plane where 8 bits were expected.
+        let why = match_layers(
+            &nv12,
+            size,
+            &[layer(fourcc::R16, 0, 64), layer(fourcc::GR88, 2048, 64)],
+        )
+        .unwrap_err();
+        assert_eq!(why, "layer 0 is R16 where R8 was expected");
+        assert_eq!(fourcc_name(fourcc::GR1616), "GR32");
+    }
+}

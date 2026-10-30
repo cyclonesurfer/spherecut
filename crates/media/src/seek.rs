@@ -35,8 +35,8 @@ use spherecut_core::{FrameRate, Rational, Rounding, StopToken, Time};
 
 use crate::backend::{
     DamageCause, DecodePath, DecodeStats, DecoderEvent, Exactness, FallbackReason, HwKind,
-    NextFrame, SeekCost, SeekMode, SeekOutcome, SourceMapping, Timing, VideoDecode, VideoFrame,
-    VideoRequest, VideoStreamInfo,
+    HwOutput, NextFrame, SeekCost, SeekMode, SeekOutcome, SourceMapping, Timing, Transfer,
+    VideoDecode, VideoFrame, VideoRequest, VideoStreamInfo, ZERO_COPY_SURFACES, match_layers,
 };
 #[cfg(feature = "fault-injection")]
 use crate::backend::{Fault, FaultPlan};
@@ -382,6 +382,11 @@ pub struct FfmpegVideo {
     events: Vec<DecoderEvent>,
     stats: DecodeStats,
     decode_ms_total: f64,
+    /// Frames are exported as DMA-BUFs rather than downloaded
+    /// ([`HwOutput::DrmPrime`] on VA-API), and why the last one that
+    /// wasn't, once said.
+    drm_prime: bool,
+    not_exported: Option<String>,
     #[cfg(feature = "fault-injection")]
     injection: Option<Injection>,
 }
@@ -455,6 +460,14 @@ impl FfmpegVideo {
     /// can't decode is [`MediaError::HwUnsupported`] and its failure
     /// [`MediaError::HwFailed`], from here or later, never damage.
     pub(crate) fn open_on(path: &Path, req: &VideoRequest, on: On) -> Result<Self, MediaError> {
+        let drm_prime = req.output == HwOutput::DrmPrime
+            && matches!(
+                &on,
+                On::Device {
+                    kind: HwKind::VaApi,
+                    ..
+                }
+            );
         let (mut dec, decode_path) = match &on {
             On::Software => (
                 VideoDecoder::open_software(path, req.stream, req.threads, req.interrupt.clone())?,
@@ -467,7 +480,11 @@ impl FfmpegVideo {
                     path,
                     req.stream,
                     dev.clone(),
-                    req.extra_hw_frames,
+                    if drm_prime {
+                        req.extra_hw_frames.max(ZERO_COPY_SURFACES)
+                    } else {
+                        req.extra_hw_frames
+                    },
                     req.interrupt.clone(),
                 )?,
                 DecodePath::Hardware { kind: *kind },
@@ -643,6 +660,8 @@ impl FfmpegVideo {
             events,
             stats: DecodeStats::default(),
             decode_ms_total: 0.0,
+            drm_prime,
+            not_exported: None,
             #[cfg(feature = "fault-injection")]
             injection,
         };
@@ -1145,21 +1164,21 @@ impl FfmpegVideo {
         #[cfg(feature = "fault-injection")]
         self.inject(Some(raw.made), Some(Fault::Download))?;
         // Only now off the device: what a seek decoded on the way stayed
-        // there.
-        let (picture, f) = if raw.on_device {
-            let started = Instant::now();
-            let down = self.dec.download(&raw.frame)?;
-            self.stats.last_download_ms = started.elapsed().as_secs_f64() * 1000.0;
-            let d = ffi::frame_fields(&down);
-            let f = FrameFields {
-                format: d.format,
-                width: d.width,
-                height: d.height,
-                ..raw.fields
-            };
-            (down, f)
-        } else {
-            (raw.frame, raw.fields)
+        // there. Exported, it stays on it.
+        let started = Instant::now();
+        let mapped = match raw.on_device && self.drm_prime {
+            true => self.export(&raw.frame),
+            false => None,
+        };
+        let f = match raw.on_device {
+            // What a download makes of it.
+            true => {
+                ffi::as_downloaded(&raw.frame, raw.fields).ok_or_else(|| MediaError::Decode {
+                    path: self.dec.path().to_path_buf(),
+                    reason: "a device frame without a frames context".into(),
+                })?
+            }
+            false => raw.fields,
         };
         if self.conv.source() != (f.format, f.width, f.height) {
             let conv = Conversion::new(self.dec.path(), f.format, f.width, f.height)?;
@@ -1200,23 +1219,74 @@ impl FfmpegVideo {
         };
         let at = time(raw.pts)?;
         let layout = self.conv.layout().clone();
-        let frame = match &mut self.conv {
-            Conversion::Native { .. } => picture,
-            Conversion::Scaled { scaler, .. } => {
-                let started = Instant::now();
-                let out = scaler.scale(&picture).map_err(|e| MediaError::Decode {
-                    path: self.dec.path().to_path_buf(),
-                    reason: format!("converting {} frame: {e}", self.source_name),
-                })?;
-                self.stats.last_convert_ms = started.elapsed().as_secs_f64() * 1000.0;
-                out
+        // An exported frame is uploaded as it is: its layers must be the
+        // layout's planes as they come, else it is downloaded after all.
+        let exported = match mapped {
+            Some(mapped) if matches!(self.conv, Conversion::Native { .. }) => {
+                match ffi::drm_layers(&mapped)
+                    .ok_or_else(|| "its DRM descriptor is out of range".to_owned())
+                    .and_then(|l| match_layers(&layout, (f.width, f.height), &l))
+                {
+                    Ok(layers) => Some((mapped, layers)),
+                    Err(why) => {
+                        self.refuse_export(why);
+                        None
+                    }
+                }
             }
+            Some(_) => {
+                self.refuse_export(format!(
+                    "its {} frames are converted to {} on the CPU",
+                    self.source_name, layout.name
+                ));
+                None
+            }
+            None => None,
         };
-        let mut out = VideoFrame::from_ffmpeg(frame, layout, color, raw.pts, at);
         let duration = next_pts
             .map(|n| n.saturating_sub(raw.pts))
             .filter(|&d| d > 0)
             .or((f.duration > 0).then_some(f.duration));
+        let mut out = if let Some((mapped, layers)) = exported {
+            self.stats.last_download_ms = started.elapsed().as_secs_f64() * 1000.0;
+            VideoFrame::from_drm_prime(
+                raw.frame,
+                mapped,
+                layers,
+                layout,
+                color,
+                (f.width, f.height),
+                (raw.pts, at),
+            )
+        } else {
+            let picture = match raw.on_device {
+                true => {
+                    let down = self.dec.download(&raw.frame)?;
+                    self.stats.last_download_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    down
+                }
+                false => raw.frame,
+            };
+            let frame = match &mut self.conv {
+                Conversion::Native { .. } => picture,
+                Conversion::Scaled { scaler, .. } => {
+                    let started = Instant::now();
+                    let out = scaler.scale(&picture).map_err(|e| MediaError::Decode {
+                        path: self.dec.path().to_path_buf(),
+                        reason: format!("converting {} frame: {e}", self.source_name),
+                    })?;
+                    self.stats.last_convert_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    out
+                }
+            };
+            let mut out = VideoFrame::from_ffmpeg(frame, layout, color, raw.pts, at);
+            if raw.on_device {
+                out.transfer = Transfer::Downloaded {
+                    not_exported: self.drm_prime.then(|| self.not_exported.clone()).flatten(),
+                };
+            }
+            out
+        };
         out.duration = duration.and_then(|d| Time::from_pts(d, tb).ok());
         out.decoded_on = self.decode_path.clone();
         out.run = self.run;
@@ -1229,6 +1299,35 @@ impl FfmpegVideo {
         let frame = Arc::new(out);
         self.current = Some(frame.clone());
         Ok(frame)
+    }
+
+    /// `frame`, on the VA-API device, mapped to DRM PRIME; `None`, the
+    /// reason said once, when it can't be: cropped on the left or top
+    /// (an import starts at a plane's first texel), or the map failed.
+    fn export(&mut self, frame: &ff::frame::Video) -> Option<ff::frame::Video> {
+        if ffi::crop_left_top(frame) != (0, 0) {
+            self.refuse_export("the frame is cropped on the left or top".into());
+            return None;
+        }
+        match ffi::map_drm_prime(frame) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                self.refuse_export(format!("mapping it to DRM PRIME failed: {e}"));
+                None
+            }
+        }
+    }
+
+    /// A frame that was to be exported is downloaded, for `why`: logged
+    /// the first time, and the frame's transfer says it.
+    fn refuse_export(&mut self, why: String) {
+        if self.not_exported.as_ref() != Some(&why) {
+            tracing::warn!(
+                path = %self.dec.path().display(),
+                "a VA-API frame isn't exported, so it is downloaded: {why}"
+            );
+        }
+        self.not_exported = Some(why);
     }
 
     /// Decode one frame ahead into `pending`, if it isn't there, so the

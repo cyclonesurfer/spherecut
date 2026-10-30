@@ -3074,6 +3074,14 @@ pub(crate) fn download_into_pool(
     Ok(dst)
 }
 
+/// Copy the hardware frame `src` into system memory, as
+/// [`download_into_pool`] does, through a pool of its own: for a frame
+/// left on its device and read once (`VideoFrame::to_system`).
+pub(crate) fn download(src: &ff::frame::Video) -> Result<ff::frame::Video, ff::Error> {
+    let mut pool = DownloadPool::default();
+    download_into_pool(&mut pool, src)
+}
+
 /// What a device frame becomes once downloaded by [`download_into_pool`]:
 /// its frames context's system-memory format, and its size less the left
 /// and top cropping still to apply. `None` when it has no frames context.
@@ -3093,6 +3101,88 @@ pub(crate) fn as_downloaded(frame: &ff::frame::Video, fields: FrameFields) -> Op
             height: less(fields.height, (*f).crop_top),
             ..fields
         })
+    }
+}
+
+/// One layer of a DRM PRIME frame, as its descriptor has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DrmLayer {
+    pub fourcc: u32,
+    /// Memory planes in the layer: 1 for a plane of NV12 or P010 as
+    /// VA-API exports it with separate layers, more with a compression
+    /// modifier's metadata planes.
+    pub planes: usize,
+    pub fd: c_int,
+    pub modifier: u64,
+    pub offset: u64,
+    pub pitch: u64,
+}
+
+/// Map the VA-API frame `src` to DRM PRIME for reading: FFmpeg syncs the
+/// surface and exports it with a layer per plane (FFmpeg's
+/// `vaapi_map_to_drm_esh`). The mapped frame holds `src`'s surface and
+/// the exported fds until it is freed.
+pub(crate) fn map_drm_prime(src: &ff::frame::Video) -> Result<ff::frame::Video, ff::Error> {
+    let mut dst = ff::frame::Video::empty();
+    // SAFETY: `dst` is a fresh frame with no buffers; `src` wraps a live
+    // device frame. av_hwframe_map with a DRM PRIME `format` and no
+    // hw_frames_ctx maps into `dst`, which then refers to `src`'s buffers.
+    unsafe {
+        let d = dst.as_mut_ptr();
+        (*d).format = sys::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int;
+        let ret = sys::av_hwframe_map(d, src.as_ptr(), sys::AV_HWFRAME_MAP_READ as c_int);
+        if ret < 0 {
+            return Err(ff::Error::from(ret));
+        }
+    }
+    Ok(dst)
+}
+
+/// The layers of a frame [`map_drm_prime`] made, each with its first
+/// memory plane; `None` when it holds no descriptor or its counts are out
+/// of range.
+pub(crate) fn drm_layers(frame: &ff::frame::Video) -> Option<Vec<DrmLayer>> {
+    // SAFETY: a DRM PRIME frame's data[0] is its AVDRMFrameDescriptor,
+    // which lives as long as the frame; its counts are checked against
+    // the arrays before any entry is read.
+    unsafe {
+        let f = frame.as_ptr();
+        if (*f).format != sys::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int
+            || (*f).data[0].is_null()
+        {
+            return None;
+        }
+        let desc = &*(*f).data[0].cast::<sys::AVDRMFrameDescriptor>();
+        let objects = usize::try_from(desc.nb_objects).ok()?;
+        let layers = usize::try_from(desc.nb_layers).ok()?;
+        if objects > desc.objects.len() || layers > desc.layers.len() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(layers);
+        for layer in &desc.layers[..layers] {
+            let planes = usize::try_from(layer.nb_planes).ok()?;
+            let plane = layer.planes.get(..planes)?.first()?;
+            let object = desc.objects[..objects].get(usize::try_from(plane.object_index).ok()?)?;
+            out.push(DrmLayer {
+                fourcc: layer.format,
+                planes,
+                fd: object.fd,
+                modifier: object.format_modifier,
+                offset: u64::try_from(plane.offset).ok()?,
+                pitch: u64::try_from(plane.pitch).ok()?,
+            });
+        }
+        Some(out)
+    }
+}
+
+/// The left and top cropping still to apply to a device frame, which
+/// FFmpeg leaves (it crops a device frame only on the right and bottom).
+pub(crate) fn crop_left_top(frame: &ff::frame::Video) -> (usize, usize) {
+    // SAFETY: `frame` wraps a live AVFrame; two size_t fields.
+    unsafe {
+        let f = frame.as_ptr();
+        ((*f).crop_left, (*f).crop_top)
     }
 }
 
