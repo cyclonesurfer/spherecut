@@ -163,7 +163,7 @@ impl Roots {
             rest,
             OFlags::RDONLY | OFlags::NOCTTY | OFlags::NONBLOCK,
         )
-        .map_err(|e| self.refused(arg, e, Want::File))?;
+        .map_err(|e| self.refused(arg, e, Want::File, path))?;
         let st = rustix::fs::fstat(&fd).map_err(|e| unreadable(arg, e))?;
         match FileType::from_raw_mode(st.st_mode) {
             FileType::RegularFile => {}
@@ -198,7 +198,7 @@ impl Roots {
             rest,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOCTTY,
         )
-        .map_err(|e| self.refused(arg, e, Want::Folder))?;
+        .map_err(|e| self.refused(arg, e, Want::Folder, path))?;
         let mut dir = Dir::new(fd).map_err(|e| unreadable(arg, e))?;
         let mut entries = Vec::new();
         let mut left_out = 0;
@@ -265,7 +265,7 @@ impl Roots {
             folder
         };
         let parent = beneath(root.fd.as_fd(), folder, OFlags::PATH | OFlags::DIRECTORY)
-            .map_err(|e| self.refused(arg, e, Want::OutputFolder))?;
+            .map_err(|e| self.refused(arg, e, Want::OutputFolder, path))?;
         let fd = rustix::fs::openat(
             &parent,
             name,
@@ -319,8 +319,9 @@ impl Roots {
         self.read.iter().chain(&self.write)
     }
 
-    /// An `openat2` refusal as the agent gets it (a1-plan section 5).
-    fn refused(&self, arg: &str, e: Errno, want: Want) -> ToolError {
+    /// An `openat2` refusal of `path` as the agent gets it (a1-plan
+    /// section 5).
+    fn refused(&self, arg: &str, e: Errno, want: Want, path: &Path) -> ToolError {
         let e = match (e, want) {
             (Errno::XDEV | Errno::AGAIN, Want::OutputFolder) => {
                 return outside(arg, "write to", self.write.iter());
@@ -329,6 +330,12 @@ impl Roots {
             (Errno::NOENT, Want::OutputFolder) => {
                 ToolError::new(codes::NOT_FOUND, "is in a folder that doesn't exist")
                     .next("write it to a folder that exists: none is made")
+            }
+            (Errno::NOENT, _) if path.is_relative() => {
+                ToolError::new(codes::NOT_FOUND, "doesn't exist").next(
+                    "a relative path is read under the first read root; probe a folder to see \
+                     what is there, or give an absolute path",
+                )
             }
             (Errno::NOENT, _) => ToolError::new(codes::NOT_FOUND, "doesn't exist"),
             (Errno::LOOP, _) => ToolError::new(

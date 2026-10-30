@@ -297,13 +297,13 @@ fn measure(times: &[Time], diffs: &[(Time, f64)], span: &Span, done: usize) -> (
     let max_at = diffs
         .iter()
         .max_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(t, _)| secs(t.to_secs_f64()));
+        .map(|(t, _)| *t);
     let summary = json!({
         "frames": frames.iter().sum::<usize>(),
         "mean": mean,
         "max": max,
         "max_at": max_at,
-        "cuts": listed(&cut_times.iter().map(|t| t.to_secs_f64()).collect::<Vec<_>>()),
+        "cuts": listed(&cut_times),
     });
     (buckets, summary)
 }

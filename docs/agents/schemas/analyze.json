@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "analyze",
-  "description": "Measure a video over time, in buckets. timing reads packets only: frame durations, duplicate timestamps, gaps (frames missing), keyframes, Mb/s, vfr, and pictures coded as repeats. motion decodes: the change from frame to frame (0 to 255) and cuts. audio: peak and RMS dBFS, clipped samples, silences. Out of time, it returns the buckets done with complete false and next_from to call again from.",
+  "description": "Measure a video over time, in buckets. timing reads packets only: frame durations, duplicate timestamps, gaps (frames missing), keyframes, Mb/s, vfr, and pictures coded as repeats. motion decodes: the change from frame to frame (0 to 255) and cuts. audio: peak and RMS dBFS, clipped samples, silences. Out of time, it returns the buckets done with complete false and next_from to call again from. Moments come back exact, to send to look.",
   "type": "object",
   "additionalProperties": false,
   "required": [
