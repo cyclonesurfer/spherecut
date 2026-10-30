@@ -5049,7 +5049,10 @@ What:
     first second of 60 s in real time, every unthrottled second
     decoding at least 1.2 × 29.97 frames, and every stream on that
     kind throughout. The rows are recorded before the gate judges, so a
-    failing run's numbers are in the report.
+    failing run's numbers are in the report. *Updated by D42:* the
+    gated run plays as the app does by default, Vulkan Video's frames
+    kept on the GPU (path B) where the device can be shared, and `Auto`'s
+    copy path is then recorded.
   - The other kind, where doctor says it decodes the format, and
     software are recorded, 20 s each, as are `bench_playback_realtime_8k_8bit`
     (synth's 8K perf clip), `bench_playback_x5_raw` (the longest file
@@ -6079,7 +6082,9 @@ What:
   (plan section 12.3) are the playback benchmarks' gate (D34): on the
   hardware kind `Auto` picks, no drop and no decode-drop after the first
   second of 60 s, and every unthrottled second decoding at least
-  1.2 × 29.97 frames. A skip is never a pass.
+  1.2 × 29.97 frames. A skip is never a pass. *Updated by D42:* on the
+  path the app plays by default, zero copy where `Auto` picks Vulkan
+  Video and the device can be shared.
 - **Benchmarks** (D20): the playback benchmarks record one run's seconds
   as one row, named "… per second", whose runs are the seconds and whose
   range is the slowest and the fastest second. The report says so.
@@ -6635,6 +6640,61 @@ compositor shows frames without waiting for their writers; FFmpeg
 stops calling `lock_queue` (libavutil 62), which would take FFmpeg's
 decodes out of the gate; or a benchmark with a window shows the hold
 costing decode time.
+
+## D42. The real-time gate plays as the app does
+
+*2026-10-30, M1 slice 9, from odin's H3. Updates D34 and D37.*
+
+What:
+
+- **The gated run is the app's default path.** The gated runs of
+  `bench_playback_realtime_5k7_8bit` and `_10bit`, and of
+  `bench_playback_stitched_samples` within the criterion, play `Auto`'s
+  pick as the app plays it by default (D25): where `Auto` picks Vulkan
+  Video and the rendering GPU's device can be shared, on that GPU
+  opened again with its device shared, the frames decoded there and
+  copied out on the GPU (path B), under `ZeroCopy`'s default. Their rows
+  are named `<clip>, Vulkan (Auto, zero copy)`. Where `Auto` picks
+  VA-API, whose frames the app copies unless `SPHERECUT_ZERO_COPY=1`,
+  or the device can't be shared, the gated run copies as before, and a
+  note says why. A gated zero-copy run also fails if the GPU refused a
+  frame or took none. `Auto`'s copy path is then recorded, 20 s, as
+  `<clip>, Vulkan (Auto)`, beside the other kind and software.
+- **Why.** H3 at 0d491ae (PR #12) failed both 5.7K gates on Vulkan
+  Video's copy path, which the app on odin no longer takes. The 10-bit
+  clip dropped 69 frames between seconds 5 and 9 and its unthrottled
+  seconds fell to 11 to 15 fps; the 8-bit clip's fell to 27. A rerun
+  of the 10-bit clip passed; one of the 8-bit clip fell further, to 21.
+  The copy path downloads every frame into the frame cache, and
+  Vulkan Video's download buffers are mappings advised
+  `MADV_HUGEPAGE` (D30, m1-plan amendment 18). With odin's THP defrag
+  at `madvise`, a fault in one compacts memory directly when free
+  memory is fragmented; odin then had about 46 GB of page cache and
+  4.5 GB free, and over the failing run `compact_stall` rose by about
+  15 000 and `thp_fault_fallback` by 12 500, while the cache filled
+  with 160 to 200 new frames of 25 or 50 MB. With 15.7 GB free the
+  10-bit rerun passed. Path B downloads nothing, so this can't slow it.
+- **Measured** at 8d5c943 on odin, twice, with about 15.5 GB free:
+  both gates passed on path B, unthrottled at 128 to 131 fps on either
+  clip, nothing dropped, decode-dropped or late after the first second,
+  2385 to 2388 frames taken on the GPU a run and none refused. `Auto`'s
+  copy path, recorded, ran at 108 to 129 fps (8-bit) and 63 to 109
+  (10-bit), nothing dropped; with memory to spare, no compaction.
+- **What stays recorded, not gated:** the copy path's slump where
+  memory is fragmented. It touches Vulkan Video's copy path only
+  (VA-API's buffers come from `av_buffer_alloc`, amendment 18): the
+  app takes it where the device can't be shared or with
+  `SPHERECUT_ZERO_COPY=0`. PROGRESS lists it as a known issue.
+
+Rejected: gating both paths, which would fail odin on a path its app
+doesn't play; and dropping the huge-page advice, which brought back
+H1's 4 KiB faults (a new 5.7K P010 frame took about 12 000, and the
+cache filled in 7 s instead of 2.5).
+
+Revisit if: the app's default path changes (D25); a machine whose
+device can't be shared runs the gate on the copy path and slumps; or
+the copy path's buffers are allocated ahead of the decode, off its
+thread.
 
 ## Open
 

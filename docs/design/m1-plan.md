@@ -322,6 +322,12 @@ the sections below, they win.
       software-decode gate fails software only, not Vulkan Video; and
       the smoke run starts once the probe has opened a camera's lenses
       (D40).
+21. **H3** (D42). Section 12.3's real-time rows gate on "the path the
+    backend picks" as the app plays it by default: where that is Vulkan
+    Video on a device that can be shared, its frames stay on the GPU
+    (path B, D25, Pat's choice), and the copy path is recorded. H3 on
+    odin failed both gates on the copy path alone, while fragmented
+    memory slowed its huge-page download buffers (amendment 18).
 
 ## 1. Summary
 
