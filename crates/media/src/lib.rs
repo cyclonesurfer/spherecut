@@ -27,6 +27,7 @@ mod hwprobe;
 pub mod inject;
 pub mod mp4;
 mod nal;
+pub mod packets;
 pub mod probe;
 pub mod seek;
 pub mod spherical;

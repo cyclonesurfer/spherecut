@@ -15,6 +15,10 @@
 //! to stereo by swresample's default matrix. Stereo then goes to the
 //! output's channels: averaged for one, the first two of more.
 //!
+//! **Raw** ([`FfmpegAudio::open_raw`], for measuring a stream rather
+//! than playing it: a1-plan amendment 11): every channel as it is, at the
+//! stream's own rate, with no mixing; only the sample format becomes f32.
+//!
 //! **Timing.** libavcodec removes AAC's priming and the demuxer applies
 //! edit lists, so frames carry their presentation time. Samples before
 //! clip time 0 are dropped, and audio that starts after 0 (or after a
@@ -63,6 +67,8 @@ enum Mix {
     Ambix,
     /// swresample's default downmix.
     Downmix,
+    /// Every channel as it is ([`FfmpegAudio::open_raw`]).
+    Raw(usize),
 }
 
 impl Mix {
@@ -82,6 +88,7 @@ impl Mix {
             Mix::Stereo => (Channels::Unordered(2), Channels::Unordered(2)),
             Mix::Ambix => (Channels::Unordered(4), Channels::Unordered(4)),
             Mix::Downmix => (Channels::Frame, Channels::Default(2)),
+            Mix::Raw(n) => (Channels::Unordered(n), Channels::Unordered(n)),
         }
     }
 
@@ -91,6 +98,7 @@ impl Mix {
             Mix::Mono => 1,
             Mix::Stereo | Mix::Downmix => 2,
             Mix::Ambix => 4,
+            Mix::Raw(n) => n,
         }
     }
 }
@@ -145,6 +153,8 @@ pub struct FfmpegAudio {
     origin: Rational,
     in_rate: u32,
     mix: Mix,
+    /// Every channel at the stream's rate ([`open_raw`](Self::open_raw)).
+    raw: bool,
     grid: Grid,
     run: Option<Run>,
     /// The output sample the next chunk starts at.
@@ -197,8 +207,19 @@ impl FfmpegAudio {
     /// a decoder) and decode its first frame, which places the stream on
     /// the clip's axis. A file without one is [`MediaError::NoStream`].
     pub fn open(path: &Path, req: &AudioRequest) -> Result<Self, MediaError> {
+        Self::open_with(path, req, false)
+    }
+
+    /// As [`open`](Self::open), but the output is the stream's own: its
+    /// rate and every channel, unmixed, which [`AudioDecode::info`] gives.
+    /// `req.out` is not read.
+    pub fn open_raw(path: &Path, req: &AudioRequest) -> Result<Self, MediaError> {
+        Self::open_with(path, req, true)
+    }
+
+    fn open_with(path: &Path, req: &AudioRequest, raw: bool) -> Result<Self, MediaError> {
         init();
-        if req.out.rate == 0 || req.out.channels == 0 {
+        if !raw && (req.out.rate == 0 || req.out.channels == 0) {
             return Err(err(
                 path,
                 "opening audio",
@@ -278,6 +299,7 @@ impl FfmpegAudio {
             origin: req.origin.map_or(Rational::ZERO, Time::as_rational),
             in_rate: u32::try_from(fields.sample_rate).unwrap_or(0),
             mix: Mix::Stereo,
+            raw,
             grid: Grid {
                 first: 0,
                 period: 1,
@@ -311,18 +333,24 @@ impl FfmpegAudio {
         a.slack = a.tick_samples();
         a.info.rate = f.rate;
         a.info.channels = u16::try_from(f.channels).unwrap_or(u16::MAX);
-        a.mix = Mix::of(f.channels, ambisonic);
+        if raw {
+            a.out = AudioOutFormat {
+                rate: f.rate,
+                channels: a.info.channels,
+            };
+        }
+        a.mix = a.mix_of(f.channels);
         let first = a.input_position(f.pts.unwrap_or(0))?;
         if req.origin.is_none() {
             a.origin = Rational::new(first, i64::from(f.rate))
                 .map_err(|e| err(path, "audio timing", e))?;
         }
-        let g = gcd(i64::from(f.rate), i64::from(req.out.rate));
+        let g = gcd(i64::from(f.rate), i64::from(a.out.rate));
         let out_first = a.output_position(first)?;
         a.grid = Grid {
             first,
             period: i64::from(f.rate) / g,
-            out_period: i64::from(req.out.rate) / g,
+            out_period: i64::from(a.out.rate) / g,
             out_first,
         };
         a.info.start = Time::seconds(
@@ -342,6 +370,15 @@ impl FfmpegAudio {
         );
         a.take_frame()?;
         Ok(a)
+    }
+
+    /// How a frame of `channels` channels is mixed.
+    fn mix_of(&self, channels: usize) -> Mix {
+        if self.raw {
+            Mix::Raw(channels)
+        } else {
+            Mix::of(channels, self.info.ambisonic)
+        }
     }
 
     /// The input sample, at the input rate on the stream's own axis, that
@@ -475,12 +512,19 @@ impl FfmpegAudio {
         if f.samples == 0 {
             return Ok(());
         }
-        if f.rate != self.in_rate || Mix::of(f.channels, self.info.ambisonic) != self.mix {
+        if f.rate != self.in_rate || self.mix_of(f.channels) != self.mix {
+            if self.raw && f.channels != usize::from(self.out.channels) {
+                return Err(err(
+                    &self.path,
+                    "decoding audio",
+                    "the stream changes its channel count mid-way",
+                ));
+            }
             // A stream that changes its rate or channels mid-way: start
             // afresh from here, on a grid of the new rate.
             self.end_run()?;
             self.in_rate = f.rate;
-            self.mix = Mix::of(f.channels, self.info.ambisonic);
+            self.mix = self.mix_of(f.channels);
             let pos = self.input_position(f.pts.unwrap_or(0))?;
             let g = gcd(i64::from(f.rate), i64::from(self.out.rate));
             self.grid = Grid {
@@ -600,11 +644,17 @@ impl FfmpegAudio {
         let out = self.out.channels as usize;
         let kept = &data[from * width..];
         let mut chunk = Vec::with_capacity(kept.len() / width * out);
+        // Two channels to the output's, or every channel as it is.
+        let stereo = |frame: &[f32]| match self.mix {
+            Mix::Mono => Some((frame[0], frame[0])),
+            Mix::Stereo | Mix::Downmix => Some((frame[0], frame[1])),
+            Mix::Ambix => Some((0.5 * (frame[0] + frame[1]), 0.5 * (frame[0] - frame[1]))),
+            Mix::Raw(_) => None,
+        };
         for frame in kept.chunks_exact(width) {
-            let (l, r) = match self.mix {
-                Mix::Mono => (frame[0], frame[0]),
-                Mix::Stereo | Mix::Downmix => (frame[0], frame[1]),
-                Mix::Ambix => (0.5 * (frame[0] + frame[1]), 0.5 * (frame[0] - frame[1])),
+            let Some((l, r)) = stereo(frame) else {
+                chunk.extend_from_slice(frame);
+                continue;
             };
             match out {
                 1 => chunk.push(match self.mix {

@@ -1261,6 +1261,15 @@ pub(crate) fn index_keyframe_inside(
         .max()
 }
 
+/// Whether the demuxer marked `pkt` as one not to show
+/// (`AV_PKT_FLAG_DISCARD`): a frame an edit list cuts, which is decoded
+/// only for the frames after it. ffmpeg-next's flags leave the bit out.
+pub fn packet_discarded(pkt: &ff::Packet) -> bool {
+    use ff::codec::packet::Ref;
+    // SAFETY: `pkt` wraps a live AVPacket.
+    unsafe { (*pkt.as_ptr()).flags & sys::AV_PKT_FLAG_DISCARD != 0 }
+}
+
 /// Have the demuxer skip every stream but `keep`: it then neither reads
 /// their data nor stops at damage in it.
 pub fn discard_other_streams(ictx: &mut ff::format::context::Input, keep: usize) {
