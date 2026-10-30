@@ -1095,6 +1095,17 @@ On `m1/slice9` (D37, D40):
   stays opt-in until huginn's numbers. `SPHERECUT_ZERO_COPY` sets a
   `ZeroCopy` (`0` off, `1` VA-API's too), and doctor says which
   (`zero_copy_mode`).
+- **The GUI rerun at d72b756** (PR #11): with the belt the noisy 5.7K
+  clips presented 80% and 78% of the UI frames after the first second
+  and dropped 29 and 19 frames, the X5 pair 96% with 10; with zero copy
+  97%, 95% and 98%, dropping 3, 1 and 0, the UI's p99 33 to 50 ms. The
+  seam and sync runs pass either way, and every screenshot is right.
+  The UI's own work was 2.2 ms at p95 with the belt and 1.1 with zero
+  copy, so what is left is the window waiting, not the UI's work. The
+  smoke document now lists its late UI passes (`late`: each gap, the
+  work before it and the slowest stage samples in it), for odin's next
+  run to say what the gaps line up with, and its `frames.expected`
+  counts every stream, as `shown` does.
 - **huginn's H1 and H2** are a prompt for Pat to paste into Claude Code
   there (`/mnt/project-files/spherecut/hw-run-6.md`): the full run under
   `gnome-session-inhibit`, a 125 % rerun of the GUI part, and Pat's

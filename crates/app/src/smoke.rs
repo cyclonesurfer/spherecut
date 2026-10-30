@@ -53,6 +53,20 @@ const SCREENSHOT: Duration = Duration::from_secs(5);
 /// out as the playback benches do.
 pub const SETTLE: Duration = Duration::from_secs(1);
 
+/// The late UI passes a run lists ([`Late`]): the first, after
+/// [`SETTLE`].
+pub const LATE_KEPT: usize = 64;
+
+/// The stages a [`Late`] pass gives the slowest of, from the samples
+/// recorded since the pass before it.
+const LATE_STAGES: [Stage; 5] = [
+    Stage::Decode,
+    Stage::Download,
+    Stage::UploadCpu,
+    Stage::UploadGpu,
+    Stage::RenderGpu,
+];
+
 /// The longest the window may go without a UI pass before the watchdog
 /// ends the run.
 pub const STALL: Duration = Duration::from_secs(15);
@@ -131,6 +145,11 @@ struct Run {
     work: Vec<f32>,
     /// Where things stood [`SETTLE`] in.
     settled: Option<Mark>,
+    /// The last UI pass's end, and per stage the slowest sample gathered
+    /// since then.
+    last_ui: Option<Instant>,
+    slowest: [Option<f32>; Stage::ALL.len()],
+    late: Vec<Late>,
 }
 
 /// The counters, UI samples and passes at a moment of the run.
@@ -258,6 +277,9 @@ impl SmokeDriver {
                         passes: 0,
                         work: Vec::new(),
                         settled: None,
+                        last_ui: None,
+                        slowest: [None; Stage::ALL.len()],
+                        late: Vec::new(),
                     };
                     run.gather(perf);
                     if !s.snapshot.want_play {
@@ -283,6 +305,7 @@ impl SmokeDriver {
                     return;
                 }
                 let played = now.saturating_duration_since(run.since).as_secs_f64();
+                run.note_late(now, played, self.refresh_hz);
                 if run.settled.is_none()
                     && played >= SETTLE.as_secs_f64()
                     && let Some(p) = &s.player
@@ -539,9 +562,35 @@ impl Run {
         for (i, st) in Stage::ALL.into_iter().enumerate() {
             let (recorded, new) = perf.samples_after(st, self.seen[i]);
             self.missed[i] += recorded.saturating_sub(self.seen[i]) - new.len() as u64;
+            for &v in &new {
+                self.slowest[i] = Some(self.slowest[i].map_or(v, |m| m.max(v)));
+            }
             self.samples[i].extend(new);
             self.seen[i] = recorded;
         }
+    }
+
+    /// Lists the UI pass ending `now` when it came more than one and a
+    /// half refresh periods after the last, once settled.
+    fn note_late(&mut self, now: Instant, played_s: f64, refresh_hz: Option<f64>) {
+        let last = self.last_ui.replace(now);
+        let slowest = std::mem::take(&mut self.slowest);
+        let (Some(last), Some(hz), Some(_)) = (last, refresh_hz, &self.settled) else {
+            return;
+        };
+        let interval = now.saturating_duration_since(last).as_secs_f64() * 1000.0;
+        if interval <= 1500.0 / hz || self.late.len() >= LATE_KEPT {
+            return;
+        }
+        self.late.push(Late {
+            at_s: played_s,
+            interval_ms: interval as f32,
+            work_ms: self.work.last().copied(),
+            slowest: LATE_STAGES
+                .into_iter()
+                .filter_map(|st| slowest[st as usize].map(|v| (st.name(), v)))
+                .collect(),
+        });
     }
 
     fn samples(&self, st: Stage) -> &[f32] {
@@ -636,6 +685,9 @@ pub struct Report {
     /// The same after the first second ([`SETTLE`]), which the gates
     /// judge; `None` for a run that ended sooner.
     pub settled: Option<Settled>,
+    /// The first [`LATE_KEPT`] UI passes after it that came more than one
+    /// and a half refresh periods after the pass before.
+    pub late: Vec<Late>,
     /// Each stage's milliseconds by its name ([`Stage::name`]).
     pub stages: BTreeMap<&'static str, Percentiles>,
     pub av: Option<Av>,
@@ -696,6 +748,19 @@ pub struct UiReport {
     pub work: Percentiles,
 }
 
+/// A UI pass that came late, and what ran while the UI waited.
+#[derive(Debug, Clone, Serialize)]
+pub struct Late {
+    /// How far into the run it ended, in seconds.
+    pub at_s: f64,
+    /// Since the pass before, in milliseconds.
+    pub interval_ms: f32,
+    /// The pass before's own work, as eframe counts it.
+    pub work_ms: Option<f32>,
+    /// Per stage, by its name, the slowest sample recorded in between.
+    pub slowest: BTreeMap<&'static str, f32>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Settled {
     /// How far into the run it begins, in seconds.
@@ -721,7 +786,8 @@ pub struct Frames {
     pub shown: u64,
     pub dropped: u64,
     pub decode_dropped: u64,
-    /// The first stream's frames in `played_s`, at its rate.
+    /// Every stream's frames in `played_s`, at their rates, as `shown`
+    /// counts each stream's.
     pub expected: Option<f64>,
 }
 
@@ -839,6 +905,12 @@ impl SmokeDriver {
                 }
             })
             .collect::<Vec<_>>();
+        // Every stream's frames count among those shown.
+        let rates = streams
+            .iter()
+            .map(|st| st.fps)
+            .sum::<Option<f64>>()
+            .filter(|_| !streams.is_empty());
         let mut stages = BTreeMap::new();
         for st in Stage::ALL {
             if st != Stage::AvOffset {
@@ -894,10 +966,7 @@ impl SmokeDriver {
                     shown: since(Counter::FramesShown),
                     dropped: since(Counter::Dropped),
                     decode_dropped: since(Counter::DecodeDropped),
-                    expected: streams
-                        .first()
-                        .and_then(|st| st.fps)
-                        .map(|f| f * (played_s - m.played_s)),
+                    expected: rates.map(|f| f * (played_s - m.played_s)),
                 },
             }
         });
@@ -927,10 +996,11 @@ impl SmokeDriver {
                 shown: counted(Counter::FramesShown),
                 dropped: counted(Counter::Dropped),
                 decode_dropped: counted(Counter::DecodeDropped),
-                expected: streams.first().and_then(|st| st.fps).map(|f| f * played_s),
+                expected: rates.map(|f| f * played_s),
             },
             streams,
             settled,
+            late: run.late.clone(),
             ui: UiReport {
                 frames: run.ui_frames,
                 passes: run.passes,
@@ -1054,6 +1124,55 @@ fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_late_pass_is_listed_once_settled_with_the_slowest_stages_between() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut run = Run {
+            since: t0,
+            start: [0; Counter::ALL.len()],
+            seen: [0; Stage::ALL.len()],
+            samples: Default::default(),
+            missed: [0; Stage::ALL.len()],
+            ui_frames: 0,
+            passes: 0,
+            work: vec![1.5],
+            settled: None,
+            last_ui: None,
+            slowest: [None; Stage::ALL.len()],
+            late: Vec::new(),
+        };
+        // Before the mark, late or not, nothing is listed.
+        run.note_late(at(0), 0.0, Some(60.0));
+        run.note_late(at(50), 0.05, Some(60.0));
+        assert!(run.late.is_empty());
+        run.settled = Some(Mark {
+            played_s: 1.0,
+            counters: [0; Counter::ALL.len()],
+            ui_samples: 0,
+            ui_frames: 0,
+            passes: 0,
+        });
+        // On time at 60 Hz (17 ms): not listed, and the samples before it
+        // go with it.
+        run.slowest[Stage::Decode as usize] = Some(9.0);
+        run.note_late(at(67), 1.0, Some(60.0));
+        assert!(run.late.is_empty());
+        // 50 ms: late; the UI's own interval isn't one of the stages.
+        run.slowest[Stage::UploadGpu as usize] = Some(3.0);
+        run.slowest[Stage::UiFrame as usize] = Some(50.0);
+        run.note_late(at(117), 1.05, Some(60.0));
+        assert_eq!(run.late.len(), 1);
+        let late = &run.late[0];
+        assert!((late.interval_ms - 50.0).abs() < 0.01, "{late:?}");
+        assert_eq!(late.work_ms, Some(1.5));
+        assert_eq!(late.slowest.len(), 1, "{late:?}");
+        assert_eq!(late.slowest["upload_gpu"], 3.0);
+        // Without a refresh rate there is no period to be late for.
+        run.note_late(at(300), 1.3, None);
+        assert_eq!(run.late.len(), 1);
+    }
 
     #[test]
     fn the_screenshot_keeps_its_aspect_at_most_960_wide() {

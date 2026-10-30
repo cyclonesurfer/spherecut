@@ -125,6 +125,8 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
     let frames = &r["frames"];
     assert!(frames["shown"].as_u64().unwrap() >= 5, "{frames}");
     assert!(frames["expected"].as_f64().unwrap() > 40.0, "{frames}");
+    // Late passes are late for a refresh rate, which kittest hasn't.
+    assert_eq!(r["late"], serde_json::json!([]));
     assert_eq!(r["streams"][0]["decoder"], "software");
     assert!(
         r["streams"][0]["format"]

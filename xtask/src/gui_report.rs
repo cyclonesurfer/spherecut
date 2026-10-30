@@ -139,7 +139,7 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
                 let _ = writeln!(
                     r,
                     "{} ({}, {}); {} at {} pixels a point (the window's own {}), the window \
-                     {} and the viewer {} pixels; {}; {}; played {:.1} s{}.\n",
+                     {} and the viewer {} pixels; {}; {}{}; played {:.1} s{}.\n",
                     res["adapter"]["name"].as_str().unwrap_or("?"),
                     res["adapter"]["driver"].as_str().unwrap_or("?"),
                     res["adapter"]["driver_info"].as_str().unwrap_or("?"),
@@ -150,6 +150,7 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
                     size(&res["viewer"]),
                     stages(&res["stages"]),
                     passes(&res["ui"]),
+                    late(res),
                     res["played_s"].as_f64().unwrap_or(0.0),
                     if res["ended"] == true {
                         ", to the clip's end"
@@ -251,6 +252,49 @@ fn passes(ui: &Value) -> String {
     )
 }
 
+/// "; 3 late UI passes after the first second, the longest 99.9 ms; the
+/// slowest in their gaps decode 29.5 ms, upload_gpu 2.1 ms": what ran
+/// while the UI waited. Empty without a refresh rate to be late for, or
+/// a document from before the list.
+fn late(res: &Value) -> String {
+    let Some(late) = res["late"].as_array() else {
+        return String::new();
+    };
+    if res["refresh_hz"].is_null() {
+        return String::new();
+    }
+    if late.is_empty() {
+        return "; no late UI pass after the first second".into();
+    }
+    let longest = late
+        .iter()
+        .filter_map(|l| l["interval_ms"].as_f64())
+        .fold(0.0, f64::max);
+    let mut slowest = std::collections::BTreeMap::<String, f64>::new();
+    for l in late {
+        for (k, v) in l["slowest"].as_object().into_iter().flatten() {
+            if let Some(v) = v.as_f64() {
+                let m = slowest.entry(k.clone()).or_insert(v);
+                *m = m.max(v);
+            }
+        }
+    }
+    let stages: Vec<String> = slowest
+        .iter()
+        .map(|(k, v)| format!("{k} {v:.1} ms"))
+        .collect();
+    format!(
+        "; {} late UI pass{} after the first second, the longest {longest:.1} ms{}",
+        late.len(),
+        if late.len() == 1 { "" } else { "es" },
+        if stages.is_empty() {
+            String::new()
+        } else {
+            format!("; the slowest in their gaps {}", stages.join(", "))
+        }
+    )
+}
+
 /// "decode 4.1 / 6.0 ms, upload_cpu ..." for the stages with samples:
 /// p50 and p95.
 fn stages(v: &Value) -> String {
@@ -304,6 +348,11 @@ mod tests {
                 "av": {"median_ms": 2.0, "p95_abs_ms": 6.5},
                 "audio": {"host": "PulseAudio", "latency_ms": 41.2},
                 "stages": {"decode": {"samples": 600, "p50": 4.1, "p95": 6.0}, "convert": {"samples": 0}},
+                "late": [
+                    {"at_s": 3.2, "interval_ms": 33.4, "work_ms": 1.1, "slowest": {"decode": 12.0}},
+                    {"at_s": 9.8, "interval_ms": 99.9, "work_ms": null,
+                     "slowest": {"decode": 29.5, "upload_gpu": 2.1}},
+                ],
             }
         });
         std::fs::write(dir.join("gui-0.json"), doc.to_string()).unwrap();
@@ -348,7 +397,8 @@ mod tests {
         ));
         assert!(md.contains(
             "p50 / p95: decode 4.1 / 6.0 ms; 1188 UI passes of 1190, their own work 2.1 / 3.3 ms; \
-             played 20.0 s."
+             2 late UI passes after the first second, the longest 99.9 ms; the slowest in their \
+             gaps decode 29.5 ms, upload_gpu 2.1 ms; played 20.0 s."
         ));
         assert!(!md.contains("convert"));
         assert!(md.contains("![noisy 5.7K 8-bit](odin-abc-gui-0.png)"));
