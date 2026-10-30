@@ -185,6 +185,36 @@ the sections below, they win.
     trigger stands. Neither holds on odin, and U2's doesn't: download
     plus copy is 10.9 ms at p50 for a 10-bit 5.7K frame, under a third
     of the frame budget. huginn's H1 can still turn either on.
+16. **The GUI as built** (slice 7, D31, D33, D36). Where it differs
+    from section 7:
+    - 7.1: the device is `Gpu::for_window`'s, handed over with
+      `WgpuSetup::Existing`, not `CreateNew` (D31, found in slice 3a's
+      review). `run` returns `Result<(), GuiError>`, whose codes are the
+      contract's (`no_display`, then render's). `eframe::App::logic`
+      isn't used: `SpherecutApp::ui` polls the player and the jobs
+      itself, so kittest, which calls only `ui`, runs it all. The app is
+      made from `AppParts` (device, backend, clock, audio, doctor run),
+      so tests give it a gated or faulting backend and a fixture report.
+    - 7.3: the callback carries a `DrawKey` (the slot, its frame, the
+      view, the filter), and `prepare` projects when it differs from the
+      last one projected, or the size changed, in place of a `redraw`
+      flag: eframe runs `prepare` only for a pass it paints, so a flag
+      cleared by an unpainted pass would lose its redraw. The rect is
+      rounded inward to whole pixels and inset by one pixel each side,
+      since at 1.25 the tiles' separator antialiased into the last
+      column. The GPU timers are slice 8's, with the overlay.
+    - 7.4: the marker drag test runs at 1 and 1.25 through the fisheye:
+      rectilinear's stretch moved the 8° disc's centroid 0.7 px off the
+      grabbed point over the drag, though the grabbed point lands
+      exactly.
+    - 7.9: `spherecut_playback::Player::join` joins the bans, so that
+      `run`'s join after the event loop is the `#[expect]` the section
+      names.
+    - Section 11: `deny.toml`'s graph is Linux's only, since arboard
+      turns on image's `bmp` and `tiff` for the Windows and macOS
+      clipboards; cpal's bans were already an allow list (D35).
+    - Slice 8's cached ranges on the scrub bar came with slice 7
+      (`FrameCache::try_ranges`).
 
 ## 1. Summary
 

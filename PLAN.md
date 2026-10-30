@@ -121,7 +121,7 @@ new features to agents, which adds a little work to each.
       cursor stays under it, tested numerically), scroll/pinch FOV zoom,
       projection switch, play/pause, scrubbing, frame step, audio playback
       with the audio clock driving A/V sync.
-- [ ] Decode, audio and texture upload on workers; UI never blocks on them
+- [x] Decode, audio and texture upload on workers; UI never blocks on them
       (asserted by a test harness that injects a slow decoder). Bounded frame
       cache sized from available memory, configurable.
 - [ ] Performance overlay: decode ms, upload ms, render ms, dropped frames,
