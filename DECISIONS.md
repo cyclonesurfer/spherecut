@@ -2913,10 +2913,25 @@ Limits:
   25 huge pages. Here (a VM, THP `madvise`) the first copy into a fresh
   5.7K P010 buffer takes 13.9 ms on huge pages against 172.8 ms on 4 KiB
   ones, and 5.0 ms into one reused. The kernel still zeroes each page it
-  hands out; where THP is `never` nothing changes.
+  hands out; where THP is `never` nothing changes. On odin at 1991a98
+  the cache sat in 8.1 to 8.6 GiB of huge pages, a new frame's 10-bit
+  download took about 14 ms and a reused one's 5 to 6 (18 to 21 before),
+  and the cache filled in 2.5 s rather than 7. The process still counts
+  12 150 minor faults for each new frame, as before: most likely the
+  GPU's import of the buffer walks it a 4 KiB page at a time and counts
+  every page it touches, huge or not; Vulkan Video's reused buffers
+  count none. With free memory left in single pages, the kernel
+  compacted 395 times in the first 4.6 s, and a new frame's download
+  took 15 to 18 ms. Once in four runs, a new frame's download took 50
+  to 56 ms for 3 s while the cache passed 5 GiB (a reused one's still 5
+  to 6), for a reason not known; `/proc/vmstat` wasn't sampled then.
 
 Revisit if: slice 5 needs a device per stream rather than per backend,
-or slice 5b's zero-copy replaces the download.
+slice 5b's zero-copy replaces the download, or new frames' downloads
+take 50 ms again while the cache fills (then with `/proc/vmstat`
+sampled beside the timeline: a pool that makes its buffers ahead on a
+thread of its own, using huge pages only while the kernel has free ones,
+is the fix to try).
 
 ## D31. The render pipeline
 
@@ -3253,6 +3268,25 @@ written, the trigger makes the belt the default where it costs as much
 or more, which isn't what the trigger is for, so the default stays
 `write_texture` until H1, which has huginn's numbers too and should
 restate the trigger as the belt being cheaper.
+
+*Updated 2026-10-30 by H1 on odin (PR #7, at 43abcda):* the belt was
+never cheaper again. One step in flight, 5.7K NV12 costs 2.57 ms a step
+with `write_texture` against the belt's 15.84, P010 4.31 against 4.32,
+and the 3840² pairs 5.83 against 5.86 (NV12) and 9.26 against 9.31
+(P010); two in flight the belt is dearer at every input but the NV12
+pair (6.63 against 6.64), and `write_texture` makes or frees no block.
+The CPU trigger is now the belt's CPU time under 0.9 times
+`write_texture`'s, which `bench_upload_5k7` reports, and the block
+trigger stands: the default stays `write_texture`, and huginn's H1 can
+still turn the belt on. U2 (the VA surface downloaded straight into a
+mapped belt chunk, m1-plan section 4.4) isn't needed on odin either:
+its trigger is download plus copy over a third of a 30 fps frame, 11.1
+ms, and with the download pool on huge pages (D30) 10-bit's Vulkan
+Video download and `write_texture` take 5.0 and 5.9 ms at p50 (8-bit
+2.6 and 3.0), on two threads, with nothing dropped. VA-API's own
+download, 31 ms a 5.7K NV12 frame and 109 ms a P010 one, is far over
+it, but that is the CPU reading the surface across PCIe, which U2
+wouldn't remove; slice 5b's zero-copy would.
 
 The review also found `round_f16` untested where it matters least and
 inexact where no pass goes. No test reached its subnormal branch (no

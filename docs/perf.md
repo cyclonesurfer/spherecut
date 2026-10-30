@@ -109,13 +109,13 @@ Current benchmarks:
   tiny planet 300° to 1920x1080 | 3840x2160: GPU`, each the mean of 60
   passes. Each row is a run's mean, recorded as the median and range of
   `SPHERECUT_BENCH_RUNS` runs after a warm-up. A note for each 5.7K
-  input says whether the plan's CPU trigger holds (`write_texture` above
-  1.5 times the belt's CPU time, or above 4 ms a frame), and a note for
-  each input whether `write_texture` makes or frees allocator blocks
-  within a step, waited or in flight, the other trigger. Either holding
-  on huginn or odin makes the belt the default (D31), though on odin
-  only the CPU trigger's 4 ms arm has held, where the belt was no
-  cheaper, so the default stays `write_texture` until H1 (below). A last note names
+  input says whether the CPU trigger holds (the belt's CPU time under
+  0.9 times `write_texture`'s, as H1 restated the plan's "above 1.5
+  times, or above 4 ms", whose 4 ms arm held on odin where the belt
+  cost the same), and a note for each input whether `write_texture`
+  makes or frees allocator blocks within a step, waited or in flight,
+  the other trigger. Either holding on huginn or odin makes the belt the
+  default (D31); neither has on odin, through H1 (below). A last note names
   the GPU and how long the bench took. A device without timestamps
   inside encoders has no GPU rows, and a note says so. It needs at most
   about 1 GB on the GPU.
@@ -440,6 +440,82 @@ What these add:
   the default stays `write_texture` until H1 (D31).
 - VA-API's download still faults about 10 times per MB copied (10.2 to
   10.5); Vulkan Video's none.
+
+Fifth run, H1's first:
+[`hw-reports/odin-43abcdad28.md`](../hw-reports/odin-43abcdad28.md) at
+43abcda, 2026-10-29 (PR #7, 8936 s, of which 3838 s made the perf
+clips), the same machine and software, with kernel 7.2.9 and the
+CPU's governor and energy preference at `performance`. Tier 2: 28 of
+31 passed, both 5.7K gates failing, and `bench_playback_x5_raw` passed
+on passes that had stalled at their second frame (both fixed after it;
+PROGRESS, "odin's fifth run"). Decode and seek, against the fourth
+run's:
+
+| Benchmark | Software | VA-API | Vulkan Video |
+|---|---:|---:|---:|
+| X5 2× 1920² @ 119.88 | 0.72 × | 1.08 × | 1.66 × |
+| X5 2× 2880² @ 59.94 | 0.66 × | 1.02 × | 1.62 × |
+| X5 2× 3840² @ 25.00 | 0.53 × | 1.38 × | 2.20 × |
+| X5 2× 3840² @ 29.97 | 0.45 × | 1.04 × | 1.93 × |
+| LRV 1× 1664×832 @ 25.00 | 27.20 × | 23.79 × | 31.17 × |
+| LRV 1× 1664×832 @ 29.97 | 31.26 × | 24.35 × | 34.90 × |
+| 3840×1920 HEVC 8-bit, synthetic | 230 fps (188 to 250) **unstable** | 129 fps | 285 fps |
+| 5760×2880 HEVC 8-bit, synthetic | 101 fps | 48 fps | 135 fps |
+
+| Seek (median / p95, ms) | Software | VA-API | Vulkan Video |
+|---|---:|---:|---:|
+| exact, noisy 5760×2880 HEVC | 638 / 855 | 131 / 245 | 123 / 244 |
+| keyframe, noisy 5760×2880 HEVC | 586 / 698 | 50 / 57 | 45 / 51 |
+| exact, X5 3840² stream (8K30) | 3641 / 6699 | 182 / 370 | 184 / 380 |
+| keyframe, X5 3840² stream | 1623 / 1685 | 22 / 36 | 17 / 28 |
+| exact, LRV 1664×832 | 43 / 50 | 18 / 23 | 17 / 21 |
+| keyframe, LRV 1664×832 | 26 / 29 | 4.3 / 5.3 | 3.6 / 4.4 |
+
+Upload (`bench_upload_5k7`), as above:
+
+| Input | `write_texture` | belt | `write_texture`, 2 in flight | belt, 2 in flight | GPU ingest and mips |
+|---|---:|---:|---:|---:|---:|
+| 5760×2880 NV12 | 2.57 | 15.84 | 2.63 | 3.74 | 1.01 |
+| 5760×2880 P010 | 4.31 | 4.32 | 5.93 | 6.21 | 1.24 |
+| 3840² NV12 pair | 5.83 | 5.86 | 6.64 | 6.63 | 0.88 |
+| 3840² P010 pair | 9.26 | 9.31 | 10.60 | 10.82 | 1.09 |
+
+The playback benchmarks' first numbers, on the perf clips (D37), each
+pass's decoded fps per second, unthrottled and in real time, then what
+dropped after the first second and the stages at p50 / p95 in ms. The
+5.7K rows are from odin's reruns at 1991a98 over Remote Control, after
+the fixes (10-bit Vulkan Video's from the third, the rest from the
+second); the 8K rows are the fifth run's, at 43abcda:
+
+| Clip, decoder | Unthrottled | Real time | Dropped, decode-dropped | `download` | `upload_cpu` |
+|---|---:|---:|---:|---:|---:|
+| 5.7K 8-bit, Vulkan (Auto) | 121 (120 to 130) | 30 (0 to 129) | 0, 0 | 2.57 / 10.98 | 2.99 / 3.47 |
+| 5.7K 8-bit, VA-API | 28 (25 to 51) | 28.5 (25 to 54) | 33, 33 | 31.16 / 66.02 | 5.42 / 6.37 |
+| 5.7K 8-bit, software | 46.5 (40 to 53) | 30 (0 to 51) | 0, 0 | | 4.38 / 6.15 |
+| 5.7K 10-bit, Vulkan (Auto) | 88 (62 to 98) | 30 (0 to 113) | 0, 0 | 4.97 / 25.82 | 5.89 / 7.22 |
+| 5.7K 10-bit, VA-API | 17 (15 to 18) | 24 (22 to 28) | 409, 411 | 109.38 / 150.42 | 6.09 / 7.28 |
+| 5.7K 10-bit, software | 33 (28 to 38) | 30 (0 to 40) | 20, 12 | | 11.88 / 16.14 |
+| 8K 8-bit, Vulkan (Auto) | 38 (19 to 71) | 29 (0 to 61) | 34, 34 | 22.27 / 47.27 | 4.96 / 7.19 |
+| 8K 8-bit, VA-API | 12 (10 to 15) | 24 (18 to 30) | 445, 454 | 123.79 / 221.99 | 5.98 / 6.80 |
+| 8K 8-bit, software | 30 (24 to 31) | 30 (19 to 36) | 216, 183 | | 10.10 / 14.05 |
+
+What these add:
+
+- On odin only Vulkan Video plays 5.7K in real time. VA-API's download,
+  the CPU reading the surface across PCIe, takes 31 ms a 5.7K NV12
+  frame and 109 ms a P010 one, and it dropped 33 of 8-bit's frames and
+  409 of 10-bit's in 20 s; software kept up at 8 bits and nearly at 10.
+  Slice 5b's zero-copy removes both downloads.
+- The 8K row predates the fixes: its downloads went into fresh 4 KiB
+  pages while the cache filled, as the 5.7K ones did then (`download`
+  22 ms at p50), so it is to be measured again.
+- `download` and `upload_cpu` run on two threads, and even at 10 bits
+  their p50s add up to 10.9 ms, under the third of a frame (11.1 ms)
+  that would call for U2 (m1-plan section 4.4, D31).
+- 10-bit's unthrottled pass ran at 17 to 20 fps for 3 s in one run at
+  1991a98, while the cache passed 5 GiB, and at 48 fps or more in the
+  next three, one with free memory fragmented (PROGRESS, "odin's fifth
+  run").
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 

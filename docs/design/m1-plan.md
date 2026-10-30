@@ -177,6 +177,14 @@ the sections below, they win.
     benchmarks dropped 4 to 9 frames at every loop point and, at 10
     bits, ran under real time for 7 s while the cache filled, each new
     5.7K P010 buffer faulting in 12 000 pages.
+15. **The belt's trigger and U2, after H1 on odin** (PR #7, D31).
+    Section 4.4's CPU trigger for the belt, "`write_texture` above 1.5
+    times the belt's CPU time, or above 4 ms per 5.7K frame", held on
+    odin through its 4 ms arm where the belt cost the same, so it is
+    now the belt's CPU time under 0.9 times `write_texture`'s; the block
+    trigger stands. Neither holds on odin, and U2's doesn't: download
+    plus copy is 10.9 ms at p50 for a 10-bit 5.7K frame, under a third
+    of the frame budget. huginn's H1 can still turn either on.
 
 ## 1. Summary
 
@@ -1135,7 +1143,8 @@ checks it runs) compares `write_texture` with a test-side
 nothing else changing) if either of these holds on huginn or odin:
 
 - `write_texture`'s CPU time is above 1.5× the belt's, or above 4 ms per
-  5.7K frame;
+  5.7K frame (since H1, the belt's under 0.9 times `write_texture`'s,
+  amendment 15);
 - the allocator report shows blocks allocated and freed per frame.
 
 **The upload ladder:**
