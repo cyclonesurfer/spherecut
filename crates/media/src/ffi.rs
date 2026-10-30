@@ -2758,11 +2758,16 @@ pub(crate) const DOWNLOAD_ROW_ALIGN: usize = 256;
 /// size, as after `LayoutChanged`, rebuilds the pool; buffers of the old
 /// one still in use are freed as they come back.
 ///
-/// Each buffer is a mapping of its own, 2 MiB aligned, that the kernel is
+/// How each buffer is allocated depends on the device ([`Backing`]).
+/// Vulkan's are mappings of their own, 2 MiB aligned, that the kernel is
 /// asked to back with transparent huge pages ([`huge_alloc`]): a new 5.7K
 /// P010 frame in 4 KiB pages took about 12 000 faults, which on odin
 /// doubled its download while the frame cache filled (D30). Where THP is
 /// off the advice does nothing, and the pages are 4 KiB as before.
+/// VA-API's come from `av_buffer_alloc`, as FFmpeg's own would: in
+/// mappings its 3840² downloads ran at half the speed on most runs,
+/// faulting in ten times the pages, and in malloc's memory at full speed
+/// on every run (odin, 2026-10-30; m1-plan amendment 18).
 ///
 /// The one buffer for all planes suits both hwcontexts: VA-API copies
 /// into any strides (`av_frame_copy` from a VAImage that FFmpeg creates,
@@ -2772,8 +2777,9 @@ pub(crate) const DOWNLOAD_ROW_ALIGN: usize = 256;
 /// the host pointer alignment), from FFmpeg 6.1 to 8.1.
 pub(crate) struct DownloadPool {
     pool: *mut sys::AVBufferPool,
-    /// The format, width and height the pool's buffers are laid out for.
-    key: Option<(c_int, c_int, c_int)>,
+    /// The format, width and height the pool's buffers are laid out for,
+    /// and how they are allocated.
+    key: Option<(c_int, c_int, c_int, Backing)>,
     planes: usize,
     linesizes: [c_int; 4],
     offsets: [usize; 4],
@@ -2781,7 +2787,7 @@ pub(crate) struct DownloadPool {
     builds: u64,
     /// Buffers every pool built so far has allocated: each takes a
     /// reference, which FFmpeg drops when it frees the pool, and counts
-    /// in [`counted_alloc`].
+    /// in [`count`].
     allocated: Arc<AtomicU64>,
 }
 
@@ -2814,14 +2820,56 @@ impl Default for DownloadPool {
     }
 }
 
-/// The allocator of a [`DownloadPool`]'s `AVBufferPool`: [`huge_alloc`],
-/// counting each buffer in `opaque`, the pool's counter. The pool calls it
-/// only when it has no buffer to hand back.
-unsafe extern "C" fn counted_alloc(opaque: *mut c_void, size: usize) -> *mut sys::AVBufferRef {
-    // SAFETY: `opaque` is the counter `DownloadPool::build` gave the pool,
-    // which holds a reference to it until `release_counter`.
+/// How a [`DownloadPool`]'s buffers are allocated, by the device its
+/// frames come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backing {
+    /// `av_buffer_alloc`: VA-API's.
+    Malloc,
+    /// [`huge_alloc`]: Vulkan's, and any other device's.
+    Huge,
+}
+
+impl Backing {
+    /// For frames of the device type `kind` (an `AVHWDeviceType`).
+    fn for_device(kind: c_int) -> Backing {
+        if kind == sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI as c_int {
+            Backing::Malloc
+        } else {
+            Backing::Huge
+        }
+    }
+}
+
+/// Counts a buffer in `opaque`, the pool's counter.
+///
+/// # Safety
+///
+/// `opaque` is the counter `DownloadPool::build` gave the pool, which
+/// holds a reference to it until `release_counter`.
+unsafe fn count(opaque: *mut c_void) {
+    // SAFETY: the caller's guarantee.
     unsafe { (*opaque.cast::<AtomicU64>()).fetch_add(1, Ordering::Relaxed) };
+}
+
+/// The allocator of a [`Backing::Huge`] [`DownloadPool`]'s
+/// `AVBufferPool`: [`huge_alloc`], counting each buffer in `opaque`, the
+/// pool's counter. The pool calls it only when it has no buffer to hand
+/// back.
+unsafe extern "C" fn counted_huge(opaque: *mut c_void, size: usize) -> *mut sys::AVBufferRef {
+    // SAFETY: `opaque` is the pool's counter, as `count` takes.
+    unsafe { count(opaque) };
     huge_alloc(size)
+}
+
+/// [`counted_huge`] for a [`Backing::Malloc`] pool: `av_buffer_alloc`.
+unsafe extern "C" fn counted_malloc(opaque: *mut c_void, size: usize) -> *mut sys::AVBufferRef {
+    // SAFETY: `opaque` is the pool's counter, as `count` takes; and
+    // av_buffer_alloc takes any size, NULL when out of memory.
+    unsafe {
+        count(opaque);
+        sys::av_buffer_alloc(size)
+    }
 }
 
 /// A transparent huge page, on x86-64 and on arm64 with 4 KiB pages.
@@ -2915,8 +2963,15 @@ impl Drop for DownloadPool {
 }
 
 impl DownloadPool {
-    /// Lay the pool out for `fmt` frames of `width` × `height`.
-    fn build(&mut self, fmt: c_int, width: c_int, height: c_int) -> Result<(), ff::Error> {
+    /// Lay the pool out for `fmt` frames of `width` × `height`, its
+    /// buffers allocated as `backing` says.
+    fn build(
+        &mut self,
+        fmt: c_int,
+        width: c_int,
+        height: c_int,
+        backing: Backing,
+    ) -> Result<(), ff::Error> {
         // SAFETY: NULL or the pool this owns (see Drop).
         unsafe { sys::av_buffer_pool_uninit(&mut self.pool) };
         self.key = None;
@@ -2963,12 +3018,16 @@ impl DownloadPool {
         let counter = Arc::into_raw(Arc::clone(&self.allocated))
             .cast_mut()
             .cast::<c_void>();
+        let alloc = match backing {
+            Backing::Malloc => counted_malloc,
+            Backing::Huge => counted_huge,
+        };
         // SAFETY: a size, and an allocator and a release function that
         // never unwind. The pool takes the counter's new reference, which
         // `release_counter` drops when FFmpeg frees it; NULL when out of
         // memory.
         let pool = unsafe {
-            sys::av_buffer_pool_init2(total, counter, Some(counted_alloc), Some(release_counter))
+            sys::av_buffer_pool_init2(total, counter, Some(alloc), Some(release_counter))
         };
         if pool.is_null() {
             // SAFETY: the reference made above, which no pool took.
@@ -2979,7 +3038,7 @@ impl DownloadPool {
         }
         *self = DownloadPool {
             pool,
-            key: Some((fmt, width, height)),
+            key: Some((fmt, width, height, backing)),
             planes,
             linesizes,
             offsets,
@@ -3004,7 +3063,7 @@ impl DownloadPool {
 }
 
 /// Copy the hardware frame `src` into a buffer of `pool` (rebuilt first
-/// when the frame's system-memory format or size is new), with its
+/// when the frame's system-memory format, size or device is new), with its
 /// properties and, as software decoding does ([`open_decoder`]), its left
 /// and top cropping applied exactly: FFmpeg crops a device frame only on
 /// the right and bottom.
@@ -3013,7 +3072,8 @@ pub(crate) fn download_into_pool(
     src: &ff::frame::Video,
 ) -> Result<ff::frame::Video, ff::Error> {
     // SAFETY: `src` wraps a live AVFrame. A device frame's hw_frames_ctx
-    // holds its AVHWFramesContext, whose sw_format is read as an int.
+    // holds its AVHWFramesContext, whose sw_format is read as an int, and
+    // whose device context, which it holds too, says its type, an int.
     let key = unsafe {
         let f = src.as_ptr();
         let frames = (*f).hw_frames_ctx;
@@ -3021,14 +3081,19 @@ pub(crate) fn download_into_pool(
             return Err(ff::Error::InvalidData);
         }
         let fc = (*frames).data.cast::<sys::AVHWFramesContext>();
+        let device = (*fc).device_ctx;
+        if device.is_null() {
+            return Err(ff::Error::InvalidData);
+        }
         (
             enum_int(&raw const (*fc).sw_format),
             (*f).width,
             (*f).height,
+            Backing::for_device(enum_int(&raw const (*device).type_)),
         )
     };
     if pool.key != Some(key) {
-        pool.build(key.0, key.1, key.2)?;
+        pool.build(key.0, key.1, key.2, key.3)?;
     }
     // SAFETY: the pool is live (just built or kept); NULL when out of
     // memory.
@@ -4743,6 +4808,43 @@ mod tests {
         assert_eq!(Arc::strong_count(&counter), 2);
         drop(e);
         assert_eq!(Arc::strong_count(&counter), 1);
+    }
+
+    #[test]
+    fn vaapi_downloads_go_to_malloc_and_vulkans_to_huge_pages() {
+        use sys::AVHWDeviceType as T;
+        assert_eq!(
+            Backing::for_device(T::AV_HWDEVICE_TYPE_VAAPI as c_int),
+            Backing::Malloc
+        );
+        assert_eq!(
+            Backing::for_device(T::AV_HWDEVICE_TYPE_VULKAN as c_int),
+            Backing::Huge
+        );
+        // A malloc pool lays its buffers out as a huge one does, and
+        // hands them back as they come back.
+        let nv12 = sys::AVPixelFormat::AV_PIX_FMT_NV12 as c_int;
+        let mut pool = DownloadPool::default();
+        pool.build(nv12, 250, 66, Backing::Malloc).unwrap();
+        assert_eq!(pool.linesizes[..2], [256, 256]);
+        assert_eq!(pool.offsets[..2], [0, 256 * 66]);
+        // SAFETY: the pool just built; each buffer is unreferenced once.
+        unsafe {
+            let mut a = sys::av_buffer_pool_get(pool.pool);
+            assert!(!a.is_null());
+            assert_eq!(
+                (*a).size,
+                256 * 66 + 256 * 33 + sys::AV_INPUT_BUFFER_PADDING_SIZE as usize
+            );
+            // av_malloc's alignment, at the least.
+            assert_eq!((*a).data.addr() % 16, 0);
+            let first = (*a).data;
+            sys::av_buffer_unref(&mut a);
+            let mut b = sys::av_buffer_pool_get(pool.pool);
+            assert_eq!((*b).data, first);
+            sys::av_buffer_unref(&mut b);
+        }
+        assert_eq!(pool.allocated(), 1);
     }
 
     /// The range and lines of the `/proc/self/smaps` entry for the

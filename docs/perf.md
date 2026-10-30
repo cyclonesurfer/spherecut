@@ -589,6 +589,21 @@ per lens. What these add:
   of each 8K30 and 2.9K60 at under half the median, so VA-API at these
   sizes has been slow before; slice 5b's odin run runs the bench at
   43abcda and at main to tell code from machine.
+- It was the code: 43abcda ran at 1.32 and 0.93 ×, main at 0.61 and
+  0.46 ×, and with transparent huge pages off (`PR_SET_THP_DISABLE`)
+  main stayed at 0.60 and 0.43 ×. A test that played the 3840² modes
+  with each of five allocators for the download pool, five rounds,
+  twice (branch `diag/vaapi-8k-alloc`), had `av_buffer_alloc` at 1.32
+  to 1.39 × at 25 fps and 0.95 to 1.08 × at 29.97 in all 20 runs, and
+  every mapping (2 MiB aligned or not, advised or not, the data at the
+  start or 64 bytes in) at about half on most runs. The speed followed
+  the minor faults: 93 000 to 208 000 a run when fast, 0.7 to 3.4
+  million when slow. 2880² was 1.0 × under every allocator. The faults
+  aren't the pool's own: that bench's decoders take two buffers each,
+  some 11 000 faults at 3840², and why the driver's side faults more
+  beside mappings isn't known. So the pool takes VA-API's buffers from
+  `av_buffer_alloc` again, and keeps the huge-page mappings for Vulkan
+  Video's, which they made play (m1-plan amendment 18).
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 

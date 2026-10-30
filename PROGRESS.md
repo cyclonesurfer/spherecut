@@ -193,8 +193,12 @@ on the machine passed 662 and failed one.
   media code between the two changed only the download pool's buffers,
   now on huge pages (H1-A), and that bench's decoders reuse two buffers
   each; odin's first run (PR #3) had runs of 8K30 and 2.9K60 at under
-  half their median too. The cause isn't known, and slice 5b's odin run
-  runs that bench at both commits to tell code from machine.
+  half their median too. It was the code: with each of five allocators
+  for the pool on odin, `av_buffer_alloc` played the 8K modes at full
+  speed in 20 runs of 20 and every mapping at about half on most runs,
+  with ten times the minor faults (`docs/perf.md`). The pool takes
+  VA-API's buffers from `av_buffer_alloc` again, keeping huge pages for
+  Vulkan Video's (m1-plan amendment 18); odin runs the fix next.
 - **Seeks** on hardware: exact at 5.7K 126 ms median on VA-API and 119
   on Vulkan Video (245 and 244 p95), keyframe 55 and 45; an X5 8K
   lens's exact seek 182 and 183.

@@ -243,6 +243,14 @@ the sections below, they win.
     - The Tier 2 check holds 48 frames of each clip (amendment 2 had
       one) and renders each through its import 15 frames after it came,
       so that a surface reused while held shows.
+18. **The download pool's buffers by device** (odin, 2026-10-30, D30,
+    `docs/perf.md`). Section 3.5's pool takes VA-API's buffers from
+    `av_buffer_alloc` again, as before amendment 14, and keeps the
+    huge-page mappings for Vulkan Video's. In mappings, VA-API's 3840²
+    downloads ran at about half speed on most runs, with ten times the
+    minor faults, huge pages or not; in malloc's memory they ran at
+    full speed in 20 runs of 20. The pool's key gains the device's
+    type.
 
 ## 1. Summary
 
