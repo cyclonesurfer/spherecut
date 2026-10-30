@@ -68,6 +68,7 @@ const CODES: &[&str] = &[
     "pose_not_applied",
     "stereo_left_eye",
     "stereo_unknown",
+    "timed_out",
     "too_large",
     "track_without_stream",
     "truncated",
@@ -677,6 +678,67 @@ fn problems_carry_codes() {
         assert!(CODES.contains(&c.as_str()), "{c}");
     }
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The smoke run's hidden flags (`docs/cli-json.md`): `--smoke` needs
+/// its output, the others need `--smoke`, and with no display the run
+/// exits 3 as the GUI does, before any window.
+#[test]
+fn the_smoke_flags_need_their_output_and_a_display() {
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_spherecut"))
+            .args(args)
+            .env_remove("SPHERECUT_LOG")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("WAYLAND_SOCKET")
+            .env_remove("DISPLAY")
+            .output()
+            .unwrap()
+    };
+    for args in [
+        &["--smoke", "clip.mp4"][..],
+        &["--smoke-out", "s.json"],
+        &[
+            "--smoke",
+            "clip.mp4",
+            "--smoke-out",
+            "s.json",
+            "--smoke-seconds",
+            "0",
+        ],
+        &["--smoke", "clip.mp4", "--smoke-out", "s.json", "other.mp4"],
+    ] {
+        let out = run(args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    let dir = tmp("smoke");
+    let json = dir.join("s.json");
+    let out = run(&[
+        "--smoke",
+        "clip.mp4",
+        "--smoke-out",
+        json.to_str().unwrap(),
+        "--smoke-seconds",
+        "2.5",
+    ]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no display"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!json.exists());
+    // Hidden from the help.
+    let help = text(&run(&["--help"]).stdout);
+    assert!(
+        help.contains("--adapter") && !help.contains("--smoke"),
+        "{help}"
+    );
 }
 
 #[test]

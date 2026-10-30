@@ -25,6 +25,7 @@ use crate::notices::{Notice, NoticeKind, Notices};
 use crate::overlay::OverlayState;
 use crate::panes::{FilesPane, InfoPane};
 use crate::settings::{self, Settings};
+use crate::smoke::SmokeDriver;
 use crate::transport::{self, Scrub};
 use crate::view::{Preset, ViewState, ZOOM_PER_POINT, ZOOM_STEP};
 use crate::viewer::{self, DrawKey, RawDraw, RawKey, ViewerCallback};
@@ -166,6 +167,8 @@ pub struct AppState {
 pub struct SpherecutApp {
     pub tree: Tree<Pane>,
     pub state: AppState,
+    /// `--smoke`: the run that drives the app, then closes it.
+    pub smoke: Option<SmokeDriver>,
 }
 
 impl SpherecutApp {
@@ -278,6 +281,7 @@ impl SpherecutApp {
         SpherecutApp {
             tree: tree.unwrap_or_else(default_tree),
             state,
+            smoke: None,
         }
     }
 
@@ -293,6 +297,9 @@ impl SpherecutApp {
         s.presented = s.player.as_ref().and_then(|p| p.present(Instant::now()));
         s.request_repaint(ctx);
         s.logic_ran = true;
+        if let Some(smoke) = &mut self.smoke {
+            smoke.logic(s);
+        }
     }
 
     /// The whole UI, for one frame: the menu bar, the notices and the
@@ -324,6 +331,9 @@ impl SpherecutApp {
         });
         settings::window(&mut self.state, ui.ctx());
         self.state.request_repaint(ui.ctx());
+        if let Some(smoke) = &mut self.smoke {
+            smoke.ui(&mut self.state, ui.ctx());
+        }
     }
 
     /// The player's threads are told to stop; [`crate::run`] joins them
@@ -346,6 +356,7 @@ impl SpherecutApp {
         {
             threads.extend(job.into_thread());
         }
+        threads.extend(self.smoke.as_mut().and_then(SmokeDriver::take_thread));
         threads
     }
 }

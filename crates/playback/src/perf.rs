@@ -237,6 +237,17 @@ impl PerfStats {
         self.rings[stage as usize].samples().1
     }
 
+    /// The samples of `stage` recorded after the first `seen`, as far as
+    /// the ring still keeps them, oldest first, and how many were ever
+    /// recorded: a reader that passes back that count each time gathers
+    /// every sample, but for those it was a ring's worth too late for
+    /// (the smoke run).
+    pub fn samples_after(&self, stage: Stage, seen: u64) -> (u64, Vec<f32>) {
+        let (recorded, kept) = self.rings[stage as usize].samples();
+        let new = recorded.saturating_sub(seen).min(kept.len() as u64) as usize;
+        (recorded, kept[kept.len() - new..].to_vec())
+    }
+
     pub fn summary(&self, stage: Stage) -> StageSummary {
         let (recorded, samples) = self.rings[stage as usize].samples();
         StageSummary::of(recorded, samples)
@@ -405,6 +416,28 @@ mod tests {
         assert_eq!(s.last(), Some(&((RING * 3 + 6) as f32)));
         assert!(s.windows(2).all(|w| w[1] == w[0] + 1.0));
         assert_eq!(p.summary(Stage::UiFrame).recorded, RING as u64 * 3 + 7);
+    }
+
+    #[test]
+    fn a_reader_gathers_each_sample_once_or_misses_it() {
+        let p = PerfStats::new();
+        assert_eq!(p.samples_after(Stage::Decode, 0), (0, vec![]));
+        for v in 0..5 {
+            p.record(Stage::Decode, v as f32);
+        }
+        let (seen, got) = p.samples_after(Stage::Decode, 0);
+        assert_eq!((seen, got), (5, vec![0.0, 1.0, 2.0, 3.0, 4.0]));
+        assert_eq!(p.samples_after(Stage::Decode, seen), (5, vec![]));
+        p.record(Stage::Decode, 5.0);
+        assert_eq!(p.samples_after(Stage::Decode, seen), (6, vec![5.0]));
+        // Read a ring and ten too late: the ten oldest are gone.
+        for v in 0..(RING as u32 + 10) {
+            p.record(Stage::Decode, v as f32);
+        }
+        let (seen, got) = p.samples_after(Stage::Decode, 6);
+        assert_eq!(seen, 6 + RING as u64 + 10);
+        assert_eq!(got.len(), RING);
+        assert_eq!(got.first(), Some(&10.0));
     }
 
     #[test]

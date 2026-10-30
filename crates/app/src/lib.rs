@@ -15,6 +15,7 @@ pub mod overlay;
 pub mod panes;
 pub mod run;
 pub mod settings;
+pub mod smoke;
 pub mod transport;
 pub mod view;
 pub mod viewer;

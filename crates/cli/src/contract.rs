@@ -84,6 +84,8 @@ pub mod codes {
     pub const CANCELLED: &str = "cancelled";
     /// The GUI: no Wayland or X11 display to open its window on (exit 3).
     pub const NO_DISPLAY: &str = "no_display";
+    /// The GUI's smoke run: no frame of the clip within 60 s (exit 1).
+    pub const TIMED_OUT: &str = "timed_out";
 
     /// Every error code above.
     pub const ALL: &[&str] = &[
@@ -96,6 +98,7 @@ pub mod codes {
         OUT_OF_RANGE,
         CANCELLED,
         NO_DISPLAY,
+        TIMED_OUT,
     ];
 
     /// frame's warnings that aren't errors' codes too: what it did with

@@ -379,7 +379,7 @@ fn rank(v: &mut [f32], p: f32) -> Option<f32> {
 }
 
 /// "hevc 5760×2880 nv12 full/709".
-fn stream_line(info: &VideoStreamInfo) -> String {
+pub(crate) fn stream_line(info: &VideoStreamInfo) -> String {
     let c = &info.color;
     format!(
         "{} {}×{} {} {}/{}",
