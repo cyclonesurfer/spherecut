@@ -283,6 +283,39 @@ pub mod tier2 {
         })
     }
 
+    /// Whether the user's graphical session is locked, by logind's
+    /// `LockedHint`, which GNOME sets; a locker that doesn't tell logind
+    /// leaves it "no". None when it can't be read (no `loginctl`, no
+    /// graphical session of the user's).
+    pub fn session_locked() -> Option<bool> {
+        locked_hint(own_uid()?, |args| {
+            let out = std::process::Command::new("loginctl")
+                .args(args)
+                .output()
+                .ok()?;
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        })
+    }
+
+    /// [`session_locked`]'s rule for the user `uid`, with `loginctl` as
+    /// `run` answers it: the user's graphical session (`Display`), then
+    /// its `LockedHint`.
+    pub fn locked_hint(uid: u32, run: impl Fn(&[&str]) -> Option<String>) -> Option<bool> {
+        let uid = uid.to_string();
+        let display = run(&["show-user", &uid, "--property=Display", "--value"])?;
+        let display = display.trim();
+        if display.is_empty() {
+            return None;
+        }
+        match run(&["show-session", display, "--property=LockedHint", "--value"])?.trim() {
+            "yes" => Some(true),
+            "no" => Some(false),
+            _ => None,
+        }
+    }
+
     /// The process's real user id, from `/proc/self/status`.
     pub fn own_uid() -> Option<u32> {
         let status = std::fs::read_to_string("/proc/self/status").ok()?;
@@ -645,6 +678,31 @@ mod tests {
             "{two}"
         );
         drop(guard);
+    }
+
+    #[test]
+    fn the_lock_is_read_from_the_users_graphical_session() {
+        use tier2::locked_hint;
+        let logind = |display: &'static str, hint: &'static str| {
+            move |args: &[&str]| -> Option<String> {
+                match args {
+                    ["show-user", "1000", "--property=Display", "--value"] => {
+                        Some(format!("{display}\n"))
+                    }
+                    ["show-session", "3", "--property=LockedHint", "--value"] => {
+                        Some(format!("{hint}\n"))
+                    }
+                    _ => None,
+                }
+            }
+        };
+        assert_eq!(locked_hint(1000, logind("3", "yes")), Some(true));
+        assert_eq!(locked_hint(1000, logind("3", "no")), Some(false));
+        // Another user, no graphical session, or an answer not known.
+        assert_eq!(locked_hint(1001, logind("3", "yes")), None);
+        assert_eq!(locked_hint(1000, logind("", "yes")), None);
+        assert_eq!(locked_hint(1000, logind("3", "maybe")), None);
+        assert_eq!(locked_hint(1000, |_| None), None);
     }
 
     #[test]

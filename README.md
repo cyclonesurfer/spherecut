@@ -457,8 +457,11 @@ Tier 2 tests use `/dev/dri/renderD128`, or `SPHERECUT_RENDER_NODE`.
 `gui_smoke` opens the viewer on each perf clip and sample, plays it with
 the overlay on and judges what it measured; it needs a desktop session
 (GNOME or Hyprland, unlocked and on screen), which it finds from a
-terminal inside it or from an SSH shell, and skips without one. Its
-screenshots go next to the report.
+terminal inside it or from an SSH shell, and skips without one. It
+fails at once if logind says the screen is locked, and a window left
+undrawn ends after 15 s. On GNOME, `gnome-session-inhibit --inhibit
+idle:suspend cargo xtask hw-test ...` keeps the screen from locking
+while it runs. Its screenshots go next to the report.
 `audio_output_device_plays` plays a quiet 440 Hz tone for about 2 s on
 the default output device.
 Benchmarks repeat `SPHERECUT_BENCH_RUNS` times (default 3); see

@@ -983,7 +983,8 @@ Built on `m1/slice8` (D37, D40; m1-plan sections 7.1, 7.8, 8.2, 10 and
   run, UI frames against the monitor's refresh rate, drops, A/V, audio,
   cache, memory) and a screenshot 960 pixels wide, and closes. It leaves
   the stored settings and window alone. `timed_out` (exit 1) is a new
-  code, for no first frame within 60 s (`docs/cli-json.md`).
+  code, for no first frame within 60 s (`docs/cli-json.md`), and since
+  slice 9 for a window with no UI pass for 15 s.
 - **`gui_smoke`** (Tier 2, `crates/cli/tests/tier2_gui.rs`): the smoke
   run on the 5.7K 8-bit and 10-bit perf clips, a seam clip, the sync
   clip, the stitched samples and the largest X5 file with its two
@@ -1005,6 +1006,39 @@ Built on `m1/slice8` (D37, D40; m1-plan sections 7.1, 7.8, 8.2, 10 and
   section xtask's. `gui_smoke` skips here, with no desktop session; H2
   runs it on odin and huginn, under GNOME, and Hyprland where there is
   one.
+
+## Slice 9: M1's acceptance
+
+On `m1/slice9` (D37, D40):
+
+- **`cargo xtask hw-test --only <name>`** runs only the Tier 2 tests
+  whose `binary::test` contains a name given (the option repeats), and
+  the report lists the rest as left out by `--only`; a name that picks
+  nothing fails the run. `--only gui_smoke --no-tier1` reruns the GUI
+  part in a few minutes, for a screen that was locked or a fractional
+  scale.
+- **doctor's `shared_decode`** (above, "Slice 5b: zero copy, path B")
+  and `zero_copy`.
+- **A smoke run on a screen that isn't drawn ends, saying so.** odin's
+  H2 at c9a4a55 started with the screen locked (idle for 2.5 hours):
+  every smoke run's window got no UI pass, so neither its 60 s limit
+  nor its end came, and `gui_smoke` killed each after 120 s with no
+  document. Now a watchdog thread ends a run after 15 s without a UI
+  pass, with a `timed_out` document that says when, in which phase, and
+  whether eframe's logic still ran (a hidden window) or not (a UI
+  thread stuck presenting), and exits 1. `gui_smoke` runs nothing while
+  logind says the session is locked, failing at once with the rerun
+  command when it is at the start, and says on a failed run whether
+  the screen had locked by its end; the report says whether the screen
+  was locked when the runs began and at the end. kittest checks the
+  watchdog both ways and that it leaves a finished run's document
+  alone; testkit checks the `loginctl` rule.
+- **huginn's H1 and H2** are a prompt for Pat to paste into Claude Code
+  there (`/mnt/project-files/spherecut/hw-run-6.md`): the full run under
+  `gnome-session-inhibit`, a 125 % rerun of the GUI part, and Pat's
+  by-eye checks.
+- **Docs as built**: ARCHITECTURE's Rendering and Threads, and PLAN's
+  M1 wording for decoding to the frame's native YUV (D30, D31).
 
 ## Known issues and limits
 
@@ -1380,7 +1414,6 @@ Built on `m1/slice8` (D37, D40; m1-plan sections 7.1, 7.8, 8.2, 10 and
 - huginn has no Vulkan Video H.264 or HEVC until it gets RPM Fusion's
   `mesa-vulkan-drivers-freeworld`, as odin has (Pat's call).
 - No Intel machine until the Framework arrives.
-- No GUI yet, so no GUI smoke run (M1).
 - The JSON contract's doctor error path (an issue of severity error,
   `doctor_errors`, exit 1) is tested on a constructed report, and the
   binary only for `ok` matching its exit status: this workspace's FFmpeg
@@ -1411,18 +1444,22 @@ Built on `m1/slice8` (D37, D40; m1-plan sections 7.1, 7.8, 8.2, 10 and
   show it, and its cause isn't known. The X5 raw and 8K numbers are to
   be measured again after the fixes.
 - In the benchmarks the X5's raw view is the two lenses projected side
-  by side, 960×1080 each, through the same rectilinear projection: the
-  GUI's raw view comes in slice 7, and its cost may differ.
+  by side, 960×1080 each, through the same rectilinear projection; the
+  GUI's raw view (slice 8) shows them flat, by its own pass, and its
+  cost may differ.
 - hw-test's first full run on a machine is long: libx265 took 27 minutes
   here, on 4 CPUs, for the 5.7K 8-bit perf clip alone. The clips are
   kept for later runs, and `--quick` makes none.
-- The engine is in no binary until the GUI (slice 7), so
-  `SPHERECUT_FRAME_CACHE_MIB`, which `playback::budget` reads, is not in
-  the README yet.
-- `gui_smoke` (D37, D40) has never run: this box has no desktop session,
-  so it skips. H2 runs it on odin and huginn. Its UI gate counts the
-  frames winit's refresh rate expects, which a compositor that reports
-  no rate leaves to the passes, as under kittest.
+- `gui_smoke` (D37, D40) has run once, on odin at c9a4a55 with the
+  screen locked, where every window went undrawn and every run was
+  killed (slice 9, above); here it skips, with no desktop session. Its
+  UI gate counts the frames winit's refresh rate expects, which a
+  compositor that reports no rate leaves to the passes, as under
+  kittest. Whether a locked GNOME session left eframe running only its
+  logic or stuck the UI thread in presenting isn't known yet; the
+  watchdog's document says which next time. The lock is read from
+  logind's `LockedHint`, which a locker that doesn't tell logind leaves
+  at "no", so there only the watchdog stops a run.
 - Audio has played on a sound card only in `audio_output_device_plays`,
   on odin's two outputs (above). This box has none, so here the fake and
   null devices run the engine's audio, the callback included; the

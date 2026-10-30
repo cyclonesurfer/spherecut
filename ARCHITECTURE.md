@@ -736,9 +736,12 @@ intermediate equirect exists only as the output of a 360 export.
   (`ctx.request_screenshot`, downscaled to 960 pixels wide), writes
   `spherecut.smoke/1` (`docs/cli-json.md`) and closes the window. The
   files are written on a worker. The stored settings and layout are
-  neither read nor written. hw-test's Tier 2 `gui_smoke` runs it on each
-  clip in the desktop session it finds, and kittest runs it with no
-  compositor.
+  neither read nor written. A watchdog thread ends a run whose window
+  has had no UI pass for 15 s (a locked screen, slice 9), writing a
+  `timed_out` document that says whether eframe's logic still ran, and
+  exits 1. hw-test's Tier 2 `gui_smoke` runs it on each clip in the
+  desktop session it finds, unless logind says it is locked, and
+  kittest runs it with no compositor.
 
 ## Threads *(as built in M1)*
 
@@ -755,7 +758,9 @@ intermediate equirect exists only as the output of a 360 export.
   pane), `files` (a folder's listing) and `smoke-out` (the smoke run's
   PNG and JSON). A job whose thread panics or can't start is lost,
   which the UI reports, and at exit
-  `run` joins them beside the player's threads, with 3 s.
+  `run` joins them beside the player's threads, with 3 s. The smoke
+  run's `smoke-watchdog` is the one thread never joined: it ends with
+  the process, or ends the process itself (above).
 * *(planned, M2 on)* Background workers for thumbnails, waveforms,
   proxies and export, each with progress reporting and cancellation
   tokens.
@@ -958,7 +963,9 @@ intermediate equirect exists only as the output of a 360 export.
   of the UI frames expected were presented (a hidden session), over
   0.1% of the frames dropped, UI p99 is over 1.5× the refresh period,
   |A/V| p95 reaches 20 ms on the sync clip, or HEVC decodes in software
-  where doctor says VA-API decodes it; without a session it skips. The
+  where doctor says VA-API decodes it; without a session it skips, and
+  with the session locked (logind's `LockedHint`) it fails at once
+  and the report says so. The
   playback benchmarks (`crates/playback/tests/tier2_playback.rs`) play
   the perf clips and the X5's samples through a `Player` on the GPU at
   60 Hz deadlines into an offscreen 1920×1080 target, unthrottled and in

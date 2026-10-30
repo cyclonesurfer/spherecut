@@ -18,6 +18,13 @@
 //! - an HEVC stream decodes in software where doctor's check says VA-API
 //!   decodes its profile.
 //!
+//! A locked screen draws no window, so nothing runs while logind says
+//! the session is locked (`tier2::session_locked`): with the screen
+//! locked at the start, the test fails at once, saying so; a run it
+//! locks before is failed unrun, and a failed run says whether the
+//! screen was locked by its end. A window that isn't drawn has no UI
+//! passes, and the smoke run's watchdog ends it after 15 s.
+//!
 //! Each run's document and screenshot go to `SPHERECUT_GUI_OUT`
 //! (hw-test's), and `gui-smoke.json` there lists the runs and their
 //! verdicts, which the report's GUI section shows. A clip that isn't
@@ -57,6 +64,10 @@ const MAX_AV_P95_MS: f64 = 20.0;
 
 /// The summary hw-test reads.
 const SUMMARY: &str = "gui-smoke.json";
+
+/// Why nothing ran.
+const LOCKED: &str = "the screen is locked: unlock it, keep it on, and run the GUI part again \
+     with `cargo xtask hw-test --only gui_smoke --no-tier1` (and `--samples` as before)";
 
 /// One clip to run.
 struct Clip {
@@ -250,6 +261,26 @@ fn gui_smoke() {
             Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("gui-smoke-{}", std::process::id()))
         });
     std::fs::create_dir_all(&out).unwrap();
+    let locked = tier2::session_locked();
+    let summary = |vaapi_hevc: &[String], runs: &[Value], not_run: &[(String, String)]| {
+        let s = json!({
+            "session": session.found.describe(),
+            "env": session.env.iter().map(|(k, v)| format!("{k}={}", v.to_string_lossy())).collect::<Vec<_>>(),
+            "locked": locked,
+            "vaapi_hevc": vaapi_hevc,
+            "runs": runs,
+            "not_run": not_run.iter().map(|(l, w)| json!({"label": l, "why": w})).collect::<Vec<_>>(),
+        });
+        std::fs::write(
+            out.join(SUMMARY),
+            serde_json::to_string_pretty(&s).unwrap() + "\n",
+        )
+        .unwrap();
+    };
+    if locked == Some(true) {
+        summary(&[], &[], &[("every run".into(), LOCKED.into())]);
+        panic!("{LOCKED}");
+    }
 
     // What doctor says VA-API decodes.
     let node = tier2::render_node().unwrap_or_else(|| PathBuf::from("/dev/dri/renderD128"));
@@ -335,6 +366,19 @@ fn gui_smoke() {
         let _ = std::fs::remove_file(&json);
         let _ = std::fs::remove_file(&png);
         eprintln!("==> {}: {}", clip.label, clip.path.display());
+        if tier2::session_locked() == Some(true) {
+            let why = "not run: the screen locked during the runs".to_string();
+            failed.push(format!("{}: {why}", clip.label));
+            runs.push(json!({
+                "n": n,
+                "label": clip.label,
+                "clip": clip.path.display().to_string(),
+                "document": json.display().to_string(),
+                "screenshot": null,
+                "failed": [why],
+            }));
+            continue;
+        }
         let (status, stderr) = smoke(&session, &clip.path, &json, &png);
         let doc = std::fs::read(&json)
             .ok()
@@ -352,6 +396,9 @@ fn gui_smoke() {
                 stderr.lines().last().unwrap_or("")
             ));
         }
+        if !why.is_empty() && tier2::session_locked() == Some(true) {
+            why.push("the screen was locked by the run's end".into());
+        }
         for w in &why {
             failed.push(format!("{}: {w}", clip.label));
         }
@@ -364,18 +411,7 @@ fn gui_smoke() {
             "failed": why,
         }));
     }
-    let summary = json!({
-        "session": session.found.describe(),
-        "env": session.env.iter().map(|(k, v)| format!("{k}={}", v.to_string_lossy())).collect::<Vec<_>>(),
-        "vaapi_hevc": gates.vaapi_hevc,
-        "runs": runs,
-        "not_run": not_run.iter().map(|(l, w)| json!({"label": l, "why": w})).collect::<Vec<_>>(),
-    });
-    std::fs::write(
-        out.join(SUMMARY),
-        serde_json::to_string_pretty(&summary).unwrap() + "\n",
-    )
-    .unwrap();
+    summary(&gates.vaapi_hevc, &runs, &not_run);
     for (label, why) in &not_run {
         eprintln!("not run: {label}: {why}");
     }

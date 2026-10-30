@@ -1568,6 +1568,15 @@ pub fn run(a: Args) -> Result<()> {
     let _ = writeln!(r, "| Kernel | {} |", uname.text.trim());
     let _ = writeln!(r, "| Session | {session} |");
     let _ = writeln!(r, "| GUI display | {display} |");
+    let _ = writeln!(
+        r,
+        "| Screen locked at the end | {} |",
+        match spherecut_testkit::tier2::session_locked() {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "not known (no LockedHint from logind)",
+        }
+    );
     let _ = writeln!(r, "| Audio server | {audio_server} |");
     if let Some(m) = &mutter {
         let _ = writeln!(
