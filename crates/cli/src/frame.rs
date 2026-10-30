@@ -25,37 +25,21 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Args, ValueEnum};
+use spherecut_agent::still::{self, Failure, Still, about, failure, number, seconds};
 use spherecut_cli::contract::{
-    self, DecodeInfo, Envelope, ErrorBody, Exit, FallbackInfo, FrameResult, FrameShown, GpuInfo,
-    Size, SourceInfo, ViewInfo, Warning, codes,
+    self, Envelope, Exit, FrameResult, FrameShown, Size, ViewInfo, Warning, codes,
 };
-use spherecut_core::cancel::{StopSource, StopToken};
+use spherecut_core::TimeSpec;
+use spherecut_core::cancel::StopSource;
 use spherecut_core::fs::{TempFile, follow_links, replaceable};
 use spherecut_core::video::VideoPlanes;
-use spherecut_core::{FrameTime, Rounding, Time, TimeSpec};
-use spherecut_media::HwDevice;
-use spherecut_media::backend::{
-    DamageCause, DecodeMode, DecodePath, DecoderEvent, Exactness, Fallback, FallbackReason,
-    FfmpegBackend, HwKind, HwOutput, MediaBackend, NextFrame, SeekMode, SeekOutcome, Timing,
-    Transfer, VideoDecode, VideoFrame, VideoRequest, VideoStreamInfo,
-};
-use spherecut_media::detect::Layout;
-use spherecut_media::hw::{self, GpuIds, RenderNode};
-use spherecut_media::probe::{self, ProbeReport, StreamInfo, StreamKind};
-use spherecut_media::seek::{FrameAddress, frame_address};
-use spherecut_media::spherical::{Projection as SvProjection, StereoMode};
-use spherecut_render::dmabuf::{self, Importer};
-use spherecut_render::vkshare::Copied;
-use spherecut_render::{
-    AdapterChoice, Depth, Filter, Gpu, Image, Pixels, Placement, RenderError, SlotShape, Stereo,
-    StillOptions, StillRenderer, ViewParams, reference, render_still, upload, wgpu,
-};
+use spherecut_media::Source;
+use spherecut_render::{AdapterChoice, Depth, Filter, ViewParams};
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
 
@@ -329,19 +313,21 @@ impl FrameArgs {
             None => AdapterChoice::from_env().unwrap_or(AdapterChoice::Auto),
         }
     }
-}
 
-/// A failed step: the error the run ends with.
-type Failure = ErrorBody;
-
-fn failure(code: &'static str, message: impl Into<String>) -> Failure {
-    ErrorBody::new(code, message)
-}
-
-/// `e` as the run's error, about `path`.
-fn about(mut e: Failure, path: &Path) -> Failure {
-    e.path = Some(path.to_string_lossy().into_owned());
-    e
+    fn still_options(&self) -> still::Options {
+        still::Options {
+            decoder: match self.decoder {
+                DecoderArg::Auto => still::Decoder::Auto,
+                DecoderArg::Software => still::Decoder::Software,
+                DecoderArg::Vaapi => still::Decoder::Vaapi,
+                DecoderArg::Vulkan => still::Decoder::Vulkan,
+            },
+            render_node: self.render_node.clone(),
+            equirect: self.equirect,
+            stream: self.stream,
+            zero_copy: self.zero_copy,
+        }
+    }
 }
 
 /// Run `spherecut frame`, and print its report.
@@ -411,7 +397,6 @@ fn work(args: FrameArgs) -> (Vec<Warning>, Result<Done, Failure>) {
     let mut job = Job {
         args,
         stop: stop.clone(),
-        token: stop.current(),
         warnings: Vec::new(),
     };
     let spawned = std::thread::Builder::new()
@@ -538,19 +523,12 @@ fn check_output(out: &Path, overwrite: bool) -> Result<PathBuf, Failure> {
     Ok(dest)
 }
 
-/// Steps 4 to 9, on the worker thread.
+/// Steps 4 to 9, on the worker thread. Steps 4 to 8 are
+/// [`spherecut_agent::still`]'s, which `look` renders with too.
 struct Job {
     args: FrameArgs,
     stop: StopSource,
-    token: StopToken,
     warnings: Vec<Warning>,
-}
-
-/// The decoder and what it found, for the report.
-struct Decoded {
-    frame: Arc<VideoFrame>,
-    requested: FrameTime,
-    shown: FrameTime,
 }
 
 impl Job {
@@ -559,74 +537,26 @@ impl Job {
         self.warnings.push(Warning::new(code, message));
     }
 
-    /// `Err(cancelled)` once the run has been interrupted.
-    fn go_on(&self) -> Result<(), Failure> {
-        if self.stop.is_shut_down() {
-            Err(cancelled())
-        } else {
-            Ok(())
-        }
-    }
-
-    fn file(&self) -> &Path {
-        &self.args.file
-    }
-
-    fn media_error(&self, e: spherecut_media::MediaError) -> Failure {
-        about(failure(e.code(), e.to_string()), self.file())
-    }
-
     fn run(&mut self, mut tmp: TempFile) -> Result<Done, Failure> {
+        let stop = still::Stop::of(&self.stop);
+        let opts = self.args.still_options();
+        let file = self.args.file.clone();
+        let src = Source::path(&file);
+
         // Step 4.
-        let report = match probe::probe(self.file()) {
-            Ok(r) => r,
-            Err(e) => {
-                let mut f = about(failure(e.code(), e.to_string()), self.file());
-                f.ffmpeg_log = e.ffmpeg_log;
-                return Err(f);
-            }
-        };
-        let stream = self.choose_stream(&report)?.clone();
-        if !self.args.equirect {
-            check_equirect(&report, &stream)?;
-        }
-        // Damage the seek may not reach: it fails the run only if it does.
-        for d in &report.damage {
-            self.warn(
-                d.code,
-                format!("{} is damaged: {}", self.file().display(), d.message),
-            );
-        }
-        self.go_on()?;
+        let probed =
+            still::probe(src, &opts, &stop, &mut self.warnings).map_err(|e| self.flags(e))?;
 
         // Step 5. The filter is the one rendered with: iso where aniso was
         // asked for and the device can't.
         let mut filter = self.args.filter;
-        let shared = self.args.zero_copy && self.args.decoder == DecoderArg::Vulkan;
         let gpu = if self.args.reference {
             None
         } else {
-            let gpu = if shared {
-                Gpu::headless_shared(&self.args.adapter())
-            } else {
-                Gpu::headless(&self.args.adapter())
-            }
-            .map_err(render_error)?;
+            let gpu = still::gpu(&self.args.adapter(), &opts)?;
             gpu.check_size(self.args.size)
                 .map_err(|e| failure(codes::USAGE, format!("--size: {e}")))?;
-            if shared && let Err(why) = gpu.shared_video() {
-                return Err(render_error(RenderError::Import(format!(
-                    "{} can't share its device with FFmpeg's Vulkan Video: {why}",
-                    gpu.caps.info.name
-                ))));
-            }
-            if self.args.zero_copy && !shared && !gpu.caps.dmabuf_import {
-                return Err(render_error(RenderError::Import(format!(
-                    "{} can't import DMA-BUFs (it lacks \
-                     VK_EXT_external_memory_dma_buf or VK_EXT_image_drm_format_modifier)",
-                    gpu.caps.info.name
-                ))));
-            }
+            still::check_gpu(&gpu, &opts)?;
             if self.args.filter == FilterArg::Aniso && !gpu.caps.anisotropy {
                 self.warn(
                     codes::warnings::ANISOTROPY_UNAVAILABLE,
@@ -639,101 +569,34 @@ impl Job {
             }
             Some(gpu)
         };
-        self.go_on()?;
+        stop.go_on()?;
 
         // Step 6.
-        let ids = gpu
-            .as_ref()
-            .filter(|g| !g.caps.is_cpu)
-            .map(|g| gpu_ids(&g.caps.info));
-        let node = hw::render_node(ids.as_ref(), self.args.render_node.as_deref());
-        let (mut decode, skipped) = decode_mode(self.args.decoder, &node);
-        if let (true, Some(gpu)) = (shared, &gpu) {
-            decode = DecodeMode::Hardware {
-                kind: HwKind::Vulkan,
-                device: Some(shared_device(gpu)?),
-                fallback: Fallback::Fail,
-            };
-        }
-        let backend = FfmpegBackend::on_node(node);
-        let req = VideoRequest {
-            stream: Some(stream.index),
-            decode,
-            output: match (self.args.zero_copy, shared) {
-                (true, true) => HwOutput::Vulkan,
-                (true, false) => HwOutput::DrmPrime,
-                (false, _) => HwOutput::Download,
-            },
-            interrupt: self.stop.shutdown_flag(),
-            ..VideoRequest::default()
-        };
-        let mut dec = backend
-            .open_video(self.file(), &req)
-            .map_err(|e| self.media_error(e))?;
-        let placement = self.placement(dec.as_ref(), &stream);
-        self.go_on()?;
+        let mut still = Still::open(src, &probed, gpu.as_ref(), &opts, &stop, &mut self.warnings)?;
+        stop.go_on()?;
 
         // Step 7.
-        let decoded = self.seek(dec.as_mut())?;
-        self.go_on()?;
+        let decoded = still.seek(self.args.when(), &mut self.warnings)?;
+        stop.go_on()?;
 
         // Step 8.
         let size = self.args.size;
-        let view = self.args.view();
-        let opts = StillOptions {
+        let look = still::Look {
             filter: match filter {
                 FilterArg::Iso => Filter::Isotropic,
                 FilterArg::Aniso => Filter::Anisotropic,
             },
             depth: self.args.depth(),
-            placement,
-            ..StillOptions::default()
         };
-        let image = match &gpu {
-            Some(gpu) if shared => {
-                let copied = copy_out(gpu, &decoded.frame, &placement)?;
-                StillRenderer::new(gpu)
-                    .render_copied(
-                        gpu,
-                        decoded.frame.as_ref(),
-                        &copied.buffer,
-                        &copied.planes,
-                        &view,
-                        size,
-                        &opts,
-                    )
-                    .map_err(render_error)?
-            }
-            Some(gpu) if self.args.zero_copy => {
-                let planes = import(gpu, &decoded.frame)?;
-                StillRenderer::new(gpu)
-                    .render_imported(gpu, decoded.frame.as_ref(), &planes, &view, size, &opts)
-                    .map_err(render_error)?
-            }
-            Some(gpu) => render_still(gpu, decoded.frame.as_ref(), &view, size, opts)
-                .map_err(render_error)?,
-            None => {
-                let f64s = reference::render(
-                    decoded.frame.as_ref(),
-                    &view,
-                    size,
-                    &reference::Options {
-                        level0: false,
-                        placement,
-                    },
-                )
-                .map_err(render_error)?;
-                quantize(&f64s, self.args.depth())
-            }
-        };
-        self.go_on()?;
+        let image = still.render(&decoded, &self.args.view(), size, look)?;
+        stop.go_on()?;
 
         // Step 9.
         let out = &self.args.output;
         let io = |e: std::io::Error| cannot_write(out, &e);
-        let png = image.to_png().map_err(render_error)?;
+        let png = image.to_png().map_err(still::render_error)?;
         tmp.file_mut().write_all(&png).map_err(io)?;
-        self.go_on()?;
+        stop.go_on()?;
         if self.args.overwrite {
             tmp.persist_replace().map_err(io)?;
         } else {
@@ -759,7 +622,6 @@ impl Job {
         }
 
         // Step 10.
-        let decode = decode_info(&decoded.frame.decoded_on, &decoded.frame.transfer, skipped);
         let result = FrameResult {
             output: out.to_string_lossy().into_owned(),
             frame: FrameShown {
@@ -782,743 +644,27 @@ impl Job {
                 FilterArg::Aniso => "aniso",
             },
             renderer: if gpu.is_some() { "gpu" } else { "reference" },
-            decode,
-            gpu: gpu.as_ref().map(|g| gpu_info(&g.caps.info)),
+            decode: still.decode_info(&decoded),
+            gpu: gpu.as_ref().map(|g| still::gpu_info(&g.caps.info)),
             color: *decoded.frame.color(),
-            source: SourceInfo {
-                stream: stream.index,
-                codec: dec.info().codec.clone(),
-                size: Size {
-                    width: dec.info().size.0,
-                    height: dec.info().size.1,
-                },
-                pix_fmt: dec.info().source_pix_fmt.clone(),
-            },
+            source: still.source_info(),
         };
         let line = summary(&result);
         Ok(Done { result, line })
     }
 
-    /// `--stream`, which must be a video stream, else the first video
-    /// stream that isn't a cover picture.
-    fn choose_stream<'r>(&self, report: &'r ProbeReport) -> Result<&'r StreamInfo, Failure> {
-        let is_video = |s: &&StreamInfo| {
-            s.kind == StreamKind::Video && !s.disposition.iter().any(|d| d == "attached_pic")
-        };
-        let videos: Vec<&StreamInfo> = report.streams.iter().filter(is_video).collect();
-        match self.args.stream {
-            Some(n) => videos
-                .iter()
-                .find(|s| s.index == n)
-                .copied()
-                .ok_or_else(|| {
-                    let listed = videos
-                        .iter()
-                        .map(|s| s.index.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    failure(
-                        codes::USAGE,
-                        format!(
-                            "--stream {n}: {} has no video stream {n} (its video streams: {})",
-                            self.file().display(),
-                            if listed.is_empty() { "none" } else { &listed }
-                        ),
-                    )
-                }),
-            None => videos.first().copied().ok_or_else(|| {
-                about(
-                    failure(
-                        "decode_failed",
-                        format!("{} has no video stream", self.file().display()),
-                    ),
-                    self.file(),
-                )
-            }),
-        }
-    }
-
-    /// Where the picture sits on the sphere, from the stream's spherical
-    /// metadata, with a warning for each thing M1 does with it: the left
-    /// eye of a stereo picture, a crop, and a pose it doesn't apply.
-    fn placement(&mut self, dec: &dyn VideoDecode, stream: &StreamInfo) -> Placement {
-        let m = dec.info().mapping.clone();
-        let stereo = match m.stereo {
-            StereoMode::Mono => Stereo::Mono,
-            StereoMode::TopBottom => {
-                self.warn(
-                    codes::warnings::STEREO_LEFT_EYE,
-                    "stereo, top-bottom: rendering the left eye (the top half)".into(),
-                );
-                Stereo::TopBottom
+    /// Step 4's errors with the flags that answer them: `--equirect` for a
+    /// file that isn't one, and `--stream` for a stream it hasn't.
+    fn flags(&self, mut e: Failure) -> Failure {
+        match (e.code, self.args.stream) {
+            (codes::NOT_EQUIRECT, _) => {
+                e.message
+                    .push_str("; --equirect renders it as equirect anyway");
             }
-            StereoMode::LeftRight => {
-                self.warn(
-                    codes::warnings::STEREO_LEFT_EYE,
-                    "stereo, left-right: rendering the left eye (the left half)".into(),
-                );
-                Stereo::LeftRight
-            }
-            other => {
-                self.warn(
-                    codes::warnings::STEREO_UNKNOWN,
-                    format!(
-                        "stereo layout {other:?} is unknown: rendering the whole picture, as mono"
-                    ),
-                );
-                Stereo::Mono
-            }
-        };
-        let [u0, v0, u1, v1] = m.cover;
-        let placement = Placement {
-            left: u0,
-            top: v0,
-            right: 1.0 - u1,
-            bottom: 1.0 - v1,
-            stereo,
-        };
-        if m.cover != [0.0, 0.0, 1.0, 1.0] {
-            self.warn(
-                codes::warnings::CROP_APPLIED,
-                format!(
-                    "the picture covers part of the sphere (cropped by {} left, {} top, {} right \
-                     and {} bottom): the rest is black",
-                    number(placement.left),
-                    number(placement.top),
-                    number(placement.right),
-                    number(placement.bottom)
-                ),
-            );
+            (codes::USAGE, Some(n)) => e.message = format!("--stream {n}: {}", e.message),
+            _ => {}
         }
-        if m.pose_present {
-            let pose = stream
-                .spherical
-                .v2
-                .as_ref()
-                .map(|v2| {
-                    format!(
-                        " (yaw {}°, pitch {}°, roll {}°)",
-                        number(v2.pose_yaw),
-                        number(v2.pose_pitch),
-                        number(v2.pose_roll)
-                    )
-                })
-                .unwrap_or_default();
-            self.warn(
-                codes::warnings::POSE_NOT_APPLIED,
-                format!("the file's pose{pose} is not applied (M2)"),
-            );
-        }
-        placement
-    }
-
-    /// Step 7: the frame `--time` or `--frame` names, exactly.
-    fn seek(&mut self, dec: &mut dyn VideoDecode) -> Result<Decoded, Failure> {
-        let when = self.args.when();
-        let rate = dec.info().frame_rate();
-        tracing::info!("seeking to {when}");
-        let (at, requested) = match when {
-            TimeSpec::Time(t) => (
-                t,
-                FrameTime {
-                    time: t,
-                    frame: None,
-                },
-            ),
-            TimeSpec::Frame(n) => {
-                let address =
-                    frame_address(dec.info(), n).map_err(|_| self.beyond(dec.info(), when))?;
-                match address {
-                    FrameAddress::At(t) => {
-                        let requested = match rate {
-                            Some(rate) => {
-                                FrameTime::at(rate, n).map_err(|_| self.beyond(dec.info(), when))?
-                            }
-                            None => FrameTime {
-                                time: t,
-                                frame: Some(n),
-                            },
-                        };
-                        (t, requested)
-                    }
-                    FrameAddress::Counted(n) => return self.count(dec, n),
-                }
-            }
-        };
-        // A time that no timestamp of the stream can hold is past its end,
-        // which the seek would only fail on.
-        if at.to_pts(dec.info().time_base, Rounding::Floor).is_err() {
-            return Err(self.beyond(dec.info(), when));
-        }
-        let outcome = dec
-            .seek(at, SeekMode::Exact, &self.token)
-            .map_err(|e| self.media_error(e))?;
-        let (frame, exactness) = match outcome {
-            SeekOutcome::Frame {
-                frame, exactness, ..
-            } => (frame, exactness),
-            SeekOutcome::Stopped => return Err(cancelled()),
-        };
-        let events = dec.take_events();
-        match exactness {
-            Exactness::Exact => {}
-            Exactness::AfterLast => return Err(self.past_the_end(dec, when, &frame)),
-            Exactness::Truncated { last_good_pts } => {
-                return Err(self.damaged(dec, when, last_good_pts, &events));
-            }
-            Exactness::BeforeFirst | Exactness::KeyframeOnly => {
-                return Err(failure(
-                    codes::INTERNAL,
-                    format!("an exact seek to {when} came back {exactness:?}"),
-                ));
-            }
-        }
-        self.damage_after(&events);
-        let shown = shown(dec, &frame);
-        self.check_index(dec, when, &shown)?;
-        Ok(Decoded {
-            frame,
-            requested,
-            shown,
-        })
-    }
-
-    /// A frame number on a constant-rate stream must be the frame
-    /// `shown`, which the seek can't tell where frames are missing: past
-    /// the last frame of a stream whose container says it runs on, frame
-    /// `n` is `out_of_range`; before it, frames are missing in its place
-    /// (`damaged`). A cut the decoder can't see (in a Matroska file that
-    /// doesn't say its size, D13) leaves either.
-    fn check_index(
-        &mut self,
-        dec: &mut dyn VideoDecode,
-        when: TimeSpec,
-        shown: &FrameTime,
-    ) -> Result<(), Failure> {
-        let (TimeSpec::Frame(n), Some(_)) = (when, dec.info().frame_rate()) else {
-            return Ok(());
-        };
-        let Some(i) = shown.frame.filter(|&i| i != n) else {
-            return Ok(());
-        };
-        let file = self.file().display().to_string();
-        let e = if self.is_last(dec)? {
-            failure(
-                codes::OUT_OF_RANGE,
-                format!("no frame {n}: {file} has {} frames, 0 to {i}", i + 1),
-            )
-        } else {
-            failure(
-                DamageCause::Corrupt.code(),
-                format!(
-                    "{file} has no frame {n}: at its constant rate frame {i} is shown in its \
-                     place, so frames are missing there"
-                ),
-            )
-        };
-        Err(about(e, self.file()))
-    }
-
-    /// Whether the frame the last seek returned is the stream's last: the
-    /// next one is decoded to see, and damage after it is a warning.
-    fn is_last(&mut self, dec: &mut dyn VideoDecode) -> Result<bool, Failure> {
-        let next = dec.next_frame(&self.token);
-        self.damage_after(&dec.take_events());
-        match next {
-            Ok(NextFrame::Frame(_)) => Ok(false),
-            Ok(NextFrame::End) => Ok(true),
-            Ok(NextFrame::Stopped) => Err(cancelled()),
-            // The device failing is no answer.
-            Err(e) if e.is_device_failure() => Err(self.media_error(e)),
-            // The stream ends there, said as damage.
-            Err(_) => Ok(true),
-        }
-    }
-
-    /// `out_of_range` for `when`, too far on for any timestamp of the
-    /// stream, naming its range as far as `info` knows it.
-    fn beyond(&self, info: &VideoStreamInfo, when: TimeSpec) -> Failure {
-        let file = self.file().display();
-        let what = match when {
-            TimeSpec::Time(t) => format!("no frame at {} s", seconds(t)),
-            TimeSpec::Frame(n) => format!("no frame {n}"),
-        };
-        let message = match (when, info.frame_count, info.duration) {
-            (TimeSpec::Frame(_), Some(c), _) if c > 0 => {
-                format!("{what}: {file} has {c} frames, 0 to {}", c - 1)
-            }
-            (_, _, Some(d)) => format!("{what}: the clip runs from 0 to {} s", seconds(d)),
-            _ => format!("{what}: it is past the end of {file}"),
-        };
-        about(failure(codes::OUT_OF_RANGE, message), self.file())
-    }
-
-    /// Frame `n` of a variable-rate stream, counted from the first. Damage
-    /// before it fails the run, by its cause: frames it lost would go
-    /// uncounted. That includes a read that failed, which the decoder says
-    /// before the first frame it gives up after it, and before the error
-    /// the stream ends with.
-    fn count(&mut self, dec: &mut dyn VideoDecode, n: u64) -> Result<Decoded, Failure> {
-        let when = TimeSpec::Frame(n);
-        let mut frame = match dec
-            .seek(Time::ZERO, SeekMode::Exact, &self.token)
-            .map_err(|e| self.media_error(e))?
-        {
-            SeekOutcome::Frame { frame, .. } => frame,
-            SeekOutcome::Stopped => return Err(cancelled()),
-        };
-        for i in 0..n {
-            let next = dec.next_frame(&self.token);
-            let events = dec.take_events();
-            if let Some(e) = self.damage_before(dec, &events, when, &frame) {
-                return Err(e);
-            }
-            frame = match next.map_err(|e| self.media_error(e))? {
-                NextFrame::Frame(f) => f,
-                NextFrame::Stopped => return Err(cancelled()),
-                NextFrame::End => {
-                    let message = format!(
-                        "no frame {n}: {} has {} frames, 0 to {i}",
-                        self.file().display(),
-                        i + 1
-                    );
-                    return Err(about(failure(codes::OUT_OF_RANGE, message), self.file()));
-                }
-            };
-        }
-        self.damage_after(&dec.take_events());
-        let at = FrameTime {
-            time: frame.time,
-            frame: Some(n),
-        };
-        Ok(Decoded {
-            frame,
-            requested: at,
-            shown: at,
-        })
-    }
-
-    /// `out_of_range` for a seek past the last frame, `last`, naming the
-    /// clip's range.
-    fn past_the_end(&self, dec: &dyn VideoDecode, when: TimeSpec, last: &VideoFrame) -> Failure {
-        let info = dec.info();
-        let end = info
-            .duration
-            .or_else(|| last.duration.and_then(|d| last.time.checked_add(d).ok()))
-            .unwrap_or(last.time);
-        let message = match when {
-            TimeSpec::Frame(n) => match shown(dec, last).frame {
-                Some(i) => format!(
-                    "no frame {n}: {} has {} frames, 0 to {i}",
-                    self.file().display(),
-                    i + 1
-                ),
-                None => format!("no frame {n}: {} ends before it", self.file().display()),
-            },
-            TimeSpec::Time(t) => format!(
-                "no frame at {} s: the clip runs from 0 to {} s (its last frame starts at {} s)",
-                seconds(t),
-                seconds(end),
-                seconds(last.time)
-            ),
-        };
-        about(failure(codes::OUT_OF_RANGE, message), self.file())
-    }
-
-    /// The error for a seek that damage stopped short of `when`: its
-    /// cause's code (D27, the M1 plan's amendment 8), naming the last good
-    /// frame's time.
-    fn damaged(
-        &self,
-        dec: &dyn VideoDecode,
-        when: TimeSpec,
-        last_good_pts: i64,
-        events: &[DecoderEvent],
-    ) -> Failure {
-        // The damage the seek stopped at: the event that names the frame
-        // it returned, else the last.
-        let damage: Vec<(&str, DamageCause, Option<i64>)> = events
-            .iter()
-            .filter_map(|e| match e {
-                DecoderEvent::Damaged {
-                    reason,
-                    last_good_pts,
-                    cause,
-                } => Some((reason.as_str(), *cause, *last_good_pts)),
-                _ => None,
-            })
-            .collect();
-        let (reason, cause) = damage
-            .iter()
-            .find(|d| d.2 == Some(last_good_pts))
-            .or(damage.last())
-            .map_or(("damaged data", DamageCause::Corrupt), |d| (d.0, d.1));
-        let good = dec.info().clip_time(last_good_pts).map_or_else(
-            |_| format!("pts {last_good_pts}"),
-            |t| format!("{} s", seconds(t)),
-        );
-        about(
-            failure(
-                cause.code(),
-                format!(
-                    "{} is damaged before {}: {reason}; the last good frame is at {good}",
-                    self.file().display(),
-                    describe(when)
-                ),
-            ),
-            self.file(),
-        )
-    }
-
-    /// Damage that a counted frame `when` lies past, after `last`, the
-    /// last frame counted: the error for it, naming the last good frame,
-    /// as the damage says it or else `last`.
-    fn damage_before(
-        &self,
-        dec: &dyn VideoDecode,
-        events: &[DecoderEvent],
-        when: TimeSpec,
-        last: &VideoFrame,
-    ) -> Option<Failure> {
-        events.iter().find_map(|e| match e {
-            DecoderEvent::Damaged {
-                reason,
-                cause,
-                last_good_pts,
-            } => {
-                let good = last_good_pts
-                    .and_then(|p| dec.info().clip_time(p).ok())
-                    .unwrap_or(last.time);
-                Some(about(
-                    failure(
-                        cause.code(),
-                        format!(
-                            "{} is damaged before {}: {reason}; the last good frame is at {} s",
-                            self.file().display(),
-                            describe(when),
-                            seconds(good)
-                        ),
-                    ),
-                    self.file(),
-                ))
-            }
-            _ => None,
-        })
-    }
-
-    /// Damage after the frame, which the run goes on past: warnings.
-    fn damage_after(&mut self, events: &[DecoderEvent]) {
-        for e in events {
-            if let DecoderEvent::Damaged { reason, cause, .. } = e {
-                self.warn(
-                    cause.code(),
-                    format!(
-                        "{} is damaged after the frame: {reason}",
-                        self.file().display()
-                    ),
-                );
-            }
-        }
-    }
-}
-
-/// The frame's clip time, with its index on a constant-rate stream.
-fn shown(dec: &dyn VideoDecode, frame: &VideoFrame) -> FrameTime {
-    let index = match dec.info().timing {
-        Timing::Constant(rate) => rate
-            .time_to_frame(frame.time, Rounding::Nearest)
-            .ok()
-            .and_then(|i| u64::try_from(i).ok()),
-        Timing::Variable { .. } => None,
-    };
-    FrameTime {
-        time: frame.time,
-        frame: index,
-    }
-}
-
-/// Whether the file is a stitched equirect: tagged so (Spherical Video
-/// V2's `equi`, or V1's `equirectangular`, in an MP4 or MOV file), or
-/// else `not_equirect`, naming what it is, or that its Matroska spherical
-/// metadata isn't read.
-fn check_equirect(report: &ProbeReport, stream: &StreamInfo) -> Result<(), Failure> {
-    let file = report.path.display();
-    let refuse = |what: String| {
-        about(
-            failure(
-                codes::NOT_EQUIRECT,
-                format!("{file} is {what}; --equirect renders it as equirect anyway"),
-            ),
-            &report.path,
-        )
-    };
-    let sph = &stream.spherical;
-    if let Some(v2) = &sph.v2 {
-        return match &v2.projection {
-            Some(SvProjection::Equirect { .. }) => Ok(()),
-            Some(SvProjection::Cubemap { .. }) => Err(refuse(
-                "a cubemap (Spherical Video V2 cbmp), not an equirect: M1 renders only equirect"
-                    .into(),
-            )),
-            Some(SvProjection::Mesh) => Err(refuse(
-                "a mesh projection (Spherical Video V2 mshp), not an equirect: M1 renders only \
-                 equirect"
-                    .into(),
-            )),
-            Some(SvProjection::Other { fourcc }) => Err(refuse(format!(
-                "in a projection Spherecut doesn't know (Spherical Video V2 {fourcc}): M1 \
-                 renders only equirect"
-            ))),
-            None => Err(refuse(
-                "tagged spherical (Spherical Video V2) with no projection".into(),
-            )),
-        };
-    }
-    if let Some(v1) = &sph.v1 {
-        return match v1.projection_type.as_deref() {
-            Some("equirectangular") => Ok(()),
-            Some(other) => Err(refuse(format!(
-                "in the projection {other} (Spherical Video V1): M1 renders only equirect"
-            ))),
-            None => Err(refuse(
-                "tagged spherical (Spherical Video V1) with no projection".into(),
-            )),
-        };
-    }
-    let vendor = report
-        .camera
-        .as_ref()
-        .and_then(|c| c.vendor.clone())
-        .unwrap_or_else(|| "a camera's".into());
-    let size = stream
-        .video
-        .as_ref()
-        .map(|v| format!("{}x{}", v.width, v.height))
-        .unwrap_or_else(|| "of unknown size".into());
-    // probe reads spherical metadata from MP4 boxes only.
-    if report.container.format.starts_with("matroska") {
-        return Err(refuse(format!(
-            "a {size} Matroska/WebM file, and Spherecut doesn't read Matroska's spherical \
-             metadata yet (Spherical Video V2's Projection element), so it can't tell whether \
-             it is an equirect"
-        )));
-    }
-    match report.camera.as_ref().map(|c| c.layout) {
-        Some(Layout::Insta360DualFisheye) => Err(refuse(
-            "Insta360 dual fisheye: stitching arrives in M3".into(),
-        )),
-        Some(Layout::DjiDualFisheye) => Err(refuse(
-            "DJI dual fisheye, one stream per lens: stitching arrives in M3".into(),
-        )),
-        Some(Layout::GoProEac) => Err(refuse(
-            "a GoPro equi-angular cubemap pair (EAC): stitching arrives in M3".into(),
-        )),
-        Some(Layout::LowResCompanion) => Err(refuse(format!(
-            "{vendor} low-resolution companion (an LRV proxy), not a stitched equirect: M3 \
-             uses these as proxies"
-        ))),
-        Some(Layout::EquirectLikely) => Err(refuse(format!(
-            "{size}, 2:1, but has no spherical metadata, so it may not be an equirect"
-        ))),
-        _ => Err(refuse(format!(
-            "{size} with no spherical metadata, not a tagged equirect"
-        ))),
-    }
-}
-
-/// How the decoder is opened for `--decoder`, on `node`, and the fallback
-/// `auto` took without trying, when there is no device to try.
-fn decode_mode(decoder: DecoderArg, node: &RenderNode) -> (DecodeMode, Option<FallbackInfo>) {
-    let hardware = |kind, fallback| DecodeMode::Hardware {
-        kind,
-        device: None,
-        fallback,
-    };
-    match decoder {
-        DecoderArg::Software => (DecodeMode::Software, None),
-        // VA-API on the GPU's node, then software (D39). Without a node
-        // there is nothing to try.
-        DecoderArg::Auto if !node.path.exists() => (
-            DecodeMode::Software,
-            Some(FallbackInfo {
-                from: HwKind::VaApi.ffmpeg_name(),
-                code: "hw_unavailable",
-                reason: format!(
-                    "no VA-API device: no render node at {}",
-                    node.path.display()
-                ),
-            }),
-        ),
-        DecoderArg::Auto => (hardware(HwKind::VaApi, Fallback::Software), None),
-        DecoderArg::Vaapi => (hardware(HwKind::VaApi, Fallback::Fail), None),
-        DecoderArg::Vulkan => (hardware(HwKind::Vulkan, Fallback::Fail), None),
-    }
-}
-
-/// `frame`'s planes imported into `gpu` (`--zero-copy`): `import_failed`
-/// when the decoder didn't export it, or the GPU can't import it.
-fn import(gpu: &Gpu, frame: &VideoFrame) -> Result<Vec<wgpu::Texture>, Failure> {
-    let refused = |why: String| render_error(RenderError::Import(why));
-    let layers = match (&frame.transfer, frame.dmabuf()) {
-        (Transfer::DrmPrime, Some(layers)) => layers,
-        (
-            Transfer::Downloaded {
-                not_exported: Some(why),
-            },
-            _,
-        ) => return Err(refused(format!("VA-API didn't export the frame: {why}"))),
-        (Transfer::System, _) => {
-            return Err(refused(
-                "the frame was decoded in software, not on VA-API".into(),
-            ));
-        }
-        _ => {
-            return Err(refused(
-                "the decoder copied the frame from its device".into(),
-            ));
-        }
-    };
-    let whole = SlotShape::of(frame.layout(), frame.size()).map_err(render_error)?;
-    let planes = dmabuf::plan(&whole, layers).map_err(refused)?;
-    Importer::new().import(gpu, &planes).map_err(render_error)
-}
-
-/// FFmpeg's Vulkan context on `gpu`'s device, shared with it
-/// (`--zero-copy --decoder vulkan`): `import_failed` when FFmpeg refuses
-/// it.
-fn shared_device(gpu: &Gpu) -> Result<Arc<HwDevice>, Failure> {
-    let video = gpu
-        .shared_video()
-        .map_err(|why| render_error(RenderError::Import(why)))?;
-    HwDevice::vulkan_shared(&video.handles)
-        .map(Arc::new)
-        .map_err(|e| {
-            render_error(RenderError::Import(format!(
-                "FFmpeg can't decode on {}'s device: {e}",
-                gpu.caps.info.name
-            )))
-        })
-}
-
-/// `frame`'s shown planes copied out of its Vulkan image on `gpu`
-/// (`--zero-copy --decoder vulkan`), the copy done and ordered before
-/// wgpu's next submit: `import_failed` when the decoder downloaded the
-/// frame instead, or the copier refuses it.
-fn copy_out(gpu: &Gpu, frame: &VideoFrame, placement: &Placement) -> Result<Copied, Failure> {
-    let refused = |why: String| render_error(RenderError::Import(why));
-    let picture = match (&frame.transfer, frame.vulkan()) {
-        (Transfer::Vulkan, Some(p)) => p,
-        (
-            Transfer::Downloaded {
-                not_exported: Some(why),
-            },
-            _,
-        ) => {
-            return Err(refused(format!(
-                "the frame wasn't left on the Vulkan device: {why}"
-            )));
-        }
-        _ => {
-            return Err(refused(
-                "the decoder copied the frame from its device".into(),
-            ));
-        }
-    };
-    let video = gpu.shared_video().map_err(refused)?;
-    let regions = upload::shown_regions(frame, placement).map_err(render_error)?;
-    let copied = video.copier.copy(picture, &regions).map_err(render_error)?;
-    video.copier.wait(&copied).map_err(render_error)?;
-    video.copier.order_before(&gpu.queue, &copied);
-    Ok(copied)
-}
-
-/// How the frame left its decoder, as the JSON names it.
-fn transfer_name(t: &Transfer) -> &'static str {
-    match t {
-        Transfer::System => "system",
-        Transfer::Downloaded { .. } => "downloaded",
-        Transfer::DrmPrime => "drm_prime",
-        Transfer::Vulkan => "vulkan",
-    }
-}
-
-/// Where the frame was decoded, and how it left the decoder, for the
-/// JSON.
-fn decode_info(
-    path: &DecodePath,
-    transfer: &Transfer,
-    skipped: Option<FallbackInfo>,
-) -> DecodeInfo {
-    let transfer = transfer_name(transfer);
-    match path {
-        DecodePath::Software { .. } => DecodeInfo {
-            path: "software",
-            transfer,
-            fallback: skipped,
-        },
-        DecodePath::Hardware { kind } => DecodeInfo {
-            path: kind.ffmpeg_name(),
-            transfer,
-            fallback: None,
-        },
-        DecodePath::FellBack { from, reason } => DecodeInfo {
-            path: "software",
-            transfer,
-            fallback: Some(FallbackInfo {
-                from: from.ffmpeg_name(),
-                code: match reason {
-                    FallbackReason::Refused(_) => "hw_unsupported",
-                    FallbackReason::DeviceUnavailable(_) => "hw_unavailable",
-                    FallbackReason::Failed { .. } => "hw_failed",
-                },
-                reason: reason.to_string(),
-            }),
-        },
-    }
-}
-
-/// The ids hardware decoding finds the adapter's render node by.
-fn gpu_ids(info: &wgpu::AdapterInfo) -> GpuIds {
-    GpuIds {
-        pci_bus_id: info.device_pci_bus_id.clone(),
-        vendor: info.vendor,
-        device: info.device,
-    }
-}
-
-fn gpu_info(info: &wgpu::AdapterInfo) -> GpuInfo {
-    GpuInfo {
-        name: info.name.clone(),
-        driver: info.driver.clone(),
-        driver_info: info.driver_info.clone(),
-        device_type: match info.device_type {
-            wgpu::DeviceType::DiscreteGpu => "discrete_gpu",
-            wgpu::DeviceType::IntegratedGpu => "integrated_gpu",
-            wgpu::DeviceType::VirtualGpu => "virtual_gpu",
-            wgpu::DeviceType::Cpu => "cpu",
-            wgpu::DeviceType::Other => "other",
-        },
-    }
-}
-
-fn render_error(e: RenderError) -> Failure {
-    failure(e.code(), e.to_string())
-}
-
-/// The reference's picture at `depth`'s codes, rounded to nearest as the
-/// GPU stores them.
-fn quantize(img: &reference::ImageF64, depth: Depth) -> Image {
-    let code = |v: f64, max: f64| (v.clamp(0.0, 1.0) * max).round();
-    let pixels = match depth {
-        Depth::Sixteen => {
-            Pixels::Rgb16(img.data.iter().map(|&v| code(v, 65535.0) as u16).collect())
-        }
-        _ => Pixels::Rgb8(img.data.iter().map(|&v| code(v, 255.0) as u8).collect()),
-    };
-    Image {
-        width: img.width,
-        height: img.height,
-        pixels,
+        e
     }
 }
 
@@ -1564,26 +710,6 @@ fn hw_name(ffmpeg: &str) -> &str {
         "vulkan" => "Vulkan",
         other => other,
     }
-}
-
-/// `--time` or `--frame` as the messages name it.
-fn describe(when: TimeSpec) -> String {
-    match when {
-        TimeSpec::Time(t) => format!("{} s", seconds(t)),
-        TimeSpec::Frame(n) => format!("frame {n}"),
-    }
-}
-
-/// Seconds for people: to the millisecond, without trailing zeros.
-fn seconds(t: Time) -> String {
-    number(t.to_secs_f64())
-}
-
-/// A number for people: to three decimals, without trailing zeros.
-fn number(v: f64) -> String {
-    let s = format!("{v:.3}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s == "-0" { "0".into() } else { s.into() }
 }
 
 /// In debug builds, when `SPHERECUT_DEBUG_FRAME_RACE` is set, write the

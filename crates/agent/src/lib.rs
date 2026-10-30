@@ -10,12 +10,14 @@
 #![forbid(unsafe_code)]
 
 mod b64;
+pub mod contract;
 pub mod error;
 pub mod limits;
 pub mod ops;
 pub mod roots;
 pub mod rpc;
 pub mod schema;
+pub mod still;
 pub mod text;
 pub mod tools;
 

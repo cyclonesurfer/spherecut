@@ -1788,7 +1788,9 @@ What, for `spherecut probe` and `spherecut doctor` now, and for
   library half brings clap, anyhow and tracing-subscriber with it). A1
   moves `contract` into spherecut-agent, or into a small crate below
   both that needs only serde, serde_json, core and media, as the module
-  does today, and spherecut-cli re-exports it. The JSON doesn't change.
+  does today, and spherecut-cli re-exports it. The JSON doesn't change. *A1.4 did:* it is `spherecut_agent::contract`, since frame's core
+  moved there too (`spherecut_agent::still`, a1-plan amendment 13), and
+  `spherecut_cli::contract` re-exports it.
 - `schema` is one string that names the document and its version:
   `spherecut.probe/1`, `spherecut.doctor/1`, and `spherecut/1` for a
   usage error that names no subcommand.

@@ -386,7 +386,8 @@ should call `sync_ffmpeg_log_level()`.
 
 ## The CLI's JSON contract
 
-`spherecut_cli::contract` builds what `--json` prints (D27, and
+`spherecut_agent::contract`, re-exported as `spherecut_cli::contract`
+since A1.4 moved it below the CLI, builds what `--json` prints (D27, and
 `docs/cli-json.md` field by field): one envelope per run, `{"schema",
 "ok", "result"?, "error"?, "warnings"}`, with `schema` such as
 `spherecut.probe/1`. probe's result is `{"files": [...]}`, one
@@ -413,7 +414,10 @@ document. Debug builds panic on `SPHERECUT_DEBUG_PANIC` (`main`,
 ## `spherecut frame`
 
 `crates/cli/src/frame.rs` renders one frame of a stitched equirect into
-a PNG (M1 plan section 5, D27), in the plan's order:
+a PNG (M1 plan section 5, D27), in the plan's order. Steps 4 to 8 are
+`spherecut_agent::still`'s since A1.4, so that the agent's `look` renders
+its tiles the way frame does and frame's tests cover that path; frame
+keeps its flags, its output file, SIGINT and its JSON:
 
 1. clap parses the flags, `--time` through `core::TimeSpec` (exact
    decimals, `m:s` and `h:m:s`, rationals, `Nf`), and
