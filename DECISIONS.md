@@ -6551,6 +6551,85 @@ raw view's reopen then doesn't fire); M3's stitcher replaces the raw
 view; or winit stops reporting the refresh rate on a compositor Pat
 uses.
 
+## D41. The submit gate
+
+*2026-10-30, M1 slice 9, from odin's GUI runs with zero copy the
+default for Vulkan Video (D25). Updates D25 and D36.*
+
+What:
+
+- **Why the window still missed refreshes.** At 36041f7 `gui_smoke` on
+  odin (RX 7600, RADV on Mesa 26.2.5, GNOME's mutter on Wayland)
+  presented 95 % and 94 % of the refreshes on the noisy 5.7K 8- and
+  10-bit clips, with 39 and 44 late UI passes after the first second,
+  while the UI's own work stayed under 1.5 ms and acquiring the surface
+  under 0.2 ms. Every late gap came after a pass had presented: the
+  compositor showed the frame late. The cause is in RADV and the amdgpu
+  kernel driver. From acquire to present RADV adds the swapchain image
+  the app holds to its device's global buffer list
+  (`radv_wsi_set_memory_ownership`), so every submission on that
+  VkDevice meanwhile, from any thread, lists it; amdgpu's CS ioctl
+  makes each submission a writer of every buffer in its list
+  (`amdgpu_cs.c`); and the compositor waits for the image's writers
+  before it shows it. So it waited for whatever else was submitted in
+  that window: FFmpeg's Vulkan Video decode on the shared device (about
+  40 ms for a 5.7K I-frame), the copier's copy, an upload with its
+  mips. In the diagnostic runs (branch `diag/late-ui`) 20 of 27, 32 of
+  37, 25 of 28, 53 of 54 and 5 of 5 late passes had such a submission
+  in the window, and the rest an I-frame decode still running. Only the
+  UI's own VkDevice counts: VA-API, and FFmpeg's Vulkan on a device of
+  its own (the copy path), don't.
+- **The gate** (`core::gate::SubmitGate`, one a device:
+  `Gpu::submit_gate`, and for the shared device also in its
+  `VkDeviceHandles`). The viewer's `prepare`, which egui-wgpu runs
+  before it acquires the surface, closes it; its `paint`, which runs
+  after, opens it 2 ms on (`HOLD`), which covers egui's submit and the
+  present. The next pass's logic, which follows the present, opens it
+  at once, and one closed and not opened opens by itself after 20 ms
+  (`CLOSED_AT_MOST`). Every other submitter waits at it right before it
+  submits: FFmpeg in the device context's `lock_queue`, which is ours
+  (one thread a queue, as FFmpeg's own, then the gate; FFmpeg 6.1 to
+  9.0 call it around every submission, and 8.1 and 9.0 mark it
+  deprecated, to go at libavutil 62), the copier before its
+  `vkQueueSubmit2`, and the uploader before each `queue.submit`. The
+  UI thread never waits: a wait on it passes at once.
+- **Measured** on odin with the diagnostic build, whose gate was this
+  one with the hold as a switch: late passes 27 → 1 and 37 → 2 on the
+  5.7K 8-bit clip, 54 → 2 on the 10-bit one and 5 → 3 on the X5 pair;
+  presented 95.8 % → 99.9 % and 91.7 % → 99.8 %, the UI's p99 49.9 →
+  17.05 ms, nothing dropped. The longest wait was 2.1 ms. A hold of
+  5 ms did no better. The 1 to 3 left are 26 to 33 ms with nothing
+  submitted in the window: the compositor's own.
+- **What it costs**: a submission waits at most egui's pass after the
+  acquire plus the hold, about 2 ms a refresh, and FFmpeg's other
+  threads find that queue held meanwhile. The runs with the gate
+  dropped no frame; the Tier 2 playback benches have no window, so
+  nothing closes the gate there.
+- **Tests**: core's unit tests (a submission waits from the close to
+  the hold after the acquire; a close with no acquire, or one opened,
+  lets it through; the UI thread never waits). render's
+  `shared_vulkan` on lavapipe: FFmpeg's upload, the copier and the
+  uploader each wait at a closed gate (FFmpeg's part fails with the
+  queue locks unset, checked). app's
+  `the_viewer_closes_the_submit_gate_around_each_paint`. The smoke
+  document's `submit_gate` (`waits`, `longest_ms`), in hw-test's GUI
+  report.
+
+Tried in the diagnostic runs, and worse: mailbox presentation (23 late
+passes against 30 to 35), a frame latency of 3 (25), skipping the copy
+(38) or the copy and its GPU work (46), since the decode alone does it,
+and uploads without mips (5 and 16 in two runs). A device of the UI's
+own would avoid it, since RADV's list is per device, but path B shares
+the device by design (D25). Waiting for the decoder's fence instead
+doesn't help: the fence is added when the decode is submitted.
+
+Revisit if: RADV stops listing the held image in every submission, or
+amdgpu stops marking each submission a writer of its whole list; a
+compositor shows frames without waiting for their writers; FFmpeg
+stops calling `lock_queue` (libavutil 62), which would take FFmpeg's
+decodes out of the gate; or a benchmark with a window shows the hold
+costing decode time.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360
@@ -6563,5 +6642,5 @@ uses.
   own layer, schemars or hand-written, rustix or `libc`. To decide at A1
   (D23).
 - **Attach socket** (A3): Pat to confirm that a local socket the GUI
-  opens only when he turns attach on (mode 0600, his user only) is IPC,
-  not the network access his rule forbids. Before A3 (D23).
+  opens only when Pat turns attach on (mode 0600, Pat's user only) is
+  IPC, not the network access Pat's rule forbids. Before A3 (D23).

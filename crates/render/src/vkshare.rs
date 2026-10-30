@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ash::vk;
 use ash::vk::Handle;
+use spherecut_core::gate::SubmitGate;
 use spherecut_core::video::{VkDeviceHandles, VkImageState, VkPicture, VkQueueGrant};
 
 use crate::error::RenderError;
@@ -47,6 +48,8 @@ pub use spherecut_core::vkplan::{Family, QueuePlan, plan_extensions, plan_queues
 /// is made from, and the copier.
 #[derive(Debug)]
 pub struct SharedVideo {
+    /// The handles, with the device's submit gate (D41), which the
+    /// [`Gpu`](crate::Gpu) made with it shares.
     pub handles: VkDeviceHandles,
     /// The queues, where [`open_shared`] planned them.
     pub plan: Option<QueuePlan>,
@@ -281,6 +284,7 @@ fn share(
             device_extensions: names(hal.enabled_device_extensions()),
             queues: grants,
             keepalive: Arc::new(device.clone()),
+            gate: Arc::new(SubmitGate::default()),
         };
         (handles, hal.raw_device().clone(), memory)
     };
@@ -288,7 +292,8 @@ fn share(
     // SAFETY: the device was made with this queue (the callers made it so).
     let queue = unsafe { raw.get_device_queue(family, index) };
     let copier = Copier::new(device.clone(), raw, memory, queue, family, sharing)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .with_gate(handles.gate.clone());
     Ok(SharedVideo {
         handles,
         plan,
@@ -395,6 +400,8 @@ struct Inner {
     last: u64,
     ring: Vec<(vk::CommandBuffer, u64)>,
     next: usize,
+    /// Each copy waits at it right before it submits (D41).
+    gate: Arc<SubmitGate>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -474,9 +481,19 @@ impl Copier {
                 last: 0,
                 ring: buffers.into_iter().map(|b| (b, 0)).collect(),
                 next: 0,
+                gate: Arc::new(SubmitGate::default()),
             }),
             free: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    /// Makes each copy wait at `gate` right before it submits (D41).
+    pub fn with_gate(mut self, gate: Arc<SubmitGate>) -> Copier {
+        self.inner
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .gate = gate;
+        self
     }
 
     /// The queue family the copier submits to.
@@ -834,6 +851,8 @@ impl Inner {
             .wait_semaphore_infos(&waits)
             .command_buffer_infos(&cmds)
             .signal_semaphore_infos(&signals);
+        // Not while the UI presents (D41).
+        self.gate.wait();
         // SAFETY: the copier's queue, which only it submits to, under its
         // lock; the semaphores are timeline ones, signalled to values past
         // what they hold (the frame's at one past its last use, under its

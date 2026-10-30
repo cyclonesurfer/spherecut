@@ -698,6 +698,7 @@ pub struct Report {
     /// Blocking calls on the UI thread since the start: 0 unless
     /// something is wrong (`core::blocking`).
     pub blocked_on_ui_thread: u64,
+    pub submit_gate: Gate,
     /// Where the screenshot went, once written.
     pub screenshot: Option<String>,
     pub screenshot_size: Option<[u32; 2]>,
@@ -853,6 +854,14 @@ pub struct Cache {
 pub struct Slots {
     pub active: usize,
     pub dead: usize,
+}
+
+/// What the submit gate held back since the device was made (D41).
+#[derive(Debug, Serialize)]
+pub struct Gate {
+    /// Submissions from other threads that waited for the UI's present.
+    pub waits: u64,
+    pub longest_ms: f32,
 }
 
 #[derive(Debug, Serialize)]
@@ -1042,6 +1051,13 @@ impl SmokeDriver {
                 gpu_reserved: m.gpu_reserved,
             }),
             blocked_on_ui_thread: spherecut_core::blocking::blocked_on_ui_thread(),
+            submit_gate: {
+                let g = s.gpu.submit_gate().stats();
+                Gate {
+                    waits: g.waits,
+                    longest_ms: g.longest.as_secs_f32() * 1e3,
+                }
+            },
             screenshot: None,
             screenshot_size: None,
         }

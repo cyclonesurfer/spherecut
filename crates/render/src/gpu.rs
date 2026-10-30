@@ -18,6 +18,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use spherecut_core::gate::SubmitGate;
+
 use crate::error::RenderError;
 use crate::vkshare::{self, SharedVideo};
 
@@ -107,6 +109,10 @@ pub struct Gpu {
     pub caps: GpuCaps,
     health: Arc<Health>,
     video: SharedState,
+    /// Where submissions from threads other than the UI's wait while it
+    /// presents (D41): the shared device's, which FFmpeg's queue locks
+    /// and the copier wait at too, or the device's own.
+    gate: Arc<SubmitGate>,
 }
 
 /// Whether the device is shared with FFmpeg's Vulkan Video (slice 5b's
@@ -215,8 +221,16 @@ impl Gpu {
 
     /// This device, shared as `shared` says.
     pub(crate) fn with_shared(mut self, shared: SharedVideo) -> Gpu {
+        self.gate = shared.handles.gate.clone();
         self.video = SharedState::Shared(Arc::new(shared));
         self
+    }
+
+    /// The device's submit gate (D41): the viewer closes it around its
+    /// present, and every other thread that submits to the device waits
+    /// at it first.
+    pub fn submit_gate(&self) -> &Arc<SubmitGate> {
+        &self.gate
     }
 
     fn adapter(choice: &AdapterChoice) -> Result<(wgpu::Instance, wgpu::Adapter), RenderError> {
@@ -301,6 +315,7 @@ impl Gpu {
             caps,
             health,
             video: SharedState::NotAsked,
+            gate: Arc::new(SubmitGate::default()),
         }
     }
 

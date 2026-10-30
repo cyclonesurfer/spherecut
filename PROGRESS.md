@@ -1106,6 +1106,23 @@ On `m1/slice9` (D37, D40):
   work before it and the slowest stage samples in it), for odin's next
   run to say what the gaps line up with, and its `frames.expected`
   counts every stream, as `shown` does.
+- **The submit gate** (D41). With zero copy the default, `gui_smoke` at
+  36041f7 (PR #11) still failed the noisy 5.7K clips and the X5 pair:
+  95 %, 94 % and 99 % presented, 39, 44 and 16 late UI passes, the UI's
+  own work under 1.5 ms. The late list and the diagnostic build
+  (`diag/late-ui`) put every gap after the present, and the cause in
+  RADV and amdgpu: while the UI holds a swapchain image, any submission
+  on its device, from any thread, becomes a writer of that image, and
+  the compositor waits for it, an I-frame decode included. Now the
+  viewer closes a gate on the device before the surface is acquired
+  and opens it 2 ms after; FFmpeg's queue locks, the copier and the
+  uploader wait at it before they submit. On odin's diagnostic runs
+  that took the late passes from 27 to 1 (8-bit), 54 to 2 (10-bit) and
+  5 to 3 (X5), 99.8 % to 99.9 % presented, the UI's p99 at 17 ms,
+  nothing dropped, no wait over 2.1 ms. Tests: core's unit tests,
+  `shared_vulkan`'s three waits on lavapipe (FFmpeg's checked by
+  unsetting the locks), and the viewer's kittest; the smoke document
+  says how many submissions waited (`submit_gate`).
 - **huginn's H1 and H2** are a prompt for Pat to paste into Claude Code
   there (`/mnt/project-files/spherecut/hw-run-6.md`): the full run under
   `gnome-session-inhibit`, a 125 % rerun of the GUI part, and Pat's

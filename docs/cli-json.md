@@ -672,6 +672,7 @@ and no `path` in its `error`. Its `result`:
 | `audio` | `host`, `device`, `rate`, `latency_ms`, `underruns` and `on_system_clock`; `null` without an audio device |
 | `cache`, `slots`, `memory` | The cache's `budget`, `bytes` and `frames`; the GPU slots `active` and `dead`; `rss`, `gpu_allocated` and `gpu_reserved` in bytes |
 | `blocked_on_ui_thread` | Blocking calls on the UI thread: 0 unless something is wrong |
+| `submit_gate` | What the submit gate (DECISIONS D41) held back since the device was made: `waits`, the submissions from other threads (decodes, copies, uploads) that waited for the UI's present, and `longest_ms`, the longest wait |
 | `screenshot`, `screenshot_size` | Where the PNG went and its size, or `null` when none was asked for or it couldn't be taken (a warning says why) |
 
 ## A usage error

@@ -326,6 +326,37 @@ fn an_unchanged_frame_and_view_only_encode() {
     assert_eq!(common::draws(&rs).0, p1 + 1);
 }
 
+/// The submit gate (D41): `prepare` closes it before the surface is
+/// acquired and `paint` opens it a hold after, on every pass; the next
+/// pass's logic opens one that no paint followed.
+#[test]
+fn the_viewer_closes_the_submit_gate_around_each_paint() {
+    let gpu = common::gpu();
+    let rs = common::render_state(&gpu);
+    let mut h = common::harness(common::grid_app(&gpu), &rs, [640.0, 420.0], 1.0);
+    common::until_shown(&mut h, &rs);
+    let gate = gpu.submit_gate().clone();
+    let marks = |g: &spherecut_core::gate::SubmitGate| {
+        let (closed, acquired) = g.marks();
+        (
+            closed.expect("prepare closed the gate"),
+            acquired.expect("paint opened it"),
+        )
+    };
+    let (c0, a0) = marks(&gate);
+    assert!(c0 <= a0);
+    h.step();
+    let (c1, a1) = marks(&gate);
+    assert!(a0 < c1 && c1 <= a1, "each pass closes and opens it again");
+    // A prepare that no paint followed: the next logic opens the gate.
+    // (This thread isn't marked as the UI's, so it would wait.)
+    assert!(!spherecut_core::blocking::is_ui_thread());
+    gate.close();
+    let ctx = h.ctx.clone();
+    h.state_mut().logic(&ctx);
+    assert_eq!(gate.wait(), std::time::Duration::ZERO, "logic opened it");
+}
+
 /// egui-wgpu runs the callbacks' `prepare` before it acquires the
 /// window's surface, and drops what `prepare` recorded when that fails
 /// (Outdated, Lost, Timeout, Occluded): `paint` doesn't follow. Such a

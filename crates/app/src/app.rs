@@ -308,6 +308,8 @@ impl SpherecutApp {
     /// anything moves. Never waits.
     pub fn logic(&mut self, ctx: &egui::Context) {
         let s = &mut self.state;
+        // The last pass has presented, painted or not (D41).
+        s.gpu.submit_gate().open();
         s.tick();
         s.presented = s.player.as_ref().and_then(|p| {
             // As eframe decides whether to paint: frames passed over

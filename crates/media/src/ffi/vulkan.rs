@@ -14,10 +14,11 @@
 
 use std::any::Any;
 use std::ffi::{CString, c_char, c_int};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as sys;
+use spherecut_core::gate::SubmitGate;
 use spherecut_core::video::{PixelLayout, VkDeviceHandles, VkImageState, VkPicture, VkPlane};
 
 use super::{HwDevice, HwError, c, device_type};
@@ -37,13 +38,63 @@ const VK_IMAGE_ASPECT_PLANE_0_BIT: u32 = 0x10;
 const VK_ACCESS_MEMORY_READ_WRITE: u32 = 0x8000 | 0x1_0000;
 
 /// What a shared device context holds for as long as it lives: the
-/// extension names its `AVVulkanDeviceContext` points at, and the device
-/// itself, which outlives FFmpeg's context and so every frame of it.
+/// extension names its `AVVulkanDeviceContext` points at, the device
+/// itself, which outlives FFmpeg's context and so every frame of it, and
+/// what its queue locks need.
 struct Kept {
     _names: Vec<CString>,
     instance_extensions: Vec<*const c_char>,
     device_extensions: Vec<*const c_char>,
     _keepalive: Arc<dyn Any + Send + Sync>,
+    /// The device's submit gate, which every queue lock waits at (D41).
+    gate: Arc<SubmitGate>,
+    /// The queues FFmpeg holds, as (family, index), and a wake for a
+    /// lock waiting for one to be let go.
+    held: Mutex<Vec<(u32, u32)>>,
+    freed: Condvar,
+}
+
+/// The device context's `lock_queue`, which FFmpeg calls around each use
+/// of a queue (a submission, a wait for idle): the queue, held by one
+/// thread at a time as FFmpeg's own locks would, and then the submit
+/// gate, so that FFmpeg's decodes stay out of the UI's present (D41).
+/// FFmpeg 8.1 and 9.0 mark the field deprecated and still call it; a
+/// later FFmpeg that stops calling it loses the gate, not the locking,
+/// which it does itself then.
+unsafe extern "C" fn lock_queue(ctx: *mut sys::AVHWDeviceContext, family: u32, index: u32) {
+    // SAFETY: `user_opaque` is the context's `Kept` from before init until
+    // `free_kept`, which FFmpeg calls after its last queue use.
+    let Some(kept) = (unsafe { (*ctx).user_opaque.cast::<Kept>().as_ref() }) else {
+        return;
+    };
+    // Nothing here panics but a poisoned lock, which is taken over; a
+    // panic must not unwind into C.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut held = kept.held.lock().unwrap_or_else(PoisonError::into_inner);
+        while held.contains(&(family, index)) {
+            held = kept
+                .freed
+                .wait(held)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        held.push((family, index));
+        drop(held);
+        kept.gate.wait();
+    }));
+}
+
+/// The device context's `unlock_queue`.
+unsafe extern "C" fn unlock_queue(ctx: *mut sys::AVHWDeviceContext, family: u32, index: u32) {
+    // SAFETY: as `lock_queue`'s.
+    let Some(kept) = (unsafe { (*ctx).user_opaque.cast::<Kept>().as_ref() }) else {
+        return;
+    };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut held = kept.held.lock().unwrap_or_else(PoisonError::into_inner);
+        held.retain(|&q| q != (family, index));
+        drop(held);
+        kept.freed.notify_all();
+    }));
 }
 
 /// The device context's `free`: called once, after FFmpeg's own uninit,
@@ -124,6 +175,9 @@ impl HwDevice {
             instance_extensions,
             device_extensions,
             _keepalive: handles.keepalive.clone(),
+            gate: handles.gate.clone(),
+            held: Mutex::new(Vec::new()),
+            freed: Condvar::new(),
         });
         let count = |n: usize| {
             c_int::try_from(n).map_err(|_| HwError::Vulkan(format!("{n} names are too many")))
@@ -165,6 +219,10 @@ impl HwDevice {
             (*hw).nb_enabled_dev_extensions = nb_device;
             (*dev).user_opaque = Box::into_raw(kept).cast();
             (*dev).free = Some(free_kept);
+            // Ours instead of FFmpeg's own, which it sets only if these
+            // are unset.
+            (*hw).lock_queue = Some(lock_queue);
+            (*hw).unlock_queue = Some(unlock_queue);
             if let Err(e) = set_queues(hw, handles) {
                 sys::av_buffer_unref(&mut r);
                 return Err(e);
@@ -568,6 +626,7 @@ mod tests {
             device_extensions,
             queues,
             keepalive: Arc::new(()),
+            gate: Default::default(),
         }
     }
 

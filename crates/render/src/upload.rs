@@ -224,6 +224,8 @@ impl Uploader {
         if let Some(belt) = self.belt.as_mut() {
             belt.finish_and_recall_on_submit(&enc);
         }
+        // Not while the UI presents (D41).
+        gpu.submit_gate().wait();
         gpu.queue.submit([enc.finish()]);
         Ok(UploadStats {
             cpu_ms: start.elapsed().as_secs_f32() * 1e3,
@@ -311,6 +313,7 @@ impl Uploader {
             t.end(&mut enc, span);
         }
         slot.set_source(gpu, shape.bit_depth, frame.color(), placement);
+        gpu.submit_gate().wait();
         gpu.queue.submit([enc.finish()]);
         Ok(UploadStats {
             cpu_ms: start.elapsed().as_secs_f32() * 1e3,
@@ -410,6 +413,7 @@ impl Uploader {
             t.end(&mut enc, span);
         }
         slot.set_source(gpu, shape.bit_depth, frame.color(), placement);
+        gpu.submit_gate().wait();
         gpu.queue.submit([enc.finish()]);
         Ok(UploadStats {
             cpu_ms: start.elapsed().as_secs_f32() * 1e3,

@@ -291,6 +291,9 @@ impl CallbackTrait for ViewerCallback {
         let Some(r) = res.get_mut::<ViewerResources>() else {
             return Vec::new();
         };
+        // egui-wgpu acquires the surface after the callbacks' prepare:
+        // from here to the present, no other thread submits (D41).
+        r.gpu.submit_gate().close();
         // The rounding paint gets, from the surface's real size.
         let vp = ViewportInPixels::from_points(&self.rect, sd.pixels_per_point, sd.size_in_pixels);
         let size = physical(&vp);
@@ -370,6 +373,8 @@ impl CallbackTrait for ViewerCallback {
         let Some(r) = res.get::<ViewerResources>() else {
             return;
         };
+        // The surface is acquired; egui's submit and the present follow.
+        r.gpu.submit_gate().acquired();
         if !self.raw.is_empty() {
             paint_raw(r, &info, pass);
             r.painted.store(true, Ordering::Relaxed);

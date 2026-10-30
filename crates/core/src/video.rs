@@ -234,6 +234,9 @@ pub struct VkDeviceHandles {
     /// family's queues, from index 0.
     pub queues: Vec<VkQueueGrant>,
     pub keepalive: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    /// The device's submit gate, which FFmpeg's queue locks wait at
+    /// (D41).
+    pub gate: std::sync::Arc<crate::gate::SubmitGate>,
 }
 
 impl std::fmt::Debug for VkDeviceHandles {

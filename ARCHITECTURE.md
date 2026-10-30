@@ -832,6 +832,16 @@ intermediate equirect exists only as the output of a 360 export.
     buffer until the GPU has read it. A refused import or copy is
     copied through the CPU, said once in the snapshot
     (`import_refused`), and the next opens ask for downloads.
+  * **The submit gate** (D41, `core::gate::SubmitGate`, one a device,
+    `Gpu::submit_gate`): while the UI thread holds a swapchain image,
+    no other thread submits to its device, since RADV makes every
+    submission then a writer of that image and the compositor waits
+    for it. The viewer's `prepare` closes it before egui-wgpu acquires
+    the surface, its `paint` opens it 2 ms on, after egui's submit and
+    the present, and the next pass's logic opens it at once; one left
+    closed opens after 20 ms. FFmpeg's queue locks (`lock_queue`, ours
+    on a shared device), the copier and the uploader wait at it right
+    before they submit; the UI thread never does.
   * **GPU slots** (`playback::SlotRing`): 3 to 6 `GpuFrame`s, each with
     an atomic state word (Free, Writing, Ready, Shown, Dead, and a
     version). The upload thread claims a Free slot only when the ring's
