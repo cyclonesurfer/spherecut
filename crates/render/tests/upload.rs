@@ -4,8 +4,9 @@
 //! above at odd sizes, an 8-bit one rounded to the nearest code, ties to
 //! even, the reference's code for code up to 16384 texels a side; both
 //! upload paths fill a slot alike; bad frames and wrong slots are
-//! refused; a frame already on the GPU fills a slot as an upload does;
-//! and the upload bench runs, small (its Tier 2 form, `bench_upload_5k7`,
+//! refused; a frame already on the GPU fills a slot as an upload does,
+//! and planes already there (slice 5b's imports, made here by wgpu) fill
+//! one byte for byte as their bytes do; and the upload bench runs, small (its Tier 2 form, `bench_upload_5k7`,
 //! is here too).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -17,7 +18,7 @@ use spherecut_core::video::{ChromaSiting, Matrix, Range, SampleBytes};
 use spherecut_render::readback::{f16_to_f32, read_texture, round_f16};
 use spherecut_render::{
     AdapterChoice, DebugMode, Filter, Gpu, GpuFrame, GpuTimers, LinearTarget, Placement,
-    PlaneFormat, Projector, SlotShape, UploadPath, Uploader, ViewParams, reference,
+    PlaneFormat, Projector, SlotShape, UploadPath, Uploader, ViewParams, dmabuf, reference,
 };
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_synth::{Pattern, render_equirect};
@@ -678,6 +679,127 @@ fn a_frame_already_on_the_gpu_fills_a_slot() {
         assert_eq!(levels(&on_gpu), levels(&uploaded), "{kind:?}");
         assert_eq!(project(&on_gpu), project(&uploaded), "{kind:?}");
     }
+}
+
+/// `frame`'s planes as textures, as `dmabuf::Importer` makes them: one a
+/// plane, whole, in the import's format and usage (and `COPY_DST`, to
+/// fill them here). What lavapipe can't import, it can make.
+fn on_gpu(frame: &Frame) -> Vec<wgpu::Texture> {
+    let gpu = gpu();
+    let whole = SlotShape::of(&frame.layout, frame.size).unwrap();
+    whole
+        .planes
+        .iter()
+        .zip(&frame.planes)
+        .map(|(p, (bytes, stride, _))| {
+            let size = wgpu::Extent3d {
+                width: p.size.0,
+                height: p.size.1,
+                depth_or_array_layers: 1,
+            };
+            let t = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("plane on the GPU"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: dmabuf::imported_format(p.format),
+                usage: dmabuf::USAGE | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            gpu.queue.write_texture(
+                t.as_image_copy(),
+                bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(*stride as u32),
+                    rows_per_image: None,
+                },
+                size,
+            );
+            t
+        })
+        .collect()
+}
+
+#[test]
+fn planes_on_the_gpu_fill_a_slot_as_their_bytes_do() {
+    // Slice 5b's import path with textures in place of imports: the same
+    // levels and the same projection, byte for byte, for the layouts
+    // VA-API exports (NV12, P010) and for three deep planes LSB-aligned;
+    // whole frames and a stereo frame's shown eye.
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    let top_bottom = Placement {
+        stereo: spherecut_render::Stereo::TopBottom,
+        ..Placement::FULL
+    };
+    for kind in [Kind::Nv12, Kind::P010, Kind::I420p10] {
+        for (size, pad) in [((96u32, 48u32), 0usize), ((70, 34), 34)] {
+            let mut frame = noise(kind, size, pad, 31);
+            frame.color = common::color(Range::Limited, Matrix::Bt709, ChromaSiting::Left);
+            let planes = on_gpu(&frame);
+            for placement in [Placement::FULL, top_bottom] {
+                let shape = SlotShape::of(&frame.layout, placement.shown(frame.size))
+                    .unwrap()
+                    .with_levels(4);
+                let uploaded = GpuFrame::new(gpu, &shape).unwrap();
+                uploader
+                    .upload_placed(gpu, &frame, &placement, &uploaded)
+                    .unwrap();
+                let imported = GpuFrame::new(gpu, &shape).unwrap();
+                let stats = uploader
+                    .upload_imported(gpu, &frame, &planes, &placement, &imported)
+                    .unwrap();
+                assert_eq!(stats.bytes, 0);
+                let what = format!("{kind:?} {size:?} {:?}", placement.stereo);
+                assert_eq!(levels(&imported), levels(&uploaded), "{what}");
+                assert_eq!(project(&imported), project(&uploaded), "{what}");
+            }
+        }
+    }
+}
+
+#[test]
+fn planes_on_the_gpu_that_dont_fit_are_refused() {
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    let frame = noise(Kind::P010, (64, 32), 0, 8);
+    let planes = on_gpu(&frame);
+    let slot = slot_for(&frame, 1);
+    let refused = |uploader: &mut Uploader, planes: &[wgpu::Texture], slot: &GpuFrame| {
+        uploader
+            .upload_imported(gpu, &frame, planes, &Placement::FULL, slot)
+            .unwrap_err()
+            .code()
+    };
+    assert_eq!(refused(&mut uploader, &planes[..1], &slot), "invalid_input");
+    // NV12's planes for a P010 frame: 8-bit where integers are wanted.
+    let nv12 = on_gpu(&noise(Kind::Nv12, (64, 32), 0, 8));
+    assert_eq!(refused(&mut uploader, &nv12, &slot), "invalid_input");
+    // A plane of the wrong size, and one that can't be copied from.
+    let small = on_gpu(&noise(Kind::P010, (64, 30), 0, 8));
+    let mixed = [planes[0].clone(), small[1].clone()];
+    assert_eq!(refused(&mut uploader, &mixed, &slot), "invalid_input");
+    let no_copy = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: planes[1].size(),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: planes[1].format(),
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let mixed = [planes[0].clone(), no_copy];
+    assert_eq!(refused(&mut uploader, &mixed, &slot), "invalid_input");
+    // A slot for another size.
+    let other = slot_for(&noise(Kind::P010, (64, 34), 0, 8), 1);
+    assert_eq!(refused(&mut uploader, &planes, &other), "internal");
+    // And the good planes still fill the slot.
+    uploader
+        .upload_imported(gpu, &frame, &planes, &Placement::FULL, &slot)
+        .unwrap();
 }
 
 #[test]

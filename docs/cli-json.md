@@ -255,6 +255,7 @@ Errors of the GPU, which frame gives:
 | `adapter_not_found` | 3 | No adapter matches `--adapter` (or `SPHERECUT_ADAPTER`); the message lists those there are |
 | `gpu_failed` | 1 | The adapter gave no device, the device refused work or was lost, or reading the picture back failed |
 | `out_of_gpu_memory` | 1 | The GPU ran out of memory |
+| `import_failed` | 3 | `--zero-copy`: the GPU can't import the decoder's picture: the device has no DMA-BUF import, or its driver refuses the picture's format, modifier or size; the message says which. Without `--zero-copy` the picture is copied instead |
 | `invalid_input` | 1 | A picture the renderer can't use, such as a plane that doesn't match its layout |
 | `too_large` | 1 | The source picture is larger than the GPU's textures (a `--size` past them is a `usage` error) |
 | `internal` | 1 | As above |

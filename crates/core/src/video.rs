@@ -177,6 +177,20 @@ pub mod fourcc {
     pub const GR88: u32 = code(b"GR88");
     pub const R16: u32 = code(b"R16 ");
     pub const GR1616: u32 = code(b"GR32");
+
+    /// A fourcc as its four characters, trailing spaces dropped.
+    pub fn name(code: u32) -> String {
+        code.to_le_bytes()
+            .iter()
+            .map(|&b| match b {
+                b' ' => ' ',
+                b if b.is_ascii_graphic() => b as char,
+                _ => '?',
+            })
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
 }
 
 /// The colour fields as the file codes them, as FFmpeg's ints. FFmpeg's

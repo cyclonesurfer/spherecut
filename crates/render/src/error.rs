@@ -41,6 +41,11 @@ pub enum RenderError {
     /// The GPU ran out of memory allocating `what`.
     #[error("the GPU ran out of memory for {0}")]
     OutOfMemory(&'static str),
+    /// A decoded picture couldn't be imported (slice 5b): the device has
+    /// no DMA-BUF import, or the driver refuses the picture's format,
+    /// modifier or size. The copy path still takes it.
+    #[error("importing the decoder's picture: {0}")]
+    Import(String),
 }
 
 impl RenderError {
@@ -55,6 +60,7 @@ impl RenderError {
             RenderError::WrongSlot { .. } => "internal",
             RenderError::Readback(_) => "gpu_failed",
             RenderError::OutOfMemory(_) => "out_of_gpu_memory",
+            RenderError::Import(_) => "import_failed",
         }
     }
 
@@ -67,6 +73,7 @@ impl RenderError {
         "invalid_input",
         "internal",
         "out_of_gpu_memory",
+        "import_failed",
     ];
 }
 
@@ -105,6 +112,7 @@ mod tests {
             },
             RenderError::Readback("map failed".into()),
             RenderError::OutOfMemory("a slot"),
+            RenderError::Import("no DMA-BUF import".into()),
         ];
         for e in &errors {
             assert!(RenderError::CODES.contains(&e.code()), "{e:?}");

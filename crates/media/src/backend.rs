@@ -621,8 +621,8 @@ pub(crate) fn match_layers(
             if l.fourcc != want {
                 return Err(format!(
                     "layer {i} is {} where {} was expected",
-                    fourcc_name(l.fourcc),
-                    fourcc_name(want)
+                    fourcc::name(l.fourcc),
+                    fourcc::name(want)
                 ));
             }
             Ok(DmabufLayer {
@@ -635,20 +635,6 @@ pub(crate) fn match_layers(
             })
         })
         .collect()
-}
-
-/// A fourcc as its four characters.
-pub fn fourcc_name(code: u32) -> String {
-    code.to_le_bytes()
-        .iter()
-        .map(|&b| match b {
-            b' ' => ' ',
-            b if b.is_ascii_graphic() => b as char,
-            _ => '?',
-        })
-        .collect::<String>()
-        .trim_end()
-        .to_owned()
 }
 
 /// A plane of an owned frame doesn't hold its rows.
@@ -816,13 +802,8 @@ impl VideoFrame {
                 }));
             }
         };
-        let mut out = VideoFrame::from_ffmpeg(
-            down,
-            self.layout.clone(),
-            self.color.clone(),
-            self.pts,
-            self.time,
-        );
+        let mut out =
+            VideoFrame::from_ffmpeg(down, self.layout.clone(), self.color, self.pts, self.time);
         out.duration = self.duration;
         out.key = self.key;
         out.concealed = self.concealed;
@@ -1223,6 +1204,6 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(why, "layer 0 is R16 where R8 was expected");
-        assert_eq!(fourcc_name(fourcc::GR1616), "GR32");
+        assert_eq!(fourcc::name(fourcc::GR1616), "GR32");
     }
 }

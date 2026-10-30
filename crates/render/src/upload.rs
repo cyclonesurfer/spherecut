@@ -1,6 +1,7 @@
 //! Frames into slots (M1 plan section 4.4): plane bytes into level 0,
 //! deep planes through the ingest pass, then the mip chain, in one
-//! submission per frame that never waits on the GPU.
+//! submission per frame that never waits on the GPU. Planes already on
+//! the GPU (slice 5b's DMA-BUF imports) take the same way, copied there.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -170,17 +171,7 @@ impl Uploader {
         slot: &GpuFrame,
     ) -> Result<UploadStats, RenderError> {
         let start = Instant::now();
-        // Polls the device too, which runs map callbacks: the belt's
-        // chunks and the timers' read-backs.
-        gpu.check()?;
-        let whole = SlotShape::of(frame.layout(), frame.size())?;
-        let shape = SlotShape::of(frame.layout(), placement.shown(frame.size()))?;
-        if !slot.shape().fits(&shape) {
-            return Err(RenderError::WrongSlot {
-                got: shape.describe(),
-                slot: slot.shape().describe(),
-            });
-        }
+        let (whole, shape) = shapes(gpu, frame, placement, slot)?;
         // Every plane is checked, whole, before any is written, so a bad
         // frame leaves the slot as it was. What is copied is the shown
         // part's rows, from the top-left corner.
@@ -203,20 +194,7 @@ impl Uploader {
             label: Some("upload"),
         });
         let mut bytes = 0u64;
-        let deep = shape.planes.iter().any(|p| p.format.is_deep());
-        if deep {
-            let uniform = IngestUniform {
-                shift: if shape.msb_aligned {
-                    16 - u32::from(shape.bit_depth)
-                } else {
-                    0
-                },
-                max_code: (1u32 << shape.bit_depth) - 1,
-                _pad: [0; 2],
-            };
-            gpu.queue
-                .write_buffer(&self.ingest_uniform, 0, bytemuck::bytes_of(&uniform));
-        }
+        self.write_ingest_uniform(gpu, &shape);
         // The planes first: deep ones into their scratch textures. Then
         // the GPU's own work, timed: the ingest passes and the mips.
         for (i, (p, (data, row))) in shape.planes.iter().zip(&planes).enumerate() {
@@ -230,8 +208,9 @@ impl Uploader {
         }
         let span = self.timers.as_mut().and_then(|t| t.begin(&mut enc));
         for (i, p) in shape.planes.iter().enumerate() {
-            if p.format.is_deep() {
-                self.record_ingest(&mut enc, i, p.format, &slot.planes[i].levels[0]);
+            if let Some(Some(scratch)) = self.scratch.get(i).filter(|_| p.format.is_deep()) {
+                let input = &scratch.bind_group;
+                self.record_ingest(&mut enc, p.format, input, &slot.planes[i].levels[0]);
             }
         }
         self.record_mips(&mut enc, slot);
@@ -247,6 +226,93 @@ impl Uploader {
         Ok(UploadStats {
             cpu_ms: start.elapsed().as_secs_f32() * 1e3,
             bytes,
+            gpu_ms: self.timers.as_mut().and_then(GpuTimers::poll),
+        })
+    }
+
+    /// Fills `slot` from planes already on the GPU, one texture a plane in
+    /// [`dmabuf::imported_format`](crate::dmabuf::imported_format) at the
+    /// frame's whole plane sizes, with [`dmabuf::USAGE`](crate::dmabuf::USAGE):
+    /// a DMA-BUF import, or any texture made so. An 8-bit plane's shown
+    /// part is copied into level 0, a deep one goes through the ingest
+    /// pass; then the mips, all in one submission, as
+    /// [`upload_placed`](Self::upload_placed) does from bytes. `frame`
+    /// gives the layout, size and colour; its bytes aren't read. The GPU
+    /// time covers the copies too, since they replace the CPU's. Never
+    /// waits on the GPU; the planes must stay as they are until it is
+    /// done (`Queue::on_submitted_work_done`).
+    pub fn upload_imported(
+        &mut self,
+        gpu: &Gpu,
+        frame: &dyn VideoPlanes,
+        planes: &[wgpu::Texture],
+        placement: &Placement,
+        slot: &GpuFrame,
+    ) -> Result<UploadStats, RenderError> {
+        let start = Instant::now();
+        let (whole, shape) = shapes(gpu, frame, placement, slot)?;
+        if planes.len() != whole.planes.len() {
+            return Err(RenderError::Invalid(format!(
+                "{} textures for {}'s {} planes",
+                planes.len(),
+                frame.layout().name,
+                whole.planes.len()
+            )));
+        }
+        for (i, (t, w)) in planes.iter().zip(&whole.planes).enumerate() {
+            let want = crate::dmabuf::imported_format(w.format);
+            let size = (t.width(), t.height());
+            if t.format() != want
+                || size != w.size
+                || t.mip_level_count() != 1
+                || t.sample_count() != 1
+                || t.depth_or_array_layers() != 1
+                || !t.usage().contains(crate::dmabuf::USAGE)
+            {
+                return Err(RenderError::Invalid(format!(
+                    "plane {i}'s texture is {:?} {}x{}, where {want:?} {}x{} with {:?} is wanted",
+                    t.format(),
+                    size.0,
+                    size.1,
+                    w.size.0,
+                    w.size.1,
+                    crate::dmabuf::USAGE
+                )));
+            }
+        }
+        let device = &gpu.device;
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("upload imported"),
+        });
+        self.write_ingest_uniform(gpu, &shape);
+        let span = self.timers.as_mut().and_then(|t| t.begin(&mut enc));
+        for (i, (p, t)) in shape.planes.iter().zip(planes).enumerate() {
+            let target = &slot.planes[i];
+            if p.format.is_deep() {
+                let view = t.create_view(&wgpu::TextureViewDescriptor::default());
+                let input = self.ingest_bind_group(gpu, &view);
+                self.record_ingest(&mut enc, p.format, &input, &target.levels[0]);
+            } else {
+                enc.copy_texture_to_texture(
+                    t.as_image_copy(),
+                    target.texture.as_image_copy(),
+                    wgpu::Extent3d {
+                        width: p.size.0,
+                        height: p.size.1,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+        self.record_mips(&mut enc, slot);
+        if let (Some(t), Some(span)) = (self.timers.as_mut(), span) {
+            t.end(&mut enc, span);
+        }
+        slot.set_source(gpu, shape.bit_depth, frame.color(), placement);
+        gpu.queue.submit([enc.finish()]);
+        Ok(UploadStats {
+            cpu_ms: start.elapsed().as_secs_f32() * 1e3,
+            bytes: 0,
             gpu_ms: self.timers.as_mut().and_then(GpuTimers::poll),
         })
     }
@@ -278,22 +344,60 @@ impl Uploader {
         }
     }
 
+    /// The ingest pass from `input` (integers of a deep plane, and the
+    /// uniform) into `target`, a level 0 of `format`.
     fn record_ingest(
         &self,
         enc: &mut wgpu::CommandEncoder,
-        plane: usize,
         format: PlaneFormat,
+        input: &wgpu::BindGroup,
         target: &wgpu::TextureView,
     ) {
-        let (Some(pipeline), Some(Some(scratch))) =
-            (self.ingest.get(&format), self.scratch.get(plane))
-        else {
+        let Some(pipeline) = self.ingest.get(&format) else {
             return;
         };
         let mut pass = layouts::fullscreen_pass(enc, "ingest", target);
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &scratch.bind_group, &[]);
+        pass.set_bind_group(0, input, &[]);
         pass.draw(0..3, 0..1);
+    }
+
+    /// The ingest uniform for `shape`'s depth and alignment, when it has a
+    /// deep plane.
+    fn write_ingest_uniform(&self, gpu: &Gpu, shape: &SlotShape) {
+        if !shape.planes.iter().any(|p| p.format.is_deep()) {
+            return;
+        }
+        let uniform = IngestUniform {
+            shift: if shape.msb_aligned {
+                16 - u32::from(shape.bit_depth)
+            } else {
+                0
+            },
+            max_code: (1u32 << shape.bit_depth) - 1,
+            _pad: [0; 2],
+        };
+        gpu.queue
+            .write_buffer(&self.ingest_uniform, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// The ingest pass's input: `view` of a deep plane's integers, and the
+    /// uniform.
+    fn ingest_bind_group(&self, gpu: &Gpu, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ingest input"),
+            layout: &self.ingest_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.ingest_uniform.as_entire_binding(),
+                },
+            ],
+        })
     }
 
     /// The scratch texture for plane `i`, made or remade to fit.
@@ -327,20 +431,7 @@ impl Uploader {
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("ingest input"),
-                layout: &self.ingest_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.ingest_uniform.as_entire_binding(),
-                    },
-                ],
-            });
+            let bind_group = self.ingest_bind_group(gpu, &view);
             self.scratch[i] = Some(Scratch {
                 format: want,
                 size,
@@ -432,6 +523,27 @@ impl Uploader {
         }
         Ok(())
     }
+}
+
+/// `frame`'s shape whole and as `placement` shows it, after checking the
+/// device (which polls it too, running map callbacks: the belt's chunks
+/// and the timers' read-backs) and that the shown part fits `slot`.
+fn shapes(
+    gpu: &Gpu,
+    frame: &dyn VideoPlanes,
+    placement: &Placement,
+    slot: &GpuFrame,
+) -> Result<(SlotShape, SlotShape), RenderError> {
+    gpu.check()?;
+    let whole = SlotShape::of(frame.layout(), frame.size())?;
+    let shape = SlotShape::of(frame.layout(), placement.shown(frame.size()))?;
+    if !slot.shape().fits(&shape) {
+        return Err(RenderError::WrongSlot {
+            got: shape.describe(),
+            slot: slot.shape().describe(),
+        });
+    }
+    Ok((whole, shape))
 }
 
 /// `Invalid` unless plane `i` holds `size.1` rows of `row` bytes.

@@ -155,6 +155,7 @@ pub fn frame_exit(code: &str) -> Exit {
         | "hw_unavailable"
         | "hw_unsupported"
         | "hw_failed"
+        | "import_failed"
         | "no_decoder"
         | codes::NO_DISPLAY => Exit::Missing,
         codes::CANCELLED => Exit::Cancelled,
@@ -585,6 +586,7 @@ mod tests {
             "hw_unavailable",
             "hw_unsupported",
             "hw_failed",
+            "import_failed",
             "no_decoder",
         ] {
             assert_eq!(frame_exit(code), Exit::Missing, "{code}");
