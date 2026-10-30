@@ -141,6 +141,33 @@ fn frames_link_by_run_and_place() {
 }
 
 #[test]
+fn the_scrub_bars_spans_join_frames_that_meet() {
+    let c = FrameCache::new(1 << 20, Time::from_secs(1));
+    for k in [0, 1, 2, 3, 4, 6, 7, 10] {
+        assert_eq!(c.try_insert(0, frame(k, 1, k as u64, 10)), Insert::Stored);
+    }
+    // A frame with no duration covers its instant.
+    let mut last = Arc::try_unwrap(frame(12, 1, 12, 10)).unwrap();
+    last.duration = None;
+    assert_eq!(c.try_insert(0, Arc::new(last)), Insert::Stored);
+    assert_eq!(
+        c.try_ranges(0, Time::ZERO).unwrap(),
+        vec![
+            (at(0), at(5)),
+            (at(6), at(8)),
+            (at(10), at(11)),
+            (at(12), at(12))
+        ]
+    );
+    // Within a frame's gap, 5 and 11 missing are bridged; 8 and 9 aren't.
+    assert_eq!(
+        c.try_ranges(0, RATE.frame_duration()).unwrap(),
+        vec![(at(0), at(8)), (at(10), at(12))]
+    );
+    assert_eq!(c.try_ranges(1, Time::ZERO).unwrap(), vec![]);
+}
+
+#[test]
 fn tied_frames_keep_the_later_and_links_pass_over_the_tie() {
     let c = FrameCache::new(1 << 20, Time::from_secs(1));
     // Frames 3 and 4 of the run have the same time (frame 3's): the
@@ -508,6 +535,10 @@ fn the_ui_thread_only_tries_the_lock() {
     };
     assert_eq!(ui(|c| assert!(c.try_stats().is_some())), Ok(()));
     assert_eq!(ui(|c| assert!(c.try_set_playhead(at(1)))), Ok(()));
+    assert_eq!(
+        ui(|c| assert!(c.try_ranges(0, Time::ZERO).is_some())),
+        Ok(())
+    );
     let lock = "taking the frame cache's lock";
     for (f, what) in [
         (

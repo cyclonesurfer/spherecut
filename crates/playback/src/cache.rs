@@ -804,6 +804,30 @@ impl FrameCache {
         self.try_lock().map(|g| g.stats())
     }
 
+    /// The spans of clip time stream `stream`'s frames cover, in order,
+    /// for the scrub bar's shading: frames that meet (each starting where
+    /// the one before it ends, to within `gap`) make one span, and a frame
+    /// without a duration covers its instant. `None` when the lock is
+    /// taken. Never waits: for the UI thread.
+    pub fn try_ranges(&self, stream: usize, gap: Time) -> Option<Vec<(Time, Time)>> {
+        let g = self.try_lock()?;
+        let mut out: Vec<(Time, Time)> = Vec::new();
+        for (&(_, t), e) in g.stream(stream) {
+            let end = e
+                .frame
+                .duration
+                .and_then(|d| t.checked_add(d).ok())
+                .unwrap_or(t);
+            match out.last_mut() {
+                Some((_, last)) if t.checked_sub(gap).is_ok_and(|s| s <= *last) => {
+                    *last = (*last).max(end);
+                }
+                _ => out.push((t, end)),
+            }
+        }
+        Some(out)
+    }
+
     /// Every frame held, with its stream, in stream and time order: for
     /// tests.
     #[track_caller]
