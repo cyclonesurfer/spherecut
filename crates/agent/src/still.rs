@@ -340,9 +340,11 @@ pub fn check_gpu(gpu: &Gpu, opts: &Options) -> Result<(), Failure> {
     Ok(())
 }
 
-/// How a still is drawn: the filter, and the bits per channel.
+/// How a still is drawn: through the view, or flat; the filter; the bits
+/// per channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Look {
+    pub draw: Draw,
     pub filter: Filter,
     pub depth: Depth,
 }
@@ -350,10 +352,24 @@ pub struct Look {
 impl Default for Look {
     fn default() -> Self {
         Look {
+            draw: Draw::View,
             filter: Filter::Isotropic,
             depth: Depth::Eight,
         }
     }
+}
+
+/// What a still draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Draw {
+    /// The sphere through the view, as frame does.
+    #[default]
+    View,
+    /// The picture of the eye shown, flat, scaled to the size: an
+    /// equirect as it is, for look's `sphere` and `sheet`.
+    Eye,
+    /// The coded picture whole, flat, scaled to the size: look's `raw`.
+    Coded,
 }
 
 /// The decoder and what it found, for the report.
@@ -573,10 +589,14 @@ impl<'g> Still<'g> {
         placement
     }
 
-    /// Step 7: the frame `when` names, exactly.
+    /// Step 7: the frame `when` names, exactly; or with
+    /// [`SeekMode::Keyframe`] the keyframe a seek to it lands on, which
+    /// may come after it (`look`'s `seek: "keyframe"`). A frame number on
+    /// a variable-rate stream is counted exactly either way.
     pub fn seek(
         &mut self,
         when: TimeSpec,
+        mode: SeekMode,
         warnings: &mut Vec<Warning>,
     ) -> Result<Decoded, Failure> {
         let rate = self.dec.info().frame_rate();
@@ -617,7 +637,7 @@ impl<'g> Still<'g> {
         {
             return Err(self.beyond(self.dec.info(), when));
         }
-        let outcome = self.dec.seek(at, SeekMode::Exact, &self.stop.token);
+        let outcome = self.dec.seek(at, mode, &self.stop.token);
         let outcome = outcome.map_err(|e| self.media_error(e))?;
         let (frame, exactness) = match outcome {
             SeekOutcome::Frame {
@@ -628,6 +648,7 @@ impl<'g> Still<'g> {
         let events = self.dec.take_events();
         match exactness {
             Exactness::Exact => {}
+            Exactness::KeyframeOnly if mode == SeekMode::Keyframe => {}
             Exactness::AfterLast => return Err(self.past_the_end(when, &frame)),
             Exactness::Truncated { last_good_pts } => {
                 return Err(self.damaged(when, last_good_pts, &events));
@@ -641,7 +662,9 @@ impl<'g> Still<'g> {
         }
         self.damage_after(&events, warnings);
         let shown = shown(self.dec.as_ref(), &frame);
-        self.check_index(when, &shown, warnings)?;
+        if mode == SeekMode::Exact {
+            self.check_index(when, &shown, warnings)?;
+        }
         Ok(Decoded {
             frame,
             requested,
@@ -881,9 +904,10 @@ impl<'g> Still<'g> {
         }
     }
 
-    /// Step 8: `decoded` through `view`, `size` pixels large, on the GPU
-    /// (one [`StillRenderer`] a still, so that its pipelines are made
-    /// once) or the CPU reference.
+    /// Step 8: `decoded` through `view` (or flat, as `look.draw` says),
+    /// `size` pixels large, on the GPU (one [`StillRenderer`] a still, so
+    /// that its pipelines are made once) or the CPU reference, which
+    /// draws only through a view.
     pub fn render(
         &mut self,
         decoded: &Decoded,
@@ -891,15 +915,25 @@ impl<'g> Still<'g> {
         size: (u32, u32),
         look: Look,
     ) -> Result<Image, Failure> {
-        let placement = self.placement;
+        let placement = match look.draw {
+            Draw::View | Draw::Eye => self.placement,
+            Draw::Coded => Placement::default(),
+        };
         let opts = StillOptions {
             filter: look.filter,
             depth: look.depth,
             placement,
+            flat: look.draw != Draw::View,
             ..StillOptions::default()
         };
         let frame = decoded.frame.as_ref();
         let Some(gpu) = self.gpu else {
+            if look.draw != Draw::View {
+                return Err(failure(
+                    codes::INTERNAL,
+                    "the CPU reference draws only through a view",
+                ));
+            }
             let f64s = reference::render(
                 frame,
                 view,

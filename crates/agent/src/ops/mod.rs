@@ -3,6 +3,7 @@
 
 pub mod clips;
 pub mod doctor;
+pub mod look;
 pub mod probe;
 
 use serde::de::DeserializeOwned;
@@ -12,12 +13,14 @@ use crate::error::{ToolError, codes};
 use crate::roots::Roots;
 use crate::rpc::CallCx;
 
-/// What an op runs with: the roots its paths open under, and its call's
-/// deadline, stop and progress.
+/// What an op runs with: the roots its paths open under, its call's
+/// deadline, stop and progress, and how much base64 an image inline may
+/// take.
 #[derive(Debug, Clone, Copy)]
 pub struct Ctx<'a> {
     pub roots: &'a Roots,
     pub call: &'a CallCx,
+    pub image_budget: usize,
 }
 
 /// `args` as the tool's request type. The schema has already passed

@@ -14,10 +14,12 @@ serde_json.workspace = true
 spherecut-core.workspace = true
 spherecut-media.workspace = true
 spherecut-render.workspace = true
+spherecut-sphere.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+image.workspace = true
 proptest.workspace = true
 spherecut-synth.workspace = true
 

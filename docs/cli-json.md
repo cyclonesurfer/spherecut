@@ -629,13 +629,13 @@ A failed run has no `result`:
 {"schema":"spherecut.frame/1","ok":false,"error":{"code":"out_of_range","message":"no frame at 1.5 s: the clip runs from 0 to 1.001 s (its last frame starts at 0.968 s)","path":"grid-hevc10-2997.mp4"},"warnings":[]}
 ```
 
-## `spherecut call <TOOL> [<JSON>] [--read-root <DIR>]...`
+## `spherecut call <TOOL> [<JSON>] [--read-root <DIR>]... [--image-dir <DIR>]`
 
 Runs one of the tools `spherecut mcp` serves to agents (docs/agents.md),
 with the same argument checks, roots and limits, and always prints JSON:
 there is no `--json`. `<JSON>` is the tool's arguments as an agent sends
-them, `{}` by default. `--read-root`, `--allow-write` and `--write-root`
-are mcp's.
+them, `{}` by default. `--read-root`, `--allow-write`, `--write-root`
+and `--image-budget-kb` are mcp's.
 
 ```sh
 $ spherecut call probe '{"files": ["grid-hevc10-2997.mp4"]}'
@@ -643,7 +643,15 @@ $ spherecut call probe '{"files": ["grid-hevc10-2997.mp4"]}'
 ```
 
 `result` is exactly what an MCP client gets as the call's
-`structuredContent`, and `warnings` repeats the result's own. A tool's
+`structuredContent` (or, for look, whose result carries an image and so
+has none, as the JSON in its text), and `warnings` repeats the result's
+own. The image an MCP client gets inline is written instead to a new
+file in `--image-dir` (the temporary folder by default), named
+`spherecut-look-<ms>-<n>.jpg` or `.png` and never replacing a file, and
+`images` lists the files' paths; a result without images has no
+`images`. An image that can't be written is the call's error, `internal`
+with exit 1, and its message names the folder. look's `output` is another
+thing: a file the tool itself writes, under a write root. A tool's
 error is `error`, the object an MCP client gets under `error` in the
 call's text: `code`, `argument` (the JSON path of the argument at
 fault, or null), `message`, and `valid` and `next` when there is

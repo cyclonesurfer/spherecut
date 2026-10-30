@@ -284,6 +284,88 @@ pub fn swscale_rgb48(
         .map_err(|e| EncodeError::Invalid(format!("swscale: {e}")))
 }
 
+/// The quantizer scale [`encode_jpeg`] takes: 2 is FFmpeg's best, 31
+/// its worst.
+pub const JPEG_QSCALE: std::ops::RangeInclusive<u8> = 2..=31;
+
+/// `rgb`, `width` × `height` pixels of 8-bit sRGB, rows packed and top
+/// first, as a baseline JPEG from FFmpeg's `mjpeg` encoder at quantizer
+/// scale `qscale` ([`JPEG_QSCALE`]): 4:2:0, full range, BT.601, as JFIF
+/// has it. Every FFmpeg build has the encoder: it is FFmpeg's own and
+/// unpatented, in Fedora's `ffmpeg-free` too (a1-plan section 7.3).
+pub fn encode_jpeg(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    qscale: u8,
+) -> Result<Vec<u8>, EncodeError> {
+    use ffmpeg_sys_next::AVPixelFormat as F;
+    init();
+    if width == 0 || height == 0 || rgb.len() as u64 != u64::from(width) * u64::from(height) * 3 {
+        return Err(EncodeError::Invalid(format!(
+            "{} bytes aren't a {width}x{height} RGB picture",
+            rgb.len()
+        )));
+    }
+    if !JPEG_QSCALE.contains(&qscale) {
+        return Err(EncodeError::Invalid(format!(
+            "a JPEG quantizer scale is 2 to 31, not {qscale}"
+        )));
+    }
+    let codec = ff::encoder::find(ff::codec::Id::MJPEG)
+        .ok_or_else(|| EncodeError::NoEncoder("mjpeg".into()))?;
+    let mut enc = ctx(
+        ff::codec::context::Context::new_with_codec(codec)
+            .encoder()
+            .video(),
+        || "JPEG encoder context".into(),
+    )?;
+    let lambda = i32::from(qscale) * ffi::QP2LAMBDA;
+    enc.set_width(width);
+    enc.set_height(height);
+    enc.set_format(ff::format::Pixel::YUVJ420P);
+    enc.set_time_base(ff::Rational::new(1, 25));
+    enc.set_flags(ff::codec::Flags::QSCALE);
+    enc.set_global_quality(lambda);
+    let mut enc = ctx(enc.open(), || "opening mjpeg".into())?;
+
+    let mut src = ff::frame::Video::new(ff::format::Pixel::RGB24, width, height);
+    let (w, h) = (width as usize * 3, height as usize);
+    let stride = src.stride(0);
+    let data = src.data_mut(0);
+    for (y, row) in rgb.chunks_exact(w).enumerate().take(h) {
+        data[y * stride..y * stride + w].copy_from_slice(row);
+    }
+    let mut scaler = ffi::Scaler::new(
+        F::AV_PIX_FMT_RGB24 as i32,
+        F::AV_PIX_FMT_YUVJ420P as i32,
+        width,
+        height,
+    )
+    .map_err(|e| EncodeError::Invalid(format!("swscale: {e}")))?;
+    let mut yuv = ctx(scaler.scale(&src), || "converting to YUV".into())?;
+    yuv.set_pts(Some(0));
+    // The encoder takes a fixed quantizer from the frame (QSCALE).
+    ffi::set_frame_quality(&mut yuv, lambda);
+    ctx(enc.send_frame(&yuv), || "encoding the JPEG".into())?;
+    ctx(enc.send_eof(), || "finishing the JPEG".into())?;
+    let mut out = Vec::new();
+    let mut packet = ff::Packet::empty();
+    loop {
+        match enc.receive_packet(&mut packet) {
+            Ok(()) => out.extend_from_slice(packet.data().unwrap_or_default()),
+            Err(ff::Error::Eof) => break,
+            Err(e) => {
+                return Err(EncodeError::Ffmpeg {
+                    context: "encoding the JPEG".into(),
+                    error: e,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub struct Mp4Writer {
     /// The destination as given to `create`.
     path: PathBuf,
@@ -1005,4 +1087,109 @@ pub fn remux_to_matroska_at(
         error,
     })?;
     Ok(dst.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A picture like a tile of look's: a label band, white on near-black,
+    /// above a smooth picture with a soft grid drawn over it.
+    fn picture(w: u32, h: u32) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let px = if y < 22 {
+                    let ink = (3..19).contains(&y) && x % 8 < 5 && (x / 8) % 3 != 2;
+                    if ink { [255, 255, 255] } else { [16, 16, 16] }
+                } else {
+                    let base = [(x * 255 / w) as f64, (y * 255 / h) as f64, 96.0];
+                    // A line 3 px wide, its middle at half strength.
+                    let d = (x % 60).min(60 - x % 60).min((y % 60).min(60 - y % 60));
+                    let a = match d {
+                        0 => 0.5,
+                        1 => 0.25,
+                        _ => 0.0,
+                    };
+                    base.map(|c| (c + (255.0 - c) * a).round() as u8)
+                };
+                rgb.extend_from_slice(&px);
+            }
+        }
+        rgb
+    }
+
+    /// `jpeg` decoded by FFmpeg's own decoder, as RGB.
+    fn decode(jpeg: &[u8], w: u32, h: u32) -> Vec<u8> {
+        use ffmpeg_sys_next::AVPixelFormat as F;
+        let codec = ff::decoder::find(ff::codec::Id::MJPEG).expect("an mjpeg decoder");
+        let ctx = ff::codec::context::Context::new_with_codec(codec);
+        let mut dec = ff::decoder::Video(ffi::open_decoder(ctx, codec).expect("a decoder"));
+        dec.send_packet(&ff::Packet::copy(jpeg)).expect("a packet");
+        dec.send_eof().expect("eof");
+        let mut frame = ff::frame::Video::empty();
+        dec.receive_frame(&mut frame).expect("a frame");
+        let mut scaler =
+            ffi::Scaler::new(ffi::frame_format(&frame), F::AV_PIX_FMT_RGB24 as i32, w, h)
+                .expect("a scaler");
+        let rgb = scaler.scale(&frame).expect("RGB");
+        let (plane, stride) = ffi::plane_and_stride(&rgb, 0).expect("a plane");
+        (0..h as usize)
+            .flat_map(|y| plane[y * stride..y * stride + w as usize * 3].to_vec())
+            .collect()
+    }
+
+    fn psnr(a: &[u8], b: &[u8]) -> f64 {
+        let mse = a
+            .iter()
+            .zip(b)
+            .map(|(&x, &y)| (f64::from(x) - f64::from(y)).powi(2))
+            .sum::<f64>()
+            / a.len() as f64;
+        10.0 * (255.0 * 255.0 / mse).log10()
+    }
+
+    #[test]
+    fn a_jpeg_decodes_back_to_its_picture() {
+        let (w, h) = (320, 180);
+        let rgb = picture(w, h);
+        let jpeg = encode_jpeg(&rgb, w, h, 3).expect("a JPEG");
+        assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF], "a JPEG starts with SOI");
+        assert_eq!(&jpeg[jpeg.len() - 2..], &[0xFF, 0xD9], "and ends with EOI");
+        let back = decode(&jpeg, w, h);
+        let db = psnr(&rgb, &back);
+        assert!(db > 35.0, "PSNR {db:.1} dB");
+    }
+
+    #[test]
+    fn a_higher_scale_makes_a_smaller_jpeg_and_odd_sizes_encode() {
+        let (w, h) = (321, 181);
+        let rgb = picture(w, h);
+        let fine = encode_jpeg(&rgb, w, h, 3).expect("q3");
+        let coarse = encode_jpeg(&rgb, w, h, 12).expect("q12");
+        assert!(
+            coarse.len() < fine.len(),
+            "{} vs {}",
+            coarse.len(),
+            fine.len()
+        );
+        let back = decode(&coarse, w, h);
+        assert!(psnr(&rgb, &back) > 25.0);
+    }
+
+    #[test]
+    fn what_isn_t_a_picture_is_refused() {
+        assert!(matches!(
+            encode_jpeg(&[0; 10], 2, 2, 3),
+            Err(EncodeError::Invalid(_))
+        ));
+        assert!(matches!(
+            encode_jpeg(&[0; 12], 2, 2, 1),
+            Err(EncodeError::Invalid(_))
+        ));
+        assert!(matches!(
+            encode_jpeg(&[], 0, 0, 3),
+            Err(EncodeError::Invalid(_))
+        ));
+    }
 }

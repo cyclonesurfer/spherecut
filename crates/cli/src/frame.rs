@@ -39,6 +39,7 @@ use spherecut_core::cancel::StopSource;
 use spherecut_core::fs::{TempFile, follow_links, replaceable};
 use spherecut_core::video::VideoPlanes;
 use spherecut_media::Source;
+use spherecut_media::backend::SeekMode;
 use spherecut_render::{AdapterChoice, Depth, Filter, ViewParams};
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
@@ -576,12 +577,13 @@ impl Job {
         stop.go_on()?;
 
         // Step 7.
-        let decoded = still.seek(self.args.when(), &mut self.warnings)?;
+        let decoded = still.seek(self.args.when(), SeekMode::Exact, &mut self.warnings)?;
         stop.go_on()?;
 
         // Step 8.
         let size = self.args.size;
         let look = still::Look {
+            draw: still::Draw::View,
             filter: match filter {
                 FilterArg::Iso => Filter::Isotropic,
                 FilterArg::Aniso => Filter::Anisotropic,

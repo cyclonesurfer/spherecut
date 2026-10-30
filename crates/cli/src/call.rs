@@ -3,22 +3,26 @@
 //! 7), with the same schema, op, roots and limits. stdout gets D27's
 //! envelope, `spherecut.call/1`, with the tool's Response as `result` and
 //! its warnings again as the envelope's, or the tool's error as `error`.
+//! An image the tool returns (look's) is written to a new file in the
+//! image folder, and `images` lists the files.
 //!
 //! Exit statuses are D27's: 1 for a tool's error, 2 for usage (arguments
 //! that aren't JSON, an unknown tool, `bad_argument`), 3 for `no_gpu`, 4
 //! for SIGINT.
 
-use std::time::{Duration, Instant};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
 use spherecut_agent::error::codes;
-use spherecut_agent::rpc::CallCx;
+use spherecut_agent::rpc::{self, CallCx};
 use spherecut_agent::{ToolError, limits};
 use spherecut_cli::contract::{self, Exit};
 
-use crate::{RootArgs, emit_document, interrupt};
+use crate::{AgentArgs, emit_document, interrupt};
 
 /// How often the main thread looks for SIGINT while the tool runs.
 const POLL: Duration = Duration::from_millis(10);
@@ -33,6 +37,9 @@ struct Document {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<Value>,
     warnings: Value,
+    /// The files the tool's images were written to.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    images: Vec<PathBuf>,
 }
 
 impl Document {
@@ -43,12 +50,14 @@ impl Document {
             result: None,
             error: Some(error),
             warnings: json!([]),
+            images: Vec::new(),
         }
     }
 }
 
-pub fn run(tool: &str, args: &str, roots: &RootArgs) -> Result<Exit> {
-    let (document, exit) = call(tool, args, roots);
+pub fn run(tool: &str, args: &str, agent: &AgentArgs, image_dir: Option<&Path>) -> Result<Exit> {
+    let dir = image_dir.map_or_else(std::env::temp_dir, Path::to_path_buf);
+    let (document, exit) = call(tool, args, agent, &dir);
     let mut line = serde_json::to_string(&document)?;
     line.push('\n');
     emit_document(&line)?;
@@ -61,12 +70,12 @@ fn usage(message: String) -> (Document, Exit) {
     (Document::failed(error), Exit::Usage)
 }
 
-fn call(tool: &str, args: &str, roots: &RootArgs) -> (Document, Exit) {
+fn call(tool: &str, args: &str, agent: &AgentArgs, image_dir: &Path) -> (Document, Exit) {
     let args: Value = match serde_json::from_str(args) {
         Ok(v) => v,
         Err(e) => return usage(format!("the arguments aren't JSON: {e}")),
     };
-    let roots = match roots.roots() {
+    let roots = match agent.roots.roots() {
         Ok(roots) => roots,
         Err(e) => return usage(e.to_string()),
     };
@@ -77,7 +86,7 @@ fn call(tool: &str, args: &str, roots: &RootArgs) -> (Document, Exit) {
     }
     let cx = CallCx::standalone(Instant::now() + limits::CALL_TIME);
     let cancel = cx.canceller();
-    let options = spherecut_agent::Options { roots };
+    let options = agent.options(roots);
     let outcome = std::thread::scope(|s| {
         let worker = std::thread::Builder::new()
             .name("call".into())
@@ -127,7 +136,14 @@ fn call(tool: &str, args: &str, roots: &RootArgs) -> (Document, Exit) {
             (Document::failed(error), exit)
         }
         Ok(out) => {
-            // look's images, from A1.4, go to files named in the result.
+            let images = match save(tool, &out.images, image_dir) {
+                Ok(paths) => paths,
+                Err(e) => {
+                    let message = format!("cannot write the image to {}: {e}", image_dir.display());
+                    let error = json!({"code": codes::INTERNAL, "message": message});
+                    return (Document::failed(error), Exit::Failed);
+                }
+            };
             let warnings = out.result.get("warnings").cloned().unwrap_or(json!([]));
             let document = Document {
                 schema: contract::CALL,
@@ -135,10 +151,39 @@ fn call(tool: &str, args: &str, roots: &RootArgs) -> (Document, Exit) {
                 result: Some(out.result),
                 error: None,
                 warnings,
+                images,
             };
             (document, Exit::Ok)
         }
     }
+}
+
+/// `images` as new files in `dir`, `spherecut-<tool>-<ms>-<n>.<ext>`, never
+/// over anything there.
+fn save(tool: &str, images: &[rpc::Image], dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let mut paths = Vec::with_capacity(images.len());
+    for (n, image) in images.iter().enumerate() {
+        let ext = if image.mime == "image/png" {
+            "png"
+        } else {
+            "jpg"
+        };
+        let path = dir.join(format!("spherecut-{tool}-{ms}-{n}.{ext}"));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        if let Err(e) = file.write_all(&image.data).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
+        paths.push(path);
+    }
+    Ok(paths)
 }
 
 /// In debug builds, with `SPHERECUT_DEBUG_PANIC=call_wait`, hold the

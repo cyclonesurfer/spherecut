@@ -67,3 +67,41 @@ pub const FIELD_BYTES: usize = 1024;
 
 /// The longest error a tool returns, in characters of its JSON.
 pub const ERROR_CHARS: usize = 500;
+
+/// The most tiles one `look` draws: times × views.
+pub const MAX_TILES: usize = 24;
+
+/// The long edge of `look`'s image, in pixels, unless `size` says.
+pub const IMAGE_DEFAULT_EDGE: u32 = 768;
+
+/// The longest edge `look` returns inline. Past it the image must go to
+/// a file (`output`).
+pub const IMAGE_MAX_EDGE: u32 = 1568;
+
+/// The longest edge `look` draws at all, to a file: an image of
+/// 4096 × 4096 is 64 MiB of RGBA (amendment 27).
+pub const IMAGE_LIMIT_EDGE: u32 = 4096;
+
+/// The narrowest a tile may be: a label's second line (`y90 p-20 f100`)
+/// is 13 glyphs, 104 pixels (amendment 16).
+pub const MIN_TILE_WIDTH: u32 = 112;
+
+/// The most base64 an inline image may take, in bytes, unless
+/// `--image-budget-kb` says (amendment 19): 15,000 tokens even if a
+/// client counts it as text, under Claude Code's 25,000.
+pub const INLINE_IMAGE_BYTES: usize = 60_000;
+
+/// The most `--image-budget-kb` may raise [`INLINE_IMAGE_BYTES`] to: 5 MB
+/// of base64, Bedrock's limit on an image and half the API's (a1-plan
+/// section 7.1).
+pub const MAX_IMAGE_BUDGET: usize = 5_000_000;
+
+/// The quantizer scale a JPEG starts at (2 is FFmpeg's best).
+pub const JPEG_QSCALE: u8 = 3;
+
+/// The coarsest quantizer scale a JPEG may take to fit the inline
+/// budget; past it the image is `image_too_large`.
+pub const JPEG_QSCALE_MAX: u8 = 12;
+
+/// The most video streams `look`'s `raw` mode draws side by side.
+pub const RAW_STREAMS: usize = 4;
