@@ -264,6 +264,12 @@ fn the_smoke_run_exports_while_it_plays_and_waits_for_the_export() {
     // The run waited for the export past its 1.5 s, if it took longer.
     let played = doc["result"]["played_s"].as_f64().unwrap();
     assert!(played >= to, "{played} {to}");
+    // Its edits left the project unsaved, and still the window closes
+    // without asking (a prompt would hold it open until the watchdog).
+    assert!(project.dirty());
+    h.step();
+    assert!(h.state_mut().state.close_requested());
+    assert!(h.state().state.reframe.confirm.is_none());
 }
 
 #[test]

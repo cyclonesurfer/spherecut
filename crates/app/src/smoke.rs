@@ -475,6 +475,9 @@ impl SmokeDriver {
             },
             Phase::Done { closed } => {
                 if !*closed {
+                    // The run's own edits (an export's preset, its blur)
+                    // aren't Pat's to save: closing doesn't ask.
+                    s.reframe.may_close = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     *closed = true;
                 }
