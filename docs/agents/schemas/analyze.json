@@ -24,16 +24,24 @@
       ]
     },
     "from": {
-      "type": [
-        "string",
-        "array"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array"
+        }
       ],
       "description": "A time, as look's: the start by default."
     },
     "to": {
-      "type": [
-        "string",
-        "array"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array"
+        }
       ],
       "description": "A time: the end by default."
     },

@@ -45,8 +45,8 @@ What they show:
   at a property and render. The same schema with `anyOf` of the two
   types renders, which `--any-of-types` sends. PLAN bans combinators
   only at a schema's root, so the fix is in Spherecut: time arguments
-  as a nested `anyOf` of plain types, which `agent::schema`'s validator
-  and lint learn to take.
+  now go as a nested `anyOf` of plain types, which `agent::schema`'s
+  validator reads and its lint requires (D43).
 
 Next: the same four tasks on the models huginn's upgrade brings
 (nemotron among them), with a longer request timeout for marker.

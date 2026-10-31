@@ -7,6 +7,14 @@
 //! the path of the argument at fault (`times[3]`, `view.fov`), and tests
 //! hold each schema to its request type. The validator knows exactly the
 //! keywords below; a test fails a schema that uses any other.
+//!
+//! A property of more than one type (a time is a string or a `[num,
+//! den]` pair) says so with `anyOf` of plain types, `{"type": t}` each,
+//! beside the keywords that apply to one of them (`items` for the
+//! array). A list-valued `type` says the same, but llama.cpp's template
+//! engine can't render one under `items` for gemma-4 (HTTP 500 on the
+//! first request, `docs/research/a1/local-models-2026-10-31.md`), so the
+//! lint refuses it.
 
 use serde_json::{Map, Value};
 
@@ -31,6 +39,7 @@ pub const KEYWORDS: &[&str] = &[
     "maximum",
     "enum",
     "default",
+    "anyOf",
 ];
 
 /// Check `value` against `schema`.
@@ -92,10 +101,16 @@ fn with_article(t: &str) -> String {
     }
 }
 
+/// The types a value may have: `type`'s, or those of `anyOf`'s plain
+/// types.
 fn types(schema: &Map<String, Value>) -> Vec<&str> {
-    match schema.get("type") {
-        Some(Value::String(t)) => vec![t.as_str()],
-        Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
+    match (schema.get("type"), schema.get("anyOf")) {
+        (Some(Value::String(t)), _) => vec![t.as_str()],
+        (Some(Value::Array(ts)), _) => ts.iter().filter_map(Value::as_str).collect(),
+        (None, Some(Value::Array(branches))) => branches
+            .iter()
+            .filter_map(|b| b.get("type").and_then(Value::as_str))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -259,9 +274,10 @@ fn check<'a>(
 }
 
 /// What makes a schema fit to publish (PLAN A1): draft 2020-12, an
-/// object at the root that takes no other properties, no combinator, no
-/// `$ref`, snake_case names, a description on the tool and every
-/// property under 4,096 characters, and only the keywords in
+/// object at the root that takes no other properties, no combinator at
+/// the root, no `$ref`, snake_case names, a description on the tool and
+/// every property under 4,096 characters, one type to a `type` (more go
+/// in an `anyOf` of plain types), and only the keywords in
 /// [`KEYWORDS`]. Each problem as a sentence.
 pub fn lint(name: &str, schema: &Value) -> Vec<String> {
     let mut problems = Vec::new();
@@ -279,8 +295,36 @@ pub fn lint(name: &str, schema: &Value) -> Vec<String> {
     if root.get("additionalProperties") != Some(&Value::Bool(false)) {
         problems.push(format!("{name}: the root takes other properties"));
     }
+    if root.contains_key("anyOf") {
+        problems.push(format!("{name}: a combinator at the root"));
+    }
     lint_node(name, schema, &mut problems);
     problems
+}
+
+/// An `anyOf` the validator takes: two or more plain types, `{"type":
+/// t}` each, all different, with no `type` beside it.
+fn lint_any_of(at: &str, node: &Map<String, Value>, problems: &mut Vec<String>) {
+    let Some(any_of) = node.get("anyOf") else {
+        return;
+    };
+    if node.contains_key("type") {
+        problems.push(format!("{at}: anyOf beside a type"));
+    }
+    let branches = any_of.as_array().map(Vec::as_slice).unwrap_or_default();
+    let mut seen = Vec::new();
+    for b in branches {
+        let plain = b.as_object().is_some_and(|m| m.len() == 1);
+        match b.get("type").and_then(Value::as_str) {
+            Some(t) if plain && !seen.contains(&t) => seen.push(t),
+            _ => problems.push(format!(
+                "{at}: anyOf has a branch that isn't a plain type of its own: {b}"
+            )),
+        }
+    }
+    if branches.len() < 2 {
+        problems.push(format!("{at}: anyOf with fewer than two types"));
+    }
 }
 
 fn lint_node(at: &str, node: &Value, problems: &mut Vec<String>) {
@@ -293,6 +337,12 @@ fn lint_node(at: &str, node: &Value, problems: &mut Vec<String>) {
             problems.push(format!("{at}: keyword {k} isn't one the validator knows"));
         }
     }
+    if map.get("type").is_some_and(Value::is_array) {
+        problems.push(format!(
+            "{at}: a list of types, which some clients' templates can't render; use anyOf"
+        ));
+    }
+    lint_any_of(at, map, problems);
     match map.get("description").and_then(Value::as_str) {
         None => problems.push(format!("{at}: no description")),
         Some(d) if d.chars().count() >= 4096 => {
@@ -340,7 +390,7 @@ mod tests {
                 "file": {"type": "string", "description": "a path", "minLength": 1},
                 "times": {
                     "type": "array", "description": "times", "minItems": 1, "maxItems": 3,
-                    "items": {"type": ["string", "array"], "description": "a time",
+                    "items": {"anyOf": [{"type": "string"}, {"type": "array"}], "description": "a time",
                               "items": {"type": "integer", "description": "num or den"},
                               "minItems": 2, "maxItems": 2}
                 },
@@ -441,5 +491,47 @@ mod tests {
         ] {
             assert!(p.contains(needle), "{needle} in:\n{p}");
         }
+    }
+
+    #[test]
+    fn more_than_one_type_is_an_any_of_of_plain_types() {
+        let with = |time: Value| {
+            json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "a tool", "type": "object", "additionalProperties": false,
+                "properties": {"t": time}
+            })
+        };
+        let p = |time: Value| lint("t", &with(time)).join("\n");
+        // The list gemma-4's template can't render, and anyOfs the
+        // validator wouldn't read.
+        let list = p(json!({"type": ["string", "array"], "description": "a time"}));
+        assert!(list.contains("a list of types"), "{list}");
+        for bad in [
+            json!({"anyOf": [{"type": "string"}], "description": "d"}),
+            json!({"anyOf": [{"type": "string"}, {"type": "string"}], "description": "d"}),
+            json!({"anyOf": [{"type": "string"}, {"type": "array", "minItems": 2}], "description": "d"}),
+            json!({"anyOf": [{"type": "string"}, {"type": "array"}], "type": "string", "description": "d"}),
+        ] {
+            assert!(!p(bad.clone()).is_empty(), "{bad} passed the lint");
+        }
+        let mut root = with(json!({"type": "string", "description": "d"}));
+        root["anyOf"] = json!([{"type": "object"}, {"type": "null"}]);
+        assert!(
+            lint("t", &root)
+                .join("\n")
+                .contains("a combinator at the root")
+        );
+        assert_eq!(
+            p(json!({"anyOf": [{"type": "string"}, {"type": "array"}], "description": "d"})),
+            ""
+        );
+
+        // Validated as either type, with the keywords for its own.
+        let e = err(json!({"file": "a", "times": [true]}));
+        assert_eq!(e.argument.as_deref(), Some("times[0]"));
+        assert_eq!(e.message, "expected a string or an array, not a boolean");
+        let e = err(json!({"file": "a", "times": [[1]]}));
+        assert_eq!(e.valid.as_deref(), Some("exactly 2 items"));
     }
 }
