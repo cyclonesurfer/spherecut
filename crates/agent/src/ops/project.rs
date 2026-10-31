@@ -17,6 +17,7 @@ use spherecut_core::{FrameRate, Time, TimeSpec};
 
 use super::Ctx;
 use super::look::{self, TimeArg};
+use crate::contract::Warning;
 use crate::error::{ToolError, codes};
 use crate::limits::{HISTORY_STEPS, LOCK_WAIT, SUMMARY_MARKERS, VIEW_CHARS, VIEW_KEYS};
 use crate::still::{self, Decoder, Still};
@@ -120,14 +121,17 @@ fn create(file: &Path, media: &Path, cx: &Ctx) -> Result<Value, ToolError> {
         .at("file")
         .next("give another name, or read this project with project")
     };
-    if folder
-        .identity(&name)
-        .map_err(|e| folder_error("file", e))?
-        .is_some()
-    {
-        return Err(taken());
+    // Whatever is there, a link or a folder too, is something a new
+    // project would replace.
+    match folder.identity(&name) {
+        Ok(None) => {}
+        Ok(Some(_)) | Err(FolderError::Link { .. } | FolderError::NotAFile { .. }) => {
+            return Err(taken());
+        }
+        Err(e) => return Err(folder_error("file", e)),
     }
-    let entry = probe_media("create.media", media, cx)?;
+    let mut doubts = Vec::new();
+    let entry = probe_media("create.media", media, cx, &mut doubts)?;
     let project = Project::untitled(entry, INITIAL_VIEW).map_err(|p| {
         ToolError::new(
             codes::BAD_ARGUMENT,
@@ -147,20 +151,30 @@ fn create(file: &Path, media: &Path, cx: &Ctx) -> Result<Value, ToolError> {
     let loaded = folder.load(&name).map_err(|e| folder_error("file", e))?;
     let mut s = summary(&folder, &name, &loaded, cx);
     s["created"] = json!(true);
+    if !doubts.is_empty() {
+        s["warnings"] = json!(doubts);
+    }
     Ok(s)
 }
 
 /// The media entry of the video at `path`, the argument `arg`: opened
 /// beneath the roots, probed through what was opened, its stream opened
 /// for its rate and length, and recorded as the agent names it. Like
-/// the GUI's, it takes footage whatever its metadata says: look's
-/// `assume_equirect` is how an agent checks.
-pub(crate) fn probe_media(arg: &str, path: &Path, cx: &Ctx) -> Result<Media, ToolError> {
+/// the GUI's, it takes footage whatever its metadata says, with a
+/// `not_equirect` warning in `doubts` when it isn't tagged a stitched
+/// equirect: looking at the project shows what a render makes of it.
+pub(crate) fn probe_media(
+    arg: &str,
+    path: &Path,
+    cx: &Ctx,
+    doubts: &mut Vec<Warning>,
+) -> Result<Media, ToolError> {
     let opened = cx.roots.open_file(arg, path)?;
     let named = cx.roots.named(arg, path)?;
     let stop = still::Stop::new(cx.call.token(), cx.call.interrupt());
     let opts = still::Options {
         decoder: Decoder::Software,
+        equirect: true,
         ..still::Options::default()
     };
     let mut warnings = Vec::new();
@@ -178,6 +192,12 @@ pub(crate) fn probe_media(arg: &str, path: &Path, cx: &Ctx) -> Result<Media, Too
     };
     let probed =
         still::probe(opened.source(), &opts, &stop, &mut warnings).map_err(|f| failed(&f))?;
+    if let Some(why) = still::equirect_doubt(&probed) {
+        doubts.push(Warning::new(
+            codes::NOT_EQUIRECT,
+            format!("{why}; the project renders it as a stitched equirect all the same"),
+        ));
+    }
     let open = Still::open(opened.source(), &probed, None, &opts, &stop, &mut warnings)
         .map_err(|f| failed(&f))?;
     let info = open.info().clone();
@@ -211,6 +231,21 @@ pub(crate) fn open(file: &Path, lock: bool, cx: &Ctx) -> Result<Writing, ToolErr
     let (folder, name) = cx.roots.project_folder("file", file, true)?;
     let first = folder.load(&name).map_err(|e| folder_error("file", e))?;
     if !lock {
+        // A dry run takes no lock, but meets the window's hold as the
+        // edit would; another call's it would wait out.
+        let holder = folder
+            .holder(&name)
+            .map_err(|e| folder_error("file", e))?
+            .flatten();
+        if let Some(h) = holder.filter(|h| h.by == By::Gui) {
+            return Err(folder_error(
+                "file",
+                FolderError::Locked {
+                    path: folder.path_of(&name),
+                    holder: Some(h),
+                },
+            ));
+        }
         return Ok(Writing {
             folder,
             name,
@@ -385,17 +420,23 @@ fn nothing(redo: bool) -> (&'static str, String) {
     }
 }
 
-/// The step undo (or redo) would take next, for a result.
+/// The step undo (or redo) would take next, for a result: null when
+/// there is none, and only `agent_may: false` with why when the history
+/// beside the project can't be trusted.
 pub(crate) fn next_step(kept: &Kept, redo: bool, revision: u64) -> Value {
     let step = match kept {
         Kept::Kept(h) if redo => h.redo_step(),
         Kept::Kept(h) => h.undo_step(),
         _ => None,
     };
-    let Some(s) = step else {
-        return Value::Null;
+    let mut v = match (kept, step) {
+        (Kept::Kept(_), Some(s)) => {
+            json!({ "label": text::field(&s.label), "by": origin(&s.origin) })
+        }
+        // Steps there may be, but none undo can trust: say why.
+        (Kept::Stale { .. } | Kept::Unreadable(_), _) => json!({}),
+        _ => return Value::Null,
     };
-    let mut v = json!({ "label": text::field(&s.label), "by": origin(&s.origin) });
     match refusal(kept, redo, revision) {
         None => v["agent_may"] = json!(true),
         Some((code, why)) => {
@@ -699,8 +740,9 @@ fn view(clip: &Clip, from: Time, to: Option<Time>) -> Value {
 }
 
 /// A clip's markers from `from` to `to`, [`VIEW_KEYS`] at most. As in
-/// [`view`], none is listed from `next_from` on, unless they all share
-/// its time.
+/// [`view`], none is listed from `next_from` on, unless more than a page
+/// share the first time: then a page of those, the rest `skipped`, and
+/// `next_from` the time after.
 fn markers(clip: &Clip, from: Time, to: Option<Time>) -> Value {
     let mut inside: Vec<_> = clip
         .markers
@@ -708,12 +750,18 @@ fn markers(clip: &Clip, from: Time, to: Option<Time>) -> Value {
         .filter(|m| within(m.at, from, to))
         .collect();
     inside.sort_by_key(|m| m.at);
-    let cut = inside.get(VIEW_KEYS).map(|m| m.at);
+    let mut cut = inside.get(VIEW_KEYS).map(|m| m.at);
     let before = inside
         .iter()
         .take_while(|m| cut.is_none_or(|c| m.at < c))
         .count();
-    let listed = if before == 0 {
+    let mut skipped = 0;
+    let listed = if before == 0 && cut.is_some() {
+        // More than a page at one time: the page lists some of them, and
+        // goes on after that time, or `from` would give the same page.
+        let at_once = inside.iter().take_while(|m| Some(m.at) == cut).count();
+        skipped = at_once - VIEW_KEYS;
+        cut = inside.get(at_once).map(|m| m.at);
         VIEW_KEYS
     } else {
         before.min(VIEW_KEYS)
@@ -723,6 +771,9 @@ fn markers(clip: &Clip, from: Time, to: Option<Time>) -> Value {
         "markers": inside.iter().take(listed).map(|m| marker(m)).collect::<Vec<_>>(),
         "more": cut.is_some(),
     });
+    if skipped > 0 {
+        out["skipped"] = json!(skipped);
+    }
     if let Some(t) = cut {
         out["next_from"] = next_from(t);
     }

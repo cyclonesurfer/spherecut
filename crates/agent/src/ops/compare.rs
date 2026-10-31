@@ -253,8 +253,10 @@ pub fn run(req: Request, cx: &Ctx) -> Result<(Value, Vec<rpc::Image>), ToolError
         let ours = flat(&mut file, &a, size).map_err(|f| failed(cx, &f, "file"))?;
         let (theirs, their_time) = match &mut against {
             Against::File { still, .. } => {
+                // The time the first file showed, not the spec again: a
+                // frame count ("40f") is the first file's.
                 let b = still
-                    .seek(*spec, SeekMode::Exact, &mut warnings)
+                    .seek(TimeSpec::Time(a.shown.time), SeekMode::Exact, &mut warnings)
                     .map_err(|f| at_time(cx, &f, arg, still.info()))?;
                 let img = flat(still, &b, size).map_err(|f| failed(cx, &f, "against_file"))?;
                 (img, json!(b.shown))

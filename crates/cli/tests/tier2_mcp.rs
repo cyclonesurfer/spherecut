@@ -1,13 +1,14 @@
-//! Tier 2: agents' MCP sessions on the GPU, with one of Pat's samples.
-//! `spherecut mcp` is spawned as a client spawns it, on the folder of the
-//! first `.lrv` proxy under the samples (the X5's, H.264).
+//! Tier 2: agents' MCP sessions on the GPU. `spherecut mcp` is spawned as
+//! a client spawns it.
 //!
 //! - `mcp_session_decodes_with_vaapi` (a1-plan section 11.4 and amendment
-//!   3): `doctor` with the file and a `raw` look of it must both say
-//!   `vaapi` wherever doctor says VA-API decodes the file's codec.
-//! - `mcp_render_vaapi` (a2-plan 9.6): a project of the file, 3 s of it
-//!   rendered on VA-API's H.264 encoder, followed with `job`, and the file
-//!   compared with the project.
+//!   3), on the folder of the first `.lrv` proxy under Pat's samples (the
+//!   X5's, H.264): `doctor` with the file and a `raw` look of it must both
+//!   say `vaapi` wherever doctor says VA-API decodes the file's codec.
+//! - `mcp_render_vaapi` (a2-plan 9.6): a project of a tagged 1080p
+//!   equirect (synth's grid: the X5's proxies are dual fisheye, which M2
+//!   doesn't stitch), 3 s of it rendered on VA-API's H.264 encoder,
+//!   followed with `job`, and the file compared with the project.
 //!
 //! Where doctor says the GPU can't (no device, no driver for the codec),
 //! a test skips with doctor's reason, and never passes. Run with `cargo
@@ -22,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use mcp_client::{Server, assert_jsonrpc};
 use serde_json::{Value, json};
+use spherecut_synth::media::{self, Audio, Spec};
 use spherecut_testkit::tier2;
 
 /// The first `.lrv` under `dir`, by path.
@@ -137,28 +139,38 @@ fn follow(s: &mut Server, id: &mut i64, r: &Value) -> Value {
     }
 }
 
-/// a2-plan section 9.6: an agent's MCP session makes a project of the
-/// first `.lrv` proxy under the samples, renders 3 s of it on the VA-API
-/// H.264 encoder, follows the job, and compares the file with the
-/// project: the job's check passes and every time is above PLAN's least
-/// for any encoder (40 dB, 0.98). Where doctor says VA-API doesn't
-/// encode H.264 here, it skips with doctor's reason.
+/// a2-plan section 9.6: an agent's MCP session makes a project of a
+/// tagged 1920x960 equirect of 5 s with stereo AAC, renders 3 s of it on
+/// the VA-API H.264 encoder, follows the job, and compares the file with
+/// the project: no fallback, the job's check passes, and every time is
+/// above PLAN's least for any encoder (40 dB, 0.98). Where doctor says
+/// VA-API doesn't encode H.264 here, it skips with doctor's reason.
 #[test]
-#[ignore = "tier2: needs a VA-API GPU and the samples"]
+#[ignore = "tier2: needs a VA-API GPU"]
 fn mcp_render_vaapi() {
-    let samples = tier2::require_samples_dir();
-    let Some(proxy) = first_proxy(&samples) else {
-        tier2::skip(format!("no .lrv proxy under {}", samples.display()));
-    };
+    tier2::require_hw_run();
     let out = Outputs(
         Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("tier2-mcp-render-{}", std::process::id())),
     );
     std::fs::remove_dir_all(&out.0).ok();
     std::fs::create_dir_all(&out.0).unwrap();
+    let clip = media::write(
+        &Spec {
+            name: "grid".into(),
+            width: 1920,
+            height: 960,
+            frames: 150,
+            audio: Audio::Stereo,
+            spherical: true,
+            ..Spec::default()
+        },
+        &out.0,
+    )
+    .unwrap();
     let mut s = Server::spawn(|c| {
         c.arg("--read-root")
-            .arg(proxy.parent().unwrap())
+            .arg(&out.0)
             .arg("--allow-write")
             .arg("--write-root")
             .arg(&out.0);
@@ -185,13 +197,14 @@ fn mcp_render_vaapi() {
         ));
     }
 
-    let project = out.0.join("lrv.spherecut");
+    let project = out.0.join("grid.spherecut");
     let summary = call(
         &mut s,
         2,
         "project",
-        json!({"file": project, "create": {"media": proxy}}),
+        json!({"file": project, "create": {"media": clip}}),
     );
+    assert!(summary.get("warnings").is_none(), "{summary}");
     call(
         &mut s,
         3,
@@ -204,14 +217,16 @@ fn mcp_render_vaapi() {
         &mut s,
         4,
         "render",
-        json!({"project": project, "output": out.0.join("lrv.mp4"),
+        json!({"project": project, "output": out.0.join("grid-flat.mp4"),
                "range": {"from": "2", "to": "5"}}),
     );
     assert_eq!(r["encoder"], "h264_vaapi", "{r}");
     let mut id = 5;
     let job = follow(&mut s, &mut id, &r);
-    assert_eq!(job["report"]["encoder"], "h264_vaapi", "{job}");
-    assert!(job.get("fallback").is_none(), "{job}");
+    let report = &job["report"];
+    assert_eq!(report["encoder"], "h264_vaapi", "{job}");
+    assert!(report.get("fallback").is_none(), "{job}");
+    assert!(report.get("decode_fallback").is_none(), "{job}");
     assert_eq!(job["check"]["pass"], true, "{job}");
 
     let c = call(
@@ -224,12 +239,9 @@ fn mcp_render_vaapi() {
     let ssim = c["worst"]["ssim"]["ssim"].as_f64().unwrap();
     assert!(psnr >= 40.0 && ssim >= 0.98, "{c}");
     eprintln!(
-        "{}: 3 s on h264_vaapi at {} fps, {} bytes; against the project worst {psnr:.2} dB, \
-         SSIM {ssim:.5}, mean {}",
-        proxy.display(),
-        job["fps"],
-        job["report"]["bytes"],
-        c["mean"]
+        "3 s of a 1080p grid on h264_vaapi (decode {}) in {} s, {} bytes; against the \
+         project worst {psnr:.2} dB, SSIM {ssim:.5}, mean {}",
+        report["decode"], report["seconds"], report["bytes"], c["mean"]
     );
     let (status, _, rest, _) = s.close();
     assert!(status.success(), "{status}");

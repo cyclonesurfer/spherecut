@@ -468,7 +468,7 @@ impl Export {
                     let r = pipeline::run(&job, preset, plan, &node, &encoders, &shared, &stop);
                     tx.send(r).ok();
                 })
-                .map_err(|e| ExportError::Invalid(format!("starting the export: {e}")))?
+                .map_err(|e| ExportError::Internal(format!("starting the export: {e}")))?
         };
         Ok(Export {
             shared,
@@ -508,7 +508,7 @@ impl Export {
                         Some(Err(p)) => panic_text(&p),
                         _ => "no result".into(),
                     };
-                    self.done = Some(Err(ExportError::Invalid(format!(
+                    self.done = Some(Err(ExportError::Internal(format!(
                         "the export stopped: {why}"
                     ))));
                 }

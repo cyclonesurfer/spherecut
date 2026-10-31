@@ -156,6 +156,15 @@ impl Table {
     }
 }
 
+/// The one waiting call's mark, taken off when it is dropped.
+struct Waiting<'a>(&'a Shared);
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.lock().waiting = false;
+    }
+}
+
 #[derive(Debug, Default)]
 struct Shared {
     table: Mutex<Table>,
@@ -346,11 +355,17 @@ impl Jobs {
         stop: impl Fn() -> bool,
         mut progress: impl FnMut(&Status),
     ) -> Option<(Status, bool)> {
-        let mut t = self.shared.lock();
-        if t.waiting {
-            return self.status_in(&t, n).map(|s| (s, false));
+        {
+            let mut t = self.shared.lock();
+            if t.waiting {
+                return self.status_in(&t, n).map(|s| (s, false));
+            }
+            t.waiting = true;
         }
-        t.waiting = true;
+        // Cleared however the wait ends, a panic in `progress` too (the
+        // call's panic is caught and answered): dropped after `t`.
+        let _waiting = Waiting(&self.shared);
+        let mut t = self.shared.lock();
         let mut seen = None;
         let status = loop {
             let Some(s) = self.status_in(&t, n) else {
@@ -372,7 +387,7 @@ impl Jobs {
                 .shared
                 .wait(t, until.saturating_duration_since(now).min(POLL));
         };
-        t.waiting = false;
+        drop(t);
         status.map(|s| (s, true))
     }
 

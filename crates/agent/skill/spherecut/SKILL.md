@@ -121,8 +121,8 @@ with its server; `spherecut render --json` is the same export.
    user's is theirs to undo.
 5. `look` with `project` and `mode: "sheet"`: the frames a render makes,
    at the render's times (0 is the trim's start; each tile's `source` is
-   the file's time). Where the subject drifts off centre, add points
-   there and edit again.
+   the file's time). Where the subject drifts off centre, add points at
+   those tiles' `source` times and edit again.
 6. `check` with `project` and the `target` its output fits
    (`flat_16_9`, `vertical`, `youtube_360`): what a render would make,
    before one is made.
@@ -130,8 +130,8 @@ with its server; `spherecut render --json` is the same export.
    …, "to": …}`, file times). It answers at once with a `job`: call
    `job` with `wait: 30` until its `state` is `done`; its `check` is the
    file's verdict. `compare` the draft's `output` with `against_project`
-   and `from` the range's `from`: every encoder is above 40 dB and an
-   SSIM of 0.98 at every time, the software ones above 48 dB. Far below
-   means the file isn't the project's render.
+   and `from` the range's `from`: a render is above 40 dB and an SSIM of
+   0.98 at every time, whatever its encoder. Under about 30 dB means the
+   wrong frames: the wrong `from`, or not this project's render.
 8. `render` the whole project and follow it with `job` the same way.
    Report the file, its `check`, and the moments you keyed.

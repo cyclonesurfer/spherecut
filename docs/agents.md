@@ -5,7 +5,9 @@ CLI, Cursor, Zed, goose, opencode, or anything else that starts a local
 MCP server or runs a command) can go through your footage with
 Spherecut: probe a folder, look at any moment from any direction, find
 where something happens, explain stutter or audio problems, and check a
-file's 360 metadata. In A1 it can't change or render anything.
+file's 360 metadata. Given a write root it can also make projects of
+your clips, edit and undo them, and render them ([Projects](#projects));
+without one it only reads.
 
 There are two ways in, with the same tools, arguments and results:
 
@@ -32,10 +34,13 @@ file is opened with `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)`
 beneath its root, so `..`, an absolute path outside, a symlink out of a
 root, a dangling symlink and `/proc/self/fd/N` are all refused
 (`outside_roots` or `not_found`), and a file swapped after it was opened
-is not the one read (DECISIONS D45). Nothing is ever overwritten: an
-output is a new file, and anything already at its name, a symlink
-included, is `output_exists`. No tool deletes or moves a file or starts
-a process, and tools take only data, never code, filters or commands.
+is not the one read (DECISIONS D45). Nothing is overwritten but a
+project: an output is a new file, and anything already at its name, a
+symlink included, is `output_exists`; `edit` and `undo` replace only a
+file that loads as a project, and the hidden files beside it
+([Projects](#projects)). No tool deletes or moves a file of yours or
+starts a process, and tools take only data, never code, filters or
+commands.
 
 **The roots limit what Spherecut opens for an agent, not what the agent
 can do.** An agent that can run shell commands can read your files
@@ -55,7 +60,9 @@ spherecut agents install-skill [--dry-run]
   first. Without it, the working directory the client starts the server
   in, which is often not your footage: name your footage folder.
 - `--allow-write --write-root DIR` (both or neither): lets `look` write
-  its image to a new file under `DIR` when the call gives `output`.
+  its image to a new file under `DIR` when the call gives `output`, and
+  lists `edit`, `undo`, `render` and `job`: projects are made, edited
+  and rendered only under `DIR`.
 - `--image-budget-kb KB` (default 60, at most 5000): the most base64 an
   image in a result may take. See [Images and output limits](#images-and-output-limits).
 - `spherecut call` prints `{"schema": "spherecut.call/1", "ok", "result",
@@ -372,14 +379,17 @@ true, `idempotentHint` false).
   `warnings`) and a `check` of the file against the target its output
   fits (`youtube_360` for the sphere, `flat_16_9`, `vertical`, and the
   rules alone for 1:1 and 4:5); once `failed`, its `error`, with the
-  export's code (`encode_failed`, `mux_failed`, `metadata_failed`,
-  `check_failed`, `io_error`, `no_space`, the hardware codes). `wait`
+  export's code (`cannot_export`, `output_exists`, `decode_failed`,
+  `render_failed`, `encode_failed`, `mux_failed`, `metadata_failed`,
+  `check_failed`, `io_error`, `no_space`, the hardware codes, or
+  `internal`). `wait`
   (seconds, up to 45) returns when it ends or the time passes, sending
   progress if the call asked for it; one call waits at a time, and
   another answers at once with a `note`. opencode's calls end after
   30 s, so wait less there. `cancel` stops it and its file, within 2 s.
-  The last 16 finished jobs are kept; an id from a server that has
-  ended is `job_lost`. When the server ends, its renders are cancelled;
+  The last 16 finished jobs are kept; an id this server didn't give
+  (one from a server that has ended, or another that is running) is
+  `job_lost`. When the server ends, its renders are cancelled;
   a file a killed server left is removed by the next render in that
   folder.
 - **`compare`**: how alike `file` is to `against_file` (a video of the
@@ -393,13 +403,15 @@ true, `idempotentHint` false).
   channel; a project's frame is the one its render shows at the file's
   frame's time, so a render compares frame for frame with its project,
   and `from` (the clip's media time, the trim's start by default) is
-  where the render started: a `render` of a `range` gives its `from`.
+  where the render started: for a `render` of a `range`, its `from`.
   `sheet` adds an image of the four worst times, a row each of the
   file, the other and their difference times four, within the inline
   budget. Out of time, it answers with the times it measured,
-  `partial: true`. An export at its preset is above D52's floors
-  against its project (49 dB and 0.995 flat, 55.5 dB and 0.996 for the
-  sphere, 48 dB and 0.994 draft).
+  `partial: true`. A render is above 40 dB and an SSIM of 0.98 against
+  its project at every time, whatever its encoder (PLAN's least; the
+  software encoders at their presets are near 50 dB, VA-API and SVT-AV1
+  a few dB under); well under that, around 30 dB or less, means the
+  wrong frames: the wrong `from`, or not this project's render.
 
 **Conventions.** Times are strings (`"12.5"`, `"1:02.5"`, `"370f"` for
 frame 370, `"30000/1001"`) or `[num, den]` pairs of seconds; a bare
@@ -433,7 +445,8 @@ beside it that Spherecut makes and nothing else should touch:
   project is open; `project` with `create`, `edit` and `undo` hold it
   for the call. A call waits for another call's hold up to `LOCK_WAIT`
   and is refused at once while the window has it (`project_locked`,
-  saying who). It is never removed or replaced. Reading takes no lock:
+  saying who). It is never removed or replaced, only written over with
+  its holder's name. Reading takes no lock:
   `project`, `look`, `check`, `compare` and `render` read a project the
   window has open, and `render` reads it once, when it is called.
 - `.trip.spherecut.history`, the undo steps, written with every save,
@@ -442,15 +455,18 @@ beside it that Spherecut makes and nothing else should touch:
   (written by something else since) is stale: undo and redo are
   `stale_revision`, and the next edit starts a fresh history
   (`history_reset: true`). It is kept under 16 MiB, the oldest steps
-  going first (`history_dropped`).
+  going first (`history_dropped` in `edit`'s result). It has the
+  project's permissions, and a project's save fails, leaving it as it
+  was, if its history can't be written.
 
 A project changed on disk since a call read it (by a text editor, git,
 a sync tool) is never saved over: `changed_on_disk`, and nothing is
 written. Beneath the write root Spherecut replaces only a file that
 loads as a project, and its history; everything else it writes is new.
 
-**Undo.** `undo` takes back the last step only if an agent made it, and
-`redo` puts back the last one undone the same way. A step of the user's
+**Undo.** `undo` takes back the last step only if an agent made it (any
+agent's: `spherecut call` and every client count as agents), and `redo`
+puts back the last one undone the same way. A step of the user's
 is `not_top`: theirs to undo, in the window. The summary's `undo` and
 `redo` say whether an agent may (`agent_may`) and why not. The window's
 Edit menu names the client an agent's step came from ("Undo Set trim
@@ -462,14 +478,17 @@ instead:
 | In the window | An agent |
 |---|---|
 | Play, pause, scrub, step a frame | `look` at the time (with `project`, the render's) |
+| Jump a second (Shift+arrows), to the start or end (Home, End), to the previous or next key (Alt+[ and Alt+]) | `look` at that time; `project` with `part: "view"` lists the keys' times |
 | Drag the viewer to look around | `look` with a `view`; to keep it, `edit` with `add_key`, `set_key` or `set_view_path` |
+| Zoom (scroll, + and −), the lens presets (1, 2, 3, the transport's lens buttons, Morph to), reset the view (R) | `look` with a view's `fov` and `projection` (the default view for a reset); to keep it, `edit` with a key on the `fov` or `projection` track |
 | The curve editor's handles | `edit` with `set_key` and its `ease` |
 | Open, Save, Save As, Close | `project` (`create` for a new one); every `edit` and `undo` saves |
+| Replace an existing file (Save As's and Export's "Replace it?") | None: an agent's new file never replaces one (`output_exists`); it gives another name |
 | Undo, Redo | `undo` (with `redo`), on an agent's steps |
 | Export | `render`, then `job` |
 | The Info and Files panes | `probe` |
 | The Doctor pane | `doctor` |
-| The overlay, Settings, the sphere overview, the equirect preview, the panes' layout | None: they change no project and no file |
+| The overlay (F3), Settings (anisotropic filtering among them), the sphere overview, the equirect preview, loop (Ctrl+L), the panes' layout, Help, Quit | None: they change no project and no file |
 
 Each milestone's review checks this list against the window until M5's
 shortcut map lets a test do it (PLAN).
@@ -480,8 +499,10 @@ A failed call is a tool result marked `isError`, whose text is
 `{"error": {code, argument, message, valid, next}}`, under 500
 characters: a stable `code`, the argument at fault as a JSON path
 (`file`, `times[3]`, `view.fov`) or null, what would be valid, and what
-to try next. No file name or FFmpeg message is in it; probe's `detail:
-"full"` gives FFmpeg's own words. The codes:
+to try next. A message may name a file or folder the call gave (a
+folder without room, a media file that moved) and, for a render that
+failed writing, the writer's words; probe's `detail: "full"` gives
+FFmpeg's own. The codes:
 
 | Code | Meaning |
 |---|---|
@@ -521,7 +542,7 @@ to try next. No file name or FFmpeg message is in it; probe's `detail:
 | `media_missing` | A project's media file isn't there, or isn't beneath the roots |
 | `media_changed` | A project's media file isn't the one it was made with: its size or first MiB differ |
 | `no_space` | The output's disk hasn't room for the render, with both numbers |
-| `job_lost` | A job of a server that has ended; render again |
+| `job_lost` | A job this server didn't give (one that has ended, or another running); render again |
 | `cannot_export` | A render the project can't make: its output isn't a preset, or its trim has no frames |
 | `no_encoder` | No encoder here for the project's codec |
 | `hw_unavailable`, `hw_unsupported`, `hw_failed` | A render's hardware encoder isn't there, turned the job down, or failed, with nothing to fall back to |
@@ -660,3 +681,4 @@ name and meaning (D27). A change that breaks that is a new version.
 | Version | Date | Change |
 |---|---|---|
 | 1 | 2026-10-30 | A1: `probe`, `look`, `analyze`, `check`, `doctor` |
+| 1 | 2026-10-31 | A2, fields and tools added: `project`, `edit`, `undo`, `render`, `job`, `compare`; `project` in `look` and `check` |

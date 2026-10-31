@@ -176,6 +176,14 @@ pub fn probe(
     Ok(Probed { report, stream })
 }
 
+/// Why `probed` may not be a stitched equirect, as [`probe`] without
+/// [`Options::equirect`] refuses it: `None` when it is tagged one.
+pub fn equirect_doubt(probed: &Probed) -> Option<String> {
+    check_equirect(&probed.report, &probed.stream)
+        .err()
+        .map(|f| f.message)
+}
+
 /// `stream`, which must be a video stream, else the first video stream
 /// that isn't a cover picture. A `stream` the file hasn't is a usage
 /// error, which says what the file has; the caller names its flag.

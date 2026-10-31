@@ -66,19 +66,29 @@ pub fn run(req: Request, cx: &Ctx, jobs: &Jobs) -> Result<Value, ToolError> {
     if status.state == State::Done {
         let check = match status.check {
             Some(c) => c,
-            None => {
-                let c = super::check::run(
-                    super::check::Request {
-                        file: Some(status.output.clone()),
-                        project: None,
-                        target: status.target,
-                    },
-                    cx,
-                )
-                .unwrap_or_else(|e| json!({"error": e.to_json()["error"]}));
-                jobs.checked(n, c.clone());
-                c
-            }
+            // Only a check that ran is kept: one this call ran out of
+            // time for, or was cancelled in, runs again on the next.
+            None => match super::check::run(
+                super::check::Request {
+                    file: Some(status.output.clone()),
+                    project: None,
+                    target: status.target,
+                },
+                cx,
+            ) {
+                Ok(c) => {
+                    jobs.checked(n, c.clone());
+                    c
+                }
+                Err(e) => {
+                    let mut e = e.to_json()["error"].take();
+                    // check's argument, not job's.
+                    if let Some(o) = e.as_object_mut() {
+                        o.remove("argument");
+                    }
+                    json!({ "error": e })
+                }
+            },
         };
         v["check"] = check;
     }

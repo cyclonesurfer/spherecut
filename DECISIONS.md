@@ -1018,8 +1018,11 @@ Why the link: a check and then a rename can't refuse an existing output
 atomically, since a file can appear between them and the rename would
 replace it. `link(2)` fails if the name exists, never replaces it, and
 gives the name to a file that is already whole. `renameat2` with
-`RENAME_NOREPLACE` would do the same, but std doesn't wrap it, and core
-forbids `unsafe` (D28). Why frame doesn't write through a link without
+`RENAME_NOREPLACE` does the same in one step, and since A2 (its review)
+`persist_new` tries it first, through rustix (core forbids `unsafe`,
+D28), and links only where the filesystem refuses the flag: on one
+without either, the copy is the only way, and a server killed during it
+leaves part of the file at the output. Why frame doesn't write through a link without
 `--overwrite`: a link at the output is something there, and writing
 through it replaces the file it names, which is what `--overwrite`
 asks for.
@@ -8847,8 +8850,8 @@ running one it tells the export to stop and waits up to `CANCEL_WAIT`
 answer is `cancelled` with nothing left at the output, or the state it
 is still in.
 
-**The server's end.** When the input closes or a signal comes,
-`rpc::serve` stops the calls, then `Tools::cancel_all` (the queue
+**The server's end.** When the input closes, `rpc::serve` stops the
+calls, then `Tools::cancel_all` (the queue
 emptied, the running export told to stop, nothing more started), then
 `Tools::shutdown` against the same `EXIT_GRACE` deadline, which waits
 for the worker; a worker still running then is counted with the stuck
@@ -8857,7 +8860,9 @@ server's `SIGKILL`) leaves its locked temporary file, which the next
 export's sweep in that folder removes once its lock is free and it is
 older than `SWEEP_AGE`, cut from 60 s to 10 s here, since a killed
 server's files are known to be dead the moment their lock is free and
-an agent may render again within a minute.
+an agent may render again within a minute. `spherecut mcp` installs no
+signal handler (A2's review): `SIGINT` or `SIGTERM` ends it as a kill
+does, and its file goes the same way.
 
 **`spherecut call` refuses `render` and `job`**: a job outlives the one
 call `call` makes, and its id would be lost with the process. The
@@ -8973,7 +8978,12 @@ Measured on lavapipe in a debug build: a 1 s render at flat 16:9 1080
 through libx264 at the high quality, against its project, 55.18 to
 55.39 dB and SSIM 0.99850 to 0.99857 at eight times, above D52's flat
 floors (49 dB, 0.995); the same a frame off, 19.22 to 25.04 dB. A time
-at 1080 takes about a second there.
+at 1080 takes about a second there. What agents are told to expect is
+one rule, PLAN's least for any encoder, 40 dB and 0.98 at every time
+(A2's review): VA-API and SVT-AV1 sit a few dB under the software
+floors, and an 8-bit file rounds once more than the parity tests'
+frames, so D52's per-encoder floors would fail sound renders; well
+under 30 dB is the wrong frames.
 
 **The listing.** compare's schema is flat (`against_file` or
 `against_project`, exactly one, which the op checks) and lists in 999

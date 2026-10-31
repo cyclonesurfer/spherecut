@@ -1075,13 +1075,24 @@ fn frame_project_is_the_exports_frame_before_its_encode() {
 
 /// `look` on a project (a2-plan 9.4) shows the picture `frame --project`
 /// makes of the same frame at the same size, pixel for pixel: a tile of
-/// the output's size, at the render's frame 7, keyed view and all.
+/// the output's size, at the render's frame 7, keyed view and all. The
+/// trim starts at the clip's frame 2, so that is the clip's frame 9.
 #[test]
 fn look_on_a_project_is_frame_projects_picture() {
     let dir = TempDir::new("look-project");
     let src = clip(&dir, "grid", Pattern::Grid, 12);
     let p = project(&dir, &src);
     panning(&p);
+    let mut trimmed = file::load(&p).unwrap();
+    let clip_id = trimmed.the_clip().id;
+    trimmed
+        .apply(&[Edit::SetTrim {
+            clip: clip_id,
+            start: Some(Time::seconds(Rational::new(2, 30).unwrap())),
+            end: None,
+        }])
+        .unwrap();
+    file::save(&trimmed, &p).unwrap();
     let still = dir.join("f7.png");
     still_of(&p, &still, &["--frame", "7", "--decoder", "auto"]);
     let args = json!({"project": p, "times": ["7f"], "size": 1920, "format": "png",
@@ -1109,7 +1120,7 @@ fn look_on_a_project_is_frame_projects_picture() {
     let doc: Value = serde_json::from_str(&stdout).unwrap();
     let tile = &doc["result"]["tiles"][0];
     assert_eq!(tile["time"]["frame"], 7, "{doc}");
-    assert_eq!(tile["source"]["frame"], 7, "{doc}");
+    assert_eq!(tile["source"]["frame"], 9, "{doc}");
     let rect: Vec<u32> = tile["rect"]
         .as_array()
         .unwrap()

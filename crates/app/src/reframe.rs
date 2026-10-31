@@ -314,20 +314,21 @@ fn save_file(
             Err(e) => return Saved::Failed(locked(path, e)),
         },
     };
-    if !replace {
-        match folder.identity(&name) {
-            Ok(None) => {}
-            Ok(Some(_)) => return Saved::Exists,
-            Err(e) => return Saved::Failed(e.to_string()),
-        }
-    }
-    match folder.save(&name, project, history, expect.as_ref()) {
+    // Without replacing, nothing that turns up meanwhile is replaced
+    // either: the new file goes in only where nothing is.
+    let saved = if replace {
+        folder.save(&name, project, history, expect.as_ref())
+    } else {
+        folder.create(&name, project, history)
+    };
+    match saved {
         Ok(saved) => Saved::Done {
             identity: saved.identity,
             lock,
             history_error: saved.history_error,
         },
         Err(e @ FolderError::Changed { .. }) => Saved::Changed(e.to_string()),
+        Err(FolderError::Exists { .. }) => Saved::Exists,
         Err(e) => Saved::Failed(e.to_string()),
     }
 }

@@ -93,6 +93,24 @@ corrected to match.
     read-only with writing on; look's and check's new `project` goes in
     `docs/agents.md`'s list of schema changes; a project's name may take
     246 bytes, so its history's name fits in 255.
+15. **After the build's fresh review** (2026-10-31): a save writes the
+    history's temporary file before either rename, so a history that
+    can't be written leaves the project as it was (3.3); `create` takes
+    an untagged clip as the GUI does, warning `not_equirect`; 9.6 renders
+    a tagged synthetic equirect, the X5's proxies being dual fisheye;
+    agents get one threshold, 40 dB and 0.98 for any encoder (D59);
+    `persist_new` renames with `RENAME_NOREPLACE` before linking (D16);
+    a dry run meets the window's lock; the history file has the
+    project's permissions; a page of markers at one time goes on after
+    it (`skipped`); `job` keeps only a check that ran; a thread that
+    won't start or panics is `internal`. Known and left: an agent may
+    redo its step after the user undid it in the window (the history
+    doesn't say who moved its cursor; A3); a read-only project is
+    replaced by a save, as the GUI's has always been; compare at 8K
+    takes about 2.2 GB a time; the property test of history saves and
+    loads, an exhaustive test of `Edit::OPS`, and a planted link while
+    a render runs are still to write; `no_space` is tested through
+    `room` alone.
 
 ## 0. What A2 is for
 
@@ -742,8 +760,9 @@ With our own client over pipes, as A1's tests are:
 ### 9.6 Tier 2
 
 `mcp_render_vaapi` in hw-test: an MCP session renders a few seconds of
-one of Pat's samples on the hardware encoder, the job's check passes,
-and `compare` against the project is above the hardware floors (D52).
+a tagged equirect (amendment 15) on the hardware encoder, the job's
+check passes, and `compare` against the project is above PLAN's least
+for any encoder (40 dB, 0.98).
 odin runs it by Remote Control; huginn's waits for Pat, as before.
 
 ## 10. Limits

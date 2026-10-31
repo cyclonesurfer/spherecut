@@ -77,13 +77,18 @@ impl Folder {
 
     /// The agent trims the clip to end at `end`, "20f" for frame 20.
     fn trim(&self, end: &str) -> Result<Value, ToolError> {
+        self.trim_with(end, false)
+    }
+
+    /// [`Folder::trim`], or its dry run.
+    fn trim_with(&self, end: &str, dry_run: bool) -> Result<Value, ToolError> {
         let summary = self
             .agent("project", json!({"file": self.project}))
             .unwrap();
         let clip = summary["clips"][0]["id"].clone();
         self.agent(
             "edit",
-            json!({"file": self.project,
+            json!({"file": self.project, "dry_run": dry_run,
                    "edits": [{"op": "set_trim", "clip": clip, "end": end}]}),
         )
     }
@@ -251,6 +256,9 @@ fn the_windows_lock_holds_off_an_agents_edit_until_it_closes() {
     let e = f.trim("20f").unwrap_err();
     assert_eq!(e.code, codes::PROJECT_LOCKED, "{e:?}");
     assert!(e.message.contains("Spherecut's window"), "{e:?}");
+    // A dry run says what the edit would meet.
+    let e = f.trim_with("20f", true).unwrap_err();
+    assert_eq!(e.code, codes::PROJECT_LOCKED, "{e:?}");
     assert_eq!(bytes(&f.project), before);
     close(&mut h);
     f.trim("20f").unwrap();

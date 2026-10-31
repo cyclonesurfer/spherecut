@@ -733,7 +733,7 @@ fn spawn<T: Send + 'static>(
     std::thread::Builder::new()
         .name(name.into())
         .spawn(f)
-        .map_err(|e| ExportError::Invalid(format!("starting the export's {name} thread: {e}")))
+        .map_err(|e| ExportError::Internal(format!("starting the export's {name} thread: {e}")))
 }
 
 /// How a stage's thread ended; a panic fails `stage`.

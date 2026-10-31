@@ -71,11 +71,12 @@ pub fn run(req: Request, cx: &Ctx) -> Result<Value, ToolError> {
     } = proj::open(&req.file, !req.dry_run, cx)?;
     let mut project = loaded.project;
     stale(project.revision(), req.if_revision)?;
+    let mut doubts = Vec::new();
     let edits = req
         .edits
         .into_iter()
         .enumerate()
-        .map(|(i, v)| edit(i, v, &project, cx))
+        .map(|(i, v)| edit(i, v, &project, cx, &mut doubts))
         .collect::<Result<Vec<_>, _>>()?;
     cx.call.check()?;
     let (mut history, reset) = history_of(loaded.history);
@@ -92,7 +93,8 @@ pub fn run(req: Request, cx: &Ctx) -> Result<Value, ToolError> {
         "label": text::field(&step.label),
         "ids": made(&step.edits),
     });
-    let mut warnings = outside_trim(&before, &project);
+    let mut warnings = doubts;
+    warnings.extend(outside_trim(&before, &project));
     if reset {
         out["history_reset"] = json!(true);
     }
@@ -105,14 +107,19 @@ pub fn run(req: Request, cx: &Ctx) -> Result<Value, ToolError> {
         if saved.dropped > 0 {
             out["history_dropped"] = json!(saved.dropped);
         }
-        if let Some(e) = saved.history_error {
-            warnings.push(Warning::new(
-                "history_not_saved",
-                format!("the project was saved, its history wasn't ({e}): undo can't take it back"),
-            ));
-        }
         drop(lock);
-        out["undo"] = next_step(&Kept::Kept(history), false, project.revision());
+        out["undo"] = match saved.history_error {
+            Some(e) => {
+                warnings.push(Warning::new(
+                    "history_not_saved",
+                    format!(
+                        "the project was saved, its history wasn't ({e}): undo can't take it back"
+                    ),
+                ));
+                unsaved_history()
+            }
+            None => next_step(&Kept::Kept(history), false, project.revision()),
+        };
     }
     if !warnings.is_empty() {
         out["warnings"] = json!(warnings);
@@ -180,12 +187,24 @@ pub fn undo(req: UndoRequest, cx: &Ctx) -> Result<Value, ToolError> {
         "redo": next_step(&kept, true, revision),
     });
     if let Some(e) = saved.history_error {
+        out["undo"] = unsaved_history();
+        out["redo"] = unsaved_history();
         out["warnings"] = json!([Warning::new(
             "history_not_saved",
             format!("the project was saved, its history wasn't: {e}"),
         )]);
     }
     Ok(out)
+}
+
+/// `undo` and `redo` in a result whose history wasn't saved: the file
+/// beside the project reads as stale now.
+fn unsaved_history() -> Value {
+    json!({
+        "agent_may": false,
+        "why_not": codes::STALE_REVISION,
+        "message": "the history wasn't saved with the project, so undo can't go back from here",
+    })
 }
 
 /// Refused `stale_revision` unless the project is at `want`.
@@ -241,7 +260,13 @@ fn bad_edit(e: EditError) -> ToolError {
 
 /// Edit `i` as the agent wrote it, as an `Edit`: `add_media` probed by
 /// its path, the rest through [`wire`].
-fn edit(i: usize, v: Value, project: &Project, cx: &Ctx) -> Result<Edit, ToolError> {
+fn edit(
+    i: usize,
+    v: Value,
+    project: &Project,
+    cx: &Ctx,
+    doubts: &mut Vec<Warning>,
+) -> Result<Edit, ToolError> {
     let arg = format!("edits[{i}]");
     if v.get("op").and_then(Value::as_str) == Some("add_media") {
         let path = match v.as_object() {
@@ -256,7 +281,7 @@ fn edit(i: usize, v: Value, project: &Project, cx: &Ctx) -> Result<Edit, ToolErr
             .at(arg)
             .valid(r#"{"op": "add_media", "path": "clips/b.mp4"}"#));
         };
-        let media = probe_media(&format!("{arg}.path"), Path::new(path), cx)?;
+        let media = probe_media(&format!("{arg}.path"), Path::new(path), cx, doubts)?;
         return Ok(Edit::AddMedia { media });
     }
     wire(&arg, v, project)

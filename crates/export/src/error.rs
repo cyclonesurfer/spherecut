@@ -56,6 +56,10 @@ pub enum ExportError {
     /// isn't a preset, a missing media entry.
     #[error("{0}")]
     Invalid(String),
+    /// Spherecut's own failure, not the job's: a thread that couldn't be
+    /// started, or one that panicked.
+    #[error("{0}")]
+    Internal(String),
     /// Something is already at the output, and the job doesn't replace
     /// it (D16).
     #[error("{} already exists", .0.display())]
@@ -120,6 +124,7 @@ impl ExportError {
     pub const CODES: &'static [&'static str] = &[
         "cancelled",
         "cannot_export",
+        "internal",
         "output_exists",
         "no_encoder",
         "hw_unavailable",
@@ -143,6 +148,7 @@ impl ExportError {
         match self {
             ExportError::Cancelled => "cancelled",
             ExportError::Invalid(_) => "cannot_export",
+            ExportError::Internal(_) => "internal",
             ExportError::OutputExists(_) => "output_exists",
             ExportError::NoEncoder(_) => "no_encoder",
             ExportError::Hardware { code, .. } => code,
@@ -186,6 +192,7 @@ mod tests {
         let mut errors = vec![
             ExportError::Cancelled,
             ExportError::Invalid(String::new()),
+            ExportError::Internal(String::new()),
             ExportError::OutputExists(PathBuf::new()),
             ExportError::NoEncoder(String::new()),
             ExportError::NoSpace {

@@ -364,6 +364,60 @@ fn a_new_project_is_made_of_a_video_once() {
     );
     assert_eq!(e.argument.as_deref(), Some("create.media"), "{e:?}");
     assert!(!dir.path("b.spherecut").exists());
+    // A link to nothing, or a folder, is something there too.
+    std::os::unix::fs::symlink("nowhere.spherecut", dir.path("dangling.spherecut")).unwrap();
+    std::fs::create_dir(dir.path("folder.spherecut")).unwrap();
+    for name in ["dangling.spherecut", "folder.spherecut"] {
+        let e = refused(
+            &tools,
+            "project",
+            json!({"file": name, "create": {"media": clip}}),
+        );
+        assert_eq!(e.code, codes::OUTPUT_EXISTS, "{name}: {e:?}");
+    }
+    assert!(!dir.path("nowhere.spherecut").exists());
+}
+
+/// A 2:1 clip with no spherical metadata (stitched by software that
+/// writes none) makes a project as the GUI makes one of it, with a
+/// `not_equirect` warning; a tagged one has none.
+#[test]
+fn a_project_is_made_of_an_untagged_clip_with_a_warning() {
+    let dir = TempDir::new("create-untagged");
+    let spec = Spec {
+        name: "plain".into(),
+        width: 256,
+        height: 128,
+        frames: 10,
+        spherical: false,
+        ..Spec::default()
+    };
+    let clip = media::write(&spec, &dir.path("clips")).unwrap();
+    let tools = dir.tools();
+    let r = ok(
+        &tools,
+        "project",
+        json!({"file": "plain.spherecut", "create": {"media": clip}}),
+    );
+    assert_eq!(r["created"], true, "{r}");
+    let w = r["warnings"].as_array().unwrap();
+    assert_eq!(w.len(), 1, "{r}");
+    assert_eq!(w[0]["code"], codes::NOT_EQUIRECT, "{r}");
+    assert!(
+        w[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no spherical metadata"),
+        "{r}"
+    );
+    assert_eq!(load(&dir.path("plain.spherecut")).media()[0].path, clip);
+    let tagged = dir.clip("clips", "tagged");
+    let r = ok(
+        &tools,
+        "project",
+        json!({"file": "tagged.spherecut", "create": {"media": tagged}}),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
 }
 
 #[test]
@@ -474,6 +528,42 @@ fn a_long_view_pages_from_next_from() {
     let all = view.orientation.keys.len() + view.fov.keys.len() + view.projection.keys.len();
     assert_eq!(seen.len(), all);
     assert_eq!(view.orientation.keys.len(), 290);
+}
+
+/// More markers at one time than a page holds: the page lists some, says
+/// how many it skipped, and goes on after that time rather than from it
+/// again.
+#[test]
+fn markers_past_a_page_at_one_time_go_on_after_it() {
+    let dir = TempDir::new("markers-at-once");
+    let tools = dir.tools();
+    let p = dir.fixture("a.spherecut");
+    let mut edits: Vec<Value> = (0..230)
+        .map(|i| json!({"op": "add_marker", "clip": 4, "marker": {"at": "5", "name": format!("m{i}")}}))
+        .collect();
+    edits.push(json!({"op": "add_marker", "clip": 4, "marker": {"at": "7", "name": "later"}}));
+    ok(&tools, "edit", edit(&p, json!(edits)));
+    let m = ok(
+        &tools,
+        "project",
+        json!({"file": p, "part": "markers", "clip": 4, "from": "4"}),
+    );
+    assert_eq!(m["markers"].as_array().unwrap().len(), 200, "{m}");
+    assert_eq!(m["skipped"], 30, "{m}");
+    assert_eq!(m["more"], true, "{m}");
+    let next = ok(
+        &tools,
+        "project",
+        json!({"file": p, "part": "markers", "clip": 4, "from": m["next_from"]}),
+    );
+    let names: Vec<&str> = next["markers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["later"], "{next}");
+    assert_eq!(next["more"], false, "{next}");
 }
 
 #[test]

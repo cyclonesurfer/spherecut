@@ -46,7 +46,8 @@ over time; then look with a view or views at the moments that matter. check says
 metadata fits its picture and a target such as youtube_360; doctor what this machine decodes. Where \
 the server allows writing, make a video: project create; project part edits once for the ops; edit, \
 all or none, one undo step; undo takes back the last step only if an agent made it. Edit times are \
-the media file's; look and compare with a project take the render's (0 is its first frame). render \
+the media file's; look and compare with a project take the render's (0 is its first frame), and \
+compare's from the file's. render \
 answers at once with a job: job with wait follows it, then check its file or compare it with the \
 project. Images are 768 px long by default, up to 1568 inline. Times are strings (\"12.5\", \
 \"1:02.5\", \"30000/1001\", \"120f\" for frame 120) or [num, den], never bare numbers. Angles are \

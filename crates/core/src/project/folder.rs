@@ -28,7 +28,7 @@ use std::fs::{File, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -178,8 +178,10 @@ pub struct Saved {
     /// Oldest steps dropped to keep the history under
     /// [`MAX_HISTORY_BYTES`].
     pub dropped: usize,
-    /// Why the history couldn't be written, if it couldn't: the project
-    /// is saved, and its history reads as stale next time.
+    /// Why the history couldn't be put in place, if it couldn't (its
+    /// temporary file is written before the project is, so this is only
+    /// the last rename failing): the project is saved, and its history
+    /// reads as stale next time.
     pub history_error: Option<String>,
 }
 
@@ -412,7 +414,9 @@ impl ProjectFolder {
     /// refused if the file there isn't what was loaded or last saved
     /// ([`FolderError::Changed`]); without, a file there is replaced. The
     /// project goes first, so a history never claims a project it wasn't
-    /// written with.
+    /// written with; both are written to temporary files before either is
+    /// renamed into place, so a history that can't be written (a full
+    /// disk) leaves the project as it was.
     pub fn save(
         &self,
         name: &OsStr,
@@ -433,8 +437,8 @@ impl ProjectFolder {
             }
         };
         check()?;
-        let (tmp, identity) = self.write_temp(name, text.as_bytes())?;
-        let (side, dropped) = self.history_temp(name, project, history, &identity);
+        let (tmp, identity) = self.write_temp(name, text.as_bytes(), None)?;
+        let (side, dropped) = self.history_temp(name, project, history, &identity, &tmp)?;
         check()?;
         tmp.persist_replace().map_err(|source| FolderError::Io {
             path: self.path_of(name),
@@ -449,7 +453,8 @@ impl ProjectFolder {
     }
 
     /// Save a new project as `name`, refused if anything is there
-    /// ([`FolderError::Exists`]), and `history` beside it.
+    /// ([`FolderError::Exists`]), and `history` beside it; nothing is
+    /// there if the history can't be written.
     pub fn create(
         &self,
         name: &OsStr,
@@ -463,8 +468,8 @@ impl ProjectFolder {
         if self.identity(name)?.is_some() {
             return Err(FolderError::Exists { path });
         }
-        let (tmp, identity) = self.write_temp(name, text.as_bytes())?;
-        let (side, dropped) = self.history_temp(name, project, history, &identity);
+        let (tmp, identity) = self.write_temp(name, text.as_bytes(), None)?;
+        let (side, dropped) = self.history_temp(name, project, history, &identity, &tmp)?;
         tmp.persist_new().map_err(|source| {
             if source.kind() == io::ErrorKind::AlreadyExists {
                 FolderError::Exists { path: path.clone() }
@@ -475,7 +480,8 @@ impl ProjectFolder {
                 }
             }
         })?;
-        // persist_new links the same inode in, so the identity holds.
+        // persist_new renames or links the same inode in, so the identity
+        // holds.
         Ok(publish_history(side, identity, dropped, &path))
     }
 
@@ -561,13 +567,25 @@ impl ProjectFolder {
     /// `bytes` written to a temporary file beside `name` and flushed to
     /// disk, so that publishing it is a rename, with the identity it will
     /// have once published.
-    fn write_temp(&self, name: &OsStr, bytes: &[u8]) -> Result<(TempFile, Identity), FolderError> {
+    /// With `mode`, the file has those permission bits before anything is
+    /// written to it.
+    fn write_temp(
+        &self,
+        name: &OsStr,
+        bytes: &[u8],
+        mode: Option<u32>,
+    ) -> Result<(TempFile, Identity), FolderError> {
         let dest = self.proc.join(name);
         let io = |source| FolderError::Io {
             path: self.path_of(name),
             source,
         };
         let mut tmp = TempFile::create(&dest).map_err(io)?;
+        if let Some(mode) = mode {
+            tmp.file()
+                .set_permissions(std::fs::Permissions::from_mode(mode))
+                .map_err(io)?;
+        }
         tmp.file_mut().write_all(bytes).map_err(io)?;
         tmp.file().sync_all().map_err(io)?;
         let meta = tmp.file().metadata().map_err(io)?;
@@ -576,15 +594,17 @@ impl ProjectFolder {
 
     /// The history file for `project` saved as `identity`, written beside
     /// `name` but not yet published, with the oldest steps dropped to fit
-    /// (the newest steps are kept, or none). Its error, if it can't be
-    /// written, doesn't stop the save.
+    /// (the newest steps are kept, or none), with how many were. It has
+    /// the permission bits of `project_tmp`, the project's own temporary
+    /// file: a private project's history holds its edits too.
     fn history_temp(
         &self,
         name: &OsStr,
         project: &Project,
         history: &History,
         identity: &Identity,
-    ) -> (Result<TempFile, String>, usize) {
+        project_tmp: &TempFile,
+    ) -> Result<(TempFile, usize), FolderError> {
         let mut history = history.clone();
         // Room for the envelope around the history.
         let dropped = history.keep_bytes(MAX_HISTORY_BYTES - 256);
@@ -595,14 +615,22 @@ impl ProjectFolder {
             project_hash: format!("{:016x}", identity.hash),
             history: &history,
         };
-        let tmp = serde_json::to_string(&out)
-            .map_err(|e| e.to_string())
-            .and_then(|text| {
-                self.write_temp(&side(name, "history"), text.as_bytes())
-                    .map(|(tmp, _)| tmp)
-                    .map_err(|e| e.to_string())
-            });
-        (tmp, dropped)
+        let side = side(name, "history");
+        let io = |source| FolderError::Io {
+            path: self.path_of(&side),
+            source,
+        };
+        let text = serde_json::to_string(&out)
+            .map_err(|e| io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+        let mode = project_tmp
+            .file()
+            .metadata()
+            .map_err(io)?
+            .permissions()
+            .mode()
+            & 0o777;
+        let (tmp, _) = self.write_temp(&side, text.as_bytes(), Some(mode))?;
+        Ok((tmp, dropped))
     }
 
     fn read_history(&self, name: &OsStr, project: &Project, identity: &Identity) -> Kept {
@@ -643,13 +671,8 @@ impl ProjectFolder {
 /// `identity`: after the project, so a history never claims a project it
 /// wasn't written with, and only a crash between the two renames leaves
 /// it stale.
-fn publish_history(
-    tmp: Result<TempFile, String>,
-    identity: Identity,
-    dropped: usize,
-    project: &Path,
-) -> Saved {
-    let written = tmp.and_then(|t| t.persist_replace().map_err(|e| e.to_string()));
+fn publish_history(tmp: TempFile, identity: Identity, dropped: usize, project: &Path) -> Saved {
+    let written = tmp.persist_replace().map_err(|e| e.to_string());
     if let Err(e) = &written {
         tracing::warn!("{}'s history wasn't saved: {e}", project.display());
     }
@@ -735,6 +758,67 @@ mod tests {
         // A second create of the same name is refused.
         let e = folder.create(name, &p, &h).unwrap_err();
         assert!(matches!(e, FolderError::Exists { .. }), "{e}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The history beside a private project is as private: it holds the
+    /// project's edits too.
+    #[test]
+    fn a_private_projects_history_is_private() {
+        let dir = temp_dir();
+        let folder = ProjectFolder::open(&dir).unwrap();
+        let name = OsStr::new("a.spherecut");
+        let (mut p, mut h) = (project(), History::new());
+        let saved = folder.create(name, &p, &h).unwrap();
+        let path = dir.join("a.spherecut");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // A new history file, not one whose bits would be kept.
+        std::fs::remove_file(dir.join(".a.spherecut.history")).unwrap();
+        rename(&mut p, &mut h, "b");
+        folder.save(name, &p, &h, Some(&saved.identity)).unwrap();
+        let mode = |f: &str| std::fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("a.spherecut"), 0o600);
+        assert_eq!(mode(".a.spherecut.history"), 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A history that can't be written (here a folder where it goes; on a
+    /// full disk, the same) stops the save before the project is touched,
+    /// so the steps beside it still match it.
+    #[test]
+    fn a_history_that_cant_be_written_leaves_the_project_as_it_was() {
+        let dir = temp_dir();
+        let folder = ProjectFolder::open(&dir).unwrap();
+        let name = OsStr::new("a.spherecut");
+        let side = dir.join(".a.spherecut.history");
+        let (mut p, mut h) = (project(), History::new());
+        std::fs::create_dir(&side).unwrap();
+        let e = folder.create(name, &p, &h).unwrap_err();
+        assert!(matches!(e, FolderError::Io { .. }), "{e}");
+        assert!(!dir.join("a.spherecut").exists());
+        std::fs::remove_dir(&side).unwrap();
+
+        rename(&mut p, &mut h, "b");
+        let saved = folder.create(name, &p, &h).unwrap();
+        let before = std::fs::read(dir.join("a.spherecut")).unwrap();
+        std::fs::remove_file(&side).unwrap();
+        std::fs::create_dir(&side).unwrap();
+        rename(&mut p, &mut h, "c");
+        let e = folder
+            .save(name, &p, &h, Some(&saved.identity))
+            .unwrap_err();
+        assert!(matches!(e, FolderError::Io { .. }), "{e}");
+        assert_eq!(std::fs::read(dir.join("a.spherecut")).unwrap(), before);
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [".a.spherecut.history", "a.spherecut"],
+            "no temporary file is left"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

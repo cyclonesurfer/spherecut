@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use spherecut_core::project::Codec;
 use spherecut_export::{ExportJob, Planned};
 use spherecut_media::detect::Layout;
 use spherecut_media::probe::{
@@ -1238,7 +1239,10 @@ fn run_project(path: &Path, target: Option<Target>, cx: &Ctx) -> Result<Value, T
     let planned =
         spherecut_export::planned(&job, &prepared).map_err(|e| super::render::prepare_error(&e))?;
     cx.call.check()?;
-    let report = rendered(&planned, bits > 8 && !job.eight_bit);
+    // As the export decides it: 10-bit from a deeper source unless asked
+    // for 8, and H.264 at 8 bits whatever the source.
+    let ten_bit = bits > 8 && !job.eight_bit && planned.file.codec != Codec::H264;
+    let report = rendered(&planned, ten_bit);
     let file = File::of(&report, Path::new(RENDER_NAME));
     let (rules, tips) = rules_of(&file, target);
     let mut v = response(target, &rules, &tips);
@@ -1260,7 +1264,6 @@ fn run_project(path: &Path, target: Option<Target>, cx: &Ctx) -> Result<Value, T
 /// and depth in BT.709 4:2:0, with Spherical Video V2 and V1 for 360,
 /// and the audio the export chose, with `SA3D` on ambiX.
 fn rendered(planned: &Planned, ten_bit: bool) -> ProbeReport {
-    use spherecut_core::project::Codec;
     use spherecut_media::probe::{
         AudioInfo, ColorInfo, Container as Format, Mp4Summary, StructureCheck,
     };
