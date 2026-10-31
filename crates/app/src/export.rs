@@ -10,8 +10,9 @@
 //! looks at the output path and the render node, so that is a job too:
 //! the UI thread never waits on a file (section 7.9).
 //!
-//! While the viewer plays or a drag runs, the export is held to a frame
-//! a UI pass through its [`Pace`] (amendment 2 item 22). It renders on a
+//! While the viewer plays, the export stands aside, and while a drag
+//! runs it is held to a frame a UI pass, through its [`Pace`] (amendment
+//! 2 item 22). It renders on a
 //! GPU device of its own beside the window's (D56), so that nothing it
 //! submits or waits for shares a lock or a queue with the window's.
 
@@ -784,6 +785,7 @@ fn settings_ui(s: &mut AppState, ui: &mut egui::Ui) {
 /// Start, or the running export's progress and Cancel.
 fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
     let dir = output_dir(s);
+    let playing = s.snapshot.want_play;
     match &s.export.run {
         None => {
             let path = output_path(&dir, &s.export.name);
@@ -806,7 +808,7 @@ fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
                 Run::Starting(_) => {
                     ui.add(egui::ProgressBar::new(0.0).text("Starting…"));
                 }
-                Run::Exporting(e) => progress_ui(ui, &e.progress()),
+                Run::Exporting(e) => progress_ui(ui, &e.progress(), playing),
             }
             ui.horizontal(|ui| {
                 if ui.button("Cancel").clicked() {
@@ -824,7 +826,8 @@ fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
-fn progress_ui(ui: &mut egui::Ui, p: &Progress) {
+/// `playing`: the viewer plays, so the export stands aside (D56).
+fn progress_ui(ui: &mut egui::Ui, p: &Progress, playing: bool) {
     let (fraction, text) = match p.finishing {
         Some((done, total)) if total > 0 => (
             done as f32 / total as f32,
@@ -840,10 +843,12 @@ fn progress_ui(ui: &mut egui::Ui, p: &Progress) {
                 p.frames_done as f32 / p.frames_total as f32
             };
             let mut text = format!("{} of {} frames", p.frames_done, p.frames_total);
-            if p.fps > 0.0 {
+            if playing {
+                text.push_str(", waiting while the viewer plays");
+            } else if p.fps > 0.0 {
                 text.push_str(&format!(", {:.1} fps", p.fps));
             }
-            if let Some(eta) = p.eta {
+            if let Some(eta) = p.eta.filter(|_| !playing) {
                 text.push_str(&format!(", {} left", format_duration(eta)));
             }
             (fraction, text)

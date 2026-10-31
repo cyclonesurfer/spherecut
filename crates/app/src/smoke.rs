@@ -238,16 +238,21 @@ struct Run {
     /// Where things stood when the export started and when it ended.
     export_from: Option<(Mark, Instant)>,
     export_to: Option<Mark>,
+    /// Where things stood when the run's seconds were up and the viewer
+    /// stopped for an export still running (D56): what the run reports
+    /// is up to here.
+    stopped: Option<Mark>,
 }
 
 /// The counters, UI samples and passes at a moment of the run.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Mark {
     played_s: f64,
     counters: [u64; Counter::ALL.len()],
     ui_samples: usize,
     ui_frames: u64,
     passes: u64,
+    work: usize,
 }
 
 impl SmokeDriver {
@@ -370,6 +375,7 @@ impl SmokeDriver {
                         late: Vec::new(),
                         export_from: None,
                         export_to: None,
+                        stopped: None,
                     };
                     run.gather(perf);
                     if !s.snapshot.want_play {
@@ -403,10 +409,8 @@ impl SmokeDriver {
                     run.gather(p.perf());
                     run.settled = Some(run.mark(played, p.perf()));
                 }
-                if self.export_step(s, now, played) {
-                    return;
-                }
-                if played < self.args.seconds && !s.snapshot.at_end {
+                let over = played >= self.args.seconds || s.snapshot.at_end;
+                if self.export_step(s, now, played, over) || !over {
                     return;
                 }
                 let Phase::Playing(mut run) =
@@ -524,6 +528,7 @@ impl Phase {
     fn name(&self) -> &'static str {
         match self {
             Phase::Waiting { .. } => "waiting for the first frame",
+            Phase::Playing(run) if run.stopped.is_some() => "finishing its export",
             Phase::Playing(_) => "playing",
             Phase::Shooting { .. } => "taking the screenshot",
             Phase::Writing { .. } => "writing its document",
@@ -650,9 +655,10 @@ fn stalled(stall: Duration, last: Option<(Duration, &str)>, logic: u64) -> Strin
 impl SmokeDriver {
     /// The export `--smoke-export` asks for: started once the run has
     /// settled and a project is open, cancelled [`EXPORT_LONGEST`] past
-    /// the run's seconds, and marked where it ended. Whether the run
-    /// waits for it.
-    fn export_step(&mut self, s: &mut AppState, now: Instant, played: f64) -> bool {
+    /// the run's seconds, and marked where it ended. Once the run is
+    /// `over`, the viewer stops: the export stands aside while it plays
+    /// (D56), so it finishes after. Whether the run waits for it.
+    fn export_step(&mut self, s: &mut AppState, now: Instant, played: f64, over: bool) -> bool {
         let Some(export) = &self.args.export else {
             return false;
         };
@@ -707,9 +713,19 @@ impl SmokeDriver {
             }
             Some(_) if run.export_to.is_some() => false,
             Some((_, since)) => {
+                let since = *since;
                 let longest = EXPORT_LONGEST + Duration::from_secs_f64(self.args.seconds);
                 if s.export.running() {
-                    if now.saturating_duration_since(*since) > longest {
+                    if over
+                        && run.stopped.is_none()
+                        && let Some(p) = &s.player
+                    {
+                        run.gather(p.perf());
+                        run.stopped = Some(run.mark(played, p.perf()));
+                        p.pause();
+                        tracing::info!(played, "the smoke run stops playing for its export");
+                    }
+                    if now.saturating_duration_since(since) > longest {
                         s.export.cancel();
                     }
                     return true;
@@ -734,6 +750,7 @@ impl Run {
             ui_samples: self.samples(Stage::UiFrame).len(),
             ui_frames: self.ui_frames,
             passes: self.passes,
+            work: self.work.len(),
         }
     }
 
@@ -813,10 +830,6 @@ impl Run {
 
     fn samples(&self, st: Stage) -> &[f32] {
         &self.samples[st as usize]
-    }
-
-    fn counted(&self, perf: &spherecut_playback::PerfStats, c: Counter) -> u64 {
-        perf.count(c).saturating_sub(self.start[c as usize])
     }
 }
 
@@ -957,7 +970,14 @@ pub struct ExportReport {
     /// the longest wait.
     pub yielded: u64,
     pub longest_yield_ms: f32,
-    /// The UI and the clip's frames while it ran, as `settled` has them.
+    /// Frames of its stages that stood aside while the viewer played
+    /// (D56), and the time they stood aside in all.
+    pub aside: u64,
+    pub aside_ms: f32,
+    /// How long it ran on after the run's seconds, the viewer stopped.
+    pub after_playing_s: Option<f64>,
+    /// The UI and the clip's frames while it ran and the viewer played,
+    /// as `settled` has them.
     pub while_running: Option<Settled>,
 }
 
@@ -1159,9 +1179,11 @@ fn decoder_name(p: &DecodePath) -> (&'static str, Option<&'static str>) {
 }
 
 impl SmokeDriver {
-    /// What `run` measured, `played_s` after it started.
+    /// What `run` measured, `played_s` after it started: up to where it
+    /// stopped playing for an export, if it did.
     fn report(&self, s: &AppState, ctx: &egui::Context, run: &Run, played_s: f64) -> Report {
         let refresh_hz = self.refresh_hz;
+        let played_s = run.stopped.as_ref().map_or(played_s, |m| m.played_s);
         let snap = &s.snapshot;
         let ppp = ctx.pixels_per_point();
         let px = |v: f32| (v * ppp).round() as u32;
@@ -1193,6 +1215,23 @@ impl SmokeDriver {
             .map(|st| st.fps)
             .sum::<Option<f64>>()
             .filter(|_| !streams.is_empty());
+        let (perf, audio) = match &s.player {
+            Some(p) => (Some(p.perf().clone()), p.audio_stats()),
+            None => (None, None),
+        };
+        let end = run
+            .stopped
+            .clone()
+            .or_else(|| perf.as_ref().map(|p| run.mark(played_s, p)));
+        let counted = |c: Counter| {
+            end.as_ref()
+                .map_or(0, |m| m.counters[c as usize].saturating_sub(run.start[c as usize]))
+        };
+        let (ui_frames, passes) = end
+            .as_ref()
+            .map_or((run.ui_frames, run.passes), |m| (m.ui_frames, m.passes));
+        let ui_samples = end.as_ref().map_or(usize::MAX, |m| m.ui_samples);
+        let work = &run.work[..end.as_ref().map_or(run.work.len(), |m| m.work)];
         let mut stages = BTreeMap::new();
         for st in Stage::ALL {
             if st != Stage::AvOffset {
@@ -1202,8 +1241,9 @@ impl SmokeDriver {
                 );
             }
         }
-        let ui = Percentiles::of(run.samples(Stage::UiFrame), 0);
-        let expected = refresh_hz.map_or(run.passes as f64, |hz| hz * played_s);
+        let ui_all = run.samples(Stage::UiFrame);
+        let ui = Percentiles::of(&ui_all[..ui_samples.min(ui_all.len())], 0);
+        let expected = refresh_hz.map_or(passes as f64, |hz| hz * played_s);
         let av = {
             let signed = run.samples(Stage::AvOffset);
             let mut sorted = signed.to_vec();
@@ -1216,22 +1256,21 @@ impl SmokeDriver {
                 samples: signed.len(),
             })
         };
-        let (perf, audio) = match &s.player {
-            Some(p) => (Some(p.perf().clone()), p.audio_stats()),
-            None => (None, None),
-        };
-        let counted = |c| perf.as_ref().map_or(0, |p| run.counted(p, c));
-        let end = perf.as_ref().map(|p| run.mark(played_s, p));
         let settled = run
             .settled
             .as_ref()
             .zip(end.as_ref())
             .map(|(m, end)| run.between(m, end, refresh_hz, rates));
         let export = self.args.export.as_ref().map(|export| {
+            // While it ran and the viewer played.
+            let to = match (&run.export_to, &end) {
+                (Some(t), Some(e)) if e.played_s < t.played_s => Some(e),
+                (t, e) => t.as_ref().or(e.as_ref()),
+            };
             let while_running = run
                 .export_from
                 .as_ref()
-                .zip(run.export_to.as_ref().or(end.as_ref()))
+                .zip(to)
                 .map(|((a, _), b)| run.between(a, b, refresh_hz, rates));
             export_report(
                 export,
@@ -1240,6 +1279,10 @@ impl SmokeDriver {
                 s.export.device_used,
                 &s.export.pace,
                 while_running,
+                run.stopped
+                    .as_ref()
+                    .zip(run.export_to.as_ref())
+                    .map(|(a, b)| (b.played_s - a.played_s).max(0.0)),
             )
         });
         Report {
@@ -1266,11 +1309,11 @@ impl SmokeDriver {
             settled,
             late: run.late.clone(),
             ui: UiReport {
-                frames: run.ui_frames,
-                passes: run.passes,
+                frames: ui_frames,
+                passes,
                 expected,
                 presented: if expected > 0.0 {
-                    run.ui_frames as f64 / expected
+                    ui_frames as f64 / expected
                 } else {
                     0.0
                 },
@@ -1279,7 +1322,7 @@ impl SmokeDriver {
                 p99: ui.p99,
                 max: ui.max,
                 hitches: counted(Counter::Hitches),
-                work: Percentiles::of(&run.work, 0),
+                work: Percentiles::of(work, 0),
             },
             stages,
             av,
@@ -1329,9 +1372,11 @@ fn export_report(
     device: Option<crate::export::ExportDevice>,
     pace: &spherecut_export::Pace,
     while_running: Option<Settled>,
+    after_playing_s: Option<f64>,
 ) -> ExportReport {
     let (held, longest) = pace.waits();
     let (yielded, longest_yield) = pace.yields();
+    let (aside, aside_for) = pace.aside();
     let mut r = ExportReport {
         output: export.output.display().to_string(),
         preset: export.preset.map(|p| p.to_string()),
@@ -1350,6 +1395,9 @@ fn export_report(
         longest_hold_ms: longest.as_secs_f32() * 1e3,
         yielded,
         longest_yield_ms: longest_yield.as_secs_f32() * 1e3,
+        aside,
+        aside_ms: aside_for.as_secs_f32() * 1e3,
+        after_playing_s,
         while_running,
     };
     match (started, last) {
@@ -1481,6 +1529,7 @@ mod tests {
             late: Vec::new(),
             export_from: None,
             export_to: None,
+            stopped: None,
         };
         // Before the mark, late or not, nothing is listed.
         run.note_late(at(0), 0.0, Some(60.0));
@@ -1492,6 +1541,7 @@ mod tests {
             ui_samples: 0,
             ui_frames: 0,
             passes: 0,
+            work: 0,
         });
         // On time at 60 Hz (17 ms): not listed, and the samples before it
         // go with it.
