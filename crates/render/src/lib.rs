@@ -7,7 +7,7 @@
 //! Data flows one way: [`VideoPlanes`](spherecut_core::video::VideoPlanes)
 //! → [`Uploader`] → a [`GpuFrame`] slot → [`Projector`] → a
 //! [`LinearTarget`] → [`Encoder`] → the screen, or a readback
-//! ([`render_still`]). A decoder's picture can arrive as DMA-BUF planes
+//! ([`render_still`]), or → [`YuvConverter`] → an encoder's planes (M2). A decoder's picture can arrive as DMA-BUF planes
 //! instead ([`dmabuf`]), which the uploader copies from on the GPU, or as
 //! Vulkan images on the renderer's own device ([`vkshare`]), copied into
 //! a buffer the uploader reads.
@@ -17,6 +17,7 @@
 // DECISIONS D25).
 #![deny(unsafe_code)]
 
+pub mod blur;
 pub mod color;
 #[allow(unsafe_code)]
 pub mod dmabuf;
@@ -25,6 +26,7 @@ pub mod error;
 pub mod frame;
 pub mod gpu;
 pub mod layouts;
+pub mod output;
 pub mod plane;
 pub mod project;
 pub mod readback;
@@ -34,15 +36,21 @@ pub mod timers;
 pub mod upload;
 #[allow(unsafe_code)]
 pub mod vkshare;
+pub mod yuv;
 
+pub use blur::Blur;
 pub use color::{Placement, SourceUniform, Stereo};
 pub use encode::{Encoder, PlaceUniform};
 pub use error::RenderError;
 pub use frame::GpuFrame;
 pub use gpu::{AdapterChoice, Gpu, GpuCaps};
+pub use output::FrameViews;
 pub use plane::{LayoutKind, PlaneFormat, PlaneShape, SlotShape};
-pub use project::{DebugMode, Filter, LinearTarget, Projector, ViewParams, ViewUniform};
-pub use still::{Depth, Image, Pixels, StillOptions, StillRenderer, render_still};
+pub use project::{
+    DebugMode, Filter, Framing, LinearTarget, OutKind, Projector, ViewParams, ViewUniform,
+};
+pub use still::{Depth, Image, Pixels, StillOptions, StillRenderer, YuvImage, render_still};
 pub use timers::{GpuTimers, TimerSpan};
 pub use upload::{IngestUniform, UploadPath, UploadStats, Uploader};
 pub use wgpu;
+pub use yuv::{YuvConverter, YuvLayout, YuvShape};

@@ -47,10 +47,10 @@ pub struct Options {
 }
 
 /// The world direction through point `(x, y)` of a `size` view, in
-/// pixels from the top-left corner (a pixel's centre is at i + 0.5).
+/// pixels from the top-left corner (a pixel's centre is at i + 0.5):
+/// [`ViewParams::dir`].
 pub fn sphere_dir(view: &ViewParams, size: (u32, u32), x: f64, y: f64) -> DVec3 {
-    let p = pixel::to_lens(size, x, y);
-    (view.orientation * view.lens.unproject(p)).normalize()
+    view.dir(size, x, y)
 }
 
 /// Pixel `(i, j)`'s footprint in sphere uv: how uv changes across one
@@ -117,6 +117,35 @@ pub fn render(
     Ok(per_pixel(size, |px| {
         source.shade(&source.footprint(view, size, px), opts.level0, linear)
     }))
+}
+
+/// `frame` through each of `views`, averaged in linear light as
+/// [`crate::Blur`] does, `size` pixels large: each view's linear target,
+/// their mean as its nearest half, then the OETF, as the encode pass
+/// computes it.
+pub fn render_blurred(
+    frame: &dyn VideoPlanes,
+    views: &[ViewParams],
+    size: (u32, u32),
+    opts: &Options,
+) -> Result<ImageF64, RenderError> {
+    let n = views.len().max(1) as f64;
+    let mut sum = vec![0.0; 3 * size.0 as usize * size.1 as usize];
+    for v in views {
+        let img = render(frame, v, size, opts)?;
+        for (s, d) in sum.iter_mut().zip(&img.data) {
+            // The target's half, back from the display value.
+            *s += srgb_eotf(*d);
+        }
+    }
+    Ok(ImageF64 {
+        width: size.0,
+        height: size.1,
+        data: sum
+            .into_iter()
+            .map(|s| srgb_oetf(round_f16(s / n).clamp(0.0, 1.0)))
+            .collect(),
+    })
 }
 
 /// What the flat pass draws (`fs_flat`, the GUI's raw view, and
@@ -193,6 +222,9 @@ struct Sampled {
     lod: [f64; 2],
     levels: [f64; 2],
     inside: bool,
+    /// What linear light is multiplied by: past a framing's frame, its
+    /// dim.
+    dim: f64,
 }
 
 impl Source {
@@ -246,7 +278,7 @@ impl Source {
     fn footprint(&self, view: &ViewParams, size: (u32, u32), (i, j): (u32, u32)) -> Sampled {
         let c = pixel::centre(i, j);
         let d = sphere_dir(view, size, c.x, c.y);
-        let theta = view.lens.theta(pixel::to_lens(size, c.x, c.y).length());
+        let theta = view.theta(size, c.x, c.y);
         let (gx, gy) = uv_footprint(view, size, i, j);
         let suv = sphere_uv(d);
         let uv = suv * self.uv_scale + self.uv_offset;
@@ -259,6 +291,7 @@ impl Source {
             lod: [lod(g, self.size0), lod(gc, self.size1)],
             levels: self.levels,
             inside: theta <= PI + 1e-4 && suv.x >= u0 && suv.y >= v0 && suv.x <= u1 && suv.y <= v1,
+            dim: view.dim_at(c.x, c.y),
         }
     }
 
@@ -279,6 +312,7 @@ impl Source {
             lod: [lod(g, self.size0), lod(gc, self.size1)],
             levels: self.levels,
             inside: true,
+            dim: 1.0,
         }
     }
 
@@ -324,7 +358,7 @@ impl Source {
         }
         rgb.map(|v| {
             // The linear target is f16; the encode pass undoes the EOTF.
-            let lin = round_f16(if linear { v } else { srgb_eotf(v) });
+            let lin = round_f16((if linear { v } else { srgb_eotf(v) }) * s.dim);
             srgb_oetf(lin.clamp(0.0, 1.0))
         })
     }
@@ -555,7 +589,8 @@ pub(crate) fn srgb_eotf(v: f64) -> f64 {
     }
 }
 
-pub(crate) fn srgb_oetf(l: f64) -> f64 {
+/// The sRGB OETF in f64, as the encode and YUV passes apply it in f32.
+pub fn srgb_oetf(l: f64) -> f64 {
     if l <= 0.003_130_8 {
         l * 12.92
     } else {

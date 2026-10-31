@@ -320,6 +320,47 @@ prototype as built, where it differs from section 12 (D53 records it):
   have their own Tier 1 test beside `gui_proto`. hw-test's report has a
   "Timeline prototype" section.
 
+**Amendment 4 (2026-10-31, slice M2.3's code).** Rendering for export
+as built, where it differs from section 7 and amendment 2's M2.3 items
+(D49 records it):
+
+- **Blur's mean goes back into the f16 target.** After the last view
+  is added, a fragment pass writes the sum divided by `n`, as its
+  nearest half, into the `Rgba16Float` target, and the YUV pass reads
+  the target as for any frame (section 7.4 had the YUV pass read the
+  storage buffer divided by `n`). One YUV pass and one encode pass then
+  serve every frame, and `StillRenderer::render_blurred` gives a PNG of
+  a blurred frame with no second path; the mean is rounded to a half
+  as every unblurred frame is.
+- **The view carries the output**: `ViewParams` gains `out` (`OutKind::
+  Lens` or `Equirect`; the uniform's `out_kind`) and `framing:
+  Option<Framing>` (the frame rectangle in pixels and the dim factor;
+  none is the whole target, the M1 view to the bit). `ViewParams::dir`,
+  `theta` and `pixel_of` (where a view shows a direction) serve the CPU
+  reference and blur's displacement for both kinds.
+- **`render::output::frame_views`** gives an output's size and a
+  frame's views from `ViewAnim::at` (one, or the shutter's with blur,
+  and whether it capped), for the export and the parity reference
+  alike; `StillRenderer::render_blurred` and `render_yuv` take views,
+  not one view. Item 5's `StillRenderer` gains no output enum of its
+  own: the views and size say it. `frame --project` stays in M2.5.
+- **The YUV buffer** is written a 32-bit word per invocation (4 8-bit
+  or 2 16-bit samples), so widths must be multiples of 4 and heights
+  even (`YuvShape::new` refuses others, `invalid_input`), and each
+  plane's rows are padded to 256 bytes with zeros. I420 and I010 have
+  their Cb and Cr planes at half the luma row's bytes, padded alike.
+- **Item 13's identity test** uses 8×8 blocks of constant chroma, wider
+  than the filter's 3×2 footprint, and checks chroma inside the blocks
+  against the source's codes and everywhere against the CPU's codes of
+  the render's own linear target; luma and chroma come back exact in
+  all four layouts on lavapipe, where D31 allows a code.
+- **The goldens**: `equirect_identity` is compared with the flat pass
+  of the same source (0 codes off the two edge columns, where the flat
+  pass clamps and the identity wraps), `equirect_yaw90` with the
+  identity shifted by a quarter (0 codes; the wrong way, 255), and
+  `blur_pan` measures 21 views. The old be38fa4 RX 7600 comparison
+  skips the three equirect rows, which postdate it.
+
 ## 1. Summary
 
 M2 is the first version Pat can use for real: open one 360 clip, trim

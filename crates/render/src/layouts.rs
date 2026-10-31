@@ -25,6 +25,13 @@ pub const ENCODE_WGSL: &str = concat!(
     include_str!("shaders/common.wgsl"),
     include_str!("shaders/encode.wgsl")
 );
+/// Motion blur's sum and mean.
+pub const BLUR_WGSL: &str = concat!(
+    include_str!("shaders/common.wgsl"),
+    include_str!("shaders/blur.wgsl")
+);
+/// The YUV pass, a compute pass with no use for `shaders/common.wgsl`.
+pub const YUV_WGSL: &str = include_str!("shaders/yuv.wgsl");
 
 pub(crate) fn module(device: &wgpu::Device, label: &str, source: &str) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {

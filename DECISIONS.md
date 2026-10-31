@@ -3108,6 +3108,10 @@ is the fix to try).
 *2026-10-24, M1 slice 3a. The M1 plan's D29 (sections 4.1 to 4.5);
 updates D7. Slice 3b adds the goldens (D32) and the Tier 2 tests.*
 
+*Updated by D49 (M2.3):* the projection pass also renders equirect
+output and an output frame with the lens dimmed past it, and the linear
+target feeds a YUV pass for the encoders and motion blur's mean.
+
 What:
 
 - **The device.** wgpu 30.0.1 on Vulkan only (`Gpu::instance_descriptor`).
@@ -7375,6 +7379,133 @@ the same code.
 Revisit if: M5 needs edits that move many clips at once faster than a
 clone a step allows, or A2's saved history needs more in a step.
 
+## D49. Rendering for export: the output frame, equirect output, the YUV pass and motion blur
+
+*2026-10-31, M2 slice M2.3. From `docs/design/m2-plan.md` section 7,
+its amendment 2 (items 5, 6, 13, 17, 18, 26 and 34) and amendment 4,
+which records where the code differs. Updates D31. M2.4's export and
+M2.5's `spherecut render` and `frame --project` build on it.*
+
+What, as `crates/render` does it:
+
+- **A key's FOV is the output frame's** horizontal field of view, D33's
+  `hfov` with `p.x = ±1` at the output's left and right edges, so what
+  is keyed is what is exported whatever the viewer's size. A view may
+  carry a `Framing`: a rectangle in the target's pixels that the lens
+  spans, and a dim factor for the rest of the target, where the same
+  lens goes on past the frame's edges with its linear light multiplied
+  by the factor (0.4 in the reframer, section 7.1). A view without one
+  is framed by the whole target, as in M1, and renders the same to the
+  bit. The projection uniform gains the rectangle and the factor.
+- **Equirect output**: a view's `out` is `Lens` or `Equirect`. In
+  equirect, pixel `(x, y)` of a `w × h` target is the direction at
+  longitude `(x + ½)/w · 2π − π` and latitude `π/2 − (y + ½)/h · π`
+  (D33's convention), turned by the output's orientation (`world = q ·
+  view`), with the LOD from the same central differences as the lens.
+  The clip's keys don't move an equirect output.
+- **The YUV pass** (`shaders/yuv.wgsl`, `YuvConverter`): a compute pass
+  from the linear `Rgba16Float` target to the encoder's planes in a
+  storage buffer, each invocation writing one 32-bit word. Per pixel the
+  sRGB OETF (the encode pass's curve, so an export matches the viewer),
+  then BT.709's matrix in limited range (16 to 235 and 16 to 240, ×4 at
+  10 bits); chroma 4:2:0 sited left, taps ¼ ½ ¼ about the even column
+  (clamped at the edges) on the encoded values, the two rows averaged;
+  every code rounded to the nearest, ties to even. Four layouts: NV12
+  and P010 (the code in a `u16`'s top 10 bits) for VA-API, I420 and
+  I010 (the low 10 bits) for the software encoders. Each plane's rows
+  are padded to 256 bytes with zeros. Widths must be multiples of 4 and
+  heights even (`YuvShape::new` refuses others); every preset is.
+- **Motion blur** (`blur.rs`, `shaders/blur.wgsl`): a frame averages
+  `n = clamp(⌈s / 1.5⌉, 1, 64)` views, where `s` is the largest
+  distance, in output pixels, that the frame's centre, corners or edge
+  midpoints move between the views at the shutter's two ends (180°:
+  half a frame, centred on its time). Points a view can't show are left
+  out, and equirect measures across its seam the short way. The views
+  are at the middles of `n` equal parts of the shutter. Each is
+  projected into the target and added into a storage buffer of
+  `vec4<f32>`; then the mean goes back into the target as its nearest
+  half, which the encode and YUV passes read as they read any frame. A
+  frame that would need more than 64 renders 64 and says so
+  (`FrameViews.capped`, the export's `blur.capped`).
+- **One source for a frame's views**: `render::output::frame_views`
+  gives an output's size and the views of the frame at a time, from
+  `ViewAnim::at`, with blur or without. `StillRenderer::render_blurred`
+  (an image) and `render_yuv` (the encoder's planes) take those views,
+  and so will the export, so the parity reference renders the same
+  frame the export does. `frame --project` (M2.5) and A2's `compare`
+  go through them.
+- **The filter**: the export and its parity reference sample with the
+  viewer's default, the anisotropic filter where the GPU has it and the
+  isotropic one where it doesn't, so an export looks as it did when it
+  was keyed. The goldens and the CPU reference stay isotropic, which is
+  defined to the bit.
+
+Tests: `crates/render/tests/yuv.rs` (the pass against its f64
+reference on every 8-bit code and a 10-bit ramp, in all four layouts,
+equal but where the reference lies within 0.01 codes of a tie, with
+the padding zero; the layouts hold the same codes; an equirect render
+at the identity of a source with 8×8 blocks comes back to the source's
+codes, luma everywhere and chroma inside the blocks, measured exact
+where D31 allows a code, and equals the CPU's codes of the render's own
+linear target everywhere); `render.rs` (a portrait frame in a landscape
+target against the CPU reference at 52.9 dB, the frame over the whole
+target equal to the plain view, the dimmed part the undimmed part's
+light × 0.4 within a half's step, and the control that the framed view
+is far from the plain one); the unit tests of `blur.rs` (the count and
+the cap, the times, a pan, a roll and a zoom each blur) and `output.rs`
+(the keyed view for flat, the fixed one for equirect, one view without
+blur or movement, 36 views for a 90°/s pan at 1080p, 64 and capped at
+180°/s); and the goldens (D32): `equirect_identity` (0 codes from the
+flat pass), `equirect_yaw90` (the identity's columns a quarter on, 0
+codes; the wrong way 255), `equirect_roll30`, and `blur_pan` (the grid
+panning at 360°/s at 30 fps, 21 views, against the CPU's mean of the
+same views; the frame's middle view alone is 20.3 dB from it, half the
+views fails the stored-image rule, and a still view blurred is the
+still view to the bit). Tier 2's `yuv_on_gpu_matches_reference` runs
+the pass and the round trip on each GPU, and amendment 2 item 34 has
+odin run it and the goldens on RADV before M2.3 merges. odin did on
+2026-10-31 at a271c55, and both pass (`hw-reports/odin-a271c55c5f.md`):
+the goldens are 58.87 to 59.34 dB from the CPU reference against floors
+of 49.01 to 53.98 (blessed on lavapipe at 52.02 to 56.99), the wrong-way
+yaw control 255 codes out and `blur_pan`'s half-views control at
+51.47 dB; the YUV pass equals its reference exactly in NV12, P010, I420
+and I010.
+
+Why:
+- **The frame's FOV, not the viewer's**: a FOV tied to the viewer's
+  size would export a different picture from a different window; the
+  output frame is the one thing the key and the file share.
+- **Dim, not black, past the frame**: a reframer is mostly about what
+  is just out of shot; every reframer checked shows it.
+- **The YUV pass on the GPU**: a 4K frame on the CPU is 8.3 M pixels
+  of OETF, matrix and chroma filter per frame; the GPU has the frame
+  already, and the encoders read planes.
+- **Four layouts**: VA-API's encoders take NV12 and P010, libx264,
+  libx265 and SVT-AV1 take `yuv420p` and `yuv420p10le`. Writing each
+  encoder's own layout means no swscale between the pass and the
+  encoder. 256-byte rows are wgpu's copy alignment and a multiple of
+  FFmpeg's frame alignment, so the planes copy into an `AVFrame` one
+  row at a time.
+- **Ties to even** as the encode pass rounds, so a PNG of a frame and
+  its exported codes come from one rule.
+- **Blur's mean back into the f16 target** (the plan had the YUV pass
+  read the sum divided by `n`): one YUV pass and one encode pass for
+  every frame, blurred or not, so `render_blurred` gives a PNG with no
+  second path; the cost is rounding the mean to a half, the rounding
+  every unblurred frame has.
+- **A storage buffer, not a storage texture** (amendment 2 item 18):
+  read-write `Rgba32Float` storage textures, and blending into
+  `Rgba32Float`, are adapter features; a buffer works on any Vulkan
+  device wgpu runs on.
+- **The edges, and 64** (item 17): a roll or a zoom barely moves the
+  centre but moves the edges; 64 views covers a 96-pixel smear, beyond
+  which a frame is a blur either way.
+
+Revisit if: an encoder needs 4:2:2 or 4:4:4 (M7's intermediates), the
+export goes HDR or BT.2020 (M7 replaces the OETF and the matrix), a
+preset needs a width that isn't a multiple of 4, or exports with blur
+are too slow (each view is a whole projection of the frame).
+
 ## D50. Keyframes and interpolation: Level by default, one scalar spline, Free on SO(3)
 
 *2026-10-31, M2.2. From `docs/design/m2-plan.md` section 6 and its
@@ -7528,7 +7659,16 @@ Why:
   then does its own hit testing, drag tracking and zoom handling, as it
   would for a person.
 
-Result: *pending odin's run (M2.2b).*
+Result (M2.2b, odin at a9d7028, `hw-reports/odin-a9d7028-proto.md` and
+`-proto-125.md`): every run passed. On the RX 7600 at 60 Hz, at the
+desktop's scale with egui zooms 1, 1.25 and 1.5, and with GNOME at
+125%: presented 99.8% to 100% (at most 2 late), the interval p50 16.7
+ms and p99 17.1 to 17.6 ms, each pass's work p50 0.5 to 0.6 ms and p99
+1.6 to 1.7 ms (a tenth of the period), the prototype's own building
+p99 0.3 ms; every move, trim, zoom (2 s to 963 s on screen) and pan
+landed, with up to 248 thumbnails and 82 names drawn in a pass. egui
+holds the timeline with room to spare; the check is run again at M2's
+end (M2.8).
 
 Revisit if: a run fails (D26: Pat decides before anything changes);
 the reframer's real timeline (M2.6) draws far more per clip than this

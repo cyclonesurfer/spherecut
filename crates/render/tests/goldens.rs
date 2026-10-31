@@ -70,11 +70,12 @@ use serde_json::{Map, Value, json};
 use spherecut_core::video::{
     ChromaSiting, ColorInfo, Matrix, Range, SampleBytes, Transfer, VideoPlanes,
 };
+use spherecut_render::blur;
 use spherecut_render::readback::round_f16;
 use spherecut_render::reference::{self, ImageF64};
 use spherecut_render::{
-    AdapterChoice, DebugMode, Depth, Gpu, Image, LayoutKind, Pixels, Placement, PlaneFormat,
-    SlotShape, Stereo, StillOptions, StillRenderer, ViewParams,
+    AdapterChoice, DebugMode, Depth, Gpu, Image, LayoutKind, OutKind, Pixels, Placement,
+    PlaneFormat, SlotShape, Stereo, StillOptions, StillRenderer, ViewParams,
 };
 use spherecut_sphere::LonLat;
 use spherecut_sphere::orient::Ypr;
@@ -159,7 +160,7 @@ const CONTROL_BAD_OVER: usize = 100;
 /// have it. Elsewhere both draw black.
 fn shows(v: &ViewParams, size: (u32, u32), placement: &Placement, (i, j): (u32, u32)) -> bool {
     let c = pixel::centre(i, j);
-    let theta = v.lens.theta(pixel::to_lens(size, c.x, c.y).length());
+    let theta = v.theta(size, c.x, c.y);
     let suv = reference::sphere_uv(reference::sphere_dir(v, size, c.x, c.y));
     let [u0, v0, u1, v1] = placement.cover();
     theta <= PI + 1e-4 && suv.x >= u0 && suv.y >= v0 && suv.x <= u1 && suv.y <= v1
@@ -408,6 +409,17 @@ fn proj_name(p: Projection) -> &'static str {
 fn view_about(v: &ViewParams, size: (u32, u32)) -> Value {
     let e = Ypr::from_quat(v.orientation);
     let q = v.orientation.normalize();
+    if v.out == OutKind::Equirect {
+        return json!({
+            "size": [size.0, size.1],
+            "output": "equirect",
+            "yaw_deg": num(e.yaw.to_degrees()),
+            "pitch_deg": num(e.pitch.to_degrees()),
+            "roll_deg": num(e.roll.to_degrees()),
+            "quaternion_xyzw": [q.x, q.y, q.z, q.w],
+            "filter": "isotropic",
+        });
+    }
     let mut m = json!({
         "size": [size.0, size.1],
         "projection": proj_name(v.lens.from),
@@ -1312,6 +1324,12 @@ const ROWS: &[(&str, Row)] = &[
     ("siting_left_center", siting_left_center),
     ("crop_half", crop_half),
     ("lod_heatmap", lod_heatmap),
+    // M2 plan section 7.2: equirect output.
+    ("equirect_identity", equirect_identity),
+    ("equirect_yaw90", equirect_yaw90),
+    ("equirect_roll30", equirect_roll30),
+    // Section 7.4: motion blur.
+    ("blur_pan", blur_pan),
 ];
 
 fn run_rows(run: &mut Run<'_>, only: Option<&[&str]>) {
@@ -1422,6 +1440,193 @@ fn rect_ypr(run: &mut Run<'_>) {
         rect_ypr_view(),
         RECT,
         |run, _, got| ypr_markers(run, got, RECT_YPR),
+    );
+}
+
+/// Equirect output's size: half the grid's, so a pixel is two texels
+/// each way at the identity and the LOD is 1 everywhere.
+const EQUIRECT: (u32, u32) = (512, 256);
+
+/// Most a channel of the 8-bit image may differ from the image it should
+/// equal (the identity's flat twin, or the identity's columns turned), in
+/// codes: the GPU's own `atan2` and filtering weights.
+const EQUIRECT_MAX_CODES: f64 = 2.0;
+
+/// The largest difference between two 8-bit images in codes, over the
+/// columns `cols` of each row, `b`'s columns shifted by `shift`.
+fn max_codes(a: &Image, b: &Image, cols: std::ops::Range<u32>, shift: u32) -> f64 {
+    let mut worst = 0f64;
+    for j in 0..a.height {
+        for i in cols.clone() {
+            let (x, y) = (
+                a.unit_at(i, j).unwrap(),
+                b.unit_at((i + shift) % b.width, j).unwrap(),
+            );
+            for c in 0..3 {
+                worst = worst.max(((x[c] - y[c]) * 255.0).abs());
+            }
+        }
+    }
+    worst.round()
+}
+
+fn equirect_identity(run: &mut Run<'_>) {
+    stored_grid_view(
+        run,
+        "the grid as equirect output at the identity: the source, resampled",
+        ViewParams::equirect(DQuat::IDENTITY),
+        EQUIRECT,
+        |run, s, got| {
+            // The flat pass samples the picture at the same places with
+            // the same footprint, clamped where the identity wraps: they
+            // agree off the two edge columns.
+            let flat = StillOptions {
+                flat: true,
+                ..StillOptions::default()
+            };
+            let Some(want) = run.render(
+                &s.frame,
+                &ViewParams::equirect(DQuat::IDENTITY),
+                EQUIRECT,
+                flat,
+            ) else {
+                return;
+            };
+            let m = max_codes(got, &want, 1..EQUIRECT.0 - 1, 0);
+            run.at_most("flat_max_codes", m, EQUIRECT_MAX_CODES);
+        },
+    );
+}
+
+fn equirect_yaw90(run: &mut Run<'_>) {
+    stored_grid_view(
+        run,
+        "the grid as equirect output turned 90° right: the identity's columns a quarter on",
+        ViewParams::equirect(ypr(90.0, 0.0, 0.0)),
+        EQUIRECT,
+        |run, s, got| {
+            let Some(identity) = run.render_with(
+                &s.frame,
+                &ViewParams::equirect(DQuat::IDENTITY),
+                EQUIRECT,
+                DebugMode::Off,
+            ) else {
+                return;
+            };
+            // Turned right, the output's middle looks east: column x
+            // shows what the identity shows at x + w/4.
+            let m = max_codes(got, &identity, 0..EQUIRECT.0, EQUIRECT.0 / 4);
+            run.at_most("quarter_turn_max_codes", m, EQUIRECT_MAX_CODES);
+            // Control: shifted the other way, it doesn't match.
+            let m = max_codes(got, &identity, 0..EQUIRECT.0, 3 * EQUIRECT.0 / 4);
+            run.over("control_wrong_way_max_codes", m, 50.0);
+        },
+    );
+}
+
+fn equirect_roll30(run: &mut Run<'_>) {
+    stored_grid_view(
+        run,
+        "the grid as equirect output rolled 30°",
+        ViewParams::equirect(ypr(0.0, 0.0, 30.0)),
+        EQUIRECT,
+        |run, _, got| {
+            // A roll turns about the forward axis: the red F marker's
+            // centre stays in the middle of the picture.
+            let c = got.unit_at(EQUIRECT.0 / 2, EQUIRECT.1 / 2).unwrap();
+            let red = c[0] >= 0.8 && c[1] <= 0.2 && c[2] <= 0.2;
+            run.at_least("centre_red", f64::from(u8::from(red)), 1.0);
+        },
+    );
+}
+
+/// `blur_pan`'s frame: the grid, rectilinear 90°, panning right at
+/// 360°/s, at 30 fps with a 180° shutter, the frame at 1/12 s.
+const BLUR_FRAME_S: f64 = 1.0 / 12.0;
+const BLUR_SHUTTER_S: f64 = 0.5 / 30.0;
+
+fn blur_view(t: f64) -> ViewParams {
+    ViewParams::new(
+        ypr(360.0 * t, 0.0, 0.0),
+        lens(Projection::Rectilinear, 90.0),
+    )
+}
+
+/// The frame's views over the shutter, `n` of them, or as many as the
+/// blur's rule asks for.
+fn blur_views(n: Option<u32>) -> Vec<ViewParams> {
+    let (t, open) = (BLUR_FRAME_S, BLUR_SHUTTER_S);
+    let n = n.unwrap_or_else(|| {
+        let s = blur::displacement(&blur_view(t - open / 2.0), &blur_view(t + open / 2.0), RECT);
+        blur::sample_count(s).0
+    });
+    blur::sample_times(t, open, n)
+        .into_iter()
+        .map(blur_view)
+        .collect()
+}
+
+fn blur_pan(run: &mut Run<'_>) {
+    let s = grid_nv12();
+    let views = blur_views(None);
+    let n = views.len() as u32;
+    run.at_least("samples", f64::from(n), 2.0);
+    run.at_most("samples", f64::from(n), f64::from(blur::MAX_SAMPLES));
+    let opts = StillOptions::default();
+    let blurred = |run: &mut Run<'_>, views: &[ViewParams]| match run
+        .renderer
+        .render_blurred(run.gpu, &s.frame, views, RECT, &opts)
+    {
+        Ok(img) => Some(img),
+        Err(e) => {
+            run.fail(format!("render_blurred: {e} ({})", e.code()));
+            None
+        }
+    };
+    let Some(got) = blurred(run, &views) else {
+        return;
+    };
+    match reference::render_blurred(&s.frame, &views, RECT, &reference::Options::default()) {
+        Ok(cpu) => run.cpu_check(
+            "cpu",
+            &got,
+            &cpu,
+            (&s.frame, &views[0], &Placement::default()),
+        ),
+        Err(e) => run.fail(format!("the CPU reference: {e}")),
+    }
+    // Controls: a pan blurs (the frame's middle view alone is far off);
+    // half the views is a different picture by the stored-image rule;
+    // and a still view blurred is the still view, to the bit.
+    if let Some(sharp) = run.render_with(&s.frame, &blur_view(BLUR_FRAME_S), RECT, DebugMode::Off) {
+        let d = drift(&sharp, &got).unwrap();
+        run.at_most("control_unblurred_psnr_db", d.psnr, 40.0);
+    }
+    if let Some(half) = blurred(run, &blur_views(Some(n / 2))) {
+        let d = drift(&half, &got).unwrap();
+        run.measure("control_half_samples_psnr_db", d.psnr);
+        let fails = judge(&d, false).is_err();
+        run.at_least("control_half_samples_fail", f64::from(u8::from(fails)), 1.0);
+    }
+    let still = vec![blur_view(BLUR_FRAME_S); n as usize];
+    if let (Some(a), Some(b)) = (
+        blurred(run, &still),
+        run.render_with(&s.frame, &still[0], RECT, DebugMode::Off),
+    ) {
+        run.at_least("still_identical", f64::from(u8::from(a == b)), 1.0);
+    }
+    let mut about = view_about(&views[0], RECT);
+    about["blur"] = json!({
+        "pan_deg_per_s": 360.0,
+        "frame_s": BLUR_FRAME_S,
+        "shutter_s": BLUR_SHUTTER_S,
+        "samples": n,
+    });
+    run.stored(
+        "the grid, rectilinear 90°, panning right at 360°/s, blurred over a 180° shutter at 30 fps",
+        &got,
+        &s,
+        about,
     );
 }
 
@@ -2914,6 +3119,30 @@ fn cpu_checks() -> Vec<CpuCheck> {
         check("morph_half", key, grid(), morph_half_view(), RECT, mono),
         check("crop_half", key, crop, crop_half_view(), RECT, cropped),
         check(
+            "equirect_identity",
+            key,
+            grid(),
+            ViewParams::equirect(DQuat::IDENTITY),
+            EQUIRECT,
+            mono,
+        ),
+        check(
+            "equirect_yaw90",
+            key,
+            grid(),
+            ViewParams::equirect(ypr(90.0, 0.0, 0.0)),
+            EQUIRECT,
+            mono,
+        ),
+        check(
+            "equirect_roll30",
+            key,
+            grid(),
+            ViewParams::equirect(ypr(0.0, 0.0, 30.0)),
+            EQUIRECT,
+            mono,
+        ),
+        check(
             "matrix_601_709",
             "cpu_601_psnr_db",
             grid_coded(Matrix::Bt601),
@@ -3697,8 +3926,17 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
     let mut renderer = StillRenderer::new(gpu);
     let (mut filter_miss, mut radv_miss, mut lavapipe_miss) = ([0.0f64; 4], 0.0f64, 0.0f64);
     let (mut under, mut caught, mut predictions) = (Vec::new(), Vec::new(), Vec::new());
+    // The rows added since be38fa4 have no RX 7600 number to predict from.
+    let since = ["equirect_identity", "equirect_yaw90", "equirect_roll30"];
     for c in cpu_checks() {
         let what = format!("{} {}", c.row, c.key);
+        let Some(&(_, _, rx)) = RX_7600_BE38FA4
+            .iter()
+            .find(|(r, k, _)| *r == c.row && *k == c.key)
+        else {
+            assert!(since.contains(&c.row), "{what} has no RX 7600 number");
+            continue;
+        };
         let cpu = reference::render(
             &c.frame,
             &c.view,
@@ -3726,11 +3964,6 @@ fn the_wide_views_lose_to_the_mip_stores_not_the_filter() {
             );
         }
         let old = e.render(&then(Precision::F64));
-        let rx = RX_7600_BE38FA4
-            .iter()
-            .find(|(r, k, _)| *r == c.row && *k == c.key)
-            .unwrap()
-            .2;
         let opts = StillOptions {
             placement: c.placement,
             ..StillOptions::default()
