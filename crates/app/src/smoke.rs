@@ -810,7 +810,10 @@ impl Run {
     fn note_late(&mut self, now: Instant, played_s: f64, refresh_hz: Option<f64>) {
         let last = self.last_ui.replace(now);
         let slowest = std::mem::take(&mut self.slowest);
-        let (Some(last), Some(hz), Some(_)) = (last, refresh_hz, &self.settled) else {
+        // From the first second until the viewer stopped for an export.
+        let (Some(last), Some(hz), Some(_), None) =
+            (last, refresh_hz, &self.settled, &self.stopped)
+        else {
             return;
         };
         let interval = now.saturating_duration_since(last).as_secs_f64() * 1000.0;

@@ -8607,6 +8607,28 @@ Why:
   `while_the_viewer_plays_the_stages_stand_aside_until_it_stops` and
   `a_stage_goes_when_the_export_stops_or_the_ui_stops_passing`; app's
   export kittest plays 20 steps, stops, and the export ends.
+- **odin's rerun at a177ea9 (PR #24):** the pause holds: while the
+  viewer played, every export run presented 100 % with a UI p99 of 17.0
+  to 17.9 ms, each export stood aside once (about 19 s; 9 s for the
+  blur run) and ran 1.3 to 6.3 s after the viewer stopped, and the blur
+  run passed at both scales. The two 5.7K runs still dropped exactly one
+  frame each, at both scales. Their smoke documents put it at the
+  export's start: the one slow pass in the gated time comes at 1.16 s,
+  0.15 s after the export started, with the viewer's upload taking 58 to
+  64 ms (its slowest of the run) and a decode 32 to 37 ms. The export
+  had opened its device, its decoder and the clip's first frame before
+  any stage stood aside. The other late passes listed came after the
+  viewer stopped, the window drawing at 10 Hz while the export ran
+  (the app asks for a pass a tenth of a second while nothing plays).
+- **So nothing of the export starts while the viewer plays** (M2.10e
+  too): the export's starting job stands aside before it opens the
+  export's device, and the export stands aside again before it opens the
+  decoder and before each try opens an encoder; Cancel while it waits
+  ends it without starting. The window says "Starting once the viewer
+  stops". A file already at the output is found once the export starts,
+  so "Replace it?" comes after the viewer stops. The smoke run's late
+  passes are listed up to where the viewer stopped, as its other
+  numbers are.
 
 Revisit if: Pat answers the export card otherwise (turns are on branch
 m2/share at b77e65a; letting exports off the gate is a change to

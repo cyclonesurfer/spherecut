@@ -150,6 +150,15 @@ pub(crate) fn run(
             )
         })
     };
+    // While the app's viewer plays, none of the export starts: opening the
+    // decoder and its first frame take the video engine too, and the
+    // first frames' surfaces the GPU's memory (D56).
+    if let Some(p) = &job.pace {
+        p.stand_aside(|| stop.is_shut_down());
+    }
+    if stop.is_shut_down() {
+        return Err(ExportError::Cancelled);
+    }
     let first = open()?;
     let info = first.info().clone();
     let mut dec = Some(first);
@@ -224,6 +233,10 @@ pub(crate) fn run(
         };
         let setup = setup_of(kind);
         shared.encoder(setup.name, fallback.clone());
+        // A try opens its encoder and renderer: not while the viewer plays.
+        if let Some(p) = &job.pace {
+            p.stand_aside(|| stop.is_shut_down());
+        }
         // A new generation: the stop for this try's threads alone, while
         // a cancel stops them all.
         let token = stop.next();

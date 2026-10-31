@@ -516,8 +516,13 @@ aside: none of its stages starts a frame until the viewer stops (D56),
 and the export window says it is waiting. Cancel still ends it, and a UI
 thread that stops passing for 100 ms doesn't hold it. The smoke run stops
 playing at its seconds and waits for the export, reporting up to where it
-stopped. Pat's card asks again, pause recommended; odin's rerun with it
-is next.
+stopped. Pat's card asks again, pause recommended. odin's rerun at
+a177ea9 (PR #24): the blur run passes now, and while the viewer played
+the UI presented 100 % with a p99 of about 17 ms, but each 5.7K run
+dropped one frame, 0.15 s after its export started: the export had
+opened its device and decoder before standing aside. Now nothing of
+the export starts while the viewer plays; odin's rerun with that is
+next.
 
 ## A1: the MCP server
 

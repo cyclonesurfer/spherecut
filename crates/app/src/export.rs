@@ -18,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -134,9 +135,15 @@ struct Running {
     /// The project the export was given, kept for "Replace it?".
     project: Project,
     state: Run,
-    /// Cancel asked for: an export still starting is cancelled once it
-    /// has.
-    cancelled: bool,
+    /// Cancel asked for: an export waiting to start doesn't, and one
+    /// still starting is cancelled once it has.
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Running {
+    fn cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Debug)]
@@ -155,7 +162,7 @@ impl ExportUi {
     /// leaving nothing at its output.
     pub fn cancel(&mut self) {
         if let Some(r) = &mut self.run {
-            r.cancelled = true;
+            r.cancelled.store(true, Ordering::Relaxed);
             if let Run::Exporting(e) = &r.state {
                 e.cancel();
             }
@@ -175,6 +182,7 @@ impl ExportUi {
     /// on a thread of its own.
     pub fn take_threads(&mut self) -> Vec<JoinHandle<()>> {
         if let Some(r) = self.run.take() {
+            r.cancelled.store(true, Ordering::Relaxed);
             match r.state {
                 Run::Starting(job) => self.threads.keep(job),
                 Run::Exporting(export) => {
@@ -252,14 +260,14 @@ impl AppState {
             }) {
                 Poll::Pending => None,
                 Poll::Done(Ok(export)) => {
-                    if run.cancelled {
+                    if run.cancelled() {
                         export.cancel();
                     }
                     run.state = Run::Exporting(Box::new(export));
                     None
                 }
                 // Cancelled before it found the file: nothing to ask.
-                Poll::Done(Err(ExportError::OutputExists(_))) if run.cancelled => {
+                Poll::Done(Err(ExportError::OutputExists(_))) if run.cancelled() => {
                     Some(Err(ExportError::Cancelled))
                 }
                 Poll::Done(Err(ExportError::OutputExists(path))) => {
@@ -354,17 +362,29 @@ impl AppState {
         job.overwrite = overwrite;
         job.pace = Some(self.export.pace.clone());
         let device = self.export.device;
+        let pace = self.export.pace.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
         tracing::info!(output = %output.display(), device = device.name(), "exporting");
-        let starting = Job::spawn("export-start", move || {
-            let (gpu, used) = export_device(window, device);
-            job.gpu = gpu;
-            (Export::start(job), used)
+        let starting = Job::spawn("export-start", {
+            let cancelled = cancelled.clone();
+            move || {
+                // While the viewer plays, the export doesn't start: its
+                // device's opening and its first allocations stalled the
+                // viewer's uploads 60 ms on odin (D56).
+                pace.stand_aside(|| cancelled.load(Ordering::Relaxed));
+                if cancelled.load(Ordering::Relaxed) {
+                    return (Err(ExportError::Cancelled), device);
+                }
+                let (gpu, used) = export_device(window, device);
+                job.gpu = gpu;
+                (Export::start(job), used)
+            }
         });
         self.export.run = Some(Running {
             output,
             project,
             state: Run::Starting(starting),
-            cancelled: false,
+            cancelled,
         });
     }
 }
@@ -806,7 +826,11 @@ fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
             ui.label(format!("Exporting to {}", output.display()));
             match &r.state {
                 Run::Starting(_) => {
-                    ui.add(egui::ProgressBar::new(0.0).text("Starting…"));
+                    ui.add(egui::ProgressBar::new(0.0).text(if playing {
+                        "Starting once the viewer stops"
+                    } else {
+                        "Starting…"
+                    }));
                 }
                 Run::Exporting(e) => progress_ui(ui, &e.progress(), playing),
             }
