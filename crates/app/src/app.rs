@@ -401,7 +401,7 @@ impl SpherecutApp {
         });
         s.export
             .pace
-            .pass(s.export_held(), s.viewer_lead(), s.viewer_frame());
+            .pass(s.export_held(), s.viewer_lead(), s.snapshot.want_play);
         s.request_repaint(ctx);
         s.logic_ran = true;
         if let Some(smoke) = &mut self.smoke {

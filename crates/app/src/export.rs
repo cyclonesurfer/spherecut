@@ -10,8 +10,9 @@
 //! looks at the output path and the render node, so that is a job too:
 //! the UI thread never waits on a file (section 7.9).
 //!
-//! While the viewer plays or a drag runs, the export is held to a frame
-//! a UI pass through its [`Pace`] (amendment 2 item 22). It renders on a
+//! While the viewer plays, the export stands aside, and while a drag
+//! runs it is held to a frame a UI pass, through its [`Pace`] (amendment
+//! 2 item 22). It renders on a
 //! GPU device of its own beside the window's (D56), so that nothing it
 //! submits or waits for shares a lock or a queue with the window's.
 
@@ -217,13 +218,6 @@ impl AppState {
         lead(self.snapshot.want_play, &self.snapshot.slots)
     }
 
-    /// While the viewer plays, how long its clip's frames are, so that
-    /// the export's decode and encode take turns with its decodes (D56):
-    /// the first stream's rate, or its average when it varies.
-    pub(crate) fn viewer_frame(&self) -> Option<Duration> {
-        frame_of(self.snapshot.want_play, self.stream0().map(|i| i.timing))
-    }
-
     /// Whether the export is held to a frame a UI pass: the viewer
     /// plays, or a drag runs.
     pub(crate) fn export_held(&self) -> bool {
@@ -378,18 +372,6 @@ impl AppState {
 /// [`AppState::viewer_lead`], from what the player says.
 fn lead(playing: bool, slots: &spherecut_playback::slots::SlotStats) -> bool {
     !playing || slots.ready >= LEAD_FRAMES.min(slots.active.saturating_sub(2)).max(1)
-}
-
-/// [`AppState::viewer_frame`], from whether the clip plays and its
-/// stream's timing.
-fn frame_of(playing: bool, timing: Option<spherecut_media::backend::Timing>) -> Option<Duration> {
-    use spherecut_media::backend::Timing;
-    let rate = match timing? {
-        Timing::Constant(r) | Timing::Variable { average: Some(r) } => r,
-        Timing::Variable { average: None } => return None,
-    };
-    let secs = 1.0 / rate.to_f64();
-    (playing && secs.is_finite() && secs > 0.0).then(|| Duration::from_secs_f64(secs))
 }
 
 /// The device an export renders on: a second one on the window's adapter,
@@ -803,6 +785,7 @@ fn settings_ui(s: &mut AppState, ui: &mut egui::Ui) {
 /// Start, or the running export's progress and Cancel.
 fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
     let dir = output_dir(s);
+    let playing = s.snapshot.want_play;
     match &s.export.run {
         None => {
             let path = output_path(&dir, &s.export.name);
@@ -825,7 +808,7 @@ fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
                 Run::Starting(_) => {
                     ui.add(egui::ProgressBar::new(0.0).text("Starting…"));
                 }
-                Run::Exporting(e) => progress_ui(ui, &e.progress()),
+                Run::Exporting(e) => progress_ui(ui, &e.progress(), playing),
             }
             ui.horizontal(|ui| {
                 if ui.button("Cancel").clicked() {
@@ -843,7 +826,8 @@ fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
-fn progress_ui(ui: &mut egui::Ui, p: &Progress) {
+/// `playing`: the viewer plays, so the export stands aside (D56).
+fn progress_ui(ui: &mut egui::Ui, p: &Progress, playing: bool) {
     let (fraction, text) = match p.finishing {
         Some((done, total)) if total > 0 => (
             done as f32 / total as f32,
@@ -859,10 +843,12 @@ fn progress_ui(ui: &mut egui::Ui, p: &Progress) {
                 p.frames_done as f32 / p.frames_total as f32
             };
             let mut text = format!("{} of {} frames", p.frames_done, p.frames_total);
-            if p.fps > 0.0 {
+            if playing {
+                text.push_str(", waiting while the viewer plays");
+            } else if p.fps > 0.0 {
                 text.push_str(&format!(", {:.1} fps", p.fps));
             }
-            if let Some(eta) = p.eta {
+            if let Some(eta) = p.eta.filter(|_| !playing) {
                 text.push_str(&format!(", {} left", format_duration(eta)));
             }
             (fraction, text)
@@ -928,25 +914,6 @@ mod tests {
         // Three slots hold one ready beside the shown frame and a held one.
         assert!(lead(true, &slots(3, 1)));
         assert!(!lead(true, &slots(3, 0)));
-    }
-
-    #[test]
-    fn the_export_takes_turns_only_while_the_viewer_plays_a_known_rate() {
-        use spherecut_core::time::FrameRate;
-        use spherecut_media::backend::Timing;
-        let thirty = Some(Timing::Constant(FrameRate::FPS_30));
-        let frame = frame_of(true, thirty).unwrap();
-        assert!((frame.as_secs_f64() - 1.0 / 30.0).abs() < 1e-9, "{frame:?}");
-        assert_eq!(frame_of(false, thirty), None);
-        assert_eq!(frame_of(true, None), None);
-        let vfr = Some(Timing::Variable {
-            average: Some(FrameRate::FPS_25),
-        });
-        assert_eq!(frame_of(true, vfr), Some(Duration::from_millis(40)));
-        assert_eq!(
-            frame_of(true, Some(Timing::Variable { average: None })),
-            None
-        );
     }
 
     #[test]

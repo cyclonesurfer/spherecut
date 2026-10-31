@@ -8575,11 +8575,44 @@ Why:
   says so. Pat was asked the same day whether an export should slow
   down, pause, or be let off the gate while the viewer plays; this is
   the first, built while the answer comes.
+- **odin's rerun at b77e65a (PR #23):** turns helped and weren't
+  enough. The 1080p export of run 0 took 118 turns (6.5 s waited) and
+  4.3 s instead of 1.7, and the UI's p99 while it ran fell from 65 to
+  83 ms to 33.5 ms, but the run still dropped 1 frame (3 at 125%); run
+  1's 8K export took 1 turn and dropped 1 frame (p99 34.7 ms, 50.2 at
+  125%); the blur run failed only its p99 (29.8 ms) at the usual scale
+  and passed at 125%. gui_smoke failed 3 of 5 runs at the usual scale
+  and 2 of 5 at 125%. In the gaps around late passes the viewer's
+  decodes took 38 to 84 ms and its uploads 36 to 68 ms: a share of the
+  engine still leaves the viewer's decodes waiting behind the export's.
+  Pat's card was withdrawn and asked again with pause recommended.
+- **M2.10e, the export stands aside while the viewer plays (branch
+  m2/pause):** each UI pass says whether the viewer plays, and while it
+  does each of the export's stages (the decode's first seek and each
+  frame, each render, each encode) starts nothing until it stops
+  (`Pace::stand_aside`). The stage looks at the export's stop at each of
+  the UI's passes, so Cancel still ends it at once, and a UI that hasn't
+  passed for 100 ms (`AT_MOST`: a stuck UI thread) doesn't hold it, so
+  the export can't be stopped by the window. A frame a stage has started
+  when play begins finishes. While a drag runs the export keeps to a
+  frame a UI pass and the viewer's lead as before; while nothing moves
+  it runs as fast as it can. The export window's progress says "waiting
+  while the viewer plays" and shows no time left. The turns of M2.10d
+  are gone. The smoke run, at its seconds with an export still running,
+  stops the viewer, lets the export finish, and reports up to where it
+  stopped: `played_s`, the gates' frames and the export's
+  `while_running` end there; the export's part counts the frames that
+  stood aside (`aside`, `aside_ms`) and how long it ran after
+  (`after_playing_s`). Tests: export's
+  `while_the_viewer_plays_the_stages_stand_aside_until_it_stops` and
+  `a_stage_goes_when_the_export_stops_or_the_ui_stops_passing`; app's
+  export kittest plays 20 steps, stops, and the export ends.
 
-Revisit if: odin's rerun with turns still drops frames while 5.7K plays
-(then the export's 8K encodes, each a long turn on the engine, are next:
-a smaller share, more slots while an export runs, or Pat's other
-answers); wgpu-core stops holding the lock
+Revisit if: Pat answers the export card otherwise (turns are on branch
+m2/share at b77e65a; letting exports off the gate is a change to
+gui_smoke's judge alone); odin's rerun with the pause still drops frames
+while 5.7K plays (then it is the export's start, its decoder, encoder
+and device opening beside the viewer); wgpu-core stops holding the lock
 through `maintain`'s wait, or fixes the timed wait's race, which would
 let a plain wait back; wgpu gains a second queue.
 

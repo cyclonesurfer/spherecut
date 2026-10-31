@@ -506,7 +506,18 @@ turns with it, each starting a frame at most once for every two the
 viewer shows (`pace::SHARE`, D56), so the export decodes a 30 fps clip
 at 15 frames a second while it plays and at full speed otherwise. Pat
 was asked whether an export should slow down (this), pause, or be let
-off the gate while the viewer plays. odin's rerun with it is next.
+off the gate while the viewer plays. odin's rerun at b77e65a (PR #23)
+cut the UI's p99 while the export ran to about 33 ms, but the 5.7K runs
+still dropped 1 to 3 frames: gui_smoke failed 3 of 5 runs (2 of 5 at
+125%).
+
+M2.10e (branch `m2/pause`): while the viewer plays, the export stands
+aside: none of its stages starts a frame until the viewer stops (D56),
+and the export window says it is waiting. Cancel still ends it, and a UI
+thread that stops passing for 100 ms doesn't hold it. The smoke run stops
+playing at its seconds and waits for the export, reporting up to where it
+stopped. Pat's card asks again, pause recommended; odin's rerun with it
+is next.
 
 ## A1: the MCP server
 

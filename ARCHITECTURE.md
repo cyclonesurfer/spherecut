@@ -751,22 +751,23 @@ pass's bytes; the `Report` holds what was made and each check passed.
 
 The app's export (M2.7, D55) renders on the viewer's device and queue.
 Its `ExportJob` carries a `Pace`, shared with the UI: each UI pass says
-whether the UI is busy (the viewer plays, a drag runs), and while it
-is, the render stage waits before each frame for the UI's next pass,
+whether the viewer plays and whether a drag runs. While the viewer
+plays, each of the export's stages (decode, render, encode) starts no
+frame until it stops (`Pace::stand_aside`, M2.10e), Cancel and a UI
+that stops passing for 100 ms aside. While a drag runs, the render
+stage waits before each frame for the UI's next pass,
 or 100 ms at most, and its renderer keeps its jobs short
 (`StillRenderer::share`, M2.10, D56): one submission in flight, a view
 larger than 4K in bands of 4K's pixels, the readback in copies of 16
 MiB. It renders on a GPU device of its own on the window's adapter
 (`Gpu::beside`), so it shares no wgpu lock, queue or submit gate with
 the window, only the GPU; the window's device is the fallback
-(`SPHERECUT_EXPORT_DEVICE=window` asks for it). While the viewer plays,
-each UI pass also says whether the viewer has two frames ready beyond
-the one it shows, and until it has, the export's decode, render and
-encode stages each wait before a frame's work (`Pace::yield_to_viewer`,
-100 ms at most), so the viewer's decodes go first on the GPU's video
-engine; and the decode and encode take turns with the viewer
-(`Pace::take_turn`), each starting a frame at most once for every two
-the viewer shows. No thread but the UI's
+(`SPHERECUT_EXPORT_DEVICE=window` asks for it). Each UI pass also says
+whether the viewer has two frames ready beyond the one it shows, and
+while a drag runs and it hasn't, the export's decode, render and encode
+stages each wait before a frame's work (`Pace::yield_to_viewer`, 100 ms
+at most), so the viewer's decodes go first on the GPU's video engine.
+No thread but the UI's
 waits for the GPU through wgpu's `Device::poll` wait, which holds the
 lock a present takes: they use `Gpu::wait_for_submitted`, which polls
 without waiting.

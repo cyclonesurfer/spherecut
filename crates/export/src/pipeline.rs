@@ -833,6 +833,10 @@ fn decode_frames(
     let Ok(start) = plan.source_time(0) else {
         return fail(0, "the trim's start doesn't fit".into());
     };
+    // An exact seek decodes from the keyframe before: the viewer's, too.
+    if let Some(p) = pace {
+        p.stand_aside(|| token.is_stopped());
+    }
     let sought = Busy::time(&busy.decode, || dec.seek(start, SeekMode::Exact, &token));
     let mut cur = match sought {
         Ok(SeekOutcome::Stopped) => return Ended::Stopped,
@@ -857,7 +861,6 @@ fn decode_frames(
     seen.saw(&cur);
     let mut ahead: Option<Arc<VideoFrame>> = None;
     let mut ended = false;
-    let mut turn = None;
     for n in 0..plan.count() {
         if token.is_stopped() {
             return Ended::Stopped;
@@ -872,8 +875,8 @@ fn decode_frames(
                 None => {
                     // The viewer's decodes go first on the video engine.
                     if let Some(p) = pace {
+                        p.stand_aside(|| token.is_stopped());
                         p.yield_to_viewer();
-                        p.take_turn(&mut turn);
                     }
                     match Busy::time(&busy.decode, || dec.next_frame(&token)) {
                         Ok(NextFrame::Frame(f)) => {
@@ -965,9 +968,11 @@ fn render(
         if token.is_stopped() {
             return Ended::Stopped;
         }
-        // While the app's viewer plays, a frame a UI pass, its work in
-        // small submissions one after another (odin's M2 run).
+        // While the app's viewer plays, nothing; while a drag runs, a
+        // frame a UI pass, its work in small submissions one after
+        // another (odin's M2 run).
         if let Some(p) = &look.pace {
+            p.stand_aside(|| token.is_stopped());
             p.wait(&mut pass);
             renderer.share(p.held());
         }
@@ -1029,7 +1034,8 @@ struct Encode<'a> {
     /// This try's.
     token: &'a StopToken,
     busy: &'a Busy,
-    /// The app's: each frame's encode waits for the viewer's lead.
+    /// The app's: each frame's encode stands aside while the viewer
+    /// plays, and waits for its lead while a drag runs.
     pace: Option<&'a Pace>,
 }
 
@@ -1116,7 +1122,6 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
     };
     let mut capped = 0;
     let mut next = 0;
-    let mut turn = None;
     while next < plan.count() {
         if stop.is_shut_down() {
             return Err(ExportError::Cancelled.into());
@@ -1128,8 +1133,8 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
             Err(RecvTimeoutError::Disconnected) => break,
         };
         if let Some(p) = pace {
+            p.stand_aside(|| stop.is_shut_down());
             p.yield_to_viewer();
-            p.take_turn(&mut turn);
         }
         let at = plan.sequence_time(r.n).ok();
         if r.n != next {
