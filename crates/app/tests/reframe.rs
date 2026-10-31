@@ -160,6 +160,21 @@ fn key_at_20(h: &mut H) {
     assert!(apart_deg(v.orientation, turn(60.0, 0.0)) < 1e-6);
 }
 
+/// Step until the button `label` stays where it is: a window shows a
+/// frame after it opens, and moves again when its content widens it.
+fn until_still(h: &mut H, label: &str) {
+    let mut last = None;
+    for _ in 0..20 {
+        step(h);
+        let at = h.query_by_label(label).map(|n| n.rect());
+        if at.is_some() && at == last {
+            return;
+        }
+        last = at;
+    }
+    panic!("{label} never settled: {last:?}");
+}
+
 /// The strip's key on `lane` at `frame`.
 fn key_label(lane: Lane, frame: i64) -> String {
     format!("{} key at {}", lane.label(), format_time(t(frame)))
@@ -525,7 +540,10 @@ fn the_strip_selects_moves_and_eases_keys_and_drags_the_trim() {
 fn a_project_saves_reopens_and_asks_before_it_is_let_go() {
     let gpu = common::gpu();
     let (_rs, mut h) = start(&gpu);
-    let path = common::tmp().join("reframe-save.spherecut");
+    // A long folder: the Save as window widens once it shows it.
+    let dir = common::tmp().join("a-folder-with-a-name-long-enough-to-widen-the-save-as-window");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("reframe-save.spherecut");
     let _ = std::fs::remove_file(&path);
     assert!(h.state_mut().state.close_requested(), "nothing to save yet");
     key_at_20(&mut h);
@@ -544,9 +562,9 @@ fn a_project_saves_reopens_and_asks_before_it_is_let_go() {
         .save_as
         .as_mut()
         .expect("Save as");
-    save_as.dir = common::tmp().to_path_buf();
+    save_as.dir = dir.clone();
     save_as.name = "reframe-save.spherecut".into();
-    step(&mut h);
+    until_still(&mut h, "Save");
     h.get_by_label("Save").click();
     step(&mut h);
     until(&mut h, "the save", |a| {
@@ -562,9 +580,7 @@ fn a_project_saves_reopens_and_asks_before_it_is_let_go() {
     step(&mut h);
     assert!(doc(&h).dirty());
     h.state_mut().state.open(path.clone());
-    // A window's first frame only sizes it.
-    step(&mut h);
-    step(&mut h);
+    until_still(&mut h, "Don't save");
     assert_eq!(
         h.state().state.reframe.confirm,
         Some(Pending::Open(path.clone()))
@@ -586,9 +602,7 @@ fn a_project_saves_reopens_and_asks_before_it_is_let_go() {
     h.key_press(Key::M);
     step(&mut h);
     h.state_mut().state.open(path.clone());
-    // A window's first frame only sizes it.
-    step(&mut h);
-    step(&mut h);
+    until_still(&mut h, "Save");
     h.get_by_label("Save").click();
     step(&mut h);
     until(&mut h, "the save, then the load", |a| {
@@ -606,8 +620,7 @@ fn a_project_saves_reopens_and_asks_before_it_is_let_go() {
     step(&mut h);
     assert!(!h.state_mut().state.close_requested());
     assert_eq!(h.state().state.reframe.confirm, Some(Pending::Quit));
-    step(&mut h);
-    step(&mut h);
+    until_still(&mut h, "Quit without saving");
     h.get_by_label("Quit without saving").click();
     step(&mut h);
     assert!(h.state_mut().state.close_requested());
