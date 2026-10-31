@@ -1,18 +1,21 @@
 //! The open project (M2 plan section 10; amendment 2 items 20, 39 and
 //! 53): the project and its undo history, the file it came from or was
-//! saved to, the keys selected, and the edits the reframer's gestures
-//! make of them. No egui here: the timeline strip and the viewer call it,
-//! and its tests need no window.
+//! saved to, the keys selected, a drag's preview, and the edits the
+//! reframer's gestures make of them. No egui here: the timeline strip,
+//! the curves, the Inspector and the viewer call it, and its tests need
+//! no window.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use glam::DQuat;
 use spherecut_core::project::{
-    AnyKey, AnyKeys, AnyValue, Clip, Ease, Edit, EditError, History, InitialView, Key, KeyId,
-    KeyTrack, Marker, MarkerId, Media, Orient, Orientation, Origin, Problem, Project, View,
+    AimDir, AnyKey, AnyKeys, AnyValue, Clip, Ease, Edit, EditError, ExportSettings, History,
+    InitialView, Key, KeyId, KeyTrack, Marker, MarkerId, Media, Orient, Orientation, Origin,
+    Output, Problem, Project, Target, TargetId, View, ViewAnim,
 };
 use spherecut_core::{FrameRate, Rational, Rounding, Time};
+use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, LensShape, MIN_HFOV_DEG, Projection};
 
 /// The widest field of view a key holds, in degrees (D50: the renderer
@@ -125,6 +128,12 @@ pub struct Doc {
     saved: Option<u64>,
     /// The keys selected, one or more, in one lane or across lanes.
     pub selection: BTreeSet<KeyId>,
+    /// The clip's view with a drag's change in it, shown until the drag
+    /// ends (amendment 2 item 39): the project changes, through `apply`
+    /// and its checks, only then. Any edit, undo or redo drops it.
+    pub preview: Option<ViewAnim>,
+    /// A 360 output's front being changed, shown until the change ends.
+    pub front_preview: Option<Orientation>,
 }
 
 impl Doc {
@@ -137,6 +146,8 @@ impl Doc {
             path,
             saved,
             selection: BTreeSet::new(),
+            preview: None,
+            front_preview: None,
         }
     }
 
@@ -216,8 +227,15 @@ impl Doc {
         }
         self.history
             .record(&mut self.project, label, Origin::User, edits)?;
+        self.end_preview();
         self.prune_selection();
         Ok(())
+    }
+
+    /// The drag's previews dropped: the project's own view is shown.
+    pub fn end_preview(&mut self) {
+        self.preview = None;
+        self.front_preview = None;
     }
 
     /// Undo, giving the step's label.
@@ -226,6 +244,7 @@ impl Doc {
             .history
             .undo(&mut self.project)?
             .map(|s| s.label.clone());
+        self.end_preview();
         self.prune_selection();
         Ok(label)
     }
@@ -236,6 +255,7 @@ impl Doc {
             .history
             .redo(&mut self.project)?
             .map(|s| s.label.clone());
+        self.end_preview();
         self.prune_selection();
         Ok(label)
     }
@@ -307,9 +327,275 @@ impl Doc {
         Lane::ALL.iter().any(|&l| self.key_at(l, t).is_some())
     }
 
-    /// The keyed view at `t`, source time.
+    /// The clip's view as shown: a drag's preview, else the project's.
+    pub fn anim(&self) -> &ViewAnim {
+        self.preview.as_ref().unwrap_or(&self.clip().view)
+    }
+
+    /// The keyed view at `t`, source time, as shown.
     pub fn view_at(&self, t: Time) -> View {
-        self.clip().view.at(t.to_secs_f64(), self.project.targets())
+        self.anim().at(t.to_secs_f64(), self.project.targets())
+    }
+
+    /// The sequence's output as shown: a 360 output with its front
+    /// being changed has the change's.
+    pub fn output(&self) -> Output {
+        match (self.project.the_sequence().output, self.front_preview) {
+            (Output::Equirect { width, .. }, Some(orientation)) => {
+                Output::Equirect { width, orientation }
+            }
+            (out, _) => out,
+        }
+    }
+
+    /// The key with `id` on whichever lane has it.
+    pub fn key(&self, id: KeyId) -> Option<KeyMark> {
+        self.keys().into_iter().find(|k| k.id == id)
+    }
+
+    pub fn orientation_key(&self, id: KeyId) -> Option<&Key<Orient>> {
+        self.clip().view.orientation.key(id)
+    }
+
+    pub fn fov_key(&self, id: KeyId) -> Option<&Key<f64>> {
+        self.clip().view.fov.key(id)
+    }
+
+    pub fn projection_key(&self, id: KeyId) -> Option<&Key<LensShape>> {
+        self.clip().view.projection.key(id)
+    }
+
+    /// The clip's view with `key`'s value set to `value`, and the
+    /// orientation keys in `spins` with those spins: a drag's preview.
+    /// A value of the wrong lane changes nothing.
+    pub fn with_value(&self, key: KeyId, value: &AnyValue, spins: &[(KeyId, i8)]) -> ViewAnim {
+        let mut a = self.clip().view.clone();
+        match *value {
+            AnyValue::Orientation(o) => {
+                if let Some(k) = a.orientation.keys.iter_mut().find(|k| k.id == key) {
+                    k.value = o;
+                }
+            }
+            AnyValue::Fov(f) => {
+                if let Some(k) = a.fov.keys.iter_mut().find(|k| k.id == key) {
+                    k.value = f;
+                }
+            }
+            AnyValue::Projection(p) => {
+                if let Some(k) = a.projection.keys.iter_mut().find(|k| k.id == key) {
+                    k.value = p;
+                }
+            }
+        }
+        for &(id, spin) in spins {
+            if let Some(k) = a.orientation.keys.iter_mut().find(|k| k.id == id) {
+                k.spin = spin;
+            }
+        }
+        a
+    }
+
+    /// `key`'s value set to `value`, and the spins in `spins` set where
+    /// they differ from the project's (section 6.4's sticky spin): one
+    /// step's edits.
+    pub fn set_value(&self, key: KeyId, value: AnyValue, spins: &[(KeyId, i8)]) -> Vec<Edit> {
+        let mut edits = vec![Edit::SetKey {
+            key,
+            at: None,
+            value: Some(value),
+            ease: None,
+            spin: None,
+        }];
+        for &(id, spin) in spins {
+            let now = self.orientation_key(id).map(|k| k.spin);
+            if now.is_some_and(|s| s != spin) {
+                match edits
+                    .iter_mut()
+                    .find(|e| matches!(e, Edit::SetKey { key, .. } if *key == id))
+                {
+                    Some(Edit::SetKey { spin: s, .. }) => *s = Some(spin),
+                    _ => edits.push(Edit::SetKey {
+                        key: id,
+                        at: None,
+                        value: None,
+                        ease: None,
+                        spin: Some(spin),
+                    }),
+                }
+            }
+        }
+        edits
+    }
+
+    /// `key`'s spin: extra whole turns from it to the next key.
+    pub fn set_spin(&self, key: KeyId, spin: i8) -> Vec<Edit> {
+        match self.orientation_key(key) {
+            Some(k) if k.spin != spin => vec![Edit::SetKey {
+                key,
+                at: None,
+                value: None,
+                ease: None,
+                spin: Some(spin),
+            }],
+            _ => Vec::new(),
+        }
+    }
+
+    /// The selected key moved to `at` (snapped to a frame by the caller).
+    pub fn set_time(&self, key: KeyId, at: Time) -> Vec<Edit> {
+        match self.key(key) {
+            Some(k) if k.at != at => vec![Edit::SetKey {
+                key,
+                at: Some(at),
+                value: None,
+                ease: None,
+                spin: None,
+            }],
+            _ => Vec::new(),
+        }
+    }
+
+    /// An orientation key aimed at `target`, keeping its roll, or with
+    /// none turned back into the direction it looks in at its time.
+    pub fn aim(&self, key: KeyId, target: Option<TargetId>) -> Vec<Edit> {
+        let Some(k) = self.orientation_key(key) else {
+            return Vec::new();
+        };
+        let value = match (target, k.value) {
+            (Some(t), Orient::Aim { target, .. }) if t == target => return Vec::new(),
+            (Some(target), Orient::Aim { roll_deg, .. }) => Orient::Aim { target, roll_deg },
+            (Some(target), Orient::View(o)) => Orient::Aim {
+                target,
+                roll_deg: o.ypr().roll.to_degrees(),
+            },
+            (None, Orient::View(_)) => return Vec::new(),
+            (None, Orient::Aim { .. }) => {
+                let q = self
+                    .clip()
+                    .view
+                    .orientation_at(k.at.to_secs_f64(), self.project.targets());
+                match Orientation::new(q) {
+                    Ok(o) => Orient::View(o),
+                    Err(_) => return Vec::new(),
+                }
+            }
+        };
+        vec![Edit::SetKey {
+            key,
+            at: None,
+            value: Some(AnyValue::Orientation(value)),
+            ease: None,
+            spin: None,
+        }]
+    }
+
+    /// A target at `dir`, fixed, in the clip's media, named by its
+    /// number.
+    pub fn add_target(&self, t: Time, dir: AimDir) -> Vec<Edit> {
+        let n = self.project.targets().len() + 1;
+        vec![Edit::AddTarget {
+            target: Target {
+                id: TargetId::NEW,
+                name: format!("Target {n}"),
+                media: self.clip().media,
+                path: KeyTrack {
+                    keys: vec![new_key(t, dir, Ease::SMOOTH)],
+                },
+            },
+        }]
+    }
+
+    /// `target` at `dir` at `t`: its path's key within half a frame of
+    /// `t` moved there, else a new key, so a target that moves is keyed
+    /// as the view is.
+    pub fn key_target(&self, target: TargetId, t: Time, dir: AimDir) -> Vec<Edit> {
+        let Some(tg) = self.project.target(target) else {
+            return Vec::new();
+        };
+        let mut path = tg.path.clone();
+        let half = self.half_frame().to_secs_f64();
+        let near = path
+            .keys
+            .iter_mut()
+            .find(|k| (k.at.to_secs_f64() - t.to_secs_f64()).abs() <= half + 1e-12);
+        match near {
+            Some(k) => k.value = dir,
+            None => {
+                let i = path.keys.partition_point(|k| k.at < t);
+                path.keys.insert(i, new_key(t, dir, Ease::SMOOTH));
+            }
+        }
+        vec![Edit::SetTarget {
+            target,
+            name: None,
+            path: Some(path),
+        }]
+    }
+
+    pub fn rename_target(&self, target: TargetId, name: &str) -> Vec<Edit> {
+        match self.project.target(target) {
+            Some(t) if t.name != name => vec![Edit::Rename {
+                id: target.0,
+                name: name.to_owned(),
+            }],
+            _ => Vec::new(),
+        }
+    }
+
+    /// The sequence's output set to `output`. Between flat and 360 the
+    /// export's codec follows, when it was the old kind's default.
+    pub fn set_output(&self, output: Output) -> Vec<Edit> {
+        let seq = self.project.the_sequence();
+        if seq.output == output {
+            return Vec::new();
+        }
+        let sequence = seq.id;
+        let mut edits = vec![Edit::SetOutput { sequence, output }];
+        let kind = |o: &Output| matches!(o, Output::Flat { .. });
+        let was = ExportSettings::default_for(&seq.output);
+        if kind(&seq.output) != kind(&output) && seq.export.codec == was.codec {
+            edits.push(Edit::SetExport {
+                sequence,
+                export: ExportSettings {
+                    codec: ExportSettings::default_for(&output).codec,
+                    ..seq.export
+                },
+            });
+        }
+        edits
+    }
+
+    /// A 360 output's front turned to `orientation`.
+    pub fn set_front(&self, orientation: Orientation) -> Vec<Edit> {
+        match self.project.the_sequence().output {
+            Output::Equirect { width, .. } => {
+                self.set_output(Output::Equirect { width, orientation })
+            }
+            Output::Flat { .. } => Vec::new(),
+        }
+    }
+
+    pub fn set_rate(&self, rate: FrameRate) -> Vec<Edit> {
+        let seq = self.project.the_sequence();
+        if seq.rate == rate {
+            return Vec::new();
+        }
+        vec![Edit::SetRate {
+            sequence: seq.id,
+            rate,
+        }]
+    }
+
+    /// The export's choices, kept with the sequence.
+    pub fn set_export(&self, export: ExportSettings) -> Vec<Edit> {
+        let seq = self.project.the_sequence();
+        if seq.export == export {
+            return Vec::new();
+        }
+        vec![Edit::SetExport {
+            sequence: seq.id,
+            export,
+        }]
     }
 
     /// The key times before and after `t`, past half a frame, for
@@ -519,6 +805,29 @@ fn mark<V>(lane: Lane, k: &Key<V>) -> KeyMark {
         at: k.at,
         ease: k.ease,
         aim: false,
+    }
+}
+
+/// `o` with one of its yaw, pitch and roll (0, 1, 2) set to `deg`, the
+/// rest of its own decomposition kept (section 6.4): pitch within ±90°.
+pub fn with_angle(o: Orientation, which: usize, deg: f64) -> Option<Orientation> {
+    let mut y = o.ypr();
+    let r = deg.to_radians();
+    match which {
+        0 => y.yaw = r,
+        1 => y.pitch = r.clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2),
+        _ => y.roll = r,
+    }
+    Orientation::from_ypr(Ypr::new(y.yaw, y.pitch, y.roll)).ok()
+}
+
+/// Where a view looking along `q` looks, as a target's direction: its
+/// yaw and pitch in degrees (D33: forward is the centre's).
+pub fn aim_dir(q: DQuat) -> AimDir {
+    let y = Ypr::from_quat(q);
+    AimDir {
+        yaw_deg: y.yaw.to_degrees(),
+        pitch_deg: y.pitch.to_degrees(),
     }
 }
 

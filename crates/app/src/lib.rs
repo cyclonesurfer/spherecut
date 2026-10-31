@@ -9,10 +9,14 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod curves;
 pub mod doc;
+pub mod export;
+pub mod inspector;
 pub mod jobs;
 pub mod notices;
 pub mod overlay;
+pub mod overview;
 pub mod panes;
 pub mod proto;
 pub mod reframe;

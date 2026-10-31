@@ -3097,6 +3097,7 @@ dependencies = [
  "serde_json",
  "spherecut-audio",
  "spherecut-core",
+ "spherecut-export",
  "spherecut-media",
  "spherecut-playback",
  "spherecut-render",

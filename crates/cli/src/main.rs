@@ -79,6 +79,10 @@ struct GuiCli {
     /// A screenshot at the run's end, at most 960 pixels wide.
     #[arg(long, hide = true, value_name = "PNG", requires = "smoke")]
     smoke_screenshot: Option<PathBuf>,
+    /// An export of the clip's first 2 s, made while it plays (M2 plan
+    /// section 11), to this MP4.
+    #[arg(long, hide = true, value_name = "MP4", requires = "smoke")]
+    smoke_export: Option<PathBuf>,
     /// The toolkit check's timeline prototype (D26) in place of the
     /// viewer; with --proto-out, a script drives it, what each UI pass
     /// took goes there as JSON (spherecut.timeline-proto/1), and it
@@ -507,6 +511,7 @@ fn gui(args: GuiCli) -> Exit {
             seconds: args.smoke_seconds,
             out: args.smoke_out.unwrap_or_default(),
             screenshot: args.smoke_screenshot,
+            export: args.smoke_export,
         }),
         proto: args
             .timeline_proto
