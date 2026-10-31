@@ -299,6 +299,16 @@ A1.7 taught agents the workflow:
   sheet as 766×355, 40,091 bytes, every label readable; a `sheet` of the
   LRV was refused with `not_equirect`, as it should be, naming `raw`.
 
+**Local models** (2026-10-31, `docs/research/a1/local-models-2026-10-31.md`,
+`hw-reports/agents-2026-10-31/`): `docs/research/a1/local_agents.py`
+drove the tools with four models served on huginn, on four tasks with
+planted answers. 3.8-q4 and gemma-4 did 3 of 4, qwen3-coder-next 2 and
+mistral-small-4 1. The `check` and `analyze` tasks went through; the
+marker task, which needs vision, beat every model by the request
+timeout or the step limit. gemma-4 got HTTP 500 until the list-valued
+`type` of `look`'s `times` items was sent as `anyOf`, which llama.cpp's
+template engine renders; Spherecut's schemas take that next.
+
 ### A1 criteria ticked
 
 | Criterion (`PLAN.md` A1) | Evidence |
