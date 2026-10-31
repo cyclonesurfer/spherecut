@@ -133,9 +133,9 @@ fn the_doctor_tab_says_it_is_checking_until_the_report_comes() {
     // Nothing is open yet, and the viewer says how to open something.
     assert_eq!(
         h.state().state.placeholder(),
-        Some("Open a video from the Files pane")
+        Some("Open a video or a project from the Files pane")
     );
-    let _ = h.get_by_label("Open a video from the Files pane");
+    let _ = h.get_by_label("Open a video or a project from the Files pane");
 }
 
 #[test]

@@ -137,6 +137,8 @@ pub struct Readings {
     pub has_audio: bool,
     pub audio: Option<OutputStats>,
     pub memory: Option<MemoryStats>,
+    /// Which view the viewer shows, with a project open (M2 plan 10.2).
+    pub look: Option<&'static str>,
 }
 
 impl Readings {
@@ -189,6 +191,7 @@ impl Readings {
             has_audio: snap.has_audio,
             audio: s.player.as_ref().and_then(|pl| pl.audio_stats()),
             memory: snap.memory,
+            look: s.reframe.flat_output().map(|_| s.reframe.look.label()),
         }
     }
 
@@ -296,6 +299,7 @@ impl Readings {
             ),
             format!("audio     {}", self.audio_text()),
             format!("memory    {}", self.memory_text()),
+            format!("view      {}", self.look.unwrap_or("free (no project)")),
         ]
     }
 
@@ -588,6 +592,7 @@ mod tests {
                 gpu_allocated: Some(1 << 29),
                 gpu_reserved: Some(1 << 30),
             }),
+            look: Some("keyed"),
         }
     }
 

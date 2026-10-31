@@ -44,7 +44,7 @@ use spherecut_media::doctor::CheckResult;
 use spherecut_media::probe::{ProbeError, ProbeReport};
 use spherecut_playback::{
     AudioOutput, AudioOutputFactory, CacheBudget, Counter, DecoderPreference, HwDecodeCheck,
-    HwPromise, HwSupport, PREROLL_FRAMES, PlayState, Player, PlayerConfig, PlayerError,
+    HwPromise, HwSupport, PREROLL_FRAMES, PlaySpan, PlayState, Player, PlayerConfig, PlayerError,
     PlayerEvent, PlayerParts, PlayerThreads, Presented, SlotState,
 };
 use spherecut_render::readback::read_texture;
@@ -1121,6 +1121,109 @@ fn an_end_decoding_has_not_reached_stops_a_frame_before_the_duration() {
     pass.store(u64::MAX, Ordering::Release);
     show(&player, 29);
     assert_eq!(snapshot(&player).clock, at(29));
+    common::join(player);
+}
+
+/// Playing from frame `from` with `span` kept to, presented once there
+/// so the play has a time to cross the span's end from.
+fn playing_in(span: PlaySpan, from: i64) -> (Player, Arc<ManualClock>) {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(clip(30), clock.clone(), config(64));
+    until(WAIT, || snapshot(&player).streams[0].end).expect("decoding never reached the end");
+    player.set_span(Some(span));
+    player.seek(at(from), SeekMode::Exact);
+    show(&player, from);
+    player.play();
+    let _ = player.present(Instant::now());
+    assert!(snapshot(&player).playing);
+    (player, clock)
+}
+
+#[test]
+fn a_span_stops_on_its_last_frame_and_plays_again_from_its_start() {
+    let span = PlaySpan {
+        start: at(5),
+        end: at(15),
+        looping: false,
+    };
+    let (player, clock) = playing_in(span, 10);
+    clock.set(at(20), Instant::now());
+    let end = ended(&player);
+    assert_eq!(end.state, PlayState::Paused);
+    assert!(end.clock < at(15) && end.clock > at(14), "{:?}", end.clock);
+    show(&player, 14);
+    // Played again from there: from the span's start.
+    player.play();
+    lands_on(&player, 5);
+    assert!(snapshot(&player).want_play);
+    // Stepped past the end and played: from the start too.
+    player.pause();
+    player.seek(at(20), SeekMode::Exact);
+    show(&player, 20);
+    player.play();
+    lands_on(&player, 5);
+    common::join(player);
+}
+
+#[test]
+fn a_looping_span_goes_on_from_its_start() {
+    let span = PlaySpan {
+        start: at(5),
+        end: at(15),
+        looping: true,
+    };
+    let (player, clock) = playing_in(span, 10);
+    clock.set(at(20), Instant::now());
+    lands_on(&player, 5);
+    let s = snapshot(&player);
+    assert!(s.want_play && !s.at_end, "{s:?}");
+    // A span to the stream's end loops at the end as well.
+    player.set_span(Some(PlaySpan {
+        start: at(2),
+        end: at(30),
+        looping: true,
+    }));
+    player.seek(at(25), SeekMode::Exact);
+    show(&player, 25);
+    let _ = player.present(Instant::now());
+    clock.set(at(40), Instant::now());
+    lands_on(&player, 2);
+    assert!(snapshot(&player).want_play);
+    common::join(player);
+}
+
+#[test]
+fn a_seek_past_the_span_while_playing_plays_on() {
+    let span = PlaySpan {
+        start: at(5),
+        end: at(15),
+        looping: false,
+    };
+    let (player, clock) = playing_in(span, 10);
+    player.seek(at(20), SeekMode::Exact);
+    show(&player, 20);
+    let _ = player.present(Instant::now());
+    clock.set(at(25), Instant::now());
+    show(&player, 25);
+    let s = snapshot(&player);
+    assert!(s.want_play && !s.at_end, "{s:?}");
+    common::join(player);
+}
+
+#[test]
+fn a_closed_player_shows_nothing_until_the_next_open() {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(clip(30), clock, config(64));
+    player.play();
+    player.close();
+    let s = snapshot(&player);
+    assert_eq!(s.state, PlayState::Empty, "{s:?}");
+    assert!(s.path.is_none() && !s.want_play && !s.playing, "{s:?}");
+    let p = player.present(Instant::now());
+    assert!(p.as_ref().is_none_or(|p| p.frames.is_empty()), "{p:?}");
+    // Its slots came back: the next open shows its first frame.
+    player.open("clip.synthetic".into());
+    show(&player, 0);
     common::join(player);
 }
 

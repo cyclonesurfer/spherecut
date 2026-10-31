@@ -17,7 +17,11 @@ pub const KEYS_HELP: &str = "Space or K: play or pause\n\
     Drag: look around (level; with Ctrl, free)\n\
     Scroll or Ctrl+scroll: zoom about the pointer;  + and -: zoom\n\
     1, 2, 3: Rect, Fisheye, Tiny planet\n\
-    R: look forward, level;  F3: the overlay";
+    R: look forward, level;  F3: the overlay\n\
+    Alt+K: key the view;  Alt+[ and Alt+]: the key before or after\n\
+    I and O: in and out at the frame;  M: a marker;  Delete: the keys selected\n\
+    Ctrl+L: loop in to out;  Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y: undo, redo\n\
+    Ctrl+O: open;  Ctrl+S: save;  Ctrl+Shift+S: save as";
 
 /// How long the pointer rests on the scrub bar before the frame under it
 /// is sought exactly.
@@ -46,6 +50,20 @@ pub fn format_time(t: Time) -> String {
 pub fn frame_number(t: Time, info: Option<&VideoStreamInfo>) -> Option<i64> {
     let rate = info?.frame_rate()?;
     rate.time_to_frame(t, Rounding::Floor).ok()
+}
+
+/// The time `f` (0 to 1) of the way through `duration`, to the
+/// millionth.
+pub fn time_of_fraction(f: f64, duration: Time) -> Time {
+    let f = Time::seconds(
+        Rational::new((f.clamp(0.0, 1.0) * 1_000_000.0).round() as i64, 1_000_000)
+            .unwrap_or(Rational::ZERO),
+    );
+    Time::seconds(
+        f.as_rational()
+            .checked_mul(duration.as_rational())
+            .unwrap_or(Rational::ZERO),
+    )
 }
 
 /// The time of the last frame of a clip lasting `duration`: one tick of
@@ -181,8 +199,24 @@ pub fn bar_ui(s: &mut AppState, ui: &mut egui::Ui, now: Instant) {
         if let Some(n) = frame_number(at, s.stream0()) {
             ui.monospace(format!("#{n}"));
         }
+        if let Some(doc) = &s.reframe.doc {
+            let trim = doc.clip().source;
+            ui.separator();
+            ui.monospace(format!(
+                "In {}  Out {}",
+                format_time(trim.start),
+                format_time(trim.end)
+            ));
+            if s.reframe.looping {
+                ui.monospace("Loop");
+            }
+        }
     });
-    scrub_bar(s, ui, at, duration, now);
+    if s.reframe.doc.is_some() {
+        crate::timeline::strip_ui(s, ui, at, now);
+    } else {
+        scrub_bar(s, ui, at, duration, now);
+    }
     ui.horizontal(|ui| {
         let t = ui.input(|i| i.time);
         for p in Preset::ALL {
@@ -209,10 +243,28 @@ pub fn bar_ui(s: &mut AppState, ui: &mut egui::Ui, now: Instant) {
     });
 }
 
-/// The scrub bar: the cached spans shaded, the playhead, and the drag.
+/// The scrub bar, a row of its own without a project.
 fn scrub_bar(s: &mut AppState, ui: &mut egui::Ui, at: Time, duration: Option<Time>, now: Instant) {
     let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y * 0.6);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    scrub_row(s, ui, rect, at, duration, now);
+}
+
+/// The scrub bar in `rect`: the cached spans shaded, the playhead, and
+/// the drag.
+pub(crate) fn scrub_row(
+    s: &mut AppState,
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    at: Time,
+    duration: Option<Time>,
+    now: Instant,
+) {
+    let response = ui.interact(
+        rect,
+        egui::Id::unique("scrub-bar"),
+        egui::Sense::click_and_drag(),
+    );
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::Role::Slider, ui.is_enabled(), "Scrub bar")
     });
@@ -244,17 +296,12 @@ fn scrub_bar(s: &mut AppState, ui: &mut egui::Ui, at: Time, duration: Option<Tim
     let last = last_frame_time(d, s.stream0());
     let time_at = |pos: egui::Pos2| {
         let f = f64::from(((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0));
-        let t = Time::seconds(
-            Rational::new((f * 1_000_000.0).round() as i64, 1_000_000).unwrap_or(Rational::ZERO),
-        );
-        let t = Time::seconds(
-            t.as_rational()
-                .checked_mul(d.as_rational())
-                .unwrap_or(Rational::ZERO),
-        );
-        t.min(last)
+        time_of_fraction(f, d).min(last)
     };
     let playing = s.snapshot.want_play;
+    if response.drag_started() {
+        s.end_look();
+    }
     if response.dragged()
         && let Some(pos) = response.interact_pointer_pos()
     {

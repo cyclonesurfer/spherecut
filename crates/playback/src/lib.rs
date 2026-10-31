@@ -40,9 +40,9 @@ pub use decoder::{
 };
 pub use perf::{Counter, MemoryStats, PerfSnapshot, PerfStats, Stage, StageSummary};
 pub use player::{
-    PREROLL_FRAMES, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent, PlayerParts,
-    PlayerSnapshot, Presented, SURFACE_CAP, ShownFrame, ShutdownReport, ZERO_COPY_ENV, ZeroCopy,
-    zero_copy_from_env,
+    PREROLL_FRAMES, PlaySpan, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent,
+    PlayerParts, PlayerSnapshot, Presented, SURFACE_CAP, ShownFrame, ShutdownReport, ZERO_COPY_ENV,
+    ZeroCopy, zero_copy_from_env,
 };
 pub use shared::{BudgetStatus, Landed, Repaint, SeekCounts, StreamStatus};
 pub use slots::{SlotFrame, SlotRing, SlotState, SlotStats, SlotView};

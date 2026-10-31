@@ -278,6 +278,19 @@ pub fn lens_point(pos: egui::Pos2, vp: &ViewportInPixels, ppp: f32) -> DVec2 {
     pixel::to_lens(physical(vp), x, y)
 }
 
+/// [`lens_point`] through `view`'s output frame, as the renderer maps
+/// it (amendment 2 item 29): the frame's edges are ±1 across.
+pub fn frame_point(
+    pos: egui::Pos2,
+    vp: &ViewportInPixels,
+    ppp: f32,
+    view: &spherecut_render::ViewParams,
+) -> DVec2 {
+    let x = f64::from(pos.x) * f64::from(ppp) - f64::from(vp.left_px);
+    let y = f64::from(pos.y) * f64::from(ppp) - f64::from(vp.top_px);
+    view.lens_point(physical(vp), x, y)
+}
+
 impl CallbackTrait for ViewerCallback {
     fn prepare(
         &self,

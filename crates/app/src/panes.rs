@@ -27,35 +27,35 @@ pub struct Entry {
 
 type Listing = Result<Vec<Entry>, String>;
 
-/// `dir`'s subdirectories and video files, directories first, then by
-/// name; hidden ones left out. On the Files pane's worker.
+/// `dir`'s subdirectories, video files and project files, directories
+/// first, then by name; hidden ones left out. On the Files pane's worker.
 #[expect(
     clippy::disallowed_methods,
     reason = "runs on the Files pane's worker thread, never the UI thread"
 )]
 pub fn list_dir(dir: &Path) -> Listing {
     let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut out: Vec<Entry> = rd
-        .filter_map(Result::ok)
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
-                return None;
-            }
-            let path = e.path();
-            // Follows symlinks, so a link to a directory lists as one.
-            let is_dir = path.is_dir();
-            let video = path
-                .extension()
-                .and_then(|x| x.to_str())
-                .is_some_and(|x| VIDEO_EXTENSIONS.contains(&x.to_ascii_lowercase().as_str()));
-            (is_dir || video).then_some(Entry {
-                name,
-                path,
-                dir: is_dir,
+    let mut out: Vec<Entry> =
+        rd.filter_map(Result::ok)
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    return None;
+                }
+                let path = e.path();
+                // Follows symlinks, so a link to a directory lists as one.
+                let is_dir = path.is_dir();
+                let video =
+                    path.extension().and_then(|x| x.to_str()).is_some_and(|x| {
+                        VIDEO_EXTENSIONS.contains(&x.to_ascii_lowercase().as_str())
+                    }) || crate::reframe::is_project_file(&path);
+                (is_dir || video).then_some(Entry {
+                    name,
+                    path,
+                    dir: is_dir,
+                })
             })
-        })
-        .collect();
+            .collect();
     out.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.cmp(&b.name)));
     Ok(out)
 }
@@ -265,6 +265,16 @@ impl InfoPane {
         });
         if let Some(old) = self.job.replace(job) {
             self.threads.keep(old);
+        }
+    }
+
+    /// Forget the file: nothing open.
+    pub fn close(&mut self) {
+        self.path = None;
+        self.text = None;
+        self.lenses = None;
+        if let Some(job) = self.job.take() {
+            self.threads.keep(job);
         }
     }
 
