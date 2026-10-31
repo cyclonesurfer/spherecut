@@ -7463,7 +7463,13 @@ same views; the frame's middle view alone is 20.3 dB from it, half the
 views fails the stored-image rule, and a still view blurred is the
 still view to the bit). Tier 2's `yuv_on_gpu_matches_reference` runs
 the pass and the round trip on each GPU, and amendment 2 item 34 has
-odin run it and the goldens on RADV before M2.3 merges.
+odin run it and the goldens on RADV before M2.3 merges. odin did on
+2026-10-31 at a271c55, and both pass (`hw-reports/odin-a271c55c5f.md`):
+the goldens are 58.87 to 59.34 dB from the CPU reference against floors
+of 49.01 to 53.98 (blessed on lavapipe at 52.02 to 56.99), the wrong-way
+yaw control 255 codes out and `blur_pan`'s half-views control at
+51.47 dB; the YUV pass equals its reference exactly in NV12, P010, I420
+and I010.
 
 Why:
 - **The frame's FOV, not the viewer's**: a FOV tied to the viewer's
