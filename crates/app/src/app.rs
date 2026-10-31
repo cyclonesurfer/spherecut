@@ -554,6 +554,7 @@ impl AppState {
                     | NoticeKind::NoAudioDevice
                     | NoticeKind::SlotDropped
                     | NoticeKind::Project
+                    | NoticeKind::History
                     | NoticeKind::MediaOffline
                     | NoticeKind::Export
             )
@@ -926,18 +927,8 @@ impl AppState {
     /// edits by their keys.
     fn edit_menu(&mut self, ui: &mut egui::Ui) {
         let doc = self.reframe.doc.is_some();
-        let undo = self
-            .reframe
-            .doc
-            .as_ref()
-            .and_then(|d| d.undo_label())
-            .map(str::to_owned);
-        let redo = self
-            .reframe
-            .doc
-            .as_ref()
-            .and_then(|d| d.redo_label())
-            .map(str::to_owned);
+        let undo = self.reframe.doc.as_ref().and_then(|d| d.undo_label());
+        let redo = self.reframe.doc.as_ref().and_then(|d| d.redo_label());
         let label = |verb: &str, step: &Option<String>| match step {
             Some(l) => format!("{verb} {l}"),
             None => verb.to_owned(),

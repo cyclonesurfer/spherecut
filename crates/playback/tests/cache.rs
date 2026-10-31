@@ -441,10 +441,21 @@ fn the_producer_waits_at_the_limit_and_goes_on_when_the_playhead_moves() {
     // Moving the playhead five frames on lets five more in.
     c.set_playhead(at(5));
     expect(&rx, stored(11..=15, Insert::Stored));
-    // As the UI moves it, without waiting for the lock (free here).
-    assert!(c.try_set_playhead(at(29)));
+    // As the UI moves it, without waiting for the lock: the producer holds
+    // it a moment on its way to waiting, and the UI tries again next frame.
+    let ui_moves = |t| {
+        let started = Instant::now();
+        while !c.try_set_playhead(t) {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the lock stayed taken"
+            );
+            std::thread::yield_now();
+        }
+    };
+    ui_moves(at(29));
     expect(&rx, stored(16..=39, Insert::Stored));
-    assert!(c.try_set_playhead(at(30)));
+    ui_moves(at(30));
     assert_eq!(
         rx.recv_timeout(Duration::from_secs(10)),
         Ok((40, Insert::Stored))

@@ -3095,6 +3095,7 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
+ "spherecut-agent",
  "spherecut-audio",
  "spherecut-core",
  "spherecut-export",

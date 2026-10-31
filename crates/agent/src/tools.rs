@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 use serde_json::{Map, Value, json};
 
 use crate::error::{ToolError, codes};
+use crate::jobs::Jobs;
 use crate::limits::{INLINE_IMAGE_BYTES, RESULT_CHARS};
 use crate::roots::Roots;
 use crate::rpc::{CallCx, Output, Tools};
@@ -25,6 +26,31 @@ pub struct Tool {
     pub title: &'static str,
     /// Its input schema, `docs/agents/schemas/<name>.json`.
     pub schema: &'static str,
+    pub writes: Writes,
+}
+
+/// What a tool does to files with writing on (`--allow-write`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Writes {
+    /// Nothing.
+    Never,
+    /// Only new files, when asked to: it never destroys, and the same
+    /// call again is refused (`output_exists`), so it is idempotent.
+    New,
+    /// It replaces a project: listed only with a write root (a2-plan
+    /// 1.1), since without one every call would be refused.
+    Replaces,
+    /// It starts or stops renders, which make only new files: listed
+    /// only with a write root, as for [`Writes::Replaces`], and hinted as
+    /// for [`Writes::New`].
+    Renders,
+}
+
+impl Writes {
+    /// Listed only when the server may write.
+    fn needs_root(self) -> bool {
+        matches!(self, Writes::Replaces | Writes::Renders)
+    }
 }
 
 /// Every tool, in `tools/list`'s order.
@@ -33,27 +59,82 @@ pub const TOOLS: &[Tool] = &[
         name: "probe",
         title: "Read what media files are",
         schema: include_str!("../../../docs/agents/schemas/probe.json"),
+        writes: Writes::Never,
     },
     Tool {
         name: "look",
         title: "See frames of a video",
         schema: include_str!("../../../docs/agents/schemas/look.json"),
+        writes: Writes::New,
     },
     Tool {
         name: "analyze",
         title: "Measure a video over time",
         schema: include_str!("../../../docs/agents/schemas/analyze.json"),
+        writes: Writes::Never,
     },
     Tool {
         name: "check",
         title: "Check a file's metadata and fit",
         schema: include_str!("../../../docs/agents/schemas/check.json"),
+        writes: Writes::Never,
     },
     Tool {
         name: "doctor",
         title: "Check this machine's decoders",
         schema: include_str!("../../../docs/agents/schemas/doctor.json"),
+        writes: Writes::Never,
     },
+    Tool {
+        name: "project",
+        title: "Read or make a project",
+        schema: include_str!("../../../docs/agents/schemas/project.json"),
+        writes: Writes::New,
+    },
+    Tool {
+        name: "edit",
+        title: "Edit a project",
+        schema: include_str!("../../../docs/agents/schemas/edit.json"),
+        writes: Writes::Replaces,
+    },
+    Tool {
+        name: "undo",
+        title: "Undo or redo an edit",
+        schema: include_str!("../../../docs/agents/schemas/undo.json"),
+        writes: Writes::Replaces,
+    },
+    Tool {
+        name: "render",
+        title: "Render a project",
+        schema: include_str!("../../../docs/agents/schemas/render.json"),
+        writes: Writes::Renders,
+    },
+    Tool {
+        name: "job",
+        title: "Follow or cancel a render",
+        schema: include_str!("../../../docs/agents/schemas/job.json"),
+        writes: Writes::Renders,
+    },
+    Tool {
+        name: "compare",
+        title: "Compare two videos or a render",
+        schema: include_str!("../../../docs/agents/schemas/compare.json"),
+        writes: Writes::Never,
+    },
+];
+
+/// How many of [`TOOLS`] are A1's: the rest are A2's.
+pub const A1_TOOLS: usize = 5;
+
+/// Each of A2's tools' share of [`MAX_LIST_BYTES`], as listed with
+/// writing on (a2-plan 4.5).
+pub const BUDGETS: &[(&str, usize)] = &[
+    ("project", 1000),
+    ("edit", 950),
+    ("undo", 650),
+    ("render", 950),
+    ("job", 650),
+    ("compare", 1000),
 ];
 
 /// The most tools `tools/list` may hold: past a dozen, agents choose
@@ -82,27 +163,34 @@ struct Parsed {
 #[derive(Debug)]
 pub struct Spherecut {
     tools: Vec<Parsed>,
-    list: Value,
+    /// `tools/list`, with the title at the top and in the annotations:
+    /// see [`top_title`].
+    lists: [Value; 2],
     roots: Roots,
     image_budget: usize,
+    /// The renders this server runs (a2-plan 5.3).
+    jobs: Jobs,
 }
 
 impl Spherecut {
     pub fn new(roots: Roots) -> Self {
+        let writes = roots.writes();
         let tools: Vec<Parsed> = parsed()
             .iter()
+            .filter(|(tool, _)| writes || !tool.writes.needs_root())
             .map(|(tool, schema)| Parsed {
                 tool,
                 schema: schema.clone(),
             })
             .collect();
-        let writes = roots.writes();
-        let list = Value::Array(tools.iter().map(|p| listed(p, writes)).collect());
+        let lists = [true, false]
+            .map(|top| Value::Array(tools.iter().map(|p| listed(p, writes, top)).collect()));
         Self {
             tools,
-            list,
+            lists,
             roots,
             image_budget: INLINE_IMAGE_BYTES,
+            jobs: Jobs::new(),
         }
     }
 
@@ -148,45 +236,59 @@ pub(crate) fn schema(name: &str) -> Option<&'static Value> {
         .map(|(_, s)| s)
 }
 
-/// The tools that write a file when asked to and writing is on.
-const WRITERS: &[&str] = &["look"];
+/// Whether a session on protocol revision `version` has a tool's title
+/// at the top: 2025-06-18 added it there, and older clients read
+/// `annotations.title`. Each form lists the title once (a2-plan 4.5).
+/// Revisions are dates, so they compare as text.
+pub fn top_title(version: &str) -> bool {
+    version >= "2025-06-18"
+}
 
 /// A tool as `tools/list` has it. The schema's own title and description
 /// move up to the tool, where clients read them, rather than appear
 /// twice, and its `$schema` goes: 2020-12 is MCP's default dialect
 /// (2025-11-25), and the schemas use nothing that differs from draft 7.
-/// A tool that writes with writing on (`--allow-write`) isn't read-only,
-/// but never destroys: it only creates new files, so a second call the
-/// same has no more effect (it is refused, `output_exists`). The other
-/// hints mean something only for a tool that isn't read-only, so a
-/// read-only one leaves them out.
-fn listed(p: &Parsed, writes: bool) -> Value {
+/// The title is at the top when `top` and in the annotations otherwise.
+/// A tool that writes with writing on isn't read-only; see [`Writes`]
+/// for the rest. The other hints mean something only for a tool that
+/// isn't read-only, so a read-only one leaves them out.
+fn listed(p: &Parsed, writes: bool, top: bool) -> Value {
     let mut input: Map<String, Value> = p.schema.as_object().cloned().unwrap_or_default();
     let description = input.remove("description").unwrap_or(Value::Null);
     input.remove("title");
     input.remove("$schema");
     let mut annotations = json!({
-        "title": p.tool.title,
         "readOnlyHint": true,
         "openWorldHint": false,
     });
-    if writes && WRITERS.contains(&p.tool.name) {
-        annotations["readOnlyHint"] = json!(false);
-        annotations["destructiveHint"] = json!(false);
-        annotations["idempotentHint"] = json!(true);
+    match (writes, p.tool.writes) {
+        (false, _) | (_, Writes::Never) => {}
+        (true, Writes::New | Writes::Renders) => {
+            annotations["readOnlyHint"] = json!(false);
+            annotations["destructiveHint"] = json!(false);
+            annotations["idempotentHint"] = json!(true);
+        }
+        (true, Writes::Replaces) => {
+            annotations["readOnlyHint"] = json!(false);
+            annotations["destructiveHint"] = json!(true);
+            annotations["idempotentHint"] = json!(false);
+        }
     }
-    json!({
-        "name": p.tool.name,
-        "title": p.tool.title,
-        "description": description,
-        "inputSchema": input,
-        "annotations": annotations,
-    })
+    let mut tool = json!({ "name": p.tool.name });
+    if top {
+        tool["title"] = json!(p.tool.title);
+    } else {
+        annotations["title"] = json!(p.tool.title);
+    }
+    tool["description"] = description;
+    tool["inputSchema"] = Value::Object(input);
+    tool["annotations"] = annotations;
+    tool
 }
 
 impl Tools for Spherecut {
-    fn list(&self) -> Value {
-        self.list.clone()
+    fn list(&self, version: &str) -> Value {
+        self.lists[usize::from(!top_title(version))].clone()
     }
 
     fn has(&self, name: &str) -> bool {
@@ -212,11 +314,31 @@ impl Tools for Spherecut {
             "analyze" => (ops::analyze::run(ops::request(args)?, &cx)?, Vec::new()),
             "check" => (ops::check::run(ops::request(args)?, &cx)?, Vec::new()),
             "doctor" => (ops::doctor::run(ops::request(args)?, &cx)?, Vec::new()),
+            "project" => (ops::project::run(ops::request(args)?, &cx)?, Vec::new()),
+            "edit" => (ops::edit::run(ops::request(args)?, &cx)?, Vec::new()),
+            "undo" => (ops::edit::undo(ops::request(args)?, &cx)?, Vec::new()),
+            "render" => (
+                ops::render::run(ops::request(args)?, &cx, &self.jobs)?,
+                Vec::new(),
+            ),
+            "job" => (
+                ops::job::run(ops::request(args)?, &cx, &self.jobs)?,
+                Vec::new(),
+            ),
+            "compare" => ops::compare::run(ops::request(args)?, &cx)?,
             _ => return Err(ToolError::internal(format!("{name} has no op"))),
         };
         text::sanitize(&mut result);
         fits(&result)?;
         Ok(Output { result, images })
+    }
+
+    fn cancel_all(&self) {
+        self.jobs.cancel_all();
+    }
+
+    fn shutdown(&self, until: std::time::Instant) -> usize {
+        self.jobs.shutdown(until)
     }
 }
 
@@ -252,45 +374,125 @@ mod tests {
         }
     }
 
+    /// Spherecut with writing on, so that every tool is listed.
+    fn writing() -> Spherecut {
+        Spherecut::new(Roots::new(&[], Some(&std::env::temp_dir())).unwrap())
+    }
+
+    fn bytes(tools: &[Value]) -> usize {
+        json!({ "tools": tools }).to_string().len()
+    }
+
     #[test]
     fn the_list_fits() {
-        let s = Spherecut::new(Roots::new(&[], None).unwrap());
-        let list = s.list();
-        let tools = list.as_array().map_or(0, Vec::len);
-        assert!(tools <= MAX_TOOLS, "{tools} tools");
-        let bytes = json!({ "tools": list }).to_string().len();
-        eprintln!("tools/list: {tools} tools, {bytes} bytes");
-        assert!(bytes <= MAX_LIST_BYTES, "{bytes} bytes");
-        assert!(bytes <= A1_LIST_BYTES, "{bytes} bytes, past A1's share");
-        for t in list.as_array().into_iter().flatten() {
-            assert!(
-                t["description"].as_str().is_some_and(|d| !d.is_empty()),
-                "{t}"
-            );
-            assert_eq!(t["inputSchema"]["type"], "object");
-            assert!(t["inputSchema"].get("description").is_none());
-            assert!(t["inputSchema"].get("$schema").is_none());
-            assert_eq!(t["annotations"]["readOnlyHint"], true);
+        let reading = Spherecut::new(Roots::new(&[], None).unwrap());
+        for version in crate::rpc::SUPPORTED {
+            for (s, count) in [(&reading, 7), (&writing(), TOOLS.len())] {
+                let list = s.list(version);
+                let list = list.as_array().cloned().unwrap_or_default();
+                assert_eq!(list.len(), count, "{version}");
+                assert!(list.len() <= MAX_TOOLS, "{} tools", list.len());
+                let all = bytes(&list);
+                let a1 = bytes(&list[..A1_TOOLS]);
+                eprintln!("tools/list on {version}: {count} tools, {all} bytes, A1's {a1}");
+                assert!(all <= MAX_LIST_BYTES, "{all} bytes");
+                assert!(a1 <= A1_LIST_BYTES, "{a1} bytes, past A1's share");
+                for t in &list {
+                    assert!(
+                        t["description"].as_str().is_some_and(|d| !d.is_empty()),
+                        "{t}"
+                    );
+                    assert_eq!(t["inputSchema"]["type"], "object");
+                    assert!(t["inputSchema"].get("description").is_none());
+                    assert!(t["inputSchema"].get("$schema").is_none());
+                }
+            }
+            for t in reading.list(version).as_array().into_iter().flatten() {
+                assert_eq!(t["annotations"]["readOnlyHint"], true, "{t}");
+            }
+        }
+    }
+
+    /// Each of A2's tools within its share, in both title forms.
+    #[test]
+    fn each_new_tool_keeps_to_its_budget() {
+        let s = writing();
+        assert_eq!(BUDGETS.len(), TOOLS.len() - A1_TOOLS);
+        for version in crate::rpc::SUPPORTED {
+            for (name, budget) in BUDGETS {
+                let list = s.list(version);
+                let t = list
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|t| t["name"] == *name)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{name} isn't listed"));
+                let n = t.to_string().len();
+                eprintln!("{name} on {version}: {n} bytes of {budget}");
+                assert!(
+                    n <= *budget,
+                    "{name} on {version}: {n} bytes, past {budget}"
+                );
+            }
         }
     }
 
     #[test]
-    fn with_writing_on_look_says_it_writes_but_never_destroys() {
-        let dir = std::env::temp_dir();
-        let s = Spherecut::new(Roots::new(&[], Some(&dir)).unwrap());
-        let list = s.list();
-        let bytes = json!({ "tools": list }).to_string().len();
-        assert!(bytes <= A1_LIST_BYTES, "{bytes} bytes, past A1's share");
-        for t in list.as_array().into_iter().flatten() {
-            let writer = t["name"] == "look";
-            assert_eq!(t["annotations"]["readOnlyHint"], !writer, "{t}");
-            if writer {
-                assert_eq!(t["annotations"]["destructiveHint"], false);
-                assert_eq!(t["annotations"]["idempotentHint"], true);
-            } else {
-                assert!(t["annotations"].get("idempotentHint").is_none(), "{t}");
+    fn each_tool_has_one_title_where_its_clients_read_it() {
+        let s = writing();
+        for version in crate::rpc::SUPPORTED {
+            let top = top_title(version);
+            assert_eq!(top, *version != "2025-03-26" && *version != "2024-11-05");
+            for t in s.list(version).as_array().into_iter().flatten() {
+                let title = TOOLS.iter().find(|x| t["name"] == x.name).unwrap().title;
+                let (at, not) = if top {
+                    (&t["title"], &t["annotations"]["title"])
+                } else {
+                    (&t["annotations"]["title"], &t["title"])
+                };
+                assert_eq!(at, title, "{version}: {t}");
+                assert!(not.is_null(), "{version}: two titles in {t}");
             }
         }
+    }
+
+    #[test]
+    fn with_writing_on_look_and_project_make_files_and_edit_and_undo_replace_them() {
+        let list = writing().list(crate::rpc::SUPPORTED[0]);
+        let a = |t: &Value, hint: &str| t["annotations"][hint].clone();
+        for t in list.as_array().into_iter().flatten() {
+            match t["name"].as_str().unwrap_or_default() {
+                "look" | "project" => {
+                    assert_eq!(a(t, "readOnlyHint"), false, "{t}");
+                    assert_eq!(a(t, "destructiveHint"), false, "{t}");
+                    assert_eq!(a(t, "idempotentHint"), true, "{t}");
+                }
+                "render" | "job" => {
+                    assert_eq!(a(t, "readOnlyHint"), false, "{t}");
+                    assert_eq!(a(t, "destructiveHint"), false, "{t}");
+                    assert_eq!(a(t, "idempotentHint"), true, "{t}");
+                }
+                "edit" | "undo" => {
+                    assert_eq!(a(t, "readOnlyHint"), false, "{t}");
+                    assert_eq!(a(t, "destructiveHint"), true, "{t}");
+                    assert_eq!(a(t, "idempotentHint"), false, "{t}");
+                }
+                _ => {
+                    assert_eq!(a(t, "readOnlyHint"), true, "{t}");
+                    assert!(t["annotations"].get("idempotentHint").is_none(), "{t}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn without_writing_edit_undo_render_and_job_are_not_listed() {
+        let s = Spherecut::new(Roots::new(&[], None).unwrap());
+        for name in ["edit", "undo", "render", "job"] {
+            assert!(!s.has(name), "{name}");
+        }
+        assert!(s.has("project"));
     }
 
     /// One argument object per mode of each tool, holding every property
@@ -309,13 +511,38 @@ mod tests {
                        "output": "out/a.png", "assume_equirect": true}),
                 json!({"file": "a.mp4", "times": ["0", "10"], "count": 5,
                        "views": [{"yaw": 0, "vfov": 60}, {"yaw": 180}]}),
+                json!({"project": "a.spherecut", "mode": "sheet", "count": 6}),
             ],
             "analyze" => vec![json!({"file": "a.mp4", "kind": "timing", "from": "1.5",
                                     "to": [30000, 1001], "buckets": 20, "stream": 0})],
-            "check" => vec![json!({"file": "a.mp4", "target": "youtube_360"})],
+            "check" => vec![
+                json!({"file": "a.mp4", "target": "youtube_360"}),
+                json!({"project": "a.spherecut", "target": "archive"}),
+            ],
             "doctor" => {
                 vec![json!({"file": "a.mp4", "speed": true, "render_node": "/dev/dri/renderD128"})]
             }
+            "project" => vec![
+                json!({"file": "a.spherecut", "part": "view", "clip": 4, "from": "1",
+                       "to": [3, 1]}),
+                json!({"file": "a.spherecut", "create": {"media": "a.mp4"}}),
+            ],
+            "edit" => vec![json!({"file": "a.spherecut",
+                                  "edits": [{"op": "rename", "id": 2, "name": "x"}],
+                                  "label": "x", "dry_run": true, "if_revision": 3})],
+            "undo" => vec![json!({"file": "a.spherecut", "redo": true, "if_revision": 3})],
+            "render" => vec![json!({"project": "a.spherecut", "output": "a.mp4",
+                                    "range": {"from": "1", "to": [3, 1]}, "draft": true})],
+            "job" => vec![
+                json!({"job": "j0123abcd-1", "wait": 30}),
+                json!({"job": "j0123abcd-1", "cancel": true}),
+            ],
+            "compare" => vec![
+                json!({"file": "a.mp4", "against_file": "b.mp4", "times": ["1", [3, 1]],
+                       "sheet": true}),
+                json!({"file": "a.mp4", "against_project": "a.spherecut", "from": "2",
+                       "count": 4}),
+            ],
             _ => vec![],
         }
     }
@@ -328,6 +555,12 @@ mod tests {
             "analyze" => ops::request::<ops::analyze::Request>(args).map(drop),
             "check" => ops::request::<ops::check::Request>(args).map(drop),
             "doctor" => ops::request::<ops::doctor::Request>(args).map(drop),
+            "project" => ops::request::<ops::project::Request>(args).map(drop),
+            "edit" => ops::request::<ops::edit::Request>(args).map(drop),
+            "undo" => ops::request::<ops::edit::UndoRequest>(args).map(drop),
+            "render" => ops::request::<ops::render::Request>(args).map(drop),
+            "job" => ops::request::<ops::job::Request>(args).map(drop),
+            "compare" => ops::request::<ops::compare::Request>(args).map(drop),
             _ => Err(ToolError::internal(format!("no request type for {name}"))),
         }
     }
@@ -396,7 +629,8 @@ mod tests {
     #[test]
     fn schemas_hold_the_limits() {
         use crate::limits::{
-            FILES_PER_CALL, IMAGE_LIMIT_EDGE, MAX_BUCKETS, MAX_PAGE_SIZE, MAX_TILES,
+            EDITS_PER_CALL, FILES_PER_CALL, IMAGE_LIMIT_EDGE, LABEL_CHARS, MAX_BUCKETS,
+            MAX_PAGE_SIZE, MAX_TILES,
         };
         let schema = |name: &str| {
             parsed()
@@ -414,6 +648,22 @@ mod tests {
         assert_eq!(look["views"]["maxItems"], json!(MAX_TILES));
         assert_eq!(look["size"]["maximum"], json!(IMAGE_LIMIT_EDGE));
         assert_eq!(schema("analyze")["buckets"]["maximum"], json!(MAX_BUCKETS));
+        let edit = schema("edit");
+        assert_eq!(edit["edits"]["maxItems"], json!(EDITS_PER_CALL));
+        assert_eq!(edit["label"]["maxLength"], json!(LABEL_CHARS));
+        assert_eq!(
+            schema("job")["wait"]["maximum"],
+            json!(crate::limits::JOB_WAIT.as_secs())
+        );
+        let compare = schema("compare");
+        assert_eq!(
+            compare["times"]["maxItems"],
+            json!(crate::limits::COMPARE_TIMES)
+        );
+        assert_eq!(
+            compare["count"]["maximum"],
+            json!(crate::limits::COMPARE_TIMES)
+        );
     }
 
     #[test]

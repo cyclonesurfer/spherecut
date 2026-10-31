@@ -115,7 +115,7 @@ pub(crate) fn run(
         .project
         .media_by_id(clip.media)
         .ok_or_else(|| ExportError::Invalid("the clip's media isn't in the project".into()))?;
-    let folder = folder(&job.output)?;
+    let folder = folder(&job.output, job.exact)?;
     // What an export or a frame killed in this folder left (D16).
     match sweep_temp_files(&folder, SWEEP_AGE) {
         Ok(gone) => {
@@ -170,18 +170,7 @@ pub(crate) fn run(
     } else {
         preset.size()
     };
-    let setup_of = |kind| {
-        let setup = EncoderSetup::of(kind, s.codec, s.quality, preset, plan.rate(), ten_bit);
-        let setup = if job.draft {
-            setup.draft(preset.size(), size)
-        } else {
-            setup
-        };
-        match job.vaapi_level {
-            Some(level) => setup.with_vaapi_level(level),
-            None => setup,
-        }
-    };
+    let setup_of = |kind| setup(job, preset, &plan, kind, ten_bit);
     if s.codec == Codec::H264 && size.0 > H264_HARDWARE_WIDTH {
         warnings.push(Warning::new(
             codes::H264_LEVEL_6,
@@ -208,15 +197,7 @@ pub(crate) fn run(
     };
     let (audio_plan, audio_warnings) = audio::choose(&media.path, s.audio, &sequence.output)?;
     warnings.extend(audio_warnings);
-    // The muxer's file and the finished one are both on the disk until
-    // the first is removed (section 8.6, amendment 2 item 28). Every
-    // encoder of a codec has the same rates.
-    let needed = setup_of(encoders.kinds[0])
-        .estimate(
-            audio_plan.as_ref().map_or(0, audio::Plan::bits),
-            plan.duration(),
-        )
-        .saturating_mul(2);
+    let needed = needed(job, preset, &plan, encoders.kinds[0], audio_plan.as_ref());
     warnings.extend(room(&folder, needed, free_space(&folder))?);
     let origin = match &audio_plan {
         None => None,
@@ -349,20 +330,7 @@ pub(crate) fn run(
     if stop.is_shut_down() {
         return Err(ExportError::Cancelled);
     }
-    let want = Expected {
-        codec: s.codec,
-        size,
-        frames: plan.count(),
-        duration: plan.duration(),
-        rate: plan.rate(),
-        sphere: matches!(sequence.output, Output::Equirect { .. }),
-        audio: audio_plan.as_ref().map(|a| ExpectedAudio {
-            codec: a.codec().to_owned(),
-            rate: a.rate(),
-            channels: a.channels(),
-            ambix: a.ambix,
-        }),
-    };
+    let want = expected(job, preset, &plan, audio_plan.as_ref());
     // A failed check drops `tmp`, which removes it.
     let checks = check::check(tmp.path(), &want, stop.shutdown_flag()).map_err(|e| {
         if stop.is_shut_down() {
@@ -649,12 +617,81 @@ fn once(o: Once<'_>) -> Result<Attempt, Tried> {
     })
 }
 
+/// The encoder `kind` as `job` sets it up, at the draft's size and
+/// speed for a draft.
+fn setup(
+    job: &ExportJob,
+    preset: Preset,
+    plan: &FramePlan,
+    kind: EncoderKind,
+    ten_bit: bool,
+) -> EncoderSetup {
+    let s = &job.settings;
+    let setup = EncoderSetup::of(kind, s.codec, s.quality, preset, plan.rate(), ten_bit);
+    let setup = if job.draft {
+        setup.draft(preset.size(), preset.draft_size())
+    } else {
+        setup
+    };
+    match job.vaapi_level {
+        Some(level) => setup.with_vaapi_level(level),
+        None => setup,
+    }
+}
+
+/// What the finished file of `job` is, as its checks read it back.
+pub(crate) fn expected(
+    job: &ExportJob,
+    preset: Preset,
+    plan: &FramePlan,
+    audio: Option<&audio::Plan>,
+) -> Expected {
+    Expected {
+        codec: job.settings.codec,
+        size: if job.draft {
+            preset.draft_size()
+        } else {
+            preset.size()
+        },
+        frames: plan.count(),
+        duration: plan.duration(),
+        rate: plan.rate(),
+        sphere: matches!(job.project.the_sequence().output, Output::Equirect { .. }),
+        audio: audio.map(|a| ExpectedAudio {
+            codec: a.codec().to_owned(),
+            rate: a.rate(),
+            channels: a.channels(),
+            ambix: a.ambix,
+        }),
+    }
+}
+
+/// The bytes an export needs free: the muxer's file and the finished
+/// one are both on the disk until the first is removed (section 8.6,
+/// amendment 2 item 28). Every encoder of a codec has the same rates,
+/// at either depth.
+pub(crate) fn needed(
+    job: &ExportJob,
+    preset: Preset,
+    plan: &FramePlan,
+    kind: EncoderKind,
+    audio: Option<&audio::Plan>,
+) -> u64 {
+    setup(job, preset, plan, kind, false)
+        .estimate(audio.map_or(0, audio::Plan::bits), plan.duration())
+        .saturating_mul(2)
+}
+
 /// The folder the export's files go in: the output's, through any links
-/// to it, as the writer finds it.
-fn folder(output: &Path) -> Result<PathBuf, ExportError> {
-    let dest = follow_links(output).map_err(|e| {
-        ExportError::failed(Stage::File, None, format!("{}: {e}", output.display()))
-    })?;
+/// to it, as the writer finds it; with `exact`, the one its path names.
+fn folder(output: &Path, exact: bool) -> Result<PathBuf, ExportError> {
+    let dest = if exact {
+        output.to_path_buf()
+    } else {
+        follow_links(output).map_err(|e| {
+            ExportError::failed(Stage::File, None, format!("{}: {e}", output.display()))
+        })?
+    };
     Ok(match dest.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
@@ -696,7 +733,7 @@ fn spawn<T: Send + 'static>(
     std::thread::Builder::new()
         .name(name.into())
         .spawn(f)
-        .map_err(|e| ExportError::Invalid(format!("starting the export's {name} thread: {e}")))
+        .map_err(|e| ExportError::Internal(format!("starting the export's {name} thread: {e}")))
 }
 
 /// How a stage's thread ended; a panic fails `stage`.
@@ -1107,6 +1144,7 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
     let mux = MuxOptions {
         movie_timescale: Some(feed.as_deref().map_or(audio::RATE, Feed::rate)),
         negative_cts_offsets: true,
+        exact: job.exact,
     };
     let track = feed.as_deref().map(Feed::track);
     let (created, log) = Busy::time(&busy.encode, || {
@@ -1813,7 +1851,18 @@ mod tests {
         // The real call, on a folder that is there.
         let tmp = TempDir::new("room");
         assert!(free_space(&tmp.0).unwrap() > 0);
-        assert_eq!(folder(&tmp.0.join("out.mp4")).unwrap(), tmp.0);
-        assert_eq!(folder(Path::new("out.mp4")).unwrap(), PathBuf::from("."));
+        assert_eq!(folder(&tmp.0.join("out.mp4"), false).unwrap(), tmp.0);
+        assert_eq!(
+            folder(Path::new("out.mp4"), false).unwrap(),
+            PathBuf::from(".")
+        );
+        // A link at the output leads the files to its target's folder,
+        // except when the path is to be taken as it is (a2-plan 5.3).
+        let other = tmp.0.join("other");
+        std::fs::create_dir(&other).unwrap();
+        let link = tmp.0.join("link.mp4");
+        std::os::unix::fs::symlink(other.join("out.mp4"), &link).unwrap();
+        assert_eq!(folder(&link, false).unwrap(), other);
+        assert_eq!(folder(&link, true).unwrap(), tmp.0);
     }
 }

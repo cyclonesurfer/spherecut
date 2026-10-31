@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "render",
+  "description": "Export a project to a new MP4 beneath the write root, as a job: answers at once with its id, for job. One runs at a time; the file appears only when whole and checked.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "project",
+    "output"
+  ],
+  "properties": {
+    "project": {
+      "type": "string",
+      "description": "A .spherecut file.",
+      "minLength": 1
+    },
+    "output": {
+      "type": "string",
+      "description": "A new .mp4; nothing is replaced.",
+      "minLength": 1
+    },
+    "range": {
+      "type": "object",
+      "description": "Part of the trim.",
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array"
+            }
+          ],
+          "description": "A time, as look's."
+        },
+        "to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array"
+            }
+          ],
+          "description": "A time."
+        }
+      }
+    },
+    "draft": {
+      "type": "boolean",
+      "description": "Small and fast, for a look."
+    }
+  }
+}

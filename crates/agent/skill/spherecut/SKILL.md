@@ -1,12 +1,14 @@
 ---
 name: spherecut
-description: Look at and check 360° video on this machine with Spherecut's tools (probe, look, analyze, check, doctor), served by `spherecut mcp` or run as `spherecut call`. Use it for 360 footage, from an Insta360, GoPro MAX or DJI camera or any equirect MP4, MOV, MKV or WebM, to find where a moving subject is over time, to validate a 360 export for YouTube or for keeping, or to find why a file stutters.
+description: Look at, check, reframe and render 360° video on this machine with Spherecut's tools (probe, look, analyze, check, doctor; project, edit, undo, render, job, compare), served by `spherecut mcp` or run as `spherecut call`. Use it for 360 footage, from an Insta360, GoPro MAX or DJI camera or any equirect MP4, MOV, MKV or WebM, to find where a moving subject is over time, to validate a 360 export for YouTube or for keeping, to find why a file stutters, or to reframe a clip into a flat or vertical video that follows the action.
 ---
 
 # Spherecut
 
 Spherecut reads 360° footage on this machine and shows it to you as
-labelled images and JSON. Its tools come from the `spherecut` MCP server.
+labelled images and JSON; where the server allows writing, it also makes
+projects of it, edits them and renders them. Its tools come from the
+`spherecut` MCP server.
 If they aren't connected, the same tools run from a shell:
 `spherecut call <tool> '<json>'` prints one JSON document, with any image
 written to a file whose path is in its `images`.
@@ -91,3 +93,45 @@ Ground rules:
 4. Report the cause (a variable rate, missing frames, repeated pictures,
    keyframes far apart, a decoder below real time) with its evidence:
    the times, the counts and the numbers.
+
+## Reframe a clip into a flat video
+
+This needs a server started with `--allow-write` and a `--write-root`:
+without one, `edit`, `undo`, `render` and `job` aren't listed.
+`spherecut call` runs all but `render` and `job`, since a render ends
+with its server; `spherecut render --json` is the same export.
+
+1. Find the moments and directions as in the first recipe: `probe`,
+   `look` with `mode: "sheet"`, then `mode: "sphere"` at the times that
+   matter. Note each time (its `exact`) and the yaw and pitch to point
+   the view at.
+2. `project` with a new `file` (`"trip.spherecut"` is made beneath the
+   write root) and `create: {"media": …}`: a project of the clip, flat
+   16:9 at 1080 by default. Its summary gives the `file` to go on with
+   and the ids that edits name: the `sequence`, and each clip's `id`.
+3. `project` with `part: "edits"`, once: every op, with an example of
+   each.
+4. `edit` with the ops in one call, all or none, one undo step:
+   `set_view_path` with a point at each moment (`at`, `orientation:
+   {"ypr_deg": [yaw, pitch, 0]}`, `fov`) and `replace: true`; `set_trim`
+   for the part to keep; `set_output` for another shape (`"aspect":
+   "9:16"` for a vertical video). Times in edits are the clip's file
+   times, as `look` gave them. `dry_run: true` checks without saving.
+   `undo` takes back the last step if an agent made it; a step of the
+   user's is theirs to undo.
+5. `look` with `project` and `mode: "sheet"`: the frames a render makes,
+   at the render's times (0 is the trim's start; each tile's `source` is
+   the file's time). Where the subject drifts off centre, add points at
+   those tiles' `source` times and edit again.
+6. `check` with `project` and the `target` its output fits
+   (`flat_16_9`, `vertical`, `youtube_360`): what a render would make,
+   before one is made.
+7. `render` with `draft: true` and a `range` of a few seconds (`{"from":
+   …, "to": …}`, file times). It answers at once with a `job`: call
+   `job` with `wait: 30` until its `state` is `done`; its `check` is the
+   file's verdict. `compare` the draft's `output` with `against_project`
+   and `from` the range's `from`: a render is above 40 dB and an SSIM of
+   0.98 at every time, whatever its encoder. Under about 30 dB means the
+   wrong frames: the wrong `from`, or not this project's render.
+8. `render` the whole project and follow it with `job` the same way.
+   Report the file, its `check`, and the moments you keyed.

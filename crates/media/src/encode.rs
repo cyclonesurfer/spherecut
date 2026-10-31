@@ -288,6 +288,9 @@ pub struct MuxOptions {
     /// time 0 and the video's edit list is an identity, which
     /// [`Finish::drop_video_identity_edit`] then removes.
     pub negative_cts_offsets: bool,
+    /// Write at the path as given, following no link there (an agent's
+    /// render, through its folder's descriptor: a2-plan 5.3).
+    pub exact: bool,
 }
 
 /// One planar YUV frame. Plane strides equal plane widths.
@@ -851,10 +854,14 @@ impl Mp4Writer {
             _ => None,
         };
 
-        let dest = follow_links(path).map_err(|error| EncodeError::Io {
-            path: path.to_path_buf(),
-            error,
-        })?;
+        let dest = if mux.exact {
+            path.to_path_buf()
+        } else {
+            follow_links(path).map_err(|error| EncodeError::Io {
+                path: path.to_path_buf(),
+                error,
+            })?
+        };
         let io_err = |error| EncodeError::Io {
             path: dest.clone(),
             error,

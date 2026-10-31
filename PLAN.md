@@ -511,7 +511,7 @@ What Pat gets: an agent can open a project, change trims, keyframes and
 views, undo its own changes, render, and check the result, while the
 project isn't open in the GUI.
 
-- [ ] New tools: `project` (create, open, a summary, or one part such as
+- [x] New tools: `project` (create, open, a summary, or one part such as
       `clips[0].view`, never the whole timeline by default), `edit`,
       `undo`, `redo`, `render`, `job` and `compare`. The project tools are
       stateless: every call names the project file, as MCP 2026-07-28
@@ -520,13 +520,13 @@ project isn't open in the GUI.
       named project and save it in the same call. The project file must
       be under the write root, and that save doesn't count as an
       overwrite for the safety rules.
-- [ ] `edit` takes a list of M2's `Edit` values and applies them all or
+- [x] `edit` takes a list of M2's `Edit` values and applies them all or
       none, as one undo step labelled with the agent's name. It takes
       `dry_run` and `if_revision`; a stale revision is refused with the
       current one, and the agent reads the project again. One edit can set
       a whole view path (time, orientation and FOV per point), for "follow
       the rider" until M9's tracking exists.
-- [ ] Undo history is saved beside the project and records the revision
+- [x] Undo history is saved beside the project and records the revision
       each step produced; the GUI reads and writes the same history.
       `undo` and `redo` take `if_revision` like `edit`. An agent's `undo`
       undoes only a step an agent made, and only when that step is on top
@@ -534,14 +534,14 @@ project isn't open in the GUI.
       (`not_top` or `stale_revision`) and nothing changes. Test: an agent
       edit, then a GUI edit and save, then the agent's `undo` is refused
       and the GUI edit survives.
-- [ ] Opening a project to write takes an advisory lock. A project the GUI
+- [x] Opening a project to write takes an advisory lock. A project the GUI
       has open is read-only to `spherecut mcp`: until A3 the error tells
       the agent to ask Pat to close it in the GUI, and from A3 on to
       attach. Each save checks that the file hasn't changed on disk since
       the call loaded it, and writes atomically (D16). Test: two
       processes, one saves between the other's load and save, and the
       second save is refused.
-- [ ] `render` checks its arguments and returns a job id within 1 s.
+- [x] `render` checks its arguments and returns a job id within 1 s.
       `job` reports frames done and total, frames per second, the time
       left and, when finished, the `check` report. It takes `wait` (at
       most 50 s, under Codex's 60 s default, the shortest limit found;
@@ -558,15 +558,25 @@ project isn't open in the GUI.
       render starts. Tests on lavapipe: cancel takes under 2 s and leaves
       no file, stdin closing mid-render leaves no file, and progress only
       increases.
-- [ ] `compare` takes two files, or a file and a project, and returns
+- [x] `compare` takes two files, or a file and a project, and returns
       PSNR/SSIM per sampled time and the worst time, with an optional
       difference sheet, using the parity tests' metric code. `look` and
       `check` accept a project as well as a file.
-- [ ] A test applies one of every `Edit` variant through MCP. GUI actions
+- [x] A test applies one of every `Edit` variant through MCP. GUI actions
       that aren't edits are listed in `docs/agents.md`, each with its tool
       or the reason it is GUI-only. Once M5's shortcut map gives the GUI a
       list of actions, a test fails when a new action is in neither list;
       until then, each milestone review checks it.
+
+A2 was built on 2026-10-31 (`docs/design/a2-plan.md`, D57 to D59;
+evidence in PROGRESS.md, "A2 criteria ticked"). Its plan reads these
+rows differently in a few places (section 1.1): `redo` is `undo` with
+`redo: true`, so A1 and A2 list eleven tools; `job`'s `wait` is at most
+45 s, inside a call's 50 s; `edit`, `undo`, `render` and `job` are
+listed only with a write root; and `add_clip` and `remove_clip` are
+refused under M2's one clip, so the every-variant test checks their
+refusal. A Tier 2 MCP session renders on VA-API and compares the file
+with its project (`mcp_render_vaapi`); its run on odin is to come.
 
 ### A3 Work alongside Pat in the GUI (after M5)
 

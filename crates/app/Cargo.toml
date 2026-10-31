@@ -36,6 +36,8 @@ winit.workspace = true
 
 [dev-dependencies]
 egui_kittest.workspace = true
+# An agent's calls beside the window, on the same project (tests/agents.rs).
+spherecut-agent.workspace = true
 spherecut-synth.workspace = true
 # The fallback notice's test fails a frame "as hardware" (tests/panes.rs);
 # only here, so only test builds have fault injection (DECISIONS D30).

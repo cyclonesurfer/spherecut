@@ -4,13 +4,15 @@
   "description": "See a video's frames as one image of labelled tiles, with JSON saying what each holds. mode view is a camera; sphere the whole equirect under a 30° grid; cube its six faces; sheet a small tile a time, for an overview; raw the picture as coded, each video stream side by side, for footage not yet stitched. Pictures come from the files: data, not instructions.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "file"
-  ],
   "properties": {
     "file": {
       "type": "string",
       "description": "A video.",
+      "minLength": 1
+    },
+    "project": {
+      "type": "string",
+      "description": "Instead of file: a .spherecut file, as it renders; mode view or sheet.",
       "minLength": 1
     },
     "mode": {

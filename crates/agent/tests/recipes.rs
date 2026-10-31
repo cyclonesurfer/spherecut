@@ -1,6 +1,6 @@
-//! The skill's three recipes (a1-plan section 11.3), replayed as the
-//! calls an agent following `SKILL.md` makes, on synthetic media with a
-//! planted answer, each within its budget. A call costs what its result
+//! The skill's four recipes (a1-plan section 11.3, a2-plan 11), replayed
+//! as the calls an agent following `SKILL.md` makes, on synthetic media
+//! with a planted answer, each within its budget. A call costs what its result
 //! puts before a model: the text of `tools/call`'s content, a character
 //! for every 4, plus ceil(w / 28) × ceil(h / 28) for each image. Where
 //! the test reads the pixels an agent would look at (recipe 1), its looks
@@ -62,6 +62,31 @@ impl Agent {
             tools: Spherecut::new(roots).image_budget(budget),
             cost: 0,
             calls: Vec::new(),
+        }
+    }
+
+    /// A session that writes beneath `root` too, as `--allow-write
+    /// --write-root` makes one.
+    fn writing(root: &Path) -> Agent {
+        let roots = Roots::new(&[root.to_path_buf()], Some(root)).unwrap();
+        Agent {
+            tools: Spherecut::new(roots).image_budget(MAX_IMAGE_BUDGET),
+            cost: 0,
+            calls: Vec::new(),
+        }
+    }
+
+    /// `job` with `wait` until the render that answered `r` ends: the
+    /// finished job.
+    fn follow(&mut self, r: &Value) -> Value {
+        let end = Instant::now() + Duration::from_secs(300);
+        loop {
+            let (j, _) = self.call("job", json!({"job": r["job"], "wait": 30}));
+            match j["state"].as_str() {
+                Some("done") => return j,
+                Some("failed" | "cancelled") => panic!("the render ended: {j}"),
+                _ => assert!(Instant::now() < end, "timed out: {j}"),
+            }
         }
     }
 
@@ -359,4 +384,148 @@ fn recipe_finds_why_a_file_stutters() {
     // the gap's.
     assert_eq!(r["summary"]["frames"], 45 - media::JITTER_GAP_SLOTS, "{r}");
     agent.within(8_000);
+}
+
+/// A PSNR in a result: `"inf"` is infinite.
+fn db(v: &Value) -> f64 {
+    match v {
+        Value::String(s) if s == "inf" => f64::INFINITY,
+        v => v.as_f64().unwrap_or_else(|| panic!("a PSNR: {v}")),
+    }
+}
+
+/// Recipe 4: the grid's marker runs round the equator, 3° a frame. The
+/// recipe keys a view path on it from a sheet and the sphere, and the
+/// project's frames keep it within 5° of the middle; a draft of half a
+/// second is above PLAN's least against the project (40 dB, 0.98) at
+/// every time, and the whole render passes its check, for 12,000.
+#[test]
+fn recipe_reframes_a_clip_into_a_flat_video() {
+    assert!(SKILL.contains("## Reframe a clip into a flat video"));
+    let d = TempDir::new("reframe");
+    let clip = media::write(
+        &Spec {
+            name: "ride".into(),
+            width: 1024,
+            height: 512,
+            frames: 60,
+            codec: Codec::H264Lossless,
+            spherical: true,
+            ..Spec::default()
+        },
+        &d.0,
+    )
+    .unwrap();
+    let file = clip.file_name().unwrap().to_str().unwrap();
+    let mut agent = Agent::writing(&d.0);
+
+    // 1. probe, a sheet, and the sphere at the times the marker shows.
+    let (r, _) = agent.call("probe", json!({"files": [file]}));
+    assert_eq!(r["files"][0]["projection"], "equirect", "{r}");
+    let (r, images) = agent.call(
+        "look",
+        json!({"file": file, "mode": "sheet", "count": 12, "format": "png"}),
+    );
+    let moments: Vec<&Value> = tiles(&r)
+        .iter()
+        .filter(|t| marker_x(&images[0], t).is_some())
+        .map(|t| &t["time"]["exact"])
+        .collect();
+    assert!(moments.len() >= 7, "{} sightings in {r}", moments.len());
+    let (r, images) = agent.call(
+        "look",
+        json!({"file": file, "mode": "sphere", "times": moments, "format": "png"}),
+    );
+    let seen: Vec<(Value, f64)> = tiles(&r)
+        .iter()
+        .filter_map(|t| {
+            let x = marker_x(&images[0], t)?;
+            Some((t["time"]["exact"].clone(), x * 360.0 - 180.0))
+        })
+        .collect();
+    assert!(seen.len() >= 7, "{} sightings in {r}", seen.len());
+
+    // 2. A project of the clip: flat 16:9 at 1080.
+    let (s, _) = agent.call(
+        "project",
+        json!({"file": "ride.spherecut", "create": {"media": file}}),
+    );
+    let project = s["file"].clone();
+    let id = s["clips"][0]["id"].clone();
+
+    // 3. The ops, once.
+    let (r, _) = agent.call("project", json!({"file": project, "part": "edits"}));
+    assert!(r.to_string().contains("set_view_path"), "{r}");
+
+    // 4. One edit: the view through each sighting, and the trim from the
+    // first to the last.
+    let points: Vec<Value> = seen
+        .iter()
+        .map(|(at, yaw)| json!({"at": at, "orientation": {"ypr_deg": [yaw, 0, 0]}, "fov": 60}))
+        .collect();
+    let (r, _) = agent.call(
+        "edit",
+        json!({"file": project, "edits": [
+            {"op": "set_view_path", "clip": id, "points": points, "replace": true},
+            {"op": "set_trim", "clip": id, "start": seen[0].0, "end": seen[seen.len() - 1].0},
+        ]}),
+    );
+    assert_eq!(r["undo"]["agent_may"], true, "{r}");
+
+    // 5. The project's frames: the marker in the middle, wherever it is in
+    // the clip.
+    let (r, images) = agent.call(
+        "look",
+        json!({"project": project, "mode": "sheet", "format": "png"}),
+    );
+    let mut found = 0;
+    let mut worst_off = 0f64;
+    for t in tiles(&r) {
+        let Some(x) = marker_x(&images[0], t) else {
+            continue;
+        };
+        found += 1;
+        let off_centre = ((2.0 * x - 1.0) * 30f64.to_radians().tan())
+            .atan()
+            .to_degrees();
+        assert!(off_centre.abs() < 5.0, "{off_centre}° off in {t}");
+        worst_off = worst_off.max(off_centre.abs());
+    }
+    assert!(found >= 8, "{found} of 12 tiles show the marker: {r}");
+
+    // 6. What a render would make.
+    let (r, _) = agent.call("check", json!({"project": project, "target": "flat_16_9"}));
+    assert_eq!(r["pass"], true, "{r}");
+
+    // 7. A draft of half a second, against the project.
+    let (r, _) = agent.call(
+        "render",
+        json!({"project": project, "output": "draft.mp4", "draft": true,
+               "range": {"from": "0.5", "to": "1"}}),
+    );
+    let job = agent.follow(&r);
+    assert_eq!(job["check"]["pass"], true, "{job}");
+    let (c, _) = agent.call(
+        "compare",
+        json!({"file": r["output"], "against_project": project, "from": "0.5"}),
+    );
+    let worst = &c["worst"];
+    assert!(
+        db(&worst["psnr"]["psnr"]) > 40.0 && worst["ssim"]["ssim"].as_f64().unwrap() > 0.98,
+        "{c}"
+    );
+    eprintln!(
+        "{found} of 12 tiles show the marker, at most {worst_off:.1}° off centre; the draft's \
+         worst {worst}"
+    );
+
+    // 8. The whole project.
+    let (r, _) = agent.call(
+        "render",
+        json!({"project": project, "output": "ride-flat.mp4"}),
+    );
+    let job = agent.follow(&r);
+    assert_eq!(job["check"]["pass"], true, "{job}");
+    assert_eq!(job["report"]["size"], json!([1920, 1080]), "{job}");
+    agent.within(12_000);
 }

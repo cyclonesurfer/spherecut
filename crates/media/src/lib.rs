@@ -30,6 +30,7 @@ pub mod mp4;
 mod nal;
 pub mod packets;
 pub mod probe;
+pub mod project;
 pub mod seek;
 pub mod spherical;
 

@@ -43,6 +43,15 @@ use crate::text;
 /// The revisions served through `initialize`, newest first.
 pub const SUPPORTED: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
+/// The most characters of a client's name that label its steps.
+pub const CLIENT_CHARS: usize = 64;
+
+/// A client's name when `initialize` gave none.
+pub const UNNAMED_CLIENT: &str = "agent";
+
+/// `spherecut call`'s name for itself, as a client.
+pub const CALL_CLIENT: &str = "spherecut call";
+
 /// Where a 2026-07-28 request carries its revision, in `params._meta`.
 const MODERN_META: &str = "io.modelcontextprotocol/protocolVersion";
 
@@ -212,12 +221,23 @@ impl Output {
 
 /// The tools a server offers.
 pub trait Tools: Send + Sync + 'static {
-    /// The `tools` array of `tools/list`, in its fixed order.
-    fn list(&self) -> Value;
+    /// The `tools` array of `tools/list`, in its fixed order, for a
+    /// session on protocol revision `version` (one of [`SUPPORTED`]).
+    fn list(&self, version: &str) -> Value;
     /// Whether there is a tool of this name.
     fn has(&self, name: &str) -> bool;
     /// Run tool `name` on `args`, on a worker thread.
     fn call(&self, name: &str, args: Value, cx: &CallCx) -> Result<Output, ToolError>;
+    /// Stop the work that outlives its call, a render job's (a2-plan
+    /// 5.4), as the session ends: [`serve`] calls it when it stops the
+    /// calls.
+    fn cancel_all(&self) {}
+    /// Wait until `until` for that work to end: how many threads were
+    /// still at it then, which [`Ended::stuck`] counts.
+    fn shutdown(&self, until: Instant) -> usize {
+        let _ = until;
+        0
+    }
 }
 
 /// The server's name, version and instructions, for `initialize`.
@@ -282,6 +302,8 @@ pub struct CallCx {
     limit: Duration,
     timed_out: Arc<AtomicBool>,
     progress: Option<Progress>,
+    /// Who is calling ([`CallCx::client`]).
+    client: Arc<str>,
 }
 
 /// Cancels a call ([`CallCx::canceller`]).
@@ -318,6 +340,7 @@ impl CallCx {
             limit: deadline.saturating_duration_since(Instant::now()),
             timed_out: Arc::default(),
             progress: None,
+            client: Arc::from(CALL_CLIENT),
         };
         let (stop, timed_out) = (cx.stop.clone(), cx.timed_out.clone());
         let _ = std::thread::Builder::new()
@@ -353,6 +376,14 @@ impl CallCx {
     /// inside a read when the call does.
     pub fn interrupt(&self) -> Arc<AtomicBool> {
         self.stop.shutdown_flag()
+    }
+
+    /// Who is calling: the client's `clientInfo.name` from `initialize`,
+    /// made safe to show and cut to [`CLIENT_CHARS`] characters, `agent`
+    /// when it gave none, and `spherecut call` for `spherecut call`. It
+    /// names the agent in each undo step it makes (a2-plan 2).
+    pub fn client(&self) -> &str {
+        &self.client
     }
 
     /// How long the call has left.
@@ -430,6 +461,13 @@ struct Job {
     stop: StopSource,
     deadline: Instant,
     timed_out: Arc<AtomicBool>,
+    client: Arc<str>,
+}
+
+/// What `initialize` agreed on.
+struct Session {
+    version: &'static str,
+    client: Arc<str>,
 }
 
 /// Why the session is ending.
@@ -523,6 +561,7 @@ pub fn serve(
     }
     lock(&shared.queue).clear();
     shared.ready.notify_all();
+    shared.tools.cancel_all();
     {
         let _sleep = lock(&shared.reaper_sleep.0);
         shared.reaper_sleep.1.notify_all();
@@ -551,6 +590,8 @@ pub fn serve(
     if stuck > 0 {
         tracing::warn!("mcp: {stuck} call(s) didn't stop in time; leaving them");
     }
+    // The renders, against the same deadline.
+    stuck += shared.tools.shutdown(until);
     // After giving up, the reader may still be waiting for input.
     if let Some(t) = reader
         && !gave_up
@@ -635,8 +676,8 @@ fn error_message(id: Option<&Id>, code: i64, message: &str, data: Option<Value>)
 
 fn read(mut input: impl BufRead, shared: &Shared, info: &Info) {
     let mut buf = Vec::new();
-    // The revision `initialize` agreed on, once it has.
-    let mut session: Option<&'static str> = None;
+    // What `initialize` agreed on, once it has.
+    let mut session: Option<Session> = None;
     loop {
         match read_line(&mut input, &mut buf) {
             Line::End => return,
@@ -683,7 +724,7 @@ fn read(mut input: impl BufRead, shared: &Shared, info: &Info) {
 fn request(
     shared: &Shared,
     info: &Info,
-    session: &mut Option<&'static str>,
+    session: &mut Option<Session>,
     id: &Id,
     method: &str,
     params: Map<String, Value>,
@@ -735,7 +776,10 @@ fn request(
                 part("version"),
                 text::field(asked.unwrap_or("no revision")),
             );
-            *session = Some(version);
+            *session = Some(Session {
+                version,
+                client: Arc::from(client_name(client)),
+            });
             Some(result_message(
                 id,
                 json!({
@@ -747,28 +791,62 @@ fn request(
             ))
         }
         "ping" => Some(result_message(id, json!({}))),
-        _ if session.is_none() => Some(error_message(
-            Some(id),
-            code::INVALID_REQUEST,
-            "send initialize first",
-            None,
-        )),
-        "tools/list" => Some(result_message(id, json!({"tools": shared.tools.list()}))),
-        "tools/call" => call(shared, id, params),
-        _ => Some(error_message(
-            Some(id),
-            code::METHOD_NOT_FOUND,
-            &format!(
-                "no method {}",
-                text::field(&method.chars().take(64).collect::<String>())
-            ),
-            None,
-        )),
+        _ => match session {
+            None => Some(error_message(
+                Some(id),
+                code::INVALID_REQUEST,
+                "send initialize first",
+                None,
+            )),
+            Some(s) => match method {
+                "tools/list" => Some(result_message(
+                    id,
+                    json!({"tools": shared.tools.list(s.version)}),
+                )),
+                "tools/call" => call(shared, id, params, &s.client),
+                _ => Some(error_message(
+                    Some(id),
+                    code::METHOD_NOT_FOUND,
+                    &format!(
+                        "no method {}",
+                        text::field(&method.chars().take(64).collect::<String>())
+                    ),
+                    None,
+                )),
+            },
+        },
+    }
+}
+
+/// The name a client gave in `initialize`'s `clientInfo`, as each step it
+/// makes is labelled: made safe to show, cut to [`CLIENT_CHARS`], and
+/// `agent` when there was none.
+fn client_name(client: Option<&Value>) -> String {
+    let name = client
+        .and_then(|c| c.get("name"))
+        .and_then(Value::as_str)
+        .map(|n| {
+            text::field(n)
+                .trim()
+                .chars()
+                .take(CLIENT_CHARS)
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    if name.is_empty() {
+        UNNAMED_CLIENT.to_owned()
+    } else {
+        name
     }
 }
 
 /// Queue a `tools/call`, or answer why not.
-fn call(shared: &Shared, id: &Id, mut params: Map<String, Value>) -> Option<Value> {
+fn call(
+    shared: &Shared,
+    id: &Id,
+    mut params: Map<String, Value>,
+    client: &Arc<str>,
+) -> Option<Value> {
     let bad = |message: &str| Some(error_message(Some(id), code::INVALID_PARAMS, message, None));
     let Some(Value::String(name)) = params.remove("name") else {
         return bad("tools/call needs the tool's name");
@@ -826,6 +904,7 @@ fn call(shared: &Shared, id: &Id, mut params: Map<String, Value>) -> Option<Valu
         stop,
         deadline,
         timed_out,
+        client: client.clone(),
     });
     shared.ready.notify_one();
     None
@@ -884,6 +963,7 @@ fn worker(shared: &Shared, retired: &Arc<AtomicBool>) {
                 out: shared.out.clone(),
                 last: Mutex::new(None),
             }),
+            client: job.client,
         };
         let outcome = match cx.check() {
             Err(e) => Err(e),

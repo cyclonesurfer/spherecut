@@ -154,7 +154,7 @@ fn key_at_20(h: &mut H) {
     h.key_press_modifiers(Modifiers::ALT, Key::K);
     step(h);
     assert_eq!(lanes(h), [2, 2, 2]);
-    assert_eq!(doc(h).undo_label(), Some("Key the view"));
+    assert_eq!(doc(h).undo_label().as_deref(), Some("Key the view"));
     assert_eq!(look(h), Look::Keyed);
     let v = doc(h).view_at(t(20));
     assert!(apart_deg(v.orientation, turn(60.0, 0.0)) < 1e-6);
@@ -192,7 +192,7 @@ fn the_trim_plays_to_out_then_from_in_and_loops() {
     step(&mut h);
     let trim = doc(&h).clip().source;
     assert_eq!((trim.start, trim.end), (t(10), t(21)));
-    assert_eq!(doc(&h).undo_label(), Some("Set out"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Set out"));
 
     // From 15, play stops on 20, the last frame in.
     seek(&mut h, 15);
@@ -293,7 +293,7 @@ fn alt_k_keys_the_view_the_viewer_follows_and_undo_takes_it_back() {
     step(&mut h);
     step(&mut h);
     assert_eq!(lanes(&h), [1, 1, 1]);
-    assert_eq!(doc(&h).redo_label(), Some("Key the view"));
+    assert_eq!(doc(&h).redo_label().as_deref(), Some("Key the view"));
     step(&mut h);
     until(&mut h, "the static view at 10", |_| {
         common::last_drawn(&rs)
@@ -304,7 +304,7 @@ fn alt_k_keys_the_view_the_viewer_follows_and_undo_takes_it_back() {
     h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
     step(&mut h);
     assert_eq!(lanes(&h), [2, 2, 2]);
-    assert_eq!(doc(&h).undo_label(), Some("Key the view"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Key the view"));
     until(&mut h, "the keyed view at 10 again", |_| {
         common::last_drawn(&rs).is_some_and(|d| apart_deg(d.view.orientation, want) < 1e-6)
     });
@@ -328,7 +328,7 @@ fn a_change_off_a_key_is_a_look_around_until_the_playhead_moves() {
     });
     assert!(since.elapsed() >= SETTLE);
     assert_eq!(look(&h), Look::Around);
-    assert_eq!(doc(&h).undo_label(), Some("Key the view"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Key the view"));
     let _ = h.get_by_label(NOT_KEYED);
     // The look stays where it was put.
     step(&mut h);
@@ -360,7 +360,7 @@ fn a_change_off_a_key_is_a_look_around_until_the_playhead_moves() {
     h.key_press(Key::Home);
     step(&mut h);
     assert_eq!(look(&h), Look::Keyed);
-    assert_eq!(doc(&h).undo_label(), Some("Key the view"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Key the view"));
     finish(h);
 }
 
@@ -390,7 +390,7 @@ fn a_drag_on_a_key_edits_it_as_one_step() {
     until(&mut h, "the drag's edit", |a| {
         a.state.reframe.look == Look::Keyed
     });
-    assert_eq!(doc(&h).undo_label(), Some("Reframe"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Reframe"));
     let dragged = h.state().state.view.q;
 
     // Let go with Escape, a drag keeps nothing and the view goes back.
@@ -410,7 +410,7 @@ fn a_drag_on_a_key_edits_it_as_one_step() {
     step(&mut h);
     step(&mut h);
     assert_eq!(look(&h), Look::Keyed);
-    assert_eq!(doc(&h).undo_label(), Some("Reframe"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Reframe"));
     assert!(apart_deg(doc(&h).view_at(t(20)).orientation, dragged) < 1e-6);
     assert_eq!(lanes(&h), [2, 2, 2]);
     let q = h.state().state.view.q;
@@ -423,7 +423,7 @@ fn a_drag_on_a_key_edits_it_as_one_step() {
 
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
     step(&mut h);
-    assert_eq!(doc(&h).undo_label(), Some("Key the view"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Key the view"));
     until(&mut h, "the view before the drag", |_| {
         common::last_drawn(&rs)
             .is_some_and(|d| apart_deg(d.view.orientation, turn(60.0, 0.0)) < 1e-6)
@@ -447,7 +447,14 @@ fn a_turn_past_half_way_round_keeps_the_way_it_went() {
     }
     until(&mut h, "the turn's edit", |a| {
         a.state.reframe.look == Look::Keyed
-            && a.state.reframe.doc.as_ref().unwrap().undo_label() == Some("Reframe")
+            && a.state
+                .reframe
+                .doc
+                .as_ref()
+                .unwrap()
+                .undo_label()
+                .as_deref()
+                == Some("Reframe")
     });
     let first = doc(&h).lane_keys(Lane::Orientation)[0].id;
     // 240° on from 0° is 120° the short way back: the long way.
@@ -471,7 +478,14 @@ fn a_lanes_only_key_takes_a_static_reframe() {
     step(&mut h);
     until(&mut h, "the zoom's edit", |a| {
         a.state.reframe.look == Look::Keyed
-            && a.state.reframe.doc.as_ref().unwrap().undo_label() == Some("Reframe")
+            && a.state
+                .reframe
+                .doc
+                .as_ref()
+                .unwrap()
+                .undo_label()
+                .as_deref()
+                == Some("Reframe")
     });
     assert_eq!(lanes(&h), [1, 1, 1]);
     let hfov = h.state().state.view.lens.hfov;
@@ -524,10 +538,10 @@ fn the_strip_selects_moves_and_eases_keys_and_drags_the_trim() {
     };
     // Let go with Escape, it keeps nothing (M2 plan section 4.3).
     drag(&mut h, true);
-    assert_eq!(doc(&h).undo_label(), Some("Key the view"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Key the view"));
     assert!(doc(&h).key_at(Lane::Orientation, t(20)).is_some());
     drag(&mut h, false);
-    assert_eq!(doc(&h).undo_label(), Some("Move keys"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Move keys"));
     let at: Vec<Time> = doc(&h)
         .lane_keys(Lane::Orientation)
         .iter()
@@ -546,7 +560,7 @@ fn the_strip_selects_moves_and_eases_keys_and_drags_the_trim() {
     h.get_by_label("Linear").click();
     step(&mut h);
     step(&mut h);
-    assert_eq!(doc(&h).undo_label(), Some("Set ease"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Set ease"));
     assert_eq!(doc(&h).lane_keys(Lane::Orientation)[1].ease, Ease::LINEAR);
 
     // Delete removes the selection, but a lane keeps its last key: here
@@ -565,7 +579,7 @@ fn the_strip_selects_moves_and_eases_keys_and_drags_the_trim() {
     step(&mut h);
     step(&mut h);
     assert!(!h.state().state.reframe.strip.dragging());
-    assert_eq!(doc(&h).undo_label(), Some("Delete keys"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Delete keys"));
     assert_eq!(lanes(&h), [1, 2, 2]);
     h.get_by_label(&key_label(Lane::Orientation, 0)).click();
     step(&mut h);
@@ -617,7 +631,7 @@ fn the_strip_selects_moves_and_eases_keys_and_drags_the_trim() {
     h.drop_at(to);
     step(&mut h);
     step(&mut h);
-    assert_eq!(doc(&h).undo_label(), Some("Move in"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Move in"));
     assert_eq!(doc(&h).clip().source.start, t(5));
     finish(h);
 }

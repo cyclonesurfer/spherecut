@@ -32,8 +32,8 @@ quaternions the project model holds; sphere depends on neither.
 
 agent depends on export (since M2.5): the JSON contract it holds for
 the CLI lists the export's codes and turns its errors and fallbacks
-into `render`'s documents (D51), and A2's tools will drive the same
-job handle.
+into `render`'s documents (D51), and A2's `render` and `job` drive the
+same job handle.
 
 render depends on core and sphere only, not on media: frames reach it
 through `core::video::VideoPlanes`, so the library has no FFmpeg
@@ -56,8 +56,8 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slices 5 and 6 |
 | `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
 | `spherecut-export` | The export (D52): `Export` runs an `ExportJob`, a project's sequence, on three threads (decode, render through the YUV pass, encode and mux) into a locked temporary file, then one last pass (V2, `SA3D`, the V1 box, the moov first) and section 9's read-back checks before it is put in place; the presets and their bitrates, the software encoders (libx264, libx265, libsvtav1) under a VBV cap, the size estimate and free-space check, audio copied (AAC and PCM cut to the sample), AAC or none; the job handle (progress, cancel, wait, the `Report` with each stage's time) that cli, the app and A2 drive; the VA-API encoders (VBR under the same cap, Mesa's quality level) tried before software, with a restart in software when one fails in its first second, and the decode on VA-API going on in software; the pace an export from the app keeps while the UI is busy (`Pace`, one frame per UI pass) | M2.4; M2.5: VA-API, the order and fallback, the decode path, stage times; M2.7: `Pace` |
-| `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside two rows of tabs: Info, Inspector, Doctor and Files, then Curves and Sphere); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); the overlay (`overlay`), the settings and their window (`settings`), the raw view, the smoke run (`smoke`) and the toolkit check's timeline prototype (`proto`, D53); `run`, which the CLI calls with no command; the reframer (M2.6, D54): the open project and its undo history (`doc`), the file work as jobs, the keyed view and look-around and the output frame (`reframe`), and the timeline strip (`timeline`); and (M2.7, D55) the curve editor (`curves`), the sphere overview (`overview`), the Inspector and look-at targets (`inspector`) and the export window with its job (`export`). `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs | M1 slices 7 and 8, M2.6, M2.7 |
-| `spherecut-agent` | Agent integration (D23, D43 to D46): the MCP server (`rpc`), the tools and their hand-written schemas (`tools`, `ops`), the roots (`roots`), the JSON contract of `--json` (`contract`, D27), frame's core that look renders through (`still`), look's canvas and font (`image`, `font`), the instructions and the skill; later the GUI attach bridge | A1 |
+| `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside two rows of tabs: Info, Inspector, Doctor and Files, then Curves and Sphere); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); the overlay (`overlay`), the settings and their window (`settings`), the raw view, the smoke run (`smoke`) and the toolkit check's timeline prototype (`proto`, D53); `run`, which the CLI calls with no command; the reframer (M2.6, D54): the open project and its undo history (`doc`), the file work as jobs (each project file opened under its lock with the history beside it, and never saved over a file changed on disk: A2.3, D57), the keyed view and look-around and the output frame (`reframe`), and the timeline strip (`timeline`); and (M2.7, D55) the curve editor (`curves`), the sphere overview (`overview`), the Inspector and look-at targets (`inspector`) and the export window with its job (`export`). `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs | M1 slices 7 and 8, M2.6, M2.7 |
+| `spherecut-agent` | Agent integration (D23, D43 to D46, D57 to D59): the MCP server (`rpc`), the tools and their hand-written schemas (`tools`, `ops`), the roots (`roots`), the JSON contract of `--json` (`contract`, D27), frame's core that look renders through (`still`), look's canvas and font (`image`, `font`), the instructions and the skill; A2's project tools (`ops::project`, `ops::edit`, `reference`) render jobs (`jobs`, `ops::render`, `ops::job`), and a project's frames for compare, look and check (`ops::sequence`, `ops::compare`); later the GUI attach bridge | A1, A2 |
 | `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor`, `frame` (and `frame --project`, a sequence's frame as the export renders it), `render` (a project's export, one envelope a line, D51), `mcp`, `call` and `agents install-skill` (A1). Its library half re-exports `spherecut_agent::contract` as `contract` | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI; A1: `mcp`, `call`, `agents install-skill`; M2.5: `render`, `frame --project` |
 | `xtask` | `check`, `compat` (clippy and a link of the tests against other FFmpeg builds, and Tier 1 against one, D2), `gen-media`, `hw-test` | M0; `compat` from 2026-10-24 |
 
@@ -484,7 +484,7 @@ Whatever the worker returns after that, the run ends `cancelled` (exit 4) and th
 temporary file is dropped. The handler is reset as it runs, so a second
 Ctrl+C kills the process. probe and doctor never install it.
 
-## The agent server *(A1, D43 to D46)*
+## The agent server *(A1, D43 to D46; A2, D57 to D59)*
 
 `spherecut mcp` serves the tools of `crates/agent` over MCP on stdio;
 `spherecut call <tool> '<json>'` runs one of them the same way from a
@@ -523,12 +523,50 @@ shell. The crate has no `unsafe`.
   fits its track) and a target's (YouTube 360, from its help pages as
   fetched on 2026-10-30; flat 16:9 or 9:16; archive), each with its fix,
   under 2 KiB.
+- **Projects** (A2.2, D57): `ops::project` reads a project's summary
+  or one part, or creates one of a probed video; `ops::edit` applies
+  edits as one step of the history and takes an agent's step back.
+  Each call opens the project's folder through `Roots::project_folder`,
+  loads, takes the lock (`edit`, `undo`, `create`) for that call only,
+  and saves through core's `ProjectFolder` (project and history
+  together, refused if the file changed since the load). Edits are
+  core's `Edit` values; a pass turns A1's times in `at`, `start` and
+  `end` into the file's, with frames at that time's axis, before the
+  typed read. `reference` is the edit reference: every op with an
+  example against one fixture project, served as `project`'s `edits`
+  part and applied by the tests. `tools` lists `edit` and `undo` only
+  with a write root.
+- **Render jobs** (A2.4, D58): `ops::render` checks a render (the
+  project loads, its media is the file it recorded, the output and the
+  range, the export's `prepare` and free space for `needed_bytes`) and
+  queues it in `jobs`, answering within a second with its id;
+  `ops::job` reports, waits (one call at a time, with progress) or
+  cancels, and checks the finished file once. `jobs` is the table: one
+  `mcp-render` thread runs the queue (at most 4 waiting, each output's
+  name reserved while queued), the last 16 ended jobs are kept, and ids
+  are `j<tag>-<n>` with a tag per server. A job holds its output's
+  folder (`Roots::output`) and its media as descriptors, and the export
+  reads and writes through `/proc/self/fd` (`ExportJob::exact`,
+  `Project::reading_media_from`). `rpc::serve` ends the jobs with the
+  server: `Tools::cancel_all`, then `Tools::shutdown` within
+  `EXIT_GRACE`. `spherecut call` refuses both tools.
+- **A project's frames** (A2.5, D59): `ops::sequence` loads a project
+  and its media as `render` does, maps the render's times to its frames
+  (`Frames`) and renders each through `frame_views_at` with the
+  export's filter at any size, so `look` with a `project` shows the
+  render's frames, and `ops::compare` measures a file against another
+  or against a project's render (luma PSNR and SSIM from
+  `render::compare` at the file's size in 16 bits, the worst and the
+  means, a sheet of the worst, partial at the deadline). `check` with a
+  `project` runs its rules on the `ProbeReport` of the file a render
+  would write, from `spherecut_export::planned`.
 - **`contract`**: the CLI's JSON contract (D27), here since A1.4 so that
   `still` can return its errors and the CLI re-exports it.
-- **Teaching** (A1.7): `initialize` gives the instructions (the
-  conventions and the cheap-first order, under 1,500 characters), and
-  `SKILL` is the Agent Skills file (`skill/spherecut/SKILL.md`, three
-  recipes) that `spherecut agents install-skill` (the CLI's `skill`)
+- **Teaching** (A1.7, A2.6): `initialize` gives the instructions (the
+  conventions, the cheap-first order and the way to make a video, each
+  tool by name, under 1,500 characters), and `SKILL` is the Agent Skills
+  file (`skill/spherecut/SKILL.md`, four recipes, the fourth reframing a
+  clip through a project and a render) that `spherecut agents install-skill` (the CLI's `skill`)
   writes to `$XDG_DATA_HOME/spherecut/skills/spherecut` and links into
   `~/.claude/skills` and `~/.agents/skills`. `docs/agents.md` is the
   user's guide, and tests keep its limits and codes in step with the
@@ -748,6 +786,14 @@ sweeps its folder of a killed export's temporary files (their locks are
 free, D16) and refuses a disk with less free space than two copies of
 the size estimate. `Progress` counts frames muxed and then the last
 pass's bytes; the `Report` holds what was made and each check passed.
+`prepare` (the preset, the frame plan, the encoders) and `needed_bytes`
+(two copies of the estimate) are public so that the agent's `render`
+refuses what `start` would before it queues (D58), and `planned` (the
+file the last pass checks for, and the audio choice) so that `check`
+with a project checks what a render would write (D59);
+`ExportJob::exact` takes the output path as given, never following a link at it, for a
+path through `/proc/self/fd`. The sweep takes files older than
+`core::fs::SWEEP_AGE`, 10 s.
 
 The app's export (M2.7, D55) renders on the viewer's device and queue.
 Its `ExportJob` carries a `Pace`, shared with the UI: each UI pass says

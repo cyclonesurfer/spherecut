@@ -279,7 +279,7 @@ impl AppState {
                     return;
                 }
                 Poll::Done(Err(e)) => Some(Err(e)),
-                Poll::Lost => Some(Err(ExportError::Invalid(
+                Poll::Lost => Some(Err(ExportError::Internal(
                     "the export didn't start: its thread ended".into(),
                 ))),
             },

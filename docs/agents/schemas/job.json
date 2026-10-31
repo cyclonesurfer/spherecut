@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "job",
+  "description": "A render's state and progress; once done, its file and a check of it. wait returns when it ends or the seconds pass; cancel stops it, leaving no file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "job"
+  ],
+  "properties": {
+    "job": {
+      "type": "string",
+      "description": "The id render gave.",
+      "minLength": 1
+    },
+    "wait": {
+      "type": "number",
+      "description": "Seconds to wait for it to end.",
+      "minimum": 0,
+      "maximum": 45
+    },
+    "cancel": {
+      "type": "boolean",
+      "description": "Stop it."
+    }
+  }
+}

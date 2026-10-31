@@ -1018,8 +1018,11 @@ Why the link: a check and then a rename can't refuse an existing output
 atomically, since a file can appear between them and the rename would
 replace it. `link(2)` fails if the name exists, never replaces it, and
 gives the name to a file that is already whole. `renameat2` with
-`RENAME_NOREPLACE` would do the same, but std doesn't wrap it, and core
-forbids `unsafe` (D28). Why frame doesn't write through a link without
+`RENAME_NOREPLACE` does the same in one step, and since A2 (its review)
+`persist_new` tries it first, through rustix (core forbids `unsafe`,
+D28), and links only where the filesystem refuses the flag: on one
+without either, the copy is the only way, and a server killed during it
+leaves part of the file at the output. Why frame doesn't write through a link without
 `--overwrite`: a link at the output is something there, and writing
 through it replaces the file it names, which is what `--overwrite`
 asks for.
@@ -1037,7 +1040,7 @@ the first writer that cleans up after others:
   only when its name is ours (`is_temp_name`), it is a regular file
   opened with `O_NOFOLLOW | O_NONBLOCK` (so never through a link, nor
   waiting on a pipe given our name), its lock can be taken at once, it
-  was last written more than `SWEEP_AGE` (60 s) ago, and the name still
+  was last written more than `SWEEP_AGE` (60 s; 10 s from D58) ago, and the name still
   names the inode locked. Anything else is left, including a file it
   can't lock for any reason, so a filesystem without locks is never
   swept. An export sweeps its output's folder before it starts and logs
@@ -8648,6 +8651,360 @@ is something the export holds while it waits, its device or its
 memory); wgpu-core stops holding the lock
 through `maintain`'s wait, or fixes the timed wait's race, which would
 let a plain wait back; wgpu gains a second queue.
+
+## D57. Projects for agents: the folder handle, the lock, the history file, and the project tools
+
+*2026-10-31, A2 slices A2.1 (core), A2.2 (the tools) and A2.3 (the
+window's share). The A2 plan, `docs/design/a2-plan.md` sections 3, 4
+and 6, has the detail; this is what was built and why.*
+
+**One folder handle for every project read and write.** A
+`ProjectFolder` is an `O_PATH | O_DIRECTORY` descriptor for the
+project's folder and that folder's path as named. An agent gets it from
+its roots (`Roots::project_folder`: beneath a read root or the write
+root to read, beneath the write root to write, by `openat2` as D45's
+outputs are); the GUI opens the folder by its path. Files in it are
+opened with `openat(O_NOFOLLOW)`, so the project, its history and its
+lock are what is in that folder, and a link at the project's name is
+refused rather than replaced. Media paths are made relative to, and
+read against, the path as named (D47), so the GUI and an agent read a
+project's `../clips/a.mp4` as the same file.
+
+**The lock**, `.<name>.lock` beside the project: `flock` on a file
+that is never removed or replaced, with one line saying who holds it
+(`{"by": "gui" | "mcp", "pid"}`). The GUI holds it while a project is
+open; an agent's `edit`, `undo` or `project` create holds it for one
+call and waits up to `LOCK_WAIT` (2 s) for another call, never for the
+window. Reading takes no lock, since a project file is always whole
+(D16). A file that isn't a project is never locked: `edit` loads first
+and locks after, so pointing it at the wrong file leaves nothing
+beside it.
+
+**The history file**, `.<name>.history`, written with the project
+(both to temporary files, then the project renamed, then the history)
+and stamped with the project's revision and the FNV-1a 64 of its
+bytes. A history that doesn't match is stale: nothing in it is trusted,
+undo is refused, and the next edit starts a fresh history and says so
+(`history_reset`). No history file is an empty history. At most 16 MiB,
+oldest steps first.
+
+**Changed on disk.** A save compares what is at the name now (device,
+inode, size, mtime and the hash) with what was loaded, and refuses
+(`changed_on_disk`) when they differ. The lock keeps Spherecut's
+writers apart; this catches the others.
+
+**What may be replaced.** A1 never replaces a file. A2 replaces exactly
+a project file that loads as a project, beneath the write root, and
+its history; `project` create refuses anything already there
+(`output_exists`).
+
+**The window's share** (A2.3). Opening a project file takes its lock
+first, waiting up to 2 s (`reframe::AGENT_WAIT`) for an agent's call,
+so the file is read after that call's save; another window's lock is
+refused at once ("open in another Spherecut window"). Then the project
+and its history load on the same worker, and the window's Ctrl+Z goes
+through an agent's steps, which the Edit menu names with the agent:
+"Undo Set trim (claude-code)". Every save writes the history beside
+the project, under the lock the window holds (the `Doc` keeps it in an
+`Arc` a save job shares, so a save still running after Close holds it
+until it ends), and only over the file as it was loaded or last saved:
+a file changed on disk is not saved over, and the notice points to
+Save As, which takes the new file's lock and lets the old one go. A
+stale or unreadable history opens as a fresh one with a notice saying
+which. A folder the window can't write opens its project without a
+lock, saying it can't be saved there.
+
+**The tools.**
+
+- **Three, not four**: `project` (read a summary or one part, or
+  `create`), `edit`, and `undo` with `redo: true`. One tool for undo and
+  redo keeps `tools/list` within PLAN's 12 KiB; each tool has a byte
+  budget (`tools::BUDGETS`: 1,000, 950, 650) that a test holds in both
+  title forms. With writing on the list is 8 tools; without, `edit` and
+  `undo` aren't listed (6), since every call would be refused, and
+  `project` still reads.
+- **Annotations**: `look` and `project` write only new files
+  (`destructiveHint` false, `idempotentHint` true); `edit` and `undo`
+  replace a project (`destructiveHint` true, `idempotentHint` false).
+- **Edits are the project file's own `Edit` values**, so there is one
+  vocabulary for the file, the GUI's history and the agent. Two
+  allowances: times may be A1's forms (`"12.5"`, `"45f"`, `[n, d]`) as
+  well as the file's `{"exact"}`, turned by a pass over every field
+  named `at`, `start` or `end`, with frames at that time's own axis (a
+  clip's media for keys, markers and trim, a target's media for its
+  path, the sequence for `add_clip`'s `at`); and `add_media` takes only
+  a path, probed beneath the roots, since `apply` does no I/O. A test
+  walks one example of every op and checks that those field names and
+  the times are the same set, so a new field can't slip past the pass.
+- **The edit reference is data, not schema**: `reference.rs` holds
+  every op with what it does and an example, in `Edit`'s order (a test
+  fails when `Edit` gains a variant it lacks), and `project`'s `edits`
+  part serves it. The examples name the ids of one fixture project, and
+  the tool tests apply every one through `edit` and take it back
+  through `undo`.
+- **The agent's undo rule**: an agent may undo or redo a step only
+  when it is an agent's step and the history is not stale (it was
+  written with the project at the revision and bytes the file has).
+  A user's step is `not_top`. Comparing the project's revision with the
+  step's own would refuse an agent's second undo in a row, since every
+  undo is a new revision.
+- **`if_revision`** on `edit` and `undo` refuses (`stale_revision`)
+  unless the project is still at the revision the agent decided on;
+  `dry_run` checks everything and saves nothing.
+- **A relative `file`** follows A1's rule (read under the first read
+  root, made under the write root), so the summary gives the project's
+  `file` path to go on with rather than the tools guessing which root
+  was meant.
+- **Paging**: a view part lists at most `VIEW_KEYS` keys a track and
+  `VIEW_CHARS` characters, and lists nothing at or past `next_from`
+  (the exact time as text, which `from` takes back), so the next page
+  misses nothing and repeats nothing; markers and targets page the same
+  way.
+- **Untrusted text stays in fields.** A history's step label and a
+  history file's parse error are the file's text, so a refusal's
+  message doesn't quote them; the label is in the result's fields and
+  the history part.
+
+**Considered and not done.** A save tool or an open session (each call
+names its file and keeps nothing, so a crash between calls loses
+nothing); a lock taken for reads (a whole-file save makes it needless);
+a relative project path read under the write root (a second rule for
+one tool, against A1's); the whole `Media` object from an agent (it
+would claim a file's size and hash without the file being read).
+
+Revisit if: A3's attach lets an agent edit a project the window has
+open (then the lock's holder changes, and `not_top` may become
+"ask the window"); M3's second clip makes `add_clip` and `remove_clip`
+apply; a client's limit makes the 12 KiB list too large; or a user
+wants an agent to undo the user's steps.
+
+## D58. Render jobs: the job table, ids, the queue, cancel and the server's end, the output beneath the write root
+
+*2026-10-31, A2 slice A2.4. The A2 plan, `docs/design/a2-plan.md`
+section 5 and amendments 2, 5, 7, 8 and 9, has the detail; this is what
+was built and why.*
+
+**Two tools, a job between them.** An export takes minutes and a call
+at most 50 s, so `render` checks everything that needs no work and
+answers within a second with a job id; `job` reports on it, waits for
+it (up to `JOB_WAIT`, 45 s, and never past its own call's deadline less
+2 s) or cancels it. A job is in one of six states: `queued`, `running`,
+`finishing` (the frames are encoded, the last pass writes and checks
+the file), `done`, `failed`, `cancelled`. Once a job is done, `job`
+runs A1's `check` on the file against the target its output fits
+(`youtube_360` for 360, `flat_16_9` or `vertical` for a reframe) and
+keeps the answer, so a second `job` doesn't read the file again.
+
+**What `render` checks before it answers**: the project loads; each
+clip's media is beneath a read root (`media_missing` otherwise) and is
+the file the project recorded, by size and the hash of its first MiB
+(`media_changed`); the output is an `.mp4` beneath the write root with
+nothing at its name (`output_exists`); the range is inside the trim and
+not empty (`out_of_range`, with the trim as `valid`); the export
+prepares (its preset, frame plan and encoders, so an output size that
+is no preset or a codec with no encoder fails here and not on the
+worker); and the disk
+holds two copies of the size estimate (`no_space`, with both numbers),
+or a warning when the free space can't be read. A range is a trim of
+the loaded project, never an edit of the file, and `draft` is the
+export's own draft.
+
+**The descriptors are what the job uses.** A job holds the output's
+folder (`O_PATH`, from `Roots::output`) and each media file opened by
+`render`, and the export reads and writes through `/proc/self/fd/N`:
+the project is handed to the export with its media paths replaced by
+the descriptors' (`Project::reading_media_from`, which is no edit and
+no history step), and the output is `/proc/self/fd/N/<name>` with
+`ExportJob::exact` set, so the export and its muxer take that path as
+given and never follow a link at it (`MuxOptions::exact`). A link
+planted at a queued render's name, or a folder moved under it, changes
+nothing the job writes. Paths in the report and in errors are mapped
+back to the ones the agent named.
+
+**One worker, a queue of four, sixteen kept.** Renders run one at a
+time on one thread (`mcp-render`, started with the first), since two
+exports would share one GPU and one encoder engine and each go slower
+than in turn. At most `QUEUED_RENDERS` (4) wait; a fifth is `busy`.
+The output's name (the folder's device and inode, and the name) is
+reserved from the moment a render is queued, so a second render to the
+same file is refused when it is asked for, not when it would run. The
+last `FINISHED_JOBS` (16) ended jobs are kept for `job`; older ones are
+`not_found`.
+
+**Ids** are `j<tag>-<n>`: `n` counts from 1 in this server, and the
+8 hex digits of the tag are drawn when the server starts (from the pid
+and the clock), so an id from an earlier server is `job_lost` (that
+server's jobs ended with it) rather than another job's, and a malformed
+id is `bad_argument`.
+
+**One waiter at a time.** A `job` call that waits holds the job's
+waiter; a second call that asks to wait answers at once with the state
+and a note saying why, so two calls can't hold both of the server's
+workers for 45 s. The waiting call sends MCP progress (frames done of
+the total) as the worker updates it, and ends early when its own call
+is cancelled.
+
+**Cancel** of a queued job drops it from the queue at once. Of a
+running one it tells the export to stop and waits up to `CANCEL_WAIT`
+(2 s) for it to end, by when its temporary files are removed: the
+answer is `cancelled` with nothing left at the output, or the state it
+is still in.
+
+**The server's end.** When the input closes, `rpc::serve` stops the
+calls, then `Tools::cancel_all` (the queue
+emptied, the running export told to stop, nothing more started), then
+`Tools::shutdown` against the same `EXIT_GRACE` deadline, which waits
+for the worker; a worker still running then is counted with the stuck
+calls and left to the process's exit. An export killed outright (the
+server's `SIGKILL`) leaves its locked temporary file, which the next
+export's sweep in that folder removes once its lock is free and it is
+older than `SWEEP_AGE`, cut from 60 s to 10 s here, since a killed
+server's files are known to be dead the moment their lock is free and
+an agent may render again within a minute. `spherecut mcp` installs no
+signal handler (A2's review): `SIGINT` or `SIGTERM` ends it as a kill
+does, and its file goes the same way.
+
+**`spherecut call` refuses `render` and `job`**: a job outlives the one
+call `call` makes, and its id would be lost with the process. The
+refusal names `spherecut render PROJECT -o OUT.mp4 --json`, the same
+export with its progress. Without a write root neither tool is listed,
+as `edit` and `undo` aren't.
+
+**The list.** Ten tools with writing, within the 12 KiB: `render` has
+950 bytes of budget (and uses them all), `job` 650. Both are annotated
+as writing only new files (`destructiveHint` false, `idempotentHint`
+true), as `look` and `project` are.
+
+**The export's part.** `spherecut_export::prepare` and `needed_bytes`
+are the export's own checks made public (the preset, the plan, the
+encoders; twice the size estimate) so that `render` refuses what the
+export would, and `Export::start` runs the same `prepare`. Thirteen new
+codes name the export's errors and render's refusals (`media_missing`,
+`media_changed`, `no_space`, `job_lost`, `cannot_export`, `no_encoder`,
+the three `hw_` codes, `encode_failed`, `mux_failed`,
+`metadata_failed`, `check_failed`), in `docs/agents.md`'s table.
+
+**Considered and not done.** Renders side by side (one GPU, one encode
+engine: two at once is slower than two in turn); a job that outlives
+its server, or a job file on disk to find it again (a server's jobs
+are its own, and `job_lost` says so plainly); `render` waiting for the
+file itself (minutes inside one call, against the 50 s deadline);
+progress notifications sent with no call waiting (MCP sends progress on
+a request); an edit of the project's trim for a range (a render
+mustn't change the project it renders); cancel waiting longer than 2 s
+(the export stops within a frame, and `job` again says where it got).
+
+Revisit if: a client keeps a call open longer than 50 s, so `render`
+could wait; A3's attach gives the window the jobs to show (then the
+table moves to where both reach it); a machine with two GPUs makes two
+renders at once worth it; or an agent needs a job found again after the
+server restarts.
+
+## D59. Compare, and projects in look and check: a sequence's frames one way, the render's times
+
+*2026-10-31, A2 slice A2.5. The A2 plan, `docs/design/a2-plan.md`
+sections 7 and 9.4, has the detail; this is what was built and why.*
+
+**A sequence's frames, one way.** `ops::sequence` loads a project as
+`render` does (its media beneath the read roots and the file it
+recorded: `media_missing`, `media_changed`), gives the frames a render
+makes from a time (`Frames`: frame n is at n / rate in the render and
+shows the clip's media at `from` + n / rate), and renders each through
+the views the export and `frame --project` use (`frame_views_at`, with
+motion blur when the sequence has it) and the export's filter
+(anisotropic where the GPU filters so, D49), at any size. `render`,
+`look`, `compare` and `check` go through it, so the frame a tool shows
+is the frame a render makes; a CLI test holds look's tile at the
+output's size to `frame --project`'s PNG, sample for sample.
+
+**Times on a project are the render's.** 0 is the render's first frame,
+which shows the media at the trim's start (or at `from`), and `"12f"`
+is the render's frame 12; past the render's end is `out_of_range`, with
+the render's span as `valid`. Each tile gives `time`, the render's, and
+`source`, the media's. So a time names the same frame in a render and
+in its project, which is what comparing the two needs.
+
+**look with a project** takes `mode` `view` (a tile a time) or `sheet`
+(12 by default, from the first frame to the last), rendered at the
+tile's size in 8 bits. The source's modes (`sphere`, `cube`, `raw`),
+`view`, `views`, `seek: keyframe` and `assume_equirect` are refused
+(`bad_argument`): the project says how a frame is rendered, and a view
+of the source is a look at its media file.
+
+**check with a project** runs D46's rules, and the target's, on the
+file a render would write, without rendering: the export's `prepare`
+(the preset, the encoder it would choose) and the new `planned` (the
+file the last pass checks for, `Expected`, and the audio choice with
+its bit rate) make a `ProbeReport` of it, with the codec, size, rate,
+bit depth, BT.709 limited range, the moov first, and the metadata the
+injector writes (V2 equirect mono and V1 for a sphere; SA3D for
+ambiX). The rules' messages keep their words; `checked` says that "it"
+is the file a render of the project would make, and the export's
+warnings come with it. A flat project checked for YouTube 360 fails
+`spherical_metadata`, with its fix. The check a finished `job` gives is
+the proof; this is the check before.
+
+**compare** measures PSNR and SSIM of BT.709 luma with
+`render::compare` (`psnr_plane`, and `ssim_plane`, whose Gaussian is
+two 1D passes so a 4K plane takes a fraction of a second), the parity
+tests' code, on the scale they measure in: limited range over 255, as
+an 8-bit encoder codes it, so its dB are theirs. Each time is decoded
+exactly and drawn whole as coded (`Draw::Coded`) at the file's size in
+16 bits a channel; a project's frame renders at the file's size in 16
+bits. Luma from a file's RGB is its coded luma again, up to clamping,
+so a render against its project measures the encode, as the parity
+tests do in the encoder's planes.
+
+- **Times** are the file's: `times` (up to 24), or `count` (8 by
+  default) at the middles of equal parts of the shorter of the two, so
+  that none is at the very end. A project's frame is the one its
+  render shows at the file's frame's time, from `from` (the trim's
+  start by default; a `render` of a `range` gives its `from`), so a
+  render compares frame for frame.
+- **Sizes**: two files must be one size (`bad_argument` with both); a
+  project renders at the file's size, refused when its output's shape
+  is more than 1 % off the file's (a draft's sides move by under 1 %).
+- **The result** gives each time's PSNR (`"inf"` when identical) and
+  SSIM, the worst of each, and the means; the mean PSNR is the mean
+  error's, so one identical time doesn't make it infinite.
+- **`sheet`** adds a JPEG within the inline budget: the four worst
+  times by PSNR, a row each of the file, the other and their difference
+  times 4 (`DIFF_GAIN`), each box-averaged down to its tile.
+- **At its deadline** it answers with the times measured, `partial`,
+  `measured` and `next`, once less than `COMPARE_RESERVE` (1.5 s) plus
+  twice its slowest time is left; the first time is always measured.
+
+Measured on lavapipe in a debug build: a 1 s render at flat 16:9 1080
+through libx264 at the high quality, against its project, 55.18 to
+55.39 dB and SSIM 0.99850 to 0.99857 at eight times, above D52's flat
+floors (49 dB, 0.995); the same a frame off, 19.22 to 25.04 dB. A time
+at 1080 takes about a second there. What agents are told to expect is
+one rule, PLAN's least for any encoder, 40 dB and 0.98 at every time
+(A2's review): VA-API and SVT-AV1 sit a few dB under the software
+floors, and an 8-bit file rounds once more than the parity tests'
+frames, so D52's per-encoder floors would fail sound renders; well
+under 30 dB is the wrong frames.
+
+**The listing.** compare's schema is flat (`against_file` or
+`against_project`, exactly one, which the op checks) and lists in 999
+of its 1,000 bytes. `project` in look and check, with `file` no longer
+required (the op refuses both or neither), brings A1's five to 7,109
+bytes of their 7 KiB (the plan's table rounded the share to 7,000).
+Eleven tools with a write root take 12,267 bytes of the 12 KiB; seven
+are listed without one, compare being read-only.
+
+**Considered and not done.** One `against` taking either kind, told
+apart by the extension (the plan flattened it to two names, so the
+schema says which); luma from the decoder's Y plane rather than RGB
+(the still draws RGB, and they differ only by clamping); VMAF or other
+measures (D52's floors are PSNR and SSIM); a project rendered at its
+own size with the file scaled to it (the file is what was delivered);
+look on a project through a view of its own (a look at the media
+file); check rendering a frame to be sure (`job`'s check is the proof).
+
+Revisit if: an agent needs the source and the render side by side in
+one image; a codec's clamping moves compare's numbers (then read Y);
+or 1 % of shape lets a wrong project through.
 
 ## Open
 

@@ -181,3 +181,67 @@ pub const SILENCE_MIN: Duration = Duration::from_millis(500);
 
 /// How loud nothing is: the floor of every dBFS `analyze` gives.
 pub const DBFS_FLOOR: f64 = -120.0;
+
+/// The most edits one `edit` call may make, as one undo step (a2-plan
+/// 4.3).
+pub const EDITS_PER_CALL: usize = 1000;
+
+/// The most characters of an `edit` call's label.
+pub const LABEL_CHARS: usize = 200;
+
+/// The most keys a track `project`'s view part gives at once, from
+/// `from`; `more` says where to go on from.
+pub const VIEW_KEYS: usize = 200;
+
+/// The most characters of keys a `view` part lists, so that it fits in
+/// [`RESULT_CHARS`] with its envelope: past it, `next_from` says where
+/// to go on.
+pub const VIEW_CHARS: usize = 30_000;
+
+/// The newest steps `project`'s history part gives.
+pub const HISTORY_STEPS: usize = 50;
+
+/// The first markers `project`'s summary lists; the markers part has all.
+pub const SUMMARY_MARKERS: usize = 20;
+
+/// How long a call waits for another call's hold of a project's lock
+/// (a2-plan 3.2). The GUI's is never waited for.
+pub const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// The most renders waiting behind the one running (a2-plan 5.1): past
+/// it, `render` is `busy`.
+pub const QUEUED_RENDERS: usize = 4;
+
+/// The last finished jobs `job` reports on; an older one is `not_found`.
+pub const FINISHED_JOBS: usize = 16;
+
+/// The longest `job`'s `wait` may be: a call has [`CALL_TIME`], and the
+/// answer needs some of it (a2-plan 1.1).
+pub const JOB_WAIT: Duration = Duration::from_secs(45);
+
+/// How long before its call's deadline a `job` wait ends, to answer in
+/// time.
+pub const JOB_WAIT_MARGIN: Duration = Duration::from_secs(2);
+
+/// How long `job`'s `cancel` waits for the render to stop and its file
+/// to go.
+pub const CANCEL_WAIT: Duration = Duration::from_secs(2);
+
+/// The most times `compare` measures (a2-plan 7.1).
+pub const COMPARE_TIMES: usize = 24;
+
+/// The times `compare` spreads over the shorter of its two, unless
+/// `times` or `count` says.
+pub const COMPARE_COUNT: u32 = 8;
+
+/// The worst times `compare`'s `sheet` shows, a row each of the file, the
+/// other and their difference.
+pub const SHEET_ROWS: usize = 4;
+
+/// How much `compare`'s sheet brightens a difference, so that a few
+/// codes' error shows.
+pub const DIFF_GAIN: f64 = 4.0;
+
+/// How long before its deadline `compare` stops to answer with the times
+/// it measured, plus twice the longest time it took to measure one.
+pub const COMPARE_RESERVE: Duration = Duration::from_millis(1500);

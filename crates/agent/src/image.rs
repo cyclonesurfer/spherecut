@@ -115,6 +115,20 @@ pub fn layout(n: u32, aspect: f64, edge: u32, target: f64) -> Option<Layout> {
     }
 }
 
+/// `n` tiles of `aspect` at exactly `columns` columns, as [`layout`] lays
+/// them out otherwise: `None` when the tiles would be under
+/// [`MIN_TILE_WIDTH`].
+pub fn columns(n: u32, aspect: f64, edge: u32, columns: u32) -> Option<Layout> {
+    let columns = columns.clamp(1, n.max(1));
+    let big = fit(n.max(1), aspect, edge, columns, 2);
+    let l = if big.tile.0 >= BIG_LABELS {
+        big
+    } else {
+        fit(n.max(1), aspect, edge, columns, 1)
+    };
+    (l.tile.0 >= MIN_TILE_WIDTH).then_some(l)
+}
+
 /// The most tiles of `aspect` that fit in an image whose long edge is
 /// `edge`, for the error that says how many do.
 pub fn most_tiles(aspect: f64, edge: u32, target: f64, limit: u32) -> u32 {

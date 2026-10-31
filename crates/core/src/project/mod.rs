@@ -18,6 +18,7 @@
 pub mod anim;
 pub mod edit;
 pub mod file;
+pub mod folder;
 pub mod history;
 mod validate;
 
@@ -34,6 +35,9 @@ pub use anim::{
     OrientationError, Side, Target, View, ViewAnim, follow_spin,
 };
 pub use edit::{AnyKey, AnyKeys, AnyValue, Applied, Edit, EditError, PathPoint};
+pub use folder::{
+    By, FolderError, Holder, Identity, Kept, Loaded, ProjectFolder, ProjectLock, Saved,
+};
 pub use history::{Gesture, History, Origin, Step};
 pub use validate::{Code, Problem};
 
@@ -372,6 +376,15 @@ pub struct InitialView {
     pub projection: Projection,
 }
 
+/// The view an untitled project starts with: the viewer's own default,
+/// forward and level through a 100° rectilinear lens. The GUI and A2's
+/// `project` create make the same project of a clip.
+pub const INITIAL_VIEW: InitialView = InitialView {
+    orientation: Orientation::IDENTITY,
+    fov_deg: 100.0,
+    projection: Projection::Rectilinear,
+};
+
 impl Project {
     /// The untitled project opening `media` makes (M2 plan section 3.2):
     /// one sequence at the clip's rate, flat 16:9 1080p, one track, one
@@ -469,6 +482,17 @@ impl Project {
 
     pub fn media_by_id(&self, id: MediaId) -> Option<&Media> {
         self.media.iter().find(|m| m.id == id)
+    }
+
+    /// The same project reading each media file from `path(m)` instead:
+    /// an agent's render reads the files it checked through their
+    /// descriptors (a2-plan 5.3). Not an edit: no history records it,
+    /// and the copy isn't saved.
+    pub fn reading_media_from(mut self, mut path: impl FnMut(&Media) -> PathBuf) -> Project {
+        for m in &mut self.media {
+            m.path = path(m);
+        }
+        self
     }
 
     pub fn target(&self, id: TargetId) -> Option<&Target> {

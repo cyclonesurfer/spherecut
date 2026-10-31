@@ -31,6 +31,8 @@ pub enum NoticeKind {
     Doctor(String),
     /// The project can't be made, opened or saved.
     Project,
+    /// The project's undo history was left behind or couldn't be kept.
+    History,
     /// The project's video isn't where it was.
     MediaOffline,
     /// The project's video isn't the file it was.

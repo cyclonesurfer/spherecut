@@ -10,16 +10,18 @@
 //!   regular file there: `inject`, `Mp4Writer`, and `spherecut frame
 //!   --overwrite`.
 //! * [`TempFile::persist_new`] publishes it only if nothing is there, with
-//!   `link(2)`, which fails with `EEXIST` if anything has turned up at the
-//!   output since it was checked, so an existing output is never replaced:
-//!   `spherecut frame` without `--overwrite`. On a filesystem without hard
-//!   links (FAT, some network filesystems), it creates the output with
-//!   `O_CREAT | O_EXCL` instead and copies the file into it.
+//!   `renameat2(RENAME_NOREPLACE)`, which fails with `EEXIST` if anything
+//!   has turned up at the output since it was checked, so an existing
+//!   output is never replaced: `spherecut frame` without `--overwrite`,
+//!   renders, new projects. Where the filesystem doesn't take the flag it
+//!   uses `link(2)`, which refuses the same way, and on one without hard
+//!   links either it creates the output with `O_CREAT | O_EXCL` and copies
+//!   the file into it.
 //!
 //! A temporary file holds an exclusive `flock` for its life, so that
 //! [`sweep_temp_files`] can tell one a killed writer left (whose lock the
 //! kernel let go) from one that is still being written: it removes only
-//! those whose lock it can take and that are more than a minute old.
+//! those whose lock it can take and that are more than [`SWEEP_AGE`] old.
 
 use std::fs::{File, OpenOptions, Permissions, TryLockError};
 use std::hash::{BuildHasher, RandomState};
@@ -39,8 +41,9 @@ pub const TEMP_ATTEMPTS: usize = 16;
 
 /// How long ago a temporary file must last have been written for
 /// [`sweep_temp_files`] to take it, besides its lock being free: far
-/// longer than the moment between a file's creation and its lock.
-pub const SWEEP_AGE: Duration = Duration::from_secs(60);
+/// longer than the moment between a file's creation and its lock, which
+/// is all the age guards (60 s until A2.4, D58).
+pub const SWEEP_AGE: Duration = Duration::from_secs(10);
 
 /// A name for a temporary file: hidden, recognisably ours, the same short
 /// length whatever the output is called, and random, so that a file left
@@ -212,17 +215,34 @@ impl TempFile {
     /// leaves what is there alone, whenever it turned up. The temp file is
     /// gone either way.
     pub fn persist_new(self) -> io::Result<()> {
-        self.persist_new_with(|from, to| std::fs::hard_link(from, to))
+        self.persist_new_with(rename_new, |from, to| std::fs::hard_link(from, to))
     }
 
-    /// [`TempFile::persist_new`], publishing with `link`, which tests
-    /// make refuse as a filesystem without hard links does.
+    /// [`TempFile::persist_new`], publishing with `rename` or else `link`,
+    /// which tests make refuse as filesystems without them do.
     fn persist_new_with(
         mut self,
+        rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
         link: impl FnOnce(&Path, &Path) -> io::Result<()>,
     ) -> io::Result<()> {
         may_block("writing a file to disk");
         self.file.sync_all()?;
+        // One step that leaves nothing at the temporary name and is never
+        // a part of the file at the output, as the copy below can be.
+        match rename(&self.path, &self.dest) {
+            Ok(()) => {
+                self.persisted = true;
+                return Ok(());
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+            // The filesystem doesn't take the flag (EINVAL), or the kernel
+            // is older than it (ENOSYS); any other refusal the link meets
+            // too.
+            Err(e) => tracing::debug!(
+                "no rename without replacing to {} ({e}); linking instead",
+                self.dest.display()
+            ),
+        }
         match link(&self.path, &self.dest) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
@@ -273,6 +293,13 @@ impl TempFile {
         }
         Ok(())
     }
+}
+
+/// Rename `from` to `to` unless something is at `to`, even a dangling
+/// link: `renameat2` with `RENAME_NOREPLACE`.
+fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(io::Error::from)
 }
 
 /// Remove the temporary files that killed writers left in `dir` (D16):
@@ -531,18 +558,44 @@ mod tests {
         assert_eq!(listing(&dir), ["late.png", "sock.png"]);
     }
 
+    /// What `renameat2` says where the filesystem doesn't take
+    /// `RENAME_NOREPLACE`.
+    fn no_flag(_: &Path, _: &Path) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(22))
+    }
+
     #[test]
-    fn persist_new_publishes_with_a_link() {
+    fn persist_new_publishes_with_a_rename_or_else_a_link() {
         let dir = tmpdir("new");
         let out = dir.join("out.png");
         let tmp = written(&out, b"picture");
-        let made = mode(tmp.path());
+        let (made, ino) = (mode(tmp.path()), tmp.file().metadata().unwrap().ino());
         tmp.persist_new().unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), b"picture");
         assert_eq!(mode(&out), made);
+        let meta = std::fs::metadata(&out).unwrap();
+        assert_eq!(
+            (meta.ino(), meta.nlink()),
+            (ino, 1),
+            "the file itself, once"
+        );
+        assert_eq!(listing(&dir), ["out.png"]);
+
+        let out = dir.join("linked.png");
+        let tmp = written(&out, b"linked");
+        tmp.persist_new_with(no_flag, |from, to| std::fs::hard_link(from, to))
+            .unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"linked");
         // One name left: the temp name was removed after the link.
         assert_eq!(std::fs::metadata(&out).unwrap().nlink(), 1);
-        assert_eq!(listing(&dir), ["out.png"]);
+        assert_eq!(listing(&dir), ["linked.png", "out.png"]);
+        let tmp = written(&out, b"again");
+        let e = tmp
+            .persist_new_with(no_flag, |from, to| std::fs::hard_link(from, to))
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&out).unwrap(), b"linked");
+        assert_eq!(listing(&dir), ["linked.png", "out.png"]);
     }
 
     #[test]
@@ -608,14 +661,14 @@ mod tests {
         let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         let tmp = written(&out, &big);
         let made = mode(tmp.path());
-        tmp.persist_new_with(refuse).unwrap();
+        tmp.persist_new_with(no_flag, refuse).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), big);
         assert_eq!(mode(&out), made);
         assert_eq!(listing(&dir), ["out.png"]);
 
         // The exclusive create still refuses an output that turned up.
         let tmp = written(&out, b"ours");
-        let e = tmp.persist_new_with(refuse).unwrap_err();
+        let e = tmp.persist_new_with(no_flag, refuse).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&out).unwrap(), big);
         assert_eq!(listing(&dir), ["out.png"]);
@@ -623,7 +676,7 @@ mod tests {
         // And a refusal the create meets too is reported, leaving nothing.
         let nowhere = dir.join("no-such-dir").join("out.png");
         let tmp = written(&out, b"ours").aimed_at(&nowhere);
-        let e = tmp.persist_new_with(refuse).unwrap_err();
+        let e = tmp.persist_new_with(no_flag, refuse).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
         assert_eq!(listing(&dir), ["out.png"]);
     }

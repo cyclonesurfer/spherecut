@@ -94,7 +94,7 @@ impl Fake {
 }
 
 impl Tools for Fake {
-    fn list(&self) -> Value {
+    fn list(&self, _version: &str) -> Value {
         NAMES
             .iter()
             .map(|n| json!({"name": n, "description": n, "inputSchema": {"type": "object"}}))

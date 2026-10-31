@@ -4,9 +4,15 @@
 pub mod analyze;
 pub mod check;
 pub mod clips;
+pub mod compare;
 pub mod doctor;
+pub mod edit;
+pub mod job;
 pub mod look;
 pub mod probe;
+pub mod project;
+pub mod render;
+pub mod sequence;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
