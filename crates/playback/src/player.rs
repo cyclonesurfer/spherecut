@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use spherecut_core::{Clock, Rational, StopSource, Time, may_block};
+use spherecut_core::{Clock, Rational, StopSource, StopToken, Time, may_block};
 use spherecut_media::MediaError;
 use spherecut_media::backend::{
     DecoderEvent, Exactness, FallbackReason, HwKind, MediaBackend, SeekMode, VideoStreamInfo,
@@ -300,6 +300,17 @@ pub struct ShownFrame {
     pub gpu: Arc<GpuFrame>,
 }
 
+/// The part of the source playback keeps to (M2 plan section 10.3): a
+/// clip's trim. Playing stops on the last frame before `end`, or with
+/// `looping` goes on from `start`; a play at or past `end` starts at
+/// `start`. Seeks and steps still reach the whole source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaySpan {
+    pub start: Time,
+    pub end: Time,
+    pub looping: bool,
+}
+
 /// What [`Player::present`] picked. Drop it once it is drawn: while it
 /// is held, so are its frames' slots ([`ShownFrame::gpu`]), and with two
 /// streams on four slots, holding one keeps both from their next frames.
@@ -486,6 +497,10 @@ struct Ui {
     last_new: Option<Instant>,
     /// The playhead the presenter last gave the cache.
     playhead: Option<Time>,
+    span: Option<PlaySpan>,
+    /// The clock's time at the last present while playing since the last
+    /// seek, open or pause: a play crosses the span's end from here.
+    span_prev: Option<Time>,
     snapshot: PlayerSnapshot,
     /// The open the snapshot's streams are about.
     snapshot_epoch: u64,
@@ -679,6 +694,8 @@ impl Player {
                 painted: true,
                 last_new: None,
                 playhead: None,
+                span: None,
+                span_prev: None,
                 snapshot: PlayerSnapshot::default(),
                 snapshot_epoch: 0,
             }),
@@ -700,33 +717,8 @@ impl Player {
         if self.shared.is_shut_down() || streams.is_empty() {
             return;
         }
-        ui.epoch += 1;
-        let epoch = ui.epoch;
-        self.shared.epoch.store(epoch, Ordering::Release);
-        let token = self.shared.stop.next();
-        for w in ui.workers.drain(..) {
-            let _ = w.send(Command::Close);
-        }
-        self.shared.cache.notify();
-        for s in std::mem::take(&mut ui.shown).into_iter().flatten() {
-            self.shared.slots.unshow(s.view.index, s.view.word);
-        }
+        let (epoch, token) = self.end_open(&mut ui, now);
         ui.shown = vec![None; streams.len()];
-        // The last file's audio goes quiet now; its threads end with the
-        // newer open's token.
-        ui.clock.pause(now);
-        ui.clock = self.base_clock.clone();
-        ui.clock.pause(now);
-        ui.clock.set(Time::ZERO, now);
-        ui.ahead = None;
-        ui.audio = None;
-        ui.want_play = false;
-        ui.at_end = false;
-        ui.preroll = false;
-        ui.view_epoch = 0;
-        ui.view.clear();
-        ui.playhead = None;
-        ui.last_new = None;
         ui.path = Some(path.clone());
         let id = ui.next_id();
         ui.target = Some(Target {
@@ -779,6 +771,56 @@ impl Player {
         }
     }
 
+    /// Close the open file: its threads stopped, nothing shown, and the
+    /// player [`PlayState::Empty`] until the next open.
+    pub fn close(&self) {
+        let now = Instant::now();
+        let Ok(mut ui) = self.ui.try_borrow_mut() else {
+            return;
+        };
+        if self.shared.is_shut_down() {
+            return;
+        }
+        self.end_open(&mut ui, now);
+        ui.path = None;
+        ui.target = None;
+        self.shared.playing.store(false, Ordering::Release);
+    }
+
+    /// The open file's threads told to stop, its frames unshown and the
+    /// clock back at 0, paused: a new epoch, and its stop token.
+    fn end_open(&self, ui: &mut Ui, now: Instant) -> (u64, StopToken) {
+        ui.epoch += 1;
+        let epoch = ui.epoch;
+        self.shared.epoch.store(epoch, Ordering::Release);
+        let token = self.shared.stop.next();
+        for w in ui.workers.drain(..) {
+            let _ = w.send(Command::Close);
+        }
+        self.shared.cache.notify();
+        for s in std::mem::take(&mut ui.shown).into_iter().flatten() {
+            self.shared.slots.unshow(s.view.index, s.view.word);
+        }
+        // The last file's audio goes quiet now; its threads end with the
+        // newer open's token.
+        ui.clock.pause(now);
+        ui.clock = self.base_clock.clone();
+        ui.clock.pause(now);
+        ui.clock.set(Time::ZERO, now);
+        ui.ahead = None;
+        ui.audio = None;
+        ui.want_play = false;
+        ui.at_end = false;
+        ui.preroll = false;
+        ui.view_epoch = 0;
+        ui.view.clear();
+        ui.playhead = None;
+        ui.last_new = None;
+        ui.span = None;
+        ui.span_prev = None;
+        (epoch, token)
+    }
+
     /// Play, from the start when at the end. A seek in flight plays once
     /// it lands.
     pub fn play(&self) {
@@ -796,8 +838,12 @@ impl Player {
         }
         ui.want_play = true;
         self.shared.playing.store(true, Ordering::Release);
-        if ui.at_end {
-            self.seek_with(&mut ui, Time::ZERO, SeekMode::Exact, now);
+        let past = ui
+            .span
+            .filter(|s| ui.target.is_none() && ui.clock.time_at(now) >= s.end);
+        if ui.at_end || past.is_some() {
+            let start = ui.span.map_or(Time::ZERO, |s| s.start);
+            self.seek_with(&mut ui, start, SeekMode::Exact, now);
         }
         if ui.target.is_none() && !ui.preroll {
             ui.clock.play(now);
@@ -856,6 +902,7 @@ impl Player {
         });
         ui.preroll = false;
         ui.at_end = false;
+        ui.span_prev = None;
         shared.target.store(id, Ordering::Release);
         ui.clock.pause(now);
         ui.clock.set(at, now);
@@ -1025,6 +1072,10 @@ impl Player {
                 t
             }
         };
+        if ui.target.is_none() {
+            let t = at(ui);
+            self.check_span(ui, t, now);
+        }
         let mut changed = std::mem::take(&mut ui.unpresented);
         if let Some(target) = ui.target {
             if let Some(found) = self.target_slots(ui, target) {
@@ -1351,6 +1402,64 @@ impl Player {
         true
     }
 
+    /// Keep playback to the span: once a play crosses its end, pause on
+    /// the frame before it, or with `looping` seek back to its start and
+    /// play on. A play that a seek put past the end plays on.
+    fn check_span(&self, ui: &mut Ui, t: Time, now: Instant) {
+        let prev = if ui.clock.is_running() {
+            ui.span_prev.replace(t)
+        } else {
+            ui.span_prev = None;
+            None
+        };
+        let (Some(span), Some(prev)) = (ui.span, prev) else {
+            return;
+        };
+        if prev >= span.end || t < span.end {
+            return;
+        }
+        // At or past the stream's end, check_end stops it on its last
+        // frame, which it knows.
+        if ui
+            .view
+            .first()
+            .and_then(|v| v.end)
+            .is_some_and(|end| span.end >= end)
+        {
+            return;
+        }
+        if span.looping {
+            self.seek_with(ui, span.start, SeekMode::Exact, now);
+            return;
+        }
+        Self::pause_ui(&self.shared, ui, now);
+        // The frame on screen just before the end is the last that starts
+        // before it.
+        let before = span
+            .end
+            .checked_sub(Time::seconds(
+                Rational::new(1, 1_000_000_000).unwrap_or(Rational::ZERO),
+            ))
+            .unwrap_or(span.start)
+            .max(span.start);
+        ui.clock.set(before, now);
+        ui.span_prev = None;
+        ui.at_end = true;
+        self.shared.event(PlayerEvent::Ended);
+    }
+
+    /// The span playback keeps to, or none for the whole source. An open
+    /// clears it.
+    pub fn set_span(&self, span: Option<PlaySpan>) {
+        let Ok(mut ui) = self.ui.try_borrow_mut() else {
+            return;
+        };
+        if ui.span != span {
+            ui.span = span;
+            ui.span_prev = None;
+        }
+    }
+
     /// Pause at the end, once the clock passes the first stream's, on its
     /// last frame: one whose upload came too late for its time comes up
     /// once it is uploaded. Before decoding reached the end (the end is the
@@ -1367,6 +1476,10 @@ impl Player {
             return;
         };
         if t >= end {
+            if let Some(span) = ui.span.filter(|s| s.looping) {
+                self.seek_with(ui, span.start, SeekMode::Exact, now);
+                return;
+            }
             Self::pause_ui(&self.shared, ui, now);
             let shown = ui.shown.first().and_then(|s| s.as_ref());
             let at = last.or_else(|| {

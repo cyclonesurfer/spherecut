@@ -426,6 +426,38 @@ sections 8.3 and 9 (D51 and D52 record them):
 - **`frame --project`** (amendment 4) is in: the sequence's frame as
   the export renders it, the parity sample through the CLI.
 
+**Amendment 7 (2026-10-31, slice M2.6's code).** The GUI's first part
+as built, where it differs from sections 10.1 to 10.3 and 11 (D54
+records it):
+
+- **An untitled project opens with every equirect video**, made from
+  the view on screen once the first stream opens and its fingerprint is
+  read (a job), so a reframe needs no File ▸ New. A raw-view source gets
+  none until M3.
+- **Keys**: `Alt+K` keys the view and `Ctrl+L` toggles the loop
+  (amendment 2 item 36); the badge says "Not keyed: Alt+K to key".
+  `Ctrl+O` goes to the Files pane, which opens videos and project files
+  alike, standing in for a file dialog as in M1 (D36). File ▸ Export… is there but
+  greyed until M2.7, and `Ctrl+E` with it.
+- **A change that isn't a drag** (a scroll, `+`, `R`, a projection
+  switch) becomes key edits after 400 ms of rest, so a wheel's many
+  events are one undo step. Pausing keeps a look-around; play, a seek,
+  a step or a scrub ends it.
+- **A 360 output** keeps M1's free look in the viewer and isn't keyed
+  from it; M2.7's equirect preview (item 37) and sphere overview are
+  where its view is keyed.
+- **Delete keeps a lane's last key**, saying so in a notice, since a
+  track can't be empty (D48).
+- **Section 11's app tests** for M2.6 are in `crates/app/tests/
+  reframe.rs`, with `Alt+K` at one time between the untitled project's
+  keys rather than three (the doc's unit tests key at the playhead
+  with a FOV key already there, item 20), and the drawn view checked
+  against `ViewAnim::at` at the frame rather than read back from the
+  uniform each frame. The never-blocks guard (item 21) is on in every
+  one of them, through the saves and the opens.
+- **The player's `close`** is new: File ▸ Close leaves it empty, which
+  M1's player couldn't be once opened.
+
 ## 1. Summary
 
 M2 is the first version Pat can use for real: open one 360 clip, trim
@@ -1612,6 +1644,7 @@ the run at the end, in M2.8, on the same binary.
 | D51 | `spherecut render`: flags, every `--json` line a D27 envelope with `result.event`, exits, the checks before the output appears (amends D27) | M2.5 |
 | D52 | The export pipeline: the crate, threads, presets and bitrates, encoder order and fallback, rate control, the MP4 and its metadata in one cancellable pass (updates D4), audio copy, its edit list and the movie timescale, the parity floors, the job handle, the Opus revisit (D17) | M2.4, M2.5 |
 | D53 | The toolkit check's prototype and its result (updates D26) | M2.2b, M2.8 |
+| D54 | The reframer's GUI, part 1: the untitled project, the keyed view and look-around, the strip, the play span (updates D34) | M2.6 |
 | D16, D3, D33 | Updated: temporary files hold a lock and the sweep takes only lockable old files (M2.4); export reports a decode fallback (M2.5); the sv3d pose checked with Pat's YouTube upload (M2.8) | as listed |
 
 

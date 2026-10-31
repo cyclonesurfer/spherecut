@@ -17,13 +17,14 @@ use spherecut_playback::{
     AudioOutputFactory, HwPromise, HwSupport, PlayState, Player, PlayerConfig, PlayerEvent,
     PlayerParts, PlayerSnapshot, Presented, Repaint,
 };
-use spherecut_render::{Filter, Gpu, ViewParams};
+use spherecut_render::{Filter, Framing, Gpu, ViewParams};
 use spherecut_sphere::grab::{GrabFit, GrabStart};
 
 use crate::jobs::{Job, Poll};
 use crate::notices::{Notice, NoticeKind, Notices};
 use crate::overlay::OverlayState;
 use crate::panes::{FilesPane, InfoPane};
+use crate::reframe::{Look, NOT_KEYED, Reframe};
 use crate::settings::{self, Settings};
 use crate::smoke::SmokeDriver;
 use crate::transport::{self, Scrub};
@@ -160,6 +161,8 @@ pub struct AppState {
     /// `logic` ran for the coming `ui`, as eframe runs it before each.
     pub logic_ran: bool,
     pub overlay: OverlayState,
+    /// The open project (M2 plan section 10).
+    pub reframe: Reframe,
 }
 
 /// The app.
@@ -289,6 +292,7 @@ impl SpherecutApp {
             presented: None,
             logic_ran: false,
             overlay: OverlayState::default(),
+            reframe: Reframe::default(),
         };
         if let Some(path) = open.into_iter().next() {
             state.open(path);
@@ -333,6 +337,10 @@ impl SpherecutApp {
         }
         self.state.logic_ran = false;
         let now = Instant::now();
+        let ctx = ui.ctx().clone();
+        if ctx.input(|i| i.viewport().close_requested()) && !self.state.close_requested() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
         egui::Panel::top("menu").show(ui, |ui| self.state.menu_ui(ui));
         if !self.state.notices.shown().is_empty() {
             egui::Panel::top("notices").show(ui, |ui| self.state.notices.ui(ui));
@@ -352,6 +360,10 @@ impl SpherecutApp {
             self.tree.ui(&mut behavior, ui);
         });
         settings::window(&mut self.state, ui.ctx());
+        crate::reframe::windows(&mut self.state, ui.ctx());
+        if std::mem::take(&mut self.state.reframe.quit) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         self.state.request_repaint(ui.ctx());
         if let Some(smoke) = &mut self.smoke {
             smoke.ui(&mut self.state, ui.ctx());
@@ -373,6 +385,7 @@ impl SpherecutApp {
         let s = &mut self.state;
         let mut threads = s.files.take_threads();
         threads.extend(s.info.take_threads());
+        threads.extend(s.reframe.take_threads());
         if matches!(s.doctor, DoctorState::Pending(_))
             && let DoctorState::Pending(job) = std::mem::replace(&mut s.doctor, DoctorState::Lost)
         {
@@ -384,20 +397,34 @@ impl SpherecutApp {
 }
 
 impl AppState {
-    /// Open `path` in the player, and forget the last file's notices.
-    /// The machine's stay, dismissed or not: the doctor's, the adapter's,
-    /// a failed GPU, a missing audio device, a slot the GPU dropped.
-    pub fn open(&mut self, path: PathBuf) {
-        let Some(player) = &self.player else {
+    /// Open these streams of the video at `path` in the player (`None`
+    /// for the best), and forget the last file's notices.
+    pub(crate) fn open_media(&mut self, path: PathBuf, streams: Vec<Option<usize>>) {
+        if self.player.is_none() {
             return;
-        };
+        }
+        self.forget_file();
+        self.info.open(&path);
+        self.view.reset();
+        if let Some(player) = &self.player {
+            player.open_streams(path, streams);
+        }
+        self.reframe.span_reset();
+    }
+
+    /// The last file's notices and streams forgotten. The machine's
+    /// notices stay, dismissed or not: the doctor's, the adapter's, a
+    /// failed GPU, a missing audio device, a slot the GPU dropped; and
+    /// the project's.
+    pub(crate) fn forget_file(&mut self) {
         // The last file's events, sent since this frame's tick, go with
         // its notices rather than onto the next file's. Once the player
         // has the new file, it sends none of the last one's (but for one
         // already past its check: D36).
-        let events = player.events();
-        for e in events {
-            self.event(e);
+        if let Some(player) = &self.player {
+            for e in player.events() {
+                self.event(e);
+            }
         }
         self.notices.retain(|k| {
             matches!(
@@ -407,14 +434,11 @@ impl AppState {
                     | NoticeKind::GpuFailed
                     | NoticeKind::NoAudioDevice
                     | NoticeKind::SlotDropped
+                    | NoticeKind::Project
+                    | NoticeKind::MediaOffline
             )
         });
         self.streams.clear();
-        self.info.open(&path);
-        self.view.reset();
-        if let Some(player) = &self.player {
-            player.open(path);
-        }
     }
 
     /// The player's events into notices, the doctor's result into
@@ -448,6 +472,7 @@ impl AppState {
         for e in events {
             self.event(e);
         }
+        self.reframe_tick();
         if let Some((path, lenses)) = self.info.take_lenses()
             && lenses.len() >= 2
             && self.snapshot.path.as_ref() == Some(&path)
@@ -466,6 +491,8 @@ impl AppState {
         };
         let (at, play) = (self.snapshot.clock, self.snapshot.want_play);
         tracing::info!(?lenses, "opening the lenses of {}", path.display());
+        // A camera's raw file has no view to key until M3 stitches it.
+        self.reframe.let_go();
         self.notices.push(
             Notice::new(
                 NoticeKind::Lenses,
@@ -479,6 +506,7 @@ impl AppState {
         );
         self.streams.clear();
         player.open_streams(path, lenses.into_iter().map(Some).collect());
+        self.reframe.span_reset();
         if at > Time::ZERO {
             player.seek(at, SeekMode::Exact);
         }
@@ -625,6 +653,8 @@ impl AppState {
         } else if matches!(self.doctor, DoctorState::Pending(_))
             || self.files.pending()
             || self.info.pending()
+            || self.reframe.pending()
+            || matches!(self.reframe.look, Look::Editing { .. })
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -632,11 +662,43 @@ impl AppState {
 
     fn menu_ui(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
+            let doc = self.reframe.doc.is_some();
             ui.menu_button("File", |ui| {
-                if ui.button("Open…").clicked() {
+                if ui
+                    .add(egui::Button::new("Open…").shortcut_text("Ctrl+O"))
+                    .clicked()
+                {
                     self.files.focus = true;
                     ui.close();
                 }
+                let saving = self.reframe.saving();
+                if ui
+                    .add_enabled(
+                        doc && !saving,
+                        egui::Button::new("Save").shortcut_text("Ctrl+S"),
+                    )
+                    .clicked()
+                {
+                    self.save();
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        doc && !saving,
+                        egui::Button::new("Save as…").shortcut_text("Ctrl+Shift+S"),
+                    )
+                    .clicked()
+                {
+                    self.open_save_as();
+                    ui.close();
+                }
+                ui.add_enabled(false, egui::Button::new("Export…").shortcut_text("Ctrl+E"))
+                    .on_disabled_hover_text("The export window arrives in M2.7");
+                if ui.add_enabled(doc, egui::Button::new("Close")).clicked() {
+                    self.close_project();
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button("Settings…").clicked() {
                     self.settings_open = true;
                     ui.close();
@@ -645,6 +707,7 @@ impl AppState {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
+            ui.menu_button("Edit", |ui| self.edit_menu(ui));
             ui.menu_button("View", |ui| {
                 let now = ui.input(|i| i.time);
                 for p in Preset::ALL {
@@ -694,6 +757,10 @@ impl AppState {
                     self.settings.anisotropic = aniso;
                 }
                 ui.checkbox(&mut self.settings.overlay, "Overlay (F3)");
+                ui.add_enabled(
+                    self.reframe.doc.is_some(),
+                    egui::Checkbox::new(&mut self.reframe.looping, "Loop in to out (Ctrl+L)"),
+                );
             });
             ui.menu_button("Help", |ui| {
                 ui.label(format!(
@@ -707,7 +774,75 @@ impl AppState {
         });
     }
 
-    /// The transport and view keys, while no text field has focus.
+    /// Edit ▸: undo and redo by their steps' labels, and the reframer's
+    /// edits by their keys.
+    fn edit_menu(&mut self, ui: &mut egui::Ui) {
+        let doc = self.reframe.doc.is_some();
+        let undo = self
+            .reframe
+            .doc
+            .as_ref()
+            .and_then(|d| d.undo_label())
+            .map(str::to_owned);
+        let redo = self
+            .reframe
+            .doc
+            .as_ref()
+            .and_then(|d| d.redo_label())
+            .map(str::to_owned);
+        let label = |verb: &str, step: &Option<String>| match step {
+            Some(l) => format!("{verb} {l}"),
+            None => verb.to_owned(),
+        };
+        if ui
+            .add_enabled(
+                undo.is_some(),
+                egui::Button::new(label("Undo", &undo)).shortcut_text("Ctrl+Z"),
+            )
+            .clicked()
+        {
+            self.undo();
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                redo.is_some(),
+                egui::Button::new(label("Redo", &redo)).shortcut_text("Ctrl+Shift+Z"),
+            )
+            .clicked()
+        {
+            self.redo();
+            ui.close();
+        }
+        ui.separator();
+        let selected = self
+            .reframe
+            .doc
+            .as_ref()
+            .is_some_and(|d| !d.selection.is_empty());
+        let keyed = self.reframe.flat_output().is_some();
+        type Item = (&'static str, &'static str, bool, fn(&mut AppState));
+        let items: [Item; 5] = [
+            ("Key the view", "Alt+K", keyed, AppState::key_view),
+            ("Set in", "I", doc, AppState::set_in),
+            ("Set out", "O", doc, AppState::set_out),
+            ("Add marker", "M", doc, AppState::add_marker),
+            ("Delete keys", "Delete", selected, AppState::remove_selected),
+        ];
+        for (text, key, enabled, run) in items {
+            if ui
+                .add_enabled(enabled, egui::Button::new(text).shortcut_text(key))
+                .clicked()
+            {
+                run(self);
+                ui.close();
+            }
+        }
+    }
+
+    /// The transport, view and project keys, while no text field has
+    /// focus. egui matches a key without Shift or Alt whether they are
+    /// held or not, so the chords go first.
     fn keys(&mut self, ui: &mut egui::Ui) {
         if ui.ctx().text_edit_focused() {
             return;
@@ -716,6 +851,47 @@ impl AppState {
         let pressed =
             |ui: &mut egui::Ui, m: Modifiers, k: Key| ui.input_mut(|i| i.consume_key(m, k));
         let t = ui.input(|i| i.time);
+        let shift = Modifiers::COMMAND | Modifiers::SHIFT;
+        if pressed(ui, shift, Key::Z) || pressed(ui, Modifiers::COMMAND, Key::Y) {
+            self.redo();
+        }
+        if pressed(ui, Modifiers::COMMAND, Key::Z) {
+            self.undo();
+        }
+        if pressed(ui, shift, Key::S) {
+            self.open_save_as();
+        }
+        if pressed(ui, Modifiers::COMMAND, Key::S) {
+            self.save();
+        }
+        if pressed(ui, Modifiers::COMMAND, Key::O) {
+            self.files.focus = true;
+        }
+        if pressed(ui, Modifiers::COMMAND, Key::L) {
+            self.toggle_loop();
+        }
+        if pressed(ui, Modifiers::ALT, Key::K) {
+            self.key_view();
+        }
+        if pressed(ui, Modifiers::ALT, Key::OpenBracket) {
+            self.seek_key(false);
+        }
+        if pressed(ui, Modifiers::ALT, Key::CloseBracket) {
+            self.seek_key(true);
+        }
+        if pressed(ui, Modifiers::NONE, Key::I) {
+            self.set_in();
+        }
+        if pressed(ui, Modifiers::NONE, Key::O) {
+            self.set_out();
+        }
+        if pressed(ui, Modifiers::NONE, Key::M) {
+            self.add_marker();
+        }
+        if pressed(ui, Modifiers::NONE, Key::Delete) || pressed(ui, Modifiers::NONE, Key::Backspace)
+        {
+            self.remove_selected();
+        }
         if pressed(ui, Modifiers::NONE, Key::Space) || pressed(ui, Modifiers::NONE, Key::K) {
             self.toggle_play();
         }
@@ -776,6 +952,12 @@ impl AppState {
     }
 
     pub fn toggle_play(&mut self) {
+        if self.player.is_none() {
+            return;
+        }
+        if !self.snapshot.want_play {
+            self.end_look();
+        }
         let Some(p) = &self.player else { return };
         if self.snapshot.want_play {
             p.pause();
@@ -785,12 +967,14 @@ impl AppState {
     }
 
     pub fn step(&mut self, frames: i32) {
+        self.end_look();
         if let Some(p) = &self.player {
             p.step(frames);
         }
     }
 
     pub fn seek(&mut self, at: Time, mode: SeekMode) {
+        self.end_look();
         if let Some(p) = &self.player {
             p.seek(at, mode);
         }
@@ -835,7 +1019,9 @@ impl AppState {
             return None;
         }
         Some(match self.snapshot.state {
-            PlayState::Empty => "Open a video from the Files pane",
+            PlayState::Empty if self.reframe.loading() => "Opening the project…",
+            PlayState::Empty if self.reframe.doc.is_some() => "The project's video is missing",
+            PlayState::Empty => "Open a video or a project from the Files pane",
             PlayState::Failed => "This file can't be shown",
             _ => "Decoding…",
         })
@@ -851,23 +1037,28 @@ impl AppState {
             .show(ui, |ui| self.picture_ui(ui));
     }
 
-    /// The projected picture, and the drag and zoom on it.
+    /// The projected picture, and the drag and zoom on it. With a flat
+    /// output it is the keyed view (or a look-around, or a change being
+    /// made) through the output frame, dimmed past it (M2 plan 10.2).
     fn picture_ui(&mut self, ui: &mut egui::Ui) {
         let t = ui.input(|i| i.time);
         self.view.settle(t);
+        self.watch_view(Instant::now());
+        self.apply_keys();
         let area = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(area, egui::Sense::click_and_drag());
         let ppp = ui.ctx().pixels_per_point();
         let rect = viewer::pixel_rect(area, ppp);
         self.viewer_rect = Some(rect);
         let vp = viewer::viewport(rect, ui.ctx());
+        let framing = self.framing(viewer::physical(&vp));
         let free = ui.input(|i| i.modifiers.ctrl);
         // The raw view's pictures are flat: nothing to look around in.
         let raw = self.raw_view();
         if raw {
             self.drag = None;
         } else {
-            self.look_ui(ui, &response, &vp, ppp, free);
+            self.look_ui(ui, &response, &vp, ppp, free, framing);
         }
         if response.double_clicked() {
             self.toggle_play();
@@ -877,7 +1068,10 @@ impl AppState {
         // in the raw view every stream's, flat.
         let presented = self.presented.take();
         let frames = presented.as_ref().map_or(&[][..], |p| &p.frames[..]);
-        let view = ViewParams::new(self.view.q, self.view.lens);
+        let mut view = ViewParams::new(self.view.q, self.view.lens);
+        if let Some(f) = framing {
+            view = view.framed(f);
+        }
         let filter = self.view.filter;
         let shown = frames.first().map(|s| {
             (
@@ -907,7 +1101,8 @@ impl AppState {
         } else {
             Vec::new()
         };
-        let shown = shown.filter(|_| raw.is_empty());
+        let flat = raw.is_empty();
+        let shown = shown.filter(|_| flat);
         let perf = self.player.as_ref().map(|p| p.perf().clone());
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
@@ -920,10 +1115,11 @@ impl AppState {
             },
         ));
         drop(presented);
-        self.picture_notes(ui, &response, rect);
+        self.picture_notes(ui, &response, rect, framing.filter(|_| flat));
     }
 
-    /// Drag to look around, and zoom with the wheel or a pinch.
+    /// Drag to look around, and zoom with the wheel or a pinch, the
+    /// pointer mapped through the output frame when there is one.
     fn look_ui(
         &mut self,
         ui: &egui::Ui,
@@ -931,30 +1127,35 @@ impl AppState {
         vp: &egui::epaint::ViewportInPixels,
         ppp: f32,
         free: bool,
+        framing: Option<Framing>,
     ) {
+        let mut through = ViewParams::new(self.view.q, self.view.lens);
+        if let Some(f) = framing {
+            through = through.framed(f);
+        }
+        let point = |pos| viewer::frame_point(pos, vp, ppp, &through);
         if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(origin) = ui.input(|i| i.pointer.press_origin())
         {
             self.view.cancel_morph();
-            self.drag = Some(self.view.grab(viewer::lens_point(origin, vp, ppp)));
+            self.drag = Some(self.view.grab(point(origin)));
         }
         if response.dragged_by(egui::PointerButton::Primary)
             && let (Some(mut start), Some(pos)) = (self.drag, response.interact_pointer_pos())
         {
-            let fit = self
-                .view
-                .drag_to(&mut start, viewer::lens_point(pos, vp, ppp), free);
+            let fit = self.view.drag_to(&mut start, point(pos), free);
             self.drag = Some(start);
             self.last_fit = Some(fit);
         }
         if response.drag_stopped() {
             self.drag = None;
+            self.reframe.released = true;
         }
         if response.hovered()
             && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
         {
             let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
-            let p = viewer::lens_point(pos, vp, ppp);
+            let p = point(pos);
             if scroll != 0.0 {
                 self.view
                     .zoom((ZOOM_PER_POINT * f64::from(scroll)).exp(), p);
@@ -965,8 +1166,15 @@ impl AppState {
         }
     }
 
-    /// The picture's label, its placeholder, and the overlay over it.
-    fn picture_notes(&mut self, ui: &egui::Ui, response: &egui::Response, rect: egui::Rect) {
+    /// The picture's label, its placeholder, the look-around's badge, and
+    /// the overlay over it.
+    fn picture_notes(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        rect: egui::Rect,
+        framing: Option<Framing>,
+    ) {
         let placeholder = self.placeholder();
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
@@ -983,6 +1191,19 @@ impl AppState {
                 egui::FontId::proportional(16.0),
                 egui::Color32::GRAY,
             );
+        }
+        if self.reframe.look == Look::Around && placeholder.is_none() {
+            // In the frame's corner: its rect is in the viewer's pixels.
+            let ppp = ui.ctx().pixels_per_point();
+            let corner = framing.map_or(rect.left_top(), |f| {
+                rect.left_top() + egui::vec2(f.rect[0] as f32, f.rect[1] as f32) / ppp
+            });
+            let text = egui::RichText::new(NOT_KEYED)
+                .color(egui::Color32::WHITE)
+                .background_color(egui::Color32::from_black_alpha(160));
+            let at =
+                egui::Rect::from_min_size(corner + egui::vec2(8.0, 8.0), egui::vec2(220.0, 20.0));
+            ui.put(at, egui::Label::new(text).selectable(false));
         }
         if self.settings.overlay {
             crate::overlay::overlay_ui(self, ui, rect);

@@ -9,14 +9,17 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod doc;
 pub mod jobs;
 pub mod notices;
 pub mod overlay;
 pub mod panes;
 pub mod proto;
+pub mod reframe;
 pub mod run;
 pub mod settings;
 pub mod smoke;
+pub mod timeline;
 pub mod transport;
 pub mod view;
 pub mod viewer;

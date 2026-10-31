@@ -10,6 +10,7 @@ mod common;
 use egui::epaint::ViewportInPixels;
 use egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor};
 use spherecut_app::viewer::{ViewerCallback, ViewerResources};
+use spherecut_core::project::{Aspect, Orientation, Output};
 use spherecut_render::{Pixels, StillOptions, render_still};
 
 /// The viewer's rect in the rendered image, as `prepare` rounds it.
@@ -187,17 +188,55 @@ fn drag(
     h.step();
 }
 
+/// The outputs the under-cursor tests run through (M2 amendment 2 item
+/// 29): a 360 output, which the viewer doesn't frame, as M1's, the
+/// untitled project's 16:9, and a 9:16 frame in the wide viewer.
+fn outputs() -> [(&'static str, Output); 3] {
+    [
+        (
+            "360",
+            Output::Equirect {
+                width: 3840,
+                orientation: Orientation::IDENTITY,
+            },
+        ),
+        ("16:9", Output::DEFAULT),
+        (
+            "9:16",
+            Output::Flat {
+                aspect: Aspect::Portrait,
+                short_side: 1080,
+            },
+        ),
+    ]
+}
+
+/// The lens point under `pos`, as the app maps it: through the output
+/// frame of the view it shows.
+fn under(
+    h: &egui_kittest::Harness<'_, spherecut_app::SpherecutApp>,
+    pos: egui::Pos2,
+    vp: &ViewportInPixels,
+    ppp: f32,
+) -> glam::DVec2 {
+    let view = h.state().state.shown.as_ref().expect("a frame shown").view;
+    spherecut_app::viewer::frame_point(pos, vp, ppp, &view)
+}
+
 /// The marker drag of section 7.4, through the fisheye: an equidistant
 /// lens moves a disc's image nearly rigidly, where rectilinear's
 /// stretch away from the centre moves the 8° disc's centroid 0.7 px off
 /// the grabbed point over this drag at 1.0 points a pixel (measured),
-/// though the grabbed point itself lands exactly (the level solve).
+/// though the grabbed point itself lands exactly (the level solve). The
+/// viewer is tall enough that a 9:16 frame shows the disc large enough
+/// to find.
 #[test]
 fn a_drag_puts_the_marker_under_the_pointer() {
     let gpu = common::gpu();
-    for ppp in [1.0f32, 1.25] {
+    for ((name, output), ppp) in outputs().into_iter().flat_map(|o| [(o, 1.0f32), (o, 1.25)]) {
         let rs = common::render_state(&gpu);
-        let mut h = common::harness(common::grid_app(&gpu), &rs, [640.0, 420.0], ppp);
+        let mut h = common::harness(common::grid_app(&gpu), &rs, [640.0, 760.0], ppp);
+        common::set_output(&mut h, output);
         h.key_press(egui::Key::Num2);
         for _ in 0..20 {
             h.step();
@@ -219,19 +258,19 @@ fn a_drag_puts_the_marker_under_the_pointer() {
         let c1 = red_centroid(&image, &vp);
         let miss = (c1 - egui::pos2(to.x * ppp, to.y * ppp)).length();
         eprintln!(
-            "at {ppp} points a pixel, the centroid lands {miss:.3} px from the release point"
+            "{name} at {ppp} points a pixel, the centroid lands {miss:.3} px from the release point"
         );
         assert!(
             miss <= 0.5,
-            "at {ppp}: the marker's centroid is {miss} px from the release point"
+            "{name} at {ppp}: the marker's centroid is {miss} px from the release point"
         );
         // The app's orientation is the level solve's.
-        let lp = |p| spherecut_app::viewer::lens_point(p, &vp, ppp);
+        let lp = |p| under(&h, p, &vp, ppp);
         let start = spherecut_sphere::grab::start(q0, &lens, lp(from));
         let (want, fit) = spherecut_sphere::grab::solve_level(&start, &lens, lp(to));
         assert_eq!(fit, spherecut_sphere::grab::GrabFit::Exact);
         let q = h.state().state.view.q;
-        assert!(want.angle_between(q) < 1e-9, "{want} {q}");
+        assert!(want.angle_between(q) < 1e-9, "{name}: {want} {q}");
         assert!(h.state().state.drag.is_none());
     }
 }
@@ -239,14 +278,22 @@ fn a_drag_puts_the_marker_under_the_pointer() {
 #[test]
 fn zoom_keeps_the_direction_under_the_pointer() {
     let gpu = common::gpu();
-    let rs = common::render_state(&gpu);
-    let mut h = common::harness(common::grid_app(&gpu), &rs, [640.0, 420.0], 1.25);
+    for (name, output) in outputs() {
+        zoom_about_the_pointer(&gpu, name, output);
+    }
+}
+
+fn zoom_about_the_pointer(gpu: &spherecut_render::Gpu, name: &str, output: Output) {
+    let rs = common::render_state(gpu);
+    let mut h = common::harness(common::grid_app(gpu), &rs, [640.0, 420.0], 1.25);
+    common::set_output(&mut h, output);
     common::until_shown(&mut h, &rs);
     let image = h.render().unwrap();
     let vp = viewport(&h, image.width(), image.height());
     let rect = h.state().state.viewer_rect.unwrap();
-    let at = rect.center() + egui::vec2(120.0, -60.0);
-    let lp = spherecut_app::viewer::lens_point(at, &vp, 1.25);
+    // Inside even the 9:16 frame, off its centre.
+    let at = rect.center() + egui::vec2(40.0, -30.0);
+    let lp = under(&h, at, &vp, 1.25);
     let dir = |a: &spherecut_app::SpherecutApp| a.state.view.q * a.state.view.lens.unproject(lp);
     let before = dir(h.state());
     let hfov0 = h.state().state.view.lens.hfov;
@@ -264,16 +311,16 @@ fn zoom_keeps_the_direction_under_the_pointer() {
         h.step();
     }
     let hfov1 = h.state().state.view.lens.hfov;
-    assert!(hfov1 < hfov0 * 0.9, "{hfov0} → {hfov1}");
-    assert!(angle(before, dir(h.state())) < 1e-9);
+    assert!(hfov1 < hfov0 * 0.9, "{name}: {hfov0} → {hfov1}");
+    assert!(angle(before, dir(h.state())) < 1e-9, "{name}");
     h.event(egui::Event::Zoom(0.5));
     h.step();
     let hfov2 = h.state().state.view.lens.hfov;
     assert!(
         (hfov2 - (hfov1 * 2.0).min(170f64.to_radians())).abs() < 1e-9,
-        "{hfov1} → {hfov2}"
+        "{name}: {hfov1} → {hfov2}"
     );
-    assert!(angle(before, dir(h.state())) < 1e-9);
+    assert!(angle(before, dir(h.state())) < 1e-9, "{name}");
 }
 
 #[test]
@@ -294,13 +341,15 @@ fn the_projection_switch_morphs_over_a_quarter_second() {
     let view = &h.state().state.view;
     assert!(!view.animating());
     assert_eq!(view.preset, spherecut_app::view::Preset::TinyPlanet);
+    // Once the switch rests it keys the project's only keys, whose FOV is
+    // in degrees: the lens comes back from them within rounding.
+    use spherecut_sphere::perspective::Projection;
+    let l = view.lens;
     assert_eq!(
-        view.lens,
-        spherecut_sphere::perspective::Lens::new(
-            spherecut_sphere::perspective::Projection::Stereographic,
-            300f64.to_radians()
-        )
+        (l.from, l.to, l.morph),
+        (Projection::Stereographic, Projection::Stereographic, 0.0)
     );
+    assert!((l.hfov - 300f64.to_radians()).abs() < 1e-12, "{l:?}");
     assert!((view.ypr().pitch + std::f64::consts::FRAC_PI_2).abs() < 1e-9);
     assert!(morphs.iter().any(|&m| m > 0.1 && m < 0.9), "{morphs:?}");
     // Every frame of the morph was projected anew.

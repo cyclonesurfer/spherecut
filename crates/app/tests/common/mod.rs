@@ -221,13 +221,15 @@ pub fn last_drawn(rs: &egui_wgpu::RenderState) -> Option<DrawKey> {
         .and_then(|v| v.last().cloned())
 }
 
-/// Step until the viewer has projected the frame the app shows.
+/// Step until the viewer has projected the frame the app shows, with
+/// the untitled project made (it frames the picture).
 pub fn until_shown(h: &mut Harness<'_, SpherecutApp>, rs: &egui_wgpu::RenderState) {
     let start = Instant::now();
     loop {
         h.step();
-        let shown = h.state().state.shown.clone();
-        if shown.is_some() && last_drawn(rs) == shown {
+        let s = &h.state().state;
+        let shown = s.shown.clone();
+        if shown.is_some() && !s.reframe.pending() && last_drawn(rs) == shown {
             return;
         }
         assert!(
@@ -236,4 +238,23 @@ pub fn until_shown(h: &mut Harness<'_, SpherecutApp>, rs: &egui_wgpu::RenderStat
         );
         pace(Duration::from_millis(5));
     }
+}
+
+/// Step until the open video's untitled project is made.
+pub fn until_project(h: &mut Harness<'_, SpherecutApp>) {
+    step_until(h, Duration::from_secs(20), "the untitled project", |a| {
+        a.state.reframe.doc.is_some()
+    });
+}
+
+/// The project's sequence set to `output`, one undo step.
+pub fn set_output(h: &mut Harness<'_, SpherecutApp>, output: spherecut_core::project::Output) {
+    until_project(h);
+    let s = &mut h.state_mut().state;
+    let sequence = s.reframe.doc.as_ref().unwrap().project.the_sequence().id;
+    assert!(s.edit(
+        "Output",
+        &[spherecut_core::project::Edit::SetOutput { sequence, output }]
+    ));
+    h.step();
 }

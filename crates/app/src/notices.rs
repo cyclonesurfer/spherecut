@@ -29,6 +29,14 @@ pub enum NoticeKind {
     UploadFailed,
     /// One of the doctor's issues, by what it says.
     Doctor(String),
+    /// The project can't be made, opened or saved.
+    Project,
+    /// The project's video isn't where it was.
+    MediaOffline,
+    /// The project's video isn't the file it was.
+    MediaChanged,
+    /// An edit was refused.
+    Edit,
 }
 
 /// One banner.

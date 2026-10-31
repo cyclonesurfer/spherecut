@@ -229,6 +229,20 @@ impl ViewState {
         }
     }
 
+    /// The keyed view (M2 plan section 10.2): `q` through `lens`, the
+    /// preset the one its projection is nearest, no switch under way.
+    pub fn set_keyed(&mut self, q: DQuat, lens: Lens) {
+        self.morph = None;
+        self.q = q;
+        self.lens = lens;
+        let nearest = if lens.morph > 0.5 { lens.to } else { lens.from };
+        self.preset = match nearest {
+            Projection::Rectilinear => Preset::Rectilinear,
+            Projection::Fisheye => Preset::Fisheye,
+            Projection::Stereographic => Preset::TinyPlanet,
+        };
+    }
+
     /// A drag's start at lens point `p`.
     pub fn grab(&self, p: DVec2) -> GrabStart {
         grab::start(self.q, &self.lens, p)
