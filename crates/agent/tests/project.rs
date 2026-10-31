@@ -561,7 +561,7 @@ fn a_session_lists_the_project_tools_and_edits() {
         names,
         [
             "probe", "look", "analyze", "check", "doctor", "project", "edit", "undo", "render",
-            "job"
+            "job", "compare"
         ]
     );
     let r = s.call_tool(

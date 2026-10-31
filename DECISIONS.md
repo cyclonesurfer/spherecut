@@ -8895,6 +8895,107 @@ table moves to where both reach it); a machine with two GPUs makes two
 renders at once worth it; or an agent needs a job found again after the
 server restarts.
 
+## D59. Compare, and projects in look and check: a sequence's frames one way, the render's times
+
+*2026-10-31, A2 slice A2.5. The A2 plan, `docs/design/a2-plan.md`
+sections 7 and 9.4, has the detail; this is what was built and why.*
+
+**A sequence's frames, one way.** `ops::sequence` loads a project as
+`render` does (its media beneath the read roots and the file it
+recorded: `media_missing`, `media_changed`), gives the frames a render
+makes from a time (`Frames`: frame n is at n / rate in the render and
+shows the clip's media at `from` + n / rate), and renders each through
+the views the export and `frame --project` use (`frame_views_at`, with
+motion blur when the sequence has it) and the export's filter
+(anisotropic where the GPU filters so, D49), at any size. `render`,
+`look`, `compare` and `check` go through it, so the frame a tool shows
+is the frame a render makes; a CLI test holds look's tile at the
+output's size to `frame --project`'s PNG, sample for sample.
+
+**Times on a project are the render's.** 0 is the render's first frame,
+which shows the media at the trim's start (or at `from`), and `"12f"`
+is the render's frame 12; past the render's end is `out_of_range`, with
+the render's span as `valid`. Each tile gives `time`, the render's, and
+`source`, the media's. So a time names the same frame in a render and
+in its project, which is what comparing the two needs.
+
+**look with a project** takes `mode` `view` (a tile a time) or `sheet`
+(12 by default, from the first frame to the last), rendered at the
+tile's size in 8 bits. The source's modes (`sphere`, `cube`, `raw`),
+`view`, `views`, `seek: keyframe` and `assume_equirect` are refused
+(`bad_argument`): the project says how a frame is rendered, and a view
+of the source is a look at its media file.
+
+**check with a project** runs D46's rules, and the target's, on the
+file a render would write, without rendering: the export's `prepare`
+(the preset, the encoder it would choose) and the new `planned` (the
+file the last pass checks for, `Expected`, and the audio choice with
+its bit rate) make a `ProbeReport` of it, with the codec, size, rate,
+bit depth, BT.709 limited range, the moov first, and the metadata the
+injector writes (V2 equirect mono and V1 for a sphere; SA3D for
+ambiX). The rules' messages keep their words; `checked` says that "it"
+is the file a render of the project would make, and the export's
+warnings come with it. A flat project checked for YouTube 360 fails
+`spherical_metadata`, with its fix. The check a finished `job` gives is
+the proof; this is the check before.
+
+**compare** measures PSNR and SSIM of BT.709 luma with
+`render::compare` (`psnr_plane`, and `ssim_plane`, whose Gaussian is
+two 1D passes so a 4K plane takes a fraction of a second), the parity
+tests' code, on the scale they measure in: limited range over 255, as
+an 8-bit encoder codes it, so its dB are theirs. Each time is decoded
+exactly and drawn whole as coded (`Draw::Coded`) at the file's size in
+16 bits a channel; a project's frame renders at the file's size in 16
+bits. Luma from a file's RGB is its coded luma again, up to clamping,
+so a render against its project measures the encode, as the parity
+tests do in the encoder's planes.
+
+- **Times** are the file's: `times` (up to 24), or `count` (8 by
+  default) at the middles of equal parts of the shorter of the two, so
+  that none is at the very end. A project's frame is the one its
+  render shows at the file's frame's time, from `from` (the trim's
+  start by default; a `render` of a `range` gives its `from`), so a
+  render compares frame for frame.
+- **Sizes**: two files must be one size (`bad_argument` with both); a
+  project renders at the file's size, refused when its output's shape
+  is more than 1 % off the file's (a draft's sides move by under 1 %).
+- **The result** gives each time's PSNR (`"inf"` when identical) and
+  SSIM, the worst of each, and the means; the mean PSNR is the mean
+  error's, so one identical time doesn't make it infinite.
+- **`sheet`** adds a JPEG within the inline budget: the four worst
+  times by PSNR, a row each of the file, the other and their difference
+  times 4 (`DIFF_GAIN`), each box-averaged down to its tile.
+- **At its deadline** it answers with the times measured, `partial`,
+  `measured` and `next`, once less than `COMPARE_RESERVE` (1.5 s) plus
+  twice its slowest time is left; the first time is always measured.
+
+Measured on lavapipe in a debug build: a 1 s render at flat 16:9 1080
+through libx264 at the high quality, against its project, 55.18 to
+55.39 dB and SSIM 0.99850 to 0.99857 at eight times, above D52's flat
+floors (49 dB, 0.995); the same a frame off, 19.22 to 25.04 dB. A time
+at 1080 takes about a second there.
+
+**The listing.** compare's schema is flat (`against_file` or
+`against_project`, exactly one, which the op checks) and lists in 999
+of its 1,000 bytes. `project` in look and check, with `file` no longer
+required (the op refuses both or neither), brings A1's five to 7,109
+bytes of their 7 KiB (the plan's table rounded the share to 7,000).
+Eleven tools with a write root take 12,267 bytes of the 12 KiB; seven
+are listed without one, compare being read-only.
+
+**Considered and not done.** One `against` taking either kind, told
+apart by the extension (the plan flattened it to two names, so the
+schema says which); luma from the decoder's Y plane rather than RGB
+(the still draws RGB, and they differ only by clamping); VMAF or other
+measures (D52's floors are PSNR and SSIM); a project rendered at its
+own size with the file scaled to it (the file is what was delivered);
+look on a project through a view of its own (a look at the media
+file); check rendering a frame to be sure (`job`'s check is the proof).
+
+Revisit if: an agent needs the source and the render side by side in
+one image; a codec's clamping moves compare's numbers (then read Y);
+or 1 % of shape lets a wrong project through.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360

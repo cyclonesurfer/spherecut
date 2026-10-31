@@ -226,3 +226,22 @@ pub const JOB_WAIT_MARGIN: Duration = Duration::from_secs(2);
 /// How long `job`'s `cancel` waits for the render to stop and its file
 /// to go.
 pub const CANCEL_WAIT: Duration = Duration::from_secs(2);
+
+/// The most times `compare` measures (a2-plan 7.1).
+pub const COMPARE_TIMES: usize = 24;
+
+/// The times `compare` spreads over the shorter of its two, unless
+/// `times` or `count` says.
+pub const COMPARE_COUNT: u32 = 8;
+
+/// The worst times `compare`'s `sheet` shows, a row each of the file, the
+/// other and their difference.
+pub const SHEET_ROWS: usize = 4;
+
+/// How much `compare`'s sheet brightens a difference, so that a few
+/// codes' error shows.
+pub const DIFF_GAIN: f64 = 4.0;
+
+/// How long before its deadline `compare` stops to answer with the times
+/// it measured, plus twice the longest time it took to measure one.
+pub const COMPARE_RESERVE: Duration = Duration::from_millis(1500);

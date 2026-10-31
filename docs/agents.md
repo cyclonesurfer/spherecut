@@ -254,7 +254,7 @@ it negotiated when it was tried with Spherecut.
 
 ## The tools
 
-Ten tools, in this order; `edit`, `undo`, `render` and `job` are listed
+Eleven tools, in this order; `edit`, `undo`, `render` and `job` are listed
 only with a write root (`--allow-write`), since without one each call
 would be refused. Each takes one JSON object; the schemas are
 `docs/agents/schemas/*.json`. Every result has `warnings: [{code,
@@ -284,7 +284,14 @@ true, `idempotentHint` false).
   stream side by side, for footage not yet stitched). `times` up to 24,
   `size` 64 to 4096 (768 by default, 1568 at most inline), `format`
   `jpeg` or `png`, `seek` `exact` or `keyframe`, `output`,
-  `assume_equirect`.
+  `assume_equirect`. With `project` in place of `file`, the tiles are
+  the project's render: its frames at the times, which are the
+  render's (0 is its first frame, `"12f"` its frame 12), rendered as
+  the export renders them (`frame --project`), in `mode` `view` or
+  `sheet` (12 over the render by default). Each tile gives `time`, the
+  render's, and `source`, the media's. `view`, `views`, `seek` and
+  `assume_equirect` are refused there: a view of the source is a look
+  at the project's media file.
 - **`analyze`**: a measure over time in `buckets` (50 by default, up to
   200), between `from` and `to`. `kind`: `timing` (packets only: frame
   durations, `vfr`, duplicate timestamps, gaps and frames missing,
@@ -300,7 +307,11 @@ true, `idempotentHint` false).
   streams, and the file against a `target` (`youtube_360`,
   `flat_16_9`, `vertical`, `archive`). `{target, pass, rules: [{id, ok,
   message, fix}], advice: [{id, message}]}`, under 2 KB. D46 lists every
-  rule.
+  rule. With `project` in place of `file`, it checks the file a render
+  of the project would make (`checked` says so): the output's kind and
+  size, codec, bit depth, colour, audio and its metadata, by the same
+  rules and target, before any render. The `check` a finished `job`
+  gives is the proof.
 - **`doctor`**: this machine's FFmpeg, decoders, VA-API and Vulkan
   devices, and each problem with its fix (the exact Fedora commands come
   from `spherecut doctor` in a terminal). With `file`, the decode path
@@ -369,6 +380,24 @@ true, `idempotentHint` false).
   ended is `job_lost`. When the server ends, its renders are cancelled;
   a file a killed server left is removed by the next render in that
   folder.
+- **`compare`**: how alike `file` is to `against_file` (a video of the
+  same size) or to `against_project`'s render (rendered at `file`'s
+  size, refused when its shape differs), at `times` (file time, up to
+  24) or `count` spread over the shorter of the two (8 by default): the
+  PSNR (dB, `"inf"` when identical) and SSIM of BT.709 luma at each
+  time, in limited range as an encoder codes it (so the dB are the
+  export's parity tests'), the worst of each and the means (the mean
+  PSNR is the mean error's). Each time is decoded exactly and drawn whole at 16 bits a
+  channel; a project's frame is the one its render shows at the file's
+  frame's time, so a render compares frame for frame with its project,
+  and `from` (the clip's media time, the trim's start by default) is
+  where the render started: a `render` of a `range` gives its `from`.
+  `sheet` adds an image of the four worst times, a row each of the
+  file, the other and their difference times four, within the inline
+  budget. Out of time, it answers with the times it measured,
+  `partial: true`. An export at its preset is above D52's floors
+  against its project (49 dB and 0.995 flat, 55.5 dB and 0.996 for the
+  sphere, 48 dB and 0.994 draft).
 
 **Conventions.** Times are strings (`"12.5"`, `"1:02.5"`, `"370f"` for
 frame 370, `"30000/1001"`) or `[num, den]` pairs of seconds; a bare
@@ -536,7 +565,12 @@ test; a test checks that each is listed here.
 | `JOB_WAIT` | 45 s | the longest `job` `wait` |
 | `JOB_WAIT_MARGIN` | 2 s | a wait ends this long before its call's deadline |
 | `CANCEL_WAIT` | 2 s | how long `cancel` waits for the render and its file to go |
-| `MAX_TOOLS` | 12 | tools through M9 (A1 has 5, A2.2 adds 3, A2.4 2) |
+| `COMPARE_TIMES` | 24 | times in one `compare` |
+| `COMPARE_COUNT` | 8 | times `compare` spreads by default |
+| `SHEET_ROWS` | 4 | worst times `compare`'s `sheet` shows |
+| `DIFF_GAIN` | 4 | how much the sheet brightens a difference |
+| `COMPARE_RESERVE` | 1.5 s | how long before its deadline `compare` stops to answer, plus twice its slowest time |
+| `MAX_TOOLS` | 12 | tools through M9 (A1 has 5, A2.2 adds 3, A2.4 2, A2.5 1) |
 | `MAX_LIST_BYTES` | 12 KiB | the `tools/list` result, all tools |
 | `A1_LIST_BYTES` | 7 KiB | A1's share of it |
 | `INSTRUCTIONS_CHARS` | 1,500 | the server's instructions |

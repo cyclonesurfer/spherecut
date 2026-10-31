@@ -32,8 +32,8 @@ pub use check::Checked;
 pub use encoder::{EncoderKind, EncoderSetup};
 pub use error::{ExportError, Stage};
 pub use job::{
-    AudioReport, DecodeReport, Decoder, Export, ExportJob, Fallback, Prepared, Progress, Report,
-    StageTimes, needed_bytes, prepare,
+    AudioReport, DecodeReport, Decoder, Export, ExportJob, Fallback, Planned, Prepared, Progress,
+    Report, StageTimes, needed_bytes, planned, prepare,
 };
 pub use pace::Pace;
 pub use plan::FramePlan;

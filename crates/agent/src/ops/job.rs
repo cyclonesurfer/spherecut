@@ -69,7 +69,8 @@ pub fn run(req: Request, cx: &Ctx, jobs: &Jobs) -> Result<Value, ToolError> {
             None => {
                 let c = super::check::run(
                     super::check::Request {
-                        file: status.output.clone(),
+                        file: Some(status.output.clone()),
+                        project: None,
                         target: status.target,
                     },
                     cx,

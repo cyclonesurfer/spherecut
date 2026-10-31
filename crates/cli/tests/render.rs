@@ -1073,6 +1073,66 @@ fn frame_project_is_the_exports_frame_before_its_encode() {
     );
 }
 
+/// `look` on a project (a2-plan 9.4) shows the picture `frame --project`
+/// makes of the same frame at the same size, pixel for pixel: a tile of
+/// the output's size, at the render's frame 7, keyed view and all.
+#[test]
+fn look_on_a_project_is_frame_projects_picture() {
+    let dir = TempDir::new("look-project");
+    let src = clip(&dir, "grid", Pattern::Grid, 12);
+    let p = project(&dir, &src);
+    panning(&p);
+    let still = dir.join("f7.png");
+    still_of(&p, &still, &["--frame", "7", "--decoder", "auto"]);
+    let args = json!({"project": p, "times": ["7f"], "size": 1920, "format": "png",
+                      "output": dir.join("look.png")});
+    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .args([
+            "call",
+            "look",
+            &args.to_string(),
+            "--allow-write",
+            "--write-root",
+        ])
+        .arg(&*dir)
+        .env("SPHERECUT_ADAPTER", "cpu")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout} / {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: Value = serde_json::from_str(&stdout).unwrap();
+    let tile = &doc["result"]["tiles"][0];
+    assert_eq!(tile["time"]["frame"], 7, "{doc}");
+    assert_eq!(tile["source"]["frame"], 7, "{doc}");
+    let rect: Vec<u32> = tile["rect"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u32)
+        .collect();
+    assert_eq!(rect[2..], [1920, 1080], "{doc}");
+    let want = Image::from_png(&std::fs::read(&still).unwrap()).unwrap();
+    let sheet = Image::from_png(&std::fs::read(dir.join("look.png")).unwrap()).unwrap();
+    let (Pixels::Rgb8(want), Pixels::Rgb8(sheet_px)) = (&want.pixels, &sheet.pixels) else {
+        panic!("8-bit PNGs");
+    };
+    let width = sheet.width as usize;
+    let got: Vec<u8> = (0..1080)
+        .flat_map(|y| {
+            let start = ((rect[1] as usize + y) * width + rect[0] as usize) * 3;
+            sheet_px[start..start + 1920 * 3].iter().copied()
+        })
+        .collect();
+    let differ = got.iter().zip(want).filter(|(a, b)| a != b).count();
+    assert_eq!(differ, 0, "{differ} samples differ of {}", want.len());
+}
+
 #[test]
 fn frame_project_takes_the_view_from_the_project_and_no_frame_past_its_end() {
     let dir = TempDir::new("still-flags");

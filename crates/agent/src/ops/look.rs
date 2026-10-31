@@ -29,7 +29,7 @@ use spherecut_render::{AdapterChoice, Depth, Filter, Gpu, Image, ViewParams};
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection as LensProjection};
 
-use super::Ctx;
+use super::{Ctx, sequence};
 use crate::contract::{self, Warning};
 use crate::error::{ToolError, codes};
 use crate::image::{self as picture, Canvas, Layout};
@@ -207,7 +207,9 @@ pub enum TimeArg {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    pub file: PathBuf,
+    pub file: Option<PathBuf>,
+    /// Instead of `file`: the frames a render of the project makes.
+    pub project: Option<PathBuf>,
     #[serde(default)]
     pub mode: Mode,
     pub times: Option<Vec<TimeArg>>,
@@ -1047,7 +1049,7 @@ fn encode(canvas: Canvas, format: Format, budget: Option<usize>) -> Result<Encod
 }
 
 /// A tile's first label line: `12.512s f375`.
-fn when_label(t: &FrameTime) -> String {
+pub(crate) fn when_label(t: &FrameTime) -> String {
     match t.frame {
         Some(n) => format!("{}s f{n}", seconds(t.time)),
         None => format!("{}s", seconds(t.time)),
@@ -1055,9 +1057,21 @@ fn when_label(t: &FrameTime) -> String {
 }
 
 pub fn run(req: Request, cx: &Ctx) -> Result<(Value, Vec<rpc::Image>), ToolError> {
+    let file = match (&req.file, &req.project) {
+        (Some(_), Some(_)) => {
+            return Err(bad("project", "can't come with file").valid("file, or project, not both"));
+        }
+        (None, None) => {
+            return Err(
+                bad("file", "is missing").valid("a video as file, or a .spherecut file as project")
+            );
+        }
+        (None, Some(p)) => return run_project(&req, p, cx),
+        (Some(f), None) => f.clone(),
+    };
     let plan = plan(&req, cx)?;
     cx.call.check()?;
-    let opened = cx.roots.open_file("file", &req.file)?;
+    let opened = cx.roots.open_file("file", &file)?;
     let stop = still::Stop::new(cx.call.token(), cx.call.interrupt());
     let opts = still::Options {
         // The equirect check is mode's: raw renders anything.
@@ -1227,19 +1241,208 @@ pub fn run(req: Request, cx: &Ctx) -> Result<(Value, Vec<rpc::Image>), ToolError
     }
     drop(stills);
 
-    let budget = req.output.is_none().then_some(cx.image_budget);
+    let (image, images) = deliver(canvas, req.format, req.output.as_deref(), cx)?;
+    let warnings = warnings_json(&warnings);
+    let mut result = json!({
+        "file": text::field(&file.to_string_lossy()),
+        "mode": req.mode.name(),
+        "seek": req.seek.name(),
+        "tiles": entries.into_iter().flatten().collect::<Vec<_>>(),
+        "image": image,
+        "warnings": warnings,
+    });
+    // A fallback's reason can carry FFmpeg's words.
+    text::untrusted_under(&mut result, "reason");
+    Ok((result, images))
+}
+
+/// look with `project` (a2-plan 7.2, D59): the frames a render of it
+/// makes at the times, in the render's time, each rendered as the export
+/// renders it (its views, its blur, its filter) at the tile's size. The
+/// source's modes and cameras are refused: a look at the media file
+/// shows the source.
+fn run_project(
+    req: &Request,
+    path: &Path,
+    cx: &Ctx,
+) -> Result<(Value, Vec<rpc::Image>), ToolError> {
+    if !matches!(req.mode, Mode::View | Mode::Sheet) {
+        return Err(bad(
+            "mode",
+            format!(
+                "{} shows the source, and project the render",
+                req.mode.name()
+            ),
+        )
+        .valid("view or sheet")
+        .next("look at the project's media file to see the source"));
+    }
+    let given = [
+        ("view", req.view.is_some()),
+        ("views", req.views.is_some()),
+        ("seek", req.seek != Seek::Exact),
+        ("assume_equirect", req.assume_equirect),
+    ];
+    if let Some((arg, _)) = given.into_iter().find(|(_, g)| *g) {
+        return Err(bad(
+            arg,
+            "isn't used with project: the project says how a frame is rendered",
+        )
+        .next("look at the project's media file for another view"));
+    }
+    let plan = plan(req, cx)?;
+    cx.call.check()?;
+    let loaded = sequence::load(cx, "project", path)?;
+    let frames = sequence::Frames::new(&loaded.project, None, "project")?;
+    let last = frames.count() - 1;
+    let valid = || {
+        format!(
+            "0 to {} s, or frames 0f to {last}f: the render's time",
+            seconds(frames.duration())
+        )
+    };
+    let frame = |w: &When| {
+        frames.at(w.spec).ok_or_else(|| {
+            ToolError::new(codes::OUT_OF_RANGE, "is past the end of the render")
+                .at(&w.arg)
+                .valid(valid())
+        })
+    };
+    let ns: Vec<u64> = match &plan.times {
+        Times::Given(ws) => ws.iter().map(frame).collect::<Result<_, _>>()?,
+        Times::Spread { count, ends, .. } => {
+            let (a, b) = match ends {
+                Some((a, b)) => (frame(a)?, frame(b)?),
+                None => (0, last),
+            };
+            if b < a {
+                return Err(bad("times", "the last comes before the first")
+                    .valid("the first time, then the last"));
+            }
+            let steps = u64::from(count.saturating_sub(1).max(1));
+            (0..u64::from(*count))
+                .map(|i| a + ((b - a) * i + steps / 2) / steps)
+                .collect()
+        }
+    };
+    let aspect = frames.aspect();
+    let n = ns.len() as u32;
+    let Some(layout) = picture::layout(n, aspect, plan.edge, SCREEN) else {
+        return Err(ToolError::new(
+            codes::OUT_OF_RANGE,
+            format!("{n} tiles don't fit at size {}", plan.edge),
+        )
+        .at("size")
+        .next("a larger size, or fewer times"));
+    };
+
+    let gpu = gpu()?;
+    let stop = still::Stop::new(cx.call.token(), cx.call.interrupt());
+    let mut warnings: Vec<Warning> = Vec::new();
+    let stopped = |f: &Failure| f.code == codes::CANCELLED;
+    let failed = |f: &Failure| {
+        if stopped(f) {
+            halted(cx, 0, 0)
+        } else {
+            file_failed(f).at("project")
+        }
+    };
+    let mut renderer =
+        sequence::Renderer::open(&loaded, &gpu, &stop, &mut warnings).map_err(|f| failed(&f))?;
+    let mut canvas = Canvas::new(layout.size.0, layout.size.1);
+    let mut entries: Vec<Option<Value>> = vec![None; ns.len()];
+    let mut order: Vec<usize> = (0..ns.len()).collect();
+    order.sort_by_key(|&i| ns[i]);
+    let total = ns.len();
+    let mut last_decoded: Option<(u64, Decoded)> = None;
+    for (done, i) in order.into_iter().enumerate() {
+        cx.call.check().map_err(|_| halted(cx, done, total))?;
+        let k = ns[i];
+        let decoded = match last_decoded.take() {
+            Some((m, d)) if m == k => d,
+            _ => renderer
+                .seek(frames.source(k), &mut warnings)
+                .map_err(|f| {
+                    if stopped(&f) {
+                        halted(cx, done, total)
+                    } else {
+                        time_failed(&f, &format!("times[{i}]"), renderer.still().info())
+                    }
+                })?,
+        };
+        let (x, y) = layout.origin(i);
+        let (row, column) = layout.cell(i);
+        let at = (x, y + layout.band);
+        let views = frames.views(&loaded.project, k, layout.tile);
+        let img = renderer
+            .render(&decoded, &views, Depth::Eight)
+            .map_err(|f| render_failed(&f))
+            .inspect_err(|_| forget_if_lost(&gpu))?;
+        canvas.put(at.0, at.1, &img);
+        let shown = FrameTime {
+            time: frames.shown(k),
+            frame: Some(k),
+        };
+        picture::caption(
+            &mut canvas,
+            (x, y),
+            layout.tile.0,
+            layout.scale,
+            [&when_label(&shown), "render"],
+        );
+        let mut entry = json!({
+            "index": i,
+            "row": row,
+            "column": column,
+            "rect": [at.0, at.1, layout.tile.0, layout.tile.1],
+            "time": shown,
+            "source": decoded.shown,
+        });
+        if views.views.len() > 1 {
+            entry["blur_views"] = json!(views.views.len());
+        }
+        entries[i] = Some(entry);
+        cx.call
+            .progress((done + 1) as f64, Some(total as f64), None);
+        last_decoded = Some((k, decoded));
+    }
+    drop(renderer);
+
+    let (image, images) = deliver(canvas, req.format, req.output.as_deref(), cx)?;
+    let mut result = json!({
+        "project": text::field(&path.to_string_lossy()),
+        "mode": req.mode.name(),
+        "frames": frames.count(),
+        "tiles": entries.into_iter().flatten().collect::<Vec<_>>(),
+        "image": image,
+        "warnings": warnings_json(&warnings),
+    });
+    text::untrusted_under(&mut result, "reason");
+    Ok((result, images))
+}
+
+/// `canvas` encoded as `format`, inline within the image budget or
+/// written to `output` beneath the write root: the response's `image`,
+/// and the image to send with it.
+pub(crate) fn deliver(
+    canvas: Canvas,
+    format: Format,
+    output: Option<&Path>,
+    cx: &Ctx,
+) -> Result<(Map<String, Value>, Vec<rpc::Image>), ToolError> {
+    let budget = output.is_none().then_some(cx.image_budget);
     let (width, height) = (canvas.width, canvas.height);
-    let encoded = encode(canvas, req.format, budget)?;
+    let encoded = encode(canvas, format, budget)?;
     let mut image = Map::new();
     image.insert("width".into(), json!(width));
     image.insert("height".into(), json!(height));
-    image.insert("format".into(), json!(req.format.name()));
+    image.insert("format".into(), json!(format.name()));
     image.insert("bytes".into(), json!(encoded.bytes.len()));
     if let Some(q) = encoded.quality {
         image.insert("quality".into(), json!(q));
     }
     let mut images = Vec::new();
-    match &req.output {
+    match output {
         Some(out) => {
             let mut file = cx.roots.create("output", out)?;
             let wrote = file.write_all(&encoded.bytes).and_then(|()| file.keep());
@@ -1254,22 +1457,11 @@ pub fn run(req: Request, cx: &Ctx) -> Result<(Value, Vec<rpc::Image>), ToolError
             image.insert("path".into(), json!(text::field(&out.to_string_lossy())));
         }
         None => images.push(rpc::Image {
-            mime: req.format.mime(),
+            mime: format.mime(),
             data: encoded.bytes,
         }),
     }
-    let warnings = warnings_json(&warnings);
-    let mut result = json!({
-        "file": text::field(&req.file.to_string_lossy()),
-        "mode": req.mode.name(),
-        "seek": req.seek.name(),
-        "tiles": entries.into_iter().flatten().collect::<Vec<_>>(),
-        "image": image,
-        "warnings": warnings,
-    });
-    // A fallback's reason can carry FFmpeg's words.
-    text::untrusted_under(&mut result, "reason");
-    Ok((result, images))
+    Ok((image, images))
 }
 
 /// Draw tile `i` of `layout`, its label and its picture, from `decoded`

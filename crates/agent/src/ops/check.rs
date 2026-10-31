@@ -13,18 +13,19 @@
 //! message (rule 4.2). Fixes are plain words, never a command; M2's
 //! exports will be named in them once they exist.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use spherecut_export::{ExportJob, Planned};
 use spherecut_media::detect::Layout;
 use spherecut_media::probe::{
     ProbeReport, StreamInfo, StreamKind, VideoInfo, codes as probe_codes,
 };
 use spherecut_media::spherical::{Projection, SpatialAudio, StereoMode};
 
-use super::Ctx;
-use crate::error::ToolError;
+use super::{Ctx, sequence};
+use crate::error::{ToolError, codes};
 use crate::limits::CHECK_BYTES;
 use crate::text;
 
@@ -59,7 +60,9 @@ impl Target {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    pub file: PathBuf,
+    pub file: Option<PathBuf>,
+    /// Instead of `file`: the file a render of the project would make.
+    pub project: Option<PathBuf>,
     pub target: Option<Target>,
 }
 
@@ -108,7 +111,21 @@ fn advice(id: &'static str, message: impl Into<String>) -> Advice {
 }
 
 pub fn run(req: Request, cx: &Ctx) -> Result<Value, ToolError> {
-    let opened = cx.roots.open_file("file", &req.file)?;
+    let path = match (req.file, req.project) {
+        (Some(_), Some(_)) => {
+            return Err(ToolError::new(codes::BAD_ARGUMENT, "can't come with file")
+                .at("project")
+                .valid("file, or project, not both"));
+        }
+        (None, None) => {
+            return Err(ToolError::new(codes::BAD_ARGUMENT, "is missing")
+                .at("file")
+                .valid("a video as file, or a .spherecut file as project"));
+        }
+        (None, Some(p)) => return run_project(&p, req.target, cx),
+        (Some(f), None) => f,
+    };
+    let opened = cx.roots.open_file("file", &path)?;
     let report =
         match spherecut_media::probe::probe_cancellable(opened.source(), cx.call.interrupt()) {
             Ok(r) => r,
@@ -131,16 +148,22 @@ pub fn run(req: Request, cx: &Ctx) -> Result<Value, ToolError> {
             }
         };
     cx.call.check()?;
-    let file = File::of(&report, &req.file);
-    let mut rules = always(&file);
-    let mut tips = Vec::new();
-    match req.target {
-        None => {}
-        Some(Target::Youtube360) => youtube_360(&file, &mut rules, &mut tips),
-        Some(t @ (Target::Flat16x9 | Target::Vertical)) => flat(&file, t, &mut rules),
-        Some(Target::Archive) => archive(&file, &mut rules, &mut tips),
-    }
+    let file = File::of(&report, &path);
+    let (rules, tips) = rules_of(&file, req.target);
     Ok(response(req.target, &rules, &tips))
+}
+
+/// The rules that always hold, then `target`'s; and its advice.
+fn rules_of(file: &File, target: Option<Target>) -> (Vec<Rule>, Vec<Advice>) {
+    let mut rules = always(file);
+    let mut tips = Vec::new();
+    match target {
+        None => {}
+        Some(Target::Youtube360) => youtube_360(file, &mut rules, &mut tips),
+        Some(t @ (Target::Flat16x9 | Target::Vertical)) => flat(file, t, &mut rules),
+        Some(Target::Archive) => archive(file, &mut rules, &mut tips),
+    }
+    (rules, tips)
 }
 
 /// The response, cut to [`CHECK_BYTES`]: the passed rules' messages go
@@ -1169,6 +1192,206 @@ fn camera_metadata(f: &File) -> Rule {
         _ => "no Insta360, GoPro or DJI metadata is in it to keep",
     };
     Rule::ok(ID, kept)
+}
+
+// --- a project: what a render of it would make (a2-plan 7.2, D59).
+
+/// The name a render's report is checked under: the export writes MP4.
+const RENDER_NAME: &str = "render.mp4";
+
+/// `check` with `project`: the rules on the file a render would make,
+/// found as `render` finds it (the export's preset, encoders and audio
+/// choice) without rendering. The rules keep their words: "it" is the
+/// render. A render's own check, once `job` has it done, is the proof.
+fn run_project(path: &Path, target: Option<Target>, cx: &Ctx) -> Result<Value, ToolError> {
+    let loaded = sequence::load(cx, "project", path)?;
+    let media =
+        spherecut_media::probe::probe_cancellable(loaded.opened.source(), cx.call.interrupt())
+            .map_err(|e| {
+                cx.call.check().err().unwrap_or_else(|| {
+                    let (code, message) = super::probe::words(e.code());
+                    ToolError::new(code, format!("the project's media: {message}"))
+                        .at("project")
+                        .next("probe the project's media file")
+                })
+            })?;
+    cx.call.check()?;
+    let bits = media
+        .streams
+        .iter()
+        .find(|s| s.index == loaded.media.video.stream as usize)
+        .and_then(|s| s.video.as_ref())
+        .and_then(|v| v.bit_depth)
+        .unwrap_or(8);
+    let proc = loaded.opened.proc_path().to_path_buf();
+    let id = loaded.media.id;
+    let project = loaded.project.reading_media_from(|m| {
+        if m.id == id {
+            proc.clone()
+        } else {
+            m.path.clone()
+        }
+    });
+    let gpu = super::look::gpu()?;
+    let job = ExportJob::new(project, PathBuf::from(RENDER_NAME), (*gpu).clone());
+    let prepared = spherecut_export::prepare(&job).map_err(|e| super::render::prepare_error(&e))?;
+    let planned =
+        spherecut_export::planned(&job, &prepared).map_err(|e| super::render::prepare_error(&e))?;
+    cx.call.check()?;
+    let report = rendered(&planned, bits > 8 && !job.eight_bit);
+    let file = File::of(&report, Path::new(RENDER_NAME));
+    let (rules, tips) = rules_of(&file, target);
+    let mut v = response(target, &rules, &tips);
+    v["project"] = json!(text::field(&path.to_string_lossy()));
+    v["checked"] = json!("the file a render of the project would make");
+    if let Some(w) = v["warnings"].as_array_mut() {
+        w.extend(
+            planned
+                .warnings
+                .iter()
+                .map(|w| json!({"code": w.code, "message": text::field(&w.message)})),
+        );
+    }
+    Ok(v)
+}
+
+/// The report a probe of the render would give, as far as the rules read
+/// one: an MP4 with its moov first, the video at the preset's size, rate
+/// and depth in BT.709 4:2:0, with Spherical Video V2 and V1 for 360,
+/// and the audio the export chose, with `SA3D` on ambiX.
+fn rendered(planned: &Planned, ten_bit: bool) -> ProbeReport {
+    use spherecut_core::project::Codec;
+    use spherecut_media::probe::{
+        AudioInfo, ColorInfo, Container as Format, Mp4Summary, StructureCheck,
+    };
+    use spherecut_media::spherical::{SphericalV1, SphericalV2, TrackSpherical};
+    let want = &planned.file;
+    let rate = want.rate.as_rational();
+    let stream = |index, kind| StreamInfo {
+        index,
+        kind,
+        codec: None,
+        codec_tag: None,
+        profile: None,
+        level: None,
+        time_base: rate.recip().unwrap_or(spherecut_core::Rational::ONE),
+        start_pts: Some(0),
+        duration: Some(want.duration),
+        frames: None,
+        avg_frame_rate: None,
+        r_frame_rate: None,
+        bit_rate: None,
+        disposition: vec!["default".into()],
+        handler: None,
+        language: None,
+        video: None,
+        audio: None,
+        spherical: TrackSpherical::default(),
+        tags: Default::default(),
+    };
+    let mut video = stream(0, StreamKind::Video);
+    video.codec = Some(
+        match want.codec {
+            Codec::H264 => "h264",
+            Codec::Hevc => "hevc",
+            Codec::Av1 => "av1",
+        }
+        .into(),
+    );
+    video.frames = i64::try_from(want.frames).ok();
+    video.avg_frame_rate = Some(rate);
+    video.r_frame_rate = Some(rate);
+    video.video = Some(VideoInfo {
+        width: want.size.0,
+        height: want.size.1,
+        sample_aspect: None,
+        pix_fmt: Some(if ten_bit { "yuv420p10le" } else { "yuv420p" }.into()),
+        bit_depth: Some(if ten_bit { 10 } else { 8 }),
+        chroma_subsampling: Some((1, 1)),
+        color: ColorInfo {
+            range: Some("tv".into()),
+            matrix: Some("bt709".into()),
+            primaries: Some("bt709".into()),
+            transfer: Some("bt709".into()),
+            chroma_location: Some("left".into()),
+        },
+        field_order: Some("progressive".into()),
+        rotation_deg: None,
+    });
+    if want.sphere {
+        video.spherical.v2 = Some(SphericalV2 {
+            stereo: Some(StereoMode::Mono),
+            metadata_source: Some("Spherecut".into()),
+            pose_yaw: 0.0,
+            pose_pitch: 0.0,
+            pose_roll: 0.0,
+            projection: Some(Projection::Equirect {
+                top: 0,
+                bottom: 0,
+                left: 0,
+                right: 0,
+            }),
+        });
+        video.spherical.v1 = Some(SphericalV1 {
+            spherical: true,
+            stitched: true,
+            projection_type: Some("equirectangular".into()),
+            stereo_mode: None,
+            stitching_software: Some("Spherecut".into()),
+            raw_xml: String::new(),
+        });
+    }
+    let mut streams = vec![video];
+    if let Some(a) = &want.audio {
+        let mut audio = stream(1, StreamKind::Audio);
+        audio.codec = Some(a.codec.clone());
+        audio.profile = (a.codec == "aac").then(|| "LC".into());
+        audio.bit_rate = planned.audio_bits.and_then(|b| i64::try_from(b).ok());
+        audio.audio = Some(AudioInfo {
+            sample_rate: a.rate,
+            channels: u32::from(a.channels),
+            layout: None,
+            sample_fmt: None,
+            opus_mapping_family: None,
+        });
+        if a.ambix {
+            audio.spherical.spatial_audio = Some(SpatialAudio {
+                version: 0,
+                ambisonic_type: 0,
+                head_locked_stereo: false,
+                ambisonic_order: 1,
+                channel_ordering: 0,
+                normalization: 0,
+                channel_map: vec![0, 1, 2, 3],
+            });
+        }
+        streams.push(audio);
+    }
+    ProbeReport {
+        path: PathBuf::from(RENDER_NAME),
+        file_size: 0,
+        container: Format {
+            format: "mov,mp4,m4a,3gp,3g2,mj2".into(),
+            format_long: "QuickTime / MOV".into(),
+            duration: Some(want.duration),
+            start_time: Some(spherecut_core::Time::ZERO),
+            bit_rate: None,
+            tags: Default::default(),
+        },
+        streams,
+        mp4: Some(Mp4Summary {
+            brand: Some("isom".into()),
+            top_level: vec![("ftyp".into(), 0), ("moov".into(), 0), ("mdat".into(), 0)],
+            trailing_bytes: 0,
+            truncated: None,
+            warnings: Vec::new(),
+        }),
+        camera: None,
+        structure: StructureCheck::Full,
+        damage: Vec::new(),
+        warnings: Vec::new(),
+        ffmpeg_log: Vec::new(),
+    }
 }
 
 #[cfg(test)]

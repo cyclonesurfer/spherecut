@@ -330,20 +330,7 @@ pub(crate) fn run(
     if stop.is_shut_down() {
         return Err(ExportError::Cancelled);
     }
-    let want = Expected {
-        codec: s.codec,
-        size,
-        frames: plan.count(),
-        duration: plan.duration(),
-        rate: plan.rate(),
-        sphere: matches!(sequence.output, Output::Equirect { .. }),
-        audio: audio_plan.as_ref().map(|a| ExpectedAudio {
-            codec: a.codec().to_owned(),
-            rate: a.rate(),
-            channels: a.channels(),
-            ambix: a.ambix,
-        }),
-    };
+    let want = expected(job, preset, &plan, audio_plan.as_ref());
     // A failed check drops `tmp`, which removes it.
     let checks = check::check(tmp.path(), &want, stop.shutdown_flag()).map_err(|e| {
         if stop.is_shut_down() {
@@ -649,6 +636,33 @@ fn setup(
     match job.vaapi_level {
         Some(level) => setup.with_vaapi_level(level),
         None => setup,
+    }
+}
+
+/// What the finished file of `job` is, as its checks read it back.
+pub(crate) fn expected(
+    job: &ExportJob,
+    preset: Preset,
+    plan: &FramePlan,
+    audio: Option<&audio::Plan>,
+) -> Expected {
+    Expected {
+        codec: job.settings.codec,
+        size: if job.draft {
+            preset.draft_size()
+        } else {
+            preset.size()
+        },
+        frames: plan.count(),
+        duration: plan.duration(),
+        rate: plan.rate(),
+        sphere: matches!(job.project.the_sequence().output, Output::Equirect { .. }),
+        audio: audio.map(|a| ExpectedAudio {
+            codec: a.codec().to_owned(),
+            rate: a.rate(),
+            channels: a.channels(),
+            ambix: a.ambix,
+        }),
     }
 }
 

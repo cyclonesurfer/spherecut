@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "compare",
+  "description": "How alike two videos are, or a video and a project's render: luma PSNR and SSIM, the worst and mean.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "file"
+  ],
+  "properties": {
+    "file": {
+      "type": "string",
+      "description": "A video.",
+      "minLength": 1
+    },
+    "against_file": {
+      "type": "string",
+      "description": "A video of its size."
+    },
+    "against_project": {
+      "type": "string",
+      "description": "A .spherecut file."
+    },
+    "from": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array"
+        }
+      ],
+      "description": "The render's start in the media: the trim's by default."
+    },
+    "times": {
+      "type": "array",
+      "description": "In file, as look's; 8 by default.",
+      "minItems": 1,
+      "maxItems": 24,
+      "items": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array"
+          }
+        ],
+        "description": "A time."
+      }
+    },
+    "count": {
+      "type": "integer",
+      "description": "Spread this many.",
+      "minimum": 1,
+      "maximum": 24
+    },
+    "sheet": {
+      "type": "boolean",
+      "description": "An image of the worst four."
+    }
+  }
+}

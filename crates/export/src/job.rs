@@ -16,7 +16,7 @@ use spherecut_media::encode::has_encoder;
 use spherecut_media::hw::{self, GpuIds, RenderNode};
 use spherecut_render::Gpu;
 
-use crate::check::Checked;
+use crate::check::{Checked, Expected};
 use crate::encoder::{EncoderKind, EncoderSetup};
 use crate::error::ExportError;
 use crate::pace::Pace;
@@ -398,6 +398,34 @@ pub fn needed_bytes(job: &ExportJob, prepared: &Prepared) -> Result<u64, ExportE
         prepared.encoders.kinds[0],
         audio.as_ref(),
     ))
+}
+
+/// What a render of a job would make, found without rendering: the
+/// agent's `check` of a project reads it (D59).
+#[derive(Debug, Clone)]
+pub struct Planned {
+    /// The file, as the export's checks would read it back.
+    pub file: Expected,
+    /// The audio's bits a second, when it has audio.
+    pub audio_bits: Option<u64>,
+    /// What the export would warn of: audio it drops, say.
+    pub warnings: Vec<Warning>,
+}
+
+/// What `job`, as [`prepare`] found it, would make.
+pub fn planned(job: &ExportJob, prepared: &Prepared) -> Result<Planned, ExportError> {
+    let sequence = job.project.the_sequence();
+    let media = job
+        .project
+        .media_by_id(job.project.the_clip().media)
+        .ok_or_else(|| ExportError::Invalid("the clip's media isn't in the project".into()))?;
+    let (audio, warnings) =
+        crate::audio::choose(&media.path, job.settings.audio, &sequence.output)?;
+    Ok(Planned {
+        file: crate::pipeline::expected(job, prepared.preset, &prepared.plan, audio.as_ref()),
+        audio_bits: audio.as_ref().map(crate::audio::Plan::bits),
+        warnings,
+    })
 }
 
 /// A running export. Dropping it cancels the export and waits for it.

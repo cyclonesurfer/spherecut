@@ -115,6 +115,12 @@ pub const TOOLS: &[Tool] = &[
         schema: include_str!("../../../docs/agents/schemas/job.json"),
         writes: Writes::Renders,
     },
+    Tool {
+        name: "compare",
+        title: "Compare two videos or a render",
+        schema: include_str!("../../../docs/agents/schemas/compare.json"),
+        writes: Writes::Never,
+    },
 ];
 
 /// How many of [`TOOLS`] are A1's: the rest are A2's.
@@ -128,6 +134,7 @@ pub const BUDGETS: &[(&str, usize)] = &[
     ("undo", 650),
     ("render", 950),
     ("job", 650),
+    ("compare", 1000),
 ];
 
 /// The most tools `tools/list` may hold: past a dozen, agents choose
@@ -318,6 +325,7 @@ impl Tools for Spherecut {
                 ops::job::run(ops::request(args)?, &cx, &self.jobs)?,
                 Vec::new(),
             ),
+            "compare" => ops::compare::run(ops::request(args)?, &cx)?,
             _ => return Err(ToolError::internal(format!("{name} has no op"))),
         };
         text::sanitize(&mut result);
@@ -379,7 +387,7 @@ mod tests {
     fn the_list_fits() {
         let reading = Spherecut::new(Roots::new(&[], None).unwrap());
         for version in crate::rpc::SUPPORTED {
-            for (s, count) in [(&reading, 6), (&writing(), TOOLS.len())] {
+            for (s, count) in [(&reading, 7), (&writing(), TOOLS.len())] {
                 let list = s.list(version);
                 let list = list.as_array().cloned().unwrap_or_default();
                 assert_eq!(list.len(), count, "{version}");
@@ -503,10 +511,14 @@ mod tests {
                        "output": "out/a.png", "assume_equirect": true}),
                 json!({"file": "a.mp4", "times": ["0", "10"], "count": 5,
                        "views": [{"yaw": 0, "vfov": 60}, {"yaw": 180}]}),
+                json!({"project": "a.spherecut", "mode": "sheet", "count": 6}),
             ],
             "analyze" => vec![json!({"file": "a.mp4", "kind": "timing", "from": "1.5",
                                     "to": [30000, 1001], "buckets": 20, "stream": 0})],
-            "check" => vec![json!({"file": "a.mp4", "target": "youtube_360"})],
+            "check" => vec![
+                json!({"file": "a.mp4", "target": "youtube_360"}),
+                json!({"project": "a.spherecut", "target": "archive"}),
+            ],
             "doctor" => {
                 vec![json!({"file": "a.mp4", "speed": true, "render_node": "/dev/dri/renderD128"})]
             }
@@ -525,6 +537,12 @@ mod tests {
                 json!({"job": "j0123abcd-1", "wait": 30}),
                 json!({"job": "j0123abcd-1", "cancel": true}),
             ],
+            "compare" => vec![
+                json!({"file": "a.mp4", "against_file": "b.mp4", "times": ["1", [3, 1]],
+                       "sheet": true}),
+                json!({"file": "a.mp4", "against_project": "a.spherecut", "from": "2",
+                       "count": 4}),
+            ],
             _ => vec![],
         }
     }
@@ -542,6 +560,7 @@ mod tests {
             "undo" => ops::request::<ops::edit::UndoRequest>(args).map(drop),
             "render" => ops::request::<ops::render::Request>(args).map(drop),
             "job" => ops::request::<ops::job::Request>(args).map(drop),
+            "compare" => ops::request::<ops::compare::Request>(args).map(drop),
             _ => Err(ToolError::internal(format!("no request type for {name}"))),
         }
     }
@@ -635,6 +654,15 @@ mod tests {
         assert_eq!(
             schema("job")["wait"]["maximum"],
             json!(crate::limits::JOB_WAIT.as_secs())
+        );
+        let compare = schema("compare");
+        assert_eq!(
+            compare["times"]["maxItems"],
+            json!(crate::limits::COMPARE_TIMES)
+        );
+        assert_eq!(
+            compare["count"]["maximum"],
+            json!(crate::limits::COMPARE_TIMES)
         );
     }
 

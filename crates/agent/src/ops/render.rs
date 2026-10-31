@@ -16,16 +16,16 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use spherecut_core::Time;
 use spherecut_core::fs::free_space;
-use spherecut_core::project::{Aspect, Edit, Media, Output, file};
+use spherecut_core::project::{Aspect, Edit, Output};
 use spherecut_export::{ExportError, ExportJob};
 
 use super::Ctx;
 use super::check::Target;
 use super::look::{self, TimeArg};
-use super::project::{at, folder_error, time};
+use super::project::{at, time};
+use super::sequence;
 use crate::error::{ToolError, codes};
 use crate::jobs::{Jobs, Render};
-use crate::roots::Opened;
 use crate::text;
 
 #[derive(Debug, Deserialize)]
@@ -48,17 +48,12 @@ pub struct Range {
 
 pub fn run(req: Request, cx: &Ctx, jobs: &Jobs) -> Result<Value, ToolError> {
     cx.call.check()?;
-    let (folder, name) = cx.roots.project_folder("project", &req.project, false)?;
-    let project = folder
-        .load(&name)
-        .map_err(|e| folder_error("project", e))?
-        .project;
+    let sequence::Loaded {
+        project,
+        media,
+        opened,
+    } = sequence::load(cx, "project", &req.project)?;
     let clip = project.the_clip().clone();
-    let media = project
-        .media_by_id(clip.media)
-        .ok_or_else(|| ToolError::internal("the clip's media isn't in the project"))?
-        .clone();
-    let opened = media_file(cx, &media)?;
     cx.call.check()?;
 
     if !is_mp4(&req.output) {
@@ -154,48 +149,6 @@ fn is_mp4(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
 }
 
-/// The project's media file, opened beneath the roots and checked
-/// against what the project recorded of it (D45, a2-plan amendment 6).
-fn media_file(cx: &Ctx, m: &Media) -> Result<Opened, ToolError> {
-    let named = text::field(&m.path.to_string_lossy());
-    let missing = |why: &str| {
-        ToolError::new(
-            codes::MEDIA_MISSING,
-            format!("the project's media {named} {why}"),
-        )
-        .at("project")
-        .next("put the file back where the project says, or make a project of the file where it is")
-    };
-    let opened = match cx.roots.open_file("project", &m.path) {
-        Ok(f) => f,
-        Err(e) if e.code == codes::OUTSIDE_ROOTS => {
-            return Err(missing("isn't beneath the roots the server reads"));
-        }
-        Err(e) if e.code == codes::NOT_FOUND => return Err(missing("isn't there")),
-        Err(e) => return Err(missing(&format!("can't be read: {}", e.message))),
-    };
-    let changed = |why: String| {
-        ToolError::new(
-            codes::MEDIA_CHANGED,
-            format!("the project's media {named} isn't the file it was made with: {why}"),
-        )
-        .at("project")
-        .next("make a new project of the file as it is now")
-    };
-    if opened.size() != m.fingerprint.bytes {
-        return Err(changed(format!(
-            "its size is {} bytes, not {}",
-            opened.size(),
-            m.fingerprint.bytes
-        )));
-    }
-    match file::head_hash(opened.source().open) {
-        Err(e) => Err(changed(format!("it can't be read: {e}"))),
-        Ok(h) if h != m.fingerprint.head => Err(changed("its first MiB is different".into())),
-        Ok(_) => Ok(opened),
-    }
-}
-
 /// `range` within the trim `start`..`end`, at the clip's rate: from and
 /// to default to the trim's ends.
 fn range(
@@ -260,7 +213,7 @@ fn target_of(o: &Output) -> Option<Target> {
 }
 
 /// [`spherecut_export::prepare`]'s refusal: D51's codes.
-fn prepare_error(e: &ExportError) -> ToolError {
+pub(crate) fn prepare_error(e: &ExportError) -> ToolError {
     let err = ToolError::new(e.code(), e.to_string()).at("project");
     match e {
         ExportError::Invalid(_) => {
