@@ -262,6 +262,12 @@ fn the_inspector_adds_a_target_where_the_view_looks() {
     let targets = doc(&h).project.targets();
     assert_eq!(targets.len(), 1, "{targets:?}");
     assert_eq!(targets[0].name, "Target 1");
+    // Where the view looks: yaw −40°, pitch 5°.
+    let dir = targets[0].path.keys[0].value;
+    assert!(
+        (dir.yaw_deg + 40.0).abs() < 1e-6 && (dir.pitch_deg - 5.0).abs() < 1e-6,
+        "{dir:?}"
+    );
     assert!(doc(&h).undo_label().is_some_and(|l| l.contains("target")));
     finish(h);
 }
@@ -364,6 +370,7 @@ fn an_export_from_the_window_reaches_the_end_while_the_ui_draws_on() {
     assert!(n.impact.contains("10 frames"), "{}", n.impact);
     assert!(n.fix.contains("Checked: "), "{}", n.fix);
     let (held, _) = h.state().state.export.pace.waits();
+    assert!(held > 0, "no frame waited for a UI pass while playing");
     times.sort();
     eprintln!(
         "exported 10 frames while playing in {} steps, the median {:?}, the slowest {:?}; {held} \
@@ -381,12 +388,25 @@ fn an_export_from_the_window_reaches_the_end_while_the_ui_draws_on() {
     until(&mut h, "the replace window", |a| {
         a.state.export.replace.is_some()
     });
+    // A change while it asks doesn't reach the export: Replace exports
+    // what Start was given, the 10 frames.
+    {
+        let d = h.state_mut().state.reframe.doc.as_mut().unwrap();
+        let e = d.set_out(t(5));
+        d.record("Set out", &e).unwrap();
+    }
     until_still(&mut h, "Replace");
     h.get_by_label("Replace").click();
     step(&mut h);
     let (slowest, steps) = while_exporting(&mut h, Duration::from_secs(120));
     eprintln!("replaced: {steps} steps, the slowest {slowest:?}");
-    assert!(matches!(h.state().state.export.last, Some(Ok(_))));
+    match &h.state().state.export.last {
+        Some(Ok(r)) => assert_eq!(r.frames, 10),
+        other => panic!("the export didn't end well: {other:?}"),
+    }
+    h.state_mut().state.undo();
+    step(&mut h);
+    assert_eq!(doc(&h).clip().source.end, t(10));
 
     // And Cancel leaves the file that was there.
     let size = std::fs::metadata(&out).unwrap().len();
@@ -409,6 +429,40 @@ fn an_export_from_the_window_reaches_the_end_while_the_ui_draws_on() {
     assert_eq!(std::fs::metadata(&out).unwrap().len(), size);
     let n = h.state().state.notices.get(&NoticeKind::Export).unwrap();
     assert!(n.what.contains("was cancelled"), "{}", n.what);
+
+    // Cancelled while it starts, a file there: nothing to ask.
+    {
+        let s = &mut h.state_mut().state;
+        s.export_span(out.clone(), None, false);
+        assert!(s.export.running());
+        s.export.cancel();
+    }
+    while_exporting(&mut h, Duration::from_secs(60));
+    assert!(h.state().state.export.replace.is_none());
+    assert!(matches!(
+        h.state().state.export.last,
+        Some(Err(spherecut_export::ExportError::Cancelled))
+    ));
+
+    // The project closed while one runs: Ctrl+E still opens the window,
+    // to follow it or cancel it.
+    {
+        let s = &mut h.state_mut().state;
+        s.export_span(out.clone(), None, true);
+        s.export.open = false;
+        s.close_project();
+        if s.reframe.confirm.is_some() {
+            s.answer_confirm(false);
+        }
+        assert!(s.reframe.doc.is_none());
+        s.open_export();
+        assert!(s.export.open);
+        s.export.cancel();
+    }
+    while_exporting(&mut h, Duration::from_secs(60));
+    h.state_mut().state.open_export();
+    assert!(!h.state().state.export.open, "nothing to show");
+    assert_eq!(std::fs::metadata(&out).unwrap().len(), size);
     finish(h);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -436,9 +490,17 @@ fn the_front_of_a_360_output_turns_from_the_overview() {
         panic!("not 360")
     };
     assert!(apart_deg(orientation.quat(), want) < 1.0);
-    // The viewer's equirect preview shows the output.
+    // The viewer's equirect preview draws the output: the whole sphere,
+    // 2:1, turned to its front.
     h.state_mut().state.reframe.equirect_preview = true;
     step(&mut h);
-    assert!(h.state().state.reframe.preview_front().is_some());
+    step(&mut h);
+    let shown = h.state().state.shown.clone().expect("a frame drawn");
+    assert_eq!(
+        shown.view,
+        spherecut_render::ViewParams::equirect(orientation.quat())
+    );
+    let r = h.state().state.viewer_rect.expect("drawn");
+    assert!((r.width() / r.height() - 2.0).abs() < 0.01, "{r:?}");
     finish(h);
 }

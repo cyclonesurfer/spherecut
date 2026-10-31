@@ -303,6 +303,8 @@ pub enum YuvPlanes {
 /// in the top 10 bits).
 #[derive(Debug, Clone, Copy)]
 pub struct StridedPlanes<'a> {
+    /// The picture's width and height, which must be the stream's.
+    pub size: (u32, u32),
     pub data: &'a [u8],
     /// Each plane's first byte and the bytes from one row to the next:
     /// as many as the layout has planes.
@@ -334,6 +336,13 @@ fn video_frame(
         }
         Pushed::Planes(p) => p,
         Pushed::Strided(s) => {
+            // A picture of another size would be cut at its top left.
+            if s.size != (width, height) {
+                return Err(EncodeError::Invalid(format!(
+                    "a {}x{} picture pushed to a {width}x{height} stream",
+                    s.size.0, s.size.1
+                )));
+            }
             copy_strided(&mut frame, &dims, if ten { 2 } else { 1 }, s)?;
             return Ok(frame);
         }
@@ -551,6 +560,8 @@ pub struct Mp4Writer {
     frame_ticks: Option<i64>,
     /// The timestamp of the last frame pushed.
     last_video_pts: Option<i64>,
+    /// Whether the video encoder was told the end, by `flush_video`.
+    video_flushed: bool,
     audio: Option<AudioOut>,
 }
 
@@ -1043,6 +1054,7 @@ impl Mp4Writer {
             next_video_pts: first_pts,
             frame_ticks,
             last_video_pts: None,
+            video_flushed: false,
             audio,
         })
     }
@@ -1245,14 +1257,27 @@ impl Mp4Writer {
         Ok(out)
     }
 
-    /// Flush everything into the temporary file and close the muxer.
-    fn close(mut self) -> Result<(PathBuf, TempFile), EncodeError> {
+    /// Tell the video encoder the end and mux what it still holds: a
+    /// hardware encoder holds a GOP or so, so a short file's failure
+    /// comes here, where a caller can tell it from the file's as it can
+    /// a frame's. No more video can be pushed after it. The `finish`
+    /// calls do it when it hasn't been.
+    pub fn flush_video(&mut self) -> Result<(), EncodeError> {
+        if std::mem::replace(&mut self.video_flushed, true) {
+            return Ok(());
+        }
         ctx(self.video.send_eof(), || "flushing video".into())?;
         self.drain_video()?;
         if let Some(f) = self.crop.as_mut() {
             ctx(f.send(None), || "flushing the video's cropping".into())?;
             drain_crop(f, &mut self.octx, self.video_index, self.video_tb, "video")?;
         }
+        Ok(())
+    }
+
+    /// Flush everything into the temporary file and close the muxer.
+    fn close(mut self) -> Result<(PathBuf, TempFile), EncodeError> {
+        self.flush_video()?;
         if matches!(self.audio, Some(AudioOut::Encoded(_))) {
             self.flush_audio_frames(true)?;
             if let Some(AudioOut::Encoded(a)) = self.audio.as_mut() {

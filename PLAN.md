@@ -166,18 +166,18 @@ new features to agents, which adds a little work to each.
 
 The first version Pat can use for real.
 
-- [ ] Single-clip reframer mode on the core data model (a sequence with one
+- [x] Single-clip reframer mode on the core data model (a sequence with one
       clip), so M5's timeline extends it rather than replacing it.
-- [ ] Trim in/out with exact rational times; markers.
-- [ ] Keyframes for orientation (quaternion), FOV, projection and morph;
+- [x] Trim in/out with exact rational times; markers.
+- [x] Keyframes for orientation (quaternion), FOV, projection and morph;
       set from the viewer; interpolation on SO(3) (squad or a C¹ spline)
       with easing presets; property tests for continuity and no flips
       through ±180°.
-- [ ] Curve editor panel (FOV, morph, and yaw/pitch/roll as displayed
+- [x] Curve editor panel (FOV, morph, and yaw/pitch/roll as displayed
       views of the quaternion track) with easing presets.
-- [ ] Look-at target keyframes.
-- [ ] Full-sphere overview showing where the virtual camera points.
-- [ ] Every edit is a value of one `Edit` enum in `spherecut-core` (serde,
+- [x] Look-at target keyframes.
+- [x] Full-sphere overview showing where the virtual camera points.
+- [x] Every edit is a value of one `Edit` enum in `spherecut-core` (serde,
       versioned with the project schema), applied only through
       `Project::apply(&[Edit])`: all or none, no I/O. The GUI changes the
       project only by building `Edit`s, and a drag becomes one undo step
@@ -192,21 +192,21 @@ The first version Pat can use for real.
       DECISIONS.md (JSON is the leaning, since agents and `jq` read it),
       with a schema version and relative media paths; undo/redo for every
       edit.
-- [ ] Flat export: 16:9, 9:16, 1:1, 4:5 at 1080p/1440p/4K, project frame
+- [x] Flat export: 16:9, 9:16, 1:1, 4:5 at 1080p/1440p/4K, project frame
       rate, H.264/HEVC/AV1 via VA-API with libx264/libx265/SVT-AV1
       fallback; audio passed through or re-encoded.
-- [ ] 360 export: equirect up to 7680×3840 with st3d/sv3d (and SA3D for
+- [x] 360 export: equirect up to 7680×3840 with st3d/sv3d (and SA3D for
       ambiX), written by our own box writer and validated by re-parsing.
 - [ ] Export runs in the background with progress and cancel; the UI stays
       responsive.
-- [ ] Parity tests: decode exported frames and compare against
+- [x] Parity tests: decode exported frames and compare against
       `spherecut frame` renders of the same times (PSNR threshold), flat and
       360.
-- [ ] `spherecut render <project> -o out.mp4 [--preset] [--overwrite]
+- [x] `spherecut render <project> -o out.mp4 [--preset] [--overwrite]
       [--json]` headless. With `--json` it prints one progress line a
       second and a final result line. An existing output is refused without
       `--overwrite`, and Ctrl+C leaves no partial file.
-- [ ] Synthetic motion blur for fast pans (sub-frame sampling), off by
+- [x] Synthetic motion blur for fast pans (sub-frame sampling), off by
       default, with a golden test.
 - [ ] Hardware: reframed 4K30 exports at or above real time with VA-API on
       odin and huginn.

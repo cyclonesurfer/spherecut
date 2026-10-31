@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use spherecut_core::project::{AudioChoice, Codec, Edit, EncoderChoice, Output, Quality};
+use spherecut_core::project::{AudioChoice, Codec, Edit, EncoderChoice, Output, Project, Quality};
 use spherecut_core::time::Time;
 use spherecut_export::{Export, ExportError, ExportJob, Pace, Progress, Report};
 use spherecut_media::doctor::{DoctorReport, Severity};
@@ -49,8 +49,8 @@ pub struct ExportUi {
     /// not: for the media file and the output kind it was asked for.
     audio: Option<AudioCheck>,
     /// An export refused for a file at its output: the "Replace it?"
-    /// window, and the job it would run.
-    pub replace: Option<PathBuf>,
+    /// window, and the project it would export.
+    pub replace: Option<Replace>,
     run: Option<Running>,
     /// How the last export ended.
     pub last: Option<Result<Report, ExportError>>,
@@ -74,9 +74,19 @@ enum Check {
     Done(Option<String>),
 }
 
+/// A file at the output, to be replaced or not: Replace exports the
+/// project as Start found it, not as it is now.
+#[derive(Debug)]
+pub struct Replace {
+    pub path: PathBuf,
+    project: Project,
+}
+
 #[derive(Debug)]
 struct Running {
     output: PathBuf,
+    /// The project the export was given, kept for "Replace it?".
+    project: Project,
     state: Run,
     /// Cancel asked for: an export still starting is cancelled once it
     /// has.
@@ -140,9 +150,11 @@ impl ExportUi {
 }
 
 impl AppState {
-    /// `Ctrl+E` and File ▸ Export…: the window, named for the project.
+    /// `Ctrl+E` and File ▸ Export…: the window, named for the project;
+    /// without one, while an export runs, to follow or cancel it.
     pub fn open_export(&mut self) {
         let Some(doc) = &self.reframe.doc else {
+            self.export.open = self.export.running();
             return;
         };
         if self.export.name.is_empty() {
@@ -188,8 +200,15 @@ impl AppState {
                     run.state = Run::Exporting(Box::new(export));
                     None
                 }
+                // Cancelled before it found the file: nothing to ask.
+                Poll::Done(Err(ExportError::OutputExists(_))) if run.cancelled => {
+                    Some(Err(ExportError::Cancelled))
+                }
                 Poll::Done(Err(ExportError::OutputExists(path))) => {
-                    ui.replace = Some(path);
+                    ui.replace = Some(Replace {
+                        path,
+                        project: run.project.clone(),
+                    });
                     ui.run = None;
                     return;
                 }
@@ -224,8 +243,7 @@ impl AppState {
         });
     }
 
-    /// Start exporting the window's range to `output`, replacing a file
-    /// there if `overwrite`.
+    /// Start exporting the window's range to `output`.
     fn start_export(&mut self, output: PathBuf, overwrite: bool) {
         let span = match (&self.reframe.doc, self.export.span) {
             (Some(doc), Span::Selection) => selection_span(doc),
@@ -264,13 +282,23 @@ impl AppState {
                 return;
             }
         }
-        let mut job = ExportJob::new(project, &output, self.gpu.clone());
+        self.export_project(project, output, overwrite);
+    }
+
+    /// Start exporting `project` to `output`, replacing a file there if
+    /// `overwrite`.
+    fn export_project(&mut self, project: Project, output: PathBuf, overwrite: bool) {
+        if self.export.running() {
+            return;
+        }
+        let mut job = ExportJob::new(project.clone(), &output, self.gpu.clone());
         job.overwrite = overwrite;
         job.pace = Some(self.export.pace.clone());
         tracing::info!(output = %output.display(), "exporting");
         let starting = Job::spawn("export-start", move || Export::start(job));
         self.export.run = Some(Running {
             output,
+            project,
             state: Run::Starting(starting),
             cancelled: false,
         });
@@ -746,7 +774,7 @@ fn progress_ui(ui: &mut egui::Ui, p: &Progress) {
 }
 
 fn replace_window(s: &mut AppState, ctx: &egui::Context) {
-    let Some(path) = s.export.replace.clone() else {
+    let Some(path) = s.export.replace.as_ref().map(|r| r.path.clone()) else {
         return;
     };
     let mut answer = None;
@@ -768,8 +796,9 @@ fn replace_window(s: &mut AppState, ctx: &egui::Context) {
         });
     match answer {
         Some(true) => {
-            s.export.replace = None;
-            s.start_export(path, true);
+            if let Some(r) = s.export.replace.take() {
+                s.export_project(r.project, r.path, true);
+            }
         }
         Some(false) => s.export.replace = None,
         None => {}

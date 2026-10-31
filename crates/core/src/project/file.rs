@@ -44,8 +44,8 @@ pub const EXTENSION: &str = APP_SLUG;
 pub const MAX_FILE_BYTES: u64 = 64 << 20;
 /// How much of a media file its fingerprint hashes.
 pub const HEAD_BYTES: u64 = 1 << 20;
-/// How far a time's `seconds` may be from its `exact` value before it is
-/// taken for a hand edit.
+/// How far a time's `seconds` may be from its `exact` value, in seconds,
+/// before it is taken for a hand edit: 1 µs (D47).
 const SECONDS_TOLERANCE: f64 = 1e-6;
 
 #[derive(Debug, Error)]
@@ -192,9 +192,11 @@ pub fn save(project: &Project, path: &Path) -> Result<(), FileError> {
         source,
     };
     let path = std::path::absolute(path).map_err(io)?;
-    let folder = path.parent().unwrap_or(Path::new("/"));
+    // Through a link the file is written where it points, so its paths
+    // are relative to that folder, which load reads them from too.
+    let dest = lexical(&crate::fs::follow_links(&path).map_err(io)?);
+    let folder = dest.parent().unwrap_or(Path::new("/"));
     let text = to_json(project, folder)?;
-    let dest = crate::fs::follow_links(&path).map_err(io)?;
     let mut tmp = TempFile::create(&dest).map_err(io)?;
     tmp.file_mut().write_all(text.as_bytes()).map_err(io)?;
     tmp.persist_replace().map_err(io)
@@ -216,24 +218,32 @@ pub fn load(path: &Path) -> Result<Project, FileError> {
     if text.len() as u64 > MAX_FILE_BYTES {
         return Err(FileError::TooLarge { path });
     }
-    let folder = path.parent().unwrap_or(Path::new("/"));
+    // The folder of the file itself, a link's target, as save takes it.
+    let real = lexical(&crate::fs::follow_links(&path).map_err(io)?);
+    let folder = real.parent().unwrap_or(Path::new("/"));
     from_json(&text, folder)
 }
 
 /// Check every time in `v` (an object with `exact` and `seconds`): the
-/// two must agree, since only `exact` is read.
+/// two must agree, since only `exact` is read, and nothing else may be
+/// beside them, since the typed read would drop it unseen (D47 refuses
+/// unknown fields).
 fn check_times(v: &Value, pointer: &str) -> Result<(), FileError> {
     match v {
         Value::Object(map) => {
-            let is_time = map.contains_key("seconds")
-                && map
-                    .keys()
-                    .all(|k| matches!(k.as_str(), "exact" | "seconds" | "frame"));
-            if is_time {
+            if map.contains_key("exact") || map.contains_key("seconds") {
                 let fail = |message: String| FileError::Time {
                     pointer: pointer.to_owned(),
                     message,
                 };
+                if let Some(k) = map
+                    .keys()
+                    .find(|k| !matches!(k.as_str(), "exact" | "seconds"))
+                {
+                    return Err(fail(format!(
+                        "a time has \"exact\" and \"seconds\" only, not \"{k}\""
+                    )));
+                }
                 let Some(exact) = map.get("exact") else {
                     return Err(fail(
                         "a time needs \"exact\" (\"seconds\" is only for reading)".into(),
@@ -247,7 +257,7 @@ fn check_times(v: &Value, pointer: &str) -> Result<(), FileError> {
                     return Ok(());
                 };
                 let x = r.to_f64();
-                if (s - x).abs() > SECONDS_TOLERANCE * x.abs().max(1.0) {
+                if (s - x).abs() > SECONDS_TOLERANCE {
                     return Err(fail(format!(
                         "\"seconds\" is {s} but \"exact\" is \"{e}\" ({x}); \"exact\" is the time, so edit it (and \"seconds\" with it, or leave \"seconds\" out)"
                     )));

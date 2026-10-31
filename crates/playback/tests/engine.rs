@@ -1192,6 +1192,44 @@ fn a_looping_span_goes_on_from_its_start() {
     common::join(player);
 }
 
+/// A play from a frame before the span's end with the frames ahead of
+/// the clock (here by the A/V offset; on a desktop by the latency too)
+/// still stops there, and loops: its first present crosses the end from
+/// the clock's own time.
+#[test]
+fn a_play_ahead_of_the_clock_from_just_before_the_end_keeps_to_the_span() {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let ahead = PlayerConfig {
+        av_offset_ms: 100,
+        ..config(64)
+    };
+    let player = opened(clip(30), clock.clone(), ahead);
+    until(WAIT, || snapshot(&player).streams[0].end).expect("decoding never reached the end");
+    player.set_span(Some(PlaySpan {
+        start: at(5),
+        end: at(15),
+        looping: false,
+    }));
+    player.seek(at(14), SeekMode::Exact);
+    show(&player, 14);
+    player.play();
+    let end = ended(&player);
+    assert_eq!(end.state, PlayState::Paused);
+    assert!(end.clock < at(15) && end.clock > at(14), "{:?}", end.clock);
+    // A loop two frames long, shorter than the offset.
+    player.set_span(Some(PlaySpan {
+        start: at(5),
+        end: at(7),
+        looping: true,
+    }));
+    player.seek(at(6), SeekMode::Exact);
+    lands_on(&player, 6);
+    player.play();
+    lands_on(&player, 5);
+    assert!(snapshot(&player).want_play);
+    common::join(player);
+}
+
 #[test]
 fn a_seek_past_the_span_while_playing_plays_on() {
     let span = PlaySpan {

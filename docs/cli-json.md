@@ -771,9 +771,9 @@ before the last have `ok` true and no warnings.
 | Field | Type | What |
 |---|---|---|
 | `event` | string | `progress` |
-| `frames_done` | integer | Frames muxed so far: never fewer than the line before |
+| `frames_done` | integer | Frames given to the encoder so far (it muxes each soon after, a hardware encoder a GOP or so later): never fewer than the line before |
 | `frames_total` | integer | As `start`'s `frames` |
-| `fps` | number | Frames muxed a second over the last two seconds; 0 until it can tell |
+| `fps` | number | Frames given to the encoder a second over the last two seconds; 0 until it can tell |
 | `elapsed` | number | Seconds since the export started |
 | `eta` | number, or null | Seconds left at `fps`; null until it can tell |
 | `encoder` | string | The encoder now |
@@ -797,11 +797,11 @@ before the last have `ok` true and no warnings.
 | `fallback` | object, or absent | As progress's |
 | `decode` | object | `path` (`vaapi` or `software`: where the last frame was decoded) and, as progress's `decode_fallback`, `fallback` |
 | `ten_bit` | bool | The video is 10-bit: a 10-bit source in HEVC or AV1, without `--eight-bit` |
-| `audio` | object, or null | The audio track: `stream` (the source's, by FFmpeg's index), `encoder` (`aac`, or the copied codec's FFmpeg name such as `pcm_s16le`), `rate`, `channels`, `ambix` (first-order ambiX with an `SA3D` box) and `samples` (a channel's); null for none |
+| `audio` | object, or null | The audio track: `stream` (the source's, by FFmpeg's index), `encoder` (`aac`, or `copy` for the source's packets as they are), `codec` (FFmpeg's name for the track's codec: `aac`, or the copied one's such as `pcm_s16le`), `rate`, `channels`, `ambix` (first-order ambiX with an `SA3D` box) and `samples` (a channel's); null for none |
 | `bytes` | integer | The file's size |
 | `blur_capped` | integer | Frames whose motion blur needed more views than the cap of 64, and got 64 |
 | `checks` | array | The checks the file passed before it was put in place, in order, each `name` and `found` (for people): `probe` (it opens), `layout` (the moov before the media data), `codec`, `size`, `frames`, `duration` (within a frame), `rate`, then `st3d`, `sv3d` and `v1` for a 360 export or `spherical` (none) for a flat one, then `audio` and, for ambiX, `sa3d` |
-| `stages` | object | Where the time went, in seconds of each stage's work over the try that made the file: `decode`, `render` (the upload and the draw), `readback` (the planes copied back from the GPU), `encode` (and the audio muxed between frames) and `finish` (the encoder's flush, the last pass and the checks). Decode, render and encode run at once, so the busiest of them sets the pace |
+| `stages` | object | Where the time went, in seconds of each stage's work over the try that made the file: `decode`, `render` (the upload and the draw), `readback` (the planes copied back from the GPU), `encode` (with the audio muxed between frames and the video encoder's flush) and `finish` (the audio's flush, the last pass and the checks). Decode, render and encode run at once, so the busiest of them sets the pace |
 | `elapsed` | number | Seconds from start to finish |
 
 `fallback`, `decode.fallback` and `decode_fallback` are absent when

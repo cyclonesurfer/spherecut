@@ -30,7 +30,7 @@ use spherecut_media::hw::RenderNode;
 use spherecut_media::inject::{EntryEdit, Finish, InjectError, TrackKind};
 use spherecut_media::spherical::{StereoMode, write};
 use spherecut_media::{HwDevice, capture_ffmpeg_log};
-use spherecut_render::output::frame_views;
+use spherecut_render::output::frame_views_at;
 use spherecut_render::{
     Filter, Gpu, Placement, Stereo, StillOptions, StillRenderer, YuvImage, YuvLayout,
 };
@@ -88,6 +88,8 @@ struct Look {
     anim: ViewAnim,
     targets: Vec<Target>,
     output: Output,
+    /// The size each frame renders at: the output's, or `--draft`'s.
+    size: (u32, u32),
     blur: bool,
     opts: StillOptions,
     yuv: YuvLayout,
@@ -185,6 +187,7 @@ pub(crate) fn run(
         anim: clip.view.clone(),
         targets: job.project.targets().to_vec(),
         output: sequence.output,
+        size,
         blur: s.motion_blur,
         opts: StillOptions {
             filter: filter(&job.gpu),
@@ -391,6 +394,7 @@ pub(crate) fn run(
         audio: audio_plan.zip(feed.as_ref()).map(|(a, f)| AudioReport {
             stream: a.stream,
             encoder: a.encoder(),
+            codec: a.codec().to_owned(),
             rate: f.rate(),
             channels: a.channels(),
             ambix: a.ambix,
@@ -950,10 +954,11 @@ fn render(
         }
         let since = Instant::now();
         let t = plan.source_time(held.n).map_or(f64::NAN, Time::to_secs_f64);
-        let views = frame_views(
+        let views = frame_views_at(
             &look.anim,
             &look.targets,
             &look.output,
+            look.size,
             t,
             frame_s,
             look.blur,
@@ -1116,6 +1121,7 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
             .map(|p| (p.offset as usize, p.stride as usize))
             .collect();
         let planes = StridedPlanes {
+            size: r.image.shape.size,
             data: &r.image.data,
             planes: &spans,
         };
@@ -1131,17 +1137,7 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
         let pushed = writer.push_video_strided(&planes);
         #[cfg(test)]
         let pushed = pushed.and_then(|()| fault::disk(next));
-        pushed.map_err(|e| {
-            let fault = !matches!(
-                e,
-                EncodeError::Io { .. } | EncodeError::Write(_) | EncodeError::Invalid(_)
-            );
-            Failed {
-                error: file_or(Stage::Encode, at, e),
-                encoder: fault.then_some("hw_failed"),
-                frames: next,
-            }
-        })?;
+        pushed.map_err(|e| encoder_failed(e, at, next))?;
         capped += u64::from(r.capped);
         next += 1;
         let end = plan
@@ -1161,8 +1157,37 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
         )
         .into());
     }
+    // What the encoder still holds (VA-API's GOP) fails here as a frame
+    // would: within its first second, the next encoder may try.
+    #[cfg(test)]
+    if fault::take(next) {
+        return Err(Failed {
+            error: ExportError::failed(Stage::Encode, None, "an injected failure at the flush"),
+            encoder: Some("hw_failed"),
+            frames: next,
+        });
+    }
+    let since = Instant::now();
+    writer
+        .flush_video()
+        .map_err(|e| encoder_failed(e, None, next))?;
+    Busy::add(&busy.encode, since.elapsed());
     audio_to(&mut writer, None)?;
     Ok((writer, capped))
+}
+
+/// The writer failing on the frame at `at`, or at the flush, after
+/// `frames` frames: the encoder's failure unless it was the file's.
+fn encoder_failed(e: EncodeError, at: Option<Time>, frames: u64) -> Failed {
+    let fault = !matches!(
+        e,
+        EncodeError::Io { .. } | EncodeError::Write(_) | EncodeError::Invalid(_)
+    );
+    Failed {
+        error: file_or(Stage::Encode, at, e),
+        encoder: fault.then_some("hw_failed"),
+        frames,
+    }
 }
 
 /// The unit tests' failures: the encode stage on this thread fails at
@@ -1551,12 +1576,19 @@ mod tests {
         let dir = TempDir::new("fallback-early");
         let job = job(&dir.0, 15);
         let two = vec![EncoderKind::Software, EncoderKind::Software];
-        let (r, progress) = export_through(&job, two, Some(3));
+        let (r, progress) = export_through(&job, two.clone(), Some(3));
         let r = r.unwrap();
         assert_eq!((r.frames, r.encoder), (15, "libx264"));
         let f = r.fallback.expect("the first encoder's failure is reported");
         assert_eq!((f.from, f.code), ("libx264", "hw_failed"));
         assert!(f.reason.contains("injected"), "{}", f.reason);
+        // At the flush, after the last frame: a short file's VA-API
+        // failure comes there.
+        std::fs::remove_file(&job.output).unwrap();
+        let r = export_through(&job, two.clone(), Some(15)).0.unwrap();
+        assert_eq!((r.frames, r.encoder), (15, "libx264"));
+        let f = r.fallback.expect("the flush's failure is reported");
+        assert!(f.reason.contains("at the flush"), "{}", f.reason);
         assert_eq!(progress.frames_done, 15);
         assert_eq!(progress.fallback.map(|f| f.code), Some("hw_failed"));
         assert!(job.output.exists());

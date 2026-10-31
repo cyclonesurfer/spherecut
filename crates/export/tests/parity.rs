@@ -15,12 +15,12 @@
 mod common;
 
 use common::{
-    Scratch, best, export, frames, grid, held, measure, media_path, project, references, secs,
-    worst,
+    Scratch, best, export, frames, gpu, grid, held, measure, media_path, project, references,
+    references_at, run, secs, worst,
 };
 use spherecut_core::project::{Aspect, Codec, Orientation, Output, Project, Range};
 use spherecut_core::time::Time;
-use spherecut_export::{FramePlan, Report};
+use spherecut_export::{ExportJob, FramePlan, Report};
 use spherecut_render::YuvLayout;
 use spherecut_sphere::orient::Ypr;
 use spherecut_synth::media as synth;
@@ -99,6 +99,7 @@ const FLAT_FLOORS: (f64, f64) = (49.0, 0.995);
 const SPHERE_FLOORS: (f64, f64) = (55.5, 0.996);
 const AV1_FLOORS: (f64, f64) = (47.0, 0.9945);
 const AV1_TEN_BIT_FLOORS: (f64, f64) = (48.5, 0.9958);
+const DRAFT_FLOORS: (f64, f64) = (48.0, 0.994);
 
 #[test]
 fn a_flat_export_through_libx264_matches_the_reference() {
@@ -117,6 +118,45 @@ fn a_flat_export_through_libx264_matches_the_reference() {
     assert_eq!((r.frames, r.size, r.encoder), (60, (1920, 1080), "libx264"));
     assert!(!r.ten_bit);
     assert_eq!(r.duration, Time::from_secs(2));
+}
+
+/// `--draft` (M2 plan section 9): the whole picture at the draft's size,
+/// as the reference renders it there, not the full size's top left.
+#[test]
+fn a_draft_is_the_whole_picture_at_its_size() {
+    let src = grid("parity-grid-h264-8", synth::Codec::H264, 8);
+    let output = Output::Flat {
+        aspect: Aspect::Wide,
+        short_side: 1080,
+    };
+    let trim = Range {
+        start: Time::ZERO,
+        end: secs(1, 2),
+    };
+    let p = project(&src, trim, output, Codec::H264, 0.0);
+    let scratch = Scratch::new("draft-x264");
+    let out = scratch.0.join("draft.mp4");
+    let mut job = ExportJob::new(p.clone(), &out, gpu().clone());
+    job.draft = true;
+    let r = run(job).unwrap();
+    assert_eq!((r.frames, r.size, r.encoder), (15, (960, 544), "libx264"));
+    let got = frames(&out);
+    assert_eq!(got.len() as u64, r.frames);
+    let source = frames(&media_path(&p));
+    let all: Vec<u64> = (0..r.frames).collect();
+    let want = references_at(gpu(), &p, &source, YuvLayout::I420, &all, r.size);
+    let m = measure(
+        got.iter()
+            .map(|g| g.as_ref())
+            .zip(want.iter().map(Vec::as_slice)),
+    );
+    let (psnr, ssim) = worst(&m);
+    eprintln!("draft: worst luma PSNR {psnr:.2} dB, SSIM {ssim:.5}");
+    let (floor_psnr, floor_ssim) = DRAFT_FLOORS;
+    assert!(
+        psnr >= floor_psnr && ssim >= floor_ssim,
+        "draft: worst {psnr:.2} dB, SSIM {ssim:.5}, below {floor_psnr} dB, {floor_ssim}"
+    );
 }
 
 #[test]

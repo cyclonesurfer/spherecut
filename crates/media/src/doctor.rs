@@ -1885,11 +1885,13 @@ pub fn render_text(r: &DoctorReport) -> String {
     let _ = writeln!(s, "\nExport encoders (auto)");
     for e in &r.export_encoders {
         let encoder = e.encoder.as_deref().unwrap_or("none in this FFmpeg");
-        // VCN 4's H.264 stops at 4096 (M2 plan section 8.3).
-        let wide = if e.encoder.as_deref() == Some("h264_vaapi") {
-            " (libx264 above 4096 wide)"
-        } else {
-            ""
+        // VCN 4's H.264 stops at 4096 (M2 plan section 8.3), and export
+        // gives AV1 to VA-API only at a size it needn't pad (export's
+        // `av1_vaapi_pads`).
+        let wide = match e.encoder.as_deref() {
+            Some("h264_vaapi") => " (libx264 above 4096 wide)",
+            Some("av1_vaapi") => " (libsvtav1 unless a multiple of 64x16)",
+            _ => "",
         };
         let _ = writeln!(s, "  {:<14}{encoder}{wide}", e.format);
     }

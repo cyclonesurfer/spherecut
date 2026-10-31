@@ -88,7 +88,8 @@ fn make(p: &Project, s: &Seed) -> Edit {
         orientation_key: KeyId::NEW,
         fov_key: KeyId::NEW,
     };
-    match s.op % 18 {
+    let media: Vec<MediaId> = p.media().iter().map(|m| m.id).collect();
+    match s.op % 22 {
         0 => Edit::AddKey {
             clip: c,
             key: orientation_key(time(s.a), ypr(s.x, s.y * 0.9, s.z / 10.0)),
@@ -223,6 +224,51 @@ fn make(p: &Project, s: &Seed) -> Edit {
                 String::new()
             } else {
                 format!("n{}", s.b % 1000)
+            },
+        },
+        18 => Edit::SetTarget {
+            target: pick(&targets, s.a).unwrap_or(TargetId(999)),
+            name: s.b.is_multiple_of(2).then(|| format!("r{}", s.b % 10)),
+            path: s.b.is_multiple_of(3).then(|| {
+                // Sometimes past the media's end, which is refused.
+                let mut path = target(p, "x", s.y, s.y * 0.5).path;
+                path.keys.push(Key {
+                    id: KeyId::NEW,
+                    at: time(s.a),
+                    value: AimDir {
+                        yaw_deg: s.x,
+                        pitch_deg: (s.z / 4.0).clamp(-90.0, 90.0),
+                    },
+                    ease: ease(s.b),
+                    spin: 0,
+                });
+                path.keys.sort_by_key(|k| k.at);
+                path
+            }),
+        },
+        19 => Edit::AddMedia {
+            media: common::media(
+                &format!("/clips/more_{}.mp4", s.a % 5),
+                1 + (s.b % 20) as i64,
+            ),
+        },
+        20 => Edit::RemoveMedia {
+            // The clip's own is in use, and refused.
+            media: pick(&media, s.a).unwrap_or(MediaId(999)),
+        },
+        21 => Edit::SetExport {
+            sequence: seq,
+            export: ExportSettings {
+                codec: [Codec::H264, Codec::Hevc, Codec::Av1][(s.a % 3) as usize],
+                quality: [Quality::High, Quality::Medium, Quality::Small][(s.b % 3) as usize],
+                encoder: [
+                    EncoderChoice::Auto,
+                    EncoderChoice::Vaapi,
+                    EncoderChoice::Software,
+                ][(s.a / 3 % 3) as usize],
+                audio: [AudioChoice::Copy, AudioChoice::Aac, AudioChoice::None]
+                    [(s.b / 3 % 3) as usize],
+                motion_blur: s.a.is_multiple_of(2),
             },
         },
         _ => {

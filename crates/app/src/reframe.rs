@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use spherecut_core::Time;
 use spherecut_core::project::file::{self, MediaStatus};
 use spherecut_core::project::{
-    Edit, Fingerprint, InitialView, Media, MediaId, MediaVideo, Orientation, Output, Project,
+    Edit, Fingerprint, InitialView, KeyId, Media, MediaId, MediaVideo, Orientation, Output,
+    Project, ViewAnim,
 };
 use spherecut_media::backend::{SeekMode, Timing, VideoStreamInfo};
 use spherecut_media::doctor::Severity;
@@ -121,6 +122,10 @@ pub struct Reframe {
     /// from them, and those it last had, to time a change's rest.
     applied: Option<ViewValues>,
     seen: Option<ViewValues>,
+    /// A turn under way's view as it was the frame before, and the spins
+    /// that keep its key's segments turning the way they went (section
+    /// 6.4's sticky spin).
+    follow: Option<(ViewAnim, Vec<(KeyId, i8)>)>,
     /// A drag of the picture ended this frame.
     pub released: bool,
     /// The span the player was given since its last open.
@@ -199,6 +204,7 @@ impl Reframe {
         self.look = Look::Keyed;
         self.applied = None;
         self.seen = None;
+        self.follow = None;
         self.keep_jobs();
         self.save_as = None;
         self.replace = None;
@@ -593,14 +599,20 @@ impl AppState {
         match s.job.poll() {
             Poll::Pending => self.reframe.saving = Some(s),
             Poll::Done(Saved::Done) => {
-                if s.generation == self.reframe.generation
-                    && let Some(doc) = &mut self.reframe.doc
-                {
+                let ours = s.generation == self.reframe.generation;
+                if ours && let Some(doc) = &mut self.reframe.doc {
                     doc.saved_to(s.path, s.revision);
                 }
                 self.notices.retain(|k| *k != NoticeKind::Project);
                 if let Some(step) = self.reframe.after_save.take() {
-                    self.take_step(step);
+                    // A step asked for while this save ran waits on the
+                    // changes made since it began being saved too.
+                    if ours && self.reframe.doc.as_ref().is_some_and(Doc::dirty) {
+                        self.reframe.after_save = Some(step);
+                        self.save();
+                    } else {
+                        self.take_step(step);
+                    }
                 }
             }
             Poll::Done(Saved::Exists) => self.reframe.replace = Some(s.path),
@@ -698,17 +710,20 @@ impl AppState {
                     .applied
                     .is_some_and(|a| !a.changed(&vals).is_empty());
                 if off || busy {
+                    self.reframe.follow = None;
                     self.reframe.look = if self.snapshot.want_play {
                         Look::Around
                     } else {
-                        Look::Editing {
-                            at: self.frame_time(),
-                            moved: now,
-                        }
+                        let at = self.frame_time();
+                        self.follow_look(at, &vals);
+                        Look::Editing { at, moved: now }
                     };
                 }
             }
             Look::Editing { at, moved: last } => {
+                if moved {
+                    self.follow_look(at, &vals);
+                }
                 if busy || (moved && !released) {
                     self.reframe.look = Look::Editing { at, moved: now };
                 } else if released || now.duration_since(last) >= SETTLE {
@@ -717,6 +732,19 @@ impl AppState {
             }
             Look::Around => {}
         }
+    }
+
+    /// The spins a turn under way to `vals` at `at` keeps: its key's
+    /// segments turn the way they did the frame before.
+    fn follow_look(&mut self, at: Time, vals: &ViewValues) {
+        let Some(doc) = &self.reframe.doc else {
+            return;
+        };
+        let (previous, spins) = match self.reframe.follow.take() {
+            Some(f) => f,
+            None => (doc.clip().view.clone(), Vec::new()),
+        };
+        self.reframe.follow = doc.follow_look(at, vals, &previous, &spins);
     }
 
     /// The view the keys give at the frame on screen, while it is keyed.
@@ -742,11 +770,12 @@ impl AppState {
             return;
         };
         let vals = ViewValues::of(self.view.q, &self.view.lens);
+        let spins = self.reframe.follow.take().map(|f| f.1).unwrap_or_default();
         let Some(edits) = self
             .reframe
             .doc
             .as_ref()
-            .and_then(|d| d.view_edits(at, &vals))
+            .and_then(|d| d.view_edits(at, &vals, &spins))
         else {
             self.reframe.look = Look::Around;
             return;
@@ -771,12 +800,23 @@ impl AppState {
         self.reframe.look = Look::Keyed;
         self.reframe.applied = None;
         self.reframe.seen = None;
+        self.reframe.follow = None;
         // A number or a curve being changed is let go, unkept.
         self.reframe.inspector.editing = None;
         self.reframe.curves.cancel();
         if let Some(doc) = &mut self.reframe.doc {
             doc.end_preview();
         }
+    }
+
+    /// A drag of the view let go with Escape: the view back at `q`, where
+    /// the drag began, and the viewer showing what it did then, `was`.
+    /// Nothing is kept of the drag.
+    pub(crate) fn cancel_look(&mut self, q: glam::DQuat, was: Look) {
+        self.view.q = q;
+        self.reframe.follow = None;
+        self.reframe.seen = Some(ViewValues::of(q, &self.view.lens));
+        self.reframe.look = was;
     }
 
     /// The view turned to `q` at once (the sphere overview's click): as
@@ -802,7 +842,7 @@ impl AppState {
             .reframe
             .doc
             .as_ref()
-            .and_then(|d| d.view_edits(t, &vals));
+            .and_then(|d| d.view_edits(t, &vals, &[]));
         self.reframe.look = match edits {
             Some(edits) if self.edit("Turn the view", &edits) => {
                 self.reframe.applied = Some(vals);

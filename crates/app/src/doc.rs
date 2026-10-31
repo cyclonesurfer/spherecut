@@ -12,7 +12,7 @@ use glam::DQuat;
 use spherecut_core::project::{
     AimDir, AnyKey, AnyKeys, AnyValue, Clip, Ease, Edit, EditError, ExportSettings, History,
     InitialView, Key, KeyId, KeyTrack, Marker, MarkerId, Media, Orient, Orientation, Origin,
-    Output, Problem, Project, Target, TargetId, View, ViewAnim,
+    Output, Problem, Project, Target, TargetId, View, ViewAnim, follow_spin,
 };
 use spherecut_core::{FrameRate, Rational, Rounding, Time};
 use spherecut_sphere::orient::Ypr;
@@ -406,6 +406,13 @@ impl Doc {
             ease: None,
             spin: None,
         }];
+        self.add_spins(&mut edits, spins);
+        edits
+    }
+
+    /// The spins in `spins` that differ from the project's, set by
+    /// `edits`: in a key's own edit where it has one.
+    fn add_spins(&self, edits: &mut Vec<Edit>, spins: &[(KeyId, i8)]) {
         for &(id, spin) in spins {
             let now = self.orientation_key(id).map(|k| k.spin);
             if now.is_some_and(|s| s != spin) {
@@ -424,7 +431,6 @@ impl Doc {
                 }
             }
         }
-        edits
     }
 
     /// `key`'s spin: extra whole turns from it to the next key.
@@ -624,10 +630,18 @@ impl Doc {
     /// the keys it touches (section 10.2): `Some` of the edits (none when
     /// nothing changed) when every lane that changed has a key to edit,
     /// `None` when one hasn't and the change is a look-around. An aim
-    /// key (M2.7's targets) isn't edited by turning the view.
-    pub fn view_edits(&self, t: Time, now: &ViewValues) -> Option<Vec<Edit>> {
+    /// key (M2.7's targets) isn't edited by turning the view. A turn
+    /// also sets the spins in `spins` (a drag's, from
+    /// [`Doc::follow_look`]).
+    pub fn view_edits(
+        &self,
+        t: Time,
+        now: &ViewValues,
+        spins: &[(KeyId, i8)],
+    ) -> Option<Vec<Edit>> {
         let was = self.view_at(t);
         let changed = ViewValues::of(was.orientation, &was.lens).changed(now);
+        let turned = changed.contains(&Lane::Orientation);
         let mut edits = Vec::new();
         for lane in changed {
             let k = self.editable(lane, t)?;
@@ -642,7 +656,39 @@ impl Doc {
                 spin: None,
             });
         }
+        if turned {
+            self.add_spins(&mut edits, spins);
+        }
         Some(edits)
+    }
+
+    /// A turn of the view at `t` to `now` while a drag runs in the viewer
+    /// (section 6.4's sticky spin): the view with the orientation key it
+    /// edits at `now` and `spins` set, and `spins` with the spins that
+    /// keep that key's segments turning from `previous`, the frame
+    /// before's, the way they went. `None` when no orientation key takes
+    /// the turn.
+    pub fn follow_look(
+        &self,
+        t: Time,
+        now: &ViewValues,
+        previous: &ViewAnim,
+        spins: &[(KeyId, i8)],
+    ) -> Option<(ViewAnim, Vec<(KeyId, i8)>)> {
+        let k = self.editable(Lane::Orientation, t)?;
+        if k.aim {
+            return None;
+        }
+        let value = now.value(Lane::Orientation).ok()?;
+        let mut spins = spins.to_vec();
+        let next = self.with_value(k.id, &value, &spins);
+        for (id, spin) in follow_spin(previous, &next, self.project.targets()) {
+            match spins.iter_mut().find(|(k, _)| *k == id) {
+                Some(s) => s.1 = spin,
+                None => spins.push((id, spin)),
+            }
+        }
+        Some((self.with_value(k.id, &value, &spins), spins))
     }
 
     /// `Alt+K`: the view `now` keyed at the playhead `t`, one key on each
@@ -909,7 +955,7 @@ mod tests {
     fn a_turn_edits_the_only_key_then_keys_at_the_playhead() {
         let mut d = doc();
         // One key a lane: a turn anywhere edits it, a static reframe.
-        let edits = d.view_edits(at(90), &looking(30.0, 100.0)).unwrap();
+        let edits = d.view_edits(at(90), &looking(30.0, 100.0), &[]).unwrap();
         assert_eq!(edits.len(), 1, "{edits:?}");
         d.record("Turn the view", &edits).unwrap();
         let y = d.view_at(at(200)).orientation;
@@ -919,15 +965,18 @@ mod tests {
         let k = d.key_view(at(90), &looking(60.0, 80.0)).unwrap();
         d.record("Key the view", &k).unwrap();
         assert_eq!(d.lane_keys(Lane::Orientation).len(), 2);
-        assert!(d.view_edits(at(180), &looking(10.0, 90.0)).is_none());
+        assert!(d.view_edits(at(180), &looking(10.0, 90.0), &[]).is_none());
         // Within half a frame of the key, the key is edited.
         let near = at(90)
             .checked_add(Time::seconds(Rational::new(1, 70).unwrap()))
             .unwrap();
-        let edits = d.view_edits(near, &looking(61.0, 80.0)).unwrap();
+        let edits = d.view_edits(near, &looking(61.0, 80.0), &[]).unwrap();
         assert_eq!(edits.len(), 1, "only the orientation changed: {edits:?}");
         // The field of view alone, unchanged elsewhere, edits nothing.
-        assert_eq!(d.view_edits(at(90), &looking(60.0, 80.0)), Some(Vec::new()));
+        assert_eq!(
+            d.view_edits(at(90), &looking(60.0, 80.0), &[]),
+            Some(Vec::new())
+        );
     }
 
     #[test]

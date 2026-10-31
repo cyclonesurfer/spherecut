@@ -377,7 +377,9 @@ impl Project {
     /// one sequence at the clip's rate, flat 16:9 1080p, one track, one
     /// clip over the whole file, and `view` as the one key on each of the
     /// view's tracks, at the source's start. `media`'s id is given here.
-    pub fn untitled(media: Media, view: InitialView) -> Result<Project, Problem> {
+    pub fn untitled(mut media: Media, view: InitialView) -> Result<Project, Problem> {
+        // As a saved project loads it, so save then load gives it back.
+        media.path = file::lexical(&media.path);
         let mut p = Project {
             revision: 0,
             next_id: 1,
@@ -391,7 +393,17 @@ impl Project {
             .map(|s| s.to_string_lossy().into_owned())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "Sequence".to_owned());
-        let name: String = name.chars().take(limits::MAX_NAME_CHARS).collect();
+        // A file name may hold what a name may not.
+        let name: String = name
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(limits::MAX_NAME_CHARS)
+            .collect();
+        let name = if name.trim().is_empty() {
+            "Sequence".to_owned()
+        } else {
+            name
+        };
         let media_id = MediaId(p.take_id());
         let sequence = SequenceId(p.take_id());
         let track = TrackId(p.take_id());

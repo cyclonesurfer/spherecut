@@ -51,7 +51,20 @@ pub fn frame_views(
     frame_s: f64,
     blur: bool,
 ) -> FrameViews {
-    let size = output.size();
+    frame_views_at(anim, targets, output, output.size(), t, frame_s, blur)
+}
+
+/// [`frame_views`] at `size` rather than the output's own: export's
+/// `--draft`, the same picture at fewer pixels (M2 plan section 9).
+pub fn frame_views_at(
+    anim: &ViewAnim,
+    targets: &[Target],
+    output: &Output,
+    size: (u32, u32),
+    t: f64,
+    frame_s: f64,
+    blur: bool,
+) -> FrameViews {
     let at = |t| view_at(anim, targets, output, t);
     if !blur {
         return FrameViews {

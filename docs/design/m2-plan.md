@@ -528,6 +528,44 @@ its front, which keys don't move), so "8K with blur" is two cases:
 - **hw-test's GUI section** shows each export under its run: what it
   made, the stages, the pace's waits and the UI while it ran.
 
+**Amendment 10 (2026-10-31, M2.9's fresh review).** Four reviewers
+read M2's code against PLAN, this plan and D47 to D55, one area each,
+and made 24 findings (`/mnt/project-files/spherecut/m2-review-findings.md`
+holds them as found). Where the code now differs from the sections
+below:
+
+- **Spin** (section 6.2): one rule, `spline::spun`. Spin n adds n whole
+  turns the way the short way goes, −1 the long way, in both modes;
+  with equal ends the turns go right, so Free's equal-ends axis is −Y,
+  not +Y. Level's pitch is clamped to ±90°, which an aim key's rate
+  could carry it past.
+- **Sticky spin** (section 6.4) applies to a drag in the viewer as well
+  as the curve editor: the turn's spins go into its one undo step.
+- **The file** (section 5): a time object holds `exact` and `seconds`
+  only; the seconds' tolerance is 1 µs at any time, not relative; a
+  project's media paths are lexical, refused otherwise; through a
+  symlink, relative paths are from the folder the link points into;
+  the revision is at most 2^53; key times increase as `f64` seconds
+  too; a target's keys don't spin; an untitled project's name has a
+  file name's control characters made spaces.
+- **The play span** (section 10.3): a play's first crossing of out is
+  taken from the clock's own time, not the first present's (which is
+  ahead by the latency and the A/V offset).
+- **Export** (section 8): `--draft` renders at its own size; a picture
+  pushed to a stream of another size is refused; the video's flush is
+  in the encode stage, so a hardware failure there on a short file
+  falls back as section 8.3's early failures do; the report's audio
+  gains `codec`.
+- **The GUI** (sections 10.4 to 10.6): Escape lets any drag go unkept;
+  a drag whose widget goes away is let go of; a step waiting on a save
+  that began before more edits waits for those too; Cancel while an
+  export starts doesn't ask Replace; Replace exports the project Start
+  had; a running export can be reopened with the project closed; the
+  strip's bar shares the lanes' time scale.
+- **Listed instead of fixed** (PROGRESS, Known issues): Cancel during
+  the encoder's last flush waits for it; the flat blur's sum buffer at
+  4K is 1 % under wgpu's default binding limit.
+
 ## 1. Summary
 
 M2 is the first version Pat can use for real: open one 360 clip, trim

@@ -498,8 +498,9 @@ struct Ui {
     /// The playhead the presenter last gave the cache.
     playhead: Option<Time>,
     span: Option<PlaySpan>,
-    /// The clock's time at the last present while playing since the last
-    /// seek, open or pause: a play crosses the span's end from here.
+    /// The time of the last present while playing since the last seek,
+    /// open or pause: a play crosses the span's end from here, and its
+    /// first from the clock's own time.
     span_prev: Option<Time>,
     snapshot: PlayerSnapshot,
     /// The open the snapshot's streams are about.
@@ -1407,7 +1408,11 @@ impl Player {
     /// play on. A play that a seek put past the end plays on.
     fn check_span(&self, ui: &mut Ui, t: Time, now: Instant) {
         let prev = if ui.clock.is_running() {
-            ui.span_prev.replace(t)
+            // A present's time is ahead of the clock by the latency and
+            // the A/V offset, so the first may already be past the end
+            // (a play from just before it, or a loop shorter than that).
+            let first = ui.clock.time_at(now).min(t);
+            Some(ui.span_prev.replace(t).unwrap_or(first))
         } else {
             ui.span_prev = None;
             None

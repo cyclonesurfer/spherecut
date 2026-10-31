@@ -23,7 +23,7 @@ use spherecut_media::backend::{
     VideoRequest,
 };
 use spherecut_render::compare::{Plane, psnr_plane, ssim_plane};
-use spherecut_render::output::frame_views;
+use spherecut_render::output::frame_views_at;
 use spherecut_render::{
     AdapterChoice, Filter, Gpu, Placement, StillOptions, StillRenderer, YuvImage, YuvLayout,
 };
@@ -299,6 +299,19 @@ pub fn references_on(
     yuv: YuvLayout,
     which: &[u64],
 ) -> Vec<Vec<f64>> {
+    let size = project.the_sequence().output.size();
+    references_at(gpu, project, source, yuv, which, size)
+}
+
+/// [`references_on`] at `size`, as `--draft` renders.
+pub fn references_at(
+    gpu: &Gpu,
+    project: &Project,
+    source: &[Arc<VideoFrame>],
+    yuv: YuvLayout,
+    which: &[u64],
+    size: (u32, u32),
+) -> Vec<Vec<f64>> {
     let sequence = project.the_sequence();
     let clip = project.the_clip();
     let plan = FramePlan::new(clip.source, sequence.rate).unwrap();
@@ -318,10 +331,11 @@ pub fn references_on(
         .map(|&n| {
             let t = plan.source_time(n).unwrap();
             let src = held(source, t);
-            let views = frame_views(
+            let views = frame_views_at(
                 &clip.view,
                 project.targets(),
                 &sequence.output,
+                size,
                 t.to_secs_f64(),
                 frame_s,
                 false,
