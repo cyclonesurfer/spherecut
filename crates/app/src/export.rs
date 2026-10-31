@@ -10,13 +10,15 @@
 //! looks at the output path and the render node, so that is a job too:
 //! the UI thread never waits on a file (section 7.9).
 //!
-//! While the viewer plays or a drag runs, the export is held to a frame
-//! a UI pass through its [`Pace`] (amendment 2 item 22). It renders on a
+//! While the viewer plays, the export stands aside, and while a drag
+//! runs it is held to a frame a UI pass, through its [`Pace`] (amendment
+//! 2 item 22). It renders on a
 //! GPU device of its own beside the window's (D56), so that nothing it
 //! submits or waits for shares a lock or a queue with the window's.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -133,9 +135,15 @@ struct Running {
     /// The project the export was given, kept for "Replace it?".
     project: Project,
     state: Run,
-    /// Cancel asked for: an export still starting is cancelled once it
-    /// has.
-    cancelled: bool,
+    /// Cancel asked for: an export waiting to start doesn't, and one
+    /// still starting is cancelled once it has.
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Running {
+    fn cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Debug)]
@@ -154,7 +162,7 @@ impl ExportUi {
     /// leaving nothing at its output.
     pub fn cancel(&mut self) {
         if let Some(r) = &mut self.run {
-            r.cancelled = true;
+            r.cancelled.store(true, Ordering::Relaxed);
             if let Run::Exporting(e) = &r.state {
                 e.cancel();
             }
@@ -174,6 +182,7 @@ impl ExportUi {
     /// on a thread of its own.
     pub fn take_threads(&mut self) -> Vec<JoinHandle<()>> {
         if let Some(r) = self.run.take() {
+            r.cancelled.store(true, Ordering::Relaxed);
             match r.state {
                 Run::Starting(job) => self.threads.keep(job),
                 Run::Exporting(export) => {
@@ -251,14 +260,14 @@ impl AppState {
             }) {
                 Poll::Pending => None,
                 Poll::Done(Ok(export)) => {
-                    if run.cancelled {
+                    if run.cancelled() {
                         export.cancel();
                     }
                     run.state = Run::Exporting(Box::new(export));
                     None
                 }
                 // Cancelled before it found the file: nothing to ask.
-                Poll::Done(Err(ExportError::OutputExists(_))) if run.cancelled => {
+                Poll::Done(Err(ExportError::OutputExists(_))) if run.cancelled() => {
                     Some(Err(ExportError::Cancelled))
                 }
                 Poll::Done(Err(ExportError::OutputExists(path))) => {
@@ -353,17 +362,29 @@ impl AppState {
         job.overwrite = overwrite;
         job.pace = Some(self.export.pace.clone());
         let device = self.export.device;
+        let pace = self.export.pace.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
         tracing::info!(output = %output.display(), device = device.name(), "exporting");
-        let starting = Job::spawn("export-start", move || {
-            let (gpu, used) = export_device(window, device);
-            job.gpu = gpu;
-            (Export::start(job), used)
+        let starting = Job::spawn("export-start", {
+            let cancelled = cancelled.clone();
+            move || {
+                // While the viewer plays, the export doesn't start: its
+                // device's opening and its first allocations stalled the
+                // viewer's uploads 60 ms on odin (D56).
+                pace.stand_aside(|| cancelled.load(Ordering::Relaxed));
+                if cancelled.load(Ordering::Relaxed) {
+                    return (Err(ExportError::Cancelled), device);
+                }
+                let (gpu, used) = export_device(window, device);
+                job.gpu = gpu;
+                (Export::start(job), used)
+            }
         });
         self.export.run = Some(Running {
             output,
             project,
             state: Run::Starting(starting),
-            cancelled: false,
+            cancelled,
         });
     }
 }
@@ -784,6 +805,7 @@ fn settings_ui(s: &mut AppState, ui: &mut egui::Ui) {
 /// Start, or the running export's progress and Cancel.
 fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
     let dir = output_dir(s);
+    let playing = s.snapshot.want_play;
     match &s.export.run {
         None => {
             let path = output_path(&dir, &s.export.name);
@@ -804,9 +826,13 @@ fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
             ui.label(format!("Exporting to {}", output.display()));
             match &r.state {
                 Run::Starting(_) => {
-                    ui.add(egui::ProgressBar::new(0.0).text("Starting…"));
+                    ui.add(egui::ProgressBar::new(0.0).text(if playing {
+                        "Starting once the viewer stops"
+                    } else {
+                        "Starting…"
+                    }));
                 }
-                Run::Exporting(e) => progress_ui(ui, &e.progress()),
+                Run::Exporting(e) => progress_ui(ui, &e.progress(), playing),
             }
             ui.horizontal(|ui| {
                 if ui.button("Cancel").clicked() {
@@ -824,7 +850,8 @@ fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
-fn progress_ui(ui: &mut egui::Ui, p: &Progress) {
+/// `playing`: the viewer plays, so the export stands aside (D56).
+fn progress_ui(ui: &mut egui::Ui, p: &Progress, playing: bool) {
     let (fraction, text) = match p.finishing {
         Some((done, total)) if total > 0 => (
             done as f32 / total as f32,
@@ -840,10 +867,12 @@ fn progress_ui(ui: &mut egui::Ui, p: &Progress) {
                 p.frames_done as f32 / p.frames_total as f32
             };
             let mut text = format!("{} of {} frames", p.frames_done, p.frames_total);
-            if p.fps > 0.0 {
+            if playing {
+                text.push_str(", waiting while the viewer plays");
+            } else if p.fps > 0.0 {
                 text.push_str(&format!(", {:.1} fps", p.fps));
             }
-            if let Some(eta) = p.eta {
+            if let Some(eta) = p.eta.filter(|_| !playing) {
                 text.push_str(&format!(", {} left", format_duration(eta)));
             }
             (fraction, text)

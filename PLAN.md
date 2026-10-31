@@ -197,7 +197,7 @@ The first version Pat can use for real.
       fallback; audio passed through or re-encoded.
 - [x] 360 export: equirect up to 7680×3840 with st3d/sv3d (and SA3D for
       ambiX), written by our own box writer and validated by re-parsing.
-- [ ] Export runs in the background with progress and cancel; the UI stays
+- [x] Export runs in the background with progress and cancel; the UI stays
       responsive.
 - [x] Parity tests: decode exported frames and compare against
       `spherecut frame` renders of the same times (PSNR threshold), flat and

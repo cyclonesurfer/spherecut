@@ -598,6 +598,17 @@ GPU's video engine. So, while the viewer plays, each of the export's
 stages waits before a frame's work until the viewer has two frames
 ready beyond the one it shows, 100 ms at most (M2.10c, D56).
 
+That never waited on odin (PR #22), and taking turns with the viewer's
+decodes (M2.10d) still dropped a frame or three (PR #23). Pat chose that
+an export pauses while the viewer plays. So, while it plays, none of the
+export starts, opens or works: its start, the decoder's opening, each
+try's encoder, and each stage's frame stand aside until the viewer
+stops (M2.10e). The section 10 pace above holds only while a drag runs.
+The smoke run stops playing at its seconds and waits for its export,
+and the gates judge the time it played. odin passed at 5b907e3 at both
+scales (PR #25): 100 % presented and nothing dropped while the viewer
+played.
+
 ## 1. Summary
 
 M2 is the first version Pat can use for real: open one 360 clip, trim

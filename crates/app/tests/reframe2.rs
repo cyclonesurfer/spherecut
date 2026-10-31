@@ -46,6 +46,10 @@ const FRAMES: i64 = 60;
 /// refresh-interval gate is gui_smoke's (Tier 2, M2 plan amendment 8).
 const STEP: Duration = Duration::from_secs(1);
 
+/// The steps the viewer plays for once an export has started, which
+/// stands aside until it stops.
+const PLAYING_STEPS: u32 = 20;
+
 type H = Harness<'static, SpherecutApp>;
 
 /// 60 frames at 30 fps, a keyframe every 10.
@@ -322,13 +326,14 @@ fn an_export_from_the_window_reaches_the_end_while_the_ui_draws_on() {
     let out = dir.join("ten.mp4");
     let _ = std::fs::remove_file(&out);
 
-    // Played, looping in the trim, while it exports: the export is
-    // paced a frame a UI pass.
+    // Played, looping in the trim, when it starts: the export stands
+    // aside while the viewer plays, and goes once it stops (D56).
     h.key_press_modifiers(Modifiers::COMMAND, Key::L);
     h.key_press(Key::Space);
     step(&mut h);
     start_export(&mut h, "ten");
     assert!(h.state().state.export.running());
+    let mut playing = PLAYING_STEPS;
     let mut last = 0;
     let mut seen_progress = false;
     let mut times = Vec::new();
@@ -344,6 +349,10 @@ fn an_export_from_the_window_reaches_the_end_while_the_ui_draws_on() {
             times.len()
         );
         assert!(h.state().state.export.pace.held() || !h.state().state.snapshot.want_play);
+        playing = playing.saturating_sub(1);
+        if playing == 0 && h.state().state.snapshot.want_play {
+            h.key_press(Key::Space);
+        }
         let ui = &h.state().state.export;
         if let Some(p) = ui.progress() {
             assert!(p.frames_done >= last, "progress went back");
@@ -369,8 +378,8 @@ fn an_export_from_the_window_reaches_the_end_while_the_ui_draws_on() {
     assert_eq!(n.what, format!("Exported {}", out.display()));
     assert!(n.impact.contains("10 frames"), "{}", n.impact);
     assert!(n.fix.contains("Checked: "), "{}", n.fix);
-    let (held, _) = h.state().state.export.pace.waits();
-    assert!(held > 0, "no frame waited for a UI pass while playing");
+    let (aside, aside_for) = h.state().state.export.pace.aside();
+    assert!(aside > 0, "no stage stood aside while the viewer played");
     // It rendered on a device of its own (D56), not the window's.
     assert_eq!(
         h.state().state.export.device_used,
@@ -378,16 +387,20 @@ fn an_export_from_the_window_reaches_the_end_while_the_ui_draws_on() {
     );
     times.sort();
     eprintln!(
-        "exported 10 frames while playing in {} steps, the median {:?}, the slowest {:?}; {held} \
-         frames held for a UI pass",
+        "exported 10 frames in {} steps, {PLAYING_STEPS} of them playing, the median {:?}, the \
+         slowest {:?}; its stages stood aside {aside} times, {aside_for:?} in all",
         times.len(),
         times[times.len() / 2],
         times.last().unwrap()
     );
 
+    // Stopped, if the export ended first (a slow step lets it go).
+    if h.state().state.snapshot.want_play {
+        h.key_press(Key::Space);
+        step(&mut h);
+    }
+
     // Again: the file is there, so the window asks first.
-    h.key_press(Key::Space);
-    step(&mut h);
     h.get_by_label("Start").click();
     step(&mut h);
     until(&mut h, "the replace window", |a| {

@@ -204,7 +204,7 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
 /// item 22 run asks (there an 8K 360; here a square 1080, which lavapipe
 /// and libx264 make quickly).
 #[test]
-fn the_smoke_run_exports_while_it_plays_and_waits_for_the_export() {
+fn the_smoke_run_exports_while_it_plays_then_stops_and_waits_for_the_export() {
     let gpu = common::gpu();
     let rs = common::render_state(&gpu);
     let dir = common::tmp().join("smoke-export");
@@ -261,9 +261,20 @@ fn the_smoke_run_exports_while_it_plays_and_waits_for_the_export() {
     assert!(w["ui"]["frames"].as_u64().unwrap() > 0, "{w}");
     // No refresh rate here: every pass was expected, and ran the UI.
     assert_eq!(w["ui"]["presented"], 1.0);
-    // The run waited for the export past its 1.5 s, if it took longer.
+    // The run played its 1.5 s and stopped there; the export, which
+    // stands aside while the viewer plays (D56), ran on after, and the
+    // run waited for it. Its time while the viewer played ends there too.
     let played = doc["result"]["played_s"].as_f64().unwrap();
+    // Well short of the export's 20 s or so on lavapipe.
+    assert!(
+        played >= args.seconds && played < args.seconds + 5.0,
+        "{played}"
+    );
     assert!(played >= to, "{played} {to}");
+    assert!(e["aside"].as_u64().is_some(), "{e}");
+    if let Some(after) = e["after_playing_s"].as_f64() {
+        assert!(after >= 0.0, "{e}");
+    }
     // Its edits left the project unsaved, and still the window closes
     // without asking (a prompt would hold it open until the watchdog).
     assert!(project.dirty());
