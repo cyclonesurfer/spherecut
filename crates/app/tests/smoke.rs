@@ -266,7 +266,10 @@ fn the_smoke_run_exports_while_it_plays_then_stops_and_waits_for_the_export() {
     // run waited for it. Its time while the viewer played ends there too.
     let played = doc["result"]["played_s"].as_f64().unwrap();
     // Well short of the export's 20 s or so on lavapipe.
-    assert!(played >= args.seconds && played < args.seconds + 5.0, "{played}");
+    assert!(
+        played >= args.seconds && played < args.seconds + 5.0,
+        "{played}"
+    );
     assert!(played >= to, "{played} {to}");
     assert!(e["aside"].as_u64().is_some(), "{e}");
     if let Some(after) = e["after_playing_s"].as_f64() {

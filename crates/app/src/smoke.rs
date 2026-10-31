@@ -1224,8 +1224,9 @@ impl SmokeDriver {
             .clone()
             .or_else(|| perf.as_ref().map(|p| run.mark(played_s, p)));
         let counted = |c: Counter| {
-            end.as_ref()
-                .map_or(0, |m| m.counters[c as usize].saturating_sub(run.start[c as usize]))
+            end.as_ref().map_or(0, |m| {
+                m.counters[c as usize].saturating_sub(run.start[c as usize])
+            })
         };
         let (ui_frames, passes) = end
             .as_ref()
