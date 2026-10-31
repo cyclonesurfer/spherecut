@@ -391,6 +391,13 @@ At the time it was tested with 2000 byte flips of one file plus
 truncations. D15 has the parser's limits, its damage checks and the
 fuzzing now in place; D16 has inject's checks and atomic writes.
 
+*Updated by D52 (M2.4):* the export's last pass is our own as well. One
+rewrite of the muxer's file (`inject::rewrite_into` with `Finish`) adds
+V2 and `SA3D`, the Spherical Video V1 `uuid` beside V2, removes the
+video's identity edit, and puts the moov first with every chunk offset
+moved, as faststart would; the export reads the result back with the
+same parser before it is put in place.
+
 ## D5. glam for vectors and quaternions
 
 *2026-10-22, M0. Research: `docs/research/gpu-ui-stack.md` §8.*
@@ -1071,6 +1078,13 @@ so players that ignore `SA3D` play it as 4.0 surround.
 Revisit for M2/M6: Opus with channel mapping family 2 (ffprobe 6.1 reports
 "ambisonic 1" for it in MP4). It needs packed-float audio in `Mp4Writer`
 and a check that YouTube accepts it.
+
+*Updated by D52 (M2.4):* the export encodes ambiX this way at 384 kb/s,
+without intensity stereo or noise substitution (`aac_is=0`,
+`aac_pns=0`), and a test plays a tone on each channel through it and
+finds them in order. Opus stays out of M2: it isn't copied, since how
+its pre-skip and an edit list combine is unverified, and the encode is
+AAC. The revisit moves to M6.
 
 ## D18. Doctor checks capability, and reads packages only to word fixes
 
@@ -2077,7 +2091,9 @@ which case that is a version 2 of these schemas, never a silent change.
 
 *2026-10-24, M1 slice 3b. The M1 plan's D26 (section 2); updates D1,
 whose 1.95 half landed with slice 3a. Updated by D48: core depends on
-sphere and glam.*
+sphere and glam. Updated by D52: `export` depends on core, sphere, media
+and render and forbids unsafe, and the image metrics are render's
+`compare`, not testkit's.*
 
 What:
 
@@ -7645,6 +7661,163 @@ modes or tangent handles in yaw, pitch and roll (they need the
 angle-rate Jacobian, singular at the poles); or M9's tracker output
 needs smoothing, for which an approximating C² spline suits better than
 one through every key.
+
+## D52. The export pipeline: presets, encoders, the MP4 in one last pass, audio cut to the sample, parity floors and the job handle
+
+*2026-10-31, M2 slice M2.4. From `docs/design/m2-plan.md` section 8,
+its amendment 2 (items 4, 7, 8, 10, 24, 27, 28, 31, 32, 53),
+section 9's checks, and amendment 5, which records where the code
+differs. Updates D4, D16, D17 and D28. M2.5 adds the VA-API
+encoders, the encoder order and fallback, and `spherecut render`; this
+entry will say what M2.5 changes.*
+
+What, as `crates/export` does it:
+
+- **The crate.** `spherecut-export` depends on core, sphere, media and
+  render, and is `#![forbid(unsafe_code)]`: what needs FFmpeg's C API
+  is in media. `Export::start(ExportJob)` checks what needs no work (the
+  output is a preset, the trim has frames, the encoder exists, nothing
+  is at the output unless the job overwrites it) and starts the job's
+  thread; the handle gives `progress()` (frames muxed, only increasing,
+  the total, fps over the last 2 s, elapsed, the time left, the encoder,
+  and the last pass's bytes once it starts), `cancel()` and
+  `wait(timeout)`, which hands back the `Report` (frames, duration,
+  size, rate, codec, encoder, 10-bit, the audio track, bytes, frames
+  whose blur was capped, warnings, the checks passed) or the
+  `ExportError`. cli's `render`, the app's export window and A2 all
+  drive this one handle (amendment 2 item 32).
+- **Three threads** joined by bounded channels (2 decoded frames and 2
+  rendered ones ahead), stopped together by one `StopSource`: decode
+  (software for now; section 8.2's choice of path comes with M2.5),
+  holding each source frame for the output frames it covers; render,
+  the clip's keyed views through `StillRenderer` and the YUV pass into
+  the encoder's planes (D49); and encode and mux on the job's thread,
+  which owns the writer and encodes the audio between frames. The frame
+  plan is exact: `ceil(length × rate)` frames at `in + n/rate`, each
+  showing the last source frame at or before its time, so 29.97 fps
+  and VFR sources export at the sequence's rate. A frame the decoder
+  can't give, or one it concealed, fails the export with its time.
+- **Presets** are section 8.1's table: 12 flat sizes (four aspects at
+  1080, 1440 and 2160) and 3 spheres, the bitrate scaled by rate/30,
+  by 0.7 for HEVC and 0.6 for AV1, and by the aspect's pixels. No
+  preset needed more bits: every parity floor below is far above PLAN's.
+- **Software encoders**: libx264 CRF 18/21/24 at `medium`, libx265
+  20/23/26 at `fast`, libsvtav1 28/32/36 at preset 8, by quality. VBV
+  `maxrate` is 1.5× the preset's bitrate and `bufsize` 2 s of `maxrate`,
+  without which x264 and x265 ignore the cap (amendment 2 item 24).
+  Both write how they were set into their streams, and a test reads
+  `vbv_maxrate`/`vbv_bufsize` (x264) and `vbv-maxrate`/`vbv-bufsize`
+  (x265) there at the preset's values, which a cap without a buffer
+  doesn't give, and holds the file to the estimate below. The synthetic
+  clips don't reach the cap at CRF (a noisy grid at 1:1 1080 High made
+  9.4 Mb/s under x264's 10.8 and 2.3 under x265's 7.6), so the size
+  half is a bound, not a measure of the cap; the stream's own record is
+  what fails without the buffer (with `bufsize` taken out, the test
+  fails at x264's). A
+  keyframe every second (the rate's whole frames), closed GOPs
+  (`open-gop=0` for x264 and x265, `irefresh-type=2` for SVT-AV1).
+  A 10-bit source exports 10-bit (I010) in HEVC and AV1 and 8-bit in
+  H.264, or 8-bit when the job asks. BT.709 limited range with left
+  chroma siting, tagged.
+- **The MP4** (updates D4). FFmpeg's mov muxer writes the temporary
+  file with `+negative_cts_offsets`, so the video's composition times
+  need no edit, and the movie timescale is the audio's rate (48 kHz, or
+  a copy's own) so that an audio edit can end on a sample (item 7).
+  Then one last pass of our own (`inject::rewrite_into` with `Finish`)
+  writes the finished file beside it: `st3d` (mono) and `sv3d` (the
+  whole sphere, equirect, pose 0) on the video entry and `SA3D` on
+  ambiX audio for a 360 export; the Spherical Video V1 `uuid` beside
+  V2 (item 8); the video's one identity edit removed, so its first
+  frame is at 0 with no edit list; and the moov first with every chunk
+  offset moved with its data, as faststart would. The pass reports its
+  bytes as progress and stops on cancel. The muxer's file is removed
+  once the finished one is whole.
+- **Audio** (section 8.5): the clip's first audio stream, or its ambiX
+  one. **Copy** takes AAC from the packet before the trim's first
+  sample (AAC's windows overlap by a packet), stamped from the trim's
+  start so the first come before 0, and the muxer's `elst` skips to the
+  first sample exactly; the last packet's duration is cut to end on the
+  trim's end, where the muxer's edit then ends. So no `elst` patch is
+  needed, unlike the plan's: the end is exact on 6.1 too. PCM is cut at
+  the exact samples with no edit. Anything else (Opus, a stream whose
+  ticks aren't its samples, ambiX in a flat export) is encoded again
+  with a warning. PCM ambiX can't be copied into a 360 MP4, as YouTube
+  takes PCM spatial audio only in a MOV: the export refuses Copy with
+  that reason and asks for AAC, and the export window will offer AAC
+  for such a source (item 27, M2.6). **AAC** decodes at 48 kHz
+  and encodes at 256 kb/s stereo, or 384 kb/s for four channels of
+  ambiX labelled `4.0` without intensity stereo or noise substitution
+  (D17). A flat export hears ambiX as media's stereo decode does.
+  **None** writes no track.
+- **The output** (D16 as updated in M2.4): the temporary files hold a
+  lock and the next export sweeps a killed one's. Before it starts, the
+  export refuses (`NoSpace`, with both numbers) a folder with less free
+  space (`statvfs`) than two copies of the estimate, since the muxer's
+  file and the finished one are both on the disk until the first is
+  removed (item 28). The estimate (`EncoderSetup::estimate`) is the
+  video at `maxrate` and one `bufsize` beyond it, a tenth more for the
+  container, and the audio. The plan counted `maxrate` × the duration
+  × 1.1 alone, but an encoder may start with its VBV buffer full and
+  spend it, so a short export could pass that by up to two seconds of
+  the cap. A filesystem without `statvfs` gets a warning.
+- **Checks before the file is put in place** (section 9, item 53): the
+  finished temporary file is read back through media's probe, and the
+  export fails, leaving nothing, unless it is whole, its moov comes
+  before its media data, it has one video stream of the codec, size,
+  frame count, duration (within a frame) and rate asked for, the audio
+  planned (none, or the codec, rate and channels), and for 360 `st3d`
+  mono, `sv3d` of the whole sphere at pose 0, the V1 box (spherical,
+  stitched, equirectangular) and `SA3D` first-order ambiX on ambiX
+  audio; a flat export must have no spherical metadata. The `Report`
+  lists each check with what it found.
+- **Parity floors** (item 31, section 11): an export decoded again is
+  held to `StillRenderer` of the same views of the same source frame in
+  the encoder's planes, every frame, by luma PSNR and SSIM. Each floor
+  is the worst frame measured on lavapipe with FFmpeg 6.1 (libx264
+  0.164.3108, libx265 3.5, SVT-AV1 1.7.0) less 3 dB and 0.003:
+
+  | Export | Worst measured | Floor |
+  |---|---|---|
+  | flat 16:9 1080, libx264, 8-bit, 60 frames | 52.27 dB, 0.99811 | 49.0 dB, 0.995 |
+  | 360 3840, libx265, 10-bit, 15 frames | 58.83 dB, 0.99961 | 55.5 dB, 0.996 |
+  | flat 1:1 1080, libsvtav1, 8-bit, 15 frames | 50.06 dB, 0.99754 | 47.0 dB, 0.9945 |
+  | flat 1:1 1080, libsvtav1, 10-bit, 15 frames | 51.49 dB, 0.99888 | 48.5 dB, 0.9958 |
+
+  The views follow the moving marker and the frame counter, so both
+  controls fall far below every floor: the view turned 1° (best about
+  20 dB) and the frames shifted by one (best about 24 dB).
+- **The image metrics** (PSNR, SSIM, difference statistics) move from
+  testkit to `spherecut_render::compare`, so that agent can measure an
+  export (A2, item 32). render gains no dependency (D28).
+
+Not yet, and where it goes:
+
+- **ambiX isn't turned with the picture.** A 360 export whose output
+  orientation isn't the identity turns the video but not the sound
+  field, and says so in a warning. Turning first-order ambiX is a 3×3
+  rotation of its X, Y and Z channels; no slice has it yet, and PROGRESS
+  lists it as open.
+- **A full disk leaving no file** (section 11) is tested with M2.5's
+  `spherecut render`, through a small tmpfs or a fake writer; the
+  export's own error path (the temporary file removed on any error) is
+  the one the cancel test covers.
+- **Opus** (D17's revisit) stays out: it isn't copied, since how its
+  pre-skip and an edit list combine is unverified, and the encode is
+  AAC. D17 stands for M2.
+- The VA-API encoders, the order and fallback, and the 5.7K export bench
+  (item 52) are M2.5's.
+
+Why one last pass of our own rather than the muxer's faststart and a
+patch: faststart is a second pass anyway, and ours already has to write
+`sv3d` and `SA3D`, which the muxer can't; doing the V1 box, the video
+edit and the move in the same pass costs one copy of the file instead
+of two, and keeps the result checkable by the same parser (D4).
+
+Why the copy cuts its last packet rather than patching the `elst`: a
+packet whose duration ends on the trim's end gives the muxer's own edit
+that end in every FFmpeg we build against, so nothing writes into the
+muxer's boxes, and our decode (which applies an edit's end itself)
+reads the trim back to the sample.
 
 ## D53. The toolkit check: a timeline prototype behind a hidden flag, and its gates
 

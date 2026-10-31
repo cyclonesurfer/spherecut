@@ -1,7 +1,9 @@
-//! An export's refusals, its cancel, and its timing: what `Export::start`
-//! refuses before any work (M2 plan section 8.6), a cancel that leaves
-//! nothing behind, and a 29.97 fps export from mid-GOP whose frames are
-//! the source's at their own times.
+//! An export's refusals, its cancel, its timing and its size: what
+//! `Export::start` refuses before any work (M2 plan section 8.6), a
+//! cancel that leaves nothing behind, a 29.97 fps export from mid-GOP
+//! whose frames are the source's at their own times, and libx264 and
+//! libx265 under their cap, within the size estimate (amendment 2 item
+//! 24).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -12,9 +14,9 @@ use std::time::{Duration, Instant};
 use common::{
     Scratch, best, clip, frames, gpu, grid, held, measure, project, references, secs, worst,
 };
-use spherecut_core::project::{Aspect, Codec, EncoderChoice, Output, Range};
+use spherecut_core::project::{Aspect, Codec, EncoderChoice, Output, Quality, Range};
 use spherecut_core::time::{FrameRate, Time};
-use spherecut_export::{Export, ExportError, ExportJob, FramePlan};
+use spherecut_export::{EncoderSetup, Export, ExportError, ExportJob, FramePlan, Preset};
 use spherecut_render::YuvLayout;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self as synth, Audio, Spec};
@@ -162,4 +164,45 @@ fn a_29_97_export_from_mid_gop_shows_the_source_at_each_frames_time() {
     eprintln!("29.97: worst {psnr:.2} dB, SSIM {ssim:.5}; a frame on, best {off_psnr:.2} dB");
     assert!(psnr >= 40.0 && ssim >= 0.98, "{psnr:.2} dB, SSIM {ssim:.5}");
     assert!(off_psnr < psnr, "a frame on reaches {off_psnr:.2} dB");
+}
+
+#[test]
+fn libx264_and_libx265_run_under_the_cap_and_within_the_estimate() {
+    let src = grid("export-grid-h264-8", synth::Codec::H264, 8);
+    let scratch = Scratch::new("cap");
+    let square = Output::Flat {
+        aspect: Aspect::Square,
+        short_side: 1080,
+    };
+    let preset = Preset::of(&square).unwrap();
+    for (codec, keys) in [
+        (Codec::H264, ("vbv_maxrate", "vbv_bufsize")),
+        (Codec::Hevc, ("vbv-maxrate", "vbv-bufsize")),
+    ] {
+        let p = project(&src, first_second(), square, codec, 0.0);
+        let out = scratch.0.join(format!("{codec:?}.mp4"));
+        let r = common::export(&p, &out);
+        let setup = EncoderSetup::software(codec, Quality::High, preset, r.rate, false);
+        // The encoder writes how it was set into its stream; given a cap
+        // without a buffer, it names neither.
+        let said = format!(
+            "{}={} {}={}",
+            keys.0,
+            setup.maxrate / 1000,
+            keys.1,
+            setup.bufsize / 1000
+        );
+        let file = std::fs::read(&out).unwrap();
+        assert!(
+            file.windows(said.len()).any(|w| w == said.as_bytes()),
+            "{codec:?}: the stream doesn't say `{said}`"
+        );
+        let estimate = setup.estimate(0, r.duration);
+        eprintln!("{codec:?}: {} bytes, the estimate {estimate}", r.bytes);
+        assert!(
+            r.bytes <= estimate,
+            "{codec:?}: {} bytes, past the estimate of {estimate}",
+            r.bytes
+        );
+    }
 }

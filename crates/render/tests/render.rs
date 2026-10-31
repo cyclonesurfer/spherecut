@@ -20,6 +20,7 @@ use std::sync::{Mutex, OnceLock};
 
 use common::{Frame, Kind, color, frame, gpu};
 use spherecut_core::video::{ChromaSiting, Matrix, Range, Transfer};
+use spherecut_render::compare::{View, diff_stats, psnr};
 use spherecut_render::readback::{Texels, f16_to_f32, read_texture, round_f16};
 use spherecut_render::reference::{self, ImageF64};
 use spherecut_render::still::srgb_oetf;
@@ -30,7 +31,6 @@ use spherecut_render::{
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_synth::{Pattern, RgbImage, render_equirect};
-use spherecut_testkit::compare::{View, diff_stats, psnr};
 
 const OUT: (u32, u32) = (192, 128);
 

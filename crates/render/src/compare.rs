@@ -1,7 +1,9 @@
-//! Image metrics for the render tests (M1 plan, section 6): PSNR over
-//! RGB, SSIM on BT.709 luma, and a count of the pixels that differ by
-//! more than a threshold; and PSNR and SSIM of one plane, for the
-//! export's parity tests (M2 plan section 11).
+//! Image metrics (M1 plan, section 6): PSNR over RGB, SSIM on BT.709
+//! luma, and a count of the pixels that differ by more than a threshold,
+//! for the render tests; and PSNR and SSIM of one plane, for the
+//! export's parity tests (M2 plan section 11). Here rather than in
+//! testkit so that agent can measure an export too (A2, amendment 2 item
+//! 32).
 //!
 //! Every metric works in unit scale, samples in `[0, 1]`: 8-bit samples
 //! count as `v / 255`, 16-bit ones as `v / 65535`, floats as they are. So

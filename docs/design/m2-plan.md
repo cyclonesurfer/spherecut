@@ -361,6 +361,38 @@ as built, where it differs from section 7 and amendment 2's M2.3 items
   `blur_pan` measures 21 views. The old be38fa4 RX 7600 comparison
   skips the three equirect rows, which postdate it.
 
+**Amendment 5 (2026-10-31, slice M2.4's code).** The export as built,
+where it differs from section 8 and amendment 2's M2.4 items (D52
+records it):
+
+- **No `elst` patch.** Section 8.5 had `inject` patch the audio edit's
+  duration after muxing before FFmpeg 9.0. The copy cuts its last
+  packet's duration to end on the trim's end instead, and the muxer's
+  own edit then ends there in every FFmpeg we build against; nothing
+  writes into the muxer's boxes.
+- **One last pass, not faststart.** The muxer writes with
+  `+negative_cts_offsets` and no faststart; `inject::rewrite_into` with
+  `Finish` then adds the metadata (V2, `SA3D`, the V1 `uuid`), removes
+  the video's identity edit and moves the moov first in the same copy
+  (section 8.4 had faststart and a separate inject). The movie
+  timescale is the audio's rate, so that its edit ends on a sample.
+- **Decoding is software** in M2.4; section 8.2's choice of path comes
+  with M2.5's hardware encoders.
+- **The size estimate counts one VBV buffer**: (`maxrate` × the
+  duration + `bufsize`) × 1.1 plus the audio, since an encoder may start
+  with its buffer full and spend it. The free-space check asks for two.
+  Item 24's test reads x264's and x265's own record of their VBV
+  settings in the stream, since the synthetic clips don't reach the cap.
+- **Item 4's AV1 parity** runs at the smallest preset, 1:1 at 1080,
+  for half a second from each source (the export takes presets only).
+- **Item 32's metrics** are `spherecut_render::compare`.
+- **Item 27**: Copy of PCM ambiX into a 360 MP4 is refused with the
+  reason; offering AAC for such a source is the export window's (M2.6).
+- **ambiX isn't turned** with a 360 output's orientation; the export
+  warns. No slice has the rotation yet.
+- **The full-disk test** (section 11) moves to M2.5, with
+  `spherecut render`.
+
 ## 1. Summary
 
 M2 is the first version Pat can use for real: open one 360 clip, trim

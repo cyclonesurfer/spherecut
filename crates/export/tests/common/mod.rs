@@ -22,6 +22,7 @@ use spherecut_media::backend::{
     FfmpegBackend, MediaBackend, NextFrame, SeekMode, SeekOutcome, VideoDecode, VideoFrame,
     VideoRequest,
 };
+use spherecut_render::compare::{Plane, psnr_plane, ssim_plane};
 use spherecut_render::output::frame_views;
 use spherecut_render::{
     AdapterChoice, Filter, Gpu, Placement, StillOptions, StillRenderer, YuvImage, YuvLayout,
@@ -30,7 +31,6 @@ use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::Projection;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self as synth, Audio, Spec};
-use spherecut_testkit::compare::{Plane, psnr_plane, ssim_plane};
 
 pub fn gpu() -> &'static Gpu {
     static GPU: OnceLock<Gpu> = OnceLock::new();

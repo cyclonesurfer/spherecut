@@ -47,6 +47,7 @@ use spherecut_core::{FrameRate, StopToken};
 use spherecut_media::backend::{FfmpegBackend, MediaBackend, NextFrame, VideoRequest};
 use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 use spherecut_media::ff;
+use spherecut_render::compare::{View, psnr, ssim};
 use spherecut_render::reference;
 use spherecut_render::{Image, Pixels, ViewParams};
 use spherecut_sphere::orient::Ypr;
@@ -55,7 +56,6 @@ use spherecut_sphere::{LonLat, equirect, pixel};
 use spherecut_synth::media::{self, CLIP_COLOR, Codec, Spec};
 use spherecut_synth::yuv::{self, Chroma, YuvFormat};
 use spherecut_synth::{AXIS_MARKERS, Pattern, RgbImage, decode_frame_code, render_equirect};
-use spherecut_testkit::compare::{View, psnr, ssim};
 use spherecut_testkit::{Fnv64, fnv64};
 
 use document::document;

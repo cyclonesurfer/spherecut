@@ -4,7 +4,7 @@
 //! with left chroma siting (what the YUV pass writes).
 
 use spherecut_core::project::{Codec, Quality};
-use spherecut_core::time::{FrameRate, Rounding};
+use spherecut_core::time::{FrameRate, Rounding, Time};
 use spherecut_media::encode::{ColorTags, PixelLayout};
 use spherecut_render::yuv::YuvLayout;
 
@@ -103,6 +103,24 @@ impl EncoderSetup {
         }
     }
 
+    /// The most bytes a file of `duration` should take, with
+    /// `audio_bits` a second of audio (section 8.6, amendment 2 item
+    /// 24): the video at `maxrate` and one `bufsize` beyond it, since the
+    /// encoder may start with its buffer full and spend it, a tenth more
+    /// for the container, and the audio. The free-space check asks for
+    /// two of these.
+    pub fn estimate(&self, audio_bits: u64, duration: Time) -> u64 {
+        let secs = duration.as_rational();
+        let (num, den) = (
+            u128::try_from(secs.num()).unwrap_or(0),
+            u128::try_from(secs.den()).unwrap_or(1),
+        );
+        // In bits times `den`, so that nothing rounds until the end.
+        let video = (u128::from(self.maxrate) * num + u128::from(self.bufsize) * den) * 11 / 10;
+        let bits = video + u128::from(audio_bits) * num;
+        u64::try_from(bits.div_ceil(den * 8)).unwrap_or(u64::MAX)
+    }
+
     /// The option `key`'s value, if it is set.
     pub fn option(&self, key: &str) -> Option<&str> {
         self.options
@@ -115,6 +133,7 @@ impl EncoderSetup {
 #[cfg(test)]
 mod tests {
     use spherecut_core::project::Aspect;
+    use spherecut_core::time::Rational;
 
     use super::*;
 
@@ -175,6 +194,23 @@ mod tests {
         assert_eq!(keyint(FrameRate::FPS_29_97), 29);
         assert_eq!(keyint(FrameRate::FPS_23_976), 23);
         assert_eq!(keyint(FrameRate::FPS_60), 60);
+    }
+
+    #[test]
+    fn the_estimate_is_the_cap_and_a_buffer_with_a_tenth_more_and_the_audio() {
+        // 360-3840 in H.264 at High and 30 fps is 45 Mb/s: a cap of
+        // 67.5 Mb/s and a buffer of 135 Mb. For 10 s, (675 + 135) Mb with
+        // a tenth more is 891 Mb, and 256 kb/s of audio 2.56 Mb.
+        let sphere = Preset::Sphere { width: 3840 };
+        let s =
+            EncoderSetup::software(Codec::H264, Quality::High, sphere, FrameRate::FPS_30, false);
+        assert_eq!((s.maxrate, s.bufsize), (67_500_000, 135_000_000));
+        assert_eq!(s.estimate(256_000, Time::from_secs(10)), 111_695_000);
+        // A third of a second: (22.5 + 135) Mb with a tenth more, exactly.
+        let third = Time::seconds(Rational::new(1, 3).unwrap());
+        assert_eq!(s.estimate(0, third), 21_656_250);
+        // However short, a buffer's worth.
+        assert_eq!(s.estimate(0, Time::ZERO), 18_562_500);
     }
 
     #[test]

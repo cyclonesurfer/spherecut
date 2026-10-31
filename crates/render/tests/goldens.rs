@@ -71,6 +71,7 @@ use spherecut_core::video::{
     ChromaSiting, ColorInfo, Matrix, Range, SampleBytes, Transfer, VideoPlanes,
 };
 use spherecut_render::blur;
+use spherecut_render::compare::{DiffStats, View, diff_stats, psnr, ssim};
 use spherecut_render::readback::round_f16;
 use spherecut_render::reference::{self, ImageF64};
 use spherecut_render::{
@@ -82,7 +83,6 @@ use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_sphere::pixel;
 use spherecut_synth::{Pattern, RgbImage, render_equirect, render_view_ideal};
-use spherecut_testkit::compare::{DiffStats, View, diff_stats, psnr, ssim};
 use spherecut_testkit::{Fnv64, bench, tier2};
 
 /// Where the stored images and the manifest live.

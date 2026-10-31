@@ -6,7 +6,9 @@
 //!
 //! On lavapipe with the software encoders: flat through libx264 from an
 //! 8-bit source, every frame of 2 s; 360 through libx265 from a 10-bit
-//! one, every frame of half a second.
+//! one, every frame of half a second; and libsvtav1 at the smallest
+//! preset, 1:1 at 1080, from each source, every frame of half a second
+//! (amendment 2 item 4).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -89,11 +91,14 @@ fn parity(
 }
 
 /// The floors (D52): the worst frame measured on lavapipe with Ubuntu
-/// 24.04's FFmpeg 6.1, libx264 0.164.3108 and libx265 3.5, less 3 dB of
-/// PSNR and 0.003 of SSIM, so above PLAN's 40 dB and 0.98. Measured:
-/// flat 52.27 dB and 0.99811; 360 58.83 dB and 0.99961.
+/// 24.04's FFmpeg 6.1, libx264 0.164.3108, libx265 3.5 and SVT-AV1
+/// 1.7.0, less 3 dB of PSNR and 0.003 of SSIM, so above PLAN's 40 dB and
+/// 0.98. Measured: flat 52.27 dB and 0.99811; 360 58.83 dB and 0.99961;
+/// AV1 50.06 dB and 0.99754 in 8 bits, 51.49 dB and 0.99888 in 10.
 const FLAT_FLOORS: (f64, f64) = (49.0, 0.995);
 const SPHERE_FLOORS: (f64, f64) = (55.5, 0.996);
+const AV1_FLOORS: (f64, f64) = (47.0, 0.9945);
+const AV1_TEN_BIT_FLOORS: (f64, f64) = (48.5, 0.9958);
 
 #[test]
 fn a_flat_export_through_libx264_matches_the_reference() {
@@ -131,4 +136,39 @@ fn a_360_export_through_libx265_matches_the_reference_in_10_bits() {
     assert_eq!((r.frames, r.size, r.encoder), (15, (3840, 1920), "libx265"));
     assert!(r.ten_bit);
     assert_eq!(p.the_clip().source, trim);
+}
+
+/// Half a second of `src` through libsvtav1 at 1:1 1080, held to
+/// `floors`.
+fn av1(name: &str, src: &std::path::Path, yuv: YuvLayout, floors: (f64, f64)) -> Report {
+    let output = Output::Flat {
+        aspect: Aspect::Square,
+        short_side: 1080,
+    };
+    let trim = Range {
+        start: Time::ZERO,
+        end: secs(1, 2),
+    };
+    let p = project(src, trim, output, Codec::Av1, 0.0);
+    let turned = project(src, trim, output, Codec::Av1, 1.0);
+    let r = parity(name, &p, &turned, yuv, floors);
+    assert_eq!(
+        (r.frames, r.size, r.encoder),
+        (15, (1080, 1080), "libsvtav1")
+    );
+    r
+}
+
+#[test]
+fn a_flat_export_through_libsvtav1_matches_the_reference() {
+    let src = grid("parity-grid-h264-8", synth::Codec::H264, 8);
+    let r = av1("flat-svtav1-8", &src, YuvLayout::I420, AV1_FLOORS);
+    assert!(!r.ten_bit);
+}
+
+#[test]
+fn a_flat_export_through_libsvtav1_matches_the_reference_in_10_bits() {
+    let src = grid("parity-grid-hevc-10", synth::Codec::Hevc, 10);
+    let r = av1("flat-svtav1-10", &src, YuvLayout::I010, AV1_TEN_BIT_FLOORS);
+    assert!(r.ten_bit);
 }

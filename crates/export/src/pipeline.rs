@@ -149,11 +149,14 @@ pub(crate) fn run(
     let token = stop.current();
     let (audio_plan, audio_warnings) = audio::choose(&media.path, s.audio, &sequence.output)?;
     warnings.extend(audio_warnings);
-    let needed = needed(
-        setup.maxrate,
-        audio_plan.as_ref().map_or(0, audio::Plan::bits),
-        plan.duration(),
-    );
+    // The muxer's file and the finished one are both on the disk until
+    // the first is removed (section 8.6, amendment 2 item 28).
+    let needed = setup
+        .estimate(
+            audio_plan.as_ref().map_or(0, audio::Plan::bits),
+            plan.duration(),
+        )
+        .saturating_mul(2);
     warnings.extend(room(&folder, needed, free_space(&folder))?);
     let mut feed = match &audio_plan {
         None => None,
@@ -314,18 +317,6 @@ fn folder(output: &Path) -> Result<PathBuf, ExportError> {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
     })
-}
-
-/// The most bytes an export of `duration` needs on its folder's disk: the
-/// video at the preset's cap with a tenth more, and the audio, twice,
-/// since the muxer's file and the finished one are there together until
-/// the first is removed (section 8.6, amendment 2 item 28).
-fn needed(maxrate: u64, audio_bits: u64, duration: Time) -> u64 {
-    let rate = u128::from(maxrate) * 11 / 10 + u128::from(audio_bits);
-    let secs = duration.as_rational();
-    let bits = rate * u128::try_from(secs.num()).unwrap_or(0) * 2;
-    let bytes = bits.div_ceil(u128::try_from(secs.den()).unwrap_or(1) * 8);
-    u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
 /// Whether `folder`, with `free` bytes, has room for `needed`: a refusal
@@ -905,17 +896,6 @@ mod tests {
             end: Time::from_secs(1),
         };
         assert_eq!(held(&path, trim, FrameRate::FPS_30).unwrap().len(), 15);
-    }
-
-    #[test]
-    fn the_space_needed_is_two_copies_at_the_cap() {
-        // 60 Mb/s for 10 s with a tenth more is 82.5 MB, and 256 kb/s of
-        // audio 0.32 MB: twice their sum.
-        assert_eq!(
-            needed(60_000_000, 256_000, Time::from_secs(10)),
-            165_640_000
-        );
-        assert_eq!(needed(60_000_000, 0, Time::ZERO), 0);
     }
 
     #[test]

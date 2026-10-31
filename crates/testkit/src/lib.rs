@@ -12,15 +12,12 @@
 //! marker, which the hw-test report shows as "skipped" with the reason. A
 //! Tier 2 test therefore never passes on a machine that lacks what it needs.
 //!
-//! # Comparing images
+//! # Hashing
 //!
-//! [`compare`] has the render tests' metrics (PSNR, SSIM and a count of
-//! wrong pixels), and [`fnv64`] the hash the golden manifest identifies a
-//! source's planes by.
+//! [`fnv64`] is the hash the golden manifest identifies a source's planes
+//! by. The image metrics are render's (`spherecut_render::compare`).
 
 #![forbid(unsafe_code)]
-
-pub mod compare;
 
 /// FNV-1a, 64 bits, fed in pieces: the planes of a frame row by row, say,
 /// so that row padding doesn't change the hash.
