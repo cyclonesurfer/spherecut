@@ -7347,10 +7347,12 @@ What, as `crates/core/src/project/file.rs` does it:
   "seconds": 30.03}` and an orientation `{"quat": [x, y, z, w],
   "ypr_deg": [yaw, pitch, roll]}`. Only `exact` and `quat` are the
   values; the copies are for people, `jq` and agents. A copy that
-  disagrees with its value (more than 1 µs, or 0.001°) is refused with
-  where it is and which to edit, so a hand edit of one is never
-  silently dropped. `seconds` may be left out, and an orientation may be
-  given by `ypr_deg` alone (D33's convention builds it).
+  disagrees with its value (more than 1 µs at any time, or 0.001°) is
+  refused with where it is and which to edit, so a hand edit of one is
+  never silently dropped. `seconds` may be left out, and an orientation
+  may be given by `ypr_deg` alone (D33's convention builds it). A time
+  holds `exact` and `seconds` only: anything beside them is refused,
+  since the typed read would drop it unseen.
 - **Floats** are written shortest-exact and read with serde_json's
   `float_roundtrip` (turned on for the workspace), so every `f64` loads
   back bit for bit; a quaternion within 1e−12 of unit length is not
@@ -7362,7 +7364,12 @@ What, as `crates/core/src/project/file.rs` does it:
   lexically, without following links, so where a folder on the path is
   a symlink `..` can name another folder than the OS would. That is on
   purpose: a project folder moved or copied with its media keeps
-  working. A path that isn't UTF-8 can't be saved (`PathNotUtf8`).
+  working. A project's own paths are lexical already (adding media and
+  the untitled project make them so; `validate` refuses `.` or `..`),
+  so a save and a load give the same project. A project file reached
+  through a symlink is written where the link points, and its relative
+  paths are from that folder, on save and load alike. A path that isn't
+  UTF-8 can't be saved (`PathNotUtf8`).
 - **Media that moved or changed** doesn't stop a load: `media_status`
   says per file whether it is there, and whether its size and the
   FNV-1a 64 of its first MiB match the fingerprint taken when it was
@@ -7430,11 +7437,15 @@ What, as `crates/core/src/project/` has it:
   The project's fields are private: nothing else can change it.
 - **`validate`** holds the rules: ids unique and below the counter,
   references resolve, the trim inside the source with start before end,
-  keys in strictly increasing time inside the source, at least one key
-  a track and at most 10,000, a field of view from 10° to 360°, spin
-  only on orientation keys and at most 8 turns, aim keys at targets that
-  exist, names under 200 characters without control characters, rates
-  up to 240 fps, output sizes from section 8.1's list.
+  keys in strictly increasing time inside the source (in seconds as an
+  `f64` too, since the spline divides by the gap), at least one key a
+  track and at most 10,000, a field of view from 10° to 360°, spin only
+  on a view's orientation keys (not a target's) and at most 8 turns,
+  aim keys at targets that exist, names under 200 characters without
+  control characters (an untitled project's name, from a file name,
+  has them made spaces), rates up to 240 fps, output sizes from section
+  8.1's list, media paths without `.` or `..`, and the revision at most
+  2^53.
 - **`History`** keeps up to 1,000 steps, each with a label, an origin
   (`user` or `agent` by name), the edits and inverse, and the revisions
   before and after; undo and redo are new revisions. It serializes and
@@ -7620,9 +7631,11 @@ What, as `crates/sphere/src/spline.rs` and
   both Stop.
 - **Level** (the default): each key's yaw, pitch and roll (D33) are
   interpolated as numbers by the scalar spline; yaw takes the short way
-  plus the segment's whole turns, roll the short way, pitch as it is;
-  the view is `Ypr::to_quat` of the three. A pan between level keys
-  keeps the horizon level.
+  plus the segment's whole turns, roll the short way, pitch as it is,
+  clamped to ±90° (an aim key's rate beside a target falling from the
+  top could carry it past and tip the view over); the view is
+  `Ypr::to_quat` of the three. A pan between level keys keeps the
+  horizon level.
 - **Free**, per clip: Kim–Kim–Shin's cumulative cubic Hermite on SO(3),
   fed non-uniform Catmull–Rom angular velocities. The velocity is
   scaled by max(0, cos θ) of the angle between the chords, then capped
@@ -7636,11 +7649,19 @@ What, as `crates/sphere/src/spline.rs` and
   wherever a key's sides match, at any spacing. Linear–Linear is slerp
   and Stop–Stop slerp at smoothstep, exactly.
 - **Spin** is a signed count of whole turns on the segment after a key
-  (at most 8): Level adds 2πn to yaw's short way; Free adds 2πn along
-  the short rotation's axis (Y, the yaw axis, when the keys are equal).
-  −1 is the long way. `follow_spin` sets the spins a drag needs so that
+  (at most 8), one rule in both modes (`spline::spun`): spin n adds n
+  whole turns the way the short way goes, so a negative spin goes the
+  other way round and −1 is the long way. Level adds them to yaw's
+  short way; Free adds them about the short rotation's axis. With equal
+  ends (no short way) they turn right: Level's yaw increases, Free's
+  axis is −Y (D33's yaw to the right is a turn about −Y), so keys that
+  differ only in yaw turn the same in both modes and switching modes
+  keeps the way a spin goes. (Until M2.9 Level always added +2πn and
+  Free turned about +Y: a leftward segment's spin 1 went right in Level
+  and left in Free.) `follow_spin` sets the spins a drag needs so that
   carrying a key past 180° from its neighbour keeps the path going the
-  way it went.
+  way it went, in the curve editor and in the viewer alike (a drag on a
+  key, one undo step with its spins).
 - **Field of view** is the scalar spline on ln(degrees), so a zoom is
   nearly even in apparent size.
 - **Projection keys** hold a `LensShape` (D48): a projection, or a morph
@@ -7663,7 +7684,8 @@ Tests: `crates/sphere` unit and property tests of the splines (keys
 hit, Linear is slerp, Stop is smoothstep, monotone keys stay
 monotone); `crates/core/tests/view_eval.rs` (the horizon, ends and
 holds, spin, the zoom, the morph, keying a half-morphed view, targets
-and their pitch clamp, sticky spin, the 5 µs bound); and
+and their pitch clamp, Level's ±90° beside an aim key, spin the same
+way in both modes, sticky spin, the 5 µs bound); and
 `crates/core/tests/view_props.rs`, property tests at 100,000 cases
 before a merge, in both modes: keys hit within 1e−9 rad, no flips, C¹
 where sides match (second-order one-sided differences, within 1e−5 of
@@ -7935,8 +7957,12 @@ What, as `crates/export` does it:
   | 360 3840, libx265, 10-bit, 15 frames | 58.83 dB, 0.99961 | 55.5 dB, 0.996 |
   | flat 1:1 1080, libsvtav1, 8-bit, 15 frames | 50.06 dB, 0.99754 | 47.0 dB, 0.9945 |
   | flat 1:1 1080, libsvtav1, 10-bit, 15 frames | 51.49 dB, 0.99888 | 48.5 dB, 0.9958 |
+  | flat 16:9 1080 `--draft` (960 × 544), libx264, 8-bit, 15 frames | 51.33 dB, 0.99723 | 48.0 dB, 0.994 |
 
-  The views follow the moving marker and the frame counter, so both
+  The draft's row (M2.9) holds the whole picture at the draft's size:
+  until then a draft rendered the preset's full size and encoded its top
+  left quarter, and a picture of another size than the stream's is now
+  refused (`StridedPlanes.size`). The views follow the moving marker and the frame counter, so both
   controls fall far below every floor: the view turned 1° (best about
   20 dB) and the frames shifted by one (best about 24 dB).
 - **The image metrics** (PSNR, SSIM, difference statistics) move from
@@ -8003,15 +8029,19 @@ What, as `crates/export` does it:
   30 fps bitrate, not 2×: half again for twice the frames, as the
   encoders' own rate tables have it.
 - **`--draft`**: half the preset's size each side (rounded up to a
-  multiple of 8), the encoder's fastest setting (`ultrafast`, SVT-AV1's
-  12, Mesa's speed), and the bitrates scaled by the pixels.
+  multiple of 8), rendered at that size (`render::frame_views_at`), the
+  encoder's fastest setting (`ultrafast`, SVT-AV1's 12, Mesa's speed),
+  and the bitrates scaled by the pixels.
 - **Codes on every warning** (D27's list), and a write the disk refuses
   is `io_error`, the file's, never the encoder's (D51).
 - **Stage times.** The report's `stages` give each stage's busy time
   over the try that made the file: decode, render (the upload and the
   draw), readback (copying the planes back, timed after the GPU has
-  drawn them), encode (with the mux), and the last pass. They name the
-  slow stage when an export misses real time.
+  drawn them), encode (with the mux, and the video's flush at the end,
+  so a VA-API failure there on a file shorter than a GOP still hands
+  over to the next encoder), and the last pass (the audio's flush, the
+  MP4 pass and the checks). They name the slow stage when an export
+  misses real time.
 - **Tier 2** (`crates/export/tests/tier2_export.rs`, `cargo xtask
   hw-test`): every format doctor finds working on VA-API against its
   software twin and the parity reference on the same GPU, each decoding
@@ -8162,7 +8192,10 @@ in the project's folder, else the Files pane's, else the video's. A
 save that would replace a file asks "Replace it?". "Save changes?"
 comes before an open, a close or a quit with unsaved changes, with
 Save, Don't save (Quit without saving) and Cancel; Save saves first and
-then takes the step. A save finishing for a project since let go
+then takes the step. Asked while a save already runs, the step waits for
+it and, if the project changed since that save began, for a second save
+of the changes too (M2.9: it used to take the step after the first, the
+later edits unsaved). A save finishing for a project since let go
 changes nothing (a generation count).
 
 **The viewer shows the keyed view, framed.** For a flat output the
@@ -8177,7 +8210,9 @@ three looks, named in the overlay's `view` line:
 - *editing a key*: paused, the view moved; it becomes key edits, one
   "Reframe" undo step, when a drag ends or after 400 ms of rest for a
   scroll, a key or a switch. It edits the key at the playhead (within
-  half a frame) on each lane it changed, or a lane's only key;
+  half a frame) on each lane it changed, or a lane's only key, with the
+  spins that keep a turn past 180° going the way it went (D50's sticky
+  spin, as the curve editor's);
 - *look-around*: playing, or no key to take the change on some lane.
   The badge "Not keyed: Alt+K to key" shows in the frame's corner, and
   play, a seek, a step or a scrub goes back to the keys. Pausing keeps
@@ -8189,13 +8224,20 @@ output keeps M1's free look and isn't keyed from the viewer (M2.7's
 equirect preview and sphere overview are where it is).
 
 **The strip** replaces the scrub bar while a project is open: markers,
-the scrub bar with the in and out handles and the source past them
-dimmed, and a lane of diamonds for each of orientation, FOV and
+the scrub bar (as wide as the lanes' time scale, so a time has one x in
+both) with the in and out handles and the source past them dimmed, and
+a lane of diamonds for each of orientation, FOV and
 projection, with the playhead across all. A click on a key selects it
 (Shift or Ctrl toggles it in the selection) and seeks to it; a drag moves the selected keys,
 snapped to frames or with Shift to a marker or the playhead within 8
 points; right-click sets the ease (the six presets); Delete removes the
-selection, but a lane keeps its last key and a notice says so. Markers
+selection, but a lane keeps its last key and a notice says so.
+**Escape** during any drag (the picture, a key, a marker, a handle, and
+D55's curve dots and front) lets it go unkept, the view back where it
+was: egui ends a drag on Escape as it does on release, so each drag's
+end looks for it. A drag whose widget goes away under it (its key
+deleted or undone mid-drag) is let go of too, unkept, so nothing of it
+is left to move a key later or hold an export to the UI's pace. Markers
 move by drag, rename by double-click and are removed from their menu;
 `M` adds one at the playhead. The handles move in and out, in staying a
 frame before out. A drag draws where it goes and edits on release, one
@@ -8220,9 +8262,11 @@ the viewer draws the keys' view between keys, Edit ▸ Undo by its step's
 name and `Ctrl+Shift+Z` redo; a change off a key settles into a
 look-around with its badge and a step ends it, and playing makes any
 change one; a drag on a key is one "Reframe" step that undo takes back;
-a lane's only key takes a zoom anywhere; the strip's click, drag, ease
-menu, Delete, marker and in handle; save as, reopen with Don't save and
-with Save, and quit asking. The viewer's under-cursor tests run with a
+a lane's only key takes a zoom anywhere; a turn past half way round
+keeps its way; Escape lets a drag go unkept; the strip's click, drag,
+ease menu, Delete (of the key being dragged too), marker, in handle and
+its bar's time scale; save as, reopen with Don't save and with Save,
+quit asking, and Save from the quit prompt while a save runs. The viewer's under-cursor tests run with a
 360, a 16:9 and a 9:16 output.
 
 Why:
@@ -8320,11 +8364,14 @@ project's, else the home folder.
 Start runs the export on a clone of the project with the range set as
 its trim, so edits made while it runs don't reach it. Starting it looks
 at the output path and the render node, so it runs on a job too
-(`export-start`), and Cancel works while it starts. If the file is
-there, "Replace the file?" asks first. The window shows a progress bar
-with frames, fps and the time left, then the muxing's percent, with
-Cancel; Close leaves it running ("The export goes on"), and the window
-opens again on it. One runs at a time. When it ends, a notice of its
+(`export-start`), and Cancel works while it starts (it then ends as
+cancelled, without asking about a file there). If the file is there,
+"Replace the file?" asks first, and Replace exports the project as
+Start found it, not as it has been edited since. The window shows a
+progress bar with frames, fps and the time left, then the muxing's
+percent, with Cancel; Close leaves it running ("The export goes on"),
+and the window opens again on it, from `Ctrl+E` or File ▸ Export… even
+once the project is closed. One runs at a time. When it ends, a notice of its
 own kind says where the file is, how many frames over how long in how
 much time, with which encoder and any fallback, then the checks; a
 cancel or a failure says so and leaves no file (D52). Quitting while it
@@ -8360,13 +8407,16 @@ their runs.
 **Tests** (`crates/app/tests/reframe2.rs`, lavapipe, the UI thread
 marked): a curve drag moves only that key's yaw, previewed while it
 drags, one step that undo takes back; a click on the overview turns the
-view there; the Inspector adds a target where the view looks; an
-export from the window, with the loop playing, reaches its last frame
-and its notice while every UI step stays under 1 s, then Replace
-replaces the file and Cancel leaves the old one; the overview turns a
-360 output's front and the equirect preview draws it. The smoke
-driver's test exports while it plays. The Inspector's, curves' and
-overview's helpers have unit tests in their modules.
+view there; the Inspector adds a target where the view looks, in the
+direction it looks; an export from the window, with the loop playing,
+reaches its last frame and its notice while every UI step stays under
+1 s and frames wait for the UI's passes, then Replace replaces the file
+with what Start was given, Cancel leaves the old one, a Cancel while it
+starts doesn't ask, and the window opens on a running export after the
+project closes; the overview turns a 360 output's front and the
+equirect preview draws it (the view drawn is the equirect one, 2:1).
+The smoke driver's test exports while it plays. The Inspector's,
+curves' and overview's helpers have unit tests in their modules.
 
 Why:
 - **A preview held apart from the project** rather than an edit per

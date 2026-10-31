@@ -23,8 +23,13 @@ in progress. What works today:
 - Reframing (M2, under way): opening a video makes a project of it. The
   viewer shows the output's frame, and moving the view on a key edits
   it; Alt+K keys the view, I and O set the trim, and the strip under
-  the picture moves keys, markers and the trim. File saves and reopens
-  `.spherecut` projects, and Edit undoes and redoes every change.
+  the picture moves keys, markers and the trim (Escape lets a drag go).
+  The Curves tab draws and drags yaw, pitch, roll, FOV and the
+  projection over time, Sphere shows where the camera points, and the
+  Inspector edits the numbers and the look-at targets. File ▸ Export…
+  (Ctrl+E) exports flat or 360 in the background while you work. File
+  saves and reopens `.spherecut` projects, and Edit undoes and redoes
+  every change.
 
 - `spherecut probe <file>...` shows what an MP4/MOV or Matroska/WebM file
   is: container, streams, codecs, colour, exact frame rates and

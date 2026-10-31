@@ -692,7 +692,8 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   bytes). `Blur` adds each of a frame's views into a `vec4<f32>`
   storage buffer and writes the mean back into the target.
   `output::frame_views` gives an output's size and a frame's views from
-  `ViewAnim::at` (the shutter's, with blur); `StillRenderer::
+  `ViewAnim::at` (the shutter's, with blur), and `frame_views_at` the
+  same at another size (a draft's); `StillRenderer::
   render_blurred` and `render_yuv` render them, and so does the export
   (M2.4), so the parity reference and the export render one frame.
 * **`reference`** is the same projection in f64 on the CPU, with the
@@ -729,7 +730,8 @@ second starts the video again in software from frame 0, and the
 decode is VA-API on the same node going on in software (D3), and the
 report says where frames were decoded. Each stage adds its busy time to
 an atomic counter as it goes (`StageTimes`: decode, render, readback,
-encode, and the last pass), so a slow export names its slow stage.
+encode with the video's flush, and the last pass), so a slow export
+names its slow stage.
 `spherecut render` drives this handle from the command line (D51), and
 `spherecut frame --project` renders a sequence's frame through the same
 `frame_views` the render stage uses.
@@ -844,7 +846,11 @@ UI's acquire and its present.
   polls the `Export` each frame (`export_tick`) and asks for a repaint
   every 100 ms while it runs; at exit a running export is cancelled and
   dropped on its own thread (`export-stop`), which `run` joins with the
-  jobs.
+  jobs. A drag's end checks for Escape (`app::escaped`), which lets it
+  go unkept; after the panes have drawn, `let_go_of_lost_drags` ends any
+  drag egui no longer has (its widget gone mid-drag). A viewer drag on
+  a key keeps its turn's way with `Doc::follow_look`, the viewer's
+  sticky spin, as the curve editor does.
 * **Shutdown.** `on_exit` tells the player's threads to stop and leaves
   the player and the jobs' threads (`jobs::Threads`, which also holds
   those of jobs given up for newer ones) for `run`, which joins them
