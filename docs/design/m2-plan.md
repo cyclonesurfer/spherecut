@@ -508,6 +508,26 @@ records it):
   spin; a target is keyed where the view looks ("Key here"), so a
   moving target is keyed as the view is.
 
+**Amendment 9 (2026-10-31, slice M2.8's code).** Item 22's measurement
+needed a way to make the heaviest export frames from the app on odin.
+Motion blur samples only a moving flat view (a 360 output's view is
+its front, which keys don't move), so "8K with blur" is two cases:
+
+- **The smoke run's export takes a preset and motion blur**
+  (`--smoke-export-preset NAME`, `--smoke-export-blur`), set as edits on
+  the untitled project before it starts; with blur it also keys a pan
+  of 90° in yaw over the span, at an even speed, for the blur to
+  sample. The document gives the export's size, stage times and
+  capped-blur count.
+- **gui_smoke's first three runs export** their clip's first 2 s while
+  it plays: the project's 16:9 1080, a `360-7680` (the largest frame),
+  and a `flat-16x9-2160` with blur over the pan (the most renders a
+  frame), each judged by the run's gates over the time it ran. That is
+  item 22's measurement; a miss is M2.8's finding, to answer with a
+  smaller unit of work than a frame or a second queue.
+- **hw-test's GUI section** shows each export under its run: what it
+  made, the stages, the pace's waits and the UI while it ran.
+
 ## 1. Summary
 
 M2 is the first version Pat can use for real: open one 360 clip, trim

@@ -162,6 +162,9 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
                         ""
                     }
                 );
+                if let Some(e) = export(&res["export"]) {
+                    let _ = writeln!(r, "{e}\n");
+                }
             }
             None => {
                 let why = doc
@@ -471,6 +474,72 @@ fn gate(g: &Value) -> String {
     )
 }
 
+/// The export a run made while it played (`--smoke-export`, M2.7): what
+/// it made, how long each stage was busy, how often it waited for the
+/// UI, and the UI over the time it ran. None for a run without one.
+fn export(e: &Value) -> Option<String> {
+    if !e.is_object() {
+        return None;
+    }
+    let what = format!(
+        "{}{}",
+        e["preset"].as_str().unwrap_or("the project's output"),
+        if e["motion_blur"] == true {
+            ", with motion blur"
+        } else {
+            ""
+        }
+    );
+    if e["ok"] != true {
+        return Some(format!(
+            "The export while it played ({what}) failed: {}.",
+            e["error"].as_str().unwrap_or("no reason given")
+        ));
+    }
+    let stages = e["stages_s"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some(format!("{k} {:.1} s", v.as_f64()?)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let w = &e["while_running"];
+    let ui = if w.is_object() {
+        format!(
+            "; while it ran {:.0}% of the UI frames were presented, UI p50 / p99 {} / {} ms, \
+             {} frames shown and {} dropped",
+            w["ui"]["presented"].as_f64().unwrap_or(0.0) * 100.0,
+            ms(&w["ui"]["p50"]),
+            ms(&w["ui"]["p99"]),
+            w["frames"]["shown"],
+            w["frames"]["dropped"]
+        )
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "The export while it played ({what}): {} frames at {} in {:.1} s with {}{}; busy {}; \
+         {} frames waited for a UI pass, the longest {} ms{ui}.",
+        e["frames"],
+        size(&e["size"]),
+        e["elapsed_s"].as_f64().unwrap_or(0.0),
+        e["encoder"].as_str().unwrap_or("?"),
+        e["fallback"]
+            .as_str()
+            .map(|f| format!(" (not {f})"))
+            .unwrap_or_default(),
+        if stages.is_empty() {
+            "-".into()
+        } else {
+            stages
+        },
+        e["held"],
+        ms(&e["longest_hold_ms"])
+    ))
+}
+
 /// "decode 4.1 / 6.0 ms, upload_cpu ..." for the stages with samples:
 /// p50 and p95.
 fn stages(v: &Value) -> String {
@@ -507,7 +576,7 @@ mod tests {
         let s = Scratch(std::env::temp_dir().join(format!("xtask-gui-{}", std::process::id())));
         let dir = s.0.join("hw-gui");
         std::fs::create_dir_all(&dir).unwrap();
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "schema": "spherecut.smoke/1", "ok": true, "warnings": [],
             "result": {
                 "adapter": {"name": "AMD Radeon RX 7600 (RADV NAVI33)", "driver": "radv", "driver_info": "Mesa 26.2.5"},
@@ -531,6 +600,16 @@ mod tests {
                 ],
                 "submit_gate": {"waits": 412, "longest_ms": 2.06},
             }
+        });
+        doc["result"]["export"] = serde_json::json!({
+            "output": "/o/gui-0-export.mp4", "preset": "360-7680", "motion_blur": true,
+            "ok": true, "error": null, "frames": 60, "size": [7680, 3840],
+            "encoder": "hevc_vaapi", "fallback": null, "elapsed_s": 12.34,
+            "stages_s": {"decode": 1.0, "encode": 3.31, "finish": 0.5, "readback": 2.0, "render": 9.0},
+            "blur_capped": 0, "held": 58, "longest_hold_ms": 17.31,
+            "while_running": {"from_s": 1.2, "to_s": 13.5,
+                "ui": {"presented": 0.95, "p50": 16.7, "p99": 24.5},
+                "frames": {"shown": 360, "dropped": 2, "decode_dropped": 0}},
         });
         std::fs::write(dir.join("gui-0.json"), doc.to_string()).unwrap();
         std::fs::write(dir.join("gui-0.png"), b"png").unwrap();
@@ -579,6 +658,19 @@ mod tests {
              back, the longest 2.1 ms; played 20.0 s."
         ));
         assert!(!md.contains("convert"));
+        assert!(md.contains(
+            "The export while it played (360-7680, with motion blur): 60 frames at 7680×3840 in \
+             12.3 s with hevc_vaapi; busy decode 1.0 s, encode 3.3 s, finish 0.5 s, readback 2.0 \
+             s, render 9.0 s; 58 frames waited for a UI pass, the longest 17.3 ms; while it ran \
+             95% of the UI frames were presented, UI p50 / p99 16.7 / 24.5 ms, 360 frames shown \
+             and 2 dropped."
+        ));
+        let failed = serde_json::json!({"preset": null, "ok": false, "error": "no encoder"});
+        assert_eq!(
+            export(&failed).unwrap(),
+            "The export while it played (the project's output) failed: no encoder."
+        );
+        assert_eq!(export(&Value::Null), None);
         assert!(md.contains("![noisy 5.7K 8-bit](odin-abc-gui-0.png)"));
         assert_eq!(
             std::fs::read(s.0.join("hw-reports").join("odin-abc-gui-0.png")).unwrap(),

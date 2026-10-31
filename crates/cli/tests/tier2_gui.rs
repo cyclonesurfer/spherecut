@@ -22,9 +22,13 @@
 //!   decodes its profile.
 //!
 //! The first run also exports the clip's first 2 s while it plays
-//! (`--smoke-export`, M2 plan section 11), and fails when the export
-//! does, or when the presented share, the drops or the UI's p99 over the
-//! time it ran miss the same gates.
+//! (`--smoke-export`, M2 plan section 11); the second exports them as an
+//! 8K 360 (`--smoke-export-preset 360-7680`), and the third as a 4K
+//! flat with motion blur over a pan (`--smoke-export-preset
+//! flat-16x9-2160 --smoke-export-blur`): amendment 2 item 22's
+//! measurement of the heaviest export frames while the viewer plays.
+//! Each fails when the export does, or when the presented share, the
+//! drops or the UI's p99 over the time it ran miss the same gates.
 //!
 //! A locked screen draws no window, so nothing runs while logind says
 //! the session is locked (`tier2::session_locked`): with the screen
@@ -274,7 +278,7 @@ fn smoke(
     clip: &Path,
     json: &Path,
     png: &Path,
-    export: Option<&Path>,
+    export: Option<&Export>,
 ) -> (Option<i32>, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
     cmd.arg("--smoke")
@@ -285,9 +289,22 @@ fn smoke(
         .arg("--smoke-screenshot")
         .arg(png);
     if let Some(e) = export {
-        cmd.arg("--smoke-export").arg(e);
+        cmd.arg("--smoke-export").arg(&e.path);
+        if let Some(p) = e.preset {
+            cmd.args(["--smoke-export-preset", p]);
+        }
+        if e.blur {
+            cmd.arg("--smoke-export-blur");
+        }
     }
     window(session, cmd)
+}
+
+/// A run's export while it plays.
+struct Export {
+    path: PathBuf,
+    preset: Option<&'static str>,
+    blur: bool,
 }
 
 /// `cmd`'s window in `session`, killed if it hangs: its exit code and
@@ -429,12 +446,21 @@ fn gui_smoke() {
     for (n, clip) in clips.iter().enumerate() {
         let json = out.join(format!("gui-{n}.json"));
         let png = out.join(format!("gui-{n}.png"));
-        // The first run exports 2 s while it plays (M2 plan section 11).
-        let export = (n == 0).then(|| out.join(format!("gui-{n}-export.mp4")));
+        // The first run exports 2 s while it plays (M2 plan section 11),
+        // the second an 8K 360 and the third a 4K flat with blur
+        // (amendment 2 item 22).
+        let path = out.join(format!("gui-{n}-export.mp4"));
+        let export = match n {
+            0 => Some((None, false)),
+            1 => Some((Some("360-7680"), false)),
+            2 => Some((Some("flat-16x9-2160"), true)),
+            _ => None,
+        }
+        .map(|(preset, blur)| Export { path, preset, blur });
         let _ = std::fs::remove_file(&json);
         let _ = std::fs::remove_file(&png);
         if let Some(e) = &export {
-            let _ = std::fs::remove_file(e);
+            let _ = std::fs::remove_file(&e.path);
         }
         eprintln!("==> {}: {}", clip.label, clip.path.display());
         if tier2::session_locked() == Some(true) {
@@ -450,7 +476,7 @@ fn gui_smoke() {
             }));
             continue;
         }
-        let (status, stderr) = smoke(&session, &clip.path, &json, &png, export.as_deref());
+        let (status, stderr) = smoke(&session, &clip.path, &json, &png, export.as_ref());
         let doc = std::fs::read(&json)
             .ok()
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok());

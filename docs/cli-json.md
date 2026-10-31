@@ -876,7 +876,13 @@ window's own path: the export renders while the clip plays on, held to
 one frame a UI pass. The run then waits for the export to end before
 writing its document, and cancels it 60 s past `--smoke-seconds`. An
 export that fails or is cancelled doesn't fail the run: the document's
-`export` says so, and `gui_smoke` judges it.
+`export` says so, and `gui_smoke` judges it. `--smoke-export-preset
+<NAME>` (a name as `render --preset` takes it, such as `360-7680`)
+sets the project's output first, and `--smoke-export-blur` turns motion
+blur on and keys a pan of 90° in yaw over the 2 s for it to sample, as
+`gui_smoke`'s second and third runs do to measure the heaviest export
+frames while the viewer plays (an 8K 360, and a 4K flat with blur; M2
+plan amendment 2 item 22).
 
 A window the compositor doesn't draw (a locked or blanked screen, a
 minimized window, another virtual terminal) has no UI passes, and the
@@ -908,7 +914,7 @@ and no `path` in its `error`. Its `result`:
 | `blocked_on_ui_thread` | Blocking calls on the UI thread: 0 unless something is wrong |
 | `submit_gate` | What the submit gate (DECISIONS D41) held back since the device was made: `waits`, the submissions from other threads (decodes, copies, uploads) that waited for the UI's present, and `longest_ms`, the longest wait |
 | `screenshot`, `screenshot_size` | Where the PNG went and its size, or `null` when none was asked for or it couldn't be taken (a warning says why) |
-| `export` | With `--smoke-export`: `output`, `ok` (the file whole and checked), `error` (or `null`), `frames`, `encoder`, `fallback` (the hardware encoder not used and why, or `null`), `elapsed_s`, `held` and `longest_hold_ms` (frames the export held for a UI pass, and the longest hold), and `while_running`: `settled`'s numbers over the time the export ran (`null` if it never started). `null` without the flag |
+| `export` | With `--smoke-export`: `output`, `preset` (the one asked for, or `null` for the project's) and `motion_blur`, `ok` (the file whole and checked), `error` (or `null`), `frames`, `size` (`[width, height]`), `encoder`, `fallback` (the hardware encoder not used and why, or `null`), `elapsed_s`, `stages_s` (each stage's busy time in seconds: `decode`, `render`, `readback`, `encode`, `finish`), `blur_capped` (frames whose blur was capped, D49), `held` and `longest_hold_ms` (frames the export held for a UI pass, and the longest hold), and `while_running`: `settled`'s numbers over the time the export ran (`null` if it never started). `null` without the flag |
 
 ## `spherecut --timeline-proto [--proto-out <JSON>]` (hidden; hw-test's)
 
