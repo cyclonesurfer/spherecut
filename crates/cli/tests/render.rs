@@ -6,6 +6,11 @@
 //! offline, a range with no frames, VA-API without a device, Ctrl+C, and
 //! a disk that stops taking the file part way.
 //!
+//! **`frame --project`** (amendment 2 item 5) renders the sequence's
+//! frame as the export does, so the parity sample runs through the CLI:
+//! its PNG's luma against the exported file's decoded frame, and the
+//! frame before it as the control.
+//!
 //! **The full disk** is a tmpfs of the test's own, in a user and mount
 //! namespace, filled by another writer once the render has started (past
 //! its free-space check), where the box lets a user mount one; the
@@ -17,7 +22,7 @@
 // Test helpers outside #[test] functions; panicking is the point here.
 #![allow(clippy::unwrap_used)]
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -29,14 +34,22 @@ use spherecut_cli::contract::{
     RenderProgress, RenderResult, RenderStages, RenderStart, Size, TimeRange,
 };
 use spherecut_core::FrameRate;
+use spherecut_core::StopToken;
 use spherecut_core::project::file::{self, head_hash};
 use spherecut_core::project::{
-    Aspect, AudioChoice, Codec, Edit, EncoderChoice, ExportSettings, Fingerprint, InitialView,
-    Media, MediaId, MediaVideo, Orientation, Output, Project, Quality,
+    AnyKeys, Aspect, AudioChoice, Codec, Ease, Edit, EncoderChoice, ExportSettings, Fingerprint,
+    InitialView, Key, KeyId, Media, MediaId, MediaVideo, Orient, Orientation, Output, Project,
+    Quality,
 };
-use spherecut_core::time::Time;
-use spherecut_media::backend::{FfmpegBackend, MediaBackend, VideoRequest};
+use spherecut_core::time::{Rational, Time};
+use spherecut_core::video::VideoPlanes;
+use spherecut_media::backend::{
+    FfmpegBackend, MediaBackend, NextFrame, SeekMode, SeekOutcome, VideoRequest,
+};
 use spherecut_media::hw::DEFAULT_RENDER_NODE;
+use spherecut_render::compare::{Plane, psnr_plane, ssim_plane};
+use spherecut_render::{Image, Pixels};
+use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::Projection;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self as synth, Spec};
@@ -807,4 +820,308 @@ exit $status"#;
     assert_eq!(e["path"], out.to_str().unwrap());
     let left = std::fs::read_to_string(dir.join("disk.left")).unwrap();
     assert_eq!(left.lines().collect::<Vec<_>>(), ["filler"]);
+}
+
+// ---------------------------------------------------------------------
+// frame --project
+
+/// `project`'s sequence panning right at 100° a second from yaw 0, 10°
+/// down, at the high preset: each frame's view is 3.3° on from the
+/// last, so neighbours differ.
+fn panning(project: &Path) {
+    let mut p = file::load(project).unwrap();
+    let (sequence, clip) = (p.the_sequence().id, p.the_clip().id);
+    let export = p.the_sequence().export;
+    let key = |ms: i64| Key {
+        id: KeyId::NEW,
+        at: Time::seconds(Rational::new(ms, 1000).unwrap()),
+        value: Orient::View(
+            Orientation::from_ypr(Ypr::from_degrees(ms as f64 / 10.0, -10.0, 0.0)).unwrap(),
+        ),
+        ease: Ease::LINEAR,
+        spin: 0,
+    };
+    p.apply(&[
+        Edit::SetKeys {
+            clip,
+            keys: AnyKeys::Orientation(vec![key(0), key(400)]),
+        },
+        Edit::SetExport {
+            sequence,
+            export: ExportSettings {
+                quality: Quality::High,
+                ..export
+            },
+        },
+    ])
+    .unwrap();
+    file::save(&p, project).unwrap();
+}
+
+/// What a `frame --json` run gave: its status and its one document.
+fn frame(args: &[&OsStr]) -> (Option<i32>, Value) {
+    let mut all: Vec<&OsStr> = vec!["frame".as_ref()];
+    all.extend_from_slice(args);
+    for (flag, value) in [("--adapter", "cpu"), ("--decoder", "software")] {
+        if !args.contains(&flag.as_ref()) {
+            all.extend([OsStr::new(flag), OsStr::new(value)]);
+        }
+    }
+    all.push("--json".as_ref());
+    let out = spherecut().args(&all).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("{e}: {stdout:?} / {}", String::from_utf8_lossy(&out.stderr)));
+    (out.status.code(), doc)
+}
+
+/// `frame --project P -o OUT ARGS`, which must write OUT: its result.
+fn still_of(project: &Path, out: &Path, args: &[&str]) -> Value {
+    let mut all: Vec<&OsStr> = vec![
+        "--project".as_ref(),
+        project.as_os_str(),
+        "-o".as_ref(),
+        out.as_os_str(),
+    ];
+    all.extend(args.iter().map(OsStr::new));
+    let (status, doc) = frame(&all);
+    assert_eq!(status, Some(0), "{doc}");
+    assert_eq!(doc["schema"], contract::FRAME);
+    doc["result"].clone()
+}
+
+/// The luma of an 8-bit PNG as the export's YUV pass makes it from the
+/// same display values (BT.709, limited range), in unit scale.
+fn png_luma(path: &Path) -> (usize, usize, Vec<f64>) {
+    let image = Image::from_png(&std::fs::read(path).unwrap()).unwrap();
+    let Pixels::Rgb8(rgb) = &image.pixels else {
+        panic!("an 8-bit PNG");
+    };
+    let luma = rgb
+        .chunks_exact(3)
+        .map(|c| {
+            let [r, g, b] = [c[0], c[1], c[2]].map(|v| f64::from(v) / 255.0);
+            (16.0 + 219.0 * (0.2126 * r + 0.7152 * g + 0.0722 * b)) / 255.0
+        })
+        .collect();
+    (image.width as usize, image.height as usize, luma)
+}
+
+/// The luma of every frame of the 8-bit `video`, in unit scale.
+fn video_luma(video: &Path) -> Vec<(usize, usize, Vec<f64>)> {
+    let mut dec = FfmpegBackend::new()
+        .open_video(video, &VideoRequest::default())
+        .unwrap();
+    let stop = StopToken::never();
+    let SeekOutcome::Frame { frame, .. } = dec.seek(Time::ZERO, SeekMode::Exact, &stop).unwrap()
+    else {
+        panic!("the seek stopped");
+    };
+    let mut frames = vec![frame];
+    while let NextFrame::Frame(f) = dec.next_frame(&stop).unwrap() {
+        frames.push(f);
+    }
+    frames
+        .iter()
+        .map(|f| {
+            let p = f.plane(0).unwrap();
+            let (w, h) = (p.width as usize, p.height as usize);
+            let luma = (0..h)
+                .flat_map(|y| p.bytes[y * p.stride..][..w].iter())
+                .map(|&v| f64::from(v) / 255.0)
+                .collect();
+            (w, h, luma)
+        })
+        .collect()
+}
+
+/// PSNR and SSIM of `a` against `b`.
+fn measure(a: &(usize, usize, Vec<f64>), b: &(usize, usize, Vec<f64>)) -> (f64, f64) {
+    assert_eq!((a.0, a.1), (b.0, b.1));
+    let (a, b) = (plane(a), plane(b));
+    (psnr_plane(a, b).unwrap(), ssim_plane(a, b).unwrap())
+}
+
+fn plane(p: &(usize, usize, Vec<f64>)) -> Plane<'_> {
+    Plane {
+        width: p.0,
+        height: p.1,
+        data: &p.2,
+    }
+}
+
+#[test]
+fn frame_project_is_the_exports_frame_before_its_encode() {
+    let dir = TempDir::new("still");
+    let src = clip(&dir, "grid", Pattern::Grid, 12);
+    let p = project(&dir, &src);
+    panning(&p);
+    let out = dir.join("out.mp4");
+    run(&p, &out, &["--json"]).ok();
+    let exported = video_luma(&out);
+    assert_eq!(exported.len(), 12);
+
+    let f7 = dir.join("f7.png");
+    let r = still_of(&p, &f7, &["--frame", "7"]);
+    assert_eq!(r["size"], json!({"width": 1920, "height": 1080}));
+    let shown = serde_json::to_value(FrameRate::FPS_30.frame_to_time(7).unwrap()).unwrap();
+    assert_eq!(
+        r["sequence"],
+        json!({
+            "project": p.to_str().unwrap(),
+            "frame": {"exact": shown["exact"], "seconds": shown["seconds"], "frame": 7},
+            "output": "flat",
+            "views": 1,
+            "capped": false,
+        })
+    );
+    assert_eq!(r["requested"]["frame"], 7);
+    // The source frame at 7/30 s, the clip being untrimmed at 30 fps.
+    assert_eq!(r["frame"]["time"]["frame"], 7);
+    // The keyed view at 7/30 s: 23.33° right, its FOV the frame's.
+    let view = &r["view"];
+    assert!(
+        (view["yaw"].as_f64().unwrap() - 70.0 / 3.0).abs() < 1e-5,
+        "{view}"
+    );
+    assert!(
+        (view["pitch"].as_f64().unwrap() + 10.0).abs() < 1e-5,
+        "{view}"
+    );
+    assert_eq!(
+        (&view["fov"], &view["projection"], &view["morph_to"]),
+        (&json!(90.0), &json!("rectilinear"), &json!(null))
+    );
+    assert!(
+        ["iso", "aniso"].contains(&r["filter"].as_str().unwrap()),
+        "{r}"
+    );
+
+    // The parity sample: the still is the exported frame before its
+    // encode, and the frame before isn't.
+    let (psnr, ssim) = measure(&png_luma(&f7), &exported[7]);
+    let f6 = dir.join("f6.png");
+    still_of(&p, &f6, &["--frame", "6"]);
+    let (control, _) = measure(&png_luma(&f6), &exported[7]);
+    eprintln!("frame 7: {psnr:.2} dB, SSIM {ssim:.5}; frame 6 against it: {control:.2} dB");
+    // Lavapipe and libx264 at the high preset measured 51.6 dB and
+    // 0.9974; the frame before, 18.4 dB.
+    assert!(
+        psnr >= 48.5 && ssim >= 0.994,
+        "{psnr:.2} dB, SSIM {ssim:.5}"
+    );
+    assert!(control < psnr - 12.0, "{control:.2} dB against {psnr:.2}");
+
+    // --time is sequence time, and shows the frame on screen then.
+    let t = dir.join("t.png");
+    let r = still_of(&p, &t, &["--time", "0.25"]);
+    assert_eq!(r["sequence"]["frame"]["frame"], 7);
+    assert_eq!(r["requested"], json!({"exact": "1/4", "seconds": 0.25}));
+    assert_eq!(std::fs::read(&t).unwrap(), std::fs::read(&f7).unwrap());
+
+    // The line for people says which frame of what.
+    let text = dir.join("text.png");
+    let o = spherecut()
+        .args([
+            "frame",
+            "--adapter",
+            "cpu",
+            "--decoder",
+            "software",
+            "--frame",
+            "7",
+        ])
+        .arg("--project")
+        .arg(&p)
+        .arg("-o")
+        .arg(&text)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0));
+    let line = String::from_utf8(o.stdout).unwrap();
+    let want = format!(
+        "wrote {}: 1920×1080 rectilinear 90° at 0.233 s of {} (its frame 7; the source's at \
+         0.233 s, frame 7, pts ",
+        text.display(),
+        p.display()
+    );
+    assert!(line.starts_with(&want), "{line}");
+
+    // With motion blur, the frame's views over the shutter.
+    let mut project = file::load(&p).unwrap();
+    let sequence = project.the_sequence();
+    let export = ExportSettings {
+        motion_blur: true,
+        ..sequence.export
+    };
+    let id = sequence.id;
+    project
+        .apply(&[Edit::SetExport {
+            sequence: id,
+            export,
+        }])
+        .unwrap();
+    file::save(&project, &p).unwrap();
+    let blurred = dir.join("blurred.png");
+    let r = still_of(&p, &blurred, &["--frame", "7"]);
+    let views = r["sequence"]["views"].as_u64().unwrap();
+    assert!(views > 1, "{r}");
+    assert_ne!(
+        std::fs::read(&blurred).unwrap(),
+        std::fs::read(&f7).unwrap()
+    );
+}
+
+#[test]
+fn frame_project_takes_the_view_from_the_project_and_no_frame_past_its_end() {
+    let dir = TempDir::new("still-flags");
+    let src = clip(&dir, "grid", Pattern::Grid, 12);
+    let p = project(&dir, &src);
+    let png = dir.join("x.png");
+    let with = |args: &[&str]| {
+        let mut all: Vec<&OsStr> = vec!["-o".as_ref(), png.as_os_str()];
+        all.extend(args.iter().map(OsStr::new));
+        frame(&all)
+    };
+    let failed = |(status, doc): (Option<i32>, Value), want: (i32, &str)| {
+        assert_eq!(
+            (status, doc["error"]["code"].as_str()),
+            (Some(want.0), Some(want.1)),
+            "{doc}"
+        );
+        assert_eq!(doc["schema"], contract::FRAME, "{doc}");
+        doc["error"]["message"].as_str().unwrap().to_string()
+    };
+    let project = p.to_str().unwrap();
+    let file = src.to_str().unwrap();
+    // The view is the project's, and so is the file.
+    for flags in [
+        &["--project", project, file][..],
+        &["--project", project, "--yaw", "10"],
+        &["--project", project, "--size", "64x64"],
+        &["--project", project, "--filter", "aniso"],
+        &["--project", project, "--reference"],
+        &[],
+    ] {
+        failed(with(flags), (2, "usage"));
+    }
+    // Twelve frames: 0 to 11, and the last ends at 0.4 s.
+    let m = failed(
+        with(&["--project", project, "--frame", "12"]),
+        (1, "out_of_range"),
+    );
+    assert_eq!(m, "no frame 12: the sequence's frames are 0 to 11");
+    let m = failed(
+        with(&["--project", project, "--time", "0.4"]),
+        (1, "out_of_range"),
+    );
+    assert_eq!(
+        m,
+        "no frame at 0.4 s: the sequence runs from 0 to 0.4 s (its last frame starts at 0.367 s)"
+    );
+    // An offline clip, as render says.
+    std::fs::remove_file(&src).unwrap();
+    failed(with(&["--project", project]), (1, "media_offline"));
+    assert!(!png.exists());
+    assert_eq!(temp_files(&dir), Vec::<String>::new());
 }

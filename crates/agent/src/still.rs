@@ -923,14 +923,15 @@ impl<'g> Still<'g> {
         }
     }
 
-    /// Step 8: `decoded` through `view` (or flat, as `look.draw` says),
+    /// Step 8: `decoded` through `views` (or flat, as `look.draw` says),
     /// `size` pixels large, on the GPU (one [`StillRenderer`] a still, so
     /// that its pipelines are made once) or the CPU reference, which
-    /// draws only through a view.
+    /// draws only through one view. Several views are a frame's over the
+    /// shutter, averaged for motion blur (`frame --project`).
     pub fn render(
         &mut self,
         decoded: &Decoded,
-        view: &ViewParams,
+        views: &[ViewParams],
         size: (u32, u32),
         look: Look,
     ) -> Result<Image, Failure> {
@@ -947,6 +948,12 @@ impl<'g> Still<'g> {
         };
         let frame = decoded.frame.as_ref();
         let Some(gpu) = self.gpu else {
+            let [view] = views else {
+                return Err(failure(
+                    codes::INTERNAL,
+                    "the CPU reference draws through one view, with no motion blur",
+                ));
+            };
             if look.draw != Draw::View {
                 return Err(failure(
                     codes::INTERNAL,
@@ -973,15 +980,15 @@ impl<'g> Still<'g> {
                 frame,
                 &copied.buffer,
                 &copied.planes,
-                view,
+                views,
                 size,
                 &opts,
             )
         } else if self.opts.zero_copy {
             let planes = import(gpu, &decoded.frame)?;
-            renderer.render_imported(gpu, frame, &planes, view, size, &opts)
+            renderer.render_imported(gpu, frame, &planes, views, size, &opts)
         } else {
-            renderer.render(gpu, frame, view, size, &opts)
+            renderer.render_blurred(gpu, frame, views, size, &opts)
         };
         image.map_err(render_error)
     }

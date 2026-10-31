@@ -578,7 +578,9 @@ adds:
 
 One frame of a stitched equirect, rendered through a virtual camera
 into a PNG (`spherecut frame --help` lists the options; the README shows
-them in use). Without `--json`, a run that wrote the frame prints one
+them in use); or with `--project <P>` instead of the file, the frame of
+the project's sequence at a time, as `spherecut render` renders it
+before its encode (below, and D51). Without `--json`, a run that wrote the frame prints one
 line on stdout (`wrote out.png: 1920×1080 rectilinear 100° at 0.4 s
 (frame 12, pts 12012), decoded on VA-API, rendered on ...`), and its
 warnings and errors go to stderr, as log lines and an `error:` line.
@@ -590,26 +592,40 @@ or the CPU reference with `--reference`; the decoder (`--decoder`, on
 the rendering GPU's render node, D39); an exact seek; the render; the
 PNG. Whatever fails first is the run's `error`, and nothing is written.
 
+**`--project`.** `--time` and `--frame` are then sequence time:
+`--time T` from the sequence's start, showing the frame on screen at T
+(the last that starts at or before it), and `--frame N` counting at the
+sequence's rate; at or past the sequence's end is `out_of_range`. The
+project and its clip load as `render` loads them, with the same codes
+(`media_offline`, and `media_changed` as a warning). The view, the size
+and the filter are the project's: the views the export renders the
+frame through (several over the shutter with motion blur), the
+sequence's output size, and the export's filter, `aniso` where the GPU
+has it. So `--yaw`, `--pitch`, `--roll`, `--fov`, `--projection`,
+`--morph-to`, `--morph`, `--size`, `--filter`, `--equirect`, `--stream`,
+`--reference` and a FILE are usage errors with it.
+
 `result`, only when the PNG was written:
 
 | Field | Type | What |
 |---|---|---|
 | `output` | string | The PNG written, as given to `-o` |
 | `frame` | object | The frame rendered: `pts` (integer, in ticks of the stream's time base) and `time` (a frame time, in clip time) |
-| `requested` | frame time | What `--time` or `--frame` asked for (0 when neither was given). With `--time`, a plain time; with `--frame N` (or `--time Nf`), `frame` is N, and the time is that frame's start on a constant-rate stream. `--time 0.5` shows the frame on screen at 0.5 s: the last one that starts at or before it, so `frame.time` may be earlier than `requested` |
+| `requested` | frame time | What `--time` or `--frame` asked for (0 when neither was given). With `--time`, a plain time; with `--frame N` (or `--time Nf`), `frame` is N, and the time is that frame's start on a constant-rate stream. `--time 0.5` shows the frame on screen at 0.5 s: the last one that starts at or before it, so `frame.time` may be earlier than `requested`. With `--project`, in sequence time, and `frame` is the source frame the sequence's frame shows |
 | `exactness` | string | `exact`: the frame is the one asked for. The only value in version 1; a seek that can't be exact fails the run instead |
-| `size` | object | `width`, `height`: the PNG's, as `--size` asked (16 to 16384 each, and within the GPU's texture limit) |
+| `size` | object | `width`, `height`: the PNG's, as `--size` asked (16 to 16384 each, and within the GPU's texture limit); with `--project`, the sequence's output size |
 | `depth` | integer | Bits per channel of the PNG: 8 or 16 (`--depth`) |
-| `view` | object | The virtual camera as given: `yaw` (degrees to the right), `pitch` (up), `roll` (clockwise as seen from behind the camera), `fov` (horizontal, degrees), `projection` (`rectilinear`, `fisheye` or `stereographic`), `morph_to` (one of those, or null) and `morph` (0 is `projection`, 1 is `morph_to`) |
-| `filter` | string | `iso` or `aniso`: the filter rendered with, `iso` where `--filter aniso` met a device without anisotropy (a warning says so) |
+| `view` | object | The virtual camera as given: `yaw` (degrees to the right), `pitch` (up), `roll` (clockwise as seen from behind the camera), `fov` (horizontal, degrees), `projection` (`rectilinear`, `fisheye` or `stereographic`), `morph_to` (one of those, or null) and `morph` (0 is `projection`, 1 is `morph_to`). With `--project`, the keyed camera at the frame's time, its `fov` the output frame's, to a millionth of a degree; for a 360 output, `projection` is `equirect`, `fov` 360, and the angles are the output's turn |
+| `filter` | string | `iso` or `aniso`: the filter rendered with, `iso` where `--filter aniso` met a device without anisotropy (a warning says so); with `--project`, the export's |
 | `renderer` | string | `gpu`, or `reference` for `--reference`'s CPU render |
 | `decode` | object | `path` (`software`, `vaapi` or `vulkan`: where the frame was decoded), `transfer` (how it left the decoder: `system`, decoded in system memory; `downloaded`, copied from the device; `drm_prime`, exported as DMA-BUFs and imported by the GPU; `vulkan`, decoded by Vulkan Video on the renderer's own device and copied out there; only `--zero-copy` asks for these two) and, when a hardware decode went on in software, `fallback`: `from` (`vaapi` or `vulkan`), `code` (`hw_unavailable`, no device; `hw_unsupported`, the device turned the stream down; `hw_failed`, it failed on a frame) and `reason` (for people). `--decoder auto` on a machine without a render node has `fallback` without trying the device |
 | `gpu` | object, or null | The adapter rendered on: `name`, `driver`, `driver_info` (strings, as Vulkan gives them), `device_type` (`discrete_gpu`, `integrated_gpu`, `virtual_gpu`, `cpu` for a software rasterizer such as lavapipe, or `other`). Null for `--reference` |
 | `color` | object | The colour the frame was decoded as: `codes` (the file's H.273 codes as FFmpeg numbers them: `primaries`, `transfer`, `matrix`, `range`, `chroma_location`, integers), and what the renderer used: `range` (`limited` or `full`), `matrix` (`bt709`, `bt601`, `bt2020_ncl`, `smpte240m`, `fcc` or `identity`), `transfer` (`sdr`, `pq`, `hlg` or `linear`), `primaries` (`bt709`, `bt2020` or `other`), `siting` (`left`, `center`, `top_left`, `top`, `bottom_left` or `bottom`), and `assumed`: for each of those five, whether a default rule chose it because the file left it unspecified (D30) |
-| `source` | object | The stream the frame came from: `stream` (FFmpeg's index; `--stream` picks one, the first video stream otherwise), `codec` (FFmpeg's name, such as `hevc`), `size` (`width`, `height`: the decoded picture, after the codec's cropping) and `pix_fmt` (the decoder's pixel format, as FFmpeg names it, such as `yuv420p10le`; a hardware decode names the format it downloads, such as `nv12` or `p010le`) |
+| `source` | object | The stream the frame came from: `stream` (FFmpeg's index; `--stream` picks one, the first video stream otherwise, and with `--project` the clip's), `codec` (FFmpeg's name, such as `hevc`), `size` (`width`, `height`: the decoded picture, after the codec's cropping) and `pix_fmt` (the decoder's pixel format, as FFmpeg names it, such as `yuv420p10le`; a hardware decode names the format it downloads, such as `nv12` or `p010le`) |
+| `sequence` | object, or null | With `--project`, the sequence's frame rendered: `project` (the file, as given), `frame` (a frame time in sequence time, with `frame` its index at the sequence's rate), `output` (`flat` or `equirect`), `views` (the views averaged over the shutter for motion blur: 1 without it) and `capped` (true when blur needed more than 64 views and has 64). Null without `--project` |
 
-Every field is there in every result; `morph_to` and `gpu` are the
-fields that may be null, and `fallback`, `frame.time.frame` and
+Every field is there in every result; `morph_to`, `gpu` and `sequence`
+are the fields that may be null, and `fallback`, `frame.time.frame` and
 `requested.frame` (there only for `--frame N` or `--time Nf`) the ones
 that may be absent.
 
@@ -668,7 +684,8 @@ line, shown here indented:
       "range": "limited", "matrix": "bt709", "transfer": "sdr", "primaries": "bt709", "siting": "center",
       "assumed": {"range": false, "matrix": false, "transfer": false, "primaries": false, "siting": false}
     },
-    "source": {"stream": 0, "codec": "hevc", "size": {"width": 1024, "height": 512}, "pix_fmt": "yuv420p10le"}
+    "source": {"stream": 0, "codec": "hevc", "size": {"width": 1024, "height": 512}, "pix_fmt": "yuv420p10le"},
+    "sequence": null
   },
   "warnings": []
 }

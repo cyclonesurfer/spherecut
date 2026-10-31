@@ -240,7 +240,7 @@ fn render(args: &RenderArgs, warnings: &mut Vec<Warning>) -> Result<RenderResult
 
     // Step 3.
     let mut project = file::load(&args.project).map_err(|e| project_error(&args.project, &e))?;
-    media(&project, warnings)?;
+    media(&project, "exporting", warnings)?;
 
     // Step 4.
     let range = changes(&mut project, args)?;
@@ -430,7 +430,8 @@ fn cancelled() -> Failure {
 }
 
 /// Step 3's error: the file's own code, D27's `io_error` for reading it.
-fn project_error(path: &Path, e: &FileError) -> Failure {
+/// `frame --project`'s too.
+pub(crate) fn project_error(path: &Path, e: &FileError) -> Failure {
     let code = match e.code() {
         "not_found" => "not_found",
         "io" => "io_error",
@@ -449,8 +450,13 @@ fn project_error(path: &Path, e: &FileError) -> Failure {
 }
 
 /// Step 3's look at the clip's media: an offline clip fails, a changed
-/// file is a warning (M2 plan section 5.3).
-fn media(project: &Project, warnings: &mut Vec<Warning>) -> Result<(), Failure> {
+/// file is a warning (M2 plan section 5.3) that says it is `doing`
+/// anyway: `exporting`, or `frame --project`'s `rendering`.
+pub(crate) fn media(
+    project: &Project,
+    doing: &str,
+    warnings: &mut Vec<Warning>,
+) -> Result<(), Failure> {
     let clip = project.the_clip();
     let status = file::media_status(project);
     let Some((m, status)) = project
@@ -478,7 +484,7 @@ fn media(project: &Project, warnings: &mut Vec<Warning>) -> Result<(), Failure> 
         )),
         MediaStatus::Changed(why) => {
             let message = format!(
-                "{} isn't the file the project added ({why}); exporting it anyway",
+                "{} isn't the file the project added ({why}); {doing} it anyway",
                 m.path.display()
             );
             tracing::warn!("{message}");

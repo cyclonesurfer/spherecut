@@ -277,8 +277,8 @@ impl StillRenderer {
         }
     }
 
-    /// [`render`](Self::render) of a frame whose planes are on the GPU
-    /// already, one texture a plane, as
+    /// [`render_blurred`](Self::render_blurred) of a frame whose planes
+    /// are on the GPU already, one texture a plane, as
     /// [`Uploader::upload_imported`](crate::Uploader::upload_imported)
     /// takes them: slice 5b's DMA-BUF imports. `frame` gives the layout,
     /// size and colour.
@@ -287,19 +287,19 @@ impl StillRenderer {
         gpu: &Gpu,
         frame: &dyn VideoPlanes,
         planes: &[wgpu::Texture],
-        view: &ViewParams,
+        views: &[ViewParams],
         size: (u32, u32),
         opts: &StillOptions,
     ) -> Result<Image, RenderError> {
         let want = Want::Image(opts.depth);
-        let (views, source) = (std::slice::from_ref(view), Source::Imported(planes));
+        let source = Source::Imported(planes);
         Ok(image(self.render_from(
             gpu, frame, source, views, size, opts, want,
         )?))
     }
 
-    /// [`render`](Self::render) of a frame whose shown planes are in a
-    /// GPU buffer, laid out as `planes` says, as
+    /// [`render_blurred`](Self::render_blurred) of a frame whose shown
+    /// planes are in a GPU buffer, laid out as `planes` says, as
     /// [`Uploader::upload_from_buffer`](crate::Uploader::upload_from_buffer)
     /// takes them: slice 5b's copies out of FFmpeg's Vulkan images.
     /// `frame` gives the layout, size and colour.
@@ -310,12 +310,12 @@ impl StillRenderer {
         frame: &dyn VideoPlanes,
         buffer: &wgpu::Buffer,
         planes: &[BufferPlane],
-        view: &ViewParams,
+        views: &[ViewParams],
         size: (u32, u32),
         opts: &StillOptions,
     ) -> Result<Image, RenderError> {
         let want = Want::Image(opts.depth);
-        let (views, source) = (std::slice::from_ref(view), Source::Buffer(buffer, planes));
+        let source = Source::Buffer(buffer, planes);
         Ok(image(self.render_from(
             gpu, frame, source, views, size, opts, want,
         )?))

@@ -1191,9 +1191,12 @@ fn frame_documents_have_the_envelope_too() {
         "gpu",
         "color",
         "source",
+        "sequence",
     ];
     assert!(has_keys(r, &fields), "{r}");
     assert_eq!(r["output"], out.to_str().unwrap());
+    // Only `--project` renders a sequence's frame.
+    assert_eq!(r["sequence"], Value::Null);
     assert!(has_keys(&r["frame"], &["pts", "time"]), "{r}");
     assert!(
         has_keys(&r["frame"]["time"], &["exact", "seconds", "frame"]),

@@ -337,6 +337,26 @@ pub struct FrameResult {
     /// The colour the frame was decoded as, with what was assumed.
     pub color: ColorInfo,
     pub source: SourceInfo,
+    /// With `--project`, the sequence's frame rendered; null otherwise.
+    pub sequence: Option<SequenceFrame>,
+}
+
+/// The frame of a project's sequence that `frame --project` rendered,
+/// as `spherecut render` renders it.
+#[derive(Debug, Clone, Serialize)]
+pub struct SequenceFrame {
+    /// The project file, as given.
+    pub project: String,
+    /// The frame, in sequence time from the sequence's start, with its
+    /// index at the sequence's rate.
+    pub frame: FrameTime,
+    /// The sequence's output: `flat` or `equirect`.
+    pub output: &'static str,
+    /// The views averaged over the shutter for motion blur: 1 without.
+    pub views: usize,
+    /// Motion blur needed more views than its cap, and rendered that
+    /// many.
+    pub capped: bool,
 }
 
 /// A frame of the stream: its own timestamp, and its clip time.

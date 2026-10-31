@@ -343,7 +343,8 @@ as built, where it differs from section 7 and amendment 2's M2.3 items
   and whether it capped), for the export and the parity reference
   alike; `StillRenderer::render_blurred` and `render_yuv` take views,
   not one view. Item 5's `StillRenderer` gains no output enum of its
-  own: the views and size say it. `frame --project` stays in M2.5.
+  own: the views and size say it. `frame --project` stays in M2.5
+  (done there: D51).
 - **The YUV buffer** is written a 32-bit word per invocation (4 8-bit
   or 2 16-bit samples), so widths must be multiples of 4 and heights
   even (`YuvShape::new` refuses others, `invalid_input`), and each

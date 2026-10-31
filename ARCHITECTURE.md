@@ -8,7 +8,7 @@ This describes the design as built, plus the planned parts marked
 ```
           app (eframe viewer; M1 slice 7)   cli (`spherecut` binary)   tests
                           \                |                    /
-                           +--------- export (planned) --------+
+                           +---- export (M2.4 and M2.5) -------+
                                       |
    playback (Player, decode workers, frame cache, GPU slots, presenter, the file's audio; M1 slices 5 and 6)
                      |                                    |
@@ -30,6 +30,11 @@ tests and `xtask`.
 core depends on sphere (since M2.1, D48), whose projections and
 quaternions the project model holds; sphere depends on neither.
 
+agent depends on export (since M2.5): the JSON contract it holds for
+the CLI lists the export's codes and turns its errors and fallbacks
+into `render`'s documents (D51), and A2's tools will drive the same
+job handle.
+
 render depends on core and sphere only, not on media: frames reach it
 through `core::video::VideoPlanes`, so the library has no FFmpeg
 dependency, and its tests, the goldens and M3's stitcher make the frames
@@ -50,10 +55,10 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); for export, equirect output, the output frame, the YUV pass for the encoders, motion blur and a frame's views from the clip's keys (`output`, D49); image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics), from testkit so that agent can use it (amendment 2 item 32); later scopes | M1 slices 3a and 3b; M2.3; M2.4: `compare` |
 | `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slices 5 and 6 |
 | `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
-| `spherecut-export` | The export (D52): `Export` runs an `ExportJob`, a project's sequence, on three threads (decode, render through the YUV pass, encode and mux) into a locked temporary file, then one last pass (V2, `SA3D`, the V1 box, the moov first) and section 9's read-back checks before it is put in place; the presets and their bitrates, the software encoders (libx264, libx265, libsvtav1) under a VBV cap, the size estimate and free-space check, audio copied (AAC and PCM cut to the sample), AAC or none; the job handle (progress, cancel, wait, the `Report`) that cli, the app and A2 drive | M2.4; the VA-API encoders, fallback and `render` in M2.5 |
+| `spherecut-export` | The export (D52): `Export` runs an `ExportJob`, a project's sequence, on three threads (decode, render through the YUV pass, encode and mux) into a locked temporary file, then one last pass (V2, `SA3D`, the V1 box, the moov first) and section 9's read-back checks before it is put in place; the presets and their bitrates, the software encoders (libx264, libx265, libsvtav1) under a VBV cap, the size estimate and free-space check, audio copied (AAC and PCM cut to the sample), AAC or none; the job handle (progress, cancel, wait, the `Report` with each stage's time) that cli, the app and A2 drive; the VA-API encoders (VBR under the same cap, Mesa's quality level) tried before software, with a restart in software when one fails in its first second, and the decode on VA-API going on in software | M2.4; M2.5: VA-API, the order and fallback, the decode path, stage times |
 | `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside the Info, Doctor and Files tabs); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); the overlay (`overlay`), the settings and their window (`settings`), the raw view, the smoke run (`smoke`) and the toolkit check's timeline prototype (`proto`, D53); `run`, which the CLI calls with no command. `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs. Later the timeline (M2) | M1 slices 7 and 8 |
 | `spherecut-agent` | Agent integration (D23, D43 to D46): the MCP server (`rpc`), the tools and their hand-written schemas (`tools`, `ops`), the roots (`roots`), the JSON contract of `--json` (`contract`, D27), frame's core that look renders through (`still`), look's canvas and font (`image`, `font`), the instructions and the skill; later the GUI attach bridge | A1 |
-| `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor`, `frame`, `mcp`, `call` and `agents install-skill` (A1). `render` (M2) is planned. Its library half re-exports `spherecut_agent::contract` as `contract` | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI; A1: `mcp`, `call`, `agents install-skill` |
+| `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor`, `frame` (and `frame --project`, a sequence's frame as the export renders it), `render` (a project's export, one envelope a line, D51), `mcp`, `call` and `agents install-skill` (A1). Its library half re-exports `spherecut_agent::contract` as `contract` | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI; A1: `mcp`, `call`, `agents install-skill`; M2.5: `render`, `frame --project` |
 | `xtask` | `check`, `compat` (clippy and a link of the tests against other FFmpeg builds, and Tier 1 against one, D2), `gen-media`, `hw-test` | M0; `compat` from 2026-10-24 |
 
 Crates are created when they get real content, not as empty shells. The
@@ -435,10 +440,16 @@ keeps its flags, its output file, SIGINT and its JSON:
    Ctrl+C always finds the handler there to drop it; the rest runs on a
    worker thread named `frame` while the main thread polls the handler's
    flag every 10 ms (below);
-4. probe, through the confinement (D24), picks the stream (`--stream`,
-   else the first video stream that isn't a cover picture) and refuses a
-   file not tagged as an equirect (`not_equirect`, naming what it is)
-   unless `--equirect`; probe's damage becomes warnings;
+4. with `--project` (M2.5, D51), the project and its media load as
+   `render` loads them, and the sequence's frame at the time asked for
+   (sequence time) gives the file, its stream, the source time to seek
+   to, the output's size and the frame's views (`render::output::
+   frame_views`, with the sequence's motion blur), and the filter is the
+   export's; then probe, through the confinement (D24), picks the stream
+   (`--stream`, else the first video stream that isn't a cover picture)
+   and refuses a file not tagged as an equirect (`not_equirect`, naming
+   what it is) unless `--equirect` (which a project's clip implies);
+   probe's damage becomes warnings;
 5. `Gpu::headless` takes the adapter `--adapter` (or
    `SPHERECUT_ADAPTER`) names and checks `--size` against its limit,
    unless `--reference` renders on the CPU;
@@ -452,7 +463,8 @@ keeps its flags, its output file, SIGINT and its JSON:
    `--frame N` on a constant-rate stream the frame shown must be frame N
    (`check_index`), else frames are missing there (`damaged`, or
    `out_of_range` when it is the last frame);
-8. `render_still`, or for `--reference` the f64 CPU reference
+8. `render_still` through the views (several, averaged, for motion
+   blur), or for `--reference` the f64 CPU reference
    (`reference::render`, trilinear as `render_trilinear` is, with the
    file's placement) rounded to the PNG's codes;
 9. the PNG goes into the temporary file, which `persist_new` publishes
@@ -696,17 +708,31 @@ float before the output. Stitching, stabilization and reframing then
 happen in one pass shared by the viewer and the exporter, and an
 intermediate equirect exists only as the output of a 360 export.
 
-## Export *(M2.4, D52)*
+## Export *(M2.4 and M2.5, D52)*
 
 `spherecut_export::Export::start(ExportJob)` checks what needs no work
 and runs the job on its own thread, which spawns two more:
 
 ```
-decode (software) ──2──▶ render (StillRenderer, YUV pass) ──2──▶ encode + mux (job thread)
-  exact seek to the trim's start,     the clip's views at n/rate,       the encoder's planes, the
-  each source frame held for the      equirect or the lens, into        trim's audio between frames,
-  output frames it covers             I420 or I010                      into a locked TempFile
+decode (VA-API or software) ──2──▶ render (StillRenderer, YUV pass) ──2──▶ encode + mux (job thread)
+  exact seek to the trim's start,     the clip's views at n/rate,       the encoder's planes (uploaded
+  each source frame held for the      equirect or the lens, into        to a VA surface for VA-API), the
+  output frames it covers             NV12 or P010 for VA-API,          trim's audio between frames,
+                                      I420 or I010 for software         into a locked TempFile
 ```
+
+The encoders are tried in order (M2.5): with `auto`, the codec's VA-API
+encoder on the render node of the GPU that renders, then its software
+one. A VA-API encoder that fails to open or on a frame in its first
+second starts the video again in software from frame 0, and the
+`Report`'s `fallback` says why; later failures fail the export. The
+decode is VA-API on the same node going on in software (D3), and the
+report says where frames were decoded. Each stage adds its busy time to
+an atomic counter as it goes (`StageTimes`: decode, render, readback,
+encode, and the last pass), so a slow export names its slow stage.
+`spherecut render` drives this handle from the command line (D51), and
+`spherecut frame --project` renders a sequence's frame through the same
+`frame_views` the render stage uses.
 
 The channels hold two frames each, and one `StopSource` stops all
 three. Once the muxer has finished, one last pass of media's injector
