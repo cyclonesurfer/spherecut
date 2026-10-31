@@ -1,4 +1,4 @@
-//! A project's folder (a2-plan section 3, D56): the project file, the
+//! A project's folder (a2-plan section 3, D57): the project file, the
 //! undo history beside it and its lock, each opened through the folder's
 //! descriptor.
 //!

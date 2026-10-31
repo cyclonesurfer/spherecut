@@ -118,13 +118,13 @@ PLAN's A2 criteria, and where this plan meets each:
 
 To be recorded in DECISIONS as their slices land:
 
-- **D56, projects for agents**: the project folder handle, the lock, the
+- **D57, projects for agents**: the project folder handle, the lock, the
   history file, the changed-on-disk check, the one exception to "nothing
   is replaced", times in edits, and the agent's undo rule (sections 3, 4,
   6).
-- **D57, render jobs**: the job table, ids, the queue, cancel and the
+- **D58, render jobs**: the job table, ids, the queue, cancel and the
   server's end, the output beneath the write root (5).
-- **D58, compare, and projects in look and check** (7).
+- **D59, compare, and projects in look and check** (7).
 
 None is expensive to reverse. The history file and the lock file are new
 files beside a project; a build that doesn't know them ignores them, and
@@ -783,15 +783,15 @@ PLAN's A2 criteria, and the note to Pat.
 
 1. **A2.1 Projects on disk.** `ProjectFolder`, the lock, the history
    file, the identity check, `INITIAL_VIEW` and `project_media` moved;
-   core's tests (9.1), the two-process ones included. D56's core half.
+   core's tests (9.1), the two-process ones included. D57's core half.
 2. **A2.2 The project tools.** `CallCx::client`, the wire forms,
    `project`, `edit`, `undo` (with redo), `reference.rs`, the schemas and
-   the list budget, `Roots::project_folder`; 9.2. D56.
+   the list budget, `Roots::project_folder`; 9.2. D57.
 3. **A2.3 The GUI.** Lock, history, changed on disk, labels; 9.5.
 4. **A2.4 Render and job.** `needed_bytes` moved, `jobs.rs`,
    `Tools::shutdown`, `render`, `job`, the `/proc/self/fd` output and
-   media, `call`'s refusal; 9.3, the killed-server test in cli. D57.
-5. **A2.5 Compare, look and check with a project.** 9.4. D58.
+   media, `call`'s refusal; 9.3, the killed-server test in cli. D58.
+5. **A2.5 Compare, look and check with a project.** 9.4. D59.
 6. **A2.6 Teaching and finishing.** Instructions, the skill's fourth
    recipe, `docs/agents.md` with the GUI actions list, the recipes
    replayed (A1's harness with a fourth), the Tier 2 test and its
