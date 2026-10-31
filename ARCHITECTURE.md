@@ -32,8 +32,8 @@ quaternions the project model holds; sphere depends on neither.
 
 agent depends on export (since M2.5): the JSON contract it holds for
 the CLI lists the export's codes and turns its errors and fallbacks
-into `render`'s documents (D51), and A2's tools will drive the same
-job handle.
+into `render`'s documents (D51), and A2's `render` and `job` drive the
+same job handle.
 
 render depends on core and sphere only, not on media: frames reach it
 through `core::video::VideoPlanes`, so the library has no FFmpeg
@@ -562,10 +562,11 @@ shell. The crate has no `unsafe`.
   would write, from `spherecut_export::planned`.
 - **`contract`**: the CLI's JSON contract (D27), here since A1.4 so that
   `still` can return its errors and the CLI re-exports it.
-- **Teaching** (A1.7): `initialize` gives the instructions (the
-  conventions and the cheap-first order, under 1,500 characters), and
-  `SKILL` is the Agent Skills file (`skill/spherecut/SKILL.md`, three
-  recipes) that `spherecut agents install-skill` (the CLI's `skill`)
+- **Teaching** (A1.7, A2.6): `initialize` gives the instructions (the
+  conventions, the cheap-first order and the way to make a video, each
+  tool by name, under 1,500 characters), and `SKILL` is the Agent Skills
+  file (`skill/spherecut/SKILL.md`, four recipes, the fourth reframing a
+  clip through a project and a render) that `spherecut agents install-skill` (the CLI's `skill`)
   writes to `$XDG_DATA_HOME/spherecut/skills/spherecut` and links into
   `~/.claude/skills` and `~/.agents/skills`. `docs/agents.md` is the
   user's guide, and tests keep its limits and codes in step with the

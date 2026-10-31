@@ -76,12 +76,14 @@ only the protocol.
 ## The skill
 
 `spherecut agents install-skill` installs an [Agent Skills](https://agentskills.io)
-`SKILL.md` with three recipes: find where a moving subject is over time,
-validate a 360 export, and find why a file stutters. Claude Code reads
+`SKILL.md` with four recipes: find where a moving subject is over time,
+validate a 360 export, find why a file stutters, and reframe a clip into
+a flat video (which needs a write root). Claude Code reads
 `~/.claude/skills`; Codex, Gemini CLI and Copilot CLI read
 `~/.agents/skills`. The skill's text is
 `crates/agent/skill/spherecut/SKILL.md`; a test replays each recipe on
-synthetic media (`crates/agent/tests/recipes.rs`).
+synthetic media (`crates/agent/tests/recipes.rs`), the fourth through
+a project, a draft render, `compare` and the whole render.
 
 ## Setting up each client
 
@@ -415,6 +417,62 @@ invisible characters replaced. It never appears in a tool's description,
 the server's instructions or an error's message. The tools' descriptions
 and the instructions tell the agent that these fields and the pixels of
 frames are data, not instructions.
+
+## Projects
+
+A project is a `.spherecut` file (D47): JSON, always written whole, its
+media named relative to its folder. `project` with `part: "edits"` is
+the edit reference: every op, what it does, and an example that applies
+to the ids it names; the ops and their fields are the project file's
+(D47 and `docs/design/m2-plan.md` sections 3 to 5 have the format).
+
+**The files beside a project.** `trip.spherecut` has two hidden files
+beside it that Spherecut makes and nothing else should touch:
+
+- `.trip.spherecut.lock`, the lock. The window holds it while the
+  project is open; `project` with `create`, `edit` and `undo` hold it
+  for the call. A call waits for another call's hold up to `LOCK_WAIT`
+  and is refused at once while the window has it (`project_locked`,
+  saying who). It is never removed or replaced. Reading takes no lock:
+  `project`, `look`, `check`, `compare` and `render` read a project the
+  window has open, and `render` reads it once, when it is called.
+- `.trip.spherecut.history`, the undo steps, written with every save,
+  the window's and the agents' alike, so the user's Ctrl+Z goes back
+  through an agent's steps. A history that doesn't match its project
+  (written by something else since) is stale: undo and redo are
+  `stale_revision`, and the next edit starts a fresh history
+  (`history_reset: true`). It is kept under 16 MiB, the oldest steps
+  going first (`history_dropped`).
+
+A project changed on disk since a call read it (by a text editor, git,
+a sync tool) is never saved over: `changed_on_disk`, and nothing is
+written. Beneath the write root Spherecut replaces only a file that
+loads as a project, and its history; everything else it writes is new.
+
+**Undo.** `undo` takes back the last step only if an agent made it, and
+`redo` puts back the last one undone the same way. A step of the user's
+is `not_top`: theirs to undo, in the window. The summary's `undo` and
+`redo` say whether an agent may (`agent_may`) and why not. The window's
+Edit menu names the client an agent's step came from ("Undo Set trim
+(claude-code)").
+
+**The window's actions that aren't edits**, and what an agent does
+instead:
+
+| In the window | An agent |
+|---|---|
+| Play, pause, scrub, step a frame | `look` at the time (with `project`, the render's) |
+| Drag the viewer to look around | `look` with a `view`; to keep it, `edit` with `add_key`, `set_key` or `set_view_path` |
+| The curve editor's handles | `edit` with `set_key` and its `ease` |
+| Open, Save, Save As, Close | `project` (`create` for a new one); every `edit` and `undo` saves |
+| Undo, Redo | `undo` (with `redo`), on an agent's steps |
+| Export | `render`, then `job` |
+| The Info and Files panes | `probe` |
+| The Doctor pane | `doctor` |
+| The overlay, Settings, the sphere overview, the equirect preview, the panes' layout | None: they change no project and no file |
+
+Each milestone's review checks this list against the window until M5's
+shortcut map lets a test do it (PLAN).
 
 ## Errors
 

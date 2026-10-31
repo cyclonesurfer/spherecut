@@ -56,9 +56,13 @@ in progress. What works today:
   labelled images, measure timing, motion and audio over a clip, check a
   file's 360 metadata against YouTube's or another target, and ask what
   this machine decodes. It reads only under the folders you give it and
-  changes no file; at most, if you allow it, `look` writes its image to a
-  new one. `spherecut call` runs the same tools from a shell, and
-  `spherecut agents install-skill` installs the recipes agents follow.
+  changes no file unless you allow writing in one folder. Then an agent
+  can also make a project of a clip, key the view to follow something,
+  trim it, undo its own steps, render it in the background and compare
+  the file with the project, while the project isn't open in the
+  window; the window's undo goes back through the agent's steps too.
+  `spherecut call` runs the same tools from a shell, and `spherecut
+  agents install-skill` installs the recipes agents follow.
   [docs/agents.md](docs/agents.md) has each client's setup. Spherecut
   itself makes no network requests, but what it returns to an agent,
   frames of your footage included, goes to that agent's model provider.
