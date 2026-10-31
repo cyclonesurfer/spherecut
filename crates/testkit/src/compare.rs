@@ -1,6 +1,7 @@
 //! Image metrics for the render tests (M1 plan, section 6): PSNR over
 //! RGB, SSIM on BT.709 luma, and a count of the pixels that differ by
-//! more than a threshold.
+//! more than a threshold; and PSNR and SSIM of one plane, for the
+//! export's parity tests (M2 plan section 11).
 //!
 //! Every metric works in unit scale, samples in `[0, 1]`: 8-bit samples
 //! count as `v / 255`, 16-bit ones as `v / 65535`, floats as they are. So
@@ -261,9 +262,158 @@ pub fn diff_stats<A: Sample, B: Sample>(
     Ok(s)
 }
 
+/// One plane of a picture, its samples in unit scale, row after row:
+/// a luma plane, say, for comparing a decoded export with what it was
+/// rendered from in the encoder's own codes.
+#[derive(Debug, Clone, Copy)]
+pub struct Plane<'a> {
+    pub width: usize,
+    pub height: usize,
+    pub data: &'a [f64],
+}
+
+impl Plane<'_> {
+    fn check(&self) -> Result<(), Mismatch> {
+        if self.data.len() != self.width * self.height {
+            return Err(Mismatch(format!(
+                "a {}x{} plane needs {} samples, has {}",
+                self.width,
+                self.height,
+                self.width * self.height,
+                self.data.len()
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn same_plane(a: &Plane<'_>, b: &Plane<'_>) -> Result<(), Mismatch> {
+    a.check()?;
+    b.check()?;
+    if (a.width, a.height) != (b.width, b.height) {
+        return Err(Mismatch(format!(
+            "{}x{} against {}x{}",
+            a.width, a.height, b.width, b.height
+        )));
+    }
+    Ok(())
+}
+
+/// [`psnr`] of one plane: `10 log10(1 / MSE)` in unit scale.
+pub fn psnr_plane(a: Plane<'_>, b: Plane<'_>) -> Result<f64, Mismatch> {
+    same_plane(&a, &b)?;
+    let sum: f64 = a
+        .data
+        .iter()
+        .zip(b.data)
+        .map(|(p, q)| (p - q).powi(2))
+        .sum();
+    let mse = sum / a.data.len().max(1) as f64;
+    Ok(if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        -10.0 * mse.log10()
+    })
+}
+
+/// [`ssim`] of one plane, as it is rather than as luma: the same window
+/// and constants, with the Gaussian applied as two passes of its 1D
+/// factor, so a 4K plane takes a fraction of a second.
+pub fn ssim_plane(a: Plane<'_>, b: Plane<'_>) -> Result<f64, Mismatch> {
+    same_plane(&a, &b)?;
+    let (w, h) = (a.width, a.height);
+    if w < 11 || h < 11 {
+        return Err(Mismatch(format!("SSIM needs 11x11 at least, not {w}x{h}")));
+    }
+    // The 2D window is the outer product of this, normalized.
+    let g: Vec<f64> = {
+        let g: Vec<f64> = (0..11)
+            .map(|i| (-((i as f64 - 5.0).powi(2)) / (2.0 * 1.5 * 1.5)).exp())
+            .collect();
+        let s: f64 = g.iter().sum();
+        g.into_iter().map(|v| v / s).collect()
+    };
+    let (ow, oh) = (w - 10, h - 10);
+    // Each of the five moments, filtered along rows, then along columns.
+    let fields: [&dyn Fn(f64, f64) -> f64; 5] = [
+        &|p, _| p,
+        &|_, q| q,
+        &|p, _| p * p,
+        &|_, q| q * q,
+        &|p, q| p * q,
+    ];
+    let filtered: Vec<Vec<f64>> = fields
+        .iter()
+        .map(|f| {
+            let mut rows = vec![0.0; ow * h];
+            for y in 0..h {
+                let (ra, rb) = (&a.data[y * w..(y + 1) * w], &b.data[y * w..(y + 1) * w]);
+                for x0 in 0..ow {
+                    rows[y * ow + x0] = (0..11).map(|d| g[d] * f(ra[x0 + d], rb[x0 + d])).sum();
+                }
+            }
+            let mut out = vec![0.0; ow * oh];
+            for y0 in 0..oh {
+                for x0 in 0..ow {
+                    out[y0 * ow + x0] = (0..11).map(|d| g[d] * rows[(y0 + d) * ow + x0]).sum();
+                }
+            }
+            out
+        })
+        .collect();
+    let (c1, c2) = (0.01f64.powi(2), 0.03f64.powi(2));
+    let total: f64 = (0..ow * oh)
+        .map(|i| {
+            let (ma, mb) = (filtered[0][i], filtered[1][i]);
+            let (va, vb) = (filtered[2][i] - ma * ma, filtered[3][i] - mb * mb);
+            let cov = filtered[4][i] - ma * mb;
+            ((2.0 * ma * mb + c1) * (2.0 * cov + c2)) / ((ma * ma + mb * mb + c1) * (va + vb + c2))
+        })
+        .sum();
+    Ok(total / (ow * oh) as f64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plane_measures_as_the_gray_image_it_would_be() {
+        let (w, h) = (40, 23);
+        let mut rng = Rng(7);
+        let a: Vec<f64> = (0..w * h)
+            .map(|i| 0.2 + 0.6 * ((i % w) as f64 / w as f64))
+            .collect();
+        let b: Vec<f64> = a.iter().map(|v| v + 0.02 * rng.gauss()).collect();
+        let gray = |p: &[f64]| p.iter().flat_map(|&v| [v, v, v]).collect::<Vec<f64>>();
+        let (ga, gb) = (gray(&a), gray(&b));
+        let (va, vb) = (View::new(w, h, 3, &ga), View::new(w, h, 3, &gb));
+        let (pa, pb) = (
+            Plane {
+                width: w,
+                height: h,
+                data: &a,
+            },
+            Plane {
+                width: w,
+                height: h,
+                data: &b,
+            },
+        );
+        let (p, q) = (psnr(va, vb).unwrap(), psnr_plane(pa, pb).unwrap());
+        assert!((p - q).abs() < 1e-9, "{p} {q}");
+        let (s, t) = (ssim(va, vb).unwrap(), ssim_plane(pa, pb).unwrap());
+        assert!((s - t).abs() < 1e-9, "{s} {t}");
+        assert!(t < 0.99, "{t}");
+        assert_eq!(ssim_plane(pa, pa).unwrap(), 1.0);
+        assert_eq!(psnr_plane(pa, pa).unwrap(), f64::INFINITY);
+        let short = Plane {
+            width: w,
+            height: h,
+            data: &a[1..],
+        };
+        assert!(psnr_plane(pa, short).is_err());
+    }
 
     /// A seeded generator for test images: xorshift64*, and Box–Muller
     /// for Gaussian noise.

@@ -23,6 +23,7 @@ spherecut-playback = { path = "crates/playback" }
 spherecut-audio = { path = "crates/audio" }
 spherecut-app = { path = "crates/app" }
 spherecut-agent = { path = "crates/agent" }
+spherecut-export = { path = "crates/export" }
 
 anyhow = "1.0.100"
 # Vulkan's types, for asking the driver what DMA-BUFs it imports (slice

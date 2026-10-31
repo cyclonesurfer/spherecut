@@ -3157,6 +3157,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "spherecut-export"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "proptest",
+ "spherecut-core",
+ "spherecut-media",
+ "spherecut-render",
+ "spherecut-sphere",
+ "spherecut-synth",
+ "spherecut-testkit",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "spherecut-media"
 version = "0.1.0"
 dependencies = [

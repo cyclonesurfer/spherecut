@@ -155,6 +155,21 @@ fn write_err(path: &Path) -> impl Fn(io::Error) -> InjectError + '_ {
 pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), InjectError> {
     spherecut_core::may_block("rewriting an MP4 file");
     check_not_same_file(input, output)?;
+    let dest = follow_links(output).map_err(write_err(output))?;
+    let mut tmp = TempFile::create(&dest).map_err(write_err(&dest))?;
+    inject_into(input, &mut tmp, edits)?;
+    tmp.persist_replace().map_err(write_err(&dest))?;
+    Ok(())
+}
+
+/// [`inject`]'s rewrite of `input`, written into `out`, a temporary file
+/// for the output that the caller persists (as new, or replacing).
+pub fn inject_into(
+    input: &Path,
+    out: &mut TempFile,
+    edits: &[EntryEdit],
+) -> Result<(), InjectError> {
+    spherecut_core::may_block("rewriting an MP4 file");
     for (i, e) in edits.iter().enumerate() {
         if edits[..i].iter().any(|o| o.track == e.track) {
             return Err(InjectError::DuplicateEdit(e.track));
@@ -288,14 +303,13 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
         shift_chunk_offsets(&mut moov_bytes, moov_end, total_delta)?;
     }
 
-    let dest = follow_links(output).map_err(write_err(output))?;
-    let mut tmp = TempFile::create(&dest).map_err(write_err(&dest))?;
+    let dest = out.dest().to_path_buf();
     let copy_err = |error| InjectError::Copy {
         input: input.to_path_buf(),
         output: dest.clone(),
         error,
     };
-    let mut out = BufWriter::new(tmp.file_mut());
+    let mut out = BufWriter::new(out.file_mut());
     // Copy exactly the lengths the parse saw, never "to the end": the
     // output can't outgrow the input, whatever happens to the input file.
     f.seek(SeekFrom::Start(0)).map_err(read_err(input))?;
@@ -304,8 +318,6 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
     f.seek(SeekFrom::Start(moov_end)).map_err(read_err(input))?;
     copy_exact(&mut f, &mut out, tree.file_size.saturating_sub(moov_end)).map_err(copy_err)?;
     out.flush().map_err(write_err(&dest))?;
-    drop(out);
-    tmp.persist_replace().map_err(write_err(&dest))?;
     Ok(())
 }
 

@@ -211,16 +211,40 @@ pub enum YuvPlanes {
     U16([Vec<u16>; 3]),
 }
 
-/// A frame of `layout` holding `planes`, `width` × `height`.
+/// One planar YUV frame in one buffer, each plane's rows `stride` bytes
+/// apart from `offset`: the layout render's YUV pass reads back (I420,
+/// or I010 with each sample a little-endian `u16` in its low 10 bits).
+#[derive(Debug, Clone, Copy)]
+pub struct StridedPlanes<'a> {
+    pub data: &'a [u8],
+    /// Each plane's first byte and the bytes from one row to the next.
+    pub planes: [(usize, usize); 3],
+}
+
+/// What a frame is pushed as.
+#[derive(Debug, Clone, Copy)]
+enum Pushed<'a> {
+    Planes(&'a YuvPlanes),
+    Strided(&'a StridedPlanes<'a>),
+}
+
+/// A frame of `layout` holding `pushed`, `width` × `height`.
 fn video_frame(
     layout: PixelLayout,
     width: u32,
     height: u32,
-    planes: &YuvPlanes,
+    pushed: Pushed<'_>,
 ) -> Result<ff::frame::Video, EncodeError> {
     let mut frame = ff::frame::Video::new(layout.ff(), width, height);
     let dims = layout.plane_sizes(width, height);
     let ten = layout.ten_bit();
+    let planes = match pushed {
+        Pushed::Planes(p) => p,
+        Pushed::Strided(s) => {
+            copy_strided(&mut frame, dims, if ten { 2 } else { 1 }, s)?;
+            return Ok(frame);
+        }
+    };
     for (i, &(w, h)) in dims.iter().enumerate() {
         let stride = frame.stride(i);
         let data = frame.data_mut(i);
@@ -254,6 +278,38 @@ fn video_frame(
     Ok(frame)
 }
 
+/// `s`'s planes into `frame`, a row at a time: `dims` samples of
+/// `sample` bytes each.
+fn copy_strided(
+    frame: &mut ff::frame::Video,
+    dims: [(usize, usize); 3],
+    sample: usize,
+    s: &StridedPlanes<'_>,
+) -> Result<(), EncodeError> {
+    for (i, &(w, h)) in dims.iter().enumerate() {
+        let (offset, from_stride) = s.planes[i];
+        let row = w * sample;
+        let last = h
+            .checked_sub(1)
+            .and_then(|r| r.checked_mul(from_stride))
+            .and_then(|b| b.checked_add(offset)?.checked_add(row));
+        if from_stride < row || last.is_none_or(|end| end > s.data.len()) {
+            return Err(EncodeError::Invalid(format!(
+                "plane {i}: {h} rows of {row} bytes, {from_stride} apart from byte {offset}, \
+                 don't fit {} bytes",
+                s.data.len()
+            )));
+        }
+        let to_stride = frame.stride(i);
+        let to = frame.data_mut(i);
+        for y in 0..h {
+            let from = offset + y * from_stride;
+            to[y * to_stride..y * to_stride + row].copy_from_slice(&s.data[from..from + row]);
+        }
+    }
+    Ok(())
+}
+
 /// What swscale makes of `planes`, a `width` × `height` picture in
 /// `layout`, as RGB at 16 bits per channel (R, G, B per pixel, rows top
 /// to bottom), decoding its Y'CbCr with `matrix` and `range` as given,
@@ -279,9 +335,16 @@ pub fn swscale_rgb48(
             )));
         }
     };
-    let frame = video_frame(layout, width, height, planes)?;
+    let frame = video_frame(layout, width, height, Pushed::Planes(planes))?;
     ffi::swscale_rgb48(&frame, bt709, range == Range::Full)
         .map_err(|e| EncodeError::Invalid(format!("swscale: {e}")))
+}
+
+/// Whether this FFmpeg has the encoder FFmpeg calls `name`, such as
+/// `libx265`.
+pub fn has_encoder(name: &str) -> bool {
+    init();
+    ff::encoder::find_by_name(name).is_some()
 }
 
 /// The quantizer scale [`encode_jpeg`] takes: 2 is FFmpeg's best, 31
@@ -747,14 +810,20 @@ impl Mp4Writer {
 
     /// Append the next video frame, one frame after the last.
     pub fn push_video(&mut self, planes: &YuvPlanes) -> Result<(), EncodeError> {
-        self.push_next(planes, false)
+        self.push_next(Pushed::Planes(planes), false)
+    }
+
+    /// Append the next video frame, one frame after the last, from one
+    /// buffer of strided planes.
+    pub fn push_video_strided(&mut self, planes: &StridedPlanes<'_>) -> Result<(), EncodeError> {
+        self.push_next(Pushed::Strided(planes), false)
     }
 
     /// Append the next video frame at timestamp `pts`, in ticks of the
     /// stream's time base, for a variable frame rate. Timestamps must
     /// increase; negative ones are before the edit list's start.
     pub fn push_video_at(&mut self, planes: &YuvPlanes, pts: i64) -> Result<(), EncodeError> {
-        self.push_frame(planes, pts, false)
+        self.push_frame(Pushed::Planes(planes), pts, false)
     }
 
     /// Append the next video frame, one frame after the last, and have
@@ -764,10 +833,10 @@ impl Mp4Writer {
     /// no recovery point that the frames after it may refer across, as
     /// x264 codes a flash. For test media.
     pub fn push_video_intra(&mut self, planes: &YuvPlanes) -> Result<(), EncodeError> {
-        self.push_next(planes, true)
+        self.push_next(Pushed::Planes(planes), true)
     }
 
-    fn push_next(&mut self, planes: &YuvPlanes, intra: bool) -> Result<(), EncodeError> {
+    fn push_next(&mut self, planes: Pushed<'_>, intra: bool) -> Result<(), EncodeError> {
         let Some(ticks) = self.frame_ticks else {
             return Err(EncodeError::Invalid(
                 "a frame is not a whole number of ticks of the time base: use push_video_at".into(),
@@ -780,7 +849,7 @@ impl Mp4Writer {
     }
 
     /// Append a video frame at `pts`, coded as an I-frame when `intra`.
-    fn push_frame(&mut self, planes: &YuvPlanes, pts: i64, intra: bool) -> Result<(), EncodeError> {
+    fn push_frame(&mut self, planes: Pushed<'_>, pts: i64, intra: bool) -> Result<(), EncodeError> {
         may_block("encoding a frame to a file");
         if let Some(last) = self.last_video_pts
             && pts <= last
@@ -893,6 +962,26 @@ impl Mp4Writer {
         inject::inject(tmp.path(), tmp.dest(), edits)?;
         // `tmp` is removed as it drops.
         Ok(path)
+    }
+
+    /// Like [`finish_with_edits`](Self::finish_with_edits) (or
+    /// [`finish`](Self::finish) with no edits), but the finished file is
+    /// handed back still under its temporary name, for the caller to
+    /// check and then put in place with `persist_new` or
+    /// `persist_replace` (D16), or to drop, which removes it.
+    pub fn finish_temp(self, edits: &[EntryEdit]) -> Result<TempFile, EncodeError> {
+        may_block("finishing a file");
+        let (_, tmp) = self.close()?;
+        if edits.is_empty() {
+            return Ok(tmp);
+        }
+        let dest = tmp.dest().to_path_buf();
+        let mut out = TempFile::create(&dest).map_err(|error| EncodeError::Io {
+            path: dest.clone(),
+            error,
+        })?;
+        inject::inject_into(tmp.path(), &mut out, edits)?;
+        Ok(out)
     }
 
     /// Flush everything into the temporary file and close the muxer.
