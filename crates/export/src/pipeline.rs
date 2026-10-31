@@ -576,9 +576,10 @@ fn once(o: Once<'_>) -> Result<Attempt, Tried> {
     let (held_tx, held_rx) = mpsc::sync_channel(DECODED_AHEAD);
     let (yuv_tx, yuv_rx) = mpsc::sync_channel(RENDERED_AHEAD);
     let busy = Arc::new(Busy::default());
+    let pace = look.pace.clone();
     let decoding = spawn("export-decode", {
-        let (token, busy) = (token.clone(), busy.clone());
-        move || decode(dec, plan, held_tx, token, &busy)
+        let (token, busy, pace) = (token.clone(), busy.clone(), pace.clone());
+        move || decode(dec, plan, held_tx, token, &busy, pace.as_deref())
     })
     .map_err(Tried::Late)?;
     let rendering = spawn("export-render", {
@@ -599,6 +600,7 @@ fn once(o: Once<'_>) -> Result<Attempt, Tried> {
         stop,
         token: &token,
         busy: &busy,
+        pace: pace.as_deref(),
     });
     let (decoded, seen) = decoding.join().unwrap_or_else(|p| {
         let e = ExportError::failed(Stage::Decode, None, panic_text(&*p));
@@ -801,9 +803,10 @@ fn decode(
     tx: SyncSender<Held>,
     token: StopToken,
     busy: &Busy,
+    pace: Option<&Pace>,
 ) -> (Ended, Seen) {
     let mut seen = Seen::default();
-    let ended = decode_frames(dec, plan, tx, token, &mut seen, busy);
+    let ended = decode_frames(dec, plan, tx, token, &mut seen, busy, pace);
     (ended, seen)
 }
 
@@ -817,6 +820,7 @@ fn decode_frames(
     token: StopToken,
     seen: &mut Seen,
     busy: &Busy,
+    pace: Option<&Pace>,
 ) -> Ended {
     let fail = |n: u64, message: String| {
         Ended::Failed(ExportError::failed(
@@ -864,19 +868,25 @@ fn decode_frames(
             let next = match ahead.take() {
                 Some(f) => f,
                 None if ended => break,
-                None => match Busy::time(&busy.decode, || dec.next_frame(&token)) {
-                    Ok(NextFrame::Frame(f)) => {
-                        seen.saw(&f);
-                        f
+                None => {
+                    // The viewer's decodes go first on the video engine.
+                    if let Some(p) = pace {
+                        p.yield_to_viewer();
                     }
-                    Ok(NextFrame::End) => {
-                        ended = true;
-                        break;
+                    match Busy::time(&busy.decode, || dec.next_frame(&token)) {
+                        Ok(NextFrame::Frame(f)) => {
+                            seen.saw(&f);
+                            f
+                        }
+                        Ok(NextFrame::End) => {
+                            ended = true;
+                            break;
+                        }
+                        Ok(NextFrame::Stopped) => return Ended::Stopped,
+                        Err(_) if token.is_stopped() => return Ended::Stopped,
+                        Err(e) => return fail(n, e.to_string()),
                     }
-                    Ok(NextFrame::Stopped) => return Ended::Stopped,
-                    Err(_) if token.is_stopped() => return Ended::Stopped,
-                    Err(e) => return fail(n, e.to_string()),
-                },
+                }
             };
             if next.time <= t {
                 cur = next;
@@ -1017,6 +1027,8 @@ struct Encode<'a> {
     /// This try's.
     token: &'a StopToken,
     busy: &'a Busy,
+    /// The app's: each frame's encode waits for the viewer's lead.
+    pace: Option<&'a Pace>,
 }
 
 /// How the encode stage failed.
@@ -1056,6 +1068,7 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
         stop,
         token,
         busy,
+        pace,
     } = e;
     let settings = VideoSettings {
         encoder: setup.name.into(),
@@ -1111,6 +1124,9 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
             // An earlier stage ended; `run` says why.
             Err(RecvTimeoutError::Disconnected) => break,
         };
+        if let Some(p) = pace {
+            p.yield_to_viewer();
+        }
         let at = plan.sequence_time(r.n).ok();
         if r.n != next {
             return Err(ExportError::failed(
@@ -1341,7 +1357,14 @@ mod tests {
     fn held(path: &Path, trim: Range, rate: FrameRate) -> Result<Vec<(u64, Time)>, ExportError> {
         let plan = FramePlan::new(trim, rate).unwrap();
         let (tx, rx) = mpsc::sync_channel(plan.count() as usize);
-        let (ended, seen) = decode(open(path), plan, tx, StopToken::never(), &Busy::default());
+        let (ended, seen) = decode(
+            open(path),
+            plan,
+            tx,
+            StopToken::never(),
+            &Busy::default(),
+            None,
+        );
         assert_eq!(seen, Seen::default(), "decoded in software");
         let got = rx.try_iter().map(|h| (h.n, h.frame.time)).collect();
         match ended {

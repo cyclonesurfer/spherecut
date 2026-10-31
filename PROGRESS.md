@@ -486,7 +486,19 @@ M2.10b: the app's export renders on a GPU device of its own on the
 window's adapter (`Gpu::beside`, D56), sharing no wgpu lock, queue or
 submit gate with the window. The pace and the bands stay;
 `SPHERECUT_EXPORT_DEVICE=window` puts it back on the window's device to
-compare. odin's rerun of `gui_smoke` and `gui_proto` with it is next.
+compare. odin's rerun at 3c1a727 (PR #21) fixed the 4K export with
+blur: 6.3 s instead of 13.9, 99 % of the UI frames presented while it
+ran, none dropped (it fails only on a UI p99 of 30.8 ms at the usual
+scale, and passes at 125 %). The two runs that play 5.7K while they
+export still dropped 1 to 6 frames, with the viewer's decodes slow (37
+to 81 ms) while the export's VA-API decode and encode had the GPU's
+video engine. `gui_proto` passed.
+
+M2.10c: while the viewer plays, each of the export's stages (decode,
+render, encode) waits before a frame's work until the viewer has two
+frames ready beyond the one it shows, 100 ms at most, so the viewer's
+decodes go first on the video engine (D56). odin's rerun with it is
+next.
 
 ## A1: the MCP server
 

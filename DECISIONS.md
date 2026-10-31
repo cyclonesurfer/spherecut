@@ -8442,7 +8442,7 @@ a second queue); a user wants the tabs in one row on a wide screen; M5's
 render queue takes the export out of the window; or a user wants the
 quit to ask about a running export.
 
-## D56. The app's export and the window: no wait through wgpu, a smaller unit, a device of its own
+## D56. The app's export and the window: no wait through wgpu, a smaller unit, a device of its own, the viewer first
 
 *2026-10-31, M2.10, from odin's M2 run at 0663e05. Updates D41 and
 D55.*
@@ -8522,8 +8522,33 @@ What:
   and `a_device_beside_the_windows_is_another_on_its_adapter`; the
   kittest of an export while the window plays checks the device it
   used.
+- **odin's rerun at 3c1a727** (PR #21, `hw-reports/odin-3c1a727-pace2.md`
+  and `-pace2-125.md`): the 4K export with blur is fixed (6.3 s instead
+  of 13.9; 99 % presented while it ran, 0 dropped; its run fails only on
+  a UI p99 of 30.8 ms at the usual scale and passes at 125 %). The two
+  runs that play 5.7K while they export still drop 1 to 6 frames, and
+  the gaps' slowest stages are the viewer's decodes (37 to 81 ms) and
+  uploads (54 to 67 ms): the export's VA-API decode and encode share the
+  GPU's video engine with the viewer's Vulkan decodes, and an 8K HEVC
+  frame takes the engine about 90 ms.
+- **So, while the viewer plays, the export goes after its frames**
+  (M2.10c): each UI pass tells the pace whether the viewer has a lead,
+  two frames ready in its slots beyond the one it shows (`LEAD_FRAMES`,
+  or as many as fewer slots hold), and while it hasn't, each of the
+  export's stages waits before its next frame's work (decode, render,
+  encode: `Pace::yield_to_viewer`), at most 100 ms a time, so a viewer
+  that never gets its lead slows the export and doesn't stop it. While
+  nothing plays the export runs as before. The smoke document counts
+  the waits (`yielded`, `longest_yield_ms`).
+- **Tests**: export's `the_stages_wait_for_the_viewers_lead_while_held`;
+  app's `the_viewer_has_its_lead_with_two_frames_ready_or_while_it_doesnt_play`.
 
 Why:
+- **The viewer's frames first, over a rate cap.** A fixed cap (one
+  export frame a video frame, or a share of the time) is right on one
+  GPU at one size and wrong on the next; the viewer's slots say on any
+  GPU whether it is keeping up, and a stage that waits for them gives
+  the engine back to the viewer at once.
 - **A device of the export's own, over a second queue.** A second queue
   isn't in wgpu 30's API. The export decodes on VA-API or in software
   (D52), never through the window's device (path B is the player's), so
@@ -8533,9 +8558,10 @@ Why:
 - **Bands over a lower resolution or rate while held**: the bytes stay
   those of the free export, which the parity tests compare.
 
-Revisit if: odin's rerun with the export's own device still misses the
-90 % (then the GPU itself is the contention: the export's jobs smaller
-still, or fewer of them a UI frame); wgpu-core stops holding the lock
+Revisit if: odin's rerun with the viewer's lead still drops frames
+while 5.7K plays (then one export frame's turn on the video engine
+outlasts the lead: more slots while an export runs, or the export's
+decode in software while the viewer plays); wgpu-core stops holding the lock
 through `maintain`'s wait, or fixes the timed wait's race, which would
 let a plain wait back; wgpu gains a second queue.
 

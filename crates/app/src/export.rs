@@ -40,6 +40,11 @@ pub enum Span {
     Selection,
 }
 
+/// Frames the viewer has ready beyond the one it shows before the
+/// export's stages start a frame's work while it plays (D56): two, about
+/// 67 ms at 30 fps.
+pub const LEAD_FRAMES: usize = 2;
+
 /// Where the app's export renders (D56).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExportDevice {
@@ -203,6 +208,15 @@ impl AppState {
         self.export.open = true;
     }
 
+    /// Whether the viewer has frames in hand beyond the one it shows, so
+    /// that the export's stages may start a frame's work while it plays
+    /// (D56): [`LEAD_FRAMES`] ready in their slots, or as many as the
+    /// slots hold beside the shown frame and one a draw holds. Always
+    /// while it doesn't play.
+    pub(crate) fn viewer_lead(&self) -> bool {
+        lead(self.snapshot.want_play, &self.snapshot.slots)
+    }
+
     /// Whether the export is held to a frame a UI pass: the viewer
     /// plays, or a drag runs.
     pub(crate) fn export_held(&self) -> bool {
@@ -352,6 +366,11 @@ impl AppState {
             cancelled: false,
         });
     }
+}
+
+/// [`AppState::viewer_lead`], from what the player says.
+fn lead(playing: bool, slots: &spherecut_playback::slots::SlotStats) -> bool {
+    !playing || slots.ready >= LEAD_FRAMES.min(slots.active.saturating_sub(2)).max(1)
 }
 
 /// The device an export renders on: a second one on the window's adapter,
@@ -873,6 +892,24 @@ fn replace_window(s: &mut AppState, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_viewer_has_its_lead_with_two_frames_ready_or_while_it_doesnt_play() {
+        use spherecut_playback::slots::SlotStats;
+        let slots = |active, ready| SlotStats {
+            active,
+            ready,
+            ..SlotStats::default()
+        };
+        assert!(lead(false, &slots(4, 0)));
+        assert!(!lead(true, &slots(4, 0)));
+        assert!(!lead(true, &slots(4, 1)));
+        assert!(lead(true, &slots(4, 2)));
+        assert!(lead(true, &slots(6, 3)));
+        // Three slots hold one ready beside the shown frame and a held one.
+        assert!(lead(true, &slots(3, 1)));
+        assert!(!lead(true, &slots(3, 0)));
+    }
 
     #[test]
     fn the_export_has_a_device_of_its_own_unless_told_the_windows() {

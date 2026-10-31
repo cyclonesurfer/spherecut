@@ -399,7 +399,7 @@ impl SpherecutApp {
             p.set_painted(ctx.input(|i| i.viewport().visible()).unwrap_or(true));
             p.present(Instant::now())
         });
-        s.export.pace.pass(s.export_held());
+        s.export.pace.pass(s.export_held(), s.viewer_lead());
         s.request_repaint(ctx);
         s.logic_ran = true;
         if let Some(smoke) = &mut self.smoke {

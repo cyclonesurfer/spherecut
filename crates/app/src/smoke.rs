@@ -953,6 +953,10 @@ pub struct ExportReport {
     /// amendment 2 item 22), and the longest hold.
     pub held: u64,
     pub longest_hold_ms: f32,
+    /// Times one of its stages waited for the viewer's frames (D56), and
+    /// the longest wait.
+    pub yielded: u64,
+    pub longest_yield_ms: f32,
     /// The UI and the clip's frames while it ran, as `settled` has them.
     pub while_running: Option<Settled>,
 }
@@ -1327,6 +1331,7 @@ fn export_report(
     while_running: Option<Settled>,
 ) -> ExportReport {
     let (held, longest) = pace.waits();
+    let (yielded, longest_yield) = pace.yields();
     let mut r = ExportReport {
         output: export.output.display().to_string(),
         preset: export.preset.map(|p| p.to_string()),
@@ -1343,6 +1348,8 @@ fn export_report(
         blur_capped: None,
         held,
         longest_hold_ms: longest.as_secs_f32() * 1e3,
+        yielded,
+        longest_yield_ms: longest_yield.as_secs_f32() * 1e3,
         while_running,
     };
     match (started, last) {

@@ -759,7 +759,12 @@ larger than 4K in bands of 4K's pixels, the readback in copies of 16
 MiB. It renders on a GPU device of its own on the window's adapter
 (`Gpu::beside`), so it shares no wgpu lock, queue or submit gate with
 the window, only the GPU; the window's device is the fallback
-(`SPHERECUT_EXPORT_DEVICE=window` asks for it). No thread but the UI's
+(`SPHERECUT_EXPORT_DEVICE=window` asks for it). While the viewer plays,
+each UI pass also says whether the viewer has two frames ready beyond
+the one it shows, and until it has, the export's decode, render and
+encode stages each wait before a frame's work (`Pace::yield_to_viewer`,
+100 ms at most), so the viewer's decodes go first on the GPU's video
+engine. No thread but the UI's
 waits for the GPU through wgpu's `Device::poll` wait, which holds the
 lock a present takes: they use `Gpu::wait_for_submitted`, which polls
 without waiting.

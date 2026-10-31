@@ -591,6 +591,13 @@ presented 66 %, with a stall of up to 100 ms an export frame, on the
 CPU. So the app's export renders on a device of its own (M2.10b), which
 shares nothing with the window but the GPU; the pace and the bands stay.
 
+odin's rerun at 3c1a727 fixed the blur export (99 % presented, none
+dropped), and the runs that play 5.7K while they export still dropped 1
+to 6 frames, their viewer's decodes waiting behind the export's on the
+GPU's video engine. So, while the viewer plays, each of the export's
+stages waits before a frame's work until the viewer has two frames
+ready beyond the one it shows, 100 ms at most (M2.10c, D56).
+
 ## 1. Summary
 
 M2 is the first version Pat can use for real: open one 360 clip, trim

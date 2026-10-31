@@ -524,9 +524,18 @@ fn export(e: &Value) -> Option<String> {
         Some("window") => " on the window's device",
         _ => "",
     };
+    // A document from before D56's lead has no yields.
+    let yielded = match e["yielded"].as_u64() {
+        Some(n) => format!(
+            "; its stages waited {n} time{} for the viewer's frames, the longest {} ms",
+            if n == 1 { "" } else { "s" },
+            ms(&e["longest_yield_ms"])
+        ),
+        None => String::new(),
+    };
     Some(format!(
         "The export while it played ({what}){device}: {} frames at {} in {:.1} s with {}{}; \
-         busy {}; {} frames waited for a UI pass, the longest {} ms{ui}.",
+         busy {}; {} frames waited for a UI pass, the longest {} ms{yielded}{ui}.",
         e["frames"],
         size(&e["size"]),
         e["elapsed_s"].as_f64().unwrap_or(0.0),
@@ -612,6 +621,7 @@ mod tests {
             "encoder": "hevc_vaapi", "fallback": null, "elapsed_s": 12.34,
             "stages_s": {"decode": 1.0, "encode": 3.31, "finish": 0.5, "readback": 2.0, "render": 9.0},
             "blur_capped": 0, "held": 58, "longest_hold_ms": 17.31,
+            "yielded": 7, "longest_yield_ms": 41.31,
             "while_running": {"from_s": 1.2, "to_s": 13.5,
                 "ui": {"presented": 0.95, "p50": 16.7, "p99": 24.5},
                 "frames": {"shown": 360, "dropped": 2, "decode_dropped": 0}},
@@ -666,7 +676,8 @@ mod tests {
         assert!(md.contains(
             "The export while it played (360-7680, with motion blur) on a device of its own: 60 \
              frames at 7680×3840 in 12.3 s with hevc_vaapi; busy decode 1.0 s, encode 3.3 s, finish 0.5 s, readback 2.0 \
-             s, render 9.0 s; 58 frames waited for a UI pass, the longest 17.3 ms; while it ran \
+             s, render 9.0 s; 58 frames waited for a UI pass, the longest 17.3 ms; its stages \
+             waited 7 times for the viewer's frames, the longest 41.3 ms; while it ran \
              95% of the UI frames were presented, UI p50 / p99 16.7 / 24.5 ms, 360 frames shown \
              and 2 dropped."
         ));
