@@ -8240,6 +8240,151 @@ Revisit if: M5's multi-clip timeline replaces the strip; a user finds
 the 400 ms rest too short or long; or M2.7's sphere overview needs the
 360 output keyed from the viewer.
 
+## D55. The reframer's GUI, part 2: the curve editor, the sphere overview, the Inspector and targets, the export window and its pace
+
+*2026-10-31, M2 slice M2.7. Amendment 8 of the M2 plan lists where
+this differs from its sections 10.4 to 10.6 and 11.*
+
+**The side tabs.** Info, Inspector, Doctor and Files share the upper
+tab row beside the viewer; Curves and Sphere share a lower one under
+it. Six tabs in one row didn't fit the side panel at the default size,
+and a tab out of sight can't be clicked. A layout saved before M2.7
+gets the new panes beside Info.
+
+**A drag shows before it edits** (amendment 2 item 39). The curve
+editor's dots, the Inspector's numbers and a 360 output's front change
+a preview held by the doc: a copy of the clip's `ViewAnim` (or of the
+output) with the one value changed, drawn by the viewer and every pane.
+The project changes only when the drag or the typing lets go, through
+`apply` and its checks, as one undo step named for what changed ("Move
+yaw", "Set FOV", "Turn the front"). Any edit, undo or redo drops
+the preview, so a preview never outlives the state it was made from.
+
+**The curve editor** draws a row each for yaw, pitch and roll in
+degrees, the FOV, and the projection (a band per segment, the morph's
+progress drawn in its ease's shape), over the clip's source time, the
+source past the trim dimmed. Yaw and roll are unwrapped, each
+segment the shortest way plus its spin's turns, so a turn reads as yaw
+rising past 180°. Where |pitch| > 85° yaw and roll are broken and
+greyed and their dots don't drag (section 6.4). Dragging a dot up or
+down changes that value of that key only: `with_angle` rebuilds the
+key's orientation from its own yaw, pitch and roll with the one angle
+changed, and section 6.4's sticky spin (`follow_spin`) keeps the
+neighbouring segments turning the way they did. `Ctrl` and the wheel
+zoom about the pointer, the wheel or a drag of the background pans, a
+click seeks.
+
+**The sphere overview** is an equirect thumbnail of the frame on
+screen, drawn by the viewer's own projector in flat mode into a texture
+of the pane's size (an equirect source is its own thumbnail), no second
+decode; it redraws only when the frame or its size changes. Over it:
+the view's footprint (the output frame's edge on the sphere, red), its
+centre, the centre's path over the trim, each orientation key's
+centre, the look-at targets with their names, and a 360 output's front.
+A click turns the view to look there, level: for a flat output as a
+change of the view (D54: key edits on a key or a lane's only key,
+else a look-around), for a 360 output its front ("Turn the front").
+
+**The equirect preview** (amendment 2 item 37): View ▸ Preview the 360
+output shows a 360 output in the viewer as it will export, the whole
+sphere turned to its front, and a drag there turns the front (one step
+on release). It is greyed for a flat output.
+
+**The Inspector** shows the view at the playhead in numbers (yaw,
+pitch, roll, FOV, projection and morph), editable where a key is; the
+selected keys' time, ease and spin, and what an orientation key aims at
+(none, or a target: `aim` keeps its roll, and "none" turns it back into
+the direction it looks in at its time); the trim's in, out and
+duration (read only); the sequence's output, a 360 output's front and
+the rate; and the look-at targets, each renamed, keyed where the view looks at
+the playhead ("Key here": the target's key within half a frame moved,
+else a new one), or removed. "Add a target where the view looks" adds a
+fixed one in the clip's media, named by its number.
+
+**The export window** (`Ctrl+E`, File ▸ Export…, greyed with no
+project). Every choice is an edit to the sequence, an undo step like
+the Inspector's, so the project saves what the export used: the output
+(the preset rows, flat and 360) and the export settings (codec,
+quality, encoder: automatic, the GPU's or software, as `render
+--encoder`; audio; motion blur). The codecs are listed in the order the
+doctor's export encoders give, the ones this machine can encode first,
+each with the encoder it would use, "(no encoder here)" for the rest.
+Audio Copy is greyed, with the reason on hover and under the choice,
+when the export crate's own check (`copy_refusal`, the rule its audio
+plan applies) says it can't copy; that check reads the file, so it runs
+on a job per media and output. The range is the trim, or the selected
+keys from the first to the end of the last key's frame. The file is a
+name (the project's, `.mp4` added) in the Files pane's folder, else the
+project's, else the home folder.
+
+Start runs the export on a clone of the project with the range set as
+its trim, so edits made while it runs don't reach it. Starting it looks
+at the output path and the render node, so it runs on a job too
+(`export-start`), and Cancel works while it starts. If the file is
+there, "Replace the file?" asks first. The window shows a progress bar
+with frames, fps and the time left, then the muxing's percent, with
+Cancel; Close leaves it running ("The export goes on"), and the window
+opens again on it. One runs at a time. When it ends, a notice of its
+own kind says where the file is, how many frames over how long in how
+much time, with which encoder and any fallback, then the checks; a
+cancel or a failure says so and leaves no file (D52). Quitting while it
+runs cancels it.
+
+**The export's pace while the UI is busy** (amendment 2 item 22,
+`spherecut_export::Pace`). The app's export renders on the viewer's
+device and queue. While the viewer plays, a drag runs (viewer, strip,
+curves, a scrub, the front) the export is held to one frame per UI
+pass: before each frame it waits for the UI's next pass, or 100 ms at
+most so a window that stops drawing doesn't stop it. Otherwise it runs
+as fast as it can. The submit gate (D41) keeps its work out of the
+window between the UI's acquire and present; the pace keeps the work
+between two presents to one export frame. The smoke document reports
+how many frames waited and the longest wait.
+
+**gui_smoke's export.** `--smoke-export <MP4>` (hidden, with `--smoke`)
+exports the clip's first 2 s once the run has settled, while the run
+plays on, and waits for the export to end (cancelled 60 s past the
+run's seconds). The document's `result.export` holds the output, the
+outcome, frames, encoder, fallback, elapsed, the pace's waits, and
+`while_running`: the run's settled numbers over the time the export
+ran. Tier 2's gui_smoke exports on its first run and judges that span
+by the run's own gates (presented ≥ 0.90, dropped ≤ 0.1 %, UI p99 ≤
+1.5 refresh periods, D40).
+
+**Tests** (`crates/app/tests/reframe2.rs`, lavapipe, the UI thread
+marked): a curve drag moves only that key's yaw, previewed while it
+drags, one step that undo takes back; a click on the overview turns the
+view there; the Inspector adds a target where the view looks; an
+export from the window, with the loop playing, reaches its last frame
+and its notice while every UI step stays under 1 s, then Replace
+replaces the file and Cancel leaves the old one; the overview turns a
+360 output's front and the equirect preview draws it. The smoke
+driver's test exports while it plays. The Inspector's, curves' and
+overview's helpers have unit tests in their modules.
+
+Why:
+- **A preview held apart from the project** rather than an edit per
+  pointer move: undo gets one step a gesture, `apply`'s checks run once,
+  and a change whose pane closes before it ends leaves nothing behind.
+- **Choices as edits** rather than window state: the project file says
+  what an export used, and `spherecut render` of the saved project
+  gives the same file.
+- **One frame a pass while the UI is busy**, rather than a lower
+  thread priority or a fixed rate: the GPU queue is shared and in
+  order, so only the amount of work between two presents matters, and
+  the UI's own pace sets it whatever the export's frame costs.
+- **The kittest bound is a hang bound** (1 s a step). lavapipe runs the
+  queue in order on the CPU, so a UI step during an export waits behind
+  an export frame (about 80 ms at the median, 200 to 330 ms at worst in
+  the test); the refresh-interval gate is gui_smoke's export on Tier 2,
+  where the GPU is real.
+
+Revisit if: M2.8's 8K export with blur on odin still stalls presents
+while held (then a smaller unit of work than a frame, or the export on
+a second queue); a user wants the tabs in one row on a wide screen; M5's
+render queue takes the export out of the window; or a user wants the
+quit to ask about a running export.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360

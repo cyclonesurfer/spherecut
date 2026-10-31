@@ -277,6 +277,21 @@ Delete removes it. Ctrl+S and Ctrl+Shift+S save the project, the Files
 pane opens `.spherecut` files, Ctrl+Z and Ctrl+Shift+Z undo and redo,
 and closing or opening with unsaved changes asks first.
 
+The Curves tab draws yaw, pitch, roll, FOV and the projection over
+time: drag a key's dot up or down to change that one value, Ctrl and
+the wheel zoom, the wheel or a drag of the background pans. The Sphere
+tab shows the whole frame with the view's outline, its path over the
+trim, the keys and the look-at targets; click it to look there (for a
+360 output, to turn its front there). The Inspector tab shows the view,
+the selected keys, the trim, the output and the targets in numbers to
+edit, and adds a target where the view looks. View ▸ Preview the 360
+output shows a 360 output as it will export. File ▸ Export… (Ctrl+E)
+sets the output, codec, quality, encoder, audio, motion blur, the range
+(the trim or the selected keys) and the file name, in the Files pane's
+folder, and exports in the background with its progress and Cancel;
+each choice is kept with the project. While the picture plays or a drag
+runs, the export slows to keep the window smooth.
+
 ### Rendering a frame
 
 ```sh

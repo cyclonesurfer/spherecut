@@ -55,8 +55,8 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); for export, equirect output, the output frame, the YUV pass for the encoders, motion blur and a frame's views from the clip's keys (`output`, D49); image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics), from testkit so that agent can use it (amendment 2 item 32); later scopes | M1 slices 3a and 3b; M2.3; M2.4: `compare` |
 | `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slices 5 and 6 |
 | `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
-| `spherecut-export` | The export (D52): `Export` runs an `ExportJob`, a project's sequence, on three threads (decode, render through the YUV pass, encode and mux) into a locked temporary file, then one last pass (V2, `SA3D`, the V1 box, the moov first) and section 9's read-back checks before it is put in place; the presets and their bitrates, the software encoders (libx264, libx265, libsvtav1) under a VBV cap, the size estimate and free-space check, audio copied (AAC and PCM cut to the sample), AAC or none; the job handle (progress, cancel, wait, the `Report` with each stage's time) that cli, the app and A2 drive; the VA-API encoders (VBR under the same cap, Mesa's quality level) tried before software, with a restart in software when one fails in its first second, and the decode on VA-API going on in software | M2.4; M2.5: VA-API, the order and fallback, the decode path, stage times |
-| `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside the Info, Doctor and Files tabs); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); the overlay (`overlay`), the settings and their window (`settings`), the raw view, the smoke run (`smoke`) and the toolkit check's timeline prototype (`proto`, D53); `run`, which the CLI calls with no command; the reframer (M2.6, D54): the open project and its undo history (`doc`), the file work as jobs, the keyed view and look-around and the output frame (`reframe`), and the timeline strip (`timeline`). `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs. Later the curve editor, sphere overview, Inspector and export window (M2.7) | M1 slices 7 and 8, M2.6 |
+| `spherecut-export` | The export (D52): `Export` runs an `ExportJob`, a project's sequence, on three threads (decode, render through the YUV pass, encode and mux) into a locked temporary file, then one last pass (V2, `SA3D`, the V1 box, the moov first) and section 9's read-back checks before it is put in place; the presets and their bitrates, the software encoders (libx264, libx265, libsvtav1) under a VBV cap, the size estimate and free-space check, audio copied (AAC and PCM cut to the sample), AAC or none; the job handle (progress, cancel, wait, the `Report` with each stage's time) that cli, the app and A2 drive; the VA-API encoders (VBR under the same cap, Mesa's quality level) tried before software, with a restart in software when one fails in its first second, and the decode on VA-API going on in software; the pace an export from the app keeps while the UI is busy (`Pace`, one frame per UI pass) | M2.4; M2.5: VA-API, the order and fallback, the decode path, stage times; M2.7: `Pace` |
+| `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside two rows of tabs: Info, Inspector, Doctor and Files, then Curves and Sphere); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); the overlay (`overlay`), the settings and their window (`settings`), the raw view, the smoke run (`smoke`) and the toolkit check's timeline prototype (`proto`, D53); `run`, which the CLI calls with no command; the reframer (M2.6, D54): the open project and its undo history (`doc`), the file work as jobs, the keyed view and look-around and the output frame (`reframe`), and the timeline strip (`timeline`); and (M2.7, D55) the curve editor (`curves`), the sphere overview (`overview`), the Inspector and look-at targets (`inspector`) and the export window with its job (`export`). `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs | M1 slices 7 and 8, M2.6, M2.7 |
 | `spherecut-agent` | Agent integration (D23, D43 to D46): the MCP server (`rpc`), the tools and their hand-written schemas (`tools`, `ops`), the roots (`roots`), the JSON contract of `--json` (`contract`, D27), frame's core that look renders through (`still`), look's canvas and font (`image`, `font`), the instructions and the skill; later the GUI attach bridge | A1 |
 | `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor`, `frame` (and `frame --project`, a sequence's frame as the export renders it), `render` (a project's export, one envelope a line, D51), `mcp`, `call` and `agents install-skill` (A1). Its library half re-exports `spherecut_agent::contract` as `contract` | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI; A1: `mcp`, `call`, `agents install-skill`; M2.5: `render`, `frame --project` |
 | `xtask` | `check`, `compat` (clippy and a link of the tests against other FFmpeg builds, and Tier 1 against one, D2), `gen-media`, `hw-test` | M0; `compat` from 2026-10-24 |
@@ -747,6 +747,14 @@ free, D16) and refuses a disk with less free space than two copies of
 the size estimate. `Progress` counts frames muxed and then the last
 pass's bytes; the `Report` holds what was made and each check passed.
 
+The app's export (M2.7, D55) renders on the viewer's device and queue.
+Its `ExportJob` carries a `Pace`, shared with the UI: each UI pass says
+whether the UI is busy (the viewer plays, a drag runs), and while it
+is, the render stage waits before each frame for the UI's next pass,
+or 100 ms at most. The work between two presents is then one export
+frame; the submit gate (D41) keeps it out of the window between the
+UI's acquire and its present.
+
 ## The GUI *(M1 slices 7 and 8)*
 
 `spherecut` with no command (`spherecut-app`, D33, D36):
@@ -767,7 +775,8 @@ pass's bytes; the `Report` holds what was made and each check passed.
   minimized or occluded, so playback goes on hidden, and `ui` runs it
   when nothing did (kittest). `ui` draws the menu, the notices, and the
   tiles: the viewer (the picture
-  over the transport bar) beside the Info, Doctor and Files tabs. It
+  over the transport bar, or the strip with a project) beside the side
+  panel's two tab rows. It
   asks for a repaint while anything moves (playback, a seek, a switch, a
   scrub) and every 50 ms while a job runs; the player's repaint
   callback wakes it when a frame comes up.
@@ -818,6 +827,24 @@ pass's bytes; the `Report` holds what was made and each check passed.
   (`timeline::strip_ui`) draws under the picture, collects what its
   input asks for and applies it once drawn, every edit one undo step
   through `AppState::edit`.
+* **The reframer, part 2** (M2.7, D55). A drag in the curve editor,
+  a number being changed in the Inspector, or a 360 output's front
+  being turned changes a preview the `Doc` holds (`Doc::anim` and
+  `Doc::output` give the view as shown), and one `AppState::edit` on
+  release; any edit, undo or redo drops it. The curve editor (`curves`)
+  samples the tracks once per two points and rebuilds a dragged key's
+  orientation with one angle changed (`doc::with_angle`), keeping the
+  neighbours' spins (`follow_spin`). The sphere overview (`overview`)
+  draws its thumbnail through a paint callback of its own
+  (`OverviewCallback`) with the viewer's projector, flat, into a
+  texture redrawn only when the frame or its size changes. The export
+  window (`export::window`) edits the sequence's output and export
+  settings, checks audio copy on a job (`export-audio`), starts the
+  export on a job (`export-start`) from a clone of the project, then
+  polls the `Export` each frame (`export_tick`) and asks for a repaint
+  every 100 ms while it runs; at exit a running export is cancelled and
+  dropped on its own thread (`export-stop`), which `run` joins with the
+  jobs.
 * **Shutdown.** `on_exit` tells the player's threads to stop and leaves
   the player and the jobs' threads (`jobs::Threads`, which also holds
   those of jobs given up for newer ones) for `run`, which joins them
@@ -873,7 +900,10 @@ pass's bytes; the `Report` holds what was made and each check passed.
   neither read nor written. A watchdog thread ends a run whose window
   has had no UI pass for 15 s (a locked screen, slice 9), writing a
   `timed_out` document that says whether eframe's logic still ran, and
-  exits 1. hw-test's Tier 2 `gui_smoke` runs it on each clip in the
+  exits 1. With `--smoke-export <MP4>` (M2.7) it exports the clip's
+  first 2 s once settled, plays on while it runs, and waits for it to
+  end; the document's `export` holds its outcome and the run's numbers
+  over the time it ran. hw-test's Tier 2 `gui_smoke` runs it on each clip in the
   desktop session it finds, unless logind says it is locked, and
   kittest runs it with no compositor.
 * **The timeline prototype** (`spherecut --timeline-proto`, hidden,
@@ -899,8 +929,10 @@ pass's bytes; the `Report` holds what was made and each check passed.
 * The GUI's jobs (`app::jobs::Job`, slices 7 and 8): a named thread per
   piece of work the UI would otherwise wait for, whose result the UI
   polls each frame: `doctor` (the startup check), `probe` (the Info
-  pane), `files` (a folder's listing) and `smoke-out` (the smoke run's
-  PNG and JSON). A job whose thread panics or can't start is lost,
+  pane), `files` (a folder's listing), `smoke-out` (the smoke run's
+  PNG and JSON), the reframer's loads, saves and file checks (M2.6),
+  and the export's `export-audio`, `export-start` and `export-stop`
+  (M2.7). A job whose thread panics or can't start is lost,
   which the UI reports, and at exit
   `run` joins them beside the player's threads, with 3 s. The smoke
   run's `smoke-watchdog` is the one thread never joined: it ends with
