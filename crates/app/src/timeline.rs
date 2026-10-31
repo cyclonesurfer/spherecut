@@ -13,7 +13,7 @@ use spherecut_core::project::{Ease, Edit, KeyId, MarkerId};
 use spherecut_media::backend::SeekMode;
 use spherecut_media::doctor::Severity;
 
-use crate::app::AppState;
+use crate::app::{AppState, escaped};
 use crate::doc::{Doc, Lane};
 use crate::notices::{Notice, NoticeKind};
 use crate::transport;
@@ -65,6 +65,11 @@ impl Strip {
     /// A handle, marker or key is being dragged.
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    /// The drag let go, unkept.
+    pub fn cancel(&mut self) {
+        self.drag = None;
     }
 }
 
@@ -186,8 +191,8 @@ pub fn strip_ui(s: &mut AppState, ui: &mut egui::Ui, at: Time, now: Instant) {
         );
     }
     // The bar last of the rows, so its handles are over the lanes' and
-    // markers' edges.
-    let bar = row(1);
+    // markers' edges; as wide as the track, so a time has one x in both.
+    let bar = egui::Rect::from_x_y_ranges(track.left..=track.left + track.width, row(1).y_range());
     transport::scrub_row(s, ui, bar, at, Some(track.duration), now);
     let Some(doc) = s.reframe.doc.as_ref() else {
         return;
@@ -286,6 +291,7 @@ fn markers_row(
         if r.drag_stopped() {
             if let Some(Drag::Marker { id, at: to }) = drag
                 && id == m.id
+                && !escaped(ui)
             {
                 actions.push(Action::Edit("Move marker", doc.move_marker(id, to)));
             }
@@ -422,6 +428,7 @@ fn lane_row(
         if r.drag_stopped() {
             if let Some(Drag::Keys { from, to }) = drag
                 && let Ok(by) = to.checked_sub(from)
+                && !escaped(ui)
             {
                 match doc.move_keys(&doc.selection, by) {
                     Some(edits) => actions.push(Action::Edit("Move keys", edits)),
@@ -495,6 +502,7 @@ fn handles(
         }
         if r.drag_stopped() {
             match drag {
+                _ if escaped(ui) => {}
                 Some(Drag::In(t)) if !out => actions.push(Action::Edit("Move in", doc.set_in(t))),
                 Some(Drag::Out(t)) if out => actions.push(Action::Edit("Move out", doc.set_out(t))),
                 _ => {}

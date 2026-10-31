@@ -688,7 +688,7 @@ fn dots(
             && r.drag_stopped()
         {
             let edits = value_of(doc, d.row, d.key, d.value)
-                .filter(|_| d.value != d.start)
+                .filter(|_| d.value != d.start && !crate::app::escaped(ui))
                 .map(|v| doc.set_value(d.key, v, &d.spins))
                 .unwrap_or_default();
             actions.push(Action::Drag(None));

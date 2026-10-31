@@ -194,6 +194,7 @@ fn stereo_aac_starts_and_ends_within_a_sample_of_the_trim() {
         Some(AudioReport {
             stream: 1,
             encoder: "aac",
+            codec: "aac".into(),
             rate: 48_000,
             channels: 2,
             ambix: false,
@@ -355,6 +356,7 @@ fn aac_copy_keeps_the_sources_packets_and_cuts_them_to_the_sample() {
             Some(AudioReport {
                 stream: 1,
                 encoder: "copy",
+                codec: "aac".into(),
                 rate,
                 channels: 2,
                 ambix: false,

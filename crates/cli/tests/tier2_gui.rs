@@ -644,6 +644,11 @@ fn judge_proto(doc: &Value) -> Vec<String> {
             r["textures"], r["clips"]
         ));
     }
+    // Made at the start whatever the run does: the pictures drawn say
+    // the zoomed-in timeline showed them.
+    if r["drawn"]["thumbnails"].as_u64().unwrap_or(0) == 0 {
+        why.push("no thumbnail was drawn".into());
+    }
     if r["blocked_on_ui_thread"] != 0 {
         why.push(format!(
             "{} blocking calls on the UI thread",
@@ -773,6 +778,7 @@ fn the_prototype_gates_fail_what_they_say() {
                 "refresh_hz": 60.0,
                 "clips": 500,
                 "textures": 500,
+                "drawn": {"clips": 120, "thumbnails": 400, "names": 60, "snap_lines": 0},
                 "span_s": [2.0, 777.0],
                 "actions": {"moves": 2, "trims": 2, "scrubs": 0, "zoom_passes": 300, "pan_passes": 200, "snaps": 1},
                 "blocked_on_ui_thread": 0,
@@ -861,6 +867,10 @@ fn the_prototype_gates_fail_what_they_say() {
     fails(
         &with(&|r| r["textures"] = json!(0)),
         "0 thumbnails for 500 clips",
+    );
+    fails(
+        &with(&|r| r["drawn"]["thumbnails"] = json!(0)),
+        "no thumbnail was drawn",
     );
     fails(
         &with(&|r| r["blocked_on_ui_thread"] = json!(2)),

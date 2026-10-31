@@ -599,14 +599,20 @@ impl AppState {
         match s.job.poll() {
             Poll::Pending => self.reframe.saving = Some(s),
             Poll::Done(Saved::Done) => {
-                if s.generation == self.reframe.generation
-                    && let Some(doc) = &mut self.reframe.doc
-                {
+                let ours = s.generation == self.reframe.generation;
+                if ours && let Some(doc) = &mut self.reframe.doc {
                     doc.saved_to(s.path, s.revision);
                 }
                 self.notices.retain(|k| *k != NoticeKind::Project);
                 if let Some(step) = self.reframe.after_save.take() {
-                    self.take_step(step);
+                    // A step asked for while this save ran waits on the
+                    // changes made since it began being saved too.
+                    if ours && self.reframe.doc.as_ref().is_some_and(Doc::dirty) {
+                        self.reframe.after_save = Some(step);
+                        self.save();
+                    } else {
+                        self.take_step(step);
+                    }
                 }
             }
             Poll::Done(Saved::Exists) => self.reframe.replace = Some(s.path),
@@ -801,6 +807,16 @@ impl AppState {
         if let Some(doc) = &mut self.reframe.doc {
             doc.end_preview();
         }
+    }
+
+    /// A drag of the view let go with Escape: the view back at `q`, where
+    /// the drag began, and the viewer showing what it did then, `was`.
+    /// Nothing is kept of the drag.
+    pub(crate) fn cancel_look(&mut self, q: glam::DQuat, was: Look) {
+        self.view.q = q;
+        self.reframe.follow = None;
+        self.reframe.seen = Some(ViewValues::of(q, &self.view.lens));
+        self.reframe.look = was;
     }
 
     /// The view turned to `q` at once (the sphere overview's click): as

@@ -75,6 +75,13 @@ impl Pane {
 /// The layout of section 7.2 with M2's tabs: the viewer, and beside it
 /// the Info, Inspector, Curves, Sphere, Doctor and Files tabs, split
 /// 3 : 1.
+/// Whether a drag that stopped this frame was let go with Escape, which
+/// egui ends a drag on: it restores the start rather than keeping the
+/// move (M2 plan section 4.3).
+pub(crate) fn escaped(ui: &egui::Ui) -> bool {
+    ui.input(|i| i.key_pressed(egui::Key::Escape))
+}
+
 pub fn default_tree() -> Tree<Pane> {
     let mut tiles = Tiles::default();
     let viewer = tiles.insert_pane(Pane::Viewer);
@@ -192,6 +199,9 @@ pub struct AppState {
     pub player: Option<Player>,
     pub view: ViewState,
     pub drag: Option<GrabStart>,
+    /// The view and what the viewer showed when the drag began, which
+    /// Escape goes back to.
+    pub drag_from: Option<(glam::DQuat, Look)>,
     /// The last level drag's fit, for the overlay and tests.
     pub last_fit: Option<GrabFit>,
     pub scrub: Scrub,
@@ -339,6 +349,7 @@ impl SpherecutApp {
             player,
             view,
             drag: None,
+            drag_from: None,
             last_fit: None,
             scrub: Scrub::default(),
             scrub_spans: Vec::new(),
@@ -442,6 +453,7 @@ impl SpherecutApp {
         settings::window(&mut self.state, ui.ctx());
         crate::reframe::windows(&mut self.state, ui.ctx());
         crate::export::window(&mut self.state, ui.ctx());
+        self.state.let_go_of_lost_drags(&ctx);
         if std::mem::take(&mut self.state.reframe.quit) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -482,6 +494,26 @@ impl SpherecutApp {
 }
 
 impl AppState {
+    /// A drag whose widget went from under it (its key deleted or undone
+    /// mid-drag) gets no release: once egui drags nothing it is let go,
+    /// unkept, so it moves nothing later and no longer holds the export
+    /// to the UI's pace.
+    fn let_go_of_lost_drags(&mut self, ctx: &egui::Context) {
+        if ctx.dragged_id().is_some() {
+            return;
+        }
+        let r = &mut self.reframe;
+        let lost = r.strip.dragging() || r.curves.dragging() || r.front_drag.is_some();
+        r.strip.cancel();
+        r.curves.cancel();
+        r.front_drag = None;
+        if lost && let Some(doc) = &mut r.doc {
+            doc.end_preview();
+        }
+        self.drag = None;
+        self.drag_from = None;
+    }
+
     /// Open these streams of the video at `path` in the player (`None`
     /// for the best), and forget the last file's notices.
     pub(crate) fn open_media(&mut self, path: PathBuf, streams: Vec<Option<usize>>) {
@@ -782,8 +814,11 @@ impl AppState {
                     self.open_save_as();
                     ui.close();
                 }
+                // Without a project, a running export can still be
+                // followed.
+                let export = doc || self.export.running();
                 if ui
-                    .add_enabled(doc, egui::Button::new("Export…").shortcut_text("Ctrl+E"))
+                    .add_enabled(export, egui::Button::new("Export…").shortcut_text("Ctrl+E"))
                     .clicked()
                 {
                     self.open_export();
@@ -1179,7 +1214,7 @@ impl AppState {
             self.drag = None;
         } else if let Some(front) = front {
             self.drag = None;
-            self.front_ui(&response, rect, front);
+            self.front_ui(ui, &response, rect, front);
         } else {
             self.look_ui(ui, &response, &vp, ppp, free, framing);
         }
@@ -1265,6 +1300,7 @@ impl AppState {
         {
             self.view.cancel_morph();
             self.drag = Some(self.view.grab(point(origin)));
+            self.drag_from = Some((self.view.q, self.reframe.look));
         }
         if response.dragged_by(egui::PointerButton::Primary)
             && let (Some(mut start), Some(pos)) = (self.drag, response.interact_pointer_pos())
@@ -1275,7 +1311,10 @@ impl AppState {
         }
         if response.drag_stopped() {
             self.drag = None;
-            self.reframe.released = true;
+            match self.drag_from.take() {
+                Some((q, look)) if escaped(ui) => self.cancel_look(q, look),
+                _ => self.reframe.released = true,
+            }
         }
         if response.hovered()
             && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
@@ -1294,7 +1333,13 @@ impl AppState {
 
     /// A drag of the equirect preview turns the 360 output's front: the
     /// picture follows the pointer, and the release is one step.
-    fn front_ui(&mut self, response: &egui::Response, rect: egui::Rect, front: Orientation) {
+    fn front_ui(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        rect: egui::Rect,
+        front: Orientation,
+    ) {
         if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(p) = response.interact_pointer_pos()
         {
@@ -1319,6 +1364,7 @@ impl AppState {
                 .reframe
                 .doc
                 .as_ref()
+                .filter(|_| !escaped(ui))
                 .and_then(|d| d.front_preview.map(|o| d.set_front(o)))
                 .unwrap_or_default();
             if let Some(doc) = &mut self.reframe.doc {

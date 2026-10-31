@@ -391,6 +391,27 @@ fn a_drag_on_a_key_edits_it_as_one_step() {
         a.state.reframe.look == Look::Keyed
     });
     assert_eq!(doc(&h).undo_label(), Some("Reframe"));
+    let dragged = h.state().state.view.q;
+
+    // Let go with Escape, a drag keeps nothing and the view goes back.
+    h.hover_at(from);
+    h.drag_at(from);
+    step(&mut h);
+    for i in 1..=4 {
+        h.hover_at(from + (to - from) * (i as f32 / 4.0));
+        step(&mut h);
+    }
+    assert!(apart_deg(h.state().state.view.q, dragged) > 5.0);
+    h.key_press(Key::Escape);
+    step(&mut h);
+    assert_eq!(look(&h), Look::Keyed);
+    assert!(apart_deg(h.state().state.view.q, dragged) < 1e-6);
+    h.drop_at(to);
+    step(&mut h);
+    step(&mut h);
+    assert_eq!(look(&h), Look::Keyed);
+    assert_eq!(doc(&h).undo_label(), Some("Reframe"));
+    assert!(apart_deg(doc(&h).view_at(t(20)).orientation, dragged) < 1e-6);
     assert_eq!(lanes(&h), [2, 2, 2]);
     let q = h.state().state.view.q;
     let keyed = doc(&h).view_at(t(20)).orientation;
@@ -485,16 +506,27 @@ fn the_strip_selects_moves_and_eases_keys_and_drags_the_trim() {
     let c20 = h.get_by_label(&at20).rect().center();
     let per_frame = (c20.x - c0.x) / 20.0;
     let to = egui::pos2(c20.x + 5.0 * per_frame, c20.y);
-    h.hover_at(c20);
-    h.drag_at(c20);
-    step(&mut h);
-    for i in 1..=4 {
-        h.hover_at(c20 + (to - c20) * (i as f32 / 4.0));
-        step(&mut h);
-    }
-    h.drop_at(to);
-    step(&mut h);
-    step(&mut h);
+    let drag = |h: &mut H, escape: bool| {
+        h.hover_at(c20);
+        h.drag_at(c20);
+        step(h);
+        for i in 1..=4 {
+            h.hover_at(c20 + (to - c20) * (i as f32 / 4.0));
+            step(h);
+        }
+        if escape {
+            h.key_press(Key::Escape);
+            step(h);
+        }
+        h.drop_at(to);
+        step(h);
+        step(h);
+    };
+    // Let go with Escape, it keeps nothing (M2 plan section 4.3).
+    drag(&mut h, true);
+    assert_eq!(doc(&h).undo_label(), Some("Key the view"));
+    assert!(doc(&h).key_at(Lane::Orientation, t(20)).is_some());
+    drag(&mut h, false);
     assert_eq!(doc(&h).undo_label(), Some("Move keys"));
     let at: Vec<Time> = doc(&h)
         .lane_keys(Lane::Orientation)
@@ -517,11 +549,22 @@ fn the_strip_selects_moves_and_eases_keys_and_drags_the_trim() {
     assert_eq!(doc(&h).undo_label(), Some("Set ease"));
     assert_eq!(doc(&h).lane_keys(Lane::Orientation)[1].ease, Ease::LINEAR);
 
-    // Delete removes the selection, but a lane keeps its last key.
-    h.get_by_label(&at20).click();
+    // Delete removes the selection, but a lane keeps its last key: here
+    // the key being dragged, whose drag ends with it, unkept.
+    h.hover_at(c20);
+    h.drag_at(c20);
     step(&mut h);
+    h.hover_at(c20 + (to - c20) * 0.5);
+    step(&mut h);
+    assert!(h.state().state.reframe.strip.dragging());
     h.key_press(Key::Delete);
     step(&mut h);
+    h.hover_at(to);
+    step(&mut h);
+    h.drop_at(to);
+    step(&mut h);
+    step(&mut h);
+    assert!(!h.state().state.reframe.strip.dragging());
     assert_eq!(doc(&h).undo_label(), Some("Delete keys"));
     assert_eq!(lanes(&h), [1, 2, 2]);
     h.get_by_label(&key_label(Lane::Orientation, 0)).click();
@@ -547,6 +590,19 @@ fn the_strip_selects_moves_and_eases_keys_and_drags_the_trim() {
     h.get_by_label("Marker 1").click();
     step(&mut h);
     until_frame(&mut h, 30);
+
+    // The bar and the lanes share one time scale: a click on the bar a
+    // quarter frame past frame 50's place shows frame 50.
+    let bar = h.get_by_label("Scrub bar").rect();
+    let p = egui::pos2(c0.x + 50.25 * per_frame, bar.center().y);
+    assert!(bar.contains(p));
+    h.hover_at(p);
+    step(&mut h);
+    h.drag_at(p);
+    step(&mut h);
+    h.drop_at(p);
+    step(&mut h);
+    until_frame(&mut h, 50);
 
     // The in handle's drag moves in.
     let handle = h.get_by_label("In handle").rect().center();
@@ -654,5 +710,30 @@ fn a_project_saves_reopens_and_asks_before_it_is_let_go() {
     h.get_by_label("Quit without saving").click();
     step(&mut h);
     assert!(h.state_mut().state.close_requested());
+
+    // Save from the quit prompt while a save runs: the change made since
+    // that save began is saved too before the window may close.
+    h.state_mut().state.reframe.may_close = false;
+    {
+        let s = &mut h.state_mut().state;
+        s.save();
+        assert!(s.reframe.saving());
+        let d = s.reframe.doc.as_mut().unwrap();
+        let edits = d.add_marker(t(3));
+        d.record("Add marker", &edits).unwrap();
+        assert!(!s.close_requested());
+        s.answer_confirm(true);
+    }
+    until(&mut h, "both saves, then the quit", |a| {
+        a.state.reframe.may_close && !a.state.reframe.saving()
+    });
+    assert!(!doc(&h).dirty());
+    let p = path.clone();
+    let on_disk = std::thread::spawn(move || spherecut_core::project::file::load(&p))
+        .join()
+        .unwrap()
+        .unwrap();
+    assert!(on_disk.same_content(&doc(&h).project));
+    assert!(doc(&h).clip().markers.iter().any(|m| m.at == t(3)));
     finish(h);
 }

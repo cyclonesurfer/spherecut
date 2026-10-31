@@ -394,6 +394,7 @@ pub(crate) fn run(
         audio: audio_plan.zip(feed.as_ref()).map(|(a, f)| AudioReport {
             stream: a.stream,
             encoder: a.encoder(),
+            codec: a.codec().to_owned(),
             rate: f.rate(),
             channels: a.channels(),
             ambix: a.ambix,

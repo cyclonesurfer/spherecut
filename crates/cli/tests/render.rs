@@ -473,6 +473,7 @@ fn the_document_lists_every_field_of_every_line() {
             audio: Some(RenderAudio {
                 stream: 1,
                 encoder: "aac",
+                codec: "aac".into(),
                 rate: 48_000,
                 channels: 2,
                 ambix: false,

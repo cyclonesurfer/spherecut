@@ -114,10 +114,12 @@ impl ExportJob {
 /// How far an export has got.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Progress {
-    /// Frames muxed into the file: only ever increasing.
+    /// Frames given to the encoder, which muxes each soon after (a GOP
+    /// or so later for a hardware one, the rest at its flush): only ever
+    /// increasing.
     pub frames_done: u64,
     pub frames_total: u64,
-    /// Frames muxed a second over the last two seconds, 0 until there
+    /// Frames given to the encoder a second over the last two seconds, 0 until there
     /// are two to measure between.
     pub fps: f64,
     pub elapsed: Duration,
@@ -182,10 +184,11 @@ pub struct StageTimes {
     pub render: Duration,
     /// Copying each frame's planes back from the GPU.
     pub readback: Duration,
-    /// Encoding and muxing the frames, and the audio between them.
+    /// Encoding and muxing the frames, the audio between them, and the
+    /// video encoder's flush.
     pub encode: Duration,
-    /// After the last frame: the encoder's flush, the last pass that
-    /// writes the finished file, and the checks.
+    /// After that: the audio's flush, the last pass that writes the
+    /// finished file, and the checks.
     pub finish: Duration,
 }
 
@@ -194,8 +197,12 @@ pub struct StageTimes {
 pub struct AudioReport {
     /// The source's stream it came from, by index.
     pub stream: usize,
-    /// FFmpeg's name for the encoder.
+    /// FFmpeg's name for the encoder, or `copy` for the source's packets
+    /// as they are.
     pub encoder: &'static str,
+    /// FFmpeg's name for the track's codec: `aac`, or the copied one's
+    /// (`pcm_s16le`, say).
+    pub codec: String,
     pub rate: u32,
     pub channels: u16,
     /// First-order ambiX, with an `SA3D` box.
@@ -257,7 +264,7 @@ impl Shared {
         lock(&self.decode_fallback).get_or_insert(fallback);
     }
 
-    /// `done` frames are muxed. After an encoder's restart (section 8.3)
+    /// `done` frames are given to the encoder. After an encoder's restart (section 8.3)
     /// the count stays where the first got to until the next passes it,
     /// since progress only goes forward.
     pub(crate) fn muxed(&self, done: u64) {

@@ -603,8 +603,10 @@ pub struct RenderDecode {
 pub struct RenderAudio {
     /// The source's stream, by FFmpeg's index.
     pub stream: usize,
-    /// FFmpeg's name for the encoder, or the copied codec's.
+    /// FFmpeg's name for the encoder, or `copy`.
     pub encoder: &'static str,
+    /// FFmpeg's name for the track's codec: `aac`, or the copied one's.
+    pub codec: String,
     pub rate: u32,
     pub channels: u16,
     /// First-order ambiX, with an `SA3D` box.

@@ -914,3 +914,133 @@ fn apply(s: &mut AppState, actions: Vec<Action>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use spherecut_core::project::{Aspect, Fingerprint, Media, MediaId, MediaVideo};
+
+    use super::*;
+
+    fn doc() -> Doc {
+        let media = Media {
+            id: MediaId::NEW,
+            path: "/clips/a.mp4".into(),
+            fingerprint: Fingerprint {
+                bytes: 1,
+                head: "0000000000000000".into(),
+            },
+            video: MediaVideo {
+                stream: 0,
+                width: 1024,
+                height: 512,
+                rate: FrameRate::FPS_30,
+                duration: Time::from_secs(10),
+            },
+        };
+        Doc::untitled(media, doc::INITIAL_VIEW).unwrap()
+    }
+
+    fn yaw_pitch(d: &Doc) -> (f64, f64) {
+        let y = Ypr::from_quat(d.view_at(Time::ZERO).orientation);
+        (y.yaw.to_degrees(), y.pitch.to_degrees())
+    }
+
+    #[test]
+    fn the_projection_button_goes_through_all_three() {
+        let mut p = PROJECTIONS[0];
+        for want in PROJECTIONS.iter().cycle().skip(1).take(3) {
+            p = next(p);
+            assert_eq!(p, *want);
+        }
+    }
+
+    #[test]
+    fn labels_say_the_shape_the_size_and_the_rate() {
+        let wide = Preset::Flat {
+            aspect: Aspect::Wide,
+            short_side: 1080,
+        };
+        assert_eq!(output_label(wide), "16:9, 1920 × 1080");
+        assert_eq!(
+            output_label(Preset::Sphere { width: 3840 }),
+            "360, 3840 × 1920"
+        );
+        assert_eq!(
+            rate_label(FrameRate::FPS_30, Some(FrameRate::FPS_30)),
+            "30 fps (the video's)"
+        );
+        assert_eq!(rate_label(FrameRate::FPS_29_97, None), "29.970 fps");
+    }
+
+    #[test]
+    fn a_360_preset_keeps_the_front_it_had() {
+        let front = Orientation::from_ypr(Ypr::from_degrees(30.0, 0.0, 0.0)).unwrap();
+        let now = Output::Equirect {
+            width: 3840,
+            orientation: front,
+        };
+        let flat = Output::Flat {
+            aspect: Aspect::Wide,
+            short_side: 1080,
+        };
+        let sphere = Preset::Sphere { width: 7680 };
+        assert_eq!(
+            preset_output(sphere, &now),
+            Output::Equirect {
+                width: 7680,
+                orientation: front
+            }
+        );
+        assert_eq!(
+            preset_output(sphere, &flat),
+            Output::Equirect {
+                width: 7680,
+                orientation: Orientation::IDENTITY
+            }
+        );
+    }
+
+    #[test]
+    fn a_number_edits_its_angle_or_nothing() {
+        let mut d = doc();
+        let id = d.lane_keys(Lane::Orientation)[0].id;
+        let e = angle_edit(&d, id, 0, 30.0);
+        assert_eq!(e.len(), 1, "{e:?}");
+        d.record(angle_label(0), &e).unwrap();
+        let (yaw, pitch) = yaw_pitch(&d);
+        assert!((yaw - 30.0).abs() < 1e-9 && pitch.abs() < 1e-9);
+        assert!(angle_edit(&d, id, 0, 30.0).is_empty(), "unchanged");
+        // Pitch past straight up is straight up.
+        let e = angle_edit(&d, id, 1, 120.0);
+        d.record(angle_label(1), &e).unwrap();
+        assert!((yaw_pitch(&d).1 - 90.0).abs() < 1e-6);
+        // The field of view is kept to its range.
+        let fov = d.lane_keys(Lane::Fov)[0].id;
+        let e = fov_edit(&d, fov, 500.0);
+        d.record("Set field of view", &e).unwrap();
+        let hfov = d.view_at(Time::ZERO).lens.hfov.to_degrees();
+        assert!((hfov - MAX_FOV_DEG).abs() < 1e-9, "{hfov}");
+        assert!(fov_edit(&d, fov, 900.0).is_empty(), "already there");
+        // Not a key of the lane: nothing.
+        assert!(angle_edit(&d, fov, 0, 10.0).is_empty());
+    }
+
+    #[test]
+    fn the_front_is_edited_only_on_a_360_output() {
+        let mut d = doc();
+        assert!(front_edit(&d, 0, 45.0).is_empty());
+        let e = d.set_output(Output::Equirect {
+            width: 3840,
+            orientation: Orientation::IDENTITY,
+        });
+        d.record("Set the output", &e).unwrap();
+        let e = front_edit(&d, 0, 45.0);
+        assert_eq!(e.len(), 1, "{e:?}");
+        d.record("Turn the front", &e).unwrap();
+        let Output::Equirect { orientation, .. } = d.project.the_sequence().output else {
+            panic!("not 360")
+        };
+        assert!((orientation.ypr().yaw.to_degrees() - 45.0).abs() < 1e-9);
+        assert!(front_edit(&d, 0, 45.0).is_empty(), "unchanged");
+    }
+}

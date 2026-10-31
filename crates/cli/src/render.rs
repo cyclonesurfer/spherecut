@@ -661,6 +661,7 @@ fn result(output: &Path, r: &Report) -> RenderResult {
         audio: r.audio.as_ref().map(|a| RenderAudio {
             stream: a.stream,
             encoder: a.encoder,
+            codec: a.codec.clone(),
             rate: a.rate,
             channels: a.channels,
             ambix: a.ambix,
