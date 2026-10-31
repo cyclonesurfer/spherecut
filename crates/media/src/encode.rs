@@ -204,6 +204,16 @@ pub struct AudioSettings {
     pub options: Vec<(String, String)>,
 }
 
+/// How the muxer writes the file, beyond its streams.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MuxOptions {
+    /// The movie's timescale (`mvhd`), which every edit's duration is in.
+    /// FFmpeg's default is 1000, where a tick is 48 samples at 48 kHz, so
+    /// an audio edit can't end on a sample; an export sets the audio's
+    /// rate (m2-plan amendment 2 item 7).
+    pub movie_timescale: Option<u32>,
+}
+
 /// One planar YUV frame. Plane strides equal plane widths.
 #[derive(Debug, Clone)]
 pub enum YuvPlanes {
@@ -626,6 +636,16 @@ impl Mp4Writer {
         v: &VideoSettings,
         a: Option<&AudioSettings>,
     ) -> Result<Self, EncodeError> {
+        Self::create_with(path, v, a, &MuxOptions::default())
+    }
+
+    /// As [`create`](Self::create), with the muxer's options.
+    pub fn create_with(
+        path: &Path,
+        v: &VideoSettings,
+        a: Option<&AudioSettings>,
+        mux: &MuxOptions,
+    ) -> Result<Self, EncodeError> {
         may_block("creating a file to encode into");
         init();
         if !v.width.is_multiple_of(2)
@@ -789,7 +809,21 @@ impl Mp4Writer {
             }
         };
 
-        ctx(octx.write_header(), || "writing MP4 header".into())?;
+        let mut opts = Vec::new();
+        if let Some(t) = mux.movie_timescale {
+            opts.push(("movie_timescale".to_string(), t.to_string()));
+        }
+        let unused: Vec<String> = ctx(octx.write_header_with(dict(&opts)), || {
+            "writing MP4 header".into()
+        })?
+        .iter()
+        .map(|(k, _)| k.to_string())
+        .collect();
+        if let Some(key) = unused.first() {
+            return Err(EncodeError::Invalid(format!(
+                "this FFmpeg's MP4 muxer has no option `{key}`"
+            )));
+        }
         Ok(Mp4Writer {
             path: path.to_path_buf(),
             tmp,

@@ -4,8 +4,8 @@
 //! give a sequential decode's samples in MP4 and Matroska, a Matroska
 //! remux with every sample of the MP4's, 44.1 kHz resampled to 48 kHz to the
 //! sample, mono duplicated, ambiX decoded to two cardioids, the output's
-//! channels, origins before and after the audio, and `sync-flash-beep`'s
-//! beeps on its white frames.
+//! channels, origins before and after the audio, `sync-flash-beep`'s
+//! beeps on its white frames, and raw and unmixed decoding.
 
 // Test helpers outside #[test] functions; panicking is the point here.
 #![allow(clippy::unwrap_used)]
@@ -21,6 +21,7 @@ use spherecut_media::backend::{
     AudioDecode, AudioOutFormat, AudioRequest, FfmpegBackend, MediaBackend, NextAudio, NextFrame,
     VideoRequest,
 };
+use spherecut_synth::audio::{AMBIX_TONES_HZ, tone_level};
 use spherecut_synth::media::{self, Audio, Spec};
 
 const STEREO_48K: AudioOutFormat = AudioOutFormat {
@@ -346,6 +347,40 @@ fn raw_keeps_every_channel_at_the_streams_rate() {
     let e: Vec<f64> = (0..4).map(|c| energy(&channel(&data, 4, c))).collect();
     assert!(e[1] > e[0] * 0.5, "{e:?}");
     assert!(e[2] < e[0] * 0.01 && e[3] < e[0] * 0.01, "{e:?}");
+}
+
+/// Unmixed decoding (an export's ambiX, m2-plan amendment 2 item 27) is
+/// raw at the output's rate: 44.1 kHz ambiX comes out as four channels
+/// at 48 kHz, each with its own tone.
+#[test]
+fn unmixed_keeps_every_channel_at_the_outputs_rate() {
+    let spec = Spec {
+        name: "unmixed-441".into(),
+        frames: 60,
+        audio: Audio::AmbiXTones,
+        sample_rate: 44_100,
+        spherical: true,
+        ..Spec::default()
+    };
+    let path = media::write(&spec, &dir(&spec.name)).unwrap();
+    let mut dec = FfmpegAudio::open_unmixed(&path, &request(STEREO_48K, None)).unwrap();
+    assert_eq!((dec.info().rate, dec.info().channels), (44_100, 4));
+    assert!(dec.info().ambisonic);
+    let (_, data) = drain(&mut dec, None);
+    assert_eq!(data.len(), 96_000 * 4, "2 s at 48 kHz");
+    // A second from the middle: a whole number of each tone's cycles.
+    let middle = &data[24_000 * 4..72_000 * 4];
+    for c in 0..4 {
+        let ch = channel(middle, 4, c);
+        for (t, &f) in AMBIX_TONES_HZ.iter().enumerate() {
+            let level = tone_level(&ch, 48_000, f);
+            if t == c {
+                assert!((level - 0.25).abs() < 0.01, "channel {c}: {level}");
+            } else {
+                assert!(level < 0.005, "channel {c} has {f} Hz: {level}");
+            }
+        }
+    }
 }
 
 /// A source at azimuth +90° is on the left, where the left cardioid

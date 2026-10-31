@@ -1304,6 +1304,56 @@ fn plays_once(trak: &Mp4Box) -> bool {
     shown <= 1
 }
 
+/// One edit of a track's edit list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edit {
+    /// How long it shows, in the movie's timescale (`mvhd`).
+    pub duration: u64,
+    /// Where in the media it starts, in the track's timescale (`mdhd`);
+    /// −1 for an empty edit.
+    pub media_time: i64,
+    /// 16.16 fixed point: `0x0001_0000` plays at rate 1.
+    pub rate: u32,
+}
+
+/// A track's edit list (`edts/elst`), `None` without one or when it
+/// can't be read.
+pub fn edit_list(trak: &Mp4Box) -> Option<Vec<Edit>> {
+    let elst = trak.path(&[b"edts", b"elst"])?;
+    let mut c = Cursor::new(&elst.payload);
+    let (version, _) = c.version_flags()?;
+    let field = if version == 1 { 8 } else { 4 };
+    let (_, entries) = table_entries(elst, 4, 2 * field + 4).ok()?;
+    entries
+        .chunks_exact(2 * field + 4)
+        .map(|e| {
+            let (duration, media_time) = if version == 1 {
+                let d = u64::from_be_bytes(e.get(0..8)?.try_into().ok()?);
+                let t = i64::from_be_bytes(e.get(8..16)?.try_into().ok()?);
+                (d, t)
+            } else {
+                let d = u64::from(be_u32(e, 0)?);
+                let t = i64::from(be_u32(e, 4)? as i32);
+                (d, t)
+            };
+            Some(Edit {
+                duration,
+                media_time,
+                rate: be_u32(e, 2 * field)?,
+            })
+        })
+        .collect()
+}
+
+/// The movie's timescale (`moov/mvhd`), ticks a second.
+pub fn movie_timescale(tree: &Mp4Tree) -> Option<u32> {
+    let mvhd = tree.moov()?.child(b"mvhd")?;
+    let mut c = Cursor::new(&mvhd.payload);
+    let (version, _) = c.version_flags()?;
+    c.take(if version == 1 { 16 } else { 8 })?;
+    c.u32().filter(|&t| t > 0)
+}
+
 pub fn sample_timing(trak: &Mp4Box) -> Option<SampleTiming> {
     let mdhd = trak.path(&[b"mdia", b"mdhd"])?;
     let mut c = Cursor::new(&mdhd.payload);

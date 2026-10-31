@@ -168,6 +168,22 @@ pub fn project(path: &Path, trim: Range, output: Output, codec: Codec, yaw0: f64
     p
 }
 
+/// `project` exporting its audio as `audio`.
+pub fn with_audio(project: &mut Project, audio: AudioChoice) {
+    let sequence = project.the_sequence();
+    let export = ExportSettings {
+        audio,
+        ..sequence.export
+    };
+    let id = sequence.id;
+    project
+        .apply(&[Edit::SetExport {
+            sequence: id,
+            export,
+        }])
+        .unwrap();
+}
+
 pub fn export(project: &Project, out: &Path) -> Report {
     let job = ExportJob::new(project.clone(), out, gpu().clone());
     let mut e = Export::start(job).unwrap();

@@ -22,7 +22,9 @@ use spherecut_media::backend::{
     DecodeMode, DecoderEvent, Exactness, FfmpegBackend, MediaBackend, NextFrame, SeekMode,
     SeekOutcome, VideoDecode, VideoFrame, VideoRequest, VideoStreamInfo,
 };
-use spherecut_media::encode::{EncodeError, Mp4Writer, StridedPlanes, VideoSettings};
+use spherecut_media::encode::{
+    AudioSettings, EncodeError, Mp4Writer, MuxOptions, StridedPlanes, VideoSettings,
+};
 use spherecut_media::inject::{EntryEdit, TrackKind};
 use spherecut_media::spherical::{StereoMode, write};
 use spherecut_render::output::frame_views;
@@ -30,9 +32,10 @@ use spherecut_render::{
     Filter, Gpu, Placement, Stereo, StillOptions, StillRenderer, YuvImage, YuvLayout,
 };
 
+use crate::audio::{self, Feed};
 use crate::encoder::EncoderSetup;
 use crate::error::{ExportError, Stage};
-use crate::job::{ExportJob, Report, Shared, panic_text};
+use crate::job::{AudioReport, ExportJob, Report, Shared, panic_text};
 use crate::plan::FramePlan;
 use crate::preset::Preset;
 
@@ -115,7 +118,7 @@ pub(crate) fn run(
         )
     })?;
     let info = dec.info().clone();
-    let (placement, warnings) = placement(&info);
+    let (placement, mut warnings) = placement(&info);
     let ten_bit = info.layout.bit_depth > 8 && !job.eight_bit;
     let s = &job.settings;
     let setup = EncoderSetup::software(s.codec, s.quality, preset, plan.rate(), ten_bit);
@@ -134,6 +137,28 @@ pub(crate) fn run(
         yuv: setup.yuv,
     };
     let token = stop.current();
+    let (audio_plan, audio_warnings) = audio::choose(&media.path, s.audio, &sequence.output)?;
+    warnings.extend(audio_warnings);
+    let mut feed = match &audio_plan {
+        None => None,
+        Some(a) => {
+            let origin = info.origin().map_err(|e| {
+                ExportError::failed(Stage::Decode, None, format!("the video's first frame: {e}"))
+            })?;
+            let opened = Feed::open(
+                &media.path,
+                a,
+                clip.source,
+                origin,
+                stop.shutdown_flag(),
+                &token,
+            );
+            match opened {
+                Err(_) if stop.is_shut_down() => return Err(ExportError::Cancelled),
+                f => Some(f?),
+            }
+        }
+    };
     let (held_tx, held_rx) = mpsc::sync_channel(DECODED_AHEAD);
     let (yuv_tx, yuv_rx) = mpsc::sync_channel(RENDERED_AHEAD);
     let decoding = spawn("export-decode", {
@@ -144,7 +169,17 @@ pub(crate) fn run(
         let gpu = job.gpu.clone();
         move || render(gpu, look, plan, held_rx, yuv_tx, token)
     })?;
-    let encoded = encode(job, &setup, size, plan, yuv_rx, shared, stop);
+    let audio_settings = audio_plan.as_ref().map(audio::Plan::settings);
+    let encoded = encode(
+        job,
+        &setup,
+        size,
+        plan,
+        yuv_rx,
+        (audio_settings.as_ref(), feed.as_mut()),
+        shared,
+        stop,
+    );
     let decoded = join(decoding, Stage::Decode);
     let rendered = join(rendering, Stage::Render);
     if stop.is_shut_down() {
@@ -157,7 +192,7 @@ pub(crate) fn run(
     }
     let (writer, blur_capped) = encoded?;
 
-    let edits = match sequence.output {
+    let mut edits = match sequence.output {
         Output::Equirect { .. } => vec![EntryEdit {
             track: TrackKind::Video,
             boxes: [
@@ -168,6 +203,18 @@ pub(crate) fn run(
         }],
         Output::Flat { .. } => Vec::new(),
     };
+    if audio_plan.as_ref().is_some_and(|a| a.ambix) {
+        edits.push(EntryEdit {
+            track: TrackKind::Audio,
+            boxes: write::sa3d_first_order_ambix(),
+        });
+    }
+    if let Some(at) = feed.as_ref().and_then(Feed::ended_at) {
+        warnings.push(format!(
+            "the clip's audio ends {:.3} s into the export: silence after",
+            at as f64 / f64::from(audio::RATE)
+        ));
+    }
     let tmp = writer.finish_temp(&edits).map_err(|e| match e {
         EncodeError::Inject(e) => ExportError::failed(Stage::Metadata, None, e.to_string()),
         e => file_or(Stage::Mux, None, e),
@@ -198,6 +245,14 @@ pub(crate) fn run(
         codec: s.codec,
         encoder: setup.name,
         ten_bit,
+        audio: audio_plan.zip(feed.as_ref()).map(|(a, f)| AudioReport {
+            stream: a.stream,
+            encoder: "aac",
+            rate: audio::RATE,
+            channels: a.channels(),
+            ambix: a.ambix,
+            samples: f.total(),
+        }),
         bytes,
         blur_capped,
         warnings,
@@ -441,15 +496,17 @@ fn render(
     Ended::Done
 }
 
-/// The encode stage: every frame into the writer, in order. Returns the
-/// writer, all frames pushed, and the count of frames whose blur was
-/// capped.
+/// The encode stage: every frame into the writer, in order, and after
+/// each the audio up to its end. Returns the writer, all frames and
+/// samples pushed, and the count of frames whose blur was capped.
+#[allow(clippy::too_many_arguments)]
 fn encode(
     job: &ExportJob,
     setup: &EncoderSetup,
     (width, height): (u32, u32),
     plan: FramePlan,
     rx: Receiver<Rendered>,
+    (audio_settings, mut feed): (Option<&AudioSettings>, Option<&mut Feed>),
     shared: &Shared,
     stop: &StopSource,
 ) -> Result<(Mp4Writer, u64), ExportError> {
@@ -465,8 +522,20 @@ fn encode(
         time_base: None,
         crop_left: 0,
     };
-    let mut writer = Mp4Writer::create(&job.output, &settings, None)
+    let mux = MuxOptions {
+        movie_timescale: Some(audio::RATE),
+    };
+    let mut writer = Mp4Writer::create_with(&job.output, &settings, audio_settings, &mux)
         .map_err(|e| writer_error(&job.output, e))?;
+    let token = stop.current();
+    // The audio up to output sample `upto`; a stop is the cancel.
+    let mut audio_to = |writer: &mut Mp4Writer, upto: u64| -> Result<(), ExportError> {
+        match feed.as_deref_mut().map(|f| f.feed(writer, upto, &token)) {
+            Some(Ok(false)) => Err(ExportError::Cancelled),
+            Some(Err(e)) => Err(e),
+            Some(Ok(true)) | None => Ok(()),
+        }
+    };
     let mut capped = 0;
     let mut next = 0;
     while next < plan.count() {
@@ -503,6 +572,10 @@ fn encode(
             .map_err(|e| file_or(Stage::Encode, at, e))?;
         capped += u64::from(r.capped);
         next += 1;
+        let end = plan
+            .sequence_time(next)
+            .map_err(|e| ExportError::failed(Stage::Encode, at, e.to_string()))?;
+        audio_to(&mut writer, audio::sample(end)?.max(0) as u64)?;
         shared.muxed(next);
     }
     if next < plan.count() {
@@ -514,6 +587,7 @@ fn encode(
             "the frames stopped coming",
         ));
     }
+    audio_to(&mut writer, u64::MAX)?;
     Ok((writer, capped))
 }
 

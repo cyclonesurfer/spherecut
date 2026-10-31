@@ -1,5 +1,6 @@
 //! Synthetic audio: stereo tones and first-order ambiX (ACN order, SN3D
-//! normalisation) with a source at a known direction.
+//! normalisation) with a source at a known direction or a tone a
+//! channel, and the measures that read them back.
 
 use std::f64::consts::TAU;
 
@@ -123,6 +124,41 @@ pub fn ambix_source(sample_rate: u32, n: usize, azimuth: f64, elevation: f64) ->
         .collect()
 }
 
+/// The tones of [`ambix_tones`], one a channel in ACN order (W, Y, Z, X).
+pub const AMBIX_TONES_HZ: [f64; 4] = [300.0, 500.0, 700.0, 1100.0];
+
+/// First-order ambiX with a different tone in each channel
+/// ([`AMBIX_TONES_HZ`]), so that a channel that comes back elsewhere
+/// shows: not a sound field, a test of channel order.
+pub fn ambix_tones(sample_rate: u32, n: usize) -> Vec<Vec<f32>> {
+    AMBIX_TONES_HZ
+        .iter()
+        .map(|&f| {
+            tone(f, sample_rate, n, 0.25)
+                .into_iter()
+                .map(|v| v as f32)
+                .collect()
+        })
+        .collect()
+}
+
+/// The amplitude of the `freq` component of `samples`: the DFT at that
+/// frequency (Goertzel's), scaled so that a sine of amplitude `a` lasting
+/// a whole number of cycles gives `a`.
+pub fn tone_level(samples: &[f32], sample_rate: u32, freq: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let w = TAU * freq / f64::from(sample_rate);
+    let (mut re, mut im) = (0.0, 0.0);
+    for (i, &v) in samples.iter().enumerate() {
+        let (sin, cos) = (w * i as f64).sin_cos();
+        re += f64::from(v) * cos;
+        im -= f64::from(v) * sin;
+    }
+    2.0 * (re * re + im * im).sqrt() / samples.len() as f64
+}
+
 /// Recover a source direction from first-order ambiX by the
 /// intensity-vector method: `(azimuth, elevation)` in degrees.
 pub fn ambix_direction(ch: &[Vec<f32>]) -> Option<(f64, f64)> {
@@ -147,6 +183,21 @@ pub fn ambix_direction(ch: &[Vec<f32>]) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_ambix_channel_has_its_own_tone() {
+        let ch = ambix_tones(48_000, 48_000);
+        for (i, c) in ch.iter().enumerate() {
+            for (j, &f) in AMBIX_TONES_HZ.iter().enumerate() {
+                let level = tone_level(c, 48_000, f);
+                if i == j {
+                    assert!((level - 0.25).abs() < 0.01, "channel {i}: {level}");
+                } else {
+                    assert!(level < 0.001, "channel {i} at {f} Hz: {level}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn direction_round_trips() {

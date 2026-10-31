@@ -85,6 +85,8 @@ pub struct Report {
     pub encoder: &'static str,
     /// The video is 10-bit.
     pub ten_bit: bool,
+    /// The audio track, if the export has one.
+    pub audio: Option<AudioReport>,
     /// The file's size.
     pub bytes: u64,
     /// Frames whose motion blur needed more views than the cap and got
@@ -94,6 +96,21 @@ pub struct Report {
     /// a stereo source, a crop, a pose not applied.
     pub warnings: Vec<String>,
     pub elapsed: Duration,
+}
+
+/// An export's audio track.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioReport {
+    /// The source's stream it came from, by index.
+    pub stream: usize,
+    /// FFmpeg's name for the encoder.
+    pub encoder: &'static str,
+    pub rate: u32,
+    pub channels: u16,
+    /// First-order ambiX, with an `SA3D` box.
+    pub ambix: bool,
+    /// Samples a channel: the trim's length at `rate`, to within one.
+    pub samples: u64,
 }
 
 /// What the threads and the handle share: the progress counters.

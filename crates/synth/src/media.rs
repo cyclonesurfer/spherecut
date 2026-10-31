@@ -53,6 +53,9 @@ pub enum Audio {
         azimuth: i32,
         elevation: i32,
     },
+    /// First-order ambiX with a different tone in each channel
+    /// ([`audio::ambix_tones`]).
+    AmbiXTones,
     /// Stereo silence with a 1 kHz beep of [`audio::BEEP_MS`] starting at
     /// the presentation time of each of [`Spec::white`]'s frames, the same
     /// in both channels ([`audio::beeps`]): `sync-flash-beep`'s.
@@ -370,6 +373,15 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             bit_rate: 256_000,
             options: aac_options.clone(),
         }),
+        // No intensity stereo either, which codes the second and third
+        // channels (a pair to AAC) as one.
+        Audio::AmbiXTones => Some(AudioSettings {
+            encoder: "aac".into(),
+            sample_rate,
+            channels: 4,
+            bit_rate: 384_000,
+            options: [aac_options.clone(), vec![("aac_is".into(), "0".into())]].concat(),
+        }),
     };
     let mut w = Mp4Writer::create(&out, &spec.video_settings()?, audio_settings.as_ref())?;
     // Exact per-frame sample counts: frame i covers samples
@@ -393,6 +405,7 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             Some(audio::beeps(sample_rate, total, &onsets))
         }
         Audio::Levels => Some(audio::levels(sample_rate, total)),
+        Audio::AmbiXTones => Some(audio::ambix_tones(sample_rate, total)),
         Audio::AmbiX { azimuth, elevation } => Some(audio::ambix_source(
             sample_rate,
             total,
@@ -456,7 +469,7 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             ]
             .concat(),
         }];
-        if matches!(spec.audio, Audio::AmbiX { .. }) {
+        if matches!(spec.audio, Audio::AmbiX { .. } | Audio::AmbiXTones) {
             edits.push(EntryEdit {
                 track: TrackKind::Audio,
                 boxes: write::sa3d_first_order_ambix(),

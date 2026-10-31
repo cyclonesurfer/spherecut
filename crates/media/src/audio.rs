@@ -18,6 +18,8 @@
 //! **Raw** ([`FfmpegAudio::open_raw`], for measuring a stream rather
 //! than playing it: a1-plan amendment 11): every channel as it is, at the
 //! stream's own rate, with no mixing; only the sample format becomes f32.
+//! **Unmixed** ([`FfmpegAudio::open_unmixed`], for an export's ambiX: m2-plan
+//! amendment 2 item 27) is the same at the output's rate.
 //!
 //! **Timing.** libavcodec removes AAC's priming and the demuxer applies
 //! edit lists, so frames carry their presentation time. Samples before
@@ -57,6 +59,13 @@ const SILENCE_CHUNK: i64 = 4096;
 /// Packets in a row the decoder may refuse before the stream is called
 /// undecodable.
 const MAX_ERRORS: u32 = 50;
+
+/// Which unmixed output an open asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unmixed {
+    AtStreamRate,
+    AtOutputRate,
+}
 
 /// How the stream's channels become stereo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,7 +162,8 @@ pub struct FfmpegAudio {
     origin: Rational,
     in_rate: u32,
     mix: Mix,
-    /// Every channel at the stream's rate ([`open_raw`](Self::open_raw)).
+    /// Every channel, unmixed ([`open_raw`](Self::open_raw),
+    /// [`open_unmixed`](Self::open_unmixed)).
     raw: bool,
     grid: Grid,
     run: Option<Run>,
@@ -207,19 +217,33 @@ impl FfmpegAudio {
     /// a decoder) and decode its first frame, which places the stream on
     /// the clip's axis. A file without one is [`MediaError::NoStream`].
     pub fn open(path: &Path, req: &AudioRequest) -> Result<Self, MediaError> {
-        Self::open_with(path, req, false)
+        Self::open_with(path, req, None)
     }
 
     /// As [`open`](Self::open), but the output is the stream's own: its
     /// rate and every channel, unmixed, which [`AudioDecode::info`] gives.
     /// `req.out` is not read.
     pub fn open_raw(path: &Path, req: &AudioRequest) -> Result<Self, MediaError> {
-        Self::open_with(path, req, true)
+        Self::open_with(path, req, Some(Unmixed::AtStreamRate))
     }
 
-    fn open_with(path: &Path, req: &AudioRequest, raw: bool) -> Result<Self, MediaError> {
+    /// As [`open_raw`](Self::open_raw), but resampled to `req.out.rate`:
+    /// every channel as it is, at the output's rate. `req.out.channels`
+    /// is not read.
+    pub fn open_unmixed(path: &Path, req: &AudioRequest) -> Result<Self, MediaError> {
+        Self::open_with(path, req, Some(Unmixed::AtOutputRate))
+    }
+
+    fn open_with(
+        path: &Path,
+        req: &AudioRequest,
+        unmixed: Option<Unmixed>,
+    ) -> Result<Self, MediaError> {
         init();
-        if !raw && (req.out.rate == 0 || req.out.channels == 0) {
+        let raw = unmixed.is_some();
+        let rate_given = unmixed != Some(Unmixed::AtStreamRate);
+        let channels_given = unmixed.is_none();
+        if (rate_given && req.out.rate == 0) || (channels_given && req.out.channels == 0) {
             return Err(err(
                 path,
                 "opening audio",
@@ -335,7 +359,7 @@ impl FfmpegAudio {
         a.info.channels = u16::try_from(f.channels).unwrap_or(u16::MAX);
         if raw {
             a.out = AudioOutFormat {
-                rate: f.rate,
+                rate: if rate_given { req.out.rate } else { f.rate },
                 channels: a.info.channels,
             };
         }
