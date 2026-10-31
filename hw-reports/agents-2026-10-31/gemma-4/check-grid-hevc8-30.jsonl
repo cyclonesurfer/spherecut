@@ -1,0 +1,2 @@
+{"error": "HTTP Error 500: Internal Server Error"}
+{"answer": null, "parsed": null, "ok": false, "why": "no answer", "stats": {"steps": 1, "calls": 0, "errors": 0, "images": 0, "prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.1}}
