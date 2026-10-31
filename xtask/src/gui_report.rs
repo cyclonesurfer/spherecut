@@ -519,9 +519,14 @@ fn export(e: &Value) -> Option<String> {
     } else {
         String::new()
     };
+    let device = match e["device"].as_str() {
+        Some("own") => " on a device of its own",
+        Some("window") => " on the window's device",
+        _ => "",
+    };
     Some(format!(
-        "The export while it played ({what}): {} frames at {} in {:.1} s with {}{}; busy {}; \
-         {} frames waited for a UI pass, the longest {} ms{ui}.",
+        "The export while it played ({what}){device}: {} frames at {} in {:.1} s with {}{}; \
+         busy {}; {} frames waited for a UI pass, the longest {} ms{ui}.",
         e["frames"],
         size(&e["size"]),
         e["elapsed_s"].as_f64().unwrap_or(0.0),
@@ -602,7 +607,7 @@ mod tests {
             }
         });
         doc["result"]["export"] = serde_json::json!({
-            "output": "/o/gui-0-export.mp4", "preset": "360-7680", "motion_blur": true,
+            "output": "/o/gui-0-export.mp4", "preset": "360-7680", "motion_blur": true, "device": "own",
             "ok": true, "error": null, "frames": 60, "size": [7680, 3840],
             "encoder": "hevc_vaapi", "fallback": null, "elapsed_s": 12.34,
             "stages_s": {"decode": 1.0, "encode": 3.31, "finish": 0.5, "readback": 2.0, "render": 9.0},
@@ -659,8 +664,8 @@ mod tests {
         ));
         assert!(!md.contains("convert"));
         assert!(md.contains(
-            "The export while it played (360-7680, with motion blur): 60 frames at 7680×3840 in \
-             12.3 s with hevc_vaapi; busy decode 1.0 s, encode 3.3 s, finish 0.5 s, readback 2.0 \
+            "The export while it played (360-7680, with motion blur) on a device of its own: 60 \
+             frames at 7680×3840 in 12.3 s with hevc_vaapi; busy decode 1.0 s, encode 3.3 s, finish 0.5 s, readback 2.0 \
              s, render 9.0 s; 58 frames waited for a UI pass, the longest 17.3 ms; while it ran \
              95% of the UI frames were presented, UI p50 / p99 16.7 / 24.5 ms, 360 frames shown \
              and 2 dropped."

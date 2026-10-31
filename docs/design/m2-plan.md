@@ -586,7 +586,10 @@ to write. So, for every thread but the UI's:
   of 16 MiB. The free export (the pace not held, and the CLI) is as
   before, with its YUV and readback buffers kept from frame to frame.
 
-A second queue stays unneeded unless odin's rerun says otherwise.
+odin's rerun at 5316176 still missed: the blur export's window
+presented 66 %, with a stall of up to 100 ms an export frame, on the
+CPU. So the app's export renders on a device of its own (M2.10b), which
+shares nothing with the window but the GPU; the pace and the bands stay.
 
 ## 1. Summary
 

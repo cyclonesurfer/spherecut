@@ -183,6 +183,22 @@ impl Gpu {
         Ok(Self::from_parts(instance, adapter, device, queue))
     }
 
+    /// A second device on this one's adapter, sharing nothing with it but
+    /// the GPU: wgpu's locks, the queue and the submit gate are its own.
+    /// The app's export renders on one (D56), so that nothing it does
+    /// waits for the window's present or holds it up.
+    pub fn beside(&self, what: &str) -> Result<Gpu, RenderError> {
+        spherecut_core::may_block("opening a GPU device");
+        let (device, queue) = open_device(&self.adapter)?;
+        tracing::info!(adapter = %describe(&self.caps.info), "{what}, on a device of its own");
+        Ok(Self::from_parts(
+            self.instance.clone(),
+            self.adapter.clone(),
+            device,
+            queue,
+        ))
+    }
+
     fn open_shared(choice: &AdapterChoice, what: &str) -> Result<Gpu, RenderError> {
         spherecut_core::may_block("opening a GPU device");
         let (instance, adapter) = Self::adapter(choice)?;

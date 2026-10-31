@@ -210,6 +210,11 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
                 open,
             });
             let mut app = app;
+            app.state.export.device = crate::export::ExportDevice::parse(
+                std::env::var(crate::export::ExportDevice::ENV)
+                    .ok()
+                    .as_deref(),
+            );
             app.smoke = args.smoke.map(|a| {
                 let mut d = SmokeDriver::new(a, format!("{:?}", rs.target_format));
                 // The run's limits come in its UI passes, and a window the

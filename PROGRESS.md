@@ -470,8 +470,23 @@ M2.10 (branch `m2/pace`, D56) answers each:
 - The YUV pass's output and the readback buffer are kept from frame to
   frame: at 8K in P010 they are 88 MB each.
 
-odin's rerun of `gui_smoke`, `gui_proto` and the export tests on
-`m2/pace` is under way.
+odin reran `gui_smoke`, `gui_proto` and the export tests at 5316176
+(PR #20, `hw-reports/odin-5316176-pace.md` and `-pace-125.md`). The
+export tests and `gui_proto` passed, the 8K export's window presented
+95 % (85 % before) and the blur export dropped no video frame (28
+before), but `gui_smoke` still failed: under the blur export the window
+presented 66 % with a stall of up to 100 ms about once an export frame,
+the UI's own work 14.2 ms at p95, and the export took 13.9 s (6.0 s);
+the 1080p export's window had one 83 ms stall. The slowest stages in
+the late gaps were the viewer's own decode and upload, not the GPU's
+work, so the export still held the window up through something it
+shared with the window on their one device.
+
+M2.10b: the app's export renders on a GPU device of its own on the
+window's adapter (`Gpu::beside`, D56), sharing no wgpu lock, queue or
+submit gate with the window. The pace and the bands stay;
+`SPHERECUT_EXPORT_DEVICE=window` puts it back on the window's device to
+compare. odin's rerun of `gui_smoke` and `gui_proto` with it is next.
 
 ## A1: the MCP server
 

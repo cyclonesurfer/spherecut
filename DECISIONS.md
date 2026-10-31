@@ -8442,7 +8442,7 @@ a second queue); a user wants the tabs in one row on a wide screen; M5's
 render queue takes the export out of the window; or a user wants the
 quit to ask about a running export.
 
-## D56. An export on the window's device: no wait through wgpu, and a smaller unit
+## D56. The app's export and the window: no wait through wgpu, a smaller unit, a device of its own
 
 *2026-10-31, M2.10, from odin's M2 run at 0663e05. Updates D41 and
 D55.*
@@ -8492,18 +8492,52 @@ What:
   to split a 192 × 96 frame give the same bytes as one pass, every
   layout and depth, with blur. The hardware measure is `gui_smoke`'s
   export runs on Tier 2.
+- **odin's rerun at 5316176** (PR #20, `hw-reports/odin-5316176-pace.md`
+  and `-pace-125.md`): the export tests pass, and the 8K export's
+  window presented 95 % (85 % before) with its readback 3.9 s (6.0 s);
+  the blur export dropped no video frame (28 before) but took 13.9 s
+  (6.0 s), and its window presented 66 % with 64 late passes of up to
+  100 ms, about one an export frame, while the UI's own work rose to
+  14.2 ms at p95 (0.9 ms without an export). The 1080p export's window
+  had one 83 ms stall, and at 125 % ran at 30 Hz throughout. The
+  slowest stages in the late gaps were the viewer's decode and upload
+  (63 and 77 ms in one), not the GPU's work. So the export still held
+  the window up on the CPU, through something the two shared besides
+  the lock above: wgpu-core's other locks (the queue's pending writes,
+  which a submit holds through `vkQueueSubmit`, and the allocator's),
+  or the device's single queue.
+- **So the app's export renders on a device of its own** (M2.10b,
+  `Gpu::beside`): a second wgpu device on the window's adapter, opened
+  by the export's starting thread, sharing no lock, queue or submit
+  gate with the window's, only the GPU, which the kernel's scheduler
+  shares between the two a job at a time. The pace (one frame a UI
+  pass) and the shared renderer's bands stay, so that the export's jobs
+  stay short and few between two of the window's frames. When a second
+  device can't be had, the export renders on the window's, as before,
+  and says so in the log. `SPHERECUT_EXPORT_DEVICE=window` asks for
+  the window's, for comparing the two; the smoke document says which
+  the export used (`device`: `own` or `window`). The CLI's export has
+  always had its own device.
+- **Tests**: app's `the_export_has_a_device_of_its_own_unless_told_the_windows`
+  and `a_device_beside_the_windows_is_another_on_its_adapter`; the
+  kittest of an export while the window plays checks the device it
+  used.
 
 Why:
-- **Polling over a second queue or a device of the export's own.** A
-  second queue isn't in wgpu 30's API; a second device would copy each
-  decoded frame across devices, which path B exists to avoid (D25).
+- **A device of the export's own, over a second queue.** A second queue
+  isn't in wgpu 30's API. The export decodes on VA-API or in software
+  (D52), never through the window's device (path B is the player's), so
+  a second device copies nothing across devices; it costs the device's
+  opening (a fraction of a second, off the UI thread) and the export's
+  own memory, which it had on the shared device too.
 - **Bands over a lower resolution or rate while held**: the bytes stay
   those of the free export, which the parity tests compare.
 
-Revisit if: odin's rerun still misses the 90 % (then read its late
-passes for the next lock); wgpu-core stops holding the lock through
-`maintain`'s wait, or fixes the timed wait's race, which would let a
-plain wait back; wgpu gains a second queue.
+Revisit if: odin's rerun with the export's own device still misses the
+90 % (then the GPU itself is the contention: the export's jobs smaller
+still, or fewer of them a UI frame); wgpu-core stops holding the lock
+through `maintain`'s wait, or fixes the timed wait's race, which would
+let a plain wait back; wgpu gains a second queue.
 
 ## Open
 

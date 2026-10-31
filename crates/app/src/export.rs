@@ -11,7 +11,9 @@
 //! the UI thread never waits on a file (section 7.9).
 //!
 //! While the viewer plays or a drag runs, the export is held to a frame
-//! a UI pass through its [`Pace`] (amendment 2 item 22).
+//! a UI pass through its [`Pace`] (amendment 2 item 22). It renders on a
+//! GPU device of its own beside the window's (D56), so that nothing it
+//! submits or waits for shares a lock or a queue with the window's.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,6 +24,7 @@ use spherecut_core::project::{AudioChoice, Codec, Edit, EncoderChoice, Output, P
 use spherecut_core::time::Time;
 use spherecut_export::{Export, ExportError, ExportJob, Pace, Progress, Report};
 use spherecut_media::doctor::{DoctorReport, Severity};
+use spherecut_render::Gpu;
 
 use crate::app::{AppState, DoctorState};
 use crate::jobs::{Job, Poll, Threads};
@@ -35,6 +38,39 @@ pub enum Span {
     #[default]
     Trim,
     Selection,
+}
+
+/// Where the app's export renders (D56).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExportDevice {
+    /// A device of its own on the window's adapter: the default.
+    #[default]
+    Own,
+    /// The window's own device, as M2.7 had it: for comparing the two
+    /// (`SPHERECUT_EXPORT_DEVICE=window`), and what an export falls back
+    /// to when a second device can't be had.
+    Window,
+}
+
+impl ExportDevice {
+    /// The environment variable that puts the export on the window's
+    /// device: `window`; anything else, or nothing, is a device of its own.
+    pub const ENV: &'static str = "SPHERECUT_EXPORT_DEVICE";
+
+    pub fn parse(value: Option<&str>) -> ExportDevice {
+        match value.map(str::trim) {
+            Some(v) if v.eq_ignore_ascii_case("window") => ExportDevice::Window,
+            _ => ExportDevice::Own,
+        }
+    }
+
+    /// `own` or `window`, as the smoke document has it.
+    pub fn name(self) -> &'static str {
+        match self {
+            ExportDevice::Own => "own",
+            ExportDevice::Window => "window",
+        }
+    }
 }
 
 /// The window's state and the export running.
@@ -54,6 +90,10 @@ pub struct ExportUi {
     run: Option<Running>,
     /// How the last export ended.
     pub last: Option<Result<Report, ExportError>>,
+    /// Where the next export renders.
+    pub device: ExportDevice,
+    /// Where the last one to start rendered.
+    pub device_used: Option<ExportDevice>,
     /// The UI's side of the pace: [`SpherecutApp::logic`](crate::app::SpherecutApp::logic)
     /// passes it each pass.
     pub pace: Arc<Pace>,
@@ -95,7 +135,7 @@ struct Running {
 
 #[derive(Debug)]
 enum Run {
-    Starting(Job<Result<Export, ExportError>>),
+    Starting(Job<(Result<Export, ExportError>, ExportDevice)>),
     Exporting(Box<Export>),
 }
 
@@ -191,7 +231,10 @@ impl AppState {
             return;
         };
         let ended = match &mut run.state {
-            Run::Starting(job) => match job.poll() {
+            Run::Starting(job) => match job.poll().map(|(started, device)| {
+                ui.device_used = Some(device);
+                started
+            }) {
                 Poll::Pending => None,
                 Poll::Done(Ok(export)) => {
                     if run.cancelled {
@@ -291,17 +334,39 @@ impl AppState {
         if self.export.running() {
             return;
         }
-        let mut job = ExportJob::new(project.clone(), &output, self.gpu.clone());
+        let window = self.gpu.clone();
+        let mut job = ExportJob::new(project.clone(), &output, window.clone());
         job.overwrite = overwrite;
         job.pace = Some(self.export.pace.clone());
-        tracing::info!(output = %output.display(), "exporting");
-        let starting = Job::spawn("export-start", move || Export::start(job));
+        let device = self.export.device;
+        tracing::info!(output = %output.display(), device = device.name(), "exporting");
+        let starting = Job::spawn("export-start", move || {
+            let (gpu, used) = export_device(window, device);
+            job.gpu = gpu;
+            (Export::start(job), used)
+        });
         self.export.run = Some(Running {
             output,
             project,
             state: Run::Starting(starting),
             cancelled: false,
         });
+    }
+}
+
+/// The device an export renders on: a second one on the window's adapter,
+/// or the window's when asked for or when a second can't be had. On the
+/// export's starting thread: opening a device takes a while.
+fn export_device(window: Gpu, want: ExportDevice) -> (Gpu, ExportDevice) {
+    match want {
+        ExportDevice::Window => (window, ExportDevice::Window),
+        ExportDevice::Own => match window.beside("exporting") {
+            Ok(gpu) => (gpu, ExportDevice::Own),
+            Err(e) => {
+                tracing::warn!(error = %e, "the export renders on the window's device");
+                (window, ExportDevice::Window)
+            }
+        },
     }
 }
 
@@ -808,6 +873,28 @@ fn replace_window(s: &mut AppState, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_export_has_a_device_of_its_own_unless_told_the_windows() {
+        assert_eq!(ExportDevice::parse(None), ExportDevice::Own);
+        assert_eq!(ExportDevice::parse(Some("own")), ExportDevice::Own);
+        assert_eq!(ExportDevice::parse(Some("whatever")), ExportDevice::Own);
+        assert_eq!(ExportDevice::parse(Some(" Window ")), ExportDevice::Window);
+        assert_eq!(ExportDevice::Own.name(), "own");
+        assert_eq!(ExportDevice::Window.name(), "window");
+    }
+
+    #[test]
+    fn a_device_beside_the_windows_is_another_on_its_adapter() {
+        let window = Gpu::headless(&spherecut_render::AdapterChoice::Cpu).expect("lavapipe");
+        let (gpu, used) = export_device(window.clone(), ExportDevice::Own);
+        assert_eq!(used, ExportDevice::Own);
+        assert_ne!(gpu.device, window.device);
+        assert_eq!(gpu.caps.info.name, window.caps.info.name);
+        let (gpu, used) = export_device(window.clone(), ExportDevice::Window);
+        assert_eq!(used, ExportDevice::Window);
+        assert_eq!(gpu.device, window.device);
+    }
 
     #[test]
     fn the_output_gets_mp4_and_refuses_a_path() {

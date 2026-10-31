@@ -371,6 +371,11 @@ fn an_export_from_the_window_reaches_the_end_while_the_ui_draws_on() {
     assert!(n.fix.contains("Checked: "), "{}", n.fix);
     let (held, _) = h.state().state.export.pace.waits();
     assert!(held > 0, "no frame waited for a UI pass while playing");
+    // It rendered on a device of its own (D56), not the window's.
+    assert_eq!(
+        h.state().state.export.device_used,
+        Some(spherecut_app::export::ExportDevice::Own)
+    );
     times.sort();
     eprintln!(
         "exported 10 frames while playing in {} steps, the median {:?}, the slowest {:?}; {held} \

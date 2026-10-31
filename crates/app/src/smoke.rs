@@ -932,6 +932,9 @@ pub struct ExportReport {
     /// blur was.
     pub preset: Option<String>,
     pub motion_blur: bool,
+    /// Where it rendered: `own` (a device of its own) or `window` (the
+    /// window's), D56.
+    pub device: Option<&'static str>,
     /// It ended with its file whole and checked.
     pub ok: bool,
     pub error: Option<String>,
@@ -1230,6 +1233,7 @@ impl SmokeDriver {
                 export,
                 run.export_from.is_some(),
                 s.export.last.as_ref(),
+                s.export.device_used,
                 &s.export.pace,
                 while_running,
             )
@@ -1318,6 +1322,7 @@ fn export_report(
     export: &SmokeExport,
     started: bool,
     last: Option<&Result<spherecut_export::Report, spherecut_export::ExportError>>,
+    device: Option<crate::export::ExportDevice>,
     pace: &spherecut_export::Pace,
     while_running: Option<Settled>,
 ) -> ExportReport {
@@ -1326,6 +1331,7 @@ fn export_report(
         output: export.output.display().to_string(),
         preset: export.preset.map(|p| p.to_string()),
         motion_blur: export.blur,
+        device: device.map(crate::export::ExportDevice::name),
         ok: false,
         error: None,
         frames: None,
