@@ -6,10 +6,13 @@
 //!   in 10 bits where AV1 works), exported through the VA-API encoder
 //!   alone and through its software counterpart, the same project each
 //!   time, both against the parity reference rendered on the same GPU.
-//!   Each is held to PLAN's floor, 40 dB and 0.98, until odin's
-//!   measurements give floors of their own; the measures go in the
-//!   report's notes. The source decodes on VA-API: a decode that fell
-//!   back fails the test.
+//!   The VA-API encoders are held to odin's measures less 3 dB and
+//!   0.003 (AV1's to PLAN's 40 dB and 0.98 until odin measures it), the
+//!   software ones to PLAN's (theirs are Tier 1's); the measures go in
+//!   the report's notes. The source decodes on VA-API: a decode that fell
+//!   back fails the test. Every export decodes at the output's size
+//!   (odin's VCN 4 padded a 1080 × 1080 AV1 to 1088 × 1082), and where
+//!   AV1 works, a square one goes to libsvtav1, which `auto` says.
 //! - `export_360_8k_vaapi`: 2 s of the 8K perf clip to 360 at 7680×3840,
 //!   in AV1 where doctor finds av1_vaapi working, else HEVC: V1 and V2
 //!   read back, and A1's `check` passing it for `youtube_360`.
@@ -61,8 +64,8 @@ use spherecut_sphere::orient::Ypr;
 use spherecut_synth::media::{self as synth, PERF_5K7_8BIT, PERF_8K_8BIT};
 use spherecut_testkit::{bench, tier2};
 
-/// PLAN's least: the floor until odin's measurements set the encoders'
-/// own.
+/// PLAN's least: the software encoders' floor here (theirs are Tier 1's),
+/// and a VA-API format's until odin measures it.
 const PLAN_FLOORS: (f64, f64) = (40.0, 0.98);
 
 /// The GPU the tests render on: `SPHERECUT_ADAPTER`'s, else the best
@@ -146,6 +149,16 @@ fn export_on(gpu: &Gpu, project: &Project, encoder: EncoderChoice, out: &Path) -
 /// the reference on `gpu`, every frame.
 fn worst_against_reference(gpu: &Gpu, project: &Project, out: &Path, yuv: YuvLayout) -> (f64, f64) {
     let got = frames(out);
+    let (w, h) = project.the_sequence().output.size();
+    for g in &got {
+        let (gw, gh, _) = luma(g.as_ref());
+        assert_eq!(
+            (gw, gh),
+            (w as usize, h as usize),
+            "{} decodes at another size than the output's: the encoder padded it",
+            out.display()
+        );
+    }
     let src = frames(&media_path(project));
     let all: Vec<u64> = (0..got.len() as u64).collect();
     let want = references_on(gpu, project, &src, yuv, &all);
@@ -170,6 +183,9 @@ struct Case {
     /// encoder's.
     yuv: YuvLayout,
     encoders: (&'static str, &'static str),
+    /// The VA-API encoder's worst luma PSNR and SSIM: odin's (RX 7600,
+    /// Mesa's radeonsi, 2026-10-31) less 3 dB and 0.003, else PLAN's.
+    floor: (f64, f64),
 }
 
 fn cases() -> Vec<Case> {
@@ -177,9 +193,10 @@ fn cases() -> Vec<Case> {
         aspect: Aspect::Wide,
         short_side: 1080,
     };
-    let square = Output::Flat {
-        aspect: Aspect::Square,
-        short_side: 1080,
+    // AV1 on VA-API takes no size it would pad (64 × 16 on VCN 4).
+    let wide_1440 = Output::Flat {
+        aspect: Aspect::Wide,
+        short_side: 1440,
     };
     let sphere = Output::Equirect {
         width: 3840,
@@ -187,7 +204,7 @@ fn cases() -> Vec<Case> {
     };
     let eight = ("parity-grid-h264-8", synth::Codec::H264, 8);
     let ten = ("parity-grid-hevc-10", synth::Codec::Hevc, 10);
-    let case = |format, codec, source, output, end, yuv, encoders| Case {
+    let case = |format, codec, source, output, end, yuv, encoders, floor| Case {
         format,
         codec,
         source,
@@ -195,6 +212,7 @@ fn cases() -> Vec<Case> {
         end,
         yuv,
         encoders,
+        floor,
     };
     let (h264, hevc, av1) = (
         ("h264_vaapi", "libx264"),
@@ -202,6 +220,8 @@ fn cases() -> Vec<Case> {
         ("av1_vaapi", "libsvtav1"),
     );
     let (two, half) = (Time::from_secs(2), secs(1, 2));
+    // odin measured 50.78 dB and 0.99729, 53.15 and 0.99808, 54.30 and
+    // 0.99914; AV1 wasn't measured (its square case was padded).
     vec![
         case(
             "H.264",
@@ -211,6 +231,7 @@ fn cases() -> Vec<Case> {
             two,
             YuvLayout::I420,
             h264,
+            (47.7, 0.994),
         ),
         case(
             "HEVC Main",
@@ -220,6 +241,7 @@ fn cases() -> Vec<Case> {
             two,
             YuvLayout::I420,
             hevc,
+            (50.1, 0.995),
         ),
         case(
             "HEVC Main 10",
@@ -229,10 +251,29 @@ fn cases() -> Vec<Case> {
             half,
             YuvLayout::I010,
             hevc,
+            (51.3, 0.996),
         ),
-        case("AV1", Codec::Av1, eight, square, half, YuvLayout::I420, av1),
+        case(
+            "AV1",
+            Codec::Av1,
+            eight,
+            wide_1440,
+            half,
+            YuvLayout::I420,
+            av1,
+            PLAN_FLOORS,
+        ),
         // Doctor checks AV1 in 8 bits; VCN 4 encodes 10 too.
-        case("AV1", Codec::Av1, ten, square, half, YuvLayout::I010, av1),
+        case(
+            "AV1",
+            Codec::Av1,
+            ten,
+            sphere,
+            half,
+            YuvLayout::I010,
+            av1,
+            PLAN_FLOORS,
+        ),
     ]
 }
 
@@ -285,14 +326,35 @@ fn export_vaapi_matches_software() {
             measured.push((encoder, psnr, ssim));
             std::fs::remove_file(&out).ok();
         }
-        for (encoder, psnr, ssim) in measured {
+        for ((encoder, psnr, ssim), floor) in measured.into_iter().zip([c.floor, PLAN_FLOORS]) {
             assert!(
-                psnr >= PLAN_FLOORS.0 && ssim >= PLAN_FLOORS.1,
-                "{name} through {encoder}: worst {psnr:.2} dB, SSIM {ssim:.5}, below PLAN's \
-                 {PLAN_FLOORS:?}"
+                psnr >= floor.0 && ssim >= floor.1,
+                "{name} through {encoder}: worst {psnr:.2} dB, SSIM {ssim:.5}, below {floor:?}"
             );
         }
         ran.push(name);
+    }
+    // A square AV1 would be padded on VA-API: `auto` exports it through
+    // libsvtav1, and says why.
+    if works.iter().any(|w| w == "AV1") {
+        let src = grid("parity-grid-h264-8", synth::Codec::H264, 8);
+        let square = Output::Flat {
+            aspect: Aspect::Square,
+            short_side: 1080,
+        };
+        let p = project(&src, first(secs(1, 2)), square, Codec::Av1, 0.0);
+        let out = scratch.0.join("av1-square.mp4");
+        let r = export_on(&gpu, &p, EncoderChoice::Auto, &out);
+        let f = r.fallback.as_ref().expect("no fallback from av1_vaapi");
+        assert_eq!(
+            (r.encoder, f.from, f.code),
+            ("libsvtav1", "av1_vaapi", "hw_unsupported"),
+            "{f:?}"
+        );
+        let (psnr, ssim) = worst_against_reference(&gpu, &p, &out, YuvLayout::I420);
+        eprintln!("square AV1 through libsvtav1: worst luma PSNR {psnr:.2} dB, SSIM {ssim:.5}");
+        std::fs::remove_file(&out).ok();
+        ran.push("AV1 square, through libsvtav1".into());
     }
     eprintln!("ran {ran:?}");
 }

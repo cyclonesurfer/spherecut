@@ -306,7 +306,7 @@ and `decode_failed` as above:
 | `media_offline` | 1 | The clip's media file isn't where the project says (relinking a moved file is M5's); `path` is where it was looked for |
 | `cannot_export` | 1 | The project can't be exported as it is: an empty trim, a trim of more frames than an export holds, PCM ambiX copied into a 360 MP4 (YouTube takes it only in a MOV: ask for `--audio aac`) |
 | `no_encoder` | 3 | No encoder the run can use for the codec: `--encoder vaapi` without a render node or without the codec's VA-API encoder in this FFmpeg, or no software encoder for it |
-| `hw_unavailable`, `hw_unsupported`, `hw_failed` | 3 | `--encoder vaapi`: the device can't be opened, its encoder refused the job, or it failed on a frame in its first second. With `auto` they are `fallback`'s code instead, and the export goes on in software |
+| `hw_unavailable`, `hw_unsupported`, `hw_failed` | 3 | `--encoder vaapi`: the device can't be opened, its encoder refused the job (or AV1 at a size VA-API would pad: not a multiple of 64 wide and 16 high), or it failed on a frame in its first second. With `auto` they are `fallback`'s code instead, and the export goes on in software |
 | `no_space` | 1 | The output's folder has less free space than two copies of the export at its preset's highest bitrate need (both are on the disk while the file is finished); the message gives both numbers, and `path` is the folder |
 | `decode_failed` | 1 | Opening the clip, or a frame of it, failed (or the decoder concealed damage in it); the message gives the frame's time |
 | `render_failed` | 1 | The GPU's projection, YUV pass or readback failed for a frame |
@@ -762,7 +762,7 @@ before the last have `ok` true and no warnings.
 | `codec` | string | `h264`, `hevc` or `av1` |
 | `quality` | string | `high`, `medium` or `small` |
 | `encoder` | string | The encoder tried first, as FFmpeg names it (`hevc_vaapi`, `libx265`, ...) |
-| `fallback` | object, or absent | The hardware encoder `auto` passed over without trying, and why: `from` (FFmpeg's name for it), `code` (`hw_unavailable`: no render node, or no such encoder in this FFmpeg) and `reason` |
+| `fallback` | object, or absent | The hardware encoder `auto` passed over without trying, and why: `from` (FFmpeg's name for it), `code` (`hw_unavailable`: no render node, or no such encoder in this FFmpeg; `hw_unsupported`: AV1 at a size VA-API would pad, one not a multiple of 64 wide and 16 high, such as 1920×1080) and `reason` |
 | `audio` | string | `copy`, `aac` or `none`, as asked |
 | `motion_blur` | bool | Whether each frame is blurred over its shutter |
 

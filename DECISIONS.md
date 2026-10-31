@@ -7953,7 +7953,14 @@ What, as `crates/export` does it:
   preset (speed, balanced, quality, high quality), bit 3 pre-encode and
   bit 4 VBAQ. High is quality with pre-encode and VBAQ (29), Medium and
   Small balanced (3), a draft speed (1). `bench_export_vaapi_levels`
-  measures each on odin, which may change this table.
+  measured each on odin (RX 7600, 2026-10-31; 4K from the 5.7K clip,
+  one run each, fps / worst luma dB / Mb/s for speed, balanced and 29):
+  H.264 35.3 / 45.20 / 36.6, 37.5 / 44.71 / 28.5, 25.9 / 45.20 / 36.2;
+  HEVC 38.2 / 47.16 / 28.9, 39.2 / 46.44 / 25.7, 36.9 / 47.16 / 27.4;
+  AV1 38.5 / 43.02 / 15.0, 39.7 / 43.55 / 20.6, 25.5 / 43.03 / 15.7.
+  VBAQ moves luma PSNR by half a dB either way, as it should (it spends
+  bits where the eye sees them, not where PSNR counts), and in a whole
+  export the encode isn't the slow stage (below), so the table stands.
 - **The order and fallback** (section 8.3). `auto` tries the codec's
   VA-API encoder where there is a render node and this FFmpeg has it,
   then the software one; with no node or no such encoder it goes
@@ -7965,6 +7972,21 @@ What, as `crates/export` does it:
   hardware's code: exit 3 in the CLI). H.264 wider than 4096 is past
   VCN 4's limit: it goes to libx264 at level 6, with the warning
   `h264_level_6`.
+- **AV1 only at a size VA-API needn't pad** (odin, 2026-10-31). VCN 4
+  pads AV1 to a multiple of 64 × 16 (1080 lines to 1082, a mode of its
+  own), and the file decodes at the padded size: odin's 1080 × 1080
+  parity export came back 1088 × 1082, and decoders don't crop to the
+  render size (dav1d and FFmpeg's own decoder turn it into an aspect
+  ratio; Chromium's WebCodecs ignore it). H.264 and HEVC crop theirs in
+  the stream (frame cropping, the conformance window), so they are
+  untouched. AV1 goes to av1_vaapi only where the size encoded (the
+  draft's, for a draft) is a multiple of 64 wide and 16 high: 2560 ×
+  1440 and 3840 × 2160 flat, every 360 preset, and most drafts. At any
+  other `auto` goes straight to libsvtav1, its fallback `hw_unsupported`
+  ("av1_vaapi would pad 1920x1080: ..."), and `vaapi` alone fails with
+  that code (exit 3). The rule holds for every driver until a Tier 2 run
+  shows one decoding at the size asked for; reports say VCN 5 doesn't
+  pad.
 - **The decode path** (item 25): `auto` decodes on VA-API on the same
   node, going on in software if it can't (D3's fallback, through the
   backend's `Fallback::Software`), and the report's `decode` says where
@@ -7986,12 +8008,26 @@ What, as `crates/export` does it:
   slow stage when an export misses real time.
 - **Tier 2** (`crates/export/tests/tier2_export.rs`, `cargo xtask
   hw-test`): every format doctor finds working on VA-API against its
-  software twin and the parity reference on the same GPU, held to
-  PLAN's 40 dB and 0.98 until odin's numbers set floors of their own;
-  an 8K 360 export through VA-API that A1's `check` passes for
-  `youtube_360`; the 4K30 bench (a 3840×2160 reframe of the 5.7K perf
-  clip and of an X5 `.lrv` proxy, H.264 at High, and HEVC and a draft
-  as well, gated at 30 fps); and the quality levels' table.
+  software twin and the parity reference on the same GPU, each decoding
+  at the output's size; an 8K 360 export through VA-API that A1's
+  `check` passes for `youtube_360`; the 4K30 bench (a 3840×2160 reframe
+  of the 5.7K perf clip and of an X5 `.lrv` proxy, H.264 at High, and
+  HEVC and a draft as well, gated at 30 fps); and the quality levels'
+  table.
+- **odin's run** (RX 7600, Mesa's radeonsi, FFmpeg 8.1, at 6993987,
+  2026-10-31, `hw-reports/odin-6993987-m25.md`). The 4K30 gate passes:
+  H.264 at High 32.5 fps (31.7 to 34.2 over 3 runs), HEVC 44.4, a draft
+  54.9, from the `.lrv` proxy 46.8. Decode is the slow stage (29.9 ms a
+  frame of the 5.7K clip in H.264's run, 22.1 in HEVC's), then render
+  (9.7), encode (6.6) and readback (3.0): the stages overlap, so the
+  rate is about the decode's. Parity, worst luma PSNR and SSIM through
+  VA-API (software in brackets): H.264 50.78 dB, 0.99729 (52.32,
+  0.99817); HEVC Main 53.15, 0.99808 (53.07, 0.99834); HEVC Main 10
+  54.30, 0.99914 (58.95, 0.99962). Their floors are those less 3 dB and
+  0.003: 47.7 and 0.994, 50.1 and 0.995, 51.3 and 0.996. AV1 was padded
+  (above), so its floor stays PLAN's 40 dB and 0.98 until its cases, now
+  at 2560 × 1440 and 3840 × 1920, are measured. The 8K 360 export
+  through av1_vaapi ran at 10.0 fps, 35.3 Mb/s (decode 5.7 s of 8.0).
 
 Not yet, and where it goes:
 

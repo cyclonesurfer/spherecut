@@ -335,7 +335,19 @@ impl Export {
         })?;
         let plan = FramePlan::new(clip.source, sequence.rate)?;
         let node = render_node(&job.gpu);
-        let encoders = Encoders::choose(&job.settings, preset, sequence.rate, &node, &has_encoder)?;
+        let size = if job.draft {
+            preset.draft_size()
+        } else {
+            preset.size()
+        };
+        let encoders = Encoders::choose(
+            &job.settings,
+            preset,
+            size,
+            sequence.rate,
+            &node,
+            &has_encoder,
+        )?;
         if !job.overwrite && std::fs::symlink_metadata(&job.output).is_ok() {
             return Err(ExportError::OutputExists(job.output.clone()));
         }
@@ -439,14 +451,33 @@ pub(crate) struct Encoders {
     pub(crate) names: (&'static str, &'static str),
 }
 
+/// Why VA-API's AV1 encoder can't take frames of `size`, if it can't
+/// as they are: AMD's VCN 4 pads AV1 to a multiple of 64 × 16 (1080
+/// lines to 1082) and decoders show the padding (odin, 2026-10-31: a
+/// 1080 × 1080 export decoded at 1088 × 1082), so AV1 goes to VA-API
+/// only at a size it needn't pad, on any driver until one is measured
+/// not to. H.264 and HEVC crop theirs.
+pub(crate) fn av1_vaapi_pads(size: (u32, u32)) -> Option<String> {
+    let (w, h) = size;
+    (w % 64 != 0 || h % 16 != 0).then(|| {
+        format!(
+            "av1_vaapi would pad {w}x{h}: VA-API pads AV1 to a multiple of 64x16 (AMD's VCN 4 \
+             pads 1080 lines to 1082), and players show the padding"
+        )
+    })
+}
+
 impl Encoders {
-    /// The list for `settings`: `vaapi` and `software` the one each (an
-    /// error for a missing one, which the CLI's exit 3 says), and `auto`
-    /// VA-API where there is a render node and this FFmpeg has its
-    /// encoder, then software. `has` says whether FFmpeg has an encoder.
+    /// The list for `settings` at the encoded `size`: `vaapi` and
+    /// `software` the one each (an error for a missing one, or for AV1 at
+    /// a size VA-API pads, which the CLI's exit 3 says), and `auto`
+    /// VA-API where there is a render node, this FFmpeg has its encoder
+    /// and it needn't pad, then software. `has` says whether FFmpeg has
+    /// an encoder.
     pub(crate) fn choose(
         settings: &ExportSettings,
         preset: Preset,
+        size: (u32, u32),
         rate: FrameRate,
         node: &RenderNode,
         has: &dyn Fn(&str) -> bool,
@@ -467,6 +498,9 @@ impl Encoders {
             })
         };
         let missing = |name: &str| format!("this FFmpeg has no {name}, which exports {codec:?}");
+        let pads = (codec == Codec::Av1)
+            .then(|| av1_vaapi_pads(size))
+            .flatten();
         let (kinds, skipped) = match settings.encoder {
             EncoderChoice::Vaapi => {
                 if !has(vaapi) {
@@ -475,6 +509,13 @@ impl Encoders {
                 if let Some(why) = no_device() {
                     return Err(ExportError::NoEncoder(format!("{vaapi}: {why}")));
                 }
+                if let Some(message) = pads {
+                    return Err(ExportError::Hardware {
+                        encoder: vaapi,
+                        code: "hw_unsupported",
+                        message,
+                    });
+                }
                 (vec![EncoderKind::Vaapi], None)
             }
             EncoderChoice::Software if has(software) => (vec![EncoderKind::Software], None),
@@ -482,8 +523,10 @@ impl Encoders {
             EncoderChoice::Auto => {
                 let why_not = if has(vaapi) {
                     no_device()
+                        .map(|why| ("hw_unavailable", why))
+                        .or_else(|| pads.map(|why| ("hw_unsupported", why)))
                 } else {
-                    Some(missing(vaapi))
+                    Some(("hw_unavailable", missing(vaapi)))
                 };
                 let mut kinds = Vec::new();
                 if why_not.is_none() {
@@ -495,13 +538,13 @@ impl Encoders {
                 if kinds.is_empty() {
                     return Err(ExportError::NoEncoder(format!(
                         "{}, and {}",
-                        why_not.unwrap_or_default(),
+                        why_not.map(|(_, why)| why).unwrap_or_default(),
                         missing(software)
                     )));
                 }
-                let skipped = why_not.map(|reason| Fallback {
+                let skipped = why_not.map(|(code, reason)| Fallback {
                     from: vaapi,
-                    code: "hw_unavailable",
+                    code,
                     reason,
                 });
                 (kinds, skipped)
@@ -570,7 +613,7 @@ mod tests {
         let gone = node(std::path::Path::new("/nonexistent/renderD128"));
         let all = |_: &str| true;
         let choose = |codec, choice, node: &RenderNode, has: &dyn Fn(&str) -> bool| {
-            Encoders::choose(&settings(codec, choice), WIDE, rate, node, has)
+            Encoders::choose(&settings(codec, choice), WIDE, WIDE.size(), rate, node, has)
         };
 
         let e = choose(Codec::Hevc, EncoderChoice::Auto, &there, &all).unwrap();
@@ -619,7 +662,14 @@ mod tests {
         let all = |_: &str| true;
         let none = |_: &str| false;
         let choose = |choice, node: &RenderNode, has: &dyn Fn(&str) -> bool| {
-            Encoders::choose(&settings(Codec::Hevc, choice), WIDE, rate, node, has)
+            Encoders::choose(
+                &settings(Codec::Hevc, choice),
+                WIDE,
+                WIDE.size(),
+                rate,
+                node,
+                has,
+            )
         };
         let e = choose(EncoderChoice::Vaapi, &there, &all).unwrap();
         assert_eq!((e.kinds, e.skipped), (vec![EncoderKind::Vaapi], None));
@@ -639,6 +689,64 @@ mod tests {
                 Err(ExportError::NoEncoder(why)) => assert!(why.contains(want), "{why}"),
                 other => panic!("{choice:?}: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn av1_goes_to_vaapi_only_at_sizes_it_needs_no_padding_for() {
+        // odin's VCN 4 decoded a 1080 x 1080 AV1 export at 1088 x 1082.
+        for (size, pads) in [
+            ((1080, 1080), true),
+            ((1920, 1080), true),
+            ((1080, 1920), true),
+            ((1080, 1350), true),
+            ((2560, 1440), false),
+            ((3840, 2160), false),
+            ((3840, 1920), false),
+            ((5760, 2880), false),
+            ((7680, 3840), false),
+            // 1920 x 1080's draft.
+            ((960, 544), false),
+        ] {
+            assert_eq!(av1_vaapi_pads(size).is_some(), pads, "{size:?}");
+        }
+        let there = node(std::path::Path::new(env!("CARGO_MANIFEST_PATH")));
+        let all = |_: &str| true;
+        let choose = |codec, choice, size| {
+            Encoders::choose(
+                &settings(codec, choice),
+                WIDE,
+                size,
+                FrameRate::FPS_30,
+                &there,
+                &all,
+            )
+        };
+        // Auto: software, saying why.
+        let e = choose(Codec::Av1, EncoderChoice::Auto, (1920, 1080)).unwrap();
+        assert_eq!(e.kinds, [EncoderKind::Software]);
+        let f = e.skipped.unwrap();
+        assert_eq!((f.from, f.code), ("av1_vaapi", "hw_unsupported"));
+        assert!(f.reason.contains("would pad 1920x1080"), "{}", f.reason);
+        // Its draft needs none.
+        let e = choose(Codec::Av1, EncoderChoice::Auto, (960, 544)).unwrap();
+        assert_eq!(
+            (e.kinds, e.skipped),
+            (vec![EncoderKind::Vaapi, EncoderKind::Software], None)
+        );
+        // Asked for: refused as the hardware's (exit 3).
+        match choose(Codec::Av1, EncoderChoice::Vaapi, (1080, 1080)) {
+            Err(ExportError::Hardware {
+                encoder: "av1_vaapi",
+                code: "hw_unsupported",
+                message,
+            }) => assert!(message.contains("would pad 1080x1080"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        // H.264 and HEVC crop theirs.
+        for codec in [Codec::H264, Codec::Hevc] {
+            let e = choose(codec, EncoderChoice::Vaapi, (1080, 1080)).unwrap();
+            assert_eq!(e.kinds, [EncoderKind::Vaapi], "{codec:?}");
         }
     }
 
