@@ -15,7 +15,8 @@
 //! forward).
 
 use glam::{DQuat, DVec3};
-use std::f64::consts::{PI, TAU};
+
+use crate::spline::wrap;
 
 /// An orientation as yaw, pitch and roll, in radians.
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -60,12 +61,16 @@ impl Ypr {
         let roll = -2.0 * rest.z.atan2(rest.w);
         Ypr::new(wrap(yaw), pitch, wrap(roll))
     }
-}
 
-/// An angle in (−π, π].
-fn wrap(a: f64) -> f64 {
-    let w = (a + PI).rem_euclid(TAU) - PI;
-    if w <= -PI { w + TAU } else { w }
+    /// The world-frame angular velocity of this orientation while its
+    /// angles change at `rate` (radians per second each): yaw turns about
+    /// the world's down axis, pitch about the camera's right after the
+    /// yaw, and roll about its forward.
+    pub fn omega(self, rate: Ypr) -> DVec3 {
+        let q = self.to_quat();
+        let right = DQuat::from_rotation_y(-self.yaw) * DVec3::X;
+        DVec3::NEG_Y * rate.yaw + right * rate.pitch + (q * DVec3::NEG_Z) * rate.roll
+    }
 }
 
 #[cfg(test)]
@@ -74,7 +79,7 @@ mod tests {
     use crate::testutil::unit_quat;
     use crate::{angle_between, rotation_angle};
     use proptest::prelude::*;
-    use std::f64::consts::FRAC_PI_2;
+    use std::f64::consts::{FRAC_PI_2, PI};
 
     fn close(a: DVec3, b: DVec3) -> bool {
         angle_between(a, b) < 1e-12
@@ -122,6 +127,18 @@ mod tests {
             prop_assert!(ypr.yaw > -PI && ypr.yaw <= PI);
             prop_assert!(ypr.roll > -PI && ypr.roll <= PI);
             prop_assert!(rotation_angle(ypr.to_quat(), q) < 1e-9);
+        }
+
+        #[test]
+        fn omega_is_the_rate_of_turn(
+            yaw in -PI..PI, pitch in -1.5f64..1.5, roll in -PI..PI,
+            dy in -3.0f64..3.0, dp in -3.0f64..3.0, dr in -3.0f64..3.0,
+        ) {
+            let at = |t: f64| Ypr::new(yaw + dy * t, pitch + dp * t, roll + dr * t).to_quat();
+            let h = 1e-6;
+            let fd = crate::spline::log(at(h) * at(-h).conjugate()) / (2.0 * h);
+            let w = Ypr::new(yaw, pitch, roll).omega(Ypr::new(dy, dp, dr));
+            prop_assert!((fd - w).length() < 1e-6, "{fd} {w}");
         }
 
         #[test]

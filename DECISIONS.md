@@ -7241,7 +7241,10 @@ What, as `crates/core/src/project/file.rs` does it:
 
 - **A `.spherecut` file** is UTF-8 JSON, `{"format":
   "spherecut.project", "schema": 1, "saved_by": "spherecut 0.1.0",
-  "project": {...}}`, pretty-printed with two-space indents in the
+  "project": {...}}`. The format name and the extension are made from
+  `core::brand`'s slug (`brand::slug!()`), so a rename changes them in
+  one place; files saved under the old name would then need a
+  migration. The file is pretty-printed with two-space indents in the
   structs' field order and ending in a newline, so a `git diff` of two
   saves shows the change. Files over 64 MiB are refused unread.
 - **`schema` is read first**: a newer one is refused (`newer_schema`,
@@ -7266,8 +7269,10 @@ What, as `crates/core/src/project/file.rs` does it:
   path components (`/v/clips/a.mp4` from `/v/projects` is
   `../clips/a.mp4`), and read back against the folder the file is in;
   an absolute path in a file is read as it is. `..` is resolved
-  lexically, without following links. A path that isn't UTF-8 can't be
-  saved (`PathNotUtf8`).
+  lexically, without following links, so where a folder on the path is
+  a symlink `..` can name another folder than the OS would. That is on
+  purpose: a project folder moved or copied with its media keeps
+  working. A path that isn't UTF-8 can't be saved (`PathNotUtf8`).
 - **Media that moved or changed** doesn't stop a load: `media_status`
   says per file whether it is there, and whether its size and the
   FNV-1a 64 of its first MiB match the fingerprint taken when it was
@@ -7302,7 +7307,13 @@ What, as `crates/core/src/project/` has it:
   and look-at targets. A clip has its media, its trim (`source`, the
   source's [start, end) in its own time), its place in the sequence
   (`at`), markers and its view (three key tracks: orientation, field of
-  view in degrees, projection; and the orientation mode). M2's limits
+  view in degrees, projection; and the orientation mode). A projection
+  key holds a `LensShape`, a projection or a morph `{from, to, morph}`
+  between two (D50), so a half-morphed view can be keyed. A target
+  belongs to one media (`media`) and its path is in that media's time,
+  so with M5's several media it still has one time base; an aim key's
+  target must be in its clip's media, and `remove_media` is refused
+  while a target is in it. M2's limits
   are checked, not built in: one sequence, one video track, one clip at
   0, so M5 widens limits rather than changing the format.
 - **Keys and markers are in the source's time**, so a trim never moves
@@ -7336,7 +7347,10 @@ What, as `crates/core/src/project/` has it:
   up to 240 fps, output sizes from section 8.1's list.
 - **`History`** keeps up to 1,000 steps, each with a label, an origin
   (`user` or `agent` by name), the edits and inverse, and the revisions
-  before and after; undo and redo are new revisions. A `Gesture` (a
+  before and after; undo and redo are new revisions. It serializes and
+  deserializes (checked on load: the cursor within the steps, the steps
+  within the limit, a limit of at least 1) for A2's saved history; M2
+  doesn't save it. A `Gesture` (a
   drag) previews each frame from the project as it was when it began
   and ends as one step, or is cancelled back to the start.
 - **core depends on sphere and glam** (D28 updated): the model holds
@@ -7348,8 +7362,11 @@ refused with its code (`tests/project_edits.rs`); property tests of
 random steps of valid and invalid edits (undo of all gives back the
 original, redo the same states with the same ids, a refused step
 changes nothing, no id ever names two kinds of thing, save then load is
-equal) and of gestures (`tests/project_props.rs`), run at 100,000 cases
-before a merge; and `apply` on a track of 10,000 keys.
+equal, history saved and loaded is equal) and of gestures
+(`tests/project_props.rs`), run at 100,000 cases before a merge; a
+property test that mangled files load or are refused with a code, never
+a panic (`tests/project_file.rs`); and `apply` on a track of 10,000
+keys.
 
 Why: PLAN's M2 and A2 ask for exactly this, and one path for every
 change is what lets an agent's edit, the GUI's and undo be checked by
@@ -7357,6 +7374,109 @@ the same code.
 
 Revisit if: M5 needs edits that move many clips at once faster than a
 clone a step allows, or A2's saved history needs more in a step.
+
+## D50. Keyframes and interpolation: Level by default, one scalar spline, Free on SO(3)
+
+*2026-10-31, M2.2. From `docs/design/m2-plan.md` section 6 and its
+amendment 2, and `docs/research/m2/keyframes.md` (its figures come from
+the scripts beside it). PLAN says orientation is interpolated on SO(3);
+Pat was asked whether Level or Free should be the default, with Level
+recommended. Until Pat answers, Level is the working choice; keys are
+quaternions either way, so another answer changes only the default
+`OrientMode`, not the file.*
+
+What, as `crates/sphere/src/spline.rs` and
+`crates/core/src/project/anim/eval.rs` do it:
+
+- **One scalar spline** for every number that is keyed: cubic Hermite
+  per segment, non-uniform Catmull–Rom slopes, and Fritsch–Carlson's
+  limit (slope 0 where the chords reverse, |slope| ≤ 3× the smaller
+  chord's), which keeps monotone keys monotone: pitch never leaves its
+  keys' range, and keys 0/90/90/0 hold at 90 instead of reaching 101.
+  The limit is continuous in the keys.
+- **Eases** are per key and per side: `Smooth` (the spline's slope),
+  `Linear` (the chord's) or `Stop` (zero), and `hold` (keep the value,
+  jump at the next key). `Smooth` with no neighbour is `Stop`, unless
+  the key brings its own rate (an aim key's target). The presets are
+  Smooth, Stop, Linear, Arrive slowly (Stop, Smooth), Leave slowly
+  (Smooth, Stop) and Hold. A key is C¹ when both its sides are Smooth or
+  both Stop.
+- **Level** (the default): each key's yaw, pitch and roll (D33) are
+  interpolated as numbers by the scalar spline; yaw takes the short way
+  plus the segment's whole turns, roll the short way, pitch as it is;
+  the view is `Ypr::to_quat` of the three. A pan between level keys
+  keeps the horizon level.
+- **Free**, per clip: Kim–Kim–Shin's cumulative cubic Hermite on SO(3),
+  fed non-uniform Catmull–Rom angular velocities. The velocity is
+  scaled by max(0, cos θ) of the angle between the chords, then capped
+  at 3× the slower chord, so a sharp corner slows the camera (to a stop
+  at 90° or more) and a tiny move of a key never switches between full
+  speed and a stop. The middle turn is the chord's, less the ends'
+  turns, whole turns and all, with a small correction rotation after it
+  (not one rotation on the branch nearest the chord: near a whole turn
+  that branch's axis is ill-conditioned, and a 0.001° move of a key
+  moved the view 0.05°). It passes through every key and is C¹
+  wherever a key's sides match, at any spacing. Linear–Linear is slerp
+  and Stop–Stop slerp at smoothstep, exactly.
+- **Spin** is a signed count of whole turns on the segment after a key
+  (at most 8): Level adds 2πn to yaw's short way; Free adds 2πn along
+  the short rotation's axis (Y, the yaw axis, when the keys are equal).
+  −1 is the long way. `follow_spin` sets the spins a drag needs so that
+  carrying a key past 180° from its neighbour keeps the path going the
+  way it went.
+- **Field of view** is the scalar spline on ln(degrees), so a zoom is
+  nearly even in apparent size.
+- **Projection keys** hold a `LensShape` (D48): a projection, or a morph
+  of two. The shapes are places on a loop (rectilinear 0, fisheye 1,
+  stereographic 2, period 3), the track is the scalar spline over that
+  place the short way round, and the result is a two-way `Lens`. Stop
+  on both sides is smoothstep; equal shapes hold.
+- **Look-at**: a target is a path of (yaw, pitch) keys in its media's
+  time (D48), yaw the short way, pitch clamped to ±89° for aiming (rate
+  0 while clamped). An aim key's rate is the target's, analytically:
+  the spline slopes in Level, turned into an angular velocity with
+  `Ypr::omega` in Free. An aim key keeps aiming before the first key,
+  after the last and while it holds; between two aim keys on the same
+  target the view follows the target, with roll from the scalar spline.
+- **Evaluation**: `ViewAnim::at(t, targets)` gives the orientation and
+  the `Lens`, by a binary search and one segment's formula, in under
+  5 µs a call.
+
+Tests: `crates/sphere` unit and property tests of the splines (keys
+hit, Linear is slerp, Stop is smoothstep, monotone keys stay
+monotone); `crates/core/tests/view_eval.rs` (the horizon, ends and
+holds, spin, the zoom, the morph, keying a half-morphed view, targets
+and their pitch clamp, sticky spin, the 5 µs bound); and
+`crates/core/tests/view_props.rs`, property tests at 100,000 cases
+before a merge, in both modes: keys hit within 1e−9 rad, no flips, C¹
+where sides match (second-order one-sided differences, within 1e−5 of
+the speeds), spin turns, Linear Free is slerp, Level keeps level, sticky
+spin moves nothing far, a 1e−3° move of a key moves the path by at most
+50× that (pans and tilts at right angles included), aim keys follow
+their target, and evaluation is the same bit for bit after save and
+load.
+
+Why:
+- **Level**: slerp between level keys tilts the horizon whenever yaw
+  and pitch change together: (0°, 0°) to (90°, 30°) has roll −6.5° at
+  its midpoint, (0°, −30°) to (120°, 30°) −17.6°, and (0°, 0°) to
+  (170°, 60°) −31.1°, 32.5° at worst. Every reframer checked (Insta360
+  Studio and app, GoPro FX Reframe, Reframe360XL, Fusion's PanoMap)
+  keys the angles as numbers.
+- **Not squad**: with keys 0.2 to 3 s apart its angular velocity jumps
+  at a key by up to 2.03× the larger chord speed, the speed changing
+  14× across it. The De Casteljau form of the same Catmull–Rom spline
+  breaks C¹ when a control rotation passes 180° (24 of 300 random
+  tracks with keys up to 120° apart).
+- **The continuous limit**: the first rule (stop when the chords turn
+  back) moved a path by 6.87° for a 0.02° change of a key on a
+  pan-then-tilt; the cos factor moves it by 0.020°.
+
+Revisit if: Pat chooses Free as the default; someone needs per-segment
+modes or tangent handles in yaw, pitch and roll (they need the
+angle-rate Jacobian, singular at the poles); or M9's tracker output
+needs smoothing, for which an approximating C² spline suits better than
+one through every key.
 
 ## Open
 

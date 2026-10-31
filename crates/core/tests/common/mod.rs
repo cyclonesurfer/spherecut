@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use spherecut_core::project::*;
 use spherecut_core::{FrameRate, Rational, Time};
 use spherecut_sphere::orient::Ypr;
-use spherecut_sphere::perspective::Projection;
+use spherecut_sphere::perspective::{LensShape, Projection};
 
 /// A 3840×1920 30 fps media entry of `seconds` at `path`.
 pub fn media(path: &str, seconds: i64) -> Media {
@@ -87,16 +87,18 @@ pub fn projection_key(at: Time, p: Projection) -> AnyKey {
     AnyKey::Projection(Key {
         id: KeyId::NEW,
         at,
-        value: p,
+        value: LensShape::Pure(p),
         ease: Ease::STOP,
         spin: 0,
     })
 }
 
-pub fn target(name: &str, yaw: f64, pitch: f64) -> Target {
+/// A fixed target in `p`'s clip's media.
+pub fn target(p: &Project, name: &str, yaw: f64, pitch: f64) -> Target {
     Target {
         id: TargetId::NEW,
         name: name.into(),
+        media: p.the_clip().media,
         path: KeyTrack {
             keys: vec![Key {
                 id: KeyId::NEW,

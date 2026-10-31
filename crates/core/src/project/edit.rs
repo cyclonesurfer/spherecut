@@ -8,7 +8,7 @@
 //! filled in) with the edits that undo them.
 
 use serde::{Deserialize, Serialize};
-use spherecut_sphere::perspective::Projection;
+use spherecut_sphere::perspective::LensShape;
 use thiserror::Error;
 
 use super::anim::{AimDir, Ease, Key, KeyTrack, Orient, OrientMode, Orientation, Target};
@@ -147,7 +147,7 @@ pub enum Edit {
 pub enum AnyKey {
     Orientation(Key<Orient>),
     Fov(Key<f64>),
-    Projection(Key<Projection>),
+    Projection(Key<LensShape>),
 }
 
 /// A value for a key of one of a view's three tracks.
@@ -156,7 +156,7 @@ pub enum AnyKey {
 pub enum AnyValue {
     Orientation(Orient),
     Fov(f64),
-    Projection(Projection),
+    Projection(LensShape),
 }
 
 /// All of one track's keys.
@@ -165,7 +165,7 @@ pub enum AnyValue {
 pub enum AnyKeys {
     Orientation(Vec<Key<Orient>>),
     Fov(Vec<Key<f64>>),
-    Projection(Vec<Key<Projection>>),
+    Projection(Vec<Key<LensShape>>),
 }
 
 /// A point of a view path.
@@ -316,7 +316,7 @@ impl AnyValue {
         }
     }
 
-    fn into_projection(self) -> Option<Projection> {
+    fn into_projection(self) -> Option<LensShape> {
         match self {
             AnyValue::Projection(p) => Some(p),
             _ => None,
@@ -474,6 +474,9 @@ impl Project {
                 };
                 if let Some(c) = self.clips().find(|c| c.media == id) {
                     return fail(Code::InUse, format!("clip {} uses media {id}", c.id));
+                }
+                if let Some(t) = self.targets.iter().find(|t| t.media == id) {
+                    return fail(Code::InUse, format!("target {} is in media {id}", t.id));
                 }
                 vec![Edit::AddMedia {
                     media: self.media.remove(i),

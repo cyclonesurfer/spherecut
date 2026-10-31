@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use spherecut_sphere::perspective::{MIN_HFOV_DEG, Projection};
+use spherecut_sphere::perspective::{LensShape, MIN_HFOV_DEG, Projection};
 use thiserror::Error;
 
 use super::anim::{Key, KeyTrack, Orient};
@@ -173,7 +173,13 @@ impl Project {
         }
         for t in &self.targets {
             check_name("a target", &t.name, false)?;
-            check_keys("target", &t.path, Time::ZERO, None)?;
+            let Some(m) = self.media_by_id(t.media) else {
+                return fail(
+                    Code::NotFound,
+                    format!("target {} is in media {}, which isn't there", t.id, t.media),
+                );
+            };
+            check_keys("target", &t.path, Time::ZERO, Some(m.video.duration))?;
             for k in &t.path.keys {
                 let a = k.value;
                 if !(a.yaw_deg.is_finite() && a.pitch_deg.is_finite()) {
@@ -354,10 +360,19 @@ impl Project {
                 );
             }
             if let Orient::Aim { target, roll_deg } = k.value {
-                if self.target(target).is_none() {
+                let Some(t) = self.target(target) else {
                     return fail(
                         Code::NotFound,
                         format!("key {} aims at target {target}, which isn't there", k.id),
+                    );
+                };
+                if t.media != c.media {
+                    return fail(
+                        Code::Invalid,
+                        format!(
+                            "key {} aims at target {target}, which is in media {}, not the clip's {}",
+                            k.id, t.media, c.media
+                        ),
                     );
                 }
                 if !(roll_deg.is_finite() && roll_deg.abs() <= 180.0) {
@@ -375,6 +390,20 @@ impl Project {
         }
         for k in &v.projection.keys {
             check_no_spin(k)?;
+            if let LensShape::Morph(m) = k.value {
+                if m.from == m.to {
+                    return fail(
+                        Code::Invalid,
+                        format!("key {} morphs from a projection to itself", k.id),
+                    );
+                }
+                if !(0.0..=1.0).contains(&m.morph) {
+                    return fail(
+                        Code::OutOfRange,
+                        format!("key {}'s morph {} is outside 0 to 1", k.id, m.morph),
+                    );
+                }
+            }
         }
         Ok(())
     }

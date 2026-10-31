@@ -2,8 +2,8 @@
 
 *2026-10-30, before M2's code, at main be982e9. Written from PLAN.md M2
 and A2, docs/PROMPT.md, DECISIONS.md D1 to D46, the code as M1 and A1
-left it, and two research notes (`m2-research/encode.md`,
-`m2-research/keyframes.md` in the session scratchpad, summarised where
+left it, and two research notes (`docs/research/m2/encode.md` and
+`docs/research/m2/keyframes.md`, with their scripts; summarised where
 they are used). A fresh review's findings become amendments in section
 0, which win over the sections below.*
 
@@ -46,6 +46,237 @@ record them):
   its first MiB. `Media::from_probe` (in media) moves to M2.4, where the
   export's tests first open real files, and core's `media_status`
   checks the size and hash on load.
+
+**Amendment 2 (2026-10-31, the fresh review of this plan, and slice
+M2.2's code).** A fresh review of the plan at 7018ff0 found no
+blockers, 14 major, 25 minor and 14 nits; six more were already fixed
+by c28cc2b. Each finding is listed below with what answers it: code
+that M2.1 or M2.2 now has, or the slice that must do it (that slice's
+"done when" in section 15 includes its items). Numbers are the
+review's. The research notes the plan cites are now in the repository:
+`docs/research/m2/encode.md` (with a list of corrections at its head),
+`docs/research/m2/keyframes.md` (revised, every figure rerun) and their
+scripts in `docs/research/m2/scripts/`. Section 6 is corrected in place
+where it was wrong on a fact (nits 43 to 46, the squad figure).
+
+*Done in M2.1 and M2.2's code:*
+
+- **1, 30. Morph is keyed.** A projection key's value is a `LensShape`:
+  `Pure(Projection)`, or `Morph {from, to, morph}` (from ≠ to, morph in
+  [0, 1]). The shapes sit on a loop of perimeter 3, rectilinear at 0,
+  fisheye at 1, stereographic at 2 and rectilinear again at 3, each edge
+  a two-way `Lens` morph. The projection track is the scalar spline over
+  that place, the short way round, with the keys' own eases, so every
+  pair of sides is defined, not only Stop–Stop and hold: between two
+  pure keys with Stop sides it is smoothstep. Equal shapes hold, and a
+  value within 1e−12 of a whole number is the pure projection. `K`
+  (M2.6) records `ViewState.lens.shape()` as it is; the test
+  `a_half_morphed_view_keys_and_plays_back_as_it_was` gets the same
+  `Lens` back within 1e−12. Schema 1 has it.
+- **2. Free mode's velocity limit is continuous.** ω is scaled by
+  max(0, cos θ), θ the angle between the two chords, before the 3·min
+  cap, so a sharp corner slows the camera in proportion and stops it at
+  90° or more. On the review's pan-then-tilt case a ±0.01° nudge moved
+  the path by 6.87° under the old rule and moves it by 0.020° now
+  (`scripts/clamp_discontinuity.py`). New property test
+  `a_small_move_of_a_key_moves_the_path_a_little`, both modes: a 1e−3°
+  move of any key moves no sample by more than 50× that, on generators
+  that include pans and tilts meeting at exactly a right angle; the old
+  rule fails it (0.0509° > 0.05°).
+- **12. The C¹ test** uses second-order one-sided differences at 1 µs
+  and passes within 1e−5 of the largest of the one-sided speeds and the
+  chord speeds either side (plus 1e−8 rad/s). First-order differences
+  can't meet that at short spacing (`scripts/c1_tolerance*.py`).
+- **16. Spin.** A segment with spin n turns | |δ| + 2πn | in total,
+  signed along δ's axis, so n = −1 is the long way (+30° with n = −1
+  turns 330°); when |δ| < 1e−12 the axis is Y. Level adds 2πn to the
+  short way's yaw. The spin property test draws n from −2 to 2.
+- **11, 19. Look-at.** A target belongs to a media (`Target.media`), its
+  path in that media's time: the media must exist, the path's keys lie
+  within its duration, an aim key's target must be in its clip's media,
+  and `remove_media` is refused while a target is in it. Path yaw goes
+  the short way between keys (tested across ±180°). An aim key's rate
+  on a Smooth side is analytic, not a symmetric difference: the target's
+  spline slope in Level, the same rates through `Ypr::omega` in Free.
+  Aim pitch is clamped to ±89° with rate 0 while clamped; the property
+  test compares with the clamped direction and draws path pitches up to
+  90°.
+- **32 (history).** `History` is `Serialize + Deserialize`, checked on
+  load (cursor ≤ steps, steps ≤ limit, limit ≥ 1). M2 still doesn't
+  save it (Appendix A); A2 can.
+- **38.** The proptest `mangled_files_load_or_are_refused` loads files
+  with junk spliced in and values changed at random JSON pointers: each
+  loads or gives a typed error, never a panic.
+- **51.** The format name and extension come from `brand::slug!()`:
+  `spherecut.project` and `.spherecut`.
+- **14.** The keyframe note exists and is revised. The squad figure is
+  now 2.03× the larger chord speed (33× the smaller, the speed changing
+  14× across the key) at 0.2 to 3 s spacing (`scripts/squad_jump.py`).
+
+*Pat's calls:*
+
+- **15.** Level by default changes PLAN's "interpolation on SO(3)", so
+  it went to Pat as a question (Level recommended, with section 6's
+  horizon numbers); M2 works on Level until Pat answers, and D50
+  records the answer. Section 17 item 2 is now a question.
+- **3. Real time on hardware.** M2.5 is done at ≥ 30 fps on odin, not
+  "or the slow stage named"; M2.8 records huginn. A miss on either
+  machine leaves PLAN's box open and becomes a question for Pat, with
+  the stage times and the options (zero copy, path B, or VA-API surface
+  mapping pulled into M2). Risk 1's "M8 takes it" applies only if Pat
+  picks it.
+
+*M2.3 (render):*
+
+- **5. The parity reference.** `StillRenderer` (agent's `still`) gains
+  the output kind (flat or equirect), the output size and frame, and the
+  view from `ViewAnim::at(t)`; parity compares the export against it.
+  `spherecut frame --project P --time T` renders through it (M2.5), and
+  one parity sample runs through the CLI. D49 records it; A2's
+  `compare` of a file with a project uses the same entry point.
+- **6. Four YUV layouts.** NV12 and P010 for VA-API, I420 and I010
+  (10 bits in the low bits) for the software encoders; each encoder
+  declares its layout, `Mp4Writer` gains the semi-planar ones (M2.4),
+  and the CPU-reference test covers all four.
+- **13. The identity export test.** Luma within 1 code everywhere.
+  Chroma within 1 code only where the source's chroma is constant over
+  the filter's footprint (the test source has chroma constant per 4×2
+  block), and equal to a CPU reference of the same chain everywhere.
+- **17. Motion blur.** The displacement s is the largest of the centre,
+  the corners and the edge midpoints, so a roll or a zoom blurs too. The
+  sample cap rises to 64; the golden's pan stays below it, and a frame
+  at the cap is counted in the result (`blur.capped`). Negative
+  controls: blur on differs from blur off for a pan, and halving n fails
+  the golden.
+- **18.** Blur accumulates in a storage buffer of `vec4<f32>`, not a
+  read-write `Rgba32Float` storage texture (an adapter feature).
+- **26.** Export and the parity reference sample with the same filter,
+  the viewer's default; D49 records it.
+- **34.** M2.3 ends with odin running the goldens and the YUV reference
+  test on RADV, by Remote Control.
+
+*M2.4 (export, software encoders):*
+
+- **7. Exact audio ends.** Every export sets `movie_timescale` to the
+  audio's sample rate (48000), so an edit can end on a sample; at the
+  default 1000 one tick is 48 samples (`scripts/elst.py`: 48,480 for
+  48,485). Media's audio decode applies an edit's end itself (FFmpeg's
+  demuxer keeps the packet that crosses it whole), tested against a
+  hand-made `elst`. Opus copy is tested or greyed out, since PreSkip's
+  interaction with the edit is unverified (encode.md section 6).
+- **8, 28. The MP4.** Mux without faststart (its second pass reopens a
+  URL our stream writer doesn't have). Then one cancellable pass with an
+  extended injector writes the final file: a new moov (st3d, sv3d, SA3D,
+  the V1 `uuid` under `trak`, the audio `elst` end, and no video `edts`,
+  with `+negative_cts_offsets` so the identity edit isn't needed), `stco`
+  and `co64` shifted, moov before mdat, the StopToken checked and
+  progress reported throughout. The free-space check counts the second
+  copy. Tests: no video `edts`; V1 under `trak`; moov first;
+  `check youtube_360` passes; a cancel during the pass leaves no file.
+- **10. Temporary files.** Each `TempFile` holds an exclusive `flock`
+  for its life, and the sweep removes only `.spherecut-*.tmp` files whose
+  lock it can take and that are more than a minute old (D16 updated).
+  Tests: two concurrent exports into one folder both succeed; a `frame`
+  beside an export survives; a SIGKILLed export's file is swept.
+- **24.** libx264 and libx265 get `bufsize` = 2 s × `maxrate`, without
+  which VBV ignores the cap; a test checks a software export's size
+  against the estimate.
+- **27. ambiX.** A raw decode mode that keeps the four channels and
+  resamples to 48 kHz feeds the AAC re-encode. A PCM ambiX source in a
+  360 MP4 export defaults to AAC, and Copy is refused with the reason
+  (YouTube takes PCM only in MOV).
+- **32. A2's needs.** The PSNR and SSIM code moves from testkit into a
+  library crate agent can depend on. `spherecut-export` gives a job
+  handle (`progress()`, `cancel()`, `wait(timeout)`, the check report)
+  that cli, the app and A2 all drive.
+- **4 (Tier 1).** Parity adds libsvtav1 at a small size, 8 and 10-bit.
+- **31. Parity thresholds.** Parity views include the marker's path and
+  the frame counter, so the shifted-frames control must fail. Each floor
+  is the worst value measured minus a stated margin, recorded in D52,
+  and the controls must fall below it.
+- **48.** Risk 4 counts the start as well: a player that ignores the
+  edit list starts about 43 ms early (priming plus pre-roll).
+- **52.** The export bench uses a full-resolution 5.7K clip, not the LRV
+  proxy.
+- **53.** Section 9's read-back checks include the V1 `uuid`.
+
+*M2.5 (`spherecut render`, VA-API):*
+
+- **4 (Tier 2).** Every codec and VA-API encoder that doctor lists is
+  exported and compared with its software counterpart and the
+  reference, 10-bit for HEVC and AV1. The 8K AV1 export is required on
+  odin (VCN 4 encodes AV1).
+- **9. D51 amends D27.** With `--json`, every line on stdout is a whole
+  D27 envelope (`schema`, `ok`, `result`, `error`, `warnings`) whose
+  `result.event` names it: progress lines, then the final result, which
+  is the run's document. Each line is one parse, and a reader that wants
+  one document takes the last line. A panic and a usage error are
+  envelopes too. A project that doesn't load is exit 1, a `--range`
+  outside the sequence is `out_of_range` (exit 1), and D27's exits 3 (a
+  codec or device the command needs is missing, as for an encoder named
+  with `--encoder`) and 4 (interrupted, no output) extend to render.
+  Contract tests cover each.
+- **23.** Draft sizes are rounded to multiples of 8 (4:5 at 1080 drafts
+  at 544 × 680, not 540 × 675); odin's run exports every preset at
+  draft size.
+- **25. Decoding for export.** The GUI's export decodes with playback's
+  policy (D25); a headless render uses `frame`'s `auto`. A decode
+  fallback is reported (`decode.fallback`) in the result and the events,
+  as D3 asks, and a Tier 2 export test fails on one.
+- **40.** Doctor already encodes one frame with each VA-API encoder;
+  M2.5 adds which of them export would use, nothing more.
+- **47.** The 60 fps bitrates are about 1.5× the 30 fps ones (YouTube's
+  figures), not rate/30.
+- **49.** The av1_vaapi QP note applies under CQP only; VBR sets a
+  bitrate.
+
+*M2.6 and M2.7 (the GUI):*
+
+- **20.** Keying the view is one step: `set_key` on each track with a
+  key within half a frame of the playhead, `add_key` on the others;
+  tested with a FOV key already at the playhead.
+- **21.** Open, save and the media check run as jobs off the UI thread
+  (`may_block` says they block). A never_blocks test (as
+  crates/app/tests/never_blocks.rs) runs during an export, a save and an
+  open; the p99 frame-time gate stays in Tier 2's gui_smoke.
+- **22.** New risk: an export shares the viewer's GPU queue, and an 8K
+  export with blur can stall presents. Export submissions are throttled
+  while the viewer plays or a drag runs; M2.7 measures it at 8K with
+  blur on.
+- **29.** The pointer maps through the output frame's rectangle, not
+  the whole viewer; M1's under-cursor tests run again with a 9:16 frame
+  in a 16:9 viewer.
+- **36. Keys M5 can keep.** M5's J/K/L shuttle owns those letters, so
+  keying the view is `Alt+K` (Final Cut's Option-K) and loop is `Ctrl+L`
+  (Final Cut's Cmd-L). `I`, `O` and `M` stay.
+- **37.** The sphere overview draws the 360 output's front direction,
+  and the viewer has an equirect preview toggle (`out_kind`).
+- **39.** A drag's preview edits only the dragged key's track; the full
+  `apply` with validation runs on release. The 5 ms figure moves to a
+  bench with a baseline, not a wall-clock test.
+- **53.** "Selection" is the set of selected keys, one or more in one
+  lane or across lanes; section 10 defines it in M2.6.
+
+*M2.2b and M2.8 (the toolkit check):*
+
+- **35.** The prototype draws 500 real thumbnail textures, not
+  placeholders. huginn's scale is checked, not assumed; at 1.0 the run
+  also tests 1.25 and 1.5.
+
+*Docs (each in its slice, all checked in M2.9):*
+
+- **33.** Section 16 lists every decision this touches: D3 (decode
+  fallback in export, M2.5), D4 (the injector's new pass, M2.4), D16
+  (locks and the sweep, M2.4), D17 (the Opus revisit, M2.4), D27 (via
+  D51, M2.5) and D33 (the sv3d pose, checked with Pat's YouTube upload,
+  M2.8). DECISIONS' Open section lists the format question until Pat
+  answers.
+- **41.** `forbid(unsafe_code)` holds in every library crate but media
+  and render; cli's binary has its own `unsafe` (signals and exit).
+- **42.** Section 2's crate list includes `crates/audio`.
+- **50.** Section 5.2's lexical `..` resolution differs from the OS's
+  when a folder on the path is a symlink; D47 says so and why (a project
+  moved with its media keeps its relative paths).
 
 
 ## 1. Summary
@@ -405,8 +636,10 @@ about unsaved changes on close; autosave is M5's.
 The research note's findings, in short: every reframer checked (Insta360
 Studio and app, GoPro's FX Reframe, Reframe360XL, Fusion's PanoMap) keys
 yaw, pitch, roll and FOV as separate numbers with per-segment curves;
-squad is C¹ only when keys are evenly spaced (with uneven spacing the
-speed jumps at a key by up to 2.8× the chord speed); a non-uniform
+squad is C¹ only when keys are evenly spaced (with keys 0.2 to 3 s
+apart the angular velocity jumps at a key by up to 2.03× the larger
+chord speed either side, the speed changing up to 14× across it); a
+non-uniform
 Catmull–Rom tangent fed into Kim–Kim–Shin's cumulative cubic Hermite
 passes through every key and is C¹ at any spacing; easing is a per-key,
 per-side scale on the key's velocity; deliberate long-way turns need an
@@ -416,7 +649,7 @@ One more measurement decides the default. Interpolating along SO(3)'s
 geodesics tilts the horizon whenever yaw and pitch change together:
 from (yaw 0°, pitch 0°) to (90°, 30°) the slerp midpoint has roll
 −6.5°; from (0°, −30°) to (120°, 30°), −17.6°; from (0°, 0°) to (170°,
-60°), −31°. A reframed pan with a tilting horizon is the first thing a
+60°), −31.1° (32.5° at its worst along the path). A reframed pan with a tilting horizon is the first thing a
 viewer notices, which is why the tools above interpolate angles. So:
 
 ### 6.1 Tracks and keys
@@ -459,23 +692,30 @@ start for the maths only; the model keeps them exact.
   between two level keys (roll 0) stays level throughout; a pure yaw pan
   is the same path as the geodesic. Pitch is clamped by the spline to
   its keys' range (below), so it stays in [−90°, 90°]. Near the poles
-  (|pitch| > 85° at both ends, the tiny planet) yaw and roll lose
-  meaning, and D33 folds the heading into yaw there, so a tiny-planet
-  key interpolates its heading as yaw.
+  yaw and roll lose meaning; D33 folds the heading into yaw at exactly
+  ±90° (the tiny planet), so a tiny-planet key interpolates its heading
+  as yaw.
 - **Free**: the research note's spline on SO(3), for moves the angles
   can't do well (a barrel roll, a path through the zenith): keys as unit
   quaternions, segment rotation `δ_i = log(q_{i+1} q_i⁻¹)` on the short
   branch plus `spin`·2π along its axis, non-uniform Catmull–Rom angular
   velocities `ω_i = (Δ_i ρ_{i−1} + Δ_{i−1} ρ_i)/(Δ_{i−1} + Δ_i)` with
-  `ρ_i = δ_i/Δ_i`, clamped (`ω_i = 0` when the chords turn back, else
-  `|ω_i| ≤ 3·min(|ρ_{i−1}|, |ρ_i|)`), and each segment evaluated in the
+  `ρ_i = δ_i/Δ_i`, limited (scaled by max(0, cos θ_i), θ_i the angle
+  between ρ_{i−1} and ρ_i, then `|ω_i| ≤ 3·min(|ρ_{i−1}|, |ρ_i|)`;
+  amendment 2, finding 2), and each segment evaluated in the
   cumulative cubic Hermite form
-  `q(u) = q_i·exp(B̃₁(u)A)·exp(B̃₂(u)M)·exp(B̃₃(u)C)` with
+  `q(u) = q_i·exp(B̃₁(u)A)·exp(B̃₂(u)M)·exp(B̃₂(u)R)·exp(B̃₃(u)C)` with
   `A = q_i⁻¹(Δ_i/3·ω_i^out)q_i`, `C = q_{i+1}⁻¹(Δ_i/3·ω_{i+1}^in)q_{i+1}`,
-  `M = log(exp(−A)·q_i⁻¹q_{i+1}·exp(−C))` on the branch nearest
-  `q_i⁻¹δ_iq_i − A − C`, and `B̃₁ = 1−(1−u)³`, `B̃₂ = 3u²−2u³`,
-  `B̃₃ = u³`. It passes through every key exactly and is C¹ wherever a
-  key's in and out velocities match.
+  the middle turn `M = q_i⁻¹δ_iq_i − A − C` (whole turns and all), its
+  correction `R = log(exp(−M)·exp(−A)·q_i⁻¹q_{i+1}·exp(−C))`, small,
+  and `B̃₁ = 1−(1−u)³`, `B̃₂ = 3u²−2u³`, `B̃₃ = u³`. It passes through
+  every key exactly and is C¹ wherever a key's in and out velocities
+  match. (As built, M2.2: the first form took one middle rotation
+  `log(exp(−A)·q_i⁻¹q_{i+1}·exp(−C))` on the branch nearest
+  `q_i⁻¹δ_iq_i − A − C`; where that rotation is near a whole turn the
+  branch's axis is ill-conditioned, and 100,000 property cases found a
+  0.001° move of a key moving the view 0.05°. Splitting off the
+  correction leaves the turn on the chord's own axis.)
 
 The mode is per track in M2 (`set_orient_mode`, one undo step; the
 curve editor and the Inspector show it). Per-segment modes would need
@@ -517,7 +757,7 @@ not in M2.
 
 `ViewAnim::at(t) -> (DQuat, Lens)` evaluates the three tracks:
 orientation as above; FOV through the scalar spline on `ln(hfov)`, so a
-zoom is even in apparent size; projection: between keys of the same
+zoom is nearly even in apparent size; projection: between keys of the same
 projection that projection, between different ones a `Lens` with `from`,
 `to` and `morph` = the segment's 0-to-1 shape from the two keys' sides
 (Stop–Stop is smoothstep), `hold` switching at the next key. Lookup is a
@@ -545,7 +785,9 @@ those spins in it.
 pub struct Target {
     pub id: TargetId,
     pub name: String,
-    /// The target's direction over the source's time, as (yaw, pitch)
+    /// The media the target is in (amendment 2, finding 11).
+    pub media: MediaId,
+    /// The target's direction over that media's time, as (yaw, pitch)
     /// of a view looking at it: one key for a fixed point, more for a
     /// moving one (A2's "follow the rider" sets these).
     pub path: Track<Aim>,           // Aim { yaw: f64, pitch: f64 }
@@ -558,10 +800,12 @@ target's direction at each time with roll interpolated, so the camera
 follows it exactly. A segment between a free key and an aim key is an
 ordinary segment whose aim end has the target's direction and the
 target's rate at that time (the scalar spline's slope, or for Free the
-angular velocity of the aim, by a symmetric difference of 1 ms), so the
-join is C¹ and passes through both keys. A target's pitch is clamped
-to ±89° for aiming, since a level view of the zenith has no heading.
-Targets are project-wide and shown on the sphere overview; a key's
+same rates turned into an angular velocity by `Ypr::omega`, both
+analytic), so the join is C¹ and passes through both keys. A target's
+yaw goes the short way between its keys, and its pitch is clamped to
+±89° for aiming, since a level view of the zenith has no heading (the
+rate is 0 while clamped). Targets are listed project-wide, each in one
+media, and shown on the sphere overview; a key's
 target is chosen from the Inspector, and `Shift`+click on the overview
 makes a target at that point.
 
@@ -574,12 +818,14 @@ spins), in both modes:
 - every key is hit: the value at a key's time equals the key, within
   1e−9 rad;
 - C¹ at every key whose sides match: the one-sided angular velocities
-  (finite differences at h = 1e−6 s) differ by at most 1e−5 of the
-  segment's chord speed;
+  (second-order one-sided differences at h = 1 µs) differ by at most
+  1e−5 of the largest of the two speeds and the chord speeds either
+  side, plus 1e−8 rad/s (amendment 2, finding 12);
 - no flips: over 1,000 samples per segment, the angle between successive
   samples is at most 3× the largest chord speed times the step, so no
   sample jumps to the far side;
-- spin: a segment with spin n turns |δ| + 2π|n| in total, within 1e−6;
+- spin: a segment with spin n turns | |δ| + 2πn | in total, within
+  1e−6, for n of either sign (amendment 2, finding 16);
 - sticky spin: moving a key by 0.01° across 180° from its neighbour,
   with `follow_spin`, moves every sample by less than 1°;
 - Level keeps level: a segment between two roll-0 keys has roll 0 at
@@ -587,7 +833,10 @@ spins), in both modes:
 - Linear Free segments equal slerp, Stop–Stop Free segments equal slerp
   at smoothstep(u), both within 1e−12;
 - look-at: between two aim keys the view's forward vector is the
-  target's direction within 1e−9; a free–aim join is C¹;
+  target's direction, clamped to ±89° of pitch, within 1e−9; a free–aim
+  join is C¹;
+- a small move of a key moves the path a little: 1e−3° on any key moves
+  no sample by more than 50× that (amendment 2, finding 2);
 - evaluation is identical after save and load (bit for bit).
 
 Run at `PROPTEST_CASES=100000` before the slice merges.
@@ -621,7 +870,7 @@ same vertical edge angle).
 `out_kind: u32`): 0 is the lens (M1), 1 is equirect, where pixel
 `(x, y)` of a `w × h` target is the direction at longitude
 `(x + ½)/w · 2π − π` and latitude `π/2 − (y + ½)/h · π` (D33's equirect
-convention, `sphere::equirect::to_dir`), turned by the output's fixed
+convention, `sphere::LonLat` in crates/sphere/src/lib.rs), turned by the output's fixed
 orientation (`Output::Equirect.orientation`, D33's `world = q · view`).
 The LOD comes from the same central differences as the lens. A CPU
 reference row and a golden for each of: identity (output equals input
@@ -1187,9 +1436,9 @@ and after any slice whose diff is large enough to need one.
 | **M2.1** | `core::project`: the model (section 3), `Edit` and `apply` (4.1, 4.2), `History` (4.3), JSON save and load (5), `validate`; sphere's `MIN_HFOV_DEG`; core's new dependencies | section 4.4's property tests and section 11's core tests pass; a checked-in schema 1 file loads |
 | **M2.2** | `sphere::spline` (Level, Free, the scalar spline, eases, spin, `follow_spin`) and `core::project::anim` (`ViewAnim::at`, targets, aim keys) | section 6.6's property tests at 100,000; the `at` bench under 5 µs |
 | **M2.2b** | The toolkit prototype (section 12) and its Tier 2 test, then an odin run by Remote Control at 1.0 and 1.25 | the report is in PROGRESS; a failure goes to Pat before M2.6 starts |
-| **M2.3** | render: the output frame and dim (7.1), equirect output (7.2), the YUV pass (7.3), motion blur (7.4) | their goldens and CPU-reference tests on lavapipe |
+| **M2.3** | render: the output frame and dim (7.1), equirect output (7.2), the YUV pass (7.3), motion blur (7.4); `StillRenderer` with the out kind, size and frame (amendment 2) | their goldens and CPU-reference tests on lavapipe, then on RADV on odin by Remote Control |
 | **M2.4** | `spherecut-export` with the software encoders: the pipeline (8.2), presets (8.1), audio (8.5), the MP4 and metadata V1 and V2 (8.4), atomic output, free space, cancel, progress (8.6) | the parity tests, flat and 360, with libx264 and libx265; audio trims exact on the three FFmpeg versions; cancel and full-disk tests |
-| **M2.5** | `spherecut render` (section 9) with `cli-json.md`; the VA-API encoders, the encoder choice and fallback (8.3); doctor lists the encoders it can open; hw-test's Tier 2 export tests and bench, then an odin run | D27's contract tests; odin's `bench_export_4k30_vaapi` at ≥ 30 fps or the slow stage named |
+| **M2.5** | `spherecut render` (section 9) with `cli-json.md`; the VA-API encoders, the encoder choice and fallback (8.3); doctor lists the encoders it can open; hw-test's Tier 2 export tests and bench, then an odin run | D27's and D51's contract tests; odin's `bench_export_4k30_vaapi` at ≥ 30 fps (a miss is a question for Pat, amendment 2) |
 | **M2.6** | GUI part 1: project open, save and close, the menu bar, undo and redo, the timeline strip (trim handles, markers, key lanes), keyed view and look-around, trim playback, the output frame in the viewer (10.1 to 10.3) | section 11's app tests for these |
 | **M2.7** | GUI part 2: the curve editor (10.4), the sphere overview (10.5), the Inspector, targets, the export window (10.6), gui_smoke's export | the remaining app tests, including the UI budget during an export |
 | **M2.8** | Hardware: the full hw-test on odin, the toolkit check again, and huginn's prompt for Pat (huginn's runs wait for Pat, as M1's did) | odin's results in PROGRESS and perf.md |
@@ -1211,11 +1460,12 @@ the run at the end, in M2.8, on the same binary.
 |---|---|---|
 | D47 | The project file: JSON (or Pat's choice), the schema number and migrations, relative paths, fingerprints, offline media | M2.1 |
 | D48 | The project model and `Edit` in core: ids, revision, all-or-none `apply`, history steps with label and origin, M2's limits; core depends on sphere and glam (updates D28) | M2.1 |
-| D49 | Rendering for export: the keyed FOV is the output frame's, equirect output, the YUV pass and its tags, motion blur (updates D31) | M2.3 |
-| D50 | Keyframes: Level by default and Free per track, the scalar and SO(3) splines, eases, spin, look-at; why not squad and why Level (the horizon measurements of section 6) | M2.2 |
-| D51 | `spherecut render`: flags, the `spherecut.render/1` events, the checks before the output appears (extends D27) | M2.5 |
-| D52 | The export pipeline: the crate, threads, presets and bitrates, encoder order and fallback, rate control, the MP4 and its metadata, audio copy and its edit list | M2.4, M2.5 |
+| D49 | Rendering for export: the keyed FOV is the output frame's, equirect output, the YUV pass and its four layouts and tags, motion blur, the export's filter, `StillRenderer` as the parity reference and `frame --project` (updates D31) | M2.3 |
+| D50 | Keyframes: Level by default (Pat's call, asked) and Free per track, the scalar and SO(3) splines, the continuous limit, eases, spin, keyed morph, look-at; why not squad and why Level (the horizon measurements of section 6) | M2.2 |
+| D51 | `spherecut render`: flags, every `--json` line a D27 envelope with `result.event`, exits, the checks before the output appears (amends D27) | M2.5 |
+| D52 | The export pipeline: the crate, threads, presets and bitrates, encoder order and fallback, rate control, the MP4 and its metadata in one cancellable pass (updates D4), audio copy, its edit list and the movie timescale, the parity floors, the job handle, the Opus revisit (D17) | M2.4, M2.5 |
 | D53 | The toolkit check's prototype and its result (updates D26) | M2.2b, M2.8 |
+| D16, D3, D33 | Updated: temporary files hold a lock and the sweep takes only lockable old files (M2.4); export reports a decode fallback (M2.5); the sv3d pose checked with Pat's YouTube upload (M2.8) | as listed |
 
 
 ## 17. Questions for Pat
@@ -1223,12 +1473,16 @@ the run at the end, in M2.8, on the same binary.
 1. **The project file format** (asked, JSON recommended). The plan is
    written for JSON; another choice changes only section 5 and `save`
    and `load`.
-2. **Level by default** (for information, not a question). PLAN says
-   orientation is interpolated on SO(3). The horizon tilt between keys
-   that change yaw and pitch together (up to 31° in section 6's
-   measurements) makes M2 interpolate yaw, pitch and roll by default, as
-   every reframer checked does, with SO(3) as the per-track Free mode.
-   Keys are still stored as quaternions.
+2. **Level by default** (asked, Level recommended; amendment 2,
+   finding 15). PLAN says orientation is interpolated on SO(3). The
+   horizon tilt between keys that change yaw and pitch together (up to
+   32.5° in section 6's measurements) makes M2 interpolate yaw, pitch
+   and roll by default, as every reframer checked does, with SO(3) as
+   the per-track Free mode. Keys are still stored as quaternions, so
+   the default can change without a migration.
+5. **Real time on hardware**, only if odin or huginn misses 30 fps for
+   a reframed 4K30 export (amendment 2, finding 3): which way to close
+   the gap.
 3. **A YouTube upload of a 360 export** when Pat has time: the only way
    to know that YouTube reads the metadata and accepts the audio's edit
    list. A private upload is enough.

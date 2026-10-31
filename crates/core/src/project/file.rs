@@ -33,12 +33,13 @@ use crate::brand::{APP_SLUG, VERSION};
 use crate::fs::TempFile;
 use crate::time::Rational;
 
-/// The `format` every project file names.
-pub const FORMAT: &str = "spherecut.project";
+/// The `format` every project file names. A rename of the product after
+/// files are out would have to read the old name too.
+pub const FORMAT: &str = concat!(crate::brand::slug!(), ".project");
 /// The schema this build writes, and the newest it reads.
 pub const SCHEMA: u64 = 1;
 /// A project file's extension.
-pub const EXTENSION: &str = "spherecut";
+pub const EXTENSION: &str = APP_SLUG;
 /// The largest project file read: 10,000 keys on each track are a few MB.
 pub const MAX_FILE_BYTES: u64 = 64 << 20;
 /// How much of a media file its fingerprint hashes.

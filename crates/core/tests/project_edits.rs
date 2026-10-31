@@ -8,7 +8,7 @@ mod common;
 use common::*;
 use spherecut_core::Time;
 use spherecut_core::project::*;
-use spherecut_sphere::perspective::Projection;
+use spherecut_sphere::perspective::{LensShape, Projection};
 
 /// Record `edits` as one step, check the revision went up by one, undo
 /// it and check the project is as it was, redo it and check it is as it
@@ -349,7 +349,10 @@ fn keys() {
     };
     refused(
         &mut p,
-        vec![set_value(fov, AnyValue::Projection(Projection::Fisheye))],
+        vec![set_value(
+            fov,
+            AnyValue::Projection(LensShape::Pure(Projection::Fisheye)),
+        )],
         0,
         Code::Invalid,
     );
@@ -784,15 +787,75 @@ fn markers() {
 }
 
 #[test]
+fn targets_belong_to_their_media() {
+    let mut p = project();
+    let c = clip(&p);
+    p.apply(&[Edit::AddMedia {
+        media: common::media("/clips/VID_2.mp4", 5),
+    }])
+    .unwrap();
+    let other = p.media()[1].id;
+    let mut there = target(&p, "elsewhere", 0.0, 0.0);
+    there.media = other;
+    // A target's path is in its media's time, so it ends with the media.
+    let mut long = there.clone();
+    long.path.keys[0].at = frame(200);
+    refused(
+        &mut p,
+        vec![Edit::AddTarget { target: long }],
+        0,
+        Code::OutOfRange,
+    );
+    let mut lost = there.clone();
+    lost.media = MediaId(77);
+    refused(
+        &mut p,
+        vec![Edit::AddTarget { target: lost }],
+        0,
+        Code::NotFound,
+    );
+    p.apply(&[Edit::AddTarget { target: there }]).unwrap();
+    let t = p.targets()[0].id;
+    // The clip's media isn't the target's.
+    let aim = AnyKey::Orientation(Key {
+        id: KeyId::NEW,
+        at: frame(30),
+        value: Orient::Aim {
+            target: t,
+            roll_deg: 0.0,
+        },
+        ease: Ease::SMOOTH,
+        spin: 0,
+    });
+    let e = refused(
+        &mut p,
+        vec![Edit::AddKey { clip: c, key: aim }],
+        0,
+        Code::Invalid,
+    );
+    assert!(e.to_string().contains("not the clip's"), "{e}");
+    // Media a target is in stays while the target does.
+    refused(
+        &mut p,
+        vec![Edit::RemoveMedia { media: other }],
+        0,
+        Code::InUse,
+    );
+    round_trip(
+        &mut p,
+        vec![
+            Edit::RemoveTarget { target: t },
+            Edit::RemoveMedia { media: other },
+        ],
+    );
+}
+
+#[test]
 fn targets() {
     let mut p = project();
     let c = clip(&p);
-    let after = round_trip(
-        &mut p,
-        vec![Edit::AddTarget {
-            target: target("rider", 30.0, -10.0),
-        }],
-    );
+    let rider = target(&p, "rider", 30.0, -10.0);
+    let after = round_trip(&mut p, vec![Edit::AddTarget { target: rider }]);
     let t = after.targets()[0].id;
     let aim = AnyKey::Orientation(Key {
         id: KeyId::NEW,
@@ -1004,7 +1067,7 @@ fn every_op_is_named_as_serde_writes_it() {
             marker: MarkerId(9),
         },
         Edit::AddTarget {
-            target: target("t", 0.0, 0.0),
+            target: target(&project(), "t", 0.0, 0.0),
         },
         Edit::SetTarget {
             target: TargetId(9),

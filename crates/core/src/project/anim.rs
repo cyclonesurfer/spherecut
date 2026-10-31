@@ -1,19 +1,23 @@
 //! A clip's view over time (M2 plan section 6, DECISIONS D50): key
 //! tracks for orientation, field of view and projection, and look-at
-//! targets. This module holds the data; evaluating it between keys is
-//! slice M2.2's.
+//! targets, and ([`ViewAnim::at`]) the view they give at any time.
 
 use std::fmt;
 
 use glam::DQuat;
 use serde::{Deserialize, Serialize};
 use spherecut_sphere::orient::Ypr;
-use spherecut_sphere::perspective::Projection;
+use spherecut_sphere::perspective::LensShape;
 use spherecut_sphere::rotation_angle;
 use thiserror::Error;
 
-use super::{KeyId, TargetId};
+use super::{KeyId, MediaId, TargetId};
 use crate::time::Time;
+
+mod eval;
+
+pub use eval::{Aim, MAX_AIM_PITCH_DEG, View, follow_spin};
+pub use spherecut_sphere::spline::{Ease, Side};
 
 /// How a clip's orientation keys are joined (M2 plan section 6.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -35,7 +39,8 @@ pub struct ViewAnim {
     pub orientation: KeyTrack<Orient>,
     /// The output frame's horizontal field of view, in degrees.
     pub fov: KeyTrack<f64>,
-    pub projection: KeyTrack<Projection>,
+    /// Each key a projection or a morph between two (D33's slider).
+    pub projection: KeyTrack<LensShape>,
 }
 
 /// A track's keys, in increasing time.
@@ -104,56 +109,16 @@ pub enum Orient {
     },
 }
 
-/// How a key is entered and left (M2 plan section 6.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Ease {
-    #[serde(default)]
-    pub into: Side,
-    #[serde(default)]
-    pub out: Side,
-    /// Keep this key's value until the next key, then jump.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub hold: bool,
-}
-
-fn is_false(b: &bool) -> bool {
-    !*b
-}
-
-impl Ease {
-    pub const SMOOTH: Ease = Ease {
-        into: Side::Smooth,
-        out: Side::Smooth,
-        hold: false,
-    };
-    pub const STOP: Ease = Ease {
-        into: Side::Stop,
-        out: Side::Stop,
-        hold: false,
-    };
-}
-
-/// One side of a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Side {
-    /// The spline's velocity at the key.
-    #[default]
-    Smooth,
-    /// The adjacent segment's average rate.
-    Linear,
-    /// At rest.
-    Stop,
-}
-
-/// A look-at target: a direction over the source's time.
+/// A look-at target: something in one media file, as a direction over
+/// that file's time. Only clips of that media aim at it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Target {
     #[serde(default)]
     pub id: TargetId,
     pub name: String,
+    /// The media the target is in; its path is in this media's time.
+    pub media: MediaId,
     /// One key for a fixed point, more for a moving one.
     pub path: KeyTrack<AimDir>,
 }

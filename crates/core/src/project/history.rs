@@ -35,11 +35,49 @@ pub struct Step {
 
 /// A project's undo steps, oldest first, with a cursor: the steps below
 /// it are done, the ones above it undone (redo applies them again).
-#[derive(Debug, Clone, PartialEq)]
+/// Written as `{"steps": [...], "cursor": n, "limit": n}`, for A2's
+/// saved history; reading refuses a cursor past the steps or more steps
+/// than the limit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "HistoryRepr")]
 pub struct History {
     steps: Vec<Step>,
     cursor: usize,
     limit: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryRepr {
+    steps: Vec<Step>,
+    cursor: usize,
+    limit: usize,
+}
+
+impl TryFrom<HistoryRepr> for History {
+    type Error = String;
+
+    fn try_from(r: HistoryRepr) -> Result<History, String> {
+        if r.limit == 0 || r.steps.len() > r.limit {
+            return Err(format!(
+                "a history of {} steps with a limit of {}",
+                r.steps.len(),
+                r.limit
+            ));
+        }
+        if r.cursor > r.steps.len() {
+            return Err(format!(
+                "a history's cursor {} is past its {} steps",
+                r.cursor,
+                r.steps.len()
+            ));
+        }
+        Ok(History {
+            steps: r.steps,
+            cursor: r.cursor,
+            limit: r.limit,
+        })
+    }
 }
 
 /// How many steps a history keeps; the oldest go first.

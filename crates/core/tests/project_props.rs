@@ -14,7 +14,7 @@ use proptest::prelude::*;
 use spherecut_core::project::file;
 use spherecut_core::project::*;
 use spherecut_core::{FrameRate, Rational};
-use spherecut_sphere::perspective::Projection;
+use spherecut_sphere::perspective::{LensShape, Morph, Projection};
 
 /// One edit's worth of randomness, turned into an edit by [`make`]
 /// against the project as it is when it is applied.
@@ -99,7 +99,22 @@ fn make(p: &Project, s: &Seed) -> Edit {
         },
         2 => Edit::AddKey {
             clip: c,
-            key: projection_key(time(s.a), projection),
+            key: if s.b.is_multiple_of(2) {
+                projection_key(time(s.a), projection)
+            } else {
+                // A morph, sometimes outside 0 to 1 or to itself.
+                AnyKey::Projection(Key {
+                    id: KeyId::NEW,
+                    at: time(s.a),
+                    value: LensShape::Morph(Morph {
+                        from: projection,
+                        to: [Projection::Fisheye, Projection::Stereographic][(s.a % 2) as usize],
+                        morph: s.z / 380.0,
+                    }),
+                    ease: Ease::STOP,
+                    spin: 0,
+                })
+            },
         },
         3 => Edit::SetKey {
             key: pick(&keys, s.a).unwrap_or(KeyId(999)),
@@ -139,7 +154,7 @@ fn make(p: &Project, s: &Seed) -> Edit {
             marker: pick(&markers, s.a).unwrap_or(MarkerId(999)),
         },
         9 => Edit::AddTarget {
-            target: target(&format!("t{}", s.a % 10), s.x, s.y),
+            target: target(p, &format!("t{}", s.a % 10), s.x, s.y),
         },
         10 => match pick(&targets, s.a) {
             Some(t) => Edit::RemoveTarget { target: t },
@@ -394,4 +409,14 @@ fn history_keeps_its_limit_and_drops_redo_on_a_new_step() {
     );
     let back: Step = serde_json::from_value(json).unwrap();
     assert_eq!(&back, step);
+    // A2 saves the whole history and reads it back.
+    let saved = serde_json::to_string(&h).unwrap();
+    let read: History = serde_json::from_str(&saved).unwrap();
+    assert_eq!(read, h);
+    let mut bad: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    bad["cursor"] = serde_json::json!(9);
+    let e = serde_json::from_value::<History>(bad)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("cursor 9 is past its 3 steps"), "{e}");
 }

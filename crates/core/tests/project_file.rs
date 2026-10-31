@@ -9,9 +9,10 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::*;
+use proptest::prelude::*;
 use spherecut_core::project::file::{self, FileError, MediaStatus};
 use spherecut_core::project::*;
-use spherecut_sphere::perspective::Projection;
+use spherecut_sphere::perspective::{LensShape, Morph, Projection};
 
 /// The checked-in file, and where its media is said to be.
 fn data_dir() -> PathBuf {
@@ -25,7 +26,7 @@ fn rich() -> Project {
     let c = clip(&p);
     let s = sequence(&p);
     p.apply(&[Edit::AddTarget {
-        target: target("rider", 30.0, -10.0),
+        target: target(&p, "rider", 30.0, -10.0),
     }])
     .unwrap();
     let t = p.targets()[0].id;
@@ -65,6 +66,20 @@ fn rich() -> Project {
         Edit::AddKey {
             clip: c,
             key: projection_key(frame(150), Projection::Stereographic),
+        },
+        Edit::AddKey {
+            clip: c,
+            key: AnyKey::Projection(Key {
+                id: KeyId::NEW,
+                at: frame(200),
+                value: LensShape::Morph(Morph {
+                    from: Projection::Stereographic,
+                    to: Projection::Fisheye,
+                    morph: 0.25,
+                }),
+                ease: Ease::STOP,
+                spin: 0,
+            }),
         },
         Edit::SetOrientMode {
             clip: c,
@@ -368,4 +383,114 @@ fn too_large_and_missing_files() {
             .code(),
         "not_found"
     );
+}
+
+/// A JSON value from the shapes a project file holds, for the mutations.
+fn junk() -> impl Strategy<Value = serde_json::Value> {
+    use serde_json::{Value, json};
+    let leaf = prop_oneof![
+        Just(Value::Null),
+        any::<bool>().prop_map(Value::Bool),
+        any::<i64>().prop_map(|n| json!(n)),
+        any::<u64>().prop_map(|n| json!(n)),
+        prop::num::f64::ANY.prop_map(|x| json!(x)),
+        "[a-z_/0-9.:-]{0,12}".prop_map(Value::String),
+        Just(json!("1/0")),
+        Just(json!("-1/3")),
+        Just(json!({"exact": "9223372036854775807/1"})),
+        Just(json!({"quat": [0, 0, 0, 0]})),
+        Just(json!({"ypr_deg": [1e308, 0, 0]})),
+        Just(json!({"from": "fisheye", "to": "fisheye", "morph": 0.5})),
+    ];
+    leaf.prop_recursive(2, 8, 3, |inner| {
+        prop_oneof![
+            prop::collection::vec(inner.clone(), 0..3).prop_map(Value::Array),
+            prop::collection::btree_map("[a-z_]{1,8}", inner, 0..3)
+                .prop_map(|m| Value::Object(m.into_iter().collect())),
+        ]
+    })
+}
+
+/// Every place in `v`, as JSON pointers.
+fn pointers(v: &serde_json::Value, at: String, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Array(a) => {
+            for (i, x) in a.iter().enumerate() {
+                pointers(x, format!("{at}/{i}"), out);
+            }
+        }
+        serde_json::Value::Object(m) => {
+            for (k, x) in m {
+                pointers(x, format!("{at}/{k}"), out);
+            }
+        }
+        _ => {}
+    }
+    out.push(at);
+}
+
+proptest! {
+    /// Files written by agents and by hand: whatever is changed, deleted
+    /// or cut short, loading gives a project that passes `validate` or a
+    /// typed error, never a panic.
+    #[test]
+    fn mangled_files_load_or_are_refused(
+        changes in prop::collection::vec((any::<prop::sample::Index>(), junk(), 0u8..4), 1..4),
+        cut in any::<prop::sample::Index>(),
+        cut_it in prop::bool::weighted(0.1),
+    ) {
+        let text = std::fs::read_to_string(data_dir().join("schema1.spherecut")).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for (at, value, how) in changes {
+            let mut all = Vec::new();
+            pointers(&v, String::new(), &mut all);
+            let p = at.get(&all).clone();
+            match how {
+                // Replace a value.
+                0 | 1 => {
+                    if let Some(slot) = v.pointer_mut(&p) {
+                        *slot = value;
+                    }
+                }
+                // Delete a field or an element.
+                2 => {
+                    if let Some((parent, last)) = p.rsplit_once('/') {
+                        match v.pointer_mut(parent) {
+                            Some(serde_json::Value::Object(m)) => {
+                                m.remove(last);
+                            }
+                            Some(serde_json::Value::Array(a)) => {
+                                if let Ok(i) = last.parse::<usize>() {
+                                    a.remove(i);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Duplicate an element of an array.
+                _ => {
+                    if let Some((parent, last)) = p.rsplit_once('/')
+                        && let Some(serde_json::Value::Array(a)) = v.pointer_mut(parent)
+                        && let Ok(i) = last.parse::<usize>()
+                    {
+                        let x = a[i].clone();
+                        a.insert(i, x);
+                    }
+                }
+            }
+        }
+        let mut mangled = serde_json::to_string_pretty(&v).unwrap();
+        if cut_it {
+            let mut n = cut.index(mangled.len());
+            while !mangled.is_char_boundary(n) {
+                n -= 1;
+            }
+            mangled.truncate(n);
+        }
+        if let Ok(p) = file::from_json(&mangled, &data_dir()) {
+            prop_assert!(p.validate().is_ok());
+            prop_assert!(file::to_json(&p, &data_dir()).is_ok());
+        }
+    }
 }

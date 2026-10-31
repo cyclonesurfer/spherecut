@@ -25,13 +25,13 @@ use std::fmt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use spherecut_sphere::perspective::Projection;
+use spherecut_sphere::perspective::{LensShape, Projection};
 
 use crate::time::{FrameRate, Time};
 
 pub use anim::{
-    AimDir, Ease, Key, KeyTrack, Orient, OrientMode, Orientation, OrientationError, Side, Target,
-    ViewAnim,
+    Aim, AimDir, Ease, Key, KeyTrack, MAX_AIM_PITCH_DEG, Orient, OrientMode, Orientation,
+    OrientationError, Side, Target, View, ViewAnim, follow_spin,
 };
 pub use edit::{AnyKey, AnyKeys, AnyValue, Applied, Edit, EditError, PathPoint};
 pub use history::{Gesture, History, Origin, Step};
@@ -401,7 +401,7 @@ impl Project {
             mode: OrientMode::Level,
             orientation: KeyTrack::one(key(&mut p), Orient::View(view.orientation), Ease::SMOOTH),
             fov: KeyTrack::one(key(&mut p), view.fov_deg, Ease::SMOOTH),
-            projection: KeyTrack::one(key(&mut p), view.projection, Ease::STOP),
+            projection: KeyTrack::one(key(&mut p), LensShape::Pure(view.projection), Ease::STOP),
         };
         let rate = media.video.rate;
         let end = media.video.duration;
