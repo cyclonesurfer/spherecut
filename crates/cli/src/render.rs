@@ -154,7 +154,7 @@ pub struct RangeArg {
     pub end: Option<TimeSpec>,
 }
 
-fn preset(s: &str) -> Result<Preset, String> {
+pub(crate) fn preset(s: &str) -> Result<Preset, String> {
     Preset::parse(s).ok_or_else(|| {
         let names: Vec<String> = Preset::all().iter().map(Preset::to_string).collect();
         format!("expected one of {}", names.join(", "))

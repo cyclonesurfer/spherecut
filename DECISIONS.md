@@ -8349,7 +8349,13 @@ outcome, frames, encoder, fallback, elapsed, the pace's waits, and
 `while_running`: the run's settled numbers over the time the export
 ran. Tier 2's gui_smoke exports on its first run and judges that span
 by the run's own gates (presented ≥ 0.90, dropped ≤ 0.1 %, UI p99 ≤
-1.5 refresh periods, D40).
+1.5 refresh periods, D40). Its second and third runs (M2.8) export the
+same 2 s as an 8K 360 (`--smoke-export-preset 360-7680`) and as a 4K
+flat with motion blur over a keyed 90° pan (`--smoke-export-preset
+flat-16x9-2160 --smoke-export-blur`), the heaviest frames amendment 2
+item 22 asks about, judged the same way; the document gives each
+export's stage times, and hw-test's report shows the exports under
+their runs.
 
 **Tests** (`crates/app/tests/reframe2.rs`, lavapipe, the UI thread
 marked): a curve drag moves only that key's yaw, previewed while it

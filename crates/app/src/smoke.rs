@@ -11,7 +11,10 @@
 //! the clip's first [`EXPORT_SPAN`] through the export window's path
 //! while the clip plays (M2 plan section 11), and the run goes on until
 //! the export has ended: the document says how the export went and what
-//! the UI did while it ran.
+//! the UI did while it ran. `--smoke-export-preset` exports at another
+//! output, and `--smoke-export-blur` with motion blur and a pan of
+//! [`PAN_DEG`] over the span for it to sample (amendment 2 item 22
+//! measures the heaviest export frames while the viewer plays).
 //!
 //! The numbers are the overlay's ([`PerfStats`]), over the whole run: each
 //! pass gathers the samples every stage recorded since the last
@@ -39,6 +42,7 @@ use spherecut_core::fs::TempFile;
 use spherecut_media::backend::DecodePath;
 use spherecut_playback::{Counter, PlayState, Stage};
 
+use spherecut_core::project::{AnyKey, Ease, Edit, Key, KeyId, Orient};
 use spherecut_core::time::{Rational, Time};
 
 use crate::app::AppState;
@@ -99,9 +103,72 @@ pub struct SmokeArgs {
     pub out: PathBuf,
     /// Where the screenshot goes, as a PNG; none without it.
     pub screenshot: Option<PathBuf>,
-    /// Where an export of the clip's first [`EXPORT_SPAN`] goes, made
-    /// while it plays; none without it.
-    pub export: Option<PathBuf>,
+    /// An export of the clip's first [`EXPORT_SPAN`], made while it
+    /// plays; none without it.
+    pub export: Option<SmokeExport>,
+}
+
+/// `--smoke-export`: where the export goes, and what the run sets first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SmokeExport {
+    pub output: PathBuf,
+    /// The output to export at, in place of the untitled project's.
+    pub preset: Option<spherecut_export::Preset>,
+    /// Motion blur on, and the view panning [`PAN_DEG`] over the span so
+    /// that it has movement to sample (a flat output's: a 360 output's
+    /// view is its front, which the keys don't move).
+    pub blur: bool,
+}
+
+/// How far `--smoke-export-blur`'s pan turns the view in yaw over the
+/// exported span, at an even speed: 45° a second, a quick pan, a few
+/// dozen blur samples a frame for a 4K flat output at 30 fps.
+pub const PAN_DEG: f64 = 90.0;
+
+/// The pan's edits: the first orientation key's ease made linear, and a
+/// key at `end` turned [`PAN_DEG`] in yaw from it. None without a first
+/// key that is a view (an aim follows its target).
+fn pan(doc: &crate::doc::Doc, end: Time) -> Vec<Edit> {
+    let Some(first) = doc.clip().view.orientation.keys.first() else {
+        return Vec::new();
+    };
+    let Orient::View(o) = first.value else {
+        return Vec::new();
+    };
+    let yaw = o.ypr().yaw.to_degrees();
+    let Some(turned) = crate::doc::with_angle(o, 0, yaw + PAN_DEG) else {
+        return Vec::new();
+    };
+    vec![
+        Edit::SetKey {
+            key: first.id,
+            at: None,
+            value: None,
+            ease: Some(Ease::LINEAR),
+            spin: None,
+        },
+        Edit::AddKey {
+            clip: doc.clip().id,
+            key: AnyKey::Orientation(Key {
+                id: KeyId::NEW,
+                at: end,
+                value: Orient::View(turned),
+                ease: Ease::LINEAR,
+                spin: 0,
+            }),
+        },
+    ]
+}
+
+impl SmokeExport {
+    /// To `output`, at the project's output, without blur.
+    pub fn to(output: PathBuf) -> SmokeExport {
+        SmokeExport {
+            output,
+            preset: None,
+            blur: false,
+        }
+    }
 }
 
 /// How the run ended, once its document was written: `Err` with a code
@@ -583,7 +650,7 @@ impl SmokeDriver {
     /// the run's seconds, and marked where it ended. Whether the run
     /// waits for it.
     fn export_step(&mut self, s: &mut AppState, now: Instant, played: f64) -> bool {
-        let Some(output) = &self.args.export else {
+        let Some(export) = &self.args.export else {
             return false;
         };
         let Phase::Playing(run) = &mut self.phase else {
@@ -604,8 +671,30 @@ impl SmokeDriver {
                     .start
                     .checked_add(span)
                     .map_or(trim.end, |e| e.min(trim.end));
-                s.export_span(output.clone(), Some((trim.start, end)), true);
-                tracing::info!(output = %output.display(), "the smoke run exports");
+                let seq = doc.project.the_sequence();
+                let output = export
+                    .preset
+                    .map(|p| doc.set_output(crate::inspector::preset_output(p, &seq.output)))
+                    .unwrap_or_default();
+                s.edit("Set output", &output);
+                if export.blur
+                    && let Some(doc) = &s.reframe.doc
+                {
+                    let settings = spherecut_core::project::ExportSettings {
+                        motion_blur: true,
+                        ..doc.project.the_sequence().export
+                    };
+                    let mut edits = doc.set_export(settings);
+                    edits.extend(pan(doc, end));
+                    s.edit("Export with blur", &edits);
+                }
+                s.export_span(export.output.clone(), Some((trim.start, end)), true);
+                tracing::info!(
+                    output = %export.output.display(),
+                    preset = ?export.preset,
+                    blur = export.blur,
+                    "the smoke run exports"
+                );
                 let Some(p) = &s.player else {
                     return false;
                 };
@@ -836,14 +925,24 @@ pub struct Report {
 #[derive(Debug, Serialize)]
 pub struct ExportReport {
     pub output: String,
+    /// The preset asked for (`null`: the project's) and whether motion
+    /// blur was.
+    pub preset: Option<String>,
+    pub motion_blur: bool,
     /// It ended with its file whole and checked.
     pub ok: bool,
     pub error: Option<String>,
     pub frames: Option<u64>,
+    pub size: Option<[u32; 2]>,
     pub encoder: Option<&'static str>,
     /// The hardware encoder it didn't use, and why.
     pub fallback: Option<String>,
     pub elapsed_s: Option<f64>,
+    /// Each stage's busy time in seconds, as the export's report has
+    /// them: `decode`, `render`, `readback`, `encode`, `finish`.
+    pub stages_s: Option<BTreeMap<&'static str, f64>>,
+    /// Frames whose blur was capped at the most samples (D49).
+    pub blur_capped: Option<u64>,
     /// Frames held for a UI pass while the clip played (M2 plan
     /// amendment 2 item 22), and the longest hold.
     pub held: u64,
@@ -1118,14 +1217,14 @@ impl SmokeDriver {
             .as_ref()
             .zip(end.as_ref())
             .map(|(m, end)| run.between(m, end, refresh_hz, rates));
-        let export = self.args.export.as_ref().map(|output| {
+        let export = self.args.export.as_ref().map(|export| {
             let while_running = run
                 .export_from
                 .as_ref()
                 .zip(run.export_to.as_ref().or(end.as_ref()))
                 .map(|((a, _), b)| run.between(a, b, refresh_hz, rates));
             export_report(
-                output,
+                export,
                 run.export_from.is_some(),
                 s.export.last.as_ref(),
                 &s.export.pace,
@@ -1213,7 +1312,7 @@ impl SmokeDriver {
 /// The export's part of the document: `last` is how the export window's
 /// last export ended, if `started`.
 fn export_report(
-    output: &Path,
+    export: &SmokeExport,
     started: bool,
     last: Option<&Result<spherecut_export::Report, spherecut_export::ExportError>>,
     pace: &spherecut_export::Pace,
@@ -1221,13 +1320,18 @@ fn export_report(
 ) -> ExportReport {
     let (held, longest) = pace.waits();
     let mut r = ExportReport {
-        output: output.display().to_string(),
+        output: export.output.display().to_string(),
+        preset: export.preset.map(|p| p.to_string()),
+        motion_blur: export.blur,
         ok: false,
         error: None,
         frames: None,
+        size: None,
         encoder: None,
         fallback: None,
         elapsed_s: None,
+        stages_s: None,
+        blur_capped: None,
         held,
         longest_hold_ms: longest.as_secs_f32() * 1e3,
         while_running,
@@ -1245,6 +1349,21 @@ fn export_report(
                 .as_ref()
                 .map(|f| format!("{}: {}", f.from, f.reason));
             r.elapsed_s = Some(report.elapsed.as_secs_f64());
+            r.size = Some([report.size.0, report.size.1]);
+            let st = report.stages;
+            r.stages_s = Some(
+                [
+                    ("decode", st.decode),
+                    ("render", st.render),
+                    ("readback", st.readback),
+                    ("encode", st.encode),
+                    ("finish", st.finish),
+                ]
+                .into_iter()
+                .map(|(k, d)| (k, d.as_secs_f64()))
+                .collect(),
+            );
+            r.blur_capped = Some(report.blur_capped);
         }
     }
     r

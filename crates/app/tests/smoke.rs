@@ -12,8 +12,10 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use egui_kittest::Harness;
-use spherecut_app::smoke::{SCHEMA, SCREENSHOT_WIDTH, SmokeArgs, SmokeDriver};
+use spherecut_app::smoke::{SCHEMA, SCREENSHOT_WIDTH, SmokeArgs, SmokeDriver, SmokeExport};
 use spherecut_app::{Settings, SpherecutApp};
+use spherecut_core::project::Aspect;
+use spherecut_export::Preset;
 use spherecut_media::backend::FfmpegBackend;
 use spherecut_synth::media::{self, Codec, Spec};
 
@@ -198,6 +200,9 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
     );
 }
 
+/// At an output other than the project's, with motion blur on, as hw-test's
+/// item 22 run asks (there an 8K 360; here a square 1080, which lavapipe
+/// and libx264 make quickly).
 #[test]
 fn the_smoke_run_exports_while_it_plays_and_waits_for_the_export() {
     let gpu = common::gpu();
@@ -211,7 +216,14 @@ fn the_smoke_run_exports_while_it_plays_and_waits_for_the_export() {
         seconds: 1.5,
         out: dir.join("smoke.json"),
         screenshot: None,
-        export: Some(out.clone()),
+        export: Some(SmokeExport {
+            preset: Some(Preset::Flat {
+                aspect: Aspect::Square,
+                short_side: 1080,
+            }),
+            blur: true,
+            ..SmokeExport::to(out.clone())
+        }),
     };
     let app = smoke_app(&gpu, &rs, args.clone());
     let mut h = common::harness(app, &rs, [960.0, 600.0], 1.0);
@@ -227,8 +239,19 @@ fn the_smoke_run_exports_while_it_plays_and_waits_for_the_export() {
     eprintln!("{}", serde_json::to_string_pretty(e).unwrap());
     assert_eq!(e["ok"], true, "{e}");
     assert_eq!(e["output"], out.display().to_string());
-    // The clip's first 2 s at its 30 fps.
+    // The clip's first 2 s at its 30 fps, at the preset asked for.
     assert_eq!(e["frames"], 60);
+    assert_eq!(e["preset"], "flat-1x1-1080");
+    assert_eq!(e["motion_blur"], true);
+    assert_eq!(e["size"], serde_json::json!([1080, 1080]));
+    assert!(e["stages_s"]["render"].as_f64().unwrap() > 0.0, "{e}");
+    let project = h.state().state.reframe.doc.as_ref().unwrap();
+    assert!(project.project.the_sequence().export.motion_blur);
+    // The pan the blur samples: a second orientation key at the span's
+    // end.
+    let keys = &project.clip().view.orientation.keys;
+    assert_eq!(keys.len(), 2, "{keys:?}");
+    assert_eq!(keys[1].at.to_secs_f64(), 2.0);
     assert!(out.is_file());
     assert!(e["encoder"].as_str().is_some_and(|n| !n.is_empty()), "{e}");
     let w = &e["while_running"];

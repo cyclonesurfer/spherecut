@@ -83,6 +83,13 @@ struct GuiCli {
     /// section 11), to this MP4.
     #[arg(long, hide = true, value_name = "MP4", requires = "smoke")]
     smoke_export: Option<PathBuf>,
+    /// The smoke export's output preset, as `render --preset` names it,
+    /// in place of the project's (M2 plan amendment 2 item 22).
+    #[arg(long, hide = true, value_name = "NAME", requires = "smoke_export", value_parser = render::preset)]
+    smoke_export_preset: Option<spherecut_export::Preset>,
+    /// The smoke export with motion blur on.
+    #[arg(long, hide = true, requires = "smoke_export")]
+    smoke_export_blur: bool,
     /// The toolkit check's timeline prototype (D26) in place of the
     /// viewer; with --proto-out, a script drives it, what each UI pass
     /// took goes there as JSON (spherecut.timeline-proto/1), and it
@@ -511,7 +518,13 @@ fn gui(args: GuiCli) -> Exit {
             seconds: args.smoke_seconds,
             out: args.smoke_out.unwrap_or_default(),
             screenshot: args.smoke_screenshot,
-            export: args.smoke_export,
+            export: args
+                .smoke_export
+                .map(|output| spherecut_app::smoke::SmokeExport {
+                    output,
+                    preset: args.smoke_export_preset,
+                    blur: args.smoke_export_blur,
+                }),
         }),
         proto: args
             .timeline_proto
