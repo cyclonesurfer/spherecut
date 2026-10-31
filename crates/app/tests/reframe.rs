@@ -728,12 +728,22 @@ fn a_project_saves_reopens_and_asks_before_it_is_let_go() {
         a.state.reframe.may_close && !a.state.reframe.saving()
     });
     assert!(!doc(&h).dirty());
-    let p = path.clone();
-    let on_disk = std::thread::spawn(move || spherecut_core::project::file::load(&p))
-        .join()
-        .unwrap()
-        .unwrap();
+    let on_disk = load_off_the_ui_thread(&path);
     assert!(on_disk.same_content(&doc(&h).project));
     assert!(doc(&h).clip().markers.iter().any(|m| m.at == t(3)));
     finish(h);
+}
+
+/// The project file at `path`, read on a thread of its own: the test's
+/// thread is marked as the UI's, where a load panics.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test waits on its own read of the file, never the app's"
+)]
+fn load_off_the_ui_thread(path: &Path) -> spherecut_core::project::Project {
+    let p = path.to_path_buf();
+    std::thread::spawn(move || spherecut_core::project::file::load(&p))
+        .join()
+        .unwrap()
+        .unwrap()
 }
