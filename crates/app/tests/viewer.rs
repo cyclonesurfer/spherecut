@@ -341,13 +341,15 @@ fn the_projection_switch_morphs_over_a_quarter_second() {
     let view = &h.state().state.view;
     assert!(!view.animating());
     assert_eq!(view.preset, spherecut_app::view::Preset::TinyPlanet);
+    // Once the switch rests it keys the project's only keys, whose FOV is
+    // in degrees: the lens comes back from them within rounding.
+    use spherecut_sphere::perspective::Projection;
+    let l = view.lens;
     assert_eq!(
-        view.lens,
-        spherecut_sphere::perspective::Lens::new(
-            spherecut_sphere::perspective::Projection::Stereographic,
-            300f64.to_radians()
-        )
+        (l.from, l.to, l.morph),
+        (Projection::Stereographic, Projection::Stereographic, 0.0)
     );
+    assert!((l.hfov - 300f64.to_radians()).abs() < 1e-12, "{l:?}");
     assert!((view.ypr().pitch + std::f64::consts::FRAC_PI_2).abs() < 1e-9);
     assert!(morphs.iter().any(|&m| m > 0.1 && m < 0.9), "{morphs:?}");
     // Every frame of the morph was projected anew.
