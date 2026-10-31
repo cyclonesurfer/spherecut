@@ -106,6 +106,8 @@ pub struct StreamStatus {
     pub failed_request: Option<u64>,
     /// The clip time its last frame ends at, once decoding reached it.
     pub end: Option<Time>,
+    /// The clip time its last frame starts at, as `end`.
+    pub last: Option<Time>,
     pub landed: Option<Landed>,
     pub seeks: SeekCounts,
 }

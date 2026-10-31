@@ -5026,7 +5026,12 @@ What:
     and the benchmarks do.
   - **The end.** Once the clock passes the first stream's end (its last
     frame's end, else its duration), it pauses on the last frame and
-    sends `Ended`. `play` then starts from 0.
+    sends `Ended`. `play` then starts from 0. *Amended 2026-10-31:* the
+    clock stops at the last frame's time, not the time of the frame on
+    screen, so a last frame uploaded too late for its time comes up
+    once it is (on lavapipe under load the clip ended on an earlier
+    frame). Before decoding reached the end (its duration), the clock
+    stops a frame's length before it, as the frame on screen lasts.
   - **Instant steps.** A step of one frame either way is instant when
     the frame next in the run is in a Ready slot, which the upload
     thread sees to while paused. It is shown at once, the clock moves
