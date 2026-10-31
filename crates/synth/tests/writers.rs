@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use spherecut_core::FrameRate;
 use spherecut_media::decode::VideoDecoder;
 use spherecut_media::encode::{
-    AudioSettings, ColorTags, EncodeError, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes,
+    AudioSettings, ColorTags, EncodeError, Mp4Writer, PixelLayout, StridedPlanes, VideoSettings,
+    YuvPlanes,
 };
 use spherecut_media::ff;
 use spherecut_media::inject::{self, EntryEdit, InjectError, TrackKind};
@@ -395,7 +396,103 @@ fn video_settings() -> VideoSettings {
         edit_start: 0,
         time_base: None,
         crop_left: 0,
+        device: None,
     }
+}
+
+/// Frame `n` of a test picture, 64x32 in I420: Y, then Cb and Cr, each
+/// sample a function of its place.
+fn picture(n: usize) -> [Vec<u8>; 3] {
+    let y = (0..64 * 32)
+        .map(|i| (16 + (i * 7 + n * 13) % 200) as u8)
+        .collect();
+    let cb = (0..32 * 16)
+        .map(|i| (40 + (i * 5 + n) % 170) as u8)
+        .collect();
+    let cr = (0..32 * 16)
+        .map(|i| (60 + (i * 3 + 2 * n) % 150) as u8)
+        .collect();
+    [y, cb, cr]
+}
+
+#[test]
+fn nv12_pushed_as_strided_planes_encodes_as_its_planar_twin() {
+    // The copy that VA-API's encoders get their NV12 through, with
+    // libx264, which takes NV12 too: lossless, so the decoded frames
+    // must be the same.
+    let dir = tmp("nv12");
+    let settings = |layout| VideoSettings {
+        layout,
+        options: vec![
+            ("preset".into(), "ultrafast".into()),
+            ("qp".into(), "0".into()),
+        ],
+        ..video_settings()
+    };
+    let (planar, nv12) = (dir.join("i420.mp4"), dir.join("nv12.mp4"));
+    let mut a = Mp4Writer::create(&planar, &settings(PixelLayout::Yuv420p), None).unwrap();
+    let mut b = Mp4Writer::create(&nv12, &settings(PixelLayout::Nv12), None).unwrap();
+    for n in 0..3 {
+        let [y, cb, cr] = picture(n);
+        // Rows padded to 80 and 48 bytes, as a GPU's readback pads them.
+        let mut i420 = Vec::new();
+        for (plane, w) in [(&y, 64), (&cb, 32), (&cr, 32)] {
+            for row in plane.chunks(w) {
+                i420.extend_from_slice(row);
+                i420.resize(i420.len() + 16, 0);
+            }
+        }
+        let spans = [(0, 80), (80 * 32, 48), (80 * 32 + 48 * 16, 48)];
+        a.push_video_strided(&StridedPlanes {
+            data: &i420,
+            planes: &spans,
+        })
+        .unwrap();
+        let mut semi = Vec::new();
+        for row in y.chunks(64) {
+            semi.extend_from_slice(row);
+            semi.resize(semi.len() + 16, 0);
+        }
+        for (u, v) in cb.chunks(32).zip(cr.chunks(32)) {
+            for (u, v) in u.iter().zip(v) {
+                semi.extend_from_slice(&[*u, *v]);
+            }
+            semi.resize(semi.len() + 16, 0);
+        }
+        let spans = [(0, 80), (80 * 32, 80)];
+        b.push_video_strided(&StridedPlanes {
+            data: &semi,
+            planes: &spans,
+        })
+        .unwrap();
+        // Three planes for NV12 are refused.
+        let three = [(0, 80), (80 * 32, 80), (80 * 48, 80)];
+        let e = b.push_video_strided(&StridedPlanes {
+            data: &semi,
+            planes: &three,
+        });
+        assert!(matches!(e, Err(EncodeError::Invalid(_))), "{e:?}");
+    }
+    a.finish().unwrap();
+    b.finish().unwrap();
+    let mut da = VideoDecoder::open(&planar, None, None).unwrap();
+    let mut db = VideoDecoder::open(&nv12, None, None).unwrap();
+    for n in 0..3 {
+        let fa = da.next_frame().unwrap().unwrap().planes_u16().unwrap();
+        let fb = db.next_frame().unwrap().unwrap().planes_u16().unwrap();
+        let [y, cb, cr] = picture(n);
+        let want = [y, cb, cr].map(|p| p.into_iter().map(u16::from).collect::<Vec<_>>());
+        assert!(fa == want, "frame {n}: the planar one");
+        assert!(fb == want, "frame {n}: NV12");
+    }
+    assert!(db.next_frame().unwrap().is_none());
+    // NV12 isn't pushed as separate planes, and a hardware device wants it.
+    let mut c = Mp4Writer::create(&dir.join("c.mp4"), &settings(PixelLayout::Nv12), None).unwrap();
+    assert!(matches!(
+        c.push_video(&black_frame()),
+        Err(EncodeError::Invalid(_))
+    ));
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 fn black_frame() -> YuvPlanes {

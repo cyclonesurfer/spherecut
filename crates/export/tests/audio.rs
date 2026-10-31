@@ -18,7 +18,7 @@ use common::{Scratch, clip, export, open, project, secs, try_export, with_audio}
 use spherecut_core::cancel::StopToken;
 use spherecut_core::project::{Aspect, AudioChoice, Codec, Orientation, Output, Range};
 use spherecut_core::time::{FrameRate, Time};
-use spherecut_export::{AudioReport, ExportError};
+use spherecut_export::{AudioReport, ExportError, Warning, warning};
 use spherecut_media::audio::FfmpegAudio;
 use spherecut_media::backend::{AudioDecode, AudioOutFormat, AudioRequest, NextAudio};
 use spherecut_media::encode::has_encoder;
@@ -316,7 +316,13 @@ fn no_audio_asked_for_or_none_there_makes_no_track() {
     let out = scratch.0.join("silent.mp4");
     let report = export(&p, &out);
     assert_eq!(report.audio, None);
-    assert_eq!(report.warnings, ["the clip has no audio"]);
+    assert_eq!(
+        report.warnings,
+        [Warning::new(
+            warning::codes::NO_AUDIO,
+            "the clip has no audio"
+        )]
+    );
     assert!(audio_streams(&out).is_empty());
 }
 
@@ -474,7 +480,10 @@ fn copy_encodes_again_or_refuses_what_it_cant_cut_exactly() {
     assert_eq!((a.encoder, a.channels, a.ambix), ("aac", 2, false));
     assert_eq!(
         report.warnings,
-        ["the ambiX audio is encoded again as stereo AAC: a flat export can't carry ambiX"]
+        [Warning::new(
+            warning::codes::AUDIO_ENCODED,
+            "the ambiX audio is encoded again as stereo AAC: a flat export can't carry ambiX"
+        )]
     );
 
     // How Opus's pre-skip and the edit combine is unverified.
@@ -486,8 +495,10 @@ fn copy_encodes_again_or_refuses_what_it_cant_cut_exactly() {
             let report = export(&p, &scratch.0.join("opus.mp4"));
             assert_eq!(report.audio.unwrap().encoder, "aac");
             assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+            assert_eq!(report.warnings[0].code, warning::codes::AUDIO_ENCODED);
             assert!(
                 report.warnings[0]
+                    .message
                     .starts_with("the audio is encoded again as AAC: Opus audio isn't copied"),
                 "{:?}",
                 report.warnings

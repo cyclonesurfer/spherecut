@@ -13,6 +13,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use spherecut_core::fs::{TempFile, follow_links};
 use spherecut_core::video::ColorCodes;
@@ -20,7 +21,8 @@ use spherecut_core::{FrameRate, Rational, may_block};
 use thiserror::Error;
 
 use crate::copy::{AudioCopy, Copied};
-use crate::ffi;
+use crate::ffi::{self, HwDevice};
+use crate::hwprobe::Surfaces;
 use crate::inject::{self, EntryEdit, Finish, InjectError};
 use crate::{ff, init};
 
@@ -32,6 +34,10 @@ pub enum EncodeError {
     Ffmpeg { context: String, error: ff::Error },
     #[error("{0}")]
     Invalid(String),
+    /// The hardware encoder's device: its surfaces couldn't be set up, or
+    /// a frame couldn't be uploaded into one.
+    #[error("{0}")]
+    Device(String),
     /// On the destination (with links followed), never the temporary file.
     #[error("writing {}: {error}", path.display())]
     Io { path: PathBuf, error: io::Error },
@@ -50,7 +56,7 @@ fn ctx<T>(r: Result<T, ff::Error>, context: impl FnOnce() -> String) -> Result<T
 }
 
 /// Pixel layouts the writer accepts: planar YUV, 8-bit or 10-bit in the
-/// low bits of little-endian u16 samples.
+/// low bits of little-endian u16 samples, or VA-API's semi-planar 4:2:0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelLayout {
     /// 8-bit 4:2:0.
@@ -65,6 +71,12 @@ pub enum PixelLayout {
     Yuv444p,
     /// 10-bit 4:4:4.
     Yuv444p10,
+    /// 8-bit 4:2:0, Y and then Cb and Cr interleaved: what VA-API's
+    /// encoders take.
+    Nv12,
+    /// 10-bit as NV12, each code in the top 10 bits of a little-endian
+    /// u16.
+    P010,
 }
 
 impl PixelLayout {
@@ -77,6 +89,8 @@ impl PixelLayout {
             PixelLayout::Yuv422p10 => Pixel::YUV422P10LE,
             PixelLayout::Yuv444p => Pixel::YUV444P,
             PixelLayout::Yuv444p10 => Pixel::YUV444P10LE,
+            PixelLayout::Nv12 => Pixel::NV12,
+            PixelLayout::P010 => Pixel::P010LE,
         }
     }
 
@@ -84,25 +98,42 @@ impl PixelLayout {
     pub fn ten_bit(self) -> bool {
         matches!(
             self,
-            PixelLayout::Yuv420p10 | PixelLayout::Yuv422p10 | PixelLayout::Yuv444p10
+            PixelLayout::Yuv420p10
+                | PixelLayout::Yuv422p10
+                | PixelLayout::Yuv444p10
+                | PixelLayout::P010
         )
+    }
+
+    /// Cb and Cr in one plane, interleaved: NV12 and P010.
+    pub fn semi_planar(self) -> bool {
+        matches!(self, PixelLayout::Nv12 | PixelLayout::P010)
     }
 
     /// log2 of the chroma planes' horizontal and vertical subsampling.
     pub fn chroma_shift(self) -> (u32, u32) {
         match self {
-            PixelLayout::Yuv420p | PixelLayout::Yuv420p10 => (1, 1),
+            PixelLayout::Yuv420p
+            | PixelLayout::Yuv420p10
+            | PixelLayout::Nv12
+            | PixelLayout::P010 => (1, 1),
             PixelLayout::Yuv422p | PixelLayout::Yuv422p10 => (1, 0),
             PixelLayout::Yuv444p | PixelLayout::Yuv444p10 => (0, 0),
         }
     }
 
-    /// The size of each plane of a `width` × `height` frame.
-    pub fn plane_sizes(self, width: u32, height: u32) -> [(usize, usize); 3] {
+    /// The size of each plane of a `width` × `height` frame in samples:
+    /// three, or two for NV12 and P010, whose chroma plane holds a Cb and
+    /// a Cr for each pair of columns.
+    pub fn plane_sizes(self, width: u32, height: u32) -> Vec<(usize, usize)> {
         let (sx, sy) = self.chroma_shift();
         let (w, h) = (width as usize, height as usize);
         let c = (w.div_ceil(1 << sx), h.div_ceil(1 << sy));
-        [(w, h), c, c]
+        if self.semi_planar() {
+            vec![(w, h), (2 * c.0, c.1)]
+        } else {
+            vec![(w, h), c, c]
+        }
     }
 }
 
@@ -193,6 +224,11 @@ pub struct VideoSettings {
     /// cropping, HEVC's conformance window), as no encoder does itself.
     /// For test media.
     pub crop_left: u32,
+    /// The device a hardware encoder (`h264_vaapi`, `hevc_vaapi`,
+    /// `av1_vaapi`) runs on, whose surfaces each frame is uploaded into
+    /// (M2 plan section 8.3); `layout` is then NV12 or P010. `None` for a
+    /// software encoder.
+    pub device: Option<Arc<HwDevice>>,
 }
 
 #[derive(Debug, Clone)]
@@ -237,14 +273,16 @@ pub enum YuvPlanes {
     U16([Vec<u16>; 3]),
 }
 
-/// One planar YUV frame in one buffer, each plane's rows `stride` bytes
-/// apart from `offset`: the layout render's YUV pass reads back (I420,
-/// or I010 with each sample a little-endian `u16` in its low 10 bits).
+/// One YUV frame in one buffer, each plane's rows `stride` bytes apart
+/// from `offset`: what render's YUV pass reads back (I420, or I010 with
+/// each sample a little-endian `u16` in its low 10 bits; NV12, or P010
+/// in the top 10 bits).
 #[derive(Debug, Clone, Copy)]
 pub struct StridedPlanes<'a> {
     pub data: &'a [u8],
-    /// Each plane's first byte and the bytes from one row to the next.
-    pub planes: [(usize, usize); 3],
+    /// Each plane's first byte and the bytes from one row to the next:
+    /// as many as the layout has planes.
+    pub planes: &'a [(usize, usize)],
 }
 
 /// What a frame is pushed as.
@@ -265,9 +303,14 @@ fn video_frame(
     let dims = layout.plane_sizes(width, height);
     let ten = layout.ten_bit();
     let planes = match pushed {
+        Pushed::Planes(_) if layout.semi_planar() => {
+            return Err(EncodeError::Invalid(format!(
+                "{layout:?} frames are pushed as strided planes"
+            )));
+        }
         Pushed::Planes(p) => p,
         Pushed::Strided(s) => {
-            copy_strided(&mut frame, dims, if ten { 2 } else { 1 }, s)?;
+            copy_strided(&mut frame, &dims, if ten { 2 } else { 1 }, s)?;
             return Ok(frame);
         }
     };
@@ -308,10 +351,17 @@ fn video_frame(
 /// `sample` bytes each.
 fn copy_strided(
     frame: &mut ff::frame::Video,
-    dims: [(usize, usize); 3],
+    dims: &[(usize, usize)],
     sample: usize,
     s: &StridedPlanes<'_>,
 ) -> Result<(), EncodeError> {
+    if s.planes.len() != dims.len() {
+        return Err(EncodeError::Invalid(format!(
+            "{} planes pushed to a stream of {}",
+            s.planes.len(),
+            dims.len()
+        )));
+    }
     for (i, &(w, h)) in dims.iter().enumerate() {
         let (offset, from_stride) = s.planes[i];
         let row = w * sample;
@@ -464,6 +514,8 @@ pub struct Mp4Writer {
     video: ff::encoder::Video,
     /// What crops the video stream on the left, when it is.
     crop: Option<ffi::CropFilter>,
+    /// The hardware encoder's surfaces, which each frame is uploaded into.
+    surfaces: Option<Surfaces>,
     video_index: usize,
     video_tb: ff::Rational,
     width: u32,
@@ -750,6 +802,12 @@ impl Mp4Writer {
                 v.crop_left, v.width
             )));
         }
+        if v.device.is_some() && !v.layout.semi_planar() {
+            return Err(EncodeError::Invalid(format!(
+                "{:?} frames for {}: a hardware encoder takes NV12 or P010",
+                v.layout, v.encoder
+            )));
+        }
         // Both encoders exist before anything touches the disk.
         let vcodec = ff::encoder::find_by_name(&v.encoder)
             .ok_or_else(|| EncodeError::NoEncoder(v.encoder.clone()))?;
@@ -817,6 +875,17 @@ impl Mp4Writer {
         venc.set_width(v.width);
         venc.set_height(v.height);
         venc.set_format(v.layout.ff());
+        let surfaces = match &v.device {
+            None => None,
+            Some(dev) => {
+                let hw = |e: crate::hwprobe::HwProbeError| {
+                    EncodeError::Device(format!("{} on {}: {e}", v.encoder, dev.kind()))
+                };
+                let s = Surfaces::new(dev, v.layout.ff(), v.width, v.height).map_err(hw)?;
+                s.attach(&mut venc).map_err(hw)?;
+                Some(s)
+            }
+        };
         venc.set_time_base(video_tb);
         venc.set_frame_rate(Some(fps));
         ffi::set_color_tags(&mut venc, v.color.into());
@@ -941,6 +1010,7 @@ impl Mp4Writer {
             octx,
             video: venc,
             crop,
+            surfaces,
             video_index,
             video_tb,
             width: v.width,
@@ -1005,6 +1075,11 @@ impl Mp4Writer {
         }
         let mut frame = video_frame(self.layout, self.width, self.height, planes)?;
         frame.set_pts(Some(pts));
+        if let Some(s) = &self.surfaces {
+            frame = s
+                .upload(&frame)
+                .map_err(|e| EncodeError::Device(format!("the encoder's device: {e}")))?;
+        }
         if intra {
             frame.set_kind(ff::picture::Type::I);
         }

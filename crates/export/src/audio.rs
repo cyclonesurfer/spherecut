@@ -30,6 +30,7 @@ use spherecut_media::encode::{AudioSettings, AudioTrack, Mp4Writer};
 use spherecut_media::probe::{self, StreamKind};
 
 use crate::error::{ExportError, Stage};
+use crate::warning::{Warning, codes};
 
 /// The sample rate the export encodes at, and then its movie timescale,
 /// so that an edit can end on a sample (amendment 2 item 7). A copy keeps
@@ -114,7 +115,7 @@ pub(crate) fn choose(
     path: &Path,
     choice: AudioChoice,
     output: &Output,
-) -> Result<(Option<Plan>, Vec<String>), ExportError> {
+) -> Result<(Option<Plan>, Vec<Warning>), ExportError> {
     let mut warnings = Vec::new();
     if choice == AudioChoice::None {
         return Ok((None, warnings));
@@ -134,7 +135,7 @@ pub(crate) fn choose(
                 .is_some_and(|sa| sa.is_ambix() && sa.ambisonic_order == 1)
     };
     let Some(stream) = audio.iter().find(is_ambix).or(audio.first()) else {
-        warnings.push("the clip has no audio".into());
+        warnings.push(Warning::new(codes::NO_AUDIO, "the clip has no audio"));
         return Ok((None, warnings));
     };
     let ambix_source = is_ambix(&stream);
@@ -144,10 +145,10 @@ pub(crate) fn choose(
         // Never interrupted: it reads only the file's header.
         let opened = AudioCopy::open(path, stream.index, Arc::new(AtomicBool::new(false)));
         match opened {
-            Ok(_) if ambix_source && !ambix => warnings.push(
-                "the ambiX audio is encoded again as stereo AAC: a flat export can't carry ambiX"
-                    .into(),
-            ),
+            Ok(_) if ambix_source && !ambix => warnings.push(Warning::new(
+                codes::AUDIO_ENCODED,
+                "the ambiX audio is encoded again as stereo AAC: a flat export can't carry ambiX",
+            )),
             Ok(c) if c.is_pcm() && ambix => {
                 return Err(ExportError::Invalid(format!(
                     "the clip's ambiX audio is {}, which can't be copied into a 360 MP4: YouTube \
@@ -164,7 +165,10 @@ pub(crate) fn choose(
                 });
             }
             Err(CopyError::Refused(why)) => {
-                warnings.push(format!("the audio is encoded again as AAC: {why}"));
+                warnings.push(Warning::new(
+                    codes::AUDIO_ENCODED,
+                    format!("the audio is encoded again as AAC: {why}"),
+                ));
             }
             Err(CopyError::Media(e)) => {
                 return Err(ExportError::failed(
@@ -179,7 +183,10 @@ pub(crate) fn choose(
         && let Output::Equirect { orientation, .. } = output
         && *orientation != Orientation::IDENTITY
     {
-        warnings.push("the ambiX sound field is not turned with the picture's orientation".into());
+        warnings.push(Warning::new(
+            codes::AMBIX_NOT_TURNED,
+            "the ambiX sound field is not turned with the picture's orientation",
+        ));
     }
     Ok((
         Some(Plan {
@@ -248,7 +255,7 @@ impl Feed {
     }
 
     /// What to say when the source's audio ran out before the trim's end.
-    pub fn ended_early(&self) -> Option<String> {
+    pub fn ended_early(&self) -> Option<Warning> {
         let at = |samples: u64| samples as f64 / f64::from(self.rate());
         match self {
             Feed::Decode(d) => d.ended_at.map(|s| {
@@ -264,6 +271,7 @@ impl Feed {
                 )
             }),
         }
+        .map(|m| Warning::new(codes::AUDIO_ENDS_EARLY, m))
     }
 
     /// Hand the writer the samples up to export time `upto`, or all of

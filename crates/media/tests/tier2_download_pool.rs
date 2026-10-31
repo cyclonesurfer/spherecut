@@ -110,6 +110,7 @@ fn clip(dir: &TempDir, bits: u32, size: (usize, usize)) -> PathBuf {
         edit_start: 0,
         time_base: None,
         crop_left: 0,
+        device: None,
     };
     let path = dir.0.join(format!("hevc{bits}-{w}.mp4"));
     let mut out = match Mp4Writer::create(&path, &settings, None) {

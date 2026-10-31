@@ -12,14 +12,17 @@ use std::time::{Duration, Instant};
 use spherecut_core::cancel::StopSource;
 use spherecut_core::project::{Codec, EncoderChoice, ExportSettings, Project};
 use spherecut_core::time::{FrameRate, Time};
+use spherecut_media::encode::has_encoder;
+use spherecut_media::hw::{self, GpuIds, RenderNode};
 use spherecut_render::Gpu;
 
 use crate::check::Checked;
-use crate::encoder::EncoderSetup;
+use crate::encoder::{EncoderKind, EncoderSetup};
 use crate::error::ExportError;
 use crate::pipeline;
 use crate::plan::FramePlan;
 use crate::preset::Preset;
+use crate::warning::Warning;
 
 /// What to export, and where.
 #[derive(Debug, Clone)]
@@ -36,9 +39,48 @@ pub struct ExportJob {
     pub settings: ExportSettings,
     /// Export 8-bit even from a 10-bit source (section 8.3).
     pub eight_bit: bool,
+    /// Render at [`Preset::draft_size`] with the encoder's fastest
+    /// settings, for a quick look (`--draft`, section 9).
+    pub draft: bool,
+    /// Where the source is decoded (amendment 2 item 25).
+    pub decoder: Decoder,
     /// The device to render on: the app's, whose submissions wait at its
     /// gate while the UI presents (D41), or a headless one.
     pub gpu: Gpu,
+}
+
+/// Where an export decodes its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Decoder {
+    /// As `spherecut frame --decoder auto` does (D39): VA-API on the
+    /// render node of the GPU that renders, going on in software if it
+    /// can't, which the report says (D3); software when there is no node.
+    #[default]
+    Auto,
+    Software,
+}
+
+/// A hardware path an export didn't take, or left: what it was, and why
+/// (D3). D27's codes say which: `hw_unavailable` (no device, or no such
+/// encoder in this FFmpeg), `hw_unsupported` (it turned the job down) or
+/// `hw_failed` (it failed on a frame).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fallback {
+    /// FFmpeg's name for it: `vaapi` for a decoder's device,
+    /// `hevc_vaapi` for an encoder.
+    pub from: &'static str,
+    pub code: &'static str,
+    pub reason: String,
+}
+
+/// Where an export's frames were decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeReport {
+    /// FFmpeg's name for the device (`vaapi`), or `software`: where the
+    /// last frame was decoded.
+    pub path: &'static str,
+    /// The hardware decode that `auto` passed over or left for software.
+    pub fallback: Option<Fallback>,
 }
 
 impl ExportJob {
@@ -52,6 +94,8 @@ impl ExportJob {
             overwrite: false,
             settings,
             eight_bit: false,
+            draft: false,
+            decoder: Decoder::Auto,
             gpu,
         }
     }
@@ -71,6 +115,10 @@ pub struct Progress {
     pub eta: Option<Duration>,
     /// FFmpeg's name for the encoder.
     pub encoder: &'static str,
+    /// The hardware encoder passed over or left for this one.
+    pub fallback: Option<Fallback>,
+    /// The hardware decode passed over or left for software.
+    pub decode_fallback: Option<Fallback>,
     /// The last pass, which writes the finished file with its metadata
     /// and the moov first: bytes written and in all, once it has started.
     pub finishing: Option<(u64, u64)>,
@@ -84,9 +132,15 @@ pub struct Report {
     /// `frames / rate`.
     pub duration: Time,
     pub size: (u32, u32),
+    /// At the draft's size and speed.
+    pub draft: bool,
     pub rate: FrameRate,
     pub codec: Codec,
     pub encoder: &'static str,
+    /// The hardware encoder that the export passed over, or restarted
+    /// without when it failed in its first second (section 8.3).
+    pub fallback: Option<Fallback>,
+    pub decode: DecodeReport,
     /// The video is 10-bit.
     pub ten_bit: bool,
     /// The audio track, if the export has one.
@@ -98,7 +152,7 @@ pub struct Report {
     pub blur_capped: u64,
     /// What the export did that the project didn't say: the left eye of
     /// a stereo source, a crop, a pose not applied.
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Warning>,
     /// The checks the file passed before it was put in place (section 9).
     pub checks: Vec<Checked>,
     pub elapsed: Duration,
@@ -124,7 +178,9 @@ pub struct AudioReport {
 pub(crate) struct Shared {
     started: Instant,
     total: u64,
-    encoder: &'static str,
+    /// The encoder now, and the hardware one it took over from.
+    encoder: Mutex<(&'static str, Option<Fallback>)>,
+    decode_fallback: Mutex<Option<Fallback>>,
     done: AtomicU64,
     /// When frames were muxed over the last two seconds, oldest first,
     /// with the one before them.
@@ -137,12 +193,16 @@ pub(crate) struct Shared {
 /// The span `Progress::fps` measures over.
 const FPS_WINDOW: Duration = Duration::from_secs(2);
 
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 impl Shared {
-    fn new(total: u64, encoder: &'static str) -> Shared {
+    pub(crate) fn new(total: u64, encoder: &'static str, fallback: Option<Fallback>) -> Shared {
         Shared {
             started: Instant::now(),
             total,
-            encoder,
+            encoder: Mutex::new((encoder, fallback)),
+            decode_fallback: Mutex::new(None),
             done: AtomicU64::new(0),
             window: Mutex::new(VecDeque::new()),
             finished: AtomicU64::new(0),
@@ -156,10 +216,22 @@ impl Shared {
         self.finished.store(done, Ordering::Release);
     }
 
-    /// `done` frames are muxed.
+    /// The export goes on with `encoder`, having left `fallback`'s.
+    pub(crate) fn encoder(&self, encoder: &'static str, fallback: Option<Fallback>) {
+        *lock(&self.encoder) = (encoder, fallback);
+    }
+
+    /// The decode left the hardware, or never had it.
+    pub(crate) fn decode_fell_back(&self, fallback: Fallback) {
+        lock(&self.decode_fallback).get_or_insert(fallback);
+    }
+
+    /// `done` frames are muxed. After an encoder's restart (section 8.3)
+    /// the count stays where the first got to until the next passes it,
+    /// since progress only goes forward.
     pub(crate) fn muxed(&self, done: u64) {
         let now = Instant::now();
-        self.done.store(done, Ordering::Release);
+        let done = self.done.fetch_max(done, Ordering::AcqRel).max(done);
         let mut w = self
             .window
             .lock()
@@ -174,7 +246,7 @@ impl Shared {
         self.started.elapsed()
     }
 
-    fn progress(&self) -> Progress {
+    pub(crate) fn progress(&self) -> Progress {
         let done = self.done.load(Ordering::Acquire);
         let fps = {
             let w = self
@@ -189,13 +261,16 @@ impl Shared {
             }
         };
         let eta = (fps > 0.0).then(|| Duration::from_secs_f64((self.total - done) as f64 / fps));
+        let (encoder, fallback) = lock(&self.encoder).clone();
         Progress {
             frames_done: done,
             frames_total: self.total,
             fps,
             elapsed: self.started.elapsed(),
             eta,
-            encoder: self.encoder,
+            encoder,
+            fallback,
+            decode_fallback: lock(&self.decode_fallback).clone(),
             finishing: match self.finishing_total.load(Ordering::Acquire) {
                 0 => None,
                 total => Some((self.finished.load(Ordering::Acquire), total)),
@@ -233,25 +308,16 @@ impl Export {
             ExportError::Invalid(format!("{w}x{h} isn't one of the export presets"))
         })?;
         let plan = FramePlan::new(clip.source, sequence.rate)?;
-        if job.settings.encoder == EncoderChoice::Vaapi {
-            return Err(ExportError::NoEncoder(
-                "the VA-API encoders aren't in this build yet: export with the software ones"
-                    .into(),
-            ));
-        }
-        // The name doesn't depend on the bit depth, which the source sets.
-        let s = &job.settings;
-        let name = EncoderSetup::software(s.codec, s.quality, preset, sequence.rate, false).name;
-        if !spherecut_media::encode::has_encoder(name) {
-            return Err(ExportError::NoEncoder(format!(
-                "this FFmpeg has no {name}, which exports {:?}",
-                s.codec
-            )));
-        }
+        let node = render_node(&job.gpu);
+        let encoders = Encoders::choose(&job.settings, preset, sequence.rate, &node, &has_encoder)?;
         if !job.overwrite && std::fs::symlink_metadata(&job.output).is_ok() {
             return Err(ExportError::OutputExists(job.output.clone()));
         }
-        let shared = Arc::new(Shared::new(plan.count(), name));
+        let shared = Arc::new(Shared::new(
+            plan.count(),
+            encoders.first_name(),
+            encoders.skipped.clone(),
+        ));
         let stop = StopSource::new();
         let (tx, result) = mpsc::channel();
         let thread = {
@@ -259,7 +325,7 @@ impl Export {
             std::thread::Builder::new()
                 .name("export".into())
                 .spawn(move || {
-                    let r = pipeline::run(&job, preset, plan, &shared, &stop);
+                    let r = pipeline::run(&job, preset, plan, &node, &encoders, &shared, &stop);
                     tx.send(r).ok();
                 })
                 .map_err(|e| ExportError::Invalid(format!("starting the export: {e}")))?
@@ -323,9 +389,261 @@ impl Drop for Export {
     }
 }
 
+/// The render node of the GPU that renders, where VA-API decodes and
+/// encodes (D30): its PCI bus id's, else the first with its PCI ids, else
+/// `renderD128`. lavapipe names no GPU.
+pub(crate) fn render_node(gpu: &Gpu) -> RenderNode {
+    let info = &gpu.caps.info;
+    let ids = (!gpu.caps.is_cpu).then(|| GpuIds {
+        pci_bus_id: info.device_pci_bus_id.clone(),
+        vendor: info.vendor,
+        device: info.device,
+    });
+    hw::render_node(ids.as_ref(), None)
+}
+
+/// The encoders an export tries for its codec, in order (section 8.3),
+/// and the hardware one `auto` passed over without trying.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Encoders {
+    pub kinds: Vec<EncoderKind>,
+    pub skipped: Option<Fallback>,
+    /// FFmpeg's names for them: the codec's VA-API encoder, its software
+    /// one.
+    pub(crate) names: (&'static str, &'static str),
+}
+
+impl Encoders {
+    /// The list for `settings`: `vaapi` and `software` the one each (an
+    /// error for a missing one, which the CLI's exit 3 says), and `auto`
+    /// VA-API where there is a render node and this FFmpeg has its
+    /// encoder, then software. `has` says whether FFmpeg has an encoder.
+    pub(crate) fn choose(
+        settings: &ExportSettings,
+        preset: Preset,
+        rate: FrameRate,
+        node: &RenderNode,
+        has: &dyn Fn(&str) -> bool,
+    ) -> Result<Encoders, ExportError> {
+        // The names don't depend on the bit depth, which the source sets.
+        let name = |kind| {
+            EncoderSetup::of(kind, settings.codec, settings.quality, preset, rate, false).name
+        };
+        let names = (name(EncoderKind::Vaapi), name(EncoderKind::Software));
+        let (vaapi, software) = names;
+        let codec = settings.codec;
+        let no_device = || {
+            (!node.path.exists()).then(|| {
+                format!(
+                    "no VA-API device: no render node at {}",
+                    node.path.display()
+                )
+            })
+        };
+        let missing = |name: &str| format!("this FFmpeg has no {name}, which exports {codec:?}");
+        let (kinds, skipped) = match settings.encoder {
+            EncoderChoice::Vaapi => {
+                if !has(vaapi) {
+                    return Err(ExportError::NoEncoder(missing(vaapi)));
+                }
+                if let Some(why) = no_device() {
+                    return Err(ExportError::NoEncoder(format!("{vaapi}: {why}")));
+                }
+                (vec![EncoderKind::Vaapi], None)
+            }
+            EncoderChoice::Software if has(software) => (vec![EncoderKind::Software], None),
+            EncoderChoice::Software => return Err(ExportError::NoEncoder(missing(software))),
+            EncoderChoice::Auto => {
+                let why_not = if has(vaapi) {
+                    no_device()
+                } else {
+                    Some(missing(vaapi))
+                };
+                let mut kinds = Vec::new();
+                if why_not.is_none() {
+                    kinds.push(EncoderKind::Vaapi);
+                }
+                if has(software) {
+                    kinds.push(EncoderKind::Software);
+                }
+                if kinds.is_empty() {
+                    return Err(ExportError::NoEncoder(format!(
+                        "{}, and {}",
+                        why_not.unwrap_or_default(),
+                        missing(software)
+                    )));
+                }
+                let skipped = why_not.map(|reason| Fallback {
+                    from: vaapi,
+                    code: "hw_unavailable",
+                    reason,
+                });
+                (kinds, skipped)
+            }
+        };
+        Ok(Encoders {
+            kinds,
+            skipped,
+            names,
+        })
+    }
+
+    pub(crate) fn name(&self, kind: EncoderKind) -> &'static str {
+        match kind {
+            EncoderKind::Vaapi => self.names.0,
+            EncoderKind::Software => self.names.1,
+        }
+    }
+
+    fn first_name(&self) -> &'static str {
+        self.name(self.kinds[0])
+    }
+}
+
 pub(crate) fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
     p.downcast_ref::<&str>()
         .map(|s| (*s).to_owned())
         .or_else(|| p.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "a panic".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use spherecut_core::project::{Aspect, AudioChoice, Quality};
+    use spherecut_media::hw::NodeChoice;
+
+    use super::*;
+
+    fn settings(codec: Codec, encoder: EncoderChoice) -> ExportSettings {
+        ExportSettings {
+            codec,
+            quality: Quality::High,
+            encoder,
+            audio: AudioChoice::None,
+            motion_blur: false,
+        }
+    }
+
+    const WIDE: Preset = Preset::Flat {
+        aspect: Aspect::Wide,
+        short_side: 1080,
+    };
+
+    fn node(path: &std::path::Path) -> RenderNode {
+        RenderNode {
+            path: path.to_path_buf(),
+            chosen: NodeChoice::Default,
+        }
+    }
+
+    #[test]
+    fn auto_tries_vaapi_where_there_is_a_node_and_the_encoder_then_software() {
+        let rate = FrameRate::FPS_30;
+        // A file stands in for the render node: it is there.
+        let there = node(std::path::Path::new(env!("CARGO_MANIFEST_PATH")));
+        let gone = node(std::path::Path::new("/nonexistent/renderD128"));
+        let all = |_: &str| true;
+        let choose = |codec, choice, node: &RenderNode, has: &dyn Fn(&str) -> bool| {
+            Encoders::choose(&settings(codec, choice), WIDE, rate, node, has)
+        };
+
+        let e = choose(Codec::Hevc, EncoderChoice::Auto, &there, &all).unwrap();
+        assert_eq!(e.kinds, [EncoderKind::Vaapi, EncoderKind::Software]);
+        assert_eq!((&e.skipped, e.first_name()), (&None, "hevc_vaapi"));
+        assert_eq!(e.name(EncoderKind::Software), "libx265");
+
+        // No node: software, saying why.
+        let e = choose(Codec::Av1, EncoderChoice::Auto, &gone, &all).unwrap();
+        assert_eq!(e.kinds, [EncoderKind::Software]);
+        let f = e.skipped.unwrap();
+        assert_eq!((f.from, f.code), ("av1_vaapi", "hw_unavailable"));
+        assert!(
+            f.reason.contains("no render node at /nonexistent"),
+            "{}",
+            f.reason
+        );
+
+        // No VA-API encoder in this FFmpeg.
+        let no_vaapi = |n: &str| !n.ends_with("_vaapi");
+        let e = choose(Codec::H264, EncoderChoice::Auto, &there, &no_vaapi).unwrap();
+        assert_eq!(e.kinds, [EncoderKind::Software]);
+        assert!(e.skipped.unwrap().reason.contains("no h264_vaapi"));
+
+        // No software encoder (Fedora's own FFmpeg has no x264): VA-API
+        // alone.
+        let no_x264 = |n: &str| n != "libx264";
+        let e = choose(Codec::H264, EncoderChoice::Auto, &there, &no_x264).unwrap();
+        assert_eq!(e.kinds, [EncoderKind::Vaapi]);
+        // Neither: refused, with both reasons.
+        let e = choose(Codec::H264, EncoderChoice::Auto, &gone, &no_x264).unwrap_err();
+        let ExportError::NoEncoder(why) = e else {
+            panic!("{e:?}")
+        };
+        assert!(
+            why.contains("no render node") && why.contains("no libx264"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn vaapi_and_software_are_the_one_asked_for_or_refused() {
+        let rate = FrameRate::FPS_30;
+        let there = node(std::path::Path::new(env!("CARGO_MANIFEST_PATH")));
+        let gone = node(std::path::Path::new("/nonexistent/renderD128"));
+        let all = |_: &str| true;
+        let none = |_: &str| false;
+        let choose = |choice, node: &RenderNode, has: &dyn Fn(&str) -> bool| {
+            Encoders::choose(&settings(Codec::Hevc, choice), WIDE, rate, node, has)
+        };
+        let e = choose(EncoderChoice::Vaapi, &there, &all).unwrap();
+        assert_eq!((e.kinds, e.skipped), (vec![EncoderKind::Vaapi], None));
+        let e = choose(EncoderChoice::Software, &gone, &all).unwrap();
+        assert_eq!((e.kinds, e.skipped), (vec![EncoderKind::Software], None));
+        for (choice, node, has, want) in [
+            (
+                EncoderChoice::Vaapi,
+                &gone,
+                &all as &dyn Fn(&str) -> bool,
+                "no render node",
+            ),
+            (EncoderChoice::Vaapi, &there, &none, "no hevc_vaapi"),
+            (EncoderChoice::Software, &there, &none, "no libx265"),
+        ] {
+            match choose(choice, node, has) {
+                Err(ExportError::NoEncoder(why)) => assert!(why.contains(want), "{why}"),
+                other => panic!("{choice:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn progress_only_goes_forward_when_an_encoder_starts_over() {
+        let s = Shared::new(30, "hevc_vaapi", None);
+        s.muxed(5);
+        let fallback = Fallback {
+            from: "hevc_vaapi",
+            code: "hw_failed",
+            reason: "it failed".into(),
+        };
+        s.encoder("libx265", Some(fallback.clone()));
+        s.muxed(1);
+        let p = s.progress();
+        assert_eq!((p.frames_done, p.encoder), (5, "libx265"));
+        assert_eq!(p.fallback, Some(fallback));
+        s.muxed(6);
+        assert_eq!(s.progress().frames_done, 6);
+        assert!(s.progress().fps >= 0.0);
+        // The decode's first fallback is the one kept.
+        let first = Fallback {
+            from: "vaapi",
+            code: "hw_unavailable",
+            reason: "none".into(),
+        };
+        s.decode_fell_back(first.clone());
+        s.decode_fell_back(Fallback {
+            reason: "another".into(),
+            ..first.clone()
+        });
+        assert_eq!(s.progress().decode_fallback, Some(first));
+    }
 }

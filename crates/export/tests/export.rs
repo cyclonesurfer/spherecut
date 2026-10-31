@@ -1,14 +1,15 @@
 //! An export's refusals, its cancel, its timing and its size: what
-//! `Export::start` refuses before any work (M2 plan section 8.6), a
-//! cancel that leaves nothing behind, a 29.97 fps export from mid-GOP
-//! whose frames are the source's at their own times, and libx264 and
-//! libx265 under their cap, within the size estimate (amendment 2 item
-//! 24).
+//! `Export::start` refuses before any work (M2 plan section 8.6), `auto`
+//! on a machine without VA-API (section 8.3), a cancel that leaves
+//! nothing behind, a 29.97 fps export from mid-GOP whose frames are the
+//! source's at their own times, and libx264 and libx265 under their cap,
+//! within the size estimate (amendment 2 item 24).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::{
@@ -16,7 +17,10 @@ use common::{
 };
 use spherecut_core::project::{Aspect, Codec, EncoderChoice, Output, Quality, Range};
 use spherecut_core::time::{FrameRate, Time};
-use spherecut_export::{EncoderSetup, Export, ExportError, ExportJob, FramePlan, Preset};
+use spherecut_export::{
+    DecodeReport, EncoderSetup, Export, ExportError, ExportJob, FramePlan, Preset,
+};
+use spherecut_media::hw::DEFAULT_RENDER_NODE;
 use spherecut_render::YuvLayout;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self as synth, Audio, Spec};
@@ -33,8 +37,14 @@ fn first_second() -> Range {
     }
 }
 
+/// Whether this machine has the render node that lavapipe's exports use
+/// for VA-API (it names no GPU of its own): odin's Tier 1 does.
+fn has_render_node() -> bool {
+    Path::new(DEFAULT_RENDER_NODE).exists()
+}
+
 #[test]
-fn start_refuses_a_file_at_the_output_and_va_api() {
+fn start_refuses_a_file_at_the_output_and_va_api_without_a_device() {
     let src = grid("export-grid-h264-8", synth::Codec::H264, 8);
     let scratch = Scratch::new("refusals");
     let p = project(&src, first_second(), FLAT_1080, Codec::H264, 0.0);
@@ -50,16 +60,53 @@ fn start_refuses_a_file_at_the_output_and_va_api() {
     assert_eq!(std::fs::read(&out).unwrap(), b"mine");
 
     let free = scratch.0.join("free.mp4");
-    // VA-API isn't in this build.
-    let mut job = ExportJob::new(p.clone(), &free, gpu().clone());
-    job.settings.encoder = EncoderChoice::Vaapi;
-    let e = Export::start(job).unwrap_err();
-    assert!(
-        matches!(&e, ExportError::NoEncoder(why) if why.contains("VA-API")),
-        "{e:?}"
-    );
+    // VA-API with no device to run on: refused before any work. Where
+    // there is one, Tier 2 exports through it.
+    if !has_render_node() {
+        let mut job = ExportJob::new(p.clone(), &free, gpu().clone());
+        job.settings.encoder = EncoderChoice::Vaapi;
+        let e = Export::start(job).unwrap_err();
+        assert!(
+            matches!(&e, ExportError::NoEncoder(why) if why.contains("no render node")),
+            "{e:?}"
+        );
+    }
 
     assert!(!free.exists());
+}
+
+#[test]
+fn auto_without_va_api_exports_in_software_and_says_why() {
+    if has_render_node() {
+        eprintln!("skipped: {DEFAULT_RENDER_NODE} is there, and Tier 2 tests VA-API");
+        return;
+    }
+    let src = grid("export-grid-h264-8", synth::Codec::H264, 8);
+    let scratch = Scratch::new("auto");
+    let trim = Range {
+        start: Time::ZERO,
+        end: secs(1, 6),
+    };
+    let square = Output::Flat {
+        aspect: Aspect::Square,
+        short_side: 1080,
+    };
+    let mut p = project(&src, trim, square, Codec::Hevc, 0.0);
+    common::with_encoder(&mut p, EncoderChoice::Auto);
+    let r = common::export(&p, &scratch.0.join("auto.mp4"));
+    assert_eq!((r.frames, r.encoder), (5, "libx265"));
+    let f = r.fallback.expect("auto says why it didn't use VA-API");
+    assert_eq!((f.from, f.code), ("hevc_vaapi", "hw_unavailable"));
+    assert!(f.reason.contains("no render node"), "{}", f.reason);
+    // And so does the decode, which `auto` tries on the same node.
+    let DecodeReport { path, fallback } = r.decode;
+    let f = fallback.expect("the decode says why it is in software");
+    assert_eq!(
+        (path, f.from, f.code),
+        ("software", "vaapi", "hw_unavailable")
+    );
+    // Said there, not in the warnings, as frame says it (D3).
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
 }
 
 #[test]

@@ -1,7 +1,8 @@
-//! The software encoders and how they are set (M2 plan section 8.3,
-//! amendment 2 item 24): CRF at a preset with the preset's bitrate as a
-//! VBV cap, a keyframe every second in closed GOPs, BT.709 limited range
-//! with left chroma siting (what the YUV pass writes).
+//! The encoders and how they are set (M2 plan section 8.3, amendment 2
+//! items 24 and 49): VA-API's in VBR at the preset's bitrate, the
+//! software ones in CRF with the preset's bitrate as a VBV cap; a
+//! keyframe every second in closed GOPs, BT.709 limited range with left
+//! chroma siting (what the YUV pass writes).
 
 use spherecut_core::project::{Codec, Quality};
 use spherecut_core::time::{FrameRate, Rounding, Time};
@@ -13,23 +14,45 @@ use crate::preset::Preset;
 /// FFmpeg's `AVCHROMA_LOC_LEFT`: the YUV pass sites chroma left.
 pub const CHROMA_LEFT: i32 = 1;
 
+/// Mesa's reading of VA-API's quality level, which FFmpeg's
+/// `compression_level` sets (research note encode.md, "Quality level"):
+/// bit 0 says the rest is set, bits 1 and 2 are the preset (0 speed, 1
+/// balanced, 2 quality, 3 high quality), bit 3 is pre-encode and bit 4
+/// VBAQ, the adaptive quantisation.
+pub mod quality_level {
+    pub const VALID: u32 = 1;
+    pub const BALANCED: u32 = 1 << 1;
+    pub const QUALITY: u32 = 2 << 1;
+    pub const PRE_ENCODE: u32 = 1 << 3;
+    pub const VBAQ: u32 = 1 << 4;
+}
+
+/// Where an encoder runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncoderKind {
+    /// On the GPU's VA-API device, from NV12 or P010 surfaces.
+    Vaapi,
+    /// On the CPU, from I420 or I010.
+    Software,
+}
 /// How the export encodes: which encoder, its options, and the planes
 /// the YUV pass writes for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderSetup {
     /// FFmpeg's name for it, such as `libx265`.
     pub name: &'static str,
-    /// What the YUV pass writes and the encoder takes: I420, or I010
-    /// for 10-bit.
+    pub kind: EncoderKind,
+    /// What the YUV pass writes and the encoder takes: NV12 or P010 for
+    /// VA-API, I420 or I010 for software.
     pub yuv: YuvLayout,
     /// The same as the writer's layout.
     pub layout: PixelLayout,
     /// The preset's bitrate, in bits a second.
     pub bitrate: u64,
-    /// The VBV cap: 1.5 × the bitrate.
+    /// The cap: 1.5 × the bitrate.
     pub maxrate: u64,
-    /// The VBV buffer: two seconds of `maxrate`, without which x264 and
-    /// x265 ignore the cap (amendment 2 item 24).
+    /// The rate control's buffer: two seconds of `maxrate`, without which
+    /// x264 and x265 ignore the cap (amendment 2 item 24).
     pub bufsize: u64,
     /// Frames from one keyframe to the next: the most that fit in a
     /// second.
@@ -57,14 +80,12 @@ impl EncoderSetup {
             Quality::Small => small,
         };
         let ten_bit = ten_bit && codec != Codec::H264;
-        let bitrate = preset.bitrate(quality, codec, rate);
-        let maxrate = bitrate * 3 / 2;
-        let bufsize = maxrate * 2;
-        // At least one frame, at most a second's worth.
-        let keyint = rate
-            .as_rational()
-            .round(Rounding::Floor)
-            .clamp(1, i64::from(u32::MAX)) as u32;
+        let Rates {
+            bitrate,
+            maxrate,
+            bufsize,
+            keyint,
+        } = Rates::of(codec, quality, preset, rate);
         let (name, crf, speed, params) = match codec {
             Codec::H264 => ("libx264", pick(18, 21, 24), "medium", "x264-params"),
             Codec::Hevc => ("libx265", pick(20, 23, 26), "fast", "x265-params"),
@@ -92,6 +113,7 @@ impl EncoderSetup {
         };
         EncoderSetup {
             name,
+            kind: EncoderKind::Software,
             yuv,
             layout,
             bitrate,
@@ -101,6 +123,122 @@ impl EncoderSetup {
             options,
             color: ColorTags::BT709_LIMITED.with_chroma_location(CHROMA_LEFT),
         }
+    }
+
+    /// VA-API's encoder for `codec` (h264_vaapi, hevc_vaapi or
+    /// av1_vaapi) at `quality`, for `preset` at `rate`: VBR at the
+    /// preset's bitrate with `maxrate` 1.5 times it, and Mesa's quality
+    /// level by quality (quality preset with pre-encode and VBAQ for High,
+    /// balanced for Medium and Small). With a bitrate set, av1_vaapi's QP
+    /// (on a 0 to 255 scale) is never used (amendment 2 item 49). 10-bit
+    /// is P010, which picks HEVC's Main10 and AV1's 10-bit profile; H.264
+    /// stays 8-bit, as VA-API's drivers encode it.
+    pub fn vaapi(
+        codec: Codec,
+        quality: Quality,
+        preset: Preset,
+        rate: FrameRate,
+        ten_bit: bool,
+    ) -> EncoderSetup {
+        use quality_level::*;
+        let ten_bit = ten_bit && codec != Codec::H264;
+        let Rates {
+            bitrate,
+            maxrate,
+            bufsize,
+            keyint,
+        } = Rates::of(codec, quality, preset, rate);
+        let name = match codec {
+            Codec::H264 => "h264_vaapi",
+            Codec::Hevc => "hevc_vaapi",
+            Codec::Av1 => "av1_vaapi",
+        };
+        let level = match quality {
+            Quality::High => VALID | QUALITY | PRE_ENCODE | VBAQ,
+            Quality::Medium | Quality::Small => VALID | BALANCED,
+        };
+        let options: Vec<(String, String)> = vec![
+            ("rc_mode".into(), "VBR".into()),
+            ("b".into(), bitrate.to_string()),
+            ("maxrate".into(), maxrate.to_string()),
+            ("bufsize".into(), bufsize.to_string()),
+            ("g".into(), keyint.to_string()),
+            // Every GOP starts at an IDR frame (idr_interval 0, FFmpeg's
+            // default), and none refers across it.
+            ("flags".into(), "+cgop".into()),
+            ("compression_level".into(), level.to_string()),
+        ];
+        let (yuv, layout) = if ten_bit {
+            (YuvLayout::P010, PixelLayout::P010)
+        } else {
+            (YuvLayout::Nv12, PixelLayout::Nv12)
+        };
+        EncoderSetup {
+            name,
+            kind: EncoderKind::Vaapi,
+            yuv,
+            layout,
+            bitrate,
+            maxrate,
+            bufsize,
+            keyint,
+            options,
+            color: ColorTags::BT709_LIMITED.with_chroma_location(CHROMA_LEFT),
+        }
+    }
+
+    /// The encoder of `kind` for `codec`, as [`vaapi`](Self::vaapi) or
+    /// [`software`](Self::software) sets it.
+    pub fn of(
+        kind: EncoderKind,
+        codec: Codec,
+        quality: Quality,
+        preset: Preset,
+        rate: FrameRate,
+        ten_bit: bool,
+    ) -> EncoderSetup {
+        match kind {
+            EncoderKind::Vaapi => Self::vaapi(codec, quality, preset, rate, ten_bit),
+            EncoderKind::Software => Self::software(codec, quality, preset, rate, ten_bit),
+        }
+    }
+
+    /// The same encoder for `--draft` (M2 plan section 9): its fastest
+    /// settings (x264's and x265's `ultrafast`, SVT-AV1's preset 12,
+    /// Mesa's speed preset), and the bitrates scaled from the preset's
+    /// `full` size to the draft's `size` by their pixels.
+    pub fn draft(mut self, full: (u32, u32), size: (u32, u32)) -> EncoderSetup {
+        let pixels = |(w, h): (u32, u32)| u128::from(w) * u128::from(h);
+        let scaled = u128::from(self.bitrate) * pixels(size) / pixels(full).max(1);
+        self.bitrate = u64::try_from(scaled).unwrap_or(u64::MAX).max(1);
+        self.maxrate = self.bitrate * 3 / 2;
+        self.bufsize = self.maxrate * 2;
+        let speed = match self.name {
+            "libx264" | "libx265" => Some("ultrafast"),
+            "libsvtav1" => Some("12"),
+            _ => None,
+        };
+        let (bitrate, maxrate, bufsize) = (self.bitrate, self.maxrate, self.bufsize);
+        for (k, v) in &mut self.options {
+            match k.as_str() {
+                "b" => *v = bitrate.to_string(),
+                "maxrate" => *v = maxrate.to_string(),
+                "bufsize" => *v = bufsize.to_string(),
+                "preset" => {
+                    if let Some(speed) = speed {
+                        *v = speed.into();
+                    }
+                }
+                "compression_level" => *v = quality_level::VALID.to_string(),
+                _ => {}
+            }
+        }
+        self
+    }
+
+    /// Whether the export's video is 10-bit with this encoder.
+    pub fn ten_bit(&self) -> bool {
+        self.layout.ten_bit()
     }
 
     /// The most bytes a file of `duration` should take, with
@@ -127,6 +265,32 @@ impl EncoderSetup {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+}
+
+/// What every encoder is given: the preset's bitrate, the cap and its
+/// buffer, and the keyframe interval.
+struct Rates {
+    bitrate: u64,
+    maxrate: u64,
+    bufsize: u64,
+    keyint: u32,
+}
+
+impl Rates {
+    fn of(codec: Codec, quality: Quality, preset: Preset, rate: FrameRate) -> Rates {
+        let bitrate = preset.bitrate(quality, codec, rate);
+        let maxrate = bitrate * 3 / 2;
+        Rates {
+            bitrate,
+            maxrate,
+            bufsize: maxrate * 2,
+            // At least one frame, at most a second's worth.
+            keyint: rate
+                .as_rational()
+                .round(Rounding::Floor)
+                .clamp(1, i64::from(u32::MAX)) as u32,
+        }
     }
 }
 
@@ -186,6 +350,41 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_is_fastest_at_a_quarter_of_the_bits() {
+        let full = WIDE_1080.size();
+        let draft = WIDE_1080.draft_size();
+        let rate = FrameRate::FPS_30;
+        for codec in [Codec::H264, Codec::Hevc, Codec::Av1] {
+            let s = EncoderSetup::software(codec, Quality::High, WIDE_1080, rate, false);
+            let d = s.clone().draft(full, draft);
+            // 960 × 544 of 1920 × 1080.
+            assert_eq!(
+                d.bitrate,
+                s.bitrate * 960 * 544 / (1920 * 1080),
+                "{}",
+                s.name
+            );
+            assert_eq!(
+                (d.maxrate, d.bufsize),
+                (d.bitrate * 3 / 2, d.bitrate * 3 / 2 * 2)
+            );
+            assert_eq!(d.option("maxrate"), Some(d.maxrate.to_string().as_str()));
+            assert_eq!(d.option("bufsize"), Some(d.bufsize.to_string().as_str()));
+            let fastest = if codec == Codec::Av1 {
+                "12"
+            } else {
+                "ultrafast"
+            };
+            assert_eq!(d.option("preset"), Some(fastest), "{}", s.name);
+            assert_eq!((d.option("crf"), d.keyint), (s.option("crf"), s.keyint));
+            let v = EncoderSetup::vaapi(codec, Quality::High, WIDE_1080, rate, false);
+            let dv = v.draft(full, draft);
+            assert_eq!(dv.option("compression_level"), Some("1"));
+            assert_eq!(dv.option("b"), Some(dv.bitrate.to_string().as_str()));
+        }
+    }
+
+    #[test]
     fn a_keyframe_comes_at_least_once_a_second() {
         let keyint = |rate| {
             EncoderSetup::software(Codec::Hevc, Quality::High, WIDE_1080, rate, false).keyint
@@ -223,5 +422,57 @@ mod tests {
         assert_eq!(s(Codec::Av1, true).yuv, YuvLayout::I010);
         assert_eq!(s(Codec::Hevc, false).yuv, YuvLayout::I420);
         assert_eq!(s(Codec::Hevc, false).color.chroma_location, CHROMA_LEFT);
+    }
+
+    #[test]
+    fn vaapi_runs_vbr_at_the_bitrate_with_the_same_cap_in_nv12_or_p010() {
+        let rate = FrameRate::FPS_30;
+        let sphere = Preset::Sphere { width: 3840 };
+        let s = EncoderSetup::vaapi(Codec::Hevc, Quality::High, sphere, rate, true);
+        assert_eq!((s.name, s.kind), ("hevc_vaapi", EncoderKind::Vaapi));
+        // 45 Mb/s by 0.7 for HEVC.
+        assert_eq!(
+            (s.bitrate, s.maxrate, s.bufsize),
+            (31_500_000, 47_250_000, 94_500_000)
+        );
+        assert_eq!(s.option("rc_mode"), Some("VBR"));
+        assert_eq!(s.option("b"), Some("31500000"));
+        assert_eq!(s.option("maxrate"), Some("47250000"));
+        assert_eq!(s.option("g"), Some("30"));
+        // Quality preset (2 << 1), pre-encode (8) and VBAQ (16), valid.
+        assert_eq!(s.option("compression_level"), Some("29"));
+        assert_eq!((s.yuv, s.layout), (YuvLayout::P010, PixelLayout::P010));
+        assert!(s.ten_bit());
+        // Balanced for the others; no QP, which VBR doesn't read.
+        for q in [Quality::Medium, Quality::Small] {
+            let s = EncoderSetup::vaapi(Codec::Av1, q, sphere, rate, false);
+            assert_eq!(s.name, "av1_vaapi");
+            assert_eq!(s.option("compression_level"), Some("3"), "{q:?}");
+            assert_eq!(s.option("qp"), None);
+            assert_eq!(s.yuv, YuvLayout::Nv12);
+        }
+        // H.264 is 8-bit, from a 10-bit source too.
+        let s = EncoderSetup::vaapi(Codec::H264, Quality::High, WIDE_1080, rate, true);
+        assert_eq!(
+            (s.name, s.yuv, s.ten_bit()),
+            ("h264_vaapi", YuvLayout::Nv12, false)
+        );
+        // The same rates as the software encoder's.
+        let soft = EncoderSetup::software(Codec::H264, Quality::High, WIDE_1080, rate, true);
+        assert_eq!(
+            (s.bitrate, s.maxrate, s.bufsize, s.keyint),
+            (soft.bitrate, soft.maxrate, soft.bufsize, soft.keyint)
+        );
+        assert_eq!(
+            EncoderSetup::of(
+                EncoderKind::Software,
+                Codec::H264,
+                Quality::High,
+                WIDE_1080,
+                rate,
+                true
+            ),
+            soft
+        );
     }
 }

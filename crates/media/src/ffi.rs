@@ -4280,6 +4280,7 @@ mod tests {
             edit_start: 0,
             time_base: None,
             crop_left: 0,
+            device: None,
         };
         let mut w = Mp4Writer::create(&dir.0.join(name), &settings, None).unwrap();
         for i in 0..3 {

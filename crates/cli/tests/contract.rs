@@ -155,6 +155,7 @@ fn untagged_clip(dir: &Path) -> PathBuf {
         edit_start: 0,
         time_base: None,
         crop_left: 0,
+        device: None,
     };
     let mut w = Mp4Writer::create(&dir.join("untagged.mp4"), &settings, None).unwrap();
     for i in 0..3 {
@@ -1364,6 +1365,7 @@ fn long_gop(dir: &Path, frames: u32) -> PathBuf {
         edit_start: 0,
         time_base: None,
         crop_left: 0,
+        device: None,
     };
     let path = dir.join(format!("long-gop-{frames}.mp4"));
     let mut wr = Mp4Writer::create(&path, &settings, None).unwrap();
