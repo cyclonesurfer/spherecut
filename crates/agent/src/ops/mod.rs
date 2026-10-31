@@ -6,9 +6,11 @@ pub mod check;
 pub mod clips;
 pub mod doctor;
 pub mod edit;
+pub mod job;
 pub mod look;
 pub mod probe;
 pub mod project;
+pub mod render;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;

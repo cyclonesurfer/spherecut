@@ -17,6 +17,7 @@ pub mod contract;
 pub mod error;
 mod font;
 mod image;
+pub mod jobs;
 pub mod limits;
 pub mod ops;
 pub mod reference;
@@ -107,6 +108,10 @@ pub fn serve(
     )
 }
 
+/// The tools [`call`] refuses: their jobs end with their server
+/// (a2-plan 1.1).
+pub const CALL_REFUSES: &[&str] = &["render", "job"];
+
 /// One tool call outside a session, as `spherecut call` makes it: the
 /// schema, the op and the limits of `tools/call`, with `cx` for its
 /// deadline and stop ([`rpc::CallCx::standalone`]). An unknown tool is a
@@ -118,12 +123,20 @@ pub fn call(
     cx: &rpc::CallCx,
 ) -> Result<rpc::Output, ToolError> {
     use rpc::Tools;
+    if CALL_REFUSES.contains(&tool) {
+        return Err(ToolError::new(
+            error::codes::BAD_ARGUMENT,
+            "runs only in a server: a render outlives one call, and this one ends with it",
+        )
+        .at("tool")
+        .next("spherecut render PROJECT -o OUT.mp4 --json is the same export, with its progress"));
+    }
     let tools = tools::Spherecut::new(options.roots).image_budget(options.image_budget);
     if !tools.has(tool) {
         let names: Vec<&str> = tools::TOOLS
             .iter()
             .map(|t| t.name)
-            .filter(|name| tools.has(name))
+            .filter(|name| tools.has(name) && !CALL_REFUSES.contains(name))
             .collect();
         return Err(
             ToolError::new(error::codes::BAD_ARGUMENT, "isn't one of Spherecut's tools")

@@ -484,6 +484,17 @@ impl Project {
         self.media.iter().find(|m| m.id == id)
     }
 
+    /// The same project reading each media file from `path(m)` instead:
+    /// an agent's render reads the files it checked through their
+    /// descriptors (a2-plan 5.3). Not an edit: no history records it,
+    /// and the copy isn't saved.
+    pub fn reading_media_from(mut self, mut path: impl FnMut(&Media) -> PathBuf) -> Project {
+        for m in &mut self.media {
+            m.path = path(m);
+        }
+        self
+    }
+
     pub fn target(&self, id: TargetId) -> Option<&Target> {
         self.targets.iter().find(|t| t.id == id)
     }

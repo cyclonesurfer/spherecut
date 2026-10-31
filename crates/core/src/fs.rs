@@ -39,8 +39,9 @@ pub const TEMP_ATTEMPTS: usize = 16;
 
 /// How long ago a temporary file must last have been written for
 /// [`sweep_temp_files`] to take it, besides its lock being free: far
-/// longer than the moment between a file's creation and its lock.
-pub const SWEEP_AGE: Duration = Duration::from_secs(60);
+/// longer than the moment between a file's creation and its lock, which
+/// is all the age guards (a2-plan amendment 7: 60 s until A2.4).
+pub const SWEEP_AGE: Duration = Duration::from_secs(10);
 
 /// A name for a temporary file: hidden, recognisably ours, the same short
 /// length whatever the output is called, and random, so that a file left

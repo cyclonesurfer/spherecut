@@ -254,17 +254,17 @@ it negotiated when it was tried with Spherecut.
 
 ## The tools
 
-Eight tools, in this order; `edit` and `undo` are listed only with a
-write root (`--allow-write`), since without one each call would be
-refused. Each takes one JSON object; the schemas are
+Ten tools, in this order; `edit`, `undo`, `render` and `job` are listed
+only with a write root (`--allow-write`), since without one each call
+would be refused. Each takes one JSON object; the schemas are
 `docs/agents/schemas/*.json`. Every result has `warnings: [{code,
 message}]`. Each is marked `readOnlyHint` true and `openWorldHint`
 false, except under `--allow-write`: `look` and `project` are marked as
 writing new files only (`readOnlyHint` false, `destructiveHint` false,
 `idempotentHint` true), since `look` writes one when a call gives
-`output` and `project` when it gives `create`, and `edit` and `undo`
-as replacing a project (`destructiveHint` true, `idempotentHint`
-false).
+`output` and `project` when it gives `create`, as are `render` and
+`job`, and `edit` and `undo` as replacing a project (`destructiveHint`
+true, `idempotentHint` false).
 
 - **`probe`**: what media files are, without decoding. `files` (up to
   64) or a `folder` (one level, its clips a page at a time: `page_size`
@@ -337,6 +337,38 @@ false).
   last one undone, if the agent made it: a step of the user's is
   `not_top`, and a project written by something else since its history
   was is `stale_revision`. `if_revision` as for `edit`.
+- **`render`**: exports the project's sequence to a new `.mp4` beneath
+  the write root, as `spherecut render` does, and answers within a
+  second, before a frame is rendered, with `{job, output, frames,
+  duration, size, draft, encoder, estimate_bytes, ahead}`. First it
+  checks the project's media (`media_missing`, `media_changed`), the
+  output (`output_exists`, also for a file a render not yet finished
+  writes), `range` (`{from, to}`, within the trim, in the clip's file
+  time: `out_of_range`), the preset, frames and encoder (D51's
+  `cannot_export`, `no_encoder`), and room on the disk (`no_space`, with
+  both numbers). `draft` renders at half the size, fast. One renders at
+  a time and 4 wait (`busy` past them). The file appears only when it
+  is whole and its checks pass, and nothing at the name is replaced or
+  followed, a link included. `spherecut call` refuses `render` and
+  `job`: a render ends with its server, so it would end with the call;
+  `spherecut render --json` is the same export.
+- **`job`**: a render's `state` (`queued`, `running`, `finishing`,
+  `done`, `failed`, `cancelled`), `frames: {done, total}`, `fps`,
+  `seconds_left`, the encoder and any `fallback`; once `done`, its
+  `report` (`file`, `bytes`, `codec`, `size`, `duration`, `audio`,
+  `warnings`) and a `check` of the file against the target its output
+  fits (`youtube_360` for the sphere, `flat_16_9`, `vertical`, and the
+  rules alone for 1:1 and 4:5); once `failed`, its `error`, with the
+  export's code (`encode_failed`, `mux_failed`, `metadata_failed`,
+  `check_failed`, `io_error`, `no_space`, the hardware codes). `wait`
+  (seconds, up to 45) returns when it ends or the time passes, sending
+  progress if the call asked for it; one call waits at a time, and
+  another answers at once with a `note`. opencode's calls end after
+  30 s, so wait less there. `cancel` stops it and its file, within 2 s.
+  The last 16 finished jobs are kept; an id from a server that has
+  ended is `job_lost`. When the server ends, its renders are cancelled;
+  a file a killed server left is removed by the next render in that
+  folder.
 
 **Conventions.** Times are strings (`"12.5"`, `"1:02.5"`, `"370f"` for
 frame 370, `"30000/1001"`) or `[num, den]` pairs of seconds; a bare
@@ -385,8 +417,8 @@ to try next. No file name or FFmpeg message is in it; probe's `detail:
 | `output_exists` | Something is already at `output`; nothing is replaced |
 | `cursor_stale` | The folder changed between pages; start again without `cursor` |
 | `timed_out` | The call ran past 50 s; `next` says how to ask for less |
-| `busy` | Too many calls waiting already; call again |
-| `cancelled` | The call was cancelled; the client gets no response for it |
+| `busy` | Too many calls waiting already, or 4 renders; call again |
+| `cancelled` | The call was cancelled; the client gets no response for it (a cancelled render's `state`, too) |
 | `internal` | Spherecut's fault, not the agent's |
 | `bad_edit` | An edit the project's rules refuse, at `edits[i]`: its op and the rule (`limit`, `in_use`, `not_found` and so on) are in the message; nothing was saved |
 | `stale_revision` | The project isn't at `if_revision`, or was written by something else since its history was; read it again |
@@ -398,7 +430,15 @@ to try next. No file name or FFmpeg message is in it; probe's `detail:
 | `not_project` | Not a Spherecut project; it was left as it was |
 | `bad_project` | A project that doesn't read: malformed, or breaking a rule |
 | `newer_schema` | A project saved by a newer Spherecut |
-| `io_error` | Reading or writing a project failed partway (the disk, a permission); nothing was saved |
+| `io_error` | Reading or writing a project or a render's file failed partway (the disk, a permission); nothing was saved |
+| `media_missing` | A project's media file isn't there, or isn't beneath the roots |
+| `media_changed` | A project's media file isn't the one it was made with: its size or first MiB differ |
+| `no_space` | The output's disk hasn't room for the render, with both numbers |
+| `job_lost` | A job of a server that has ended; render again |
+| `cannot_export` | A render the project can't make: its output isn't a preset, or its trim has no frames |
+| `no_encoder` | No encoder here for the project's codec |
+| `hw_unavailable`, `hw_unsupported`, `hw_failed` | A render's hardware encoder isn't there, turned the job down, or failed, with nothing to fall back to |
+| `encode_failed`, `mux_failed`, `metadata_failed`, `check_failed` | A render's stage failed: the encoder, the muxer, the metadata boxes, the finished file's checks |
 
 How the codes of media and render (the CLI's `--json`, D27, and
 `docs/cli-json.md`) become these:
@@ -491,7 +531,12 @@ test; a test checks that each is listed here.
 | `HISTORY_STEPS` | 50 | the newest steps the `history` part gives |
 | `SUMMARY_MARKERS` | 20 | markers the summary lists |
 | `LOCK_WAIT` | 2 s | how long a call waits for another call's hold of a project; the window's is never waited for |
-| `MAX_TOOLS` | 12 | tools through M9 (A1 has 5, A2.2 adds 3) |
+| `QUEUED_RENDERS` | 4 | renders waiting behind the one running; one more is `busy` |
+| `FINISHED_JOBS` | 16 | finished jobs `job` reports on |
+| `JOB_WAIT` | 45 s | the longest `job` `wait` |
+| `JOB_WAIT_MARGIN` | 2 s | a wait ends this long before its call's deadline |
+| `CANCEL_WAIT` | 2 s | how long `cancel` waits for the render and its file to go |
+| `MAX_TOOLS` | 12 | tools through M9 (A1 has 5, A2.2 adds 3, A2.4 2) |
 | `MAX_LIST_BYTES` | 12 KiB | the `tools/list` result, all tools |
 | `A1_LIST_BYTES` | 7 KiB | A1's share of it |
 | `INSTRUCTIONS_CHARS` | 1,500 | the server's instructions |

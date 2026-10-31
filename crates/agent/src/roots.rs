@@ -301,6 +301,68 @@ impl Roots {
         })
     }
 
+    /// The folder `path`, the argument `arg`, is to be written in,
+    /// opened beneath the write root, and its name there, for a file
+    /// that another thread writes later (a render, a2-plan 5.3): nothing
+    /// is created, and the name is refused if anything is there now, a
+    /// link included (`output_exists`). The writer goes through
+    /// [`Folder::exact`], so the file lands in this folder whatever
+    /// happens to its path meanwhile.
+    pub fn output(&self, arg: &str, path: &Path) -> Result<Folder, ToolError> {
+        let Some(root) = &self.write else {
+            return Err(ToolError::new(codes::WRITE_REFUSED, "writing is off")
+                .at(arg)
+                .next(
+                    "ask the user to start Spherecut with --allow-write --write-root DIR, \
+                     and render beneath DIR",
+                ));
+        };
+        let rest = if path.is_absolute() {
+            match under(std::iter::once(root), path) {
+                Some((_, rest)) => rest,
+                None => return Err(outside(arg, "write to", std::iter::once(root))),
+            }
+        } else {
+            path
+        };
+        let name = match rest.components().next_back() {
+            Some(std::path::Component::Normal(name)) => name.to_owned(),
+            _ => {
+                return Err(
+                    ToolError::new(codes::BAD_ARGUMENT, "names a folder, not a file").at(arg),
+                );
+            }
+        };
+        let folder = rest.parent().unwrap_or(Path::new(""));
+        let fd = beneath(root.fd.as_fd(), folder, OFlags::PATH | OFlags::DIRECTORY)
+            .map_err(|e| self.refused(arg, e, Want::OutputFolder, path))?;
+        match rustix::fs::statat(&fd, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Err(Errno::NOENT) => {}
+            Ok(_) => {
+                return Err(ToolError::new(
+                    codes::OUTPUT_EXISTS,
+                    "something is at that path already, and nothing is replaced",
+                )
+                .at(arg)
+                .next("choose a new name"));
+            }
+            Err(e) => {
+                return Err(ToolError::new(
+                    codes::WRITE_REFUSED,
+                    format!("can't be written: {}", io::Error::from(e)),
+                )
+                .at(arg));
+            }
+        }
+        let proc = PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()));
+        Ok(Folder {
+            fd,
+            proc,
+            name,
+            path: spherecut_core::project::file::lexical(&root.given.join(rest)),
+        })
+    }
+
     /// The folder of the project at `path`, the argument `arg`, opened
     /// beneath its root, and the project's file name (a2-plan 3.1): to
     /// write, beneath the write root, where a relative path is from, as
@@ -535,6 +597,13 @@ impl Opened {
     pub fn size(&self) -> u64 {
         self.size
     }
+
+    /// Its descriptor's `/proc` path, for a reader on another thread that
+    /// the holder of this `Opened` outlives (a render's media, a2-plan
+    /// 5.3).
+    pub fn proc_path(&self) -> &Path {
+        &self.proc
+    }
 }
 
 impl AsFd for Opened {
@@ -572,6 +641,60 @@ pub enum EntryKind {
     Other,
 }
 
+/// A folder beneath the write root, held open, and the name a file is to
+/// take in it ([`Roots::output`]).
+#[derive(Debug)]
+pub struct Folder {
+    fd: OwnedFd,
+    /// `/proc/self/fd/N` for `fd`.
+    proc: PathBuf,
+    name: OsString,
+    /// The file's path as the agent names it: the write root as it was
+    /// given, joined with the rest, lexically.
+    path: PathBuf,
+}
+
+impl Folder {
+    /// The path to write the file at: through the folder's descriptor,
+    /// so it names this folder only while the `Folder` lives.
+    pub fn exact(&self) -> PathBuf {
+        self.proc.join(&self.name)
+    }
+
+    /// The folder, through its descriptor.
+    pub fn dir(&self) -> &Path {
+        &self.proc
+    }
+
+    /// The file's path as the agent names it, absolute.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The file's name in the folder.
+    pub fn name(&self) -> &OsStr {
+        &self.name
+    }
+
+    /// The folder, and the name: two renders to the same file are the
+    /// same pair.
+    pub fn key(&self) -> io::Result<(u64, u64, OsString)> {
+        let st = rustix::fs::fstat(&self.fd)?;
+        Ok((st.st_dev, st.st_ino, self.name.clone()))
+    }
+
+    /// Whether anything is at the name now.
+    pub fn taken(&self) -> bool {
+        rustix::fs::statat(&self.fd, self.name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW).is_ok()
+    }
+}
+
+impl AsFd for Folder {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
 /// A new file under the write root, removed again on drop unless kept, so
 /// that a failed or cancelled call leaves nothing for a retry to trip on
 /// (amendment 23).
@@ -587,7 +710,7 @@ pub struct Created {
 }
 
 impl Created {
-    /// The path the agent gave.
+    /// The file's path as the agent names it, absolute.
     pub fn path(&self) -> &Path {
         &self.path
     }

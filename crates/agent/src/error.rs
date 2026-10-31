@@ -48,10 +48,11 @@ pub mod codes {
     pub const CURSOR_STALE: &str = "cursor_stale";
     /// The call ran past its time limit.
     pub const TIMED_OUT: &str = "timed_out";
-    /// Too many calls are waiting already.
+    /// Too many calls are waiting already, or too many renders.
     pub const BUSY: &str = "busy";
     /// The call was cancelled. The agent never sees this one: a cancelled
-    /// call gets no response at all.
+    /// call gets no response at all. A render cancelled with `job` is in
+    /// the state `cancelled`, which isn't an error.
     pub const CANCELLED: &str = "cancelled";
     /// Spherecut's fault, not the agent's.
     pub const INTERNAL: &str = "internal";
@@ -80,6 +81,32 @@ pub mod codes {
     /// Reading or writing a project failed partway: the disk, a
     /// permission. Nothing was saved.
     pub const IO_ERROR: &str = "io_error";
+    /// A project's media file isn't there, or isn't beneath the roots.
+    pub const MEDIA_MISSING: &str = "media_missing";
+    /// A project's media file isn't the one the project was made with:
+    /// its size or its first MiB differ.
+    pub const MEDIA_CHANGED: &str = "media_changed";
+    /// The output's disk hasn't room for the render: both numbers are in
+    /// the message.
+    pub const NO_SPACE: &str = "no_space";
+    /// A job of a server that has ended: its render went with it.
+    pub const JOB_LOST: &str = "job_lost";
+    /// The project can't be exported as it is: its output isn't a preset,
+    /// or its trim has no frames (D51).
+    pub const CANNOT_EXPORT: &str = "cannot_export";
+    /// No encoder this machine has for the project's codec (D51).
+    pub const NO_ENCODER: &str = "no_encoder";
+    /// The hardware encoder isn't there, turned the job down, or failed
+    /// (D27, D3).
+    pub const HW_UNAVAILABLE: &str = "hw_unavailable";
+    pub const HW_UNSUPPORTED: &str = "hw_unsupported";
+    pub const HW_FAILED: &str = "hw_failed";
+    /// A render's stage failed: the encoder, the muxer, the metadata
+    /// boxes, or the checks of the finished file (D51).
+    pub const ENCODE_FAILED: &str = "encode_failed";
+    pub const MUX_FAILED: &str = "mux_failed";
+    pub const METADATA_FAILED: &str = "metadata_failed";
+    pub const CHECK_FAILED: &str = "check_failed";
 
     /// Every code, for the docs and their test.
     pub const ALL: &[&str] = &[
@@ -116,6 +143,19 @@ pub mod codes {
         BAD_PROJECT,
         NEWER_SCHEMA,
         IO_ERROR,
+        MEDIA_MISSING,
+        MEDIA_CHANGED,
+        NO_SPACE,
+        JOB_LOST,
+        CANNOT_EXPORT,
+        NO_ENCODER,
+        HW_UNAVAILABLE,
+        HW_UNSUPPORTED,
+        HW_FAILED,
+        ENCODE_FAILED,
+        MUX_FAILED,
+        METADATA_FAILED,
+        CHECK_FAILED,
     ];
 }
 
@@ -231,6 +271,14 @@ mod tests {
         let text = e.to_json().to_string();
         assert!(text.chars().count() <= ERROR_CHARS, "{}", text.len());
         assert!(text.contains('…'));
+    }
+
+    /// Every code an export fails with reaches the agent as it is.
+    #[test]
+    fn the_exports_codes_are_codes() {
+        for c in spherecut_export::ExportError::CODES {
+            assert!(codes::ALL.contains(c), "{c}");
+        }
     }
 
     #[test]

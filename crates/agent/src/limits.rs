@@ -207,3 +207,22 @@ pub const SUMMARY_MARKERS: usize = 20;
 /// How long a call waits for another call's hold of a project's lock
 /// (a2-plan 3.2). The GUI's is never waited for.
 pub const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// The most renders waiting behind the one running (a2-plan 5.1): past
+/// it, `render` is `busy`.
+pub const QUEUED_RENDERS: usize = 4;
+
+/// The last finished jobs `job` reports on; an older one is `not_found`.
+pub const FINISHED_JOBS: usize = 16;
+
+/// The longest `job`'s `wait` may be: a call has [`CALL_TIME`], and the
+/// answer needs some of it (a2-plan 1.1).
+pub const JOB_WAIT: Duration = Duration::from_secs(45);
+
+/// How long before its call's deadline a `job` wait ends, to answer in
+/// time.
+pub const JOB_WAIT_MARGIN: Duration = Duration::from_secs(2);
+
+/// How long `job`'s `cancel` waits for the render to stop and its file
+/// to go.
+pub const CANCEL_WAIT: Duration = Duration::from_secs(2);

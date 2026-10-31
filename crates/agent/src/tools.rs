@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 use serde_json::{Map, Value, json};
 
 use crate::error::{ToolError, codes};
+use crate::jobs::Jobs;
 use crate::limits::{INLINE_IMAGE_BYTES, RESULT_CHARS};
 use crate::roots::Roots;
 use crate::rpc::{CallCx, Output, Tools};
@@ -39,6 +40,17 @@ pub enum Writes {
     /// It replaces a project: listed only with a write root (a2-plan
     /// 1.1), since without one every call would be refused.
     Replaces,
+    /// It starts or stops renders, which make only new files: listed
+    /// only with a write root, as for [`Writes::Replaces`], and hinted as
+    /// for [`Writes::New`].
+    Renders,
+}
+
+impl Writes {
+    /// Listed only when the server may write.
+    fn needs_root(self) -> bool {
+        matches!(self, Writes::Replaces | Writes::Renders)
+    }
 }
 
 /// Every tool, in `tools/list`'s order.
@@ -91,6 +103,18 @@ pub const TOOLS: &[Tool] = &[
         schema: include_str!("../../../docs/agents/schemas/undo.json"),
         writes: Writes::Replaces,
     },
+    Tool {
+        name: "render",
+        title: "Render a project",
+        schema: include_str!("../../../docs/agents/schemas/render.json"),
+        writes: Writes::Renders,
+    },
+    Tool {
+        name: "job",
+        title: "Follow or cancel a render",
+        schema: include_str!("../../../docs/agents/schemas/job.json"),
+        writes: Writes::Renders,
+    },
 ];
 
 /// How many of [`TOOLS`] are A1's: the rest are A2's.
@@ -98,7 +122,13 @@ pub const A1_TOOLS: usize = 5;
 
 /// Each of A2's tools' share of [`MAX_LIST_BYTES`], as listed with
 /// writing on (a2-plan 4.5).
-pub const BUDGETS: &[(&str, usize)] = &[("project", 1000), ("edit", 950), ("undo", 650)];
+pub const BUDGETS: &[(&str, usize)] = &[
+    ("project", 1000),
+    ("edit", 950),
+    ("undo", 650),
+    ("render", 950),
+    ("job", 650),
+];
 
 /// The most tools `tools/list` may hold: past a dozen, agents choose
 /// worse (a1-plan section 4.4).
@@ -131,6 +161,8 @@ pub struct Spherecut {
     lists: [Value; 2],
     roots: Roots,
     image_budget: usize,
+    /// The renders this server runs (a2-plan 5.3).
+    jobs: Jobs,
 }
 
 impl Spherecut {
@@ -138,7 +170,7 @@ impl Spherecut {
         let writes = roots.writes();
         let tools: Vec<Parsed> = parsed()
             .iter()
-            .filter(|(tool, _)| writes || tool.writes != Writes::Replaces)
+            .filter(|(tool, _)| writes || !tool.writes.needs_root())
             .map(|(tool, schema)| Parsed {
                 tool,
                 schema: schema.clone(),
@@ -151,6 +183,7 @@ impl Spherecut {
             lists,
             roots,
             image_budget: INLINE_IMAGE_BYTES,
+            jobs: Jobs::new(),
         }
     }
 
@@ -223,7 +256,7 @@ fn listed(p: &Parsed, writes: bool, top: bool) -> Value {
     });
     match (writes, p.tool.writes) {
         (false, _) | (_, Writes::Never) => {}
-        (true, Writes::New) => {
+        (true, Writes::New | Writes::Renders) => {
             annotations["readOnlyHint"] = json!(false);
             annotations["destructiveHint"] = json!(false);
             annotations["idempotentHint"] = json!(true);
@@ -277,11 +310,27 @@ impl Tools for Spherecut {
             "project" => (ops::project::run(ops::request(args)?, &cx)?, Vec::new()),
             "edit" => (ops::edit::run(ops::request(args)?, &cx)?, Vec::new()),
             "undo" => (ops::edit::undo(ops::request(args)?, &cx)?, Vec::new()),
+            "render" => (
+                ops::render::run(ops::request(args)?, &cx, &self.jobs)?,
+                Vec::new(),
+            ),
+            "job" => (
+                ops::job::run(ops::request(args)?, &cx, &self.jobs)?,
+                Vec::new(),
+            ),
             _ => return Err(ToolError::internal(format!("{name} has no op"))),
         };
         text::sanitize(&mut result);
         fits(&result)?;
         Ok(Output { result, images })
+    }
+
+    fn cancel_all(&self) {
+        self.jobs.cancel_all();
+    }
+
+    fn shutdown(&self, until: std::time::Instant) -> usize {
+        self.jobs.shutdown(until)
     }
 }
 
@@ -411,6 +460,11 @@ mod tests {
                     assert_eq!(a(t, "destructiveHint"), false, "{t}");
                     assert_eq!(a(t, "idempotentHint"), true, "{t}");
                 }
+                "render" | "job" => {
+                    assert_eq!(a(t, "readOnlyHint"), false, "{t}");
+                    assert_eq!(a(t, "destructiveHint"), false, "{t}");
+                    assert_eq!(a(t, "idempotentHint"), true, "{t}");
+                }
                 "edit" | "undo" => {
                     assert_eq!(a(t, "readOnlyHint"), false, "{t}");
                     assert_eq!(a(t, "destructiveHint"), true, "{t}");
@@ -425,9 +479,9 @@ mod tests {
     }
 
     #[test]
-    fn without_writing_edit_and_undo_are_not_listed() {
+    fn without_writing_edit_undo_render_and_job_are_not_listed() {
         let s = Spherecut::new(Roots::new(&[], None).unwrap());
-        for name in ["edit", "undo"] {
+        for name in ["edit", "undo", "render", "job"] {
             assert!(!s.has(name), "{name}");
         }
         assert!(s.has("project"));
@@ -465,6 +519,12 @@ mod tests {
                                   "edits": [{"op": "rename", "id": 2, "name": "x"}],
                                   "label": "x", "dry_run": true, "if_revision": 3})],
             "undo" => vec![json!({"file": "a.spherecut", "redo": true, "if_revision": 3})],
+            "render" => vec![json!({"project": "a.spherecut", "output": "a.mp4",
+                                    "range": {"from": "1", "to": [3, 1]}, "draft": true})],
+            "job" => vec![
+                json!({"job": "j0123abcd-1", "wait": 30}),
+                json!({"job": "j0123abcd-1", "cancel": true}),
+            ],
             _ => vec![],
         }
     }
@@ -480,6 +540,8 @@ mod tests {
             "project" => ops::request::<ops::project::Request>(args).map(drop),
             "edit" => ops::request::<ops::edit::Request>(args).map(drop),
             "undo" => ops::request::<ops::edit::UndoRequest>(args).map(drop),
+            "render" => ops::request::<ops::render::Request>(args).map(drop),
+            "job" => ops::request::<ops::job::Request>(args).map(drop),
             _ => Err(ToolError::internal(format!("no request type for {name}"))),
         }
     }
@@ -570,6 +632,10 @@ mod tests {
         let edit = schema("edit");
         assert_eq!(edit["edits"]["maxItems"], json!(EDITS_PER_CALL));
         assert_eq!(edit["label"]["maxLength"], json!(LABEL_CHARS));
+        assert_eq!(
+            schema("job")["wait"]["maximum"],
+            json!(crate::limits::JOB_WAIT.as_secs())
+        );
     }
 
     #[test]

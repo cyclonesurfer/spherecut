@@ -560,7 +560,8 @@ fn a_session_lists_the_project_tools_and_edits() {
     assert_eq!(
         names,
         [
-            "probe", "look", "analyze", "check", "doctor", "project", "edit", "undo"
+            "probe", "look", "analyze", "check", "doctor", "project", "edit", "undo", "render",
+            "job"
         ]
     );
     let r = s.call_tool(

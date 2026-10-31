@@ -32,6 +32,13 @@ pub struct ExportJob {
     pub project: Project,
     /// The file to write.
     pub output: PathBuf,
+    /// Take `output` exactly as given: a link at it is never followed,
+    /// and the free-space check and the sweep look at the folder it
+    /// names. An agent's render writes `/proc/self/fd/N/<name>`, N its
+    /// checked folder beneath the write root, so that nothing planted at
+    /// the name mid-render leads the files elsewhere (a2-plan 5.3). The
+    /// CLI and the window follow links, as `--output` always has.
+    pub exact: bool,
     /// Replace a regular file at `output` once the new one is whole
     /// (`--overwrite`, D16); otherwise one there is refused.
     pub overwrite: bool,
@@ -99,6 +106,7 @@ impl ExportJob {
         ExportJob {
             project,
             output: output.into(),
+            exact: false,
             overwrite: false,
             settings,
             eight_bit: false,
@@ -317,6 +325,81 @@ impl Shared {
     }
 }
 
+/// What [`Export::start`] checks before anything runs, for a caller
+/// that checks before it queues an export (an agent's `render`, a2-plan
+/// 5.1): the preset, the frames, and the encoders in the order tried.
+#[derive(Debug)]
+pub struct Prepared {
+    pub preset: Preset,
+    pub plan: FramePlan,
+    node: RenderNode,
+    encoders: Encoders,
+}
+
+impl Prepared {
+    /// The encoder tried first, by FFmpeg's name.
+    pub fn encoder(&self) -> &'static str {
+        self.encoders.first_name()
+    }
+}
+
+/// The checks that need no file or device: the sequence's output is a
+/// preset, its trim has frames, an encoder for its codec is there.
+pub fn prepare(job: &ExportJob) -> Result<Prepared, ExportError> {
+    let sequence = job.project.the_sequence();
+    let clip = job.project.the_clip();
+    if job.project.media_by_id(clip.media).is_none() {
+        return Err(ExportError::Invalid(format!(
+            "the clip's media {} isn't in the project",
+            clip.media.0
+        )));
+    }
+    let preset = Preset::of(&sequence.output).ok_or_else(|| {
+        let (w, h) = sequence.output.size();
+        ExportError::Invalid(format!("{w}x{h} isn't one of the export presets"))
+    })?;
+    let plan = FramePlan::new(clip.source, sequence.rate)?;
+    let node = render_node(&job.gpu);
+    let size = if job.draft {
+        preset.draft_size()
+    } else {
+        preset.size()
+    };
+    let encoders = Encoders::choose(
+        &job.settings,
+        preset,
+        size,
+        sequence.rate,
+        &node,
+        &has_encoder,
+    )?;
+    Ok(Prepared {
+        preset,
+        plan,
+        node,
+        encoders,
+    })
+}
+
+/// The bytes `job` needs free in its output's folder: the muxer's file
+/// and the finished one, both on the disk until the first is removed
+/// (m2-plan section 8.6). It reads the source's audio to know its rate.
+pub fn needed_bytes(job: &ExportJob, prepared: &Prepared) -> Result<u64, ExportError> {
+    let sequence = job.project.the_sequence();
+    let media = job
+        .project
+        .media_by_id(job.project.the_clip().media)
+        .ok_or_else(|| ExportError::Invalid("the clip's media isn't in the project".into()))?;
+    let (audio, _) = crate::audio::choose(&media.path, job.settings.audio, &sequence.output)?;
+    Ok(crate::pipeline::needed(
+        job,
+        prepared.preset,
+        &prepared.plan,
+        prepared.encoders.kinds[0],
+        audio.as_ref(),
+    ))
+}
+
 /// A running export. Dropping it cancels the export and waits for it.
 #[derive(Debug)]
 pub struct Export {
@@ -333,33 +416,12 @@ impl Export {
     /// trim has frames, the encoder is there, nothing is at the output
     /// (unless `overwrite`). The rest fail through [`Export::wait`].
     pub fn start(job: ExportJob) -> Result<Export, ExportError> {
-        let sequence = job.project.the_sequence();
-        let clip = job.project.the_clip();
-        if job.project.media_by_id(clip.media).is_none() {
-            return Err(ExportError::Invalid(format!(
-                "the clip's media {} isn't in the project",
-                clip.media.0
-            )));
-        }
-        let preset = Preset::of(&sequence.output).ok_or_else(|| {
-            let (w, h) = sequence.output.size();
-            ExportError::Invalid(format!("{w}x{h} isn't one of the export presets"))
-        })?;
-        let plan = FramePlan::new(clip.source, sequence.rate)?;
-        let node = render_node(&job.gpu);
-        let size = if job.draft {
-            preset.draft_size()
-        } else {
-            preset.size()
-        };
-        let encoders = Encoders::choose(
-            &job.settings,
+        let Prepared {
             preset,
-            size,
-            sequence.rate,
-            &node,
-            &has_encoder,
-        )?;
+            plan,
+            node,
+            encoders,
+        } = prepare(&job)?;
         if !job.overwrite && std::fs::symlink_metadata(&job.output).is_ok() {
             return Err(ExportError::OutputExists(job.output.clone()));
         }

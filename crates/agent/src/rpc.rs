@@ -228,6 +228,16 @@ pub trait Tools: Send + Sync + 'static {
     fn has(&self, name: &str) -> bool;
     /// Run tool `name` on `args`, on a worker thread.
     fn call(&self, name: &str, args: Value, cx: &CallCx) -> Result<Output, ToolError>;
+    /// Stop the work that outlives its call, a render job's (a2-plan
+    /// 5.4), as the session ends: [`serve`] calls it when it stops the
+    /// calls.
+    fn cancel_all(&self) {}
+    /// Wait until `until` for that work to end: how many threads were
+    /// still at it then, which [`Ended::stuck`] counts.
+    fn shutdown(&self, until: Instant) -> usize {
+        let _ = until;
+        0
+    }
 }
 
 /// The server's name, version and instructions, for `initialize`.
@@ -551,6 +561,7 @@ pub fn serve(
     }
     lock(&shared.queue).clear();
     shared.ready.notify_all();
+    shared.tools.cancel_all();
     {
         let _sleep = lock(&shared.reaper_sleep.0);
         shared.reaper_sleep.1.notify_all();
@@ -579,6 +590,8 @@ pub fn serve(
     if stuck > 0 {
         tracing::warn!("mcp: {stuck} call(s) didn't stop in time; leaving them");
     }
+    // The renders, against the same deadline.
+    stuck += shared.tools.shutdown(until);
     // After giving up, the reader may still be waiting for input.
     if let Some(t) = reader
         && !gave_up
