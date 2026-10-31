@@ -7,12 +7,12 @@
 //!   alone and through its software counterpart, the same project each
 //!   time, both against the parity reference rendered on the same GPU.
 //!   The VA-API encoders are held to odin's measures less 3 dB and
-//!   0.003 (AV1's to PLAN's 40 dB and 0.98 until odin measures it), the
-//!   software ones to PLAN's (theirs are Tier 1's); the measures go in
-//!   the report's notes. The source decodes on VA-API: a decode that fell
-//!   back fails the test. Every export decodes at the output's size
-//!   (odin's VCN 4 padded a 1080 × 1080 AV1 to 1088 × 1082), and where
-//!   AV1 works, a square one goes to libsvtav1, which `auto` says.
+//!   0.003, the software ones to PLAN's 40 dB and 0.98 (theirs are Tier
+//!   1's); the measures go in the report's notes. The source decodes on
+//!   VA-API: a decode that fell back fails the test. Every export decodes
+//!   at the output's size (odin's VCN 4 padded a 1080 × 1080 AV1 to
+//!   1088 × 1082), and where AV1 works, a square one goes to libsvtav1,
+//!   which `auto` says.
 //! - `export_360_8k_vaapi`: 2 s of the 8K perf clip to 360 at 7680×3840,
 //!   in AV1 where doctor finds av1_vaapi working, else HEVC: V1 and V2
 //!   read back, and A1's `check` passing it for `youtube_360`.
@@ -221,7 +221,7 @@ fn cases() -> Vec<Case> {
     );
     let (two, half) = (Time::from_secs(2), secs(1, 2));
     // odin measured 50.78 dB and 0.99729, 53.15 and 0.99808, 54.30 and
-    // 0.99914; AV1 wasn't measured (its square case was padded).
+    // 0.99914, then 49.95 and 0.99673, 47.28 and 0.99663 for AV1.
     vec![
         case(
             "H.264",
@@ -261,7 +261,7 @@ fn cases() -> Vec<Case> {
             half,
             YuvLayout::I420,
             av1,
-            PLAN_FLOORS,
+            (46.9, 0.993),
         ),
         // Doctor checks AV1 in 8 bits; VCN 4 encodes 10 too.
         case(
@@ -272,7 +272,7 @@ fn cases() -> Vec<Case> {
             half,
             YuvLayout::I010,
             av1,
-            PLAN_FLOORS,
+            (44.2, 0.993),
         ),
     ]
 }

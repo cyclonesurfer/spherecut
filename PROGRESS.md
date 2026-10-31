@@ -290,8 +290,9 @@ dB in H.264, 53.2 in HEVC and 54.3 in 10-bit HEVC, within 2 dB of
 software's or better but for 10-bit, and those less 3 dB are the
 floors. odin also found AV1 on VA-API padded to 64 × 16 (a 1080 × 1080
 export decoded at 1088 × 1082), so AV1 goes to VA-API only at a size it
-needn't pad and to libsvtav1 otherwise, saying why; AV1's own floors
-wait on odin's rerun of its cases at 2560 × 1440 and 3840 × 1920.
+needn't pad and to libsvtav1 otherwise, saying why. Its cases, rerun at
+2560 × 1440 and 3840 × 1920, measure 50.0 dB in 8 bits and 47.3 in 10
+(SVT-AV1's 51.6 and 60.4), and those less 3 dB are AV1's floors.
 
 ## A1: the MCP server
 

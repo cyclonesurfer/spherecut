@@ -8025,9 +8025,15 @@ What, as `crates/export` does it:
   0.99817); HEVC Main 53.15, 0.99808 (53.07, 0.99834); HEVC Main 10
   54.30, 0.99914 (58.95, 0.99962). Their floors are those less 3 dB and
   0.003: 47.7 and 0.994, 50.1 and 0.995, 51.3 and 0.996. AV1 was padded
-  (above), so its floor stays PLAN's 40 dB and 0.98 until its cases, now
-  at 2560 × 1440 and 3840 × 1920, are measured. The 8K 360 export
-  through av1_vaapi ran at 10.0 fps, 35.3 Mb/s (decode 5.7 s of 8.0).
+  (above), so its cases moved to 2560 × 1440 and 3840 × 1920, and odin's
+  rerun at 6ed8172 (`hw-reports/odin-6ed8172-m25b.md`, FFmpeg 8.1.3)
+  measured them: AV1 49.95 dB, 0.99673 (51.60, 0.99778); AV1 in 10 bits
+  47.28, 0.99663 (60.37, 0.99969); the square AV1 through libsvtav1
+  48.92, 0.99695. Their floors are 46.9 and 0.993, 44.2 and 0.993. VCN
+  4's 10-bit AV1 is 13 dB under SVT-AV1's and 2.7 under its own 8-bit
+  one, still 7 dB over PLAN's 40 dB, so it stands (below). The 8K 360
+  export through av1_vaapi ran at 10.0 fps, 35.3 Mb/s (decode 5.7 s of
+  8.0).
 
 Not yet, and where it goes:
 
@@ -8043,6 +8049,11 @@ Not yet, and where it goes:
   AAC. D17 stands for M2.
 - ~~The VA-API encoders, the order and fallback, and the 5.7K export
   bench (item 52)~~: M2.5, above.
+- **10-bit AV1 on VCN 4** is 13 dB under SVT-AV1's at the same bitrate
+  (odin's rerun, above), where H.264 and HEVC Main are within 2 dB of
+  software's. The levels' table is 8-bit only; whether a quality level
+  or a higher bitrate closes it is a Tier 2 run of its own, and until
+  then the 10-bit floor is the measure less 3 dB.
 
 Why one last pass of our own rather than the muxer's faststart and a
 patch: faststart is a second pass anyway, and ours already has to write
