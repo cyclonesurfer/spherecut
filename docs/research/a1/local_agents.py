@@ -23,7 +23,6 @@ import argparse
 import base64
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -191,17 +190,16 @@ def tasks(media, mcp):
 
 
 def last_json(text):
-    """The last {...} in `text` that parses."""
-    for m in reversed(list(re.finditer(r"\{", text or ""))):
-        depth = 0
-        for i in range(m.start(), len(text)):
-            depth += {"{": 1, "}": -1}.get(text[i], 0)
-            if depth == 0:
-                try:
-                    return json.loads(text[m.start() : i + 1])
-                except json.JSONDecodeError:
-                    break
-    return None
+    """The last top-level {...} in `text` that parses, not an object
+    nested in it."""
+    text, i, last = text or "", 0, None
+    dec = json.JSONDecoder()
+    while (i := text.find("{", i)) >= 0:
+        try:
+            last, i = dec.raw_decode(text, i)
+        except json.JSONDecodeError:
+            i += 1
+    return last
 
 
 def run(args, model, vision, task, mcp, skill, log):
