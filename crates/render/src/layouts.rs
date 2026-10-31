@@ -186,6 +186,25 @@ pub(crate) fn fullscreen_pass<'e>(
     label: &str,
     target: &wgpu::TextureView,
 ) -> wgpu::RenderPass<'e> {
+    pass(enc, label, target, wgpu::LoadOp::Load)
+}
+
+/// [`fullscreen_pass`] over what `target` holds, for a draw a scissor
+/// keeps to part of it.
+pub(crate) fn fullscreen_pass_over<'e>(
+    enc: &'e mut wgpu::CommandEncoder,
+    label: &str,
+    target: &wgpu::TextureView,
+) -> wgpu::RenderPass<'e> {
+    pass(enc, label, target, wgpu::LoadOp::Load)
+}
+
+fn pass<'e>(
+    enc: &'e mut wgpu::CommandEncoder,
+    label: &str,
+    target: &wgpu::TextureView,
+    load: wgpu::LoadOp<wgpu::Color>,
+) -> wgpu::RenderPass<'e> {
     enc.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some(label),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -193,7 +212,7 @@ pub(crate) fn fullscreen_pass<'e>(
             depth_slice: None,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                load,
                 store: wgpu::StoreOp::Store,
             },
         })],

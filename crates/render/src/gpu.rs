@@ -16,12 +16,17 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use spherecut_core::gate::SubmitGate;
 
 use crate::error::RenderError;
 use crate::vkshare::{self, SharedVideo};
+
+/// How often [`Gpu::wait_for_submitted`] polls the device while it
+/// waits.
+pub const POLL_EVERY: Duration = Duration::from_micros(500);
 
 /// Which adapter to render on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -343,6 +348,55 @@ impl Gpu {
             )));
         }
         Ok(())
+    }
+
+    /// Waits for the GPU to finish the work submitted so far, from any
+    /// thread, without wgpu's own wait: it polls the device every
+    /// [`POLL_EVERY`] and sleeps between, woken by wgpu's callback for the
+    /// work done. wgpu holds the device's resource lock through its own
+    /// wait, and a window's present takes that lock to write, so a wait
+    /// off the UI thread held the present as long (odin's M2 run, M2 plan
+    /// item 22); and wgpu's wait with a timeout, timing out while another
+    /// thread polls, trips an assertion in wgpu-core 30's `maintain`.
+    /// Never on the UI thread.
+    pub fn wait_for_submitted(&self) -> Result<(), RenderError> {
+        self.wait_for_submitted_until(None).map(|_| ())
+    }
+
+    /// [`Self::wait_for_submitted`], giving up at `until`: false then.
+    pub fn wait_for_submitted_until(&self, until: Option<Instant>) -> Result<bool, RenderError> {
+        spherecut_core::may_block("waiting for the GPU");
+        let done = Arc::new((Mutex::new(false), Condvar::new()));
+        let d = done.clone();
+        self.queue.on_submitted_work_done(move || {
+            *lock(&d.0) = true;
+            d.1.notify_all();
+        });
+        loop {
+            // Fires the callback once the work is done.
+            let _ = self.device.poll(wgpu::PollType::Poll);
+            if self.health.lost.load(Ordering::Acquire) {
+                let why = lock(&self.health.why).clone().unwrap_or_default();
+                return Err(RenderError::Device(format!(
+                    "the device was lost ({why}); it has to be made again"
+                )));
+            }
+            let finished = lock(&done.0);
+            if *finished {
+                return Ok(true);
+            }
+            let now = Instant::now();
+            let slice = match until {
+                Some(u) if u <= now => return Ok(false),
+                Some(u) => (u - now).min(POLL_EVERY),
+                None => POLL_EVERY,
+            };
+            drop(
+                done.1
+                    .wait_timeout(finished, slice)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+        }
     }
 
     /// The Vulkan backend only, with wgpu's default flags (validation in

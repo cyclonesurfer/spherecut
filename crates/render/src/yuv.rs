@@ -338,11 +338,10 @@ pub fn read_buffer(gpu: &Gpu, buffer: &wgpu::Buffer, bytes: u64) -> Result<Vec<u
     enc.map_buffer_on_submit(&staging, wgpu::MapMode::Read, .., move |r| {
         let _ = tx.send(r);
     });
+    gpu.submit_gate().wait();
     gpu.queue.submit([enc.finish()]);
     let read = || -> Result<Vec<u8>, RenderError> {
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| RenderError::Readback(e.to_string()))?;
+        gpu.wait_for_submitted()?;
         rx.recv()
             .map_err(|_| RenderError::Readback("the copy never finished".into()))?
             .map_err(|e| RenderError::Readback(e.to_string()))?;

@@ -140,10 +140,9 @@ pub fn read_region_in_bands(
             enc.map_buffer_on_submit(&buffer, wgpu::MapMode::Read, .., move |r| {
                 let _ = tx.send(r);
             });
+            gpu.submit_gate().wait();
             gpu.queue.submit([enc.finish()]);
-            device
-                .poll(wgpu::PollType::wait_indefinitely())
-                .map_err(|e| RenderError::Readback(e.to_string()))?;
+            gpu.wait_for_submitted()?;
             rx.recv()
                 .map_err(|_| RenderError::Readback("the copy never finished".into()))?
                 .map_err(|e| RenderError::Readback(e.to_string()))?;

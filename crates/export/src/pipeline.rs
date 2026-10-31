@@ -32,7 +32,7 @@ use spherecut_media::spherical::{StereoMode, write};
 use spherecut_media::{HwDevice, capture_ffmpeg_log};
 use spherecut_render::output::frame_views_at;
 use spherecut_render::{
-    Filter, Gpu, Placement, Stereo, StillOptions, StillRenderer, YuvImage, YuvLayout,
+    Filter, Gpu, Placement, Stereo, StillOptions, StillRenderer, UploadPath, YuvImage, YuvLayout,
 };
 
 use crate::audio::{self, Feed};
@@ -941,16 +941,23 @@ fn render(
     token: StopToken,
     busy: &Busy,
 ) -> Ended {
-    let mut renderer = StillRenderer::new(&gpu);
+    // The app's export shares its device with the window: its frames go
+    // up as the player's do (`StillRenderer::with_upload_path`).
+    let mut renderer = match &look.pace {
+        Some(_) => StillRenderer::with_upload_path(&gpu, UploadPath::StagingBelt),
+        None => StillRenderer::new(&gpu),
+    };
     let frame_s = plan.rate().frame_duration().to_secs_f64();
     let mut pass = 0;
     for held in rx {
         if token.is_stopped() {
             return Ended::Stopped;
         }
-        // While the app's viewer plays, a frame a UI pass.
+        // While the app's viewer plays, a frame a UI pass, its work in
+        // small submissions one after another (odin's M2 run).
         if let Some(p) = &look.pace {
             p.wait(&mut pass);
+            renderer.share(p.held());
         }
         let since = Instant::now();
         let t = plan.source_time(held.n).map_or(f64::NAN, Time::to_secs_f64);
