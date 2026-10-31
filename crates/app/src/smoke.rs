@@ -932,6 +932,9 @@ pub struct ExportReport {
     /// blur was.
     pub preset: Option<String>,
     pub motion_blur: bool,
+    /// Where it rendered: `own` (a device of its own) or `window` (the
+    /// window's), D56.
+    pub device: Option<&'static str>,
     /// It ended with its file whole and checked.
     pub ok: bool,
     pub error: Option<String>,
@@ -950,6 +953,10 @@ pub struct ExportReport {
     /// amendment 2 item 22), and the longest hold.
     pub held: u64,
     pub longest_hold_ms: f32,
+    /// Times one of its stages waited for the viewer's frames (D56), and
+    /// the longest wait.
+    pub yielded: u64,
+    pub longest_yield_ms: f32,
     /// The UI and the clip's frames while it ran, as `settled` has them.
     pub while_running: Option<Settled>,
 }
@@ -1230,6 +1237,7 @@ impl SmokeDriver {
                 export,
                 run.export_from.is_some(),
                 s.export.last.as_ref(),
+                s.export.device_used,
                 &s.export.pace,
                 while_running,
             )
@@ -1318,14 +1326,17 @@ fn export_report(
     export: &SmokeExport,
     started: bool,
     last: Option<&Result<spherecut_export::Report, spherecut_export::ExportError>>,
+    device: Option<crate::export::ExportDevice>,
     pace: &spherecut_export::Pace,
     while_running: Option<Settled>,
 ) -> ExportReport {
     let (held, longest) = pace.waits();
+    let (yielded, longest_yield) = pace.yields();
     let mut r = ExportReport {
         output: export.output.display().to_string(),
         preset: export.preset.map(|p| p.to_string()),
         motion_blur: export.blur,
+        device: device.map(crate::export::ExportDevice::name),
         ok: false,
         error: None,
         frames: None,
@@ -1337,6 +1348,8 @@ fn export_report(
         blur_capped: None,
         held,
         longest_hold_ms: longest.as_secs_f32() * 1e3,
+        yielded,
+        longest_yield_ms: longest_yield.as_secs_f32() * 1e3,
         while_running,
     };
     match (started, last) {

@@ -3,6 +3,7 @@
 //! raw view of a source that isn't equirect.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
@@ -574,7 +575,49 @@ impl Projector {
             .write_buffer(&target.view_uniform, 0, bytemuck::bytes_of(&uniform));
         let pipeline = self.pipeline(filter, debug, Pass::Project);
         let wraps = slot.wraps.load(Ordering::Acquire);
-        self.draw(enc, slot, target, &pipeline, wraps, filter, timers);
+        self.draw(enc, slot, target, &pipeline, wraps, filter, timers, None);
+    }
+
+    /// [`Self::record`] of `rows` of `target`'s extent alone, its other
+    /// rows left as they were: a large view drawn in bands, a submission
+    /// each, so that a window that shares the queue waits behind one band
+    /// of it, not the whole (M2 plan item 22). The bands of one view draw
+    /// what one [`Self::record`] would.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_rows(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        slot: &GpuFrame,
+        view: &ViewParams,
+        target: &LinearTarget,
+        filter: Filter,
+        debug: DebugMode,
+        rows: Range<u32>,
+    ) -> Result<(), RenderError> {
+        self.gpu.check()?;
+        let (w, h) = target.extent;
+        if rows.start >= rows.end || rows.end > h {
+            return Err(RenderError::Invalid(format!(
+                "rows {rows:?} of a {w}x{h} target"
+            )));
+        }
+        let uniform = ViewUniform::new(view, (w, h));
+        self.gpu
+            .queue
+            .write_buffer(&target.view_uniform, 0, bytemuck::bytes_of(&uniform));
+        let pipeline = self.pipeline(filter, debug, Pass::Project);
+        let wraps = slot.wraps.load(Ordering::Acquire);
+        self.draw(
+            enc,
+            slot,
+            target,
+            &pipeline,
+            wraps,
+            filter,
+            None,
+            Some(rows),
+        );
+        Ok(())
     }
 
     /// Records `slot`'s picture flat into `target`'s extent, scaled to
@@ -601,7 +644,7 @@ impl Projector {
             .write_buffer(&target.view_uniform, 0, bytemuck::bytes_of(&uniform));
         let pipeline = self.pipeline(filter, DebugMode::Off, Pass::Flat);
         // Clamped at the picture's edges: its sides don't meet.
-        self.draw(enc, slot, target, &pipeline, false, filter, timers);
+        self.draw(enc, slot, target, &pipeline, false, filter, timers, None);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -614,6 +657,7 @@ impl Projector {
         wraps: bool,
         filter: Filter,
         timers: Option<&mut GpuTimers>,
+        rows: Option<Range<u32>>,
     ) {
         let (w, h) = target.extent;
         let sampler =
@@ -621,8 +665,14 @@ impl Projector {
         let mut timers = timers;
         let span = timers.as_deref_mut().and_then(|t| t.begin(enc));
         {
-            let mut pass = layouts::fullscreen_pass(enc, "project", &target.view);
+            let mut pass = match &rows {
+                None => layouts::fullscreen_pass(enc, "project", &target.view),
+                Some(_) => layouts::fullscreen_pass_over(enc, "project rows", &target.view),
+            };
             pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
+            if let Some(r) = &rows {
+                pass.set_scissor_rect(0, r.start, w, r.end - r.start);
+            }
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &target.view_group, &[]);
             pass.set_bind_group(1, &slot.bind_group, &[]);

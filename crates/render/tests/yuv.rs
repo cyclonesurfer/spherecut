@@ -297,6 +297,67 @@ fn blocks() -> (Vec<u8>, Vec<u8>) {
 /// back within a code of its own luma everywhere, and of its own chroma
 /// wherever the chroma is the same over what the filters reach (D31's
 /// tolerance).
+/// A shared renderer (M2 plan item 22) draws a view in bands and reads
+/// it back in parts, one submission each, and makes the same bytes as
+/// one that isn't: the planes for the encoders, a still at each depth,
+/// a 360 output and a blurred flat one.
+#[test]
+fn a_shared_render_makes_the_same_bytes() {
+    let g = gpu();
+    let (w, h) = (192u32, 96u32);
+    let img = spherecut_synth::render_equirect(spherecut_synth::Pattern::Grid, 384, 192, 3, 1);
+    let f = frame(
+        &img,
+        Kind::Nv12,
+        color(Range::Limited, Matrix::Bt709, ChromaSiting::Left),
+        0,
+    );
+    let equirect = [ViewParams::equirect(DQuat::from_rotation_y(0.4))];
+    let flat = |yaw: f64| {
+        ViewParams::new(
+            DQuat::from_rotation_y(yaw),
+            spherecut_sphere::perspective::Lens::new(
+                spherecut_sphere::perspective::Projection::Rectilinear,
+                90f64.to_radians(),
+            ),
+        )
+    };
+    let blurred: Vec<ViewParams> = (0..5).map(|i| flat(0.02 * f64::from(i))).collect();
+    let mut plain = StillRenderer::new(g);
+    let mut shared = StillRenderer::new(g);
+    shared.share(true);
+    // Bands of 10 rows (13 of them, the last 6), copies of 1000 bytes.
+    shared.share_in_parts(u64::from(w) * 11, 1001);
+    for (what, views) in [("equirect", &equirect[..]), ("blurred", &blurred[..])] {
+        for layout in YuvLayout::ALL {
+            let opts = StillOptions::default();
+            let a = plain
+                .render_yuv(g, &f, views, (w, h), &opts, layout)
+                .unwrap();
+            let b = shared
+                .render_yuv(g, &f, views, (w, h), &opts, layout)
+                .unwrap();
+            assert!(
+                a.data == b.data,
+                "{what} {}: the shared render differs",
+                layout.name()
+            );
+        }
+        for depth in [Depth::Eight, Depth::Sixteen, Depth::Linear] {
+            let opts = StillOptions {
+                depth,
+                ..StillOptions::default()
+            };
+            let a = plain.render_blurred(g, &f, views, (w, h), &opts).unwrap();
+            let b = shared.render_blurred(g, &f, views, (w, h), &opts).unwrap();
+            assert!(
+                a.pixels == b.pixels,
+                "{what} {depth:?}: the shared render differs"
+            );
+        }
+    }
+}
+
 #[test]
 fn an_identity_render_comes_back_to_its_codes() {
     identity_round_trip(gpu());

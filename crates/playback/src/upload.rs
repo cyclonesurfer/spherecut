@@ -173,10 +173,16 @@ impl UploadThread {
                 self.shared.cache.wait_for_change(seen, WAIT_SLICE);
             }
         }
-        // The current submit has returned; let the GPU finish with it.
+        // The current submit has returned; let the GPU finish with it,
+        // without wgpu's own wait (render's `Gpu::wait_for_submitted`).
         may_block("waiting for the GPU at shutdown");
-        if let Err(e) = self.gpu.device.poll(wgpu_wait(FINISH)) {
-            tracing::debug!("the GPU's last work at shutdown: {e}");
+        match self
+            .gpu
+            .wait_for_submitted_until(Some(Instant::now() + FINISH))
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!("the GPU's last work at shutdown took over {FINISH:?}"),
+            Err(e) => tracing::debug!("the GPU's last work at shutdown: {e}"),
         }
         self.shared.cache.close();
         tracing::debug!("upload thread ends");
@@ -701,12 +707,5 @@ pub(crate) fn placement_of(info: Option<&VideoStreamInfo>) -> Placement {
         right: 1.0 - u1,
         bottom: 1.0 - v1,
         stereo,
-    }
-}
-
-fn wgpu_wait(timeout: Duration) -> spherecut_render::wgpu::PollType {
-    spherecut_render::wgpu::PollType::Wait {
-        submission_index: None,
-        timeout: Some(timeout),
     }
 }

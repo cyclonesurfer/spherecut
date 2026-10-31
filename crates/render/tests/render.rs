@@ -1193,3 +1193,105 @@ fn the_probes_half_is_ieees() {
         assert_eq!(half_bits(f16_to_f32(h)), h, "{h:#06x}");
     }
 }
+
+/// wgpu holds the device's resource lock through a wait for the GPU, and
+/// a window's present takes that lock to write, as a texture's destroy
+/// does: wgpu's wait holds them while the GPU works, and
+/// [`Gpu::wait_for_submitted`] a poll's moment at a time (odin's M2 run,
+/// M2 plan item 22). The control is wgpu's wait: if it no longer holds a
+/// destroy back, wgpu has stopped holding its lock through a wait.
+#[test]
+fn a_wait_for_the_gpu_holds_wgpus_lock_a_moment_at_a_time() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let g = gpu();
+    // Work lavapipe takes a while over: 32 copies of 32 MiB.
+    let bytes = 32u64 << 20;
+    let make = |usage| {
+        g.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: bytes,
+            usage,
+            mapped_at_creation: false,
+        })
+    };
+    let a = make(wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST);
+    let b = make(wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST);
+    // How long a destroy took at most while another thread waited, and
+    // how long the wait was.
+    let run = |ours: bool| -> (Duration, Duration) {
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        for i in 0..32 {
+            let (from, to) = if i % 2 == 0 { (&a, &b) } else { (&b, &a) };
+            enc.copy_buffer_to_buffer(from, 0, to, 0, bytes);
+        }
+        // Destroyed once first: a second destroy takes the lock and finds
+        // nothing to do, where a first calls the driver, which on lavapipe
+        // waits for the queue's work.
+        let textures: Vec<wgpu::Texture> = (0..512)
+            .map(|_| {
+                g.device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width: 4,
+                        height: 4,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+            })
+            .collect();
+        for t in &textures {
+            t.destroy();
+        }
+        let index = g.queue.submit([enc.finish()]);
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|s| {
+            let waiter = s.spawn(move || {
+                let start = Instant::now();
+                tx.send(()).unwrap();
+                if ours {
+                    g.wait_for_submitted().unwrap();
+                } else {
+                    g.device
+                        .poll(wgpu::PollType::Wait {
+                            submission_index: Some(index),
+                            timeout: None,
+                        })
+                        .unwrap();
+                }
+                start.elapsed()
+            });
+            rx.recv().unwrap();
+            let mut worst = Duration::ZERO;
+            for t in &textures {
+                if waiter.is_finished() {
+                    break;
+                }
+                let start = Instant::now();
+                t.destroy();
+                worst = worst.max(start.elapsed());
+            }
+            (worst, waiter.join().unwrap())
+        })
+    };
+    let (held, waited) = run(false);
+    eprintln!("wgpu's wait: a destroy held up to {held:?} of a {waited:?} wait");
+    assert!(
+        waited > Duration::from_millis(40) && held > waited / 2,
+        "the control: wgpu's wait of {waited:?} held a destroy {held:?}, \
+         so wgpu no longer holds its lock through a wait (or the work was too quick)"
+    );
+    let (held, waited) = run(true);
+    eprintln!("Gpu::wait_for_submitted: a destroy held up to {held:?} of a {waited:?} wait");
+    assert!(
+        held < Duration::from_millis(25) && held < waited / 2,
+        "a wait of {waited:?} held a destroy {held:?}"
+    );
+}

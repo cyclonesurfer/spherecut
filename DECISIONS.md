@@ -4972,8 +4972,9 @@ What:
       `budget::recheck` gives: what the setting stands for, and with
       under 1 GiB available no more than a quarter of it, below an
       explicit size too.
-  - At shutdown it waits for the GPU at most 1 s (`PollType::Wait`),
-    then closes the cache, which ends every wait in it.
+  - At shutdown it waits for the GPU at most 1 s
+    (`Gpu::wait_for_submitted_until`, D56), then closes the cache,
+    which ends every wait in it.
 - **The presenter** (`Player::present(now)`), once a UI frame:
   - **The time.** It picks for `clock.time_at(now + latency)`, plus
     `av_offset` while the clock runs: a positive offset shows the frame
@@ -8440,6 +8441,129 @@ while held (then a smaller unit of work than a frame, or the export on
 a second queue); a user wants the tabs in one row on a wide screen; M5's
 render queue takes the export out of the window; or a user wants the
 quit to ask about a running export.
+
+## D56. The app's export and the window: no wait through wgpu, a smaller unit, a device of its own, the viewer first
+
+*2026-10-31, M2.10, from odin's M2 run at 0663e05. Updates D41 and
+D55.*
+
+What:
+
+- **Why the window missed frames while it exported.** On odin
+  `gui_smoke` presented 91 %, 85 % and 58 % of its frames under the
+  1080p, 8K 360 and 4K-with-blur exports (gate 90 %). The submit gate
+  (D41) held: no export submission landed in the UI's window. The
+  stall was on the CPU, in wgpu-core 30.0.1. `Device::poll` holds the
+  device's `snatchable_lock` to read through `maintain`'s wait, and a
+  surface's present takes it to write (`present.rs`), as do
+  `Texture::destroy` and `Buffer::destroy`. parking_lot's lock is fair,
+  so once the present waits, readers wait too. So the export's wait for
+  a frame held the window's present until the GPU finished the frame.
+  `Queue::write_texture` holds the same lock while it makes a staging
+  buffer and copies a frame into it.
+- **`Gpu::wait_for_submitted`** is the only wait for the GPU off the
+  UI thread. It registers `on_submitted_work_done` and loops: a
+  `PollType::Poll` (never a wait), a check for a lost device, then a
+  condvar wait of at most `POLL_EVERY` (0.5 ms). The readbacks, the
+  YUV read and the player's shutdown wait use it
+  (`wait_for_submitted_until` for a bounded one).
+- **Not a timed `PollType::Wait`.** One that times out while another
+  thread triages the same device trips wgpu-core's assertion in
+  `resource.rs` ("If the queue is empty, the current submission index
+  ..."): the upload tests hit it with 1 ms slices.
+- **The app's export uploads through the staging belt** (D36's path),
+  not `write_texture`. The CLI's keeps the default.
+- **A smaller unit while the pace holds** (`StillRenderer::share`,
+  set from D55's pace each frame): one submission in flight, each
+  after the gate; a view larger than 3840 × 2160 drawn in bands of that
+  many pixels (even rows, scissored, `LoadOp::Load`); the readback in
+  copies of 16 MiB. The blur keeps one submission a view. The free
+  export, and the CLI, are as before.
+- **Kept from frame to frame**: the YUV pass's output buffer and the
+  readback's staging buffer, when the size matches (88 MB each at 8K
+  in P010). A read that fails drops the staging buffer.
+- **Tests** (Tier 1, lavapipe): render's
+  `a_wait_for_the_gpu_holds_wgpus_lock_a_moment_at_a_time`, a second
+  destroy timed while another thread waits on 32 copies of 32 MiB: 114
+  ms behind wgpu's wait (the control), 0.05 ms behind
+  `wait_for_submitted`. lavapipe's first destroy of a texture waits for
+  the queue, so the test destroys each once first. render's
+  `a_shared_render_makes_the_same_bytes`: bands and copies small enough
+  to split a 192 × 96 frame give the same bytes as one pass, every
+  layout and depth, with blur. The hardware measure is `gui_smoke`'s
+  export runs on Tier 2.
+- **odin's rerun at 5316176** (PR #20, `hw-reports/odin-5316176-pace.md`
+  and `-pace-125.md`): the export tests pass, and the 8K export's
+  window presented 95 % (85 % before) with its readback 3.9 s (6.0 s);
+  the blur export dropped no video frame (28 before) but took 13.9 s
+  (6.0 s), and its window presented 66 % with 64 late passes of up to
+  100 ms, about one an export frame, while the UI's own work rose to
+  14.2 ms at p95 (0.9 ms without an export). The 1080p export's window
+  had one 83 ms stall, and at 125 % ran at 30 Hz throughout. The
+  slowest stages in the late gaps were the viewer's decode and upload
+  (63 and 77 ms in one), not the GPU's work. So the export still held
+  the window up on the CPU, through something the two shared besides
+  the lock above: wgpu-core's other locks (the queue's pending writes,
+  which a submit holds through `vkQueueSubmit`, and the allocator's),
+  or the device's single queue.
+- **So the app's export renders on a device of its own** (M2.10b,
+  `Gpu::beside`): a second wgpu device on the window's adapter, opened
+  by the export's starting thread, sharing no lock, queue or submit
+  gate with the window's, only the GPU, which the kernel's scheduler
+  shares between the two a job at a time. The pace (one frame a UI
+  pass) and the shared renderer's bands stay, so that the export's jobs
+  stay short and few between two of the window's frames. When a second
+  device can't be had, the export renders on the window's, as before,
+  and says so in the log. `SPHERECUT_EXPORT_DEVICE=window` asks for
+  the window's, for comparing the two; the smoke document says which
+  the export used (`device`: `own` or `window`). The CLI's export has
+  always had its own device.
+- **Tests**: app's `the_export_has_a_device_of_its_own_unless_told_the_windows`
+  and `a_device_beside_the_windows_is_another_on_its_adapter`; the
+  kittest of an export while the window plays checks the device it
+  used.
+- **odin's rerun at 3c1a727** (PR #21, `hw-reports/odin-3c1a727-pace2.md`
+  and `-pace2-125.md`): the 4K export with blur is fixed (6.3 s instead
+  of 13.9; 99 % presented while it ran, 0 dropped; its run fails only on
+  a UI p99 of 30.8 ms at the usual scale and passes at 125 %). The two
+  runs that play 5.7K while they export still drop 1 to 6 frames, and
+  the gaps' slowest stages are the viewer's decodes (37 to 81 ms) and
+  uploads (54 to 67 ms): the export's VA-API decode and encode share the
+  GPU's video engine with the viewer's Vulkan decodes, and an 8K HEVC
+  frame takes the engine about 90 ms.
+- **So, while the viewer plays, the export goes after its frames**
+  (M2.10c): each UI pass tells the pace whether the viewer has a lead,
+  two frames ready in its slots beyond the one it shows (`LEAD_FRAMES`,
+  or as many as fewer slots hold), and while it hasn't, each of the
+  export's stages waits before its next frame's work (decode, render,
+  encode: `Pace::yield_to_viewer`), at most 100 ms a time, so a viewer
+  that never gets its lead slows the export and doesn't stop it. While
+  nothing plays the export runs as before. The smoke document counts
+  the waits (`yielded`, `longest_yield_ms`).
+- **Tests**: export's `the_stages_wait_for_the_viewers_lead_while_held`;
+  app's `the_viewer_has_its_lead_with_two_frames_ready_or_while_it_doesnt_play`.
+
+Why:
+- **The viewer's frames first, over a rate cap.** A fixed cap (one
+  export frame a video frame, or a share of the time) is right on one
+  GPU at one size and wrong on the next; the viewer's slots say on any
+  GPU whether it is keeping up, and a stage that waits for them gives
+  the engine back to the viewer at once.
+- **A device of the export's own, over a second queue.** A second queue
+  isn't in wgpu 30's API. The export decodes on VA-API or in software
+  (D52), never through the window's device (path B is the player's), so
+  a second device copies nothing across devices; it costs the device's
+  opening (a fraction of a second, off the UI thread) and the export's
+  own memory, which it had on the shared device too.
+- **Bands over a lower resolution or rate while held**: the bytes stay
+  those of the free export, which the parity tests compare.
+
+Revisit if: odin's rerun with the viewer's lead still drops frames
+while 5.7K plays (then one export frame's turn on the video engine
+outlasts the lead: more slots while an export runs, or the export's
+decode in software while the viewer plays); wgpu-core stops holding the lock
+through `maintain`'s wait, or fixes the timed wait's race, which would
+let a plain wait back; wgpu gains a second queue.
 
 ## Open
 

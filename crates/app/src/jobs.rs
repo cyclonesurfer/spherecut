@@ -25,6 +25,16 @@ pub enum Poll<T> {
     Lost,
 }
 
+impl<T> Poll<T> {
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Poll<U> {
+        match self {
+            Poll::Pending => Poll::Pending,
+            Poll::Done(t) => Poll::Done(f(t)),
+            Poll::Lost => Poll::Lost,
+        }
+    }
+}
+
 impl<T: Send + 'static> Job<T> {
     /// Run `f` on a thread named `name`. If the thread can't start, the
     /// job is [`Poll::Lost`] at once.

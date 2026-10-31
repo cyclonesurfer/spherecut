@@ -44,7 +44,7 @@ pub use color::{Placement, SourceUniform, Stereo};
 pub use encode::{Encoder, PlaceUniform};
 pub use error::RenderError;
 pub use frame::GpuFrame;
-pub use gpu::{AdapterChoice, Gpu, GpuCaps};
+pub use gpu::{AdapterChoice, Gpu, GpuCaps, POLL_EVERY};
 pub use output::FrameViews;
 pub use plane::{LayoutKind, PlaneFormat, PlaneShape, SlotShape};
 pub use project::{
