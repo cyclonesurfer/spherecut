@@ -8629,12 +8629,23 @@ Why:
   so "Replace it?" comes after the viewer stops. The smoke run's late
   passes are listed up to where the viewer stopped, as its other
   numbers are.
+- **odin's rerun at 5b907e3 (PR #25): item 22 passes.** gui_smoke and
+  gui_proto passed at the usual scale and at 125 %: every export run
+  presented 100 % of the UI's frames while the viewer played, with a UI
+  p99 of 17.0 to 17.4 ms and no frame dropped (569 of 569 in both 5.7K
+  runs); the 1.16 s stall is gone. Each export ran after the viewer
+  stopped: 1.4 s for the 1080p, 6.3 to 6.5 s for the 8K, 5.4 to 5.5 s for
+  the 4K with blur.
+- **Pat's choice (2026-10-31):** asked how an export should behave while
+  5.7K plays (pause, keep the slow-down, or let exports off the
+  smoothness gate), Pat chose to pause it. M2.10e is that answer; the
+  turns of M2.10d (branch `m2/share`) aren't merged.
 
-Revisit if: Pat answers the export card otherwise (turns are on branch
-m2/share at b77e65a; letting exports off the gate is a change to
-gui_smoke's judge alone); odin's rerun with the pause still drops frames
-while 5.7K plays (then it is the export's start, its decoder, encoder
-and device opening beside the viewer); wgpu-core stops holding the lock
+Revisit if: someone wants exports to go on while they play (then the
+turns on branch m2/share at b77e65a are the start, with what odin found
+of them in PR #23); a GPU drops frames with the export paused (then it
+is something the export holds while it waits, its device or its
+memory); wgpu-core stops holding the lock
 through `maintain`'s wait, or fixes the timed wait's race, which would
 let a plain wait back; wgpu gains a second queue.
 
