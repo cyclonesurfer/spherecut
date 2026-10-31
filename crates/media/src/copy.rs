@@ -225,6 +225,20 @@ impl AudioCopy {
         self.channels
     }
 
+    /// Bits a second, for an estimate of the copy's size: PCM's exactly;
+    /// AAC's as the stream says or, where it doesn't, the most AAC holds
+    /// (6,144 bits a channel for 1,024 samples).
+    pub fn bit_rate(&self) -> u64 {
+        let (rate, channels) = (u64::from(self.rate), u64::from(self.channels));
+        match self.pcm {
+            Some(frame) => rate * frame as u64 * 8,
+            None => u64::try_from(self.params.bit_rate())
+                .ok()
+                .filter(|&b| b > 0)
+                .unwrap_or(rate * channels * 6),
+        }
+    }
+
     /// Hand out the packets of samples `start` to `end` (not included), in
     /// the stream's ticks, from the next [`next_packet`](Self::next_packet).
     pub fn cut(&mut self, start: i64, end: i64) -> Result<(), MediaError> {

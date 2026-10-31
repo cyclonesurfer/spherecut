@@ -8,7 +8,7 @@
 //! channel closed), and [`run`] reports the first stage that failed for
 //! a reason of its own.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::JoinHandle;
@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use spherecut_core::brand::APP_NAME;
 use spherecut_core::cancel::{StopSource, StopToken};
+use spherecut_core::fs::{SWEEP_AGE, follow_links, free_space, sweep_temp_files};
 use spherecut_core::project::{Output, Target, ViewAnim};
 use spherecut_core::time::Time;
 use spherecut_media::backend::{
@@ -31,6 +32,7 @@ use spherecut_render::{
 };
 
 use crate::audio::{self, Feed};
+use crate::check::{self, Expected, ExpectedAudio};
 use crate::encoder::EncoderSetup;
 use crate::error::{ExportError, Stage};
 use crate::job::{AudioReport, ExportJob, Report, Shared, panic_text};
@@ -95,6 +97,16 @@ pub(crate) fn run(
         .project
         .media_by_id(clip.media)
         .ok_or_else(|| ExportError::Invalid("the clip's media isn't in the project".into()))?;
+    let folder = folder(&job.output)?;
+    // What an export or a frame killed in this folder left (D16).
+    match sweep_temp_files(&folder, SWEEP_AGE) {
+        Ok(gone) => {
+            for p in gone {
+                tracing::info!("removed {}, which a stopped export left", p.display());
+            }
+        }
+        Err(e) => tracing::debug!("no sweep of {}: {e}", folder.display()),
+    }
 
     // Software decoding for now; section 8.2's choice of path comes with
     // the hardware encoders (M2.5).
@@ -137,6 +149,12 @@ pub(crate) fn run(
     let token = stop.current();
     let (audio_plan, audio_warnings) = audio::choose(&media.path, s.audio, &sequence.output)?;
     warnings.extend(audio_warnings);
+    let needed = needed(
+        setup.maxrate,
+        audio_plan.as_ref().map_or(0, audio::Plan::bits),
+        plan.duration(),
+    );
+    warnings.extend(room(&folder, needed, free_space(&folder))?);
     let mut feed = match &audio_plan {
         None => None,
         Some(a) => {
@@ -222,6 +240,31 @@ pub(crate) fn run(
     if stop.is_shut_down() {
         return Err(ExportError::Cancelled);
     }
+    let want = Expected {
+        codec: s.codec,
+        size,
+        frames: plan.count(),
+        duration: plan.duration(),
+        rate: plan.rate(),
+        sphere: matches!(sequence.output, Output::Equirect { .. }),
+        audio: audio_plan.as_ref().map(|a| ExpectedAudio {
+            codec: a.codec().to_owned(),
+            rate: a.rate(),
+            channels: a.channels(),
+            ambix: a.ambix,
+        }),
+    };
+    // A failed check drops `tmp`, which removes it.
+    let checks = check::check(tmp.path(), &want, stop.shutdown_flag()).map_err(|e| {
+        if stop.is_shut_down() {
+            ExportError::Cancelled
+        } else {
+            e
+        }
+    })?;
+    if stop.is_shut_down() {
+        return Err(ExportError::Cancelled);
+    }
     let persisted = if job.overwrite {
         tmp.persist_replace()
     } else {
@@ -256,8 +299,61 @@ pub(crate) fn run(
         bytes,
         blur_capped,
         warnings,
+        checks,
         elapsed: shared.elapsed(),
     })
+}
+
+/// The folder the export's files go in: the output's, through any links
+/// to it, as the writer finds it.
+fn folder(output: &Path) -> Result<PathBuf, ExportError> {
+    let dest = follow_links(output).map_err(|e| {
+        ExportError::failed(Stage::File, None, format!("{}: {e}", output.display()))
+    })?;
+    Ok(match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    })
+}
+
+/// The most bytes an export of `duration` needs on its folder's disk: the
+/// video at the preset's cap with a tenth more, and the audio, twice,
+/// since the muxer's file and the finished one are there together until
+/// the first is removed (section 8.6, amendment 2 item 28).
+fn needed(maxrate: u64, audio_bits: u64, duration: Time) -> u64 {
+    let rate = u128::from(maxrate) * 11 / 10 + u128::from(audio_bits);
+    let secs = duration.as_rational();
+    let bits = rate * u128::try_from(secs.num()).unwrap_or(0) * 2;
+    let bytes = bits.div_ceil(u128::try_from(secs.den()).unwrap_or(1) * 8);
+    u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
+/// Whether `folder`, with `free` bytes, has room for `needed`: a refusal
+/// with both numbers when it hasn't, and a warning when its free space
+/// can't be read (a filesystem without `statvfs`), since the write will
+/// say so if it is full.
+fn room(
+    folder: &Path,
+    needed: u64,
+    free: std::io::Result<u64>,
+) -> Result<Option<String>, ExportError> {
+    match free {
+        Ok(free) if free < needed => Err(ExportError::NoSpace {
+            folder: folder.to_path_buf(),
+            needed,
+            free,
+        }),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ExportError::failed(
+            Stage::File,
+            None,
+            format!("the output's folder {} doesn't exist", folder.display()),
+        )),
+        Err(e) => Ok(Some(format!(
+            "{}'s free space wasn't checked: {e}",
+            folder.display()
+        ))),
+    }
 }
 
 fn spawn(
@@ -619,8 +715,6 @@ fn file_or(stage: Stage, at: Option<Time>, e: EncodeError) -> ExportError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use spherecut_core::project::Range;
     use spherecut_core::time::{FrameRate, Rational};
     use spherecut_synth::media::{self as synth, Spec, VFR_TIMESCALE, vfr_ticks};
@@ -811,5 +905,42 @@ mod tests {
             end: Time::from_secs(1),
         };
         assert_eq!(held(&path, trim, FrameRate::FPS_30).unwrap().len(), 15);
+    }
+
+    #[test]
+    fn the_space_needed_is_two_copies_at_the_cap() {
+        // 60 Mb/s for 10 s with a tenth more is 82.5 MB, and 256 kb/s of
+        // audio 0.32 MB: twice their sum.
+        assert_eq!(
+            needed(60_000_000, 256_000, Time::from_secs(10)),
+            165_640_000
+        );
+        assert_eq!(needed(60_000_000, 0, Time::ZERO), 0);
+    }
+
+    #[test]
+    fn room_refuses_with_both_numbers_and_warns_when_it_cant_tell() {
+        let dir = Path::new("/media/card");
+        assert_eq!(room(dir, 100, Ok(100)), Ok(None));
+        let e = room(dir, 101, Ok(100)).unwrap_err();
+        assert_eq!(
+            e,
+            ExportError::NoSpace {
+                folder: dir.to_path_buf(),
+                needed: 101,
+                free: 100
+            }
+        );
+        let e = room(dir, 1, Err(std::io::ErrorKind::NotFound.into())).unwrap_err();
+        assert_eq!(e.stage(), Some(Stage::File));
+        assert!(e.to_string().contains("doesn't exist"), "{e}");
+        let unsupported = std::io::Error::from_raw_os_error(38);
+        let w = room(dir, u64::MAX, Err(unsupported)).unwrap();
+        assert!(w.is_some_and(|w| w.contains("wasn't checked")));
+        // The real call, on a folder that is there.
+        let tmp = TempDir::new("room");
+        assert!(free_space(&tmp.0).unwrap() > 0);
+        assert_eq!(folder(&tmp.0.join("out.mp4")).unwrap(), tmp.0);
+        assert_eq!(folder(Path::new("out.mp4")).unwrap(), PathBuf::from("."));
     }
 }

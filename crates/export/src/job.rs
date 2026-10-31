@@ -14,6 +14,7 @@ use spherecut_core::project::{Codec, EncoderChoice, ExportSettings, Project};
 use spherecut_core::time::{FrameRate, Time};
 use spherecut_render::Gpu;
 
+use crate::check::Checked;
 use crate::encoder::EncoderSetup;
 use crate::error::ExportError;
 use crate::pipeline;
@@ -98,6 +99,8 @@ pub struct Report {
     /// What the export did that the project didn't say: the left eye of
     /// a stereo source, a crop, a pose not applied.
     pub warnings: Vec<String>,
+    /// The checks the file passed before it was put in place (section 9).
+    pub checks: Vec<Checked>,
     pub elapsed: Duration,
 }
 

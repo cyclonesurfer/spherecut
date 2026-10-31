@@ -63,6 +63,20 @@ pub enum ExportError {
     /// No encoder the job can use for its codec.
     #[error("{0}")]
     NoEncoder(String),
+    /// The output's disk hasn't room for the export (section 8.6): bytes
+    /// free there, and at most needed.
+    #[error(
+        "{} has {} free, and the export may need {}: two copies of the file at its preset's \
+         highest bitrate are on the disk while it is finished",
+        folder.display(),
+        size_text(*free),
+        size_text(*needed)
+    )]
+    NoSpace {
+        folder: PathBuf,
+        needed: u64,
+        free: u64,
+    },
     /// A stage failed, at the frame shown at `at` (sequence time) where
     /// there is one.
     #[error("{stage}{}: {message}", at.map(|t| format!(" at {:.3} s", t.to_secs_f64())).unwrap_or_default())]
@@ -71,6 +85,17 @@ pub enum ExportError {
         at: Option<Time>,
         message: String,
     },
+}
+
+/// Bytes as a disk's size is given: decimal gigabytes, or megabytes
+/// under one.
+fn size_text(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b >= 1e9 {
+        format!("{:.1} GB", b / 1e9)
+    } else {
+        format!("{:.0} MB", b / 1e6)
+    }
 }
 
 impl ExportError {
@@ -88,5 +113,24 @@ impl ExportError {
             ExportError::Failed { stage, .. } => Some(*stage),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_space_gives_both_numbers() {
+        let e = ExportError::NoSpace {
+            folder: "/media/card".into(),
+            needed: 3_456_000_000,
+            free: 812_000_000,
+        };
+        let text = e.to_string();
+        assert!(
+            text.starts_with("/media/card has 812 MB free, and the export may need 3.5 GB"),
+            "{text}"
+        );
     }
 }

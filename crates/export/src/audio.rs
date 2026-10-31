@@ -53,8 +53,12 @@ pub(crate) struct Plan {
 /// What a copied stream is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CopyPlan {
+    /// FFmpeg's name for its codec.
+    pub codec: String,
     pub rate: u32,
     pub channels: u16,
+    /// Bits a second ([`AudioCopy::bit_rate`]).
+    pub bits: u64,
 }
 
 impl Plan {
@@ -69,6 +73,24 @@ impl Plan {
     /// What the report calls the writer's audio: `copy`, or the encoder.
     pub fn encoder(&self) -> &'static str {
         if self.copy.is_some() { "copy" } else { "aac" }
+    }
+
+    /// FFmpeg's name for the codec the file's audio is in.
+    pub fn codec(&self) -> &str {
+        self.copy.as_ref().map_or("aac", |c| c.codec.as_str())
+    }
+
+    /// The file's sample rate.
+    pub fn rate(&self) -> u32 {
+        self.copy.as_ref().map_or(RATE, |c| c.rate)
+    }
+
+    /// Bits a second, for an estimate of the file's size.
+    pub fn bits(&self) -> u64 {
+        match &self.copy {
+            Some(c) => c.bits,
+            None => self.settings().bit_rate as u64,
+        }
     }
 
     pub fn settings(&self) -> AudioSettings {
@@ -135,8 +157,10 @@ pub(crate) fn choose(
             }
             Ok(c) => {
                 copy = Some(CopyPlan {
+                    codec: c.codec().to_owned(),
                     rate: c.rate(),
                     channels: c.channels(),
+                    bits: c.bit_rate(),
                 });
             }
             Err(CopyError::Refused(why)) => {

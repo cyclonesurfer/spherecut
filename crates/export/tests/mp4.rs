@@ -8,6 +8,8 @@
 mod common;
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use common::{Scratch, clip, gpu, project, secs, with_audio};
@@ -18,7 +20,8 @@ use spherecut_agent::tools::Spherecut;
 use spherecut_core::brand::APP_NAME;
 use spherecut_core::project::{Aspect, AudioChoice, Codec, Orientation, Output, Project, Range};
 use spherecut_core::time::FrameRate;
-use spherecut_export::{Export, ExportJob, Report};
+use spherecut_export::check::{Expected, ExpectedAudio, check};
+use spherecut_export::{Export, ExportJob, Report, Stage};
 use spherecut_media::mp4::{self, Mp4Tree};
 use spherecut_media::spherical;
 use spherecut_synth::Pattern;
@@ -102,6 +105,14 @@ fn a_360_export_has_the_moov_first_v1_and_v2_and_no_video_edit_list() {
     assert!(spherical::read_track(audio).spatial_audio.is_some());
 
     passes(&scratch.0, &out, "youtube_360");
+    let names: Vec<_> = report.checks.iter().map(|c| c.name).collect();
+    assert_eq!(
+        names,
+        [
+            "probe", "layout", "codec", "size", "frames", "duration", "rate", "st3d", "sv3d", "v1",
+            "audio", "sa3d"
+        ]
+    );
 }
 
 #[test]
@@ -119,7 +130,29 @@ fn a_flat_export_has_the_moov_first_and_no_spherical_metadata() {
     let mut p = project(&src, trim, flat, Codec::H264, 0.0);
     with_audio(&mut p, AudioChoice::Aac);
     let out = scratch.0.join("flat.mp4");
-    export(&p, &out);
+    let (report, _) = export(&p, &out);
+    let names: Vec<_> = report.checks.iter().map(|c| c.name).collect();
+    assert_eq!(
+        names,
+        [
+            "probe",
+            "layout",
+            "codec",
+            "size",
+            "frames",
+            "duration",
+            "rate",
+            "spherical",
+            "audio"
+        ]
+    );
+    let found = |name| {
+        let c = report.checks.iter().find(|c| c.name == name).unwrap();
+        c.found.clone()
+    };
+    assert_eq!(found("frames"), "15 frames");
+    assert_eq!(found("size"), "1920x1080");
+    assert_eq!(found("audio"), "aac, 48000 Hz, 2 channels");
     let tree = mp4::read_file(&out).unwrap();
     assert!(tree.damage().is_empty(), "{:?}", tree.damage());
     assert_eq!(top(&tree), ["ftyp", "free", "moov", "mdat"]);
@@ -131,4 +164,65 @@ fn a_flat_export_has_the_moov_first_and_no_spherical_metadata() {
         }
     }
     passes(&scratch.0, &out, "flat_16_9");
+
+    // The same file against what it isn't fails the check that says so.
+    let want = Expected {
+        codec: Codec::H264,
+        size: (1920, 1080),
+        frames: 15,
+        duration: secs(1, 2),
+        rate: FrameRate::FPS_30,
+        sphere: false,
+        audio: Some(ExpectedAudio {
+            codec: "aac".into(),
+            rate: 48_000,
+            channels: 2,
+            ambix: false,
+        }),
+    };
+    let flag = || Arc::new(AtomicBool::new(false));
+    assert_eq!(check(&out, &want, flag()).unwrap(), report.checks);
+    let fails = |want: Expected, name: &str| {
+        let e = check(&out, &want, flag()).unwrap_err();
+        assert_eq!(e.stage(), Some(Stage::Check), "{e}");
+        assert!(
+            e.to_string().starts_with(&format!("check: {name}: ")),
+            "{e}"
+        );
+    };
+    fails(
+        Expected {
+            frames: 16,
+            ..want.clone()
+        },
+        "frames",
+    );
+    fails(
+        Expected {
+            codec: Codec::Hevc,
+            ..want.clone()
+        },
+        "codec",
+    );
+    fails(
+        Expected {
+            duration: secs(2, 3),
+            ..want.clone()
+        },
+        "duration",
+    );
+    fails(
+        Expected {
+            sphere: true,
+            ..want.clone()
+        },
+        "st3d",
+    );
+    fails(
+        Expected {
+            audio: None,
+            ..want.clone()
+        },
+        "audio",
+    );
 }

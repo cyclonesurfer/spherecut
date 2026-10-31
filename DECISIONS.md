@@ -1010,6 +1010,43 @@ forbids `unsafe` (D28). Why frame doesn't write through a link without
 through it replaces the file it names, which is what `--overwrite`
 asks for.
 
+*Updated in M2.4* (M2 plan section 8.6, amendment 2 item 10), for the
+export, which leaves a temporary file behind when it is killed and is
+the first writer that cleans up after others:
+
+- **Every `TempFile` holds an exclusive `flock`** on its descriptor for
+  its life (std's `File::lock`, taken right after the `create_new`).
+  The kernel lets go of it when the process dies, however it dies.
+  Where the filesystem has no locks (some network ones) the file goes
+  without, at a debug line.
+- **`fs::sweep_temp_files(dir, SWEEP_AGE)`** removes a file in `dir`
+  only when its name is ours (`is_temp_name`), it is a regular file
+  opened with `O_NOFOLLOW | O_NONBLOCK` (so never through a link, nor
+  waiting on a pipe given our name), its lock can be taken at once, it
+  was last written more than `SWEEP_AGE` (60 s) ago, and the name still
+  names the inode locked. Anything else is left, including a file it
+  can't lock for any reason, so a filesystem without locks is never
+  swept. An export sweeps its output's folder before it starts and logs
+  each file it removed.
+- A writer that meets the sweep's lock in the moment between its
+  `create_new` and its own lock waits for it (the sweep holds it only
+  to look); the age rule covers that moment too.
+
+Tests: `fs::tests::a_sweep_takes_only_old_temp_files_that_nothing_holds`
+(a locked file ten minutes old stays, an unlocked one goes, a fresh
+one, another program's, a link and a pipe stay; without the lock the
+test fails), and `crates/export/tests/files.rs`: two exports into one
+folder both succeed, a `frame`'s temporary file beside an export
+survives it, and a SIGKILLed writer's file (a child process, the test
+binary run again) stays while it lives and is swept by the next export.
+
+Why a lock and an age: a name and an age alone would take the file of a
+slow writer that hasn't written for a minute (the export's first file,
+read whole during the last pass, is one), and a lock alone would take a
+file in the moment before its writer locks it. Why not a pid in the
+name: pids come round again, and a file from another machine on a
+shared folder has a pid that means nothing here.
+
 ## D17. First-order ambiX in AAC uses the 4.0 layout
 
 *2026-10-23, M0.*
@@ -1216,7 +1253,7 @@ rest, with the versions in `Cargo.lock`:
 | image 0.25.10 (png only) | render; app, agent (dev) | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame`, look's PNGs and the goldens; agent's tests decode look's PNGs with it. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
 | libc 0.2.191 | cli, media | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, one of the binary's two FFI modules (D28): the handler only stores to an atomic. `_exit(2)` in `cli::exit`, the other, for `spherecut mcp` when a call is stuck (D44). In media's `ffi`, `mmap`, `madvise` and `munmap` for the download pool's buffers on huge pages (D30). It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
-| rustix 1.1.5 (std, fs, stdio) | agent, cli | `openat2` below a root, a directory read through its descriptor (A1's roots, D43), and `spherecut mcp`'s stdout guard: the protocol's copy of fd 1 (`fcntl_dupfd_cloexec`) and fd 1 pointed at stderr (`dup2_stdout`), all without `unsafe`. Pinned with `=` to the version already in the tree through tempfile and the Wayland crates, so it adds no crate |
+| rustix 1.1.5 (std, fs, stdio) | agent, cli, core | `openat2` below a root, a directory read through its descriptor (A1's roots, D43), and `spherecut mcp`'s stdout guard: the protocol's copy of fd 1 (`fcntl_dupfd_cloexec`) and fd 1 pointed at stderr (`dup2_stdout`); in core (M2.4), the temporary-file sweep's `O_NOFOLLOW` and `O_NONBLOCK` and `statvfs` for an export's free space (D16), all without `unsafe`. Pinned with `=` to the version already in the tree through tempfile and the Wayland crates, so it adds no crate |
 | serde 1.0.229 (derive) | core, sphere, media, cli, agent | Serializable time types, `Projection`, the probe and doctor reports, the CLI's JSON envelope (D27), and the agent's requests |
 | serde_json 1.0.154 (float_roundtrip) | cli, agent, core; render (dev) | `--json` output, through the `contract` module (D27), the MCP server's messages, schemas and results (D43, D44), and the project file (D47), whose floats `float_roundtrip` reads back bit for bit. core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
 | thiserror 2.0.21 | core, media, synth, render, playback, audio, agent | Typed library errors without hand-written `Display` impls |
