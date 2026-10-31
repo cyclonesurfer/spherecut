@@ -1037,7 +1037,7 @@ the first writer that cleans up after others:
   only when its name is ours (`is_temp_name`), it is a regular file
   opened with `O_NOFOLLOW | O_NONBLOCK` (so never through a link, nor
   waiting on a pipe given our name), its lock can be taken at once, it
-  was last written more than `SWEEP_AGE` (60 s) ago, and the name still
+  was last written more than `SWEEP_AGE` (60 s; 10 s from D58) ago, and the name still
   names the inode locked. Anything else is left, including a file it
   can't lock for any reason, so a filesystem without locks is never
   swept. An export sweeps its output's folder before it starts and logs
@@ -8774,6 +8774,126 @@ open (then the lock's holder changes, and `not_top` may become
 "ask the window"); M3's second clip makes `add_clip` and `remove_clip`
 apply; a client's limit makes the 12 KiB list too large; or a user
 wants an agent to undo the user's steps.
+
+## D58. Render jobs: the job table, ids, the queue, cancel and the server's end, the output beneath the write root
+
+*2026-10-31, A2 slice A2.4. The A2 plan, `docs/design/a2-plan.md`
+section 5 and amendments 2, 5, 7, 8 and 9, has the detail; this is what
+was built and why.*
+
+**Two tools, a job between them.** An export takes minutes and a call
+at most 50 s, so `render` checks everything that needs no work and
+answers within a second with a job id; `job` reports on it, waits for
+it (up to `JOB_WAIT`, 45 s, and never past its own call's deadline less
+2 s) or cancels it. A job is in one of six states: `queued`, `running`,
+`finishing` (the frames are encoded, the last pass writes and checks
+the file), `done`, `failed`, `cancelled`. Once a job is done, `job`
+runs A1's `check` on the file against the target its output fits
+(`youtube_360` for 360, `flat_16_9` or `vertical` for a reframe) and
+keeps the answer, so a second `job` doesn't read the file again.
+
+**What `render` checks before it answers**: the project loads; each
+clip's media is beneath a read root (`media_missing` otherwise) and is
+the file the project recorded, by size and the hash of its first MiB
+(`media_changed`); the output is an `.mp4` beneath the write root with
+nothing at its name (`output_exists`); the range is inside the trim and
+not empty (`out_of_range`, with the trim as `valid`); the export
+prepares (its preset, frame plan and encoders, so an output size that
+is no preset or a codec with no encoder fails here and not on the
+worker); and the disk
+holds two copies of the size estimate (`no_space`, with both numbers),
+or a warning when the free space can't be read. A range is a trim of
+the loaded project, never an edit of the file, and `draft` is the
+export's own draft.
+
+**The descriptors are what the job uses.** A job holds the output's
+folder (`O_PATH`, from `Roots::output`) and each media file opened by
+`render`, and the export reads and writes through `/proc/self/fd/N`:
+the project is handed to the export with its media paths replaced by
+the descriptors' (`Project::reading_media_from`, which is no edit and
+no history step), and the output is `/proc/self/fd/N/<name>` with
+`ExportJob::exact` set, so the export and its muxer take that path as
+given and never follow a link at it (`MuxOptions::exact`). A link
+planted at a queued render's name, or a folder moved under it, changes
+nothing the job writes. Paths in the report and in errors are mapped
+back to the ones the agent named.
+
+**One worker, a queue of four, sixteen kept.** Renders run one at a
+time on one thread (`mcp-render`, started with the first), since two
+exports would share one GPU and one encoder engine and each go slower
+than in turn. At most `QUEUED_RENDERS` (4) wait; a fifth is `busy`.
+The output's name (the folder's device and inode, and the name) is
+reserved from the moment a render is queued, so a second render to the
+same file is refused when it is asked for, not when it would run. The
+last `FINISHED_JOBS` (16) ended jobs are kept for `job`; older ones are
+`not_found`.
+
+**Ids** are `j<tag>-<n>`: `n` counts from 1 in this server, and the
+8 hex digits of the tag are drawn when the server starts (from the pid
+and the clock), so an id from an earlier server is `job_lost` (that
+server's jobs ended with it) rather than another job's, and a malformed
+id is `bad_argument`.
+
+**One waiter at a time.** A `job` call that waits holds the job's
+waiter; a second call that asks to wait answers at once with the state
+and a note saying why, so two calls can't hold both of the server's
+workers for 45 s. The waiting call sends MCP progress (frames done of
+the total) as the worker updates it, and ends early when its own call
+is cancelled.
+
+**Cancel** of a queued job drops it from the queue at once. Of a
+running one it tells the export to stop and waits up to `CANCEL_WAIT`
+(2 s) for it to end, by when its temporary files are removed: the
+answer is `cancelled` with nothing left at the output, or the state it
+is still in.
+
+**The server's end.** When the input closes or a signal comes,
+`rpc::serve` stops the calls, then `Tools::cancel_all` (the queue
+emptied, the running export told to stop, nothing more started), then
+`Tools::shutdown` against the same `EXIT_GRACE` deadline, which waits
+for the worker; a worker still running then is counted with the stuck
+calls and left to the process's exit. An export killed outright (the
+server's `SIGKILL`) leaves its locked temporary file, which the next
+export's sweep in that folder removes once its lock is free and it is
+older than `SWEEP_AGE`, cut from 60 s to 10 s here, since a killed
+server's files are known to be dead the moment their lock is free and
+an agent may render again within a minute.
+
+**`spherecut call` refuses `render` and `job`**: a job outlives the one
+call `call` makes, and its id would be lost with the process. The
+refusal names `spherecut render PROJECT -o OUT.mp4 --json`, the same
+export with its progress. Without a write root neither tool is listed,
+as `edit` and `undo` aren't.
+
+**The list.** Ten tools with writing, within the 12 KiB: `render` has
+950 bytes of budget (and uses them all), `job` 650. Both are annotated
+as writing only new files (`destructiveHint` false, `idempotentHint`
+true), as `look` and `project` are.
+
+**The export's part.** `spherecut_export::prepare` and `needed_bytes`
+are the export's own checks made public (the preset, the plan, the
+encoders; twice the size estimate) so that `render` refuses what the
+export would, and `Export::start` runs the same `prepare`. Thirteen new
+codes name the export's errors and render's refusals (`media_missing`,
+`media_changed`, `no_space`, `job_lost`, `cannot_export`, `no_encoder`,
+the three `hw_` codes, `encode_failed`, `mux_failed`,
+`metadata_failed`, `check_failed`), in `docs/agents.md`'s table.
+
+**Considered and not done.** Renders side by side (one GPU, one encode
+engine: two at once is slower than two in turn); a job that outlives
+its server, or a job file on disk to find it again (a server's jobs
+are its own, and `job_lost` says so plainly); `render` waiting for the
+file itself (minutes inside one call, against the 50 s deadline);
+progress notifications sent with no call waiting (MCP sends progress on
+a request); an edit of the project's trim for a range (a render
+mustn't change the project it renders); cancel waiting longer than 2 s
+(the export stops within a frame, and `job` again says where it got).
+
+Revisit if: a client keeps a call open longer than 50 s, so `render`
+could wait; A3's attach gives the window the jobs to show (then the
+table moves to where both reach it); a machine with two GPUs makes two
+renders at once worth it; or an agent needs a job found again after the
+server restarts.
 
 ## Open
 

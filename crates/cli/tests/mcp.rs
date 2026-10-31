@@ -470,3 +470,110 @@ fn sigint_cancels_a_call_with_exit_4() {
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["error"]["code"], "cancelled", "{doc}");
 }
+
+/// The temporary files an export left in `dir`.
+fn temp_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy();
+            name.starts_with(".spherecut-") && name.ends_with(".tmp")
+        })
+        .collect()
+}
+
+/// A server killed mid-render leaves its temporary file; once that is
+/// past the sweep's age, the next server's render in the folder removes
+/// it (a2-plan 5.4, D16).
+#[test]
+fn a_killed_servers_file_is_swept_by_the_next_render() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("mcp-killed-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = TempDir(dir);
+    let spec = Spec {
+        name: "clip".into(),
+        width: 512,
+        height: 256,
+        frames: 60,
+        spherical: true,
+        ..Spec::default()
+    };
+    let clip = media::write(&spec, &dir.0).unwrap();
+    let project = dir.0.join("trip.spherecut");
+    let server = || {
+        Server::spawn(|c| {
+            c.arg("--read-root")
+                .arg(&dir.0)
+                .arg("--allow-write")
+                .arg("--write-root")
+                .arg(&dir.0);
+        })
+    };
+    let tool = |s: &mut Server, id: i64, name: &str, args: Value| {
+        let r = s.call(id, "tools/call", json!({"name": name, "arguments": args}));
+        assert_ne!(r["result"]["isError"], true, "{name}: {r}");
+        r["result"]["structuredContent"].clone()
+    };
+
+    let mut s = server();
+    s.initialize("2025-11-25");
+    tool(
+        &mut s,
+        1,
+        "project",
+        json!({"file": project, "create": {"media": clip}}),
+    );
+    let job = tool(
+        &mut s,
+        2,
+        "render",
+        json!({"project": project, "output": dir.0.join("out.mp4")}),
+    )["job"]
+        .clone();
+    let started = std::time::Instant::now();
+    let mut id = 3;
+    loop {
+        let j = tool(&mut s, id, "job", json!({"job": job}));
+        id += 1;
+        if j["state"] == "running" && j["frames"]["done"].as_u64().unwrap() > 0 {
+            break;
+        }
+        assert!(
+            j["state"] != "done",
+            "it finished before it could be killed: {j}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(30), "{j}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    s.child.kill().unwrap();
+    s.child.wait().unwrap();
+    let left = temp_files(&dir.0);
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(!dir.0.join("out.mp4").exists());
+    // As old as a file a server killed a minute ago left.
+    let a_minute_ago = std::time::SystemTime::now() - Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(&left[0])
+        .unwrap()
+        .set_modified(a_minute_ago)
+        .unwrap();
+
+    let mut s = server();
+    s.initialize("2025-11-25");
+    let job = tool(
+        &mut s,
+        1,
+        "render",
+        json!({"project": project, "output": dir.0.join("next.mp4"),
+               "draft": true, "range": {"to": "3f"}}),
+    )["job"]
+        .clone();
+    let j = tool(&mut s, 2, "job", json!({"job": job, "wait": 40}));
+    assert_eq!(j["state"], "done", "{j}");
+    assert_eq!(temp_files(&dir.0), Vec::<std::path::PathBuf>::new());
+    assert!(s.close().0.success());
+}

@@ -62,9 +62,11 @@ pub fn run(req: Request, cx: &Ctx, jobs: &Jobs) -> Result<Value, ToolError> {
     cx.call.check()?;
 
     if !is_mp4(&req.output) {
-        return Err(ToolError::new(codes::BAD_ARGUMENT, "isn't an .mp4 file's name")
-            .at("output")
-            .valid("a new file ending in .mp4"));
+        return Err(
+            ToolError::new(codes::BAD_ARGUMENT, "isn't an .mp4 file's name")
+                .at("output")
+                .valid("a new file ending in .mp4"),
+        );
     }
     let out = cx.roots.output("output", &req.output)?;
 
@@ -208,25 +210,20 @@ fn range(
         .map(|t| at("range.from", t, Some(rate)))
         .transpose()?
         .unwrap_or(start);
-    let to = r
-        .to
-        .as_ref()
-        .map(|t| at("range.to", t, Some(rate)))
-        .transpose()?
-        .unwrap_or(end);
-    let valid = || {
-        format!(
-            "from {} to {} s, the trim",
-            seconds(start),
-            seconds(end)
-        )
-    };
+    let to =
+        r.to.as_ref()
+            .map(|t| at("range.to", t, Some(rate)))
+            .transpose()?
+            .unwrap_or(end);
+    let valid = || format!("from {} to {} s, the trim", seconds(start), seconds(end));
     for (arg, t) in [("range.from", from), ("range.to", to)] {
         if t < start || t > end {
-            return Err(ToolError::new(codes::OUT_OF_RANGE, "is outside the clip's trim")
-                .at(arg)
-                .valid(valid())
-                .next("set the trim with edit first to render past it"));
+            return Err(
+                ToolError::new(codes::OUT_OF_RANGE, "is outside the clip's trim")
+                    .at(arg)
+                    .valid(valid())
+                    .next("set the trim with edit first to render past it"),
+            );
         }
     }
     if from >= to {
@@ -335,7 +332,10 @@ mod tests {
         assert_eq!(range(&r(None, None), s(1), s(3), rate), Ok((s(1), s(3))));
         assert_eq!(
             range(&r(t("1.5"), t("60f")), s(1), s(3), rate),
-            Ok((Time::seconds(spherecut_core::Rational::new(3, 2).unwrap()), s(2)))
+            Ok((
+                Time::seconds(spherecut_core::Rational::new(3, 2).unwrap()),
+                s(2)
+            ))
         );
         for (from, to, arg) in [
             (t("0.5"), None, "range.from"),

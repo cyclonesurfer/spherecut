@@ -38,7 +38,8 @@ pub fn run(req: Request, cx: &Ctx, jobs: &Jobs) -> Result<Value, ToolError> {
     let gone = || ToolError::new(codes::NOT_FOUND, "isn't a job this server keeps").at("job");
     let mut waited_out = false;
     let status = if req.cancel {
-        jobs.cancel(n, Instant::now() + CANCEL_WAIT).ok_or_else(gone)?
+        jobs.cancel(n, Instant::now() + CANCEL_WAIT)
+            .ok_or_else(gone)?
     } else if let Some(w) = req.wait {
         let w = std::time::Duration::try_from_secs_f64(w)
             .ok()
@@ -48,15 +49,9 @@ pub fn run(req: Request, cx: &Ctx, jobs: &Jobs) -> Result<Value, ToolError> {
                     .at("wait")
                     .valid(format!("0 to {} seconds", JOB_WAIT.as_secs()))
             })?;
-        let until = Instant::now()
-            + w.min(cx.call.remaining().saturating_sub(JOB_WAIT_MARGIN));
+        let until = Instant::now() + w.min(cx.call.remaining().saturating_sub(JOB_WAIT_MARGIN));
         let (s, waited) = jobs
-            .wait(
-                n,
-                until,
-                || cx.call.check().is_err(),
-                |s| progress(cx, s),
-            )
+            .wait(n, until, || cx.call.check().is_err(), |s| progress(cx, s))
             .ok_or_else(gone)?;
         waited_out = !waited;
         s

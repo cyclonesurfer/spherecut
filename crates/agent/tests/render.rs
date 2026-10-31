@@ -270,9 +270,14 @@ fn one_call_waits_at_a_time_with_progress() {
         json!({"name": "job", "arguments": {"job": id, "wait": 40}}),
     );
     let other = &other["result"]["structuredContent"];
-    assert!(other["note"].as_str().unwrap().contains("another call"), "{other}");
+    assert!(
+        other["note"].as_str().unwrap().contains("another call"),
+        "{other}"
+    );
     let done = loop {
-        let m = s.recv_for(Duration::from_secs(45)).expect("the wait's answer");
+        let m = s
+            .recv_for(Duration::from_secs(45))
+            .expect("the wait's answer");
         if m["method"] == "notifications/progress" {
             progress.push(m["params"]["progress"].as_f64().unwrap());
             continue;
@@ -356,7 +361,10 @@ fn a_range_and_a_draft_give_what_was_asked_and_a_range_outside_the_trim_is_refus
         json!({"project": dir.project(), "output": dir.path("whole.mp4"), "range": {"to": "2f"}}),
     );
     // A draft is half the preset's size, each side to a multiple of 8.
-    let (w, h) = (full["size"][0].as_u64().unwrap(), full["size"][1].as_u64().unwrap());
+    let (w, h) = (
+        full["size"][0].as_u64().unwrap(),
+        full["size"][1].as_u64().unwrap(),
+    );
     assert_eq!(r["size"], json!([w.div_ceil(16) * 8, h.div_ceil(16) * 8]));
     let done = ok(&tools, "job", json!({"job": r["job"], "wait": 40}));
     assert_eq!(done["state"], "done", "{done}");
@@ -427,7 +435,8 @@ fn a_link_planted_at_a_queued_renders_name_is_not_followed() {
     a["draft"] = json!(true);
     a["range"] = json!({"to": "3f"});
     let second = ok(&tools, "render", a);
-    let elsewhere = std::env::temp_dir().join(format!("render-elsewhere-{}.mp4", std::process::id()));
+    let elsewhere =
+        std::env::temp_dir().join(format!("render-elsewhere-{}.mp4", std::process::id()));
     std::os::unix::fs::symlink(&elsewhere, dir.path("second.mp4")).unwrap();
     ok(&tools, "job", json!({"job": first["job"], "cancel": true}));
     let j = ok(&tools, "job", json!({"job": second["job"], "wait": 40}));

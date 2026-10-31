@@ -19,7 +19,7 @@
 //! A temporary file holds an exclusive `flock` for its life, so that
 //! [`sweep_temp_files`] can tell one a killed writer left (whose lock the
 //! kernel let go) from one that is still being written: it removes only
-//! those whose lock it can take and that are more than a minute old.
+//! those whose lock it can take and that are more than [`SWEEP_AGE`] old.
 
 use std::fs::{File, OpenOptions, Permissions, TryLockError};
 use std::hash::{BuildHasher, RandomState};
@@ -40,7 +40,7 @@ pub const TEMP_ATTEMPTS: usize = 16;
 /// How long ago a temporary file must last have been written for
 /// [`sweep_temp_files`] to take it, besides its lock being free: far
 /// longer than the moment between a file's creation and its lock, which
-/// is all the age guards (a2-plan amendment 7: 60 s until A2.4).
+/// is all the age guards (60 s until A2.4, D58).
 pub const SWEEP_AGE: Duration = Duration::from_secs(10);
 
 /// A name for a temporary file: hidden, recognisably ours, the same short

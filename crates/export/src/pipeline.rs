@@ -1838,7 +1838,10 @@ mod tests {
         let tmp = TempDir::new("room");
         assert!(free_space(&tmp.0).unwrap() > 0);
         assert_eq!(folder(&tmp.0.join("out.mp4"), false).unwrap(), tmp.0);
-        assert_eq!(folder(Path::new("out.mp4"), false).unwrap(), PathBuf::from("."));
+        assert_eq!(
+            folder(Path::new("out.mp4"), false).unwrap(),
+            PathBuf::from(".")
+        );
         // A link at the output leads the files to its target's folder,
         // except when the path is to be taken as it is (a2-plan 5.3).
         let other = tmp.0.join("other");
