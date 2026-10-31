@@ -283,8 +283,26 @@ impl CropFilter {
     }
 }
 
-/// Planar 32-bit float, the only sample format `Mp4Writer` sends.
+/// Planar 32-bit float, the sample format `Mp4Writer` sends an encoder.
 pub(crate) const SAMPLE_FMT_FLTP: c_int = sys::AVSampleFormat::AV_SAMPLE_FMT_FLTP as c_int;
+/// Packed 16- and 32-bit integers, which it sends a PCM encoder.
+pub(crate) const SAMPLE_FMT_S16: c_int = sys::AVSampleFormat::AV_SAMPLE_FMT_S16 as c_int;
+pub(crate) const SAMPLE_FMT_S32: c_int = sys::AVSampleFormat::AV_SAMPLE_FMT_S32 as c_int;
+
+/// `FF_COMPLIANCE_NORMAL`, which FFmpeg's headers define as 0 in every
+/// version.
+const COMPLIANCE_NORMAL: c_int = 0;
+
+/// Whether FFmpeg's MP4 muxer stores codec `id` (`avformat_query_codec`):
+/// PCM, for one, only from 6.1, as ISO `ipcm` and `fpcm`.
+pub(crate) fn mp4_takes(id: ff::codec::Id) -> bool {
+    // SAFETY: av_guess_format returns one of FFmpeg's static muxers or
+    // NULL, and avformat_query_codec only reads it.
+    unsafe {
+        let mp4 = sys::av_guess_format(c"mp4".as_ptr(), std::ptr::null(), std::ptr::null());
+        !mp4.is_null() && sys::avformat_query_codec(mp4, id.into(), COMPLIANCE_NORMAL) == 1
+    }
+}
 
 /// The sample formats encoder `codec` takes, as FFmpeg's ints, or `None`
 /// when it doesn't say. Ints, because a newer FFmpeg may list formats our

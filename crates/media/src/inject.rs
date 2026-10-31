@@ -14,7 +14,7 @@
 //! or socket) is refused.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -50,6 +50,9 @@ pub enum InjectError {
     /// `tfra`), which we don't shift.
     #[error("fragmented MP4 (it has a `{0}` box) is not supported")]
     Fragmented(String),
+    /// [`rewrite_into`]'s progress asked it to stop.
+    #[error("stopped")]
+    Stopped,
     /// The input did not parse cleanly. A partial parse can miss the
     /// `mdat` after `moov`, or a track, and leave chunk offsets wrong.
     #[error("{} is damaged: {}", path.display(), damage.join("; "))]
@@ -155,6 +158,83 @@ fn write_err(path: &Path) -> impl Fn(io::Error) -> InjectError + '_ {
 pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), InjectError> {
     spherecut_core::may_block("rewriting an MP4 file");
     check_not_same_file(input, output)?;
+    let dest = follow_links(output).map_err(write_err(output))?;
+    let mut tmp = TempFile::create(&dest).map_err(write_err(&dest))?;
+    inject_into(input, &mut tmp, edits)?;
+    tmp.persist_replace().map_err(write_err(&dest))?;
+    Ok(())
+}
+
+/// [`inject`]'s rewrite of `input`, written into `out`, a temporary file
+/// for the output that the caller persists (as new, or replacing).
+pub fn inject_into(
+    input: &Path,
+    out: &mut TempFile,
+    edits: &[EntryEdit],
+) -> Result<(), InjectError> {
+    rewrite_into(input, out, edits, &Finish::default(), &mut |_, _| true)
+}
+
+/// What [`rewrite_into`] does beyond the sample entries' edits: the rest
+/// of an export's last pass over its file (M2 plan amendment 2 items 8
+/// and 28).
+#[derive(Debug, Clone, Default)]
+pub struct Finish {
+    /// Boxes to add to the first video `trak`, at its end, replacing any
+    /// child of the same type (and, for a `uuid`, the same extended type):
+    /// the V1 spherical box.
+    pub video_trak: Vec<u8>,
+    /// Remove the video track's edit list, which must be one identity
+    /// edit (from media time 0 at rate 1), as FFmpeg's muxer writes with
+    /// `+negative_cts_offsets`, so that the video has none.
+    pub drop_video_identity_edit: bool,
+    /// Put `moov` before the media data, as faststart does, with every
+    /// chunk offset moved with its data.
+    pub moov_first: bool,
+}
+
+/// How many bytes [`rewrite_into`] copies between calls of its progress.
+const PROGRESS_STEP: u64 = 16 << 20;
+
+/// A splice into `moov`'s bytes: `start..end` (relative to `moov`)
+/// becomes `replacement`, which already carries its own size fields, and
+/// each box in `ancestors` (its offset and header length) grows by the
+/// difference.
+struct Splice {
+    start: usize,
+    end: usize,
+    replacement: Vec<u8>,
+    ancestors: Vec<(usize, u64)>,
+}
+
+/// Apply `splices`, which must not overlap, from the highest offset down
+/// so that earlier offsets stay valid. Returns the change in size.
+fn apply(moov_bytes: &mut Vec<u8>, mut splices: Vec<Splice>) -> Result<i64, InjectError> {
+    splices.sort_by_key(|s| std::cmp::Reverse((s.start, s.end)));
+    let mut total = 0;
+    for s in splices {
+        let delta = s.replacement.len() as i64 - (s.end - s.start) as i64;
+        for &(off, hlen) in &s.ancestors {
+            patch_size(moov_bytes, off, hlen, delta)?;
+        }
+        moov_bytes.splice(s.start..s.end, s.replacement);
+        total += delta;
+    }
+    Ok(total)
+}
+
+/// [`inject_into`], and `finish`'s changes, with `progress` called with
+/// the bytes written and the bytes in all as the media data is copied:
+/// returning `false` stops the copy with [`InjectError::Stopped`], and
+/// `out` holds a partial file for the caller to drop.
+pub fn rewrite_into(
+    input: &Path,
+    out: &mut TempFile,
+    edits: &[EntryEdit],
+    finish: &Finish,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<(), InjectError> {
+    spherecut_core::may_block("rewriting an MP4 file");
     for (i, e) in edits.iter().enumerate() {
         if edits[..i].iter().any(|o| o.track == e.track) {
             return Err(InjectError::DuplicateEdit(e.track));
@@ -192,14 +272,9 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
     let mut moov_bytes = vec![0u8; moov.size as usize];
     f.read_exact(&mut moov_bytes).map_err(read_err(input))?;
 
-    // Byte ranges are relative to the start of moov. Apply edits from the
-    // highest offset down so earlier offsets stay valid.
-    struct Splice {
-        start: usize,
-        end: usize,
-        replacement: Vec<u8>,
-        ancestors: Vec<(usize, u64)>, // (offset, header_len)
-    }
+    // Byte ranges are relative to the start of moov.
+    let rel = |b: &Mp4Box| (b.offset - moov.offset) as usize;
+    let at = |boxes: &[&Mp4Box]| boxes.iter().map(|b| (rel(b), b.header_len)).collect();
     let mut splices = Vec::new();
     for e in edits {
         let ti = first_track(&tree, e.track)
@@ -227,7 +302,6 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
             )));
         }
         let replace = box_types(&e.boxes)?;
-        let rel = |b: &Mp4Box| (b.offset - moov.offset) as usize;
         // Rebuild the entry: header + fixed fields + kept children + new.
         let start = rel(entry);
         let fixed_end = start + entry.header_len as usize + entry.payload.len();
@@ -248,65 +322,163 @@ pub fn inject(input: &Path, output: &Path, edits: &[EntryEdit]) -> Result<(), In
         }
         new_entry.extend_from_slice(&e.boxes);
         new_entry.extend_from_slice(terminator);
+        // The rebuilt entry carries its old size; fix it.
+        let delta = new_entry.len() as i64 - entry.size as i64;
+        patch_size(&mut new_entry, 0, entry.header_len, delta)?;
         splices.push(Splice {
             start,
             end: start + entry.size as usize,
             replacement: new_entry,
-            ancestors: [moov, trak, mdia, minf, stbl, stsd, entry]
-                .iter()
-                .map(|b| (rel(b), b.header_len))
-                .collect(),
+            ancestors: at(&[moov, trak, mdia, minf, stbl, stsd]),
         });
     }
-    splices.sort_by_key(|s| std::cmp::Reverse(s.start));
-    let mut total_delta: i64 = 0;
-    for s in &splices {
-        let delta = s.replacement.len() as i64 - (s.end - s.start) as i64;
-        // Patch ancestor sizes (including the entry itself, which is
-        // rewritten wholesale below, so skip it).
-        for &(off, hlen) in &s.ancestors[..s.ancestors.len() - 1] {
-            patch_size(&mut moov_bytes, off, hlen, delta)?;
+    let video = first_track(&tree, TrackKind::Video).and_then(|i| tree.tracks().nth(i));
+    if !finish.video_trak.is_empty() {
+        let trak = video
+            .ok_or_else(|| InjectError::Unsupported("no video track for the V1 metadata".into()))?;
+        let replace = boxes_with_uuids(&finish.video_trak)?;
+        for c in &trak.children {
+            if replace.contains(&(c.fourcc.0, c.uuid)) {
+                splices.push(Splice {
+                    start: rel(c),
+                    end: rel(c) + c.size as usize,
+                    replacement: Vec::new(),
+                    ancestors: at(&[moov, trak]),
+                });
+            }
         }
-        moov_bytes.splice(s.start..s.end, s.replacement.iter().copied());
-        // The rebuilt entry carries its old size; fix it.
-        patch_size(
-            &mut moov_bytes,
-            s.start,
-            s.ancestors[s.ancestors.len() - 1].1,
-            delta,
-        )?;
-        total_delta += delta;
+        let end = rel(trak) + trak.size as usize;
+        splices.push(Splice {
+            start: end,
+            end,
+            replacement: finish.video_trak.clone(),
+            ancestors: at(&[moov, trak]),
+        });
     }
+    if finish.drop_video_identity_edit
+        && let Some(trak) = video
+        && let Some(edts) = trak.child(b"edts")
+    {
+        let identity = |e: &mp4::Edit| e.media_time == 0 && e.rate == 1 << 16;
+        match mp4::edit_list(trak) {
+            Some(list) if list.len() == 1 && identity(&list[0]) => {}
+            list => {
+                return Err(InjectError::Unsupported(format!(
+                    "the video's edit list is {list:?}, not one identity edit"
+                )));
+            }
+        }
+        splices.push(Splice {
+            start: rel(edts),
+            end: rel(edts) + edts.size as usize,
+            replacement: Vec::new(),
+            ancestors: at(&[moov, trak]),
+        });
+    }
+    apply(&mut moov_bytes, splices)?;
 
-    // If media data follows moov, shift chunk offsets.
-    let moov_end = moov.offset + moov.size;
-    let data_after = tree
+    // Where each top-level box goes: in order, or with moov moved before
+    // the first mdat. Bytes after the last box stay last.
+    let order: Vec<&Mp4Box> = tree
         .top
         .iter()
-        .any(|b| b.fourcc.0 == *b"mdat" && b.offset >= moov_end);
-    if data_after && total_delta != 0 {
-        shift_chunk_offsets(&mut moov_bytes, moov_end, total_delta)?;
-    }
+        .filter(|b| b.offset != moov.offset)
+        .collect();
+    let first_mdat = order.iter().position(|b| b.fourcc.0 == *b"mdat");
+    let moov_at = match first_mdat {
+        Some(i) if finish.moov_first && moov.offset > order[i].offset => i,
+        _ => order.iter().take_while(|b| b.offset < moov.offset).count(),
+    };
+    let tail = tree.file_size - tree.trailing_bytes;
+    // Chunk offsets move with their box. A stco entry that would pass
+    // 4 GiB makes its table a co64, which grows moov; then again.
+    let mut placed = loop {
+        let mut new_offset = Vec::with_capacity(order.len());
+        let mut pos = 0;
+        for (i, b) in order.iter().enumerate() {
+            if i == moov_at {
+                pos += moov_bytes.len() as u64;
+            }
+            new_offset.push(pos);
+            pos += b.size;
+        }
+        if moov_at == order.len() {
+            pos += moov_bytes.len() as u64;
+        }
+        let total = pos + tree.trailing_bytes;
+        let moved = |c: u64| -> Option<u64> {
+            let i = order
+                .iter()
+                .position(|b| (b.offset..b.offset + b.size).contains(&c))?;
+            Some(c - order[i].offset + new_offset[i])
+        };
+        let mut shifted = moov_bytes.clone();
+        match shift_chunk_offsets(&mut shifted, &moved)? {
+            None => break (shifted, new_offset, total),
+            Some(stco) => widen_chunk_table(&mut moov_bytes, stco)?,
+        }
+    };
+    let (new_moov, _, total) = &mut placed;
 
-    let dest = follow_links(output).map_err(write_err(output))?;
-    let mut tmp = TempFile::create(&dest).map_err(write_err(&dest))?;
+    let dest = out.dest().to_path_buf();
     let copy_err = |error| InjectError::Copy {
         input: input.to_path_buf(),
         output: dest.clone(),
         error,
     };
-    let mut out = BufWriter::new(tmp.file_mut());
-    // Copy exactly the lengths the parse saw, never "to the end": the
-    // output can't outgrow the input, whatever happens to the input file.
-    f.seek(SeekFrom::Start(0)).map_err(read_err(input))?;
-    copy_exact(&mut f, &mut out, moov.offset).map_err(copy_err)?;
-    out.write_all(&moov_bytes).map_err(write_err(&dest))?;
-    f.seek(SeekFrom::Start(moov_end)).map_err(read_err(input))?;
-    copy_exact(&mut f, &mut out, tree.file_size.saturating_sub(moov_end)).map_err(copy_err)?;
-    out.flush().map_err(write_err(&dest))?;
-    drop(out);
-    tmp.persist_replace().map_err(write_err(&dest))?;
+    let file = out.file_mut();
+    let mut written = 0;
+    let write_moov = |file: &mut File, written: &mut u64| -> Result<(), InjectError> {
+        file.write_all(new_moov).map_err(write_err(&dest))?;
+        *written += new_moov.len() as u64;
+        Ok(())
+    };
+    for (i, b) in order.iter().enumerate() {
+        if i == moov_at {
+            write_moov(file, &mut written)?;
+        }
+        // Copy exactly the lengths the parse saw, never "to the end": the
+        // output can't outgrow the input, whatever happens to the input
+        // file.
+        f.seek(SeekFrom::Start(b.offset)).map_err(read_err(input))?;
+        let mut left = b.size;
+        while left > 0 {
+            if !progress(written, *total) {
+                return Err(InjectError::Stopped);
+            }
+            let n = left.min(PROGRESS_STEP);
+            copy_exact(&mut f, file, n).map_err(copy_err)?;
+            left -= n;
+            written += n;
+        }
+    }
+    if moov_at == order.len() {
+        write_moov(file, &mut written)?;
+    }
+    f.seek(SeekFrom::Start(tail)).map_err(read_err(input))?;
+    copy_exact(&mut f, file, tree.trailing_bytes).map_err(copy_err)?;
+    file.flush().map_err(write_err(&dest))?;
+    progress(*total, *total);
     Ok(())
+}
+
+/// A box's type, and its extended type for a `uuid`.
+type BoxId = ([u8; 4], Option<[u8; 16]>);
+
+/// The type and extended type of each box in a list of concatenated
+/// boxes.
+fn boxes_with_uuids(boxes: &[u8]) -> Result<Vec<BoxId>, InjectError> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    for t in box_types(boxes)? {
+        let size = u32::from_be_bytes([boxes[pos], boxes[pos + 1], boxes[pos + 2], boxes[pos + 3]]);
+        let uuid = (t == *b"uuid")
+            .then(|| boxes.get(pos + 8..pos + 24)?.try_into().ok())
+            .flatten();
+        out.push((t, uuid));
+        pos += size as usize;
+    }
+    Ok(out)
 }
 
 fn copy_exact(from: &mut File, to: &mut impl Write, len: u64) -> io::Result<()> {
@@ -351,12 +523,50 @@ fn patch_size(buf: &mut [u8], off: usize, header_len: u64, delta: i64) -> Result
     Ok(())
 }
 
-/// Shift every `stco`/`co64` entry that points at or past `moov_end`.
+/// Where a chunk table is in `moov`'s bytes: its offset and whether it is
+/// a `co64`.
+type ChunkTable = usize;
+
+/// Move every `stco`/`co64` entry with `moved`, its new place. `Some` of
+/// a `stco` that can't hold an entry's new offset, leaving the bytes
+/// partly moved.
 fn shift_chunk_offsets(
     moov_bytes: &mut [u8],
-    moov_end: u64,
-    delta: i64,
-) -> Result<(), InjectError> {
+    moved: &dyn Fn(u64) -> Option<u64>,
+) -> Result<Option<ChunkTable>, InjectError> {
+    for (b, wide) in chunk_tables(moov_bytes)? {
+        let base = b + 8 + 4; // the header and version/flags
+        let count = table_count(moov_bytes, base)?;
+        let w = if wide { 8 } else { 4 };
+        for i in 0..count {
+            let at = base + 4 + i * w;
+            let field = moov_bytes
+                .get_mut(at..at + w)
+                .ok_or_else(|| InjectError::Unsupported("chunk table overruns".into()))?;
+            let cur = if wide {
+                u64::from_be_bytes(field.try_into().unwrap_or([0; 8]))
+            } else {
+                u32::from_be_bytes(field.try_into().unwrap_or([0; 4])) as u64
+            };
+            let new = moved(cur).ok_or_else(|| {
+                InjectError::Unsupported(format!("a chunk at {cur} is in no box"))
+            })?;
+            if wide {
+                field.copy_from_slice(&new.to_be_bytes());
+            } else {
+                match u32::try_from(new) {
+                    Ok(n) => field.copy_from_slice(&n.to_be_bytes()),
+                    Err(_) => return Ok(Some(b)),
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Every chunk table in `moov`'s bytes: its offset there, and whether it
+/// is a `co64`. They have 8-byte headers, as every muxer writes them.
+fn chunk_tables(moov_bytes: &[u8]) -> Result<Vec<(usize, bool)>, InjectError> {
     // Offsets in this tree are relative to the start of moov.
     let tree = mp4::read(&mut io::Cursor::new(moov_bytes.to_vec()))
         .map_err(|e| InjectError::Unsupported(format!("re-reading the edited moov: {e}")))?;
@@ -371,48 +581,82 @@ fn shift_chunk_offsets(
     let moov = tree
         .moov()
         .ok_or_else(|| InjectError::Unsupported("moov vanished".into()))?;
+    let mut out = Vec::new();
     for trak in moov.children_of(b"trak") {
         let Some(stbl) = trak.path(&[b"mdia", b"minf", b"stbl"]) else {
             continue;
         };
         for (t, wide) in [(b"stco", false), (b"co64", true)] {
             let Some(b) = stbl.child(t) else { continue };
-            let base = (b.offset + b.header_len) as usize + 4; // version/flags
-            let count = u32::from_be_bytes(
-                moov_bytes
-                    .get(base..base + 4)
-                    .and_then(|x| x.try_into().ok())
-                    .ok_or_else(|| InjectError::Unsupported("bad chunk table".into()))?,
-            ) as usize;
-            let w = if wide { 8 } else { 4 };
-            for i in 0..count {
-                let at = base + 4 + i * w;
-                let field = moov_bytes
-                    .get_mut(at..at + w)
-                    .ok_or_else(|| InjectError::Unsupported("chunk table overruns".into()))?;
-                let cur = if wide {
-                    u64::from_be_bytes(field.try_into().unwrap_or([0; 8]))
-                } else {
-                    u32::from_be_bytes(field.try_into().unwrap_or([0; 4])) as u64
-                };
-                if cur < moov_end {
-                    continue;
-                }
-                let new = cur
-                    .checked_add_signed(delta)
-                    .ok_or_else(|| InjectError::Unsupported("chunk offset underflow".into()))?;
-                if wide {
-                    field.copy_from_slice(&new.to_be_bytes());
-                } else {
-                    let n: u32 = new.try_into().map_err(|_| {
-                        InjectError::Unsupported("chunk offset past 4 GiB in a 32-bit stco".into())
-                    })?;
-                    field.copy_from_slice(&n.to_be_bytes());
-                }
+            if b.header_len != 8 {
+                return Err(InjectError::Unsupported(format!(
+                    "a `{}` with a {}-byte header",
+                    b.fourcc, b.header_len
+                )));
             }
+            out.push((b.offset as usize, wide));
         }
     }
-    Ok(())
+    Ok(out)
+}
+
+fn table_count(moov_bytes: &[u8], base: usize) -> Result<usize, InjectError> {
+    Ok(u32::from_be_bytes(
+        moov_bytes
+            .get(base..base + 4)
+            .and_then(|x| x.try_into().ok())
+            .ok_or_else(|| InjectError::Unsupported("bad chunk table".into()))?,
+    ) as usize)
+}
+
+/// Rewrite the `stco` at `table` as a `co64` with the same offsets.
+fn widen_chunk_table(moov_bytes: &mut Vec<u8>, table: ChunkTable) -> Result<(), InjectError> {
+    let tree = mp4::read(&mut io::Cursor::new(moov_bytes.clone()))
+        .map_err(|e| InjectError::Unsupported(format!("re-reading the edited moov: {e}")))?;
+    let moov = tree
+        .moov()
+        .ok_or_else(|| InjectError::Unsupported("moov vanished".into()))?;
+    for trak in moov.children_of(b"trak") {
+        let path = [b"mdia", b"minf", b"stbl"];
+        let (Some(mdia), Some(minf), Some(stbl)) = (
+            trak.path(&path[..1]),
+            trak.path(&path[..2]),
+            trak.path(&path),
+        ) else {
+            continue;
+        };
+        let Some(stco) = stbl.child(b"stco").filter(|b| b.offset as usize == table) else {
+            continue;
+        };
+        let count = table_count(moov_bytes, table + 12)?;
+        let mut co64 = Vec::with_capacity(16 + 8 * count);
+        co64.extend_from_slice(&((16 + 8 * count) as u32).to_be_bytes());
+        co64.extend_from_slice(b"co64");
+        co64.extend_from_slice(&moov_bytes[table + 8..table + 16]);
+        for i in 0..count {
+            let at = table + 16 + 4 * i;
+            let field = moov_bytes
+                .get(at..at + 4)
+                .ok_or_else(|| InjectError::Unsupported("chunk table overruns".into()))?;
+            let offset = u32::from_be_bytes(field.try_into().unwrap_or([0; 4]));
+            co64.extend_from_slice(&u64::from(offset).to_be_bytes());
+        }
+        let ancestors = [moov, trak, mdia, minf, stbl]
+            .iter()
+            .map(|b| (b.offset as usize, b.header_len))
+            .collect();
+        apply(
+            moov_bytes,
+            vec![Splice {
+                start: table,
+                end: table + stco.size as usize,
+                replacement: co64,
+                ancestors,
+            }],
+        )?;
+        return Ok(());
+    }
+    Err(InjectError::Unsupported("a chunk table vanished".into()))
 }
 
 #[cfg(test)]
@@ -438,16 +682,171 @@ mod tests {
 
     /// A track with one 9-byte sample in one chunk at `chunk_offset`.
     fn trak(kind: &[u8; 4], entry: Vec<u8>, chunk_offset: u32) -> Vec<u8> {
+        trak_with(kind, entry, chunk_offset, &[])
+    }
+
+    /// [`trak`] with `first` before its `mdia`: an `edts`, say.
+    fn trak_with(kind: &[u8; 4], entry: Vec<u8>, chunk_offset: u32, first: &[u8]) -> Vec<u8> {
         let stsd = full(b"stsd", 0, 0, &cat(&[words(&[1]), entry]));
         let stts = full(b"stts", 0, 0, &words(&[1, 1, 1]));
         let stsz = full(b"stsz", 0, 0, &words(&[0, 1, 9]));
         let stsc = full(b"stsc", 0, 0, &words(&[1, 1, 1, 1]));
         let stco = full(b"stco", 0, 0, &words(&[1, chunk_offset]));
         let stbl = bx(b"stbl", &cat(&[stsd, stts, stsz, stsc, stco]));
-        bx(
-            b"trak",
-            &bx(b"mdia", &cat(&[hdlr(kind), bx(b"minf", &stbl)])),
+        let mdia = bx(b"mdia", &cat(&[hdlr(kind), bx(b"minf", &stbl)]));
+        bx(b"trak", &cat(&[first.to_vec(), mdia]))
+    }
+
+    /// A file as FFmpeg's muxer writes one without faststart, moov last,
+    /// with a video edit list of one edit from `media_time` at `rate`.
+    fn muxed_file(media_time: i32, rate: u32) -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isom");
+        let free = bx(b"free", &[]);
+        let ventry = bx(b"hvc1", &cat(&[vec![0u8; 78], bx(b"hvcC", &[9; 5])]));
+        let aentry = bx(b"mp4a", &cat(&[vec![0u8; 28], bx(b"esds", &[7; 5])]));
+        let data_start = (ftyp.len() + free.len() + 8) as u32;
+        let elst = full(b"elst", 0, 0, &words(&[1, 1, media_time as u32, rate]));
+        let moov = bx(
+            b"moov",
+            &cat(&[
+                trak_with(b"vide", ventry, data_start, &bx(b"edts", &elst)),
+                trak(b"soun", aentry, data_start + 9),
+            ]),
+        );
+        cat(&[ftyp, free, bx(b"mdat", b"VIDEODATAAUDIODATA"), moov])
+    }
+
+    fn finish_all() -> Finish {
+        Finish {
+            video_trak: write::v1_equirect("test"),
+            drop_video_identity_edit: true,
+            moov_first: true,
+        }
+    }
+
+    #[test]
+    fn finishing_puts_moov_first_with_v1_and_no_video_edit() {
+        let dir = tmpdir("finish");
+        let (a, b, c) = (
+            dir.join("in.mp4"),
+            dir.join("out.mp4"),
+            dir.join("again.mp4"),
+        );
+        std::fs::write(&a, muxed_file(0, 1 << 16)).unwrap();
+        let mut calls = Vec::new();
+        let mut out = TempFile::create(&b).unwrap();
+        let mut progress = |done, total| {
+            calls.push((done, total));
+            true
+        };
+        rewrite_into(
+            &a,
+            &mut out,
+            &spherical_edits(),
+            &finish_all(),
+            &mut progress,
         )
+        .unwrap();
+        out.persist_new().unwrap();
+        // Done again on its own output, nothing is added twice.
+        let mut again = TempFile::create(&c).unwrap();
+        rewrite_into(
+            &b,
+            &mut again,
+            &spherical_edits(),
+            &finish_all(),
+            &mut |_, _| true,
+        )
+        .unwrap();
+        again.persist_new().unwrap();
+        let bytes = std::fs::read(&b).unwrap();
+        assert_eq!(std::fs::read(&c).unwrap(), bytes);
+
+        let tree = mp4::read(&mut io::Cursor::new(bytes.clone())).unwrap();
+        assert!(tree.damage().is_empty(), "{:?}", tree.damage());
+        let top: Vec<String> = tree.top.iter().map(|b| b.fourcc.to_string()).collect();
+        assert_eq!(top, ["ftyp", "free", "moov", "mdat"]);
+        let video = tree.tracks().next().unwrap();
+        let kids: Vec<String> = video
+            .children
+            .iter()
+            .map(|b| b.fourcc.to_string())
+            .collect();
+        assert_eq!(kids, ["mdia", "uuid"]);
+        let sph = spherical::read_tracks(&tree);
+        assert!(sph[0].v1.as_ref().is_some_and(|v| v.spherical));
+        assert!(sph[0].v2.is_some());
+        assert!(sph[1].spatial_audio.is_some());
+        let offs = chunk_offsets(&tree);
+        assert_eq!(&bytes[offs[0] as usize..offs[0] as usize + 9], b"VIDEODATA");
+        assert_eq!(&bytes[offs[1] as usize..offs[1] as usize + 9], b"AUDIODATA");
+        // Progress only grows, and ends at the file's size.
+        let total = bytes.len() as u64;
+        assert!(calls.windows(2).all(|w| w[0].0 <= w[1].0), "{calls:?}");
+        assert_eq!(calls.last(), Some(&(total, total)));
+        assert!(calls.iter().all(|&(_, t)| t == total));
+    }
+
+    #[test]
+    fn a_video_edit_that_does_something_is_not_dropped() {
+        let dir = tmpdir("finish-edit");
+        let a = dir.join("in.mp4");
+        for (media_time, rate) in [(1024, 1 << 16), (0, 2 << 16)] {
+            std::fs::write(&a, muxed_file(media_time, rate)).unwrap();
+            let mut out = TempFile::create(&dir.join("out.mp4")).unwrap();
+            match rewrite_into(&a, &mut out, &[], &finish_all(), &mut |_, _| true) {
+                Err(InjectError::Unsupported(e)) => assert!(e.contains("identity"), "{e}"),
+                r => panic!("{r:?}"),
+            }
+        }
+        assert_eq!(listing(&dir), ["in.mp4"]);
+    }
+
+    #[test]
+    fn a_stopped_rewrite_leaves_no_file() {
+        let dir = tmpdir("finish-stop");
+        let a = dir.join("in.mp4");
+        std::fs::write(&a, muxed_file(0, 1 << 16)).unwrap();
+        let mut out = TempFile::create(&dir.join("out.mp4")).unwrap();
+        let r = rewrite_into(&a, &mut out, &[], &finish_all(), &mut |done, _| done == 0);
+        assert!(matches!(r, Err(InjectError::Stopped)), "{r:?}");
+        drop(out);
+        assert_eq!(listing(&dir), ["in.mp4"]);
+    }
+
+    #[test]
+    fn a_chunk_table_moved_past_4_gib_becomes_a_co64() {
+        let (bytes, _) = file(false);
+        let tree = mp4::read(&mut io::Cursor::new(bytes.clone())).unwrap();
+        let moov = tree.moov().unwrap();
+        let mut moov_bytes =
+            bytes[moov.offset as usize..(moov.offset + moov.size) as usize].to_vec();
+        let before = chunk_offsets(&tree);
+        let far = |c: u64| Some(c + (1 << 32));
+        let mut tried = moov_bytes.clone();
+        let table = shift_chunk_offsets(&mut tried, &far)
+            .unwrap()
+            .expect("too far");
+        widen_chunk_table(&mut moov_bytes, table).unwrap();
+        let mut tried = moov_bytes.clone();
+        let table = shift_chunk_offsets(&mut tried, &far)
+            .unwrap()
+            .expect("the other");
+        widen_chunk_table(&mut moov_bytes, table).unwrap();
+        assert_eq!(shift_chunk_offsets(&mut moov_bytes, &far).unwrap(), None);
+        // Only the moov: its chunks are past its end, which damage() says.
+        let tree = mp4::read(&mut io::Cursor::new(moov_bytes)).unwrap();
+        assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+        let wide: Vec<u64> = tree
+            .tracks()
+            .map(|t| {
+                let co64 = t.path(&[b"mdia", b"minf", b"stbl", b"co64"]).expect("co64");
+                assert!(t.path(&[b"mdia", b"minf", b"stbl", b"stco"]).is_none());
+                u64::from_be_bytes(co64.payload[8..16].try_into().unwrap())
+            })
+            .collect();
+        let want: Vec<u64> = before.iter().map(|&c| u64::from(c) + (1 << 32)).collect();
+        assert_eq!(wide, want);
     }
 
     /// A file with video+audio tracks whose single chunks hold known bytes.

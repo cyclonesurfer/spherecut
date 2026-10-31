@@ -19,6 +19,7 @@
 
 pub mod blur;
 pub mod color;
+pub mod compare;
 #[allow(unsafe_code)]
 pub mod dmabuf;
 pub mod encode;

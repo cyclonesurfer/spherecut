@@ -3149,9 +3149,28 @@ dependencies = [
  "glam",
  "proptest",
  "ron",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "spherecut-sphere",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "spherecut-export"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "proptest",
+ "serde_json",
+ "spherecut-agent",
+ "spherecut-core",
+ "spherecut-media",
+ "spherecut-render",
+ "spherecut-sphere",
+ "spherecut-synth",
+ "spherecut-testkit",
  "thiserror 2.0.21",
  "tracing",
 ]

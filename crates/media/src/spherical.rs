@@ -441,6 +441,27 @@ pub mod write {
         bx(b"sv3d", &[svhd, proj].concat())
     }
 
+    /// The V1 `uuid` box for a mono full-sphere equirect, for the video
+    /// `trak`: the XML Google's spatial-media injector writes by default,
+    /// with `stitching_software` in place of its own name.
+    pub fn v1_equirect(stitching_software: &str) -> Vec<u8> {
+        let escaped = stitching_software
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        let xml = format!(
+            "<?xml version=\"1.0\"?><rdf:SphericalVideo\n\
+             xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"\n\
+             xmlns:GSpherical=\"http://ns.google.com/videos/1.0/spherical/\">\
+             <GSpherical:Spherical>true</GSpherical:Spherical>\
+             <GSpherical:Stitched>true</GSpherical:Stitched>\
+             <GSpherical:StitchingSoftware>{escaped}</GSpherical:StitchingSoftware>\
+             <GSpherical:ProjectionType>equirectangular</GSpherical:ProjectionType>\
+             </rdf:SphericalVideo>"
+        );
+        bx(b"uuid", &[&SPHERICAL_V1_UUID[..], xml.as_bytes()].concat())
+    }
+
     /// First-order ambiX (ACN/SN3D) SA3D box with an identity channel map.
     pub fn sa3d_first_order_ambix() -> Vec<u8> {
         sa3d_ambix(1, false)
@@ -521,6 +542,19 @@ mod tests {
         assert!(v1.spherical && v1.stitched);
         assert_eq!(v1.projection_type.as_deref(), Some("equirectangular"));
         assert_eq!(v1.stitching_software.as_deref(), Some("Test"));
+    }
+
+    #[test]
+    fn v1_is_written_as_googles_injector_writes_it_and_reads_back() {
+        let uuid = write::v1_equirect("A & B");
+        let xml = String::from_utf8(uuid[24..].to_vec()).unwrap();
+        assert!(xml.starts_with("<?xml version=\"1.0\"?><rdf:SphericalVideo\nxmlns:rdf="));
+        assert!(xml.contains("<GSpherical:StitchingSoftware>A &amp; B</"));
+        let tree = mp4::read(&mut std::io::Cursor::new(file_with(vec![], vec![], uuid))).unwrap();
+        let v1 = read_tracks(&tree)[0].v1.clone().unwrap();
+        assert!(v1.spherical && v1.stitched);
+        assert_eq!(v1.projection_type.as_deref(), Some("equirectangular"));
+        assert_eq!(v1.stereo_mode, None);
     }
 
     #[test]

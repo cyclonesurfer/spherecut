@@ -15,19 +15,32 @@
 //!   `spherecut frame` without `--overwrite`. On a filesystem without hard
 //!   links (FAT, some network filesystems), it creates the output with
 //!   `O_CREAT | O_EXCL` instead and copies the file into it.
+//!
+//! A temporary file holds an exclusive `flock` for its life, so that
+//! [`sweep_temp_files`] can tell one a killed writer left (whose lock the
+//! kernel let go) from one that is still being written: it removes only
+//! those whose lock it can take and that are more than a minute old.
 
-use std::fs::{File, OpenOptions, Permissions};
+use std::fs::{File, OpenOptions, Permissions, TryLockError};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Seek, SeekFrom};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use rustix::fs::OFlags;
 
 use crate::blocking::may_block;
 use crate::brand::APP_SLUG;
 
 /// How many names [`TempFile::create`] tries before giving up.
 pub const TEMP_ATTEMPTS: usize = 16;
+
+/// How long ago a temporary file must last have been written for
+/// [`sweep_temp_files`] to take it, besides its lock being free: far
+/// longer than the moment between a file's creation and its lock.
+pub const SWEEP_AGE: Duration = Duration::from_secs(60);
 
 /// A name for a temporary file: hidden, recognisably ours, the same short
 /// length whatever the output is called, and random, so that a file left
@@ -153,6 +166,13 @@ impl TempFile {
             let path = dest.with_file_name(name());
             match opts.open(&path) {
                 Ok(file) => {
+                    // A sweep that opened it first holds the lock for a
+                    // moment, and this waits that out. Where there are no
+                    // locks (some network filesystems) a sweep can't take
+                    // one either, so it leaves the file alone.
+                    if let Err(e) = file.lock() {
+                        tracing::debug!("no lock on {}: {e}", path.display());
+                    }
                     let tmp = TempFile {
                         path,
                         dest: dest.to_path_buf(),
@@ -253,6 +273,70 @@ impl TempFile {
         }
         Ok(())
     }
+}
+
+/// Remove the temporary files that killed writers left in `dir` (D16):
+/// those named as [`TempFile::create`] names them whose lock can be
+/// taken, so that nothing holds them open any more, and that were last
+/// written more than `older_than` ago ([`SWEEP_AGE`]). Anything else is
+/// left: a file being written, another program's, a link, a pipe. The
+/// paths removed; a file that can't be looked at is skipped.
+pub fn sweep_temp_files(dir: &Path, older_than: Duration) -> io::Result<Vec<PathBuf>> {
+    may_block("sweeping temporary files");
+    let mut removed = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_name().to_str().is_some_and(is_temp_name) {
+            continue;
+        }
+        let path = entry.path();
+        match sweep(&path, older_than) {
+            Ok(true) => removed.push(path),
+            Ok(false) => {}
+            Err(e) => tracing::debug!("not sweeping {}: {e}", path.display()),
+        }
+    }
+    Ok(removed)
+}
+
+/// Remove `path` if it is a regular file whose lock is free and that is
+/// older than `older_than`: whether it was removed.
+fn sweep(path: &Path, older_than: Duration) -> io::Result<bool> {
+    // Never through a link, nor waiting on a pipe given a temp name.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Ok(false);
+    }
+    match file.try_lock() {
+        Ok(()) => {}
+        // Its writer is alive.
+        Err(TryLockError::WouldBlock) => return Ok(false),
+        Err(TryLockError::Error(e)) => return Err(e),
+    }
+    // A time to come (another machine's clock) counts as now.
+    let age = meta.modified()?.elapsed().unwrap_or(Duration::ZERO);
+    if age <= older_than {
+        return Ok(false);
+    }
+    // The name still names the file locked.
+    let now = std::fs::symlink_metadata(path)?;
+    if (now.dev(), now.ino()) != (meta.dev(), meta.ino()) {
+        return Ok(false);
+    }
+    std::fs::remove_file(path)?;
+    Ok(true)
+}
+
+/// Bytes free to an unprivileged writer on the filesystem holding `path`
+/// (`statvfs`'s available blocks).
+pub fn free_space(path: &Path) -> io::Result<u64> {
+    may_block("reading a filesystem's free space");
+    let s = rustix::fs::statvfs(path)?;
+    Ok(s.f_bavail.saturating_mul(s.f_frsize))
 }
 
 impl Drop for TempFile {
@@ -555,6 +639,68 @@ mod tests {
         });
         assert!(r.is_err());
         assert!(listing(&dir).is_empty());
+    }
+
+    /// Make `p`'s last write `secs` seconds ago.
+    fn age(p: &Path, secs: u64) {
+        let f = OpenOptions::new().write(true).open(p).unwrap();
+        f.set_modified(std::time::SystemTime::now() - Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_sweep_takes_only_old_temp_files_that_nothing_holds() {
+        use rustix::fs::{CWD, FileType, Mode, mknodat};
+        let dir = tmpdir("sweep");
+        // A writer's file, locked, however old.
+        let live = written(&dir.join("live.mp4"), b"being written");
+        age(live.path(), 600);
+        // What a killed writer left: our name, and no lock.
+        let left = dir.join(temp_name());
+        std::fs::write(&left, b"left").unwrap();
+        age(&left, 600);
+        // Left a moment ago: its writer may be about to take the lock.
+        let fresh = dir.join(temp_name());
+        std::fs::write(&fresh, b"new").unwrap();
+        // Not ours, though old.
+        let other = dir.join(".other.tmp");
+        std::fs::write(&other, b"theirs").unwrap();
+        age(&other, 600);
+        // A link and a pipe given our names: never opened through, nor
+        // waited on.
+        let target = dir.join("target.mp4");
+        std::fs::write(&target, b"target").unwrap();
+        age(&target, 600);
+        let link = dir.join(temp_name());
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let pipe = dir.join(temp_name());
+        mknodat(CWD, &pipe, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+
+        let gone = sweep_temp_files(&dir, SWEEP_AGE).unwrap();
+        assert_eq!(gone, std::slice::from_ref(&left));
+        assert!(left.symlink_metadata().is_err());
+        for p in [live.path(), &fresh, &other, &target, &link, &pipe] {
+            assert!(p.symlink_metadata().is_ok(), "{} was swept", p.display());
+        }
+        // The writer still publishes its file.
+        live.persist_new().unwrap();
+        assert_eq!(
+            std::fs::read(dir.join("live.mp4")).unwrap(),
+            b"being written"
+        );
+        // A second sweep finds nothing more to take.
+        assert_eq!(
+            sweep_temp_files(&dir, SWEEP_AGE).unwrap(),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    #[test]
+    fn free_space_is_the_filesystems() {
+        let dir = tmpdir("free");
+        assert!(free_space(&dir).unwrap() > 0);
+        let e = free_space(&dir.join("no-such-dir")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
