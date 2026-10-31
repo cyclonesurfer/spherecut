@@ -39,6 +39,7 @@ fn clip(path: &Path) {
         edit_start: 0,
         time_base: None,
         crop_left: 0,
+        device: None,
     };
     let mut w = Mp4Writer::create(&path.with_extension("tmp.mp4"), &settings, None).unwrap();
     for _ in 0..3 {

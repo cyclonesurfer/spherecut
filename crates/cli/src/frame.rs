@@ -1,5 +1,7 @@
 //! `spherecut frame`: one frame of a stitched equirect, rendered through a
-//! virtual camera into a PNG (M1 plan section 5, DECISIONS D27).
+//! virtual camera into a PNG (M1 plan section 5, DECISIONS D27); or with
+//! `--project`, the frame of a project's sequence at a time, as `spherecut
+//! render` renders it (M2 plan amendment 2 item 5, D51).
 //!
 //! The steps, in order:
 //!
@@ -11,8 +13,13 @@
 //! 3. the SIGINT handler (`crate::interrupt`), then the temporary file;
 //!    the work runs on a worker thread while this one waits for it, and
 //!    the first Ctrl+C stops it (exit 4, no output);
-//! 4. probe, through the confinement (D24), and the layout: only a
-//!    stitched equirect renders, unless `--equirect` says it is one;
+//! 4. with `--project`, the project and its media, loaded as `render`
+//!    loads them (an offline clip is exit 1), and the sequence's frame at
+//!    the time asked for, in sequence time (`out_of_range` past its end):
+//!    the source frame it shows, the output's size, and its views, as
+//!    [`frame_views`] gives the export them; then probe, through the
+//!    confinement (D24), and the layout: only a stitched equirect
+//!    renders, unless `--equirect` says it is one (a project's clip is);
 //! 5. the GPU, unless `--reference` renders on the CPU (exit 3 without
 //!    one);
 //! 6. the decoder, on the render node of the GPU that renders (D39 has the
@@ -32,19 +39,24 @@ use anyhow::Result;
 use clap::{Args, ValueEnum};
 use spherecut_agent::still::{self, Failure, Still, about, failure, number, seconds};
 use spherecut_cli::contract::{
-    self, Envelope, Exit, FrameResult, FrameShown, Size, ViewInfo, Warning, codes,
+    self, Envelope, Exit, FrameResult, FrameShown, SequenceFrame, Size, ViewInfo, Warning, codes,
 };
-use spherecut_core::TimeSpec;
 use spherecut_core::cancel::StopSource;
 use spherecut_core::fs::{TempFile, follow_links, replaceable};
+use spherecut_core::project::Output;
+use spherecut_core::project::file;
 use spherecut_core::video::VideoPlanes;
+use spherecut_core::{FrameTime, Rounding, Time, TimeSpec};
+use spherecut_export::FramePlan;
 use spherecut_media::Source;
 use spherecut_media::backend::SeekMode;
+use spherecut_render::output::{frame_views, view_at};
+use spherecut_render::project::OutKind;
 use spherecut_render::{AdapterChoice, Depth, Filter, ViewParams};
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
 
-use crate::{emit, interrupt, print_json, to_stderr};
+use crate::{emit, interrupt, print_json, render, to_stderr};
 
 /// How often the main thread looks for a Ctrl+C while the worker works.
 const POLL: Duration = Duration::from_millis(10);
@@ -55,19 +67,35 @@ const SIDES: std::ops::RangeInclusive<u32> = 16..=16384;
 #[derive(Args, Debug, Clone)]
 pub struct FrameArgs {
     /// The video: a stitched equirect, tagged with spherical metadata or
-    /// treated as one with --equirect.
-    pub file: PathBuf,
+    /// treated as one with --equirect. Not with --project.
+    #[arg(required_unless_present = "project")]
+    pub file: Option<PathBuf>,
+    /// A project file: render its sequence's frame at --time or --frame,
+    /// in sequence time, as `spherecut render` renders it: the sequence's
+    /// output size, its keyed view and its motion blur, with the export's
+    /// filter. The view, --size, --filter and --stream flags are the
+    /// project's then.
+    #[arg(
+        long,
+        value_name = "PROJECT",
+        conflicts_with_all = [
+            "file", "yaw", "pitch", "roll", "fov", "projection", "morph_to", "morph", "size",
+            "filter", "equirect", "stream", "reference",
+        ],
+    )]
+    pub project: Option<PathBuf>,
     /// The PNG to write. Something already there is refused unless
     /// --overwrite is given.
     #[arg(short, long, value_name = "OUT.png")]
     pub output: PathBuf,
-    /// When, in clip time from the first frame: 12, 12.5, 1:02.5,
-    /// 01:02:03.250, 30000/1001, or a frame number such as 370f [default:
-    /// 0]
+    /// When, in clip time from the first frame (with --project, in
+    /// sequence time from its start): 12, 12.5, 1:02.5, 01:02:03.250,
+    /// 30000/1001, or a frame number such as 370f [default: 0]
     // Hyphens too, so that a negative time gets its own message.
     #[arg(long, value_name = "T", value_parser = time_spec, conflicts_with = "frame", allow_hyphen_values = true)]
     pub time: Option<TimeSpec>,
-    /// Frame N, counting the first frame shown as 0 (the same as --time Nf).
+    /// Frame N, counting the first frame shown as 0 (the same as --time Nf);
+    /// with --project, the sequence's frame N at its rate.
     #[arg(long, value_name = "N", value_parser = frame_number, allow_negative_numbers = true)]
     pub frame: Option<u64>,
     /// Degrees to the right.
@@ -315,6 +343,24 @@ impl FrameArgs {
         }
     }
 
+    /// What the flags render: the file, through their view.
+    fn shot(&self) -> Result<Shot, Failure> {
+        let Some(file) = self.file.clone() else {
+            return Err(failure(codes::USAGE, "give a FILE, or --project"));
+        };
+        Ok(Shot {
+            file,
+            opts: self.still_options(),
+            when: self.when(),
+            size: self.size,
+            views: vec![self.view()],
+            view: self.view_info(),
+            filter: Some(self.filter),
+            requested: None,
+            sequence: None,
+        })
+    }
+
     fn still_options(&self) -> still::Options {
         still::Options {
             decoder: match self.decoder {
@@ -328,6 +374,186 @@ impl FrameArgs {
             stream: self.stream,
             zero_copy: self.zero_copy,
         }
+    }
+}
+
+/// What a run renders: the flags' view of the file, or with `--project`
+/// the sequence's frame.
+struct Shot {
+    file: PathBuf,
+    opts: still::Options,
+    /// What the seek goes to.
+    when: TimeSpec,
+    size: (u32, u32),
+    /// One, or a frame's over the shutter for motion blur.
+    views: Vec<ViewParams>,
+    view: ViewInfo,
+    /// The filter asked for; `None` is the export's, anisotropic where
+    /// the GPU filters so (D49).
+    filter: Option<FilterArg>,
+    /// What `--time` or `--frame` asked for, when the seek's time is
+    /// another: the sequence's time, not the source's.
+    requested: Option<FrameTime>,
+    sequence: Option<SequenceFrame>,
+}
+
+/// Step 4 with `--project`: the project at `path` and its media, loaded
+/// as `render` loads them, and the sequence's frame at `when`: the
+/// source frame it shows, at the output's size, through the views the
+/// export renders it through ([`frame_views`]), so that the PNG is the
+/// export's frame before its encode.
+fn project_shot(
+    args: &FrameArgs,
+    path: &Path,
+    warnings: &mut Vec<Warning>,
+) -> Result<Shot, Failure> {
+    let project = file::load(path).map_err(|e| render::project_error(path, &e))?;
+    render::media(&project, "rendering", warnings)?;
+    let sequence = project.the_sequence();
+    let clip = project.the_clip();
+    let media = project.media_by_id(clip.media).ok_or_else(|| {
+        failure(
+            codes::INVALID_PROJECT,
+            format!("the clip's media {} isn't in the project", clip.media.0),
+        )
+    })?;
+    let plan = FramePlan::new(clip.source, sequence.rate)
+        .map_err(|e| failure(codes::INVALID_PROJECT, e.to_string()))?;
+    let (n, requested) = sequence_frame(&plan, clip.duration(), args.when())?;
+    // Every frame of the plan has a time that fits.
+    let fits = |e| failure(codes::INTERNAL, format!("frame {n}'s time: {e}"));
+    let at = plan.source_time(n).map_err(fits)?;
+    let shown = plan.sequence_time(n).map_err(fits)?;
+    let t = at.to_secs_f64();
+    let frame_s = sequence.rate.frame_duration().to_secs_f64();
+    let (anim, targets) = (&clip.view, project.targets());
+    let views = frame_views(
+        anim,
+        targets,
+        &sequence.output,
+        t,
+        frame_s,
+        sequence.export.motion_blur,
+    );
+    let opts = still::Options {
+        stream: Some(media.video.stream as usize),
+        equirect: true,
+        ..args.still_options()
+    };
+    Ok(Shot {
+        file: media.path.clone(),
+        opts,
+        when: TimeSpec::Time(at),
+        size: views.size,
+        view: shown_view(&view_at(anim, targets, &sequence.output, t)),
+        filter: None,
+        requested: Some(requested),
+        sequence: Some(SequenceFrame {
+            project: path.to_string_lossy().into_owned(),
+            frame: FrameTime {
+                time: shown,
+                frame: Some(n),
+            },
+            output: match sequence.output {
+                Output::Flat { .. } => "flat",
+                Output::Equirect { .. } => "equirect",
+            },
+            views: views.views.len(),
+            capped: views.capped,
+        }),
+        views: views.views,
+    })
+}
+
+/// The frame of the sequence `plan` makes that `when` names, and what
+/// was asked for, in sequence time: frame N at the sequence's rate, or
+/// the frame on screen at a time, the last that starts at or before it.
+/// `out_of_range` at or past `length`, where the sequence ends.
+fn sequence_frame(
+    plan: &FramePlan,
+    length: Time,
+    when: TimeSpec,
+) -> Result<(u64, FrameTime), Failure> {
+    let (rate, count) = (plan.rate(), plan.count());
+    let out = |message: String| failure(codes::OUT_OF_RANGE, message);
+    match when {
+        TimeSpec::Frame(n) => {
+            if n >= count {
+                return Err(out(format!(
+                    "no frame {n}: the sequence's frames are 0 to {}",
+                    count - 1
+                )));
+            }
+            let requested = FrameTime::at(rate, n).map_err(|e| out(format!("frame {n}: {e}")))?;
+            Ok((n, requested))
+        }
+        TimeSpec::Time(t) => {
+            let n = (t >= Time::ZERO && t < length)
+                .then(|| rate.time_to_frame(t, Rounding::Floor).ok())
+                .flatten()
+                .and_then(|n| u64::try_from(n).ok())
+                .filter(|&n| n < count);
+            let Some(n) = n else {
+                let last = plan
+                    .sequence_time(count - 1)
+                    .map_or_else(|_| "?".into(), seconds);
+                return Err(out(format!(
+                    "no frame at {} s: the sequence runs from 0 to {} s (its last frame starts at \
+                     {last} s)",
+                    seconds(t),
+                    seconds(length)
+                )));
+            };
+            Ok((
+                n,
+                FrameTime {
+                    time: t,
+                    frame: None,
+                },
+            ))
+        }
+    }
+}
+
+/// The view a sequence's frame is rendered through, as `view` reports
+/// it: the keyed camera of a flat output at the frame's time (its FOV
+/// the output frame's), or the turn of an equirect one, whose picture
+/// is the whole sphere (`projection` is then `equirect`, 360°).
+fn shown_view(v: &ViewParams) -> ViewInfo {
+    // Degrees to a millionth, so that a keyed 30° isn't 29.999999999999996.
+    let deg = |r: f64| (r.to_degrees() * 1e6).round() / 1e6 + 0.0;
+    let ypr = Ypr::from_quat(v.orientation);
+    let (yaw, pitch, roll) = (deg(ypr.yaw), deg(ypr.pitch), deg(ypr.roll));
+    match v.out {
+        OutKind::Equirect => ViewInfo {
+            yaw,
+            pitch,
+            roll,
+            fov: 360.0,
+            projection: "equirect",
+            morph_to: None,
+            morph: 0.0,
+        },
+        OutKind::Lens => {
+            let morphs = v.lens.to != v.lens.from;
+            ViewInfo {
+                yaw,
+                pitch,
+                roll,
+                fov: deg(v.lens.hfov),
+                projection: lens_name(v.lens.from),
+                morph_to: morphs.then(|| lens_name(v.lens.to)),
+                morph: if morphs { v.lens.morph } else { 0.0 },
+            }
+        }
+    }
+}
+
+fn lens_name(p: Projection) -> &'static str {
+    match p {
+        Projection::Rectilinear => "rectilinear",
+        Projection::Fisheye => "fisheye",
+        Projection::Stereographic => "stereographic",
     }
 }
 
@@ -473,7 +699,7 @@ fn cannot_write(out: &Path, e: &std::io::Error) -> Failure {
 /// either way (`not_a_file`), since a rename would replace the node
 /// instead of writing to it (D16), and so is a name that ends in `/`,
 /// which names a directory whether or not there is one.
-fn check_output(out: &Path, overwrite: bool) -> Result<PathBuf, Failure> {
+pub(crate) fn check_output(out: &Path, overwrite: bool) -> Result<PathBuf, Failure> {
     use std::os::unix::ffi::OsStrExt;
     let io = |e: std::io::Error| cannot_write(out, &e);
     let not_a_file = |e: std::io::Error| {
@@ -540,48 +766,59 @@ impl Job {
 
     fn run(&mut self, mut tmp: TempFile) -> Result<Done, Failure> {
         let stop = still::Stop::of(&self.stop);
-        let opts = self.args.still_options();
-        let file = self.args.file.clone();
-        let src = Source::path(&file);
 
         // Step 4.
+        let shot = match self.args.project.clone() {
+            Some(p) => project_shot(&self.args, &p, &mut self.warnings)?,
+            None => self.args.shot()?,
+        };
+        stop.go_on()?;
+        let opts = &shot.opts;
+        let src = Source::path(&shot.file);
         let probed =
-            still::probe(src, &opts, &stop, &mut self.warnings).map_err(|e| self.flags(e))?;
+            still::probe(src, opts, &stop, &mut self.warnings).map_err(|e| self.flags(e))?;
 
         // Step 5. The filter is the one rendered with: iso where aniso was
-        // asked for and the device can't.
-        let mut filter = self.args.filter;
+        // asked for and the device can't; with --project, the export's.
+        let mut filter = shot.filter.unwrap_or(FilterArg::Iso);
         let gpu = if self.args.reference {
             None
         } else {
-            let gpu = still::gpu(&self.args.adapter(), &opts)?;
-            gpu.check_size(self.args.size)
-                .map_err(|e| failure(codes::USAGE, format!("--size: {e}")))?;
-            still::check_gpu(&gpu, &opts)?;
-            if self.args.filter == FilterArg::Aniso && !gpu.caps.anisotropy {
-                self.warn(
-                    codes::warnings::ANISOTROPY_UNAVAILABLE,
-                    format!(
-                        "{} has no anisotropic filtering: rendering with --filter iso",
-                        gpu.caps.info.name
-                    ),
-                );
-                filter = FilterArg::Iso;
-            }
+            let gpu = still::gpu(&self.args.adapter(), opts)?;
+            gpu.check_size(shot.size).map_err(|e| match shot.sequence {
+                None => failure(codes::USAGE, format!("--size: {e}")),
+                Some(_) => still::render_error(e),
+            })?;
+            still::check_gpu(&gpu, opts)?;
+            filter = match shot.filter {
+                Some(FilterArg::Aniso) if !gpu.caps.anisotropy => {
+                    self.warn(
+                        codes::warnings::ANISOTROPY_UNAVAILABLE,
+                        format!(
+                            "{} has no anisotropic filtering: rendering with --filter iso",
+                            gpu.caps.info.name
+                        ),
+                    );
+                    FilterArg::Iso
+                }
+                Some(f) => f,
+                None if gpu.caps.anisotropy => FilterArg::Aniso,
+                None => FilterArg::Iso,
+            };
             Some(gpu)
         };
         stop.go_on()?;
 
         // Step 6.
-        let mut still = Still::open(src, &probed, gpu.as_ref(), &opts, &stop, &mut self.warnings)?;
+        let mut still = Still::open(src, &probed, gpu.as_ref(), opts, &stop, &mut self.warnings)?;
         stop.go_on()?;
 
         // Step 7.
-        let decoded = still.seek(self.args.when(), SeekMode::Exact, &mut self.warnings)?;
+        let decoded = still.seek(shot.when, SeekMode::Exact, &mut self.warnings)?;
         stop.go_on()?;
 
         // Step 8.
-        let size = self.args.size;
+        let size = shot.size;
         let look = still::Look {
             draw: still::Draw::View,
             filter: match filter {
@@ -590,7 +827,7 @@ impl Job {
             },
             depth: self.args.depth(),
         };
-        let image = still.render(&decoded, &self.args.view(), size, look)?;
+        let image = still.render(&decoded, &shot.views, size, look)?;
         stop.go_on()?;
 
         // Step 9.
@@ -630,7 +867,7 @@ impl Job {
                 pts: decoded.frame.pts,
                 time: decoded.shown,
             },
-            requested: decoded.requested,
+            requested: shot.requested.unwrap_or(decoded.requested),
             exactness: "exact",
             size: Size {
                 width: size.0,
@@ -640,7 +877,7 @@ impl Job {
                 DepthArg::Eight => 8,
                 DepthArg::Sixteen => 16,
             },
-            view: self.args.view_info(),
+            view: shot.view,
             filter: match filter {
                 FilterArg::Iso => "iso",
                 FilterArg::Aniso => "aniso",
@@ -650,6 +887,7 @@ impl Job {
             gpu: gpu.as_ref().map(|g| still::gpu_info(&g.caps.info)),
             color: *decoded.frame.color(),
             source: still.source_info(),
+            sequence: shot.sequence,
         };
         let line = summary(&result);
         Ok(Done { result, line })
@@ -672,15 +910,30 @@ impl Job {
 
 /// The report's line: "wrote out.png: 1920×1080 rectilinear 100° at
 /// 62.233 s (frame 1867, pts 186700), decoded on VA-API, rendered on AMD
-/// Radeon 8060S (RADV)".
+/// Radeon 8060S (RADV)"; with `--project`, "... 1920×1080 rectilinear
+/// 90° at 2.5 s of p.spherecut (its frame 75; the source's at 4.5 s,
+/// frame 135, pts 135135), ...".
 fn summary(r: &FrameResult) -> String {
-    let mut lens = format!("{} {}°", r.view.projection, number(r.view.fov));
+    let mut lens = match r.view.projection {
+        "equirect" => "equirect".to_string(),
+        p => format!("{p} {}°", number(r.view.fov)),
+    };
     if let Some(to) = r.view.morph_to {
         lens.push_str(&format!(" morphed {} to {to}", number(r.view.morph)));
     }
     let frame = match r.frame.time.frame {
         Some(n) => format!("frame {n}, pts {}", r.frame.pts),
         None => format!("pts {}", r.frame.pts),
+    };
+    let at = match &r.sequence {
+        Some(s) => format!(
+            "at {} s of {} (its frame {}; the source's at {} s, {frame})",
+            seconds(s.frame.time),
+            s.project,
+            s.frame.frame.unwrap_or(0),
+            seconds(r.frame.time.time)
+        ),
+        None => format!("at {} s ({frame})", seconds(r.frame.time.time)),
     };
     let decoded = match (&r.decode.path, &r.decode.fallback) {
         (&"software", Some(f)) => {
@@ -697,11 +950,8 @@ fn summary(r: &FrameResult) -> String {
         None => "rendered by the CPU reference".to_string(),
     };
     format!(
-        "wrote {}: {}×{} {lens} at {} s ({frame}), {decoded}, {rendered}",
-        r.output,
-        r.size.width,
-        r.size.height,
-        seconds(r.frame.time.time)
+        "wrote {}: {}×{} {lens} {at}, {decoded}, {rendered}",
+        r.output, r.size.width, r.size.height
     )
 }
 

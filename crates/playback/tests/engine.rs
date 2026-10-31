@@ -15,7 +15,10 @@
 //! keyframe, on one stream and on two streams on three slots; a seek
 //! back, as at a loop, leaves the frames held from before it out of the
 //! slots and starts the clock once the next two frames are Ready, or at
-//! once at the last frame; a fallback reaches the snapshot, from a fault and from `Auto` picking
+//! once at the last frame; the clock run past the end stops on the last
+//! frame, which comes up once it is uploaded, or a frame before the
+//! container's duration before decoding reached the end; a fallback
+//! reaches the snapshot, from a fault and from `Auto` picking
 //! Vulkan on lavapipe; the audio seam holds playback for its preroll;
 //! and a 5.7K source plays inside a 256 MiB cache.
 
@@ -974,6 +977,150 @@ fn a_preroll_at_the_last_frame_waits_for_nothing_more() {
         started < spherecut_playback::PREROLL_LIMIT / 2,
         "it started after {started:?}"
     );
+    common::join(player);
+}
+
+/// Present until the player pauses at the end, the clock run past it.
+fn ended(player: &Player) -> spherecut_playback::PlayerSnapshot {
+    until(WAIT, || {
+        let _ = player.present(Instant::now());
+        let s = snapshot(player);
+        s.at_end.then_some(s)
+    })
+    .unwrap_or_else(|| panic!("it never ended: {:?}", snapshot(player)))
+}
+
+#[test]
+fn the_end_stops_on_the_last_frame_which_comes_up_once_uploaded() {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(clip(30), clock.clone(), config(64));
+    // The whole clip decoded, but only the first four frames on the four
+    // slots: the clock runs past the end before the rest are uploaded,
+    // as on lavapipe under load.
+    until(WAIT, || snapshot(&player).streams[0].end).expect("decoding never reached the end");
+    player.play();
+    clock.set(at(40), Instant::now());
+    let end = ended(&player);
+    assert_eq!(end.state, PlayState::Paused);
+    assert_eq!(end.clock, at(29));
+    show(&player, 29);
+    assert_eq!(snapshot(&player).clock, at(29));
+    common::join(player);
+}
+
+/// The synthetic clip, its decoder letting `pass` frames through and
+/// holding the next until `pass` grows; `entered` counts the frames
+/// asked for, so that a test knows the decoder is held.
+#[derive(Debug)]
+struct Held {
+    inner: SyntheticBackend,
+    pass: Arc<AtomicU64>,
+    entered: Arc<AtomicU64>,
+}
+
+#[derive(Debug)]
+struct HeldVideo {
+    inner: Box<dyn VideoDecode>,
+    pass: Arc<AtomicU64>,
+    entered: Arc<AtomicU64>,
+}
+
+impl VideoDecode for HeldVideo {
+    fn info(&self) -> &VideoStreamInfo {
+        self.inner.info()
+    }
+
+    fn decode_path(&self) -> &DecodePath {
+        self.inner.decode_path()
+    }
+
+    fn seek(
+        &mut self,
+        at: Time,
+        mode: SeekMode,
+        stop: &StopToken,
+    ) -> Result<SeekOutcome, MediaError> {
+        self.inner.seek(at, mode, stop)
+    }
+
+    fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError> {
+        let n = self.entered.fetch_add(1, Ordering::AcqRel);
+        while n >= self.pass.load(Ordering::Acquire) {
+            if !wait_unless_stopped(Duration::from_millis(1), stop) {
+                return Ok(NextFrame::Stopped);
+            }
+        }
+        self.inner.next_frame(stop)
+    }
+
+    fn catch_up(&mut self, until: Option<Time>) {
+        self.inner.catch_up(until);
+    }
+
+    fn take_events(&mut self) -> Vec<DecoderEvent> {
+        self.inner.take_events()
+    }
+
+    fn stats(&self) -> DecodeStats {
+        self.inner.stats()
+    }
+}
+
+impl MediaBackend for Held {
+    fn name(&self) -> &'static str {
+        "held"
+    }
+
+    fn probe(&self, path: &Path) -> Result<ProbeReport, ProbeError> {
+        self.inner.probe(path)
+    }
+
+    fn open_video(
+        &self,
+        path: &Path,
+        req: &VideoRequest,
+    ) -> Result<Box<dyn VideoDecode>, MediaError> {
+        Ok(Box::new(HeldVideo {
+            inner: self.inner.open_video(path, req)?,
+            pass: self.pass.clone(),
+            entered: self.entered.clone(),
+        }))
+    }
+
+    fn open_audio(
+        &self,
+        path: &Path,
+        req: &AudioRequest,
+    ) -> Result<Box<dyn AudioDecode>, MediaError> {
+        self.inner.open_audio(path, req)
+    }
+}
+
+#[test]
+fn an_end_decoding_has_not_reached_stops_a_frame_before_the_duration() {
+    let (pass, entered) = (Arc::new(AtomicU64::new(4)), Arc::new(AtomicU64::default()));
+    let backend = Held {
+        inner: clip(30),
+        pass: pass.clone(),
+        entered: entered.clone(),
+    };
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(backend, clock.clone(), config(64));
+    // Held after four frames, inside its next (so that it can't start
+    // catching up with the clock while that runs): the end is the
+    // container's duration, 1 s.
+    until(WAIT, || (entered.load(Ordering::Acquire) > 4).then_some(()))
+        .expect("the decoder never asked for its fifth frame");
+    player.play();
+    clock.set(at(40), Instant::now());
+    let end = ended(&player);
+    assert_eq!(end.streams[0].end, None, "decoding reached the end");
+    assert_eq!(end.state, PlayState::Paused);
+    assert_eq!(end.clock, at(29));
+    // Let go, the decoder makes the rest, and the last comes up.
+    pass.store(u64::MAX, Ordering::Release);
+    show(&player, 29);
+    assert_eq!(snapshot(&player).clock, at(29));
     common::join(player);
 }
 

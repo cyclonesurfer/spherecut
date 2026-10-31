@@ -343,7 +343,8 @@ as built, where it differs from section 7 and amendment 2's M2.3 items
   and whether it capped), for the export and the parity reference
   alike; `StillRenderer::render_blurred` and `render_yuv` take views,
   not one view. Item 5's `StillRenderer` gains no output enum of its
-  own: the views and size say it. `frame --project` stays in M2.5.
+  own: the views and size say it. `frame --project` stays in M2.5
+  (done there: D51).
 - **The YUV buffer** is written a 32-bit word per invocation (4 8-bit
   or 2 16-bit samples), so widths must be multiples of 4 and heights
   even (`YuvShape::new` refuses others, `invalid_input`), and each
@@ -392,6 +393,38 @@ records it):
   warns. No slice has the rotation yet.
 - **The full-disk test** (section 11) moves to M2.5, with
   `spherecut render`.
+
+**Amendment 6 (2026-10-31, slice M2.5's code and odin's runs).** The
+VA-API encoders and `spherecut render` as built, where they differ from
+sections 8.3 and 9 (D51 and D52 record them):
+
+- **Every `--json` line is a whole D27 envelope** of schema
+  `spherecut.render/1`, with `result.event` `start`, `progress` or
+  `result`; a failed run ends with the error envelope, so the last line
+  is always the run's document. Section 9 had `event` and the fields at
+  the top level.
+- **Three more flags**: `--eight-bit` (section 8.3's forced 8 bits),
+  `--decoder auto|software` (item 25) and `--adapter`. A `--range`
+  outside the sequence is `out_of_range`, exit 1, as `frame`'s `--time`
+  past the end is; one that doesn't parse is usage.
+- **AV1 goes to av1_vaapi only at a size it needn't pad.** VCN 4 pads
+  AV1 to 64 × 16 (1080 lines become 1082) and decoders show the
+  padding, so `auto` sends any other size to libsvtav1 with
+  `hw_unsupported`, and `--encoder vaapi` fails with that code (exit
+  3). Every 360 preset, 2560 × 1440, 3840 × 2160 and the 960 × 544
+  draft are aligned. H.264 and HEVC crop in the stream and are
+  untouched.
+- **Mesa's quality levels** are measured (D52): High 29, Medium and
+  Small 3, a draft 1. The table stands, since in a whole export the
+  decode is the slow stage, not the encode.
+- **Tier 2's floors are odin's measures less 3 dB and 0.003** for each
+  VA-API encoder (section 11 had PLAN's 40 dB and 0.98 for all), and
+  each export decodes at the output's size, so padding fails it.
+- **The full disk** is a real one: the render runs in a user and mount
+  namespace of its own on a 128 MB tmpfs (D51 says why not
+  `RLIMIT_FSIZE`).
+- **`frame --project`** (amendment 4) is in: the sequence's frame as
+  the export renders it, the parity sample through the CLI.
 
 ## 1. Summary
 

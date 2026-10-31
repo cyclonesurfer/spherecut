@@ -1292,7 +1292,7 @@ fn draw(
         depth: Depth::Eight,
     };
     let render = |s: &mut Still<'_>, d: &Decoded, cam: &Camera, size, draw| {
-        s.render(d, &cam.params(), size, look(draw))
+        s.render(d, &[cam.params()], size, look(draw))
             .map_err(|f| render_failed(&f))
     };
     let stream = match tile.shows {

@@ -659,11 +659,15 @@ impl Worker {
             }
             Ok(NextFrame::End) => {
                 self.at_end = true;
+                let last = self.last.as_ref().map(|l| l.time);
                 let end = self
                     .last
                     .as_ref()
                     .and_then(|l| l.time.checked_add(l.duration?).ok());
-                self.shared.stream(self.epoch, self.stream, |s| s.end = end);
+                self.shared.stream(self.epoch, self.stream, |s| {
+                    s.end = end;
+                    s.last = last;
+                });
                 self.tell(PlayerEvent::StreamEnded {
                     stream: self.stream,
                 });

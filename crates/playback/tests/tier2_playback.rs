@@ -1608,10 +1608,11 @@ fn render_taken(
     size: (u32, u32),
     opts: &StillOptions,
 ) -> Result<Image, RenderError> {
+    let views = std::slice::from_ref(view);
     match taken {
-        Taken::Imported(planes) => renderer.render_imported(gpu, frame, planes, view, size, opts),
+        Taken::Imported(planes) => renderer.render_imported(gpu, frame, planes, views, size, opts),
         Taken::Copied(c) => {
-            renderer.render_copied(gpu, frame, &c.buffer, &c.planes, view, size, opts)
+            renderer.render_copied(gpu, frame, &c.buffer, &c.planes, views, size, opts)
         }
     }
 }

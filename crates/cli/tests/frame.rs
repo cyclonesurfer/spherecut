@@ -1208,6 +1208,7 @@ fn tagged_clip(dir: &Path, name: &str, img: &RgbImage, boxes: Vec<u8>) -> PathBu
         edit_start: 0,
         time_base: None,
         crop_left: 0,
+        device: None,
     };
     let mut w = Mp4Writer::create(&dir.join(format!("{name}.mp4")), &settings, None).unwrap();
     w.push_video(&yuv::to_yuv(
@@ -2121,6 +2122,7 @@ fn lossless_clip(
         edit_start: 0,
         time_base: None,
         crop_left: 0,
+        device: None,
     };
     let mut w = Mp4Writer::create(path, &settings, None).unwrap();
     w.push_video(planes).unwrap();

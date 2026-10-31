@@ -442,6 +442,8 @@ struct StreamView {
     failed_request: Option<u64>,
     landed: Option<crate::shared::Landed>,
     end: Option<Time>,
+    /// Its last frame's time, once decoding reached it.
+    last: Option<Time>,
 }
 
 /// The UI thread's own state.
@@ -1141,6 +1143,7 @@ impl Player {
                 failed_request: s.failed_request,
                 landed: s.landed,
                 end: s.end.or_else(|| s.info.as_ref().and_then(|i| i.duration)),
+                last: s.last,
             };
         }
         if ui.audio.is_none()
@@ -1348,18 +1351,31 @@ impl Player {
         true
     }
 
-    /// Pause at the end, once the clock passes the first stream's.
+    /// Pause at the end, once the clock passes the first stream's, on its
+    /// last frame: one whose upload came too late for its time comes up
+    /// once it is uploaded. Before decoding reached the end (the end is the
+    /// container's duration), a frame's length before it, as the frame on
+    /// screen lasts.
     fn check_end(&self, ui: &mut Ui, t: Time, now: Instant) {
         if !ui.clock.is_running() {
             return;
         }
-        let Some(end) = ui.view.first().and_then(|s| s.end) else {
+        let Some(first) = ui.view.first() else {
+            return;
+        };
+        let (Some(end), last) = (first.end, first.last) else {
             return;
         };
         if t >= end {
             Self::pause_ui(&self.shared, ui, now);
-            if let Some(Some(s)) = ui.shown.first() {
-                ui.clock.set(s.view.frame.time, now);
+            let shown = ui.shown.first().and_then(|s| s.as_ref());
+            let at = last.or_else(|| {
+                let f = shown?.view.frame;
+                let before = f.duration.and_then(|d| end.checked_sub(d).ok());
+                Some(before.map_or(f.time, |b| b.max(f.time)))
+            });
+            if let Some(at) = at {
+                ui.clock.set(at, now);
             }
             ui.at_end = true;
             self.shared.event(PlayerEvent::Ended);

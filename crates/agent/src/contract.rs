@@ -15,7 +15,10 @@ use std::path::Path;
 
 use serde::Serialize;
 use spherecut_core::FrameTime;
+use spherecut_core::time::{FrameRate, Time};
 use spherecut_core::video::ColorInfo;
+use spherecut_export::warning::codes as export_warnings;
+use spherecut_export::{ExportError, Fallback};
 use spherecut_media::MediaError;
 use spherecut_media::doctor::{DoctorReport, Severity};
 use spherecut_media::probe::{self, ProbeError, ProbeReport};
@@ -27,6 +30,9 @@ pub const PROBE: &str = "spherecut.probe/1";
 pub const DOCTOR: &str = "spherecut.doctor/1";
 /// The schema of `spherecut frame --json`.
 pub const FRAME: &str = "spherecut.frame/1";
+/// The schema of `spherecut render --json`: one envelope a line, each
+/// naming its event (D51).
+pub const RENDER: &str = "spherecut.render/1";
 /// The schema of `spherecut call`, which always prints JSON: an agent
 /// tool's Response as `result`, or its error (a1-plan amendment 7).
 pub const CALL: &str = "spherecut.call/1";
@@ -82,15 +88,30 @@ pub mod codes {
     /// (exit 1).
     pub const NOT_EQUIRECT: &str = "not_equirect";
     /// frame: no frame at the time or number asked for: it is past the
-    /// end (exit 1).
+    /// end (exit 1). render: `--range` reaches outside the sequence
+    /// (exit 1).
     pub const OUT_OF_RANGE: &str = "out_of_range";
-    /// frame: interrupted by SIGINT, leaving no output file (exit 4).
+    /// frame and render: interrupted by SIGINT, leaving no output file
+    /// (exit 4).
     pub const CANCELLED: &str = "cancelled";
     /// The GUI: no Wayland or X11 display to open its window on (exit 3).
     pub const NO_DISPLAY: &str = "no_display";
     /// The GUI's smoke run: no frame of the clip within 60 s, or no UI
     /// pass for 15 s (exit 1).
     pub const TIMED_OUT: &str = "timed_out";
+    /// render: the file isn't a Spherecut project (exit 1).
+    pub const NOT_PROJECT: &str = "not_project";
+    /// render: the project was saved by a newer Spherecut (exit 1).
+    pub const NEWER_SCHEMA: &str = "newer_schema";
+    /// render: the project file doesn't read as one: a field of the wrong
+    /// kind, or a time whose `seconds` and `exact` disagree (exit 1).
+    pub const MALFORMED_PROJECT: &str = "malformed_project";
+    /// render: the project breaks one of its rules, as loaded or with the
+    /// flags' changes (exit 1).
+    pub const INVALID_PROJECT: &str = "invalid_project";
+    /// render: the clip's media file isn't where the project says, so the
+    /// clip is offline (exit 1).
+    pub const MEDIA_OFFLINE: &str = "media_offline";
 
     /// Every error code above.
     pub const ALL: &[&str] = &[
@@ -104,6 +125,11 @@ pub mod codes {
         CANCELLED,
         NO_DISPLAY,
         TIMED_OUT,
+        NOT_PROJECT,
+        NEWER_SCHEMA,
+        MALFORMED_PROJECT,
+        INVALID_PROJECT,
+        MEDIA_OFFLINE,
     ];
 
     /// frame's warnings that aren't errors' codes too: what it did with
@@ -122,6 +148,9 @@ pub mod codes {
         /// `--filter aniso` on a device without anisotropic filtering:
         /// the render is isotropic.
         pub const ANISOTROPY_UNAVAILABLE: &str = "anisotropy_unavailable";
+        /// render: the clip's media file is there but isn't the one added
+        /// (its size or first MiB differs); it is exported anyway.
+        pub const MEDIA_CHANGED: &str = "media_changed";
 
         pub const ALL: &[&str] = &[
             STEREO_LEFT_EYE,
@@ -129,13 +158,15 @@ pub mod codes {
             CROP_APPLIED,
             POSE_NOT_APPLIED,
             ANISOTROPY_UNAVAILABLE,
+            MEDIA_CHANGED,
         ];
     }
 }
 
 /// Every code the JSON can carry, as an error or a warning, sorted and
 /// without repeats: the CLI's own, [`MediaError::CODES`],
-/// [`probe::codes::ALL`] and [`RenderError::CODES`].
+/// [`probe::codes::ALL`], [`RenderError::CODES`], and the export's
+/// ([`ExportError::CODES`] and its warnings').
 pub fn all_codes() -> Vec<&'static str> {
     let mut all: Vec<&'static str> = codes::ALL
         .iter()
@@ -143,6 +174,8 @@ pub fn all_codes() -> Vec<&'static str> {
         .chain(MediaError::CODES)
         .chain(probe::codes::ALL)
         .chain(RenderError::CODES)
+        .chain(ExportError::CODES)
+        .chain(export_warnings::ALL)
         .copied()
         .collect();
     all.sort_unstable();
@@ -150,11 +183,12 @@ pub fn all_codes() -> Vec<&'static str> {
     all
 }
 
-/// The exit status of a `frame` run, or the GUI's, that failed with
-/// `code`: 2 for a usage error, 3 for a device, codec or display the run
-/// needs and doesn't have, 4 when it was cancelled, and 1 for anything
-/// else (D27). `hw_*` codes fail a run only when `--decoder` named the
-/// hardware; `auto` falls back to software instead.
+/// The exit status of a `frame` or `render` run, or the GUI's, that
+/// failed with `code`: 2 for a usage error, 3 for a device, codec,
+/// encoder or display the run needs and doesn't have, 4 when it was
+/// cancelled, and 1 for anything else (D27, D51). `hw_*` codes fail a
+/// run only when `--decoder` or `--encoder` named the hardware; `auto`
+/// falls back to software instead.
 pub fn frame_exit(code: &str) -> Exit {
     match code {
         codes::USAGE => Exit::Usage,
@@ -165,6 +199,7 @@ pub fn frame_exit(code: &str) -> Exit {
         | "hw_failed"
         | "import_failed"
         | "no_decoder"
+        | "no_encoder"
         | codes::NO_DISPLAY => Exit::Missing,
         codes::CANCELLED => Exit::Cancelled,
         _ => Exit::Failed,
@@ -302,6 +337,26 @@ pub struct FrameResult {
     /// The colour the frame was decoded as, with what was assumed.
     pub color: ColorInfo,
     pub source: SourceInfo,
+    /// With `--project`, the sequence's frame rendered; null otherwise.
+    pub sequence: Option<SequenceFrame>,
+}
+
+/// The frame of a project's sequence that `frame --project` rendered,
+/// as `spherecut render` renders it.
+#[derive(Debug, Clone, Serialize)]
+pub struct SequenceFrame {
+    /// The project file, as given.
+    pub project: String,
+    /// The frame, in sequence time from the sequence's start, with its
+    /// index at the sequence's rate.
+    pub frame: FrameTime,
+    /// The sequence's output: `flat` or `equirect`.
+    pub output: &'static str,
+    /// The views averaged over the shutter for motion blur: 1 without.
+    pub views: usize,
+    /// Motion blur needed more views than its cap, and rendered that
+    /// many.
+    pub capped: bool,
 }
 
 /// A frame of the stream: its own timestamp, and its clip time.
@@ -351,10 +406,12 @@ pub struct DecodeInfo {
     pub fallback: Option<FallbackInfo>,
 }
 
-/// A hardware decode that went on in software.
+/// A hardware decode that went on in software, or (render) a hardware
+/// encoder that did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FallbackInfo {
-    /// `vaapi` or `vulkan`.
+    /// `vaapi` or `vulkan` for a decode; FFmpeg's name for an encoder,
+    /// such as `hevc_vaapi`.
     pub from: &'static str,
     /// `hw_unavailable` (no device), `hw_unsupported` (the device turned
     /// the stream down) or `hw_failed` (it failed on a frame).
@@ -384,6 +441,185 @@ pub struct SourceInfo {
     pub size: Size,
     /// The decoder's pixel format, as FFmpeg names it.
     pub pix_fmt: String,
+}
+
+impl From<&Fallback> for FallbackInfo {
+    fn from(f: &Fallback) -> Self {
+        FallbackInfo {
+            from: f.from,
+            code: f.code,
+            reason: f.reason.clone(),
+        }
+    }
+}
+
+/// A line of `spherecut render --json`, as its envelope's `result` (D51):
+/// `start` once the export has started, `progress` at most once a
+/// second, and `result` last, for an export that wrote its file. A run
+/// that fails ends instead with an envelope that has an `error` and no
+/// `result`, as every command's failure does.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum RenderEvent {
+    Start(RenderStart),
+    Progress(RenderProgress),
+    Result(RenderResult),
+}
+
+/// What the export is about to do.
+#[derive(Debug, Clone, Serialize)]
+pub struct RenderStart {
+    /// The file to write, as given.
+    pub output: String,
+    /// The project file, as given.
+    pub project: String,
+    /// The preset's name, such as `flat-16x9-1080` or `360-5760`.
+    pub preset: String,
+    /// The picture's size: the preset's, or its draft's.
+    pub size: Size,
+    /// `--draft`: half the size, the encoders' fastest settings.
+    pub draft: bool,
+    pub rate: FrameRate,
+    /// The part of the sequence exported, in sequence time: all of it,
+    /// or `--range`.
+    pub range: TimeRange,
+    pub frames: u64,
+    /// `frames / rate`.
+    pub duration: Time,
+    /// `h264`, `hevc` or `av1`.
+    pub codec: &'static str,
+    /// `high`, `medium` or `small`.
+    pub quality: &'static str,
+    /// The encoder tried first, as FFmpeg names it.
+    pub encoder: &'static str,
+    /// The hardware encoder `auto` passed over without trying, and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<FallbackInfo>,
+    /// `copy`, `aac` or `none`, as asked.
+    pub audio: &'static str,
+    pub motion_blur: bool,
+}
+
+/// A span of time, [start, end).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TimeRange {
+    pub start: Time,
+    pub end: Time,
+}
+
+/// How far the export has got.
+#[derive(Debug, Clone, Serialize)]
+pub struct RenderProgress {
+    /// Frames muxed: never fewer than the line before said, even when an
+    /// encoder that failed in its first second starts over in software.
+    pub frames_done: u64,
+    pub frames_total: u64,
+    /// Frames a second over the last two seconds; 0 until it can tell.
+    pub fps: f64,
+    /// Seconds since the export started.
+    pub elapsed: f64,
+    /// Seconds left at `fps`; null until it can tell.
+    pub eta: Option<f64>,
+    /// The encoder now.
+    pub encoder: &'static str,
+    /// The hardware encoder the export passed over or left, and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<FallbackInfo>,
+    /// The hardware decode the export passed over or left, and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_fallback: Option<FallbackInfo>,
+    /// The last pass, which writes the finished file: bytes written and
+    /// in all, once it has started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finishing: Option<Finishing>,
+}
+
+/// The last pass's bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Finishing {
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}
+
+/// The finished file, which passed every check before it was put at
+/// `output`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RenderResult {
+    pub output: String,
+    pub frames: u64,
+    pub duration: Time,
+    pub size: Size,
+    pub draft: bool,
+    pub rate: FrameRate,
+    pub codec: &'static str,
+    /// The encoder that wrote the video, as FFmpeg names it.
+    pub encoder: &'static str,
+    /// The hardware encoder passed over, or left in its first second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<FallbackInfo>,
+    pub decode: RenderDecode,
+    pub ten_bit: bool,
+    /// The audio track; null for none.
+    pub audio: Option<RenderAudio>,
+    /// The file's size.
+    pub bytes: u64,
+    /// Frames whose motion blur needed more views than the cap.
+    pub blur_capped: u64,
+    /// The checks the file passed, in order.
+    pub checks: Vec<RenderCheck>,
+    /// Where the time went.
+    pub stages: RenderStages,
+    /// Seconds from start to finish.
+    pub elapsed: f64,
+}
+
+/// Each stage's busy seconds over the try that made the file. Decode,
+/// render and encode run at once, so the busiest sets the pace.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct RenderStages {
+    pub decode: f64,
+    /// The upload and the draw.
+    pub render: f64,
+    /// Copying the planes back from the GPU.
+    pub readback: f64,
+    pub encode: f64,
+    /// After the last frame: the encoder's flush, the last pass and the
+    /// checks.
+    pub finish: f64,
+}
+
+/// Where the export's frames were decoded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderDecode {
+    /// `vaapi` or `software`: where the last frame was decoded.
+    pub path: &'static str,
+    /// The hardware decode passed over or left, and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<FallbackInfo>,
+}
+
+/// The export's audio track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderAudio {
+    /// The source's stream, by FFmpeg's index.
+    pub stream: usize,
+    /// FFmpeg's name for the encoder, or the copied codec's.
+    pub encoder: &'static str,
+    pub rate: u32,
+    pub channels: u16,
+    /// First-order ambiX, with an `SA3D` box.
+    pub ambix: bool,
+    /// Samples a channel.
+    pub samples: u64,
+}
+
+/// A check the finished file passed, and what it found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderCheck {
+    /// `probe`, `layout`, `codec`, `size`, `frames`, `duration`, `rate`,
+    /// `st3d`, `sv3d`, `v1`, `spherical`, `audio` or `sa3d`.
+    pub name: &'static str,
+    pub found: String,
 }
 
 /// What `spherecut probe --json` gives in `result`: one entry per file,
@@ -516,6 +752,7 @@ pub fn schema_for(args: &[OsString]) -> &'static str {
         Some("probe") => PROBE,
         Some("doctor") => DOCTOR,
         Some("frame") => FRAME,
+        Some("render") => RENDER,
         Some("call") => CALL,
         _ => CLI,
     }

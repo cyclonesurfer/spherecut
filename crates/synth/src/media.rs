@@ -336,6 +336,7 @@ impl Spec {
             edit_start: self.edit_start,
             time_base,
             crop_left: self.crop_left,
+            device: None,
         })
     }
 }
@@ -1151,6 +1152,7 @@ pub fn write_mjpeg_declaring(
         edit_start: 0,
         time_base: None,
         crop_left: 0,
+        device: None,
     };
     let mut w = Mp4Writer::create(&path, &settings, None)?;
     for _ in 0..2 {

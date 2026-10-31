@@ -63,6 +63,15 @@ pub enum ExportError {
     /// No encoder the job can use for its codec.
     #[error("{0}")]
     NoEncoder(String),
+    /// The VA-API encoder that the job asked for, or the last left to
+    /// try, failed to open or failed in its first second: D27's code for
+    /// it (`hw_unavailable`, `hw_unsupported` or `hw_failed`).
+    #[error("{message}")]
+    Hardware {
+        encoder: &'static str,
+        code: &'static str,
+        message: String,
+    },
     /// The output's disk hasn't room for the export (section 8.6): bytes
     /// free there, and at most needed.
     #[error(
@@ -107,6 +116,49 @@ impl ExportError {
         }
     }
 
+    /// Every code [`code`](Self::code) gives.
+    pub const CODES: &'static [&'static str] = &[
+        "cancelled",
+        "cannot_export",
+        "output_exists",
+        "no_encoder",
+        "hw_unavailable",
+        "hw_unsupported",
+        "hw_failed",
+        "no_space",
+        "decode_failed",
+        "render_failed",
+        "encode_failed",
+        "mux_failed",
+        "metadata_failed",
+        "check_failed",
+        "io_error",
+    ];
+
+    /// The error's stable code, as `spherecut render --json` gives it
+    /// (D51): within a schema version a code keeps its name and meaning.
+    /// A failed stage is its own code, the output file's (`file`) being
+    /// D27's `io_error`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            ExportError::Cancelled => "cancelled",
+            ExportError::Invalid(_) => "cannot_export",
+            ExportError::OutputExists(_) => "output_exists",
+            ExportError::NoEncoder(_) => "no_encoder",
+            ExportError::Hardware { code, .. } => code,
+            ExportError::NoSpace { .. } => "no_space",
+            ExportError::Failed { stage, .. } => match stage {
+                Stage::Decode => "decode_failed",
+                Stage::Render => "render_failed",
+                Stage::Encode => "encode_failed",
+                Stage::Mux => "mux_failed",
+                Stage::Metadata => "metadata_failed",
+                Stage::Check => "check_failed",
+                Stage::File => "io_error",
+            },
+        }
+    }
+
     /// The stage that failed, for [`ExportError::Failed`].
     pub fn stage(&self) -> Option<Stage> {
         match self {
@@ -119,6 +171,44 @@ impl ExportError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_code_is_listed() {
+        let stages = [
+            Stage::Decode,
+            Stage::Render,
+            Stage::Encode,
+            Stage::Mux,
+            Stage::Metadata,
+            Stage::Check,
+            Stage::File,
+        ];
+        let mut errors = vec![
+            ExportError::Cancelled,
+            ExportError::Invalid(String::new()),
+            ExportError::OutputExists(PathBuf::new()),
+            ExportError::NoEncoder(String::new()),
+            ExportError::NoSpace {
+                folder: PathBuf::new(),
+                needed: 1,
+                free: 0,
+            },
+        ];
+        errors.extend(stages.map(|s| ExportError::failed(s, None, "")));
+        errors.extend(
+            ["hw_unavailable", "hw_unsupported", "hw_failed"].map(|code| ExportError::Hardware {
+                encoder: "hevc_vaapi",
+                code,
+                message: String::new(),
+            }),
+        );
+        let mut given: Vec<_> = errors.iter().map(ExportError::code).collect();
+        given.sort_unstable();
+        given.dedup();
+        let mut listed = ExportError::CODES.to_vec();
+        listed.sort_unstable();
+        assert_eq!(given, listed);
+    }
 
     #[test]
     fn no_space_gives_both_numbers() {

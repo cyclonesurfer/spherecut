@@ -4,9 +4,12 @@
 //! sides, or a 2:1 sphere at one of three widths. Every size is a
 //! multiple of 4 wide and even tall, as the YUV pass needs. The bitrates
 //! start from YouTube's upload guidance for H.264 at 30 fps (4K30 SDR 35
-//! to 45 Mb/s, 8K30 80 to 160) and scale by rate / 30, by 0.7 for HEVC
-//! and by 0.6 for AV1. They are the VBV cap's base for the software
-//! encoders (section 8.3) and the free-space estimate's (section 8.6).
+//! to 45 Mb/s, 8K30 80 to 160) and scale by rate / 30 up to 30 fps and
+//! half as steeply above it, so that 60 fps gets 1.5 times 30's as
+//! YouTube's own figures do (amendment 2 item 47), by 0.7 for HEVC and by
+//! 0.6 for AV1. They are the hardware encoders' target, the VBV cap's base
+//! for the software ones (section 8.3) and the free-space estimate's
+//! (section 8.6).
 
 use std::fmt;
 
@@ -65,8 +68,19 @@ impl Preset {
         }
     }
 
+    /// The size `--draft` renders at (M2 plan section 9, amendment 2
+    /// item 23): half of each side, rounded up to a multiple of 8, so
+    /// that 4:5 at 1080 drafts at 544 × 680 rather than 540 × 675. The
+    /// aspect moves by under 1 %.
+    pub fn draft_size(self) -> (u32, u32) {
+        let (w, h) = self.size();
+        let half = |side: u32| side.div_ceil(16) * 8;
+        (half(w), half(h))
+    }
+
     /// The bitrate in bits a second for `quality` in `codec` at `rate`:
-    /// section 8.1's table, scaled.
+    /// section 8.1's table, scaled. Above 30 fps the rate's factor is
+    /// (rate + 30) / 60: 1.5 at 60, 1.33 at 50.
     pub fn bitrate(self, quality: Quality, codec: Codec, rate: FrameRate) -> u64 {
         let base_kbps = self.base_kbps(quality);
         // Each factor as a fraction: the aspect's, the codec's, and the
@@ -93,8 +107,13 @@ impl Preset {
             r.num().unsigned_abs() as u128,
             r.den().unsigned_abs() as u128,
         );
-        let num = u128::from(base_kbps) * 1000 * aspect.0 * codec.0 * rn;
-        let den = aspect.1 * codec.1 * rd * 30;
+        let rate: (u128, u128) = if rn <= 30 * rd {
+            (rn, 30 * rd)
+        } else {
+            (rn + 30 * rd, 60 * rd)
+        };
+        let num = u128::from(base_kbps) * 1000 * aspect.0 * codec.0 * rate.0;
+        let den = aspect.1 * codec.1 * rate.1;
         // To the nearest bit a second.
         ((num + den / 2) / den) as u64
     }
@@ -180,6 +199,24 @@ mod tests {
     }
 
     #[test]
+    fn drafts_are_half_each_side_rounded_up_to_a_multiple_of_8() {
+        let draft = |name| Preset::parse(name).unwrap().draft_size();
+        assert_eq!(draft("flat-4x5-1080"), (544, 680));
+        assert_eq!(draft("flat-16x9-1080"), (960, 544));
+        assert_eq!(draft("flat-9x16-2160"), (1080, 1920));
+        assert_eq!(draft("360-3840"), (1920, 960));
+        assert_eq!(draft("360-5760"), (2880, 1440));
+        for p in Preset::all() {
+            let ((w, h), (dw, dh)) = (p.size(), p.draft_size());
+            assert!(dw.is_multiple_of(8) && dh.is_multiple_of(8), "{p}");
+            assert!(2 * dw >= w && 2 * dw < w + 16, "{p}");
+            assert!(2 * dh >= h && 2 * dh < h + 16, "{p}");
+            let aspect = |w: u32, h: u32| f64::from(w) / f64::from(h);
+            assert!((aspect(dw, dh) / aspect(w, h) - 1.0).abs() < 0.01, "{p}");
+        }
+    }
+
+    #[test]
     fn an_output_is_a_preset_only_at_a_listed_size() {
         let flat = Output::Flat {
             aspect: Aspect::Portrait,
@@ -225,11 +262,20 @@ mod tests {
         let q = Quality::High;
         assert_eq!(p("360-7680").bitrate(q, Codec::Hevc, fps30), 112 * MB);
         assert_eq!(p("360-7680").bitrate(q, Codec::Av1, fps30), 96 * MB);
-        // The rate over 30: twice at 60, 1000/1001 of it at 29.97 (to the
-        // nearest bit a second).
+        // The rate over 30 up to 30 fps: 1000/1001 of it at 29.97 (to the
+        // nearest bit a second). Above, (rate + 30) / 60: 1.5 times 30's
+        // at 60, as YouTube has it, not twice.
         let at = |rate| p("flat-16x9-1080").bitrate(q, Codec::H264, rate);
-        assert_eq!(at(FrameRate::FPS_60), 24 * MB);
+        assert_eq!(at(FrameRate::FPS_60), 18 * MB);
+        assert_eq!(at(FrameRate::FPS_50), 16 * MB);
+        assert_eq!(at(FrameRate::FPS_30), 12 * MB);
         assert_eq!(at(FrameRate::FPS_29_97), 11_988_012);
         assert_eq!(at(FrameRate::FPS_24), 9_600_000);
+        // 59.94 is (60000/1001 + 30) / 60 of 12 Mb/s.
+        assert_eq!(at(FrameRate::FPS_59_94), 17_988_012);
+        assert_eq!(
+            p("360-3840").bitrate(q, Codec::Hevc, FrameRate::FPS_60),
+            47_250_000
+        );
     }
 }

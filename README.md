@@ -265,6 +265,7 @@ spherecut frame clip.mp4 -o out.png --frame 370 --projection fisheye --fov 360 -
 spherecut frame clip.mp4 -o out.png --time 30000/1001 --projection stereographic --fov 300 --pitch -90   # a tiny planet
 spherecut frame clip.mp4 -o out.png --morph-to stereographic --morph 0.5 --fov 150
 spherecut frame clip.mp4 -o out.png --overwrite --depth 16 --json
+spherecut frame --project trip.spherecut -o out.png --time 2.5   # the sequence at 2.5 s, as render writes it
 ```
 
 - **When**: `--time` takes seconds (`12`, `12.5`), `m:s` or `h:m:s`
@@ -317,6 +318,11 @@ spherecut frame clip.mp4 -o out.png --overwrite --depth 16 --json
   into place), so a failed or interrupted run leaves nothing behind, and
   a file that appears at the output while the frame renders is kept
   (DECISIONS D16).
+- **A project's frame**: `--project P` renders the frame of P's
+  sequence at `--time` or `--frame`, counted from the sequence's start,
+  as `spherecut render` renders it before the encode: the keyed view,
+  the output size and the motion blur are the project's, so the camera
+  flags, `--size` and `--filter` don't go with it (DECISIONS D51).
 - **Ctrl+C** ends the run with exit 4 and no output. It stops a seek or
   a read at once; during probe, the GPU's set-up, the render or the
   PNG's encode it takes effect when that step ends, which at a large

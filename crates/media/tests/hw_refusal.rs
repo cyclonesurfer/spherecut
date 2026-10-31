@@ -62,6 +62,7 @@ fn clip(dir: &TempDir, name: &str, encoder: &str, options: &[(&str, &str)]) -> P
         edit_start: 0,
         time_base: None,
         crop_left: 0,
+        device: None,
     };
     let (w, h) = (w as usize, h as usize);
     let mut out = Mp4Writer::create(&dir.0.join(name), &settings, None).unwrap();

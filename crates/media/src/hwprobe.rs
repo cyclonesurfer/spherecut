@@ -210,6 +210,73 @@ pub(crate) fn hw_frames(
     Ok(frames)
 }
 
+/// Surfaces on a hardware device that an encoder reads its frames from
+/// (M2 plan section 8.3): a frames context of one size and system-memory
+/// format, NV12 or P010, which VA-API's encoders need (the device alone
+/// is refused).
+pub(crate) struct Surfaces {
+    frames: BufferRef,
+    hw_pixel: ff::format::Pixel,
+}
+
+// SAFETY: a frames context is reference-counted with atomics, and FFmpeg
+// locks its own pool; a writer that owns `Surfaces` uses them from one
+// thread at a time.
+unsafe impl Send for Surfaces {}
+
+impl Surfaces {
+    /// `w`x`h` surfaces of `sw_format` on `dev`.
+    pub(crate) fn new(
+        dev: &HwDevice,
+        sw_format: ff::format::Pixel,
+        w: u32,
+        h: u32,
+    ) -> Result<Surfaces, HwProbeError> {
+        Ok(Surfaces {
+            frames: hw_frames(dev, sw_format, w, h)?,
+            hw_pixel: dev.hw_pixel(),
+        })
+    }
+
+    /// Give `enc`, not yet opened, these surfaces to encode from: their
+    /// frames context and the device's pixel format.
+    pub(crate) fn attach(&self, enc: &mut ff::encoder::video::Video) -> Result<(), HwProbeError> {
+        enc.set_format(self.hw_pixel);
+        // SAFETY: takes a new reference to a live frames context.
+        let frames_ref = unsafe { sys::av_buffer_ref(self.frames.0) };
+        if frames_ref.is_null() {
+            return Err(no_memory("setting up the encoder"));
+        }
+        // SAFETY: the encoder is not opened yet, so hw_frames_ctx may be
+        // set; one set before is released first, and the context takes
+        // over our new reference.
+        unsafe {
+            let ctx = enc.as_mut_ptr();
+            sys::av_buffer_unref(&mut (*ctx).hw_frames_ctx);
+            (*ctx).hw_frames_ctx = frames_ref;
+        }
+        Ok(())
+    }
+
+    /// `src`, a system-memory frame of the surfaces' format and size, in
+    /// a new surface with its timestamp. The encoder keeps a reference to
+    /// the surface until it has coded it, and the pool takes it back.
+    pub(crate) fn upload(&self, src: &ff::frame::Video) -> Result<ff::frame::Video, HwProbeError> {
+        let mut surface = ff::frame::Video::empty();
+        // SAFETY: `frames` is an initialised frames context, and get_buffer
+        // gives `surface` a frame from it.
+        let ret = unsafe { sys::av_hwframe_get_buffer(self.frames.0, surface.as_mut_ptr(), 0) };
+        check(ret, "getting a frame on the device")?;
+        // SAFETY: `src` is a system-memory frame, which the caller made of
+        // the frames context's sw_format and size, and `surface` one of its
+        // device frames; the transfer refuses any other.
+        let ret = unsafe { sys::av_hwframe_transfer_data(surface.as_mut_ptr(), src.as_ptr(), 0) };
+        check(ret, "uploading the frame")?;
+        surface.set_pts(src.pts());
+        Ok(surface)
+    }
+}
+
 /// A system-memory frame with a diagonal luma ramp and neutral chroma, in
 /// NV12 or P010.
 pub(crate) fn ramp(sw_format: ff::format::Pixel, w: u32, h: u32) -> ff::frame::Video {
@@ -263,18 +330,10 @@ pub(crate) fn encode_one(
     } else {
         ff::format::Pixel::NV12
     };
-    let frames = hw_frames(dev, sw_format, w, h)?;
-    let src = ramp(sw_format, w, h);
-    let mut surface = ff::frame::Video::empty();
-    // SAFETY: `frames` is an initialised frames context, and get_buffer
-    // gives `surface` a frame from it.
-    let ret = unsafe { sys::av_hwframe_get_buffer(frames.0, surface.as_mut_ptr(), 0) };
-    check(ret, "getting a frame on the device")?;
-    // SAFETY: `src` is a system-memory frame of the frames context's
-    // sw_format and size, and `surface` one of its device frames.
-    let ret = unsafe { sys::av_hwframe_transfer_data(surface.as_mut_ptr(), src.as_ptr(), 0) };
-    check(ret, "uploading the frame")?;
-    surface.set_pts(Some(0));
+    let surfaces = Surfaces::new(dev, sw_format, w, h)?;
+    let mut src = ramp(sw_format, w, h);
+    src.set_pts(Some(0));
+    let surface = surfaces.upload(&src)?;
 
     let mut enc = ff::codec::context::Context::new_with_codec(codec)
         .encoder()
@@ -282,17 +341,9 @@ pub(crate) fn encode_one(
         .map_err(ffmpeg("setting up the encoder"))?;
     enc.set_width(w);
     enc.set_height(h);
-    enc.set_format(dev.hw_pixel());
     enc.set_time_base((1, 30));
     enc.set_frame_rate(Some((30, 1)));
-    // SAFETY: takes a new reference to a live frames context.
-    let frames_ref = unsafe { sys::av_buffer_ref(frames.0) };
-    if frames_ref.is_null() {
-        return Err(no_memory("setting up the encoder"));
-    }
-    // SAFETY: the encoder is not opened yet, so hw_frames_ctx may be set;
-    // the context takes over our new reference.
-    unsafe { (*enc.as_mut_ptr()).hw_frames_ctx = frames_ref };
+    surfaces.attach(&mut enc)?;
     let mut enc = enc.open_as(codec).map_err(ffmpeg("opening the encoder"))?;
     enc.send_frame(&surface).map_err(ffmpeg("encoding"))?;
     enc.send_eof().map_err(ffmpeg("encoding"))?;
@@ -1019,6 +1070,42 @@ impl field::Visit for Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surfaces_take_nv12_and_p010_frames_with_their_timestamps() {
+        // FFmpeg's Vulkan device on lavapipe stands in for VA-API's: the
+        // frames context, the upload and the timestamp are the same code.
+        let dev = HwDevice::open("vulkan", Some("llvmpipe")).unwrap_or_else(|e| {
+            panic!(
+                "{e}; Tier 1 needs FFmpeg's Vulkan device on Mesa's lavapipe \
+                 (mesa-vulkan-drivers on Fedora and Ubuntu, vulkan-swrast on Arch)"
+            )
+        });
+        let (w, h) = (128, 64);
+        for (fmt, sample) in [(ff::format::Pixel::NV12, 1), (ff::format::Pixel::P010LE, 2)] {
+            let s = Surfaces::new(&dev, fmt, w, h).unwrap();
+            let mut src = ramp(fmt, w, h);
+            src.set_pts(Some(7));
+            let surface = s.upload(&src).unwrap();
+            assert_eq!(surface.pts(), Some(7), "{fmt:?}");
+            assert_eq!(ffi::frame_format(&surface), dev.hw_pix_fmt(), "{fmt:?}");
+            let back = ffi::download_frame(&surface).unwrap();
+            for (plane, rows) in [(0, h as usize), (1, h as usize / 2)] {
+                let row = w as usize * sample;
+                let (a, sa) = ffi::plane_and_stride(&src, plane).unwrap();
+                let (b, sb) = ffi::plane_and_stride(&back, plane).unwrap();
+                for y in 0..rows {
+                    assert_eq!(
+                        a[y * sa..y * sa + row],
+                        b[y * sb..y * sb + row],
+                        "{fmt:?} plane {plane} row {y}"
+                    );
+                }
+            }
+            // A frame bigger than the surfaces is refused.
+            assert!(s.upload(&ramp(fmt, w * 2, h)).is_err(), "{fmt:?}");
+        }
+    }
 
     #[test]
     fn vulkan_versions_unpack() {

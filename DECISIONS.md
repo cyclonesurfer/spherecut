@@ -365,6 +365,13 @@ slower at 5.7K. A hardware decoder keeps that default.
 fallback, with a warning and a `FellBack` event before the next frame;
 any other failure on the device is `MediaError::HwFailed`, never damage.
 
+*Updated 2026-10-31 by D52 (M2.5):* the export decodes as `frame
+--decoder auto` does, on VA-API going on in software, and its report and
+`spherecut render`'s result say where the frames were decoded and the
+first fallback, with its code. An encoder falls back the same way, in
+the open: `auto` restarts in software when VA-API's encoder fails in its
+first second, and the result's `fallback` says so.
+
 ## D4. Our own MP4 box parser and injector for spherical metadata
 
 *2026-10-22, M0.*
@@ -5019,7 +5026,12 @@ What:
     and the benchmarks do.
   - **The end.** Once the clock passes the first stream's end (its last
     frame's end, else its duration), it pauses on the last frame and
-    sends `Ended`. `play` then starts from 0.
+    sends `Ended`. `play` then starts from 0. *Amended 2026-10-31:* the
+    clock stops at the last frame's time, not the time of the frame on
+    screen, so a last frame uploaded too late for its time comes up
+    once it is (on lavapipe under load the clip ended on an earlier
+    frame). Before decoding reached the end (its duration), the clock
+    stops a frame's length before it, as the frame on screen lasts.
   - **Instant steps.** A step of one frame either way is instant when
     the frame next in the run is in a Ready slot, which the upload
     thread sees to while paused. It is shown at once, the clock moves
@@ -7500,8 +7512,8 @@ What, as `crates/render` does it:
   `ViewAnim::at`, with blur or without. `StillRenderer::render_blurred`
   (an image) and `render_yuv` (the encoder's planes) take those views,
   and so will the export, so the parity reference renders the same
-  frame the export does. `frame --project` (M2.5) and A2's `compare`
-  go through them.
+  frame the export does. `frame --project` (M2.5, D51 has it) and A2's
+  `compare` go through them.
 - **The filter**: the export and its parity reference sample with the
   viewer's default, the anisotropic filter where the GPU has it and the
   isotropic one where it doesn't, so an export looks as it did when it
@@ -7677,14 +7689,134 @@ angle-rate Jacobian, singular at the poles); or M9's tracker output
 needs smoothing, for which an approximating C² spline suits better than
 one through every key.
 
+## D51. `spherecut render`: the export from the command line, one envelope a line
+
+*2026-10-31, M2 slice M2.5. From `docs/design/m2-plan.md` section 9 and
+its amendment 2 (items 5, 25, 32, 40). Updates D27. `docs/cli-json.md`
+is the contract, with a test for every field; this says why it has the
+shape it has, and where it differs from the plan.*
+
+What:
+
+- **`spherecut render PROJECT -o OUT`** exports the project's one
+  sequence through the export crate's handle (D52), the same one the
+  app's export window and A2 will drive. Each flag overrides one stored
+  setting for this run and is never saved: the plan's `--preset`,
+  `--codec`, `--encoder`, `--quality`, `--range`, `--draft`, `--audio`,
+  `--motion-blur` and `--overwrite`, and three more: `--eight-bit`
+  (section 8.3's forced 8 bits), `--decoder auto|software` (item 25)
+  and `--adapter`, as `frame` has them. `--preset` and `--range` go
+  through the project's own edits, so its rules (a preset is a listed
+  size, a trim has frames) hold for flags as for the window.
+- **The run, in order**: the command line (exit 2); the output, refused
+  before any work if something is there and `--overwrite` isn't given,
+  and a directory, pipe or device either way (exit 1, as `frame`); the
+  project, whose load errors keep their codes (`not_found`,
+  `not_project`, `malformed_project`, `invalid_project`,
+  `newer_schema`, exit 1), and its clip's media (`media_offline` with
+  the path, exit 1; a file whose size or head changed is the warning
+  `media_changed`); the flags; the SIGINT handler and the GPU (`no_gpu`,
+  exit 3); the export's own refusals; then the export.
+- **Every line under `--json` is a whole D27 envelope** of schema
+  `spherecut.render/1`, and `result.event` names it: `start` once,
+  `progress` at most once a second, and `result` last. A run that fails
+  ends instead with the error envelope (`ok` false, no `result`), as
+  every command's failure does, so the last line is always the run's
+  document. The plan had `event` and the fields at the top level of
+  each line; keeping D27's envelope means every line parses as any
+  other command's document, and a reader that wants only the outcome
+  needs no special case. `frames_done` never goes down, even when a
+  hardware encoder that failed in its first second starts over in
+  software: the counter is the most muxed by any try.
+- **Exit status** as `frame`'s (D27): 0; 1 for a failed export, a
+  failed check, a project that won't load and a disk that fills; 2 for
+  usage; 3 for a GPU or encoder the run needs and hasn't (`no_gpu`,
+  `no_encoder`, and `--encoder vaapi` failing with `hw_unavailable`,
+  `hw_unsupported` or `hw_failed`, while `auto` goes on in software and
+  says so in `fallback`); 4 for Ctrl+C (`cancelled`). A range outside
+  the sequence is `out_of_range` (exit 1), as `frame`'s `--time` past
+  the end is, where the plan said usage: the range parses, it just
+  isn't in this project; a range that doesn't parse is usage (2).
+- **New codes** (D27's list, each with a row in `cli-json.md`): the
+  export's failures by stage (`decode_failed`, `render_failed`,
+  `encode_failed`, `mux_failed`, `metadata_failed`, `check_failed`,
+  `io_error`), `cannot_export`, `no_encoder`, `no_space`, the project
+  file's, and warnings with codes (`media_changed`, `h264_level_6`,
+  `audio_encoded`, `audio_ends_early`, `no_audio`, `ambix_not_turned`,
+  `free_space_unknown`). A code may have digits after its first letter
+  (`h264_level_6`).
+- **Nothing is left at `-o`** by Ctrl+C, a failure, a panic on any
+  thread (the hook sets a flag the loop reads, and the export is
+  cancelled, exit 1) or a full disk. A write the disk refuses (`ENOSPC`,
+  `EFBIG`, `EDQUOT`, `EIO`, `EROFS`) in a packet, the MP4's header or
+  trailer, or the last pass is `EncodeError::Write`, the file's error
+  (`io_error` with the output's path), and never an encoder's fault, so
+  it never sends `auto` on to software.
+- **Tests** (`crates/cli/tests/render.rs`, on lavapipe): the lines in
+  order with their fields, every field of every line against the
+  document both ways, a file in the way with and without `--overwrite`,
+  each project failure, ranges without frames, VA-API without a device
+  (exit 3) and `auto` falling back, panics on the main and a worker
+  thread, Ctrl+C after the first progress line (exit 4 within 2 s), and
+  a real full disk: the render runs in a user and mount namespace of
+  its own (`unshare --user --map-root-user --mount`) on a 128 MB tmpfs,
+  which the test fills through `/proc/<pid>/root` after the first
+  progress line, and only the filler is left. Where the box doesn't let
+  a user mount, it says so and the export's own test of a disk that
+  fills part way (an injected `ENOSPC` at frame 5) still runs.
+
+Why not `RLIMIT_FSIZE` for the full disk: lavapipe keeps its heap in a
+memfd it grows with `ftruncate` (about 64 MiB and up), so a file size
+limit below that kills the process with `SIGBUS` before the export
+writes its file. A tmpfs of the test's own fills only the output's
+folder.
+
+**`spherecut frame --project P -o OUT.png`** (amendment 2 item 5, D49):
+the sequence's frame at `--time` or `--frame` as the export renders it,
+before its encode, so a person or an agent can look at what `render`
+will write without writing it.
+
+- **Sequence time.** `--time T` is from the sequence's start, and shows
+  the frame on screen then, the last that starts at or before it (frame
+  ⌊T · rate⌋); `--frame N` counts at the sequence's rate. At or past the
+  sequence's end is `out_of_range` (exit 1), as `render --range` is.
+  Frame N shows the source frame at `in + N / rate`, the one the export
+  holds for it.
+- **The project's view, size and filter.** The views are
+  `frame_views`'s at that source time, with the sequence's motion blur,
+  at the output's size; the filter is the export's, anisotropic where
+  the GPU has it. So the view flags, `--size`, `--filter`, `--equirect`,
+  `--stream` and `--reference` are usage errors with `--project`, and a
+  FILE is too. The decoder flags, `--depth`, `--adapter`, `--zero-copy`
+  and `--overwrite` keep their meaning.
+- **Loaded as `render` loads it**, with the same codes: the project's
+  load errors, `media_offline`, and `media_changed` as a warning.
+- **The result** is `frame`'s, with `requested` in sequence time,
+  `frame` the source frame shown, `view` the keyed camera at that time
+  (`projection` `equirect` and `fov` 360 for a 360 output, turned by
+  the output's orientation), and one new field, `sequence`: the
+  project, the sequence's frame, the output kind, the views averaged
+  and whether blur capped them. Null without `--project`, which keeps
+  the frame/1 schema (fields are only added).
+- **Through the CLI, the parity sample**: `crates/cli/tests/render.rs`
+  exports a panning project with `render` and compares `frame
+  --project`'s PNG, its luma made as the YUV pass makes it, with the
+  file's decoded frame 7: 51.6 dB and SSIM 0.9974 on lavapipe with
+  libx264 at the high preset (floors 48.5 dB and 0.994), and 18.4 dB
+  for frame 6 against it, the control. `--time 0.25` is the same PNG
+  to the byte, and with motion blur on, the frame has several views.
+- `Still::render` (agent) and `StillRenderer::render_imported` and
+  `render_copied` take a frame's views, as `render_blurred` and
+  `render_yuv` do (D49), so zero copy and path B blur too.
+
 ## D52. The export pipeline: presets, encoders, the MP4 in one last pass, audio cut to the sample, parity floors and the job handle
 
 *2026-10-31, M2 slice M2.4. From `docs/design/m2-plan.md` section 8,
 its amendment 2 (items 4, 7, 8, 10, 24, 27, 28, 31, 32, 53),
 section 9's checks, and amendment 5, which records where the code
 differs. Updates D4, D16, D17 and D28. M2.5 adds the VA-API
-encoders, the encoder order and fallback, and `spherecut render`; this
-entry will say what M2.5 changes.*
+encoders, the encoder order and fallback, the decode path and
+`spherecut render` (D51); "M2.5" below says what that changes.*
 
 What, as `crates/export` does it:
 
@@ -7703,7 +7835,7 @@ What, as `crates/export` does it:
   drive this one handle (amendment 2 item 32).
 - **Three threads** joined by bounded channels (2 decoded frames and 2
   rendered ones ahead), stopped together by one `StopSource`: decode
-  (software for now; section 8.2's choice of path comes with M2.5),
+  (software in M2.4; M2.5 chooses the path, below),
   holding each source frame for the output frames it covers; render,
   the clip's keyed views through `StillRenderer` and the YUV pass into
   the encoder's planes (D49); and encode and mux on the job's thread,
@@ -7805,6 +7937,104 @@ What, as `crates/export` does it:
   testkit to `spherecut_render::compare`, so that agent can measure an
   export (A2, item 32). render gains no dependency (D28).
 
+**M2.5** (section 8.2 and 8.3, amendment 2 items 25, 47, 49 and 52):
+
+- **VA-API encoders** (`h264_vaapi`, `hevc_vaapi`, `av1_vaapi`) on the
+  render node of the GPU that renders, the same node the decode uses
+  (D30). VBR at the preset's bitrate with the same `maxrate` (1.5×) and
+  `bufsize` (2 s of it) as the software encoders, a keyframe every
+  second in closed GOPs (`+cgop`, every GOP from an IDR frame), and no
+  QP, which VBR doesn't read and av1_vaapi would take on a 0 to 255
+  scale (item 49). The YUV pass writes NV12, or P010 for 10-bit HEVC
+  and AV1, and media uploads each frame to a surface of the encoder's
+  frame pool; H.264 stays 8-bit, as the drivers encode it.
+- **Mesa's quality level** is FFmpeg's `compression_level`, read as bits
+  (research note encode.md): 1 says the rest is set, bits 1 and 2 the
+  preset (speed, balanced, quality, high quality), bit 3 pre-encode and
+  bit 4 VBAQ. High is quality with pre-encode and VBAQ (29), Medium and
+  Small balanced (3), a draft speed (1). `bench_export_vaapi_levels`
+  measured each on odin (RX 7600, 2026-10-31; 4K from the 5.7K clip,
+  one run each, fps / worst luma dB / Mb/s for speed, balanced and 29):
+  H.264 35.3 / 45.20 / 36.6, 37.5 / 44.71 / 28.5, 25.9 / 45.20 / 36.2;
+  HEVC 38.2 / 47.16 / 28.9, 39.2 / 46.44 / 25.7, 36.9 / 47.16 / 27.4;
+  AV1 38.5 / 43.02 / 15.0, 39.7 / 43.55 / 20.6, 25.5 / 43.03 / 15.7.
+  VBAQ moves luma PSNR by half a dB either way, as it should (it spends
+  bits where the eye sees them, not where PSNR counts), and in a whole
+  export the encode isn't the slow stage (below), so the table stands.
+- **The order and fallback** (section 8.3). `auto` tries the codec's
+  VA-API encoder where there is a render node and this FFmpeg has it,
+  then the software one; with no node or no such encoder it goes
+  straight to software and says why in `fallback` (`hw_unavailable`).
+  A VA-API encoder that fails to open, or on a frame within its first
+  second, restarts the export in software from frame 0 with the reason
+  (`hw_unsupported` or `hw_failed`); past the first second a failure
+  fails the export. `vaapi` alone fails instead (`no_encoder`, or the
+  hardware's code: exit 3 in the CLI). H.264 wider than 4096 is past
+  VCN 4's limit: it goes to libx264 at level 6, with the warning
+  `h264_level_6`.
+- **AV1 only at a size VA-API needn't pad** (odin, 2026-10-31). VCN 4
+  pads AV1 to a multiple of 64 × 16 (1080 lines to 1082, a mode of its
+  own), and the file decodes at the padded size: odin's 1080 × 1080
+  parity export came back 1088 × 1082, and decoders don't crop to the
+  render size (dav1d and FFmpeg's own decoder turn it into an aspect
+  ratio; Chromium's WebCodecs ignore it). H.264 and HEVC crop theirs in
+  the stream (frame cropping, the conformance window), so they are
+  untouched. AV1 goes to av1_vaapi only where the size encoded (the
+  draft's, for a draft) is a multiple of 64 wide and 16 high: 2560 ×
+  1440 and 3840 × 2160 flat, every 360 preset, and most drafts. At any
+  other `auto` goes straight to libsvtav1, its fallback `hw_unsupported`
+  ("av1_vaapi would pad 1920x1080: ..."), and `vaapi` alone fails with
+  that code (exit 3). The rule holds for every driver until a Tier 2 run
+  shows one decoding at the size asked for; reports say VCN 5 doesn't
+  pad.
+- **The decode path** (item 25): `auto` decodes on VA-API on the same
+  node, going on in software if it can't (D3's fallback, through the
+  backend's `Fallback::Software`), and the report's `decode` says where
+  the last frame was decoded and the first fallback; `software` decodes
+  on the CPU. With no node, `auto` is software, with the reason.
+- **60 fps** (item 47): the bitrate's rate factor is the rate over 30
+  up to 30 fps, and above it (rate + 30) / 60, so 60 fps is 1.5× the
+  30 fps bitrate, not 2×: half again for twice the frames, as the
+  encoders' own rate tables have it.
+- **`--draft`**: half the preset's size each side (rounded up to a
+  multiple of 8), the encoder's fastest setting (`ultrafast`, SVT-AV1's
+  12, Mesa's speed), and the bitrates scaled by the pixels.
+- **Codes on every warning** (D27's list), and a write the disk refuses
+  is `io_error`, the file's, never the encoder's (D51).
+- **Stage times.** The report's `stages` give each stage's busy time
+  over the try that made the file: decode, render (the upload and the
+  draw), readback (copying the planes back, timed after the GPU has
+  drawn them), encode (with the mux), and the last pass. They name the
+  slow stage when an export misses real time.
+- **Tier 2** (`crates/export/tests/tier2_export.rs`, `cargo xtask
+  hw-test`): every format doctor finds working on VA-API against its
+  software twin and the parity reference on the same GPU, each decoding
+  at the output's size; an 8K 360 export through VA-API that A1's
+  `check` passes for `youtube_360`; the 4K30 bench (a 3840×2160 reframe
+  of the 5.7K perf clip and of an X5 `.lrv` proxy, H.264 at High, and
+  HEVC and a draft as well, gated at 30 fps); and the quality levels'
+  table.
+- **odin's run** (RX 7600, Mesa's radeonsi, FFmpeg 8.1, at 6993987,
+  2026-10-31, `hw-reports/odin-6993987-m25.md`). The 4K30 gate passes:
+  H.264 at High 32.5 fps (31.7 to 34.2 over 3 runs), HEVC 44.4, a draft
+  54.9, from the `.lrv` proxy 46.8. Decode is the slow stage (29.9 ms a
+  frame of the 5.7K clip in H.264's run, 22.1 in HEVC's), then render
+  (9.7), encode (6.6) and readback (3.0): the stages overlap, so the
+  rate is about the decode's. Parity, worst luma PSNR and SSIM through
+  VA-API (software in brackets): H.264 50.78 dB, 0.99729 (52.32,
+  0.99817); HEVC Main 53.15, 0.99808 (53.07, 0.99834); HEVC Main 10
+  54.30, 0.99914 (58.95, 0.99962). Their floors are those less 3 dB and
+  0.003: 47.7 and 0.994, 50.1 and 0.995, 51.3 and 0.996. AV1 was padded
+  (above), so its cases moved to 2560 × 1440 and 3840 × 1920, and odin's
+  rerun at 6ed8172 (`hw-reports/odin-6ed8172-m25b.md`, FFmpeg 8.1.3)
+  measured them: AV1 49.95 dB, 0.99673 (51.60, 0.99778); AV1 in 10 bits
+  47.28, 0.99663 (60.37, 0.99969); the square AV1 through libsvtav1
+  48.92, 0.99695. Their floors are 46.9 and 0.993, 44.2 and 0.993. VCN
+  4's 10-bit AV1 is 13 dB under SVT-AV1's and 2.7 under its own 8-bit
+  one, still 7 dB over PLAN's 40 dB, so it stands (below). The 8K 360
+  export through av1_vaapi ran at 10.0 fps, 35.3 Mb/s (decode 5.7 s of
+  8.0).
+
 Not yet, and where it goes:
 
 - **ambiX isn't turned with the picture.** A 360 export whose output
@@ -7812,15 +8042,18 @@ Not yet, and where it goes:
   field, and says so in a warning. Turning first-order ambiX is a 3×3
   rotation of its X, Y and Z channels; no slice has it yet, and PROGRESS
   lists it as open.
-- **A full disk leaving no file** (section 11) is tested with M2.5's
-  `spherecut render`, through a small tmpfs or a fake writer; the
-  export's own error path (the temporary file removed on any error) is
-  the one the cancel test covers.
+- ~~A full disk leaving no file~~: done in M2.5, through `spherecut
+  render` on a tmpfs of its own and an injected `ENOSPC` (D51).
 - **Opus** (D17's revisit) stays out: it isn't copied, since how its
   pre-skip and an edit list combine is unverified, and the encode is
   AAC. D17 stands for M2.
-- The VA-API encoders, the order and fallback, and the 5.7K export bench
-  (item 52) are M2.5's.
+- ~~The VA-API encoders, the order and fallback, and the 5.7K export
+  bench (item 52)~~: M2.5, above.
+- **10-bit AV1 on VCN 4** is 13 dB under SVT-AV1's at the same bitrate
+  (odin's rerun, above), where H.264 and HEVC Main are within 2 dB of
+  software's. The levels' table is 8-bit only; whether a quality level
+  or a higher bitrate closes it is a Tier 2 run of its own, and until
+  then the 10-bit floor is the measure less 3 dB.
 
 Why one last pass of our own rather than the muxer's faststart and a
 patch: faststart is a second pass anyway, and ours already has to write

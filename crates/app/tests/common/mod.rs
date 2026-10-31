@@ -92,6 +92,7 @@ pub fn doctor_report(issues: Vec<Issue>) -> DoctorReport {
         zero_copy_mode: spherecut_media::backend::ZeroCopy::Off,
         decode_checks: Vec::new(),
         encode_checks: Vec::new(),
+        export_encoders: Vec::new(),
         issues,
     }
 }
