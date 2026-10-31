@@ -34,26 +34,44 @@ use document::document;
 /// Renaming one is a new schema version (D27), so a rename must fail here.
 const CODES: &[&str] = &[
     "adapter_not_found",
+    "ambix_not_turned",
     "anisotropy_unavailable",
+    "audio_encoded",
+    "audio_ends_early",
     "cancelled",
     "cannot_decode",
+    "cannot_export",
+    "check_failed",
     "crop_applied",
     "damaged",
     "decode_failed",
     "doctor_errors",
+    "encode_failed",
     "files_failed",
+    "free_space_unknown",
     "gpu_failed",
+    "h264_level_6",
     "hw_failed",
     "hw_unavailable",
     "hw_unsupported",
     "import_failed",
     "internal",
     "invalid_input",
+    "invalid_project",
     "io_error",
+    "malformed_project",
+    "media_changed",
+    "media_offline",
+    "metadata_failed",
+    "mux_failed",
     "nested_open_refused",
+    "newer_schema",
+    "no_audio",
     "no_decoder",
     "no_display",
+    "no_encoder",
     "no_gpu",
+    "no_space",
     "no_stream",
     "no_video_or_audio",
     "not_a_file",
@@ -61,11 +79,13 @@ const CODES: &[&str] = &[
     "not_found",
     "not_implemented",
     "not_media",
+    "not_project",
     "open_failed",
     "out_of_gpu_memory",
     "out_of_range",
     "output_exists",
     "pose_not_applied",
+    "render_failed",
     "stereo_left_eye",
     "stereo_unknown",
     "timed_out",
@@ -78,8 +98,8 @@ const CODES: &[&str] = &[
     "usage",
 ];
 
-/// The codes `frame` exits 3 with: a device or a codec the run needs and
-/// this machine doesn't have (D27).
+/// The codes `frame` and `render` exit 3 with: a device or a codec the
+/// run needs and this machine doesn't have (D27).
 const MISSING: &[&str] = &[
     "adapter_not_found",
     "hw_failed",
@@ -88,6 +108,7 @@ const MISSING: &[&str] = &[
     "import_failed",
     "no_decoder",
     "no_display",
+    "no_encoder",
     "no_gpu",
 ];
 
@@ -240,12 +261,14 @@ fn every_code_is_listed_and_stable() {
     assert_eq!(contract::all_codes(), CODES);
     for c in CODES {
         assert!(
-            !c.is_empty() && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
+            c.starts_with(|ch: char| ch.is_ascii_lowercase())
+                && c.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
             "{c} is not snake_case"
         );
     }
-    // `frame`'s status for each code: 2 for usage, 3 for what is missing,
-    // 4 for a cancel, 1 for everything else.
+    // `frame`'s and `render`'s status for each code: 2 for usage, 3 for
+    // what is missing, 4 for a cancel, 1 for everything else.
     for c in CODES {
         let want = match *c {
             "usage" => Exit::Usage,
@@ -256,7 +279,7 @@ fn every_code_is_listed_and_stable() {
         assert_eq!(contract::frame_exit(c), want, "{c}");
     }
     // The statuses are part of the contract too; 3 and 4 are `frame`'s
-    // (and the GUI's, later).
+    // and `render`'s (and the GUI's, later).
     let statuses = [
         (Exit::Ok, 0),
         (Exit::Failed, 1),
@@ -285,6 +308,7 @@ fn the_document_describes_every_code_schema_and_status() {
         contract::PROBE,
         contract::DOCTOR,
         contract::FRAME,
+        contract::RENDER,
         contract::CALL,
         contract::CLI,
     ] {
@@ -1005,6 +1029,7 @@ fn doctor_report(issues: Vec<Issue>) -> DoctorReport {
         zero_copy_mode: spherecut_media::backend::ZeroCopy::Off,
         decode_checks: Vec::new(),
         encode_checks: Vec::new(),
+        export_encoders: Vec::new(),
         issues,
     }
 }

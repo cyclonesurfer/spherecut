@@ -2,9 +2,11 @@
 //!
 //! With `--json`, stdout gets exactly one JSON document per run, on
 //! success and on failure, a panic included, and the exit status says how
-//! the run ended (`contract`, D27). stderr is for people.
+//! the run ended (`contract`, D27); `render` writes its start and progress
+//! before it, one envelope a line, and the document is the last (D51).
+//! stderr is for people.
 
-// Only `interrupt`, frame's SIGINT handler, and `exit`, mcp's way out
+// Only `interrupt`, frame's and render's SIGINT handler, and `exit`, mcp's way out
 // past a stuck call, are allowed unsafe code (D28).
 #![deny(unsafe_code)]
 
@@ -25,6 +27,7 @@ mod exit;
 mod frame;
 #[allow(unsafe_code)]
 mod interrupt;
+mod render;
 mod skill;
 
 #[derive(Parser)]
@@ -141,6 +144,10 @@ enum Cmd {
     /// Render one frame of a stitched equirect through a virtual camera
     /// into a PNG.
     Frame(frame::FrameArgs),
+    /// Export a project's sequence to an MP4, with its stored export
+    /// settings; each flag overrides one for this run only. The file
+    /// appears only once it is whole and has passed its checks.
+    Render(render::RenderArgs),
     /// Serve Spherecut's tools to an AI agent over MCP, on stdin and
     /// stdout (docs/agents.md); they only read unless --allow-write. Logs
     /// go to stderr.
@@ -428,6 +435,7 @@ fn run(cli: Cli, args: &[OsString], json: bool) -> Result<Exit> {
             Ok(()) => frame::run(frame),
             Err(message) => Ok(usage(&subcommand_error("frame", message), args, json)),
         },
+        Cmd::Render(render) => render::run(render),
         Cmd::Probe { files, json } => probe(&files, json),
         Cmd::Doctor { render_node, json } => {
             // The lookup hardware decoding uses (D30); no adapter is known

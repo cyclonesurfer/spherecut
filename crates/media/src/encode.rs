@@ -41,6 +41,10 @@ pub enum EncodeError {
     /// On the destination (with links followed), never the temporary file.
     #[error("writing {}: {error}", path.display())]
     Io { path: PathBuf, error: io::Error },
+    /// The file being written refused a write: the disk is full, the file
+    /// is as large as it may be, or the disk failed. The encoder is fine.
+    #[error("writing the file: {0}")]
+    Write(io::Error),
     #[error(transparent)]
     Inject(#[from] InjectError),
     /// Opening a file to read from it.
@@ -53,6 +57,26 @@ fn ctx<T>(r: Result<T, ff::Error>, context: impl FnOnce() -> String) -> Result<T
         context: context(),
         error,
     })
+}
+
+/// [`ctx`] for writing into the output, where an errno that means the
+/// file can't take more is the file's error, not the muxer's.
+fn written<T>(r: Result<T, ff::Error>, context: impl FnOnce() -> String) -> Result<T, EncodeError> {
+    match r {
+        Err(ff::Error::Other { errno })
+            if [
+                libc::ENOSPC,
+                libc::EFBIG,
+                libc::EDQUOT,
+                libc::EIO,
+                libc::EROFS,
+            ]
+            .contains(&errno) =>
+        {
+            Err(EncodeError::Write(io::Error::from_raw_os_error(errno)))
+        }
+        r => ctx(r, context),
+    }
 }
 
 /// Pixel layouts the writer accepts: planar YUV, 8-bit or 10-bit in the
@@ -714,7 +738,7 @@ fn write_packet(
         .ok_or_else(|| EncodeError::Invalid(format!("{what} stream vanished")))?;
     pkt.set_stream(index);
     pkt.rescale_ts(enc_tb, ost_tb);
-    ctx(pkt.write_interleaved(octx), || {
+    written(pkt.write_interleaved(octx), || {
         format!("writing {what} packet")
     })
 }
@@ -993,7 +1017,7 @@ impl Mp4Writer {
         if mux.negative_cts_offsets {
             opts.push(("movflags".to_string(), "+negative_cts_offsets".to_string()));
         }
-        let unused: Vec<String> = ctx(octx.write_header_with(dict(&opts)), || {
+        let unused: Vec<String> = written(octx.write_header_with(dict(&opts)), || {
             "writing MP4 header".into()
         })?
         .iter()
@@ -1236,7 +1260,7 @@ impl Mp4Writer {
             }
             self.drain_audio()?;
         }
-        ctx(self.octx.write_trailer(), || "writing MP4 trailer".into())?;
+        written(self.octx.write_trailer(), || "writing MP4 trailer".into())?;
         let Mp4Writer {
             path, tmp, octx, ..
         } = self;
@@ -1418,6 +1442,37 @@ pub fn remux_to_matroska_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_write_the_disk_refuses_is_the_files_error() {
+        for errno in [
+            libc::ENOSPC,
+            libc::EFBIG,
+            libc::EDQUOT,
+            libc::EIO,
+            libc::EROFS,
+        ] {
+            let e = written::<()>(Err(ff::Error::Other { errno }), || "x".into()).unwrap_err();
+            assert!(
+                matches!(&e, EncodeError::Write(io) if io.raw_os_error() == Some(errno)),
+                "{e:?}"
+            );
+        }
+        // The muxer's own errors stay its.
+        let e = written::<()>(Err(ff::Error::InvalidData), || {
+            "writing video packet".into()
+        })
+        .unwrap_err();
+        assert!(matches!(e, EncodeError::Ffmpeg { .. }), "{e:?}");
+        let e = written::<()>(
+            Err(ff::Error::Other {
+                errno: libc::EINVAL,
+            }),
+            || "x".into(),
+        )
+        .unwrap_err();
+        assert!(matches!(e, EncodeError::Ffmpeg { .. }), "{e:?}");
+    }
 
     /// A picture like a tile of look's: a label band, white on near-black,
     /// above a smooth picture with a soft grid drawn over it.

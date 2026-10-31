@@ -263,7 +263,20 @@ pub struct DoctorReport {
     pub decode_checks: Vec<Check>,
     /// Each VA-API encoder, one frame each.
     pub encode_checks: Vec<Check>,
+    /// The encoder export's `auto` uses for each of `encode_checks`'
+    /// formats (M2 plan section 8.3).
+    pub export_encoders: Vec<ExportEncoder>,
     pub issues: Vec<Issue>,
+}
+
+/// The encoder export's `auto` uses for one format: the GPU's where its
+/// encode check works, else the software one, if this FFmpeg has it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExportEncoder {
+    /// As its encode check names it, such as "HEVC Main 10".
+    pub format: String,
+    /// FFmpeg's name for it, or `None` when this FFmpeg has neither.
+    pub encoder: Option<String>,
 }
 
 /// A decoder or encoder doctor looks for, and the issue when FFmpeg lacks
@@ -484,6 +497,8 @@ pub fn check_format(
 struct EncodeTarget {
     format: &'static str,
     encoder: &'static str,
+    /// The encoder export goes on in when this one fails.
+    software: &'static str,
     ten_bit: bool,
     read_back: &'static [&'static str],
 }
@@ -492,28 +507,56 @@ const ENCODE_TARGETS: &[EncodeTarget] = &[
     EncodeTarget {
         format: "H.264",
         encoder: "h264_vaapi",
+        software: "libx264",
         ten_bit: false,
         read_back: &["h264"],
     },
     EncodeTarget {
         format: "HEVC Main",
         encoder: "hevc_vaapi",
+        software: "libx265",
         ten_bit: false,
         read_back: &["hevc"],
     },
     EncodeTarget {
         format: "HEVC Main 10",
         encoder: "hevc_vaapi",
+        software: "libx265",
         ten_bit: true,
         read_back: &["hevc"],
     },
     EncodeTarget {
         format: "AV1",
         encoder: "av1_vaapi",
+        software: "libsvtav1",
         ten_bit: false,
         read_back: &["libdav1d", "libaom-av1"],
     },
 ];
+
+/// What export's `auto` uses for each of [`ENCODE_TARGETS`], whose
+/// checks `checks` are, in order: it tries the VA-API encoder and goes on
+/// in software when that fails (M2 plan section 8.3).
+fn export_encoders(checks: &[Check], encoders: &[CodecStatus]) -> Vec<ExportEncoder> {
+    let has = |name: &str| encoders.iter().any(|e| e.name == name && e.available);
+    ENCODE_TARGETS
+        .iter()
+        .zip(checks)
+        .map(|(t, c)| {
+            let encoder = if c.result == CheckResult::Works {
+                Some(t.encoder)
+            } else if has(t.software) {
+                Some(t.software)
+            } else {
+                None
+            };
+            ExportEncoder {
+                format: t.format.to_string(),
+                encoder: encoder.map(str::to_string),
+            }
+        })
+        .collect()
+}
 
 /// Fedora packages whose presence changes the wording of a fix.
 const FEDORA_PACKAGES: &[&str] = &[
@@ -597,10 +640,11 @@ pub fn run_with(render_node: &Path, options: Options) -> DoctorReport {
         ("vulkan", vulkan.as_ref(), &vulkan_status),
     ];
     let decode_checks = SAMPLES.iter().flat_map(|s| decode(s, &paths)).collect();
-    let encode_checks = ENCODE_TARGETS
+    let encode_checks: Vec<Check> = ENCODE_TARGETS
         .iter()
         .map(|t| encode(t, vaapi.as_ref(), &vaapi_status))
         .collect();
+    let export_encoders = export_encoders(&encode_checks, &encoders);
     let gpu = Gpu {
         render_node: node,
         ..gpu_vendor(render_node, &vulkan_devices)
@@ -624,6 +668,7 @@ pub fn run_with(render_node: &Path, options: Options) -> DoctorReport {
         zero_copy_mode: zero_copy,
         decode_checks,
         encode_checks,
+        export_encoders,
         issues: Vec::new(),
     };
     report.issues = issues(&report, &env);
@@ -1837,6 +1882,17 @@ pub fn render_text(r: &DoctorReport) -> String {
         n = SAMPLE_SIZE
     );
     checks(&mut s, &r.encode_checks);
+    let _ = writeln!(s, "\nExport encoders (auto)");
+    for e in &r.export_encoders {
+        let encoder = e.encoder.as_deref().unwrap_or("none in this FFmpeg");
+        // VCN 4's H.264 stops at 4096 (M2 plan section 8.3).
+        let wide = if e.encoder.as_deref() == Some("h264_vaapi") {
+            " (libx264 above 4096 wide)"
+        } else {
+            ""
+        };
+        let _ = writeln!(s, "  {:<14}{encoder}{wide}", e.format);
+    }
     if r.issues.is_empty() {
         let _ = writeln!(s, "\nNo problems found.");
     } else {
@@ -2024,6 +2080,7 @@ mod tests {
                 .iter()
                 .map(|t| Check::new(t.format, "vaapi", t.encoder, CheckResult::Works))
                 .collect(),
+            export_encoders: Vec::new(),
             issues: vec![],
         }
     }
@@ -2812,5 +2869,61 @@ mod tests {
         assert_eq!(and_list(&["a", "b", "c"]), "a, b and c");
         assert_eq!(cannot(&["X"], &[]), "decode X");
         assert_eq!(cannot(&[], &["Y", "Z"]), "encode Y and Z");
+    }
+
+    #[test]
+    fn export_uses_each_va_api_encoder_whose_check_works_else_software() {
+        let mut r = healthy(Distro::Fedora);
+        let status = |name: &str, available| CodecStatus {
+            name: name.into(),
+            available,
+            hw: Vec::new(),
+        };
+        let encoders = [
+            status("libx264", true),
+            status("libx265", true),
+            status("libsvtav1", false),
+        ];
+        let named = |e: &[ExportEncoder]| -> Vec<(String, Option<String>)> {
+            e.iter()
+                .map(|e| (e.format.clone(), e.encoder.clone()))
+                .collect()
+        };
+        let row = |f: &str, e: Option<&str>| (f.to_string(), e.map(str::to_string));
+        assert_eq!(
+            named(&export_encoders(&r.encode_checks, &encoders)),
+            [
+                row("H.264", Some("h264_vaapi")),
+                row("HEVC Main", Some("hevc_vaapi")),
+                row("HEVC Main 10", Some("hevc_vaapi")),
+                row("AV1", Some("av1_vaapi")),
+            ]
+        );
+        // A check that fails or wasn't run is software's, where this
+        // FFmpeg has it.
+        fail(
+            &mut r.encode_checks,
+            "vaapi",
+            &["HEVC Main 10", "AV1"],
+            Fault::Driver,
+        );
+        r.encode_checks[0].result = CheckResult::NotTested;
+        r.export_encoders = export_encoders(&r.encode_checks, &encoders);
+        assert_eq!(
+            named(&r.export_encoders),
+            [
+                row("H.264", Some("libx264")),
+                row("HEVC Main", Some("hevc_vaapi")),
+                row("HEVC Main 10", Some("libx265")),
+                row("AV1", None),
+            ]
+        );
+        let text = render_text(&r);
+        assert!(text.contains("Export encoders (auto)"), "{text}");
+        assert!(
+            text.contains("  AV1           none in this FFmpeg"),
+            "{text}"
+        );
+        assert!(text.contains("  HEVC Main 10  libx265"), "{text}");
     }
 }

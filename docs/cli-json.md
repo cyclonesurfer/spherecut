@@ -1,8 +1,9 @@
 # The CLI's JSON contract
 
-What `spherecut probe --json`, `spherecut doctor --json` and `spherecut
-frame --json` print, for scripts and AI agents. A1's MCP tools return the
-same time shapes and codes. DECISIONS D27 records why it is this way.
+What `spherecut probe --json`, `spherecut doctor --json`, `spherecut
+frame --json` and `spherecut render --json` print, for scripts and AI
+agents. A1's MCP tools return the same time shapes and codes. DECISIONS
+D27 records why it is this way, and D51 how `render` extends it.
 
 ## One document per run
 
@@ -11,6 +12,8 @@ With `--json`:
 - **stdout** carries exactly one JSON document per run, on success and
   on failure: one line of compact JSON, ending in a newline. Newlines
   inside strings are escaped, so the document is always one line.
+  `render` writes lines before it, its start and its progress, each a
+  whole envelope of its own (below); the document is the last line.
 - **stderr** is for people: the log (see `SPHERECUT_LOG` in the README)
   and an `error:` line for each failure. Its wording changes; never
   parse it.
@@ -38,9 +41,9 @@ With `--json`:
 ## Versions
 
 `schema` names the document and its version: `spherecut.probe/1`,
-`spherecut.doctor/1`, `spherecut.frame/1`, `spherecut.call/1`, and
-`spherecut/1` for a usage error that names no subcommand. Check the
-whole string.
+`spherecut.doctor/1`, `spherecut.frame/1`, `spherecut.render/1`,
+`spherecut.call/1`, and `spherecut/1` for a usage error that names no
+subcommand. Check the whole string.
 
 Within a version:
 
@@ -144,13 +147,13 @@ its `time_base`.
 
 ## Exit statuses
 
-| Status | Meaning | probe | doctor | frame |
-|---:|---|---|---|---|
-| 0 | The run did what was asked | Every file is ok (warnings don't count) | No problem of severity error | The PNG is written (warnings don't count) |
-| 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18) | No frame: the output is in the way, the file is missing, damaged before the frame or not an equirect, the frame is past the end, the GPU failed, ... (Codes) |
-| 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso`, `--zero-copy` with `--decoder software` |
-| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware, and `import_failed` with `--zero-copy` |
-| 4 | Interrupted (SIGINT), leaving no output file; the document's code is `cancelled` | never | never | The first Ctrl+C |
+| Status | Meaning | probe | doctor | frame | render |
+|---:|---|---|---|---|---|
+| 0 | The run did what was asked | Every file is ok (warnings don't count) | No problem of severity error | The PNG is written (warnings don't count) | The MP4 is written and passed its checks (warnings don't count) |
+| 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18) | No frame: the output is in the way, the file is missing, damaged before the frame or not an equirect, the frame is past the end, the GPU failed, ... (Codes) | No file: the output is in the way, the project doesn't load or its clip is offline, `--range` is outside the sequence, a stage of the export or a check of the file failed, the disk hasn't room, ... (Codes) |
+| 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso`, `--zero-copy` with `--decoder software` | An unknown preset, codec or choice, or a `--range` that doesn't parse |
+| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware, and `import_failed` with `--zero-copy` | `no_gpu`, `adapter_not_found`, `no_encoder` (no encoder for the codec that the run can use), and `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--encoder vaapi` named the hardware and it failed to open or in its first second |
+| 4 | Interrupted (SIGINT), leaving no output file; the document's code is `cancelled` | never | never | The first Ctrl+C | The first Ctrl+C |
 
 The GUI (`spherecut` with no command) exits 3 too: without a display
 (`no_display`), without a GPU (`no_gpu`), or when no adapter matches
@@ -289,6 +292,50 @@ The smoke run's own failures also use `cancelled` (exit 4: the window
 closed before the run had ended), `io_error` (its JSON can't be written)
 and `internal`, and the player's code when the clip can't be opened or
 played (`not_found`, `gpu_failed`, ...).
+
+render's `error.code`, beside `usage`, `internal`, `output_exists`,
+`not_a_file`, `io_error`, `out_of_range`, `cancelled`, the GPU's codes
+and `decode_failed` as above:
+
+| Code | Exit | Meaning |
+|---|---:|---|
+| `not_project` | 1 | The project file isn't one: not JSON, or not a Spherecut project |
+| `newer_schema` | 1 | The project was saved by a newer Spherecut, whose schema this one doesn't read |
+| `malformed_project` | 1 | The project file doesn't read as one: a field of the wrong kind, or a time whose `seconds` and `exact` disagree; the message gives the JSON pointer |
+| `invalid_project` | 1 | The project breaks one of its rules, as loaded or with the flags' changes, or its sequence's size isn't a preset (`--preset` gives one) |
+| `media_offline` | 1 | The clip's media file isn't where the project says (relinking a moved file is M5's); `path` is where it was looked for |
+| `cannot_export` | 1 | The project can't be exported as it is: an empty trim, a trim of more frames than an export holds, PCM ambiX copied into a 360 MP4 (YouTube takes it only in a MOV: ask for `--audio aac`) |
+| `no_encoder` | 3 | No encoder the run can use for the codec: `--encoder vaapi` without a render node or without the codec's VA-API encoder in this FFmpeg, or no software encoder for it |
+| `hw_unavailable`, `hw_unsupported`, `hw_failed` | 3 | `--encoder vaapi`: the device can't be opened, its encoder refused the job, or it failed on a frame in its first second. With `auto` they are `fallback`'s code instead, and the export goes on in software |
+| `no_space` | 1 | The output's folder has less free space than two copies of the export at its preset's highest bitrate need (both are on the disk while the file is finished); the message gives both numbers, and `path` is the folder |
+| `decode_failed` | 1 | Opening the clip, or a frame of it, failed (or the decoder concealed damage in it); the message gives the frame's time |
+| `render_failed` | 1 | The GPU's projection, YUV pass or readback failed for a frame |
+| `encode_failed` | 1 | The encoder failed, after its first second (before it, `auto` goes on in software) |
+| `mux_failed` | 1 | FFmpeg's MP4 muxer failed |
+| `metadata_failed` | 1 | The last pass, which writes the spherical boxes and moves the moov first, failed |
+| `check_failed` | 1 | The finished file failed one of the checks made before it is put in place; the message names the check and what it found |
+| `io_error` | 1 | The file couldn't be written: the disk filled during the export (after the free-space check passed), the file grew past what the file system takes, or the disk failed or is read-only. `path` is the output. Never an encoder's fault: `auto` doesn't go on in software for it |
+
+A failed stage's message starts with the stage and, where there is one,
+the time of the frame involved (`encode at 4.033 s: ...`). A failure
+writes nothing at `-o`: the temporary files are removed.
+
+render's `warnings[].code`, which don't fail the run: `stereo_left_eye`,
+`stereo_unknown`, `crop_applied` and `pose_not_applied` as frame's, and:
+
+| Code | Meaning |
+|---|---|
+| `media_changed` | The clip's media file is there but isn't the one the project added (its size or first MiB differs); it is exported anyway |
+| `h264_level_6` | H.264 wider than 4096 pixels needs level 6, which many players' hardware decoders can't play; HEVC or AV1 play more widely |
+| `no_audio` | The clip has no audio stream; the export has no audio track |
+| `audio_encoded` | `--audio copy`, and the audio is encoded again as AAC: its codec or timing can't be copied exactly, or the export is flat and the audio ambiX (encoded as stereo) |
+| `ambix_not_turned` | A 360 export turned from the source by its orientation: the ambiX sound field isn't turned with it |
+| `audio_ends_early` | The clip's audio ends before the export does: silence after, or a shorter copy |
+| `free_space_unknown` | The output's folder can't say how much room it has, so it wasn't checked |
+
+A hardware encoder or decode the export didn't take is not a warning:
+it is `fallback` and `decode.fallback` in the result, and the progress
+lines, as frame's decode is.
 
 `crates/cli/tests/contract.rs` lists every code, so a rename fails a
 test.
@@ -469,6 +516,7 @@ error; parts of that entry:
 | `zero_copy` | boolean | Whether the viewer keeps any decoded frames on the GPU: `zero_copy_mode` isn't `off` |
 | `zero_copy_mode` | string | Which frames the viewer keeps on the GPU, as `SPHERECUT_ZERO_COPY` sets it (slice 5b, D25): `vulkan` by default (Vulkan Video decoding on the renderer's own device where it has `shared_decode`), `all` with `1` (VA-API frames imported as DMA-BUFs too where the rendering GPU has `dmabuf_import`), `off` with `0` (every frame copied through RAM) |
 | `decode_checks`, `encode_checks` | arrays | One decode or encode of one format on one path: `format` (such as `HEVC Main 10`), `path` (`software`, `vaapi` or `vulkan`), `codec` (the FFmpeg decoder or encoder), `result` (`works`, `fails` or `not_tested`), `reason` (or null), `fault` (`ffmpeg`, `driver`, `wrong_output`, or null), `ffmpeg_log` |
+| `export_encoders` | array | The encoder `spherecut render --encoder auto` uses for each of `encode_checks`' formats, in their order: `format` and `encoder` (FFmpeg's name: the VA-API encoder where its check works, else the software one, `libx264`, `libx265` or `libsvtav1`; null when this FFmpeg has neither). H.264 wider than 4096 is libx264's whatever this says (M2 plan section 8.3) |
 | `issues` | array | Each problem: `severity` (`error`, `warning` or `info`), `what`, `impact`, `fix` (for people: lines separated by `\n`, each a shell command, the exact `dnf` or `pacman` command where a package fixes it, or a sentence where no command does. A command may be followed by three spaces and a note, as in `sudo dnf swap mesa-vulkan-drivers mesa-vulkan-drivers-freeworld   (RPM Fusion free: ...)` or `sudo usermod -aG render "$USER"   then log out and back in`, so the command is what comes before the first three spaces. Nothing marks a sentence apart from a command: don't run a line unread) |
 
 The run fails with `doctor_errors` exactly when an issue's severity is
@@ -505,6 +553,9 @@ GPU (lavapipe only), with the lists shortened:
     ],
     "encode_checks": [
       {"format": "H.264", "path": "vaapi", "codec": "h264_vaapi", "result": "not_tested", "reason": "no VA-API device (Invalid argument)", "fault": null, "ffmpeg_log": []}
+    ],
+    "export_encoders": [
+      {"format": "H.264", "encoder": "libx264"}
     ],
     "issues": [
       {"severity": "warning", "what": "no DRM render node at /dev/dri/renderD128",
@@ -627,6 +678,123 @@ A failed run has no `result`:
 
 ```json
 {"schema":"spherecut.frame/1","ok":false,"error":{"code":"out_of_range","message":"no frame at 1.5 s: the clip runs from 0 to 1.001 s (its last frame starts at 0.968 s)","path":"grid-hevc10-2997.mp4"},"warnings":[]}
+```
+
+## `spherecut render <PROJECT> -o <OUT.mp4> [options] --json`
+
+A project's sequence exported to an MP4 (M2 plan section 9, D51), with
+the sequence's stored export settings; each flag overrides one of them
+for this run and is not saved (`spherecut render --help` lists them):
+`--preset` (a row of the export presets: `flat-16x9-1080` to
+`flat-4x5-2160` and `360-3840`, `360-5760`, `360-7680`), `--codec`
+(`h264`, `hevc`, `av1`), `--encoder` (`auto`, `vaapi`, `software`),
+`--quality` (`high`, `medium`, `small`), `--range IN..OUT` (the part of
+the sequence, each end as frame's `--time` takes it, such as `2..7.5`,
+`1:00..90f`, `5..` or `..10`), `--draft` (half each side, rounded up to
+a multiple of 8, with the encoder's fastest settings), `--audio`
+(`copy`, `aac`, `none`), `--motion-blur`, `--eight-bit` (8-bit from a
+10-bit source), `--decoder` (`auto`, VA-API on the rendering GPU's node
+going on in software, or `software`), `--adapter` and `--overwrite`.
+
+Without `--json`, a line on stderr says what is rendering, then one a
+second how far it has got, and a run that wrote its file prints one
+line on stdout (`wrote out.mp4: 600 frames (20 s) at 3840×1920, HEVC
+10-bit in hevc_vaapi, aac audio, 45.1 MB, 14 checks passed`).
+
+The run, in order: the command line; the output (refused before any work
+if something is there, as frame's is); the project, loaded, and its
+clip's media; the flags' changes; the GPU; the export's own refusals
+(the encoder, the trim); then the export: decode, render and encode in
+step, the last pass that writes the finished file, and the checks of
+that file. Only then is it put at `-o`, or over what is there with
+`--overwrite`, in one rename. Ctrl+C, a failure or a full disk leave
+nothing at `-o`.
+
+**One envelope a line.** With `--json`, each line on stdout is a whole
+envelope of schema `spherecut.render/1`, and `result.event` says which
+line it is:
+
+1. `start`, once the export has started: what it will do.
+2. `progress`, at most once a second: how far it has got. `frames_done`
+   never goes down, even when a hardware encoder that failed in its first
+   second starts over in software.
+3. `result`, last, when the file is written and has passed its checks.
+   This is the run's document, and its `warnings` are the run's.
+
+A run that fails ends instead with an envelope with `ok` false, an
+`error` and no `result`, as every command's failure does; it may follow
+`start` and `progress` lines, or be the only line. So a reader that
+wants one document takes the last line, and one that follows progress
+reads each line as it comes. A panic is that last line too. The lines
+before the last have `ok` true and no warnings.
+
+`start`:
+
+| Field | Type | What |
+|---|---|---|
+| `event` | string | `start` |
+| `output` | string | The file to write, as given to `-o` |
+| `project` | string | The project file, as given |
+| `preset` | string | The output's preset, such as `flat-16x9-1080` or `360-5760` |
+| `size` | object | `width`, `height`: the picture's, the preset's or (with `--draft`) its draft's |
+| `draft` | bool | `--draft` |
+| `rate` | rational | The sequence's frame rate |
+| `range` | object | `start`, `end` (times, in sequence time): the part exported, all of the sequence or `--range` |
+| `frames` | integer | Frames the export writes: the range's length at the rate, rounded up |
+| `duration` | time | `frames / rate` |
+| `codec` | string | `h264`, `hevc` or `av1` |
+| `quality` | string | `high`, `medium` or `small` |
+| `encoder` | string | The encoder tried first, as FFmpeg names it (`hevc_vaapi`, `libx265`, ...) |
+| `fallback` | object, or absent | The hardware encoder `auto` passed over without trying, and why: `from` (FFmpeg's name for it), `code` (`hw_unavailable`: no render node, or no such encoder in this FFmpeg) and `reason` |
+| `audio` | string | `copy`, `aac` or `none`, as asked |
+| `motion_blur` | bool | Whether each frame is blurred over its shutter |
+
+`progress`:
+
+| Field | Type | What |
+|---|---|---|
+| `event` | string | `progress` |
+| `frames_done` | integer | Frames muxed so far: never fewer than the line before |
+| `frames_total` | integer | As `start`'s `frames` |
+| `fps` | number | Frames muxed a second over the last two seconds; 0 until it can tell |
+| `elapsed` | number | Seconds since the export started |
+| `eta` | number, or null | Seconds left at `fps`; null until it can tell |
+| `encoder` | string | The encoder now |
+| `fallback` | object, or absent | The hardware encoder passed over, or left in its first second, with `code` `hw_unavailable`, `hw_unsupported` (it refused the job) or `hw_failed` (it failed on a frame) |
+| `decode_fallback` | object, or absent | The hardware decode passed over or left (`from` `vaapi`), with the same codes |
+| `finishing` | object, or absent | The last pass, once it has started: `bytes_done` and `bytes_total` |
+
+`result`:
+
+| Field | Type | What |
+|---|---|---|
+| `event` | string | `result` |
+| `output` | string | The file written, as given to `-o` |
+| `frames` | integer | Frames in it |
+| `duration` | time | `frames / rate` |
+| `size` | object | `width`, `height` |
+| `draft` | bool | `--draft` |
+| `rate` | rational | The video's frame rate |
+| `codec` | string | `h264`, `hevc` or `av1` |
+| `encoder` | string | The encoder that wrote the video |
+| `fallback` | object, or absent | As progress's |
+| `decode` | object | `path` (`vaapi` or `software`: where the last frame was decoded) and, as progress's `decode_fallback`, `fallback` |
+| `ten_bit` | bool | The video is 10-bit: a 10-bit source in HEVC or AV1, without `--eight-bit` |
+| `audio` | object, or null | The audio track: `stream` (the source's, by FFmpeg's index), `encoder` (`aac`, or the copied codec's FFmpeg name such as `pcm_s16le`), `rate`, `channels`, `ambix` (first-order ambiX with an `SA3D` box) and `samples` (a channel's); null for none |
+| `bytes` | integer | The file's size |
+| `blur_capped` | integer | Frames whose motion blur needed more views than the cap of 64, and got 64 |
+| `checks` | array | The checks the file passed before it was put in place, in order, each `name` and `found` (for people): `probe` (it opens), `layout` (the moov before the media data), `codec`, `size`, `frames`, `duration` (within a frame), `rate`, then `st3d`, `sv3d` and `v1` for a 360 export or `spherical` (none) for a flat one, then `audio` and, for ambiX, `sa3d` |
+| `elapsed` | number | Seconds from start to finish |
+
+`fallback`, `decode.fallback` and `decode_fallback` are absent when
+nothing fell back; the other fields are there in every line of their
+event.
+
+```sh
+$ spherecut render trip.spherecut -o trip.mp4 --preset flat-16x9-1080 --json
+{"schema":"spherecut.render/1","ok":true,"result":{"event":"start","output":"trip.mp4",...},"warnings":[]}
+{"schema":"spherecut.render/1","ok":true,"result":{"event":"progress","frames_done":31,...},"warnings":[]}
+{"schema":"spherecut.render/1","ok":true,"result":{"event":"result","output":"trip.mp4","frames":600,...},"warnings":[]}
 ```
 
 ## `spherecut call <TOOL> [<JSON>] [--read-root <DIR>]... [--image-dir <DIR>]`
@@ -759,8 +927,8 @@ $ echo $?
 ```
 
 The schema is the subcommand's when the first argument that isn't an
-option names one (`probe`, `doctor`, `frame`, `call`), and `spherecut/1`
-otherwise. `call`'s are JSON without `--json`.
+option names one (`probe`, `doctor`, `frame`, `render`, `call`), and
+`spherecut/1` otherwise. `call`'s are JSON without `--json`.
 frame's own usage errors, which clap can't find (a `--fov` past the
 projection's limit, a `--size` past the GPU's, a `--stream` that isn't a
 video stream), are `usage` errors with exit 2 too, under

@@ -1,6 +1,6 @@
 [package]
 name = "spherecut-cli"
-description = "The spherecut command: the GUI with no subcommand, probe, doctor, frame and mcp, and (later) render; its library half holds the JSON contract"
+description = "The spherecut command: the GUI with no subcommand, probe, doctor, frame, render, mcp and call; its library half re-exports the JSON contract"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,6 +24,7 @@ serde_json.workspace = true
 spherecut-agent.workspace = true
 spherecut-app.workspace = true
 spherecut-core.workspace = true
+spherecut-export.workspace = true
 spherecut-media.workspace = true
 spherecut-playback.workspace = true
 spherecut-render.workspace = true

@@ -26,7 +26,7 @@ use spherecut_core::time::{Rational, Rounding, Time};
 use spherecut_media::audio::FfmpegAudio;
 use spherecut_media::backend::{AudioChunk, AudioDecode, AudioOutFormat, AudioRequest, NextAudio};
 use spherecut_media::copy::{AudioCopy, CopyError, NextCopied};
-use spherecut_media::encode::{AudioSettings, AudioTrack, Mp4Writer};
+use spherecut_media::encode::{AudioSettings, AudioTrack, EncodeError, Mp4Writer};
 use spherecut_media::probe::{self, StreamKind};
 
 use crate::error::{ExportError, Stage};
@@ -371,9 +371,14 @@ impl Copying {
                 return Ok(true);
             }
             self.written = u64::try_from(c.pts() + c.duration()).unwrap_or(0);
-            writer
-                .push_copied(c)
-                .map_err(|e| self.failed(Stage::Mux, e.to_string()))?;
+            writer.push_copied(c).map_err(|e| {
+                let stage = if matches!(e, EncodeError::Write(_)) {
+                    Stage::File
+                } else {
+                    Stage::Mux
+                };
+                self.failed(stage, e.to_string())
+            })?;
         }
     }
 
@@ -512,7 +517,12 @@ impl Decoded {
             })
             .collect();
         writer.push_audio(&planar).map_err(|e| {
-            ExportError::failed(Stage::Encode, Some(self.time()), format!("the audio: {e}"))
+            let stage = if matches!(e, EncodeError::Write(_)) {
+                Stage::File
+            } else {
+                Stage::Encode
+            };
+            ExportError::failed(stage, Some(self.time()), format!("the audio: {e}"))
         })?;
         self.pushed += n as u64;
         Ok(())

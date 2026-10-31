@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 mod common;
 mod document;
@@ -78,6 +78,25 @@ fn json_flags_lavapipe_as_cpu_and_the_render_node_as_missing() {
     ] {
         assert!(r.get(k).is_some(), "no {k} in {r:#}");
     }
+
+    // Without VA-API, export uses the software encoders this FFmpeg has.
+    let has = |name: &str| {
+        r["encoders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == name && e["available"] == true)
+    };
+    let software = |name: &str| if has(name) { json!(name) } else { Value::Null };
+    assert_eq!(
+        r["export_encoders"],
+        json!([
+            {"format": "H.264", "encoder": software("libx264")},
+            {"format": "HEVC Main", "encoder": software("libx265")},
+            {"format": "HEVC Main 10", "encoder": software("libx265")},
+            {"format": "AV1", "encoder": software("libsvtav1")},
+        ])
+    );
 
     let vk = r["vulkan_devices"].as_array().unwrap();
     assert_eq!(vk.len(), 1, "{vk:#?}");

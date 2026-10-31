@@ -473,7 +473,7 @@ fn cannot_write(out: &Path, e: &std::io::Error) -> Failure {
 /// either way (`not_a_file`), since a rename would replace the node
 /// instead of writing to it (D16), and so is a name that ends in `/`,
 /// which names a directory whether or not there is one.
-fn check_output(out: &Path, overwrite: bool) -> Result<PathBuf, Failure> {
+pub(crate) fn check_output(out: &Path, overwrite: bool) -> Result<PathBuf, Failure> {
     use std::os::unix::ffi::OsStrExt;
     let io = |e: std::io::Error| cannot_write(out, &e);
     let not_a_file = |e: std::io::Error| {

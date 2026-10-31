@@ -26,7 +26,7 @@ use spherecut_media::backend::{
 };
 use spherecut_media::encode::{EncodeError, Mp4Writer, MuxOptions, StridedPlanes, VideoSettings};
 use spherecut_media::hw::RenderNode;
-use spherecut_media::inject::{EntryEdit, Finish, TrackKind};
+use spherecut_media::inject::{EntryEdit, Finish, InjectError, TrackKind};
 use spherecut_media::spherical::{StereoMode, write};
 use spherecut_media::{HwDevice, capture_ffmpeg_log};
 use spherecut_render::output::frame_views;
@@ -311,6 +311,11 @@ pub(crate) fn run(
         .finish_temp(&edits, &finish, &mut progress)
         .map_err(|e| match e {
             _ if stop.is_shut_down() => ExportError::Cancelled,
+            EncodeError::Inject(
+                e @ (InjectError::Read { .. }
+                | InjectError::Write { .. }
+                | InjectError::Copy { .. }),
+            ) => ExportError::failed(Stage::File, None, e.to_string()),
             EncodeError::Inject(e) => ExportError::failed(Stage::Metadata, None, e.to_string()),
             e => file_or(Stage::Mux, None, e),
         })?;
@@ -1049,8 +1054,14 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
                 frames: next,
             });
         }
-        writer.push_video_strided(&planes).map_err(|e| {
-            let fault = !matches!(e, EncodeError::Io { .. } | EncodeError::Invalid(_));
+        let pushed = writer.push_video_strided(&planes);
+        #[cfg(test)]
+        let pushed = pushed.and_then(|()| fault::disk(next));
+        pushed.map_err(|e| {
+            let fault = !matches!(
+                e,
+                EncodeError::Io { .. } | EncodeError::Write(_) | EncodeError::Invalid(_)
+            );
             Failed {
                 error: file_or(Stage::Encode, at, e),
                 encoder: fault.then_some("hw_failed"),
@@ -1079,18 +1090,34 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
     Ok((writer, capped))
 }
 
-/// The unit tests' encoder failure: the encode stage on this thread fails
-/// at frame `n`, once, as a hardware encoder might.
+/// The unit tests' failures: the encode stage on this thread fails at
+/// frame `n`, once, as a hardware encoder might, or its file stops
+/// taking writes there, as a full disk does.
 #[cfg(test)]
 mod fault {
     use std::cell::Cell;
 
+    use spherecut_media::encode::EncodeError;
+
     thread_local! {
         static AT: Cell<Option<u64>> = const { Cell::new(None) };
+        static FULL_AT: Cell<Option<u64>> = const { Cell::new(None) };
     }
 
     pub(super) fn at(n: Option<u64>) {
         AT.with(|a| a.set(n));
+    }
+
+    pub(super) fn full_at(n: Option<u64>) {
+        FULL_AT.with(|a| a.set(n));
+    }
+
+    /// The write of frame `n`: ENOSPC from then on.
+    pub(super) fn disk(n: u64) -> Result<(), EncodeError> {
+        match FULL_AT.with(Cell::get) {
+            Some(at) if n >= at => Err(EncodeError::Write(std::io::Error::from_raw_os_error(28))),
+            _ => Ok(()),
+        }
     }
 
     /// Whether frame `n` fails now, which it does once.
@@ -1118,6 +1145,7 @@ fn writer_error(output: &Path, encoder: &str, e: EncodeError, log: &[String]) ->
             None,
             format!("creating a file beside {}: {error}", output.display()),
         ),
+        e @ EncodeError::Write(_) => ExportError::failed(Stage::File, None, e.to_string()),
         e => {
             let why = log
                 .last()
@@ -1131,7 +1159,9 @@ fn writer_error(output: &Path, encoder: &str, e: EncodeError, log: &[String]) ->
 /// `e` as a failure of `stage`, or of the file when it is the disk's.
 fn file_or(stage: Stage, at: Option<Time>, e: EncodeError) -> ExportError {
     match e {
-        EncodeError::Io { .. } => ExportError::failed(Stage::File, at, e.to_string()),
+        EncodeError::Io { .. } | EncodeError::Write(_) => {
+            ExportError::failed(Stage::File, at, e.to_string())
+        }
         e => ExportError::failed(stage, at, e.to_string()),
     }
 }
@@ -1514,6 +1544,34 @@ mod tests {
         // Frame 29 is within it.
         let (r, _) = export_through(&job, two, Some(29));
         assert_eq!(r.unwrap().fallback.map(|f| f.code), Some("hw_failed"));
+    }
+
+    #[test]
+    fn a_disk_that_fills_part_way_fails_the_file_and_leaves_nothing() {
+        let dir = TempDir::new("full");
+        let job = job(&dir.0, 15);
+        // With an encoder to hand over to, which a full disk isn't
+        // reason to.
+        let two = vec![EncoderKind::Software, EncoderKind::Software];
+        fault::full_at(Some(5));
+        let (r, progress) = export_through(&job, two, None);
+        fault::full_at(None);
+        let e = r.unwrap_err();
+        assert_eq!(
+            (e.stage(), e.code()),
+            (Some(Stage::File), "io_error"),
+            "{e}"
+        );
+        assert!(e.to_string().contains("No space left on device"), "{e}");
+        assert!(progress.fallback.is_none(), "{:?}", progress.fallback);
+        assert!(!job.output.exists());
+        let left: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_str().is_some_and(spherecut_core::fs::is_temp_name))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     #[test]
