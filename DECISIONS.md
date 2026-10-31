@@ -7478,6 +7478,62 @@ angle-rate Jacobian, singular at the poles); or M9's tracker output
 needs smoothing, for which an approximating C² spline suits better than
 one through every key.
 
+## D53. The toolkit check: a timeline prototype behind a hidden flag, and its gates
+
+*2026-10-31, M2 slice M2.2b. Updates D26. M2's plan reserved D51 and
+D52 for M2.5 and M2.4, which land before this in their slices. The
+result is filled in from odin's run (M2.2b) and again at M2's end
+(M2.8).*
+
+D26 checks egui against a timeline before the GUI work commits to it.
+The check is `spherecut --timeline-proto` (`spherecut_app::proto`), a
+hidden flag of the app's binary, on the device the viewer would take:
+
+- **What it draws**: a seeded timeline of 500 clips (1 to 30 s, some
+  gaps) on 6 tracks, each clip a rounded rect with its name from 40
+  points wide and its own 160 × 90 thumbnail texture tiled along it
+  from 8 points; a ruler with timecode at 80 points or more apart; a
+  playhead stepping at 30 fps; snap lines (at most 4) while a clip
+  moves; and an overlay with the UI's interval, work and build times
+  and a sparkline.
+- **What it does**: a clip moves with snapping (its start or end,
+  whichever is nearer, to clip edges and the playhead within 8
+  points); an edge trims with ripple (every later clip on the track
+  moves by the change); the ruler scrubs; Ctrl and the wheel, or a
+  pinch, zoom about the pointer between the whole timeline and 2 s on
+  screen; the wheel pans.
+- **The run**: with `--proto-out`, a script drives it in 12 s cycles
+  (zoom sweep, drag, ripple trim, pan), injected as raw input before
+  each pass, and the document (`spherecut.timeline-proto/1`,
+  `docs/cli-json.md`) gives presented frames, late frames, and the
+  p50/p99/max of the interval between passes, each pass's own work
+  (eframe's count) and the prototype's own build time, after the first
+  second; what was drawn and done; and a screenshot.
+- **The gate** (`gui_proto`, Tier 2): presented ≥ 99%; work p99 under
+  one refresh period; interval p99 at most 1.5 periods; every action
+  landed, the zoom reached 2 s, all 500 textures loaded; no blocking
+  call on the UI thread. At the desktop's scale, and at egui zooms of
+  1.25 and 1.5 when that is 1.0; on odin also with GNOME at 125%.
+
+Why:
+- **A flag, not a feature-gated binary** (section 12 of the plan had
+  `--features proto --bin timeline-proto`): hw-test already builds and
+  runs `spherecut`, so the flag needs no second build and no feature
+  that the check builds anyway; it adds no dependency.
+- **Work and interval apart**: under vsync a pass's interval is the
+  refresh period, so "UI p99 under the period" fails on jitter alone.
+  What has to fit in a period is the pass's own work; the interval
+  gate catches passes that miss presents for other reasons.
+- **Scripted input as raw events**, not calls into the model: egui
+  then does its own hit testing, drag tracking and zoom handling, as it
+  would for a person.
+
+Result: *pending odin's run (M2.2b).*
+
+Revisit if: a run fails (D26: Pat decides before anything changes);
+the reframer's real timeline (M2.6) draws far more per clip than this
+does; or huginn's laptop scale differs from what was tested.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360

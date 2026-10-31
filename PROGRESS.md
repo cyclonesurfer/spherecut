@@ -203,6 +203,20 @@ chord's own axis with a small correction after it (D50), and the case
 is a saved regression. Mangled project files load or are refused, never
 panic (`project_file.rs`).
 
+**M2.2b, the toolkit check's prototype** (D53, amendment 3): `spherecut
+--timeline-proto` draws 500 seeded clips on 6 tracks, each with its own
+thumbnail texture, a ruler, a playhead at 30 fps and the overlay's UI
+times; clips move with snapping, edges ripple trim, the ruler scrubs,
+and the view zooms from the whole timeline to 2 s and pans. With
+`--proto-out` a script drives it in 12 s cycles and the run writes
+`spherecut.timeline-proto/1` and a screenshot. kittest runs a cycle and
+a bit on lavapipe (`crates/app/tests/proto.rs`); hw-test's Tier 2
+`gui_proto` judges it on a desktop (presented ≥ 99%, each pass's work
+p99 under the refresh period, the interval p99 at most 1.5 periods,
+every action landed), at the desktop's scale and at egui zooms of 1.25
+and 1.5 when that is 1.0, and the report has a "Timeline prototype"
+section. odin's run is next.
+
 ## A1: the MCP server
 
 `spherecut mcp` serves five tools to an AI agent over MCP, on stdin and

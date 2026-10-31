@@ -13,6 +13,7 @@ pub mod jobs;
 pub mod notices;
 pub mod overlay;
 pub mod panes;
+pub mod proto;
 pub mod run;
 pub mod settings;
 pub mod smoke;

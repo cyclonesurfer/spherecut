@@ -279,6 +279,47 @@ where it was wrong on a fact (nits 43 to 46, the squad figure).
   moved with its media keeps its relative paths).
 
 
+**Amendment 3 (2026-10-31, slice M2.2b's code).** The toolkit check's
+prototype as built, where it differs from section 12 (D53 records it):
+
+- **A hidden flag, not a feature-gated binary**: `spherecut
+  --timeline-proto`, with `--proto-seconds`, `--proto-out`,
+  `--proto-screenshot` and `--proto-zoom`, in `spherecut_app::proto`.
+  hw-test's Tier 2 tests already build and run `spherecut`; a second
+  binary behind a feature would need its own build there, for nothing
+  the flag can't do. Without `--proto-out` the window stays open to be
+  tried by hand. No dependency is added.
+- **500 real textures** (finding 35): each clip has its own 160 × 90
+  thumbnail, made from its id, tiled along the clip as an NLE does.
+- **The script** runs in cycles of 12 s: a zoom from where the view
+  was to the whole timeline, to 2 s on screen and to twelve times the
+  whole (4 s); a drag of a clip across the width and back (3.2 s); a
+  ripple trim of a clip's end, 200 points out and 300 back (2 s); and a
+  pan with the wheel (2.8 s). It is injected as raw input before each
+  pass (`raw_input_hook`), from where the last pass drew things, so
+  egui sees what a person's input would be.
+- **The gate is two numbers where section 12 had one**: each pass's own
+  work as eframe counts it (without the surface's acquire and present)
+  has a p99 under one refresh period, and the interval from one pass to
+  the next has a p99 of at most 1.5 periods. Under vsync the interval
+  is the period itself, so "under the period" would fail on jitter
+  alone; the work is what has to fit. Presented ≥ 99% stays, counted
+  after the run's first second as `gui_smoke` counts. Every action must
+  land, the zoom must reach 2 s, and all 500 textures must load.
+- **Scales** (finding 35): `gui_proto` runs at the desktop's scale and,
+  when that is 1.0, again at egui zooms of 1.25 and 1.5. On odin,
+  M2.2b's run also sets GNOME to 125% for a run and restores it.
+- **Naming the slow part**: the document has `build_ms` (the
+  prototype's own UI code: layout and the painter's shapes) beside
+  `work_ms` (the whole pass, with egui's tessellation and the render
+  submit). A failure is first read from those two; a finer split
+  (egui's tessellation alone) is added only if a run needs it.
+- **Tier 1**: `crates/app/tests/proto.rs` runs a cycle and a bit under
+  kittest on lavapipe (every action lands, the timeline stays in order
+  throughout, the document and screenshot are written), and the gates
+  have their own Tier 1 test beside `gui_proto`. hw-test's report has a
+  "Timeline prototype" section.
+
 ## 1. Summary
 
 M2 is the first version Pat can use for real: open one 360 clip, trim

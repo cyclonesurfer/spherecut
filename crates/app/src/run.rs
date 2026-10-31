@@ -17,8 +17,9 @@ use spherecut_playback::{AudioDevice, CacheBudget, DeviceAudio, Player, PlayerCo
 use spherecut_render::{AdapterChoice, Gpu, RenderError};
 
 use crate::app::{AppParts, DoctorRun, Pane, SpherecutApp};
+use crate::proto::{ProtoArgs, TimelineProto};
 use crate::settings::Settings;
-use crate::smoke::{Outcome, STALL, SmokeArgs, SmokeDriver};
+use crate::smoke::{Adapter, Outcome, STALL, SmokeArgs, SmokeDriver};
 use crate::viewer::ViewerResources;
 
 /// eframe storage keys.
@@ -47,6 +48,10 @@ pub struct GuiArgs {
     /// ([`crate::smoke`]). The stored settings and layout are neither
     /// read nor written.
     pub smoke: Option<SmokeArgs>,
+    /// `--timeline-proto`: the toolkit check's prototype
+    /// ([`crate::proto`]) in place of the viewer. The stored settings and
+    /// layout are neither read nor written.
+    pub proto: Option<ProtoArgs>,
 }
 
 /// Why the GUI can't run.
@@ -65,6 +70,8 @@ pub enum GuiError {
     /// The smoke run failed; its document says why, if it was written.
     #[error("the smoke run failed: {message}")]
     Smoke { code: &'static str, message: String },
+    #[error("the timeline prototype's run failed: {message}")]
+    Proto { code: &'static str, message: String },
 }
 
 impl GuiError {
@@ -74,7 +81,7 @@ impl GuiError {
             GuiError::NoDisplay => "no_display",
             GuiError::Gpu(e) => e.code(),
             GuiError::Window(_) => "internal",
-            GuiError::Smoke { code, .. } => code,
+            GuiError::Smoke { code, .. } | GuiError::Proto { code, .. } => code,
         }
     }
 }
@@ -125,6 +132,9 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
     } else {
         Gpu::for_window(&choice)?
     };
+    if let Some(proto) = &args.proto {
+        return run_proto(proto, gpu);
+    }
     // Decoding runs on the rendering GPU's node, where doctor's checks run.
     let info = &gpu.caps.info;
     let ids = GpuIds {
@@ -136,32 +146,9 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
     let backend: Arc<FfmpegBackend> = Arc::new(FfmpegBackend::on_node(node.clone()));
     let left = Rc::new(RefCell::new(Leftover::default()));
     let smoke = args.smoke.clone();
-    let options = eframe::NativeOptions {
-        renderer: eframe::Renderer::Wgpu,
-        // egui's pass then has one sample and no depth, as the viewer's
-        // pipelines do.
-        multisampling: 0,
-        depth_buffer: 0,
-        viewport: egui::ViewportBuilder::default()
-            .with_app_id(brand::APP_ID)
-            .with_title(brand::APP_NAME)
-            .with_decorations(true)
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([480.0, 320.0]),
-        // A smoke run's window is the default size, and leaves the next
-        // run's alone.
-        persist_window: smoke.is_none(),
-        wgpu_options: egui_wgpu::WgpuConfiguration {
-            wgpu_setup: egui_wgpu::WgpuSetup::Existing(egui_wgpu::WgpuSetupExisting {
-                instance: gpu.instance.clone(),
-                adapter: gpu.adapter.clone(),
-                device: gpu.device.clone(),
-                queue: gpu.queue.clone(),
-            }),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+    // A smoke run's window is the default size, and leaves the next run's
+    // alone.
+    let options = native_options(&gpu, brand::APP_NAME, smoke.is_none());
     let leftover = left.clone();
     let result = eframe::run_native(
         brand::APP_NAME,
@@ -251,6 +238,131 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
     }
 }
 
+/// eframe's options: a window of 1280×800 points titled `title`, drawn
+/// with `gpu`'s device.
+fn native_options(gpu: &Gpu, title: &str, persist_window: bool) -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        renderer: eframe::Renderer::Wgpu,
+        // egui's pass then has one sample and no depth, as the viewer's
+        // pipelines do.
+        multisampling: 0,
+        depth_buffer: 0,
+        viewport: egui::ViewportBuilder::default()
+            .with_app_id(brand::APP_ID)
+            .with_title(title)
+            .with_decorations(true)
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([480.0, 320.0]),
+        persist_window,
+        wgpu_options: egui_wgpu::WgpuConfiguration {
+            wgpu_setup: egui_wgpu::WgpuSetup::Existing(egui_wgpu::WgpuSetupExisting {
+                instance: gpu.instance.clone(),
+                adapter: gpu.adapter.clone(),
+                device: gpu.device.clone(),
+                queue: gpu.queue.clone(),
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// The toolkit check's prototype on the device the viewer would take,
+/// until its run ends or its window closes. Its writer is joined after
+/// the event loop, with the jobs' budget.
+fn run_proto(args: &ProtoArgs, gpu: Gpu) -> Result<(), GuiError> {
+    let left: Rc<RefCell<ProtoLeftover>> = Rc::default();
+    let leftover = left.clone();
+    let proto_args = args.clone();
+    let title = format!("{} timeline prototype", brand::APP_NAME);
+    let result = eframe::run_native(
+        brand::APP_NAME,
+        native_options(&gpu, &title, false),
+        Box::new(move |cc| {
+            spherecut_core::blocking::mark_ui_thread();
+            let rs = cc
+                .wgpu_render_state
+                .as_ref()
+                .ok_or("eframe made no wgpu render state")?;
+            cc.egui_ctx.set_zoom_factor(proto_args.zoom);
+            let proto = TimelineProto::new(
+                Adapter::of(&gpu),
+                format!("{:?}", rs.target_format),
+                &proto_args,
+            );
+            Ok(Box::new(ProtoApp { proto, leftover }))
+        }),
+    );
+    spherecut_core::blocking::unmark_ui_thread();
+    let left = std::mem::take(&mut *left.borrow_mut());
+    let still_running = join_threads(
+        left.thread.into_iter().collect(),
+        Instant::now() + JOBS_BUDGET,
+    );
+    if !still_running.is_empty() {
+        tracing::warn!(?still_running, "the prototype's writer didn't end");
+    }
+    result.map_err(|e| GuiError::Window(e.to_string()))?;
+    match (&args.out, left.outcome) {
+        (None, _) | (Some(_), Some(Ok(()))) => Ok(()),
+        (Some(_), Some(Err((code, message)))) => Err(GuiError::Proto { code, message }),
+        (Some(out), None) => Err(GuiError::Proto {
+            code: "cancelled",
+            message: format!(
+                "the window closed before the run ended; {} may be missing",
+                out.display()
+            ),
+        }),
+    }
+}
+
+/// The window's monitor's refresh rate, as winit has it.
+fn refresh_hz(frame: &eframe::Frame) -> Option<f64> {
+    frame
+        .winit_window()
+        .and_then(|w| w.current_monitor())
+        .and_then(|m| m.refresh_rate_millihertz())
+        .map(|mhz| f64::from(mhz) / 1000.0)
+}
+
+/// What the prototype's `on_exit` leaves for [`run_proto`].
+#[derive(Default)]
+struct ProtoLeftover {
+    outcome: Option<Outcome>,
+    thread: Option<JoinHandle<()>>,
+}
+
+/// The prototype, as eframe runs it.
+struct ProtoApp {
+    proto: TimelineProto,
+    leftover: Rc<RefCell<ProtoLeftover>>,
+}
+
+impl eframe::App for ProtoApp {
+    /// The script's input joins the pass's before egui reads it.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(t) = raw_input.time {
+            raw_input.events.extend(self.proto.script(t));
+        }
+    }
+
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.proto.logic();
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.proto.set_refresh_hz(refresh_hz(frame));
+        self.proto.ui(ui, frame.info().cpu_usage);
+    }
+
+    fn on_exit(&mut self) {
+        if let Ok(mut left) = self.leftover.try_borrow_mut() {
+            left.outcome = self.proto.outcome().cloned();
+            left.thread = self.proto.take_thread();
+        }
+    }
+}
+
 /// What `on_exit` leaves for [`run`] to join.
 #[derive(Default)]
 struct Leftover {
@@ -329,12 +441,7 @@ impl eframe::App for EframeApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if let Some(smoke) = &mut self.app.smoke {
-            let hz = frame
-                .winit_window()
-                .and_then(|w| w.current_monitor())
-                .and_then(|m| m.refresh_rate_millihertz())
-                .map(|mhz| f64::from(mhz) / 1000.0);
-            smoke.set_refresh_hz(hz);
+            smoke.set_refresh_hz(refresh_hz(frame));
             smoke.set_work(frame.info().cpu_usage);
         }
         self.app.ui(ui);

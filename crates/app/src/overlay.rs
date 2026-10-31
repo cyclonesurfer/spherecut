@@ -479,7 +479,7 @@ pub fn overlay_ui(s: &mut AppState, ui: &egui::Ui, rect: egui::Rect) {
 
 /// Intervals in milliseconds as a line, scaled to their largest or 1.5×
 /// their median, whichever is more, with the scale beside it.
-fn sparkline(ui: &mut egui::Ui, what: &str, ms: &[f32]) {
+pub(crate) fn sparkline(ui: &mut egui::Ui, what: &str, ms: &[f32]) {
     let mut sorted = ms.to_vec();
     sorted.sort_by(f32::total_cmp);
     let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);

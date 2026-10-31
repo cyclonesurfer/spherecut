@@ -3,15 +3,18 @@
 //! leaves in its directory: `gui-smoke.json`, which lists the runs and
 //! their verdicts, and each run's `spherecut.smoke/1` document and
 //! screenshot. The screenshots are copied next to the report as
-//! `<report>-gui-<n>.png` and shown in it.
+//! `<report>-gui-<n>.png` and shown in it. Its "Timeline prototype"
+//! section (M2 plan section 12) is the same from `gui_proto`'s
+//! `gui-proto.json`, the screenshots as `<report>-proto-<n>.png`.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-/// The summary's file name, as the test writes it.
+/// The summaries' file names, as the tests write them.
 pub const SUMMARY: &str = "gui-smoke.json";
+pub const PROTO_SUMMARY: &str = "gui-proto.json";
 
 /// The section's Markdown for the runs in `dir`, with the screenshots
 /// copied beside `report`. `test` says how the `gui_smoke` test ended,
@@ -195,16 +198,174 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
     r
 }
 
+/// The section's Markdown for the prototype's runs in `dir`, with the
+/// screenshots copied beside `report`. `test` says how `gui_proto`
+/// ended.
+pub fn proto_section(dir: &Path, report: &Path, test: &str) -> String {
+    let mut r = String::new();
+    let summary = std::fs::read(dir.join(PROTO_SUMMARY))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let Some(s) = summary else {
+        let _ = writeln!(r, "No run: `gui_proto` {test}.\n");
+        return r;
+    };
+    let lock = match s["locked"].as_bool() {
+        Some(true) => " The screen was locked when the runs began, so none ran.",
+        Some(false) => " The screen was unlocked when the runs began.",
+        None => "",
+    };
+    let _ = writeln!(
+        r,
+        "`gui_proto` {test}. The session: {} ({}).{lock} Each run plays the prototype's \
+         script (zoom, drag, ripple trim, pan; 500 clips on 6 tracks) for {} s; after its first \
+         second it must present 99% of the frames, each pass's own work must have a p99 under \
+         the refresh period and the interval between passes a p99 of at most 1.5 periods, and \
+         every action must land.\n",
+        s["session"].as_str().unwrap_or("?"),
+        list(&s["env"]),
+        s["seconds"]
+    );
+    let runs = s["runs"].as_array().cloned().unwrap_or_default();
+    let docs: Vec<Option<Value>> = runs
+        .iter()
+        .map(|run| {
+            let p = run["document"].as_str()?;
+            serde_json::from_slice(&std::fs::read(p).ok()?).ok()
+        })
+        .collect();
+    if !runs.is_empty() {
+        let _ = writeln!(
+            r,
+            "| # | Run | Verdict | Pixels a point | Presented | Late | Interval p50 / p99 ms | Work p50 / p99 ms | Building p99 ms | Refresh |\n\
+             |---:|---|---|---:|---:|---:|---:|---:|---:|---:|"
+        );
+    }
+    for (run, doc) in runs.iter().zip(&docs) {
+        let failed = list_of(&run["failed"]);
+        let verdict = if failed.is_empty() {
+            "pass".to_string()
+        } else {
+            format!("**FAILED**: {}", failed.join("; "))
+        };
+        let res = doc.as_ref().map(|d| &d["result"]);
+        let cell =
+            |f: &dyn Fn(&Value) -> Option<String>| res.and_then(f).unwrap_or_else(|| "-".into());
+        let _ = writeln!(
+            r,
+            "| {} | {} | {verdict} | {} | {} | {} | {} | {} | {} | {} |",
+            run["n"],
+            run["label"].as_str().unwrap_or("?"),
+            cell(&|r| r["scale"].as_f64().map(|v| format!("{v}"))),
+            cell(&|r| Some(format!("{:.1}%", r["ui"]["presented"].as_f64()? * 100.0))),
+            cell(&|r| Some(r["ui"]["late"].to_string())),
+            cell(&|r| Some(format!(
+                "{} / {}",
+                ms(&r["ui"]["interval_ms"]["p50"]),
+                ms(&r["ui"]["interval_ms"]["p99"])
+            ))),
+            cell(&|r| Some(format!(
+                "{} / {}",
+                ms(&r["ui"]["work_ms"]["p50"]),
+                ms(&r["ui"]["work_ms"]["p99"])
+            ))),
+            cell(&|r| Some(ms(&r["ui"]["build_ms"]["p99"]))),
+            cell(&|r| r["refresh_hz"].as_f64().map(|hz| format!("{hz:.2} Hz"))),
+        );
+    }
+    if !runs.is_empty() {
+        let _ = writeln!(r);
+    }
+    for (run, doc) in runs.iter().zip(&docs) {
+        let n = run["n"].as_u64().unwrap_or(0);
+        let label = run["label"].as_str().unwrap_or("?");
+        let _ = writeln!(r, "### Prototype {n}. {label}\n");
+        match doc.as_ref().map(|d| &d["result"]).filter(|v| !v.is_null()) {
+            Some(res) => {
+                let (d, a) = (&res["drawn"], &res["actions"]);
+                let _ = writeln!(
+                    r,
+                    "{} ({}, {}); {} at {} pixels a point (the window's own {}, egui's zoom {}), \
+                     the window {} pixels; {} UI passes of {}; at most {} clips, {} thumbnails, \
+                     {} names and {} snap lines in a pass; {} moves ({} snapped), {} trims, {} \
+                     passes zooming and {} panning, from {} to {} s on screen; played {:.1} s.\n",
+                    res["adapter"]["name"].as_str().unwrap_or("?"),
+                    res["adapter"]["driver"].as_str().unwrap_or("?"),
+                    res["adapter"]["driver_info"].as_str().unwrap_or("?"),
+                    res["surface_format"].as_str().unwrap_or("?"),
+                    res["scale"],
+                    res["native_scale"],
+                    res["zoom"],
+                    size(&res["window"]),
+                    res["ui"]["frames"],
+                    res["ui"]["passes"],
+                    d["clips"],
+                    d["thumbnails"],
+                    d["names"],
+                    d["snap_lines"],
+                    a["moves"],
+                    a["snaps"],
+                    a["trims"],
+                    a["zoom_passes"],
+                    a["pan_passes"],
+                    res["span_s"][0]
+                        .as_f64()
+                        .map_or("?".into(), |v| format!("{v:.1}")),
+                    res["span_s"][1]
+                        .as_f64()
+                        .map_or("?".into(), |v| format!("{v:.0}")),
+                    res["played_s"].as_f64().unwrap_or(0.0),
+                );
+            }
+            None => {
+                let why = doc
+                    .as_ref()
+                    .and_then(|d| d["error"]["message"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "no document".into());
+                let _ = writeln!(r, "No measurements: {why}.\n");
+            }
+        }
+        if let Some(png) = run["screenshot"].as_str() {
+            match copy_named(Path::new(png), report, &named(report, "proto", n)) {
+                Ok(name) => {
+                    let _ = writeln!(r, "![{label}]({name})\n");
+                }
+                Err(e) => {
+                    let _ = writeln!(r, "The screenshot couldn't be copied: {e}.\n");
+                }
+            }
+        }
+    }
+    for nr in s["not_run"].as_array().into_iter().flatten() {
+        let _ = writeln!(
+            r,
+            "Not run: {}: {}\n",
+            nr["label"].as_str().unwrap_or("?"),
+            nr["why"].as_str().unwrap_or("?")
+        );
+    }
+    r
+}
+
 /// `report`'s screenshot `n`: its name beside the report.
 pub fn screenshot_name(report: &Path, n: u64) -> String {
+    named(report, "gui", n)
+}
+
+/// `<report>-<kind>-<n>.png`.
+fn named(report: &Path, kind: &str, n: u64) -> String {
     let stem = report
         .file_stem()
         .map_or_else(|| "report".into(), |s| s.to_string_lossy().into_owned());
-    format!("{stem}-gui-{n}.png")
+    format!("{stem}-{kind}-{n}.png")
 }
 
 fn copy_beside(png: &Path, report: &Path, n: u64) -> std::io::Result<String> {
-    let name = screenshot_name(report, n);
+    copy_named(png, report, &screenshot_name(report, n))
+}
+
+fn copy_named(png: &Path, report: &Path, name: &str) -> std::io::Result<String> {
+    let name = name.to_string();
     let dest: PathBuf = report.with_file_name(&name);
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
@@ -450,6 +611,72 @@ mod tests {
         assert_eq!(
             none,
             "No run: `gui_smoke` skipped: no graphical session.\n\n"
+        );
+    }
+
+    #[test]
+    fn the_prototype_section_shows_each_run_and_its_screenshot() {
+        let s = Scratch(std::env::temp_dir().join(format!("xtask-proto-{}", std::process::id())));
+        let dir = s.0.join("hw-gui");
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = serde_json::json!({
+            "schema": "spherecut.timeline-proto/1", "ok": true, "warnings": [],
+            "result": {
+                "adapter": {"name": "AMD Radeon RX 7600 (RADV NAVI33)", "driver": "radv", "driver_info": "Mesa 26.2.5"},
+                "surface_format": "Bgra8UnormSrgb", "scale": 1.25, "native_scale": 1.0, "zoom": 1.25,
+                "window": [1280, 800], "refresh_hz": 59.95, "played_s": 20.02,
+                "ui": {"presented": 0.9966, "late": 2, "frames": 1136, "passes": 1136,
+                       "interval_ms": {"p50": 16.68, "p99": 17.9},
+                       "work_ms": {"p50": 3.1, "p99": 5.04},
+                       "build_ms": {"p99": 2.26}},
+                "drawn": {"clips": 500, "thumbnails": 812, "names": 260, "snap_lines": 4},
+                "actions": {"moves": 2, "snaps": 2, "trims": 2, "zoom_passes": 310, "pan_passes": 168},
+                "span_s": [2.0, 777.31],
+            }
+        });
+        std::fs::write(dir.join("gui-proto-0.json"), doc.to_string()).unwrap();
+        std::fs::write(dir.join("gui-proto-0.png"), b"png").unwrap();
+        let summary = serde_json::json!({
+            "session": "Wayland socket discovered",
+            "env": ["WAYLAND_DISPLAY=wayland-0"],
+            "locked": false,
+            "seconds": 20.0,
+            "runs": [
+                {"n": 0, "label": "egui zoom 1.25", "zoom": 1.25,
+                 "document": dir.join("gui-proto-0.json"), "screenshot": dir.join("gui-proto-0.png"), "failed": []},
+                {"n": 1, "label": "egui zoom 1.5", "zoom": 1.5,
+                 "document": dir.join("gui-proto-1.json"), "screenshot": null,
+                 "failed": ["no document (exit None): killed after 120 s"]},
+            ],
+            "not_run": [],
+        });
+        std::fs::write(dir.join(PROTO_SUMMARY), summary.to_string()).unwrap();
+        let report = s.0.join("hw-reports").join("odin-abc.md");
+        let md = proto_section(&dir, &report, "passed");
+        eprintln!("{md}");
+        assert!(md.contains("`gui_proto` passed. The session: Wayland socket discovered (WAYLAND_DISPLAY=wayland-0). The screen was unlocked"));
+        assert!(md.contains("for 20.0 s;"));
+        assert!(md.contains(
+            "| 0 | egui zoom 1.25 | pass | 1.25 | 99.7% | 2 | 16.7 / 17.9 | 3.1 / 5.0 | 2.3 | 59.95 Hz |"
+        ));
+        assert!(md.contains(
+            "| 1 | egui zoom 1.5 | **FAILED**: no document (exit None): killed after 120 s | - |"
+        ));
+        assert!(md.contains(
+            "(radv, Mesa 26.2.5); Bgra8UnormSrgb at 1.25 pixels a point (the window's own 1.0, \
+             egui's zoom 1.25), the window 1280×800 pixels; 1136 UI passes of 1136; at most 500 \
+             clips, 812 thumbnails, 260 names and 4 snap lines in a pass; 2 moves (2 snapped), 2 \
+             trims, 310 passes zooming and 168 panning, from 2.0 to 777 s on screen; played 20.0 s."
+        ));
+        assert!(md.contains("![egui zoom 1.25](odin-abc-proto-0.png)"));
+        assert_eq!(
+            std::fs::read(s.0.join("hw-reports").join("odin-abc-proto-0.png")).unwrap(),
+            b"png"
+        );
+        assert!(md.contains("No measurements: no document."));
+        assert_eq!(
+            proto_section(&s.0.join("nothing"), &report, "wasn't listed"),
+            "No run: `gui_proto` wasn't listed.\n\n"
         );
     }
 }
