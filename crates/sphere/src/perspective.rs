@@ -13,7 +13,13 @@
 use glam::{DVec2, DVec3};
 use std::f64::consts::PI;
 
+/// The narrowest horizontal field of view a view may have, in degrees:
+/// the viewer's zoom stops here, and a project's FOV keys may not go
+/// below it.
+pub const MIN_HFOV_DEG: f64 = 10.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Projection {
     /// Pinhole camera; straight lines stay straight. hfov < 180°.
     Rectilinear,

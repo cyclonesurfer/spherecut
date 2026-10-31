@@ -10,7 +10,42 @@ they are used). A fresh review's findings become amendments in section
 
 ## 0. Amendments (read first)
 
-None yet.
+**Amendment 1 (2026-10-31, slice M2.1's code).** What the model and
+its edits became, where they differ from sections 3 to 5 (D47 and D48
+record them):
+
+- **Markers are on the clip, in the source's time** (`Clip.markers`,
+  `add_marker {clip, marker}`), like keys, so trimming the in point
+  doesn't shift them off their moment. Sequence markers wait for M5.
+- **A flat output is `{aspect, short_side}`**: 1080, 1440 or 2160 on the
+  short side for every aspect (1080 × 1350 for 4:5), instead of a
+  `height` that meant width for portrait.
+- **The view's names**: a key track is `KeyTrack<V>` (`Track` is the
+  timeline's); an orientation key's value is `Orient::View(Orientation)`
+  or `Orient::Aim {target, roll_deg}` (`Free` was easy to confuse with
+  `OrientMode::Free`); the mode is `ViewAnim.mode`. FOV keys, aim roll
+  and target paths are in degrees in the model and the file.
+- **FOV keys are 10° to 360° whatever the projection**; the renderer
+  caps each projection at its own maximum, as the viewer does, so a
+  projection key never makes a FOV key invalid.
+- **The readable copies are checked, not ignored** (section 5.1): a time
+  whose `seconds` disagrees with `exact`, or an orientation whose
+  `ypr_deg` disagrees with `quat`, is refused with where it is and
+  which to edit; `seconds` may be left out and `ypr_deg` given alone.
+- **Edits**: `set_key`, `remove_key`, `set_marker` and `remove_marker`
+  name only the key or marker (ids are project-wide); `set_keys`
+  replaces a whole track (the inverse of `set_view_path`, and the
+  Inspector's "keep the vertical field of view"); `set_view_path`'s
+  points carry the ids their keys were given, so redo makes the same
+  ids; `rename {id, name}` takes a sequence, marker or target. A new
+  thing's id in an edit is 0 or left out (`id_given` otherwise); undo
+  and redo restore ids. Each edit is validated before the next, so the
+  error names the edit that broke a rule. An empty list is refused.
+- **`MediaVideo`** is the stream index, size, rate and duration, with no
+  projection field; the fingerprint is the file's size and the hash of
+  its first MiB. `Media::from_probe` (in media) moves to M2.4, where the
+  export's tests first open real files, and core's `media_status`
+  checks the size and hash on load.
 
 
 ## 1. Summary

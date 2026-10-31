@@ -1218,7 +1218,7 @@ rest, with the versions in `Cargo.lock`:
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
 | rustix 1.1.5 (std, fs, stdio) | agent, cli | `openat2` below a root, a directory read through its descriptor (A1's roots, D43), and `spherecut mcp`'s stdout guard: the protocol's copy of fd 1 (`fcntl_dupfd_cloexec`) and fd 1 pointed at stderr (`dup2_stdout`), all without `unsafe`. Pinned with `=` to the version already in the tree through tempfile and the Wayland crates, so it adds no crate |
 | serde 1.0.229 (derive) | core, sphere, media, cli, agent | Serializable time types, `Projection`, the probe and doctor reports, the CLI's JSON envelope (D27), and the agent's requests |
-| serde_json 1.0.154 | cli, agent; core, render (dev) | `--json` output, through the `contract` module (D27), and the MCP server's messages, schemas and results (D43, D44). core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
+| serde_json 1.0.154 (float_roundtrip) | cli, agent, core; render (dev) | `--json` output, through the `contract` module (D27), the MCP server's messages, schemas and results (D43, D44), and the project file (D47), whose floats `float_roundtrip` reads back bit for bit. core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
 | thiserror 2.0.21 | core, media, synth, render, playback, audio, agent | Typed library errors without hand-written `Display` impls |
 | tracing 0.1.44 | core, media, cli, render, playback, audio, agent | Structured logging, and the target for FFmpeg's log (D12). core logs only what `fs::TempFile` can't clean up (M1 slice 4) |
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
@@ -1230,7 +1230,7 @@ rest, with the versions in `Cargo.lock`:
 | proptest 1.12.0 (dev) | core, sphere, media, render, playback, agent | Property tests, the MP4 fuzzing (D15) and the JSON-RPC reader's (D44) |
 | ron 0.12.2 (dev) | core | A serde round-trip test of the time types in a text format |
 
-glam's `serde` feature is on, but no glam type is serialized yet.
+glam's `serde` feature is on; since M2.1 core depends on glam and sphere for the project model's orientations (D48), which the project file writes through its own `Orientation` form, not glam's.
 
 *Updated in M1 slice 3a,* with the render crate's rows above: cargo-deny
 now warns of three more crates in two versions, each inside the new
@@ -2039,7 +2039,8 @@ which case that is a version 2 of these schemas, never a silent change.
 ## D28. Crate layout, rust-version 1.95 and where unsafe may appear
 
 *2026-10-24, M1 slice 3b. The M1 plan's D26 (section 2); updates D1,
-whose 1.95 half landed with slice 3a.*
+whose 1.95 half landed with slice 3a. Updated by D48: core depends on
+sphere and glam.*
 
 What:
 
@@ -7229,6 +7230,134 @@ Revisit if: YouTube's pages change (refetch them), or M2's exports
 exist (name them in the fixes), or Pat's footage shows a camera file
 `archive` misreads.
 
+## D47. The project file: JSON with a schema number
+
+*2026-10-31, M2.1. From `docs/design/m2-plan.md` section 5 and its
+amendments. Pat was asked to choose between JSON, RON and SQLite, with
+JSON recommended; until Pat answers, this is the working choice, and
+another answer changes only `core::project::file`.*
+
+What, as `crates/core/src/project/file.rs` does it:
+
+- **A `.spherecut` file** is UTF-8 JSON, `{"format":
+  "spherecut.project", "schema": 1, "saved_by": "spherecut 0.1.0",
+  "project": {...}}`, pretty-printed with two-space indents in the
+  structs' field order and ending in a newline, so a `git diff` of two
+  saves shows the change. Files over 64 MiB are refused unread.
+- **`schema` is read first**: a newer one is refused (`newer_schema`,
+  "saved by a newer Spherecut (schema 3); this one reads schemas up to
+  1"), an older one migrated step by step (none yet). Within a schema
+  nothing changes: unknown fields are refused (`deny_unknown_fields`)
+  so a typo in a hand edit is caught, which means any new field is a
+  new schema with a migration.
+- **The readable copies.** A time is `{"exact": "30030/1001",
+  "seconds": 30.03}` and an orientation `{"quat": [x, y, z, w],
+  "ypr_deg": [yaw, pitch, roll]}`. Only `exact` and `quat` are the
+  values; the copies are for people, `jq` and agents. A copy that
+  disagrees with its value (more than 1 µs, or 0.001°) is refused with
+  where it is and which to edit, so a hand edit of one is never
+  silently dropped. `seconds` may be left out, and an orientation may be
+  given by `ypr_deg` alone (D33's convention builds it).
+- **Floats** are written shortest-exact and read with serde_json's
+  `float_roundtrip` (turned on for the workspace), so every `f64` loads
+  back bit for bit; a quaternion within 1e−12 of unit length is not
+  normalised again.
+- **Media paths** are written relative to the file's folder, made from
+  path components (`/v/clips/a.mp4` from `/v/projects` is
+  `../clips/a.mp4`), and read back against the folder the file is in;
+  an absolute path in a file is read as it is. `..` is resolved
+  lexically, without following links. A path that isn't UTF-8 can't be
+  saved (`PathNotUtf8`).
+- **Media that moved or changed** doesn't stop a load: `media_status`
+  says per file whether it is there, and whether its size and the
+  FNV-1a 64 of its first MiB match the fingerprint taken when it was
+  added (the video's own numbers wait for a probe, in the media crate).
+- **Saving** goes through `TempFile` and `persist_replace` (D16): a crash
+  leaves the old file or the new one, never half of one.
+- **Codes** for A2: `not_found`, `io`, `too_large`, `not_project`,
+  `newer_schema`, `malformed`, `invalid`.
+
+`crates/core/tests/data/schema1.spherecut` is a checked-in file with
+something of every kind in it; a test loads it and checks that saving
+the same project writes it byte for byte, so a format change fails a
+test until it gets a schema number and a migration.
+
+Why JSON: agents and `jq` read it, it diffs, serde writes it, and it
+needs no new dependency. RON reads better by hand but no agent tool
+reads it; SQLite would make saves incremental and undo history cheap to
+keep, which a project of a few MB doesn't need yet.
+
+Revisit if: Pat chooses otherwise, M5's timelines make files large
+enough for saves to be slow, or A2's saved history wants a database.
+
+## D48. The project model and `Edit`
+
+*2026-10-31, M2.1. From `docs/design/m2-plan.md` sections 3 and 4 and
+their amendments. Updates D28.*
+
+What, as `crates/core/src/project/` has it:
+
+- **The shape** is M5's timeline: a `Project` holds media, sequences
+  (each with a rate, an output, export settings and tracks of clips)
+  and look-at targets. A clip has its media, its trim (`source`, the
+  source's [start, end) in its own time), its place in the sequence
+  (`at`), markers and its view (three key tracks: orientation, field of
+  view in degrees, projection; and the orientation mode). M2's limits
+  are checked, not built in: one sequence, one video track, one clip at
+  0, so M5 widens limits rather than changing the format.
+- **Keys and markers are in the source's time**, so a trim never moves
+  them off the moment they were set on (markers were planned in
+  sequence time; that would shift them on every trim of the in point).
+- **Ids** are typed `u64`s from the project's one counter, never reused
+  (undo never lowers the counter), below 2^53 so JSON holds them. In an
+  edit from outside, a new thing's id is 0 (or left out) and `apply`
+  gives it; a nonzero one is `id_given`. Undo and redo bring things
+  back with the ids they had.
+- **`Edit`** is one serde enum tagged `op`, naming ids: `add_media`,
+  `remove_media`, `add_clip`, `remove_clip`, `set_trim`, `set_output`,
+  `set_rate`, `set_export`, `add_key`, `set_key`, `remove_key`,
+  `set_keys` (a whole track), `set_orient_mode`, `set_view_path` (A2's
+  many keys in one edit), `add_marker`, `set_marker`, `remove_marker`,
+  `add_target`, `set_target`, `remove_target`, `rename`.
+- **`Project::apply(&[Edit])`** works on a clone, applies each edit and
+  validates the project before the next, and swaps the clone in only
+  when all pass, so a refusal changes nothing (revision included) and
+  names the edit's index, its `op` and a code (`not_found`, `in_use`,
+  `exists`, `last_key`, `out_of_range`, `invalid`, `limit`,
+  `id_given`). On success the revision is one higher and `Applied`
+  holds the edits as applied (ids filled in) and their inverse. No I/O.
+  The project's fields are private: nothing else can change it.
+- **`validate`** holds the rules: ids unique and below the counter,
+  references resolve, the trim inside the source with start before end,
+  keys in strictly increasing time inside the source, at least one key
+  a track and at most 10,000, a field of view from 10° to 360°, spin
+  only on orientation keys and at most 8 turns, aim keys at targets that
+  exist, names under 200 characters without control characters, rates
+  up to 240 fps, output sizes from section 8.1's list.
+- **`History`** keeps up to 1,000 steps, each with a label, an origin
+  (`user` or `agent` by name), the edits and inverse, and the revisions
+  before and after; undo and redo are new revisions. A `Gesture` (a
+  drag) previews each frame from the project as it was when it began
+  and ends as one step, or is cancelled back to the start.
+- **core depends on sphere and glam** (D28 updated): the model holds
+  `Projection` and quaternions, and sphere has never depended on core.
+  `MIN_HFOV_DEG` moved from the app to sphere, for `validate`.
+
+Tests: every variant applied, undone, redone, read back from JSON and
+refused with its code (`tests/project_edits.rs`); property tests of
+random steps of valid and invalid edits (undo of all gives back the
+original, redo the same states with the same ids, a refused step
+changes nothing, no id ever names two kinds of thing, save then load is
+equal) and of gestures (`tests/project_props.rs`), run at 100,000 cases
+before a merge; and `apply` on a track of 10,000 keys.
+
+Why: PLAN's M2 and A2 ask for exactly this, and one path for every
+change is what lets an agent's edit, the GUI's and undo be checked by
+the same code.
+
+Revisit if: M5 needs edits that move many clips at once faster than a
+clone a step allows, or A2's saved history needs more in a step.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360
@@ -7237,6 +7366,9 @@ exist (name them in the fixes), or Pat's footage shows a camera file
   license, allow that one git revision in `deny.toml`, or write our own
   parsers from `docs/formats/`. To decide at M4, after checking its license
   and what we actually need from it.
+- **The project file format** (D47): Pat was asked on 2026-10-30
+  (JSON, RON or SQLite; JSON recommended). M2 is built on JSON
+  meanwhile; another answer changes only `core::project::file`.
 - **Attach socket** (A3): Pat to confirm that a local socket the GUI
   opens only when Pat turns attach on (mode 0600, Pat's user only) is
   IPC, not the network access Pat's rule forbids. Before A3 (D23).
