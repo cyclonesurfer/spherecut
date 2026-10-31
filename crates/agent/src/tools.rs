@@ -259,6 +259,7 @@ mod tests {
         let tools = list.as_array().map_or(0, Vec::len);
         assert!(tools <= MAX_TOOLS, "{tools} tools");
         let bytes = json!({ "tools": list }).to_string().len();
+        eprintln!("tools/list: {tools} tools, {bytes} bytes");
         assert!(bytes <= MAX_LIST_BYTES, "{bytes} bytes");
         assert!(bytes <= A1_LIST_BYTES, "{bytes} bytes, past A1's share");
         for t in list.as_array().into_iter().flatten() {

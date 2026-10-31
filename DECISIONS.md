@@ -6800,6 +6800,21 @@ Revisit if: a client Pat uses needs 2026-07-28 (then `server/discover`
 and requests with `_meta`, from D23's research), or the schemas outgrow
 what is easy to keep by hand (M9's tool count is still 12).
 
+*Updated 2026-10-31*, after A1's local-model runs
+(`docs/research/a1/local-models-2026-10-31.md`): a property of two
+types (every time: a string or a `[num, den]` pair) is an `anyOf` of
+plain types, `{"type": "string"}` and `{"type": "array"}`, with the
+array's `items`, `minItems` and `maxItems` beside it, rather than
+`"type": ["string", "array"]`. Both are valid JSON Schema, but
+llama.cpp's template engine fails gemma-4's chat template on a list of
+types under `items` (HTTP 500, "filter-mapping not implemented", on the
+first request), and renders the `anyOf`. `schema::validate` takes the
+`anyOf`'s types as the value's choices, so its errors are unchanged
+(the bare-number hint included); the lint refuses a list-valued `type`
+and any `anyOf` but two or more distinct plain types with no `type`
+beside them, and still any combinator at the root (PLAN A1). tools/list
+grew from 6,976 to 7,033 bytes of A1's 7,168.
+
 ## D44. A1's MCP server: the protocol and its conventions
 
 *2026-10-30, A1.1. The protocol half; A1.3 adds results that end

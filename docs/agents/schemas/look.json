@@ -30,9 +30,13 @@
       "minItems": 1,
       "maxItems": 24,
       "items": {
-        "type": [
-          "string",
-          "array"
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array"
+          }
         ],
         "description": "A time: a string (\"12.5\", \"1:02.5\", \"370f\" for frame 370, \"30000/1001\") or [num, den], never a bare number."
       }

@@ -307,14 +307,17 @@ mistral-small-4 1. The `check` and `analyze` tasks went through; the
 marker task, which needs vision, beat every model by the request
 timeout or the step limit. gemma-4 got HTTP 500 until the list-valued
 `type` of `look`'s `times` items was sent as `anyOf`, which llama.cpp's
-template engine renders; Spherecut's schemas take that next.
+template engine renders. The schemas now give every time that way: an
+`anyOf` of plain types, which the validator reads and the lint holds
+them to, a list-valued `type` being refused (D43; tools/list grew to
+7,033 bytes).
 
 ### A1 criteria ticked
 
 | Criterion (`PLAN.md` A1) | Evidence |
 |---|---|
 | MCP 2025-06-18 and 2025-11-25 through `initialize`, answered within 1 s, before any FFmpeg or GPU setup | `crates/agent/tests/protocol.rs`: `both_revisions_and_an_unknown_one_negotiate` (2025-11-25, 2025-06-18, 2025-03-26 and 2024-11-05 served; an unknown revision gets 2025-11-25), `a_modern_request_learns_the_supported_revisions` (-32022 with the list), `the_lifecycle_is_enforced`. `crates/cli/tests/mcp.rs`: `a_session_at_each_revision`, `initialize_comes_before_any_media_setup` (the log's order, within 1 s of spawn). 2026-07-28 through `server/discover` waits for a client that needs it (D44) |
-| At most 12 tools and 12 KB of `tools/list` | `tools.rs` `the_list_fits` (`MAX_TOOLS`, `MAX_LIST_BYTES`, and A1's 7 KiB share, amendment 34): five tools, 6,976 bytes |
+| At most 12 tools and 12 KB of `tools/list` | `tools.rs` `the_list_fits` (`MAX_TOOLS`, `MAX_LIST_BYTES`, and A1's 7 KiB share, amendment 34): five tools, 7,033 bytes |
 | Schemas: draft 2020-12, an object at the root, no root `oneOf`/`anyOf`/`allOf`, snake_case, descriptions under 4,096, a fixed order | `tools.rs` `every_schema_parses_and_passes_the_lint`, `names_are_unique_and_snake_case`, `schemas_and_request_types_agree` (amendment 30), `schemas_hold_the_limits`; `schema.rs` `lint_finds_what_clients_refuse` |
 | Images: 768 px JPEG by default, 1568 px and 24 tiles at most, size and bytes stated, PNG on request, a larger one to a file or refused, FFmpeg encoding | `crates/agent/tests/look.rs`: `each_limit_names_its_argument`, `the_image_budget_lowers_the_quality_then_refuses` (amendment 19), `output_writes_a_new_file_and_nothing_inline`, `views_of_a_time_are_tiles_in_order_with_their_markers_centred`; JPEG from FFmpeg's encoder in media (A1.4), PNG as `frame` writes it (amendment 9) |
 | Conventions: times as strings or `[num, den]`, never a bare number; `{exact, seconds, frame}` back; angles stated | `schema.rs` `a_bare_number_time_says_what_to_send`; every tool's tests read times back as `{exact, seconds, frame}`; `look.rs` `cube_faces_look_along_the_six_axes` and `the_sphere_shows_the_frame_asked_for_under_a_grid_on_its_lines` hold the angle conventions to the pixels |
