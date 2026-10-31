@@ -13,7 +13,13 @@
 use glam::{DVec2, DVec3};
 use std::f64::consts::PI;
 
+/// The narrowest horizontal field of view a view may have, in degrees:
+/// the viewer's zoom stops here, and a project's FOV keys may not go
+/// below it.
+pub const MIN_HFOV_DEG: f64 = 10.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Projection {
     /// Pinhole camera; straight lines stay straight. hfov < 180°.
     Rectilinear,
@@ -169,6 +175,110 @@ impl Lens {
     }
 }
 
+/// A lens's projection without its field of view: one projection, or a
+/// morph part way from one to another (D33's slider). A projection key
+/// holds one. Written as the projection's name, or as
+/// `{"from": "rectilinear", "to": "fisheye", "morph": 0.25}`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(
+    untagged,
+    expecting = "a projection name, or a morph {\"from\", \"to\", \"morph\"}"
+)]
+pub enum LensShape {
+    Pure(Projection),
+    Morph(Morph),
+}
+
+/// A morph from one projection to another: 0 is `from`, 1 is `to`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Morph {
+    pub from: Projection,
+    pub to: Projection,
+    pub morph: f64,
+}
+
+impl LensShape {
+    /// The length of [`LensShape::perimeter`]'s loop.
+    pub const PERIMETER: f64 = 3.0;
+
+    /// Where the shape is on a loop through the three projections, each
+    /// next to the other two: rectilinear at 0, fisheye at 1,
+    /// stereographic at 2, and back to rectilinear at 3, a morph between
+    /// two of them on the edge between. A projection track is a scalar
+    /// track of this, the shortest way round, so keys of any shapes
+    /// interpolate through morphs of two projections at a time, as the
+    /// renderer draws them.
+    pub fn perimeter(self) -> f64 {
+        let at = |p: Projection| match p {
+            Projection::Rectilinear => 0.0,
+            Projection::Fisheye => 1.0,
+            Projection::Stereographic => 2.0,
+        };
+        match self {
+            LensShape::Pure(p) => at(p),
+            LensShape::Morph(m) => {
+                let (a, b) = (at(m.from), at(m.to));
+                let m = m.morph.clamp(0.0, 1.0);
+                // From a to b the short way round, which is one edge.
+                let step = crate::spline::wrap_period(b - a, Self::PERIMETER);
+                (a + step * m).rem_euclid(Self::PERIMETER)
+            }
+        }
+    }
+
+    /// The shape at `c` on [`LensShape::perimeter`]'s loop.
+    pub fn from_perimeter(c: f64) -> LensShape {
+        const ORDER: [Projection; 3] = [
+            Projection::Rectilinear,
+            Projection::Fisheye,
+            Projection::Stereographic,
+        ];
+        let c = c.rem_euclid(Self::PERIMETER);
+        let i = (c.floor() as usize).min(2);
+        let morph = c - i as f64;
+        if morph <= 0.0 {
+            return LensShape::Pure(ORDER[i]);
+        }
+        LensShape::Morph(Morph {
+            from: ORDER[i],
+            to: ORDER[(i + 1) % 3],
+            morph,
+        })
+    }
+
+    /// A lens of this shape.
+    pub fn lens(self, hfov: f64) -> Lens {
+        match self {
+            LensShape::Pure(p) => Lens::new(p, hfov),
+            LensShape::Morph(m) => Lens {
+                from: m.from,
+                to: m.to,
+                morph: m.morph,
+                hfov,
+            },
+        }
+    }
+}
+
+impl Lens {
+    /// The lens's shape, as a projection key holds it: a morph at 0 or 1,
+    /// or between a projection and itself, is that projection.
+    pub fn shape(&self) -> LensShape {
+        if self.from == self.to || self.morph <= 0.0 {
+            LensShape::Pure(self.from)
+        } else if self.morph >= 1.0 {
+            LensShape::Pure(self.to)
+        } else {
+            LensShape::Morph(Morph {
+                from: self.from,
+                to: self.to,
+                morph: self.morph,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +359,57 @@ mod tests {
             }
             let edge = lens.theta(1.0);
             prop_assert!((edge - fov_deg.to_radians() / 2.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn shapes_sit_on_a_loop_of_the_three_projections() {
+        use Projection::*;
+        let morph = |from, to, morph| LensShape::Morph(Morph { from, to, morph });
+        assert_eq!(LensShape::Pure(Rectilinear).perimeter(), 0.0);
+        assert_eq!(LensShape::Pure(Stereographic).perimeter(), 2.0);
+        assert_eq!(morph(Rectilinear, Fisheye, 0.25).perimeter(), 0.25);
+        assert_eq!(morph(Fisheye, Rectilinear, 0.25).perimeter(), 0.75);
+        // Stereographic and rectilinear are next to each other too.
+        assert_eq!(morph(Rectilinear, Stereographic, 0.25).perimeter(), 2.75);
+        assert_eq!(morph(Stereographic, Rectilinear, 0.25).perimeter(), 2.25);
+        assert_eq!(
+            LensShape::from_perimeter(2.25),
+            morph(Stereographic, Rectilinear, 0.25)
+        );
+        assert_eq!(LensShape::from_perimeter(3.0), LensShape::Pure(Rectilinear));
+        assert_eq!(
+            LensShape::from_perimeter(-1.0),
+            LensShape::Pure(Stereographic)
+        );
+    }
+
+    #[test]
+    fn a_shape_reads_as_a_name_or_a_morph() {
+        let pure: LensShape = serde_json::from_str("\"fisheye\"").unwrap();
+        assert_eq!(pure, LensShape::Pure(Projection::Fisheye));
+        let m: LensShape =
+            serde_json::from_str(r#"{"from": "fisheye", "to": "stereographic", "morph": 0.5}"#)
+                .unwrap();
+        assert_eq!(m.perimeter(), 1.5);
+        assert_eq!(serde_json::to_string(&pure).unwrap(), "\"fisheye\"");
+        let e = serde_json::from_str::<LensShape>(r#"{"from": "fisheye", "too": 1}"#).unwrap_err();
+        assert!(
+            e.to_string().contains("a projection name, or a morph"),
+            "{e}"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn shapes_and_lenses_round_trip(from in proj(), to in proj(), morph in 0.0f64..1.0) {
+            let lens = Lens { from, to, morph, hfov: 1.0 };
+            let shape = lens.shape();
+            let back = LensShape::from_perimeter(shape.perimeter()).lens(1.0);
+            // The same blend of projections, however it is written.
+            for rho in [0.1, 0.5, 0.9] {
+                prop_assert!((back.theta(rho) - lens.theta(rho)).abs() < 1e-12);
+            }
         }
     }
 }

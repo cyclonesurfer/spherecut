@@ -1,0 +1,251 @@
+{
+  "format": "spherecut.project",
+  "schema": 1,
+  "saved_by": "spherecut 0.1.0",
+  "project": {
+    "revision": 2,
+    "next_id": 16,
+    "media": [
+      {
+        "id": 1,
+        "path": "../clips/VID_1.mp4",
+        "fingerprint": {
+          "bytes": 1000000,
+          "head": "0123456789abcdef"
+        },
+        "video": {
+          "stream": 0,
+          "width": 3840,
+          "height": 1920,
+          "rate": "30",
+          "duration": {
+            "exact": "10",
+            "seconds": 10.0
+          }
+        }
+      }
+    ],
+    "sequences": [
+      {
+        "id": 2,
+        "name": "VID_1",
+        "rate": "30",
+        "output": {
+          "kind": "flat",
+          "aspect": "9:16",
+          "short_side": 1440
+        },
+        "export": {
+          "codec": "h264",
+          "quality": "high",
+          "encoder": "auto",
+          "audio": "copy",
+          "motion_blur": false
+        },
+        "tracks": [
+          {
+            "id": 3,
+            "kind": "video",
+            "clips": [
+              {
+                "id": 4,
+                "media": 1,
+                "source": {
+                  "start": {
+                    "exact": "1/2",
+                    "seconds": 0.5
+                  },
+                  "end": {
+                    "exact": "29029/3001",
+                    "seconds": 9.673108963678773
+                  }
+                },
+                "at": {
+                  "exact": "0",
+                  "seconds": 0.0
+                },
+                "markers": [
+                  {
+                    "id": 15,
+                    "at": {
+                      "exact": "3/2",
+                      "seconds": 1.5
+                    },
+                    "name": "the jump"
+                  }
+                ],
+                "view": {
+                  "mode": "free",
+                  "orientation": [
+                    {
+                      "id": 5,
+                      "at": {
+                        "exact": "0",
+                        "seconds": 0.0
+                      },
+                      "value": {
+                        "view": {
+                          "quat": [
+                            -0.042956710859025644,
+                            -0.1734829030790772,
+                            -0.007574427126938522,
+                            0.9838704342468719
+                          ],
+                          "ypr_deg": [
+                            20.0,
+                            -5.0,
+                            0.0
+                          ]
+                        }
+                      },
+                      "ease": {
+                        "into": "smooth",
+                        "out": "smooth"
+                      }
+                    },
+                    {
+                      "id": 10,
+                      "at": {
+                        "exact": "2",
+                        "seconds": 2.0
+                      },
+                      "value": {
+                        "view": {
+                          "quat": [
+                            0.06162841671621935,
+                            -0.7044160264027586,
+                            0.061628416716219346,
+                            0.7044160264027587
+                          ],
+                          "ypr_deg": [
+                            90.0,
+                            10.0,
+                            0.0
+                          ]
+                        }
+                      },
+                      "ease": {
+                        "into": "smooth",
+                        "out": "smooth"
+                      }
+                    },
+                    {
+                      "id": 11,
+                      "at": {
+                        "exact": "4",
+                        "seconds": 4.0
+                      },
+                      "value": {
+                        "aim": {
+                          "target": 8,
+                          "roll_deg": 2.5
+                        }
+                      },
+                      "ease": {
+                        "into": "stop",
+                        "out": "linear"
+                      },
+                      "spin": 1
+                    }
+                  ],
+                  "fov": [
+                    {
+                      "id": 6,
+                      "at": {
+                        "exact": "0",
+                        "seconds": 0.0
+                      },
+                      "value": 90.0,
+                      "ease": {
+                        "into": "smooth",
+                        "out": "smooth"
+                      }
+                    },
+                    {
+                      "id": 12,
+                      "at": {
+                        "exact": "2",
+                        "seconds": 2.0
+                      },
+                      "value": 62.5,
+                      "ease": {
+                        "into": "smooth",
+                        "out": "smooth"
+                      }
+                    }
+                  ],
+                  "projection": [
+                    {
+                      "id": 7,
+                      "at": {
+                        "exact": "0",
+                        "seconds": 0.0
+                      },
+                      "value": "rectilinear",
+                      "ease": {
+                        "into": "stop",
+                        "out": "stop"
+                      }
+                    },
+                    {
+                      "id": 13,
+                      "at": {
+                        "exact": "5",
+                        "seconds": 5.0
+                      },
+                      "value": "stereographic",
+                      "ease": {
+                        "into": "stop",
+                        "out": "stop"
+                      }
+                    },
+                    {
+                      "id": 14,
+                      "at": {
+                        "exact": "20/3",
+                        "seconds": 6.666666666666667
+                      },
+                      "value": {
+                        "from": "stereographic",
+                        "to": "fisheye",
+                        "morph": 0.25
+                      },
+                      "ease": {
+                        "into": "stop",
+                        "out": "stop"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "id": 8,
+        "name": "rider",
+        "media": 1,
+        "path": [
+          {
+            "id": 9,
+            "at": {
+              "exact": "0",
+              "seconds": 0.0
+            },
+            "value": {
+              "yaw_deg": 30.0,
+              "pitch_deg": -10.0
+            },
+            "ease": {
+              "into": "smooth",
+              "out": "smooth"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

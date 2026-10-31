@@ -1903,9 +1903,9 @@ pub fn run(a: Args) -> Result<()> {
     }
 
     let _ = writeln!(r, "## GUI smoke run\n");
-    let gui_test = match &tier2 {
+    let gui_test = |name: &str| match &tier2 {
         None => "didn't run: there was no build".to_string(),
-        Some(t) => match t.results.iter().find(|(n, _)| n.ends_with("::gui_smoke")) {
+        Some(t) => match t.results.iter().find(|(n, _)| n.ends_with(name)) {
             None => "wasn't listed".to_string(),
             Some((_, Outcome::Passed)) => "passed".to_string(),
             Some((_, Outcome::Failed(_))) => {
@@ -1919,7 +1919,13 @@ pub fn run(a: Args) -> Result<()> {
     r.push_str(&crate::gui_report::section(
         &gui_out,
         &report_path,
-        &gui_test,
+        &gui_test("::gui_smoke"),
+    ));
+    let _ = writeln!(r, "## Timeline prototype\n");
+    r.push_str(&crate::gui_report::proto_section(
+        &gui_out,
+        &report_path,
+        &gui_test("::gui_proto"),
     ));
 
     let _ = writeln!(r, "## Raw environment\n");

@@ -35,7 +35,25 @@
 //! run, with why. `the_gates_fail_what_they_say` is the gates' Tier 1
 //! check.
 //!
-//! Run with `cargo xtask hw-test`; plain `cargo test` lists it as
+//! `gui_proto` runs the toolkit check's timeline prototype (M2 plan
+//! section 12 and amendment 3), `spherecut --timeline-proto`, for 20 s
+//! at the desktop's scale, and when that is 1.0 again at egui zooms of
+//! 1.25 and 1.5. A run fails when, after its first second:
+//!
+//! - the process fails, or its document isn't `ok`;
+//! - the monitor gave no refresh rate, so nothing can be judged;
+//! - fewer than 99% of the UI frames expected were presented (said as
+//!   above when the compositor didn't draw the window);
+//! - a pass's own work, as eframe counts it, has a p99 of a refresh
+//!   period or more;
+//! - the interval between passes has a p99 over 1.5 periods;
+//! - any of the script's moves, trims, zooms or pans didn't land, the
+//!   zoom didn't reach 2 s on screen, or a thumbnail is missing.
+//!
+//! Its runs go to the same directory, listed in `gui-proto.json`.
+//! `the_prototype_gates_fail_what_they_say` is their Tier 1 check.
+//!
+//! Run with `cargo xtask hw-test`; plain `cargo test` lists them as
 //! ignored.
 
 #![allow(clippy::unwrap_used)]
@@ -71,6 +89,15 @@ const SUMMARY: &str = "gui-smoke.json";
 /// Why nothing ran.
 const LOCKED: &str = "the screen is locked: unlock it, keep it on, and run the GUI part again \
      with `cargo xtask hw-test --only gui_smoke --no-tier1` (and `--samples` as before)";
+
+/// The prototype's runs: how long, its gates (module docs), and its
+/// summary.
+const PROTO_SECONDS: f64 = 20.0;
+const MIN_PROTO_PRESENTED: f64 = 0.99;
+const MAX_INTERVAL_P99_PERIODS: f64 = 1.5;
+const PROTO_SUMMARY: &str = "gui-proto.json";
+const PROTO_LOCKED: &str = "the screen is locked: unlock it, keep it on, and run the GUI part \
+     again with `cargo xtask hw-test --only gui_proto --no-tier1`";
 
 /// One clip to run.
 struct Clip {
@@ -250,9 +277,14 @@ fn smoke(
         .arg("--smoke-out")
         .arg(json)
         .arg("--smoke-screenshot")
-        .arg(png)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .arg(png);
+    window(session, cmd)
+}
+
+/// `cmd`'s window in `session`, killed if it hangs: its exit code and
+/// what it wrote to stderr.
+fn window(session: &tier2::GraphicalSession, mut cmd: Command) -> (Option<i32>, String) {
+    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
     for (k, v) in &session.env {
         cmd.env(k, v);
     }
@@ -446,6 +478,306 @@ fn gui_smoke() {
         runs.iter().filter(|r| r["failed"] != json!([])).count(),
         runs.len(),
         failed.join("\n")
+    );
+}
+
+/// Why the prototype's run in `doc` fails, by its gates; empty when it
+/// passes.
+fn judge_proto(doc: &Value) -> Vec<String> {
+    let mut why = Vec::new();
+    if doc["ok"] != true {
+        why.push(format!(
+            "the run failed: {} ({})",
+            doc["error"]["message"].as_str().unwrap_or("no message"),
+            doc["error"]["code"].as_str().unwrap_or("no code")
+        ));
+        return why;
+    }
+    let r = &doc["result"];
+    let ui = &r["ui"];
+    let f = |v: &Value| v.as_f64();
+    let Some(hz) = f(&r["refresh_hz"]) else {
+        why.push("the monitor gave no refresh rate, so nothing can be judged".into());
+        return why;
+    };
+    let period = 1000.0 / hz;
+    let presented = f(&ui["presented"]).unwrap_or(0.0);
+    if presented < MIN_PROTO_PRESENTED {
+        let expected = f(&ui["expected"]).unwrap_or(0.0);
+        let frames = f(&ui["frames"]).unwrap_or(0.0);
+        let hidden = f(&ui["passes"]).unwrap_or(0.0) - frames;
+        if hidden >= (expected - frames) / 2.0 {
+            why.push(format!(
+                "{:.0}% of the UI frames expected were presented: the compositor didn't draw \
+                 the window (a locked session, or one on another VT), so the rest doesn't count",
+                presented * 100.0
+            ));
+            return why;
+        }
+        why.push(format!(
+            "{:.1}% of the UI frames expected were presented, under {:.0}% ({} late)",
+            presented * 100.0,
+            MIN_PROTO_PRESENTED * 100.0,
+            ui["late"]
+        ));
+    }
+    match f(&ui["work_ms"]["p99"]) {
+        Some(w) if w >= period => why.push(format!(
+            "each pass's own work has a p99 of {w:.2} ms, not under the {hz:.0} Hz period \
+             ({period:.2} ms); building the UI's p99 {} ms",
+            f(&ui["build_ms"]["p99"]).map_or("unmeasured".into(), |b| format!("{b:.2}"))
+        )),
+        Some(_) => {}
+        None => why.push("eframe counted no pass's work".into()),
+    }
+    if let Some(p99) = f(&ui["interval_ms"]["p99"]) {
+        let limit = MAX_INTERVAL_P99_PERIODS * period;
+        if p99 > limit {
+            why.push(format!(
+                "UI interval p99 {p99:.1} ms, over {MAX_INTERVAL_P99_PERIODS} × the {hz:.0} Hz \
+                 period ({limit:.1} ms)"
+            ));
+        }
+    }
+    let a = &r["actions"];
+    for k in ["moves", "trims", "zoom_passes", "pan_passes"] {
+        if a[k].as_u64().unwrap_or(0) == 0 {
+            why.push(format!("the script's {} didn't land", k.replace('_', " ")));
+        }
+    }
+    if f(&r["span_s"][0]).is_none_or(|lo| lo > 2.05) {
+        why.push(format!(
+            "the zoom didn't reach 2 s on screen: {} s at the closest",
+            r["span_s"][0]
+        ));
+    }
+    if r["textures"] != r["clips"] || r["clips"].as_u64().unwrap_or(0) == 0 {
+        why.push(format!(
+            "{} thumbnails for {} clips",
+            r["textures"], r["clips"]
+        ));
+    }
+    if r["blocked_on_ui_thread"] != 0 {
+        why.push(format!(
+            "{} blocking calls on the UI thread",
+            r["blocked_on_ui_thread"]
+        ));
+    }
+    why
+}
+
+#[test]
+#[ignore = "tier2: needs a desktop session (GNOME or Hyprland) on a GPU"]
+fn gui_proto() {
+    let session = tier2::require_graphical_session();
+    let out = std::env::var_os("SPHERECUT_GUI_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("gui-proto-{}", std::process::id()))
+        });
+    std::fs::create_dir_all(&out).unwrap();
+    let locked = tier2::session_locked();
+    let summary = |runs: &[Value], not_run: &[(String, String)]| {
+        let s = json!({
+            "session": session.found.describe(),
+            "env": session.env.iter().map(|(k, v)| format!("{k}={}", v.to_string_lossy())).collect::<Vec<_>>(),
+            "locked": locked,
+            "seconds": PROTO_SECONDS,
+            "runs": runs,
+            "not_run": not_run.iter().map(|(l, w)| json!({"label": l, "why": w})).collect::<Vec<_>>(),
+        });
+        std::fs::write(
+            out.join(PROTO_SUMMARY),
+            serde_json::to_string_pretty(&s).unwrap() + "\n",
+        )
+        .unwrap();
+    };
+    if locked == Some(true) {
+        summary(&[], &[("every run".into(), PROTO_LOCKED.into())]);
+        panic!("{PROTO_LOCKED}");
+    }
+
+    let mut runs = Vec::new();
+    let mut failed = Vec::new();
+    // The desktop's scale first; at 1.0, egui's zoom gives the others.
+    let mut zooms = vec![1.0f32];
+    let mut n = 0;
+    while n < zooms.len() {
+        let zoom = zooms[n];
+        let json = out.join(format!("gui-proto-{n}.json"));
+        let png = out.join(format!("gui-proto-{n}.png"));
+        let _ = std::fs::remove_file(&json);
+        let _ = std::fs::remove_file(&png);
+        let label = format!("egui zoom {zoom}");
+        eprintln!("==> the timeline prototype, {label}");
+        if tier2::session_locked() == Some(true) {
+            let why = "not run: the screen locked during the runs".to_string();
+            failed.push(format!("{label}: {why}"));
+            runs.push(json!({"n": n, "label": label, "zoom": zoom, "document": json.display().to_string(), "screenshot": null, "failed": [why]}));
+            n += 1;
+            continue;
+        }
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
+        cmd.arg("--timeline-proto")
+            .args(["--proto-seconds", &PROTO_SECONDS.to_string()])
+            .args(["--proto-zoom", &zoom.to_string()])
+            .arg("--proto-out")
+            .arg(&json)
+            .arg("--proto-screenshot")
+            .arg(&png);
+        let (status, stderr) = window(&session, cmd);
+        let doc = std::fs::read(&json)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        let mut why = match &doc {
+            Some(d) => judge_proto(d),
+            None => vec![format!(
+                "no document (exit {status:?}): {}",
+                stderr.lines().last().unwrap_or("")
+            )],
+        };
+        if why.is_empty() && status != Some(0) {
+            why.push(format!(
+                "exit {status:?}: {}",
+                stderr.lines().last().unwrap_or("")
+            ));
+        }
+        if !why.is_empty() && tier2::session_locked() == Some(true) {
+            why.push("the screen was locked by the run's end".into());
+        }
+        if n == 0
+            && doc
+                .as_ref()
+                .and_then(|d| d["result"]["native_scale"].as_f64())
+                .is_some_and(|s| (s - 1.0).abs() < 1e-3)
+        {
+            zooms.extend([1.25, 1.5]);
+        }
+        for w in &why {
+            failed.push(format!("{label}: {w}"));
+        }
+        runs.push(json!({
+            "n": n,
+            "label": label,
+            "zoom": zoom,
+            "document": json.display().to_string(),
+            "screenshot": png.is_file().then(|| png.display().to_string()),
+            "failed": why,
+        }));
+        n += 1;
+    }
+    summary(&runs, &[]);
+    assert!(
+        failed.is_empty(),
+        "{} of {} runs failed:\n{}",
+        runs.iter().filter(|r| r["failed"] != json!([])).count(),
+        runs.len(),
+        failed.join("\n")
+    );
+}
+
+/// The prototype's gates on documents made up to fail each one (Tier 1).
+#[test]
+fn the_prototype_gates_fail_what_they_say() {
+    let good = || {
+        json!({
+            "ok": true,
+            "result": {
+                "refresh_hz": 60.0,
+                "clips": 500,
+                "textures": 500,
+                "span_s": [2.0, 777.0],
+                "actions": {"moves": 2, "trims": 2, "scrubs": 0, "zoom_passes": 300, "pan_passes": 200, "snaps": 1},
+                "blocked_on_ui_thread": 0,
+                "ui": {
+                    "presented": 0.995, "expected": 1140.0, "frames": 1134, "passes": 1134, "late": 3,
+                    "interval_ms": {"p99": 17.4},
+                    "work_ms": {"p99": 6.0},
+                    "build_ms": {"p99": 2.5},
+                },
+            },
+        })
+    };
+    assert!(
+        judge_proto(&good()).is_empty(),
+        "{:?}",
+        judge_proto(&good())
+    );
+    let fails = |d: &Value, has: &str| {
+        let why = judge_proto(d);
+        assert!(
+            why.iter().any(|w| w.contains(has)),
+            "{has:?} not in {why:?}"
+        );
+    };
+    let with = |edit: &dyn Fn(&mut Value)| {
+        let mut d = good();
+        edit(&mut d["result"]);
+        d
+    };
+    fails(
+        &json!({"ok": false, "error": {"code": "io_error", "message": "full"}}),
+        "the run failed: full (io_error)",
+    );
+    let no_hz = with(&|r| r["refresh_hz"] = Value::Null);
+    assert_eq!(judge_proto(&no_hz).len(), 1);
+    fails(&no_hz, "no refresh rate");
+    // Hidden: only that is said.
+    let hidden = with(&|r| {
+        r["ui"]["presented"] = json!(0.4);
+        r["ui"]["frames"] = json!(456);
+        r["ui"]["passes"] = json!(1130);
+        r["ui"]["work_ms"]["p99"] = json!(30.0);
+    });
+    assert_eq!(judge_proto(&hidden).len(), 1, "{:?}", judge_proto(&hidden));
+    fails(&hidden, "the compositor didn't draw");
+    // 98.5% drawn: slow, and the other gates still judge.
+    let slow = with(&|r| {
+        r["ui"]["presented"] = json!(0.985);
+        r["ui"]["frames"] = json!(1123);
+        r["ui"]["passes"] = json!(1123);
+        r["ui"]["late"] = json!(17);
+        r["ui"]["work_ms"]["p99"] = json!(16.7);
+    });
+    let why = judge_proto(&slow);
+    assert_eq!(why.len(), 2, "{why:?}");
+    fails(
+        &slow,
+        "98.5% of the UI frames expected were presented, under 99% (17 late)",
+    );
+    fails(
+        &slow,
+        "a p99 of 16.70 ms, not under the 60 Hz period (16.67 ms); building the UI's p99 2.50 ms",
+    );
+    fails(
+        &with(&|r| r["ui"]["work_ms"]["p99"] = Value::Null),
+        "eframe counted no pass's work",
+    );
+    // 1.5 × 16.7 ms is 25 ms.
+    fails(
+        &with(&|r| r["ui"]["interval_ms"]["p99"] = json!(25.5)),
+        "UI interval p99 25.5 ms",
+    );
+    assert!(judge_proto(&with(&|r| r["ui"]["interval_ms"]["p99"] = json!(24.9))).is_empty());
+    fails(
+        &with(&|r| r["actions"]["trims"] = json!(0)),
+        "the script's trims didn't land",
+    );
+    fails(
+        &with(&|r| r["actions"]["zoom_passes"] = json!(0)),
+        "the script's zoom passes didn't land",
+    );
+    fails(
+        &with(&|r| r["span_s"][0] = json!(3.0)),
+        "the zoom didn't reach 2 s",
+    );
+    fails(
+        &with(&|r| r["textures"] = json!(0)),
+        "0 thumbnails for 500 clips",
+    );
+    fails(
+        &with(&|r| r["blocked_on_ui_thread"] = json!(2)),
+        "2 blocking calls",
     );
 }
 

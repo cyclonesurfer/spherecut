@@ -27,6 +27,7 @@ pub mod grab;
 pub mod orient;
 pub mod perspective;
 pub mod pixel;
+pub mod spline;
 
 pub use glam::{DQuat, DVec2};
 

@@ -20,12 +20,15 @@ This describes the design as built, plus the planned parts marked
                                       |
      media (FFmpeg, MediaBackend and frame-exact seek, probing, MP4 boxes, doctor)
                                       |
-   sphere (projection math)      core (time, frames, colour, stop tokens, clocks, the UI thread's guard, atomic writes; project model planned)
+   sphere (projection math)      core (time, frames, colour, stop tokens, clocks, the UI thread's guard, atomic writes, the project model)
 ```
 
 `synth` (test patterns and media, and backends that stand in for FFmpeg)
 and `testkit` (test helpers) sit beside this stack and are used only by
 tests and `xtask`.
+
+core depends on sphere (since M2.1, D48), whose projections and
+quaternions the project model holds; sphere depends on neither.
 
 render depends on core and sphere only, not on media: frames reach it
 through `core::video::VideoPlanes`, so the library has no FFmpeg
@@ -36,8 +39,8 @@ samples reach it from playback's `audio-decode` thread.
 
 | Crate | Role | Status |
 |---|---|---|
-| `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), the `--time` grammar (`TimeSpec`), what a decoded frame is (`video`: pixel layouts, planes, colour), stop tokens by generation (`cancel`), the clocks playback runs on (`clock`: the `Clock` trait, `SystemClock`, the frame-steppable `ManualClock`), the guard that a blocking call never runs on the UI thread (`blocking`: `mark_ui_thread`, `may_block`, D34) and files written whole or not at all (`fs::TempFile`, D16); later the project model, timeline, keyframes, undo | M0: name and time; M1: `video`, `cancel`; slice 4: `TimeSpec`, `fs`; slice 5: `clock`, `blocking` |
-| `spherecut-sphere` | CPU reference projection math in f64: equirect and its uv gradient, cube/EAC, fisheye lens models, view projections and morphs and their inverse (`project_morph`), output pixels to lens coordinates (`pixel`), yaw, pitch and roll (`orient`), rotation helpers | M0; M1 slice 3a: `pixel`, `orient`, `uv_gradient`, `project_morph` |
+| `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), the `--time` grammar (`TimeSpec`), what a decoded frame is (`video`: pixel layouts, planes, colour), stop tokens by generation (`cancel`), the clocks playback runs on (`clock`: the `Clock` trait, `SystemClock`, the frame-steppable `ManualClock`), the guard that a blocking call never runs on the UI thread (`blocking`: `mark_ui_thread`, `may_block`, D34) files written whole or not at all (`fs::TempFile`, D16), and the project model (`project`: media, a sequence of clips with trims, view keys and markers, look-at targets, every change an `Edit` through `Project::apply`, undo `History`, the JSON project file; D47, D48; and `project::anim`, the view of a clip at a time from its keys, D50) | M0: name and time; M1: `video`, `cancel`; slice 4: `TimeSpec`, `fs`; slice 5: `clock`, `blocking`; M2.1: `project`; M2.2: `project::anim` |
+| `spherecut-sphere` | CPU reference projection math in f64: equirect and its uv gradient, cube/EAC, fisheye lens models, view projections and morphs and their inverse (`project_morph`), output pixels to lens coordinates (`pixel`), yaw, pitch and roll (`orient`), rotation helpers, keyed lens shapes (`LensShape`), and the keyframe splines (`spline`: the scalar spline with eases and spin, Free's SO(3) spline, `follow_spin`'s maths) | M0; M1 slice 3a: `pixel`, `orient`, `uv_gradient`, `project_morph`; M2.2: `spline`, `LensShape` |
 | `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software and on VA-API or Vulkan Video with fallback to software, the render node lookup, the colour default rules, audio decoding to the output's rate and channels on the clip's time axis (`audio`, D35), a small MP4 writer, `doctor`'s capability checks | M0; `MediaBackend` from M1 slice 2a, hardware from 2b, audio from 6 |
 | `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, the supersampled ideal of a view (`render_view_ideal`, which the goldens hold minified views to), tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes, seeded noise for camera bitrates) and broken files, `SyntheticBackend` and `GatedBackend` | M0; M1 slices 2a, 2b and 3b |
 | `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, `require_audio_device` among them, the `TIER2-SKIP:` marker), benchmark recording (`bench`, with latency percentiles), image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics) and FNV-1a hashing (`fnv64`) | M0; M1 slice 3a: `compare`, `fnv64` |
@@ -48,7 +51,7 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slices 5 and 6 |
 | `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
-| `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside the Info, Doctor and Files tabs); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); the overlay (`overlay`), the settings and their window (`settings`), the raw view, and the smoke run (`smoke`); `run`, which the CLI calls with no command. `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs. Later the timeline (M2) | M1 slices 7 and 8 |
+| `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside the Info, Doctor and Files tabs); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); the overlay (`overlay`), the settings and their window (`settings`), the raw view, the smoke run (`smoke`) and the toolkit check's timeline prototype (`proto`, D53); `run`, which the CLI calls with no command. `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs. Later the timeline (M2) | M1 slices 7 and 8 |
 | `spherecut-agent` | Agent integration (D23, D43 to D46): the MCP server (`rpc`), the tools and their hand-written schemas (`tools`, `ops`), the roots (`roots`), the JSON contract of `--json` (`contract`, D27), frame's core that look renders through (`still`), look's canvas and font (`image`, `font`), the instructions and the skill; later the GUI attach bridge | A1 |
 | `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor`, `frame`, `mcp`, `call` and `agents install-skill` (A1). `render` (M2) is planned. Its library half re-exports `spherecut_agent::contract` as `contract` | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI; A1: `mcp`, `call`, `agents install-skill` |
 | `xtask` | `check`, `compat` (clippy and a link of the tests against other FFmpeg builds, and Tier 1 against one, D2), `gen-media`, `hw-test` | M0; `compat` from 2026-10-24 |
@@ -795,6 +798,16 @@ intermediate equirect exists only as the output of a 360 export.
   exits 1. hw-test's Tier 2 `gui_smoke` runs it on each clip in the
   desktop session it finds, unless logind says it is locked, and
   kittest runs it with no compositor.
+* **The timeline prototype** (`spherecut --timeline-proto`, hidden,
+  M2.2b, D53) is the toolkit check's (D26): `proto::TimelineProto`, on
+  the device the viewer would take, draws 500 seeded clips on 6 tracks
+  with their own thumbnail textures and lets them be moved with
+  snapping, ripple trimmed, scrubbed, zoomed and panned. With
+  `--proto-out` a script (`TimelineProto::script`) adds its input to
+  each pass's raw input (eframe's `raw_input_hook`), and the run writes
+  `spherecut.timeline-proto/1` and a screenshot as the smoke run does.
+  It shares only eframe's setup with the app (`run::native_options`).
+  hw-test's Tier 2 `gui_proto` judges it, and kittest runs it.
 
 ## Threads *(as built in M1)*
 

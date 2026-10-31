@@ -10,7 +10,7 @@ use spherecut_sphere::perspective::{Lens, Projection};
 /// How long the projection switch takes.
 pub const MORPH_SECONDS: f64 = 0.25;
 /// The narrowest field of view zoom goes to.
-pub const MIN_HFOV_DEG: f64 = 10.0;
+pub use spherecut_sphere::perspective::MIN_HFOV_DEG;
 /// Rectilinear's field of view is eased down to this at most when the
 /// switch lands on it.
 pub const RECT_MAX_HFOV_DEG: f64 = 170.0;

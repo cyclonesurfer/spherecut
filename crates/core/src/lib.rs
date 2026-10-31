@@ -2,8 +2,8 @@
 //! and colour vocabulary, cancellation, the playback clocks, the guard
 //! that keeps blocking calls off the UI thread, the gate that keeps other
 //! threads' submissions out of the UI's present, atomic file writes, the
-//! plan of a Vulkan device shared with FFmpeg, and
-//! (later) the project model, timeline, keyframes and undo.
+//! plan of a Vulkan device shared with FFmpeg, and the project model:
+//! clips, keyframes, edits, undo and the project file.
 
 #![forbid(unsafe_code)]
 
@@ -13,6 +13,7 @@ pub mod cancel;
 pub mod clock;
 pub mod fs;
 pub mod gate;
+pub mod project;
 pub mod time;
 pub mod timespec;
 pub mod video;

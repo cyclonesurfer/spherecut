@@ -714,6 +714,41 @@ and no `path` in its `error`. Its `result`:
 | `submit_gate` | What the submit gate (DECISIONS D41) held back since the device was made: `waits`, the submissions from other threads (decodes, copies, uploads) that waited for the UI's present, and `longest_ms`, the longest wait |
 | `screenshot`, `screenshot_size` | Where the PNG went and its size, or `null` when none was asked for or it couldn't be taken (a warning says why) |
 
+## `spherecut --timeline-proto [--proto-out <JSON>]` (hidden; hw-test's)
+
+The toolkit check's timeline prototype (M2 plan section 12, DECISIONS
+D53), on the device the viewer would take: a window of 1280 × 800
+points with a seeded timeline of 500 clips on 6 tracks, each with its
+own 160 × 90 thumbnail texture, a ruler, a playhead stepping at 30
+fps, and an overlay of its UI times. Without `--proto-out` it stays
+open for a person to drag, trim (an edge, rippling the clips after
+it), scrub, zoom (Ctrl and the wheel, or a pinch) and pan. With it, a
+script drives the window for `--proto-seconds` (20 by default), in
+cycles of 12 s: a zoom from where it was to the whole timeline, to 2 s
+on screen and to twelve times the whole; a drag of a clip across the
+width and back; a ripple trim 200 points out and 300 back; and a pan
+with the wheel. Then it takes a screenshot to `--proto-screenshot
+<PNG>` if given (at most 960 pixels wide), writes the document, and
+closes. `--proto-zoom <FACTOR>` (0.5 to 4, 1 by default) sets egui's
+zoom, for other scales on a desktop at 1.0. The exit status is the
+GUI's; the outputs are replaced as the smoke run's are.
+
+The document has the envelope above, with the schema
+`spherecut.timeline-proto/1`. Its `result`:
+
+| Field | What |
+|---|---|
+| `version`, `seconds`, `played_s` | The build, the seconds asked for, and played from the script's first pass |
+| `adapter`, `surface_format`, `window`, `refresh_hz` | As the smoke run's |
+| `scale`, `native_scale`, `zoom` | Pixels a point, the window's own scale, and egui's zoom on it |
+| `tracks`, `clips`, `textures` | 6, 500, and the thumbnails loaded (500) |
+| `ui` | After the run's first second: `from_s`, `frames` (UI passes), `passes` (with those eframe ran without the UI), `expected` (`refresh_hz` × the seconds, or the passes without a rate), `presented` (frames over expected), `late` (intervals over one and a half refresh periods), and as `samples`, `missed`, `p50`, `p95`, `p99`, `max` in ms: `interval_ms` (one UI pass to the next), `work_ms` (each pass's own work, as eframe counts it, without the surface's acquire and present) and `build_ms` (building the timeline's UI, the prototype's own code) |
+| `drawn` | The most in one pass of `clips`, `thumbnails`, `names` and `snap_lines` |
+| `actions` | `moves`, `trims`, `scrubs`, `zoom_passes` and `pan_passes` (passes that zoomed or panned), and `snaps` (moves that came to snap) |
+| `span_s` | The fewest and most seconds on screen |
+| `blocked_on_ui_thread` | Blocking calls on the UI thread: 0 unless something is wrong |
+| `screenshot`, `screenshot_size` | As the smoke run's |
+
 ## A usage error
 
 ```sh

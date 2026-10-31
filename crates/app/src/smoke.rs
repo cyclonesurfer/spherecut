@@ -704,7 +704,7 @@ pub struct Report {
     pub screenshot_size: Option<[u32; 2]>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Adapter {
     pub name: String,
     pub vendor: u32,
@@ -713,6 +713,22 @@ pub struct Adapter {
     pub driver: String,
     pub driver_info: String,
     pub cpu: bool,
+}
+
+impl Adapter {
+    /// `gpu`'s, as wgpu names it.
+    pub fn of(gpu: &spherecut_render::Gpu) -> Adapter {
+        let info = &gpu.caps.info;
+        Adapter {
+            name: info.name.clone(),
+            vendor: info.vendor,
+            device: info.device,
+            device_type: format!("{:?}", info.device_type),
+            driver: info.driver.clone(),
+            driver_info: info.driver_info.clone(),
+            cpu: gpu.caps.is_cpu,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -803,7 +819,7 @@ pub struct Percentiles {
 }
 
 impl Percentiles {
-    fn of(samples: &[f32], missed: u64) -> Percentiles {
+    pub(crate) fn of(samples: &[f32], missed: u64) -> Percentiles {
         let mut v = samples.to_vec();
         v.sort_by(f32::total_cmp);
         Percentiles {
@@ -888,7 +904,6 @@ impl SmokeDriver {
     /// What `run` measured, `played_s` after it started.
     fn report(&self, s: &AppState, ctx: &egui::Context, run: &Run, played_s: f64) -> Report {
         let refresh_hz = self.refresh_hz;
-        let info = &s.gpu.caps.info;
         let snap = &s.snapshot;
         let ppp = ctx.pixels_per_point();
         let px = |v: f32| (v * ppp).round() as u32;
@@ -985,15 +1000,7 @@ impl SmokeDriver {
             seconds: self.args.seconds,
             played_s,
             ended: snap.at_end,
-            adapter: Adapter {
-                name: info.name.clone(),
-                vendor: info.vendor,
-                device: info.device,
-                device_type: format!("{:?}", info.device_type),
-                driver: info.driver.clone(),
-                driver_info: info.driver_info.clone(),
-                cpu: s.gpu.caps.is_cpu,
-            },
+            adapter: Adapter::of(&s.gpu),
             surface_format: self.surface_format.clone(),
             scale: ppp,
             native_scale: ctx.input(|i| i.viewport().native_pixels_per_point),
@@ -1114,7 +1121,7 @@ fn write_out(args: &SmokeArgs, mut doc: Document, shot: Option<Arc<egui::ColorIm
     failed.map_or(Ok(()), Err)
 }
 
-fn write_png(path: &Path, image: &image::RgbImage) -> std::io::Result<()> {
+pub(crate) fn write_png(path: &Path, image: &image::RgbImage) -> std::io::Result<()> {
     use image::ImageEncoder;
     let mut png = Vec::new();
     image::codecs::png::PngEncoder::new(&mut png)
@@ -1129,7 +1136,7 @@ fn write_png(path: &Path, image: &image::RgbImage) -> std::io::Result<()> {
 }
 
 /// `bytes` into `path` whole, or the file as it was.
-fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let dest = spherecut_core::fs::follow_links(path)?;
     let mut tmp = TempFile::create(&dest)?;

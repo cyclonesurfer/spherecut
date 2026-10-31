@@ -3146,10 +3146,12 @@ dependencies = [
 name = "spherecut-core"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "proptest",
  "ron",
  "serde",
  "serde_json",
+ "spherecut-sphere",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -3215,6 +3217,7 @@ dependencies = [
  "glam",
  "proptest",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

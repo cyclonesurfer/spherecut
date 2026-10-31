@@ -76,6 +76,30 @@ struct GuiCli {
     /// A screenshot at the run's end, at most 960 pixels wide.
     #[arg(long, hide = true, value_name = "PNG", requires = "smoke")]
     smoke_screenshot: Option<PathBuf>,
+    /// The toolkit check's timeline prototype (D26) in place of the
+    /// viewer; with --proto-out, a script drives it, what each UI pass
+    /// took goes there as JSON (spherecut.timeline-proto/1), and it
+    /// closes.
+    #[arg(long, hide = true, conflicts_with_all = ["files", "smoke"])]
+    timeline_proto: bool,
+    /// How long the script runs.
+    #[arg(long, hide = true, value_name = "SECONDS", requires = "timeline_proto", default_value_t = 20.0, value_parser = smoke_seconds)]
+    proto_seconds: f64,
+    #[arg(long, hide = true, value_name = "JSON", requires = "timeline_proto")]
+    proto_out: Option<PathBuf>,
+    /// A screenshot at the run's end, at most 960 pixels wide.
+    #[arg(long, hide = true, value_name = "PNG", requires = "proto_out")]
+    proto_screenshot: Option<PathBuf>,
+    /// egui's zoom: points this many times the desktop's, 0.5 to 4.
+    #[arg(long, hide = true, value_name = "FACTOR", requires = "timeline_proto", default_value_t = 1.0, value_parser = proto_zoom)]
+    proto_zoom: f32,
+}
+
+fn proto_zoom(s: &str) -> Result<f32, String> {
+    match s.parse::<f32>() {
+        Ok(v) if (0.5..=4.0).contains(&v) => Ok(v),
+        _ => Err(format!("{s:?} isn't a zoom from 0.5 to 4")),
+    }
 }
 
 fn smoke_seconds(s: &str) -> Result<f64, String> {
@@ -476,6 +500,14 @@ fn gui(args: GuiCli) -> Exit {
             out: args.smoke_out.unwrap_or_default(),
             screenshot: args.smoke_screenshot,
         }),
+        proto: args
+            .timeline_proto
+            .then_some(spherecut_app::proto::ProtoArgs {
+                seconds: args.proto_seconds,
+                out: args.proto_out,
+                screenshot: args.proto_screenshot,
+                zoom: args.proto_zoom,
+            }),
     };
     match spherecut_app::run(gui) {
         Ok(()) => Exit::Ok,
