@@ -43,6 +43,7 @@ use crate::job::{
     AudioReport, DecodeReport, Decoder, Encoders, ExportJob, Fallback, Report, Shared, StageTimes,
     panic_text,
 };
+use crate::pace::Pace;
 use crate::plan::FramePlan;
 use crate::preset::Preset;
 use crate::warning::{Warning, codes};
@@ -90,6 +91,7 @@ struct Look {
     blur: bool,
     opts: StillOptions,
     yuv: YuvLayout,
+    pace: Option<Arc<Pace>>,
 }
 
 /// The whole export, on the job's thread: the decoder and the audio
@@ -190,6 +192,7 @@ pub(crate) fn run(
             ..StillOptions::default()
         },
         yuv: YuvLayout::I420,
+        pace: job.pace.clone(),
     };
     let (audio_plan, audio_warnings) = audio::choose(&media.path, s.audio, &sequence.output)?;
     warnings.extend(audio_warnings);
@@ -936,9 +939,14 @@ fn render(
 ) -> Ended {
     let mut renderer = StillRenderer::new(&gpu);
     let frame_s = plan.rate().frame_duration().to_secs_f64();
+    let mut pass = 0;
     for held in rx {
         if token.is_stopped() {
             return Ended::Stopped;
+        }
+        // While the app's viewer plays, a frame a UI pass.
+        if let Some(p) = &look.pace {
+            p.wait(&mut pass);
         }
         let since = Instant::now();
         let t = plan.source_time(held.n).map_or(f64::NAN, Time::to_secs_f64);

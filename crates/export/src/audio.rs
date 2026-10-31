@@ -109,6 +109,23 @@ impl Plan {
     }
 }
 
+/// Why `path`'s audio can't be copied into `output` as it is, or `None`
+/// when it can: what the export window says beside a greyed Copy (M2
+/// plan section 10.6). It reads the file's header, so never on the UI
+/// thread.
+pub fn copy_refusal(path: &Path, output: &Output) -> Option<String> {
+    match choose(path, AudioChoice::Copy, output) {
+        Ok((Some(plan), _)) if plan.copy.is_some() => None,
+        Ok((_, warnings)) => Some(
+            warnings
+                .into_iter()
+                .find(|w| w.code == codes::AUDIO_ENCODED || w.code == codes::NO_AUDIO)
+                .map_or_else(|| "the audio is encoded again".to_owned(), |w| w.message),
+        ),
+        Err(e) => Some(e.to_string()),
+    }
+}
+
 /// What the export does with `path`'s audio for `choice` into `output`:
 /// the plan, `None` for no audio, and what it did that wasn't asked.
 pub(crate) fn choose(

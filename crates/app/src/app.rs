@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use egui_tiles::{Container, Tile, TileId, Tiles, Tree};
 use spherecut_core::Time;
 use spherecut_core::clock::Clock;
+use spherecut_core::project::Orientation;
 use spherecut_media::backend::{MediaBackend, SeekMode, VideoStreamInfo};
 use spherecut_media::doctor::{DoctorReport, Issue, Severity};
 use spherecut_playback::{
@@ -38,35 +39,93 @@ pub enum Pane {
     Info,
     Doctor,
     Files,
+    /// M2's (plan section 10.1).
+    Inspector,
+    Curves,
+    Sphere,
 }
 
 impl Pane {
+    /// The side panes, in their tabs' order: [`Pane::UPPER`] of them in
+    /// the upper tabs, the rest under them, so that neither row of tabs
+    /// is wider than the side of a 960-point window.
+    pub const SIDE: [Pane; 6] = [
+        Pane::Info,
+        Pane::Inspector,
+        Pane::Doctor,
+        Pane::Files,
+        Pane::Curves,
+        Pane::Sphere,
+    ];
+    pub const UPPER: usize = 4;
+
     pub fn title(self) -> &'static str {
         match self {
             Pane::Viewer => "Viewer",
             Pane::Info => "Info",
             Pane::Doctor => "Doctor",
             Pane::Files => "Files",
+            Pane::Inspector => "Inspector",
+            Pane::Curves => "Curves",
+            Pane::Sphere => "Sphere",
         }
     }
 }
 
-/// The layout of section 7.2: the viewer, and beside it the Info, Doctor
-/// and Files tabs, split 3 : 1.
+/// The layout of section 7.2 with M2's tabs: the viewer, and beside it
+/// the Info, Inspector, Curves, Sphere, Doctor and Files tabs, split
+/// 3 : 1.
 pub fn default_tree() -> Tree<Pane> {
     let mut tiles = Tiles::default();
     let viewer = tiles.insert_pane(Pane::Viewer);
-    let side = [Pane::Info, Pane::Doctor, Pane::Files]
-        .into_iter()
-        .map(|p| tiles.insert_pane(p))
-        .collect();
-    let tabs = tiles.insert_tab_tile(side);
-    let root = tiles.insert_horizontal_tile(vec![viewer, tabs]);
+    let (upper, lower) = Pane::SIDE.split_at(Pane::UPPER);
+    let mut tabs = |panes: &[Pane]| {
+        let panes = panes.iter().map(|p| tiles.insert_pane(*p)).collect();
+        tiles.insert_tab_tile(panes)
+    };
+    let (upper, lower) = (tabs(upper), tabs(lower));
+    let side = tiles.insert_vertical_tile(vec![upper, lower]);
+    let root = tiles.insert_horizontal_tile(vec![viewer, side]);
     if let Some(Tile::Container(Container::Linear(l))) = tiles.get_mut(root) {
         l.shares.set_share(viewer, 3.0);
-        l.shares.set_share(tabs, 1.0);
+        l.shares.set_share(side, 1.0);
     }
     Tree::new(egui::Id::unique("spherecut-tiles"), root, tiles)
+}
+
+/// A saved layout with every pane: one from before a pane was added gets
+/// it as a tab beside Info's (or the first tabs), else beside the root.
+pub fn with_every_pane(mut tree: Tree<Pane>) -> Tree<Pane> {
+    for pane in std::iter::once(Pane::Viewer).chain(Pane::SIDE) {
+        if tree.tiles.find_pane(&pane).is_some() {
+            continue;
+        }
+        let id = tree.tiles.insert_pane(pane);
+        let tabs = tree
+            .tiles
+            .find_pane(&Pane::Info)
+            .and_then(|info| tree.tiles.parent_of(info))
+            .filter(|p| {
+                matches!(
+                    tree.tiles.get(*p),
+                    Some(Tile::Container(Container::Tabs(_)))
+                )
+            })
+            .or_else(|| {
+                tree.tiles.iter().find_map(|(id, t)| {
+                    matches!(t, Tile::Container(Container::Tabs(_))).then_some(*id)
+                })
+            });
+        match tabs.or(tree.root) {
+            Some(parent) => {
+                if let Some(Tile::Container(c)) = tree.tiles.get_mut(parent) {
+                    c.add_child(id);
+                }
+            }
+            None => tree.root = Some(id),
+        }
+    }
+    tree
 }
 
 /// How the startup doctor check runs.
@@ -163,6 +222,12 @@ pub struct AppState {
     pub overlay: OverlayState,
     /// The open project (M2 plan section 10).
     pub reframe: Reframe,
+    /// The first stream's frame on screen this pass, for the sphere
+    /// overview's thumbnail: held, as the viewer's is, until egui has
+    /// submitted the pass.
+    pub overview_frame: Option<(Arc<spherecut_render::GpuFrame>, RawKey)>,
+    /// The export window and the export running (section 10.6).
+    pub export: crate::export::ExportUi,
 }
 
 /// The app.
@@ -293,12 +358,14 @@ impl SpherecutApp {
             logic_ran: false,
             overlay: OverlayState::default(),
             reframe: Reframe::default(),
+            overview_frame: None,
+            export: crate::export::ExportUi::default(),
         };
         if let Some(path) = open.into_iter().next() {
             state.open(path);
         }
         SpherecutApp {
-            tree: tree.unwrap_or_else(default_tree),
+            tree: tree.map_or_else(default_tree, with_every_pane),
             state,
             smoke: None,
         }
@@ -321,6 +388,7 @@ impl SpherecutApp {
             p.set_painted(ctx.input(|i| i.viewport().visible()).unwrap_or(true));
             p.present(Instant::now())
         });
+        s.export.pace.pass(s.export_held());
         s.request_repaint(ctx);
         s.logic_ran = true;
         if let Some(smoke) = &mut self.smoke {
@@ -352,6 +420,18 @@ impl SpherecutApp {
             self.tree
                 .make_active(|_, tile| matches!(tile, Tile::Pane(Pane::Files)));
         }
+        let filter = self.state.view.filter;
+        self.state.overview_frame = self.state.presented.as_ref().and_then(|p| {
+            let f = p.frames.first()?;
+            Some((
+                f.gpu.clone(),
+                RawKey {
+                    slot: f.slot,
+                    frame: f.frame,
+                    filter,
+                },
+            ))
+        });
         egui::CentralPanel::default().show(ui, |ui| {
             let mut behavior = Behavior {
                 state: &mut self.state,
@@ -361,6 +441,7 @@ impl SpherecutApp {
         });
         settings::window(&mut self.state, ui.ctx());
         crate::reframe::windows(&mut self.state, ui.ctx());
+        crate::export::window(&mut self.state, ui.ctx());
         if std::mem::take(&mut self.state.reframe.quit) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -368,6 +449,9 @@ impl SpherecutApp {
         if let Some(smoke) = &mut self.smoke {
             smoke.ui(&mut self.state, ui.ctx());
         }
+        // Dropped with the pass's callbacks, which hold it until egui
+        // has submitted them.
+        self.state.overview_frame = None;
     }
 
     /// The player's threads are told to stop; [`crate::run`] joins them
@@ -386,6 +470,7 @@ impl SpherecutApp {
         let mut threads = s.files.take_threads();
         threads.extend(s.info.take_threads());
         threads.extend(s.reframe.take_threads());
+        threads.extend(s.export.take_threads());
         if matches!(s.doctor, DoctorState::Pending(_))
             && let DoctorState::Pending(job) = std::mem::replace(&mut s.doctor, DoctorState::Lost)
         {
@@ -436,6 +521,7 @@ impl AppState {
                     | NoticeKind::SlotDropped
                     | NoticeKind::Project
                     | NoticeKind::MediaOffline
+                    | NoticeKind::Export
             )
         });
         self.streams.clear();
@@ -463,6 +549,7 @@ impl AppState {
         }
         self.files.poll();
         self.info.poll();
+        self.export_tick();
         let Some(player) = &self.player else {
             return;
         };
@@ -657,6 +744,9 @@ impl AppState {
             || matches!(self.reframe.look, Look::Editing { .. })
         {
             ctx.request_repaint_after(Duration::from_millis(50));
+        } else if self.export.running() {
+            // The progress bar, and the end's notice.
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
 
@@ -692,8 +782,13 @@ impl AppState {
                     self.open_save_as();
                     ui.close();
                 }
-                ui.add_enabled(false, egui::Button::new("Export…").shortcut_text("Ctrl+E"))
-                    .on_disabled_hover_text("The export window arrives in M2.7");
+                if ui
+                    .add_enabled(doc, egui::Button::new("Export…").shortcut_text("Ctrl+E"))
+                    .clicked()
+                {
+                    self.open_export();
+                    ui.close();
+                }
                 if ui.add_enabled(doc, egui::Button::new("Close")).clicked() {
                     self.close_project();
                     ui.close();
@@ -757,6 +852,22 @@ impl AppState {
                     self.settings.anisotropic = aniso;
                 }
                 ui.checkbox(&mut self.settings.overlay, "Overlay (F3)");
+                let sphere = self.reframe.doc.as_ref().is_some_and(|d| {
+                    matches!(
+                        d.project.the_sequence().output,
+                        spherecut_core::project::Output::Equirect { .. }
+                    )
+                });
+                ui.add_enabled(
+                    sphere,
+                    egui::Checkbox::new(
+                        &mut self.reframe.equirect_preview,
+                        "Preview the 360 output",
+                    ),
+                )
+                .on_disabled_hover_text(
+                    "For a 360 output: set it in the Inspector or the export window",
+                );
                 ui.add_enabled(
                     self.reframe.doc.is_some(),
                     egui::Checkbox::new(&mut self.reframe.looping, "Loop in to out (Ctrl+L)"),
@@ -866,6 +977,9 @@ impl AppState {
         }
         if pressed(ui, Modifiers::COMMAND, Key::O) {
             self.files.focus = true;
+        }
+        if pressed(ui, Modifiers::COMMAND, Key::E) {
+            self.open_export();
         }
         if pressed(ui, Modifiers::COMMAND, Key::L) {
             self.toggle_loop();
@@ -1045,7 +1159,13 @@ impl AppState {
         self.view.settle(t);
         self.watch_view(Instant::now());
         self.apply_keys();
-        let area = ui.available_rect_before_wrap();
+        let mut area = ui.available_rect_before_wrap();
+        let front = self.reframe.preview_front();
+        if front.is_some() {
+            // The 360 output as it exports: 2:1, as large as fits.
+            let w = area.width().min(area.height() * 2.0);
+            area = egui::Rect::from_center_size(area.center(), egui::vec2(w, w / 2.0));
+        }
         let response = ui.allocate_rect(area, egui::Sense::click_and_drag());
         let ppp = ui.ctx().pixels_per_point();
         let rect = viewer::pixel_rect(area, ppp);
@@ -1057,6 +1177,9 @@ impl AppState {
         let raw = self.raw_view();
         if raw {
             self.drag = None;
+        } else if let Some(front) = front {
+            self.drag = None;
+            self.front_ui(&response, rect, front);
         } else {
             self.look_ui(ui, &response, &vp, ppp, free, framing);
         }
@@ -1071,6 +1194,9 @@ impl AppState {
         let mut view = ViewParams::new(self.view.q, self.view.lens);
         if let Some(f) = framing {
             view = view.framed(f);
+        }
+        if let Some(front) = front {
+            view = ViewParams::equirect(front.quat());
         }
         let filter = self.view.filter;
         let shown = frames.first().map(|s| {
@@ -1166,6 +1292,42 @@ impl AppState {
         }
     }
 
+    /// A drag of the equirect preview turns the 360 output's front: the
+    /// picture follows the pointer, and the release is one step.
+    fn front_ui(&mut self, response: &egui::Response, rect: egui::Rect, front: Orientation) {
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            self.reframe.front_drag = Some((front, p));
+        }
+        if let Some((start, from)) = self.reframe.front_drag
+            && let Some(p) = response.interact_pointer_pos()
+            && response.dragged()
+        {
+            let d = p - from;
+            let y = start.ypr();
+            let yaw = y.yaw - f64::from(d.x / rect.width().max(1.0)) * std::f64::consts::TAU;
+            let pitch = (y.pitch + f64::from(d.y / rect.height().max(1.0)) * std::f64::consts::PI)
+                .clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
+            let o = Orientation::from_ypr(spherecut_sphere::orient::Ypr::new(yaw, pitch, y.roll));
+            if let (Ok(o), Some(doc)) = (o, &mut self.reframe.doc) {
+                doc.front_preview = Some(o);
+            }
+        }
+        if response.drag_stopped() && self.reframe.front_drag.take().is_some() {
+            let edits = self
+                .reframe
+                .doc
+                .as_ref()
+                .and_then(|d| d.front_preview.map(|o| d.set_front(o)))
+                .unwrap_or_default();
+            if let Some(doc) = &mut self.reframe.doc {
+                doc.front_preview = None;
+            }
+            self.edit("Turn the front", &edits);
+        }
+    }
+
     /// The picture's label, its placeholder, the look-around's badge, and
     /// the overlay over it.
     fn picture_notes(
@@ -1230,6 +1392,9 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
             Pane::Viewer => self.state.viewer_ui(ui, self.now),
             Pane::Info => crate::panes::info_ui(self.state, ui),
             Pane::Doctor => crate::panes::doctor_ui(self.state, ui),
+            Pane::Inspector => crate::inspector::inspector_ui(self.state, ui),
+            Pane::Curves => crate::curves::curves_ui(self.state, ui),
+            Pane::Sphere => crate::overview::overview_ui(self.state, ui),
             Pane::Files => {
                 if let Some(path) = self.state.files.ui(ui) {
                     self.state.settings.last_dir = self.state.files.dir().map(PathBuf::from);

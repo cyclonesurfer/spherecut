@@ -458,6 +458,56 @@ records it):
 - **The player's `close`** is new: File ▸ Close leaves it empty, which
   M1's player couldn't be once opened.
 
+**Amendment 8 (2026-10-31, slice M2.7's code).** The GUI's second
+part as built, where it differs from sections 10.4 to 10.6 and 11 (D55
+records it):
+
+- **The side tabs are in two rows**: Info, Inspector, Doctor and Files
+  above, Curves and Sphere below, where section 10.1 put every tab
+  beside Info. Six tabs overflowed the side panel at its default size.
+- **Drags preview, then edit** (item 39): the curve editor's dots, the
+  Inspector's numbers and a 360 output's front change a preview the doc
+  holds (a copy of the clip's `ViewAnim` or of the output), and `apply`
+  runs once on release, one step. The preview doesn't run `apply`, so
+  item 39's 5 ms figure stays core's: `apply` of one edit on a project
+  with 10,000 keys (`crates/core/tests/project_edits.rs`). No new bench.
+- **The curve editor** keeps section 6.4's sticky spin through a drag
+  (`follow_spin`: the neighbouring segments keep turning the way they
+  did), which section 10.4 didn't say.
+- **The sphere overview** also turns a 360 output's front by a click
+  (item 37), and the viewer's equirect preview is View ▸ Preview the
+  360 output, where a drag turns the front.
+- **The export window's choices are edits** to the sequence's output
+  and export settings, undoable and saved, rather than window state.
+  Audio Copy's greying uses the export crate's own rule
+  (`copy_refusal`) for the file and output, which reads the file, so it
+  runs on a job; section 10.6 said "a codec it can't trim exactly".
+  The range's "in to out of the selection" is the first selected key to
+  the end of the last one's frame (item 53's selection).
+- **Starting an export is a job** too, since it looks at the output path
+  and the render node; Cancel works while it starts, and an existing
+  file asks "Replace the file?" first. Quitting while one runs cancels
+  it without asking.
+- **The pace** (item 22) is `spherecut_export::Pace`: while the viewer
+  plays or any drag runs, the export renders one frame per UI pass,
+  waiting at most 100 ms for a pass. The measurement at 8K with blur is
+  M2.8's, on odin; the cloud box's lavapipe can't say anything about
+  presents.
+- **Section 11's UI budget during an export** is two checks. The
+  kittest test (`crates/app/tests/reframe2.rs`) bounds each UI step at
+  1 s, a hang bound: lavapipe's queue is in order on the CPU, so a step
+  waits behind an export frame (about 80 ms median, 200 to 330 ms at
+  worst there), and lavapipe's numbers aren't the refresh interval's.
+  The refresh-interval gate is gui_smoke's export on Tier 2
+  (`--smoke-export`), judged over the time the export ran by gui_smoke's
+  own gates (presented ≥ 0.90, dropped ≤ 0.1 %, UI p99 ≤ 1.5 periods),
+  where section 11 said presented ≥ 99 %: the export shares the GPU
+  with the viewer, and the gate is the run's, as section 11 asks.
+- **The Inspector** also shows the trim (in, out and duration, read
+  only: the strip's handles move them) and edits the rate and a key's
+  spin; a target is keyed where the view looks ("Key here"), so a
+  moving target is keyed as the view is.
+
 ## 1. Summary
 
 M2 is the first version Pat can use for real: open one 360 clip, trim
@@ -1645,6 +1695,7 @@ the run at the end, in M2.8, on the same binary.
 | D52 | The export pipeline: the crate, threads, presets and bitrates, encoder order and fallback, rate control, the MP4 and its metadata in one cancellable pass (updates D4), audio copy, its edit list and the movie timescale, the parity floors, the job handle, the Opus revisit (D17) | M2.4, M2.5 |
 | D53 | The toolkit check's prototype and its result (updates D26) | M2.2b, M2.8 |
 | D54 | The reframer's GUI, part 1: the untitled project, the keyed view and look-around, the strip, the play span (updates D34) | M2.6 |
+| D55 | The reframer's GUI, part 2: the curve editor, the sphere overview and the equirect preview, the Inspector and targets, the export window, the export's pace while the UI is busy, gui_smoke's export | M2.7 |
 | D16, D3, D33 | Updated: temporary files hold a lock and the sweep takes only lockable old files (M2.4); export reports a decode fallback (M2.5); the sv3d pose checked with Pat's YouTube upload (M2.8) | as listed |
 
 

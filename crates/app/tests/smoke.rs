@@ -79,6 +79,7 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
         seconds: 1.5,
         out: dir.join("smoke.json"),
         screenshot: Some(dir.join("smoke.png")),
+        export: None,
     };
     let app = smoke_app(&gpu, &rs, args.clone());
     // 1600 × 1000 pixels: the screenshot comes out 960 × 600.
@@ -198,6 +199,51 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
 }
 
 #[test]
+fn the_smoke_run_exports_while_it_plays_and_waits_for_the_export() {
+    let gpu = common::gpu();
+    let rs = common::render_state(&gpu);
+    let dir = common::tmp().join("smoke-export");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("export.mp4");
+    let _ = std::fs::remove_file(&out);
+    let args = SmokeArgs {
+        clip: clip().to_path_buf(),
+        seconds: 1.5,
+        out: dir.join("smoke.json"),
+        screenshot: None,
+        export: Some(out.clone()),
+    };
+    let app = smoke_app(&gpu, &rs, args.clone());
+    let mut h = common::harness(app, &rs, [960.0, 600.0], 1.0);
+    common::step_until(
+        &mut h,
+        Duration::from_secs(180),
+        "the smoke run's end",
+        |a| a.smoke.as_ref().unwrap().done(),
+    );
+    assert_eq!(h.state().smoke.as_ref().unwrap().outcome(), Some(&Ok(())));
+    let doc = read_json(&args.out);
+    let e = &doc["result"]["export"];
+    eprintln!("{}", serde_json::to_string_pretty(e).unwrap());
+    assert_eq!(e["ok"], true, "{e}");
+    assert_eq!(e["output"], out.display().to_string());
+    // The clip's first 2 s at its 30 fps.
+    assert_eq!(e["frames"], 60);
+    assert!(out.is_file());
+    assert!(e["encoder"].as_str().is_some_and(|n| !n.is_empty()), "{e}");
+    let w = &e["while_running"];
+    let (from, to) = (w["from_s"].as_f64().unwrap(), w["to_s"].as_f64().unwrap());
+    // From the first second, until it ended.
+    assert!(from >= 1.0 && to > from, "{w}");
+    assert!(w["ui"]["frames"].as_u64().unwrap() > 0, "{w}");
+    // No refresh rate here: every pass was expected, and ran the UI.
+    assert_eq!(w["ui"]["presented"], 1.0);
+    // The run waited for the export past its 1.5 s, if it took longer.
+    let played = doc["result"]["played_s"].as_f64().unwrap();
+    assert!(played >= to, "{played} {to}");
+}
+
+#[test]
 fn a_clip_that_cant_open_ends_the_run_with_its_code() {
     let gpu = common::gpu();
     let rs = common::render_state(&gpu);
@@ -208,6 +254,7 @@ fn a_clip_that_cant_open_ends_the_run_with_its_code() {
         seconds: 1.0,
         out: dir.join("smoke.json"),
         screenshot: Some(dir.join("smoke.png")),
+        export: None,
     };
     let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
     run_to_end(&mut h);
@@ -256,6 +303,7 @@ fn the_smoke_run_plays_a_cameras_lenses_together() {
         seconds: 10.0,
         out: dir.join("smoke.json"),
         screenshot: None,
+        export: None,
     };
     let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
     run_to_end(&mut h);
@@ -306,6 +354,7 @@ fn the_watchdog_ends_a_run_whose_window_has_no_pass() {
         seconds: 1.0,
         out: dir.join("smoke.json"),
         screenshot: Some(dir.join("smoke.png")),
+        export: None,
     };
     let mut d = SmokeDriver::new(args.clone(), "Bgra8UnormSrgb".into());
     let (hook, exited) = exit_hook();
@@ -340,6 +389,7 @@ fn the_watchdog_tells_a_hidden_window_from_a_stuck_one() {
         seconds: 1.0,
         out: dir.join("smoke.json"),
         screenshot: None,
+        export: None,
     };
     let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
     // One UI pass, then logic alone.
@@ -387,6 +437,7 @@ fn the_watchdog_leaves_a_finished_runs_document() {
         seconds: 10.0,
         out: dir.join("smoke.json"),
         screenshot: None,
+        export: None,
     };
     let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
     let (hook, exited) = exit_hook();

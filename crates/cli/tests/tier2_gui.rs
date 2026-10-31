@@ -21,6 +21,11 @@
 //! - an HEVC stream decodes in software where doctor's check says VA-API
 //!   decodes its profile.
 //!
+//! The first run also exports the clip's first 2 s while it plays
+//! (`--smoke-export`, M2 plan section 11), and fails when the export
+//! does, or when the presented share, the drops or the UI's p99 over the
+//! time it ran miss the same gates.
+//!
 //! A locked screen draws no window, so nothing runs while logind says
 //! the session is locked (`tier2::session_locked`): with the screen
 //! locked at the start, the test fails at once, saying so; a run it
@@ -269,6 +274,7 @@ fn smoke(
     clip: &Path,
     json: &Path,
     png: &Path,
+    export: Option<&Path>,
 ) -> (Option<i32>, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
     cmd.arg("--smoke")
@@ -278,6 +284,9 @@ fn smoke(
         .arg(json)
         .arg("--smoke-screenshot")
         .arg(png);
+    if let Some(e) = export {
+        cmd.arg("--smoke-export").arg(e);
+    }
     window(session, cmd)
 }
 
@@ -420,8 +429,13 @@ fn gui_smoke() {
     for (n, clip) in clips.iter().enumerate() {
         let json = out.join(format!("gui-{n}.json"));
         let png = out.join(format!("gui-{n}.png"));
+        // The first run exports 2 s while it plays (M2 plan section 11).
+        let export = (n == 0).then(|| out.join(format!("gui-{n}-export.mp4")));
         let _ = std::fs::remove_file(&json);
         let _ = std::fs::remove_file(&png);
+        if let Some(e) = &export {
+            let _ = std::fs::remove_file(e);
+        }
         eprintln!("==> {}: {}", clip.label, clip.path.display());
         if tier2::session_locked() == Some(true) {
             let why = "not run: the screen locked during the runs".to_string();
@@ -436,11 +450,16 @@ fn gui_smoke() {
             }));
             continue;
         }
-        let (status, stderr) = smoke(&session, &clip.path, &json, &png);
+        let (status, stderr) = smoke(&session, &clip.path, &json, &png, export.as_deref());
         let doc = std::fs::read(&json)
             .ok()
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
         let mut why = match &doc {
+            Some(d) if export.is_some() => {
+                let mut why = judge(d, clip.sync, &gates);
+                why.extend(judge_export(d));
+                why
+            }
             Some(d) => judge(d, clip.sync, &gates),
             None => vec![format!(
                 "no document (exit {status:?}): {}",
@@ -479,6 +498,48 @@ fn gui_smoke() {
         runs.len(),
         failed.join("\n")
     );
+}
+
+/// Why the export a run made while it played fails, by the run's own
+/// gates over the time it ran; empty when it passes.
+fn judge_export(doc: &Value) -> Vec<String> {
+    let mut why = Vec::new();
+    let e = &doc["result"]["export"];
+    if e["ok"] != true {
+        why.push(format!(
+            "the export while playing failed: {}",
+            e["error"].as_str().unwrap_or("no document part")
+        ));
+        return why;
+    }
+    let f = |v: &Value| v.as_f64();
+    let w = &e["while_running"];
+    let presented = f(&w["ui"]["presented"]).unwrap_or(0.0);
+    if presented < MIN_PRESENTED {
+        why.push(format!(
+            "{:.0}% of the UI frames expected were presented while the export ran, under {:.0}%",
+            presented * 100.0,
+            MIN_PRESENTED * 100.0
+        ));
+    }
+    let shown = f(&w["frames"]["shown"]).unwrap_or(0.0);
+    let dropped = f(&w["frames"]["dropped"]).unwrap_or(0.0);
+    if shown + dropped > 0.0 && dropped / (shown + dropped) > MAX_DROPPED {
+        why.push(format!(
+            "{dropped} of {} frames dropped while the export ran",
+            shown + dropped
+        ));
+    }
+    if let (Some(hz), Some(p99)) = (f(&doc["result"]["refresh_hz"]), f(&w["ui"]["p99"])) {
+        let limit = MAX_UI_P99_PERIODS * 1000.0 / hz;
+        if p99 > limit {
+            why.push(format!(
+                "UI p99 {p99:.1} ms while the export ran, over {MAX_UI_P99_PERIODS} × the \
+                 {hz:.0} Hz period ({limit:.1} ms)"
+            ));
+        }
+    }
+    why
 }
 
 /// Why the prototype's run in `doc` fails, by its gates; empty when it
@@ -896,4 +957,48 @@ fn the_gates_fail_what_they_say() {
         vaapi_hevc: vec!["HEVC Main".into()],
     };
     assert!(judge(&sw, false, &only8).is_empty());
+}
+
+#[test]
+fn the_export_gates_fail_what_they_say() {
+    let good = || {
+        json!({
+            "ok": true,
+            "result": {
+                "refresh_hz": 60.0,
+                "export": {
+                    "ok": true,
+                    "while_running": {
+                        "ui": {"presented": 0.97, "p99": 21.0},
+                        "frames": {"shown": 180, "dropped": 0},
+                    },
+                },
+            },
+        })
+    };
+    assert!(judge_export(&good()).is_empty());
+    let fails = |d: &Value, has: &str| {
+        let why = judge_export(d);
+        assert!(
+            why.iter().any(|w| w.contains(has)),
+            "{has:?} not in {why:?}"
+        );
+    };
+    let mut failed = good();
+    failed["result"]["export"] = json!({"ok": false, "error": "no encoder for H.264"});
+    fails(
+        &failed,
+        "the export while playing failed: no encoder for H.264",
+    );
+    fails(&json!({"ok": true, "result": {}}), "no document part");
+    let mut slow = good();
+    slow["result"]["export"]["while_running"]["ui"] = json!({"presented": 0.8, "p99": 40.0});
+    fails(
+        &slow,
+        "80% of the UI frames expected were presented while the export ran",
+    );
+    fails(&slow, "UI p99 40.0 ms while the export ran");
+    let mut dropped = good();
+    dropped["result"]["export"]["while_running"]["frames"]["dropped"] = json!(3);
+    fails(&dropped, "3 of 183 frames dropped while the export ran");
 }

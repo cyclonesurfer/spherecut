@@ -37,6 +37,8 @@ pub enum NoticeKind {
     MediaChanged,
     /// An edit was refused.
     Edit,
+    /// An export ended, failed or was cancelled.
+    Export,
 }
 
 /// One banner.

@@ -123,6 +123,10 @@ pub struct ViewerResources {
     last: Option<DrawKey>,
     /// The raw view's targets, by column.
     raw: Vec<Option<RawTarget>>,
+    /// The sphere overview's thumbnail (M2 plan section 10.5), and
+    /// whether a pass with its last draw was painted.
+    overview: Option<RawTarget>,
+    overview_painted: AtomicBool,
     /// `paint` ran since `last` was recorded, so the projection was
     /// submitted with it. Set by `paint`, which has the resources only
     /// shared.
@@ -163,10 +167,21 @@ impl ViewerResources {
             target: None,
             last: None,
             raw: Vec::new(),
+            overview: None,
+            overview_painted: AtomicBool::new(false),
             painted: AtomicBool::new(false),
             projected: 0,
             encoded_only: 0,
         }
+    }
+
+    /// What the overview's thumbnail holds and its size, once painted.
+    pub fn overview_last(&self) -> Option<(RawKey, (u32, u32))> {
+        let t = self.overview.as_ref()?;
+        let key = t.last.clone()?;
+        self.overview_painted
+            .load(Ordering::Relaxed)
+            .then(|| (key, t.target.extent()))
     }
 
     /// The linear target's size, for tests.
@@ -493,6 +508,102 @@ impl ViewerCallback {
                 perf.add(Counter::EncodedOnly, 1);
             }
         }
+    }
+}
+
+/// The sphere overview's thumbnail: the frame on screen drawn flat by the
+/// viewer's own projector (an equirect source is its own thumbnail), no
+/// second decode. It draws only when the frame or its size changes.
+pub struct OverviewCallback {
+    pub rect: egui::Rect,
+    /// Held as [`ViewerCallback::shown`]'s is.
+    pub shown: Option<(Arc<GpuFrame>, RawKey)>,
+}
+
+impl std::fmt::Debug for OverviewCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OverviewCallback")
+            .field("rect", &self.rect)
+            .field("shown", &self.shown.as_ref().map(|(_, k)| k))
+            .finish()
+    }
+}
+
+impl CallbackTrait for OverviewCallback {
+    fn prepare(
+        &self,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        sd: &ScreenDescriptor,
+        enc: &mut wgpu::CommandEncoder,
+        res: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let Some(r) = res.get_mut::<ViewerResources>() else {
+            return Vec::new();
+        };
+        let Some((frame, key)) = &self.shown else {
+            if let Some(t) = &mut r.overview {
+                t.last = None;
+            }
+            return Vec::new();
+        };
+        let vp = ViewportInPixels::from_points(&self.rect, sd.pixels_per_point, sd.size_in_pixels);
+        let size = physical(&vp);
+        let t = match &mut r.overview {
+            Some(t) if t.target.extent() == size => t,
+            Some(t) => {
+                if let Err(e) = t.target.resize_unchecked(&r.gpu, size) {
+                    tracing::warn!(error = %e, ?size, "the overview's target can't be resized");
+                    r.overview = None;
+                    return Vec::new();
+                }
+                t.last = None;
+                t
+            }
+            None => match LinearTarget::new_unchecked(&r.gpu, size) {
+                Ok(target) => r.overview.insert(RawTarget {
+                    target,
+                    origin: [0, 0],
+                    last: None,
+                }),
+                Err(e) => {
+                    tracing::warn!(error = %e, ?size, "the overview's target can't be made");
+                    return Vec::new();
+                }
+            },
+        };
+        if t.last.as_ref() == Some(key) && r.overview_painted.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        r.projector
+            .record_flat_unchecked(enc, frame, &t.target, key.filter, None);
+        t.last = Some(key.clone());
+        r.overview_painted.store(false, Ordering::Relaxed);
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        info: egui::PaintCallbackInfo,
+        pass: &mut wgpu::RenderPass<'static>,
+        res: &CallbackResources,
+    ) {
+        let Some(r) = res.get::<ViewerResources>() else {
+            return;
+        };
+        let Some(t) = &r.overview else {
+            return;
+        };
+        if self.shown.is_none() || t.last.is_none() {
+            return;
+        }
+        let vp = info.viewport_in_pixels();
+        let origin = [
+            u32::try_from(vp.left_px).unwrap_or(0),
+            u32::try_from(vp.top_px).unwrap_or(0),
+        ];
+        r.encoder.draw(pass, &t.target, origin);
+        r.overview_painted.store(true, Ordering::Relaxed);
     }
 }
 

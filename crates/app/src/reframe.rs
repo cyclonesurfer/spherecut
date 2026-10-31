@@ -137,6 +137,15 @@ pub struct Reframe {
     pub replace: Option<PathBuf>,
     threads: Threads,
     pub strip: crate::timeline::Strip,
+    pub inspector: crate::inspector::Inspector,
+    pub curves: crate::curves::Curves,
+    pub overview: crate::overview::Overview,
+    /// The viewer shows a 360 output as it exports, the whole sphere
+    /// turned to its front (amendment 2 item 37).
+    pub equirect_preview: bool,
+    /// A drag of the equirect preview: the front and the pointer where
+    /// it started.
+    pub front_drag: Option<(Orientation, egui::Pos2)>,
     /// The window may close: nothing is unsaved, or the user said so.
     pub may_close: bool,
     /// The window is to close, now that it may.
@@ -155,6 +164,14 @@ impl Reframe {
 
     pub fn loading(&self) -> bool {
         self.loading.is_some()
+    }
+
+    /// The 360 output's front, while the viewer previews it.
+    pub fn preview_front(&self) -> Option<Orientation> {
+        match self.doc.as_ref()?.output() {
+            Output::Equirect { orientation, .. } if self.equirect_preview => Some(orientation),
+            _ => None,
+        }
     }
 
     /// The flat output's size: the viewer frames it and shows the keyed
@@ -187,6 +204,9 @@ impl Reframe {
         self.replace = None;
         self.after_save = None;
         self.strip = crate::timeline::Strip::default();
+        self.inspector = crate::inspector::Inspector::default();
+        self.curves = crate::curves::Curves::default();
+        self.overview = crate::overview::Overview::default();
     }
 
     fn keep_jobs(&mut self) {
@@ -751,6 +771,45 @@ impl AppState {
         self.reframe.look = Look::Keyed;
         self.reframe.applied = None;
         self.reframe.seen = None;
+        // A number or a curve being changed is let go, unkept.
+        self.reframe.inspector.editing = None;
+        self.reframe.curves.cancel();
+        if let Some(doc) = &mut self.reframe.doc {
+            doc.end_preview();
+        }
+    }
+
+    /// The view turned to `q` at once (the sphere overview's click): as
+    /// a change of the view (section 10.2), key edits on a key or a
+    /// lane's only key, one step; else, or while playing, a look-around.
+    pub fn look_at(&mut self, q: glam::DQuat) {
+        if self.reframe.flat_output().is_none() {
+            return;
+        }
+        if matches!(self.reframe.look, Look::Editing { .. }) {
+            self.commit_look();
+        }
+        self.view.cancel_morph();
+        self.view.q = q;
+        let vals = ViewValues::of(q, &self.view.lens);
+        self.reframe.seen = Some(vals);
+        if self.snapshot.want_play {
+            self.reframe.look = Look::Around;
+            return;
+        }
+        let t = self.frame_time();
+        let edits = self
+            .reframe
+            .doc
+            .as_ref()
+            .and_then(|d| d.view_edits(t, &vals));
+        self.reframe.look = match edits {
+            Some(edits) if self.edit("Turn the view", &edits) => {
+                self.reframe.applied = Some(vals);
+                Look::Keyed
+            }
+            _ => Look::Around,
+        };
     }
 
     /// `edits` as one undo step labelled `label`; a refusal is a notice.

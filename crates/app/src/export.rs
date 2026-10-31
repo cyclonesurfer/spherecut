@@ -1,0 +1,815 @@
+//! The export window (M2 plan section 10.6): the sequence's output and
+//! export settings, the range, the output file, and the export running
+//! as a background job with its progress and Cancel.
+//!
+//! Each choice is an edit to the sequence, an undo step as the
+//! Inspector's are, so the project saves what the export used. The
+//! export runs on a clone of the project (the range applied to its
+//! trim): edits made while it runs don't reach it. One runs at a time;
+//! the window can be closed and opened again while it does. Starting it
+//! looks at the output path and the render node, so that is a job too:
+//! the UI thread never waits on a file (section 7.9).
+//!
+//! While the viewer plays or a drag runs, the export is held to a frame
+//! a UI pass through its [`Pace`] (amendment 2 item 22).
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use spherecut_core::project::{AudioChoice, Codec, Edit, EncoderChoice, Output, Quality};
+use spherecut_core::time::Time;
+use spherecut_export::{Export, ExportError, ExportJob, Pace, Progress, Report};
+use spherecut_media::doctor::{DoctorReport, Severity};
+
+use crate::app::{AppState, DoctorState};
+use crate::jobs::{Job, Poll, Threads};
+use crate::notices::{Notice, NoticeKind};
+use crate::transport::format_time;
+
+/// What the window exports: the trim, or from the first selected key to
+/// the end of the last one's frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Span {
+    #[default]
+    Trim,
+    Selection,
+}
+
+/// The window's state and the export running.
+#[derive(Debug, Default)]
+pub struct ExportUi {
+    pub open: bool,
+    /// The output file's name, `.mp4` added; empty until the window
+    /// first opens with a project, which names it.
+    pub name: String,
+    pub span: Span,
+    /// Whether the clip's audio can be copied into the output, and why
+    /// not: for the media file and the output kind it was asked for.
+    audio: Option<AudioCheck>,
+    /// An export refused for a file at its output: the "Replace it?"
+    /// window, and the job it would run.
+    pub replace: Option<PathBuf>,
+    run: Option<Running>,
+    /// How the last export ended.
+    pub last: Option<Result<Report, ExportError>>,
+    /// The UI's side of the pace: [`SpherecutApp::logic`](crate::app::SpherecutApp::logic)
+    /// passes it each pass.
+    pub pace: Arc<Pace>,
+    threads: Threads,
+}
+
+#[derive(Debug)]
+struct AudioCheck {
+    media: PathBuf,
+    sphere: bool,
+    state: Check,
+}
+
+#[derive(Debug)]
+enum Check {
+    Running(Job<Option<String>>),
+    /// Why Copy can't be, or `None` when it can.
+    Done(Option<String>),
+}
+
+#[derive(Debug)]
+struct Running {
+    output: PathBuf,
+    state: Run,
+    /// Cancel asked for: an export still starting is cancelled once it
+    /// has.
+    cancelled: bool,
+}
+
+#[derive(Debug)]
+enum Run {
+    Starting(Job<Result<Export, ExportError>>),
+    Exporting(Box<Export>),
+}
+
+impl ExportUi {
+    /// An export is starting or running.
+    pub fn running(&self) -> bool {
+        self.run.is_some()
+    }
+
+    /// Cancel the export running: it ends within about a frame's work,
+    /// leaving nothing at its output.
+    pub fn cancel(&mut self) {
+        if let Some(r) = &mut self.run {
+            r.cancelled = true;
+            if let Run::Exporting(e) = &r.state {
+                e.cancel();
+            }
+        }
+    }
+
+    /// The running export's progress, once it has started.
+    pub fn progress(&self) -> Option<Progress> {
+        match &self.run.as_ref()?.state {
+            Run::Exporting(e) => Some(e.progress()),
+            Run::Starting(_) => None,
+        }
+    }
+
+    /// The jobs' threads still running, for the join at exit: an export
+    /// running is cancelled, and dropped (which waits for its threads)
+    /// on a thread of its own.
+    pub fn take_threads(&mut self) -> Vec<JoinHandle<()>> {
+        if let Some(r) = self.run.take() {
+            match r.state {
+                Run::Starting(job) => self.threads.keep(job),
+                Run::Exporting(export) => {
+                    export.cancel();
+                    self.threads
+                        .keep(Job::spawn("export-stop", move || drop(export)));
+                }
+            }
+        }
+        if let Some(AudioCheck {
+            state: Check::Running(job),
+            ..
+        }) = self.audio.take()
+        {
+            self.threads.keep(job);
+        }
+        self.threads.take()
+    }
+}
+
+impl AppState {
+    /// `Ctrl+E` and File ▸ Export…: the window, named for the project.
+    pub fn open_export(&mut self) {
+        let Some(doc) = &self.reframe.doc else {
+            return;
+        };
+        if self.export.name.is_empty() {
+            self.export.name = default_name(&doc.name());
+        }
+        self.export.open = true;
+    }
+
+    /// Whether the export is held to a frame a UI pass: the viewer
+    /// plays, or a drag runs.
+    pub(crate) fn export_held(&self) -> bool {
+        self.snapshot.want_play
+            || self.drag.is_some()
+            || self.scrub.pending()
+            || self.reframe.strip.dragging()
+            || self.reframe.curves.dragging()
+            || self.reframe.front_drag.is_some()
+    }
+
+    /// The export started, its end turned into a notice, the audio
+    /// check taken. Never waits.
+    pub(crate) fn export_tick(&mut self) {
+        let ui = &mut self.export;
+        if let Some(a) = &mut ui.audio
+            && let Check::Running(job) = &a.state
+        {
+            match job.poll() {
+                Poll::Pending => {}
+                Poll::Done(why) => a.state = Check::Done(why),
+                Poll::Lost => a.state = Check::Done(Some("the audio couldn't be read".into())),
+            }
+        }
+        let Some(run) = &mut ui.run else {
+            return;
+        };
+        let ended = match &mut run.state {
+            Run::Starting(job) => match job.poll() {
+                Poll::Pending => None,
+                Poll::Done(Ok(export)) => {
+                    if run.cancelled {
+                        export.cancel();
+                    }
+                    run.state = Run::Exporting(Box::new(export));
+                    None
+                }
+                Poll::Done(Err(ExportError::OutputExists(path))) => {
+                    ui.replace = Some(path);
+                    ui.run = None;
+                    return;
+                }
+                Poll::Done(Err(e)) => Some(Err(e)),
+                Poll::Lost => Some(Err(ExportError::Invalid(
+                    "the export didn't start: its thread ended".into(),
+                ))),
+            },
+            Run::Exporting(export) => export.wait(Duration::ZERO),
+        };
+        let Some(result) = ended else {
+            return;
+        };
+        let output = run.output.clone();
+        ui.run = None;
+        ui.last = Some(result.clone());
+        self.notices.retain(|k| *k != NoticeKind::Export);
+        self.notices.push(match result {
+            Ok(report) => done_notice(&report),
+            Err(ExportError::Cancelled) => Notice::new(
+                NoticeKind::Export,
+                Severity::Info,
+                format!("The export to {} was cancelled", output.display()),
+            )
+            .impact("nothing was written"),
+            Err(e) => Notice::new(
+                NoticeKind::Export,
+                Severity::Error,
+                format!("The export to {} failed", output.display()),
+            )
+            .impact(format!("{e}; nothing was written")),
+        });
+    }
+
+    /// Start exporting the window's range to `output`, replacing a file
+    /// there if `overwrite`.
+    fn start_export(&mut self, output: PathBuf, overwrite: bool) {
+        let span = match (&self.reframe.doc, self.export.span) {
+            (Some(doc), Span::Selection) => selection_span(doc),
+            _ => None,
+        };
+        self.export_span(output, span, overwrite);
+    }
+
+    /// Start exporting `span` of the clip (its trim, for `None`) to
+    /// `output`, replacing a file there if `overwrite`: Start's, the
+    /// smoke run's and the tests'. The checks that look at files run on
+    /// the job; one export runs at a time.
+    pub fn export_span(&mut self, output: PathBuf, span: Option<(Time, Time)>, overwrite: bool) {
+        if self.export.running() {
+            return;
+        }
+        let Some(doc) = &self.reframe.doc else {
+            return;
+        };
+        let mut project = doc.project.clone();
+        if let Some((start, end)) = span {
+            let trim = Edit::SetTrim {
+                clip: doc.clip().id,
+                start: Some(start),
+                end: Some(end),
+            };
+            if let Err(e) = project.apply(&[trim]) {
+                self.notices.push(
+                    Notice::new(
+                        NoticeKind::Export,
+                        Severity::Warning,
+                        "That span can't be exported",
+                    )
+                    .impact(e.problem.to_string()),
+                );
+                return;
+            }
+        }
+        let mut job = ExportJob::new(project, &output, self.gpu.clone());
+        job.overwrite = overwrite;
+        job.pace = Some(self.export.pace.clone());
+        tracing::info!(output = %output.display(), "exporting");
+        let starting = Job::spawn("export-start", move || Export::start(job));
+        self.export.run = Some(Running {
+            output,
+            state: Run::Starting(starting),
+            cancelled: false,
+        });
+    }
+}
+
+/// The notice an export that ended well leaves: where, how, what was
+/// checked.
+fn done_notice(r: &Report) -> Notice {
+    let mut how = format!(
+        "{} frames ({}) in {}, with {}",
+        r.frames,
+        format_time(r.duration),
+        format_duration(r.elapsed),
+        r.encoder
+    );
+    if let Some(f) = &r.fallback {
+        how.push_str(&format!(" ({} wasn't used: {})", f.from, f.reason));
+    }
+    if let Some(f) = &r.decode.fallback {
+        how.push_str(&format!("; decoded in software ({})", f.reason));
+    }
+    let mut fix: Vec<String> = r.warnings.iter().map(|w| w.message.clone()).collect();
+    if !r.checks.is_empty() {
+        let names: Vec<&str> = r.checks.iter().map(|c| c.name).collect();
+        fix.push(format!("Checked: {}", names.join(", ")));
+    }
+    let mut n = Notice::new(
+        NoticeKind::Export,
+        Severity::Info,
+        format!("Exported {}", r.output.display()),
+    )
+    .impact(how);
+    if !fix.is_empty() {
+        n = n.fix(fix.join("\n"));
+    }
+    n
+}
+
+/// "1:05" or "42 s".
+fn format_duration(d: Duration) -> String {
+    let s = d.as_secs();
+    if s >= 60 {
+        format!("{}:{:02}", s / 60, s % 60)
+    } else {
+        format!("{:.1} s", d.as_secs_f64())
+    }
+}
+
+/// The output's name for a project named `project`: its stem, without
+/// " (untitled)".
+fn default_name(project: &str) -> String {
+    let stem = project.trim_end_matches(" (untitled)");
+    let stem = Path::new(stem)
+        .file_stem()
+        .map_or_else(|| "export".to_owned(), |s| s.to_string_lossy().into_owned());
+    format!("{stem}.mp4")
+}
+
+/// From the first selected key to the end of the last one's frame, if
+/// that is a span.
+fn selection_span(doc: &crate::doc::Doc) -> Option<(Time, Time)> {
+    let times: Vec<Time> = doc
+        .keys()
+        .into_iter()
+        .filter(|k| doc.selection.contains(&k.id))
+        .map(|k| k.at)
+        .collect();
+    let start = times.iter().copied().min()?;
+    let last = times.iter().copied().max()?;
+    let end = last
+        .checked_add(doc.rate().frame_duration())
+        .ok()?
+        .min(doc.duration());
+    (end > start && last > start).then_some((start, end))
+}
+
+/// The codecs in the order the window lists them: those this machine
+/// can encode first (as doctor found), and the encoder `auto` uses for
+/// each, `None` when there is none; doctor's answer not in yet, all of
+/// them, unknown.
+fn codecs(report: Option<&DoctorReport>) -> Vec<(Codec, Option<Option<String>>)> {
+    let all = [Codec::H264, Codec::Hevc, Codec::Av1];
+    let Some(report) = report else {
+        return all.into_iter().map(|c| (c, None)).collect();
+    };
+    let mut v: Vec<_> = all
+        .into_iter()
+        .map(|c| {
+            let prefix = codec_label(c);
+            let encoder = report
+                .export_encoders
+                .iter()
+                .filter(|e| e.format.starts_with(prefix))
+                .find_map(|e| e.encoder.clone());
+            (c, Some(encoder))
+        })
+        .collect();
+    v.sort_by_key(|(_, e)| matches!(e, Some(None)));
+    v
+}
+
+pub fn codec_label(c: Codec) -> &'static str {
+    match c {
+        Codec::H264 => "H.264",
+        Codec::Hevc => "HEVC",
+        Codec::Av1 => "AV1",
+    }
+}
+
+fn quality_label(q: Quality) -> &'static str {
+    match q {
+        Quality::High => "High",
+        Quality::Medium => "Medium",
+        Quality::Small => "Small",
+    }
+}
+
+fn encoder_label(e: EncoderChoice) -> &'static str {
+    match e {
+        EncoderChoice::Auto => "Auto (the GPU's, else software)",
+        EncoderChoice::Vaapi => "The GPU's (VA-API)",
+        EncoderChoice::Software => "Software",
+    }
+}
+
+fn audio_label(a: AudioChoice) -> &'static str {
+    match a {
+        AudioChoice::Copy => "Copy",
+        AudioChoice::Aac => "AAC",
+        AudioChoice::None => "None",
+    }
+}
+
+/// The folder the output goes in: the Files pane's, else the project's,
+/// else the home directory.
+fn output_dir(s: &AppState) -> PathBuf {
+    s.files
+        .dir()
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            let doc = s.reframe.doc.as_ref()?;
+            doc.path.as_deref()?.parent().map(Path::to_path_buf)
+        })
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The name field's file in `dir`, `.mp4` added; `None` for no name or
+/// one with a slash.
+pub fn output_path(dir: &Path, name: &str) -> Option<PathBuf> {
+    let name = name.trim();
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        return None;
+    }
+    let mut path = dir.join(name);
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
+    {
+        path.as_mut_os_string().push(".mp4");
+    }
+    Some(path)
+}
+
+/// Check, on a job, whether the clip's audio can be copied into the
+/// output, when the media or the output's kind has changed.
+fn check_audio(s: &mut AppState) {
+    let Some(doc) = &s.reframe.doc else {
+        return;
+    };
+    let Some(media) = doc.media() else {
+        return;
+    };
+    let output = doc.project.the_sequence().output;
+    let sphere = matches!(output, Output::Equirect { .. });
+    if s.export
+        .audio
+        .as_ref()
+        .is_some_and(|a| a.media == media.path && a.sphere == sphere)
+    {
+        return;
+    }
+    if let Some(AudioCheck {
+        state: Check::Running(job),
+        ..
+    }) = s.export.audio.take()
+    {
+        s.export.threads.keep(job);
+    }
+    let path = media.path.clone();
+    s.export.audio = Some(AudioCheck {
+        media: path.clone(),
+        sphere,
+        state: Check::Running(Job::spawn("export-audio", move || {
+            spherecut_export::copy_refusal(&path, &output)
+        })),
+    });
+}
+
+/// The export window and its "Replace it?" window.
+pub fn window(s: &mut AppState, ctx: &egui::Context) {
+    replace_window(s, ctx);
+    if !s.export.open {
+        return;
+    }
+    if s.reframe.doc.is_none() && !s.export.running() {
+        s.export.open = false;
+        return;
+    }
+    check_audio(s);
+    let mut open = true;
+    egui::Window::new("Export")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_pos(ctx.content_rect().center() - egui::vec2(200.0, 200.0))
+        .show(ctx, |ui| {
+            ui.set_min_width(380.0);
+            if s.reframe.doc.is_some() {
+                settings_ui(s, ui);
+                ui.separator();
+            }
+            run_ui(s, ui);
+        });
+    if !open {
+        s.export.open = false;
+    }
+}
+
+/// The choices: each an edit to the sequence.
+fn settings_ui(s: &mut AppState, ui: &mut egui::Ui) {
+    let report = match &s.doctor {
+        DoctorState::Done(r) => Some(r.clone()),
+        _ => None,
+    };
+    let busy = s.export.running();
+    let mut edit: Option<(&str, Vec<Edit>)> = None;
+    let dir = output_dir(s);
+    let Some(doc) = s.reframe.doc.as_ref() else {
+        return;
+    };
+    let mut settings = doc.project.the_sequence().export;
+    let before = settings;
+    let selection = selection_span(doc);
+    let audio_why = match s.export.audio.as_ref().map(|a| &a.state) {
+        Some(Check::Done(why)) => why.clone(),
+        _ => None,
+    };
+    let checking = matches!(
+        s.export.audio.as_ref().map(|a| &a.state),
+        Some(Check::Running(_))
+    );
+    ui.add_enabled_ui(!busy, |ui| {
+        egui::Grid::new("export-settings")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Output");
+                if let Some(edits) = crate::inspector::output_menu(ui, doc, "export-output") {
+                    edit = Some(("Set the output", edits));
+                }
+                ui.end_row();
+
+                ui.label("Codec");
+                let list = codecs(report.as_deref());
+                let label = |c: Codec, e: &Option<Option<String>>| match e {
+                    None => codec_label(c).to_owned(),
+                    Some(Some(name)) => format!("{} ({name})", codec_label(c)),
+                    Some(None) => format!("{} (no encoder here)", codec_label(c)),
+                };
+                let shown = list.iter().find(|(c, _)| *c == settings.codec).map_or_else(
+                    || codec_label(settings.codec).to_owned(),
+                    |(c, e)| label(*c, e),
+                );
+                egui::ComboBox::from_id_salt("export-codec")
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        for (c, e) in &list {
+                            ui.selectable_value(&mut settings.codec, *c, label(*c, e));
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Quality");
+                egui::ComboBox::from_id_salt("export-quality")
+                    .selected_text(quality_label(settings.quality))
+                    .show_ui(ui, |ui| {
+                        for q in [Quality::High, Quality::Medium, Quality::Small] {
+                            ui.selectable_value(&mut settings.quality, q, quality_label(q));
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Encoder");
+                egui::ComboBox::from_id_salt("export-encoder")
+                    .selected_text(encoder_label(settings.encoder))
+                    .show_ui(ui, |ui| {
+                        for e in [
+                            EncoderChoice::Auto,
+                            EncoderChoice::Vaapi,
+                            EncoderChoice::Software,
+                        ] {
+                            ui.selectable_value(&mut settings.encoder, e, encoder_label(e));
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Audio");
+                ui.vertical(|ui| {
+                    egui::ComboBox::from_id_salt("export-audio")
+                        .selected_text(audio_label(settings.audio))
+                        .show_ui(ui, |ui| {
+                            let copy = ui.add_enabled(
+                                audio_why.is_none(),
+                                egui::Button::selectable(
+                                    settings.audio == AudioChoice::Copy,
+                                    audio_label(AudioChoice::Copy),
+                                ),
+                            );
+                            if copy.clicked() {
+                                settings.audio = AudioChoice::Copy;
+                            }
+                            if let Some(why) = &audio_why {
+                                copy.on_disabled_hover_text(why.as_str());
+                            }
+                            for a in [AudioChoice::Aac, AudioChoice::None] {
+                                ui.selectable_value(&mut settings.audio, a, audio_label(a));
+                            }
+                        });
+                    if settings.audio == AudioChoice::Copy {
+                        if checking {
+                            ui.weak("Looking at the audio…");
+                        } else if let Some(why) = &audio_why {
+                            ui.weak(format!("Not copied: {why}"));
+                        }
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Motion blur");
+                ui.checkbox(&mut settings.motion_blur, "Blur moves across a frame");
+                ui.end_row();
+
+                ui.label("Range");
+                ui.vertical(|ui| {
+                    let clip = doc.clip();
+                    ui.radio_value(
+                        &mut s.export.span,
+                        Span::Trim,
+                        format!(
+                            "The trim, {} to {}",
+                            format_time(clip.source.start),
+                            format_time(clip.source.end)
+                        ),
+                    );
+                    let text = match selection {
+                        Some((a, b)) => {
+                            format!(
+                                "The selected keys, {} to {}",
+                                format_time(a),
+                                format_time(b)
+                            )
+                        }
+                        None => "The selected keys (select two or more)".to_owned(),
+                    };
+                    ui.add_enabled_ui(selection.is_some(), |ui| {
+                        ui.radio_value(&mut s.export.span, Span::Selection, text);
+                    });
+                });
+                ui.end_row();
+
+                let file = ui.label("File");
+                ui.vertical(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut s.export.name)
+                            .desired_width(260.0)
+                            .hint_text("name.mp4"),
+                    )
+                    .labelled_by(file.id);
+                    ui.weak(format!("In {}", dir.display()));
+                });
+                ui.end_row();
+            });
+    });
+    if settings != before {
+        edit = Some(("Export settings", doc.set_export(settings)));
+    }
+    if selection.is_none() && s.export.span == Span::Selection {
+        s.export.span = Span::Trim;
+    }
+    if let Some((label, edits)) = edit
+        && !edits.is_empty()
+    {
+        s.edit(label, &edits);
+    }
+}
+
+/// Start, or the running export's progress and Cancel.
+fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
+    let dir = output_dir(s);
+    match &s.export.run {
+        None => {
+            let path = output_path(&dir, &s.export.name);
+            let ready = s.reframe.doc.is_some() && path.is_some();
+            ui.horizontal(|ui| {
+                if ui.add_enabled(ready, egui::Button::new("Start")).clicked()
+                    && let Some(path) = path
+                {
+                    s.start_export(path, false);
+                }
+                if ui.button("Close").clicked() {
+                    s.export.open = false;
+                }
+            });
+        }
+        Some(r) => {
+            let output = r.output.clone();
+            ui.label(format!("Exporting to {}", output.display()));
+            match &r.state {
+                Run::Starting(_) => {
+                    ui.add(egui::ProgressBar::new(0.0).text("Starting…"));
+                }
+                Run::Exporting(e) => progress_ui(ui, &e.progress()),
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    s.export.cancel();
+                }
+                if ui
+                    .button("Close")
+                    .on_hover_text("The export goes on")
+                    .clicked()
+                {
+                    s.export.open = false;
+                }
+            });
+        }
+    }
+}
+
+fn progress_ui(ui: &mut egui::Ui, p: &Progress) {
+    let (fraction, text) = match p.finishing {
+        Some((done, total)) if total > 0 => (
+            done as f32 / total as f32,
+            format!(
+                "Writing the file: {:.0}%",
+                100.0 * done as f64 / total as f64
+            ),
+        ),
+        _ => {
+            let fraction = if p.frames_total == 0 {
+                0.0
+            } else {
+                p.frames_done as f32 / p.frames_total as f32
+            };
+            let mut text = format!("{} of {} frames", p.frames_done, p.frames_total);
+            if p.fps > 0.0 {
+                text.push_str(&format!(", {:.1} fps", p.fps));
+            }
+            if let Some(eta) = p.eta {
+                text.push_str(&format!(", {} left", format_duration(eta)));
+            }
+            (fraction, text)
+        }
+    };
+    ui.add(egui::ProgressBar::new(fraction).text(text));
+    let mut how = format!("With {}", p.encoder);
+    if let Some(f) = &p.fallback {
+        how.push_str(&format!(" ({} wasn't used: {})", f.from, f.reason));
+    }
+    ui.weak(how);
+}
+
+fn replace_window(s: &mut AppState, ctx: &egui::Context) {
+    let Some(path) = s.export.replace.clone() else {
+        return;
+    };
+    let mut answer = None;
+    egui::Window::new("Replace the file?")
+        .id(egui::Id::unique("export-replace"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label(format!("{} is there already.", path.display()));
+            ui.horizontal(|ui| {
+                if ui.button("Replace").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+    match answer {
+        Some(true) => {
+            s.export.replace = None;
+            s.start_export(path, true);
+        }
+        Some(false) => s.export.replace = None,
+        None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_output_gets_mp4_and_refuses_a_path() {
+        let dir = Path::new("/videos");
+        assert_eq!(
+            output_path(dir, "trip"),
+            Some(PathBuf::from("/videos/trip.mp4"))
+        );
+        assert_eq!(
+            output_path(dir, " trip.MP4 "),
+            Some(PathBuf::from("/videos/trip.MP4"))
+        );
+        assert_eq!(
+            output_path(dir, "trip.mov"),
+            Some(PathBuf::from("/videos/trip.mov.mp4"))
+        );
+        assert_eq!(output_path(dir, ""), None);
+        assert_eq!(output_path(dir, "a/b"), None);
+        assert_eq!(output_path(dir, ".."), None);
+    }
+
+    #[test]
+    fn the_default_name_is_the_projects() {
+        assert_eq!(default_name("ride.spherecut"), "ride.mp4");
+        assert_eq!(default_name("VID_0001 (untitled)"), "VID_0001.mp4");
+        assert_eq!(default_name(""), "export.mp4");
+    }
+
+    #[test]
+    fn durations_read_as_minutes_past_one() {
+        assert_eq!(format_duration(Duration::from_millis(4200)), "4.2 s");
+        assert_eq!(format_duration(Duration::from_secs(65)), "1:05");
+    }
+}

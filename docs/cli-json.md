@@ -869,6 +869,15 @@ the smoke run replaces its document and screenshot (each written to a
 temporary file and renamed over the old): they are hw-test's own
 outputs, which `gui_smoke` clears before each run anyway.
 
+With `--smoke-export <MP4>` (M2.7, DECISIONS D55) the run also exports
+the clip's first 2 s, from the untitled project the app made of it, to
+`MP4` once the run has settled (its first second), through the export
+window's own path: the export renders while the clip plays on, held to
+one frame a UI pass. The run then waits for the export to end before
+writing its document, and cancels it 60 s past `--smoke-seconds`. An
+export that fails or is cancelled doesn't fail the run: the document's
+`export` says so, and `gui_smoke` judges it.
+
 A window the compositor doesn't draw (a locked or blanked screen, a
 minimized window, another virtual terminal) has no UI passes, and the
 run's own limits are checked in them. A watchdog thread ends such a
@@ -890,7 +899,7 @@ and no `path` in its `error`. Its `result`:
 | `raw_view`, `streams[]` | Whether the viewer showed the raw view; each video stream's `format` (as the overlay has it), `fps`, `decoder` (`software`, `vaapi` or `vulkan`), `fell_back_from` and `decode` (the Info pane's words) |
 | `ui` | `frames` (UI passes) and `passes` (with those eframe ran hidden, without the UI), `expected` (`refresh_hz` × `played_s`, or the passes without a rate) and `presented` (frames over expected), the intervals' `p50`, `p95`, `p99` and `max` in ms, `hitches`, and `work`: each pass's own work as eframe counts it, without acquiring the surface, the submit and the present, as `samples`, `missed` (0), `p50`, `p95`, `p99` and `max` in ms |
 | `frames` | `shown`, `dropped` and `decode_dropped` over the run, every stream's frames counted, and `expected` (the streams' rates summed × `played_s`) |
-| `settled` | The same after the run's first second, while the cache fills, as the playback benches count them: `from_s` (how far in it begins), `ui` (`frames`, `passes`, `expected`, `presented`, `p50`, `p95`, `p99`, `max`) and `frames` (`shown`, `dropped`, `decode_dropped`, `expected`); `null` for a run that ended within its first second. `gui_smoke` judges these |
+| `settled` | The same after the run's first second, while the cache fills, as the playback benches count them: `from_s` and `to_s` (how far in it begins and ends), `ui` (`frames`, `passes`, `expected`, `presented`, `p50`, `p95`, `p99`, `max`) and `frames` (`shown`, `dropped`, `decode_dropped`, `expected`); `null` for a run that ended within its first second. `gui_smoke` judges these |
 | `late` | The first 64 UI passes after the run's first second that came more than one and a half refresh periods after the pass before (none without `refresh_hz`), each with `at_s` (seconds into the run), `interval_ms`, `work_ms` (the pass before's own work, or null) and `slowest`: per stage by its name (`decode`, `download`, `upload_cpu`, `upload_gpu`, `render_gpu`), the slowest sample recorded in between, for those that recorded one |
 | `stages` | Per stage (`decode`, `download`, `convert`, `upload_cpu`, `upload_gpu`, `render_cpu`, `render_gpu`, `ui_frame`, `shown_interval`): `samples`, `missed` (recorded but gone from the ring before the next pass read it), and `p50`, `p95`, `p99`, `max` in ms over the whole run, by the nearest rank |
 | `av` | How far the clock, at each present, is from the shown frame's interval (its time to the next frame's): 0 inside it, positive when the frame is late, negative when early. `median_ms` (signed), `p95_abs_ms` and `samples`; `null` with none |
@@ -899,6 +908,7 @@ and no `path` in its `error`. Its `result`:
 | `blocked_on_ui_thread` | Blocking calls on the UI thread: 0 unless something is wrong |
 | `submit_gate` | What the submit gate (DECISIONS D41) held back since the device was made: `waits`, the submissions from other threads (decodes, copies, uploads) that waited for the UI's present, and `longest_ms`, the longest wait |
 | `screenshot`, `screenshot_size` | Where the PNG went and its size, or `null` when none was asked for or it couldn't be taken (a warning says why) |
+| `export` | With `--smoke-export`: `output`, `ok` (the file whole and checked), `error` (or `null`), `frames`, `encoder`, `fallback` (the hardware encoder not used and why, or `null`), `elapsed_s`, `held` and `longest_hold_ms` (frames the export held for a UI pass, and the longest hold), and `while_running`: `settled`'s numbers over the time the export ran (`null` if it never started). `null` without the flag |
 
 ## `spherecut --timeline-proto [--proto-out <JSON>]` (hidden; hw-test's)
 

@@ -61,6 +61,13 @@ pub struct Strip {
     rename: Option<(MarkerId, String)>,
 }
 
+impl Strip {
+    /// A handle, marker or key is being dragged.
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+}
+
 /// What the strip's input asks for, taken once it has drawn.
 enum Action {
     Seek(Time),

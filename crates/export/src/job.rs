@@ -19,6 +19,7 @@ use spherecut_render::Gpu;
 use crate::check::Checked;
 use crate::encoder::{EncoderKind, EncoderSetup};
 use crate::error::ExportError;
+use crate::pace::Pace;
 use crate::pipeline;
 use crate::plan::FramePlan;
 use crate::preset::Preset;
@@ -51,6 +52,9 @@ pub struct ExportJob {
     /// The device to render on: the app's, whose submissions wait at its
     /// gate while the UI presents (D41), or a headless one.
     pub gpu: Gpu,
+    /// The app's pace (amendment 2 item 22): a frame a UI pass while the
+    /// viewer plays or a drag runs. None runs free.
+    pub pace: Option<Arc<Pace>>,
 }
 
 /// Where an export decodes its source.
@@ -102,6 +106,7 @@ impl ExportJob {
             decoder: Decoder::Auto,
             vaapi_level: None,
             gpu,
+            pace: None,
         }
     }
 }
