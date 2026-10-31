@@ -21,7 +21,7 @@ use thiserror::Error;
 
 use crate::copy::{AudioCopy, Copied};
 use crate::ffi;
-use crate::inject::{self, EntryEdit, InjectError};
+use crate::inject::{self, EntryEdit, Finish, InjectError};
 use crate::{ff, init};
 
 #[derive(Debug, Error)]
@@ -223,6 +223,11 @@ pub struct MuxOptions {
     /// an audio edit can't end on a sample; an export sets the audio's
     /// rate (m2-plan amendment 2 item 7).
     pub movie_timescale: Option<u32>,
+    /// `+negative_cts_offsets`: B-frames' composition offsets may be
+    /// negative (`ctts` version 1), so that the first frame is shown at
+    /// time 0 and the video's edit list is an identity, which
+    /// [`Finish::drop_video_identity_edit`] then removes.
+    pub negative_cts_offsets: bool,
 }
 
 /// One planar YUV frame. Plane strides equal plane widths.
@@ -916,6 +921,9 @@ impl Mp4Writer {
         if let Some(t) = mux.movie_timescale {
             opts.push(("movie_timescale".to_string(), t.to_string()));
         }
+        if mux.negative_cts_offsets {
+            opts.push(("movflags".to_string(), "+negative_cts_offsets".to_string()));
+        }
         let unused: Vec<String> = ctx(octx.write_header_with(dict(&opts)), || {
             "writing MP4 header".into()
         })?
@@ -1114,23 +1122,27 @@ impl Mp4Writer {
         Ok(path)
     }
 
-    /// Like [`finish_with_edits`](Self::finish_with_edits) (or
-    /// [`finish`](Self::finish) with no edits), but the finished file is
-    /// handed back still under its temporary name, for the caller to
-    /// check and then put in place with `persist_new` or
-    /// `persist_replace` (D16), or to drop, which removes it.
-    pub fn finish_temp(self, edits: &[EntryEdit]) -> Result<TempFile, EncodeError> {
+    /// Like [`finish_with_edits`](Self::finish_with_edits), but in one
+    /// more pass ([`inject::rewrite_into`]) with `finish`'s changes too,
+    /// and `progress` told of it (returning `false` stops it with
+    /// [`InjectError::Stopped`]). The finished file is handed back still
+    /// under its temporary name, for the caller to check and then put in
+    /// place with `persist_new` or `persist_replace` (D16), or to drop,
+    /// which removes it. The muxer's own file is removed either way.
+    pub fn finish_temp(
+        self,
+        edits: &[EntryEdit],
+        finish: &Finish,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> Result<TempFile, EncodeError> {
         may_block("finishing a file");
         let (_, tmp) = self.close()?;
-        if edits.is_empty() {
-            return Ok(tmp);
-        }
         let dest = tmp.dest().to_path_buf();
         let mut out = TempFile::create(&dest).map_err(|error| EncodeError::Io {
             path: dest.clone(),
             error,
         })?;
-        inject::inject_into(tmp.path(), &mut out, edits)?;
+        inject::rewrite_into(tmp.path(), &mut out, edits, finish, progress)?;
         Ok(out)
     }
 

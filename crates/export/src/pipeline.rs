@@ -23,7 +23,7 @@ use spherecut_media::backend::{
     SeekOutcome, VideoDecode, VideoFrame, VideoRequest, VideoStreamInfo,
 };
 use spherecut_media::encode::{EncodeError, Mp4Writer, MuxOptions, StridedPlanes, VideoSettings};
-use spherecut_media::inject::{EntryEdit, TrackKind};
+use spherecut_media::inject::{EntryEdit, Finish, TrackKind};
 use spherecut_media::spherical::{StereoMode, write};
 use spherecut_render::output::frame_views;
 use spherecut_render::{
@@ -198,10 +198,27 @@ pub(crate) fn run(
         });
     }
     warnings.extend(feed.as_ref().and_then(Feed::ended_early));
-    let tmp = writer.finish_temp(&edits).map_err(|e| match e {
-        EncodeError::Inject(e) => ExportError::failed(Stage::Metadata, None, e.to_string()),
-        e => file_or(Stage::Mux, None, e),
-    })?;
+    // One last pass writes the file with its metadata, the moov first and
+    // no video edit list (amendment 2 items 8 and 28).
+    let finish = Finish {
+        video_trak: match sequence.output {
+            Output::Equirect { .. } => write::v1_equirect(APP_NAME),
+            Output::Flat { .. } => Vec::new(),
+        },
+        drop_video_identity_edit: true,
+        moov_first: true,
+    };
+    let mut progress = |done, total| {
+        shared.finishing(done, total);
+        !stop.is_shut_down()
+    };
+    let tmp = writer
+        .finish_temp(&edits, &finish, &mut progress)
+        .map_err(|e| match e {
+            _ if stop.is_shut_down() => ExportError::Cancelled,
+            EncodeError::Inject(e) => ExportError::failed(Stage::Metadata, None, e.to_string()),
+            e => file_or(Stage::Mux, None, e),
+        })?;
     if stop.is_shut_down() {
         return Err(ExportError::Cancelled);
     }
@@ -507,6 +524,7 @@ fn encode(
     };
     let mux = MuxOptions {
         movie_timescale: Some(feed.as_deref().map_or(audio::RATE, Feed::rate)),
+        negative_cts_offsets: true,
     };
     let track = feed.as_deref().map(Feed::track);
     let mut writer = Mp4Writer::create_with(&job.output, &settings, track, &mux)

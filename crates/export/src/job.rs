@@ -70,6 +70,9 @@ pub struct Progress {
     pub eta: Option<Duration>,
     /// FFmpeg's name for the encoder.
     pub encoder: &'static str,
+    /// The last pass, which writes the finished file with its metadata
+    /// and the moov first: bytes written and in all, once it has started.
+    pub finishing: Option<(u64, u64)>,
 }
 
 /// A finished export.
@@ -123,6 +126,9 @@ pub(crate) struct Shared {
     /// When frames were muxed over the last two seconds, oldest first,
     /// with the one before them.
     window: Mutex<VecDeque<(Instant, u64)>>,
+    /// The last pass's bytes written and in all; all 0 until it starts.
+    finished: AtomicU64,
+    finishing_total: AtomicU64,
 }
 
 /// The span `Progress::fps` measures over.
@@ -136,7 +142,15 @@ impl Shared {
             encoder,
             done: AtomicU64::new(0),
             window: Mutex::new(VecDeque::new()),
+            finished: AtomicU64::new(0),
+            finishing_total: AtomicU64::new(0),
         }
+    }
+
+    /// The last pass has written `done` bytes of `total`.
+    pub(crate) fn finishing(&self, done: u64, total: u64) {
+        self.finishing_total.store(total, Ordering::Release);
+        self.finished.store(done, Ordering::Release);
     }
 
     /// `done` frames are muxed.
@@ -179,6 +193,10 @@ impl Shared {
             elapsed: self.started.elapsed(),
             eta,
             encoder: self.encoder,
+            finishing: match self.finishing_total.load(Ordering::Acquire) {
+                0 => None,
+                total => Some((self.finished.load(Ordering::Acquire), total)),
+            },
         }
     }
 }
