@@ -497,8 +497,16 @@ video engine. `gui_proto` passed.
 M2.10c: while the viewer plays, each of the export's stages (decode,
 render, encode) waits before a frame's work until the viewer has two
 frames ready beyond the one it shows, 100 ms at most, so the viewer's
-decodes go first on the video engine (D56). odin's rerun with it is
-next.
+decodes go first on the video engine (D56). odin's rerun at 5c3e3a3
+(PR #22) found the viewer always had its two frames when a stage looked:
+no stage waited, and the 5.7K runs dropped 1 to 3 frames as before.
+
+M2.10d: while the viewer plays, the export's decode and encode take
+turns with it, each starting a frame at most once for every two the
+viewer shows (`pace::SHARE`, D56), so the export decodes a 30 fps clip
+at 15 frames a second while it plays and at full speed otherwise. Pat
+was asked whether an export should slow down (this), pause, or be let
+off the gate while the viewer plays. odin's rerun with it is next.
 
 ## A1: the MCP server
 

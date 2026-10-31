@@ -957,6 +957,10 @@ pub struct ExportReport {
     /// the longest wait.
     pub yielded: u64,
     pub longest_yield_ms: f32,
+    /// Frames of its decode and encode that waited their turn while the
+    /// viewer played (D56), and the time they waited in all.
+    pub slowed: u64,
+    pub slowed_ms: f32,
     /// The UI and the clip's frames while it ran, as `settled` has them.
     pub while_running: Option<Settled>,
 }
@@ -1332,6 +1336,7 @@ fn export_report(
 ) -> ExportReport {
     let (held, longest) = pace.waits();
     let (yielded, longest_yield) = pace.yields();
+    let (slowed, slowed_for) = pace.slowed();
     let mut r = ExportReport {
         output: export.output.display().to_string(),
         preset: export.preset.map(|p| p.to_string()),
@@ -1350,6 +1355,8 @@ fn export_report(
         longest_hold_ms: longest.as_secs_f32() * 1e3,
         yielded,
         longest_yield_ms: longest_yield.as_secs_f32() * 1e3,
+        slowed,
+        slowed_ms: slowed_for.as_secs_f32() * 1e3,
         while_running,
     };
     match (started, last) {

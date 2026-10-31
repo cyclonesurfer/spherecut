@@ -217,6 +217,13 @@ impl AppState {
         lead(self.snapshot.want_play, &self.snapshot.slots)
     }
 
+    /// While the viewer plays, how long its clip's frames are, so that
+    /// the export's decode and encode take turns with its decodes (D56):
+    /// the first stream's rate, or its average when it varies.
+    pub(crate) fn viewer_frame(&self) -> Option<Duration> {
+        frame_of(self.snapshot.want_play, self.stream0().map(|i| i.timing))
+    }
+
     /// Whether the export is held to a frame a UI pass: the viewer
     /// plays, or a drag runs.
     pub(crate) fn export_held(&self) -> bool {
@@ -371,6 +378,18 @@ impl AppState {
 /// [`AppState::viewer_lead`], from what the player says.
 fn lead(playing: bool, slots: &spherecut_playback::slots::SlotStats) -> bool {
     !playing || slots.ready >= LEAD_FRAMES.min(slots.active.saturating_sub(2)).max(1)
+}
+
+/// [`AppState::viewer_frame`], from whether the clip plays and its
+/// stream's timing.
+fn frame_of(playing: bool, timing: Option<spherecut_media::backend::Timing>) -> Option<Duration> {
+    use spherecut_media::backend::Timing;
+    let rate = match timing? {
+        Timing::Constant(r) | Timing::Variable { average: Some(r) } => r,
+        Timing::Variable { average: None } => return None,
+    };
+    let secs = 1.0 / rate.to_f64();
+    (playing && secs.is_finite() && secs > 0.0).then(|| Duration::from_secs_f64(secs))
 }
 
 /// The device an export renders on: a second one on the window's adapter,
@@ -909,6 +928,25 @@ mod tests {
         // Three slots hold one ready beside the shown frame and a held one.
         assert!(lead(true, &slots(3, 1)));
         assert!(!lead(true, &slots(3, 0)));
+    }
+
+    #[test]
+    fn the_export_takes_turns_only_while_the_viewer_plays_a_known_rate() {
+        use spherecut_core::time::FrameRate;
+        use spherecut_media::backend::Timing;
+        let thirty = Some(Timing::Constant(FrameRate::FPS_30));
+        let frame = frame_of(true, thirty).unwrap();
+        assert!((frame.as_secs_f64() - 1.0 / 30.0).abs() < 1e-9, "{frame:?}");
+        assert_eq!(frame_of(false, thirty), None);
+        assert_eq!(frame_of(true, None), None);
+        let vfr = Some(Timing::Variable {
+            average: Some(FrameRate::FPS_25),
+        });
+        assert_eq!(frame_of(true, vfr), Some(Duration::from_millis(40)));
+        assert_eq!(
+            frame_of(true, Some(Timing::Variable { average: None })),
+            None
+        );
     }
 
     #[test]

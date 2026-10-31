@@ -764,7 +764,9 @@ each UI pass also says whether the viewer has two frames ready beyond
 the one it shows, and until it has, the export's decode, render and
 encode stages each wait before a frame's work (`Pace::yield_to_viewer`,
 100 ms at most), so the viewer's decodes go first on the GPU's video
-engine. No thread but the UI's
+engine; and the decode and encode take turns with the viewer
+(`Pace::take_turn`), each starting a frame at most once for every two
+the viewer shows. No thread but the UI's
 waits for the GPU through wgpu's `Device::poll` wait, which holds the
 lock a present takes: they use `Gpu::wait_for_submitted`, which polls
 without waiting.
