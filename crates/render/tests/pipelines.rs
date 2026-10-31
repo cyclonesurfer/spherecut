@@ -9,8 +9,9 @@ mod common;
 use std::mem::{offset_of, size_of};
 
 use common::gpu;
-use spherecut_render::layouts::{ENCODE_WGSL, INGEST_WGSL, MIPS_WGSL, PROJECT_WGSL};
+use spherecut_render::layouts::{ENCODE_WGSL, INGEST_WGSL, MIPS_WGSL, PROJECT_WGSL, YUV_WGSL};
 use spherecut_render::readback::{read_region, read_region_in_bands, read_texture};
+use spherecut_render::yuv::YuvUniform;
 use spherecut_render::{
     DebugMode, Encoder, Filter, GpuFrame, IngestUniform, LinearTarget, PlaceUniform, Projector,
     RenderError, SlotShape, SourceUniform, StillOptions, Uploader, ViewParams, ViewUniform,
@@ -54,12 +55,14 @@ fn every_pipeline_builds() {
     ] {
         validated("encode", || Encoder::new(gpu, format));
     }
+    validated("yuv", || spherecut_render::YuvConverter::new(gpu));
     // And each shader on its own through naga, for its messages.
     for (name, src) in [
         ("project", PROJECT_WGSL),
         ("mips", MIPS_WGSL),
         ("ingest", INGEST_WGSL),
         ("encode", ENCODE_WGSL),
+        ("yuv", YUV_WGSL),
     ] {
         let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: {e}"));
         naga::valid::Validator::new(
@@ -108,12 +111,11 @@ fn uniforms_match_their_wgsl_structs() {
     macro_rules! fields {
         ($t:ty: $($f:ident),*) => { &[$((stringify!($f), offset_of!($t, $f))),*] };
     }
-    same_layout(
-        PROJECT_WGSL,
-        "View",
-        fields!(ViewUniform: rot0, rot1, rot2, size, k, proj, morph, _pad),
-        size_of::<ViewUniform>(),
-    );
+    // `_pad: [f32; 3]` is WGSL's `_pad0` to `_pad2`.
+    let mut view: Vec<(&str, usize)> =
+        fields!(ViewUniform: rot0, rot1, rot2, size, k, proj, morph, out_kind, frame, dim).to_vec();
+    view.extend((0..3).map(|i| ("_pad", offset_of!(ViewUniform, _pad) + 4 * i)));
+    same_layout(PROJECT_WGSL, "View", &view, size_of::<ViewUniform>());
     same_layout(
         PROJECT_WGSL,
         "Source",
@@ -135,6 +137,10 @@ fn uniforms_match_their_wgsl_structs() {
         fields!(PlaceUniform: origin, extent),
         size_of::<PlaceUniform>(),
     );
+    let mut yuv: Vec<(&str, usize)> =
+        fields!(YuvUniform: offsets, strides, size, bits, planar, shift).to_vec();
+    yuv.extend((0..3).map(|i| ("_pad", offset_of!(YuvUniform, _pad) + 4 * i)));
+    same_layout(YUV_WGSL, "Yuv", &yuv, size_of::<YuvUniform>());
 }
 
 /// Writes `w`×`h` texels of `format` with a pattern, and reads them back.

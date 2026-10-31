@@ -3,6 +3,7 @@
 
 use spherecut_core::video::VideoPlanes;
 
+use crate::blur::Blur;
 use crate::color::Placement;
 use crate::encode::Encoder;
 use crate::error::RenderError;
@@ -13,6 +14,7 @@ use crate::project::{DebugMode, Filter, LinearTarget, Projector, ViewParams};
 use crate::readback::{self, Texels};
 use crate::upload::Uploader;
 use crate::vkshare::BufferPlane;
+use crate::yuv::{self, YuvConverter, YuvLayout, YuvShape};
 
 /// What a still is read back as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -49,6 +51,34 @@ pub enum Pixels {
     Rgb16(Vec<u16>),
     /// Linear values ([`Depth::Linear`]).
     LinearF32(Vec<f32>),
+}
+
+/// A picture as an encoder takes it: [`YuvConverter`]'s output, read
+/// back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct YuvImage {
+    pub shape: YuvShape,
+    /// The planes, laid out as `shape` says.
+    pub data: Vec<u8>,
+}
+
+impl YuvImage {
+    /// Sample `(x, y)` of plane `p`: 0 Y, 1 Cb, 2 Cr, in that plane's
+    /// samples.
+    pub fn sample(&self, p: usize, x: u32, y: u32) -> u32 {
+        yuv::sample(&self.shape, &self.data, p, x, y)
+    }
+}
+
+/// What [`StillRenderer`] reads back.
+enum Want {
+    Image(Depth),
+    Yuv(YuvLayout),
+}
+
+enum Rendered {
+    Image(Image),
+    Yuv(YuvImage),
 }
 
 /// A rendered picture.
@@ -140,6 +170,10 @@ pub struct StillRenderer {
     uploader: Uploader,
     projector: Projector,
     encoder: Encoder,
+    /// Made when first asked for a [`YuvImage`].
+    yuv: Option<YuvConverter>,
+    /// Made when first asked to blur.
+    blur: Option<Blur>,
     slot: Option<GpuFrame>,
     target: Option<LinearTarget>,
     output: Option<wgpu::Texture>,
@@ -154,6 +188,8 @@ impl StillRenderer {
             uploader: Uploader::new(gpu),
             projector: Projector::new(gpu),
             encoder: Encoder::new(gpu, Self::OUTPUT_FORMAT),
+            yuv: None,
+            blur: None,
             slot: None,
             target: None,
             output: None,
@@ -173,7 +209,60 @@ impl StillRenderer {
         size: (u32, u32),
         opts: &StillOptions,
     ) -> Result<Image, RenderError> {
-        self.render_from(gpu, frame, Source::Bytes, view, size, opts)
+        let want = Want::Image(opts.depth);
+        let views = std::slice::from_ref(view);
+        Ok(image(self.render_from(
+            gpu,
+            frame,
+            Source::Bytes,
+            views,
+            size,
+            opts,
+            want,
+        )?))
+    }
+
+    /// `frame` seen through each of `views` (a frame's views over the
+    /// shutter, [`crate::blur`]) and averaged in linear light, `size`
+    /// pixels large: motion blur. One view is [`Self::render`].
+    pub fn render_blurred(
+        &mut self,
+        gpu: &Gpu,
+        frame: &dyn VideoPlanes,
+        views: &[ViewParams],
+        size: (u32, u32),
+        opts: &StillOptions,
+    ) -> Result<Image, RenderError> {
+        let want = Want::Image(opts.depth);
+        Ok(image(self.render_from(
+            gpu,
+            frame,
+            Source::Bytes,
+            views,
+            size,
+            opts,
+            want,
+        )?))
+    }
+
+    /// `frame` through `views`, averaged as [`Self::render_blurred`]
+    /// does, `size` pixels large, as an encoder's planes in `layout`: the
+    /// YUV pass's output, which the export's parity tests compare against
+    /// (M2 plan amendment 2 item 5). `opts.depth` goes unused.
+    pub fn render_yuv(
+        &mut self,
+        gpu: &Gpu,
+        frame: &dyn VideoPlanes,
+        views: &[ViewParams],
+        size: (u32, u32),
+        opts: &StillOptions,
+        layout: YuvLayout,
+    ) -> Result<YuvImage, RenderError> {
+        let want = Want::Yuv(layout);
+        match self.render_from(gpu, frame, Source::Bytes, views, size, opts, want)? {
+            Rendered::Yuv(y) => Ok(y),
+            Rendered::Image(_) => unreachable!("a YUV render reads back planes"),
+        }
     }
 
     /// [`render`](Self::render) of a frame whose planes are on the GPU
@@ -190,7 +279,11 @@ impl StillRenderer {
         size: (u32, u32),
         opts: &StillOptions,
     ) -> Result<Image, RenderError> {
-        self.render_from(gpu, frame, Source::Imported(planes), view, size, opts)
+        let want = Want::Image(opts.depth);
+        let (views, source) = (std::slice::from_ref(view), Source::Imported(planes));
+        Ok(image(self.render_from(
+            gpu, frame, source, views, size, opts, want,
+        )?))
     }
 
     /// [`render`](Self::render) of a frame whose shown planes are in a
@@ -209,19 +302,35 @@ impl StillRenderer {
         size: (u32, u32),
         opts: &StillOptions,
     ) -> Result<Image, RenderError> {
-        self.render_from(gpu, frame, Source::Buffer(buffer, planes), view, size, opts)
+        let want = Want::Image(opts.depth);
+        let (views, source) = (std::slice::from_ref(view), Source::Buffer(buffer, planes));
+        Ok(image(self.render_from(
+            gpu, frame, source, views, size, opts, want,
+        )?))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_from(
         &mut self,
         gpu: &Gpu,
         frame: &dyn VideoPlanes,
         source: Source<'_>,
-        view: &ViewParams,
+        views: &[ViewParams],
         size: (u32, u32),
         opts: &StillOptions,
-    ) -> Result<Image, RenderError> {
+        want: Want,
+    ) -> Result<Rendered, RenderError> {
         gpu.check()?;
+        if views.is_empty() || (opts.flat && views.len() > 1) {
+            return Err(RenderError::Invalid(format!(
+                "a still takes one view, or several to blur through the lens, not {}",
+                views.len()
+            )));
+        }
+        let yuv_shape = match want {
+            Want::Yuv(layout) => Some(YuvShape::new(layout, size)?),
+            Want::Image(_) => None,
+        };
         if size.0 == 0 || size.1 == 0 {
             return Err(RenderError::Invalid(format!(
                 "a {}x{} still has no pixels",
@@ -270,12 +379,48 @@ impl StillRenderer {
             gpu.check()?;
             self.projector
                 .record_flat_unchecked(&mut enc, slot, target, opts.filter, None);
-        } else {
+        } else if let [view] = views {
             self.projector
                 .record(&mut enc, slot, view, target, opts.filter, opts.debug, None)?;
+        } else {
+            // Each view is projected and added in a submission of its own,
+            // since the view uniform is written through the queue.
+            let blur = self.blur.get_or_insert_with(|| Blur::new(gpu));
+            blur.begin(gpu, &mut enc, size);
+            for view in views {
+                self.projector.record(
+                    &mut enc,
+                    slot,
+                    view,
+                    target,
+                    opts.filter,
+                    opts.debug,
+                    None,
+                )?;
+                blur.add(gpu, &mut enc, target)?;
+                gpu.queue.submit([enc.finish()]);
+                enc = gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("still"),
+                    });
+            }
+            blur.resolve(gpu, &mut enc, target, views.len() as u32)?;
         }
-        let image = match opts.depth {
-            Depth::Eight => {
+        let depth = match want {
+            Want::Image(d) => d,
+            Want::Yuv(_) => Depth::Linear,
+        };
+        let image = match (yuv_shape, depth) {
+            (Some(shape), _) => {
+                let converter = self.yuv.get_or_insert_with(|| YuvConverter::new(gpu));
+                let out = YuvConverter::buffer(gpu, &shape);
+                converter.record(gpu, &mut enc, target.texture_view(), &shape, &out)?;
+                gpu.queue.submit([enc.finish()]);
+                let data = yuv::read_buffer(gpu, &out, shape.bytes)?;
+                Rendered::Yuv(YuvImage { shape, data })
+            }
+            (None, Depth::Eight) => {
                 let output = match self.output.take() {
                     Some(t) if (t.width(), t.height()) == size => t,
                     _ => output_texture(gpu, size),
@@ -288,9 +433,9 @@ impl StillRenderer {
                 }
                 gpu.queue.submit([enc.finish()]);
                 let texels = readback::read_texture(gpu, output, 0)?;
-                rgb8(&texels)
+                Rendered::Image(rgb8(&texels))
             }
-            Depth::Sixteen | Depth::Linear => {
+            (None, Depth::Sixteen | Depth::Linear) => {
                 gpu.queue.submit([enc.finish()]);
                 let texels = readback::read_region(gpu, target.texture(), 0, size)?;
                 let linear = texels.f16_values();
@@ -303,17 +448,24 @@ impl StillRenderer {
                             .collect(),
                     )
                 };
-                Image {
+                Rendered::Image(Image {
                     width: size.0,
                     height: size.1,
                     pixels,
-                }
+                })
             }
         };
         if let Some(e) = pollster::block_on(scope.pop()) {
             return Err(RenderError::Device(e.to_string()));
         }
         Ok(image)
+    }
+}
+
+fn image(r: Rendered) -> Image {
+    match r {
+        Rendered::Image(i) => i,
+        Rendered::Yuv(_) => unreachable!("an image render reads back an image"),
     }
 }
 

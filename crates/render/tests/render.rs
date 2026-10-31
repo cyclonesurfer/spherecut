@@ -24,8 +24,8 @@ use spherecut_render::readback::{Texels, f16_to_f32, read_texture, round_f16};
 use spherecut_render::reference::{self, ImageF64};
 use spherecut_render::still::srgb_oetf;
 use spherecut_render::{
-    DebugMode, Depth, Encoder, Image, LinearTarget, Placement, Stereo, StillOptions, StillRenderer,
-    ViewParams,
+    DebugMode, Depth, Encoder, Framing, Image, LinearTarget, Pixels, Placement, Stereo,
+    StillOptions, StillRenderer, ViewParams,
 };
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
@@ -183,6 +183,71 @@ fn the_flat_pass_matches_the_reference() {
     let (p, _) = measure(&g, &reference::render_trilinear(&f, &any, OUT).unwrap());
     eprintln!("the flat pass against the projection: {p:.2} dB");
     assert!(p < 20.0, "the flat pass is {p:.2} dB from the projection");
+}
+
+/// The reframer's output frame (M2 plan section 7.1): a portrait frame
+/// in the middle of a landscape target, its lens's p.x = ±1 at the
+/// frame's sides, and the same lens past them at 40 %.
+#[test]
+fn the_output_frame_is_drawn_and_dimmed_past_its_edges() {
+    let f = nv12();
+    let v = view(20.0, -10.0, 0.0, lens(Projection::Rectilinear, 70.0));
+    let (w, h) = (f64::from(OUT.0), f64::from(OUT.1));
+    let fw = h * 9.0 / 16.0;
+    let rect = [(w - fw) / 2.0, 0.0, fw, h];
+    let framed = v.framed(Framing { rect, dim: 0.4 });
+    let g = render(&f, &framed, StillOptions::default());
+    // Measured 51.57 dB.
+    check(
+        "a framed view",
+        &g,
+        &reference::render_trilinear(&f, &framed, OUT).unwrap(),
+        48.0,
+    );
+    // A frame over the whole target dims nothing: it is the plain view.
+    let whole = v.framed(Framing {
+        rect: [0.0, 0.0, w, h],
+        dim: 0.4,
+    });
+    assert_eq!(
+        render(&f, &whole, StillOptions::default()),
+        render(&f, &v, StillOptions::default())
+    );
+    // In linear light, past the frame is the undimmed frame's light times
+    // 0.4, to within one step of the f16 the target holds (the pass rounds
+    // lin · 0.4 once; here the undimmed target's f16 is rounded again);
+    // inside, it is the same.
+    let linear = StillOptions {
+        depth: Depth::Linear,
+        ..StillOptions::default()
+    };
+    let lit = |dim| match render(&f, &v.framed(Framing { rect, dim }), linear).pixels {
+        Pixels::LinearF32(p) => p,
+        _ => unreachable!(),
+    };
+    let (dimmed, full) = (lit(0.4), lit(1.0));
+    let (mut inside, mut past) = (0, 0);
+    for (k, (d, l)) in dimmed.iter().zip(&full).enumerate() {
+        let x = (k / 3) as f64 % w + 0.5;
+        if (rect[0]..=rect[0] + rect[2]).contains(&x) {
+            assert_eq!(d, l, "pixel {} inside the frame", k / 3);
+            inside += 1;
+        } else {
+            let want = round_f16(f64::from(*l) * 0.4);
+            assert!(
+                (f64::from(*d) - want).abs() <= (want * 2f64.powi(-10)).max(2f64.powi(-24)),
+                "pixel {} past the frame: {d}, {want} wanted",
+                k / 3
+            );
+            past += 1;
+        }
+    }
+    assert!(inside > 0 && past > 0, "{inside} inside, {past} past");
+    // Control: the frame's FOV spans the frame, not the target, so the
+    // framed view is the plain one magnified.
+    let plain = reference::render_trilinear(&f, &v, OUT).unwrap();
+    let (p, _) = measure(&g, &plain);
+    assert!(p < 25.0, "the framed view is {p:.2} dB from the plain one");
 }
 
 #[test]

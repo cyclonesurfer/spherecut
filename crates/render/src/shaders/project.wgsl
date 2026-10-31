@@ -26,7 +26,15 @@ struct View {
     // 0 rectilinear, 1 fisheye (equidistant), 2 stereographic.
     proj: vec2<u32>,
     morph: f32,
-    _pad: f32,
+    // 0 the lens; 1 equirect, the whole sphere (M2 plan section 7.2).
+    out_kind: u32,
+    // The lens's frame in the target, in pixels: left, top, width,
+    // height. Past it the lens goes on, multiplied by `dim` (7.1).
+    frame: vec4<f32>,
+    dim: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 };
 
 struct Source {
@@ -77,12 +85,21 @@ struct Ray {
     theta: f32,
 };
 
-// sphere::pixel::to_lens, then Lens::unproject with the morph, then the
-// view's rotation.
+// sphere::pixel::to_lens over the frame, then Lens::unproject with the
+// morph, then the view's rotation; or, for equirect output,
+// sphere::equirect::to_dir of the pixel's place in the target.
 fn ray_at(px: vec2<f32>) -> Ray {
+    let rot = mat3x3<f32>(view.rot0.xyz, view.rot1.xyz, view.rot2.xyz);
+    if view.out_kind == 1u {
+        let lon = (px.x / view.size.x - 0.5) * TAU;
+        let lat = (0.5 - px.y / view.size.y) * PI;
+        let e = vec3<f32>(cos(lat) * sin(lon), sin(lat), -cos(lat) * cos(lon));
+        return Ray(normalize(rot * e), 0.0);
+    }
+    let f = view.frame;
     let p = vec2<f32>(
-        2.0 * px.x / view.size.x - 1.0,
-        (1.0 - 2.0 * px.y / view.size.y) * view.size.y / view.size.x,
+        2.0 * (px.x - f.x) / f.z - 1.0,
+        (1.0 - 2.0 * (px.y - f.y) / f.w) * f.w / f.z,
     );
     let rho = length(p);
     let theta = mix(
@@ -91,9 +108,16 @@ fn ray_at(px: vec2<f32>) -> Ray {
         view.morph,
     );
     let a = select(vec2<f32>(0.0), p / max(rho, 1e-30), rho > 1e-12);
-    let rot = mat3x3<f32>(view.rot0.xyz, view.rot1.xyz, view.rot2.xyz);
     let d = normalize(rot * vec3<f32>(sin(theta) * a, -cos(theta)));
     return Ray(d, theta);
+}
+
+// 1 inside the lens's frame (and for equirect), `dim` past it.
+fn dim_at(px: vec2<f32>) -> f32 {
+    let f = view.frame;
+    let inside = view.out_kind == 1u
+        || (px.x >= f.x && px.x <= f.x + f.z && px.y >= f.y && px.y <= f.y + f.w);
+    return select(view.dim, 1.0, inside);
 }
 
 fn dir_at(px: vec2<f32>) -> vec3<f32> {
@@ -181,7 +205,7 @@ fn fs_project(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let lin = select(srgb_eotf(rgb), rgb, src.transfer == 1u);
     // A fisheye past θ = π would show the sphere twice.
     let inside = r.theta <= PI + 1e-4 && all(suv >= src.cover.xy) && all(suv <= src.cover.zw);
-    return round_f16(vec4<f32>(select(vec3<f32>(0.0), lin, inside), 1.0));
+    return round_f16(vec4<f32>(select(vec3<f32>(0.0), lin * dim_at(frag.xy), inside), 1.0));
 }
 
 // The raw view (M1 slice 8): the picture as it is coded, flat over the

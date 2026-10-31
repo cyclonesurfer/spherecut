@@ -3,8 +3,8 @@
   "checks": {
     "crop_half": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -56,8 +56,8 @@
     },
     "layout_invariance": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -119,8 +119,8 @@
     },
     "lod_heatmap": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -167,8 +167,8 @@
     },
     "matrix_601_709": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -242,8 +242,8 @@
     },
     "nadir_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -294,8 +294,8 @@
     },
     "passthrough_exact": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -497,8 +497,8 @@
     },
     "range_full_vs_limited": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -589,8 +589,8 @@
     },
     "seam_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -642,8 +642,8 @@
     },
     "shimmer_fisheye360": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -700,8 +700,8 @@
     },
     "shimmer_tinyplanet": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -758,8 +758,8 @@
     },
     "siting_left_center": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -901,8 +901,8 @@
     },
     "tenbit_ramp": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -970,8 +970,8 @@
     },
     "tinyplanet_pole": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -1022,8 +1022,8 @@
     },
     "zenith_quad": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -1074,10 +1074,263 @@
     }
   },
   "images": {
+    "blur_pan": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "control_half_samples_fail": 1.0,
+        "control_half_samples_psnr_db": 51.1594,
+        "control_unblurred_psnr_db": 20.3087,
+        "cpu_max_channel": 0.0073,
+        "cpu_psnr_db": 56.7582,
+        "samples": 21.0,
+        "still_identical": 1.0
+      },
+      "png": "blur_pan.png",
+      "png_fnv64": "50627be2e5f8479f",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "0e2be80e98b1f2c5",
+      "thresholds": {
+        "control_half_samples_fail_min": 1.0,
+        "control_unblurred_psnr_db_max": 40.0,
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 53.75,
+        "other_driver": {
+          "max_lsb": 8.0,
+          "pixels_past_4_lsb_max": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels",
+        "samples_max": 64.0,
+        "samples_min": 2.0,
+        "still_identical_min": 1.0
+      },
+      "view": {
+        "blur": {
+          "frame_s": 0.08333333333333333,
+          "pan_deg_per_s": 360.0,
+          "samples": 21,
+          "shutter_s": 0.016666666666666666
+        },
+        "filter": "isotropic",
+        "hfov_deg": 90.0,
+        "pitch_deg": 0.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.0,
+          -0.23465740046771524,
+          0.0,
+          0.9720781369857746
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          144
+        ],
+        "yaw_deg": 27.1429
+      },
+      "wgpu": "30.0.1",
+      "what": "the grid, rectilinear 90°, panning right at 360°/s, blurred over a 180° shutter at 30 fps"
+    },
+    "equirect_identity": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "cpu_max_channel": 0.0062,
+        "cpu_psnr_db": 56.9886,
+        "flat_max_codes": 0.0
+      },
+      "png": "equirect_identity.png",
+      "png_fnv64": "98a26acc4f2ea8e0",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "0e2be80e98b1f2c5",
+      "thresholds": {
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 53.98,
+        "flat_max_codes_max": 2.0,
+        "other_driver": {
+          "max_lsb": 8.0,
+          "pixels_past_4_lsb_max": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "view": {
+        "filter": "isotropic",
+        "output": "equirect",
+        "pitch_deg": 0.0,
+        "quaternion_xyzw": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          512,
+          256
+        ],
+        "yaw_deg": 0.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the grid as equirect output at the identity: the source, resampled"
+    },
+    "equirect_roll30": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "centre_red": 1.0,
+        "cpu_max_channel": 0.0144,
+        "cpu_psnr_db": 52.0152
+      },
+      "png": "equirect_roll30.png",
+      "png_fnv64": "a64d9cbbc6a2de9f",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "0e2be80e98b1f2c5",
+      "thresholds": {
+        "centre_red_min": 1.0,
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 49.01,
+        "other_driver": {
+          "max_lsb": 8.0,
+          "pixels_past_4_lsb_max": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "view": {
+        "filter": "isotropic",
+        "output": "equirect",
+        "pitch_deg": 0.0,
+        "quaternion_xyzw": [
+          0.0,
+          0.0,
+          -0.25881904510252074,
+          0.9659258262890683
+        ],
+        "roll_deg": 30.0,
+        "size": [
+          512,
+          256
+        ],
+        "yaw_deg": 0.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the grid as equirect output rolled 30°"
+    },
+    "equirect_yaw90": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "control_wrong_way_max_codes": 255.0,
+        "cpu_max_channel": 0.0062,
+        "cpu_psnr_db": 56.9886,
+        "quarter_turn_max_codes": 0.0
+      },
+      "png": "equirect_yaw90.png",
+      "png_fnv64": "e6834d5545ff0cad",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "layout": "nv12",
+        "matrix": "bt709",
+        "pattern": "grid",
+        "range": "limited",
+        "siting": "left",
+        "size": [
+          1024,
+          512
+        ]
+      },
+      "source_fnv64": "0e2be80e98b1f2c5",
+      "thresholds": {
+        "control_wrong_way_max_codes_over": 50.0,
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 53.98,
+        "other_driver": {
+          "max_lsb": 8.0,
+          "pixels_past_4_lsb_max": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "quarter_turn_max_codes_max": 2.0,
+        "same_driver": "identical pixels"
+      },
+      "view": {
+        "filter": "isotropic",
+        "output": "equirect",
+        "pitch_deg": 0.0,
+        "quaternion_xyzw": [
+          0.0,
+          -0.7071067811865475,
+          0.0,
+          0.7071067811865476
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          512,
+          256
+        ],
+        "yaw_deg": 90.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the grid as equirect output turned 90° right: the identity's columns a quarter on"
+    },
     "fisheye_180": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -1137,8 +1390,8 @@
     },
     "fisheye_360": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -1200,8 +1453,8 @@
     },
     "morph_half": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -1260,8 +1513,8 @@
     },
     "rect_forward": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -1318,8 +1571,8 @@
     },
     "rect_ypr": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
@@ -1380,8 +1633,8 @@
     },
     "stereo_tinyplanet": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "df4a6680f5",
-      "date": "2026-10-28",
+      "commit": "4e77c6866d",
+      "date": "2026-10-31",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
