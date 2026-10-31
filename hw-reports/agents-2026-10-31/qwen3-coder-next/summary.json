@@ -1,0 +1,58 @@
+[
+ {
+  "model": "qwen3-coder-next",
+  "task": "marker",
+  "vision": false,
+  "ok": false,
+  "why": "no answer",
+  "steps": 16,
+  "calls": 16,
+  "errors": 1,
+  "images": 14,
+  "prompt_tokens": 9261,
+  "completion_tokens": 1007,
+  "seconds": 44.9
+ },
+ {
+  "model": "qwen3-coder-next",
+  "task": "check-grid-hevc8-30-untagged",
+  "vision": false,
+  "ok": false,
+  "why": "no answer",
+  "steps": 16,
+  "calls": 16,
+  "errors": 0,
+  "images": 0,
+  "prompt_tokens": 9434,
+  "completion_tokens": 2775,
+  "seconds": 74.9
+ },
+ {
+  "model": "qwen3-coder-next",
+  "task": "check-grid-hevc8-30",
+  "vision": false,
+  "ok": true,
+  "why": "pass True (truth True), rules [] (truth [])",
+  "steps": 2,
+  "calls": 1,
+  "errors": 0,
+  "images": 0,
+  "prompt_tokens": 4520,
+  "completion_tokens": 133,
+  "seconds": 5.3
+ },
+ {
+  "model": "qwen3-coder-next",
+  "task": "stutter",
+  "vision": false,
+  "ok": true,
+  "why": "{'gaps': 2, 'dups': 2, 'repeated_pictures': 10} (truth {'gaps': 2, 'dups': 2, 'repeated_pictures': 10})",
+  "steps": 5,
+  "calls": 4,
+  "errors": 0,
+  "images": 0,
+  "prompt_tokens": 11760,
+  "completion_tokens": 407,
+  "seconds": 26.5
+ }
+]

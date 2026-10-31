@@ -1,0 +1,58 @@
+[
+ {
+  "model": "gemma-4",
+  "task": "marker",
+  "vision": true,
+  "ok": false,
+  "why": "no answer",
+  "steps": 1,
+  "calls": 0,
+  "errors": 0,
+  "images": 0,
+  "prompt_tokens": 0,
+  "completion_tokens": 0,
+  "seconds": 0.0
+ },
+ {
+  "model": "gemma-4",
+  "task": "check-grid-hevc8-30-untagged",
+  "vision": true,
+  "ok": false,
+  "why": "no answer",
+  "steps": 1,
+  "calls": 0,
+  "errors": 0,
+  "images": 0,
+  "prompt_tokens": 0,
+  "completion_tokens": 0,
+  "seconds": 0.0
+ },
+ {
+  "model": "gemma-4",
+  "task": "check-grid-hevc8-30",
+  "vision": true,
+  "ok": false,
+  "why": "no answer",
+  "steps": 1,
+  "calls": 0,
+  "errors": 0,
+  "images": 0,
+  "prompt_tokens": 0,
+  "completion_tokens": 0,
+  "seconds": 0.1
+ },
+ {
+  "model": "gemma-4",
+  "task": "stutter",
+  "vision": true,
+  "ok": false,
+  "why": "no answer",
+  "steps": 1,
+  "calls": 0,
+  "errors": 0,
+  "images": 0,
+  "prompt_tokens": 0,
+  "completion_tokens": 0,
+  "seconds": 0.0
+ }
+]
