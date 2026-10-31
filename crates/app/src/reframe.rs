@@ -11,10 +11,9 @@ use std::time::{Duration, Instant};
 use spherecut_core::Time;
 use spherecut_core::project::file::{self, MediaStatus};
 use spherecut_core::project::{
-    Edit, Fingerprint, InitialView, KeyId, Media, MediaId, MediaVideo, Orientation, Output,
-    Project, ViewAnim,
+    Edit, InitialView, KeyId, Media, Orientation, Output, Project, ViewAnim,
 };
-use spherecut_media::backend::{SeekMode, Timing, VideoStreamInfo};
+use spherecut_media::backend::SeekMode;
 use spherecut_media::doctor::Severity;
 use spherecut_playback::{PlaySpan, PlayState};
 use spherecut_render::Framing;
@@ -248,33 +247,6 @@ pub fn frame_rect(size: (u32, u32), out: (u32, u32)) -> [f64; 4] {
     [((w - fw) / 2.0).round(), ((h - fh) / 2.0).round(), fw, fh]
 }
 
-/// The media of the video at `path`, whose first stream opened as
-/// `info`, for its untitled project. On a worker: it reads the file's
-/// size and start.
-fn untitled_media(path: &Path, info: &VideoStreamInfo) -> Result<Media, String> {
-    let rate = match info.timing {
-        Timing::Constant(r) | Timing::Variable { average: Some(r) } => r,
-        Timing::Variable { average: None } => return Err("its frame rate isn't known".into()),
-    };
-    let duration = info.duration.ok_or("its length isn't known")?;
-    let bytes = std::fs::metadata(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?
-        .len();
-    let head = file::head_hash(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(Media {
-        id: MediaId::NEW,
-        path: std::path::absolute(path).map_err(|e| e.to_string())?,
-        fingerprint: Fingerprint { bytes, head },
-        video: MediaVideo {
-            stream: u32::try_from(info.index).map_err(|e| e.to_string())?,
-            width: info.size.0,
-            height: info.size.1,
-            rate,
-            duration,
-        },
-    })
-}
-
 impl AppState {
     /// Open a video, which makes an untitled project of it, or a project
     /// file, asking first if the open project has unsaved changes.
@@ -473,7 +445,13 @@ impl AppState {
                 if self.raw_view() {
                     return;
                 }
-                let job = Job::spawn("untitled project", move || untitled_media(&path, &info));
+                let job = Job::spawn("untitled project", move || {
+                    spherecut_media::project::project_media(
+                        spherecut_media::Source::path(&path),
+                        &path,
+                        &info,
+                    )
+                });
                 self.reframe.making = Some(Making::Fingerprint(job));
             }
             Some(Making::Fingerprint(job)) => match job.poll() {

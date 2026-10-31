@@ -18,6 +18,7 @@
 pub mod anim;
 pub mod edit;
 pub mod file;
+pub mod folder;
 pub mod history;
 mod validate;
 
@@ -34,6 +35,9 @@ pub use anim::{
     OrientationError, Side, Target, View, ViewAnim, follow_spin,
 };
 pub use edit::{AnyKey, AnyKeys, AnyValue, Applied, Edit, EditError, PathPoint};
+pub use folder::{
+    By, FolderError, Holder, Identity, Kept, Loaded, ProjectFolder, ProjectLock, Saved,
+};
 pub use history::{Gesture, History, Origin, Step};
 pub use validate::{Code, Problem};
 
@@ -371,6 +375,15 @@ pub struct InitialView {
     pub fov_deg: f64,
     pub projection: Projection,
 }
+
+/// The view an untitled project starts with: the viewer's own default,
+/// forward and level through a 100° rectilinear lens. The GUI and A2's
+/// `project` create make the same project of a clip.
+pub const INITIAL_VIEW: InitialView = InitialView {
+    orientation: Orientation::IDENTITY,
+    fov_deg: 100.0,
+    projection: Projection::Rectilinear,
+};
 
 impl Project {
     /// The untitled project opening `media` makes (M2 plan section 3.2):

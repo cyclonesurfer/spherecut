@@ -16,7 +16,7 @@ use spherecut_core::project::{
 };
 use spherecut_core::{FrameRate, Rational, Rounding, Time};
 use spherecut_sphere::orient::Ypr;
-use spherecut_sphere::perspective::{Lens, LensShape, MIN_HFOV_DEG, Projection};
+use spherecut_sphere::perspective::{Lens, LensShape, MIN_HFOV_DEG};
 
 /// The widest field of view a key holds, in degrees (D50: the renderer
 /// caps each projection at its own).
@@ -111,11 +111,7 @@ impl ViewValues {
 
 /// The viewer's own default view, forward and level through a 100°
 /// rectilinear lens (an untitled project starts with the view on screen).
-pub const INITIAL_VIEW: InitialView = InitialView {
-    orientation: Orientation::IDENTITY,
-    fov_deg: 100.0,
-    projection: Projection::Rectilinear,
-};
+pub use spherecut_core::project::INITIAL_VIEW;
 
 /// The open project.
 #[derive(Debug)]
@@ -920,6 +916,7 @@ fn moved<V: Clone>(
 mod tests {
     use spherecut_core::project::{Fingerprint, MediaId, MediaVideo};
     use spherecut_sphere::orient::Ypr;
+    use spherecut_sphere::perspective::Projection;
 
     use super::*;
 

@@ -171,6 +171,32 @@ impl History {
         self.cursor
     }
 
+    /// Drop the oldest steps until the history, written as JSON, takes at
+    /// most `bytes`: how many went. An undone step goes with every step
+    /// before it, so redo never skips one.
+    pub fn keep_bytes(&mut self, bytes: usize) -> usize {
+        // The envelope around the steps: `{"steps":[],"cursor":n,"limit":n}`.
+        const FRAME: usize = 64;
+        let sizes: Vec<usize> = self
+            .steps
+            .iter()
+            .map(|s| serde_json::to_string(s).map_or(usize::MAX, |t| t.len() + 1))
+            .collect();
+        let mut total = sizes.iter().fold(FRAME, |a, &b| a.saturating_add(b));
+        let mut drop = 0;
+        while total > bytes && drop < sizes.len() {
+            total -= sizes[drop];
+            drop += 1;
+        }
+        if drop > self.cursor {
+            // Past the done steps: the undone ones can't be redone in order.
+            drop = self.steps.len();
+        }
+        self.steps.drain(..drop);
+        self.cursor -= drop.min(self.cursor);
+        drop
+    }
+
     /// End a gesture (a drag) as one step: `project` goes back to how it
     /// was when the gesture started, then `edits` (the whole change, start
     /// to end) are recorded. No edits, no step.
