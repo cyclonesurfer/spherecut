@@ -29,7 +29,9 @@ pub mod warning;
 pub use check::Checked;
 pub use encoder::{EncoderKind, EncoderSetup};
 pub use error::{ExportError, Stage};
-pub use job::{AudioReport, DecodeReport, Decoder, Export, ExportJob, Fallback, Progress, Report};
+pub use job::{
+    AudioReport, DecodeReport, Decoder, Export, ExportJob, Fallback, Progress, Report, StageTimes,
+};
 pub use plan::FramePlan;
 pub use preset::Preset;
 pub use warning::Warning;

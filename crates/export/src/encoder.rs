@@ -23,6 +23,7 @@ pub mod quality_level {
     pub const VALID: u32 = 1;
     pub const BALANCED: u32 = 1 << 1;
     pub const QUALITY: u32 = 2 << 1;
+    pub const HIGH_QUALITY: u32 = 3 << 1;
     pub const PRE_ENCODE: u32 = 1 << 3;
     pub const VBAQ: u32 = 1 << 4;
 }
@@ -231,6 +232,17 @@ impl EncoderSetup {
                 }
                 "compression_level" => *v = quality_level::VALID.to_string(),
                 _ => {}
+            }
+        }
+        self
+    }
+
+    /// The same encoder at Mesa's quality level `level`
+    /// ([`quality_level`]); a software encoder is left as it is.
+    pub fn with_vaapi_level(mut self, level: u32) -> EncoderSetup {
+        for (k, v) in &mut self.options {
+            if k == "compression_level" {
+                *v = level.to_string();
             }
         }
         self
@@ -474,5 +486,9 @@ mod tests {
             ),
             soft
         );
+        // A level given is the one used; software has none to set.
+        let s = s.with_vaapi_level(quality_level::VALID | quality_level::QUALITY);
+        assert_eq!(s.option("compression_level"), Some("5"));
+        assert_eq!(soft.clone().with_vaapi_level(5), soft);
     }
 }

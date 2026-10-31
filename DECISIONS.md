@@ -7677,6 +7677,88 @@ angle-rate Jacobian, singular at the poles); or M9's tracker output
 needs smoothing, for which an approximating C² spline suits better than
 one through every key.
 
+## D51. `spherecut render`: the export from the command line, one envelope a line
+
+*2026-10-31, M2 slice M2.5. From `docs/design/m2-plan.md` section 9 and
+its amendment 2 (items 5, 25, 32, 40). Updates D27. `docs/cli-json.md`
+is the contract, with a test for every field; this says why it has the
+shape it has, and where it differs from the plan.*
+
+What:
+
+- **`spherecut render PROJECT -o OUT`** exports the project's one
+  sequence through the export crate's handle (D52), the same one the
+  app's export window and A2 will drive. Each flag overrides one stored
+  setting for this run and is never saved: the plan's `--preset`,
+  `--codec`, `--encoder`, `--quality`, `--range`, `--draft`, `--audio`,
+  `--motion-blur` and `--overwrite`, and three more: `--eight-bit`
+  (section 8.3's forced 8 bits), `--decoder auto|software` (item 25)
+  and `--adapter`, as `frame` has them. `--preset` and `--range` go
+  through the project's own edits, so its rules (a preset is a listed
+  size, a trim has frames) hold for flags as for the window.
+- **The run, in order**: the command line (exit 2); the output, refused
+  before any work if something is there and `--overwrite` isn't given,
+  and a directory, pipe or device either way (exit 1, as `frame`); the
+  project, whose load errors keep their codes (`not_found`,
+  `not_project`, `malformed_project`, `invalid_project`,
+  `newer_schema`, exit 1), and its clip's media (`media_offline` with
+  the path, exit 1; a file whose size or head changed is the warning
+  `media_changed`); the flags; the SIGINT handler and the GPU (`no_gpu`,
+  exit 3); the export's own refusals; then the export.
+- **Every line under `--json` is a whole D27 envelope** of schema
+  `spherecut.render/1`, and `result.event` names it: `start` once,
+  `progress` at most once a second, and `result` last. A run that fails
+  ends instead with the error envelope (`ok` false, no `result`), as
+  every command's failure does, so the last line is always the run's
+  document. The plan had `event` and the fields at the top level of
+  each line; keeping D27's envelope means every line parses as any
+  other command's document, and a reader that wants only the outcome
+  needs no special case. `frames_done` never goes down, even when a
+  hardware encoder that failed in its first second starts over in
+  software: the counter is the most muxed by any try.
+- **Exit status** as `frame`'s (D27): 0; 1 for a failed export, a
+  failed check, a project that won't load and a disk that fills; 2 for
+  usage; 3 for a GPU or encoder the run needs and hasn't (`no_gpu`,
+  `no_encoder`, and `--encoder vaapi` failing with `hw_unavailable`,
+  `hw_unsupported` or `hw_failed`, while `auto` goes on in software and
+  says so in `fallback`); 4 for Ctrl+C (`cancelled`). A range outside
+  the sequence is `out_of_range` (exit 1), as `frame`'s `--time` past
+  the end is, where the plan said usage: the range parses, it just
+  isn't in this project; a range that doesn't parse is usage (2).
+- **New codes** (D27's list, each with a row in `cli-json.md`): the
+  export's failures by stage (`decode_failed`, `render_failed`,
+  `encode_failed`, `mux_failed`, `metadata_failed`, `check_failed`,
+  `io_error`), `cannot_export`, `no_encoder`, `no_space`, the project
+  file's, and warnings with codes (`media_changed`, `h264_level_6`,
+  `audio_encoded`, `audio_ends_early`, `no_audio`, `ambix_not_turned`,
+  `free_space_unknown`). A code may have digits after its first letter
+  (`h264_level_6`).
+- **Nothing is left at `-o`** by Ctrl+C, a failure, a panic on any
+  thread (the hook sets a flag the loop reads, and the export is
+  cancelled, exit 1) or a full disk. A write the disk refuses (`ENOSPC`,
+  `EFBIG`, `EDQUOT`, `EIO`, `EROFS`) in a packet, the MP4's header or
+  trailer, or the last pass is `EncodeError::Write`, the file's error
+  (`io_error` with the output's path), and never an encoder's fault, so
+  it never sends `auto` on to software.
+- **Tests** (`crates/cli/tests/render.rs`, on lavapipe): the lines in
+  order with their fields, every field of every line against the
+  document both ways, a file in the way with and without `--overwrite`,
+  each project failure, ranges without frames, VA-API without a device
+  (exit 3) and `auto` falling back, panics on the main and a worker
+  thread, Ctrl+C after the first progress line (exit 4 within 2 s), and
+  a real full disk: the render runs in a user and mount namespace of
+  its own (`unshare --user --map-root-user --mount`) on a 128 MB tmpfs,
+  which the test fills through `/proc/<pid>/root` after the first
+  progress line, and only the filler is left. Where the box doesn't let
+  a user mount, it says so and the export's own test of a disk that
+  fills part way (an injected `ENOSPC` at frame 5) still runs.
+
+Why not `RLIMIT_FSIZE` for the full disk: lavapipe keeps its heap in a
+memfd it grows with `ftruncate` (about 64 MiB and up), so a file size
+limit below that kills the process with `SIGBUS` before the export
+writes its file. A tmpfs of the test's own fills only the output's
+folder.
+
 ## D52. The export pipeline: presets, encoders, the MP4 in one last pass, audio cut to the sample, parity floors and the job handle
 
 *2026-10-31, M2 slice M2.4. From `docs/design/m2-plan.md` section 8,

@@ -784,6 +784,7 @@ before the last have `ok` true and no warnings.
 | `bytes` | integer | The file's size |
 | `blur_capped` | integer | Frames whose motion blur needed more views than the cap of 64, and got 64 |
 | `checks` | array | The checks the file passed before it was put in place, in order, each `name` and `found` (for people): `probe` (it opens), `layout` (the moov before the media data), `codec`, `size`, `frames`, `duration` (within a frame), `rate`, then `st3d`, `sv3d` and `v1` for a 360 export or `spherical` (none) for a flat one, then `audio` and, for ambiX, `sa3d` |
+| `stages` | object | Where the time went, in seconds of each stage's work over the try that made the file: `decode`, `render` (the upload and the draw), `readback` (the planes copied back from the GPU), `encode` (and the audio muxed between frames) and `finish` (the encoder's flush, the last pass and the checks). Decode, render and encode run at once, so the busiest of them sets the pace |
 | `elapsed` | number | Seconds from start to finish |
 
 `fallback`, `decode.fallback` and `decode_fallback` are absent when

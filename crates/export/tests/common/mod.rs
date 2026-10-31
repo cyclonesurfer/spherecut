@@ -206,7 +206,11 @@ pub fn export(project: &Project, out: &Path) -> Report {
 
 /// The export of `project` to `out`, as it ended.
 pub fn try_export(project: &Project, out: &Path) -> Result<Report, ExportError> {
-    let job = ExportJob::new(project.clone(), out, gpu().clone());
+    run(ExportJob::new(project.clone(), out, gpu().clone()))
+}
+
+/// `job`, run to its end.
+pub fn run(job: ExportJob) -> Result<Report, ExportError> {
     let mut e = Export::start(job)?;
     let report = e
         .wait(Duration::from_secs(1800))
@@ -284,7 +288,17 @@ pub fn references(
     yuv: YuvLayout,
     which: &[u64],
 ) -> Vec<Vec<f64>> {
-    let gpu = gpu();
+    references_on(gpu(), project, source, yuv, which)
+}
+
+/// [`references`] rendered on `gpu`.
+pub fn references_on(
+    gpu: &Gpu,
+    project: &Project,
+    source: &[Arc<VideoFrame>],
+    yuv: YuvLayout,
+    which: &[u64],
+) -> Vec<Vec<f64>> {
     let sequence = project.the_sequence();
     let clip = project.the_clip();
     let plan = FramePlan::new(clip.source, sequence.rate).unwrap();

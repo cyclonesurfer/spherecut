@@ -44,6 +44,10 @@ pub struct ExportJob {
     pub draft: bool,
     /// Where the source is decoded (amendment 2 item 25).
     pub decoder: Decoder,
+    /// Mesa's quality level for a VA-API encoder
+    /// ([`quality_level`](crate::encoder::quality_level)) in place of the
+    /// quality's: for the benchmark that measured them.
+    pub vaapi_level: Option<u32>,
     /// The device to render on: the app's, whose submissions wait at its
     /// gate while the UI presents (D41), or a headless one.
     pub gpu: Gpu,
@@ -96,6 +100,7 @@ impl ExportJob {
             eight_bit: false,
             draft: false,
             decoder: Decoder::Auto,
+            vaapi_level: None,
             gpu,
         }
     }
@@ -155,7 +160,28 @@ pub struct Report {
     pub warnings: Vec<Warning>,
     /// The checks the file passed before it was put in place (section 9).
     pub checks: Vec<Checked>,
+    /// Where the time went.
+    pub stages: StageTimes,
     pub elapsed: Duration,
+}
+
+/// Each stage's busy time over the try that made the file. The decode,
+/// render and encode stages run at once on threads of their own, so the
+/// busiest sets the pace; the finish comes after them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StageTimes {
+    /// Seeking to the trim's start and decoding the frames.
+    pub decode: Duration,
+    /// Uploading each frame and drawing its views, until the GPU had
+    /// drawn them.
+    pub render: Duration,
+    /// Copying each frame's planes back from the GPU.
+    pub readback: Duration,
+    /// Encoding and muxing the frames, and the audio between them.
+    pub encode: Duration,
+    /// After the last frame: the encoder's flush, the last pass that
+    /// writes the finished file, and the checks.
+    pub finish: Duration,
 }
 
 /// An export's audio track.

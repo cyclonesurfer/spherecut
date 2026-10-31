@@ -34,7 +34,8 @@ use clap::{Args, ValueEnum};
 use spherecut_agent::still::{Failure, about, failure, number, seconds};
 use spherecut_cli::contract::{
     self, Envelope, Exit, FallbackInfo, Finishing, RenderAudio, RenderCheck, RenderDecode,
-    RenderEvent, RenderProgress, RenderResult, RenderStart, Size, TimeRange, Warning, codes,
+    RenderEvent, RenderProgress, RenderResult, RenderStages, RenderStart, Size, TimeRange, Warning,
+    codes,
 };
 use spherecut_core::TimeSpec;
 use spherecut_core::project::file::{self, FileError, MediaStatus};
@@ -669,6 +670,13 @@ fn result(output: &Path, r: &Report) -> RenderResult {
                 found: c.found.clone(),
             })
             .collect(),
+        stages: RenderStages {
+            decode: r.stages.decode.as_secs_f64(),
+            render: r.stages.render.as_secs_f64(),
+            readback: r.stages.readback.as_secs_f64(),
+            encode: r.stages.encode.as_secs_f64(),
+            finish: r.stages.finish.as_secs_f64(),
+        },
         elapsed: r.elapsed.as_secs_f64(),
     }
 }

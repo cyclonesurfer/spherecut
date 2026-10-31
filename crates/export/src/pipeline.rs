@@ -10,9 +10,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use spherecut_core::brand::APP_NAME;
 use spherecut_core::cancel::{StopSource, StopToken};
@@ -39,7 +40,8 @@ use crate::check::{self, Expected, ExpectedAudio};
 use crate::encoder::{EncoderKind, EncoderSetup};
 use crate::error::{ExportError, Stage};
 use crate::job::{
-    AudioReport, DecodeReport, Decoder, Encoders, ExportJob, Fallback, Report, Shared, panic_text,
+    AudioReport, DecodeReport, Decoder, Encoders, ExportJob, Fallback, Report, Shared, StageTimes,
+    panic_text,
 };
 use crate::plan::FramePlan;
 use crate::preset::Preset;
@@ -157,10 +159,14 @@ pub(crate) fn run(
     };
     let setup_of = |kind| {
         let setup = EncoderSetup::of(kind, s.codec, s.quality, preset, plan.rate(), ten_bit);
-        if job.draft {
+        let setup = if job.draft {
             setup.draft(preset.size(), size)
         } else {
             setup
+        };
+        match job.vaapi_level {
+            Some(level) => setup.with_vaapi_level(level),
+            None => setup,
         }
     };
     if s.codec == Codec::H264 && size.0 > H264_HARDWARE_WIDTH {
@@ -269,6 +275,7 @@ pub(crate) fn run(
         blur_capped,
         feed,
         decode,
+        busy,
     } = attempt;
     let decode = DecodeReport {
         path: decode.path,
@@ -307,6 +314,7 @@ pub(crate) fn run(
         shared.finishing(done, total);
         !stop.is_shut_down()
     };
+    let finishing = Instant::now();
     let tmp = writer
         .finish_temp(&edits, &finish, &mut progress)
         .map_err(|e| match e {
@@ -347,6 +355,10 @@ pub(crate) fn run(
     if stop.is_shut_down() {
         return Err(ExportError::Cancelled);
     }
+    let stages = StageTimes {
+        finish: finishing.elapsed(),
+        ..busy
+    };
     let persisted = if job.overwrite {
         tmp.persist_replace()
     } else {
@@ -385,6 +397,7 @@ pub(crate) fn run(
         blur_capped,
         warnings,
         checks,
+        stages,
         elapsed: shared.elapsed(),
     })
 }
@@ -448,6 +461,44 @@ struct Attempt {
     blur_capped: u64,
     feed: Option<Feed>,
     decode: Seen,
+    busy: StageTimes,
+}
+
+/// Each stage's busy time this try, in nanoseconds, added to by its
+/// thread as it goes.
+#[derive(Debug, Default)]
+struct Busy {
+    decode: AtomicU64,
+    render: AtomicU64,
+    readback: AtomicU64,
+    encode: AtomicU64,
+}
+
+impl Busy {
+    /// `f`, its time added to `stage`.
+    fn time<T>(stage: &AtomicU64, f: impl FnOnce() -> T) -> T {
+        let since = Instant::now();
+        let t = f();
+        Busy::add(stage, since.elapsed());
+        t
+    }
+
+    fn add(stage: &AtomicU64, d: Duration) {
+        let nanos = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+        stage.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    /// The times so far, with no finish.
+    fn times(&self) -> StageTimes {
+        let get = |a: &AtomicU64| Duration::from_nanos(a.load(Ordering::Relaxed));
+        StageTimes {
+            decode: get(&self.decode),
+            render: get(&self.render),
+            readback: get(&self.readback),
+            encode: get(&self.encode),
+            finish: Duration::ZERO,
+        }
+    }
 }
 
 /// How a try failed.
@@ -517,15 +568,16 @@ fn once(o: Once<'_>) -> Result<Attempt, Tried> {
     };
     let (held_tx, held_rx) = mpsc::sync_channel(DECODED_AHEAD);
     let (yuv_tx, yuv_rx) = mpsc::sync_channel(RENDERED_AHEAD);
+    let busy = Arc::new(Busy::default());
     let decoding = spawn("export-decode", {
-        let token = token.clone();
-        move || decode(dec, plan, held_tx, token)
+        let (token, busy) = (token.clone(), busy.clone());
+        move || decode(dec, plan, held_tx, token, &busy)
     })
     .map_err(Tried::Late)?;
     let rendering = spawn("export-render", {
         let gpu = job.gpu.clone();
-        let token = token.clone();
-        move || render(gpu, look, plan, held_rx, yuv_tx, token)
+        let (token, busy) = (token.clone(), busy.clone());
+        move || render(gpu, look, plan, held_rx, yuv_tx, token, &busy)
     })
     .map_err(Tried::Late)?;
     let encoded = encode(Encode {
@@ -539,6 +591,7 @@ fn once(o: Once<'_>) -> Result<Attempt, Tried> {
         shared,
         stop,
         token: &token,
+        busy: &busy,
     });
     let (decoded, seen) = decoding.join().unwrap_or_else(|p| {
         let e = ExportError::failed(Stage::Decode, None, panic_text(&*p));
@@ -570,6 +623,7 @@ fn once(o: Once<'_>) -> Result<Attempt, Tried> {
         blur_capped,
         feed,
         decode: seen,
+        busy: busy.times(),
     })
 }
 
@@ -739,9 +793,10 @@ fn decode(
     plan: FramePlan,
     tx: SyncSender<Held>,
     token: StopToken,
+    busy: &Busy,
 ) -> (Ended, Seen) {
     let mut seen = Seen::default();
-    let ended = decode_frames(dec, plan, tx, token, &mut seen);
+    let ended = decode_frames(dec, plan, tx, token, &mut seen, busy);
     (ended, seen)
 }
 
@@ -754,6 +809,7 @@ fn decode_frames(
     tx: SyncSender<Held>,
     token: StopToken,
     seen: &mut Seen,
+    busy: &Busy,
 ) -> Ended {
     let fail = |n: u64, message: String| {
         Ended::Failed(ExportError::failed(
@@ -766,7 +822,8 @@ fn decode_frames(
     let Ok(start) = plan.source_time(0) else {
         return fail(0, "the trim's start doesn't fit".into());
     };
-    let mut cur = match dec.seek(start, SeekMode::Exact, &token) {
+    let sought = Busy::time(&busy.decode, || dec.seek(start, SeekMode::Exact, &token));
+    let mut cur = match sought {
         Ok(SeekOutcome::Stopped) => return Ended::Stopped,
         Ok(SeekOutcome::Frame {
             frame, exactness, ..
@@ -800,7 +857,7 @@ fn decode_frames(
             let next = match ahead.take() {
                 Some(f) => f,
                 None if ended => break,
-                None => match dec.next_frame(&token) {
+                None => match Busy::time(&busy.decode, || dec.next_frame(&token)) {
                     Ok(NextFrame::Frame(f)) => {
                         seen.saw(&f);
                         f
@@ -875,6 +932,7 @@ fn render(
     rx: Receiver<Held>,
     tx: SyncSender<Rendered>,
     token: StopToken,
+    busy: &Busy,
 ) -> Ended {
     let mut renderer = StillRenderer::new(&gpu);
     let frame_s = plan.rate().frame_duration().to_secs_f64();
@@ -882,6 +940,7 @@ fn render(
         if token.is_stopped() {
             return Ended::Stopped;
         }
+        let since = Instant::now();
         let t = plan.source_time(held.n).map_or(f64::NAN, Time::to_secs_f64);
         let views = frame_views(
             &look.anim,
@@ -908,6 +967,9 @@ fn render(
                 ));
             }
         };
+        let readback = renderer.last_readback();
+        Busy::add(&busy.render, since.elapsed().saturating_sub(readback));
+        Busy::add(&busy.readback, readback);
         let rendered = Rendered {
             n: held.n,
             image,
@@ -934,6 +996,7 @@ struct Encode<'a> {
     stop: &'a StopSource,
     /// This try's.
     token: &'a StopToken,
+    busy: &'a Busy,
 }
 
 /// How the encode stage failed.
@@ -972,6 +1035,7 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
         shared,
         stop,
         token,
+        busy,
     } = e;
     let settings = VideoSettings {
         encoder: setup.name.into(),
@@ -991,8 +1055,9 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
         negative_cts_offsets: true,
     };
     let track = feed.as_deref().map(Feed::track);
-    let (created, log) =
-        capture_ffmpeg_log(|| Mp4Writer::create_with(&job.output, &settings, track, &mux));
+    let (created, log) = Busy::time(&busy.encode, || {
+        capture_ffmpeg_log(|| Mp4Writer::create_with(&job.output, &settings, track, &mux))
+    });
     let mut writer = created.map_err(|e| {
         let code = match &e {
             EncodeError::NoEncoder(_) => Some("hw_unavailable"),
@@ -1054,6 +1119,7 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
                 frames: next,
             });
         }
+        let since = Instant::now();
         let pushed = writer.push_video_strided(&planes);
         #[cfg(test)]
         let pushed = pushed.and_then(|()| fault::disk(next));
@@ -1074,6 +1140,7 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
             .sequence_time(next)
             .map_err(|e| ExportError::failed(Stage::Encode, at, e.to_string()))?;
         audio_to(&mut writer, Some(end))?;
+        Busy::add(&busy.encode, since.elapsed());
         shared.muxed(next);
     }
     if next < plan.count() {
@@ -1234,7 +1301,7 @@ mod tests {
     fn held(path: &Path, trim: Range, rate: FrameRate) -> Result<Vec<(u64, Time)>, ExportError> {
         let plan = FramePlan::new(trim, rate).unwrap();
         let (tx, rx) = mpsc::sync_channel(plan.count() as usize);
-        let (ended, seen) = decode(open(path), plan, tx, StopToken::never());
+        let (ended, seen) = decode(open(path), plan, tx, StopToken::never(), &Busy::default());
         assert_eq!(seen, Seen::default(), "decoded in software");
         let got = rx.try_iter().map(|h| (h.n, h.frame.time)).collect();
         match ended {
@@ -1504,6 +1571,29 @@ mod tests {
         let f = r.fallback.unwrap();
         assert_eq!((f.from, f.code), ("h264_vaapi", "hw_unavailable"));
         assert!(f.reason.contains("no VA-API device"), "{}", f.reason);
+    }
+
+    #[test]
+    fn the_report_says_where_the_time_went() {
+        let dir = TempDir::new("stages");
+        let job = job(&dir.0, 15);
+        let r = export_through(&job, vec![EncoderKind::Software], None)
+            .0
+            .unwrap();
+        let s = r.stages;
+        for (stage, busy) in [
+            ("decode", s.decode),
+            ("render", s.render),
+            ("readback", s.readback),
+            ("encode", s.encode),
+            ("finish", s.finish),
+        ] {
+            assert!(busy > Duration::ZERO, "{stage} took no time: {s:?}");
+            // Each stage is one thread's, so none is busy for longer than
+            // the export took.
+            assert!(busy <= r.elapsed, "{stage}: {s:?} in {:?}", r.elapsed);
+        }
+        assert!(s.render + s.readback <= r.elapsed, "{s:?}");
     }
 
     #[test]

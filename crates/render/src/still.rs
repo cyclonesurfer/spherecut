@@ -1,6 +1,8 @@
 //! One frame, headless (M1 plan section 4.5): upload, project, encode and
 //! read back. `spherecut frame` and the goldens use it.
 
+use std::time::{Duration, Instant};
+
 use spherecut_core::video::VideoPlanes;
 
 use crate::blur::Blur;
@@ -177,6 +179,8 @@ pub struct StillRenderer {
     slot: Option<GpuFrame>,
     target: Option<LinearTarget>,
     output: Option<wgpu::Texture>,
+    /// The last [`render_yuv`](Self::render_yuv)'s read back.
+    readback: Duration,
 }
 
 impl StillRenderer {
@@ -193,7 +197,15 @@ impl StillRenderer {
             slot: None,
             target: None,
             output: None,
+            readback: Duration::ZERO,
         }
+    }
+
+    /// How long the last [`render_yuv`](Self::render_yuv) took to copy
+    /// its planes back once the GPU had drawn them: the rest of the call
+    /// is the upload and the draw.
+    pub fn last_readback(&self) -> Duration {
+        self.readback
     }
 
     pub fn projector(&self) -> &Projector {
@@ -417,7 +429,14 @@ impl StillRenderer {
                 let out = YuvConverter::buffer(gpu, &shape);
                 converter.record(gpu, &mut enc, target.texture_view(), &shape, &out)?;
                 gpu.queue.submit([enc.finish()]);
+                // The draw finishes before the copy starts, so the copy
+                // is timed alone.
+                gpu.device
+                    .poll(wgpu::PollType::wait_indefinitely())
+                    .map_err(|e| RenderError::Device(e.to_string()))?;
+                let read = Instant::now();
                 let data = yuv::read_buffer(gpu, &out, shape.bytes)?;
+                self.readback = read.elapsed();
                 Rendered::Yuv(YuvImage { shape, data })
             }
             (None, Depth::Eight) => {

@@ -547,8 +547,25 @@ pub struct RenderResult {
     pub blur_capped: u64,
     /// The checks the file passed, in order.
     pub checks: Vec<RenderCheck>,
+    /// Where the time went.
+    pub stages: RenderStages,
     /// Seconds from start to finish.
     pub elapsed: f64,
+}
+
+/// Each stage's busy seconds over the try that made the file. Decode,
+/// render and encode run at once, so the busiest sets the pace.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct RenderStages {
+    pub decode: f64,
+    /// The upload and the draw.
+    pub render: f64,
+    /// Copying the planes back from the GPU.
+    pub readback: f64,
+    pub encode: f64,
+    /// After the last frame: the encoder's flush, the last pass and the
+    /// checks.
+    pub finish: f64,
 }
 
 /// Where the export's frames were decoded.

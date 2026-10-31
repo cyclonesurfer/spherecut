@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use spherecut_cli::contract::{
     self, FallbackInfo, Finishing, RenderAudio, RenderCheck, RenderDecode, RenderEvent,
-    RenderProgress, RenderResult, RenderStart, Size, TimeRange,
+    RenderProgress, RenderResult, RenderStages, RenderStart, Size, TimeRange,
 };
 use spherecut_core::FrameRate;
 use spherecut_core::project::file::{self, head_hash};
@@ -321,6 +321,10 @@ fn a_render_is_a_start_line_progress_lines_and_its_result() {
     assert_eq!(result["decode"], json!({"path": "software"}));
     assert_eq!(result["audio"], Value::Null);
     assert_eq!(result["blur_capped"], 0);
+    for stage in ["decode", "render", "readback", "encode", "finish"] {
+        let busy = result["stages"][stage].as_f64().unwrap();
+        assert!(busy > 0.0, "{stage}: {}", result["stages"]);
+    }
     assert_eq!(result["bytes"], std::fs::metadata(&out).unwrap().len());
     let checks: Vec<&str> = result["checks"]
         .as_array()
@@ -467,6 +471,13 @@ fn the_document_lists_every_field_of_every_line() {
                 name: "probe",
                 found: "mp4".into(),
             }],
+            stages: RenderStages {
+                decode: 0.0,
+                render: 0.0,
+                readback: 0.0,
+                encode: 0.0,
+                finish: 0.0,
+            },
             elapsed: 0.0,
         }),
     ];
