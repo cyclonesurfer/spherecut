@@ -5,8 +5,10 @@ pub mod analyze;
 pub mod check;
 pub mod clips;
 pub mod doctor;
+pub mod edit;
 pub mod look;
 pub mod probe;
+pub mod project;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;

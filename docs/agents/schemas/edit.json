@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "edit",
+  "description": "Change a project and save it: edits in order as one undo step, all or none. Each is {\"op\": ...} as project's edits part shows; times as look's. Gives the revision and new ids; a refused edit is bad_edit at edits[i], nothing saved.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "file",
+    "edits"
+  ],
+  "properties": {
+    "file": {
+      "type": "string",
+      "description": "A .spherecut file.",
+      "minLength": 1
+    },
+    "edits": {
+      "type": "array",
+      "description": "The edits.",
+      "minItems": 1,
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "description": "An edit."
+      }
+    },
+    "label": {
+      "type": "string",
+      "description": "The undo step's name.",
+      "maxLength": 200
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "Save nothing."
+    },
+    "if_revision": {
+      "type": "integer",
+      "description": "Refused unless at this revision.",
+      "minimum": 0
+    }
+  }
+}

@@ -484,7 +484,11 @@ fn spherecut_lists_its_tools_and_runs_doctor() {
     let list = s.call_method(1, "tools/list", json!({}));
     let tools = list["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["probe", "look", "analyze", "check", "doctor"]);
+    // Without a write root, `project` reads; `edit` and `undo` aren't listed.
+    assert_eq!(
+        names,
+        ["probe", "look", "analyze", "check", "doctor", "project"]
+    );
     let r = s.call_tool(2, "doctor", json!({"x": 1}));
     let e = tool_error(&r);
     assert_eq!(

@@ -254,12 +254,17 @@ it negotiated when it was tried with Spherecut.
 
 ## The tools
 
-Five tools, in this order. Each takes one JSON object; the schemas are
+Eight tools, in this order; `edit` and `undo` are listed only with a
+write root (`--allow-write`), since without one each call would be
+refused. Each takes one JSON object; the schemas are
 `docs/agents/schemas/*.json`. Every result has `warnings: [{code,
 message}]`. Each is marked `readOnlyHint` true and `openWorldHint`
-false, except that under `--allow-write` `look` is marked as writing
-(`readOnlyHint` false, `destructiveHint` false, `idempotentHint` true),
-since it writes a new file when a call gives `output`.
+false, except under `--allow-write`: `look` and `project` are marked as
+writing new files only (`readOnlyHint` false, `destructiveHint` false,
+`idempotentHint` true), since `look` writes one when a call gives
+`output` and `project` when it gives `create`, and `edit` and `undo`
+as replacing a project (`destructiveHint` true, `idempotentHint`
+false).
 
 - **`probe`**: what media files are, without decoding. `files` (up to
   64) or a `folder` (one level, its clips a page at a time: `page_size`
@@ -302,6 +307,36 @@ since it writes a new file when a call gives `output`.
   `look` and `spherecut frame` take for it, and with `speed: true` its
   decode speed against real time (`realtime`). `render_node` picks a
   DRM node.
+- **`project`**: a project (`.spherecut`, D47): with `file` alone, its
+  summary (the `file` path the other calls name it by, `revision`, the
+  sequence's `rate`, `output` and `export`, each media file with its
+  `status`, the clip's trim and its view tracks' key counts, the first
+  markers, the targets, and the history's `undo` and `redo`, each with
+  `agent_may` and why not). `part` gives one part: `sequence`, `view`
+  (a clip's keys, at most 200 a track from `from`; `more` and
+  `next_from` say where to go on), `markers`, `targets`, `history` (the
+  last 50 steps, who made each), or `edits` (every op with what it does
+  and an example that applies to the ids it names). `create: {media}`
+  makes a new project of one equirect video, refused `output_exists` if
+  anything is at `file`. A relative `file` is read under the first read
+  root but made under the write root: the summary's `file` is the path
+  to go on with.
+- **`edit`**: `edits` (up to 1000) applied in order to the project at
+  `file`, all or none, as one undo step labelled `label` (by default the
+  first op's name, "Set trim", or "N edits"); the user's Edit menu shows
+  it as the agent's. Ops and fields are the project file's, ids are
+  `project`'s, and times are as above, frames at the clip's media's rate
+  (a target's own media for its path, the sequence's for `add_clip`'s
+  `at`). `add_media` takes only `path`, probed beneath the roots. The
+  result gives the new `revision`, the ids each edit made, and whether
+  the agent may undo it; `if_revision` refuses the edit
+  (`stale_revision`) unless the project is still at that revision, and
+  `dry_run` checks it all and saves nothing. A refused edit is
+  `bad_edit` at `edits[i]`, its op and rule in the message.
+- **`undo`**: takes back the last step, or with `redo` puts back the
+  last one undone, if the agent made it: a step of the user's is
+  `not_top`, and a project written by something else since its history
+  was is `stale_revision`. `if_revision` as for `edit`.
 
 **Conventions.** Times are strings (`"12.5"`, `"1:02.5"`, `"370f"` for
 frame 370, `"30000/1001"`) or `[num, den]` pairs of seconds; a bare
@@ -353,6 +388,17 @@ to try next. No file name or FFmpeg message is in it; probe's `detail:
 | `busy` | Too many calls waiting already; call again |
 | `cancelled` | The call was cancelled; the client gets no response for it |
 | `internal` | Spherecut's fault, not the agent's |
+| `bad_edit` | An edit the project's rules refuse, at `edits[i]`: its op and the rule (`limit`, `in_use`, `not_found` and so on) are in the message; nothing was saved |
+| `stale_revision` | The project isn't at `if_revision`, or was written by something else since its history was; read it again |
+| `not_top` | The step to undo or redo is the user's; ask the user, or make an edit that changes it |
+| `nothing_to_undo` | No step to undo |
+| `nothing_to_redo` | No step to redo |
+| `project_locked` | Spherecut's window has the project open, or another agent's call is writing it |
+| `changed_on_disk` | Something other than Spherecut wrote the project during the call; nothing was saved over it |
+| `not_project` | Not a Spherecut project; it was left as it was |
+| `bad_project` | A project that doesn't read: malformed, or breaking a rule |
+| `newer_schema` | A project saved by a newer Spherecut |
+| `io_error` | Reading or writing a project failed partway (the disk, a permission); nothing was saved |
 
 How the codes of media and render (the CLI's `--json`, D27, and
 `docs/cli-json.md`) become these:
@@ -438,7 +484,14 @@ test; a test checks that each is listed here.
 | `TIMING_PACKETS` | 1,048,576 | packets `timing` holds: 4.8 hours at 60 fps |
 | `LISTED` | 20 | times a list in `analyze`'s summary gives |
 | `MAX_PIXELS` | 2^27 | the largest picture decoded (D24): over it is `too_large` |
-| `MAX_TOOLS` | 12 | tools through M9 (A1 has 5) |
+| `EDITS_PER_CALL` | 1,000 | edits in one `edit`, one undo step |
+| `LABEL_CHARS` | 200 | characters of an edit's label |
+| `VIEW_KEYS` | 200 | keys a track in a `view` part, and markers or a target's keys in theirs |
+| `VIEW_CHARS` | 30,000 | characters of keys in a `view` part |
+| `HISTORY_STEPS` | 50 | the newest steps the `history` part gives |
+| `SUMMARY_MARKERS` | 20 | markers the summary lists |
+| `LOCK_WAIT` | 2 s | how long a call waits for another call's hold of a project; the window's is never waited for |
+| `MAX_TOOLS` | 12 | tools through M9 (A1 has 5, A2.2 adds 3) |
 | `MAX_LIST_BYTES` | 12 KiB | the `tools/list` result, all tools |
 | `A1_LIST_BYTES` | 7 KiB | A1's share of it |
 | `INSTRUCTIONS_CHARS` | 1,500 | the server's instructions |

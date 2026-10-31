@@ -484,7 +484,7 @@ Whatever the worker returns after that, the run ends `cancelled` (exit 4) and th
 temporary file is dropped. The handler is reset as it runs, so a second
 Ctrl+C kills the process. probe and doctor never install it.
 
-## The agent server *(A1, D43 to D46)*
+## The agent server *(A1, D43 to D46; A2, D57)*
 
 `spherecut mcp` serves the tools of `crates/agent` over MCP on stdio;
 `spherecut call <tool> '<json>'` runs one of them the same way from a
@@ -523,6 +523,19 @@ shell. The crate has no `unsafe`.
   fits its track) and a target's (YouTube 360, from its help pages as
   fetched on 2026-10-30; flat 16:9 or 9:16; archive), each with its fix,
   under 2 KiB.
+- **Projects** (A2.2, D57): `ops::project` reads a project's summary
+  or one part, or creates one of a probed video; `ops::edit` applies
+  edits as one step of the history and takes an agent's step back.
+  Each call opens the project's folder through `Roots::project_folder`,
+  loads, takes the lock (`edit`, `undo`, `create`) for that call only,
+  and saves through core's `ProjectFolder` (project and history
+  together, refused if the file changed since the load). Edits are
+  core's `Edit` values; a pass turns A1's times in `at`, `start` and
+  `end` into the file's, with frames at that time's axis, before the
+  typed read. `reference` is the edit reference: every op with an
+  example against one fixture project, served as `project`'s `edits`
+  part and applied by the tests. `tools` lists `edit` and `undo` only
+  with a write root.
 - **`contract`**: the CLI's JSON contract (D27), here since A1.4 so that
   `still` can return its errors and the CLI re-exports it.
 - **Teaching** (A1.7): `initialize` gives the instructions (the

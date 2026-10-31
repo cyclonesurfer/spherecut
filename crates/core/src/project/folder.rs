@@ -320,6 +320,7 @@ impl ProjectFolder {
             source,
         };
         let until = Instant::now() + wait;
+        let mut seen_gui = false;
         let mut file = loop {
             let fd = self
                 .openat(
@@ -356,9 +357,13 @@ impl ProjectFolder {
                 Err(TryLockError::WouldBlock) => {
                     let holder = read_holder(&mut file);
                     let gui = holder.as_ref().is_some_and(|h| h.by == By::Gui);
-                    if gui || Instant::now() >= until {
+                    // A reader's look at the lock ([`ProjectFolder::holder`])
+                    // holds it for a moment under a line a closed window
+                    // left: the GUI's hold is refused once seen twice.
+                    if (gui && seen_gui) || Instant::now() >= until {
                         return Err(FolderError::Locked { path, holder });
                     }
+                    seen_gui |= gui;
                     std::thread::sleep(LOCK_POLL);
                 }
                 Err(TryLockError::Error(e)) => return Err(io(e)),
@@ -373,6 +378,34 @@ impl ProjectFolder {
         file.seek(SeekFrom::Start(0)).map_err(io)?;
         file.write_all(format!("{line}\n").as_bytes()).map_err(io)?;
         Ok(ProjectLock { _file: file })
+    }
+
+    /// Who holds the lock for writing `name` now, without taking it:
+    /// `None` when no one does, `Some(None)` when someone does without
+    /// saying who. It takes a shared lock for a moment to find out, which
+    /// a writer trying then sees as held and tries again.
+    pub fn holder(&self, name: &OsStr) -> Result<Option<Option<Holder>>, FolderError> {
+        may_block("reading a project's lock");
+        self.check_name(name)?;
+        let lock_name = side(name, "lock");
+        let fd = match self.openat(
+            &lock_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT) => return Ok(None),
+            Err(e) => return Err(self.refusal(&lock_name, e)),
+        };
+        let mut file = File::from(fd);
+        match file.try_lock_shared() {
+            Ok(()) => Ok(None),
+            Err(TryLockError::WouldBlock) => Ok(Some(read_holder(&mut file))),
+            Err(TryLockError::Error(source)) => Err(FolderError::Io {
+                path: self.path_of(&lock_name),
+                source,
+            }),
+        }
     }
 
     /// Save `project` as `name` and `history` beside it. With `expect`,
@@ -875,7 +908,13 @@ mod tests {
         let dir = temp_dir();
         let folder = ProjectFolder::open(&dir).unwrap();
         let name = OsStr::new("a.spherecut");
+        assert_eq!(folder.holder(name).unwrap(), None, "no lock file yet");
         let held = folder.lock(name, By::Gui, Duration::ZERO).unwrap();
+        let gui = Holder {
+            by: By::Gui,
+            pid: std::process::id(),
+        };
+        assert_eq!(folder.holder(name).unwrap(), Some(Some(gui.clone())));
         // Another descriptor's flock is refused, naming the holder; the
         // GUI's hold isn't waited for.
         let started = Instant::now();
@@ -894,6 +933,8 @@ mod tests {
             e => panic!("{e}"),
         }
         drop(held);
+        // The line the window left is no hold.
+        assert_eq!(folder.holder(name).unwrap(), None);
         let _again = folder.lock(name, By::Mcp, Duration::ZERO).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }

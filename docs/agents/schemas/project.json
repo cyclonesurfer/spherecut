@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "project",
+  "description": "Read a project (.spherecut): its summary or one part; create makes one of a video. Times are the clip's file time, as look's.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "file"
+  ],
+  "properties": {
+    "file": {
+      "type": "string",
+      "description": "A .spherecut file."
+    },
+    "create": {
+      "type": "object",
+      "description": "Make it of this video.",
+      "required": [
+        "media"
+      ],
+      "properties": {
+        "media": {
+          "type": "string",
+          "description": "An equirect video."
+        }
+      }
+    },
+    "part": {
+      "type": "string",
+      "description": "One part; edits lists every op.",
+      "enum": [
+        "sequence",
+        "view",
+        "markers",
+        "targets",
+        "history",
+        "edits"
+      ]
+    },
+    "clip": {
+      "type": "integer",
+      "description": "For view and markers.",
+      "minimum": 1
+    },
+    "from": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array"
+        }
+      ],
+      "description": "A time, as look's."
+    },
+    "to": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array"
+        }
+      ],
+      "description": "A time."
+    }
+  }
+}

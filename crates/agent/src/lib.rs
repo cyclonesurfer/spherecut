@@ -2,10 +2,13 @@
 //! `spherecut mcp`, and the tools it and `spherecut call` share.
 //!
 //! An agent reads footage through five tools (probe, look, analyze,
-//! check, doctor; docs/agents.md), read-only but for look's `output`,
-//! each a schema in `docs/agents/schemas/` and an op in [`ops`]. [`rpc`]
-//! is the protocol, [`tools`] the table between the two. Nothing here touches the network:
-//! what a tool returns goes to the agent, and from there to its model.
+//! check, doctor), read-only but for look's `output`, and reads, makes
+//! and edits projects through three more (project, edit, undo; A2,
+//! [`reference`] for the ops); docs/agents.md has them all. Each is a
+//! schema in `docs/agents/schemas/` and an op in [`ops`]. [`rpc`] is the
+//! protocol, [`tools`] the table between the two. Nothing here touches
+//! the network: what a tool returns goes to the agent, and from there to
+//! its model.
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +19,7 @@ mod font;
 mod image;
 pub mod limits;
 pub mod ops;
+pub mod reference;
 pub mod roots;
 pub mod rpc;
 pub mod schema;
@@ -116,7 +120,11 @@ pub fn call(
     use rpc::Tools;
     let tools = tools::Spherecut::new(options.roots).image_budget(options.image_budget);
     if !tools.has(tool) {
-        let names: Vec<&str> = tools::TOOLS.iter().map(|t| t.name).collect();
+        let names: Vec<&str> = tools::TOOLS
+            .iter()
+            .map(|t| t.name)
+            .filter(|name| tools.has(name))
+            .collect();
         return Err(
             ToolError::new(error::codes::BAD_ARGUMENT, "isn't one of Spherecut's tools")
                 .at("tool")
@@ -147,7 +155,8 @@ mod tests {
         let description = field("description");
         assert!(description.chars().count() <= SKILL_DESCRIPTION_CHARS);
         assert!(!description.contains(['<', '>']), "{description}");
-        for tool in tools::TOOLS {
+        // A2's tools get their recipe in A2.6 (a2-plan 8.2).
+        for tool in tools::TOOLS.iter().take(tools::A1_TOOLS) {
             assert!(body.contains(&format!("`{}`", tool.name)), "{}", tool.name);
         }
         assert_eq!(body.matches("\n## ").count(), 3, "three recipes");

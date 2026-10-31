@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
+use spherecut_core::project::ProjectFolder;
 use spherecut_media::Source;
 
 use crate::error::{ToolError, codes};
@@ -298,6 +299,72 @@ impl Roots {
             path: path.to_path_buf(),
             kept: false,
         })
+    }
+
+    /// The folder of the project at `path`, the argument `arg`, opened
+    /// beneath its root, and the project's file name (a2-plan 3.1): to
+    /// write, beneath the write root, where a relative path is from, as
+    /// for [`create`](Self::create); to read, beneath any root, as for
+    /// [`open_file`](Self::open_file). The folder is named as its root was
+    /// given joined with the rest, lexically, so media paths are read the
+    /// way the agent names them (D47). The project, its history and its
+    /// lock are then opened by name in the folder, never through a link.
+    pub fn project_folder(
+        &self,
+        arg: &str,
+        path: &Path,
+        write: bool,
+    ) -> Result<(ProjectFolder, OsString), ToolError> {
+        let (root, rest, want) = if write {
+            let Some(root) = &self.write else {
+                return Err(ToolError::new(codes::WRITE_REFUSED, "writing is off")
+                    .at(arg)
+                    .next(
+                        "ask the user to start Spherecut with --allow-write --write-root DIR, \
+                         with the project under DIR",
+                    ));
+            };
+            let rest = if path.is_absolute() {
+                match under(std::iter::once(root), path) {
+                    Some((_, rest)) => rest,
+                    None => return Err(outside(arg, "write to", std::iter::once(root))),
+                }
+            } else {
+                path
+            };
+            (root, rest, Want::OutputFolder)
+        } else {
+            let (root, rest) = self.locate_read(arg, path)?;
+            (root, rest, Want::File)
+        };
+        let name = match rest.components().next_back() {
+            Some(std::path::Component::Normal(name)) => name,
+            _ => {
+                return Err(
+                    ToolError::new(codes::BAD_ARGUMENT, "names a folder, not a file").at(arg),
+                );
+            }
+        };
+        let folder = rest.parent().unwrap_or(Path::new(""));
+        let fd = beneath(root.fd.as_fd(), folder, OFlags::PATH | OFlags::DIRECTORY)
+            .map_err(|e| self.refused(arg, e, want, path))?;
+        let named = if folder.as_os_str().is_empty() {
+            root.given.clone()
+        } else {
+            root.given.join(folder)
+        };
+        Ok((ProjectFolder::from_fd(fd, &named), name.to_owned()))
+    }
+
+    /// `path`, the argument `arg`, as the agent names it: its root's
+    /// given path joined with the rest, lexically, as a project records a
+    /// media file (D47). Nothing is opened: the caller opens it with
+    /// [`open_file`](Self::open_file).
+    pub fn named(&self, arg: &str, path: &Path) -> Result<PathBuf, ToolError> {
+        let (root, rest) = self.locate_read(arg, path)?;
+        Ok(spherecut_core::project::file::lexical(
+            &root.given.join(rest),
+        ))
     }
 
     /// The root `path` is under, and the rest of it. A relative path is

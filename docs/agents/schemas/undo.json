@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "undo",
+  "description": "Undo the project's last step, or with redo the one undone after it, and save. Only an agent's step: the user's is not_top.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "file"
+  ],
+  "properties": {
+    "file": {
+      "type": "string",
+      "description": "A .spherecut file.",
+      "minLength": 1
+    },
+    "redo": {
+      "type": "boolean",
+      "description": "Redo instead."
+    },
+    "if_revision": {
+      "type": "integer",
+      "description": "Refused unless at this revision.",
+      "minimum": 0
+    }
+  }
+}

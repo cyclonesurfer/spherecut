@@ -55,6 +55,31 @@ pub mod codes {
     pub const CANCELLED: &str = "cancelled";
     /// Spherecut's fault, not the agent's.
     pub const INTERNAL: &str = "internal";
+    /// An edit the project's rules refuse: its op and the rule's code
+    /// are in the message. Nothing was saved.
+    pub const BAD_EDIT: &str = "bad_edit";
+    /// The project's revision isn't `if_revision`, or its history was
+    /// written with another revision of it.
+    pub const STALE_REVISION: &str = "stale_revision";
+    /// The step to undo or redo is the user's, not the agent's.
+    pub const NOT_TOP: &str = "not_top";
+    pub const NOTHING_TO_UNDO: &str = "nothing_to_undo";
+    pub const NOTHING_TO_REDO: &str = "nothing_to_redo";
+    /// Spherecut's window has the project open, or another call is
+    /// writing it.
+    pub const PROJECT_LOCKED: &str = "project_locked";
+    /// Something other than Spherecut wrote the project since it was
+    /// read; nothing was saved over it.
+    pub const CHANGED_ON_DISK: &str = "changed_on_disk";
+    /// The file isn't a Spherecut project.
+    pub const NOT_PROJECT: &str = "not_project";
+    /// A project file that doesn't read: malformed, or breaking a rule.
+    pub const BAD_PROJECT: &str = "bad_project";
+    /// Saved by a newer Spherecut.
+    pub const NEWER_SCHEMA: &str = "newer_schema";
+    /// Reading or writing a project failed partway: the disk, a
+    /// permission. Nothing was saved.
+    pub const IO_ERROR: &str = "io_error";
 
     /// Every code, for the docs and their test.
     pub const ALL: &[&str] = &[
@@ -80,6 +105,17 @@ pub mod codes {
         BUSY,
         CANCELLED,
         INTERNAL,
+        BAD_EDIT,
+        STALE_REVISION,
+        NOT_TOP,
+        NOTHING_TO_UNDO,
+        NOTHING_TO_REDO,
+        PROJECT_LOCKED,
+        CHANGED_ON_DISK,
+        NOT_PROJECT,
+        BAD_PROJECT,
+        NEWER_SCHEMA,
+        IO_ERROR,
     ];
 }
 

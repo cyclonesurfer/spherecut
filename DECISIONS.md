@@ -8649,6 +8649,116 @@ memory); wgpu-core stops holding the lock
 through `maintain`'s wait, or fixes the timed wait's race, which would
 let a plain wait back; wgpu gains a second queue.
 
+## D57. Projects for agents: the folder handle, the lock, the history file, and the project tools
+
+*2026-10-31, A2 slices A2.1 (core) and A2.2 (the tools). The A2 plan,
+`docs/design/a2-plan.md` sections 3 and 4, has the detail; this is
+what was built and why.*
+
+**One folder handle for every project read and write.** A
+`ProjectFolder` is an `O_PATH | O_DIRECTORY` descriptor for the
+project's folder and that folder's path as named. An agent gets it from
+its roots (`Roots::project_folder`: beneath a read root or the write
+root to read, beneath the write root to write, by `openat2` as D45's
+outputs are); the GUI opens the folder by its path. Files in it are
+opened with `openat(O_NOFOLLOW)`, so the project, its history and its
+lock are what is in that folder, and a link at the project's name is
+refused rather than replaced. Media paths are made relative to, and
+read against, the path as named (D47), so the GUI and an agent read a
+project's `../clips/a.mp4` as the same file.
+
+**The lock**, `.<name>.lock` beside the project: `flock` on a file
+that is never removed or replaced, with one line saying who holds it
+(`{"by": "gui" | "mcp", "pid"}`). The GUI holds it while a project is
+open; an agent's `edit`, `undo` or `project` create holds it for one
+call and waits up to `LOCK_WAIT` (2 s) for another call, never for the
+window. Reading takes no lock, since a project file is always whole
+(D16). A file that isn't a project is never locked: `edit` loads first
+and locks after, so pointing it at the wrong file leaves nothing
+beside it.
+
+**The history file**, `.<name>.history`, written with the project
+(both to temporary files, then the project renamed, then the history)
+and stamped with the project's revision and the FNV-1a 64 of its
+bytes. A history that doesn't match is stale: nothing in it is trusted,
+undo is refused, and the next edit starts a fresh history and says so
+(`history_reset`). No history file is an empty history. At most 16 MiB,
+oldest steps first.
+
+**Changed on disk.** A save compares what is at the name now (device,
+inode, size, mtime and the hash) with what was loaded, and refuses
+(`changed_on_disk`) when they differ. The lock keeps Spherecut's
+writers apart; this catches the others.
+
+**What may be replaced.** A1 never replaces a file. A2 replaces exactly
+a project file that loads as a project, beneath the write root, and
+its history; `project` create refuses anything already there
+(`output_exists`).
+
+**The tools.**
+
+- **Three, not four**: `project` (read a summary or one part, or
+  `create`), `edit`, and `undo` with `redo: true`. One tool for undo and
+  redo keeps `tools/list` within PLAN's 12 KiB; each tool has a byte
+  budget (`tools::BUDGETS`: 1,000, 950, 650) that a test holds in both
+  title forms. With writing on the list is 8 tools; without, `edit` and
+  `undo` aren't listed (6), since every call would be refused, and
+  `project` still reads.
+- **Annotations**: `look` and `project` write only new files
+  (`destructiveHint` false, `idempotentHint` true); `edit` and `undo`
+  replace a project (`destructiveHint` true, `idempotentHint` false).
+- **Edits are the project file's own `Edit` values**, so there is one
+  vocabulary for the file, the GUI's history and the agent. Two
+  allowances: times may be A1's forms (`"12.5"`, `"45f"`, `[n, d]`) as
+  well as the file's `{"exact"}`, turned by a pass over every field
+  named `at`, `start` or `end`, with frames at that time's own axis (a
+  clip's media for keys, markers and trim, a target's media for its
+  path, the sequence for `add_clip`'s `at`); and `add_media` takes only
+  a path, probed beneath the roots, since `apply` does no I/O. A test
+  walks one example of every op and checks that those field names and
+  the times are the same set, so a new field can't slip past the pass.
+- **The edit reference is data, not schema**: `reference.rs` holds
+  every op with what it does and an example, in `Edit`'s order (a test
+  fails when `Edit` gains a variant it lacks), and `project`'s `edits`
+  part serves it. The examples name the ids of one fixture project, and
+  the tool tests apply every one through `edit` and take it back
+  through `undo`.
+- **The agent's undo rule**: an agent may undo or redo a step only
+  when it is an agent's step and the history is not stale (it was
+  written with the project at the revision and bytes the file has).
+  A user's step is `not_top`. Comparing the project's revision with the
+  step's own would refuse an agent's second undo in a row, since every
+  undo is a new revision.
+- **`if_revision`** on `edit` and `undo` refuses (`stale_revision`)
+  unless the project is still at the revision the agent decided on;
+  `dry_run` checks everything and saves nothing.
+- **A relative `file`** follows A1's rule (read under the first read
+  root, made under the write root), so the summary gives the project's
+  `file` path to go on with rather than the tools guessing which root
+  was meant.
+- **Paging**: a view part lists at most `VIEW_KEYS` keys a track and
+  `VIEW_CHARS` characters, and lists nothing at or past `next_from`
+  (the exact time as text, which `from` takes back), so the next page
+  misses nothing and repeats nothing; markers and targets page the same
+  way.
+- **Untrusted text stays in fields.** A history's step label and a
+  history file's parse error are the file's text, so a refusal's
+  message doesn't quote them; the label is in the result's fields and
+  the history part.
+
+**Considered and not done.** A save tool or an open session (each call
+names its file and keeps nothing, so a crash between calls loses
+nothing); a lock taken for reads (a whole-file save makes it needless);
+a relative project path read under the write root (a second rule for
+one tool, against A1's); the whole `Media` object from an agent (it
+would claim a file's size and hash without the file being read).
+
+Revisit if: A3's attach lets an agent edit a project the window has
+open (then the lock's holder changes, and `not_top` may become
+"ask the window"); M3's second clip makes `add_clip` and `remove_clip`
+apply; a client's limit makes the 12 KiB list too large; or a user
+wants an agent to undo the user's steps.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360

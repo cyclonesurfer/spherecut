@@ -181,3 +181,29 @@ pub const SILENCE_MIN: Duration = Duration::from_millis(500);
 
 /// How loud nothing is: the floor of every dBFS `analyze` gives.
 pub const DBFS_FLOOR: f64 = -120.0;
+
+/// The most edits one `edit` call may make, as one undo step (a2-plan
+/// 4.3).
+pub const EDITS_PER_CALL: usize = 1000;
+
+/// The most characters of an `edit` call's label.
+pub const LABEL_CHARS: usize = 200;
+
+/// The most keys a track `project`'s view part gives at once, from
+/// `from`; `more` says where to go on from.
+pub const VIEW_KEYS: usize = 200;
+
+/// The most characters of keys a `view` part lists, so that it fits in
+/// [`RESULT_CHARS`] with its envelope: past it, `next_from` says where
+/// to go on.
+pub const VIEW_CHARS: usize = 30_000;
+
+/// The newest steps `project`'s history part gives.
+pub const HISTORY_STEPS: usize = 50;
+
+/// The first markers `project`'s summary lists; the markers part has all.
+pub const SUMMARY_MARKERS: usize = 20;
+
+/// How long a call waits for another call's hold of a project's lock
+/// (a2-plan 3.2). The GUI's is never waited for.
+pub const LOCK_WAIT: Duration = Duration::from_secs(2);
