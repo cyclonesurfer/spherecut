@@ -444,6 +444,7 @@ fn nv12_pushed_as_strided_planes_encodes_as_its_planar_twin() {
         }
         let spans = [(0, 80), (80 * 32, 48), (80 * 32 + 48 * 16, 48)];
         a.push_video_strided(&StridedPlanes {
+            size: (64, 32),
             data: &i420,
             planes: &spans,
         })
@@ -461,6 +462,7 @@ fn nv12_pushed_as_strided_planes_encodes_as_its_planar_twin() {
         }
         let spans = [(0, 80), (80 * 32, 80)];
         b.push_video_strided(&StridedPlanes {
+            size: (64, 32),
             data: &semi,
             planes: &spans,
         })
@@ -468,10 +470,22 @@ fn nv12_pushed_as_strided_planes_encodes_as_its_planar_twin() {
         // Three planes for NV12 are refused.
         let three = [(0, 80), (80 * 32, 80), (80 * 48, 80)];
         let e = b.push_video_strided(&StridedPlanes {
+            size: (64, 32),
             data: &semi,
             planes: &three,
         });
         assert!(matches!(e, Err(EncodeError::Invalid(_))), "{e:?}");
+        // So is a picture of another size, which would fit the buffer
+        // cut at its top left.
+        let e = b.push_video_strided(&StridedPlanes {
+            size: (32, 16),
+            data: &semi,
+            planes: &spans,
+        });
+        assert!(
+            matches!(&e, Err(EncodeError::Invalid(m)) if m.contains("32x16 picture")),
+            "{e:?}"
+        );
     }
     a.finish().unwrap();
     b.finish().unwrap();

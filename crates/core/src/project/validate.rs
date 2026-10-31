@@ -151,6 +151,19 @@ impl Project {
                     format!("media {}'s path {} is not absolute", m.id, m.path.display()),
                 );
             }
+            // A file stores paths lexically, so save then load gives them
+            // back only if they are already.
+            if super::file::lexical(&m.path) != m.path {
+                return fail(
+                    Code::Invalid,
+                    format!(
+                        "media {}'s path {} has \".\" or \"..\" in it (give it as {})",
+                        m.id,
+                        m.path.display(),
+                        super::file::lexical(&m.path).display()
+                    ),
+                );
+            }
             let v = &m.video;
             if v.width == 0 || v.height == 0 || v.duration <= Time::ZERO {
                 return fail(
@@ -181,6 +194,7 @@ impl Project {
             };
             check_keys("target", &t.path, Time::ZERO, Some(m.video.duration))?;
             for k in &t.path.keys {
+                check_no_spin(k)?;
                 let a = k.value;
                 if !(a.yaw_deg.is_finite() && a.pitch_deg.is_finite()) {
                     return fail(
@@ -254,6 +268,13 @@ impl Project {
             return fail(
                 Code::Invalid,
                 format!("the id counter {} is out of range", self.next_id),
+            );
+        }
+        // Each edit adds one; past this it would wrap.
+        if self.revision > MAX_ID {
+            return fail(
+                Code::Invalid,
+                format!("the revision {} is out of range", self.revision),
             );
         }
         let mut seen = HashSet::new();
@@ -437,7 +458,12 @@ fn check_keys<V>(
             format!("the {what} track has more than {MAX_KEYS} keys"),
         );
     }
-    if let Some(pair) = keys.windows(2).find(|w| w[0].at >= w[1].at) {
+    // In seconds too: the spline divides by the gap between keys, and
+    // two rational times may differ by less than an f64 holds.
+    if let Some(pair) = keys
+        .windows(2)
+        .find(|w| w[0].at >= w[1].at || w[0].at.to_secs_f64() >= w[1].at.to_secs_f64())
+    {
         return fail(
             Code::Exists,
             format!(

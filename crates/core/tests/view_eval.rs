@@ -310,11 +310,12 @@ fn sticky_spin_keeps_a_turn_going_past_half_way() {
     };
     let before = make(179.995);
     let mut after = make(180.005);
-    // Without the spin the turn goes the other way.
+    // Without the spin the turn goes the other way, the short way to
+    // the left; −1 is the long way, on to the right.
     assert!(angles(&after, 0.5, &[])[0] < 0.0);
     let spins = follow_spin(&before, &after, &[]);
-    assert_eq!(spins, vec![(KeyId(1), 1)]);
-    after.orientation.keys[0].spin = 1;
+    assert_eq!(spins, vec![(KeyId(1), -1)]);
+    after.orientation.keys[0].spin = -1;
     assert!(close(angles(&after, 0.5, &[])[0], 90.0025, 1e-9));
     // Nothing changed, nothing to do.
     assert!(follow_spin(&after, &after, &[]).is_empty());
@@ -407,5 +408,42 @@ fn a_view_is_quick_to_evaluate() {
             each < std::time::Duration::from_micros(5),
             "{mode:?}: {each:?} a view"
         );
+    }
+}
+
+#[test]
+fn level_never_tips_over_the_top_beside_a_target_falling_from_it() {
+    let dir = |pitch_deg| AimDir {
+        yaw_deg: 0.0,
+        pitch_deg,
+    };
+    // The target leaves the zenith fast, and the key before looks
+    // nearly straight up: the aim key's rate overshoots the pitch.
+    let targets = [Target {
+        id: TargetId(50),
+        name: "kite".into(),
+        media: MediaId(1),
+        path: KeyTrack {
+            keys: vec![
+                key(51, 0, dir(90.0), Ease::SMOOTH),
+                key(52, 1000, dir(90.0), Ease::SMOOTH),
+                key(53, 3000, dir(30.0), Ease::SMOOTH),
+            ],
+        },
+    }];
+    let aim = Orient::Aim {
+        target: TargetId(50),
+        roll_deg: 0.0,
+    };
+    let v = view(
+        &[(0, look(0.0, 89.0, 0.0)), (1160, aim)],
+        Ease::SMOOTH,
+        OrientMode::Level,
+    );
+    for i in 0..=116 {
+        let s = f64::from(i) / 100.0;
+        let f = forward(v.orientation_at(s, &targets));
+        // Facing yaw 0 is facing −Z; past the zenith it would face +Z.
+        assert!(f.z <= 1e-9, "{s}: {f}");
     }
 }

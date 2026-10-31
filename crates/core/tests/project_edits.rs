@@ -806,6 +806,16 @@ fn targets_belong_to_their_media() {
         0,
         Code::OutOfRange,
     );
+    // Only orientation keys spin; a path key's spin would be kept and
+    // never used.
+    let mut spun = there.clone();
+    spun.path.keys[0].spin = 1;
+    refused(
+        &mut p,
+        vec![Edit::AddTarget { target: spun }],
+        0,
+        Code::Invalid,
+    );
     let mut lost = there.clone();
     lost.media = MediaId(77);
     refused(
@@ -1139,5 +1149,32 @@ fn apply_is_fast_on_a_full_track() {
     }
     let each = start.elapsed() / n;
     // 5 ms in the plan, for an optimised build; a debug build gets 10×.
-    assert!(each.as_millis() < 50, "{each:?} per apply");
+    let bound = if cfg!(debug_assertions) { 50 } else { 5 };
+    assert!(each.as_millis() < bound, "{each:?} per apply");
+}
+
+#[test]
+fn keys_too_close_for_seconds_are_refused() {
+    let mut p = project();
+    let c = clip(&p);
+    // Apart as fractions, one time in seconds: the spline would divide
+    // by nothing between them.
+    let one = Time(spherecut_core::Rational::new(1, 1).unwrap());
+    let next =
+        Time(spherecut_core::Rational::new(9_007_199_254_740_993, 9_007_199_254_740_992).unwrap());
+    assert!(next > one && next.to_secs_f64() == one.to_secs_f64());
+    p.apply(&[Edit::AddKey {
+        clip: c,
+        key: fov_key(one, 60.0),
+    }])
+    .unwrap();
+    refused(
+        &mut p,
+        vec![Edit::AddKey {
+            clip: c,
+            key: fov_key(next, 60.0),
+        }],
+        0,
+        Code::Exists,
+    );
 }

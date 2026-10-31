@@ -19,6 +19,7 @@ use spherecut_core::time::Rational;
 use spherecut_media::backend::SeekMode;
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{LensShape, MIN_HFOV_DEG};
+use spherecut_sphere::spline::spun;
 
 use crate::app::AppState;
 use crate::doc::{self, Doc, KeyMark, Lane, MAX_FOV_DEG};
@@ -151,12 +152,12 @@ fn anchors(anim: &ViewAnim, targets: &[Target]) -> Vec<(f64, f64, f64)> {
             None => out.push((t, yaw, roll)),
             Some(&(_, py, pr)) => {
                 let spin = match anim.mode {
-                    OrientMode::Level => f64::from(keys[i - 1].spin),
-                    OrientMode::Free => 0.0,
+                    OrientMode::Level => keys[i - 1].spin,
+                    OrientMode::Free => 0,
                 };
                 out.push((
                     t,
-                    py + wrap_deg(yaw - py) + 360.0 * spin,
+                    py + spun(wrap_deg(yaw - py), spin, 360.0),
                     pr + wrap_deg(roll - pr),
                 ));
             }

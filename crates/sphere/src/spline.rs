@@ -169,15 +169,15 @@ pub struct Knot {
 impl Window<Knot> {
     /// The window of an angle track, each segment the shortest way plus
     /// its `turns` (whole turns, for the segments before → from,
-    /// from → to and to → after): values are unwrapped from `from`'s, so
-    /// `to` may be more than π from it.
+    /// from → to and to → after, as [`spun`] adds them): values are
+    /// unwrapped from `from`'s, so `to` may be more than π from it.
     pub fn unwrap_angles(self, turns: [i8; 3]) -> Window<Knot> {
         self.unwrap_periodic(TAU, turns)
     }
 
     /// [`Window::unwrap_angles`] for values that repeat every `period`.
     pub fn unwrap_periodic(mut self, period: f64, turns: [i8; 3]) -> Window<Knot> {
-        let way = |a: f64, b: f64, n: i8| wrap_period(b - a, period) + period * f64::from(n);
+        let way = |a: f64, b: f64, n: i8| spun(wrap_period(b - a, period), n, period);
         let from = self.from.v;
         if let Some(b) = &mut self.before {
             b.v = from - way(b.v, from, turns[0]);
@@ -364,10 +364,29 @@ pub fn exp(v: DVec3) -> DQuat {
     DQuat::from_axis_angle(v / angle, angle)
 }
 
+/// A segment's turn: the short way `short` plus `spin` whole turns of
+/// `period` the way it goes (the way of increasing values, a yaw to the
+/// right, when it is 0), so a negative spin goes the other way round
+/// and −1 is the long way. Level's yaw and Free's rotation ([`chord`])
+/// count spin alike: keys that differ only in yaw turn the same in both.
+pub fn spun(short: f64, spin: i8, period: f64) -> f64 {
+    short + way(short) * period * f64::from(spin)
+}
+
+/// The sign of a short way's turn: none (under the 1e−12 [`chord`]
+/// takes as none) counts as increasing.
+fn way(short: f64) -> f64 {
+    if short < -SAME { -1.0 } else { 1.0 }
+}
+
+/// A rotation or turn this small (radians) is none, for which way whole
+/// turns go.
+const SAME: f64 = 1e-12;
+
 /// The world-frame rotation vector from `a` to `b` (`b = exp(δ) · a`):
-/// the shortest way, plus `spin` whole turns about its axis (about the
-/// world's up when `a` and `b` are the same). A negative spin goes the
-/// other way round: −1 is the long way.
+/// the shortest way, plus `spin` whole turns about its axis (about −Y,
+/// a turn to the right, when `a` and `b` are the same). A negative spin
+/// goes the other way round: −1 is the long way.
 pub fn chord(a: DQuat, b: DQuat, spin: i8) -> DVec3 {
     let d = log(b * a.conjugate());
     if spin == 0 {
@@ -376,10 +395,12 @@ pub fn chord(a: DQuat, b: DQuat, spin: i8) -> DVec3 {
     d + turn_axis(d) * (TAU * f64::from(spin))
 }
 
-/// The axis whole turns are added about for a short-way rotation `d`.
+/// The axis whole turns are added about for a short-way rotation `d`:
+/// its own, or with none −Y, about which a yaw to the right turns (D33's
+/// yaw is `R_y(−yaw)`), as Level's spin turns equal keys.
 fn turn_axis(d: DVec3) -> DVec3 {
     let len = d.length();
-    if len > 1e-12 { d / len } else { DVec3::Y }
+    if len > SAME { d / len } else { DVec3::NEG_Y }
 }
 
 /// The smooth angular velocity at a key between chords `d0` (over `h0`
@@ -449,7 +470,7 @@ pub fn rotation_hermite(
 /// section 6.4).
 pub fn follow_spin_angle(previous: f64, a: f64, b: f64) -> i8 {
     let short = wrap(b - a);
-    to_spin((previous - short) / TAU)
+    to_spin((previous - short) * way(short) / TAU)
 }
 
 /// [`follow_spin_angle`] for a rotation from `a` to `b`, `previous`
@@ -578,9 +599,37 @@ mod tests {
         assert!((deg(u.before).unwrap() - (-190.0)).abs() < 1e-9);
         assert!((u.to.v.to_degrees() - (-190.0)).abs() < 1e-9);
         assert!((deg(u.after).unwrap() - (-170.0)).abs() < 1e-9);
-        let spun = w.unwrap_angles([0, 1, 0]);
-        assert!((spun.to.v.to_degrees() - 170.0).abs() < 1e-9);
-        assert!((deg(spun.after).unwrap() - 190.0).abs() < 1e-9);
+        // −170° to 170° is 20° to the left: a spin of 1 turns a whole
+        // turn more that way, −1 the long way round to the right.
+        let more = w.unwrap_angles([0, 1, 0]);
+        assert!((more.to.v.to_degrees() - (-550.0)).abs() < 1e-9);
+        assert!((deg(more.after).unwrap() - (-530.0)).abs() < 1e-9);
+        let long = w.unwrap_angles([0, -1, 0]);
+        assert!((long.to.v.to_degrees() - 170.0).abs() < 1e-9);
+        assert!((deg(long.after).unwrap() - 190.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn spin_counts_the_way_the_segment_goes() {
+        let d = f64::to_radians;
+        assert!((spun(d(30.0), 1, TAU) - d(390.0)).abs() < 1e-12);
+        assert!((spun(d(30.0), -1, TAU) - d(-330.0)).abs() < 1e-12);
+        assert!((spun(d(-30.0), 1, TAU) - d(-390.0)).abs() < 1e-12);
+        assert!((spun(d(-30.0), -1, TAU) - d(330.0)).abs() < 1e-12);
+        // Equal ends turn to the right, as the rotation's chord does.
+        assert!((spun(0.0, 2, TAU) - d(720.0)).abs() < 1e-12);
+        let yaw = |deg: f64| crate::orient::Ypr::from_degrees(deg, 0.0, 0.0).to_quat();
+        for (from, to) in [(0.0, 30.0), (0.0, -30.0), (10.0, 10.0), (170.0, -170.0)] {
+            for n in -2..=2 {
+                let level = spun(wrap(d(to) - d(from)), n, TAU);
+                // A yaw of θ is a rotation of −θ about Y.
+                let free = chord(yaw(from), yaw(to), n);
+                assert!(
+                    (free - DVec3::NEG_Y * level).length() < 1e-9,
+                    "{from} to {to} spin {n}: {free} for {level}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -602,20 +651,24 @@ mod tests {
         assert!((chord(a, b, 0) - DVec3::Y * 0.3).length() < 1e-12);
         assert!((chord(a, b, 1) - DVec3::Y * (0.3 + TAU)).length() < 1e-12);
         assert!((chord(a, b, -1) - DVec3::Y * (0.3 - TAU)).length() < 1e-12);
-        // No rotation at all spins about the world's up.
-        assert!((chord(a, a, 2) - DVec3::Y * (2.0 * TAU)).length() < 1e-12);
+        // No rotation at all spins to the right, about −Y.
+        assert!((chord(a, a, 2) - DVec3::NEG_Y * (2.0 * TAU)).length() < 1e-12);
     }
 
     #[test]
     fn follow_spin_keeps_the_way_it_went() {
         let d = f64::to_radians;
-        // A turn of 179.99° to the right whose end moves to 180.01°.
-        assert_eq!(follow_spin_angle(d(179.99), 0.0, d(180.01)), 1);
+        // A turn of 179.99° to the right whose end moves to 180.01°, now
+        // 179.99° to the left the short way: the long way round.
+        assert_eq!(follow_spin_angle(d(179.99), 0.0, d(180.01)), -1);
         assert_eq!(follow_spin_angle(d(179.99), 0.0, d(179.98)), 0);
         assert_eq!(follow_spin_angle(d(-179.99), 0.0, d(179.99)), -1);
-        // 540° before; 181° is −179° the short way, and −179° + 720° is
-        // the nearest to 540°.
-        assert_eq!(follow_spin_angle(d(540.0), 0.0, d(181.0)), 2);
+        // 540° before; 181° is −179° the short way, and two turns the
+        // other way round, −179° + 720°, is the nearest to 540°.
+        assert_eq!(follow_spin_angle(d(540.0), 0.0, d(181.0)), -2);
+        // −540° before, to −181° (179° the short way): two turns more
+        // to the left of the long way.
+        assert_eq!(follow_spin_angle(d(-540.0), 0.0, d(-181.0)), -2);
         let a = DQuat::IDENTITY;
         let before = chord(a, DQuat::from_rotation_y(d(179.99)), 0);
         let b = DQuat::from_rotation_y(d(180.01));

@@ -410,6 +410,36 @@ fn a_drag_on_a_key_edits_it_as_one_step() {
     finish(h);
 }
 
+/// Section 6.4's sticky spin in the viewer: a key turned on past 180°
+/// from the one before keeps its segment going the way the turn went,
+/// not the short way round.
+#[test]
+fn a_turn_past_half_way_round_keeps_the_way_it_went() {
+    let gpu = common::gpu();
+    let (_rs, mut h) = start(&gpu);
+    key_at_20(&mut h);
+    step(&mut h);
+    for yaw in (90..=240).step_by(30) {
+        h.state_mut().state.view.q = turn(f64::from(yaw), 0.0);
+        step(&mut h);
+        assert!(matches!(look(&h), Look::Editing { .. }), "{:?}", look(&h));
+    }
+    until(&mut h, "the turn's edit", |a| {
+        a.state.reframe.look == Look::Keyed
+            && a.state.reframe.doc.as_ref().unwrap().undo_label() == Some("Reframe")
+    });
+    let first = doc(&h).lane_keys(Lane::Orientation)[0].id;
+    // 240° on from 0° is 120° the short way back: the long way.
+    assert_eq!(doc(&h).orientation_key(first).unwrap().spin, -1);
+    let half = doc(&h).view_at(t(10)).orientation;
+    assert!(apart_deg(half, turn(120.0, 0.0)) < 1.0, "{half:?}");
+    // Undone, the spin goes with the turn.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    step(&mut h);
+    assert_eq!(doc(&h).orientation_key(first).unwrap().spin, 0);
+    finish(h);
+}
+
 #[test]
 fn a_lanes_only_key_takes_a_static_reframe() {
     let gpu = common::gpu();

@@ -280,6 +280,29 @@ fn hand_edits_of_the_readable_copies() {
         serde_json::json!({"seconds": 8.0});
     let e = read(&v.to_string()).unwrap_err();
     assert!(e.to_string().contains("needs \"exact\""), "{e}");
+    // Anything beside them would be dropped unread, so it is refused: a
+    // note, or a misspelt field next to an edited `seconds`.
+    for extra in [
+        serde_json::json!({"exact": "10", "seconds": 10.0, "note": 1}),
+        serde_json::json!({"exact": "10", "seconds": 8.0, "frames": 240}),
+        serde_json::json!({"exact": "10", "frame": 300}),
+    ] {
+        v["project"]["sequences"][0]["tracks"][0]["clips"][0]["source"]["end"] = extra.clone();
+        let e = read(&v.to_string()).unwrap_err();
+        assert_eq!(e.code(), "malformed", "{extra}");
+        assert!(
+            e.to_string().contains("\"exact\" and \"seconds\" only"),
+            "{e}"
+        );
+    }
+    // `seconds` is checked to 1 µs, an hour in as at the start.
+    v["project"]["sequences"][0]["tracks"][0]["clips"][0]["source"]["end"] =
+        serde_json::json!({"exact": "3600", "seconds": 3600.003});
+    let e = read(&v.to_string()).unwrap_err();
+    assert!(e.to_string().contains("edit it"), "{e}");
+    v["project"]["sequences"][0]["tracks"][0]["clips"][0]["source"]["end"] =
+        serde_json::json!({"exact": "10", "seconds": 10.0000005});
+    assert!(read(&v.to_string()).is_ok());
     // An orientation's `ypr_deg` edited alone is refused; given alone, it
     // is read.
     let key = &mut v["project"]["sequences"][0]["tracks"][0]["clips"][0]["view"]["orientation"][0]
@@ -328,6 +351,49 @@ fn media_paths() {
         let e = file::to_json(&q, Path::new("/v")).unwrap_err();
         assert!(matches!(e, FileError::PathNotUtf8 { .. }), "{e}");
     }
+    // A path with `..` in it is made lexical when a project starts from
+    // it, as a load would make it, and refused in an edit.
+    let p = project_at("/v/work/../clips/./a.mp4");
+    assert_eq!(p.media()[0].path, Path::new("/v/clips/a.mp4"));
+    let mut m = p.media()[0].clone();
+    m.path = PathBuf::from("/v/work/../b.mp4");
+    m.id = MediaId::NEW;
+    let mut q = p.clone();
+    let e = q.apply(&[Edit::AddMedia { media: m }]).unwrap_err();
+    assert!(e.problem.to_string().contains("/v/b.mp4"), "{e:?}");
+    assert_eq!(q, p);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_project_saved_through_a_link_keeps_its_paths_from_the_files_folder() {
+    let dir = TempDir::new("link");
+    let (home, nas) = (dir.0.join("home"), dir.0.join("nas/proj"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&nas).unwrap();
+    let link = home.join("p.spherecut");
+    std::os::unix::fs::symlink(nas.join("p.spherecut"), &link).unwrap();
+    let media = home.join("clips/a.mp4");
+    let p = project_at(media.to_str().unwrap());
+    file::save(&p, &link).unwrap();
+    let text = std::fs::read_to_string(nas.join("p.spherecut")).unwrap();
+    // From nas/proj to home/clips, not from home.
+    assert!(
+        text.contains("\"path\": \"../../home/clips/a.mp4\""),
+        "{text}"
+    );
+    for path in [&link, &nas.join("p.spherecut")] {
+        let back = file::load(path).unwrap();
+        assert_eq!(back.media()[0].path, media, "{}", path.display());
+    }
+}
+
+#[test]
+fn a_file_with_a_revision_past_the_ids_is_refused() {
+    let mut v: serde_json::Value = serde_json::from_str(&sample()).unwrap();
+    v["project"]["revision"] = serde_json::json!(u64::MAX);
+    let e = read(&v.to_string()).unwrap_err();
+    assert!(e.to_string().contains("revision"), "{e}");
 }
 
 #[test]

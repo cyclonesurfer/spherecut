@@ -21,7 +21,7 @@ use spherecut_sphere::angle_between;
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{LensShape, Projection};
 use spherecut_sphere::rotation_angle;
-use spherecut_sphere::spline::{chord, exp, log, wrap};
+use spherecut_sphere::spline::{chord, exp, log, spun, wrap};
 
 const TARGET: TargetId = TargetId(900);
 
@@ -196,7 +196,7 @@ fn chord_speed(v: &ViewAnim, targets: &[Target], i: usize) -> f64 {
     match v.mode {
         OrientMode::Level => {
             let (ya, yb) = (Ypr::from_quat(qa), Ypr::from_quat(qb));
-            let dyaw = wrap(yb.yaw - ya.yaw) + TAU * f64::from(a.spin);
+            let dyaw = spun(wrap(yb.yaw - ya.yaw), a.spin, TAU);
             (dyaw.abs() + (yb.pitch - ya.pitch).abs() + wrap(yb.roll - ya.roll).abs()) / h
         }
         OrientMode::Free => chord(qa, qb, a.spin).length() / h,
@@ -316,7 +316,7 @@ proptest! {
                 OrientMode::Level => {
                     let yaw = |q| Ypr::from_quat(q).yaw;
                     let total: f64 = s.windows(2).map(|w| wrap(yaw(w[1].1) - yaw(w[0].1))).sum();
-                    let want = wrap(yaw(qb) - yaw(qa)) + TAU * f64::from(a.spin);
+                    let want = spun(wrap(yaw(qb) - yaw(qa)), a.spin, TAU);
                     prop_assert!((total - want).abs() < 1e-6, "segment {i}: {total} for {want}");
                 }
                 OrientMode::Free => {

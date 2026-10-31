@@ -6,14 +6,14 @@
 //! first key, after the last and while it holds, it follows its target.
 
 use std::collections::HashMap;
-use std::f64::consts::TAU;
+use std::f64::consts::{FRAC_PI_2, TAU};
 
 use glam::DQuat;
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, LensShape, Projection};
 use spherecut_sphere::spline::{
     Knot, RotKnot, Window, chord, follow_spin_angle, follow_spin_rotation, locate, slope_at_from,
-    slope_at_to, wrap,
+    slope_at_to, spun, wrap,
 };
 
 use super::{Key, Orient, OrientMode, Target, ViewAnim};
@@ -171,7 +171,7 @@ pub fn follow_spin(previous: &ViewAnim, next: &ViewAnim, targets: &[Target]) -> 
         let spin = match next.mode {
             OrientMode::Level => {
                 let (ya, yb) = (view(pa).ypr.yaw, view(pb).ypr.yaw);
-                let turn = wrap(yb - ya) + TAU * f64::from(pa.spin);
+                let turn = spun(wrap(yb - ya), pa.spin, TAU);
                 follow_spin_angle(turn, view(a).ypr.yaw, view(b).ypr.yaw)
             }
             OrientMode::Free => {
@@ -313,7 +313,11 @@ fn level(w: &Keys<'_>, t: f64) -> DQuat {
         ..knot(k, v.ypr.pitch)
     });
     let roll = w.map(|(k, v)| knot(k, v.ypr.roll)).unwrap_angles([0; 3]);
-    Ypr::new(yaw.value(t), pitch.value(t), roll.value(t)).to_quat()
+    // An aim key's pitch rate isn't limited as the spline's own slopes
+    // are, so beside a target leaving the zenith fast the pitch can pass
+    // ±90°: held there, the view never tips over the top.
+    let pitch = pitch.value(t).clamp(-FRAC_PI_2, FRAC_PI_2);
+    Ypr::new(yaw.value(t), pitch, roll.value(t)).to_quat()
 }
 
 /// Free: Kim–Kim–Shin on SO(3). An aim key's angular velocity on a
