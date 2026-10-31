@@ -20,6 +20,11 @@ in progress. What works today:
   F3 shows the performance overlay, File ▸ Settings keeps the cache,
   decoder, filter, slots and A/V offset, and a camera's raw file with a
   stream a lens shows its lenses flat, side by side.
+- Reframing (M2, under way): opening a video makes a project of it. The
+  viewer shows the output's frame, and moving the view on a key edits
+  it; Alt+K keys the view, I and O set the trim, and the strip under
+  the picture moves keys, markers and the trim. File saves and reopens
+  `.spherecut` projects, and Edit undoes and redoes every change.
 
 - `spherecut probe <file>...` shows what an MP4/MOV or Matroska/WebM file
   is: container, streams, codecs, colour, exact frame rates and
@@ -255,6 +260,22 @@ probe report, and the Doctor pane the startup check's whole report; its
 errors and warnings also show as banners above the viewer, each with its
 fix and a Copy button. `SPHERECUT_FRAME_CACHE_MIB` and
 `SPHERECUT_ADAPTER` set the cache and the GPU as the options do.
+
+Opening an equirect video makes an untitled project of it, and the
+viewer shows the output's frame (16:9 at first) with the picture past
+it dimmed. Each frame shows the keys' view. Moving the view while
+paused on a key's frame, or while a lane has only its first key,
+edits that key; elsewhere, or while playing, it is a look-around,
+marked "Not keyed", until the next play, seek or step. Alt+K keys the
+view at the playhead. I and O set in and out, M drops a marker, Alt+[
+and Alt+] go to the previous and next key, Ctrl+L loops in to out, and
+play stops at out. The strip under the picture shows the markers, the
+trim's handles and a lane of keys for each of orientation, FOV and
+projection: click a key to select it and go there, drag it to move it
+(Shift snaps to markers and the playhead), right-click it for its ease,
+Delete removes it. Ctrl+S and Ctrl+Shift+S save the project, the Files
+pane opens `.spherecut` files, Ctrl+Z and Ctrl+Shift+Z undo and redo,
+and closing or opening with unsaved changes asks first.
 
 ### Rendering a frame
 

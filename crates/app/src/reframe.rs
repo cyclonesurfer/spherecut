@@ -732,6 +732,8 @@ impl AppState {
             return;
         };
         self.reframe.look = if self.edit("Reframe", &edits) {
+            self.reframe.applied = Some(vals);
+            self.reframe.seen = Some(vals);
             Look::Keyed
         } else {
             Look::Around
@@ -744,7 +746,11 @@ impl AppState {
         if matches!(self.reframe.look, Look::Editing { .. }) {
             self.commit_look();
         }
+        // The keys set the view again from the next frame; what the look
+        // left is not a change of it.
         self.reframe.look = Look::Keyed;
+        self.reframe.applied = None;
+        self.reframe.seen = None;
     }
 
     /// `edits` as one undo step labelled `label`; a refusal is a notice.
@@ -784,6 +790,8 @@ impl AppState {
             Ok(edits) => {
                 if self.edit("Key the view", &edits) {
                     self.reframe.look = Look::Keyed;
+                    self.reframe.applied = Some(vals);
+                    self.reframe.seen = Some(vals);
                 }
             }
             Err(p) => self.notices.push(

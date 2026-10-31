@@ -5671,6 +5671,12 @@ ring runs dry; the present latency of one UI frame being visibly off
 the vsync's on the GUI (slice 7); or `never_blocks` failing its 10 ms
 ceiling on a machine that isn't a VM.
 
+*Updated by D54 (M2.6):* the player plays a span when given one
+(`Player::set_span`, a `PlaySpan` of start, end and loop): it stops on
+the last frame before the end or loops to the start, and a play at or
+past the end starts at the start. Opening a file clears it, and
+`Player::close` empties the player.
+
 ## D35. Audio and A/V sync
 
 *2026-10-30, M1 slice 6. The M1 plan's D33 (section 9), adjusted to
@@ -8131,6 +8137,108 @@ end (M2.8).
 Revisit if: a run fails (D26: Pat decides before anything changes);
 the reframer's real timeline (M2.6) draws far more per clip than this
 does; or huginn's laptop scale differs from what was tested.
+
+## D54. The reframer's GUI, part 1: the untitled project, the keyed view, the strip and the play span
+
+*2026-10-31, M2 slice M2.6. Updates D34 (the player plays a span).
+Amendment 7 of the M2 plan lists where this differs from its section
+10.*
+
+**A project is always open with a video.** Opening an equirect video
+makes an untitled project of it once its first stream opens: a job
+reads the file's size and first MiB (its fingerprint, D47), and the
+project is made on the UI thread from the view on screen, after any
+drag or projection switch ends, so the view doesn't jump. One key on
+each lane holds that view; the output is the 16:9 default. A video
+shown in the raw view (lenses, a flat source) gets no project until M3
+stitches it. Opening a project file loads it on a job, checks its
+video (missing: the keys and trims are kept and a notice says where to
+put it back; changed: it opens with a warning), then opens the video.
+
+**The file work never waits.** Load, save and the "is a file there"
+check run as jobs (`may_block` panics on the marked UI thread in every
+reframer test). Save writes to the project's file, else opens Save as
+in the project's folder, else the Files pane's, else the video's. A
+save that would replace a file asks "Replace it?". "Save changes?"
+comes before an open, a close or a quit with unsaved changes, with
+Save, Don't save (Quit without saving) and Cancel; Save saves first and
+then takes the step. A save finishing for a project since let go
+changes nothing (a generation count).
+
+**The viewer shows the keyed view, framed.** For a flat output the
+viewer draws the output's frame at 90% of the side it meets, centred
+on whole pixels, and the lens past it at a quarter of the light
+(`Framing`, D49), and the pointer maps through the frame (amendment 2
+item 29). Each frame it sets the view from `ViewAnim::at` at the
+presented frame's source time. A change of the view is then one of
+three looks, named in the overlay's `view` line:
+
+- *keyed*: the view is the keys';
+- *editing a key*: paused, the view moved; it becomes key edits, one
+  "Reframe" undo step, when a drag ends or after 400 ms of rest for a
+  scroll, a key or a switch. It edits the key at the playhead (within
+  half a frame) on each lane it changed, or a lane's only key;
+- *look-around*: playing, or no key to take the change on some lane.
+  The badge "Not keyed: Alt+K to key" shows in the frame's corner, and
+  play, a seek, a step or a scrub goes back to the keys. Pausing keeps
+  it.
+
+`Alt+K` keys the view on screen at the playhead: the key there changed
+on each lane that has one, a new one on the others, one step. A 360
+output keeps M1's free look and isn't keyed from the viewer (M2.7's
+equirect preview and sphere overview are where it is).
+
+**The strip** replaces the scrub bar while a project is open: markers,
+the scrub bar with the in and out handles and the source past them
+dimmed, and a lane of diamonds for each of orientation, FOV and
+projection, with the playhead across all. A click on a key selects it
+(Shift or Ctrl toggles it in the selection) and seeks to it; a drag moves the selected keys,
+snapped to frames or with Shift to a marker or the playhead within 8
+points; right-click sets the ease (the six presets); Delete removes the
+selection, but a lane keeps its last key and a notice says so. Markers
+move by drag, rename by double-click and are removed from their menu;
+`M` adds one at the playhead. The handles move in and out, in staying a
+frame before out. A drag draws where it goes and edits on release, one
+step; an edit `apply` refuses is a notice, never a partial change. Keys
+outside the trim are hollow.
+
+**Play keeps to the trim** (D34's `PlaySpan`): play stops on the last
+frame before out, or with `Ctrl+L` loops to in; play at or past out
+starts at in; seeks and steps reach the whole source, and a seek past
+out while playing plays on. Opening or closing a video clears the span.
+`Player::close` leaves the player empty, its frames unshown.
+
+**Keys.** egui's `consume_key` matches a key whatever extra Shift or
+Alt is held, so the chords are tested first: `Ctrl+Shift+Z` (or
+`Ctrl+Y`) before `Ctrl+Z`, `Ctrl+Shift+S` before `Ctrl+S`, `Alt+K`
+before `K`. `I`, `O`, `M`, `Delete`, `Alt+[` and `Alt+]` are the
+strip's (amendment 2 item 36 keeps `J`, `K` and `L` for M5).
+
+**Tests** (`crates/app/tests/reframe.rs`, on lavapipe, the UI thread
+marked): the trim plays to out, again from in, and loops; `Alt+K` keys,
+the viewer draws the keys' view between keys, Edit ▸ Undo by its step's
+name and `Ctrl+Shift+Z` redo; a change off a key settles into a
+look-around with its badge and a step ends it, and playing makes any
+change one; a drag on a key is one "Reframe" step that undo takes back;
+a lane's only key takes a zoom anywhere; the strip's click, drag, ease
+menu, Delete, marker and in handle; save as, reopen with Don't save and
+with Save, and quit asking. The viewer's under-cursor tests run with a
+360, a 16:9 and a 9:16 output.
+
+Why:
+- **An untitled project at once**, rather than a viewer that plays a
+  file until the user makes a project: every reframing gesture is then
+  an edit with undo, and saving is the only extra step.
+- **Three looks** follow section 10.2: nothing is keyed by accident,
+  and a key is one press away. The rest before a scroll's edit keeps a
+  wheel's many events one undo step.
+- **The view on screen at the project's making**, on the UI thread: a
+  view taken when the job started would jump back if the user dragged
+  meanwhile.
+
+Revisit if: M5's multi-clip timeline replaces the strip; a user finds
+the 400 ms rest too short or long; or M2.7's sphere overview needs the
+360 output keyed from the viewer.
 
 ## Open
 
