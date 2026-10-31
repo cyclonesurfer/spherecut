@@ -1,19 +1,24 @@
 //! The YUV pass (M2 plan section 7.3) on lavapipe: against its CPU
 //! reference on every 8-bit code and a 10-bit ramp, in each of the four
 //! layouts, with the rows' padding zero; and a synthetic equirect
-//! rendered at the identity comes back to its own codes.
+//! rendered at the identity comes back to its own codes, and to the
+//! CPU's codes of its own linear render everywhere. The pass and the
+//! round trip run on every GPU too, in Tier 2 (amendment 2 item 34).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
-use common::{Kind, color, frame, gpu};
+use common::{Kind, color, frame, gpu, hardware_gpu, hardware_gpus};
 use glam::DQuat;
 use spherecut_core::video::{ChromaSiting, Matrix, Range};
 use spherecut_render::readback::round_f16;
 use spherecut_render::yuv::{self, YuvConverter, YuvLayout, YuvShape};
-use spherecut_render::{StillOptions, StillRenderer, ViewParams};
+use spherecut_render::{
+    AdapterChoice, Depth, Gpu, Pixels, StillOptions, StillRenderer, ViewParams,
+};
 use spherecut_synth::RgbImage;
+use spherecut_testkit::tier2;
 
 /// The bits of `v`, an IEEE half already.
 fn bits_of_half(v: f64) -> u16 {
@@ -39,7 +44,7 @@ fn srgb_eotf(v: f64) -> f64 {
 
 /// A `size` linear target holding `rgb` (R, G, B per pixel), each value
 /// as its nearest half, and those halves.
-fn target(size: (u32, u32), rgb: &[f64]) -> (wgpu::Texture, Vec<f64>) {
+fn target(g: &Gpu, size: (u32, u32), rgb: &[f64]) -> (wgpu::Texture, Vec<f64>) {
     let halves: Vec<f64> = rgb.iter().map(|v| round_f16(*v)).collect();
     let texels: Vec<u16> = halves
         .chunks(3)
@@ -52,7 +57,6 @@ fn target(size: (u32, u32), rgb: &[f64]) -> (wgpu::Texture, Vec<f64>) {
             ]
         })
         .collect();
-    let g = gpu();
     let texture = g.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("yuv test input"),
         size: wgpu::Extent3d {
@@ -84,8 +88,7 @@ fn target(size: (u32, u32), rgb: &[f64]) -> (wgpu::Texture, Vec<f64>) {
     (texture, halves)
 }
 
-fn convert(texture: &wgpu::Texture, shape: &YuvShape) -> Vec<u8> {
-    let g = gpu();
+fn convert(g: &Gpu, texture: &wgpu::Texture, shape: &YuvShape) -> Vec<u8> {
     let converter = YuvConverter::new(g);
     let out = YuvConverter::buffer(g, shape);
     let mut enc = g
@@ -177,19 +180,26 @@ fn ten_bit_ramp() -> Vec<f64> {
 
 #[test]
 fn the_pass_matches_its_reference_in_every_layout() {
+    pass_matches_reference(gpu());
+}
+
+fn pass_matches_reference(g: &Gpu) {
     let size = (64, 32);
     for (input, rgb) in [
         ("every 8-bit code", every_code()),
         ("a 10-bit ramp", ten_bit_ramp()),
     ] {
-        let (texture, halves) = target(size, &rgb);
+        let (texture, halves) = target(g, size, &rgb);
         let codes = yuv::reference(&halves, size);
         for layout in YuvLayout::ALL {
             let shape = YuvShape::new(layout, size).unwrap();
-            let got = convert(&texture, &shape);
+            let got = convert(g, &texture, &shape);
             let what = format!("{input}, {}", layout.name());
             let ties = compare(&what, &shape, &got, &codes);
-            eprintln!("{what}: exact, {ties} samples near a tie");
+            eprintln!(
+                "{what} on {}: exact, {ties} samples near a tie",
+                g.caps.info.name
+            );
             // About 2 % of samples sit within 0.01 codes of a tie, as
             // chance has it; many more would mean the margin hides a
             // rounding fault.
@@ -207,10 +217,10 @@ fn the_pass_matches_its_reference_in_every_layout() {
 #[test]
 fn the_layouts_hold_the_same_codes() {
     let size = (64, 32);
-    let (texture, _) = target(size, &every_code());
+    let (texture, _) = target(gpu(), size, &every_code());
     let read = |l| {
         let shape = YuvShape::new(l, size).unwrap();
-        let data = convert(&texture, &shape);
+        let data = convert(gpu(), &texture, &shape);
         (shape, data)
     };
     for (a, b) in [
@@ -289,6 +299,10 @@ fn blocks() -> (Vec<u8>, Vec<u8>) {
 /// tolerance).
 #[test]
 fn an_identity_render_comes_back_to_its_codes() {
+    identity_round_trip(gpu());
+}
+
+fn identity_round_trip(g: &Gpu) {
     let (w, h) = (256u32, 128u32);
     let limited709 = color(Range::Limited, Matrix::Bt709, ChromaSiting::Left);
     let blank = RgbImage {
@@ -305,18 +319,28 @@ fn an_identity_render_comes_back_to_its_codes() {
             bytes[r * *stride..r * *stride + row].copy_from_slice(&codes[r * row..(r + 1) * row]);
         }
     }
-    let mut renderer = StillRenderer::new(gpu());
+    let mut renderer = StillRenderer::new(g);
+    let views = [ViewParams::equirect(DQuat::IDENTITY)];
+    // The same chain on the CPU, from the render's own linear target:
+    // equal everywhere, the blocks' edges too (amendment 2 item 13).
+    let linear = StillOptions {
+        depth: Depth::Linear,
+        ..StillOptions::default()
+    };
+    let lit: Vec<f64> = match renderer
+        .render(g, &f, &views[0], (w, h), &linear)
+        .unwrap()
+        .pixels
+    {
+        Pixels::LinearF32(p) => p.iter().map(|v| f64::from(*v)).collect(),
+        _ => unreachable!(),
+    };
+    let chain = yuv::reference(&lit, (w, h));
     for layout in YuvLayout::ALL {
         let got = renderer
-            .render_yuv(
-                gpu(),
-                &f,
-                &[ViewParams::equirect(DQuat::IDENTITY)],
-                (w, h),
-                &StillOptions::default(),
-                layout,
-            )
+            .render_yuv(g, &f, &views, (w, h), &StillOptions::default(), layout)
             .unwrap();
+        compare(layout.name(), &got.shape, &got.data, &chain);
         let k = if layout.bits() == 10 { 4 } else { 1 };
         let mut worst = [0u32; 3];
         let mut checked = 0;
@@ -342,8 +366,9 @@ fn an_identity_render_comes_back_to_its_codes() {
             }
         }
         eprintln!(
-            "{}: luma within {}, Cb within {}, Cr within {} codes ({checked} chroma samples)",
+            "{} on {}: luma within {}, Cb within {}, Cr within {} codes ({checked} chroma samples)",
             layout.name(),
+            g.caps.info.name,
             worst[0],
             worst[1],
             worst[2]
@@ -355,5 +380,27 @@ fn an_identity_render_comes_back_to_its_codes() {
             "{}: {worst:?}",
             layout.name()
         );
+    }
+}
+
+/// The pass against its reference, and the round trip, on each GPU (or
+/// the one `SPHERECUT_ADAPTER` names): the same rules as on lavapipe,
+/// where the GPU's own `pow` decides only codes within 0.01 of a tie.
+#[test]
+#[ignore = "tier2: needs a GPU (RADV or ANV)"]
+fn yuv_on_gpu_matches_reference() {
+    tier2::require_hw_run();
+    let gpus = if AdapterChoice::from_env().is_some() {
+        vec![hardware_gpu()]
+    } else {
+        let (gpus, seen) = hardware_gpus();
+        if gpus.is_empty() {
+            tier2::skip(format!("no GPU: Vulkan lists only {}", seen.join(", ")));
+        }
+        gpus
+    };
+    for g in &gpus {
+        pass_matches_reference(g);
+        identity_round_trip(g);
     }
 }

@@ -26,6 +26,7 @@ pub mod error;
 pub mod frame;
 pub mod gpu;
 pub mod layouts;
+pub mod output;
 pub mod plane;
 pub mod project;
 pub mod readback;
@@ -43,6 +44,7 @@ pub use encode::{Encoder, PlaceUniform};
 pub use error::RenderError;
 pub use frame::GpuFrame;
 pub use gpu::{AdapterChoice, Gpu, GpuCaps};
+pub use output::FrameViews;
 pub use plane::{LayoutKind, PlaneFormat, PlaneShape, SlotShape};
 pub use project::{
     DebugMode, Filter, Framing, LinearTarget, OutKind, Projector, ViewParams, ViewUniform,

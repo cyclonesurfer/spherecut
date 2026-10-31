@@ -197,7 +197,7 @@ fn the_output_frame_is_drawn_and_dimmed_past_its_edges() {
     let rect = [(w - fw) / 2.0, 0.0, fw, h];
     let framed = v.framed(Framing { rect, dim: 0.4 });
     let g = render(&f, &framed, StillOptions::default());
-    // Measured 51.57 dB.
+    // Measured 52.93 dB.
     check(
         "a framed view",
         &g,

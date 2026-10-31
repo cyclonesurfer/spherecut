@@ -47,7 +47,7 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-camera` | Per-camera raw formats: file pairing, vendor metadata, calibration | M3 |
 | `spherecut-stitch` | Lens calibration models, seam blending, exposure matching | M3 |
 | `spherecut-motion` | IMU ingest, time sync, orientation fusion, stabilization | M4 |
-| `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); later scopes | M1 slices 3a and 3b |
+| `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); for export, equirect output, the output frame, the YUV pass for the encoders, motion blur and a frame's views from the clip's keys (`output`, D49); later scopes | M1 slices 3a and 3b; M2.3 |
 | `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slices 5 and 6 |
 | `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
 | `spherecut-export` | Encode pipeline, render queue, metadata injection and validation | M2 |
@@ -670,9 +670,23 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
 * **`render_still`** (and `StillRenderer`, which keeps its pipelines)
   does all of it headless and reads back an `Image`: 8-bit through the
   encode pass, 16-bit or linear from the linear target.
+* **For export** *(M2.3, D49)*: a `ViewParams` also says what it
+  renders (`out`: the lens, or the whole sphere as equirect, turned by
+  its orientation) and may be framed (`Framing`: the lens spans a
+  rectangle of the target and goes on past it, dimmed, for the
+  reframer). `YuvConverter` (`yuv.wgsl`, compute) turns a linear target
+  into an encoder's planes in a storage buffer (NV12, P010, I420 or
+  I010; BT.709 limited range, chroma sited left, rows padded to 256
+  bytes). `Blur` adds each of a frame's views into a `vec4<f32>`
+  storage buffer and writes the mean back into the target.
+  `output::frame_views` gives an output's size and a frame's views from
+  `ViewAnim::at` (the shutter's, with blur); `StillRenderer::
+  render_blurred` and `render_yuv` render them, and the export (M2.4)
+  will too, so the parity reference and the export render one frame.
 * **`reference`** is the same projection in f64 on the CPU, with the
-  GPU's storage formats emulated; the Tier 1 tests compare the two on
-  lavapipe.
+  GPU's storage formats emulated (equirect output, framing and the
+  blurred mean too), and `yuv::reference` the YUV pass's; the Tier 1
+  tests compare the two on lavapipe.
 
 What is still planned *(M3 on)*, for every source type: in WGSL, "direction on the
 unit sphere → texel(s)" for the GoPro EAC pair and calibrated dual
