@@ -8558,10 +8558,28 @@ Why:
 - **Bands over a lower resolution or rate while held**: the bytes stay
   those of the free export, which the parity tests compare.
 
-Revisit if: odin's rerun with the viewer's lead still drops frames
-while 5.7K plays (then one export frame's turn on the video engine
-outlasts the lead: more slots while an export runs, or the export's
-decode in software while the viewer plays); wgpu-core stops holding the lock
+- **odin's rerun at 5c3e3a3 (PR #22):** the lead never ran out when a
+  stage looked (0 waits in all six exports), and the results were
+  3c1a727's: the 5.7K runs dropped 1 to 3 frames while the export ran,
+  with the viewer's decodes taking 38 to 77 ms in the gaps; the blur run
+  failed only its UI p99 (29.8 ms, 33.0 at 125%). The export decoded the
+  5.7K source at 37 fps beside the viewer's 30, so the video engine was
+  full, and a viewer decode waited behind the export's.
+- **M2.10d, turns (branch m2/share):** while the viewer plays, the
+  export's decode and encode each start a frame at most once a
+  `pace::SHARE` (0.5) of the viewer's frames: a 30 fps clip leaves the
+  export 15 decodes a second. The UI's pass gives the clip's frame length
+  (its rate, or its average rate when it varies); a stage waiting its
+  turn goes at once when the viewer stops. The smoke document counts the
+  frames that waited (`slowed`) and the time; gui_smoke's export line
+  says so. Pat was asked the same day whether an export should slow
+  down, pause, or be let off the gate while the viewer plays; this is
+  the first, built while the answer comes.
+
+Revisit if: odin's rerun with turns still drops frames while 5.7K plays
+(then the export's 8K encodes, each a long turn on the engine, are next:
+a smaller share, more slots while an export runs, or Pat's other
+answers); wgpu-core stops holding the lock
 through `maintain`'s wait, or fixes the timed wait's race, which would
 let a plain wait back; wgpu gains a second queue.
 

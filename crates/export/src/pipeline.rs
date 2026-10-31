@@ -857,6 +857,7 @@ fn decode_frames(
     seen.saw(&cur);
     let mut ahead: Option<Arc<VideoFrame>> = None;
     let mut ended = false;
+    let mut turn = None;
     for n in 0..plan.count() {
         if token.is_stopped() {
             return Ended::Stopped;
@@ -872,6 +873,7 @@ fn decode_frames(
                     // The viewer's decodes go first on the video engine.
                     if let Some(p) = pace {
                         p.yield_to_viewer();
+                        p.take_turn(&mut turn);
                     }
                     match Busy::time(&busy.decode, || dec.next_frame(&token)) {
                         Ok(NextFrame::Frame(f)) => {
@@ -1114,6 +1116,7 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
     };
     let mut capped = 0;
     let mut next = 0;
+    let mut turn = None;
     while next < plan.count() {
         if stop.is_shut_down() {
             return Err(ExportError::Cancelled.into());
@@ -1126,6 +1129,7 @@ fn encode(e: Encode<'_>) -> Result<(Mp4Writer, u64), Failed> {
         };
         if let Some(p) = pace {
             p.yield_to_viewer();
+            p.take_turn(&mut turn);
         }
         let at = plan.sequence_time(r.n).ok();
         if r.n != next {
