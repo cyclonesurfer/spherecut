@@ -4972,8 +4972,9 @@ What:
       `budget::recheck` gives: what the setting stands for, and with
       under 1 GiB available no more than a quarter of it, below an
       explicit size too.
-  - At shutdown it waits for the GPU at most 1 s (`PollType::Wait`),
-    then closes the cache, which ends every wait in it.
+  - At shutdown it waits for the GPU at most 1 s
+    (`Gpu::wait_for_submitted_until`, D56), then closes the cache,
+    which ends every wait in it.
 - **The presenter** (`Player::present(now)`), once a UI frame:
   - **The time.** It picks for `clock.time_at(now + latency)`, plus
     `av_offset` while the clock runs: a positive offset shows the frame
@@ -8440,6 +8441,69 @@ while held (then a smaller unit of work than a frame, or the export on
 a second queue); a user wants the tabs in one row on a wide screen; M5's
 render queue takes the export out of the window; or a user wants the
 quit to ask about a running export.
+
+## D56. An export on the window's device: no wait through wgpu, and a smaller unit
+
+*2026-10-31, M2.10, from odin's M2 run at 0663e05. Updates D41 and
+D55.*
+
+What:
+
+- **Why the window missed frames while it exported.** On odin
+  `gui_smoke` presented 91 %, 85 % and 58 % of its frames under the
+  1080p, 8K 360 and 4K-with-blur exports (gate 90 %). The submit gate
+  (D41) held: no export submission landed in the UI's window. The
+  stall was on the CPU, in wgpu-core 30.0.1. `Device::poll` holds the
+  device's `snatchable_lock` to read through `maintain`'s wait, and a
+  surface's present takes it to write (`present.rs`), as do
+  `Texture::destroy` and `Buffer::destroy`. parking_lot's lock is fair,
+  so once the present waits, readers wait too. So the export's wait for
+  a frame held the window's present until the GPU finished the frame.
+  `Queue::write_texture` holds the same lock while it makes a staging
+  buffer and copies a frame into it.
+- **`Gpu::wait_for_submitted`** is the only wait for the GPU off the
+  UI thread. It registers `on_submitted_work_done` and loops: a
+  `PollType::Poll` (never a wait), a check for a lost device, then a
+  condvar wait of at most `POLL_EVERY` (0.5 ms). The readbacks, the
+  YUV read and the player's shutdown wait use it
+  (`wait_for_submitted_until` for a bounded one).
+- **Not a timed `PollType::Wait`.** One that times out while another
+  thread triages the same device trips wgpu-core's assertion in
+  `resource.rs` ("If the queue is empty, the current submission index
+  ..."): the upload tests hit it with 1 ms slices.
+- **The app's export uploads through the staging belt** (D36's path),
+  not `write_texture`. The CLI's keeps the default.
+- **A smaller unit while the pace holds** (`StillRenderer::share`,
+  set from D55's pace each frame): one submission in flight, each
+  after the gate; a view larger than 3840 × 2160 drawn in bands of that
+  many pixels (even rows, scissored, `LoadOp::Load`); the readback in
+  copies of 16 MiB. The blur keeps one submission a view. The free
+  export, and the CLI, are as before.
+- **Kept from frame to frame**: the YUV pass's output buffer and the
+  readback's staging buffer, when the size matches (88 MB each at 8K
+  in P010). A read that fails drops the staging buffer.
+- **Tests** (Tier 1, lavapipe): render's
+  `a_wait_for_the_gpu_holds_wgpus_lock_a_moment_at_a_time`, a second
+  destroy timed while another thread waits on 32 copies of 32 MiB: 114
+  ms behind wgpu's wait (the control), 0.05 ms behind
+  `wait_for_submitted`. lavapipe's first destroy of a texture waits for
+  the queue, so the test destroys each once first. render's
+  `a_shared_render_makes_the_same_bytes`: bands and copies small enough
+  to split a 192 × 96 frame give the same bytes as one pass, every
+  layout and depth, with blur. The hardware measure is `gui_smoke`'s
+  export runs on Tier 2.
+
+Why:
+- **Polling over a second queue or a device of the export's own.** A
+  second queue isn't in wgpu 30's API; a second device would copy each
+  decoded frame across devices, which path B exists to avoid (D25).
+- **Bands over a lower resolution or rate while held**: the bytes stay
+  those of the free export, which the parity tests compare.
+
+Revisit if: odin's rerun still misses the 90 % (then read its late
+passes for the next lock); wgpu-core stops holding the lock through
+`maintain`'s wait, or fixes the timed wait's race, which would let a
+plain wait back; wgpu gains a second queue.
 
 ## Open
 

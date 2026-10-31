@@ -566,6 +566,28 @@ below:
   the encoder's last flush waits for it; the flat blur's sum buffer at
   4K is 1 % under wgpu's default binding limit.
 
+**Amendment 11 (2026-10-31, M2.10, after odin's M2 run; D56).** Item 22's
+measurement missed on odin: 58 % of the UI frames presented under the
+4K export with blur, 85 % under the 8K one (PROGRESS, "odin's M2 run").
+The unit of work was part of it, but the larger part was a lock: wgpu
+holds the device's resource lock through `Device::poll`'s wait and
+through `Queue::write_texture`'s copy, and a surface's present takes it
+to write. So, for every thread but the UI's:
+
+- **No wait through wgpu.** `Gpu::wait_for_submitted` polls without
+  waiting every 0.5 ms and sleeps between, woken by
+  `on_submitted_work_done`. A timed `Device::poll` wait is no way out:
+  one that times out while another thread polls trips wgpu-core's
+  assertion in `maintain`.
+- **The app's export uploads through the belt**, as the player does.
+- **The pace's smaller unit**: while the pace holds, the export's
+  renderer has one submission in flight, each after the gate; a view is
+  drawn in bands of at most 3840 × 2160 pixels, and read back in copies
+  of 16 MiB. The free export (the pace not held, and the CLI) is as
+  before, with its YUV and readback buffers kept from frame to frame.
+
+A second queue stays unneeded unless odin's rerun says otherwise.
+
 ## 1. Summary
 
 M2 is the first version Pat can use for real: open one 360 clip, trim

@@ -401,7 +401,8 @@ they found, fixed:
 
 Ticked in `PLAN.md` with M2.9, after the fresh review's fixes. Five stay
 open: the project format waits on Pat's choice (JSON is the working one,
-D47), the export's UI pace on odin's M2.8 run (amendment 9), and the
+D47), the export's UI pace on odin's rerun of M2.10's fix (odin's M2
+run missed it; the section after this one says why), and the
 4K30 hardware row and the toolkit check each on huginn (odin's are in:
 D52's 4K30 table, D53's runs).
 
@@ -419,6 +420,58 @@ D52's 4K30 table, D53's runs).
 | Parity tests against `spherecut frame`, flat and 360 | D52's floors (flat, 360, AV1 8 and 10-bit, the draft); `crates/cli/tests/render.rs`'s sample against `spherecut frame` |
 | `spherecut render`, its JSON lines, `--overwrite`, Ctrl+C | D51; `crates/cli/tests/render.rs` (start, progress and result lines; a file in the way; Ctrl+C and a full disk leave nothing) |
 | Motion blur, off by default, with a golden | D49; the `blur_pan` golden with its unblurred control (20.3 dB) |
+
+## odin's M2 run (0663e05) and the export's pace (M2.10)
+
+odin ran the full hw-test at 0663e05 on 2026-10-31 (PR #19,
+`hw-reports/odin-0663e057fe.md`, and the GUI part at 125 % in
+`odin-0663e05-125.md`): 44 Tier 2 tests passed, 2 failed and 1 was
+skipped (no stitched sample yet, clip 12); Tier 1 on the machine passed,
+1183 tests. The failures:
+
+- **`gui_smoke` while it exported** (amendment 9's measurement of item
+  22). The window presented 91 % of its frames under the project's 1080p
+  export, 85 % under an 8K 360 one and 58 % under a 4K flat one with
+  motion blur (45 % at 125 %), against a gate of 90 %; the runs without
+  an export passed. No export frame waited for a UI pass: each took
+  longer than one (92 ms of render a frame with blur), and the viewer's
+  upload thread stalled for up to 77 ms meanwhile.
+- **`zero_copy_matches_copy_path`**, the intermittent H3 found: one
+  view of one X5 frame differs by 19 values of 2,764,800, and renders as
+  the copy when rendered again.
+
+The cause of the first was on the CPU, in wgpu-core 30, read in its
+source and then measured: a wait for the GPU through `Device::poll`
+holds the device's resource lock to read, and a surface's present takes
+it to write, so the export's wait for a frame's work held the window's
+present, and every submission queued behind the present, until the GPU
+finished. `Queue::write_texture` also copies a frame into a staging
+buffer it makes, under the same lock. A third finding came from the
+fix's own tests: a `Device::poll` wait with a timeout that times out
+while another thread polls trips an assertion in wgpu-core's `maintain`,
+so a wait in short slices isn't a way out.
+
+M2.10 (branch `m2/pace`, D56) answers each:
+
+- `Gpu::wait_for_submitted` waits without wgpu's wait: it polls every
+  0.5 ms and sleeps between, woken by `on_submitted_work_done`. The
+  readbacks, the YUV read and the player's shutdown wait use it. A
+  Tier 1 test measures the lock: a texture's destroy, which takes it as
+  a present does, waited 114 ms behind wgpu's wait and 0.05 ms behind
+  this one (`render.rs`, with wgpu's wait as its control).
+- The app's export uploads through the staging belt, as the player does.
+- While the viewer plays, the export's renderer shares the device
+  (`StillRenderer::share`): each submission waits for the one before
+  and at the submit gate, a view larger than 4K is drawn in bands of 4K's
+  pixels, and the frame is read back in copies of 16 MiB, so the
+  window's frame queues behind one band at most. A shared render makes
+  the same bytes as an unshared one (`yuv.rs`, every layout and depth,
+  bands small enough to split a 192 × 96 frame).
+- The YUV pass's output and the readback buffer are kept from frame to
+  frame: at 8K in P010 they are 88 MB each.
+
+odin's rerun of `gui_smoke`, `gui_proto` and the export tests on
+`m2/pace` is under way.
 
 ## A1: the MCP server
 

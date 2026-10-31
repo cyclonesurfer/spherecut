@@ -753,9 +753,14 @@ The app's export (M2.7, D55) renders on the viewer's device and queue.
 Its `ExportJob` carries a `Pace`, shared with the UI: each UI pass says
 whether the UI is busy (the viewer plays, a drag runs), and while it
 is, the render stage waits before each frame for the UI's next pass,
-or 100 ms at most. The work between two presents is then one export
-frame; the submit gate (D41) keeps it out of the window between the
-UI's acquire and its present.
+or 100 ms at most, and its renderer shares the device
+(`StillRenderer::share`, M2.10, D56): one submission in flight, each at
+the gate, a view larger than 4K in bands of 4K's pixels, the readback
+in copies of 16 MiB. The submit gate (D41) keeps that work out of the
+window between the UI's acquire and its present. It uploads through the
+staging belt, and no thread but the UI's waits for the GPU through
+wgpu's `Device::poll` wait, which holds the lock a present takes: they
+use `Gpu::wait_for_submitted`, which polls without waiting.
 
 ## The GUI *(M1 slices 7 and 8)*
 
