@@ -1,0 +1,58 @@
+[
+ {
+  "model": "3.8-q4",
+  "task": "marker",
+  "vision": false,
+  "ok": false,
+  "why": "no answer",
+  "steps": 7,
+  "calls": 9,
+  "errors": 1,
+  "images": 5,
+  "prompt_tokens": 7122,
+  "completion_tokens": 17041,
+  "seconds": 1592.1
+ },
+ {
+  "model": "3.8-q4",
+  "task": "check-grid-hevc8-30-untagged",
+  "vision": false,
+  "ok": true,
+  "why": "pass False (truth False), rules ['spherical_metadata'] (truth ['spherical_metadata'])",
+  "steps": 3,
+  "calls": 3,
+  "errors": 0,
+  "images": 1,
+  "prompt_tokens": 5280,
+  "completion_tokens": 968,
+  "seconds": 48.7
+ },
+ {
+  "model": "3.8-q4",
+  "task": "check-grid-hevc8-30",
+  "vision": false,
+  "ok": true,
+  "why": "pass True (truth True), rules [] (truth [])",
+  "steps": 3,
+  "calls": 3,
+  "errors": 0,
+  "images": 1,
+  "prompt_tokens": 4626,
+  "completion_tokens": 730,
+  "seconds": 33.4
+ },
+ {
+  "model": "3.8-q4",
+  "task": "stutter",
+  "vision": false,
+  "ok": true,
+  "why": "{'gaps': 2, 'dups': 2, 'repeated_pictures': 10} (truth {'gaps': 2, 'dups': 2, 'repeated_pictures': 10})",
+  "steps": 3,
+  "calls": 5,
+  "errors": 0,
+  "images": 0,
+  "prompt_tokens": 10521,
+  "completion_tokens": 1537,
+  "seconds": 94.5
+ }
+]

@@ -202,12 +202,28 @@ def last_json(text):
     return last
 
 
+def any_of_types(v):
+    """`"type": [a, b]` as `"anyOf": [{"type": a}, {"type": b}]`, for chat
+    templates that can't render a list of types (gemma-4's in llama.cpp:
+    "map: filter-mapping not implemented")."""
+    if isinstance(v, list):
+        return [any_of_types(x) for x in v]
+    if not isinstance(v, dict):
+        return v
+    v = {k: any_of_types(x) for k, x in v.items()}
+    if isinstance(v.get("type"), list):
+        v["anyOf"] = [{"type": t} for t in v.pop("type")]
+    return v
+
+
 def run(args, model, vision, task, mcp, skill, log):
     name, prompt, shape, grade = task
     tools = [
         {"type": "function", "function": {"name": t["name"], "description": t.get("description", ""), "parameters": t["inputSchema"]}}
         for t in mcp.tools
     ]
+    if args.any_of_types:
+        tools = any_of_types(tools)
     system = (
         "You are an agent with Spherecut's tools for 360° video. The files are under the server's read root; "
         "name them by their relative paths.\n\n# The server's instructions\n\n"
@@ -228,7 +244,10 @@ def run(args, model, vision, task, mcp, skill, log):
         try:
             r = chat(args.base, model, messages, tools)
         except (urllib.error.URLError, TimeoutError) as e:
-            log.write(json.dumps({"error": str(e)}) + "\n")
+            entry = {"error": str(e)}
+            if isinstance(e, urllib.error.HTTPError):
+                entry["body"] = e.read().decode(errors="replace")[:4000]
+            log.write(json.dumps(entry) + "\n")
             break
         u = r.get("usage") or {}
         stats["prompt_tokens"] = max(stats["prompt_tokens"], u.get("prompt_tokens", 0))
@@ -296,6 +315,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-steps", type=int, default=16)
     ap.add_argument("--only", default="")
+    ap.add_argument("--any-of-types", action="store_true", help="send list-valued schema types as anyOf")
     args = ap.parse_args()
     skill = open(args.skill).read().split("---", 2)[-1]
     os.makedirs(args.out, exist_ok=True)

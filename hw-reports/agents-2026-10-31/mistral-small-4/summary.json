@@ -1,0 +1,58 @@
+[
+ {
+  "model": "mistral-small-4",
+  "task": "marker",
+  "vision": true,
+  "ok": false,
+  "why": "no answer",
+  "steps": 16,
+  "calls": 16,
+  "errors": 15,
+  "images": 0,
+  "prompt_tokens": 5222,
+  "completion_tokens": 807,
+  "seconds": 53.5
+ },
+ {
+  "model": "mistral-small-4",
+  "task": "check-grid-hevc8-30-untagged",
+  "vision": true,
+  "ok": true,
+  "why": "pass False (truth False), rules ['spherical_metadata'] (truth ['spherical_metadata'])",
+  "steps": 2,
+  "calls": 1,
+  "errors": 0,
+  "images": 0,
+  "prompt_tokens": 4031,
+  "completion_tokens": 303,
+  "seconds": 18.6
+ },
+ {
+  "model": "mistral-small-4",
+  "task": "check-grid-hevc8-30",
+  "vision": true,
+  "ok": false,
+  "why": "no answer",
+  "steps": 9,
+  "calls": 8,
+  "errors": 4,
+  "images": 1,
+  "prompt_tokens": 4711,
+  "completion_tokens": 338,
+  "seconds": 20.8
+ },
+ {
+  "model": "mistral-small-4",
+  "task": "stutter",
+  "vision": true,
+  "ok": false,
+  "why": "{'gaps': 0, 'dups': 2, 'repeated_pictures': 10} (truth {'gaps': 2, 'dups': 2, 'repeated_pictures': 10})",
+  "steps": 3,
+  "calls": 2,
+  "errors": 0,
+  "images": 0,
+  "prompt_tokens": 9431,
+  "completion_tokens": 232,
+  "seconds": 40.7
+ }
+]
