@@ -14,6 +14,7 @@ use thiserror::Error;
 pub mod audio;
 pub mod backend;
 pub mod color;
+pub mod copy;
 pub mod decode;
 pub mod detect;
 pub mod doctor;

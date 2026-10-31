@@ -65,6 +65,17 @@ pub enum Audio {
     Levels,
 }
 
+/// How a clip's audio is coded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioCodec {
+    /// FFmpeg's `aac`, without noise substitution.
+    Aac,
+    /// 16-bit PCM, which FFmpeg's MP4 muxer stores as ISO `ipcm`.
+    Pcm,
+    /// FFmpeg's own Opus encoder, which is experimental.
+    Opus,
+}
+
 #[derive(Debug, Clone)]
 pub struct Spec {
     pub name: String,
@@ -77,6 +88,8 @@ pub struct Spec {
     pub codec: Codec,
     pub bits: u32,
     pub audio: Audio,
+    /// What the audio is coded as.
+    pub audio_codec: AudioCodec,
     /// Write Spherical Video V2 (and SA3D for ambiX) metadata.
     pub spherical: bool,
     pub chroma: Chroma,
@@ -184,6 +197,7 @@ impl Default for Spec {
             codec: Codec::H264,
             bits: 8,
             audio: Audio::None,
+            audio_codec: AudioCodec::Aac,
             spherical: false,
             chroma: Chroma::Yuv420,
             color: CLIP_COLOR,
@@ -383,6 +397,21 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             options: [aac_options.clone(), vec![("aac_is".into(), "0".into())]].concat(),
         }),
     };
+    let audio_settings = audio_settings.map(|a| match spec.audio_codec {
+        AudioCodec::Aac => a,
+        AudioCodec::Pcm => AudioSettings {
+            encoder: "pcm_s16le".into(),
+            bit_rate: 0,
+            options: Vec::new(),
+            ..a
+        },
+        AudioCodec::Opus => AudioSettings {
+            encoder: "opus".into(),
+            bit_rate: 128_000 * a.channels as usize / 2,
+            options: vec![("strict".into(), "experimental".into())],
+            ..a
+        },
+    });
     let mut w = Mp4Writer::create(&out, &spec.video_settings()?, audio_settings.as_ref())?;
     // Exact per-frame sample counts: frame i covers samples
     // [i·sr/fps, (i+1)·sr/fps).

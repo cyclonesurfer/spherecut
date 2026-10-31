@@ -22,9 +22,7 @@ use spherecut_media::backend::{
     DecodeMode, DecoderEvent, Exactness, FfmpegBackend, MediaBackend, NextFrame, SeekMode,
     SeekOutcome, VideoDecode, VideoFrame, VideoRequest, VideoStreamInfo,
 };
-use spherecut_media::encode::{
-    AudioSettings, EncodeError, Mp4Writer, MuxOptions, StridedPlanes, VideoSettings,
-};
+use spherecut_media::encode::{EncodeError, Mp4Writer, MuxOptions, StridedPlanes, VideoSettings};
 use spherecut_media::inject::{EntryEdit, TrackKind};
 use spherecut_media::spherical::{StereoMode, write};
 use spherecut_render::output::frame_views;
@@ -169,17 +167,7 @@ pub(crate) fn run(
         let gpu = job.gpu.clone();
         move || render(gpu, look, plan, held_rx, yuv_tx, token)
     })?;
-    let audio_settings = audio_plan.as_ref().map(audio::Plan::settings);
-    let encoded = encode(
-        job,
-        &setup,
-        size,
-        plan,
-        yuv_rx,
-        (audio_settings.as_ref(), feed.as_mut()),
-        shared,
-        stop,
-    );
+    let encoded = encode(job, &setup, size, plan, yuv_rx, feed.as_mut(), shared, stop);
     let decoded = join(decoding, Stage::Decode);
     let rendered = join(rendering, Stage::Render);
     if stop.is_shut_down() {
@@ -209,12 +197,7 @@ pub(crate) fn run(
             boxes: write::sa3d_first_order_ambix(),
         });
     }
-    if let Some(at) = feed.as_ref().and_then(Feed::ended_at) {
-        warnings.push(format!(
-            "the clip's audio ends {:.3} s into the export: silence after",
-            at as f64 / f64::from(audio::RATE)
-        ));
-    }
+    warnings.extend(feed.as_ref().and_then(Feed::ended_early));
     let tmp = writer.finish_temp(&edits).map_err(|e| match e {
         EncodeError::Inject(e) => ExportError::failed(Stage::Metadata, None, e.to_string()),
         e => file_or(Stage::Mux, None, e),
@@ -247,8 +230,8 @@ pub(crate) fn run(
         ten_bit,
         audio: audio_plan.zip(feed.as_ref()).map(|(a, f)| AudioReport {
             stream: a.stream,
-            encoder: "aac",
-            rate: audio::RATE,
+            encoder: a.encoder(),
+            rate: f.rate(),
             channels: a.channels(),
             ambix: a.ambix,
             samples: f.total(),
@@ -506,7 +489,7 @@ fn encode(
     (width, height): (u32, u32),
     plan: FramePlan,
     rx: Receiver<Rendered>,
-    (audio_settings, mut feed): (Option<&AudioSettings>, Option<&mut Feed>),
+    mut feed: Option<&mut Feed>,
     shared: &Shared,
     stop: &StopSource,
 ) -> Result<(Mp4Writer, u64), ExportError> {
@@ -523,13 +506,15 @@ fn encode(
         crop_left: 0,
     };
     let mux = MuxOptions {
-        movie_timescale: Some(audio::RATE),
+        movie_timescale: Some(feed.as_deref().map_or(audio::RATE, Feed::rate)),
     };
-    let mut writer = Mp4Writer::create_with(&job.output, &settings, audio_settings, &mux)
+    let track = feed.as_deref().map(Feed::track);
+    let mut writer = Mp4Writer::create_with(&job.output, &settings, track, &mux)
         .map_err(|e| writer_error(&job.output, e))?;
     let token = stop.current();
-    // The audio up to output sample `upto`; a stop is the cancel.
-    let mut audio_to = |writer: &mut Mp4Writer, upto: u64| -> Result<(), ExportError> {
+    // The audio up to export time `upto`, or all of it; a stop is the
+    // cancel.
+    let mut audio_to = |writer: &mut Mp4Writer, upto: Option<Time>| -> Result<(), ExportError> {
         match feed.as_deref_mut().map(|f| f.feed(writer, upto, &token)) {
             Some(Ok(false)) => Err(ExportError::Cancelled),
             Some(Err(e)) => Err(e),
@@ -575,7 +560,7 @@ fn encode(
         let end = plan
             .sequence_time(next)
             .map_err(|e| ExportError::failed(Stage::Encode, at, e.to_string()))?;
-        audio_to(&mut writer, audio::sample(end)?.max(0) as u64)?;
+        audio_to(&mut writer, Some(end))?;
         shared.muxed(next);
     }
     if next < plan.count() {
@@ -587,7 +572,7 @@ fn encode(
             "the frames stopped coming",
         ));
     }
-    audio_to(&mut writer, u64::MAX)?;
+    audio_to(&mut writer, None)?;
     Ok((writer, capped))
 }
 

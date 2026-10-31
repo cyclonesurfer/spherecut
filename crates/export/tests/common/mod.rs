@@ -17,7 +17,7 @@ use spherecut_core::project::{
 };
 use spherecut_core::time::{Rational, Time};
 use spherecut_core::video::VideoPlanes;
-use spherecut_export::{Export, ExportJob, FramePlan, Report};
+use spherecut_export::{Export, ExportError, ExportJob, FramePlan, Report};
 use spherecut_media::backend::{
     FfmpegBackend, MediaBackend, NextFrame, SeekMode, SeekOutcome, VideoDecode, VideoFrame,
     VideoRequest,
@@ -185,12 +185,18 @@ pub fn with_audio(project: &mut Project, audio: AudioChoice) {
 }
 
 pub fn export(project: &Project, out: &Path) -> Report {
+    try_export(project, out).unwrap()
+}
+
+/// The export of `project` to `out`, as it ended.
+pub fn try_export(project: &Project, out: &Path) -> Result<Report, ExportError> {
     let job = ExportJob::new(project.clone(), out, gpu().clone());
-    let mut e = Export::start(job).unwrap();
-    let report = e.wait(Duration::from_secs(1800)).expect("the export ends");
-    let report = report.unwrap();
+    let mut e = Export::start(job)?;
+    let report = e
+        .wait(Duration::from_secs(1800))
+        .expect("the export ends")?;
     assert_eq!(e.progress().frames_done, report.frames);
-    report
+    Ok(report)
 }
 
 /// Every frame of `path` from the start, in order.

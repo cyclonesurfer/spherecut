@@ -1,5 +1,6 @@
 //! A small synchronous MP4 writer: one video stream from planar YUV frames
-//! and an optional audio stream from planar float samples.
+//! and an optional audio stream, encoded from planar float samples or
+//! copied from another file's packets ([`crate::copy`]).
 //!
 //! The file is written under a temporary name next to its destination and
 //! renamed into place when it is finished, the way [`crate::inject`]
@@ -18,6 +19,7 @@ use spherecut_core::video::ColorCodes;
 use spherecut_core::{FrameRate, Rational, may_block};
 use thiserror::Error;
 
+use crate::copy::{AudioCopy, Copied};
 use crate::ffi;
 use crate::inject::{self, EntryEdit, InjectError};
 use crate::{ff, init};
@@ -202,6 +204,15 @@ pub struct AudioSettings {
     /// Encoder options, e.g. `[("strict", "experimental")]` for FFmpeg's
     /// own Opus encoder.
     pub options: Vec<(String, String)>,
+}
+
+/// What a writer's audio track holds.
+#[derive(Debug, Clone, Copy)]
+pub enum AudioTrack<'a> {
+    /// Samples given to [`Mp4Writer::push_audio`], encoded.
+    Encode(&'a AudioSettings),
+    /// Packets given to [`Mp4Writer::push_copied`], from this stream.
+    Copy(&'a AudioCopy),
 }
 
 /// How the muxer writes the file, beyond its streams.
@@ -459,7 +470,7 @@ pub struct Mp4Writer {
     frame_ticks: Option<i64>,
     /// The timestamp of the last frame pushed.
     last_video_pts: Option<i64>,
-    audio: Option<AudioState>,
+    audio: Option<AudioOut>,
 }
 
 impl std::fmt::Debug for Mp4Writer {
@@ -470,6 +481,15 @@ impl std::fmt::Debug for Mp4Writer {
     }
 }
 
+enum AudioOut {
+    Encoded(AudioState),
+    /// Packets copied from another file, in ticks of `tb`, its samples.
+    Copied {
+        index: usize,
+        tb: ff::Rational,
+    },
+}
+
 struct AudioState {
     enc: ff::encoder::Audio,
     index: usize,
@@ -478,8 +498,58 @@ struct AudioState {
     frame_size: usize,
     channels: usize,
     layout: ff::ChannelLayout,
+    samples: Samples,
     pending: Vec<Vec<f32>>,
     next_pts: i64,
+}
+
+/// How the writer hands its encoder samples: planar float, or packed
+/// integers for a PCM encoder, which takes nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Samples {
+    PlanarF32,
+    PackedS16,
+    PackedS32,
+}
+
+impl Samples {
+    fn ff(self) -> ff::format::Sample {
+        use ff::format::sample::Type;
+        match self {
+            Samples::PlanarF32 => PLANAR_F32,
+            Samples::PackedS16 => ff::format::Sample::I16(Type::Packed),
+            Samples::PackedS32 => ff::format::Sample::I32(Type::Packed),
+        }
+    }
+
+    /// Write `n` frames of `planar` into `frame`.
+    fn fill(self, frame: &mut ff::frame::Audio, planar: &[Vec<f32>], n: usize) {
+        let channels = planar.len();
+        match self {
+            Samples::PlanarF32 => {
+                for (ch, p) in planar.iter().enumerate() {
+                    frame.plane_mut::<f32>(ch)[..n].copy_from_slice(&p[..n]);
+                }
+            }
+            Samples::PackedS16 | Samples::PackedS32 => {
+                let bytes = if self == Samples::PackedS16 { 2 } else { 4 };
+                let data = frame.data_mut(0);
+                for i in 0..n {
+                    for (ch, p) in planar.iter().enumerate() {
+                        let x = f64::from(p[i].clamp(-1.0, 1.0));
+                        let at = (i * channels + ch) * bytes;
+                        if bytes == 2 {
+                            let v = (x * f64::from(i16::MAX)).round() as i16;
+                            data[at..at + 2].copy_from_slice(&v.to_ne_bytes());
+                        } else {
+                            let v = (x * f64::from(i32::MAX)).round() as i32;
+                            data[at..at + 4].copy_from_slice(&v.to_ne_bytes());
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// FFmpeg's default layout for `channels`.
@@ -592,22 +662,32 @@ fn write_packet(
     })
 }
 
-/// The only sample format the writer sends.
+/// The sample format the writer sends an encoder that isn't PCM's.
 const PLANAR_F32: ff::format::Sample = ff::format::Sample::F32(ff::format::sample::Type::Planar);
 
-/// The encoder for `a`, if this FFmpeg has it and it takes what we send.
-fn audio_encoder(a: &AudioSettings) -> Result<ff::Codec, EncodeError> {
+/// The encoder for `a`, if this FFmpeg has it and it takes what we send,
+/// and how we send it.
+fn audio_encoder(a: &AudioSettings) -> Result<(ff::Codec, Samples), EncodeError> {
     let codec = ff::encoder::find_by_name(&a.encoder)
         .ok_or_else(|| EncodeError::NoEncoder(a.encoder.clone()))?;
-    // We only send planar float; say so rather than let the encoder fail to
-    // open with EINVAL (libopus takes packed).
-    if ffi::sample_formats(&codec).is_some_and(|f| !f.contains(&ffi::SAMPLE_FMT_FLTP)) {
-        return Err(EncodeError::Invalid(format!(
+    let Some(formats) = ffi::sample_formats(&codec) else {
+        return Ok((codec, Samples::PlanarF32));
+    };
+    let pcm = a.encoder.starts_with("pcm_");
+    // We send planar float, or packed integers to PCM; say so rather than
+    // let the encoder fail to open with EINVAL (libopus takes packed).
+    if formats.contains(&ffi::SAMPLE_FMT_FLTP) {
+        Ok((codec, Samples::PlanarF32))
+    } else if pcm && formats.contains(&ffi::SAMPLE_FMT_S16) {
+        Ok((codec, Samples::PackedS16))
+    } else if pcm && formats.contains(&ffi::SAMPLE_FMT_S32) {
+        Ok((codec, Samples::PackedS32))
+    } else {
+        Err(EncodeError::Invalid(format!(
             "audio encoder `{}` does not take planar float samples",
             a.encoder
-        )));
+        )))
     }
-    Ok(codec)
 }
 
 fn ff_rational(r: Rational) -> Result<ff::Rational, EncodeError> {
@@ -636,14 +716,15 @@ impl Mp4Writer {
         v: &VideoSettings,
         a: Option<&AudioSettings>,
     ) -> Result<Self, EncodeError> {
-        Self::create_with(path, v, a, &MuxOptions::default())
+        Self::create_with(path, v, a.map(AudioTrack::Encode), &MuxOptions::default())
     }
 
-    /// As [`create`](Self::create), with the muxer's options.
+    /// As [`create`](Self::create), with an audio track encoded or copied,
+    /// and the muxer's options.
     pub fn create_with(
         path: &Path,
         v: &VideoSettings,
-        a: Option<&AudioSettings>,
+        a: Option<AudioTrack<'_>>,
         mux: &MuxOptions,
     ) -> Result<Self, EncodeError> {
         may_block("creating a file to encode into");
@@ -667,7 +748,10 @@ impl Mp4Writer {
         // Both encoders exist before anything touches the disk.
         let vcodec = ff::encoder::find_by_name(&v.encoder)
             .ok_or_else(|| EncodeError::NoEncoder(v.encoder.clone()))?;
-        let acodec = a.map(audio_encoder).transpose()?;
+        let acodec = match a {
+            Some(AudioTrack::Encode(a)) => Some(audio_encoder(a)?),
+            _ => None,
+        };
 
         let dest = follow_links(path).map_err(|error| EncodeError::Io {
             path: path.to_path_buf(),
@@ -758,9 +842,27 @@ impl Mp4Writer {
             ost.set_avg_frame_rate(fps);
         }
 
-        let audio = match a.zip(acodec) {
-            None => None,
-            Some((a, acodec)) => {
+        let audio = match (a, acodec) {
+            (None, _) => None,
+            (Some(AudioTrack::Copy(c)), _) => {
+                let mut ost = ctx(octx.add_stream(None::<ff::Codec>), || {
+                    "adding audio stream".into()
+                })?;
+                ost.set_parameters(c.params.clone());
+                ffi::clear_codec_tag(&mut ost);
+                let rate = i32::try_from(c.rate())
+                    .map_err(|_| EncodeError::Invalid("sample rate too large".into()))?;
+                let tb = ff::Rational::new(1, rate);
+                ost.set_time_base(tb);
+                Some(AudioOut::Copied {
+                    index: ost.index(),
+                    tb,
+                })
+            }
+            (Some(AudioTrack::Encode(_)), None) => {
+                return Err(EncodeError::Invalid("no audio encoder".into()));
+            }
+            (Some(AudioTrack::Encode(a)), Some((acodec, samples))) => {
                 let index = ctx(octx.add_stream(acodec), || "adding audio stream".into())?.index();
                 let mut aenc = ctx(
                     ff::codec::context::Context::new_with_codec(acodec)
@@ -773,7 +875,7 @@ impl Mp4Writer {
                     .map_err(|_| EncodeError::Invalid("sample rate too large".into()))?;
                 aenc.set_rate(rate);
                 aenc.set_channel_layout(layout);
-                aenc.set_format(PLANAR_F32);
+                aenc.set_format(samples.ff());
                 aenc.set_bit_rate(a.bit_rate);
                 let tb = ff::Rational::new(1, rate);
                 aenc.set_time_base(tb);
@@ -796,16 +898,17 @@ impl Mp4Writer {
                     ost.set_parameters(&aenc);
                     ost.set_time_base(tb);
                 }
-                Some(AudioState {
+                Some(AudioOut::Encoded(AudioState {
                     enc: aenc,
                     index,
                     tb,
                     frame_size,
                     channels: a.channels as usize,
                     layout,
+                    samples,
                     pending: vec![Vec::new(); a.channels as usize],
                     next_pts: 0,
-                })
+                }))
             }
         };
 
@@ -908,8 +1011,10 @@ impl Mp4Writer {
     /// the same length.
     pub fn push_audio(&mut self, samples: &[Vec<f32>]) -> Result<(), EncodeError> {
         may_block("encoding audio to a file");
-        let Some(a) = self.audio.as_mut() else {
-            return Err(EncodeError::Invalid("no audio stream".into()));
+        let Some(AudioOut::Encoded(a)) = self.audio.as_mut() else {
+            return Err(EncodeError::Invalid(
+                "no audio stream to encode into".into(),
+            ));
         };
         if samples.len() != a.channels {
             return Err(EncodeError::Invalid(format!(
@@ -931,9 +1036,21 @@ impl Mp4Writer {
         self.flush_audio_frames(false)
     }
 
+    /// Append a packet copied from another file's stream, as
+    /// [`AudioCopy`] hands them out, to a writer whose audio track is
+    /// [`AudioTrack::Copy`] of that stream.
+    pub fn push_copied(&mut self, copied: Copied) -> Result<(), EncodeError> {
+        may_block("writing audio to a file");
+        let Some(AudioOut::Copied { index, tb }) = self.audio else {
+            return Err(EncodeError::Invalid("no audio stream to copy into".into()));
+        };
+        let mut pkt = copied.packet;
+        write_packet(&mut pkt, &mut self.octx, index, tb, "audio")
+    }
+
     fn flush_audio_frames(&mut self, final_partial: bool) -> Result<(), EncodeError> {
         loop {
-            let Some(a) = self.audio.as_mut() else {
+            let Some(AudioOut::Encoded(a)) = self.audio.as_mut() else {
                 return Ok(());
             };
             let avail = a.pending.first().map_or(0, Vec::len);
@@ -944,12 +1061,11 @@ impl Mp4Writer {
             } else {
                 return Ok(());
             };
-            let mut frame = ff::frame::Audio::new(PLANAR_F32, n, a.layout);
+            let mut frame = ff::frame::Audio::new(a.samples.ff(), n, a.layout);
             frame.set_rate(a.tb.denominator() as u32);
-            for ch in 0..a.channels {
-                let plane = frame.plane_mut::<f32>(ch);
-                plane[..n].copy_from_slice(&a.pending[ch][..n]);
-                a.pending[ch].drain(..n);
+            a.samples.fill(&mut frame, &a.pending, n);
+            for p in &mut a.pending {
+                p.drain(..n);
             }
             frame.set_pts(Some(a.next_pts));
             a.next_pts += n as i64;
@@ -970,7 +1086,7 @@ impl Mp4Writer {
     }
 
     fn drain_audio(&mut self) -> Result<(), EncodeError> {
-        let Some(a) = self.audio.as_mut() else {
+        let Some(AudioOut::Encoded(a)) = self.audio.as_mut() else {
             return Ok(());
         };
         drain(&mut a.enc, &mut self.octx, a.index, a.tb, "audio", None)
@@ -1026,9 +1142,9 @@ impl Mp4Writer {
             ctx(f.send(None), || "flushing the video's cropping".into())?;
             drain_crop(f, &mut self.octx, self.video_index, self.video_tb, "video")?;
         }
-        if self.audio.is_some() {
+        if matches!(self.audio, Some(AudioOut::Encoded(_))) {
             self.flush_audio_frames(true)?;
-            if let Some(a) = self.audio.as_mut() {
+            if let Some(AudioOut::Encoded(a)) = self.audio.as_mut() {
                 ctx(a.enc.send_eof(), || "flushing audio".into())?;
             }
             self.drain_audio()?;
