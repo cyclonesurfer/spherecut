@@ -8651,9 +8651,9 @@ let a plain wait back; wgpu gains a second queue.
 
 ## D57. Projects for agents: the folder handle, the lock, the history file, and the project tools
 
-*2026-10-31, A2 slices A2.1 (core) and A2.2 (the tools). The A2 plan,
-`docs/design/a2-plan.md` sections 3 and 4, has the detail; this is
-what was built and why.*
+*2026-10-31, A2 slices A2.1 (core), A2.2 (the tools) and A2.3 (the
+window's share). The A2 plan, `docs/design/a2-plan.md` sections 3, 4
+and 6, has the detail; this is what was built and why.*
 
 **One folder handle for every project read and write.** A
 `ProjectFolder` is an `O_PATH | O_DIRECTORY` descriptor for the
@@ -8694,6 +8694,22 @@ writers apart; this catches the others.
 a project file that loads as a project, beneath the write root, and
 its history; `project` create refuses anything already there
 (`output_exists`).
+
+**The window's share** (A2.3). Opening a project file takes its lock
+first, waiting up to 2 s (`reframe::AGENT_WAIT`) for an agent's call,
+so the file is read after that call's save; another window's lock is
+refused at once ("open in another Spherecut window"). Then the project
+and its history load on the same worker, and the window's Ctrl+Z goes
+through an agent's steps, which the Edit menu names with the agent:
+"Undo Set trim (claude-code)". Every save writes the history beside
+the project, under the lock the window holds (the `Doc` keeps it in an
+`Arc` a save job shares, so a save still running after Close holds it
+until it ends), and only over the file as it was loaded or last saved:
+a file changed on disk is not saved over, and the notice points to
+Save As, which takes the new file's lock and lets the old one go. A
+stale or unreadable history opens as a fresh one with a notice saying
+which. A folder the window can't write opens its project without a
+lock, saying it can't be saved there.
 
 **The tools.**
 

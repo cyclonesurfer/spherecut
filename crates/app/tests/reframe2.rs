@@ -167,7 +167,7 @@ fn key_at_20(h: &mut H) {
     h.state_mut().state.view.q = turn(60.0, 10.0);
     h.key_press_modifiers(Modifiers::ALT, Key::K);
     step(h);
-    assert_eq!(doc(h).undo_label(), Some("Key the view"));
+    assert_eq!(doc(h).undo_label().as_deref(), Some("Key the view"));
     assert_eq!(doc(h).lane_keys(Lane::Orientation).len(), 2);
 }
 
@@ -208,13 +208,13 @@ fn a_curve_drag_moves_only_that_keys_yaw() {
         h.hover_at(dot + (to - dot) * (i as f32 / 4.0));
         step(&mut h);
         // A drag previews: nothing is recorded until it lets go.
-        assert_eq!(doc(&h).undo_label(), Some("Key the view"));
+        assert_eq!(doc(&h).undo_label().as_deref(), Some("Key the view"));
     }
     assert!(doc(&h).preview.is_some(), "the drag previews the curve");
     h.drop_at(to);
     step(&mut h);
     step(&mut h);
-    assert_eq!(doc(&h).undo_label(), Some("Move yaw"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Move yaw"));
     assert!(doc(&h).preview.is_none());
     let (yaw2, pitch2, roll2) = ypr_at(&h, 20);
     assert!(yaw2 > yaw + 1.0, "up raises yaw: {yaw} to {yaw2}");
@@ -244,7 +244,7 @@ fn a_click_on_the_overview_turns_the_view_there() {
     let q = h.state().state.view.q;
     assert!(apart_deg(q, want) < 1.0, "{}° off", apart_deg(q, want));
     // The only key took it, one step.
-    assert_eq!(doc(&h).undo_label(), Some("Turn the view"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Turn the view"));
     let v = doc(&h).view_at(t(0));
     assert!(apart_deg(v.orientation, want) < 1.0);
     finish(h);
@@ -501,7 +501,7 @@ fn the_front_of_a_360_output_turns_from_the_overview() {
     let want = turn(-120.0, 0.0);
     let p = spherecut_app::overview::to_thumb(rect, want * glam::DVec3::NEG_Z);
     click_at(&mut h, p);
-    assert_eq!(doc(&h).undo_label(), Some("Turn the front"));
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Turn the front"));
     let spherecut_core::project::Output::Equirect { orientation, .. } =
         doc(&h).project.the_sequence().output
     else {

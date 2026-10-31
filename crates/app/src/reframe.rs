@@ -3,13 +3,24 @@
 //! untitled from a video or loaded from a file, saved and closed, with
 //! the file work on jobs; the viewer's keyed view, its look-around, and
 //! the output frame it draws; and the trim the player keeps to.
+//!
+//! A project file opens under its lock and with the history beside it,
+//! and saves with both, never over a file that changed on disk since
+//! (a2-plan section 6): an agent's edits and the window's share one undo
+//! history, and neither writes over the other.
 
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use spherecut_core::Time;
+use spherecut_core::project::History;
 use spherecut_core::project::file::{self, MediaStatus};
+use spherecut_core::project::folder::{
+    By, FolderError, Holder, Identity, Kept, ProjectFolder, ProjectLock,
+};
 use spherecut_core::project::{
     Edit, InitialView, KeyId, Media, Orientation, Output, Project, ViewAnim,
 };
@@ -33,6 +44,9 @@ pub const FRAME_FILL: f64 = 0.9;
 pub const FRAME_DIM: f64 = 0.25;
 /// The badge a look-around shows.
 pub const NOT_KEYED: &str = "Not keyed: Alt+K to key";
+/// How long an open or a save waits for an agent's call that holds the
+/// project's lock (a2-plan 3.2). Another window's is never waited for.
+pub const AGENT_WAIT: Duration = Duration::from_secs(2);
 
 /// What the viewer shows of the view (section 10.2).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -78,9 +92,17 @@ pub struct SaveAs {
 
 #[derive(Debug)]
 enum Saved {
-    Done,
+    Done {
+        identity: Identity,
+        lock: Arc<ProjectLock>,
+        /// The project is saved, but its history isn't, for this reason.
+        history_error: Option<String>,
+    },
     /// The file is there, and the save wasn't to replace it.
     Exists,
+    /// The file isn't what was loaded or last saved: something else
+    /// wrote it since, and it wasn't saved over.
+    Changed(String),
     Failed(String),
 }
 
@@ -93,7 +115,19 @@ struct Saving {
     generation: u64,
 }
 
-type Loaded = Result<(Project, Vec<MediaStatus>), String>;
+/// A project file opened: the project, the history found beside it,
+/// what the file was, its lock (none in a folder the window can't write)
+/// and its media's status.
+#[derive(Debug)]
+struct Opened {
+    project: Project,
+    history: Kept,
+    identity: Identity,
+    lock: Option<ProjectLock>,
+    status: Vec<MediaStatus>,
+}
+
+type Loaded = Result<Opened, String>;
 
 /// An untitled project being made of the video just opened.
 #[derive(Debug)]
@@ -236,6 +270,97 @@ pub fn is_project_file(path: &Path) -> bool {
         .is_some_and(|x| x.eq_ignore_ascii_case(file::EXTENSION))
 }
 
+/// Open the project file at `path`, on a worker: its lock first, so an
+/// agent's call under way ends before the file is read, then the project
+/// and the history beside it.
+fn open_file(path: &Path) -> Loaded {
+    let (folder, name) = ProjectFolder::of_file(path).map_err(|e| e.to_string())?;
+    let lock = match folder.lock(&name, By::Gui, AGENT_WAIT) {
+        Ok(lock) => Some(lock),
+        Err(e) if cant_write(&e) => None,
+        Err(e) => return Err(locked(path, e)),
+    };
+    let loaded = folder.load(&name).map_err(|e| e.to_string())?;
+    let status = file::media_status(&loaded.project);
+    Ok(Opened {
+        project: loaded.project,
+        history: loaded.history,
+        identity: loaded.identity,
+        lock,
+        status,
+    })
+}
+
+/// Save `project` and `history` as `path`, on a worker, under `held` if
+/// the window holds that file's lock already, else under the lock taken
+/// here; with `expect`, only over the file it was. A file there is
+/// replaced only when `replace` says so.
+fn save_file(
+    path: &Path,
+    project: &Project,
+    history: &History,
+    held: Option<Arc<ProjectLock>>,
+    expect: Option<Identity>,
+    replace: bool,
+) -> Saved {
+    let (folder, name) = match ProjectFolder::of_file(path) {
+        Ok(f) => f,
+        Err(e) => return Saved::Failed(e.to_string()),
+    };
+    let lock = match held {
+        Some(lock) => lock,
+        None => match folder.lock(&name, By::Gui, AGENT_WAIT) {
+            Ok(lock) => Arc::new(lock),
+            Err(e) => return Saved::Failed(locked(path, e)),
+        },
+    };
+    if !replace {
+        match folder.identity(&name) {
+            Ok(None) => {}
+            Ok(Some(_)) => return Saved::Exists,
+            Err(e) => return Saved::Failed(e.to_string()),
+        }
+    }
+    match folder.save(&name, project, history, expect.as_ref()) {
+        Ok(saved) => Saved::Done {
+            identity: saved.identity,
+            lock,
+            history_error: saved.history_error,
+        },
+        Err(e @ FolderError::Changed { .. }) => Saved::Changed(e.to_string()),
+        Err(e) => Saved::Failed(e.to_string()),
+    }
+}
+
+/// The lock for the project at `path` refused, as the window says it.
+fn locked(path: &Path, e: FolderError) -> String {
+    let who = match e {
+        FolderError::Locked { holder, .. } => match holder {
+            Some(Holder { by: By::Gui, pid }) => {
+                format!("is open in another Spherecut window (pid {pid})")
+            }
+            Some(Holder { by: By::Mcp, pid }) => {
+                format!("is being written by an agent's call (pid {pid}); try again")
+            }
+            None => "is being written by another program".to_owned(),
+        },
+        e => return e.to_string(),
+    };
+    format!("{} {who}", path.display())
+}
+
+/// The folder can't be written: no lock file can be made there.
+fn cant_write(e: &FolderError) -> bool {
+    matches!(
+        e,
+        FolderError::Io { source, .. }
+            if matches!(
+                source.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+            )
+    )
+}
+
 /// The output frame of a `out`-sized output in a `size`-pixel viewer:
 /// as large as [`FRAME_FILL`] of it allows, centred, on whole pixels.
 pub fn frame_rect(size: (u32, u32), out: (u32, u32)) -> [f64; 4] {
@@ -315,7 +440,10 @@ impl AppState {
         self.notices.retain(|k| {
             !matches!(
                 k,
-                NoticeKind::Project | NoticeKind::MediaOffline | NoticeKind::MediaChanged
+                NoticeKind::Project
+                    | NoticeKind::History
+                    | NoticeKind::MediaOffline
+                    | NoticeKind::MediaChanged
             )
         });
     }
@@ -343,11 +471,7 @@ impl AppState {
         self.drop_doc();
         self.close_media();
         let p = path.clone();
-        let job = Job::spawn("load project", move || {
-            let project = file::load(&p).map_err(|e| e.to_string())?;
-            let status = file::media_status(&project);
-            Ok((project, status))
-        });
+        let job = Job::spawn("load project", move || open_file(&p));
         self.reframe.loading = Some((path, job));
     }
 
@@ -397,16 +521,18 @@ impl AppState {
             return;
         }
         let project = doc.project.clone();
+        let history = doc.history.clone();
         let revision = project.revision();
+        // Saved over the file it came from: under the lock it holds, and
+        // only if that file is still what was loaded or last saved.
+        let (held, expect) = if doc.path.as_ref() == Some(&path) {
+            (doc.lock.clone(), doc.identity)
+        } else {
+            (None, None)
+        };
         let p = path.clone();
         let job = Job::spawn("save project", move || {
-            if !replace && p.symlink_metadata().is_ok() {
-                return Saved::Exists;
-            }
-            match file::save(&project, &p) {
-                Ok(()) => Saved::Done,
-                Err(e) => Saved::Failed(e.to_string()),
-            }
+            save_file(&p, &project, &history, held, expect, replace)
         });
         self.reframe.saving = Some(Saving {
             job,
@@ -499,7 +625,7 @@ impl AppState {
         let Some((path, job)) = self.reframe.loading.take() else {
             return;
         };
-        let (project, status) = match job.poll() {
+        let opened = match job.poll() {
             Poll::Pending => {
                 self.reframe.loading = Some((path, job));
                 return;
@@ -521,7 +647,51 @@ impl AppState {
                 return;
             }
         };
-        let doc = Doc::new(project, Some(path));
+        let Opened {
+            project,
+            history,
+            identity,
+            lock,
+            status,
+        } = opened;
+        let mut doc = Doc::new(project, Some(path));
+        doc.identity = Some(identity);
+        if lock.is_none() {
+            self.notices.push(
+                Notice::new(
+                    NoticeKind::Project,
+                    Severity::Warning,
+                    "This project can't be saved in its folder",
+                )
+                .impact("the folder can't be written; the project opens, and edits are kept until it closes")
+                .fix("File ▸ Save as… to a folder you can write"),
+            );
+        }
+        doc.lock = lock.map(Arc::new);
+        match history {
+            Kept::Kept(h) => doc.history = h,
+            Kept::Missing => {}
+            Kept::Stale { revision } => self.notices.push(
+                Notice::new(
+                    NoticeKind::History,
+                    Severity::Warning,
+                    "The project's undo history was left behind",
+                )
+                .impact(format!(
+                    "it was saved with revision {revision} and the file is at revision {}: \
+                     something else saved the project since, so undo starts from here",
+                    doc.project.revision()
+                )),
+            ),
+            Kept::Unreadable(why) => self.notices.push(
+                Notice::new(
+                    NoticeKind::History,
+                    Severity::Warning,
+                    "The project's undo history can't be read",
+                )
+                .impact(format!("{why}; undo starts from here")),
+            ),
+        }
         let media = doc.media().cloned();
         let status = media
             .as_ref()
@@ -576,12 +746,29 @@ impl AppState {
         };
         match s.job.poll() {
             Poll::Pending => self.reframe.saving = Some(s),
-            Poll::Done(Saved::Done) => {
+            Poll::Done(Saved::Done {
+                identity,
+                lock,
+                history_error,
+            }) => {
                 let ours = s.generation == self.reframe.generation;
                 if ours && let Some(doc) = &mut self.reframe.doc {
-                    doc.saved_to(s.path, s.revision);
+                    doc.saved_to(s.path, s.revision, Some(identity), Some(lock));
                 }
-                self.notices.retain(|k| *k != NoticeKind::Project);
+                self.notices
+                    .retain(|k| !matches!(k, NoticeKind::Project | NoticeKind::History));
+                if let Some(why) = history_error {
+                    self.notices.push(
+                        Notice::new(
+                            NoticeKind::History,
+                            Severity::Warning,
+                            "The project is saved, but its undo history isn't",
+                        )
+                        .impact(format!(
+                            "{why}; undo goes on until the project closes, and it opens with none"
+                        )),
+                    );
+                }
                 if let Some(step) = self.reframe.after_save.take() {
                     // A step asked for while this save ran waits on the
                     // changes made since it began being saved too.
@@ -594,6 +781,13 @@ impl AppState {
                 }
             }
             Poll::Done(Saved::Exists) => self.reframe.replace = Some(s.path),
+            Poll::Done(Saved::Changed(why)) => {
+                self.reframe.after_save = None;
+                self.notices.push(
+                    failed(why)
+                        .fix("File ▸ Save as… keeps your changes in another file; reopen this one to see what changed"),
+                );
+            }
             Poll::Done(Saved::Failed(why)) => {
                 self.reframe.after_save = None;
                 self.notices.push(failed(why));

@@ -1,14 +1,16 @@
 //! The open project (M2 plan section 10; amendment 2 items 20, 39 and
 //! 53): the project and its undo history, the file it came from or was
-//! saved to, the keys selected, a drag's preview, and the edits the
-//! reframer's gestures make of them. No egui here: the timeline strip,
-//! the curves, the Inspector and the viewer call it, and its tests need
-//! no window.
+//! saved to with its lock and what it was on disk (a2-plan section 6),
+//! the keys selected, a drag's preview, and the edits the reframer's
+//! gestures make of them. No egui here: the timeline strip, the curves,
+//! the Inspector and the viewer call it, and its tests need no window.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use glam::DQuat;
+use spherecut_core::project::folder::{Identity, ProjectLock};
 use spherecut_core::project::{
     AimDir, AnyKey, AnyKeys, AnyValue, Clip, Ease, Edit, EditError, ExportSettings, History,
     InitialView, Key, KeyId, KeyTrack, Marker, MarkerId, Media, Orient, Orientation, Origin,
@@ -109,6 +111,14 @@ impl ViewValues {
     }
 }
 
+/// A step's label, with the agent's name if an agent made it.
+fn step_label(step: &spherecut_core::project::Step) -> String {
+    match &step.origin {
+        Origin::User => step.label.clone(),
+        Origin::Agent { name } => format!("{} ({name})", step.label),
+    }
+}
+
 /// The viewer's own default view, forward and level through a 100°
 /// rectilinear lens (an untitled project starts with the view on screen).
 pub use spherecut_core::project::INITIAL_VIEW;
@@ -122,6 +132,13 @@ pub struct Doc {
     pub path: Option<PathBuf>,
     /// The revision that file holds.
     saved: Option<u64>,
+    /// That file as it was loaded or last saved: a save over anything
+    /// else there is refused (a2-plan 3.4).
+    pub identity: Option<Identity>,
+    /// That file's lock, held while the project is open (a2-plan 3.2)
+    /// and by a save under way, which shares it. None while untitled, or
+    /// in a folder the window can't write.
+    pub lock: Option<Arc<ProjectLock>>,
     /// The keys selected, one or more, in one lane or across lanes.
     pub selection: BTreeSet<KeyId>,
     /// The clip's view with a drag's change in it, shown until the drag
@@ -141,6 +158,8 @@ impl Doc {
             history: History::new(),
             path,
             saved,
+            identity: None,
+            lock: None,
             selection: BTreeSet::new(),
             preview: None,
             front_preview: None,
@@ -160,10 +179,19 @@ impl Doc {
         }
     }
 
-    /// Saved to `path` at `revision`.
-    pub fn saved_to(&mut self, path: PathBuf, revision: u64) {
+    /// Saved to `path` at `revision`, where it is now `identity`; `lock`
+    /// is that file's, and a Save As lets go of the old one's.
+    pub fn saved_to(
+        &mut self,
+        path: PathBuf,
+        revision: u64,
+        identity: Option<Identity>,
+        lock: Option<Arc<ProjectLock>>,
+    ) {
         self.path = Some(path);
         self.saved = Some(revision);
+        self.identity = identity;
+        self.lock = lock;
     }
 
     /// The name the window and the Save window say: the file's, or the
@@ -256,12 +284,14 @@ impl Doc {
         Ok(label)
     }
 
-    pub fn undo_label(&self) -> Option<&str> {
-        self.history.undo_step().map(|s| s.label.as_str())
+    /// The step undo takes back, as the Edit menu says it: an agent's
+    /// with the agent's name, "Set trim (claude-code)" (a2-plan 6).
+    pub fn undo_label(&self) -> Option<String> {
+        self.history.undo_step().map(step_label)
     }
 
-    pub fn redo_label(&self) -> Option<&str> {
-        self.history.redo_step().map(|s| s.label.as_str())
+    pub fn redo_label(&self) -> Option<String> {
+        self.history.redo_step().map(step_label)
     }
 
     fn prune_selection(&mut self) {
@@ -1049,7 +1079,7 @@ mod tests {
         d.record("Add marker", &d.add_marker(at(10))).unwrap();
         assert!(d.dirty());
         let r = d.project.revision();
-        d.saved_to("/p/a.spherecut".into(), r);
+        d.saved_to("/p/a.spherecut".into(), r, None, None);
         assert!(!d.dirty());
         assert_eq!(d.name(), "a.spherecut");
         d.undo().unwrap();
