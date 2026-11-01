@@ -102,15 +102,36 @@ fn sample_entry_types(trak: &Mp4Box) -> Vec<[u8; 4]> {
 }
 
 fn has_trailer_magic(path: &Path) -> bool {
+    last_32(path).is_some_and(|b| &b == INSTA360_TRAILER_MAGIC)
+}
+
+/// The file's last 32 bytes, or None when it is shorter or can't be read.
+fn last_32(path: &Path) -> Option<[u8; 32]> {
     spherecut_core::may_block("reading a file's trailer");
-    let Ok(mut f) = File::open(path) else {
-        return false;
-    };
-    if f.seek(SeekFrom::End(-32)).is_err() {
-        return false;
-    }
+    let mut f = File::open(path).ok()?;
+    f.seek(SeekFrom::End(-32)).ok()?;
     let mut b = [0u8; 32];
-    f.read_exact(&mut b).is_ok() && &b == INSTA360_TRAILER_MAGIC
+    f.read_exact(&mut b).ok()?;
+    Some(b)
+}
+
+/// The byte where a file whose last top-level box is an `inst` box, as
+/// the X5 wraps its trailer in (insta360.md §3), stops being the trailer's
+/// magic: the first of its last 32 bytes that differs from
+/// [`INSTA360_TRAILER_MAGIC`]. None when the file ends in the magic, its
+/// last box isn't `inst`, or it is shorter than the magic. The file is
+/// `len` bytes, opened at `path`.
+pub(crate) fn inst_without_magic(path: &Path, tree: Option<&Mp4Tree>, len: u64) -> Option<u64> {
+    let last = tree?.top.last()?;
+    if last.fourcc.0 != *b"inst" {
+        return None;
+    }
+    let b = last_32(path)?;
+    let at = b
+        .iter()
+        .zip(INSTA360_TRAILER_MAGIC)
+        .position(|(x, m)| x != m)?;
+    Some(len.checked_sub(32)? + at as u64)
 }
 
 /// GoPro firmware string from `udta/FIRM`, e.g. "H19.03.02.00.00".

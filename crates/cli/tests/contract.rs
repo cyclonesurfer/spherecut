@@ -20,7 +20,7 @@ use spherecut_core::{FrameRate, FrameTime, Rational, Time};
 use spherecut_media::doctor::{self, DoctorReport, Issue, Severity};
 use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings};
 use spherecut_media::ff;
-use spherecut_synth::insv::{InsvFault, TrailerLayout, print};
+use spherecut_synth::insv::{Field, InsvFault, TrailerLayout, print};
 use spherecut_synth::media::{self, Audio, Codec, Spec};
 use spherecut_synth::{Pattern, render_equirect, yuv};
 use spherecut_testkit::Fnv64;
@@ -1971,6 +1971,89 @@ fn probe_pins_the_camera_shapes() {
     );
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_dir_all(&other).ok();
+}
+
+/// Probe's text escapes the control characters a file's strings hold, as
+/// it escapes a fourcc's: a serial with a terminal's colour sequence and
+/// a bell in it prints as text, while the JSON keeps it as it is.
+#[test]
+fn probe_text_escapes_the_trailer_s_strings() {
+    let started = Instant::now();
+    let dir = tmp("escaped-serial");
+    let serial = "SYNTH\x1b[31m00001\x07";
+    let mut records = insv::records();
+    let field = records.metadata.iter_mut().find(|f| f.number == 1).unwrap();
+    *field = Field::string(1, serial);
+    let master = insv::master_with(&dir, insv::MASTER, &records, None);
+
+    let (status, doc) = probe_json(&[&master.path]);
+    assert_eq!(status, Some(0), "{doc}");
+    assert_eq!(
+        doc["result"]["files"][0]["report"]["camera"]["serial"],
+        serial
+    );
+    let out = spherecut(&[OsStr::new("probe"), master.path.as_os_str()]);
+    assert_eq!(out.status.code(), Some(0));
+    let t = text(&out.stdout);
+    // No control character but the lines' own ends.
+    let clean = |s: &str| !s.chars().any(|c| c.is_control() && c != '\n');
+    assert!(clean(&t), "{t:?}");
+    assert!(
+        t.contains(", serial SYNTH\\x1b[31m00001\\x07  layout: Insta360DualFisheye\n"),
+        "{t}"
+    );
+    // The control: the serial planted holds what the check finds.
+    must_fail("the planted serial, clean", clean(serial));
+    eprintln!(
+        "probe_text_escapes_the_trailer_s_strings: {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An X5 file whose trailer's magic is damaged (`InsvFault::BadMagic`)
+/// ends in an `inst` box with no trailer after it: probe warns of it as
+/// `bad_trailer`, at the first byte that differs (M3 plan 5.5, 22.1).
+#[test]
+fn probe_warns_of_an_inst_box_without_the_magic() {
+    let started = Instant::now();
+    let dir = tmp("bad-magic");
+    let bad = insv::master(&dir, insv::MASTER, Some(InsvFault::BadMagic));
+    let good = insv::master(&dir, "VID_20261022_101500_00_002.insv", None);
+    let (status, doc) = probe_json(&[&bad.path, &good.path]);
+    assert_eq!(status, Some(0), "a warning doesn't fail the file: {doc}");
+    let files = &doc["result"]["files"];
+    let bad_trailer = |r: &Value| -> Vec<String> {
+        r["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["code"] == "bad_trailer")
+            .map(|w| w["message"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let r = &files[0]["report"];
+    // The magic's last byte is the one changed.
+    let last = r["file_size"].as_u64().unwrap() - 1;
+    assert_eq!(
+        bad_trailer(r),
+        [format!(
+            "the file ends in an `inst` box, where Insta360 cameras put their trailer, but not \
+             in the trailer's magic: byte {last} differs, so the trailer can't be read"
+        )],
+        "{r}"
+    );
+    assert_eq!(r["records"], Value::Null, "{r}");
+    // The control: the same file with its magic whole has no such warning.
+    must_fail(
+        "a master with its magic whole, warned of",
+        !bad_trailer(&files[1]["report"]).is_empty(),
+    );
+    eprintln!(
+        "probe_warns_of_an_inst_box_without_the_magic: {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The `records` a trailer laid out as `layout` gives: each slot's id and

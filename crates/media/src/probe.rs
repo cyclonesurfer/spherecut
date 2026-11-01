@@ -1,6 +1,7 @@
 //! `spherecut probe`: everything we can learn about a media file without
 //! decoding it.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs::File;
@@ -370,6 +371,27 @@ pub(crate) fn fourcc_str(tag: u32) -> Option<String> {
                     (c as char).to_string()
                 } else {
                     format!("\\x{c:02x}")
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Text a file holds, for a terminal: each control character (C0, DEL
+/// and C1, ESC and newline among them) as `\xNN`, as [`fourcc_str`]
+/// gives a fourcc's bytes, so that a camera's serial or a tag can't move
+/// the cursor or recolour what is printed after it.
+pub fn escape_controls(s: &str) -> Cow<'_, str> {
+    if !s.chars().any(char::is_control) {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(
+        s.chars()
+            .map(|c| {
+                if c.is_control() {
+                    format!("\\x{:02x}", u32::from(c))
+                } else {
+                    c.to_string()
                 }
             })
             .collect(),
@@ -810,6 +832,17 @@ fn probe_file(src: Source<'_>, cancel: Option<Arc<AtomicBool>>) -> Result<ProbeR
         }
         _ => CameraFile::default(),
     };
+    // An `inst` box last, as the X5 writes, with no trailer's magic after
+    // it: a trailer damaged at its end, which detect can't tell from a
+    // plain MP4's end.
+    if let Some(at) = detect::inst_without_magic(open, tree.as_ref(), meta.len()) {
+        warnings.push(Problem::new(
+            codes::BAD_TRAILER,
+            format!(
+                "the file ends in an `inst` box, where Insta360 cameras put their trailer, but not in the trailer's magic: byte {at} differs, so the trailer can't be read"
+            ),
+        ));
+    }
     let mp4 = tree.as_ref().map(|t| Mp4Summary {
         brand: t.ftyp_brand().map(|b| b.to_string()),
         top_level: t
@@ -1230,7 +1263,7 @@ mod text {
 
     use spherecut_core::{Rational, Time};
 
-    use super::{ProbeReport, StreamInfo, StructureCheck, TruncatedBox};
+    use super::{ProbeReport, StreamInfo, StructureCheck, TruncatedBox, escape_controls};
     use crate::camera::CameraFile;
     use crate::spherical::{Projection, StereoMode};
 
@@ -1320,23 +1353,26 @@ mod text {
                 );
             }
         }
+        // The camera's strings are the file's, its trailer's or its tags',
+        // so their control characters are escaped.
         if let Some(c) = &r.camera {
             let _ = writeln!(
                 s,
                 "  camera     {}{}{}  layout: {:?}",
-                opt(&c.name()),
+                c.name()
+                    .map_or_else(|| "-".into(), |n| escape_controls(&n).into_owned()),
                 c.firmware
-                    .as_ref()
-                    .map(|f| format!(" (firmware {f})"))
+                    .as_deref()
+                    .map(|f| format!(" (firmware {})", escape_controls(f)))
                     .unwrap_or_default(),
                 c.serial
-                    .as_ref()
-                    .map(|n| format!(", serial {n}"))
+                    .as_deref()
+                    .map(|n| format!(", serial {}", escape_controls(n)))
                     .unwrap_or_default(),
                 c.layout
             );
             for e in &c.evidence {
-                let _ = writeln!(s, "             - {e}");
+                let _ = writeln!(s, "             - {}", escape_controls(e));
             }
         }
         camera_file(&mut s, &r.camera_file);
@@ -1344,7 +1380,12 @@ mod text {
             stream(&mut s, st);
         }
         for (k, v) in &r.container.tags {
-            let _ = writeln!(s, "  tag        {k} = {v}");
+            let _ = writeln!(
+                s,
+                "  tag        {} = {}",
+                escape_controls(k),
+                escape_controls(v)
+            );
         }
         for w in &r.warnings {
             let _ = writeln!(s, "  warning    {w}");
@@ -1945,6 +1986,24 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A file's text prints with its control characters escaped, the
+    /// rest as it is, and text without any is borrowed.
+    #[test]
+    fn control_characters_are_escaped_for_the_terminal() {
+        use spherecut_testkit::control::must_fail;
+
+        let planted = "SN\u{1b}[2J\u{7}\n\t\u{7f}\u{9b}é 360°";
+        let shown = escape_controls(planted);
+        assert_eq!(shown, "SN\\x1b[2J\\x07\\x0a\\x09\\x7f\\x9bé 360°");
+        assert!(!shown.chars().any(char::is_control), "{shown:?}");
+        assert!(matches!(escape_controls("Insta360 X5"), Cow::Borrowed(_)));
+        // The control: what was planted holds control characters.
+        must_fail(
+            "the planted text, free of control characters",
+            !planted.chars().any(char::is_control),
+        );
     }
 
     #[test]

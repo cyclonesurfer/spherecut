@@ -42,10 +42,22 @@ pub fn pats_calibrations() -> [CalibTruth; 2] {
     [pats_v3(), pats_v6()]
 }
 
+/// The records [`master`] writes in its trailer: `Records::x5_like` for
+/// Pat's two calibrations, which a test may change before
+/// [`master_with`] writes them.
+pub fn records() -> Records {
+    Records::x5_like(&pats_calibrations(), &planted(), FRAMES, RATE)
+}
+
 /// An X5-like master in `dir` named `name`: two H.264 lens tracks, each
-/// SIDE square, and the trailer of `Records::x5_like` for Pat's two
-/// calibrations, with `fault` planted in it.
+/// SIDE square, and the trailer of [`records`], with `fault` planted in
+/// it.
 pub fn master(dir: &Path, name: &str, fault: Option<InsvFault>) -> Written {
+    master_with(dir, name, &records(), fault)
+}
+
+/// [`master`] with the trailer of `records`.
+pub fn master_with(dir: &Path, name: &str, records: &Records, fault: Option<InsvFault>) -> Written {
     let lens = |n: usize, pattern: Pattern| {
         media::write(
             &Spec {
@@ -67,9 +79,8 @@ pub fn master(dir: &Path, name: &str, fault: Option<InsvFault>) -> Written {
     };
     let tracks = dir.join(format!("{name}.tracks.mp4"));
     remux(&[lens(0, Pattern::Grid), lens(1, Pattern::Seam)], &tracks);
-    let records = Records::x5_like(&pats_calibrations(), &planted(), FRAMES, RATE);
     let path = dir.join(name);
-    let layout = insv::append_trailer(&tracks, &path, &records, fault).unwrap();
+    let layout = insv::append_trailer(&tracks, &path, records, fault).unwrap();
     Written { path, layout }
 }
 
