@@ -769,6 +769,27 @@ fn strings_round_trip() {
     };
     assert_eq!(from_values.split('_').count(), 40);
     must_fail("Pat's V3 string printed from its values", from_values == V3);
+    // The controls on same_bits: V3 with lens 0's ξ written with a zero
+    // more has the same values to the bit but other text, and with ξ's
+    // last digit changed, another value.
+    let longer = V3.replacen("2_2.000000_", "2_2.0000000_", 1);
+    let rewritten = calib::parse(Generation::V3, &longer).unwrap();
+    let (xi, was) = (tokens(&rewritten)[0], tokens(&v3)[0]);
+    assert_eq!((xi.text(), was.text()), ("2.0000000", "2.000000"));
+    assert_eq!(xi.value().to_bits(), was.value().to_bits());
+    must_fail(
+        "Pat's V3 with lens 0's xi written 2.0000000",
+        same_bits(&rewritten, &v3),
+    );
+    let mut nudged = v3.clone();
+    let Focal::Mei { xi, .. } = &mut nudged.lenses[0].focal else {
+        panic!("V3's lens 0 has no xi: {:?}", nudged.lenses[0].focal);
+    };
+    *xi = Token::new("2.000001").unwrap();
+    must_fail(
+        "Pat's V3 with lens 0's xi written 2.000001",
+        same_bits(&nudged, &v3),
+    );
     strings_round_trip_cases();
 }
 
@@ -868,9 +889,10 @@ fn with_field(fields: &[(u32, Wire)], n: u32, w: Wire) -> (Vec<u8>, u64, u64) {
 /// (`MAX_METADATA` and `MAX_STRING`, which `trailer.rs` leaves to this
 /// file), a string that isn't UTF-8, groups and wire types a field
 /// doesn't have, a u32 past 32 bits, keys protobuf doesn't allow, and
-/// bytes cut short, at the top and inside a message. A field read twice
-/// keeps its last value, field 24 is signed, and packed doubles read as
-/// field 145's unpacked ones do.
+/// bytes cut short, at the top and inside a message. A number or a
+/// string read twice keeps its last value and a message read twice is
+/// replaced by its last copy, field 24 is signed, and packed doubles
+/// read as field 145's unpacked ones do.
 #[test]
 fn each_metadata_error_is_at_its_byte() {
     let _time = timed("each_metadata_error_is_at_its_byte");
@@ -1067,6 +1089,26 @@ fn each_metadata_error_is_at_its_byte() {
     );
     let (b, ..) = with_field(&fields, 24, Wire::Varint(-5i64 as u64));
     assert_eq!(parse_metadata(&b).unwrap().first_frame_us, Some(-5));
+    // A message read twice is replaced by its last copy, not merged: a
+    // second window with only its width leaves the rest at 0.
+    let width_only = Wire::Message(vec![(1, Wire::Varint(7))]);
+    let twice = [&base[..], &field(27, &width_only)].concat();
+    let replaced = parse_metadata(&twice).unwrap().window;
+    assert_eq!(
+        replaced,
+        Some(Window {
+            src: [7, 0],
+            dst: [0; 2],
+            offset: [0; 2],
+        })
+    );
+    // The control: merged, as protobuf would, it would keep the rest.
+    let merged = Window {
+        src: [7, 5376],
+        dst: [5312; 2],
+        offset: [0; 2],
+    };
+    must_fail("a window read twice, merged", replaced == Some(merged));
 }
 
 /// Each error `calib::parse` gives besides a wrong count, with its

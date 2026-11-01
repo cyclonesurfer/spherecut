@@ -162,7 +162,9 @@ impl Calibrations {
 }
 
 /// Reads record 1's payload. Fields are found by number whatever their
-/// order; a field read twice keeps its last value, as protobuf does.
+/// order. A number or a string read twice keeps its last value, as
+/// protobuf does; a message read twice (26, 27, 44, 98 or 145) is
+/// replaced whole by its last copy, where protobuf would merge the two.
 ///
 /// A payload over [`MAX_METADATA`] or a string over [`MAX_STRING`] is
 /// [`CameraError::TooLarge`]; a bad varint, a group or a field cut short
