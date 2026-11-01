@@ -27,7 +27,7 @@ use spherecut_core::FrameRate;
 use spherecut_media::encode::{
     AudioTrack, ColorTags, Mp4Writer, MuxOptions, PixelLayout, VideoSettings, YuvPlanes,
 };
-use spherecut_media::mp4::{self, Edit, EditList, Mp4Error, TrackTiming};
+use spherecut_media::mp4::{self, Edit, EditList, Mp4Box, Mp4Error, TrackTiming};
 use spherecut_media::packets::{NextPacket, PacketInfo, PacketReader};
 use spherecut_testkit::control::must_fail;
 use spherecut_testkit::fnv64;
@@ -324,13 +324,24 @@ fn an_edit_list_moves_the_first_frame() {
         assert_eq!(first(&[(3000, 1024, RATE_1)], 1000), 0);
         // An empty edit of half a second first: 7680 ticks.
         assert_eq!(first(&[(500, -1, RATE_1), (3000, 0, RATE_1)], 1000), 7680);
-        // Two empty edits add up; 3 ms is 46.08 ticks, so 46.
+        // Two empty edits add up, each rounded to the nearest tick as
+        // FFmpeg rounds them: 1 ms is 15.36 ticks and 2 ms 30.72, so
+        // 15 + 31.
         assert_eq!(
             first(&[(1, -1, RATE_1), (2, -1, RATE_1), (3000, 0, RATE_1)], 1000),
             46
         );
-        // Half a tick rounds away from zero, as FFmpeg's av_rescale does.
+        // Half a tick rounds away from zero, as FFmpeg's av_rescale does,
+        // so two halves make 2.
         assert_eq!(first(&[(1, -1, RATE_1), (3000, 0, RATE_1)], 30720), 1);
+        let halves = first(
+            &[(1, -1, RATE_1), (1, -1, RATE_1), (3000, 0, RATE_1)],
+            30720,
+        );
+        assert_eq!(halves, 2);
+        // Control: the two added before rounding make one tick.
+        let once = (2 * 15360 + 30720 / 2) / 30720;
+        must_fail("the empty edits rounded once", halves == once);
         // An edit that starts between frames shows the next one first,
         // 24 ticks after the edit's start. Its rate doesn't move it.
         assert_eq!(first(&[(3000, 1000, RATE_1)], 1000), 24);
@@ -360,6 +371,37 @@ fn an_edit_list_moves_the_first_frame() {
     // A list of no edits, which FFmpeg ignores, moves nothing.
     let none = at(0, &[], 1000).unwrap();
     assert_eq!((none.first_pts, none.edit.unwrap().edits.len()), (0, 0));
+
+    // Version 1's times past 32 bits: an empty edit of 2^32 + 1000 ms,
+    // then the media from 2^33 + 2^30 ticks, where the fourth frame is
+    // decoded after three of 0xC000_0000 ticks.
+    let wide_edits = vec![
+        ((1 << 32) + 1000, -1, RATE_1),
+        (3000, 0x2_4000_0000, RATE_1),
+    ];
+    let wide = Spec {
+        elst: Some((1, wide_edits.clone())),
+        ..Spec::new(15360, &[(3, 0xC000_0000), (4, 512)])
+    };
+    let t = timing(&file(1000, &[wide.boxes()]), 0).unwrap();
+    // 2^32 + 1000 ms is 65970713026.56 ticks.
+    assert_eq!(t.first_pts, 65_970_713_027);
+    let read: Vec<EditSpec> = t
+        .edit
+        .unwrap()
+        .edits
+        .iter()
+        .map(|e| (e.duration, e.media_time, e.rate))
+        .collect();
+    assert_eq!(read, wide_edits);
+    // Control: the edits cut to their low words, as a reader of 32 bits
+    // would take them, show another frame first, at another time.
+    let low = Spec {
+        elst: Some((1, vec![(1000, -1, RATE_1), (3000, 0x4000_0000, RATE_1)])),
+        ..wide.clone()
+    };
+    let low = timing(&file(1000, &[low.boxes()]), 0).unwrap();
+    must_fail("the low words", low.first_pts == t.first_pts);
 
     // Controls: lists that can't say when the first frame is shown.
     for (edits, why) in [
@@ -569,6 +611,90 @@ fn bad_tables_are_errors_naming_their_box() {
         let e = must_fail(why, with(bad));
         assert_eq!(named(e), (fourcc.to_string(), why.to_string()));
     }
+}
+
+/// `f` with the `cut` bytes at offset `at` replaced by `bytes`, and each
+/// box of `around`, which all start before `at`, hold it and have 32-bit
+/// sizes, resized to fit.
+fn splice(f: &[u8], at: usize, cut: usize, bytes: &[u8], around: &[&Mp4Box]) -> Vec<u8> {
+    let mut out = [&f[..at], bytes, &f[at + cut..]].concat();
+    for b in around {
+        assert_eq!(b.header_len, 8, "{b:?}");
+        let o = b.offset as usize;
+        let size = (b.size + bytes.len() as u64)
+            .checked_sub(cut as u64)
+            .and_then(|s| u32::try_from(s).ok())
+            .unwrap();
+        out[o..o + 4].copy_from_slice(&size.to_be_bytes());
+    }
+    out
+}
+
+#[test]
+fn a_box_the_reader_loses_is_an_error_naming_its_parent() {
+    // `stss` last in `stbl`, as on the X5, and two tracks.
+    let s = Spec {
+        stss: Some(vec![1, 31, 61]),
+        elst: Some((0, vec![(3000, 0, RATE_1)])),
+        ..Spec::new(15360, &[(90, 512)])
+    };
+    let f = file(1000, &[s.boxes(), s.boxes()]);
+    let whole = timing(&f, 0).unwrap();
+    assert_eq!(whole.stss, Some(vec![1, 31, 61]));
+    let tree = mp4::read(&mut io::Cursor::new(&f)).unwrap();
+    let moov = tree.moov().unwrap();
+    let trak = moov.child(b"trak").unwrap();
+    let (mdia, edts) = (trak.child(b"mdia").unwrap(), trak.child(b"edts").unwrap());
+    let minf = mdia.child(b"minf").unwrap();
+    let stbl = minf.child(b"stbl").unwrap();
+
+    // Fewer than 8 bytes after a container's last box are not a box,
+    // and FFmpeg passes over them too.
+    let end = (stbl.offset + stbl.size) as usize;
+    let padded = splice(&f, end, 0, &[0; 7], &[moov, trak, mdia, minf, stbl]);
+    assert_eq!(timing(&padded, 0).unwrap(), whole);
+
+    // Controls: each box made a byte longer than its parent holds, which
+    // stops the reader there, as its warnings say. A lost `stss` would
+    // read as every sample a sync sample.
+    let stss = stbl.child(b"stss").unwrap();
+    let elst = edts.child(b"elst").unwrap();
+    for (b, parent) in [
+        (stss, "stbl"),
+        (elst, "edts"),
+        (stbl, "minf"),
+        (minf, "mdia"),
+        (mdia, "trak"),
+    ] {
+        let at = b.offset as usize;
+        let mut bad = f.clone();
+        bad[at..at + 4].copy_from_slice(&(b.size as u32 + 1).to_be_bytes());
+        let tree = mp4::read(&mut io::Cursor::new(&bad)).unwrap();
+        let warning = format!("child box `{}` at {at} overruns its parent", b.fourcc);
+        assert_eq!(tree.warnings, [warning]);
+        let (fourcc, why) = named(must_fail(parent, mp4::track_timing_in(&tree, 0)));
+        assert_eq!(fourcc, parent);
+        assert!(
+            why.starts_with(&format!(
+                "its boxes stop at offset {at}, {} bytes before its end",
+                b.size
+            )),
+            "{why}"
+        );
+        // The other track is whole.
+        assert!(mp4::track_timing_in(&tree, 1).is_ok());
+    }
+    // A track lost from `moov` says why it isn't there.
+    let second = moov.children_of(b"trak").nth(1).unwrap();
+    let at = second.offset as usize;
+    let mut bad = f.clone();
+    bad[at..at + 4].copy_from_slice(&(second.size as u32 + 1).to_be_bytes());
+    let why = no_track(must_fail("a lost trak", timing(&bad, 1)));
+    assert!(
+        why.starts_with("the file has 1 tracks, so none is stream 1, but box `moov`"),
+        "{why}"
+    );
+    assert_eq!(timing(&bad, 0).unwrap(), whole);
 }
 
 #[test]
@@ -882,6 +1008,58 @@ fn ffmpeg_s_files_time_as_its_demuxer_reads_them() {
 }
 
 #[test]
+fn edits_put_in_by_hand_time_as_ffmpeg_s_demuxer_reads_them() {
+    let dir = temp_dir("track-timing-edits");
+    // A movie at 30720, whose tick is half the track's.
+    let mux = MuxOptions {
+        movie_timescale: Some(30720),
+        ..MuxOptions::default()
+    };
+    let plain = written(&dir.0, "plain", &[("g", "6"), ("bf", "0")], 0, &mux);
+    let f = std::fs::read(&plain).unwrap();
+    // The file with its track's edit list replaced by `edits`, or one put
+    // in after `tkhd`. FFmpeg's muxer writes `moov` last, so no chunk
+    // moves.
+    let put = |name: &str, edits: &[EditSpec]| {
+        let tree = mp4::read(&mut io::Cursor::new(&f)).unwrap();
+        assert_eq!(tree.top.last().unwrap().fourcc.0, *b"moov");
+        let moov = tree.moov().unwrap();
+        let trak = moov.child(b"trak").unwrap();
+        let (at, cut) = match trak.child(b"edts") {
+            Some(e) => (e.offset, e.size),
+            None => {
+                let tkhd = trak.child(b"tkhd").unwrap();
+                (tkhd.offset + tkhd.size, 0)
+            }
+        };
+        let edts = bx(b"edts", &bx(b"elst", &elst(0, edits)));
+        let path = dir.0.join(format!("{name}.mp4"));
+        let bytes = splice(&f, at as usize, cut as usize, &edts, &[moov, trak]);
+        std::fs::write(&path, bytes).unwrap();
+        let first = |p: &[PacketInfo]| p.iter().filter_map(|p| p.pts).min().unwrap();
+        let (den, packets) = demuxed(&path);
+        let t = mp4::track_timing(&path, 0).unwrap();
+        assert_eq!((den, t.timescale), (15360, 15360), "{name}");
+        (t, first(&packets))
+    };
+    // Two empty edits of half a track tick each, then the twelve frames,
+    // 0.4 s: FFmpeg rounds each edit to a tick and adds them up.
+    let (t, first) = put(
+        "halves",
+        &[(1, -1, RATE_1), (1, -1, RATE_1), (12288, 0, RATE_1)],
+    );
+    assert_eq!((t.first_pts, first), (2, 2));
+    // Control: the two added before rounding make one tick.
+    must_fail("the empty edits rounded once", first == 1);
+    // An edit that starts 300 ticks into the first frame: FFmpeg
+    // discards that frame and shows the next at the empty edits' time,
+    // 0, where the tables give the next frame's offset from the edit's
+    // start.
+    let (t, first) = put("between", &[(12288, 300, RATE_1)]);
+    assert_eq!((t.first_pts, first), (512 - 300, 0));
+}
+
+#[test]
 fn a_moov_cut_short_is_an_error_naming_it() {
     // FFmpeg's muxer writes `moov` last, as cameras do.
     let dir = temp_dir("track-timing-cut");
@@ -926,13 +1104,13 @@ fn first_pts_by_sample(s: &Spec, movie: u32) -> Option<i128> {
     let (from, delay) = match &s.elst {
         Some((_, edits)) if !edits.is_empty() => {
             let shown = edits.iter().position(|e| e.1 != -1)?;
-            let empty: i128 = edits[..shown].iter().map(|e| i128::from(e.0)).sum();
             let (ts, movie) = (i128::from(s.timescale), i128::from(movie));
-            // To the nearest tick, halves away from zero.
-            (
-                Some(i128::from(edits[shown].1)),
-                (2 * empty * ts + movie) / (2 * movie),
-            )
+            // Each to the nearest tick, halves away from zero, then added.
+            let empty: i128 = edits[..shown]
+                .iter()
+                .map(|e| (2 * i128::from(e.0) * ts + movie) / (2 * movie))
+                .sum();
+            (Some(i128::from(edits[shown].1)), empty)
         }
         _ => (None, 0),
     };
@@ -1006,7 +1184,9 @@ fn spec() -> impl Strategy<Value = (Spec, u32)> {
                 vec(prop_oneof![Just(0i32), Just(512), -3000i32..3000], count),
             ));
             let sync = option::of(vec(any::<bool>(), count));
-            let edit = (0u64..5000, -1i64..span + 3000, 0u32..0x2_0000);
+            // Empty edits often, so that lists start with two or more.
+            let media_time = prop_oneof![Just(-1i64), -1i64..span + 3000];
+            let edit = (0u64..5000, media_time, 0u32..0x2_0000);
             let edits = option::of((0u8..2, vec(edit, 0..4)));
             (
                 Just(timescale),

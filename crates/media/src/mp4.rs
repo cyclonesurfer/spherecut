@@ -1421,11 +1421,15 @@ pub struct TrackTiming {
     /// composition offset (`ctts`) and the edit list: the sample shown
     /// earliest at or after where the list's first edit that shows media
     /// starts, timed from that start, plus the empty edits before it
-    /// (rescaled to the nearest tick, as FFmpeg rescales them). Without
-    /// an edit list it is the earliest presentation time of any sample.
-    /// Where the edit starts on a sample, as it does in the files
+    /// (each rescaled to the nearest tick, as FFmpeg rescales them).
+    /// Without an edit list it is the earliest presentation time of any
+    /// sample. Where the edit starts on a sample, as it does in the files
     /// cameras and FFmpeg write, this is FFmpeg's pts of the frame at
-    /// clip time 0 ([`VideoStreamInfo::origin_pts`]).
+    /// clip time 0 ([`VideoStreamInfo::origin_pts`]). Where it starts
+    /// between samples, FFmpeg discards the frame before the start and,
+    /// in a track without composition offsets, shows the first frame
+    /// inside the edit at the empty edits' time: its pts is less than
+    /// this by that frame's offset from the edit's start.
     ///
     /// [`VideoStreamInfo::origin_pts`]: crate::backend::VideoStreamInfo::origin_pts
     pub first_pts: i64,
@@ -1574,8 +1578,11 @@ impl<'a, T: Copy> Runs<'a, T> {
 /// than guessed at.
 ///
 /// The tables are checked against each other, and an error names the box
-/// that is wrong and why; bad bytes never panic. The work is linear in
-/// the size of the tables, whatever the counts in them say.
+/// that is wrong and why; bad bytes never panic. A box on the way to the
+/// tables (`trak`, `edts`, `mdia`, `minf`, `stbl`) whose boxes the reader
+/// couldn't all read is an error naming it too, rather than tables read
+/// as absent. The work is linear in the size of the tables, whatever the
+/// counts in them say.
 pub fn track_timing(path: &Path, stream: usize) -> Result<TrackTiming, Mp4Error> {
     track_timing_in(&read_file(path)?, stream)
 }
@@ -1584,14 +1591,15 @@ pub fn track_timing(path: &Path, stream: usize) -> Result<TrackTiming, Mp4Error>
 pub fn track_timing_in(tree: &Mp4Tree, stream: usize) -> Result<TrackTiming, Mp4Error> {
     let no_track = |why: String| Mp4Error::NoTrack { stream, why };
     let (moov, trak) = stream_trak(tree, stream).map_err(no_track)?;
+    // Before the handler, which a box the reader lost may have taken.
+    let mdia = whole(need(whole(trak)?, b"mdia")?)?;
     match handler_type(trak) {
         Some(h) if h.0 == *b"vide" => {}
         Some(h) => return Err(no_track(format!("it is a `{h}` track, not video"))),
         None => return Err(no_track("its track has no handler (`mdia/hdlr`)".into())),
     }
-    let mdia = need(trak, b"mdia")?;
     let timescale = timescale_of(need(mdia, b"mdhd")?)?;
-    let stbl = need(need(mdia, b"minf")?, b"stbl")?;
+    let stbl = whole(need(whole(need(mdia, b"minf")?)?, b"stbl")?)?;
 
     let sizes = stbl
         .child(b"stsz")
@@ -1645,7 +1653,10 @@ pub fn track_timing_in(tree: &Mp4Tree, stream: usize) -> Result<TrackTiming, Mp4
         Some(b) => Some(sync_samples(b, count)?),
     };
 
-    let elst = trak.path(&[b"edts", b"elst"]);
+    let elst = match trak.child(b"edts") {
+        Some(edts) => whole(edts)?.child(b"elst"),
+        None => None,
+    };
     let edit = match elst {
         None => None,
         Some(elst) => {
@@ -1752,9 +1763,12 @@ fn stream_trak(tree: &Mp4Tree, stream: usize) -> Result<(&Mp4Box, &Mp4Box), Stri
         }
         renumbers = renumbers.or_else(|| adds_streams(c));
     }
-    Err(format!(
-        "the file has {n} tracks, so none is stream {stream}"
-    ))
+    let why = format!("the file has {n} tracks, so none is stream {stream}");
+    // A box that stopped the reader may have hidden more.
+    Err(match whole(moov) {
+        Ok(_) => why,
+        Err(e) => format!("{why}, but {e}"),
+    })
 }
 
 /// What in `b`, if anything, FFmpeg's MOV demuxer makes streams of
@@ -1793,23 +1807,23 @@ fn sync_samples(stss: &Mp4Box, count: u64) -> Result<Vec<u32>, Mp4Error> {
 }
 
 /// Where an edit list starts showing the media: the media time of its
-/// first edit that isn't empty, and the empty edits before it rescaled to
-/// `timescale` ticks, to the nearest as FFmpeg's `av_rescale` rounds.
-/// `None` for a list of no edits, which FFmpeg ignores.
+/// first edit that isn't empty, and the empty edits before it in
+/// `timescale` ticks. As FFmpeg does, each empty edit is rescaled on its
+/// own, to the nearest tick as `av_rescale` rounds, and the ticks are
+/// added up. `None` for a list of no edits, which FFmpeg ignores.
 fn edit_start(list: &EditList, timescale: u32) -> Result<Option<(i64, i128)>, String> {
     if list.edits.is_empty() {
         return Ok(None);
     }
-    // At most 2^24 edits fit in a `moov`: their sum times a timescale
-    // fits in a u128.
-    let mut empty = 0u128;
+    let (from, to) = (u128::from(list.movie_timescale), u128::from(timescale));
+    // At most 2^24 edits fit in a `moov`, each a u64 times a u32 in
+    // ticks: the sum fits in a u128, and in an i128.
+    let mut delay = 0u128;
     for e in &list.edits {
         if e.media_time != -1 {
-            let (from, to) = (u128::from(list.movie_timescale), u128::from(timescale));
-            let delay = (empty * to + from / 2) / from;
             return Ok(Some((e.media_time, delay as i128)));
         }
-        empty += u128::from(e.duration);
+        delay += (u128::from(e.duration) * to + from / 2) / from;
     }
     Err("every edit is empty, so it shows none of the media".into())
 }
@@ -1856,6 +1870,31 @@ fn first_shown(
         }
     }
     first.map(|t| t - from.unwrap_or(0))
+}
+
+/// `b`, a container, if the reader read all the boxes in it. A box that
+/// overruns its parent or has a bad header stops the reader, which keeps
+/// neither it nor the boxes after it ([`Mp4Tree::warnings`]), as it
+/// stops once [`MAX_BOXES`] are read. A table lost that way would read
+/// as absent, which for `stss` would make every sample a sync sample,
+/// while FFmpeg reads the box cut to fit. Fewer than 8 bytes after the
+/// last box are not a box, and FFmpeg passes over them too.
+fn whole(b: &Mp4Box) -> Result<&Mp4Box, Mp4Error> {
+    let end = b.offset + b.size;
+    let read = b
+        .children
+        .last()
+        .map_or(b.offset + b.header_len, |c| c.offset + c.size);
+    let left = end.saturating_sub(read);
+    if left < 8 {
+        return Ok(b);
+    }
+    Err(malformed(
+        b,
+        format!(
+            "its boxes stop at offset {read}, {left} bytes before its end: the box there overruns it, has a bad header or is past the reader's limit of {MAX_BOXES} boxes, so neither it nor any box after it was read"
+        ),
+    ))
 }
 
 /// The child of `b` of type `t`, or an error naming both.
