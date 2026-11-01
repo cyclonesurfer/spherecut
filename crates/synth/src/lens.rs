@@ -418,6 +418,12 @@ pub struct BlockTruth {
 /// (insta360.md §4.1, M3 plan 3.1 and 6.1): two blocks of one generation,
 /// the canvas they are in and field 27's window. Block 0 is the canvas's
 /// left; which track each block describes is the planted binding's.
+///
+/// The type doesn't make the two blocks share a generation:
+/// [`CalibTruth::generation`] says whether they do. The tracks' side is
+/// not here either, since it is the recording mode's and not the
+/// calibration's: whatever scales these numbers to a track takes it
+/// beside them, as `Rig::build` (6.2) takes its `sides`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CalibTruth {
     pub blocks: [BlockTruth; 2],
@@ -431,6 +437,15 @@ pub struct CalibTruth {
     pub lens_type: u32,
     /// The packed word's body code, its bits 8 to 15 (4 on the X5).
     pub body: u8,
+}
+
+impl CalibTruth {
+    /// The generation both blocks store their terms in, or `None` when
+    /// they differ, which no calibration string holds.
+    pub fn generation(&self) -> Option<Generation> {
+        let [b0, b1] = self.blocks.map(|b| b.dist.generation());
+        (b0 == b1).then_some(b0)
+    }
 }
 
 #[cfg(test)]
@@ -589,7 +604,8 @@ mod tests {
 
     #[test]
     fn stored_terms_name_their_generation() {
-        // Lens 0 of clip 8's V3 string, as M3 plan 3.4 reads it.
+        // Lens 0 of Pat's V3 string (field 54, the same in every master
+        // and LRV, plan 3.1).
         let v3 = StoredDist::V3 {
             k: [0.18632051, 2.04984355, -3.24446917],
             p: [-0.00143576, -0.00339240],
@@ -612,9 +628,16 @@ mod tests {
             body: 4,
         };
         assert_eq!(cal.blocks[1].dist.generation(), Generation::V3);
+        assert_eq!(cal.generation(), Some(Generation::V3));
         let v6 = StoredDist::V6 { d: [0.0; 13] };
         assert_eq!(v6.generation(), Generation::V6);
         // Control: V6's terms aren't taken for V3's.
         must_fail("V6 terms as V3", v6.generation() == Generation::V3);
+        // Control: a calibration with a block of each generation has none.
+        let mixed = CalibTruth {
+            blocks: [block, BlockTruth { dist: v6, ..block }],
+            ..cal
+        };
+        must_fail("a V3 block beside a V6 one", mixed.generation().is_some());
     }
 }
