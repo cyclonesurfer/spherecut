@@ -532,7 +532,7 @@ fn write_with(spec: &Spec, dir: &Path, lens: Lens) -> Result<PathBuf, SynthError
     Ok(out)
 }
 
-/// Frame `i` of `spec`'s clip as [`write`] codes it: the pattern with the
+/// Frame `i` of `spec`'s clip as [`write()`] codes it: the pattern with the
 /// spec's flash, white and cut-away frames, lens `code`'s corner codes if
 /// any ([`PairSpec::corner_codes`]), and the spec's noise.
 pub fn frame_planes(spec: &Spec, code: Option<usize>, i: u32) -> Result<YuvPlanes, SynthError> {
@@ -562,7 +562,7 @@ pub fn frame_planes(spec: &Spec, code: Option<usize>, i: u32) -> Result<YuvPlane
     Ok(planes)
 }
 
-/// The noise's format, raised whenever [`add_noise`] would add other
+/// The noise's format, raised whenever `add_noise` would add other
 /// noise for the same seed and frame: its generator, its levels or its
 /// scaling. The noise sets how hard a clip is to code and decode, so a
 /// perf pair's stamp holds this and hw-test makes the pair again when it

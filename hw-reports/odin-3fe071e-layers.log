@@ -1,0 +1,24 @@
+   Compiling spherecut-testkit v0.1.0 (/home/pat/spherecut/crates/testkit)
+   Compiling spherecut-media v0.1.0 (/home/pat/spherecut/crates/media)
+   Compiling spherecut-synth v0.1.0 (/home/pat/spherecut/crates/synth)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.38s
+     Running tests/pairs.rs (target/debug/deps/pairs-37286a67321fa95b)
+
+running 1 test
+x265 4.1+1-1d117be (build 215), temporal-layers=2 without B-frames: NAL types [(1, 46), (20, 2)], in the order shown
+x265 4.1+1-1d117be (build 215), temporal-layers=2 with a B-frame between references: NAL types [(1, 24), (2, 22), (20, 2)], reordered
+x265s_temporal_layers_are_recorded_and_only_what_holds_for_every_version_asserted: 1.062 s; the suite 1.062 s so far, of its 15 s budget
+test x265s_temporal_layers_are_recorded_and_only_what_holds_for_every_version_asserted ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 1.07s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running tests/pairs.rs (target/debug/deps/pairs-37286a67321fa95b)
+
+running 1 test
+x265 4.1+1-1d117be (build 215)
+x265_names_its_version_in_the_streams_it_codes: 0.593 s; the suite 0.593 s so far, of its 15 s budget
+test x265_names_its_version_in_the_streams_it_codes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.60s
+

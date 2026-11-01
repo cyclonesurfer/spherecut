@@ -10,7 +10,7 @@ decisions and their reasons in `DECISIONS.md`.
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because RADV on Strix Halo has no Vulkan Video H.264 or HEVC decode. Evidence below |
 | M1 Viewer | **Done pending hardware** (2026-10-30). Every criterion has its evidence (below, "M1 criteria ticked") but three that wait on machines: huginn's H1 and H2 for the real-time and zero-copy rows on its 8060S, Hyprland for the HiDPI row (odin passed at 125 % on 2026-10-30), and clip 12, a stitched camera export, for the real-time row. odin's H3 at 0d491ae and its reruns at 8d5c943 are the hardware evidence so far (D41, D42). How it got there: `VideoDecoder` (software, VA-API, Vulkan) is its first slice. FFmpeg's confinement (D24) is the second; its criterion is ticked since slice 4 gave `spherecut frame` its strace test. The CLI's JSON contract for `probe` and `doctor` (D27, `docs/cli-json.md`) is the third; its criterion is ticked since slice 4 brought `frame` into it, with exit statuses 3 and 4, SIGINT and `--overwrite` (evidence under "M1 criteria ticked", below). Slice 2a is the fourth: `core::video` and `core::cancel`, `media::backend` with `FfmpegBackend` and the frame-exact seek of plan section 3.3 in software (D29), native pixel layouts, swscale for the rest and the colour default rules (D30), synth's new clips and its `SyntheticBackend` and `GatedBackend`. The seek oracle (`crates/synth/tests/seek.rs`) is exact on every clip of the set, among them clips whose timestamps tie or go backwards and variable-rate Matroska files with a constant default duration; it checks what each seek cost and every run link, and its negative controls miss. The slice's review found 16 faults (wrong frames returned as `Exact` after a cut, in broken timestamps and in variable-rate Matroska, false run links when catching up, a duration missing for Matroska, an index trusted before Cues are read); all are fixed, each with a test that fails without its fix where one can show it (D29, D30). Its second review found 10 more (an open-GOP H.264 leading picture and a RADL picture returned after a seek, seeks past an MP4 cut, an MP4 spliced by its edit list read as constant-rate, resuming after a stopped seek in tied and backwards streams, an FFmpeg log capture that lost its lines to another thread, a test that a change in load could fail, and an overflow on a far-off Cues entry); all are fixed too, with tests where one can show it (D29). Slice 2b is the fifth: `DecodeMode::Hardware` decodes through the backend on VA-API or Vulkan Video, on one device per kind per backend opened on the render node `media::hw` finds (bus id, then PCI ids, then `renderD128`; `--render-node` overrides it), single-threaded, with frames kept on the device until handed out and downloaded into a pool of 256-byte-aligned buffers. `Fallback::Software` opens in software when the device can't be opened or turns the stream down, and reopens in software when it fails mid-stream, going on from the frame after the last one returned with no gap and no repeat; `Fallback::Fail` returns the error. A device's refusal or failure is its own error (`HwUnsupported`, the new `HwFailed`), never the file's damage. Media's `fault-injection` feature, turned on only by synth's tests, fails any frame as the device would, and the Tier 1 fallback tests (`crates/synth/tests/fallback.rs`) fail every frame of H.264 and HEVC clips while seeking, catching up and playing; they also fall back on lavapipe and on a render node that isn't there. The Tier 2 tests the plan names are written and listed (`vaapi_seek_matches_software`, `vaapi_colorinfo_matches_software`, `vaapi_download_pool_reuses_buffers`, `bench_seek_latency`, and Vulkan Video versions of the first three), and here they skip with their reasons; their checks pass on software standing in for a device and fail on one that fails. The slice's review found 4 faults (a stream cropped on the left came off the device narrower than software's frame, or failed on its first download at 10 bits, since FFmpeg's aligned cropping keeps columns by the pixel format's own rule; the pool tests couldn't tell a pool from a fresh buffer per frame; a device that won't open was named `vaapi`, and the Vulkan device's log line named the node asked rather than the GPU taken); all are fixed, with tests where one can show it. Both paths now crop exactly as the stream says, and the Tier 2 seek and colour sets have clips cropped on the left (D30). Slice 2 is done once 2b merges; its hardware results come with H1. Slice 3a is the sixth: `spherecut-render` on wgpu 30.0.1 (Vulkan only) with `rust-version` 1.95 (D1): the device (`Gpu`, `AdapterChoice`, `GpuCaps`, `RenderError` with contract codes), canonical plane textures (deep planes through an integer scratch and an ingest pass into f16) with area mips capped near 64 px, GPU slots, the `Uploader` (`write_texture` or a staging belt, one submit per frame), the projection shader (every projection and morphs, the shader's own LOD, colour from `ColorInfo`), the encode pass, `render_still` and the f64 CPU reference (D31), with sphere's `pixel`, `orient`, `uv_gradient` and `project_morph` and testkit's `compare` and `fnv64`. On lavapipe `render_still` matches the reference at 49.6 to 59.0 dB through every projection and ten plane layouts at 8 to 12 bits, both ranges, three matrices and three sitings, and the mips match an independent area mean; negative controls tell level 0 from trilinear and one siting from another (`crates/render/tests/`). The slice's first review found 11 faults; all are fixed, each with a test that fails without its fix where one can show it: lavapipe truncates an f32 stored into an f16 target, so half the 10-bit codes ingested a half low (the shaders now round every f16 store to the nearest half themselves); an upload's GPU time left out the ingest; a stereo frame's other eye bled in across the shown eye's edges (only the shown eye is uploaded now); the chroma siting had no check that didn't share the renderer's own arithmetic, and 4:1:1's factor was wrong at small widths; readback failed past wgpu's 256 MiB buffer limit; a lost device panicked in wgpu's error handler (every entry point now returns `gpu_failed`); and D31, D22, ARCHITECTURE and a test comment said things that weren't so (the GUI's device path, the crate count, FFmpeg in render's tests, the belt branch a test covered). An odd-width 360° frame's chroma step at the seam is recorded as a limit (D31). Slice 3b is the seventh: the golden images (`crates/render/tests/goldens.rs`, D32). One test runs every row of plan section 6 on lavapipe from synth's in-memory planes: six views stored as PNGs that must come back pixel for pixel at the Mesa build they were blessed on, every view against the f64 reference at floors calibrated when blessing, and minified views against synth's new `render_view_ideal`, the supersampled pattern itself. Each row's negative control is asserted on every run: implicit derivatives give 175 to 288 bad pixels at the seam and the poles where the analytic LOD gives none, level 0 shimmers 3.3 to 5.0 times as much as the ideal, and a swapped range, matrix or siting misses by 22 LSB, 19.5 dB and 53 LSB. A manifest records each row's driver build, source hash, view, thresholds and measurements; a changed source is reported as one and never compared as a render; and blessing (`SPHERECUT_UPDATE_GOLDENS=1`) writes nothing unless every row passes and every control fails. The evidence changed four of the plan's rules: the ideal comparisons cover only pixels 2.5 levels down or more, where level 0 must alias (over a whole view isotropic trilinear is softer than the ideal, and level 0 nearer it); range and siting are asserted at 10 bits, with 8 bits recorded, since lavapipe filters 8-bit planes to whole codes; `passthrough_exact` holds limited range to an independent model of the chain, and to round((k − 16) · 255 / 219) except within the f16 store's 0.0547 codes of a tie (86, 159 and 165 come out one code off); and each pole is turned to lie inside a pixel quad, which pitch ±90 exactly doesn't do. The Tier 2 tests `list_adapters_and_features`, `goldens_on_gpu_match_reference`, `goldens_on_host_llvmpipe` and `bench_upload_5k7` are written, each with a Tier 1 run on lavapipe; here the first two and the bench skip with their reasons, and `goldens_on_host_llvmpipe` passes, lavapipe being this machine's llvmpipe. Every crate root now forbids `unsafe`, except media's and the `spherecut` binary's, which deny it and allow it only in their FFI modules (D28). The slice's review found 10 faults; all are fixed, each with a test that fails without its fix where one can show it: a matrix or siting swapped inside render's colour code passed `matrix_601_709` and `siting_left_center` and was blessed, since the CPU reference shares that code (both rows now have truths outside it: the two matrices' codings of one picture must render alike, and smooth 4:2:0 chroma must match its 4:4:4 self); a blessing could lower any calibrated floor (it now prints them old → new and refuses a drop of more than 0.5 dB unless told `SPHERECUT_UPDATE_GOLDENS=lower`); the blessing command exited 101 after a blessing that had written everything (the harness's own tests read `tests/goldens` while it was rewritten, and now bless into scratch directories); three manifest entries lacked their sources or views; the controls' "over" bounds passed at the bound; `bench_upload_5k7` couldn't see a block made and freed within a step, which is its second trigger (it reads the allocator in flight too, and also runs two steps in flight), and timed 5.7K NV12 on the copy a decoded frame doesn't take (its frames now have the pooled download's stride); a GPU named by `SPHERECUT_ADAPTER` that refused a device showed as skipped; `round_f16` had no test of the subnormal halves and stored the largest half where the nearest is infinite; and a test comment was stale (D31, D32, m1-plan amendment 11). No golden image changed. Slice 3 is done. On 2026-10-24 main stopped compiling against FFmpeg 8 (3a8047d's swscale flags; fixed in 67fa1fd), which odin's `hw-test` found and nothing here had checked: Tier 1 now runs against an 8.1.3 built like Pat's, where it found that on one thread, as hardware decoders run, FFmpeg 7.1 and later's HEVC decoder gave a frame from before a seek after it (fixed, with a test, D29); odin's second run (PR #4) failed both GPU seek tests on it, and the download pool tests on a fault limit that counted the driver's faults (m1-plan amendment 12). Its review found that from 8.0 a damaged HEVC reference picture lost the rest of its GOP without a `Damaged` event, and an exact seek into it returned an earlier frame as `Exact`, so slice 2a's "damage the decode goes on past is an event" didn't hold on Pat's FFmpeg (fixed, with a test; on 7.1.x such damage is still silent, D29). Tier 1 against a 7.1.3 found that FFmpeg 7.0 to 8.1.2 leave an audio stream whose decoder they couldn't open without channels, which probe took for "has no channels" rather than the decoder's refusal, so a feature FFmpeg lacks became damage (fixed, with a test, D2, D15). `cargo xtask compat` lints the workspace and links its tests against other FFmpeg builds (D2). The review of that work found 10 more faults; all are fixed, each with a test that fails without its fix where one can show it: from 7.0 FFmpeg's H.264 decoder flags corrupt the frames decoded after a keyframe that isn't IDR, with no recovery point SEI, before it comes out, though their references are all there, and Spherecut took them for damage after a seek and dropped them (the oracle, which now fails any good clip that raises a `Damaged` event, has two such clips and a cut of one, D29); D13, D29 and this file said what FFmpeg's corrupt flag and its HEVC decoder do in ways that weren't so; probe made a PCM track with no channels damage even without samples (D15); a test gated what it expected on libavformat's version; `cargo xtask compat` deleted any directory without its stamp where a target went, the prefix itself when that directory was the prefixes' own, took a prefix whose `.pc` file led to another FFmpeg for found, and ran another pkg-config than the build does; and `build-ffmpeg.sh` said nothing of a step that failed (D2). Its second review found 7 more; 6 are fixed, each with a test that fails without its fix where one can show it, and one is a limit: such a stream with x264's default 3 reference frames never came out unflagged after a seek or at the start of a cut, so a cut played 2 of 32 frames and keyframe seeks went to the file's end (the I-frame decoding starts from is now taken as good, flagged or not, and the oracle has 3-reference clips and a cut, D29); a cut of the 1-B-frame clip cost a second seek after a keyframe seek (the keyframe a seek lands on now counts for the keyframes' lag); x264's intra refresh seeks only to where FFmpeg says decoding has recovered, which isn't always the decode from the start (a limit, D29); `build-ffmpeg.sh` left a half-installed prefix under its name; and compat checked libavcodec alone of the five libraries the build binds, let a target root with `..` build inside a prefix, and checked nothing once the build had run (D2). The review of that work found 5 more; all are fixed, each with a test that fails without its fix where one can show it: an exact seek ended on frames decoded from an I-frame that an MP4 lists as a sync sample but no IDR picture or recovery point vouches for, which may refer to frames before it (x264's I-frames at a flash, keeping 3 references: 28 of 40 exact seeks gave a wrong frame, with no event), so an exact seek in H.264 whose sync samples FFmpeg doesn't flag now decodes from the start of the stream (D29); a Matroska cut at the last keyframe of open-GOP H.264 opened on a leading B-frame decoded without its references (D29); and compat read the build's output where cargo doesn't put it once a build directory or target triple is set, held the libraries it checks to one line of the manifest, and its docs overstated its guard (D2). Its review found 7 more; all are fixed, each with a test that fails without its fix where one can show it: exact seeks still trusted FFmpeg's heuristic at an I-frame whose recovery point SEI counts frames, and 30 of 60 returned a wrong frame as `Exact` (now only a frame FFmpeg flags a keyframe starts an exact run after a seek, and x264's intra refresh, a limit until now, seeks exactly from the start of the stream); a seek back to the start of a cut at an I-frame that isn't IDR, with no B-frames, decoded other pictures than opening did, returned as `Exact` (such a start now decodes on a decoder opened afresh); the docs left the X5's LRV proxies to Pat's next run, where the samples here show them keyed by IDR pictures and seeking as they did (D29); and compat tied its libraries to the workspace's features only in a compat run, didn't count libavresample as FFmpeg's, failed every build in a target root with a brace, and said it recognised FFmpeg layouts it doesn't (D2). `cargo xtask compat` lints the workspace and links its tests against other FFmpeg builds (D2). Slice 4 is the eighth: `spherecut frame` (`crates/cli/src/frame.rs`) with every flag of plan section 5 and `--decoder vulkan`, on the JSON contract as `spherecut.frame/1` with exit statuses 3 and 4 (D27, `docs/cli-json.md`); `core::TimeSpec`, the exact `--time` grammar, with its proptest; `core::fs::TempFile`, moved from `inject`, with `persist_new` (a hard link, which fails with EEXIST whatever turned up at the output, or an exclusive create and a copy where links are refused) beside D16's `persist_replace`; and `cli::interrupt`, the binary's one FFI module, whose SIGINT handler (`SA_RESETHAND | SA_RESTART`) only stores to an atomic that the main thread polls every 10 ms while a worker thread does the work (D28). `--decoder auto` decodes with VA-API on the render node of the GPU that renders and falls back to software, saying why in the result (D39). On lavapipe the Euler table's centre pixels are F (255, 1, 0), R (0, 255, 1), B (1, 0, 255) and L (254, 255, 0), and at the poles the neutral greys 184 (U) and 72 (D) that the f64 reference gives too, since isotropic filtering at the pole blends the marker disc with the grid round it (D32); `--roll 90` keeps F at the centre and puts U on the view's left (amendment 10), shown in a 200° fisheye. The frame code read back through a 360° fisheye is the frame `--time` and `--frame` ask for on a constant-rate MP4 and on its Matroska remux at 1/1000, and `--frame` counts frames on a variable-rate clip. Every error row of the exit table leaves no output and no temporary file; an existing output, a link or a dangling link is never replaced without `--overwrite`, and a file created between the check and the publish is kept (`output_exists`). Ctrl+C 300 ms into a 600-frame exact seek on `long-gop` ends the run about 25 ms later with exit 4 and `cancelled`. The pipeline goldens (D32) store four PNGs, identical here at the build they were blessed on, that `frame --reference` matches at 51.2 to 90.0 dB, and the swscale cross-check is within 1 LSB of swscale and 0.51 to 0.60 LSB of the exact conversion at BT.601 and BT.709, both ranges and both depths, where a swapped matrix or range misses by 18 to 30 LSB. strace shows no IP socket for `frame`. The Tier 2 `vaapi_render_matches_software` and `vulkan_render_matches_software` are written and listed by hw-test, and skip here with their reasons; the same check passes on lavapipe with software standing in for the device and fails on the next frame. Two M1 criteria are ticked: FFmpeg's confinement and the JSON contract. The slice's review found 18 faults; all are fixed or corrected in the docs, each with a test that fails without its fix where one can show it: a frame past a Matroska cut was rendered as the frame asked for (the decoder now finds a Matroska cut from the Segment's size, D13, and `--frame N` on a constant-rate stream checks that the frame shown is N); `--frame N` past a cut on a variable-rate clip failed `decode_failed` rather than by its cause; a Matroska equirect was refused as having no spherical metadata (frame now says it doesn't read Matroska's yet); `--time` and `--frame` values past what the time base holds failed `decode_failed`; negative values got clap's tip; `-o dir/` was refused only after the render; the SIGINT handler replaced an inherited `SIG_IGN` and was installed after the temporary file was made; the Vulkan Tier 2 test skipped on a broken device, passed with clips left out and lacked FFmpeg's words, and no Tier 2 run tried `--decoder auto`; and the tests couldn't tell `--reference` rendering on a GPU, or a crop's sides swapped. The docs' Ctrl+C, output, timing and field lists are corrected, and that lavapipe's `aniso` renders as `iso` is recorded (D13, D16, D27, D39). No golden image changed. odin's third run (PR #5) failed two golden tests, for three reasons, and branch `m1/goldens-hw` fixes all three: the encode pass rounds to its target's codes itself, since RADV's export packs to f16 toward zero first and put ten of `passthrough_exact`'s codes a code low (D31); the other-driver rule allows at most 4 pixels more than 4 LSB off and none more than 8, which passes LLVM 22's maximum of 5 LSB if no more than 4 of its pixels are past 4 LSB (odin's next run notes the count) and fails every fault made from the stored views: a pixel's shift, a seam, pole or rim blacked out, and implicit LOD wherever it shows (D32, m1-plan amendment 13); and the mip pass rounds its 8-bit means to codes itself (below). The branch's review found 13 more; all are fixed or corrected in the docs, each with a test that fails without its fix where one can show it: the fault test read `tests/goldens` while a blessing rewrote it, which failed the blessing command after it had written everything; the encode pass's 10-bit output, packed to f16 toward zero, could land 0.0005 codes from a tie, and its output into an f16 target was the driver's rounding (it returns halves there now, D31); a Tier 1 assertion held whatever lavapipe the machine has to a model of one lavapipe build; the other-driver path's test couldn't tell the two rules apart, and the CLI's rule had no test; and D32, m1-plan, ARCHITECTURE, perf.md and this file said things that weren't so (a fix where a floor was lowered, LLVM 22's unrecorded count, a fault table's SSIM, the labels' darkest pixels, a filter's cost, an RMS). No golden image changed there either. Then the mip pass: it works each 8-bit mean of codes out exactly, in integers, and rounds it to the nearest code with ties to even, as the CPU reference now does, after an emulation showed that its stores, left to the driver, not RADV's filtering, cost the RX 7600's wide views up to 15 dB (D31, D32). A lower floor for a GPU's CPU checks, the RX 7600's measurement less 3 dB, stood in for that fix for a while and is gone; the emulation predicts the RX 7600 at 56.11 to 59.78 dB after it, 7.91 dB or more above lavapipe's floors. The fix moved six stored goldens and one pipeline golden by up to 4 LSB where a pixel reads mip level 1 or more, and raised all nine CPU floors of the render goldens and that pipeline golden's (47.2 to 48.17 dB); the other three pipeline goldens' didn't move. odin's fourth run (PR #6, at 918d031) passed all 25 Tier 2 tests: the RX 7600's CPU checks came out at 58.88 to 60.75 dB, 8.57 dB or more above the floors and, at every check, the emulation's own number to the hundredth of a dB, so the error its prediction had added as RADV's own wasn't RADV's; `passthrough_exact` gave limited 86, 159 and 165 one code off and nothing off the model, as lavapipe does; and LLVM 22's llvmpipe put no pixel more than 4 LSB off a stored image (D31, D32). Slice 5, the headless playback engine, is the ninth, in three parts. Its first part is the clocks, the UI thread's guard and the frame cache (D34). `core::clock` has the `Clock` trait, `SystemClock`, and `ManualClock`, which tests and M2's export step frame by frame. `core::blocking` has `mark_ui_thread` and `may_block`, and every blocking helper in core, media, render and synth now calls `may_block`, which panics on a marked thread in debug and test builds. The new `spherecut-playback` crate has the bounded `FrameCache`: frames linked by run, a window ahead of the playhead that is never evicted, eviction of the frame farthest behind first, and back-pressure that stops with its token. It also has the cache's budget, from `/proc/meminfo` and cgroup v2 limits or a size from `SPHERECUT_FRAME_CACHE_MIB`, and `PerfStats`. A proptest holds the cache to a model of its rules at 100000 cases, and caught each of eleven faults put into the cache by hand. The second part, the engine, is in too (D34). The `Player` takes commands that return at once and is read with `try_lock` and atomics only. A decode worker per video stream answers seeks from the cache's runs or the decoder, the latest request winning, decodes ahead under the cache's back-pressure, and catches up when more than two frames behind the clock, counting what it passes as decode-dropped. Its decoder is picked from doctor's checks (Vulkan Video on a discrete GPU when both kinds work), and a fallback reaches the snapshot. The upload thread fills the GPU slots, reusing one only when it is Free and nothing else holds its frame. The presenter shows each stream's latest frame at or before the clock, which suits variable frame rates, and keeps the frame up until a seek's is ready. Shutdown joins every thread within one budget, and there is a seam for slice 6's audio. On a marked UI thread, with a backend that never answers and through a storm of 1000 seeks in 2 s, UI iterations took under 200 µs at the 99th percentile; the storm decoded one seek to completion. A 5.7K source played every frame inside a 256 MiB cache, peaking at 237 MiB. The third part, the last, is in too (D34, D37). The Tier 2 playback benchmarks play hw-test's perf clips, the X5 raw files and any stitched sample through a `Player` on the machine's GPU, from a thread marked as the UI thread at 60 Hz deadlines, projecting each new frame to 1920×1080, once unthrottled and once in real time. `bench_playback_realtime_5k7_8bit` and `_10bit` hold the hardware decoder `Auto` picks to plan section 12.3's rules: no drop after the first second of 60 s, and every unthrottled second at 1.2 × 29.97 frames or more. Their harness runs in Tier 1 on lavapipe. hw-test makes the perf clips once, 5.7K and 8K HEVC with noise on every frame at a camera's bitrate, runs Tier 1 on the machine, and reports its power settings and render nodes. The slice's review found 19 faults; all are fixed or corrected in the docs, each with a test that fails without its fix where one can show it: two video streams, as the X5's lenses, deadlocked on GPU slots after a seek or step on three slots, with a slot dead or with the second decoder late; a keyframe seek back with the cache full never landed (the landing is now pinned while its request is the target); a step made while a seek or step was on its way started from the frame on screen, and two instant steps before a present went one frame; a paused frame moved with the A/V offset; a 5 s budget recheck counted the cache against itself, and the cgroup cap missed a namespaced container's limit; two Tier 1 tests would have failed on odin's Vulkan Video, and xtask's machine tests raced; and tests, a count and docs said or checked less than they seemed to ("Slice 5", below, D34, D37). Its re-review found 5 more, and their tests 2: a keyframe seek back on two streams on few slots could stay in Seeking, a failing stream's slots had no test, a step during a keyframe seek started from the time asked, a step superseding a seek before its worker started it could wait for room for good, one lens's next frame could take the slot the other's needed on three slots, the budget's recheck swung under pressure, and a cgroup's page cache counted as use; all are fixed, each with a test that fails without its fix, and two slots Dead of four on two streams is a documented limit (D34). None of it has run on a GPU yet: H1 is requested (Next, item 1), and the real-time criterion waits for it ("Slice 5", below). Slice 6, audio, is the tenth (D35). `media::audio` decodes a file's audio through its own confined demuxer and decoder to packed f32 at the output's rate and channels, on the clip's time axis: AAC's priming gone, edit lists applied, mono duplicated, first-order ambiX decoded to two cardioids, the rest mixed down, and seeks that give a sequential decode's samples within 1e-6, 44.1 kHz resampled included. The new `spherecut-audio` crate plays it through cpal (PulseAudio's protocol, else ALSA), from a lock-free chunk ring, with an audio clock that video follows, so the sound card's clock is the master; it falls back to the system clock when the device is lost or stalls and comes back to the audio without a jump, and plays on a null output where there is no device, as here. The engine opens a file's audio with the file and prerolls for it after a seek. The A/V tests run the engine on a scripted device at 29.97 and 59.94 fps with 44.1 and 48 kHz for 60 s each, and pass; the Tier 2 device test is written and skips here, for H2 ("Slice 6", below). H1 has run on odin (PR #7, at 43abcda): its two 5.7K gates and four Tier 1 tests failed, and the X5 raw benchmark passed on passes that had stalled. Branch `m1/h1-fixes` fixes all of them: the benchmarks let go of their first frame, so two streams play; after a seek back the frames left ahead keep out of the GPU slots and the clock waits for the next two frames; and the download pool's buffers are on huge pages, so a 10-bit 8 GiB cache fills in about 2.5 s rather than 7. At its commits odin dropped no frame after the first second on either gate in any run, and the 10-bit gate's unthrottled clause failed once in four runs, at 17 to 20 fps for 3 s while the cache filled ("odin's fifth run", below). huginn's H1 is still to come. Slice 7 is the GUI viewer: `spherecut [file]` opens it on render's own device, and the kittest suite proves it on lavapipe, byte for byte against `render_still` at four scales, the drag within 0.34 px, and the whole app never waiting on a backend that never answers ("Slice 7", below). The criterion that the UI never blocks is ticked with it. odin's sixth run (PR #8, at 303e364) passed every Tier 2 test it could run, both gates on Vulkan Video with no frame dropped, and failed one Tier 1 test that needed more time under load, now fixed ("odin's sixth run", below). Slice 5b's path A, zero copy from VA-API, is built, and on odin (PR #9) every frame came through byte for byte and VA-API's X5 modes decoded twice to three times as fast imported; odin's run also showed that VA-API's 8K slowdown was the download pool's mappings, which the pool now leaves to Vulkan Video. Its path B, Vulkan Video decoding on the renderer's own device, is built too, and on odin (PR #10) every frame came through byte for byte and it was the fastest path in every X5 mode ("Slice 5b", below). The default stays the copy until D25's choice before M3, which waits for huginn's rows. Slice 8 is the overlay's numbers, the settings, the raw view for a camera's lens streams and other flat sources, and `spherecut --smoke`, which hw-test's `gui_smoke` runs under a desktop session for H2, its gates and screenshots in the report ("Slice 8", below). H2 and slice 9, M1's acceptance, follow |
 | M2 Clip reframer | Under way. The plan is `docs/design/m2-plan.md` (2026-10-31): nine slices, the toolkit check built early. M2.1 is in: the project model, `Edit` and `Project::apply`, undo history and the JSON project file (D47, D48). M2.2 is in: keyframe interpolation, look-at targets and their property tests (D50). M2.2b is in: the toolkit check's timeline prototype, which passed on odin at every scale (D53). M2.3 is in: rendering for export (equirect output, the output frame, the YUV pass, motion blur; D49), which passed on odin's RADV. M2.4 is in: the export, with the software encoders, audio copied to the sample or encoded, one last pass for the metadata and the moov, and the file checked before it appears (D52). M2.5 is in: the VA-API encoders and their fallback (odin passes the 4K30 gate; AV1 on VA-API only at sizes it needn't pad), `spherecut render` (D51) and `frame --project`. M2.6 is in: the reframer's first GUI part, an untitled project with every video, save and reopen, undo, the timeline strip, the keyed view with look-around, and play kept to the trim (D54). M2.7 is in: the curve editor, the sphere overview and the 360 preview, the Inspector and look-at targets, and the export window, the export paced while the UI is busy (D55). M2.8's code is in: the smoke run exports at a preset and with motion blur, item 22's measurement (amendment 9); odin's full hw-test with a 125 % pass ran at 0663e05, and huginn's runs wait for Pat. M2.9, the fresh review of M2, made 24 findings across four areas; all are fixed or listed below (amendment 10). M2.10 is in: the app's export renders on a device of its own and, as Pat chose, pauses while the viewer plays; odin passed item 22's measurement at both scales (D56, amendment 11). Open: the project format (Pat's card), and the 4K30 row and the toolkit check on huginn. Below |
-| M3 Raw ingest and stitching | Under way. The plan is `docs/design/m3-plan.md` (2026-11-01): the Insta360 X5 first (Pat's choice), then the GoPro MAX's EAC pair, DJI's Osmo 360 and nadir and zenith caps, in 22 slices. Written from an understanding pass over the code and Pat's 14 X5 files, three competing drafts and their judges; a fresh review's 58 findings and a check of their fixes (50 more) are folded in (its section 0 and Appendix C). M3.0 is in: the test gates every M3 suite uses (`must_fail`, Tier 2c), synth's lens types, the lens tracks' timing tables (P-TRK passed on every field: the lenses lock by clip time), an agent's `.insv` project that stays open, and the format notes corrected against the bytes (below, "M3.0"). Waiting on Pat: takes 14 to 17 (`docs/SAMPLES.md`) and the plan's questions 2 to 4 |
+| M3 Raw ingest and stitching | Under way. The plan is `docs/design/m3-plan.md` (2026-11-01): the Insta360 X5 first (Pat's choice), then the GoPro MAX's EAC pair, DJI's Osmo 360 and nadir and zenith caps, in 22 slices. Written from an understanding pass over the code and Pat's 14 X5 files, three competing drafts and their judges; a fresh review's 58 findings and a check of their fixes (50 more) are folded in (its section 0 and Appendix C). M3.0 is in: the test gates every M3 suite uses (`must_fail`, Tier 2c), synth's lens types, the lens tracks' timing tables (P-TRK passed on every field: the lenses lock by clip time), an agent's `.insv` project that stays open, and the format notes corrected against the bytes (below, "M3.0"). M3.1 is in too: the pair decode, with K1 Redirect 2 on odin (M3.11b opens) and K3 Pass (below, "M3.1"). So is M3.3: the lens maths, `sphere::fisheye`'s unified model with V3's reading and the 21 V6 readings, `sphere::rig` and `synth::lens`, with rung 0 against synth (below, "M3.3"). Waiting on Pat: takes 14 to 17 (`docs/SAMPLES.md`) and the plan's questions 2 to 4 |
 | M4–M9 | Not started |
 | Agent integration (track A) | Planned 2026-10-24 at Pat's request (`PLAN.md` track A, DECISIONS D23). The CLI's JSON contract and FFmpeg's confinement are M1 criteria; the confinement is in (D24), and so is the contract for probe and doctor (D27). A1, the MCP server, is under way (`docs/design/a1-plan.md`, D43 to D46): A1.1 is in, `spherecut mcp` with the protocol and the `doctor` tool, and so is A1.2, the read and write roots (`--read-root`, `--allow-write --write-root`, `openat2` beneath each). A1.3 adds the `probe` tool (summaries, a folder's camera clips a page at a time, full reports within 40,000 characters, partial results at the deadline) and `spherecut call`, which prints what `tools/call` returns. A1.4 adds `look` (frames as one image of labelled tiles: views, the sphere under a grid, cube faces, sheets over the clip, raw streams; JPEG within a 60 KB budget, or PNG, or a file under the write root) and doctor with a `file` (the decode path look and frame take for it) and `speed`; frame's core moved to `spherecut_agent::still` so that look renders as frame does. A1.5 adds `analyze` (D46): timing from packets alone (frame durations, duplicate timestamps, gaps, keyframes, Mb/s, vfr, repeated pictures), motion (the change from frame to frame, and cuts) and audio levels (peak, RMS, clipping, silences), in up to 200 buckets, stopping at a bucket's end before the deadline with where to go on from; `gen-media` adds `jitter-dups.mp4` and `levels-3s.mp4` for it. A1.6 adds `check` (D46): the metadata against the streams (the projection's shape against one eye's picture, V1 against V2, SA3D against its channels) and a target (`youtube_360` from YouTube's help pages as fetched on 2026-10-30, `flat_16_9`, `vertical`, `archive`), each failure with its fix, under 2 KiB; probe now reads a Matroska or WebM file's projection and SA3D's head-locked stereo. A1.7 teaches agents the workflow: the server's instructions, an Agent Skills `SKILL.md` with three recipes that `spherecut agents install-skill` links where Claude Code, Codex, Gemini CLI and Copilot CLI look for skills, and `docs/agents.md` with each client's setup; the recipes replay on synthetic media within their budgets. Every A1 criterion is met but the hardware one (below, "A1: the MCP server"), which waits on Pat's runs with two agents; the Tier 2 MCP session passed on odin (PR #14) A2, edit and render, is planned: `docs/design/a2-plan.md` (2026-10-31, with its fresh review's amendments), six slices. A2.1 is in, projects on disk in core (the folder handle, the lock, the history file beside each project, the changed-on-disk check), and so is A2.2, the project tools (D57): `project` (a summary, a part a page at a time, or a new project of a video), `edit` (the project file's own edit ops, A1's times, all or none as one undo step labelled as the agent's) and `undo` (with `redo`, the agent's own steps only), with the edit reference as `project`'s `edits` part; `edit` and `undo` are listed only with a write root, and the eight tools' list keeps to its budgets. A2.3 is in, the window's share (D57): a project opens under its lock (waiting 2 s for an agent's call, refusing another window), with the history beside it, so Ctrl+Z goes through an agent's steps, named in the Edit menu with the agent ("Undo Set trim (claude-code)"); saves write the history too and never over a file changed on disk; a stale history opens fresh with a notice. A2.4 is in, render jobs (D58): `render` checks a project's render (its media the files it recorded, the output beneath the write root, the range within the trim, the export's preset and encoders, the free space) and answers within a second with a job id; `job` reports, waits up to 45 s with progress, or cancels within 2 s; one render runs at a time with four queued, each output's name reserved while queued, and the export writes and reads through the job's descriptors, so a link planted at the output isn't followed; the jobs end with the server within its grace, and a killed server's temporary file is swept by the next render after 10 s; `spherecut call` refuses both. With a write root the ten tools keep to the 12 KiB list. A2.5 is in, compare and projects in look and check (D59): `compare` measures a video against another of its size, or against a project's render at its size, frame for frame (luma PSNR and SSIM at up to 24 times, on the parity tests' scale, the worst and the means, a sheet of the worst four with their difference, partial at the deadline); a 1080p render through libx264 measured 55.2 dB against its project on lavapipe, and a frame off under 26 dB. `look` takes a `project` in place of `file` (its render's frames at the render's times, as `frame --project` renders them, pixel for pixel), and `check` a `project` (D46's rules on the file a render would write). The eleven tools take 12,267 bytes of the 12 KiB. A2.6 is in, teaching agents the workflow: the instructions name all eleven tools (1,309 of 1,500 characters), the skill has a fourth recipe (reframe a clip into a flat video) that a test replays on synthetic media through a draft render, `compare` and the whole render, and `docs/agents.md` has the files beside a project, the undo rule and the window's actions that aren't edits. A2's fresh review found no blocker, and its fixes are in; the Tier 2 render session (`mcp_render_vaapi`) passed on odin at 0c0296b (PR #26), and A2 waits only on Pat's runs of the fourth recipe with a real agent (below, "A2: edit and render for agents") |
 
@@ -337,7 +337,7 @@ and K4 wait for huginn's paste and go into perf.md whenever it comes.
   rows give). x265 3.5 (the cloud's) marks frames non-reference (TSA_N)
   only as reordered B-frames anyway; 4.x (odin's and huginn's 4.1) is
   asked for its layers by synth's `pairs` test and recorded per
-  version, not assumed. 7.2's "checked on its output's NAL types"
+  version, not assumed (odin's 4.1 does what 3.5 does, below). 7.2's "checked on its output's NAL types"
   should read "recorded per x265 version".
 - The masters code 10 slices a picture at 8K and 5 at 5.7K and 4K, WPP
   off, IDR_W_RADL, with TSA_N on every other picture at 5.7K60 and
@@ -397,8 +397,8 @@ code at 0444568; 5634 s, Tier 2 3 of 3 passed): the three two-track
 clips took 3501 s to make (2×3840² at 29.97 1655 s, 163 MB, 65.3 Mbit/s
 a lens; 2×2880² at 59.94 894 s, 100 MB, 80.2; 2×2880² at 29.97 952 s,
 201 MB, 80.2); their software decode and coding weren't in the run's
-`--only`, so a second odin run gives the too-easy flags and the coding
-rows the done-when asks for; they go into perf.md when it reports.
+`--only`, so odin's second run (below) gave the too-easy flags and the
+coding rows the done-when asks for.
 - **K2's export half on odin** (huginn's rule, the 2×2880² at 29.97
   pair beside the encode): VA-API download 26.3 fps a lens serial and
   29.2 a thread a lens, both under 36; Vulkan Video download 47.2 and
@@ -426,6 +426,22 @@ rows the done-when asks for; they go into perf.md when it reports.
   weakens it; not measured further. odin's `pkg-config` has no x265
   file, so the first report records libavcodec 62.28.103 alone; the
   fixed hw-test reads the version from a stream it coded.
+
+**odin's second run** (PR #28, report odin-3fe071e-m31b.md, code at
+3fe071e; 5495 s, both tests passed; perf.md's eleventh odin run) made
+the pairs again on their new stamps and gives the rest of the
+done-when. No lens is too easy: alone in software, 64.8 and 64.9 fps
+at 2×3840², 114.2 and 114.9 at 2×2880² at 59.94, 82.2 and 81.9 at
+29.97. Each lens codes an IDR_N_LP every 60 frames (120 at 59.94) and
+every other picture as a TRAIL_R, nothing in bold, beside the masters'
+IDR_W_RADL every 60 at 8K30, 50 at 8K25 and 120 at 5.7K60 and 4K120,
+those two with TSA_N on every other picture. odin's x265 4.1 gives
+TSA_N only to reordered B-frames, as 3.5 does
+(`hw-reports/odin-3fe071e-layers.log`). The gated rows repeat the first
+run's within 0.2 fps; the encode beside held 28.6 fps once (software a
+thread a lens on the 2880 pair, a setup no K line lists), under the
+29.5 floor. Alone on VA-API serially, the 3840 pair's slower lens ran
+40.4 fps against the first run's 31.1, beside clip 9's 41.0.
 
 **The reviews found** that both lenses of every perf pair had the same
 noise (the seeds were s and s + 1, and the noise generator makes its
@@ -510,6 +526,287 @@ deliberate stall), xtask's 77 tests 1.6 s. `cargo xtask check` gained
 103 binaries against M3.0's 778 s over 99; other builds ran beside
 both, so the totals move with the load.
 
+### M3.3, lens maths (2026-11-01)
+
+Branch `m3/lens`: the types the units share first, then (a) and (c)
+side by side in worktrees of their own, then (b), which merged them;
+a reviewer each, a fresh review of the whole slice, and two rounds of
+fixes with a reviewer between them.
+
+- **(a) The unified model.** `sphere::fisheye` gains `Unified` (Mei:
+  ξ, focal lengths, centre, and `Canonical`'s 13 distortion terms read
+  under any of the 21 `V6Reading`s), `KbLens` and `LensModel`, each
+  with forward, inverse and `limit_theta`. The inverse lifts through ξ
+  and runs Newton inside a bracket (a step that leaves it, or fails to
+  halve, falls back to bisection); a pass whose radial target lies past
+  r(limit) takes the bracket's top instead of failing.
+  `unproject_within(px, limit)` takes a limit found once, clamped to
+  the model's end (acos(−1/ξ) or acos(−ξ), 180° for `KbLens`), +∞
+  included. `KbLens` undoes its base in closed form and runs Newton on
+  θ_d(θ) only; it has no image on the back axis or, on a stereographic
+  base, from θ_d = 180°. `limit_theta` scans its last partial step too
+  (a hair inside the end for ξ ≤ 1, and at ξ = 1, where m is infinite,
+  it reads the slope by its highest term).
+- **(c) synth's lens camera.** `synth::lens` renders a lens from its
+  own truth (`TruthModel`: Mei, and KB on four bases with two focals
+  and 6.1's tangential and prism terms applied after the base;
+  `RigTruth` with a ground plane, turns, late frames and a
+  rolling-shutter readout). `compose` builds a rig's truth, `x5_like()`
+  the X5-like V3 pair, `render_lens` supersamples in display values as
+  `render_view_ideal` does, through a cache held to 1 GiB (least
+  recently used out, `RenderCache::with_budget` for tests), and
+  `lens_planes` codes to 4:2:0 at the X5's siting. `Pattern::SeamLines`
+  is 4.2's exposure scene, every channel within 0.05 to 0.8, so 4.2's
+  exposure control doesn't clip it. `bench_render_lens_x5_like_pair` is
+  a CPU Tier 2 bench. `render_lens_coded` paints M3.1's corner codes
+  (`synth::code`) on a render once `code::check_clear` holds the
+  truth's circle clear of their blocks (the X5-like pair at 384² by
+  more than 47 px). The fixtures both suites use are public:
+  `TruthV6::EVERY_TERM`, `KB_TERMS_P`, `_PE` and `_S`, `PATS_V6_D` (Pat's
+  V6 terms) and `pats_v6_scaled(ξ)`.
+- **(b) The rig.** `sphere::rig`: `Geometry` and its spaces (binding,
+  canvas map A, B, C or fitted, the 1152 Euler conventions, turn axis,
+  tz sign, upright, generation, V6 reading); `Calibration` as sphere's
+  own type, which M3.5's camera crate fills; `Tune`; `Rig::build`,
+  which composes lens_from_rig_b = E_b·F·Q_tune_bᵀ·T_b·S, refuses a
+  θ_max past `limit_theta`, and refuses with a `RigError` naming the
+  field a focal, radius scale, θ_max or fitted scale at 0 or below, a
+  `src` or `dst` of 0, a fitted relative that can't be normalised and
+  an `EulerConv` whose axes or order aren't a permutation; `ray`,
+  `texel`, `weights` (the margin, the h shrink, never below 0.5°),
+  `covers`, `feather_at`, `unproject`; and `theta_frame`, a Brent
+  search along each slot edge (written from Brent's localmin, 1973,
+  ch. 5). `Rig.lenses` go by calibration block, with `RigLens.track`
+  set by the binding. Under `Extrinsics::Fitted` both E_b are the
+  identity and block 1's view frame is T_1 = F⁻¹·relative·F, so its
+  tune turns lens 1 in its own view frame whatever the relative; the
+  turn axis and the tz sign aren't read there. c_1 turns with lens 0's
+  tune and nothing of lens 1's. synth's types become sphere's only at
+  the test's boundary, field by field, and rung 0 runs on 21 truth
+  models.
+
+**Settled by the slice** (for the plan's next amendment):
+- `limit_theta` on Pat's V3 and V6 is 120.000°, the projection's own
+  fold at ξ = 2: dr/dθ is the polynomial's slope times (1 + ξ cos θ)/
+  (cos θ + ξ)², whose second factor changes sign at acos(−1/ξ) whatever
+  the polynomial, and the polynomial's slope there is 1.41 to 1.50 on
+  Pat's four blocks (m² = 1/3). 6.1's 120.1° [F] is a 0.1° scan's first
+  sample past the peak.
+- The inverse's passes to 119°: at most 6 on Pat's V3, 7 on V6 read
+  through every term, 9 under any reading; 6.3's scaled draws take 12
+  to 15 (bounded at 16), not "at most 10". Three passes leave 3.9e-7
+  to 4.8e-6 rad at θ ≤ 100° (6.1 said 1.3e-7 to 2.1e-6), so 6.3's
+  1e-7 still refuses three passes.
+- A lens on which the slope test can't rule out a fold scans for its
+  limit on every `unproject`: every `KbLens`, ξ ≤ 1 with a negative
+  term, and Pat's own below ξ ≈ 1.96 (V3) or 1.98 (V6), which 8.7's
+  ξ delta can reach. Hence `unproject_within`; `Rig` finds each lens's
+  limit once. At ξ = 0 Pat's V6, scaled as 6.3's generator scales it,
+  folds at 89.23°, before z + ξ vanishes at 90°, so the drawn range ends
+  at 88.23° (6.3's "at least 88°" holds).
+- Amendment 3's open points: `TzSign::Negated` negates all of t_1, so
+  Negated at q is AsStored at −q; the placeholder `EulerConv` is axes
+  (y, x, z), yaw-pitch-roll, all signs +, roll offset −90° (11.1's
+  JSON), within 1° of the identity on Pat's angles (tested).
+- The types as built: `RigLens` gains `theta_frame`, `side`,
+  `limit_theta`, `texels_per_radian` and `band_texels_per_radian` (the
+  smaller slope over the band the margin covers, which `feather_at`
+  uses; equal to `texels_per_radian` on Pat's lenses, whose slope
+  falls); `Calibration { src, dst, v3, v6 }` of `LensCalib` (cx local
+  to its square, read from pixel corners) and `CalibTerms`;
+  `Extrinsics::Fitted { relative, translation_m }`; `RigError` gains
+  `NotPositive`, `NotPermutation` and `NotRotation`, and `EulerConv`
+  `is_valid`; `Tune::default` is a 5° feather and q = 0.5 m⁻¹ (2 m,
+  question 3's recommendation, which Pat hasn't answered),
+  `LensTune::default` θ_max 100°; margin(lod) = `margin_texels`·2^lod,
+  the LOD clamped at 0. A positive tune yaw swings a lens's axis to its
+  own right, as 6.2 says (tested by hand). 7.1's `TruthModel::Kb` is
+  `{ base, fx, fy, cx, cy, k: [f64; 5], p, pe, s }`.
+- θ_frame on Pat's V6 under A: 99.057° and 99.243° radial-only (6.1's
+  and 6.3's 99.1° is this reading's), 99.037° and 98.930° through every
+  term; under C, 100.54/100.74° and 100.53/100.42°. On V3: 100.15/
+  99.44° under A, 101.68/100.92° under C. The feather's bound on Pat's
+  V6 under A is h = 9.057°. 10.3's WGSL needs θ_frame and the band's
+  slope per lens and the h shrink (h ≥ 0.5° and h ≤ min(θ_max,
+  θ_frame) − 90° less the margin), must clamp the margin's LOD at 0,
+  and must treat h ≤ 0 as a step giving 1/2 at the edge, since WGSL's
+  smoothstep is undefined for equal edges. Its KB branch takes θ as
+  atan2(|v.xy|, v.z), not acos(v.z) (f32 acos near the axis is
+  quantised to about 3.5e-4 rad), with m = 0 on the axis and no image
+  on the back axis. 10.3's uniform carries one model per rig, so a rig
+  mixing Mei and KB lenses renders on the CPU only; 6.2 or 11.2 should
+  say whether `Rig::build` or `validate` refuses one.
+- The X5-like truth's r(106°) is 393 to 399 px under C at 768² (7.1
+  said 395), and the corner block's bound about 97 px, not 100.
+  `render_lens` of the pair at 768², ss 2, takes 0.49 s on 4 threads
+  (7.1 guessed about 2 s).
+- The stored centre is read from pixel corners (c·s/src, pixel (i, j)
+  covering [i, i + 1)) by both synth and sphere, an unlisted camera
+  assumption: read from pixel centres, as OpenCV counts, the slot's
+  centre moves 0.5·s/src along each axis, 0.36 px at 3840². M3.6's fit
+  can test it; 3.2's unknowns should list it.
+- 4.2 calls the X5-like rig V3, but its rung-1 control "the wrong V6
+  reading", 10.5's `dfish_seam_registration` and 8.5's hard
+  neighbours need V6 terms: `PATS_V6_D` is now public, but M3.4 still
+  needs an X5-like V6 `CalibTruth` built from it.
+- Grid's 1.0 lines clip under 4.2's exposure control (lens 1 at
+  +0.5 EV), so rung 1's step check leaves out samples that clip on
+  either lens, or runs on SeamLines only.
+- 7.1's per-binary cache is bounded at 1 GiB; 8.3's moving renders
+  share it only while they fit, and a test whose renders no other test
+  shares calls `render_lens` directly or keeps its own cache.
+- 4.2's and 6.3's rung 0 could require each model's points to reach
+  within 1° of its cap and the pixels drawn per point to be within 5 %
+  of the slot's share, so synth's inverse refuses no part of the image
+  (now asserted, on 21 models).
+- Twins: of the 2304 (turn axis, `EulerConv`) values per binding, stage
+  G keeps 1152, which fall into 640 groups, every common rotation a
+  quarter turn about Z (640 exact twins, 384 not back to back, 128 near
+  twins at 0.054° on V3 and 0.265° on V6). Two properties run a
+  fraction of `PROPTEST_CASES` (the twins a twentieth, the edge scan a
+  fortieth), at about 2.5 ms a case: the full 100k would take about
+  260 s and 240 s of CPU.
+- 22.1's 30 s for `rig.rs`, `unified.rs` and `lens_against_sphere.rs`
+  at 100k is wall time on an idle 4-core box; the three cost about 66 s
+  of CPU (38.4 s wall at a load of 12). Most of `rig.rs`'s is
+  `Rig::build`'s θ_frame search. 19.6 says "in release" where these run
+  in debug.
+- Joined with M3.1 at merge: `render_lens_coded` holds each truth it
+  codes to `check_clear` (7.1's "synth asserts ... for every truth it
+  renders" applies to the coded renders; `render_lens` paints no codes).
+  Grid's back-hemisphere code (7.1) is not done. `cargo doc` with
+  `-D warnings` now passes on sphere and synth (three links fixed);
+  xtask check doesn't run rustdoc.
+
+**Open, for `validate` (M3.9, 11.2):** a feather h under the parallax
+angle (90° + atan(q·b/2)) leaves a black seam at high q; a 30° relative
+tilt passes `validate` but leaves 374 of 3600 horizon directions
+unweighed; a θ_max of 85 to 90° leaves no valid feather; a radius scale
+above about 1.09 (A) puts θ_frame under 90° on Pat's V6; `Fitted
+{ scale: 1.0 }` is exactly C. Under stored extrinsics the tune sits in
+the view frame, so a twin whose E_b holds a quarter or half turn of
+roll applies the tune that far off as seen through the lens, which
+upright can't fix: should it sit in each lens's own view frame, as
+under Fitted?
+
+**The reviews found** that the pass-count bounds could not fail (now
+each count is checked against the work, k passes meet 1e-12 and k − 1
+don't), that every `unproject` searched for the lens's limit again
+(`unproject_within`), that SeamLines' brightest values clipped under
+4.2's exposure control (now at most 0.8), and that nothing pinned the
+tune's sign (`rig_tune_turns_each_lens_as_seen`, by hand). The fresh
+review of the whole slice (12,500 lines) found, all fixed: under
+`Fitted` block 1's tune met a leftover rotation unless the relative's
+half turn matched the turn axis (+10° of tune yaw swung lens 1's axis
+0.174 the wrong way under turn X); c_1's place under lens 0's tune was
+untested; `Rig::build` took zero or negative focals, scales and sizes
+and invalid conventions; `KbLens` sent the back pole to the principal
+point; no test caught a `limit_theta` that came back early, nor a fold
+in the scan's last step; `unproject_within` took a limit past the end
+(+∞ let pixels outside the image through); nothing outside sphere
+checked `KbLens`'s tangential and prism terms or two focals, which
+synth's KB truth lacked; the render cache never evicted (14 MB a
+picture); rung 0 didn't assert its reach (an inverse refusing past 95°
+passed); synth's inverse never ran off ξ = 2; synth's compose never
+tested block 1 with both E_1 and T_1; `feather_at` read the margin at
+θ_max's slope even where θ_frame bounds the feather (wrong for a
+rising slope); two properties ran below 22.1's count; `golden_min`
+named no source; and this note listed six controls and no check
+growth. The second round's review found that ξ = 1 returned
+3.1415926430530807 (m is infinite at the tail), that synth's KB truth
+still imaged its back axis, and that the fixtures were written twice;
+all fixed. One fix agent rebuilt its own three unpushed commits with
+`git commit-tree` after a mis-staged hunk (the final tree identical;
+858db37, 8195003 and 63fef25 superseded).
+
+**Controls that must fail** (every new one, by file):
+- sphere `tests/unified.rs`: the distortion left in; a pixel past the
+  limit within the draws' bound; three passes (twice); one pass fewer;
+  a pixel past the limit within 7 passes; every reading within 7
+  passes; ξ = 1 against tan θ; the end taken for the limit (at ξ = 2,
+  at ξ = 0 and at ξ = 1, where the last-step fold must be bisected); a
+  limit a scan step early (Mei and KB); a pixel inside the edge; the
+  lens's own limit (twice); a pixel inside the edge given ∞; the pixel
+  inside the edge given 100°; the fold read at m⁴ (54.7°, still rising)
+  and at m (76.0°, fallen) on the fold at m = 2; m a hair short of 180°
+  at ξ = 1 (it overflows); the slope at m = ∞, nested, a number; 0.1°
+  short of the fold (twice, the KB one at 104.607°); p1 and p2 swapped;
+  the prism's second and third terms swapped; GyroView's against the
+  pair swapped; orbis's against the prism interleaved; d7 and d8 read
+  twice; d5 to d12 all equal; the terms left in; a pixel inside the
+  image given ∞ (KB, 3 rad along +x); the back axis taken for the limit
+  (twice); the terms before the base (5.05 px equisolid, 59.8 px
+  stereographic, 2.85 px orthographic); fx and fy swapped (3.9 to
+  13.0 px); the base before the polynomial; a hair off the back axis.
+- sphere `tests/rig.rs`: yaw and pitch about one axis; the space with a
+  direction field; the roll's sign before its offset; the signs read by
+  place; the placeholder without its offset; stage G's filter off; the
+  turn axis swapped for unproject; a mirrored frame; tz at q = 0; the
+  roll's sign at a stored roll of 90°; B's inverse of A's output; the
+  turn flipped with the binding; a z-only flip of t_1; lens 1 alone
+  turned; the tune's sign flipped (0.35 in a matrix element); block 1's
+  tune turned in the rig frame; c_1 by lens 0's untuned rotation; the tz
+  sign under stored extrinsics; block 1's view frame from the turn axis
+  (−0.174 along lens 1's right); each focal, radius scale and θ_max
+  just above 0, refused; a canvas scale just above 0, refused; src and
+  dst of 1, refused; a relative of length 1e-150, refused; the
+  convention's axes and order reversed, refused; a rig it can build,
+  refused; a feather of 10°; a 1° feather at 0.3 m; lenses 30° apart; h
+  never shrunk; the margin at θ_max's slope (0.0433 jump at LOD 3.9 on a
+  stereographic rig); swapped without the mirror; q = 0 against R =
+  1.5 m; the frame term off (172 directions weigh outside); the
+  farthest edge alone.
+- synth `lens.rs`: no Newton; another reading's inverse; the KB lens's
+  terms dropped; ξ = 0.5 inverted at ξ = 2; the prism by axis; a hair
+  off the back axis; the terms before the base (0.20 px); one focal
+  (8.2 px); the roll's sign before its offset; case 8 in the reverse
+  order; T_1 on the left, under turn Y and under turn X; B's centre as
+  A's; C's focal as A's; tz flipped alone as Negated; Reversed with the
+  tracks unswapped; the front track's turn about +X; upright about +Z;
+  the turns composed in reverse; the first turn at 9°/s; the other
+  lens's discs; the other lens's truth; half a pixel right; the 106°
+  picture held to 90°; seen from the rig's origin; the disc where an
+  infinitely far scene puts it; lens 1 a frame late taken for on time;
+  row 40 at the frame's time and at row 0's time; the gain and the
+  falloff on display values; Grid's white; the peak just past white;
+  limited range; centre-sited chroma; chroma sited with the top row;
+  Grid's frames 0 and 1 kept as one; frames in the turn kept as one;
+  frame 29 kept with rest 0; room for ten (4 pictures past a 3-picture
+  bound); frame 0 kept, not asked for again; 95° taken for the circle's
+  edge; Mei's focal length; the 384² circle in a 320² square (no
+  codes painted). synth's lib: a line square to the seam;
+  half a degree off the line; a checker beyond the band; the Seam
+  pattern's checker.
+- synth `tests/lens_against_sphere.rs`: the wrong V6 reading (7.88 px
+  against synth; forward and inverse in rung 0, 7.86 px and 2.21°);
+  lenses paired by block under Reversed (179.6°); the tz sign crossed
+  (31.53 mm); equidistant applied to Mei data (738.5 px); an inverse
+  that refuses past 95°, its reach (94.95°) and its draws (+19 %); the
+  KB lens's focals and terms dropped at the boundary (7.51 px).
+
+Measured, on the cloud box (debug, sphere and synth at opt-level 3):
+at 100k cases, at a load of about 2, `rig.rs` 16.2 s wall (44.8 s
+user), `unified.rs` 5.4 s (16.0 s) and `lens_against_sphere.rs` 5.2 s
+(5.5 s), 26.8 s of 22.1's 30 s; against synth, all 4224 small-enum
+values agree within 4.9e-16 rad, 1.4e-17 m and 2.5e-13 px, and 100k
+random draws within 7.5e-16 rad, 5.1e-17 m and 1.9e-12 px; rung 0
+within 1.1e-11 rad and 9e-13 px on all 21 models, each reaching within
+0.196° of its cap (the orthographic KB to 86.99° of 87.18°, the
+X5-like V3 to 105.98°), the pixels drawn per point within 2.5 % of the
+slot's share at 10k points; `KbLens`'s forward worked by hand within
+1.8e-12 px on all four bases; 54,908 of 100k `Unified` draws and
+88,161 of 100k KB draws fold before the end and are held to fall 0.01°
+past the limit; the fitted frames worked by hand within 5.6e-16, c_1
+within 1.7e-18 m.
+
+`cargo xtask check` gained 3 test binaries (`rig`, `unified`,
+`lens_against_sphere`) and about 3.2 s of tests (`rig` 2.1 s, synth's
+lib 0.6 s with the lens tests, `lens_against_sphere` 0.4 s, `unified`
+0.1 s). At fff95b4 (main merged in) it passed in 25 minutes from an
+empty target folder, its tests 889 s over 106 binaries against M3.1's
+669 s over 103; M3.2's fix agents built beside it, and the rest of the
+rise is in suites the slice doesn't touch (parity +68 s, export +67 s).
+
 ### M3.2, the camera crate (2026-11-01)
 
 Branch `m3/camera`: the types the units share first (a new crate,
@@ -546,42 +843,66 @@ turn; a reviewer each, and each review's findings fixed.
   file. Probe gains `camera.serial`, `lenses`, `calibration`,
   `companion`, `exposure_entries` and `records` (null for any other
   file; the agent's summary gains `camera_detail` and the same
-  fields, each only when present) and a warning code, `bad_trailer`.
-  `spherecut doctor --file FILE` says whether a file can be stitched,
-  what is missing, and decodes each lens's first frame.
+  fields, each only when present) and a warning code, `bad_trailer`,
+  which also names a file whose last box is `inst` without the magic
+  (the first byte that differs). Probe's text escapes control
+  characters in the camera's strings, the tags, handler names and
+  paths. `spherecut doctor --file FILE` says whether a file can be
+  stitched, what is missing and why (a trailer there but unreadable,
+  no video stream), carries probe's warnings, and decodes each lens's
+  first frame.
 
 **Settled by the slice** (for the plan's next amendment):
 - `read_trailer` returns `Ok(None)` for a wrong magic, as for a plain
-  MP4. 5.5, 22.1's M3.2 done-when and M3.5's done-when should leave
-  `InsvFault::BadMagic` out of "every trailer fault is a clear error",
-  or say the error comes from probe seeing an `inst` box with no
-  trailer.
+  MP4; the clear error for `InsvFault::BadMagic` is probe's
+  `bad_trailer` warning on an `inst` box without the magic, and
+  doctor --file's "missing: a camera trailer that can be read". 5.5,
+  22.1's M3.2 done-when and M3.5's should say so. `NoCalibration`
+  is doctor --file's "can be stitched: no".
 - No metadata field holds a frame period, so `Metadata` has none; the
-  period comes from the mode or the tracks. Field 98's items 1, 3, 4
-  and 5 make `FrameSpan`; item 2's meaning is disputed and not kept.
-  Field 98 counts the tracks' frames + 1 on masters and the LRV's own
-  frames on LRVs; field 93 = floor(n·1000·den/num).
+  period, the clip's length and its frame count come from the tracks.
+  Field 98's items 1, 3, 4 and 5 make `FrameSpan`: item 1 is field
+  24, item 4 − item 3 = floor(n·1000/r) ms with r the rate rounded up,
+  item 5 is n on a master and the LRV's own frame count on an LRV,
+  items 6 and 7 are 0; item 2 (item 1 + floor(n·10⁶/r) µs on all 14
+  of Pat's files) conflicts with the sailing fixture and is not kept.
+  Field 93 = floor(n·1000·den/num) on a master and its LRV alike,
+  with n a master track's frames + 1 and num/den the master's rate.
 - Field 44 is the file's own `video_size` (3840² on a master, 1664×832
   on an LRV), not 5.1's "LRV size". Fields 133 and 134 are not kept.
 - Field 25 is an f32 widened to an f64 (21.244001388549805 at 8K), so
   it is compared by bits, not with an f32 literal.
 - A message field read twice (26, 27, 44, 98, 145) is replaced whole
   by its last copy, where protobuf would merge; no X5 file repeats a
-  top-level field.
+  top-level field. Record 1 has 92 top-level fields on a master and
+  90 on an LRV (79 and 80 absent), 67 of them unread.
+- Limits beyond 5.1's (D15): 256 index slots (`MAX_SLOTS`, one for
+  each id a slot's byte can name; 5.1 says 64), 64 lens profiles of
+  each kind in field 145 (`MAX_PROFILES`; the X5 writes 6), and
+  `verify_companion`'s `max`, which media sets to `MAX_EXPOSURE` (64
+  MiB, the limit probe reads record 4 to): a record over it, or empty
+  in both files, pairs by name only and isn't read.
 - New in the API: `RecordRef::slot` (where its index slot is),
   `Trailer::skipped`, `imu_span`, `calib::Token`, `Focal::{Radius,
   Mei}`, `Generation::{of_word, of_offset_version, tokens, fields}`,
-  `CameraError`'s `Part` and the variants WireType, TooLarge, Version,
-  BadSize, NotUtf8, BadToken and Io; synth's `TrailerLayout::index`,
-  `InsvFault::in_trailer` and `inst_box`'s `align` (X5_ALIGN, or 1 so
-  cheap properties don't write 128 KiB gaps).
+  `CameraError`'s `Part` and the variants WireType, TooLarge, TooSmall,
+  IndexFooter, Version, BadSize, NotUtf8, BadToken and Io (which names
+  its part); `verify_companion(master, lrv, max)` returning
+  `CompanionError { side, error }`; synth's `TrailerLayout::index`,
+  `InsvFault::in_trailer`, `inst_box`'s `align` (X5_ALIGN, or 1 so
+  cheap properties don't write 128 KiB gaps), `Records::x5_lrv` (an
+  LRV keeping its master's records, for M3.5's `write_insv`) and
+  `Records::plant_original`.
 - Errors 5.1 doesn't name: a footer at EOF − 78 that isn't an index's
-  (an older camera's trailer, or damage) is FooterMismatch with id 0
-  at len − 78, and its message names no slot; an index that isn't
-  whole slots is BadSize{id 0}; a trailer too small for its index is
-  Truncated{Index}; the version is checked before the size. The
-  reader doesn't enforce slot k = id k or the 128 KiB alignment (the
-  X4 uses 4 KiB); Tier 2c checks both on Pat's files.
+  (an older camera's trailer, or damage) is IndexFooter at len − 78;
+  FooterMismatch always names a record's slot, id 0 included; an index
+  that isn't whole slots is BadSize{id 0}; a trailer too small for its
+  index's footer and tail (78 bytes) or for the index too is
+  TooSmall{Tail} at len − 40, worded by which; the version is checked
+  before the size; BadToken tells a packed word of another generation
+  from one of none. The reader doesn't enforce slot k = id k or the
+  128 KiB alignment (the X4 uses 4 KiB); Tier 2c checks both on Pat's
+  files.
 - The hash rule (11.1): fnv1a64 (core's, now public) over the working
   V1, V2, V3 and V6 strings in that order, each followed by a NUL, an
   absent one the NUL alone, formatted `{:016x}`.
@@ -597,13 +918,32 @@ turn; a reviewer each, and each review's findings fixed.
   with M3.1's pair decode.
 - `media::detect::CameraGuess::name()` is the one camera-name rule,
   used by probe's text, the agent's summary and doctor --file.
-- The format notes need two corrections (M3.21): the X5's gaps
-  between records aren't all zero (stray bytes in 004, 007 and LRV
-  004, found by the reviewer's script), and take 007 keeps its
-  thumbnail in a separate `.thumbnail.bin`, not in record 2.
+- `synth::insv`'s `x5_like` follows the relations Pat's masters show
+  (insta360.md's new [bytes] table "Record 4 and the IMU against the
+  frames"): one exposure item a frame, field 24's frame at item 5 at
+  25 and 29.97 fps, 6 at 59.94 and 10 at 119.88, and 2, 3, 4 or 6
+  items past the last frame, which gives record 4's 122 to 1912 items
+  on all 7 takes; the IMU at 1 kHz over record 4's span (within 17 ms
+  of Pat's start on every take); field 136 from the strings given.
+  `append_trailer` copies the whole MP4 before writing the box, which
+  M3.10's multi-GB clips will want done in place.
+- insta360.md is corrected against the bytes (for M3.21's review): the
+  gaps between records hold stray non-zero bytes in all 14 files,
+  mostly before records 9, 4 and 2; record 1 ends where the index
+  starts (EOF − 388), not at its footer; the metadata table gains
+  fields 25, 44, 93 and 98's rules and the field counts; the LRV
+  bullet lists every field that differs from its master's (9, 26's
+  item 2, 36, 44, 79 and 80 absent, 98's item 5, 131, 132, 135). Still
+  to correct: §3.3's record 2 row, since the 4K120 files have none (a
+  `.thumbnail.bin` beside them instead), and the rig.rs citations left
+  in §2.4, §2.6, §4.3, §4.4 and §4.5.
 
 **Open:** whether read_trailer should read the pre-X4 sequential
-layout (refused today as FooterMismatch, as D62's Revisit says);
+layout (refused today as IndexFooter, as D62's Revisit says);
+whether `verify_companion` should check the stop between its chunks
+(it would need a stop error in camera; the 64 MiB cap bounds the work
+and the stop is checked between files); probe's text still prints
+warnings, damage and FFmpeg's log lines unescaped;
 whether the agent's MCP doctor tool should return `FileCheck` too;
 whether M3.5's `print` applies `planted`; `cargo doc -p
 spherecut-core` with -D warnings already fails on main
@@ -617,65 +957,152 @@ fail on the index alone (synth's layout is now checked against the
 file first), that parse_metadata's doc claimed protobuf's merge, that
 doctor --file claimed the viewer's decode path, and that nothing
 checked the agent's side of the companion test or a lens that doesn't
-decode. All were fixed; none was rejected.
+decode. All were fixed; none was rejected. The fresh review of the
+whole slice (four areas, each finding checked by a second agent; 18
+upheld, 5 refuted) found four majors: three in this note, whose
+control list left most controls out (rule 8; now whole, below), and
+Tier 2c's shutter check, which passed a denormal while it and the
+stamps' order had no control (now a floor of 1/100,000 s and three
+controls a file). Its other upheld findings: a slot claiming id 0 was worded as the index's
+footer; 64 slots refused trailers whose ids the byte can name; I/O
+errors didn't name their part; field 145 had no count limit;
+`verify_companion` read record 4 whole however large; doctor --file
+said "missing" for a trailer it couldn't read and failed a file with
+no video; a damaged magic went unwarned; probe's text printed control
+characters; `x5_like` didn't follow the X5's record 4, field 93 or
+98; synth's docs were copied from camera's reader (rewritten from
+insta360.md); a fault test's name claimed every fault was an error;
+the note's stray-byte list named 3 files of 14; and the Tier 2c
+agent's probe ran on one pair, not seven (it now runs on all 14
+files). The fixes' own review found two minors (D15 missing the two
+new limits; synth citing a table insta360.md didn't have, now added
+from the bytes) and seven nits, all fixed.
 
-**Controls that must fail**, by file:
-- `trailer.rs`: each limit at the limit and a byte over (MAX_TRAILER
-  on a sparse reader past 1 GiB, the file's length, MAX_SLOTS 64
-  against 65, read_record's max, MAX_METADATA as record 1's max); each
-  error at its byte (Version, FooterMismatch by format, id and size
-  and the index's own, BadSize, Truncated in the tail, the index and
-  a record's payload, SlotPastEnd into the index and past the file,
-  Io on read and seek); both FooterMismatch messages and both tail
-  size messages; the parsers' bad sizes; the UI-thread panics, with
-  the unmarked call as their control; the cut property's control
-  (bytes lost before the trailer still read) and the arbitrary
-  property's (holds rejects another file's trailer).
-- `strings.rs`: same_bits against a token with one more zero and one
-  a digit off; a second field 27 replaced whole, against the merged
-  window; the error tables at their bytes.
-- `synth_insv.rs`: the X5-like round trip's 13 (layout size + 1,
-  index + 10, record 4's offset + 1, no thumbnail, field 79 as 3,
-  another serial, the thumbnail's sides swapped, its last chroma byte,
-  the last IMU stamp + 1 µs, an IMU gyro bit, an exposure of 1/250 s,
-  record 9's last byte, record 10's format); the cross parse's three
-  (lens type 114, body 5, fx printed 4284.6200).
-- `tier2_samples.rs`, on each of Pat's 14 files: record 4's footer
-  flipped as read, record 1 taken as aligned, another take's sizes,
-  the exposure against half the rate, the inst box read a byte early,
-  the slots against a 32-slot index, record 1 ending at a 32-slot
-  index, record 9 where record 10 ends, the thumbnail taken as the
-  protobuf record, the thumbnail turned to 640 × 1280 (still parses),
-  the IMU at 500 Hz, and the print identity's two same_bits controls.
-- cli `contract.rs`: the agent's probe of a master and an LRV a frame
-  short must not verify, each naming the other with the CLI's why.
-  cli `doctor.rs`: a master with track 1's samples zeroed in place is
-  not stitchable, lens 1 `decode_failed`.
+**Controls that must fail**, by file (every new one):
+- camera `trailer.rs`: three bytes of the inst box lost; one file's
+  trailer held to another's bytes; a trailer a byte over 1 GiB and a
+  byte larger than its file; the index's size in the tail's words; an
+  index of 2561 bytes and one of 257 slots (256 slots read, holding
+  records 128 and 255); a 100-byte record read with a max of 99; a
+  metadata record a byte over 1 MiB; version 4; record 4's footer with
+  another format, id and size; a metadata footer where the index's is;
+  record 4's footer said to be the index's; a slot claiming id 0, and
+  it worded as the index's footer; an index of 305 bytes; a trailer
+  too small for the footer and for the index, the first worded as the
+  second, and trailers of 388 and 78 bytes said too small; record 29
+  past the file and into the index; a file ten bytes short of its
+  length; record 4 cut five bytes into its payload; a failed read or
+  seek in seven places, and record 4's worded as the tail's; field 93
+  in wire type 2, a group, and the first worded as the walk's; an
+  exposure record of 33 bytes and an IMU record of 41; a thumbnail
+  shorter than its header, a byte short, 7 wide and 2³² × 2³²; and
+  read_trailer and read_record on a thread not marked.
+- camera `strings.rs`: u64::MAX's ten bytes taken for a bad varint; a
+  second field 2 and a group among the unknown; Pat's V3 printed from
+  its values, and with lens 0's ξ written 2.0000000 and 2.000001;
+  Pat's V6 taken for a wrong count and with a letter for a digit; a
+  metadata record a byte over 1 MiB; a model, a V6 string, an
+  identify and a profile's name a byte over 4 KiB (the last also
+  worded as too many profiles); field 145 with 65 polynomials, 65
+  fields of view and half a million; a firmware that isn't UTF-8; each
+  wire type the walk refuses, and each field in a wire type not its
+  own; field 27's item 1 as bytes; a window 2³² wide; field 0 and a
+  key past 32 bits; the record a byte short; field 26's identify past
+  its end; field 145's packed doubles a byte short; a window read
+  twice, merged; each bad token at its byte; V6's word in V3 worded as
+  a word of none; the X5-like record cut a byte short.
+- camera `synth_insv.rs`: a footer of synth's changed; the X5-like
+  round trip's eight (the parsed metadata, the thumbnail's sides
+  swapped and its last chroma byte, the last IMU item a µs later, an
+  IMU item's gyro, an exposure of 1/250 s, record 9's last byte,
+  record 10 said to be JSON); at each of 25, 29.97, 59.94 and 119.88
+  fps the first frame taken as exposure item 0, field 24 at the next
+  item and the frames timed from item 0; an LRV of its own 95 frames,
+  verified; the cross parse's seven (each block held to the other's
+  truth, fx a unit off and a decimal short, Pat's V6 truth held to
+  the V3 string, Pat's V3 held to lens type 114 and to body 5, fx
+  with a zero more, reprinted); the hash's five (a working string with
+  a byte changed, V3's and V6's swapped, V3's held as V2's, no NULs,
+  the hash over the original copies); the clean file read as each
+  fault; a truncated trailer's file.
+- camera `companions.rs`: another recording's LRV naming this master;
+  the X5's own name naming nothing; an LRV and a master with a byte
+  changed (5 places each); an LRV a frame short; record 4 missing in
+  the master, the LRV and both; record 4's slot past the LRV's end; a
+  master cut inside record 4; an LRV whose read fails inside it; a
+  record a byte over the limit, verified; empty exposure records,
+  verified; verify_companion on a thread not marked.
+- camera `tier2_samples.rs`, on each of Pat's 14 files: V3's lens 1
+  held to lens 0's tokens; the V3 string read as V6; the serial with
+  its first byte changed; the model an X4; the firmware build0; the
+  window a pixel lower; the metadata held to the other kind's and to
+  another take's; field 24 at the next exposure item; the metadata
+  without its last field; the thumbnail turned 640 × 1280; record 4's
+  footer changed; the slots against an index of 32 and the metadata
+  ending at one; the metadata on a 128 KiB boundary; record 9 where
+  record 10 ends; the sizes against another take's; the formats with
+  the thumbnail in protobuf; the IMU at 500 Hz; the exposure a frame
+  apart at half the rate; the exposure stamps reversed; the shutters
+  held to a fiftieth of the frame and read as integer µs through a
+  double's bits; the inst box a byte early. On each pair, a master's
+  V6 word and its serial changed, against its LRV's. On each string,
+  printed from its values, with a zero more against its own
+  calibration and against the camera's, its first token's last digit
+  changed, and read as the next generation.
+- cli `contract.rs`: a report with only its old keys; the LRV's
+  lenses; the hash without the absent generations' NULs; an LRV with
+  an exposure item fewer, verified, by the CLI and by the agent; a
+  master with no calibration strings, calibrated; the master's summary
+  with only the old keys; the planted serial, clean; a master with its
+  magic whole, warned of. cli `doctor.rs`: a master with no
+  calibration stitchable, in text and in JSON; an LRV stitchable; a
+  master whose lens 1 doesn't decode stitchable, in JSON and in text;
+  an unreadable trailer and a damaged magic said to be missing; a
+  calibration the camera names worded as one it doesn't; a master
+  with two video streams missing a video stream. cli `tier2_probe.rs`:
+  another take's LRV, verified.
+- media `camera.rs`: a directory, warned of as a file that can't be
+  opened; `probe.rs`: the planted text free of control characters,
+  and the file's name, the LRV's name and the handler printed as they
+  are, clean. agent `ops/probe.rs`: a stopped call compares no
+  companion (written by hand, checked by removing the stop check).
+- synth `insv.rs`: Pat's V3 blocks swapped; block 1's tz a unit off;
+  the box a byte later; record 4's footer with id 5; a byte after
+  record 4 that isn't zero; field 1 written as 2; the clean box
+  against itself; take 006's records held to 007's; field 24 at the
+  first exposure item; an exposure item a frame late; field 98's item
+  1 a µs off; field 98 counting the tracks' frames; field 93 to the
+  nearest ms; the IMU from field 24's time and stopped at the last
+  frame; V3 alone in use as V6; one calibration of each generation,
+  refused; an LRV of its own 95 frames; the master as its own LRV;
+  the working string, the planted original.
 - A mutation check: four deliberate bugs in the reader, each caught
-  by one to four tests, then reverted.
+  by one to four tests, then reverted; and the field 145 cap disabled,
+  caught by its control.
 
 **Tier 2c on Pat's 14 files, Pass:** version 3; the index at EOF − 388
 with slot k listing record k; inst.size = E + 8; records 22 and 28
 listed; every record but 1 and 10 on 128 KiB; the thumbnail 1280×640
 and absent from the 4K120 files; the IMU about 995 µs a sample; the
 exposure one item a master frame, within 1 % of the frame period,
-every shutter shorter than the frame, and the LRVs carry the master's
-record (007's 602 items for a 4K120 master). The four generations'
+its stamps rising, every shutter between 1/100,000 s and the frame
+(1065.2 µs on take 006 to 9999.7 µs on take 010), and the LRVs carry
+the master's record (007's 602 items for a 4K120 master). The four generations'
 strings are byte-identical in all 14 files and print back byte for
-byte (112 of 112). All 7 pairs verify by record 4 through the CLI and
-the agent. The calibration hash is 840fcc4eb186a389 in all 14 files,
+byte (112 of 112). All 7 pairs verify by record 4, through the CLI
+and through the agent's probe of all 14 files. The calibration hash is 840fcc4eb186a389 in all 14 files,
 V6 in use, canvas 10752×5376, window 5312 of 5376 at 0,0. doctor
 --file on take 004: stitchable with V6, both 3840² HEVC lenses
 decode on software, 2.5 s on the cloud CPU.
 
 Measured, on the cloud box (debug, camera at opt-level 2): at 100k
-cases the trailer cut property 1.22 s and never-panic 0.84 s; the
-strings properties 0.36 s (varints), 2.71 s (unknown fields), 4.32 s
-(round trip), 2.96 s (wrong token count) and 0.59 s (never panic);
-synth's round trip 4.45 s and cross parse 4.33 s; each suite at the
+cases the trailer cut property 1.38 s and never-panic 0.87 s; the
+strings properties 0.34 s (varints), 2.82 s (unknown fields), 4.42 s
+(round trip), 3.13 s (wrong token count) and 0.60 s (never panic);
+synth's round trip 4.66 s and cross parse 4.17 s; each suite at the
 default 256 cases under 0.1 s, against camera's 1 s budget. Tier 2c:
-0.012 s for the trailers and metadata, 0.003 s for the 112 strings,
-0.7 s for the probe test. `cargo xtask check` grows by CHECK_GROWTH.
+0.018 s for the trailers and metadata of the 14 files (D62's figure),
+0.005 s for the 112 strings, 1.1 s for the probe test's 7 takes. `cargo xtask check` grows by CHECK_GROWTH.
 
 ## A2: edit and render for agents
 
@@ -2773,7 +3200,7 @@ On `m1/slice9` (D37, D40):
 
 ## Next
 
-1. **M3**: M3.1 (pair decode: the MP4 mux, corner codes, two-track perf clips, K1 and K3 on odin), M3.2 (the camera crate) and M3.3 (lens maths) side by side, from M3.0 (`docs/design/m3-plan.md` 22.1 and 22.2). Pat's takes 14 to 17 and the plan's questions 2 to 4 are open, and nothing waits on them.
+1. **M3**: M3.2 (the camera crate), then M3.4 (the instrument, from M3.3) and M3.8 (frame lock, from M3.0 and M3.1); M3.1 and M3.3 are in, from M3.0 (`docs/design/m3-plan.md` 22.1 and 22.2). Pat's takes 14 to 17 and the plan's questions 2 to 4 are open, and nothing waits on them.
 2. **A2's open box**: Pat's runs of the fourth recipe with a real
    agent, recorded here like A1's (`mcp_render_vaapi` passed on odin,
    PR #26).

@@ -41,16 +41,28 @@ pub enum Pattern {
     /// Thin stripes straddling the ±180° seam plus a horizontal gradient,
     /// so a seam line or a half-texel wrap error is obvious.
     Seam,
+    /// The stitching round trip's scene (M3 plan 4.2): tilted great
+    /// circles across both of a back-to-back rig's side seams (the great
+    /// circle through ±X and ±Y, where lenses looking along ∓Z meet), a
+    /// 1° checker within ±15° of that seam, and a luminance ramp for the
+    /// exposure checks.
+    SeamLines,
 }
 
 impl Pattern {
-    pub const ALL: [Pattern; 3] = [Pattern::Grid, Pattern::HighFrequency, Pattern::Seam];
+    pub const ALL: [Pattern; 4] = [
+        Pattern::Grid,
+        Pattern::HighFrequency,
+        Pattern::Seam,
+        Pattern::SeamLines,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Pattern::Grid => "grid",
             Pattern::HighFrequency => "hifreq",
             Pattern::Seam => "seam",
+            Pattern::SeamLines => "seamlines",
         }
     }
 }
@@ -139,6 +151,47 @@ pub const FRAME_CODE_LON0: f64 = -45.0;
 pub const FRAME_CODE_STEP: f64 = 6.0;
 const FRAME_CODE_HALF: f64 = 2.2;
 
+/// `SeamLines`' great circles, as `(α, τ)` in degrees. Each crosses the
+/// seam, the great circle z = 0, at azimuth α (atan2(y, x), from +X
+/// towards +Y) and again at α + 180°, so every one crosses both side
+/// seams, near +X and near −X. At α it runs at τ to the seam, rising
+/// towards +Z as α grows for τ > 0. Neighbours tilt opposite ways, so
+/// that a misregistration shows along the seam as well as across it, and
+/// are far enough apart that no two meet within the checker band.
+pub const SEAM_LINES: [(f64, f64); 5] = [
+    (-48.0, 55.0),
+    (-24.0, -55.0),
+    (0.0, 55.0),
+    (24.0, -55.0),
+    (48.0, 55.0),
+];
+/// Half the width of a `SeamLines` line, in degrees.
+pub const SEAM_LINE_HALF_WIDTH: f64 = 0.3;
+/// The colors of `SeamLines`' lines, taken in turn. No channel passes
+/// [`SEAM_LINES_PEAK`].
+pub const SEAM_LINE_COLORS: [Rgb; 2] = [[0.8, 0.1, 0.1], [0.1, 0.4, 0.8]];
+/// How far `SeamLines`' 1° checker reaches each side of the seam, in
+/// degrees.
+pub const SEAM_CHECKER_BAND: f64 = 15.0;
+/// How far a `SeamLines` checker cell lies above or below the ramp.
+pub const SEAM_CHECKER_CONTRAST: f64 = 0.15;
+
+/// The brightest value `SeamLines` shows on any channel: the brightest
+/// line channel, and a bright checker cell at −X. 4.2's exposure control
+/// puts lens 1 at +0.5 EV and +5 % red, which takes a display value above
+/// 0.840 past white (in linear light 1/(√2 · 1.05) = 0.673), so the scene
+/// stays below that, and lens 1 can be matched back to lens 0 everywhere
+/// on it. Its darkest value, a dark cell at +X, is 0.05, above the 0.01
+/// that section 16's estimator leaves out.
+pub const SEAM_LINES_PEAK: f64 = 0.8;
+
+/// `SeamLines`' luminance ramp at azimuth `along` degrees: 0.2 at +X up
+/// to 0.65 at −X, the same either way round, so it has no step. With the
+/// checker's contrast it reaches [`SEAM_LINES_PEAK`].
+pub fn seam_ramp(along: f64) -> f64 {
+    0.2 + 0.45 * along.abs() / 180.0
+}
+
 /// Longitude (degrees) of the moving equator marker at frame `n`.
 pub fn moving_marker_lon(frame: u32) -> f64 {
     (frame as f64 * 3.0 + 180.0).rem_euclid(360.0) - 180.0
@@ -223,6 +276,29 @@ pub fn color(pattern: Pattern, d: DVec3, frame: u32) -> Rgb {
             } else {
                 let t = (lon + 180.0) / 360.0;
                 [t, 0.5 + 0.4 * (lat / 90.0), 1.0 - t]
+            }
+        }
+        Pattern::SeamLines => {
+            // A line's plane has the normal cos τ ẑ − sin τ e, where e =
+            // (−sin α, cos α, 0) runs along the seam at its crossing.
+            let width = SEAM_LINE_HALF_WIDTH.to_radians().sin();
+            for (k, (along, tilt)) in SEAM_LINES.into_iter().enumerate() {
+                let (sa, ca) = along.to_radians().sin_cos();
+                let (st, ct) = tilt.to_radians().sin_cos();
+                if d.dot(DVec3::new(st * sa, -st * ca, ct)).abs() < width {
+                    return SEAM_LINE_COLORS[k % SEAM_LINE_COLORS.len()];
+                }
+            }
+            // Azimuth along the seam and elevation off it, in degrees.
+            let along = deg(d.y.atan2(d.x));
+            let off = deg(d.z.clamp(-1.0, 1.0).asin());
+            let level = seam_ramp(along);
+            if off.abs() < SEAM_CHECKER_BAND {
+                let cell = (along.floor() as i64 + off.floor() as i64).rem_euclid(2);
+                let sign = if cell == 0 { 1.0 } else { -1.0 };
+                [level + sign * SEAM_CHECKER_CONTRAST; 3]
+            } else {
+                [level; 3]
             }
         }
     }
@@ -384,6 +460,8 @@ pub fn decode_frame_code(img: &RgbImage) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use spherecut_testkit::control::must_fail;
+
     use super::*;
 
     #[test]
@@ -552,5 +630,120 @@ mod tests {
             0,
         );
         assert_eq!(l, r);
+    }
+
+    /// The direction at azimuth `along` (from +X towards +Y) and elevation
+    /// `off` off the seam z = 0, both in degrees.
+    fn seam_dir(along: f64, off: f64) -> DVec3 {
+        let (sa, ca) = along.to_radians().sin_cos();
+        let (so, co) = off.to_radians().sin_cos();
+        DVec3::new(co * ca, co * sa, so)
+    }
+
+    /// Whether `SeamLines` shows line `k`'s color at `along` and `off`.
+    fn on_line(k: usize, along: f64, off: f64) -> bool {
+        color(Pattern::SeamLines, seam_dir(along, off), 0) == SEAM_LINE_COLORS[k % 2]
+    }
+
+    /// `SeamLines` draws tilted great circles that cross both side seams
+    /// (the great circle z = 0).
+    #[test]
+    fn seam_lines_cross_both_side_seams() {
+        for (k, (along, tilt)) in SEAM_LINES.into_iter().enumerate() {
+            // Within 50° of +X, so the far crossing is within 50° of −X.
+            assert!(along.abs() <= 50.0, "line {k}");
+            for far in [false, true] {
+                let at = if far { along + 180.0 } else { along };
+                assert!(on_line(k, at, 0.0), "line {k} at {at}°");
+                // At elevation β the line lies at azimuth α + δ, where
+                // its plane's normal (sin τ sin α, −sin τ cos α, cos τ)
+                // meets cos β (cos(α + δ), sin(α + δ), 0) + sin β ẑ at a
+                // right angle: cos τ sin β = sin τ cos β sin δ, so sin δ
+                // = tan β / tan τ. On the far side sin(180° + δ) = −sin δ,
+                // so the line leans the other way.
+                for off in [-10.0f64, -5.0, 5.0, 10.0] {
+                    let lean = (off.to_radians().tan() / tilt.to_radians().tan())
+                        .asin()
+                        .to_degrees();
+                    let shift = if far { -lean } else { lean };
+                    assert!(on_line(k, at + shift, off), "line {k} at {at}°, {off}°");
+                    // Control: a line square to the seam would pass here.
+                    must_fail("a line square to the seam", on_line(k, at, off));
+                }
+            }
+            // Control: half a degree along the seam is 0.5° · sin 55° =
+            // 0.41° from the line, beyond its half-width of 0.3°.
+            must_fail("half a degree off the line", on_line(k, along + 0.5, 0.0));
+        }
+    }
+
+    /// Whether `pattern` shows `SeamLines`' checker at `along` and `off`:
+    /// gray, the ramp plus or minus the contrast, with the same sign
+    /// across the cell and the other a cell along and a cell across.
+    fn checker_at(pattern: Pattern, along: f64, off: f64) -> bool {
+        let at = |a: f64, o: f64| color(pattern, seam_dir(a, o), 0);
+        let term = |a: f64, o: f64| at(a, o)[0] - seam_ramp(a);
+        let c = at(along, off);
+        let across = if off + 1.0 < SEAM_CHECKER_BAND {
+            off + 1.0
+        } else {
+            off - 1.0
+        };
+        c[0] == c[1]
+            && c[1] == c[2]
+            && (term(along, off).abs() - SEAM_CHECKER_CONTRAST).abs() < 1e-12
+            && (term(along + 0.3, off + 0.3) - term(along, off)).abs() < 1e-12
+            && (term(along + 1.0, off) + term(along, off)).abs() < 1e-12
+            && (term(along, across) + term(along, off)).abs() < 1e-12
+    }
+
+    /// `SeamLines` holds a 1° checker within ±15° of the seam and a
+    /// luminance ramp beyond it.
+    #[test]
+    fn seam_lines_has_a_checker_near_the_seam_and_a_ramp() {
+        // No line comes within 15° of the seam between 62° and 118° of
+        // azimuth either way round: a line at τ = 55° reaches 15° off the
+        // seam asin(tan 15° / tan 55°) = 10.8° along it, so the lines
+        // crossing at 48° and 132° (48° + 180°) stop at 58.8° and 121.2°.
+        for along in [62.5, 80.5, 100.5, 116.5, -63.5, -99.5] {
+            for off in [-14.5, -7.5, -0.5, 0.5, 7.5, 14.5] {
+                assert!(
+                    checker_at(Pattern::SeamLines, along, off),
+                    "{along}°, {off}°"
+                );
+            }
+            // Beyond the band, the ramp alone.
+            for off in [15.5, 16.5, 40.0, -15.5, -60.0] {
+                // The azimuth comes back from the direction within a few
+                // ulps, so the level does too.
+                let c = color(Pattern::SeamLines, seam_dir(along, off), 0);
+                assert!(
+                    c.iter().all(|v| (v - seam_ramp(along)).abs() < 1e-12),
+                    "{along}°, {off}°: {c:?}"
+                );
+                // Control: no checker there.
+                must_fail(
+                    "a checker beyond the band",
+                    checker_at(Pattern::SeamLines, along, off),
+                );
+            }
+        }
+        // The ramp runs from 0.2 at +X to 0.65 at −X, through 0.425 at
+        // ±Y, the same either way round, so it has no step. Its bright
+        // cells at −X reach 0.65 + 0.15, the peak.
+        assert_eq!(seam_ramp(0.0), 0.2);
+        assert!((seam_ramp(90.0) - 0.425).abs() < 1e-15);
+        assert_eq!(seam_ramp(-90.0), seam_ramp(90.0));
+        assert!((seam_ramp(180.0) - 0.65).abs() < 1e-15);
+        assert_eq!(seam_ramp(-180.0), seam_ramp(180.0));
+        assert!((seam_ramp(180.0) + SEAM_CHECKER_CONTRAST - SEAM_LINES_PEAK).abs() < 1e-15);
+        let far_off = |along: f64| color(Pattern::SeamLines, seam_dir(along, 30.0), 0)[0];
+        assert!(far_off(100.0) > far_off(80.0));
+        assert!((far_off(100.0) - far_off(80.0) - 0.45 * 20.0 / 180.0).abs() < 1e-12);
+        // Control: the Seam pattern has no checker there.
+        must_fail(
+            "the Seam pattern's checker",
+            checker_at(Pattern::Seam, 80.5, 0.5),
+        );
     }
 }
