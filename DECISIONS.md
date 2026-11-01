@@ -4625,6 +4625,20 @@ Tested:
 Revisit if: M2's keyframes need a convention for roll at the poles that
 `to_ypr` doesn't give, or a tagged sv3d pose file arrives.
 
+*Updated 2026-11-01 (M3.3):* the rig frame, Spherecut's world at zero
+stabilisation (M3 plan 6.2), is this convention's frame: +X right, +Y
+up, and the front lens looks along −Z. A lens's own frame is Mei's and
+OpenCV's: +x right, +y down, +z along its axis. F = diag(1, −1, −1), a
+half turn about x and so a rotation, never a reflection, carries a view
+frame looking along −Z into a lens frame. Each lens's
+lens_from_rig = E_b · F · Q_tuneᵀ · T_b · S, where Q_tune is the tune's
+yaw, pitch and roll read by `Ypr` as above, so a positive tune yaw turns
+the lens right as seen through it. `sphere::rig` defines the frame, and
+`sphere::fisheye::F` is F. `synth::lens::compose` writes the same
+composition from the plan's text with its own code, and
+`crates/synth/tests/lens_against_sphere.rs` holds the two within 1e-12
+rad on every value of the small enums.
+
 ## D34. The playback engine
 
 *2026-10-28, M1 slice 5. The M1 plan's D32 (section 8), adjusted to
