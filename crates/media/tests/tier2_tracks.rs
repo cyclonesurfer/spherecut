@@ -7,13 +7,19 @@
 //! for a constant offset in the first pts or the edit list, R2 for sync
 //! samples that differ, and Kill for decode times that differ over the
 //! common prefix, which fails the test, as does a difference no branch
-//! names. An edit list differs by a constant offset only when each shows
-//! the media in one edit, after any empty ones, and the two part only in
-//! the empty edits or where that edit starts. Counts that differ only at the end take no branch: the pair
-//! ends at the shorter lens. An LRV passes within one master frame of
-//! its master, and otherwise its offset is reported for the proxy's time
-//! map (section 15). FFmpeg's demuxer reads the head of every track as
-//! its tables say.
+//! names. The decode times and sync samples are lined up by each lens's
+//! first shown sample. An edit list differs by a constant offset only
+//! when each shows the media in one edit, after any empty ones, and the
+//! two part only in the empty edits or where that edit starts. Counts
+//! that differ only at the end take no branch: the pair ends at the
+//! shorter lens, and the verdict says so. An LRV passes within one
+//! master frame of its master by the tables, and otherwise its offset is
+//! reported for the proxy's time map (section 15). The tables time each
+//! file from the start of its own movie, so they can't show whether the
+//! LRV and the master began recording together: M3.14's
+//! `lrv_matches_master` settles that from the pixels. FFmpeg's demuxer
+//! gives the first packets of every track the time base, first pts and
+//! keyframes its tables say.
 //!
 //! Run in the cloud, with `SPHERECUT_TIER2` unset, by
 //! `SPHERECUT_SAMPLES=/home/claude/spherecut-samples/insta360-x5 cargo test
@@ -73,19 +79,24 @@ impl Branch {
     }
 }
 
-/// P-TRK's verdict on the branches some fields took: Pass when no field
-/// took one beyond ending at the shorter lens, and otherwise every
-/// branch that fired, such as "R1 + R2".
+/// P-TRK's verdict on the branches some fields took: Pass when every
+/// field agrees, "Pass, ends at the shorter lens" when the only
+/// difference is where the lenses end, and otherwise every branch that
+/// fired, such as "R1 + R2".
 fn verdict(branches: impl IntoIterator<Item = Branch>) -> String {
-    let fired: BTreeSet<Branch> = branches
-        .into_iter()
-        .filter(|&b| b > Branch::EndsApart)
+    let taken: BTreeSet<Branch> = branches.into_iter().collect();
+    let fired: Vec<&str> = taken
+        .iter()
+        .filter(|&&b| b > Branch::EndsApart)
+        .map(|b| b.name())
         .collect();
-    if fired.is_empty() {
-        return "Pass".into();
+    if !fired.is_empty() {
+        fired.join(" + ")
+    } else if taken.contains(&Branch::EndsApart) {
+        "Pass, ends at the shorter lens".into()
+    } else {
+        "Pass".into()
     }
-    let names: Vec<&str> = fired.iter().map(|b| b.name()).collect();
-    names.join(" + ")
 }
 
 /// One field of two tracks: what each holds, the branch, and why.
@@ -364,11 +375,20 @@ fn compare(a: &TrackTiming, b: &TrackTiming) -> Vec<Field> {
         },
     ));
 
-    let same = a.count == b.count;
+    // The samples from the first shown on, which the pair shows.
+    let count = |t: &TrackTiming| match t.first_shown {
+        0 => t.count.to_string(),
+        _ => format!(
+            "{} ({} from the first shown)",
+            t.count,
+            t.from_first_shown()
+        ),
+    };
+    let same = a.from_first_shown() == b.from_first_shown();
     out.push(field(
         "count",
-        a.count.to_string(),
-        b.count.to_string(),
+        count(a),
+        count(b),
         if same {
             Branch::Same
         } else {
@@ -378,6 +398,22 @@ fn compare(a: &TrackTiming, b: &TrackTiming) -> Vec<Field> {
             ""
         } else {
             "the pair ends at the shorter lens"
+        },
+    ));
+
+    let same = a.first_shown == b.first_shown;
+    out.push(field(
+        "first_shown",
+        a.first_shown.to_string(),
+        b.first_shown.to_string(),
+        if same { Branch::Same } else { Branch::R1 },
+        if same {
+            String::new()
+        } else {
+            format!(
+                "an offset in the media: lens 1 shows from decode index {}, lens 0 from {}, and stts and stss are lined up by them",
+                b.first_shown, a.first_shown
+            )
         },
     ));
 
@@ -403,7 +439,10 @@ fn compare(a: &TrackTiming, b: &TrackTiming) -> Vec<Field> {
     let (branch, why) = match a.stts_mismatch(b) {
         None if a.stts == b.stts => (Branch::Same, String::new()),
         None => (Branch::Same, "the same times, in runs split apart".into()),
-        Some(k) => (Branch::Kill, format!("decode times part at sample {k}")),
+        Some(k) => (
+            Branch::Kill,
+            format!("decode times part at sample {k} from the first shown"),
+        ),
     };
     out.push(field("stts", runs(&a.stts), runs(&b.stts), branch, why));
 
@@ -428,7 +467,7 @@ fn compare(a: &TrackTiming, b: &TrackTiming) -> Vec<Field> {
         None => (Branch::Same, String::new()),
         Some(k) => (
             Branch::R2,
-            format!("sample {k} is a sync sample in one lens only"),
+            format!("sample {k} from the first shown is a sync sample in one lens only"),
         ),
     };
     out.push(field(
@@ -457,7 +496,7 @@ fn agree(fields: &[Field]) -> Result<(), String> {
 
 fn print_table(title: &str, fields: &[Field]) {
     eprintln!("{title}");
-    eprintln!("  {:<10} {:<38} {:<38} branch", "field", "lens 0", "lens 1");
+    eprintln!("  {:<11} {:<38} {:<38} branch", "field", "lens 0", "lens 1");
     for f in fields {
         let why = if f.why.is_empty() {
             String::new()
@@ -465,7 +504,7 @@ fn print_table(title: &str, fields: &[Field]) {
             format!(": {}", f.why)
         };
         eprintln!(
-            "  {:<10} {:<38} {:<38} {}{why}",
+            "  {:<11} {:<38} {:<38} {}{why}",
             f.name,
             f.a,
             f.b,
@@ -475,10 +514,13 @@ fn print_table(title: &str, fields: &[Field]) {
 }
 
 /// How much later than its master's lens 0 an LRV's first frame is
-/// shown, in ms and in master frames. Each file's clip time 0 is its
-/// first frame, shown `first_pts` after the start of its movie. The
-/// offset is taken in whole ticks of both timescales, so that a frame
-/// late is exactly 1.
+/// shown, in ms and in master frames, by the tables. Each file's clip
+/// time 0 is its first frame, shown `first_pts` after the start of its
+/// movie, so this takes the two movies to have started together, which
+/// their tables can't show: each times its own recording. M3.14's
+/// `lrv_matches_master`, with its one-frame-offset control, settles it
+/// from the pixels. The offset is taken in whole ticks of both
+/// timescales, so that a frame late is exactly 1.
 fn lrv_offset(master: &TrackTiming, lrv: &TrackTiming) -> (f64, f64) {
     let (tm, tl) = (i128::from(master.timescale), i128::from(lrv.timescale));
     // tm × tl of these a second.
@@ -488,12 +530,18 @@ fn lrv_offset(master: &TrackTiming, lrv: &TrackTiming) -> (f64, f64) {
     (ms, ticks as f64 / (i128::from(delta) * tl) as f64)
 }
 
-/// Whether FFmpeg's demuxer reads the head of `stream` as `t` says: its
-/// time base, the first frame's pts, and which packets are keyframes,
-/// through the second sync sample and one past it. The packets are the
-/// samples from the first only when the edit list hides none, as on the
-/// X5, so a track whose list hides some is reported rather than read.
-fn demuxer_agrees(path: &Path, stream: usize, t: &TrackTiming) -> Result<(), String> {
+/// Whether FFmpeg's demuxer (`PacketReader`) agrees with `t` on the
+/// head of `stream`, and what it compared: that the stream's time base
+/// is 1/`timescale`, and over its first packets, through the second sync
+/// sample and one past it (10 without an `stss`; the whole track with
+/// one sync sample), that it gives that many, that the smallest pts
+/// among them is `first_pts`, and that the packets it flags as
+/// keyframes, numbered from 1, are the sync samples among them. It
+/// compares no decode times, no other composition offsets, and not the
+/// count. The packets are the samples from the first only when the edit
+/// list hides none, as on the X5, so a track whose list starts past
+/// media time 0 is reported rather than read.
+fn demuxer_agrees(path: &Path, stream: usize, t: &TrackTiming) -> Result<String, String> {
     let shown = t
         .edit
         .as_ref()
@@ -555,7 +603,10 @@ fn demuxer_agrees(path: &Path, stream: usize, t: &TrackTiming) -> Result<(), Str
             "the demuxer's keyframes are {keys:?}, the tables' {sync:?}"
         ))
     } else {
-        Ok(())
+        Ok(format!(
+            "time base 1/{}, and over packets 1 to {n} the smallest pts {} and keyframes {keys:?}, as the tables say",
+            t.timescale, t.first_pts
+        ))
     }
 }
 
@@ -616,7 +667,7 @@ fn samples_x5_tracks_equal() {
             }
         };
         eprintln!(
-            "  LRV: {} at {}, {} frames ({}), first pts {}, {}; {ms:+.3} ms, {frames:+.3} master frames from lens 0: {lrv_verdict}",
+            "  LRV: {} at {}, {} frames ({}), first pts {}, {}; by the tables {ms:+.3} ms, {frames:+.3} master frames from lens 0: {lrv_verdict}",
             runs(&l.stts),
             l.timescale,
             l.count,
@@ -625,13 +676,14 @@ fn samples_x5_tracks_equal() {
             edits(l),
         );
 
-        for (path, stream, t) in [
-            (&master, 0, &take.lens[0]),
-            (&master, 1, &take.lens[1]),
-            (&lrv, 0, l),
+        for (what, path, stream, t) in [
+            ("lens 0", &master, 0, &take.lens[0]),
+            ("lens 1", &master, 1, &take.lens[1]),
+            ("LRV", &lrv, 0, l),
         ] {
-            if let Err(e) = demuxer_agrees(path, stream, t) {
-                problems.push(format!("{} stream {stream}: {e}", path.display()));
+            match demuxer_agrees(path, stream, t) {
+                Ok(checked) => eprintln!("  demuxer, {what}: {checked}"),
+                Err(e) => problems.push(format!("{} stream {stream}: {e}", path.display())),
             }
         }
         takes.push((take, fields));
@@ -651,7 +703,7 @@ fn samples_x5_tracks_equal() {
             .iter()
             .map(|(b, files)| format!("{} in {} ({})", b.name(), files.len(), files.join(", ")))
             .collect();
-        eprintln!("  {:<10} {}", takes[0].1[i].name, verdicts.join("; "));
+        eprintln!("  {:<11} {}", takes[0].1[i].name, verdicts.join("; "));
     }
     let all = takes.iter().flat_map(|(_, f)| f.iter().map(|f| f.branch));
     eprintln!("P-TRK: {}", verdict(all));
@@ -664,26 +716,62 @@ fn samples_x5_tracks_equal() {
         n => format!("{n} need the time map: {}", time_map.join(", ")),
     };
     eprintln!(
-        "LRVs: largest offset {:.3} master frames over {}; {} within one frame, {mapped}",
+        "LRVs, by the tables: largest offset {:.3} master frames over {}; {} within one frame, {mapped}",
         offsets.iter().copied().fold(0.0, f64::max),
         offsets.len(),
         offsets.len() - time_map.len(),
     );
 
     // Controls: lens 0 of the 8K30 master against the 8K25 master's,
-    // whose frames part at the second; lens 1 of the 8K30 master shown a
-    // frame late, which R1 lets through, and skipping a frame, which no
-    // branch names; an LRV a master frame late; and tables the 8K30
-    // file's packets don't have.
+    // whose frames part at the second and whose every other field but
+    // the composition offsets fires; lens 1 of the 8K30 master shown a
+    // frame late, which R1 lets through; with the LRV's sync samples, R2;
+    // its first frame hidden by its edit list, R1 and R2 at once;
+    // skipping a frame, and composition offsets apart, which no branch
+    // names; the verdict when only the ends differ; an LRV a master frame
+    // late; and tables the 8K30 file's packets don't have.
     let at = |name: &str| &takes.iter().find(|(t, _)| t.role.name == name).unwrap().0;
     let (k30, k25) = (at("clip1_8k30"), at("clip2_8k25"));
+    let fired = |fields: &[Field]| -> Vec<(&'static str, Branch)> {
+        fields
+            .iter()
+            .filter(|f| f.branch != Branch::Same)
+            .map(|f| (f.name, f.branch))
+            .collect()
+    };
+    let why_of = |fields: &[Field], name: &str| {
+        fields
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.why.clone())
+            .unwrap()
+    };
     let fields = compare(&k30.lens[0], &k25.lens[0]);
     print_table("control: 004's lens 0 against 005's lens 0", &fields);
-    let why = must_fail("29.97 against 25 fps", agree(&fields));
-    assert!(
-        why.contains("stts: Kill (decode times part at sample 1)"),
-        "{why}"
+    let all: Vec<(&str, Branch)> = fields.iter().map(|f| (f.name, f.branch)).collect();
+    assert_eq!(
+        all,
+        [
+            ("timescale", Branch::Unforeseen),
+            ("count", Branch::EndsApart),
+            ("first_shown", Branch::Same),
+            ("first_pts", Branch::Same),
+            ("edit", Branch::EndsApart),
+            ("stts", Branch::Kill),
+            ("ctts_hash", Branch::Same),
+            ("stss", Branch::R2),
+        ]
     );
+    assert_eq!(
+        why_of(&fields, "stss"),
+        "sample 50 from the first shown is a sync sample in one lens only"
+    );
+    let why = must_fail("29.97 against 25 fps", agree(&fields));
+    assert_eq!(
+        why,
+        "timescale: unforeseen (the lock compares time bases (section 9)); stts: Kill (decode times part at sample 1 from the first shown)"
+    );
+    assert_eq!(verdict(all.iter().map(|f| f.1)), "R2 + Kill + unforeseen");
     let lens1 = &k30.lens[1];
     let list = lens1.edit.as_ref().unwrap();
     let (delta, mts) = (u64::from(lens1.stts[0].1), list.movie_timescale);
@@ -709,13 +797,55 @@ fn samples_x5_tracks_equal() {
     let fields = compare(&k30.lens[0], &shifted);
     print_table("control: 004's lens 1 a frame late", &fields);
     assert_eq!(agree(&fields), Ok(()));
-    let fired: Vec<(&str, Branch)> = fields
-        .iter()
-        .filter(|f| f.branch != Branch::Same)
-        .map(|f| (f.name, f.branch))
-        .collect();
-    assert_eq!(fired, [("first_pts", Branch::R1), ("edit", Branch::R1)]);
-    assert_eq!(verdict(fired.iter().map(|f| f.1)), "R1");
+    let r1 = fired(&fields);
+    assert_eq!(r1, [("first_pts", Branch::R1), ("edit", Branch::R1)]);
+    assert_eq!(verdict(r1.iter().map(|f| f.1)), "R1");
+    // The LRV's keyframe every 30 frames against the master's every 60.
+    let gop30 = TrackTiming {
+        stss: k30.lrv.stss.clone(),
+        ..lens1.clone()
+    };
+    let fields = compare(&k30.lens[0], &gop30);
+    print_table("control: 004's lens 1 with the LRV's sync samples", &fields);
+    assert_eq!(agree(&fields), Ok(()));
+    let r2 = fired(&fields);
+    assert_eq!(r2, [("stss", Branch::R2)]);
+    assert_eq!(
+        why_of(&fields, "stss"),
+        "sample 30 from the first shown is a sync sample in one lens only"
+    );
+    assert_eq!(verdict(r2.iter().map(|f| f.1)), "R2");
+    // Lens 1's edit hides its first frame, a keyframe: its first shown
+    // frame is decoded second, at clip time 0 still, and its next
+    // keyframe comes a frame early, which only lining the lenses up by
+    // their first shown frames shows.
+    let hidden = TrackTiming {
+        first_shown: 1,
+        edit: edit(vec![Edit {
+            duration: (lens1.count - 1) * frame,
+            media_time: delta as i64,
+            rate: RATE_1,
+        }]),
+        ..lens1.clone()
+    };
+    let fields = compare(&k30.lens[0], &hidden);
+    print_table("control: 004's lens 1 with its first frame hidden", &fields);
+    assert_eq!(agree(&fields), Ok(()));
+    let both = fired(&fields);
+    assert_eq!(
+        both,
+        [
+            ("count", Branch::EndsApart),
+            ("first_shown", Branch::R1),
+            ("edit", Branch::R1),
+            ("stss", Branch::R2),
+        ]
+    );
+    assert_eq!(
+        why_of(&fields, "stss"),
+        "sample 0 from the first shown is a sync sample in one lens only"
+    );
+    assert_eq!(verdict(both.iter().map(|f| f.1)), "R1 + R2");
     // Frames 0 to 49, then 51 on: no one offset lines the lenses up.
     let skip = TrackTiming {
         edit: edit(vec![
@@ -738,6 +868,42 @@ fn samples_x5_tracks_equal() {
     assert_eq!(
         why,
         "edit: unforeseen (the lists hold 1 and 2 edits, which no constant offset makes the same)"
+    );
+    // Lens 1's frames shown a frame after they are decoded, with 004's
+    // count and with 005's.
+    let late_offsets = |t: &TrackTiming| TrackTiming {
+        ctts_hash: Some(fnv64(
+            &[(t.count as u32).to_be_bytes(), (delta as u32).to_be_bytes()].concat(),
+        )),
+        ..t.clone()
+    };
+    for (name, b, failure) in [
+        (
+            "offsets apart",
+            late_offsets(lens1),
+            "ctts_hash: unforeseen (the composition offsets differ)",
+        ),
+        (
+            "offsets apart over other counts",
+            late_offsets(&TrackTiming {
+                count: 116,
+                stts: vec![(116, lens1.stts[0].1)],
+                ..lens1.clone()
+            }),
+            "ctts_hash: unforeseen (the hash covers each whole table, so with the counts apart compare the tables by hand)",
+        ),
+    ] {
+        let fields = compare(&k30.lens[0], &b);
+        assert_eq!(must_fail(name, agree(&fields)), failure);
+    }
+    // Only the ends apart: Pass, and the verdict says where the pair ends.
+    assert_eq!(
+        verdict([Branch::Same, Branch::EndsApart]),
+        "Pass, ends at the shorter lens"
+    );
+    must_fail(
+        "the ends apart",
+        verdict([Branch::Same, Branch::EndsApart]) == verdict([Branch::Same]),
     );
     let late = TrackTiming {
         first_pts: k30.lrv.first_pts + i64::from(k30.lens[0].stts[0].1),

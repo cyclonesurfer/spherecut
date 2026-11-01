@@ -34,6 +34,13 @@ pub enum Mp4Error {
     /// [`track_timing`] found no video track for the stream asked about.
     #[error("no video track for stream {stream}: {why}")]
     NoTrack { stream: usize, why: String },
+    /// [`track_timing`]'s track is in a fragmented file, which times its
+    /// samples in the fragments (`moof`) that it doesn't read. Nothing is
+    /// wrong with the file, but there are no tables to compare: the
+    /// backend answers it as M3 plan section 9's `Ok(None)`, a track with
+    /// no tables.
+    #[error("stream {stream} is fragmented: {why}")]
+    Fragmented { stream: usize, why: String },
 }
 
 /// By hand rather than `#[from]`, which would also make the I/O error the
@@ -1415,8 +1422,21 @@ pub struct TrackTiming {
     /// Ticks a second of the track's media times (`mdhd`).
     pub timescale: u32,
     /// The track's samples (`stsz`), one a frame, those an edit list
-    /// hides included. `stts` times exactly these.
+    /// hides included: the lead-in before [`first_shown`] and any frames
+    /// after the edit ends. `stts` times exactly these. Section 9's
+    /// `LensShort` counts the frames each lens shows, so M3.8 takes those
+    /// from each decoder's [`VideoStreamInfo::frame_count`], FFmpeg's
+    /// index less what it discards, not from this.
+    ///
+    /// [`first_shown`]: TrackTiming::first_shown
+    /// [`VideoStreamInfo::frame_count`]: crate::backend::VideoStreamInfo::frame_count
     pub count: u64,
+    /// The sample shown first, the one `first_pts` times, by its decode
+    /// index counted from 0: 0 unless the edit list hides a lead-in, or
+    /// composition offsets show a later sample first. Of two shown at
+    /// that time, the one decoded first. [`TrackTiming::stts_mismatch`]
+    /// and [`TrackTiming::stss_mismatch`] line two tracks up by it.
+    pub first_shown: u64,
     /// When the first frame the track shows is shown, after its
     /// composition offset (`ctts`) and the edit list: the sample shown
     /// earliest at or after where the list's first edit that shows media
@@ -1459,19 +1479,39 @@ pub struct EditList {
 }
 
 impl TrackTiming {
-    /// The first sample, counted from 0 in decode order, whose decode
-    /// time differs between the two tracks among the samples both have,
-    /// or `None` when they all agree: the frames line up by time over the
-    /// common prefix, which the shorter track ends (M3 plan 4.3's Kill
-    /// rule, and section 9). Times are compared in seconds, so tracks of
-    /// different timescales can agree, and however their runs are split.
-    /// A sample's decode time is the sum of the deltas before it, so the
-    /// last common sample's own delta, often a muxer's guess, doesn't
-    /// count.
+    /// The samples from [`first_shown`] on, which [`stts_mismatch`] and
+    /// [`stss_mismatch`] compare: their common prefix is the shorter
+    /// track's.
+    ///
+    /// [`first_shown`]: TrackTiming::first_shown
+    /// [`stts_mismatch`]: TrackTiming::stts_mismatch
+    /// [`stss_mismatch`]: TrackTiming::stss_mismatch
+    pub fn from_first_shown(&self) -> u64 {
+        self.count.saturating_sub(self.first_shown)
+    }
+
+    /// The first sample whose decode time, from the first shown sample's,
+    /// differs between the two tracks among the samples both have from
+    /// it, or `None` when they all agree. Samples are counted in decode
+    /// order from each track's [`first_shown`], which is 0 in both, so
+    /// a lens whose edit list hides one more frame of lead-in is lined
+    /// up by the frames it shows (M3 plan 4.3's Kill rule, and section
+    /// 9). Samples decoded before the first shown one are left out, even
+    /// where composition offsets show one of them after it. The common
+    /// prefix ends with the shorter track ([`from_first_shown`]). Times
+    /// are compared in seconds, so tracks of different timescales can
+    /// agree, and however their runs are split. A sample's decode time is
+    /// the sum of the deltas before it, so the last common sample's own
+    /// delta, often a muxer's guess, doesn't count.
+    ///
+    /// [`first_shown`]: TrackTiming::first_shown
+    /// [`from_first_shown`]: TrackTiming::from_first_shown
     pub fn stts_mismatch(&self, other: &TrackTiming) -> Option<u64> {
-        let n = self.count.min(other.count);
+        let n = self.from_first_shown().min(other.from_first_shown());
         let (ta, tb) = (u64::from(self.timescale), u64::from(other.timescale));
         let (mut a, mut b) = (Runs::new(&self.stts), Runs::new(&other.stts));
+        a.pass(self.first_shown);
+        b.pass(other.first_shown);
         // Samples 0 to `at` are decoded at the same times in both.
         let mut at = 0;
         while at + 1 < n {
@@ -1491,16 +1531,21 @@ impl TrackTiming {
         None
     }
 
-    /// The first sample, numbered from 1, that is a sync sample in one
-    /// track and not in the other among the samples both have, or `None`
-    /// when they agree over the common prefix (M3 plan 4.3's R2).
+    /// The first sample that is a sync sample in one track and not in the
+    /// other among the samples both have from their first shown ones, or
+    /// `None` when they agree over that common prefix (M3 plan 4.3's R2).
+    /// Samples are counted as [`stts_mismatch`] counts them: in decode
+    /// order from each track's [`first_shown`], which is 0.
+    ///
+    /// [`first_shown`]: TrackTiming::first_shown
+    /// [`stts_mismatch`]: TrackTiming::stts_mismatch
     pub fn stss_mismatch(&self, other: &TrackTiming) -> Option<u64> {
         if self.stss.is_none() && other.stss.is_none() {
             return None;
         }
-        let n = self.count.min(other.count);
-        let mut a = sync_samples_to(self.stss.as_deref(), n).peekable();
-        let mut b = sync_samples_to(other.stss.as_deref(), n).peekable();
+        let n = self.from_first_shown().min(other.from_first_shown());
+        let mut a = sync_samples_from(self.stss.as_deref(), self.first_shown, n).peekable();
+        let mut b = sync_samples_from(other.stss.as_deref(), other.first_shown, n).peekable();
         // Each step takes a sample from both lists or returns, so this
         // ends within the length of the one that is a table.
         loop {
@@ -1517,12 +1562,24 @@ impl TrackTiming {
     }
 }
 
-/// The sync samples of a track up to sample `n`: those its `stss`
-/// lists, or every one without one.
-fn sync_samples_to(stss: Option<&[u32]>, n: u64) -> Box<dyn Iterator<Item = u64> + '_> {
+/// The sync samples of a track among the `n` from decode index `first`
+/// on, counted from 0 there: those its `stss` lists, or every one
+/// without one.
+fn sync_samples_from(
+    stss: Option<&[u32]>,
+    first: u64,
+    n: u64,
+) -> Box<dyn Iterator<Item = u64> + '_> {
     match stss {
-        Some(s) => Box::new(s.iter().map(|&k| u64::from(k)).take_while(move |&k| k <= n)),
-        None => Box::new(1..=n),
+        // `stss` numbers its samples from 1.
+        Some(s) => Box::new(
+            s.iter()
+                .filter_map(|&k| u64::from(k).checked_sub(1))
+                .skip_while(move |&k| k < first)
+                .map(move |k| k - first)
+                .take_while(move |&k| k < n),
+        ),
+        None => Box::new(0..n),
     }
 }
 
@@ -1561,6 +1618,18 @@ impl<'a, T: Copy> Runs<'a, T> {
     fn skip(&mut self, k: u64) {
         self.used += k;
     }
+
+    /// Pass `k` samples, or all of them if there are fewer, whatever
+    /// runs they are in: one step a run.
+    fn pass(&mut self, mut k: u64) {
+        while k > 0
+            && let Some((left, _)) = self.peek()
+        {
+            let n = left.min(k);
+            self.skip(n);
+            k -= n;
+        }
+    }
 }
 
 /// The timing tables of the video track that is stream `stream` of the
@@ -1575,14 +1644,17 @@ impl<'a, T: Copy> Runs<'a, T> {
 /// items (`iinf`), each cover picture (`covr`) and an IAMF track's
 /// further substreams (`iamf`) where it reads them, which renumbers the
 /// tracks after them, so a track after one of those is refused rather
-/// than guessed at.
+/// than guessed at, as is one after a top-level `meta` or `udta` that
+/// the reader didn't read whole.
 ///
 /// The tables are checked against each other, and an error names the box
 /// that is wrong and why; bad bytes never panic. A box on the way to the
 /// tables (`trak`, `edts`, `mdia`, `minf`, `stbl`) whose boxes the reader
 /// couldn't all read is an error naming it too, rather than tables read
-/// as absent. The work is linear in the size of the tables, whatever the
-/// counts in them say.
+/// as absent, and so is a second `stts`, `ctts`, `stss` or `elst`, of
+/// which FFmpeg reads the later. A track of a fragmented file is
+/// [`Mp4Error::Fragmented`]. The work is linear in the size of the
+/// tables, whatever the counts in them say.
 pub fn track_timing(path: &Path, stream: usize) -> Result<TrackTiming, Mp4Error> {
     track_timing_in(&read_file(path)?, stream)
 }
@@ -1598,8 +1670,25 @@ pub fn track_timing_in(tree: &Mp4Tree, stream: usize) -> Result<TrackTiming, Mp4
         Some(h) => return Err(no_track(format!("it is a `{h}` track, not video"))),
         None => return Err(no_track("its track has no handler (`mdia/hdlr`)".into())),
     }
+    // Its tables hold none of the samples, or not all of them.
+    let fragments = moov.child(b"mvex").map_or_else(
+        || {
+            let moof = tree.top.iter().find(|b| b.fourcc.0 == *b"moof")?;
+            Some(format!("the file has a `moof` at offset {}", moof.offset))
+        },
+        |b| Some(format!("its `moov` has an `mvex` at offset {}", b.offset)),
+    );
+    if let Some(why) = fragments {
+        return Err(Mp4Error::Fragmented {
+            stream,
+            why: format!("{why}, so the track's samples are timed in fragments, which aren't read"),
+        });
+    }
     let timescale = timescale_of(need(mdia, b"mdhd")?)?;
     let stbl = whole(need(whole(need(mdia, b"minf")?)?, b"stbl")?)?;
+    for t in [b"stts", b"ctts", b"stss"] {
+        once(stbl.children_of(t), t, stbl)?;
+    }
 
     let sizes = stbl
         .child(b"stsz")
@@ -1653,10 +1742,11 @@ pub fn track_timing_in(tree: &Mp4Tree, stream: usize) -> Result<TrackTiming, Mp4
         Some(b) => Some(sync_samples(b, count)?),
     };
 
-    let elst = match trak.child(b"edts") {
-        Some(edts) => whole(edts)?.child(b"elst"),
-        None => None,
-    };
+    let mut lists = Vec::new();
+    for edts in trak.children_of(b"edts") {
+        lists.extend(whole(edts)?.children_of(b"elst"));
+    }
+    let elst = once(lists.into_iter(), b"elst", trak)?;
     let edit = match elst {
         None => None,
         Some(elst) => {
@@ -1692,7 +1782,7 @@ pub fn track_timing_in(tree: &Mp4Tree, stream: usize) -> Result<TrackTiming, Mp4
         _ => (None, 0),
     };
     let offsets = ctts.as_ref().map(|(runs, _)| &runs[..]);
-    let Some(shown) = first_shown(&stts, offsets, start) else {
+    let Some((first_shown, shown)) = earliest_shown(&stts, offsets, start) else {
         return Err(match (start, elst) {
             (Some(m), Some(elst)) if count > 0 => malformed(
                 elst,
@@ -1716,6 +1806,7 @@ pub fn track_timing_in(tree: &Mp4Tree, stream: usize) -> Result<TrackTiming, Mp4
     Ok(TrackTiming {
         timescale,
         count,
+        first_shown,
         first_pts,
         edit,
         stts,
@@ -1742,26 +1833,35 @@ fn stream_trak(tree: &Mp4Tree, stream: usize) -> Result<(&Mp4Box, &Mp4Box), Stri
         ));
     }
     // FFmpeg reads the top-level boxes before `moov`, then `moov`'s
-    // children in order.
+    // children in order. Of the top-level boxes, only `meta` and `udta`
+    // can hold what it makes streams of, and the reader keeps only small
+    // ones whole.
+    let made = |what: String| format!("FFmpeg makes streams of {what}");
     let mut renumbers = tree
         .top
         .iter()
         .take_while(|b| b.fourcc.0 != *b"moov")
-        .find_map(adds_streams);
+        .find_map(|b| match &b.fourcc.0 {
+            b"meta" | b"udta" if whole(b).is_err() => Some(format!(
+                "the {}-byte `{}` at offset {} wasn't read whole, and FFmpeg may make streams of what it holds",
+                b.size, b.fourcc, b.offset
+            )),
+            _ => adds_streams(b).map(made),
+        });
     let mut n = 0;
     for c in &moov.children {
         if c.fourcc.0 == *b"trak" {
             if n == stream {
                 return match renumbers {
                     None => Ok((moov, c)),
-                    Some(what) => Err(format!(
-                        "FFmpeg makes streams of {what}, before the file's track #{n}, so which stream that track is isn't known"
+                    Some(why) => Err(format!(
+                        "{why}, before the file's track #{n}, so which stream that track is isn't known"
                     )),
                 };
             }
             n += 1;
         }
-        renumbers = renumbers.or_else(|| adds_streams(c));
+        renumbers = renumbers.or_else(|| adds_streams(c).map(made));
     }
     let why = format!("the file has {n} tracks, so none is stream {stream}");
     // A box that stopped the reader may have hidden more.
@@ -1828,21 +1928,22 @@ fn edit_start(list: &EditList, timescale: u32) -> Result<Option<(i64, i128)>, St
     Err("every edit is empty, so it shows none of the media".into())
 }
 
-/// The earliest presentation time (decode time from `stts` plus
-/// composition offset from `ctts`) of a sample at or after media time
-/// `from`, less `from`, or of any sample when `from` is `None`; `None`
-/// when no sample is. Within a stretch of samples that share a delta and
-/// an offset, presentation times rise by the delta, so the work is one
-/// step per run.
-fn first_shown(
+/// The sample with the earliest presentation time (decode time from
+/// `stts` plus composition offset from `ctts`) at or after media time
+/// `from`, or of any sample when `from` is `None`: its decode index, the
+/// first of any that tie, and its time less `from`. `None` when no
+/// sample is. Within a stretch of samples that share a delta and an
+/// offset, presentation times rise by the delta, so the work is one step
+/// per run.
+fn earliest_shown(
     stts: &[(u32, u32)],
     ctts: Option<&[(u32, i32)]>,
     from: Option<i64>,
-) -> Option<i128> {
+) -> Option<(u64, i128)> {
     let (mut deltas, mut offsets) = (Runs::new(stts), ctts.map(Runs::new));
     let from = from.map(i128::from);
-    let mut dts = 0i128;
-    let mut first: Option<i128> = None;
+    let (mut index, mut dts) = (0u64, 0i128);
+    let mut first: Option<(u64, i128)> = None;
     while let Some((left, delta)) = deltas.peek() {
         let (len, offset) = match offsets.as_mut() {
             None => (left, 0),
@@ -1861,15 +1962,20 @@ fn first_shown(
         };
         if j < n {
             let t = shown + j * d;
-            first = Some(first.map_or(t, |f| f.min(t)));
+            // `j` is below `len`, a u64.
+            let at = index + j as u64;
+            if first.is_none_or(|(_, f)| t < f) {
+                first = Some((at, t));
+            }
         }
+        index += len;
         dts += n * d;
         deltas.skip(len);
         if let Some(o) = offsets.as_mut() {
             o.skip(len);
         }
     }
-    first.map(|t| t - from.unwrap_or(0))
+    first.map(|(at, t)| (at, t - from.unwrap_or(0)))
 }
 
 /// `b`, a container, if the reader read all the boxes in it. A box that
@@ -1895,6 +2001,29 @@ fn whole(b: &Mp4Box) -> Result<&Mp4Box, Mp4Error> {
             "its boxes stop at offset {read}, {left} bytes before its end: the box there overruns it, has a bad header or is past the reader's limit of {MAX_BOXES} boxes, so neither it nor any box after it was read"
         ),
     ))
+}
+
+/// The one box of type `t` that `boxes`, of `parent`, holds, if any, or
+/// an error naming the second. FFmpeg warns of a duplicate and reads the
+/// later of two, as long as it isn't empty, so which one it times the
+/// track by is refused rather than guessed.
+fn once<'a>(
+    mut boxes: impl Iterator<Item = &'a Mp4Box>,
+    t: &[u8; 4],
+    parent: &Mp4Box,
+) -> Result<Option<&'a Mp4Box>, Mp4Error> {
+    let first = boxes.next();
+    match boxes.next() {
+        None => Ok(first),
+        Some(second) => Err(malformed(
+            second,
+            format!(
+                "it is a second `{}` in its `{}`, and FFmpeg reads the later of two",
+                FourCc(*t),
+                parent.fourcc
+            ),
+        )),
+    }
 }
 
 /// The child of `b` of type `t`, or an error naming both.
@@ -2190,6 +2319,39 @@ pub(crate) mod tests {
         assert_eq!(constant(&[(3, 0), (1, 256)]), None);
         // Offsets for 3 samples of 4.
         assert_eq!(constant(&[(3, 0)]), None);
+    }
+
+    #[test]
+    fn a_ctts_past_the_leaf_limit_is_kept_and_read_to_its_end() {
+        use spherecut_testkit::control::must_fail;
+        // I P B P B … in decode order, a run a sample: the I shown a frame
+        // after its decode time, each P two frames after and each B at
+        // it, so every frame is shown 512 after the one before. 2^17 + 1
+        // runs make the body 8 + 8 × 131,073 bytes, past MAX_KEPT_LEAF.
+        // Before M3.0 a `ctts` that large wasn't kept, so the rate came
+        // out Variable; since `ctts` joined SAMPLE_TABLES it is read.
+        let pairs = MAX_KEPT_LEAF / 16;
+        let mut offsets = vec![(1, 512)];
+        for _ in 0..pairs {
+            offsets.extend([(1, 1024), (1, 0)]);
+        }
+        let samples = offsets.len() as u32;
+        let constant = |offsets: &[(u32, i32)]| {
+            let trak = timed_trak_with(1, 15360, &[(samples, 512)], Some(offsets));
+            let f = cat(&[bx(b"ftyp", b"isom\0\0\x02\0isom"), bx(b"moov", &trak)]);
+            let t = read(&mut io::Cursor::new(f)).unwrap();
+            let trak = t.tracks().next().unwrap();
+            let ctts = trak.path(&[b"mdia", b"minf", b"stbl", b"ctts"]).unwrap();
+            assert!(ctts.payload.len() > MAX_KEPT_LEAF);
+            assert_eq!(ctts.payload.len() as u64, ctts.size - ctts.header_len);
+            sample_timing(trak).unwrap().constant
+        };
+        assert_eq!(constant(&offsets), Some(512));
+        // Control: the last B shown with the P before it, which only the
+        // table's last entry says.
+        let mut tied = offsets.clone();
+        *tied.last_mut().unwrap() = (1, 512);
+        must_fail("the last B tied", constant(&tied).ok_or("Variable"));
     }
 
     #[test]

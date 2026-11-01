@@ -274,6 +274,14 @@ fn no_track(e: Mp4Error) -> String {
     }
 }
 
+/// Why the track is timed in fragments, for a `Fragmented` error.
+fn fragmented(e: Mp4Error) -> String {
+    match e {
+        Mp4Error::Fragmented { why, .. } => why,
+        e => panic!("not a fragmented track: {e}"),
+    }
+}
+
 /// Whether two tracks' decode times agree over their common prefix, or
 /// the first sample where they don't.
 fn same_times(a: &TrackTiming, b: &TrackTiming) -> Result<(), u64> {
@@ -307,6 +315,7 @@ fn the_tables_of_a_known_file() {
         TrackTiming {
             timescale: 30000,
             count: 114,
+            first_shown: 0,
             first_pts: 0,
             edit: Some(EditList {
                 movie_timescale: 30000,
@@ -361,6 +370,8 @@ fn an_edit_list_moves_the_first_frame() {
         let first = |edits: &[EditSpec], movie| at(v, edits, movie).unwrap().first_pts;
         // Two frames of lead-in hidden: the third is shown first, at 0.
         assert_eq!(first(&[(3000, 1024, RATE_1)], 1000), 0);
+        let t = at(v, &[(3000, 1024, RATE_1)], 1000).unwrap();
+        assert_eq!((t.first_shown, t.from_first_shown()), (2, 88));
         // An empty edit of half a second first: 7680 ticks.
         assert_eq!(first(&[(500, -1, RATE_1), (3000, 0, RATE_1)], 1000), 7680);
         // Two empty edits add up, each rounded to the nearest tick as
@@ -384,6 +395,7 @@ fn an_edit_list_moves_the_first_frame() {
         // An edit that starts between frames shows the next one first,
         // 24 ticks after the edit's start. Its rate doesn't move it.
         assert_eq!(first(&[(3000, 1000, RATE_1)], 1000), 24);
+        assert_eq!(at(v, &[(3000, 1000, RATE_1)], 1000).unwrap().first_shown, 2);
         assert_eq!(first(&[(3000, 1000, 0x8000)], 1000), 24);
         // Only the first edit that shows media counts.
         assert_eq!(first(&[(1000, 0, RATE_1), (1000, 20480, RATE_1)], 1000), 0);
@@ -513,7 +525,19 @@ fn composition_offsets_set_the_first_frame() {
         ..Spec::new(15360, &[(4, 512)])
     };
     let n = timing(&file(1000, &[negative.boxes()]), 0).unwrap();
-    assert_eq!(n.first_pts, 0);
+    assert_eq!((n.first_shown, n.first_pts), (0, 0));
+    // The second sample shown first; and of two shown first, the one
+    // decoded first.
+    let at = |runs: Vec<(u32, i32)>| {
+        let s = Spec {
+            ctts: Some((1, runs)),
+            ..Spec::new(15360, &[(4, 512)])
+        };
+        let t = timing(&file(1000, &[s.boxes()]), 0).unwrap();
+        (t.first_shown, t.first_pts)
+    };
+    assert_eq!(at(vec![(1, 512), (1, -512), (2, 0)]), (1, 0));
+    assert_eq!(at(vec![(1, 512), (1, 0), (2, 0)]), (0, 512));
     // Different offsets hash apart; without a `ctts` there's no hash.
     assert_ne!(n.ctts_hash, t.ctts_hash);
     let plain = timing(&file(1000, &[Spec::new(15360, &[(4, 512)]).boxes()]), 0).unwrap();
@@ -552,14 +576,15 @@ fn a_track_without_stss_has_every_sample_sync() {
     // Sync samples past the shorter track don't count.
     let gop5 = listed(&[1, 6, 11], 12);
     assert_eq!(listed(&[1, 6], 10).stss_mismatch(&gop5), None);
-    // Controls: sample 2 not sync; GOPs of 5 and 4.
+    // Controls: sample 2 not sync; GOPs of 5 and 4. Samples count from
+    // 0, as `stts_mismatch` counts them, where `stss` counts from 1.
     let missing = listed(&[1, 3, 4, 5, 6, 7, 8, 9, 10], 10);
     assert_eq!(
         must_fail(
             "sample 2 not sync",
             all.stss_mismatch(&missing).map_or(Ok(()), Err)
         ),
-        2
+        1
     );
     let gop4 = listed(&[1, 5, 9], 12);
     assert_eq!(
@@ -567,7 +592,7 @@ fn a_track_without_stss_has_every_sample_sync() {
             "GOPs of 5 and 4",
             gop5.stss_mismatch(&gop4).map_or(Ok(()), Err)
         ),
-        5
+        4
     );
 }
 
@@ -787,6 +812,63 @@ fn stts_agree_over_the_common_prefix() {
 }
 
 #[test]
+fn lenses_line_up_by_the_frames_they_show() {
+    let _time = timed("lenses_line_up_by_the_frames_they_show");
+    let x5 = timing(&file(30000, &[x5_lens().boxes()]), 0).unwrap();
+    // A lens with a frame of lead-in, of another length, that its edit
+    // list hides, and its sync samples a sample later: the same frames.
+    let lead = Spec {
+        stts: vec![(1, 500), (114, 1001)],
+        ctts: Some((0, vec![(115, 0)])),
+        stss: Some(vec![1, 2, 62]),
+        elst: Some((0, vec![(114_114, 500, RATE_1)])),
+        ..x5_lens()
+    };
+    let t = timing(&file(30000, &[lead.boxes()]), 0).unwrap();
+    assert_eq!(
+        (t.first_shown, t.first_pts, t.from_first_shown()),
+        (1, 0, 114)
+    );
+    assert_eq!(same_times(&x5, &t), Ok(()));
+    assert_eq!(x5.stss_mismatch(&t), None);
+    // Controls: paired from decode index 0 instead, the lead-in's frame
+    // parts the decode times and the sync samples.
+    let unaligned = TrackTiming {
+        first_shown: 0,
+        ..t.clone()
+    };
+    assert_eq!(
+        must_fail("decode times from index 0", same_times(&x5, &unaligned)),
+        1
+    );
+    assert_eq!(
+        must_fail(
+            "sync samples from index 0",
+            x5.stss_mismatch(&unaligned).map_or(Ok(()), Err)
+        ),
+        1
+    );
+    // The same tables as lens 0, but an edit list that hides the first
+    // frame: the keyframes come at frame 59 alone, which R2 must see,
+    // although the tables are the same and both first frames are shown
+    // at 0.
+    let hides = Spec {
+        elst: Some((0, vec![(113_113, 1001, RATE_1)])),
+        ..x5_lens()
+    };
+    let h = timing(&file(30000, &[hides.boxes()]), 0).unwrap();
+    assert_eq!((h.first_shown, h.first_pts), (1, 0));
+    assert_eq!(same_times(&x5, &h), Ok(()));
+    assert_eq!(
+        must_fail(
+            "a keyframe hidden",
+            x5.stss_mismatch(&h).map_or(Ok(()), Err)
+        ),
+        0
+    );
+}
+
+#[test]
 fn streams_are_numbered_as_ffmpeg_numbers_them() {
     let _time = timed("streams_are_numbered_as_ffmpeg_numbers_them");
     let video = Spec::new(15360, &[(10, 512)]).boxes();
@@ -847,9 +929,168 @@ fn streams_are_numbered_as_ffmpeg_numbers_them() {
     );
     let mut f = bx(b"ftyp", b"isom\0\0\x02\0isom");
     f.extend(heif);
-    f.extend_from_slice(&file(1000, &[video])[20..]);
+    f.extend_from_slice(&file(1000, std::slice::from_ref(&video))[20..]);
     let why = no_track(must_fail("HEIF items first", ok(&f, 0)));
     assert!(why.contains("`iinf`"), "{why}");
+
+    // A top-level `meta` or `udta` holds no cover art or items here, but
+    // past 64 KiB the reader doesn't read it, so it can't say.
+    let top = |t: &[u8; 4], padding: usize| {
+        // `meta` is a full box, with a version and flags first.
+        let version = if t == b"meta" { words(&[0]) } else { vec![] };
+        let mut f = bx(b"ftyp", b"isom\0\0\x02\0isom");
+        f.extend(bx(t, &[version, bx(b"free", &vec![0; padding])].concat()));
+        f.extend_from_slice(&file(1000, std::slice::from_ref(&video))[20..]);
+        f
+    };
+    for t in [b"meta", b"udta"] {
+        assert_eq!(ok(&top(t, 64), 0).unwrap(), 10);
+        let f = top(t, 70 * 1024);
+        let why = no_track(must_fail("a large box first", ok(&f, 0)));
+        let size = u32::from_be_bytes(f[20..24].try_into().unwrap());
+        let name = String::from_utf8_lossy(t);
+        assert_eq!(
+            why,
+            format!(
+                "the {size}-byte `{name}` at offset 20 wasn't read whole, and FFmpeg may make streams of what it holds, before the file's track #0, so which stream that track is isn't known"
+            )
+        );
+    }
+}
+
+#[test]
+fn a_fragmented_file_is_its_own_error() {
+    let _time = timed("a_fragmented_file_is_its_own_error");
+    // As a fragmented file's `moov` has them: no samples in the tables.
+    let empty = Boxes {
+        stts: Some(table(0, &[])),
+        stsz: Some(stsz(0)),
+        ..Spec::new(15360, &[(1, 512)]).boxes()
+    };
+    let mvhd_box = bx(b"mvhd", &mvhd(1000));
+    let mvex = bx(b"mvex", &bx(b"trex", &words(&[0, 1, 1, 0, 0, 0])));
+    let f = file_of(&[mvhd_box.clone(), trak(1, &empty), mvex]);
+    let why = fragmented(must_fail("an mvex", timing(&f, 0)));
+    assert!(
+        why.starts_with("its `moov` has an `mvex` at offset ")
+            && why.ends_with(", so the track's samples are timed in fragments, which aren't read"),
+        "{why}"
+    );
+    // Fragments after `moov`, even without an `mvex`.
+    let plain = file_of(&[mvhd_box, trak(1, &empty)]);
+    let moof = bx(b"moof", &bx(b"mfhd", &words(&[0, 1])));
+    let at = plain.len();
+    let why = fragmented(must_fail(
+        "a moof",
+        timing(&[plain.clone(), moof].concat(), 0),
+    ));
+    assert!(
+        why.starts_with(&format!("the file has a `moof` at offset {at}, ")),
+        "{why}"
+    );
+    // Control: the same tables without fragments are tables of no
+    // samples.
+    let e = must_fail("no fragments", timing(&plain, 0));
+    assert_eq!(
+        named(e),
+        (
+            "stts".to_string(),
+            "it times no samples, so the track shows none".to_string()
+        )
+    );
+}
+
+#[test]
+fn a_second_table_is_an_error_naming_it() {
+    let _time = timed("a_second_table_is_an_error_naming_it");
+    let s = Spec {
+        ctts: Some((0, vec![(90, 0)])),
+        stss: Some(vec![1, 31, 61]),
+        elst: Some((0, vec![(3000, 0, RATE_1)])),
+        ..Spec::new(15360, &[(90, 512)])
+    };
+    let b = s.boxes();
+    let f = file(1000, std::slice::from_ref(&b));
+    assert!(timing(&f, 0).is_ok());
+    let tree = mp4::read(&mut io::Cursor::new(&f)).unwrap();
+    let moov = tree.moov().unwrap();
+    let trak = moov.child(b"trak").unwrap();
+    let (mdia, edts) = (trak.child(b"mdia").unwrap(), trak.child(b"edts").unwrap());
+    let minf = mdia.child(b"minf").unwrap();
+    let stbl = minf.child(b"stbl").unwrap();
+    // A copy of each, after the last box of its parent.
+    let stbl_end = (stbl.offset + stbl.size) as usize;
+    let edts_end = (edts.offset + edts.size) as usize;
+    let elst = bx(b"elst", b.elst.as_ref().unwrap());
+    let cases = [
+        (
+            "stts",
+            "stbl",
+            splice(
+                &f,
+                stbl_end,
+                0,
+                &bx(b"stts", b.stts.as_ref().unwrap()),
+                &[moov, trak, mdia, minf, stbl],
+            ),
+            stbl_end,
+        ),
+        (
+            "ctts",
+            "stbl",
+            splice(
+                &f,
+                stbl_end,
+                0,
+                &bx(b"ctts", b.ctts.as_ref().unwrap()),
+                &[moov, trak, mdia, minf, stbl],
+            ),
+            stbl_end,
+        ),
+        (
+            "stss",
+            "stbl",
+            splice(
+                &f,
+                stbl_end,
+                0,
+                &bx(b"stss", b.stss.as_ref().unwrap()),
+                &[moov, trak, mdia, minf, stbl],
+            ),
+            stbl_end,
+        ),
+        // In the same `edts`, and in a second one.
+        (
+            "elst",
+            "trak",
+            splice(&f, edts_end, 0, &elst, &[moov, trak, edts]),
+            edts_end,
+        ),
+        (
+            "elst",
+            "trak",
+            splice(&f, edts_end, 0, &bx(b"edts", &elst), &[moov, trak]),
+            edts_end + 8,
+        ),
+    ];
+    for (t, parent, bad, at) in cases {
+        match must_fail(t, timing(&bad, 0)) {
+            Mp4Error::Malformed {
+                fourcc,
+                offset,
+                why,
+            } => {
+                assert_eq!((fourcc.as_str(), offset), (t, at as u64));
+                assert_eq!(
+                    why,
+                    format!(
+                        "it is a second `{t}` in its `{parent}`, and FFmpeg reads the later of two"
+                    )
+                );
+            }
+            e => panic!("{t}: {e}"),
+        }
+    }
 }
 
 #[test]
@@ -1040,18 +1281,27 @@ fn ffmpeg_s_files_time_as_its_demuxer_reads_them() {
     let lead_in = at("lead_in").edit.unwrap();
     assert_eq!(lead_in.edits[0].media_time, 1024);
 
-    // Control: the box reader's first frame without the edit list, which
-    // FFmpeg's demuxer does apply.
-    let b = at("b_frames");
-    let shift = b.edit.as_ref().unwrap().edits[0].media_time;
-    assert!(shift > 0, "{b:?}");
-    let ignored = TrackTiming {
-        first_pts: b.first_pts + shift,
-        ..b.clone()
-    };
-    let (_, packets) = demuxed(&dir.0.join("b_frames.mp4"));
+    // Control: the box reader on the B-frame file with its edit list cut
+    // out, which FFmpeg's demuxer applies to the file that keeps it. Its
+    // muxer writes `moov` last, so no chunk moves.
+    let path = dir.0.join("b_frames.mp4");
+    let f = std::fs::read(&path).unwrap();
+    let tree = mp4::read(&mut io::Cursor::new(&f)).unwrap();
+    assert_eq!(tree.top.last().unwrap().fourcc.0, *b"moov");
+    let moov = tree.moov().unwrap();
+    let trak = moov.child(b"trak").unwrap();
+    let edts = trak.child(b"edts").unwrap();
+    let (from, cut) = (edts.offset as usize, edts.size as usize);
+    let no_edts = dir.0.join("b_frames_no_edts.mp4");
+    std::fs::write(&no_edts, splice(&f, from, cut, &[], &[moov, trak])).unwrap();
+    let ignored = mp4::track_timing(&no_edts, 0).unwrap();
+    assert_eq!(ignored.edit, None);
+    let (_, packets) = demuxed(&path);
     let first = packets.iter().filter_map(|p| p.pts).min().unwrap();
     must_fail("the edit list ignored", ignored.first_pts == first);
+    // Late by where the edit starts: the frames' composition delay.
+    let shift = at("b_frames").edit.unwrap().edits[0].media_time;
+    assert_eq!((ignored.first_pts - first, shift > 0), (shift, true));
 }
 
 #[test]
@@ -1147,9 +1397,10 @@ fn presentation_times(s: &Spec) -> Vec<i128> {
         .collect()
 }
 
-/// When the first frame of `s` is shown, sample by sample, in a movie
-/// at `movie`: `None` when its edits show none.
-fn first_pts_by_sample(s: &Spec, movie: u32) -> Option<i128> {
+/// Which sample of `s` is shown first, by its decode index (the first of
+/// any that tie), and when, sample by sample, in a movie at `movie`:
+/// `None` when its edits show none.
+fn first_by_sample(s: &Spec, movie: u32) -> Option<(u64, i128)> {
     let (from, delay) = match &s.elst {
         Some((_, edits)) if !edits.is_empty() => {
             let shown = edits.iter().position(|e| e.1 != -1)?;
@@ -1163,20 +1414,30 @@ fn first_pts_by_sample(s: &Spec, movie: u32) -> Option<i128> {
         }
         _ => (None, 0),
     };
-    let first = presentation_times(s)
+    let (at, first) = presentation_times(s)
         .into_iter()
-        .filter(|&t| from.is_none_or(|m| t >= m))
-        .min()?;
-    Some(delay + first - from.unwrap_or(0))
+        .enumerate()
+        .filter(|&(_, t)| from.is_none_or(|m| t >= m))
+        .min_by_key(|&(i, t)| (t, i))?;
+    Some((at as u64, delay + first - from.unwrap_or(0)))
 }
 
-/// [`TrackTiming::stts_mismatch`], sample by sample.
-fn stts_mismatch_by_sample(a: &TrackTiming, b: &TrackTiming) -> Option<u64> {
-    let n = a.count.min(b.count) as usize;
-    let dts = |t: &TrackTiming| -> Vec<u128> {
+/// The samples two tracks have in common from their first shown ones,
+/// decode indices `fa` and `fb`.
+fn common(a: &TrackTiming, fa: u64, b: &TrackTiming, fb: u64) -> u64 {
+    (a.count - fa).min(b.count - fb)
+}
+
+/// [`TrackTiming::stts_mismatch`], sample by sample, with the tracks'
+/// first shown samples `fa` and `fb` as [`first_by_sample`] finds them.
+fn stts_mismatch_by_sample(a: &TrackTiming, fa: u64, b: &TrackTiming, fb: u64) -> Option<u64> {
+    let n = common(a, fa, b, fb) as usize;
+    // Decode times from the first shown sample's.
+    let dts = |t: &TrackTiming, first: u64| -> Vec<u128> {
         t.stts
             .iter()
             .flat_map(|&(k, d)| std::iter::repeat_n(u128::from(d), k as usize))
+            .skip(first as usize)
             .scan(0, |at, d| {
                 let t = *at;
                 *at += d;
@@ -1185,15 +1446,18 @@ fn stts_mismatch_by_sample(a: &TrackTiming, b: &TrackTiming) -> Option<u64> {
             .take(n)
             .collect()
     };
-    let (da, db) = (dts(a), dts(b));
+    let (da, db) = (dts(a, fa), dts(b, fb));
     let (ta, tb) = (u128::from(a.timescale), u128::from(b.timescale));
     (0..n).find(|&i| da[i] * tb != db[i] * ta).map(|i| i as u64)
 }
 
-/// [`TrackTiming::stss_mismatch`], sample by sample.
-fn stss_mismatch_by_sample(a: &TrackTiming, b: &TrackTiming) -> Option<u64> {
-    let sync = |t: &TrackTiming, k: u64| t.stss.as_ref().is_none_or(|s| s.contains(&(k as u32)));
-    (1..=a.count.min(b.count)).find(|&k| sync(a, k) != sync(b, k))
+/// [`TrackTiming::stss_mismatch`], sample by sample, as
+/// [`stts_mismatch_by_sample`] lines the tracks up.
+fn stss_mismatch_by_sample(a: &TrackTiming, fa: u64, b: &TrackTiming, fb: u64) -> Option<u64> {
+    // `stss` numbers samples from 1.
+    let sync =
+        |t: &TrackTiming, k: u64| t.stss.as_ref().is_none_or(|s| s.contains(&(k as u32 + 1)));
+    (0..common(a, fa, b, fb)).find(|&i| sync(a, fa + i) != sync(b, fb + i))
 }
 
 /// Runs of equal values, as (count, value).
@@ -1281,6 +1545,8 @@ fn payload() -> impl Strategy<Value = Vec<u8>> {
 fn holds(t: &TrackTiming) -> Result<(), TestCaseError> {
     prop_assert!(t.timescale > 0 && t.timescale <= i32::MAX as u32);
     prop_assert_eq!(t.stts.iter().map(|r| u64::from(r.0)).sum::<u64>(), t.count);
+    prop_assert!(t.first_shown < t.count);
+    prop_assert_eq!(t.from_first_shown(), t.count - t.first_shown);
     if let Some(s) = &t.stss {
         prop_assert!(s.windows(2).all(|w| w[0] < w[1]), "{:?}", s);
         prop_assert!(s.iter().all(|&k| k >= 1 && u64::from(k) <= t.count));
@@ -1299,10 +1565,11 @@ proptest! {
 
     fn tables_read_back_as_written_cases((s, movie) in spec()) {
         let f = file(movie, &[s.boxes(), audio(3)]);
-        match (timing(&f, 0), first_pts_by_sample(&s, movie)) {
-            (Ok(t), Some(first)) => {
+        match (timing(&f, 0), first_by_sample(&s, movie)) {
+            (Ok(t), Some((at, first))) => {
                 holds(&t)?;
                 prop_assert_eq!(i128::from(t.first_pts), first);
+                prop_assert_eq!(t.first_shown, at);
                 prop_assert_eq!(&t.stts, &s.stts);
                 prop_assert_eq!(t.count, u64::from(s.count()));
                 prop_assert_eq!(&t.stss, &s.stss);
@@ -1326,28 +1593,50 @@ proptest! {
     fn mismatches_are_the_first_samples_that_differ_cases(
         (a, _) in spec(),
         (b, _) in spec(),
-        same_rate in any::<bool>(),
+        mode in 0u8..3,
+        (lead, delta) in (1u32..4, 1u32..2000),
     ) {
-        // Often the same deltas and sync samples at the same timescale, so
-        // that the two agree for a while.
-        let b = if same_rate {
-            let head = &a.stts[..a.stts.len() / 2];
-            let n: u32 = head.iter().map(|r| r.0).sum();
-            let sync = |s: &Spec, upto: u32| match &s.stss {
-                Some(v) => v.iter().copied().filter(|&k| k <= upto).collect(),
-                None => (1..=upto).collect::<Vec<_>>(),
-            };
-            let tail = sync(&b, b.count()).into_iter().map(|k| k + n);
-            let stss = (a.stss.is_some() || b.stss.is_some()).then(|| sync(&a, n).into_iter().chain(tail).collect());
-            Spec { timescale: a.timescale, stts: [head, &b.stts].concat(), ctts: None, stss, ..b }
-        } else {
-            b
+        let a = Spec {
+            ctts: a.ctts.filter(|_| mode != 2),
+            elst: None,
+            ..a
         };
-        let ta = timing(&file(1000, &[Spec { elst: None, ..a }.boxes()]), 0).unwrap();
-        let tb = timing(&file(1000, &[Spec { elst: None, ..b }.boxes()]), 0).unwrap();
-        prop_assert_eq!(ta.stts_mismatch(&tb), stts_mismatch_by_sample(&ta, &tb));
-        prop_assert_eq!(tb.stts_mismatch(&ta), stts_mismatch_by_sample(&tb, &ta));
-        prop_assert_eq!(ta.stss_mismatch(&tb), stss_mismatch_by_sample(&ta, &tb));
+        let b = match mode {
+            // Often the same deltas and sync samples at the same
+            // timescale, so that the two agree for a while.
+            1 => {
+                let head = &a.stts[..a.stts.len() / 2];
+                let n: u32 = head.iter().map(|r| r.0).sum();
+                let sync = |s: &Spec, upto: u32| match &s.stss {
+                    Some(v) => v.iter().copied().filter(|&k| k <= upto).collect(),
+                    None => (1..=upto).collect::<Vec<_>>(),
+                };
+                let tail = sync(&b, b.count()).into_iter().map(|k| k + n);
+                let stss = (a.stss.is_some() || b.stss.is_some()).then(|| sync(&a, n).into_iter().chain(tail).collect());
+                Spec { timescale: a.timescale, stts: [head, &b.stts].concat(), ctts: None, stss, elst: None }
+            }
+            // `a` after a lead-in of `lead` frames `delta` apart, a sync
+            // sample first, which an edit list hides: the same frames once
+            // lined up by the first shown.
+            2 => Spec {
+                stts: [&[(lead, delta)][..], &a.stts].concat(),
+                stss: a.stss.as_ref().map(|s| std::iter::once(1).chain(s.iter().map(|k| k + lead)).collect()),
+                elst: Some((0, vec![(1000, i64::from(lead * delta), RATE_1)])),
+                ..a.clone()
+            },
+            _ => Spec { elst: None, ..b },
+        };
+        let ta = timing(&file(1000, &[a.boxes()]), 0).unwrap();
+        let tb = timing(&file(1000, &[b.boxes()]), 0).unwrap();
+        let (fa, fb) = (first_by_sample(&a, 1000).unwrap().0, first_by_sample(&b, 1000).unwrap().0);
+        prop_assert_eq!(ta.stts_mismatch(&tb), stts_mismatch_by_sample(&ta, fa, &tb, fb));
+        prop_assert_eq!(tb.stts_mismatch(&ta), stts_mismatch_by_sample(&tb, fb, &ta, fa));
+        prop_assert_eq!(ta.stss_mismatch(&tb), stss_mismatch_by_sample(&ta, fa, &tb, fb));
+        if mode == 2 {
+            prop_assert_eq!((fa, fb), (0, u64::from(lead)));
+            prop_assert_eq!(ta.stts_mismatch(&tb), None);
+            prop_assert_eq!(ta.stss_mismatch(&tb), None);
+        }
     }
 
     fn any_table_bytes_are_read_or_refused_cases(
