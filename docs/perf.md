@@ -161,11 +161,16 @@ Current benchmarks:
     the GPU imports DMA-BUFs (path A), with a note of each run's frames,
     decode paths and stages. A note compares path A's median second with
     the copy's, for D25's revisit (M3 plan 4.3's K2), and another gives
-    K2's engine half from `pair-hevc8-2880-2997-noisy-20s`: decided on
-    `VA-API (Auto)` with its frames copied, and a pass when every full
-    second decodes 36 fps a lens or more, on VA-API throughout, without
-    a stall. It plays whichever of the samples and the pairs are there,
-    and a stall fails it.
+    K2's engine half from `pair-hevc8-2880-2997-noisy-20s` as this
+    machine measures it, whichever machine the plan wrote K2 for:
+    decided on `VA-API (Auto)` with its frames copied, and a pass when
+    every full second decodes 36 fps a lens or more, on VA-API
+    throughout, without a stall. A second's count is the mean over the
+    lenses, since the engine counts the frames of every stream together.
+    A note beside `pair-hevc8-2880-5994-noisy-10s`'s rows says it is P
+    only, where the X5 codes TSA_N on every other picture. It plays
+    whichever of the samples and the pairs are there, and a stall fails
+    it.
   - `bench_x5_8k30_zero_copy_vs_copy` (slice 5b, D25): each X5 mode
     on VA-API with the copy, VA-API with zero copy (frames imported as
     DMA-BUFs) and Vulkan Video with the copy, recorded with the
@@ -192,11 +197,17 @@ Current benchmarks:
   or `slower lens alone` (fps a lens: the frames after the first over
   the time from both lenses' first frame), `opening` (ms) and
   `peak RSS growth beside the encode` or `alone` (MiB), with
-  `the encode beside` (fps) on the gated rows. The gated rows, clip 9
-  (K1 and K4) and `pair-hevc8-2880-2997-noisy-20s` (K2's export half),
-  decode 600 frames a lens beside an `h264_vaapi` encode of a fixed
-  3840×2160 frame at 30 fps, once to warm up and then three times; the
-  rest decode up to 600 frames once, alone. For K3 each path also
+  `the encode beside, in the decode's window` (fps: the frames the
+  encode took from both lenses' first frame to the last frame decoded,
+  over that time) on the gated rows. The gated rows, clip 9 (K1 and K4)
+  and `pair-hevc8-2880-2997-noisy-20s` (K2's export half), decode 600
+  frames a lens beside an `h264_vaapi` encode of a fixed 3840×2160
+  frame at 30 fps, once to warm up and then three times; a row decides
+  only when each run's encode took 29.5 fps or more in its window, and
+  the verdicts give the encode's rates beside the decode's. The rest
+  decode up to 600 frames once, alone, and a note beside
+  `pair-hevc8-2880-5994-noisy-10s`'s rows says it is P only, where the
+  X5 codes TSA_N on every other picture. For K3 each path also
   decodes clip 9 alone, as a pair and as lens 0 by itself
   (`…, <setup>, for K3` and `…, lens 0 only, for K3`). In these runs
   the consumer lets a pair go only once every channel is full, as a
@@ -206,11 +217,20 @@ Current benchmarks:
   side. K3 decides only when each of its runs had all its frames alive
   at once, and its note gives that peak and the bytes it accounts for
   beside the growth. Every run is a child process of its own, so that
-  its peak RSS growth is its own. A note per K gives its verdict by the
-  plan's rule: Pass, the redirect the plan names, or not decided and
-  why. A verdict never fails the test; a run that fails does, and with
-  no hardware row at clip 9 it skips. On odin it should take about 25
-  minutes, most of it software's gated rows.
+  its peak RSS growth is its own. A note gives what doctor's decode
+  checks say of each hardware path on the clips' format, and a note per
+  K its verdict on this machine by the plan's rule, under the plan's
+  name for the machine it was written for (`K4's rule (huginn's 8K30
+  export), on this machine, …`): Pass, the redirect the plan names, or
+  not decided and why. Where VA-API misses and Vulkan Video has no
+  rows, the verdict goes past Redirect 1 only when doctor says Vulkan
+  Video doesn't decode the clip's format here or the device turned the
+  stream down; otherwise it is not decided. A last note names the Ks
+  left undecided. A verdict never fails the test; a run that fails
+  does, and so does one that finds a path's device or decoder missing
+  after the path decoded here, or a device turning down a clip it
+  decoded. It skips only when no K was decided, naming them. On odin it
+  should take about 25 minutes, most of it software's gated rows.
 - **The perf clips** (DECISIONS D37): hw-test makes them once, with
   libx265 at an average bitrate, into `<cargo target dir>/hw-media/`:
   `hevc8-5k7-30fps-noisy-20s.mp4` and `hevc10-5k7-30fps-noisy-20s.mp4`
