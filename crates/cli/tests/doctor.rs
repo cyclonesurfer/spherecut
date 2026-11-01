@@ -223,8 +223,8 @@ fn doctor_opens_no_network_socket() {
 /// `doctor --file` on a synthetic `.insv`: whether it can be stitched
 /// (its calibration is there), whether both lenses decode on the chosen
 /// path, and what is missing when not ("Insta360 X5 v1.1.22, geometry
-/// provisional"); on one with `NoCalibration`, that it can't (M3 plan
-/// 5.4).
+/// provisional"); on one with `NoCalibration`, an LRV, and a master
+/// whose lens 1 doesn't decode, that it can't (M3 plan 5.4).
 #[test]
 fn doctor_file_says_whether_an_insv_can_be_stitched() {
     let dir =
@@ -323,6 +323,49 @@ fn doctor_file_says_whether_an_insv_can_be_stitched() {
         v["result"]["file"]["stitchable"] == true,
     );
 
+    // The lens control: a master whose lens 1 has lost its pictures, each
+    // sample zeroed in place, probes as before, but stream #1's first
+    // frame doesn't decode, so it can't be stitched.
+    let blank = insv::master(&dir, "VID_20261022_101500_00_003.insv", None);
+    blank_track(&blank.path, 1);
+    let v = document::document(&doctor(&["--json", "--file", blank.path.to_str().unwrap()]).stdout);
+    assert_eq!(v["ok"], true, "{v}");
+    let f = &v["result"]["file"];
+    must_fail(
+        "a master whose lens 1 doesn't decode, stitchable",
+        f["stitchable"] == true,
+    );
+    assert_eq!(f["calibration"], "v6", "{f:#}");
+    let lenses = f["lenses"].as_array().unwrap();
+    assert_eq!(lenses.len(), 2, "{f:#}");
+    assert_eq!(lenses[0]["decodes"], true, "{f:#}");
+    let l = &lenses[1];
+    assert_eq!(l["stream"], 1, "{f:#}");
+    assert_eq!(l["decodes"], false, "{f:#}");
+    // Its decoder decodes the first frame as it opens, and that failed.
+    assert_eq!(l["source"], Value::Null, "{f:#}");
+    assert_eq!(l["decode"], Value::Null, "{f:#}");
+    assert_eq!(l["error"]["code"], "decode_failed", "{f:#}");
+    let error = l["error"]["message"].as_str().unwrap();
+    assert_eq!(
+        f["missing"],
+        json!([format!("stream #1's pictures: {error}")]),
+        "{f:#}"
+    );
+    let t = text(&blank.path);
+    must_fail(
+        "a master whose lens 1 doesn't decode, stitchable in text",
+        t.contains("can be stitched: yes"),
+    );
+    for want in [
+        "  can be stitched: no\n".to_string(),
+        format!("  stream #0  h264 128x128 yuv420p, {software}\n"),
+        format!("  stream #1  not opened, doesn't decode: {error}\n"),
+        format!("  missing: stream #1's pictures: {error}\n"),
+    ] {
+        assert!(t.contains(&want), "no {want:?} in:\n{t}");
+    }
+
     // A file that can't be probed fails the run with probe's error, and
     // the machine's report comes with it.
     let gone = dir.join("gone.insv");
@@ -344,4 +387,44 @@ fn doctor_file_says_whether_an_insv_can_be_stitched() {
     assert_eq!(v["result"]["file"], Value::Null);
     assert!(v["result"].get("decoders").is_some(), "{v}");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The file at `path` with every sample of its track `track` (in file
+/// order) zeroed where it lies in `mdat`, its boxes and sample tables as
+/// they were: a lens whose pictures are lost, which probe reads as it
+/// did but from which no decoder makes a frame.
+fn blank_track(path: &Path, track: usize) {
+    let mut f = std::fs::read(path).unwrap();
+    let tree = spherecut_media::mp4::read(&mut std::io::Cursor::new(&f)).unwrap();
+    let stbl = tree
+        .tracks()
+        .nth(track)
+        .and_then(|t| t.path(&[b"mdia", b"minf", b"stbl"]))
+        .unwrap();
+    // A table's 32-bit words after its first `skip` bytes: the version
+    // and flags, the count, and in `stsz` the size all samples share.
+    let words = |t: &[u8; 4], skip: usize| -> Vec<usize> {
+        stbl.child(t).unwrap().payload[skip..]
+            .chunks_exact(4)
+            .map(|w| u32::from_be_bytes(w.try_into().unwrap()) as usize)
+            .collect()
+    };
+    assert_eq!(words(b"stsz", 4)[0], 0, "the samples' sizes differ");
+    let sizes = words(b"stsz", 12);
+    let chunks = words(b"stco", 8);
+    // `stsc`'s runs: first chunk (from 1), samples a chunk, description.
+    let stsc = words(b"stsc", 8);
+    let runs: Vec<&[usize]> = stsc.chunks_exact(3).collect();
+    let mut sample = 0;
+    for (k, &start) in chunks.iter().enumerate() {
+        let run = runs.iter().rfind(|r| r[0] <= k + 1).unwrap();
+        let mut at = start;
+        for &size in &sizes[sample..sample + run[1]] {
+            f[at..at + size].fill(0);
+            at += size;
+        }
+        sample += run[1];
+    }
+    assert_eq!(sample, sizes.len());
+    std::fs::write(path, &f).unwrap();
 }

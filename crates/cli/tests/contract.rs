@@ -1726,6 +1726,7 @@ fn only_frame_handles_sigint() {
 /// `camera` a name and gains `camera_detail`; both gain `lenses`,
 /// `calibration` (with the snapshot's hash), `companion`,
 /// `exposure_entries` and `records`, as `docs/cli-json.md` gives them.
+/// Each pairs a master and an LRV a frame short by name only.
 #[test]
 fn probe_pins_the_camera_shapes() {
     let started = Instant::now();
@@ -1887,19 +1888,24 @@ fn probe_pins_the_camera_shapes() {
     // camera's five are added for a camera's file, and a plain file's
     // summary is as it was.
     std::fs::copy(&plain, dir.join("plain.mp4")).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
-        .args([
-            "call",
-            "probe",
-            &serde_json::json!({"files": [insv::MASTER, insv::LRV, "plain.mp4"]}).to_string(),
-            "--read-root",
-        ])
-        .arg(&dir)
-        .env_remove("SPHERECUT_LOG")
-        .output()
-        .unwrap();
-    let doc = document(&out.stdout);
-    assert_eq!(out.status.code(), Some(0), "{doc}");
+    // The agent's `probe` of `files` beneath the one root `root`.
+    let call_probe = |root: &Path, files: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+            .args([
+                "call",
+                "probe",
+                &serde_json::json!({ "files": files }).to_string(),
+                "--read-root",
+            ])
+            .arg(root)
+            .env_remove("SPHERECUT_LOG")
+            .output()
+            .unwrap();
+        let doc = document(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{doc}");
+        doc
+    };
+    let doc = call_probe(&dir, &[insv::MASTER, insv::LRV, "plain.mp4"]);
     let files = &doc["result"]["files"];
     let summary_old = [
         "file",
@@ -1940,6 +1946,25 @@ fn probe_pins_the_camera_shapes() {
     assert_eq!(m["exposure_entries"], insv::FRAMES);
     assert_eq!(m["records"], files_records(&master.layout));
     assert!(l.get("lenses").is_none(), "{l}");
+    // The agent's control: the master whose LRV is a frame short, and
+    // that LRV, both opened beneath the root, are paired by name only,
+    // each naming the other, so the agent compares the two files and
+    // not a file with itself.
+    let doc = call_probe(&other, &[insv::MASTER, insv::LRV]);
+    let files = &doc["result"]["files"];
+    let why = "their exposure records (4) differ in size: 96 bytes in the master, 80 in the LRV";
+    for (f, path) in [(&files[0], insv::LRV), (&files[1], insv::MASTER)] {
+        let c = &f["companion"];
+        must_fail(
+            "the agent's pair a frame short, verified",
+            c["verified"] == true,
+        );
+        assert_eq!(
+            *c,
+            serde_json::json!({"path": path, "verified": false, "why": why}),
+            "{f}"
+        );
+    }
     eprintln!(
         "probe_pins_the_camera_shapes: {:.1} s",
         started.elapsed().as_secs_f64()
