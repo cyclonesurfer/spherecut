@@ -895,6 +895,36 @@ its real-time decode keeps no more than the decoder's surfaces ahead
 runs had memory to spare, so they don't show the copy path's slump.
 `zero_copy_matches_copy_path` passed 10 of 10 meanwhile.
 
+Ninth run, M3.1's pair decode:
+[`hw-reports/odin-0444568-k1k3.log`](../hw-reports/odin-0444568-k1k3.log)
+at 0444568 (branch `m3/decode`, over Remote Control), 2026-11-01 (PR
+#27). `bench_export_pair_decode` on clip 9 (the X5's 8K30, 2×3840²),
+600 frames a lens, in 1131 s; MemFree read 0 GB before it, with about
+44 GB of page cache. K1, beside a VA-API H.264 encode of a 3840×2160
+frame at 30 fps, the slower lens's fps (runs; median):
+
+| Path | Serial | A thread a lens |
+|---|---:|---:|
+| Vulkan Video download | 33.2, 33.2, 33.1; 33.2 | 32.0, 32.0, 31.9; 32.0 |
+| VA-API download | 18.5, 18.4, 18.5; 18.5 | 14.2, 14.3, 14.1; 14.2 |
+| Software | 13.6 | 13.8 |
+
+K1 is Redirect 2 (M3 plan 4.3): no setup reaches 36 fps a lens. K3, the
+same clip alone, each run in a child process of its own, peak RSS
+growth in MiB:
+
+| Path | Lens 0 alone | Pair, serial | Pair, a thread a lens | Pass at 2.2 × lens 0 |
+|---|---:|---:|---:|---:|
+| VA-API download | 246 | 422 | 443 | 542 |
+| Vulkan Video download | 225 | 410 | 406 | 496 |
+| Software | 1230 | 2451 | 2451 | 2705 |
+
+K3 passes on every path; each pair run had 10 frames alive at its peak
+(211 MiB), lens 0 alone 5. In those runs alone, Vulkan Video decoded
+one lens at 155 fps and the pair at 78 to 79 a lens; VA-API's lens 0
+alone at 28.6 and the serial pair's slower lens at 41.3, with a thread
+a lens at 12.9, which isn't explained yet.
+
 ### Framework 13 Pro (Intel Xe3, Arch)
 
 Not available yet.

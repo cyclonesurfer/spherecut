@@ -291,9 +291,8 @@ testkit's tests 0.06 s.
 ### M3.1, pair decode (2026-11-01)
 
 Branch `m3/decode`: units (a) and (b) with a reviewer each, and (c),
-huginn's prompt. K1 and K3 come from odin's run (below, when it
-reports); K2 and K4 wait for huginn's paste and go into perf.md
-whenever it comes.
+huginn's prompt. K1 and K3 come from odin's run (PR #27, below); K2
+and K4 wait for huginn's paste and go into perf.md whenever it comes.
 
 - **(a) The pair's files.** `synth::code` writes a corner code in each
   corner of a lens frame (a block of side s/12: 16 frame bits, the lens
@@ -340,8 +339,35 @@ off, IDR_W_RADL, with TSA_N on every other picture at 5.7K60 and
 needs B-frames), so the pairs say where they differ; K3's "twice the
 one-lens run, plus 10 %" is read as 2.2 × lens 0's growth, measured
 without the encode; K2's engine half is every full unthrottled second
-of VA-API copied at 36 fps a lens or more. D52's update is drafted and
-waits for odin's K1.
+of VA-API copied at 36 fps a lens or more. D52's update is recorded
+(below).
+
+**odin's K1 and K3** (PR #27, at 0444568, over Remote Control; clip
+9, 600 frames a lens; the K lines go to the bench file, so the PR
+carries them):
+- **K1: Redirect 2.** Beside a 4K30 VA-API H.264 encode, the slower
+  lens's median of three: Vulkan Video download 33.2 fps a lens serial
+  and 32.0 a thread a lens; VA-API download 18.5 and 14.2; software
+  13.6 and 13.8. Every run was within 0.1 fps of its median. No setup
+  reaches 36, so M3.11b opens (D52's update): until it lands, pairs
+  decode on Vulkan Video download, serially, at real time with a 10 %
+  margin on odin. Alone, Vulkan Video's pair runs 78 to 79 fps a lens
+  and one lens 155, the same pixel rate, so the video engine the
+  encoder shares looks like the limit, not the copy: M3.11b first
+  measures path B's decode beside the encode, since its done-when (the
+  decode under 25 ms a pair) may not be reachable on odin's engine.
+- **K3: Pass on every path.** The pair's peak RSS growth against 2.2 ×
+  lens 0 alone: VA-API 422 MiB serial and 443 a thread a lens against
+  2.2 × 246 = 542; Vulkan Video 410 and 406 against 496; software 2451
+  and 2451 against 2705. At each peak 10 frames were alive, 211 MiB
+  (221 MB) of the growth; lens 0 alone held 5, 105 MiB.
+- **Unexplained:** in K3's runs alone, VA-API's lens 0 decoded at 28.6
+  fps while the serial pair's slower lens reached 41.3, and a thread a
+  lens was slowest at 12.9. MemFree read 0 GB before the run (44 GB of
+  page cache), and the eighth run's huge-page compaction is the first
+  suspect (a guess, not measured). The perf clips' run repeats the
+  rows; odin's `pkg-config` has no x265 file, so the report records
+  libavcodec 62.28.103 instead.
 
 **The reviews found** that both lenses of every perf pair had the same
 noise (the seeds were s and s + 1, and the noise generator makes its
