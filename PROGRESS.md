@@ -288,6 +288,122 @@ over 111 test binaries against 108; the `track_timing` suite 0.07 s at
 `samples_x5_tracks_equal` 0.44 s warm; `agents.rs` 7 tests in 4.8 s;
 testkit's tests 0.06 s.
 
+### M3.3, lens maths (2026-11-01)
+
+Branch `m3/lens`: the types the units share first, then (a) and (c)
+side by side in worktrees of their own, then (b), which merged them;
+a reviewer each.
+
+- **(a) The unified model.** `sphere::fisheye` gains `Unified` (Mei:
+  ξ, focal lengths, centre, and `Canonical`'s 13 distortion terms read
+  under any of the 21 `V6Reading`s), `KbLens` and `LensModel`, each
+  with forward, inverse and `limit_theta`. The inverse lifts through ξ
+  and runs Newton inside a bracket (a step that leaves it, or fails to
+  halve, falls back to bisection); a pass whose radial target lies past
+  r(limit) takes the bracket's top instead of failing.
+  `unproject_within(px, limit)` takes a limit found once. `KbLens`
+  undoes its base in closed form and runs Newton on θ_d(θ) only.
+- **(c) synth's lens camera.** `synth::lens` renders a lens from its
+  own truth (`TruthModel`: Mei, and KB on four bases; `RigTruth` with a
+  ground plane, turns, late frames and a rolling-shutter readout).
+  `compose` builds a rig's truth, `x5_like()` the X5-like V3 pair,
+  `render_lens` supersamples in display values as `render_view_ideal`
+  does (with a cache), and `lens_planes` codes to 4:2:0 at the X5's
+  siting. `Pattern::SeamLines` is 4.2's exposure scene, every channel
+  within 0.05 to 0.8, so 4.2's exposure control doesn't clip it.
+  `bench_render_lens_x5_like_pair` is a CPU Tier 2 bench.
+- **(b) The rig.** `sphere::rig`: `Geometry` and its spaces (binding,
+  canvas map A, B, C or fitted, the 1152 Euler conventions, turn axis,
+  tz sign, upright, generation, V6 reading); `Calibration` as sphere's
+  own type, which M3.5's camera crate fills; `Tune`; `Rig::build`,
+  which composes lens_from_rig_b = E_b·F·Q_tune_bᵀ·T_b·S and refuses a
+  θ_max past `limit_theta`; `ray`, `texel`, `weights` (the margin, the
+  h shrink, never below 0.5°), `covers`, `feather_at`, `unproject`; and
+  `theta_frame`, a Brent search along each slot edge. `Rig.lenses` go
+  by calibration block, with `RigLens.track` set by the binding.
+  synth's types become sphere's only at the test's boundary, field by
+  field, and rung 0 runs on 14 truth models.
+
+**Settled by the slice** (for the plan's next amendment):
+- `limit_theta` on Pat's V3 and V6 is 120.000°, the projection's own
+  fold at ξ = 2 (acos(−1/2)); the polynomials alone fold later. 6.1's
+  120.1° is unexplained, and left open.
+- The inverse's passes to 119°: at most 6 on Pat's V3, 7 on V6 read
+  through every term, 9 under any reading; 6.3's scaled draws take 12
+  to 15 (bounded at 16), not "at most 10". Three passes leave 3.9e-7
+  to 4.8e-6 rad at θ ≤ 100° (6.1 said 1.3e-7 to 2.1e-6), so 6.3's
+  1e-7 still refuses three passes.
+- A lens on which the slope test can't rule out a fold scans for its
+  limit on every `unproject`: every `KbLens`, ξ ≤ 1 with a negative
+  term, and Pat's own below ξ ≈ 1.96 (V3) or 1.98 (V6), which 8.7's
+  ξ delta can reach. Hence `unproject_within`; `Rig` finds each lens's
+  limit once.
+- Amendment 3's open points: `TzSign::Negated` negates all of t_1, so
+  Negated at q is AsStored at −q; the placeholder `EulerConv` is axes
+  (y, x, z), yaw-pitch-roll, all signs +, roll offset −90° (11.1's
+  JSON), within 1° of the identity on Pat's angles (tested).
+- The types as built: `RigLens` gains `theta_frame` and `side`;
+  `Calibration { src, dst, v3, v6 }` of `LensCalib` (cx local to its
+  square) and `CalibTerms`; `Extrinsics::Fitted { relative,
+  translation_m }` with E_0 the identity; `Tune::default` is a 5°
+  feather and q = 0.5 m⁻¹ (2 m, question 3's recommendation, which Pat
+  hasn't answered), `LensTune::default` θ_max 100°; margin(lod) =
+  `margin_texels`·2^lod. A positive tune yaw swings a lens's axis to
+  its own right, as 6.2 says (now tested by hand).
+- θ_frame on Pat's V6 under A: 99.057° and 99.243° radial-only (6.2's
+  99.1° is this reading's), 99.037° and 98.930° through every term;
+  under C, 100.54/100.74° and 100.53/100.42°. On V3: 100.15/99.44°
+  under A, 101.68/100.92° under C. The feather's bound on Pat's V6
+  under A is h = 9.057°. 10.3's WGSL needs θ_frame per lens and the h
+  shrink: h ≥ 0.5° and h ≤ min(θ_max, θ_frame) − 90° less the margin.
+- The X5-like truth's r(106°) is 393 to 399 px under C at 768² (4.2
+  said 395), and the corner block's bound about 97 px, not 100.
+  `render_lens` of the pair at 768², ss 2, takes 0.49 s on 4 threads
+  (4.2 guessed about 2 s).
+- 4.2 calls the X5-like rig V3, but its rung-1 control "the wrong V6
+  reading", 10.5's `dfish_seam_registration` and 8.5's hard
+  neighbours need V6 terms: M3.4 needs a public V6 X5-like
+  calibration (Pat's V6 lives only in synth's private tests).
+- Grid's 1.0 lines clip under 4.2's exposure control (lens 1 at
+  +0.5 EV), so rung 1's step check leaves out samples that clip on
+  either lens, or runs on SeamLines only.
+- To join with M3.1 at merge: `render_lens` calls `synth::code`'s
+  `check_clear` hook for the corner codes; Grid's back-hemisphere code
+  (7.1) is not done.
+
+**Open, for M3.4's `validate`:** a feather h under the parallax angle
+(90° + atan(q·b/2)) leaves a black seam at high q; a 30° relative tilt
+passes `validate` but leaves 374 of 3600 horizon directions unweighed;
+a θ_max of 85 to 90° leaves no valid feather; a radius scale above
+about 1.09 (A) puts θ_frame under 90° on Pat's V6; `Fitted { scale:
+1.0 }` is exactly C.
+
+**The reviews found** that the pass-count bounds could not fail (now
+each count is checked against the work, k passes meet 1e-12 and k − 1
+don't, with controls on the bounds of 7, 9 and 16), that every
+`unproject` searched for the lens's limit again (`unproject_within`),
+that SeamLines' brightest values clipped under 4.2's exposure control
+(now at most 0.8), and that nothing pinned the tune's sign
+(`rig_tune_turns_each_lens_as_seen`, by hand, with the sign flipped
+and block 1's tune taken in the rig frame as controls).
+
+**Controls that must fail**, among them: the wrong V6 reading (7.88 px
+off against synth; 7.86 px and 2.21° in rung 0); pairing the lenses by
+block under Reversed (179.6°); tz crossed (31.53 mm); equidistant read
+from Mei data (738.5 px); the tune's sign flipped (0.35 in a matrix
+element); the frame term off (172 directions weigh outside).
+
+Measured, on the cloud box (debug, sphere and synth at opt-level 3):
+at 100k cases `rig.rs` 12.4 s, `unified.rs` 5.3 s and
+`lens_against_sphere.rs` 4.4 s, about 22 s of 4.4's 30 s; against
+synth, all 4224 small-enum values agree within 4.9e-16 rad, 1.4e-17 m
+and 2.5e-13 px, and 100k random draws within 7.5e-16 rad, 5.1e-17 m
+and 1.9e-12 px; rung 0 within 8.2e-13 px and 4.3e-12 rad on every
+model (orthographic KB to 87.18°, 1° inside its limit); the 1152 Euler
+conventions fall into 640 groups, every common rotation a quarter turn
+about Z (640 exact twins, 128 near twins at 0.054° on V3 and 0.265° on
+V6); `Rig::build` 16 µs.
+
 ## A2: edit and render for agents
 
 An agent can make a project of a video, read it, edit it, undo its own
