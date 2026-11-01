@@ -30,7 +30,7 @@ use spherecut_sphere::fisheye::{
     Canonical, F, KbLens, Lens, LensModel, Model, PairOrder, Prism, PrismAt, PrismOrder,
     Tangential, Unified, V6Reading,
 };
-use spherecut_testkit::control::{at_most, below, must_fail};
+use spherecut_testkit::control::{Comparison, above, at_most, below, must_fail};
 
 /// The suite's budget in seconds, at 100,000 cases, shared as the module
 /// doc says.
@@ -220,9 +220,114 @@ fn radial_only(lens: &Unified) -> Unified {
     }
 }
 
-/// r(θ) of a lens: the radial curve's plane radius at θ.
+/// r(θ) of a lens: the radial curve's plane radius at θ, along +x and
+/// signed, so that a curve the polynomial carries back through the
+/// centre reads as falling, not rising again.
 fn radius(lens: &Unified, theta: f64) -> f64 {
-    radial_only(lens).project(dir(theta, 0.0)).unwrap().length()
+    radial_only(lens).project(dir(theta, 0.0)).unwrap().x
+}
+
+/// How far either side of a limit the radius is compared with the
+/// radius at the limit: 0.01°, in radians.
+const NEAR: f64 = 0.01 * PI / 180.0;
+
+/// The radius 0.01° past θ against the radius at θ: below it once the
+/// curve has folded at θ.
+fn falls_past(lens: &Unified, theta: f64) -> Comparison<f64> {
+    below(radius(lens, theta + NEAR), radius(lens, theta))
+}
+
+/// The radius at θ against the radius 0.01° short of it: above it while
+/// the curve still rises at θ.
+fn rose_to(lens: &Unified, theta: f64) -> Comparison<f64> {
+    above(radius(lens, theta), radius(lens, theta - NEAR))
+}
+
+/// How many of the draws had a limit at least 0.01° short of the model's
+/// own end, where the polynomial folds first, so that `radius_rises_cases`
+/// held the radius to fall past it.
+static FOLDED: AtomicU32 = AtomicU32::new(0);
+
+/// A `KbLens` on `base` with the polynomial `k`, at unit focal, no offset
+/// and no other terms: its pixels are its plane points.
+fn kb_bare(base: Model, k: [f64; 5]) -> KbLens {
+    KbLens {
+        base,
+        k,
+        fx: 1.0,
+        fy: 1.0,
+        cx: 0.0,
+        cy: 0.0,
+        p: [0.0; 2],
+        pe: [0.0; 2],
+        s: [0.0; 4],
+    }
+}
+
+/// θ_d = θ (1 + k1 θ² + k2 θ⁴ + k3 θ⁶ + k4 θ⁸ + k5 θ¹⁰), worked from 6.1's
+/// text.
+fn kb_poly(k: [f64; 5], t: f64) -> f64 {
+    t * (1.0
+        + k[0] * t.powi(2)
+        + k[1] * t.powi(4)
+        + k[2] * t.powi(6)
+        + k[3] * t.powi(8)
+        + k[4] * t.powi(10))
+}
+
+/// A base's plane radius at θ_d, as `fisheye::Model` names them.
+fn base_of(base: Model, t: f64) -> f64 {
+    match base {
+        Model::Equidistant => t,
+        Model::Equisolid => 2.0 * (t / 2.0).sin(),
+        Model::Stereographic => 2.0 * (t / 2.0).tan(),
+        Model::Orthographic => t.sin(),
+    }
+}
+
+/// The θ_d past which a base images nothing: 90° for orthographic, 180°
+/// for equisolid and stereographic, and nowhere for equidistant.
+fn base_end(base: Model) -> f64 {
+    match base {
+        Model::Equidistant => f64::INFINITY,
+        Model::Equisolid | Model::Stereographic => PI,
+        Model::Orthographic => FRAC_PI_2,
+    }
+}
+
+/// The plane radius of a lens `kb_bare` made at θ, along +x and signed
+/// as [`radius`] is, or `None` where it has no image.
+fn kb_radius(lens: &KbLens, theta: f64) -> Option<f64> {
+    lens.project(dir(theta, 0.0)).map(|px| px.x)
+}
+
+/// [`falls_past`] for a lens `kb_bare` made.
+fn kb_falls_past(lens: &KbLens, theta: f64) -> Comparison<f64> {
+    below(
+        kb_radius(lens, theta + NEAR).unwrap(),
+        kb_radius(lens, theta).unwrap(),
+    )
+}
+
+/// [`rose_to`] for a lens `kb_bare` made.
+fn kb_rose_to(lens: &KbLens, theta: f64) -> Comparison<f64> {
+    above(
+        kb_radius(lens, theta).unwrap(),
+        kb_radius(lens, theta - NEAR).unwrap(),
+    )
+}
+
+/// How many of the KB draws had a limit at least 0.01° short of the back
+/// axis, so that `kb_radius_rises_cases` held the radius to fall past it.
+static KB_FOLDED: AtomicU32 = AtomicU32::new(0);
+
+/// A check that something has no image, as `must_fail` reads it: `Ok`
+/// for `None`, and the image it has as the error.
+fn no_image<T>(image: Option<T>) -> Result<(), T> {
+    match image {
+        None => Ok(()),
+        Some(v) => Err(v),
+    }
 }
 
 /// The passes the inverse reports for a plane point 1% past the radial
@@ -572,6 +677,14 @@ proptest! {
             prop_assert!(r > last, "r falls at {}° of a limit of {}°", theta.to_degrees(), limit.to_degrees());
             last = r;
         }
+        // Where the polynomial folds short of the model's own end, the
+        // curve has fallen 0.01° past the limit, so a limit found early,
+        // where it still rises, fails here.
+        if limit + NEAR < end_theta(w.lens.xi) - 1e-9 {
+            FOLDED.fetch_add(1, Ordering::Relaxed);
+            let falls = falls_past(&w.lens, limit);
+            prop_assert_eq!(falls.passes(), Some(true), "{} at a limit of {}°", falls, limit.to_degrees());
+        }
     }
 
     fn none_past_limit_cases(w in draw(), beyond in 1e-6f64..=1.0, spot in (-1.6f64..=1.6, -1.6f64..=1.6)) {
@@ -624,14 +737,14 @@ proptest! {
     }
 
     fn kb_round_trip_cases(
-        base in prop_oneof![Just(Model::Equidistant), Just(Model::Equisolid), Just(Model::Stereographic), Just(Model::Orthographic)],
-        k in (-0.05f64..=0.05, -0.01f64..=0.01, -0.002f64..=0.002, -5e-4f64..=5e-4, -1e-4f64..=1e-4),
+        base in kb_base(),
+        k in kb_k(),
         terms in uniform8(-1.0f64..=1.0),
         (fx, aspect, cx, cy) in (800.0f64..=1200.0, -0.001f64..=0.001, 900.0f64..=1100.0, 900.0f64..=1100.0),
         along in 0.0f64..=1.0,
         phi in -PI..PI,
     ) {
-        let bare = KbLens { base, k: [k.0, k.1, k.2, k.3, k.4], fx: 1.0, fy: 1.0, cx: 0.0, cy: 0.0, p: [0.0; 2], pe: [0.0; 2], s: [0.0; 4] };
+        let bare = kb_bare(base, k);
         let top = 100f64.to_radians().min(bare.limit_theta() - 1f64.to_radians());
         // The tangential and prism terms move the plane point at the top
         // of the range by up to 2e-3 of its radius for those of degree 2
@@ -666,6 +779,56 @@ proptest! {
         let err = angle_between(within.unwrap(), d);
         prop_assert!(err <= ANGLE_TOL, "{err:e} rad off within the top");
     }
+
+    fn kb_radius_rises_cases(base in kb_base(), k in kb_k()) {
+        let lens = kb_bare(base, k);
+        let limit = lens.limit_theta();
+        let mut last = 0.0;
+        for i in 1..=256 {
+            // A hair short of the limit at the last step, which may be
+            // the back axis, where there is no plane point.
+            let theta = limit * (f64::from(i) / 256.0).min(1.0 - 1e-12);
+            let r = kb_radius(&lens, theta);
+            prop_assert!(r.is_some_and(|r| r > last), "r is {r:?} at {}° of a limit of {}°", theta.to_degrees(), limit.to_degrees());
+            last = r.unwrap();
+        }
+        // Short of the back axis, 0.01° past the limit the radius has
+        // fallen where the polynomial folded, and there is no image where
+        // the base's own ended.
+        if limit + NEAR < PI {
+            KB_FOLDED.fetch_add(1, Ordering::Relaxed);
+            let past = limit + NEAR;
+            if kb_poly(k, past) > base_end(base) {
+                prop_assert_eq!(lens.project(dir(past, 0.0)), None, "past the base's end at {}°", past.to_degrees());
+            } else {
+                let falls = kb_falls_past(&lens, limit);
+                prop_assert_eq!(falls.passes(), Some(true), "{} at a limit of {}°", falls, limit.to_degrees());
+            }
+        }
+    }
+}
+
+/// The four bases.
+fn kb_base() -> impl Strategy<Value = Model> {
+    prop_oneof![
+        Just(Model::Equidistant),
+        Just(Model::Equisolid),
+        Just(Model::Stereographic),
+        Just(Model::Orthographic),
+    ]
+}
+
+/// k1 to k5 for a KB lens: small enough that most draws rise to 100°,
+/// large enough that most fold before the back axis.
+fn kb_k() -> impl Strategy<Value = [f64; 5]> {
+    (
+        -0.05f64..=0.05,
+        -0.01f64..=0.01,
+        -0.002f64..=0.002,
+        -5e-4f64..=5e-4,
+        -1e-4f64..=1e-4,
+    )
+        .prop_map(|(k1, k2, k3, k4, k5)| [k1, k2, k3, k4, k5])
 }
 
 /// unproject(project(d)) is within 1e-7 rad of d for ξ in [0, 2.5] and
@@ -765,11 +928,15 @@ fn unified_is_tan_at_xi_0_and_tan_half_at_xi_1() {
     );
 }
 
-/// r(θ) rises all the way up to limit_theta.
+/// r(θ) rises all the way up to limit_theta, and where the polynomial
+/// folds first, falls just past it.
 #[test]
 fn unified_radius_rises_up_to_limit_theta() {
     let _time = timed("unified_radius_rises_up_to_limit_theta");
     radius_rises_cases();
+    let folded = FOLDED.load(Ordering::Relaxed);
+    eprintln!("{folded} of {} draws fold before the model's end", cases());
+    assert!(folded > 0, "no draw folds, so nothing was held to fall");
     // Control: a polynomial that folds at 45° (ξ = 0, k1 = −1/3), held to
     // rise up to the model's own end, 90°, short by a degree.
     let folds = Unified {
@@ -791,6 +958,12 @@ fn unified_radius_rises_up_to_limit_theta() {
     };
     assert!(rises_to(folds.limit_theta()));
     must_fail("the end taken for the limit", rises_to(89f64.to_radians()));
+    // Control on the fall: a limit found a scan step early, 0.05° short
+    // of the fold, where the curve still rises.
+    must_fail(
+        "a limit a scan step early",
+        falls_past(&folds, folds.limit_theta() - 0.05f64.to_radians()),
+    );
 }
 
 /// unproject is `None` past limit_theta.
@@ -826,12 +999,42 @@ fn unified_unproject_is_none_past_limit_theta() {
         flat.unproject_within(past_100, limit),
         flat.unproject(past_100)
     );
+    // A limit past the model's own end, 120° here, is the end, ∞ among
+    // them (whose sine is NaN): a pixel 1% past the edge has no
+    // direction, and one a millionth inside it has unproject's.
+    let inside = edge * (1.0 - 1e-6);
+    let past = edge * 1.01;
+    for given in [2.5, f64::INFINITY] {
+        assert_eq!(flat.unproject_within(past, given), None, "given {given}");
+        assert_eq!(
+            flat.unproject_within(inside, given),
+            flat.unproject(inside),
+            "given {given}"
+        );
+    }
+    // Controls: given ∞, the pixel inside the edge has a direction, and
+    // given 100° it has none, so each check can fail.
+    must_fail(
+        "a pixel inside the edge given ∞",
+        flat.unproject_within(inside, f64::INFINITY).is_none(),
+    );
+    must_fail(
+        "the pixel inside the edge given 100°",
+        flat.unproject_within(inside, 100f64.to_radians()) == flat.unproject(inside),
+    );
 }
 
 /// limit_theta is acos(−1/ξ) for ξ > 1 (120° at ξ = 2), acos(−ξ) for
-/// ξ ≤ 1 (90° at ξ = 0), or earlier where the polynomial folds first. On
-/// Pat's V3 and V6 the projection's own fold comes first, 120.0° at
-/// ξ = 2; 6.1's 120.1° for V6 is an open question.
+/// ξ ≤ 1 (90° at ξ = 0), or earlier where the polynomial folds first,
+/// even within the scan's last step, short of the end.
+///
+/// On Pat's V3 and V6 the projection's own fold comes first, at exactly
+/// 120°. dr/dθ is the polynomial's slope in m times dm/dθ = (1 + ξ cos θ)/
+/// (cos θ + ξ)², whose numerator changes sign at acos(−1/ξ), 120° at
+/// ξ = 2, whatever the polynomial, so long as the polynomial's slope is
+/// positive there: 1.41 to 1.50 on Pat's four blocks at m² = 1/3. So r
+/// peaks at 120°, and 6.1's 120.1° is what a scan in 0.1° steps reports,
+/// its first sample past the peak.
 #[test]
 fn unified_limit_theta_is_where_the_model_folds() {
     let _time = timed("unified_limit_theta_is_where_the_model_folds");
@@ -857,7 +1060,10 @@ fn unified_limit_theta_is_where_the_model_folds() {
     // the curve's slope 1 + 3 k1 m² is 0 at m = 1 for k1 = −1/3, which is
     // 45° at ξ = 0 (m = tan θ) and 90° at ξ = 1 (m = tan θ/2); with
     // R = 1 − r⁴/5 the slope 1 − m⁴ is 0 at m = 1 too, where
-    // sin θ − cos θ = 1/2 at ξ = 1/2: θ = 45° + asin(1/(2√2)).
+    // sin θ − cos θ = 1/2 at ξ = 1/2: θ = 45° + asin(1/(2√2)). At m = 1,
+    // m, m² and m⁴ agree, so the last fold is away from it: with
+    // k1 = −1/12 the slope 1 − m²/4 is 0 at m = 2, θ = atan 2 = 63.435° at
+    // ξ = 0.
     let folds = [
         (
             lens(0.0, [-1.0 / 3.0, 0.0, 0.0, 0.0, 0.0]),
@@ -868,11 +1074,8 @@ fn unified_limit_theta_is_where_the_model_folds() {
             lens(0.5, [0.0, -0.2, 0.0, 0.0, 0.0]),
             45f64.to_radians() + (0.5 / 2f64.sqrt()).asin(),
         ),
+        (lens(0.0, [-1.0 / 12.0, 0.0, 0.0, 0.0, 0.0]), 2f64.atan()),
     ];
-    // The radius at θ + 0.01° against the radius at θ: below it once
-    // the curve has folded.
-    let falls_after =
-        |l: &Unified, theta: f64| below(radius(l, theta + 0.01f64.to_radians()), radius(l, theta));
     for (l, at) in &folds {
         let limit = l.limit_theta();
         assert!(
@@ -881,9 +1084,51 @@ fn unified_limit_theta_is_where_the_model_folds() {
             limit.to_degrees(),
             at.to_degrees()
         );
-        assert!(radius(l, limit) > radius(l, limit - 0.01f64.to_radians()));
-        assert_eq!(falls_after(l, limit).passes(), Some(true));
+        assert_eq!(rose_to(l, limit).passes(), Some(true));
+        assert_eq!(falls_past(l, limit).passes(), Some(true));
     }
+    // Controls on the fold at m = 2: where a scan reading the slope at m⁴
+    // would put it, m = √2 (54.7°), the curve still rises, and where one
+    // reading it at m would, m = 4 (76.0°), it has long fallen.
+    let (l, _) = &folds[3];
+    must_fail("the fold read at m⁴", falls_past(l, 2f64.sqrt().atan()));
+    must_fail("the fold read at m", rose_to(l, 4f64.atan()));
+    // A fold in the scan's last step, between its last sample, a whole
+    // number of 0.05° steps, and the end: k1 = −1/(3 m²) puts it at the
+    // plane radius m of θ. At ξ = 2 it is 119.98°, between 119.95° and
+    // 120°, where m is so flat that only the limit can be held; at ξ = 0
+    // it is 89.97°, between 89.95° and 90°, where the curve falls fast.
+    let last_step = |xi: f64, deg: f64| {
+        let m = plane(xi, deg.to_radians());
+        (
+            lens(xi, [-1.0 / (3.0 * m * m), 0.0, 0.0, 0.0, 0.0]),
+            deg.to_radians(),
+        )
+    };
+    for (xi, deg) in [(2.0, 119.98), (0.0, 89.97)] {
+        let (l, at) = last_step(xi, deg);
+        let limit = l.limit_theta();
+        assert!(
+            (limit - at).abs() < 1e-9,
+            "ξ {xi}: {}° for {deg}°",
+            limit.to_degrees()
+        );
+        // Control: the model's end, which a scan that stopped at its last
+        // sample would give, 0.02° or 0.03° off.
+        let off = must_fail(
+            "the end taken for the limit",
+            at_most((end_theta(xi) - at).abs(), 1e-9),
+        );
+        assert!(off > 0.01f64.to_radians());
+    }
+    let (l, at) = last_step(0.0, 89.97);
+    assert_eq!(rose_to(&l, at).passes(), Some(true));
+    assert_eq!(falls_past(&l, at).passes(), Some(true));
+    // Control: a hair short of 90°, the curve has fallen.
+    must_fail(
+        "the end taken for the limit, at ξ = 0",
+        rose_to(&l, FRAC_PI_2 * (1.0 - 1e-12)),
+    );
     // Pat's lenses: the curve stops rising where the projection folds,
     // 120.0° at ξ = 2. The polynomial alone would fold later, at the
     // plane radius where ξ = 0's limit puts it.
@@ -912,7 +1157,7 @@ fn unified_limit_theta_is_where_the_model_folds() {
     let (l, at) = &folds[0];
     must_fail(
         "0.1° short of the fold",
-        falls_after(l, at - 0.1f64.to_radians()),
+        falls_past(l, at - 0.1f64.to_radians()),
     );
 }
 
@@ -1192,6 +1437,200 @@ fn kb_lens_unproject_inverts_project() {
     );
     let back = lens.unproject_within(px, limit).unwrap();
     assert!(angle_between(back, at_81) <= ANGLE_TOL);
+    // A limit past the model's own end, the back axis, is the end, ∞
+    // among them: on an undistorted equidistant base, whose image ends at
+    // r = π, a pixel at r = 3.5 has no direction given 4 rad or ∞, where
+    // θ = 3.5 would pass the back axis and come back turned half way
+    // round.
+    let plain = kb_bare(Model::Equidistant, [0.0; 5]);
+    for given in [4.0, f64::INFINITY] {
+        assert_eq!(
+            plain.unproject_within(DVec2::new(3.5, 0.0), given),
+            None,
+            "given {given}"
+        );
+    }
+    // Control: inside the image, r = 3 has its direction given ∞, 3 rad
+    // off the axis along +x.
+    let back = must_fail(
+        "a pixel inside the image given ∞",
+        no_image(plain.unproject_within(DVec2::new(3.0, 0.0), f64::INFINITY)),
+    );
+    assert!(angle_between(back, dir(3.0, 0.0)) <= ANGLE_TOL);
+}
+
+/// A `KbLens`'s radius rises all the way up to its limit_theta, and short
+/// of the back axis falls just past it, or has no image past the base's
+/// own end.
+#[test]
+fn kb_lens_radius_rises_up_to_limit_theta() {
+    let _time = timed("kb_lens_radius_rises_up_to_limit_theta");
+    kb_radius_rises_cases();
+    let folded = KB_FOLDED.load(Ordering::Relaxed);
+    eprintln!(
+        "{folded} of {} KB draws stop rising before the back axis",
+        cases()
+    );
+    assert!(folded > 0, "no draw folds, so nothing was held to fall");
+    // Controls, on a polynomial that folds at 104.6°: the back axis taken
+    // for the limit, past the fold, and a limit found a scan step early,
+    // where the radius still rises.
+    let folds = kb_bare(Model::Equidistant, [-0.1, 0.0, 0.0, 0.0, 0.0]);
+    let rises_to = |top: f64| {
+        (1..=256).all(|i| {
+            kb_radius(&folds, top * f64::from(i) / 256.0).unwrap()
+                > kb_radius(&folds, top * f64::from(i - 1) / 256.0).unwrap()
+        })
+    };
+    assert!(rises_to(folds.limit_theta()));
+    must_fail(
+        "the back axis taken for the limit",
+        rises_to(PI * (1.0 - 1e-12)),
+    );
+    must_fail(
+        "a limit a scan step early",
+        kb_falls_past(&folds, folds.limit_theta() - 0.05f64.to_radians()),
+    );
+}
+
+/// A `KbLens`'s limit_theta is where θ_d(θ) stops rising, worked by hand,
+/// even within the scan's last step, short of the back axis.
+#[test]
+fn kb_lens_limit_theta_is_where_the_radius_folds() {
+    let _time = timed("kb_lens_limit_theta_is_where_the_radius_folds");
+    // On an equidistant base θ_d = θ + k1 θ³ has the slope 1 + 3 k1 θ²,
+    // which is 0 at θ = 1/√0.3 rad = 104.607° for k1 = −0.1, and at
+    // 179.97° for k1 = −1/(3 θ²) there: between the scan's last sample,
+    // 179.95°, and the back axis.
+    let last = 179.97f64.to_radians();
+    let folds = [
+        (
+            kb_bare(Model::Equidistant, [-0.1, 0.0, 0.0, 0.0, 0.0]),
+            1.0 / 0.3f64.sqrt(),
+        ),
+        (
+            kb_bare(
+                Model::Equidistant,
+                [-1.0 / (3.0 * last * last), 0.0, 0.0, 0.0, 0.0],
+            ),
+            last,
+        ),
+    ];
+    for (l, at) in &folds {
+        let limit = l.limit_theta();
+        assert!(
+            (limit - at).abs() < 1e-9,
+            "{}° for {}°",
+            limit.to_degrees(),
+            at.to_degrees()
+        );
+        assert_eq!(kb_rose_to(l, limit).passes(), Some(true));
+        assert_eq!(kb_falls_past(l, limit).passes(), Some(true));
+    }
+    // Controls: 0.1° short of the first fold the radius still rises, and
+    // a hair short of the back axis, which a scan that stopped at its last
+    // sample would give for the second, it has fallen.
+    must_fail(
+        "0.1° short of the fold",
+        kb_falls_past(&folds[0].0, folds[0].1 - 0.1f64.to_radians()),
+    );
+    must_fail(
+        "the back axis taken for the limit",
+        kb_rose_to(&folds[1].0, PI * (1.0 - 1e-12)),
+    );
+}
+
+/// `KbLens`'s forward, worked by hand on every base with its tangential
+/// and prism terms and two focal lengths: θ_d of θ with k1 to k5, then the
+/// base, then the plane point m = base(θ_d) (x, y)/|(x, y)|, then Brown's
+/// and the prism's terms on m, then (fx xd + cx, fy yd + cy).
+#[test]
+fn kb_lens_forward_is_worked_by_hand() {
+    let _time = timed("kb_lens_forward_is_worked_by_hand");
+    let k = [0.03, -0.01, 2e-3, -4e-4, 5e-5];
+    let [p1, p2] = [1.5e-3, -1.1e-3];
+    let [q1, q2] = [4e-4, -3e-4];
+    let [s1, s2, s3, s4] = [6e-4, -2e-4, -5e-4, 3e-4];
+    let (fx, fy, cx, cy) = (1000.0, 1004.0, 960.5, 951.25);
+    // Brown's terms with their r² extensions and the thin prism, on the
+    // plane point (mx, my), as 6.1 writes them with R = 1.
+    let terms = |mx: f64, my: f64| {
+        let r2 = mx * mx + my * my;
+        let (big_p1, big_p2) = (p1 + q1 * r2, p2 + q2 * r2);
+        DVec2::new(
+            mx + 2.0 * big_p1 * mx * my + big_p2 * (r2 + 2.0 * mx * mx) + s1 * r2 + s2 * r2 * r2,
+            my + 2.0 * big_p2 * mx * my + big_p1 * (r2 + 2.0 * my * my) + s3 * r2 + s4 * r2 * r2,
+        )
+    };
+    let pixel = |xd: DVec2| DVec2::new(fx * xd.x + cx, fy * xd.y + cy);
+    let by_hand = |base: Model, d: DVec3| {
+        let across = d.x.hypot(d.y);
+        let r = base_of(base, kb_poly(k, across.atan2(d.z)));
+        pixel(terms(r * d.x / across, r * d.y / across))
+    };
+    // Control: the terms on θ_d (cos φ, sin φ), before the base, which then
+    // scales the point they moved.
+    let terms_first = |base: Model, d: DVec3| {
+        let across = d.x.hypot(d.y);
+        let theta_d = kb_poly(k, across.atan2(d.z));
+        let moved = terms(theta_d * d.x / across, theta_d * d.y / across);
+        pixel(moved * (base_of(base, moved.length()) / moved.length()))
+    };
+    // Control: the focal lengths swapped.
+    let swapped = |base: Model, d: DVec3| {
+        let px = by_hand(base, d);
+        DVec2::new((px.x - cx) * fy / fx + cx, (px.y - cy) * fx / fy + cy)
+    };
+    let directions: Vec<DVec3> = [3.0f64, 25.0, 50.0, 75.0, 95.0, 110.0]
+        .iter()
+        .flat_map(|&deg| [0.4, 1.7, 2.9, -2.3, -0.8].map(|phi| dir(deg.to_radians(), phi)))
+        .collect();
+    for base in [
+        Model::Equidistant,
+        Model::Equisolid,
+        Model::Stereographic,
+        Model::Orthographic,
+    ] {
+        let lens = KbLens {
+            base,
+            k,
+            fx,
+            fy,
+            cx,
+            cy,
+            p: [p1, p2],
+            pe: [q1, q2],
+            s: [s1, s2, s3, s4],
+        };
+        let (mut worst, mut first, mut swap) = (0.0f64, 0.0f64, 0.0f64);
+        for &d in &directions {
+            // Past the base's own end (θ_d beyond 90° on an orthographic
+            // base, here from 95°) there is no image.
+            if kb_poly(k, theta_of(d)) > base_end(base) {
+                assert_eq!(
+                    lens.project(d),
+                    None,
+                    "{base:?} at {}°",
+                    theta_of(d).to_degrees()
+                );
+                continue;
+            }
+            let px = lens.project(d).unwrap();
+            worst = worst.max((px - by_hand(base, d)).length());
+            first = first.max((px - terms_first(base, d)).length());
+            swap = swap.max((px - swapped(base, d)).length());
+        }
+        assert!(worst <= 1e-9, "{base:?}: {worst:e} px");
+        eprintln!("{base:?}: by hand to {worst:.1e} px");
+        // The equidistant base is the identity, so it can't tell the terms
+        // before it from the terms after.
+        if base != Model::Equidistant {
+            let off = must_fail("the terms before the base", at_most(first, 1e-9));
+            eprintln!("{base:?}: the terms before the base miss by up to {off:.3e} px");
+        }
+        let off = must_fail("fx and fy swapped", at_most(swap, 1e-9));
+        eprintln!("{base:?}: fx and fy swapped miss by up to {off:.3e} px");
+    }
 }
 
 /// `KbLens` applies its base after the polynomial in θ, as
@@ -1246,27 +1685,7 @@ fn kb_lens_applies_its_base_after_the_polynomial() {
     // of (3, 4).
     let k5 = [0.03, -0.01, 2e-3, -4e-4, 5e-5];
     let theta = 70f64.to_radians();
-    let theta_d = theta
-        * (1.0
-            + k5[0] * theta.powi(2)
-            + k5[1] * theta.powi(4)
-            + k5[2] * theta.powi(6)
-            + k5[3] * theta.powi(8)
-            + k5[4] * theta.powi(10));
-    let base_first = |base: Model, t: f64| match base {
-        Model::Equidistant => t,
-        Model::Equisolid => 2.0 * (t / 2.0).sin(),
-        Model::Stereographic => 2.0 * (t / 2.0).tan(),
-        Model::Orthographic => t.sin(),
-    };
-    let poly = |t: f64| {
-        t * (1.0
-            + k5[0] * t.powi(2)
-            + k5[1] * t.powi(4)
-            + k5[2] * t.powi(6)
-            + k5[3] * t.powi(8)
-            + k5[4] * t.powi(10))
-    };
+    let theta_d = kb_poly(k5, theta);
     for base in bases {
         let kb = KbLens {
             base,
@@ -1280,7 +1699,7 @@ fn kb_lens_applies_its_base_after_the_polynomial() {
             s: [0.0; 4],
         };
         let px = kb.project(dir(theta, 0.0)).unwrap();
-        let r = base_first(base, theta_d);
+        let r = base_of(base, theta_d);
         assert!(
             (px - DVec2::new(3.0 + 2.0 * r, 4.0)).length() < 1e-13,
             "{base:?}"
@@ -1288,7 +1707,7 @@ fn kb_lens_applies_its_base_after_the_polynomial() {
         // Control: the base applied before the polynomial, which only the
         // equidistant base, the identity, can't tell.
         if base != Model::Equidistant {
-            let before = poly(base_first(base, theta));
+            let before = kb_poly(k5, base_of(base, theta));
             must_fail(
                 "the base before the polynomial",
                 at_most((px.x - (3.0 + 2.0 * before)).abs(), 1e-9),
@@ -1314,4 +1733,22 @@ fn kb_lens_applies_its_base_after_the_polynomial() {
         ideal(Model::Orthographic).project(dir(91f64.to_radians(), 0.0)),
         None
     );
+    // The back axis, θ = 180°, has no azimuth, so no plane point: the
+    // directions about it land on the rim, a whole circle, never on the
+    // principal point. So it has no image on any base, with or without
+    // the polynomial, as `Unified::project` has none there.
+    for base in bases {
+        for k in [[0.0; 5], k5] {
+            let lens = KbLens { k, ..ideal(base) };
+            assert_eq!(lens.project(DVec3::NEG_Z), None, "{base:?} with {k:?}");
+        }
+    }
+    // Control: a hair off the back axis, the undistorted equidistant base
+    // has an image, on its rim at r = θ.
+    let near = PI - 1e-6;
+    let px = must_fail(
+        "a hair off the back axis",
+        no_image(ideal(Model::Equidistant).project(dir(near, 0.4))),
+    );
+    assert!((px.length() - near).abs() < 1e-9, "{px:?}");
 }

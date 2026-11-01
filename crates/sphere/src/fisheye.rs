@@ -223,7 +223,8 @@ impl Unified {
     /// lens: `limit` is [`Unified::limit_theta`]'s value or any smaller θ
     /// in radians, and the inverse is `None` past it. Past `limit_theta`
     /// the radial curve no longer rises, so a larger `limit` gives the
-    /// bracket no single answer. `None` for a NaN or negative `limit`.
+    /// bracket no single answer. A `limit` past the model's own end, +∞
+    /// among them, is the end. `None` for a NaN or negative `limit`.
     pub fn unproject_within(&self, px: DVec2, limit: f64) -> Option<DVec3> {
         let inv = self.invert_within(px, Self::PASSES, limit)?;
         (inv.residual < Self::RESIDUAL).then(|| self.lift(inv.m))
@@ -255,6 +256,9 @@ impl Unified {
         if !target.is_finite() || limit.is_nan() || limit < 0.0 {
             return None;
         }
+        // Past the end the plane radius turns back for ξ > 1, and the sine
+        // of ∞ is NaN, either of which would leave the bracket's top wrong.
+        let limit = limit.min(self.end_theta());
         let top = self.plane_at(limit);
         let reach = if top.is_finite() {
             self.dist.radial(top)
@@ -319,8 +323,11 @@ impl Unified {
     /// for ξ > 1 (120° at ξ = 2) and acos(−ξ) for ξ ≤ 1 (90° at ξ = 0),
     /// or earlier where the polynomial folds, found by a scan of dr/dθ in
     /// 0.05° steps and bisected within the step where it stops rising.
-    /// r(θ) is the radial curve m R(m²), which the tangential and prism
-    /// terms don't change. `Rig::build` refuses a θ_max beyond it.
+    /// The scan looks at its last step too, from its last sample to the
+    /// end, which ends a hair (1e-12 of it) inside the end for ξ ≤ 1,
+    /// where m has no bound. r(θ) is the radial curve m R(m²), which the
+    /// tangential and prism terms don't change. `Rig::build` refuses a
+    /// θ_max beyond it.
     pub fn limit_theta(&self) -> f64 {
         let end = self.end_theta();
         let xi = self.xi;
@@ -349,7 +356,10 @@ impl Unified {
         // stops rising is bisected with the functions themselves.
         let (sd, cd) = SCAN_STEP.sin_cos();
         let (mut s, mut c) = (0.0, 1.0);
-        let steps = (end / SCAN_STEP).ceil() as u32;
+        // The scan runs up to the end, or a hair inside it for ξ ≤ 1,
+        // where z + ξ vanishes.
+        let tail = if xi > 1.0 { end } else { end * (1.0 - 1e-12) };
+        let steps = (tail / SCAN_STEP).ceil() as u32;
         for k in 1..steps {
             (s, c) = (s * cd + c * sd, c * cd - s * sd);
             let m = s / (c + xi);
@@ -360,6 +370,14 @@ impl Unified {
                     f64::from(k) * SCAN_STEP,
                 );
             }
+        }
+        // The last step, from the loop's last sample to the tail, a whole
+        // step or less. None is left when the tail is a whole number of
+        // steps to the last bit, so that the loop's last sample was the tail
+        // itself.
+        let last = f64::from(steps - 1) * SCAN_STEP;
+        if last < tail && !rises(tail) {
+            return last_rising(rises, last, tail);
         }
         end
     }
@@ -732,6 +750,12 @@ impl PrismOrder {
 /// applies the base after the polynomial; the tangential and prism terms
 /// act on m as [`Canonical`]'s do, and the pixel is (fx xd + cx,
 /// fy yd + cy).
+///
+/// For the shader's copy (10.3): θ is atan2(|(x, y)|, z), never acos(z).
+/// In f32 the largest z under 1 is 1 − 2⁻²⁴, whose acos is already
+/// √(2 · 2⁻²⁴), about 3.5e-4 rad, so acos quantises θ that coarsely near
+/// the axis, where atan2 keeps its digits. (cos φ, sin φ) is
+/// (x, y)/|(x, y)|, and on the axis, where that has no value, m is 0.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KbLens {
     pub base: Model,
@@ -751,18 +775,30 @@ pub struct KbLens {
 
 impl KbLens {
     /// Lens-frame direction to pixel. `None` for a zero or non-finite
-    /// `p`, and where θ_d leaves the base's image: below 0, or past 90°
-    /// for an orthographic base and 180° for an equisolid or
-    /// stereographic one. As with [`Unified::project`], the polynomial's
-    /// own fold is [`KbLens::limit_theta`]'s to find.
+    /// `p`; on the back axis, θ = 180°, which has no azimuth, so that the
+    /// directions about it land all round the rim and none of them is its
+    /// image (as [`Unified::project`] is `None` there at any ξ); and where
+    /// θ_d leaves the base's image: below 0, past 90° for an orthographic
+    /// base, past 180° for an equisolid one, and from 180° on for a
+    /// stereographic one, whose radius is infinite there. As with
+    /// [`Unified::project`], the polynomial's own fold is
+    /// [`KbLens::limit_theta`]'s to find.
     pub fn project(&self, p: DVec3) -> Option<DVec2> {
         let d = p.normalize_or_zero();
         if d == DVec3::ZERO {
             return None;
         }
         let rho = d.x.hypot(d.y);
+        if rho == 0.0 && d.z < 0.0 {
+            return None;
+        }
         let theta_d = self.theta_d(rho.atan2(d.z));
-        if !(theta_d >= 0.0 && theta_d <= self.base_end()) {
+        let images = theta_d >= 0.0
+            && match self.base {
+                Model::Stereographic => theta_d < PI,
+                _ => theta_d <= self.base_end(),
+            };
+        if !images {
             return None;
         }
         let r = self.base_radius(theta_d);
@@ -796,12 +832,17 @@ impl KbLens {
     /// lens: `limit` is [`KbLens::limit_theta`]'s value or any smaller θ
     /// in radians, and the inverse is `None` past it, or for a NaN or
     /// negative `limit`. Past `limit_theta` the polynomial no longer
-    /// rises, so a larger `limit` gives the Newton no single answer.
+    /// rises, so a larger `limit` gives the Newton no single answer. A
+    /// `limit` past the back axis, +∞ among them, is the back axis, where
+    /// a larger θ would turn the direction half way round. The base's own
+    /// end needs no such care: its closed-form inverse gives no θ_d past
+    /// it.
     pub fn unproject_within(&self, px: DVec2, limit: f64) -> Option<DVec3> {
         let target = DVec2::new((px.x - self.cx) / self.fx, (px.y - self.cy) / self.fy);
-        if !target.is_finite() {
+        if !target.is_finite() || limit.is_nan() || limit < 0.0 {
             return None;
         }
+        let limit = limit.min(PI);
         let terms = self.terms();
         let mut m = DVec2::ZERO;
         let mut converged = false;
@@ -827,7 +868,7 @@ impl KbLens {
         };
         // Past the base's image (r > 1 on an orthographic base, r > 2 on an
         // equisolid one) θ_d is NaN.
-        if theta_d.is_nan() || limit.is_nan() || limit < 0.0 || theta_d > self.theta_d(limit) {
+        if theta_d.is_nan() || theta_d > self.theta_d(limit) {
             return None;
         }
         let curve = |theta: f64| (self.theta_d(theta), self.theta_d_slope(theta));
@@ -838,9 +879,11 @@ impl KbLens {
     }
 
     /// The largest θ, in radians, at which the radius still rises, the
-    /// base's own fold included (an orthographic base folds at θ_d = 90°):
-    /// a scan in 0.05° steps up to 180°, bisected within the step where
-    /// the radius stops rising, as [`Unified::limit_theta`]'s is.
+    /// base's own end included (an orthographic base folds at θ_d = 90°,
+    /// an equisolid one at 180°, where a stereographic one's radius is
+    /// infinite): a scan in 0.05° steps up to 180°, the back axis itself
+    /// the last sample, bisected within the step where the radius stops
+    /// rising, as [`Unified::limit_theta`]'s is.
     pub fn limit_theta(&self) -> f64 {
         let end = self.base_end();
         let rises = |theta: f64| self.theta_d_slope(theta) > 0.0 && self.theta_d(theta) < end;
@@ -850,6 +893,12 @@ impl KbLens {
             if !rises(theta) {
                 return last_rising(rises, f64::from(k - 1) * SCAN_STEP, theta);
             }
+        }
+        // The last step, up to the back axis, where θ_d and its slope are
+        // as finite as anywhere.
+        let last = f64::from(steps - 1) * SCAN_STEP;
+        if !rises(PI) {
+            return last_rising(rises, last, PI);
         }
         PI
     }
@@ -900,7 +949,9 @@ impl KbLens {
 }
 
 /// A lens of a stitched pair (6.1): Mei, or Kannala–Brandt on a base. The
-/// shader carries which one per rig (10.3).
+/// shader carries which one per rig, not per lens (10.3's `Rig.model`),
+/// so a rig that pairs a Mei lens with a KB one renders on the CPU only;
+/// whether `Rig::build` refuses such a pair is the rig's to decide.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LensModel {
     Mei(Unified),
