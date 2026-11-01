@@ -586,3 +586,45 @@ fn the_bound_keeps_blocks_off_the_image_circle() {
         outside(384, (192.0, 192.0), r),
     );
 }
+
+/// The bytes a code paints over a mid-grey square of each side in
+/// `sides`, a byte a pixel (0 black, 1 grey, 2 white), then the side of
+/// the blocks at each of `blocks`.
+fn painted(lens: usize, frame: u32, sides: &[u32], blocks: &[u32]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for &side in sides {
+        let mut img = RgbImage {
+            width: side,
+            height: side,
+            pixels: vec![[0.5; 3]; (side * side) as usize],
+        };
+        corner_code(&mut img, lens, frame).unwrap();
+        bytes.extend(img.pixels.iter().map(|p| (p[0] * 2.0).round() as u8));
+    }
+    for &side in blocks {
+        bytes.extend(block_side(side).to_le_bytes());
+    }
+    bytes
+}
+
+/// The layout `code::FORMAT` names, pinned: the pixels lens 1's code of
+/// frame 0xa5c3 paints at 64² and 384², and the blocks' side at the perf
+/// pairs' 2880² and 3840², hashed. A change to the layout fails this
+/// until `FORMAT` is raised and the pin moved with it, so that hw-test
+/// makes the perf pairs again rather than taking those of the old layout
+/// as made.
+#[test]
+fn the_layout_code_format_names_is_pinned() {
+    let _time = timed("the_layout_code_format_names_is_pinned");
+    let fingerprint =
+        |lens, frame| spherecut_testkit::fnv64(&painted(lens, frame, &[64, 384], &[2880, 3840]));
+    let pinned = fingerprint(1, 0xa5c3);
+    eprintln!("corner codes: format {}, {pinned:#018x}", code::FORMAT);
+    assert_eq!((code::FORMAT, pinned), (1, 0xd4f0_449e_dd74_0f0e));
+    // Its control: a code one frame on paints other pixels, so the pin
+    // sees the cells.
+    must_fail(
+        "the next frame's code taken for the pinned one",
+        fingerprint(1, 0xa5c4) == pinned,
+    );
+}

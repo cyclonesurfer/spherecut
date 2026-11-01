@@ -36,6 +36,13 @@ pub const FRAME_BITS: u32 = 16;
 /// The lenses a code tells apart: indices 0 and 1.
 pub const LENSES: usize = 2;
 
+/// The codes' layout, raised whenever a code would be painted otherwise:
+/// its grid, its bits, its checksum, its blocks' size or where they lie.
+/// A picture coded in one layout doesn't read in another, so a perf
+/// pair's stamp holds this and hw-test makes the pair again when it
+/// changes; `tests/code.rs` pins the pixels of the layout it names.
+pub const FORMAT: u32 = 1;
+
 /// The bits a code's checksum covers: the frame's and the lens's.
 const DATA_BITS: u32 = FRAME_BITS + 1;
 
