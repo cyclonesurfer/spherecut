@@ -949,8 +949,11 @@ limits of its own (`camera::insta360::limits`):
 
 - a trailer of at most the file, and at most 1 GiB (`MAX_TRAILER`),
   whatever its tail says; Pat's X5 files have 10 MB to 13 MB;
-- an index of at most 64 slots (`MAX_SLOTS`); the X5 writes 31, the X6
-  59;
+- an index of at most 256 slots (`MAX_SLOTS`), one for each id a slot
+  can name, so that no trailer is refused for the id of a record it
+  lists (slot k lists record k, and an app-trimmed file's TimeMap,
+  record 128, would need 129); the X5 writes 31, the X6 59, and the
+  reader holds the slots on the stack, 2.5 KiB;
 - a metadata record of at most 1 MiB (`MAX_METADATA`), the X5's being
   about 4 KB, and a string in it of at most 4 KiB (`MAX_STRING`), the
   longest, V6's calibration string, being 518 bytes (`parse_metadata`,
@@ -958,17 +961,20 @@ limits of its own (`camera::insta360::limits`):
 - a record of at most what `read_record`'s caller asks for.
 
 Each is checked before anything is allocated for it, and a size over
-it is `CameraError::TooLarge` at the byte that states it. A record
-whose slot runs into the index or past the file is listed in
-`Trailer::skipped`, counted and never followed. The reader reads the
-tail, the index and the records' footers, a few hundred bytes whatever
-the file's size, and every error names its part and its byte. Its
-properties run 100,000 cases (M3 plan 5.5,
+it is `CameraError::TooLarge` at the byte that states it; a trailer too
+small for its index is `CameraError::TooSmall` at the same byte, the
+tail's size. A record whose slot runs into the index or past the file
+is listed in `Trailer::skipped`, counted and never followed. The
+reader reads the tail, the index and the records' footers, a few
+hundred bytes whatever the file's size, and every error names its part
+and its byte, an I/O error the tail, the index or the record it was
+reading. Its properties run 100,000 cases (M3 plan 5.5,
 `crates/camera/tests/trailer.rs`): a trailer cut at every point, four
 ways, is no trailer or the exact error at its byte; arbitrary bytes,
 damaged trailers among them, never panic, and whatever trailer comes
 back is checked against the bytes themselves. At 100,000 cases they
-take 1.2 s and 0.8 s in a debug build in the cloud.
+take 1.4 s and 0.9 s in a debug build on the cloud box (4 Xeon cores,
+camera at opt-level 2).
 
 ## D16. `inject` and `Mp4Writer` write atomically
 
@@ -9179,7 +9185,8 @@ What:
   from the bytes: records 1, 2 (absent from the 4K120 take, which wrote
   a sidecar), 3, 4, 9, 10, 11, 22, 28 and 29, every one but 1 and 10 on
   a 128 KiB boundary of the file, each trailer in an `inst` box of its
-  size plus 8; the 14 take 0.03 s.
+  size plus 8; the 14 take 0.017 s in a debug build on the cloud box (4
+  Xeon cores, camera at opt-level 2).
 
 Why: `deny.toml` forbids git sources, and crates.io's telemetry-parser
 0.2.x predates the X5; its geometry is Studio-derived, and its DJI
@@ -9192,9 +9199,9 @@ agent's roots or the app's jobs opened.
 
 Revisit if: a camera writes its trailer without an index (older
 Insta360 bodies walk their records from the end) or without footers
-(the Antigravity A1), which the reader refuses, the first as a footer
-at EOF − 78 that isn't an index's; or M4 takes telemetry-parser up for
-the IMU.
+(the Antigravity A1), which the reader refuses, the first as
+`IndexFooter`, a footer at EOF − 78 that isn't an index's; or M4 takes
+telemetry-parser up for the IMU.
 
 ## Open
 
