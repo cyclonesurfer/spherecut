@@ -809,7 +809,13 @@ fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
     match &s.export.run {
         None => {
             let path = output_path(&dir, &s.export.name);
-            let ready = s.reframe.doc.is_some() && path.is_some();
+            // A camera's raw file's lenses, side by side: the export would
+            // render one of them as an equirect (m3-plan 13.2).
+            let lenses = s.columns() > 1;
+            let ready = s.reframe.doc.is_some() && path.is_some() && !lenses;
+            if lenses {
+                ui.weak("Stitched export arrives with M3.11");
+            }
             ui.horizontal(|ui| {
                 if ui.add_enabled(ready, egui::Button::new("Start")).clicked()
                     && let Some(path) = path
