@@ -1904,7 +1904,8 @@ fn rig_centre_turns_with_lens_0s_tune() {
 /// Under `Extrinsics::Fitted` the measured relative rotation sets block
 /// 1's view frame, whatever `Geometry::turn` says: untuned,
 /// lens_from_rig_1 = relative · lens_from_rig_0 with lens 0 at F · S;
-/// c_1 is the measured translation turned by lens 0; and block 1's tune
+/// c_1 is the measured translation turned by lens 0, whatever
+/// `Geometry::tz` says; and block 1's tune
 /// turns lens 1 in its own view frame, as seen. Written by hand for the
 /// two half turns a back-to-back pair takes, about lens 0's y (the
 /// placeholder's class predicts it) and about its x (the twins (Y, 0°)
@@ -2008,6 +2009,32 @@ fn rig_fitted_extrinsics_compose_by_hand() {
     );
     assert!(worst <= 1e-12, "{worst:e}");
     assert!(centres <= 1e-15, "{centres:e} m");
+    // The tz sign isn't read either: the measured translation is already
+    // sign(tz) · t_1.
+    let lenses_at = |extrinsics: Extrinsics, tz: TzSign| {
+        let geo = Geometry {
+            extrinsics,
+            tz,
+            ..placeholder(CanvasMap::C, Generation::V6, EVERY_TERM)
+        };
+        Rig::build(&cal, &geo, &Tune::default(), 0, [768; 2])
+            .unwrap()
+            .lenses
+    };
+    let fitted = Extrinsics::Fitted {
+        relative: DQuat::from_rotation_y(PI),
+        translation_m: t,
+    };
+    assert_eq!(
+        lenses_at(fitted, TzSign::AsStored),
+        lenses_at(fitted, TzSign::Negated)
+    );
+    // Control: under stored extrinsics the sign moves the centres.
+    let stored = Extrinsics::Stored(EulerConv::PLACEHOLDER);
+    must_fail(
+        "the tz sign under stored extrinsics",
+        lenses_at(stored, TzSign::AsStored) == lenses_at(stored, TzSign::Negated),
+    );
     // Control: block 1's view frame from the turn axis, as relative · F ·
     // T_1⁻¹ · Q_tuneᵀ · T_1 · S. With the relative a half turn about x and
     // T_1 one about Y, a yaw of 10° swings lens 1's axis to its left, by

@@ -29,6 +29,11 @@
 //!
 //! and a scene point 1/q from the origin o along the rig direction d is
 //! seen by lens b along lens_from_rig_b · normalize(d − q (c_b − o)).
+//! Under [`Extrinsics::Fitted`] the two formulas read differently: both
+//! E_b are the identity, T_1 is F⁻¹ · relative · F, so that
+//! [`Geometry::turn`] isn't read, and sign(tz) · t_1 is the measured
+//! `translation_m` as it stands, so that [`Geometry::tz`] isn't read
+//! either (see [`Rig::build`]).
 //!
 //! Each convention is a small generic space ([`EulerConv`], 1152 values;
 //! `fisheye::V6Reading`, 21), so that no reader's choice is copied or

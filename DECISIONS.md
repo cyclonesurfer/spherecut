@@ -4637,9 +4637,11 @@ the lens right as seen through it. `sphere::rig` defines the frame, and
 `sphere::fisheye::F` is F. Block 1's centre
 c_1 = lens_from_rig_0⁻¹ · (sign(tz) · t_1) turns with lens 0's rotation,
 its tune included, as the stored t_1 is in lens 0's frame. Under fitted
-extrinsics both E_b are the identity, and block 1's view frame is
+extrinsics both E_b are the identity, block 1's view frame is
 F⁻¹ · relative · F · S, lens 0's carried by the measured rotation, in
-place of a half turn about the turn axis: untuned,
+place of a half turn about the turn axis, and c_1 takes the measured
+translation as it stands, with no sign(tz), since it is already lens
+1's centre in lens 0's frame: untuned,
 lens_from_rig_1 = relative · lens_from_rig_0, and block 1's tune turns
 it in its own view frame whichever way the relative rotation turns it
 over. `synth::lens::compose` writes the same composition from the
