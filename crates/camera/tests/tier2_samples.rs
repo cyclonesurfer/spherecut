@@ -45,6 +45,11 @@ const fn index_from_end(slots: u64) -> u64 {
 }
 /// The X5's: 31 slots.
 const INDEX_FROM_END: u64 = index_from_end(31);
+/// The shortest shutter a camera's exposure record can hold, in
+/// seconds: 1/100,000 s, past any shutter's speed. An integer word read
+/// as a double's bits is a denormal far below it (3248 is about
+/// 1.6e-320).
+const MIN_SHUTTER: f64 = 1e-5;
 /// Records 2, 10, 22 and 28, whose sizes are the same in every file.
 const THUMBNAIL: u32 = 1_228_840;
 const R10: u32 = 35;
@@ -779,7 +784,9 @@ fn check_file(
     assert_eq!(imu_at(1000.0).passes(), Some(true), "{name}: {imu_step} µs");
     let exposure = parse_exposure(&read(4, take.r4 as usize)).unwrap();
     assert_eq!(exposure.len(), take.r4 as usize / 16, "{name}");
-    assert!(exposure.windows(2).all(|w| w[0].t_us < w[1].t_us), "{name}");
+    // The stamps rise, item by item.
+    let stamps_rise = |items: &[Exposure]| items.windows(2).all(|w| w[0].t_us < w[1].t_us);
+    assert!(stamps_rise(&exposure), "{name}");
     let (num, den) = role.mode.rate();
     let period = f64::from(den) / f64::from(num);
     let step = (exposure[exposure.len() - 1].t_us - exposure[0].t_us) as f64
@@ -792,19 +799,25 @@ fn check_file(
         Some(true),
         "{name}: {step} s a frame, not {period}"
     );
-    for e in &exposure {
-        assert!(e.seconds > 0.0 && e.seconds < period, "{name}: {e:?}");
-    }
+    // Every shutter a real one, no shorter than MIN_SHUTTER, and shorter
+    // than the frame: the first item that isn't.
+    let odd_shutter = |items: &[Exposure], frame: f64| {
+        items
+            .iter()
+            .find(|e| !(MIN_SHUTTER..frame).contains(&e.seconds))
+            .copied()
+    };
+    assert_eq!(odd_shutter(&exposure, period), None, "{name}");
     eprintln!(
-        "  IMU {} items, {imu_step:.1} µs apart; exposure {} items, {:.3} ms apart, {:.5} to {:.5} s",
+        "  IMU {} items, {imu_step:.1} µs apart; exposure {} items, {:.3} ms apart, shutters {:.1} to {:.1} µs",
         imu.samples,
         exposure.len(),
         step * 1e3,
         exposure
             .iter()
-            .map(|e| e.seconds)
+            .map(|e| e.seconds * 1e6)
             .fold(f64::INFINITY, f64::min),
-        exposure.iter().map(|e| e.seconds).fold(0.0, f64::max),
+        exposure.iter().map(|e| e.seconds * 1e6).fold(0.0, f64::max),
     );
     let m = check_metadata(&name, &metadata, role, take, other, lrv, &exposure);
 
@@ -859,6 +872,37 @@ fn check_file(
         &format!("{name}'s exposure a frame apart at half the rate"),
         within(2.0 * period),
     );
+    // The exposure's stamps reversed don't rise; its shutters aren't all
+    // shorter than a thousandth of the frame; and stored as integer µs,
+    // read as a double's bits as parse_exposure reads them, they are
+    // denormals, above zero and shorter than the frame but under
+    // MIN_SHUTTER.
+    let reversed: Vec<Exposure> = exposure.iter().rev().copied().collect();
+    must_fail(
+        &format!("{name}'s exposure stamps reversed"),
+        stamps_rise(&reversed),
+    );
+    must_fail(
+        &format!("{name}'s shutters held to a thousandth of the frame"),
+        odd_shutter(&exposure, period / 1000.0).is_none(),
+    );
+    let as_integers: Vec<Exposure> = exposure
+        .iter()
+        .map(|e| Exposure {
+            seconds: f64::from_bits((e.seconds * 1e6).round() as u64),
+            ..*e
+        })
+        .collect();
+    assert!(
+        as_integers
+            .iter()
+            .all(|e| e.seconds > 0.0 && e.seconds < period),
+        "{name}"
+    );
+    must_fail(
+        &format!("{name}'s shutters as integer µs read as a double's bits"),
+        odd_shutter(&as_integers, period).is_none(),
+    );
     let mut early = [0; 8];
     f.seek(SeekFrom::Start(t.payload_start - 9)).unwrap();
     f.read_exact(&mut early).unwrap();
@@ -891,8 +935,9 @@ fn check_file(
 /// in slot k; its records, 22 and 28 among them, are the table's ids and
 /// sizes, each footer checked; all but 1 and 10 sit on 128 KiB
 /// boundaries; the thumbnail is 1280 × 640, the IMU about 1 kHz, and the
-/// exposure one item a frame at the take's rate, each shorter than the
-/// frame. A table per file says what the index holds.
+/// exposure one item a frame at the take's rate, its stamps rising and
+/// each shutter between 1/100,000 s and the frame. A table per file says
+/// what the index holds.
 #[test]
 #[ignore = "tier2: Pat's X5 samples (Tier 2c: SPHERECUT_SAMPLES and the CPU only)"]
 fn samples_insv_trailer_parses() {

@@ -34,7 +34,8 @@ pub struct Exposure {
     /// When the frame was exposed, on the camera's clock in µs (the X5's
     /// unit, §3.4): the clock of the metadata's first-frame time.
     pub t_us: u64,
-    /// The shutter time, in seconds.
+    /// The shutter time, in seconds: an IEEE double, from 1.07 ms to
+    /// 10.0 ms on Pat's X5 files.
     pub seconds: f64,
 }
 
