@@ -215,3 +215,14 @@ fn doctor_opens_no_network_socket() {
     let sockets = common::inet_sockets(&log_text);
     assert!(sockets.is_empty(), "{sockets:#?}");
 }
+
+/// `doctor --file` on a synthetic `.insv`: whether it can be stitched
+/// (its calibration is there), whether both lenses decode on the chosen
+/// path, and what is missing when not ("Insta360 X5 v1.1.22, geometry
+/// provisional"); on one with `NoCalibration`, that it can't (M3 plan
+/// 5.4).
+#[test]
+#[ignore = "M3.2 unit (c)"]
+fn doctor_file_says_whether_an_insv_can_be_stitched() {
+    todo!()
+}

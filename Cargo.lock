@@ -3122,6 +3122,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "spherecut-camera"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "spherecut-core",
+ "spherecut-synth",
+ "spherecut-testkit",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "spherecut-cli"
 version = "0.1.0"
 dependencies = [

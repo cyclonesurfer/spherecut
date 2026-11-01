@@ -1714,3 +1714,15 @@ fn only_frame_handles_sigint() {
     assert_eq!(status.signal(), Some(2), "{status:?}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Probe on a synthetic `.insv` (synth's trailer, M3 plan 5.4): the CLI's
+/// `camera` object gains `serial` and keeps `vendor`, `model`,
+/// `firmware`, `layout` and `evidence`; the agent's summary keeps
+/// `camera` a name and gains `camera_detail`; both gain `lenses`,
+/// `calibration` (with the snapshot's hash), `companion`,
+/// `exposure_entries` and `records`, as `docs/cli-json.md` gives them.
+#[test]
+#[ignore = "M3.2 unit (c)"]
+fn probe_pins_the_camera_shapes() {
+    todo!()
+}

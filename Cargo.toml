@@ -24,6 +24,7 @@ spherecut-audio = { path = "crates/audio" }
 spherecut-app = { path = "crates/app" }
 spherecut-agent = { path = "crates/agent" }
 spherecut-export = { path = "crates/export" }
+spherecut-camera = { path = "crates/camera" }
 
 anyhow = "1.0.100"
 # Vulkan's types, for asking the driver what DMA-BUFs it imports (slice
@@ -111,4 +112,9 @@ opt-level = 3
 opt-level = 2
 
 [profile.dev.package.spherecut-testkit]
+opt-level = 2
+
+# The trailer, metadata and calibration string properties run 100,000
+# cases each (M3 plan 5.1 and 19.3).
+[profile.dev.package.spherecut-camera]
 opt-level = 2
