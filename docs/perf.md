@@ -164,7 +164,9 @@ Current benchmarks:
     while there is none.
   - `bench_perf_clips_software_decode`: `perf clip <name>: software
     decode`, in fps, which the report's "Perf clips" section shows,
-    flagged **too easy** over 150 fps.
+    flagged **too easy** over 150 fps; a two-track clip a lens at a
+    time, `perf clip <name> lens <k>: software decode`, so that each
+    track is flagged on its own.
 - **The perf clips** (DECISIONS D37): hw-test makes them once, with
   libx265 at an average bitrate, into `<cargo target dir>/hw-media/`:
   `hevc8-5k7-30fps-noisy-20s.mp4` and `hevc10-5k7-30fps-noisy-20s.mp4`
@@ -172,6 +174,20 @@ Current benchmarks:
   120 Mbps), 20 s of synth's grid with new noise on every frame, open
   GOPs of 30 with three B-frames. `--quick` makes none, and the
   benchmarks that play them skip.
+- **The two-track perf clips** (M3 plan 7.2, from M3.1): synth's
+  `perf_pairs`, two square lens tracks in one MP4, each coded alone by
+  threaded x265 with its corner codes and its own noise, 600 frames a
+  lens, as the X5 codes each mode: closed GOPs, no B-frames, one-pass
+  ABR, 8-bit full range BT.709.
+  `pair-hevc8-3840-2997-noisy-20s.mp4` (2×3840² at 29.97, an IDR every
+  60 frames, 65 Mbps a lens), `pair-hevc8-2880-5994-noisy-10s.mp4`
+  (2×2880² at 59.94, an IDR every 120, 80 Mbps) and
+  `pair-hevc8-2880-2997-noisy-20s.mp4` (2×2880² at 29.97, an IDR every
+  60, 80 Mbps). Every picture but the IDRs (IDR_N_LP) is a TRAIL_R
+  reference P frame, at 59.94 too: the X5 codes every other frame there
+  as a non-reference TSA_N, which x265 3.5 gives only to B-frames, which
+  are reordered. The report rates each lens on its own: its bitrate from
+  its own samples, and its software decode.
 
 Not benchmarks, but their numbers are in the same notes:
 `list_adapters_and_features` notes each Vulkan adapter's info (with its

@@ -25,8 +25,8 @@
 //! After Tier 2, the Tier 1 tests run as `cargo xtask check` runs them
 //! (`--no-tier1` leaves them out), which catches what this machine's
 //! FFmpeg and Mesa do differently. Before Tier 2, hw-test makes the perf
-//! clips the playback benchmarks play, once (`perf_clips`), unless
-//! `--quick`. The report also records the power settings and every render
+//! clips the playback benchmarks play, and the two-track ones the pair
+//! benchmarks play, once (`perf_clips`), unless `--quick`. The report also records the power settings and every render
 //! node (`machine`). `--list` lists the Tier 2 tests and stops.
 //!
 //! The command exits non-zero when the build fails, a Tier 2 or Tier 1
