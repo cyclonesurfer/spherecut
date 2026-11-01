@@ -8165,6 +8165,25 @@ that end in every FFmpeg we build against, so nothing writes into the
 muxer's boxes, and our decode (which applies an edit's end itself)
 reads the trim back to the sample.
 
+*Updated 2026-11-01 (M3.1, P-DEC's K1 on odin):* the export decodes a
+dual-fisheye source as a pair: two `HwOutput::Download` decoders, one
+per lens track, which the M3 plan's section 12 zips by time and ends at
+the shorter lens. Pairs decode on Vulkan Video download wherever doctor
+says Vulkan Video decodes the format (HEVC on the X5), on VA-API
+download where it doesn't (huginn as last measured), and in software
+as the fallback, with the two decoders on one thread, which won on both
+paths on odin. K1 measured odin's 8K30 pair (clip 9) beside a 4K30
+VA-API H.264 encode at 33.2 fps a lens on Vulkan Video download (32.0
+with a thread a lens) and 18.5 on VA-API download (14.2), each under
+K1's 36 (30 × 1.2): above real time on Vulkan Video, without the
+margin. So Redirect 2 fires and M3.11b opens: the export decodes onto
+its own device through path B (Vulkan) or A (VA-API), never through
+RAM. Alone, Vulkan Video's pair decodes 78 to 79 fps a lens, the pixel
+rate of one lens alone at 155, so the video engine, which the encoder
+shares (D56), looks like the limit rather than the copy through RAM:
+M3.11b measures its decode beside the encode before anything else is
+built on it. huginn's K4 (and K2's export half) are pending its paste.
+
 ## D53. The toolkit check: a timeline prototype behind a hidden flag, and its gates
 
 *2026-10-31, M2 slice M2.2b. Updates D26. M2's plan reserved D51 and

@@ -288,6 +288,228 @@ over 111 test binaries against 108; the `track_timing` suite 0.07 s at
 `samples_x5_tracks_equal` 0.44 s warm; `agents.rs` 7 tests in 4.8 s;
 testkit's tests 0.06 s.
 
+### M3.1, pair decode (2026-11-01)
+
+Branch `m3/decode`: units (a) and (b) with a reviewer each, and (c),
+huginn's prompt. K1 and K3 come from odin's run (PR #27, below); K2
+and K4 wait for huginn's paste and go into perf.md whenever it comes.
+
+- **(a) The pair's files.** `synth::code` writes a corner code in each
+  corner of a lens frame (a block of side s/12: 16 frame bits, the lens
+  bit and a CRC-8, words at least 4 bits apart) and reads it back from
+  8- or 10-bit planes; `check_clear` is the hook M3.3's `render_lens`
+  calls. `mux_video_streams` gains an MP4 output that keeps each
+  track's time base (`MuxedAs`, by extension: `.mkv`, `.mk3d`, `.mka`
+  and `.webm` stay Matroska), which `track_timing` reads back exactly.
+  `synth::media::write_pair` codes each lens alone with its own corner
+  codes and noise and muxes them; `perf_pairs()` are the three
+  two-track perf clips (2×3840² at 29.97, 2×2880² at 59.94 and 29.97,
+  600 frames a lens, closed GOPs, P frames only, an IDR every 60 or
+  120, 65 or 80 Mb/s a lens), and `pairs_64()` section 9's 2×64² files
+  (matched, a GOP fault, a lens one frame short). hw-test makes the
+  pairs and rates each lens on its own (its bitrate, decode rate and
+  too-easy flag), and records the machine's x265. `agents.rs` writes
+  its camera file as MP4 (amendment 3).
+- **(b) The bench.** `bench_export_pair_decode` (export's
+  `tier2_pair_decode.rs`) decodes both lenses as section 12 will, on
+  VA-API download, Vulkan Video download and software, serially and a
+  thread a lens, over clip 9 (8K30), the 8K25, 5.7K60 and 4K120
+  samples and the perf pairs. The gated rows follow K1's rule: 600
+  frames a lens beside an `h264_vaapi` encode of a 3840×2160 frame at
+  30 fps, the slower lens's median of three runs, a run under 30 fps
+  fails. K3's runs each run in a child process of their own, with a
+  consumer that keeps every channel full, so the pair holds the 10
+  frames section 12 holds (5 for lens 0 alone), and K3 decides only
+  when the run's own peak was that. Each K gets a note: Pass, its
+  redirect, or "not decided" with the reason. `bench_playback_x5_raw`
+  also plays the perf pairs (K2's engine half), on the default path
+  and with `SPHERECUT_ZERO_COPY=1` where Auto picks VA-API.
+  `peak_rss_growth_kib` moves to `testkit::memory`.
+- **(c) huginn's prompt** is `hw-run-8.md` in the project files: one
+  paste that runs the full hw-test hw-run-7.md asked for (H1, H2, M2's
+  4K30 row, the toolkit check), now with the pair benches and path A,
+  and says first that the perf clips take about two hours to make.
+
+**Settled by the slice** (for the plan's next amendment):
+- The 59.94 pair is P only by its spec on every x265: `perf_pairs`
+  asks for no temporal layers, so it doesn't show the X5's halved
+  catch-up decode (`synth::media::PERF_PAIR_P_ONLY` is the wording its
+  rows give). x265 3.5 (the cloud's) marks frames non-reference (TSA_N)
+  only as reordered B-frames anyway; 4.x (odin's and huginn's 4.1) is
+  asked for its layers by synth's `pairs` test and recorded per
+  version, not assumed. 7.2's "checked on its output's NAL types"
+  should read "recorded per x265 version".
+- The masters code 10 slices a picture at 8K and 5 at 5.7K and 4K, WPP
+  off, IDR_W_RADL, with TSA_N on every other picture at 5.7K60 and
+  4K120 (an IDR every 60 at 8K30, 50 at 8K25, 120 at 5.7K60 and 4K120),
+  which x265 3.5 can't match (several slices need WPP, IDR_W_RADL needs
+  B-frames), so the pairs say where they differ. hw-test now reads each
+  perf pair lens's IDR interval and NAL types beside the masters' (the
+  same reader, `synth::track_coding`) and flags in bold an IDR off the
+  interval, a missing IDR or an `stss` that disagrees.
+- A pair's stamp holds its spec, `synth::code::FORMAT`,
+  `synth::media::NOISE_FORMAT` and the x265 version read from the
+  stream's info SEI, so a change to any of them remakes the pair once.
+  A run that can't read its x265 keeps a pair that matches on the rest
+  and says its coder wasn't checked.
+- K1's rule, which K2 and K4 share: a pass needs every run's encode
+  beside at 29.5 fps or more over the decode's own timed window; a miss
+  counts whatever the encode took, alone included, since the full
+  encode could only slow the decode. Redirect 1's "wherever doctor says
+  it decodes HEVC" is read from doctor inside the bench: a Vulkan Video
+  path with no rows leaves the K undecided unless doctor says it can't
+  decode the format or the device refused the stream. Once a path has
+  decoded on a machine, a later "missing" on it fails the run. The
+  bench skips only when it decided no K, and names the Ks it left
+  undecided.
+- K3's "twice the one-lens run, plus 10 %" is read as 2.2 × lens 0's
+  growth, measured without the encode. K2's engine half is every full
+  unthrottled second of VA-API copied at 36 fps a lens or more, as the
+  mean over the lenses until the engine counts decodes per stream
+  (M3.8 could add one to `StreamStatus`).
+- D52's update is recorded (below).
+
+**odin's K1 and K3** (PR #27, at 0444568, over Remote Control; clip
+9, 600 frames a lens; the K lines go to the bench file and the report,
+so the PR carries them; two runs, the second inside the perf clips'
+hw-test, agree within 0.2 fps):
+- **K1: Redirect 2.** Beside a 4K30 VA-API H.264 encode that held
+  30.0 fps, the slower lens's median of three: Vulkan Video download
+  33.2 fps a lens serial and 31.9 to 32.0 a thread a lens; VA-API
+  download 18.5 and 14.2 to 14.4; software 13.6 and 13.7 to 13.8. No
+  setup reaches 36, so M3.11b opens (D52's update): until it lands,
+  pairs decode on Vulkan Video download, serially, at real time with a
+  10 % margin on odin. Alone, Vulkan Video's pair runs 78 to 79 fps a
+  lens and one lens 155, the same pixel rate, so the video engine the
+  encoder shares looks like the limit, not the copy: M3.11b first
+  measures path B's decode beside the encode, since its done-when (the
+  decode under 25 ms a pair) may not be reachable on odin's engine.
+  Both readings predate the encode-floor rule above; a miss stands
+  under it.
+- **K3: Pass on every path.** The pair's peak RSS growth against 2.2 ×
+  lens 0 alone: VA-API 423 MiB serial and 443 a thread a lens against
+  2.2 × 246 = 542; Vulkan Video 410 and 406 against 497; software 2451
+  and 2452 against 2706. At each peak 10 frames were alive, 211 MiB
+  (221 MB) of the growth; lens 0 alone held 5, 105 MiB.
+
+**odin's perf clips' run** (the same PR, report odin-b27c0f9-m31.md,
+code at 0444568; 5634 s, Tier 2 3 of 3 passed): the three two-track
+clips took 3501 s to make (2×3840² at 29.97 1655 s, 163 MB, 65.3 Mbit/s
+a lens; 2×2880² at 59.94 894 s, 100 MB, 80.2; 2×2880² at 29.97 952 s,
+201 MB, 80.2); their software decode and coding weren't in the run's
+`--only`, so a second odin run gives the too-easy flags and the coding
+rows the done-when asks for; they go into perf.md when it reports.
+- **K2's export half on odin** (huginn's rule, the 2×2880² at 29.97
+  pair beside the encode): VA-API download 26.3 fps a lens serial and
+  29.2 a thread a lens, both under 36; Vulkan Video download 47.2 and
+  45.4. On huginn VA-API is the export's path, so this is a warning for
+  huginn's K2, not its verdict.
+- **The perf pairs are easier than the X5's files in software, not on
+  the engines.** Alone, the slower lens in software: the 3840 pair
+  42.8 fps against clip 9's 13.9 (3.1×), the 2880 pair at 59.94 79.1
+  against clip 3's 43.3 (1.8×). On the engines they are no easier:
+  Vulkan Video 79.2 against 77.5, VA-API serially 31.1 against 39.6. So the perf
+  pairs stand in for the X5 on hardware decode only; 150 fps's
+  too-easy flag doesn't catch this at these sizes.
+- `bench_playback_x5_raw`'s perf pairs, unthrottled on odin's default
+  (Vulkan, Auto, zero copy): 2×3840² at 29.97 84.0 fps (82.5 to 85.0),
+  decode p50 11.5 ms; 2×2880² at 59.94 145.5 (144.5 to 146.0), 6.7 ms;
+  2×2880² at 29.97 119.5 (117.5 to 120.0), 8.0 ms; uploads under 1.2
+  ms, no frame refused. They have no real-time pass yet, and K2's
+  engine half (VA-API copied) is huginn's.
+- **Unexplained, in both runs:** VA-API's lens 0 alone decodes clip 9
+  at 28.5 fps while the serial pair's slower lens reaches 39.6 to 41.3,
+  and a thread a lens drops to 12.9 to 13.0 (17.9 on the 3840 perf pair
+  against 31.1 serially). On the 2880 clips threads are the same or
+  faster. Vulkan Video shows none of it. The eighth run's huge-page
+  compaction was the first suspect, but the repeat in a second run
+  weakens it; not measured further. odin's `pkg-config` has no x265
+  file, so the first report records libavcodec 62.28.103 alone; the
+  fixed hw-test reads the version from a stream it coded.
+
+**The reviews found** that both lenses of every perf pair had the same
+noise (the seeds were s and s + 1, and the noise generator makes its
+state odd; lens k now takes s + 2k, and the test measures the noise
+itself, which now differs in 0.86 to 0.87 of the samples), and that
+K3's runs dropped each pair as it came, so they held 2 to 6 frames, not
+section 12's 10 (now 5, 10 and 10 on clip 9 in the cloud). The fresh
+review of the whole slice (5850 lines) upheld no major: it found that
+the bench never checked that the encode beside kept 30 fps, that a
+Vulkan Video path with no rows passed Redirect 1 whatever doctor said,
+that a path could decode and then go missing unnoticed, that the bench
+skipped when only some Ks were decided, that the K notes read as other
+machines' verdicts, that K2's engine half was a mean over the lenses
+without saying so, that the pair's stamp missed the corner codes'
+format, the x265 and the noise, and that the 59.94 pair's P frames
+were stated as x265's limit. The fixes' own review found one major (a
+miss beside a slow encode was left undecided, which would have turned
+odin's K1 into "not decided" on a rerun: now a miss counts), that an
+unreadable x265 deleted a cached pair, and five nits; all fixed.
+Commit 8ec75ec also carries the perf.md paragraph on the two-track
+clips' coding (its message doesn't say so).
+
+**Controls that must fail** (every new one, by file):
+- export `tier2_pair_decode.rs`: a channel of 3; lens 0's frames 0
+  and 1 zipped; a software frame taken for VA-API's; the short lens
+  asked for 30 frames; a run under 30; a median under 36; a NaN run; no
+  runs; a pair at 2.3 × lens 0; a pair run that held 9 frames; lens 0
+  by itself held 2 frames; K4 passed on the serial setup; K1, K2 and
+  K4 each kept by rows whose encode beside held 20 fps; K1's and K4's
+  miss beside a 20 fps encode left undecided; K1's and K4's miss alone
+  left undecided; a pass beside a 20 fps encode outranked by a miss;
+  the end of a run that decided no K; doctor saying Vulkan Video can't
+  decode HEVC Main; the device turning the stream down; VA-API missing
+  after its serial run decoded; clip 9 refused after it decoded; VA-API
+  missing in measure after it decoded; a missing file; VA-API on a node
+  that isn't there; the listing while the encode runs; VA-API's encoder
+  on no device; an encode stalled for the window's last 3 s; a clip
+  coded as the X5 said to be P only; rows for a clip that isn't here.
+- media `mux.rs`: track 1 held to track 0's source; track 1's tables
+  are track 0's source's; Matroska kept 29.97's durations; Matroska
+  kept 29.97's times; lenses.MKV read as an MP4; lenses.MKV kept
+  29.97's times.
+- playback `tier2_playback.rs`: a pair whose lens 1 is a frame short;
+  a second under 36; a lens in software; a pass that stalled; no full
+  second; each 29.97 pair said to be P only.
+- synth `code.rs`: cell 7 flipped read as a code; P010 read as
+  low-aligned; corners holding two codes; all four corners lost; cell
+  17 flipped in every corner; the lenses read swapped; a radius a pixel
+  past the bound; the next frame's code taken for the pinned one.
+- synth `pairs.rs`: seeds a bit apart taken for noise of their own;
+  M2's perf clip taken for the X5's coding; M2's coding taken for the
+  X5's; 2×3840²'s bitrate taken for 2×2880²'s; x265's reordered
+  B-frames taken for the X5's P frames; the X5's TSA_N taken for P
+  only; a stream without x265's info SEI read for a version; a count
+  its chunks hold refused as too many; the GOP fault's sync samples
+  agree. synth's lib: lens 1's noise taken for the pinned lens 0's;
+  x265 3.5 asked for 4.x's count of temporal layers; registered user
+  data read as x265's.
+- testkit `memory.rs`: a closure that touches nothing.
+- xtask `hw_test.rs`: the pair rated as one file; each 29.97 pair said
+  to be P only; the X5's TSA_N taken for P only; an IDR off the
+  interval; an IDR missing from the interval; `stss` taken for the
+  coding's; the row without the streams' version. `perf_clips.rs`: a
+  pair stamped by its spec alone taken as made; a pair of another code
+  layout kept while this run's x265 isn't read.
+
+Measured, on the cloud box (debug): the short 192² perf pairs (121
+frames a lens) came out under their scaled ABR targets by 9 to 10 %
+(2×3840²), 6 to 7 % (2×2880² at 59.94) and under 1 % (at 29.97), each
+in about 2 s; the corner codes read with a clearance of 0.32 at 384²
+in the perf coding; K3's runs on clip 9 in software, 600 frames a lens,
+grew 467 MiB for lens 0 and 933 and 931 MiB for the pair (2.0×); x265
+3.5 with temporal layers and no B-frames coded TRAIL_R 46 and IDR_N_LP
+2, and with one B-frame TRAIL_R 24, TSA_N 22 and IDR_N_LP 2. Suite
+times after the fixes: export's `tier2_pair_decode` 1.6 s (15 s
+budget), synth's `pairs` 6.9 s (15 s) and `code` 1.7 s (5 s), media's
+`mux` 0.09 s, playback's Tier 1 file 6.5 to 7.7 s (5 s of it a
+deliberate stall), xtask's 77 tests 1.6 s. `cargo xtask check` gained
+4 test binaries (`code`, `pairs`, `tier2_pair_decode`, `mux`) and
+10.8 s of tests (`pairs` 7.0 s of it). At 3fe071e the check passed in
+13 minutes in a warm target folder of its own, its tests 669 s over
+103 binaries against M3.0's 778 s over 99; other builds ran beside
+both, so the totals move with the load.
+
 ### M3.3, lens maths (2026-11-01)
 
 Branch `m3/lens`: the types the units share first, then (a) and (c)
