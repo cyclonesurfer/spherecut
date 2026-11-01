@@ -345,8 +345,12 @@ pub fn read_with<R: Read + Seek>(r: &mut R, first: FirstBox) -> Result<Mp4Tree, 
             )));
         }
         if h.size > remaining && !any && !top_level_types().any(|t| *t == h.fourcc.0) {
-            // Vendor trailers (Insta360 before X5 firmware 1.7) are not
-            // boxes, but their first bytes can look like an oversized one.
+            // A bare vendor trailer, as older Insta360 bodies such as the
+            // ONE X2 append theirs (reported), is not a box, but its first
+            // bytes can look like an oversized one. The X5 wraps its
+            // trailer in a top-level `inst` box, already at firmware
+            // v1.1.22 (all 14 of Pat's files; docs/formats/insta360.md),
+            // so its trailer is read as a box.
             tree.trailing_bytes = remaining;
             break;
         }
