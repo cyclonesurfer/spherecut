@@ -1153,6 +1153,16 @@ fn euler_rotation(euler: &TruthEuler, ypr_deg: [f64; 3]) -> DQuat {
 /// the planted canvas map (6.2's table): src is a block's square on the
 /// canvas (its height), dst field 27's window, and the centre is taken
 /// in the block's own square, block 1's less src.
+///
+/// The stored centre is read as counting from the canvas's pixel
+/// corners, as synth's own pixels do (pixel (i, j) covers i to i + 1 and
+/// j to j + 1, [`render_lens`]), so it scales as the table writes it, c ·
+/// s/src under A and C, with no half-pixel shift; `sphere::rig` reads it
+/// the same way. Whether the X5 counts its cx and cy from pixel corners
+/// or, as OpenCV does, from pixel centres is a camera assumption the plan
+/// doesn't list: from centres, the slot's centre would sit 0.5 · s/src
+/// (0.5 · s/dst under B) further along each axis, 0.36 px at 3840² and
+/// 0.07 px at 768².
 fn slot_model(cal: &CalibTruth, b: usize, planted: &Planted, side: u32) -> TruthModel {
     let block = &cal.blocks[b];
     let s = f64::from(side);
@@ -2396,7 +2406,8 @@ mod tests {
     }
 
     /// compose's E_b for 8 `TruthEuler` values, the placeholder among
-    /// them, against values worked out by hand with the arithmetic in the
+    /// them, and block 1's whole lens_from_rig under each turn axis,
+    /// against values worked out by hand with the arithmetic in the
     /// comments (7.1).
     #[test]
     fn compose_turns_eight_euler_values_as_worked_by_hand() {
@@ -2536,6 +2547,66 @@ mod tests {
         must_fail(
             "case 8 in the reverse order",
             takes_axes(e0(reversed, cases[7].1), cases[7].2),
+        );
+
+        // Block 1, where E_1 and T_1 are both turns: with S the identity,
+        // lens_from_rig_1 = E_1 · F · T_1, which takes rig X, Y and Z to
+        // the columns below.
+        //  9. The placeholder on (0, 30, 90) under turn Y: E_1 = R_z(90 −
+        //     90) · R_x(30) · R_y(0) = R_x(30), and T_1 = R_y(180) =
+        //     diag(−1, 1, −1), so F · T_1 = diag(−1, −1, 1), taking X to
+        //     −x, Y to −y and Z to z. R_x(30) then keeps −x, takes −y to
+        //     (0, −cos 30, −sin 30) and z to (0, −sin 30, cos 30).
+        // 10. The placeholder on (30, 0, 90) under turn X: E_1 = R_y(30),
+        //     and T_1 = R_x(180) = F, so F · T_1 is the identity and
+        //     lens_from_rig_1 = R_y(30): X to (cos 30, 0, −sin 30), Y
+        //     kept, Z to (sin 30, 0, cos 30).
+        let lens_1 = |turn: TruthTurn, ypr: [f64; 3]| {
+            let mut cal = pats_v6();
+            cal.blocks[1].ypr_deg = ypr;
+            let planted = Planted {
+                turn,
+                ..planted(TruthEuler::PLACEHOLDER)
+            };
+            let to_rig = compose(&cal, &planted, 0, [768; 2]).lenses[1].to_rig;
+            move |v: DVec3| to_rig.inverse() * v
+        };
+        let under_y = || lens_1(TruthTurn::Y, [0.0, 30.0, 90.0]);
+        let under_x = || lens_1(TruthTurn::X, [30.0, 0.0, 90.0]);
+        assert!(
+            takes_axes(
+                under_y(),
+                [[-1.0, 0.0, 0.0], [0.0, -c30, -s30], [0.0, -s30, c30]]
+            ),
+            "case 9"
+        );
+        assert!(
+            takes_axes(
+                under_x(),
+                [[c30, 0.0, -s30], [0.0, 1.0, 0.0], [s30, 0.0, c30]]
+            ),
+            "case 10"
+        );
+        // Controls: T_1 on the left, T_1 · E_1 · F. In case 9, F takes Y to
+        // −y, R_x(30) that to (0, −cos 30, −sin 30) and R_y(180) to (0,
+        // −cos 30, sin 30); Z goes to −z, then (0, sin 30, −cos 30), then
+        // (0, sin 30, cos 30). In case 10, R_x(180) · R_y(30) · R_x(180) =
+        // R_y(−30): X to (cos 30, 0, sin 30), Z to (−sin 30, 0, cos 30). A
+        // yaw under turn Y, or a pitch under X, turns about T_1's own axis
+        // and commutes with it, so it could not tell the two apart.
+        must_fail(
+            "T_1 on the left, under turn Y",
+            takes_axes(
+                under_y(),
+                [[-1.0, 0.0, 0.0], [0.0, -c30, s30], [0.0, s30, c30]],
+            ),
+        );
+        must_fail(
+            "T_1 on the left, under turn X",
+            takes_axes(
+                under_x(),
+                [[c30, 0.0, s30], [0.0, 1.0, 0.0], [-s30, 0.0, c30]],
+            ),
         );
     }
 
