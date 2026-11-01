@@ -5,7 +5,7 @@
 //!
 //! The rig frame is Spherecut's world at zero stabilisation (D33): +X
 //! right, +Y up, and the front lens looking along −Z. A lens frame is
-//! [`Unified`](crate::fisheye::Unified)'s: +x right in the image, +y
+//! [`Unified`]'s: +x right in the image, +y
 //! down, +z along the optical axis. Every frame is right-handed, and a
 //! rotation by a positive angle about an axis turns by the right-hand
 //! rule. For calibration block b, a rig-frame direction reaches the lens
