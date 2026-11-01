@@ -9135,10 +9135,11 @@ What:
   written by hand (`camera::pb`).
 - **D15's style of limits**, listed under D15: the trailer, the index,
   the metadata and its strings, and each record read, each checked
-  before anything is allocated for it; a record past the trailer is
-  skipped and counted, never followed; every error carries its part and
-  its byte (in the file for the readers, in the payload for the
-  parsers, in the string for the calibration parser); no input panics.
+  before anything is allocated for it; a record that would run into the
+  index or past the file is skipped and counted, never followed; every
+  error carries its part and its byte (in the file for the readers, in
+  the payload for the parsers, in the string for the calibration
+  parser); no input panics.
 - **Inputs are `impl Read + Seek`**, so callers open the file
   themselves, an agent's beneath its root (D45). Every reader
   (`read_trailer`, `read_record`, `verify_companion`, and later the
