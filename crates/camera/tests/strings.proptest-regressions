@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+#
+# The one case saved here before (arbitrary_bytes_never_panic_the_parsers,
+# base = u64::MAX - 8) was dropped: it shrank under an earlier strategy
+# for `base`, which today's `any::<u64>() >> 1` can't draw, so its seed
+# no longer replays it. The property now walks every input from
+# u64::MAX - 8 itself.

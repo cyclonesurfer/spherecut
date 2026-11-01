@@ -21,6 +21,7 @@ use spherecut_sphere::{LonLat, equirect};
 pub mod audio;
 pub mod code;
 pub mod fake;
+pub mod insv;
 pub mod lens;
 pub mod media;
 pub mod yuv;

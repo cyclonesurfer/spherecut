@@ -1,6 +1,7 @@
 //! `spherecut probe`: everything we can learn about a media file without
 //! decoding it.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs::File;
@@ -13,6 +14,7 @@ use serde::Serialize;
 use spherecut_core::{Rational, Time};
 use thiserror::Error;
 
+use crate::camera::CameraFile;
 use crate::detect::{self, CameraGuess};
 use crate::ff;
 use crate::ffi;
@@ -32,6 +34,11 @@ pub struct ProbeReport {
     /// Present for MP4/MOV files, which is every camera format we support.
     pub mp4: Option<Mp4Summary>,
     pub camera: Option<CameraGuess>,
+    /// What a camera's own records say: an Insta360 trailer's lenses,
+    /// calibration, companion, exposure count and records, each a field
+    /// of the report's own, null for any other file (M3 plan 5.4).
+    #[serde(flatten)]
+    pub camera_file: CameraFile,
     /// How much of the file's structure was checked for `damage`.
     pub structure: StructureCheck,
     /// Why the file looks truncated or corrupt, each [`codes::TRUNCATED`]
@@ -97,7 +104,7 @@ pub struct Problem {
 }
 
 impl Problem {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Problem {
             code,
             message: message.into(),
@@ -138,6 +145,10 @@ pub mod codes {
     pub const UNEXPECTED_FIRST_BOX: &str = "unexpected_first_box";
     /// A warning: a `trak` that FFmpeg gives no stream.
     pub const TRACK_WITHOUT_STREAM: &str = "track_without_stream";
+    /// A warning: an Insta360 trailer, one of its records or a
+    /// calibration string that can't be read (M3 plan 5.4). The video
+    /// plays; what the part would have said is left out of the report.
+    pub const BAD_TRAILER: &str = "bad_trailer";
 
     /// Every code above.
     pub const ALL: &[&str] = &[
@@ -150,6 +161,7 @@ pub mod codes {
         CANNOT_DECODE,
         UNEXPECTED_FIRST_BOX,
         TRACK_WITHOUT_STREAM,
+        BAD_TRAILER,
     ];
 }
 
@@ -359,6 +371,27 @@ pub(crate) fn fourcc_str(tag: u32) -> Option<String> {
                     (c as char).to_string()
                 } else {
                     format!("\\x{c:02x}")
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Text a file holds, for a terminal: each control character (C0, DEL
+/// and C1, ESC and newline among them) as `\xNN`, as [`fourcc_str`]
+/// gives a fourcc's bytes, so that a camera's serial or a tag can't move
+/// the cursor or recolour what is printed after it.
+pub fn escape_controls(s: &str) -> Cow<'_, str> {
+    if !s.chars().any(char::is_control) {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(
+        s.chars()
+            .map(|c| {
+                if c.is_control() {
+                    format!("\\x{:02x}", u32::from(c))
+                } else {
+                    c.to_string()
                 }
             })
             .collect(),
@@ -791,7 +824,25 @@ fn probe_file(src: Source<'_>, cancel: Option<Arc<AtomicBool>>) -> Result<ProbeR
             warnings.push(Problem::new(why.warning_code(), why.describe(&what, false)));
         }
     }
-    let camera = detect::guess(src, tree.as_ref(), &streams, &container.tags);
+    let mut camera = detect::guess(src, tree.as_ref(), &streams, &container.tags);
+    // An Insta360 file's trailer, which camera reads (M3 plan 5.4).
+    let camera_file = match camera.as_mut() {
+        Some(g) if g.vendor.as_deref() == Some("Insta360") => {
+            crate::camera::read(open, meta.len(), g, &streams, &mut warnings)
+        }
+        _ => CameraFile::default(),
+    };
+    // An `inst` box last, as the X5 writes, with no trailer's magic after
+    // it: a trailer damaged at its end, which detect can't tell from a
+    // plain MP4's end.
+    if let Some(at) = detect::inst_without_magic(open, tree.as_ref(), meta.len()) {
+        warnings.push(Problem::new(
+            codes::BAD_TRAILER,
+            format!(
+                "the file ends in an `inst` box, where Insta360 cameras put their trailer, but not in the trailer's magic: byte {at} differs, so the trailer can't be read"
+            ),
+        ));
+    }
     let mp4 = tree.as_ref().map(|t| Mp4Summary {
         brand: t.ftyp_brand().map(|b| b.to_string()),
         top_level: t
@@ -817,6 +868,7 @@ fn probe_file(src: Source<'_>, cancel: Option<Arc<AtomicBool>>) -> Result<ProbeR
         streams,
         mp4,
         camera,
+        camera_file,
         structure,
         damage,
         warnings,
@@ -1211,7 +1263,8 @@ mod text {
 
     use spherecut_core::{Rational, Time};
 
-    use super::{ProbeReport, StreamInfo, StructureCheck, TruncatedBox};
+    use super::{ProbeReport, StreamInfo, StructureCheck, TruncatedBox, escape_controls};
+    use crate::camera::CameraFile;
     use crate::spherical::{Projection, StereoMode};
 
     /// The lines of FFmpeg's log about a file, as the report shows them.
@@ -1254,7 +1307,10 @@ mod text {
     /// GUI's Info pane shows.
     pub fn render_text(r: &ProbeReport) -> String {
         let mut s = String::new();
-        let _ = writeln!(s, "{}", r.path.display());
+        // A file's name, its companion's and its tracks' handler names are
+        // the file system's and the file's, so their control characters
+        // are escaped, as the camera's strings are below.
+        let _ = writeln!(s, "{}", escape_controls(&r.path.to_string_lossy()));
         let _ = writeln!(
             s,
             "  container  {} ({}), {} bytes{}{}",
@@ -1300,30 +1356,39 @@ mod text {
                 );
             }
         }
+        // The camera's strings are the file's, its trailer's or its tags',
+        // so their control characters are escaped.
         if let Some(c) = &r.camera {
             let _ = writeln!(
                 s,
                 "  camera     {}{}{}  layout: {:?}",
-                opt(&c.vendor),
-                c.model
-                    .as_ref()
-                    .map(|m| format!(" {m}"))
-                    .unwrap_or_default(),
+                c.name()
+                    .map_or_else(|| "-".into(), |n| escape_controls(&n).into_owned()),
                 c.firmware
-                    .as_ref()
-                    .map(|f| format!(" (firmware {f})"))
+                    .as_deref()
+                    .map(|f| format!(" (firmware {})", escape_controls(f)))
+                    .unwrap_or_default(),
+                c.serial
+                    .as_deref()
+                    .map(|n| format!(", serial {}", escape_controls(n)))
                     .unwrap_or_default(),
                 c.layout
             );
             for e in &c.evidence {
-                let _ = writeln!(s, "             - {e}");
+                let _ = writeln!(s, "             - {}", escape_controls(e));
             }
         }
+        camera_file(&mut s, &r.camera_file);
         for st in &r.streams {
             stream(&mut s, st);
         }
         for (k, v) in &r.container.tags {
-            let _ = writeln!(s, "  tag        {k} = {v}");
+            let _ = writeln!(
+                s,
+                "  tag        {} = {}",
+                escape_controls(k),
+                escape_controls(v)
+            );
         }
         for w in &r.warnings {
             let _ = writeln!(s, "  warning    {w}");
@@ -1333,6 +1398,66 @@ mod text {
             let _ = writeln!(s, "  DAMAGE     {d}");
         }
         s
+    }
+
+    /// The lines for what a camera's own records say (M3 plan 5.4).
+    fn camera_file(s: &mut String, f: &CameraFile) {
+        if let Some(l) = &f.lenses {
+            let _ = writeln!(
+                s,
+                "  lenses     streams #{} and #{} (which lens each holds isn't read yet)",
+                l.tracks[0], l.tracks[1]
+            );
+        }
+        if let Some(c) = &f.calibration {
+            let _ = writeln!(
+                s,
+                "  calibration {}{}, canvas {}x{}{}, hash {}",
+                c.generations.join(" "),
+                c.in_use
+                    .as_ref()
+                    .map(|g| format!(" ({g} in use)"))
+                    .unwrap_or_else(|| " (none said to be in use)".into()),
+                c.canvas[0],
+                c.canvas[1],
+                c.window
+                    .map(|w| format!(
+                        ", window {}x{} of {}x{} at {},{}",
+                        w.dst[0], w.dst[1], w.src[0], w.src[1], w.offset[0], w.offset[1]
+                    ))
+                    .unwrap_or_default(),
+                c.hash
+            );
+        }
+        if let Some(c) = &f.companion {
+            let _ = writeln!(
+                s,
+                "  companion  {}, {}",
+                escape_controls(&c.path.to_string_lossy()),
+                if c.verified {
+                    "the same exposure record (4): one recording".into()
+                } else {
+                    format!(
+                        "paired by name only: {}",
+                        c.why.as_deref().unwrap_or("not compared")
+                    )
+                }
+            );
+        }
+        if let Some(records) = &f.records {
+            let list: Vec<String> = records
+                .iter()
+                .map(|r| format!("{} ({} B)", r.id, r.size))
+                .collect();
+            let _ = writeln!(
+                s,
+                "  trailer    records {}{}",
+                list.join(", "),
+                f.exposure_entries
+                    .map(|n| format!("; {n} exposure entries"))
+                    .unwrap_or_default()
+            );
+        }
     }
 
     fn stream(s: &mut String, st: &StreamInfo) {
@@ -1403,7 +1528,7 @@ mod text {
             }
         }
         if let Some(h) = &st.handler {
-            let _ = writeln!(s, "             handler \"{h}\"");
+            let _ = writeln!(s, "             handler \"{}\"", escape_controls(h));
         }
         if !st.disposition.is_empty() {
             let _ = writeln!(s, "             disposition {}", st.disposition.join(", "));
@@ -1863,6 +1988,90 @@ mod tests {
                 channel_conf,
                 "{name}"
             );
+        }
+    }
+
+    /// A file's text prints with its control characters escaped, the
+    /// rest as it is, and text without any is borrowed.
+    #[test]
+    fn control_characters_are_escaped_for_the_terminal() {
+        use spherecut_testkit::control::must_fail;
+
+        let planted = "SN\u{1b}[2J\u{7}\n\t\u{7f}\u{9b}é 360°";
+        let shown = escape_controls(planted);
+        assert_eq!(shown, "SN\\x1b[2J\\x07\\x0a\\x09\\x7f\\x9bé 360°");
+        assert!(!shown.chars().any(char::is_control), "{shown:?}");
+        assert!(matches!(escape_controls("Insta360 X5"), Cow::Borrowed(_)));
+        // The control: what was planted holds control characters.
+        must_fail(
+            "the planted text, free of control characters",
+            !planted.chars().any(char::is_control),
+        );
+    }
+
+    /// Probe's text escapes a track's handler name, which is the file's
+    /// own `hdlr` text, and the file's and its companion's names, as it
+    /// does the camera's strings: the only control characters left are
+    /// the lines' own ends.
+    ///
+    /// Control: each planted text printed as it is holds control
+    /// characters.
+    #[test]
+    fn probe_text_escapes_the_handler_and_the_paths() {
+        use spherecut_testkit::control::must_fail;
+
+        use crate::camera::Companion;
+
+        let (name, lrv, handler) = (
+            "VID_\u{1b}]0;x\u{7}_00_004.insv",
+            "LRV_\u{1b}]0;x\u{7}_01_004.lrv",
+            "INS\u{1b}[2J.HVC",
+        );
+        let mut video = stream(StreamKind::Video);
+        video.handler = Some(handler.into());
+        let report = ProbeReport {
+            path: name.into(),
+            file_size: 1,
+            container: Container {
+                format: "mov,mp4,m4a,3gp,3g2,mj2".into(),
+                format_long: String::new(),
+                duration: None,
+                start_time: None,
+                bit_rate: None,
+                tags: BTreeMap::new(),
+            },
+            streams: vec![video],
+            mp4: None,
+            camera: None,
+            camera_file: CameraFile {
+                companion: Some(Companion {
+                    path: lrv.into(),
+                    verified: true,
+                    why: None,
+                }),
+                ..CameraFile::default()
+            },
+            structure: StructureCheck::Full,
+            damage: Vec::new(),
+            warnings: Vec::new(),
+            ffmpeg_log: Vec::new(),
+        };
+        let text = render_text(&report);
+        let clean = |s: &str| !s.chars().any(|c| c.is_control() && c != '\n');
+        assert!(clean(&text), "{text:?}");
+        for line in [
+            "VID_\\x1b]0;x\\x07_00_004.insv\n".to_owned(),
+            "  companion  LRV_\\x1b]0;x\\x07_01_004.lrv, the same exposure record (4): one recording\n".to_owned(),
+            "             handler \"INS\\x1b[2J.HVC\"\n".to_owned(),
+        ] {
+            assert!(text.contains(&line), "{line:?} in {text}");
+        }
+        for (what, raw) in [
+            ("file's name", name),
+            ("LRV's name", lrv),
+            ("handler", handler),
+        ] {
+            must_fail(&format!("the {what}, printed as it is, clean"), clean(raw));
         }
     }
 

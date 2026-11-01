@@ -14,11 +14,11 @@ This describes the design as built, plus the planned parts marked
                      |                                    |
    render (wgpu on Vulkan, WGSL; M1 slice 3)   audio (cpal output, chunk ring, audio clock; M1 slice 6)
                                       |
-             motion (IMU, stabilization)   stitch (lens models, blending)  (planned)
-                                      |
-                       camera (insta360, gopro, dji)  (planned)
+                    motion (IMU, stabilization)  (planned)
                                       |
      media (FFmpeg, MediaBackend and frame-exact seek, probing, MP4 boxes, doctor)
+                                      |
+        camera (cameras' raw files from their bytes: the Insta360 trailer; M3.2)
                                       |
    sphere (projection math)      core (time, frames, colour, stop tokens, clocks, the UI thread's guard, atomic writes, the project model)
 ```
@@ -29,6 +29,13 @@ tests and `xtask`.
 
 core depends on sphere (since M2.1, D48), whose projections and
 quaternions the project model holds; sphere depends on neither.
+
+camera (M3.2, D61) reads cameras' raw files from their bytes, with no
+FFmpeg, and depends on core alone (sphere joins in M3.5). media depends
+on camera, never the reverse, so that probe and doctor read a trailer
+(M3.2's unit (c) adds that edge). M3's lens maths and rig go in sphere
+and its blending, seam instrument and fit in render: there is no
+`stitch` crate.
 
 agent depends on export (since M2.5): the JSON contract it holds for
 the CLI lists the export's codes and turns its errors and fallbacks
@@ -47,10 +54,9 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), the `--time` grammar (`TimeSpec`), what a decoded frame is (`video`: pixel layouts, planes, colour), stop tokens by generation (`cancel`), the clocks playback runs on (`clock`: the `Clock` trait, `SystemClock`, the frame-steppable `ManualClock`), the guard that a blocking call never runs on the UI thread (`blocking`: `mark_ui_thread`, `may_block`, D34) files written whole or not at all (`fs::TempFile`, D16), and the project model (`project`: media, a sequence of clips with trims, view keys and markers, look-at targets, every change an `Edit` through `Project::apply`, undo `History`, the JSON project file; D47, D48; and `project::anim`, the view of a clip at a time from its keys, D50) | M0: name and time; M1: `video`, `cancel`; slice 4: `TimeSpec`, `fs`; slice 5: `clock`, `blocking`; M2.1: `project`; M2.2: `project::anim` |
 | `spherecut-sphere` | CPU reference projection math in f64: equirect and its uv gradient, cube/EAC, fisheye lens models, view projections and morphs and their inverse (`project_morph`), output pixels to lens coordinates (`pixel`), yaw, pitch and roll (`orient`), rotation helpers, keyed lens shapes (`LensShape`), and the keyframe splines (`spline`: the scalar spline with eases and spin, Free's SO(3) spline, `follow_spin`'s maths) | M0; M1 slice 3a: `pixel`, `orient`, `uv_gradient`, `project_morph`; M2.2: `spline`, `LensShape` |
 | `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software and on VA-API or Vulkan Video with fallback to software, the render node lookup, the colour default rules, audio decoding to the output's rate and channels on the clip's time axis (`audio`, D35), a small MP4 writer, `doctor`'s capability checks | M0; `MediaBackend` from M1 slice 2a, hardware from 2b, audio from 6 |
-| `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, the supersampled ideal of a view (`render_view_ideal`, which the goldens hold minified views to), tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes, seeded noise for camera bitrates) and broken files, `SyntheticBackend` and `GatedBackend` | M0; M1 slices 2a, 2b and 3b |
+| `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, the supersampled ideal of a view (`render_view_ideal`, which the goldens hold minified views to), tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes, seeded noise for camera bitrates) and broken files, `SyntheticBackend` and `GatedBackend`; for M3's camera files, the lens truth synth plants (`lens`: one calibration's stored numbers, `CalibTruth`, and `Planted`, synth's own enums for the conventions a camera's files leave open), the frame codes in a lens image's corners (`code`) and the two-track pair clips with their coding read back (`media::write_pair`, `track_coding`), and the Insta360-like trailer writer (`insv`: the X5's records for a master and its LRV, `Records::x5_like` and `x5_lrv`, laid out by `inst_box` and appended by `append_trailer`, with the trailer faults of `InsvFault` planted on request) and the calibration-string printer (`insv::print`, at the X5's precision), which share no code with camera's reader and parser (M3 plan 4.1 rule 2) | M0; M1 slices 2a, 2b and 3b; M3.0: `lens`; M3.1: `code`, the pair clips; M3.2: `insv` |
 | `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, `require_audio_device` among them, the `TIER2-SKIP:` marker), benchmark recording (`bench`, with latency percentiles) and FNV-1a hashing (`fnv64`) | M0; M1 slice 3a: `fnv64` (and `compare` until M2.4) |
-| `spherecut-camera` | Per-camera raw formats: file pairing, vendor metadata, calibration | M3 |
-| `spherecut-stitch` | Lens calibration models, seam blending, exposure matching | M3 |
+| `spherecut-camera` | Cameras' raw files, read from their bytes with no FFmpeg (D61, and the M3 plan's D62): the Insta360 trailer and its records (`insta360::read_trailer`, `read_record`, under the limits in `insta360::limits`), the metadata record (`parse_metadata`, through the schema-less protobuf walker `pb::Walker`), the thumbnail, IMU span and exposure records, the calibration strings parsed into named tokens and printed back byte for byte (`insta360::calib`), and a recording's files, by name (`companions`) and by bytes (`verify_companion`). Every reader takes `impl Read + Seek` and calls `may_block` first. Later in M3, the conversion to sphere's rig and other cameras | M3.2: the types, then its units (a) to (d) |
 | `spherecut-motion` | IMU ingest, time sync, orientation fusion, stabilization | M4 |
 | `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); for export, equirect output, the output frame, the YUV pass for the encoders, motion blur and a frame's views from the clip's keys (`output`, D49); image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics), from testkit so that agent can use it (amendment 2 item 32); later scopes | M1 slices 3a and 3b; M2.3; M2.4: `compare` |
 | `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slices 5 and 6 |

@@ -807,6 +807,311 @@ empty target folder, its tests 889 s over 106 binaries against M3.1's
 669 s over 103; M3.2's fix agents built beside it, and the rest of the
 rise is in suites the slice doesn't touch (parity +68 s, export +67 s).
 
+### M3.2, the camera crate (2026-11-01)
+
+Branch `m3/camera`: the types the units share first (a new crate,
+`spherecut-camera`, below media, D61), then (a), (b), (d) and (c) in
+turn; a reviewer each, and each review's findings fixed.
+
+- **(a) The trailer.** `read_trailer` finds everything from the
+  file's end, so a trailer inside an `inst` box and a bare one read
+  the same: the 72-byte tail (size, version, magic), the index whose
+  footer sits at EOF − 78, and each listed record's 6-byte footer,
+  which must repeat its slot's id, format and size. A slot whose
+  record would run into the index or past the file goes into
+  `Trailer::skipped` and is never followed. Every size is checked
+  before anything is allocated for it, every error carries its byte,
+  and both readers call `may_block` first. `parse_exposure`,
+  `thumbnail` and `imu_span` read records 4, 2 and 3. D62 (our own
+  reader, D15's limits, no telemetry-parser) is recorded, and D15
+  gains camera's limits.
+- **(b) Metadata and strings.** `pb::Walker` walks protobuf (varints
+  of at most 10 bytes, keys that fit u32, wire types 0, 1, 2 and 5).
+  `parse_metadata` reads the fields 5.1 names and counts the rest in
+  `unknown` (67 on every X5 file). `calib::parse` and `print` keep
+  each number's text, so `parse(print(c)) == c` bit for bit and
+  `print(parse(s)) == s` byte for byte, V6's 13 terms in token order.
+- **(d) synth's writer.** `synth::insv` shares no code with camera
+  (4.1 rule 2): `encode`, `Records::x5_like`, `inst_box` and
+  `append_trailer` (the hook M3.5's `write_insv` calls after
+  `Mp4Writer`), the six trailer faults planted on request, and
+  `print` at the X5's precision.
+- **(c) Companions, probe and doctor.** `companions` moves into
+  camera (clips.rs's tests pass unchanged), with `verify_companion`
+  comparing record 4 in 64 KiB chunks and `Calibrations::hash`.
+  `media::camera` reads the trailer where probe already reads the
+  file. Probe gains `camera.serial`, `lenses`, `calibration`,
+  `companion`, `exposure_entries` and `records` (null for any other
+  file; the agent's summary gains `camera_detail` and the same
+  fields, each only when present) and a warning code, `bad_trailer`,
+  which also names a file whose last box is `inst` without the magic
+  (the first byte that differs). Probe's text escapes control
+  characters in the camera's strings, the tags, handler names and
+  paths. `spherecut doctor --file FILE` says whether a file can be
+  stitched, what is missing and why (a trailer there but unreadable,
+  no video stream), carries probe's warnings, and decodes each lens's
+  first frame.
+
+**Settled by the slice** (for the plan's next amendment):
+- `read_trailer` returns `Ok(None)` for a wrong magic, as for a plain
+  MP4; the clear error for `InsvFault::BadMagic` is probe's
+  `bad_trailer` warning on an `inst` box without the magic, and
+  doctor --file's "missing: a camera trailer that can be read". 5.5,
+  22.1's M3.2 done-when and M3.5's should say so. `NoCalibration`
+  is doctor --file's "can be stitched: no".
+- No metadata field holds a frame period, so `Metadata` has none; the
+  period, the clip's length and its frame count come from the tracks.
+  Field 98's items 1, 3, 4 and 5 make `FrameSpan`: item 1 is field
+  24, item 4 − item 3 = floor(n·1000/r) ms with r the rate rounded up,
+  item 5 is n on a master and the LRV's own frame count on an LRV,
+  items 6 and 7 are 0; item 2 (item 1 + floor(n·10⁶/r) µs on all 14
+  of Pat's files) conflicts with the sailing fixture and is not kept.
+  Field 93 = floor(n·1000·den/num) on a master and its LRV alike,
+  with n a master track's frames + 1 and num/den the master's rate.
+- Field 44 is the file's own `video_size` (3840² on a master, 1664×832
+  on an LRV), not 5.1's "LRV size". Fields 133 and 134 are not kept.
+- Field 25 is an f32 widened to an f64 (21.244001388549805 at 8K), so
+  it is compared by bits, not with an f32 literal.
+- A message field read twice (26, 27, 44, 98, 145) is replaced whole
+  by its last copy, where protobuf would merge; no X5 file repeats a
+  top-level field. Record 1 has 92 top-level fields on a master and
+  90 on an LRV (79 and 80 absent), 67 of them unread.
+- Limits beyond 5.1's (D15): 256 index slots (`MAX_SLOTS`, one for
+  each id a slot's byte can name; 5.1 says 64), 64 lens profiles of
+  each kind in field 145 (`MAX_PROFILES`; the X5 writes 6), and
+  `verify_companion`'s `max`, which media sets to `MAX_EXPOSURE` (64
+  MiB, the limit probe reads record 4 to): a record over it, or empty
+  in both files, pairs by name only and isn't read.
+- New in the API: `RecordRef::slot` (where its index slot is),
+  `Trailer::skipped`, `imu_span`, `calib::Token`, `Focal::{Radius,
+  Mei}`, `Generation::{of_word, of_offset_version, tokens, fields}`,
+  `CameraError`'s `Part` and the variants WireType, TooLarge, TooSmall,
+  IndexFooter, Version, BadSize, NotUtf8, BadToken and Io (which names
+  its part); `verify_companion(master, lrv, max)` returning
+  `CompanionError { side, error }`; synth's `TrailerLayout::index`,
+  `InsvFault::in_trailer`, `inst_box`'s `align` (X5_ALIGN, or 1 so
+  cheap properties don't write 128 KiB gaps), `Records::x5_lrv` (an
+  LRV keeping its master's records, for M3.5's `write_insv`) and
+  `Records::plant_original`.
+- Errors 5.1 doesn't name: a footer at EOF − 78 that isn't an index's
+  (an older camera's trailer, or damage) is IndexFooter at len − 78;
+  FooterMismatch always names a record's slot, id 0 included; an index
+  that isn't whole slots is BadSize{id 0}; a trailer too small for its
+  index's footer and tail (78 bytes) or for the index too is
+  TooSmall{Tail} at len − 40, worded by which; the version is checked
+  before the size; BadToken tells a packed word of another generation
+  from one of none. The reader doesn't enforce slot k = id k or the
+  128 KiB alignment (the X4 uses 4 KiB); Tier 2c checks both on Pat's
+  files.
+- The hash rule (11.1): fnv1a64 (core's, now public) over the working
+  V1, V2, V3 and V6 strings in that order, each followed by a NUL, an
+  absent one the NUL alone, formatted `{:016x}`.
+- 5.4's shapes as built: `companion` is `{path, verified, why}`;
+  `lenses` is `{tracks}` only until M3.5 adds binding, evidence,
+  screen side and geometry (doctor's geometry is "provisional" until
+  then); `calibration.in_use` is null, with a `bad_trailer` warning,
+  when field 136's generation doesn't parse.
+- doctor --file decodes on `frame --decoder auto`'s path (D39:
+  VA-API on the render node, else software), not the viewer's choice
+  (D34, Vulkan Video on a discrete GPU). Lining the two up needs a
+  Vulkan mode with a software fallback in `agent::still`; it belongs
+  with M3.1's pair decode.
+- `media::detect::CameraGuess::name()` is the one camera-name rule,
+  used by probe's text, the agent's summary and doctor --file.
+- `synth::insv`'s `x5_like` follows the relations Pat's masters show
+  (insta360.md's new [bytes] table "Record 4 and the IMU against the
+  frames"): one exposure item a frame, field 24's frame at item 5 at
+  25 and 29.97 fps, 6 at 59.94 and 10 at 119.88, and 2, 3, 4 or 6
+  items past the last frame, which gives record 4's 122 to 1912 items
+  on all 7 takes; the IMU at 1 kHz over record 4's span (within 17 ms
+  of Pat's start on every take); field 136 from the strings given.
+  `append_trailer` copies the whole MP4 before writing the box, which
+  M3.10's multi-GB clips will want done in place.
+- insta360.md is corrected against the bytes (for M3.21's review): the
+  gaps between records hold stray non-zero bytes in all 14 files,
+  mostly before records 9, 4 and 2; record 1 ends where the index
+  starts (EOF − 388), not at its footer; the metadata table gains
+  fields 25, 44, 93 and 98's rules and the field counts; the LRV
+  bullet lists every field that differs from its master's (9, 26's
+  item 2, 36, 44, 79 and 80 absent, 98's item 5, 131, 132, 135). Still
+  to correct: §3.3's record 2 row, since the 4K120 files have none (a
+  `.thumbnail.bin` beside them instead), and the rig.rs citations left
+  in §2.4, §2.6, §4.3, §4.4 and §4.5.
+
+**Open:** whether read_trailer should read the pre-X4 sequential
+layout (refused today as IndexFooter, as D62's Revisit says);
+whether `verify_companion` should check the stop between its chunks
+(it would need a stop error in camera; the 64 MiB cap bounds the work
+and the stop is checked between files); probe's text still prints
+warnings, damage and FFmpeg's log lines unescaped;
+whether the agent's MCP doctor tool should return `FileCheck` too;
+whether M3.5's `print` applies `planted`; `cargo doc -p
+spherecut-core` with -D warnings already fails on main
+(project/mod.rs:7 needs `mod@file`), and xtask doesn't run rustdoc.
+
+**The reviews found** that FooterMismatch's message named a slot for
+the index's own footer, that several Tier 2c checks had no control,
+that read_record's doc missed Truncated, that the TruncatedTrailer
+message didn't say which size was wrong, that the round trip couldn't
+fail on the index alone (synth's layout is now checked against the
+file first), that parse_metadata's doc claimed protobuf's merge, that
+doctor --file claimed the viewer's decode path, and that nothing
+checked the agent's side of the companion test or a lens that doesn't
+decode. All were fixed; none was rejected. The fresh review of the
+whole slice (four areas, each finding checked by a second agent; 18
+upheld, 5 refuted) found four majors: three in this note, whose
+control list left most controls out (rule 8; now whole, below), and
+Tier 2c's shutter check, which passed a denormal while it and the
+stamps' order had no control (now a floor of 1/100,000 s and three
+controls a file). Its other upheld findings: a slot claiming id 0 was worded as the index's
+footer; 64 slots refused trailers whose ids the byte can name; I/O
+errors didn't name their part; field 145 had no count limit;
+`verify_companion` read record 4 whole however large; doctor --file
+said "missing" for a trailer it couldn't read and failed a file with
+no video; a damaged magic went unwarned; probe's text printed control
+characters; `x5_like` didn't follow the X5's record 4, field 93 or
+98; synth's docs were copied from camera's reader (rewritten from
+insta360.md); a fault test's name claimed every fault was an error;
+the note's stray-byte list named 3 files of 14; and the Tier 2c
+agent's probe ran on one pair, not seven (it now runs on all 14
+files). The fixes' own review found two minors (D15 missing the two
+new limits; synth citing a table insta360.md didn't have, now added
+from the bytes) and seven nits, all fixed.
+
+**Controls that must fail**, by file (every new one):
+- camera `trailer.rs`: three bytes of the inst box lost; one file's
+  trailer held to another's bytes; a trailer a byte over 1 GiB and a
+  byte larger than its file; the index's size in the tail's words; an
+  index of 2561 bytes and one of 257 slots (256 slots read, holding
+  records 128 and 255); a 100-byte record read with a max of 99; a
+  metadata record a byte over 1 MiB; version 4; record 4's footer with
+  another format, id and size; a metadata footer where the index's is;
+  record 4's footer said to be the index's; a slot claiming id 0, and
+  it worded as the index's footer; an index of 305 bytes; a trailer
+  too small for the footer and for the index, the first worded as the
+  second, and trailers of 388 and 78 bytes said too small; record 29
+  past the file and into the index; a file ten bytes short of its
+  length; record 4 cut five bytes into its payload; a failed read or
+  seek in seven places, and record 4's worded as the tail's; field 93
+  in wire type 2, a group, and the first worded as the walk's; an
+  exposure record of 33 bytes and an IMU record of 41; a thumbnail
+  shorter than its header, a byte short, 7 wide and 2³² × 2³²; and
+  read_trailer and read_record on a thread not marked.
+- camera `strings.rs`: u64::MAX's ten bytes taken for a bad varint; a
+  second field 2 and a group among the unknown; Pat's V3 printed from
+  its values, and with lens 0's ξ written 2.0000000 and 2.000001;
+  Pat's V6 taken for a wrong count and with a letter for a digit; a
+  metadata record a byte over 1 MiB; a model, a V6 string, an
+  identify and a profile's name a byte over 4 KiB (the last also
+  worded as too many profiles); field 145 with 65 polynomials, 65
+  fields of view and half a million; a firmware that isn't UTF-8; each
+  wire type the walk refuses, and each field in a wire type not its
+  own; field 27's item 1 as bytes; a window 2³² wide; field 0 and a
+  key past 32 bits; the record a byte short; field 26's identify past
+  its end; field 145's packed doubles a byte short; a window read
+  twice, merged; each bad token at its byte; V6's word in V3 worded as
+  a word of none; the X5-like record cut a byte short.
+- camera `synth_insv.rs`: a footer of synth's changed; the X5-like
+  round trip's eight (the parsed metadata, the thumbnail's sides
+  swapped and its last chroma byte, the last IMU item a µs later, an
+  IMU item's gyro, an exposure of 1/250 s, record 9's last byte,
+  record 10 said to be JSON); at each of 25, 29.97, 59.94 and 119.88
+  fps the first frame taken as exposure item 0, field 24 at the next
+  item and the frames timed from item 0; an LRV of its own 95 frames,
+  verified; the cross parse's seven (each block held to the other's
+  truth, fx a unit off and a decimal short, Pat's V6 truth held to
+  the V3 string, Pat's V3 held to lens type 114 and to body 5, fx
+  with a zero more, reprinted); the hash's five (a working string with
+  a byte changed, V3's and V6's swapped, V3's held as V2's, no NULs,
+  the hash over the original copies); the clean file read as each
+  fault; a truncated trailer's file.
+- camera `companions.rs`: another recording's LRV naming this master;
+  the X5's own name naming nothing; an LRV and a master with a byte
+  changed (5 places each); an LRV a frame short; record 4 missing in
+  the master, the LRV and both; record 4's slot past the LRV's end; a
+  master cut inside record 4; an LRV whose read fails inside it; a
+  record a byte over the limit, verified; empty exposure records,
+  verified; verify_companion on a thread not marked.
+- camera `tier2_samples.rs`, on each of Pat's 14 files: V3's lens 1
+  held to lens 0's tokens; the V3 string read as V6; the serial with
+  its first byte changed; the model an X4; the firmware build0; the
+  window a pixel lower; the metadata held to the other kind's and to
+  another take's; field 24 at the next exposure item; the metadata
+  without its last field; the thumbnail turned 640 × 1280; record 4's
+  footer changed; the slots against an index of 32 and the metadata
+  ending at one; the metadata on a 128 KiB boundary; record 9 where
+  record 10 ends; the sizes against another take's; the formats with
+  the thumbnail in protobuf; the IMU at 500 Hz; the exposure a frame
+  apart at half the rate; the exposure stamps reversed; the shutters
+  held to a fiftieth of the frame and read as integer µs through a
+  double's bits; the inst box a byte early. On each pair, a master's
+  V6 word and its serial changed, against its LRV's. On each string,
+  printed from its values, with a zero more against its own
+  calibration and against the camera's, its first token's last digit
+  changed, and read as the next generation.
+- cli `contract.rs`: a report with only its old keys; the LRV's
+  lenses; the hash without the absent generations' NULs; an LRV with
+  an exposure item fewer, verified, by the CLI and by the agent; a
+  master with no calibration strings, calibrated; the master's summary
+  with only the old keys; the planted serial, clean; a master with its
+  magic whole, warned of. cli `doctor.rs`: a master with no
+  calibration stitchable, in text and in JSON; an LRV stitchable; a
+  master whose lens 1 doesn't decode stitchable, in JSON and in text;
+  an unreadable trailer and a damaged magic said to be missing; a
+  calibration the camera names worded as one it doesn't; a master
+  with two video streams missing a video stream. cli `tier2_probe.rs`:
+  another take's LRV, verified.
+- media `camera.rs`: a directory, warned of as a file that can't be
+  opened; `probe.rs`: the planted text free of control characters,
+  and the file's name, the LRV's name and the handler printed as they
+  are, clean. agent `ops/probe.rs`: a stopped call compares no
+  companion (written by hand, checked by removing the stop check).
+- synth `insv.rs`: Pat's V3 blocks swapped; block 1's tz a unit off;
+  the box a byte later; record 4's footer with id 5; a byte after
+  record 4 that isn't zero; field 1 written as 2; the clean box
+  against itself; take 006's records held to 007's; field 24 at the
+  first exposure item; an exposure item a frame late; field 98's item
+  1 a µs off; field 98 counting the tracks' frames; field 93 to the
+  nearest ms; the IMU from field 24's time and stopped at the last
+  frame; V3 alone in use as V6; one calibration of each generation,
+  refused; an LRV of its own 95 frames; the master as its own LRV;
+  the working string, the planted original.
+- A mutation check: four deliberate bugs in the reader, each caught
+  by one to four tests, then reverted; and the field 145 cap disabled,
+  caught by its control.
+
+**Tier 2c on Pat's 14 files, Pass:** version 3; the index at EOF − 388
+with slot k listing record k; inst.size = E + 8; records 22 and 28
+listed; every record but 1 and 10 on 128 KiB; the thumbnail 1280×640
+and absent from the 4K120 files; the IMU about 995 µs a sample; the
+exposure one item a master frame, within 1 % of the frame period,
+its stamps rising, every shutter between 1/100,000 s and the frame
+(1065.2 µs on take 006 to 9999.7 µs on take 010), and the LRVs carry
+the master's record (007's 602 items for a 4K120 master). The four generations'
+strings are byte-identical in all 14 files and print back byte for
+byte (112 of 112). All 7 pairs verify by record 4, through the CLI
+and through the agent's probe of all 14 files. The calibration hash is 840fcc4eb186a389 in all 14 files,
+V6 in use, canvas 10752×5376, window 5312 of 5376 at 0,0. doctor
+--file on take 004: stitchable with V6, both 3840² HEVC lenses
+decode on software, 2.5 s on the cloud CPU.
+
+Measured, on the cloud box (debug, camera at opt-level 2): at 100k
+cases the trailer cut property 1.38 s and never-panic 0.87 s; the
+strings properties 0.34 s (varints), 2.82 s (unknown fields), 4.42 s
+(round trip), 3.13 s (wrong token count) and 0.60 s (never panic);
+synth's round trip 4.66 s and cross parse 4.17 s; each suite at the
+default 256 cases under 0.1 s, against camera's 1 s budget. Tier 2c:
+0.018 s for the trailers and metadata of the 14 files (D62's figure),
+0.005 s for the 112 strings, 1.1 s for the probe test's 7 takes.
+Before the merge, at PROPTEST_CASES=100000, camera's `trailer`,
+`strings` and `synth_insv` suites passed in 1.4 s, 4.3 s and 4.5 s.
+`cargo xtask check` gained six test binaries (camera's `companions`,
+`strings`, `synth_insv`, `tier2_samples` and `trailer`, each under 0.1
+s, and the CLI's `tier2_probe`, whose test is Tier 2c). At f9cee20
+(main merged in) it passed in about 17 minutes in a warm target folder
+of its own, its tests 820 s over 113 binaries against M3.3's 889 s over
+106; other builds ran beside both, so the totals move with the load.
+
 ## A2: edit and render for agents
 
 An agent can make a project of a video, read it, edit it, undo its own

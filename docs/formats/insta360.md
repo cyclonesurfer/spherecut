@@ -1,7 +1,8 @@
 # Insta360 raw video: `.insv` and `.lrv`
 
 Status: desk research, 2026-10-22, then checked against Pat's own X5 samples on 2026-10-23,
-with corrections from a second look at their bytes on 2026-11-01 (M3.0)
+with corrections from a second look at their bytes on 2026-11-01 (M3.0) and a third, of the
+trailer's gaps, the metadata record and the four strings, the same day (M3.2)
 (see [Pat's X5 samples](#pats-x5-samples), which take precedence over the rest where they
 disagree). Before the samples, the only real camera bytes behind this document were the
 Insta360 X5 slices that GyroView publishes as test fixtures (two recordings: an info record,
@@ -48,8 +49,11 @@ What they show [bytes]:
   master's frame count at 25 and 29.97 fps, half at 59.94 (95 of 190) and a quarter rounded up
   at 119.88 (147 of 586). Its trailer has the master's records, and **every record but the
   metadata (1) is byte-identical to the master's** on all 7 pairs, the IMU, exposure, 22 and
-  28 included (SHA-256 of each payload, 2026-11-01). The metadata fields listed below match the
-  master's except field 26 index = 1, field 131 = 1, field 132 = 1 (H.264) and field 135 = 7.
+  28 included (SHA-256 of each payload, 2026-11-01). Its metadata is the master's, field for
+  field and byte for byte, the four calibration strings included, but for these, on all 7 pairs
+  [bytes] (M3.2): 9 (the trailer's start, §3.1), 26's index (its item 2) = 1, 36 (a Unix time in
+  ms, under a second from the master's), 44 (1664 × 832, the LRV's own video), 79 and 80
+  (absent), 98's item 5 (the LRV's own frame count), 131 = 1, 132 = 1 (H.264) and 135 = 7.
 - **LRV halves**: the left half is master **track 1** and the right half **track 0**. This is
   shown by the bytes, not inferred: on frame 60 of 004 and of 008, each half's luma correlates
   0.986 to 0.992 with its track scaled to 832², against 0.40 to 0.49 with the other track
@@ -63,6 +67,34 @@ What they show [bytes]:
   SHA-256s each over the 7 takes, while each LRV's equal its master's (2026-11-01). So they are
   not fixed per-camera data, as the 2026-10-23 reading of their sizes alone suggested. The IMU
   record (3) grows by about 20 kB per second.
+- **Trailer layout** [bytes] (M3.2): in every file the records lie in the order 29, 28, 22, 11,
+  10, 9, 4, 3, 2 (absent from the 4K120 pair), 1, then the index, and record 1's footer ends
+  where the index starts, at EOF − 388, not at the index's footer (EOF − 78). The gaps between
+  records are **not zero padding**: every one of the 14 files has non-zero bytes in at least one
+  gap between two records, mostly in the gaps before records 9, 4 and 2. Counted from one
+  record's footer to the next record's start (a blank is a gap of zeros):
+
+  | File | before 22 | before 11 | before 9 | before 4 | before 2 |
+  |---|---|---|---|---|---|
+  | VID 004 | 1 | | | | |
+  | VID 005 | 1 | | | | 57 |
+  | VID 006 | | | 17 | | 186 |
+  | VID 007 | 1 | 35 | 176 | 64 | (no record 2) |
+  | VID 008 | | | 184 | 127 | 158 |
+  | VID 009 | | | 133 | 162 | 205 |
+  | VID 010 | | | 239 | | |
+  | LRV 004 | | | | 86 | 40 |
+  | LRV 005 | | | | | 9 |
+  | LRV 006 | | | 86 | 34 | 48 |
+  | LRV 007 | | 159 | 56 | | (no record 2) |
+  | LRV 008 | | | 42 | 127 | 114 |
+  | LRV 009 | | | 30 | 162 | 162 |
+  | LRV 010 | | | 149 | | 20 |
+
+  The gaps are up to 256 KiB long, so these are stray bytes in mostly zero gaps (the most, 239,
+  in a gap of 3 374 bytes). The gap from the payload start to record 29 has non-zero bytes too
+  in 5 files (VID 004, 008, 010, LRV 004, 007). A reader finds every record through the index
+  and never reads the gaps.
 - **Thumbnail**: record 2 is 1 228 840 bytes (= 40 + 1280 × 640 × 1.5, consistent with the
   NV12 1280×640 equirect of §3.3). The **4K120 file has no record 2**; the camera wrote it as a
   sidecar `VID_….insv.thumbnail.bin` of the same size instead, and the same for its LRV. The
@@ -74,15 +106,73 @@ What they show [bytes]:
   that take was shot in the camera's HDR video mode, so the enum value holds on the X5. The
   HDR take is still 8-bit BT.709 `standard`; HDR here is the camera's exposure mode, not an HDR
   transfer function.
+- **Record 1's fields** [bytes] (M3.2): every master has **92** top-level fields, numbered up to
+  163, none of them twice; every LRV has the same but **79 and 80**, so 90. Spherecut's reader
+  leaves 67 of them unread on every file. Field 133 is absent and 134 is 0 everywhere. Field 25
+  is an **f32 widened to a double**: 21.244001388549805 at 8K, 9.181875228881836 at 5.7K60 and
+  5.53125 at 4K120, so it compares by its bits, not as 21.244. Field 44 is **the file's own
+  video size**: one track's on a master (3840², 2880² at 5.7K, 1920² at 4K), 1664 × 832 on an
+  LRV. Fields 79 = 2 and 80 = 1 on the masters.
+- **Fields 93 and 98 aren't the clip's length and frame count** [bytes] (M3.2). With *n* one
+  more than the frames in each of the master's tracks, *num/den* the master's rate and *r* that
+  rate rounded up to a whole number (30, 25, 60, 120), on the master and on its LRV alike:
+  field 93 = ⌊*n* · 1000 · *den* / *num*⌋; 98's item 1 = field 24; item 4 − item 3 =
+  ⌊*n* · 1000 / *r*⌋ ms and item 2 − item 1 = ⌊*n* · 10⁶ / *r*⌋ µs; items 6 and 7 are 0.
+  Item 5 is *n* on a master and the LRV's own frame count on an LRV. So on 004 item 4 is
+  3833 ms after item 3, where the last of its 114 frames starts 3770 ms in, and LRV 006 gives
+  93 = 3186 from the master's 190 frames at 59.94, not 3203 from its own 95 at 29.97.
+
+  | Take | Mode | Frames a track | 98.5, master / LRV | 93 | 98.4 − 98.3 (ms) | 98.2 − 98.1 (µs) |
+  |---|---|---|---|---|---|---|
+  | 004 | 8K30 | 114 | 115 / 114 | 3837 | 3833 | 3 833 333 |
+  | 005 | 8K25 | 116 | 117 / 116 | 4680 | 4680 | 4 680 000 |
+  | 006 | 5.7K60 | 190 | 191 / 95 | 3186 | 3183 | 3 183 333 |
+  | 007 | 4K120 | 586 | 587 / 147 | 4896 | 4891 | 4 891 666 |
+  | 008 | 8K30 | 966 | 967 / 966 | 32265 | 32233 | 32 233 333 |
+  | 009 | 8K30 | 1904 | 1905 / 1904 | 63563 | 63500 | 63 500 000 |
+  | 010 | 8K30 | 968 | 969 / 968 | 32332 | 32300 | 32 300 000 |
+- **Record 4 and the IMU against the frames** [bytes] (M3.2). Record 4 holds an item a frame
+  (§3.4), each a frame after the last to within 0.23 ms, from a few frames before the tracks'
+  first to a few past their last, as many as the rate gives: field 24 is exactly the stamp of
+  item 5 at 25 and 29.97 fps, item 6 at 59.94 and item 10 at 119.88 (item 0 is then 200.0,
+  166.8, 100.1 and 83.4 ms before it), and the record runs 2, 3, 4 and 6 items past the last
+  frame. The IMU (record 3) starts within 17 ms of record 4's first item, so 92 to 190 ms
+  before field 24, and ends within 48 ms of its last. An LRV's records 3 and 4 are its
+  master's byte for byte (above), so the same holds there. Times in ms:
+
+  | Take | Rate | Frames a track | Record 4's items | Field 24's item | Items past the last frame | IMU's first − item 0 | IMU's first − field 24 | IMU's last − last item |
+  |---|---|---|---|---|---|---|---|---|
+  | 004 | 29.97 | 114 | 122 | 5 | 3 | +10.5 | −156.4 | +15.3 |
+  | 005 | 25 | 116 | 123 | 5 | 2 | +9.8 | −190.2 | +47.8 |
+  | 006 | 59.94 | 190 | 200 | 6 | 4 | −12.3 | −112.4 | +9.9 |
+  | 007 | 119.88 | 586 | 602 | 10 | 6 | −8.2 | −91.6 | −7.9 |
+  | 008 | 29.97 | 966 | 974 | 5 | 3 | +16.3 | −150.5 | +10.0 |
+  | 009 | 29.97 | 1904 | 1912 | 5 | 3 | +10.9 | −155.9 | +10.4 |
+  | 010 | 29.97 | 968 | 976 | 5 | 3 | +15.4 | −151.5 | +10.2 |
 - **Calibration strings**: all four generations, **byte-identical in all 7 masters and all 7
   LRVs**, so in every mode and take (2026-11-01): they belong to the camera unit. V1, V2 and
-  V3 share their centres and angles; V6 is a separate calibration. V3 and V6 below, laid out as
-  in §4.2, each number its token as stored: ξ and t to 6 decimals, focal, centre and angles to
-  3, the distortion terms to 8. M3's plan (7.1) and synth's lens tests
-  (`crates/synth/src/lens.rs`) take their numbers from here.
+  V3 share their centres and angles; V6 is a separate calibration. All four below, copied from
+  fields 5, 53, 54 and 111 and laid out as in §4.2 under §4.1's labels (which the bytes don't
+  all settle, §4.1), each number its token as stored: ξ and t to 6 decimals, the radius, focal,
+  centre and angles to 3, the distortion terms to 8. M3's plan (7.1) and synth's lens tests
+  (`crates/synth/src/lens.rs`) take their numbers from here, and camera's tests
+  (`crates/camera/tests/strings.rs`) the four strings whole.
 
 ```
-V3 (word 0x30400)
+V1 (word 0x471: generation 0, body 4, lens type 113; 16 tokens)
+  lens 0: radius 2653.545  cx 2701.130 cy 2692.130  ypr -0.198 0.211 90.280
+  lens 1: radius 2661.203  cx 8069.000 cy 2684.950  ypr 0.239 0.113 89.107
+  canvas 10752 5376
+V2 (word 0x20400; 34 tokens)
+  lens 0: radius 2660.372  cx 2701.130 cy 2692.130
+          ypr -0.198 0.211 90.280  t 0.000000 0.000000 0.000000
+          c0..c3: 1.00000000 -0.18756898 0.27067676 -0.08894466
+          10752 5376 113
+  lens 1: radius 2670.937  cx 8069.000 cy 2684.950
+          ypr 0.239 0.113 89.107  t -0.004460 0.000017 -0.031920
+          c0..c3: 1.00000000 -0.18880324 0.27227741 -0.08904964
+          10752 5376 113
+V3 (word 0x30400; 40 tokens)
   lens 0: xi 2.000000  fx 4284.620 fy 4284.280  cx 2701.130 cy 2692.130
           ypr -0.198 0.211 90.280  t 0.000000 0.000000 0.000000
           k1 0.18632051 k2 2.04984355 k3 -3.24446917  p1 -0.00143576 p2 -0.00339240
@@ -91,7 +181,7 @@ V3 (word 0x30400)
           ypr 0.239 0.113 89.107  t -0.004460 0.000017 -0.031920
           k1 0.18940836 k2 2.07073069 k3 -3.24103332  p1 0.00013831 p2 -0.00299873
           10752 5376 113
-V6 (word 0x60400)
+V6 (word 0x60400; 56 tokens)
   lens 0: xi 2.000000  fx 4277.520 fy 4277.270  cx 2713.050 cy 2689.210
           ypr -0.310 -0.271 90.255  t 0.000000 0.000000 0.000000
           d0..d12: 0.28032997 0.89045405 2.04927588 -8.05179787 0.00000000
@@ -146,8 +236,10 @@ the pinned commit*. The full list is at the end.
    `{u8 format, u8 id, u32le size}`. Older cameras are walked backwards from the end. X4 and later
    put an **index record (id 0)** last, with fixed 10-byte slots, and pad records to alignment
    boundaries. Everything is little-endian. [bytes] [code]
-4. Record 1 is a **protobuf** message (about 80 fields on the X5, numbered up to 199) holding model, firmware,
-   timing, the IMU configuration, the stream layout and the per-lens **calibration strings**.
+4. Record 1 is a **protobuf** message holding model, firmware, timing, the IMU configuration,
+   the stream layout and the per-lens **calibration strings**: on Pat's X5 92 top-level fields
+   numbered up to 163 on a master, and on an LRV the same but 79 and 80 (Pat's X5 samples),
+   where this list first said about 80, numbered up to 199.
    Record 3 is the IMU, record 4 the per-frame exposure. [bytes] [code]
 5. Calibration comes in four generations of underscore-separated strings: V1, V2, V3 and V6.
    The modern ones (V3 with 19 tokens per lens, V6 with 27) describe a **Mei unified
@@ -348,10 +440,13 @@ describes record type *k*, and an all-zero slot means the type is absent. [bytes
 from the index start to EOF = 310 + 6 + 72. [bytes] The X6 uses 59 slots. [reported]
 `GV FORMAT.md` Note the field order: the **id comes first in a slot but second in a footer**.
 
-- X5: records sit at absolute file offsets aligned to **128 KiB**, with zero padding between
-  them. The metadata record and record 10 are not aligned (record 1 ends exactly at the index's
-  footer). [bytes] (e.g. record 2 at 6 893 338 624 = 52 592 × 131 072) Each record still ends in
-  its 6-byte footer. [code] `TP mod.rs:99-116`
+- X5: records sit at absolute file offsets aligned to **128 KiB** [bytes] (e.g. record 2 at
+  6 893 338 624 = 52 592 × 131 072). The gaps between them are **not zero padding**: all 14 of
+  Pat's files have stray non-zero bytes in them, mostly in the gaps before records 9, 4 and 2
+  [bytes] (Pat's X5 samples, which count them). The metadata record and record 10 are not
+  aligned: record 1's footer ends where the index starts, at EOF − 388, on all 14 of Pat's
+  files, and the index's own footer follows the index, at EOF − 78 [bytes]. Each record still
+  ends in its 6-byte footer. [bytes] [code] `TP mod.rs:99-116`
 - X4: 4 KiB alignment was seen. [reported] `RF docs/insta360.md`
 - **Antigravity A1**: each record begins a 256 KiB slot and there are **no footers at all**, so the
   table is the only index. A reader that insists on footers sees an empty file. [code]
@@ -460,7 +555,7 @@ which ultimately mirrors the vendor schema [RE]. "X5" values are from both fixtu
 | 20 | frame_rate | | X5 60, 30 |
 | 22 | gamma_mode | string | X5 `standard`; `I_Log` on I-Log clips [reported] `OR insta360-x5.md`; X6 `standard` / `I_Log` / `Dolby_Vision` [reported] `OR insta360-x6.md`; X2 `linear` [reported]. GyroView calls this field "capture mode" [conflict, naming] |
 | 24 | first_frame_timestamp | int64 | clock of the first video frame: X5 µs, X2 ms (§5.3) |
-| 25 | rolling_shutter_time | double | ms: X5 8.4075 (5.7K60) and 21.244 (8K30); orbis also reports 11.837 on another clip; X2 36.94 |
+| 25 | rolling_shutter_time | double | ms: X5 8.4075 (5.7K60) and 21.244 (8K30); orbis also reports 11.837 on another clip; X2 36.94. On Pat's X5 an f32 widened to the double: 21.244001388549805 at 8K, 9.181875228881836 at 5.7K60 HDR, 5.53125 at 4K120 [bytes] |
 | 26 | file_group_info | {1 type SubMediaType, 2 index, 3 identify, 4 total} | §2.4. SubMediaType 0–17 = VideoNormal, Bullettime, Timelapse, PhotoNormal, PhotoHdr, PhotoInterval, VideoHdr, Burst, StaticTimelapse, Timeshift, AebNight, SuperNormal, Looprecording, Starlapse, PanoMode, Fpv, Movie, Slowmotion [code] |
 | 27 | window_crop_info | {1 src_w, 2 src_h, 3 dst_w, 4 dst_h, (5, 6 offset x, y)} | X5 `5376, 5376, 5312, 5312, 0, 0` [bytes]; X2 `3040 → 2880` [reported]; X6 `7744 → 7680` [reported]. Fields 5 and 6 come from GyroView only |
 | 28 | gyro_timestamp | double | ms; **X5 1.6** [bytes], **X2 −12.0** [reported]. Used only if 29 is set |
@@ -468,6 +563,7 @@ which ultimately mirrors the vendor schema [RE]. "X5" values are from both fixtu
 | 31 | gyro_calib | bytes | §3.4 |
 | 40 | total_frames | | |
 | 42 | is_flowstate_online | bool | X5 0. Gyroflow uses it to label in-camera EIS [code] `GF src/core/camera_identifier.rs` |
+| 44 | (video size) | {1 width, 2 height} | The file's own video: one track's on a master (Pat's X5 3840² at 8K, 2880² at 5.7K, 1920² at 4K), the whole frame's on an LRV (1664 × 832) [bytes] |
 | 46 | cam_posture | enum 0–3 = 0/90/180/270° | X5 office 3, sailing 0 [bytes] |
 | 47–49 | fov_type, distance, fov | | X5 15, 0.6, 56.82 (probably the app's reframe defaults) [unverified] |
 | 51 | gyro_type | enum 0 ICM20948, 1 ICM40609 | X5 1 |
@@ -479,13 +575,15 @@ which ultimately mirrors the vendor schema [RE]. "X5" values are from both fixtu
 | 64 | pts_type | 0 unknown, 1 Mp4, 2 ExposureFile | X5 2: frame times come from the exposure record |
 | 65 | gyro_cfg_info | {1 acc_range, 2 gyro_range} u32 | X5 `{32, 2000}` [bytes] |
 | 68 | (optical state) | | X5 office 0, sailing 4. insta360-rs: 0 bare, 1 protector, 2 dive, 4/5 guards, … [unverified] |
-| 79, 80 | layout, track order | | §2.6 |
-| 98 | | message | X5 sailing `{1: 393534973, 2: 444202729, 3: 1789712955321, 4: 1789713149154, 5: 5815}`. 3 and 4 are unix ms of the first and last frame (their difference, 193.8 s, is the duration); 5 is the frame count. Item 2 is not "last frame µs" as orbis says (only 50.7 s after item 1) [bytes] [conflict] |
+| 79, 80 | layout, track order | | §2.6. 2 and 1 on Pat's X5 masters; absent on their LRVs [bytes] |
+| 93 | (a length) | varint | ms, but not the clip's length: on Pat's X5 ⌊*n* · 1000 · *den* / *num*⌋, with *n* one more than the frames in each of the master's tracks and *num/den* the master's rate, on the master and its LRV alike (004: 3837 for 114 frames at 30000/1001; LRV 006: 3186 from its master's 190 at 60000/1001, not its own 95) [bytes] (Pat's X5 samples) |
+| 98 | | message | X5 sailing `{1: 393534973, 2: 444202729, 3: 1789712955321, 4: 1789713149154, 5: 5815}`, where 3 and 4 are unix ms about the clip's length (193.8 s) apart and item 2 is not "last frame µs" as orbis says (only 50.7 s after item 1) [bytes] [conflict]. On Pat's X5 [bytes] (Pat's X5 samples), with *n* as for 93 and *r* the master's rate rounded up (30, 25, 60, 120), on the master and its LRV alike: item 1 = field 24 (µs); item 2 = item 1 + ⌊*n* · 10⁶ / *r*⌋ µs; item 3 is unix ms; item 4 = item 3 + ⌊*n* · 1000 / *r*⌋, which isn't the last frame's time (004: 3833 ms after item 3, where its last frame starts at 3770 ms); item 5 is *n* on a master and the LRV's own frame count on an LRV, so not the clip's frame count (004: 115 for 114 frames a track); items 6 and 7 are 0. The sailing file's item 2 doesn't fit that rule, so item 2's meaning stays [conflict] |
 | 111 / 112 | offset_v6 / original | string | V6 |
 | 129 | image category | | X5 2 ("double fisheye"; 6 = equirect) [unverified] `IR` |
 | 130 | rotation | | X5 1 (= 0°) [unverified] `IR` |
 | 131 | stream_type | enum | §2.6 |
 | 132 | codec | 1 H.264, 2 H.265, 3 MJPEG, … | X5 2 [unverified meaning] `IR` |
+| 133, 134 | | | 133 absent and 134 = 0 on all 14 of Pat's files; meaning unknown [bytes] |
 | 135 | bitrate | Mb/s | X5 200 (5.7K60), 180 (8K30) |
 | 136 | capture_offset_version | enum 1 V1, 2 V2, 3 V3, **4 V6**, 5 V8 | X5 4. telemetry-parser treats it as advisory and always prefers V6 > V3 > V2 > V1 [code] `TP extra_info.rs:132-136`. (GyroView says no camera writes 136; the X5 fixtures do [bytes] [conflict]) |
 | 145 | lens profiles | message | X5: per accessory (`bare`, `ProtectorA`, `ProtectorS`, `ProtectorAS`, `InvisibleDiveWater`, `InvisibleDiveAir`) a degree-5 polynomial in degrees (bare: `0, 0.03159, −8.415e−5, 2.201e−6, −1.284e−8, 0`) and a field of view (bare 200°, protectors 195°, dive 190°) [bytes]. orbis reads the polynomial as image height in mm [reported]. Absent on X2 and X6 [reported] |
@@ -499,15 +597,18 @@ names for 66–199 come from insta360-rs, GyroView or orbis, or are unknown.
 
 Tokens are decimal numbers joined by `_`. Token 0 is the lens count *N* (2). The last token is a
 **packed word**. In between come *N* per-lens blocks, plus, for V1 only, a global
-`canvas_w canvas_h` before the word. [bytes] [code] `TP rig.rs:150-200`
+`canvas_w canvas_h` before the word. [bytes] (Pat's four strings, "Pat's X5 samples": each
+starts with `2`, and V1 ends `…_10752_5376_1137`)
 
-Packed word [bytes] [code] `TP rig.rs:156-170`:
+Packed word [bytes] (Pat's four words: V1 `0x471`, V2 `0x20400`, V3 `0x30400`, V6 `0x60400`):
 
 - `word >> 16` is the generation: 0 → V1, 2 → V2, 3 → V3, 6 → V6.
-- `(word >> 8) & 0xff` is a body code: 4 on X5, 11 on X3 (`0x30B00`), 12 on ONE X2 (`0x30C00`).
-  telemetry-parser treats **5** as "lens 0 mirrored" [code]; nothing else is known about it.
-- In V1, `word & 0xff` is the lens type: X5 `0x471` gives 113. insta360-rs uses `& 0x3ff`.
-  [bytes] [code]
+- `(word >> 8) & 0xff` is a body code: 4 on the X5. 11 on the X3 (`0x30B00`) and 12 on the ONE X2
+  (`0x30C00`) are [unverified]: no X3 or X2 string has been read here. What any other code means
+  is **unsettled**, and code 5 has no meaning here: the one given for it before came from
+  telemetry-parser's rig, which M3's plan (4.1 rule 7) bars, and is not to be used.
+- In V1, `word & 0xff` is the lens type: Pat's `0x471` gives 113, the `type` that every block of
+  Pat's V2, V3 and V6 ends with. Whether higher bits belong to it, the bytes can't say.
 
 | Gen | Field | Tokens | Per-lens block |
 |---|---|---|---|
@@ -516,10 +617,33 @@ Packed word [bytes] [code] `TP rig.rs:156-170`:
 | V3 | 54 (56) | 19N + 2 (40) | `xi fx fy cx cy yaw pitch roll tx ty tz k1 k2 k3 p1 p2 w h type` |
 | V6 | 111 (112) | 27N + 2 (56) | `xi fx fy cx cy yaw pitch roll tx ty tz d0…d12 w h type` |
 
-Sources for the table: [code] `TP rig.rs:83-95`; [bytes] all four on X5. Units are pixels of the
-calibration canvas, degrees and metres. `w h` is the **whole side-by-side canvas**, not one
-lens, and lens 1's `cx` includes the width of lens 0's area. [bytes] (X5: canvas 10752×5376,
-lens 1 `cx` = 8082.1 = 5376 + 2706.1)
+Sources for the table: [bytes], Pat's four strings ("Pat's X5 samples"), which settle these and
+no more:
+
+- **The counts**: 16, 34, 40 and 56 tokens, which are 6N + 4, 16N + 2, 19N + 2 and 27N + 2 for
+  N = 2.
+- **Where the blocks end**: each block of V2, V3 and V6 ends in `10752 5376 113` (V2's tokens 14
+  to 16 and 30 to 32, V3's 17 to 19 and 36 to 38, V6's 25 to 27 and 52 to 54), and V1's two
+  blocks of six are followed by `10752 5376` and the word.
+- **Where the centre and the angles sit**: V1's tokens 2 to 6, `2701.130 2692.130 -0.198 0.211
+  90.280`, recur as V2's tokens 2 to 6 and V3's 4 to 8, and lens 1's the same way (V1's 8 to 12,
+  V2's 18 to 22, V3's 23 to 27).
+- **That the centre is on the whole canvas**: lens 1's `cx` is 8069.000 in V1 to V3 and
+  8075.730 in V6, that is 5376 plus a centre near the middle of its own square (2693.000 and
+  2699.730), as lens 0's is of its own (2701.130 and 2713.050).
+- **Where the translation sits**: the three tokens after the angles, all 0 for lens 0, and lens
+  1's third about −0.032 in V2, V3 and V6.
+
+The names in the blocks are **labels**, and the bytes don't settle all of them. They don't say
+which of the three angles is the yaw, the pitch or the roll (the third is about 90 for both
+lenses, §4.5), that V3's five terms are k1 k2 k3 then p1 p2 (the order §4.3's V3 model takes; on
+Pat's files the last two are the small ones), or what V2's c0 to c3 and V6's d0 to d12 are
+(§4.3). These stay **unsettled**: M3's plan reads them through generic spaces (6.1, 6.2), and
+Spherecut's parser keeps the terms in token order. Units are pixels of the calibration canvas,
+degrees and metres, which the sizes of Pat's numbers fit (lens 1's tz, 32 mm, is about the
+lenses' spacing, §4.2). `w h` is the **whole side-by-side canvas**, not one lens, and lens 1's
+`cx` includes the width of lens 0's area. [bytes] (X5: canvas 10752×5376; lens 1 `cx` =
+8069.000 = 5376 + 2693.000 on Pat's V3, and 8082.1 = 5376 + 2706.1 on the GyroView fixture)
 
 Which model writes which strings:
 
@@ -601,8 +725,10 @@ plus lens pose against Insta360 Studio exports of X3 photos, to within about 1°
 
 **V2: odd-free polynomial in θ.** `r = θ(c0 + c1θ + c2θ² + c3θ³)` (normalised, c0 = 1 on the
 X5), with focal `f = radius / r(θ_max)`. θ_max is the lens class's half-field: 200° FOV for most
-bare lenses, 195° or 190° with accessories. [code] `TP rig.rs:500-540`; the θ_max table is
-[RE] (`TP rig.rs:230-250`, "Insta360Lens::GetFov (0x17f3d70)").
+bare lenses, 195° or 190° with accessories. [code] `TP rig.rs:500-540`. Field 145 gives the same
+fields of view on the X5 [bytes] (§3.5). The θ_max table behind them in that file is [RE] and
+**is not to be used**: M3's plan (4.1 rule 7) bars telemetry-parser's rig and its V2 θ_max
+table (§8).
 
 **V1: equidistant fisheye.** Only `radius` and a centre are given. The radius marks about 100°
 off axis. [reported] `RF` Only a few legacy lens types get Studio's built-in polynomial. [code]

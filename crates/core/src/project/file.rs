@@ -293,7 +293,13 @@ pub fn head_hash(path: &Path) -> io::Result<String> {
     Ok(format!("{:016x}", fnv1a64(&buf)))
 }
 
-pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
+/// FNV-1a 64 of `bytes`: the project's hashes, a media file's
+/// [`Fingerprint::head`] and a saved project file's identity, and from M3
+/// a camera calibration's (M3 plan 11.1). Public so that camera, media
+/// and the app hash as the project does, and their 16 hex digits agree.
+///
+/// [`Fingerprint::head`]: super::Fingerprint::head
+pub fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
         h ^= u64::from(b);

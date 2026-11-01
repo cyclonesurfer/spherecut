@@ -943,6 +943,53 @@ stream or the projection. The next review found an `sv3d` whose type, or
 size and type, were zeroed, which passed as QuickTime's terminator, and
 an `sv3d` renamed to `rv3d`.
 
+*Updated 2026-11-01 (M3.2, D62):* camera's Insta360 trailer reader keeps
+the same rule, that a hostile file costs bounded time and memory, with
+limits of its own (`camera::insta360::limits`):
+
+- a trailer of at most the file, and at most 1 GiB (`MAX_TRAILER`),
+  whatever its tail says; Pat's X5 files have 10 MB to 13 MB;
+- an index of at most 256 slots (`MAX_SLOTS`), one for each id a slot
+  can name, so that no trailer is refused for the id of a record it
+  lists (slot k lists record k, and an app-trimmed file's TimeMap,
+  record 128, would need 129); the X5 writes 31, the X6 59, and the
+  reader holds the slots on the stack, 2.5 KiB;
+- a metadata record of at most 1 MiB (`MAX_METADATA`), the X5's being
+  about 4 KB, and a string in it of at most 4 KiB (`MAX_STRING`), the
+  longest, V6's calibration string, being 518 bytes (`parse_metadata`,
+  M3.2's unit (b));
+- at most 64 lens profiles of each kind in field 145, polynomials and
+  fields of view (`MAX_PROFILES`), the X5 listing 6 of each: an item
+  can be 2 bytes where what it is kept as takes 48, so a 1 MiB field
+  would otherwise keep half a million. The 65th is `TooLarge` in
+  `Part::Field(145)` at its key, told from a string over `MAX_STRING`
+  there by its limit;
+- a record of at most what `read_record`'s caller asks for, and in
+  `verify_companion` an exposure record (4) of at most its `max`,
+  compared 64 KiB of each file at a time. Records over it, or empty in
+  both files, are paired by name only (`Pairing::NameOnly`, saying why)
+  and not read. media passes both its `MAX_EXPOSURE`, 64 MiB, four
+  million frames, so that probe, which reads record 4 to count its
+  items, and `verify_companion` share one limit; Pat's longest is
+  30 KB.
+
+Each is checked before anything is allocated for it, and a size over
+it is `CameraError::TooLarge` at the byte that states it (in
+`verify_companion`, a pairing by name only); a trailer too
+small for its index is `CameraError::TooSmall` at the same byte, the
+tail's size. A record whose slot runs into the index or past the file
+is listed in `Trailer::skipped`, counted and never followed. The
+reader reads the tail, the index and the records' footers, a few
+hundred bytes whatever the file's size, and every error names its part
+and its byte, an I/O error the tail, the index or the record it was
+reading. Its properties run 100,000 cases (M3 plan 5.5,
+`crates/camera/tests/trailer.rs`): a trailer cut at every point, four
+ways, is no trailer or the exact error at its byte; arbitrary bytes,
+damaged trailers among them, never panic, and whatever trailer comes
+back is checked against the bytes themselves. At 100,000 cases they
+take 1.4 s and 0.9 s in a debug build on the cloud box (4 Xeon cores,
+camera at opt-level 2).
+
 ## D16. `inject` and `Mp4Writer` write atomically
 
 *2026-10-23, M0. Updates D4.*
@@ -1298,7 +1345,7 @@ rest, with the versions in `Cargo.lock`:
 | rustix 1.1.5 (std, fs, stdio) | agent, cli, core | `openat2` below a root, a directory read through its descriptor (A1's roots, D43), and `spherecut mcp`'s stdout guard: the protocol's copy of fd 1 (`fcntl_dupfd_cloexec`) and fd 1 pointed at stderr (`dup2_stdout`); in core (M2.4), the temporary-file sweep's `O_NOFOLLOW` and `O_NONBLOCK` and `statvfs` for an export's free space (D16), all without `unsafe`. Pinned with `=` to the version already in the tree through tempfile and the Wayland crates, so it adds no crate |
 | serde 1.0.229 (derive) | core, sphere, media, cli, agent | Serializable time types, `Projection`, the probe and doctor reports, the CLI's JSON envelope (D27), and the agent's requests |
 | serde_json 1.0.154 (float_roundtrip) | cli, agent, core; render (dev) | `--json` output, through the `contract` module (D27), the MCP server's messages, schemas and results (D43, D44), and the project file (D47), whose floats `float_roundtrip` reads back bit for bit. core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
-| thiserror 2.0.21 | core, media, synth, render, playback, audio, agent | Typed library errors without hand-written `Display` impls |
+| thiserror 2.0.21 | core, media, synth, render, playback, audio, agent, camera | Typed library errors without hand-written `Display` impls |
 | tracing 0.1.44 | core, media, cli, render, playback, audio, agent | Structured logging, and the target for FFmpeg's log (D12). core logs only what `fs::TempFile` can't clean up (M1 slice 4) |
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
 | tracing-subscriber 0.3.23 (env-filter) | cli | EnvFilter gives `SPHERECUT_LOG` its syntax, and the fmt layer writes to stderr. env-filter brings in `matchers` and `regex-automata` |
@@ -1306,7 +1353,7 @@ rest, with the versions in `Cargo.lock`:
 | winit 0.30.13 (rwh_06, wayland, wayland-dlopen, x11) | app | Not called: named so that eframe's winit gets `wayland-dlopen` back by feature unification, and libwayland is loaded at run time (D36). Never `wayland-csd-adwaita` (RUSTSEC-2026-0192 through ttf-parser), which `[[bans.features]]` refuses |
 | naga 30.0.1 (wgsl-in) (dev) | render | The test that each uniform's Rust layout matches its WGSL struct, member by member, which a driver doesn't check (D31). The same naga wgpu builds, so it adds nothing to the tree |
 | egui_kittest 0.37.0 (wgpu) (dev) | app | The GUI's tests on lavapipe, through our device with `WgpuTestRenderer::from_render_state` (D36), and its accessibility tree for finding widgets. Not its `eframe` feature, which turns eframe's accesskit on and `[[bans.features]]` refuses. In test builds it turns on wgpu's `gles`, `metal` and `dx12` (D31's row); the shipped binary has none |
-| proptest 1.12.0 (dev) | core, sphere, media, render, playback, agent | Property tests, the MP4 fuzzing (D15) and the JSON-RPC reader's (D44) |
+| proptest 1.12.0 (dev) | core, sphere, media, render, playback, agent, camera | Property tests, the MP4 fuzzing (D15) and the JSON-RPC reader's (D44) |
 | ron 0.12.2 (dev) | core | A serde round-trip test of the time types in a text format |
 
 glam's `serde` feature is on; since M2.1 core depends on glam and sphere for the project model's orientations (D48), which the project file writes through its own `Orientation` form, not glam's.
@@ -1361,6 +1408,11 @@ glam, serde, thiserror, tracing and wgpu, and on synth and media's
 
 *Updated in M1 slice 5b,* with ash's row above, which adds no crate: it
 was wgpu-hal's already, at the same version.
+
+*Updated 2026-11-01 in M3.2,* with the camera crate (D61): it depends
+on core and thiserror, and on proptest, synth and testkit for its tests,
+all in the tree already, so it adds no crate. Sphere joins its
+dependencies in M3.5, and media depends on it from M3.2's unit (c).
 
 ## D23. Agent integration: an MCP server and the JSON CLI
 
@@ -2215,6 +2267,12 @@ share wgpu's queue on lavapipe, is an `unsafe fn` whose contract says
 so. media's FFmpeg side, `ffi::vulkan` (the `AVVulkanDeviceContext` made
 from the handles, and the frame lock around the copy), sits under
 `ffi`'s allowance.
+
+*Updated by D61 (2026-11-01, M3.2):* a new crate, `camera` (cameras'
+raw files read from their bytes), depends on core (and on sphere from
+M3.5), and media depends on it, never the reverse; it has
+`#![forbid(unsafe_code)]`. M3's lens maths and rig go in sphere and its
+blending, instrument and fit in render: there is no `stitch` crate.
 
 ## D29. MediaBackend and frame-exact seek
 
@@ -9083,6 +9141,111 @@ Revisit if: an agent needs the source and the render side by side in
 one image; a codec's clamping moves compare's numbers (then read Y);
 or 1 % of shape lets a wrong project through.
 
+## D61. Crates for M3: camera reads the vendors' bytes, media depends on it, no stitch crate
+
+*2026-11-01, M3 slice M3.2. The M3 plan, `docs/design/m3-plan.md`
+sections 5.1, 20 and 23, has the detail; this is the layout M3.2 starts
+and why. Updates D22 and D28.*
+
+What:
+
+- **`camera`** (`spherecut-camera`, new) reads cameras' raw files from
+  their bytes, with no FFmpeg: from M3.2 the Insta360 trailer, its
+  records and metadata, the calibration strings and a recording's
+  companion files (`camera::insta360`), through a schema-less protobuf
+  walker of its own (`camera::pb`, the M3 plan's D62). It depends on
+  core and thiserror, and from M3.5 on sphere, for the types it converts
+  into. Its readers take `impl Read + Seek` and each calls
+  `core::blocking::may_block` first (D34), so the app reads only on its
+  jobs. It has `#![forbid(unsafe_code)]`, and builds at opt-level 2 in
+  dev for its properties' 100,000 cases.
+- **media depends on camera, never the reverse**: probe, doctor and
+  `media::project` read a trailer (M3.2's unit (c) adds the edge), so
+  there is no cycle. camera's integration tests take synth as a
+  dev-dependency, to hold the reader to synth's own writer
+  (`synth::insv`), which shares no code with it (so those test binaries
+  link FFmpeg through synth, as render's do); a unit test there would
+  link a second copy of camera.
+- **Lens maths and the rig in `sphere`** (M3.3); **blending, the
+  instrument and the fit in `render`**. There is **no `stitch` crate**.
+- **Mei's unified model** goes beyond PROMPT.md:79's
+  "equidistant/equisolid plus polynomial": the X5's V3 and V6 strings
+  give ξ, fx and fy.
+- core's `project::file::fnv1a64` is public, so that camera, media and
+  the app hash a calibration as the project does (the M3 plan's 11.1).
+
+Why: synth's checks, the reference, the fit and the project share the
+maths, and sphere already holds every projection. render holds the
+reference and builds at opt-level 2. A stitch crate would hold nothing
+of its own. A reader without FFmpeg takes whatever file an agent's
+roots (D45) or the app's jobs opened, and needs none of D24's
+confinement. The X5 writes Mei.
+
+Revisit if: a camera's format can only be read through FFmpeg, or
+camera needs a type of media's (then the type moves to core).
+
+## D62. Our own trailer reader: a hand-written walker, D15's limits, no telemetry-parser
+
+*2026-11-01, M3 slice M3.2, as the M3 plan decided it in M3.0
+(`docs/design/m3-plan.md` sections 5.1, 5.5, 20 and 23). Updates D15.*
+
+What:
+
+- **camera reads the X5's trailer with its own code**
+  (`camera::insta360`), from `docs/formats/insta360.md` §3 and the bytes
+  of Pat's samples: the 72-byte tail (the trailer's size, version 3 and
+  the magic), then the index, the record whose footer sits at EOF − 78
+  (31 ten-byte slots on the X5, slot k listing record k, so it starts
+  at EOF − 388), then each listed record's 6-byte footer, which must
+  repeat its slot's id, format and size. Everything is found from the
+  end, so the `inst` box the X5 writes and a bare trailer read alike.
+  The metadata record goes through a schema-less protobuf varint walker
+  written by hand (`camera::pb`).
+- **D15's style of limits**, listed under D15: the trailer, the index,
+  the metadata and its strings, and each record read, each checked
+  before anything is allocated for it; a record that would run into the
+  index or past the file is skipped and counted, never followed; every
+  error carries its part and its byte (in the file for the readers, in
+  the payload for the parsers, in the string for the calibration
+  parser); no input panics.
+- **Inputs are `impl Read + Seek`**, so callers open the file
+  themselves, an agent's beneath its root (D45). Every reader
+  (`read_trailer`, `read_record`, `verify_companion`, and later the
+  stitch profiles' list, load and save) calls `core::blocking::may_block`
+  before anything else, even where it would answer without reading, so
+  one called on the UI thread panics in a debug build (D34); the app
+  reads only on its jobs. `companions` works on names alone and reads
+  nothing.
+- **telemetry-parser is not used in M3, not even as an oracle**:
+  neither for the X5's trailer nor for DJI's calibration block, whose
+  field numbers come from OpenOSV's `proto/dvtm_osmo360.proto`
+  (Apache-2.0). PLAN's line is clarified, not amended. M4 still decides
+  whether it parses the IMU (the Open item below).
+- **What checks the walk instead**, on every file: the records' own
+  footers, the index's place, and the calibration strings printed back
+  byte for byte (M3.2's unit (b)). `samples_insv_trailer_parses` (Tier
+  2c) holds Pat's 14 files to that and to a table of their records read
+  from the bytes: records 1, 2 (absent from the 4K120 take, which wrote
+  a sidecar), 3, 4, 9, 10, 11, 22, 28 and 29, every one but 1 and 10 on
+  a 128 KiB boundary of the file, each trailer in an `inst` box of its
+  size plus 8; the 14 take 0.017 s in a debug build on the cloud box (4
+  Xeon cores, camera at opt-level 2).
+
+Why: `deny.toml` forbids git sources, and crates.io's telemetry-parser
+0.2.x predates the X5; its geometry is Studio-derived, and its DJI
+`rig.rs` takes the `far_11` default and the 0.038 blend from hooking DJI
+Studio (dji.md §11.2), which the M3 plan's rule 7 (4.1) keeps out. The
+records' footers, the index and the byte-identical reprint check our
+walk on every file without another parser. A reader that reads a few
+hundred bytes from the end needs no FFmpeg, and takes whatever file an
+agent's roots or the app's jobs opened.
+
+Revisit if: a camera writes its trailer without an index (older
+Insta360 bodies walk their records from the end) or without footers
+(the Antigravity A1), which the reader refuses, the first as
+`IndexFooter`, a footer at EOF − 78 that isn't an index's; or M4 takes
+telemetry-parser up for the IMU.
+
 ## D63. The lens model: one canonical distortion under every reading, an inverse that repeats to 1e-12
 
 *2026-11-01, M3 slice M3.3. The M3 plan, `docs/design/m3-plan.md`
@@ -9202,7 +9365,7 @@ strip stops converging; or a source states a V6 reading outside the
   its own parsers, from `docs/formats/`, and does not use telemetry-parser
   even as a test oracle; DJI's field numbers come from OpenOSV's proto
   instead (`docs/design/m3-plan.md` section 20, and D62 in its section 23,
-  which M3.21 records here).
+  recorded above in M3.2).
   What stays open is only whether M4 uses it to parse the IMU. Its licence
   is MIT OR Apache-2.0 and its geometry is Studio-derived
   (`docs/formats/insta360.md` §8), so the parts M4 could use are its

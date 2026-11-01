@@ -3072,6 +3072,7 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_json",
+ "spherecut-camera",
  "spherecut-core",
  "spherecut-export",
  "spherecut-media",
@@ -3119,6 +3120,17 @@ dependencies = [
  "spherecut-testkit",
  "thiserror 2.0.21",
  "tracing",
+]
+
+[[package]]
+name = "spherecut-camera"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "spherecut-core",
+ "spherecut-synth",
+ "spherecut-testkit",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3188,6 +3200,7 @@ dependencies = [
  "libc",
  "proptest",
  "serde",
+ "spherecut-camera",
  "spherecut-core",
  "spherecut-testkit",
  "thiserror 2.0.21",
