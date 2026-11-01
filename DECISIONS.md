@@ -943,6 +943,33 @@ stream or the projection. The next review found an `sv3d` whose type, or
 size and type, were zeroed, which passed as QuickTime's terminator, and
 an `sv3d` renamed to `rv3d`.
 
+*Updated 2026-11-01 (M3.2, D62):* camera's Insta360 trailer reader keeps
+the same rule, that a hostile file costs bounded time and memory, with
+limits of its own (`camera::insta360::limits`):
+
+- a trailer of at most the file, and at most 1 GiB (`MAX_TRAILER`),
+  whatever its tail says; Pat's X5 files have 10 MB to 13 MB;
+- an index of at most 64 slots (`MAX_SLOTS`); the X5 writes 31, the X6
+  59;
+- a metadata record of at most 1 MiB (`MAX_METADATA`), the X5's being
+  about 4 KB, and a string in it of at most 4 KiB (`MAX_STRING`), the
+  longest, V6's calibration string, being 518 bytes (`parse_metadata`,
+  M3.2's unit (b));
+- a record of at most what `read_record`'s caller asks for.
+
+Each is checked before anything is allocated for it, and a size over
+it is `CameraError::TooLarge` at the byte that states it. A record
+whose slot runs into the index or past the file is listed in
+`Trailer::skipped`, counted and never followed. The reader reads the
+tail, the index and the records' footers, a few hundred bytes whatever
+the file's size, and every error names its part and its byte. Its
+properties run 100,000 cases (M3 plan 5.5,
+`crates/camera/tests/trailer.rs`): a trailer cut at every point, four
+ways, is no trailer or the exact error at its byte; arbitrary bytes,
+damaged trailers among them, never panic, and whatever trailer comes
+back is checked against the bytes themselves. At 100,000 cases they
+take 1.2 s and 0.8 s in a debug build in the cloud.
+
 ## D16. `inject` and `Mp4Writer` write atomically
 
 *2026-10-23, M0. Updates D4.*
@@ -9089,6 +9116,66 @@ confinement. The X5 writes Mei.
 Revisit if: a camera's format can only be read through FFmpeg, or
 camera needs a type of media's (then the type moves to core).
 
+## D62. Our own trailer reader: a hand-written walker, D15's limits, no telemetry-parser
+
+*2026-11-01, M3 slice M3.2, as the M3 plan decided it in M3.0
+(`docs/design/m3-plan.md` sections 5.1, 5.5, 20 and 23). Updates D15.*
+
+What:
+
+- **camera reads the X5's trailer with its own code**
+  (`camera::insta360`), from `docs/formats/insta360.md` §3 and the bytes
+  of Pat's samples: the 72-byte tail (the trailer's size, version 3 and
+  the magic), then the index, the record whose footer sits at EOF − 78
+  (31 ten-byte slots on the X5, slot k listing record k, so it starts
+  at EOF − 388), then each listed record's 6-byte footer, which must
+  repeat its slot's id, format and size. Everything is found from the
+  end, so the `inst` box the X5 writes and a bare trailer read alike.
+  The metadata record goes through a schema-less protobuf varint walker
+  written by hand (`camera::pb`).
+- **D15's style of limits**, listed under D15: the trailer, the index,
+  the metadata and its strings, and each record read, each checked
+  before anything is allocated for it; a record past the trailer is
+  skipped and counted, never followed; every error carries its part and
+  its byte (in the file for the readers, in the payload for the
+  parsers, in the string for the calibration parser); no input panics.
+- **Inputs are `impl Read + Seek`**, so callers open the file
+  themselves, an agent's beneath its root (D45). Every reader
+  (`read_trailer`, `read_record`, `verify_companion`, and later the
+  stitch profiles' list, load and save) calls `core::blocking::may_block`
+  before anything else, even where it would answer without reading, so
+  one called on the UI thread panics in a debug build (D34); the app
+  reads only on its jobs. `companions` works on names alone and reads
+  nothing.
+- **telemetry-parser is not used in M3, not even as an oracle**:
+  neither for the X5's trailer nor for DJI's calibration block, whose
+  field numbers come from OpenOSV's `proto/dvtm_osmo360.proto`
+  (Apache-2.0). PLAN's line is clarified, not amended. M4 still decides
+  whether it parses the IMU (the Open item below).
+- **What checks the walk instead**, on every file: the records' own
+  footers, the index's place, and the calibration strings printed back
+  byte for byte (M3.2's unit (b)). `samples_insv_trailer_parses` (Tier
+  2c) holds Pat's 14 files to that and to a table of their records read
+  from the bytes: records 1, 2 (absent from the 4K120 take, which wrote
+  a sidecar), 3, 4, 9, 10, 11, 22, 28 and 29, every one but 1 and 10 on
+  a 128 KiB boundary of the file, each trailer in an `inst` box of its
+  size plus 8; the 14 take 0.03 s.
+
+Why: `deny.toml` forbids git sources, and crates.io's telemetry-parser
+0.2.x predates the X5; its geometry is Studio-derived, and its DJI
+`rig.rs` takes the `far_11` default and the 0.038 blend from hooking DJI
+Studio (dji.md §11.2), which the M3 plan's rule 7 (4.1) keeps out. The
+records' footers, the index and the byte-identical reprint check our
+walk on every file without another parser. A reader that reads a few
+hundred bytes from the end needs no FFmpeg, and takes whatever file an
+agent's roots or the app's jobs opened.
+
+Revisit if: a camera writes its trailer without an index (older
+Insta360 bodies walk their records from the end) or without footers
+(the Antigravity A1), which the reader refuses, the first as a footer
+at EOF − 78 that isn't an index's; or M4 takes telemetry-parser up for
+the IMU.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360
@@ -9103,7 +9190,7 @@ camera needs a type of media's (then the type moves to core).
   its own parsers, from `docs/formats/`, and does not use telemetry-parser
   even as a test oracle; DJI's field numbers come from OpenOSV's proto
   instead (`docs/design/m3-plan.md` section 20, and D62 in its section 23,
-  which M3.21 records here).
+  recorded above in M3.2).
   What stays open is only whether M4 uses it to parse the IMU. Its licence
   is MIT OR Apache-2.0 and its geometry is Studio-derived
   (`docs/formats/insta360.md` §8), so the parts M4 could use are its
