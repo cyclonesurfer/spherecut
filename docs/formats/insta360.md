@@ -132,7 +132,8 @@ the pinned commit*. The full list is at the end.
    GPL-3.0-or-later. But crates.io only has 0.2.6 from 2022, which lacks X4, X5, X6 and the A1.
    Its current geometry module is derived from Insta360 Studio disassembly. Section 8 recommends
    writing our own trailer reader and using telemetry-parser only as a test oracle, or as a
-   pinned git dependency for the parsing alone.
+   pinned git dependency for the parsing alone. (M3: not used, not even as an oracle; D62,
+   `docs/design/m3-plan.md` §20. M4 still decides whether it parses the IMU.)
 
 ## 2. Container layout
 
@@ -835,7 +836,9 @@ naming only the field numbers used. Build our own geometry from the strings and 
 measurements. Keep telemetry-parser out of the shipped graph. Use it as a **differential-test
 oracle** in a separate, non-workspace tool or in xtask behind a feature, so it never enters
 `cargo deny`'s product graph, and compare IMU samples, timestamps and string parses on every
-sample clip. If the user also wants it for GoPro GPMF or DJI telemetry, reconsider a pinned
+sample clip. (M3: not used, not even as an oracle, for the X5's trailer or DJI's calibration;
+D62, `docs/design/m3-plan.md` §20. M4 still decides whether it parses the IMU.) If the user
+also wants it for GoPro GPMF or DJI telemetry, reconsider a pinned
 git dependency (`rev = "2817b42"`) that uses only its parsing output (`Lens/Data` and the IMU
 tags) and never its `Lens/Rig`. That needs `allow-git`, a DECISIONS.md entry, and the user's
 sign-off on the provenance point above.
