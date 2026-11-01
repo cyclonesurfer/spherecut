@@ -361,7 +361,8 @@ fn v6_reading(r: TruthV6) -> V6Reading {
 
 /// sphere's model for a truth model, term for term: V3's terms through
 /// `Canonical::v3`, V6's through `Canonical::v6` under the same reading,
-/// and Kannala–Brandt with no tangential or prism terms.
+/// and Kannala–Brandt's focals, polynomial, tangential and prism terms
+/// each to its own field.
 fn lens_model(m: &TruthModel) -> LensModel {
     match *m {
         TruthModel::Mei {
@@ -396,7 +397,17 @@ fn lens_model(m: &TruthModel) -> LensModel {
             cy,
             dist: Canonical::v6(d, v6_reading(reading)),
         }),
-        TruthModel::Kb { base, f, cx, cy, k } => LensModel::Kb(KbLens {
+        TruthModel::Kb {
+            base,
+            fx,
+            fy,
+            cx,
+            cy,
+            k,
+            p,
+            pe,
+            s,
+        } => LensModel::Kb(KbLens {
             base: match base {
                 KbBase::Equidistant => fisheye::Model::Equidistant,
                 KbBase::Equisolid => fisheye::Model::Equisolid,
@@ -404,13 +415,13 @@ fn lens_model(m: &TruthModel) -> LensModel {
                 KbBase::Orthographic => fisheye::Model::Orthographic,
             },
             k,
-            fx: f,
-            fy: f,
+            fx,
+            fy,
             cx,
             cy,
-            p: [0.0; 2],
-            pe: [0.0; 2],
-            s: [0.0; 4],
+            p,
+            pe,
+            s,
         }),
     }
 }
@@ -892,10 +903,14 @@ fn rung0_models() -> Vec<(String, TruthModel, u32)> {
                 format!("{base:?} KB, track {t}"),
                 TruthModel::Kb {
                     base,
-                    f: reach / radius,
+                    fx: reach / radius,
+                    fy: reach / radius,
                     cx,
                     cy,
                     k: truth::KB_LIKE_K,
+                    p: [0.0; 2],
+                    pe: [0.0; 2],
+                    s: [0.0; 4],
                 },
                 side,
             ));

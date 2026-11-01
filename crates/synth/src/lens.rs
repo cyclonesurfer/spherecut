@@ -548,9 +548,11 @@ impl KbBase {
 /// A truth lens's projection, in its slot's pixels (7.1), written from
 /// 6.1's formulas with synth's own code. For the Mei models a unit
 /// lens-frame direction (x, y, z) lands on the plane at m = (x, y)/(z + ξ)
-/// and is distorted there; for `Kb` it lands at base(θ_d) (cos φ, sin φ)
-/// with θ_d = θ (1 + k1 θ² + … + k5 θ¹⁰). The pixel is (fx xd + cx,
-/// fy yd + cy), with fx = fy = f for `Kb`.
+/// and is distorted there; for `Kb` it lands at m = base(θ_d) (cos φ,
+/// sin φ) with θ_d = θ (1 + k1 θ² + … + k5 θ¹⁰), and the base's plane
+/// point takes the tangential and prism terms as a Mei model's does, with
+/// no radial term (6.1's `KbLens`, after the base). The pixel is
+/// (fx xd + cx, fy yd + cy).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TruthModel {
     /// V3: radial k1 to k3 and Brown's p1 and p2.
@@ -574,13 +576,19 @@ pub enum TruthModel {
         reading: TruthV6,
     },
     /// Kannala–Brandt on a base: docs/PROMPT.md's model, and the
-    /// no-calibration fallback (4.2's second rig).
+    /// no-calibration fallback (4.2's second rig). `k` is the polynomial
+    /// in θ, and `p`, `pe` and `s` are 6.1's tangential pair, its r²
+    /// extension and the thin prism, on the base's plane point.
     Kb {
         base: KbBase,
-        f: f64,
+        fx: f64,
+        fy: f64,
         cx: f64,
         cy: f64,
         k: [f64; 5],
+        p: [f64; 2],
+        pe: [f64; 2],
+        s: [f64; 4],
     },
 }
 
@@ -604,10 +612,9 @@ impl TruthModel {
     /// The focal lengths and the centre, in pixels.
     fn intrinsics(&self) -> (DVec2, DVec2) {
         match *self {
-            TruthModel::Mei { fx, fy, cx, cy, .. } | TruthModel::MeiV6 { fx, fy, cx, cy, .. } => {
-                (DVec2::new(fx, fy), DVec2::new(cx, cy))
-            }
-            TruthModel::Kb { f, cx, cy, .. } => (DVec2::splat(f), DVec2::new(cx, cy)),
+            TruthModel::Mei { fx, fy, cx, cy, .. }
+            | TruthModel::MeiV6 { fx, fy, cx, cy, .. }
+            | TruthModel::Kb { fx, fy, cx, cy, .. } => (DVec2::new(fx, fy), DVec2::new(cx, cy)),
         }
     }
 
@@ -653,7 +660,9 @@ impl TruthModel {
                 let (k, p, pe, s) = v6_terms(&d, reading);
                 Some(brown(w, k, p, pe, s))
             }
-            TruthModel::Kb { base, k, .. } => {
+            TruthModel::Kb {
+                base, k, p, pe, s, ..
+            } => {
                 let theta = w.length();
                 if theta == 0.0 {
                     return Some(DVec2::ZERO);
@@ -668,7 +677,8 @@ impl TruthModel {
                     KbBase::Orthographic if theta_d <= FRAC_PI_2 => theta_d.sin(),
                     KbBase::Stereographic | KbBase::Orthographic => return None,
                 };
-                Some(w * (r / theta))
+                // The base's plane point, then the terms on it.
+                Some(brown(w * (r / theta), [0.0; 5], p, pe, s))
             }
         }
     }
@@ -739,7 +749,8 @@ impl TruthModel {
     /// Where the Newton starts for the normalised image point `t`: the w
     /// that maps to it with no distortion. A Mei model's plane point is
     /// `t` itself; a `Kb` base inverts in closed form, and `None` past the
-    /// base's image (r > 2 for equisolid, r > 1 for orthographic).
+    /// base's image (r > 2 for equisolid, r > 1 for orthographic), where
+    /// the tangential and prism terms can still put a pixel of the lens.
     fn start(&self, t: DVec2) -> Option<DVec2> {
         let TruthModel::Kb { base, .. } = *self else {
             return Some(t);
@@ -766,16 +777,19 @@ impl TruthModel {
     /// determinant positive): the models synth renders fold at most once
     /// as θ grows, so that root is the only one on the image's first
     /// sheet, and a root past the lift's fold or past `cap` means there
-    /// is no direction to find. When the Newton finds no root, or one
-    /// past a fold of the distortion, the bisection walks out from the
-    /// axis along the target's own image direction in 1° steps, while
-    /// the image still moves outwards, brackets the target's radius and
-    /// halves the bracket; the Newton then starts again from there.
+    /// is no direction to find. When the Newton has no start, finds no
+    /// root, or finds one past a fold of the distortion, the bisection
+    /// walks out from the axis along the target's own image direction in
+    /// 1° steps, while the image still moves outwards, brackets the
+    /// target's radius and halves the bracket; the Newton then starts
+    /// again from there.
     fn invert(&self, px: DVec2, cap: f64) -> Option<DVec3> {
         let (f, c) = self.intrinsics();
         let t = (px - c) / f;
         let distort = |w: DVec2| self.distort(w);
-        let w = newton(distort, t, self.start(t)?)
+        let w = self
+            .start(t)
+            .and_then(|from| newton(distort, t, from))
             .filter(|&(_, det)| det > 0.0)
             .or_else(|| newton(distort, t, self.bisect(t, cap)?).filter(|&(_, det)| det > 0.0))?
             .0;
@@ -1721,10 +1735,11 @@ pub fn x5_like() -> CalibTruth {
 pub const KB_LIKE_K: [f64; 5] = [0.012, -0.0021, 0.0003, 0.0, 0.0];
 
 /// 4.2's second rig: `rig` with each lens an equidistant Kannala–Brandt
-/// lens of [`KB_LIKE_K`] on the same centre, its focal set so that at
-/// [`IMAGE_CIRCLE_DEG`] it reaches as far along +x as the lens it
-/// replaces. The rest, `to_rig` and the centres among it, is `rig`'s.
-/// It shows that the source path is not Mei's alone.
+/// lens of [`KB_LIKE_K`] on the same centre, with no tangential or prism
+/// terms and one focal on both axes, set so that at [`IMAGE_CIRCLE_DEG`]
+/// it reaches as far along +x as the lens it replaces. The rest, `to_rig`
+/// and the centres among it, is `rig`'s. It shows that the source path is
+/// not Mei's alone.
 pub fn kb_like(rig: &RigTruth) -> RigTruth {
     let mut kb = rig.clone();
     let theta = IMAGE_CIRCLE_DEG.to_radians();
@@ -1738,12 +1753,17 @@ pub fn kb_like(rig: &RigTruth) -> RigTruth {
             .model
             .forward(edge)
             .map_or(f.x * theta, |px| px.x - c.x);
+        let f = reach / theta_d;
         lens.model = TruthModel::Kb {
             base: KbBase::Equidistant,
-            f: reach / theta_d,
+            fx: f,
+            fy: f,
             cx: c.x,
             cy: c.y,
             k,
+            p: [0.0; 2],
+            pe: [0.0; 2],
+            s: [0.0; 4],
         };
     }
     kb
@@ -2069,33 +2089,139 @@ mod tests {
         }
     }
 
+    /// The reading that reads every one of d5 to d12: the pair in order
+    /// with its extension, and the prism at d9 by axis.
+    const EVERY_TERM: TruthV6 = TruthV6 {
+        tangential: Some(Tangential {
+            pair: PairOrder::D5D6,
+            extension: true,
+        }),
+        prism: Some(Prism {
+            at: PrismAt::D9,
+            order: PrismOrder::ByAxis,
+        }),
+    };
+
+    /// The plane radius sin θ/(cos θ + ξ) of a Mei model at θ.
+    fn plane(xi: f64, theta: f64) -> f64 {
+        theta.sin() / (theta.cos() + xi)
+    }
+
+    /// Pat's V6 lens 0 at 768² under map C, read through every term and
+    /// scaled to `xi` as 6.3's generator scales it: a term of degree n in
+    /// m is multiplied by (m_X5/m_top)^(n − 1), where m_top is the plane
+    /// radius at min(100°, the model's end − 1°) for that ξ and m_X5 the
+    /// X5's at 100°, and the focal by m_X5/m_top, so the polynomial keeps
+    /// the X5's shape over that range and the image the X5's size.
+    fn pats_v6_at_xi(xi: f64) -> TruthModel {
+        let end = if xi > 1.0 {
+            (-1.0 / xi).acos()
+        } else {
+            (-xi).acos()
+        };
+        let top = 100f64.to_radians().min(end - 1f64.to_radians());
+        let s = plane(2.0, 100f64.to_radians()) / plane(xi, top);
+        let mut d = PATS_V6_D0;
+        for (i, k) in d[..5].iter_mut().enumerate() {
+            *k *= s.powi(2 * i as i32 + 2);
+        }
+        // Read through every term, d5 and d6 (p1, p2) and d9 and d11 (s1,
+        // s3) are of degree 2, and d7 and d8 (p1', p2') and d10 and d12
+        // (s2, s4) of degree 4.
+        for i in [5, 6, 9, 11] {
+            d[i] *= s;
+        }
+        for i in [7, 8, 10, 12] {
+            d[i] *= s.powi(3);
+        }
+        let TruthModel::MeiV6 { fx, fy, cx, cy, .. } = pats_v6_at_768(EVERY_TERM) else {
+            unreachable!("Pat's V6 lens is MeiV6");
+        };
+        TruthModel::MeiV6 {
+            xi,
+            fx: fx * s,
+            fy: fy * s,
+            cx,
+            cy,
+            d,
+            reading: EVERY_TERM,
+        }
+    }
+
+    /// The ξ that [`pats_v6_at_xi`] scales Pat's V6 to beside its own 2,
+    /// each with how far off the axis the tests check it: a degree or more
+    /// inside where its r(θ) stops rising (by a scan in 0.01° steps:
+    /// 89.2°, 104.6°, 114.1° and 120.4°, and the projection's own fold at
+    /// acos(−1/2.5) = 113.6°), and no further than 106°.
+    const SCALED_XI: [(f64, f64); 5] = [
+        (0.0, 88.0),
+        (0.5, 103.0),
+        (1.0, 106.0),
+        (1.2, 106.0),
+        (2.5, 106.0),
+    ];
+
     /// A Kannala–Brandt lens on `base` in a 768² slot, its circle about
-    /// as wide as the X5's.
+    /// as wide as the X5's, with one focal and no tangential or prism
+    /// terms.
     fn kb_at_768(base: KbBase) -> TruthModel {
         TruthModel::Kb {
             base,
-            f: 230.0,
+            fx: 230.0,
+            fy: 230.0,
             cx: 386.4,
             cy: 381.9,
             k: [0.012, -0.0021, 0.0003, -0.00002, 0.000001],
+            p: [0.0; 2],
+            pe: [0.0; 2],
+            s: [0.0; 4],
+        }
+    }
+
+    /// The tangential pair, its extension and the prism of
+    /// [`kb_with_terms_at_768`], which move the image by a few pixels at
+    /// 106°.
+    const KB_P: [f64; 2] = [0.0012, -0.0021];
+    const KB_PE: [f64; 2] = [0.0003, -0.0002];
+    const KB_S: [f64; 4] = [-0.0011, 0.0002, 0.0008, -0.0001];
+
+    /// [`kb_at_768`] with its focal 0.4% longer down than across and
+    /// every tangential and prism term non-zero.
+    fn kb_with_terms_at_768(base: KbBase) -> TruthModel {
+        let TruthModel::Kb { fx, cx, cy, k, .. } = kb_at_768(base) else {
+            unreachable!("a KB lens");
+        };
+        TruthModel::Kb {
+            base,
+            fx,
+            fy: fx * 1.004,
+            cx,
+            cy,
+            k,
+            p: KB_P,
+            pe: KB_PE,
+            s: KB_S,
         }
     }
 
     /// Every truth model the tests invert, with how far off the axis each
-    /// is checked: Pat's V3, Pat's V6 under each of the 21 readings, and
-    /// a KB lens on each base, the orthographic one short of where its
-    /// base ends.
+    /// is checked: Pat's V3, Pat's V6 under each of the 21 readings and
+    /// scaled to each of [`SCALED_XI`], and a KB lens on each base, with
+    /// and without its tangential and prism terms, the orthographic ones
+    /// short of where their base ends.
     fn every_model() -> Vec<(TruthModel, f64)> {
         let mut models = vec![(pats_v3_at_768(), 106.0)];
         models.extend(TruthV6::all().map(|v| (pats_v6_at_768(v), 106.0)));
-        models.extend(KbBase::all().map(|base| {
+        models.extend(SCALED_XI.map(|(xi, reach)| (pats_v6_at_xi(xi), reach)));
+        for base in KbBase::all() {
             let reach = if base == KbBase::Orthographic {
                 80.0
             } else {
                 106.0
             };
-            (kb_at_768(base), reach)
-        }));
+            models.push((kb_at_768(base), reach));
+            models.push((kb_with_terms_at_768(base), reach));
+        }
         models
     }
 
@@ -2140,7 +2266,7 @@ mod tests {
     }
 
     /// Synth's inverse inverts its forward on every truth model, each V6
-    /// reading and each KB base among them.
+    /// reading, each ξ and each KB base among them.
     #[test]
     fn truth_inverse_inverts_forward() {
         for (model, reach) in every_model() {
@@ -2154,16 +2280,22 @@ mod tests {
         assert_eq!(pats_v3_at_768().inverse(DVec2::new(0.5, 0.5)), None);
         let ortho = kb_at_768(KbBase::Orthographic);
         assert_eq!(ortho.inverse(DVec2::new(386.4 + 240.0, 381.9)), None);
-        // The bisection finds what the Newton does, from where it starts.
+        // The bisection finds what the Newton does, from where it starts,
+        // at ξ = 2 and at each scaled ξ, whose walk out ends at the fold
+        // (ξ > 1) or just short of acos(−ξ) (ξ ≤ 1).
         let model = pats_v6_at_768(TruthV6::RADIAL_ONLY);
-        for theta in [5.0, 50.0, 99.0] {
-            let px = model.forward(lens_dir(theta, 63.0)).unwrap();
-            let t = (px - DVec2::new(2713.05, 2689.21) * (768.0 / 5376.0))
-                / (DVec2::new(4277.52, 4277.27) * (768.0 / 5376.0));
-            let from = model.bisect(t, PI).unwrap();
-            let (w, det) = newton(|w| model.distort(w), t, from).unwrap();
-            assert!(det > 0.0);
-            assert!(angle(model.lift(w).unwrap(), lens_dir(theta, 63.0)) <= 1e-12);
+        let walked = std::iter::once((model, 100.0))
+            .chain(SCALED_XI.map(|(xi, reach)| (pats_v6_at_xi(xi), reach)));
+        for (model, reach) in walked {
+            for theta in [5.0, 50.0, reach - 1.0] {
+                let (f, c) = model.intrinsics();
+                let t = (model.forward(lens_dir(theta, 63.0)).unwrap() - c) / f;
+                let from = model.bisect(t, PI).unwrap();
+                let (w, det) = newton(|w| model.distort(w), t, from).unwrap();
+                assert!(det > 0.0);
+                let off = angle(model.lift(w).unwrap(), lens_dir(theta, 63.0));
+                assert!(off <= 1e-12, "{model:?} at {theta}°: {off:e} rad");
+            }
         }
         // Controls: the undistorted guess alone, and another V6 reading's
         // inverse, miss by far more.
@@ -2172,23 +2304,44 @@ mod tests {
             model.lift(model.start((p - c) / f)?)
         });
         assert!(must_fail("no Newton", at_most(guess_px, 1e-9)) > 1.0);
-        let sourced = pats_v6_at_768(TruthV6 {
-            tangential: Some(Tangential {
-                pair: PairOrder::D5D6,
-                extension: true,
-            }),
-            prism: Some(Prism {
-                at: PrismAt::D9,
-                order: PrismOrder::ByAxis,
-            }),
-        });
+        let sourced = pats_v6_at_768(EVERY_TERM);
         let (rad, _) = round_trip(&sourced, 106.0, |p| model.inverse(p));
         assert!(must_fail("another reading's inverse", at_most(rad, 1e-12)) > 1e-4);
+        // The KB lens's terms dropped, and a scaled ξ inverted at ξ = 2.
+        let plain = kb_at_768(KbBase::Equisolid);
+        let (rad, _) = round_trip(&kb_with_terms_at_768(KbBase::Equisolid), 106.0, |p| {
+            plain.inverse(p)
+        });
+        assert!(must_fail("the KB lens's terms dropped", at_most(rad, 1e-12)) > 1e-3);
+        let TruthModel::MeiV6 {
+            fx,
+            fy,
+            cx,
+            cy,
+            d,
+            reading,
+            ..
+        } = pats_v6_at_xi(0.5)
+        else {
+            unreachable!("a V6 lens");
+        };
+        let at = |xi| TruthModel::MeiV6 {
+            xi,
+            fx,
+            fy,
+            cx,
+            cy,
+            d,
+            reading,
+        };
+        let (rad, _) = round_trip(&at(0.5), 103.0, |p| at(2.0).inverse(p));
+        assert!(must_fail("ξ = 0.5 inverted at ξ = 2", at_most(rad, 1e-12)) > 1e-2);
     }
 
     /// Synth's forward on values worked out by hand: the centre on the
-    /// axis, tan θ at ξ = 0 and tan(θ/2) at ξ = 1 with no distortion, and
-    /// each KB base.
+    /// axis, tan θ at ξ = 0 and tan(θ/2) at ξ = 1 with no distortion, each
+    /// KB base, and a KB lens's two focals and its tangential and prism
+    /// terms on the base's plane point.
     #[test]
     fn truth_forward_lands_where_worked_by_hand() {
         let close = |a: DVec2, b: [f64; 2]| (a - DVec2::from(b)).length() < 1e-9;
@@ -2283,10 +2436,14 @@ mod tests {
         // 1.1547005 and sin 60° = 0.8660254.
         let kb = |base: KbBase, k1: f64| TruthModel::Kb {
             base,
-            f: 100.0,
+            fx: 100.0,
+            fy: 100.0,
             cx: 50.0,
             cy: 60.0,
             k: [k1, 0.0, 0.0, 0.0, 0.0],
+            p: [0.0; 2],
+            pe: [0.0; 2],
+            s: [0.0; 4],
         };
         for (base, r) in [
             (KbBase::Equidistant, PI / 3.0),
@@ -2309,6 +2466,46 @@ mod tests {
             kb(KbBase::Orthographic, 0.0).forward(lens_dir(100.0, 0.0)),
             None
         );
+        // The tangential and prism terms apply to the base's plane point.
+        // The direction θ = 60° off the axis at azimuth (0.6, 0.8), on the
+        // equisolid base with no polynomial, has r = 2 sin 30° = 1, so m =
+        // (0.6, 0.8), r² = r⁴ = 1. With p = (0.002, 0.003) and p' = (0.001,
+        // 0.002), P1 = 0.003 and P2 = 0.005; with s = (0.004, 0.0005,
+        // 0.006, 0.0007),
+        //   xd = 0.6 + 2 P1 · 0.48 + P2 (1 + 2 · 0.36) + s1 + s2
+        //      = 0.6 + 0.00288 + 0.0086 + 0.004 + 0.0005 = 0.61598,
+        //   yd = 0.8 + 2 P2 · 0.48 + P1 (1 + 2 · 0.64) + s3 + s4
+        //      = 0.8 + 0.0048 + 0.00684 + 0.006 + 0.0007 = 0.81834,
+        // and with fx = 100, fy = 110, u = 50 + 61.598 = 111.598 and v =
+        // 60 + 90.0174 = 150.0174.
+        let (p, pe, s) = (
+            [0.002, 0.003],
+            [0.001, 0.002],
+            [0.004, 0.0005, 0.006, 0.0007],
+        );
+        let with_terms = TruthModel::Kb {
+            base: KbBase::Equisolid,
+            fx: 100.0,
+            fy: 110.0,
+            cx: 50.0,
+            cy: 60.0,
+            k: [0.0; 5],
+            p,
+            pe,
+            s,
+        };
+        let s60 = 3f64.sqrt() / 2.0;
+        let slant = DVec3::new(0.6 * s60, 0.8 * s60, 0.5);
+        let at = with_terms.forward(slant).unwrap();
+        assert!(close(at, [111.598, 150.0174]), "{at}");
+        // Controls: the terms on θ (cos φ, sin φ) = (π/3) (0.6, 0.8),
+        // before the base, which then scales by r/θ = 3/π; and one focal.
+        let w = DVec2::new(0.6, 0.8) * (PI / 3.0);
+        let before = brown(w, [0.0; 5], p, pe, s) * (3.0 / PI);
+        let before = DVec2::new(50.0 + 100.0 * before.x, 60.0 + 110.0 * before.y);
+        must_fail("the terms before the base", close(at, before.to_array()));
+        assert!((before - at).length() > 0.05, "{before}");
+        must_fail("one focal", close(at, [111.598, 60.0 + 81.834]));
     }
 
     /// Pat's V6 lens 1's d0 to d12.
@@ -3863,10 +4060,22 @@ mod tests {
         let edge = lens_dir(IMAGE_CIRCLE_DEG, 0.0);
         let reach = |model: &TruthModel| model.forward(edge).unwrap().x;
         for (mei, lens) in rig.lenses.iter().zip(&kb.lenses) {
-            let TruthModel::Kb { base, f, cx, cy, k } = lens.model else {
+            let TruthModel::Kb {
+                base,
+                fx: f,
+                fy,
+                cx,
+                cy,
+                k,
+                p,
+                pe,
+                s,
+            } = lens.model
+            else {
                 panic!("{:?} for a KB lens", lens.model);
             };
             assert_eq!((base, k), (KbBase::Equidistant, KB_LIKE_K));
+            assert_eq!((fy, p, pe, s), (f, [0.0; 2], [0.0; 2], [0.0; 4]));
             assert_eq!(
                 LensTruth {
                     model: mei.model,
@@ -3883,10 +4092,14 @@ mod tests {
             // Control: Mei's own focal length for the KB lens's.
             let naive = TruthModel::Kb {
                 base,
-                f: mei.model.intrinsics().0.x,
+                fx: mei.model.intrinsics().0.x,
+                fy: mei.model.intrinsics().0.y,
                 cx,
                 cy,
                 k,
+                p,
+                pe,
+                s,
             };
             assert_ne!(f, mei.model.intrinsics().0.x);
             must_fail(
