@@ -5,13 +5,16 @@ use std::path::{Path, PathBuf};
 
 use spherecut_core::{FrameRate, Rational, Time};
 use spherecut_media::encode::{
-    AudioSettings, ColorTags, EncodeError, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes,
+    self, AudioSettings, ColorTags, EncodeError, Mp4Writer, MuxedAs, PixelLayout, VideoSettings,
+    YuvPlanes,
 };
 use spherecut_media::inject::{self, EntryEdit, TrackKind};
 use spherecut_media::mp4::{self, Mp4Tree};
+use spherecut_media::packets::{NextPacket, PacketReader};
 use spherecut_media::spherical::{StereoMode, write};
 use thiserror::Error;
 
+use crate::code::{self, CodeError};
 use crate::yuv::{Chroma, YuvFormat};
 use crate::{Pattern, audio, render_equirect, yuv};
 
@@ -26,6 +29,11 @@ pub enum SynthError {
         path: PathBuf,
         error: std::io::Error,
     },
+    #[error(transparent)]
+    Code(#[from] CodeError),
+    /// A file synth reads back isn't what it should be.
+    #[error("{}: {why}", path.display())]
+    Read { path: PathBuf, why: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,6 +355,28 @@ impl Spec {
 /// the path exists it holds a whole clip, even after an interrupted run,
 /// and callers may cache clips by whether the file exists.
 pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
+    write_with(spec, dir, Lens::NONE)
+}
+
+/// What a lens of a [`PairSpec`] adds to its [`Spec`]'s clip.
+#[derive(Debug, Clone, Copy)]
+struct Lens {
+    /// The lens whose corner codes each frame carries, if any.
+    code: Option<usize>,
+    /// The encoder picks its own threads ([`PairSpec::threaded`]).
+    threaded: bool,
+}
+
+impl Lens {
+    /// A clip of its own.
+    const NONE: Lens = Lens {
+        code: None,
+        threaded: false,
+    };
+}
+
+/// [`write`], with what `lens` adds.
+fn write_with(spec: &Spec, dir: &Path, lens: Lens) -> Result<PathBuf, SynthError> {
     std::fs::create_dir_all(dir).map_err(|error| SynthError::Io {
         path: dir.to_path_buf(),
         error,
@@ -413,7 +443,15 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             ..a
         },
     });
-    let mut w = Mp4Writer::create(&out, &spec.video_settings()?, audio_settings.as_ref())?;
+    let mut settings = spec.video_settings()?;
+    if lens.threaded {
+        for (k, v) in &mut settings.options {
+            if k == "threads" {
+                *v = "0".into();
+            }
+        }
+    }
+    let mut w = Mp4Writer::create(&out, &settings, audio_settings.as_ref())?;
     // Exact per-frame sample counts: frame i covers samples
     // [i·sr/fps, (i+1)·sr/fps).
     let fps = spec.rate.as_rational();
@@ -471,6 +509,9 @@ pub fn write(spec: &Spec, dir: &Path) -> Result<PathBuf, SynthError> {
             for px in &mut img.pixels {
                 *px = px.map(|c| 1.0 - c);
             }
+        }
+        if let Some(k) = lens.code {
+            code::corner_code(&mut img, k, i)?;
         }
         let mut planes = yuv::to_yuv(&img, spec.bits, &format);
         if let Some(seed) = spec.noise {
@@ -946,10 +987,29 @@ impl PairSpec {
     /// The same coding at `side`² and `frames` frames a lens, at the same
     /// bits a pixel: each lens's bitrate scaled by its pixels, so that a
     /// short, small version tests the coding of a perf clip that takes
-    /// hours to make.
+    /// hours to make. The GOP is kept, so `frames` should hold a few.
     pub fn scaled(&self, side: u32, frames: u32) -> PairSpec {
-        let _ = (side, frames);
-        todo!("M3.1 unit (a)")
+        let lens = |s: &Spec| {
+            let (from, to) = (
+                u64::from(s.width) * u64::from(s.height),
+                u64::from(side) * u64::from(side),
+            );
+            Spec {
+                name: format!("{}-{side}-{frames}f", s.name),
+                width: side,
+                height: side,
+                frames,
+                bitrate_kbps: s
+                    .bitrate_kbps
+                    .map(|k| ((u64::from(k) * to).div_ceil(from.max(1))) as u32),
+                ..s.clone()
+            }
+        };
+        PairSpec {
+            name: format!("{}-{side}-{frames}f", self.name),
+            lenses: [lens(&self.lenses[0]), lens(&self.lenses[1])],
+            ..self.clone()
+        }
     }
 }
 
@@ -957,8 +1017,39 @@ impl PairSpec {
 /// on its own into a folder of its own beside the file, then the two
 /// muxed, and the folder removed. The file appears only once whole.
 pub fn write_pair(spec: &PairSpec, dir: &Path) -> Result<PathBuf, SynthError> {
-    let _ = (spec, dir);
-    todo!("M3.1 unit (a)")
+    let invalid = |why: &str| -> SynthError {
+        EncodeError::Invalid(format!("pair {}: {why}", spec.name)).into()
+    };
+    let [a, b] = &spec.lenses;
+    if a.name == b.name {
+        return Err(invalid("its lenses need names of their own"));
+    }
+    if spec
+        .lenses
+        .iter()
+        .any(|l| l.audio != Audio::None || l.spherical)
+    {
+        return Err(invalid("a lens track has no audio or spherical metadata"));
+    }
+    let lenses = dir.join(format!(".{}-lenses", spec.name));
+    let written = (|| {
+        let mut paths = Vec::with_capacity(2);
+        for (k, l) in spec.lenses.iter().enumerate() {
+            let lens = Lens {
+                code: spec.corner_codes.then_some(k),
+                threaded: spec.threaded,
+            };
+            paths.push(write_with(l, &lenses, lens)?);
+        }
+        let srcs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        Ok(encode::mux_video_streams_as(
+            &srcs,
+            &dir.join(spec.file_name()),
+            MuxedAs::Mp4,
+        )?)
+    })();
+    let _ = std::fs::remove_dir_all(&lenses);
+    written
 }
 
 /// [`perf_pairs`]' names: what hw-test writes and the pair benchmarks ask
@@ -969,9 +1060,84 @@ pub const PERF_PAIR_2880_2997: &str = "pair-hevc8-2880-2997-noisy-20s";
 
 /// The two-track perf clips hw-test makes for the pair benchmarks (M3
 /// plan 4.3's P-DEC and 7.2), each 600 frames a lens, coded as the X5
-/// codes each mode.
+/// codes each mode: square 8-bit HEVC lenses in full range, closed GOPs
+/// without B-frames, one-pass ABR at the masters' bitrate a lens, each
+/// lens with its corner codes and its own noise.
+///
+/// - 2×3840² at 29.97: an IDR every 60 frames, P frames only, 65 Mbps a
+///   lens (the masters: 61 to 68).
+/// - 2×2880² at 59.94: an IDR every 120 frames, 80 Mbps a lens (79). The
+///   X5 codes every other frame as a non-reference TSA_N picture, which
+///   x265 (3.5, which every FFmpeg we build against links) gives only to
+///   B-frames: its temporal layers put the non-reference B-frames alone
+///   in the upper layer, and a B-frame is decoded after the frame it is
+///   shown before, where the X5 reorders nothing. So this clip is P
+///   frames only, every one a reference, and decodes no faster for
+///   skipping non-reference frames, as the X5's 5.7K60 does.
+/// - 2×2880² at 29.97: an IDR every 60 frames, P frames only, 80 Mbps a
+///   lens. No sample has this mode yet.
+///
+/// x265 codes them on as many threads as it likes ([`PairSpec::threaded`]),
+/// and its rate control makes them differ a little from one machine to
+/// another, which doesn't matter here.
 pub fn perf_pairs() -> Vec<PairSpec> {
-    todo!("M3.1 unit (a)")
+    // Each lens of each clip has a noise seed of its own: `seed` and the
+    // one after it.
+    let pair = |name: &str, side: u32, rate: FrameRate, keyint: u32, kbps: u32, seed: u64| {
+        let lens = |k: u32| Spec {
+            name: format!("{name}-lens{k}"),
+            pattern: Pattern::Grid,
+            width: side,
+            height: side,
+            rate,
+            frames: 600,
+            codec: Codec::Hevc,
+            bits: 8,
+            audio: Audio::None,
+            color: LENS_COLOR,
+            gop: Some(Gop {
+                keyint,
+                bframes: 0,
+                open: false,
+                radl: 0,
+            }),
+            noise: Some(seed + u64::from(k)),
+            bitrate_kbps: Some(kbps),
+            ..Spec::default()
+        };
+        PairSpec {
+            name: name.into(),
+            lenses: [lens(0), lens(1)],
+            corner_codes: true,
+            threaded: true,
+        }
+    };
+    vec![
+        pair(
+            PERF_PAIR_3840_2997,
+            3840,
+            FrameRate::FPS_29_97,
+            60,
+            65_000,
+            0x7a1b_0010,
+        ),
+        pair(
+            PERF_PAIR_2880_5994,
+            2880,
+            FrameRate::FPS_59_94,
+            120,
+            80_000,
+            0x7a1b_0020,
+        ),
+        pair(
+            PERF_PAIR_2880_2997,
+            2880,
+            FrameRate::FPS_29_97,
+            60,
+            80_000,
+            0x7a1b_0030,
+        ),
+    ]
 }
 
 /// One lens of a [`pair_64`] file: its frames and its keyframe interval.
@@ -982,10 +1148,33 @@ pub struct LensTrack {
 }
 
 /// A two-track file of 2 × 64² (M3 plan section 9), with a length and a
-/// GOP for each lens.
+/// GOP for each lens: HEVC at 29.97 fps in closed GOPs without B-frames,
+/// in the lens colour, each frame with its corner codes, coded on one
+/// thread so that the file is the same on every machine.
 pub fn pair_64(name: &str, lenses: [LensTrack; 2]) -> PairSpec {
-    let _ = (name, lenses);
-    todo!("M3.1 unit (a)")
+    let lens = |k: usize| Spec {
+        name: format!("{name}-lens{k}"),
+        pattern: Pattern::Grid,
+        width: 64,
+        height: 64,
+        rate: FrameRate::FPS_29_97,
+        frames: lenses[k].frames,
+        codec: Codec::Hevc,
+        color: LENS_COLOR,
+        gop: Some(Gop {
+            keyint: lenses[k].keyint,
+            bframes: 0,
+            open: false,
+            radl: 0,
+        }),
+        ..Spec::default()
+    };
+    PairSpec {
+        name: name.into(),
+        lenses: [lens(0), lens(1)],
+        corner_codes: true,
+        threaded: false,
+    }
 }
 
 /// [`pairs_64`]' names.
@@ -993,24 +1182,184 @@ pub const PAIR_64_MATCHED: &str = "pair64-matched";
 pub const PAIR_64_GOP_FAULT: &str = "pair64-gop-fault";
 pub const PAIR_64_LENS_SHORT: &str = "pair64-lens-short";
 
-/// Section 9's 2 × 64² files for the frame lock's tests (M3.8).
+/// Section 9's 2 × 64² files for the frame lock's tests (M3.8), each of
+/// 30 frames a lens: [`PAIR_64_MATCHED`], whose lenses match, with an
+/// IDR every 10 frames; [`PAIR_64_GOP_FAULT`], with GOPs of 8 and 10, so
+/// that their sync samples differ; and [`PAIR_64_LENS_SHORT`], whose lens
+/// 1 is a frame short.
 pub fn pairs_64() -> Vec<PairSpec> {
-    todo!("M3.1 unit (a)")
+    let track = |frames, keyint| LensTrack { frames, keyint };
+    vec![
+        pair_64(PAIR_64_MATCHED, [track(30, 10), track(30, 10)]),
+        pair_64(PAIR_64_GOP_FAULT, [track(30, 8), track(30, 10)]),
+        pair_64(PAIR_64_LENS_SHORT, [track(30, 10), track(29, 10)]),
+    ]
 }
 
 /// The bytes of the samples of stream `stream` of the file at `path`,
 /// counted from its packets: with its length, the track's bitrate.
 pub fn track_bytes(path: &Path, stream: usize) -> Result<u64, SynthError> {
-    let _ = (path, stream);
-    todo!("M3.1 unit (a)")
+    let read = |why: String| SynthError::Read {
+        path: path.to_path_buf(),
+        why,
+    };
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut r = PacketReader::open(path, stream, stop).map_err(|e| read(e.to_string()))?;
+    let mut bytes = 0;
+    loop {
+        match r.next_packet() {
+            NextPacket::Packet(p) => bytes += p.size as u64,
+            NextPacket::End { damaged: false } => return Ok(bytes),
+            NextPacket::End { damaged: true } => {
+                return Err(read(format!("stream {stream} is damaged")));
+            }
+            NextPacket::Stopped => return Err(read("stopped".into())),
+        }
+    }
 }
 
 /// The NAL unit type of each picture of stream `stream`, an HEVC track
 /// of the MP4 file at `path`, in decode order: its first slice's (19 and
-/// 20 IDR, 1 TRAIL_R, 0 TRAIL_N, 2 TSA_N, 3 TSA_R and so on).
+/// 20 IDR, 1 TRAIL_R, 0 TRAIL_N, 2 TSA_N, 3 TSA_R and so on). The
+/// samples are found from the track's own tables and read a NAL unit's
+/// header at a time, without FFmpeg.
 pub fn hevc_picture_types(path: &Path, stream: usize) -> Result<Vec<u8>, SynthError> {
-    let _ = (path, stream);
-    todo!("M3.1 unit (a)")
+    use std::io::{Read, Seek, SeekFrom};
+
+    let read = |why: String| SynthError::Read {
+        path: path.to_path_buf(),
+        why,
+    };
+    let tree = mp4::read_file(path).map_err(|e| read(e.to_string()))?;
+    let trak = tree
+        .tracks()
+        .nth(stream)
+        .ok_or_else(|| read(format!("no track {stream}")))?;
+    let entry = trak
+        .path(&[b"mdia", b"minf", b"stbl", b"stsd"])
+        .and_then(|stsd| stsd.children.first())
+        .ok_or_else(|| read(format!("track {stream} has no sample entry")))?;
+    let hvcc = entry.child(b"hvcC").ok_or_else(|| {
+        read(format!(
+            "track {stream} is no HEVC: no `hvcC` in `{}`",
+            entry.fourcc
+        ))
+    })?;
+    // The bytes of each NAL unit's length.
+    let length_bytes = match hvcc.payload.get(21) {
+        Some(b) => u64::from(b & 3) + 1,
+        None => return Err(read(format!("track {stream}'s `hvcC` is cut short"))),
+    };
+    let samples = sample_ranges(trak).map_err(|why| read(format!("track {stream}: {why}")))?;
+    let io = |error| SynthError::Io {
+        path: path.to_path_buf(),
+        error,
+    };
+    let mut f = std::fs::File::open(path).map_err(io)?;
+    let mut types = Vec::with_capacity(samples.len());
+    for (i, &(offset, size)) in samples.iter().enumerate() {
+        let end = offset + u64::from(size);
+        let mut at = offset;
+        let slice = loop {
+            if at + length_bytes + 1 > end {
+                return Err(read(format!("picture {i} of track {stream} has no slice")));
+            }
+            let mut head = [0u8; 5];
+            let head = &mut head[..length_bytes as usize + 1];
+            f.seek(SeekFrom::Start(at)).map_err(io)?;
+            f.read_exact(head).map_err(io)?;
+            let (len, header) = head.split_at(length_bytes as usize);
+            let len = len.iter().fold(0u64, |v, b| v << 8 | u64::from(*b));
+            // A VCL unit's type is below 32: the picture's first slice.
+            let t = header[0] >> 1 & 0x3f;
+            if t < 32 {
+                break t;
+            }
+            at += length_bytes + len;
+        };
+        types.push(slice);
+    }
+    Ok(types)
+}
+
+/// Where each sample of `trak` lies in its file, in decode order, as
+/// (offset, bytes): from its `stsz`, its `stsc` and its `stco` or `co64`.
+fn sample_ranges(trak: &mp4::Mp4Box) -> Result<Vec<(u64, u32)>, String> {
+    let stbl = trak
+        .path(&[b"mdia", b"minf", b"stbl"])
+        .ok_or("no sample table")?;
+    let table = |t: &[u8; 4]| -> Option<mp4::Cursor<'_>> {
+        let b = stbl.child(t)?;
+        // A payload too large to keep reads as cut short below.
+        let mut c = mp4::Cursor::new(&b.payload);
+        c.version_flags()?;
+        Some(c)
+    };
+    let short = |t: &str| format!("`{t}` is missing or cut short");
+    let mut c = table(b"stsz").ok_or_else(|| short("stsz"))?;
+    let (fixed, count) = (
+        c.u32().ok_or_else(|| short("stsz"))?,
+        c.u32().ok_or_else(|| short("stsz"))?,
+    );
+    let sizes: Vec<u32> = match fixed {
+        0 => (0..count)
+            .map(|_| c.u32())
+            .collect::<Option<_>>()
+            .ok_or_else(|| short("stsz"))?,
+        n => vec![n; count as usize],
+    };
+    let offsets: Vec<u64> = match (table(b"stco"), table(b"co64")) {
+        (Some(mut c), _) => {
+            let n = c.u32().ok_or_else(|| short("stco"))?;
+            (0..n)
+                .map(|_| c.u32().map(u64::from))
+                .collect::<Option<_>>()
+                .ok_or_else(|| short("stco"))?
+        }
+        (None, Some(mut c)) => {
+            let n = c.u32().ok_or_else(|| short("co64"))?;
+            (0..n)
+                .map(|_| c.u64())
+                .collect::<Option<_>>()
+                .ok_or_else(|| short("co64"))?
+        }
+        (None, None) => return Err("no `stco` or `co64`".into()),
+    };
+    // Runs of chunks, each as its first chunk (from 1) and its samples a
+    // chunk.
+    let mut c = table(b"stsc").ok_or_else(|| short("stsc"))?;
+    let n = c.u32().ok_or_else(|| short("stsc"))?;
+    let runs: Vec<(u32, u32)> = (0..n)
+        .map(|_| {
+            let run = (c.u32()?, c.u32()?);
+            c.u32()?;
+            Some(run)
+        })
+        .collect::<Option<_>>()
+        .ok_or_else(|| short("stsc"))?;
+    let mut ranges = Vec::with_capacity(sizes.len());
+    let mut sizes_left = sizes.iter();
+    for (i, &offset) in offsets.iter().enumerate() {
+        let chunk = i as u64 + 1;
+        let per = runs
+            .iter()
+            .rev()
+            .find(|(first, _)| u64::from(*first) <= chunk)
+            .map_or(0, |r| r.1);
+        let mut at = offset;
+        for &size in sizes_left.by_ref().take(per as usize) {
+            ranges.push((at, size));
+            at += u64::from(size);
+        }
+    }
+    if ranges.len() != sizes.len() {
+        return Err(format!(
+            "its chunks hold {} samples, and `stsz` sizes {}",
+            ranges.len(),
+            sizes.len()
+        ));
+    }
+    Ok(ranges)
 }
 
 /// Broken files derived from a good one with video and audio: truncated at
