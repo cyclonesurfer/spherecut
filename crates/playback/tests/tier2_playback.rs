@@ -41,7 +41,12 @@
 //! - `bench_playback_x5_raw`: the longest file of each X5 recording mode,
 //!   its two lenses as two streams: M3's 8K budget, recorded, failing
 //!   only when a pass stalls (no frame for 5 s), as it does when the
-//!   engine stops.
+//!   engine stops. Then hw-test's two-track perf clips, both tracks
+//!   opened as a sample's are, unthrottled only: on Auto's hardware as
+//!   the app plays it by default, and again with `SPHERECUT_ZERO_COPY=1`
+//!   where that imports VA-API's frames (path A), with notes on path A
+//!   against the copy and on K2's engine half (M3 plan 4.3), from the
+//!   2×2880² pair at 29.97.
 //! - `bench_playback_stitched_samples`: each stitched equirect among the
 //!   samples, gated as the perf clips are when it is within the criterion
 //!   (5.7K at 30 fps or less) and recorded otherwise; a skip saying so
@@ -54,9 +59,10 @@
 //! the reason, which never counts as a pass. A run that only records and
 //! fails is a note saying why, but a stall fails the benchmark.
 //! `the_bench_harness_plays_on_lavapipe` runs the same harness in Tier 1,
-//! in software on a small clip, with one stream and with two, so that it
-//! can't rot between hardware runs. Run the rest with
-//! `cargo xtask hw-test`.
+//! in software on a small clip, with one stream and with two, and
+//! `the_bench_harness_plays_both_tracks_of_a_pair` plays a 2 × 64² pair
+//! as the perf pairs are played, so that neither can rot between hardware
+//! runs. Run the rest with `cargo xtask hw-test`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -95,6 +101,7 @@ use spherecut_sphere::DQuat;
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_synth::media::{self as synth_media, Codec, Spec};
+use spherecut_testkit::control::must_fail;
 use spherecut_testkit::{bench, tier2};
 
 /// One UI frame at 60 Hz.
@@ -272,30 +279,33 @@ impl Rig {
         Player::new(parts, config).map_err(|e| e.to_string())
     }
 
-    /// The decoders to run a stream of `format` on: the hardware kind
-    /// Auto picks, or why it picks software; then the other kind where
-    /// doctor says it decodes the format, and software. A kind left out
-    /// gets a note under `label`.
-    fn decoders(&self, format: &StreamFormat, label: &str) -> (Result<Run, String>, Vec<Run>) {
+    /// The hardware kind Auto picks for a stream of `format`, its frames
+    /// copied, or why it picks software.
+    fn auto(&self, format: &StreamFormat) -> Result<Run, String> {
         let auto = choose(
             DecoderPreference::Auto,
             Some(&self.hw),
             Some(format),
             self.discrete(),
         );
-        let picked = match auto.mode {
-            DecodeMode::Hardware { kind, .. } => Some(kind),
-            DecodeMode::Software => None,
-        };
-        let gated = match picked {
-            Some(kind) => Ok(Run {
+        match auto.mode {
+            DecodeMode::Hardware { kind, .. } => Ok(Run {
                 decoder: DecoderPreference::Auto,
                 label: format!("{kind} (Auto)"),
                 kind: Some(kind),
                 zero_copy: ZeroCopy::Off,
             }),
-            None => Err(auto.why),
-        };
+            DecodeMode::Software => Err(auto.why),
+        }
+    }
+
+    /// The decoders to run a stream of `format` on: the hardware kind
+    /// Auto picks, or why it picks software; then the other kind where
+    /// doctor says it decodes the format, and software. A kind left out
+    /// gets a note under `label`.
+    fn decoders(&self, format: &StreamFormat, label: &str) -> (Result<Run, String>, Vec<Run>) {
+        let gated = self.auto(format);
+        let picked = gated.as_ref().ok().and_then(|run| run.kind);
         let mut others = Vec::new();
         for kind in [HwKind::VaApi, HwKind::Vulkan] {
             if picked == Some(kind) {
@@ -1390,16 +1400,272 @@ fn require_x5_modes() -> BTreeMap<String, (PathBuf, ProbeReport)> {
     modes
 }
 
+/// What K2's engine half asks of each lens of the 2×2880² pair at 29.97
+/// (M3 plan 4.3): 30 × 1.2 fps, as `bench_export_pair_decode` asks of the
+/// export's pair decode.
+const K2_FPS: f64 = 30.0 * 1.2;
+
+/// A probed file's video streams, each opened by its index, as a
+/// sample's two lenses are.
+fn lens_streams(r: &ProbeReport) -> Vec<Option<usize>> {
+    video_streams(r).into_iter().map(Some).collect()
+}
+
+/// Both lenses of the two-track file at `path`, as `streams`, played
+/// unthrottled on each of `runs` on its rig, for up to `limit`: each
+/// run's rows under `clip`, and its pass, or why it didn't play, which a
+/// note says too.
+fn play_pair(
+    clip: &str,
+    path: &Path,
+    streams: &[Option<usize>],
+    runs: &[(&Rig, Run)],
+    limit: Duration,
+) -> Vec<Result<Pass, String>> {
+    let mut passes = Vec::new();
+    for (rig, run) in runs {
+        let name = format!("{clip}, {}", run.label);
+        let pass = unthrottled(rig, path, streams, run, limit);
+        match &pass {
+            Ok(u) => {
+                bench::record_runs(
+                    &format!("{name}: decoded per second, unthrottled"),
+                    &u.decoded_fps(),
+                    "fps",
+                );
+                bench::note(format!(
+                    "{name}: {} frames a lens shown in {:.1} s unthrottled; {}; \
+                     stage p50/p95 ms: {}",
+                    u.shown + 1,
+                    u.elapsed.as_secs_f64(),
+                    u.paths_line(),
+                    u.stages_line()
+                ));
+                if let Some(why) = &u.stalled {
+                    bench::note(format!("{name}: the unthrottled pass stalled: {why}"));
+                }
+                if run.zero_copy != ZeroCopy::Off {
+                    bench::note(format!(
+                        "{name}: {} frames taken on the GPU, {} refused{}",
+                        u.imported,
+                        u.refused,
+                        because(u.refusal.as_ref())
+                    ));
+                }
+            }
+            Err(why) => bench::not_measured(&name, format!("unthrottled: {why}")),
+        }
+        passes.push(pass);
+    }
+    passes
+}
+
+/// Auto's run with `SPHERECUT_ZERO_COPY=1`: VA-API's frames imported as
+/// DMA-BUFs (path A), on the GPU the copy runs on. Why it doesn't apply,
+/// where Auto decodes on Vulkan Video, whose frames the default already
+/// keeps on the GPU where it can, or where the GPU can't import them.
+fn path_a(rig: &Rig, auto: &Run) -> Result<Run, String> {
+    if auto.kind != Some(HwKind::VaApi) {
+        return Err(format!(
+            "the same as the default: it imports only VA-API's frames, and Auto decodes on {}",
+            auto.kind.map_or("software".into(), |k| k.to_string())
+        ));
+    }
+    if !rig.gpu.caps.dmabuf_import {
+        return Err(format!(
+            "{} can't import DMA-BUFs: it lacks VK_EXT_external_memory_dma_buf or \
+             VK_EXT_image_drm_format_modifier",
+            rig.gpu.caps.info.name
+        ));
+    }
+    Ok(Run {
+        label: format!("{} (Auto, SPHERECUT_ZERO_COPY=1)", HwKind::VaApi),
+        zero_copy: ZeroCopy::All,
+        ..auto.clone()
+    })
+}
+
+/// K2's engine half (M3 plan 4.3) from `run`'s unthrottled pass over the
+/// 2×2880² pair at 29.97: decided only on VA-API with its frames copied,
+/// as the plan names it. It passes when every stream decoded on VA-API
+/// throughout, the pass didn't stall, and every full second decoded
+/// [`K2_FPS`] frames a lens or more, as section 12.3's gate holds a
+/// perf clip's seconds; the error says what fell short.
+fn k2_engine(run: &Run, u: &Pass) -> Option<Result<String, String>> {
+    if run.kind != Some(HwKind::VaApi) || run.zero_copy.dmabuf() {
+        return None;
+    }
+    let mut short = Vec::new();
+    let on_va = Some(DecodePath::Hardware {
+        kind: HwKind::VaApi,
+    });
+    if u.paths.is_empty() || u.paths.iter().any(|d| *d != on_va) {
+        short.push(format!("not on VA-API throughout: {}", u.paths_line()));
+    }
+    if let Some(why) = &u.stalled {
+        short.push(format!("the pass stalled: {why}"));
+    }
+    let fps: Vec<f64> = u.seconds.iter().map(|s| s.decoded).collect();
+    let slowest = fps.iter().copied().fold(f64::INFINITY, f64::min);
+    if fps.is_empty() || slowest < K2_FPS {
+        short.push(format!(
+            "its {} full seconds decoded {fps:.1?} fps a lens, the slowest under {K2_FPS:.0}",
+            fps.len()
+        ));
+    }
+    if !short.is_empty() {
+        return Some(Err(short.join("; ")));
+    }
+    let median = bench::percentile(&fps, 50.0).unwrap_or(f64::NAN);
+    Some(Ok(format!(
+        "its {} full seconds decoded {slowest:.1} fps a lens at the slowest, {median:.1} at \
+         the median, against {K2_FPS:.0}",
+        fps.len()
+    )))
+}
+
+/// The median of a pass's full seconds, in fps a lens.
+fn median_fps(u: &Pass) -> f64 {
+    bench::percentile(&u.decoded_fps(), 50.0).unwrap_or(f64::NAN)
+}
+
+/// A two-track perf clip's runs in [`bench_playback_x5_raw`] (M3 plan
+/// 4.3's K2, the engine half): Auto as the app plays it by default (D25),
+/// then again with `SPHERECUT_ZERO_COPY=1` where that imports the frames
+/// (path A), each unthrottled; notes compare path A with the copy and,
+/// on the 2×2880² pair at 29.97, give K2's verdict. Stalls go into
+/// `stalls`; the clip goes into `no_hardware` when Auto decodes it in
+/// software, which isn't played.
+fn bench_perf_pair(
+    rig: &Rig,
+    clip: &str,
+    path: &Path,
+    k2: bool,
+    stalls: &mut Vec<String>,
+    no_hardware: &mut Vec<String>,
+) -> Option<String> {
+    let report = probe_file(path);
+    let streams = lens_streams(&report);
+    let format = format_of(&report, streams[0]);
+    let auto = match rig.auto(&format) {
+        Ok(run) => run,
+        Err(why) => {
+            bench::not_measured(clip, format!("Auto decodes it in software here: {why}"));
+            no_hardware.push(format!("{clip}: {why}"));
+            return k2.then(|| format!("not decided here: Auto decodes {clip} in software"));
+        }
+    };
+    let shared = rig.as_app_plays(&auto);
+    let mut runs: Vec<(&Rig, Run)> = Vec::new();
+    match &shared {
+        Ok((on, kept)) => runs.push((on, kept.clone())),
+        Err(why) => {
+            bench::note(format!(
+                "{clip}, {}: copied, as the app plays it: {why}",
+                auto.label
+            ));
+            runs.push((rig, auto.clone()));
+        }
+    }
+    match path_a(rig, &auto) {
+        Ok(run) => runs.push((rig, run)),
+        Err(why) => bench::not_measured(&format!("{clip}, SPHERECUT_ZERO_COPY=1"), why),
+    }
+    let passes = play_pair(clip, path, &streams, &runs, GATED_UNTHROTTLED);
+    for ((_, run), pass) in runs.iter().zip(&passes) {
+        if let Ok(Pass {
+            stalled: Some(why), ..
+        }) = pass
+        {
+            stalls.push(format!(
+                "{clip}, {}: the unthrottled pass stalled: {why}",
+                run.label
+            ));
+        }
+    }
+    if let [Ok(copy), Ok(a)] = &passes[..] {
+        let (fa, fc) = (median_fps(a), median_fps(copy));
+        bench::note(format!(
+            "{clip}, path A against the copy: {fa:.1} fps a lens at the median against {fc:.1}: \
+             {}",
+            if fa > fc {
+                "path A is the faster: if zero_copy_matches_copy_path passes here, D25's \
+                 revisit rule makes it the default where Vulkan Video can't decode"
+            } else {
+                "the copy is as fast or faster, so D25 stands"
+            }
+        ));
+    }
+    if !k2 {
+        return None;
+    }
+    let (run, pass) = (&runs[0].1, &passes[0]);
+    Some(match pass {
+        Err(why) => format!("not decided: {}: {why}", run.label),
+        Ok(u) => match k2_engine(run, u) {
+            None => format!(
+                "not decided here: Auto plays {clip} on {}, and K2 asks VA-API's with its \
+                 frames copied",
+                run.label
+            ),
+            Some(Ok(why)) => format!("{clip}, {}: Pass: {why}", run.label),
+            Some(Err(why)) => format!(
+                "{clip}, {}: Fail: {why}; path A's row and zero_copy_matches_copy_path here \
+                 decide D25's revisit",
+                run.label
+            ),
+        },
+    })
+}
+
+/// Each X5 raw mode among the samples, its two lenses as two streams, on
+/// Auto's hardware and the rest, in real time and unthrottled; then each
+/// of hw-test's two-track perf clips, both tracks opened as a sample's
+/// are, unthrottled ([`bench_perf_pair`]). Recorded; a stall fails it.
 #[test]
-#[ignore = "tier2: benchmark, needs camera samples and a GPU that decodes them"]
+#[ignore = "tier2: benchmark, needs camera samples or hw-test's perf pairs, and a GPU that decodes them"]
 fn bench_playback_x5_raw() {
-    let modes = require_x5_modes();
+    tier2::require_hw_run();
+    // The samples and the perf pairs each give rows of their own; with
+    // neither, this skips with both reasons.
+    let mut missing = Vec::new();
+    let modes = match tier2::samples_dir() {
+        Some(dir) => {
+            let modes = x5_modes(probe_samples(&dir));
+            if modes.is_empty() {
+                missing.push(format!(
+                    "no Insta360 dual-fisheye file with two lenses under {}",
+                    dir.display()
+                ));
+            }
+            modes
+        }
+        None => {
+            missing.push("no samples directory (SPHERECUT_SAMPLES)".into());
+            BTreeMap::new()
+        }
+    };
+    let mut pairs = Vec::new();
+    for spec in synth_media::perf_pairs() {
+        let clip = format!("perf clip {}", spec.name);
+        match tier2::perf_clip(&spec.file_name()) {
+            Ok(path) => pairs.push((clip, path, spec.name == synth_media::PERF_PAIR_2880_2997)),
+            Err(why) => {
+                bench::not_measured(&clip, &why);
+                missing.push(why);
+            }
+        }
+    }
+    missing.dedup();
+    if modes.is_empty() && pairs.is_empty() {
+        tier2::skip(missing.join("; "));
+    }
     let rig = Rig::hardware();
     bench::note(format!("X5 raw: {}", rig.about()));
     let mut no_hardware = Vec::new();
     let mut stalls = Vec::new();
     for (mode, (path, report)) in &modes {
-        let streams: Vec<Option<usize>> = video_streams(report).into_iter().map(Some).collect();
+        let streams = lens_streams(report);
         let format = format_of(report, streams[0]);
         bench::note(format!(
             "{mode}: {}",
@@ -1418,8 +1684,20 @@ fn bench_playback_x5_raw() {
             stalls.extend(stall(mode, run, &passes));
         }
     }
+    let mut k2 = None;
+    for (clip, path, gated) in &pairs {
+        let verdict = bench_perf_pair(&rig, clip, path, *gated, &mut stalls, &mut no_hardware);
+        k2 = k2.or(verdict);
+    }
+    bench::note(format!(
+        "K2's engine half, huginn's 5.7K30: {}",
+        k2.unwrap_or_else(|| format!(
+            "not decided: perf clip {} isn't here",
+            synth_media::PERF_PAIR_2880_2997
+        ))
+    ));
     assert!(stalls.is_empty(), "{}", stalls.join("; "));
-    if no_hardware.len() == modes.len() {
+    if no_hardware.len() == modes.len() + pairs.len() {
         tier2::skip(format!(
             "Auto decodes in software here: {}",
             no_hardware.join("; ")
@@ -2193,5 +2471,133 @@ fn the_bench_harness_plays_on_lavapipe() {
             stage.name(),
             r.stages_line()
         );
+    }
+}
+
+/// [`play_pair`], the perf pairs' half of `bench_playback_x5_raw`, in
+/// Tier 1: pair64-matched's two tracks, opened as a sample's lenses are,
+/// played unthrottled on lavapipe in software to the end of both. The
+/// control is pair64-lens-short, whose lens 1 is a frame short: were the
+/// second stream lens 0 again, it would play to the end as well. It
+/// stalls instead, for 5 s.
+#[test]
+fn the_bench_harness_plays_both_tracks_of_a_pair() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("tier2-playback-pair-{}", std::process::id()));
+    let rig = Rig {
+        gpu: common::gpu().clone(),
+        node: hw::render_node(None, None),
+        hw: HwSupport::default(),
+    };
+    let play = |name: &str| {
+        let spec = synth_media::pairs_64()
+            .into_iter()
+            .find(|p| p.name == name)
+            .unwrap();
+        let path = synth_media::write_pair(&spec, &dir).unwrap();
+        let streams = lens_streams(&probe_file(&path));
+        let runs = [(&rig, Run::software())];
+        let passes = play_pair(name, &path, &streams, &runs, Duration::from_secs(60));
+        let [pass] = <[_; 1]>::try_from(passes).unwrap();
+        (path, streams, pass)
+    };
+    // Every frame of both lenses after the first came up, each lens
+    // decoded in software.
+    let whole = |p: &Pass| {
+        p.stalled.is_none()
+            && p.shown == 29
+            && p.paths.len() == 2
+            && p.paths
+                .iter()
+                .all(|d| matches!(d, Some(DecodePath::Software { .. })))
+    };
+    let (path, streams, matched) = play(synth_media::PAIR_64_MATCHED);
+    let (_, _, short) = play(synth_media::PAIR_64_LENS_SHORT);
+    // The bench's own rows end before any pass where Auto decodes in
+    // software, as it does with no doctor's checks.
+    let (mut stalls, mut no_hardware) = (Vec::new(), Vec::new());
+    let k2 = bench_perf_pair(&rig, "pair64", &path, true, &mut stalls, &mut no_hardware);
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(
+        k2.as_deref(),
+        Some("not decided here: Auto decodes pair64 in software")
+    );
+    assert_eq!((stalls.len(), no_hardware.len()), (0, 1), "{no_hardware:?}");
+    assert_eq!(streams, [Some(0), Some(1)]);
+    let matched = matched.unwrap();
+    assert!(
+        whole(&matched),
+        "{} shown, stalled {:?}; {}",
+        matched.shown,
+        matched.stalled,
+        matched.paths_line()
+    );
+    assert!(!matched.decoded_fps().is_empty());
+    must_fail(
+        "a pair whose lens 1 is a frame short",
+        short.as_ref().is_ok_and(whole),
+    );
+}
+
+/// K2's engine half holds VA-API's copied pass to 36 fps a lens in every
+/// full second, on VA-API throughout and without a stall, and decides
+/// nothing on any other run.
+#[test]
+fn k2s_engine_half_holds_every_second_of_va_api_copied_to_36_a_lens() {
+    let va = Run {
+        label: "VA-API (Auto)".into(),
+        decoder: DecoderPreference::Auto,
+        ..Run::only(HwKind::VaApi)
+    };
+    let on_va = Some(DecodePath::Hardware {
+        kind: HwKind::VaApi,
+    });
+    let pass = |fps: &[f64]| Pass {
+        seconds: fps
+            .iter()
+            .map(|&decoded| Second {
+                decoded,
+                ..Second::default()
+            })
+            .collect(),
+        paths: vec![on_va.clone(); 2],
+        ..Pass::default()
+    };
+    let fast = pass(&[41.0, 38.5, 36.0, 40.0]);
+    let why = k2_engine(&va, &fast).unwrap().unwrap();
+    assert!(
+        why.contains("4 full seconds decoded 36.0 fps a lens at the slowest, 38.5 at the median"),
+        "{why}"
+    );
+    // The controls: each shortfall fails it.
+    let slow = must_fail(
+        "a second under 36",
+        k2_engine(&va, &pass(&[41.0, 35.9, 40.0])).unwrap(),
+    );
+    assert!(slow.contains("35.9"), "{slow}");
+    let fell = Pass {
+        paths: vec![on_va.clone(), Some(DecodePath::Software { threads: None })],
+        ..pass(&[41.0])
+    };
+    let off = must_fail("a lens in software", k2_engine(&va, &fell).unwrap());
+    assert!(off.contains("stream 1 in software"), "{off}");
+    let stalled = Pass {
+        stalled: Some("no frame at 3.000 s after 5s".into()),
+        ..pass(&[41.0])
+    };
+    must_fail("a pass that stalled", k2_engine(&va, &stalled).unwrap());
+    let brief = Pass {
+        decoded: 30.0,
+        elapsed: Duration::from_millis(500),
+        ..pass(&[])
+    };
+    must_fail("no full second", k2_engine(&va, &brief).unwrap());
+    // Only VA-API with its frames copied decides it.
+    let path_a = Run {
+        zero_copy: ZeroCopy::All,
+        ..va.clone()
+    };
+    for run in [Run::only(HwKind::Vulkan), path_a, Run::software()] {
+        assert!(k2_engine(&run, &fast).is_none(), "{}", run.label);
     }
 }
