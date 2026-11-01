@@ -3,15 +3,15 @@
 //!
 //! Only the fields 5.1 lists are read; every other top-level field is
 //! skipped and counted. Their numbers and the values quoted are from the
-//! bytes of Pat's X5 files unless the format notes say otherwise.
-
-#![expect(
-    unused_variables,
-    reason = "the bodies are todo!() until M3.2's unit (b) writes them"
-)]
+//! bytes of Pat's X5 files unless the format notes say otherwise. Of
+//! 131 to 136, 133 and 134 are kept by nothing: the X5 writes no 133 and
+//! 0 in 134, whose meaning is unknown, so both are counted as unknown.
 
 use super::calib::Generation;
-use crate::CameraError;
+use super::le64;
+use super::limits::{MAX_METADATA, MAX_STRING};
+use crate::pb::{Field, Value, Walker};
+use crate::{CameraError, Part};
 
 /// What record 1 says about the camera and the recording.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -148,6 +148,16 @@ impl Calibrations {
             Generation::V6 => &self.v6,
         }
     }
+
+    /// Generation `g`'s strings, to set.
+    fn get_mut(&mut self, g: Generation) -> &mut CalibStrings {
+        match g {
+            Generation::V1 => &mut self.v1,
+            Generation::V2 => &mut self.v2,
+            Generation::V3 => &mut self.v3,
+            Generation::V6 => &mut self.v6,
+        }
+    }
 }
 
 /// Reads record 1's payload. Fields are found by number whatever their
@@ -159,8 +169,245 @@ impl Calibrations {
 /// [`CameraError::NotUtf8`]. Unknown fields are skipped by their wire
 /// type and counted in [`Metadata::unknown`].
 ///
-/// [`MAX_METADATA`]: super::limits::MAX_METADATA
-/// [`MAX_STRING`]: super::limits::MAX_STRING
+/// A field read here, or one inside its message, that comes in a wire
+/// type other than its own is [`CameraError::WireType`] at its key, and a
+/// varint past 32 bits where the field holds a u32 (the window and the
+/// video size) is [`CameraError::BadVarint`] at the value. Errors inside
+/// a field are in its [`Part::Field`]; those of the walk between fields,
+/// and the payload's size, in `Part::Record(1)`. The payload's
+/// `TooLarge` is at the first byte past the limit, and a string's at the
+/// key of its field. The fields inside a message read here that it
+/// doesn't read are skipped, and not counted.
 pub fn parse_metadata(bytes: &[u8]) -> Result<Metadata, CameraError> {
-    todo!()
+    if bytes.len() > MAX_METADATA {
+        return Err(CameraError::TooLarge {
+            part: Part::Record(1),
+            size: bytes.len() as u64,
+            limit: MAX_METADATA as u64,
+            offset: MAX_METADATA as u64,
+        });
+    }
+    let mut m = Metadata::default();
+    for f in Walker::new(bytes, Part::Record(1), 0) {
+        let f = f?;
+        let n = f.number;
+        match n {
+            1 => m.serial = Some(string(&f, n)?),
+            2 => m.model = Some(string(&f, n)?),
+            3 => m.firmware = Some(string(&f, n)?),
+            24 => m.first_frame_us = Some(varint(&f, n)? as i64),
+            25 => m.rolling_shutter_ms = Some(double(&f, n)?),
+            26 => m.file_group = Some(file_group(&f)?),
+            27 => m.window = Some(window(&f)?),
+            44 => m.video_size = Some(video_size(&f)?),
+            79 => m.layout = Some(varint(&f, n)?),
+            80 => m.track_order = Some(varint(&f, n)?),
+            93 => m.duration_ms = Some(varint(&f, n)?),
+            98 => m.frames = Some(frame_span(&f)?),
+            131 => m.stream_type = Some(varint(&f, n)?),
+            132 => m.codec = Some(varint(&f, n)?),
+            135 => m.bitrate_mbps = Some(varint(&f, n)?),
+            136 => m.offset_version = Some(varint(&f, n)?),
+            145 => m.lens_profiles = Some(lens_profiles(&f)?),
+            _ => match Generation::ALL
+                .into_iter()
+                .find(|g| g.fields().contains(&n))
+            {
+                Some(g) => {
+                    let s = Some(string(&f, n)?);
+                    let c = m.calib.get_mut(g);
+                    if n == g.fields()[0] {
+                        c.working = s;
+                    } else {
+                        c.original = s;
+                    }
+                }
+                None => m.unknown = m.unknown.saturating_add(1),
+            },
+        }
+    }
+    Ok(m)
+}
+
+/// [`CameraError::WireType`] for field `f`, inside top-level field `top`,
+/// which came in a wire type other than its own.
+fn wire_type(f: &Field, top: u32) -> CameraError {
+    let wire = match f.value {
+        Value::Varint(_) => 0,
+        Value::I64(_) => 1,
+        Value::Len(_) => 2,
+        Value::I32(_) => 5,
+    };
+    CameraError::WireType {
+        part: Part::Field(top),
+        wire,
+        offset: f.offset,
+    }
+}
+
+/// `f`'s value as a varint (an integer, a bool or an enum).
+fn varint(f: &Field, top: u32) -> Result<u64, CameraError> {
+    match f.value {
+        Value::Varint(v) => Ok(v),
+        _ => Err(wire_type(f, top)),
+    }
+}
+
+/// `f`'s value as a varint that fits a u32.
+fn small(f: &Field, top: u32) -> Result<u32, CameraError> {
+    u32::try_from(varint(f, top)?).map_err(|_| CameraError::BadVarint {
+        part: Part::Field(top),
+        offset: f.value_offset,
+    })
+}
+
+/// `f`'s value as a double.
+fn double(f: &Field, top: u32) -> Result<f64, CameraError> {
+    match f.value {
+        Value::I64(v) => Ok(f64::from_bits(v)),
+        _ => Err(wire_type(f, top)),
+    }
+}
+
+/// `f`'s bytes: a string, bytes or a message.
+fn len<'a>(f: &Field<'a>, top: u32) -> Result<&'a [u8], CameraError> {
+    match f.value {
+        Value::Len(b) => Ok(b),
+        _ => Err(wire_type(f, top)),
+    }
+}
+
+/// `f`'s value as a string of at most [`MAX_STRING`] bytes.
+fn string(f: &Field, top: u32) -> Result<String, CameraError> {
+    let b = len(f, top)?;
+    if b.len() > MAX_STRING {
+        return Err(CameraError::TooLarge {
+            part: Part::Field(top),
+            size: b.len() as u64,
+            limit: MAX_STRING as u64,
+            offset: f.offset,
+        });
+    }
+    match std::str::from_utf8(b) {
+        Ok(s) => Ok(s.to_owned()),
+        Err(e) => Err(CameraError::NotUtf8 {
+            part: Part::Field(top),
+            offset: f.value_offset + e.valid_up_to() as u64,
+        }),
+    }
+}
+
+/// A walker over top-level field `f`'s message.
+fn message<'a>(f: &Field<'a>) -> Result<Walker<'a>, CameraError> {
+    let part = Part::Field(f.number);
+    Ok(Walker::new(len(f, f.number)?, part, f.value_offset))
+}
+
+/// Field 26.
+fn file_group(f: &Field) -> Result<FileGroup, CameraError> {
+    let mut group = FileGroup::default();
+    for g in message(f)? {
+        let g = g?;
+        match g.number {
+            1 => group.kind = varint(&g, f.number)?,
+            2 => group.index = varint(&g, f.number)?,
+            3 => group.identify = Some(string(&g, f.number)?),
+            4 => group.total = varint(&g, f.number)?,
+            _ => {}
+        }
+    }
+    Ok(group)
+}
+
+/// Field 27.
+fn window(f: &Field) -> Result<Window, CameraError> {
+    let mut w = Window::default();
+    for g in message(f)? {
+        let g = g?;
+        let slot = match g.number {
+            1 => &mut w.src[0],
+            2 => &mut w.src[1],
+            3 => &mut w.dst[0],
+            4 => &mut w.dst[1],
+            5 => &mut w.offset[0],
+            6 => &mut w.offset[1],
+            _ => continue,
+        };
+        *slot = small(&g, f.number)?;
+    }
+    Ok(w)
+}
+
+/// Field 44, `{1 width, 2 height}`.
+fn video_size(f: &Field) -> Result<[u32; 2], CameraError> {
+    let mut size = [0; 2];
+    for g in message(f)? {
+        let g = g?;
+        let slot = match g.number {
+            1 => &mut size[0],
+            2 => &mut size[1],
+            _ => continue,
+        };
+        *slot = small(&g, f.number)?;
+    }
+    Ok(size)
+}
+
+/// Field 98.
+fn frame_span(f: &Field) -> Result<FrameSpan, CameraError> {
+    let mut span = FrameSpan::default();
+    for g in message(f)? {
+        let g = g?;
+        let slot = match g.number {
+            1 => &mut span.first_us,
+            3 => &mut span.first_unix_ms,
+            4 => &mut span.last_unix_ms,
+            5 => &mut span.frames,
+            _ => continue,
+        };
+        *slot = varint(&g, f.number)?;
+    }
+    Ok(span)
+}
+
+/// Field 145: its items 1 (a name and a polynomial's coefficients) and 2
+/// (a name and a field of view).
+fn lens_profiles(f: &Field) -> Result<LensProfiles, CameraError> {
+    let top = f.number;
+    let mut profiles = LensProfiles::default();
+    for item in message(f)? {
+        let item = item?;
+        if !matches!(item.number, 1 | 2) {
+            continue;
+        }
+        let (mut name, mut values) = (String::new(), Vec::new());
+        for g in Walker::new(len(&item, top)?, Part::Field(top), item.value_offset) {
+            let g = g?;
+            match (g.number, g.value) {
+                (1, _) => name = string(&g, top)?,
+                // A repeated double, one a field or packed in one.
+                (2, Value::Len(packed)) => {
+                    if packed.len() % 8 != 0 {
+                        return Err(CameraError::Truncated {
+                            part: Part::Field(top),
+                            offset: g.value_offset + packed.len() as u64,
+                        });
+                    }
+                    let n = packed.len() / 8;
+                    values.extend((0..n).map(|i| f64::from_bits(le64(packed, 8 * i))));
+                }
+                (2, _) => values.push(double(&g, top)?),
+                _ => {}
+            }
+        }
+        if item.number == 1 {
+            profiles.polynomials.push((name, values));
+        } else {
+            // The last value, as for any field read twice.
+            profiles
+                .fovs
+                .push((name, values.last().copied().unwrap_or(0.0)));
+        }
+    }
+    Ok(profiles)
 }

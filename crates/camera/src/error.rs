@@ -59,11 +59,16 @@ pub enum CameraError {
     /// as older cameras write theirs, or a damaged one.
     #[error("{}", footer_mismatch(.id, .offset))]
     FooterMismatch { id: u8, offset: u64 },
-    /// A varint of more than ten bytes, or past 64 bits.
+    /// A varint of more than ten bytes, or past 64 bits; a field's key
+    /// past 32 bits or with field number 0, which protobuf doesn't allow;
+    /// or a varint past 32 bits where the metadata holds a u32. `offset`
+    /// is the varint's first byte.
     #[error("{part} has a bad varint at byte {offset}")]
     BadVarint { part: Part, offset: u64 },
     /// A protobuf wire type the metadata doesn't use: a group's (3 or 4),
-    /// or 6 or 7, which protobuf doesn't define.
+    /// or 6 or 7, which protobuf doesn't define; or, for a field
+    /// `parse_metadata` reads, a wire type other than the field's own.
+    /// `offset` is the field's key.
     #[error("{part} has wire type {wire} at byte {offset}, which the metadata doesn't use")]
     WireType { part: Part, wire: u8, offset: u64 },
     /// More bytes than a limit allows (`insta360::limits`), or than the
@@ -102,9 +107,11 @@ pub enum CameraError {
         offset: u64,
     },
     /// A calibration token that isn't what the grammar has in its place:
-    /// not a decimal number, a lens count other than 2, a packed word of
-    /// another generation, or a block whose canvas or lens type isn't the
-    /// other's. `why` says which.
+    /// not a decimal number, an integer (the lens count, the canvas, the
+    /// lens type or the word) that isn't a u32 as it prints, a lens count
+    /// other than 2, a packed word of another generation, or a block whose
+    /// canvas or lens type isn't the other's. `why` says which, and
+    /// `offset` is where the token starts.
     #[error("the {generation} calibration string's token at byte {offset} {why}")]
     BadToken {
         generation: Generation,
