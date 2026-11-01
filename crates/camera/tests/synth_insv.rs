@@ -29,13 +29,13 @@ use proptest::sample::{Index, subsequence};
 use spherecut_camera::insta360::calib::{self, Focal, Generation, Token};
 use spherecut_camera::insta360::limits::MAX_METADATA;
 use spherecut_camera::insta360::{
-    CalibStrings, Calibrations, FileGroup, FrameSpan, LensProfiles, Metadata, Nv12Image, RecordRef,
-    Trailer, Window, imu_span, parse_exposure, parse_metadata, read_record, read_trailer,
-    thumbnail,
+    CalibStrings, Calibrations, Exposure, FileGroup, FrameSpan, LensProfiles, Metadata, Nv12Image,
+    Pairing, RecordRef, Trailer, Window, imu_span, parse_exposure, parse_metadata, read_record,
+    read_trailer, thumbnail, verify_companion,
 };
 use spherecut_camera::pb::{Value, Walker};
 use spherecut_camera::{CameraError, Part};
-use spherecut_core::FrameRate;
+use spherecut_core::{FrameRate, Rational};
 use spherecut_synth::insv::{
     self, ExposureItem, Field, ImuItem, InsvFault, RawRecord, Records, Thumbnail, TrailerLayout,
     X5_ALIGN,
@@ -206,9 +206,10 @@ fn pats_v6() -> CalibTruth {
 }
 
 /// What `parse_metadata` reads from `Records::x5_like` of Pat's two
-/// calibrations, for `frames` frames lasting `duration_ms`, as x5_like's
-/// doc lists its fields.
-fn x5_like_metadata(frames: u64, duration_ms: u64) -> Metadata {
+/// calibrations, as x5_like's doc lists its fields, where field 98 counts
+/// `counted` frames (one more than the tracks hold, as the X5 counts them
+/// on a master) and field 93 is `duration_ms`.
+fn x5_like_metadata(counted: u64, duration_ms: u64) -> Metadata {
     let printed = |cal: &CalibTruth| {
         let s = insv::print(cal, &planted());
         CalibStrings {
@@ -231,7 +232,7 @@ fn x5_like_metadata(frames: u64, duration_ms: u64) -> Metadata {
         duration_ms: Some(duration_ms),
         frames: Some(FrameSpan {
             first_us: 1_000_000,
-            frames,
+            frames: counted,
             ..FrameSpan::default()
         }),
         stream_type: Some(4),
@@ -787,7 +788,7 @@ fn the_trailer_round_trips_through_synths_writer() {
     let mut records = Records::x5_like(
         &[pats_v3(), pats_v6()],
         &planted(),
-        115,
+        114,
         FrameRate::FPS_29_97,
     );
     records.thumbnail = Some(Thumbnail {
@@ -813,7 +814,9 @@ fn the_trailer_round_trips_through_synths_writer() {
     let at = 100_003;
     let (inst, layout) = insv::inst_box(&records, at, X5_ALIGN, None);
     let mut file = Placed { at, inst, pos: 0 };
-    // 115 frames at 29.97 last 3837 ms, as clip 1's do.
+    // Clip 1's 114 frames a track at 29.97: field 98 counts 115, the
+    // X5's count on a master, and field 93 is ⌊115 × 1001 / 30⌋ = 3837
+    // ms, as clip 1's master has them (tier2_samples.rs).
     let meta = x5_like_metadata(115, 3837);
     assert_eq!(round_trips(&mut file, &records, &layout, &meta), Ok(()));
 
@@ -905,6 +908,155 @@ fn the_trailer_round_trips_through_synths_writer() {
     );
     assert!(e.starts_with("record 10: [10, 10,"), "{e}");
     the_trailer_round_trips_through_synths_writer_cases();
+}
+
+// The first frame and the LRV.
+
+/// Synth's file of `records`, its box at the file's start and its records
+/// on the X5's boundaries, with its trailer and its metadata and exposure
+/// as camera reads them.
+fn read_back(records: &Records) -> (Placed, Trailer, Metadata, Vec<Exposure>) {
+    let (inst, _) = insv::inst_box(records, 0, X5_ALIGN, None);
+    let mut file = Placed {
+        at: 0,
+        inst,
+        pos: 0,
+    };
+    let len = file.len();
+    let t = read_trailer(&mut file, len).unwrap().unwrap();
+    let mut record = |id| {
+        read_record(&mut file, &t, id, MAX_METADATA)
+            .unwrap()
+            .unwrap()
+    };
+    let m = parse_metadata(&record(1)).unwrap();
+    let exposure = parse_exposure(&record(4)).unwrap();
+    (file, t, m, exposure)
+}
+
+/// The X5's 119.88 fps, which core names no constant for.
+fn fps_119_88() -> FrameRate {
+    FrameRate::new(Rational::new(120000, 1001).unwrap()).unwrap()
+}
+
+/// Synth's X5-like file at each of the X5's rates, read through camera,
+/// has its first frame among earlier exposure items, where the X5's is:
+/// the item whose stamp is field 24's is item 5 at 25 and 29.97 fps, 6 at
+/// 59.94 and 10 at 119.88 (Tier 2c's `first_entry` on Pat's files, which
+/// is synth's spec); field 98's item 1 is the same time and its count
+/// the tracks' frames + 1; each frame's item from there is a frame on
+/// from field 24's time, to the µs; and 2 to 6 items follow the last
+/// frame's, as on the X5. The tracks' frames are Pat's takes' at each
+/// rate.
+///
+/// Controls: the first frame taken as exposure item 0, whose stamp isn't
+/// field 24's; field 24 held to the next item's stamp; and the frames
+/// timed from item 0.
+#[test]
+fn the_first_frame_is_found_among_earlier_exposure_items() {
+    let _time = timed("the_first_frame_is_found_among_earlier_exposure_items");
+    let cals = [pats_v3(), pats_v6()];
+    let rates = [
+        (FrameRate::FPS_25, 116, 5),
+        (FrameRate::FPS_29_97, 114, 5),
+        (FrameRate::FPS_59_94, 190, 6),
+        (fps_119_88(), 586, 10),
+    ];
+    for (rate, frames, first) in rates {
+        let records = Records::x5_like(&cals, &planted(), frames, rate);
+        let (_, _, m, exposure) = read_back(&records);
+        let first_us = m.first_frame_us.unwrap() as u64;
+        // The frames' items from `from`, each within a µs of its time
+        // from field 24's: the first that isn't.
+        let r = rate.as_rational();
+        let off = |from: usize| {
+            (0..frames as usize).find(|&k| {
+                let want = first_us as f64 + k as f64 * 1e6 * r.den() as f64 / r.num() as f64;
+                (exposure[from + k].t_us as f64 - want).abs() > 1.0
+            })
+        };
+        let at = exposure.iter().position(|e| e.t_us == first_us);
+        assert_eq!(at, Some(first), "{rate:?}");
+        let span = m.frames.unwrap();
+        assert_eq!(
+            (span.first_us, span.frames),
+            (first_us, u64::from(frames) + 1),
+            "{rate:?}"
+        );
+        assert_eq!(off(first), None, "{rate:?}");
+        let after = exposure.len() - first - frames as usize;
+        assert!(
+            (2..=6).contains(&after),
+            "{rate:?}: {after} items after the last frame's"
+        );
+
+        must_fail(
+            &format!("the first frame at {rate:?} taken as exposure item 0"),
+            exposure[0].t_us == first_us,
+        );
+        must_fail(
+            &format!("field 24 at {rate:?} at the next exposure item"),
+            exposure[first + 1].t_us == first_us,
+        );
+        must_fail(
+            &format!("the frames at {rate:?} timed from item 0"),
+            off(0).is_none(),
+        );
+    }
+}
+
+/// An LRV whose records `Records::x5_lrv` copies from its master's
+/// verifies against the master whatever its length, as the X5's 5.7K60
+/// LRV of 95 frames verifies against its 190-frame master by its 200
+/// exposure items; and camera reads the LRV's own count in field 98, the
+/// master's length in field 93, no fields 79 and 80, and 131 and 132 1.
+///
+/// Control: the LRV `Records::x5_like` writes for its own 95 frames,
+/// whose exposure record (4) has 105 items to the master's 200, is paired
+/// by name only.
+#[test]
+fn an_lrv_with_its_masters_exposure_record_verifies() {
+    let _time = timed("an_lrv_with_its_masters_exposure_record_verifies");
+    let cals = [pats_v3(), pats_v6()];
+    let master = Records::x5_like(&cals, &planted(), 190, FrameRate::FPS_59_94);
+    let (mut m, mt, mm, _) = read_back(&master);
+    let mut pair = |lrv: &Records| {
+        let (mut l, lt, lm, _) = read_back(lrv);
+        let p = verify_companion((&mut m, &mt), (&mut l, &lt), 1 << 20).unwrap();
+        (p, lm)
+    };
+    let (p, lm) = pair(&Records::x5_lrv(&master, 95));
+    assert_eq!(p, Pairing::Verified);
+    assert_eq!(lm.frames.unwrap().frames, 95);
+    assert_eq!(mm.frames.unwrap().frames, 191);
+    assert_eq!(
+        (
+            lm.duration_ms,
+            lm.layout,
+            lm.track_order,
+            lm.stream_type,
+            lm.codec
+        ),
+        (Some(3186), None, None, Some(1), Some(1))
+    );
+    assert_eq!(lm.calib, mm.calib);
+
+    let (p, _) = pair(&Records::x5_like(
+        &cals,
+        &planted(),
+        95,
+        FrameRate::FPS_59_94,
+    ));
+    must_fail(
+        "an LRV of its own 95 frames, verified",
+        p == Pairing::Verified,
+    );
+    assert_eq!(
+        p,
+        Pairing::NameOnly {
+            why: "their exposure records (4) differ in size: 3200 bytes in the master, 1680 in the LRV".into()
+        }
+    );
 }
 
 // The cross parse.
@@ -1236,6 +1388,44 @@ fn the_calibration_hash_is_over_the_working_strings() {
     must_fail("the strings hashed with no NULs", joined == calib.hash());
 }
 
+/// A file whose original copies (56 and 112) differ from its working
+/// strings (54 and 111), as synth's `Records::plant_original` writes
+/// them, reads with both kept apart, and camera's `Calibrations::hash`
+/// follows the working strings alone (M3 plan 11.1): the hash over V1's
+/// and V2's absent strings and Pat's V3 and V6, as `x5_like` printed
+/// them.
+///
+/// Control: the same hash computed over the original copies, each its
+/// generation's truth with one number moved, isn't camera's.
+#[test]
+fn the_calibration_hash_follows_the_working_strings_in_a_file() {
+    let _time = timed("the_calibration_hash_follows_the_working_strings_in_a_file");
+    let p = planted();
+    let mut records = Records::x5_like(&[pats_v3(), pats_v6()], &p, 30, FrameRate::FPS_29_97);
+    let (mut v3, mut v6) = (pats_v3(), pats_v6());
+    v3.blocks[1].cx += 1.0;
+    v6.blocks[0].fx -= 1.0;
+    records.plant_original(&v3, &p);
+    records.plant_original(&v6, &p);
+    let (_, _, m, _) = read_back(&records);
+
+    let working = [&pats_v3(), &pats_v6()].map(|c| insv::print(c, &p));
+    let originals = [&v3, &v6].map(|c| insv::print(c, &p));
+    let strings = |g: usize| CalibStrings {
+        working: Some(working[g].clone()),
+        original: Some(originals[g].clone()),
+    };
+    assert_eq!((&m.calib.v3, &m.calib.v6), (&strings(0), &strings(1)));
+    assert_eq!(
+        m.calib.hash(),
+        nul_ended(&["", "", &working[0], &working[1]])
+    );
+    must_fail(
+        "the hash over the original copies",
+        m.calib.hash() == nul_ended(&["", "", &originals[0], &originals[1]]),
+    );
+}
+
 // The faults.
 
 /// A test's own directory in the system's temp dir, removed with what it
@@ -1410,19 +1600,32 @@ fn reads_as(path: &Path, layout: &TrailerLayout, fault: InsvFault) -> Result<(),
     }
 }
 
-/// Each trailer `InsvFault` (`TruncatedTrailer` to `VarintOverflow`) is
-/// an error naming its record or part at the planted byte, and
-/// `NoCalibration` a file with no strings.
+/// Each trailer `InsvFault` reads as it was planted. Four are errors
+/// naming their part or record at the planted byte, each with its
+/// message: `TruncatedTrailer` is `TooLarge` in the tail (the trailer's
+/// size, at EOF − 40, more than the file's length), `IndexSlotPastEnd`
+/// record 1 skipped and `SlotPastEnd` at its slot, `WrongTokenCount` a
+/// `TokenCount` at each string's end and `VarintOverflow` a `BadVarint`
+/// in record 1.
 ///
-/// `BadMagic` is the exception, not an error: with no magic there is no
-/// trailer at all, and `read_trailer` answers `Ok(None)` as for any file
-/// without one, by its design. Each file is written by `append_trailer`
-/// after the same MP4's bytes, at the X5's alignment; the MP4's faults
-/// leave the file as it is without them. Each fault's control: the clean
-/// file, read as that fault says, doesn't read so.
+/// The other two aren't camera's errors. `BadMagic` leaves no trailer at
+/// all, and `read_trailer` answers `Ok(None)` as for any file without
+/// one, by its design; its clear message is probe's `bad_trailer`
+/// warning of an `inst` box without the magic, at the byte that differs
+/// (cli's contract.rs, `probe_warns_of_an_inst_box_without_the_magic`),
+/// and doctor `--file`'s "missing: a camera trailer that can be read".
+/// `NoCalibration` is a file whose metadata reads with no strings, a
+/// state rather than damage (M3 plan 5.4); doctor `--file` says it
+/// "can be stitched: no", missing "a calibration: the trailer holds none
+/// that parses" (cli's doctor.rs).
+///
+/// Each file is written by `append_trailer` after the same MP4's bytes,
+/// at the X5's alignment; the MP4's faults leave the file as it is
+/// without them. Each fault's control: the clean file, read as that
+/// fault says, doesn't read so.
 #[test]
-fn every_trailer_fault_is_a_clear_error_naming_the_record() {
-    let _time = timed("every_trailer_fault_is_a_clear_error_naming_the_record");
+fn each_trailer_fault_reads_as_planted() {
+    let _time = timed("each_trailer_fault_reads_as_planted");
     let dir = TempDir::new("faults");
     // Not an MP4, which camera never reads: the bytes before the trailer.
     let mp4 = dir.0.join("tracks.mp4");
@@ -1448,8 +1651,9 @@ fn every_trailer_fault_is_a_clear_error_naming_the_record() {
         [1, 3, 4]
     );
     assert_eq!(layout.payload_start + layout.size, len);
-    // 30 frames at 29.97 last 1001 ms.
-    let want = x5_like_metadata(30, 1001);
+    // 30 frames a track at 29.97: field 98 counts 31, and field 93 is
+    // ⌊31 × 1001 / 30⌋ = 1034 ms.
+    let want = x5_like_metadata(31, 1034);
     let m = metadata(&clean).unwrap();
     assert_eq!(m, want);
 
