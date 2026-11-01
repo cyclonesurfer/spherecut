@@ -1726,7 +1726,8 @@ fn only_frame_handles_sigint() {
 /// `camera` a name and gains `camera_detail`; both gain `lenses`,
 /// `calibration` (with the snapshot's hash), `companion`,
 /// `exposure_entries` and `records`, as `docs/cli-json.md` gives them.
-/// Each pairs a master and an LRV a frame short by name only.
+/// Each pairs a master by name only with an LRV whose exposure record
+/// (4) has lost its last item.
 #[test]
 fn probe_pins_the_camera_shapes() {
     let started = Instant::now();
@@ -1831,7 +1832,7 @@ fn probe_pins_the_camera_shapes() {
     let companion = |path: &Path| serde_json::json!({"path": path.to_str().unwrap(), "verified": true, "why": null});
     assert_eq!(m["companion"], companion(&lrv));
     assert_eq!(l["companion"], companion(&master.path));
-    assert_eq!(m["exposure_entries"], insv::FRAMES);
+    assert_eq!(m["exposure_entries"], insv::records().exposure.len());
     let records: Vec<Value> = master
         .layout
         .slots
@@ -1841,12 +1842,15 @@ fn probe_pins_the_camera_shapes() {
     assert_eq!(m["records"], Value::Array(records));
     assert!(m["warnings"].as_array().unwrap().is_empty(), "{m}");
 
-    // The controls: an LRV a frame short is paired by name only, a
-    // master without calibration strings has none, and one whose
-    // strings don't parse has none and a `bad_trailer` warning for each.
+    // The controls: an LRV whose exposure record has lost its last item
+    // is paired by name only, a master without calibration strings has
+    // none, and one whose strings don't parse has none and a
+    // `bad_trailer` warning for each.
     let other = tmp("camera-shapes-other");
     let short = insv::master(&other, insv::MASTER, None);
-    insv::lrv(&other, insv::LRV, insv::FRAMES - 1);
+    let mut cut = insv::lrv_records(insv::FRAMES);
+    cut.exposure.pop();
+    insv::lrv_with(&other, insv::LRV, insv::FRAMES, &cut);
     let none = insv::master(
         &other,
         "VID_20261022_101500_00_002.insv",
@@ -1860,10 +1864,15 @@ fn probe_pins_the_camera_shapes() {
     let (_, doc) = probe_json(&[&short.path, &none.path, &bad.path]);
     let files = &doc["result"]["files"];
     let c = &files[0]["report"]["companion"];
-    must_fail("an LRV a frame short, verified", c["verified"] == true);
+    must_fail(
+        "an LRV with an exposure item fewer, verified",
+        c["verified"] == true,
+    );
+    // The master's 13 items of 16 bytes at 25 fps, its 6 frames' with 5
+    // before the first's and 2 past the last's, and the LRV's 12.
     assert_eq!(
         c["why"],
-        "their exposure records (4) differ in size: 96 bytes in the master, 80 in the LRV"
+        "their exposure records (4) differ in size: 208 bytes in the master, 192 in the LRV"
     );
     must_fail(
         "a master with no calibration strings, calibrated",
@@ -1943,20 +1952,20 @@ fn probe_pins_the_camera_shapes() {
         serde_json::json!({"path": insv::LRV, "verified": true, "why": null})
     );
     assert_eq!(l["companion"]["path"], insv::MASTER);
-    assert_eq!(m["exposure_entries"], insv::FRAMES);
+    assert_eq!(m["exposure_entries"], insv::records().exposure.len());
     assert_eq!(m["records"], files_records(&master.layout));
     assert!(l.get("lenses").is_none(), "{l}");
-    // The agent's control: the master whose LRV is a frame short, and
-    // that LRV, both opened beneath the root, are paired by name only,
-    // each naming the other, so the agent compares the two files and
-    // not a file with itself.
+    // The agent's control: the master whose LRV has an exposure item
+    // fewer, and that LRV, both opened beneath the root, are paired by
+    // name only, each naming the other, so the agent compares the two
+    // files and not a file with itself.
     let doc = call_probe(&other, &[insv::MASTER, insv::LRV]);
     let files = &doc["result"]["files"];
-    let why = "their exposure records (4) differ in size: 96 bytes in the master, 80 in the LRV";
+    let why = "their exposure records (4) differ in size: 208 bytes in the master, 192 in the LRV";
     for (f, path) in [(&files[0], insv::LRV), (&files[1], insv::MASTER)] {
         let c = &f["companion"];
         must_fail(
-            "the agent's pair a frame short, verified",
+            "the agent's pair with an exposure item fewer, verified",
             c["verified"] == true,
         );
         assert_eq!(

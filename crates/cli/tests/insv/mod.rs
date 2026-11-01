@@ -1,9 +1,11 @@
 //! A synthetic `.insv` and its LRV for the CLI's tests (M3 plan 7.2):
 //! two lens clips of synth's remuxed into one MP4 of two video tracks,
 //! as the X5 writes its masters, with synth's X5-like trailer after it
-//! (`insv::append_trailer`), and a one-track LRV with the same exposure
-//! record. Pat's V3 and V6 calibrations are insta360.md's "Pat's X5
-//! samples", as camera's `synth_insv.rs` has them.
+//! (`insv::append_trailer`), and a one-track LRV whose trailer holds the
+//! master's records with the LRV's own metadata fields
+//! (`Records::x5_lrv`), its exposure record among them. Pat's V3 and V6
+//! calibrations are insta360.md's "Pat's X5 samples", as camera's
+//! `synth_insv.rs` has them.
 //!
 //! `Mp4Writer` writes one video track and M3.5's `write_insv` the N-track
 //! file; until then, the remux here is ffmpeg-next's alone, apart from
@@ -84,10 +86,22 @@ pub fn master_with(dir: &Path, name: &str, records: &Records, fault: Option<Insv
     Written { path, layout }
 }
 
-/// An LRV in `dir` named `name`: one track, both lenses side by side, and
-/// the trailer of `Records::x5_like` for `frames` frames, so that its
-/// exposure record (4) is the master's when `frames` is [`FRAMES`].
+/// The records [`lrv`] writes in its trailer for an LRV of `frames`
+/// frames: [`records`] as `Records::x5_lrv` gives the LRV them, so that
+/// its exposure record (4) is the master's whatever `frames` is, as the
+/// X5's is. A test may change them before [`lrv_with`] writes them.
+pub fn lrv_records(frames: u32) -> Records {
+    Records::x5_lrv(&records(), frames)
+}
+
+/// An LRV in `dir` named `name`: one track of `frames` frames, both
+/// lenses side by side, and the trailer of [`lrv_records`].
 pub fn lrv(dir: &Path, name: &str, frames: u32) -> PathBuf {
+    lrv_with(dir, name, frames, &lrv_records(frames))
+}
+
+/// [`lrv`] with the trailer of `records`.
+pub fn lrv_with(dir: &Path, name: &str, frames: u32, records: &Records) -> PathBuf {
     let clip = media::write(
         &Spec {
             name: "lrv".into(),
@@ -105,9 +119,8 @@ pub fn lrv(dir: &Path, name: &str, frames: u32) -> PathBuf {
         &dir.join(format!("{name}.clip")),
     )
     .unwrap();
-    let records = Records::x5_like(&pats_calibrations(), &planted(), frames, RATE);
     let path = dir.join(name);
-    insv::append_trailer(&clip, &path, &records, None).unwrap();
+    insv::append_trailer(&clip, &path, records, None).unwrap();
     path
 }
 
