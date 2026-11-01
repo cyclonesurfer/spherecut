@@ -9035,6 +9035,99 @@ Revisit if: an agent needs the source and the render side by side in
 one image; a codec's clamping moves compare's numbers (then read Y);
 or 1 % of shape lets a wrong project through.
 
+## D63. The lens model: one canonical distortion under every reading, an inverse that repeats to 1e-12
+
+*2026-11-01, M3 slice M3.3. The M3 plan, `docs/design/m3-plan.md`
+sections 6.1 and 6.3, has the detail; this is what was built and why.*
+
+**One canonical form.** `sphere::fisheye::Unified` is Mei's model, m =
+(x, y)/(z + ξ), with one distortion, `Canonical`: five radial terms,
+Brown's p1 and p2 with their r² extensions, and a thin prism of four,
+13 in all. Every reading of the camera's terms maps onto it.
+`Canonical::v3` takes V3's k1 to k3 and p1, p2. `Canonical::v6` takes
+V6's d0 to d4 as radial and reads d5 to d12 through `V6Reading`, a
+small generic space of 21 values (5 tangential readings: none, or
+either pair order, with or without the d7, d8 extension; 5 prism
+layouts: none, or d7 or d9 onwards, by axis or interleaved; d7's prism
+only without the extension). No value is named after a source. The
+shader will evaluate this form only (10.3), so a reading the Stitch
+pane offers renders on the GPU as the CPU and the fit see it.
+
+**The forward** is closed form. `project` is `None` past the model's
+own end: the fold at acos(−1/ξ) for ξ > 1 (120° at ξ = 2), or where
+z + ξ vanishes for ξ ≤ 1. It doesn't scan for an earlier fold in the
+polynomial on every call; `limit_theta` finds that, and `Rig::build`
+keeps θ_max inside it.
+
+**The inverse** (CPU only) repeats one pass: strip the tangential and
+prism terms at the current estimate, then solve m R(m²) = r_d by
+Newton bracketed on [0, m(`limit_theta`)], falling back to bisection
+when a step would leave the bracket or fails to halve. It stops when
+the full forward's residual is under 1e-12 in plane units (about 4e-9
+px at the X5's focal), at most 20 passes, and lifts in closed form,
+η = (ξ + √(1 + (1 − ξ²)ρ))/(ρ + 1). Near the fold an early estimate
+overshoots: a pass whose radial target lies past r(`limit_theta`)
+takes the bracket's top and the passes go on, so a pixel truly past
+the limit ends with its residual above 1e-12 and is `None`, while one
+just inside it converges. Failing that pass outright lost every pixel
+from 112.6° to 119° on Pat's numbers. `invert` (with the passes it
+took and the residual it left) and `lift` are public, so that the
+tests count passes. The method follows Gyroflow's `insta360.rs`
+(GPL-3.0-or-later, attributed in the code), written from the plan's
+description.
+
+**The limit.** `limit_theta` scans dr/dθ in 0.05° steps up to the
+model's end and bisects within the step where the curve stops rising.
+When the slope can't reach 0 below the end even with every positive
+term dropped, it returns the end without a scan. On all four of Pat's
+blocks (V3 and V6, both lenses) it is 120.000°, the projection's fold:
+their polynomials alone would stop rising only at plane radius 0.78
+(V3) and 0.70 (V6), past the fold's 1/√3 = 0.577.
+
+**`KbLens`** applies its base after the polynomial, r = base(θ_d), as
+`Lens::radius` does. Its inverse strips the tangential and prism terms
+by the same passes, undoes the base in closed form, and runs the
+Newton on the polynomial θ_d(θ) alone, bracketed on [0,
+`limit_theta`]: through the base, a stereographic lens's pole at 180°
+let a tiny step pass for convergence, 0.74 rad off. Its `limit_theta`
+scans to 180°, the base's own fold included (90° of θ_d on an
+orthographic base).
+
+**The frames.** `fisheye::F` is the 180° turn about +x, diag(1, −1, −1)
+with det +1, taking `Lens`'s frame (−Z forward, +y up) to Mei's (+z
+along the axis, +y down) and back.
+
+**Measured** on Pat's numbers to 119°, in a debug build: V3 takes at
+most 6 passes, V6 read through every term 7, and any of the 21
+readings at most 9. Residuals stay under 1e-12 and directions within
+5e-11 rad. Three passes, Gyroflow's count, leave up to 7.3e-7 and
+3.9e-7 rad on V3's two lenses and 4.8e-6 and 1.0e-6 on V6's at θ ≤
+100° (up to 6.6e-3 px), which 6.3's 1e-7 rad refuses. 6.3's scaled
+draws take 12 or 13 passes at 100,000 cases and up to 15 at the
+corners of the draw (ξ = 0.5), so the tests bound them at 16, not the
+plan's 10. `tests/unified.rs` runs its 14 tests in 5.2 s at 100,000
+cases, of the 30 s it shares with the rig and rung 0. Each reading's
+formula is written on the test side term by term from its fields; the
+two sourced readings ({D5D6 with extension, D9 by axis}, and {D5D6, D7
+by axis} with d4 = 0) are written as their sources state them; each
+check has a control that must fail (three passes, swapped terms, a
+reading that reads d7 and d8 twice, the base before the polynomial).
+
+**Considered and not done.** Gyroflow's three passes (above); failing
+a pass whose target overshoots (above); `project` scanning for the
+polynomial's fold on every call (the scan belongs once per lens, in
+`Rig::build`); a Newton through the base for `KbLens` (the pole);
+readings named after sources (it would favour one, and video-types'
+names come from a vendor's internals, 4.1 rule 7).
+
+The shader's forward copy (10.3) and `theta_frame`, which bounds the
+feather, are M3.3's other units and complete the plan's row.
+
+Revisit if: a camera's polynomial folds inside its frame; a lens needs
+more than 20 passes, or its tangential terms are large enough that the
+strip stops converging; or a source states a V6 reading outside the
+21.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360
