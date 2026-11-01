@@ -17,7 +17,9 @@
 //! looking along −Z. Every frame is right-handed, and a rotation by a
 //! positive angle about an axis turns by the right-hand rule.
 
-use glam::{DQuat, DVec2, DVec3};
+use std::f64::consts::{FRAC_PI_2, PI};
+
+use glam::{DMat2, DQuat, DVec2, DVec3};
 use spherecut_core::video::ChromaSiting;
 
 use crate::yuv::{Chroma, YuvFormat, YuvPlanes};
@@ -580,9 +582,8 @@ impl TruthModel {
     /// Synth's forward: lens-frame direction to pixel, term by term from
     /// 6.1. `None` where the model has no image (the lift's denominator
     /// at or below 0, or an orthographic base past 90°).
-    #[expect(unused_variables, reason = "M3.3 unit (c) writes the body")]
     pub fn forward(&self, d: DVec3) -> Option<DVec2> {
-        todo!()
+        self.pixel(self.param(d)?)
     }
 
     /// Synth's inverse, pixel to lens-frame unit direction, which rung 0
@@ -590,10 +591,337 @@ impl TruthModel {
     /// forward with a numeric Jacobian and bisection as its fallback,
     /// deliberately not sphere's bracketed radial Newton, then the
     /// closed-form lift (7.1). `None` where it finds no direction.
-    #[expect(unused_variables, reason = "M3.3 unit (c) writes the body")]
     pub fn inverse(&self, px: DVec2) -> Option<DVec3> {
-        todo!()
+        self.invert(px, PI)
     }
+
+    /// The focal lengths and the centre, in pixels.
+    fn intrinsics(&self) -> (DVec2, DVec2) {
+        match *self {
+            TruthModel::Mei { fx, fy, cx, cy, .. } | TruthModel::MeiV6 { fx, fy, cx, cy, .. } => {
+                (DVec2::new(fx, fy), DVec2::new(cx, cy))
+            }
+            TruthModel::Kb { f, cx, cy, .. } => (DVec2::splat(f), DVec2::new(cx, cy)),
+        }
+    }
+
+    /// The point w the model distorts for direction `d`: the plane point
+    /// m = (x, y)/(z + ξ) of a Mei model, or θ (cos φ, sin φ) for `Kb`,
+    /// which [`TruthModel::lift`] turns back into the direction.
+    fn param(&self, d: DVec3) -> Option<DVec2> {
+        let len = d.length();
+        if !(len > 0.0 && len.is_finite()) {
+            return None;
+        }
+        let d = d / len;
+        match *self {
+            TruthModel::Mei { xi, .. } | TruthModel::MeiV6 { xi, .. } => {
+                let denom = d.z + xi;
+                (denom > 0.0).then(|| DVec2::new(d.x, d.y) / denom)
+            }
+            TruthModel::Kb { .. } => {
+                let across = DVec2::new(d.x, d.y);
+                let off_axis = across.length();
+                let theta = off_axis.atan2(d.z);
+                Some(if off_axis > 0.0 {
+                    across * (theta / off_axis)
+                } else {
+                    DVec2::new(theta, 0.0)
+                })
+            }
+        }
+    }
+
+    /// The distorted, normalised image point for `w`: (xd, yd), which the
+    /// focal lengths and centre take to the pixel.
+    fn distort(&self, w: DVec2) -> Option<DVec2> {
+        match *self {
+            TruthModel::Mei { k, p, .. } => Some(brown(
+                w,
+                [k[0], k[1], k[2], 0.0, 0.0],
+                p,
+                [0.0; 2],
+                [0.0; 4],
+            )),
+            TruthModel::MeiV6 { d, reading, .. } => {
+                let (k, p, pe, s) = v6_terms(&d, reading);
+                Some(brown(w, k, p, pe, s))
+            }
+            TruthModel::Kb { base, k, .. } => {
+                let theta = w.length();
+                if theta == 0.0 {
+                    return Some(DVec2::ZERO);
+                }
+                let t2 = theta * theta;
+                let theta_d = theta
+                    * (1.0 + t2 * (k[0] + t2 * (k[1] + t2 * (k[2] + t2 * (k[3] + t2 * k[4])))));
+                let r = match base {
+                    KbBase::Equidistant => theta_d,
+                    KbBase::Equisolid => 2.0 * (theta_d / 2.0).sin(),
+                    KbBase::Stereographic if theta_d < PI => 2.0 * (theta_d / 2.0).tan(),
+                    KbBase::Orthographic if theta_d <= FRAC_PI_2 => theta_d.sin(),
+                    KbBase::Stereographic | KbBase::Orthographic => return None,
+                };
+                Some(w * (r / theta))
+            }
+        }
+    }
+
+    /// The pixel for `w`.
+    fn pixel(&self, w: DVec2) -> Option<DVec2> {
+        let (f, c) = self.intrinsics();
+        Some(f * self.distort(w)? + c)
+    }
+
+    /// The unit direction `w` stands for, in closed form: for a Mei
+    /// model the lift η = (ξ + √(1 + (1 − ξ²) ρ²))/(ρ² + 1) with ρ = |m|,
+    /// and the direction (η m, η − ξ), `None` where the root's argument
+    /// is negative (past the fold); for `Kb`, θ = |w| off the axis,
+    /// `None` past π.
+    fn lift(&self, w: DVec2) -> Option<DVec3> {
+        match *self {
+            TruthModel::Mei { xi, .. } | TruthModel::MeiV6 { xi, .. } => {
+                let rho2 = w.length_squared();
+                let disc = 1.0 + (1.0 - xi * xi) * rho2;
+                if disc.is_nan() || disc < 0.0 {
+                    return None;
+                }
+                let eta = (xi + disc.sqrt()) / (rho2 + 1.0);
+                Some(DVec3::new(eta * w.x, eta * w.y, eta - xi).normalize())
+            }
+            TruthModel::Kb { .. } => {
+                let theta = w.length();
+                if theta.is_nan() || theta > PI {
+                    return None;
+                }
+                if theta == 0.0 {
+                    return Some(DVec3::Z);
+                }
+                let across = w * (theta.sin() / theta);
+                Some(DVec3::new(across.x, across.y, theta.cos()))
+            }
+        }
+    }
+
+    /// The model's w at θ off the axis along the unit image direction
+    /// `u`, with no distortion: where the bisection looks.
+    fn along(&self, theta: f64, u: DVec2) -> DVec2 {
+        match *self {
+            TruthModel::Mei { xi, .. } | TruthModel::MeiV6 { xi, .. } => {
+                u * (theta.sin() / (theta.cos() + xi))
+            }
+            TruthModel::Kb { .. } => u * theta,
+        }
+    }
+
+    /// The largest θ [`TruthModel::along`] reaches: for a Mei model with
+    /// ξ > 1 the fold at acos(−1/ξ), and with ξ ≤ 1 just short of
+    /// acos(−ξ), where z + ξ vanishes; π for `Kb`.
+    fn reach(&self) -> f64 {
+        match *self {
+            TruthModel::Mei { xi, .. } | TruthModel::MeiV6 { xi, .. } => {
+                if xi > 1.0 {
+                    (-1.0 / xi).acos()
+                } else {
+                    (-xi).acos() - 1e-6
+                }
+            }
+            TruthModel::Kb { .. } => PI,
+        }
+    }
+
+    /// Where the Newton starts for the normalised image point `t`: the w
+    /// that maps to it with no distortion. A Mei model's plane point is
+    /// `t` itself; a `Kb` base inverts in closed form, and `None` past the
+    /// base's image (r > 2 for equisolid, r > 1 for orthographic).
+    fn start(&self, t: DVec2) -> Option<DVec2> {
+        let TruthModel::Kb { base, .. } = *self else {
+            return Some(t);
+        };
+        let r = t.length();
+        if r == 0.0 {
+            return Some(DVec2::ZERO);
+        }
+        let theta_d = match base {
+            KbBase::Equidistant => r,
+            KbBase::Equisolid if r <= 2.0 => 2.0 * (r / 2.0).asin(),
+            KbBase::Stereographic => 2.0 * (r / 2.0).atan(),
+            KbBase::Orthographic if r <= 1.0 => r.asin(),
+            KbBase::Equisolid | KbBase::Orthographic => return None,
+        };
+        Some(t * (theta_d / r))
+    }
+
+    /// The direction seen at `px` no further than `cap` off the axis.
+    ///
+    /// The Newton runs on the normalised point from where the model
+    /// without distortion would put it. Its root is the direction's when
+    /// the forward keeps its orientation there (the Jacobian's
+    /// determinant positive): the models synth renders fold at most once
+    /// as θ grows, so that root is the only one on the image's first
+    /// sheet, and a root past the lift's fold or past `cap` means there
+    /// is no direction to find. When the Newton finds no root, or one
+    /// past a fold of the distortion, the bisection walks out from the
+    /// axis along the target's own image direction in 1° steps, while
+    /// the image still moves outwards, brackets the target's radius and
+    /// halves the bracket; the Newton then starts again from there.
+    fn invert(&self, px: DVec2, cap: f64) -> Option<DVec3> {
+        let (f, c) = self.intrinsics();
+        let t = (px - c) / f;
+        let distort = |w: DVec2| self.distort(w);
+        let w = newton(distort, t, self.start(t)?)
+            .filter(|&(_, det)| det > 0.0)
+            .or_else(|| newton(distort, t, self.bisect(t, cap)?).filter(|&(_, det)| det > 0.0))?
+            .0;
+        let d = self.lift(w)?;
+        (off_axis(d) <= cap).then_some(d)
+    }
+
+    /// The bisection's w for the normalised point `t`, looking no further
+    /// than 1° past `cap`.
+    fn bisect(&self, t: DVec2, cap: f64) -> Option<DVec2> {
+        let r = t.length();
+        if r == 0.0 {
+            return Some(DVec2::ZERO);
+        }
+        let u = t / r;
+        let outward = |theta: f64| Some(self.distort(self.along(theta, u))?.dot(u));
+        let step = 1f64.to_radians();
+        let end = self.reach().min(cap + step);
+        let (mut lo, mut at_lo) = (0.0, 0.0);
+        while lo < end {
+            let hi = (lo + step).min(end);
+            let at_hi = outward(hi)?;
+            if at_hi < at_lo {
+                // The image turned back before reaching t.
+                return None;
+            }
+            if at_hi >= r {
+                let (mut a, mut b) = (lo, hi);
+                for _ in 0..64 {
+                    let mid = 0.5 * (a + b);
+                    if outward(mid)? < r {
+                        a = mid;
+                    } else {
+                        b = mid;
+                    }
+                }
+                return Some(self.along(0.5 * (a + b), u));
+            }
+            (lo, at_lo) = (hi, at_hi);
+        }
+        None
+    }
+}
+
+/// The angle of the lens-frame direction `d` off the optical axis +z.
+fn off_axis(d: DVec3) -> f64 {
+    DVec2::new(d.x, d.y).length().atan2(d.z)
+}
+
+/// The Mei distortion of the plane point `m` (6.1): radial
+/// R = 1 + k1 r² + … + k5 r¹⁰, Brown's tangential pair p with its r²
+/// extension pe (P1 = p1 + p1' r², P2 = p2 + p2' r²), and the thin prism
+/// s, s1 r² + s2 r⁴ on x and s3 r² + s4 r⁴ on y.
+fn brown(m: DVec2, k: [f64; 5], p: [f64; 2], pe: [f64; 2], s: [f64; 4]) -> DVec2 {
+    let (x, y) = (m.x, m.y);
+    let r2 = x * x + y * y;
+    let r4 = r2 * r2;
+    let radial = 1.0 + r2 * (k[0] + r2 * (k[1] + r2 * (k[2] + r2 * (k[3] + r2 * k[4]))));
+    let p1 = p[0] + pe[0] * r2;
+    let p2 = p[1] + pe[1] * r2;
+    DVec2::new(
+        x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x) + s[0] * r2 + s[1] * r4,
+        y * radial + 2.0 * p2 * x * y + p1 * (r2 + 2.0 * y * y) + s[2] * r2 + s[3] * r4,
+    )
+}
+
+/// What V6's d0 to d12 give `brown` under `reading` (6.1's table): d0 to
+/// d4 radial; the pair d5 and d6 in the reading's order, and with the
+/// extension d7 and d8 in the same order; the four prism terms from d7
+/// or d9, by axis (x's first and second) or interleaved (x's first and
+/// third). A term the reading doesn't take is 0.
+fn v6_terms(d: &[f64; 13], reading: TruthV6) -> ([f64; 5], [f64; 2], [f64; 2], [f64; 4]) {
+    let k = [d[0], d[1], d[2], d[3], d[4]];
+    let (mut p, mut pe, mut s) = ([0.0; 2], [0.0; 2], [0.0; 4]);
+    if let Some(t) = reading.tangential {
+        let (first, second) = match t.pair {
+            PairOrder::D5D6 => (0, 1),
+            PairOrder::D6D5 => (1, 0),
+        };
+        p = [d[5 + first], d[5 + second]];
+        if t.extension {
+            pe = [d[7 + first], d[7 + second]];
+        }
+    }
+    if let Some(prism) = reading.prism {
+        let at = match prism.at {
+            PrismAt::D7 => 7,
+            PrismAt::D9 => 9,
+        };
+        let q = [d[at], d[at + 1], d[at + 2], d[at + 3]];
+        s = match prism.order {
+            PrismOrder::ByAxis => q,
+            PrismOrder::Interleaved => [q[0], q[2], q[1], q[3]],
+        };
+    }
+    (k, p, pe, s)
+}
+
+/// How small the Newton's residual gets before it stops, and how small it
+/// must be for the root to count, in normalised image units (at the X5's
+/// canvas focal of about 4300 px, 4e-12 and 4e-9 px).
+const NEWTON_SETTLED: f64 = 1e-15;
+const NEWTON_ROOT: f64 = 1e-12;
+/// The Newton's step limit, and the step of its central differences.
+const NEWTON_STEPS: usize = 60;
+const NEWTON_H: f64 = 1e-6;
+
+/// The root of `f(w) = target` from `start`, and the determinant of `f`'s
+/// Jacobian there: Newton's method on the 2-D map with a Jacobian by
+/// central differences, each step halved until the residual falls (the
+/// damping). `None` when the residual stalls above [`NEWTON_ROOT`], the
+/// Jacobian is singular, or `f` has no value at a point it needs.
+fn newton(f: impl Fn(DVec2) -> Option<DVec2>, target: DVec2, start: DVec2) -> Option<(DVec2, f64)> {
+    let jacobian = |w: DVec2| -> Option<DMat2> {
+        let (hx, hy) = (DVec2::new(NEWTON_H, 0.0), DVec2::new(0.0, NEWTON_H));
+        Some(DMat2::from_cols(
+            (f(w + hx)? - f(w - hx)?) / (2.0 * NEWTON_H),
+            (f(w + hy)? - f(w - hy)?) / (2.0 * NEWTON_H),
+        ))
+    };
+    let mut w = start;
+    let mut miss = f(w)? - target;
+    for _ in 0..NEWTON_STEPS {
+        if miss.length() <= NEWTON_SETTLED {
+            break;
+        }
+        let j = jacobian(w)?;
+        let det = j.determinant();
+        if det == 0.0 || !det.is_finite() {
+            return None;
+        }
+        let step = -(j.inverse() * miss);
+        let mut scale = 1.0;
+        let mut moved = false;
+        while scale > 1e-9 {
+            let next = w + step * scale;
+            if let Some(v) = f(next) {
+                let next_miss = v - target;
+                if next_miss.length() < miss.length() {
+                    (w, miss, moved) = (next, next_miss, true);
+                    break;
+                }
+            }
+            scale *= 0.5;
+        }
+        if !moved {
+            break;
+        }
+    }
+    // A NaN residual fails this too.
+    (miss.length() <= NEWTON_ROOT).then_some(())?;
+    Some((w, jacobian(w)?.determinant()))
 }
 
 /// One lens of a [`RigTruth`]: what a track shows.
@@ -695,9 +1023,148 @@ pub struct Turn {
 /// scene is infinitely far with no ground, the rig still, both lenses on
 /// time with no rolling shutter, unit gains, no vignette, and each
 /// `theta_max` at [`IMAGE_CIRCLE_DEG`].
-#[expect(unused_variables, reason = "M3.3 unit (c) writes the body")]
+///
+/// Block b's lens frame is reached from the rig frame as 6.2 writes it at
+/// the default tune, lens_from_rig_b = E_b · F · T_b · S: first S = U · Y
+/// (Y the turn for the front track, U the planted quarter turn about −Z),
+/// then T_b (none for block 0, the planted 180° turn for block 1), then F
+/// = diag(1, −1, −1), a half turn about x, and last E_b. `to_rig` is its
+/// inverse. Lens 1's centre is c_1 = to_rig_0 · (±t_1), the sign the
+/// planted tz's, lens 0's is c_0 = 0, and each `centre_m` is c_b less
+/// their midpoint.
+///
+/// # Panics
+///
+/// If `front_track` is not 0 or 1.
 pub fn compose(cal: &CalibTruth, planted: &Planted, front_track: u8, sides: [u32; 2]) -> RigTruth {
-    todo!()
+    assert!(
+        front_track < 2,
+        "front_track {front_track}: a pair has tracks 0 and 1"
+    );
+    let track = |b: usize| match planted.binding {
+        TruthBinding::Direct => b,
+        TruthBinding::Reversed => 1 - b,
+    };
+    let y = if usize::from(front_track) == track(1) {
+        DQuat::from_axis_angle(DVec3::Y, PI)
+    } else {
+        DQuat::IDENTITY
+    };
+    let u = DQuat::from_axis_angle(DVec3::NEG_Z, planted.upright.degrees().to_radians());
+    let s = u * y;
+    let f = DQuat::from_axis_angle(DVec3::X, PI);
+    let turn_axis = match planted.turn {
+        TruthTurn::Y => DVec3::Y,
+        TruthTurn::X => DVec3::X,
+    };
+    let t = [DQuat::IDENTITY, DQuat::from_axis_angle(turn_axis, PI)];
+    let to_rig: [DQuat; 2] = std::array::from_fn(|b| {
+        let e = euler_rotation(&planted.euler, cal.blocks[b].ypr_deg);
+        (e * f * t[b] * s).inverse()
+    });
+    let sign = match planted.tz {
+        TruthTz::AsStored => 1.0,
+        TruthTz::Negated => -1.0,
+    };
+    let c1 = to_rig[0] * (DVec3::from(cal.blocks[1].t_m) * sign);
+    let centres = [-c1 / 2.0, c1 / 2.0];
+    let mut by_block: [LensTruth; 2] = std::array::from_fn(|b| {
+        let side = sides[track(b)];
+        LensTruth {
+            model: slot_model(cal, b, planted, side),
+            to_rig: to_rig[b],
+            centre_m: centres[b],
+            theta_max: IMAGE_CIRCLE_DEG.to_radians(),
+            side,
+            gain: [1.0; 3],
+            vignette: [0.0; 3],
+        }
+    });
+    if planted.binding == TruthBinding::Reversed {
+        by_block.swap(0, 1);
+    }
+    RigTruth {
+        lenses: by_block,
+        scene_radius_m: None,
+        ground_m: None,
+        motion: Motion::still(),
+        late_frames: [0.0; 2],
+        readout_s: 0.0,
+    }
+}
+
+/// E_b for stored yaw, pitch and roll in degrees under `euler`, from the
+/// view frame (after F) to the lens frame: angle a turns about
+/// `axes[a]` by `signs[a]` · (its stored value, plus the roll offset
+/// when a is the roll), and `order` composes the three, first applied
+/// first.
+fn euler_rotation(euler: &TruthEuler, ypr_deg: [f64; 3]) -> DQuat {
+    let turn = |angle: Angle| {
+        let i = match angle {
+            Angle::Yaw => 0,
+            Angle::Pitch => 1,
+            Angle::Roll => 2,
+        };
+        let offset = match angle {
+            Angle::Roll => euler.roll_offset.degrees(),
+            Angle::Yaw | Angle::Pitch => 0.0,
+        };
+        let sign = match euler.signs[i] {
+            Sign::Plus => 1.0,
+            Sign::Minus => -1.0,
+        };
+        let axis = match euler.axes[i] {
+            Axis::X => DVec3::X,
+            Axis::Y => DVec3::Y,
+            Axis::Z => DVec3::Z,
+        };
+        DQuat::from_axis_angle(axis, (sign * (ypr_deg[i] + offset)).to_radians())
+    };
+    let [first, second, third] = euler.order;
+    turn(third) * turn(second) * turn(first)
+}
+
+/// Block b's model in the pixels of a square track of side `side`, under
+/// the planted canvas map (6.2's table): src is a block's square on the
+/// canvas (its height), dst field 27's window, and the centre is taken
+/// in the block's own square, block 1's less src.
+fn slot_model(cal: &CalibTruth, b: usize, planted: &Planted, side: u32) -> TruthModel {
+    let block = &cal.blocks[b];
+    let s = f64::from(side);
+    let src = f64::from(cal.canvas[1]);
+    let dst = f64::from(cal.dst);
+    let local = DVec2::new(block.cx - b as f64 * src, block.cy);
+    let (focal, centre) = match planted.canvas {
+        TruthCanvas::A => (s / dst, local * (s / src)),
+        TruthCanvas::B => (
+            s / dst,
+            (local - DVec2::splat((src - dst) / 2.0)) * (s / dst),
+        ),
+        TruthCanvas::C => (s / src, local * (s / src)),
+        TruthCanvas::Fitted { scale } => (s / src * scale, local * (s / src)),
+    };
+    let (xi, fx, fy) = (block.xi, block.fx * focal, block.fy * focal);
+    let (cx, cy) = (centre.x, centre.y);
+    match cal.dist {
+        StoredDist::V3 { k, p } => TruthModel::Mei {
+            xi,
+            fx,
+            fy,
+            cx,
+            cy,
+            k: k[b],
+            p: p[b],
+        },
+        StoredDist::V6 { d } => TruthModel::MeiV6 {
+            xi,
+            fx,
+            fy,
+            cx,
+            cy,
+            d: d[b],
+            reading: planted.v6,
+        },
+    }
 }
 
 /// What track `lens` shows of `pattern` at `frame`, side × side, each
@@ -749,7 +1216,7 @@ mod tests {
     use std::fmt::Debug;
     use std::hash::Hash;
 
-    use spherecut_testkit::control::must_fail;
+    use spherecut_testkit::control::{at_most, must_fail};
 
     use super::*;
 
@@ -1013,13 +1480,531 @@ mod tests {
         );
     }
 
+    /// Pat's V3 lens 0 in a 768² slot under map C: focal and centre
+    /// times 768/5376 (insta360.md, "Pat's X5 samples").
+    fn pats_v3_at_768() -> TruthModel {
+        let s = 768.0 / 5376.0;
+        TruthModel::Mei {
+            xi: 2.0,
+            fx: 4284.62 * s,
+            fy: 4284.28 * s,
+            cx: 2701.13 * s,
+            cy: 2692.13 * s,
+            k: [0.18632051, 2.04984355, -3.24446917],
+            p: [-0.00143576, -0.00339240],
+        }
+    }
+
+    /// Pat's V6 lens 0's d0 to d12.
+    const PATS_V6_D0: [f64; 13] = [
+        0.28032997,
+        0.89045405,
+        2.04927588,
+        -8.05179787,
+        0.0,
+        0.00120200,
+        -0.00259487,
+        0.02324706,
+        0.00533920,
+        -0.01560208,
+        0.00019357,
+        -0.04580523,
+        0.00197187,
+    ];
+
+    /// Pat's V6 lens 0 in a 768² slot under map C, read through
+    /// `reading`.
+    fn pats_v6_at_768(reading: TruthV6) -> TruthModel {
+        let s = 768.0 / 5376.0;
+        TruthModel::MeiV6 {
+            xi: 2.0,
+            fx: 4277.52 * s,
+            fy: 4277.27 * s,
+            cx: 2713.05 * s,
+            cy: 2689.21 * s,
+            d: PATS_V6_D0,
+            reading,
+        }
+    }
+
+    /// A Kannala–Brandt lens on `base` in a 768² slot, its circle about
+    /// as wide as the X5's.
+    fn kb_at_768(base: KbBase) -> TruthModel {
+        TruthModel::Kb {
+            base,
+            f: 230.0,
+            cx: 386.4,
+            cy: 381.9,
+            k: [0.012, -0.0021, 0.0003, -0.00002, 0.000001],
+        }
+    }
+
+    /// Every truth model the tests invert, with how far off the axis each
+    /// is checked: Pat's V3, Pat's V6 under each of the 21 readings, and
+    /// a KB lens on each base, the orthographic one short of where its
+    /// base ends.
+    fn every_model() -> Vec<(TruthModel, f64)> {
+        let mut models = vec![(pats_v3_at_768(), 106.0)];
+        models.extend(TruthV6::all().map(|v| (pats_v6_at_768(v), 106.0)));
+        models.extend(KbBase::all().map(|base| {
+            let reach = if base == KbBase::Orthographic {
+                80.0
+            } else {
+                106.0
+            };
+            (kb_at_768(base), reach)
+        }));
+        models
+    }
+
+    /// The unit direction θ off the axis at azimuth φ, in degrees.
+    fn lens_dir(theta: f64, phi: f64) -> DVec3 {
+        let (st, ct) = theta.to_radians().sin_cos();
+        let (sp, cp) = phi.to_radians().sin_cos();
+        DVec3::new(st * cp, st * sp, ct)
+    }
+
+    /// The angle between two directions, in radians, accurate at small
+    /// angles.
+    fn angle(a: DVec3, b: DVec3) -> f64 {
+        a.cross(b).length().atan2(a.dot(b))
+    }
+
+    /// The worst of `inverse(forward(d))` against d, in radians, and of
+    /// `forward(inverse(px))` against px, in pixels, for `invert` as the
+    /// inverse, over a grid of directions up to `reach` degrees off the
+    /// axis. Infinite when the inverse finds nothing.
+    fn round_trip(
+        model: &TruthModel,
+        reach: f64,
+        invert: impl Fn(DVec2) -> Option<DVec3>,
+    ) -> (f64, f64) {
+        let (mut rad, mut px) = (0.0f64, 0.0f64);
+        let thetas = [0.0, 0.5, 10.0, 30.0, 60.0, 75.0, 90.0, 100.0, reach];
+        for theta in thetas.into_iter().filter(|&t| t <= reach) {
+            for phi in [0.0, 37.0, 90.0, 151.0, 200.0, 290.0] {
+                let d = lens_dir(theta, phi);
+                let at = model.forward(d).unwrap();
+                match invert(at) {
+                    Some(back) => {
+                        rad = rad.max(angle(back, d));
+                        px = px.max((model.forward(back).unwrap() - at).length());
+                    }
+                    None => return (f64::INFINITY, f64::INFINITY),
+                }
+            }
+        }
+        (rad, px)
+    }
+
+    /// Synth's inverse inverts its forward on every truth model, each V6
+    /// reading and each KB base among them.
+    #[test]
+    fn truth_inverse_inverts_forward() {
+        for (model, reach) in every_model() {
+            let (rad, px) = round_trip(&model, reach, |p| model.inverse(p));
+            assert!(rad <= 1e-12, "{model:?}: {rad:e} rad");
+            assert!(px <= 1e-9, "{model:?}: {px:e} px");
+        }
+        // Past the X5-like lens's fold at 120° there is no direction: the
+        // slot's corner lies 543 px from the centre, beyond the 412 px
+        // the lens reaches.
+        assert_eq!(pats_v3_at_768().inverse(DVec2::new(0.5, 0.5)), None);
+        let ortho = kb_at_768(KbBase::Orthographic);
+        assert_eq!(ortho.inverse(DVec2::new(386.4 + 240.0, 381.9)), None);
+        // The bisection finds what the Newton does, from where it starts.
+        let model = pats_v6_at_768(TruthV6::RADIAL_ONLY);
+        for theta in [5.0, 50.0, 99.0] {
+            let px = model.forward(lens_dir(theta, 63.0)).unwrap();
+            let t = (px - DVec2::new(2713.05, 2689.21) * (768.0 / 5376.0))
+                / (DVec2::new(4277.52, 4277.27) * (768.0 / 5376.0));
+            let from = model.bisect(t, PI).unwrap();
+            let (w, det) = newton(|w| model.distort(w), t, from).unwrap();
+            assert!(det > 0.0);
+            assert!(angle(model.lift(w).unwrap(), lens_dir(theta, 63.0)) <= 1e-12);
+        }
+        // Controls: the undistorted guess alone, and another V6 reading's
+        // inverse, miss by far more.
+        let (_, guess_px) = round_trip(&model, 106.0, |p| {
+            let (f, c) = model.intrinsics();
+            model.lift(model.start((p - c) / f)?)
+        });
+        assert!(must_fail("no Newton", at_most(guess_px, 1e-9)) > 1.0);
+        let sourced = pats_v6_at_768(TruthV6 {
+            tangential: Some(Tangential {
+                pair: PairOrder::D5D6,
+                extension: true,
+            }),
+            prism: Some(Prism {
+                at: PrismAt::D9,
+                order: PrismOrder::ByAxis,
+            }),
+        });
+        let (rad, _) = round_trip(&sourced, 106.0, |p| model.inverse(p));
+        assert!(must_fail("another reading's inverse", at_most(rad, 1e-12)) > 1e-4);
+    }
+
+    /// Synth's forward on values worked out by hand: the centre on the
+    /// axis, tan θ at ξ = 0 and tan(θ/2) at ξ = 1 with no distortion, and
+    /// each KB base.
+    #[test]
+    fn truth_forward_lands_where_worked_by_hand() {
+        let close = |a: DVec2, b: [f64; 2]| (a - DVec2::from(b)).length() < 1e-9;
+        let mei = |xi: f64, k: [f64; 3], p: [f64; 2]| TruthModel::Mei {
+            xi,
+            fx: 200.0,
+            fy: 210.0,
+            cx: 100.5,
+            cy: 99.5,
+            k,
+            p,
+        };
+        // The axis lands on the centre whatever the distortion.
+        for (model, _) in every_model() {
+            assert_eq!(model.forward(DVec3::Z), Some(model.intrinsics().1));
+        }
+        // ξ = 0 is the pinhole: θ = 30° along +x lands at tan 30° =
+        // 0.5773503, so u = 100.5 + 200 · 0.5773503 = 215.9700538.
+        let pinhole = mei(0.0, [0.0; 3], [0.0; 2]);
+        assert!(close(
+            pinhole.forward(lens_dir(30.0, 0.0)).unwrap(),
+            [215.9700538379, 99.5]
+        ));
+        // It sees nothing behind it: z + ξ = cos 100° < 0.
+        assert_eq!(pinhole.forward(lens_dir(100.0, 0.0)), None);
+        // ξ = 1 is the stereographic tan(θ/2): θ = 90° along +y, the
+        // direction (0, 1, 0), lands at m = (0, 1/(0 + 1)) = (0, 1), so
+        // v = 99.5 + 210 · 1 = 309.5.
+        let stereo = mei(1.0, [0.0; 3], [0.0; 2]);
+        assert!(close(stereo.forward(DVec3::Y).unwrap(), [100.5, 309.5]));
+        // The direction (2, 2, 1)/3 lands at m = (2/3)/(1/3 + 1) = 0.5 on
+        // each axis at ξ = 1: r² = 0.5, r⁴ = 0.25, r⁶ = 0.125. With k =
+        // (0.1, 0.01, 0.001), R = 1 + 0.05 + 0.0025 + 0.000125 = 1.052625;
+        // with p = (0.002, 0.003),
+        //   xd = 0.5 R + 2 p1 · 0.25 + p2 (0.5 + 2 · 0.25)
+        //      = 0.5263125 + 0.001 + 0.003 = 0.5303125,
+        //   yd = 0.5 R + 2 p2 · 0.25 + p1 (0.5 + 2 · 0.25)
+        //      = 0.5263125 + 0.0015 + 0.002 = 0.5298125,
+        // so u = 100.5 + 200 xd = 206.5625, v = 99.5 + 210 yd = 210.760625.
+        let corner = DVec3::new(2.0, 2.0, 1.0) / 3.0;
+        let v3 = mei(1.0, [0.1, 0.01, 0.001], [0.002, 0.003]);
+        assert!(close(v3.forward(corner).unwrap(), [206.5625, 210.760625]));
+        // The same point through a V6 reading, {D6D5 with extension, D9
+        // Interleaved}, with d = (0.1, 0.01, 0.001, 0.0001, 0.00001, then
+        // 0.005 to 0.012 by 0.001): R = 1 + 0.05 + 0.0025 + 0.000125 +
+        // 0.00000625 + 0.0000003125 = 1.0526315625. The pair reversed
+        // gives p1 = d6 = 0.006, p2 = d5 = 0.005, and its extension p1' =
+        // d8 = 0.008, p2' = d7 = 0.007, so P1 = 0.006 + 0.008 · 0.5 =
+        // 0.010 and P2 = 0.005 + 0.007 · 0.5 = 0.0085. The prism from d9,
+        // interleaved, gives x s1 = d9 = 0.009 and s2 = d11 = 0.011, and y
+        // s3 = d10 = 0.010 and s4 = d12 = 0.012. So
+        //   xd = 0.52631578125 + 2 · 0.010 · 0.25 + 0.0085 · 1
+        //        + 0.009 · 0.5 + 0.011 · 0.25 = 0.54706578125,
+        //   yd = 0.52631578125 + 2 · 0.0085 · 0.25 + 0.010 · 1
+        //        + 0.010 · 0.5 + 0.012 · 0.25 = 0.54856578125,
+        // and u = 100.5 + 200 xd = 209.91315625, v = 99.5 + 210 yd =
+        // 214.6988140625.
+        let d = [
+            0.1, 0.01, 0.001, 0.0001, 0.00001, 0.005, 0.006, 0.007, 0.008, 0.009, 0.010, 0.011,
+            0.012,
+        ];
+        let v6 = |order: PrismOrder| TruthModel::MeiV6 {
+            xi: 1.0,
+            fx: 200.0,
+            fy: 210.0,
+            cx: 100.5,
+            cy: 99.5,
+            d,
+            reading: TruthV6 {
+                tangential: Some(Tangential {
+                    pair: PairOrder::D6D5,
+                    extension: true,
+                }),
+                prism: Some(Prism {
+                    at: PrismAt::D9,
+                    order,
+                }),
+            },
+        };
+        let want = [209.91315625, 214.6988140625];
+        assert!(close(
+            v6(PrismOrder::Interleaved).forward(corner).unwrap(),
+            want
+        ));
+        // Control: by axis, s2 and s3 trade places.
+        must_fail(
+            "the prism by axis",
+            close(v6(PrismOrder::ByAxis).forward(corner).unwrap(), want),
+        );
+        // KB bases at θ = 60° along +x, f = 100, centre (50, 60), no
+        // distortion: r = π/3 = 1.0471976, 2 sin 30° = 1, 2 tan 30° =
+        // 1.1547005 and sin 60° = 0.8660254.
+        let kb = |base: KbBase, k1: f64| TruthModel::Kb {
+            base,
+            f: 100.0,
+            cx: 50.0,
+            cy: 60.0,
+            k: [k1, 0.0, 0.0, 0.0, 0.0],
+        };
+        for (base, r) in [
+            (KbBase::Equidistant, PI / 3.0),
+            (KbBase::Equisolid, 1.0),
+            (KbBase::Stereographic, 1.1547005383793),
+            (KbBase::Orthographic, 0.8660254037844),
+        ] {
+            let at = kb(base, 0.0).forward(lens_dir(60.0, 0.0)).unwrap();
+            assert!(close(at, [50.0 + 100.0 * r, 60.0]), "{base:?}: {at}");
+        }
+        // The polynomial before the base: with k1 = 0.1, θ_d = θ (1 + 0.1
+        // θ²) = 1.0471976 · 1.1096623 = 1.1620356, and equidistant r = θ_d,
+        // so u = 50 + 116.20356 = 166.2035613.
+        let at = kb(KbBase::Equidistant, 0.1)
+            .forward(lens_dir(60.0, 0.0))
+            .unwrap();
+        assert!(close(at, [166.2035612975, 60.0]), "{at}");
+        // The orthographic base ends at θ_d = 90°.
+        assert_eq!(
+            kb(KbBase::Orthographic, 0.0).forward(lens_dir(100.0, 0.0)),
+            None
+        );
+    }
+
+    /// Pat's V6 lens 1's d0 to d12.
+    const PATS_V6_D1: [f64; 13] = [
+        0.27665332,
+        0.98522973,
+        1.83605266,
+        -7.99374485,
+        0.0,
+        0.00021056,
+        -0.00147626,
+        0.01940425,
+        0.00331838,
+        -0.01330665,
+        0.00074511,
+        -0.02859299,
+        0.00888746,
+    ];
+
+    /// Pat's V6 calibration (insta360.md, "Pat's X5 samples").
+    fn pats_v6() -> CalibTruth {
+        CalibTruth {
+            blocks: [
+                BlockTruth {
+                    xi: 2.0,
+                    fx: 4277.52,
+                    fy: 4277.27,
+                    cx: 2713.05,
+                    cy: 2689.21,
+                    ypr_deg: [-0.310, -0.271, 90.255],
+                    t_m: [0.0; 3],
+                },
+                BlockTruth {
+                    xi: 2.0,
+                    fx: 4284.40,
+                    fy: 4284.76,
+                    cx: 8075.73,
+                    cy: 2680.35,
+                    ypr_deg: [0.120, -0.173, 89.112],
+                    t_m: [0.000637, 0.000001, -0.031525],
+                },
+            ],
+            dist: StoredDist::V6 {
+                d: [PATS_V6_D0, PATS_V6_D1],
+            },
+            canvas: [10752, 5376],
+            dst: 5312,
+            lens_type: 113,
+            body: 4,
+        }
+    }
+
+    /// Pat's V6 calibration with both blocks' stored angles (0, 0, 90),
+    /// so that under the placeholder each E_b is R_z(90° − 90°), the
+    /// identity, and the frames can be worked by hand.
+    fn square_v6() -> CalibTruth {
+        let mut cal = pats_v6();
+        for block in &mut cal.blocks {
+            block.ypr_deg = [0.0, 0.0, 90.0];
+        }
+        cal
+    }
+
+    /// The conventions the compose tests start from: the binding direct,
+    /// map C, `euler`, the turn about Y, no upright turn, tz as stored
+    /// and V6 radial only.
+    fn planted(euler: TruthEuler) -> Planted {
+        Planted {
+            binding: TruthBinding::Direct,
+            canvas: TruthCanvas::C,
+            euler,
+            turn: TruthTurn::Y,
+            upright: QuarterTurn::Zero,
+            tz: TruthTz::AsStored,
+            v6: TruthV6::RADIAL_ONLY,
+        }
+    }
+
+    /// Whether `got` is `want` within 1e-12 on each axis.
+    fn near(got: DVec3, want: [f64; 3]) -> bool {
+        (got - DVec3::from(want)).abs().max_element() <= 1e-12
+    }
+
+    /// Whether `rotate` takes x, y and z to `cols`, within 1e-12.
+    fn takes_axes(rotate: impl Fn(DVec3) -> DVec3, cols: [[f64; 3]; 3]) -> bool {
+        [DVec3::X, DVec3::Y, DVec3::Z]
+            .into_iter()
+            .zip(cols)
+            .all(|(axis, col)| near(rotate(axis), col))
+    }
+
+    /// F = diag(1, −1, −1), written out.
+    fn diag_f(v: DVec3) -> DVec3 {
+        DVec3::new(v.x, -v.y, -v.z)
+    }
+
     /// compose's E_b for 8 `TruthEuler` values, the placeholder among
     /// them, against values worked out by hand with the arithmetic in the
     /// comments (7.1).
     #[test]
-    #[ignore = "M3.3 unit (c)"]
     fn compose_turns_eight_euler_values_as_worked_by_hand() {
-        todo!()
+        use Angle::{Pitch, Roll, Yaw};
+        use Axis::{X, Y, Z};
+        use Sign::{Minus, Plus};
+        let euler = |axes, order, signs, roll_offset| TruthEuler {
+            axes,
+            order,
+            signs,
+            roll_offset,
+        };
+        // With the binding direct, front track 0 and no upright turn, S and
+        // T_0 are the identity, so lens_from_rig_0 = E_0 · F and E_0 v =
+        // lens_from_rig_0 (F v), F being its own inverse. R_x(a) takes y
+        // to (0, cos a, sin a) and z to (0, −sin a, cos a); R_y(a) takes z
+        // to (sin a, 0, cos a) and x to (cos a, 0, −sin a); R_z(a) takes x
+        // to (cos a, sin a, 0) and y to (−sin a, cos a, 0).
+        let e0 = |e: TruthEuler, ypr: [f64; 3]| {
+            let mut cal = pats_v6();
+            cal.blocks[0].ypr_deg = ypr;
+            let to_rig = compose(&cal, &planted(e), 0, [768; 2]).lenses[0].to_rig;
+            move |v: DVec3| to_rig.inverse() * diag_f(v)
+        };
+        let (c30, s30) = (3f64.sqrt() / 2.0, 0.5);
+        let cases = [
+            // 1. The placeholder on (0, 0, 90): E = R_z(90 − 90) · R_x(0)
+            //    · R_y(0), the identity.
+            (
+                TruthEuler::PLACEHOLDER,
+                [0.0, 0.0, 90.0],
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            ),
+            // 2. The placeholder on (90, 90, 90): E = R_z(0) · R_x(90) ·
+            //    R_y(90). R_y(90) takes x to −z, and R_x(90) −z to y; y
+            //    stays, then goes to z; z goes to x, which stays.
+            (
+                TruthEuler::PLACEHOLDER,
+                [90.0, 90.0, 90.0],
+                [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
+            ),
+            // 3. The placeholder on (0, 0, 120): E = R_z(120 − 90) =
+            //    R_z(30): x to (cos 30, sin 30, 0), y to (−sin 30,
+            //    cos 30, 0).
+            (
+                TruthEuler::PLACEHOLDER,
+                [0.0, 0.0, 120.0],
+                [[c30, s30, 0.0], [-s30, c30, 0.0], [0.0, 0.0, 1.0]],
+            ),
+            // 4. The pitch's sign minus, on (0, 30, 0): E = R_x(−30): y
+            //    to (0, cos 30, −sin 30), z to (0, sin 30, cos 30).
+            (
+                euler(
+                    [Y, X, Z],
+                    [Yaw, Pitch, Roll],
+                    [Plus, Minus, Plus],
+                    QuarterTurn::Zero,
+                ),
+                [0.0, 30.0, 0.0],
+                [[1.0, 0.0, 0.0], [0.0, c30, -s30], [0.0, s30, c30]],
+            ),
+            // 5. The roll's sign applies after its offset: on (0, 0,
+            //    −60) with the roll's sign minus and +90°, the roll is
+            //    −(−60 + 90) = −30, so E = R_z(−30): x to (cos 30,
+            //    −sin 30, 0), y to (sin 30, cos 30, 0). The sign first
+            //    would give +60 + 90 = 150.
+            (
+                euler(
+                    [Y, X, Z],
+                    [Yaw, Pitch, Roll],
+                    [Plus, Plus, Minus],
+                    QuarterTurn::Plus90,
+                ),
+                [0.0, 0.0, -60.0],
+                [[c30, -s30, 0.0], [s30, c30, 0.0], [0.0, 0.0, 1.0]],
+            ),
+            // 6. Signs go with their angle, not their place: in the order
+            //    roll, pitch, yaw, signs[0] is still the yaw's, so on (90,
+            //    0, 0) E = R_y(−90): x to (0, 0, 1), z to (−1, 0, 0). By
+            //    place the yaw, applied third, would take signs[2], plus.
+            (
+                euler(
+                    [Y, X, Z],
+                    [Roll, Pitch, Yaw],
+                    [Minus, Plus, Plus],
+                    QuarterTurn::Zero,
+                ),
+                [90.0, 0.0, 0.0],
+                [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]],
+            ),
+            // 7. The yaw about z and the roll about x, with the half-turn
+            //    offset, on (90, 0, 0): E = R_x(0 + 180) · R_y(0) ·
+            //    R_z(90). R_z(90) takes x to y and y to −x, and R_x(180)
+            //    flips y and z: x to −y, y to −x, z to −z.
+            (
+                euler([Z, Y, X], [Yaw, Pitch, Roll], [Plus; 3], QuarterTurn::Half),
+                [90.0, 0.0, 0.0],
+                [[0.0, -1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, -1.0]],
+            ),
+            // 8. The yaw about x, the pitch about z and the roll about y,
+            //    in the order pitch, roll, yaw, the roll's sign minus, on
+            //    (90, 30, 90): E = R_x(90) · R_y(−90) · R_z(30). R_y(−90)
+            //    takes (a, b, c) to (−c, b, a) and R_x(90) takes it to
+            //    (a, −c, b). x: R_z(30) gives (cos 30, sin 30, 0), then
+            //    (0, sin 30, cos 30), then (0, −cos 30, sin 30). y:
+            //    (−sin 30, cos 30, 0), then (0, cos 30, −sin 30), then
+            //    (0, sin 30, cos 30). z: (0, 0, 1), then (−1, 0, 0), which
+            //    R_x(90) keeps.
+            (
+                euler(
+                    [X, Z, Y],
+                    [Pitch, Roll, Yaw],
+                    [Plus, Plus, Minus],
+                    QuarterTurn::Zero,
+                ),
+                [90.0, 30.0, 90.0],
+                [[0.0, -c30, s30], [0.0, s30, c30], [-1.0, 0.0, 0.0]],
+            ),
+        ];
+        for (i, (e, ypr, cols)) in cases.into_iter().enumerate() {
+            assert!(takes_axes(e0(e, ypr), cols), "case {}: {e:?}", i + 1);
+        }
+        // Controls: case 5 with the sign before the offset (R_z(150)), and
+        // case 8 in the reverse order (R_z(30) · R_y(−90) · R_x(90)).
+        let (c150, s150) = (-c30, 0.5);
+        must_fail(
+            "the roll's sign before its offset",
+            takes_axes(
+                e0(cases[4].0, cases[4].1),
+                [[c150, s150, 0.0], [-s150, c150, 0.0], [0.0, 0.0, 1.0]],
+            ),
+        );
+        let reversed = TruthEuler {
+            order: [Yaw, Roll, Pitch],
+            ..cases[7].0
+        };
+        must_fail(
+            "case 8 in the reverse order",
+            takes_axes(e0(reversed, cases[7].1), cases[7].2),
+        );
     }
 
     /// Block 1's V6 centre and focal (cx 8075.73, so c_local 2699.73; fx
@@ -1027,43 +2012,281 @@ mod tests {
     /// 1928.48 under B, f 3097.16 under A and B and 3060.29 under C; at
     /// 768² cx 385.68 under A and C and 385.70 under B (7.1).
     #[test]
-    #[ignore = "M3.3 unit (c)"]
     fn compose_scales_block_1_under_each_canvas_map() {
-        todo!()
+        // Block 1's square starts at src = 5376, so c_local = 8075.73 −
+        // 5376 = 2699.73 and cy stays 2680.35; dst = 5312, and B's window
+        // starts (5376 − 5312)/2 = 32 px into the square.
+        //   A, C: cx = 2699.73 · 3840/5376 = 10366963.2/5376 = 1928.3785714
+        //         cy = 2680.35 · 3840/5376 = 1914.5357143
+        //   B:    cx = (2699.73 − 32) · 3840/5312 = 10244083.2/5312
+        //            = 1928.4795181
+        //         cy = (2680.35 − 32) · 3840/5312 = 1914.4698795
+        //   A, B: fx = 4284.40 · 3840/5312 = 16452096/5312 = 3097.1566265
+        //         fy = 4284.76 · 3840/5312 = 3097.4168675
+        //   C:    fx = 16452096/5376 = 3060.2857143
+        //         fy = 4284.76 · 3840/5376 = 3060.5428571
+        //   C × 1.012 (Fitted): fx = 3060.2857143 · 1.012 = 3097.0091429
+        //                       fy = 3060.5428571 · 1.012 = 3097.2693714
+        // and at 768², A and C: cx = 2699.73/7 = 385.6757143; B: 2667.73 ·
+        // 768/5312 = 385.6959036.
+        let rows: [(u32, TruthCanvas, [f64; 4]); 7] = [
+            (
+                3840,
+                TruthCanvas::A,
+                [1928.3785714, 1914.5357143, 3097.1566265, 3097.4168675],
+            ),
+            (
+                3840,
+                TruthCanvas::B,
+                [1928.4795181, 1914.4698795, 3097.1566265, 3097.4168675],
+            ),
+            (
+                3840,
+                TruthCanvas::C,
+                [1928.3785714, 1914.5357143, 3060.2857143, 3060.5428571],
+            ),
+            (
+                3840,
+                TruthCanvas::Fitted { scale: 1.012 },
+                [1928.3785714, 1914.5357143, 3097.0091429, 3097.2693714],
+            ),
+            (
+                768,
+                TruthCanvas::A,
+                [385.6757143, f64::NAN, f64::NAN, f64::NAN],
+            ),
+            (
+                768,
+                TruthCanvas::B,
+                [385.6959036, f64::NAN, f64::NAN, f64::NAN],
+            ),
+            (
+                768,
+                TruthCanvas::C,
+                [385.6757143, f64::NAN, f64::NAN, f64::NAN],
+            ),
+        ];
+        // Block 1's (cx, cy, fx, fy) at `side` under `canvas`.
+        let block_1 = |side: u32, canvas: TruthCanvas| {
+            let rig = compose(
+                &pats_v6(),
+                &Planted {
+                    canvas,
+                    ..planted(TruthEuler::PLACEHOLDER)
+                },
+                0,
+                [side; 2],
+            );
+            match rig.lenses[1].model {
+                TruthModel::MeiV6 {
+                    xi,
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    d,
+                    reading,
+                } => {
+                    assert_eq!((xi, d, reading), (2.0, PATS_V6_D1, TruthV6::RADIAL_ONLY));
+                    [cx, cy, fx, fy]
+                }
+                other => panic!("block 1 is not V6: {other:?}"),
+            }
+        };
+        for (side, canvas, want) in rows {
+            let got = block_1(side, canvas);
+            for (g, w) in got.into_iter().zip(want).filter(|(_, w)| !w.is_nan()) {
+                assert!((g - w).abs() < 5e-8, "{side}² {canvas:?}: {got:?}");
+            }
+        }
+        // C read as A is the focal 5376/5312 = 1.012 apart (Q4).
+        let (a, c) = (block_1(3840, TruthCanvas::A), block_1(3840, TruthCanvas::C));
+        assert!((a[2] / c[2] - 5376.0 / 5312.0).abs() < 1e-12);
+        // Controls: B's centre is A's moved by 0.1 px at 3840², and C's
+        // focal is not A's.
+        let b = block_1(3840, TruthCanvas::B);
+        let moved = must_fail("B's centre as A's", at_most((b[0] - a[0]).abs(), 0.05));
+        assert!((moved - 0.1009467).abs() < 1e-6);
+        must_fail("C's focal as A's", at_most((c[2] - a[2]).abs(), 0.05));
     }
 
     /// c_1 for Pat's V6 t_1 = (0.637, 0.001, −31.525) mm under both tz
     /// signs: `Negated` flips all three components.
     #[test]
-    #[ignore = "M3.3 unit (c)"]
     fn compose_places_lens_1_under_both_tz_signs() {
-        todo!()
+        // With block 0's angles (0, 0, 90) under the placeholder, E_0 is
+        // the identity, so rig_from_lens_0 = (E_0 · F · T_0 · S)⁻¹ = F
+        // with the binding direct, front track 0 and no upright turn, and
+        //   c_1 = F t_1 = (0.637, −0.001, 31.525) mm,
+        // lens 1 31.5 mm behind lens 0, which looks along −Z. The centres
+        // are c_b − o with o = c_1/2: lens 0 at −c_1/2 = (−0.3185, 0.0005,
+        // −15.7625) mm and lens 1 at c_1/2. Negated takes −t_1, so both
+        // flip.
+        let rig = |tz: TruthTz, upright: QuarterTurn| {
+            compose(
+                &square_v6(),
+                &Planted {
+                    tz,
+                    upright,
+                    ..planted(TruthEuler::PLACEHOLDER)
+                },
+                0,
+                [768; 2],
+            )
+        };
+        let mm = |v: DVec3| v * 1000.0;
+        let close = |got: DVec3, want: [f64; 3]| (mm(got) - DVec3::from(want)).length() < 1e-9;
+        let stored = rig(TruthTz::AsStored, QuarterTurn::Zero);
+        assert!(near(stored.lenses[0].to_rig * DVec3::Z, [0.0, 0.0, -1.0]));
+        assert!(close(
+            stored.lenses[0].centre_m,
+            [-0.3185, 0.0005, -15.7625]
+        ));
+        assert!(close(stored.lenses[1].centre_m, [0.3185, -0.0005, 15.7625]));
+        let negated = rig(TruthTz::Negated, QuarterTurn::Zero);
+        assert!(close(
+            negated.lenses[0].centre_m,
+            [0.3185, -0.0005, 15.7625]
+        ));
+        assert!(close(
+            negated.lenses[1].centre_m,
+            [-0.3185, 0.0005, -15.7625]
+        ));
+        // Exactly: Negated flips both lenses' c_b − o, so at q it is
+        // AsStored at −q (8.6's tz rule).
+        for t in 0..2 {
+            assert_eq!(negated.lenses[t].centre_m, -stored.lenses[t].centre_m);
+        }
+        // With the upright turn +90°, rig_from_lens_0 = U⁻¹ · F, and U⁻¹
+        // is +90° about +Z, taking (a, b, c) to (−b, a, c): c_1 = (0.001,
+        // 0.637, 31.525) mm, and lens 1's centre half of it.
+        let upright = rig(TruthTz::AsStored, QuarterTurn::Plus90);
+        assert!(close(upright.lenses[1].centre_m, [0.0005, 0.3185, 15.7625]));
+        let upright = rig(TruthTz::Negated, QuarterTurn::Plus90);
+        assert!(close(
+            upright.lenses[1].centre_m,
+            [-0.0005, -0.3185, -15.7625]
+        ));
+        // On Pat's own angles c_1 is turned by E_0, under 0.5°, and keeps
+        // t_1's length, √(0.637² + 0.001² + 31.525²) = 31.5314350 mm.
+        let pats = compose(&pats_v6(), &planted(TruthEuler::PLACEHOLDER), 0, [768; 2]);
+        let c1 = pats.lenses[1].centre_m - pats.lenses[0].centre_m;
+        assert!((mm(c1).length() - 31.5314350).abs() < 1e-6);
+        assert!(angle(c1, DVec3::new(0.637, -0.001, 31.525)) < 0.5f64.to_radians());
+        // Control: flipping tz alone, a reflection, puts lens 1 elsewhere.
+        let mut z_only = square_v6();
+        z_only.blocks[1].t_m[2] = -z_only.blocks[1].t_m[2];
+        let z_only = compose(&z_only, &planted(TruthEuler::PLACEHOLDER), 0, [768; 2]);
+        must_fail(
+            "tz flipped alone as Negated",
+            near(
+                z_only.lenses[1].centre_m,
+                negated.lenses[1].centre_m.to_array(),
+            ),
+        );
     }
 
     /// The binding puts each block on its track, a front track that is
     /// block 1's turns both lenses 180° about +Y, and `upright` turns both
     /// a quarter turn about −Z.
     #[test]
-    #[ignore = "M3.3 unit (c)"]
     fn compose_follows_the_binding_the_front_track_and_upright() {
-        todo!()
-    }
+        let cal = square_v6();
+        let base = planted(TruthEuler::PLACEHOLDER);
+        let reversed = Planted {
+            binding: TruthBinding::Reversed,
+            ..base
+        };
+        // Reversed puts block 0 on track 1 and block 1 on track 0, each
+        // with its track's side; neither run turns for the front track,
+        // since in both it is block 0's.
+        let direct = compose(&cal, &base, 0, [832, 768]);
+        let swapped = compose(&cal, &reversed, 1, [768, 832]);
+        assert_eq!(swapped.lenses[1], direct.lenses[0]);
+        assert_eq!(swapped.lenses[0], direct.lenses[1]);
+        assert_eq!(swapped.lenses[1].side, 832);
+        assert_eq!(
+            RigTruth {
+                lenses: direct.lenses,
+                ..swapped.clone()
+            },
+            direct
+        );
+        // Block 0's model, by its focal: 4277.52 · 832/5376 = 661.98.
+        let TruthModel::MeiV6 { fx, .. } = swapped.lenses[1].model else {
+            panic!("not V6");
+        };
+        assert!((fx - 4277.52 * 832.0 / 5376.0).abs() < 1e-9);
+        // Control: the tracks left as the blocks are.
+        must_fail(
+            "Reversed with the tracks unswapped",
+            swapped.lenses[0] == direct.lenses[0],
+        );
 
-    /// Synth's inverse inverts its forward on every truth model, each V6
-    /// reading and each KB base among them.
-    #[test]
-    #[ignore = "M3.3 unit (c)"]
-    fn truth_inverse_inverts_forward() {
-        todo!()
-    }
+        // Block 1 is turned 180° about the planted axis. With E_1 the
+        // identity, rig_from_lens_1 = T_1⁻¹ · F: about Y its image right x
+        // goes to F x = x, then to −X; its down y to −y, then stays −Y,
+        // down; its axis z to −z, then +Z, behind. About X: right stays
+        // +X and down goes to +Y, so the picture is upside down.
+        let lens_1 = |turn: TruthTurn| {
+            let to_rig = compose(&cal, &Planted { turn, ..base }, 0, [768; 2]).lenses[1].to_rig;
+            move |v: DVec3| to_rig * v
+        };
+        assert!(takes_axes(
+            lens_1(TruthTurn::Y),
+            [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]]
+        ));
+        assert!(takes_axes(
+            lens_1(TruthTurn::X),
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        ));
 
-    /// Synth's forward on values worked out by hand: the centre on the
-    /// axis, tan θ at ξ = 0 and tan(θ/2) at ξ = 1 with no distortion, and
-    /// each KB base.
-    #[test]
-    #[ignore = "M3.3 unit (c)"]
-    fn truth_forward_lands_where_worked_by_hand() {
-        todo!()
+        // A front track that is block 1's adds Y, 180° about +Y, to S, so
+        // rig_from_lens gains Y⁻¹ on the left: every lens direction and
+        // centre (a, b, c) becomes (−a, b, −c), and block 1 looks along
+        // −Z.
+        let front_0 = compose(&cal, &base, 0, [768; 2]);
+        let front_1 = compose(&cal, &base, 1, [768; 2]);
+        let half_y = |v: DVec3| DVec3::new(-v.x, v.y, -v.z);
+        // Each lens of `turned` is `plain`'s with `by` after it.
+        let turned_by = |turned: &RigTruth, plain: &RigTruth, by: &dyn Fn(DVec3) -> DVec3| {
+            (0..2).all(|t| {
+                let (a, b) = (&turned.lenses[t], &plain.lenses[t]);
+                takes_axes(
+                    |v| a.to_rig * v,
+                    [DVec3::X, DVec3::Y, DVec3::Z].map(|v| by(b.to_rig * v).to_array()),
+                ) && near(a.centre_m, by(b.centre_m).to_array())
+            })
+        };
+        assert!(turned_by(&front_1, &front_0, &half_y));
+        assert!(near(front_1.lenses[1].to_rig * DVec3::Z, [0.0, 0.0, -1.0]));
+        // Upright +90° is U = 90° about −Z, so rig_from_lens gains U⁻¹,
+        // 90° about +Z: (a, b, c) becomes (−b, a, c), and lens 0's image
+        // right, +X upright, points up.
+        let quarter = compose(
+            &cal,
+            &Planted {
+                upright: QuarterTurn::Plus90,
+                ..base
+            },
+            0,
+            [768; 2],
+        );
+        let quarter_z = |v: DVec3| DVec3::new(-v.y, v.x, v.z);
+        assert!(turned_by(&quarter, &front_0, &quarter_z));
+        assert!(near(quarter.lenses[0].to_rig * DVec3::X, [0.0, 1.0, 0.0]));
+        // Controls: the front track's turn is not about +X, and the
+        // upright turn not about +Z the other way.
+        let half_x = |v: DVec3| DVec3::new(v.x, -v.y, -v.z);
+        must_fail(
+            "the front track's turn about +X",
+            turned_by(&front_1, &front_0, &half_x),
+        );
+        let quarter_back = |v: DVec3| DVec3::new(v.y, -v.x, v.z);
+        must_fail(
+            "upright about +Z",
+            turned_by(&quarter, &front_0, &quarter_back),
+        );
     }
 
     /// `Motion::at` turns at each turn's rate and holds still between
