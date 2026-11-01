@@ -39,16 +39,28 @@ pub enum Pattern {
     /// Thin stripes straddling the ±180° seam plus a horizontal gradient,
     /// so a seam line or a half-texel wrap error is obvious.
     Seam,
+    /// The stitching round trip's scene (M3 plan 4.2): tilted great
+    /// circles across both of a back-to-back rig's side seams (the great
+    /// circle through ±X and ±Y, where lenses looking along ∓Z meet), a
+    /// 1° checker within ±15° of that seam, and a luminance ramp for the
+    /// exposure checks.
+    SeamLines,
 }
 
 impl Pattern {
-    pub const ALL: [Pattern; 3] = [Pattern::Grid, Pattern::HighFrequency, Pattern::Seam];
+    pub const ALL: [Pattern; 4] = [
+        Pattern::Grid,
+        Pattern::HighFrequency,
+        Pattern::Seam,
+        Pattern::SeamLines,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Pattern::Grid => "grid",
             Pattern::HighFrequency => "hifreq",
             Pattern::Seam => "seam",
+            Pattern::SeamLines => "seamlines",
         }
     }
 }
@@ -223,6 +235,7 @@ pub fn color(pattern: Pattern, d: DVec3, frame: u32) -> Rgb {
                 [t, 0.5 + 0.4 * (lat / 90.0), 1.0 - t]
             }
         }
+        Pattern::SeamLines => todo!(),
     }
 }
 
@@ -550,5 +563,21 @@ mod tests {
             0,
         );
         assert_eq!(l, r);
+    }
+
+    /// `SeamLines` draws tilted great circles that cross both side seams
+    /// (the great circle z = 0).
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn seam_lines_cross_both_side_seams() {
+        todo!()
+    }
+
+    /// `SeamLines` holds a 1° checker within ±15° of the seam and a
+    /// luminance ramp beyond it.
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn seam_lines_has_a_checker_near_the_seam_and_a_ramp() {
+        todo!()
     }
 }

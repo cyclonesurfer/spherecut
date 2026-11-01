@@ -6,13 +6,22 @@
 //! they are there to check (4.1 rule 2): a test converts between the two
 //! only at its boundary. [`Planted`] holds one value of each convention
 //! the camera's files leave open, and [`CalibTruth`] one calibration's
-//! stored numbers. M3.2 prints the calibration strings from the two, and
-//! M3.3 composes each lens's model, `to_rig` and centre from them.
+//! stored numbers. M3.2 prints the calibration strings from the two;
+//! [`compose`] builds a [`RigTruth`] from them, each lens's model, `to_rig`
+//! and centre, and [`render_lens`] renders what each lens sees through
+//! synth's own forward and inverse ([`TruthModel`]).
 //!
 //! The frames are 6.2's. A lens frame is Mei's and OpenCV's: +x right in
-//! the image, +y down, +z along the optical axis. The rig frame looks
-//! along −Z. A rotation by a positive angle about an axis turns by the
-//! right-hand rule.
+//! the image, +y down, +z along the optical axis. The rig frame is
+//! Spherecut's world (DECISIONS D33): +X right, +Y up, and the front lens
+//! looking along −Z. Every frame is right-handed, and a rotation by a
+//! positive angle about an axis turns by the right-hand rule.
+
+use glam::{DQuat, DVec2, DVec3};
+use spherecut_core::video::ChromaSiting;
+
+use crate::yuv::{Chroma, YuvFormat, YuvPlanes};
+use crate::{Pattern, RgbImage};
 
 /// Which track each calibration block describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -141,11 +150,9 @@ impl QuarterTurn {
 /// `roll_offset` when a is the roll). Either way the space holds the same
 /// 1152 rotations: the readings decide which value names which, and so
 /// which value is the placeholder and how 6.3's Against-synth test pairs
-/// each `EulerConv` with a `TruthEuler`. M3.3 writes `sphere`'s
-/// `EulerConv` to these readings, field for field.
-/// Two readings stay open for M3.3: how far [`TruthTz::Negated`] reaches,
-/// and which value is the placeholder's "identity with the −90° roll
-/// offset" (7.1).
+/// each `EulerConv` with a `TruthEuler`. `sphere`'s `EulerConv` reads
+/// them the same way, field for field, and M3.3 settled the placeholder
+/// as [`TruthEuler::PLACEHOLDER`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TruthEuler {
     /// The axis each stored angle turns about, by angle (yaw, pitch,
@@ -164,6 +171,23 @@ pub struct TruthEuler {
 }
 
 impl TruthEuler {
+    /// The X5's placeholder until M3.6's fit (5.3, 7.1), "the identity
+    /// with the −90° roll offset", as M3.3 settled it: the value whose
+    /// every field reads the angles as they are named. All signs are plus;
+    /// the order is yaw, pitch, roll, first applied first; and the axes are
+    /// those D33 gives the names, carried into the lens frame by F: yaw
+    /// about the up-down axis y, pitch about the right axis x, roll about
+    /// the optical axis z, about which the X5's sensors sit a quarter turn
+    /// (3.1). So E_b = R_z(roll − 90°) · R_x(pitch) · R_y(yaw), the value
+    /// of 11.1's worked JSON, and on Pat's angles each block's E_b is
+    /// within 1° of the identity.
+    pub const PLACEHOLDER: TruthEuler = TruthEuler {
+        axes: [Axis::Y, Axis::X, Axis::Z],
+        order: [Angle::Yaw, Angle::Pitch, Angle::Roll],
+        signs: [Sign::Plus; 3],
+        roll_offset: QuarterTurn::Minus90,
+    };
+
     /// All 1152 values.
     pub fn all() -> impl Iterator<Item = TruthEuler> {
         permutations([Axis::X, Axis::Y, Axis::Z])
@@ -218,14 +242,22 @@ impl TruthTurn {
 }
 
 /// The sign of the stored translation in 6.2's c_1 = rig_from_lens_0 ·
-/// (sign(tz) · t_1), lens 1's centre.
+/// (sign(tz) · t_1), lens 1's centre: a sign on the whole vector.
+///
+/// M3.3 settled that `Negated` flips all of t_1, not only its z. What is
+/// open is which way the stored vector points along the baseline, from
+/// lens 0 to lens 1 or back, and that negates the whole vector; flipping
+/// z alone would be a reflection, which no change between right-handed
+/// frames gives either. With c_0 = 0, flipping all of c_1 flips both
+/// lenses' c_b − o, so `Negated` at q is exactly `AsStored` at −q, as
+/// 8.6's tz rule reads it (under the wrong sign the wall fits q < 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TruthTz {
-    /// As stored: lens 1 sits behind lens 0 on lens 0's axis, the
-    /// physical layout.
+    /// As stored: t_1 is lens 1's centre in lens 0's frame, behind lens 0
+    /// on its axis, the physical layout.
     AsStored,
-    /// Negated. Whether that flips all of t_1, as 6.2's formula reads, or
-    /// only its z is M3.3's to settle.
+    /// −t_1, all three components: the stored vector read from lens 1 to
+    /// lens 0.
     Negated,
 }
 
@@ -471,6 +503,244 @@ impl CalibTruth {
     pub fn generation(&self) -> Generation {
         self.dist.generation()
     }
+}
+
+/// Where the X5's image circle ends, in degrees off each lens's axis
+/// (M3 plan 7.1): the `theta_max` [`compose`] gives each lens, so that
+/// the square frame cuts the circle on all four sides as the camera's
+/// does, while the rig's own θ_max stays 100°.
+pub const IMAGE_CIRCLE_DEG: f64 = 106.0;
+
+/// The base a Kannala–Brandt truth applies after its polynomial in θ:
+/// synth's own, written from 6.1's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KbBase {
+    /// r = θ_d.
+    Equidistant,
+    /// r = 2 sin(θ_d/2).
+    Equisolid,
+    /// r = 2 tan(θ_d/2).
+    Stereographic,
+    /// r = sin θ_d, for θ_d up to 90°.
+    Orthographic,
+}
+
+impl KbBase {
+    pub fn all() -> impl Iterator<Item = KbBase> {
+        [
+            KbBase::Equidistant,
+            KbBase::Equisolid,
+            KbBase::Stereographic,
+            KbBase::Orthographic,
+        ]
+        .into_iter()
+    }
+}
+
+/// A truth lens's projection, in its slot's pixels (7.1), written from
+/// 6.1's formulas with synth's own code. For the Mei models a unit
+/// lens-frame direction (x, y, z) lands on the plane at m = (x, y)/(z + ξ)
+/// and is distorted there; for `Kb` it lands at base(θ_d) (cos φ, sin φ)
+/// with θ_d = θ (1 + k1 θ² + … + k5 θ¹⁰). The pixel is (fx xd + cx,
+/// fy yd + cy), with fx = fy = f for `Kb`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TruthModel {
+    /// V3: radial k1 to k3 and Brown's p1 and p2.
+    Mei {
+        xi: f64,
+        fx: f64,
+        fy: f64,
+        cx: f64,
+        cy: f64,
+        k: [f64; 3],
+        p: [f64; 2],
+    },
+    /// V6: d0 to d12, read through `reading`.
+    MeiV6 {
+        xi: f64,
+        fx: f64,
+        fy: f64,
+        cx: f64,
+        cy: f64,
+        d: [f64; 13],
+        reading: TruthV6,
+    },
+    /// Kannala–Brandt on a base: docs/PROMPT.md's model, and the
+    /// no-calibration fallback (4.2's second rig).
+    Kb {
+        base: KbBase,
+        f: f64,
+        cx: f64,
+        cy: f64,
+        k: [f64; 5],
+    },
+}
+
+impl TruthModel {
+    /// Synth's forward: lens-frame direction to pixel, term by term from
+    /// 6.1. `None` where the model has no image (the lift's denominator
+    /// at or below 0, or an orthographic base past 90°).
+    #[expect(unused_variables, reason = "M3.3 unit (c) writes the body")]
+    pub fn forward(&self, d: DVec3) -> Option<DVec2> {
+        todo!()
+    }
+
+    /// Synth's inverse, pixel to lens-frame unit direction, which rung 0
+    /// holds sphere's forward to (4.2): a damped 2-D Newton on the full
+    /// forward with a numeric Jacobian and bisection as its fallback,
+    /// deliberately not sphere's bracketed radial Newton, then the
+    /// closed-form lift (7.1). `None` where it finds no direction.
+    #[expect(unused_variables, reason = "M3.3 unit (c) writes the body")]
+    pub fn inverse(&self, px: DVec2) -> Option<DVec3> {
+        todo!()
+    }
+}
+
+/// One lens of a [`RigTruth`]: what a track shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LensTruth {
+    /// The projection, in the slot's pixels.
+    pub model: TruthModel,
+    /// The rotation from the lens frame to the rig frame, the inverse of
+    /// `sphere::rig`'s `lens_from_rig`.
+    pub to_rig: DQuat,
+    /// The lens's centre from the rig's origin in metres, 6.2's c_b − o,
+    /// with o midway between the lenses.
+    pub centre_m: DVec3,
+    /// Where the image circle ends, in radians off the axis: black beyond,
+    /// as on the camera.
+    pub theta_max: f64,
+    /// The square track's side.
+    pub side: u32,
+    /// A gain per channel, in linear light.
+    pub gain: [f64; 3],
+    /// The falloff, in linear light: 1 + v1 θ² + v2 θ⁴ + v3 θ⁶ with θ in
+    /// radians off the axis. All 0 for none.
+    pub vignette: [f64; 3],
+}
+
+/// A synthetic camera (7.1): two lenses, the scene they see and how the
+/// rig moves through it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RigTruth {
+    /// By track: `lenses[t]` is what track t shows. A test that compares
+    /// with `sphere::rig::Rig`, whose lenses go by block, pairs each by
+    /// the block's track.
+    pub lenses: [LensTruth; 2],
+    /// The radius of the scene's sphere about the rig's origin, in
+    /// metres, or `None` for an infinitely far scene.
+    pub scene_radius_m: Option<f64>,
+    /// A ground plane this far below the rig's origin, in metres (8.4's
+    /// ground model, 8.5): a ray that meets it before the scene shows the
+    /// pattern in the direction of the point it meets.
+    pub ground_m: Option<f64>,
+    pub motion: Motion,
+    /// How late each track's lens exposes, in frames: a lens late by Δt
+    /// sees the rig as it is Δt later (3.4).
+    pub late_frames: [f64; 2],
+    /// The rolling shutter's readout, in seconds: row y of a lens's
+    /// picture is exposed (y + ½)/side of it after its frame's time.
+    pub readout_s: f64,
+}
+
+/// How the rig turns through a still scene over a clip: at rest, but for
+/// turns at constant rates (8.5's pans between rests).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Motion {
+    /// The frame rate, which turns frame numbers and `late_frames` into
+    /// seconds.
+    pub fps: f64,
+    /// The turns, in time order and none overlapping. Empty for a rig
+    /// that holds still.
+    pub turns: Vec<Turn>,
+}
+
+impl Motion {
+    /// A rig that holds still, at the X5's 29.97 frames a second.
+    pub fn still() -> Motion {
+        Motion {
+            fps: 30000.0 / 1001.0,
+            turns: Vec::new(),
+        }
+    }
+
+    /// The rig's orientation at `t_s` seconds, the rotation from the rig
+    /// frame to the scene's: the identity before the first turn.
+    #[expect(unused_variables, reason = "M3.3 unit (c) writes the body")]
+    pub fn at(&self, t_s: f64) -> DQuat {
+        todo!()
+    }
+}
+
+/// One turn of the rig: about `axis` (a unit vector in the scene's
+/// frame) at `deg_per_s`, by the right-hand rule, from `start_s` to
+/// `end_s` seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Turn {
+    pub start_s: f64,
+    pub end_s: f64,
+    pub axis: DVec3,
+    pub deg_per_s: f64,
+}
+
+/// The synthetic camera a calibration and a planted convention give
+/// (7.1), composed from 6.2's text with glam's axis-angle quaternions and
+/// never through `sphere::rig` (4.1 rule 2): each lens's model in its
+/// slot's pixels under the planted canvas map, its `to_rig` from the
+/// stored angles under the planted Euler convention and roll offset, T_b,
+/// S and U, and its centre from c_1 under the planted tz sign. The
+/// binding puts block b's lens on its track, and when `front_track` is
+/// block 1's track both lenses turn 180° about +Y. `sides` are the
+/// tracks' sides, by track. The rest is a test's to set: the result's
+/// scene is infinitely far with no ground, the rig still, both lenses on
+/// time with no rolling shutter, unit gains, no vignette, and each
+/// `theta_max` at [`IMAGE_CIRCLE_DEG`].
+#[expect(unused_variables, reason = "M3.3 unit (c) writes the body")]
+pub fn compose(cal: &CalibTruth, planted: &Planted, front_track: u8, sides: [u32; 2]) -> RigTruth {
+    todo!()
+}
+
+/// What track `lens` shows of `pattern` at `frame`, side × side, each
+/// pixel the mean of `ss` × `ss` samples (7.1): synth's inverse, `to_rig`
+/// under the rig's motion at the sample's own time, the ray from
+/// `centre_m` to the scene's sphere or the ground, [`crate::color`], the
+/// gain and the vignette in linear light, then the sRGB OETF. Black past
+/// `theta_max` and where the inverse has no direction, as on the camera.
+#[expect(unused_variables, reason = "M3.3 unit (c) writes the body")]
+pub fn render_lens(pattern: Pattern, rig: &RigTruth, lens: usize, frame: u32, ss: u32) -> RgbImage {
+    todo!()
+}
+
+/// How a lens's picture becomes a track's planes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Coding {
+    /// The matrix, the range and the subsampling.
+    pub format: YuvFormat,
+    /// Where each chroma sample sits.
+    pub siting: ChromaSiting,
+    /// 8 or 10.
+    pub bits: u32,
+}
+
+impl Coding {
+    /// The X5's (3.1): 8-bit 4:2:0, full range, BT.709, chroma sited left.
+    pub const X5: Coding = Coding {
+        format: YuvFormat {
+            kr: 0.2126,
+            kb: 0.0722,
+            full_range: true,
+            chroma: Chroma::Yuv420,
+        },
+        siting: ChromaSiting::Left,
+        bits: 8,
+    };
+}
+
+/// A lens's picture as the planes its track holds under `coding`, chroma
+/// taken at the coding's siting.
+#[expect(unused_variables, reason = "M3.3 unit (c) writes the body")]
+pub fn lens_planes(img: &RgbImage, coding: Coding) -> YuvPlanes {
+    todo!()
 }
 
 #[cfg(test)]
@@ -741,5 +1011,122 @@ mod tests {
             ),
             0
         );
+    }
+
+    /// compose's E_b for 8 `TruthEuler` values, the placeholder among
+    /// them, against values worked out by hand with the arithmetic in the
+    /// comments (7.1).
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn compose_turns_eight_euler_values_as_worked_by_hand() {
+        todo!()
+    }
+
+    /// Block 1's V6 centre and focal (cx 8075.73, so c_local 2699.73; fx
+    /// 4284.40) under A, B and C: at 3840² cx 1928.38 under A and C and
+    /// 1928.48 under B, f 3097.16 under A and B and 3060.29 under C; at
+    /// 768² cx 385.68 under A and C and 385.70 under B (7.1).
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn compose_scales_block_1_under_each_canvas_map() {
+        todo!()
+    }
+
+    /// c_1 for Pat's V6 t_1 = (0.637, 0.001, −31.525) mm under both tz
+    /// signs: `Negated` flips all three components.
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn compose_places_lens_1_under_both_tz_signs() {
+        todo!()
+    }
+
+    /// The binding puts each block on its track, a front track that is
+    /// block 1's turns both lenses 180° about +Y, and `upright` turns both
+    /// a quarter turn about −Z.
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn compose_follows_the_binding_the_front_track_and_upright() {
+        todo!()
+    }
+
+    /// Synth's inverse inverts its forward on every truth model, each V6
+    /// reading and each KB base among them.
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn truth_inverse_inverts_forward() {
+        todo!()
+    }
+
+    /// Synth's forward on values worked out by hand: the centre on the
+    /// axis, tan θ at ξ = 0 and tan(θ/2) at ξ = 1 with no distortion, and
+    /// each KB base.
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn truth_forward_lands_where_worked_by_hand() {
+        todo!()
+    }
+
+    /// `Motion::at` turns at each turn's rate and holds still between
+    /// turns.
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn motion_turns_at_its_rate_and_rests_between() {
+        todo!()
+    }
+
+    /// Each pixel of `render_lens` at ss = 1 is the pattern in the
+    /// direction synth's inverse and `to_rig` give its centre.
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn render_lens_shows_the_scene_through_the_truth() {
+        todo!()
+    }
+
+    /// Past `theta_max`, and where the inverse has no direction, the
+    /// picture is black.
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn render_lens_is_black_past_theta_max() {
+        todo!()
+    }
+
+    /// A finite scene and the ground plane are seen from each lens's own
+    /// centre, so the two lenses' pictures of one point differ by the
+    /// parallax 6.2 predicts.
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn render_lens_sees_the_scene_and_the_ground_from_its_centre() {
+        todo!()
+    }
+
+    /// A late lens and a rolling shutter render each row at its own time
+    /// under the rig's motion.
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn render_lens_renders_late_lenses_and_rows_at_their_times() {
+        todo!()
+    }
+
+    /// The gain and the vignette apply in linear light.
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn render_lens_applies_gain_and_vignette_in_linear_light() {
+        todo!()
+    }
+
+    /// `lens_planes` codes as the X5 does: full range, BT.709, chroma
+    /// sited left.
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn lens_planes_codes_as_the_x5_does() {
+        todo!()
+    }
+
+    /// A test binary's render cache renders a static scene once and keys
+    /// it by rig truth, scene and frame (7.1).
+    #[test]
+    #[ignore = "M3.3 unit (c)"]
+    fn the_render_cache_renders_a_static_scene_once() {
+        todo!()
     }
 }
