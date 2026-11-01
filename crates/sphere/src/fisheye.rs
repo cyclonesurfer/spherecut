@@ -325,9 +325,12 @@ impl Unified {
     /// 0.05° steps and bisected within the step where it stops rising.
     /// The scan looks at its last step too, from its last sample to the
     /// end, which ends a hair (1e-12 of it) inside the end for ξ ≤ 1,
-    /// where m has no bound. r(θ) is the radial curve m R(m²), which the
-    /// tangential and prism terms don't change. `Rig::build` refuses a
-    /// θ_max beyond it.
+    /// where m has no bound. Where m is too large for an f64 there, as
+    /// when ξ lies within about 1e-10 of 1 and cos θ + ξ rounds to 0 at
+    /// the hair, the slope is read by its highest non-zero term, whose
+    /// sign it takes for every m large enough. r(θ) is the radial curve
+    /// m R(m²), which the tangential and prism terms don't change.
+    /// `Rig::build` refuses a θ_max beyond it.
     pub fn limit_theta(&self) -> f64 {
         let end = self.end_theta();
         let xi = self.xi;
@@ -348,7 +351,7 @@ impl Unified {
         let rises = |theta: f64| {
             let (s, c) = theta.sin_cos();
             let m = s / (c + xi);
-            self.dist.slope(m * m) > 0.0
+            self.dist.rises_at(m * m)
         };
         // Each step's sine and cosine come from the last by the angle-sum
         // rule, which drifts by far less than a step over the scan, so
@@ -363,7 +366,7 @@ impl Unified {
         for k in 1..steps {
             (s, c) = (s * cd + c * sd, c * cd - s * sd);
             let m = s / (c + xi);
-            if self.dist.slope(m * m) <= 0.0 {
+            if !self.dist.rises_at(m * m) {
                 return last_rising(
                     rises,
                     f64::from(k - 1) * SCAN_STEP,
@@ -371,10 +374,11 @@ impl Unified {
                 );
             }
         }
-        // The last step, from the loop's last sample to the tail, a whole
-        // step or less. None is left when the tail is a whole number of
-        // steps to the last bit, so that the loop's last sample was the tail
-        // itself.
+        // The last step, from the loop's last sample to the tail: the loop
+        // stops one short of `steps`, the tail's steps rounded up, so this
+        // is a whole step or less, and is always looked at. The guard is
+        // for rounding alone, should the last sample's product land on the
+        // tail.
         let last = f64::from(steps - 1) * SCAN_STEP;
         if last < tail && !rises(tail) {
             return last_rising(rises, last, tail);
@@ -599,6 +603,25 @@ impl Canonical {
     fn slope(&self, r2: f64) -> f64 {
         let [k1, k2, k3, k4, k5] = self.k;
         1.0 + r2 * (3.0 * k1 + r2 * (5.0 * k2 + r2 * (7.0 * k3 + r2 * (9.0 * k4 + r2 * 11.0 * k5))))
+    }
+
+    /// Whether the radial curve rises at ρ² = `r2`: its slope is above 0.
+    /// Where `r2` is too large for [`Canonical::slope`]'s nested form,
+    /// which then meets ∞ · 0 (`r2` is infinite where cos θ + ξ rounds to
+    /// 0), the slope is read by its highest non-zero term instead, whose
+    /// sign it takes for every r² large enough; with no radial term it is
+    /// 1.
+    fn rises_at(&self, r2: f64) -> bool {
+        let slope = self.slope(r2);
+        if slope.is_nan() && r2 > 1.0 {
+            return self
+                .k
+                .iter()
+                .rev()
+                .find(|k| **k != 0.0)
+                .is_none_or(|k| *k > 0.0);
+        }
+        slope > 0.0
     }
 
     /// A floor under [`Canonical::slope`] for every r² up to `r2_max`,

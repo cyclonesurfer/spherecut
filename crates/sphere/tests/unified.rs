@@ -1026,7 +1026,8 @@ fn unified_unproject_is_none_past_limit_theta() {
 
 /// limit_theta is acos(−1/ξ) for ξ > 1 (120° at ξ = 2), acos(−ξ) for
 /// ξ ≤ 1 (90° at ξ = 0), or earlier where the polynomial folds first,
-/// even within the scan's last step, short of the end.
+/// even within the scan's last step, short of the end, and at ξ = 1,
+/// where m is infinite at the step's end in f64.
 ///
 /// On Pat's V3 and V6 the projection's own fold comes first, at exactly
 /// 120°. dr/dθ is the polynomial's slope in m times dm/dθ = (1 + ξ cos θ)/
@@ -1128,6 +1129,50 @@ fn unified_limit_theta_is_where_the_model_folds() {
     must_fail(
         "the end taken for the limit, at ξ = 0",
         rose_to(&l, FRAC_PI_2 * (1.0 - 1e-12)),
+    );
+    // At ξ = 1 the scan's last sample, a hair short of 180°, has
+    // cos θ + ξ = 0 in f64, so m there is infinite and the slope's terms
+    // give ∞ · 0. The slope 1 − 0.03 m² + 0.05 m⁴ never reaches 0 (its
+    // discriminant is negative), so the curve rises to the end, but its
+    // floor, 1 less the k1 term at m = ∞, isn't positive, so the scan
+    // runs to that sample.
+    let tail = PI * (1.0 - 1e-12);
+    let to_end = lens(1.0, [-0.01, 0.01, 0.0, 0.0, 0.0]);
+    assert_eq!(to_end.limit_theta(), PI);
+    // Controls: m at that sample is infinite, and the slope read there in
+    // its nested form, k3 to k5 among it, is no number.
+    must_fail(
+        "m a hair short of 180° at ξ = 1",
+        at_most(plane(1.0, tail), f64::MAX),
+    );
+    let r2 = plane(1.0, tail).powi(2);
+    let [k1, k2, k3, k4, k5] = to_end.dist.k;
+    let nested = 1.0
+        + r2 * (3.0 * k1 + r2 * (5.0 * k2 + r2 * (7.0 * k3 + r2 * (9.0 * k4 + r2 * 11.0 * k5))));
+    must_fail("the slope at m = ∞, nested, a number", !nested.is_nan());
+    // With k5 = −1e-30 too, the slope's highest term is negative, and the
+    // curve folds within the last step, at m² = 1.657e9 (m = 40700),
+    // 2 atan(1/m) = 4.9e-5 rad short of 180°.
+    let k = [-0.01, 0.01, 0.0, 0.0, -1e-30];
+    let slope = |r2: f64| 1.0 + r2 * (3.0 * k[0] + r2 * (5.0 * k[1] + r2.powi(3) * 11.0 * k[4]));
+    let (mut lo, mut hi) = (1e8, 1e10);
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if slope(mid) > 0.0 { lo = mid } else { hi = mid }
+    }
+    let at = PI - 2.0 * (1.0 / lo.sqrt()).atan();
+    let limit = lens(1.0, k).limit_theta();
+    assert!(
+        (limit - at).abs() < 1e-9,
+        "{}° for {}°",
+        limit.to_degrees(),
+        at.to_degrees()
+    );
+    // Control: the end, which a scan that took any infinite m for the end
+    // would give.
+    must_fail(
+        "the end taken for the limit, at ξ = 1",
+        at_most(PI - at, 1e-9),
     );
     // Pat's lenses: the curve stops rising where the projection folds,
     // 120.0° at ξ = 2. The polynomial alone would fold later, at the
