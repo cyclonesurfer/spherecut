@@ -264,8 +264,8 @@ Current benchmarks:
   copies again on each machine with its own x265 and checks their IDR
   spacing and P-only coding, though not which IDR type they take nor
   their slices (synth's `pairs`, which also prints, with `--nocapture`,
-  what that x265 does when asked for temporal layers: x265 4.x, as odin
-  and huginn link it, is unverified until one of them runs it). The
+  what that x265 does when asked for temporal layers: odin's x265 4.1
+  does what 3.5 does, its eleventh run below). The
   report then reads each lens of the full clips that machine made or
   found: its bitrate from its own samples, its software decode, and its
   coding, its IDR interval from `stss` and its pictures by NAL type
@@ -1028,6 +1028,63 @@ faster.
 | 2×3840² at 29.97 | 84.0 (82.5 to 85.0) | 11.49 / 11.96 ms | 0.83 / 1.12 ms | 1.09 / 1.11 ms |
 | 2×2880² at 59.94 | 145.5 (144.5 to 146.0) | 6.73 / 6.97 ms | 0.65 / 0.85 ms | 0.66 / 0.67 ms |
 | 2×2880² at 29.97 | 119.5 (117.5 to 120.0) | 8.03 / 9.18 ms | 0.64 / 0.90 ms | 0.66 / 0.67 ms |
+
+Eleventh run, the perf pairs' coding:
+[`hw-reports/odin-3fe071e-m31b.md`](../hw-reports/odin-3fe071e-m31b.md)
+at 3fe071e (branch `m3/decode`, over Remote Control), 2026-11-01 (PR
+#28). `cargo xtask hw-test --no-tier1 --only
+bench_perf_clips_software_decode --only bench_export_pair_decode` in
+5495 s: 2 passed. The new stamps made the three pairs again (in 1669,
+950 and 960 s) at the same sizes and bitrates. Each lens's software
+decode, alone, and its coding read back from the file, beside the
+masters' (read in the cloud; the X5 codes both lenses alike, with no
+user-data SEI):
+
+| Clip | Software decode | IDR every | Pictures by NAL type |
+|---|---:|---:|---|
+| perf 2×3840² at 29.97, lens 0 | 64.8 fps | 60 | TRAIL_R 590, IDR_N_LP 10 |
+| perf 2×3840² at 29.97, lens 1 | 64.9 fps | 60 | TRAIL_R 590, IDR_N_LP 10 |
+| `_004`, 8K30 (clip 1), each lens | | 60 | TRAIL_R 112, IDR_W_RADL 2 |
+| `_005`, 8K25 (clip 2), each lens | | 50 | TRAIL_R 113, IDR_W_RADL 3 |
+| perf 2×2880² at 59.94, lens 0 | 114.2 fps | 120 | TRAIL_R 595, IDR_N_LP 5 |
+| perf 2×2880² at 59.94, lens 1 | 114.9 fps | 120 | TRAIL_R 595, IDR_N_LP 5 |
+| `_006`, 5.7K60 (clip 3), each lens | | 120 | TRAIL_R 93, TSA_N 95, IDR_W_RADL 2 |
+| `_007`, 4K120 (clip 4), each lens | | 120 | TRAIL_R 288, TSA_N 293, IDR_W_RADL 5 |
+| perf 2×2880² at 29.97, lens 0 | 82.2 fps | 60 | TRAIL_R 590, IDR_N_LP 10 |
+| perf 2×2880² at 29.97, lens 1 | 81.9 fps | 60 | TRAIL_R 590, IDR_N_LP 10 |
+
+No lens is too easy (each is under 150 fps), and no cell is in bold:
+every IDR is on its interval and `stss` agrees with the coding. The
+pairs differ from the masters where 7.2 says they would: IDR_N_LP for
+IDR_W_RADL, and the 59.94 pair P only where `_006` codes every other
+picture as TSA_N (its rows say so). No master is 2×2880² at 29.97, so
+that pair's IDR every 60 is 7.2's guess. M2's 8K perf clip decodes at
+28.8 fps on the same run; the tenth run's pair rows already showed the
+pairs 1.8 to 3.1 times easier in software than the X5's files.
+
+odin's x265 is 4.1+1-1d117be (build 215), read from the info SEI of a
+frame hw-test coded, and asked for two temporal layers it does what
+the cloud's 3.5 does
+([`odin-3fe071e-layers.log`](../hw-reports/odin-3fe071e-layers.log)):
+without B-frames every picture but the IDRs is a TRAIL_R (TRAIL_R 46,
+IDR_N_LP 2), and with a B-frame between references only the B-frames
+are TSA_N (TRAIL_R 24, TSA_N 22, IDR_N_LP 2), reordered. So neither
+x265 codes the X5's 59.94 layers in display order.
+
+The gated rows repeat the ninth and tenth runs' within 0.2 fps: K1 is
+Redirect 2 (beside the encode, the slower lens's median: Vulkan Video
+download 33.3 fps serial and 32.0 a thread a lens, VA-API download
+18.5 and 14.2, software 13.6 and 13.7), K2's export half on the
+2×2880² at 29.97 pair reads Vulkan Video download 47.3 and 45.4
+against VA-API's 26.5 and 29.2, K3 passes on every path and K4 is a
+redirect. The encode beside held 29.8 to 30.4 fps but once: in
+software a thread a lens on the 2880 pair it held 28.6 (28.3 to 30.0),
+under the 29.5 floor, so that row (58.4 fps a lens) counts as a miss;
+the K lines list only the VA-API and Vulkan Video setups, so it moves
+no verdict. Alone, the 3840 pair's slower lens on VA-API serially ran
+40.4 fps, not the tenth run's 31.1, beside clip 9's 41.0, so there
+too the pair now matches the X5's file; a thread a lens it ran 18.0
+against clip 9's 12.8.
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 
