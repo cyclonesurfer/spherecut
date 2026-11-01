@@ -103,6 +103,12 @@ pub mod tier2 {
     /// samples and the CPU only: `SPHERECUT_SAMPLES`, or skip when it is
     /// unset or names no folder. Unlike [`require_samples_dir`] it doesn't
     /// need hw-test (`SPHERECUT_TIER2`), so the test runs in the cloud too.
+    ///
+    /// `samples_cpu_in` is the whole rule, and this reads nothing but
+    /// `SPHERECUT_SAMPLES` to hand it on, so the Tier 1 tests of
+    /// `samples_cpu_in` test the gate. Keep it so: a check added here,
+    /// such as [`require_hw_run`], would make every Tier 2c test skip in
+    /// the cloud, which no Tier 1 test would see.
     #[track_caller]
     pub fn require_samples_cpu() -> PathBuf {
         samples_cpu_in(std::env::var_os("SPHERECUT_SAMPLES").map(PathBuf::from))
