@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bc7a780d30ef7b6cc75724c1ba2131c9c17b16629a6b5b38775afbb2163d9c05 # shrinks to base = Stereographic, k = (0.040160849375522514, 0.004639475773083241, 0.0, 0.0, 0.0), terms = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], (fx, aspect, cx, cy) = (800.0, 0.0, 900.0, 900.0), along = 0.9096713116411552, phi = 0.0
+cc 8d843c9cc83e4eb2d13a60b3efed093f79a36e4260e32631dbfb6a9d5f9a7376 # shrinks to w = Draw { lens: Unified { xi: 0.6468057804346592, fx: 1086.0242054991495, fy: 1086.0242054991495, cx: 2688.0, cy: 2688.0, dist: Canonical { k: [0.015052279657780466, 0.0032091278720265837, 0.0004956997482938858, -0.00013072356854017017, 0.0], p: [0.0, -0.0], pe: [0.0004758838404392796, 0.0], s: [-0.0, 0.0, 0.017509095903857415, 0.0] } }, d: DVec3(-0.25088502283137043, -0.9539619599595696, -0.16435718502395727), top: 1.7453292519943295 }
