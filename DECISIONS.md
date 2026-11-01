@@ -958,10 +958,24 @@ limits of its own (`camera::insta360::limits`):
   about 4 KB, and a string in it of at most 4 KiB (`MAX_STRING`), the
   longest, V6's calibration string, being 518 bytes (`parse_metadata`,
   M3.2's unit (b));
-- a record of at most what `read_record`'s caller asks for.
+- at most 64 lens profiles of each kind in field 145, polynomials and
+  fields of view (`MAX_PROFILES`), the X5 listing 6 of each: an item
+  can be 2 bytes where what it is kept as takes 48, so a 1 MiB field
+  would otherwise keep half a million. The 65th is `TooLarge` in
+  `Part::Field(145)` at its key, told from a string over `MAX_STRING`
+  there by its limit;
+- a record of at most what `read_record`'s caller asks for, and in
+  `verify_companion` an exposure record (4) of at most its `max`,
+  compared 64 KiB of each file at a time. Records over it, or empty in
+  both files, are paired by name only (`Pairing::NameOnly`, saying why)
+  and not read. media passes both its `MAX_EXPOSURE`, 64 MiB, four
+  million frames, so that probe, which reads record 4 to count its
+  items, and `verify_companion` share one limit; Pat's longest is
+  30 KB.
 
 Each is checked before anything is allocated for it, and a size over
-it is `CameraError::TooLarge` at the byte that states it; a trailer too
+it is `CameraError::TooLarge` at the byte that states it (in
+`verify_companion`, a pairing by name only); a trailer too
 small for its index is `CameraError::TooSmall` at the same byte, the
 tail's size. A record whose slot runs into the index or past the file
 is listed in `Trailer::skipped`, counted and never followed. The
