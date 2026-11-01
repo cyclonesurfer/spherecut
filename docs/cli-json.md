@@ -149,8 +149,8 @@ its `time_base`.
 
 | Status | Meaning | probe | doctor | frame | render |
 |---:|---|---|---|---|---|
-| 0 | The run did what was asked | Every file is ok (warnings don't count) | No problem of severity error | The PNG is written (warnings don't count) | The MP4 is written and passed its checks (warnings don't count) |
-| 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18) | No frame: the output is in the way, the file is missing, damaged before the frame or not an equirect, the frame is past the end, the GPU failed, ... (Codes) | No file: the output is in the way, the project doesn't load or its clip is offline, `--range` is outside the sequence, a stage of the export or a check of the file failed, the disk hasn't room, ... (Codes) |
+| 0 | The run did what was asked | Every file is ok (warnings don't count) | No problem of severity error; with `--file`, the file probes too, whether or not it can be stitched | The PNG is written (warnings don't count) | The MP4 is written and passed its checks (warnings don't count) |
+| 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18); or, with `--file`, the file can't be probed (probe's code for it, in place of `doctor_errors`) | No frame: the output is in the way, the file is missing, damaged before the frame or not an equirect, the frame is past the end, the GPU failed, ... (Codes) | No file: the output is in the way, the project doesn't load or its clip is offline, `--range` is outside the sequence, a stage of the export or a check of the file failed, the disk hasn't room, ... (Codes) |
 | 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso`, `--zero-copy` with `--decoder software` | An unknown preset, codec or choice, or a `--range` that doesn't parse |
 | 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware, and `import_failed` with `--zero-copy` | `no_gpu`, `adapter_not_found`, `no_encoder` (no encoder for the codec that the run can use), and `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--encoder vaapi` named the hardware and it failed to open or in its first second |
 | 4 | Interrupted (SIGINT), leaving no output file; the document's code is `cancelled` | never | never | The first Ctrl+C | The first Ctrl+C |
@@ -214,7 +214,7 @@ A report's `warnings[].code`, which don't fail the file:
 | `cannot_decode` | FFmpeg could not set a stream up (an unknown sample entry, an empty track), or its decoder lacks a feature the stream uses |
 | `unexpected_first_box` | FFmpeg reads the file as MP4/MOV although its first box is of a type such files don't start with |
 | `track_without_stream` | An MP4 `trak` that FFmpeg gives no stream |
-| `bad_trailer` | An Insta360 trailer, or a record or calibration string in it, that can't be read; the message says which and why. What it would have given is null, and the file plays without it |
+| `bad_trailer` | An Insta360 trailer, or a record or calibration string in it, that can't be read; the message says which and why. What it would have given is null, and the file plays without it. A file that ends in an `inst` box, where the X5 puts its trailer, but not in the trailer's magic gets one too, naming the first byte that differs |
 
 frame's `error.code` is also one of probe's file codes above, for the
 file it opens (`not_found`, `not_media`, `truncated`, ... with `path`
@@ -243,7 +243,7 @@ error, and which frame does (exit 1 unless the table says 3); doctor
 
 | Code | Meaning |
 |---|---|
-| `decode_failed` | A decoder failed, or the file has no video stream |
+| `decode_failed` | A decoder failed, or the file has no video stream (frame; doctor `--file` checks such a file, with `a video stream` missing) |
 | `no_decoder` | This FFmpeg has no decoder for the stream's codec; the message names it, by its four-character code when FFmpeg has no name for it (exit 3) |
 | `too_large` | As the warning above, as an error: the decoder refuses the stream |
 | `hw_unsupported` | The hardware decoder refuses the stream; software may still decode it (exit 3 when `--decoder vaapi` or `vulkan` named it) |
@@ -371,9 +371,9 @@ A report:
 | `camera` | object, or null | `vendor`, `model`, `firmware`, `serial` (strings or null; an Insta360 file's model, firmware and serial are its trailer's), `layout` (one of `equirect_tagged`, `equirect_likely`, `insta360_dual_fisheye`, `go_pro_eac`, `dji_dual_fisheye`, `low_res_companion`, `unknown`), `evidence` (strings) |
 | `lenses` | object, or null | An Insta360 dual-fisheye master's two lens streams: `tracks` (their FFmpeg indices, in file order). Null for any other file, an LRV among them, whose one picture holds both lenses |
 | `calibration` | object, or null | The calibration an Insta360 file's trailer holds, when a string of it parses: `generations` (those whose working string parses, oldest first, of `v1`, `v2`, `v3` and `v6`), `in_use` (the one the camera says it uses, when its string parses: `v6` on the X5; or null), `canvas` (`[width, height]` of the side-by-side picture the strings are in: the one in use's, else the newest's), `window` (the part of each lens's square the tracks show: `src` (the square on the canvas), `dst` (the track's) and `offset`, each a pair; or null), `hash` (16 hex digits: FNV-1a 64 over the working strings of `v1`, `v2`, `v3` and `v6` in that order, each followed by a NUL byte, a missing one by the NUL alone; a project's snapshot of the calibration records the same hash, M3 plan 11.1) |
-| `companion` | object, or null | The recording's other file, by its name, when it is there: an Insta360 master's LRV (`LRV_…_01_NNN.lrv` beside `VID_…_00_NNN.insv`) or an LRV's master. `path` (beside the file, as the file's path was given), `verified` (whether the two files' exposure records (4) are byte for byte the same, so the bytes say they are one recording's), `why` (when not verified, why: the two are paired by name only; else null). Null when there is no such file, the file has no trailer, its name isn't an Insta360 camera's, or it is lens 1's file (`_10_`) of a camera that writes one file a lens; the agent's `probe` also leaves it out when the other file isn't beneath a root |
+| `companion` | object, or null | The recording's other file, by its name, when it is there: an Insta360 master's LRV (`LRV_…_01_NNN.lrv` beside `VID_…_00_NNN.insv`) or an LRV's master. `path` (beside the file, as the file's path was given), `verified` (whether the two files' exposure records (4) are byte for byte the same, so the bytes say they are one recording's; records that are empty in both, or of more than 64 MiB, aren't compared), `why` (when not verified, why: the two are paired by name only, and a record that can't be read is named by its file, master or LRV; else null). Null when there is no such file, the file has no trailer, its name isn't an Insta360 camera's, or it is lens 1's file (`_10_`) of a camera that writes one file a lens; the agent's `probe` also leaves it out when the other file isn't beneath a root |
 | `exposure_entries` | integer, or null | How many 16-byte items an Insta360 trailer's exposure record (4) holds: one a frame the camera exposed, from a few before the tracks' first. Null when the file has no trailer, its trailer no exposure record, or the record can't be read (a `bad_trailer` warning says why) |
-| `records` | array, or null | An Insta360 trailer's records, as its index lists them: `id` and `size` (the record's bytes, without its footer). Null for a file without a trailer |
+| `records` | array, or null | The records an Insta360 trailer's index lists that lie inside the trailer: `id` and `size` (the record's bytes, without its footer). A slot whose record runs into the index or past the file is left out, with a `bad_trailer` warning. Null when the file has no trailer or its trailer can't be read (a `bad_trailer` warning says why) |
 | `structure` | object | How much of the structure was checked for damage: `{"check": "full"}` (MP4/MOV: every top-level box and the sample tables in `moov`, but not a fragmented file's fragments: the sample tables in its `moof` boxes (`trun`) aren't checked), `{"check": "length"}` (Matroska: only the Segment's length), or `{"check": "none", "why": string}` |
 | `damage` | array of problems | Why the file looks truncated or corrupt; empty for a healthy file |
 | `warnings` | array of problems | What may keep a stream from playing, without damage |
@@ -624,13 +624,15 @@ Video, on a discrete GPU where it works. Without `--file` there is no `file`.
 | `firmware` | string or null | The firmware the file names, as written (`v1.1.22_build1`) |
 | `stitchable` | boolean | Whether it can be stitched: two lens streams that decode, and in its trailer the calibration the camera says it uses |
 | `calibration` | string or null | That calibration's generation (`v6` on the X5), as probe's `calibration.in_use` |
-| `lenses` | array | Each lens stream (probe's `lenses.tracks`; the first video stream alone for a file without them): `stream` (FFmpeg's index), `decodes` (whether its first frame decoded), `source` and `decode` (as frame's, below; null when it wasn't opened or decoded), `error` (why not, an error as in the envelope; or null) |
+| `lenses` | array | Each lens stream (probe's `lenses.tracks`; the first video stream alone for a file without them, and none for a file with no video stream): `stream` (FFmpeg's index), `decodes` (whether its first frame decoded), `source` and `decode` (as frame's, below; null when it wasn't opened or decoded), `error` (why not, an error as in the envelope; or null) |
 | `geometry` | string | How sure the lenses' geometry is: `provisional` until Spherecut's own table of cameras gives the model and firmware theirs (M3 plan 5.3) |
-| `missing` | array of strings | What keeps it from being stitched, for people; empty when nothing does |
+| `missing` | array of strings | What keeps it from being stitched, for people; empty when nothing does. A trailer that is there but can't be read says so with probe's `bad_trailer` message, and a calibration the camera names (field 136) that doesn't parse is told apart from one it doesn't name |
 | `summary` | string | One line for people: the camera, its firmware and the geometry, such as `Insta360 X5 v1.1.22, geometry provisional` |
-| `warnings` | array of warnings | What probing the file and decoding its lenses warned of, each once, as frame's warnings |
+| `warnings` | array of warnings | What probing the file warned of (its damage, and its warnings with `bad_trailer` among them, each naming the file) and what decoding its lenses warned of, each once, as frame's warnings |
 
-A file that can't be stitched doesn't fail the run. One that can't be
+A file that can't be stitched doesn't fail the run, nor does one that
+probes but has no video stream (an audio file, say): its `lenses` are
+empty and `missing` starts with `a video stream`. One that can't be
 probed fails it with probe's code for the file (`not_found`,
 `not_media`, `truncated`, ..., as in "Codes") and exit 1, in place of
 `doctor_errors`; `file` is null and the machine's report comes with
@@ -651,7 +653,12 @@ the error. An X5 master's `file`, on a machine without a render node:
 }
 ```
 
-Without `--json`, the text adds the same after the machine's report:
+Without `--json`, the text adds the same after the machine's report,
+with a `missing:` line for each thing missing and a `warning:` line for
+each warning; the camera's name and firmware, which are the file's,
+print with their control characters escaped as `\xNN`, as probe's text
+prints the trailer's model, firmware and serial and the container's
+tags:
 
 ```
 File VID_20261022_165451_00_004.insv
