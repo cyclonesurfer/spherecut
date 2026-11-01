@@ -1689,6 +1689,15 @@ pub fn track_timing_in(tree: &Mp4Tree, stream: usize) -> Result<TrackTiming, Mp4
     for t in [b"stts", b"ctts", b"stss"] {
         once(stbl.children_of(t), t, stbl)?;
     }
+    // `stz2` is `stsz` in another form, so one beside the other is a
+    // second table of sizes, which sets the count.
+    once(
+        stbl.children
+            .iter()
+            .filter(|b| matches!(&b.fourcc.0, b"stsz" | b"stz2")),
+        b"stsz",
+        stbl,
+    )?;
 
     let sizes = stbl
         .child(b"stsz")

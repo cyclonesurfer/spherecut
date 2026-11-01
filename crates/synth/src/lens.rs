@@ -720,6 +720,8 @@ mod tests {
                 0.00888746,
             ],
         ];
+        // Only the terms are Pat's V6 string's: the blocks (xi, focal,
+        // centre, angles and t) stay V3's, which is all this test needs.
         let v6 = CalibTruth {
             dist: StoredDist::V6 { d },
             ..cal

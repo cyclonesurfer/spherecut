@@ -786,7 +786,9 @@ Limits, so a hostile file costs bounded time and memory:
   top-level boxes are read only when each is at most 64 KiB and their
   total stays under 1 MiB.
 - Leaf payloads over 1 MiB are not kept, except the sample tables (`stts`,
-  `stsz`, `stz2`, `stsc`, `stco`, `co64`) and a payload that starts with a
+  `ctts`, `stss`, `stsz`, `stz2`, `stsc`, `stco`, `co64`; `ctts` and `stss`
+  since M3.0, so a B-frame track with a `ctts` over 1 MiB is now timed from
+  it) and a payload that starts with a
   `tkhd` (a renamed `trak`, below), which the 256 MiB `moov` limit
   bounds.
 

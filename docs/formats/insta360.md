@@ -268,9 +268,11 @@ The two video tracks share frame rate and size and are frame-locked. [reported]
 masters, both lenses have the same timescale, frame count, first pts (0), edit list (one edit
 from media time 0), `stts` (one run of 1001 ticks, or 1000 at 25 fps), `ctts` (every offset 0)
 and `stss` (a keyframe every 2 s at 29.97, 25 and 59.94 fps, every 1 s at 119.88), and each
-LRV starts 0 master frames from its master. So frame *n* of track 0 is frame *n* of track 1
-by clip time, with no offset (P-TRK, `media::mp4::track_timing` and the Tier 2c test
-`samples_x5_tracks_equal`, M3.0, 2026-11-01). The X5 can carry **two AAC streams** when an external mic is
+LRV's first frame is at its own movie's start, as its master's is. So the container gives no
+offset between the lenses, and P-TRK's R1 is not taken (`media::mp4::track_timing` and the
+Tier 2c test `samples_x5_tracks_equal`, M3.0, 2026-11-01). Whether the pictures agree is
+P-TRK's pixel half (`samples_lens_offset_is_zero`, M3.6), and whether an LRV began with its
+master is M3.14's `lrv_matches_master`. The X5 can carry **two AAC streams** when an external mic is
 connected, and nothing in the container says which is which. [reported] `OR insta360-x5.md
 §3.1`
 

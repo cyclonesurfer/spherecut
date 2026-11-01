@@ -1059,6 +1059,18 @@ fn a_second_table_is_an_error_naming_it() {
             ),
             stbl_end,
         ),
+        (
+            "stsz",
+            "stbl",
+            splice(
+                &f,
+                stbl_end,
+                0,
+                &bx(b"stsz", b.stsz.as_ref().unwrap()),
+                &[moov, trak, mdia, minf, stbl],
+            ),
+            stbl_end,
+        ),
         // In the same `edts`, and in a second one.
         (
             "elst",
@@ -1235,6 +1247,8 @@ fn ffmpeg_s_files_time_as_its_demuxer_reads_them() {
         // sample the edit list doesn't hide.
         assert_eq!(i64::from(t.timescale), den, "{name}");
         assert_eq!(t.count, packets.len() as u64 + u64::from(hidden), "{name}");
+        // The first sample it shows is the first the edit list doesn't hide.
+        assert_eq!(t.first_shown, u64::from(hidden), "{name}");
         // Its first frame is shown at the first pts.
         let first = packets.iter().filter_map(|p| p.pts).min().unwrap();
         assert_eq!(t.first_pts, first, "{name}");
