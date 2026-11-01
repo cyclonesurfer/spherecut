@@ -1,0 +1,82 @@
+# Pat's X5 takes by role, for `spherecut_testkit::samples` (M3 plan 4.4).
+# Nothing parses Pat's NOTES.txt, so this file says which take is which.
+#
+# The camera numbers its own files: take NNN is VID_<date>_<time>_00_NNN.insv,
+# with its LRV_<date>_<time>_01_NNN.lrv, so clip 1 of docs/SAMPLES.md is file
+# 004 (docs/formats/insta360.md, "Pat's X5 samples"). `take` is the number
+# docs/SAMPLES.md gives the clip or take, `file` the camera's NNN and `mode`
+# the recording mode. A role with no `file` is a take still to come: its
+# tests skip, saying so, until its file is named here.
+#
+# The files are looked for in `folder` under SPHERECUT_SAMPLES (hw-test's
+# samples/, laid out as docs/SAMPLES.md asks), or in SPHERECUT_SAMPLES itself
+# when it names the camera's folder, as in the cloud.
+#
+# A small parser of testkit's own reads this file (src/samples.rs): [role]
+# tables of `key = value` lines, strings in double quotes, numbers bare, and
+# comments on lines of their own.
+
+folder = "insta360-x5"
+
+[clip1_8k30]
+take = 1
+file = "004"
+mode = "8K30"
+
+[clip2_8k25]
+take = 2
+file = "005"
+mode = "8K25"
+
+# The camera's HDR video mode, still 8-bit BT.709.
+[clip3_5k7_60]
+take = 3
+file = "006"
+mode = "5.7K60"
+
+[clip4_4k120]
+take = 4
+file = "007"
+mode = "4K120"
+
+# On the tripod about 1.5 m from a wall, with lines across the seams and
+# something at 3 to 5 m.
+[tripod_seam]
+take = 8
+file = "008"
+mode = "8K30"
+
+# Handheld: walking, fast turns, past vertical and two flips.
+[handheld_flips]
+take = 9
+file = "009"
+mode = "8K30"
+
+# On the tripod, turned slowly by hand in yaw, then pitch, then roll.
+[slow_turns]
+take = 10
+file = "010"
+mode = "8K30"
+
+# Outdoors on the tripod, level, everything at least 10 m away, held at two
+# headings about 90° apart. tripod_height_m is the height from the ground to
+# the lenses in metres, from Pat's NOTES.txt (SAMPLES.md take 14), which M3
+# plan 8.4's ground model reads; it stays absent until the note gives it.
+[open_field]
+take = 14
+mode = "8K30"
+
+# The screen-side lens covered by a hand for the first 2 s.
+[lens_cover]
+take = 15
+mode = "8K30"
+
+# Anything, at 5.7K and 29.97 fps: the 5.7K30 real-time target.
+[mode_5k7_30]
+take = 16
+mode = "5.7K30"
+
+# Handheld from deep shade into direct sun and back, one lens facing the sun.
+[shade_to_sun]
+take = 17
+mode = "8K30"

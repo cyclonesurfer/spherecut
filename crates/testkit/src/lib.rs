@@ -21,7 +21,8 @@
 //! unset:
 //! `SPHERECUT_SAMPLES=<folder> cargo test -p <crate> --test <file> -- --ignored <name>`.
 //! They gate on `tier2::require_samples_cpu` alone, which needs only
-//! `SPHERECUT_SAMPLES`; hw-test runs them with the rest.
+//! `SPHERECUT_SAMPLES`, and [`samples::role`] finds a take through it;
+//! hw-test runs them with the rest.
 //!
 //! # Controls
 //!
@@ -36,6 +37,7 @@
 #![forbid(unsafe_code)]
 
 pub mod control;
+pub mod samples;
 
 /// FNV-1a, 64 bits, fed in pieces: the planes of a frame row by row, say,
 /// so that row padding doesn't change the hash.
