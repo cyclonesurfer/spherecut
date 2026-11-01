@@ -1256,6 +1256,45 @@ pub fn render_lens(pattern: Pattern, rig: &RigTruth, lens: usize, frame: u32, ss
     lens_on_threads(pattern, rig, lens, frame, ss, threads)
 }
 
+/// [`render_lens`] with 7.1's frame codes of frame `frame` of lens `lens`
+/// in the four corners ([`crate::code::corner_code`]), once the truth's
+/// image circle is held clear of their blocks
+/// ([`crate::code::check_clear`]): an error, and no picture, for a truth
+/// whose circle reaches a block.
+pub fn render_lens_coded(
+    pattern: Pattern,
+    rig: &RigTruth,
+    lens: usize,
+    frame: u32,
+    ss: u32,
+) -> Result<RgbImage, crate::code::CodeError> {
+    let truth = &rig.lenses[lens];
+    let (offset, radius) = circle(truth);
+    crate::code::check_clear(truth.side, offset, radius)?;
+    let mut picture = render_lens(pattern, rig, lens, frame, ss);
+    crate::code::corner_code(&mut picture, lens, frame)?;
+    Ok(picture)
+}
+
+/// Where a lens's image circle lies in its square, for 7.1's bound: its
+/// centre's distance from the square's, and the farthest it reaches from
+/// that centre at `theta_max`, over 360 azimuths. An azimuth with no
+/// image at `theta_max` reaches without bound, so no block is clear of
+/// it.
+fn circle(truth: &LensTruth) -> (f64, f64) {
+    let (_, c) = truth.model.intrinsics();
+    let offset = (c - DVec2::splat(f64::from(truth.side) / 2.0)).length();
+    let (s, z) = truth.theta_max.sin_cos();
+    let radius = (0..360)
+        .map(|k| {
+            let (y, x) = f64::from(k).to_radians().sin_cos();
+            let at = truth.model.forward(DVec3::new(s * x, s * y, z));
+            at.map_or(f64::INFINITY, |at| (at - c).length())
+        })
+        .fold(0.0, f64::max);
+    (offset, radius)
+}
+
 /// [`render_lens`] on `threads` threads.
 fn lens_on_threads(
     pattern: Pattern,
@@ -4136,6 +4175,33 @@ mod tests {
                 at_most((reach(&naive) - reach(&mei.model)).abs(), 1e-9),
             );
         }
+    }
+
+    /// 7.1's frame codes on a rendered lens: the X5-like pair at 384²
+    /// holds its circle clear of the corners' blocks, and each lens's code
+    /// reads back from its 4:2:0 planes as the X5 codes them.
+    #[test]
+    fn render_lens_coded_keeps_its_codes_clear_of_the_circle() {
+        use crate::code::{CornerCode, Luma, read_corner_code};
+        let rig = compose(&x5_like(), &planted(TruthEuler::PLACEHOLDER), 0, [384; 2]);
+        for lens in 0..2 {
+            let (offset, radius) = circle(&rig.lenses[lens]);
+            let bound = crate::code::block_bound(384, offset, radius);
+            // 7.1 gives 47.8 px with the centres up to 3 px off.
+            assert!(bound > 47.0, "lens {lens}: {bound}");
+            let picture = render_lens_coded(Pattern::Grid, &rig, lens, 7, 1).unwrap();
+            let planes = lens_planes(&picture, Coding::X5);
+            let read = read_corner_code(&Luma::of_yuv(&planes, 384, 384, 8));
+            assert_eq!(read, Ok(CornerCode::of(lens, 7)), "lens {lens}");
+        }
+        // Control: the 384² circle in a 320² square, its centre 45 px
+        // off the square's.
+        let mut cramped = rig.clone();
+        cramped.lenses[0].side = 320;
+        must_fail(
+            "the 384² circle in a 320² square",
+            render_lens_coded(Pattern::Grid, &cramped, 0, 7, 1).map(|_| ()),
+        );
     }
 
     /// The cost of a frame of the X5-like rig on both lenses at 768² and
