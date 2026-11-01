@@ -26,6 +26,7 @@ pub struct Metadata {
     /// the X5, as the IMU's and the exposure's stamps are (§3.4).
     pub first_frame_us: Option<i64>,
     /// Field 25: the rolling shutter's readout, in ms (21.244 at 8K30).
+    /// The X5 writes an f32 widened to the double, 21.244001388549805.
     pub rolling_shutter_ms: Option<f64>,
     /// Field 26, which files make the recording.
     pub file_group: Option<FileGroup>,
