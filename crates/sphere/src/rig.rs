@@ -1087,8 +1087,11 @@ fn frame_theta(model: &LensModel, limit: f64, side: f64) -> f64 {
 
 /// How closely [`frame_theta`]'s searches place the minimum along an
 /// edge, as a fraction of the side. Near the minimum θ is quadratic
-/// along the edge, about 9/s² rad a pixel² on the X5, so a place off by
-/// 1e-6 s leaves θ off by under 1e-11 rad.
+/// along the edge, its second derivative under 10/s² rad a pixel² on
+/// Pat's lenses under A or C. The search stops with its best point within
+/// twice this of the minimum, 2e-5 s, so θ is off by under 2e-9 rad. A
+/// finer place would gain nothing: 1e-6 s moves θ by under 5e-12 rad, a
+/// tenth of the inverse's own angle error.
 const FRAME_TOL: f64 = 1e-5;
 
 /// Where on [lo, hi] `f` takes its least value, where it has one
