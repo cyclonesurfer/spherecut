@@ -288,6 +288,86 @@ over 111 test binaries against 108; the `track_timing` suite 0.07 s at
 `samples_x5_tracks_equal` 0.44 s warm; `agents.rs` 7 tests in 4.8 s;
 testkit's tests 0.06 s.
 
+### M3.1, pair decode (2026-11-01)
+
+Branch `m3/decode`: units (a) and (b) with a reviewer each, and (c),
+huginn's prompt. K1 and K3 come from odin's run (below, when it
+reports); K2 and K4 wait for huginn's paste and go into perf.md
+whenever it comes.
+
+- **(a) The pair's files.** `synth::code` writes a corner code in each
+  corner of a lens frame (a block of side s/12: 16 frame bits, the lens
+  bit and a CRC-8, words at least 4 bits apart) and reads it back from
+  8- or 10-bit planes; `check_clear` is the hook M3.3's `render_lens`
+  calls. `mux_video_streams` gains an MP4 output that keeps each
+  track's time base (`MuxedAs`, by extension: `.mkv`, `.mk3d`, `.mka`
+  and `.webm` stay Matroska), which `track_timing` reads back exactly.
+  `synth::media::write_pair` codes each lens alone with its own corner
+  codes and noise and muxes them; `perf_pairs()` are the three
+  two-track perf clips (2×3840² at 29.97, 2×2880² at 59.94 and 29.97,
+  600 frames a lens, closed GOPs, P frames only, an IDR every 60 or
+  120, 65 or 80 Mb/s a lens), and `pairs_64()` section 9's 2×64² files
+  (matched, a GOP fault, a lens one frame short). hw-test makes the
+  pairs and rates each lens on its own (its bitrate, decode rate and
+  too-easy flag), and records the machine's x265. `agents.rs` writes
+  its camera file as MP4 (amendment 3).
+- **(b) The bench.** `bench_export_pair_decode` (export's
+  `tier2_pair_decode.rs`) decodes both lenses as section 12 will, on
+  VA-API download, Vulkan Video download and software, serially and a
+  thread a lens, over clip 9 (8K30), the 8K25, 5.7K60 and 4K120
+  samples and the perf pairs. The gated rows follow K1's rule: 600
+  frames a lens beside an `h264_vaapi` encode of a 3840×2160 frame at
+  30 fps, the slower lens's median of three runs, a run under 30 fps
+  fails. K3's runs each run in a child process of their own, with a
+  consumer that keeps every channel full, so the pair holds the 10
+  frames section 12 holds (5 for lens 0 alone), and K3 decides only
+  when the run's own peak was that. Each K gets a note: Pass, its
+  redirect, or "not decided" with the reason. `bench_playback_x5_raw`
+  also plays the perf pairs (K2's engine half), on the default path
+  and with `SPHERECUT_ZERO_COPY=1` where Auto picks VA-API.
+  `peak_rss_growth_kib` moves to `testkit::memory`.
+- **(c) huginn's prompt** is `hw-run-8.md` in the project files: one
+  paste that runs the full hw-test hw-run-7.md asked for (H1, H2, M2's
+  4K30 row, the toolkit check), now with the pair benches and path A,
+  and says first that the perf clips take about two hours to make.
+
+**Settled by the slice** (for the plan's next amendment): x265 3.5
+marks frames non-reference (TSA_N) only as reordered B-frames, so the
+59.94 pair is P only and does not show the X5's halved catch-up decode;
+the masters code 10 slices a picture at 8K and 5 at 5.7K and 4K, WPP
+off, IDR_W_RADL, with TSA_N on every other picture at 5.7K60 and
+4K120, which x265 3.5 can't match (several slices need WPP, IDR_W_RADL
+needs B-frames), so the pairs say where they differ; K3's "twice the
+one-lens run, plus 10 %" is read as 2.2 × lens 0's growth, measured
+without the encode; K2's engine half is every full unthrottled second
+of VA-API copied at 36 fps a lens or more. D52's update is drafted and
+waits for odin's K1.
+
+**The reviews found** that both lenses of every perf pair had the same
+noise (the seeds were s and s + 1, and the noise generator makes its
+state odd; lens k now takes s + 2k, and the test measures the noise
+itself, which now differs in 0.86 to 0.87 of the samples), and that
+K3's runs dropped each pair as it came, so they held 2 to 6 frames, not
+section 12's 10 (now 5, 10 and 10 on clip 9 in the cloud).
+
+**Controls that must fail**, among them: track 1's tables replaced by
+track 0's source's; Matroska's millisecond rounding (the comparison
+the MP4 output passes); `.MKV` read as MP4; a flipped cell, P010 read
+as low-aligned, corners holding two codes, swapped lenses; a radius a
+pixel past the corner bound; M2's perf coding taken for the X5's;
+2×3840²'s bitrate taken for 2×2880²'s; seeds s and s ^ 1 (identical
+noise); a GOP fault's sync samples; a pair rated as one file by
+hw-test; K3 runs holding 9 frames, or lens 0 holding 2; a short lens
+under K3's consumer (the run ends rather than hangs).
+
+Measured, on the cloud box (debug): the short 192² perf pairs (121
+frames a lens) came out 6 to 10 % under their scaled ABR targets, each
+in about 2 s; the corner codes read with a clearance of 0.32 at 384²
+in the perf coding; K3's runs on clip 9 in software, 600 frames a lens,
+grew 467 MiB for lens 0 and 933 and 931 MiB for the pair (2.0×); the
+export's `tier2_pair_decode` Tier 1 tests 2.0 s, synth's `pairs` 6.5 s
+and `code` 1.8 s, media's `mux` 0.09 s, playback's Tier 1 file 7.7 s.
+
 ## A2: edit and render for agents
 
 An agent can make a project of a video, read it, edit it, undo its own
