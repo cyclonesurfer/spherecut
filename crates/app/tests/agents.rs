@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use egui::Key;
+use egui::{Key, Modifiers};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use serde_json::{Value, json};
@@ -399,7 +399,8 @@ fn until_lenses(h: &mut H, rs: &egui_wgpu::RenderState) {
 /// file's two lenses, and they open side by side in the project's raw
 /// view, with the project, its history, its lock and its notices kept.
 /// It is a project like any other there but for the view, which the raw
-/// view has none of: a zoom makes no edit, a marker does, and it saves.
+/// view has none of: a zoom makes no edit, the export waits for the
+/// stitch (m3-plan 13.2), a marker is an edit, and it saves.
 #[test]
 fn an_agent_made_insv_project_stays_open() {
     let f = Folder::lenses("agents-insv");
@@ -464,7 +465,18 @@ fn an_agent_made_insv_project_stays_open() {
         Some("Set trim (spherecut call)")
     );
     assert!(!doc(&h).dirty());
-    // A marker is one, and the project saves with it.
+    // The export would render one lens as an equirect: Start starts none.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::E);
+    step(&mut h);
+    assert!(h.state().state.export.open);
+    h.get_by_label("Stitched export arrives with M3.11");
+    h.get_by_label("Start").click();
+    step(&mut h);
+    assert!(!h.state().state.export.running(), "a lens exported as 360");
+    h.get_by_label("Close").click();
+    step(&mut h);
+    assert!(!h.state().state.export.open);
+    // A marker is an edit, and the project saves with it.
     h.key_press(Key::M);
     step(&mut h);
     assert_eq!(doc(&h).undo_label().as_deref(), Some("Add marker"));
