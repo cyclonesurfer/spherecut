@@ -873,19 +873,23 @@ fn check_file(
         within(2.0 * period),
     );
     // The exposure's stamps reversed don't rise; its shutters aren't all
-    // shorter than a thousandth of the frame; and stored as integer µs,
-    // read as a double's bits as parse_exposure reads them, they are
-    // denormals, above zero and shorter than the frame but under
-    // MIN_SHUTTER.
+    // shorter than a fiftieth of the frame, a bound above MIN_SHUTTER at
+    // every rate to 120 fps (167 µs there), so that it is the upper bound
+    // the item found fails; and stored as integer µs, read as a double's
+    // bits as parse_exposure reads them, they are denormals, above zero
+    // and shorter than the frame but under MIN_SHUTTER.
     let reversed: Vec<Exposure> = exposure.iter().rev().copied().collect();
     must_fail(
         &format!("{name}'s exposure stamps reversed"),
         stamps_rise(&reversed),
     );
-    must_fail(
-        &format!("{name}'s shutters held to a thousandth of the frame"),
-        odd_shutter(&exposure, period / 1000.0).is_none(),
+    let tight = period / 50.0;
+    assert!(tight > MIN_SHUTTER, "{name}: {tight} s");
+    let long = must_fail(
+        &format!("{name}'s shutters held to a fiftieth of the frame"),
+        odd_shutter(&exposure, tight).map_or(Ok(()), Err),
     );
+    assert!(long.seconds >= tight, "{name}: {long:?}");
     let as_integers: Vec<Exposure> = exposure
         .iter()
         .map(|e| Exposure {
