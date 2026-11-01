@@ -532,6 +532,22 @@ in its prerequisite check.
 - Real camera samples stay outside the repo (`samples/` is gitignored) and
   are only used by Tier 2 tests.
 
+*Updated 2026-11-01 (M3.0):* Tier 2 is now two kinds (M3 plan 4.4).
+Tier 2h is the above: hardware, real time and the GUI, under hw-test
+only. Tier 2c tests need Pat's samples and the CPU only, so agents run
+them in the cloud while they implement, with `SPHERECUT_TIER2` unset:
+`SPHERECUT_SAMPLES=<folder> cargo test -p <crate> --test <file> -- --ignored <name>`.
+They are still `#[ignore = "tier2: ..."]`, and hw-test runs them with
+the rest. They gate on
+`spherecut_testkit::tier2::require_samples_cpu`, which needs only
+`SPHERECUT_SAMPLES` and skips with the marker when it is unset or names
+no folder; `require_samples_dir` and `require_sample` call
+`require_hw_run` first, so they stay Tier 2h's. `testkit::samples::role`
+finds a take through the new gate, by the checked-in
+`crates/testkit/samples-roles.toml` (roles to the camera's file numbers,
+such as `tripod_seam` for clip 8's file 008), since nothing parses Pat's
+NOTES.txt.
+
 ## D10. GPL-3.0-or-later, and reuse of GPL code
 
 *2026-10-22, M0.*
@@ -4512,6 +4528,17 @@ Revisit if: a run notes more than 2 pixels past 4 LSB for another
 llvmpipe (LLVM 22 put none there at 918d031), which would leave C less
 than twice the drift; or a driver
 build that renders the rows right fails the count or the maximum.
+
+*Updated 2026-11-01 (M3.0):* the control rule is no longer the goldens'
+alone. `spherecut_testkit::control::must_fail(name, outcome)` is the
+rule as a helper, and every M3 suite uses it (M3 plan 4.1 rule 1): a
+control that passes fails the test, naming the control, and one that
+fails gives back how it failed (a `Result`'s error, a `bool`'s nothing, a
+comparison's value), so the caller checks that it failed for the right
+reason and by enough. Numbers are compared through `at_most`,
+`at_least`, `below` and `above`, where a NaN fails the test rather than
+passing for a control that failed. The goldens keep their own run, which
+records each control's number in the manifest.
 
 ## D33. View conventions
 
