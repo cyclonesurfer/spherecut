@@ -13,6 +13,7 @@ use thiserror::Error;
 
 pub mod audio;
 pub mod backend;
+pub mod camera;
 pub mod color;
 pub mod copy;
 pub mod decode;

@@ -279,8 +279,16 @@ true, `idempotentHint` false).
   64) or a `folder` (one level, its clips a page at a time: `page_size`
   20, `cursor` for the next). A summary a file or clip: `duration`,
   `size`, `fps`, `codec`, `bit_depth`, `projection` and `metadata` (what
-  says so), `camera`, `audio`, `problems`, and for a folder `files` (a
-  camera's lens files, proxy and chapters together) and `recorded`.
+  says so), `camera` (its name, or null), `audio`, `problems`, and for
+  a folder `files` (a camera's lens files, proxy and chapters together)
+  and `recorded`. A camera's file adds what it names (`camera_detail`:
+  `vendor`, `model`, `firmware`, `serial`) and, for an Insta360 file,
+  what its trailer holds, as `docs/cli-json.md`'s probe report has
+  them: `lenses` (a master's two lens streams), `calibration` (its
+  generations, the one in use, canvas, window and hash), `companion`
+  (the master's LRV or the LRV's master beneath the roots, `verified`
+  when their exposure records agree byte for byte, else `why`),
+  `exposure_entries` and `records`.
   `detail: "full"` adds the whole report and FFmpeg's log, for 8 files
   at most. A file that fails is an entry with `ok: false` and its error.
 - **`look`**: frames as one image of labelled tiles, plus JSON with each
@@ -563,7 +571,7 @@ How the codes of media and render (the CLI's `--json`, D27, and
 | `no_decoder`, `unsupported_pixel_format`, `not_implemented` | `decode_failed` (`no_decoder` is also a probe problem) |
 | `too_large` | `decode_failed` (a picture over `MAX_PIXELS`) |
 | `hw_unsupported`, `hw_failed`, `hw_unavailable` | usually no error: the call falls back to software, and `decode.fallback` says why; `decode_failed` if it can't |
-| `cannot_decode`, `unexpected_first_box`, `track_without_stream` | probe problems, not errors |
+| `cannot_decode`, `unexpected_first_box`, `track_without_stream`, `bad_trailer` | probe problems, not errors |
 | `no_gpu`, `adapter_not_found` | `no_gpu` |
 | `out_of_gpu_memory`, `gpu_failed`, `import_failed`, `invalid_input` | `render_failed` |
 | `internal` | `internal` |

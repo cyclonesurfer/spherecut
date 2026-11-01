@@ -3200,6 +3200,7 @@ dependencies = [
  "libc",
  "proptest",
  "serde",
+ "spherecut-camera",
  "spherecut-core",
  "spherecut-testkit",
  "thiserror 2.0.21",

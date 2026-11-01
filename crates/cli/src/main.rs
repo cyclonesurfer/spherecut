@@ -550,7 +550,19 @@ fn probe(paths: &[PathBuf], json: bool) -> Result<Exit> {
     // exit code and the errors on stderr.
     let mut reading = true;
     for path in paths {
-        let probed = spherecut_media::probe::probe(path);
+        let mut probed = spherecut_media::probe::probe(path);
+        // An Insta360 master's LRV, or an LRV's master, beside it: the
+        // CLI opens files by their paths, so the companion's is its own.
+        if let Ok(r) = &mut probed
+            && let Some(other) = spherecut_media::camera::companion_path(r)
+            && other.is_file()
+        {
+            r.camera_file.companion = Some(spherecut_media::camera::verify_companion(
+                r,
+                path,
+                spherecut_media::Source::path(&other),
+            ));
+        }
         // FFmpeg's own word on why it could not open the file, under ours.
         // In JSON it is the error's `ffmpeg_log`.
         let ffmpeg = match &probed {

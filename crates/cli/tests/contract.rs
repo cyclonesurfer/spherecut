@@ -20,13 +20,17 @@ use spherecut_core::{FrameRate, FrameTime, Rational, Time};
 use spherecut_media::doctor::{self, DoctorReport, Issue, Severity};
 use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings};
 use spherecut_media::ff;
+use spherecut_synth::insv::{InsvFault, TrailerLayout, print};
 use spherecut_synth::media::{self, Audio, Codec, Spec};
 use spherecut_synth::{Pattern, render_equirect, yuv};
+use spherecut_testkit::Fnv64;
+use spherecut_testkit::control::must_fail;
 
 // Only `strace` is used here; confinement.rs uses the rest.
 #[allow(dead_code)]
 mod common;
 mod document;
+mod insv;
 
 use document::document;
 
@@ -38,6 +42,7 @@ const CODES: &[&str] = &[
     "anisotropy_unavailable",
     "audio_encoded",
     "audio_ends_early",
+    "bad_trailer",
     "cancelled",
     "cannot_decode",
     "cannot_export",
@@ -1722,7 +1727,233 @@ fn only_frame_handles_sigint() {
 /// `calibration` (with the snapshot's hash), `companion`,
 /// `exposure_entries` and `records`, as `docs/cli-json.md` gives them.
 #[test]
-#[ignore = "M3.2 unit (c)"]
 fn probe_pins_the_camera_shapes() {
-    todo!()
+    let started = Instant::now();
+    let dir = tmp("camera-shapes");
+    let master = insv::master(&dir, insv::MASTER, None);
+    let lrv = insv::lrv(&dir, insv::LRV, insv::FRAMES);
+    let (plain, _) = clip(&dir, FrameRate::FPS_25);
+
+    // The CLI's report.
+    let (status, doc) = probe_json(&[&master.path, &lrv, &plain]);
+    assert_eq!(status, Some(0), "{doc}");
+    let files = &doc["result"]["files"];
+    let (m, l, p) = (
+        &files[0]["report"],
+        &files[1]["report"],
+        &files[2]["report"],
+    );
+    // Every field a report had is still there, and the camera's five are
+    // added: null for a file that isn't a camera's.
+    let old = [
+        "path",
+        "file_size",
+        "container",
+        "streams",
+        "mp4",
+        "camera",
+        "structure",
+        "damage",
+        "warnings",
+        "ffmpeg_log",
+    ];
+    let new = [
+        "lenses",
+        "calibration",
+        "companion",
+        "exposure_entries",
+        "records",
+    ];
+    let all: Vec<&str> = old.iter().chain(&new).copied().collect();
+    for r in [m, l, p] {
+        assert!(has_keys(r, &all), "{r}");
+    }
+    for k in new {
+        assert_eq!(p[k], Value::Null, "{k}: {p}");
+    }
+    // The plain clip is tagged equirect, so it has a camera object, but
+    // no trailer to give a serial.
+    assert_eq!(p["camera"]["serial"], Value::Null, "{p}");
+    must_fail("a report with only its old keys", has_keys(m, &old));
+
+    // `camera` keeps its five and gains `serial`, from the trailer.
+    let camera = &m["camera"];
+    assert!(
+        has_keys(
+            camera,
+            &[
+                "vendor", "model", "firmware", "serial", "layout", "evidence"
+            ]
+        ),
+        "{camera}"
+    );
+    assert_eq!(camera["vendor"], "Insta360");
+    assert_eq!(camera["model"], "Insta360 X5");
+    assert_eq!(camera["firmware"], "v1.1.22_build1");
+    assert_eq!(camera["serial"], "SYNTH00001");
+    assert_eq!(camera["layout"], "insta360_dual_fisheye");
+    assert_eq!(l["camera"]["layout"], "low_res_companion");
+
+    // The lenses: the master's two tracks; none in the LRV's one picture.
+    assert_eq!(m["lenses"], serde_json::json!({"tracks": [0, 1]}));
+    must_fail(
+        "the LRV's lenses",
+        l["lenses"] == serde_json::json!({"tracks": [0, 1]}),
+    );
+
+    // The calibration, with the snapshot's hash (M3 plan 11.1): FNV-1a 64
+    // over the working strings in generation order, each ended by a NUL,
+    // by testkit's hasher, which shares no code with core's.
+    let [v3, v6] = insv::pats_calibrations().map(|c| print(&c, &insv::planted()));
+    let hash = |parts: &[&str]| {
+        let mut h = Fnv64::new();
+        for part in parts {
+            h.write(part.as_bytes()).write(&[0]);
+        }
+        format!("{:016x}", h.finish())
+    };
+    let want = serde_json::json!({
+        "generations": ["v3", "v6"],
+        "in_use": "v6",
+        "canvas": [10752, 5376],
+        "window": {"src": [5376, 5376], "dst": [5312, 5312], "offset": [0, 0]},
+        "hash": hash(&["", "", &v3, &v6]),
+    });
+    assert_eq!(m["calibration"], want);
+    assert_eq!(l["calibration"], want, "the LRV holds the same strings");
+    must_fail(
+        "the hash without the absent generations' NULs",
+        m["calibration"]["hash"] == hash(&[&v3, &v6]).as_str(),
+    );
+
+    // The companion, each way, by record 4's bytes.
+    let companion = |path: &Path| serde_json::json!({"path": path.to_str().unwrap(), "verified": true, "why": null});
+    assert_eq!(m["companion"], companion(&lrv));
+    assert_eq!(l["companion"], companion(&master.path));
+    assert_eq!(m["exposure_entries"], insv::FRAMES);
+    let records: Vec<Value> = master
+        .layout
+        .slots
+        .iter()
+        .map(|s| serde_json::json!({"id": s.id, "size": s.size}))
+        .collect();
+    assert_eq!(m["records"], Value::Array(records));
+    assert!(m["warnings"].as_array().unwrap().is_empty(), "{m}");
+
+    // The controls: an LRV a frame short is paired by name only, a
+    // master without calibration strings has none, and one whose
+    // strings don't parse has none and a `bad_trailer` warning for each.
+    let other = tmp("camera-shapes-other");
+    let short = insv::master(&other, insv::MASTER, None);
+    insv::lrv(&other, insv::LRV, insv::FRAMES - 1);
+    let none = insv::master(
+        &other,
+        "VID_20261022_101500_00_002.insv",
+        Some(InsvFault::NoCalibration),
+    );
+    let bad = insv::master(
+        &other,
+        "VID_20261022_101500_00_003.insv",
+        Some(InsvFault::WrongTokenCount),
+    );
+    let (_, doc) = probe_json(&[&short.path, &none.path, &bad.path]);
+    let files = &doc["result"]["files"];
+    let c = &files[0]["report"]["companion"];
+    must_fail("an LRV a frame short, verified", c["verified"] == true);
+    assert_eq!(
+        c["why"],
+        "their exposure records (4) differ in size: 96 bytes in the master, 80 in the LRV"
+    );
+    must_fail(
+        "a master with no calibration strings, calibrated",
+        files[1]["report"]["calibration"] != Value::Null,
+    );
+    let r = &files[2]["report"];
+    assert_eq!(r["calibration"], Value::Null, "{r}");
+    let codes: Vec<&str> = r["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(codes, ["bad_trailer"; 3], "{r}");
+    assert_eq!(
+        files[1]["report"]["companion"],
+        Value::Null,
+        "no LRV of 002"
+    );
+
+    // The agent's summary: `camera` stays a name, `camera_detail` and the
+    // camera's five are added for a camera's file, and a plain file's
+    // summary is as it was.
+    std::fs::copy(&plain, dir.join("plain.mp4")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .args([
+            "call",
+            "probe",
+            &serde_json::json!({"files": [insv::MASTER, insv::LRV, "plain.mp4"]}).to_string(),
+            "--read-root",
+        ])
+        .arg(&dir)
+        .env_remove("SPHERECUT_LOG")
+        .output()
+        .unwrap();
+    let doc = document(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{doc}");
+    let files = &doc["result"]["files"];
+    let summary_old = [
+        "file",
+        "ok",
+        "duration",
+        "size",
+        "fps",
+        "codec",
+        "bit_depth",
+        "projection",
+        "metadata",
+        "camera",
+        "audio",
+        "problems",
+    ];
+    let mut summary_new: Vec<&str> = summary_old.to_vec();
+    summary_new.extend(["video_streams", "camera_detail"]);
+    summary_new.extend(new);
+    let (m, l, p) = (&files[0], &files[1], &files[2]);
+    assert!(has_keys(m, &summary_new), "{m}");
+    assert!(has_keys(p, &summary_old), "{p}");
+    must_fail(
+        "the master's summary with only the old keys",
+        has_keys(m, &summary_old),
+    );
+    assert_eq!(m["camera"], "Insta360 X5");
+    assert_eq!(
+        m["camera_detail"],
+        serde_json::json!({"vendor": "Insta360", "model": "Insta360 X5", "firmware": "v1.1.22_build1", "serial": "SYNTH00001"})
+    );
+    assert_eq!(m["lenses"], serde_json::json!({"tracks": [0, 1]}));
+    assert_eq!(m["calibration"], want);
+    assert_eq!(
+        m["companion"],
+        serde_json::json!({"path": insv::LRV, "verified": true, "why": null})
+    );
+    assert_eq!(l["companion"]["path"], insv::MASTER);
+    assert_eq!(m["exposure_entries"], insv::FRAMES);
+    assert_eq!(m["records"], files_records(&master.layout));
+    assert!(l.get("lenses").is_none(), "{l}");
+    eprintln!(
+        "probe_pins_the_camera_shapes: {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&other).ok();
+}
+
+/// The `records` a trailer laid out as `layout` gives: each slot's id and
+/// size.
+fn files_records(layout: &TrailerLayout) -> Value {
+    layout
+        .slots
+        .iter()
+        .map(|s| serde_json::json!({"id": s.id, "size": s.size}))
+        .collect()
 }

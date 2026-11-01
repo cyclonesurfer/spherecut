@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use spherecut_media::camera::{companion_path, verify_companion};
 use spherecut_media::detect::Layout;
 use spherecut_media::probe::{ProbeError, ProbeReport, StreamInfo, StreamKind};
 use spherecut_media::spherical::{Projection, StereoMode};
@@ -176,7 +177,16 @@ fn one(job: Job, detail: Detail, share: usize, cx: &Ctx) -> Value {
         Err(e) => return failed(entry, e),
     };
     match spherecut_media::probe::probe_cancellable(opened.source(), cx.call.interrupt()) {
-        Ok(report) => {
+        Ok(mut report) => {
+            // An Insta360 master's LRV, or an LRV's master, opened beneath
+            // the roots as the file was (D45). One that isn't there, or
+            // isn't beneath a root, leaves `companion` out.
+            if let Some(other) = companion_path(&report)
+                && let Ok(o) = cx.roots.open_file(&arg, &other)
+            {
+                let c = verify_companion(&report, opened.source().open, o.source());
+                report.camera_file.companion = Some(c);
+            }
             summary(&mut entry, &report);
             if detail == Detail::Full {
                 let (report, cut) = full_report(&report, share);
@@ -290,6 +300,30 @@ fn summary(entry: &mut Map<String, Value>, r: &ProbeReport) {
         put("stereo", json!(stereo.name()));
     }
     put("camera", camera(r));
+    if let Some(detail) = camera_detail(r) {
+        put("camera_detail", detail);
+    }
+    // What an Insta360 trailer says (M3 plan 5.4), each only when there.
+    let f = &r.camera_file;
+    let mut some = |k: &str, v: Value| {
+        if !v.is_null() {
+            put(k, v);
+        }
+    };
+    some("lenses", json!(f.lenses));
+    some("calibration", json!(f.calibration));
+    some(
+        "companion",
+        f.companion.as_ref().map_or(Value::Null, |c| {
+            json!({
+                "path": text::field(&c.path.to_string_lossy()),
+                "verified": c.verified,
+                "why": c.why.as_deref().map(text::field),
+            })
+        }),
+    );
+    some("exposure_entries", json!(f.exposure_entries));
+    some("records", json!(f.records));
     put("audio", audio(r));
     put("problems", problems(r));
 }
@@ -373,6 +407,23 @@ fn camera(r: &ProbeReport) -> Value {
         (None, None) => return Value::Null,
     };
     json!(text::field(&name))
+}
+
+/// The camera as the file names it, beside `camera`'s one string (M3
+/// plan 5.4); None, and the summary leaves it out, when `camera` is null:
+/// a file whose layout was guessed but that names no vendor or model.
+fn camera_detail(r: &ProbeReport) -> Option<Value> {
+    let c = r.camera.as_ref()?;
+    if c.vendor.is_none() && c.model.is_none() {
+        return None;
+    }
+    let s = |v: &Option<String>| opt_field(v.as_deref());
+    Some(json!({
+        "vendor": s(&c.vendor),
+        "model": s(&c.model),
+        "firmware": s(&c.firmware),
+        "serial": s(&c.serial),
+    }))
 }
 
 /// The first audio stream: `"stereo, 48 kHz"`, `"ambiX 1st order, 4

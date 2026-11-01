@@ -214,6 +214,7 @@ A report's `warnings[].code`, which don't fail the file:
 | `cannot_decode` | FFmpeg could not set a stream up (an unknown sample entry, an empty track), or its decoder lacks a feature the stream uses |
 | `unexpected_first_box` | FFmpeg reads the file as MP4/MOV although its first box is of a type such files don't start with |
 | `track_without_stream` | An MP4 `trak` that FFmpeg gives no stream |
+| `bad_trailer` | An Insta360 trailer, or a record or calibration string in it, that can't be read; the message says which and why. What it would have given is null, and the file plays without it |
 
 frame's `error.code` is also one of probe's file codes above, for the
 file it opens (`not_found`, `not_media`, `truncated`, ... with `path`
@@ -363,7 +364,12 @@ A report:
 | `container` | object | `format` (FFmpeg's demuxer name, such as `mov,mp4,m4a,3gp,3g2,mj2`), `format_long` (its description), `duration` and `start_time` (times, or null), `bit_rate` (bits per second, or null), `tags` (an object of strings) |
 | `streams` | array | One per FFmpeg stream, below |
 | `mp4` | object, or null | For MP4/MOV files: `brand` (string or null), `top_level` (the first 64 top-level boxes, as `[type, size]` pairs in file order), `top_level_omitted` (how many more there are; a fragmented recording has thousands), `trailing_bytes` (after the last whole box, where some cameras put vendor data), `truncated` (the top-level box cut off by the end of the file: `fourcc` (string or null), `offset`, `header_len`, `size` (or null), `present`; or null), `warnings` (the box reader's own, as strings; each is also in `damage`) |
-| `camera` | object, or null | `vendor`, `model`, `firmware` (strings or null), `layout` (one of `equirect_tagged`, `equirect_likely`, `insta360_dual_fisheye`, `go_pro_eac`, `dji_dual_fisheye`, `low_res_companion`, `unknown`), `evidence` (strings) |
+| `camera` | object, or null | `vendor`, `model`, `firmware`, `serial` (strings or null; an Insta360 file's model, firmware and serial are its trailer's), `layout` (one of `equirect_tagged`, `equirect_likely`, `insta360_dual_fisheye`, `go_pro_eac`, `dji_dual_fisheye`, `low_res_companion`, `unknown`), `evidence` (strings) |
+| `lenses` | object, or null | An Insta360 dual-fisheye master's two lens streams: `tracks` (their FFmpeg indices, in file order). Null for any other file, an LRV among them, whose one picture holds both lenses |
+| `calibration` | object, or null | The calibration an Insta360 file's trailer holds, when a string of it parses: `generations` (those whose working string parses, oldest first, of `v1`, `v2`, `v3` and `v6`), `in_use` (the one the camera says it uses, when its string parses: `v6` on the X5; or null), `canvas` (`[width, height]` of the side-by-side picture the strings are in: the one in use's, else the newest's), `window` (the part of each lens's square the tracks show: `src` (the square on the canvas), `dst` (the track's) and `offset`, each a pair; or null), `hash` (16 hex digits: FNV-1a 64 over the working strings of `v1`, `v2`, `v3` and `v6` in that order, each followed by a NUL byte, a missing one by the NUL alone; a project's snapshot of the calibration records the same hash, M3 plan 11.1) |
+| `companion` | object, or null | The recording's other file, by its name, when it is there: an Insta360 master's LRV (`LRV_…_01_NNN.lrv` beside `VID_…_00_NNN.insv`) or an LRV's master. `path` (beside the file, as the file's path was given), `verified` (whether the two files' exposure records (4) are byte for byte the same, so the bytes say they are one recording's), `why` (when not verified, why: the two are paired by name only; else null). Null when there is no such file or the file has no trailer |
+| `exposure_entries` | integer, or null | How many 16-byte items an Insta360 trailer's exposure record (4) holds: one a frame the camera exposed, from a few before the tracks' first |
+| `records` | array, or null | An Insta360 trailer's records, as its index lists them: `id` and `size` (the record's bytes, without its footer). Null for a file without a trailer |
 | `structure` | object | How much of the structure was checked for damage: `{"check": "full"}` (MP4/MOV: every top-level box and the sample tables in `moov`, but not a fragmented file's fragments: the sample tables in its `moof` boxes (`trun`) aren't checked), `{"check": "length"}` (Matroska: only the Segment's length), or `{"check": "none", "why": string}` |
 | `damage` | array of problems | Why the file looks truncated or corrupt; empty for a healthy file |
 | `warnings` | array of problems | What may keep a stream from playing, without damage |
@@ -462,9 +468,10 @@ indented:
             "trailing_bytes": 0, "truncated": null, "warnings": []
           },
           "camera": {
-            "vendor": null, "model": null, "firmware": null, "layout": "equirect_tagged",
+            "vendor": null, "model": null, "firmware": null, "serial": null, "layout": "equirect_tagged",
             "evidence": ["spherical video metadata present", "encoder = Lavf60.16.100"]
           },
+          "lenses": null, "calibration": null, "companion": null, "exposure_entries": null, "records": null,
           "structure": {"check": "full"},
           "damage": [],
           "warnings": [],
@@ -489,6 +496,30 @@ indented:
   "warnings": []
 }
 ```
+
+An Insta360 X5 master, beside its LRV; parts of its report, the serial
+hidden:
+
+```json
+"camera": {
+  "vendor": "Insta360", "model": "Insta360 X5", "firmware": "v1.1.22_build1", "serial": "<serial>", "layout": "insta360_dual_fisheye",
+  "evidence": ["Insta360 trailer magic at end of file, inside an `inst` box", "the trailer's metadata (record 1) gives model Insta360 X5, firmware v1.1.22_build1, its serial"]
+},
+"lenses": {"tracks": [0, 1]},
+"calibration": {
+  "generations": ["v1", "v2", "v3", "v6"], "in_use": "v6", "canvas": [10752, 5376],
+  "window": {"src": [5376, 5376], "dst": [5312, 5312], "offset": [0, 0]}, "hash": "840fcc4eb186a389"
+},
+"companion": {"path": "LRV_20261022_165451_01_004.lrv", "verified": true, "why": null},
+"exposure_entries": 122,
+"records": [{"id": 1, "size": 3965}, {"id": 2, "size": 1228840}, {"id": 3, "size": 81280}, {"id": 4, "size": 1952}, {"id": 9, "size": 5520}, {"id": 10, "size": 35}, {"id": 11, "size": 30705}, {"id": 22, "size": 8306836}, {"id": 28, "size": 12793}, {"id": 29, "size": 189}]
+```
+
+Which stream holds which lens, how sure that is and which side of the
+picture each lens is on (`lenses.binding`, `lenses.evidence`,
+`lenses.screen_side`), and the lenses' geometry (`geometry`), are fields
+still to come within `spherecut.probe/1`, with Spherecut's own table of
+cameras (M3 plan 5.3).
 
 A file cut short, which FFmpeg still opens, has both its report and its
 error; parts of that entry:

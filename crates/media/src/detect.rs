@@ -1,7 +1,8 @@
 //! First-pass camera and layout detection from container structure.
 //!
 //! This only identifies what kind of file we have. Parsing each vendor's
-//! metadata belongs to the camera crate (M3). The signatures here come from
+//! metadata belongs to the camera crate (M3), which [`crate::camera`]
+//! calls for an Insta360 file's trailer. The signatures here come from
 //! the research notes in `docs/formats/` and are confirmed against real
 //! samples as they arrive; each guess lists its evidence so a wrong guess is
 //! easy to diagnose.
@@ -41,6 +42,9 @@ pub struct CameraGuess {
     pub vendor: Option<String>,
     pub model: Option<String>,
     pub firmware: Option<String>,
+    /// The camera's serial number, from an Insta360 trailer's metadata
+    /// (M3 plan 5.4).
+    pub serial: Option<String>,
     pub layout: Layout,
     pub evidence: Vec<String>,
 }
@@ -120,6 +124,7 @@ pub fn guess(
         vendor: None,
         model: None,
         firmware: None,
+        serial: None,
         layout: Layout::Unknown,
         evidence: Vec::new(),
     };

@@ -13,6 +13,7 @@ use serde::Serialize;
 use spherecut_core::{Rational, Time};
 use thiserror::Error;
 
+use crate::camera::CameraFile;
 use crate::detect::{self, CameraGuess};
 use crate::ff;
 use crate::ffi;
@@ -32,6 +33,11 @@ pub struct ProbeReport {
     /// Present for MP4/MOV files, which is every camera format we support.
     pub mp4: Option<Mp4Summary>,
     pub camera: Option<CameraGuess>,
+    /// What a camera's own records say: an Insta360 trailer's lenses,
+    /// calibration, companion, exposure count and records, each a field
+    /// of the report's own, null for any other file (M3 plan 5.4).
+    #[serde(flatten)]
+    pub camera_file: CameraFile,
     /// How much of the file's structure was checked for `damage`.
     pub structure: StructureCheck,
     /// Why the file looks truncated or corrupt, each [`codes::TRUNCATED`]
@@ -97,7 +103,7 @@ pub struct Problem {
 }
 
 impl Problem {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Problem {
             code,
             message: message.into(),
@@ -138,6 +144,10 @@ pub mod codes {
     pub const UNEXPECTED_FIRST_BOX: &str = "unexpected_first_box";
     /// A warning: a `trak` that FFmpeg gives no stream.
     pub const TRACK_WITHOUT_STREAM: &str = "track_without_stream";
+    /// A warning: an Insta360 trailer, one of its records or a
+    /// calibration string that can't be read (M3 plan 5.4). The video
+    /// plays; what the part would have said is left out of the report.
+    pub const BAD_TRAILER: &str = "bad_trailer";
 
     /// Every code above.
     pub const ALL: &[&str] = &[
@@ -150,6 +160,7 @@ pub mod codes {
         CANNOT_DECODE,
         UNEXPECTED_FIRST_BOX,
         TRACK_WITHOUT_STREAM,
+        BAD_TRAILER,
     ];
 }
 
@@ -791,7 +802,14 @@ fn probe_file(src: Source<'_>, cancel: Option<Arc<AtomicBool>>) -> Result<ProbeR
             warnings.push(Problem::new(why.warning_code(), why.describe(&what, false)));
         }
     }
-    let camera = detect::guess(src, tree.as_ref(), &streams, &container.tags);
+    let mut camera = detect::guess(src, tree.as_ref(), &streams, &container.tags);
+    // An Insta360 file's trailer, which camera reads (M3 plan 5.4).
+    let camera_file = match camera.as_mut() {
+        Some(g) if g.vendor.as_deref() == Some("Insta360") => {
+            crate::camera::read(open, meta.len(), g, &streams, &mut warnings)
+        }
+        _ => CameraFile::default(),
+    };
     let mp4 = tree.as_ref().map(|t| Mp4Summary {
         brand: t.ftyp_brand().map(|b| b.to_string()),
         top_level: t
@@ -817,6 +835,7 @@ fn probe_file(src: Source<'_>, cancel: Option<Arc<AtomicBool>>) -> Result<ProbeR
         streams,
         mp4,
         camera,
+        camera_file,
         structure,
         damage,
         warnings,
@@ -1212,6 +1231,7 @@ mod text {
     use spherecut_core::{Rational, Time};
 
     use super::{ProbeReport, StreamInfo, StructureCheck, TruncatedBox};
+    use crate::camera::CameraFile;
     use crate::spherical::{Projection, StereoMode};
 
     /// The lines of FFmpeg's log about a file, as the report shows them.
@@ -1301,17 +1321,25 @@ mod text {
             }
         }
         if let Some(c) = &r.camera {
+            // "Insta360 X5", not "Insta360 Insta360 X5".
+            let name = match (&c.vendor, &c.model) {
+                (Some(v), Some(m)) if m.starts_with(v.as_str()) => m.clone(),
+                (v, m) => format!(
+                    "{}{}",
+                    opt(v),
+                    m.as_ref().map(|m| format!(" {m}")).unwrap_or_default()
+                ),
+            };
             let _ = writeln!(
                 s,
-                "  camera     {}{}{}  layout: {:?}",
-                opt(&c.vendor),
-                c.model
-                    .as_ref()
-                    .map(|m| format!(" {m}"))
-                    .unwrap_or_default(),
+                "  camera     {name}{}{}  layout: {:?}",
                 c.firmware
                     .as_ref()
                     .map(|f| format!(" (firmware {f})"))
+                    .unwrap_or_default(),
+                c.serial
+                    .as_ref()
+                    .map(|n| format!(", serial {n}"))
                     .unwrap_or_default(),
                 c.layout
             );
@@ -1319,6 +1347,7 @@ mod text {
                 let _ = writeln!(s, "             - {e}");
             }
         }
+        camera_file(&mut s, &r.camera_file);
         for st in &r.streams {
             stream(&mut s, st);
         }
@@ -1333,6 +1362,66 @@ mod text {
             let _ = writeln!(s, "  DAMAGE     {d}");
         }
         s
+    }
+
+    /// The lines for what a camera's own records say (M3 plan 5.4).
+    fn camera_file(s: &mut String, f: &CameraFile) {
+        if let Some(l) = &f.lenses {
+            let _ = writeln!(
+                s,
+                "  lenses     streams #{} and #{} (which lens each holds isn't read yet)",
+                l.tracks[0], l.tracks[1]
+            );
+        }
+        if let Some(c) = &f.calibration {
+            let _ = writeln!(
+                s,
+                "  calibration {}{}, canvas {}x{}{}, hash {}",
+                c.generations.join(" "),
+                c.in_use
+                    .as_ref()
+                    .map(|g| format!(" ({g} in use)"))
+                    .unwrap_or_else(|| " (none said to be in use)".into()),
+                c.canvas[0],
+                c.canvas[1],
+                c.window
+                    .map(|w| format!(
+                        ", window {}x{} of {}x{} at {},{}",
+                        w.dst[0], w.dst[1], w.src[0], w.src[1], w.offset[0], w.offset[1]
+                    ))
+                    .unwrap_or_default(),
+                c.hash
+            );
+        }
+        if let Some(c) = &f.companion {
+            let _ = writeln!(
+                s,
+                "  companion  {}, {}",
+                c.path.display(),
+                if c.verified {
+                    "the same exposure record (4): one recording".into()
+                } else {
+                    format!(
+                        "paired by name only: {}",
+                        c.why.as_deref().unwrap_or("not compared")
+                    )
+                }
+            );
+        }
+        if let Some(records) = &f.records {
+            let list: Vec<String> = records
+                .iter()
+                .map(|r| format!("{} ({} B)", r.id, r.size))
+                .collect();
+            let _ = writeln!(
+                s,
+                "  trailer    records {}{}",
+                list.join(", "),
+                f.exposure_entries
+                    .map(|n| format!("; {n} exposure entries"))
+                    .unwrap_or_default()
+            );
+        }
     }
 
     fn stream(s: &mut String, st: &StreamInfo) {
