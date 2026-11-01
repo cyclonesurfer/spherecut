@@ -16,8 +16,11 @@
 //! its time and the suite's. `PROPTEST_CASES` sets the count (256 by
 //! default). Two properties list or scan far more per case than the
 //! rest, and run a fraction of the count: the Euler twins a twentieth,
-//! as each case lists 2304 values, and the edge scan a fortieth, as each
-//! scans every texel of eight edges (about 2.5 ms a case either way).
+//! as each case lists 2304 values and their twin groups (about 1 ms a
+//! case), and the edge scan a fortieth, as each scans every texel of
+//! eight edges (about 2.5 ms). The budget is wall time on the 4-core
+//! cloud box with nothing else running: the three files take about 66 s
+//! of CPU between them, this one 45 s, so builds beside them stretch it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -799,15 +802,19 @@ impl Listed {
 /// −1) and T_1 the half turn about the turn axis.
 fn listing(ypr: [[f64; 3]; 2]) -> Vec<Listed> {
     let f = DMat3::from_diagonal(DVec3::new(1.0, -1.0, -1.0));
+    // Each value's E_b · F, which both turn axes share.
+    let ef: Vec<[DMat3; 2]> = convs()
+        .iter()
+        .map(|conv| [0, 1].map(|b| DMat3::from_quat(conv.rotation(ypr[b])) * f))
+        .collect();
     let mut list = Vec::with_capacity(2 * convs().len());
     for turn in TurnAxis::all() {
         let t1 = match turn {
             TurnAxis::Y => DMat3::from_rotation_y(PI),
             TurnAxis::X => DMat3::from_rotation_x(PI),
         };
-        for &conv in convs() {
-            let e = |b: usize| DMat3::from_quat(conv.rotation(ypr[b]));
-            let l = [e(0) * f, e(1) * f * t1].map(|m| DQuat::from_mat3(&m));
+        for (&conv, [e0f, e1f]) in convs().iter().zip(&ef) {
+            let l = [*e0f, *e1f * t1].map(|m| DQuat::from_mat3(&m));
             list.push(Listed { turn, conv, l });
         }
     }
@@ -857,17 +864,25 @@ impl Census {
 /// values' twin groups, which fail it unless every two members differ by
 /// a quarter turn about Z.
 fn census(list: &[Listed], filter: bool) -> Result<Census, String> {
-    // A sort key that a rotation and its negated quaternion share.
-    let key = |r: DQuat| DMat3::from_quat(r).x_axis.x;
+    // A sort key that a rotation and its negated quaternion share, and
+    // that two rotations share to within the angle between them, so twins
+    // to within 1e-9: how far a generic direction lands along another. A
+    // matrix entry would do as well, but values that differ by a turn
+    // about one axis share it, and each lookup scanned them all, 2.6 ms a
+    // listing to this key's 0.66 ms.
+    let (u, w) = (
+        DVec3::new(0.3, 0.5, 0.81).normalize(),
+        DVec3::new(-0.7, 0.2, 0.68).normalize(),
+    );
+    let key = |r: DQuat| u.dot(r * w);
+    let quarters: [DQuat; 4] = std::array::from_fn(|k| quarter_about_z(k as i32));
     let (kept, dropped): (Vec<&Listed>, Vec<&Listed>) =
         list.iter().partition(|v| !filter || v.kept());
-    let mut sorted: Vec<(f64, DQuat, usize)> = kept
+    let relative: Vec<DQuat> = kept.iter().map(|v| v.relative()).collect();
+    let mut sorted: Vec<(f64, DQuat, usize)> = relative
         .iter()
         .enumerate()
-        .map(|(i, v)| {
-            let r = v.relative();
-            (key(r), r, i)
-        })
+        .map(|(i, &r)| (key(r), r, i))
         .collect();
     sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
     let twins_of = |r: DQuat| -> Vec<usize> {
@@ -882,13 +897,13 @@ fn census(list: &[Listed], filter: bool) -> Result<Census, String> {
     };
     let mut groups = 0;
     for (i, v) in kept.iter().enumerate() {
-        let twins = twins_of(v.relative());
+        let twins = twins_of(relative[i]);
         if twins.iter().min() == Some(&i) {
             groups += 1;
         }
         for &j in &twins {
             let common = v.l[0].inverse() * kept[j].l[0];
-            if !(0..4).any(|k| rotation_angle(common, quarter_about_z(k)) <= TWIN) {
+            if !quarters.iter().any(|q| rotation_angle(common, *q) <= TWIN) {
                 return Err(format!(
                     "{:?} under turn {:?} and {:?} under turn {:?} differ by {:.3}° about {:?}, \
                      no quarter turn about Z",
