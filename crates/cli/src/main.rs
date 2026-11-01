@@ -18,8 +18,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
+use spherecut_agent::{doctor_file, still};
 use spherecut_cli::contract::{self, Envelope, Exit, ProbeFile};
 use spherecut_core::brand;
+use spherecut_core::cancel::StopSource;
 
 mod call;
 #[allow(unsafe_code)]
@@ -148,6 +150,11 @@ enum Cmd {
         /// names its GPU).
         #[arg(long)]
         render_node: Option<PathBuf>,
+        /// Also check a camera's file: whether it can be stitched (its
+        /// calibration is there), whether both lenses decode on the path
+        /// the viewer takes, and what is missing when not.
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
         /// Print one JSON document instead of text (docs/cli-json.md).
         #[arg(long)]
         json: bool,
@@ -448,11 +455,15 @@ fn run(cli: Cli, args: &[OsString], json: bool) -> Result<Exit> {
         },
         Cmd::Render(render) => render::run(render),
         Cmd::Probe { files, json } => probe(&files, json),
-        Cmd::Doctor { render_node, json } => {
+        Cmd::Doctor {
+            render_node,
+            file,
+            json,
+        } => {
             // The lookup hardware decoding uses (D30); no adapter is known
             // before the GUI's (M1 slice 3).
             let node = spherecut_media::hw::render_node(None, render_node.as_deref());
-            doctor(&node.path, json)
+            doctor(&node.path, file.as_deref(), json)
         }
         Cmd::Mcp { agent } => mcp(&agent),
         Cmd::Call {
@@ -589,13 +600,44 @@ fn probe(paths: &[PathBuf], json: bool) -> Result<Exit> {
     }
 }
 
-fn doctor(render_node: &Path, json: bool) -> Result<Exit> {
+fn doctor(render_node: &Path, file: Option<&Path>, json: bool) -> Result<Exit> {
     let report = spherecut_media::doctor::run(render_node);
-    let (envelope, exit) = contract::doctor(&report);
+    let Some(file) = file else {
+        let (envelope, exit) = contract::doctor(&report);
+        return if json {
+            print_json(&envelope, exit)
+        } else {
+            emit(&spherecut_media::doctor::render_text(&report))?;
+            Ok(exit)
+        };
+    };
+    // Each lens decoded as the viewer would: VA-API on the render node
+    // doctor checked, else software (D39).
+    let opts = still::Options {
+        render_node: Some(render_node.to_path_buf()),
+        ..still::Options::default()
+    };
+    let stop = StopSource::new();
+    let checked = doctor_file::check(
+        spherecut_media::Source::path(file),
+        &opts,
+        &still::Stop::of(&stop),
+    );
+    let text = match &checked {
+        Ok(f) => Ok(doctor_file::render_text(f)),
+        Err(e) => Err(e.message.clone()),
+    };
+    let (envelope, exit) = contract::doctor_with_file(&report, checked);
     if json {
         print_json(&envelope, exit)
     } else {
         emit(&spherecut_media::doctor::render_text(&report))?;
+        match text {
+            Ok(text) => {
+                emit(&text)?;
+            }
+            Err(message) => to_stderr(&format!("error: {message}\n")),
+        }
         Ok(exit)
     }
 }

@@ -13,9 +13,13 @@ use serde_json::{Value, json};
 
 mod common;
 mod document;
+#[allow(dead_code)]
+mod insv;
 mod lavapipe;
 
 use lavapipe::lavapipe_icd;
+use spherecut_synth::insv::InsvFault;
+use spherecut_testkit::control::must_fail;
 
 fn missing_node() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -222,7 +226,122 @@ fn doctor_opens_no_network_socket() {
 /// provisional"); on one with `NoCalibration`, that it can't (M3 plan
 /// 5.4).
 #[test]
-#[ignore = "M3.2 unit (c)"]
 fn doctor_file_says_whether_an_insv_can_be_stitched() {
-    todo!()
+    let dir =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("doctor-file-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let master = insv::master(&dir, insv::MASTER, None);
+    let lrv = insv::lrv(&dir, insv::LRV, insv::FRAMES);
+    let none = insv::master(
+        &dir,
+        "VID_20261022_101500_00_002.insv",
+        Some(InsvFault::NoCalibration),
+    );
+    let text = |path: &Path| {
+        let out = doctor(&["--file", path.to_str().unwrap()]);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // The master: its camera and firmware, both lenses decoded on the
+    // path doctor chose (software, with no render node, saying why not
+    // VA-API), and its V6.
+    let t = text(&master.path);
+    let software = format!(
+        "decodes on software, not on vaapi: no VA-API device: no render node at {}",
+        missing_node().display()
+    );
+    let want = format!(
+        "\nFile {}\n  Insta360 X5 v1.1.22, geometry provisional\n  can be stitched: yes, \
+         with its v6 calibration\n  stream #0  h264 128x128 yuv420p, {software}\n  \
+         stream #1  h264 128x128 yuv420p, {software}\n",
+        master.path.display()
+    );
+    assert!(t.ends_with(&want), "no {want:?} at the end of:\n{t}");
+    // The machine's report comes first, as it does without --file.
+    assert!(t.contains("\nDecode check: one 256x256 frame each"), "{t}");
+
+    // The controls: a master without calibration strings, and an LRV
+    // with one picture of both lenses, can't be stitched, and doctor
+    // says what is missing.
+    let t = text(&none.path);
+    must_fail(
+        "a master with no calibration, stitchable",
+        t.contains("can be stitched: yes"),
+    );
+    for want in [
+        "  can be stitched: no\n".to_string(),
+        "  missing: a calibration: the trailer holds none that parses\n".into(),
+        format!("  stream #1  h264 128x128 yuv420p, {software}\n"),
+    ] {
+        assert!(t.contains(&want), "no {want:?} in:\n{t}");
+    }
+    let t = text(&lrv);
+    must_fail("an LRV, stitchable", t.contains("can be stitched: yes"));
+    for want in [
+        "  Insta360 X5 v1.1.22, geometry provisional\n  can be stitched: no\n".to_string(),
+        format!("  stream #0  h264 256x128 yuv420p, {software}\n"),
+        "  missing: two lens streams: an LRV holds both lenses in one picture, so stitch its \
+         master\n"
+            .into(),
+    ] {
+        assert!(t.contains(&want), "no {want:?} in:\n{t}");
+    }
+    assert!(!t.contains("stream #1"), "{t}");
+
+    // JSON: the machine's report as it was, and `file`.
+    let v =
+        document::document(&doctor(&["--json", "--file", master.path.to_str().unwrap()]).stdout);
+    assert_eq!(v["ok"], true, "{v}");
+    let r = &v["result"];
+    for k in ["distro", "decoders", "vulkan_devices", "issues"] {
+        assert!(r.get(k).is_some(), "no {k} in {r:#}");
+    }
+    let f = &r["file"];
+    assert_eq!(f["path"], master.path.to_str().unwrap());
+    assert_eq!(f["camera"], "Insta360 X5");
+    assert_eq!(f["firmware"], "v1.1.22_build1");
+    assert_eq!(f["stitchable"], true, "{f:#}");
+    assert_eq!(f["calibration"], "v6");
+    assert_eq!(f["geometry"], "provisional");
+    assert_eq!(f["missing"], json!([]));
+    assert_eq!(f["summary"], "Insta360 X5 v1.1.22, geometry provisional");
+    // What decoding warned of is the file's; doctor's envelope has none.
+    assert_eq!(f["warnings"], json!([]), "{f:#}");
+    assert_eq!(v["warnings"], json!([]));
+    let lenses = f["lenses"].as_array().unwrap();
+    assert_eq!(lenses.len(), 2, "{f:#}");
+    for (n, l) in lenses.iter().enumerate() {
+        assert_eq!(l["stream"], n);
+        assert_eq!(l["decodes"], true, "{l:#}");
+        assert_eq!(l["decode"]["path"], "software", "{l:#}");
+        assert_eq!(l["source"]["size"], json!({"width": 128, "height": 128}));
+        assert_eq!(l["error"], Value::Null);
+    }
+    let v = document::document(&doctor(&["--json", "--file", none.path.to_str().unwrap()]).stdout);
+    must_fail(
+        "the master with no calibration, stitchable in JSON",
+        v["result"]["file"]["stitchable"] == true,
+    );
+
+    // A file that can't be probed fails the run with probe's error, and
+    // the machine's report comes with it.
+    let gone = dir.join("gone.insv");
+    let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+        .arg("doctor")
+        .arg("--render-node")
+        .arg(missing_node())
+        .args(["--json", "--file"])
+        .arg(&gone)
+        .env("VK_DRIVER_FILES", lavapipe_icd())
+        .env("VK_ICD_FILENAMES", lavapipe_icd())
+        .env_remove("SPHERECUT_LOG")
+        .output()
+        .unwrap();
+    let v = document::document(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{v}");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "not_found", "{v}");
+    assert_eq!(v["result"]["file"], Value::Null);
+    assert!(v["result"].get("decoders").is_some(), "{v}");
+    std::fs::remove_dir_all(&dir).ok();
 }

@@ -14,6 +14,7 @@
 
 mod b64;
 pub mod contract;
+pub mod doctor_file;
 pub mod error;
 mod font;
 mod image;

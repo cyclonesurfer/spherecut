@@ -234,8 +234,12 @@ frame M is shown in its place"), or `out_of_range` when it is the
 last frame. A cut inside the first frame's own data is
 `decode_failed`, since no frame decodes at all.
 
-Errors of the decoders, which probe and doctor don't give, and which
-frame does (exit 1 unless the table says 3):
+doctor `--file`'s `error.code`, when the file can't be probed, is one of
+probe's file codes above, for that file, with exit 1.
+
+Errors of the decoders, which probe and doctor don't give as the run's
+error, and which frame does (exit 1 unless the table says 3); doctor
+`--file` gives them as a lens's `error`:
 
 | Code | Meaning |
 |---|---|
@@ -530,7 +534,7 @@ error; parts of that entry:
 "truncated": {"fourcc": "moov", "offset": 64815, "header_len": 8, "size": 4947, "present": 4847}
 ```
 
-## `spherecut doctor [--render-node <PATH>] --json`
+## `spherecut doctor [--render-node <PATH>] [--file <FILE>] --json`
 
 `result` is doctor's report, whether or not it found errors:
 
@@ -551,7 +555,8 @@ error; parts of that entry:
 | `issues` | array | Each problem: `severity` (`error`, `warning` or `info`), `what`, `impact`, `fix` (for people: lines separated by `\n`, each a shell command, the exact `dnf` or `pacman` command where a package fixes it, or a sentence where no command does. A command may be followed by three spaces and a note, as in `sudo dnf swap mesa-vulkan-drivers mesa-vulkan-drivers-freeworld   (RPM Fusion free: ...)` or `sudo usermod -aG render "$USER"   then log out and back in`, so the command is what comes before the first three spaces. Nothing marks a sentence apart from a command: don't run a line unread) |
 
 The run fails with `doctor_errors` exactly when an issue's severity is
-`error`; the report comes with the error. Example, on a machine with no
+`error` (with `--file`, also with the file's code when it can't be
+probed, below); the report comes with the error. Example, on a machine with no
 GPU (lavapipe only), with the lists shortened:
 
 ```json
@@ -603,6 +608,56 @@ adds:
 
 ```json
 "error": {"code": "doctor_errors", "message": "doctor found 1 error: FFmpeg has no HEVC decoder"}
+```
+
+With `--file`, `result` adds `file`, what doctor found of a camera's
+file (M3 plan 5.4): whether it can be stitched, and each lens stream's
+first frame decoded on the path the viewer would take (VA-API on the
+render node doctor checked, else software). Without `--file` there is
+no `file`.
+
+| Field | Type | What |
+|---|---|---|
+| `path` | string | The file, as given |
+| `camera` | string or null | The camera as probe names it: its model, with the vendor in front when the model doesn't start with it (`Insta360 X5`) |
+| `firmware` | string or null | The firmware the file names, as written (`v1.1.22_build1`) |
+| `stitchable` | boolean | Whether it can be stitched: two lens streams that decode, and in its trailer the calibration the camera says it uses |
+| `calibration` | string or null | That calibration's generation (`v6` on the X5), as probe's `calibration.in_use` |
+| `lenses` | array | Each lens stream (probe's `lenses.tracks`; the first video stream alone for a file without them): `stream` (FFmpeg's index), `decodes` (whether its first frame decoded), `source` and `decode` (as frame's, below; null when it wasn't opened or decoded), `error` (why not, an error as in the envelope; or null) |
+| `geometry` | string | How sure the lenses' geometry is: `provisional` until Spherecut's own table of cameras gives the model and firmware theirs (M3 plan 5.3) |
+| `missing` | array of strings | What keeps it from being stitched, for people; empty when nothing does |
+| `summary` | string | One line for people: the camera, its firmware and the geometry, such as `Insta360 X5 v1.1.22, geometry provisional` |
+| `warnings` | array of warnings | What probing the file and decoding its lenses warned of, each once, as frame's warnings |
+
+A file that can't be stitched doesn't fail the run. One that can't be
+probed fails it with probe's code for the file (`not_found`,
+`not_media`, `truncated`, ..., as in "Codes") and exit 1, in place of
+`doctor_errors`; `file` is null and the machine's report comes with
+the error. An X5 master's `file`, on a machine without a render node:
+
+```json
+"file": {
+  "path": "VID_20261022_165451_00_004.insv", "camera": "Insta360 X5", "firmware": "v1.1.22_build1",
+  "stitchable": true, "calibration": "v6",
+  "lenses": [
+    {"stream": 0, "decodes": true, "source": {"stream": 0, "codec": "hevc", "size": {"width": 3840, "height": 3840}, "pix_fmt": "yuvj420p"},
+     "decode": {"path": "software", "transfer": "system",
+                "fallback": {"from": "vaapi", "code": "hw_unavailable", "reason": "no VA-API device: no render node at /dev/dri/renderD128"}},
+     "error": null},
+    {"stream": 1, ...}
+  ],
+  "geometry": "provisional", "missing": [], "summary": "Insta360 X5 v1.1.22, geometry provisional", "warnings": []
+}
+```
+
+Without `--json`, the text adds the same after the machine's report:
+
+```
+File VID_20261022_165451_00_004.insv
+  Insta360 X5 v1.1.22, geometry provisional
+  can be stitched: yes, with its v6 calibration
+  stream #0  hevc 3840x3840 yuvj420p, decodes on software, not on vaapi: no VA-API device: no render node at /dev/dri/renderD128
+  stream #1  hevc 3840x3840 yuvj420p, decodes on software, not on vaapi: no VA-API device: no render node at /dev/dri/renderD128
 ```
 
 ## `spherecut frame <FILE> -o <OUT.png> [options] --json`

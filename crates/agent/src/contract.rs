@@ -24,6 +24,8 @@ use spherecut_media::doctor::{DoctorReport, Severity};
 use spherecut_media::probe::{self, ProbeError, ProbeReport};
 use spherecut_render::RenderError;
 
+use crate::doctor_file::FileCheck;
+
 /// The schema of `spherecut probe --json`.
 pub const PROBE: &str = "spherecut.probe/1";
 /// The schema of `spherecut doctor --json`.
@@ -700,6 +702,35 @@ pub fn probe(files: Vec<ProbeFile>) -> (Envelope<ProbeResult>, Exit) {
         Envelope::new(PROBE, Some(ProbeResult { files }), error),
         exit,
     )
+}
+
+/// doctor's `result` with `--file`: the machine's report, its fields as
+/// they are, and `file`, what [`crate::doctor_file::check`] found of the
+/// file (M3 plan 5.4). Within `spherecut.doctor/1`, a field added.
+#[derive(Debug, Serialize)]
+pub struct DoctorResult<'a> {
+    #[serde(flatten)]
+    pub report: &'a DoctorReport,
+    pub file: Option<FileCheck>,
+}
+
+/// [`doctor`] with `--file`'s check of a file. A file that can't be
+/// checked (one that can't be probed, with probe's code for it) fails the
+/// run with its own error and exit 1, and the machine's report comes
+/// with it; else the run fails as [`doctor`]'s does. A file that can't be
+/// stitched doesn't fail the run: `file` says so.
+pub fn doctor_with_file(
+    report: &DoctorReport,
+    file: Result<FileCheck, ErrorBody>,
+) -> (Envelope<DoctorResult<'_>>, Exit) {
+    let (machine, exit) = doctor(report);
+    let (file, error) = match file {
+        Ok(f) => (Some(f), machine.error),
+        Err(e) => (None, Some(e)),
+    };
+    let exit = if error.is_some() { Exit::Failed } else { exit };
+    let result = DoctorResult { report, file };
+    (Envelope::new(DOCTOR, Some(result), error), exit)
 }
 
 /// doctor's document and exit status: it fails when any problem is of
