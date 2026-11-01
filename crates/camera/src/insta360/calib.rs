@@ -223,9 +223,10 @@ pub struct Calib {
 ///
 /// A token count the grammar doesn't allow is [`CameraError::TokenCount`];
 /// a token that isn't a number, a lens count other than 2, a packed word
-/// of another generation, blocks that disagree on the canvas or the lens
-/// type, or an integer token that wouldn't print back as written is
-/// [`CameraError::BadToken`]. Each error's offset is a byte of `s`.
+/// of another generation or of none of the four, blocks that disagree on
+/// the canvas or the lens type, or an integer token that wouldn't print
+/// back as written is [`CameraError::BadToken`]. Each error's offset is a
+/// byte of `s`.
 ///
 /// The count is checked first, so that a token lost or added is that
 /// error, not the token that lands in a place it doesn't fit. The empty
@@ -263,8 +264,10 @@ pub fn parse(generation: Generation, s: &str) -> Result<Calib, CameraError> {
         _ => ((t.whole()?.1, t.whole()?.1), None),
     };
     let (word_at, word) = t.whole()?;
-    if Generation::of_word(word) != Some(generation) {
-        return Err(t.bad(word_at, "is a packed word of another generation"));
+    match Generation::of_word(word) {
+        Some(g) if g == generation => {}
+        Some(_) => return Err(t.bad(word_at, "is a packed word of another generation")),
+        None => return Err(t.bad(word_at, "is a packed word of none of the four generations")),
     }
     Ok(Calib {
         generation,

@@ -135,9 +135,9 @@ pub enum CameraError {
     /// A calibration token that isn't what the grammar has in its place:
     /// not a decimal number, an integer (the lens count, the canvas, the
     /// lens type or the word) that isn't a u32 as it prints, a lens count
-    /// other than 2, a packed word of another generation, or a block whose
-    /// canvas or lens type isn't the other's. `why` says which, and
-    /// `offset` is where the token starts.
+    /// other than 2, a packed word of another generation or of none of the
+    /// four, or a block whose canvas or lens type isn't the other's. `why`
+    /// says which, and `offset` is where the token starts.
     #[error("the {generation} calibration string's token at byte {offset} {why}")]
     BadToken {
         generation: Generation,

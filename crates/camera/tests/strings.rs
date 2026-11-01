@@ -1291,14 +1291,31 @@ fn each_bad_token_is_an_error_at_its_byte() {
         "gives a lens type other than block 0's",
         at,
     );
-    // A word of another generation, or of none.
+    // A word of another generation, or of none of the four: V6's in V3,
+    // V2's in V1, and codes 4 (0x40400) and 0x104.
     let other = "is a packed word of another generation";
-    for word in ["394240", "17040384"] {
-        let (s, at) = replaced(V3, 39, word);
-        bad(Generation::V3, &s, other, at);
-    }
+    let none = "is a packed word of none of the four generations";
+    let (s, at) = replaced(V3, 39, "394240");
+    bad(Generation::V3, &s, other, at);
     let (s, at) = replaced(V1, 15, "132096");
     bad(Generation::V1, &s, other, at);
+    for word in ["263168", "17040384"] {
+        let (s, at) = replaced(V3, 39, word);
+        let e = bad(Generation::V3, &s, none, at);
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "the V3 calibration string's token at byte {at} is a packed word of none of the four generations"
+            )
+        );
+    }
+    // The control: V6's word in V3 isn't worded as a word of none.
+    let (s, at) = replaced(V3, 39, "394240");
+    let e = calib::parse(Generation::V3, &s).unwrap_err();
+    must_fail(
+        "V6's word in V3 worded as a word of none",
+        matches!(&e, CameraError::BadToken { why, offset, .. } if (*why, *offset) == (none, at as u64)),
+    );
     // V1's lens type is its word's low byte.
     let (s, _) = replaced(V1, 15, "1136");
     assert_eq!(calib::parse(Generation::V1, &s).unwrap().lens_type, 112);
