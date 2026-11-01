@@ -608,7 +608,9 @@ impl AppState {
     /// stream alone. It goes on where it was, playing or not, and its
     /// notices stay. A project file whose video it is stays open, the
     /// lenses in its raw view (m3-plan 13.1); an untitled project made of
-    /// the file is let go, since a raw view makes none.
+    /// the file is let go, since a raw view makes none. Once M3.10
+    /// stitches a locked pair with a calibration, which isn't a raw view,
+    /// that untitled project has to be kept too.
     fn open_lenses(&mut self, path: PathBuf, lenses: Vec<usize>) {
         let (at, play) = (self.snapshot.clock, self.snapshot.want_play);
         tracing::info!(?lenses, "opening the lenses of {}", path.display());

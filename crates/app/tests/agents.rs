@@ -5,7 +5,8 @@
 //! opens fresh, saying so; a project changed on disk isn't saved over,
 //! while Save as still works; and an agent's project of a camera's raw
 //! file stays open once its lenses do (m3-plan 13.1), while the file
-//! opened alone makes no project.
+//! opened alone makes no project, and its export waits for the stitch
+//! by what the file holds (13.2).
 //!
 //! The agent's calls are `spherecut call`'s ([`spherecut_agent::call`]),
 //! made from the test's thread between the window's frames. Each test
@@ -34,6 +35,7 @@ use spherecut_app::reframe::SETTLE;
 use spherecut_app::viewer::{RawShown, ViewerResources};
 use spherecut_core::blocking::{OnBlock, mark_ui_thread_with, unmark_ui_thread};
 use spherecut_core::project::file;
+use spherecut_export::ExportError;
 use spherecut_media::backend::FfmpegBackend;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Codec, Spec};
@@ -133,7 +135,11 @@ fn elsewhere<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 /// still takes for one: two video streams of one size, a lens each
 /// (`panes::lenses`), the grid's and then the seam pattern's, or the other
 /// way round when `swapped`. It is Matroska inside, which FFmpeg tells by
-/// its bytes, not its name.
+/// its bytes, not its name. The X5's is an MP4 whose tracks' tables the
+/// frame lock reads, and from M3.8 `FfmpegBackend::track_timing` has
+/// none for Matroska, so this pair would be refused its lock
+/// ("timing"): it moves to `mux_video_streams`' MP4 output, which M3.1
+/// adds.
 fn write_lenses(dir: &Path, name: &str, swapped: bool) -> PathBuf {
     let lens = |name: &str, pattern| {
         let spec = Spec {
@@ -514,5 +520,71 @@ fn an_insv_opened_alone_opens_its_lenses_without_a_project() {
     assert!(s.raw_view());
     assert_eq!(s.columns(), 2);
     assert!(notice(&h, NoticeKind::Lenses).is_some());
+    finish(h);
+}
+
+/// The export of a camera's raw file waits for the stitch (m3-plan 13.2)
+/// by what the file holds, not by what the viewer has opened of it. With
+/// the probe that would open its lenses put off, the file opened alone
+/// shows its one stream in an untitled project, and an export of it,
+/// started as the smoke run starts its own, is refused, naming the
+/// lenses, with nothing written. A guard that read the viewer's streams
+/// lets it through.
+#[test]
+fn an_insv_s_export_is_refused_before_its_lenses_open() {
+    let f = Folder::lenses("agents-insv-export");
+    let gpu = common::gpu();
+    let (_rs, mut h) = start(&gpu, &f.clip, |app| app.state.info.close());
+    until(&mut h, "the untitled project", |a| {
+        a.state.reframe.doc.is_some()
+    });
+    let out = f.dir.join("lens.mp4");
+    h.state_mut().state.export_span(out.clone(), None, true);
+    assert!(h.state().state.export.running());
+    until(&mut h, "the export's start", |a| !a.state.export.running());
+    let s = &h.state().state;
+    assert_eq!(s.columns(), 1, "the lenses opened");
+    match &s.export.last {
+        Some(Err(ExportError::Invalid(why))) => assert!(
+            why.contains("is a camera's raw file, its 2 lenses side by side"),
+            "{why}"
+        ),
+        other => panic!("not refused as a camera's raw file: {other:?}"),
+    }
+    let n = notice(&h, NoticeKind::Export).expect("the export's notice");
+    assert!(n.contains("stitched export arrives with M3.11"), "{n}");
+    assert!(!out.exists(), "a lens exported as 360");
+    finish(h);
+}
+
+/// The control: an equirect project's export gets past that check and
+/// runs, until it is cancelled. A guard that refused every file fails
+/// here.
+#[test]
+fn an_equirect_project_s_export_gets_past_the_lens_check() {
+    let f = Folder::new("agents-equirect-export");
+    let gpu = common::gpu();
+    let (_rs, mut h) = open(&gpu, &f.project);
+    let out = f.dir.join("view.mp4");
+    h.state_mut().state.export_span(out.clone(), None, true);
+    until(&mut h, "the export's start", |a| {
+        a.state.export.device_used.is_some()
+    });
+    let s = &h.state().state;
+    assert!(
+        s.export.running() || matches!(s.export.last, Some(Ok(_))),
+        "refused: {:?}",
+        s.export.last
+    );
+    h.state_mut().state.export.cancel();
+    until(&mut h, "the export to end", |a| !a.state.export.running());
+    assert!(
+        matches!(
+            h.state().state.export.last,
+            Some(Err(ExportError::Cancelled) | Ok(_))
+        ),
+        "{:?}",
+        h.state().state.export.last
+    );
     finish(h);
 }
