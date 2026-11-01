@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
-use spherecut_synth::media::{TrackCoding, X265Version, hevc_nal_name};
+use spherecut_synth::media::{self, TrackCoding, X265Version, hevc_nal_name};
 
 use crate::machine::{self, Access, MIN_RUST};
 use crate::perf_clips::{self, Clip, Made};
@@ -1240,19 +1240,15 @@ fn run_tier1<V: AsRef<OsStr>>(dir: &Path, env: &[(&str, V)]) -> Tier1 {
 /// at about 58.
 const TOO_EASY_FPS: f64 = 150.0;
 
-/// Above this rate the X5 codes every other picture as a non-reference
-/// TSA_N (its 5.7K60 and 4K120), which x265 gives only to reordered
-/// B-frames, so the perf pairs there are P frames only (`perf_pairs`).
-const X5_TSA_N_ABOVE_FPS: f64 = 30.0;
-
-/// A pair's lens's coding cell, read back from the file: its IDR interval
-/// from `stss` and its pictures by NAL type (H.265 table 7-1's names), in
-/// bold where a picture is neither an IDR nor a TRAIL_R, or where an IDR
-/// lies off the interval (or a picture on it isn't one, or `stss` lists
-/// one off it), since every perf pair codes an IDR at its interval and P
-/// frames between; at `fps` above [`X5_TSA_N_ABOVE_FPS`], what the X5
-/// codes there that the pair doesn't.
-fn coding_cell(coding: &Result<TrackCoding, String>, fps: f64) -> String {
+/// A lens's coding cell for the pair `name`, read back from the file:
+/// its IDR interval from `stss` and its pictures by NAL type (H.265 table
+/// 7-1's names), since every perf pair codes an IDR at its interval and P
+/// frames between. In bold: pictures that are neither an IDR nor a
+/// TRAIL_R; an IDR off the interval; a place on the interval without an
+/// IDR; and a picture where `stss` and the coding disagree, an IDR it
+/// doesn't list or a picture it lists that isn't one. For the 59.94 pair,
+/// what it is coded unlike the X5 ([`media::PERF_PAIR_P_ONLY`]).
+fn coding_cell(coding: &Result<TrackCoding, String>, name: &str) -> String {
     let c = match coding {
         Ok(c) => c,
         Err(why) => return format!("**not read**: {why}"),
@@ -1276,9 +1272,10 @@ fn coding_cell(coding: &Result<TrackCoding, String>, fps: f64) -> String {
             .as_ref()
             .is_none_or(|s| s.binary_search(&(i + 1)).is_ok())
     };
-    let off: Vec<u32> = (0..n)
-        .filter(|&i| due(i) != is_idr(c.types[i as usize]) || due(i) != listed(i))
-        .collect();
+    let idr = |i: u32| is_idr(c.types[i as usize]);
+    let off: Vec<u32> = (0..n).filter(|&i| idr(i) && !due(i)).collect();
+    let missing: Vec<u32> = (0..n).filter(|&i| due(i) && !idr(i)).collect();
+    let unlisted: Vec<u32> = (0..n).filter(|&i| listed(i) != idr(i)).collect();
     let mut counts: Vec<(u8, usize)> = Vec::new();
     for &t in &c.types {
         match counts.iter_mut().find(|(u, _)| *u == t) {
@@ -1308,16 +1305,22 @@ fn coding_cell(coding: &Result<TrackCoding, String>, fps: f64) -> String {
     if other > 0 {
         parts.push(format!("**{other} neither IDR nor TRAIL_R**"));
     }
-    match off.as_slice() {
-        [] => {}
-        [i] => parts.push(format!("**an IDR off the interval at picture {i}**")),
-        [i, rest @ ..] => parts.push(format!(
-            "**an IDR off the interval at picture {i}, and {} more**",
-            rest.len()
-        )),
+    for (pictures, what) in [
+        (off, "an IDR off the interval"),
+        (missing, "no IDR"),
+        (unlisted, "`stss` disagrees"),
+    ] {
+        match pictures.as_slice() {
+            [] => {}
+            [i] => parts.push(format!("**{what} at picture {i}**")),
+            [i, rest @ ..] => parts.push(format!(
+                "**{what} at picture {i}, and {} more**",
+                rest.len()
+            )),
+        }
     }
-    if fps > X5_TSA_N_ABOVE_FPS {
-        parts.push("P only: the X5 codes TSA_N on every other picture".into());
+    if name == media::PERF_PAIR_2880_5994 {
+        parts.push(media::PERF_PAIR_P_ONLY.into());
     }
     parts.join("; ")
 }
@@ -1368,11 +1371,14 @@ fn perf_clip_rows(clips: &[Clip], benches: &[Bench]) -> Vec<String> {
             .path
             .file_name()
             .map_or_else(|| c.name.clone(), |f| f.to_string_lossy().into_owned());
-        let made = match &c.made {
+        let mut made = match &c.made {
             Made::Cached => "cached".to_string(),
             Made::Now(d) => format!("now, in {:.0} s", d.as_secs_f64()),
             Made::Failed(why) => format!("**not made**: {why}"),
         };
+        if let Some(why) = &c.unchecked {
+            let _ = write!(made, ", its x265 not checked ({why})");
+        }
         if c.lenses.is_empty() {
             let row = format!("perf clip {}: software decode", c.name);
             rows.push(format!(
@@ -1393,7 +1399,7 @@ fn perf_clip_rows(clips: &[Clip], benches: &[Bench]) -> Vec<String> {
                 "| `{file}` lens {k} | {bytes} | {} | {made} | {} | {} |",
                 mbps(c.track_mbps(k)),
                 decode(row),
-                coding_cell(&lens.coding, c.fps)
+                coding_cell(&lens.coding, &c.name)
             ));
         }
     }
@@ -1903,7 +1909,8 @@ pub fn run(a: Args) -> Result<()> {
              a row a lens: its bitrate from that lens's samples, its decode that lens's \
              alone, and its coding read back from the file, its IDR interval from `stss` \
              and its pictures by NAL type, in bold where a picture is neither an IDR nor a \
-             TRAIL_R or an IDR is off the interval.\n",
+             TRAIL_R, an IDR is off the interval, a place on it has none, or `stss` and the \
+             coding disagree.\n",
             media_dir.display()
         );
         let _ = writeln!(
@@ -3297,8 +3304,8 @@ error: 1 target failed:
             made,
             bytes: 250_000_000,
             seconds: 20.0,
-            fps: 30.0,
             lenses: Vec::new(),
+            unchecked: None,
         };
         let clips = [
             clip("hevc8", Made::Cached),
@@ -3349,7 +3356,7 @@ error: 1 target failed:
             made: Made::Cached,
             bytes: 312_600_000,
             seconds: 20.0,
-            fps: 30_000.0 / 1001.0,
+            unchecked: None,
             lenses: vec![
                 lens(162_600_000, p_only(600, 60)),
                 lens(150_000_000, p_only(600, 60)),
@@ -3384,6 +3391,22 @@ error: 1 target failed:
         let rows = perf_clip_rows(&[whole], &benches);
         spherecut_testkit::control::must_fail("the pair rated as one file", unflagged(&rows[0]));
 
+        // A pair kept by a run that couldn't read its x265 says its coder
+        // wasn't checked, on each lens's row.
+        let unchecked = Clip {
+            unchecked: Some("this run's x265 wasn't read: no libx265".into()),
+            ..pair.clone()
+        };
+        let rows = perf_clip_rows(&[unchecked], &benches);
+        for row in &rows {
+            assert!(
+                row.contains(
+                    "| cached, its x265 not checked (this run's x265 wasn't read: no libx265) |"
+                ),
+                "{row}"
+            );
+        }
+
         // A lens that couldn't be read says why in its row, where its size
         // would be, and has no bitrate.
         let unread = Clip {
@@ -3407,18 +3430,29 @@ error: 1 target failed:
     #[test]
     fn a_lens_coded_otherwise_than_the_perf_pairs_is_flagged_in_bold() {
         let ok = |cell: &str| !cell.contains("**");
-        let at_2997 = 30_000.0 / 1001.0;
+        let at_2997 = media::PERF_PAIR_2880_2997;
         let cell = coding_cell(&Ok(p_only(600, 60)), at_2997);
         assert_eq!(cell, "IDR every 60; TRAIL_R 590, IDR_N_LP 10");
         assert!(ok(&cell));
-        // At 59.94 the row says what the pair doesn't match.
-        let cell = coding_cell(&Ok(p_only(600, 120)), 60_000.0 / 1001.0);
+        // The 59.94 pair's row says what it is coded unlike the X5, as the
+        // pair benchmarks' notes do.
+        let cell = coding_cell(&Ok(p_only(600, 120)), media::PERF_PAIR_2880_5994);
         assert_eq!(
             cell,
-            "IDR every 120; TRAIL_R 595, IDR_N_LP 5; P only: the X5 codes TSA_N on every other \
-             picture"
+            format!(
+                "IDR every 120; TRAIL_R 595, IDR_N_LP 5; {}",
+                media::PERF_PAIR_P_ONLY
+            )
         );
         assert!(ok(&cell));
+        // Only it: the 29.97 pairs are coded P only as the X5 codes them.
+        for name in [media::PERF_PAIR_3840_2997, media::PERF_PAIR_2880_2997] {
+            let cell = coding_cell(&Ok(p_only(600, 60)), name);
+            spherecut_testkit::control::must_fail(
+                &format!("{name} said to be P only"),
+                cell.contains(media::PERF_PAIR_P_ONLY),
+            );
+        }
         let cell = coding_cell(&Err("no track 1".into()), at_2997);
         assert_eq!(cell, "**not read**: no track 1");
 
@@ -3428,7 +3462,7 @@ error: 1 target failed:
         for t in tsa_n.types.iter_mut().skip(1).step_by(2) {
             *t = 2;
         }
-        let cell = coding_cell(&Ok(tsa_n), 60_000.0 / 1001.0);
+        let cell = coding_cell(&Ok(tsa_n), media::PERF_PAIR_2880_5994);
         assert!(cell.contains("TSA_N 300, IDR_N_LP 5"), "{cell}");
         assert!(cell.contains("**300 neither IDR nor TRAIL_R**"), "{cell}");
         spherecut_testkit::control::must_fail("the X5's TSA_N taken for P only", ok(&cell));
@@ -3439,20 +3473,35 @@ error: 1 target failed:
         sync.insert(2, 91);
         early.sync = Some(sync);
         let cell = coding_cell(&Ok(early), at_2997);
-        assert!(
-            cell.ends_with("**an IDR off the interval at picture 90**"),
-            "{cell}"
+        assert_eq!(
+            cell,
+            "IDR every 60; TRAIL_R 589, IDR_N_LP 11; **an IDR off the interval at picture 90**"
         );
         spherecut_testkit::control::must_fail("an IDR off the interval", ok(&cell));
-        // ... and an IDR missing from its place, which `stss` still lists.
+        // ... an IDR missing from its place, which `stss` still lists ...
         let mut missing = p_only(600, 60);
         missing.types[120] = 1;
         let cell = coding_cell(&Ok(missing), at_2997);
-        assert!(
-            cell.ends_with("**an IDR off the interval at picture 120**"),
-            "{cell}"
+        assert_eq!(
+            cell,
+            "IDR every 60; TRAIL_R 591, IDR_N_LP 9; **no IDR at picture 120**; **`stss` \
+             disagrees at picture 120**"
         );
         spherecut_testkit::control::must_fail("an IDR missing from the interval", ok(&cell));
+        // ... and `stss` leaving out an IDR at its place, or listing a P
+        // frame, with every picture coded as it should be.
+        let mut unlisted = p_only(600, 60);
+        let mut sync = unlisted.sync.clone().unwrap();
+        sync.retain(|&s| s != 181);
+        sync.insert(2, 92);
+        unlisted.sync = Some(sync);
+        let cell = coding_cell(&Ok(unlisted), at_2997);
+        assert_eq!(
+            cell,
+            "IDR every 60; TRAIL_R 590, IDR_N_LP 10; **`stss` disagrees at picture 91, and 1 \
+             more**"
+        );
+        spherecut_testkit::control::must_fail("`stss` taken for the coding's", ok(&cell));
     }
 
     #[test]
