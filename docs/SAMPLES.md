@@ -35,6 +35,27 @@ doesn't exist on your camera, skip it and note what the nearest one is called.
 | 12 | One clip from 1 exported through the vendor's own app/desktop software as stitched equirect (any resolution) | Reference for comparing my stitch |
 | 13 | One recording longer than the camera's file-split point (usually ~4 GB, often 8–10 min at max resolution) | Chaptered/split recordings. Optional, it's large |
 
+## For stitching the X5 (M3, added 2026-11-01)
+
+Your seven X5 takes settle the file layout. These four settle the lens
+geometry and the seams, which clip 8 can't do alone: its wall is 1.5 m away,
+so parallax hides small calibration errors. Same rules as above: in-camera,
+copied untouched, with the `.lrv`.
+
+| # | Take | Why |
+|---|------|-----|
+| 14 | 8K30 on the tripod outdoors in an open space, the camera level, everything in view at least 10 m away. Hold 15 s, then turn the camera about 90° on the tripod, level it again and hold 15 s more. Long horizontal lines (the horizon, roof edges, a distant fence) **and** vertical ones (trees, poles, building corners) at both of the camera's sides, where the seams run. Please note in `NOTES.txt` the height from the ground to the lenses, and that nothing stood nearer than 10 m | Fits the lens scale and angles without parallax, and tells which of the camera's two calibrations to trust. The horizontal lines measure the seam's roll, the vertical ones the scale; the second heading and the height let the fit separate the lenses' angles from the ground's nearness |
+| 15 | 8K30, 10 s: cover the lens on the screen side with your hand for the first 2 s, then take it away | Which video track is which lens |
+| 16 | 5.7K at 29.97 fps (or the nearest 5.7K mode), 20 s, anything | The 5.7K30 real-time target |
+| 17 | 8K30 handheld, 30 s: walk from deep shade into direct sun and back, with one lens facing the sun | Matching exposure and white balance between the lenses |
+
+If you agree to it (question 2 of `docs/design/m3-plan.md`), clip 12 for
+take 14: a stitched equirect export of it from Insta360 Studio. Spherecut
+only compares its own stitch against it when the fit leaves a question open;
+it never fits to it, and nothing from Studio goes into the code. Still
+missing from the first set, if they're easy: clips 5 (I-Log or 10-bit), 6
+(360 audio on) and 11 (FlowState off and on).
+
 ## For your other cameras (short set)
 
 Clips 1, 3, 6, 8, 9 and 12 from the table above. If one camera only gets a

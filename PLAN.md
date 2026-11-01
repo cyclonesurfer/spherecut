@@ -221,7 +221,7 @@ The first version Pat can use for real.
 
 ## M3 Raw ingest and stitching
 
-Main camera first (Pat to confirm), then the others.
+Main camera first (the Insta360 X5, Pat confirmed on 2026-11-01), then the others.
 
 How it is built: Pat asked on 2026-10-30 for ultracode from M3 on, so
 each M3 step (understanding, design, implementation, review) runs as a
@@ -592,7 +592,7 @@ with Ctrl+Z.
       and asks Pat to accept each new agent, showing the name it reports
       and its executable. Agents start `spherecut mcp --attach`, which
       relays the same MCP messages to the socket. Pat confirms first that
-      a local socket like this is IPC, not the network access his rule
+      a local socket like this is IPC, not the network access Pat's rule
       forbids (DECISIONS, Open).
 - [ ] The agent can see the open project, the playhead, the selection, the
       in and out marks, the performance overlay's counters, and a `look`
