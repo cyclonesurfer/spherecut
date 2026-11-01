@@ -1242,144 +1242,536 @@ pub fn track_bytes(path: &Path, stream: usize) -> Result<u64, SynthError> {
 /// of the MP4 file at `path`, in decode order: its first slice's (19 and
 /// 20 IDR, 1 TRAIL_R, 0 TRAIL_N, 2 TSA_N, 3 TSA_R and so on). The
 /// samples are found from the track's own tables and read a NAL unit's
-/// header at a time, without FFmpeg.
+/// header at a time, without FFmpeg. Tables that don't agree on how
+/// many samples there are, or that put more bytes of samples in the
+/// file than it holds, are [`SynthError::Read`], whatever their counts
+/// say, and nothing is sized by a count before that.
 pub fn hevc_picture_types(path: &Path, stream: usize) -> Result<Vec<u8>, SynthError> {
-    use std::io::{Read, Seek, SeekFrom};
-
     let read = |why: String| SynthError::Read {
         path: path.to_path_buf(),
         why,
     };
-    let tree = mp4::read_file(path).map_err(|e| read(e.to_string()))?;
-    let trak = tree
-        .tracks()
-        .nth(stream)
-        .ok_or_else(|| read(format!("no track {stream}")))?;
-    let entry = trak
-        .path(&[b"mdia", b"minf", b"stbl", b"stsd"])
-        .and_then(|stsd| stsd.children.first())
-        .ok_or_else(|| read(format!("track {stream} has no sample entry")))?;
-    let hvcc = entry.child(b"hvcC").ok_or_else(|| {
-        read(format!(
-            "track {stream} is no HEVC: no `hvcC` in `{}`",
-            entry.fourcc
-        ))
-    })?;
-    // The bytes of each NAL unit's length.
-    let length_bytes = match hvcc.payload.get(21) {
-        Some(b) => u64::from(b & 3) + 1,
-        None => return Err(read(format!("track {stream}'s `hvcC` is cut short"))),
-    };
-    let samples = sample_ranges(trak).map_err(|why| read(format!("track {stream}: {why}")))?;
     let io = |error| SynthError::Io {
         path: path.to_path_buf(),
         error,
     };
+    let tree = mp4::read_file(path).map_err(|e| read(e.to_string()))?;
+    let (trak, hvcc) = hevc_track(&tree, stream).map_err(read)?;
+    let length_bytes =
+        nal_length_bytes(hvcc).map_err(|why| read(format!("track {stream}'s {why}")))?;
     let mut f = std::fs::File::open(path).map_err(io)?;
-    let mut types = Vec::with_capacity(samples.len());
-    for (i, &(offset, size)) in samples.iter().enumerate() {
+    let file_len = f.metadata().map_err(io)?.len();
+    let samples =
+        SampleTable::of(trak, file_len).map_err(|why| read(format!("track {stream}: {why}")))?;
+    // One type a picture read, so never more than the file has pictures.
+    let mut types = Vec::new();
+    for (i, (offset, size)) in samples.ranges().enumerate() {
         let end = offset + u64::from(size);
         let mut at = offset;
         let slice = loop {
-            if at + length_bytes + 1 > end {
+            let Some(nal) = nal_at(&mut f, at, end, length_bytes).map_err(io)? else {
                 return Err(read(format!("picture {i} of track {stream} has no slice")));
-            }
-            let mut head = [0u8; 5];
-            let head = &mut head[..length_bytes as usize + 1];
-            f.seek(SeekFrom::Start(at)).map_err(io)?;
-            f.read_exact(head).map_err(io)?;
-            let (len, header) = head.split_at(length_bytes as usize);
-            let len = len.iter().fold(0u64, |v, b| v << 8 | u64::from(*b));
+            };
             // A VCL unit's type is below 32: the picture's first slice.
-            let t = header[0] >> 1 & 0x3f;
-            if t < 32 {
-                break t;
+            if nal.kind < 32 {
+                break nal.kind;
             }
-            at += length_bytes + len;
+            at = nal.next;
         };
         types.push(slice);
     }
     Ok(types)
 }
 
-/// Where each sample of `trak` lies in its file, in decode order, as
-/// (offset, bytes): from its `stsz`, its `stsc` and its `stco` or `co64`.
-fn sample_ranges(trak: &mp4::Mp4Box) -> Result<Vec<(u64, u32)>, String> {
-    let stbl = trak
-        .path(&[b"mdia", b"minf", b"stbl"])
-        .ok_or("no sample table")?;
-    let table = |t: &[u8; 4]| -> Option<mp4::Cursor<'_>> {
-        let b = stbl.child(t)?;
-        // A payload too large to keep reads as cut short below.
-        let mut c = mp4::Cursor::new(&b.payload);
-        c.version_flags()?;
-        Some(c)
-    };
-    let short = |t: &str| format!("`{t}` is missing or cut short");
-    let mut c = table(b"stsz").ok_or_else(|| short("stsz"))?;
-    let (fixed, count) = (
-        c.u32().ok_or_else(|| short("stsz"))?,
-        c.u32().ok_or_else(|| short("stsz"))?,
-    );
-    let sizes: Vec<u32> = match fixed {
-        0 => (0..count)
-            .map(|_| c.u32())
+/// Track `stream` of `tree`, and its `hvcC`, if it is an HEVC track.
+fn hevc_track(tree: &Mp4Tree, stream: usize) -> Result<(&mp4::Mp4Box, &mp4::Mp4Box), String> {
+    let trak = tree
+        .tracks()
+        .nth(stream)
+        .ok_or_else(|| format!("no track {stream}"))?;
+    let entry = trak
+        .path(&[b"mdia", b"minf", b"stbl", b"stsd"])
+        .and_then(|stsd| stsd.children.first())
+        .ok_or_else(|| format!("track {stream} has no sample entry"))?;
+    let hvcc = entry
+        .child(b"hvcC")
+        .ok_or_else(|| format!("track {stream} is no HEVC: no `hvcC` in `{}`", entry.fourcc))?;
+    Ok((trak, hvcc))
+}
+
+/// The bytes of each NAL unit's length in the samples of a track with
+/// `hvcc` (its `lengthSizeMinusOne`, plus one).
+fn nal_length_bytes(hvcc: &mp4::Mp4Box) -> Result<u64, String> {
+    match hvcc.payload.get(21) {
+        Some(b) => Ok(u64::from(b & 3) + 1),
+        None => Err("`hvcC` is cut short".into()),
+    }
+}
+
+/// A NAL unit of a sample, as [`nal_at`] finds it.
+struct Nal {
+    /// Its type (H.265 table 7-1).
+    kind: u8,
+    /// Where its header starts in the file.
+    at: u64,
+    /// Its bytes, header included, as its length says.
+    len: u64,
+    /// Where the next NAL unit's length starts.
+    next: u64,
+}
+
+/// The NAL unit whose length starts at `at` of a sample that ends at
+/// `end` in `f`, each unit's length in `length_bytes` bytes, or `None`
+/// when no unit's length and header fit there.
+fn nal_at(
+    f: &mut std::fs::File,
+    at: u64,
+    end: u64,
+    length_bytes: u64,
+) -> std::io::Result<Option<Nal>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if at + length_bytes + 1 > end {
+        return Ok(None);
+    }
+    let mut head = [0u8; 5];
+    let head = &mut head[..length_bytes as usize + 1];
+    f.seek(SeekFrom::Start(at))?;
+    f.read_exact(head)?;
+    let (len, header) = head.split_at(length_bytes as usize);
+    let len = len.iter().fold(0u64, |v, b| v << 8 | u64::from(*b));
+    Ok(Some(Nal {
+        kind: header[0] >> 1 & 0x3f,
+        at: at + length_bytes,
+        len,
+        next: at + length_bytes + len,
+    }))
+}
+
+/// Each sample's bytes, as `stsz` gives them.
+enum Sizes {
+    /// `count` samples of `size` bytes each.
+    Fixed { size: u32, count: u32 },
+    /// Each sample's bytes, from the table itself.
+    Each(Vec<u32>),
+}
+
+impl Sizes {
+    fn count(&self) -> u64 {
+        match self {
+            Sizes::Fixed { count, .. } => u64::from(*count),
+            Sizes::Each(v) => v.len() as u64,
+        }
+    }
+
+    /// The bytes of sample `i`, from 0, which is below [`Sizes::count`].
+    fn of(&self, i: u64) -> u32 {
+        match self {
+            Sizes::Fixed { size, .. } => *size,
+            Sizes::Each(v) => v.get(i as usize).copied().unwrap_or(0),
+        }
+    }
+
+    /// The bytes of every sample.
+    fn total(&self) -> u64 {
+        match self {
+            Sizes::Fixed { size, count } => u64::from(*size) * u64::from(*count),
+            Sizes::Each(v) => v.iter().map(|&s| u64::from(s)).sum(),
+        }
+    }
+}
+
+/// Where the samples of a track lie in its file: from its `stsz`, its
+/// `stsc` and its `stco` or `co64`, checked against each other and the
+/// file's length.
+struct SampleTable {
+    sizes: Sizes,
+    /// Where each chunk starts.
+    offsets: Vec<u64>,
+    /// The samples each chunk holds.
+    per_chunk: Vec<u32>,
+}
+
+impl SampleTable {
+    /// The table of `trak`, in a file of `file_len` bytes. Every table is
+    /// read only as far as its payload holds entries, so a count in it
+    /// never sizes anything: a fixed sample size with a count of 2³² − 1
+    /// is refused here, as the chunks hold fewer, rather than read.
+    fn of(trak: &mp4::Mp4Box, file_len: u64) -> Result<SampleTable, String> {
+        let stbl = trak
+            .path(&[b"mdia", b"minf", b"stbl"])
+            .ok_or("no sample table")?;
+        let table = |t: &[u8; 4]| -> Option<mp4::Cursor<'_>> {
+            let b = stbl.child(t)?;
+            // A payload too large to keep reads as cut short below.
+            let mut c = mp4::Cursor::new(&b.payload);
+            c.version_flags()?;
+            Some(c)
+        };
+        let short = |t: &str| format!("`{t}` is missing or cut short");
+        let mut c = table(b"stsz").ok_or_else(|| short("stsz"))?;
+        let (fixed, count) = (
+            c.u32().ok_or_else(|| short("stsz"))?,
+            c.u32().ok_or_else(|| short("stsz"))?,
+        );
+        let sizes = match fixed {
+            0 => Sizes::Each(
+                (0..count)
+                    .map(|_| c.u32())
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| short("stsz"))?,
+            ),
+            size => Sizes::Fixed { size, count },
+        };
+        let offsets: Vec<u64> = match (table(b"stco"), table(b"co64")) {
+            (Some(mut c), _) => {
+                let n = c.u32().ok_or_else(|| short("stco"))?;
+                (0..n)
+                    .map(|_| c.u32().map(u64::from))
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| short("stco"))?
+            }
+            (None, Some(mut c)) => {
+                let n = c.u32().ok_or_else(|| short("co64"))?;
+                (0..n)
+                    .map(|_| c.u64())
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| short("co64"))?
+            }
+            (None, None) => return Err("no `stco` or `co64`".into()),
+        };
+        // Runs of chunks, each as its first chunk (from 1) and its samples
+        // a chunk.
+        let mut c = table(b"stsc").ok_or_else(|| short("stsc"))?;
+        let n = c.u32().ok_or_else(|| short("stsc"))?;
+        let runs: Vec<(u32, u32)> = (0..n)
+            .map(|_| {
+                let run = (c.u32()?, c.u32()?);
+                c.u32()?;
+                Some(run)
+            })
             .collect::<Option<_>>()
-            .ok_or_else(|| short("stsz"))?,
-        n => vec![n; count as usize],
-    };
-    let offsets: Vec<u64> = match (table(b"stco"), table(b"co64")) {
-        (Some(mut c), _) => {
-            let n = c.u32().ok_or_else(|| short("stco"))?;
-            (0..n)
-                .map(|_| c.u32().map(u64::from))
-                .collect::<Option<_>>()
-                .ok_or_else(|| short("stco"))?
+            .ok_or_else(|| short("stsc"))?;
+        let per_chunk: Vec<u32> = (1..=offsets.len() as u64)
+            .map(|chunk| {
+                runs.iter()
+                    .rev()
+                    .find(|(first, _)| u64::from(*first) <= chunk)
+                    .map_or(0, |r| r.1)
+            })
+            .collect();
+        let held: u64 = per_chunk.iter().map(|&n| u64::from(n)).sum();
+        if held != sizes.count() {
+            return Err(format!(
+                "`stsz` counts {} samples, and its chunks hold {held}",
+                sizes.count()
+            ));
         }
-        (None, Some(mut c)) => {
-            let n = c.u32().ok_or_else(|| short("co64"))?;
-            (0..n)
-                .map(|_| c.u64())
-                .collect::<Option<_>>()
-                .ok_or_else(|| short("co64"))?
+        let total = sizes.total();
+        if total > file_len {
+            return Err(format!(
+                "its samples' {total} bytes are more than the file's {file_len}"
+            ));
         }
-        (None, None) => return Err("no `stco` or `co64`".into()),
-    };
-    // Runs of chunks, each as its first chunk (from 1) and its samples a
-    // chunk.
-    let mut c = table(b"stsc").ok_or_else(|| short("stsc"))?;
-    let n = c.u32().ok_or_else(|| short("stsc"))?;
-    let runs: Vec<(u32, u32)> = (0..n)
-        .map(|_| {
-            let run = (c.u32()?, c.u32()?);
-            c.u32()?;
-            Some(run)
+        Ok(SampleTable {
+            sizes,
+            offsets,
+            per_chunk,
         })
-        .collect::<Option<_>>()
-        .ok_or_else(|| short("stsc"))?;
-    let mut ranges = Vec::with_capacity(sizes.len());
-    let mut sizes_left = sizes.iter();
-    for (i, &offset) in offsets.iter().enumerate() {
-        let chunk = i as u64 + 1;
-        let per = runs
+    }
+
+    /// Where each sample lies, in decode order, as (offset, bytes).
+    fn ranges(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+        let mut sample = 0u64;
+        self.offsets
             .iter()
-            .rev()
-            .find(|(first, _)| u64::from(*first) <= chunk)
-            .map_or(0, |r| r.1);
-        let mut at = offset;
-        for &size in sizes_left.by_ref().take(per as usize) {
-            ranges.push((at, size));
-            at += u64::from(size);
+            .zip(&self.per_chunk)
+            .flat_map(move |(&offset, &per)| {
+                let first = sample;
+                sample += u64::from(per);
+                let mut at = offset;
+                (first..first + u64::from(per)).map(move |i| {
+                    let size = self.sizes.of(i);
+                    let range = (at, size);
+                    at += u64::from(size);
+                    range
+                })
+            })
+    }
+}
+
+/// The name H.265 table 7-1 gives NAL unit type `t` of a picture's
+/// slices (0 to 21), or `None` for a type that isn't a slice's.
+pub fn hevc_nal_name(t: u8) -> Option<&'static str> {
+    const NAMES: [&str; 22] = [
+        "TRAIL_N",
+        "TRAIL_R",
+        "TSA_N",
+        "TSA_R",
+        "STSA_N",
+        "STSA_R",
+        "RADL_N",
+        "RADL_R",
+        "RASL_N",
+        "RASL_R",
+        "RSV_VCL_N10",
+        "RSV_VCL_R11",
+        "RSV_VCL_N12",
+        "RSV_VCL_R13",
+        "RSV_VCL_N14",
+        "RSV_VCL_R15",
+        "BLA_W_LP",
+        "BLA_W_RADL",
+        "BLA_N_LP",
+        "IDR_W_RADL",
+        "IDR_N_LP",
+        "CRA_NUT",
+    ];
+    NAMES.get(usize::from(t)).copied()
+}
+
+/// How one HEVC track of an MP4 file is coded, as hw-test reports each
+/// lens of a perf pair beside the masters' coding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackCoding {
+    /// Its sync samples (`stss`), numbered from 1, or `None` when the
+    /// track has no `stss`, so that every sample is one.
+    pub sync: Option<Vec<u32>>,
+    /// The NAL type of each picture in decode order
+    /// ([`hevc_picture_types`]).
+    pub types: Vec<u8>,
+}
+
+/// How stream `stream`, an HEVC track of the MP4 file at `path`, is
+/// coded: its sync samples from [`mp4::track_timing`] and its pictures'
+/// NAL types from their slices.
+pub fn track_coding(path: &Path, stream: usize) -> Result<TrackCoding, SynthError> {
+    let timing = mp4::track_timing(path, stream).map_err(|e| SynthError::Read {
+        path: path.to_path_buf(),
+        why: e.to_string(),
+    })?;
+    Ok(TrackCoding {
+        sync: timing.stss,
+        types: hevc_picture_types(path, stream)?,
+    })
+}
+
+/// The text of each user data SEI message (`user_data_unregistered`,
+/// H.265 D.2.7) that stream `stream`, an HEVC track of the MP4 file at
+/// `path`, holds in its `hvcC` and in its first picture, after the
+/// message's UUID and up to its first NUL: where x265 names itself and
+/// the options it coded with ([`X265Version`]).
+pub fn hevc_user_data(path: &Path, stream: usize) -> Result<Vec<String>, SynthError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let read = |why: String| SynthError::Read {
+        path: path.to_path_buf(),
+        why,
+    };
+    let io = |error| SynthError::Io {
+        path: path.to_path_buf(),
+        error,
+    };
+    let tree = mp4::read_file(path).map_err(|e| read(e.to_string()))?;
+    let (trak, hvcc) = hevc_track(&tree, stream).map_err(read)?;
+    let mut texts = Vec::new();
+    // The `hvcC`'s arrays of NAL units, after its 22 bytes of
+    // configuration and its count of arrays: each a byte whose low six
+    // bits are the units' type, their count, and each unit after its
+    // two-byte length.
+    let mut c = mp4::Cursor::new(&hvcc.payload);
+    let arrays = c
+        .take(22)
+        .and_then(|_| c.u8())
+        .ok_or_else(|| read(format!("track {stream}'s `hvcC` is cut short")))?;
+    for _ in 0..arrays {
+        let units = (|| {
+            let kind = c.u8()? & 0x3f;
+            let n = c.u16()?;
+            let mut units = Vec::new();
+            for _ in 0..n {
+                let len = c.u16()?;
+                units.push((kind, c.take(usize::from(len))?));
+            }
+            Some(units)
+        })()
+        .ok_or_else(|| read(format!("track {stream}'s `hvcC` is cut short")))?;
+        for (kind, unit) in units {
+            if matches!(kind, SEI_PREFIX | SEI_SUFFIX) {
+                texts.extend(user_data_texts(unit));
+            }
         }
     }
-    if ranges.len() != sizes.len() {
-        return Err(format!(
-            "its chunks hold {} samples, and `stsz` sizes {}",
-            ranges.len(),
-            sizes.len()
-        ));
+    // The SEI units before the first picture's first slice.
+    let length_bytes =
+        nal_length_bytes(hvcc).map_err(|why| read(format!("track {stream}'s {why}")))?;
+    let mut f = std::fs::File::open(path).map_err(io)?;
+    let file_len = f.metadata().map_err(io)?.len();
+    let samples =
+        SampleTable::of(trak, file_len).map_err(|why| read(format!("track {stream}: {why}")))?;
+    if let Some((offset, size)) = samples.ranges().next() {
+        let end = offset + u64::from(size);
+        let mut at = offset;
+        while let Some(nal) = nal_at(&mut f, at, end, length_bytes).map_err(io)? {
+            if nal.kind < 32 {
+                break;
+            }
+            if matches!(nal.kind, SEI_PREFIX | SEI_SUFFIX) {
+                // Within the sample, which lies within the file.
+                let mut unit = vec![0u8; nal.len.min(end - nal.at) as usize];
+                f.seek(SeekFrom::Start(nal.at)).map_err(io)?;
+                f.read_exact(&mut unit).map_err(io)?;
+                texts.extend(user_data_texts(&unit));
+            }
+            at = nal.next;
+        }
     }
-    Ok(ranges)
+    Ok(texts)
+}
+
+/// The NAL unit types of SEI, before and after a picture's slices.
+const SEI_PREFIX: u8 = 39;
+const SEI_SUFFIX: u8 = 40;
+
+/// The SEI payload type of user data that a UUID names
+/// (`user_data_unregistered`).
+const USER_DATA_UNREGISTERED: usize = 5;
+
+/// The texts of the user data messages of `unit`, an SEI NAL unit with
+/// its two-byte header, as [`hevc_user_data`] gives them.
+fn user_data_texts(unit: &[u8]) -> Vec<String> {
+    // The RBSP: the unit after its header, without the emulation
+    // prevention bytes (a 3 after two zeros).
+    let mut rbsp = Vec::with_capacity(unit.len());
+    let mut zeros = 0;
+    for &b in unit.iter().skip(2) {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        rbsp.push(b);
+    }
+    // Each message's type, then its size, each as bytes of 255 and one
+    // below that are summed, then its payload, until the RBSP's trailing
+    // bits.
+    fn number(c: &mut &[u8]) -> Option<usize> {
+        let mut v = 0usize;
+        loop {
+            let (&b, rest) = c.split_first()?;
+            *c = rest;
+            v = v.checked_add(usize::from(b))?;
+            if b != 0xff {
+                return Some(v);
+            }
+        }
+    }
+    let mut texts = Vec::new();
+    let mut c = &rbsp[..];
+    while !c.is_empty() && c != [0x80] {
+        let (Some(kind), Some(size)) = (number(&mut c), number(&mut c)) else {
+            break;
+        };
+        let Some(payload) = c.get(..size) else {
+            break;
+        };
+        c = &c[size..];
+        if kind == USER_DATA_UNREGISTERED && size >= 16 {
+            let text = &payload[16..];
+            let text = text.split(|&b| b == 0).next().unwrap_or(text);
+            texts.push(String::from_utf8_lossy(text).into_owned());
+        }
+    }
+    texts
+}
+
+/// The x265 that coded a stream, as the info SEI it writes into every
+/// stream it codes (unless asked not to, `info=0`) names it: "x265
+/// (build 199) - 3.5+1-f0c1022b6:[Linux][GCC 13.2.0][64 bit]
+/// 8bit+10bit+12bit - H.265/HEVC codec - … - options: …" from the cloud's
+/// x265 3.5. x265 4.x is read by the same rule, unchecked against one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct X265Version {
+    /// Its API build number (`X265_BUILD`): 199 for 3.5.
+    pub build: u32,
+    /// Its version, such as "3.5+1-f0c1022b6", or "4.1" for one built
+    /// from a release's sources alone.
+    pub version: String,
+}
+
+impl X265Version {
+    /// Read `text`, an x265 info SEI's text, or `None` for any other.
+    pub fn parse(text: &str) -> Option<X265Version> {
+        let rest = text.strip_prefix("x265 (build ")?;
+        let (build, rest) = rest.split_once(") - ")?;
+        let (version, _) = rest.split_once(':')?;
+        Some(X265Version {
+            build: build.parse().ok()?,
+            version: version.trim().to_string(),
+        })
+        .filter(|v| !v.version.is_empty())
+    }
+
+    /// Its major version: 3 for "3.5+1-f0c1022b6".
+    pub fn major(&self) -> Option<u32> {
+        self.version
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    /// The `temporal-layers` value that asks this x265 for one temporal
+    /// layer above the base: x265 3.x takes a switch (1), and x265 4.0
+    /// made it a count of layers from 2 to 5, of which 2 puts the
+    /// reference pictures in the base layer and the rest above it. `None`
+    /// when its major version can't be read.
+    pub fn temporal_layers(&self) -> Option<u32> {
+        Some(if self.major()? >= 4 { 2 } else { 1 })
+    }
+}
+
+impl std::fmt::Display for X265Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (build {})", self.version, self.build)
+    }
+}
+
+/// The x265 that synth codes HEVC with, whichever FFmpeg links: read
+/// from the info SEI of one 64² frame coded into `dir` as synth codes
+/// its clips, and the file removed again. It is the x265 the perf clips
+/// are coded with, whatever headers `pkg-config` finds or doesn't.
+pub fn x265_version(dir: &Path) -> Result<X265Version, SynthError> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    // A name of its own for each call, so that calls never share a file.
+    static CALLS: AtomicU32 = AtomicU32::new(0);
+    let spec = Spec {
+        name: format!(
+            ".x265-version-{}-{}",
+            std::process::id(),
+            CALLS.fetch_add(1, Ordering::Relaxed)
+        ),
+        width: 64,
+        height: 64,
+        frames: 1,
+        codec: Codec::Hevc,
+        ..Spec::default()
+    };
+    let path = write(&spec, dir)?;
+    let texts = hevc_user_data(&path, 0);
+    let _ = std::fs::remove_file(&path);
+    let texts = texts?;
+    texts
+        .iter()
+        .find_map(|t| X265Version::parse(t))
+        .ok_or_else(|| SynthError::Read {
+            path,
+            why: format!(
+                "x265 named no version: no info SEI among its {} user data messages",
+                texts.len()
+            ),
+        })
 }
 
 /// Broken files derived from a good one with video and audio: truncated at
@@ -1824,6 +2216,132 @@ mod tests {
         assert_eq!(
             clips.iter().map(|c| (c.width, c.bits)).collect::<Vec<_>>(),
             [(5760, 8), (5760, 10), (7680, 8)]
+        );
+    }
+
+    /// The text of the cloud's x265 3.5's info SEI, its options cut short.
+    const X265_3_5: &str = "x265 (build 199) - 3.5+1-f0c1022b6:[Linux][GCC 13.2.0][64 bit] \
+                            8bit+10bit+12bit - H.265/HEVC codec - Copyright 2013-2018 (c) \
+                            Multicoreware, Inc - http://x265.org - options: cpuid=1111039";
+
+    #[test]
+    fn x265s_info_sei_names_its_version_and_the_temporal_layers_it_takes() {
+        let v = X265Version::parse(X265_3_5).unwrap();
+        assert_eq!(
+            (v.build, v.version.as_str(), v.major()),
+            (199, "3.5+1-f0c1022b6", Some(3))
+        );
+        assert_eq!(v.to_string(), "3.5+1-f0c1022b6 (build 199)");
+        assert_eq!(v.temporal_layers(), Some(1));
+        // x265 4.x, as odin's and huginn's Fedora 44 link it, by the same
+        // printf as 3.5's: from a repository's checkout, or from a
+        // release's sources alone. Neither text is one a 4.x wrote here,
+        // since the cloud has 3.5 alone.
+        for (text, version) in [
+            (
+                "x265 (build 215) - 4.1+1-1d117be:[Linux][GCC 15.2.1][64 bit] 8bit+10bit+12bit \
+                 - H.265/HEVC codec - Copyright 2013-2018 (c) Multicoreware, Inc - \
+                 http://x265.org - options: cpuid=1111039",
+                "4.1+1-1d117be",
+            ),
+            (
+                "x265 (build 215) - 4.1:[Linux][GCC 15.2.1][64 bit] 8bit",
+                "4.1",
+            ),
+        ] {
+            let v4 = X265Version::parse(text).unwrap();
+            assert_eq!((v4.build, v4.version.as_str()), (215, version));
+            assert_eq!((v4.major(), v4.temporal_layers()), (Some(4), Some(2)));
+        }
+        // Its control: 3.5 isn't asked for 4.x's count of layers, which it
+        // would take as the switch it is.
+        spherecut_testkit::control::must_fail(
+            "x265 3.5 asked for 4.x's count of temporal layers",
+            v.temporal_layers() == Some(2),
+        );
+        // x265's log line names the version too, but goes to stderr, not
+        // into the stream, and isn't the SEI's text; nor is an encoder's
+        // name.
+        for other in [
+            "x265 [info]: HEVC encoder version 3.5+1-f0c1022b6",
+            "Lavc60.31.102 libx265",
+            "x265 (build 199) - :[Linux]",
+            "x265 (build ?) - 3.5:[Linux]",
+        ] {
+            assert_eq!(X265Version::parse(other), None, "{other}");
+        }
+    }
+
+    /// An SEI NAL unit of one message of `kind`, whose payload is a UUID of
+    /// zeros and `text` with its NUL, with the emulation prevention bytes
+    /// its zeros need.
+    fn sei_unit(kind: u8, text: &str) -> Vec<u8> {
+        let mut payload = vec![0u8; 16];
+        payload.extend(text.as_bytes());
+        payload.push(0);
+        let mut rbsp = vec![kind];
+        let mut size = payload.len();
+        while size >= 255 {
+            rbsp.push(0xff);
+            size -= 255;
+        }
+        rbsp.push(size as u8);
+        rbsp.extend(payload);
+        rbsp.push(0x80);
+        let mut unit = vec![SEI_PREFIX << 1, 1];
+        let mut zeros = 0;
+        for b in rbsp {
+            if zeros == 2 && b <= 3 {
+                unit.push(3);
+                zeros = 0;
+            }
+            zeros = if b == 0 { zeros + 1 } else { 0 };
+            unit.push(b);
+        }
+        unit
+    }
+
+    #[test]
+    fn user_data_reads_through_emulation_prevention_and_long_sizes() {
+        // As long as x265's, whose options run to a kilobyte or more.
+        let text = format!("{X265_3_5} {}", "no-wpp ".repeat(40));
+        let unit = sei_unit(USER_DATA_UNREGISTERED as u8, &text);
+        // The UUID's zeros took emulation prevention bytes, and the size
+        // is over 255.
+        assert!(unit.windows(3).any(|w| w == [0, 0, 3]), "{unit:?}");
+        assert!(text.len() + 17 > 255);
+        assert_eq!(user_data_texts(&unit), [text.as_str()]);
+        // Its control: the same bytes in a message of another type (4,
+        // user data registered by a country code) are no user data of
+        // the kind x265 writes.
+        let other = sei_unit(4, &text);
+        spherecut_testkit::control::must_fail(
+            "registered user data read as x265's",
+            user_data_texts(&other).contains(&text),
+        );
+        // A message cut short ends the reading rather than panicking.
+        assert!(user_data_texts(&unit[..unit.len() / 2]).is_empty());
+        assert!(user_data_texts(&[SEI_PREFIX << 1, 1]).is_empty());
+    }
+
+    #[test]
+    fn nal_types_have_table_7_1s_names() {
+        let names: Vec<_> = [0, 1, 2, 19, 20, 21, 22, 39]
+            .into_iter()
+            .map(hevc_nal_name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                Some("TRAIL_N"),
+                Some("TRAIL_R"),
+                Some("TSA_N"),
+                Some("IDR_W_RADL"),
+                Some("IDR_N_LP"),
+                Some("CRA_NUT"),
+                None,
+                None
+            ]
         );
     }
 }

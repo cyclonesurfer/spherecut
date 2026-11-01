@@ -6,8 +6,11 @@
 //! for 121 frames, at its bits a pixel, and its NAL types, GOP,
 //! timing and bitrate a track are read back from the file: the types from
 //! the slices' headers, an instrument that shares no code with the
-//! writer. Whether x265 can mark every other P frame non-reference, as
-//! the X5 does at 59.94, is checked on its output too.
+//! writer. What the linked x265 does when asked to mark every other
+//! frame non-reference, as the X5 does at 59.94, is recorded with its
+//! version, which x265 names in its streams; only what holds for every
+//! version is asserted. The reader of the slices refuses sample tables
+//! whose counts disagree before they size anything.
 //!
 //! Budget (M3 plan 4.1 rule 5): 15 s for the suite, which each test
 //! prints its time against.
@@ -24,7 +27,8 @@ use spherecut_media::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 use spherecut_media::mp4::{self, TrackTiming};
 use spherecut_synth::code::{CornerCode, Luma, read_corner_code};
 use spherecut_synth::media::{
-    self, Audio, Codec, LENS_COLOR, LensTrack, PairSpec, Spec, hevc_picture_types, track_bytes,
+    self, Audio, Codec, LENS_COLOR, LensTrack, PairSpec, Spec, SynthError, X265Version,
+    hevc_picture_types, hevc_user_data, track_bytes,
 };
 use spherecut_synth::yuv::{self, Chroma, YuvFormat};
 use spherecut_synth::{Pattern, render_equirect};
@@ -80,7 +84,6 @@ fn temp_dir(name: &str) -> TempDir {
 }
 
 /// HEVC NAL unit types (H.265 table 7-1).
-const TRAIL_N: u8 = 0;
 const TRAIL_R: u8 = 1;
 const TSA_N: u8 = 2;
 const IDR_W_RADL: u8 = 19;
@@ -265,9 +268,10 @@ fn p_only(types: &[u8], timing: &TrackTiming, keyint: u32) -> Result<(), String>
     Ok(())
 }
 
-/// A clip of x265's own at 256², 59.94 fps, with `params` added: what it
-/// codes when asked for temporal layers.
-fn x265_clip(dir: &Path, name: &str, params: &str) -> PathBuf {
+/// A clip of x265's own at 256², 59.94 fps, with `params` added, or why
+/// x265 wouldn't code it: what it codes when asked for temporal layers,
+/// which one version may refuse where another takes them.
+fn x265_clip(dir: &Path, name: &str, params: &str) -> Result<PathBuf, String> {
     let settings = VideoSettings {
         encoder: "libx265".into(),
         width: 256,
@@ -289,13 +293,14 @@ fn x265_clip(dir: &Path, name: &str, params: &str) -> PathBuf {
         device: None,
     };
     let path = dir.join(format!("{name}.mp4"));
-    let mut w = Mp4Writer::create(&path, &settings, None).unwrap();
+    let mut w = Mp4Writer::create(&path, &settings, None).map_err(|e| e.to_string())?;
     let format = YuvFormat::tagged(&LENS_COLOR, Chroma::Yuv420);
     for i in 0..48 {
         let img = render_equirect(Pattern::Grid, 256, 256, i, 1);
-        w.push_video(&yuv::to_yuv(&img, 8, &format)).unwrap();
+        w.push_video(&yuv::to_yuv(&img, 8, &format))
+            .map_err(|e| e.to_string())?;
     }
-    w.finish().unwrap()
+    w.finish().map_err(|e| e.to_string())
 }
 
 #[test]
@@ -359,45 +364,187 @@ fn short_perf_pairs_keep_their_nal_types_gops_and_bitrates() {
         "2×3840²'s bitrate taken for 2×2880²'s",
         at_most((kbps_3840 / want_2880 - 1.0).abs(), 0.2),
     );
+}
 
-    // Whether x265 can mark every other frame non-reference without
-    // reordering, as the X5's TSA_N at 59.94: its temporal layers put the
-    // non-reference B-frames alone in the upper layer, so without
-    // B-frames every frame is still a reference.
-    let layered = x265_clip(&dir.0, "layered-p", "bframes=0:temporal-layers=1");
-    let types = hevc_picture_types(&layered, 0).unwrap();
-    let timing = mp4::track_timing(&layered, 0).unwrap();
-    assert!(
-        !types.iter().any(|t| matches!(*t, TRAIL_N | TSA_N)),
-        "{types:?}"
+/// x265's B-frames as these tests ask for them: one between references,
+/// never itself a reference.
+const ONE_B_FRAME: &str = "bframes=1:b-adapt=0:b-pyramid=0";
+
+#[test]
+fn x265s_temporal_layers_are_recorded_and_only_what_holds_for_every_version_asserted() {
+    let _time =
+        timed("x265s_temporal_layers_are_recorded_and_only_what_holds_for_every_version_asserted");
+    let dir = temp_dir("pairs-x265");
+    let version = media::x265_version(&dir.0).unwrap();
+    // What this x265 does when asked to mark every other frame
+    // non-reference, as the X5's TSA_N at 59.94, is recorded, not
+    // asserted: x265 3.5 takes `temporal-layers` as a switch and puts only
+    // reordered B-frames in the upper layer (so every P frame stays a
+    // reference), and 4.0 made it a count of layers, whose output the
+    // cloud, with 3.5 alone, has never seen. The perf pairs ask for no
+    // temporal layers.
+    match version.temporal_layers() {
+        Some(n) => {
+            for (i, (what, params)) in [
+                ("without B-frames", "bframes=0"),
+                ("with a B-frame between references", ONE_B_FRAME),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let params = format!("{params}:temporal-layers={n}");
+                // Neither a refusal nor a stream that doesn't read fails
+                // the test: each is what this x265 did.
+                let seen = x265_clip(&dir.0, &format!("layered-{i}"), &params).and_then(|path| {
+                    let types = hevc_picture_types(&path, 0).map_err(|e| e.to_string())?;
+                    let timing = mp4::track_timing(&path, 0).map_err(|e| e.to_string())?;
+                    Ok(format!(
+                        "NAL types {:?}, {}",
+                        count_types(&types),
+                        if timing.ctts_hash.is_some() {
+                            "reordered"
+                        } else {
+                            "in the order shown"
+                        }
+                    ))
+                });
+                match seen {
+                    Ok(seen) => eprintln!("x265 {version}, temporal-layers={n} {what}: {seen}"),
+                    Err(why) => eprintln!(
+                        "x265 {version}, temporal-layers={n} {what}: not coded, or not read: {why}"
+                    ),
+                }
+            }
+        }
+        None => eprintln!("x265 {version}: its major version isn't read, so no layers asked for"),
+    }
+
+    // What holds for every version: P frames alone, as the perf pairs are
+    // coded, are as the X5 codes its frames without TSA_N.
+    let p = x265_clip(&dir.0, "p", "bframes=0").unwrap();
+    let (types, timing) = (
+        hevc_picture_types(&p, 0).unwrap(),
+        mp4::track_timing(&p, 0).unwrap(),
     );
     p_only(&types, &timing, 24).unwrap();
-    eprintln!(
-        "x265 asked for temporal layers without B-frames: {:?}",
-        count_types(&types)
-    );
 
-    // Its control: with a B-frame between references, the upper layer's
-    // pictures are non-reference TSA_N, as the X5's, but each is decoded
-    // after the frame shown after it, which the X5 never does, so the
-    // check fails.
-    let b = x265_clip(
-        &dir.0,
-        "layered-b",
-        "bframes=1:b-adapt=0:b-pyramid=0:temporal-layers=1",
-    );
-    let types = hevc_picture_types(&b, 0).unwrap();
-    let timing = mp4::track_timing(&b, 0).unwrap();
-    eprintln!(
-        "x265 asked for temporal layers with a B-frame: {:?}",
-        count_types(&types)
-    );
-    assert!(types.contains(&TSA_N), "{types:?}");
+    // Its control: x265's B-frames are reordered, which the X5 never does,
+    // on every version.
+    let b = x265_clip(&dir.0, "b", ONE_B_FRAME).unwrap();
     let why = must_fail(
-        "x265's TSA_N taken for the X5's",
-        p_only(&types, &timing, 24),
+        "x265's reordered B-frames taken for the X5's P frames",
+        p_only(
+            &hevc_picture_types(&b, 0).unwrap(),
+            &mp4::track_timing(&b, 0).unwrap(),
+            24,
+        ),
     );
     assert!(why.contains("reordered"), "{why}");
+    // And the X5's own coding at 59.94, a TSA_N in every other place, isn't
+    // P only, though nothing is reordered.
+    let mut tsa_n = types.clone();
+    for t in tsa_n.iter_mut().skip(1).step_by(2) {
+        *t = TSA_N;
+    }
+    let why = must_fail(
+        "the X5's TSA_N taken for P only",
+        p_only(&tsa_n, &timing, 24),
+    );
+    assert!(why.contains("picture 1 has NAL type 2"), "{why}");
+}
+
+/// The x265 version every file x265 codes names in its info SEI, which
+/// hw-test reports and a perf pair's stamp holds.
+#[test]
+fn x265_names_its_version_in_the_streams_it_codes() {
+    let _time = timed("x265_names_its_version_in_the_streams_it_codes");
+    let dir = temp_dir("pairs-x265-version");
+    let version = media::x265_version(&dir.0).unwrap();
+    eprintln!("x265 {version}");
+    assert!(
+        version.build > 0 && version.major().is_some(),
+        "{version:?}"
+    );
+    // The probe left nothing behind.
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    let named = |path: &Path| -> Option<X265Version> {
+        hevc_user_data(path, 0)
+            .unwrap()
+            .iter()
+            .find_map(|t| X265Version::parse(t))
+    };
+    // A clip of its own at another size and rate names the same x265.
+    let loud = x265_clip(&dir.0, "loud", "bframes=0").unwrap();
+    assert_eq!(named(&loud).as_ref(), Some(&version));
+    // Its control: a stream coded without the info SEI names none.
+    let quiet = x265_clip(&dir.0, "quiet", "bframes=0:info=0").unwrap();
+    must_fail(
+        "a stream without x265's info SEI read for a version",
+        named(&quiet).is_some(),
+    );
+}
+
+/// A track whose `stsz` counts more samples than its chunks hold, or more
+/// bytes than the file has, is refused before its count sizes anything:
+/// a fixed sample size with a count of 2³² − 1 once asked for 16 GiB.
+#[test]
+fn sample_tables_whose_counts_disagree_are_refused_before_they_size_anything() {
+    let _time = timed("sample_tables_whose_counts_disagree_are_refused_before_they_size_anything");
+    let dir = temp_dir("pairs-stsz");
+    let pair = media::pair_64(
+        "stsz",
+        [LensTrack {
+            frames: 4,
+            keyint: 2,
+        }; 2],
+    );
+    let good = media::write_pair(&pair, &dir.0).unwrap();
+    assert_eq!(hevc_picture_types(&good, 0).unwrap().len(), 4);
+    // Lens 0's `stsz`: its version and flags, its fixed sample size (0,
+    // so that each sample's size follows) and its count.
+    let tree = mp4::read_file(&good).unwrap();
+    let stsz = tree
+        .tracks()
+        .next()
+        .unwrap()
+        .path(&[b"mdia", b"minf", b"stbl", b"stsz"])
+        .unwrap();
+    let at = (stsz.offset + stsz.header_len) as usize;
+    let bytes = std::fs::read(&good).unwrap();
+    assert_eq!(bytes[at + 4..at + 12], [0, 0, 0, 0, 0, 0, 0, 4]);
+    let patched = |name: &str, size: u32, count: u32| -> PathBuf {
+        let mut b = bytes.clone();
+        b[at + 4..at + 8].copy_from_slice(&size.to_be_bytes());
+        b[at + 8..at + 12].copy_from_slice(&count.to_be_bytes());
+        let path = dir.0.join(name);
+        std::fs::write(&path, b).unwrap();
+        path
+    };
+    let refused = |path: &Path| match hevc_picture_types(path, 0) {
+        Err(SynthError::Read { why, .. }) => why,
+        other => panic!("{}: {other:?}", path.display()),
+    };
+    let began = Instant::now();
+    let why = refused(&patched("huge.mp4", 1, u32::MAX));
+    assert!(
+        why.contains("`stsz` counts 4294967295 samples, and its chunks hold 4"),
+        "{why}"
+    );
+    // Four samples of 1 GiB are more than the file holds.
+    let why = refused(&patched("big.mp4", 1 << 30, 4));
+    assert!(why.contains("more than the file's"), "{why}");
+    eprintln!(
+        "the tables refused in {:.3} s",
+        began.elapsed().as_secs_f64()
+    );
+    // Its control: the count the chunks hold isn't refused for its count;
+    // samples of a byte then hold no slice.
+    let why = refused(&patched("held.mp4", 1, 4));
+    must_fail(
+        "a count its chunks hold refused as too many",
+        why.contains("chunks hold"),
+    );
+    assert!(why.contains("picture 0 of track 0 has no slice"), "{why}");
 }
 
 /// How many pictures there are of each NAL type, by type.
