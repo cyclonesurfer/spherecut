@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use spherecut_media::camera::{companion_path, verify_companion};
+use spherecut_media::camera::{Companion, companion_path, verify_companion};
 use spherecut_media::detect::Layout;
 use spherecut_media::probe::{ProbeError, ProbeReport, StreamInfo, StreamKind};
 use spherecut_media::spherical::{Projection, StereoMode};
@@ -178,15 +178,7 @@ fn one(job: Job, detail: Detail, share: usize, cx: &Ctx) -> Value {
     };
     match spherecut_media::probe::probe_cancellable(opened.source(), cx.call.interrupt()) {
         Ok(mut report) => {
-            // An Insta360 master's LRV, or an LRV's master, opened beneath
-            // the roots as the file was (D45). One that isn't there, or
-            // isn't beneath a root, leaves `companion` out.
-            if let Some(other) = companion_path(&report)
-                && let Ok(o) = cx.roots.open_file(&arg, &other)
-            {
-                let c = verify_companion(&report, opened.source().open, o.source());
-                report.camera_file.companion = Some(c);
-            }
+            report.camera_file.companion = companion(&report, &arg, opened.source().open, cx);
             summary(&mut entry, &report);
             if detail == Detail::Full {
                 let (report, cut) = full_report(&report, share);
@@ -206,6 +198,20 @@ fn one(job: Job, detail: Detail, share: usize, cx: &Ctx) -> Value {
             failed(entry, media_error(&arg, &e, detail))
         }
     }
+}
+
+/// The companion of `report`'s file, which `arg` names and is open at
+/// `own`: an Insta360 master's LRV, or an LRV's master, opened beneath
+/// the roots as the file was (D45) and compared with it. None when there
+/// is none, when it isn't there or isn't beneath a root, and when the
+/// call has stopped: the comparison reads both files' exposure records,
+/// up to media's 64 MiB each, and [`probe_all`] drops a stopped call's
+/// entry anyway.
+fn companion(report: &ProbeReport, arg: &str, own: &Path, cx: &Ctx) -> Option<Companion> {
+    let other = companion_path(report)?;
+    cx.call.check().ok()?;
+    let o = cx.roots.open_file(arg, &other).ok()?;
+    Some(verify_companion(report, own, o.source()))
 }
 
 /// A failure to open or probe a file, by its media code, as A1's code
@@ -849,6 +855,60 @@ mod tests {
         // The first entry is kept whatever its size.
         let (entries, _) = probe_all(jobs(5), 10, &cx, |_, _| entry.clone()).unwrap();
         assert_eq!(entries.len(), 1);
+    }
+
+    /// The companion of an Insta360 master is compared while the call
+    /// runs and left out once it has stopped, though the files are there.
+    #[test]
+    fn a_stopped_call_compares_no_companion() {
+        use spherecut_synth::insv::{self, ExposureItem, Records};
+        use spherecut_synth::media::{self, Spec};
+
+        let dir =
+            std::env::temp_dir().join(format!("spherecut-agent-companion-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = media::write(
+            &Spec {
+                frames: 2,
+                ..Spec::default()
+            },
+            &dir.join("made"),
+        )
+        .unwrap();
+        // One exposure item, the same in both files' trailers.
+        let records = Records {
+            metadata: Vec::new(),
+            thumbnail: None,
+            imu: Vec::new(),
+            exposure: vec![ExposureItem {
+                t_us: 1_000_000,
+                seconds: 0.002,
+            }],
+            others: Vec::new(),
+        };
+        let (master, lrv) = (
+            "VID_20261022_101500_00_001.insv",
+            "LRV_20261022_101500_01_001.lrv",
+        );
+        for name in [master, lrv] {
+            insv::append_trailer(&clip, &dir.join(name), &records, None).unwrap();
+        }
+        let roots = Roots::new(std::slice::from_ref(&dir), None).unwrap();
+        let call = CallCx::standalone(Instant::now() + Duration::from_secs(50));
+        let cx = Ctx {
+            roots: &roots,
+            call: &call,
+            image_budget: crate::limits::INLINE_IMAGE_BYTES,
+        };
+        let opened = roots.open_file("files[0]", &dir.join(master)).unwrap();
+        let report = spherecut_media::probe::probe_source(opened.source()).unwrap();
+        let compared = || companion(&report, "files[0]", opened.source().open, &cx);
+        // The control: while the call runs, the two are compared.
+        let live = compared();
+        assert_eq!(live.as_ref().map(|c| c.verified), Some(true), "{live:?}");
+        call.expire();
+        assert_eq!(compared(), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
