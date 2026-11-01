@@ -974,6 +974,61 @@ one lens at 155 fps and the pair at 78 to 79 a lens; VA-API's lens 0
 alone at 28.6 and the serial pair's slower lens at 41.3, with a thread
 a lens at 12.9, which isn't explained yet.
 
+Tenth run, M3.1's perf pairs:
+[`hw-reports/odin-b27c0f9-m31.md`](../hw-reports/odin-b27c0f9-m31.md)
+(the code is 0444568's; the name is the report commit's), 2026-11-01,
+the same PR. `cargo xtask hw-test --no-tier1 --only
+bench_export_pair_decode --only bench_playback_x5_raw --only
+zero_copy_matches_copy_path` in 5634 s: 3 passed. The three two-track
+perf clips took 3501 s to make:
+
+| Clip | Size | Bitrate a lens | Made in |
+|---|---:|---:|---:|
+| `pair-hevc8-3840-2997-noisy-20s.mp4` | 163 MB | 65.3 Mbit/s | 1655 s |
+| `pair-hevc8-2880-5994-noisy-10s.mp4` | 100 MB | 80.2 Mbit/s | 894 s |
+| `pair-hevc8-2880-2997-noisy-20s.mp4` | 201 MB | 80.2 Mbit/s | 952 s |
+
+Their software decode and coding weren't in the run's `--only`, so the
+too-easy flags and the coding cells come from odin's next run (stamps
+from e29bd53 remake the pairs once). Clip 9's K1 and K3 rows repeat the
+ninth run's within 0.2 fps and 1 MiB; the encode beside held 30.0 fps
+on the hardware paths and 29.8 to 30.0 in software. The pairs beside
+the encode, the slower lens's median (K2's export half is huginn's
+rule; these are odin's):
+
+| Clip | Path | Serial | A thread a lens |
+|---|---|---:|---:|
+| 2×2880² at 29.97 | VA-API download | 26.3 | 29.2 |
+| 2×2880² at 29.97 | Vulkan Video download | 47.2 | 45.4 |
+| 2×2880² at 29.97 | Software | 58.5 | 58.0 |
+
+Alone, the slower lens of each pair (fps), beside the X5's files of the
+same size:
+
+| Pair | VA-API serial | VA-API a thread a lens | Vulkan Video serial | Software serial |
+|---|---:|---:|---:|---:|
+| perf 2×3840² at 29.97 | 31.1 | 17.9 | 79.2 | 42.8 |
+| clip 9, 2×3840² at 29.97 | 39.6 | 13.0 | 77.5 | 13.9 |
+| perf 2×2880² at 59.94 | 64.3 | 71.7 | 132.3 | 79.1 |
+| clip 3, 2×2880² at 59.94 | 64.8 | 70.6 | 131.5 | 43.3 |
+
+So the perf pairs are as hard as the X5's files on the engines and
+1.8 to 3.1 times easier in software, where the 150 fps too-easy flag
+doesn't catch it at these sizes: they stand in for the X5 on hardware
+decode only. VA-API's slow thread-a-lens pair at 2×3840² (and lens 0
+alone at 28.5 fps under the serial pair's 39.6) repeats the ninth run's,
+so the huge-page guess is weaker; at 2×2880² threads are as fast or
+faster.
+
+`bench_playback_x5_raw`'s pair rows, unthrottled on odin's default
+(Vulkan, Auto, zero copy; no frame refused, nothing downloaded):
+
+| Pair | fps (range) | Decode p50 / p95 | Upload CPU p50 / p95 | Upload GPU p50 / p95 |
+|---|---:|---:|---:|---:|
+| 2×3840² at 29.97 | 84.0 (82.5 to 85.0) | 11.49 / 11.96 ms | 0.83 / 1.12 ms | 1.09 / 1.11 ms |
+| 2×2880² at 59.94 | 145.5 (144.5 to 146.0) | 6.73 / 6.97 ms | 0.65 / 0.85 ms | 0.66 / 0.67 ms |
+| 2×2880² at 29.97 | 119.5 (117.5 to 120.0) | 8.03 / 9.18 ms | 0.64 / 0.90 ms | 0.66 / 0.67 ms |
+
 ### Framework 13 Pro (Intel Xe3, Arch)
 
 Not available yet.
