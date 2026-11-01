@@ -153,6 +153,19 @@ Current benchmarks:
   - `bench_playback_realtime_8k_8bit`: the 8K perf clip, recorded.
   - `bench_playback_x5_raw`: the longest X5 file of each mode, both
     lenses as two streams, on each decoder, recorded (M3's 8K budget).
+    Then each two-track perf clip (below, from M3.1), both tracks
+    opened as a sample's are, unthrottled only, for up to 30 s:
+    `perf clip <name>, <decoder>: decoded per second, unthrottled` on
+    `Auto`'s hardware as the app plays it by default, and again as
+    `VA-API (Auto, SPHERECUT_ZERO_COPY=1)` where `Auto` picks VA-API and
+    the GPU imports DMA-BUFs (path A), with a note of each run's frames,
+    decode paths and stages. A note compares path A's median second with
+    the copy's, for D25's revisit (M3 plan 4.3's K2), and another gives
+    K2's engine half from `pair-hevc8-2880-2997-noisy-20s`: decided on
+    `VA-API (Auto)` with its frames copied, and a pass when every full
+    second decodes 36 fps a lens or more, on VA-API throughout, without
+    a stall. It plays whichever of the samples and the pairs are there,
+    and a stall fails it.
   - `bench_x5_8k30_zero_copy_vs_copy` (slice 5b, D25): each X5 mode
     on VA-API with the copy, VA-API with zero copy (frames imported as
     DMA-BUFs) and Vulkan Video with the copy, recorded with the
@@ -167,6 +180,31 @@ Current benchmarks:
     flagged **too easy** over 150 fps; a two-track clip a lens at a
     time, `perf clip <name> lens <k>: software decode`, so that each
     track is flagged on its own.
+- **`bench_export_pair_decode`** (M3.1, M3 plan 4.3's P-DEC,
+  `crates/export/tests/tier2_pair_decode.rs`): the export's pair decode
+  as section 12 runs it, two `HwOutput::Download` decoders on a
+  dual-fisheye file's lens tracks, `serial` (one thread steps both) and
+  `a thread a lens`, on `VA-API download`, `Vulkan Video download` and
+  `software`, over the X5 8K30 clip 9 (`handheld_flips`), the 8K25,
+  5.7K60 and 4K120 samples, and the three two-track perf clips. Frames
+  are held as the export will hold them, 5 a lens. Rows, under
+  `pair decode <clip>, <path>, <setup>`: `slower lens beside the encode`
+  or `slower lens alone` (fps a lens: the frames after the first over
+  the time from both lenses' first frame), `opening` (ms) and
+  `peak RSS growth beside the encode` or `alone` (MiB), with
+  `the encode beside` (fps) on the gated rows. The gated rows, clip 9
+  (K1 and K4) and `pair-hevc8-2880-2997-noisy-20s` (K2's export half),
+  decode 600 frames a lens beside an `h264_vaapi` encode of a fixed
+  3840×2160 frame at 30 fps, once to warm up and then three times; the
+  rest decode up to 600 frames once, alone. For K3 each path also
+  decodes clip 9 alone, as a pair and as lens 0 by itself
+  (`…, <setup>, for K3` and `…, lens 0 only, for K3`). Every run is a
+  child process of its own, so that its peak RSS growth is its own. A
+  note per K gives its verdict by the plan's rule: Pass, the redirect
+  the plan names, or not decided and why. A verdict never fails the
+  test; a run that fails does, and with no hardware row at clip 9 it
+  skips. On odin it should take about 25 minutes, most of it
+  software's gated rows.
 - **The perf clips** (DECISIONS D37): hw-test makes them once, with
   libx265 at an average bitrate, into `<cargo target dir>/hw-media/`:
   `hevc8-5k7-30fps-noisy-20s.mp4` and `hevc10-5k7-30fps-noisy-20s.mp4`
