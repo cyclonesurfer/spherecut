@@ -18,7 +18,7 @@ mod insv;
 mod lavapipe;
 
 use lavapipe::lavapipe_icd;
-use spherecut_synth::insv::InsvFault;
+use spherecut_synth::insv::{self as synth_insv, InsvFault};
 use spherecut_testkit::control::must_fail;
 
 fn missing_node() -> PathBuf {
@@ -387,6 +387,165 @@ fn doctor_file_says_whether_an_insv_can_be_stitched() {
     assert_eq!(v["result"]["file"], Value::Null);
     assert!(v["result"].get("decoders").is_some(), "{v}");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `doctor --file` says why a file can't be stitched when its trailer is
+/// there but can't be read (its tail's size past the file, or its magic
+/// changed in an `inst` box), carrying the probe's own words and its
+/// `bad_trailer` warning; when the camera names a calibration whose
+/// string doesn't parse; and when the file has no video stream at all,
+/// which is a check like any other, not a failed run.
+#[test]
+fn doctor_file_says_why_a_trailer_or_a_video_stream_is_missing() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("doctor-file-why-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = |path: &Path| {
+        let out = doctor(&["--file", path.to_str().unwrap()]);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let json = |path: &Path| {
+        let v = document::document(&doctor(&["--json", "--file", path.to_str().unwrap()]).stdout);
+        assert_eq!(v["ok"], true, "{v}");
+        v["result"]["file"].clone()
+    };
+
+    // A trailer whose tail gives more than the file holds: read_trailer's
+    // error, the probe's `bad_trailer` warning, both in doctor's words.
+    let cut = insv::master(
+        &dir,
+        "VID_20261022_101500_00_001.insv",
+        Some(InsvFault::TruncatedTrailer),
+    );
+    let t = text(&cut.path);
+    let unreadable =
+        "  missing: a camera trailer that can be read: the Insta360 trailer can't be read: ";
+    assert!(t.contains(unreadable), "no {unreadable:?} in:\n{t}");
+    assert!(t.contains("  can be stitched: no\n"), "{t}");
+    must_fail(
+        "an unreadable trailer, said to be missing",
+        t.contains("missing: a camera trailer: Spherecut stitches"),
+    );
+    let f = json(&cut.path);
+    let warned: Vec<&Value> = f["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["code"] == "bad_trailer")
+        .collect();
+    assert_eq!(warned.len(), 1, "{f:#}");
+    let said = warned[0]["message"].as_str().unwrap();
+    assert!(
+        said.starts_with(&format!(
+            "{}: the Insta360 trailer can't be read: ",
+            cut.path.display()
+        )),
+        "{said}"
+    );
+    // Its text gives the warning too.
+    assert!(t.contains(&format!("  warning: {said}\n")), "{t}");
+
+    // The magic's last byte changed: the file ends in an `inst` box with
+    // no trailer after it.
+    let magic = insv::master(
+        &dir,
+        "VID_20261022_101500_00_002.insv",
+        Some(InsvFault::BadMagic),
+    );
+    let t = text(&magic.path);
+    let want = "  missing: a camera trailer that can be read: the file ends in an `inst` box, where \
+                Insta360 cameras put their trailer, but not in the trailer's magic: byte ";
+    assert!(t.contains(want), "no {want:?} in:\n{t}");
+    must_fail(
+        "a damaged magic, said to be missing",
+        t.contains("missing: a camera trailer: Spherecut stitches"),
+    );
+
+    // Field 136 names V6, whose string has lost its last token: the
+    // camera says which calibration it uses, and that one doesn't parse.
+    let mut records = insv::records();
+    for f in records.metadata.iter_mut().filter(|f| f.number == 111) {
+        if let synth_insv::Value::Bytes(s) = &mut f.value {
+            let last = s.iter().rposition(|&b| b == b'_').unwrap();
+            s.truncate(last);
+        }
+    }
+    let v6 = insv::master_with(&dir, "VID_20261022_101500_00_003.insv", &records, None);
+    let t = text(&v6.path);
+    let want = "  missing: the calibration in use: the camera says it uses its v6 calibration \
+                (field 136), which the trailer doesn't hold or which doesn't parse; it holds v3\n";
+    assert!(t.contains(want), "no {want:?} in:\n{t}");
+    must_fail(
+        "a calibration the camera names, worded as one it doesn't",
+        t.contains("doesn't say it uses one of them"),
+    );
+
+    // A file with only an audio stream probes, so it is a check, with no
+    // lenses and "a video stream" missing; the run is ok.
+    let audio = audio_only(&dir);
+    let f = json(&audio);
+    assert_eq!(f["lenses"], json!([]), "{f:#}");
+    assert_eq!(f["stitchable"], false, "{f:#}");
+    let no_video = "a video stream: the file has none, so it has no lenses to stitch";
+    assert_eq!(f["missing"][0], no_video, "{f:#}");
+    let t = text(&audio);
+    assert!(t.contains(&format!("  missing: {no_video}\n")), "{t}");
+    assert!(!t.contains("  stream #"), "{t}");
+    // The control: a file with video streams isn't missing one.
+    let f = json(&cut.path);
+    must_fail(
+        "a master with two video streams, missing a video stream",
+        f["missing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m.as_str().is_some_and(|m| m.starts_with("a video stream"))),
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A file in `dir` with one AAC stream and nothing else: a synthetic
+/// clip's audio, remuxed alone into an MP4.
+// Reads a file this test wrote and writes another with ffmpeg-next alone,
+// apart from Spherecut's confined open (D24).
+#[allow(clippy::disallowed_methods)]
+fn audio_only(dir: &Path) -> PathBuf {
+    use spherecut_media::ff;
+    use spherecut_synth::media::{self, Audio, Spec};
+
+    let clip = media::write(
+        &Spec {
+            name: "with-audio".into(),
+            frames: 6,
+            audio: Audio::Stereo,
+            ..Spec::default()
+        },
+        &dir.join("with-audio"),
+    )
+    .unwrap();
+    let dst = dir.join("audio-only.m4a");
+    let mut ictx = ff::format::input(&clip).unwrap();
+    let mut octx = ff::format::output_as(&dst, "mp4").unwrap();
+    let st = ictx.streams().best(ff::media::Type::Audio).unwrap();
+    let (index, tb) = (st.index(), st.time_base());
+    let mut out = octx
+        .add_stream(ff::encoder::find(ff::codec::Id::None))
+        .unwrap();
+    out.set_parameters(st.parameters());
+    out.set_time_base(tb);
+    octx.write_header().unwrap();
+    for (st, mut pkt) in ictx.packets() {
+        if st.index() != index {
+            continue;
+        }
+        let out_tb = octx.stream(0).unwrap().time_base();
+        pkt.rescale_ts(tb, out_tb);
+        pkt.set_stream(0);
+        pkt.set_position(-1);
+        pkt.write_interleaved(&mut octx).unwrap();
+    }
+    octx.write_trailer().unwrap();
+    dst
 }
 
 /// The file at `path` with every sample of its track `track` (in file

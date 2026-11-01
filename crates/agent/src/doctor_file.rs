@@ -15,9 +15,12 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::Serialize;
+use spherecut_camera::insta360::calib::Generation;
 use spherecut_core::TimeSpec;
 use spherecut_media::Source;
 use spherecut_media::backend::SeekMode;
+use spherecut_media::detect::Layout;
+use spherecut_media::probe::{ProbeReport, codes, escape_controls};
 
 use crate::contract::{DecodeInfo, ErrorBody, SourceInfo, Warning};
 use crate::still::{self, Failure, Still, Stop};
@@ -42,7 +45,8 @@ pub struct FileCheck {
     /// That calibration's generation, `v6` on the X5, or null.
     pub calibration: Option<String>,
     /// Each lens stream, its first frame decoded on the chosen path; the
-    /// first video stream alone for a file with no lens streams.
+    /// first video stream alone for a file with no lens streams, and none
+    /// for a file with no video stream.
     pub lenses: Vec<LensCheck>,
     /// How sure its lenses' geometry is: `provisional` until M3.5's
     /// built-in table and M3.6's fit.
@@ -53,9 +57,10 @@ pub struct FileCheck {
     /// One line: the camera, its firmware and the geometry, such as
     /// "Insta360 X5 v1.1.22, geometry provisional".
     pub summary: String,
-    /// What probing the file and opening its lenses warned of, such as
-    /// damage, each once: frame's warnings, which doctor's envelope
-    /// doesn't carry.
+    /// What probing the file and opening its lenses warned of, each
+    /// once: the probe's damage and its warnings (a `bad_trailer` among
+    /// them), then frame's warnings, which doctor's envelope doesn't
+    /// carry.
     pub warnings: Vec<Warning>,
 }
 
@@ -77,21 +82,28 @@ pub struct LensCheck {
 /// Checks the file at `src`, each lens on the path `opts` chooses (its
 /// decoder and render node; `equirect` and `stream` are set here). A file
 /// that can't be probed is the probe's failure; one that probes is a
-/// [`FileCheck`] whatever it says. It reads and decodes, so it runs off
-/// the UI thread (D34).
+/// [`FileCheck`] whatever it says, one with no video stream among them.
+/// It reads and decodes, so it runs off the UI thread (D34).
 pub fn check(src: Source<'_>, opts: &still::Options, stop: &Stop) -> Result<FileCheck, Failure> {
-    let mut warnings = Vec::new();
     let any = still::Options {
         // Dual fisheye isn't a stitched equirect; doctor doesn't draw it.
         equirect: true,
         stream: None,
         ..opts.clone()
     };
-    let probed = still::probe(src, &any, stop, &mut warnings)?;
-    let r = &probed.report;
-    let tracks = match &r.camera_file.lenses {
-        Some(l) => l.tracks.to_vec(),
-        None => vec![probed.stream.index],
+    let report = still::probe_report(src, stop)?;
+    let mut warnings = probe_warnings(&report);
+    let (report, tracks) = if still::video_streams(&report).is_empty() {
+        (report, Vec::new())
+    } else {
+        let mut chosen = Vec::new();
+        let probed = still::probed(report, &any, stop, &mut chosen)?;
+        add_new(&mut warnings, chosen);
+        let tracks = match &probed.report.camera_file.lenses {
+            Some(l) => l.tracks.to_vec(),
+            None => vec![probed.stream.index],
+        };
+        (probed.report, tracks)
     };
     let lenses: Vec<LensCheck> = tracks
         .into_iter()
@@ -103,26 +115,15 @@ pub fn check(src: Source<'_>, opts: &still::Options, stop: &Stop) -> Result<File
             lens(src, stream, &one, stop, &mut warnings)
         })
         .collect();
+    let r = &report;
     let calibration = r.camera_file.calibration.as_ref();
     let in_use = calibration.and_then(|c| c.in_use.clone());
-    let mut missing = Vec::new();
-    if r.camera_file.records.is_none() {
-        missing.push("a camera trailer: Spherecut stitches Insta360 dual-fisheye files".into());
-    } else if r.camera_file.lenses.is_none() {
-        missing.push(
-            "two lens streams: an LRV holds both lenses in one picture, so stitch its master"
-                .into(),
+    let mut missing = trailer_missing(r);
+    if lenses.is_empty() {
+        missing.insert(
+            0,
+            "a video stream: the file has none, so it has no lenses to stitch".into(),
         );
-    }
-    if r.camera_file.records.is_some() {
-        match calibration {
-            None => missing.push("a calibration: the trailer holds none that parses".into()),
-            Some(c) if c.in_use.is_none() => missing.push(format!(
-                "the calibration in use: the trailer holds {} but doesn't say it uses one of them",
-                c.generations.join(" and ")
-            )),
-            Some(_) => {}
-        }
     }
     for l in lenses.iter().filter(|l| !l.decodes) {
         missing.push(format!(
@@ -157,6 +158,86 @@ pub fn check(src: Source<'_>, opts: &still::Options, stop: &Stop) -> Result<File
     })
 }
 
+/// What the probe of `r` warned of, as frame words it, each once: its
+/// damage, then its warnings, each naming the file.
+fn probe_warnings(r: &ProbeReport) -> Vec<Warning> {
+    let file = r.path.display();
+    let damage = r
+        .damage
+        .iter()
+        .map(|d| Warning::new(d.code, format!("{file} is damaged: {}", d.message)));
+    let warned = r
+        .warnings
+        .iter()
+        .map(|w| Warning::new(w.code, format!("{file}: {}", w.message)));
+    let mut out = Vec::new();
+    add_new(&mut out, damage.chain(warned));
+    out
+}
+
+/// `more` added to `warnings`, each one `warnings` doesn't hold already
+/// (each lens's probe gives the file's damage again).
+fn add_new(warnings: &mut Vec<Warning>, more: impl IntoIterator<Item = Warning>) {
+    for w in more {
+        if !warnings.contains(&w) {
+            warnings.push(w);
+        }
+    }
+}
+
+/// What the camera's trailer leaves missing for a stitch, in words: the
+/// trailer itself, or the trailer when it can't be read, with the
+/// probe's own words on why; the two lens streams; the calibration the
+/// camera says it uses.
+fn trailer_missing(r: &ProbeReport) -> Vec<String> {
+    let f = &r.camera_file;
+    let mut missing = Vec::new();
+    if f.records.is_none() {
+        // With no records, a `bad_trailer` warning is about the trailer
+        // as a whole: one there whose tail, index or magic can't be read.
+        let unreadable = r.warnings.iter().find(|w| w.code == codes::BAD_TRAILER);
+        missing.push(match unreadable {
+            Some(w) => format!("a camera trailer that can be read: {}", w.message),
+            None => "a camera trailer: Spherecut stitches Insta360 dual-fisheye files".into(),
+        });
+        return missing;
+    }
+    let videos = still::video_streams(r).len();
+    if f.lenses.is_none() && videos > 0 {
+        let layout = r.camera.as_ref().map(|c| c.layout);
+        missing.push(if layout == Some(Layout::LowResCompanion) {
+            "two lens streams: an LRV holds both lenses in one picture, so stitch its master".into()
+        } else {
+            format!(
+                "two lens streams: the file has {videos} video stream{}",
+                if videos == 1 { "" } else { "s" }
+            )
+        });
+    }
+    match f.calibration.as_ref() {
+        None => missing.push("a calibration: the trailer holds none that parses".into()),
+        Some(c) if c.in_use.is_none() => missing.push(match c.offset_version {
+            None => format!(
+                "the calibration in use: the trailer holds {} but doesn't say it uses one of them",
+                c.generations.join(" and ")
+            ),
+            Some(v) => match Generation::of_offset_version(v) {
+                Some(g) => format!(
+                    "the calibration in use: the camera says it uses its {} calibration (field 136), which the trailer doesn't hold or which doesn't parse; it holds {}",
+                    g.to_string().to_lowercase(),
+                    c.generations.join(" and ")
+                ),
+                None => format!(
+                    "the calibration in use: the trailer's field 136 is {v}, which names no calibration Spherecut reads; it holds {}",
+                    c.generations.join(" and ")
+                ),
+            },
+        }),
+        Some(_) => {}
+    }
+    missing
+}
+
 /// Lens stream `stream`'s first frame, decoded as `opts` say, with what
 /// decoding it warned of added to `warnings` unless they hold it already
 /// (the file's probe gave its damage before).
@@ -169,11 +250,7 @@ fn lens(
 ) -> LensCheck {
     let mut mine = Vec::new();
     let out = first_frame(src, stream, opts, stop, &mut mine);
-    for w in mine {
-        if !warnings.contains(&w) {
-            warnings.push(w);
-        }
-    }
+    add_new(warnings, mine);
     out
 }
 
@@ -222,7 +299,9 @@ fn short_firmware(f: &str) -> &str {
 pub fn render_text(f: &FileCheck) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "\nFile {}", Path::new(&f.path).display());
-    let _ = writeln!(s, "  {}", f.summary);
+    // The camera's name and firmware are the file's: their control
+    // characters are escaped, as probe's text escapes them.
+    let _ = writeln!(s, "  {}", escape_controls(&f.summary));
     let _ = writeln!(
         s,
         "  can be stitched: {}",
@@ -253,7 +332,10 @@ pub fn render_text(f: &FileCheck) -> String {
         let _ = writeln!(s, "  stream #{}  {what}, {how}", l.stream);
     }
     for m in &f.missing {
-        let _ = writeln!(s, "  missing: {m}");
+        let _ = writeln!(s, "  missing: {}", escape_controls(m));
+    }
+    for w in &f.warnings {
+        let _ = writeln!(s, "  warning: {}", escape_controls(&w.message));
     }
     s
 }

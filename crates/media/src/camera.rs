@@ -47,7 +47,10 @@ pub struct CameraFile {
     /// How many items record 4 holds: one a frame the camera exposed,
     /// from a few before the tracks' first (insta360.md §3.4).
     pub exposure_entries: Option<u64>,
-    /// The trailer's records, as its index lists them.
+    /// The records the trailer's index lists that lie inside the
+    /// trailer; a slot whose record runs into the index or past the file
+    /// is left out, with a [`codes::BAD_TRAILER`] warning. None when the
+    /// file has no trailer or its trailer can't be read.
     pub records: Option<Vec<RecordInfo>>,
 }
 
@@ -77,6 +80,13 @@ pub struct Calibration {
     /// [`spherecut_camera::insta360::Calibrations::hash`]: 16 hex digits
     /// of FNV-1a 64 over the working strings.
     pub hash: String,
+    /// Field 136 as the trailer gives it, whether or not it names a
+    /// generation whose string parses: what `doctor --file` tells a
+    /// calibration the camera names but that doesn't parse from one it
+    /// doesn't name. Not in the JSON, where `in_use` and a
+    /// [`codes::BAD_TRAILER`] warning say as much.
+    #[serde(skip)]
+    pub offset_version: Option<u64>,
 }
 
 /// Field 27: `src`, the square on the canvas; `dst`, the track's; and
@@ -278,6 +288,7 @@ fn calibration(m: &Metadata, warnings: &mut Vec<Problem>) -> Option<Calibration>
             offset: w.offset,
         }),
         hash: m.calib.hash(),
+        offset_version: m.offset_version,
     })
 }
 

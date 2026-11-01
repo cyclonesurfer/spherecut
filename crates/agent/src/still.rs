@@ -152,15 +152,29 @@ pub fn probe(
     stop: &Stop,
     warnings: &mut Vec<Warning>,
 ) -> Result<Probed, Failure> {
-    let file = src.name;
-    let report = match probe::probe_cancellable(src, stop.flag.clone()) {
-        Ok(r) => r,
-        Err(e) => {
-            let mut f = about(failure(e.code(), e.to_string()), file);
-            f.ffmpeg_log = e.ffmpeg_log;
-            return Err(f);
-        }
-    };
+    let report = probe_report(src, stop)?;
+    probed(report, opts, stop, warnings)
+}
+
+/// Step 4's probe alone: `src` probed through the confinement (D24), or
+/// probe's failure for it, with nothing chosen or checked yet.
+pub fn probe_report(src: Source<'_>, stop: &Stop) -> Result<ProbeReport, Failure> {
+    probe::probe_cancellable(src, stop.flag.clone()).map_err(|e| {
+        let mut f = about(failure(e.code(), e.to_string()), src.name);
+        f.ffmpeg_log = e.ffmpeg_log;
+        f
+    })
+}
+
+/// The rest of step 4, on a report [`probe_report`] made: its video
+/// stream chosen and checked as [`probe`] does, and its damage a warning.
+pub fn probed(
+    report: ProbeReport,
+    opts: &Options,
+    stop: &Stop,
+    warnings: &mut Vec<Warning>,
+) -> Result<Probed, Failure> {
+    let file = report.path.as_path();
     let stream = choose_stream(&report, opts.stream, file)?.clone();
     if !opts.equirect {
         check_equirect(&report, &stream)?;
@@ -184,6 +198,18 @@ pub fn equirect_doubt(probed: &Probed) -> Option<String> {
         .map(|f| f.message)
 }
 
+/// The report's video streams that aren't cover pictures, which
+/// [`probe`] chooses from.
+pub fn video_streams(report: &ProbeReport) -> Vec<&StreamInfo> {
+    report
+        .streams
+        .iter()
+        .filter(|s| {
+            s.kind == StreamKind::Video && !s.disposition.iter().any(|d| d == "attached_pic")
+        })
+        .collect()
+}
+
 /// `stream`, which must be a video stream, else the first video stream
 /// that isn't a cover picture. A `stream` the file hasn't is a usage
 /// error, which says what the file has; the caller names its flag.
@@ -192,10 +218,7 @@ fn choose_stream<'r>(
     stream: Option<usize>,
     file: &Path,
 ) -> Result<&'r StreamInfo, Failure> {
-    let is_video = |s: &&StreamInfo| {
-        s.kind == StreamKind::Video && !s.disposition.iter().any(|d| d == "attached_pic")
-    };
-    let videos: Vec<&StreamInfo> = report.streams.iter().filter(is_video).collect();
+    let videos = video_streams(report);
     match stream {
         Some(n) => videos
             .iter()
