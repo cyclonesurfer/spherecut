@@ -9046,7 +9046,8 @@ or 1 % of shape lets a wrong project through.
   parsing.** M3 reads the X5's trailer and DJI's calibration block with
   its own parsers, from `docs/formats/`, and does not use telemetry-parser
   even as a test oracle; DJI's field numbers come from OpenOSV's proto
-  instead (`docs/design/m3-plan.md` section 20, and D62 in its section 23).
+  instead (`docs/design/m3-plan.md` section 20, and D62 in its section 23,
+  which M3.21 records here).
   What stays open is only whether M4 uses it to parse the IMU. Its licence
   is MIT OR Apache-2.0 and its geometry is Studio-derived
   (`docs/formats/insta360.md` §8), so the parts M4 could use are its

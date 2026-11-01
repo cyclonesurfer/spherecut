@@ -74,6 +74,37 @@ What they show [bytes]:
   that take was shot in the camera's HDR video mode, so the enum value holds on the X5. The
   HDR take is still 8-bit BT.709 `standard`; HDR here is the camera's exposure mode, not an HDR
   transfer function.
+- **Calibration strings**: all four generations, **byte-identical in all 7 masters and all 7
+  LRVs**, so in every mode and take (2026-11-01): they belong to the camera unit. V1, V2 and
+  V3 share their centres and angles; V6 is a separate calibration. V3 and V6 below, laid out as
+  in §4.2, each number its token as stored: ξ and t to 6 decimals, focal, centre and angles to
+  3, the distortion terms to 8. M3's plan (7.1) and synth's lens tests
+  (`crates/synth/src/lens.rs`) take their numbers from here.
+
+```
+V3 (word 0x30400)
+  lens 0: xi 2.000000  fx 4284.620 fy 4284.280  cx 2701.130 cy 2692.130
+          ypr -0.198 0.211 90.280  t 0.000000 0.000000 0.000000
+          k1 0.18632051 k2 2.04984355 k3 -3.24446917  p1 -0.00143576 p2 -0.00339240
+          10752 5376 113
+  lens 1: xi 2.000000  fx 4291.030 fy 4291.030  cx 8069.000 cy 2684.950
+          ypr 0.239 0.113 89.107  t -0.004460 0.000017 -0.031920
+          k1 0.18940836 k2 2.07073069 k3 -3.24103332  p1 0.00013831 p2 -0.00299873
+          10752 5376 113
+V6 (word 0x60400)
+  lens 0: xi 2.000000  fx 4277.520 fy 4277.270  cx 2713.050 cy 2689.210
+          ypr -0.310 -0.271 90.255  t 0.000000 0.000000 0.000000
+          d0..d12: 0.28032997 0.89045405 2.04927588 -8.05179787 0.00000000
+                   0.00120200 -0.00259487 0.02324706 0.00533920
+                   -0.01560208 0.00019357 -0.04580523 0.00197187
+          10752 5376 113
+  lens 1: xi 2.000000  fx 4284.400 fy 4284.760  cx 8075.730 cy 2680.350
+          ypr 0.120 -0.173 89.112  t 0.000637 0.000001 -0.031525
+          d0..d12: 0.27665332 0.98522973 1.83605266 -7.99374485 0.00000000
+                   0.00021056 -0.00147626 0.01940425 0.00331838
+                   -0.01330665 0.00074511 -0.02859299 0.00888746
+          10752 5376 113
+```
 
 Open questions this answers: Q1 (model and firmware), Q13 (25 fps timebase; no `_10_` on the
 X5), Q14 (every mode is one file plus an LRV), Q16 (thumbnail record), and the LRV half of Q2
@@ -132,8 +163,9 @@ the pinned commit*. The full list is at the end.
    GPL-3.0-or-later. But crates.io only has 0.2.6 from 2022, which lacks X4, X5, X6 and the A1.
    Its current geometry module is derived from Insta360 Studio disassembly. Section 8 recommends
    writing our own trailer reader and using telemetry-parser only as a test oracle, or as a
-   pinned git dependency for the parsing alone. (M3: not used, not even as an oracle; D62,
-   `docs/design/m3-plan.md` §20. M4 still decides whether it parses the IMU.)
+   pinned git dependency for the parsing alone. (M3: not used, not even as an oracle, by
+   `docs/design/m3-plan.md` §20 and the plan's D62 (§23), which DECISIONS.md records at M3.21.
+   M4 still decides whether it parses the IMU.)
 
 ## 2. Container layout
 
@@ -232,7 +264,13 @@ index, and set the clip length to the shorter track. Warn when a `_10_` file has
 ### 2.5 Multi-track files
 
 The two video tracks share frame rate and size and are frame-locked. [reported]
-`OR insta360-x5.md §3.1` The X5 can carry **two AAC streams** when an external mic is
+`OR insta360-x5.md §3.1` On the X5 the tracks' own tables say so [bytes]: on all 7 of Pat's
+masters, both lenses have the same timescale, frame count, first pts (0), edit list (one edit
+from media time 0), `stts` (one run of 1001 ticks, or 1000 at 25 fps), `ctts` (every offset 0)
+and `stss` (a keyframe every 2 s at 29.97, 25 and 59.94 fps, every 1 s at 119.88), and each
+LRV starts 0 master frames from its master. So frame *n* of track 0 is frame *n* of track 1
+by clip time, with no offset (P-TRK, `media::mp4::track_timing` and the Tier 2c test
+`samples_x5_tracks_equal`, M3.0, 2026-11-01). The X5 can carry **two AAC streams** when an external mic is
 connected, and nothing in the container says which is which. [reported] `OR insta360-x5.md
 §3.1`
 
@@ -718,7 +756,7 @@ Do not hard-code 0.9 ms or −7.3 ms until our own samples (clips 9 and 10) say 
 | ONE X2 | `LRV_…_11_NNN.insv` | H.264 Main 736×368, 25 fps, about 14 Mb/s, GOP 15 | packed 2:1, **left half = `_00_`**, one frame shorter than `_00_` | full; IMU, exposure and record 9 are byte-identical to `_00_`; metadata differs in field 9 and `file_group_info.index` = 1 | [reported] `OR insta360-one-x2.md §3.2` |
 | X3 and ONE X | `LRV_…_{01,11}_…` | ? | packed 2:1 presumably | ? | [vendor] names only |
 | X4, X4 Air | `LRV_…_01_….lrv` | ? | ? | ? | [unverified] |
-| X5 | `LRV_…_01_….lrv` | H.264 High **1664×832, 25 fps for a 25 fps master and 29.97 fps otherwise** (60 and 120 fps masters too, with half and a quarter of their frames), about 8 Mb/s [bytes]; "always 29.97 fps" and about 4 Mb/s [reported]; B-frames, GOP 30 [reported]; full-range BT.709 [bytes] | packed 2:1, **left half = `.insv` track 1, right half = track 0** [bytes] | full: every record but the metadata byte-identical to the master's [bytes] | [bytes] Pat's X5 samples; [reported] `OR insta360-x5.md §3.2`, `GV FORMAT.md` |
+| X5 | `LRV_…_01_….lrv` | H.264 High **1664×832, 25 fps for a 25 fps master and 29.97 fps otherwise** (60 and 120 fps masters too, with half and a quarter of their frames), about 8 Mb/s [bytes]; "always 29.97 fps" and about 4 Mb/s [reported]; B-frames [reported]; a keyframe every 1 s, every 30 frames at 29.97 and 25 at 25 fps [bytes] (P-TRK, M3.0; "GOP 30" [reported]); full-range BT.709 [bytes] | packed 2:1, **left half = `.insv` track 1, right half = track 0** [bytes] | full: every record but the metadata byte-identical to the master's [bytes] | [bytes] Pat's X5 samples; [reported] `OR insta360-x5.md §3.2`, `GV FORMAT.md` |
 | X6 | `.lrv` | 2048×1024, 8-bit HLG | packed | full | [reported] `GV FORMAT.md` |
 | A1 | `.prx` | | | metadata and thumbnail only, no IMU | [code] commit message of `TP` 5051b45 |
 
@@ -742,7 +780,7 @@ X5, left = track 1 [bytes]), and the mapping from proxy pixels to calibration ca
 | ONE RS 1-inch 360 | H.264 | H.264 [reported] | 3072² at 24 fps [reported]; vendor lists 6K 6144×3072@25/24, 5888×2944@30, 4K 3840×1920, 3K 3040×1520@50 | ? | 120 Mb/s |
 | X4 | H.264, H.265 | `hvc1` whose **hvcC profile, tier and level bytes are zero** [reported] `RF` | 3840² (8K), 2880² (5.7K), 1920² (4K) [unverified] | **unknown**, including 10-bit | 200 Mb/s |
 | X4 Air | H.264, H.265 | `hvc1` 8-bit [reported, one recording] | ? | ? | 180 Mb/s |
-| X5 | H.264, H.265 | HEVC Main `hvc1`, about 94 Mb/s at 8K30, GOP 60, no B-frames | 3840² (8K30), 2880² (5.7K, 5.7K+, 5.7K60), 1920² (4K120) | **8-bit `yuvj420p` full range, BT.709, in every mode including I-Log** [reported] `OR` | 180 Mb/s |
+| X5 | H.264, H.265 | HEVC Main `hvc1`, about 94 Mb/s at 8K30, GOP 60, no B-frames; a keyframe every 2 s at 29.97, 25 and 59.94 fps and every 1 s at 119.88, and `ctts` all 0, in both tracks [bytes] (P-TRK, M3.0, §2.5) | 3840² (8K30), 2880² (5.7K, 5.7K+, 5.7K60), 1920² (4K120) | **8-bit `yuvj420p` full range, BT.709, in every mode including I-Log** [reported] `OR` | 180 Mb/s |
 | X6 | H.265 | HEVC **Main 10** in every mode | 3840² (8K, 50 fps), 3008² (6K), 1920² (4K) | Standard and I-Log tagged BT.709; **Dolby Vision is HLG BT.2020 limited range with no RPU**; colour in the SPS only, no `colr` box [reported] `OR insta360-x6.md`, `GV FORMAT.md` | 180 Mb/s |
 | A1 | | HEVC `hvc1` with a **blank hvcC** | 3840² | 8-bit full range BT.709 [reported] | |
 
@@ -808,9 +846,10 @@ own comment requires. The alternative is to vendor a pinned copy as a path crate
   branch `legacy`, has no `docs/360/oracle`.
 - The protobuf enum names were "read out of [the vendor's] embedded schema" (`TP rig.rs:610`).
 - **video-types**, a telemetry-parser dependency, states vendor internals too: its
-  `RadtanDistortPro` name and reading of V6 (§4.3), Insta360's 98° mask and a 6° blend ending
-  at 93° (0.1.2 `src/geometry.rs:1267, 1451-1452, 1622-1630`). M3's plan (4.1 rule 7) keeps
-  them out of Spherecut, as it does the rig files above.
+  `RadtanDistortPro` name and reading of V6 (§4.3), and a mask angle and blend width it gives
+  for Insta360's lenses (0.1.2 `src/geometry.rs:1267, 1451-1452, 1622-1630`; their values are
+  left out here on purpose). M3's plan (4.1 rule 7) keeps them out of Spherecut, as it does the
+  rig files above.
 - PROMPT.md allows "reverse engineering my own sample files". Disassembling the vendor's
   application is a different act, and Studio's EULA terms are unknown to me. **This is a
   decision for the user, not legal advice.**
@@ -836,8 +875,9 @@ naming only the field numbers used. Build our own geometry from the strings and 
 measurements. Keep telemetry-parser out of the shipped graph. Use it as a **differential-test
 oracle** in a separate, non-workspace tool or in xtask behind a feature, so it never enters
 `cargo deny`'s product graph, and compare IMU samples, timestamps and string parses on every
-sample clip. (M3: not used, not even as an oracle, for the X5's trailer or DJI's calibration;
-D62, `docs/design/m3-plan.md` §20. M4 still decides whether it parses the IMU.) If the user
+sample clip. (M3: not used, not even as an oracle, for the X5's trailer or DJI's calibration,
+by `docs/design/m3-plan.md` §20 and the plan's D62 (§23), which DECISIONS.md records at M3.21.
+M4 still decides whether it parses the IMU.) If the user
 also wants it for GoPro GPMF or DJI telemetry, reconsider a pinned
 git dependency (`rev = "2817b42"`) that uses only its parsing output (`Lens/Data` and the IMU
 tags) and never its `Lens/Rig`. That needs `allow-git`, a DECISIONS.md entry, and the user's

@@ -237,7 +237,8 @@ settings, or has "ultracode" in its prompt, before the first workflow.
       and does not use telemetry-parser, not even as a test oracle: git
       sources are forbidden, crates.io's 0.2.x predates the X5, and its
       geometry is Studio-derived. Whether M4 uses it to parse the IMU
-      stays open. D62 and section 20 of `docs/design/m3-plan.md`;
+      stays open. Section 20 of `docs/design/m3-plan.md` and the plan's
+      D62 (its section 23), which DECISIONS.md records at M3.21;
       DECISIONS, Open.)
 - [ ] Source models in the shader: dual fisheye with calibration, GoPro
       EAC pair; feathered seam blending; per-lens exposure/white-balance
