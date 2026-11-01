@@ -13,15 +13,16 @@
 //! The trailer is laid out as the X5's (§3.1 and §3.2): records in
 //! descending id order, each its payload and a 6-byte footer `{u8 format,
 //! u8 id, u32le size}`, every one but the metadata (1) and record 10
-//! starting on a 128 KiB boundary of the file with zeros between; the
-//! metadata last, ending at the index; the index of 31 10-byte slots
-//! `{u8 id, u8 format, u32le size, u32le offset}` with its own footer
-//! (id 0), so that it starts at EOF − 388; and the 72-byte tail: 32
-//! zeros, the trailer's size E, the version 3 and the magic. The `inst`
-//! box around it has size E + 8. The X5 itself leaves more room between
-//! its records than the next boundary (Pat's files skip a further 128 KiB
-//! after most of them); a reader finds them by the index either way, so
-//! synth packs them to the next boundary.
+//! starting on a 128 KiB boundary of the file; the metadata last, ending
+//! at the index; the index of 31 10-byte slots `{u8 id, u8 format, u32le
+//! size, u32le offset}` with its own footer (id 0), so that it starts at
+//! EOF − 388; and the 72-byte tail: 32 zeros, the trailer's size E, the
+//! version 3 and the magic. The `inst` box around it has size E + 8. The
+//! X5 itself leaves more room between its records than the next boundary
+//! (Pat's files skip a further 128 KiB after most of them), and its gaps
+//! are mostly zeros, with a few stray bytes in some; a reader finds the
+//! records by the index either way, so synth packs them to the next
+//! boundary and fills the gaps with zeros.
 
 use std::cmp::Reverse;
 use std::fs::File;
@@ -903,8 +904,9 @@ mod tests {
     /// slots at EOF − 388, slot k listing record k; each record's footer
     /// repeating its slot; each record but 1 and 10 on a 128 KiB boundary
     /// of the file; the records in descending id order with only zeros
-    /// between them, 1 and 10 right after the record before; and record
-    /// 1's footer ending where the index starts.
+    /// between them (synth's padding: the X5's has a few stray bytes in
+    /// some gaps), 1 and 10 right after the record before; and record 1's
+    /// footer ending where the index starts.
     fn read_by_hand(b: &[u8], at: u64) -> Result<TrailerLayout, String> {
         let n = b.len();
         if b[n - 72..n - 40] != [0; 32] {
