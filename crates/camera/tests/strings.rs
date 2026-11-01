@@ -6,8 +6,8 @@
 //! strings assembled from insta360.md §4.1's table of each block's
 //! tokens; synth's writer and printer, which share nothing with the
 //! parsers either, are held to them in `synth_insv.rs` (unit (d)). Pat's
-//! four strings are the ones insta360.md's "Pat's X5 samples" gives,
-//! byte-identical in all 14 of Pat's files.
+//! four strings are copied from the bytes of Pat's files, in all 14 of
+//! which they are byte-identical.
 //!
 //! Budget (M3 plan 4.1 rule 5, 19.6): camera's suite ≤ 1 s at the default
 //! 256 cases, which each test prints its time against; the properties
@@ -72,8 +72,9 @@ fn cases() -> u32 {
         .unwrap_or(256)
 }
 
-// Pat's four strings, as the X5 writes them (insta360.md, "Pat's X5
-// samples"), and the generations they are.
+// Pat's four strings, as the X5 writes them, copied from fields 5, 53, 54
+// and 111 of Pat's files (byte-identical in all 14), and the generations
+// they are. insta360.md's "Pat's X5 samples" lays them out by token.
 const V1: &str = "2_2653.545_2701.130_2692.130_-0.198_0.211_90.280_2661.203_8069.000_2684.950_0.239_0.113_89.107_10752_5376_1137";
 const V2: &str = "2_2660.372_2701.130_2692.130_-0.198_0.211_90.280_0.000000_0.000000_0.000000_1.00000000_-0.18756898_0.27067676_-0.08894466_10752_5376_113_2670.937_8069.000_2684.950_0.239_0.113_89.107_-0.004460_0.000017_-0.031920_1.00000000_-0.18880324_0.27227741_-0.08904964_10752_5376_113_132096";
 const V3: &str = "2_2.000000_4284.620_4284.280_2701.130_2692.130_-0.198_0.211_90.280_0.000000_0.000000_0.000000_0.18632051_2.04984355_-3.24446917_-0.00143576_-0.00339240_10752_5376_113_2.000000_4291.030_4291.030_8069.000_2684.950_0.239_0.113_89.107_-0.004460_0.000017_-0.031920_0.18940836_2.07073069_-3.24103332_0.00013831_-0.00299873_10752_5376_113_197632";
@@ -695,7 +696,10 @@ fn tokens(c: &Calib) -> Vec<&Token> {
 }
 
 /// Whether two calibrations are equal bit for bit: equal, and every
-/// token's value the same bits.
+/// token's value the same bits. A token's value follows from its text,
+/// which `Token::new` alone sets, so the bits can differ only where the
+/// text does; they are compared so that a token holding a value apart
+/// from its text would show.
 fn same_bits(a: &Calib, b: &Calib) -> bool {
     let bits = |c| {
         tokens(c)
@@ -771,9 +775,10 @@ fn strings_round_trip() {
     };
     assert_eq!(from_values.split('_').count(), 40);
     must_fail("Pat's V3 string printed from its values", from_values == V3);
-    // The controls on same_bits: V3 with lens 0's ξ written with a zero
-    // more has the same values to the bit but other text, and with ξ's
-    // last digit changed, another value.
+    // The controls on same_bits, both on its text half, the only one a
+    // token can fail: V3 with lens 0's ξ written with a zero more has the
+    // same value to the bit but other text, and with ξ's last digit
+    // changed, other text and another value.
     let longer = V3.replacen("2_2.000000_", "2_2.0000000_", 1);
     let rewritten = calib::parse(Generation::V3, &longer).unwrap();
     let (xi, was) = (tokens(&rewritten)[0], tokens(&v3)[0]);
@@ -1375,7 +1380,8 @@ proptest! {
             prop_assert!(offset(&e) <= len, "{:?} past {}", e, len);
         }
         // The walk ends, every field inside the bytes, and an error last;
-        // from a base so far on that its offsets saturate, it still ends.
+        // from a base so far on that its offsets saturate, it still ends
+        // (the case proptest once saved, under a strategy that drew it).
         prop_assert!(Walker::new(&bytes, Part::Record(1), u64::MAX - 8).count() <= bytes.len());
         let items: Vec<_> = Walker::new(&bytes, Part::Record(1), base).collect();
         let end = base + len;

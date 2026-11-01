@@ -16,7 +16,11 @@
 //!
 //! so two lenses take 16, 34, 40 or 56 tokens. Numbers are in the
 //! canvas's pixels (block 1's `cx` includes block 0's width), degrees and
-//! metres. Each value keeps its token's text, so that `parse(g,
+//! metres. The names are labels: Pat's bytes fix the counts, the word,
+//! and where each block's centre, angles, canvas and lens type sit, but
+//! not which angle is the yaw, the pitch or the roll, nor that V3's terms
+//! are k1 k2 k3 before p1 p2 (insta360.md §4.1), so nothing here reads a
+//! meaning from them. Each value keeps its token's text, so that `parse(g,
 //! &print(c)) == c` bit for bit, and `print(&parse(g, s)?) == s` for every
 //! string in Pat's files.
 //!

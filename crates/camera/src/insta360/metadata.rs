@@ -6,6 +6,8 @@
 //! bytes of Pat's X5 files unless the format notes say otherwise. Of
 //! 131 to 136, 133 and 134 are kept by nothing: the X5 writes no 133 and
 //! 0 in 134, whose meaning is unknown, so both are counted as unknown.
+//! Pat's masters hold 92 top-level fields, numbered up to 163, and their
+//! LRVs the same but 79 and 80; 67 of them are unread on every file.
 
 use spherecut_core::project::file::fnv1a64;
 
@@ -27,8 +29,9 @@ pub struct Metadata {
     /// Field 24: the camera's clock at the first video frame, in µs on
     /// the X5, as the IMU's and the exposure's stamps are (§3.4).
     pub first_frame_us: Option<i64>,
-    /// Field 25: the rolling shutter's readout, in ms (21.244 at 8K30).
-    /// The X5 writes an f32 widened to the double, 21.244001388549805.
+    /// Field 25: the rolling shutter's readout, in ms (21.244 at 8K).
+    /// The X5 writes an f32 widened to the double: 21.244001388549805 at
+    /// 8K, 9.181875228881836 at 5.7K60, 5.53125 at 4K120.
     pub rolling_shutter_ms: Option<f64>,
     /// Field 26, which files make the recording.
     pub file_group: Option<FileGroup>,
@@ -36,17 +39,24 @@ pub struct Metadata {
     /// that the tracks show.
     pub window: Option<Window>,
     /// Field 44: the size of this file's own video, width and height. A
-    /// master gives one track's (3840² at 8K), an LRV its frame's
-    /// (1664 × 832), so on an LRV it is the LRV's size.
+    /// master gives one track's (3840² at 8K, 2880² at 5.7K, 1920² at
+    /// 4K), an LRV its frame's (1664 × 832), so on an LRV it is the LRV's
+    /// size.
     pub video_size: Option<[u32; 2]>,
     /// Field 79: 1 for split files, 2 for both lenses as tracks of one
-    /// file (§2.6). 2 on the X5.
+    /// file (§2.6). 2 on Pat's X5 masters; their LRVs have none.
     pub layout: Option<u64>,
-    /// Field 80, the tracks' order (§2.6). 1 on the X5.
+    /// Field 80, the tracks' order (§2.6). 1 on Pat's X5 masters; their
+    /// LRVs have none.
     pub track_order: Option<u64>,
-    /// Field 93: the recording's length in ms (3837 for clip 1's 3.8 s).
+    /// Field 93, a length in ms that isn't the clip's. On Pat's files it
+    /// is ⌊n × 1000 × den / num⌋, with n one more than the frames in each
+    /// of the master's tracks and num/den the master's rate, on the
+    /// master and its LRV alike: 3837 for clip 1's 114 frames at
+    /// 30000/1001, and 3186 on the 5.7K60 take, whose 190 frames at
+    /// 60000/1001 its LRV halves to 95.
     pub duration_ms: Option<u64>,
-    /// Field 98, the first and last frames' times and the frame count.
+    /// Field 98, which [`FrameSpan`] says how to read.
     pub frames: Option<FrameSpan>,
     /// Field 131, the streams' layout (§2.6): 4 on Pat's masters, 1 on
     /// their LRVs.
@@ -93,8 +103,17 @@ pub struct Window {
     pub offset: [u32; 2],
 }
 
-/// Field 98's items 1, 3, 4 and 5 (§3.5). Item 2's meaning is in conflict
-/// (the format notes), so it isn't kept.
+/// Field 98's items 1, 3, 4 and 5 (§3.5), as Pat's X5 writes them.
+///
+/// With n one more than the frames in each of the master's tracks, and r
+/// its rate rounded up to a whole number (30, 25, 60 or 120), items 4
+/// and 2 are items 3 and 1 plus n frames at r, in ms and in µs, rounded
+/// down, on the master and its LRV alike. So neither item 4 nor item 5
+/// is the clip's last frame or its frame count, nor is field 93 its
+/// length ([`Metadata::duration_ms`]). Item 2 isn't kept:
+/// on the format notes' X5 sailing file it is 50.7 s after item 1 where
+/// items 3 and 4 are 193.8 s apart, so what it means is in conflict.
+/// Items 6 and 7, 0 on Pat's files, aren't kept either.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrameSpan {
     /// Item 1: the first frame on the camera's clock, in µs; field 24's
@@ -102,9 +121,14 @@ pub struct FrameSpan {
     pub first_us: u64,
     /// Item 3: the first frame, in Unix ms.
     pub first_unix_ms: u64,
-    /// Item 4: the last frame, in Unix ms.
+    /// Item 4: item 3 plus n frames at r, in Unix ms, which isn't the
+    /// last frame's time: 3833 ms after item 3 on clip 1, 115 frames at
+    /// 30 fps, where its last frame, the 114th, starts 3770 ms in.
     pub last_unix_ms: u64,
-    /// Item 5: the frame count (115 for clip 1).
+    /// Item 5: a frame count that isn't the clip's: n on a master (115
+    /// for clip 1's 114 frames a track), and the LRV's own frames on an
+    /// LRV (95 on the 5.7K60 take's, where field 93 and items 2 and 4
+    /// count the master's n, 191).
     pub frames: u64,
 }
 
