@@ -162,7 +162,11 @@ is built by a workflow of agents, one per unit with its own reviewers
 
 Branch `m3/facts` (units c, d and a), with `m3/facts-b` (unit b)
 merged into it, under one full check. Unit (c) is the part M3.1 to
-M3.3 start from; it merges with the rest, since they start after it.
+M3.3 start from; it merges with the rest, since they start after it
+(the plan's amendment 3, which also records the API changes below).
+Each unit had its own reviewers; then, the slice being past 3,000
+lines, a fresh review of the whole of it found 14 problems, of which a
+second reader upheld 13, and they are fixed here.
 
 - **(c) The test gates and synth's lens types.**
   `testkit::control::must_fail(name, outcome)` is D32's control rule
@@ -180,11 +184,13 @@ M3.3 start from; it merges with the rest, since they start after it.
   canvas map, the 1152-value Euler space with its roll offset, turn
   axis, upright, tz sign and the 21-value V6 reading), `TruthV6` and
   `CalibTruth`, as types only, for M3.2's printer and M3.3's
-  `compose`. Four readings 6.2 leaves open are M3.3's to settle:
-  whether the Euler signs go with the angles or the order, whether
-  the roll offset comes before the sign, whether a negated tz flips
-  all of t_1 or only its z, and which of the 1152 values is the
-  placeholder's identity.
+  `compose`. `CalibTruth` holds both blocks' distortion terms once, so
+  a V3 and V6 mix can't be built. synth fixes two readings 6.2 leaves
+  open (the Euler signs go with the angles, and the roll offset comes
+  before the roll's sign), which M3.3 gives sphere's `EulerConv` too;
+  two are M3.3's to settle: whether a negated tz flips all of t_1 or
+  only its z, and which of the 1152 values is the placeholder's
+  identity.
 - **(d) Corrections against the bytes.** `mp4.rs`'s trailer comment
   (the X5 at v1.1.22 already wraps its trailer in `inst`, on all 14
   files). `docs/formats/insta360.md`: records 22 and 28 keep their
@@ -193,28 +199,42 @@ M3.3 start from; it merges with the rest, since they start after it.
   LRV runs at 25 fps for a 25 fps master and 29.97 otherwise; the
   LRV's halves are a fact (left is track 1: frame 60's luma correlates
   0.99 with it against 0.40 to 0.49 with track 0, on 004 and 008);
-  video-types' V6 reading is marked Studio-derived (4.1 rule 7).
+  Pat's V3 and V6 calibration strings are written out (each identical
+  in all 14 files); video-types' V6 reading is marked Studio-derived
+  and its mask and blend values are no longer quoted (4.1 rule 7).
   PLAN's telemetry-parser line is clarified, not amended: M3 doesn't
-  use it (D62), and M4 still decides whether it parses the IMU, as
-  DECISIONS.md's Open item now says.
-- **(a) P-TRK: the lens tracks' timing.** `media::mp4::track_timing(file,
-  track)` reads a video track's tables (timescale, count, first pts
-  after `ctts` and the edit list, the edit list, `stts` runs, a `ctts`
-  hash and the new `stss` reader), numbered as FFmpeg numbers streams,
-  with an error naming the box for anything malformed.
+  use it (D62, the plan's, recorded in DECISIONS.md at M3.21), and M4
+  still decides whether it parses the IMU, as DECISIONS.md's Open item
+  now says.
+- **(a) P-TRK's tables: the lens tracks' timing.**
+  `media::mp4::track_timing(file, track)` reads a video track's tables
+  (timescale, count, the first shown sample, the first pts after
+  `ctts` and the edit list, the edit list, `stts` runs, a `ctts` hash
+  and the new `stss` reader), numbered as FFmpeg numbers streams. It
+  refuses rather than guesses: a malformed or duplicated table names
+  its box, a fragmented MP4 is its own error (which M3.8 answers as a
+  track with no tables), and a track after cover art, IAMF, HEIF items
+  or a top-level `meta` or `udta` too large to read is not numbered.
   `samples_x5_tracks_equal` (Tier 2c, `crates/media/tests/tier2_tracks.rs`)
   ran on all 14 files in the cloud. **Verdict: Pass on every field,
   no R1, R2 or Kill.** On all 7 masters both lenses have the same
   timescale (30000 at 8K30, 25000 at 8K25, 60000 at 5.7K60, 120000 at
   4K120), the same count (114, 116, 190, 586, 966, 1904 and 968 for
-  004 to 010), first pts 0, one edit from media time 0, one `stts` run
-  (1001 ticks, or 1000 at 25 fps), `ctts` all zero (version 0) and the
-  same `stss`: a keyframe every 2 s at 30, 25 and 60 fps and every
-  1 s at 120. FFmpeg's demuxer agrees on all 21 tracks. Every LRV
-  starts 0.000 ms (0 master frames) from its master. So section 9's
-  lock pairs by clip time, `LockSpec.offset` is 0 on the X5, `stss`
-  stays in the lock's comparison, and the LRV needs no time-map
-  offset.
+  004 to 010), first shown sample 0, first pts 0, one edit from media
+  time 0, one `stts` run (1001 ticks, or 1000 at 25 fps), `ctts` all
+  zero and the same `stss`: a keyframe every 2 s at 30, 25 and 60 fps
+  and every 1 s at 120. FFmpeg's demuxer agrees on each track's time
+  base, first pts and keyframes up to its second sync sample, on all
+  21 tracks. So the container gives the lock no offset and `stss`
+  stays in its comparison; P-TRK's pixel half
+  (`samples_lens_offset_is_zero`, M3.6) can still add one. By the
+  tables each LRV's first frame is at its own movie's start, as its
+  master's is; whether an LRV began with its master is M3.14's
+  `lrv_matches_master`. One change reaches past M3: `ctts` and `stss`
+  joined the sample tables the reader keeps whole (D15), so a B-frame
+  MP4 whose `ctts` passes 1 MiB (about 73 minutes at 30 fps with a run
+  a frame) is now timed from it and can come out `Constant` where it
+  was `Variable` (`a_ctts_past_the_leaf_limit_is_kept_and_read_to_its_end`).
 - **(b) An agent's `.insv` project stays open** (plan 13.1). The
   kittest `an_agent_made_insv_project_stays_open` failed on main
   ("the project was let go when its lenses opened",
@@ -227,9 +247,12 @@ M3.3 start from; it merges with the rest, since they start after it.
   Keeping the doc showed two more things, fixed here: the viewer's
   zooms in the raw view made "Reframe" edits of a view it doesn't
   show (now none), and the Export window could export lens 0 as an
-  equirect (it now says "Stitched export arrives with M3.11", Start
-  off). `spherecut render` and the agents' `render` of such a project
-  still export lens 0, as on main, until M3.9 and M3.11's `not_yet`.
+  equirect. The export job now probes the file and refuses one with
+  two or more lenses ("Stitched export arrives with M3.11"), whatever
+  the viewer has opened, and the window's Start is off while the
+  lenses show. `spherecut render` and the agents' `render` of such a
+  project still export lens 0, as on main, until M3.9 and M3.11's
+  `not_yet`.
 
 New controls (4.1 rule 8), each run every time: `must_fail`'s own
 (a passing Result, bool or Comparison panics; NaN is not comparable);
@@ -237,20 +260,33 @@ New controls (4.1 rule 8), each run every time: `must_fail`'s own
 missing folder; the roles' parser refusing 15 bad inputs by name, a
 role named twice, a placeholder that must skip, an unknown role that
 must fail, and in Tier 2c a file number Pat's folder hasn't and a
-master paired with another take's LRV; the Euler and V6 spaces with
-a value listed twice; for P-TRK, 004's lens 0 against 005's (it must
-part, at `stts` sample 1), an LRV moved by one master frame, three
-planted tables against the demuxer, and in Tier 1 bad `stss`, `stts`,
-`stsz` and `mdhd` tables, broken edit lists, a short `ctts`, cut or
-missing `moov`s and tracks after cover art, IAMF or HEIF items, each
-by its message; for (b), a plain `.insv` opened alone (it must not
-keep a project), a stale probe for another file, and the raw view's
-zoom (no edit).
+master paired with another take's LRV; the Euler and V6 spaces with a
+value listed twice, and a calibration whose blocks read each other's
+terms. For P-TRK: 004's lens 0 against 005's, with every branch it
+fires pinned (timescale unforeseen, count and edit ending apart, `stts`
+Kill at sample 1, `stss` R2 at sample 50); lens 1 planted with the
+LRV's sync samples (R2 alone), with its first frame hidden by its
+edit (R1 and R2), and with composition offsets apart (both `ctts`
+arms); an LRV moved by one master frame; three planted tables against
+the demuxer; a verdict that ends apart is not a plain Pass; and in
+Tier 1, lenses paired by decode index rather than by their first
+shown frame, the edit list spliced out of a B-frame file, bad `stss`,
+`stts`, `stsz` and `mdhd` tables, broken edit lists, a short `ctts`, a
+second copy of each table, cut or missing `moov`s, fragments, tracks
+after cover art, IAMF, HEIF items or a large `meta` or `udta`, and a
+`ctts` past 1 MiB whose last B is tied (`Variable`), each by its
+message. For (b): a plain `.insv` opened alone (it must not keep a
+project), a stale probe for another file, the raw view's zoom (no
+edit), and an equirect project whose export passes the lens check.
 
-Measured, on the cloud box (debug, no floors apply): the
-`track_timing` suite 0.04 s at 256 cases and 8.2 s at
-`PROPTEST_CASES=100000`; `samples_x5_tracks_equal` 0.41 s warm;
-`agents.rs` 5 tests in 3.2 s; testkit's tests 0.06 s.
+Measured, on the cloud box (debug, no floors apply; section 19.6 sets
+no budget for M3.0's suites, so the `track_timing` suite has its own
+of 3 s): `cargo xtask check` from a clean target took 20 min 12 s
+against main's 20 min 0 s at A2's fixes, its tests 778 s against 770 s
+over 111 test binaries against 108; the `track_timing` suite 0.07 s at
+256 cases and 11 s at `PROPTEST_CASES=100000`;
+`samples_x5_tracks_equal` 0.44 s warm; `agents.rs` 7 tests in 4.8 s;
+testkit's tests 0.06 s.
 
 ## A2: edit and render for agents
 
