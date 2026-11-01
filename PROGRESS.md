@@ -1102,7 +1102,15 @@ strings properties 0.34 s (varints), 2.82 s (unknown fields), 4.42 s
 synth's round trip 4.66 s and cross parse 4.17 s; each suite at the
 default 256 cases under 0.1 s, against camera's 1 s budget. Tier 2c:
 0.018 s for the trailers and metadata of the 14 files (D62's figure),
-0.005 s for the 112 strings, 1.1 s for the probe test's 7 takes. `cargo xtask check` grows by CHECK_GROWTH.
+0.005 s for the 112 strings, 1.1 s for the probe test's 7 takes.
+Before the merge, at PROPTEST_CASES=100000, camera's `trailer`,
+`strings` and `synth_insv` suites passed in 1.4 s, 4.3 s and 4.5 s.
+`cargo xtask check` gained six test binaries (camera's `companions`,
+`strings`, `synth_insv`, `tier2_samples` and `trailer`, each under 0.1
+s, and the CLI's `tier2_probe`, whose test is Tier 2c). At f9cee20
+(main merged in) it passed in about 17 minutes in a warm target folder
+of its own, its tests 820 s over 113 binaries against M3.3's 889 s over
+106; other builds ran beside both, so the totals move with the load.
 
 ## A2: edit and render for agents
 
