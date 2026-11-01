@@ -1093,8 +1093,8 @@ fn reads_as(path: &Path, layout: &TrailerLayout, fault: InsvFault) -> Result<(),
     let (mut f, len, t) = open(path);
     let wrong = |what: &dyn std::fmt::Debug| Err(format!("{fault:?}: {what:?}"));
     match fault {
-        // The tail's size, more than the file holds: an error in the tail,
-        // at the size.
+        // The trailer's size in the tail, more than the file holds: an
+        // error in the tail, at the size, saying whose size it is.
         InsvFault::TruncatedTrailer => match t {
             Err(
                 ref e @ CameraError::TooLarge {
@@ -1105,7 +1105,7 @@ fn reads_as(path: &Path, layout: &TrailerLayout, fault: InsvFault) -> Result<(),
                 },
             ) if (size, limit, offset) == (len + 1, len, len - 40) => {
                 let words = format!(
-                    "the trailer's tail is {} bytes, over its limit of {len} (byte {})",
+                    "the trailer's size in its tail is {} bytes, more than the file's length of {len} (byte {})",
                     len + 1,
                     len - 40
                 );

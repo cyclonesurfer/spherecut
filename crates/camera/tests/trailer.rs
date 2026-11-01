@@ -733,6 +733,15 @@ fn every_limit_is_an_error_with_its_offset() {
             if (size, limit, offset) == (MAX_TRAILER + 1, MAX_TRAILER, len - 40)),
         "{e:?}"
     );
+    // The size it names is the trailer's, which the tail gives.
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "the trailer's size in its tail is {} bytes, over its limit of {MAX_TRAILER} (byte {})",
+            MAX_TRAILER + 1,
+            len - 40
+        )
+    );
 
     // The file's length: a trailer as large as its file reads, one a byte
     // larger doesn't.
@@ -749,6 +758,26 @@ fn every_limit_is_an_error_with_its_offset() {
         matches!(e, CameraError::TooLarge { part: Part::Tail, size, limit, offset }
             if (size, limit, offset) == (n as u64 + 1, n as u64, n as u64 - 40)),
         "{e:?}"
+    );
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "the trailer's size in its tail is {} bytes, more than the file's length of {n} (byte {})",
+            n + 1,
+            n - 40
+        )
+    );
+    // Control: the same numbers in another part read as that part's own
+    // size, not the tail's words.
+    let index = CameraError::TooLarge {
+        part: Part::Index,
+        size: n as u64 + 1,
+        limit: n as u64,
+        offset: n as u64 - 40,
+    };
+    must_fail(
+        "the index's size in the tail's words",
+        index.to_string() == e.to_string(),
     );
 
     // MAX_SLOTS: an index of 64 slots reads, one of 65 doesn't.

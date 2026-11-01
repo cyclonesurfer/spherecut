@@ -6,6 +6,7 @@ use std::io;
 use thiserror::Error;
 
 use crate::insta360::calib::Generation;
+use crate::insta360::limits::MAX_TRAILER;
 
 /// The part of a file an error is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -72,8 +73,10 @@ pub enum CameraError {
     #[error("{part} has wire type {wire} at byte {offset}, which the metadata doesn't use")]
     WireType { part: Part, wire: u8, offset: u64 },
     /// More bytes than a limit allows (`insta360::limits`), or than the
-    /// caller asked for. Nothing was allocated for them.
-    #[error("{part} is {size} bytes, over its limit of {limit} (byte {offset})")]
+    /// caller asked for. Nothing was allocated for them. In
+    /// [`Part::Tail`] the size is the trailer's, which the tail gives, and
+    /// the limit the file's length or `MAX_TRAILER`, whichever is less.
+    #[error("{}", too_large(.part, .size, .limit, .offset))]
     TooLarge {
         part: Part,
         size: u64,
@@ -121,6 +124,20 @@ pub enum CameraError {
     /// Reading the file failed.
     #[error("I/O error at byte {offset}: {error}")]
     Io { offset: u64, error: io::Error },
+}
+
+/// `TooLarge`'s message. In the tail the size is the trailer's, not the
+/// tail's own 72 bytes: a limit under `MAX_TRAILER` is the file's length.
+fn too_large(part: &Part, size: &u64, limit: &u64, offset: &u64) -> String {
+    match part {
+        Part::Tail if *limit < MAX_TRAILER => format!(
+            "the trailer's size in its tail is {size} bytes, more than the file's length of {limit} (byte {offset})"
+        ),
+        Part::Tail => format!(
+            "the trailer's size in its tail is {size} bytes, over its limit of {limit} (byte {offset})"
+        ),
+        part => format!("{part} is {size} bytes, over its limit of {limit} (byte {offset})"),
+    }
 }
 
 /// `FooterMismatch`'s message. The index's own footer (id 0) has no slot
