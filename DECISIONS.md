@@ -9072,9 +9072,10 @@ the limit ends with its residual above 1e-12 and is `None`, while one
 just inside it converges. Failing that pass outright lost every pixel
 from 112.6° to 119° on Pat's numbers. `invert` (with the passes it
 took and the residual it left) and `lift` are public, so that the
-tests count passes. The method follows Gyroflow's `insta360.rs`
-(GPL-3.0-or-later, attributed in the code), written from the plan's
-description.
+tests count passes, and the tests hold the count to the work: k passes
+meet the residual, k − 1 don't, and a pixel past the limit runs all 20.
+The method follows Gyroflow's `insta360.rs` (GPL-3.0-or-later,
+attributed in the code), written from the plan's description.
 
 **The limit.** `limit_theta` scans dr/dθ in 0.05° steps up to the
 model's end and bisects within the step where the curve stops rising.
@@ -9083,6 +9084,15 @@ term dropped, it returns the end without a scan. On all four of Pat's
 blocks (V3 and V6, both lenses) it is 120.000°, the projection's fold:
 their polynomials alone would stop rising only at plane radius 0.78
 (V3) and 0.70 (V6), past the fold's 1/√3 = 0.577.
+
+**The limit, found once.** `unproject` finds `limit_theta` on every
+call. On Pat's lenses at ξ = 2 that skips the scan, but any `KbLens`,
+a lens at ξ ≤ 1 with a negative term, and Pat's own once ξ falls below
+about 1.96 (V3) or 1.98 (V6), as 8.7's own fit could set it, scan up to
+3600 steps a call. So `unproject_within` (on `Unified`, `KbLens` and
+`LensModel`) takes the limit found once, or any smaller θ, past which
+it is `None`, for callers that invert many pixels of one lens, such as
+`theta_frame`'s searches.
 
 **`KbLens`** applies its base after the polynomial, r = base(θ_d), as
 `Lens::radius` does. Its inverse strips the tangential and prism terms

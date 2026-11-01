@@ -27,8 +27,8 @@ use proptest::array::{uniform3, uniform5, uniform8};
 use proptest::prelude::*;
 use spherecut_sphere::angle_between;
 use spherecut_sphere::fisheye::{
-    Canonical, F, KbLens, Lens, Model, PairOrder, Prism, PrismAt, PrismOrder, Tangential, Unified,
-    V6Reading,
+    Canonical, F, KbLens, Lens, LensModel, Model, PairOrder, Prism, PrismAt, PrismOrder,
+    Tangential, Unified, V6Reading,
 };
 use spherecut_testkit::control::{at_most, below, must_fail};
 
@@ -223,6 +223,16 @@ fn radial_only(lens: &Unified) -> Unified {
 /// r(θ) of a lens: the radial curve's plane radius at θ.
 fn radius(lens: &Unified, theta: f64) -> f64 {
     radial_only(lens).project(dir(theta, 0.0)).unwrap().length()
+}
+
+/// The passes the inverse reports for a plane point 1% past the radial
+/// curve's edge, which no pass can meet: all of them.
+fn passes_past_the_limit(lens: &Unified) -> u32 {
+    let flat = radial_only(lens);
+    let edge = flat
+        .project(dir(flat.limit_theta() * (1.0 - 1e-12), 1.1))
+        .unwrap();
+    flat.invert(edge * 1.01, Unified::PASSES).unwrap().passes
 }
 
 /// The most passes the inverse may take on 6.3's draws. 100,000 random
@@ -530,6 +540,12 @@ proptest! {
         prop_assert!(back.is_some(), "no direction for {:?}", px);
         let err = angle_between(back.unwrap(), w.d);
         prop_assert!(err <= ANGLE_TOL, "{err:e} rad off");
+        // Given a limit found once, here the top of the range, which the
+        // direction lies within, the inverse comes back the same.
+        let within = w.lens.unproject_within(px, w.top);
+        prop_assert!(within.is_some(), "none within {}°", w.top.to_degrees());
+        let err = angle_between(within.unwrap(), w.d);
+        prop_assert!(err <= ANGLE_TOL, "{err:e} rad off within the top");
         let passes = w.lens.invert(px, Unified::PASSES).unwrap().passes;
         MOST_PASSES.fetch_max(passes, Ordering::Relaxed);
         prop_assert!(passes <= MAX_DRAWN_PASSES, "{passes} passes");
@@ -565,11 +581,18 @@ proptest! {
         let phi = w.d.y.atan2(w.d.x);
         let edge = flat.project(dir(limit * (1.0 - 1e-12), phi)).unwrap();
         prop_assert_eq!(flat.unproject(edge * (1.0 + beyond)), None);
-        // Anywhere on the canvas, with every term, never past the limit.
+        // Given a smaller limit, the top of the range, past that.
+        let top_edge = flat.project(dir(w.top, phi)).unwrap();
+        prop_assert_eq!(flat.unproject_within(top_edge * (1.0 + beyond), w.top), None);
+        // Anywhere on the canvas, with every term, never past the limit,
+        // nor past the smaller one given it.
         let reach = w.lens.fx * edge.length();
         let px = DVec2::new(w.lens.cx, w.lens.cy) + DVec2::new(spot.0, spot.1) * reach;
         if let Some(d) = w.lens.unproject(px) {
             prop_assert!(theta_of(d) <= limit + 1e-9, "θ {}° past {}°", theta_of(d).to_degrees(), limit.to_degrees());
+        }
+        if let Some(d) = w.lens.unproject_within(px, w.top) {
+            prop_assert!(theta_of(d) <= w.top + 1e-9, "θ {}° past {}°", theta_of(d).to_degrees(), w.top.to_degrees());
         }
     }
 
@@ -636,6 +659,12 @@ proptest! {
         prop_assert!(err <= ANGLE_TOL, "{err:e} rad off");
         let err = (lens.project(back).unwrap() - px).length();
         prop_assert!(err <= PIXEL_TOL, "{err:e} px off");
+        // Given a limit found once, here the top of the range, which the
+        // direction lies within, the inverse comes back the same.
+        let within = lens.unproject_within(px, top);
+        prop_assert!(within.is_some(), "none within {}°", top.to_degrees());
+        let err = angle_between(within.unwrap(), d);
+        prop_assert!(err <= ANGLE_TOL, "{err:e} rad off within the top");
     }
 }
 
@@ -660,6 +689,13 @@ fn unified_unproject_inverts_project() {
         "the distortion left in",
         at_most(angle_between(lens.lift(distorted), d), ANGLE_TOL),
     );
+    // Control on the draws' bound on passes: a pixel past the limit runs
+    // every pass, and the count says so.
+    let ran = must_fail(
+        "a pixel past the limit within the draws' bound",
+        at_most(passes_past_the_limit(&lens), MAX_DRAWN_PASSES),
+    );
+    assert_eq!(ran, Unified::PASSES);
 }
 
 /// project(unproject(px)) is within 1e-6 px of px, in the lens's own
@@ -771,11 +807,31 @@ fn unified_unproject_is_none_past_limit_theta() {
         "a pixel inside the edge",
         flat.unproject(edge * (1.0 - 1e-6)).is_none(),
     );
+    // Given 100° as its limit, the inverse refuses a pixel just past
+    // 100°, through `LensModel` too. Control: given the lens's own limit,
+    // found once, the same pixel has its direction, so it is the limit
+    // given that refuses it.
+    let past_100 = flat.project(dir(100f64.to_radians(), 0.3)).unwrap() * 1.01;
+    assert_eq!(flat.unproject_within(past_100, 100f64.to_radians()), None);
+    assert_eq!(
+        LensModel::Mei(flat).unproject_within(past_100, 100f64.to_radians()),
+        None
+    );
+    let limit = flat.limit_theta();
+    must_fail(
+        "the lens's own limit",
+        flat.unproject_within(past_100, limit).is_none(),
+    );
+    assert_eq!(
+        flat.unproject_within(past_100, limit),
+        flat.unproject(past_100)
+    );
 }
 
 /// limit_theta is acos(−1/ξ) for ξ > 1 (120° at ξ = 2), acos(−ξ) for
-/// ξ ≤ 1 (90° at ξ = 0), and earlier where the polynomial folds: 120.1°
-/// on Pat's V6.
+/// ξ ≤ 1 (90° at ξ = 0), or earlier where the polynomial folds first. On
+/// Pat's V3 and V6 the projection's own fold comes first, 120.0° at
+/// ξ = 2; 6.1's 120.1° for V6 is an open question.
 #[test]
 fn unified_limit_theta_is_where_the_model_folds() {
     let _time = timed("unified_limit_theta_is_where_the_model_folds");
@@ -884,6 +940,30 @@ fn unified_inverts_pats_lenses_to_119_degrees() {
         let (three, _, _) = sweep(&lens, 100.0, 0.5, 7.5, 3);
         let off = must_fail("three passes", at_most(three, ANGLE_TOL));
         eprintln!("{name}: three passes leave up to {off:e} rad at θ ≤ 100°");
+        // The count is the work's: at 100° and 119° the passes reported
+        // are the fewest that meet the residual. Cut to that many, the
+        // inverse ends where 20 let it; cut to one fewer, it reports one
+        // fewer and falls short, the control.
+        for theta in [100.0f64, 119.0] {
+            let px = lens.project(dir(theta.to_radians(), 1.1)).unwrap();
+            let full = lens.invert(px, Unified::PASSES).unwrap();
+            assert!(
+                full.passes > 3,
+                "{name} at {theta}°: {} passes",
+                full.passes
+            );
+            assert_eq!(lens.invert(px, full.passes), Some(full));
+            let cut = lens.invert(px, full.passes - 1).unwrap();
+            assert_eq!(cut.passes, full.passes - 1);
+            must_fail("one pass fewer", below(cut.residual, Unified::RESIDUAL));
+        }
+        // Control on the bound: a pixel past the limit runs every pass, and
+        // the count says so.
+        let ran = must_fail(
+            "a pixel past the limit within 7 passes",
+            at_most(passes_past_the_limit(&lens), 7),
+        );
+        assert_eq!(ran, Unified::PASSES);
     }
     // Every V6 reading, more coarsely. A reading that leaves some of the
     // terms out can take more passes than the one that reads them all:
@@ -898,6 +978,8 @@ fn unified_inverts_pats_lenses_to_119_degrees() {
         }
     }
     eprintln!("every V6 reading: at most {most} passes up to 119°");
+    // Control: some reading takes more passes than every term's bound.
+    must_fail("every reading within 7 passes", at_most(most, 7));
 }
 
 /// V3's formula, written term by term, equals the canonical evaluation
@@ -1093,6 +1175,23 @@ fn kb_lens_unproject_inverts_project() {
         "the terms left in",
         at_most(angle_between(back, d), ANGLE_TOL),
     );
+    // Given 80° as its limit, the inverse refuses a pixel at 81°, through
+    // `LensModel` too. Control: given the lens's own limit, found once, it
+    // has the pixel's direction.
+    let at_81 = dir(81f64.to_radians(), 0.5);
+    let px = lens.project(at_81).unwrap();
+    assert_eq!(lens.unproject_within(px, 80f64.to_radians()), None);
+    assert_eq!(
+        LensModel::Kb(lens).unproject_within(px, 80f64.to_radians()),
+        None
+    );
+    let limit = lens.limit_theta();
+    must_fail(
+        "the lens's own limit",
+        lens.unproject_within(px, limit).is_none(),
+    );
+    let back = lens.unproject_within(px, limit).unwrap();
+    assert!(angle_between(back, at_81) <= ANGLE_TOL);
 }
 
 /// `KbLens` applies its base after the polynomial in θ, as

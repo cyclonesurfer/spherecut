@@ -209,8 +209,23 @@ impl Unified {
     /// meets the residual, and whenever 20 passes leave the residual above
     /// 1e-12. Pat's V3 lenses take at most 6 passes up to 119°, and V6's 7
     /// read through every term, or 9 through the reading that is slowest.
+    ///
+    /// Each call finds [`Unified::limit_theta`] afresh. Pat's lenses at
+    /// ξ = 2 skip its scan, but others (ξ ≤ 1 with a negative term, or
+    /// Pat's at a ξ a few hundredths under 2) scan up to 3600 steps a
+    /// call, so a caller inverting many pixels of one lens finds the limit
+    /// once and calls [`Unified::unproject_within`].
     pub fn unproject(&self, px: DVec2) -> Option<DVec3> {
-        let inv = self.invert(px, Self::PASSES)?;
+        self.unproject_within(px, self.limit_theta())
+    }
+
+    /// [`Unified::unproject`] with the limit given, found once for the
+    /// lens: `limit` is [`Unified::limit_theta`]'s value or any smaller θ
+    /// in radians, and the inverse is `None` past it. Past `limit_theta`
+    /// the radial curve no longer rises, so a larger `limit` gives the
+    /// bracket no single answer. `None` for a NaN or negative `limit`.
+    pub fn unproject_within(&self, px: DVec2, limit: f64) -> Option<DVec3> {
+        let inv = self.invert_within(px, Self::PASSES, limit)?;
         (inv.residual < Self::RESIDUAL).then(|| self.lift(inv.m))
     }
 
@@ -223,6 +238,12 @@ impl Unified {
     /// so a pixel past the limit ends with its residual above
     /// [`Unified::RESIDUAL`].
     pub fn invert(&self, px: DVec2, passes: u32) -> Option<Inversion> {
+        self.invert_within(px, passes, self.limit_theta())
+    }
+
+    /// [`Unified::invert`] with its bracket ending at θ = `limit`, as
+    /// [`Unified::unproject_within`] takes it.
+    fn invert_within(&self, px: DVec2, passes: u32, limit: f64) -> Option<Inversion> {
         // The method, stripping the tangential terms at the estimate and
         // solving the radial curve by a bracketed Newton, follows Gyroflow's
         // `src/core/stabilization/distortion_models/insta360.rs`
@@ -231,10 +252,10 @@ impl Unified {
         // passes, these repeat until the residual is under 1e-12: three
         // leave 4e-7 to 5e-6 rad on Pat's X5 at θ up to 100°.
         let target = DVec2::new((px.x - self.cx) / self.fx, (px.y - self.cy) / self.fy);
-        if !target.is_finite() {
+        if !target.is_finite() || limit.is_nan() || limit < 0.0 {
             return None;
         }
-        let top = self.limit_plane();
+        let top = self.plane_at(limit);
         let reach = if top.is_finite() {
             self.dist.radial(top)
         } else {
@@ -364,12 +385,11 @@ impl Unified {
         }
     }
 
-    /// The plane radius at [`Unified::limit_theta`], the top of the
-    /// inverse's bracket: infinite when the curve rises all the way to a
-    /// vanishing denominator (ξ ≤ 1 with no fold in the polynomial).
-    fn limit_plane(&self) -> f64 {
-        let limit = self.limit_theta();
-        if self.xi <= 1.0 && limit == self.end_theta() {
+    /// The plane radius at θ = `limit`, the top of the inverse's bracket:
+    /// infinite when the limit is the model's own end at ξ ≤ 1, where the
+    /// denominator vanishes (when the polynomial has no fold before it).
+    fn plane_at(&self, limit: f64) -> f64 {
+        if self.xi <= 1.0 && limit >= self.end_theta() {
             return f64::INFINITY;
         }
         let (s, c) = limit.sin_cos();
@@ -764,8 +784,20 @@ impl KbLens {
     /// under [`Unified::RESIDUAL`], at most [`Unified::PASSES`] times;
     /// then θ_d, by the base's own inverse of |m|, and θ, by a Newton on
     /// the polynomial θ_d(θ) bracketed on [0, `limit_theta`]. `None` past
-    /// the limit or where the passes don't converge.
+    /// the limit or where the passes don't converge. Each call scans for
+    /// [`KbLens::limit_theta`] afresh, up to 3600 steps, so a caller
+    /// inverting many pixels of one lens finds the limit once and calls
+    /// [`KbLens::unproject_within`].
     pub fn unproject(&self, px: DVec2) -> Option<DVec3> {
+        self.unproject_within(px, self.limit_theta())
+    }
+
+    /// [`KbLens::unproject`] with the limit given, found once for the
+    /// lens: `limit` is [`KbLens::limit_theta`]'s value or any smaller θ
+    /// in radians, and the inverse is `None` past it, or for a NaN or
+    /// negative `limit`. Past `limit_theta` the polynomial no longer
+    /// rises, so a larger `limit` gives the Newton no single answer.
+    pub fn unproject_within(&self, px: DVec2, limit: f64) -> Option<DVec3> {
         let target = DVec2::new((px.x - self.cx) / self.fx, (px.y - self.cy) / self.fy);
         if !target.is_finite() {
             return None;
@@ -793,10 +825,9 @@ impl KbLens {
             Model::Stereographic => 2.0 * (r / 2.0).atan(),
             Model::Orthographic => r.asin(),
         };
-        let limit = self.limit_theta();
         // Past the base's image (r > 1 on an orthographic base, r > 2 on an
         // equisolid one) θ_d is NaN.
-        if theta_d.is_nan() || theta_d > self.theta_d(limit) {
+        if theta_d.is_nan() || limit.is_nan() || limit < 0.0 || theta_d > self.theta_d(limit) {
             return None;
         }
         let curve = |theta: f64| (self.theta_d(theta), self.theta_d_slope(theta));
@@ -890,6 +921,16 @@ impl LensModel {
         match self {
             LensModel::Mei(m) => m.unproject(px),
             LensModel::Kb(k) => k.unproject(px),
+        }
+    }
+
+    /// Pixel to lens-frame unit direction, with the limit found once:
+    /// [`LensModel::limit_theta`]'s value or any smaller θ, past which it
+    /// is `None`.
+    pub fn unproject_within(&self, px: DVec2, limit: f64) -> Option<DVec3> {
+        match self {
+            LensModel::Mei(m) => m.unproject_within(px, limit),
+            LensModel::Kb(k) => k.unproject_within(px, limit),
         }
     }
 
