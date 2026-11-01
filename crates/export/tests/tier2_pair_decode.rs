@@ -23,8 +23,12 @@
 //!   as `testkit::memory` does, so that one run's freed heap can't hide
 //!   the next one's growth. On clip 9 each path also decodes the pair,
 //!   and lens 0 by itself, alone: without the encode, whose memory would
-//!   count once in each. The pair passes if it grows at most twice as
-//!   much as lens 0, plus 10 %.
+//!   count once in each. In these runs the consumer lets a pair go only
+//!   once every channel is full, as a render slower than the decode
+//!   would, so that all 10 frames are alive at once; the timed rows'
+//!   consumer takes each pair as it comes. The pair passes if it grows
+//!   at most twice as much as lens 0, plus 10 %, and K3 decides only
+//!   when each run held all its frames at once.
 //! - Each K's verdict is a note: Pass, the redirect the plan names, or
 //!   not decided and why. A verdict never fails the test. A run that
 //!   fails does, once every row is recorded, unless it failed for a path
@@ -83,7 +87,16 @@ const DECODED_AHEAD: usize = 2;
 /// Frames of a lens alive at once in section 12's export: the decoder's
 /// current and next, `DECODED_AHEAD` in the channel, and one at the
 /// consumer.
-const HELD_A_LENS: usize = 2 + DECODED_AHEAD + 1;
+const HELD_A_LENS: usize = held_a_lens(DECODED_AHEAD);
+
+/// Frames of a lens alive at once with a channel of `ahead`.
+const fn held_a_lens(ahead: usize) -> usize {
+    2 + ahead + 1
+}
+
+/// How often a consumer that waits for every channel to fill looks
+/// again.
+const FILL_POLL: Duration = Duration::from_micros(250);
 
 /// Frames a lens in a gated run (K1's rule), and the most in any run.
 const FRAMES: u64 = 600;
@@ -298,8 +311,10 @@ struct RunSpec {
     frames: u64,
     /// Each channel's bound: `DECODED_AHEAD` but in a control.
     ahead: usize,
-    /// How long the consumer holds each pair, as the render would.
-    hold: Duration,
+    /// Whether the consumer lets each pair go only once every channel
+    /// is full, as a render slower than the decode would (K3's runs);
+    /// otherwise it takes each pair as it comes.
+    fill: bool,
     /// The render node the devices open on; the backend's default when
     /// `None`.
     node: Option<PathBuf>,
@@ -331,7 +346,7 @@ impl RunSpec {
             "setup": self.setup.name(),
             "frames": self.frames,
             "ahead": self.ahead,
-            "hold_us": u64::try_from(self.hold.as_micros()).unwrap_or(u64::MAX),
+            "fill": self.fill,
             "node": self.node.as_deref().map(path_json),
             "beside": self.beside.map(|b| json!({
                 "kind": b.kind_name(),
@@ -367,7 +382,7 @@ impl RunSpec {
             setup: Setup::named(v["setup"].as_str()?)?,
             frames: v["frames"].as_u64()?,
             ahead: usize::try_from(v["ahead"].as_u64()?).ok()?,
-            hold: Duration::from_micros(v["hold_us"].as_u64()?),
+            fill: v["fill"].as_bool()?,
             node: match &v["node"] {
                 Value::Null => None,
                 n => Some(json_path(n)?),
@@ -504,6 +519,28 @@ impl From<MediaError> for NoRun {
 struct Live {
     now: AtomicUsize,
     peak: AtomicUsize,
+    /// Whether a decoder has read the last frame it will, or a decode
+    /// thread has ended: after either the channels can't fill again.
+    done: AtomicBool,
+}
+
+impl Live {
+    /// Waits until `full` frames are alive or the decoders are done.
+    fn wait_full(&self, full: usize) {
+        while self.now.load(Ordering::SeqCst) < full && !self.done.load(Ordering::SeqCst) {
+            thread::sleep(FILL_POLL);
+        }
+    }
+}
+
+/// Marks its run's decoders done in [`Live`] when dropped, however its
+/// decode thread ends.
+struct Ending<'a>(&'a Live);
+
+impl Drop for Ending<'_> {
+    fn drop(&mut self) {
+        self.0.done.store(true, Ordering::SeqCst);
+    }
 }
 
 /// A decoded frame, counted in its run's [`Live`] while it lives.
@@ -596,6 +633,9 @@ impl Lens<'_> {
         self.handed += 1;
         if self.handed < self.frames {
             self.next = Some(self.read()?);
+        } else {
+            // From here it holds only the frame it hands on.
+            self.live.done.store(true, Ordering::SeqCst);
         }
         Ok(Some(cur))
     }
@@ -661,15 +701,22 @@ fn same_time(n: u64, pair: &[Held]) -> Result<(), String> {
     ))
 }
 
-/// The consumer: takes each pair, holds its lenses to one time, keeps it
-/// for `hold` as the render would, and lets it go before taking the
-/// next. Returns how many pairs it took.
-fn consume(mut next: impl FnMut() -> Option<Vec<Held>>, hold: Duration) -> Result<u64, NoRun> {
+/// The consumer: takes each pair, holds its lenses to one time, and lets
+/// it go before taking the next. When `spec.fill`, it holds each pair
+/// until every frame section 12 holds is alive, with each channel full
+/// and each decoder at its current and next frame, or until the
+/// decoders are done. Returns how many pairs it took.
+fn consume(
+    mut next: impl FnMut() -> Option<Vec<Held>>,
+    spec: &RunSpec,
+    live: &Live,
+) -> Result<u64, NoRun> {
+    let full = held_a_lens(spec.ahead) * spec.streams.len();
     let mut n = 0;
     while let Some(pair) = next() {
         same_time(n, &pair).map_err(NoRun::Failed)?;
-        if !hold.is_zero() {
-            thread::sleep(hold);
+        if spec.fill {
+            live.wait_full(full);
         }
         drop(pair);
         n += 1;
@@ -691,6 +738,7 @@ fn serial(spec: &RunSpec, backend: &FfmpegBackend, live: &Arc<Live>) -> Result<D
     let (tx, rx) = mpsc::sync_channel::<Vec<Held>>(spec.ahead);
     thread::scope(|s| {
         let decoder = s.spawn(move || -> Result<Decoded, NoRun> {
+            let _ending = Ending(live);
             let mut lenses = Vec::new();
             let mut frame_bytes = 0;
             for k in 0..spec.streams.len() {
@@ -721,7 +769,7 @@ fn serial(spec: &RunSpec, backend: &FfmpegBackend, live: &Arc<Live>) -> Result<D
         });
         // The receiver goes with the consumer, so that a consumer that
         // stops lets a blocked decoder go.
-        let consumed = consume(move || rx.recv().ok(), spec.hold);
+        let consumed = consume(move || rx.recv().ok(), spec, live);
         let decoded = decoder
             .join()
             .unwrap_or_else(|_| Err(NoRun::Failed("the decode thread panicked".into())))?;
@@ -744,6 +792,7 @@ fn threaded(spec: &RunSpec, backend: &FfmpegBackend, live: &Arc<Live>) -> Result
             rxs.push(rx);
             let opened = &opened;
             decoders.push(s.spawn(move || -> Result<(LensRan, f64, usize), NoRun> {
+                let _ending = Ending(live);
                 let lens = open_lens(backend, spec, k, live);
                 // Every lens's first frame is in hand before any decodes
                 // on: the clock starts there.
@@ -760,7 +809,8 @@ fn threaded(spec: &RunSpec, backend: &FfmpegBackend, live: &Arc<Live>) -> Result
         }
         let consumed = consume(
             move || rxs.iter().map(|rx| rx.recv().ok()).collect(),
-            spec.hold,
+            spec,
+            live,
         );
         let lenses = decoders
             .into_iter()
@@ -1168,13 +1218,30 @@ struct GatedRow {
     beside: bool,
 }
 
-/// K3's runs on one path: lens 0 by itself, and the pair in each setup,
-/// each's growth in KiB.
+/// One of K3's runs: the most frames it had alive at once, and how far
+/// its peak resident set rose, in KiB, where that can be measured.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Grew {
+    held: usize,
+    kib: Option<u64>,
+}
+
+impl From<&Ran> for Grew {
+    fn from(r: &Ran) -> Grew {
+        Grew {
+            held: r.peak_held,
+            kib: r.rss_kib,
+        }
+    }
+}
+
+/// K3's runs on one path: lens 0 by itself, and the pair in each setup.
 #[derive(Debug, Clone, PartialEq)]
 struct K3Row {
     on: On,
-    one: Option<u64>,
-    pairs: Vec<(Setup, Option<u64>)>,
+    /// Lens 0 by itself, if it ran.
+    one: Option<Grew>,
+    pairs: Vec<(Setup, Grew)>,
     frame_bytes: usize,
 }
 
@@ -1363,35 +1430,62 @@ fn mib(kib: u64) -> f64 {
     kib as f64 / 1024.0
 }
 
+/// `n` frames of `frame_bytes` each, in MiB and MB.
+fn frames_size(n: usize, frame_bytes: usize) -> String {
+    let bytes = (n * frame_bytes) as f64;
+    format!(
+        "{:.0} MiB ({:.0} MB)",
+        bytes / f64::from(1 << 20),
+        bytes / 1e6
+    )
+}
+
 /// K3 on one path: the pair's growth, in each setup, against
-/// [`K3_FACTOR`] × lens 0's by itself.
+/// [`K3_FACTOR`] × lens 0's by itself. It decides only when each run had
+/// alive at once every frame section 12 holds, 10 for the pair and 5
+/// for lens 0, since a run that held fewer hides their memory.
 fn k3(row: &K3Row) -> Verdict {
     let Some(one) = row.one else {
+        return Verdict::NotDecided("lens 0 by itself didn't run".into());
+    };
+    let Some(one_kib) = one.kib else {
         return Verdict::NotDecided("lens 0 by itself has no growth measured".into());
     };
+    let short = |what: &str, held: usize, want: usize| {
+        Verdict::NotDecided(format!(
+            "{what} had at most {held} frames alive at once, not the {want} section 12 holds"
+        ))
+    };
+    if one.held != HELD_A_LENS {
+        return short("lens 0 by itself", one.held, HELD_A_LENS);
+    }
     if row.pairs.is_empty() {
         return Verdict::NotDecided("the pair has no run".into());
     }
-    let limit = K3_FACTOR * mib(one);
+    let limit = K3_FACTOR * mib(one_kib);
     let mut said = Vec::new();
     let mut over = false;
     for (setup, grew) in &row.pairs {
-        let Some(grew) = grew else {
+        let Some(kib) = grew.kib else {
             return Verdict::NotDecided(format!("{} has no growth measured", setup.label()));
         };
-        let held = at_most(mib(*grew), limit);
+        if grew.held != 2 * HELD_A_LENS {
+            return short(setup.label(), grew.held, 2 * HELD_A_LENS);
+        }
+        let held = at_most(mib(kib), limit);
         over |= held.passes() != Some(true);
-        said.push(format!("{} {:.0} MiB", setup.label(), mib(*grew)));
+        said.push(format!("{} {:.0} MiB", setup.label(), mib(kib)));
     }
-    let held = 2 * HELD_A_LENS;
-    let bytes = (held * row.frame_bytes) as f64;
+    let held = row.pairs.iter().map(|(_, g)| g.held).max().unwrap_or(0);
     let why = format!(
-        "the pair grew {} against {K3_FACTOR} × lens 0's {:.0} MiB = {limit:.0} MiB; the {held} \
-         frames it holds are {:.0} MiB ({:.0} MB) of it",
-        said.join(", "),
-        mib(one),
-        bytes / f64::from(1 << 20),
-        bytes / 1e6,
+        "the pair grew {} against {K3_FACTOR} × lens 0's {:.0} MiB = {limit:.0} MiB; at its peak \
+         each pair run had {held} frames alive at once, {} of its growth, and lens 0 by itself \
+         had {}, {}",
+        said.join(" and "),
+        mib(one_kib),
+        frames_size(held, row.frame_bytes),
+        one.held,
+        frames_size(one.held, row.frame_bytes),
     );
     if over {
         Verdict::Redirect(K3_LEVERS, why)
@@ -1512,7 +1606,7 @@ impl Plan {
             setup,
             frames: pair.frames.map_or(self.frames, |f| f.min(self.frames)),
             ahead: DECODED_AHEAD,
-            hold: Duration::ZERO,
+            fill: false,
             node: self.node.clone(),
             beside: None,
             scratch: self.scratch.clone(),
@@ -1634,7 +1728,7 @@ impl Plan {
     }
 
     /// K3's runs on `on`, alone: lens 0 by itself, then the pair in each
-    /// setup.
+    /// setup, each with every channel kept full.
     fn k3_runs(&self, clip: &Clip, pair: &Pair, on: On, report: &mut Report) -> K3Row {
         let mut row = K3Row {
             on,
@@ -1644,20 +1738,23 @@ impl Plan {
         };
         let name =
             |setup: &str| format!("pair decode {}, {}, {setup}, for K3", clip.name, on.label());
-        let one = self.spec(pair, &pair.streams[..1], on, Setup::Threaded);
+        let spec = |streams: &[usize], setup| RunSpec {
+            fill: true,
+            ..self.spec(pair, streams, on, setup)
+        };
+        let one = spec(&pair.streams[..1], Setup::Threaded);
         let mut runs = vec![(None, name("lens 0 only"), one)];
         for setup in Setup::ALL {
-            let spec = self.spec(pair, &pair.streams, on, setup);
-            runs.push((Some(setup), name(setup.label()), spec));
+            runs.push((Some(setup), name(setup.label()), spec(&pair.streams, setup)));
         }
         for (setup, name, spec) in runs {
             match self.measure(&name, &spec, 1, report) {
                 Ok(rans) => match setup {
                     None => {
-                        row.one = rans[0].rss_kib;
+                        row.one = Some(Grew::from(&rans[0]));
                         row.frame_bytes = rans[0].frame_bytes;
                     }
-                    Some(setup) => row.pairs.push((setup, rans[0].rss_kib)),
+                    Some(setup) => row.pairs.push((setup, Grew::from(&rans[0]))),
                 },
                 Err(NoRun::Unavailable(why)) => report.note(format!("{name}: not measured: {why}")),
                 Err(NoRun::Failed(why)) => report.failed.push(format!("{name}: {why}")),
@@ -1786,7 +1883,7 @@ fn spec_64(name: &str, setup: Setup) -> RunSpec {
         on: On::Software,
         setup,
         ahead: DECODED_AHEAD,
-        hold: Duration::ZERO,
+        fill: false,
         node: None,
         beside: None,
         scratch: media_dir(),
@@ -1797,10 +1894,10 @@ fn spec_64(name: &str, setup: Setup) -> RunSpec {
 fn the_pair_decode_holds_the_frames_section_12_holds() {
     let _time = timed("the_pair_decode_holds_the_frames_section_12_holds");
     for setup in Setup::ALL {
-        // A consumer slower than the decoders, so that every channel
-        // fills.
+        // K3's consumer, which lets a pair go only once every channel is
+        // full.
         let spec = RunSpec {
-            hold: Duration::from_millis(10),
+            fill: true,
             ..spec_64(PAIR_64_MATCHED, setup)
         };
         let ran = run(&spec).unwrap();
@@ -1874,19 +1971,23 @@ fn a_pair_decodes_as_far_as_its_shorter_lens() {
     let frames: Vec<u64> = ran.lenses.iter().map(|l| l.frames).collect();
     assert_eq!(frames, [29, 29]);
     // The control: the longer lens's count fails the run at the shorter
-    // lens's end.
+    // lens's end, and K3's consumer, waiting for the channels to fill,
+    // lets the run end too.
     for setup in Setup::ALL {
-        let longer = RunSpec {
-            frames: 30,
-            setup,
-            ..spec.clone()
-        };
-        let why = must_fail("the short lens asked for 30 frames", run(&longer));
-        assert_eq!(
-            why,
-            NoRun::Failed("lens 1 ended after 29 frames of 30".into()),
-            "{setup:?}"
-        );
+        for fill in [false, true] {
+            let longer = RunSpec {
+                frames: 30,
+                setup,
+                fill,
+                ..spec.clone()
+            };
+            let why = must_fail("the short lens asked for 30 frames", run(&longer));
+            assert_eq!(
+                why,
+                NoRun::Failed("lens 1 ended after 29 frames of 30".into()),
+                "{setup:?}, fill {fill}"
+            );
+        }
     }
 }
 
@@ -1903,28 +2004,62 @@ fn k1s_rule_and_k3s_hold_numbers_to_the_plans_limits() {
     assert!(!decided);
     let (_, decided) = must_fail("no runs", k1_rule(&[]));
     assert!(!decided);
+    let full = |mib: u64, held| Grew {
+        held,
+        kib: Some(mib << 10),
+    };
     let row = |pairs: [u64; 2]| K3Row {
         on: On::VaApi,
-        one: Some(400 << 10),
+        one: Some(full(400, HELD_A_LENS)),
         pairs: vec![
-            (Setup::Serial, Some(pairs[0] << 10)),
-            (Setup::Threaded, Some(pairs[1] << 10)),
+            (Setup::Serial, full(pairs[0], 2 * HELD_A_LENS)),
+            (Setup::Threaded, full(pairs[1], 2 * HELD_A_LENS)),
         ],
         frame_bytes: 3840 * 3840 * 3 / 2,
     };
     // 2 × 400 MiB + 10 % = 880 MiB.
     let pass = k3(&row([800, 880]));
     assert!(matches!(pass, Verdict::Pass(_)), "{pass}");
-    // Section 12's 10 frames at 8K: 221 MB.
-    assert!(pass.to_string().contains("211 MiB (221 MB)"), "{pass}");
+    // Section 12's 10 frames at 8K: 221 MB, and lens 0's 5 half that.
+    let said = pass.to_string();
+    assert!(
+        said.contains("10 frames alive at once, 211 MiB (221 MB)"),
+        "{said}"
+    );
+    assert!(said.contains("had 5, 105 MiB (111 MB)"), "{said}");
     let over = k3(&row([800, 920]));
     must_fail("a pair at 2.3 × lens 0", matches!(over, Verdict::Pass(_)));
     assert!(matches!(over, Verdict::Redirect(K3_LEVERS, _)), "{over}");
     let unmeasured = K3Row {
-        one: None,
+        one: Some(Grew {
+            held: HELD_A_LENS,
+            kib: None,
+        }),
         ..row([800, 800])
     };
     assert!(matches!(k3(&unmeasured), Verdict::NotDecided(_)));
+    // A run that never had all its frames alive at once decides nothing,
+    // even within the limit: the controls for the pass above.
+    let mut short = row([800, 800]);
+    short.pairs[1].1.held = 2 * HELD_A_LENS - 1;
+    let says = k3(&short);
+    must_fail(
+        "a pair run that held 9 frames",
+        matches!(says, Verdict::Pass(_)),
+    );
+    assert!(
+        says.to_string()
+            .contains("a thread a lens had at most 9 frames alive at once, not the 10"),
+        "{says}"
+    );
+    let mut short = row([800, 800]);
+    short.one = Some(full(400, HELD_A_LENS - 3));
+    let says = k3(&short);
+    must_fail(
+        "lens 0 by itself held 2 frames",
+        matches!(says, Verdict::Pass(_)),
+    );
+    assert!(matches!(says, Verdict::NotDecided(_)), "{says}");
 }
 
 #[test]
@@ -2149,7 +2284,22 @@ fn the_bench_runs_its_rows_and_verdicts_on_small_clips() {
     ));
     assert!(noted("K4, huginn's 8K30 export"));
     assert!(noted("K2's export half"));
-    assert!(noted("K3 on software"));
+    // K3's runs had every frame alive at once, so that where the peak
+    // can be measured K3 decides.
+    let k3_said = report
+        .notes
+        .iter()
+        .find(|n| n.starts_with("K3 on software"))
+        .unwrap();
+    if report.rows.iter().any(|r| r.unit == "MiB") {
+        assert!(
+            k3_said.contains(&format!(
+                "each pair run had {} frames alive at once",
+                2 * HELD_A_LENS
+            )),
+            "{k3_said}"
+        );
+    }
     // A machine without hardware decides nothing, and the bench skips.
     assert!(!report.decided);
     // The control for the rows found above: a clip that isn't here has

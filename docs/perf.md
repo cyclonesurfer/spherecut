@@ -186,8 +186,8 @@ Current benchmarks:
   dual-fisheye file's lens tracks, `serial` (one thread steps both) and
   `a thread a lens`, on `VA-API download`, `Vulkan Video download` and
   `software`, over the X5 8K30 clip 9 (`handheld_flips`), the 8K25,
-  5.7K60 and 4K120 samples, and the three two-track perf clips. Frames
-  are held as the export will hold them, 5 a lens. Rows, under
+  5.7K60 and 4K120 samples, and the three two-track perf clips. Each
+  lens holds at most the 5 frames the export will. Rows, under
   `pair decode <clip>, <path>, <setup>`: `slower lens beside the encode`
   or `slower lens alone` (fps a lens: the frames after the first over
   the time from both lenses' first frame), `opening` (ms) and
@@ -198,13 +198,19 @@ Current benchmarks:
   3840×2160 frame at 30 fps, once to warm up and then three times; the
   rest decode up to 600 frames once, alone. For K3 each path also
   decodes clip 9 alone, as a pair and as lens 0 by itself
-  (`…, <setup>, for K3` and `…, lens 0 only, for K3`). Every run is a
-  child process of its own, so that its peak RSS growth is its own. A
-  note per K gives its verdict by the plan's rule: Pass, the redirect
-  the plan names, or not decided and why. A verdict never fails the
-  test; a run that fails does, and with no hardware row at clip 9 it
-  skips. On odin it should take about 25 minutes, most of it
-  software's gated rows.
+  (`…, <setup>, for K3` and `…, lens 0 only, for K3`). In these runs
+  the consumer lets a pair go only once every channel is full, as a
+  render slower than the decode would, so that all 10 frames of the
+  pair (5 of lens 0) are alive at once; the other rows' consumer takes
+  each pair as it comes, and holds fewer once the decode is the slow
+  side. K3 decides only when each of its runs had all its frames alive
+  at once, and its note gives that peak and the bytes it accounts for
+  beside the growth. Every run is a child process of its own, so that
+  its peak RSS growth is its own. A note per K gives its verdict by the
+  plan's rule: Pass, the redirect the plan names, or not decided and
+  why. A verdict never fails the test; a run that fails does, and with
+  no hardware row at clip 9 it skips. On odin it should take about 25
+  minutes, most of it software's gated rows.
 - **The perf clips** (DECISIONS D37): hw-test makes them once, with
   libx265 at an average bitrate, into `<cargo target dir>/hw-media/`:
   `hevc8-5k7-30fps-noisy-20s.mp4` and `hevc10-5k7-30fps-noisy-20s.mp4`
