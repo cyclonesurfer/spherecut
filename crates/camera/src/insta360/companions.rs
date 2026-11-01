@@ -210,7 +210,7 @@ pub struct CompanionError {
 ///
 /// The records' sizes are compared first, from the trailers, and then,
 /// when they are equal and at most `max` bytes (as [`super::read_record`]
-/// takes its `max`), their bytes, a [`CHUNK`] of each file at a time, so
+/// takes its `max`), their bytes, 64 KiB of each file at a time, so
 /// nothing larger is allocated whatever the trailers say. A record 4
 /// whose slot runs into the index or past the file ([`Trailer::skipped`])
 /// is [`CameraError::SlotPastEnd`] at its slot, as `read_record` gives;
