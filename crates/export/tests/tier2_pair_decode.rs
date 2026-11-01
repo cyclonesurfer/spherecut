@@ -13,8 +13,12 @@
 //!   `EncoderSetup::vaapi`, since the export's encoder shares the video
 //!   engine (D56). Each runs once to warm up, then three times: the
 //!   slower lens's median is the verdict, and a run under 30 fps fails
-//!   it. The 8K25, 5.7K60 and 4K120 samples and the other two perf pairs
-//!   decode once each, alone, up to 600 frames a lens.
+//!   it. A row decides only when each run's encode took 29.5 frames a
+//!   second or more over the decode's own timed window. The 8K25, 5.7K60
+//!   and 4K120 samples and the other two perf pairs decode once each,
+//!   alone, up to 600 frames a lens; the 2×2880² at 59.94 is P only,
+//!   where the X5 codes every other picture as TSA_N, and a note says so
+//!   beside its rows.
 //! - K3: frames are held as section 12 will hold them, per lens the
 //!   decoder's current and next frame, `DECODED_AHEAD` in a bounded
 //!   channel and one at the consumer, so 5 a lens and 10 a pair. Every
@@ -30,10 +34,16 @@
 //!   at most twice as much as lens 0, plus 10 %, and K3 decides only
 //!   when each run held all its frames at once.
 //! - Each K's verdict is a note: Pass, the redirect the plan names, or
-//!   not decided and why. A verdict never fails the test. A run that
-//!   fails does, once every row is recorded, unless it failed for a path
-//!   the machine lacks, which is a note. With no hardware row at clip 9
-//!   the test skips, since K1 to K4 are then all undecided.
+//!   not decided and why, on this machine whichever machine the plan
+//!   wrote the K for. Where VA-API misses and Vulkan Video has no rows, a
+//!   redirect past Redirect 1 needs doctor's word that Vulkan Video
+//!   doesn't decode the clip's format here, or the device's refusal of
+//!   the stream; otherwise the K is not decided. A verdict never fails
+//!   the test. A run that fails does, once every row is recorded, unless
+//!   it failed for a path the machine lacks, which is a note; but once a
+//!   path has decoded here, a run on it that finds the device or decoder
+//!   missing fails, as does a refusal of a clip it has decoded. When no K
+//!   is decided the test skips, naming each.
 //!
 //! The Tier 1 tests run the same code in software on section 9's 2×64²
 //! pairs: the frames held, the zip, K1's and K3's rules and each K's
@@ -70,6 +80,7 @@ use spherecut_media::backend::{
     DecodeMode, DecodePath, Exactness, Fallback, FfmpegBackend, HwKind, MediaBackend, NextFrame,
     SeekMode, SeekOutcome, VideoDecode, VideoFrame, VideoRequest,
 };
+use spherecut_media::doctor::{self, CheckResult, DoctorReport};
 use spherecut_media::encode::{Mp4Writer, PixelLayout, StridedPlanes, VideoSettings};
 use spherecut_media::probe::{self, StreamKind};
 use spherecut_media::{HwDevice, MediaError};
@@ -108,6 +119,12 @@ const GATED_RUNS: usize = 3;
 /// run may fall under 30.
 const PASS_FPS: f64 = 36.0;
 const RUN_FLOOR_FPS: f64 = 30.0;
+
+/// K1's rule: the encode beside runs at 30 fps. A run decides only when
+/// its encode took at least this many frames a second over the decode's
+/// timed window, which leaves a frame of rounding over a window of a few
+/// seconds and catches an encode that fell behind.
+const ENCODE_FLOOR_FPS: f64 = 29.5;
 
 /// K3: the pair may grow twice as much as lens 0 by itself, plus 10 %.
 const K3_FACTOR: f64 = 2.0 * 1.1;
@@ -428,20 +445,37 @@ impl LensRan {
     }
 }
 
-/// The encode beside, over the decode.
+/// The encode beside, over the decode's timed window: the frames it
+/// took from both lenses' first frame to the last frame decoded, and how
+/// long that was, so that frames it took while the decoders opened, or
+/// caught up on after a stall once the decode was over, don't count.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Encoded {
     frames: u64,
-    /// From the first frame taken to the last.
     secs: f64,
 }
 
 impl Encoded {
     fn fps(self) -> f64 {
-        if self.frames > 1 {
-            (self.frames - 1) as f64 / self.secs
+        if self.secs > 0.0 {
+            self.frames as f64 / self.secs
         } else {
             f64::NAN
+        }
+    }
+}
+
+/// When the encode beside took each frame.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Taken(Vec<Instant>);
+
+impl Taken {
+    /// The frames taken after `from` up to `to`, over that window.
+    fn over(&self, (from, to): (Instant, Instant)) -> Encoded {
+        let frames = self.0.iter().filter(|&&t| t > from && t <= to).count();
+        Encoded {
+            frames: frames as u64,
+            secs: to.saturating_duration_since(from).as_secs_f64(),
         }
     }
 }
@@ -496,20 +530,72 @@ impl Ran {
 /// Why a run has no result.
 #[derive(Debug, Clone, PartialEq)]
 enum NoRun {
-    /// The path can't decode the clip on this machine: no device, or one
-    /// that turns the stream down. Its rows become a note.
+    /// The path has no device or decoder on this machine (`Hardware`,
+    /// `NoDecoder`). Its rows become a note, unless the path has decoded
+    /// here before ([`Measured::judge`]).
     Unavailable(String),
+    /// The device turned the clip's stream down (`HwUnsupported`), a
+    /// reason of the stream's own. Its rows become a note, unless the path
+    /// has decoded the clip before.
+    Refused(String),
     /// Anything else, which fails the bench once every row is recorded.
     Failed(String),
+}
+
+impl NoRun {
+    fn why(&self) -> &str {
+        match self {
+            NoRun::Unavailable(why) | NoRun::Refused(why) | NoRun::Failed(why) => why,
+        }
+    }
 }
 
 impl From<MediaError> for NoRun {
     fn from(e: MediaError) -> NoRun {
         match &e {
-            MediaError::HwUnsupported { .. }
-            | MediaError::Hardware { .. }
-            | MediaError::NoDecoder { .. } => NoRun::Unavailable(e.to_string()),
+            MediaError::HwUnsupported { .. } => NoRun::Refused(e.to_string()),
+            MediaError::Hardware { .. } | MediaError::NoDecoder { .. } => {
+                NoRun::Unavailable(e.to_string())
+            }
             _ => NoRun::Failed(e.to_string()),
+        }
+    }
+}
+
+/// Every run that has decoded on a path on this machine: the path, the
+/// clip and the run's name.
+#[derive(Debug, Default)]
+struct Measured(Vec<(On, String, String)>);
+
+impl Measured {
+    fn add(&mut self, on: On, clip: &str, run: &str) {
+        self.0.push((on, clip.to_string(), run.to_string()));
+    }
+
+    /// `no`, why a run on `on` over `clip` has no result, as what the
+    /// path has decoded here makes it. A path that has decoded a clip has
+    /// its device and decoder, so a later `Unavailable` is a failure; a
+    /// device that has decoded this clip's streams can't then turn them
+    /// down, so a later `Refused` is one too. A device may still refuse a
+    /// clip it hasn't decoded, as one mode's level can be past it.
+    fn judge(&self, on: On, clip: &str, no: NoRun) -> NoRun {
+        let before = |same_clip: bool| {
+            self.0
+                .iter()
+                .find(|(o, c, _)| *o == on && (!same_clip || c == clip))
+                .map(|(_, _, run)| run)
+        };
+        let first = match &no {
+            NoRun::Unavailable(_) => before(false),
+            NoRun::Refused(_) => before(true),
+            NoRun::Failed(_) => None,
+        };
+        match first {
+            Some(run) => NoRun::Failed(format!(
+                "`{run}` measured on this machine; this run: {}",
+                no.why()
+            )),
+            None => no,
         }
     }
 }
@@ -729,6 +815,9 @@ struct Decoded {
     open_s: f64,
     lenses: Vec<LensRan>,
     frame_bytes: usize,
+    /// The decode's timed window: from both lenses' first frame to the
+    /// last frame decoded.
+    window: (Instant, Instant),
 }
 
 /// One thread opens every lens, steps them in turn, and hands on each
@@ -761,10 +850,12 @@ fn serial(spec: &RunSpec, backend: &FfmpegBackend, live: &Arc<Live>) -> Result<D
                     break;
                 }
             }
+            let last = lenses.iter().map(|l| l.read_at).fold(t0, Instant::max);
             Ok(Decoded {
                 open_s: t0.duration_since(began).as_secs_f64(),
                 lenses: lenses.iter().map(|l| l.ran(t0)).collect(),
                 frame_bytes,
+                window: (t0, last),
             })
         });
         // The receiver goes with the consumer, so that a consumer that
@@ -791,7 +882,7 @@ fn threaded(spec: &RunSpec, backend: &FfmpegBackend, live: &Arc<Live>) -> Result
             let (tx, rx) = mpsc::sync_channel::<Held>(spec.ahead);
             rxs.push(rx);
             let opened = &opened;
-            decoders.push(s.spawn(move || -> Result<(LensRan, f64, usize), NoRun> {
+            decoders.push(s.spawn(move || -> Result<Threaded, NoRun> {
                 let _ending = Ending(live);
                 let lens = open_lens(backend, spec, k, live);
                 // Every lens's first frame is in hand before any decodes
@@ -804,7 +895,12 @@ fn threaded(spec: &RunSpec, backend: &FfmpegBackend, live: &Arc<Live>) -> Result
                         break;
                     }
                 }
-                Ok((lens.ran(t0), t0.duration_since(began).as_secs_f64(), bytes))
+                Ok(Threaded {
+                    ran: lens.ran(t0),
+                    open_s: t0.duration_since(began).as_secs_f64(),
+                    bytes,
+                    window: (t0, lens.read_at.max(t0)),
+                })
             }));
         }
         let consumed = consume(
@@ -821,12 +917,27 @@ fn threaded(spec: &RunSpec, backend: &FfmpegBackend, live: &Arc<Live>) -> Result
             })
             .collect::<Result<Vec<_>, _>>()?;
         took_all(consumed?, spec)?;
+        let first = lenses.iter().map(|l| l.window.0).min();
+        let last = lenses.iter().map(|l| l.window.1).max();
+        let (Some(first), Some(last)) = (first, last) else {
+            return Err(NoRun::Failed("the run had no lens".into()));
+        };
         Ok(Decoded {
-            open_s: lenses.iter().map(|l| l.1).fold(0.0, f64::max),
-            frame_bytes: lenses[0].2,
-            lenses: lenses.into_iter().map(|l| l.0).collect(),
+            open_s: lenses.iter().map(|l| l.open_s).fold(0.0, f64::max),
+            frame_bytes: lenses[0].bytes,
+            lenses: lenses.iter().map(|l| l.ran).collect(),
+            window: (first, last),
         })
     })
+}
+
+/// What one lens's thread came to in [`threaded`].
+struct Threaded {
+    ran: LensRan,
+    open_s: f64,
+    bytes: usize,
+    /// From its clock's start to its last frame.
+    window: (Instant, Instant),
 }
 
 /// The consumer took every pair the run decoded.
@@ -864,16 +975,16 @@ fn fixed_frame(layout: PixelLayout, (w, h): (u32, u32)) -> (Vec<u8>, Vec<(usize,
 }
 
 /// The encode beside: `b`'s encoder takes the same frame at 30 fps, or
-/// as fast as it can below that, until `stop`, and its file is removed.
-/// `started` is told once the encoder is open; it takes at least one
-/// frame.
+/// as fast as it can below that, catching up after a stall, until
+/// `stop`, and its file is removed. `started` is told once the encoder is
+/// open; it takes at least one frame. Returns when it took each.
 fn encode_beside(
     b: Beside,
     node: Option<&Path>,
     dir: &Path,
     stop: &AtomicBool,
     started: mpsc::Sender<()>,
-) -> Result<Encoded, String> {
+) -> Result<Taken, String> {
     let setup = b.setup();
     let device = match setup.kind {
         EncoderKind::Software => None,
@@ -911,32 +1022,25 @@ fn encode_beside(
     };
     started.send(()).ok();
     let began = Instant::now();
-    let mut frames = 0u64;
-    // When the first frame and the last were taken.
-    let (mut first, mut last) = (began, began);
+    let mut taken = Taken::default();
     let pushed = loop {
         if let Err(e) = writer.push_video_strided(&frame) {
-            break Err(format!("{} at frame {frames}: {e}", setup.name));
+            break Err(format!("{} at frame {}: {e}", setup.name, taken.0.len()));
         }
-        last = Instant::now();
-        if frames == 0 {
-            first = last;
-        }
-        frames += 1;
+        taken.0.push(Instant::now());
         if stop.load(Ordering::SeqCst) {
             break Ok(());
         }
-        let due = began + Duration::from_secs_f64(frames as f64 / 30.0);
+        let due = began + Duration::from_secs_f64(taken.0.len() as f64 / 30.0);
         if let Some(wait) = due.checked_duration_since(Instant::now()) {
             thread::sleep(wait);
         }
     };
-    let secs = last.duration_since(first).as_secs_f64();
     let finished = writer.finish();
     std::fs::remove_file(&path).ok();
     pushed?;
     finished.map_err(|e| format!("finishing {}: {e}", setup.name))?;
-    Ok(Encoded { frames, secs })
+    Ok(taken)
 }
 
 /// `b` if its encoder opens and takes a frame here, else why not.
@@ -991,7 +1095,7 @@ fn run(spec: &RunSpec) -> Result<Ran, NoRun> {
             lenses: decoded.lenses,
             peak_held: live.peak.load(Ordering::SeqCst),
             frame_bytes: decoded.frame_bytes,
-            encode: encode.transpose()?,
+            encode: encode.transpose()?.map(|t| t.over(decoded.window)),
             rss_kib: None,
         })
     })
@@ -1008,6 +1112,7 @@ fn result_json(r: &Result<Ran, NoRun>) -> Value {
     match r {
         Ok(ran) => json!({ "ok": ran.to_json() }),
         Err(NoRun::Unavailable(why)) => json!({ "unavailable": why }),
+        Err(NoRun::Refused(why)) => json!({ "refused": why }),
         Err(NoRun::Failed(why)) => json!({ "failed": why }),
     }
 }
@@ -1018,6 +1123,9 @@ fn json_result(v: &Value) -> Option<Result<Ran, NoRun>> {
     }
     if let Some(why) = v.get("unavailable").and_then(Value::as_str) {
         return Some(Err(NoRun::Unavailable(why.into())));
+    }
+    if let Some(why) = v.get("refused").and_then(Value::as_str) {
+        return Some(Err(NoRun::Refused(why.into())));
     }
     let why = v.get("failed").and_then(Value::as_str)?;
     Some(Err(NoRun::Failed(why.into())))
@@ -1119,13 +1227,15 @@ fn in_child(spec: &RunSpec) -> Result<Ran, NoRun> {
         })
 }
 
-/// A two-track file: its lens streams, and the frames the shorter holds
-/// as the container counts them.
+/// A two-track file: its lens streams, the frames the shorter holds as
+/// the container counts them, and the format of doctor's checks that
+/// covers lens 0's, if one does.
 #[derive(Debug, Clone)]
 struct Pair {
     path: PathBuf,
     streams: [usize; 2],
     frames: Option<u64>,
+    format: Option<&'static str>,
 }
 
 /// `path`'s first two video streams, the lenses of a dual-fisheye file.
@@ -1147,10 +1257,16 @@ fn pair_in(path: &Path) -> Result<Pair, String> {
         .iter()
         .filter_map(|s| s.frames.and_then(|f| u64::try_from(f).ok()))
         .min();
+    let format = a
+        .codec
+        .as_deref()
+        .zip(a.video.as_ref())
+        .and_then(|(codec, v)| doctor::check_format(codec, v.bit_depth, v.chroma_subsampling));
     Ok(Pair {
         path: path.to_path_buf(),
         streams: [a.index, b.index],
         frames,
+        format,
     })
 }
 
@@ -1170,7 +1286,17 @@ struct Clip {
     name: String,
     file: Result<Pair, String>,
     gate: Option<Gate>,
+    /// Where it is coded unlike the X5's mode, as a note beside its rows
+    /// says.
+    unlike: Option<&'static str>,
 }
+
+/// What `pair-hevc8-2880-5994-noisy-10s`'s rows say of its coding (M3
+/// plan 7.2): the X5 codes every other picture at 59.94 as a
+/// non-reference TSA_N, which x265 3.5, as linked in the cloud, gives only
+/// to reordered B-frames, so the pair is coded P only.
+const P_ONLY: &str = "P only: the X5 codes TSA_N on every other picture, and every picture \
+                      here but the IDRs is a reference P frame";
 
 /// The bench's clips: clip 9 and the 2×2880² at 29.97 gated, the other
 /// modes' samples and perf pairs recorded.
@@ -1187,12 +1313,14 @@ fn bench_clips() -> Vec<Clip> {
             name: format!("X5 {} clip {}", r.mode.name(), r.take),
             file,
             gate,
+            unlike: None,
         }
     };
     let perf = |name: &str, gate| Clip {
         name: format!("perf clip {name}"),
         file: tier2::perf_clip(&format!("{name}.mp4")).and_then(|p| pair_in(&p)),
         gate,
+        unlike: (name == PERF_PAIR_2880_5994).then_some(P_ONLY),
     };
     vec![
         sample("handheld_flips", Some(Gate::K1K4)),
@@ -1216,6 +1344,88 @@ struct GatedRow {
     /// Frames a lens in each run.
     frames: u64,
     beside: bool,
+    /// Each run's encode beside, in fps over the decode's timed window
+    /// ([`Encoded`]); NaN for a run whose encode took no frame there.
+    encode_fps: Vec<f64>,
+}
+
+/// A path with no rows at a gated clip, and why.
+#[derive(Debug, Clone, PartialEq)]
+struct Absent {
+    gate: Gate,
+    on: On,
+    /// The format of doctor's checks that covers the clip, if one does.
+    format: Option<&'static str>,
+    /// Why its first run has no result: `Unavailable` or `Refused`.
+    why: NoRun,
+}
+
+/// Doctor's decode checks on the bench's render node: which formats
+/// each hardware path decodes, as the playback engine's `HwSupport`
+/// reads them for Auto (D34).
+#[derive(Debug, Clone, Default)]
+struct Doctor(Vec<doctor::Check>);
+
+impl Doctor {
+    fn of(report: &DoctorReport) -> Doctor {
+        let hardware =
+            |c: &&doctor::Check| On::named(&c.path).is_some_and(|on| on.kind().is_some());
+        Doctor(
+            report
+                .decode_checks
+                .iter()
+                .filter(hardware)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// `format`, if doctor's check of it works on `on`'s device; else
+    /// what doctor says.
+    fn decodes(&self, format: Option<&'static str>, on: On) -> Result<&'static str, String> {
+        let format = format.ok_or("no check of doctor's covers the clip's format")?;
+        match self
+            .0
+            .iter()
+            .find(|c| c.format == format && c.path == on.name())
+        {
+            None => Err(format!("doctor didn't check {format} on {}", on.label())),
+            Some(c) if c.result == CheckResult::Works => Ok(format),
+            Some(c) => Err(format!(
+                "doctor says {} doesn't decode {format} here: {}",
+                on.label(),
+                c.reason.as_deref().unwrap_or(match c.result {
+                    CheckResult::NotTested => "not tested",
+                    _ => "its check fails",
+                })
+            )),
+        }
+    }
+
+    /// What doctor says of each hardware path on each of `formats`.
+    fn said(&self, formats: &[&'static str]) -> String {
+        let mut said = Vec::new();
+        for &format in formats {
+            for on in On::ALL.into_iter().filter(|on| on.kind().is_some()) {
+                said.push(match self.decodes(Some(format), on) {
+                    Ok(_) => format!("doctor says {} decodes {format} here", on.label()),
+                    Err(says) => says,
+                });
+            }
+        }
+        if said.is_empty() {
+            return "no clip's format is one doctor checks".into();
+        }
+        said.join("; ")
+    }
+}
+
+/// What the gated clips came to, for the verdicts.
+#[derive(Debug, Clone, Default)]
+struct Gated {
+    rows: Vec<GatedRow>,
+    absent: Vec<Absent>,
+    doctor: Doctor,
 }
 
 /// One of K3's runs: the most frames it had alive at once, and how far
@@ -1314,19 +1524,34 @@ enum Kept {
     /// A setup keeps it: the best, said.
     Yes(String),
     No(String),
-    /// A row can't be held to it: run alone, short or NaN.
+    /// A row can't be held to it: run alone, short, NaN, or beside an
+    /// encode that fell behind.
     Undecided(String),
-    /// The path has no row there.
-    Unmeasured,
+    /// The path has no row there, and can't decode the clip here: doctor
+    /// says it doesn't decode the clip's format, or the device turned the
+    /// stream down.
+    Cannot(String),
+    /// The path has no row there, though nothing says it can't decode the
+    /// clip: why.
+    Unmeasured(String),
+}
+
+/// Each of `fps`, to a tenth.
+fn tenths(fps: &[f64]) -> String {
+    let said: Vec<String> = fps.iter().map(|f| format!("{f:.1}")).collect();
+    said.join(", ")
 }
 
 /// Whether `on`'s rows at `gate`, in `setups`, keep K1's rule over
-/// `frames` frames a lens.
-fn kept(rows: &[GatedRow], gate: Gate, on: On, setups: &[Setup], frames: u64) -> Kept {
+/// `frames` frames a lens. A row decides only when every run's encode
+/// beside held [`ENCODE_FLOOR_FPS`] over the decode's window, since a
+/// decode beside a lighter encode isn't the rule's.
+fn kept(gated: &Gated, gate: Gate, on: On, setups: &[Setup], frames: u64) -> Kept {
     let mut best: Option<(f64, String)> = None;
     let (mut no, mut undecided) = (Vec::new(), Vec::new());
     let mut any = false;
-    for r in rows
+    for r in gated
+        .rows
         .iter()
         .filter(|r| r.gate == gate && r.on == on && setups.contains(&r.setup))
     {
@@ -1343,18 +1568,31 @@ fn kept(rows: &[GatedRow], gate: Gate, on: On, setups: &[Setup], frames: u64) ->
             ));
             continue;
         }
-        let runs: Vec<String> = r.fps.iter().map(|f| format!("{f:.1}")).collect();
+        let (runs, encode) = (tenths(&r.fps), tenths(&r.encode_fps));
+        let behind = r.encode_fps.len() != r.fps.len()
+            || r.encode_fps
+                .iter()
+                .any(|&e| at_least(e, ENCODE_FLOOR_FPS).passes() != Some(true));
+        if behind {
+            undecided.push(format!(
+                "{label}: the encode beside took {encode} fps over the decode's window, a run \
+                 under {ENCODE_FLOOR_FPS}, so the decode (runs {runs}) didn't run beside K1's \
+                 load"
+            ));
+            continue;
+        }
         match k1_rule(&r.fps) {
             Ok(m) if best.as_ref().is_none_or(|(b, _)| m > *b) => {
                 let said = format!(
-                    "{label}, {m:.1} fps a lens ≥ {PASS_FPS} (the median of {}), no run under \
-                     {RUN_FLOOR_FPS}",
-                    runs.join(", ")
+                    "{label}, {m:.1} fps a lens ≥ {PASS_FPS} (the median of {runs}), no run under \
+                     {RUN_FLOOR_FPS}, the encode beside at {encode}"
                 );
                 best = Some((m, said));
             }
             Ok(_) => {}
-            Err((why, true)) => no.push(format!("{label}: {why} (runs {})", runs.join(", "))),
+            Err((why, true)) => no.push(format!(
+                "{label}: {why} (runs {runs}; the encode beside at {encode})"
+            )),
             Err((why, false)) => undecided.push(format!("{label}: {why}")),
         }
     }
@@ -1362,54 +1600,70 @@ fn kept(rows: &[GatedRow], gate: Gate, on: On, setups: &[Setup], frames: u64) ->
         Some((_, said)) => Kept::Yes(said),
         None if !undecided.is_empty() => Kept::Undecided(undecided.join("; ")),
         None if any => Kept::No(no.join("; ")),
-        None => Kept::Unmeasured,
+        None => unmeasured(gated, gate, on),
+    }
+}
+
+/// Why `on` has no rows at `gate`: a path that can't decode the clip
+/// here, as doctor or the device says, or one nothing explains.
+fn unmeasured(gated: &Gated, gate: Gate, on: On) -> Kept {
+    let Some(a) = gated.absent.iter().find(|a| a.gate == gate && a.on == on) else {
+        return Kept::Unmeasured("has no rows (see its notes)".into());
+    };
+    match (&a.why, gated.doctor.decodes(a.format, on)) {
+        (NoRun::Refused(why), _) => {
+            Kept::Cannot(format!("the device turned the stream down: {why}"))
+        }
+        (NoRun::Unavailable(why), Err(says)) => Kept::Cannot(format!("{says} ({why})")),
+        (NoRun::Unavailable(why), Ok(format)) => Kept::Unmeasured(format!(
+            "not measured, though doctor says it decodes {format} here: {why}"
+        )),
+        (NoRun::Failed(why), _) => Kept::Unmeasured(format!("its runs failed: {why}")),
     }
 }
 
 /// VA-API download's verdict with Vulkan Video download's as its first
 /// redirect: Pass if VA-API's rows keep K1's rule, else `one` if
-/// Vulkan's do, else `two`.
+/// Vulkan's do, else `two` if Vulkan's miss or Vulkan can't decode the
+/// clip here (Redirect 1 holds only where doctor says it decodes HEVC);
+/// not decided otherwise.
 fn redirects(va: Kept, vk: Kept, one: &'static str, two: &'static str) -> Verdict {
-    let none = "has no rows (see its note)";
     match va {
         Kept::Yes(why) => Verdict::Pass(format!("VA-API download, {why}")),
-        Kept::Undecided(why) => Verdict::NotDecided(format!("VA-API download: {why}")),
-        Kept::Unmeasured => Verdict::NotDecided(format!("VA-API download {none}")),
+        Kept::Undecided(why) | Kept::Cannot(why) | Kept::Unmeasured(why) => {
+            Verdict::NotDecided(format!("VA-API download: {why}"))
+        }
         Kept::No(va) => match vk {
             Kept::Yes(why) => Verdict::Redirect(
                 one,
                 format!("VA-API download: {va}; Vulkan Video download, {why}"),
             ),
-            Kept::Undecided(why) => Verdict::NotDecided(format!(
+            Kept::Undecided(why) | Kept::Unmeasured(why) => Verdict::NotDecided(format!(
                 "VA-API download: {va}; Vulkan Video download: {why}"
             )),
-            Kept::No(vk) => Verdict::Redirect(
+            Kept::No(vk) | Kept::Cannot(vk) => Verdict::Redirect(
                 two,
                 format!("VA-API download: {va}; Vulkan Video download: {vk}"),
-            ),
-            Kept::Unmeasured => Verdict::Redirect(
-                two,
-                format!("VA-API download: {va}; Vulkan Video download {none}"),
             ),
         },
     }
 }
 
 /// K1, odin's export: VA-API download's best setup at 8K30.
-fn k1(rows: &[GatedRow], frames: u64) -> Verdict {
+fn k1(gated: &Gated, frames: u64) -> Verdict {
     redirects(
-        kept(rows, Gate::K1K4, On::VaApi, &Setup::ALL, frames),
-        kept(rows, Gate::K1K4, On::Vulkan, &Setup::ALL, frames),
+        kept(gated, Gate::K1K4, On::VaApi, &Setup::ALL, frames),
+        kept(gated, Gate::K1K4, On::Vulkan, &Setup::ALL, frames),
         REDIRECT_1,
         REDIRECT_2,
     )
 }
 
 /// K4, huginn's 8K30 export: VA-API download on a thread a lens.
-fn k4(rows: &[GatedRow], frames: u64) -> Verdict {
+fn k4(gated: &Gated, frames: u64) -> Verdict {
     redirects(
-        kept(rows, Gate::K1K4, On::VaApi, &[Setup::Threaded], frames),
-        kept(rows, Gate::K1K4, On::Vulkan, &Setup::ALL, frames),
+        kept(gated, Gate::K1K4, On::VaApi, &[Setup::Threaded], frames),
+        kept(gated, Gate::K1K4, On::Vulkan, &Setup::ALL, frames),
         REDIRECT_1,
         REDIRECT_HERE,
     )
@@ -1417,10 +1671,10 @@ fn k4(rows: &[GatedRow], frames: u64) -> Verdict {
 
 /// K2's export half, huginn's 5.7K30: VA-API download's best setup on
 /// the 2×2880² at 29.97; a miss takes K4's redirect.
-fn k2(rows: &[GatedRow], frames: u64) -> Verdict {
+fn k2(gated: &Gated, frames: u64) -> Verdict {
     redirects(
-        kept(rows, Gate::K2, On::VaApi, &Setup::ALL, frames),
-        kept(rows, Gate::K2, On::Vulkan, &Setup::ALL, frames),
+        kept(gated, Gate::K2, On::VaApi, &Setup::ALL, frames),
+        kept(gated, Gate::K2, On::Vulkan, &Setup::ALL, frames),
         REDIRECT_1,
         REDIRECT_HERE,
     )
@@ -1509,8 +1763,8 @@ struct Report {
     notes: Vec<String>,
     /// The runs that failed, other than for a path the machine lacks.
     failed: Vec<String>,
-    /// Whether a hardware path decoded clip 9's pair.
-    decided: bool,
+    /// Each K's verdict on this machine, by a short name.
+    verdicts: Vec<(String, Verdict)>,
     /// Whether each row and note is recorded through `bench` as it is
     /// added.
     echo: bool,
@@ -1552,7 +1806,11 @@ impl Report {
         self.row(format!("{name}: opening"), each(&|r| r.open_s * 1e3), "ms");
         if spec.beside.is_some() {
             let fps = each(&|r| r.encode.map_or(f64::NAN, Encoded::fps));
-            self.row(format!("{name}: the encode beside"), fps, "fps");
+            self.row(
+                format!("{name}: the encode beside, in the decode's window"),
+                fps,
+                "fps",
+            );
         }
         let rss: Option<Vec<f64>> = rans.iter().map(|r| r.rss_kib.map(mib)).collect();
         match rss {
@@ -1563,8 +1821,17 @@ impl Report {
         }
     }
 
-    /// Fails the test on a run that failed, and skips it when no
-    /// hardware path decoded clip 9's pair.
+    /// The Ks this machine left undecided, by their short names.
+    fn undecided(&self) -> Vec<&str> {
+        self.verdicts
+            .iter()
+            .filter(|(_, v)| matches!(v, Verdict::NotDecided(_)))
+            .map(|(k, _)| k.as_str())
+            .collect()
+    }
+
+    /// Fails the test on a run that failed, and skips it when no K was
+    /// decided, naming them.
     fn end(&self) {
         assert!(
             self.failed.is_empty(),
@@ -1572,11 +1839,13 @@ impl Report {
             self.failed.len(),
             self.failed.join("\n")
         );
-        if !self.decided {
-            tier2::skip(
-                "no hardware path decoded the 8K30 pair of clip 9, so K1 to K4 are undecided; \
-                 the rows measured are recorded",
-            );
+        let undecided = self.undecided();
+        if undecided.len() == self.verdicts.len() {
+            tier2::skip(format!(
+                "no K was decided on this machine ({} undecided; see their notes); the rows \
+                 measured are recorded",
+                undecided.join(", ")
+            ));
         }
     }
 }
@@ -1594,6 +1863,9 @@ struct Plan {
     frames: u64,
     /// A gated row's runs after its warm-up.
     gated_runs: usize,
+    /// Doctor's decode checks on `node`, which say where a path missing
+    /// at a gate could decode it (K1's Redirect 1).
+    doctor: Doctor,
     echo: bool,
 }
 
@@ -1613,19 +1885,28 @@ impl Plan {
         }
     }
 
-    /// `spec` run `runs` times, each in a child process of its own, the
-    /// first to warm up when there are several; its rows go under
-    /// `name`.
+    /// `spec` run `runs` times on `clip`, each in a child process of its
+    /// own, the first to warm up when there are several; its rows go
+    /// under `name`. Each run that decodes goes into `measured`, which
+    /// judges a run that finds the path missing ([`Measured::judge`]).
     fn measure(
         &self,
-        name: &str,
+        (clip, name): (&str, &str),
         spec: &RunSpec,
         runs: usize,
+        measured: &mut Measured,
         report: &mut Report,
     ) -> Result<Vec<Ran>, NoRun> {
-        let mut rans = (0..runs)
-            .map(|_| in_child(spec))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut rans = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            match in_child(spec) {
+                Ok(ran) => {
+                    measured.add(spec.on, clip, name);
+                    rans.push(ran);
+                }
+                Err(no) => return Err(measured.judge(spec.on, clip, no)),
+            }
+        }
         if runs > 1 {
             rans.remove(0);
         }
@@ -1653,8 +1934,23 @@ impl Plan {
                 "pair decode: the gated rows run alone, as the encode beside can't: {why}"
             ));
         }
-        let mut gated = Vec::new();
+        let mut formats: Vec<&'static str> = Vec::new();
+        for f in self
+            .clips
+            .iter()
+            .filter_map(|c| c.file.as_ref().ok()?.format)
+        {
+            if !formats.contains(&f) {
+                formats.push(f);
+            }
+        }
+        report.note(format!("pair decode: {}", self.doctor.said(&formats)));
+        let mut gated = Gated {
+            doctor: self.doctor.clone(),
+            ..Gated::default()
+        };
         let mut k3s = Vec::new();
+        let mut measured = Measured::default();
         for clip in &self.clips {
             let pair = match &clip.file {
                 Ok(pair) => pair,
@@ -1663,6 +1959,9 @@ impl Plan {
                     continue;
                 }
             };
+            if let Some(unlike) = clip.unlike {
+                report.note(format!("pair decode {}: {unlike}", clip.name));
+            }
             let frames = pair.frames.map_or(self.frames, |f| f.min(self.frames));
             if frames < self.frames {
                 report.note(format!(
@@ -1685,41 +1984,58 @@ impl Plan {
                         beside,
                         ..self.spec(pair, &pair.streams, on, setup)
                     };
-                    match self.measure(&name(setup.label()), &spec, runs, &mut report) {
+                    let named = (clip.name.as_str(), name(setup.label()));
+                    let ran =
+                        self.measure((named.0, &named.1), &spec, runs, &mut measured, &mut report);
+                    match ran {
                         Ok(rans) => {
                             if let Some(gate) = clip.gate {
-                                report.decided |= gate == Gate::K1K4 && on.kind().is_some();
-                                gated.push(GatedRow {
+                                let encode_fps = match beside {
+                                    Some(_) => rans
+                                        .iter()
+                                        .map(|r| r.encode.map_or(f64::NAN, Encoded::fps))
+                                        .collect(),
+                                    None => Vec::new(),
+                                };
+                                gated.rows.push(GatedRow {
                                     gate,
                                     on,
                                     setup,
                                     fps: rans.iter().map(Ran::slower_fps).collect(),
                                     frames,
                                     beside: beside.is_some(),
+                                    encode_fps,
                                 });
                             }
                         }
-                        Err(NoRun::Unavailable(why)) => {
-                            unavailable = Some(why);
+                        Err(no @ (NoRun::Unavailable(_) | NoRun::Refused(_))) => {
+                            unavailable = Some(no);
                             break;
                         }
                         Err(NoRun::Failed(why)) => {
-                            report
-                                .failed
-                                .push(format!("{}: {why}", name(setup.label())));
+                            report.failed.push(format!("{}: {why}", named.1));
                         }
                     }
                 }
-                if let Some(why) = unavailable {
+                if let Some(no) = unavailable {
                     report.note(format!(
-                        "pair decode {}, {}: not measured: {why}",
+                        "pair decode {}, {}: not measured: {}",
                         clip.name,
-                        on.label()
+                        on.label(),
+                        no.why()
                     ));
+                    if let Some(gate) = clip.gate {
+                        gated.absent.push(Absent {
+                            gate,
+                            on,
+                            format: pair.format,
+                            why: no,
+                        });
+                    }
                     continue;
                 }
                 if clip.gate == Some(Gate::K1K4) {
-                    k3s.push(self.k3_runs(clip, pair, on, &mut report));
+                    k3s.push(self.k3_runs(clip, pair, on, &mut measured, &mut report));
                 }
             }
         }
@@ -1729,7 +2045,14 @@ impl Plan {
 
     /// K3's runs on `on`, alone: lens 0 by itself, then the pair in each
     /// setup, each with every channel kept full.
-    fn k3_runs(&self, clip: &Clip, pair: &Pair, on: On, report: &mut Report) -> K3Row {
+    fn k3_runs(
+        &self,
+        clip: &Clip,
+        pair: &Pair,
+        on: On,
+        measured: &mut Measured,
+        report: &mut Report,
+    ) -> K3Row {
         let mut row = K3Row {
             on,
             one: None,
@@ -1748,7 +2071,7 @@ impl Plan {
             runs.push((Some(setup), name(setup.label()), spec(&pair.streams, setup)));
         }
         for (setup, name, spec) in runs {
-            match self.measure(&name, &spec, 1, report) {
+            match self.measure((&clip.name, &name), &spec, 1, measured, report) {
                 Ok(rans) => match setup {
                     None => {
                         row.one = Some(Grew::from(&rans[0]));
@@ -1756,15 +2079,18 @@ impl Plan {
                     }
                     Some(setup) => row.pairs.push((setup, Grew::from(&rans[0]))),
                 },
-                Err(NoRun::Unavailable(why)) => report.note(format!("{name}: not measured: {why}")),
+                Err(NoRun::Unavailable(why) | NoRun::Refused(why)) => {
+                    report.note(format!("{name}: not measured: {why}"));
+                }
                 Err(NoRun::Failed(why)) => report.failed.push(format!("{name}: {why}")),
             }
         }
         row
     }
 
-    /// Each K's verdict, as a note.
-    fn verdicts(&self, gated: &[GatedRow], k3s: &[K3Row], report: &mut Report) {
+    /// Each K's verdict on this machine, as a note, under the plan's name
+    /// for the machine it was written for; then the Ks left undecided.
+    fn verdicts(&self, gated: &Gated, k3s: &[K3Row], report: &mut Report) {
         let clip = |gate| {
             self.clips
                 .iter()
@@ -1784,27 +2110,50 @@ impl Plan {
         let first = on_8k.clone().unwrap_or_else(|| k1(gated, self.frames));
         let fourth = on_8k.unwrap_or_else(|| k4(gated, self.frames));
         let second = missing(Gate::K2).unwrap_or_else(|| k2(gated, self.frames));
-        report.note(format!(
-            "K1, odin's export, {at_8k} beside the encode: {first}"
-        ));
-        report.note(format!(
-            "K2's export half, huginn's 5.7K30, {at_5k7} beside the encode: {second} (its engine \
-             half is bench_playback_x5_raw's)"
-        ));
-        report.note(format!(
-            "K4, huginn's 8K30 export, {at_8k} beside the encode: {fourth}"
+        let mut verdicts = vec![(
+            "K1".to_string(),
+            format!("K1's rule (odin's export), on this machine, {at_8k} beside the encode"),
+            first,
+        )];
+        verdicts.push((
+            "K2's export half".into(),
+            format!(
+                "K2's rule for its export half (huginn's 5.7K30; its engine half is \
+                 bench_playback_x5_raw's), on this machine, {at_5k7} beside the encode"
+            ),
+            second,
         ));
         if k3s.is_empty() {
             let why = missing(Gate::K1K4)
                 .unwrap_or_else(|| Verdict::NotDecided("no path decoded it".into()));
-            report.note(format!("K3, {at_8k} alone: {why}"));
+            verdicts.push((
+                "K3".into(),
+                format!("K3 (memory), on this machine, {at_8k} alone"),
+                why,
+            ));
         }
         for row in k3s {
-            report.note(format!(
-                "K3 on {}, {at_8k} alone: {}",
-                row.on.label(),
-                k3(row)
+            verdicts.push((
+                format!("K3 on {}", row.on.label()),
+                format!(
+                    "K3 (memory) on {}, on this machine, {at_8k} alone",
+                    row.on.label()
+                ),
+                k3(row),
             ));
+        }
+        verdicts.push((
+            "K4".into(),
+            format!("K4's rule (huginn's 8K30 export), on this machine, {at_8k} beside the encode"),
+            fourth,
+        ));
+        for (short, said, verdict) in verdicts {
+            report.note(format!("{said}: {verdict}"));
+            report.verdicts.push((short, verdict));
+        }
+        let undecided = report.undecided().join(", ");
+        if !undecided.is_empty() {
+            report.note(format!("left undecided on this machine: {undecided}"));
         }
     }
 }
@@ -1835,6 +2184,14 @@ fn bench_export_pair_decode() {
         ENCODE_SIZE.1,
         setup.bitrate / 1_000_000
     ));
+    // Doctor's decode checks, as the playback engine's Auto reads them,
+    // without asking the package manager.
+    let checks = doctor::run_with(
+        &node,
+        doctor::Options {
+            query_packages: false,
+        },
+    );
     let plan = Plan {
         clips,
         paths: On::ALL.to_vec(),
@@ -1843,6 +2200,7 @@ fn bench_export_pair_decode() {
         scratch: scratch.0.clone(),
         frames: FRAMES,
         gated_runs: GATED_RUNS,
+        doctor: Doctor::of(&checks),
         echo: true,
     };
     plan.run().end();
@@ -2072,15 +2430,20 @@ fn each_k_names_its_verdict_by_the_plans_rules() {
         fps: fps.to_vec(),
         frames: FRAMES,
         beside: true,
+        encode_fps: vec![30.0; 3],
     };
     let fast = [40.0, 41.0, 42.0];
     let slow = [25.0, 26.0, 27.0];
+    let rows = |rows: Vec<GatedRow>| Gated {
+        rows,
+        ..Gated::default()
+    };
     let at_8k = |va: [[f64; 3]; 2], vk: [f64; 3]| {
-        vec![
+        rows(vec![
             row(Gate::K1K4, On::VaApi, Setup::Serial, va[0]),
             row(Gate::K1K4, On::VaApi, Setup::Threaded, va[1]),
             row(Gate::K1K4, On::Vulkan, Setup::Threaded, vk),
-        ]
+        ])
     };
     // VA-API's best setup keeps the rule: Pass, whichever it is.
     let serial_only = at_8k([fast, slow], slow);
@@ -2103,6 +2466,12 @@ fn each_k_names_its_verdict_by_the_plans_rules() {
         k4(&odin, FRAMES),
         Verdict::Redirect(REDIRECT_1, _)
     ));
+    // The encode's rate is in the verdict.
+    assert!(
+        says.to_string()
+            .contains("the encode beside at 30.0, 30.0, 30.0"),
+        "{says}"
+    );
     // Both miss: Redirect 2.
     let neither = at_8k([slow, slow], slow);
     assert!(matches!(
@@ -2110,32 +2479,293 @@ fn each_k_names_its_verdict_by_the_plans_rules() {
         Verdict::Redirect(REDIRECT_2, _)
     ));
     // VA-API missing, run alone or short decides nothing.
-    assert!(matches!(k1(&odin[2..], FRAMES), Verdict::NotDecided(_)));
-    let alone: Vec<GatedRow> = odin
-        .iter()
-        .map(|r| GatedRow {
-            beside: false,
-            ..r.clone()
-        })
-        .collect();
+    assert!(matches!(
+        k1(&rows(odin.rows[2..].to_vec()), FRAMES),
+        Verdict::NotDecided(_)
+    ));
+    let changed = |f: &dyn Fn(&mut GatedRow)| {
+        let mut g = odin.clone();
+        g.rows.iter_mut().for_each(f);
+        g
+    };
+    let alone = changed(&|r| {
+        r.beside = false;
+        r.encode_fps.clear();
+    });
     assert!(matches!(k1(&alone, FRAMES), Verdict::NotDecided(_)));
-    let short: Vec<GatedRow> = odin
-        .iter()
-        .map(|r| GatedRow {
-            frames: FRAMES - 1,
-            ..r.clone()
-        })
-        .collect();
+    let short = changed(&|r| r.frames = FRAMES - 1);
     assert!(matches!(k1(&short, FRAMES), Verdict::NotDecided(_)));
+    // An encode beside that held 20 fps over the decode's window isn't
+    // K1's load: rows that would pass beside it decide nothing, on K1,
+    // K2 and K4 alike. The control is the same rows at 30 fps, which
+    // pass.
+    let all_fast = |gate| {
+        rows(vec![
+            row(gate, On::VaApi, Setup::Serial, fast),
+            row(gate, On::VaApi, Setup::Threaded, fast),
+            row(gate, On::Vulkan, Setup::Threaded, fast),
+        ])
+    };
+    let at_20 = |mut g: Gated| {
+        g.rows.iter_mut().for_each(|r| r.encode_fps[1] = 20.0);
+        g
+    };
+    for (k, gate, verdict) in [
+        ("K1", Gate::K1K4, k1 as fn(&Gated, u64) -> Verdict),
+        ("K2", Gate::K2, k2),
+        ("K4", Gate::K1K4, k4),
+    ] {
+        assert!(
+            matches!(verdict(&all_fast(gate), FRAMES), Verdict::Pass(_)),
+            "{k}"
+        );
+        let says = verdict(&at_20(all_fast(gate)), FRAMES);
+        must_fail(
+            &format!("{k} kept by rows whose encode beside held 20 fps"),
+            matches!(says, Verdict::Pass(_)),
+        );
+        assert!(matches!(says, Verdict::NotDecided(_)), "{k}: {says}");
+        assert!(
+            says.to_string()
+                .contains("took 30.0, 20.0, 30.0 fps over the decode's window"),
+            "{k}: {says}"
+        );
+    }
+    // A miss beside a 20 fps encode decides nothing either.
+    assert!(matches!(
+        k1(&at_20(neither.clone()), FRAMES),
+        Verdict::NotDecided(_)
+    ));
     // K2 reads the 2×2880² rows only.
     assert!(matches!(k2(&odin, FRAMES), Verdict::NotDecided(_)));
-    let huginn = vec![row(Gate::K2, On::VaApi, Setup::Threaded, fast)];
+    let huginn = rows(vec![row(Gate::K2, On::VaApi, Setup::Threaded, fast)]);
     assert!(matches!(k2(&huginn, FRAMES), Verdict::Pass(_)));
-    let missed = vec![row(Gate::K2, On::VaApi, Setup::Threaded, slow)];
+    // huginn's VA-API misses, and its doctor says Vulkan Video doesn't
+    // decode HEVC there: K4's redirect.
+    let missed = Gated {
+        absent: vec![Absent {
+            gate: Gate::K2,
+            on: On::Vulkan,
+            format: Some("HEVC Main"),
+            why: NoRun::Unavailable("Vulkan device unavailable".into()),
+        }],
+        doctor: doctor_says(CheckResult::Works, CheckResult::Fails),
+        ..rows(vec![row(Gate::K2, On::VaApi, Setup::Threaded, slow)])
+    };
     assert!(matches!(
         k2(&missed, FRAMES),
         Verdict::Redirect(REDIRECT_HERE, _)
     ));
+}
+
+#[test]
+fn the_bench_skips_only_when_no_k_is_decided() {
+    let _time = timed("the_bench_skips_only_when_no_k_is_decided");
+    let report = |verdicts: [(&str, Verdict); 3]| Report {
+        verdicts: verdicts.map(|(k, v)| (k.to_string(), v)).to_vec(),
+        ..Report::default()
+    };
+    let undecided = || Verdict::NotDecided("no rows".into());
+    let k3 = || Verdict::Pass("the pair grew 2.0 × lens 0".into());
+    // K3 in software decided, with no hardware row: the bench ends.
+    let some = report([
+        ("K1", undecided()),
+        ("K3 on software", k3()),
+        ("K4", undecided()),
+    ]);
+    assert_eq!(some.undecided(), ["K1", "K4"]);
+    some.end();
+    // The control: with none decided it skips, naming each.
+    let none = report([
+        ("K1", undecided()),
+        ("K3 on software", undecided()),
+        ("K4", undecided()),
+    ]);
+    let skipped = must_fail(
+        "the end of a run that decided no K",
+        std::panic::catch_unwind(move || none.end()),
+    );
+    let why = skipped.downcast_ref::<String>().unwrap();
+    assert!(
+        why.starts_with(tier2::SKIP_MARKER)
+            && why.contains("no K was decided on this machine (K1, K3 on software, K4 undecided"),
+        "{why}"
+    );
+}
+
+/// Doctor's checks of HEVC Main on VA-API and Vulkan Video.
+fn doctor_says(vaapi: CheckResult, vulkan: CheckResult) -> Doctor {
+    let check = |path: &str, result| doctor::Check {
+        format: "HEVC Main".into(),
+        path: path.into(),
+        codec: "hevc".into(),
+        result,
+        reason: (result != CheckResult::Works).then(|| format!("{path} said no")),
+        fault: None,
+        ffmpeg_log: Vec::new(),
+    };
+    Doctor(vec![check("vaapi", vaapi), check("vulkan", vulkan)])
+}
+
+#[test]
+fn a_missing_vulkan_redirects_only_where_doctor_or_the_device_says_it_cant() {
+    let _time = timed("a_missing_vulkan_redirects_only_where_doctor_or_the_device_says_it_cant");
+    let slow = |setup| GatedRow {
+        gate: Gate::K1K4,
+        on: On::VaApi,
+        setup,
+        fps: vec![25.0, 26.0, 27.0],
+        frames: FRAMES,
+        beside: true,
+        encode_fps: vec![30.0; 3],
+    };
+    // VA-API misses and Vulkan Video's open failed.
+    let gated = |doctor, why| Gated {
+        rows: vec![slow(Setup::Serial), slow(Setup::Threaded)],
+        absent: vec![Absent {
+            gate: Gate::K1K4,
+            on: On::Vulkan,
+            format: Some("HEVC Main"),
+            why,
+        }],
+        doctor,
+    };
+    let failed_open = || NoRun::Unavailable("Vulkan device unavailable: it went".into());
+    let works = doctor_says(CheckResult::Works, CheckResult::Works);
+    // Doctor says Vulkan Video decodes HEVC here, where Redirect 1 would
+    // send the pairs: its missing rows decide nothing.
+    let unmeasured = gated(works.clone(), failed_open());
+    let says = k1(&unmeasured, FRAMES);
+    assert!(matches!(says, Verdict::NotDecided(_)), "{says}");
+    assert!(
+        says.to_string()
+            .contains("though doctor says it decodes HEVC Main here"),
+        "{says}"
+    );
+    let fourth = k4(&unmeasured, FRAMES);
+    assert!(matches!(fourth, Verdict::NotDecided(_)), "{fourth}");
+    // The controls: where doctor says Vulkan Video doesn't decode HEVC,
+    // or the device turned the stream down, Redirect 1 can't hold and
+    // the miss goes past it.
+    let cannot = gated(
+        doctor_says(CheckResult::Works, CheckResult::Fails),
+        failed_open(),
+    );
+    let says = k1(&cannot, FRAMES);
+    must_fail(
+        "doctor saying Vulkan Video can't decode HEVC Main",
+        matches!(says, Verdict::NotDecided(_)),
+    );
+    assert!(matches!(says, Verdict::Redirect(REDIRECT_2, _)), "{says}");
+    assert!(says.to_string().contains("vulkan said no"), "{says}");
+    assert!(matches!(
+        k4(&cannot, FRAMES),
+        Verdict::Redirect(REDIRECT_HERE, _)
+    ));
+    let not_tested = gated(
+        doctor_says(CheckResult::Works, CheckResult::NotTested),
+        failed_open(),
+    );
+    assert!(matches!(
+        k1(&not_tested, FRAMES),
+        Verdict::Redirect(REDIRECT_2, _)
+    ));
+    let refused = gated(
+        works.clone(),
+        NoRun::Refused("cannot decode it on Vulkan: too large".into()),
+    );
+    let says = k1(&refused, FRAMES);
+    must_fail(
+        "the device turning the stream down",
+        matches!(says, Verdict::NotDecided(_)),
+    );
+    assert!(matches!(says, Verdict::Redirect(REDIRECT_2, _)), "{says}");
+    // A clip no check of doctor's covers: doctor can't say it decodes it.
+    let uncovered = Gated {
+        absent: vec![Absent {
+            format: None,
+            ..unmeasured.absent[0].clone()
+        }],
+        ..unmeasured.clone()
+    };
+    assert!(matches!(
+        k1(&uncovered, FRAMES),
+        Verdict::Redirect(REDIRECT_2, _)
+    ));
+}
+
+#[test]
+fn a_path_that_decoded_here_cant_go_missing_later() {
+    let _time = timed("a_path_that_decoded_here_cant_go_missing_later");
+    let gone = || NoRun::Unavailable("VA-API device unavailable: it went".into());
+    let refused = || NoRun::Refused("cannot decode it on VA-API: too large".into());
+    let mut measured = Measured::default();
+    // Before any run decoded, a missing path is a note.
+    assert_eq!(measured.judge(On::VaApi, "clip 9", gone()), gone());
+    assert_eq!(measured.judge(On::VaApi, "clip 9", refused()), refused());
+    measured.add(
+        On::VaApi,
+        "clip 9",
+        "pair decode clip 9, VA-API download, serial",
+    );
+    // Once serial decoded, a thread a lens, a later child run or a K3 run
+    // that finds the device missing fails.
+    let after = measured.judge(On::VaApi, "clip 9", gone());
+    must_fail(
+        "VA-API missing after its serial run decoded",
+        matches!(after, NoRun::Unavailable(_)),
+    );
+    let NoRun::Failed(why) = &after else {
+        panic!("{after:?}")
+    };
+    assert!(
+        why.contains("`pair decode clip 9, VA-API download, serial` measured on this machine")
+            && why.contains("it went"),
+        "{why}"
+    );
+    // A refusal of the clip it decoded fails too, and one of another
+    // clip stays a refusal: one mode's level can be past the device.
+    let again = measured.judge(On::VaApi, "clip 9", refused());
+    must_fail(
+        "clip 9 refused after it decoded",
+        matches!(again, NoRun::Refused(_)),
+    );
+    assert_eq!(measured.judge(On::VaApi, "clip 4", refused()), refused());
+    let device_gone = measured.judge(On::VaApi, "clip 4", gone());
+    assert!(matches!(device_gone, NoRun::Failed(_)), "{device_gone:?}");
+    // Another path is judged by its own runs, and a failure stays one.
+    assert_eq!(measured.judge(On::Vulkan, "clip 9", gone()), gone());
+    let failed = NoRun::Failed("lens 1 ended".into());
+    assert_eq!(measured.judge(On::VaApi, "clip 9", failed.clone()), failed);
+    // The bench's runs go through it: VA-API on a node that isn't there,
+    // after VA-API decoded, fails, and its rows aren't recorded.
+    let plan = small_plan(Vec::new(), &media_dir());
+    let spec = RunSpec {
+        on: On::VaApi,
+        node: Some(PathBuf::from("/nonexistent/renderD128")),
+        ..spec_64(PAIR_64_MATCHED, Setup::Threaded)
+    };
+    let mut report = Report::default();
+    let named = (
+        "pair64",
+        "pair decode pair64, VA-API download, a thread a lens",
+    );
+    let mut fresh = Measured::default();
+    let first = plan.measure(named, &spec, 1, &mut fresh, &mut report);
+    assert!(matches!(first, Err(NoRun::Unavailable(_))), "{first:?}");
+    let mut decoded = Measured::default();
+    decoded.add(
+        On::VaApi,
+        "pair64",
+        "pair decode pair64, VA-API download, serial",
+    );
+    let later = plan.measure(named, &spec, 1, &mut decoded, &mut report);
+    must_fail(
+        "VA-API missing in measure after it decoded",
+        matches!(later, Err(NoRun::Unavailable(_))),
+    );
+    assert!(matches!(later, Err(NoRun::Failed(_))), "{later:?}");
+    assert!(report.rows.is_empty(), "{:?}", report.rows);
 }
 
 #[test]
@@ -2178,18 +2808,21 @@ fn the_encode_beside_takes_frames_and_leaves_no_file() {
     let stop = AtomicBool::new(false);
     let (started, has_started) = mpsc::channel();
     let listing = || std::fs::read_dir(&scratch.0).unwrap().count();
-    let encoded = thread::scope(|s| {
+    let (taken, window) = thread::scope(|s| {
         let e = s.spawn(|| encode_beside(beside, None, &scratch.0, &stop, started));
         has_started.recv().unwrap();
+        let from = Instant::now();
         thread::sleep(Duration::from_millis(200));
+        let window = (from, Instant::now());
         // The control for the listing below: while the encode runs, its
         // file is there.
         must_fail("the listing while the encode runs", listing() == 0);
         stop.store(true, Ordering::SeqCst);
-        e.join().unwrap()
-    })
-    .unwrap();
+        (e.join().unwrap(), window)
+    });
+    let taken = taken.unwrap();
     // Paced at 30 fps: about 6 frames in 0.2 s.
+    let encoded = taken.over(window);
     let held = at_least(encoded.frames, 3);
     assert_eq!(held.passes(), Some(true), "{held}: {encoded:?}");
     let paced = at_most(encoded.frames as f64, 30.0 * encoded.secs + 2.0);
@@ -2210,36 +2843,90 @@ fn the_encode_beside_takes_frames_and_leaves_no_file() {
 }
 
 #[test]
-fn the_bench_runs_its_rows_and_verdicts_on_small_clips() {
-    let _time = timed("the_bench_runs_its_rows_and_verdicts_on_small_clips");
-    let scratch = Scratch::new("pair-decode-bench");
-    let clip = |name: &str, gate| Clip {
-        name: name.to_string(),
-        file: Ok(pair_64(name)),
-        gate,
+fn the_encode_beside_is_rated_over_the_decodes_window() {
+    let _time = timed("the_encode_beside_is_rated_over_the_decodes_window");
+    let t = Instant::now();
+    let at = |s: f64| t + Duration::from_secs_f64(s);
+    // Paced at 30 fps from 0 s, while the decoders open, to 14 s; the
+    // decode's window is 2 s to 12 s.
+    let paced = |until: f64| {
+        (1..)
+            .map(|n| f64::from(n) / 30.0)
+            .take_while(move |&s| s <= until)
     };
-    let plan = Plan {
-        clips: vec![
-            clip(PAIR_64_MATCHED, Some(Gate::K1K4)),
-            clip(PAIR_64_GOP_FAULT, Some(Gate::K2)),
-            clip(PAIR_64_LENS_SHORT, None),
-            Clip {
-                name: "a clip that isn't here".into(),
-                file: Err("it isn't".into()),
-                gate: None,
-            },
-        ],
+    let window = (at(2.0), at(12.0));
+    let kept = Taken(paced(14.0).map(at).collect());
+    let held = kept.over(window);
+    assert_eq!(held.frames, 300);
+    assert!((held.fps() - 30.0).abs() < 1e-9, "{held:?}");
+    assert_eq!(at_least(held.fps(), ENCODE_FLOOR_FPS).passes(), Some(true));
+    // The control: an encode that stalls for the window's last 3 s and
+    // catches up after it took 21 frames a second there, though over its
+    // whole run, first frame to last, it averages 29.6.
+    let mut stalled: Vec<Instant> = paced(9.0).map(at).collect();
+    stalled.extend(std::iter::repeat_n(at(12.1), 90));
+    let stalled = Taken(stalled);
+    let whole = (stalled.0.len() - 1) as f64
+        / stalled.0[stalled.0.len() - 1]
+            .duration_since(stalled.0[0])
+            .as_secs_f64();
+    assert_eq!(
+        at_least(whole, ENCODE_FLOOR_FPS).passes(),
+        Some(true),
+        "{whole}"
+    );
+    let fell = stalled.over(window);
+    assert_eq!(fell.frames, 210);
+    must_fail(
+        "an encode stalled for the window's last 3 s",
+        at_least(fell.fps(), ENCODE_FLOOR_FPS),
+    );
+    // A window of no length has no rate, which decides nothing.
+    assert!(kept.over((at(2.0), at(2.0))).fps().is_nan());
+}
+
+/// The bench's plan in software on small clips, with no doctor's checks.
+fn small_plan(clips: Vec<Clip>, scratch: &Path) -> Plan {
+    Plan {
+        clips,
         paths: vec![On::VaApi, On::Software],
         node: Some(PathBuf::from("/nonexistent/renderD128")),
         beside: Ok(Beside {
             kind: EncoderKind::Software,
             size: (64, 64),
         }),
-        scratch: scratch.0.clone(),
+        scratch: scratch.to_path_buf(),
         frames: 30,
         gated_runs: GATED_RUNS,
+        doctor: Doctor::default(),
         echo: false,
+    }
+}
+
+#[test]
+fn the_bench_runs_its_rows_and_verdicts_on_small_clips() {
+    let _time = timed("the_bench_runs_its_rows_and_verdicts_on_small_clips");
+    let scratch = Scratch::new("pair-decode-bench");
+    let clip = |name: &str, gate, unlike| Clip {
+        name: name.to_string(),
+        file: Ok(pair_64(name)),
+        gate,
+        unlike,
     };
+    let plan = small_plan(
+        vec![
+            clip(PAIR_64_MATCHED, Some(Gate::K1K4), None),
+            clip(PAIR_64_GOP_FAULT, Some(Gate::K2), None),
+            clip(PAIR_64_LENS_SHORT, None, Some(P_ONLY)),
+            Clip {
+                name: "a clip that isn't here".into(),
+                file: Err("it isn't".into()),
+                gate: None,
+                unlike: None,
+            },
+        ],
+        &scratch.0,
+    );
     let report = plan.run();
     for r in &report.rows {
         let values: Vec<String> = r.values.iter().map(|v| format!("{v:.1}")).collect();
@@ -2262,8 +2949,11 @@ fn the_bench_runs_its_rows_and_verdicts_on_small_clips() {
     assert!(fps.values.iter().all(|&f| f > 0.0), "{fps:?}");
     assert_eq!(row(&format!("{gated}: opening")).values.len(), GATED_RUNS);
     // A run of 30 small frames is over before the encode's second frame
-    // is due, which its rate needs: the encode test measures that.
-    let encode = row(&format!("{gated}: the encode beside"));
+    // is due, so its rate over the decode's window says little: the
+    // encode tests measure that.
+    let encode = row(&format!(
+        "{gated}: the encode beside, in the decode's window"
+    ));
     assert_eq!(encode.values.len(), GATED_RUNS);
     let short = format!("pair decode {PAIR_64_LENS_SHORT}, software, serial: slower lens alone");
     assert_eq!(row(&short).values.len(), 1);
@@ -2280,16 +2970,32 @@ fn the_bench_runs_its_rows_and_verdicts_on_small_clips() {
         "pair decode {PAIR_64_LENS_SHORT}: 29 frames a lens"
     )));
     assert!(noted(
-        "K1, odin's export, pair64-matched beside the encode: not decided"
+        "K1's rule (odin's export), on this machine, pair64-matched beside the encode: not \
+         decided"
     ));
-    assert!(noted("K4, huginn's 8K30 export"));
-    assert!(noted("K2's export half"));
+    assert!(noted(
+        "K4's rule (huginn's 8K30 export), on this machine, pair64-matched beside the encode: \
+         not decided"
+    ));
+    assert!(noted(
+        "K2's rule for its export half (huginn's 5.7K30; its engine half is \
+         bench_playback_x5_raw's), on this machine"
+    ));
+    // The clip coded unlike the X5 says so beside its rows, and only it:
+    // the control.
+    assert!(noted(&format!(
+        "pair decode {PAIR_64_LENS_SHORT}: {P_ONLY}"
+    )));
+    must_fail(
+        "a clip coded as the X5 is said to be P only",
+        noted(&format!("pair decode {PAIR_64_MATCHED}: {P_ONLY}")),
+    );
     // K3's runs had every frame alive at once, so that where the peak
     // can be measured K3 decides.
     let k3_said = report
         .notes
         .iter()
-        .find(|n| n.starts_with("K3 on software"))
+        .find(|n| n.starts_with("K3 (memory) on software"))
         .unwrap();
     if report.rows.iter().any(|r| r.unit == "MiB") {
         assert!(
@@ -2300,8 +3006,22 @@ fn the_bench_runs_its_rows_and_verdicts_on_small_clips() {
             "{k3_said}"
         );
     }
-    // A machine without hardware decides nothing, and the bench skips.
-    assert!(!report.decided);
+    // Without hardware K1, K2 and K4 are undecided, and named so; K3 in
+    // software decides where the peak can be measured, so the bench
+    // skips only where it can't.
+    let undecided = report.undecided();
+    for k in ["K1", "K2's export half", "K4"] {
+        assert!(undecided.contains(&k), "{undecided:?}");
+    }
+    assert!(noted(
+        "left undecided on this machine: K1, K2's export half"
+    ));
+    let k3_decided = !undecided.contains(&"K3 on software");
+    assert_eq!(
+        k3_decided,
+        report.rows.iter().any(|r| r.unit == "MiB"),
+        "{undecided:?}"
+    );
     // The control for the rows found above: a clip that isn't here has
     // none.
     let mut rows = report

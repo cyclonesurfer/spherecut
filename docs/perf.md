@@ -221,22 +221,40 @@ Current benchmarks:
 - **The two-track perf clips** (M3 plan 7.2, from M3.1): synth's
   `perf_pairs`, two square lens tracks in one MP4, each coded alone by
   threaded x265 with its corner codes and its own noise, 600 frames a
-  lens, as the X5 codes each mode where x265 can: closed GOPs, no
-  B-frames, one-pass ABR, 8-bit full range BT.709.
+  lens, specified as the X5 codes each mode where x265 can: closed
+  GOPs, no B-frames, one-pass ABR, 8-bit full range BT.709.
   `pair-hevc8-3840-2997-noisy-20s.mp4` (2×3840² at 29.97, an IDR every
   60 frames, 65 Mbps a lens), `pair-hevc8-2880-5994-noisy-10s.mp4`
   (2×2880² at 59.94, an IDR every 120, 80 Mbps) and
   `pair-hevc8-2880-2997-noisy-20s.mp4` (2×2880² at 29.97, an IDR every
-  60, 80 Mbps). Every picture but the IDRs (IDR_N_LP) is a TRAIL_R
-  reference P frame, at 59.94 too: the X5 codes every other frame there
-  as a non-reference TSA_N, which x265 3.5, as linked in the cloud,
-  gives only to B-frames, which are reordered. Each picture is one slice
-  with WPP on, where the masters' slice headers show 10 slices at 8K and
-  5 at 5.7K with WPP off, and IDR_W_RADL: x265 3.5 refuses several
-  slices without WPP, and writes IDR_W_RADL only before RADL pictures,
-  which need B-frames. The report records the machine's x265
-  (`pkg-config`), and rates each lens on its own: its bitrate from its
-  own samples, and its software decode.
+  60, 80 Mbps). What x265 makes of that was measured on 192² copies of
+  121 frames a lens, coded in the cloud by its x265 3.5, not on the
+  full clips: every picture but the IDRs (IDR_N_LP) a TRAIL_R reference
+  P frame, at 59.94 too, and one slice a picture with WPP on. The X5
+  codes every other frame at 59.94 as a non-reference TSA_N, which x265
+  3.5 gives only to B-frames, which are reordered; and the masters'
+  slice headers, read in the cloud, show 10 slices at 8K and 5 at 5.7K
+  with WPP off, and IDR_W_RADL, which x265 3.5 can't match (it refuses
+  several slices without WPP, and writes IDR_W_RADL only before RADL
+  pictures, which need B-frames). hw-test's Tier 1 codes the 192²
+  copies again on each machine with its own x265 and checks their IDR
+  spacing and P-only coding, though not which IDR type they take nor
+  their slices (synth's `pairs`, which also prints, with `--nocapture`,
+  what that x265 does when asked for temporal layers: x265 4.x, as odin
+  and huginn link it, is unverified until one of them runs it). The
+  report then reads each lens of the full clips that machine made or
+  found: its bitrate from its own samples, its software decode, and its
+  coding, its IDR interval from `stss` and its pictures by NAL type
+  ("IDR every 60; TRAIL_R 590, IDR_N_LP 10"), in bold where a picture is
+  neither an IDR nor a TRAIL_R or an IDR is off the interval, and the
+  59.94 pair's rows say it is P only where the X5 codes TSA_N. Nothing
+  reads the full clips' slices. The report's x265 row gives
+  `pkg-config`'s version of the headers where there is one, and the
+  version that the info SEI of a frame hw-test codes names, which is the
+  x265 FFmpeg links: odin's `pkg-config` has no x265 file, so its row
+  read "headers not found" before and gives the SEI's version alone
+  now. A pair's stamp holds that version and the corner codes' layout
+  (`synth::code::FORMAT`), so a pair is made again when either changes.
 
 Not benchmarks, but their numbers are in the same notes:
 `list_adapters_and_features` notes each Vulkan adapter's info (with its
