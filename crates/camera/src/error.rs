@@ -6,7 +6,7 @@ use std::io;
 use thiserror::Error;
 
 use crate::insta360::calib::Generation;
-use crate::insta360::limits::MAX_TRAILER;
+use crate::insta360::limits::{MAX_PROFILES, MAX_STRING, MAX_TRAILER};
 
 /// The part of a file an error is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -83,6 +83,9 @@ pub enum CameraError {
     /// caller asked for. Nothing was allocated for them. In
     /// [`Part::Tail`] the size is the trailer's, which the tail gives, and
     /// the limit the file's length or `MAX_TRAILER`, whichever is less.
+    /// In `Part::Field(145)` with `MAX_PROFILES` for its limit, it is
+    /// more lens profiles of a kind than that: `size` counts them as far
+    /// as the first one past it, at whose key `offset` is.
     #[error("{}", too_large(.part, .size, .limit, .offset))]
     TooLarge {
         part: Part,
@@ -153,13 +156,19 @@ pub enum CameraError {
 
 /// `TooLarge`'s message. In the tail the size is the trailer's, not the
 /// tail's own 72 bytes: a limit under `MAX_TRAILER` is the file's length.
+/// In field 145 a limit of `MAX_PROFILES` counts lens profiles, which
+/// tells it from a string's `MAX_STRING` there.
 fn too_large(part: &Part, size: &u64, limit: &u64, offset: &u64) -> String {
+    const _: () = assert!(MAX_PROFILES != MAX_STRING);
     match part {
         Part::Tail if *limit < MAX_TRAILER => format!(
             "the trailer's size in its tail is {size} bytes, more than the file's length of {limit} (byte {offset})"
         ),
         Part::Tail => format!(
             "the trailer's size in its tail is {size} bytes, over its limit of {limit} (byte {offset})"
+        ),
+        Part::Field(145) if *limit == MAX_PROFILES as u64 => format!(
+            "{part} has more than {limit} lens profiles of a kind, polynomials or fields of view (byte {offset})"
         ),
         part => format!("{part} is {size} bytes, over its limit of {limit} (byte {offset})"),
     }

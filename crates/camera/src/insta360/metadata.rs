@@ -11,7 +11,7 @@ use spherecut_core::project::file::fnv1a64;
 
 use super::calib::Generation;
 use super::le64;
-use super::limits::{MAX_METADATA, MAX_STRING};
+use super::limits::{MAX_METADATA, MAX_PROFILES, MAX_STRING};
 use crate::pb::{Field, Value, Walker};
 use crate::{CameraError, Part};
 
@@ -184,7 +184,8 @@ impl Calibrations {
 /// protobuf does; a message read twice (26, 27, 44, 98 or 145) is
 /// replaced whole by its last copy, where protobuf would merge the two.
 ///
-/// A payload over [`MAX_METADATA`] or a string over [`MAX_STRING`] is
+/// A payload over [`MAX_METADATA`], a string over [`MAX_STRING`] or
+/// more lens profiles of a kind than [`MAX_PROFILES`] is
 /// [`CameraError::TooLarge`]; a bad varint, a group or a field cut short
 /// is an error at its byte, and a string field that isn't UTF-8 is
 /// [`CameraError::NotUtf8`]. Unknown fields are skipped by their wire
@@ -196,8 +197,9 @@ impl Calibrations {
 /// video size) is [`CameraError::BadVarint`] at the value. Errors inside
 /// a field are in its [`Part::Field`]; those of the walk between fields,
 /// and the payload's size, in `Part::Record(1)`. The payload's
-/// `TooLarge` is at the first byte past the limit, and a string's at the
-/// key of its field. The fields inside a message read here that it
+/// `TooLarge` is at the first byte past the limit, a string's at the key
+/// of its field, and field 145's at the key of its first item past
+/// `MAX_PROFILES`. The fields inside a message read here that it
 /// doesn't read are skipped, and not counted.
 pub fn parse_metadata(bytes: &[u8]) -> Result<Metadata, CameraError> {
     if bytes.len() > MAX_METADATA {
@@ -392,14 +394,24 @@ fn frame_span(f: &Field) -> Result<FrameSpan, CameraError> {
 }
 
 /// Field 145: its items 1 (a name and a polynomial's coefficients) and 2
-/// (a name and a field of view).
+/// (a name and a field of view), at most [`MAX_PROFILES`] of each.
 fn lens_profiles(f: &Field) -> Result<LensProfiles, CameraError> {
     let top = f.number;
     let mut profiles = LensProfiles::default();
     for item in message(f)? {
         let item = item?;
-        if !matches!(item.number, 1 | 2) {
-            continue;
+        let kept = match item.number {
+            1 => profiles.polynomials.len(),
+            2 => profiles.fovs.len(),
+            _ => continue,
+        };
+        if kept == MAX_PROFILES {
+            return Err(CameraError::TooLarge {
+                part: Part::Field(top),
+                size: kept as u64 + 1,
+                limit: MAX_PROFILES as u64,
+                offset: item.offset,
+            });
         }
         let (mut name, mut values) = (String::new(), Vec::new());
         for g in Walker::new(len(&item, top)?, Part::Field(top), item.value_offset) {

@@ -54,6 +54,12 @@ pub mod limits {
     /// The longest string the metadata keeps: 4 KiB. The X5's longest,
     /// its V6 calibration string, is 518 bytes.
     pub const MAX_STRING: usize = 4 << 10;
+    /// The most lens profiles the metadata keeps of each kind, field
+    /// 145's polynomials (its item 1) and fields of view (item 2): 64.
+    /// The X5 lists 6 of each, one for each accessory. An item can be 2
+    /// bytes where what it is kept as takes 48, so without the cap a
+    /// 1 MiB field would keep half a million.
+    pub const MAX_PROFILES: usize = 64;
     /// The most index slots read: 256, one for each id a slot's byte can
     /// name, so that no trailer is refused for the id of a record it
     /// lists (slot k lists record k: an app-trimmed file's TimeMap, 128,

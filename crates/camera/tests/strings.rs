@@ -22,7 +22,7 @@ use proptest::collection::vec;
 use proptest::prelude::*;
 use proptest::sample::Index;
 use spherecut_camera::insta360::calib::{self, Calib, Focal, Generation, Token};
-use spherecut_camera::insta360::limits::{MAX_METADATA, MAX_STRING};
+use spherecut_camera::insta360::limits::{MAX_METADATA, MAX_PROFILES, MAX_STRING};
 use spherecut_camera::insta360::{
     CalibStrings, Calibrations, FileGroup, FrameSpan, LensProfiles, Metadata, Window,
     parse_metadata,
@@ -888,12 +888,12 @@ fn with_field(fields: &[(u32, Wire)], n: u32, w: Wire) -> (Vec<u8>, u64, u64) {
 
 /// Each error `parse_metadata` gives, with the part it names and the
 /// byte it is at, against the X5-like record, which parses: its limits
-/// (`MAX_METADATA` and `MAX_STRING`, which `trailer.rs` leaves to this
-/// file), a string that isn't UTF-8, groups and wire types a field
-/// doesn't have, a u32 past 32 bits, keys protobuf doesn't allow, and
-/// bytes cut short, at the top and inside a message. A number or a
-/// string read twice keeps its last value and a message read twice is
-/// replaced by its last copy, field 24 is signed, and packed doubles
+/// (`MAX_METADATA`, `MAX_STRING` and `MAX_PROFILES`, which `trailer.rs`
+/// leaves to this file), a string that isn't UTF-8, groups and wire
+/// types a field doesn't have, a u32 past 32 bits, keys protobuf doesn't
+/// allow, and bytes cut short, at the top and inside a message. A number
+/// or a string read twice keeps its last value and a message read twice
+/// is replaced by its last copy, field 24 is signed, and packed doubles
 /// read as field 145's unpacked ones do.
 #[test]
 fn each_metadata_error_is_at_its_byte() {
@@ -960,6 +960,61 @@ fn each_metadata_error_is_at_its_byte() {
     assert!(
         matches!(e, CameraError::TooLarge { part: Part::Field(26), offset, .. } if offset == item3),
         "{e:?}"
+    );
+
+    // MAX_PROFILES: field 145 with 64 polynomials and 64 fields of view,
+    // each an empty item of 2 bytes, parses; a 65th of either kind is an
+    // error at its key, and so is the half a million a 1 MiB record could
+    // hold, which would otherwise be kept.
+    let items = |polynomials: usize, fovs: usize| {
+        Wire::Bytes([[0x0a, 0].repeat(polynomials), [0x12, 0].repeat(fovs)].concat())
+    };
+    let (b, ..) = with_field(&fields, 145, items(MAX_PROFILES, MAX_PROFILES));
+    let at_cap = parse_metadata(&b).unwrap().lens_profiles.unwrap();
+    assert_eq!(
+        at_cap,
+        LensProfiles {
+            polynomials: vec![(String::new(), Vec::new()); MAX_PROFILES],
+            fovs: vec![(String::new(), 0.0); MAX_PROFILES],
+        }
+    );
+    let cap = 2 * MAX_PROFILES as u64;
+    let hostile = (MAX_METADATA - base.len()) / 2 - 8;
+    for (what, polynomials, fovs, past) in [
+        ("65 polynomials", MAX_PROFILES + 1, 0, cap),
+        ("65 fields of view", MAX_PROFILES, MAX_PROFILES + 1, 2 * cap),
+        ("half a million polynomials", hostile, 0, cap),
+    ] {
+        let (b, _, value) = with_field(&fields, 145, items(polynomials, fovs));
+        assert!(b.len() <= MAX_METADATA, "{what}");
+        let e = must_fail(&format!("field 145 with {what}"), parse_metadata(&b));
+        assert!(
+            matches!(e, CameraError::TooLarge { part: Part::Field(145), size, limit, offset }
+                if (size, limit, offset) == (MAX_PROFILES as u64 + 1, MAX_PROFILES as u64, value + past)),
+            "{what}: {e:?}"
+        );
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "the metadata's field 145 has more than 64 lens profiles of a kind, polynomials or fields of view (byte {})",
+                value + past
+            )
+        );
+    }
+    // The control: a profile's name a byte over 4 KiB is too large in
+    // field 145 too, and worded by its bytes, not as too many profiles.
+    let named = Wire::Message(vec![(1, Wire::Message(vec![(1, long(MAX_STRING + 1))]))]);
+    let (b, _, value) = with_field(&fields, 145, named);
+    let e = must_fail("a profile's name a byte over 4 KiB", parse_metadata(&b));
+    // Item 1's key and its 2-byte length, before the name's key.
+    let name = value + 3;
+    assert_eq!(
+        e.to_string(),
+        format!("the metadata's field 145 is 4097 bytes, over its limit of 4096 (byte {name})")
+    );
+    must_fail(
+        "a profile's name a byte over 4 KiB, worded as too many profiles",
+        e.to_string().contains("lens profiles"),
     );
 
     // A string that isn't UTF-8: at its first bad byte.
