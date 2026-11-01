@@ -1719,6 +1719,93 @@ fn rig_front_track_and_upright_turn_both_lenses() {
     );
 }
 
+/// The tune turns a lens as D33's `Ypr` turns a view, in its block's view
+/// frame (6.2): a positive yaw swings the lens's axis towards its right,
+/// a positive pitch swings it up, and a positive roll turns its right
+/// side down, clockwise as seen from behind it. The frames are written by
+/// hand at stored angles of (0°, 0°, 90°), where the placeholder's E is
+/// the identity. Lens 0 then looks along −Z with its right at +X; lens 1
+/// looks along +Z, turned 180° about Y with its right at −X, or about X
+/// with its right at +X and its top down.
+#[test]
+fn rig_tune_turns_each_lens_as_seen() {
+    let _time = timed("rig_tune_turns_each_lens_as_seen");
+    let cal = with_angles(&pats(), [[0.0, 0.0, 90.0]; 2]);
+    let (s, c) = 10f64.to_radians().sin_cos();
+    // Each lens untuned, written by hand: its block, the turn axis, and
+    // where its axis (+z), its right (+x) and its top (−y) land in the rig
+    // frame.
+    let lenses = [
+        (0, TurnAxis::Y, [DVec3::NEG_Z, DVec3::X, DVec3::Y]),
+        (1, TurnAxis::Y, [DVec3::Z, DVec3::NEG_X, DVec3::Y]),
+        (1, TurnAxis::X, [DVec3::Z, DVec3::X, DVec3::NEG_Y]),
+    ];
+    // The tune's yaw, pitch or roll of 10° alone, or none, and where it
+    // puts the lens's axis and right: the yaw swings the axis towards the
+    // right, lens 0's to (sin 10°, 0, −cos 10°); the pitch swings it
+    // towards the top; the roll turns the right away from the top.
+    let cases: Vec<_> = lenses
+        .iter()
+        .flat_map(|&(b, turn, [axis, right, top])| {
+            [
+                ([0.0, 0.0, 0.0], axis, right),
+                ([10.0, 0.0, 0.0], c * axis + s * right, c * right - s * axis),
+                ([0.0, 10.0, 0.0], c * axis + s * top, right),
+                ([0.0, 0.0, 10.0], axis, c * right - s * top),
+            ]
+            .map(|(ypr, axis, right)| (b, turn, ypr, axis, right))
+        })
+        .collect();
+    let rig = |turn: TurnAxis, b: usize, ypr: [f64; 3]| {
+        let geo = Geometry {
+            turn,
+            ..placeholder(CanvasMap::C, Generation::V6, EVERY_TERM)
+        };
+        let mut tune = Tune::default();
+        tune.lenses[b].ypr_deg = ypr;
+        Rig::build(&cal, &geo, &tune, 0, [768; 2]).unwrap()
+    };
+    // The rig_from_lens with that axis and right, whose down is their
+    // cross product.
+    let frame = |axis: DVec3, right: DVec3| DMat3::from_cols(right, axis.cross(right), axis);
+    for &(b, turn, ypr, axis, right) in &cases {
+        let rig_from_lens = rig(turn, b, ypr).lenses[b].lens_from_rig.inverse();
+        let err = misfit(rig_from_lens, frame(axis, right));
+        assert!(
+            err <= 1e-12,
+            "block {b}, turn {turn:?}, tune {ypr:?}: {err:e}"
+        );
+    }
+    let tuned = || cases.iter().filter(|case| case.2 != [0.0; 3]);
+    // Control: the tune's sign flipped, Q for Qᵀ, which for one angle is
+    // that angle negated. Every tuned frame misses.
+    let flipped = tuned()
+        .map(|&(b, turn, ypr, axis, right)| {
+            let rig_from_lens = rig(turn, b, ypr.map(|a| -a)).lenses[b]
+                .lens_from_rig
+                .inverse();
+            misfit(rig_from_lens, frame(axis, right))
+        })
+        .fold(f64::INFINITY, f64::min);
+    must_fail("the tune's sign flipped", at_most(flipped, 1e-12));
+    // Control: block 1's tune turned in the rig frame, not its view frame,
+    // as Q times the untuned rig_from_lens. A yaw commutes with the half
+    // turn about Y, so that case alone can't tell them apart.
+    let in_rig = tuned()
+        .filter(|case| case.0 == 1)
+        .map(|&(b, turn, [yaw, pitch, roll], axis, right)| {
+            let untuned =
+                DMat3::from_quat(rig(turn, b, [0.0; 3]).lenses[b].lens_from_rig.inverse());
+            let q = ry(-yaw) * rx(pitch) * rz(-roll);
+            misfit(DQuat::from_mat3(&(q * untuned)), frame(axis, right))
+        })
+        .fold(0.0, f64::max);
+    must_fail(
+        "block 1's tune turned in the rig frame",
+        at_most(in_rig, 1e-12),
+    );
+}
+
 /// `Rig::build` refuses a θ_max past the limit, a missing generation, a
 /// block's terms of the wrong generation, a front track past 1, a side
 /// of 0 and numbers that aren't finite, each with its `RigError`.
