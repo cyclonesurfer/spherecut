@@ -7,9 +7,13 @@
 //! for a constant offset in the first pts or the edit list, R2 for sync
 //! samples that differ, and Kill for decode times that differ over the
 //! common prefix, which fails the test, as does a difference no branch
-//! names. Counts that differ only at the end take no branch: the pair
-//! ends at the shorter lens. FFmpeg's demuxer reads the head of every
-//! track as its tables say.
+//! names. An edit list differs by a constant offset only when each shows
+//! the media in one edit, after any empty ones, and the two part only in
+//! the empty edits or where that edit starts. Counts that differ only at the end take no branch: the pair
+//! ends at the shorter lens. An LRV passes within one master frame of
+//! its master, and otherwise its offset is reported for the proxy's time
+//! map (section 15). FFmpeg's demuxer reads the head of every track as
+//! its tables say.
 //!
 //! Run in the cloud, with `SPHERECUT_TIER2` unset, by
 //! `SPHERECUT_SAMPLES=/home/claude/spherecut-samples/insta360-x5 cargo test
@@ -18,17 +22,20 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use spherecut_media::mp4::{self, TrackTiming};
+use spherecut_media::mp4::{self, Edit, EditList, TrackTiming};
 use spherecut_media::packets::{NextPacket, PacketReader};
 use spherecut_testkit::control::{below, must_fail};
 use spherecut_testkit::samples::{self, Role};
 use spherecut_testkit::{fnv64, tier2};
+
+/// Rate 1.0 in an edit: 16.16 fixed point.
+const RATE_1: u32 = 0x0001_0000;
 
 /// What a field's difference between two lens tracks comes to under
 /// P-TRK, in the order the worst of them decides a file.
@@ -64,6 +71,21 @@ impl Branch {
     fn allowed(self) -> bool {
         self < Branch::Kill
     }
+}
+
+/// P-TRK's verdict on the branches some fields took: Pass when no field
+/// took one beyond ending at the shorter lens, and otherwise every
+/// branch that fired, such as "R1 + R2".
+fn verdict(branches: impl IntoIterator<Item = Branch>) -> String {
+    let fired: BTreeSet<Branch> = branches
+        .into_iter()
+        .filter(|&b| b > Branch::EndsApart)
+        .collect();
+    if fired.is_empty() {
+        return "Pass".into();
+    }
+    let names: Vec<&str> = fired.iter().map(|b| b.name()).collect();
+    names.join(" + ")
 }
 
 /// One field of two tracks: what each holds, the branch, and why.
@@ -165,25 +187,129 @@ fn zero_offsets(t: &TrackTiming) -> bool {
     t.ctts_hash.is_none_or(|h| h == fnv64(&run))
 }
 
-/// Whether `a` and `b` are equal as fractions of their timescales.
-fn same_time(a: i64, ta: u32, b: i64, tb: u32) -> bool {
-    i128::from(a) * i128::from(tb) == i128::from(b) * i128::from(ta)
+/// Whether `a` and `b` are equal as fractions of their timescales. A
+/// time here is at most a sum of 2^24 edits of 64 bits, so the products
+/// fit in an i128.
+fn same_time(a: i128, ta: u32, b: i128, tb: u32) -> bool {
+    a * i128::from(tb) == b * i128::from(ta)
+}
+
+/// An edit list that shows the media once, from one point on: empty
+/// edits, if any, then one edit that shows media. No list, or a list of
+/// no edits, which FFmpeg ignores, shows all of it from the start.
+struct Shown {
+    /// The empty edits before it, in ticks of the movie's timescale.
+    delay: u128,
+    /// Where in the media it starts, in ticks of the track's.
+    start: i64,
+    /// How long it shows, as (ticks, ticks a second).
+    lasts: (i128, u32),
+    rate: u32,
+    movie_timescale: u32,
+}
+
+/// `t`'s edit list as one [`Shown`], or `None` when it shows media in
+/// more than one edit.
+fn shown(t: &TrackTiming) -> Option<Shown> {
+    let media: u64 = t
+        .stts
+        .iter()
+        .map(|&(n, d)| u64::from(n) * u64::from(d))
+        .sum();
+    let all = Shown {
+        delay: 0,
+        start: 0,
+        lasts: (i128::from(media), t.timescale),
+        rate: RATE_1,
+        movie_timescale: 1,
+    };
+    let Some(list) = t.edit.as_ref().filter(|l| !l.edits.is_empty()) else {
+        return Some(all);
+    };
+    // track_timing refuses a list whose edits are all empty.
+    let k = list.edits.iter().position(|e| e.media_time != -1)?;
+    let [e] = &list.edits[k..] else {
+        return None;
+    };
+    Some(Shown {
+        delay: list.edits[..k].iter().map(|e| u128::from(e.duration)).sum(),
+        start: e.media_time,
+        lasts: (i128::from(e.duration), list.movie_timescale),
+        rate: e.rate,
+        movie_timescale: list.movie_timescale,
+    })
 }
 
 /// How the edit lists of two tracks differ: not at all, only in how long
-/// the last edit lasts, or otherwise. Times are compared in seconds.
+/// they last, by a constant offset (R1), or otherwise. Times are compared
+/// in seconds.
 fn edit_branch(a: &TrackTiming, b: &TrackTiming) -> (Branch, String) {
-    let (Some(x), Some(y)) = (&a.edit, &b.edit) else {
-        return match (&a.edit, &b.edit) {
-            (None, None) => (Branch::Same, String::new()),
-            _ => (
-                Branch::R1,
-                "one lens has an edit list, the other none".into(),
-            ),
+    let (Some(x), Some(y)) = (shown(a), shown(b)) else {
+        return lists_branch(a, b);
+    };
+    if x.rate != y.rate {
+        return (
+            Branch::Unforeseen,
+            format!("the edits play at rates {:#x} and {:#x}", x.rate, y.rate),
+        );
+    }
+    let delays = same_time(
+        x.delay as i128,
+        x.movie_timescale,
+        y.delay as i128,
+        y.movie_timescale,
+    );
+    let starts = same_time(x.start.into(), a.timescale, y.start.into(), b.timescale);
+    if !delays || !starts {
+        // When each lens shows a media time, in seconds from the start of
+        // the movie less that media time.
+        let at = |s: &Shown, t: &TrackTiming| {
+            s.delay as f64 / f64::from(s.movie_timescale) - s.start as f64 / f64::from(t.timescale)
         };
+        let ms = (at(&y, b) - at(&x, a)) * 1000.0;
+        let frames = ms / 1000.0 / frame_s(a);
+        return (
+            Branch::R1,
+            format!(
+                "a constant offset: lens 1 shows each media time {ms:+.3} ms, {frames:+.3} frames, from lens 0"
+            ),
+        );
+    }
+    if same_time(x.lasts.0, x.lasts.1, y.lasts.0, y.lasts.1) {
+        (Branch::Same, String::new())
+    } else {
+        (Branch::EndsApart, "only how long they show differs".into())
+    }
+}
+
+/// How two edit lists differ when one of them shows media in more than
+/// one edit: not at all, only in how long the last edit lasts, or
+/// otherwise, which no constant offset is.
+fn lists_branch(a: &TrackTiming, b: &TrackTiming) -> (Branch, String) {
+    let shows = |t: &TrackTiming| {
+        t.edit
+            .as_ref()
+            .map_or(1, |l| l.edits.iter().filter(|e| e.media_time != -1).count())
+    };
+    let (Some(x), Some(y)) = (&a.edit, &b.edit) else {
+        return (
+            Branch::Unforeseen,
+            format!(
+                "the lenses show their media in {} and {} edits, which no constant offset makes the same",
+                shows(a),
+                shows(b)
+            ),
+        );
     };
     if x.edits.len() != y.edits.len() {
-        return (Branch::R1, "the lists have different edits".into());
+        return (
+            Branch::Unforeseen,
+            format!(
+                "the lists hold {} and {} edits, which no constant offset makes the same",
+                x.edits.len(),
+                y.edits.len()
+            ),
+        );
     }
     let last = x.edits.len().saturating_sub(1);
     let mut end_differs = false;
@@ -191,15 +317,18 @@ fn edit_branch(a: &TrackTiming, b: &TrackTiming) -> (Branch, String) {
         let starts = match (e.media_time, f.media_time) {
             (-1, -1) => true,
             (-1, _) | (_, -1) => false,
-            (m, n) => same_time(m, a.timescale, n, b.timescale),
+            (m, n) => same_time(m.into(), a.timescale, n.into(), b.timescale),
         };
         if !starts || e.rate != f.rate {
-            return (Branch::R1, format!("edit {i} shows different media"));
+            return (
+                Branch::Unforeseen,
+                format!("edit {i} shows different media"),
+            );
         }
         let lasts = |d: u64, ts: u32| i128::from(d) * i128::from(ts);
         if lasts(e.duration, y.movie_timescale) != lasts(f.duration, x.movie_timescale) {
             if i < last {
-                return (Branch::R1, format!("edit {i} lasts differently"));
+                return (Branch::Unforeseen, format!("edit {i} lasts differently"));
             }
             end_differs = true;
         }
@@ -253,7 +382,12 @@ fn compare(a: &TrackTiming, b: &TrackTiming) -> Vec<Field> {
     ));
 
     let at = |t: &TrackTiming| format!("{} ({:.3} ms)", t.first_pts, first_ms(t));
-    let (branch, why) = if same_time(a.first_pts, a.timescale, b.first_pts, b.timescale) {
+    let (branch, why) = if same_time(
+        a.first_pts.into(),
+        a.timescale,
+        b.first_pts.into(),
+        b.timescale,
+    ) {
         (Branch::Same, String::new())
     } else {
         let ms = first_ms(b) - first_ms(a);
@@ -342,10 +476,16 @@ fn print_table(title: &str, fields: &[Field]) {
 
 /// How much later than its master's lens 0 an LRV's first frame is
 /// shown, in ms and in master frames. Each file's clip time 0 is its
-/// first frame, shown `first_pts` after the start of its movie.
+/// first frame, shown `first_pts` after the start of its movie. The
+/// offset is taken in whole ticks of both timescales, so that a frame
+/// late is exactly 1.
 fn lrv_offset(master: &TrackTiming, lrv: &TrackTiming) -> (f64, f64) {
-    let ms = first_ms(lrv) - first_ms(master);
-    (ms, ms / 1000.0 / frame_s(master))
+    let (tm, tl) = (i128::from(master.timescale), i128::from(lrv.timescale));
+    // tm × tl of these a second.
+    let ticks = i128::from(lrv.first_pts) * tm - i128::from(master.first_pts) * tl;
+    let delta = master.stts.iter().find(|r| r.0 > 0).map_or(0, |r| r.1);
+    let ms = ticks as f64 * 1000.0 / (tm * tl) as f64;
+    (ms, ticks as f64 / (i128::from(delta) * tl) as f64)
 }
 
 /// Whether FFmpeg's demuxer reads the head of `stream` as `t` says: its
@@ -438,6 +578,8 @@ fn samples_x5_tracks_equal() {
     assert!(!shot.is_empty());
     let mut problems = Vec::new();
     let mut takes: Vec<(Take, Vec<Field>)> = Vec::new();
+    // The LRVs whose offset goes into the proxy's time map (section 15).
+    let mut time_map = Vec::new();
     for &role in &shot {
         let (master, lrv) = (samples::role(role.name), samples::lrv(role.name));
         let timing = |path: &Path, stream| {
@@ -462,23 +604,26 @@ fn samples_x5_tracks_equal() {
         let (ms, frames) = lrv_offset(&take.lens[0], &take.lrv);
         let l = &take.lrv;
         let within = below(frames.abs(), 1.0);
+        let lrv_verdict = match within.passes() {
+            Some(true) => "within one frame".to_string(),
+            Some(false) => {
+                time_map.push(format!("{} ({ms:+.3} ms)", role.file.unwrap_or("?")));
+                format!("time map, {ms:+.3} ms, {frames:+.3} frames (section 15)")
+            }
+            None => {
+                problems.push(format!("{name}'s LRV: {within} decides nothing"));
+                "undecided".to_string()
+            }
+        };
         eprintln!(
-            "  LRV: {} at {}, {} frames ({}), first pts {}, {}; {ms:+.3} ms, {frames:+.3} master frames from lens 0: {}",
+            "  LRV: {} at {}, {} frames ({}), first pts {}, {}; {ms:+.3} ms, {frames:+.3} master frames from lens 0: {lrv_verdict}",
             runs(&l.stts),
             l.timescale,
             l.count,
             sync(l.stss.as_deref()),
             l.first_pts,
             edits(l),
-            if within.passes() == Some(true) {
-                "within one frame"
-            } else {
-                "an offset for the proxy's time map (15)"
-            },
         );
-        if within.passes() != Some(true) {
-            problems.push(format!("{name}'s LRV: {within} master frames"));
-        }
 
         for (path, stream, t) in [
             (&master, 0, &take.lens[0]),
@@ -492,9 +637,8 @@ fn samples_x5_tracks_equal() {
         takes.push((take, fields));
     }
 
-    // P-TRK's verdict per field over the masters, and the worst of all.
+    // P-TRK's verdict per field over the masters, and over all of them.
     eprintln!("P-TRK over {} masters:", takes.len());
-    let mut worst = Branch::Same;
     for i in 0..takes[0].1.len() {
         let mut by: BTreeMap<Branch, Vec<String>> = BTreeMap::new();
         for (take, fields) in &takes {
@@ -502,7 +646,6 @@ fn samples_x5_tracks_equal() {
             by.entry(f.branch)
                 .or_default()
                 .push(take.role.file.unwrap_or("?").to_string());
-            worst = worst.max(f.branch);
         }
         let verdicts: Vec<String> = by
             .iter()
@@ -510,24 +653,28 @@ fn samples_x5_tracks_equal() {
             .collect();
         eprintln!("  {:<10} {}", takes[0].1[i].name, verdicts.join("; "));
     }
-    let verdict = match worst {
-        Branch::Same | Branch::EndsApart => "Pass".to_string(),
-        b => b.name().to_string(),
-    };
-    eprintln!("P-TRK: {verdict}");
+    let all = takes.iter().flat_map(|(_, f)| f.iter().map(|f| f.branch));
+    eprintln!("P-TRK: {}", verdict(all));
     let offsets: Vec<f64> = takes
         .iter()
         .map(|(t, _)| lrv_offset(&t.lens[0], &t.lrv).1.abs())
         .collect();
+    let mapped = match time_map.len() {
+        0 => "none needs the time map".to_string(),
+        n => format!("{n} need the time map: {}", time_map.join(", ")),
+    };
     eprintln!(
-        "LRVs: largest offset {:.3} master frames over {}",
+        "LRVs: largest offset {:.3} master frames over {}; {} within one frame, {mapped}",
         offsets.iter().copied().fold(0.0, f64::max),
-        offsets.len()
+        offsets.len(),
+        offsets.len() - time_map.len(),
     );
 
     // Controls: lens 0 of the 8K30 master against the 8K25 master's,
-    // whose frames part at the second; an LRV a master frame late; and
-    // tables the 8K30 file's packets don't have.
+    // whose frames part at the second; lens 1 of the 8K30 master shown a
+    // frame late, which R1 lets through, and skipping a frame, which no
+    // branch names; an LRV a master frame late; and tables the 8K30
+    // file's packets don't have.
     let at = |name: &str| &takes.iter().find(|(t, _)| t.role.name == name).unwrap().0;
     let (k30, k25) = (at("clip1_8k30"), at("clip2_8k25"));
     let fields = compare(&k30.lens[0], &k25.lens[0]);
@@ -537,6 +684,61 @@ fn samples_x5_tracks_equal() {
         why.contains("stts: Kill (decode times part at sample 1)"),
         "{why}"
     );
+    let lens1 = &k30.lens[1];
+    let list = lens1.edit.as_ref().unwrap();
+    let (delta, mts) = (u64::from(lens1.stts[0].1), list.movie_timescale);
+    // A frame in the movie's ticks, which on the X5 are the track's.
+    let frame = delta * u64::from(mts) / u64::from(lens1.timescale);
+    assert_eq!(frame * u64::from(lens1.timescale), delta * u64::from(mts));
+    let edit = |edits: Vec<Edit>| {
+        Some(EditList {
+            movie_timescale: mts,
+            edits,
+        })
+    };
+    let empty = Edit {
+        duration: frame,
+        media_time: -1,
+        rate: RATE_1,
+    };
+    let shifted = TrackTiming {
+        first_pts: lens1.first_pts + delta as i64,
+        edit: edit([vec![empty], list.edits.clone()].concat()),
+        ..lens1.clone()
+    };
+    let fields = compare(&k30.lens[0], &shifted);
+    print_table("control: 004's lens 1 a frame late", &fields);
+    assert_eq!(agree(&fields), Ok(()));
+    let fired: Vec<(&str, Branch)> = fields
+        .iter()
+        .filter(|f| f.branch != Branch::Same)
+        .map(|f| (f.name, f.branch))
+        .collect();
+    assert_eq!(fired, [("first_pts", Branch::R1), ("edit", Branch::R1)]);
+    assert_eq!(verdict(fired.iter().map(|f| f.1)), "R1");
+    // Frames 0 to 49, then 51 on: no one offset lines the lenses up.
+    let skip = TrackTiming {
+        edit: edit(vec![
+            Edit {
+                duration: 50 * frame,
+                media_time: 0,
+                rate: RATE_1,
+            },
+            Edit {
+                duration: (lens1.count - 51) * frame,
+                media_time: 51 * delta as i64,
+                rate: RATE_1,
+            },
+        ]),
+        ..lens1.clone()
+    };
+    let fields = compare(&k30.lens[0], &skip);
+    print_table("control: 004's lens 1 skipping frame 50", &fields);
+    let why = must_fail("lens 1 skipping frame 50", agree(&fields));
+    assert_eq!(
+        why,
+        "edit: unforeseen (the lists hold 1 and 2 edits, which no constant offset makes the same)"
+    );
     let late = TrackTiming {
         first_pts: k30.lrv.first_pts + i64::from(k30.lens[0].stts[0].1),
         ..k30.lrv.clone()
@@ -545,7 +747,7 @@ fn samples_x5_tracks_equal() {
     let (_, frames) = lrv_offset(&k30.lens[0], &late);
     assert_eq!(
         must_fail("an LRV a frame late", below(frames.abs(), 1.0)),
-        frames.abs()
+        1.0
     );
     let lens = &k30.lens[0];
     let planted = [
