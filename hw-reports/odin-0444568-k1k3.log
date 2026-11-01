@@ -1,0 +1,16 @@
+   Compiling spherecut-sphere v0.1.0 (/home/pat/spherecut/crates/sphere)
+   Compiling spherecut-media v0.1.0 (/home/pat/spherecut/crates/media)
+   Compiling spherecut-testkit v0.1.0 (/home/pat/spherecut/crates/testkit)
+   Compiling spherecut-core v0.1.0 (/home/pat/spherecut/crates/core)
+   Compiling spherecut-render v0.1.0 (/home/pat/spherecut/crates/render)
+   Compiling spherecut-export v0.1.0 (/home/pat/spherecut/crates/export)
+   Compiling spherecut-synth v0.1.0 (/home/pat/spherecut/crates/synth)
+   Compiling spherecut-agent v0.1.0 (/home/pat/spherecut/crates/agent)
+    Finished `release` profile [optimized + debuginfo] target(s) in 15.71s
+     Running tests/tier2_pair_decode.rs (target/release/deps/tier2_pair_decode-2f54cdeb3f2d90e5)
+
+running 1 test
+test bench_export_pair_decode ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 1130.63s
+
