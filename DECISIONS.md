@@ -1298,7 +1298,7 @@ rest, with the versions in `Cargo.lock`:
 | rustix 1.1.5 (std, fs, stdio) | agent, cli, core | `openat2` below a root, a directory read through its descriptor (A1's roots, D43), and `spherecut mcp`'s stdout guard: the protocol's copy of fd 1 (`fcntl_dupfd_cloexec`) and fd 1 pointed at stderr (`dup2_stdout`); in core (M2.4), the temporary-file sweep's `O_NOFOLLOW` and `O_NONBLOCK` and `statvfs` for an export's free space (D16), all without `unsafe`. Pinned with `=` to the version already in the tree through tempfile and the Wayland crates, so it adds no crate |
 | serde 1.0.229 (derive) | core, sphere, media, cli, agent | Serializable time types, `Projection`, the probe and doctor reports, the CLI's JSON envelope (D27), and the agent's requests |
 | serde_json 1.0.154 (float_roundtrip) | cli, agent, core; render (dev) | `--json` output, through the `contract` module (D27), the MCP server's messages, schemas and results (D43, D44), and the project file (D47), whose floats `float_roundtrip` reads back bit for bit. core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
-| thiserror 2.0.21 | core, media, synth, render, playback, audio, agent | Typed library errors without hand-written `Display` impls |
+| thiserror 2.0.21 | core, media, synth, render, playback, audio, agent, camera | Typed library errors without hand-written `Display` impls |
 | tracing 0.1.44 | core, media, cli, render, playback, audio, agent | Structured logging, and the target for FFmpeg's log (D12). core logs only what `fs::TempFile` can't clean up (M1 slice 4) |
 | tracing-core 0.1.36 | media | The `Subscriber` items (`span::Current`, `callsite::rebuild_interest_cache`) that the thread-local FFmpeg log capture of doctor and probe needs. It was already in the tree through `tracing` |
 | tracing-subscriber 0.3.23 (env-filter) | cli | EnvFilter gives `SPHERECUT_LOG` its syntax, and the fmt layer writes to stderr. env-filter brings in `matchers` and `regex-automata` |
@@ -1306,7 +1306,7 @@ rest, with the versions in `Cargo.lock`:
 | winit 0.30.13 (rwh_06, wayland, wayland-dlopen, x11) | app | Not called: named so that eframe's winit gets `wayland-dlopen` back by feature unification, and libwayland is loaded at run time (D36). Never `wayland-csd-adwaita` (RUSTSEC-2026-0192 through ttf-parser), which `[[bans.features]]` refuses |
 | naga 30.0.1 (wgsl-in) (dev) | render | The test that each uniform's Rust layout matches its WGSL struct, member by member, which a driver doesn't check (D31). The same naga wgpu builds, so it adds nothing to the tree |
 | egui_kittest 0.37.0 (wgpu) (dev) | app | The GUI's tests on lavapipe, through our device with `WgpuTestRenderer::from_render_state` (D36), and its accessibility tree for finding widgets. Not its `eframe` feature, which turns eframe's accesskit on and `[[bans.features]]` refuses. In test builds it turns on wgpu's `gles`, `metal` and `dx12` (D31's row); the shipped binary has none |
-| proptest 1.12.0 (dev) | core, sphere, media, render, playback, agent | Property tests, the MP4 fuzzing (D15) and the JSON-RPC reader's (D44) |
+| proptest 1.12.0 (dev) | core, sphere, media, render, playback, agent, camera | Property tests, the MP4 fuzzing (D15) and the JSON-RPC reader's (D44) |
 | ron 0.12.2 (dev) | core | A serde round-trip test of the time types in a text format |
 
 glam's `serde` feature is on; since M2.1 core depends on glam and sphere for the project model's orientations (D48), which the project file writes through its own `Orientation` form, not glam's.
@@ -1361,6 +1361,11 @@ glam, serde, thiserror, tracing and wgpu, and on synth and media's
 
 *Updated in M1 slice 5b,* with ash's row above, which adds no crate: it
 was wgpu-hal's already, at the same version.
+
+*Updated 2026-11-01 in M3.2,* with the camera crate (D61): it depends
+on core and thiserror, and on proptest, synth and testkit for its tests,
+all in the tree already, so it adds no crate. Sphere joins its
+dependencies in M3.5, and media depends on it from M3.2's unit (c).
 
 ## D23. Agent integration: an MCP server and the JSON CLI
 
@@ -2215,6 +2220,12 @@ share wgpu's queue on lavapipe, is an `unsafe fn` whose contract says
 so. media's FFmpeg side, `ffi::vulkan` (the `AVVulkanDeviceContext` made
 from the handles, and the frame lock around the copy), sits under
 `ffi`'s allowance.
+
+*Updated by D61 (2026-11-01, M3.2):* a new crate, `camera` (cameras'
+raw files read from their bytes), depends on core (and on sphere from
+M3.5), and media depends on it, never the reverse; it has
+`#![forbid(unsafe_code)]`. M3's lens maths and rig go in sphere and its
+blending, instrument and fit in render: there is no `stitch` crate.
 
 ## D29. MediaBackend and frame-exact seek
 
@@ -9034,6 +9045,49 @@ file); check rendering a frame to be sure (`job`'s check is the proof).
 Revisit if: an agent needs the source and the render side by side in
 one image; a codec's clamping moves compare's numbers (then read Y);
 or 1 % of shape lets a wrong project through.
+
+## D61. Crates for M3: camera reads the vendors' bytes, media depends on it, no stitch crate
+
+*2026-11-01, M3 slice M3.2. The M3 plan, `docs/design/m3-plan.md`
+sections 5.1, 20 and 23, has the detail; this is the layout M3.2 starts
+and why. Updates D22 and D28.*
+
+What:
+
+- **`camera`** (`spherecut-camera`, new) reads cameras' raw files from
+  their bytes, with no FFmpeg: from M3.2 the Insta360 trailer, its
+  records and metadata, the calibration strings and a recording's
+  companion files (`camera::insta360`), through a schema-less protobuf
+  walker of its own (`camera::pb`, the M3 plan's D62). It depends on
+  core and thiserror, and from M3.5 on sphere, for the types it converts
+  into. Its readers take `impl Read + Seek` and each calls
+  `core::blocking::may_block` first (D34), so the app reads only on its
+  jobs. It has `#![forbid(unsafe_code)]`, and builds at opt-level 2 in
+  dev for its properties' 100,000 cases.
+- **media depends on camera, never the reverse**: probe, doctor and
+  `media::project` read a trailer (M3.2's unit (c) adds the edge), so
+  there is no cycle. camera's integration tests take synth as a
+  dev-dependency, to hold the reader to synth's own writer
+  (`synth::insv`), which shares no code with it (so those test binaries
+  link FFmpeg through synth, as render's do); a unit test there would
+  link a second copy of camera.
+- **Lens maths and the rig in `sphere`** (M3.3); **blending, the
+  instrument and the fit in `render`**. There is **no `stitch` crate**.
+- **Mei's unified model** goes beyond PROMPT.md:79's
+  "equidistant/equisolid plus polynomial": the X5's V3 and V6 strings
+  give ξ, fx and fy.
+- core's `project::file::fnv1a64` is public, so that camera, media and
+  the app hash a calibration as the project does (the M3 plan's 11.1).
+
+Why: synth's checks, the reference, the fit and the project share the
+maths, and sphere already holds every projection. render holds the
+reference and builds at opt-level 2. A stitch crate would hold nothing
+of its own. A reader without FFmpeg takes whatever file an agent's
+roots (D45) or the app's jobs opened, and needs none of D24's
+confinement. The X5 writes Mei.
+
+Revisit if: a camera's format can only be read through FFmpeg, or
+camera needs a type of media's (then the type moves to core).
 
 ## Open
 
