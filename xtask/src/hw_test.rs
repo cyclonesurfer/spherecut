@@ -26,8 +26,9 @@
 //! (`--no-tier1` leaves them out), which catches what this machine's
 //! FFmpeg and Mesa do differently. Before Tier 2, hw-test makes the perf
 //! clips the playback benchmarks play, and the two-track ones the pair
-//! benchmarks play, once (`perf_clips`), unless `--quick`. The report also records the power settings and every render
-//! node (`machine`). `--list` lists the Tier 2 tests and stops.
+//! benchmarks play, once (`perf_clips`), unless `--quick`. The report
+//! also records the power settings and every render node (`machine`).
+//! `--list` lists the Tier 2 tests and stops.
 //!
 //! The command exits non-zero when the build fails, a Tier 2 or Tier 1
 //! test fails or does not run, or a test binary dies; skips alone are not
@@ -1433,6 +1434,11 @@ pub fn run(a: Args) -> Result<()> {
             "libswresample",
         ],
     );
+    // The x265 the perf clips are coded with: the system's, which
+    // `scripts/build-ffmpeg.sh` links. Which pictures it can make
+    // non-reference, and how it cuts them into slices, decide how near
+    // the two-track clips come to the X5's coding (`perf_pairs`).
+    let x265 = capture("pkg-config", &["--modversion", "x265"]);
     let session = format!(
         "{} / {}",
         std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "?".into()),
@@ -1626,6 +1632,15 @@ pub fn run(a: Args) -> Result<()> {
             libs.text.split_whitespace().collect::<Vec<_>>().join(", ")
         } else {
             "headers not found".into()
+        }
+    );
+    let _ = writeln!(
+        r,
+        "| x265 | {} |",
+        if x265.ok {
+            x265.text.trim()
+        } else {
+            "headers not found"
         }
     );
     let _ = writeln!(

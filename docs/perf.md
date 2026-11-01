@@ -177,17 +177,22 @@ Current benchmarks:
 - **The two-track perf clips** (M3 plan 7.2, from M3.1): synth's
   `perf_pairs`, two square lens tracks in one MP4, each coded alone by
   threaded x265 with its corner codes and its own noise, 600 frames a
-  lens, as the X5 codes each mode: closed GOPs, no B-frames, one-pass
-  ABR, 8-bit full range BT.709.
+  lens, as the X5 codes each mode where x265 can: closed GOPs, no
+  B-frames, one-pass ABR, 8-bit full range BT.709.
   `pair-hevc8-3840-2997-noisy-20s.mp4` (2×3840² at 29.97, an IDR every
   60 frames, 65 Mbps a lens), `pair-hevc8-2880-5994-noisy-10s.mp4`
   (2×2880² at 59.94, an IDR every 120, 80 Mbps) and
   `pair-hevc8-2880-2997-noisy-20s.mp4` (2×2880² at 29.97, an IDR every
   60, 80 Mbps). Every picture but the IDRs (IDR_N_LP) is a TRAIL_R
   reference P frame, at 59.94 too: the X5 codes every other frame there
-  as a non-reference TSA_N, which x265 3.5 gives only to B-frames, which
-  are reordered. The report rates each lens on its own: its bitrate from
-  its own samples, and its software decode.
+  as a non-reference TSA_N, which x265 3.5, as linked in the cloud,
+  gives only to B-frames, which are reordered. Each picture is one slice
+  with WPP on, where the masters' slice headers show 10 slices at 8K and
+  5 at 5.7K with WPP off, and IDR_W_RADL: x265 3.5 refuses several
+  slices without WPP, and writes IDR_W_RADL only before RADL pictures,
+  which need B-frames. The report records the machine's x265
+  (`pkg-config`), and rates each lens on its own: its bitrate from its
+  own samples, and its software decode.
 
 Not benchmarks, but their numbers are in the same notes:
 `list_adapters_and_features` notes each Vulkan adapter's info (with its

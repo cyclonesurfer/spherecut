@@ -1069,22 +1069,32 @@ pub const PERF_PAIR_2880_2997: &str = "pair-hevc8-2880-2997-noisy-20s";
 
 /// The two-track perf clips hw-test makes for the pair benchmarks (M3
 /// plan 4.3's P-DEC and 7.2), each 600 frames a lens, coded as the X5
-/// codes each mode: square 8-bit HEVC lenses in full range, closed GOPs
-/// without B-frames, one-pass ABR at the masters' bitrate a lens, each
-/// lens with its corner codes and its own noise.
+/// codes each mode where x265 can: square 8-bit HEVC lenses in full
+/// range, closed GOPs without B-frames, one-pass ABR at the masters'
+/// bitrate a lens, each lens with its corner codes and its own noise.
 ///
 /// - 2×3840² at 29.97: an IDR every 60 frames, P frames only, 65 Mbps a
 ///   lens (the masters: 61 to 68).
 /// - 2×2880² at 59.94: an IDR every 120 frames, 80 Mbps a lens (79). The
 ///   X5 codes every other frame as a non-reference TSA_N picture, which
-///   x265 (3.5, which every FFmpeg we build against links) gives only to
-///   B-frames: its temporal layers put the non-reference B-frames alone
-///   in the upper layer, and a B-frame is decoded after the frame it is
-///   shown before, where the X5 reorders nothing. So this clip is P
-///   frames only, every one a reference, and decodes no faster for
-///   skipping non-reference frames, as the X5's 5.7K60 does.
+///   x265 3.5, as linked in the cloud, gives only to B-frames: its
+///   temporal layers put the non-reference B-frames alone in the upper
+///   layer, and a B-frame is decoded after the frame it is shown before,
+///   where the X5 reorders nothing. So this clip is P frames only, every
+///   one a reference, and decodes no faster for skipping non-reference
+///   frames, as the X5's 5.7K60 does.
 /// - 2×2880² at 29.97: an IDR every 60 frames, P frames only, 80 Mbps a
 ///   lens. No sample has this mode yet.
+///
+/// Two more differences from the masters, whose slice headers show 10
+/// slices a picture at 8K and 5 at 5.7K, with WPP off, and IDR_W_RADL
+/// pictures: these clips have x265's one slice a picture with WPP on,
+/// and IDR_N_LP. x265 3.5 refuses several slices without WPP, and writes
+/// IDR_W_RADL only before RADL pictures, which need B-frames. Neither the
+/// masters nor the clips have leading pictures, so the two IDR types
+/// decode alike, and media's software decoder threads by frame, so WPP's
+/// rows don't speed it up. What the slices cost a hardware decoder is not
+/// measured.
 ///
 /// x265 codes them on as many threads as it likes ([`PairSpec::threaded`]),
 /// and its rate control makes them differ a little from one machine to

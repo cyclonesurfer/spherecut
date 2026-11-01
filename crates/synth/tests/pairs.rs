@@ -86,9 +86,11 @@ const TSA_N: u8 = 2;
 const IDR_W_RADL: u8 = 19;
 const IDR_N_LP: u8 = 20;
 
-/// Whether `spec` codes a lens as the X5 does in every mode: square
-/// 8-bit HEVC in full range BT.709, closed GOPs without B-frames, at an
-/// average bitrate, with noise, and no audio or metadata of its own.
+/// Whether `spec` codes a lens as the X5 does in every mode, in what
+/// x265 can match: square 8-bit HEVC in full range BT.709, closed GOPs
+/// without B-frames, at an average bitrate, with noise, and no audio or
+/// metadata of its own. x265 can't match the masters' slices, WPP or
+/// IDR type (`perf_pairs`' doc).
 fn x5_coding(spec: &Spec) -> Result<(), String> {
     let gop = spec.gop.ok_or("no GOP of its own")?;
     let checks = [
