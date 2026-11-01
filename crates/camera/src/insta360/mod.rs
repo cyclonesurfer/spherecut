@@ -56,3 +56,19 @@ pub mod limits {
     /// The most index slots read: 64. The X5 has 31, the X6 59.
     pub const MAX_SLOTS: usize = 64;
 }
+
+/// The little-endian u32 at byte `at` of `b`, or 0 past its end, which
+/// its callers' lengths rule out.
+fn le32(b: &[u8], at: usize) -> u32 {
+    b.get(at..)
+        .and_then(|b| b.first_chunk::<4>())
+        .map_or(0, |w| u32::from_le_bytes(*w))
+}
+
+/// The little-endian u64 at byte `at` of `b`, or 0 past its end, which
+/// its callers' lengths rule out.
+fn le64(b: &[u8], at: usize) -> u64 {
+    b.get(at..)
+        .and_then(|b| b.first_chunk::<8>())
+        .map_or(0, |w| u64::from_le_bytes(*w))
+}
