@@ -29,6 +29,11 @@
 //! Every check has a control that must fail, run on every run
 //! ([`control::must_fail`]): a control that stops failing fails the test.
 //!
+//! # Memory
+//!
+//! [`memory::peak_rss_growth_kib`] is how far the process's peak resident
+//! set rises while a closure runs.
+//!
 //! # Hashing
 //!
 //! [`fnv64`] is the hash the golden manifest identifies a source's planes
@@ -37,6 +42,7 @@
 #![forbid(unsafe_code)]
 
 pub mod control;
+pub mod memory;
 pub mod samples;
 
 /// FNV-1a, 64 bits, fed in pieces: the planes of a frame row by row, say,

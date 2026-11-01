@@ -1,0 +1,77 @@
+ 06:05:10 up 21 days, 11:02,  1 user,  load average: 0.88, 0.79, 0.79
+               total        used        free      shared  buff/cache   available
+Mem:              62          16           0           0          44          46
+Swap:              7           3           4
+rustc 1.99.0 (b940084d7 2026-09-28)
+Package x265 was not found in the pkg-config search path.
+Perhaps you should add the directory containing `x265.pc'
+to the PKG_CONFIG_PATH environment variable
+Package 'x265' not found
+package mesa-vulkan-drivers is not installed
+mesa-vulkan-drivers-freeworld-26.2.5-1.fc44.x86_64
+mesa-vulkan-drivers-freeworld-26.2.5-1.fc44.i686
+mesa-va-drivers-freeworld-26.2.5-1.fc44.x86_64
+FFmpeg 8.1.3
+  libavcodec 62.28.103, libavformat 62.12.103, libavutil 60.26.103, libswresample 6.3.103, libswscale 9.5.103
+  hardware device types: vdpau, cuda, vaapi, qsv, drm, opencl, vulkan, amf
+
+Decoders
+  h264       yes  (hw: cuda, vaapi, vdpau, vulkan)
+  hevc       yes  (hw: cuda, vaapi, vdpau, vulkan)
+  av1        yes  (hw: cuda, vaapi, vdpau, vulkan)
+  libdav1d   yes
+  prores     yes
+  aac        yes
+  opus       yes
+  pcm_s16le  yes
+
+Encoders
+  libx264    yes
+  libx265    yes
+  libsvtav1  yes
+  h264_vaapi yes
+  hevc_vaapi yes
+  av1_vaapi  yes
+  prores_ks  yes
+  aac        yes
+
+Hardware devices
+  vaapi   /dev/dri/renderD128    ok
+  vulkan  (default)              ok, on AMD Radeon RX 7600 (RADV NAVI33)
+
+Vulkan devices
+  AMD Radeon RX 7600 (RADV NAVI33)  (FFmpeg uses this one)
+    discrete GPU; driver radv (Mesa 26.2.5); Vulkan 1.4.354; vendor 0x1002 device 0x7480
+    zero copy: DMA-BUF import yes; shared with FFmpeg's Vulkan Video yes
+  llvmpipe (LLVM 22.1.8, 256 bits)
+    CPU: no GPU acceleration; driver llvmpipe (Mesa 26.2.5 (LLVM 22.1.8)); Vulkan 1.4.354; vendor 0x10005 device 0x0000
+    zero copy: DMA-BUF import yes; shared with FFmpeg's Vulkan Video no: the device lacks VK_KHR_video_queue
+
+Zero copy: Vulkan Video's frames, decoded on the renderer's own device where it can be shared; VA-API's and the rest are copied through RAM (SPHERECUT_ZERO_COPY=1 imports VA-API's too, 0 copies every frame)
+
+Decode check: one 256x256 frame each, no fallback to software; the hardware's
+picture must match the software decoder's
+                 software    vaapi       vulkan
+  H.264 High     works       works       works
+  HEVC Main      works       works       works
+  HEVC Main 10   works       works       works
+  AV1 Main       works       works       works
+
+Encode check: one 256x256 frame each on VA-API, decoded back in software
+                 vaapi
+  H.264          works
+  HEVC Main      works
+  HEVC Main 10   works
+  AV1            works
+
+Export encoders (auto)
+  H.264         h264_vaapi (libx264 above 4096 wide)
+  HEVC Main     hevc_vaapi
+  HEVC Main 10  hevc_vaapi
+  AV1           av1_vaapi (libsvtav1 unless a multiple of 64x16)
+
+No problems found.
+--- pkg-config libavcodec alone (x265 has no .pc on odin):
+62.28.103
+x265-libs-4.1-4.fc44.x86_64
+package x265 is not installed
