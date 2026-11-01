@@ -1,18 +1,24 @@
 //! A recording's files: named from a file's name alone, and a master and
 //! its LRV checked by their bytes (insta360.md §2.3, §2.4 and §6; M3 plan
 //! 5.4). M3.2's unit (c), moving the naming rule from the agent's
-//! `ops/clips.rs`, whose tests still pass.
-
-#![expect(
-    unused_variables,
-    reason = "the bodies are todo!() until M3.2's unit (c) writes them"
-)]
+//! `ops/clips.rs`, which now calls [`companions`] and whose tests still
+//! pass.
 
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
-use super::Trailer;
-use crate::CameraError;
+use spherecut_core::may_block;
+
+use super::trailer::read_at;
+use super::{RecordRef, Trailer};
+use crate::{CameraError, Part};
+
+/// The exposure record's id (§3.3), which [`verify_companion`] compares.
+const EXPOSURE: u8 = 4;
+/// How much of each file's exposure record [`verify_companion`] holds at
+/// once: 64 KiB, so that a record of any size is compared with no
+/// allocation larger than this. Pat's longest is 30 KB.
+const CHUNK: usize = 64 << 10;
 
 /// A recording, as an Insta360 file's name gives it:
 /// `[PRO_](VID|LRV)_YYYYMMDD_HHMMSS_LK_NNN[-trim].ext` (§2.3).
@@ -70,7 +76,91 @@ pub struct Companions {
 /// whether the files are there, and whether they belong together, is for
 /// the caller and [`verify_companion`].
 pub fn companions(path: &Path) -> Companions {
-    todo!()
+    let Some(name) = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(read_name)
+    else {
+        return Companions {
+            name: None,
+            master: None,
+            lrv: None,
+        };
+    };
+    let r = &name.recording;
+    let beside = |kind: &str, lk: &str, ext: &str| {
+        let pro = if r.pro { "PRO_" } else { "" };
+        path.with_file_name(format!(
+            "{pro}{kind}_{}_{}_{lk}_{}.{ext}",
+            r.date, r.time, r.seq
+        ))
+    };
+    let (master, lrv) = match name.role {
+        NameRole::Lens0 => (path.to_path_buf(), beside("LRV", "01", "lrv")),
+        NameRole::Lens1 => (beside("VID", "00", "insv"), beside("LRV", "01", "lrv")),
+        NameRole::Proxy => (beside("VID", "00", "insv"), path.to_path_buf()),
+    };
+    Companions {
+        name: Some(name),
+        master: Some(master),
+        lrv: Some(lrv),
+    }
+}
+
+/// A file name read as an Insta360 camera's,
+/// `[PRO_](VID|LRV)_YYYYMMDD_HHMMSS_LK_NNN[suffix].ext` with `ext` one of
+/// `insv`, `lrv` and `mp4` in any case; None for any other. The sequence
+/// number must start with digits, and whatever follows a `-`, a `(` or a
+/// space after them (`-trim`, ` (1)`) stays in [`Recording::seq`].
+fn read_name(file: &str) -> Option<InsvName> {
+    let (stem, ext) = file.rsplit_once('.')?;
+    let ext = ext.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "insv" | "lrv" | "mp4") {
+        return None;
+    }
+    let (pro, rest) = match stem.strip_prefix("PRO_") {
+        Some(rest) => (true, rest),
+        None => (false, stem),
+    };
+    let mut parts = rest.splitn(5, '_');
+    let kind = parts.next()?;
+    let (date, time, lk, seq) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    let proxy_name = match kind {
+        "VID" => false,
+        "LRV" => true,
+        _ => return None,
+    };
+    let number = seq.split(['-', '(', ' ']).next().unwrap_or("");
+    if !digits(date, 8) || !digits(time, 6) || number.is_empty() || !digits(number, number.len()) {
+        return None;
+    }
+    let &[lens, kind_digit] = lk.as_bytes() else {
+        return None;
+    };
+    if !lens.is_ascii_digit() || !kind_digit.is_ascii_digit() {
+        return None;
+    }
+    let role = if proxy_name || kind_digit == b'1' || ext == "lrv" {
+        NameRole::Proxy
+    } else if lens == b'1' {
+        NameRole::Lens1
+    } else {
+        NameRole::Lens0
+    };
+    Some(InsvName {
+        recording: Recording {
+            pro,
+            date: date.into(),
+            time: time.into(),
+            seq: seq.into(),
+        },
+        role,
+    })
+}
+
+/// Whether `s` is `n` ASCII digits.
+fn digits(s: &str, n: usize) -> bool {
+    s.len() == n && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Whether a master and its LRV are one recording's, by their bytes.
@@ -89,11 +179,79 @@ pub enum Pairing {
 /// or missing from either, is [`Pairing::NameOnly`]. A record that can't
 /// be read is an error.
 ///
+/// The records' sizes are compared first, from the trailers, and then
+/// their bytes, a [`CHUNK`] of each file at a time, so nothing larger is
+/// allocated whatever the trailers say. A record 4 whose slot runs into
+/// the index or past the file ([`Trailer::skipped`]) is
+/// [`CameraError::SlotPastEnd`] at its slot, as [`super::read_record`]
+/// gives; bytes that end inside it are [`CameraError::Truncated`] in
+/// [`Part::Record`] 4, and a failed read [`CameraError::Io`], each at the
+/// byte of its own file it was for.
+///
 /// It calls [`spherecut_core::may_block`] first, so on the UI thread it
 /// panics in a debug build.
 pub fn verify_companion<M: Read + Seek, L: Read + Seek>(
     master: (&mut M, &Trailer),
     lrv: (&mut L, &Trailer),
 ) -> Result<Pairing, CameraError> {
-    todo!()
+    may_block("comparing an Insta360 master's exposure record with its LRV's");
+    let (m, mt) = master;
+    let (l, lt) = lrv;
+    let name_only = |why: String| Ok(Pairing::NameOnly { why });
+    let (a, b) = match (exposure(mt)?, exposure(lt)?) {
+        (Some(a), Some(b)) => (a, b),
+        (None, None) => {
+            return name_only("neither file has an exposure record (4) to compare".into());
+        }
+        (None, Some(_)) => {
+            return name_only(
+                "the master has no exposure record (4) to compare with its LRV's".into(),
+            );
+        }
+        (Some(_), None) => {
+            return name_only(
+                "the LRV has no exposure record (4) to compare with its master's".into(),
+            );
+        }
+    };
+    if a.size != b.size {
+        return name_only(format!(
+            "their exposure records (4) differ in size: {} bytes in the master, {} in the LRV",
+            a.size, b.size
+        ));
+    }
+    let size = u64::from(a.size);
+    let chunk = usize::try_from(size).map_or(CHUNK, |s| s.min(CHUNK));
+    let (mut x, mut y) = (vec![0; chunk], vec![0; chunk]);
+    let mut done = 0u64;
+    while done < size {
+        let n = usize::try_from(size - done).map_or(chunk, |left| left.min(chunk));
+        let (x, y) = (&mut x[..n], &mut y[..n]);
+        read_at(m, a.offset + done, x, Part::Record(EXPOSURE))?;
+        read_at(l, b.offset + done, y, Part::Record(EXPOSURE))?;
+        if let Some(at) = x.iter().zip(y.iter()).position(|(p, q)| p != q) {
+            return name_only(format!(
+                "their exposure records (4) differ from byte {} of the record",
+                done + at as u64
+            ));
+        }
+        done += n as u64;
+    }
+    Ok(Pairing::Verified)
+}
+
+/// The trailer's exposure record, or None when it lists none; a slot for
+/// one that runs into the index or past the file is
+/// [`CameraError::SlotPastEnd`] at the slot.
+fn exposure(t: &Trailer) -> Result<Option<&RecordRef>, CameraError> {
+    if let Some(rec) = t.records.iter().find(|r| r.id == EXPOSURE) {
+        return Ok(Some(rec));
+    }
+    match t.skipped.iter().find(|r| r.id == EXPOSURE) {
+        Some(rec) => Err(CameraError::SlotPastEnd {
+            id: EXPOSURE,
+            offset: rec.slot,
+        }),
+        None => Ok(None),
+    }
 }

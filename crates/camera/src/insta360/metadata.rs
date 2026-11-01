@@ -7,6 +7,8 @@
 //! 131 to 136, 133 and 134 are kept by nothing: the X5 writes no 133 and
 //! 0 in 134, whose meaning is unknown, so both are counted as unknown.
 
+use spherecut_core::project::file::fnv1a64;
+
 use super::calib::Generation;
 use super::le64;
 use super::limits::{MAX_METADATA, MAX_STRING};
@@ -148,6 +150,22 @@ impl Calibrations {
             Generation::V3 => &self.v3,
             Generation::V6 => &self.v6,
         }
+    }
+
+    /// The calibration's hash, as a project's snapshot of it records it
+    /// (M3 plan 11.1): 16 lowercase hex digits of core's FNV-1a 64 over
+    /// the working strings in generation order, V1, V2, V3 and V6, each
+    /// ended by a NUL byte, so that a generation the file lacks is its
+    /// NUL alone. Probe prints it (5.4).
+    pub fn hash(&self) -> String {
+        let mut bytes = Vec::new();
+        for g in Generation::ALL {
+            if let Some(s) = &self.get(g).working {
+                bytes.extend(s.as_bytes());
+            }
+            bytes.push(0);
+        }
+        format!("{:016x}", fnv1a64(&bytes))
     }
 
     /// Generation `g`'s strings, to set.

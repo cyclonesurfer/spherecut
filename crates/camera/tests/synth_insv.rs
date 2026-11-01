@@ -45,6 +45,7 @@ use spherecut_synth::lens::{
     TruthCanvas, TruthEuler, TruthTurn, TruthTz, TruthV6,
 };
 use spherecut_testkit::control::must_fail;
+use spherecut_testkit::{Fnv64, fnv64};
 
 /// The suite's budget in seconds, at the default number of cases: all of
 /// camera's (19.6).
@@ -1179,6 +1180,60 @@ fn calib_parses_synths_print() {
     );
     assert_eq!(e, padded);
     calib_parses_synths_print_cases();
+}
+
+// The calibration's hash.
+
+/// FNV-1a 64 of `parts`, each ended by a NUL byte, as 16 hex digits, by
+/// testkit's hasher, which shares no code with core's.
+fn nul_ended(parts: &[&str]) -> String {
+    let mut h = Fnv64::new();
+    for p in parts {
+        h.write(p.as_bytes()).write(&[0]);
+    }
+    format!("{:016x}", h.finish())
+}
+
+/// `Calibrations::hash` (M3 plan 11.1) is over the working strings in
+/// generation order, each ended by a NUL, with a generation the file
+/// lacks as its NUL alone; the originals don't count.
+#[test]
+fn the_calibration_hash_is_over_the_working_strings() {
+    let _time = timed("the_calibration_hash_is_over_the_working_strings");
+    let v3 = insv::print(&pats_v3(), &planted());
+    let v6 = insv::print(&pats_v6(), &planted());
+    let calib = x5_like_metadata(30, 1000).calib;
+    let want = nul_ended(&["", "", &v3, &v6]);
+    assert_eq!(calib.hash(), want);
+    assert_eq!(want.len(), 16);
+    let mut originals = calib.clone();
+    originals.v3.original = Some("2_other".into());
+    originals.v6.original = None;
+    assert_eq!(originals.hash(), want, "the originals don't count");
+
+    // The controls: a byte of a working string changed, the strings in
+    // each other's generations, V3's string held as V2's, and the strings
+    // hashed with no NULs, each another hash.
+    let mut changed = calib.clone();
+    changed.v6.working = Some(v6.replacen("4277.52", "4277.53", 1));
+    must_fail(
+        "a working string with a byte changed",
+        changed.hash() == want,
+    );
+    let swapped = Calibrations {
+        v3: calib.v6.clone(),
+        v6: calib.v3.clone(),
+        ..calib.clone()
+    };
+    must_fail("V3's and V6's strings swapped", swapped.hash() == want);
+    let moved = Calibrations {
+        v2: calib.v3.clone(),
+        v3: CalibStrings::default(),
+        ..calib.clone()
+    };
+    must_fail("V3's string held as V2's", moved.hash() == want);
+    let joined = format!("{:016x}", fnv64(format!("{v3}{v6}").as_bytes()));
+    must_fail("the strings hashed with no NULs", joined == calib.hash());
 }
 
 // The faults.

@@ -274,7 +274,8 @@ pub fn read_record<R: Read + Seek>(
 /// Fills `buf` from byte `at` of `r`. Bytes that end first are
 /// [`CameraError::Truncated`] in `part` at the first byte missing; a
 /// failed seek or read is [`CameraError::Io`] at the byte it was for.
-fn read_at<R: Read + Seek>(
+/// [`super::verify_companion`] reads record 4 through it too.
+pub(super) fn read_at<R: Read + Seek>(
     r: &mut R,
     at: u64,
     buf: &mut [u8],
