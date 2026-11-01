@@ -14,8 +14,10 @@
 //! take at most 30 s together at `PROPTEST_CASES=100000`, shared with
 //! `unified.rs` and synth's `lens_against_sphere.rs`; each test prints
 //! its time and the suite's. `PROPTEST_CASES` sets the count (256 by
-//! default). Three properties list or scan far more per case than the
-//! rest, and run a fraction of the count, which each one's doc gives.
+//! default). Two properties list or scan far more per case than the
+//! rest, and run a fraction of the count: the Euler twins a twentieth,
+//! as each case lists 2304 values, and the edge scan a fortieth, as each
+//! scans every texel of eight edges (about 2.5 ms a case either way).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -967,10 +969,10 @@ fn x5_angles() -> impl Strategy<Value = [[f64; 3]; 2]> {
         })
 }
 
-/// The twins property at sampled angles, a hundredth of `PROPTEST_CASES`
+/// The twins property at sampled angles, a twentieth of `PROPTEST_CASES`
 /// (at least 16).
 fn euler_twins_cases() {
-    run_cases((cases() / 100).max(16), x5_angles(), |ypr| {
+    run_cases((cases() / 20).max(16), x5_angles(), |ypr| {
         let c = census(&listing(ypr), true);
         prop_assert!(c.is_ok(), "{}", c.unwrap_err());
         let counts = holds_the_counts(&c.unwrap());
@@ -983,7 +985,7 @@ fn euler_twins_cases() {
 /// only values that put block 0's lens within 5° of −Z, differ by common
 /// rotations that are exactly the quarter turns about Z (6.2). Each
 /// binding drops 640 exact twins, 384 values that don't put the lenses
-/// back to back and 128 near twins. The sampled angles run a hundredth of
+/// back to back and 128 near twins. The sampled angles run a twentieth of
 /// `PROPTEST_CASES` (at least 16), as each lists 2304 values.
 #[test]
 fn euler_twins_are_quarter_turns() {
@@ -2948,8 +2950,8 @@ proptest! {
     }
 }
 
-/// The scan property on random rigs, a two-hundredth of `PROPTEST_CASES`
-/// (at least 16).
+/// The scan property on random rigs, a fortieth of `PROPTEST_CASES` (at
+/// least 16).
 fn scan_cases() {
     let slot = || prop_oneof![Just(384u32), Just(768), Just(832)];
     let draw = (
@@ -2959,7 +2961,7 @@ fn scan_cases() {
         [slot(), slot()],
     );
     run_cases(
-        (cases() / 200).max(16),
+        (cases() / 40).max(16),
         draw,
         |(small, conv, lenses, sides)| {
             let cal = pats();
@@ -3144,8 +3146,8 @@ fn mask_keeps_weighted_footprints_inside_their_slots() {
 
 /// `theta_frame` matches a scan of the slot's edges at one sample per
 /// texel within 0.01°: 99.1° on lens 0 of Pat's V6 under map A. Random
-/// rigs run a two-hundredth of `PROPTEST_CASES` (at least 16), as each
-/// scans every texel of eight edges.
+/// rigs run a fortieth of `PROPTEST_CASES` (at least 16), as each scans
+/// every texel of eight edges.
 #[test]
 fn theta_frame_matches_an_edge_scan() {
     let _time = timed("theta_frame_matches_an_edge_scan");
