@@ -7,8 +7,9 @@
 //!
 //! What synth wrote is known from what it was given, not from its bytes:
 //! the records, the metadata's fields and the calibration's numbers. The
-//! few lines here that lay out the IMU's items and read the thumbnail's
-//! header are this file's own, from insta360.md §3.4.
+//! few lines here that lay out the IMU's items (insta360.md §3.4) and read
+//! the thumbnail's header (as the bytes of Pat's files have it) are this
+//! file's own.
 //!
 //! Budget (M3 plan 4.1 rule 5, 19.6): camera's suite ≤ 1 s at the default
 //! 256 cases, which each test prints its time against; the properties
@@ -360,10 +361,11 @@ fn ids(records: &Records) -> Vec<u8> {
 }
 
 /// Synth's box in `file`, read back through camera's readers and
-/// parsers and held to what synth was given: the trailer as `layout`
-/// says, its index where the X5's is, every record listed, each payload
-/// as `records` has it, and the metadata walked field for field and
-/// parsed to `meta`. Or the first thing that differs.
+/// parsers and held to what synth was given: `layout` ending at the
+/// file's end with its index where the X5's is, the trailer as `layout`
+/// says, every record listed, each payload as `records` has it, and the
+/// metadata walked field for field and parsed to `meta`. Or the first
+/// thing that differs.
 fn round_trips(
     file: &mut Placed,
     records: &Records,
@@ -371,6 +373,14 @@ fn round_trips(
     meta: &Metadata,
 ) -> Result<(), String> {
     let len = file.len();
+    // 31 slots, or one more than the largest id.
+    let slots = layout
+        .slots
+        .last()
+        .map_or(31, |s| (u64::from(s.id) + 1).max(31));
+    if layout.payload_start + layout.size != len || layout.index != len - 78 - 10 * slots {
+        return Err(format!("{layout:?} in a file of {len} bytes"));
+    }
     let t = match read_trailer(file, len) {
         Ok(Some(t)) => t,
         got => return Err(format!("read_trailer: {got:?}")),
@@ -394,14 +404,6 @@ fn round_trips(
     };
     if t != want {
         return Err(format!("read {t:?}, synth laid out {want:?}"));
-    }
-    // 31 slots, or one more than the largest id.
-    let slots = layout
-        .slots
-        .last()
-        .map_or(31, |s| (u64::from(s.id) + 1).max(31));
-    if layout.payload_start + layout.size != len || layout.index != len - 78 - 10 * slots {
-        return Err(format!("{layout:?} in a file of {len} bytes"));
     }
     let listed: Vec<u8> = t.records.iter().map(|r| r.id).collect();
     if listed != ids(records) {
@@ -762,14 +764,21 @@ proptest! {
     }
 }
 
+/// A change to what a file is held to: its records, its metadata as
+/// parsed, and its layout.
+type Change = fn(&mut Records, &mut Metadata, &mut TrailerLayout);
+
 /// Property: records synth writes into an `inst` box, at any offset and
 /// alignment, read back through `read_trailer` and `read_record` as
 /// synth's `TrailerLayout` says, payload for payload, and the metadata
 /// and exposure parse to what synth wrote.
 ///
 /// First an X5-like trailer at the X5's alignment, after an MP4 of
-/// 100,003 bytes; then any records, after any bytes, at alignments of 1,
-/// 16, 4096 and 128 KiB. Each case's control changes a byte of one of
+/// 100,003 bytes, with a thumbnail and two of the X5's other records;
+/// then any records, after any bytes, at alignments of 1, 16, 4096 and
+/// 128 KiB. The X5-like file's controls change what it is held to, once
+/// for each of `round_trips`' checks, so that only that check sees the
+/// change and fails. Each case's control changes a byte of one of
 /// synth's footers, which the reader must refuse there.
 #[test]
 fn the_trailer_round_trips_through_synths_writer() {
@@ -786,21 +795,114 @@ fn the_trailer_round_trips_through_synths_writer() {
         y: vec![100; 64 * 32],
         uv: vec![128; 64 * 16],
     });
+    // Record 10 first, right after the box's header, then 9 on a
+    // boundary.
+    records.others = vec![
+        RawRecord {
+            id: 10,
+            format: 0,
+            payload: vec![10; 30],
+        },
+        RawRecord {
+            id: 9,
+            format: 2,
+            payload: br#"{"synth":1}"#.to_vec(),
+        },
+    ];
     let at = 100_003;
     let (inst, layout) = insv::inst_box(&records, at, X5_ALIGN, None);
     let mut file = Placed { at, inst, pos: 0 };
     // 115 frames at 29.97 last 3837 ms, as clip 1's do.
     let meta = x5_like_metadata(115, 3837);
     assert_eq!(round_trips(&mut file, &records, &layout, &meta), Ok(()));
-    // The control: held to a layout that puts record 4 a byte later, the
-    // same file doesn't round-trip.
-    let mut later = layout.clone();
-    later.slots[3].offset += 1;
+
+    // The controls, in the order of the checks they reach: each change,
+    // and how the error it fails with starts.
+    fn field(r: &mut Records, n: u32) -> &mut Field {
+        r.metadata.iter_mut().find(|f| f.number == n).unwrap()
+    }
+    fn other(r: &mut Records, id: u8) -> &mut RawRecord {
+        r.others.iter_mut().find(|o| o.id == id).unwrap()
+    }
+    let controls: [(&str, Change, &str); 12] = [
+        (
+            "the trailer a byte longer than synth laid it out",
+            |_, _, l| l.size += 1,
+            "TrailerLayout {",
+        ),
+        (
+            "the index a slot later than synth wrote it",
+            |_, _, l| l.index += 10,
+            "TrailerLayout {",
+        ),
+        (
+            "record 4 a byte later than synth wrote it",
+            |_, _, l| l.slots[3].offset += 1,
+            "read Trailer {",
+        ),
+        (
+            "no thumbnail",
+            |r, _, _| r.thumbnail = None,
+            "records [1, 2, 3, 4, 9, 10] listed of [1, 3, 4, 9, 10]",
+        ),
+        (
+            "field 79 written as 3",
+            |r, _, _| field(r, 79).value = insv::Value::Varint(3),
+            "wrote Field { number: 79, value: Varint(3) }, read Field { number: 79, value: Varint(2),",
+        ),
+        (
+            "another serial parsed",
+            |_, m, _| m.serial = Some("SYNTH00002".into()),
+            "parsed Metadata {",
+        ),
+        (
+            "the thumbnail's sides swapped",
+            |r, _, _| {
+                let t = r.thumbnail.as_mut().unwrap();
+                (t.width, t.height) = (t.height, t.width);
+            },
+            "record 2: [1, 3112, 1, 0, 64, 32, 0, 0, 0, 0]",
+        ),
+        (
+            "the thumbnail's last chroma byte",
+            |r, _, _| *r.thumbnail.as_mut().unwrap().uv.last_mut().unwrap() ^= 1,
+            "record 2: Nv12Image {",
+        ),
+        (
+            "the last IMU item a microsecond later",
+            |r, _, _| r.imu.last_mut().unwrap().t_us += 1,
+            "record 3: Some(ImuSpan {",
+        ),
+        (
+            "an IMU item's gyro",
+            |r, _, _| r.imu[7].gyro[2] ^= 1,
+            "record 3: Some(ImuSpan {",
+        ),
+        (
+            "an exposure of 1/250 s",
+            |r, _, _| r.exposure[5].seconds = 1.0 / 250.0,
+            "record 4: [Exposure {",
+        ),
+        (
+            "record 9's last byte",
+            |r, _, _| *other(r, 9).payload.last_mut().unwrap() ^= 1,
+            "record 9: [123, 34,",
+        ),
+    ];
+    for (name, change, fails_with) in controls {
+        let (mut r, mut m, mut l) = (records.clone(), meta.clone(), layout.clone());
+        change(&mut r, &mut m, &mut l);
+        let e = must_fail(name, round_trips(&mut file, &r, &l, &m));
+        assert!(e.starts_with(fails_with), "{name}: {e}");
+    }
+    // And record 10's format, the other half of the others' check.
+    let mut r = records.clone();
+    other(&mut r, 10).format = 2;
     let e = must_fail(
-        "record 4 a byte later than synth wrote it",
-        round_trips(&mut file, &records, &later, &meta),
+        "record 10 said to be JSON",
+        round_trips(&mut file, &r, &layout, &meta),
     );
-    assert!(e.starts_with("read "), "{e}");
+    assert!(e.starts_with("record 10: [10, 10,"), "{e}");
     the_trailer_round_trips_through_synths_writer_cases();
 }
 
@@ -840,10 +942,7 @@ const TERMS: usize = 8;
 /// apart; the canvas, lens type and packed word exactly. Or the first
 /// thing that isn't.
 fn cross_parses(cal: &CalibTruth, s: &str) -> Result<(), Miss> {
-    let (generation, code) = match cal.dist {
-        StoredDist::V3 { .. } => (Generation::V3, 3),
-        StoredDist::V6 { .. } => (Generation::V6, 6),
-    };
+    let (generation, code) = generation(cal);
     let c = calib::parse(generation, s).map_err(|e| Miss::Read(e.to_string()))?;
     let word = (code << 16) | (u32::from(cal.body) << 8);
     let integers = (c.canvas, c.lens_type, c.word);
@@ -906,6 +1005,23 @@ fn cross_parses(cal: &CalibTruth, s: &str) -> Result<(), Miss> {
         }
     }
     Ok(())
+}
+
+/// The generation of `cal`'s string, and its code in the packed word.
+fn generation(cal: &CalibTruth) -> (Generation, u32) {
+    match cal.dist {
+        StoredDist::V3 { .. } => (Generation::V3, 3),
+        StoredDist::V6 { .. } => (Generation::V6, 6),
+    }
+}
+
+/// `s` parsed by camera as `cal`'s generation's string and printed back
+/// by camera's printer: byte for byte `want`, synth's print of `cal`. Or
+/// what camera printed instead, or why it refused `s`.
+fn reprints(cal: &CalibTruth, s: &str, want: &str) -> Result<(), String> {
+    let c = calib::parse(generation(cal).0, s).map_err(|e| e.to_string())?;
+    let back = calib::print(&c);
+    if back == want { Ok(()) } else { Err(back) }
 }
 
 /// A number around `centre`, mostly within `spread` of it; sometimes
@@ -984,11 +1100,7 @@ proptest! {
         let s = insv::print(&cal, &planted());
         prop_assert!(cross_parses(&cal, &s).is_ok(), "{:?} for {s}", cross_parses(&cal, &s));
         // And camera prints it back as synth did.
-        let generation = match cal.dist {
-            StoredDist::V3 { .. } => Generation::V3,
-            StoredDist::V6 { .. } => Generation::V6,
-        };
-        prop_assert_eq!(calib::print(&calib::parse(generation, &s).unwrap()), s);
+        prop_assert_eq!(reprints(&cal, &s, &s), Ok(()));
     }
 }
 
@@ -996,11 +1108,15 @@ proptest! {
 /// truth's numbers back within half a unit in its last printed place,
 /// for V3 and V6 truths around Pat's numbers (amendment 3).
 ///
-/// First Pat's two calibrations, then any around them. Its controls, on
-/// Pat's V3: each block held to the other's truth; the focal length a
-/// unit off in its last place, which is more than half a unit; the focal
-/// length printed a decimal short; and the string held to Pat's V6
-/// truth, as another generation's, which camera refuses.
+/// First Pat's two calibrations, then any around them; and camera's
+/// printer gives synth's string back from what camera parsed. Its
+/// controls, on Pat's V3: each block held to the other's truth; the focal
+/// length a unit off in its last place, which is more than half a unit;
+/// the focal length printed a decimal short; the string held to Pat's V6
+/// truth, as another generation's, which camera refuses; the string held
+/// to a truth of another lens type, and of another body; and the focal
+/// length printed with a zero more, the same number, which camera prints
+/// back as it was given rather than as synth printed it.
 #[test]
 fn calib_parses_synths_print() {
     let _time = timed("calib_parses_synths_print");
@@ -1008,6 +1124,7 @@ fn calib_parses_synths_print() {
     for cal in [pats_v3(), pats_v6()] {
         let s = insv::print(&cal, &p);
         assert!(cross_parses(&cal, &s).is_ok(), "{s}");
+        assert_eq!(reprints(&cal, &s, &s), Ok(()));
     }
     let v3 = pats_v3();
     let s = insv::print(&v3, &p);
@@ -1041,6 +1158,26 @@ fn calib_parses_synths_print() {
         matches!(&e, Miss::Read(why) if why.starts_with("the V6 calibration string has 40 tokens")),
         "{e:?}"
     );
+    let mut lens = pats_v3();
+    lens.lens_type = 114;
+    let e = must_fail("Pat's V3 held to lens type 114", cross_parses(&lens, &s));
+    assert!(
+        matches!(&e, Miss::Read(why) if why == "((10752, 5376), 113, 197632), not ((10752, 5376), 114, 197632)"),
+        "{e:?}"
+    );
+    let mut body = pats_v3();
+    body.body = 5;
+    let e = must_fail("Pat's V3 held to body 5", cross_parses(&body, &s));
+    assert!(
+        matches!(&e, Miss::Read(why) if why == "((10752, 5376), 113, 197632), not ((10752, 5376), 113, 197888)"),
+        "{e:?}"
+    );
+    let padded = s.replacen("_4284.620_", "_4284.6200_", 1);
+    let e = must_fail(
+        "fx with a zero more, reprinted",
+        reprints(&pats_v3(), &padded, &s),
+    );
+    assert_eq!(e, padded);
     calib_parses_synths_print_cases();
 }
 
@@ -1222,8 +1359,9 @@ fn reads_as(path: &Path, layout: &TrailerLayout, fault: InsvFault) -> Result<(),
 /// an error naming its record or part at the planted byte, and
 /// `NoCalibration` a file with no strings.
 ///
-/// `BadMagic` is no trailer at all: `read_trailer` answers `Ok(None)`,
-/// as for any file without one. Each file is written by `append_trailer`
+/// `BadMagic` is the exception, not an error: with no magic there is no
+/// trailer at all, and `read_trailer` answers `Ok(None)` as for any file
+/// without one, by its design. Each file is written by `append_trailer`
 /// after the same MP4's bytes, at the X5's alignment; the MP4's faults
 /// leave the file as it is without them. Each fault's control: the clean
 /// file, read as that fault says, doesn't read so.
