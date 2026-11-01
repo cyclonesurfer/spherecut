@@ -901,6 +901,118 @@ pub fn perf_clips() -> Vec<Spec> {
     ]
 }
 
+/// The colour of a lens track: the X5's full range and BT.709, with
+/// synth's own centre-sited 4:2:0 chroma ([`yuv::to_yuv`]), which it
+/// tags, where the X5's is left.
+pub const LENS_COLOR: ColorTags = ColorTags {
+    range: 2,
+    matrix: 1,
+    transfer: 1,
+    primaries: 1,
+    chroma_location: 2,
+};
+
+/// A camera's raw file as synth makes it: two square lens tracks in one
+/// MP4, as the X5 writes them (M3 plan 7.2). Each lens is coded alone
+/// from its own [`Spec`], with its corner codes ([`crate::code`]) and its
+/// own noise, and the two are muxed by
+/// [`mux_video_streams_as`](spherecut_media::encode::mux_video_streams_as)'s
+/// MP4 output, which keeps each track's time base, so
+/// [`mp4::track_timing`] reads each track as it was coded.
+#[derive(Debug, Clone)]
+pub struct PairSpec {
+    /// The file's name, without `.mp4`.
+    pub name: String,
+    /// Lens k's track, for k = 0 and 1: its square picture, length,
+    /// rate, GOP, coding and noise. Its `name` names its own file while
+    /// the pair is written. Audio and spherical metadata are refused: the
+    /// file holds the two video tracks only.
+    pub lenses: [Spec; 2],
+    /// Each frame of each lens carries its corner code: lens k, its
+    /// frame number.
+    pub corner_codes: bool,
+    /// The encoder codes several frames at once, on as many threads as
+    /// it picks, rather than one frame at a time: for the perf clips,
+    /// which would take hours more. The bitstream then depends on the
+    /// machine's cores, which doesn't matter there.
+    pub threaded: bool,
+}
+
+impl PairSpec {
+    pub fn file_name(&self) -> String {
+        format!("{}.mp4", self.name)
+    }
+
+    /// The same coding at `side`² and `frames` frames a lens, at the same
+    /// bits a pixel: each lens's bitrate scaled by its pixels, so that a
+    /// short, small version tests the coding of a perf clip that takes
+    /// hours to make.
+    pub fn scaled(&self, side: u32, frames: u32) -> PairSpec {
+        let _ = (side, frames);
+        todo!("M3.1 unit (a)")
+    }
+}
+
+/// Write `spec` into `dir` and return the file's path: each lens coded
+/// on its own into a folder of its own beside the file, then the two
+/// muxed, and the folder removed. The file appears only once whole.
+pub fn write_pair(spec: &PairSpec, dir: &Path) -> Result<PathBuf, SynthError> {
+    let _ = (spec, dir);
+    todo!("M3.1 unit (a)")
+}
+
+/// [`perf_pairs`]' names: what hw-test writes and the pair benchmarks ask
+/// for.
+pub const PERF_PAIR_3840_2997: &str = "pair-hevc8-3840-2997-noisy-20s";
+pub const PERF_PAIR_2880_5994: &str = "pair-hevc8-2880-5994-noisy-10s";
+pub const PERF_PAIR_2880_2997: &str = "pair-hevc8-2880-2997-noisy-20s";
+
+/// The two-track perf clips hw-test makes for the pair benchmarks (M3
+/// plan 4.3's P-DEC and 7.2), each 600 frames a lens, coded as the X5
+/// codes each mode.
+pub fn perf_pairs() -> Vec<PairSpec> {
+    todo!("M3.1 unit (a)")
+}
+
+/// One lens of a [`pair_64`] file: its frames and its keyframe interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LensTrack {
+    pub frames: u32,
+    pub keyint: u32,
+}
+
+/// A two-track file of 2 × 64² (M3 plan section 9), with a length and a
+/// GOP for each lens.
+pub fn pair_64(name: &str, lenses: [LensTrack; 2]) -> PairSpec {
+    let _ = (name, lenses);
+    todo!("M3.1 unit (a)")
+}
+
+/// [`pairs_64`]' names.
+pub const PAIR_64_MATCHED: &str = "pair64-matched";
+pub const PAIR_64_GOP_FAULT: &str = "pair64-gop-fault";
+pub const PAIR_64_LENS_SHORT: &str = "pair64-lens-short";
+
+/// Section 9's 2 × 64² files for the frame lock's tests (M3.8).
+pub fn pairs_64() -> Vec<PairSpec> {
+    todo!("M3.1 unit (a)")
+}
+
+/// The bytes of the samples of stream `stream` of the file at `path`,
+/// counted from its packets: with its length, the track's bitrate.
+pub fn track_bytes(path: &Path, stream: usize) -> Result<u64, SynthError> {
+    let _ = (path, stream);
+    todo!("M3.1 unit (a)")
+}
+
+/// The NAL unit type of each picture of stream `stream`, an HEVC track
+/// of the MP4 file at `path`, in decode order: its first slice's (19 and
+/// 20 IDR, 1 TRAIL_R, 0 TRAIL_N, 2 TSA_N, 3 TSA_R and so on).
+pub fn hevc_picture_types(path: &Path, stream: usize) -> Result<Vec<u8>, SynthError> {
+    let _ = (path, stream);
+    todo!("M3.1 unit (a)")
+}
+
 /// Broken files derived from a good one with video and audio: truncated at
 /// several points, corrupted inside `moov`, empty, and not media at all.
 pub fn write_bad_files(good: &Path, dir: &Path) -> Result<Vec<PathBuf>, SynthError> {

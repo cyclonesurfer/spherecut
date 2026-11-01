@@ -1302,6 +1302,40 @@ impl Mp4Writer {
     }
 }
 
+/// The container [`mux_video_streams_as`] writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MuxedAs {
+    /// Matroska, in FFmpeg's default time base of 1/1000 s: every
+    /// timestamp is rounded to the millisecond, as [`remux_to_matroska`]'s
+    /// are.
+    Matroska,
+    /// MP4, each track in its source's time base, so that every
+    /// timestamp is kept exactly and [`crate::mp4::track_timing`] reads
+    /// each track's tables as its source has them.
+    Mp4,
+}
+
+impl MuxedAs {
+    /// The container `path`'s extension names: Matroska for `.mkv`,
+    /// `.mk3d`, `.mka` and `.webm`, whatever their case, and MP4 for any
+    /// other (`.mp4`, `.mov`, a camera's `.insv` or `.360`) or none.
+    pub fn for_path(path: &Path) -> MuxedAs {
+        let _ = path;
+        todo!("M3.1 unit (a)")
+    }
+}
+
+/// [`mux_video_streams`] into the container `muxed`, whatever `dst`'s
+/// extension.
+pub fn mux_video_streams_as(
+    srcs: &[&Path],
+    dst: &Path,
+    muxed: MuxedAs,
+) -> Result<PathBuf, EncodeError> {
+    let _ = (srcs, dst, muxed);
+    todo!("M3.1 unit (a)")
+}
+
 /// Copy the first video stream of each of `srcs` into one new Matroska
 /// file at `dst`, in that order, packets as they are, and return `dst`:
 /// a camera's raw file, which holds one video stream a lens (the X5's
