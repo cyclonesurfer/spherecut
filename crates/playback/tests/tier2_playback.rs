@@ -46,7 +46,10 @@
 //!   the app plays it by default, and again with `SPHERECUT_ZERO_COPY=1`
 //!   where that imports VA-API's frames (path A), with notes on path A
 //!   against the copy and on K2's engine half (M3 plan 4.3), from the
-//!   2×2880² pair at 29.97.
+//!   2×2880² pair at 29.97, as this machine measures it: every full
+//!   second's frames decoded, the mean over the lenses, at 36 fps or
+//!   more. The 2×2880² pair at 59.94 is P only, where the X5 codes every
+//!   other picture as TSA_N, and a note says so beside its rows.
 //! - `bench_playback_stitched_samples`: each stitched equirect among the
 //!   samples, gated as the perf clips are when it is within the criterion
 //!   (5.7K at 30 fps or less) and recorded otherwise; a skip saying so
@@ -1405,6 +1408,19 @@ fn require_x5_modes() -> BTreeMap<String, (PathBuf, ProbeReport)> {
 /// export's pair decode.
 const K2_FPS: f64 = 30.0 * 1.2;
 
+/// What `pair-hevc8-2880-5994-noisy-10s`'s rows say of its coding (M3
+/// plan 7.2): the X5 codes every other picture at 59.94 as a
+/// non-reference TSA_N, which x265 3.5, as linked in the cloud, gives only
+/// to reordered B-frames, so the pair is coded P only.
+const P_ONLY: &str = "P only: the X5 codes TSA_N on every other picture, and every picture \
+                      here but the IDRs is a reference P frame";
+
+/// Where the perf pair called `name` is coded unlike the X5's mode, for
+/// a note beside its rows.
+fn coded_unlike_x5(name: &str) -> Option<&'static str> {
+    (name == synth_media::PERF_PAIR_2880_5994).then_some(P_ONLY)
+}
+
 /// A probed file's video streams, each opened by its index, as a
 /// sample's two lenses are.
 fn lens_streams(r: &ProbeReport) -> Vec<Option<usize>> {
@@ -1490,7 +1506,10 @@ fn path_a(rig: &Rig, auto: &Run) -> Result<Run, String> {
 /// as the plan names it. It passes when every stream decoded on VA-API
 /// throughout, the pass didn't stall, and every full second decoded
 /// [`K2_FPS`] frames a lens or more, as section 12.3's gate holds a
-/// perf clip's seconds; the error says what fell short.
+/// perf clip's seconds; the error says what fell short. A second's count
+/// is the mean over the lenses, since the engine counts the frames
+/// decoded of every stream together, so a lens slower than the other by
+/// a few frames a second hides in it.
 fn k2_engine(run: &Run, u: &Pass) -> Option<Result<String, String>> {
     if run.kind != Some(HwKind::VaApi) || run.zero_copy.dmabuf() {
         return None;
@@ -1509,7 +1528,8 @@ fn k2_engine(run: &Run, u: &Pass) -> Option<Result<String, String>> {
     let slowest = fps.iter().copied().fold(f64::INFINITY, f64::min);
     if fps.is_empty() || slowest < K2_FPS {
         short.push(format!(
-            "its {} full seconds decoded {fps:.1?} fps a lens, the slowest under {K2_FPS:.0}",
+            "its {} full seconds decoded {fps:.1?} fps a lens (the mean over the lenses), the \
+             slowest under {K2_FPS:.0}",
             fps.len()
         ));
     }
@@ -1519,7 +1539,7 @@ fn k2_engine(run: &Run, u: &Pass) -> Option<Result<String, String>> {
     let median = bench::percentile(&fps, 50.0).unwrap_or(f64::NAN);
     Some(Ok(format!(
         "its {} full seconds decoded {slowest:.1} fps a lens at the slowest, {median:.1} at \
-         the median, against {K2_FPS:.0}",
+         the median (the mean over the lenses), against {K2_FPS:.0}",
         fps.len()
     )))
 }
@@ -1649,7 +1669,12 @@ fn bench_playback_x5_raw() {
     for spec in synth_media::perf_pairs() {
         let clip = format!("perf clip {}", spec.name);
         match tier2::perf_clip(&spec.file_name()) {
-            Ok(path) => pairs.push((clip, path, spec.name == synth_media::PERF_PAIR_2880_2997)),
+            Ok(path) => pairs.push((
+                clip,
+                path,
+                spec.name == synth_media::PERF_PAIR_2880_2997,
+                coded_unlike_x5(&spec.name),
+            )),
             Err(why) => {
                 bench::not_measured(&clip, &why);
                 missing.push(why);
@@ -1685,12 +1710,15 @@ fn bench_playback_x5_raw() {
         }
     }
     let mut k2 = None;
-    for (clip, path, gated) in &pairs {
+    for (clip, path, gated, unlike) in &pairs {
+        if let Some(unlike) = unlike {
+            bench::note(format!("{clip}: {unlike}"));
+        }
         let verdict = bench_perf_pair(&rig, clip, path, *gated, &mut stalls, &mut no_hardware);
         k2 = k2.or(verdict);
     }
     bench::note(format!(
-        "K2's engine half, huginn's 5.7K30: {}",
+        "K2's rule for its engine half (huginn's 5.7K30), on this machine: {}",
         k2.unwrap_or_else(|| format!(
             "not decided: perf clip {} isn't here",
             synth_media::PERF_PAIR_2880_2997
@@ -2566,7 +2594,10 @@ fn k2s_engine_half_holds_every_second_of_va_api_copied_to_36_a_lens() {
     let fast = pass(&[41.0, 38.5, 36.0, 40.0]);
     let why = k2_engine(&va, &fast).unwrap().unwrap();
     assert!(
-        why.contains("4 full seconds decoded 36.0 fps a lens at the slowest, 38.5 at the median"),
+        why.contains(
+            "4 full seconds decoded 36.0 fps a lens at the slowest, 38.5 at the median (the mean \
+             over the lenses)"
+        ),
         "{why}"
     );
     // The controls: each shortfall fails it.
@@ -2599,5 +2630,27 @@ fn k2s_engine_half_holds_every_second_of_va_api_copied_to_36_a_lens() {
     };
     for run in [Run::only(HwKind::Vulkan), path_a, Run::software()] {
         assert!(k2_engine(&run, &fast).is_none(), "{}", run.label);
+    }
+}
+
+/// The 59.94 perf pair's rows say it is P only, where the X5 codes
+/// TSA_N (M3 plan 7.2); the 29.97 pairs, coded P only as the X5 codes
+/// them, say nothing.
+#[test]
+fn only_the_5994_perf_pair_says_it_is_p_only() {
+    let said: Vec<(String, Option<&str>)> = synth_media::perf_pairs()
+        .into_iter()
+        .map(|p| {
+            let unlike = coded_unlike_x5(&p.name);
+            (p.name, unlike)
+        })
+        .collect();
+    assert_eq!(said.len(), 3);
+    for (name, unlike) in &said {
+        if name == synth_media::PERF_PAIR_2880_5994 {
+            assert_eq!(*unlike, Some(P_ONLY), "{name}");
+        } else {
+            must_fail(&format!("{name} said to be P only"), unlike.is_some());
+        }
     }
 }
