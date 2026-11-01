@@ -49,8 +49,8 @@ copied untouched, with the `.lrv`.
 | 16 | 5.7K at 29.97 fps (or the nearest 5.7K mode), 20 s, anything | The 5.7K30 real-time target |
 | 17 | 8K30 handheld, 30 s: walk from deep shade into direct sun and back, with one lens facing the sun | Matching exposure and white balance between the lenses |
 
-If you agree to it (question 2 of `docs/design/m3-plan.md`), clip 12 for
-take 14: a stitched equirect export of it from Insta360 Studio. Spherecut
+You agreed on 2026-11-01 (question 2 of `docs/design/m3-plan.md`) to clip 12
+for take 14: a stitched equirect export of it from Insta360 Studio. Spherecut
 only compares its own stitch against it when the fit leaves a question open;
 it never fits to it, and nothing from Studio goes into the code. Still
 missing from the first set, if they're easy: clips 5 (I-Log or 10-bit), 6
