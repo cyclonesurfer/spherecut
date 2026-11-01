@@ -505,7 +505,10 @@ budget), synth's `pairs` 6.9 s (15 s) and `code` 1.7 s (5 s), media's
 `mux` 0.09 s, playback's Tier 1 file 6.5 to 7.7 s (5 s of it a
 deliberate stall), xtask's 77 tests 1.6 s. `cargo xtask check` gained
 4 test binaries (`code`, `pairs`, `tier2_pair_decode`, `mux`) and
-CHECK_GROWTH_M31.
+10.8 s of tests (`pairs` 7.0 s of it). At 3fe071e the check passed in
+13 minutes in a warm target folder of its own, its tests 669 s over
+103 binaries against M3.0's 778 s over 99; other builds ran beside
+both, so the totals move with the load.
 
 ## A2: edit and render for agents
 
