@@ -23,9 +23,9 @@ use crate::Source;
 use crate::detect::{CameraGuess, Layout};
 use crate::probe::{ProbeReport, Problem, StreamInfo, StreamKind, codes};
 
-/// The most of record 4 probe reads to count its items: 64 MiB, four
-/// million frames, past any recording a card holds. Pat's longest is
-/// 30 KB.
+/// The most of record 4 probe reads to count its items, and that
+/// [`verify_companion`] compares: 64 MiB, four million frames, past any
+/// recording a card holds. Pat's longest is 30 KB.
 const MAX_EXPOSURE: usize = 64 << 20;
 /// The ids of the records probe reads: the metadata and the exposure.
 const METADATA: u8 = 1;
@@ -301,11 +301,15 @@ pub fn companion_path(report: &ProbeReport) -> Option<PathBuf> {
 /// an agent opens files beneath its roots, D45), by their exposure
 /// records ([`spherecut_camera::insta360::verify_companion`]): verified
 /// when they are byte for byte the same, and otherwise paired by name
-/// only, with why, which a trailer of either that can't be read is too.
+/// only, with why, which a trailer of either that can't be read is too,
+/// and records over [`MAX_EXPOSURE`] are, uncompared. The why names the
+/// file at fault, master or LRV.
 ///
 /// It reads both files, so it runs where probe does, never on the UI
-/// thread (D34).
+/// thread (D34): it calls [`spherecut_core::may_block`] first, so on the
+/// UI thread it panics in a debug build.
 pub fn verify_companion(report: &ProbeReport, own: &Path, other: Source<'_>) -> Companion {
+    spherecut_core::may_block("comparing an Insta360 file with its companion");
     let lrv_is_other = companions(&report.path)
         .name
         .is_none_or(|n| n.role != NameRole::Proxy);
@@ -317,9 +321,9 @@ pub fn verify_companion(report: &ProbeReport, own: &Path, other: Source<'_>) -> 
     let pairing = trailer_of(own, this).and_then(|(mut a, at)| {
         let (mut b, bt) = trailer_of(other.open, that)?;
         let pairing = if lrv_is_other {
-            spherecut_camera::insta360::verify_companion((&mut a, &at), (&mut b, &bt))
+            spherecut_camera::insta360::verify_companion((&mut a, &at), (&mut b, &bt), MAX_EXPOSURE)
         } else {
-            spherecut_camera::insta360::verify_companion((&mut b, &bt), (&mut a, &at))
+            spherecut_camera::insta360::verify_companion((&mut b, &bt), (&mut a, &at), MAX_EXPOSURE)
         };
         pairing.map_err(|e| format!("the exposure records (4) can't be compared: {e}"))
     });

@@ -17,12 +17,14 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use spherecut_camera::insta360::{
-    Companions, InsvName, NameRole, Pairing, Recording, Trailer, companions, read_trailer,
-    verify_companion,
+    CompanionError, Companions, InsvName, NameRole, Pairing, Recording, Side, Trailer, companions,
+    read_trailer, verify_companion,
 };
 use spherecut_camera::{CameraError, Part};
 use spherecut_core::blocking::{OnBlock, mark_ui_thread_with};
-use spherecut_synth::insv::{self, ExposureItem, Field, ImuItem, Records, TrailerLayout, X5_ALIGN};
+use spherecut_synth::insv::{
+    self, ExposureItem, Field, ImuItem, RawRecord, Records, TrailerLayout, X5_ALIGN,
+};
 use spherecut_testkit::control::must_fail;
 
 /// The suite's budget in seconds: all of camera's (19.6).
@@ -310,19 +312,29 @@ fn pair(frames: u64) -> (File, File) {
     )
 }
 
+/// How much of each record 4 the tests compare: media's 64 MiB, which
+/// probe passes.
+const MAX: usize = 64 << 20;
+
 /// `verify_companion` on the two files' bytes, each with the trailer
-/// camera reads from it.
-fn verify(master: &File, lrv: &File) -> Result<Pairing, CameraError> {
+/// camera reads from it, comparing at most [`MAX`] bytes.
+fn verify(master: &File, lrv: &File) -> Result<Pairing, CompanionError> {
+    verify_at_most(master, lrv, MAX)
+}
+
+/// `verify_companion` comparing at most `max` bytes.
+fn verify_at_most(master: &File, lrv: &File, max: usize) -> Result<Pairing, CompanionError> {
     let (mt, lt) = (master.trailer(), lrv.trailer());
     verify_companion(
         (&mut Cursor::new(&master.bytes), &mt),
         (&mut Cursor::new(&lrv.bytes), &lt),
+        max,
     )
 }
 
 /// The check: the pair is `Verified`, or what it came to instead, a
 /// `NameOnly`'s why or the error, in words.
-fn verified(p: Result<Pairing, CameraError>) -> Result<(), String> {
+fn verified(p: Result<Pairing, CompanionError>) -> Result<(), String> {
     match p {
         Ok(Pairing::Verified) => Ok(()),
         Ok(Pairing::NameOnly { why }) => Err(why),
@@ -439,10 +451,18 @@ fn verify_companion_compares_record_4() {
     past.bytes[slot + 6..slot + 10].copy_from_slice(&size.to_le_bytes());
     let t = past.trailer();
     assert!(t.records.iter().all(|r| r.id != 4) && t.skipped.iter().any(|r| r.id == 4));
-    match must_fail("record 4's slot past the LRV's end", verify(&master, &past)) {
+    let e = must_fail("record 4's slot past the LRV's end", verify(&master, &past));
+    assert_eq!(e.side, Side::Lrv, "{e}");
+    match e.error {
         CameraError::SlotPastEnd { id: 4, offset } => assert_eq!(offset, slot as u64),
         e => panic!("{e:?}"),
     }
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "in the LRV, record 4's index slot at byte {slot} runs into the index or past the file"
+        )
+    );
 
     // Bytes that end inside the master's record 4, with the trailer read
     // from the whole file: Truncated at the first byte missing.
@@ -453,9 +473,16 @@ fn verify_companion_compares_record_4() {
         verify_companion(
             (&mut Cursor::new(&master.bytes[..cut]), &mt),
             (&mut Cursor::new(&lrv.bytes), &lt),
+            MAX,
         ),
     );
-    match e {
+    // Both files' record 4 is `Part::Record(4)`: the side says which.
+    assert_eq!(e.side, Side::Master, "{e}");
+    assert_eq!(
+        e.to_string(),
+        format!("in the master, record 4 is cut short at byte {cut}")
+    );
+    match e.error {
         CameraError::Truncated {
             part: Part::Record(4),
             offset,
@@ -476,12 +503,87 @@ fn verify_companion_compares_record_4() {
                 },
                 &lt,
             ),
+            MAX,
         ),
     );
-    match e {
+    assert_eq!(e.side, Side::Lrv, "{e}");
+    assert!(e.to_string().starts_with("in the LRV, I/O error"), "{e}");
+    match e.error {
         CameraError::Io { offset, .. } => assert_eq!(offset, bad),
         e => panic!("{e:?}"),
     }
+}
+
+/// Record 4 of more than `max` bytes isn't compared: paired by name only,
+/// saying so, at a byte over and not at the limit itself.
+#[test]
+fn verify_companion_compares_at_most_max_bytes() {
+    let _time = timed("verify_companion_compares_at_most_max_bytes");
+    let (master, lrv) = pair(4200);
+    let size = master.exposure().size as usize;
+    assert_eq!(
+        verified(verify_at_most(&master, &lrv, size)),
+        Ok(()),
+        "at the limit"
+    );
+    assert_eq!(
+        must_fail(
+            "a record a byte over the limit, verified",
+            verified(verify_at_most(&master, &lrv, size - 1))
+        ),
+        format!(
+            "their exposure records (4) are {size} bytes each, over the {} compared",
+            size - 1
+        )
+    );
+    // Over the limit, nothing is read: not even a file cut inside it is
+    // an error.
+    let (mt, lt) = (master.trailer(), lrv.trailer());
+    let cut = master.exposure().offset as usize + 10;
+    assert!(matches!(
+        verify_companion(
+            (&mut Cursor::new(&master.bytes[..cut]), &mt),
+            (&mut Cursor::new(&lrv.bytes), &lt),
+            size - 1,
+        ),
+        Ok(Pairing::NameOnly { .. })
+    ));
+}
+
+/// Two empty exposure records show nothing: paired by name only.
+#[test]
+fn empty_exposure_records_are_name_only() {
+    let _time = timed("empty_exposure_records_are_name_only");
+    // synth writes record 4 only with an item; an empty one is a raw
+    // record of its id.
+    let empty = |mut r: Records| {
+        r.others.push(RawRecord {
+            id: 4,
+            format: 0,
+            payload: Vec::new(),
+        });
+        r
+    };
+    let master = file(&empty(master_records(Vec::new())), 300_000, X5_ALIGN);
+    let lrv = file(&empty(lrv_records(Vec::new())), 1_000, 1);
+    assert_eq!(master.exposure().size, 0);
+    assert_eq!(lrv.exposure().size, 0);
+    assert_eq!(
+        must_fail(
+            "empty exposure records, verified",
+            verified(verify(&master, &lrv))
+        ),
+        "their exposure records (4) are empty"
+    );
+    // An empty one against a full one differs in size.
+    let (full, _) = pair(2);
+    assert_eq!(
+        verified(verify(&full, &lrv)),
+        Err(
+            "their exposure records (4) differ in size: 32 bytes in the master, 0 in the LRV"
+                .into()
+        )
+    );
 }
 
 /// What `f` panicked with, run on a thread of its own, marked as the UI
@@ -518,6 +620,7 @@ fn verify_companion_panics_on_the_ui_thread() {
             drop(verify_companion(
                 (&mut Cursor::new(&m), &mt),
                 (&mut Cursor::new(&l), &lt),
+                MAX,
             ));
         };
         let said =

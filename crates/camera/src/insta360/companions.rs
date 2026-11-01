@@ -4,10 +4,12 @@
 //! `ops/clips.rs`, which now calls [`companions`] and whose tests still
 //! pass.
 
+use std::fmt;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 use spherecut_core::may_block;
+use thiserror::Error;
 
 use super::trailer::read_at;
 use super::{RecordRef, Trailer};
@@ -174,31 +176,66 @@ pub enum Pairing {
     NameOnly { why: String },
 }
 
+/// Which file of a master and its LRV.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Side {
+    Master,
+    Lrv,
+}
+
+impl fmt::Display for Side {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Side::Master => "master",
+            Side::Lrv => "LRV",
+        })
+    }
+}
+
+/// Why [`verify_companion`] couldn't compare a master with its LRV: the
+/// error, with the file it is in, since both files' record 4 is
+/// [`Part::Record`] 4 and the byte alone doesn't say which.
+#[derive(Debug, Error)]
+#[error("in the {side}, {error}")]
+pub struct CompanionError {
+    pub side: Side,
+    pub error: CameraError,
+}
+
 /// Compares record 4 of a master and of its LRV, each with its trailer
 /// ([`super::read_trailer`]). Equal is [`Pairing::Verified`]; different,
-/// or missing from either, is [`Pairing::NameOnly`]. A record that can't
-/// be read is an error.
+/// missing from either, empty in both or over `max` bytes is
+/// [`Pairing::NameOnly`], saying which. A record that can't be read is an
+/// error naming its file.
 ///
-/// The records' sizes are compared first, from the trailers, and then
-/// their bytes, a [`CHUNK`] of each file at a time, so nothing larger is
-/// allocated whatever the trailers say. A record 4 whose slot runs into
-/// the index or past the file ([`Trailer::skipped`]) is
-/// [`CameraError::SlotPastEnd`] at its slot, as [`super::read_record`]
-/// gives; bytes that end inside it are [`CameraError::Truncated`] in
+/// The records' sizes are compared first, from the trailers, and then,
+/// when they are equal and at most `max` bytes (as [`super::read_record`]
+/// takes its `max`), their bytes, a [`CHUNK`] of each file at a time, so
+/// nothing larger is allocated whatever the trailers say. A record 4
+/// whose slot runs into the index or past the file ([`Trailer::skipped`])
+/// is [`CameraError::SlotPastEnd`] at its slot, as `read_record` gives;
+/// bytes that end inside it are [`CameraError::Truncated`] in
 /// [`Part::Record`] 4, and a failed read [`CameraError::Io`], each at the
-/// byte of its own file it was for.
+/// byte of its own file it was for, in a [`CompanionError`] that names
+/// the file.
 ///
 /// It calls [`spherecut_core::may_block`] first, so on the UI thread it
 /// panics in a debug build.
 pub fn verify_companion<M: Read + Seek, L: Read + Seek>(
     master: (&mut M, &Trailer),
     lrv: (&mut L, &Trailer),
-) -> Result<Pairing, CameraError> {
+    max: usize,
+) -> Result<Pairing, CompanionError> {
     may_block("comparing an Insta360 master's exposure record with its LRV's");
     let (m, mt) = master;
     let (l, lt) = lrv;
     let name_only = |why: String| Ok(Pairing::NameOnly { why });
-    let (a, b) = match (exposure(mt)?, exposure(lt)?) {
+    let in_file = |side: Side| move |error: CameraError| CompanionError { side, error };
+    let found = (
+        exposure(mt).map_err(in_file(Side::Master))?,
+        exposure(lt).map_err(in_file(Side::Lrv))?,
+    );
+    let (a, b) = match found {
         (Some(a), Some(b)) => (a, b),
         (None, None) => {
             return name_only("neither file has an exposure record (4) to compare".into());
@@ -221,14 +258,23 @@ pub fn verify_companion<M: Read + Seek, L: Read + Seek>(
         ));
     }
     let size = u64::from(a.size);
+    if size == 0 {
+        // No bytes to show the two are one recording's.
+        return name_only("their exposure records (4) are empty".into());
+    }
+    if size > u64::try_from(max).unwrap_or(u64::MAX) {
+        return name_only(format!(
+            "their exposure records (4) are {size} bytes each, over the {max} compared"
+        ));
+    }
     let chunk = usize::try_from(size).map_or(CHUNK, |s| s.min(CHUNK));
     let (mut x, mut y) = (vec![0; chunk], vec![0; chunk]);
     let mut done = 0u64;
     while done < size {
         let n = usize::try_from(size - done).map_or(chunk, |left| left.min(chunk));
         let (x, y) = (&mut x[..n], &mut y[..n]);
-        read_at(m, a.offset + done, x, Part::Record(EXPOSURE))?;
-        read_at(l, b.offset + done, y, Part::Record(EXPOSURE))?;
+        read_at(m, a.offset + done, x, Part::Record(EXPOSURE)).map_err(in_file(Side::Master))?;
+        read_at(l, b.offset + done, y, Part::Record(EXPOSURE)).map_err(in_file(Side::Lrv))?;
         if let Some(at) = x.iter().zip(y.iter()).position(|(p, q)| p != q) {
             return name_only(format!(
                 "their exposure records (4) differ from byte {} of the record",

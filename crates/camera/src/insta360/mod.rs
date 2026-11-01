@@ -28,7 +28,8 @@ mod records;
 mod trailer;
 
 pub use companions::{
-    Companions, InsvName, NameRole, Pairing, Recording, companions, verify_companion,
+    CompanionError, Companions, InsvName, NameRole, Pairing, Recording, Side, companions,
+    verify_companion,
 };
 pub use metadata::{
     CalibStrings, Calibrations, FileGroup, FrameSpan, LensProfiles, Metadata, Window,
