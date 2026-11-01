@@ -69,7 +69,9 @@ impl YuvFormat {
         }
     }
 
-    fn rgb_to_ypbpr(&self, c: Rgb) -> (f64, f64, f64) {
+    /// Y', Pb and Pr from 0 to 1 and ±½ for a display value, each channel
+    /// held to 0 to 1 first.
+    pub(crate) fn rgb_to_ypbpr(&self, c: Rgb) -> (f64, f64, f64) {
         let [r, g, b] = c.map(|v| v.clamp(0.0, 1.0));
         let (kr, kb) = (self.kr, self.kb);
         let y = kr * r + (1.0 - kr - kb) * g + kb * b;
@@ -89,7 +91,7 @@ impl YuvFormat {
     /// Luma and chroma at `bits` (8 or 10): the nominal ranges of H.273,
     /// 16 to 235 and 16 to 240 scaled up for limited range, and all of
     /// 0 to 2^bits − 1 for full.
-    fn quant(&self, y: f64, pb: f64, pr: f64, bits: u32) -> (u16, u16, u16) {
+    pub(crate) fn quant(&self, y: f64, pb: f64, pr: f64, bits: u32) -> (u16, u16, u16) {
         let max = f64::from((1u32 << bits) - 1);
         if self.full_range {
             let mid = f64::from(1u32 << (bits - 1));

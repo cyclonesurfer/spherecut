@@ -9,7 +9,9 @@
 //! stored numbers. M3.2 prints the calibration strings from the two;
 //! [`compose`] builds a [`RigTruth`] from them, each lens's model, `to_rig`
 //! and centre, and [`render_lens`] renders what each lens sees through
-//! synth's own forward and inverse ([`TruthModel`]).
+//! synth's own forward and inverse ([`TruthModel`]), which
+//! [`lens_planes`] codes as the X5 does. [`x5_like`] and [`kb_like`] are
+//! 4.2's two rigs, and a [`RenderCache`] keeps a test binary's renders.
 //!
 //! The frames are 6.2's. A lens frame is Mei's and OpenCV's: +x right in
 //! the image, +y down, +z along the optical axis. The rig frame is
@@ -17,13 +19,16 @@
 //! looking along −Z. Every frame is right-handed, and a rotation by a
 //! positive angle about an axis turns by the right-hand rule.
 
+use std::collections::HashMap;
 use std::f64::consts::{FRAC_PI_2, PI};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use glam::{DMat2, DQuat, DVec2, DVec3};
 use spherecut_core::video::ChromaSiting;
 
 use crate::yuv::{Chroma, YuvFormat, YuvPlanes};
-use crate::{Pattern, RgbImage};
+use crate::{Pattern, Rgb, RgbImage};
 
 /// Which track each calibration block describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -993,10 +998,29 @@ impl Motion {
     }
 
     /// The rig's orientation at `t_s` seconds, the rotation from the rig
-    /// frame to the scene's: the identity before the first turn.
-    #[expect(unused_variables, reason = "M3.3 unit (c) writes the body")]
+    /// frame to the scene's: the identity before the first turn. Each
+    /// turn, about an axis in the scene's frame, applies after those
+    /// before it, for as much of it as has passed by `t_s`.
     pub fn at(&self, t_s: f64) -> DQuat {
-        todo!()
+        self.turns.iter().fold(DQuat::IDENTITY, |q, turn| {
+            let held = (t_s - turn.start_s).clamp(0.0, (turn.end_s - turn.start_s).max(0.0));
+            DQuat::from_axis_angle(turn.axis.normalize(), (turn.deg_per_s * held).to_radians()) * q
+        })
+    }
+
+    /// Which rest the rig holds through all of `from_s` to `to_s`: k
+    /// after k turns, ends included, or `None` when a turn moves it in
+    /// between. [`Motion::at`] gives the same orientation, to the bit,
+    /// anywhere in one rest.
+    pub fn rest(&self, from_s: f64, to_s: f64) -> Option<usize> {
+        let mut after = f64::NEG_INFINITY;
+        for (k, turn) in self.turns.iter().enumerate() {
+            if from_s >= after && to_s <= turn.start_s {
+                return Some(k);
+            }
+            after = turn.end_s;
+        }
+        (from_s >= after).then_some(self.turns.len())
     }
 }
 
@@ -1173,9 +1197,242 @@ fn slot_model(cal: &CalibTruth, b: usize, planted: &Planted, side: u32) -> Truth
 /// `centre_m` to the scene's sphere or the ground, [`crate::color`], the
 /// gain and the vignette in linear light, then the sRGB OETF. Black past
 /// `theta_max` and where the inverse has no direction, as on the camera.
-#[expect(unused_variables, reason = "M3.3 unit (c) writes the body")]
+///
+/// Pixel (i, j) covers i to i + 1 and j to j + 1 in the model's pixels,
+/// so its centre is (i + ½, j + ½), and its samples sit where
+/// [`crate::render_view_ideal`]'s do. The mean is of display values, as
+/// there, so with unit gains and no vignette, when the trip through
+/// linear light is skipped, each sample is the pattern's own value. Row
+/// j is exposed at [`exposed_at`]'s time, every sample in it alike. Rows
+/// are dealt to threads in turn, and the result doesn't depend on how
+/// many there are.
 pub fn render_lens(pattern: Pattern, rig: &RigTruth, lens: usize, frame: u32, ss: u32) -> RgbImage {
-    todo!()
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(16);
+    lens_on_threads(pattern, rig, lens, frame, ss, threads)
+}
+
+/// [`render_lens`] on `threads` threads.
+fn lens_on_threads(
+    pattern: Pattern,
+    rig: &RigTruth,
+    lens: usize,
+    frame: u32,
+    ss: u32,
+    threads: usize,
+) -> RgbImage {
+    let truth = &rig.lenses[lens];
+    let side = truth.side;
+    let n = ss.max(1);
+    let inv = 1.0 / f64::from(n * n);
+    let mut pixels = vec![[0.0; 3]; side as usize * side as usize];
+    let mut dealt: Vec<Vec<(usize, &mut [Rgb])>> =
+        (0..threads.max(1)).map(|_| Vec::new()).collect();
+    for (j, row) in pixels.chunks_mut(side.max(1) as usize).enumerate() {
+        let k = j % dealt.len();
+        dealt[k].push((j, row));
+    }
+    std::thread::scope(|s| {
+        for rows in dealt {
+            s.spawn(move || {
+                for (j, row) in rows {
+                    let turned = rig.motion.at(exposed_at(rig, lens, frame, j as u32));
+                    let to_scene = turned * truth.to_rig;
+                    let centre = turned * truth.centre_m;
+                    for (i, px) in row.iter_mut().enumerate() {
+                        let mut acc = [0.0; 3];
+                        for b in 0..n {
+                            for a in 0..n {
+                                let at = DVec2::new(
+                                    i as f64 + (f64::from(a) + 0.5) / f64::from(n),
+                                    j as f64 + (f64::from(b) + 0.5) / f64::from(n),
+                                );
+                                let Some(d) = truth.model.invert(at, truth.theta_max) else {
+                                    continue;
+                                };
+                                let seen = sees(rig, centre, to_scene * d);
+                                let c =
+                                    expose(crate::color(pattern, seen, frame), truth, off_axis(d));
+                                for (acc, c) in acc.iter_mut().zip(c) {
+                                    *acc += c;
+                                }
+                            }
+                        }
+                        *px = acc.map(|v| v * inv);
+                    }
+                }
+            });
+        }
+    });
+    RgbImage {
+        width: side,
+        height: side,
+        pixels,
+    }
+}
+
+/// When row `row` of track `lens`'s picture of `frame` is exposed, in
+/// seconds: the frame's time, the lens's lateness after it, then the
+/// rolling shutter's share of its readout, (row + ½)/side of it.
+pub fn exposed_at(rig: &RigTruth, lens: usize, frame: u32, row: u32) -> f64 {
+    let side = f64::from(rig.lenses[lens].side);
+    (f64::from(frame) + rig.late_frames[lens]) / rig.motion.fps
+        + rig.readout_s * (f64::from(row) + 0.5) / side
+}
+
+/// The point a ray from `centre` along `d`, both in the scene's frame,
+/// meets: on the ground plane when it meets that first, else on the
+/// scene's sphere about the origin. With neither, the scene is infinitely
+/// far and the ray's own direction is what it sees. Either way the
+/// pattern is read in the direction of the result.
+fn sees(rig: &RigTruth, centre: DVec3, d: DVec3) -> DVec3 {
+    let d = d.normalize();
+    let mut reach = f64::INFINITY;
+    if let Some(r) = rig.scene_radius_m {
+        // |centre + s d| = r, for the s > 0 of a centre inside the sphere.
+        let along = centre.dot(d);
+        let disc = along * along - (centre.length_squared() - r * r);
+        if disc >= 0.0 {
+            reach = disc.sqrt() - along;
+        }
+    }
+    if let Some(h) = rig.ground_m
+        && d.y < 0.0
+    {
+        let s = (-h - centre.y) / d.y;
+        if s > 0.0 && s < reach {
+            reach = s;
+        }
+    }
+    if reach.is_finite() {
+        centre + d * reach
+    } else {
+        d
+    }
+}
+
+/// A sample of display value `c` after the lens's gain and vignette,
+/// applied in linear light θ off the axis and clipped to white, as a
+/// sensor clips. Unit gains with no vignette leave it as it is.
+fn expose(c: Rgb, lens: &LensTruth, theta: f64) -> Rgb {
+    if lens.gain == [1.0; 3] && lens.vignette == [0.0; 3] {
+        return c;
+    }
+    let t2 = theta * theta;
+    let [v1, v2, v3] = lens.vignette;
+    let falloff = 1.0 + t2 * (v1 + t2 * (v2 + t2 * v3));
+    std::array::from_fn(|k| srgb_oetf((srgb_eotf(c[k]) * lens.gain[k] * falloff).clamp(0.0, 1.0)))
+}
+
+/// The sRGB transfer function's inverse: display value to linear light.
+fn srgb_eotf(v: f64) -> f64 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The sRGB transfer function: linear light to display value.
+fn srgb_oetf(l: f64) -> f64 {
+    if l <= 0.0031308 {
+        12.92 * l
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Whether `pattern` changes from frame to frame: `Grid`'s marker and
+/// counter move, and the other scenes hold still.
+fn moves(pattern: Pattern) -> bool {
+    match pattern {
+        Pattern::Grid => true,
+        Pattern::HighFrequency | Pattern::Seam | Pattern::SeamLines => false,
+    }
+}
+
+/// A test binary's renders (7.1), kept for as long as it runs, keyed by
+/// rig truth, scene and frame. A still scene through a rig at rest is
+/// rendered once: its frames differ only by what is added after
+/// rendering, the frame codes (M3.1's `synth::code`) and the noise. So
+/// the key holds the frame only when the scene moves or a turn moves the
+/// rig during the frame's exposure, and otherwise the rest it falls in
+/// ([`Motion::rest`]). Each key renders once, even when threads ask for
+/// it together.
+#[derive(Default)]
+pub struct RenderCache {
+    renders: Mutex<HashMap<String, Arc<OnceLock<Arc<RgbImage>>>>>,
+    made: AtomicU64,
+}
+
+impl std::fmt::Debug for RenderCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let held = self
+            .renders
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
+        f.debug_struct("RenderCache")
+            .field("held", &held)
+            .field("made", &self.made())
+            .finish()
+    }
+}
+
+impl RenderCache {
+    pub fn new() -> RenderCache {
+        RenderCache::default()
+    }
+
+    /// The test binary's own cache.
+    pub fn shared() -> &'static RenderCache {
+        static SHARED: OnceLock<RenderCache> = OnceLock::new();
+        SHARED.get_or_init(RenderCache::new)
+    }
+
+    /// [`render_lens`]'s picture, rendered the first time it is asked for.
+    pub fn render(
+        &self,
+        pattern: Pattern,
+        rig: &RigTruth,
+        lens: usize,
+        frame: u32,
+        ss: u32,
+    ) -> Arc<RgbImage> {
+        let cell = {
+            let mut renders = self.renders.lock().unwrap_or_else(PoisonError::into_inner);
+            renders
+                .entry(render_key(pattern, rig, lens, frame, ss))
+                .or_default()
+                .clone()
+        };
+        cell.get_or_init(|| {
+            self.made.fetch_add(1, Ordering::Relaxed);
+            Arc::new(render_lens(pattern, rig, lens, frame, ss))
+        })
+        .clone()
+    }
+
+    /// How many pictures this cache has rendered.
+    pub fn made(&self) -> u64 {
+        self.made.load(Ordering::Relaxed)
+    }
+}
+
+/// A render's key in a [`RenderCache`]: the rig truth whole, by its
+/// `Debug` form, which writes every field and each number exactly, the
+/// scene, the lens and the samples, and when the frame's picture is
+/// taken.
+fn render_key(pattern: Pattern, rig: &RigTruth, lens: usize, frame: u32, ss: u32) -> String {
+    let side = rig.lenses[lens].side;
+    let first = exposed_at(rig, lens, frame, 0);
+    let last = exposed_at(rig, lens, frame, side.saturating_sub(1));
+    let when = match rig.motion.rest(first, last) {
+        Some(rest) if !moves(pattern) => format!("rest {rest}"),
+        _ => format!("frame {frame}"),
+    };
+    format!("{pattern:?} lens {lens} ss {ss} {when} {rig:?}")
 }
 
 /// How a lens's picture becomes a track's planes.
@@ -1205,9 +1462,161 @@ impl Coding {
 
 /// A lens's picture as the planes its track holds under `coding`, chroma
 /// taken at the coding's siting.
-#[expect(unused_variables, reason = "M3.3 unit (c) writes the body")]
+///
+/// Each chroma sample is a triangle filter of the full-resolution Cb and
+/// Cr around its site, 2^s luma samples wide on each side for 2^s luma
+/// samples per chroma sample, so its weights' centre is the site: under
+/// X5's left siting [¼, ½, ¼] across, on the left column of its pair,
+/// and [⅛, ⅜, ⅜, ⅛] down, midway between its two rows. Samples past an
+/// edge repeat the edge's. The sides should be multiples of the
+/// subsampling.
 pub fn lens_planes(img: &RgbImage, coding: Coding) -> YuvPlanes {
-    todo!()
+    let format = &coding.format;
+    let (w, h) = (img.width as usize, img.height as usize);
+    let (sx, sy) = format.chroma.shift();
+    let (cw, ch) = (w >> sx, h >> sy);
+    let (ox, oy) = coding.siting.offset();
+    let ypbpr: Vec<(f64, f64, f64)> = img.pixels.iter().map(|&c| format.rgb_to_ypbpr(c)).collect();
+    let luma: Vec<u16> = ypbpr
+        .iter()
+        .map(|&(y, _, _)| format.quant(y, 0.0, 0.0, coding.bits).0)
+        .collect();
+    let (mut cb, mut cr) = (Vec::with_capacity(cw * ch), Vec::with_capacity(cw * ch));
+    for cy in 0..ch {
+        let rows = chroma_taps(cy, sy, oy, h);
+        for cx in 0..cw {
+            let cols = chroma_taps(cx, sx, ox, w);
+            let (mut pb, mut pr) = (0.0, 0.0);
+            for &(y, wy) in &rows {
+                for &(x, wx) in &cols {
+                    let (_, b, r) = ypbpr[y * w + x];
+                    pb += wy * wx * b;
+                    pr += wy * wx * r;
+                }
+            }
+            let (_, u, v) = format.quant(0.0, pb, pr, coding.bits);
+            cb.push(u);
+            cr.push(v);
+        }
+    }
+    if coding.bits == 8 {
+        YuvPlanes::U8([luma, cb, cr].map(|p| p.into_iter().map(|v| v as u8).collect()))
+    } else {
+        YuvPlanes::U16([luma, cb, cr])
+    }
+}
+
+/// The luma samples, across or down, that chroma sample `c` is made from
+/// and their weights, for 2^`shift` luma samples per chroma sample: a
+/// triangle 2^shift wide each side of the site, c · 2^shift + `offset` ·
+/// (2^shift − 1) (`ChromaSiting::offset`), clamped to the `len` samples
+/// there are and summing to 1.
+fn chroma_taps(c: usize, shift: u32, offset: f64, len: usize) -> Vec<(usize, f64)> {
+    if shift == 0 {
+        return vec![(c.min(len.saturating_sub(1)), 1.0)];
+    }
+    let n = f64::from(1u32 << shift);
+    let site = c as f64 * n + offset * (n - 1.0);
+    let first = (site - n).floor() as i64 + 1;
+    let last = (site + n).ceil() as i64 - 1;
+    let last_index = len.saturating_sub(1) as i64;
+    let taps: Vec<(usize, f64)> = (first..=last)
+        .map(|x| {
+            let weight = (1.0 - (x as f64 - site).abs() / n).max(0.0);
+            (x.clamp(0, last_index) as usize, weight)
+        })
+        .filter(|&(_, weight)| weight > 0.0)
+        .collect();
+    let total: f64 = taps.iter().map(|&(_, weight)| weight).sum();
+    taps.into_iter()
+        .map(|(x, weight)| (x, weight / total))
+        .collect()
+}
+
+/// The side of the X5-like truth's square tracks (4.2).
+pub const X5_LIKE_SIDE: u32 = 768;
+
+/// The X5-like calibration of 4.2's round trip, in the X5's canvas
+/// (10752 × 5376, field 27's window 5312): V3 Mei with ξ = 2 and Pat's V3
+/// focal lengths and Brown coefficients (insta360.md, "Pat's X5
+/// samples"), rolls of 90.5° and 89.3°, yaw and pitch of a few tenths of
+/// a degree on each lens, principal points 2 to 3 px off the slot's
+/// centre at 768² under maps A and C (lens 0 at (+2.4, −2.1) px, lens 1
+/// at (−2.7, +2.2) px; B moves them under 0.05 px more), and t_1 with
+/// tz = −32 mm. [`compose`]d at [`X5_LIKE_SIDE`] under C, its frame
+/// reaches 99.8° to 102.8° off the axis along the image's axes, about the
+/// rig's 200°, and its circle, which ends at [`IMAGE_CIRCLE_DEG`], has
+/// r(106°) of 393 to 399 px by lens and direction (7.1 rounds it to 395),
+/// past the half side of 384 on all four sides, as the camera's is. Under
+/// A each r is 1.2% longer.
+pub fn x5_like() -> CalibTruth {
+    // At 768² under C a canvas pixel is 1/7 of a slot pixel, so the
+    // centres are 2688 + 7 · offset, and block 1's 5376 further.
+    CalibTruth {
+        blocks: [
+            BlockTruth {
+                xi: 2.0,
+                fx: 4284.62,
+                fy: 4284.28,
+                cx: 2704.8,
+                cy: 2673.3,
+                ypr_deg: [0.3, -0.2, 90.5],
+                t_m: [0.0; 3],
+            },
+            BlockTruth {
+                xi: 2.0,
+                fx: 4291.03,
+                fy: 4291.03,
+                cx: 8045.1,
+                cy: 2703.4,
+                ypr_deg: [-0.25, 0.35, 89.3],
+                t_m: [-0.00446, 0.000017, -0.032],
+            },
+        ],
+        dist: StoredDist::V3 {
+            k: [
+                [0.18632051, 2.04984355, -3.24446917],
+                [0.18940836, 2.07073069, -3.24103332],
+            ],
+            p: [[-0.00143576, -0.00339240], [0.00013831, -0.00299873]],
+        },
+        canvas: [10752, 5376],
+        dst: 5312,
+        lens_type: 113,
+        body: 4,
+    }
+}
+
+/// The distortion of [`kb_like`]'s lenses, k1 to k5.
+pub const KB_LIKE_K: [f64; 5] = [0.012, -0.0021, 0.0003, 0.0, 0.0];
+
+/// 4.2's second rig: `rig` with each lens an equidistant Kannala–Brandt
+/// lens of [`KB_LIKE_K`] on the same centre, its focal set so that at
+/// [`IMAGE_CIRCLE_DEG`] it reaches as far along +x as the lens it
+/// replaces. The rest, `to_rig` and the centres among it, is `rig`'s.
+/// It shows that the source path is not Mei's alone.
+pub fn kb_like(rig: &RigTruth) -> RigTruth {
+    let mut kb = rig.clone();
+    let theta = IMAGE_CIRCLE_DEG.to_radians();
+    let t2 = theta * theta;
+    let k = KB_LIKE_K;
+    let theta_d = theta * (1.0 + t2 * (k[0] + t2 * (k[1] + t2 * (k[2] + t2 * (k[3] + t2 * k[4])))));
+    for lens in &mut kb.lenses {
+        let (f, c) = lens.model.intrinsics();
+        let edge = DVec3::new(theta.sin(), 0.0, theta.cos());
+        let reach = lens
+            .model
+            .forward(edge)
+            .map_or(f.x * theta, |px| px.x - c.x);
+        lens.model = TruthModel::Kb {
+            base: KbBase::Equidistant,
+            f: reach / theta_d,
+            cx: c.x,
+            cy: c.y,
+            k,
+        };
+    }
+    kb
 }
 
 #[cfg(test)]
@@ -1216,9 +1625,12 @@ mod tests {
     use std::fmt::Debug;
     use std::hash::Hash;
 
+    use spherecut_testkit::bench;
     use spherecut_testkit::control::{at_most, must_fail};
 
     use super::*;
+    use crate::AXIS_MARKERS;
+    use crate::yuv::to_yuv;
 
     /// How many distinct values `values` holds, or the first one it holds
     /// twice.
@@ -2289,67 +2701,903 @@ mod tests {
         );
     }
 
+    /// Turns about +Y from 0.5 s to 1.5 s at 10°/s, then about +X from
+    /// 2 s to 2.5 s at −20°/s.
+    fn two_turns() -> Motion {
+        Motion {
+            fps: 30.0,
+            turns: vec![
+                Turn {
+                    start_s: 0.5,
+                    end_s: 1.5,
+                    axis: DVec3::Y,
+                    deg_per_s: 10.0,
+                },
+                Turn {
+                    start_s: 2.0,
+                    end_s: 2.5,
+                    axis: DVec3::X,
+                    deg_per_s: -20.0,
+                },
+            ],
+        }
+    }
+
     /// `Motion::at` turns at each turn's rate and holds still between
     /// turns.
     #[test]
-    #[ignore = "M3.3 unit (c)"]
     fn motion_turns_at_its_rate_and_rests_between() {
-        todo!()
+        // cos 5° = 0.9961946980917455, sin 5° = 0.08715574274765817,
+        // cos 10° = 0.984807753012208, sin 10° = 0.17364817766693033.
+        // At 1 s the first turn is half done: R_y(5°). From 1.5 s to 2 s
+        // the rig rests at R_y(10°). At 2.25 s the second turn is half
+        // done, R_x(−5°) · R_y(10°), whose columns are
+        //   x: (cos 10°, −sin 10° sin 5°, −sin 10° cos 5°)
+        //   y: (0, cos 5°, −sin 5°)
+        //   z: (sin 10°, cos 10° sin 5°, cos 10° cos 5°).
+        let (c5, s5) = (0.9961946980917455, 0.08715574274765817);
+        let (c10, s10) = (0.984807753012208, 0.17364817766693033);
+        let half_y = [[c5, 0.0, -s5], [0.0, 1.0, 0.0], [s5, 0.0, c5]];
+        let rest_1 = [[c10, 0.0, -s10], [0.0, 1.0, 0.0], [s10, 0.0, c10]];
+        let half_x = [
+            [c10, -s10 * s5, -s10 * c5],
+            [0.0, c5, -s5],
+            [s10, c10 * s5, c10 * c5],
+        ];
+        let motion = two_turns();
+        assert_eq!(motion.at(0.2), DQuat::IDENTITY);
+        assert_eq!(motion.at(0.5), DQuat::IDENTITY);
+        assert!(takes_axes(|v| motion.at(1.0) * v, half_y));
+        assert!(takes_axes(|v| motion.at(1.5) * v, rest_1));
+        assert!(takes_axes(|v| motion.at(1.8) * v, rest_1));
+        assert!(takes_axes(|v| motion.at(2.25) * v, half_x));
+        // Anywhere in one rest, the same orientation to the bit.
+        assert_eq!(motion.at(1.5), motion.at(1.99));
+        assert_eq!(motion.at(2.5), motion.at(60.0));
+        assert_eq!(Motion::still().at(7.0), DQuat::IDENTITY);
+
+        // The rest an interval falls in, its ends included.
+        assert_eq!(motion.rest(-1.0, 0.5), Some(0));
+        assert_eq!(motion.rest(0.4, 0.6), None);
+        assert_eq!(motion.rest(1.0, 1.0), None);
+        assert_eq!(motion.rest(1.5, 2.0), Some(1));
+        assert_eq!(motion.rest(1.6, 1.9), Some(1));
+        assert_eq!(motion.rest(1.9, 2.1), None);
+        assert_eq!(motion.rest(2.5, 9.0), Some(2));
+        assert_eq!(motion.rest(0.2, 2.7), None);
+        assert_eq!(Motion::still().rest(0.0, 100.0), Some(0));
+
+        // Controls: the turns composed the other way round, and the first
+        // turn at 9°/s.
+        let ry10 = DQuat::from_axis_angle(DVec3::Y, 10f64.to_radians());
+        let rx5 = DQuat::from_axis_angle(DVec3::X, -5f64.to_radians());
+        must_fail(
+            "the turns composed in reverse",
+            takes_axes(|v| ry10 * rx5 * v, half_x),
+        );
+        let mut slow = two_turns();
+        slow.turns[0].deg_per_s = 9.0;
+        must_fail(
+            "the first turn at 9°/s",
+            takes_axes(|v| slow.at(1.0) * v, half_y),
+        );
+    }
+
+    /// The rig the render tests start from: Pat's V6 calibration with
+    /// square angles under the placeholder ([`square_v6`]), both tracks
+    /// `side` square. By 6.2's frames, lens 0 looks along −Z with its
+    /// image's +x along +X and +y along −Y, and lens 1 along +Z with +x
+    /// along −X and +y along −Y; each centre is 15.76 mm out along its
+    /// own axis.
+    fn square_rig(side: u32) -> RigTruth {
+        compose(
+            &square_v6(),
+            &planted(TruthEuler::PLACEHOLDER),
+            0,
+            [side; 2],
+        )
+    }
+
+    /// The pixel whose square holds `at`.
+    fn pixel_at(at: DVec2) -> (u32, u32) {
+        (at.x.floor() as u32, at.y.floor() as u32)
+    }
+
+    /// The centre of pixel (i, j).
+    fn pixel_centre(i: u32, j: u32) -> DVec2 {
+        DVec2::new(f64::from(i) + 0.5, f64::from(j) + 0.5)
+    }
+
+    /// How many pixels of `picture`, track `lens`'s at frame 0 and ss = 1
+    /// with the scene infinitely far and the rig still, are not the
+    /// pattern in the direction `to_rig` gives synth's inverse at the
+    /// pixel's centre moved by `shift`, or black where it finds none.
+    fn miswired(picture: &RgbImage, pattern: Pattern, lens: &LensTruth, shift: DVec2) -> usize {
+        let mut wrong = 0;
+        for j in 0..picture.height {
+            for i in 0..picture.width {
+                let want = lens
+                    .model
+                    .invert(pixel_centre(i, j) + shift, lens.theta_max)
+                    .map_or([0.0; 3], |d| {
+                        crate::color(pattern, (lens.to_rig * d).normalize(), 0)
+                    });
+                if picture.get(i, j) != want {
+                    wrong += 1;
+                }
+            }
+        }
+        wrong
     }
 
     /// Each pixel of `render_lens` at ss = 1 is the pattern in the
     /// direction synth's inverse and `to_rig` give its centre.
     #[test]
-    #[ignore = "M3.3 unit (c)"]
     fn render_lens_shows_the_scene_through_the_truth() {
-        todo!()
+        // Each axis disc's centre, as a direction in each lens's frame,
+        // where `square_rig`'s frames put it. A glyph's centre cell is
+        // never inked, and it spans more than a pixel here.
+        let [red, green, blue, yellow, white, black] = AXIS_MARKERS.map(|(_, c)| c);
+        let discs: [[(DVec3, Rgb); 5]; 2] = [
+            [
+                (DVec3::Z, red),
+                (DVec3::X, green),
+                (DVec3::NEG_X, yellow),
+                (DVec3::NEG_Y, white),
+                (DVec3::Y, black),
+            ],
+            [
+                (DVec3::Z, blue),
+                (DVec3::X, yellow),
+                (DVec3::NEG_X, green),
+                (DVec3::NEG_Y, white),
+                (DVec3::Y, black),
+            ],
+        ];
+        let rig = square_rig(384);
+        for (lens, own) in discs.iter().enumerate() {
+            let picture = render_lens(Pattern::Grid, &rig, lens, 0, 1);
+            let model = rig.lenses[lens].model;
+            let shows = |list: &[(DVec3, Rgb)]| {
+                list.iter().all(|&(d, want)| {
+                    let (i, j) = pixel_at(model.forward(d).unwrap());
+                    assert!(i < picture.width && j < picture.height, "({i}, {j})");
+                    picture.get(i, j) == want
+                })
+            };
+            assert!(shows(own), "lens {lens}");
+            // Control: the other lens's discs.
+            must_fail("the other lens's discs", shows(&discs[1 - lens]));
+        }
+
+        // Every pixel, at a size the check can afford.
+        let small = square_rig(96);
+        for lens in 0..2 {
+            let picture = render_lens(Pattern::Grid, &small, lens, 0, 1);
+            let truth = &small.lenses[lens];
+            assert_eq!(
+                miswired(&picture, Pattern::Grid, truth, DVec2::ZERO),
+                0,
+                "lens {lens}"
+            );
+            // The picture doesn't depend on how many threads render it.
+            for threads in [1, 3] {
+                let other = lens_on_threads(Pattern::Grid, &small, lens, 0, 1, threads);
+                assert_eq!(other.pixels, picture.pixels, "{threads} threads");
+            }
+            // Controls: the other lens's truth, and each sample half a
+            // pixel right.
+            let swapped = must_fail(
+                "the other lens's truth",
+                at_most(
+                    miswired(
+                        &picture,
+                        Pattern::Grid,
+                        &small.lenses[1 - lens],
+                        DVec2::ZERO,
+                    ),
+                    0,
+                ),
+            );
+            let shifted = must_fail(
+                "half a pixel right",
+                at_most(
+                    miswired(&picture, Pattern::Grid, truth, DVec2::new(0.5, 0.0)),
+                    0,
+                ),
+            );
+            assert!(
+                swapped > 96 * 96 / 4 && shifted > 96 * 96 / 4,
+                "{swapped}, {shifted}"
+            );
+        }
     }
 
     /// Past `theta_max`, and where the inverse has no direction, the
     /// picture is black.
     #[test]
-    #[ignore = "M3.3 unit (c)"]
     fn render_lens_is_black_past_theta_max() {
-        todo!()
+        // HighFrequency is never black, so a black pixel is one the
+        // render found no direction for within `theta_max`.
+        let mut rig = square_rig(96);
+        let model = rig.lenses[0].model;
+        let blacks_where = |picture: &RgbImage, cap: f64| -> Result<(), (u32, u32)> {
+            for j in 0..picture.height {
+                for i in 0..picture.width {
+                    let black = picture.get(i, j) == [0.0; 3];
+                    if black != model.invert(pixel_centre(i, j), cap).is_none() {
+                        return Err((i, j));
+                    }
+                }
+            }
+            Ok(())
+        };
+        let picture = render_lens(Pattern::HighFrequency, &rig, 0, 0, 1);
+        assert_eq!(blacks_where(&picture, rig.lenses[0].theta_max), Ok(()));
+        // Both kinds of black are there: past 106° with a direction, and
+        // past the model's fold at 120° with none.
+        let (mut no_direction, mut past_max) = (0, 0);
+        for j in 0..96 {
+            for i in 0..96 {
+                match model.inverse(pixel_centre(i, j)) {
+                    None => no_direction += 1,
+                    Some(d) if off_axis(d) > rig.lenses[0].theta_max => past_max += 1,
+                    Some(_) => {}
+                }
+            }
+        }
+        assert!(
+            no_direction > 0 && past_max > 0,
+            "{no_direction}, {past_max}"
+        );
+        // With `theta_max` at 90°, the black comes in to 90°.
+        rig.lenses[0].theta_max = FRAC_PI_2;
+        let narrower = render_lens(Pattern::HighFrequency, &rig, 0, 0, 1);
+        assert_eq!(blacks_where(&narrower, FRAC_PI_2), Ok(()));
+        // Control: the 106° picture held to 90°.
+        must_fail(
+            "the 106° picture held to 90°",
+            blacks_where(&picture, FRAC_PI_2),
+        );
     }
 
     /// A finite scene and the ground plane are seen from each lens's own
     /// centre, so the two lenses' pictures of one point differ by the
     /// parallax 6.2 predicts.
     #[test]
-    #[ignore = "M3.3 unit (c)"]
     fn render_lens_sees_the_scene_and_the_ground_from_its_centre() {
-        todo!()
+        // By hand. From (0, 0, 1) along +X, a sphere of radius 2 is met
+        // where 1 + s² = 4, at (√3, 0, 1), in the direction (√3/2, 0, ½).
+        // From the origin along (1, −1, 0)/√2, a ground 1 m down is met
+        // at s = √2, at (1, −1, 0); a sphere of radius 1.2 comes before
+        // it, at 1.2 along the ray, and one of radius 2 after.
+        let mut rig = square_rig(64);
+        rig.scene_radius_m = Some(2.0);
+        let s3 = 3f64.sqrt();
+        assert!(near(
+            sees(&rig, DVec3::Z, DVec3::X).normalize(),
+            [s3 / 2.0, 0.0, 0.5]
+        ));
+        let down = DVec3::new(1.0, -1.0, 0.0).normalize();
+        rig.scene_radius_m = None;
+        rig.ground_m = Some(1.0);
+        assert!(near(sees(&rig, DVec3::ZERO, down), [1.0, -1.0, 0.0]));
+        // A ray that misses the ground sees the scene, here infinitely
+        // far.
+        assert_eq!(sees(&rig, DVec3::ZERO, DVec3::Y), DVec3::Y);
+        rig.scene_radius_m = Some(1.2);
+        assert!(near(sees(&rig, DVec3::ZERO, down), (down * 1.2).to_array()));
+        rig.scene_radius_m = Some(2.0);
+        assert!(near(sees(&rig, DVec3::ZERO, down), [1.0, -1.0, 0.0]));
+
+        // 6.2's parallax: lens b sees the scene's point e along
+        // lens_from_rig_b · (e − c_b)/|e − c_b|, c_b its centre. From the
+        // pixel there, the render's own path (synth's inverse, `to_rig`,
+        // the ray from the centre) comes back to e: on the sphere, and on
+        // the ground for the last two.
+        let mut rig = square_rig(384);
+        rig.scene_radius_m = Some(2.0);
+        rig.ground_m = Some(1.5);
+        let points = [
+            DVec3::new(2.0, 0.0, 0.0),
+            DVec3::new(1.0, 0.3, 0.1).normalize() * 2.0,
+            DVec3::new(-1.0, 0.2, -0.05).normalize() * 2.0,
+            DVec3::new(0.0, 0.6, 1.0).normalize() * 2.0,
+            DVec3::new(0.8, -1.5, 0.3),
+            DVec3::new(-0.4, -1.5, -1.1),
+        ];
+        let back = |lens: &LensTruth, centre: DVec3, at: DVec2| {
+            let d = lens.model.invert(at, lens.theta_max).unwrap();
+            sees(&rig, centre, lens.to_rig * d)
+        };
+        let mut seen_by = [0; 2];
+        for e in points {
+            for (b, lens) in rig.lenses.iter().enumerate() {
+                let d = lens.to_rig.inverse() * (e - lens.centre_m).normalize();
+                if off_axis(d) > lens.theta_max {
+                    continue;
+                }
+                seen_by[b] += 1;
+                let at = lens.model.forward(d).unwrap();
+                let miss = (back(lens, lens.centre_m, at) - e).length();
+                assert!(miss <= 1e-9, "lens {b}, {e}: {miss} m");
+                // Infinitely far, the point would be elsewhere in the
+                // picture.
+                let far = lens.model.forward(lens.to_rig.inverse() * e).unwrap();
+                assert!((far - at).length() > 0.1, "lens {b}, {e}");
+                // Control: the same pixel seen from the rig's origin.
+                let off = must_fail(
+                    "seen from the rig's origin",
+                    at_most((back(lens, DVec3::ZERO, at) - e).length(), 1e-9),
+                );
+                assert!(off > 1e-3, "lens {b}, {e}: {off} m");
+            }
+        }
+        assert_eq!(seen_by, [5, 5]);
+
+        // In the picture. On a sphere 7 cm out, the Grid's right disc
+        // sits 102.6° off lens 0's axis and 102.7° off lens 1's, 12.6°
+        // and 12.7° past where an infinitely far one would, which is
+        // more than the disc's 8°. The frame, which reaches about 100°
+        // along the image's axes at 384², gets 64 px more on each side.
+        let mut close = square_rig(384);
+        close.scene_radius_m = Some(0.07);
+        for lens in &mut close.lenses {
+            lens.side = 512;
+            if let TruthModel::MeiV6 { cx, cy, .. } = &mut lens.model {
+                *cx += 64.0;
+                *cy += 64.0;
+            }
+        }
+        let green = AXIS_MARKERS[1].1;
+        for (b, lens) in close.lenses.iter().enumerate() {
+            let picture = render_lens(Pattern::Grid, &close, b, 0, 1);
+            let shows_disc = |d: DVec3| {
+                let (i, j) = pixel_at(lens.model.forward(d).unwrap());
+                assert!(i < picture.width && j < picture.height, "({i}, {j})");
+                picture.get(i, j) == green
+            };
+            let e = DVec3::X * 0.07;
+            assert!(
+                shows_disc(lens.to_rig.inverse() * (e - lens.centre_m).normalize()),
+                "lens {b}"
+            );
+            // Control: the disc where an infinitely far scene puts it.
+            must_fail(
+                "the disc where an infinitely far scene puts it",
+                shows_disc(lens.to_rig.inverse() * DVec3::X),
+            );
+        }
+
+        // A ground 7 cm down changes the rows that look down, seen from
+        // the lens's centre, and leaves those that look up. Image +y is
+        // −Y in both lenses, and a radial-only distortion keeps each
+        // pixel on its side of the centre's row.
+        let open = square_rig(192);
+        let mut grounded = open.clone();
+        grounded.ground_m = Some(0.07);
+        for (b, lens) in open.lenses.iter().enumerate() {
+            let sky = render_lens(Pattern::Grid, &open, b, 0, 1);
+            let ground = render_lens(Pattern::Grid, &grounded, b, 0, 1);
+            let cy = lens.model.intrinsics().1.y;
+            let (mut up_changed, mut down_changed, mut down_seen) = (0, 0, 0);
+            for j in 0..192 {
+                for i in 0..192 {
+                    let changed = usize::from(sky.get(i, j) != ground.get(i, j));
+                    if f64::from(j) + 0.5 < cy {
+                        up_changed += changed;
+                    } else if lens
+                        .model
+                        .invert(pixel_centre(i, j), lens.theta_max)
+                        .is_some()
+                    {
+                        down_seen += 1;
+                        down_changed += changed;
+                    }
+                }
+            }
+            assert_eq!(up_changed, 0, "lens {b}");
+            assert!(
+                down_changed * 4 >= down_seen * 3,
+                "lens {b}: {down_changed} of {down_seen}"
+            );
+        }
     }
 
     /// A late lens and a rolling shutter render each row at its own time
     /// under the rig's motion.
     #[test]
-    #[ignore = "M3.3 unit (c)"]
     fn render_lens_renders_late_lenses_and_rows_at_their_times() {
-        todo!()
+        // At 32 frames a second, with a readout of 1/32 s over 64 rows,
+        // every time here is a short binary fraction, so the sums are
+        // exact and the pictures compare to the bit. The rig turns about
+        // +Y at 30°/s throughout, about a degree a frame, which moves
+        // HighFrequency's 1° cells.
+        let mut rig = square_rig(64);
+        rig.motion = Motion {
+            fps: 32.0,
+            turns: vec![Turn {
+                start_s: 0.0,
+                end_s: 2.0,
+                axis: DVec3::Y,
+                deg_per_s: 30.0,
+            }],
+        };
+        let shot = |rig: &RigTruth, lens: usize, frame: u32| {
+            render_lens(Pattern::HighFrequency, rig, lens, frame, 1).pixels
+        };
+        // A lens a frame late shows frame 10 as it shows frame 11 on time,
+        // and the other lens is as it was.
+        let mut late = rig.clone();
+        late.late_frames = [0.0, 1.0];
+        assert_eq!(shot(&late, 1, 10), shot(&rig, 1, 11));
+        assert_eq!(shot(&late, 0, 10), shot(&rig, 0, 10));
+        // Control: the late lens's frame 10 taken for its frame 10 on time.
+        must_fail(
+            "lens 1 a frame late taken for on time",
+            shot(&late, 1, 10) == shot(&rig, 1, 10),
+        );
+
+        // A rolling shutter exposes row y (y + ½)/64 of its readout after
+        // the frame's time, as a global shutter late by (y + ½)/64 of a
+        // frame does.
+        let mut rolling = rig.clone();
+        rolling.readout_s = 1.0 / 32.0;
+        let rolled = shot(&rolling, 0, 10);
+        let row = |pixels: &[Rgb], y: u32| pixels[64 * y as usize..64 * (y as usize + 1)].to_vec();
+        let late_by = |frames: f64| {
+            let mut global = rig.clone();
+            global.late_frames = [frames, 0.0];
+            global
+        };
+        for y in [0, 21, 40, 63] {
+            let global = late_by((f64::from(y) + 0.5) / 64.0);
+            assert_eq!(
+                exposed_at(&rolling, 0, 10, y),
+                exposed_at(&global, 0, 10, y)
+            );
+            assert_eq!(row(&rolled, y), row(&shot(&global, 0, 10), y), "row {y}");
+        }
+        // Controls: row 40 at the frame's own time, and at row 0's.
+        must_fail(
+            "row 40 at the frame's time",
+            row(&rolled, 40) == row(&shot(&rig, 0, 10), 40),
+        );
+        must_fail(
+            "row 40 at row 0's time",
+            row(&rolled, 40) == row(&shot(&late_by(0.5 / 64.0), 0, 10), 40),
+        );
     }
 
     /// The gain and the vignette apply in linear light.
     #[test]
-    #[ignore = "M3.3 unit (c)"]
     fn render_lens_applies_gain_and_vignette_in_linear_light() {
-        todo!()
+        // HighFrequency is 0.9 or 0.1 on every channel, 0.7874122893956174
+        // and 0.010022825574869039 in linear light. A gain of 2 clips the
+        // first at white and takes the second to 0.020045651149738078,
+        // shown as 0.15190017739635536; a gain of ½ takes them to
+        // 0.3937061446978087 and 0.005011412787434520, shown as
+        // 0.6604416292086154 and 0.06111879845794282. A gain of 1 leaves
+        // them, and black stays black.
+        let worked = |k: usize, v: f64| match k {
+            0 if v == 0.9 => 1.0,
+            0 if v == 0.1 => 0.15190017739635536,
+            2 if v == 0.9 => 0.6604416292086154,
+            2 if v == 0.1 => 0.06111879845794282,
+            _ => v,
+        };
+        // The worst channel of `picture` against the worked value of
+        // `plain`'s.
+        let worst = |picture: &[Rgb], plain: &[Rgb]| {
+            picture
+                .iter()
+                .zip(plain)
+                .flat_map(|(got, was)| (0..3).map(move |k| (got[k] - worked(k, was[k])).abs()))
+                .fold(0.0, f64::max)
+        };
+        let mut rig = square_rig(96);
+        let plain = render_lens(Pattern::HighFrequency, &rig, 0, 0, 1).pixels;
+        rig.lenses[0].gain = [2.0, 1.0, 0.5];
+        let gained = render_lens(Pattern::HighFrequency, &rig, 0, 0, 1).pixels;
+        let err = worst(&gained, &plain);
+        assert!(err <= 1e-12, "{err}");
+        // Control: the gain on display values.
+        let display: Vec<Rgb> = plain
+            .iter()
+            .map(|c| std::array::from_fn(|k| (c[k] * rig.lenses[0].gain[k]).min(1.0)))
+            .collect();
+        must_fail(
+            "the gain on display values",
+            at_most(worst(&display, &plain), 1e-12),
+        );
+
+        // A vignette of v1 = −0.1 falls off to 1 − 0.1 (π/2)² =
+        // 0.753259889972766 at 90°, which takes 0.9 to 0.793653466025421
+        // and 0.1 to 0.08273956778423064.
+        let mut lens = rig.lenses[0];
+        lens.gain = [1.0; 3];
+        lens.vignette = [-0.1, 0.0, 0.0];
+        let want = [0.793653466025421, 0.08273956778423064, 0.0];
+        let off = |got: Rgb| {
+            got.iter()
+                .zip(want)
+                .map(|(g, w)| (g - w).abs())
+                .fold(0.0, f64::max)
+        };
+        let at_90 = off(expose([0.9, 0.1, 0.0], &lens, FRAC_PI_2));
+        assert!(at_90 <= 1e-12, "{at_90}");
+        // Control: the falloff on display values.
+        let fall = 0.753259889972766;
+        must_fail(
+            "the falloff on display values",
+            at_most(off([0.9 * fall, 0.1 * fall, 0.0]), 1e-12),
+        );
+        // The render takes each pixel's own θ.
+        rig.lenses[0] = lens;
+        let vignetted = render_lens(Pattern::HighFrequency, &rig, 0, 0, 1);
+        for j in 0..96 {
+            for i in 0..96 {
+                let want = match lens.model.invert(pixel_centre(i, j), lens.theta_max) {
+                    Some(d) => expose(plain[(j * 96 + i) as usize], &lens, off_axis(d)),
+                    None => [0.0; 3],
+                };
+                assert_eq!(vignetted.get(i, j), want, "({i}, {j})");
+            }
+        }
+    }
+
+    /// The Y, Cb and Cr planes of 8-bit `planes`.
+    fn planes_8(planes: YuvPlanes) -> [Vec<u8>; 3] {
+        match planes {
+            YuvPlanes::U8(p) => p,
+            YuvPlanes::U16(_) => panic!("16-bit planes where 8-bit ones were asked for"),
+        }
     }
 
     /// `lens_planes` codes as the X5 does: full range, BT.709, chroma
     /// sited left.
     #[test]
-    #[ignore = "M3.3 unit (c)"]
     fn lens_planes_codes_as_the_x5_does() {
-        todo!()
+        // Full range BT.709 at 8 bits: Y = 255 (0.2126 R + 0.7152 G +
+        // 0.0722 B), Cb = 128 + 255 (B − Y)/1.8556 and Cr = 128 +
+        // 255 (R − Y)/1.5748 with Y from 0 to 1, each rounded and held to
+        // 0 to 255.
+        //   white: Y 255, Cb 128, Cr 128; black: 0, 128, 128
+        //   red: Y 54.21 → 54, Cb 128 − 29.22 = 98.78 → 99,
+        //        Cr 128 + 127.5 = 255.5 → 255
+        //   blue: Y 18.41 → 18, Cb 255.5 → 255, Cr 128 − 11.69 → 116
+        let flat = |c: Rgb| RgbImage {
+            width: 8,
+            height: 8,
+            pixels: vec![c; 64],
+        };
+        let codes = |c: Rgb, coding: Coding, want: [u8; 3]| -> Result<(), [Vec<u8>; 3]> {
+            let planes = planes_8(lens_planes(&flat(c), coding));
+            let sizes = planes.iter().map(Vec::len).eq([64, 16, 16]);
+            let held = planes
+                .iter()
+                .zip(want)
+                .all(|(p, w)| p.iter().all(|&v| v == w));
+            if sizes && held { Ok(()) } else { Err(planes) }
+        };
+        let flats: [(Rgb, [u8; 3]); 4] = [
+            ([1.0; 3], [255, 128, 128]),
+            ([0.0; 3], [0, 128, 128]),
+            ([1.0, 0.0, 0.0], [54, 99, 255]),
+            ([0.0, 0.0, 1.0], [18, 255, 116]),
+        ];
+        for (c, want) in flats {
+            assert_eq!(codes(c, Coding::X5, want), Ok(()), "{c:?}");
+        }
+        // Control: limited range, whose white is 235.
+        let limited = Coding {
+            format: YuvFormat {
+                full_range: false,
+                ..Coding::X5.format
+            },
+            ..Coding::X5
+        };
+        let e = must_fail("limited range", codes([1.0; 3], limited, [255, 128, 128]));
+        assert_eq!(e[0][0], 235);
+        // At 10 bits, white is 1023 and no colour 512.
+        let ten = Coding {
+            bits: 10,
+            ..Coding::X5
+        };
+        let YuvPlanes::U16([y, u, v]) = lens_planes(&flat([1.0; 3]), ten) else {
+            panic!("8-bit planes at 10 bits");
+        };
+        assert!(y.iter().all(|&s| s == 1023) && u.iter().chain(&v).all(|&s| s == 512));
+
+        // Siting. A red ramp R = x/15 across 16 columns has
+        // Cr = 128 + 127.5 R. Sited left, chroma column c weighs columns
+        // 2c − 1, 2c and 2c + 1 by ¼, ½ and ¼, so R = 2c/15 and
+        // Cr = 128 + 17c wherever the edge doesn't reach, c = 1 to 7.
+        // Centre-sited, the mean of columns 2c and 2c + 1,
+        // R = (4c + 1)/30, would give 132.25 + 17c.
+        let ramp = |down: bool| RgbImage {
+            width: 16,
+            height: 16,
+            pixels: (0..256u32)
+                .map(|n| {
+                    let t = if down { n / 16 } else { n % 16 };
+                    [f64::from(t) / 15.0, 0.0, 0.0]
+                })
+                .collect(),
+        };
+        let sited_left = |cr: &[u8]| -> Result<(), (usize, u8)> {
+            for (n, &v) in cr.iter().enumerate() {
+                let c = n % 8;
+                if (1..8).contains(&c) && usize::from(v) != 128 + 17 * c {
+                    return Err((n, v));
+                }
+            }
+            Ok(())
+        };
+        let [_, _, across] = planes_8(lens_planes(&ramp(false), Coding::X5));
+        assert_eq!(sited_left(&across), Ok(()));
+        // Control: synth's `to_yuv`, whose 4:2:0 chroma is centre-sited.
+        let [_, _, centred] = planes_8(to_yuv(&ramp(false), 8, &Coding::X5.format));
+        let (n, v) = must_fail("centre-sited chroma", sited_left(&centred));
+        assert_eq!(usize::from(v), 132 + 17 * (n % 8));
+
+        // Down, chroma row r sits midway between rows 2r and 2r + 1 and
+        // weighs rows 2r − 1 to 2r + 2 by ⅛, ⅜, ⅜ and ⅛, so
+        // R = (2r + ½)/15 and Cr = 132.25 + 17r → 132 + 17r, for r = 1
+        // to 6.
+        let midway = |cr: &[u8]| -> Result<(), (usize, u8)> {
+            for (n, &v) in cr.iter().enumerate() {
+                let r = n / 8;
+                if (1..7).contains(&r) && usize::from(v) != 132 + 17 * r {
+                    return Err((n, v));
+                }
+            }
+            Ok(())
+        };
+        let [_, _, down] = planes_8(lens_planes(&ramp(true), Coding::X5));
+        assert_eq!(midway(&down), Ok(()));
+        // Control: chroma sited with the top row, R = 2r/15, which gives
+        // 128 + 17r.
+        let top = Coding {
+            siting: ChromaSiting::TopLeft,
+            ..Coding::X5
+        };
+        let [_, _, topped] = planes_8(lens_planes(&ramp(true), top));
+        let (n, v) = must_fail("chroma sited with the top row", midway(&topped));
+        assert_eq!(usize::from(v), 128 + 17 * (n / 8));
     }
 
     /// A test binary's render cache renders a static scene once and keys
     /// it by rig truth, scene and frame (7.1).
     #[test]
-    #[ignore = "M3.3 unit (c)"]
     fn the_render_cache_renders_a_static_scene_once() {
-        todo!()
+        // The scenes the cache keeps across frames are the same at every
+        // frame, on a 1° grid of directions over the sphere; Grid's
+        // marker and counter move.
+        let dirs: Vec<DVec3> = (0..180)
+            .flat_map(|a| (0..360).map(move |b| lens_dir(f64::from(a) + 0.5, f64::from(b))))
+            .collect();
+        for pattern in Pattern::ALL {
+            let changes = dirs
+                .iter()
+                .any(|&d| crate::color(pattern, d, 0) != crate::color(pattern, d, 123));
+            assert_eq!(changes, moves(pattern), "{pattern:?}");
+        }
+
+        let cache = RenderCache::new();
+        let rig = square_rig(32);
+        let render = |pattern: Pattern, rig: &RigTruth, lens: usize, frame: u32| {
+            cache.render(pattern, rig, lens, frame, 1)
+        };
+        let first = render(Pattern::SeamLines, &rig, 0, 0);
+        assert!(Arc::ptr_eq(
+            &first,
+            &render(Pattern::SeamLines, &rig, 0, 57)
+        ));
+        assert_eq!(cache.made(), 1);
+        assert_eq!(
+            first.pixels,
+            render_lens(Pattern::SeamLines, &rig, 0, 57, 1).pixels
+        );
+        // The lens, the samples, the scene and the truth are each in the
+        // key.
+        let mut brighter = rig.clone();
+        brighter.lenses[0].gain = [1.5; 3];
+        let others = [
+            render(Pattern::SeamLines, &rig, 1, 0),
+            cache.render(Pattern::SeamLines, &rig, 0, 0, 2),
+            render(Pattern::HighFrequency, &rig, 0, 0),
+            render(Pattern::SeamLines, &brighter, 0, 0),
+        ];
+        assert!(others.iter().all(|other| !Arc::ptr_eq(&first, other)));
+        assert_eq!(cache.made(), 5);
+        // Grid moves, so each of its frames is its own.
+        let grid = render(Pattern::Grid, &rig, 0, 0);
+        assert!(Arc::ptr_eq(&grid, &render(Pattern::Grid, &rig, 0, 0)));
+        // Control: Grid's frames 0 and 1 kept as one.
+        must_fail(
+            "Grid's frames 0 and 1 kept as one",
+            Arc::ptr_eq(&grid, &render(Pattern::Grid, &rig, 0, 1)),
+        );
+        assert_eq!(cache.made(), 7);
+
+        // Through a turn from 1 s to 2 s at 30 frames a second, the
+        // frames of each rest share a render, frame 30 at the turn's start
+        // among rest 0's, and frames in the turn don't.
+        let mut turning = rig.clone();
+        turning.motion = Motion {
+            fps: 30.0,
+            turns: vec![Turn {
+                start_s: 1.0,
+                end_s: 2.0,
+                axis: DVec3::Y,
+                deg_per_s: 20.0,
+            }],
+        };
+        let at = |frame: u32| render(Pattern::SeamLines, &turning, 0, frame);
+        assert!(Arc::ptr_eq(&at(0), &at(30)));
+        assert!(Arc::ptr_eq(&at(60), &at(75)));
+        assert!(!Arc::ptr_eq(&at(0), &at(60)));
+        assert_ne!(at(45).pixels, at(46).pixels);
+        // A frame kept from earlier in its rest is the frame rendered
+        // alone, to the bit.
+        assert_eq!(
+            at(75).pixels,
+            render_lens(Pattern::SeamLines, &turning, 0, 75, 1).pixels
+        );
+        // Control: frames 45 and 46, in the turn, kept as one.
+        must_fail(
+            "frames in the turn kept as one",
+            Arc::ptr_eq(&at(45), &at(46)),
+        );
+        // With a 50 ms readout, frame 29's last rows are exposed after
+        // 1 s, in the turn, while all of frame 28's are before.
+        let mut rolling = turning.clone();
+        rolling.readout_s = 0.05;
+        let rolled = |frame: u32| render(Pattern::SeamLines, &rolling, 0, frame);
+        assert!(Arc::ptr_eq(&rolled(0), &rolled(28)));
+        must_fail(
+            "frame 29 kept with rest 0",
+            Arc::ptr_eq(&rolled(0), &rolled(29)),
+        );
+
+        // Threads that ask for one picture at once get one render.
+        let fresh = RenderCache::new();
+        let pictures: Vec<Arc<RgbImage>> = std::thread::scope(|s| {
+            let asks: Vec<_> = (0..4)
+                .map(|_| s.spawn(|| fresh.render(Pattern::SeamLines, &rig, 0, 0, 1)))
+                .collect();
+            asks.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(fresh.made(), 1);
+        assert!(pictures.iter().all(|p| Arc::ptr_eq(p, &pictures[0])));
+        assert!(std::ptr::eq(RenderCache::shared(), RenderCache::shared()));
+    }
+
+    /// Whether the directions `theta` degrees off `lens`'s axis along its
+    /// image's +x, +y, −x and −y all land outside its frame, or the first
+    /// that lands inside.
+    fn cut(lens: &LensTruth, theta: f64) -> Result<(), DVec2> {
+        let side = f64::from(lens.side);
+        for phi in [0.0, 90.0, 180.0, 270.0] {
+            let at = lens.model.forward(lens_dir(theta, phi)).unwrap();
+            if (0.0..side).contains(&at.x) && (0.0..side).contains(&at.y) {
+                return Err(at);
+            }
+        }
+        Ok(())
+    }
+
+    /// The X5-like truth at 768² under maps A, B and C: centres 2 to 3 px
+    /// off the slot's on each axis, and a frame that cuts the image
+    /// circle on all four sides at 106°, where r is 393 to 399 px under C.
+    #[test]
+    fn x5_like_cuts_its_circle_on_all_four_sides() {
+        let cal = x5_like();
+        for canvas in [TruthCanvas::A, TruthCanvas::B, TruthCanvas::C] {
+            let planted = Planted {
+                canvas,
+                ..planted(TruthEuler::PLACEHOLDER)
+            };
+            let rig = compose(&cal, &planted, 0, [X5_LIKE_SIDE; 2]);
+            for (t, lens) in rig.lenses.iter().enumerate() {
+                let c = lens.model.intrinsics().1;
+                let off = (c - DVec2::splat(384.0)).abs();
+                assert!(
+                    off.min_element() >= 2.0 && off.max_element() <= 3.0,
+                    "{canvas:?}, track {t}: centre {c}"
+                );
+                assert_eq!(lens.theta_max, IMAGE_CIRCLE_DEG.to_radians());
+                assert_eq!(cut(lens, IMAGE_CIRCLE_DEG), Ok(()), "{canvas:?}, track {t}");
+                // Control: 95° off the axis, inside on all four sides.
+                must_fail("95° taken for the circle's edge", cut(lens, 95.0));
+                if canvas == TruthCanvas::C {
+                    for k in 0..8 {
+                        let d = lens_dir(IMAGE_CIRCLE_DEG, f64::from(k) * 45.0);
+                        let r = (lens.model.forward(d).unwrap() - c).length();
+                        assert!((393.0..=399.0).contains(&r), "track {t}, {k}: r = {r}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// `kb_like` swaps each lens for an equidistant KB lens of
+    /// `KB_LIKE_K` on the same centre that reaches as far along +x at
+    /// 106°, and keeps the rest of the rig.
+    #[test]
+    fn kb_like_reaches_as_far_as_the_lens_it_replaces() {
+        let rig = compose(
+            &x5_like(),
+            &planted(TruthEuler::PLACEHOLDER),
+            0,
+            [X5_LIKE_SIDE; 2],
+        );
+        let kb = kb_like(&rig);
+        assert_eq!(
+            RigTruth {
+                lenses: rig.lenses,
+                ..kb.clone()
+            },
+            rig
+        );
+        let edge = lens_dir(IMAGE_CIRCLE_DEG, 0.0);
+        let reach = |model: &TruthModel| model.forward(edge).unwrap().x;
+        for (mei, lens) in rig.lenses.iter().zip(&kb.lenses) {
+            let TruthModel::Kb { base, f, cx, cy, k } = lens.model else {
+                panic!("{:?} for a KB lens", lens.model);
+            };
+            assert_eq!((base, k), (KbBase::Equidistant, KB_LIKE_K));
+            assert_eq!(
+                LensTruth {
+                    model: mei.model,
+                    ..*lens
+                },
+                *mei
+            );
+            assert_eq!(lens.model.forward(DVec3::Z), Some(mei.model.intrinsics().1));
+            let err = (reach(&lens.model) - reach(&mei.model)).abs();
+            assert!(err <= 1e-9, "{err} px");
+            assert_eq!(cut(lens, IMAGE_CIRCLE_DEG), Ok(()));
+            let (rad, px) = round_trip(&lens.model, 106.0, |at| lens.model.inverse(at));
+            assert!(rad <= 1e-12 && px <= 1e-9, "{rad} rad, {px} px");
+            // Control: Mei's own focal length for the KB lens's.
+            let naive = TruthModel::Kb {
+                base,
+                f: mei.model.intrinsics().0.x,
+                cx,
+                cy,
+                k,
+            };
+            assert_ne!(f, mei.model.intrinsics().0.x);
+            must_fail(
+                "Mei's focal length",
+                at_most((reach(&naive) - reach(&mei.model)).abs(), 1e-9),
+            );
+        }
+    }
+
+    /// The cost of a frame of the X5-like rig on both lenses at 768² and
+    /// ss = 2 (7.1 guesses about 2 s on 4 threads).
+    #[test]
+    #[ignore = "tier2: benchmark, the CPU only"]
+    fn bench_render_lens_x5_like_pair() {
+        let rig = compose(
+            &x5_like(),
+            &planted(TruthEuler::PLACEHOLDER),
+            0,
+            [X5_LIKE_SIDE; 2],
+        );
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(16);
+        bench::note(format!("render_lens on {threads} threads"));
+        bench::measure("render_lens: X5-like, 2 × 768², ss 2", "s", || {
+            let start = std::time::Instant::now();
+            for lens in 0..2 {
+                std::hint::black_box(render_lens(Pattern::SeamLines, &rig, lens, 0, 2));
+            }
+            start.elapsed().as_secs_f64()
+        });
     }
 }
