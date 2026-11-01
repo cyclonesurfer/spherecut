@@ -1143,6 +1143,20 @@ fn each_bad_token_is_an_error_at_its_byte() {
     ] {
         assert_eq!(Generation::of_word(word), g, "{word:#x}");
     }
+    // Field 136's values (§3.5): 4 is V6, as on the X5; 5 (V8) and 0 are
+    // none of the four.
+    for (v, g) in [
+        (1, Some(Generation::V1)),
+        (2, Some(Generation::V2)),
+        (3, Some(Generation::V3)),
+        (4, Some(Generation::V6)),
+        (0, None),
+        (5, None),
+        (6, None),
+        (u64::MAX, None),
+    ] {
+        assert_eq!(Generation::of_offset_version(v), g, "{v}");
+    }
 
     // Pat's V3 with token k's text replaced by `text`, and where token
     // k is.

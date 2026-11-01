@@ -76,6 +76,19 @@ impl Generation {
             .find(|g| u32::from(g.code()) == word >> 16)
     }
 
+    /// The generation the metadata's field 136 (`offset_version`) says
+    /// the camera uses: 1 V1, 2 V2, 3 V3, 4 V6 (§3.5); None for any other
+    /// value, 5 (V8) among them, which no string here is of.
+    pub fn of_offset_version(v: u64) -> Option<Generation> {
+        match v {
+            1 => Some(Generation::V1),
+            2 => Some(Generation::V2),
+            3 => Some(Generation::V3),
+            4 => Some(Generation::V6),
+            _ => None,
+        }
+    }
+
     /// The code bits 16 and up of its packed word hold.
     fn code(self) -> u8 {
         match self {
