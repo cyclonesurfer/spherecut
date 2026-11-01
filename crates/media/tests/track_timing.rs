@@ -11,14 +11,17 @@
 //! reader. No bytes, and no cut of a file, make it panic.
 //!
 //! Budget (M3 plan 4.1 rule 5): 3 s for the suite at the default 256
-//! cases; the property tests run at `PROPTEST_CASES=100000` apart.
+//! cases, which each test prints its time against; the property tests
+//! run at `PROPTEST_CASES=100000` apart. Section 19.6 names no budget for
+//! P-TRK, so this suite sets its own.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use proptest::collection::vec;
 use proptest::option;
@@ -37,6 +40,40 @@ const RATE_1: u32 = 0x0001_0000;
 
 /// Why a file with no `moov` box has no track.
 const NO_MOOV: &str = "the file has no `moov` box, so no index of the media";
+
+/// The suite's budget in seconds, at the default number of cases.
+const BUDGET_S: f64 = 3.0;
+
+/// When the suite's first test began.
+static BEGAN: OnceLock<Instant> = OnceLock::new();
+
+/// A test's clock, which prints as the test ends how long it took and
+/// how long the suite has run, against the suite's budget. The tests run
+/// side by side, so none of them can time the rest: the last line
+/// printed is the suite's time.
+struct Timed {
+    name: &'static str,
+    began: Instant,
+}
+
+fn timed(name: &'static str) -> Timed {
+    BEGAN.get_or_init(Instant::now);
+    Timed {
+        name,
+        began: Instant::now(),
+    }
+}
+
+impl Drop for Timed {
+    fn drop(&mut self) {
+        let suite = BEGAN.get_or_init(Instant::now).elapsed().as_secs_f64();
+        eprintln!(
+            "{}: {:.3} s; the suite {suite:.3} s so far, of its {BUDGET_S} s budget",
+            self.name,
+            self.began.elapsed().as_secs_f64()
+        );
+    }
+}
 
 fn bx(t: &[u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut v = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
@@ -257,6 +294,7 @@ fn x5_lens() -> Spec {
 
 #[test]
 fn the_tables_of_a_known_file() {
+    let _time = timed("the_tables_of_a_known_file");
     // Lens 1's runs are split where lens 0's aren't: the same times.
     let lens1 = Spec {
         stts: vec![(60, 1001), (54, 1001)],
@@ -308,6 +346,7 @@ fn the_tables_of_a_known_file() {
 
 #[test]
 fn an_edit_list_moves_the_first_frame() {
+    let _time = timed("an_edit_list_moves_the_first_frame");
     // 90 frames at 1/15360, 512 ticks apart, in a movie at 1/1000.
     let at = |v: u8, edits: &[EditSpec], movie: u32| {
         let s = Spec {
@@ -447,6 +486,7 @@ fn an_edit_list_moves_the_first_frame() {
 
 #[test]
 fn composition_offsets_set_the_first_frame() {
+    let _time = timed("composition_offsets_set_the_first_frame");
     // I0 P3 B1 B2 in decode order, shown a frame later than decoded: at
     // 512, 2048, 1024 and 1536, so the first is shown at 512, and at 0
     // once the edit list skips the delay, as FFmpeg's muxer writes it.
@@ -496,6 +536,7 @@ fn composition_offsets_set_the_first_frame() {
 
 #[test]
 fn a_track_without_stss_has_every_sample_sync() {
+    let _time = timed("a_track_without_stss_has_every_sample_sync");
     let all = timing(&file(1000, &[Spec::new(15360, &[(10, 512)]).boxes()]), 0).unwrap();
     assert_eq!(all.stss, None);
     let listed = |stss: &[u32], frames: u32| {
@@ -532,6 +573,7 @@ fn a_track_without_stss_has_every_sample_sync() {
 
 #[test]
 fn bad_tables_are_errors_naming_their_box() {
+    let _time = timed("bad_tables_are_errors_naming_their_box");
     let good = Spec {
         ctts: Some((0, vec![(90, 0)])),
         stss: Some(vec![1, 31, 61]),
@@ -632,6 +674,7 @@ fn splice(f: &[u8], at: usize, cut: usize, bytes: &[u8], around: &[&Mp4Box]) -> 
 
 #[test]
 fn a_box_the_reader_loses_is_an_error_naming_its_parent() {
+    let _time = timed("a_box_the_reader_loses_is_an_error_naming_its_parent");
     // `stss` last in `stbl`, as on the X5, and two tracks.
     let s = Spec {
         stss: Some(vec![1, 31, 61]),
@@ -699,6 +742,7 @@ fn a_box_the_reader_loses_is_an_error_naming_its_parent() {
 
 #[test]
 fn stts_agree_over_the_common_prefix() {
+    let _time = timed("stts_agree_over_the_common_prefix");
     let t = |timescale: u32, stts: &[(u32, u32)]| {
         timing(&file(1000, &[Spec::new(timescale, stts).boxes()]), 0).unwrap()
     };
@@ -744,6 +788,7 @@ fn stts_agree_over_the_common_prefix() {
 
 #[test]
 fn streams_are_numbered_as_ffmpeg_numbers_them() {
+    let _time = timed("streams_are_numbered_as_ffmpeg_numbers_them");
     let video = Spec::new(15360, &[(10, 512)]).boxes();
     let mvhd_box = bx(b"mvhd", &mvhd(1000));
     // iTunes-style metadata: an encoder tag, and cover art.
@@ -809,6 +854,7 @@ fn streams_are_numbered_as_ffmpeg_numbers_them() {
 
 #[test]
 fn a_cut_or_missing_moov_is_an_error_naming_it() {
+    let _time = timed("a_cut_or_missing_moov_is_an_error_naming_it");
     let f = file(30000, &[x5_lens().boxes(), x5_lens().boxes()]);
     let whole = timing(&f, 1).unwrap();
     let moov = f.windows(4).position(|w| w == b"moov").unwrap() - 4;
@@ -919,6 +965,7 @@ fn temp_dir(name: &str) -> TempDir {
 
 #[test]
 fn ffmpeg_s_files_time_as_its_demuxer_reads_them() {
+    let _time = timed("ffmpeg_s_files_time_as_its_demuxer_reads_them");
     let dir = temp_dir("track-timing-ffmpeg");
     let plain = MuxOptions::default();
     let negative = MuxOptions {
@@ -1009,6 +1056,7 @@ fn ffmpeg_s_files_time_as_its_demuxer_reads_them() {
 
 #[test]
 fn edits_put_in_by_hand_time_as_ffmpeg_s_demuxer_reads_them() {
+    let _time = timed("edits_put_in_by_hand_time_as_ffmpeg_s_demuxer_reads_them");
     let dir = temp_dir("track-timing-edits");
     // A movie at 30720, whose tick is half the track's.
     let mux = MuxOptions {
@@ -1061,6 +1109,7 @@ fn edits_put_in_by_hand_time_as_ffmpeg_s_demuxer_reads_them() {
 
 #[test]
 fn a_moov_cut_short_is_an_error_naming_it() {
+    let _time = timed("a_moov_cut_short_is_an_error_naming_it");
     // FFmpeg's muxer writes `moov` last, as cameras do.
     let dir = temp_dir("track-timing-cut");
     let path = written(&dir.0, "whole", &[("g", "6")], 0, &MuxOptions::default());
@@ -1244,11 +1293,11 @@ fn holds(t: &TrackTiming) -> Result<(), TestCaseError> {
     Ok(())
 }
 
+// The properties, each run whole by a test below that times it.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(cases()))]
 
-    #[test]
-    fn tables_read_back_as_written((s, movie) in spec()) {
+    fn tables_read_back_as_written_cases((s, movie) in spec()) {
         let f = file(movie, &[s.boxes(), audio(3)]);
         match (timing(&f, 0), first_pts_by_sample(&s, movie)) {
             (Ok(t), Some(first)) => {
@@ -1274,8 +1323,7 @@ proptest! {
         }
     }
 
-    #[test]
-    fn mismatches_are_the_first_samples_that_differ(
+    fn mismatches_are_the_first_samples_that_differ_cases(
         (a, _) in spec(),
         (b, _) in spec(),
         same_rate in any::<bool>(),
@@ -1302,8 +1350,7 @@ proptest! {
         prop_assert_eq!(ta.stss_mismatch(&tb), stss_mismatch_by_sample(&ta, &tb));
     }
 
-    #[test]
-    fn any_table_bytes_are_read_or_refused(
+    fn any_table_bytes_are_read_or_refused_cases(
         (s, movie) in spec(),
         bad in vec((0usize..10, payload()), 1..4),
         mvhd_bytes in option::of(payload()),
@@ -1333,8 +1380,7 @@ proptest! {
         }
     }
 
-    #[test]
-    fn cut_and_damaged_files_are_read_or_refused(
+    fn cut_and_damaged_files_are_read_or_refused_cases(
         (s, movie) in spec(),
         cut in any::<prop::sample::Index>(),
         flips in vec((any::<prop::sample::Index>(), any::<u8>()), 0..6),
@@ -1352,8 +1398,7 @@ proptest! {
         }
     }
 
-    #[test]
-    fn any_bytes_are_read_or_refused(
+    fn any_bytes_are_read_or_refused_cases(
         bytes in vec(any::<u8>(), 0..300),
         in_moov in any::<bool>(),
     ) {
@@ -1365,4 +1410,34 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn tables_read_back_as_written() {
+    let _time = timed("tables_read_back_as_written");
+    tables_read_back_as_written_cases();
+}
+
+#[test]
+fn mismatches_are_the_first_samples_that_differ() {
+    let _time = timed("mismatches_are_the_first_samples_that_differ");
+    mismatches_are_the_first_samples_that_differ_cases();
+}
+
+#[test]
+fn any_table_bytes_are_read_or_refused() {
+    let _time = timed("any_table_bytes_are_read_or_refused");
+    any_table_bytes_are_read_or_refused_cases();
+}
+
+#[test]
+fn cut_and_damaged_files_are_read_or_refused() {
+    let _time = timed("cut_and_damaged_files_are_read_or_refused");
+    cut_and_damaged_files_are_read_or_refused_cases();
+}
+
+#[test]
+fn any_bytes_are_read_or_refused() {
+    let _time = timed("any_bytes_are_read_or_refused");
+    any_bytes_are_read_or_refused_cases();
 }
