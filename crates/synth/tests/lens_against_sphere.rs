@@ -28,7 +28,7 @@ use spherecut_synth::lens::{
     self as truth, BlockTruth, CalibTruth, KbBase, Planted, RigTruth, StoredDist, TruthBinding,
     TruthCanvas, TruthEuler, TruthModel, TruthTurn, TruthTz, TruthV6,
 };
-use spherecut_testkit::control::{at_most, must_fail};
+use spherecut_testkit::control::{Comparison, at_least, at_most, must_fail};
 
 /// A test's clock, which prints its time as the test ends.
 struct Timed {
@@ -765,22 +765,58 @@ fn rig_build_agrees_with_synth_compose() {
 
 /// What rung 0 found on one truth model: the farthest sphere's forward
 /// of synth's inverse landed from its pixel, and sphere's inverse from
-/// synth's, with how many pixels were drawn to find the points.
+/// synth's; the largest θ off the axis among the points, in radians; and
+/// how many pixels were drawn to find how many points.
 #[derive(Debug, Clone, Copy)]
 struct Rung0 {
     px: f64,
     rad: f64,
+    reach: f64,
     drawn: usize,
+    points: usize,
 }
 
+impl Rung0 {
+    /// The pixels drawn for each point found.
+    fn per_point(&self) -> f64 {
+        self.drawn as f64 / self.points as f64
+    }
+
+    /// Whether the points reach within [`RUNG0_SHORT`] of `cap`.
+    fn reaches(&self, cap: f64) -> Comparison<f64> {
+        at_least(self.reach, cap - RUNG0_SHORT)
+    }
+
+    /// Whether the pixels drawn for each point are within
+    /// [`RUNG0_DRAWN`] of what `share`, the slot's share within the cap,
+    /// predicts: one over it.
+    fn drew_as_predicted(&self, share: f64) -> Comparison<f64> {
+        at_most((self.per_point() * share - 1.0).abs(), RUNG0_DRAWN)
+    }
+}
+
+/// How far short of its cap rung 0's farthest point may fall. The points
+/// are random pixels, and where the radius barely grows with θ, as near
+/// an orthographic base's end or a fold, the last ring of pixels inside
+/// the cap spans a fraction of a degree: at most 0.20° here, on an
+/// orthographic KB lens, and more on other seeds.
+const RUNG0_SHORT: f64 = DEG;
+/// How far the pixels drawn for each point may be from what the slot's
+/// share within the cap predicts, as a fraction. Drawn for 10k points
+/// they come within 2.5% of it on the lens at ξ = 0, which finds a point
+/// in one pixel of five, the hardest, and within 1% on the others; for
+/// 200k points within 0.3% on all.
+const RUNG0_DRAWN: f64 = 0.05;
+
 /// Rung 0 on one model (4.2): `n` seeded pixels of its slot, of side
-/// `side`, at which synth's inverse finds a direction no further than
-/// `cap` off the axis. A pixel synth finds none for is drawn again. For
-/// each point, sphere's forward of synth's direction against the pixel,
-/// and sphere's inverse of the pixel against synth's direction; either
-/// with no answer is an infinite gap.
+/// `side`, at which synth's inverse, `invert`, finds a direction no
+/// further than `cap` off the axis. A pixel it finds none for is drawn
+/// again, so [`Rung0::drew_as_predicted`] holds it to the slot's share
+/// within the cap. For each point, sphere's forward of synth's direction
+/// against the pixel, and sphere's inverse of the pixel against synth's
+/// direction; either with no answer is an infinite gap.
 fn rung0(
-    truth: &TruthModel,
+    invert: &dyn Fn(DVec2) -> Option<DVec3>,
     sphere: &LensModel,
     side: u32,
     cap: f64,
@@ -793,19 +829,22 @@ fn rung0(
     let mut found = Rung0 {
         px: 0.0,
         rad: 0.0,
+        reach: 0.0,
         drawn: 0,
+        points: 0,
     };
-    let mut points = 0;
-    while points < n {
+    while found.points < n {
         found.drawn += 1;
         let px = DVec2::new(rng.range(0.0, s), rng.range(0.0, s));
-        let Some(d) = truth.inverse(px) else {
+        let Some(d) = invert(px) else {
             continue;
         };
-        if DVec2::new(d.x, d.y).length().atan2(d.z) > cap {
+        let theta = off_axis(d);
+        if theta > cap {
             continue;
         }
-        points += 1;
+        found.points += 1;
+        found.reach = found.reach.max(theta);
         let forward = sphere
             .project(d)
             .map_or(f64::INFINITY, |p| (p - px).length());
@@ -818,11 +857,52 @@ fn rung0(
     found
 }
 
+/// The angle of a lens-frame direction off the axis +z, in radians.
+fn off_axis(d: DVec3) -> f64 {
+    DVec2::new(d.x, d.y).length().atan2(d.z)
+}
+
 /// The θ where rung 0 stops for sphere's `model`: the truth's image
 /// circle (106°), or a degree inside the model's `limit_theta`, where
 /// the radius stops rising, whichever comes first.
 fn cap(model: &LensModel) -> f64 {
     (truth::IMAGE_CIRCLE_DEG * DEG).min(model.limit_theta() - DEG)
+}
+
+/// The share of a `side`² slot that `truth` images no further than `cap`
+/// off its axis, found with its forward alone: the polygon it draws at
+/// `cap` every 0.5° of azimuth, clipped to the slot edge by edge
+/// (Sutherland–Hodgman), its area by the shoelace.
+fn share_within(truth: &TruthModel, side: u32, cap: f64) -> f64 {
+    let s = f64::from(side);
+    let mut poly: Vec<DVec2> = (0..720)
+        .map(|k| {
+            truth
+                .forward(at(cap / DEG, 0.5 * f64::from(k)))
+                .expect("the cap is inside the image")
+        })
+        .collect();
+    // How far inside each edge of the slot a point is.
+    let edges: [fn(DVec2, f64) -> f64; 4] =
+        [|p, _| p.x, |p, s| s - p.x, |p, _| p.y, |p, s| s - p.y];
+    for inside in edges {
+        let mut kept = Vec::with_capacity(poly.len() + 4);
+        for (i, &b) in poly.iter().enumerate() {
+            let a = poly[(i + poly.len() - 1) % poly.len()];
+            let (ia, ib) = (inside(a, s), inside(b, s));
+            if (ia >= 0.0) != (ib >= 0.0) {
+                kept.push(a + (b - a) * (ia / (ia - ib)));
+            }
+            if ib >= 0.0 {
+                kept.push(b);
+            }
+        }
+        poly = kept;
+    }
+    let twice: f64 = (0..poly.len())
+        .map(|i| poly[i].perp_dot(poly[(i + 1) % poly.len()]))
+        .sum();
+    0.5 * twice.abs() / (s * s)
 }
 
 /// θ_d = θ (1 + k1 θ² + … + k5 θ¹⁰).
@@ -831,13 +911,71 @@ fn kb_theta_d(theta: f64, k: [f64; 5]) -> f64 {
     theta * (1.0 + t2 * (k[0] + t2 * (k[1] + t2 * (k[2] + t2 * (k[3] + t2 * k[4])))))
 }
 
+/// The plane radius sin θ/(cos θ + ξ) of a Mei model at θ.
+fn plane(xi: f64, theta: f64) -> f64 {
+    theta.sin() / (theta.cos() + xi)
+}
+
+/// Pat's V6 lens 0 at 768² under map C, read through every term and
+/// scaled to `xi` as 6.3's generator scales it: a term of degree n in m
+/// is multiplied by (m_X5/m_top)^(n − 1), where m_top is the plane radius
+/// at min(100°, the model's end − 1°) for that ξ and m_X5 the X5's at
+/// 100°, and the focal by m_X5/m_top, so the polynomial keeps the X5's
+/// shape over that range and the image the X5's size.
+fn pats_v6_at_xi(xi: f64) -> TruthModel {
+    let end = if xi > 1.0 {
+        (-1.0 / xi).acos()
+    } else {
+        (-xi).acos()
+    };
+    let top = (100.0 * DEG).min(end - DEG);
+    let s = plane(2.0, 100.0 * DEG) / plane(xi, top);
+    let mut d = PATS_D[0];
+    for (i, k) in d[..5].iter_mut().enumerate() {
+        *k *= s.powi(2 * i as i32 + 2);
+    }
+    // Read through every term, d5 and d6 (p1, p2) and d9 and d11 (s1, s3)
+    // are of degree 2, and d7 and d8 (p1', p2') and d10 and d12 (s2, s4)
+    // of degree 4.
+    for i in [5, 6, 9, 11] {
+        d[i] *= s;
+    }
+    for i in [7, 8, 10, 12] {
+        d[i] *= s.powi(3);
+    }
+    let slot = f64::from(truth::X5_LIKE_SIDE) / f64::from(SRC);
+    TruthModel::MeiV6 {
+        xi,
+        fx: 4277.52 * slot * s,
+        fy: 4277.27 * slot * s,
+        cx: 2713.05 * slot,
+        cy: 2689.21 * slot,
+        d,
+        reading: EVERY_TERM,
+    }
+}
+
+/// The ξ rung 0 scales Pat's V6 to, beside its own 2: both of synth's
+/// lifts, where z + ξ vanishes (ξ ≤ 1) and where the projection folds
+/// (ξ > 1).
+const SCALED_XI: [f64; 5] = [0.0, 0.5, 1.0, 1.2, 2.5];
+
+/// The tangential pair, its extension and the prism of rung 0's KB
+/// lenses with every term, which move the image by a few pixels at 106°.
+const KB_P: [f64; 2] = [0.0012, -0.0021];
+const KB_PE: [f64; 2] = [0.0003, -0.0002];
+const KB_S: [f64; 4] = [-0.0011, 0.0002, 0.0008, -0.0001];
+
 /// Rung 0's truth models, named, with their slots' sides: the X5-like
 /// rig's two V3 lenses, composed at 768² under C as 4.2's round trip
 /// takes them; Pat's two V6 lenses at 768² under A, read radially and
-/// through every term; and Kannala–Brandt lenses of `KB_LIKE_K` on each
-/// base on the X5-like lenses' centres, the equidistant ones
-/// `kb_like`'s, the others with the focal that takes the image circle
-/// (or an orthographic base's 90°) as far along +x as the Mei lens's.
+/// through every term; Pat's V6 lens 0 scaled to each of [`SCALED_XI`];
+/// and Kannala–Brandt lenses of `KB_LIKE_K` on each base on the X5-like
+/// lenses' centres, the equidistant ones `kb_like`'s, the others with the
+/// focal that takes the image circle (or an orthographic base's 90°) as
+/// far along +x as the Mei lens's, and an equisolid one a track with its
+/// focal 0.4% longer down than across and every tangential and prism term
+/// non-zero.
 fn rung0_models() -> Vec<(String, TruthModel, u32)> {
     let side = truth::X5_LIKE_SIDE;
     let x5 = truth::compose(
@@ -876,6 +1014,13 @@ fn rung0_models() -> Vec<(String, TruthModel, u32)> {
             models.push((format!("Pat's V6 {name}, track {t}"), lens.model, side));
         }
     }
+    for xi in SCALED_XI {
+        models.push((
+            format!("Pat's V6 scaled to ξ = {xi}"),
+            pats_v6_at_xi(xi),
+            side,
+        ));
+    }
     let kb = truth::kb_like(&x5);
     let circle = truth::IMAGE_CIRCLE_DEG * DEG;
     let theta_d = kb_theta_d(circle, truth::KB_LIKE_K);
@@ -894,27 +1039,45 @@ fn rung0_models() -> Vec<(String, TruthModel, u32)> {
             .unwrap()
             .x
             - cx;
+        let kb_lens = |base: KbBase, f: f64| TruthModel::Kb {
+            base,
+            fx: f,
+            fy: f,
+            cx,
+            cy,
+            k: truth::KB_LIKE_K,
+            p: [0.0; 2],
+            pe: [0.0; 2],
+            s: [0.0; 4],
+        };
+        let equisolid = 2.0 * (theta_d / 2.0).sin();
         for (base, radius) in [
-            (KbBase::Equisolid, 2.0 * (theta_d / 2.0).sin()),
+            (KbBase::Equisolid, equisolid),
             (KbBase::Stereographic, 2.0 * (theta_d / 2.0).tan()),
             (KbBase::Orthographic, 1.0),
         ] {
             models.push((
                 format!("{base:?} KB, track {t}"),
-                TruthModel::Kb {
-                    base,
-                    fx: reach / radius,
-                    fy: reach / radius,
-                    cx,
-                    cy,
-                    k: truth::KB_LIKE_K,
-                    p: [0.0; 2],
-                    pe: [0.0; 2],
-                    s: [0.0; 4],
-                },
+                kb_lens(base, reach / radius),
                 side,
             ));
         }
+        let f = reach / equisolid;
+        models.push((
+            format!("Equisolid KB with every term, track {t}"),
+            TruthModel::Kb {
+                base: KbBase::Equisolid,
+                fx: f,
+                fy: f * 1.004,
+                cx,
+                cy,
+                k: truth::KB_LIKE_K,
+                p: KB_P,
+                pe: KB_PE,
+                s: KB_S,
+            },
+            side,
+        ));
     }
     models
 }
@@ -923,22 +1086,29 @@ fn rung0_models() -> Vec<(String, TruthModel, u32)> {
 /// 10k seeded points per truth model, within 1e-6 px and 1e-7 rad.
 ///
 /// Every truth model synth renders comes up: V3 Mei, V6 Mei under two
-/// readings, and Kannala–Brandt on each of its four bases. The points
+/// readings and at six ξ from 0 to 2.5, and Kannala–Brandt on each of its
+/// four bases, with and without tangential and prism terms. The points
 /// are seeded pixels of each slot that synth's inverse finds a direction
 /// for, up to the image circle or a degree inside the model's limit; and
 /// beside the forward, sphere's own inverse of each pixel lands within
-/// 1e-7 rad of synth's. Controls: the wrong V6 reading, which both checks
-/// see, and equidistant applied to Mei data.
+/// 1e-7 rad of synth's. The points reach within a degree of that cap, and
+/// the pixels drawn for them are what the slot's share within the cap
+/// predicts, so synth's inverse refuses no part of the image. Controls:
+/// the wrong V6 reading, which both checks see; equidistant applied to
+/// Mei data; a KB lens's terms dropped at the boundary; and an inverse
+/// that refuses past 95°, which both the reach and the draws see.
 #[test]
 fn rung0_sphere_forward_of_synth_inverse_is_the_identity() {
     let _t = timed("rung0_sphere_forward_of_synth_inverse_is_the_identity");
     let models = rung0_models();
-    assert_eq!(models.len(), 14);
+    assert_eq!(models.len(), 21);
+    let mut shortest = f64::INFINITY;
     for (i, (name, truth, side)) in models.iter().enumerate() {
         let sphere = lens_model(truth);
         let cap = cap(&sphere);
+        let share = share_within(truth, *side, cap);
         let found = rung0(
-            truth,
+            &|p| truth.inverse(p),
             &sphere,
             *side,
             cap,
@@ -946,17 +1116,32 @@ fn rung0_sphere_forward_of_synth_inverse_is_the_identity() {
             0x0005_eed0 + i as u64,
         );
         eprintln!(
-            "rung 0, {name}: within {:.2e} px and {:.2e} rad, out to {:.2}°, {} pixels drawn",
+            "rung 0, {name}: within {:.2e} px and {:.2e} rad, out to {:.2}° of its {:.2}°, \
+             {:.3} pixels drawn a point against the {:.3} its share of the slot predicts",
             found.px,
             found.rad,
+            found.reach / DEG,
             cap / DEG,
-            found.drawn
+            found.per_point(),
+            1.0 / share
         );
         assert!(
             found.px <= RUNG0_PX && found.rad <= RUNG0_RAD,
             "{name}: {found:?}"
         );
+        assert_eq!(found.reaches(cap).passes(), Some(true), "{name}: {found:?}");
+        assert_eq!(
+            found.drew_as_predicted(share).passes(),
+            Some(true),
+            "{name}: {found:?} against a share of {share}"
+        );
+        shortest = shortest.min(found.reach - cap);
     }
+    eprintln!(
+        "rung 0: {} models, the farthest point at most {:.3}° short of its cap",
+        models.len(),
+        -shortest / DEG
+    );
 
     // The controls, on 1000 points each.
     let (_, truth, side) = models
@@ -974,7 +1159,14 @@ fn rung0_sphere_forward_of_synth_inverse_is_the_identity() {
         dist: Canonical::v6(d, V6Reading::RADIAL_ONLY),
         ..unified
     });
-    let wrong = rung0(truth, &radially, *side, cap(&radially), 1000, 0x0bad);
+    let wrong = rung0(
+        &|p| truth.inverse(p),
+        &radially,
+        *side,
+        cap(&radially),
+        1000,
+        0x0bad,
+    );
     let px = must_fail("the wrong V6 reading, forward", at_most(wrong.px, RUNG0_PX));
     let rad = must_fail(
         "the wrong V6 reading, inverse",
@@ -997,11 +1189,12 @@ fn rung0_sphere_forward_of_synth_inverse_is_the_identity() {
         pe: [0.0; 2],
         s: [0.0; 4],
     });
+    let mei_cap = cap(&lens_model(truth));
     let wrong = rung0(
-        truth,
+        &|p| truth.inverse(p),
         &equidistant,
         *side,
-        cap(&lens_model(truth)),
+        mei_cap,
         1000,
         0x0bad,
     );
@@ -1010,4 +1203,52 @@ fn rung0_sphere_forward_of_synth_inverse_is_the_identity() {
         at_most(wrong.px, RUNG0_PX),
     );
     eprintln!("equidistant applied to Mei data: {px:.1} px off");
+
+    // An inverse that refuses past 95° reaches 11° short of the X5-like
+    // lens's 106°, and draws far more pixels for each point than its
+    // share predicts.
+    let refusing = |p: DVec2| truth.inverse(p).filter(|&d| off_axis(d) <= 95.0 * DEG);
+    let short = rung0(&refusing, &lens_model(truth), *side, mei_cap, 1000, 0x0bad);
+    let reach = must_fail(
+        "an inverse that refuses past 95°, its reach",
+        short.reaches(mei_cap),
+    );
+    let off = must_fail(
+        "an inverse that refuses past 95°, its draws",
+        short.drew_as_predicted(share_within(truth, *side, mei_cap)),
+    );
+    eprintln!(
+        "an inverse that refuses past 95°: out to {:.2}°, {:.0}% more pixels drawn a point",
+        reach / DEG,
+        off * 100.0
+    );
+
+    let (name, truth, side) = models
+        .iter()
+        .find(|(name, ..)| name == "Equisolid KB with every term, track 0")
+        .unwrap();
+    let LensModel::Kb(with_terms) = lens_model(truth) else {
+        unreachable!("{name} is KB");
+    };
+    assert!(with_terms.fy != with_terms.fx && with_terms.p != [0.0; 2]);
+    let dropped = LensModel::Kb(KbLens {
+        fy: with_terms.fx,
+        p: [0.0; 2],
+        pe: [0.0; 2],
+        s: [0.0; 4],
+        ..with_terms
+    });
+    let wrong = rung0(
+        &|p| truth.inverse(p),
+        &dropped,
+        *side,
+        cap(&dropped),
+        1000,
+        0x0bad,
+    );
+    let px = must_fail(
+        "the KB lens's focals and terms dropped at the boundary",
+        at_most(wrong.px, RUNG0_PX),
+    );
+    eprintln!("the KB lens's focals and terms dropped: {px:.2} px off");
 }
