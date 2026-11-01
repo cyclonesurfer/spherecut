@@ -3591,7 +3591,7 @@ mod tests {
         let threads = std::thread::available_parallelism()
             .map_or(1, |n| n.get())
             .min(16);
-        bench::note(format!("render_lens on {threads} threads"));
+        bench::note(format!("render_lens threads: {threads}"));
         bench::measure("render_lens: X5-like, 2 × 768², ss 2", "s", || {
             let start = std::time::Instant::now();
             for lens in 0..2 {
