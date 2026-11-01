@@ -8,7 +8,8 @@
 //!   (0 the back, 1 the screen side) and `K` 0 for a master, 1 for a
 //!   proxy, so `_00_` and `_10_` are the lenses of a two-file camera and
 //!   `_01_` or the ONE X2's `_11_` its proxy. A `-trim` copy is a clip of
-//!   its own.
+//!   its own. camera's `insta360::companions` reads these names (M3 plan
+//!   5.4); this module only sorts what it gives.
 //! - GoPro (gopro.md 2.5): `G?ccnnnn.ext`, chapter `cc` of recording
 //!   `nnnn`, with `GL` (or `.LRV`) the proxy; and the older `GOPRnnnn`
 //!   and `GPccnnnn`.
@@ -19,8 +20,10 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 use serde_json::{Map, Value};
+use spherecut_camera::insta360::{NameRole, Recording, companions};
 
 use crate::roots::{EntryKind, Listing};
 use crate::text;
@@ -113,13 +116,9 @@ pub struct Grouped {
 /// What a name says about its clip.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
-    Insta360 {
-        pro: bool,
-        date: String,
-        time: String,
-        /// The sequence number with any suffix, `-trim` included.
-        seq: String,
-    },
+    /// The recording, its sequence number with any suffix, `-trim`
+    /// included.
+    Insta360(Recording),
     GoPro {
         recording: String,
     },
@@ -170,7 +169,7 @@ pub fn group(listing: &Listing) -> Grouped {
             .or(found.first())
             .and_then(|(.., m)| *m);
         let recorded = match &key {
-            Key::Insta360 { date, time, .. } => Some(format!(
+            Key::Insta360(Recording { date, time, .. }) => Some(format!(
                 "{}-{}-{}T{}:{}:{}",
                 &date[..4],
                 &date[4..6],
@@ -202,10 +201,10 @@ fn classify(name: &OsStr) -> Option<(Key, Role)> {
     if !VIDEO.contains(&ext.as_str()) {
         return None;
     }
-    let stem_str = std::str::from_utf8(stem).ok();
-    if let Some(found) = stem_str.and_then(|s| insta360(s, &ext)) {
+    if let Some(found) = name.to_str().and_then(insta360) {
         return Some(found);
     }
+    let stem_str = std::str::from_utf8(stem).ok();
     if let Some(found) = stem_str.and_then(|s| gopro(s, &ext)) {
         return Some(found);
     }
@@ -229,47 +228,17 @@ fn digits(s: &str, n: usize) -> bool {
     s.len() == n && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// `[PRO_](VID|LRV)_YYYYMMDD_HHMMSS_LK_NNN[-trim]`.
-fn insta360(stem: &str, ext: &str) -> Option<(Key, Role)> {
-    if !matches!(ext, "insv" | "lrv" | "mp4") {
-        return None;
-    }
-    let (pro, rest) = match stem.strip_prefix("PRO_") {
-        Some(rest) => (true, rest),
-        None => (false, stem),
+/// `[PRO_](VID|LRV)_YYYYMMDD_HHMMSS_LK_NNN[-trim].ext`, as camera's
+/// [`companions`] reads a name: the recording, and the file's role in
+/// it.
+fn insta360(name: &str) -> Option<(Key, Role)> {
+    let read = companions(Path::new(name)).name?;
+    let role = match read.role {
+        NameRole::Lens0 => Role::Lens0,
+        NameRole::Lens1 => Role::Lens1,
+        NameRole::Proxy => Role::Proxy,
     };
-    let mut parts = rest.splitn(5, '_');
-    let kind = parts.next()?;
-    let (date, time, lk, seq) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
-    let proxy_name = match kind {
-        "VID" => false,
-        "LRV" => true,
-        _ => return None,
-    };
-    let number = seq.split(['-', '(', ' ']).next().unwrap_or("");
-    if !digits(date, 8) || !digits(time, 6) || !digits(lk, 2) || number.is_empty() {
-        return None;
-    }
-    if !number.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let lk = lk.as_bytes();
-    let role = if proxy_name || lk[1] == b'1' || ext == "lrv" {
-        Role::Proxy
-    } else if lk[0] == b'1' {
-        Role::Lens1
-    } else {
-        Role::Lens0
-    };
-    Some((
-        Key::Insta360 {
-            pro,
-            date: date.into(),
-            time: time.into(),
-            seq: seq.into(),
-        },
-        role,
-    ))
+    Some((Key::Insta360(read.recording), role))
 }
 
 /// `G?ccnnnn` with `?` the encoding (`GL` the proxy), or the older

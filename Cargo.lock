@@ -3072,6 +3072,7 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_json",
+ "spherecut-camera",
  "spherecut-core",
  "spherecut-export",
  "spherecut-media",
