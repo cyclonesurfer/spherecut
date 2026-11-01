@@ -371,8 +371,8 @@ A report:
 | `camera` | object, or null | `vendor`, `model`, `firmware`, `serial` (strings or null; an Insta360 file's model, firmware and serial are its trailer's), `layout` (one of `equirect_tagged`, `equirect_likely`, `insta360_dual_fisheye`, `go_pro_eac`, `dji_dual_fisheye`, `low_res_companion`, `unknown`), `evidence` (strings) |
 | `lenses` | object, or null | An Insta360 dual-fisheye master's two lens streams: `tracks` (their FFmpeg indices, in file order). Null for any other file, an LRV among them, whose one picture holds both lenses |
 | `calibration` | object, or null | The calibration an Insta360 file's trailer holds, when a string of it parses: `generations` (those whose working string parses, oldest first, of `v1`, `v2`, `v3` and `v6`), `in_use` (the one the camera says it uses, when its string parses: `v6` on the X5; or null), `canvas` (`[width, height]` of the side-by-side picture the strings are in: the one in use's, else the newest's), `window` (the part of each lens's square the tracks show: `src` (the square on the canvas), `dst` (the track's) and `offset`, each a pair; or null), `hash` (16 hex digits: FNV-1a 64 over the working strings of `v1`, `v2`, `v3` and `v6` in that order, each followed by a NUL byte, a missing one by the NUL alone; a project's snapshot of the calibration records the same hash, M3 plan 11.1) |
-| `companion` | object, or null | The recording's other file, by its name, when it is there: an Insta360 master's LRV (`LRV_…_01_NNN.lrv` beside `VID_…_00_NNN.insv`) or an LRV's master. `path` (beside the file, as the file's path was given), `verified` (whether the two files' exposure records (4) are byte for byte the same, so the bytes say they are one recording's), `why` (when not verified, why: the two are paired by name only; else null). Null when there is no such file or the file has no trailer |
-| `exposure_entries` | integer, or null | How many 16-byte items an Insta360 trailer's exposure record (4) holds: one a frame the camera exposed, from a few before the tracks' first |
+| `companion` | object, or null | The recording's other file, by its name, when it is there: an Insta360 master's LRV (`LRV_…_01_NNN.lrv` beside `VID_…_00_NNN.insv`) or an LRV's master. `path` (beside the file, as the file's path was given), `verified` (whether the two files' exposure records (4) are byte for byte the same, so the bytes say they are one recording's), `why` (when not verified, why: the two are paired by name only; else null). Null when there is no such file, the file has no trailer, its name isn't an Insta360 camera's, or it is lens 1's file (`_10_`) of a camera that writes one file a lens; the agent's `probe` also leaves it out when the other file isn't beneath a root |
+| `exposure_entries` | integer, or null | How many 16-byte items an Insta360 trailer's exposure record (4) holds: one a frame the camera exposed, from a few before the tracks' first. Null when the file has no trailer, its trailer no exposure record, or the record can't be read (a `bad_trailer` warning says why) |
 | `records` | array, or null | An Insta360 trailer's records, as its index lists them: `id` and `size` (the record's bytes, without its footer). Null for a file without a trailer |
 | `structure` | object | How much of the structure was checked for damage: `{"check": "full"}` (MP4/MOV: every top-level box and the sample tables in `moov`, but not a fragmented file's fragments: the sample tables in its `moof` boxes (`trun`) aren't checked), `{"check": "length"}` (Matroska: only the Segment's length), or `{"check": "none", "why": string}` |
 | `damage` | array of problems | Why the file looks truncated or corrupt; empty for a healthy file |
@@ -612,9 +612,10 @@ adds:
 
 With `--file`, `result` adds `file`, what doctor found of a camera's
 file (M3 plan 5.4): whether it can be stitched, and each lens stream's
-first frame decoded on the path the viewer would take (VA-API on the
-render node doctor checked, else software). Without `--file` there is
-no `file`.
+first frame decoded on the path `frame --decoder auto` takes (VA-API on
+the render node doctor checked, else software; D39). The viewer chooses
+its own decoder from doctor's checks and may take another: Vulkan
+Video, on a discrete GPU where it works. Without `--file` there is no `file`.
 
 | Field | Type | What |
 |---|---|---|

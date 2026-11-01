@@ -151,8 +151,9 @@ enum Cmd {
         #[arg(long)]
         render_node: Option<PathBuf>,
         /// Also check a camera's file: whether it can be stitched (its
-        /// calibration is there), whether both lenses decode on the path
-        /// the viewer takes, and what is missing when not.
+        /// calibration is there), whether both lenses decode as `frame
+        /// --decoder auto` decodes (VA-API on the render node, else
+        /// software), and what is missing when not.
         #[arg(long, value_name = "FILE")]
         file: Option<PathBuf>,
         /// Print one JSON document instead of text (docs/cli-json.md).
@@ -611,8 +612,10 @@ fn doctor(render_node: &Path, file: Option<&Path>, json: bool) -> Result<Exit> {
             Ok(exit)
         };
     };
-    // Each lens decoded as the viewer would: VA-API on the render node
-    // doctor checked, else software (D39).
+    // Each lens decoded as `frame --decoder auto` decodes (D39): VA-API on
+    // the render node doctor checked, else software. The viewer chooses
+    // from doctor's checks instead (D34), and on a discrete GPU where
+    // Vulkan Video works it takes that.
     let opts = still::Options {
         render_node: Some(render_node.to_path_buf()),
         ..still::Options::default()

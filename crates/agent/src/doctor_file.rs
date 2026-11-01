@@ -1,7 +1,11 @@
 //! What `spherecut doctor --file` says of a camera's file (M3 plan 5.4),
 //! M3.2's unit (c): whether it can be stitched (its calibration is
-//! there), whether both lenses decode on the path the viewer would take,
-//! and, when not, what is missing.
+//! there), whether both lenses decode on the path its caller chooses,
+//! and, when not, what is missing. The CLI chooses `frame --decoder
+//! auto`'s (D39): VA-API on the render node doctor checked, else
+//! software. That need not be the viewer's, which chooses from doctor's
+//! checks (D34) and on a discrete GPU where Vulkan Video works takes
+//! that.
 //!
 //! The built-in geometry table is M3.5's (plan 5.3) and the X5's fit
 //! M3.6's, so every file's geometry is provisional here, and the summary
