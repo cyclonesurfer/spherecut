@@ -1239,38 +1239,58 @@ const TOO_EASY_FPS: f64 = 150.0;
 
 /// The perf clips section's table rows: each clip's size, bitrate, how it
 /// came to be there, and its software decode rate from the benchmarks,
-/// flagged above [`TOO_EASY_FPS`].
+/// flagged above [`TOO_EASY_FPS`]. A pair has a row a lens, with the
+/// lens's own samples, bitrate and decode rate, so that each track is
+/// flagged on its own.
 fn perf_clip_rows(clips: &[Clip], benches: &[Bench]) -> Vec<String> {
-    clips
-        .iter()
-        .map(|c| {
-            let file = c
-                .path
-                .file_name()
-                .map_or_else(|| c.name.clone(), |f| f.to_string_lossy().into_owned());
-            let made = match &c.made {
-                Made::Cached => "cached".to_string(),
-                Made::Now(d) => format!("now, in {:.0} s", d.as_secs_f64()),
-                Made::Failed(why) => format!("**not made**: {why}"),
-            };
-            let size = if c.bytes > 0 {
-                format!("{:.0} MB", c.bytes as f64 / 1e6)
-            } else {
-                String::new()
-            };
-            let rate = c.mbps().map_or(String::new(), |m| format!("{m:.1} Mbit/s"));
+    let decode = |row: String| match benches.iter().find(|b| b.name == row) {
+        Some(b) if b.median > TOO_EASY_FPS => format!(
+            "{:.1} fps, **too easy** (over {TOO_EASY_FPS:.0}: it proves nothing about footage)",
+            b.median
+        ),
+        Some(b) => format!("{:.1} fps", b.median),
+        None => "not measured".to_string(),
+    };
+    let size = |bytes: u64| {
+        if bytes > 0 {
+            format!("{:.0} MB", bytes as f64 / 1e6)
+        } else {
+            String::new()
+        }
+    };
+    let mbps = |m: Option<f64>| m.map_or(String::new(), |m| format!("{m:.1} Mbit/s"));
+    let mut rows = Vec::new();
+    for c in clips {
+        let file = c
+            .path
+            .file_name()
+            .map_or_else(|| c.name.clone(), |f| f.to_string_lossy().into_owned());
+        let made = match &c.made {
+            Made::Cached => "cached".to_string(),
+            Made::Now(d) => format!("now, in {:.0} s", d.as_secs_f64()),
+            Made::Failed(why) => format!("**not made**: {why}"),
+        };
+        if c.track_bytes.is_empty() {
             let row = format!("perf clip {}: software decode", c.name);
-            let decode = match benches.iter().find(|b| b.name == row) {
-                Some(b) if b.median > TOO_EASY_FPS => format!(
-                    "{:.1} fps, **too easy** (over {TOO_EASY_FPS:.0}: it proves nothing about footage)",
-                    b.median
-                ),
-                Some(b) => format!("{:.1} fps", b.median),
-                None => "not measured".to_string(),
-            };
-            format!("| `{file}` | {size} | {rate} | {made} | {decode} |")
-        })
-        .collect()
+            rows.push(format!(
+                "| `{file}` | {} | {} | {made} | {} |",
+                size(c.bytes),
+                mbps(c.mbps()),
+                decode(row)
+            ));
+            continue;
+        }
+        for (k, &bytes) in c.track_bytes.iter().enumerate() {
+            let row = format!("perf clip {} lens {k}: software decode", c.name);
+            rows.push(format!(
+                "| `{file}` lens {k} | {} | {} | {made} | {} |",
+                size(bytes),
+                mbps(c.track_mbps(k)),
+                decode(row)
+            ));
+        }
+    }
+    rows
 }
 
 /// Cargo's target directory as `cargo metadata` gives it, which follows
@@ -1759,7 +1779,9 @@ pub fn run(a: Args) -> Result<()> {
             r,
             "synth's noisy grid in HEVC at about a camera's bitrate, made once and kept in \
              `{}` for the playback benchmarks. Software decode over {TOO_EASY_FPS:.0} fps \
-             would make a clip too easy to say anything about footage.\n",
+             would make a clip too easy to say anything about footage. A two-track clip has \
+             a row a lens: its bitrate from that lens's samples, its decode that lens's \
+             alone.\n",
             media_dir.display()
         );
         let _ = writeln!(
@@ -3152,6 +3174,7 @@ error: 1 target failed:
             made,
             bytes: 250_000_000,
             seconds: 20.0,
+            track_bytes: Vec::new(),
         };
         let clips = [
             clip("hevc8", Made::Cached),
@@ -3174,6 +3197,44 @@ error: 1 target failed:
                 "| `hevc8-8k.mp4` |  |  | **not made**: no libx265 | not measured |",
             ]
         );
+    }
+
+    #[test]
+    fn a_pairs_lenses_are_each_flagged_too_easy_on_their_own() {
+        let pair = Clip {
+            name: "pair".into(),
+            path: PathBuf::from("/t/hw-media/pair.mp4"),
+            made: Made::Cached,
+            bytes: 312_600_000,
+            seconds: 20.0,
+            track_bytes: vec![162_600_000, 150_000_000],
+        };
+        // A row for the file as a whole is no lens's.
+        let benches = parse_benches(
+            "perf clip pair lens 0: software decode\t61\tfps\t60\t62\t3\n\
+             perf clip pair lens 1: software decode\t180\tfps\t170\t190\t3\n\
+             perf clip pair: software decode\t300\tfps\t290\t310\t3\n",
+        );
+        let rows = perf_clip_rows(std::slice::from_ref(&pair), &benches);
+        assert_eq!(
+            rows,
+            [
+                "| `pair.mp4` lens 0 | 163 MB | 65.0 Mbit/s | cached | 61.0 fps |",
+                "| `pair.mp4` lens 1 | 150 MB | 60.0 Mbit/s | cached | 180.0 fps, **too easy** \
+                 (over 150: it proves nothing about footage) |",
+            ]
+        );
+        // Its control: lens 0's row isn't flagged, and the same check fails
+        // the pair rated as one file, whose row a bench of the whole file
+        // flags.
+        let unflagged = |row: &str| !row.contains("too easy");
+        assert!(unflagged(&rows[0]));
+        let whole = Clip {
+            track_bytes: Vec::new(),
+            ..pair
+        };
+        let rows = perf_clip_rows(&[whole], &benches);
+        spherecut_testkit::control::must_fail("the pair rated as one file", unflagged(&rows[0]));
     }
 
     #[test]

@@ -2045,9 +2045,15 @@ fn bench_x5_8k30_zero_copy_vs_copy() {
     }
 }
 
-/// How fast software decodes up to `frames` of `path`, or for `limit`.
-fn software_fps(path: &Path, frames: usize, limit: Duration) -> Result<f64, String> {
-    let mut d = VideoDecoder::open(path, None, None).map_err(|e| e.to_string())?;
+/// How fast software decodes up to `frames` of `path`'s stream `stream`
+/// (FFmpeg's best with `None`), or for `limit`.
+fn software_fps(
+    path: &Path,
+    stream: Option<usize>,
+    frames: usize,
+    limit: Duration,
+) -> Result<f64, String> {
+    let mut d = VideoDecoder::open(path, stream, None).map_err(|e| e.to_string())?;
     let start = Instant::now();
     let mut n = 0;
     while n < frames && start.elapsed() < limit {
@@ -2065,25 +2071,48 @@ fn bench_perf_clips_software_decode() {
     tier2::require_hw_run();
     // A clip hw-test couldn't make leaves the others to measure; with
     // none, this skips with the reason.
+    // A two-track clip is measured a lens at a time, so that hw-test
+    // flags each track on its own.
     let mut missing = None;
     let mut found = 0;
-    for spec in synth_media::perf_clips() {
-        let name = format!("perf clip {}: software decode", spec.name);
-        let path = match tier2::perf_clip(&spec.file_name()) {
+    let clips = synth_media::perf_clips()
+        .into_iter()
+        .map(|s| (s.file_name(), s.name, s.frames, vec![None]));
+    let pairs = synth_media::perf_pairs().into_iter().map(|p| {
+        (
+            p.file_name(),
+            p.name,
+            p.lenses[0].frames,
+            vec![Some(0), Some(1)],
+        )
+    });
+    for (file, clip, frames, streams) in clips.chain(pairs) {
+        let names: Vec<String> = streams
+            .iter()
+            .map(|s| match s {
+                None => format!("perf clip {clip}: software decode"),
+                Some(k) => format!("perf clip {clip} lens {k}: software decode"),
+            })
+            .collect();
+        let path = match tier2::perf_clip(&file) {
             Ok(path) => path,
             Err(why) => {
-                bench::not_measured(&name, &why);
+                for name in &names {
+                    bench::not_measured(name, &why);
+                }
                 missing = Some(why);
                 continue;
             }
         };
         found += 1;
-        let frames = usize::try_from(spec.frames).unwrap_or(usize::MAX).min(300);
-        let measured = bench::try_measure(&name, "fps", || {
-            software_fps(&path, frames, Duration::from_secs(10))
-        });
-        if let Err(why) = measured {
-            bench::not_measured(&name, why);
+        let frames = usize::try_from(frames).unwrap_or(usize::MAX).min(300);
+        for (name, stream) in names.iter().zip(streams) {
+            let measured = bench::try_measure(name, "fps", || {
+                software_fps(&path, stream, frames, Duration::from_secs(10))
+            });
+            if let Err(why) = measured {
+                bench::not_measured(name, why);
+            }
         }
     }
     if let (0, Some(why)) = (found, missing) {
