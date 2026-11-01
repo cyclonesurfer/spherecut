@@ -133,6 +133,19 @@ impl QuarterTurn {
 /// offsets, 1152 values in all. It has no direction field, rig to lens or
 /// lens to rig: the inverse of one value is another, its order reversed
 /// and every sign flipped.
+///
+/// 6.2 leaves two of the labels' readings open, and synth fixes them
+/// here: a sign goes with its angle, not with its place in the order,
+/// and the roll offset is added before the roll's sign is applied. So
+/// angle a turns about `axes[a]` by `signs[a]` · (its stored value, plus
+/// `roll_offset` when a is the roll). Either way the space holds the same
+/// 1152 rotations: the readings decide which value names which, and so
+/// which value is the placeholder and how 6.3's Against-synth test pairs
+/// each `EulerConv` with a `TruthEuler`. M3.3 writes `sphere`'s
+/// `EulerConv` to these readings, field for field.
+/// Two readings stay open for M3.3: how far [`TruthTz::Negated`] reaches,
+/// and which value is the placeholder's "identity with the −90° roll
+/// offset" (7.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TruthEuler {
     /// The axis each stored angle turns about, by angle (yaw, pitch,
@@ -143,7 +156,7 @@ pub struct TruthEuler {
     /// E = R_c · R_b · R_a, acting on column vectors.
     pub order: [Angle; 3],
     /// The sign each stored angle is taken with, by angle (yaw, pitch,
-    /// roll).
+    /// roll), whatever the order.
     pub signs: [Sign; 3],
     /// A quarter turn added to the stored roll before its sign is applied.
     /// Upright X5 video stores a roll of about 90° (3.1).
@@ -211,7 +224,8 @@ pub enum TruthTz {
     /// As stored: lens 1 sits behind lens 0 on lens 0's axis, the
     /// physical layout.
     AsStored,
-    /// Negated.
+    /// Negated. Whether that flips all of t_1, as 6.2's formula reads, or
+    /// only its z is M3.3's to settle.
     Negated,
 }
 
@@ -375,14 +389,15 @@ impl Generation {
     }
 }
 
-/// A block's distortion terms as its generation stores them, in token
-/// order.
+/// Both blocks' distortion terms, as their generation stores them, by
+/// block. One generation holds both, as one calibration string does, so
+/// a calibration whose blocks differ in generation can't be built.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StoredDist {
     /// V3: radial k1, k2 and k3, then Brown's tangential p1 and p2.
-    V3 { k: [f64; 3], p: [f64; 2] },
+    V3 { k: [[f64; 3]; 2], p: [[f64; 2]; 2] },
     /// V6: d0 to d12, read through a [`TruthV6`].
-    V6 { d: [f64; 13] },
+    V6 { d: [[f64; 13]; 2] },
 }
 
 impl StoredDist {
@@ -393,10 +408,20 @@ impl StoredDist {
             StoredDist::V6 { .. } => Generation::V6,
         }
     }
+
+    /// Block `b`'s terms in token order (insta360.md §4.1): k1 k2 k3 p1
+    /// p2, or d0 to d12.
+    pub fn terms(&self, b: usize) -> Vec<f64> {
+        match self {
+            StoredDist::V3 { k, p } => k[b].iter().chain(&p[b]).copied().collect(),
+            StoredDist::V6 { d } => d[b].to_vec(),
+        }
+    }
 }
 
 /// One calibration block's stored numbers, in the calibration canvas's
-/// pixels, degrees and metres, as the string holds them.
+/// pixels, degrees and metres, as the string holds them, but for its
+/// distortion terms, which [`CalibTruth::dist`] holds for both blocks.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlockTruth {
     /// Mei's ξ (2 on the X5).
@@ -411,22 +436,24 @@ pub struct BlockTruth {
     pub ypr_deg: [f64; 3],
     /// The stored translation tx, ty and tz, in metres (block 0's is 0).
     pub t_m: [f64; 3],
-    pub dist: StoredDist,
 }
 
 /// One camera calibration's stored numbers, a calibration string's worth
-/// (insta360.md §4.1, M3 plan 3.1 and 6.1): two blocks of one generation,
-/// the canvas they are in and field 27's window. Block 0 is the canvas's
-/// left; which track each block describes is the planted binding's.
+/// (insta360.md §4.1, M3 plan 3.1 and 6.1): two blocks and their
+/// distortion terms, of one generation, the canvas they are in and field
+/// 27's window. Block 0 is the canvas's left; which track each block
+/// describes is the planted binding's.
 ///
-/// The type doesn't make the two blocks share a generation:
-/// [`CalibTruth::generation`] says whether they do. The tracks' side is
-/// not here either, since it is the recording mode's and not the
-/// calibration's: whatever scales these numbers to a track takes it
-/// beside them, as `Rig::build` (6.2) takes its `sides`.
+/// The generation is the terms' ([`CalibTruth::generation`]), so a
+/// printer needs no other. The tracks' side is not here, since it is the
+/// recording mode's and not the calibration's: whatever scales these
+/// numbers to a track takes it beside them, as `Rig::build` (6.2) takes
+/// its `sides`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CalibTruth {
     pub blocks: [BlockTruth; 2],
+    /// Both blocks' distortion terms.
+    pub dist: StoredDist,
     /// The whole side-by-side canvas, width and height (10752 × 5376 on
     /// the X5): each block's square is its height on a side.
     pub canvas: [u32; 2],
@@ -440,11 +467,9 @@ pub struct CalibTruth {
 }
 
 impl CalibTruth {
-    /// The generation both blocks store their terms in, or `None` when
-    /// they differ, which no calibration string holds.
-    pub fn generation(&self) -> Option<Generation> {
-        let [b0, b1] = self.blocks.map(|b| b.dist.generation());
-        (b0 == b1).then_some(b0)
+    /// The generation both blocks store their terms in.
+    pub fn generation(&self) -> Generation {
+        self.dist.generation()
     }
 }
 
@@ -602,42 +627,117 @@ mod tests {
         assert_eq!(degrees, [0.0, 90.0, -90.0, 180.0]);
     }
 
+    /// The first block whose terms, in token order, aren't `want`'s.
+    fn terms_differ(dist: &StoredDist, want: [&[f64]; 2]) -> Result<(), usize> {
+        match (0..2).find(|&b| dist.terms(b) != want[b]) {
+            Some(b) => Err(b),
+            None => Ok(()),
+        }
+    }
+
     #[test]
-    fn stored_terms_name_their_generation() {
-        // Lens 0 of Pat's V3 string (field 54, the same in every master
-        // and LRV, plan 3.1).
-        let v3 = StoredDist::V3 {
-            k: [0.18632051, 2.04984355, -3.24446917],
-            p: [-0.00143576, -0.00339240],
-        };
-        let block = BlockTruth {
-            xi: 2.0,
-            fx: 4284.62,
-            fy: 4284.28,
-            cx: 2701.13,
-            cy: 2692.13,
-            ypr_deg: [-0.198, 0.211, 90.28],
-            t_m: [0.0; 3],
-            dist: v3,
-        };
+    fn stored_terms_name_their_generation_and_block() {
+        // Pat's V3 and V6 strings, the same in all 7 masters and 7 LRVs
+        // (insta360.md, "Pat's X5 samples", its calibration strings).
+        // Each number is its token as stored, less its trailing zeros:
+        // none is rounded.
+        let (k, p) = (
+            [
+                [0.18632051, 2.04984355, -3.24446917],
+                [0.18940836, 2.07073069, -3.24103332],
+            ],
+            [[-0.00143576, -0.00339240], [0.00013831, -0.00299873]],
+        );
+        let v3_terms: [&[f64]; 2] = [
+            &[
+                0.18632051,
+                2.04984355,
+                -3.24446917,
+                -0.00143576,
+                -0.00339240,
+            ],
+            &[0.18940836, 2.07073069, -3.24103332, 0.00013831, -0.00299873],
+        ];
+        let blocks = [
+            BlockTruth {
+                xi: 2.0,
+                fx: 4284.62,
+                fy: 4284.28,
+                cx: 2701.13,
+                cy: 2692.13,
+                ypr_deg: [-0.198, 0.211, 90.28],
+                t_m: [0.0; 3],
+            },
+            BlockTruth {
+                xi: 2.0,
+                fx: 4291.03,
+                fy: 4291.03,
+                cx: 8069.0,
+                cy: 2684.95,
+                ypr_deg: [0.239, 0.113, 89.107],
+                t_m: [-0.00446, 0.000017, -0.03192],
+            },
+        ];
         let cal = CalibTruth {
-            blocks: [block; 2],
+            blocks,
+            dist: StoredDist::V3 { k, p },
             canvas: [10752, 5376],
             dst: 5312,
             lens_type: 113,
             body: 4,
         };
-        assert_eq!(cal.blocks[1].dist.generation(), Generation::V3);
-        assert_eq!(cal.generation(), Some(Generation::V3));
-        let v6 = StoredDist::V6 { d: [0.0; 13] };
-        assert_eq!(v6.generation(), Generation::V6);
-        // Control: V6's terms aren't taken for V3's.
-        must_fail("V6 terms as V3", v6.generation() == Generation::V3);
-        // Control: a calibration with a block of each generation has none.
-        let mixed = CalibTruth {
-            blocks: [block, BlockTruth { dist: v6, ..block }],
+        assert_eq!(cal.generation(), Generation::V3);
+        assert_eq!(terms_differ(&cal.dist, v3_terms), Ok(()));
+        let d = [
+            [
+                0.28032997,
+                0.89045405,
+                2.04927588,
+                -8.05179787,
+                0.0,
+                0.00120200,
+                -0.00259487,
+                0.02324706,
+                0.00533920,
+                -0.01560208,
+                0.00019357,
+                -0.04580523,
+                0.00197187,
+            ],
+            [
+                0.27665332,
+                0.98522973,
+                1.83605266,
+                -7.99374485,
+                0.0,
+                0.00021056,
+                -0.00147626,
+                0.01940425,
+                0.00331838,
+                -0.01330665,
+                0.00074511,
+                -0.02859299,
+                0.00888746,
+            ],
+        ];
+        let v6 = CalibTruth {
+            dist: StoredDist::V6 { d },
             ..cal
         };
-        must_fail("a V3 block beside a V6 one", mixed.generation().is_some());
+        assert_eq!(v6.generation(), Generation::V6);
+        assert_eq!(terms_differ(&v6.dist, [&d[0], &d[1]]), Ok(()));
+        // Control: the blocks' terms swapped, so that each block would
+        // read the other's.
+        let swapped = StoredDist::V3 {
+            k: [k[1], k[0]],
+            p: [p[1], p[0]],
+        };
+        assert_eq!(
+            must_fail(
+                "each block with the other's terms",
+                terms_differ(&swapped, v3_terms)
+            ),
+            0
+        );
     }
 }
