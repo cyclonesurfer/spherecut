@@ -202,22 +202,24 @@ Current benchmarks:
   over that time) on the gated rows. The gated rows, clip 9 (K1 and K4)
   and `pair-hevc8-2880-2997-noisy-20s` (K2's export half), decode 600
   frames a lens beside an `h264_vaapi` encode of a fixed 3840×2160
-  frame at 30 fps, once to warm up and then three times; a row decides
-  only when each run's encode took 29.5 fps or more in its window, and
-  the verdicts give the encode's rates beside the decode's. The rest
-  decode up to 600 frames once, alone, and a note beside
-  `pair-hevc8-2880-5994-noisy-10s`'s rows says it is P only, where the
-  X5 codes TSA_N on every other picture. For K3 each path also
-  decodes clip 9 alone, as a pair and as lens 0 by itself
-  (`…, <setup>, for K3` and `…, lens 0 only, for K3`). In these runs
-  the consumer lets a pair go only once every channel is full, as a
-  render slower than the decode would, so that all 10 frames of the
-  pair (5 of lens 0) are alive at once; the other rows' consumer takes
-  each pair as it comes, and holds fewer once the decode is the slow
-  side. K3 decides only when each of its runs had all its frames alive
-  at once, and its note gives that peak and the bytes it accounts for
-  beside the growth. Every run is a child process of its own, so that
-  its peak RSS growth is its own. A note gives what doctor's decode
+  frame at 30 fps, once to warm up and then three times; a pass counts
+  only when each run's encode took 29.5 fps or more in its window,
+  while a miss counts whatever the encode took, since a lighter load
+  can only help the decode, and the verdicts give the encode's rates
+  beside the decode's. The rest decode up to 600 frames once, alone,
+  and a note beside `pair-hevc8-2880-5994-noisy-10s`'s rows says it is
+  P only, where the X5 codes TSA_N on every other picture
+  (`synth::media::PERF_PAIR_P_ONLY`, which hw-test's report gives
+  too). For K3 each path also decodes clip 9 alone, as a pair and as
+  lens 0 by itself (`…, <setup>, for K3` and `…, lens 0 only, for K3`).
+  In these runs the consumer lets a pair go only once every channel is
+  full, as a render slower than the decode would, so that all 10 frames
+  of the pair (5 of lens 0) are alive at once; the other rows' consumer
+  takes each pair as it comes, and holds fewer once the decode is the
+  slow side. K3 decides only when each of its runs had all its frames
+  alive at once, and its note gives that peak and the bytes it accounts
+  for beside the growth. Every run is a child process of its own, so
+  that its peak RSS growth is its own. A note gives what doctor's decode
   checks say of each hardware path on the clips' format, and a note per
   K its verdict on this machine by the plan's rule, under the plan's
   name for the machine it was written for (`K4's rule (huginn's 8K30
@@ -251,9 +253,11 @@ Current benchmarks:
   121 frames a lens, coded in the cloud by its x265 3.5, not on the
   full clips: every picture but the IDRs (IDR_N_LP) a TRAIL_R reference
   P frame, at 59.94 too, and one slice a picture with WPP on. The X5
-  codes every other frame at 59.94 as a non-reference TSA_N, which x265
-  3.5 gives only to B-frames, which are reordered; and the masters'
-  slice headers, read in the cloud, show 10 slices at 8K and 5 at 5.7K
+  codes every other frame at 59.94 as a non-reference TSA_N; the 59.94
+  pair asks x265 for no temporal layers, so it is P only whatever the
+  x265, and x265 3.5 couldn't match the X5 there anyway, since it gives
+  TSA_N only to B-frames, which are reordered; and the masters' slice
+  headers, read in the cloud, show 10 slices at 8K and 5 at 5.7K
   with WPP off, and IDR_W_RADL, which x265 3.5 can't match (it refuses
   several slices without WPP, and writes IDR_W_RADL only before RADL
   pictures, which need B-frames). hw-test's Tier 1 codes the 192²
@@ -266,15 +270,22 @@ Current benchmarks:
   found: its bitrate from its own samples, its software decode, and its
   coding, its IDR interval from `stss` and its pictures by NAL type
   ("IDR every 60; TRAIL_R 590, IDR_N_LP 10"), in bold where a picture is
-  neither an IDR nor a TRAIL_R or an IDR is off the interval, and the
-  59.94 pair's rows say it is P only where the X5 codes TSA_N. Nothing
-  reads the full clips' slices. The report's x265 row gives
-  `pkg-config`'s version of the headers where there is one, and the
-  version that the info SEI of a frame hw-test codes names, which is the
-  x265 FFmpeg links: odin's `pkg-config` has no x265 file, so its row
-  read "headers not found" before and gives the SEI's version alone
-  now. A pair's stamp holds that version and the corner codes' layout
-  (`synth::code::FORMAT`), so a pair is made again when either changes.
+  neither an IDR nor a TRAIL_R, an IDR is off the interval ("an IDR off
+  the interval at picture 90"), a place on it has none ("no IDR at
+  picture 120") or `stss` and the coding disagree ("`stss` disagrees at
+  picture 91"), and the 59.94 pair's rows say it is P only where the X5
+  codes TSA_N. Nothing reads the full clips' slices. The report's x265
+  row gives `pkg-config`'s version of the headers where there is one,
+  and the version that the info SEI of a frame hw-test codes names,
+  which is the x265 FFmpeg links: odin's `pkg-config` has no x265 file,
+  so its row read "headers not found" before and gives the SEI's
+  version alone now. A pair's stamp holds that version, the corner
+  codes' layout (`synth::code::FORMAT`) and the noise's format
+  (`synth::media::NOISE_FORMAT`), so a pair is made again when any of
+  them changes. A run that can't read its x265 keeps a pair whose stamp
+  holds all the rest, rather than delete it and perhaps fail to make it
+  again, and the pair's rows say "cached, its x265 not checked (…)"; a
+  pair made on such a run is stamped "x265: not known".
 
 Not benchmarks, but their numbers are in the same notes:
 `list_adapters_and_features` notes each Vulkan adapter's info (with its
