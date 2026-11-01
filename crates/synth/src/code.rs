@@ -17,9 +17,10 @@
 //!
 //! A block must stay clear of the image circle, or it would cover what
 //! the lens shows: [`check_clear`] holds a rendered lens to 7.1's bound,
-//! b ≤ s/2 − |centre offset| − (r(θ_max) + 2)/√2. It is for M3.3's
-//! `render_lens`, which asserts it for every truth it renders; the perf
-//! clips, whose picture is noise, have no circle to keep clear of.
+//! b ≤ s/2 − |centre offset| − (r(θ_max) + 2)/√2.
+//! [`crate::lens::render_lens_coded`] holds every truth it codes to it;
+//! the perf clips, whose picture is noise, have no circle to keep clear
+//! of.
 
 use spherecut_core::video::{ColorFamily, SampleBytes, VideoPlanes};
 use thiserror::Error;
@@ -140,9 +141,10 @@ pub fn block_bound(side: u32, offset: f64, radius: f64) -> f64 {
 }
 
 /// Whether [`block_side`]'s blocks stay clear of a rendered lens's image
-/// circle by 7.1's bound ([`block_bound`]). M3.3's `render_lens` asserts
-/// it for every truth it renders, with the circle's radius at the truth's
-/// `theta_max` and its centre's offset from the square's.
+/// circle by 7.1's bound ([`block_bound`]).
+/// [`crate::lens::render_lens_coded`] checks it for every truth it codes,
+/// with the circle's radius at the truth's `theta_max` and its centre's
+/// offset from the square's.
 pub fn check_clear(side: u32, offset: f64, radius: f64) -> Result<(), CodeError> {
     let block = block_side(side);
     let bound = block_bound(side, offset, radius);

@@ -3,7 +3,10 @@
 //! The render crate's WGSL shaders implement the same functions in `f32`,
 //! and its CPU reference renderer (`spherecut_render::reference`) checks
 //! them against this crate. The synthetic test-media generator uses it to
-//! draw known scenes.
+//! draw known scenes, but not for its lenses: the stitching models
+//! ([`fisheye::Unified`], [`fisheye::KbLens`]) and the lens pair ([`rig`])
+//! are checked against synth's own lens truth, which shares no code with
+//! them (the M3 plan's 4.1 rule 2).
 //!
 //! # Conventions
 //!
@@ -27,6 +30,7 @@ pub mod grab;
 pub mod orient;
 pub mod perspective;
 pub mod pixel;
+pub mod rig;
 pub mod spline;
 
 pub use glam::{DQuat, DVec2};
