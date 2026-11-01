@@ -289,10 +289,11 @@ const GYRO_AT_REST: [u16; 3] = [32768; 3];
 const CALIBRATION_FIELDS: [u32; 8] = [5, 17, 53, 55, 54, 56, 111, 112];
 /// The exposure items the X5 writes before the first frame's and past
 /// the last frame's, by its rate in whole frames a second, rounded up:
-/// on Pat's files ("Pat's X5 samples"), 5 and 2 at 25 fps (take 005), 5
-/// and 3 at 29.97 (004 and 008 to 010), 6 and 4 at 59.94 (006) and 10
-/// and 6 at 119.88 (007). A rate between two rows takes the row above
-/// it, and one past 120 the last.
+/// on Pat's files (insta360.md, "Pat's X5 samples", record 4 and the
+/// IMU against the frames), 5 and 2 at 25 fps (take 005), 5 and 3 at
+/// 29.97 (004 and 008 to 010), 6 and 4 at 59.94 (006) and 10 and 6 at
+/// 119.88 (007). A rate between two rows takes the row above it, and
+/// one past 120 the last.
 const X5_EXPOSURE_MARGINS: [(u64, u64, u64); 4] =
     [(25, 5, 2), (30, 5, 3), (60, 6, 4), (120, 10, 6)];
 
@@ -349,7 +350,8 @@ impl Records {
     /// and the record has 122 items for clip 1's 114 frames. Record 3: a
     /// 1 kHz IMU at rest over record 4's span, as the X5's runs from
     /// within 17 ms of record 4's first item (92 to 190 ms before field
-    /// 24's on Pat's files) to within 48 ms of its last. No thumbnail.
+    /// 24's on Pat's files, "Pat's X5 samples" again) to within 48 ms of
+    /// its last. No thumbnail.
     ///
     /// `cals` holds one calibration of each generation at most, which a
     /// debug build asserts, or none. At a rate under 5 fps, which no
@@ -1267,7 +1269,8 @@ mod tests {
     /// bytes: the tracks' frames and rate, record 4's items and the item
     /// at field 24's time (as tier2_samples.rs's table has them), field
     /// 98's count, field 93, and the IMU's first stamp less field 24's, in
-    /// µs (a throwaway script's read of all 14 files, 2026-11-01).
+    /// µs (a throwaway script's read of all 14 files, 2026-11-01, whose
+    /// figures insta360.md's "Pat's X5 samples" lists).
     struct Take {
         file: &'static str,
         frames: u32,

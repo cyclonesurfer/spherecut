@@ -49,8 +49,11 @@ What they show [bytes]:
   master's frame count at 25 and 29.97 fps, half at 59.94 (95 of 190) and a quarter rounded up
   at 119.88 (147 of 586). Its trailer has the master's records, and **every record but the
   metadata (1) is byte-identical to the master's** on all 7 pairs, the IMU, exposure, 22 and
-  28 included (SHA-256 of each payload, 2026-11-01). The metadata fields listed below match the
-  master's except field 26 index = 1, field 131 = 1, field 132 = 1 (H.264) and field 135 = 7.
+  28 included (SHA-256 of each payload, 2026-11-01). Its metadata is the master's, field for
+  field and byte for byte, the four calibration strings included, but for these, on all 7 pairs
+  [bytes] (M3.2): 9 (the trailer's start, §3.1), 26's index (its item 2) = 1, 36 (a Unix time in
+  ms, under a second from the master's), 44 (1664 × 832, the LRV's own video), 79 and 80
+  (absent), 98's item 5 (the LRV's own frame count), 131 = 1, 132 = 1 (H.264) and 135 = 7.
 - **LRV halves**: the left half is master **track 1** and the right half **track 0**. This is
   shown by the bytes, not inferred: on frame 60 of 004 and of 008, each half's luma correlates
   0.986 to 0.992 with its track scaled to 832², against 0.40 to 0.49 with the other track
@@ -128,6 +131,24 @@ What they show [bytes]:
   | 008 | 8K30 | 966 | 967 / 966 | 32265 | 32233 | 32 233 333 |
   | 009 | 8K30 | 1904 | 1905 / 1904 | 63563 | 63500 | 63 500 000 |
   | 010 | 8K30 | 968 | 969 / 968 | 32332 | 32300 | 32 300 000 |
+- **Record 4 and the IMU against the frames** [bytes] (M3.2). Record 4 holds an item a frame
+  (§3.4), each a frame after the last to within 0.23 ms, from a few frames before the tracks'
+  first to a few past their last, as many as the rate gives: field 24 is exactly the stamp of
+  item 5 at 25 and 29.97 fps, item 6 at 59.94 and item 10 at 119.88 (item 0 is then 200.0,
+  166.8, 100.1 and 83.4 ms before it), and the record runs 2, 3, 4 and 6 items past the last
+  frame. The IMU (record 3) starts within 17 ms of record 4's first item, so 92 to 190 ms
+  before field 24, and ends within 48 ms of its last. An LRV's records 3 and 4 are its
+  master's byte for byte (above), so the same holds there. Times in ms:
+
+  | Take | Rate | Frames a track | Record 4's items | Field 24's item | Items past the last frame | IMU's first − item 0 | IMU's first − field 24 | IMU's last − last item |
+  |---|---|---|---|---|---|---|---|---|
+  | 004 | 29.97 | 114 | 122 | 5 | 3 | +10.5 | −156.4 | +15.3 |
+  | 005 | 25 | 116 | 123 | 5 | 2 | +9.8 | −190.2 | +47.8 |
+  | 006 | 59.94 | 190 | 200 | 6 | 4 | −12.3 | −112.4 | +9.9 |
+  | 007 | 119.88 | 586 | 602 | 10 | 6 | −8.2 | −91.6 | −7.9 |
+  | 008 | 29.97 | 966 | 974 | 5 | 3 | +16.3 | −150.5 | +10.0 |
+  | 009 | 29.97 | 1904 | 1912 | 5 | 3 | +10.9 | −155.9 | +10.4 |
+  | 010 | 29.97 | 968 | 976 | 5 | 3 | +15.4 | −151.5 | +10.2 |
 - **Calibration strings**: all four generations, **byte-identical in all 7 masters and all 7
   LRVs**, so in every mode and take (2026-11-01): they belong to the camera unit. V1, V2 and
   V3 share their centres and angles; V6 is a separate calibration. All four below, copied from
