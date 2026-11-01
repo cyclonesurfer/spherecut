@@ -12,6 +12,17 @@
 //! marker, which the hw-test report shows as "skipped" with the reason. A
 //! Tier 2 test therefore never passes on a machine that lacks what it needs.
 //!
+//! There are two kinds (M3 plan 4.4). **Tier 2h** tests need the hardware,
+//! real time or the GUI, and run only under hw-test: their gates, and the
+//! samples gates `require_samples_dir` and `require_sample` beside them,
+//! call `require_hw_run` first, which skips unless `SPHERECUT_TIER2` is
+//! set. **Tier 2c** tests need Pat's samples and the CPU only, so agents
+//! run them in the cloud while they implement, with `SPHERECUT_TIER2`
+//! unset:
+//! `SPHERECUT_SAMPLES=<folder> cargo test -p <crate> --test <file> -- --ignored <name>`.
+//! They gate on `tier2::require_samples_cpu` alone, which needs only
+//! `SPHERECUT_SAMPLES`; hw-test runs them with the rest.
+//!
 //! # Controls
 //!
 //! Every check has a control that must fail, run on every run
@@ -84,6 +95,25 @@ pub mod tier2 {
     pub fn require_samples_dir() -> PathBuf {
         require_hw_run();
         usable_samples_dir(samples_path())
+    }
+
+    /// The samples directory for a Tier 2c test, one that needs Pat's
+    /// samples and the CPU only: `SPHERECUT_SAMPLES`, or skip when it is
+    /// unset or names no folder. Unlike [`require_samples_dir`] it doesn't
+    /// need hw-test (`SPHERECUT_TIER2`), so the test runs in the cloud too.
+    #[track_caller]
+    pub fn require_samples_cpu() -> PathBuf {
+        samples_cpu_in(std::env::var_os("SPHERECUT_SAMPLES").map(PathBuf::from))
+    }
+
+    /// [`require_samples_cpu`]'s rule, on `SPHERECUT_SAMPLES` as `var`
+    /// holds it.
+    #[track_caller]
+    pub(crate) fn samples_cpu_in(var: Option<PathBuf>) -> PathBuf {
+        let Some(dir) = var else {
+            skip("SPHERECUT_SAMPLES unset: a Tier 2c test needs it to name the samples folder");
+        };
+        usable_samples_dir(dir)
     }
 
     /// The samples directory when there is one, for a test that goes on
@@ -616,6 +646,51 @@ mod tests {
         );
         drop(guard);
         assert!(!base.exists());
+    }
+
+    /// What `f` skipped with, or the folder it returned.
+    fn gate(
+        f: impl FnOnce() -> std::path::PathBuf + std::panic::UnwindSafe,
+    ) -> Result<std::path::PathBuf, String> {
+        std::panic::catch_unwind(f)
+            .map_err(|e| e.downcast_ref::<String>().cloned().unwrap_or_default())
+    }
+
+    #[test]
+    fn the_cpu_gate_returns_the_samples_folder_alone() {
+        // No SPHERECUT_TIER2 asked for: `cargo test` leaves it unset.
+        let base = std::env::temp_dir().join(format!("spherecut-cpu-{}", std::process::id()));
+        let guard = TempDir(base.clone());
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = base.clone();
+        assert_eq!(gate(|| tier2::samples_cpu_in(Some(dir))), Ok(base.clone()));
+        drop(guard);
+    }
+
+    #[test]
+    fn the_cpu_gate_skips_without_its_folder() {
+        use crate::control::must_fail;
+        let missing = std::env::temp_dir().join(format!("spherecut-none-{}", std::process::id()));
+        let named = missing.clone();
+        let why = must_fail(
+            "a missing samples folder",
+            gate(|| tier2::samples_cpu_in(Some(named))),
+        );
+        assert_eq!(
+            why,
+            format!(
+                "TIER2-SKIP: samples directory {} not found",
+                missing.display()
+            )
+        );
+        let why = must_fail(
+            "SPHERECUT_SAMPLES unset",
+            gate(|| tier2::samples_cpu_in(None)),
+        );
+        assert!(
+            why.starts_with("TIER2-SKIP: SPHERECUT_SAMPLES unset"),
+            "{why}"
+        );
     }
 
     #[test]
