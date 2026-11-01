@@ -1307,7 +1307,10 @@ mod text {
     /// GUI's Info pane shows.
     pub fn render_text(r: &ProbeReport) -> String {
         let mut s = String::new();
-        let _ = writeln!(s, "{}", r.path.display());
+        // A file's name, its companion's and its tracks' handler names are
+        // the file system's and the file's, so their control characters
+        // are escaped, as the camera's strings are below.
+        let _ = writeln!(s, "{}", escape_controls(&r.path.to_string_lossy()));
         let _ = writeln!(
             s,
             "  container  {} ({}), {} bytes{}{}",
@@ -1430,7 +1433,7 @@ mod text {
             let _ = writeln!(
                 s,
                 "  companion  {}, {}",
-                c.path.display(),
+                escape_controls(&c.path.to_string_lossy()),
                 if c.verified {
                     "the same exposure record (4): one recording".into()
                 } else {
@@ -1525,7 +1528,7 @@ mod text {
             }
         }
         if let Some(h) = &st.handler {
-            let _ = writeln!(s, "             handler \"{h}\"");
+            let _ = writeln!(s, "             handler \"{}\"", escape_controls(h));
         }
         if !st.disposition.is_empty() {
             let _ = writeln!(s, "             disposition {}", st.disposition.join(", "));
@@ -2004,6 +2007,72 @@ mod tests {
             "the planted text, free of control characters",
             !planted.chars().any(char::is_control),
         );
+    }
+
+    /// Probe's text escapes a track's handler name, which is the file's
+    /// own `hdlr` text, and the file's and its companion's names, as it
+    /// does the camera's strings: the only control characters left are
+    /// the lines' own ends.
+    ///
+    /// Control: each planted text printed as it is holds control
+    /// characters.
+    #[test]
+    fn probe_text_escapes_the_handler_and_the_paths() {
+        use spherecut_testkit::control::must_fail;
+
+        use crate::camera::Companion;
+
+        let (name, lrv, handler) = (
+            "VID_\u{1b}]0;x\u{7}_00_004.insv",
+            "LRV_\u{1b}]0;x\u{7}_01_004.lrv",
+            "INS\u{1b}[2J.HVC",
+        );
+        let mut video = stream(StreamKind::Video);
+        video.handler = Some(handler.into());
+        let report = ProbeReport {
+            path: name.into(),
+            file_size: 1,
+            container: Container {
+                format: "mov,mp4,m4a,3gp,3g2,mj2".into(),
+                format_long: String::new(),
+                duration: None,
+                start_time: None,
+                bit_rate: None,
+                tags: BTreeMap::new(),
+            },
+            streams: vec![video],
+            mp4: None,
+            camera: None,
+            camera_file: CameraFile {
+                companion: Some(Companion {
+                    path: lrv.into(),
+                    verified: true,
+                    why: None,
+                }),
+                ..CameraFile::default()
+            },
+            structure: StructureCheck::Full,
+            damage: Vec::new(),
+            warnings: Vec::new(),
+            ffmpeg_log: Vec::new(),
+        };
+        let text = render_text(&report);
+        let clean = |s: &str| !s.chars().any(|c| c.is_control() && c != '\n');
+        assert!(clean(&text), "{text:?}");
+        for line in [
+            "VID_\\x1b]0;x\\x07_00_004.insv\n".to_owned(),
+            "  companion  LRV_\\x1b]0;x\\x07_01_004.lrv, the same exposure record (4): one recording\n".to_owned(),
+            "             handler \"INS\\x1b[2J.HVC\"\n".to_owned(),
+        ] {
+            assert!(text.contains(&line), "{line:?} in {text}");
+        }
+        for (what, raw) in [
+            ("file's name", name),
+            ("LRV's name", lrv),
+            ("handler", handler),
+        ] {
+            must_fail(&format!("the {what}, printed as it is, clean"), clean(raw));
+        }
     }
 
     #[test]
