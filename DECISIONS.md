@@ -4634,10 +4634,23 @@ frame looking along −Z into a lens frame. Each lens's
 lens_from_rig = E_b · F · Q_tuneᵀ · T_b · S, where Q_tune is the tune's
 yaw, pitch and roll read by `Ypr` as above, so a positive tune yaw turns
 the lens right as seen through it. `sphere::rig` defines the frame, and
-`sphere::fisheye::F` is F. `synth::lens::compose` writes the same
-composition from the plan's text with its own code, and
-`crates/synth/tests/lens_against_sphere.rs` holds the two within 1e-12
-rad on every value of the small enums.
+`sphere::fisheye::F` is F. Block 1's centre
+c_1 = lens_from_rig_0⁻¹ · (sign(tz) · t_1) turns with lens 0's rotation,
+its tune included, as the stored t_1 is in lens 0's frame. Under fitted
+extrinsics both E_b are the identity, and block 1's view frame is
+F⁻¹ · relative · F · S, lens 0's carried by the measured rotation, in
+place of a half turn about the turn axis: untuned,
+lens_from_rig_1 = relative · lens_from_rig_0, and block 1's tune turns
+it in its own view frame whichever way the relative rotation turns it
+over. `synth::lens::compose` writes the same composition from the
+plan's text with its own code, at the default tune and under stored
+extrinsics, and `crates/synth/tests/lens_against_sphere.rs` holds the
+two within 1e-12 rad on every value of the small enums. The rest is
+checked by hand in `crates/sphere/tests/rig.rs`: where the tune sits
+(`rig_tune_turns_each_lens_as_seen`), c_1's turn with lens 0's tune
+(`rig_centre_turns_with_lens_0s_tune`), and the fitted composition at
+half turns about X and Y under either turn axis
+(`rig_fitted_extrinsics_compose_by_hand`).
 
 ## D34. The playback engine
 
@@ -9144,8 +9157,10 @@ polynomial's fold on every call (the scan belongs once per lens, in
 readings named after sources (it would favour one, and video-types'
 names come from a vendor's internals, 4.1 rule 7).
 
-The shader's forward copy (10.3) and `theta_frame`, which bounds the
-feather, are M3.3's other units and complete the plan's row.
+`theta_frame`, which bounds the feather, is M3.3's unit (b), in
+`sphere::rig`. The shader's forward copy is not M3.3's: the slice has
+no WGSL, and 10.3's `fs_rig` is M3.7's (a), which the app's viewer
+takes up in M3.10.
 
 Revisit if: a camera's polynomial folds inside its frame; a lens needs
 more than 20 passes, or its tangential terms are large enough that the
