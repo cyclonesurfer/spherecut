@@ -6,23 +6,26 @@
 //! sections 3 and 4 and the bytes of Pat's samples, sharing no code with
 //! `spherecut_camera`'s reader and parser, which it is there to check
 //! (4.1 rule 2): a bug a shared writer mirrored would go unseen. M3.2
-//! writes the trailer and prints the strings; M3.5 adds `write_insv`, its
-//! `InsvSpec` and the LRV, which call [`append_trailer`] once
-//! `Mp4Writer` has written the tracks.
+//! writes the trailer, gives the records of a master and of its LRV and
+//! prints the strings; M3.5 adds `write_insv` and its `InsvSpec`, which
+//! write both files and call [`append_trailer`] once `Mp4Writer` has
+//! written the tracks.
 //!
 //! The trailer is laid out as the X5's (§3.1 and §3.2): records in
-//! descending id order, each its payload and a 6-byte footer `{u8 format,
-//! u8 id, u32le size}`, every one but the metadata (1) and record 10
-//! starting on a 128 KiB boundary of the file; the metadata last, ending
-//! at the index; the index of 31 10-byte slots `{u8 id, u8 format, u32le
-//! size, u32le offset}` with its own footer (id 0), so that it starts at
-//! EOF − 388; and the 72-byte tail: 32 zeros, the trailer's size E, the
-//! version 3 and the magic. The `inst` box around it has size E + 8. The
-//! X5 itself leaves more room between its records than the next boundary
-//! (Pat's files skip a further 128 KiB after most of them), and its gaps
-//! are mostly zeros, with a few stray bytes in some; a reader finds the
-//! records by the index either way, so synth packs them to the next
-//! boundary and fills the gaps with zeros.
+//! descending id order, each its payload and then six bytes giving its
+//! format, id and payload length, every one but the metadata (1) and
+//! record 10 starting on a 128 KiB boundary of the file; the metadata
+//! last, ending at the index; the index, a table of 31 ten-byte slots
+//! (the id before the format there, then the length and the offset from
+//! the trailer's start) closed by six bytes of its own as record 0, so
+//! that it starts at EOF − 388; and the file's last 72 bytes: 32 zeros,
+//! the trailer's size E, version 3 and the magic. The `inst` box around
+//! it has size E + 8. The X5 itself leaves more room between its records
+//! than the next boundary (Pat's files skip a further 128 KiB after most
+//! of them), and its gaps are mostly zeros, with stray bytes in every one
+//! of Pat's 14 files, most of them in the gaps before records 9, 4 and 2;
+//! a reader finds the records by the index either way, so synth packs
+//! them to the next boundary and fills the gaps with zeros.
 
 use std::cmp::Reverse;
 use std::fs::File;
@@ -255,7 +258,8 @@ pub struct Records {
     pub thumbnail: Option<Thumbnail>,
     /// Record 3, written when it holds an item.
     pub imu: Vec<ImuItem>,
-    /// Record 4, one item a frame, written when it holds an item.
+    /// Record 4, written when it holds an item: in [`Records::x5_like`]'s,
+    /// an item a frame and a few more before and after them.
     pub exposure: Vec<ExposureItem>,
     /// The other records, written as given.
     pub others: Vec<RawRecord>,
@@ -268,7 +272,7 @@ const MODEL: &str = "Insta360 X5";
 const FIRMWARE: &str = "v1.1.22_build1";
 /// The camera's clock at the first frame, in µs (field 24): a second
 /// after it started. The exposure and the IMU are stamped on the same
-/// clock, from here.
+/// clock, and both start before it, as the X5's do.
 const FIRST_FRAME_US: u64 = 1_000_000;
 /// Each frame's shutter time in record 4, in seconds.
 const SHUTTER_S: f64 = 1.0 / 500.0;
@@ -283,6 +287,14 @@ const GYRO_AT_REST: [u16; 3] = [32768; 3];
 /// the original of each generation (§3.5): V1's 5 and 17, V2's 53 and
 /// 55, V3's 54 and 56 and V6's 111 and 112.
 const CALIBRATION_FIELDS: [u32; 8] = [5, 17, 53, 55, 54, 56, 111, 112];
+/// The exposure items the X5 writes before the first frame's and past
+/// the last frame's, by its rate in whole frames a second, rounded up:
+/// on Pat's files ("Pat's X5 samples"), 5 and 2 at 25 fps (take 005), 5
+/// and 3 at 29.97 (004 and 008 to 010), 6 and 4 at 59.94 (006) and 10
+/// and 6 at 119.88 (007). A rate between two rows takes the row above
+/// it, and one past 120 the last.
+const X5_EXPOSURE_MARGINS: [(u64, u64, u64); 4] =
+    [(25, 5, 2), (30, 5, 3), (60, 6, 4), (120, 10, 6)];
 
 /// The fields of a generation's working string and its original.
 fn string_fields(g: Generation) -> [u32; 2] {
@@ -292,40 +304,89 @@ fn string_fields(g: Generation) -> [u32; 2] {
     }
 }
 
+/// Field 136's value for a generation in use (§3.5): 3 for V3, 4 for V6.
+fn offset_version(g: Generation) -> u64 {
+    match g {
+        Generation::V3 => 3,
+        Generation::V6 => 4,
+    }
+}
+
+/// [`X5_EXPOSURE_MARGINS`]' items before the first frame and past the
+/// last at `rate`.
+fn exposure_margins(rate: FrameRate) -> (u64, u64) {
+    let r = rate.as_rational();
+    let whole = |n: i64| u64::try_from(n).unwrap_or(1);
+    let fps = whole(r.num()).div_ceil(whole(r.den()).max(1));
+    let row = X5_EXPOSURE_MARGINS
+        .iter()
+        .find(|&&(up_to, ..)| fps <= up_to)
+        .or(X5_EXPOSURE_MARGINS.last());
+    row.map_or((0, 0), |&(_, before, after)| (before, after))
+}
+
 impl Records {
-    /// An X5-like trailer's records for `frames` frames at `rate`: the
-    /// serial `SYNTH00001` (never Pat's), the model `Insta360 X5`,
-    /// firmware `v1.1.22_build1`, the first frame's time (24), the window
-    /// from `cals`' first canvas and dst (27), fields 62, 64 and 65 for
-    /// the IMU's raw form, its pts and its ranges, 79, 80, 131, 132 and
-    /// 136 as Pat's masters have them, the duration (93) and the first
-    /// frame's time and the frame count (98, items 1 and 5), each of
-    /// `cals` printed ([`print()`]) into its generation's two fields, all
-    /// in field order as the X5 writes them; an exposure item a frame
-    /// and a 1 kHz IMU at rest over the same span, on the camera's clock
-    /// from field 24's time; and no thumbnail. `cals` holds one
-    /// calibration of each generation, or none.
+    /// An X5-like master's records for `frames` frames a track at `rate`,
+    /// as Pat's masters have them ("Pat's X5 samples"), but for the
+    /// serial, `SYNTH00001`, never Pat's.
+    ///
+    /// The metadata, in field order as the X5 writes it: the serial, the
+    /// model `Insta360 X5` and firmware `v1.1.22_build1` (1 to 3); the
+    /// first frame's time on the camera's clock (24); the window from
+    /// `cals`' first canvas and dst (27); the IMU's raw form, its pts and
+    /// its ranges (62, 64, 65); 79, 80, 131 and 132 as Pat's masters
+    /// have them; field 98 with the first frame's time as item 1 and
+    /// `frames + 1` as item 5, the count the X5 gives a master, and field
+    /// 93 that count's length in whole ms, rounded down, ⌊(frames + 1) ×
+    /// 1000 / rate⌋; each of `cals` printed ([`print()`]) into its
+    /// generation's two fields; and field 136 naming the generation in
+    /// use, the newest `cals` holds (4 for V6, else 3 for V3, else none).
+    ///
+    /// Record 4: an item a frame, a frame apart, with the items
+    /// [`X5_EXPOSURE_MARGINS`] gives at `rate` before the first frame's,
+    /// whose stamp is field 24's, and past the last frame's, as the X5
+    /// writes it: so field 24's frame is item 5 at 29.97 fps, not item 0,
+    /// and the record has 122 items for clip 1's 114 frames. Record 3: a
+    /// 1 kHz IMU at rest over record 4's span, as the X5's runs from
+    /// within 17 ms of record 4's first item (92 to 190 ms before field
+    /// 24's on Pat's files) to within 48 ms of its last. No thumbnail.
+    ///
+    /// `cals` holds one calibration of each generation at most, which a
+    /// debug build asserts, or none. At a rate under 5 fps, which no
+    /// camera records at, the items before the first frame's would start
+    /// before the camera's clock does, and start at 0 instead.
     pub fn x5_like(
         cals: &[CalibTruth],
         planted: &Planted,
         frames: u32,
         rate: FrameRate,
     ) -> Records {
+        debug_assert!(
+            Generation::all().all(|g| cals.iter().filter(|c| c.generation() == g).count() <= 1),
+            "x5_like takes one calibration of each generation at most"
+        );
         let r = rate.as_rational();
         let (num, den) = (i128::from(r.num()), i128::from(r.den()));
-        // `n` frames' time in `unit`s a second, to the nearest.
-        let span = |n: u64, unit: i128| {
-            let t = (i128::from(n) * unit * den + num / 2) / num;
+        // `n` frames' time in µs, to the nearest.
+        let us = |n: u64| {
+            let t = (i128::from(n) * 1_000_000 * den + num / 2) / num;
             u64::try_from(t).unwrap_or(u64::MAX)
         };
-        let exposure: Vec<ExposureItem> = (0..u64::from(frames))
+        // The count field 98 gives a master, and its length in ms, rounded
+        // down.
+        let counted = u64::from(frames) + 1;
+        let length_ms = u64::try_from(i128::from(counted) * 1000 * den / num).unwrap_or(u64::MAX);
+        // Item `before` is the first frame's, at field 24's time.
+        let (before, after) = exposure_margins(rate);
+        let origin = FIRST_FRAME_US.saturating_sub(us(before));
+        let exposure: Vec<ExposureItem> = (0..before + u64::from(frames) + after)
             .map(|i| ExposureItem {
-                t_us: FIRST_FRAME_US.saturating_add(span(i, 1_000_000)),
+                t_us: origin.saturating_add(us(i)),
                 seconds: SHUTTER_S,
             })
             .collect();
-        let imu = match exposure.last() {
-            Some(last) => (FIRST_FRAME_US..=last.t_us)
+        let imu = match (exposure.first(), exposure.last()) {
+            (Some(first), Some(last)) => (first.t_us..=last.t_us)
                 .step_by(IMU_PERIOD_US)
                 .map(|t_us| ImuItem {
                     t_us,
@@ -333,7 +394,7 @@ impl Records {
                     gyro: GYRO_AT_REST,
                 })
                 .collect(),
-            None => Vec::new(),
+            _ => Vec::new(),
         };
         let mut metadata = vec![
             Field::string(1, SERIAL),
@@ -345,18 +406,20 @@ impl Records {
             Field::message(65, vec![Field::varint(1, 32), Field::varint(2, 2000)]),
             Field::varint(79, 2),
             Field::varint(80, 1),
-            Field::varint(93, span(u64::from(frames), 1000)),
+            Field::varint(93, length_ms),
             Field::message(
                 98,
-                vec![
-                    Field::varint(1, FIRST_FRAME_US),
-                    Field::varint(5, u64::from(frames)),
-                ],
+                vec![Field::varint(1, FIRST_FRAME_US), Field::varint(5, counted)],
             ),
             Field::varint(131, 4),
             Field::varint(132, 2),
-            Field::varint(136, 4),
         ];
+        let in_use = [Generation::V6, Generation::V3]
+            .into_iter()
+            .find(|&g| cals.iter().any(|c| c.generation() == g));
+        if let Some(g) = in_use {
+            metadata.push(Field::varint(136, offset_version(g)));
+        }
         if let Some(cal) = cals.first() {
             let (src, dst) = (cal.canvas[1], cal.dst);
             let window = [src, src, dst, dst, 0, 0]
@@ -381,6 +444,53 @@ impl Records {
             others: Vec::new(),
         }
     }
+
+    /// The records of the LRV beside a master whose records are `master`,
+    /// for an LRV of `frames` frames, as Pat's X5 writes them ("Pat's X5
+    /// samples"): every record but the metadata is the master's, the
+    /// exposure record (4) among them whatever the LRV's length (the
+    /// 5.7K60 take's LRV has 95 of its master's 190 frames and its 200
+    /// exposure items), and the metadata is the master's with the LRV's
+    /// own fields where the master has them: no 79 or 80, 131 and 132 1
+    /// (one stream, H.264), and item 5 of field 98 the LRV's `frames`.
+    /// Fields 93 and 98's item 1 stay the master's, as on the X5. Of the
+    /// LRV's other fields of its own, 26's index, 44 and 135, `x5_like`
+    /// writes none.
+    pub fn x5_lrv(master: &Records, frames: u32) -> Records {
+        let mut lrv = master.clone();
+        lrv.metadata.retain(|f| !matches!(f.number, 79 | 80));
+        for f in &mut lrv.metadata {
+            match (f.number, &mut f.value) {
+                (131 | 132, v) => *v = Value::Varint(1),
+                (98, Value::Message(items)) => {
+                    for item in items.iter_mut().filter(|item| item.number == 5) {
+                        item.value = Value::Varint(u64::from(frames));
+                    }
+                }
+                _ => {}
+            }
+        }
+        lrv
+    }
+
+    /// Prints `original` into its generation's original field (56 or 112)
+    /// in place of what is there, so that the original copy differs from
+    /// the working string (54 or 111), as an accessory mode might make it
+    /// (insta360.md Q9) and as no file seen has it: the format notes' two
+    /// and Pat's 14 hold the two equal (§4.2). With no original of that
+    /// generation, it is added where field order puts it. For a test that
+    /// tells the two apart.
+    pub fn plant_original(&mut self, original: &CalibTruth, planted: &Planted) {
+        let [_, field] = string_fields(original.generation());
+        let value = Field::string(field, &print(original, planted));
+        match self.metadata.iter_mut().find(|f| f.number == field) {
+            Some(f) => *f = value,
+            None => {
+                let at = self.metadata.partition_point(|f| f.number < field);
+                self.metadata.insert(at, value);
+            }
+        }
+    }
 }
 
 /// The alignment of the X5's records in the file: 128 KiB (§3.2).
@@ -388,17 +498,24 @@ pub const X5_ALIGN: u64 = 128 << 10;
 
 /// The 32 ASCII bytes the trailer ends with (insta360.md §3.1).
 const MAGIC: &[u8; 32] = b"8db42d694ccc418790edff439fe026bf";
-/// The only trailer version documented.
+/// The version at EOF − 36, 3 on every camera the format notes describe
+/// (§3.1).
 const VERSION: u32 = 3;
 /// The `inst` box's header: its size, big-endian, and its type.
 const INST_HEADER: usize = 8;
-/// A record's footer: `{u8 format, u8 id, u32le size}`.
+/// The bytes after each record's payload (§3.2): the format (0 binary, 1
+/// protobuf, 2 JSON), then the id, then the payload's length as a
+/// little-endian u32.
 const FOOTER: usize = 6;
-/// An index slot: `{u8 id, u8 format, u32le size, u32le offset}`.
+/// One slot of the index (§3.2), ten bytes: the id, then the format (the
+/// footer's two the other way round), then the payload's length and its
+/// offset from the trailer's start, each a little-endian u32.
 const SLOT: usize = 10;
 /// The X5's index: 31 slots, slot k for record k.
 const X5_SLOTS: usize = 31;
-/// The tail: 32 zeros, the trailer's size, its version and the magic.
+/// The file's last 72 bytes (§3.1): zeros from EOF − 72, the trailer's
+/// size E at EOF − 40, the version at EOF − 36 and the magic from
+/// EOF − 32.
 const TAIL: usize = 72;
 /// Record 2's header before its planes.
 const THUMBNAIL_HEADER: usize = 40;
@@ -904,9 +1021,9 @@ mod tests {
     /// slots at EOF − 388, slot k listing record k; each record's footer
     /// repeating its slot; each record but 1 and 10 on a 128 KiB boundary
     /// of the file; the records in descending id order with only zeros
-    /// between them (synth's padding: the X5's has a few stray bytes in
-    /// some gaps), 1 and 10 right after the record before; and record 1's
-    /// footer ending where the index starts.
+    /// between them (synth's padding: the X5's has stray bytes in some
+    /// gaps of every file), 1 and 10 right after the record before; and
+    /// record 1's footer ending where the index starts.
     fn read_by_hand(b: &[u8], at: u64) -> Result<TrailerLayout, String> {
         let n = b.len();
         if b[n - 72..n - 40] != [0; 32] {
@@ -1024,10 +1141,11 @@ mod tests {
         let meta = layout.slots[0];
         let start = (meta.offset - at) as usize;
         assert_eq!(&b[start..start + 12], b"\x0a\x0aSYNTH00001");
-        // 30 frames at 29.97: 30 exposure items, and an IMU item a ms
-        // from the first frame to the last, 0 to 967.6 ms.
-        assert_eq!((layout.slots[3].id, layout.slots[3].size), (4, 30 * 16));
-        assert_eq!((layout.slots[2].id, layout.slots[2].size), (3, 968 * 20));
+        // 30 frames at 29.97: 38 exposure items, 5 before the first
+        // frame's and 3 past the last's, and an IMU item a ms over their
+        // 37 frames, 1234.567 ms.
+        assert_eq!((layout.slots[3].id, layout.slots[3].size), (4, 38 * 16));
+        assert_eq!((layout.slots[2].id, layout.slots[2].size), (3, 1235 * 20));
 
         // Controls: the same box read as if one byte later in the file,
         // so that no record is on a boundary; a footer with another id;
@@ -1143,5 +1261,347 @@ mod tests {
         }
         // Control: the clean box differs from itself nowhere.
         must_fail("the clean box against itself", differ(&clean) > 0);
+    }
+
+    /// One of Pat's takes as its master's trailer has it, read from the
+    /// bytes: the tracks' frames and rate, record 4's items and the item
+    /// at field 24's time (as tier2_samples.rs's table has them), field
+    /// 98's count, field 93, and the IMU's first stamp less field 24's, in
+    /// µs (a throwaway script's read of all 14 files, 2026-11-01).
+    struct Take {
+        file: &'static str,
+        frames: u32,
+        rate: FrameRate,
+        items: usize,
+        first: usize,
+        counted: u64,
+        length_ms: u64,
+        imu_from_us: i64,
+    }
+
+    /// Pat's seven takes.
+    fn takes() -> [Take; 7] {
+        let (f25, f30, f60) = (
+            FrameRate::FPS_25,
+            FrameRate::FPS_29_97,
+            FrameRate::FPS_59_94,
+        );
+        let f120 = FrameRate::new(spherecut_core::Rational::new(120000, 1001).unwrap()).unwrap();
+        let take = |file, frames, rate, items, first, counted, length_ms, imu_from_us| Take {
+            file,
+            frames,
+            rate,
+            items,
+            first,
+            counted,
+            length_ms,
+            imu_from_us,
+        };
+        [
+            take("004", 114, f30, 122, 5, 115, 3837, -156_387),
+            take("005", 116, f25, 123, 5, 117, 4680, -190_207),
+            take("006", 190, f60, 200, 6, 191, 3186, -112_408),
+            take("007", 586, f120, 602, 10, 587, 4896, -91_611),
+            take("008", 966, f30, 974, 5, 967, 32265, -150_526),
+            take("009", 1904, f30, 1912, 5, 1905, 63563, -155_919),
+            take("010", 968, f30, 976, 5, 969, 32332, -151_490),
+        ]
+    }
+
+    /// Field `n` of `records`' metadata, or of its message `n` the item
+    /// `item`, as a varint.
+    fn varint(records: &Records, n: u32, item: Option<u32>) -> Option<u64> {
+        let f = records.metadata.iter().find(|f| f.number == n)?;
+        let value = match (&f.value, item) {
+            (v, None) => v,
+            (Value::Message(items), Some(k)) => &items.iter().find(|i| i.number == k)?.value,
+            _ => return None,
+        };
+        match value {
+            Value::Varint(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// `records`, x5_like's for take `t`'s frames and rate, held to the
+    /// take's master: record 4's items; field 24's time that of item
+    /// `t.first` alone, and every item a frame apart, to the µs synth
+    /// rounds to; field 98's item 1 at field 24's time and its count;
+    /// field 93; and the IMU from within 17 ms of the take's first stamp
+    /// (where the X5's starts, within 17 ms of record 4's first item) to
+    /// within a ms of record 4's last item. Or the first that isn't.
+    fn as_take(records: &Records, t: &Take) -> Result<(), String> {
+        let e = &records.exposure;
+        if e.len() != t.items {
+            return Err(format!("{} exposure items, not {}", e.len(), t.items));
+        }
+        let first_us = varint(records, 24, None).ok_or("no field 24")?;
+        let at: Vec<usize> = (0..e.len()).filter(|&i| e[i].t_us == first_us).collect();
+        if at != [t.first] {
+            return Err(format!("field 24 is exposure item {at:?}, not {}", t.first));
+        }
+        let r = t.rate.as_rational();
+        let period_us = 1e6 * r.den() as f64 / r.num() as f64;
+        if let Some(w) = e
+            .windows(2)
+            .find(|w| ((w[1].t_us - w[0].t_us) as f64 - period_us).abs() > 1.0)
+        {
+            return Err(format!(
+                "items {} and {} µs aren't a frame apart",
+                w[0].t_us, w[1].t_us
+            ));
+        }
+        if varint(records, 98, Some(1)) != Some(first_us) {
+            return Err("field 98's item 1 isn't field 24's time".into());
+        }
+        let counted = varint(records, 98, Some(5));
+        if counted != Some(t.counted) {
+            return Err(format!("field 98 counts {counted:?}, not {}", t.counted));
+        }
+        let length = varint(records, 93, None);
+        if length != Some(t.length_ms) {
+            return Err(format!("field 93 is {length:?}, not {}", t.length_ms));
+        }
+        let (Some(imu_first), Some(imu_last)) = (records.imu.first(), records.imu.last()) else {
+            return Err("no IMU".into());
+        };
+        let from = imu_first.t_us as i64 - first_us as i64;
+        if (from - t.imu_from_us).abs() > 17_000 {
+            return Err(format!(
+                "the IMU starts {from} µs from field 24, not about {}",
+                t.imu_from_us
+            ));
+        }
+        let last = e[e.len() - 1].t_us;
+        if !(last.saturating_sub(1000)..=last).contains(&imu_last.t_us) {
+            return Err(format!(
+                "the IMU ends at {}, not by record 4's last item at {last}",
+                imu_last.t_us
+            ));
+        }
+        Ok(())
+    }
+
+    /// `x5_like` for the frames and rate of each of Pat's takes gives what
+    /// the take's master holds: record 4's item count, with field 24's
+    /// frame among earlier items (5 at 25 and 29.97 fps, 6 at 59.94, 10 at
+    /// 119.88), field 98's count of frames + 1, field 93 rounded down and
+    /// an IMU that starts about where the camera's does.
+    ///
+    /// Controls, each failing a check of its own: take 006's records held
+    /// to take 007's; field 24 at the first item, as synth had it before;
+    /// one item a frame late; field 98's item 1 a µs off; field 98
+    /// counting the tracks' frames; field 93 to the nearest ms (3187 on
+    /// 006, where the X5 writes 3186); the IMU from field 24's time; and
+    /// the IMU stopped at the last frame's item.
+    #[test]
+    fn x5_like_holds_what_pats_masters_hold() {
+        let p = planted();
+        let cals = [pats_v3(), pats_v6()];
+        let all = takes();
+        for t in &all {
+            let records = Records::x5_like(&cals, &p, t.frames, t.rate);
+            assert_eq!(as_take(&records, t), Ok(()), "take {}", t.file);
+        }
+
+        let (t006, t007) = (&all[2], &all[3]);
+        let r = Records::x5_like(&cals, &p, t006.frames, t006.rate);
+        let set = |n: u32, item: Option<u32>, v: u64| {
+            let mut r = r.clone();
+            let f = r.metadata.iter_mut().find(|f| f.number == n).unwrap();
+            match (&mut f.value, item) {
+                (Value::Message(items), Some(k)) => {
+                    items.iter_mut().find(|i| i.number == k).unwrap().value = Value::Varint(v)
+                }
+                (value, _) => *value = Value::Varint(v),
+            }
+            r
+        };
+        let e = must_fail("take 006's records held to 007's", as_take(&r, t007));
+        assert_eq!(e, "200 exposure items, not 602");
+        let e = must_fail(
+            "field 24 at the first exposure item",
+            as_take(&set(24, None, r.exposure[0].t_us), t006),
+        );
+        assert_eq!(e, "field 24 is exposure item [0], not 6");
+        let mut late = r.clone();
+        late.exposure[100].t_us += 16_683;
+        let e = must_fail("an exposure item a frame late", as_take(&late, t006));
+        assert!(e.ends_with("aren't a frame apart"), "{e}");
+        let e = must_fail(
+            "field 98's item 1 a µs off",
+            as_take(&set(98, Some(1), 1_000_001), t006),
+        );
+        assert_eq!(e, "field 98's item 1 isn't field 24's time");
+        let e = must_fail(
+            "field 98 counting the tracks' frames",
+            as_take(&set(98, Some(5), 190), t006),
+        );
+        assert_eq!(e, "field 98 counts Some(190), not 191");
+        let e = must_fail(
+            "field 93 to the nearest ms",
+            as_take(&set(93, None, (191 * 1000 * 1001 + 30_000) / 60_000), t006),
+        );
+        assert_eq!(e, "field 93 is Some(3187), not 3186");
+        let mut late_imu = r.clone();
+        late_imu.imu.retain(|i| i.t_us >= FIRST_FRAME_US);
+        let e = must_fail("the IMU from field 24's time", as_take(&late_imu, t006));
+        assert!(e.starts_with("the IMU starts 900 µs from field 24"), "{e}");
+        let last_frame = r.exposure[t006.first + t006.frames as usize - 1].t_us;
+        let mut short_imu = r.clone();
+        short_imu.imu.retain(|i| i.t_us <= last_frame);
+        let e = must_fail(
+            "the IMU stopped at the last frame",
+            as_take(&short_imu, t006),
+        );
+        assert!(e.starts_with("the IMU ends at"), "{e}");
+    }
+
+    /// Field 136, the generation in use, is the newest `x5_like` is
+    /// given: 4 with V6, 3 with V3 alone, none with neither. A debug
+    /// build refuses two calibrations of one generation.
+    ///
+    /// Controls: V3 alone said to be in use as V6, as synth wrote it
+    /// before; and one calibration of each generation, refused.
+    #[test]
+    fn field_136_names_the_newest_generation_given() {
+        let in_use = |cals: &[CalibTruth]| {
+            let r = Records::x5_like(cals, &planted(), 4, FrameRate::FPS_25);
+            varint(&r, 136, None)
+        };
+        let (v3, v6) = (pats_v3(), pats_v6());
+        assert_eq!(in_use(&[v3, v6]), Some(4));
+        assert_eq!(in_use(&[v6, v3]), Some(4));
+        assert_eq!(in_use(&[v6]), Some(4));
+        assert_eq!(in_use(&[v3]), Some(3));
+        assert_eq!(in_use(&[]), None);
+        must_fail("V3 alone in use as V6", in_use(&[v3]) == Some(4));
+        if cfg!(debug_assertions) {
+            let twice = std::panic::catch_unwind(|| {
+                Records::x5_like(&[pats_v3(), pats_v3()], &planted(), 4, FrameRate::FPS_25)
+            });
+            assert!(twice.is_err(), "two V3 calibrations taken");
+            let once = std::panic::catch_unwind(|| {
+                Records::x5_like(&[pats_v3(), pats_v6()], &planted(), 4, FrameRate::FPS_25)
+            });
+            must_fail("one calibration of each generation, refused", once.is_err());
+        }
+    }
+
+    /// Whether `lrv` is the LRV of `master` for `frames` frames as
+    /// x5_lrv's doc says: every record but the metadata the master's;
+    /// the metadata's fields the master's, in its order, but 79 and 80,
+    /// which it lacks, 131 and 132, which are 1, and field 98's item 5,
+    /// which is `frames`. Or the first that isn't.
+    fn lrv_of(lrv: &Records, master: &Records, frames: u64) -> Result<(), String> {
+        if lrv.exposure != master.exposure {
+            return Err("its exposure record isn't the master's".into());
+        }
+        if (&lrv.thumbnail, &lrv.imu, &lrv.others)
+            != (&master.thumbnail, &master.imu, &master.others)
+        {
+            return Err("a record other than 1 and 4 isn't the master's".into());
+        }
+        let kept: Vec<&Field> = master
+            .metadata
+            .iter()
+            .filter(|f| !matches!(f.number, 79 | 80))
+            .collect();
+        let numbers = |fields: &[&Field]| fields.iter().map(|f| f.number).collect::<Vec<_>>();
+        let lrv_fields: Vec<&Field> = lrv.metadata.iter().collect();
+        if numbers(&lrv_fields) != numbers(&kept) {
+            return Err(format!("its fields {:?}", numbers(&lrv_fields)));
+        }
+        for (l, m) in lrv_fields.iter().zip(kept) {
+            let same = match l.number {
+                131 | 132 => l.value == Value::Varint(1),
+                98 => {
+                    varint(lrv, 98, Some(5)) == Some(frames)
+                        && varint(lrv, 98, Some(1)) == varint(master, 98, Some(1))
+                }
+                _ => l == &m,
+            };
+            if !same {
+                return Err(format!("its field {} is {:?}", l.number, l.value));
+            }
+        }
+        Ok(())
+    }
+
+    /// `x5_lrv` keeps the master's records and its exposure record
+    /// whatever the LRV's length, as the 5.7K60 take's LRV of 95 frames
+    /// keeps its master's 200 items, and gives the metadata the LRV's own
+    /// fields.
+    ///
+    /// Controls: the LRV x5_like writes for its own 95 frames, whose
+    /// exposure record isn't the master's; and the master held to be its
+    /// own LRV, which has fields 79 and 80.
+    #[test]
+    fn x5_lrv_keeps_the_masters_records() {
+        let cals = [pats_v3(), pats_v6()];
+        let master = Records::x5_like(&cals, &planted(), 190, FrameRate::FPS_59_94);
+        let lrv = Records::x5_lrv(&master, 95);
+        assert_eq!(lrv_of(&lrv, &master, 95), Ok(()));
+        assert_eq!(lrv.exposure.len(), 200);
+
+        let own = Records::x5_like(&cals, &planted(), 95, FrameRate::FPS_59_94);
+        let e = must_fail("an LRV of its own 95 frames", lrv_of(&own, &master, 95));
+        assert_eq!(e, "its exposure record isn't the master's");
+        let e = must_fail("the master as its own LRV", lrv_of(&master, &master, 191));
+        assert!(
+            e.starts_with("its fields [1, 2, 3, 24, 27, 54, 56, 62, 64, 65, 79,"),
+            "{e}"
+        );
+    }
+
+    /// `plant_original` changes the original copy alone, and adds one in
+    /// field order where there is none.
+    ///
+    /// Control: the working string held to the planted original.
+    #[test]
+    fn plant_original_changes_the_original_alone() {
+        let p = planted();
+        let clean = Records::x5_like(&[pats_v3(), pats_v6()], &p, 4, FrameRate::FPS_25);
+        let mut other = pats_v6();
+        other.blocks[0].fx += 1.0;
+        let mut planted_one = clean.clone();
+        planted_one.plant_original(&other, &p);
+        let changed: Vec<u32> = clean
+            .metadata
+            .iter()
+            .zip(&planted_one.metadata)
+            .filter(|(a, b)| a != b)
+            .map(|(a, _)| a.number)
+            .collect();
+        assert_eq!(changed, [112]);
+        let text = |r: &Records, n: u32| {
+            r.metadata
+                .iter()
+                .find(|f| f.number == n)
+                .map(|f| f.value.clone())
+        };
+        assert_eq!(
+            text(&planted_one, 112),
+            Some(Value::Bytes(print(&other, &p).into_bytes()))
+        );
+        assert_eq!(
+            text(&planted_one, 111),
+            Some(Value::Bytes(PATS_V6.as_bytes().to_vec()))
+        );
+        must_fail(
+            "the working string, the planted original",
+            text(&planted_one, 111) == text(&planted_one, 112),
+        );
+
+        // V3 alone, given V6's original: field 112 after 56, in field
+        // order.
+        let mut v3 = Records::x5_like(&[pats_v3()], &p, 4, FrameRate::FPS_25);
+        v3.plant_original(&pats_v6(), &p);
+        let numbers: Vec<u32> = v3.metadata.iter().map(|f| f.number).collect();
+        assert!(numbers.is_sorted(), "{numbers:?}");
+        assert!(
+            numbers.contains(&112) && !numbers.contains(&111),
+            "{numbers:?}"
+        );
     }
 }
