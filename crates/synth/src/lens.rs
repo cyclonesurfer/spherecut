@@ -594,8 +594,11 @@ pub enum TruthModel {
 
 impl TruthModel {
     /// Synth's forward: lens-frame direction to pixel, term by term from
-    /// 6.1. `None` where the model has no image (the lift's denominator
-    /// at or below 0, or an orthographic base past 90°).
+    /// 6.1. `None` where the model has no image: the lift's denominator
+    /// at or below 0, a KB lens's back axis (θ = 180°, which has no
+    /// azimuth, so that the directions about it land all round the rim
+    /// and none of them is its image), or θ_d past the base's image (past
+    /// 90° on an orthographic base, from 180° on a stereographic one).
     pub fn forward(&self, d: DVec3) -> Option<DVec2> {
         self.pixel(self.param(d)?)
     }
@@ -620,7 +623,9 @@ impl TruthModel {
 
     /// The point w the model distorts for direction `d`: the plane point
     /// m = (x, y)/(z + ξ) of a Mei model, or θ (cos φ, sin φ) for `Kb`,
-    /// which [`TruthModel::lift`] turns back into the direction.
+    /// which [`TruthModel::lift`] turns back into the direction. `None`
+    /// where a Mei model's z + ξ is 0 or below, and on a KB lens's back
+    /// axis, which has no φ.
     fn param(&self, d: DVec3) -> Option<DVec2> {
         let len = d.length();
         if !(len > 0.0 && len.is_finite()) {
@@ -635,12 +640,12 @@ impl TruthModel {
             TruthModel::Kb { .. } => {
                 let across = DVec2::new(d.x, d.y);
                 let off_axis = across.length();
-                let theta = off_axis.atan2(d.z);
-                Some(if off_axis > 0.0 {
-                    across * (theta / off_axis)
+                if off_axis > 0.0 {
+                    Some(across * (off_axis.atan2(d.z) / off_axis))
                 } else {
-                    DVec2::new(theta, 0.0)
-                })
+                    // On the axis θ is 0, and behind it there is no φ.
+                    (d.z > 0.0).then_some(DVec2::ZERO)
+                }
             }
         }
     }
@@ -2340,8 +2345,9 @@ mod tests {
 
     /// Synth's forward on values worked out by hand: the centre on the
     /// axis, tan θ at ξ = 0 and tan(θ/2) at ξ = 1 with no distortion, each
-    /// KB base, and a KB lens's two focals and its tangential and prism
-    /// terms on the base's plane point.
+    /// KB base and its back axis, which none images, and a KB lens's two
+    /// focals and its tangential and prism terms on the base's plane
+    /// point.
     #[test]
     fn truth_forward_lands_where_worked_by_hand() {
         let close = |a: DVec2, b: [f64; 2]| (a - DVec2::from(b)).length() < 1e-9;
@@ -2466,6 +2472,19 @@ mod tests {
             kb(KbBase::Orthographic, 0.0).forward(lens_dir(100.0, 0.0)),
             None
         );
+        // No base images the back axis, θ = 180°, which has no azimuth, as
+        // sphere's `KbLens` has none there either.
+        for base in KbBase::all() {
+            for k1 in [0.0, 0.1] {
+                assert_eq!(kb(base, k1).forward(DVec3::NEG_Z), None, "{base:?}");
+            }
+        }
+        // Control: 1e-6 rad off it, the equidistant base lands on its rim,
+        // π − 1e-6 from the centre along +x.
+        let hair = DVec3::new(1e-6f64.sin(), 0.0, -1e-6f64.cos());
+        let rim = kb(KbBase::Equidistant, 0.0).forward(hair);
+        must_fail("a hair off the back axis", rim.is_none());
+        assert!(close(rim.unwrap(), [50.0 + 100.0 * (PI - 1e-6), 60.0]));
         // The tangential and prism terms apply to the base's plane point.
         // The direction θ = 60° off the axis at azimuth (0.6, 0.8), on the
         // equisolid base with no polynomial, has r = 2 sin 30° = 1, so m =
