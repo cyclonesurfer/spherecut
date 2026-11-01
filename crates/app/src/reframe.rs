@@ -863,10 +863,12 @@ impl AppState {
 
     /// A change of the view since the keys set it, timed: a drag, a
     /// scroll, a projection switch, `R`. While paused it becomes key
-    /// edits once it ends; while playing it is a look-around.
+    /// edits once it ends; while playing it is a look-around. The raw
+    /// view shows no view, so a change there is none of the project's:
+    /// the keys set it again.
     pub(crate) fn watch_view(&mut self, now: Instant) {
         let released = std::mem::take(&mut self.reframe.released);
-        if self.reframe.flat_output().is_none() {
+        if self.reframe.flat_output().is_none() || self.raw_view() {
             return;
         }
         let vals = ViewValues::of(self.view.q, &self.view.lens);

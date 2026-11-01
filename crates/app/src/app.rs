@@ -606,15 +606,27 @@ impl AppState {
     /// The open file again, with each of its lenses' streams: a camera's
     /// raw file, which the probe found after the file opened on its best
     /// stream alone. It goes on where it was, playing or not, and its
-    /// notices stay.
+    /// notices stay. A project file whose video it is stays open, the
+    /// lenses in its raw view (m3-plan 13.1); an untitled project made of
+    /// the file is let go, since a raw view makes none.
     fn open_lenses(&mut self, path: PathBuf, lenses: Vec<usize>) {
+        let (at, play) = (self.snapshot.clock, self.snapshot.want_play);
+        tracing::info!(?lenses, "opening the lenses of {}", path.display());
+        let ours = self
+            .reframe
+            .doc
+            .as_ref()
+            .is_some_and(|d| d.path.is_some() && d.media().is_some_and(|m| m.path == path));
+        if ours {
+            // As a seek would: a change of the view under way is kept.
+            self.end_look();
+        } else {
+            // A camera's raw file has no view to key until M3 stitches it.
+            self.reframe.let_go();
+        }
         let Some(player) = &self.player else {
             return;
         };
-        let (at, play) = (self.snapshot.clock, self.snapshot.want_play);
-        tracing::info!(?lenses, "opening the lenses of {}", path.display());
-        // A camera's raw file has no view to key until M3 stitches it.
-        self.reframe.let_go();
         self.notices.push(
             Notice::new(
                 NoticeKind::Lenses,
