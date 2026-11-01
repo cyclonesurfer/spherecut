@@ -29,9 +29,13 @@ use spherecut_testkit::tier2;
 
 /// The X5's records' alignment in the file (insta360.md §3.2).
 const ALIGN: u64 = 128 << 10;
-/// From the index's start to the file's end: 31 slots, the index's
-/// footer and the tail.
-const INDEX_FROM_END: u64 = 31 * 10 + 6 + 72;
+/// From the start of an index of `slots` slots to the file's end: the
+/// slots, the index's footer and the tail.
+const fn index_from_end(slots: u64) -> u64 {
+    slots * 10 + 6 + 72
+}
+/// The X5's: 31 slots.
+const INDEX_FROM_END: u64 = index_from_end(31);
 /// Records 2, 10, 22 and 28, whose sizes are the same in every file.
 const THUMBNAIL: u32 = 1_228_840;
 const R10: u32 = 35;
@@ -226,22 +230,28 @@ fn check_file(path: &Path, role: &Role, take: &Take, other: &Take, lrv: bool) ->
     };
     assert!(inst(header), "{name}: {header:?}");
 
-    // The index: 31 slots at EOF − 388, slot k listing record k.
-    for r in &t.records {
-        assert_eq!(
-            len - r.slot,
-            INDEX_FROM_END - 10 * u64::from(r.id),
-            "{name}: {r:?}"
-        );
-    }
+    // The index: 31 slots at EOF − 388, slot k listing record k. The
+    // first record whose slot isn't where an index of `slots` puts it.
+    let misplaced = |slots: u64| {
+        t.records
+            .iter()
+            .find(|r| len - r.slot != index_from_end(slots) - 10 * u64::from(r.id))
+            .copied()
+    };
+    assert_eq!(misplaced(31), None, "{name}");
 
     // The records and their sizes, 22 and 28 among them, each footer
     // checked by read_trailer. The metadata is protobuf (1), the rest
-    // binary (0).
+    // binary (0): the first record that isn't, with record `protobuf`
+    // the one in protobuf.
     assert_eq!(records(&t), take.records(lrv), "{name}");
-    for r in &t.records {
-        assert_eq!(r.format, u8::from(r.id == 1), "{name}: {r:?}");
-    }
+    let wrong_format = |protobuf: u8| {
+        t.records
+            .iter()
+            .find(|r| r.format != u8::from(r.id == protobuf))
+            .copied()
+    };
+    assert_eq!(wrong_format(1), None, "{name}");
 
     // Every record on a 128 KiB boundary of the file but 1 and 10: the
     // metadata ends where the index starts, and record 10 starts where
@@ -268,14 +278,28 @@ fn check_file(path: &Path, role: &Role, take: &Take, other: &Take, lrv: bool) ->
         read(1, MAX_METADATA).len(),
         take.r1[usize::from(lrv)] as usize
     );
+    // The thumbnail is 1280 × 640; turned to 640 × 1280 in its header,
+    // which still parses, it isn't.
+    let is_1280_by_640 = |bytes: &[u8]| {
+        let image = thumbnail(bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        (image.width, image.height) == (1280, 640)
+    };
     if take.r2 {
-        let image = thumbnail(&read(2, THUMBNAIL as usize)).unwrap();
-        assert_eq!((image.width, image.height), (1280, 640), "{name}");
+        let thumb = read(2, THUMBNAIL as usize);
+        assert!(is_1280_by_640(&thumb), "{name}: {:?}", &thumb[..40]);
+        let mut portrait = thumb;
+        portrait[16..24].rotate_left(4);
+        must_fail(
+            &format!("{name}'s thumbnail turned 640 × 1280"),
+            is_1280_by_640(&portrait),
+        );
     }
     let imu = imu_span(&read(3, take.r3 as usize)).unwrap().unwrap();
     assert_eq!(imu.samples, u64::from(take.r3 / 20), "{name}");
     let imu_step = (imu.last_us - imu.first_us) as f64 / (imu.samples - 1) as f64;
-    assert!((950.0..1050.0).contains(&imu_step), "{name}: {imu_step} µs");
+    // About 1 kHz: the mean step within 5 % of `step` µs.
+    let imu_at = |step: f64| at_most((imu_step / step - 1.0).abs(), 0.05);
+    assert_eq!(imu_at(1000.0).passes(), Some(true), "{name}: {imu_step} µs");
     let exposure = parse_exposure(&read(4, take.r4 as usize)).unwrap();
     assert_eq!(exposure.len(), take.r4 as usize / 16, "{name}");
     assert!(exposure.windows(2).all(|w| w[0].t_us < w[1].t_us), "{name}");
@@ -321,17 +345,38 @@ fn check_file(path: &Path, role: &Role, take: &Take, other: &Take, lrv: bool) ->
         matches!(e, CameraError::FooterMismatch { id: 4, offset } if offset == footer),
         "{name}: {e:?}"
     );
-    // The metadata isn't on a boundary; another take's sizes aren't
-    // this file's; the exposure isn't a frame at half the rate apart;
-    // and the `inst` box read a byte early isn't one.
+    // The slots and the metadata's end aren't where a 32-slot index
+    // puts them.
+    must_fail(
+        &format!("{name}'s slots against an index of 32"),
+        misplaced(32).is_none(),
+    );
+    must_fail(
+        &format!("{name}'s metadata ending at an index of 32"),
+        end(1) == len - index_from_end(32),
+    );
+    // The metadata isn't on a boundary, nor does record 9 follow 10 as
+    // 10 follows 11; another take's sizes aren't this file's; the
+    // thumbnail isn't the record in protobuf; the IMU isn't 500 Hz; the
+    // exposure isn't a frame at half the rate apart; and the `inst` box
+    // read a byte early isn't one.
     must_fail(
         &format!("{name}'s metadata on a 128 KiB boundary"),
         aligned(rec(1).offset),
     );
     must_fail(
+        &format!("{name}'s record 9 where record 10 ends"),
+        rec(9).offset == end(10),
+    );
+    must_fail(
         &format!("{name}'s sizes against take {}'s", other.file),
         records(&t) == other.records(lrv),
     );
+    must_fail(
+        &format!("{name}'s formats with the thumbnail in protobuf"),
+        wrong_format(2).is_none(),
+    );
+    must_fail(&format!("{name}'s IMU at 500 Hz"), imu_at(2000.0));
     must_fail(
         &format!("{name}'s exposure a frame apart at half the rate"),
         within(2.0 * period),
