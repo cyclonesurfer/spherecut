@@ -103,13 +103,16 @@ impl RecordRef {
 /// past the file is listed in [`Trailer::skipped`], not followed.
 ///
 /// The other errors: [`CameraError::FooterMismatch`] for a record's
-/// footer that doesn't repeat its slot, at the footer, and for a footer at
-/// EOF − 78 that isn't an index's (id 0, format 0: older cameras walk
-/// their records from the end with no index, which M3 doesn't read);
-/// [`CameraError::BadSize`] for an index that isn't whole slots, at its
-/// footer's size; [`CameraError::Truncated`] in [`Part::Index`] for an
-/// index that would start before the trailer does, at the trailer's
-/// start; and `Truncated` or [`CameraError::Io`] where reading `r` stops
+/// footer that doesn't repeat its slot, at the footer, whatever id the
+/// slot claims; [`CameraError::IndexFooter`] for a footer at EOF − 78
+/// that isn't an index's (id 0, format 0: older cameras walk their
+/// records from the end with no index, which M3 doesn't read), at that
+/// footer; [`CameraError::BadSize`] for an index that isn't whole slots,
+/// at its footer's size; [`CameraError::TooSmall`] in [`Part::Tail`] for
+/// a trailer too small for the index's footer and the tail, or for the
+/// index, which would then start before the trailer does, at the tail's
+/// size, as a trailer too large is; and [`CameraError::Truncated`] or
+/// [`CameraError::Io`] in the part being read where reading `r` stops
 /// short of `len` or fails. The tail's 32 zeros aren't checked.
 ///
 /// It calls [`spherecut_core::may_block`] first, so on the UI thread it
@@ -142,24 +145,24 @@ pub fn read_trailer<R: Read + Seek>(r: &mut R, len: u64) -> Result<Option<Traile
         });
     }
     let payload_start = len - size;
-    // Nothing of the trailer may lie before its start: an index that
-    // would is cut short there.
-    let cut = CameraError::Truncated {
-        part: Part::Index,
-        offset: payload_start,
+    // Nothing of the trailer may lie before its start: a size too small
+    // for the index is wrong at the byte that gives it, as one too large
+    // is.
+    let too_small = |least: u64| CameraError::TooSmall {
+        part: Part::Tail,
+        size,
+        least,
+        offset: tail_at + SIZE_AT as u64,
     };
-    let footer_at = match tail_at.checked_sub(FOOTER) {
-        Some(at) if at >= payload_start => at,
-        _ => return Err(cut),
-    };
+    if size < TAIL + FOOTER {
+        return Err(too_small(TAIL + FOOTER));
+    }
+    let footer_at = tail_at - FOOTER;
     let mut footer = [0; FOOTER as usize];
     read_at(r, footer_at, &mut footer, Part::Index)?;
     let [format, id, ..] = footer;
     if (format, id) != (0, INDEX_ID) {
-        return Err(CameraError::FooterMismatch {
-            id: INDEX_ID,
-            offset: footer_at,
-        });
+        return Err(CameraError::IndexFooter { offset: footer_at });
     }
     let index_size = u64::from(le32(&footer, FOOTER_SIZE_AT as usize));
     let index_limit = MAX_SLOTS as u64 * SLOT;
@@ -178,10 +181,10 @@ pub fn read_trailer<R: Read + Seek>(r: &mut R, len: u64) -> Result<Option<Traile
             offset: footer_at + FOOTER_SIZE_AT,
         });
     }
-    let index_at = match footer_at.checked_sub(index_size) {
-        Some(at) if at >= payload_start => at,
-        _ => return Err(cut),
-    };
+    if size - (TAIL + FOOTER) < index_size {
+        return Err(too_small(TAIL + FOOTER + index_size));
+    }
+    let index_at = footer_at - index_size;
     // At most MAX_SLOTS slots, checked above: no allocation for them.
     let mut buf = [0; MAX_SLOTS * SLOT as usize];
     let index = buf.get_mut(..index_size as usize).unwrap_or_default();
@@ -234,8 +237,9 @@ pub fn read_trailer<R: Read + Seek>(r: &mut R, len: u64) -> Result<Option<Traile
 /// the index or past the file ([`Trailer::skipped`]) is
 /// [`CameraError::SlotPastEnd`], at its slot. Bytes that end inside the
 /// payload are [`CameraError::Truncated`] in [`Part::Record`] at the first
-/// byte missing, and a failed seek or read is [`CameraError::Io`] at the
-/// byte it was for. When `t` lists `id` twice, the first is read.
+/// byte missing, and a failed seek or read is [`CameraError::Io`] in it
+/// too, at the byte it was for. When `t` lists `id` twice, the first is
+/// read.
 ///
 /// It calls [`spherecut_core::may_block`] first, so on the UI thread it
 /// panics in a debug build.
@@ -273,7 +277,8 @@ pub fn read_record<R: Read + Seek>(
 
 /// Fills `buf` from byte `at` of `r`. Bytes that end first are
 /// [`CameraError::Truncated`] in `part` at the first byte missing; a
-/// failed seek or read is [`CameraError::Io`] at the byte it was for.
+/// failed seek or read is [`CameraError::Io`] in `part` at the byte it
+/// was for.
 /// [`super::verify_companion`] reads record 4 through it too.
 pub(super) fn read_at<R: Read + Seek>(
     r: &mut R,
@@ -282,7 +287,11 @@ pub(super) fn read_at<R: Read + Seek>(
     part: Part,
 ) -> Result<(), CameraError> {
     r.seek(SeekFrom::Start(at))
-        .map_err(|error| CameraError::Io { offset: at, error })?;
+        .map_err(|error| CameraError::Io {
+            part,
+            offset: at,
+            error,
+        })?;
     let mut got = 0;
     while let Some(rest) = buf.get_mut(got..).filter(|rest| !rest.is_empty()) {
         let offset = at.saturating_add(got as u64);
@@ -290,7 +299,13 @@ pub(super) fn read_at<R: Read + Seek>(
             Ok(0) => return Err(CameraError::Truncated { part, offset }),
             Ok(n) => got += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(CameraError::Io { offset, error }),
+            Err(error) => {
+                return Err(CameraError::Io {
+                    part,
+                    offset,
+                    error,
+                });
+            }
         }
     }
     Ok(())

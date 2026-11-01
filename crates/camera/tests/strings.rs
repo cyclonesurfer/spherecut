@@ -293,9 +293,11 @@ fn offset(e: &CameraError) -> u64 {
         CameraError::Truncated { offset, .. }
         | CameraError::SlotPastEnd { offset, .. }
         | CameraError::FooterMismatch { offset, .. }
+        | CameraError::IndexFooter { offset }
         | CameraError::BadVarint { offset, .. }
         | CameraError::WireType { offset, .. }
         | CameraError::TooLarge { offset, .. }
+        | CameraError::TooSmall { offset, .. }
         | CameraError::Version { offset, .. }
         | CameraError::BadSize { offset, .. }
         | CameraError::NotUtf8 { offset, .. }

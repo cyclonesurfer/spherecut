@@ -23,8 +23,8 @@ use proptest::prelude::*;
 use proptest::sample::{Index, subsequence};
 use spherecut_camera::insta360::limits::{MAX_METADATA, MAX_SLOTS, MAX_TRAILER};
 use spherecut_camera::insta360::{
-    Exposure, ImuSpan, MAGIC, RecordRef, Trailer, imu_span, parse_exposure, read_record,
-    read_trailer, thumbnail,
+    Exposure, ImuSpan, MAGIC, RecordRef, Trailer, imu_span, parse_exposure, parse_metadata,
+    read_record, read_trailer, thumbnail,
 };
 use spherecut_camera::{CameraError, Part};
 use spherecut_core::blocking::{OnBlock, mark_ui_thread_with};
@@ -299,9 +299,11 @@ fn offset(e: &CameraError) -> u64 {
         CameraError::Truncated { offset, .. }
         | CameraError::SlotPastEnd { offset, .. }
         | CameraError::FooterMismatch { offset, .. }
+        | CameraError::IndexFooter { offset }
         | CameraError::BadVarint { offset, .. }
         | CameraError::WireType { offset, .. }
         | CameraError::TooLarge { offset, .. }
+        | CameraError::TooSmall { offset, .. }
         | CameraError::Version { offset, .. }
         | CameraError::BadSize { offset, .. }
         | CameraError::NotUtf8 { offset, .. }
@@ -475,7 +477,7 @@ fn holds(bytes: &[u8], got: &Trailer, max: usize, also: u8) {
 /// Up to eight records, each id once below `slots`, in any order, with
 /// any format and payload.
 fn records(slots: usize) -> impl Strategy<Value = Vec<Rec>> {
-    let ids: Vec<u8> = (1..slots as u8).collect();
+    let ids: Vec<u8> = (1..slots).map(|id| u8::try_from(id).unwrap()).collect();
     subsequence(ids, 0..8.min(slots))
         .prop_shuffle()
         .prop_flat_map(|ids| {
@@ -532,7 +534,14 @@ fn tailed(body: Vec<u8>, index: Option<u32>, size: u32, version: u32) -> Vec<u8>
 fn arbitrary() -> impl Strategy<Value = Vec<u8>> {
     let size = || prop_oneof![0u32..1000, any::<u32>()];
     let version = || prop_oneof![4 => Just(3u32), 1 => any::<u32>()];
-    let index = prop_oneof![(0u32..=70).prop_map(|n| n * 10), 0u32..1000, any::<u32>()];
+    // Whole slots up to 70, and either side of MAX_SLOTS.
+    let most = MAX_SLOTS as u32;
+    let index = prop_oneof![
+        (0u32..=70).prop_map(|n| n * 10),
+        (most - 4..=most + 4).prop_map(|n| n * 10),
+        0u32..1000,
+        any::<u32>()
+    ];
     prop_oneof![
         vec(any::<u8>(), 0..400),
         (vec(any::<u8>(), 0..400), size(), version())
@@ -780,8 +789,10 @@ fn every_limit_is_an_error_with_its_offset() {
         index.to_string() == e.to_string(),
     );
 
-    // MAX_SLOTS: an index of 64 slots reads, one of 65 doesn't.
-    let recs = [Rec::new(63, 0, vec![7; 5])];
+    // MAX_SLOTS: an index of 256 slots, one for each id a slot can name,
+    // reads with record 255 in its last slot and a TimeMap's 128 among
+    // them; one a byte larger doesn't, nor one of 257 slots.
+    let recs = [Rec::new(128, 0, vec![9; 4]), Rec::new(255, 0, vec![7; 5])];
     let most = build(
         &recs,
         &Layout {
@@ -789,7 +800,17 @@ fn every_limit_is_an_error_with_its_offset() {
             ..Layout::x5()
         },
     );
+    assert_eq!(MAX_SLOTS, 256);
     assert_eq!(most.read().unwrap(), Some(most.trailer.clone()));
+    let n = most.len() as usize;
+    let footer_size = n as u64 - AFTER_INDEX as u64 + 2;
+    let byte_over = patched(&most.bytes, AFTER_INDEX - 2, &2561u32.to_le_bytes());
+    let e = must_fail("an index of 2561 bytes", read_bytes(&byte_over));
+    assert!(
+        matches!(e, CameraError::TooLarge { part: Part::Index, size: 2561, limit: 2560, offset }
+            if offset == footer_size),
+        "{e:?}"
+    );
     let one_more = build(
         &recs,
         &Layout {
@@ -797,10 +818,10 @@ fn every_limit_is_an_error_with_its_offset() {
             ..Layout::x5()
         },
     );
-    let e = must_fail("an index of 65 slots", one_more.read());
+    let e = must_fail("an index of 257 slots", one_more.read());
     let footer_size = one_more.len() - AFTER_INDEX as u64 + 2;
     assert!(
-        matches!(e, CameraError::TooLarge { part: Part::Index, size: 650, limit: 640, offset }
+        matches!(e, CameraError::TooLarge { part: Part::Index, size: 2570, limit: 2560, offset }
             if offset == footer_size),
         "{e:?}"
     );
@@ -926,14 +947,14 @@ fn each_trailer_error_is_at_the_byte_that_says_so() {
         );
     }
     // A footer at EOF − 78 that isn't an index's: older cameras' records
-    // walked from the end. At the footer, as record 0's, and saying the
-    // trailer has no index rather than naming a slot.
+    // walked from the end. At the footer, the index's own error, saying
+    // the trailer has no index rather than naming a slot.
     let e = must_fail(
         "a metadata footer where the index's is",
         read_bytes(&patched(b, 78, &[1, 1])),
     );
     assert!(
-        matches!(e, CameraError::FooterMismatch { id: 0, offset } if offset == n - 78),
+        matches!(e, CameraError::IndexFooter { offset } if offset == n - 78),
         "{e:?}"
     );
     let no_index = |e: &CameraError| e.to_string().contains("the trailer has no index");
@@ -945,6 +966,37 @@ fn each_trailer_error_is_at_the_byte_that_says_so() {
             offset: footer,
         }),
     );
+    // A damaged slot that claims id 0, the index's own: here slot 0 with
+    // record 29's format, size and offset. It is a record like any
+    // other, and its footer, record 29's, doesn't match it: at that
+    // footer, as record 0's, not as the index's footer, which is where
+    // it belongs and is sound.
+    let r29 = file.record(29);
+    let footer29 = r29.offset + u64::from(r29.size);
+    let index_at = b.len() - AFTER_INDEX - 31 * SLOT;
+    let mut claims_0 = b.clone();
+    claims_0[index_at..][..SLOT].copy_from_slice(&b[r29.slot as usize..][..SLOT]);
+    claims_0[index_at] = 0;
+    let e = must_fail("a slot claiming id 0", read_bytes(&claims_0));
+    assert!(
+        matches!(e, CameraError::FooterMismatch { id: 0, offset } if offset == footer29),
+        "{e:?}"
+    );
+    let as_record_0 = |e: &CameraError| {
+        e.to_string()
+            == format!("record 0's footer at byte {footer29} doesn't match its index slot")
+    };
+    assert!(as_record_0(&e), "{e}");
+    // The control: the index footer's error at that byte isn't record
+    // 0's, as when id 0 alone chose the message. And with the slot's id
+    // left 29, the same slot reads: record 29 listed twice.
+    must_fail(
+        "a slot claiming id 0 worded as the index's footer",
+        as_record_0(&CameraError::IndexFooter { offset: footer29 }),
+    );
+    claims_0[index_at] = 29;
+    let twice = read_bytes(&claims_0).unwrap().unwrap();
+    assert_eq!(twice.records.iter().filter(|r| r.id == 29).count(), 2);
 
     // An index that isn't whole slots: at its footer's size.
     let e = must_fail(
@@ -956,19 +1008,39 @@ fn each_trailer_error_is_at_the_byte_that_says_so() {
         "{e:?}"
     );
 
-    // A trailer too small for its index's footer, or for its index: cut
-    // short at the trailer's start.
-    for (size, what) in [(77u32, "the footer"), (78 + 300, "the index")] {
-        let small = patched(b, 40, &size.to_le_bytes());
-        let e = must_fail(
-            &format!("a trailer too small for {what}"),
-            read_bytes(&small),
-        );
+    // A trailer too small for its index's footer and the tail (78
+    // bytes), or for its index too (388): at the tail's size, the byte
+    // that says so, as a trailer too large is.
+    let sized = |size: u32| read_bytes(&patched(b, 40, &size.to_le_bytes()));
+    for (size, least, what) in [(77u32, 78u64, "the footer"), (78 + 300, 388, "the index")] {
+        let e = must_fail(&format!("a trailer too small for {what}"), sized(size));
         assert!(
-            matches!(e, CameraError::Truncated { part: Part::Index, offset } if offset == n - u64::from(size)),
+            matches!(e, CameraError::TooSmall { part: Part::Tail, size: s, least: l, offset }
+                if (s, l, offset) == (u64::from(size), least, n - 40)),
             "{what}: {e:?}"
         );
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "the trailer's size in its tail is {size} bytes, less than the {least} its index and the tail take (byte {})",
+                n - 40
+            )
+        );
     }
+    // The controls: at the least it isn't too small. A trailer of 388
+    // bytes reads, every record's offset then past the index, so
+    // skipped; one of 78 has room for the footer, and is too small only
+    // for the index.
+    let at_least = sized(388).unwrap().unwrap();
+    assert_eq!((at_least.records.len(), at_least.skipped.len()), (0, 10));
+    must_fail(
+        "a trailer of 388 bytes too small",
+        matches!(sized(388), Err(CameraError::TooSmall { .. })),
+    );
+    must_fail(
+        "a trailer of 78 bytes too small for the footer",
+        matches!(sized(78), Err(CameraError::TooSmall { least: 78, .. })),
+    );
 
     // A slot whose record runs into the index, or past the file: listed
     // as skipped, not followed, and reading it is an error at its slot.
@@ -1028,14 +1100,23 @@ fn each_trailer_error_is_at_the_byte_that_says_so() {
         Some(file.payload(&r).to_vec())
     );
 
-    // A read or a seek that fails: at the byte it was for.
+    // A read or a seek that fails: in the part being read, at the byte
+    // it was for.
     let r = file.record(4);
     let footer = r.offset + u64::from(r.size);
-    for (seek, at, part) in [
-        (false, n - 50, "the tail"),
-        (false, footer + 2, "record 4's footer"),
-        (true, footer, "record 4's footer"),
-        (false, r.offset + 5, "record 4"),
+    let index_at = n - AFTER_INDEX as u64 - 31 * SLOT as u64;
+    let tail = (Part::Tail, "the trailer's tail");
+    let index = (Part::Index, "the trailer's index");
+    let record = (Part::Record(4), "record 4");
+    let mut last = String::new();
+    for (seek, at, (part, text), what) in [
+        (false, n - 50, tail, "the tail"),
+        (false, n - 76, index, "the index's footer"),
+        (true, index_at, index, "the index"),
+        (false, index_at + 15, index, "the index"),
+        (false, footer + 2, record, "record 4's footer"),
+        (true, footer, record, "record 4's footer"),
+        (false, r.offset + 5, record, "record 4"),
     ] {
         let mut failing = Failing {
             inner: Cursor::new(b),
@@ -1045,14 +1126,84 @@ fn each_trailer_error_is_at_the_byte_that_says_so() {
         let got = read_trailer(&mut failing, n)
             .and_then(|t| read_record(&mut failing, &t.unwrap(), 4, usize::MAX));
         let e = must_fail(
-            &format!("a failed {} in {part}", if seek { "seek" } else { "read" }),
+            &format!("a failed {} in {what}", if seek { "seek" } else { "read" }),
             got,
         );
         assert!(
-            matches!(&e, CameraError::Io { offset, error } if *offset == at && error.to_string() == "planted"),
-            "{part}: {e:?}"
+            matches!(&e, CameraError::Io { part: p, offset, error }
+                if (*p, *offset) == (part, at) && error.to_string() == "planted"),
+            "{what}: {e:?}"
         );
+        last = format!("I/O error reading {text} at byte {at}: planted");
+        assert_eq!(e.to_string(), last, "{what}");
     }
+    // The control: the same failure in the tail doesn't read as record
+    // 4's.
+    let in_tail = CameraError::Io {
+        part: Part::Tail,
+        offset: r.offset + 5,
+        error: io::Error::other("planted"),
+    };
+    must_fail(
+        "a failed read in record 4 worded as the tail's",
+        in_tail.to_string() == last,
+    );
+}
+
+/// `WireType`'s two cases are worded apart: a wire type the metadata
+/// doesn't use at all, and one it uses, for another field than the one
+/// whose key is there. Unit (b)'s error tables, at their bytes, are in
+/// `strings.rs`; this is the wording, through `parse_metadata`.
+#[test]
+fn wire_type_messages_tell_a_field_from_the_walk() {
+    let _time = timed("wire_type_messages_tell_a_field_from_the_walk");
+    // Field 93 (a varint) as a length of 0: key (93 << 3) | 2.
+    let e = must_fail(
+        "field 93 in wire type 2",
+        parse_metadata(&[0xea, 0x05, 0x00]),
+    );
+    assert!(
+        matches!(
+            e,
+            CameraError::WireType {
+                part: Part::Field(93),
+                wire: 2,
+                offset: 0
+            }
+        ),
+        "{e:?}"
+    );
+    let field = e.to_string();
+    assert_eq!(
+        field,
+        "the metadata's field 93 has wire type 2 at byte 0, not the field's own"
+    );
+    // Field 9, unknown, as a group: key (9 << 3) | 3.
+    let e = must_fail("a group", parse_metadata(&[0x4b]));
+    assert!(
+        matches!(
+            e,
+            CameraError::WireType {
+                part: Part::Record(1),
+                wire: 3,
+                offset: 0
+            }
+        ),
+        "{e:?}"
+    );
+    let walk = e.to_string();
+    assert_eq!(
+        walk,
+        "record 1 has wire type 3 at byte 0, which the metadata doesn't use"
+    );
+    // The control: the field's message doesn't say the metadata has no
+    // use for wire type 2, as it did when one wording served both.
+    let unused = |m: &str| m.ends_with("which the metadata doesn't use");
+    assert!(unused(&walk));
+    must_fail(
+        "field 93 in wire type 2 worded as the walk's",
+        unused(&field),
+    );
 }
 
 /// The record parsers read what was written, and refuse a size their

@@ -54,12 +54,18 @@ pub enum CameraError {
     #[error("record {id}'s index slot at byte {offset} runs into the index or past the file")]
     SlotPastEnd { id: u8, offset: u64 },
     /// A record's footer that doesn't say what its index slot does: its
-    /// id, format or size differ. `offset` is the footer's. With `id` 0
-    /// it is the footer at EOF − 78, where the index's belongs, when that
-    /// footer isn't an index's (id 0, format 0): a trailer with no index,
-    /// as older cameras write theirs, or a damaged one.
-    #[error("{}", footer_mismatch(.id, .offset))]
+    /// id, format or size differ. `id` is the slot's, whatever it is: a
+    /// damaged slot can claim id 0, the index's own. `offset` is the
+    /// footer's.
+    #[error("record {id}'s footer at byte {offset} doesn't match its index slot")]
     FooterMismatch { id: u8, offset: u64 },
+    /// The footer at EOF − 78, where the index's belongs, when it isn't
+    /// an index's (id 0, format 0): a trailer with no index, as older
+    /// cameras write theirs, or a damaged one. `offset` is the footer's.
+    #[error(
+        "the footer at byte {offset}, where the trailer's index's is, isn't an index's: the trailer has no index (older cameras write none) or is damaged"
+    )]
+    IndexFooter { offset: u64 },
     /// A varint of more than ten bytes, or past 64 bits; a field's key
     /// past 32 bits or with field number 0, which protobuf doesn't allow;
     /// or a varint past 32 bits where the metadata holds a u32. `offset`
@@ -68,9 +74,10 @@ pub enum CameraError {
     BadVarint { part: Part, offset: u64 },
     /// A protobuf wire type the metadata doesn't use: a group's (3 or 4),
     /// or 6 or 7, which protobuf doesn't define; or, for a field
-    /// `parse_metadata` reads, a wire type other than the field's own.
-    /// `offset` is the field's key.
-    #[error("{part} has wire type {wire} at byte {offset}, which the metadata doesn't use")]
+    /// `parse_metadata` reads, a wire type other than the field's own,
+    /// which is then one the metadata uses (0, 1, 2 or 5) and is worded
+    /// so. `offset` is the field's key.
+    #[error("{}", wire_type(.part, .wire, .offset))]
     WireType { part: Part, wire: u8, offset: u64 },
     /// More bytes than a limit allows (`insta360::limits`), or than the
     /// caller asked for. Nothing was allocated for them. In
@@ -81,6 +88,19 @@ pub enum CameraError {
         part: Part,
         size: u64,
         limit: u64,
+        offset: u64,
+    },
+    /// Fewer bytes than what they must hold. In [`Part::Tail`] the size
+    /// is the trailer's, which the tail gives, and `least` what the
+    /// index's footer and the tail take (78 bytes), or with the index
+    /// that footer gives, 78 more than its size: a trailer smaller than
+    /// that would have its index start before it does. `offset` is the
+    /// byte that gives the size.
+    #[error("{}", too_small(.part, .size, .least, .offset))]
+    TooSmall {
+        part: Part,
+        size: u64,
+        least: u64,
         offset: u64,
     },
     /// A trailer version other than 3, the only one documented.
@@ -121,9 +141,14 @@ pub enum CameraError {
         why: &'static str,
         offset: u64,
     },
-    /// Reading the file failed.
-    #[error("I/O error at byte {offset}: {error}")]
-    Io { offset: u64, error: io::Error },
+    /// Reading the file failed, in `part`, at the byte the seek or read
+    /// was for.
+    #[error("I/O error reading {part} at byte {offset}: {error}")]
+    Io {
+        part: Part,
+        offset: u64,
+        error: io::Error,
+    },
 }
 
 /// `TooLarge`'s message. In the tail the size is the trailer's, not the
@@ -140,14 +165,28 @@ fn too_large(part: &Part, size: &u64, limit: &u64, offset: &u64) -> String {
     }
 }
 
-/// `FooterMismatch`'s message. The index's own footer (id 0) has no slot
-/// to match: when it isn't an index's, the trailer has no index or is
-/// damaged.
-fn footer_mismatch(id: &u8, offset: &u64) -> String {
-    match id {
-        0 => format!(
-            "the footer at byte {offset}, where the trailer's index's is, isn't an index's: the trailer has no index (older cameras write none) or is damaged"
+/// `TooSmall`'s message. In the tail the size is the trailer's, as in
+/// `TooLarge`'s.
+fn too_small(part: &Part, size: &u64, least: &u64, offset: &u64) -> String {
+    match part {
+        Part::Tail => format!(
+            "the trailer's size in its tail is {size} bytes, less than the {least} its index and the tail take (byte {offset})"
         ),
-        id => format!("record {id}'s footer at byte {offset} doesn't match its index slot"),
+        part => {
+            format!("{part} is {size} bytes, less than the {least} it must hold (byte {offset})")
+        }
+    }
+}
+
+/// `WireType`'s message. A wire type the metadata uses anywhere (0, 1,
+/// 2 or 5) is only wrong for the field whose key is at `offset`.
+fn wire_type(part: &Part, wire: &u8, offset: &u64) -> String {
+    match wire {
+        0 | 1 | 2 | 5 => {
+            format!("{part} has wire type {wire} at byte {offset}, not the field's own")
+        }
+        wire => {
+            format!("{part} has wire type {wire} at byte {offset}, which the metadata doesn't use")
+        }
     }
 }

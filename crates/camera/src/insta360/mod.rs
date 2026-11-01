@@ -53,8 +53,12 @@ pub mod limits {
     /// The longest string the metadata keeps: 4 KiB. The X5's longest,
     /// its V6 calibration string, is 518 bytes.
     pub const MAX_STRING: usize = 4 << 10;
-    /// The most index slots read: 64. The X5 has 31, the X6 59.
-    pub const MAX_SLOTS: usize = 64;
+    /// The most index slots read: 256, one for each id a slot's byte can
+    /// name, so that no trailer is refused for the id of a record it
+    /// lists (slot k lists record k: an app-trimmed file's TimeMap, 128,
+    /// would need 129). The X5 has 31, the X6 59. The reader holds them
+    /// on the stack, 2.5 KiB.
+    pub const MAX_SLOTS: usize = 256;
 }
 
 /// The little-endian u32 at byte `at` of `b`, or 0 past its end, which

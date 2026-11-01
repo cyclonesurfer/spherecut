@@ -11,13 +11,13 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use spherecut_camera::CameraError;
 use spherecut_camera::insta360::calib::{self, Generation};
 use spherecut_camera::insta360::limits::MAX_METADATA;
 use spherecut_camera::insta360::{
     Metadata, NameRole, Pairing, Trailer, companions, parse_exposure, parse_metadata, read_record,
     read_trailer,
 };
+use spherecut_camera::{CameraError, Part};
 
 use crate::Source;
 use crate::detect::{CameraGuess, Layout};
@@ -133,7 +133,11 @@ pub(crate) fn read(
 ) -> CameraFile {
     let mut out = CameraFile::default();
     let trailer = match File::open(open)
-        .map_err(|error| CameraError::Io { offset: 0, error })
+        .map_err(|error| CameraError::Io {
+            part: Part::Tail,
+            offset: 0,
+            error,
+        })
         .and_then(|mut f| read_trailer(&mut f, len).map(|t| t.map(|t| (f, t))))
     {
         Ok(Some(t)) => t,
