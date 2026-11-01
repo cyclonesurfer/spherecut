@@ -11,13 +11,13 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use spherecut_camera::CameraError;
 use spherecut_camera::insta360::calib::{self, Generation};
 use spherecut_camera::insta360::limits::MAX_METADATA;
 use spherecut_camera::insta360::{
     Metadata, NameRole, Pairing, Trailer, companions, parse_exposure, parse_metadata, read_record,
     read_trailer,
 };
-use spherecut_camera::{CameraError, Part};
 
 use crate::Source;
 use crate::detect::{CameraGuess, Layout};
@@ -142,14 +142,18 @@ pub(crate) fn read(
     warnings: &mut Vec<Problem>,
 ) -> CameraFile {
     let mut out = CameraFile::default();
-    let trailer = match File::open(open)
-        .map_err(|error| CameraError::Io {
-            part: Part::Tail,
-            offset: 0,
-            error,
-        })
-        .and_then(|mut f| read_trailer(&mut f, len).map(|t| t.map(|t| (f, t))))
-    {
+    // A file that can't be opened again is said so in words of its own:
+    // no byte of the trailer was read.
+    let mut f = match File::open(open) {
+        Ok(f) => f,
+        Err(e) => {
+            warnings.push(bad_trailer(format!(
+                "the file can't be opened to read its Insta360 trailer: {e}"
+            )));
+            return out;
+        }
+    };
+    let trailer = match read_trailer(&mut f, len) {
         Ok(Some(t)) => t,
         Ok(None) => return out,
         Err(e) => {
@@ -159,7 +163,6 @@ pub(crate) fn read(
             return out;
         }
     };
-    let (mut f, trailer) = trailer;
     for s in &trailer.skipped {
         warnings.push(bad_trailer(format!(
             "the Insta360 trailer's record {}: {}",
@@ -362,5 +365,61 @@ fn trailer_of(open: &Path, what: &str) -> Result<(File, Trailer), String> {
         Ok(Some(t)) => Ok((f, t)),
         Ok(None) => Err(format!("the {what} has no Insta360 trailer")),
         Err(e) => Err(format!("the {what}'s trailer can't be read: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use spherecut_testkit::control::must_fail;
+
+    use super::*;
+
+    /// The warnings [`read`] gives for an Insta360 master at `open`, said
+    /// to be `len` bytes long, with what it found, which is nothing.
+    fn warned(open: &Path, len: u64) -> Vec<String> {
+        let mut guess = CameraGuess {
+            vendor: Some("Insta360".into()),
+            model: None,
+            firmware: None,
+            serial: None,
+            layout: Layout::Insta360DualFisheye,
+            evidence: Vec::new(),
+        };
+        let mut warnings = Vec::new();
+        let found = read(open, len, &mut guess, &[], &mut warnings);
+        assert_eq!(found, CameraFile::default(), "{}", open.display());
+        assert!(warnings.iter().all(|w| w.code == codes::BAD_TRAILER));
+        warnings.into_iter().map(|w| w.message).collect()
+    }
+
+    /// A file that can't be opened again for its trailer is warned of in
+    /// words of its own, not as an I/O error in the trailer's tail at byte
+    /// 0, which nothing read; one that opens and can't be read, a
+    /// directory here, is the trailer's, at the tail's byte.
+    ///
+    /// Control: the directory's warning isn't the open's.
+    #[test]
+    fn a_file_that_cant_be_opened_is_said_so() {
+        let gone =
+            std::env::temp_dir().join(format!("spherecut-camera-gone-{}.insv", std::process::id()));
+        let error = File::open(&gone).unwrap_err();
+        assert_eq!(
+            warned(&gone, 4096),
+            [format!(
+                "the file can't be opened to read its Insta360 trailer: {error}"
+            )]
+        );
+        let dir = warned(&std::env::temp_dir(), 4096);
+        assert_eq!(dir.len(), 1, "{dir:?}");
+        assert!(
+            dir[0].starts_with(
+                "the Insta360 trailer can't be read: I/O error reading the trailer's tail at byte 4024: "
+            ),
+            "{dir:?}"
+        );
+        must_fail(
+            "a directory, warned of as a file that can't be opened",
+            dir[0].starts_with("the file can't be opened"),
+        );
     }
 }
