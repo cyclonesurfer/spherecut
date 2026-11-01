@@ -14,7 +14,6 @@ use serde::Serialize;
 use spherecut_core::TimeSpec;
 use spherecut_media::Source;
 use spherecut_media::backend::SeekMode;
-use spherecut_media::probe::ProbeReport;
 
 use crate::contract::{DecodeInfo, ErrorBody, SourceInfo, Warning};
 use crate::still::{self, Failure, Still, Stop};
@@ -130,7 +129,7 @@ pub fn check(src: Source<'_>, opts: &still::Options, stop: &Stop) -> Result<File
                 .map_or("it doesn't decode", |e| e.message.as_str())
         ));
     }
-    let camera = name(r);
+    let camera = r.camera.as_ref().and_then(|c| c.name());
     let firmware = r.camera.as_ref().and_then(|c| c.firmware.clone());
     let summary = format!(
         "{}{}, geometry {GEOMETRY}",
@@ -206,18 +205,6 @@ fn first_frame(
         Err(e) => out.error = Some(e),
     }
     out
-}
-
-/// The camera's name as the agent's probe summary gives it: the model,
-/// with the vendor in front when the model doesn't start with it.
-fn name(r: &ProbeReport) -> Option<String> {
-    let c = r.camera.as_ref()?;
-    match (c.vendor.as_deref(), c.model.as_deref()) {
-        (Some(v), Some(m)) if !m.starts_with(v) => Some(format!("{v} {m}")),
-        (_, Some(m)) => Some(m.to_owned()),
-        (Some(v), None) => Some(v.to_owned()),
-        (None, None) => None,
-    }
 }
 
 /// The firmware's version without the build after it: `v1.1.22` of

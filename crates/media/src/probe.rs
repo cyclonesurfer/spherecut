@@ -1321,18 +1321,10 @@ mod text {
             }
         }
         if let Some(c) = &r.camera {
-            // "Insta360 X5", not "Insta360 Insta360 X5".
-            let name = match (&c.vendor, &c.model) {
-                (Some(v), Some(m)) if m.starts_with(v.as_str()) => m.clone(),
-                (v, m) => format!(
-                    "{}{}",
-                    opt(v),
-                    m.as_ref().map(|m| format!(" {m}")).unwrap_or_default()
-                ),
-            };
             let _ = writeln!(
                 s,
-                "  camera     {name}{}{}  layout: {:?}",
+                "  camera     {}{}{}  layout: {:?}",
+                opt(&c.name()),
                 c.firmware
                     .as_ref()
                     .map(|f| format!(" (firmware {f})"))

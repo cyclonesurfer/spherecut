@@ -49,6 +49,22 @@ pub struct CameraGuess {
     pub evidence: Vec<String>,
 }
 
+impl CameraGuess {
+    /// The camera's name, as probe's text, the agent's summary and
+    /// `doctor --file` give it: the model, with the vendor in front when
+    /// the model doesn't start with it ("Insta360 X5", not "Insta360
+    /// Insta360 X5"); the vendor alone without a model; None with
+    /// neither.
+    pub fn name(&self) -> Option<String> {
+        match (self.vendor.as_deref(), self.model.as_deref()) {
+            (Some(v), Some(m)) if !m.starts_with(v) => Some(format!("{v} {m}")),
+            (_, Some(m)) => Some(m.to_owned()),
+            (Some(v), None) => Some(v.to_owned()),
+            (None, None) => None,
+        }
+    }
+}
+
 /// Insta360 files end with this ASCII marker after their metadata trailer.
 pub const INSTA360_TRAILER_MAGIC: &[u8; 32] = b"8db42d694ccc418790edff439fe026bf";
 

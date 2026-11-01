@@ -250,7 +250,8 @@ fn video_streams(r: &ProbeReport) -> Vec<&StreamInfo> {
         .collect()
 }
 
-/// A file's summary, about 300 bytes, into `entry`.
+/// A file's summary into `entry`: about 300 bytes for a plain file, and
+/// about 1 KB for a camera's with its trailer (an X5 master's is 944).
 fn summary(entry: &mut Map<String, Value>, r: &ProbeReport) {
     let video = video_streams(r);
     let v = video.first().copied();
@@ -394,19 +395,11 @@ fn projection(r: &ProbeReport, v: Option<&StreamInfo>) -> (&'static str, &'stati
     }
 }
 
-/// The camera's name: its model, with the vendor in front when the model
-/// doesn't start with it.
+/// The camera's name, as [`spherecut_media::detect::CameraGuess::name`]
+/// gives it: its model, with the vendor in front when the model doesn't
+/// start with it.
 fn camera(r: &ProbeReport) -> Value {
-    let Some(c) = &r.camera else {
-        return Value::Null;
-    };
-    let name = match (c.vendor.as_deref(), c.model.as_deref()) {
-        (Some(v), Some(m)) if !m.starts_with(v) => format!("{v} {m}"),
-        (_, Some(m)) => m.to_owned(),
-        (Some(v), None) => v.to_owned(),
-        (None, None) => return Value::Null,
-    };
-    json!(text::field(&name))
+    opt_field(r.camera.as_ref().and_then(|c| c.name()).as_deref())
 }
 
 /// The camera as the file names it, beside `camera`'s one string (M3
