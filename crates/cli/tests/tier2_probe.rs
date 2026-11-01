@@ -2,12 +2,13 @@
 //! and the CPU only (M3 plan 4.4).
 //!
 //! - `samples_probe_names_the_camera` (M3 plan 5.4): every master and its
-//!   LRV, by the CLI and by the agent's `probe`, name the X5, its firmware
-//!   and serial, the master's two lens tracks, the four calibrations with
-//!   V6 in use (one snapshot, one hash, in all of them), and each other as
-//!   companions verified by record 4; the exposure entries are record 4's
-//!   16-byte items. One master's report is printed with its serial hidden.
-//!   Its control pairs a master with another take's LRV.
+//!   LRV, by the CLI and by the agent's `probe` (all 14 files in one
+//!   call), name the X5, its firmware and serial, the master's two lens
+//!   tracks, the four calibrations with V6 in use (one snapshot, one hash,
+//!   in all of them), and each other as companions verified by record 4,
+//!   the agent's companion as the CLI's; the exposure entries are record
+//!   4's 16-byte items. One master's report is printed with its serial
+//!   hidden. Its control pairs a master with another take's LRV.
 //!
 //! Run by 4.4's command, `SPHERECUT_SAMPLES=<folder> cargo test -p
 //! spherecut-cli --test tier2_probe -- --ignored`; plain `cargo test`
@@ -71,6 +72,8 @@ fn samples_probe_names_the_camera() {
     let mut firmware: Option<String> = None;
     let mut hash: Option<String> = None;
     let mut pairs: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // Each file's companion as the CLI gives it, by the file's name.
+    let mut cli_companion: Vec<(String, Value)> = Vec::new();
     for role in &shot {
         let (master, lrv) = (samples::role(role.name), samples::lrv(role.name));
         let (status, doc) = probe(&[&master, &lrv]);
@@ -91,6 +94,8 @@ fn samples_probe_names_the_camera() {
                 json!({"path": other.to_str().unwrap(), "verified": true, "why": null}),
                 "{path}"
             );
+            let name = Path::new(path).file_name().unwrap().to_str().unwrap();
+            cli_companion.push((name.to_owned(), r["companion"].clone()));
             let c = &r["calibration"];
             assert_eq!(c["generations"], json!(["v1", "v2", "v3", "v6"]), "{path}");
             assert_eq!(c["in_use"], "v6", "{path}");
@@ -141,12 +146,15 @@ fn samples_probe_names_the_camera() {
         pairs.push((master, lrv));
     }
 
-    // The agent's summary of the first pair, from a read root: `camera`
-    // a name, `camera_detail` the CLI's camera, the companion verified
-    // as the agent opens it beneath the root (D45).
-    let (master, lrv) = &pairs[0];
-    let root = master.parent().unwrap();
-    let names = [master, lrv].map(|p| p.file_name().unwrap().to_str().unwrap());
+    // The agent's summaries of every pair, from a read root, in one call:
+    // `camera` a name, `camera_detail` the CLI's camera, the companion
+    // verified as the agent opens it beneath the root (D45), with the
+    // CLI's `verified` and `why`.
+    let root = pairs[0].0.parent().unwrap();
+    let names: Vec<&str> = cli_companion.iter().map(|(n, _)| n.as_str()).collect();
+    for (master, lrv) in &pairs {
+        assert!(master.parent() == Some(root) && lrv.parent() == Some(root));
+    }
     let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
         .args([
             "call",
@@ -160,8 +168,11 @@ fn samples_probe_names_the_camera() {
         .unwrap();
     let doc = document::document(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "{doc}");
-    let summary = &doc["result"]["files"];
-    for (s, other) in [(&summary[0], names[1]), (&summary[1], names[0])] {
+    assert_eq!(doc["result"].get("not_done"), None, "{doc}");
+    let summary = doc["result"]["files"].as_array().unwrap();
+    assert_eq!(summary.len(), names.len(), "{doc}");
+    for (s, (name, cli)) in summary.iter().zip(&cli_companion) {
+        assert_eq!(s["file"], name.as_str(), "{s}");
         assert_eq!(s["camera"], "Insta360 X5", "{s}");
         assert_eq!(
             s["camera_detail"],
@@ -170,13 +181,21 @@ fn samples_probe_names_the_camera() {
                 "model": "Insta360 X5",
                 "firmware": firmware.as_deref().unwrap(),
                 "serial": serial.as_deref().unwrap(),
-            })
+            }),
+            "{name}"
         );
+        // The CLI's companion, named as the agent names files: by the
+        // name beneath the root.
+        let other = Path::new(cli["path"].as_str().unwrap())
+            .file_name()
+            .unwrap();
         assert_eq!(
             s["companion"],
-            json!({"path": other, "verified": true, "why": null})
+            json!({"path": other.to_str().unwrap(), "verified": cli["verified"], "why": cli["why"]}),
+            "{name}"
         );
-        assert_eq!(s["calibration"]["in_use"], "v6");
+        assert_eq!(s["companion"]["verified"], true, "{name}");
+        assert_eq!(s["calibration"]["in_use"], "v6", "{name}");
     }
 
     // The control: a master beside another take's LRV, under its own
