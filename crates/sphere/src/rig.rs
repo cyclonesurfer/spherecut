@@ -40,7 +40,7 @@
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::fmt;
 
-use glam::{DQuat, DVec2, DVec3};
+use glam::{DQuat, DVec2, DVec3, DVec4};
 
 use crate::fisheye::{Canonical, F, LensModel, Unified, V6Reading};
 use crate::orient::Ypr;
@@ -156,6 +156,9 @@ pub enum Extrinsics {
     /// angles untuned lens_from_rig_1 = relative · lens_from_rig_0; and
     /// `translation_m` is lens 1's centre in lens 0's frame, the vector
     /// 6.2 writes as sign(tz) · t_1, so [`Geometry::tz`] doesn't apply.
+    /// `relative` carries the turn, so [`Geometry::turn`] doesn't apply
+    /// either: block 1's view frame is lens 0's carried by it (see
+    /// [`Rig::build`]). It need not be of unit length, but may not be 0.
     Fitted {
         relative: DQuat,
         translation_m: DVec3,
@@ -163,7 +166,9 @@ pub enum Extrinsics {
 }
 
 /// The axis of the 180° turn T_1 from the rig frame to block 1's view
-/// frame, which the strings omit (insta360.md §4.5).
+/// frame, which the strings omit (insta360.md §4.5). Under
+/// [`Extrinsics::Fitted`] the measured relative rotation carries the turn,
+/// and this isn't read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TurnAxis {
     Y,
@@ -393,6 +398,13 @@ impl EulerConv {
         roll_offset: QuarterTurn::Minus90,
     };
 
+    /// Whether this is one of the space's 1152 values: `axes` and `order`
+    /// each a permutation. The fields are public, so a value can be made
+    /// that isn't; [`Rig::build`] refuses it.
+    pub fn is_valid(&self) -> bool {
+        all_differ(self.axes) && all_differ(self.order)
+    }
+
     /// All 1152 values.
     pub fn all() -> impl Iterator<Item = EulerConv> {
         use Angle::{Pitch, Roll, Yaw};
@@ -471,7 +483,10 @@ pub struct LensCalib {
     pub fy: f64,
     /// The principal point in canvas pixels, local to the block's own
     /// square: block 1's stored cx less src (8075.73 − 5376 = 2699.73 on
-    /// Pat's V6).
+    /// Pat's V6). It and `cy` are read as corner-origin, pixel (i, j)
+    /// covering [i, i + 1) × [j, j + 1), as a slot's pixels are, so that a
+    /// canvas map scales the centre as it scales the side. That is an
+    /// assumption about the camera, which M3.6's fit can test.
     pub cx: f64,
     pub cy: f64,
     /// The stored yaw, pitch and roll, in degrees.
@@ -577,7 +592,8 @@ pub struct Rig {
     /// The feather's half width h, in radians.
     pub feather: f64,
     /// The mask's margin at LOD 0, in texels: at LOD λ it is
-    /// margin_texels · 2^λ (2^(λ+1) texels, 6.2, so 2).
+    /// margin_texels · 2^λ (2^(λ+1) texels, 6.2, so 2), with λ clamped at
+    /// 0, so that a negative LOD's footprint is LOD 0's.
     pub margin_texels: f64,
 }
 
@@ -610,9 +626,18 @@ pub struct RigLens {
     /// margin_texels · 2^λ over it (6.2's "texels in degrees at θ_max",
     /// 10.3's texels per radian).
     pub texels_per_radian: f64,
+    /// The least texels per radian from 90° to θ_max, over the azimuth:
+    /// what [`Rig::feather_at`] turns the margin into an angle by. Where
+    /// the slope falls towards θ_max, as on Pat's lenses, it is
+    /// `texels_per_radian`; where it rises, as on a stereographic lens (Mei
+    /// at ξ = 1 is one), it is the slope at 90°, so that the feather's band
+    /// still ends inside the mask where the frame cuts it short. It is
+    /// found at the range's two ends, which bound a slope that is monotone
+    /// over it, as each lens model's is here.
+    pub band_texels_per_radian: f64,
 }
 
-/// The azimuths, every 5°, over which [`RigLens::texels_per_radian`]
+/// The azimuths, every 10°, over which [`RigLens::texels_per_radian`]
 /// takes its least value.
 const AZIMUTHS: u32 = 36;
 
@@ -628,9 +653,9 @@ impl RigLens {
     /// A lens from its model, rotation, centre, θ_max (radians) and slot
     /// side, with the numbers it derives found once: the model's
     /// `limit_theta`, its θ_frame on a slot of `side`, and its texels per
-    /// radian at θ_max. [`Rig::build`] makes its lenses by this; a test or
-    /// a camera with no calibration (4.2's Kannala–Brandt rig) makes a
-    /// [`Rig`] of its own from it.
+    /// radian at θ_max and from 90° to θ_max. [`Rig::build`] makes its
+    /// lenses by this; a test or a camera with no calibration (4.2's
+    /// Kannala–Brandt rig) makes a [`Rig`] of its own from it.
     pub fn new(
         track: usize,
         model: LensModel,
@@ -640,6 +665,8 @@ impl RigLens {
         side: u32,
     ) -> RigLens {
         let limit_theta = model.limit_theta();
+        let [at_theta_max, at_90] =
+            texels_per_radian(&model, [theta_max, theta_max.min(FRAC_PI_2)]);
         RigLens {
             track,
             model,
@@ -649,7 +676,8 @@ impl RigLens {
             theta_frame: frame_theta(&model, limit_theta, f64::from(side)),
             side,
             limit_theta,
-            texels_per_radian: texels_per_radian(&model, theta_max),
+            texels_per_radian: at_theta_max,
+            band_texels_per_radian: at_theta_max.min(at_90),
         }
     }
 }
@@ -681,6 +709,18 @@ pub enum RigError {
     Side { track: usize },
     /// A number the rig is built from is NaN or infinite.
     NotFinite(&'static str),
+    /// A number the rig scales or divides by is 0 or below: a block's
+    /// focal, a lens's radius scale or θ_max, the canvas map's scale, or
+    /// the calibration's src or dst. A focal of 0 leaves a lens no texels
+    /// per radian, so that it covers nothing; a negative one mirrors or
+    /// turns its image.
+    NotPositive(&'static str),
+    /// The Euler convention's axes or its order isn't a permutation, so
+    /// it isn't one of the space's 1152 values.
+    NotPermutation(&'static str),
+    /// A quaternion that should give a rotation has no length to
+    /// normalise: the fitted relative rotation.
+    NotRotation(&'static str),
 }
 
 impl fmt::Display for RigError {
@@ -705,6 +745,9 @@ impl fmt::Display for RigError {
             RigError::FrontTrack(t) => write!(f, "front track {t} is neither 0 nor 1"),
             RigError::Side { track } => write!(f, "track {track}'s side is 0"),
             RigError::NotFinite(what) => write!(f, "{what} is not a finite number"),
+            RigError::NotPositive(what) => write!(f, "{what} is not above 0"),
+            RigError::NotPermutation(what) => write!(f, "{what} is not a permutation"),
+            RigError::NotRotation(what) => write!(f, "{what} has no length to normalise"),
         }
     }
 }
@@ -715,20 +758,28 @@ impl Rig {
     /// The rig for a calibration under a geometry and a tune (6.2).
     /// `front_track` is the media's (11.1): when it is block 1's track,
     /// both lenses turn 180° about +Y. `sides` are the tracks' sides, by
-    /// track. Refuses a θ_max past a lens's `limit_theta`.
+    /// track. Refuses a θ_max past a lens's `limit_theta`, and numbers it
+    /// can't build a rig that weighs anything from: NaN or infinite ones,
+    /// a focal, scale, side or θ_max of 0 or below, an Euler convention
+    /// outside the space, and a fitted relative rotation of length 0.
     ///
     /// Block b's lens_from_rig is E_b · F · Q_tune_bᵀ · T_b · S as the
     /// module's doc writes it, where Q_tune_b is the tune's yaw, pitch and
     /// roll as `orient::Ypr` reads them (D33) in block b's view frame, so
     /// that a positive yaw turns the lens right as seen through it. Under
-    /// [`Extrinsics::Fitted`], E_0 · F is F, and E_1 · F is relative · F ·
-    /// T_1⁻¹, so that block 1's tune still turns it in its own view frame
-    /// and, untuned, lens_from_rig_1 = relative · lens_from_rig_0. The
-    /// centre c_1 turns with lens 0, its tune included, as the stored t_1
-    /// is in lens 0's frame. Each model is `Unified` in its track's
-    /// pixels: the canvas map's focal times the tune's radius scale, its
-    /// centre at the block's c_local plus the tune's shift in canvas
-    /// pixels, and ξ plus the tune's `xi_delta`.
+    /// [`Extrinsics::Fitted`] both E_b are the identity, and block 1's view
+    /// frame is lens 0's carried by the measured rotation: T_1 is F⁻¹ ·
+    /// relative · F, the half turn about X or Y and the measured tilt
+    /// together, in place of a half turn about [`Geometry::turn`]. So,
+    /// untuned, lens_from_rig_1 = relative · lens_from_rig_0, and block 1's
+    /// tune turns it in its own view frame whichever way the relative
+    /// rotation turns it over, which a half turn about a fixed axis would
+    /// not: with the relative turning about X and T_1 about Y, a yaw would
+    /// swing lens 1 to its left. The centre c_1 turns with lens 0, its tune
+    /// included, as the stored t_1 is in lens 0's frame. Each model is
+    /// `Unified` in its track's pixels: the canvas map's focal times the
+    /// tune's radius scale, its centre at the block's c_local plus the
+    /// tune's shift in canvas pixels, and ξ plus the tune's `xi_delta`.
     pub fn build(
         cal: &Calibration,
         geo: &Geometry,
@@ -757,14 +808,22 @@ impl Rig {
             DQuat::IDENTITY
         };
         let s = geo.upright.about_neg_z() * y;
-        let t1 = geo.turn.half_turn();
-        let view = [s, t1 * s];
-        // E_b · F, and t_1 as c_1's formula takes it.
-        let (ef, t_1) = match geo.extrinsics {
-            Extrinsics::Stored(conv) => (
-                [0, 1].map(|b| conv.rotation(blocks[b].ypr_deg) * F),
-                DVec3::from(blocks[1].t_m) * geo.tz.sign(),
-            ),
+        // E_b · F, each block's view frame T_b · S, and t_1 as c_1's
+        // formula takes it.
+        let (ef, view, t_1) = match geo.extrinsics {
+            Extrinsics::Stored(conv) => {
+                if !all_differ(conv.axes) {
+                    return Err(RigError::NotPermutation("the Euler convention's axes"));
+                }
+                if !all_differ(conv.order) {
+                    return Err(RigError::NotPermutation("the Euler convention's order"));
+                }
+                (
+                    [0, 1].map(|b| conv.rotation(blocks[b].ypr_deg) * F),
+                    [s, geo.turn.half_turn() * s],
+                    DVec3::from(blocks[1].t_m) * geo.tz.sign(),
+                )
+            }
             Extrinsics::Fitted {
                 relative,
                 translation_m,
@@ -781,7 +840,11 @@ impl Rig {
                         translation_m.z,
                     ],
                 )?;
-                ([F, relative.normalize() * F * t1.inverse()], translation_m)
+                let relative = DVec4::from(relative)
+                    .try_normalize()
+                    .map(DQuat::from_vec4)
+                    .ok_or(RigError::NotRotation("the fitted relative rotation"))?;
+                ([F, F], [s, F.inverse() * relative * F * s], translation_m)
             }
         };
         let lens_from_rig: [DQuat; 2] = std::array::from_fn(|b| {
@@ -862,8 +925,10 @@ impl Rig {
     /// lies inside its mask (6.2, 10.3): θ_b on the parallax-corrected ray
     /// at most θ_max − margin(λ), and the sample's footprint, its texel
     /// with margin(λ) = margin_texels · 2^λ texels about it, inside its
-    /// slot. A negative LOD's footprint is taken as LOD 0's, which
-    /// bilinear sampling still reaches.
+    /// slot. λ is clamped at 0: a negative LOD's footprint is taken as LOD
+    /// 0's, which bilinear sampling still reaches. 10.3's text writes the
+    /// margin as margin · 2^λ, unclamped; its WGSL must clamp λ as this
+    /// does.
     pub fn covers(&self, b: usize, d: DVec3, lod: f64) -> bool {
         let lens = &self.lenses[b];
         let margin = self.margin_px(lod);
@@ -882,12 +947,17 @@ impl Rig {
     /// The feather's half width lens `b` blends over at LOD `lod`, in
     /// radians (6.2): the rig's h, shrunk where min(θ_max, θ_frame) less
     /// the margin in angle leaves less than h past 90°, but never below
-    /// 0.5° (nor above h).
+    /// 0.5° (nor above h, nor below 0: a feather of 0 or below is a hard
+    /// switch at 90°). The margin's angle is taken at the least slope
+    /// from 90° to θ_max ([`RigLens::band_texels_per_radian`]), so that
+    /// the band ends inside the mask whether the slope falls towards
+    /// θ_max or rises: on a rising one, with θ_frame the bound, the slope
+    /// at θ_max would put the margin's angle short of the frame's cut.
     pub fn feather_at(&self, b: usize, lod: f64) -> f64 {
         let lens = &self.lenses[b];
-        let margin = self.margin_px(lod) / lens.texels_per_radian;
+        let margin = self.margin_px(lod) / lens.band_texels_per_radian;
         let room = lens.theta_max.min(lens.theta_frame) - margin - FRAC_PI_2;
-        self.feather.min(room.max(MIN_FEATHER))
+        self.feather.min(room.max(MIN_FEATHER)).max(0.0)
     }
 
     /// The rig-frame unit direction lens `b` sees at pixel `px` of its
@@ -899,15 +969,18 @@ impl Rig {
         Some(lens.lens_from_rig.inverse() * d)
     }
 
-    /// margin(λ) in texels: margin_texels · 2^λ, with λ no less than 0.
+    /// margin(λ) in texels: margin_texels · 2^λ, with λ clamped at 0, so
+    /// that a negative LOD's footprint is LOD 0's. 10.3's text doesn't
+    /// clamp λ; its WGSL must, as this does.
     fn margin_px(&self, lod: f64) -> f64 {
         self.margin_texels * lod.max(0.0).exp2()
     }
 }
 
 /// Each block's θ_frame (6.1), in radians, by block: the smallest θ at
-/// which the lens's circle meets the edge of its square slot, found by a
-/// golden-section search along each edge through the inverse. Every
+/// which the lens's circle meets the edge of its square slot, found by
+/// Brent's search, golden sections with parabolic steps, along each edge
+/// through the inverse. Every
 /// canvas map scales with the side, so it needs no slot size, and
 /// `validate` (11.2) can bound the feather with it from the project
 /// alone.
@@ -922,9 +995,16 @@ pub fn theta_frame(cal: &Calibration, geo: &Geometry, tune: &Tune) -> Result<[f6
 }
 
 /// The blocks of the generation `geo` reads, checked: there, of that
-/// generation, read through one of the 21 V6 readings, and finite, with
-/// the tune's numbers for each lens.
+/// generation, read through one of the 21 V6 readings, finite, and with
+/// focals above 0, with the tune's numbers for each lens (its radius
+/// scale and θ_max above 0), the canvas map's scale and src and dst.
 fn blocks(cal: &Calibration, geo: &Geometry, tune: &Tune) -> Result<[LensCalib; 2], RigError> {
+    if cal.src == 0 {
+        return Err(RigError::NotPositive("the calibration's src"));
+    }
+    if cal.dst == 0 {
+        return Err(RigError::NotPositive("the calibration's dst"));
+    }
     let blocks = match geo.generation {
         Generation::V3 => cal.v3,
         Generation::V6 => cal.v6,
@@ -935,6 +1015,10 @@ fn blocks(cal: &Calibration, geo: &Geometry, tune: &Tune) -> Result<[LensCalib; 
     }
     const BLOCK: [&str; 2] = ["block 0's calibration", "block 1's calibration"];
     const TUNE: [&str; 2] = ["lens 0's tune", "lens 1's tune"];
+    const FX: [&str; 2] = ["block 0's fx", "block 1's fx"];
+    const FY: [&str; 2] = ["block 0's fy", "block 1's fy"];
+    const RADIUS: [&str; 2] = ["lens 0's radius scale", "lens 1's radius scale"];
+    const THETA_MAX: [&str; 2] = ["lens 0's θ_max", "lens 1's θ_max"];
     for (b, block) in blocks.iter().enumerate() {
         if block.terms.generation() != geo.generation {
             return Err(RigError::Terms {
@@ -957,9 +1041,14 @@ fn blocks(cal: &Calibration, geo: &Geometry, tune: &Tune) -> Result<[LensCalib; 
         finite(TUNE[b], &t.ypr_deg)?;
         finite(TUNE[b], &t.centre_px)?;
         finite(TUNE[b], &[t.radius_scale, t.xi_delta, t.theta_max_deg])?;
+        positive(FX[b], block.fx)?;
+        positive(FY[b], block.fy)?;
+        positive(RADIUS[b], t.radius_scale)?;
+        positive(THETA_MAX[b], t.theta_max_deg)?;
     }
     if let CanvasMap::Fitted { scale } = geo.canvas {
         finite("the canvas map's scale", &[scale])?;
+        positive("the canvas map's scale", scale)?;
     }
     Ok(blocks)
 }
@@ -971,6 +1060,20 @@ fn finite(what: &'static str, values: &[f64]) -> Result<(), RigError> {
     } else {
         Err(RigError::NotFinite(what))
     }
+}
+
+/// `Err(NotPositive(what))` unless `value` is above 0.
+fn positive(what: &'static str, value: f64) -> Result<(), RigError> {
+    if value > 0.0 {
+        Ok(())
+    } else {
+        Err(RigError::NotPositive(what))
+    }
+}
+
+/// Whether the three are all different: a permutation of three values.
+fn all_differ<T: PartialEq>([a, b, c]: [T; 3]) -> bool {
+    a != b && b != c && a != c
 }
 
 /// Block `block`'s model in the pixels of a square track of side `side`
@@ -1005,14 +1108,12 @@ fn off_axis(d: DVec3) -> f64 {
     d.x.hypot(d.y).atan2(d.z)
 }
 
-/// The lens-frame unit direction θ off the +z axis at azimuth φ.
-fn direction(theta: f64, phi: f64) -> DVec3 {
-    let (st, ct) = theta.sin_cos();
-    DVec3::new(st * phi.cos(), st * phi.sin(), ct)
-}
-
 /// 1 − w's ramp: 0 below `lo`, 1 above `hi`, Hermite's smooth step
-/// between; with `lo` = `hi` a step, ½ at the edge.
+/// between. With `hi` ≤ `lo` it is a step at `lo`, ½ at `lo` itself:
+/// [`Rig::feather_at`] gives no h below 0, so a feather of 0 or below is a
+/// hard switch at 90° that gives each lens ½ on the edge. 10.3's WGSL must
+/// take that case apart, since WGSL's `smoothstep` is undefined when its
+/// edges meet.
 fn smoothstep(lo: f64, hi: f64, x: f64) -> f64 {
     if hi <= lo {
         return match x.partial_cmp(&lo) {
@@ -1026,16 +1127,23 @@ fn smoothstep(lo: f64, hi: f64, x: f64) -> f64 {
 }
 
 /// The least over the azimuth of how far, in pixels, the image moves per
-/// radian of θ at `theta`.
-fn texels_per_radian(model: &LensModel, theta: f64) -> f64 {
-    (0..AZIMUTHS)
-        .filter_map(|j| {
-            let phi = f64::from(j) * 2.0 * PI / f64::from(AZIMUTHS);
-            let at = model.project(direction(theta, phi))?;
-            let before = model.project(direction(theta - SLOPE_STEP, phi))?;
-            Some((at - before).length() / SLOPE_STEP)
-        })
-        .fold(f64::INFINITY, f64::min)
+/// radian of θ, at each of `thetas`: one pass over the azimuths, each
+/// angle's sine and cosine found once.
+fn texels_per_radian<const N: usize>(model: &LensModel, thetas: [f64; N]) -> [f64; N] {
+    let at = thetas.map(f64::sin_cos);
+    let before = thetas.map(|theta| (theta - SLOPE_STEP).sin_cos());
+    let mut least = [f64::INFINITY; N];
+    for j in 0..AZIMUTHS {
+        let (sin_phi, cos_phi) = (f64::from(j) * 2.0 * PI / f64::from(AZIMUTHS)).sin_cos();
+        let pixel =
+            |(st, ct): (f64, f64)| model.project(DVec3::new(st * cos_phi, st * sin_phi, ct));
+        for (i, least) in least.iter_mut().enumerate() {
+            if let (Some(a), Some(b)) = (pixel(at[i]), pixel(before[i])) {
+                *least = least.min((a - b).length() / SLOPE_STEP);
+            }
+        }
+    }
+    least
 }
 
 /// θ_frame of a model on a square slot of side `side`, its inverse
@@ -1095,66 +1203,77 @@ fn frame_theta(model: &LensModel, limit: f64, side: f64) -> f64 {
 const FRAME_TOL: f64 = 1e-5;
 
 /// Where on [lo, hi] `f` takes its least value, where it has one
-/// minimum, and that value: a golden-section search that takes a
-/// parabola's step through its last three points wherever that falls well
-/// inside the bracket (Brent's method), so that a minimum as smooth as θ
-/// along an edge takes a handful of steps, not forty. It stops once the
-/// bracket about the best point is within `tol` of it.
+/// minimum, and that value: Brent's `localmin` (R. P. Brent, *Algorithms
+/// for Minimization without Derivatives*, Prentice-Hall 1973, chapter 5),
+/// written from the book's description with an absolute tolerance alone,
+/// since `tol` is far above the relative one Brent adds. Each step fits a
+/// parabola through the three best points so far, x, w and v, and takes
+/// its vertex when that lies inside the bracket and moves less than half
+/// the step before last; otherwise it takes a golden section of the
+/// larger side of x. So a minimum as smooth as θ along an edge takes a
+/// handful of steps, not forty. It stops once x lies within 2 `tol` of
+/// both ends of the bracket about it.
 fn golden_min(f: impl Fn(f64) -> f64, mut lo: f64, mut hi: f64, tol: f64) -> (f64, f64) {
-    // 1 − 1/φ, the share of the bracket a golden step takes.
+    // (3 − √5)/2, the share of a side a golden section takes.
     const GOLD: f64 = 0.381_966_011_250_105_2;
-    // x is the best point so far, w the second best and v the one before.
+    // x is the best point so far, w the second best, and v the best
+    // before w.
     let mut x = lo + GOLD * (hi - lo);
     let mut fx = f(x);
     let (mut w, mut fw, mut v, mut fv) = (x, fx, x, fx);
-    // The step taken, and the one before it.
-    let (mut step, mut last) = (0.0f64, 0.0f64);
+    // d is the step just taken, and e the one before it.
+    let (mut d, mut e) = (0.0f64, 0.0f64);
     for _ in 0..100 {
         let mid = 0.5 * (lo + hi);
         if (x - mid).abs() <= 2.0 * tol - 0.5 * (hi - lo) {
             break;
         }
-        let golden = |x: f64| if x >= mid { lo - x } else { hi - x };
-        let mut parabolic = false;
-        if last.abs() > tol {
-            // The vertex of the parabola through x, w and v, as an offset
-            // p/q from x.
-            let r = (x - w) * (fx - fv);
-            let mut q = (x - v) * (fx - fw);
-            let mut p = (x - v) * q - (x - w) * r;
+        // The parabola through x, w and v puts its vertex at x + p/q,
+        // with q ≥ 0; r keeps the step before last. With no step before
+        // last to compare against, p, q and r stay 0 and the golden
+        // section is taken.
+        let (mut p, mut q, mut r) = (0.0f64, 0.0f64, 0.0f64);
+        if e.abs() > tol {
+            r = (x - w) * (fx - fv);
+            q = (x - v) * (fx - fw);
+            p = (x - v) * q - (x - w) * r;
             q = 2.0 * (q - r);
             if q > 0.0 {
                 p = -p;
             } else {
                 q = -q;
             }
-            // Taken only when it moves less than half the step before
-            // last and lands inside the bracket.
-            if p.abs() < (0.5 * q * last).abs() && p > q * (lo - x) && p < q * (hi - x) {
-                last = step;
-                step = p / q;
-                let u = x + step;
-                if u - lo < 2.0 * tol || hi - u < 2.0 * tol {
-                    step = tol.copysign(mid - x);
-                }
-                parabolic = true;
+            r = e;
+            e = d;
+        }
+        if p.abs() < (0.5 * q * r).abs() && p > q * (lo - x) && p < q * (hi - x) {
+            // The parabola's step, kept 2 tol inside the bracket.
+            d = p / q;
+            let u = x + d;
+            if u - lo < 2.0 * tol || hi - u < 2.0 * tol {
+                d = if x < mid { tol } else { -tol };
             }
-        }
-        if !parabolic {
-            last = golden(x);
-            step = GOLD * last;
-        }
-        let u = x + if step.abs() >= tol {
-            step
         } else {
-            tol.copysign(step)
+            // A golden section of the larger side.
+            e = if x < mid { hi - x } else { lo - x };
+            d = GOLD * e;
+        }
+        // f is never sampled within tol of x.
+        let u = if d.abs() >= tol {
+            x + d
+        } else if d > 0.0 {
+            x + tol
+        } else {
+            x - tol
         };
         let fu = f(u);
+        // The bracket shrinks to the side of u or x that keeps the
+        // least, and x, w and v move up.
         if fu <= fx {
-            if u >= x {
-                lo = x;
-            } else {
+            if u < x {
                 hi = x;
+            } else {
+                lo = x;
             }
             (v, fv, w, fw, x, fx) = (w, fw, x, fx, u, fu);
         } else {

@@ -27,7 +27,7 @@ use std::time::Instant;
 use glam::{DMat3, DQuat, DVec2, DVec3};
 use proptest::prelude::*;
 use spherecut_sphere::fisheye::{
-    LensModel, PairOrder, Prism, PrismAt, PrismOrder, Tangential, Unified, V6Reading,
+    KbLens, LensModel, Model, PairOrder, Prism, PrismAt, PrismOrder, Tangential, Unified, V6Reading,
 };
 use spherecut_sphere::rig::{
     Angle, Axis, Binding, CalibTerms, Calibration, CanvasMap, EulerConv, Extrinsics, Generation,
@@ -547,8 +547,18 @@ fn euler_space_has_1152_distinct_values() {
     for c in all {
         assert_eq!(c.axes.iter().collect::<HashSet<_>>().len(), 3, "{c:?}");
         assert_eq!(c.order.iter().collect::<HashSet<_>>().len(), 3, "{c:?}");
+        assert!(c.is_valid(), "{c:?}");
     }
     assert!(all.contains(&EulerConv::PLACEHOLDER));
+    // Control: yaw and pitch about one axis is no value of the space.
+    must_fail(
+        "yaw and pitch about one axis",
+        EulerConv {
+            axes: [Axis::Y, Axis::Y, Axis::Z],
+            ..EulerConv::PLACEHOLDER
+        }
+        .is_valid(),
+    );
     // Their rotations are distinct, at angles that are no quarter turn.
     let turns: Vec<DQuat> = all.iter().map(|c| c.rotation(GENERIC)).collect();
     let least = closest_pair(&turns);
@@ -1101,6 +1111,7 @@ fn same_but_track(a: &RigLens, b: &RigLens) -> bool {
         && a.side == b.side
         && a.limit_theta == b.limit_theta
         && a.texels_per_radian == b.texels_per_radian
+        && a.band_texels_per_radian == b.band_texels_per_radian
 }
 
 /// The binding flipped with the media's numbers by track, the front
@@ -1806,9 +1817,224 @@ fn rig_tune_turns_each_lens_as_seen() {
     );
 }
 
+/// A tune of 10° in yaw, pitch or roll alone, or none, and where it puts
+/// a lens whose untuned axis, right and top in the rig frame are given:
+/// the tuned axis and right, as [`rig_tune_turns_each_lens_as_seen`]
+/// writes them.
+fn tuned_by_hand(axis: DVec3, right: DVec3, top: DVec3) -> [([f64; 3], DVec3, DVec3); 4] {
+    let (s, c) = 10f64.to_radians().sin_cos();
+    [
+        ([0.0, 0.0, 0.0], axis, right),
+        ([10.0, 0.0, 0.0], c * axis + s * right, c * right - s * axis),
+        ([0.0, 10.0, 0.0], c * axis + s * top, right),
+        ([0.0, 0.0, 10.0], axis, c * right - s * top),
+    ]
+}
+
+/// The rig_from_lens with that axis and right, whose down is their cross
+/// product.
+fn frame_from(axis: DVec3, right: DVec3) -> DMat3 {
+    DMat3::from_cols(right, axis.cross(right), axis)
+}
+
+/// Pat's V6 t_1 (block 1's stored translation), in metres.
+const PATS_T1: [f64; 3] = [0.000637, 0.000001, -0.031525];
+
+/// The centre c_1 turns with lens 0, its tune included, and with nothing
+/// of lens 1's (6.2: c_1 = rig_from_lens_0 · (sign(tz) · t_1), the stored
+/// t_1 being in lens 0's frame), written by hand at stored angles of (0°,
+/// 0°, 90°), where the placeholder's E is the identity: lens 0's tuned
+/// right, down and axis carry t_1's three components, and each lens sits
+/// half of c_1 from the origin.
+#[test]
+fn rig_centre_turns_with_lens_0s_tune() {
+    let _time = timed("rig_centre_turns_with_lens_0s_tune");
+    let cal = with_angles(&pats(), [[0.0, 0.0, 90.0]; 2]);
+    let t = DVec3::from(PATS_T1);
+    let geo = placeholder(CanvasMap::C, Generation::V6, EVERY_TERM);
+    let centres = |ypr: [[f64; 3]; 2], tz: TzSign| {
+        let mut tune = Tune::default();
+        tune.lenses[0].ypr_deg = ypr[0];
+        tune.lenses[1].ypr_deg = ypr[1];
+        let geo = Geometry { tz, ..geo.clone() };
+        let rig = Rig::build(&cal, &geo, &tune, 0, [768; 2]).unwrap();
+        [rig.lenses[0].centre_m, rig.lenses[1].centre_m]
+    };
+    // c_1 from lens 0's frame by hand, and how far a rig's centres lie
+    // from ±c_1/2.
+    let by_hand = |axis: DVec3, right: DVec3| {
+        let m = frame_from(axis, right);
+        t.x * m.x_axis + t.y * m.y_axis + t.z * m.z_axis
+    };
+    let gap = |got: [DVec3; 2], c1: DVec3| {
+        (got[0] + c1 / 2.0)
+            .length()
+            .max((got[1] - c1 / 2.0).length())
+    };
+    let untuned = by_hand(DVec3::NEG_Z, DVec3::X);
+    let mut worst = 0.0f64;
+    for (ypr, axis, right) in tuned_by_hand(DVec3::NEG_Z, DVec3::X, DVec3::Y) {
+        let c1 = by_hand(axis, right);
+        // Lens 0 tuned, with lens 1 tuned too or not.
+        for lens_1 in [[0.0; 3], [-7.0, 4.0, 12.0]] {
+            worst = worst.max(gap(centres([ypr, lens_1], TzSign::AsStored), c1));
+            worst = worst.max(gap(centres([ypr, lens_1], TzSign::Negated), -c1));
+        }
+    }
+    eprintln!("the centres lie within {worst:e} m of c_1 worked by hand");
+    assert!(worst <= 1e-15, "{worst:e} m");
+    // Untuned, c_1 is t_1 read through lens 0 along −Z: behind lens 0 by
+    // 31.5 mm.
+    assert!((untuned - DVec3::new(0.000637, -0.000001, 0.031525)).length() <= 1e-18);
+    // Control: c_1 by lens 0's untuned rotation, with lens 0 yawed.
+    must_fail(
+        "c_1 by lens 0's untuned rotation",
+        at_most(
+            gap(
+                centres([[10.0, 0.0, 0.0], [0.0; 3]], TzSign::AsStored),
+                untuned,
+            ),
+            1e-15,
+        ),
+    );
+}
+
+/// Under `Extrinsics::Fitted` the measured relative rotation sets block
+/// 1's view frame, whatever `Geometry::turn` says: untuned,
+/// lens_from_rig_1 = relative · lens_from_rig_0 with lens 0 at F · S;
+/// c_1 is the measured translation turned by lens 0; and block 1's tune
+/// turns lens 1 in its own view frame, as seen. Written by hand for the
+/// two half turns a back-to-back pair takes, about lens 0's y (the
+/// placeholder's class predicts it) and about its x (the twins (Y, 0°)
+/// and (X, ±90°) predict it), each under both turn axes, and for each
+/// with a measured tilt of 2° on top, the tune's frame then read from the
+/// rig untuned.
+#[test]
+fn rig_fitted_extrinsics_compose_by_hand() {
+    let _time = timed("rig_fitted_extrinsics_compose_by_hand");
+    let cal = pats();
+    let t = DVec3::from(PATS_T1);
+    let tilt = DQuat::from_axis_angle(DVec3::new(0.3, -0.5, 0.8).normalize(), 2.0 * DEG);
+    let rig = |relative: DQuat, turn: TurnAxis, ypr: [[f64; 3]; 2]| {
+        let geo = Geometry {
+            extrinsics: Extrinsics::Fitted {
+                relative,
+                translation_m: t,
+            },
+            turn,
+            ..placeholder(CanvasMap::C, Generation::V6, EVERY_TERM)
+        };
+        let mut tune = Tune::default();
+        tune.lenses[0].ypr_deg = ypr[0];
+        tune.lenses[1].ypr_deg = ypr[1];
+        Rig::build(&cal, &geo, &tune, 0, [768; 2]).unwrap()
+    };
+    let rig_from_lens = |r: &Rig, b: usize| DMat3::from_quat(r.lenses[b].lens_from_rig.inverse());
+    // Each half turn, and where it puts lens 1's axis, right and top in
+    // the rig frame: lens 0 looks along −Z with its right at +X and its
+    // top at +Y.
+    let halves = [
+        (
+            "about y",
+            DQuat::from_rotation_y(PI),
+            [DVec3::Z, DVec3::NEG_X, DVec3::Y],
+        ),
+        (
+            "about x",
+            DQuat::from_rotation_x(PI),
+            [DVec3::Z, DVec3::X, DVec3::NEG_Y],
+        ),
+    ];
+    // c_1, t read through lens 0 along −Z, and how far a rig's centres
+    // lie from ±c_1/2.
+    let c1 = t.x * DVec3::X - t.y * DVec3::Y - t.z * DVec3::Z;
+    let centre_gap = |r: &Rig, c1: DVec3| {
+        (r.lenses[0].centre_m + c1 / 2.0)
+            .length()
+            .max((r.lenses[1].centre_m - c1 / 2.0).length())
+    };
+    let (mut worst, mut centres) = (0.0f64, 0.0f64);
+    for (name, half, [axis, right, top]) in halves {
+        for turn in TurnAxis::all() {
+            // Lens 0, and the centres, by hand.
+            let untuned = rig(half, turn, [[0.0; 3]; 2]);
+            worst = worst.max(misfit(
+                untuned.lenses[0].lens_from_rig.inverse(),
+                frame_from(DVec3::NEG_Z, DVec3::X),
+            ));
+            centres = centres.max(centre_gap(&untuned, c1));
+            // Lens 1 under each tune, by hand.
+            for (ypr, axis, right) in tuned_by_hand(axis, right, top) {
+                let r = rig(half, turn, [[0.0; 3], ypr]);
+                let err = misfit(r.lenses[1].lens_from_rig.inverse(), frame_from(axis, right));
+                assert!(
+                    err <= 1e-12,
+                    "{name} under turn {turn:?}, tune {ypr:?}: {err:e}"
+                );
+                // Lens 1's tune leaves lens 0 and the centres.
+                assert_eq!(r.lenses[0], untuned.lenses[0]);
+                assert_eq!(r.lenses[1].centre_m, untuned.lenses[1].centre_m);
+            }
+            // With the tilt: the untuned relation, and lens 1's tune in the
+            // frame it then has.
+            let relative = tilt * half;
+            let untuned = rig(relative, turn, [[0.0; 3]; 2]);
+            let l = |b: usize| untuned.lenses[b].lens_from_rig;
+            worst = worst.max(rotation_angle(l(1), relative * l(0)));
+            let m = rig_from_lens(&untuned, 1);
+            for (ypr, axis, right) in tuned_by_hand(m.z_axis, m.x_axis, -m.y_axis) {
+                let r = rig(relative, turn, [[0.0; 3], ypr]);
+                worst = worst.max(misfit(
+                    r.lenses[1].lens_from_rig.inverse(),
+                    frame_from(axis, right),
+                ));
+            }
+        }
+    }
+    // Lens 0's tune turns c_1 with it, as under `Stored`.
+    let (s, c) = 10f64.to_radians().sin_cos();
+    let yawed = rig(
+        DQuat::from_rotation_x(PI),
+        TurnAxis::Y,
+        [[10.0, 0.0, 0.0], [0.0; 3]],
+    );
+    let c1_yawed = t.x * DVec3::new(c, 0.0, s) - t.y * DVec3::Y + t.z * DVec3::new(s, 0.0, -c);
+    centres = centres.max(centre_gap(&yawed, c1_yawed));
+    eprintln!(
+        "the fitted rigs lie within {worst:e} of their frames worked by hand, and their centres \
+         within {centres:e} m"
+    );
+    assert!(worst <= 1e-12, "{worst:e}");
+    assert!(centres <= 1e-15, "{centres:e} m");
+    // Control: block 1's view frame from the turn axis, as relative · F ·
+    // T_1⁻¹ · Q_tuneᵀ · T_1 · S. With the relative a half turn about x and
+    // T_1 one about Y, a yaw of 10° swings lens 1's axis to its left, by
+    // sin 10° along its right.
+    let f = DQuat::from_rotation_x(PI);
+    let t1 = DQuat::from_rotation_y(PI);
+    let q = DQuat::from_rotation_y(-10f64.to_radians());
+    let by_turn = DQuat::from_rotation_x(PI) * f * t1.inverse() * q.conjugate() * t1;
+    let [axis, right, top] = halves[1].2;
+    let (_, want_axis, want_right) = tuned_by_hand(axis, right, top)[1];
+    let swung = by_turn.inverse() * DVec3::Z;
+    eprintln!(
+        "with T_1 from the turn axis, lens 1's yaw moves its axis {:.3} along its right",
+        (swung - axis).dot(right)
+    );
+    must_fail(
+        "block 1's view frame from the turn axis",
+        at_most(
+            misfit(by_turn.inverse(), frame_from(want_axis, want_right)),
+            1e-12,
+        ),
+    );
+}
+
 /// `Rig::build` refuses a θ_max past the limit, a missing generation, a
 /// block's terms of the wrong generation, a front track past 1, a side
-/// of 0 and numbers that aren't finite, each with its `RigError`.
+/// of 0, numbers that aren't finite, a focal, scale, src, dst or θ_max of
+/// 0 or below, a fitted relative rotation of length 0 and an Euler
+/// convention outside the space, each with its `RigError`.
 #[test]
 fn rig_build_refuses_what_it_cannot_build() {
     let _time = timed("rig_build_refuses_what_it_cannot_build");
@@ -1953,7 +2179,149 @@ fn rig_build_refuses_what_it_cannot_build() {
         };
         assert!(not_finite(refuse(&cal, &fitted, &tune, 0, [768; 2])));
     }
+    // Each number the rig scales or divides by, at 0 and below, with the
+    // field its refusal names. Control: each just above 0, which builds,
+    // however little the rig then weighs.
+    let lens_names = |b: usize| {
+        [
+            ["block 0's fx", "block 1's fx"][b],
+            ["block 0's fy", "block 1's fy"][b],
+            ["lens 0's radius scale", "lens 1's radius scale"][b],
+            ["lens 0's θ_max", "lens 1's θ_max"][b],
+        ]
+    };
+    let at = |field: usize, b: usize, v: f64| {
+        let (mut c, mut g, mut t) = (cal, geo.clone(), tune);
+        match field {
+            0 => c.v6.as_mut().unwrap()[b].fx = v,
+            1 => c.v6.as_mut().unwrap()[b].fy = v,
+            2 => t.lenses[b].radius_scale = v,
+            3 => t.lenses[b].theta_max_deg = v,
+            _ => g.canvas = CanvasMap::Fitted { scale: v },
+        }
+        Rig::build(&c, &g, &t, 0, [768; 2])
+    };
+    for b in 0..2 {
+        let names = lens_names(b);
+        for (field, name) in names.iter().enumerate() {
+            for v in [0.0, -1.0, -4277.5] {
+                assert_eq!(at(field, b, v).unwrap_err(), RigError::NotPositive(name));
+            }
+            must_fail(
+                &format!("{name} just above 0, refused"),
+                at(field, b, 1e-6).is_err(),
+            );
+        }
+    }
+    for v in [0.0, -0.95] {
+        assert_eq!(
+            at(4, 0, v).unwrap_err(),
+            RigError::NotPositive("the canvas map's scale")
+        );
+    }
+    must_fail(
+        "a canvas scale just above 0, refused",
+        at(4, 0, 1e-6).is_err(),
+    );
+    for (name, c, one) in [
+        (
+            "the calibration's src",
+            Calibration { src: 0, ..cal },
+            Calibration { src: 1, ..cal },
+        ),
+        (
+            "the calibration's dst",
+            Calibration { dst: 0, ..cal },
+            Calibration { dst: 1, ..cal },
+        ),
+    ] {
+        assert_eq!(
+            refuse(&c, &geo, &tune, 0, [768; 2]),
+            RigError::NotPositive(name)
+        );
+        must_fail(
+            &format!("{name} of 1, refused"),
+            Rig::build(&one, &geo, &tune, 0, [768; 2]).is_err(),
+        );
+    }
+    // A fitted relative rotation of length 0, or so short its square
+    // underflows. Control: one short enough to look like it, 1e-150,
+    // which still normalises.
+    let fitted = |w: f64| Geometry {
+        extrinsics: Extrinsics::Fitted {
+            relative: DQuat::from_xyzw(0.0, w, 0.0, 0.0),
+            translation_m: DVec3::from(PATS_T1),
+        },
+        ..geo.clone()
+    };
+    for w in [0.0, 1e-170] {
+        assert_eq!(
+            refuse(&cal, &fitted(w), &tune, 0, [768; 2]),
+            RigError::NotRotation("the fitted relative rotation")
+        );
+    }
+    must_fail(
+        "a relative of length 1e-150, refused",
+        Rig::build(&cal, &fitted(1e-150), &tune, 0, [768; 2]).is_err(),
+    );
+    // An Euler convention whose axes or order repeat one. Control: each
+    // field reversed, still a permutation, which builds.
+    let euler = |conv: EulerConv| Geometry {
+        extrinsics: Extrinsics::Stored(conv),
+        ..geo.clone()
+    };
+    let p = EulerConv::PLACEHOLDER;
+    for (name, bad, good) in [
+        (
+            "the Euler convention's axes",
+            EulerConv {
+                axes: [Axis::Y, Axis::X, Axis::Y],
+                ..p
+            },
+            EulerConv {
+                axes: [Axis::Z, Axis::X, Axis::Y],
+                ..p
+            },
+        ),
+        (
+            "the Euler convention's order",
+            EulerConv {
+                order: [Angle::Yaw, Angle::Roll, Angle::Roll],
+                ..p
+            },
+            EulerConv {
+                order: [Angle::Roll, Angle::Pitch, Angle::Yaw],
+                ..p
+            },
+        ),
+    ] {
+        assert!(!bad.is_valid() && good.is_valid());
+        assert_eq!(
+            refuse(&cal, &euler(bad), &tune, 0, [768; 2]),
+            RigError::NotPermutation(name)
+        );
+        must_fail(
+            &format!("{name} reversed, refused"),
+            Rig::build(&cal, &euler(good), &tune, 0, [768; 2]).is_err(),
+        );
+    }
     // Every refusal says what it refused.
+    for (e, says) in [
+        (
+            RigError::NotPositive("block 1's fy"),
+            "block 1's fy is not above 0",
+        ),
+        (
+            RigError::NotPermutation("the Euler convention's order"),
+            "the Euler convention's order is not a permutation",
+        ),
+        (
+            RigError::NotRotation("the fitted relative rotation"),
+            "the fitted relative rotation has no length to normalise",
+        ),
+    ] {
+        assert_eq!(e.to_string(), says);
+    }
     assert!(
         RigError::PastLimit {
             block: 1,
@@ -2028,7 +2396,8 @@ fn tune_default_lies_inside_validates_bounds() {
 struct Pooled {
     name: String,
     rig: Rig,
-    /// Whether it is one of the plain rigs: Pat's numbers, the tune's
+    /// Whether it is one of the plain rigs: Pat's numbers (or the
+    /// stereographic rig on Pat's rotations and centres), the tune's
     /// angles within 0.25° and q at most 0.5 m⁻¹, so that h of 2° or more
     /// at each lens leaves no direction a lens covers at a weight of 0.
     plain: bool,
@@ -2045,14 +2414,15 @@ struct Pooled {
 const PLAIN_FEATHER: f64 = 2.0 * DEG;
 
 /// The LOD up to which `rig`'s lenses keep h at `h` or more: margin(λ) =
-/// 2^(λ+1) texels leaves min(θ_max, θ_frame) − 90° − h, at most 4.
+/// 2^(λ+1) texels, in angle at the band's least slope, leaves
+/// min(θ_max, θ_frame) − 90° − h, at most 4.
 fn lod_keeping(rig: &Rig, h: f64) -> f64 {
     (0..2)
         .map(|b| {
             let l = &rig.lenses[b];
             let room = l.theta_max.min(l.theta_frame) - FRAC_PI_2 - h;
             if room > 0.0 {
-                (room * l.texels_per_radian / rig.margin_texels).log2()
+                (room * l.band_texels_per_radian / rig.margin_texels).log2()
             } else {
                 f64::NEG_INFINITY
             }
@@ -2060,10 +2430,43 @@ fn lod_keeping(rig: &Rig, h: f64) -> f64 {
         .fold(4.0, f64::min)
 }
 
+/// A stereographic Kannala–Brandt pair on the rotations and centres of
+/// Pat's V6 under C, at the default tune: its circle meets its 768²
+/// slot's left edge at θ_frame ≈ 97.4° while θ_max is 104°, and its slope
+/// rises with θ, from 334 texels a radian at 90° to 441 at θ_max, so the
+/// frame bounds the feather where the slope at θ_max would misplace it.
+fn stereographic_rig() -> Rig {
+    let cal = pats();
+    let geo = placeholder(CanvasMap::C, Generation::V6, V6Reading::RADIAL_ONLY);
+    let base = Rig::build(&cal, &geo, &Tune::default(), 0, [768; 2]).unwrap();
+    let model = LensModel::Kb(KbLens {
+        base: Model::Stereographic,
+        k: [0.0; 5],
+        fx: 167.0,
+        fy: 167.0,
+        cx: 380.0,
+        cy: 386.0,
+        p: [0.0; 2],
+        pe: [0.0; 2],
+        s: [0.0; 4],
+    });
+    let lenses = base.lenses.map(|l| {
+        RigLens::new(
+            l.track,
+            model,
+            l.lens_from_rig,
+            l.centre_m,
+            104.0 * DEG,
+            768,
+        )
+    });
+    Rig { lenses, ..base }
+}
+
 /// The pool: Pat's numbers under each generation, two readings and each
 /// canvas map, at the default tune, at q = 0 and at the feather's bound;
-/// seeded rigs near those; and seeded rigs anywhere in `validate`'s
-/// bounds (11.2), with any geometry.
+/// seeded rigs near those; seeded rigs anywhere in `validate`'s bounds
+/// (11.2), with any geometry; and [`stereographic_rig`].
 fn pool() -> &'static [Pooled] {
     static POOL: OnceLock<Vec<Pooled>> = OnceLock::new();
     POOL.get_or_init(|| {
@@ -2166,6 +2569,12 @@ fn pool() -> &'static [Pooled] {
                 radial,
             );
         }
+        add(
+            "the stereographic rig".to_string(),
+            stereographic_rig(),
+            true,
+            false,
+        );
         for p in pool.iter().filter(|p| p.plain) {
             assert!(p.lod_max >= 0.0, "{}: h under 2° at LOD 0", p.name);
         }
@@ -2212,6 +2621,23 @@ fn unshrunk(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
         } else {
             0.0
         }
+    }))
+}
+
+/// The weights with the margin's angle for the h shrink taken at θ_max's
+/// slope alone, not the band's least (a control): on a lens whose slope
+/// rises, with θ_frame the bound, the band then runs past the frame's
+/// cut.
+fn slope_at_theta_max(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
+    normalised([0, 1].map(|b| {
+        if !rig.covers(b, d, lod[b]) {
+            return 0.0;
+        }
+        let l = &rig.lenses[b];
+        let margin = rig.margin_texels * lod[b].max(0.0).exp2() / l.texels_per_radian;
+        let room = l.theta_max.min(l.theta_frame) - margin - FRAC_PI_2;
+        let h = rig.feather.min(room.max(MIN_FEATHER));
+        1.0 - ramp(FRAC_PI_2 - h, FRAC_PI_2 + h, off_axis(rig.ray(b, d)))
     }))
 }
 
@@ -2629,6 +3055,23 @@ fn weights_are_continuous() {
     let jump = must_fail("h never shrunk", at_most(jump, JUMP));
     eprintln!("unshrunk, the weights jump by {jump:.4} across lens 0's edge at LOD 3");
     assert!(jump_at_the_edge(&p.rig, Rig::weights, 0, 0.7, [3.0; 2]) <= JUMP);
+    // Control: on the stereographic rig, the margin's angle at θ_max's
+    // slope leaves h too wide for the frame's cut, towards lens 0's left
+    // edge, its nearest, at LOD 3.9, where the band's slope keeps h at 2°.
+    let p = pool()
+        .iter()
+        .find(|p| p.name == "the stereographic rig")
+        .unwrap();
+    let lens = &p.rig.lenses[0];
+    assert!(lens.band_texels_per_radian < 0.8 * lens.texels_per_radian);
+    assert!(lens.theta_frame < lens.theta_max && p.lod_max >= 3.9);
+    let jump = jump_at_the_edge(&p.rig, slope_at_theta_max, 0, PI, [3.9; 2]);
+    let jump = must_fail("the margin at θ_max's slope", at_most(jump, JUMP));
+    eprintln!(
+        "on the stereographic rig, the margin at θ_max's slope makes the weights jump by \
+         {jump:.4} at the frame's cut, LOD 3.9"
+    );
+    assert!(jump_at_the_edge(&p.rig, Rig::weights, 0, PI, [3.9; 2]) <= JUMP);
 }
 
 /// The weights are symmetric under a lens swap with a mirrored rig.
