@@ -358,6 +358,9 @@ impl AppState {
             return;
         }
         let window = self.gpu.clone();
+        let media = project
+            .media_by_id(project.the_clip().media)
+            .map(|m| m.path.clone());
         let mut job = ExportJob::new(project.clone(), &output, window.clone());
         job.overwrite = overwrite;
         job.pace = Some(self.export.pace.clone());
@@ -375,6 +378,15 @@ impl AppState {
                 if cancelled.load(Ordering::Relaxed) {
                     return (Err(ExportError::Cancelled), device);
                 }
+                if let Some(path) = &media {
+                    let lenses = lenses_in(path, cancelled.clone());
+                    if cancelled.load(Ordering::Relaxed) {
+                        return (Err(ExportError::Cancelled), device);
+                    }
+                    if lenses > 1 {
+                        return (Err(unstitched(path, lenses)), device);
+                    }
+                }
                 let (gpu, used) = export_device(window, device);
                 job.gpu = gpu;
                 (Export::start(job), used)
@@ -387,6 +399,28 @@ impl AppState {
             cancelled,
         });
     }
+}
+
+/// How many lenses side by side the video at `path` holds, by the rule
+/// the viewer opens them by ([`crate::panes::lenses`]): 0 for a file of
+/// one picture, and for one the probe can't read, which the export then
+/// reports itself. It reads the file, so it runs on a job.
+fn lenses_in(path: &Path, cancel: Arc<AtomicBool>) -> usize {
+    spherecut_media::probe::probe_cancellable(spherecut_media::Source::path(path), cancel)
+        .map_or(0, |r| crate::panes::lenses(&r).len())
+}
+
+/// Why a camera's raw file isn't exported yet: its lenses side by side
+/// would export as one of them rendered as an equirect (m3-plan 13.2).
+/// Read from the file, whatever the viewer has opened of it yet and
+/// whoever started the export (Start, the smoke run, a test), so that
+/// it holds from before the probe opens the lenses.
+fn unstitched(path: &Path, lenses: usize) -> ExportError {
+    ExportError::Invalid(format!(
+        "{} is a camera's raw file, its {lenses} lenses side by side: stitched export arrives \
+         with M3.11",
+        path.display()
+    ))
 }
 
 /// [`AppState::viewer_lead`], from what the player says.
@@ -809,7 +843,15 @@ fn run_ui(s: &mut AppState, ui: &mut egui::Ui) {
     match &s.export.run {
         None => {
             let path = output_path(&dir, &s.export.name);
-            let ready = s.reframe.doc.is_some() && path.is_some();
+            // A camera's raw file's lenses, side by side in the viewer:
+            // Start is off. The export's start refuses such a file by
+            // its own streams, whatever the viewer shows yet
+            // (`unstitched`).
+            let lenses = s.columns() > 1;
+            let ready = s.reframe.doc.is_some() && path.is_some() && !lenses;
+            if lenses {
+                ui.weak("Stitched export arrives with M3.11");
+            }
             ui.horizontal(|ui| {
                 if ui.add_enabled(ready, egui::Button::new("Start")).clicked()
                     && let Some(path) = path

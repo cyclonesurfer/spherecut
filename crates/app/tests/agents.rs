@@ -2,8 +2,11 @@
 //! step is in the window's Edit menu by the agent's name and the window
 //! saves its own on top, which the agent can't undo past; the window's
 //! lock refuses an agent's edit until the project closes; a stale history
-//! opens fresh, saying so; and a project changed on disk isn't saved
-//! over, while Save as still works.
+//! opens fresh, saying so; a project changed on disk isn't saved over,
+//! while Save as still works; and an agent's project of a camera's raw
+//! file stays open once its lenses do (m3-plan 13.1), while the file
+//! opened alone makes no project, and its export waits for the stitch
+//! by what the file holds (13.2).
 //!
 //! The agent's calls are `spherecut call`'s ([`spherecut_agent::call`]),
 //! made from the test's thread between the window's frames. Each test
@@ -18,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use egui::Key;
+use egui::{Key, Modifiers};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use serde_json::{Value, json};
@@ -28,40 +31,59 @@ use spherecut_agent::{Options, Roots, ToolError};
 use spherecut_app::SpherecutApp;
 use spherecut_app::doc::Doc;
 use spherecut_app::notices::NoticeKind;
+use spherecut_app::reframe::SETTLE;
+use spherecut_app::viewer::{RawShown, ViewerResources};
 use spherecut_core::blocking::{OnBlock, mark_ui_thread_with, unmark_ui_thread};
 use spherecut_core::project::file;
+use spherecut_export::ExportError;
 use spherecut_media::backend::FfmpegBackend;
+use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Codec, Spec};
 
 type H = Harness<'static, SpherecutApp>;
 
-/// A folder of a test's own: an equirect clip, and `trip.spherecut`, the
-/// project an agent made of it.
+/// A folder of a test's own: a clip, and `trip.spherecut`, the project an
+/// agent made of it.
 struct Folder {
     dir: PathBuf,
+    clip: PathBuf,
     project: PathBuf,
 }
 
 impl Folder {
+    /// An equirect clip's.
     fn new(name: &str) -> Folder {
+        Folder::of(name, |dir| {
+            let spec = Spec {
+                name: "clip".into(),
+                width: 512,
+                height: 256,
+                frames: 30,
+                codec: Codec::H264Lossless,
+                spherical: true,
+                ..Spec::default()
+            };
+            media::write(&spec, dir).unwrap()
+        })
+    }
+
+    /// A camera's raw file's ([`write_lenses`]).
+    fn lenses(name: &str) -> Folder {
+        Folder::of(name, |dir| write_lenses(dir, "lenses.insv", false))
+    }
+
+    /// The clip `write` leaves in the folder, and the agent's project of
+    /// it.
+    fn of(name: &str, write: impl FnOnce(&Path) -> PathBuf) -> Folder {
         let dir = common::tmp().join(name);
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        let spec = Spec {
-            name: "clip".into(),
-            width: 512,
-            height: 256,
-            frames: 30,
-            codec: Codec::H264Lossless,
-            spherical: true,
-            ..Spec::default()
-        };
-        let clip = media::write(&spec, &dir).unwrap();
+        let clip = write(&dir);
         let project = dir.join("trip.spherecut");
-        let f = Folder { dir, project };
+        let f = Folder { dir, clip, project };
         f.agent(
             "project",
-            json!({"file": f.project, "create": {"media": clip}}),
+            json!({"file": f.project, "create": {"media": f.clip}}),
         )
         .unwrap();
         f
@@ -109,6 +131,47 @@ fn elsewhere<T: Send>(f: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|s| s.spawn(f).join().unwrap())
 }
 
+/// A camera's raw file in `dir`, named `name`, as small as the probe
+/// still takes for one: two video streams of one size, a lens each
+/// (`panes::lenses`), the grid's and then the seam pattern's, or the other
+/// way round when `swapped`. It is Matroska inside, which FFmpeg tells by
+/// its bytes, not its name. The X5's is an MP4 whose tracks' tables the
+/// frame lock reads, and from M3.8 `FfmpegBackend::track_timing` has
+/// none for Matroska, so this pair would be refused its lock
+/// ("timing"): it moves to `mux_video_streams`' MP4 output, which M3.1
+/// adds.
+fn write_lenses(dir: &Path, name: &str, swapped: bool) -> PathBuf {
+    let lens = |name: &str, pattern| {
+        let spec = Spec {
+            name: name.into(),
+            pattern,
+            width: 64,
+            height: 64,
+            frames: 30,
+            codec: Codec::H264Lossless,
+            ..Spec::default()
+        };
+        media::write(&spec, dir).unwrap()
+    };
+    let a = lens("lens-a", Pattern::Grid);
+    let b = lens("lens-b", Pattern::Seam);
+    let pair = if swapped { [&b, &a] } else { [&a, &b] };
+    spherecut_media::encode::mux_video_streams(&pair.map(PathBuf::as_path), &dir.join(name))
+        .unwrap()
+}
+
+/// What each raw view column last drew.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test's read of the renderer lock, between frames"
+)]
+fn raw_last(rs: &egui_wgpu::RenderState) -> Vec<Option<RawShown>> {
+    let r = rs.renderer.read();
+    r.callback_resources
+        .get::<ViewerResources>()
+        .map_or_else(Vec::new, ViewerResources::raw_last)
+}
+
 /// The file's bytes, read off the window's thread.
 #[expect(
     clippy::disallowed_methods,
@@ -131,13 +194,26 @@ fn rename(f: &Folder, name: &str) {
     elsewhere(|| file::save(&p, &f.project).unwrap());
 }
 
-/// The app with `project` open, on a marked thread.
-fn open(gpu: &spherecut_render::Gpu, project: &Path) -> (egui_wgpu::RenderState, H) {
+/// The app with `path` open, a project or a video, on a marked thread;
+/// `before` runs on it first, before its first pass.
+fn start(
+    gpu: &spherecut_render::Gpu,
+    path: &Path,
+    before: impl FnOnce(&mut SpherecutApp),
+) -> (egui_wgpu::RenderState, H) {
     let rs = common::render_state(gpu);
     let mut parts = common::parts(gpu, Arc::new(FfmpegBackend::new()));
-    parts.open = vec![project.to_path_buf()];
+    parts.open = vec![path.to_path_buf()];
     mark_ui_thread_with(OnBlock::Panic);
-    let mut h = common::harness(SpherecutApp::new(parts), &rs, [960.0, 600.0], 1.0);
+    let mut app = SpherecutApp::new(parts);
+    before(&mut app);
+    let h = common::harness(app, &rs, [960.0, 600.0], 1.0);
+    (rs, h)
+}
+
+/// The app with `project` open, on a marked thread.
+fn open(gpu: &spherecut_render::Gpu, project: &Path) -> (egui_wgpu::RenderState, H) {
+    let (rs, mut h) = start(gpu, project, |_| {});
     until(&mut h, "the project to open", |a| {
         let r = &a.state.reframe;
         !r.pending() && r.doc.as_ref().is_some_and(|d| d.path.is_some()) && a.state.shown.is_some()
@@ -309,5 +385,206 @@ fn a_stale_history_opens_fresh_and_a_changed_file_isnt_saved_over() {
     assert_eq!(bytes(&f.project), written);
     // The old file's lock went with it: an agent edits it now.
     f.trim("10f").unwrap();
+    finish(h);
+}
+
+/// Step until the player has both lenses open and the viewer has drawn
+/// each in its column.
+fn until_lenses(h: &mut H, rs: &egui_wgpu::RenderState) {
+    until(h, "both lenses open", |a| {
+        a.state.snapshot.streams.len() == 2
+    });
+    until(h, "both columns drawn", |_| {
+        let last = raw_last(rs);
+        last.len() == 2 && last.iter().all(Option::is_some)
+    });
+}
+
+/// An agent's project of a camera's raw file stays open (m3-plan 13.1):
+/// the window opens it on the clip's one stream, the probe finds the
+/// file's two lenses, and they open side by side in the project's raw
+/// view, with the project, its history, its lock and its notices kept.
+/// It is a project like any other there but for the view, which the raw
+/// view has none of: a zoom makes no edit, the export waits for the
+/// stitch (m3-plan 13.2), a marker is an edit, and it saves.
+#[test]
+fn an_agent_made_insv_project_stays_open() {
+    let f = Folder::lenses("agents-insv");
+    f.trim("20f").unwrap();
+    // The file is written again since the agent added it, so the project
+    // opens with a notice of its own.
+    write_lenses(&f.dir, "lenses.insv", true);
+    let other = write_lenses(&f.dir, "other.insv", false);
+    let gpu = common::gpu();
+    let (rs, mut h) = start(&gpu, &f.project, |_| {});
+    until(&mut h, "both lenses open", |a| {
+        a.state.snapshot.streams.len() == 2
+    });
+    assert!(
+        h.state().state.reframe.doc.is_some(),
+        "the project was let go when its lenses opened"
+    );
+    until_lenses(&mut h, &rs);
+    let s = &h.state().state;
+    assert!(s.raw_view());
+    assert_eq!(s.columns(), 2);
+    let d = doc(&h);
+    assert_eq!(d.path.as_deref(), Some(f.project.as_path()));
+    assert_eq!(d.name(), "trip.spherecut");
+    assert_eq!(
+        s.snapshot.path.as_deref(),
+        d.media().map(|m| m.path.as_path())
+    );
+    let twenty = spherecut_core::FrameRate::FPS_30.frame_to_time(20).unwrap();
+    assert_eq!(d.clip().source.end, twenty, "the agent's trim");
+    assert_eq!(d.undo_label().as_deref(), Some("Set trim (spherecut call)"));
+    let changed = notice(&h, NoticeKind::MediaChanged).expect("the project's notice");
+    assert!(changed.contains("changed since it was added"), "{changed}");
+    let lenses = notice(&h, NoticeKind::Lenses).expect("the lenses' notice");
+    assert!(lenses.contains("2 lenses side by side"), "{lenses}");
+    // The window holds the project still: an agent's edit waits for it.
+    let e = f.trim("10f").unwrap_err();
+    assert_eq!(e.code, codes::PROJECT_LOCKED, "{e:?}");
+
+    // Another camera file's probe, landing now, opens nothing.
+    let media = s.snapshot.path.clone();
+    h.state_mut().state.info.open(&other);
+    until(&mut h, "the other file's probe", |a| {
+        !a.state.info.pending()
+    });
+    for _ in 0..3 {
+        step(&mut h);
+    }
+    let s = &h.state().state;
+    assert_eq!(s.snapshot.path, media);
+    assert_eq!(s.snapshot.streams.len(), 2);
+    assert_eq!(doc(&h).path.as_deref(), Some(f.project.as_path()));
+
+    // The raw view has no view to change: a zoom there is no edit.
+    h.key_press(Key::Plus);
+    let zoomed = Instant::now();
+    while zoomed.elapsed() < SETTLE * 2 {
+        step(&mut h);
+    }
+    assert_eq!(
+        doc(&h).undo_label().as_deref(),
+        Some("Set trim (spherecut call)")
+    );
+    assert!(!doc(&h).dirty());
+    // The export would render one lens as an equirect: Start starts none.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::E);
+    step(&mut h);
+    assert!(h.state().state.export.open);
+    h.get_by_label("Stitched export arrives with M3.11");
+    h.get_by_label("Start").click();
+    step(&mut h);
+    assert!(!h.state().state.export.running(), "a lens exported as 360");
+    h.get_by_label("Close").click();
+    step(&mut h);
+    assert!(!h.state().state.export.open);
+    // A marker is an edit, and the project saves with it.
+    h.key_press(Key::M);
+    step(&mut h);
+    assert_eq!(doc(&h).undo_label().as_deref(), Some("Add marker"));
+    save(&mut h);
+    assert!(!doc(&h).dirty(), "{:?}", notice(&h, NoticeKind::Project));
+    close(&mut h);
+    assert_eq!(f.on_disk().the_clip().markers.len(), 1);
+    finish(h);
+}
+
+/// The control: the same file opened alone opens as its two lenses with
+/// no project (a raw view has no view to key until M3 stitches it), even
+/// when the probe lands after the untitled project was made, which goes.
+/// A fix that never let go of the open project fails here.
+#[test]
+fn an_insv_opened_alone_opens_its_lenses_without_a_project() {
+    let f = Folder::lenses("agents-insv-alone");
+    let gpu = common::gpu();
+    // The probe is put off until the untitled project is made, as a slow
+    // disk's would be.
+    let (rs, mut h) = start(&gpu, &f.clip, |app| app.state.info.close());
+    until(&mut h, "the untitled project", |a| {
+        a.state.reframe.doc.is_some()
+    });
+    assert_eq!(doc(&h).path, None);
+    assert!(!h.state().state.raw_view(), "one picture, projected");
+    h.state_mut().state.info.open(&f.clip);
+    until_lenses(&mut h, &rs);
+    let s = &h.state().state;
+    assert!(
+        s.reframe.doc.is_none(),
+        "the untitled project of a camera's raw file was kept"
+    );
+    assert!(!s.reframe.pending(), "and none is being made");
+    assert!(s.raw_view());
+    assert_eq!(s.columns(), 2);
+    assert!(notice(&h, NoticeKind::Lenses).is_some());
+    finish(h);
+}
+
+/// The export of a camera's raw file waits for the stitch (m3-plan 13.2)
+/// by what the file holds, not by what the viewer has opened of it. With
+/// the probe that would open its lenses put off, the file opened alone
+/// shows its one stream in an untitled project, and an export of it,
+/// started as the smoke run starts its own, is refused, naming the
+/// lenses, with nothing written. A guard that read the viewer's streams
+/// lets it through.
+#[test]
+fn an_insv_s_export_is_refused_before_its_lenses_open() {
+    let f = Folder::lenses("agents-insv-export");
+    let gpu = common::gpu();
+    let (_rs, mut h) = start(&gpu, &f.clip, |app| app.state.info.close());
+    until(&mut h, "the untitled project", |a| {
+        a.state.reframe.doc.is_some()
+    });
+    let out = f.dir.join("lens.mp4");
+    h.state_mut().state.export_span(out.clone(), None, true);
+    assert!(h.state().state.export.running());
+    until(&mut h, "the export's start", |a| !a.state.export.running());
+    let s = &h.state().state;
+    assert_eq!(s.columns(), 1, "the lenses opened");
+    match &s.export.last {
+        Some(Err(ExportError::Invalid(why))) => assert!(
+            why.contains("is a camera's raw file, its 2 lenses side by side"),
+            "{why}"
+        ),
+        other => panic!("not refused as a camera's raw file: {other:?}"),
+    }
+    let n = notice(&h, NoticeKind::Export).expect("the export's notice");
+    assert!(n.contains("stitched export arrives with M3.11"), "{n}");
+    assert!(!out.exists(), "a lens exported as 360");
+    finish(h);
+}
+
+/// The control: an equirect project's export gets past that check and
+/// runs, until it is cancelled. A guard that refused every file fails
+/// here.
+#[test]
+fn an_equirect_project_s_export_gets_past_the_lens_check() {
+    let f = Folder::new("agents-equirect-export");
+    let gpu = common::gpu();
+    let (_rs, mut h) = open(&gpu, &f.project);
+    let out = f.dir.join("view.mp4");
+    h.state_mut().state.export_span(out.clone(), None, true);
+    until(&mut h, "the export's start", |a| {
+        a.state.export.device_used.is_some()
+    });
+    let s = &h.state().state;
+    assert!(
+        s.export.running() || matches!(s.export.last, Some(Ok(_))),
+        "refused: {:?}",
+        s.export.last
+    );
+    h.state_mut().state.export.cancel();
+    until(&mut h, "the export to end", |a| !a.state.export.running());
+    assert!(
+        matches!(
+            h.state().state.export.last,
+            Some(Err(ExportError::Cancelled) | Ok(_))
+        ),
+        "{:?}",
+        h.state().state.export.last
+    );
     finish(h);
 }

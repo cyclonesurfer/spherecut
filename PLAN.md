@@ -232,6 +232,14 @@ settings, or has "ultracode" in its prompt, before the first workflow.
       samples, per model and firmware.
 - [ ] Container and metadata parsing (vendor trailer / GPMF / DJI metadata)
       via telemetry-parser where it fits; frame-locked decode of lens pairs.
+      (Clarified 2026-11-01, not amended: in M3 it does not fit. M3 reads
+      the X5's trailer and DJI's calibration block with its own parsers
+      and does not use telemetry-parser, not even as a test oracle: git
+      sources are forbidden, crates.io's 0.2.x predates the X5, and its
+      geometry is Studio-derived. Whether M4 uses it to parse the IMU
+      stays open. Section 20 of `docs/design/m3-plan.md` and the plan's
+      D62 (its section 23), which DECISIONS.md records at M3.21;
+      DECISIONS, Open.)
 - [ ] Source models in the shader: dual fisheye with calibration, GoPro
       EAC pair; feathered seam blending; per-lens exposure/white-balance
       match; stitch-distance control.

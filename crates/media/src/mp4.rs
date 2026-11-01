@@ -31,6 +31,16 @@ pub enum Mp4Error {
         offset: u64,
         why: String,
     },
+    /// [`track_timing`] found no video track for the stream asked about.
+    #[error("no video track for stream {stream}: {why}")]
+    NoTrack { stream: usize, why: String },
+    /// [`track_timing`]'s track is in a fragmented file, which times its
+    /// samples in the fragments (`moof`) that it doesn't read. Nothing is
+    /// wrong with the file, but there are no tables to compare: the
+    /// backend answers it as M3 plan section 9's `Ok(None)`, a track with
+    /// no tables.
+    #[error("stream {stream} is fragmented: {why}")]
+    Fragmented { stream: usize, why: String },
 }
 
 /// By hand rather than `#[from]`, which would also make the I/O error the
@@ -258,9 +268,12 @@ const MAX_LOADED: u64 = 256 * 1024 * 1024;
 const MAX_KEPT_LEAF: usize = 1024 * 1024;
 
 /// Sample tables are kept whatever their size, so the structure can be
-/// checked against the media data. They are part of `moov`, so
-/// [`MAX_LOADED`] bounds them.
-const SAMPLE_TABLES: &[&[u8; 4]] = &[b"stts", b"stsz", b"stz2", b"stsc", b"stco", b"co64"];
+/// checked against the media data, and a track timed from its
+/// composition offsets and sync samples too ([`track_timing`]). They are
+/// part of `moov`, so [`MAX_LOADED`] bounds them.
+const SAMPLE_TABLES: &[&[u8; 4]] = &[
+    b"stts", b"stsz", b"stz2", b"stsc", b"stco", b"co64", b"ctts", b"stss",
+];
 
 /// Other top-level boxes are vendor metadata or fragments, read only when
 /// this small and while their total stays under [`MAX_KEPT_TOP_TOTAL`].
@@ -345,8 +358,12 @@ pub fn read_with<R: Read + Seek>(r: &mut R, first: FirstBox) -> Result<Mp4Tree, 
             )));
         }
         if h.size > remaining && !any && !top_level_types().any(|t| *t == h.fourcc.0) {
-            // Vendor trailers (Insta360 before X5 firmware 1.7) are not
-            // boxes, but their first bytes can look like an oversized one.
+            // A bare vendor trailer, as older Insta360 bodies such as the
+            // ONE X2 append theirs (reported), is not a box, but its first
+            // bytes can look like an oversized one. The X5 wraps its
+            // trailer in a top-level `inst` box, already at firmware
+            // v1.1.22 (all 14 of Pat's files; docs/formats/insta360.md),
+            // so its trailer is read as a box.
             tree.trailing_bytes = remaining;
             break;
         }
@@ -1319,30 +1336,34 @@ pub struct Edit {
 /// A track's edit list (`edts/elst`), `None` without one or when it
 /// can't be read.
 pub fn edit_list(trak: &Mp4Box) -> Option<Vec<Edit>> {
-    let elst = trak.path(&[b"edts", b"elst"])?;
+    read_edits(trak.path(&[b"edts", b"elst"])?).ok()
+}
+
+/// The edits of an `elst`, or why they can't be read.
+fn read_edits(elst: &Mp4Box) -> Result<Vec<Edit>, String> {
     let mut c = Cursor::new(&elst.payload);
-    let (version, _) = c.version_flags()?;
+    let (version, _) = c
+        .version_flags()
+        .ok_or("`elst` is too short to hold its version")?;
     let field = if version == 1 { 8 } else { 4 };
-    let (_, entries) = table_entries(elst, 4, 2 * field + 4).ok()?;
-    entries
-        .chunks_exact(2 * field + 4)
-        .map(|e| {
-            let (duration, media_time) = if version == 1 {
-                let d = u64::from_be_bytes(e.get(0..8)?.try_into().ok()?);
-                let t = i64::from_be_bytes(e.get(8..16)?.try_into().ok()?);
-                (d, t)
-            } else {
-                let d = u64::from(be_u32(e, 0)?);
-                let t = i64::from(be_u32(e, 4)? as i32);
-                (d, t)
-            };
-            Some(Edit {
-                duration,
-                media_time,
-                rate: be_u32(e, 2 * field)?,
-            })
-        })
-        .collect()
+    let (_, entries) = table_entries(elst, 4, 2 * field + 4)?;
+    let edits = entries.chunks_exact(2 * field + 4).map(|e| {
+        let mut c = Cursor::new(e);
+        // Each entry is whole, so the reads can't run short.
+        let (duration, media_time) = if version == 1 {
+            let d = c.u64().unwrap_or(0);
+            (d, c.u64().unwrap_or(0) as i64)
+        } else {
+            let d = u64::from(c.u32().unwrap_or(0));
+            (d, i64::from(c.i32().unwrap_or(0)))
+        };
+        Edit {
+            duration,
+            media_time,
+            rate: c.u32().unwrap_or(0),
+        }
+    });
+    Ok(edits.collect())
 }
 
 /// The movie's timescale (`moov/mvhd`), ticks a second.
@@ -1391,6 +1412,693 @@ pub fn sample_timing(trak: &Mp4Box) -> Option<SampleTiming> {
 pub fn handler_type(trak: &Mp4Box) -> Option<FourCc> {
     let hdlr = trak.path(&[b"mdia", b"hdlr"])?;
     Some(FourCc(hdlr.payload.get(8..12)?.try_into().ok()?))
+}
+
+/// A video track's timing tables, as [`track_timing`] reads them: what
+/// the frame lock compares between a camera's two lenses (M3 plan 4.3,
+/// P-TRK, and section 9). Times are in ticks of the track's `timescale`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackTiming {
+    /// Ticks a second of the track's media times (`mdhd`).
+    pub timescale: u32,
+    /// The track's samples (`stsz`), one a frame, those an edit list
+    /// hides included: the lead-in before [`first_shown`] and any frames
+    /// after the edit ends. `stts` times exactly these. Section 9's
+    /// `LensShort` counts the frames each lens shows, so M3.8 takes those
+    /// from each decoder's [`VideoStreamInfo::frame_count`], FFmpeg's
+    /// index less what it discards, not from this.
+    ///
+    /// [`first_shown`]: TrackTiming::first_shown
+    /// [`VideoStreamInfo::frame_count`]: crate::backend::VideoStreamInfo::frame_count
+    pub count: u64,
+    /// The sample shown first, the one `first_pts` times, by its decode
+    /// index counted from 0: 0 unless the edit list hides a lead-in, or
+    /// composition offsets show a later sample first. Of two shown at
+    /// that time, the one decoded first. [`TrackTiming::stts_mismatch`]
+    /// and [`TrackTiming::stss_mismatch`] line two tracks up by it.
+    pub first_shown: u64,
+    /// When the first frame the track shows is shown, after its
+    /// composition offset (`ctts`) and the edit list: the sample shown
+    /// earliest at or after where the list's first edit that shows media
+    /// starts, timed from that start, plus the empty edits before it
+    /// (each rescaled to the nearest tick, as FFmpeg rescales them).
+    /// Without an edit list it is the earliest presentation time of any
+    /// sample. Where the edit starts on a sample, as it does in the files
+    /// cameras and FFmpeg write, this is FFmpeg's pts of the frame at
+    /// clip time 0 ([`VideoStreamInfo::origin_pts`]). Where it starts
+    /// between samples, FFmpeg discards the frame before the start and,
+    /// in a track without composition offsets, shows the first frame
+    /// inside the edit at the empty edits' time: its pts is less than
+    /// this by that frame's offset from the edit's start.
+    ///
+    /// [`VideoStreamInfo::origin_pts`]: crate::backend::VideoStreamInfo::origin_pts
+    pub first_pts: i64,
+    /// The track's edit list (`edts/elst`), or `None` without one.
+    pub edit: Option<EditList>,
+    /// `stts` as stored: runs of (samples, decode-time delta) in decode
+    /// order. [`TrackTiming::stts_mismatch`] compares two whatever their
+    /// runs' lengths.
+    pub stts: Vec<(u32, u32)>,
+    /// FNV-1a (64 bits) of the `ctts` entries as stored, eight bytes
+    /// each, or `None` without a `ctts`, when each sample is shown at its
+    /// decode time.
+    pub ctts_hash: Option<u64>,
+    /// The sync samples (`stss`), numbered from 1 in decode order, or
+    /// `None` without an `stss`, when every sample is one.
+    pub stss: Option<Vec<u32>>,
+}
+
+/// A track's edit list, with the timescale its durations are in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditList {
+    /// Ticks a second of the edits' durations: the movie's (`mvhd`).
+    pub movie_timescale: u32,
+    /// The edits in order. Their media times are in the track's
+    /// timescale.
+    pub edits: Vec<Edit>,
+}
+
+impl TrackTiming {
+    /// The samples from [`first_shown`] on, which [`stts_mismatch`] and
+    /// [`stss_mismatch`] compare: their common prefix is the shorter
+    /// track's.
+    ///
+    /// [`first_shown`]: TrackTiming::first_shown
+    /// [`stts_mismatch`]: TrackTiming::stts_mismatch
+    /// [`stss_mismatch`]: TrackTiming::stss_mismatch
+    pub fn from_first_shown(&self) -> u64 {
+        self.count.saturating_sub(self.first_shown)
+    }
+
+    /// The first sample whose decode time, from the first shown sample's,
+    /// differs between the two tracks among the samples both have from
+    /// it, or `None` when they all agree. Samples are counted in decode
+    /// order from each track's [`first_shown`], which is 0 in both, so
+    /// a lens whose edit list hides one more frame of lead-in is lined
+    /// up by the frames it shows (M3 plan 4.3's Kill rule, and section
+    /// 9). Samples decoded before the first shown one are left out, even
+    /// where composition offsets show one of them after it. The common
+    /// prefix ends with the shorter track ([`from_first_shown`]). Times
+    /// are compared in seconds, so tracks of different timescales can
+    /// agree, and however their runs are split. A sample's decode time is
+    /// the sum of the deltas before it, so the last common sample's own
+    /// delta, often a muxer's guess, doesn't count.
+    ///
+    /// [`first_shown`]: TrackTiming::first_shown
+    /// [`from_first_shown`]: TrackTiming::from_first_shown
+    pub fn stts_mismatch(&self, other: &TrackTiming) -> Option<u64> {
+        let n = self.from_first_shown().min(other.from_first_shown());
+        let (ta, tb) = (u64::from(self.timescale), u64::from(other.timescale));
+        let (mut a, mut b) = (Runs::new(&self.stts), Runs::new(&other.stts));
+        a.pass(self.first_shown);
+        b.pass(other.first_shown);
+        // Samples 0 to `at` are decoded at the same times in both.
+        let mut at = 0;
+        while at + 1 < n {
+            // A table that ends early doesn't say when the next one is.
+            let (Some((left_a, da)), Some((left_b, db))) = (a.peek(), b.peek()) else {
+                return Some(at + 1);
+            };
+            // Two u32s multiplied fit in a u64.
+            if u64::from(da) * tb != u64::from(db) * ta {
+                return Some(at + 1);
+            }
+            let k = left_a.min(left_b).min(n - 1 - at);
+            a.skip(k);
+            b.skip(k);
+            at += k;
+        }
+        None
+    }
+
+    /// The first sample that is a sync sample in one track and not in the
+    /// other among the samples both have from their first shown ones, or
+    /// `None` when they agree over that common prefix (M3 plan 4.3's R2).
+    /// Samples are counted as [`stts_mismatch`] counts them: in decode
+    /// order from each track's [`first_shown`], which is 0.
+    ///
+    /// [`first_shown`]: TrackTiming::first_shown
+    /// [`stts_mismatch`]: TrackTiming::stts_mismatch
+    pub fn stss_mismatch(&self, other: &TrackTiming) -> Option<u64> {
+        if self.stss.is_none() && other.stss.is_none() {
+            return None;
+        }
+        let n = self.from_first_shown().min(other.from_first_shown());
+        let mut a = sync_samples_from(self.stss.as_deref(), self.first_shown, n).peekable();
+        let mut b = sync_samples_from(other.stss.as_deref(), other.first_shown, n).peekable();
+        // Each step takes a sample from both lists or returns, so this
+        // ends within the length of the one that is a table.
+        loop {
+            match (a.peek().copied(), b.peek().copied()) {
+                (None, None) => return None,
+                (Some(x), Some(y)) if x == y => {
+                    a.next();
+                    b.next();
+                }
+                (Some(x), Some(y)) => return Some(x.min(y)),
+                (Some(x), None) | (None, Some(x)) => return Some(x),
+            }
+        }
+    }
+}
+
+/// The sync samples of a track among the `n` from decode index `first`
+/// on, counted from 0 there: those its `stss` lists, or every one
+/// without one.
+fn sync_samples_from(
+    stss: Option<&[u32]>,
+    first: u64,
+    n: u64,
+) -> Box<dyn Iterator<Item = u64> + '_> {
+    match stss {
+        // `stss` numbers its samples from 1.
+        Some(s) => Box::new(
+            s.iter()
+                .filter_map(|&k| u64::from(k).checked_sub(1))
+                .skip_while(move |&k| k < first)
+                .map(move |k| k - first)
+                .take_while(move |&k| k < n),
+        ),
+        None => Box::new(0..n),
+    }
+}
+
+/// A cursor over runs of (samples, value), such as `stts`'s, that passes
+/// over empty runs.
+struct Runs<'a, T> {
+    runs: &'a [(u32, T)],
+    at: usize,
+    /// Samples of `runs[at]` passed already.
+    used: u64,
+}
+
+impl<'a, T: Copy> Runs<'a, T> {
+    fn new(runs: &'a [(u32, T)]) -> Self {
+        Runs {
+            runs,
+            at: 0,
+            used: 0,
+        }
+    }
+
+    /// The samples left in the current run, and its value.
+    fn peek(&mut self) -> Option<(u64, T)> {
+        while let Some(&(n, v)) = self.runs.get(self.at) {
+            if self.used < u64::from(n) {
+                return Some((u64::from(n) - self.used, v));
+            }
+            self.at += 1;
+            self.used = 0;
+        }
+        None
+    }
+
+    /// Pass `k` samples of the current run, at most as many as it has
+    /// left.
+    fn skip(&mut self, k: u64) {
+        self.used += k;
+    }
+
+    /// Pass `k` samples, or all of them if there are fewer, whatever
+    /// runs they are in: one step a run.
+    fn pass(&mut self, mut k: u64) {
+        while k > 0
+            && let Some((left, _)) = self.peek()
+        {
+            let n = left.min(k);
+            self.skip(n);
+            k -= n;
+        }
+    }
+}
+
+/// The timing tables of the video track that is stream `stream` of the
+/// MP4 or MOV file at `path`, for the frame lock to compare (M3 plan 4.3
+/// and section 9).
+///
+/// `stream` numbers the file's streams as FFmpeg does, as the rest of
+/// this crate does (`VideoRequest::stream`, `probe`'s stream indices).
+/// FFmpeg's MOV demuxer makes a stream of each `trak` in the order `moov`
+/// holds them, so stream `n` is the `n`th track: the X5's lenses are
+/// streams 0 and 1, and its audio 2. It also makes streams of HEIF image
+/// items (`iinf`), each cover picture (`covr`) and an IAMF track's
+/// further substreams (`iamf`) where it reads them, which renumbers the
+/// tracks after them, so a track after one of those is refused rather
+/// than guessed at, as is one after a top-level `meta` or `udta` that
+/// the reader didn't read whole.
+///
+/// The tables are checked against each other, and an error names the box
+/// that is wrong and why; bad bytes never panic. A box on the way to the
+/// tables (`trak`, `edts`, `mdia`, `minf`, `stbl`) whose boxes the reader
+/// couldn't all read is an error naming it too, rather than tables read
+/// as absent, and so is a second `stts`, `ctts`, `stss` or `elst`, of
+/// which FFmpeg reads the later. A track of a fragmented file is
+/// [`Mp4Error::Fragmented`]. The work is linear in the size of the
+/// tables, whatever the counts in them say.
+pub fn track_timing(path: &Path, stream: usize) -> Result<TrackTiming, Mp4Error> {
+    track_timing_in(&read_file(path)?, stream)
+}
+
+/// [`track_timing`] of stream `stream` of a file already read.
+pub fn track_timing_in(tree: &Mp4Tree, stream: usize) -> Result<TrackTiming, Mp4Error> {
+    let no_track = |why: String| Mp4Error::NoTrack { stream, why };
+    let (moov, trak) = stream_trak(tree, stream).map_err(no_track)?;
+    // Before the handler, which a box the reader lost may have taken.
+    let mdia = whole(need(whole(trak)?, b"mdia")?)?;
+    match handler_type(trak) {
+        Some(h) if h.0 == *b"vide" => {}
+        Some(h) => return Err(no_track(format!("it is a `{h}` track, not video"))),
+        None => return Err(no_track("its track has no handler (`mdia/hdlr`)".into())),
+    }
+    // Its tables hold none of the samples, or not all of them.
+    let fragments = moov.child(b"mvex").map_or_else(
+        || {
+            let moof = tree.top.iter().find(|b| b.fourcc.0 == *b"moof")?;
+            Some(format!("the file has a `moof` at offset {}", moof.offset))
+        },
+        |b| Some(format!("its `moov` has an `mvex` at offset {}", b.offset)),
+    );
+    if let Some(why) = fragments {
+        return Err(Mp4Error::Fragmented {
+            stream,
+            why: format!("{why}, so the track's samples are timed in fragments, which aren't read"),
+        });
+    }
+    let timescale = timescale_of(need(mdia, b"mdhd")?)?;
+    let stbl = whole(need(whole(need(mdia, b"minf")?)?, b"stbl")?)?;
+    for t in [b"stts", b"ctts", b"stss"] {
+        once(stbl.children_of(t), t, stbl)?;
+    }
+    // `stz2` is `stsz` in another form, so one beside the other is a
+    // second table of sizes, which sets the count.
+    once(
+        stbl.children
+            .iter()
+            .filter(|b| matches!(&b.fourcc.0, b"stsz" | b"stz2")),
+        b"stsz",
+        stbl,
+    )?;
+
+    let sizes = stbl
+        .child(b"stsz")
+        .or_else(|| stbl.child(b"stz2"))
+        .ok_or_else(|| malformed(stbl, "it has no sample sizes (`stsz` or `stz2`)"))?;
+    kept(sizes)?;
+    let count = sample_sizes(stbl)
+        .map_err(|why| malformed(sizes, why))?
+        .map_or(0, |(n, _)| n);
+
+    let stts_box = need(stbl, b"stts")?;
+    let stts: Vec<(u32, u32)> = entries_of(stts_box, 8)?
+        .chunks_exact(8)
+        .map(|e| (word(e, 0), word(e, 1)))
+        .collect();
+    // At most 2^25 entries fit in a `moov`, so the sum fits in a u64.
+    let timed: u64 = stts.iter().map(|&(n, _)| u64::from(n)).sum();
+    if timed != count {
+        return Err(malformed(
+            stts_box,
+            format!(
+                "it times {timed} samples, but `{}` sizes {count}",
+                sizes.fourcc
+            ),
+        ));
+    }
+
+    let ctts = match stbl.child(b"ctts") {
+        None => None,
+        Some(b) => {
+            let data = entries_of(b, 8)?;
+            // Signed in version 1 and, as FFmpeg reads them, in version
+            // 0 too.
+            let runs: Vec<(u32, i32)> = data
+                .chunks_exact(8)
+                .map(|e| (word(e, 0), word(e, 1) as i32))
+                .collect();
+            let offset: u64 = runs.iter().map(|&(n, _)| u64::from(n)).sum();
+            if offset != count {
+                return Err(malformed(
+                    b,
+                    format!("it gives offsets for {offset} samples, but the track has {count}"),
+                ));
+            }
+            Some((runs, fnv1a64(data)))
+        }
+    };
+
+    let stss = match stbl.child(b"stss") {
+        None => None,
+        Some(b) => Some(sync_samples(b, count)?),
+    };
+
+    let mut lists = Vec::new();
+    for edts in trak.children_of(b"edts") {
+        lists.extend(whole(edts)?.children_of(b"elst"));
+    }
+    let elst = once(lists.into_iter(), b"elst", trak)?;
+    let edit = match elst {
+        None => None,
+        Some(elst) => {
+            kept(elst)?;
+            let edits = read_edits(elst).map_err(|why| malformed(elst, why))?;
+            if let Some((k, e)) = edits.iter().enumerate().find(|(_, e)| e.media_time < -1) {
+                return Err(malformed(
+                    elst,
+                    format!(
+                        "edit {k} starts at media time {}, but only an empty edit's, -1, is below 0",
+                        e.media_time
+                    ),
+                ));
+            }
+            let mvhd = moov.child(b"mvhd").ok_or_else(|| {
+                malformed(
+                    moov,
+                    "it has no `mvhd`, whose timescale the edit list's durations are in",
+                )
+            })?;
+            Some(EditList {
+                movie_timescale: timescale_of(mvhd)?,
+                edits,
+            })
+        }
+    };
+
+    // Where the edit list starts showing the media, and the time before.
+    let (start, delay) = match (&edit, elst) {
+        (Some(list), Some(elst)) => edit_start(list, timescale)
+            .map_err(|why| malformed(elst, why))?
+            .map_or((None, 0), |(m, d)| (Some(m), d)),
+        _ => (None, 0),
+    };
+    let offsets = ctts.as_ref().map(|(runs, _)| &runs[..]);
+    let Some((first_shown, shown)) = earliest_shown(&stts, offsets, start) else {
+        return Err(match (start, elst) {
+            (Some(m), Some(elst)) if count > 0 => malformed(
+                elst,
+                format!(
+                    "its first edit that shows media starts at media time {m}, after every sample"
+                ),
+            ),
+            _ => malformed(stts_box, "it times no samples, so the track shows none"),
+        });
+    };
+    let first_pts = i64::try_from(delay + shown).map_err(|_| {
+        malformed(
+            elst.unwrap_or(stts_box),
+            format!(
+                "the first frame is shown at tick {}, out of range",
+                delay + shown
+            ),
+        )
+    })?;
+
+    Ok(TrackTiming {
+        timescale,
+        count,
+        first_shown,
+        first_pts,
+        edit,
+        stts,
+        ctts_hash: ctts.map(|(_, hash)| hash),
+        stss,
+    })
+}
+
+/// The `moov`, and the `trak` in it that FFmpeg's MOV demuxer makes
+/// stream `stream` of: the `stream`th, unless something before it adds
+/// streams of its own, which renumbers it (see [`track_timing`]).
+fn stream_trak(tree: &Mp4Tree, stream: usize) -> Result<(&Mp4Box, &Mp4Box), String> {
+    let Some(moov) = tree.moov() else {
+        // The box cut short may have been `moov`, or before it.
+        return Err(tree.truncated.map_or_else(
+            || "the file has no `moov` box, so no index of the media".into(),
+            |t| t.reason(),
+        ));
+    };
+    if moov.children.is_empty() && moov.size - moov.header_len > MAX_LOADED {
+        return Err(format!(
+            "its `moov` at offset {} is {} bytes, too large to read",
+            moov.offset, moov.size
+        ));
+    }
+    // FFmpeg reads the top-level boxes before `moov`, then `moov`'s
+    // children in order. Of the top-level boxes, only `meta` and `udta`
+    // can hold what it makes streams of, and the reader keeps only small
+    // ones whole.
+    let made = |what: String| format!("FFmpeg makes streams of {what}");
+    let mut renumbers = tree
+        .top
+        .iter()
+        .take_while(|b| b.fourcc.0 != *b"moov")
+        .find_map(|b| match &b.fourcc.0 {
+            b"meta" | b"udta" if whole(b).is_err() => Some(format!(
+                "the {}-byte `{}` at offset {} wasn't read whole, and FFmpeg may make streams of what it holds",
+                b.size, b.fourcc, b.offset
+            )),
+            _ => adds_streams(b).map(made),
+        });
+    let mut n = 0;
+    for c in &moov.children {
+        if c.fourcc.0 == *b"trak" {
+            if n == stream {
+                return match renumbers {
+                    None => Ok((moov, c)),
+                    Some(why) => Err(format!(
+                        "{why}, before the file's track #{n}, so which stream that track is isn't known"
+                    )),
+                };
+            }
+            n += 1;
+        }
+        renumbers = renumbers.or_else(|| adds_streams(c).map(made));
+    }
+    let why = format!("the file has {n} tracks, so none is stream {stream}");
+    // A box that stopped the reader may have hidden more.
+    Err(match whole(moov) {
+        Ok(_) => why,
+        Err(e) => format!("{why}, but {e}"),
+    })
+}
+
+/// What in `b`, if anything, FFmpeg's MOV demuxer makes streams of
+/// besides tracks: HEIF image items (`iinf`), cover art (`covr`), or the
+/// sample entry of an IAMF track (`iamf`), whose substreams after its
+/// first are streams of their own.
+fn adds_streams(b: &Mp4Box) -> Option<String> {
+    if matches!(&b.fourcc.0, b"iinf" | b"covr" | b"iamf") {
+        return Some(format!("the `{}` at offset {}", b.fourcc, b.offset));
+    }
+    b.children.iter().find_map(adds_streams)
+}
+
+/// An `stss`'s sync samples, checked to be sample numbers from 1 to
+/// `count` in increasing order.
+fn sync_samples(stss: &Mp4Box, count: u64) -> Result<Vec<u32>, Mp4Error> {
+    let samples: Vec<u32> = entries_of(stss, 4)?
+        .chunks_exact(4)
+        .map(|e| word(e, 0))
+        .collect();
+    let mut prev = 0;
+    for (k, &s) in samples.iter().enumerate() {
+        let why = if s == 0 {
+            format!("entry {k} is sample 0, but samples count from 1")
+        } else if s <= prev {
+            format!("entry {k} is sample {s}, but the entry before it is sample {prev}")
+        } else if u64::from(s) > count {
+            format!("entry {k} is sample {s}, but the track has {count}")
+        } else {
+            prev = s;
+            continue;
+        };
+        return Err(malformed(stss, why));
+    }
+    Ok(samples)
+}
+
+/// Where an edit list starts showing the media: the media time of its
+/// first edit that isn't empty, and the empty edits before it in
+/// `timescale` ticks. As FFmpeg does, each empty edit is rescaled on its
+/// own, to the nearest tick as `av_rescale` rounds, and the ticks are
+/// added up. `None` for a list of no edits, which FFmpeg ignores.
+fn edit_start(list: &EditList, timescale: u32) -> Result<Option<(i64, i128)>, String> {
+    if list.edits.is_empty() {
+        return Ok(None);
+    }
+    let (from, to) = (u128::from(list.movie_timescale), u128::from(timescale));
+    // At most 2^24 edits fit in a `moov`, each a u64 times a u32 in
+    // ticks: the sum fits in a u128, and in an i128.
+    let mut delay = 0u128;
+    for e in &list.edits {
+        if e.media_time != -1 {
+            return Ok(Some((e.media_time, delay as i128)));
+        }
+        delay += (u128::from(e.duration) * to + from / 2) / from;
+    }
+    Err("every edit is empty, so it shows none of the media".into())
+}
+
+/// The sample with the earliest presentation time (decode time from
+/// `stts` plus composition offset from `ctts`) at or after media time
+/// `from`, or of any sample when `from` is `None`: its decode index, the
+/// first of any that tie, and its time less `from`. `None` when no
+/// sample is. Within a stretch of samples that share a delta and an
+/// offset, presentation times rise by the delta, so the work is one step
+/// per run.
+fn earliest_shown(
+    stts: &[(u32, u32)],
+    ctts: Option<&[(u32, i32)]>,
+    from: Option<i64>,
+) -> Option<(u64, i128)> {
+    let (mut deltas, mut offsets) = (Runs::new(stts), ctts.map(Runs::new));
+    let from = from.map(i128::from);
+    let (mut index, mut dts) = (0u64, 0i128);
+    let mut first: Option<(u64, i128)> = None;
+    while let Some((left, delta)) = deltas.peek() {
+        let (len, offset) = match offsets.as_mut() {
+            None => (left, 0),
+            Some(o) => match o.peek() {
+                Some((n, offset)) => (left.min(n), offset),
+                None => break,
+            },
+        };
+        let (n, d) = (i128::from(len), i128::from(delta));
+        let shown = dts + i128::from(offset);
+        // The stretch's first sample at or after `from`.
+        let j = match from {
+            Some(m) if shown < m && d == 0 => n,
+            Some(m) if shown < m => (m - shown + d - 1) / d,
+            _ => 0,
+        };
+        if j < n {
+            let t = shown + j * d;
+            // `j` is below `len`, a u64.
+            let at = index + j as u64;
+            if first.is_none_or(|(_, f)| t < f) {
+                first = Some((at, t));
+            }
+        }
+        index += len;
+        dts += n * d;
+        deltas.skip(len);
+        if let Some(o) = offsets.as_mut() {
+            o.skip(len);
+        }
+    }
+    first.map(|(at, t)| (at, t - from.unwrap_or(0)))
+}
+
+/// `b`, a container, if the reader read all the boxes in it. A box that
+/// overruns its parent or has a bad header stops the reader, which keeps
+/// neither it nor the boxes after it ([`Mp4Tree::warnings`]), as it
+/// stops once [`MAX_BOXES`] are read. A table lost that way would read
+/// as absent, which for `stss` would make every sample a sync sample,
+/// while FFmpeg reads the box cut to fit. Fewer than 8 bytes after the
+/// last box are not a box, and FFmpeg passes over them too.
+fn whole(b: &Mp4Box) -> Result<&Mp4Box, Mp4Error> {
+    let end = b.offset + b.size;
+    let read = b
+        .children
+        .last()
+        .map_or(b.offset + b.header_len, |c| c.offset + c.size);
+    let left = end.saturating_sub(read);
+    if left < 8 {
+        return Ok(b);
+    }
+    Err(malformed(
+        b,
+        format!(
+            "its boxes stop at offset {read}, {left} bytes before its end: the box there overruns it, has a bad header or is past the reader's limit of {MAX_BOXES} boxes, so neither it nor any box after it was read"
+        ),
+    ))
+}
+
+/// The one box of type `t` that `boxes`, of `parent`, holds, if any, or
+/// an error naming the second. FFmpeg warns of a duplicate and reads the
+/// later of two, as long as it isn't empty, so which one it times the
+/// track by is refused rather than guessed.
+fn once<'a>(
+    mut boxes: impl Iterator<Item = &'a Mp4Box>,
+    t: &[u8; 4],
+    parent: &Mp4Box,
+) -> Result<Option<&'a Mp4Box>, Mp4Error> {
+    let first = boxes.next();
+    match boxes.next() {
+        None => Ok(first),
+        Some(second) => Err(malformed(
+            second,
+            format!(
+                "it is a second `{}` in its `{}`, and FFmpeg reads the later of two",
+                FourCc(*t),
+                parent.fourcc
+            ),
+        )),
+    }
+}
+
+/// The child of `b` of type `t`, or an error naming both.
+fn need<'a>(b: &'a Mp4Box, t: &[u8; 4]) -> Result<&'a Mp4Box, Mp4Error> {
+    b.child(t)
+        .ok_or_else(|| malformed(b, format!("it has no `{}` box", FourCc(*t))))
+}
+
+fn malformed(b: &Mp4Box, why: impl Into<String>) -> Mp4Error {
+    Mp4Error::Malformed {
+        fourcc: b.fourcc.to_string(),
+        offset: b.offset,
+        why: why.into(),
+    }
+}
+
+/// The payload of `b`, a leaf, if the reader kept all of it: it keeps
+/// a leaf over [`MAX_KEPT_LEAF`] only if it is one of [`SAMPLE_TABLES`].
+fn kept(b: &Mp4Box) -> Result<&[u8], Mp4Error> {
+    if b.payload.len() as u64 == b.size - b.header_len {
+        Ok(&b.payload)
+    } else {
+        Err(malformed(
+            b,
+            format!("it is {} bytes, more than the reader keeps", b.size),
+        ))
+    }
+}
+
+/// The entries of sample table `b`, `width` bytes each after its version
+/// and flags and its entry count, checked to be there.
+fn entries_of(b: &Mp4Box, width: usize) -> Result<&[u8], Mp4Error> {
+    kept(b)?;
+    table_entries(b, 4, width)
+        .map(|(_, data)| data)
+        .map_err(|why| malformed(b, why))
+}
+
+/// Word `i` of a table entry, whose words are all there.
+fn word(entry: &[u8], i: usize) -> u32 {
+    be_u32(entry, 4 * i).unwrap_or(0)
+}
+
+/// The timescale of an `mvhd` or `mdhd`, if FFmpeg can use it.
+fn timescale_of(b: &Mp4Box) -> Result<u32, Mp4Error> {
+    match bad_timescale(b) {
+        Some(ts) => Err(malformed(
+            b,
+            format!("its timescale is {ts}, which FFmpeg can't use"),
+        )),
+        None => {
+            let mut c = Cursor::new(&b.payload);
+            let ts = c.version_flags().and_then(|(version, _)| {
+                c.take(if version == 1 { 16 } else { 8 })?;
+                c.u32()
+            });
+            ts.ok_or_else(|| malformed(b, "it is too short to hold its timescale"))
+        }
+    }
+}
+
+/// FNV-1a, 64 bits.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// The handler type (`vide` or `soun`) of tracks whose sample entries
@@ -1620,6 +2328,39 @@ pub(crate) mod tests {
         assert_eq!(constant(&[(3, 0), (1, 256)]), None);
         // Offsets for 3 samples of 4.
         assert_eq!(constant(&[(3, 0)]), None);
+    }
+
+    #[test]
+    fn a_ctts_past_the_leaf_limit_is_kept_and_read_to_its_end() {
+        use spherecut_testkit::control::must_fail;
+        // I P B P B … in decode order, a run a sample: the I shown a frame
+        // after its decode time, each P two frames after and each B at
+        // it, so every frame is shown 512 after the one before. 2^17 + 1
+        // runs make the body 8 + 8 × 131,073 bytes, past MAX_KEPT_LEAF.
+        // Before M3.0 a `ctts` that large wasn't kept, so the rate came
+        // out Variable; since `ctts` joined SAMPLE_TABLES it is read.
+        let pairs = MAX_KEPT_LEAF / 16;
+        let mut offsets = vec![(1, 512)];
+        for _ in 0..pairs {
+            offsets.extend([(1, 1024), (1, 0)]);
+        }
+        let samples = offsets.len() as u32;
+        let constant = |offsets: &[(u32, i32)]| {
+            let trak = timed_trak_with(1, 15360, &[(samples, 512)], Some(offsets));
+            let f = cat(&[bx(b"ftyp", b"isom\0\0\x02\0isom"), bx(b"moov", &trak)]);
+            let t = read(&mut io::Cursor::new(f)).unwrap();
+            let trak = t.tracks().next().unwrap();
+            let ctts = trak.path(&[b"mdia", b"minf", b"stbl", b"ctts"]).unwrap();
+            assert!(ctts.payload.len() > MAX_KEPT_LEAF);
+            assert_eq!(ctts.payload.len() as u64, ctts.size - ctts.header_len);
+            sample_timing(trak).unwrap().constant
+        };
+        assert_eq!(constant(&offsets), Some(512));
+        // Control: the last B shown with the P before it, which only the
+        // table's last entry says.
+        let mut tied = offsets.clone();
+        *tied.last_mut().unwrap() = (1, 512);
+        must_fail("the last B tied", constant(&tied).ok_or("Variable"));
     }
 
     #[test]

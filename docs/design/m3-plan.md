@@ -58,6 +58,38 @@ corrected to match, hold the detail, and win where the two differ.*
    cases of the lock's group base are spelt out (9); the V6 readings are named only by 6.1's
    fields everywhere; take 14's note gives the tripod height and that nothing stood nearer than
    10 m (24, SAMPLES.md).
+3. **What M3.0 settled (2026-11-01).** These override the sections they name, which are not
+   rewritten.
+   - **Order (22.1 to 22.3).** M3.0's unit (c) merged with the rest of M3.0 rather than as its
+     own first PR, since M3.1 to M3.3 start after M3.0 anyway.
+   - **P-TRK's tables (4.3, 9).** Pass on every field of all 7 masters: the container gives the
+     lenses no offset, so R1 and R2 are not taken and `stss` stays in the lock's comparison.
+     P-TRK's pixel half (`samples_lens_offset_is_zero`, M3.6) can still give the lock an offset.
+     `TrackTiming` gains `first_shown`, the decode index of the first sample the edit list
+     shows, and the lock's "`stts` and `stss` over the common prefix" lines the lenses up by it,
+     both mismatches numbered from 0 there. `count` includes the frames an edit list hides, so
+     `LensShort {frames}` comes from each decoder's `VideoStreamInfo::frame_count`, not from
+     `count`. A fragmented MP4 (`moov/mvex` or a top-level `moof`) is `Mp4Error::Fragmented`,
+     which M3.8's `FfmpegBackend::track_timing` answers as `Ok(None)` (the lock refused with
+     `"timing"`).
+   - **synth's types (7.1, 7.2, 5.5).** `print(cal: &CalibTruth, planted: &Planted) -> String`:
+     the generation is the calibration's, whose terms are held once for both blocks
+     (`StoredDist::V3 {k, p}` or `V6 {d}`), so a V3 and V6 mix can't be built. `print` writes
+     tokens at the X5's precision (`docs/formats/insta360.md`, "Pat's X5 samples": ξ and t to 6
+     decimals; focal, centre and angles to 3; the distortion terms to 8), and the cross parse
+     gives each number back within half a unit in its last place. `compose(&CalibTruth,
+     &Planted, front_track, sides: [u32; 2]) -> RigTruth` takes the two tracks' sides, as
+     `Rig::build` does.
+   - **The Euler labels (6.2).** synth's `TruthEuler` indexes `signs` by angle (yaw, pitch,
+     roll), not by place in `order`, and adds `roll_offset` to the stored roll before the
+     roll's sign; M3.3 writes sphere's `EulerConv` to the same reading. Still M3.3's to fix in
+     its first commit: whether `TzSign::Negated` flips all of t_1 or only its z, and which value
+     is the placeholder's identity with the −90° roll offset.
+   - **The app until M3.11 (13.2).** An agent's project of a camera's raw file stays open in the
+     raw view; its export is refused by probing the file (two or more lenses: "Stitched export
+     arrives with M3.11"), whatever the viewer has opened. `crates/app/tests/agents.rs` writes
+     its camera file as Matroska, so it moves to `mux_video_streams`' MP4 output once M3.1 has
+     it, before M3.8's lock reads its timing.
 
 ## 1. Summary
 

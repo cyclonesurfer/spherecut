@@ -532,6 +532,22 @@ in its prerequisite check.
 - Real camera samples stay outside the repo (`samples/` is gitignored) and
   are only used by Tier 2 tests.
 
+*Updated 2026-11-01 (M3.0):* Tier 2 is now two kinds (M3 plan 4.4).
+Tier 2h is the above: hardware, real time and the GUI, under hw-test
+only. Tier 2c tests need Pat's samples and the CPU only, so agents run
+them in the cloud while they implement, with `SPHERECUT_TIER2` unset:
+`SPHERECUT_SAMPLES=<folder> cargo test -p <crate> --test <file> -- --ignored <name>`.
+They are still `#[ignore = "tier2: ..."]`, and hw-test runs them with
+the rest. They gate on
+`spherecut_testkit::tier2::require_samples_cpu`, which needs only
+`SPHERECUT_SAMPLES` and skips with the marker when it is unset or names
+no folder; `require_samples_dir` and `require_sample` call
+`require_hw_run` first, so they stay Tier 2h's. `testkit::samples::role`
+finds a take through the new gate, by the checked-in
+`crates/testkit/samples-roles.toml` (roles to the camera's file numbers,
+such as `tripod_seam` for clip 8's file 008), since nothing parses Pat's
+NOTES.txt.
+
 ## D10. GPL-3.0-or-later, and reuse of GPL code
 
 *2026-10-22, M0.*
@@ -770,7 +786,9 @@ Limits, so a hostile file costs bounded time and memory:
   top-level boxes are read only when each is at most 64 KiB and their
   total stays under 1 MiB.
 - Leaf payloads over 1 MiB are not kept, except the sample tables (`stts`,
-  `stsz`, `stz2`, `stsc`, `stco`, `co64`) and a payload that starts with a
+  `ctts`, `stss`, `stsz`, `stz2`, `stsc`, `stco`, `co64`; `ctts` and `stss`
+  since M3.0, so a B-frame track with a `ctts` over 1 MiB is now timed from
+  it) and a payload that starts with a
   `tkhd` (a renamed `trak`, below), which the 256 MiB `moov` limit
   bounds.
 
@@ -4512,6 +4530,17 @@ Revisit if: a run notes more than 2 pixels past 4 LSB for another
 llvmpipe (LLVM 22 put none there at 918d031), which would leave C less
 than twice the drift; or a driver
 build that renders the rows right fails the count or the maximum.
+
+*Updated 2026-11-01 (M3.0):* the control rule is no longer the goldens'
+alone. `spherecut_testkit::control::must_fail(name, outcome)` is the
+rule as a helper, and every M3 suite uses it (M3 plan 4.1 rule 1): a
+control that passes fails the test, naming the control, and one that
+fails gives back how it failed (a `Result`'s error, a `bool`'s nothing, a
+comparison's value), so the caller checks that it failed for the right
+reason and by enough. Numbers are compared through `at_most`,
+`at_least`, `below` and `above`, where a NaN fails the test rather than
+passing for a control that failed. The goldens keep their own run, which
+records each control's number in the manifest.
 
 ## D33. View conventions
 
@@ -9014,6 +9043,17 @@ or 1 % of shape lets a wrong project through.
   license, allow that one git revision in `deny.toml`, or write our own
   parsers from `docs/formats/`. To decide at M4, after checking its license
   and what we actually need from it.
+
+  *Updated 2026-11-01 (M3.0):* **M3: not used (D62); M4 still decides IMU
+  parsing.** M3 reads the X5's trailer and DJI's calibration block with
+  its own parsers, from `docs/formats/`, and does not use telemetry-parser
+  even as a test oracle; DJI's field numbers come from OpenOSV's proto
+  instead (`docs/design/m3-plan.md` section 20, and D62 in its section 23,
+  which M3.21 records here).
+  What stays open is only whether M4 uses it to parse the IMU. Its licence
+  is MIT OR Apache-2.0 and its geometry is Studio-derived
+  (`docs/formats/insta360.md` §8), so the parts M4 could use are its
+  parsing alone.
 - **The project file format** (D47): Pat was asked on 2026-10-30
   (JSON, RON or SQLite; JSON recommended). M2 is built on JSON
   meanwhile; another answer changes only `core::project::file`.
