@@ -562,6 +562,14 @@ pub fn frame_planes(spec: &Spec, code: Option<usize>, i: u32) -> Result<YuvPlane
     Ok(planes)
 }
 
+/// The noise's format, raised whenever [`add_noise`] would add other
+/// noise for the same seed and frame: its generator, its levels or its
+/// scaling. The noise sets how hard a clip is to code and decode, so a
+/// perf pair's stamp holds this and hw-test makes the pair again when it
+/// changes; a test pins the noise it names. The perf clips of one stream
+/// are stamped by their spec alone, as before the pairs.
+pub const NOISE_FORMAT: u32 = 1;
+
 /// Add [`Spec::noise`]'s noise for frame `frame` to `planes`, of `bits`
 /// bits, clamped to the samples' range.
 fn add_noise(planes: &mut YuvPlanes, bits: u32, seed: u64, frame: u32) {
@@ -1067,6 +1075,18 @@ pub const PERF_PAIR_3840_2997: &str = "pair-hevc8-3840-2997-noisy-20s";
 pub const PERF_PAIR_2880_5994: &str = "pair-hevc8-2880-5994-noisy-10s";
 pub const PERF_PAIR_2880_2997: &str = "pair-hevc8-2880-2997-noisy-20s";
 
+/// What the rows of [`PERF_PAIR_2880_5994`] say of its coding, wherever
+/// they are read (the pair benchmarks and hw-test's report, each keyed on
+/// the pair's name). The X5 codes every other picture at 59.94 as a
+/// non-reference TSA_N, which halves the decode a catch-up needs. This
+/// pair is P only, every picture but the IDRs a reference, because its
+/// spec asks x265 for no temporal layers, so it decodes no faster for
+/// skipping non-reference pictures. x265 3.5, as linked in the cloud,
+/// couldn't code it otherwise: it marks only reordered B-frames
+/// non-reference ([`perf_pairs`]).
+pub const PERF_PAIR_P_ONLY: &str = "P only: the X5 codes TSA_N on every other picture, and every \
+                                    picture here but the IDRs is a reference P frame";
+
 /// The two-track perf clips hw-test makes for the pair benchmarks (M3
 /// plan 4.3's P-DEC and 7.2), each 600 frames a lens, coded as the X5
 /// codes each mode where x265 can: square 8-bit HEVC lenses in full
@@ -1076,13 +1096,14 @@ pub const PERF_PAIR_2880_2997: &str = "pair-hevc8-2880-2997-noisy-20s";
 /// - 2×3840² at 29.97: an IDR every 60 frames, P frames only, 65 Mbps a
 ///   lens (the masters: 61 to 68).
 /// - 2×2880² at 59.94: an IDR every 120 frames, 80 Mbps a lens (79). The
-///   X5 codes every other frame as a non-reference TSA_N picture, which
-///   x265 3.5, as linked in the cloud, gives only to B-frames: its
-///   temporal layers put the non-reference B-frames alone in the upper
-///   layer, and a B-frame is decoded after the frame it is shown before,
-///   where the X5 reorders nothing. So this clip is P frames only, every
+///   X5 codes every other frame as a non-reference TSA_N picture. This
+///   clip asks x265 for no temporal layers, so it is P frames only, every
 ///   one a reference, and decodes no faster for skipping non-reference
-///   frames, as the X5's 5.7K60 does.
+///   frames, as the X5's 5.7K60 does ([`PERF_PAIR_P_ONLY`]). x265 3.5, as
+///   linked in the cloud, couldn't match the X5 here: its temporal layers
+///   put the non-reference B-frames alone in the upper layer, and a
+///   B-frame is decoded after the frame it is shown before, where the X5
+///   reorders nothing. What 4.x makes of temporal layers is unverified.
 /// - 2×2880² at 29.97: an IDR every 60 frames, P frames only, 80 Mbps a
 ///   lens. No sample has this mode yet.
 ///
@@ -2162,6 +2183,42 @@ mod tests {
         assert!(b[..64].iter().all(|v| (496..=528).contains(v)), "{b:?}");
         assert!(b[64..80].iter().all(|v| *v <= 1023), "{b:?}");
         assert!(b.iter().any(|v| (v - 512).abs() > 8));
+    }
+
+    /// The noise [`NOISE_FORMAT`] names, pinned: one seed's noise for two
+    /// frames over flat 8-bit and 10-bit planes, hashed. A change to the
+    /// noise fails this until `NOISE_FORMAT` is raised and the pin moved
+    /// with it, so that hw-test makes the perf pairs again rather than
+    /// taking those of the old noise as made.
+    #[test]
+    fn the_noise_its_format_names_is_pinned() {
+        let fingerprint = |seed: u64| {
+            let mut bytes = Vec::new();
+            for frame in [0, 599] {
+                let mut p8 = YuvPlanes::U8([vec![128; 256], vec![128; 64], vec![128; 64]]);
+                add_noise(&mut p8, 8, seed, frame);
+                let mut p10 = YuvPlanes::U16([vec![512; 256], vec![512; 64], vec![512; 64]]);
+                add_noise(&mut p10, 10, seed, frame);
+                for p in [&p8, &p10] {
+                    match p {
+                        YuvPlanes::U8(p) => bytes.extend(p.concat()),
+                        YuvPlanes::U16(p) => {
+                            bytes.extend(p.concat().iter().flat_map(|v| v.to_le_bytes()));
+                        }
+                    }
+                }
+            }
+            spherecut_testkit::fnv64(&bytes)
+        };
+        let pinned = fingerprint(0x7a1b_0020);
+        eprintln!("noise: format {NOISE_FORMAT}, {pinned:#018x}");
+        assert_eq!((NOISE_FORMAT, pinned), (1, 0x0093_9790_e07d_8384));
+        // Its control: the next lens's seed adds other noise, so the pin
+        // sees the samples.
+        spherecut_testkit::control::must_fail(
+            "lens 1's noise taken for the pinned lens 0's",
+            fingerprint(0x7a1b_0022) == pinned,
+        );
     }
 
     fn option<'a>(v: &'a VideoSettings, key: &str) -> Option<&'a str> {

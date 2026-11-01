@@ -375,7 +375,11 @@ fn x265s_temporal_layers_are_recorded_and_only_what_holds_for_every_version_asse
     let _time =
         timed("x265s_temporal_layers_are_recorded_and_only_what_holds_for_every_version_asserted");
     let dir = temp_dir("pairs-x265");
-    let version = media::x265_version(&dir.0).unwrap();
+    // The version decides what to ask for. Its reader has its own test
+    // (`x265_names_its_version_in_the_streams_it_codes`), so a version
+    // that doesn't read is recorded here too, and the assertions below,
+    // which hold whatever the version, still run.
+    let version = media::x265_version(&dir.0);
     // What this x265 does when asked to mark every other frame
     // non-reference, as the X5's TSA_N at 59.94, is recorded, not
     // asserted: x265 3.5 takes `temporal-layers` as a switch and puts only
@@ -383,8 +387,9 @@ fn x265s_temporal_layers_are_recorded_and_only_what_holds_for_every_version_asse
     // reference), and 4.0 made it a count of layers, whose output the
     // cloud, with 3.5 alone, has never seen. The perf pairs ask for no
     // temporal layers.
-    match version.temporal_layers() {
-        Some(n) => {
+    match version.as_ref().map(|v| (v, v.temporal_layers())) {
+        Err(why) => eprintln!("x265's version not read ({why}), so no layers asked for"),
+        Ok((version, Some(n))) => {
             for (i, (what, params)) in [
                 ("without B-frames", "bframes=0"),
                 ("with a B-frame between references", ONE_B_FRAME),
@@ -416,7 +421,9 @@ fn x265s_temporal_layers_are_recorded_and_only_what_holds_for_every_version_asse
                 }
             }
         }
-        None => eprintln!("x265 {version}: its major version isn't read, so no layers asked for"),
+        Ok((version, None)) => {
+            eprintln!("x265 {version}: its major version isn't read, so no layers asked for")
+        }
     }
 
     // What holds for every version: P frames alone, as the perf pairs are
