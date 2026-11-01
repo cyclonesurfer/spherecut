@@ -163,6 +163,14 @@ pub(crate) fn clear_codec_tag(st: &mut ff::format::stream::StreamMut<'_>) {
     unsafe { (*(*st.as_mut_ptr()).codecpar).codec_tag = 0 };
 }
 
+/// Set an output stream's codec tag, a four-character code with its first
+/// character in the low byte, for a muxer that takes more than one for
+/// the codec.
+pub(crate) fn set_codec_tag(st: &mut ff::format::stream::StreamMut<'_>, tag: u32) {
+    // SAFETY: as in `clear_codec_tag`.
+    unsafe { (*(*st.as_mut_ptr()).codecpar).codec_tag = tag };
+}
+
 /// FFmpeg's h264_metadata or hevc_metadata bitstream filter, set to crop
 /// the pictures of an encoder's stream on the left: it rewrites H.264's
 /// frame cropping or HEVC's conformance window in every SPS, in the

@@ -37,6 +37,7 @@ use spherecut_core::blocking::{OnBlock, mark_ui_thread_with, unmark_ui_thread};
 use spherecut_core::project::file;
 use spherecut_export::ExportError;
 use spherecut_media::backend::FfmpegBackend;
+use spherecut_media::encode::MuxedAs;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Codec, Spec};
 
@@ -134,12 +135,10 @@ fn elsewhere<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 /// A camera's raw file in `dir`, named `name`, as small as the probe
 /// still takes for one: two video streams of one size, a lens each
 /// (`panes::lenses`), the grid's and then the seam pattern's, or the other
-/// way round when `swapped`. It is Matroska inside, which FFmpeg tells by
-/// its bytes, not its name. The X5's is an MP4 whose tracks' tables the
-/// frame lock reads, and from M3.8 `FfmpegBackend::track_timing` has
-/// none for Matroska, so this pair would be refused its lock
-/// ("timing"): it moves to `mux_video_streams`' MP4 output, which M3.1
-/// adds.
+/// way round when `swapped`. It is an MP4 whatever its name, as the
+/// X5's is, each track in its source's time base, so that the frame lock
+/// reads the tables it compares (`mp4::track_timing`), which a Matroska
+/// file has none of.
 fn write_lenses(dir: &Path, name: &str, swapped: bool) -> PathBuf {
     let lens = |name: &str, pattern| {
         let spec = Spec {
@@ -156,8 +155,12 @@ fn write_lenses(dir: &Path, name: &str, swapped: bool) -> PathBuf {
     let a = lens("lens-a", Pattern::Grid);
     let b = lens("lens-b", Pattern::Seam);
     let pair = if swapped { [&b, &a] } else { [&a, &b] };
-    spherecut_media::encode::mux_video_streams(&pair.map(PathBuf::as_path), &dir.join(name))
-        .unwrap()
+    spherecut_media::encode::mux_video_streams_as(
+        &pair.map(PathBuf::as_path),
+        &dir.join(name),
+        MuxedAs::Mp4,
+    )
+    .unwrap()
 }
 
 /// What each raw view column last drew.

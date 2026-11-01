@@ -1302,13 +1302,68 @@ impl Mp4Writer {
     }
 }
 
-/// Copy the first video stream of each of `srcs` into one new Matroska
-/// file at `dst`, in that order, packets as they are, and return `dst`:
-/// a camera's raw file, which holds one video stream a lens (the X5's
-/// `.insv`), for tests. The packets are read from each source in turn,
-/// so that the muxer interleaves them as it goes. Timestamps are
-/// rounded to the millisecond, as [`remux_to_matroska`]'s are.
-pub fn mux_video_streams(srcs: &[&Path], dst: &Path) -> Result<PathBuf, EncodeError> {
+/// The container [`mux_video_streams_as`] writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MuxedAs {
+    /// Matroska, in FFmpeg's default time base of 1/1000 s: every
+    /// timestamp is rounded to the millisecond, as [`remux_to_matroska`]'s
+    /// are.
+    Matroska,
+    /// MP4, each track in its source's time base, so that every
+    /// timestamp is kept exactly and [`crate::mp4::track_timing`] reads
+    /// each track's tables as its source has them.
+    Mp4,
+}
+
+impl MuxedAs {
+    /// The container `path`'s extension names: Matroska for `.mkv`,
+    /// `.mk3d`, `.mka` and `.webm`, whatever their case, and MP4 for any
+    /// other (`.mp4`, `.mov`, a camera's `.insv` or `.360`) or none.
+    pub fn for_path(path: &Path) -> MuxedAs {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ["mkv", "mk3d", "mka", "webm"]
+            .iter()
+            .any(|m| ext.eq_ignore_ascii_case(m))
+        {
+            MuxedAs::Matroska
+        } else {
+            MuxedAs::Mp4
+        }
+    }
+
+    /// FFmpeg's name for the muxer.
+    fn muxer(self) -> &'static str {
+        match self {
+            MuxedAs::Matroska => "matroska",
+            MuxedAs::Mp4 => "mp4",
+        }
+    }
+
+    /// The container's name in errors.
+    fn name(self) -> &'static str {
+        match self {
+            MuxedAs::Matroska => "Matroska",
+            MuxedAs::Mp4 => "MP4",
+        }
+    }
+}
+
+/// HEVC's sample entry type in an MP4 that holds its parameter sets in
+/// `hvcC` alone, as cameras write it: FFmpeg's own default is `hev1`.
+const HVC1: u32 = u32::from_le_bytes(*b"hvc1");
+
+/// [`mux_video_streams`] into the container `muxed`, whatever `dst`'s
+/// extension. In MP4 each track keeps its source's time base, so that
+/// its sample durations, composition offsets and sync samples are its
+/// source's exactly, and HEVC is tagged `hvc1`. The MP4 muxer doubles a
+/// time base's denominator until it is at least 10000, which keeps every
+/// timestamp exact; its edit list starts each track at its first
+/// timestamp, and a source's own edit list is not carried over.
+pub fn mux_video_streams_as(
+    srcs: &[&Path],
+    dst: &Path,
+    muxed: MuxedAs,
+) -> Result<PathBuf, EncodeError> {
     may_block("muxing files");
     init();
     let mut inputs = Vec::with_capacity(srcs.len());
@@ -1331,9 +1386,10 @@ pub fn mux_video_streams(srcs: &[&Path], dst: &Path) -> Result<PathBuf, EncodeEr
         format!("opening {}", dest.display())
     })?;
     let mut octx = ctx(
-        ff::format::output_to_stream(stream, None, Some("matroska")),
+        ff::format::output_to_stream(stream, None, Some(muxed.muxer())),
         || format!("creating {}", dest.display()),
     )?;
+    let name = muxed.name();
     // Per input: its video stream's index, the output stream's, and the
     // input's time base.
     let mut map = Vec::with_capacity(inputs.len());
@@ -1345,12 +1401,24 @@ pub fn mux_video_streams(srcs: &[&Path], dst: &Path) -> Result<PathBuf, EncodeEr
         let mut ost = ctx(octx.add_stream(None::<ff::Codec>), || {
             "adding a stream".into()
         })?;
-        ost.set_parameters(ist.parameters());
+        let par = ist.parameters();
+        let hevc = par.id() == ff::codec::Id::HEVC;
+        ost.set_parameters(par);
         ost.set_avg_frame_rate(ist.avg_frame_rate());
-        ffi::clear_codec_tag(&mut ost);
+        match muxed {
+            MuxedAs::Mp4 => {
+                ost.set_time_base(ist.time_base());
+                if hevc {
+                    ffi::set_codec_tag(&mut ost, HVC1);
+                } else {
+                    ffi::clear_codec_tag(&mut ost);
+                }
+            }
+            MuxedAs::Matroska => ffi::clear_codec_tag(&mut ost),
+        }
         map.push((ist.index(), ost.index(), ist.time_base()));
     }
-    ctx(octx.write_header(), || "writing Matroska header".into())?;
+    ctx(octx.write_header(), || format!("writing {name} header"))?;
     let out_tb: Vec<ff::Rational> = octx.streams().map(|s| s.time_base()).collect();
     let mut packets: Vec<_> = inputs.iter_mut().map(|i| i.packets()).collect();
     let mut open = vec![true; packets.len()];
@@ -1370,18 +1438,31 @@ pub fn mux_video_streams(srcs: &[&Path], dst: &Path) -> Result<PathBuf, EncodeEr
             pkt.set_position(-1);
             pkt.set_stream(to);
             ctx(pkt.write_interleaved(&mut octx), || {
-                "writing Matroska packet".into()
+                format!("writing {name} packet")
             })?;
         }
     }
     drop(packets);
-    ctx(octx.write_trailer(), || "writing Matroska trailer".into())?;
+    ctx(octx.write_trailer(), || format!("writing {name} trailer"))?;
     drop(octx);
     tmp.persist_replace().map_err(|error| EncodeError::Io {
         path: dest.clone(),
         error,
     })?;
     Ok(dst.to_path_buf())
+}
+
+/// Copy the first video stream of each of `srcs` into one new file at
+/// `dst`, in that order, packets as they are, and return `dst`: a
+/// camera's raw file, which holds one video stream a lens (the X5's
+/// `.insv`), for tests. The container is the one `dst`'s extension names
+/// ([`MuxedAs::for_path`]): Matroska rounds every timestamp to the
+/// millisecond, as [`remux_to_matroska`]'s are, and MP4 keeps each
+/// track's exactly ([`mux_video_streams_as`]). The packets are read from
+/// each source in turn, so that the muxer interleaves them as it goes.
+/// The file appears at `dst` only once it is complete.
+pub fn mux_video_streams(srcs: &[&Path], dst: &Path) -> Result<PathBuf, EncodeError> {
+    mux_video_streams_as(srcs, dst, MuxedAs::for_path(dst))
 }
 
 /// Copy the video and audio streams of `src` into a new Matroska file at
