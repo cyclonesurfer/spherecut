@@ -13,12 +13,14 @@
 //!   `EncoderSetup::vaapi`, since the export's encoder shares the video
 //!   engine (D56). Each runs once to warm up, then three times: the
 //!   slower lens's median is the verdict, and a run under 30 fps fails
-//!   it. A row decides only when each run's encode took 29.5 frames a
-//!   second or more over the decode's own timed window. The 8K25, 5.7K60
-//!   and 4K120 samples and the other two perf pairs decode once each,
-//!   alone, up to 600 frames a lens; the 2×2880² at 59.94 is P only,
+//!   it. A pass counts only when each run's encode took 29.5 frames a
+//!   second or more over the decode's own timed window; a miss counts
+//!   whatever the encode took, since a lighter load can only help the
+//!   decode. The 8K25, 5.7K60 and 4K120 samples and the other two perf
+//!   pairs decode once each, alone, up to 600 frames a lens; the 2×2880²
+//!   at 59.94 is P only, since its spec asks x265 for no temporal layers,
 //!   where the X5 codes every other picture as TSA_N, and a note says so
-//!   beside its rows.
+//!   beside its rows (`synth::media::PERF_PAIR_P_ONLY`).
 //! - K3: frames are held as section 12 will hold them, per lens the
 //!   decoder's current and next frame, `DECODED_AHEAD` in a bounded
 //!   channel and one at the consumer, so 5 a lens and 10 a pair. Every
@@ -86,7 +88,7 @@ use spherecut_media::probe::{self, StreamKind};
 use spherecut_media::{HwDevice, MediaError};
 use spherecut_synth::media::{
     self as synth, PAIR_64_GOP_FAULT, PAIR_64_LENS_SHORT, PAIR_64_MATCHED, PERF_PAIR_2880_2997,
-    PERF_PAIR_2880_5994, PERF_PAIR_3840_2997,
+    PERF_PAIR_2880_5994, PERF_PAIR_3840_2997, PERF_PAIR_P_ONLY,
 };
 use spherecut_testkit::control::{at_least, at_most, must_fail};
 use spherecut_testkit::memory::{CLEAR_REFS, peak_rss_growth_kib};
@@ -120,10 +122,11 @@ const GATED_RUNS: usize = 3;
 const PASS_FPS: f64 = 36.0;
 const RUN_FLOOR_FPS: f64 = 30.0;
 
-/// K1's rule: the encode beside runs at 30 fps. A run decides only when
-/// its encode took at least this many frames a second over the decode's
-/// timed window, which leaves a frame of rounding over a window of a few
-/// seconds and catches an encode that fell behind.
+/// K1's rule: the encode beside runs at 30 fps. A pass counts only when
+/// each run's encode took at least this many frames a second over the
+/// decode's timed window, which leaves a frame of rounding over a window
+/// of a few seconds and catches an encode that fell behind; a miss
+/// counts whatever the encode took.
 const ENCODE_FLOOR_FPS: f64 = 29.5;
 
 /// K3: the pair may grow twice as much as lens 0 by itself, plus 10 %.
@@ -1287,16 +1290,9 @@ struct Clip {
     file: Result<Pair, String>,
     gate: Option<Gate>,
     /// Where it is coded unlike the X5's mode, as a note beside its rows
-    /// says.
+    /// says: the 59.94 pair's [`PERF_PAIR_P_ONLY`].
     unlike: Option<&'static str>,
 }
-
-/// What `pair-hevc8-2880-5994-noisy-10s`'s rows say of its coding (M3
-/// plan 7.2): the X5 codes every other picture at 59.94 as a
-/// non-reference TSA_N, which x265 3.5, as linked in the cloud, gives only
-/// to reordered B-frames, so the pair is coded P only.
-const P_ONLY: &str = "P only: the X5 codes TSA_N on every other picture, and every picture \
-                      here but the IDRs is a reference P frame";
 
 /// The bench's clips: clip 9 and the 2×2880² at 29.97 gated, the other
 /// modes' samples and perf pairs recorded.
@@ -1320,7 +1316,7 @@ fn bench_clips() -> Vec<Clip> {
         name: format!("perf clip {name}"),
         file: tier2::perf_clip(&format!("{name}.mp4")).and_then(|p| pair_in(&p)),
         gate,
-        unlike: (name == PERF_PAIR_2880_5994).then_some(P_ONLY),
+        unlike: (name == PERF_PAIR_2880_5994).then_some(PERF_PAIR_P_ONLY),
     };
     vec![
         sample("handheld_flips", Some(Gate::K1K4)),
@@ -1524,8 +1520,8 @@ enum Kept {
     /// A setup keeps it: the best, said.
     Yes(String),
     No(String),
-    /// A row can't be held to it: run alone, short, NaN, or beside an
-    /// encode that fell behind.
+    /// A row can't be held to it: short or NaN, or a pass alone or
+    /// beside an encode that fell behind.
     Undecided(String),
     /// The path has no row there, and can't decode the clip here: doctor
     /// says it doesn't decode the clip's format, or the device turned the
@@ -1543,9 +1539,12 @@ fn tenths(fps: &[f64]) -> String {
 }
 
 /// Whether `on`'s rows at `gate`, in `setups`, keep K1's rule over
-/// `frames` frames a lens. A row decides only when every run's encode
+/// `frames` frames a lens. A pass counts only where every run's encode
 /// beside held [`ENCODE_FLOOR_FPS`] over the decode's window, since a
-/// decode beside a lighter encode isn't the rule's.
+/// decode beside a lighter encode, or alone, isn't held to the rule's
+/// load. A miss counts whatever the encode took: a lighter load on the
+/// shared engine and CPU can only help the decode, so a row that misses
+/// beside it would miss beside the full encode too.
 fn kept(gated: &Gated, gate: Gate, on: On, setups: &[Setup], frames: u64) -> Kept {
     let mut best: Option<(f64, String)> = None;
     let (mut no, mut undecided) = (Vec::new(), Vec::new());
@@ -1557,10 +1556,6 @@ fn kept(gated: &Gated, gate: Gate, on: On, setups: &[Setup], frames: u64) -> Kep
     {
         any = true;
         let label = r.setup.label();
-        if !r.beside {
-            undecided.push(format!("{label} ran alone"));
-            continue;
-        }
         if r.frames < frames {
             undecided.push(format!(
                 "{label} decoded {} frames a lens of {frames}",
@@ -1569,30 +1564,36 @@ fn kept(gated: &Gated, gate: Gate, on: On, setups: &[Setup], frames: u64) -> Kep
             continue;
         }
         let (runs, encode) = (tenths(&r.fps), tenths(&r.encode_fps));
-        let behind = r.encode_fps.len() != r.fps.len()
-            || r.encode_fps
+        let held = r.beside
+            && r.encode_fps.len() == r.fps.len()
+            && r.encode_fps
                 .iter()
-                .any(|&e| at_least(e, ENCODE_FLOOR_FPS).passes() != Some(true));
-        if behind {
-            undecided.push(format!(
-                "{label}: the encode beside took {encode} fps over the decode's window, a run \
-                 under {ENCODE_FLOOR_FPS}, so the decode (runs {runs}) didn't run beside K1's \
-                 load"
-            ));
-            continue;
-        }
+                .all(|&e| at_least(e, ENCODE_FLOOR_FPS).passes() == Some(true));
+        let load = if held {
+            format!("the encode beside at {encode}")
+        } else if r.beside {
+            format!("even beside an encode at {encode} fps, lighter than K1's load")
+        } else {
+            "even alone, without K1's encode".to_string()
+        };
         match k1_rule(&r.fps) {
+            Ok(m) if !held && !r.beside => undecided.push(format!(
+                "{label}, {m:.1} fps a lens (the median of {runs}), ran alone, without K1's load"
+            )),
+            Ok(m) if !held => undecided.push(format!(
+                "{label}, {m:.1} fps a lens (the median of {runs}), but the encode beside took \
+                 {encode} fps over the decode's window, a run under {ENCODE_FLOOR_FPS}, so the \
+                 decode didn't run beside K1's load"
+            )),
             Ok(m) if best.as_ref().is_none_or(|(b, _)| m > *b) => {
                 let said = format!(
                     "{label}, {m:.1} fps a lens ≥ {PASS_FPS} (the median of {runs}), no run under \
-                     {RUN_FLOOR_FPS}, the encode beside at {encode}"
+                     {RUN_FLOOR_FPS}, {load}"
                 );
                 best = Some((m, said));
             }
             Ok(_) => {}
-            Err((why, true)) => no.push(format!(
-                "{label}: {why} (runs {runs}; the encode beside at {encode})"
-            )),
+            Err((why, true)) => no.push(format!("{label}: {why} (runs {runs}; {load})")),
             Err((why, false)) => undecided.push(format!("{label}: {why}")),
         }
     }
@@ -2478,22 +2479,30 @@ fn each_k_names_its_verdict_by_the_plans_rules() {
         k1(&neither, FRAMES),
         Verdict::Redirect(REDIRECT_2, _)
     ));
-    // VA-API missing, run alone or short decides nothing.
+    // VA-API missing, or short, decides nothing; so does Vulkan's pass
+    // alone, beside VA-API's miss alone.
     assert!(matches!(
         k1(&rows(odin.rows[2..].to_vec()), FRAMES),
         Verdict::NotDecided(_)
     ));
-    let changed = |f: &dyn Fn(&mut GatedRow)| {
-        let mut g = odin.clone();
+    let changed = |g: &Gated, f: &dyn Fn(&mut GatedRow)| {
+        let mut g = g.clone();
         g.rows.iter_mut().for_each(f);
         g
     };
-    let alone = changed(&|r| {
+    let alone = |r: &mut GatedRow| {
         r.beside = false;
         r.encode_fps.clear();
-    });
-    assert!(matches!(k1(&alone, FRAMES), Verdict::NotDecided(_)));
-    let short = changed(&|r| r.frames = FRAMES - 1);
+    };
+    let says = k1(&changed(&odin, &alone), FRAMES);
+    assert!(matches!(says, Verdict::NotDecided(_)), "{says}");
+    assert!(
+        says.to_string().contains(
+            "a thread a lens, 41.0 fps a lens (the median of 40.0, 41.0, 42.0), ran alone"
+        ),
+        "{says}"
+    );
+    let short = changed(&odin, &|r| r.frames = FRAMES - 1);
     assert!(matches!(k1(&short, FRAMES), Verdict::NotDecided(_)));
     // An encode beside that held 20 fps over the decode's window isn't
     // K1's load: rows that would pass beside it decide nothing, on K1,
@@ -2531,11 +2540,56 @@ fn each_k_names_its_verdict_by_the_plans_rules() {
             "{k}: {says}"
         );
     }
-    // A miss beside a 20 fps encode decides nothing either.
-    assert!(matches!(
-        k1(&at_20(neither.clone()), FRAMES),
-        Verdict::NotDecided(_)
-    ));
+    // A miss beside a 20 fps encode, or alone, is a miss: the full
+    // encode could only slow the decode further. Both paths missing so
+    // take Redirect 2 for K1 and huginn's redirect for K4, and the miss
+    // says what it ran beside.
+    for (k, verdict, redirect) in [
+        ("K1", k1 as fn(&Gated, u64) -> Verdict, REDIRECT_2),
+        ("K4", k4, REDIRECT_HERE),
+    ] {
+        let says = verdict(&at_20(neither.clone()), FRAMES);
+        must_fail(
+            &format!("{k}'s miss beside a 20 fps encode left undecided"),
+            matches!(says, Verdict::NotDecided(_)),
+        );
+        assert!(
+            matches!(says, Verdict::Redirect(r, _) if r == redirect),
+            "{k}: {says}"
+        );
+        assert!(
+            says.to_string().contains(
+                "a thread a lens: the median 26.0 fps a lens < 36 (runs 25.0, 26.0, 27.0; even \
+                 beside an encode at 30.0, 20.0, 30.0 fps, lighter than K1's load)"
+            ),
+            "{k}: {says}"
+        );
+        let says = verdict(&changed(&neither, &alone), FRAMES);
+        must_fail(
+            &format!("{k}'s miss alone left undecided"),
+            matches!(says, Verdict::NotDecided(_)),
+        );
+        assert!(
+            matches!(says, Verdict::Redirect(r, _) if r == redirect),
+            "{k}: {says}"
+        );
+        assert!(
+            says.to_string().contains("even alone, without K1's encode"),
+            "{k}: {says}"
+        );
+    }
+    // A pass beside a slow encode beside another setup's miss leaves
+    // the path undecided: the pass might hold under the full load.
+    let mixed = at_8k([fast, slow], slow);
+    let mut mixed_slow = mixed.clone();
+    mixed_slow.rows[0].encode_fps[1] = 20.0;
+    assert!(matches!(k1(&mixed, FRAMES), Verdict::Pass(_)));
+    let says = k1(&mixed_slow, FRAMES);
+    must_fail(
+        "a pass beside a 20 fps encode outranked by a miss",
+        matches!(says, Verdict::Redirect(..)),
+    );
+    assert!(matches!(says, Verdict::NotDecided(_)), "{says}");
     // K2 reads the 2×2880² rows only.
     assert!(matches!(k2(&odin, FRAMES), Verdict::NotDecided(_)));
     let huginn = rows(vec![row(Gate::K2, On::VaApi, Setup::Threaded, fast)]);
@@ -2917,7 +2971,7 @@ fn the_bench_runs_its_rows_and_verdicts_on_small_clips() {
         vec![
             clip(PAIR_64_MATCHED, Some(Gate::K1K4), None),
             clip(PAIR_64_GOP_FAULT, Some(Gate::K2), None),
-            clip(PAIR_64_LENS_SHORT, None, Some(P_ONLY)),
+            clip(PAIR_64_LENS_SHORT, None, Some(PERF_PAIR_P_ONLY)),
             Clip {
                 name: "a clip that isn't here".into(),
                 file: Err("it isn't".into()),
@@ -2984,11 +3038,13 @@ fn the_bench_runs_its_rows_and_verdicts_on_small_clips() {
     // The clip coded unlike the X5 says so beside its rows, and only it:
     // the control.
     assert!(noted(&format!(
-        "pair decode {PAIR_64_LENS_SHORT}: {P_ONLY}"
+        "pair decode {PAIR_64_LENS_SHORT}: {PERF_PAIR_P_ONLY}"
     )));
     must_fail(
         "a clip coded as the X5 is said to be P only",
-        noted(&format!("pair decode {PAIR_64_MATCHED}: {P_ONLY}")),
+        noted(&format!(
+            "pair decode {PAIR_64_MATCHED}: {PERF_PAIR_P_ONLY}"
+        )),
     );
     // K3's runs had every frame alive at once, so that where the peak
     // can be measured K3 decides.
