@@ -119,7 +119,9 @@ pub struct Spec {
     /// needs a camera's bitrate and the decoder does a camera's work: the
     /// M1 plan's noisy perf clips. A clean grid decodes several times
     /// faster than footage. At 5760x2880 and 30 fps, x265 (`veryfast`,
-    /// CRF 18) makes about 200 Mbps of it.
+    /// CRF 18) makes about 200 Mbps of it. Two seeds that differ only in
+    /// their lowest bit give the same noise, since the generator's state
+    /// is made odd.
     pub noise: Option<u64>,
     /// Luma columns the stream crops on the left, an even number: the
     /// clip is rendered and coded `width` wide, and decodes `crop_left`
@@ -491,32 +493,9 @@ fn write_with(spec: &Spec, dir: &Path, lens: Lens) -> Result<PathBuf, SynthError
             EncodeError::Invalid("a variable frame rate clip can't force I-frames".into()).into(),
         );
     }
-    let format = spec.yuv_format();
     let mut pts = 0;
     for i in 0..spec.frames {
-        let mut img = render_equirect(spec.pattern, spec.width, spec.height, i, 2);
-        if spec.flash.contains(&i) {
-            for px in &mut img.pixels {
-                *px = px.map(|c| 0.5 + c / 2.0);
-            }
-        }
-        if spec.white.contains(&i) {
-            for px in &mut img.pixels {
-                *px = px.map(|_| 1.0);
-            }
-        }
-        if spec.cut_away.contains(&i) {
-            for px in &mut img.pixels {
-                *px = px.map(|c| 1.0 - c);
-            }
-        }
-        if let Some(k) = lens.code {
-            code::corner_code(&mut img, k, i)?;
-        }
-        let mut planes = yuv::to_yuv(&img, spec.bits, &format);
-        if let Some(seed) = spec.noise {
-            add_noise(&mut planes, spec.bits, seed, i);
-        }
+        let planes = frame_planes(spec, lens.code, i)?;
         if spec.vfr {
             w.push_video_at(&planes, pts)?;
             pts += vfr_ticks(i);
@@ -551,6 +530,36 @@ fn write_with(spec: &Spec, dir: &Path, lens: Lens) -> Result<PathBuf, SynthError
         w.finish()?;
     }
     Ok(out)
+}
+
+/// Frame `i` of `spec`'s clip as [`write`] codes it: the pattern with the
+/// spec's flash, white and cut-away frames, lens `code`'s corner codes if
+/// any ([`PairSpec::corner_codes`]), and the spec's noise.
+pub fn frame_planes(spec: &Spec, code: Option<usize>, i: u32) -> Result<YuvPlanes, SynthError> {
+    let mut img = render_equirect(spec.pattern, spec.width, spec.height, i, 2);
+    if spec.flash.contains(&i) {
+        for px in &mut img.pixels {
+            *px = px.map(|c| 0.5 + c / 2.0);
+        }
+    }
+    if spec.white.contains(&i) {
+        for px in &mut img.pixels {
+            *px = px.map(|_| 1.0);
+        }
+    }
+    if spec.cut_away.contains(&i) {
+        for px in &mut img.pixels {
+            *px = px.map(|c| 1.0 - c);
+        }
+    }
+    if let Some(k) = code {
+        code::corner_code(&mut img, k, i)?;
+    }
+    let mut planes = yuv::to_yuv(&img, spec.bits, &spec.yuv_format());
+    if let Some(seed) = spec.noise {
+        add_noise(&mut planes, spec.bits, seed, i);
+    }
+    Ok(planes)
 }
 
 /// Add [`Spec::noise`]'s noise for frame `frame` to `planes`, of `bits`
@@ -1081,8 +1090,9 @@ pub const PERF_PAIR_2880_2997: &str = "pair-hevc8-2880-2997-noisy-20s";
 /// and its rate control makes them differ a little from one machine to
 /// another, which doesn't matter here.
 pub fn perf_pairs() -> Vec<PairSpec> {
-    // Each lens of each clip has a noise seed of its own: `seed` and the
-    // one after it.
+    // Each lens of each clip has noise of its own: lens k's seed is
+    // `seed + 2k`, since seeds that differ only in their lowest bit give
+    // the same noise (`Spec::noise`).
     let pair = |name: &str, side: u32, rate: FrameRate, keyint: u32, kbps: u32, seed: u64| {
         let lens = |k: u32| Spec {
             name: format!("{name}-lens{k}"),
@@ -1101,7 +1111,7 @@ pub fn perf_pairs() -> Vec<PairSpec> {
                 open: false,
                 radl: 0,
             }),
-            noise: Some(seed + u64::from(k)),
+            noise: Some(seed + 2 * u64::from(k)),
             bitrate_kbps: Some(kbps),
             ..Spec::default()
         };

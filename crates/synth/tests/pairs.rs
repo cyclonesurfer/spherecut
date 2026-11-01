@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use spherecut_core::{FrameRate, StopToken};
 use spherecut_media::backend::{FfmpegBackend, MediaBackend, NextFrame, VideoRequest};
-use spherecut_media::encode::{Mp4Writer, PixelLayout, VideoSettings};
+use spherecut_media::encode::{Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 use spherecut_media::mp4::{self, TrackTiming};
 use spherecut_synth::code::{CornerCode, Luma, read_corner_code};
 use spherecut_synth::media::{
@@ -28,7 +28,7 @@ use spherecut_synth::media::{
 };
 use spherecut_synth::yuv::{self, Chroma, YuvFormat};
 use spherecut_synth::{Pattern, render_equirect};
-use spherecut_testkit::control::{at_most, must_fail};
+use spherecut_testkit::control::{at_least, at_most, must_fail};
 
 /// The suite's budget in seconds.
 const BUDGET_S: f64 = 15.0;
@@ -113,6 +113,38 @@ fn x5_coding(spec: &Spec) -> Result<(), String> {
     }
 }
 
+/// The least share of samples in which two lenses' noise must differ.
+const NOISE_APART: f64 = 0.75;
+
+/// The share of the samples, over every plane, in which the noise of
+/// frame `frame` of `a` and of `b` differs: each spec's noise is its frame
+/// at 64² without corner codes less the same frame without noise.
+fn noise_apart(a: &Spec, b: &Spec, frame: u32) -> f64 {
+    let samples = |s: &Spec| match media::frame_planes(s, None, frame).unwrap() {
+        YuvPlanes::U8(p) => p.concat(),
+        YuvPlanes::U16(_) => panic!("{} isn't 8-bit", s.name),
+    };
+    let noise = |s: &Spec| -> Vec<i16> {
+        let small = Spec {
+            width: 64,
+            height: 64,
+            ..s.clone()
+        };
+        let quiet = Spec {
+            noise: None,
+            ..small.clone()
+        };
+        samples(&small)
+            .iter()
+            .zip(samples(&quiet))
+            .map(|(n, q)| i16::from(*n) - i16::from(q))
+            .collect()
+    };
+    let (a, b) = (noise(a), noise(b));
+    assert_eq!(a.len(), b.len());
+    a.iter().zip(&b).filter(|(x, y)| x != y).count() as f64 / a.len() as f64
+}
+
 #[test]
 fn the_perf_pairs_are_coded_as_the_x5_codes_each_mode() {
     let _time = timed("the_perf_pairs_are_coded_as_the_x5_codes_each_mode");
@@ -142,7 +174,6 @@ fn the_perf_pairs_are_coded_as_the_x5_codes_each_mode() {
         ),
     ];
     assert_eq!(pairs.len(), modes.len());
-    let mut seeds = Vec::new();
     for (pair, (name, side, rate, keyint, kbps)) in pairs.iter().zip(modes) {
         assert_eq!(pair.name, name);
         assert_eq!(pair.file_name(), format!("{name}.mp4"));
@@ -157,14 +188,38 @@ fn the_perf_pairs_are_coded_as_the_x5_codes_each_mode() {
             );
             assert_eq!(lens.gop.map(|g| g.keyint), Some(keyint), "{name}");
             assert_eq!(lens.bitrate_kbps, Some(kbps), "{name}");
-            seeds.push(lens.noise);
         }
     }
-    // Each lens has noise of its own.
-    let mut unique = seeds.clone();
-    unique.sort();
-    unique.dedup();
-    assert_eq!(unique.len(), seeds.len(), "{seeds:?}");
+    // Each lens has noise of its own: the noise of a frame of one lens
+    // differs from the same frame's of the other in most samples if the
+    // two are drawn apart (7 in 8 where neither clamps), and in none if
+    // one is the other's.
+    for pair in &pairs {
+        for frame in [0, 1, 599] {
+            let apart = noise_apart(&pair.lenses[0], &pair.lenses[1], frame);
+            eprintln!(
+                "{} frame {frame}: the lenses' noise differs in {apart:.3} of the samples",
+                pair.name
+            );
+            assert_eq!(
+                at_least(apart, NOISE_APART).passes(),
+                Some(true),
+                "{} frame {frame}: {apart}",
+                pair.name
+            );
+        }
+    }
+    // Its control: seeds that differ only in their lowest bit give the
+    // same noise, as the lenses' seeds `seed` and `seed + 1` once did.
+    let lens = &pairs[0].lenses[0];
+    let twin = Spec {
+        noise: lens.noise.map(|s| s ^ 1),
+        ..lens.clone()
+    };
+    must_fail(
+        "seeds a bit apart taken for noise of their own",
+        at_least(noise_apart(lens, &twin, 0), NOISE_APART),
+    );
 
     // Its control: M2's perf clips, open GOPs of 30 with 3 B-frames, are
     // not coded as the X5 codes.
