@@ -891,9 +891,14 @@ fn each_trailer_error_is_at_the_byte_that_says_so() {
             matches!(e, CameraError::FooterMismatch { id: 4, offset } if offset == footer),
             "{what}: {e:?}"
         );
+        assert_eq!(
+            e.to_string(),
+            format!("record 4's footer at byte {footer} doesn't match its index slot")
+        );
     }
     // A footer at EOF − 78 that isn't an index's: older cameras' records
-    // walked from the end. At the footer, as record 0's.
+    // walked from the end. At the footer, as record 0's, and saying the
+    // trailer has no index rather than naming a slot.
     let e = must_fail(
         "a metadata footer where the index's is",
         read_bytes(&patched(b, 78, &[1, 1])),
@@ -901,6 +906,15 @@ fn each_trailer_error_is_at_the_byte_that_says_so() {
     assert!(
         matches!(e, CameraError::FooterMismatch { id: 0, offset } if offset == n - 78),
         "{e:?}"
+    );
+    let no_index = |e: &CameraError| e.to_string().contains("the trailer has no index");
+    assert!(no_index(&e), "{e}");
+    must_fail(
+        "record 4's footer said to be the index's",
+        no_index(&CameraError::FooterMismatch {
+            id: 4,
+            offset: footer,
+        }),
     );
 
     // An index that isn't whole slots: at its footer's size.
@@ -965,6 +979,24 @@ fn each_trailer_error_is_at_the_byte_that_says_so() {
     assert!(
         matches!(e, CameraError::Truncated { part: Part::Tail, offset } if offset == n - 10),
         "{e:?}"
+    );
+    // A record's bytes that stop inside its payload, after its trailer was
+    // read: cut short in the record, where they stop. Read whole, the
+    // same bytes up to its footer give the payload.
+    let r = file.record(4);
+    let cut = &b[..r.offset as usize + 5];
+    let e = must_fail(
+        "record 4 cut five bytes into its payload",
+        read_record(&mut Cursor::new(cut), &file.trailer, 4, usize::MAX),
+    );
+    assert!(
+        matches!(e, CameraError::Truncated { part: Part::Record(4), offset } if offset == r.offset + 5),
+        "{e:?}"
+    );
+    let upto = &b[..(r.offset + u64::from(r.size)) as usize];
+    assert_eq!(
+        read_record(&mut Cursor::new(upto), &file.trailer, 4, usize::MAX).unwrap(),
+        Some(file.payload(&r).to_vec())
     );
 
     // A read or a seek that fails: at the byte it was for.

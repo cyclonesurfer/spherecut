@@ -51,8 +51,8 @@ pub struct Trailer {
     /// The records the index lists, in slot order, each inside the trailer
     /// and its footer checked against its slot.
     pub records: Vec<RecordRef>,
-    /// The slots whose record would run past the trailer: listed with
-    /// what they say, counted, and never followed (5.1).
+    /// The slots whose record would run into the index or past the file:
+    /// listed with what they say, counted, and never followed (5.1).
     pub skipped: Vec<RecordRef>,
 }
 
@@ -99,8 +99,8 @@ impl RecordRef {
 /// or its last 32 bytes aren't [`super::MAGIC`]. A trailer whose size is
 /// over `min(len, MAX_TRAILER)` ([`super::limits`]), whose index has more
 /// than `MAX_SLOTS` slots, or whose version isn't 3 is an error at the
-/// byte that says so. A slot whose record would run past the trailer is
-/// listed in [`Trailer::skipped`], not followed.
+/// byte that says so. A slot whose record would run into the index or
+/// past the file is listed in [`Trailer::skipped`], not followed.
 ///
 /// The other errors: [`CameraError::FooterMismatch`] for a record's
 /// footer that doesn't repeat its slot, at the footer, and for a footer at
@@ -230,9 +230,12 @@ pub fn read_trailer<R: Read + Seek>(r: &mut R, len: u64) -> Result<Option<Traile
 /// trailer `t` lists no record `id`.
 ///
 /// A record over `max` bytes is [`CameraError::TooLarge`] before anything
-/// is allocated for it, at its slot's size, and one whose slot runs past
-/// the trailer ([`Trailer::skipped`]) is [`CameraError::SlotPastEnd`], at
-/// its slot. When `t` lists `id` twice, the first is read.
+/// is allocated for it, at its slot's size, and one whose slot runs into
+/// the index or past the file ([`Trailer::skipped`]) is
+/// [`CameraError::SlotPastEnd`], at its slot. Bytes that end inside the
+/// payload are [`CameraError::Truncated`] in [`Part::Record`] at the first
+/// byte missing, and a failed seek or read is [`CameraError::Io`] at the
+/// byte it was for. When `t` lists `id` twice, the first is read.
 ///
 /// It calls [`spherecut_core::may_block`] first, so on the UI thread it
 /// panics in a debug build.

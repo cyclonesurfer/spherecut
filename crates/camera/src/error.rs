@@ -46,14 +46,18 @@ pub enum CameraError {
     /// The bytes end before what they say comes next.
     #[error("{part} is cut short at byte {offset}")]
     Truncated { part: Part, offset: u64 },
-    /// An index slot whose record runs past the trailer. `read_trailer`
-    /// lists such a slot in `Trailer::skipped` and never follows it; this
-    /// is what reading its record gives. `offset` is the slot's.
-    #[error("record {id}'s index slot at byte {offset} runs past the trailer")]
+    /// An index slot whose record would run into the index or past the
+    /// file. `read_trailer` lists such a slot in `Trailer::skipped` and
+    /// never follows it; this is what reading its record gives. `offset`
+    /// is the slot's.
+    #[error("record {id}'s index slot at byte {offset} runs into the index or past the file")]
     SlotPastEnd { id: u8, offset: u64 },
     /// A record's footer that doesn't say what its index slot does: its
-    /// id, format or size differ. `offset` is the footer's.
-    #[error("record {id}'s footer at byte {offset} doesn't match its index slot")]
+    /// id, format or size differ. `offset` is the footer's. With `id` 0
+    /// it is the footer at EOF − 78, where the index's belongs, when that
+    /// footer isn't an index's (id 0, format 0): a trailer with no index,
+    /// as older cameras write theirs, or a damaged one.
+    #[error("{}", footer_mismatch(.id, .offset))]
     FooterMismatch { id: u8, offset: u64 },
     /// A varint of more than ten bytes, or past 64 bits.
     #[error("{part} has a bad varint at byte {offset}")]
@@ -74,9 +78,11 @@ pub enum CameraError {
     /// A trailer version other than 3, the only one documented.
     #[error("the trailer's version is {found}, not 3 (byte {offset})")]
     Version { found: u32, offset: u64 },
-    /// A record whose size its layout can't have: an exposure record that
-    /// isn't whole 16-byte items, or a thumbnail that isn't its header and
-    /// the planes its header gives.
+    /// A record whose size its layout can't have: an index (id 0) that
+    /// isn't whole 10-byte slots, an IMU record (3) that isn't whole
+    /// 20-byte items, an exposure record (4) that isn't whole 16-byte
+    /// items, or a thumbnail (2) that isn't its header and the planes its
+    /// header gives.
     #[error("record {id} is {size} bytes, which its layout doesn't allow (byte {offset})")]
     BadSize { id: u8, size: u64, offset: u64 },
     /// A string field that isn't UTF-8.
@@ -108,4 +114,16 @@ pub enum CameraError {
     /// Reading the file failed.
     #[error("I/O error at byte {offset}: {error}")]
     Io { offset: u64, error: io::Error },
+}
+
+/// `FooterMismatch`'s message. The index's own footer (id 0) has no slot
+/// to match: when it isn't an index's, the trailer has no index or is
+/// damaged.
+fn footer_mismatch(id: &u8, offset: &u64) -> String {
+    match id {
+        0 => format!(
+            "the footer at byte {offset}, where the trailer's index's is, isn't an index's: the trailer has no index (older cameras write none) or is damaged"
+        ),
+        id => format!("record {id}'s footer at byte {offset} doesn't match its index slot"),
+    }
 }
