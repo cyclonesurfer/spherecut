@@ -387,12 +387,19 @@ hw-test; K3 runs holding 9 frames, or lens 0 holding 2; a short lens
 under K3's consumer (the run ends rather than hangs).
 
 Measured, on the cloud box (debug): the short 192² perf pairs (121
-frames a lens) came out 6 to 10 % under their scaled ABR targets, each
+frames a lens) came out under their scaled ABR targets by 9 to 10 %
+(2×3840²), 6 to 7 % (2×2880² at 59.94) and under 1 % (at 29.97), each
 in about 2 s; the corner codes read with a clearance of 0.32 at 384²
 in the perf coding; K3's runs on clip 9 in software, 600 frames a lens,
 grew 467 MiB for lens 0 and 933 and 931 MiB for the pair (2.0×); the
 export's `tier2_pair_decode` Tier 1 tests 2.0 s, synth's `pairs` 6.5 s
-and `code` 1.8 s, media's `mux` 0.09 s, playback's Tier 1 file 7.7 s.
+and `code` 1.8 s, media's `mux` 0.09 s, playback's Tier 1 file 7.7 s
+(5 s of it a deliberate stall). `cargo xtask check` gained 4 test
+binaries (`code`, `pairs`, `tier2_pair_decode`, `mux`), 17.6 s of tests
+in that run; its wall time isn't comparable with main's, since it ran
+from a clean target folder of its own beside other builds (its tests
+882 s against M3.0's 762 s, the rest of the rise in suites M3.1 didn't
+touch).
 
 ## A2: edit and render for agents
 
