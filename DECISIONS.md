@@ -9041,6 +9041,16 @@ or 1 % of shape lets a wrong project through.
   license, allow that one git revision in `deny.toml`, or write our own
   parsers from `docs/formats/`. To decide at M4, after checking its license
   and what we actually need from it.
+
+  *Updated 2026-11-01 (M3.0):* **M3: not used (D62); M4 still decides IMU
+  parsing.** M3 reads the X5's trailer and DJI's calibration block with
+  its own parsers, from `docs/formats/`, and does not use telemetry-parser
+  even as a test oracle; DJI's field numbers come from OpenOSV's proto
+  instead (`docs/design/m3-plan.md` section 20, and D62 in its section 23).
+  What stays open is only whether M4 uses it to parse the IMU. Its licence
+  is MIT OR Apache-2.0 and its geometry is Studio-derived
+  (`docs/formats/insta360.md` §8), so the parts M4 could use are its
+  parsing alone.
 - **The project file format** (D47): Pat was asked on 2026-10-30
   (JSON, RON or SQLite; JSON recommended). M2 is built on JSON
   meanwhile; another answer changes only `core::project::file`.
