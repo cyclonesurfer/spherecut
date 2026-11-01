@@ -44,6 +44,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use spherecut_synth::media::{TrackCoding, X265Version, hevc_nal_name};
+
 use crate::machine::{self, Access, MIN_RUST};
 use crate::perf_clips::{self, Clip, Made};
 use crate::workspace_root;
@@ -1238,11 +1240,111 @@ fn run_tier1<V: AsRef<OsStr>>(dir: &Path, env: &[(&str, V)]) -> Tier1 {
 /// at about 58.
 const TOO_EASY_FPS: f64 = 150.0;
 
+/// Above this rate the X5 codes every other picture as a non-reference
+/// TSA_N (its 5.7K60 and 4K120), which x265 gives only to reordered
+/// B-frames, so the perf pairs there are P frames only (`perf_pairs`).
+const X5_TSA_N_ABOVE_FPS: f64 = 30.0;
+
+/// A pair's lens's coding cell, read back from the file: its IDR interval
+/// from `stss` and its pictures by NAL type (H.265 table 7-1's names), in
+/// bold where a picture is neither an IDR nor a TRAIL_R, or where an IDR
+/// lies off the interval (or a picture on it isn't one, or `stss` lists
+/// one off it), since every perf pair codes an IDR at its interval and P
+/// frames between; at `fps` above [`X5_TSA_N_ABOVE_FPS`], what the X5
+/// codes there that the pair doesn't.
+fn coding_cell(coding: &Result<TrackCoding, String>, fps: f64) -> String {
+    let c = match coding {
+        Ok(c) => c,
+        Err(why) => return format!("**not read**: {why}"),
+    };
+    let n = c.types.len() as u32;
+    let is_idr = |t: u8| matches!(t, 19 | 20);
+    // The interval from the first two sync samples; a track without an
+    // `stss` makes every picture one.
+    let (interval, head) = match c.sync.as_deref() {
+        None => (Some(1), "every picture a sync sample".to_string()),
+        Some([]) => (None, "**no sync sample**".to_string()),
+        Some([_]) => (Some(n.max(1)), "one IDR".to_string()),
+        Some([a, b, ..]) => {
+            let i = b.saturating_sub(*a).max(1);
+            (Some(i), format!("IDR every {i}"))
+        }
+    };
+    let due = |i: u32| interval.is_some_and(|k| i.is_multiple_of(k));
+    let listed = |i: u32| {
+        c.sync
+            .as_ref()
+            .is_none_or(|s| s.binary_search(&(i + 1)).is_ok())
+    };
+    let off: Vec<u32> = (0..n)
+        .filter(|&i| due(i) != is_idr(c.types[i as usize]) || due(i) != listed(i))
+        .collect();
+    let mut counts: Vec<(u8, usize)> = Vec::new();
+    for &t in &c.types {
+        match counts.iter_mut().find(|(u, _)| *u == t) {
+            Some((_, k)) => *k += 1,
+            None => counts.push((t, 1)),
+        }
+    }
+    counts.sort();
+    let mut parts = vec![head];
+    parts.push(if counts.is_empty() {
+        "**no pictures**".to_string()
+    } else {
+        counts
+            .iter()
+            .map(|&(t, k)| match hevc_nal_name(t) {
+                Some(name) => format!("{name} {k}"),
+                None => format!("type {t} {k}"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
+    let other: usize = counts
+        .iter()
+        .filter(|(t, _)| !(is_idr(*t) || *t == 1))
+        .map(|(_, k)| k)
+        .sum();
+    if other > 0 {
+        parts.push(format!("**{other} neither IDR nor TRAIL_R**"));
+    }
+    match off.as_slice() {
+        [] => {}
+        [i] => parts.push(format!("**an IDR off the interval at picture {i}**")),
+        [i, rest @ ..] => parts.push(format!(
+            "**an IDR off the interval at picture {i}, and {} more**",
+            rest.len()
+        )),
+    }
+    if fps > X5_TSA_N_ABOVE_FPS {
+        parts.push("P only: the X5 codes TSA_N on every other picture".into());
+    }
+    parts.join("; ")
+}
+
+/// The report's x265 row: the version of the headers `pkg-config` finds,
+/// if any, and the x265 the perf clips are coded with, as the info SEI of
+/// a frame hw-test coded names it (`perf_clips::x265`), which is the one
+/// FFmpeg links and which odin's `pkg-config`, without an x265 file,
+/// can't give.
+fn x265_row(pkg: Option<&str>, coded: &Result<X265Version, String>) -> String {
+    const FROM: &str = "the info SEI of a frame hw-test coded";
+    match (pkg, coded) {
+        (Some(p), Ok(v)) => format!("| x265 | {p} (`pkg-config`); {v} codes the clips ({FROM}) |"),
+        (None, Ok(v)) => format!("| x265 | {v} ({FROM}; `pkg-config` has no x265) |"),
+        (Some(p), Err(why)) => format!("| x265 | {p} (`pkg-config`); {FROM} not read: {why} |"),
+        (None, Err(why)) => {
+            format!("| x265 | headers not found, and {FROM} not read: {why} |")
+        }
+    }
+}
+
 /// The perf clips section's table rows: each clip's size, bitrate, how it
 /// came to be there, and its software decode rate from the benchmarks,
 /// flagged above [`TOO_EASY_FPS`]. A pair has a row a lens, with the
-/// lens's own samples, bitrate and decode rate, so that each track is
-/// flagged on its own.
+/// lens's own samples, bitrate, decode rate and coding ([`coding_cell`]),
+/// so that each track is flagged on its own, and a lens that can't be read
+/// says why.
 fn perf_clip_rows(clips: &[Clip], benches: &[Bench]) -> Vec<String> {
     let decode = |row: String| match benches.iter().find(|b| b.name == row) {
         Some(b) if b.median > TOO_EASY_FPS => format!(
@@ -1271,23 +1373,27 @@ fn perf_clip_rows(clips: &[Clip], benches: &[Bench]) -> Vec<String> {
             Made::Now(d) => format!("now, in {:.0} s", d.as_secs_f64()),
             Made::Failed(why) => format!("**not made**: {why}"),
         };
-        if c.track_bytes.is_empty() {
+        if c.lenses.is_empty() {
             let row = format!("perf clip {}: software decode", c.name);
             rows.push(format!(
-                "| `{file}` | {} | {} | {made} | {} |",
+                "| `{file}` | {} | {} | {made} | {} |  |",
                 size(c.bytes),
                 mbps(c.mbps()),
                 decode(row)
             ));
             continue;
         }
-        for (k, &bytes) in c.track_bytes.iter().enumerate() {
+        for (k, lens) in c.lenses.iter().enumerate() {
             let row = format!("perf clip {} lens {k}: software decode", c.name);
+            let bytes = match &lens.bytes {
+                Ok(b) => size(*b),
+                Err(why) => format!("**not read**: {why}"),
+            };
             rows.push(format!(
-                "| `{file}` lens {k} | {} | {} | {made} | {} |",
-                size(bytes),
+                "| `{file}` lens {k} | {bytes} | {} | {made} | {} | {} |",
                 mbps(c.track_mbps(k)),
-                decode(row)
+                decode(row),
+                coding_cell(&lens.coding, c.fps)
             ));
         }
     }
@@ -1437,8 +1543,12 @@ pub fn run(a: Args) -> Result<()> {
     // The x265 the perf clips are coded with: the system's, which
     // `scripts/build-ffmpeg.sh` links. Which pictures it can make
     // non-reference, and how it cuts them into slices, decide how near
-    // the two-track clips come to the X5's coding (`perf_pairs`).
+    // the two-track clips come to the X5's coding (`perf_pairs`). Its
+    // headers' version, where `pkg-config` has one, and the version the
+    // streams it codes name, which a pair's stamp holds.
     let x265 = capture("pkg-config", &["--modversion", "x265"]);
+    let media_dir = target.join("hw-media");
+    let x265_coded = perf_clips::x265(&media_dir);
     let session = format!(
         "{} / {}",
         std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "?".into()),
@@ -1518,7 +1628,6 @@ pub fn run(a: Args) -> Result<()> {
     let mut tier1: Option<Tier1> = None;
     let mut doctor: Option<Captured> = None;
     let mut clips: Vec<Clip> = Vec::new();
-    let media_dir = target.join("hw-media");
     if build_blocked {
         eprintln!("==> build prerequisites missing; skipping build and tests");
     } else {
@@ -1535,7 +1644,7 @@ pub fn run(a: Args) -> Result<()> {
         if built {
             // The benchmarks that play them are left out by --quick.
             if !a.quick {
-                clips = perf_clips::ensure(&media_dir);
+                clips = perf_clips::ensure(&media_dir, &x265_coded);
             }
             let perf_media = (!a.quick).then_some(media_dir.as_path());
             let sel = Selection {
@@ -1636,12 +1745,8 @@ pub fn run(a: Args) -> Result<()> {
     );
     let _ = writeln!(
         r,
-        "| x265 | {} |",
-        if x265.ok {
-            x265.text.trim()
-        } else {
-            "headers not found"
-        }
+        "{}",
+        x265_row(x265.ok.then(|| x265.text.trim()), &x265_coded)
     );
     let _ = writeln!(
         r,
@@ -1796,12 +1901,15 @@ pub fn run(a: Args) -> Result<()> {
              `{}` for the playback benchmarks. Software decode over {TOO_EASY_FPS:.0} fps \
              would make a clip too easy to say anything about footage. A two-track clip has \
              a row a lens: its bitrate from that lens's samples, its decode that lens's \
-             alone.\n",
+             alone, and its coding read back from the file, its IDR interval from `stss` \
+             and its pictures by NAL type, in bold where a picture is neither an IDR nor a \
+             TRAIL_R or an IDR is off the interval.\n",
             media_dir.display()
         );
         let _ = writeln!(
             r,
-            "| Clip | Size | Bitrate | Made | Software decode |\n|---|---:|---:|---|---|"
+            "| Clip | Size | Bitrate | Made | Software decode | Coding |\n\
+             |---|---:|---:|---|---|---|"
         );
         for row in perf_clip_rows(&clips, &parse_benches(&bench_text_of(&tier2, &bench_out))) {
             let _ = writeln!(r, "{row}");
@@ -3189,7 +3297,8 @@ error: 1 target failed:
             made,
             bytes: 250_000_000,
             seconds: 20.0,
-            track_bytes: Vec::new(),
+            fps: 30.0,
+            lenses: Vec::new(),
         };
         let clips = [
             clip("hevc8", Made::Cached),
@@ -3206,12 +3315,30 @@ error: 1 target failed:
         assert_eq!(
             perf_clip_rows(&clips, &benches),
             [
-                "| `hevc8.mp4` | 250 MB | 100.0 Mbit/s | cached | 61.2 fps |",
+                "| `hevc8.mp4` | 250 MB | 100.0 Mbit/s | cached | 61.2 fps |  |",
                 "| `hevc10.mp4` | 250 MB | 100.0 Mbit/s | now, in 312 s | 212.0 fps, **too easy** \
-                 (over 150: it proves nothing about footage) |",
-                "| `hevc8-8k.mp4` |  |  | **not made**: no libx265 | not measured |",
+                 (over 150: it proves nothing about footage) |  |",
+                "| `hevc8-8k.mp4` |  |  | **not made**: no libx265 | not measured |  |",
             ]
         );
+    }
+
+    /// A lens of `n` pictures coded as the perf pairs are: an IDR (IDR_N_LP)
+    /// every `keyint`, TRAIL_R between, `stss` listing the IDRs.
+    fn p_only(n: u32, keyint: u32) -> TrackCoding {
+        TrackCoding {
+            sync: Some((0..n).step_by(keyint as usize).map(|i| i + 1).collect()),
+            types: (0..n)
+                .map(|i| if i % keyint == 0 { 20 } else { 1 })
+                .collect(),
+        }
+    }
+
+    fn lens(bytes: u64, coding: TrackCoding) -> perf_clips::LensRead {
+        perf_clips::LensRead {
+            bytes: Ok(bytes),
+            coding: Ok(coding),
+        }
     }
 
     #[test]
@@ -3222,7 +3349,11 @@ error: 1 target failed:
             made: Made::Cached,
             bytes: 312_600_000,
             seconds: 20.0,
-            track_bytes: vec![162_600_000, 150_000_000],
+            fps: 30_000.0 / 1001.0,
+            lenses: vec![
+                lens(162_600_000, p_only(600, 60)),
+                lens(150_000_000, p_only(600, 60)),
+            ],
         };
         // A row for the file as a whole is no lens's.
         let benches = parse_benches(
@@ -3234,9 +3365,11 @@ error: 1 target failed:
         assert_eq!(
             rows,
             [
-                "| `pair.mp4` lens 0 | 163 MB | 65.0 Mbit/s | cached | 61.0 fps |",
+                "| `pair.mp4` lens 0 | 163 MB | 65.0 Mbit/s | cached | 61.0 fps | IDR every 60; \
+                 TRAIL_R 590, IDR_N_LP 10 |",
                 "| `pair.mp4` lens 1 | 150 MB | 60.0 Mbit/s | cached | 180.0 fps, **too easy** \
-                 (over 150: it proves nothing about footage) |",
+                 (over 150: it proves nothing about footage) | IDR every 60; TRAIL_R 590, \
+                 IDR_N_LP 10 |",
             ]
         );
         // Its control: lens 0's row isn't flagged, and the same check fails
@@ -3245,11 +3378,123 @@ error: 1 target failed:
         let unflagged = |row: &str| !row.contains("too easy");
         assert!(unflagged(&rows[0]));
         let whole = Clip {
-            track_bytes: Vec::new(),
-            ..pair
+            lenses: Vec::new(),
+            ..pair.clone()
         };
         let rows = perf_clip_rows(&[whole], &benches);
         spherecut_testkit::control::must_fail("the pair rated as one file", unflagged(&rows[0]));
+
+        // A lens that couldn't be read says why in its row, where its size
+        // would be, and has no bitrate.
+        let unread = Clip {
+            lenses: vec![
+                perf_clips::LensRead {
+                    bytes: Err("stream 0 is damaged".into()),
+                    coding: Err("track 0: `stsc` is missing or cut short".into()),
+                },
+                lens(150_000_000, p_only(600, 60)),
+            ],
+            ..pair
+        };
+        let rows = perf_clip_rows(&[unread], &benches);
+        assert_eq!(
+            rows[0],
+            "| `pair.mp4` lens 0 | **not read**: stream 0 is damaged |  | cached | 61.0 fps | \
+             **not read**: track 0: `stsc` is missing or cut short |"
+        );
+    }
+
+    #[test]
+    fn a_lens_coded_otherwise_than_the_perf_pairs_is_flagged_in_bold() {
+        let ok = |cell: &str| !cell.contains("**");
+        let at_2997 = 30_000.0 / 1001.0;
+        let cell = coding_cell(&Ok(p_only(600, 60)), at_2997);
+        assert_eq!(cell, "IDR every 60; TRAIL_R 590, IDR_N_LP 10");
+        assert!(ok(&cell));
+        // At 59.94 the row says what the pair doesn't match.
+        let cell = coding_cell(&Ok(p_only(600, 120)), 60_000.0 / 1001.0);
+        assert_eq!(
+            cell,
+            "IDR every 120; TRAIL_R 595, IDR_N_LP 5; P only: the X5 codes TSA_N on every other \
+             picture"
+        );
+        assert!(ok(&cell));
+        let cell = coding_cell(&Err("no track 1".into()), at_2997);
+        assert_eq!(cell, "**not read**: no track 1");
+
+        // Its controls: the X5's own coding at 59.94, a TSA_N in every
+        // other place, ...
+        let mut tsa_n = p_only(600, 120);
+        for t in tsa_n.types.iter_mut().skip(1).step_by(2) {
+            *t = 2;
+        }
+        let cell = coding_cell(&Ok(tsa_n), 60_000.0 / 1001.0);
+        assert!(cell.contains("TSA_N 300, IDR_N_LP 5"), "{cell}");
+        assert!(cell.contains("**300 neither IDR nor TRAIL_R**"), "{cell}");
+        spherecut_testkit::control::must_fail("the X5's TSA_N taken for P only", ok(&cell));
+        // ... an IDR between the interval's, listed in `stss` too ...
+        let mut early = p_only(600, 60);
+        early.types[90] = 20;
+        let mut sync = early.sync.clone().unwrap();
+        sync.insert(2, 91);
+        early.sync = Some(sync);
+        let cell = coding_cell(&Ok(early), at_2997);
+        assert!(
+            cell.ends_with("**an IDR off the interval at picture 90**"),
+            "{cell}"
+        );
+        spherecut_testkit::control::must_fail("an IDR off the interval", ok(&cell));
+        // ... and an IDR missing from its place, which `stss` still lists.
+        let mut missing = p_only(600, 60);
+        missing.types[120] = 1;
+        let cell = coding_cell(&Ok(missing), at_2997);
+        assert!(
+            cell.ends_with("**an IDR off the interval at picture 120**"),
+            "{cell}"
+        );
+        spherecut_testkit::control::must_fail("an IDR missing from the interval", ok(&cell));
+    }
+
+    #[test]
+    fn the_x265_row_says_where_its_version_came_from() {
+        let v41 = Ok(X265Version {
+            build: 215,
+            version: "4.1".into(),
+        });
+        // odin: `pkg-config` has no x265, and the streams name it.
+        let row = x265_row(None, &v41);
+        assert_eq!(
+            row,
+            "| x265 | 4.1 (build 215) (the info SEI of a frame hw-test coded; `pkg-config` has \
+             no x265) |"
+        );
+        let named = |row: &str| row.contains("4.1 (build 215)") && row.contains("info SEI");
+        assert!(named(&row));
+        // Its control: the row as it read before, which gave odin's x265 as
+        // "headers not found".
+        spherecut_testkit::control::must_fail(
+            "the row without the streams' version",
+            named("| x265 | headers not found |"),
+        );
+        let v35 = Ok(X265Version {
+            build: 199,
+            version: "3.5+1-f0c1022b6".into(),
+        });
+        assert_eq!(
+            x265_row(Some("3.5"), &v35),
+            "| x265 | 3.5 (`pkg-config`); 3.5+1-f0c1022b6 (build 199) codes the clips (the info \
+             SEI of a frame hw-test coded) |"
+        );
+        assert_eq!(
+            x265_row(Some("3.5"), &Err("no libx265".into())),
+            "| x265 | 3.5 (`pkg-config`); the info SEI of a frame hw-test coded not read: no \
+             libx265 |"
+        );
+        assert_eq!(
+            x265_row(None, &Err("no libx265".into())),
+            "| x265 | headers not found, and the info SEI of a frame hw-test coded not read: no \
+             libx265 |"
+        );
     }
 
     #[test]
