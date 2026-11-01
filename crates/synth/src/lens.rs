@@ -11,7 +11,8 @@
 //! and centre, and [`render_lens`] renders what each lens sees through
 //! synth's own forward and inverse ([`TruthModel`]), which
 //! [`lens_planes`] codes as the X5 does. [`x5_like`] and [`kb_like`] are
-//! 4.2's two rigs, and a [`RenderCache`] keeps a test binary's renders.
+//! 4.2's two rigs, and a [`RenderCache`] keeps a test binary's renders
+//! to a budget.
 //!
 //! The frames are 6.2's. A lens frame is Mei's and OpenCV's: +x right in
 //! the image, +y down, +z along the optical axis. The rig frame is
@@ -19,7 +20,7 @@
 //! looking along −Z. Every frame is right-handed, and a rotation by a
 //! positive angle about an axis turns by the right-hand rule.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -1352,46 +1353,137 @@ fn moves(pattern: Pattern) -> bool {
     }
 }
 
-/// A test binary's renders (7.1), kept for as long as it runs, keyed by
-/// rig truth, scene and frame. A still scene through a rig at rest is
+/// A test binary's renders (7.1), keyed by rig truth, scene and frame,
+/// and held to a budget in bytes. A still scene through a rig at rest is
 /// rendered once: its frames differ only by what is added after
 /// rendering, the frame codes (M3.1's `synth::code`) and the noise. So
 /// the key holds the frame only when the scene moves or a turn moves the
 /// rig during the frame's exposure, and otherwise the rest it falls in
 /// ([`Motion::rest`]). Each key renders once, even when threads ask for
-/// it together.
-#[derive(Default)]
+/// it together, for as long as the cache holds it.
+///
+/// A picture holds 24 bytes a pixel (f64 RGB), 13.5 MiB at 768², and a
+/// moving rig is keyed by frame, so the cache holds no more than its
+/// budget, [`RenderCache::BUDGET`] (1 GiB, 75 pictures at 768²) unless
+/// [`RenderCache::with_budget`] sets another. When a new picture would
+/// take it past the budget, the pictures asked for least recently go
+/// first; one larger than the whole budget is rendered each time it is
+/// asked for and never kept. The budget bounds what the cache holds: a
+/// picture a caller still holds stays alive until the caller drops it,
+/// and one pushed out while it was being rendered is rendered again when
+/// it is next asked for.
+///
+/// [`RenderCache::shared`] is for pictures that more than one test asks
+/// for, as 8.3's attribution matrix shares rung 1's moving renders. A
+/// test whose pictures no other test asks for, such as a sweep through a
+/// moving rig's frames that reads each once, or one that holds many
+/// pictures at once, calls [`render_lens`] directly or keeps a
+/// [`RenderCache::new`] of its own, so as not to push out the pictures
+/// the others share.
 pub struct RenderCache {
-    renders: Mutex<HashMap<String, Arc<OnceLock<Arc<RgbImage>>>>>,
+    held: Mutex<Held>,
+    budget: usize,
     made: AtomicU64,
+}
+
+/// What a [`RenderCache`] holds.
+#[derive(Default)]
+struct Held {
+    renders: HashMap<String, Kept>,
+    /// The keys by when they were last asked for, the least recent first.
+    by_use: BTreeMap<u64, String>,
+    bytes: usize,
+    /// Counts the asks, to order `by_use`.
+    clock: u64,
+}
+
+/// One picture a [`RenderCache`] holds, or is rendering: its cell, its
+/// size in bytes, and the count of the ask that last asked for it.
+struct Kept {
+    cell: Arc<OnceLock<Arc<RgbImage>>>,
+    bytes: usize,
+    used: u64,
+}
+
+impl Held {
+    /// The cell for `key`, now the most recently asked for: the one held,
+    /// or a new one of `bytes`, for which the least recently asked for
+    /// make room under `budget`.
+    fn ask(&mut self, key: String, bytes: usize, budget: usize) -> Arc<OnceLock<Arc<RgbImage>>> {
+        self.clock += 1;
+        let now = self.clock;
+        if let Some(kept) = self.renders.get_mut(&key) {
+            self.by_use.remove(&kept.used);
+            kept.used = now;
+            self.by_use.insert(now, key);
+            return Arc::clone(&kept.cell);
+        }
+        while self.bytes + bytes > budget {
+            let Some((_, oldest)) = self.by_use.pop_first() else {
+                break;
+            };
+            if let Some(gone) = self.renders.remove(&oldest) {
+                self.bytes -= gone.bytes;
+            }
+        }
+        let cell = Arc::default();
+        self.renders.insert(
+            key.clone(),
+            Kept {
+                cell: Arc::clone(&cell),
+                bytes,
+                used: now,
+            },
+        );
+        self.by_use.insert(now, key);
+        self.bytes += bytes;
+        cell
+    }
 }
 
 impl std::fmt::Debug for RenderCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let held = self
-            .renders
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len();
         f.debug_struct("RenderCache")
-            .field("held", &held)
+            .field("held", &self.held())
+            .field("held_bytes", &self.held_bytes())
+            .field("budget", &self.budget)
             .field("made", &self.made())
             .finish()
     }
 }
 
+impl Default for RenderCache {
+    fn default() -> RenderCache {
+        RenderCache::new()
+    }
+}
+
 impl RenderCache {
+    /// The budget a cache holds to unless it is given another: 1 GiB.
+    pub const BUDGET: usize = 1 << 30;
+
+    /// A cache of [`RenderCache::BUDGET`].
     pub fn new() -> RenderCache {
-        RenderCache::default()
+        RenderCache::with_budget(RenderCache::BUDGET)
     }
 
-    /// The test binary's own cache.
+    /// A cache that holds at most `bytes` of pictures.
+    pub fn with_budget(bytes: usize) -> RenderCache {
+        RenderCache {
+            held: Mutex::new(Held::default()),
+            budget: bytes,
+            made: AtomicU64::new(0),
+        }
+    }
+
+    /// The test binary's own cache, of [`RenderCache::BUDGET`].
     pub fn shared() -> &'static RenderCache {
         static SHARED: OnceLock<RenderCache> = OnceLock::new();
         SHARED.get_or_init(RenderCache::new)
     }
 
-    /// [`render_lens`]'s picture, rendered the first time it is asked for.
+    /// [`render_lens`]'s picture, rendered the first time it is asked for
+    /// and kept while the budget allows.
     pub fn render(
         &self,
         pattern: Pattern,
@@ -1400,24 +1492,52 @@ impl RenderCache {
         frame: u32,
         ss: u32,
     ) -> Arc<RgbImage> {
-        let cell = {
-            let mut renders = self.renders.lock().unwrap_or_else(PoisonError::into_inner);
-            renders
-                .entry(render_key(pattern, rig, lens, frame, ss))
-                .or_default()
-                .clone()
-        };
-        cell.get_or_init(|| {
+        let render = || {
             self.made.fetch_add(1, Ordering::Relaxed);
             Arc::new(render_lens(pattern, rig, lens, frame, ss))
-        })
-        .clone()
+        };
+        let bytes = picture_bytes(rig.lenses[lens].side);
+        if bytes > self.budget {
+            return render();
+        }
+        let cell = self.lock().ask(
+            render_key(pattern, rig, lens, frame, ss),
+            bytes,
+            self.budget,
+        );
+        cell.get_or_init(render).clone()
     }
 
     /// How many pictures this cache has rendered.
     pub fn made(&self) -> u64 {
         self.made.load(Ordering::Relaxed)
     }
+
+    /// How many pictures it holds, those being rendered among them.
+    pub fn held(&self) -> usize {
+        self.lock().renders.len()
+    }
+
+    /// How many bytes of pictures it holds, those being rendered among
+    /// them: never more than its budget.
+    pub fn held_bytes(&self) -> usize {
+        self.lock().bytes
+    }
+
+    /// Its budget, in bytes.
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Held> {
+        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The bytes a [`render_lens`] picture of side `side` holds.
+fn picture_bytes(side: u32) -> usize {
+    let side = side as usize;
+    side * side * std::mem::size_of::<Rgb>()
 }
 
 /// A render's key in a [`RenderCache`]: the rig truth whole, by its
@@ -3532,6 +3652,74 @@ mod tests {
         assert_eq!(fresh.made(), 1);
         assert!(pictures.iter().all(|p| Arc::ptr_eq(p, &pictures[0])));
         assert!(std::ptr::eq(RenderCache::shared(), RenderCache::shared()));
+    }
+
+    /// A render cache holds no more than its budget, the pictures asked
+    /// for least recently going first, and keeps none larger than it.
+    #[test]
+    fn the_render_cache_holds_to_its_budget() {
+        // 1 GiB by default, 75 pictures at 768², 13.5 MiB each.
+        assert_eq!(RenderCache::BUDGET, 1 << 30);
+        assert_eq!(RenderCache::new().budget(), RenderCache::BUDGET);
+        assert_eq!(RenderCache::shared().budget(), RenderCache::BUDGET);
+        assert_eq!(picture_bytes(768), 14_155_776);
+        assert_eq!(RenderCache::BUDGET / picture_bytes(768), 75);
+
+        // Grid moves, so each frame is a picture of its own: 32² of them,
+        // 24 KiB each, to a budget of three.
+        let rig = square_rig(32);
+        let picture = picture_bytes(32);
+        assert_eq!(picture, 32 * 32 * 24);
+        let grid = |cache: &RenderCache, frame: u32| cache.render(Pattern::Grid, &rig, 0, frame, 1);
+        let within = |cache: &RenderCache| at_most(cache.held_bytes(), 3 * picture);
+        let cache = RenderCache::with_budget(3 * picture);
+        let first = grid(&cache, 0);
+        grid(&cache, 1);
+        grid(&cache, 2);
+        assert_eq!((cache.made(), cache.held()), (3, 3));
+        // Frame 0, asked for again, is kept and becomes the most recent,
+        // so frame 3 pushes out frame 1, now the least recently asked for.
+        assert!(Arc::ptr_eq(&first, &grid(&cache, 0)));
+        grid(&cache, 3);
+        assert_eq!((cache.made(), cache.held()), (4, 3));
+        assert_eq!(within(&cache).passes(), Some(true));
+        assert!(Arc::ptr_eq(&first, &grid(&cache, 0)));
+        assert_eq!(cache.made(), 4);
+        // Frame 1 is rendered again, to the same picture, and pushes out
+        // frame 2.
+        let again = grid(&cache, 1);
+        assert_eq!(cache.made(), 5);
+        assert_eq!(
+            again.pixels,
+            render_lens(Pattern::Grid, &rig, 0, 1, 1).pixels
+        );
+        grid(&cache, 2);
+        assert_eq!(cache.made(), 6);
+        assert_eq!(within(&cache).passes(), Some(true));
+        // Controls: the same asks of a cache with room for ten hold four
+        // pictures, past the bound; and frame 0, not asked for again
+        // before frame 3, goes first, as it would first in, first out.
+        let roomy = RenderCache::with_budget(10 * picture);
+        for frame in [0, 1, 2, 0, 3, 0, 1, 2] {
+            grid(&roomy, frame);
+        }
+        assert_eq!(must_fail("room for ten", within(&roomy)), 4 * picture);
+        let unasked = RenderCache::with_budget(3 * picture);
+        let first = grid(&unasked, 0);
+        for frame in 1..4 {
+            grid(&unasked, frame);
+        }
+        must_fail(
+            "frame 0 kept, not asked for again",
+            Arc::ptr_eq(&first, &grid(&unasked, 0)),
+        );
+
+        // A picture larger than the whole budget is rendered at each ask
+        // and never kept.
+        let small = RenderCache::with_budget(picture - 1);
+        let (a, b) = (grid(&small, 0), grid(&small, 0));
+        assert_eq!((small.made(), small.held(), small.held_bytes()), (2, 0, 0));
+        assert_eq!(a.pixels, b.pixels);
     }
 
     /// Whether the directions `theta` degrees off `lens`'s axis along its
