@@ -370,6 +370,19 @@ impl TruthV6 {
         prism: None,
     };
 
+    /// The value that reads every one of d5 to d12: the pair in order with
+    /// its extension, and the prism at d9 by axis.
+    pub const EVERY_TERM: TruthV6 = TruthV6 {
+        tangential: Some(Tangential {
+            pair: PairOrder::D5D6,
+            extension: true,
+        }),
+        prism: Some(Prism {
+            at: PrismAt::D9,
+            order: PrismOrder::ByAxis,
+        }),
+    };
+
     /// All 21 values: 5 tangential readings (none, or a pair order with
     /// or without the extension) by 5 prism readings (none, or a start
     /// and an order), less the 4 whose extension and prism at d7 would
@@ -1774,6 +1787,92 @@ pub fn kb_like(rig: &RigTruth) -> RigTruth {
     kb
 }
 
+/// The tangential pair, its r² extension and the thin prism (a
+/// [`TruthModel::Kb`]'s `p`, `pe` and `s`) of the test lenses that carry
+/// every KB term, which move the image by a few pixels at 106°. synth's
+/// own tests and rung 0 both take them, so that the two test one set.
+pub const KB_TERMS_P: [f64; 2] = [0.0012, -0.0021];
+pub const KB_TERMS_PE: [f64; 2] = [0.0003, -0.0002];
+pub const KB_TERMS_S: [f64; 4] = [-0.0011, 0.0002, 0.0008, -0.0001];
+
+/// Pat's V6 d0 to d12, by block (insta360.md, "Pat's X5 samples"). Every
+/// one of d5 to d12 is non-zero.
+pub const PATS_V6_D: [[f64; 13]; 2] = [
+    [
+        0.28032997,
+        0.89045405,
+        2.04927588,
+        -8.05179787,
+        0.0,
+        0.00120200,
+        -0.00259487,
+        0.02324706,
+        0.00533920,
+        -0.01560208,
+        0.00019357,
+        -0.04580523,
+        0.00197187,
+    ],
+    [
+        0.27665332,
+        0.98522973,
+        1.83605266,
+        -7.99374485,
+        0.0,
+        0.00021056,
+        -0.00147626,
+        0.01940425,
+        0.00331838,
+        -0.01330665,
+        0.00074511,
+        -0.02859299,
+        0.00888746,
+    ],
+];
+
+/// Pat's V6 lens 0 at [`X5_LIKE_SIDE`]² under map C, read through
+/// [`TruthV6::EVERY_TERM`] and scaled to `xi` as 6.3's generator scales
+/// it: a term of degree n in m is multiplied by (m_X5/m_top)^(n − 1),
+/// where m_top is the plane radius at min(100°, the model's end − 1°) for
+/// that ξ and m_X5 the X5's at 100°, and the focal by m_X5/m_top, so that
+/// the polynomial keeps the X5's shape over that range and the image the
+/// X5's size. At ξ = 2 the scale is 1, and this is the lens as stored.
+/// synth's own tests and rung 0 both take it, so that the two test one
+/// model at each ξ.
+pub fn pats_v6_scaled(xi: f64) -> TruthModel {
+    let plane = |xi: f64, theta: f64| theta.sin() / (theta.cos() + xi);
+    let end = if xi > 1.0 {
+        (-1.0 / xi).acos()
+    } else {
+        (-xi).acos()
+    };
+    let top = 100f64.to_radians().min(end - 1f64.to_radians());
+    let s = plane(2.0, 100f64.to_radians()) / plane(xi, top);
+    let mut d = PATS_V6_D[0];
+    for (i, k) in d[..5].iter_mut().enumerate() {
+        *k *= s.powi(2 * i as i32 + 2);
+    }
+    // Read through every term, d5 and d6 (p1, p2) and d9 and d11 (s1, s3)
+    // are of degree 2, and d7 and d8 (p1', p2') and d10 and d12 (s2, s4)
+    // of degree 4.
+    for i in [5, 6, 9, 11] {
+        d[i] *= s;
+    }
+    for i in [7, 8, 10, 12] {
+        d[i] *= s.powi(3);
+    }
+    let slot = f64::from(X5_LIKE_SIDE) / 5376.0;
+    TruthModel::MeiV6 {
+        xi,
+        fx: 4277.52 * slot * s,
+        fy: 4277.27 * slot * s,
+        cx: 2713.05 * slot,
+        cy: 2689.21 * slot,
+        d,
+        reading: TruthV6::EVERY_TERM,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -2062,98 +2161,34 @@ mod tests {
         }
     }
 
-    /// Pat's V6 lens 0's d0 to d12.
-    const PATS_V6_D0: [f64; 13] = [
-        0.28032997,
-        0.89045405,
-        2.04927588,
-        -8.05179787,
-        0.0,
-        0.00120200,
-        -0.00259487,
-        0.02324706,
-        0.00533920,
-        -0.01560208,
-        0.00019357,
-        -0.04580523,
-        0.00197187,
-    ];
-
     /// Pat's V6 lens 0 in a 768² slot under map C, read through
-    /// `reading`.
+    /// `reading`: [`pats_v6_scaled`] at its own ξ of 2, where the scale is
+    /// 1.
     fn pats_v6_at_768(reading: TruthV6) -> TruthModel {
-        let s = 768.0 / 5376.0;
-        TruthModel::MeiV6 {
-            xi: 2.0,
-            fx: 4277.52 * s,
-            fy: 4277.27 * s,
-            cx: 2713.05 * s,
-            cy: 2689.21 * s,
-            d: PATS_V6_D0,
-            reading,
-        }
-    }
-
-    /// The reading that reads every one of d5 to d12: the pair in order
-    /// with its extension, and the prism at d9 by axis.
-    const EVERY_TERM: TruthV6 = TruthV6 {
-        tangential: Some(Tangential {
-            pair: PairOrder::D5D6,
-            extension: true,
-        }),
-        prism: Some(Prism {
-            at: PrismAt::D9,
-            order: PrismOrder::ByAxis,
-        }),
-    };
-
-    /// The plane radius sin θ/(cos θ + ξ) of a Mei model at θ.
-    fn plane(xi: f64, theta: f64) -> f64 {
-        theta.sin() / (theta.cos() + xi)
-    }
-
-    /// Pat's V6 lens 0 at 768² under map C, read through every term and
-    /// scaled to `xi` as 6.3's generator scales it: a term of degree n in
-    /// m is multiplied by (m_X5/m_top)^(n − 1), where m_top is the plane
-    /// radius at min(100°, the model's end − 1°) for that ξ and m_X5 the
-    /// X5's at 100°, and the focal by m_X5/m_top, so the polynomial keeps
-    /// the X5's shape over that range and the image the X5's size.
-    fn pats_v6_at_xi(xi: f64) -> TruthModel {
-        let end = if xi > 1.0 {
-            (-1.0 / xi).acos()
-        } else {
-            (-xi).acos()
-        };
-        let top = 100f64.to_radians().min(end - 1f64.to_radians());
-        let s = plane(2.0, 100f64.to_radians()) / plane(xi, top);
-        let mut d = PATS_V6_D0;
-        for (i, k) in d[..5].iter_mut().enumerate() {
-            *k *= s.powi(2 * i as i32 + 2);
-        }
-        // Read through every term, d5 and d6 (p1, p2) and d9 and d11 (s1,
-        // s3) are of degree 2, and d7 and d8 (p1', p2') and d10 and d12
-        // (s2, s4) of degree 4.
-        for i in [5, 6, 9, 11] {
-            d[i] *= s;
-        }
-        for i in [7, 8, 10, 12] {
-            d[i] *= s.powi(3);
-        }
-        let TruthModel::MeiV6 { fx, fy, cx, cy, .. } = pats_v6_at_768(EVERY_TERM) else {
+        let TruthModel::MeiV6 {
+            xi,
+            fx,
+            fy,
+            cx,
+            cy,
+            d,
+            ..
+        } = pats_v6_scaled(2.0)
+        else {
             unreachable!("Pat's V6 lens is MeiV6");
         };
         TruthModel::MeiV6 {
             xi,
-            fx: fx * s,
-            fy: fy * s,
+            fx,
+            fy,
             cx,
             cy,
             d,
-            reading: EVERY_TERM,
+            reading,
         }
     }
 
-    /// The ξ that [`pats_v6_at_xi`] scales Pat's V6 to beside its own 2,
+    /// The ξ that [`pats_v6_scaled`] scales Pat's V6 to beside its own 2,
     /// each with how far off the axis the tests check it: a degree or more
     /// inside where its r(θ) stops rising (by a scan in 0.01° steps:
     /// 89.2°, 104.6°, 114.1° and 120.4°, and the projection's own fold at
@@ -2183,15 +2218,9 @@ mod tests {
         }
     }
 
-    /// The tangential pair, its extension and the prism of
-    /// [`kb_with_terms_at_768`], which move the image by a few pixels at
-    /// 106°.
-    const KB_P: [f64; 2] = [0.0012, -0.0021];
-    const KB_PE: [f64; 2] = [0.0003, -0.0002];
-    const KB_S: [f64; 4] = [-0.0011, 0.0002, 0.0008, -0.0001];
-
     /// [`kb_at_768`] with its focal 0.4% longer down than across and
-    /// every tangential and prism term non-zero.
+    /// every tangential and prism term non-zero, rung 0's
+    /// ([`KB_TERMS_P`], [`KB_TERMS_PE`] and [`KB_TERMS_S`]).
     fn kb_with_terms_at_768(base: KbBase) -> TruthModel {
         let TruthModel::Kb { fx, cx, cy, k, .. } = kb_at_768(base) else {
             unreachable!("a KB lens");
@@ -2203,9 +2232,9 @@ mod tests {
             cx,
             cy,
             k,
-            p: KB_P,
-            pe: KB_PE,
-            s: KB_S,
+            p: KB_TERMS_P,
+            pe: KB_TERMS_PE,
+            s: KB_TERMS_S,
         }
     }
 
@@ -2217,7 +2246,7 @@ mod tests {
     fn every_model() -> Vec<(TruthModel, f64)> {
         let mut models = vec![(pats_v3_at_768(), 106.0)];
         models.extend(TruthV6::all().map(|v| (pats_v6_at_768(v), 106.0)));
-        models.extend(SCALED_XI.map(|(xi, reach)| (pats_v6_at_xi(xi), reach)));
+        models.extend(SCALED_XI.map(|(xi, reach)| (pats_v6_scaled(xi), reach)));
         for base in KbBase::all() {
             let reach = if base == KbBase::Orthographic {
                 80.0
@@ -2290,7 +2319,7 @@ mod tests {
         // (ξ > 1) or just short of acos(−ξ) (ξ ≤ 1).
         let model = pats_v6_at_768(TruthV6::RADIAL_ONLY);
         let walked = std::iter::once((model, 100.0))
-            .chain(SCALED_XI.map(|(xi, reach)| (pats_v6_at_xi(xi), reach)));
+            .chain(SCALED_XI.map(|(xi, reach)| (pats_v6_scaled(xi), reach)));
         for (model, reach) in walked {
             for theta in [5.0, 50.0, reach - 1.0] {
                 let (f, c) = model.intrinsics();
@@ -2309,7 +2338,7 @@ mod tests {
             model.lift(model.start((p - c) / f)?)
         });
         assert!(must_fail("no Newton", at_most(guess_px, 1e-9)) > 1.0);
-        let sourced = pats_v6_at_768(EVERY_TERM);
+        let sourced = pats_v6_at_768(TruthV6::EVERY_TERM);
         let (rad, _) = round_trip(&sourced, 106.0, |p| model.inverse(p));
         assert!(must_fail("another reading's inverse", at_most(rad, 1e-12)) > 1e-4);
         // The KB lens's terms dropped, and a scaled ξ inverted at ξ = 2.
@@ -2326,7 +2355,7 @@ mod tests {
             d,
             reading,
             ..
-        } = pats_v6_at_xi(0.5)
+        } = pats_v6_scaled(0.5)
         else {
             unreachable!("a V6 lens");
         };
@@ -2527,23 +2556,6 @@ mod tests {
         must_fail("one focal", close(at, [111.598, 60.0 + 81.834]));
     }
 
-    /// Pat's V6 lens 1's d0 to d12.
-    const PATS_V6_D1: [f64; 13] = [
-        0.27665332,
-        0.98522973,
-        1.83605266,
-        -7.99374485,
-        0.0,
-        0.00021056,
-        -0.00147626,
-        0.01940425,
-        0.00331838,
-        -0.01330665,
-        0.00074511,
-        -0.02859299,
-        0.00888746,
-    ];
-
     /// Pat's V6 calibration (insta360.md, "Pat's X5 samples").
     fn pats_v6() -> CalibTruth {
         CalibTruth {
@@ -2567,9 +2579,7 @@ mod tests {
                     t_m: [0.000637, 0.000001, -0.031525],
                 },
             ],
-            dist: StoredDist::V6 {
-                d: [PATS_V6_D0, PATS_V6_D1],
-            },
+            dist: StoredDist::V6 { d: PATS_V6_D },
             canvas: [10752, 5376],
             dst: 5312,
             lens_type: 113,
@@ -2906,7 +2916,7 @@ mod tests {
                     d,
                     reading,
                 } => {
-                    assert_eq!((xi, d, reading), (2.0, PATS_V6_D1, TruthV6::RADIAL_ONLY));
+                    assert_eq!((xi, d, reading), (2.0, PATS_V6_D[1], TruthV6::RADIAL_ONLY));
                     [cx, cy, fx, fy]
                 }
                 other => panic!("block 1 is not V6: {other:?}"),

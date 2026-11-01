@@ -111,53 +111,6 @@ const RUNG0_POINTS: usize = 10_000;
 const SRC: u32 = 5376;
 const DST: u32 = 5312;
 
-/// Pat's V6 d0 to d12, by block. Every one of d5 to d12 is non-zero.
-const PATS_D: [[f64; 13]; 2] = [
-    [
-        0.28032997,
-        0.89045405,
-        2.04927588,
-        -8.05179787,
-        0.0,
-        0.00120200,
-        -0.00259487,
-        0.02324706,
-        0.00533920,
-        -0.01560208,
-        0.00019357,
-        -0.04580523,
-        0.00197187,
-    ],
-    [
-        0.27665332,
-        0.98522973,
-        1.83605266,
-        -7.99374485,
-        0.0,
-        0.00021056,
-        -0.00147626,
-        0.01940425,
-        0.00331838,
-        -0.01330665,
-        0.00074511,
-        -0.02859299,
-        0.00888746,
-    ],
-];
-
-/// The reading that reads every one of d5 to d12: the pair in order with
-/// its extension, and the prism at d9 by axis.
-const EVERY_TERM: TruthV6 = TruthV6 {
-    tangential: Some(truth::Tangential {
-        pair: truth::PairOrder::D5D6,
-        extension: true,
-    }),
-    prism: Some(truth::Prism {
-        at: truth::PrismAt::D9,
-        order: truth::PrismOrder::ByAxis,
-    }),
-};
-
 /// Pat's X5 calibration of one generation, as the string holds it.
 fn pats(generation: truth::Generation) -> CalibTruth {
     let block = |xi, fx, fy, cx, cy, ypr_deg, t_m| BlockTruth {
@@ -220,7 +173,9 @@ fn pats(generation: truth::Generation) -> CalibTruth {
                     [0.000637, 0.000001, -0.031525],
                 ),
             ],
-            StoredDist::V6 { d: PATS_D },
+            StoredDist::V6 {
+                d: truth::PATS_V6_D,
+            },
         ),
     };
     CalibTruth {
@@ -704,7 +659,7 @@ fn rig_build_agrees_with_synth_compose() {
         turn: TruthTurn::Y,
         upright: truth::QuarterTurn::Zero,
         tz: TruthTz::AsStored,
-        v6: EVERY_TERM,
+        v6: TruthV6::EVERY_TERM,
     };
     let v6 = truth::Generation::V6;
     let wrong_reading = compare(
@@ -911,71 +866,22 @@ fn kb_theta_d(theta: f64, k: [f64; 5]) -> f64 {
     theta * (1.0 + t2 * (k[0] + t2 * (k[1] + t2 * (k[2] + t2 * (k[3] + t2 * k[4])))))
 }
 
-/// The plane radius sin θ/(cos θ + ξ) of a Mei model at θ.
-fn plane(xi: f64, theta: f64) -> f64 {
-    theta.sin() / (theta.cos() + xi)
-}
-
-/// Pat's V6 lens 0 at 768² under map C, read through every term and
-/// scaled to `xi` as 6.3's generator scales it: a term of degree n in m
-/// is multiplied by (m_X5/m_top)^(n − 1), where m_top is the plane radius
-/// at min(100°, the model's end − 1°) for that ξ and m_X5 the X5's at
-/// 100°, and the focal by m_X5/m_top, so the polynomial keeps the X5's
-/// shape over that range and the image the X5's size.
-fn pats_v6_at_xi(xi: f64) -> TruthModel {
-    let end = if xi > 1.0 {
-        (-1.0 / xi).acos()
-    } else {
-        (-xi).acos()
-    };
-    let top = (100.0 * DEG).min(end - DEG);
-    let s = plane(2.0, 100.0 * DEG) / plane(xi, top);
-    let mut d = PATS_D[0];
-    for (i, k) in d[..5].iter_mut().enumerate() {
-        *k *= s.powi(2 * i as i32 + 2);
-    }
-    // Read through every term, d5 and d6 (p1, p2) and d9 and d11 (s1, s3)
-    // are of degree 2, and d7 and d8 (p1', p2') and d10 and d12 (s2, s4)
-    // of degree 4.
-    for i in [5, 6, 9, 11] {
-        d[i] *= s;
-    }
-    for i in [7, 8, 10, 12] {
-        d[i] *= s.powi(3);
-    }
-    let slot = f64::from(truth::X5_LIKE_SIDE) / f64::from(SRC);
-    TruthModel::MeiV6 {
-        xi,
-        fx: 4277.52 * slot * s,
-        fy: 4277.27 * slot * s,
-        cx: 2713.05 * slot,
-        cy: 2689.21 * slot,
-        d,
-        reading: EVERY_TERM,
-    }
-}
-
 /// The ξ rung 0 scales Pat's V6 to, beside its own 2: both of synth's
 /// lifts, where z + ξ vanishes (ξ ≤ 1) and where the projection folds
 /// (ξ > 1).
 const SCALED_XI: [f64; 5] = [0.0, 0.5, 1.0, 1.2, 2.5];
 
-/// The tangential pair, its extension and the prism of rung 0's KB
-/// lenses with every term, which move the image by a few pixels at 106°.
-const KB_P: [f64; 2] = [0.0012, -0.0021];
-const KB_PE: [f64; 2] = [0.0003, -0.0002];
-const KB_S: [f64; 4] = [-0.0011, 0.0002, 0.0008, -0.0001];
-
 /// Rung 0's truth models, named, with their slots' sides: the X5-like
 /// rig's two V3 lenses, composed at 768² under C as 4.2's round trip
 /// takes them; Pat's two V6 lenses at 768² under A, read radially and
-/// through every term; Pat's V6 lens 0 scaled to each of [`SCALED_XI`];
-/// and Kannala–Brandt lenses of `KB_LIKE_K` on each base on the X5-like
-/// lenses' centres, the equidistant ones `kb_like`'s, the others with the
-/// focal that takes the image circle (or an orthographic base's 90°) as
-/// far along +x as the Mei lens's, and an equisolid one a track with its
-/// focal 0.4% longer down than across and every tangential and prism term
-/// non-zero.
+/// through every term; Pat's V6 lens 0 scaled to each of [`SCALED_XI`]
+/// by `truth::pats_v6_scaled`; and Kannala–Brandt lenses of `KB_LIKE_K`
+/// on each base on the X5-like lenses' centres, the equidistant ones
+/// `kb_like`'s, the others with the focal that takes the image circle (or
+/// an orthographic base's 90°) as far along +x as the Mei lens's, and an
+/// equisolid one a track with its focal 0.4% longer down than across and
+/// every tangential and prism term non-zero, `truth::KB_TERMS_P`, `_PE`
+/// and `_S`. synth's own tests take the same scaled lenses and terms.
 fn rung0_models() -> Vec<(String, TruthModel, u32)> {
     let side = truth::X5_LIKE_SIDE;
     let x5 = truth::compose(
@@ -998,7 +904,7 @@ fn rung0_models() -> Vec<(String, TruthModel, u32)> {
     }
     for (name, reading) in [
         ("radially", TruthV6::RADIAL_ONLY),
-        ("through every term", EVERY_TERM),
+        ("through every term", TruthV6::EVERY_TERM),
     ] {
         let planted = Planted {
             binding: TruthBinding::Direct,
@@ -1017,7 +923,7 @@ fn rung0_models() -> Vec<(String, TruthModel, u32)> {
     for xi in SCALED_XI {
         models.push((
             format!("Pat's V6 scaled to ξ = {xi}"),
-            pats_v6_at_xi(xi),
+            truth::pats_v6_scaled(xi),
             side,
         ));
     }
@@ -1072,9 +978,9 @@ fn rung0_models() -> Vec<(String, TruthModel, u32)> {
                 cx,
                 cy,
                 k: truth::KB_LIKE_K,
-                p: KB_P,
-                pe: KB_PE,
-                s: KB_S,
+                p: truth::KB_TERMS_P,
+                pe: truth::KB_TERMS_PE,
+                s: truth::KB_TERMS_S,
             },
             side,
         ));
@@ -1151,7 +1057,7 @@ fn rung0_sphere_forward_of_synth_inverse_is_the_identity() {
     let TruthModel::MeiV6 { d, reading, .. } = *truth else {
         unreachable!("Pat's V6 lens");
     };
-    assert_eq!(reading, EVERY_TERM);
+    assert_eq!(reading, TruthV6::EVERY_TERM);
     let LensModel::Mei(unified) = lens_model(truth) else {
         unreachable!("a Mei lens");
     };
