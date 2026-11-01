@@ -3246,6 +3246,66 @@ mod tests {
         }
     }
 
+    /// `pattern`'s colors on a grid of directions about the seam z = 0:
+    /// every 0.1° of azimuth, every 0.5° of elevation within 30° of the
+    /// seam, and a few rows beyond.
+    fn about_the_seam(pattern: Pattern) -> Vec<Rgb> {
+        let offs = (-60..=60)
+            .map(|k| f64::from(k) * 0.5)
+            .chain([-89.5, -60.0, -40.0, 40.0, 60.0, 89.5]);
+        offs.flat_map(|off: f64| {
+            (-1800..=1800).map(move |k| {
+                let (sa, ca) = (f64::from(k) * 0.1).to_radians().sin_cos();
+                let (so, co) = off.to_radians().sin_cos();
+                crate::color(pattern, DVec3::new(co * ca, co * sa, so), 0)
+            })
+        })
+        .collect()
+    }
+
+    /// `SeamLines` stays below white under 4.2's exposure control, lens 1
+    /// at +0.5 EV and +5 % red, so lens 1's picture matched back by its
+    /// gain shows the scene's own values everywhere, and no step is left
+    /// where it meets lens 0's at the seam.
+    #[test]
+    fn seam_lines_stays_below_white_under_the_exposure_control() {
+        let scene = about_the_seam(Pattern::SeamLines);
+        let channels = || scene.iter().flatten().copied();
+        assert_eq!(channels().fold(0.0, f64::max), crate::SEAM_LINES_PEAK);
+        let darkest = channels().fold(1.0, f64::min);
+        assert!((darkest - 0.05).abs() < 1e-12, "{darkest}");
+        // The worst channel of `colors` seen through `lens` and matched
+        // back by its gain in linear light, against the scene's own.
+        let worst = |colors: &[Rgb], lens: &LensTruth| {
+            colors
+                .iter()
+                .flat_map(|c| {
+                    let seen = expose(*c, lens, 0.0);
+                    (0..3).map(move |k| (srgb_oetf(srgb_eotf(seen[k]) / lens.gain[k]) - c[k]).abs())
+                })
+                .fold(0.0, f64::max)
+        };
+        // At +0.5 EV and +5 % red, red clips past OETF(1/(√2 · 1.05)) =
+        // 0.840 and green and blue past OETF(1/√2) = 0.858.
+        let ev = 2f64.sqrt();
+        let mut lens = square_rig(16).lenses[1];
+        lens.gain = [1.05 * ev, ev, ev];
+        let err = worst(&scene, &lens);
+        assert!(err <= 1e-12, "{err}");
+        // Control: Grid, whose equator and axis discs are white.
+        must_fail(
+            "Grid's white",
+            at_most(worst(&about_the_seam(Pattern::Grid), &lens), 1e-12),
+        );
+        // Control: a gain that takes the peak just past white, which the
+        // check sees only because the samples reach the peak.
+        lens.gain = [1.001 / srgb_eotf(crate::SEAM_LINES_PEAK); 3];
+        must_fail(
+            "the peak just past white",
+            at_most(worst(&scene, &lens), 1e-12),
+        );
+    }
+
     /// The Y, Cb and Cr planes of 8-bit `planes`.
     fn planes_8(planes: YuvPlanes) -> [Vec<u8>; 3] {
         match planes {

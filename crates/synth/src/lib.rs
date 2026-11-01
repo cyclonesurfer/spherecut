@@ -165,18 +165,29 @@ pub const SEAM_LINES: [(f64, f64); 5] = [
 ];
 /// Half the width of a `SeamLines` line, in degrees.
 pub const SEAM_LINE_HALF_WIDTH: f64 = 0.3;
-/// The colors of `SeamLines`' lines, taken in turn.
-pub const SEAM_LINE_COLORS: [Rgb; 2] = [[1.0, 0.1, 0.1], [0.1, 0.4, 1.0]];
+/// The colors of `SeamLines`' lines, taken in turn. No channel passes
+/// [`SEAM_LINES_PEAK`].
+pub const SEAM_LINE_COLORS: [Rgb; 2] = [[0.8, 0.1, 0.1], [0.1, 0.4, 0.8]];
 /// How far `SeamLines`' 1° checker reaches each side of the seam, in
 /// degrees.
 pub const SEAM_CHECKER_BAND: f64 = 15.0;
 /// How far a `SeamLines` checker cell lies above or below the ramp.
 pub const SEAM_CHECKER_CONTRAST: f64 = 0.15;
 
+/// The brightest value `SeamLines` shows on any channel: the brightest
+/// line channel, and a bright checker cell at −X. 4.2's exposure control
+/// puts lens 1 at +0.5 EV and +5 % red, which takes a display value above
+/// 0.840 past white (in linear light 1/(√2 · 1.05) = 0.673), so the scene
+/// stays below that, and lens 1 can be matched back to lens 0 everywhere
+/// on it. Its darkest value, a dark cell at +X, is 0.05, above the 0.01
+/// that section 16's estimator leaves out.
+pub const SEAM_LINES_PEAK: f64 = 0.8;
+
 /// `SeamLines`' luminance ramp at azimuth `along` degrees: 0.2 at +X up
-/// to 0.8 at −X, the same either way round, so it has no step.
+/// to 0.65 at −X, the same either way round, so it has no step. With the
+/// checker's contrast it reaches [`SEAM_LINES_PEAK`].
 pub fn seam_ramp(along: f64) -> f64 {
-    0.2 + 0.6 * along.abs() / 180.0
+    0.2 + 0.45 * along.abs() / 180.0
 }
 
 /// Longitude (degrees) of the moving equator marker at frame `n`.
@@ -715,16 +726,18 @@ mod tests {
                 );
             }
         }
-        // The ramp runs from 0.2 at +X to 0.8 at −X, through 0.5 at ±Y,
-        // the same either way round, so it has no step.
+        // The ramp runs from 0.2 at +X to 0.65 at −X, through 0.425 at
+        // ±Y, the same either way round, so it has no step. Its bright
+        // cells at −X reach 0.65 + 0.15, the peak.
         assert_eq!(seam_ramp(0.0), 0.2);
-        assert!((seam_ramp(90.0) - 0.5).abs() < 1e-15);
+        assert!((seam_ramp(90.0) - 0.425).abs() < 1e-15);
         assert_eq!(seam_ramp(-90.0), seam_ramp(90.0));
-        assert!((seam_ramp(180.0) - 0.8).abs() < 1e-15);
+        assert!((seam_ramp(180.0) - 0.65).abs() < 1e-15);
         assert_eq!(seam_ramp(-180.0), seam_ramp(180.0));
+        assert!((seam_ramp(180.0) + SEAM_CHECKER_CONTRAST - SEAM_LINES_PEAK).abs() < 1e-15);
         let far_off = |along: f64| color(Pattern::SeamLines, seam_dir(along, 30.0), 0)[0];
         assert!(far_off(100.0) > far_off(80.0));
-        assert!((far_off(100.0) - far_off(80.0) - 0.6 * 20.0 / 180.0).abs() < 1e-12);
+        assert!((far_off(100.0) - far_off(80.0) - 0.45 * 20.0 / 180.0).abs() < 1e-12);
         // Control: the Seam pattern has no checker there.
         must_fail(
             "the Seam pattern's checker",
