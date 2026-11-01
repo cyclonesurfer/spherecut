@@ -288,6 +288,173 @@ over 111 test binaries against 108; the `track_timing` suite 0.07 s at
 `samples_x5_tracks_equal` 0.44 s warm; `agents.rs` 7 tests in 4.8 s;
 testkit's tests 0.06 s.
 
+### M3.2, the camera crate (2026-11-01)
+
+Branch `m3/camera`: the types the units share first (a new crate,
+`spherecut-camera`, below media, D61), then (a), (b), (d) and (c) in
+turn; a reviewer each, and each review's findings fixed.
+
+- **(a) The trailer.** `read_trailer` finds everything from the
+  file's end, so a trailer inside an `inst` box and a bare one read
+  the same: the 72-byte tail (size, version, magic), the index whose
+  footer sits at EOF − 78, and each listed record's 6-byte footer,
+  which must repeat its slot's id, format and size. A slot whose
+  record would run into the index or past the file goes into
+  `Trailer::skipped` and is never followed. Every size is checked
+  before anything is allocated for it, every error carries its byte,
+  and both readers call `may_block` first. `parse_exposure`,
+  `thumbnail` and `imu_span` read records 4, 2 and 3. D62 (our own
+  reader, D15's limits, no telemetry-parser) is recorded, and D15
+  gains camera's limits.
+- **(b) Metadata and strings.** `pb::Walker` walks protobuf (varints
+  of at most 10 bytes, keys that fit u32, wire types 0, 1, 2 and 5).
+  `parse_metadata` reads the fields 5.1 names and counts the rest in
+  `unknown` (67 on every X5 file). `calib::parse` and `print` keep
+  each number's text, so `parse(print(c)) == c` bit for bit and
+  `print(parse(s)) == s` byte for byte, V6's 13 terms in token order.
+- **(d) synth's writer.** `synth::insv` shares no code with camera
+  (4.1 rule 2): `encode`, `Records::x5_like`, `inst_box` and
+  `append_trailer` (the hook M3.5's `write_insv` calls after
+  `Mp4Writer`), the six trailer faults planted on request, and
+  `print` at the X5's precision.
+- **(c) Companions, probe and doctor.** `companions` moves into
+  camera (clips.rs's tests pass unchanged), with `verify_companion`
+  comparing record 4 in 64 KiB chunks and `Calibrations::hash`.
+  `media::camera` reads the trailer where probe already reads the
+  file. Probe gains `camera.serial`, `lenses`, `calibration`,
+  `companion`, `exposure_entries` and `records` (null for any other
+  file; the agent's summary gains `camera_detail` and the same
+  fields, each only when present) and a warning code, `bad_trailer`.
+  `spherecut doctor --file FILE` says whether a file can be stitched,
+  what is missing, and decodes each lens's first frame.
+
+**Settled by the slice** (for the plan's next amendment):
+- `read_trailer` returns `Ok(None)` for a wrong magic, as for a plain
+  MP4. 5.5, 22.1's M3.2 done-when and M3.5's done-when should leave
+  `InsvFault::BadMagic` out of "every trailer fault is a clear error",
+  or say the error comes from probe seeing an `inst` box with no
+  trailer.
+- No metadata field holds a frame period, so `Metadata` has none; the
+  period comes from the mode or the tracks. Field 98's items 1, 3, 4
+  and 5 make `FrameSpan`; item 2's meaning is disputed and not kept.
+  Field 98 counts the tracks' frames + 1 on masters and the LRV's own
+  frames on LRVs; field 93 = floor(n·1000·den/num).
+- Field 44 is the file's own `video_size` (3840² on a master, 1664×832
+  on an LRV), not 5.1's "LRV size". Fields 133 and 134 are not kept.
+- Field 25 is an f32 widened to an f64 (21.244001388549805 at 8K), so
+  it is compared by bits, not with an f32 literal.
+- A message field read twice (26, 27, 44, 98, 145) is replaced whole
+  by its last copy, where protobuf would merge; no X5 file repeats a
+  top-level field.
+- New in the API: `RecordRef::slot` (where its index slot is),
+  `Trailer::skipped`, `imu_span`, `calib::Token`, `Focal::{Radius,
+  Mei}`, `Generation::{of_word, of_offset_version, tokens, fields}`,
+  `CameraError`'s `Part` and the variants WireType, TooLarge, Version,
+  BadSize, NotUtf8, BadToken and Io; synth's `TrailerLayout::index`,
+  `InsvFault::in_trailer` and `inst_box`'s `align` (X5_ALIGN, or 1 so
+  cheap properties don't write 128 KiB gaps).
+- Errors 5.1 doesn't name: a footer at EOF − 78 that isn't an index's
+  (an older camera's trailer, or damage) is FooterMismatch with id 0
+  at len − 78, and its message names no slot; an index that isn't
+  whole slots is BadSize{id 0}; a trailer too small for its index is
+  Truncated{Index}; the version is checked before the size. The
+  reader doesn't enforce slot k = id k or the 128 KiB alignment (the
+  X4 uses 4 KiB); Tier 2c checks both on Pat's files.
+- The hash rule (11.1): fnv1a64 (core's, now public) over the working
+  V1, V2, V3 and V6 strings in that order, each followed by a NUL, an
+  absent one the NUL alone, formatted `{:016x}`.
+- 5.4's shapes as built: `companion` is `{path, verified, why}`;
+  `lenses` is `{tracks}` only until M3.5 adds binding, evidence,
+  screen side and geometry (doctor's geometry is "provisional" until
+  then); `calibration.in_use` is null, with a `bad_trailer` warning,
+  when field 136's generation doesn't parse.
+- doctor --file decodes on `frame --decoder auto`'s path (D39:
+  VA-API on the render node, else software), not the viewer's choice
+  (D34, Vulkan Video on a discrete GPU). Lining the two up needs a
+  Vulkan mode with a software fallback in `agent::still`; it belongs
+  with M3.1's pair decode.
+- `media::detect::CameraGuess::name()` is the one camera-name rule,
+  used by probe's text, the agent's summary and doctor --file.
+- The format notes need two corrections (M3.21): the X5's gaps
+  between records aren't all zero (stray bytes in 004, 007 and LRV
+  004, found by the reviewer's script), and take 007 keeps its
+  thumbnail in a separate `.thumbnail.bin`, not in record 2.
+
+**Open:** whether read_trailer should read the pre-X4 sequential
+layout (refused today as FooterMismatch, as D62's Revisit says);
+whether the agent's MCP doctor tool should return `FileCheck` too;
+whether M3.5's `print` applies `planted`; `cargo doc -p
+spherecut-core` with -D warnings already fails on main
+(project/mod.rs:7 needs `mod@file`), and xtask doesn't run rustdoc.
+
+**The reviews found** that FooterMismatch's message named a slot for
+the index's own footer, that several Tier 2c checks had no control,
+that read_record's doc missed Truncated, that the TruncatedTrailer
+message didn't say which size was wrong, that the round trip couldn't
+fail on the index alone (synth's layout is now checked against the
+file first), that parse_metadata's doc claimed protobuf's merge, that
+doctor --file claimed the viewer's decode path, and that nothing
+checked the agent's side of the companion test or a lens that doesn't
+decode. All were fixed; none was rejected.
+
+**Controls that must fail**, by file:
+- `trailer.rs`: each limit at the limit and a byte over (MAX_TRAILER
+  on a sparse reader past 1 GiB, the file's length, MAX_SLOTS 64
+  against 65, read_record's max, MAX_METADATA as record 1's max); each
+  error at its byte (Version, FooterMismatch by format, id and size
+  and the index's own, BadSize, Truncated in the tail, the index and
+  a record's payload, SlotPastEnd into the index and past the file,
+  Io on read and seek); both FooterMismatch messages and both tail
+  size messages; the parsers' bad sizes; the UI-thread panics, with
+  the unmarked call as their control; the cut property's control
+  (bytes lost before the trailer still read) and the arbitrary
+  property's (holds rejects another file's trailer).
+- `strings.rs`: same_bits against a token with one more zero and one
+  a digit off; a second field 27 replaced whole, against the merged
+  window; the error tables at their bytes.
+- `synth_insv.rs`: the X5-like round trip's 13 (layout size + 1,
+  index + 10, record 4's offset + 1, no thumbnail, field 79 as 3,
+  another serial, the thumbnail's sides swapped, its last chroma byte,
+  the last IMU stamp + 1 µs, an IMU gyro bit, an exposure of 1/250 s,
+  record 9's last byte, record 10's format); the cross parse's three
+  (lens type 114, body 5, fx printed 4284.6200).
+- `tier2_samples.rs`, on each of Pat's 14 files: record 4's footer
+  flipped as read, record 1 taken as aligned, another take's sizes,
+  the exposure against half the rate, the inst box read a byte early,
+  the slots against a 32-slot index, record 1 ending at a 32-slot
+  index, record 9 where record 10 ends, the thumbnail taken as the
+  protobuf record, the thumbnail turned to 640 × 1280 (still parses),
+  the IMU at 500 Hz, and the print identity's two same_bits controls.
+- cli `contract.rs`: the agent's probe of a master and an LRV a frame
+  short must not verify, each naming the other with the CLI's why.
+  cli `doctor.rs`: a master with track 1's samples zeroed in place is
+  not stitchable, lens 1 `decode_failed`.
+- A mutation check: four deliberate bugs in the reader, each caught
+  by one to four tests, then reverted.
+
+**Tier 2c on Pat's 14 files, Pass:** version 3; the index at EOF − 388
+with slot k listing record k; inst.size = E + 8; records 22 and 28
+listed; every record but 1 and 10 on 128 KiB; the thumbnail 1280×640
+and absent from the 4K120 files; the IMU about 995 µs a sample; the
+exposure one item a master frame, within 1 % of the frame period,
+every shutter shorter than the frame, and the LRVs carry the master's
+record (007's 602 items for a 4K120 master). The four generations'
+strings are byte-identical in all 14 files and print back byte for
+byte (112 of 112). All 7 pairs verify by record 4 through the CLI and
+the agent. The calibration hash is 840fcc4eb186a389 in all 14 files,
+V6 in use, canvas 10752×5376, window 5312 of 5376 at 0,0. doctor
+--file on take 004: stitchable with V6, both 3840² HEVC lenses
+decode on software, 2.5 s on the cloud CPU.
+
+Measured, on the cloud box (debug, camera at opt-level 2): at 100k
+cases the trailer cut property 1.22 s and never-panic 0.84 s; the
+strings properties 0.36 s (varints), 2.71 s (unknown fields), 4.32 s
+(round trip), 2.96 s (wrong token count) and 0.59 s (never panic);
+synth's round trip 4.45 s and cross parse 4.33 s; each suite at the
+default 256 cases under 0.1 s, against camera's 1 s budget. Tier 2c:
+0.012 s for the trailers and metadata, 0.003 s for the 112 strings,
+0.7 s for the probe test. `cargo xtask check` grows by CHECK_GROWTH.
+
 ## A2: edit and render for agents
 
 An agent can make a project of a video, read it, edit it, undo its own
