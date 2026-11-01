@@ -1408,17 +1408,12 @@ fn require_x5_modes() -> BTreeMap<String, (PathBuf, ProbeReport)> {
 /// export's pair decode.
 const K2_FPS: f64 = 30.0 * 1.2;
 
-/// What `pair-hevc8-2880-5994-noisy-10s`'s rows say of its coding (M3
-/// plan 7.2): the X5 codes every other picture at 59.94 as a
-/// non-reference TSA_N, which x265 3.5, as linked in the cloud, gives only
-/// to reordered B-frames, so the pair is coded P only.
-const P_ONLY: &str = "P only: the X5 codes TSA_N on every other picture, and every picture \
-                      here but the IDRs is a reference P frame";
-
 /// Where the perf pair called `name` is coded unlike the X5's mode, for
-/// a note beside its rows.
+/// a note beside its rows: the 59.94 pair is P only (M3 plan 7.2,
+/// `synth::media::PERF_PAIR_P_ONLY`, which the export's pair bench and
+/// hw-test's report say too).
 fn coded_unlike_x5(name: &str) -> Option<&'static str> {
-    (name == synth_media::PERF_PAIR_2880_5994).then_some(P_ONLY)
+    (name == synth_media::PERF_PAIR_2880_5994).then_some(synth_media::PERF_PAIR_P_ONLY)
 }
 
 /// A probed file's video streams, each opened by its index, as a
@@ -2648,7 +2643,7 @@ fn only_the_5994_perf_pair_says_it_is_p_only() {
     assert_eq!(said.len(), 3);
     for (name, unlike) in &said {
         if name == synth_media::PERF_PAIR_2880_5994 {
-            assert_eq!(*unlike, Some(P_ONLY), "{name}");
+            assert_eq!(*unlike, Some(synth_media::PERF_PAIR_P_ONLY), "{name}");
         } else {
             must_fail(&format!("{name} said to be P only"), unlike.is_some());
         }
