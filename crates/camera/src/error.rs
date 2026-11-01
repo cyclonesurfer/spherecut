@@ -174,12 +174,22 @@ fn too_large(part: &Part, size: &u64, limit: &u64, offset: &u64) -> String {
     }
 }
 
+/// The least a trailer with an index takes before its index's size is
+/// known: the index's footer and the tail, 6 and 72 bytes (insta360.md
+/// §3.1 and §3.2). The trailer reader checks its own constants against
+/// it.
+pub(crate) const FOOTER_AND_TAIL: u64 = 6 + 72;
+
 /// `TooSmall`'s message. In the tail the size is the trailer's, as in
-/// `TooLarge`'s.
+/// `TooLarge`'s, and it is worded by `least`: [`FOOTER_AND_TAIL`] is the
+/// index's footer and the tail alone, and more than that the index too.
 fn too_small(part: &Part, size: &u64, least: &u64, offset: &u64) -> String {
     match part {
+        Part::Tail if *least == FOOTER_AND_TAIL => format!(
+            "the trailer's size in its tail is {size} bytes, less than the {least} its index's footer and the tail take (byte {offset})"
+        ),
         Part::Tail => format!(
-            "the trailer's size in its tail is {size} bytes, less than the {least} its index and the tail take (byte {offset})"
+            "the trailer's size in its tail is {size} bytes, less than the {least} its index, footer included, and the tail take (byte {offset})"
         ),
         part => {
             format!("{part} is {size} bytes, less than the {least} it must hold (byte {offset})")

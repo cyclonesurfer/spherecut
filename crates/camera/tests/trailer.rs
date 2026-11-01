@@ -1011,22 +1011,36 @@ fn each_trailer_error_is_at_the_byte_that_says_so() {
     // A trailer too small for its index's footer and the tail (78
     // bytes), or for its index too (388): at the tail's size, the byte
     // that says so, as a trailer too large is.
+    // Each is worded by what it is too small for: the index's footer and
+    // the tail, or the index, its footer included, and the tail.
     let sized = |size: u32| read_bytes(&patched(b, 40, &size.to_le_bytes()));
-    for (size, least, what) in [(77u32, 78u64, "the footer"), (78 + 300, 388, "the index")] {
+    let worded = |size: u32, least: u64, takes: &str| {
+        format!(
+            "the trailer's size in its tail is {size} bytes, less than the {least} {takes} take (byte {})",
+            n - 40
+        )
+    };
+    let (footer, index) = (
+        "its index's footer and the tail",
+        "its index, footer included, and the tail",
+    );
+    for (size, least, what, takes) in [
+        (77u32, 78u64, "the footer", footer),
+        (78 + 300, 388, "the index", index),
+    ] {
         let e = must_fail(&format!("a trailer too small for {what}"), sized(size));
         assert!(
             matches!(e, CameraError::TooSmall { part: Part::Tail, size: s, least: l, offset }
                 if (s, l, offset) == (u64::from(size), least, n - 40)),
             "{what}: {e:?}"
         );
-        assert_eq!(
-            e.to_string(),
-            format!(
-                "the trailer's size in its tail is {size} bytes, less than the {least} its index and the tail take (byte {})",
-                n - 40
-            )
-        );
+        assert_eq!(e.to_string(), worded(size, least, takes));
     }
+    let e = sized(77).unwrap_err().to_string();
+    must_fail(
+        "a trailer too small for the footer worded as too small for the index",
+        e == worded(77, 78, index),
+    );
     // The controls: at the least it isn't too small. A trailer of 388
     // bytes reads, every record's offset then past the index, so
     // skipped; one of 78 has room for the footer, and is too small only

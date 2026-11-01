@@ -29,6 +29,9 @@ const VERSION_AT: usize = 36;
 const MAGIC_AT: usize = 40;
 /// A record's footer: `{u8 format, u8 id, u32le size}`.
 const FOOTER: u64 = 6;
+// TooSmall's message tells a trailer too small for the index's footer
+// from one too small for the index by this sum.
+const _: () = assert!(TAIL + FOOTER == crate::error::FOOTER_AND_TAIL);
 /// An index slot: `{u8 id, u8 format, u32le size, u32le offset}`.
 const SLOT: u64 = 10;
 /// Where a slot's size is, and where a footer's.
