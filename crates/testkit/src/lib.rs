@@ -12,12 +12,19 @@
 //! marker, which the hw-test report shows as "skipped" with the reason. A
 //! Tier 2 test therefore never passes on a machine that lacks what it needs.
 //!
+//! # Controls
+//!
+//! Every check has a control that must fail, run on every run
+//! ([`control::must_fail`]): a control that stops failing fails the test.
+//!
 //! # Hashing
 //!
 //! [`fnv64`] is the hash the golden manifest identifies a source's planes
 //! by. The image metrics are render's (`spherecut_render::compare`).
 
 #![forbid(unsafe_code)]
+
+pub mod control;
 
 /// FNV-1a, 64 bits, fed in pieces: the planes of a frame row by row, say,
 /// so that row padding doesn't change the hash.
