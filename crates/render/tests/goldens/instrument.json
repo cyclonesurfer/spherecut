@@ -1,6 +1,6 @@
 {
   "about": "Rung 1 of the stitching round trip (M3 plan 4.2, DECISIONS D65): synth's lens pictures through the CPU reference's stitch against the analytic ideal, with each picture's blessed floors and what it measured when blessed.",
-  "commit": "6b65987f8b",
+  "commit": "392b9391a0",
   "date": "2026-11-10",
   "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test instrument",
   "rows": {
@@ -29,6 +29,25 @@
         "ssim_min": 0.9468
       },
       "what": "SeamLines at frame 0, infinitely far, q = 0, through kb_like of the X5-like camera at 768² a lens (2² samples a pixel), stitched by render_rig into a 512x256 equirect and held to render_view_ideal (8² samples a pixel), weighted by cos(latitude): more than 12° from the seam, and each lens alone over its own coverage. band_*: in 90° rectilinear views of 256² on the seam, where both lenses' weights are above 0, the stitch's PSNR less the better lens's alone, in dB"
+    },
+    "x5_common_mode": {
+      "measured": {
+        "grid_lens0_over_db": 4.7514,
+        "grid_lens1_over_db": 3.8885,
+        "grid_over_db": 4.3231,
+        "grid_psnr_db": 24.093,
+        "grid_slipping_0_5_over_db": 2.9619,
+        "grid_slipping_1_over_db": 1.1074,
+        "grid_ssim": 0.8204,
+        "misregistration_px": 0.0218,
+        "seamlines_band_pos_x_db": -0.0559,
+        "seamlines_band_pos_y_db": 0.0645,
+        "seamlines_over_db": 2.9192,
+        "seamlines_psnr_db": 29.5817,
+        "seamlines_ssim": 0.915
+      },
+      "thresholds": {},
+      "what": "Both lenses of x5_like turned 0.5° about +Y, 4.2's common-mode control, which the seam can't see: how far apart its strips lie, its band on SeamLines, and its stitches of SeamLines and of Grid against the ideal more than 12° from the seam, each held to fail that picture's floors. *_over_db: the true rig's PSNR less the control's, held to 3 dB on Grid and recorded on SeamLines. grid_slipping_*_over_db: a stitch of Grid that slips so many degrees already, less the control made from it, 0.5° further; the one at 1° is held to come under 3 dB"
     },
     "x5_grid": {
       "measured": {
