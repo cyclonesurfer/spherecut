@@ -2173,7 +2173,9 @@ which case that is a version 2 of these schemas, never a silent change.
 whose 1.95 half landed with slice 3a. Updated by D48: core depends on
 sphere and glam. Updated by D52: `export` depends on core, sphere, media
 and render and forbids unsafe, and the image metrics are render's
-`compare`, not testkit's.*
+`compare`, not testkit's. Updated by D65 (M3.4): render gains `seam`,
+the seam's masks, strips and signature, and its CPU reference gains
+`render_rig`, a lens pair's stitch.*
 
 What:
 
@@ -2187,7 +2189,11 @@ What:
   (the `spherecut` binary) and `xtask`. `playback` (workers, the frame
   cache and GPU slots), `audio` (cpal and the clock) and `app` (eframe)
   arrive in slices 5, 6 and 7, with the dependency directions of plan
-  section 2.1.
+  section 2.1. *Since M3.4 (D65)* render also holds `seam` (the masks
+  the weighted metrics take, the strips about the seam, a bin's shifts
+  and the signature) and `reference::render_rig` (the stitch of a lens
+  pair in f64); both depend on core and sphere alone, as the rest of
+  render does.
 - **Directions.** render depends on core and sphere only: never on
   media, and it holds no UI type (D26). Frames reach it through
   `core::video::VideoPlanes`, which media's decoded frames and synth's
@@ -4620,6 +4626,15 @@ from `render::seam` (`band_weights` and `lens_coverage`), and an
 equirect picture's density from `equirect_coslat`, the cosine of each
 row's latitude at its centre, under which a pixel's share of the weights
 is its share of the sphere.
+
+Rung 1's floors (D65) are blessed by these rules by the `instrument`
+binary, into `crates/render/tests/goldens/instrument.json` beside the
+goldens' manifest: written only when every test of the binary passed
+and every control failed, and a floor lowered by more than 0.5 dB (an
+SSIM floor, by more than 0.0025) only under
+`SPHERECUT_UPDATE_GOLDENS=lower`. `goldens` neither reads that file nor
+rewrites it (a blessing removes stale PNGs alone), so it stays true
+that no Tier 1 test reads what `goldens` rewrites.
 
 ## D33. View conventions
 
@@ -9371,6 +9386,184 @@ Revisit if: a camera's polynomial folds inside its frame; a lens needs
 more than 20 passes, or its tangential terms are large enough that the
 strip stops converging; or a source states a V6 reading outside the
 21.
+
+## D65. The seam signature and the attribution matrix: the instrument measures what the geometry predicts
+
+*2026-11-10, M3 slice M3.4. The M3 plan, `docs/design/m3-plan.md`
+sections 3.4, 4.2, 8.1 to 8.3 and 10.4, has the detail; this is M3.4's
+half as built, the instrument and the proof that it measures what the
+geometry predicts. The fit that reads it (8.4 to 8.6: the stages, the
+decisiveness rule, σ, `rig-fit` and `fit-matrix`) is M3.6's, and this
+entry gains that half then. D64 is M3.5's.*
+
+What:
+
+- **One implementation.** `render::seam` is the instrument, and it
+  samples through the CPU reference, never through the shader it will
+  judge (4.1 rule 2). The tests call the functions that `rig-fit`,
+  Measure seam and `look seam` will call, so the numbers Pat and an
+  agent see later are the numbers these tests hold.
+- **The stitch on the CPU.** `reference::render_rig` is 10.3's stitch
+  in f64: for each lens the parallax-corrected ray through the lens's
+  model, a footprint from the pixel's own four half-pixel rays and its
+  LOD, the mask at that LOD, trilinear taps, the lens's gain in linear
+  light, then the blend by the rig's weights. `RigDebug` writes a lens
+  alone, the weights or the seam difference (debug modes 4 to 7).
+- **The masks** for the weighted metrics (D32's M3.4 note):
+  `band_weights`, a band of angles off the seam's plane, and
+  `lens_coverage`, where a lens's mask covers. A check takes the true
+  rig's mask, so that a hole a wrong model leaves counts against it.
+- **The strips.** `strips` unwraps the band about the seam through each
+  lens alone, sampled as `render_rig` samples, with no gain and no
+  rounding to f16. Tier 1's are 3.81 px a degree (the X5-like source's
+  own scale across the seam at 768²) over ±8°, 1372 × 61 pixels.
+- **A bin's shift.** `bin_shifts` measures, in each 5° of azimuth, how
+  far lens 1's strip sits from lens 0's: both strips smoothed alike (a
+  5 × 5 binomial blur under a cubic B-spline), a coarse search of ±3°
+  by NCC, then three Lucas–Kanade steps on patches normalised for gain
+  and bias. A bin carries its 2 × 2 information, so that a line informs
+  across it only; its NCC; and the median log gains by channel. A bin
+  with nothing to measure from is invalid, never zero.
+- **The signature.** `signature` fits, weighted by the bins'
+  information, across(φ) = a0 + a1 cos φ + b1 sin φ + a2 cos 2φ + b2
+  sin 2φ and along(φ) = c0 + c1 cos φ + d1 sin φ, and gives what the fit
+  leaves, the valid bins, the median NCC and the log gains.
+- **The prediction** (8.3's step 1) is the tests' own,
+  `tests/common/predict.rs`: for a truth and a model, the shift each
+  bin should show, point by point in f64 through the model's forward
+  and the truth's inverse, with no images. A bin is predicted only
+  where the shift lies within the search.
+- **Rung 1 and the matrix** are one binary, `tests/instrument.rs`, so
+  that they share the lens pictures: synth's `SeamLines` and `Grid` at
+  frame 0, infinitely far and on a sphere of 1.5 m, through the X5-like
+  camera at 768² a lens and through its Kannala–Brandt twin, each coded
+  as the X5 codes it. `render_rig` stitches each pair into a 512 × 256
+  equirect, held to `render_view_ideal`.
+- **Rung 1's rules** (4.2): more than 12° from the seam, and for each
+  lens alone over its coverage, PSNR and SSIM at or above floors blessed
+  1 dB and 0.005 under what the true rig measured; in the band of 90°
+  views of 256² on each side seam and pole, the stitch at most 1 dB
+  under the better lens alone; the strips within 0.1 px rms of each
+  other and every term under 0.03°; with lens 1 at +0.5 EV and +5 % red,
+  a step across the seam under 1 LSB once `render_rig`'s gains are the
+  inverse of the signature's log gains. Both lenses turned 0.5° about
+  +Y, the common-mode control, pass every seam check and fail the
+  comparison with the ideal.
+- **The floors** are blessed by D32's rules into
+  `tests/goldens/instrument.json` (`SPHERECUT_UPDATE_GOLDENS=1 cargo
+  test -p spherecut-render --test instrument`): written only when all
+  seven tests pass and every control fails, and a floor lowered by more
+  than 0.5 dB (0.0025 of SSIM) only under `=lower`. The manifest holds
+  each control's numbers beside the floors.
+- **The band's stripe.** Of each 256² view only the 48 columns (on a
+  pole, rows) that hold the band are rendered, as the view framed in a
+  smaller target. The band check reads no other pixel; the test holds
+  the stripe to be the whole view's pixels to the bit, on a side seam
+  and on a pole, and the band to lie inside it.
+- **The matrix** (8.3): 24 planted errors that the search holds. For
+  each, the strips' shifts lie within 0.05 px rms of the prediction, the
+  largest term is the one the prediction names, every term the geometry
+  doesn't couple to it stays under max(0.03°, 15 %), and a coupled term
+  comes at the predicted ratio, within 0.03. Each also fails rung 1's
+  0.1 px. The model with nothing planted, at both depths and on both
+  V6 and Kannala–Brandt lenses, and the common-mode control land
+  nowhere; gains off land on the log gains and nowhere in the geometry.
+- **3.4 on the images.** `error_budget_matches_the_images` holds each
+  row of 3.4 that has a figure at 768² to the measured terms, within
+  15 % or 0.2 px, with 3.4's two scales (3.81 px a degree across the
+  seam, 6.0 along). The helpers are `tests/common/budget.rs`, which the
+  seam's own tests hold to the predicted fields.
+
+**Measured** (a cloud container's 4 cores, debug build). The true
+stitch against the ideal, more than 12° from the seam: `SeamLines`
+32.50 dB and 0.9533 (at 1.5 m 32.54 and 0.9537; Kannala–Brandt 32.41
+and 0.9519), `Grid` 28.42 and 0.9271; a lens alone 26.2 to 26.4 dB on
+`SeamLines` and 27.8 to 28.0 on `Grid`. In the band the stitch is 0.10
+to 0.74 dB above the better lens. With nothing planted the strips lie
+0.017 to 0.023 px rms apart, every term under 0.002°, at a median NCC
+of 0.988 to 0.990. The 24 planted errors come back 0.016 to 0.048 px
+off their predictions (the two largest: the V6 terms read as {D5D6, D7
+by axis}, 0.048, and the tracks swapped, 0.045, over the 44 bins the
+search holds). The log gains come back as 0.3956, 0.3468 and 0.3561 for
+0.3954, 0.3466 and 0.3466 planted; matched by them the step is 0.18
+LSB, and with the gains off 22.3 LSB. The common-mode control scores
+29.58 dB on `SeamLines` and 24.09 dB on `Grid`, with a seam of 0.022
+px. The binary takes 9.5 s of the 10 s it has of 19.6's 15 s; with the
+metrics', the rig reference's and the seam's own tests the slice takes
+about 12 s.
+
+**Where the images didn't bear the plan out**, and what the tests hold
+instead:
+
+- **The band check's control.** Lens 1 turned 0.13° about +Y lowers
+  the band's PSNR by 0.6 to 0.8 dB and leaves the stitch 0.2 to 0.4 dB
+  under the better lens (on one seam of `Grid`, still above it), not
+  the 3.6 dB of 4.2's 1-D model: at the views' 0.35° a pixel a lens
+  alone already scores about 25 dB on the 1° checker. The band check's
+  control is lens 1 yawed 0.5° (4.1 to 5.5 dB under the better lens on
+  the side seams). The 0.13° turn is held to lower the band's PSNR, and
+  it fails the misregistration at 0.35 px.
+- **No NCC collapse.** None of the gross controls brings the median NCC
+  under 0.5 on these scenes. With the turn left out, the bins lock a
+  period of `SeamLines`' checker away, at the search's edge, at 0.97;
+  equidistant lenses on Mei's pictures give 0.97, and the
+  Kannala–Brandt lenses read as equisolid 0.97. These three plant
+  fields past the search, so the prediction holds no bin. They are told
+  by the predicted size (the angle between what the two lenses show at
+  one point of the seam: 5.1°, 90° and 18.2° in the mean), by a
+  misregistration of 11.7, 16.2 and 13.0 px, and by failing the ideal.
+  The NCC check's own control is a track showing another scene (0.06).
+- **3 dB over the common-mode control** holds on `Grid` (4.32 dB for
+  the stitch, 4.75 and 3.89 dB for the lenses alone) and not on
+  `SeamLines` more than 12° from the seam (2.92 dB), where the 1°
+  checker, which reaches 15° from the seam, sets the error at the
+  equirect's 0.70° a pixel whatever the registration; past 15° it is
+  4.0 dB. `SeamLines` is held to 2.5 dB and to fail its floors. The
+  margin's own control, a stitch that slips 0.5° already against the
+  control made from it, comes to 2.96 dB: under 3, by little.
+- **The blue gain** comes back 1 % above the truth's, and the step is
+  smaller under the measured gains (0.18 LSB) than under the truth's
+  (0.54): at mid grey, +5 % red moves an 8-bit Cb by 0.3 of a code,
+  which rounds away, so the coded picture's blue rises with its luma.
+  The gains matched are the coded picture's, as they should be.
+- **`Grid`'s score depends on the ideal's sampling.** The true stitch
+  of `Grid` scores 31.1, 28.4 and 29.6 dB against ideals of 4², 8² and
+  16² samples a pixel, its lines lying along the equirect's rows and
+  columns; `SeamLines` moves by 0.05 dB from 8² to 16². The tests use
+  the goldens' 8². `Grid`'s floors hold the stitch to that ideal and
+  say little of how good the stitch is.
+- **3.4's figures.** The images confirm the three figures the seam's
+  tests corrected: both yaws of the Euler class with the wrong sign
+  give 4.19 px (the table's 2.3 is one lens's); the binding reversed in
+  Tier 1's rig gives 13.9 px across (the table: up to 9) and 9.1 px
+  along; and V3 against V6 on lens 0 gives an a0 of 0.14 px at 768²
+  (the table's 0.15° would be 0.57 px). Every other row holds as
+  written.
+
+**Not held here.** 4.2's "no channel more than 0.1 off the CPU
+reference" is rung 2's rule, the shader against these pictures (M3.7):
+in rung 1 the pictures are the CPU reference's own. `Grid`'s frame code
+on the back hemisphere isn't built: every picture is frame 0's and no
+check reads a frame number, so M3.4 needed no code. The rows of 3.4
+with no figure at 768² (the scene at 10 m) and the two V6 readings the
+pair isn't rendered under stay with the predictions.
+
+**Considered and not done.** Rendering the views whole (the band check
+reads the stripe alone, and the whole binary would pass its 10 s);
+an ideal of 4² samples for the equirect (`Grid` above); masking a
+comparison by the bins the estimator held (a prediction decides which
+bins count, so that an estimator that gives up can't pass); an NCC
+collapse as the gross controls' attribution (above); a cache of a
+lens picture's ray directions in synth, which would spare `Grid`'s and
+the gained lens's pictures the lens's inverse, about half of what a
+picture costs (it would be synth's change, at 54 MiB a lens).
+
+Revisit if: the search widens or a scene without a repeating texture
+joins rung 1, so that the gross controls can be attributed by the NCC;
+the feather passes ±5°, so that the band leaves its 48 columns (the
+test fails and says so); the ideal's sampling changes, which moves
+`Grid`'s floors by a dB or more; or M3.6's fit needs a term the eight
+don't hold.
 
 ## Open
 
