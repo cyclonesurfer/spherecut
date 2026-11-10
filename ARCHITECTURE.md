@@ -58,7 +58,7 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, `require_audio_device` among them, the `TIER2-SKIP:` marker), benchmark recording (`bench`, with latency percentiles) and FNV-1a hashing (`fnv64`) | M0; M1 slice 3a: `fnv64` (and `compare` until M2.4) |
 | `spherecut-camera` | Cameras' raw files, read from their bytes with no FFmpeg (D61, and the M3 plan's D62): the Insta360 trailer and its records (`insta360::read_trailer`, `read_record`, under the limits in `insta360::limits`), the metadata record (`parse_metadata`, through the schema-less protobuf walker `pb::Walker`), the thumbnail, IMU span and exposure records, the calibration strings parsed into named tokens and printed back byte for byte (`insta360::calib`), and a recording's files, by name (`companions`) and by bytes (`verify_companion`). Every reader takes `impl Read + Seek` and calls `may_block` first. Later in M3, the conversion to sphere's rig and other cameras | M3.2: the types, then its units (a) to (d) |
 | `spherecut-motion` | IMU ingest, time sync, orientation fusion, stabilization | M4 |
-| `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); for export, equirect output, the output frame, the YUV pass for the encoders, motion blur and a frame's views from the clip's keys (`output`, D49); image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics), from testkit so that agent can use it (amendment 2 item 32); later scopes | M1 slices 3a and 3b; M2.3; M2.4: `compare` |
+| `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); for export, equirect output, the output frame, the YUV pass for the encoders, motion blur and a frame's views from the clip's keys (`output`, D49); image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics, and since M3.4 their weighted forms), from testkit so that agent can use it (amendment 2 item 32); for stitching (D65), the CPU reference's stitch of a lens pair (`reference::render_rig`, with debug modes 4 to 7) and the seam instrument (`seam`: the masks, the strips about the seam, a bin's shifts and the signature), held to synth's lens pictures by rung 1 and the attribution matrix (`tests/instrument.rs`); later the shader's stitch, the fit and scopes | M1 slices 3a and 3b; M2.3; M2.4: `compare`; M3.4: `seam`, `render_rig` |
 | `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slices 5 and 6 |
 | `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
 | `spherecut-export` | The export (D52): `Export` runs an `ExportJob`, a project's sequence, on three threads (decode, render through the YUV pass, encode and mux) into a locked temporary file, then one last pass (V2, `SA3D`, the V1 box, the moov first) and section 9's read-back checks before it is put in place; the presets and their bitrates, the software encoders (libx264, libx265, libsvtav1) under a VBV cap, the size estimate and free-space check, audio copied (AAC and PCM cut to the sample), AAC or none; the job handle (progress, cancel, wait, the `Report` with each stage's time) that cli, the app and A2 drive; the VA-API encoders (VBR under the same cap, Mesa's quality level) tried before software, with a restart in software when one fails in its first second, and the decode on VA-API going on in software; the pace an export from the app keeps while the UI is busy (`Pace`, one frame per UI pass) | M2.4; M2.5: VA-API, the order and fallback, the decode path, stage times; M2.7: `Pace` |
@@ -744,6 +744,23 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   GPU's storage formats emulated (equirect output, framing and the
   blurred mean too), and `yuv::reference` the YUV pass's; the Tier 1
   tests compare the two on lavapipe.
+* **The stitch on the CPU** *(M3.4, D65)*: `reference::render_rig`
+  stitches a lens pair through a `sphere::rig::Rig` in f64, as the
+  shader will (M3.7): for each lens the parallax-corrected ray, a
+  footprint from the pixel's own rays and its LOD, the mask, trilinear
+  taps, the lens's gain in linear light, and the blend by the rig's
+  weights. `RigDebug` writes a lens alone, the weights or the seam
+  difference instead (the plan's debug modes 4 to 7).
+* **The seam instrument** *(M3.4, D65)*: `seam` measures a stitched
+  pair through the CPU reference, never through the shader it will
+  judge. `band_weights` and `lens_coverage` are the masks for
+  `compare`'s weighted metrics. `strips` unwraps the band about the
+  seam through each lens alone, `bin_shifts` measures in each 5° of
+  azimuth how far one lens's picture sits from the other's (a coarse
+  NCC search, then Lucas–Kanade steps, with the bin's information and
+  log gains), and `signature` fits eight harmonic terms to the bins,
+  each of which a wrong geometry of one kind leaves. The fit that reads
+  them is M3.6's.
 
 What is still planned *(M3 on)*, for every source type: in WGSL, "direction on the
 unit sphere → texel(s)" for the GoPro EAC pair and calibrated dual
@@ -1312,3 +1329,36 @@ check and FNV-64 of the first decoded frame's planes as the source hash:
 4:4:4 at BT.601 and BT.709, both ranges, 8 and 10 bits (D32). Bless it
 with `SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test
 frame pipeline_goldens`.
+
+### The stitching round trip *(M3, D65)*
+
+Stitching is held to a ladder (the M3 plan's section 4.2): one scene,
+one rig and one set of thresholds, each rung compared with the one
+below and with the analytic ideal. Rung 0 is sphere's, on points
+(M3.3). **Rung 1** and the **attribution matrix** are
+`crates/render/tests/instrument.rs` (M3.4):
+
+* synth renders each lens's picture of `SeamLines` and `Grid` through a
+  camera whose truth it knows (`synth::lens`), the X5-like rig at 768²
+  a lens and a Kannala–Brandt twin, infinitely far and at 1.5 m;
+* `reference::render_rig` stitches each pair, and the result is held to
+  `synth::render_view_ideal` under `seam`'s masks: more than 12° from
+  the seam and for each lens alone, by floors blessed into
+  `tests/goldens/instrument.json` under the goldens' rules; in the band,
+  against the better lens alone; and across the seam by the signature
+  (within 0.1 px, and under 1 LSB of exposure step once matched);
+* each control of the plan is planted and must fail, through
+  `testkit::control::must_fail`. Both lenses turned alike pass every
+  seam check and must fail the ideal;
+* for 24 planted errors, the shift each bin should show is predicted
+  with no images (`tests/common/predict.rs`), the strips must give it
+  within 0.05 px rms, and the signature must put it on the term the
+  prediction names. The same fields are held to the M3 plan's error
+  budget (3.4).
+
+Bless with `SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render
+--test instrument`: the manifest is written only when all of the
+binary's tests pass. The round trip proves the instrument consistent
+with synth's camera and nothing about a real one; the later rungs (the
+shader in M3.7, a lossless file in M3.5, exports, the viewer, and Pat's
+footage) take it from there.
