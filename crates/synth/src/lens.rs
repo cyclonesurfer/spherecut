@@ -1330,10 +1330,10 @@ fn lens_on_threads(
                                     i as f64 + (f64::from(a) + 0.5) / f64::from(n),
                                     j as f64 + (f64::from(b) + 0.5) / f64::from(n),
                                 );
-                                let Some(d) = truth.model.invert(at, truth.theta_max) else {
+                                let Some((d, seen)) = sight(rig, truth, to_scene, centre, at)
+                                else {
                                     continue;
                                 };
-                                let seen = sees(rig, centre, to_scene * d);
                                 let c =
                                     expose(crate::color(pattern, seen, frame), truth, off_axis(d));
                                 for (acc, c) in acc.iter_mut().zip(c) {
@@ -1372,9 +1372,45 @@ pub fn exposed_at(rig: &RigTruth, lens: usize, frame: u32, row: u32) -> f64 {
 /// the ground. `None` past `theta_max` and where the inverse has no
 /// direction, where the picture is black. 8.3's predictions take each
 /// seam sample through it, with no images.
-#[expect(unused_variables, reason = "M3.4 unit (c) writes the body")]
+///
+/// A point outside the picture, which has `side` rows of `side` pixels,
+/// has no row to be exposed with and shows nothing, so it is `None` too.
 pub fn seen(rig: &RigTruth, track: usize, frame: u32, px: DVec2) -> Option<DVec3> {
-    todo!()
+    let truth = &rig.lenses[track];
+    let side = f64::from(truth.side);
+    let inside = |v: f64| v >= 0.0 && v < side;
+    if !(inside(px.x) && inside(px.y)) {
+        return None;
+    }
+    // Row j covers j to j + 1, as `render_lens` deals its samples.
+    let turned = rig.motion.at(exposed_at(rig, track, frame, px.y as u32));
+    let (_, point) = sight(
+        rig,
+        truth,
+        turned * truth.to_rig,
+        turned * truth.centre_m,
+        px,
+    )?;
+    Some(point.normalize())
+}
+
+/// One sample of a lens's picture, at `at` in its model's pixels: the
+/// lens-frame direction synth's inverse gives it, no further than
+/// `theta_max` off the axis, and the point the ray along it from `centre`
+/// meets ([`sees`]), which the pattern is read in the direction of.
+/// `to_scene` and `centre` are the lens's `to_rig` and `centre_m` under
+/// the rig's motion at the sample's time. [`render_lens`] and [`seen`]
+/// both sample through this, so that what `seen` says a point shows is
+/// what the picture shows there.
+fn sight(
+    rig: &RigTruth,
+    truth: &LensTruth,
+    to_scene: DQuat,
+    centre: DVec3,
+    at: DVec2,
+) -> Option<(DVec3, DVec3)> {
+    let d = truth.model.invert(at, truth.theta_max)?;
+    Some((d, sees(rig, centre, to_scene * d)))
 }
 
 /// The point a ray from `centre` along `d`, both in the scene's frame,
@@ -3682,6 +3718,118 @@ mod tests {
             "row 40 at row 0's time",
             row(&rolled, 40) == row(&shot(&late_by(0.5 / 64.0), 0, 10), 40),
         );
+    }
+
+    /// `seen` is where `render_lens` reads the pattern: synth's inverse,
+    /// the rig as it is turned when the point's row is exposed, and the
+    /// ray from the lens's centre to the scene or the ground.
+    #[test]
+    fn seen_is_where_render_lens_reads_the_pattern() {
+        // A rig that turns about +Y at 30°/s, lens 1 half a frame late, a
+        // rolling shutter, a scene 1.5 m out and a ground 1.2 m down: each
+        // moves HighFrequency's 1° cells at 64², about 3° a pixel.
+        let mut rig = square_rig(64);
+        rig.motion = Motion {
+            fps: 32.0,
+            turns: vec![Turn {
+                start_s: 0.0,
+                end_s: 2.0,
+                axis: DVec3::Y,
+                deg_per_s: 30.0,
+            }],
+        };
+        rig.late_frames = [0.0, 0.5];
+        rig.readout_s = 1.0 / 32.0;
+        rig.scene_radius_m = Some(1.5);
+        rig.ground_m = Some(1.2);
+        // How many pixels of `picture`, rendered at ss = 1, are not the
+        // pattern where `shows` says their centres see, or black where it
+        // says they see nothing.
+        let unlike = |picture: &RgbImage, shows: &dyn Fn(DVec2) -> Option<DVec3>| {
+            let mut wrong = 0;
+            for j in 0..picture.height {
+                for i in 0..picture.width {
+                    let want = shows(pixel_centre(i, j))
+                        .map_or([0.0; 3], |d| crate::color(Pattern::HighFrequency, d, 10));
+                    if picture.get(i, j) != want {
+                        wrong += 1;
+                    }
+                }
+            }
+            wrong
+        };
+        let mut global = rig.clone();
+        global.readout_s = 0.0;
+        let mut far = rig.clone();
+        far.scene_radius_m = None;
+        far.ground_m = None;
+        for lens in 0..2 {
+            let picture = render_lens(Pattern::HighFrequency, &rig, lens, 10, 1);
+            assert_eq!(
+                unlike(&picture, &|px| seen(&rig, lens, 10, px)),
+                0,
+                "lens {lens}"
+            );
+            // Controls: the other track, every row at the frame's own
+            // time, and the scene infinitely far.
+            let controls = [
+                ("the other track's sight", &rig, 1 - lens),
+                ("every row at the frame's time", &global, lens),
+                ("the scene infinitely far", &far, lens),
+            ];
+            for (name, rig, track) in controls {
+                let wrong = unlike(&picture, &|px| seen(rig, track, 10, px));
+                let wrong = must_fail(name, at_most(wrong, 0));
+                assert!(wrong > 64 * 64 / 16, "lens {lens}, {name}: {wrong}");
+            }
+        }
+
+        // By hand. Row 40 of lens 1 at frame 10 is exposed (10 + ½)/32 s
+        // and (40 + ½)/64 of the readout after it, 0.34790 s, by when the
+        // rig has turned 30°/s · 0.34790 s = 10.437° about +Y. With the
+        // scene infinitely far, the point sees the direction `to_rig`
+        // gives synth's inverse, turned by that much.
+        let lens = &far.lenses[1];
+        let at = DVec2::new(20.25, 40.75);
+        let t = 10.5 / 32.0 + 40.5 / 64.0 / 32.0;
+        assert_eq!(exposed_at(&far, 1, 10, 40), t);
+        let turned = DQuat::from_axis_angle(DVec3::Y, (30.0 * t).to_radians());
+        let by_hand = turned * (lens.to_rig * lens.model.inverse(at).unwrap());
+        let got = seen(&far, 1, 10, at).unwrap();
+        assert!((got - by_hand).length() <= 1e-15, "{got} against {by_hand}");
+        assert!((got.length() - 1.0).abs() <= 1e-15);
+        // Control: the row above is exposed sooner.
+        let above = seen(&far, 1, 10, at - DVec2::Y).unwrap();
+        let sooner = DQuat::from_axis_angle(DVec3::Y, (30.0 / 64.0 / 32.0f64).to_radians());
+        let same_time = lens.to_rig * lens.model.inverse(at - DVec2::Y).unwrap();
+        assert!((above - sooner.inverse() * turned * same_time).length() <= 1e-15);
+        must_fail(
+            "the row above at this row's time",
+            at_most((above - turned * same_time).length(), 1e-6),
+        );
+        // A near scene is seen in the direction of the point the ray from
+        // the lens's centre meets, 1.5 m from the rig's origin.
+        let mut near_scene = far.clone();
+        near_scene.scene_radius_m = Some(1.5);
+        let centre = turned * lens.centre_m;
+        let point = sees(&near_scene, centre, by_hand);
+        assert!((point.length() - 1.5).abs() <= 1e-12);
+        let got = seen(&near_scene, 1, 10, at).unwrap();
+        assert!((got - point.normalize()).length() <= 1e-15);
+        assert!((got - by_hand).length() > 1e-3);
+
+        // Nothing past the image circle, nor outside the picture.
+        assert_eq!(seen(&rig, 0, 10, DVec2::new(0.5, 0.5)), None);
+        for outside in [
+            DVec2::new(-0.01, 32.0),
+            DVec2::new(32.0, -0.01),
+            DVec2::new(64.0, 32.0),
+            DVec2::new(32.0, 64.0),
+            DVec2::new(f64::NAN, 32.0),
+        ] {
+            assert_eq!(seen(&rig, 0, 10, outside), None, "{outside}");
+        }
+        assert!(seen(&rig, 0, 10, DVec2::new(63.99, 32.0)).is_some());
     }
 
     /// The gain and the vignette apply in linear light.
