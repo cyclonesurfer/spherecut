@@ -4607,15 +4607,19 @@ stitching round trip's masked comparisons (M3 plan 8.1 and 4.2):
 The PSNR's MSE is the weighted sum of the squared errors over three
 times the weights' sum. The SSIM is its map's mean with each position of
 the window counted by the weight at the window's centre, so an error
-within 5 pixels of a mask's edge still counts there. `diff_stats` reads
-the weights as a mask, the pixels above 0. Weights of 1 give the plain
-metrics bit for bit, and a pixel of weight 0 is never read. Weights that
-aren't of the images' size, that hold a value below 0 or not finite, or
-that sum to 0 are refused, so that a mask that came out empty can't read
-as a perfect score. The masks come from `render::seam` (`band_weights`
-and `lens_coverage`), and an equirect picture's density from
-`equirect_coslat`, the cosine of each row's latitude at its centre, under
-which a pixel's share of the weights is its share of the sphere.
+within 5 pixels of a mask's edge still counts there.
+`diff_stats_weighted` reads the weights as a mask, the pixels above 0.
+Weights of 1 give the plain metrics bit for bit. `psnr_weighted` and
+`diff_stats_weighted` never read a pixel of weight 0, and
+`ssim_weighted` never computes a window whose centre has weight 0; a
+pixel of weight 0 under a counted window still counts in the SSIM, a
+NaN there included. Weights that aren't of the images' size, that hold a
+value below 0 or not finite, or that sum to 0 are refused, so that a
+mask that came out empty can't read as a perfect score. The masks come
+from `render::seam` (`band_weights` and `lens_coverage`), and an
+equirect picture's density from `equirect_coslat`, the cosine of each
+row's latitude at its centre, under which a pixel's share of the weights
+is its share of the sphere.
 
 ## D33. View conventions
 
