@@ -5,11 +5,19 @@
 //! frame term.
 
 use spherecut_core::video::VideoPlanes;
+use spherecut_sphere::pixel;
 use spherecut_sphere::rig::Rig;
 
-use super::{StripSpec, Strips};
+use super::{Strip, StripSpec, Strips};
 use crate::error::RenderError;
 use crate::project::ViewParams;
+use crate::reference::{Footprint, LensPair, Rays, in_view, lens_covers, per_pixel_rows};
+
+/// The most pixels [`strips()`] unwraps a strip to, 2²⁴: Tier 2's strip
+/// is 2880 × 128, and one at an 8K master's own scale across the seam,
+/// about 19 px/°, is 6840 × 304. A spec past it is a mistake, refused
+/// before it is allocated.
+pub const MAX_STRIP_PIXELS: u64 = 1 << 24;
 
 /// The mask of a band about the seam (8.1), for a
 /// [`crate::compare::Weights`]: a weight for each pixel of a `size`
@@ -18,7 +26,13 @@ use crate::project::ViewParams;
 /// off the seam's plane, z = 0 in the rig frame, and a lens covers it;
 /// 0 elsewhere. Rung 1's "more than 12° from the seam" (4.2) is the band
 /// from 12° to 90°.
-#[expect(unused_variables, reason = "M3.4 unit (b) writes the body")]
+///
+/// A lens covers a pixel where [`lens_coverage`] is 1 for it, so a pixel
+/// that no lens of `rig` covers weighs nothing, and a metric under this
+/// mask can't see a hole that `rig` leaves in its own picture: where the
+/// rig under test may cover less than the true one, the mask to take is
+/// the true rig's. Bounds that hold no angle (a NaN, or `inner_deg` above
+/// `outer_deg`) leave every weight 0, which the weighted metrics refuse.
 pub fn band_weights(
     rig: &Rig,
     view: &ViewParams,
@@ -26,7 +40,18 @@ pub fn band_weights(
     inner_deg: f64,
     outer_deg: f64,
 ) -> Vec<f64> {
-    todo!()
+    per_pixel_rows(size, |(i, j)| {
+        let c = pixel::centre(i, j);
+        if !in_view(view, size, c) {
+            return 0.0;
+        }
+        let rays = Rays::at(|x, y| view.dir(size, x, y), c);
+        // The angle off the plane z = 0, by atan2, which keeps its
+        // precision at the rig's poles.
+        let off_seam = rays.d.z.abs().atan2(rays.d.x.hypot(rays.d.y)).to_degrees();
+        let in_band = inner_deg <= off_seam && off_seam <= outer_deg;
+        weight(in_band && (lens_covers(rig, 0, &rays) || lens_covers(rig, 1, &rays)))
+    })
 }
 
 /// Calibration block `b`'s coverage (8.1), for a
@@ -38,9 +63,21 @@ pub fn band_weights(
 /// parallax-corrected ray within θ_max less the margin at the sample's
 /// LOD, and the sample's footprint inside its slot (10.3's frame term).
 /// It is 0 elsewhere.
-#[expect(unused_variables, reason = "M3.4 unit (b) writes the body")]
+///
+/// # Panics
+///
+/// If `b` is neither 0 nor 1.
 pub fn lens_coverage(rig: &Rig, b: usize, view: &ViewParams, size: (u32, u32)) -> Vec<f64> {
-    todo!()
+    per_pixel_rows(size, |(i, j)| {
+        let c = pixel::centre(i, j);
+        let rays = Rays::at(|x, y| view.dir(size, x, y), c);
+        weight(in_view(view, size, c) && lens_covers(rig, b, &rays))
+    })
+}
+
+/// A mask's weight: 1 where it holds, else 0.
+fn weight(holds: bool) -> f64 {
+    if holds { 1.0 } else { 0.0 }
 }
 
 /// Both lenses' strips (8.2): the band |ε| ≤ `spec.half_band_deg` about
@@ -49,11 +86,58 @@ pub fn lens_coverage(rig: &Rig, b: usize, view: &ViewParams, size: (u32, u32)) -
 /// linear light at unit gain. `lenses` are the two tracks' pictures, by
 /// track; the strips come back by calibration block. A sample outside its
 /// lens's mask is marked invalid, never clamped.
-#[expect(unused_variables, reason = "M3.4 unit (b) writes the body")]
+///
+/// Each strip is [`StripSpec::size`] pixels, pixel (i, j) looking along
+/// [`StripSpec::dir`] at (i + ½, j + ½), and samples as
+/// [`crate::reference::render_rig`] samples a lens alone: the footprint
+/// from the strip pixel's own four ±½ px rays, the mask at its LOD, the
+/// taps, the matrix and the EOTF. Nothing after them: no gain, no dim,
+/// and no rounding to f16, so the shifts are measured on what the lens
+/// shows and not on a target's steps. An invalid sample's `rgb` is 0.
+///
+/// Refuses what [`crate::reference::render_rig`] refuses of the rig and
+/// the planes, and a spec whose scale or band isn't finite and above 0,
+/// whose band passes 90°, or whose strip has no pixels or more than
+/// [`MAX_STRIP_PIXELS`].
 pub fn strips(
     rig: &Rig,
     lenses: [&dyn VideoPlanes; 2],
     spec: &StripSpec,
 ) -> Result<Strips, RenderError> {
-    todo!()
+    let finite_above_0 = |v: f64| v.is_finite() && v > 0.0;
+    if !finite_above_0(spec.px_per_deg)
+        || !finite_above_0(spec.half_band_deg)
+        || spec.half_band_deg > 90.0
+    {
+        return Err(RenderError::Invalid(format!(
+            "a strip of {} px/° over ±{}°: the scale and the band are finite and above 0, and \
+             the band at most 90°",
+            spec.px_per_deg, spec.half_band_deg
+        )));
+    }
+    let (width, height) = spec.size();
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels == 0 || pixels > MAX_STRIP_PIXELS {
+        return Err(RenderError::Invalid(format!(
+            "a strip of {} px/° over ±{}° is {width}x{height}: a strip has 1 to \
+             {MAX_STRIP_PIXELS} pixels",
+            spec.px_per_deg, spec.half_band_deg
+        )));
+    }
+    let pair = LensPair::new(lenses, rig)?;
+    let samples = per_pixel_rows((width, height), |(i, j)| {
+        let rays = Rays::at(|x, y| spec.dir(x, y), pixel::centre(i, j));
+        [0, 1].map(|b| match Footprint::of(rig, b, &rays) {
+            Some(f) if rig.covers(b, rays.d, f.lod()) => (pair.light(b, &f, false), true),
+            _ => ([0.0; 3], false),
+        })
+    });
+    Ok(Strips {
+        lenses: [0, 1].map(|b| Strip {
+            width,
+            height,
+            rgb: samples.iter().map(|s| s[b].0).collect(),
+            valid: samples.iter().map(|s| s[b].1).collect(),
+        }),
+    })
 }
