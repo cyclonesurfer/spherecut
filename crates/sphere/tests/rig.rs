@@ -2443,7 +2443,8 @@ struct Pooled {
     /// Whether it is one of the plain rigs: Pat's numbers (or the
     /// stereographic rig on Pat's rotations and centres), the tune's
     /// angles within 0.25° and q at most 0.5 m⁻¹, so that h of 2° or more
-    /// at each lens leaves no direction a lens covers at a weight of 0.
+    /// at each lens leaves no direction that a lens covers and no feather
+    /// weighs, where the weights switch from one lens to the other.
     plain: bool,
     /// The LOD up to which each lens's h stays at 2° or more (6.2's
     /// shrink leaves it there), which the plain rigs' properties draw
@@ -2702,32 +2703,105 @@ fn frameless(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
     }))
 }
 
-/// The weights' check at one direction: each in [0, 1]; their sum 1
-/// wherever a lens covers d with θ below 90° + h, and on a plain rig
-/// wherever a lens covers d at all; 0 where neither covers it below
-/// 90° + h.
-fn weights_hold(rig: &Rig, plain: bool, d: DVec3, lod: [f64; 2]) -> Result<(), String> {
-    let w = rig.weights(d, lod);
+/// 6.2's weights as they stood before a covering lens took what no
+/// feather weighs (a control, and what the weights are wherever a feather
+/// weighs): each covering lens's 1 − smoothstep at its own h, normalised,
+/// and both 0 where they sum to 0.
+fn feathers_alone(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
+    normalised([0, 1].map(|b| {
+        if !rig.covers(b, d, lod[b]) {
+            return 0.0;
+        }
+        let h = rig.feather_at(b, lod[b]);
+        1.0 - ramp(FRAC_PI_2 - h, FRAC_PI_2 + h, off_axis(rig.ray(b, d)))
+    }))
+}
+
+/// The weights with what no feather weighs given to the covering lens
+/// with the greater θ (a control).
+fn farther_lens_takes(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
+    let w = feathers_alone(rig, d, lod);
+    if w != [0.0; 2] {
+        return w;
+    }
+    let theta = |b: usize| off_axis(rig.ray(b, d));
+    match [0, 1].map(|b| rig.covers(b, d, lod[b])) {
+        [true, true] if theta(0) > theta(1) => [1.0, 0.0],
+        [true, true] => [0.0, 1.0],
+        [true, false] => [1.0, 0.0],
+        [false, true] => [0.0, 1.0],
+        [false, false] => [0.0; 2],
+    }
+}
+
+/// What a direction is to a rig's weights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Weighed {
+    /// No lens covers it.
+    Uncovered,
+    /// A feather weighs it.
+    Feathered,
+    /// No feather weighs it, and one lens alone covers it.
+    OneCovers,
+    /// No feather weighs it, and both lenses cover it.
+    BothCover,
+}
+
+/// The check of `weights` at one direction, on any rig: each weight in
+/// [0, 1]; their sum 1 wherever a lens covers d, and 0 where none does;
+/// the feathers' own weights wherever a feather weighs d; and where none
+/// does, 1 for the covering lens with the smaller θ, ½ each at one θ.
+fn weights_hold(
+    rig: &Rig,
+    weights: impl Fn(&Rig, DVec3, [f64; 2]) -> [f64; 2],
+    d: DVec3,
+    lod: [f64; 2],
+) -> Result<Weighed, String> {
+    let w = weights(rig, d, lod);
     if !w.iter().all(|w| (0.0..=1.0).contains(w)) {
         return Err(format!("{w:?} at {d}"));
     }
     let sum = w[0] + w[1];
-    let covers = |b: usize| rig.covers(b, d, lod[b]);
-    let inside =
-        |b: usize| covers(b) && off_axis(rig.ray(b, d)) < FRAC_PI_2 + rig.feather_at(b, lod[b]);
-    let one = inside(0) || inside(1) || (plain && (covers(0) || covers(1)));
-    if one && (sum - 1.0).abs() > 1e-12 {
+    let covers = [0, 1].map(|b| rig.covers(b, d, lod[b]));
+    if covers == [false; 2] {
+        return if sum == 0.0 {
+            Ok(Weighed::Uncovered)
+        } else {
+            Err(format!("{w:?} at {d}, LOD {lod:?}, where no lens covers"))
+        };
+    }
+    if (sum - 1.0).abs() > 1e-12 {
         return Err(format!("{w:?} at {d}, LOD {lod:?}, where a lens covers"));
     }
-    if !covers(0) && !covers(1) && sum != 0.0 {
-        return Err(format!("{w:?} at {d}, LOD {lod:?}, where no lens covers"));
+    let feathered = feathers_alone(rig, d, lod);
+    if feathered != [0.0; 2] {
+        let off = (w[0] - feathered[0]).abs().max((w[1] - feathered[1]).abs());
+        return if off <= 1e-12 {
+            Ok(Weighed::Feathered)
+        } else {
+            Err(format!(
+                "{w:?} at {d}, LOD {lod:?}, where the feathers weigh {feathered:?}"
+            ))
+        };
     }
-    if !plain && !inside(0) && !inside(1) && sum != 0.0 {
-        return Err(format!(
-            "{w:?} at {d}, LOD {lod:?}, where no lens covers below 90° + h"
-        ));
+    let theta = [0, 1].map(|b| off_axis(rig.ray(b, d)));
+    let (want, weighed) = match covers {
+        [true, false] => ([1.0, 0.0], Weighed::OneCovers),
+        [false, true] => ([0.0, 1.0], Weighed::OneCovers),
+        _ if theta[0] < theta[1] => ([1.0, 0.0], Weighed::BothCover),
+        _ if theta[0] > theta[1] => ([0.0, 1.0], Weighed::BothCover),
+        _ => ([0.5; 2], Weighed::BothCover),
+    };
+    if w == want {
+        Ok(weighed)
+    } else {
+        Err(format!(
+            "{w:?} at {d}, LOD {lod:?}, where no feather weighs: the lenses cover {covers:?} at \
+             θ {:.4}° and {:.4}°",
+            theta[0].to_degrees(),
+            theta[1].to_degrees()
+        ))
     }
-    Ok(())
 }
 
 /// The LODs a case draws from two numbers in [0, 1]: −1 to the rig's
@@ -2926,7 +3000,7 @@ proptest! {
 
     fn weights_hold_cases(i in 0..pool().len(), z in -1.0f64..=1.0, phi in -PI..PI, u in [0.0f64..=1.0, 0.0f64..=1.0]) {
         let p = &pool()[i];
-        let r = weights_hold(&p.rig, p.plain, on_sphere(z, phi), lods(p, u));
+        let r = weights_hold(&p.rig, Rig::weights, on_sphere(z, phi), lods(p, u));
         prop_assert!(r.is_ok(), "{}: {}", p.name, r.unwrap_err());
     }
 
@@ -3035,10 +3109,10 @@ fn scan_cases() {
 
 /// The weights lie in [0, 1] and sum to 1 wherever a lens covers.
 ///
-/// Wherever a lens covers below 90° + h on any rig in `validate`'s bounds,
-/// and wherever a lens covers at all on the plain rigs: where no lens
-/// covers below 90° + h they are 0, a hole in the picture, which a tune in
-/// the bounds can open (the controls).
+/// On every rig in `validate`'s bounds, the plain ones or not: where no
+/// feather weighs a direction a lens covers, which a tune in the bounds
+/// can leave, the covering lens with the smaller θ takes it, so that the
+/// picture has no hole there (the controls).
 #[test]
 fn weights_lie_in_the_unit_interval_and_sum_to_one() {
     let _time = timed("weights_lie_in_the_unit_interval_and_sum_to_one");
@@ -3048,8 +3122,40 @@ fn weights_lie_in_the_unit_interval_and_sum_to_one() {
         plain().len()
     );
     weights_hold_cases();
+    // The directions no feather weighs lie in a ring about the seam, too
+    // thin for a few hundred random cases to find: on every rig of the
+    // pool, lens 0's θ from 84° to 96° at every 0.4° and every 3° of its
+    // azimuth, at LODs 0 and 2. Both kinds are there, and no plain rig
+    // has any.
+    let (mut one_covers, mut both_cover, mut rigs) = (0usize, 0usize, 0usize);
+    for p in pool() {
+        let to_rig = p.rig.lenses[0].lens_from_rig.inverse();
+        let mut found = 0usize;
+        for (j, k) in (0..120).flat_map(|j| (-15..=15).map(move |k| (j, k))) {
+            let theta = (90.0 + 0.4 * f64::from(k)) * DEG;
+            let d = to_rig * dir(theta, f64::from(j) * 3.0 * DEG);
+            for lod in [[0.0; 2], [2.0; 2]] {
+                match weights_hold(&p.rig, Rig::weights, d, lod) {
+                    Ok(Weighed::OneCovers) => one_covers += 1,
+                    Ok(Weighed::BothCover) => both_cover += 1,
+                    Ok(_) => continue,
+                    Err(why) => panic!("{}: {why}", p.name),
+                }
+                found += 1;
+            }
+        }
+        assert!(!p.plain || found == 0, "{}: {found}", p.name);
+        rigs += usize::from(found > 0);
+    }
+    eprintln!(
+        "{rigs} rigs of the pool have directions near the seam that a lens covers and no feather \
+         weighs: {one_covers} that one lens alone covers and {both_cover} that both do"
+    );
+    assert!(one_covers > 1000 && both_cover > 1000 && rigs > 10);
     // Control: on Pat's V6 at 0.3 m with h of 1°, both lenses see the
-    // seam 3° past 90°, covered and weighed 0.
+    // seam 3° past 90°, and the feathers alone leave it covered and
+    // unweighed. Just off the seam's plane the lenses' θ differ, and the
+    // lens with the greater θ taking it fails too.
     let cal = pats();
     let geo = placeholder(CanvasMap::A, Generation::V6, V6Reading::RADIAL_ONLY);
     let near = Tune {
@@ -3058,25 +3164,47 @@ fn weights_lie_in_the_unit_interval_and_sum_to_one() {
         ..Tune::default()
     };
     let rig = Rig::build(&cal, &geo, &near, 0, [768; 2]).unwrap();
+    let lod = [0.0; 2];
+    assert_eq!(
+        weights_hold(&rig, Rig::weights, DVec3::X, lod),
+        Ok(Weighed::BothCover)
+    );
     must_fail(
-        "a 1° feather at 0.3 m",
-        weights_hold(&rig, true, DVec3::X, [0.0; 2]),
+        "a 1° feather at 0.3 m, the feathers alone",
+        weights_hold(&rig, feathers_alone, DVec3::X, lod),
+    );
+    let off_the_plane = DVec3::new(1.0, 0.0, 0.01);
+    assert_eq!(
+        weights_hold(&rig, Rig::weights, off_the_plane, lod),
+        Ok(Weighed::BothCover)
+    );
+    must_fail(
+        "the lens with the greater θ taking what no feather weighs",
+        weights_hold(&rig, farther_lens_takes, off_the_plane, lod),
     );
     // Control: the lenses turned 15° each, 30° apart, by yaws of
     // opposite sign in their own view frames, and seam directions covered
-    // past 90° + h on both.
+    // past 90° + h on both, which the feathers alone leave unweighed.
     let mut apart = Tune::default();
     apart.lenses[0].ypr_deg[0] = 15.0;
     apart.lenses[1].ypr_deg[0] = -15.0;
     let rig = Rig::build(&cal, &geo, &apart, 0, [768; 2]).unwrap();
-    let holes = (0..3600)
-        .filter(|&j| {
-            let d = on_sphere(0.0, f64::from(j) * 0.1 * DEG);
-            weights_hold(&rig, true, d, [0.0; 2]).is_err()
-        })
-        .count();
-    let holes = must_fail("lenses 30° apart", at_most(holes, 0));
-    eprintln!("lenses 30° apart leave {holes} of 3600 horizon directions unweighed");
+    let holes = |weights: fn(&Rig, DVec3, [f64; 2]) -> [f64; 2]| {
+        (0..3600)
+            .filter(|&j| {
+                let d = on_sphere(0.0, f64::from(j) * 0.1 * DEG);
+                weights_hold(&rig, weights, d, lod).is_err()
+            })
+            .count()
+    };
+    assert_eq!(holes(Rig::weights), 0);
+    let holes = must_fail(
+        "lenses 30° apart, the feathers alone",
+        at_most(holes(feathers_alone), 0),
+    );
+    eprintln!(
+        "lenses 30° apart: the feathers alone leave {holes} of 3600 horizon directions unweighed"
+    );
 }
 
 /// The weights are continuous in the direction.
