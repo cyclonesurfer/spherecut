@@ -4600,6 +4600,23 @@ reason and by enough. Numbers are compared through `at_most`,
 passing for a control that failed. The goldens keep their own run, which
 records each control's number in the manifest.
 
+*Updated 2026-11-10 (M3.4):* the metrics gain weighted forms, for the
+stitching round trip's masked comparisons (M3 plan 8.1 and 4.2):
+`render::compare`'s `psnr_weighted`, `ssim_weighted` and
+`diff_stats_weighted` take a `Weights`, one `f64` for each output pixel.
+The PSNR's MSE is the weighted sum of the squared errors over three
+times the weights' sum. The SSIM is its map's mean with each position of
+the window counted by the weight at the window's centre, so an error
+within 5 pixels of a mask's edge still counts there. `diff_stats` reads
+the weights as a mask, the pixels above 0. Weights of 1 give the plain
+metrics bit for bit, and a pixel of weight 0 is never read. Weights that
+aren't of the images' size, that hold a value below 0 or not finite, or
+that sum to 0 are refused, so that a mask that came out empty can't read
+as a perfect score. The masks come from `render::seam` (`band_weights`
+and `lens_coverage`), and an equirect picture's density from
+`equirect_coslat`, the cosine of each row's latitude at its centre, under
+which a pixel's share of the weights is its share of the sphere.
+
 ## D33. View conventions
 
 *2026-10-30, M1 slice 7. The M1 plan's D31 (section 7.4), as built:
