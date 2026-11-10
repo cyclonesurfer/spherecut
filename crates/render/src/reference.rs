@@ -224,14 +224,16 @@ pub fn render_blurred(
 /// margin's angle passes θ_max the bound is negative, the cosine is even,
 /// and the cosine form covers directions that the angle refuses. On Pat's
 /// V3 lens 0 at 768² (174.73 texels a radian at a θ_max of 100°) the
-/// bound is below 0 from LOD 7.25, while the frame term still passes the
-/// lens's centre up to LOD 7.585: of 401 directions from 0° to 40° off
-/// the axis, the cosine form covers 14 at LOD 7.272 (a bound of −1.40°),
-/// 123 at 7.419 (−12.21°) and 21 at 7.565 (−24.18°), where the angle
-/// covers none; at LOD 7.202 both cover 35 and at 7.635 neither any. So
-/// the WGSL compares θ in angle, or guards the cosine form (the bound 0
-/// or more, and cos θ ≥ cos of it), and M3.7's mask test needs a case at
-/// such an LOD, an output a few pixels across.
+/// bound is below 0 from LOD 7.253, while the frame term still passes the
+/// lens's axis up to LOD 7.577 and the slot's middle, half a degree off
+/// it, up to 7.584. Of the 401 directions from 0° to 40° off the axis
+/// along a meridian, the cosine form covers 14 at LOD 7.272 (a bound of
+/// −1.36°) and 108 at 7.4 (−10.77°), whichever the meridian, and 10 to 26
+/// at 7.565 (−24.19°), by the meridian, where the angle covers none; at
+/// LOD 7.202 both cover 35 and at 7.635 neither any. So the WGSL compares
+/// θ in angle, or guards the cosine form (the bound 0 or more, and cos θ
+/// ≥ cos of it), and M3.7's mask test needs a case at such an LOD, an
+/// output a few pixels across.
 ///
 /// This builds both pictures' mip chains and renders once: a caller with
 /// more than one picture to make of one pair of frames makes a
