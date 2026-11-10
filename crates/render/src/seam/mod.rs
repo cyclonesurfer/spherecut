@@ -192,3 +192,57 @@ pub struct Signature {
     /// balance.
     pub log_gain: [f64; 3],
 }
+
+#[cfg(test)]
+mod tests {
+    use glam::DVec3;
+    use spherecut_testkit::control::{at_most, must_fail};
+
+    use super::StripSpec;
+
+    /// [`StripSpec::dir`] is 8.2's, held by directions written out here
+    /// and through nothing else of the instrument: φ is 0 on the right
+    /// (+X), 90° at the zenith (+Y), 180° on the left (−X) and 270° at the
+    /// nadir (−Y), and ε = +8°, the strip's top edge, leans towards the
+    /// front lens, which looks along −Z.
+    #[test]
+    fn dir_is_8_2s_by_literals() {
+        const WITHIN: f64 = 1e-12;
+        let spec = StripSpec::TIER1;
+        assert_eq!(spec.size(), (1372, 61));
+        let (sin_8, cos_8) = 8f64.to_radians().sin_cos();
+        // The strip's point (x, y), and the direction there.
+        let points = [
+            // The seam itself, ε = 0: the row y = 30.5.
+            ((0.0, 30.5), DVec3::new(1.0, 0.0, 0.0)),
+            ((343.0, 30.5), DVec3::new(0.0, 1.0, 0.0)),
+            ((686.0, 30.5), DVec3::new(-1.0, 0.0, 0.0)),
+            ((1029.0, 30.5), DVec3::new(0.0, -1.0, 0.0)),
+            // ε = +8° at the top edge, towards the front lens (−Z), and
+            // −8° at the bottom.
+            ((0.0, 0.0), DVec3::new(cos_8, 0.0, -sin_8)),
+            ((343.0, 0.0), DVec3::new(0.0, cos_8, -sin_8)),
+            ((686.0, 61.0), DVec3::new(-cos_8, 0.0, sin_8)),
+            ((1029.0, 61.0), DVec3::new(0.0, -cos_8, sin_8)),
+        ];
+        let held = |dir: &dyn Fn(f64, f64) -> DVec3| {
+            let worst = points
+                .iter()
+                .map(|&((x, y), want)| (dir(x, y) - want).length())
+                .fold(0.0, f64::max);
+            at_most(worst, WITHIN)
+        };
+        let dir = held(&|x, y| spec.dir(x, y));
+        assert!(dir.passes() == Some(true), "{dir}");
+
+        // Controls: φ reflected puts the nadir at 90°; φ a half turn on
+        // puts the left at 0°; ε reflected leans the top edge to the back
+        // lens.
+        let off = must_fail("φ reflected", held(&|x, y| spec.dir(1372.0 - x, y)));
+        assert!((off - 2.0).abs() < WITHIN, "{off}");
+        let off = must_fail("φ a half turn on", held(&|x, y| spec.dir(x + 686.0, y)));
+        assert!((off - 2.0).abs() < WITHIN, "{off}");
+        let off = must_fail("ε reflected", held(&|x, y| spec.dir(x, 61.0 - y)));
+        assert!((off - 2.0 * sin_8).abs() < WITHIN, "{off}");
+    }
+}
