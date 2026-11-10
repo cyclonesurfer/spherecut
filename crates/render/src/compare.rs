@@ -179,8 +179,10 @@ pub fn ssim<A: Sample, B: Sample>(a: View<'_, A>, b: View<'_, B>) -> Result<f64,
 /// The sums [`ssim`] and [`ssim_weighted`] divide, for two images of one
 /// size: the SSIM map's value at each position of the window, times
 /// `weight` of the index of the pixel at the window's centre, and those
-/// weights. A position of weight 0 is left out, unread. A weight of 1
-/// throughout gives the map's plain sum and the number of positions.
+/// weights. A position of weight 0 is left out, its window not computed;
+/// a pixel of weight 0 under a counted window is in that window's value
+/// all the same. A weight of 1 throughout gives the map's plain sum and
+/// the number of positions.
 fn ssim_sums<A: Sample, B: Sample>(
     a: &View<'_, A>,
     b: &View<'_, B>,
@@ -1175,6 +1177,29 @@ mod tests {
         let pixels = map_mean(&hurt, w, under);
         let off = must_fail("each window weighed by the pixels under it", holds(pixels));
         assert!(off > 0.005, "{got} against {pixels}");
+
+        // Whatever a pixel of weight 0 holds, it is in each counted
+        // window over it: the last centre with a weight is column 17,
+        // whose window ends at column 22, so a NaN there poisons the
+        // weighted SSIM, where the weighted PSNR never reads it.
+        let nan_at = |x: usize| {
+            let mut n = b.clone();
+            assert_eq!(mask[14 * w + x], 0.0);
+            n[(14 * w + x) * 3] = f64::NAN;
+            n
+        };
+        let under_a_window = nan_at(22);
+        let vn = View::new(w, h, 3, &under_a_window);
+        assert!(ssim_weighted(va, vn, &k).unwrap().is_nan());
+        assert_eq!(
+            psnr_weighted(va, vn, &k).unwrap().to_bits(),
+            psnr_weighted(va, vb, &k).unwrap().to_bits()
+        );
+        // Control: a column further, no counted window reaches it.
+        let past_them = nan_at(23);
+        let past = ssim_weighted(va, View::new(w, h, 3, &past_them), &k).unwrap();
+        must_fail("a NaN a column past the last counted window", past.is_nan());
+        assert_eq!(past.to_bits(), clean.to_bits());
         eprintln!(
             "the weighted SSIM by centres: {any:.1e} from the map's mean on any weights; an \
              error past a mask's edge takes it from {clean:.5} to {got:.5}, the map's mean by \
