@@ -1866,9 +1866,10 @@ pub fn x5_like_planted() -> Planted {
 /// does, under 19 of [`TruthV6`]'s 21 readings, where r(106°) is 386 to
 /// 404 px by lens, direction and reading. Under the other two, the pair
 /// read as (d6, d5), with or without its extension, and the prism at d9
-/// by axis, track 0's circle ends 1.2 px and 0.3 px short of the middle
-/// of its bottom edge: the circle reaches that edge only at 106.5° and
-/// 106.1°, so a truth read through either shows a sliver of black there.
+/// by axis, track 0's circle ends 1.19 px and 0.25 px short of the
+/// middle of its bottom edge: the circle reaches that edge only at 106.5°
+/// and 106.1°, so a truth read through either shows a sliver of black
+/// there.
 pub fn x5_like_v6() -> CalibTruth {
     let v3 = x5_like();
     let focals = [(4277.52, 4277.27), (4284.40, 4284.76)];
@@ -2014,7 +2015,7 @@ mod tests {
     use std::hash::Hash;
 
     use spherecut_testkit::bench;
-    use spherecut_testkit::control::{at_most, must_fail};
+    use spherecut_testkit::control::{at_least, at_most, must_fail};
 
     use super::*;
     use crate::AXIS_MARKERS;
@@ -3796,13 +3797,15 @@ mod tests {
         let turned = DQuat::from_axis_angle(DVec3::Y, (30.0 * t).to_radians());
         let by_hand = turned * (lens.to_rig * lens.model.inverse(at).unwrap());
         let got = seen(&far, 1, 10, at).unwrap();
-        assert!((got - by_hand).length() <= 1e-15, "{got} against {by_hand}");
-        assert!((got.length() - 1.0).abs() <= 1e-15);
+        // Each of these four differences is rounding alone, which reaches
+        // 7e-16 at other points of this rig: 4e-15 leaves it room.
+        assert!((got - by_hand).length() <= 4e-15, "{got} against {by_hand}");
+        assert!((got.length() - 1.0).abs() <= 4e-15);
         // Control: the row above is exposed sooner.
         let above = seen(&far, 1, 10, at - DVec2::Y).unwrap();
         let sooner = DQuat::from_axis_angle(DVec3::Y, (30.0 / 64.0 / 32.0f64).to_radians());
         let same_time = lens.to_rig * lens.model.inverse(at - DVec2::Y).unwrap();
-        assert!((above - sooner.inverse() * turned * same_time).length() <= 1e-15);
+        assert!((above - sooner.inverse() * turned * same_time).length() <= 4e-15);
         must_fail(
             "the row above at this row's time",
             at_most((above - turned * same_time).length(), 1e-6),
@@ -3815,7 +3818,7 @@ mod tests {
         let point = sees(&near_scene, centre, by_hand);
         assert!((point.length() - 1.5).abs() <= 1e-12);
         let got = seen(&near_scene, 1, 10, at).unwrap();
-        assert!((got - point.normalize()).length() <= 1e-15);
+        assert!((got - point.normalize()).length() <= 4e-15);
         assert!((got - by_hand).length() > 1e-3);
 
         // Nothing past the image circle, nor outside the picture.
@@ -4279,6 +4282,20 @@ mod tests {
         Ok(())
     }
 
+    /// How far past its own edge of `lens`'s frame the direction `theta`
+    /// degrees off its axis lands along its image's +x, +y, −x and −y, in
+    /// pixels: below 0 inside the frame.
+    fn past_the_edge(lens: &LensTruth, theta: f64) -> [f64; 4] {
+        let side = f64::from(lens.side);
+        let at = |phi: f64| lens.model.forward(lens_dir(theta, phi)).unwrap();
+        [
+            at(0.0).x - side,
+            at(90.0).y - side,
+            -at(180.0).x,
+            -at(270.0).y,
+        ]
+    }
+
     /// The X5-like truth at 768² under maps A, B and C: centres 2 to 3 px
     /// off the slot's on each axis, and a frame that cuts the image
     /// circle on all four sides at 106°, where r is 393 to 399 px under C.
@@ -4314,16 +4331,17 @@ mod tests {
     }
 
     /// The V6 readings under which the X5-like V6 truth's frame doesn't
-    /// cut track 0's circle on all four sides at 768² under map C, each
-    /// with where its +y direction lands at 106°, in pixels down the
-    /// frame. Both read the tangential pair as (d6, d5) and the prism at
-    /// d9 by axis, whose y terms pull the bottom of the circle in: without
-    /// the pair's extension the direction lands 384.91 px from the centre,
-    /// 1.19 px inside the bottom edge, which the circle only reaches at
-    /// 106.54°; with it, 385.85 px from the centre and 0.25 px inside
-    /// (106.11°). The other three sides are cut, by 6.7 px or more, and
-    /// so are all four of track 1's.
-    const V6_UNCUT: [(TruthV6, f64); 2] = [
+    /// cut track 0's circle on all four sides at 768² under map C. Both
+    /// read the tangential pair as (d6, d5) and the prism at d9 by axis,
+    /// whose y terms pull the bottom of the circle in. With each: where
+    /// its +y direction lands at 106°, in pixels down the frame, and the
+    /// angle past which the circle reaches the bottom edge, to the 0.01°
+    /// below. Without the pair's extension the direction lands 1.19 px
+    /// inside the edge, which the circle reaches between 106.54° and
+    /// 106.55°; with it, 0.25 px inside, and between 106.11° and 106.12°.
+    /// The other three sides are cut, by 6.7 px or more, and so are all
+    /// four of track 1's.
+    const V6_UNCUT: [(TruthV6, f64, f64); 2] = [
         (
             TruthV6 {
                 tangential: Some(Tangential {
@@ -4335,7 +4353,8 @@ mod tests {
                     order: PrismOrder::ByAxis,
                 }),
             },
-            766.81,
+            766.805,
+            106.54,
         ),
         (
             TruthV6 {
@@ -4348,7 +4367,8 @@ mod tests {
                     order: PrismOrder::ByAxis,
                 }),
             },
-            767.75,
+            767.751,
+            106.11,
         ),
     ];
 
@@ -4356,13 +4376,15 @@ mod tests {
     /// of the 21 V6 readings (amendment 4): `x5_like`'s centres, and a
     /// frame that cuts the image circle on all four sides at 106°, as
     /// `x5_like`'s does. The two readings of `V6_UNCUT` are left out, and
-    /// held to miss where its doc says they do.
+    /// held to miss where its doc says they do, each side on its own.
     #[test]
     fn x5_like_v6_cuts_its_circle_under_every_reading() {
         let cal = x5_like_v6();
         assert_eq!(cal.generation(), Generation::V6);
         let v3 = compose(&x5_like(), &x5_like_planted(), 0, [X5_LIKE_SIDE; 2]);
         let mut cut_under = 0;
+        // The least that an uncut reading's other three sides are cut by.
+        let mut least_cut = f64::INFINITY;
         for v6 in TruthV6::all() {
             let planted = Planted {
                 v6,
@@ -4374,9 +4396,21 @@ mod tests {
                 assert_eq!(c, v3.lenses[t].model.intrinsics().1, "{v6:?}, track {t}");
                 assert_eq!(lens.theta_max, IMAGE_CIRCLE_DEG.to_radians());
             }
-            if let Some((_, y)) = V6_UNCUT.iter().find(|(uncut, _)| *uncut == v6) {
-                let at = cut(&rig.lenses[0], IMAGE_CIRCLE_DEG).unwrap_err();
-                assert!((at.y - y).abs() < 0.005, "{v6:?}: track 0 at {at}");
+            if let Some((_, y, reach)) = V6_UNCUT.iter().find(|(uncut, ..)| *uncut == v6) {
+                // Track 0's +y direction alone lands inside, `y` px down
+                // the frame, and the other three sides are cut.
+                let lens = &rig.lenses[0];
+                let past = past_the_edge(lens, IMAGE_CIRCLE_DEG);
+                let down = f64::from(lens.side) + past[1];
+                assert!((down - y).abs() < 0.005, "{v6:?}: track 0's +y at {down}");
+                for side in [0, 2, 3] {
+                    assert!(past[side] > 0.0, "{v6:?}: side {side} by {}", past[side]);
+                    least_cut = least_cut.min(past[side]);
+                }
+                // The circle reaches the bottom edge within 0.01° past
+                // `reach`, and no sooner.
+                assert_eq!(cut(lens, reach + 0.01), Ok(()), "{v6:?}");
+                must_fail("the bottom edge reached 0.01° sooner", cut(lens, *reach));
                 assert_eq!(cut(&rig.lenses[1], IMAGE_CIRCLE_DEG), Ok(()), "{v6:?}");
                 continue;
             }
@@ -4397,6 +4431,11 @@ mod tests {
             cut_under += 1;
         }
         assert_eq!(cut_under, 21 - V6_UNCUT.len());
+        assert!(least_cut >= 6.7, "{least_cut}");
+        must_fail(
+            "the uncut readings' other sides cut by 6.8 px",
+            at_least(least_cut, 6.8),
+        );
     }
 
     /// `kb_like` swaps each lens for an equidistant KB lens of
