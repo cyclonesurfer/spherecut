@@ -37,6 +37,10 @@ use spherecut_synth::lens::{
 use spherecut_synth::{Pattern, render_view_ideal};
 use spherecut_testkit::control::{at_least, at_most, must_fail};
 
+use common::budget::{
+    A0, A1, ACROSS_PX, ALONG_PX, B1, Budget, C0, C1, CENTRE_ACROSS_DEG, CENTRE_ALONG_DEG, D1,
+    NAMES, centres_apart, harmonics, seam_radius, sizes, slack_px, swapped, terms, worse,
+};
 use common::predict::{predict_bins, predict_through};
 use common::rig::{pats, sphere_rig};
 
@@ -271,17 +275,6 @@ const SCENE_AGAIN: (f64, f64) = (-2.5, 0.25);
 
 // What came back.
 
-/// The greater of the worst miss so far and one more, and NaN from the
-/// first that is NaN on: a miss that is no number (an invalid bin, a term
-/// the fit couldn't say) is never passed over for the misses around it.
-fn worse(worst: f64, miss: f64) -> f64 {
-    if worst.is_nan() || miss <= worst {
-        worst
-    } else {
-        miss
-    }
-}
-
 /// The furthest any bin's shift lies from (u, v), in strip pixels; NaN
 /// if a bin is invalid.
 fn worst_miss(bins: &[BinShift], (u, v): (f64, f64)) -> f64 {
@@ -290,13 +283,6 @@ fn worst_miss(bins: &[BinShift], (u, v): (f64, f64)) -> f64 {
         .map(|b| (b.along_deg * sx - u).hypot(-b.across_deg * sy - v))
         .fold(0.0, worse)
 }
-
-/// A signature's eight terms, in `signature_of`'s order.
-fn terms(s: &Signature) -> [f64; TERMS] {
-    [s.a0, s.a1, s.b1, s.a2, s.b2, s.c0, s.c1, s.d1]
-}
-
-const NAMES: [&str; TERMS] = ["a0", "a1", "b1", "a2", "b2", "c0", "c1", "d1"];
 
 /// The furthest any term of `got` lies from `want`'s; NaN if one is.
 fn worst_term(got: [f64; TERMS], want: [f64; TERMS]) -> f64 {
@@ -1235,173 +1221,6 @@ proptest! {
 
 // The predicted fields.
 
-/// 3.4's scales at 768²: source pixels a degree, across the seam and
-/// along it.
-const ACROSS_PX: f64 = 3.81;
-const ALONG_PX: f64 = 6.0;
-
-/// What a principal point a pixel off at 768² moves the seam by, in
-/// degrees across and along: half of 3.4's row for cx + 2 px.
-const CENTRE_ACROSS_DEG: f64 = 0.52 / 2.0;
-const CENTRE_ALONG_DEG: f64 = 0.33 / 2.0;
-
-/// The terms' places in [`terms`].
-const A0: usize = 0;
-const A1: usize = 1;
-const B1: usize = 2;
-const C0: usize = 5;
-const C1: usize = 6;
-const D1: usize = 7;
-
-/// How far a predicted figure may lie from 3.4's, in pixels at 768²: 15 %
-/// of the table's figure, or 0.2 px where that is more. The plan gives
-/// its table no tolerance; this one is the slice's.
-fn slack_px(table_px: f64) -> f64 {
-    (0.15 * table_px.abs()).max(0.2)
-}
-
-/// 3.4's rows as the test holds them: each prints as it is held, and the
-/// ones that miss wait for the test's end, so that a run reports every
-/// row.
-#[derive(Default)]
-struct Budget {
-    missed: Vec<String>,
-}
-
-impl Budget {
-    fn report(&mut self, line: String, fits: bool) {
-        eprintln!("3.4 | {line}{}", if fits { "" } else { ": MISSES" });
-        if !fits {
-            self.missed.push(line);
-        }
-    }
-
-    /// Holds a predicted figure to the table's, both in pixels at 768².
-    fn hold(&mut self, row: &str, got_px: f64, table_px: f64) {
-        let fits = (got_px - table_px).abs() <= slack_px(table_px);
-        self.report(
-            format!("{row}: {got_px:.2} px predicted, {table_px:.2} px in the table"),
-            fits,
-        );
-    }
-
-    /// Holds a predicted figure to `worked_px`, 3.4's arithmetic worked
-    /// again, where the table's own figure is wrong: the prediction fits
-    /// the one and misses the other.
-    fn hold_corrected(&mut self, row: &str, got_px: f64, worked_px: f64, table_px: f64) {
-        let fits = (got_px - worked_px).abs() <= slack_px(worked_px);
-        let table_fits = (got_px - table_px).abs() <= slack_px(table_px);
-        self.report(
-            format!(
-                "{row}: {got_px:.2} px predicted, {worked_px:.2} px worked again, {table_px:.2} \
-                 px in the table, which is wrong"
-            ),
-            fits && !table_fits,
-        );
-    }
-
-    /// Holds a predicted figure to one 3.4's arithmetic gives and its
-    /// table doesn't print.
-    fn hold_worked(&mut self, row: &str, got_px: f64, worked_px: f64) {
-        let fits = (got_px - worked_px).abs() <= slack_px(worked_px);
-        self.report(
-            format!("{row}: {got_px:.2} px predicted, {worked_px:.2} px worked, not in the table"),
-            fits,
-        );
-    }
-
-    /// Holds a field to the terms its row names, by 8.3's rule for the
-    /// measured ones: every other term under 0.03°, or 15 % of the
-    /// largest named.
-    fn terms(&mut self, row: &str, s: &Signature, named: &[usize]) {
-        let t = terms(s);
-        let size = |i: &usize| t[*i].abs();
-        let main = named.iter().map(size).fold(0.0, worse);
-        let other = (0..TERMS)
-            .filter(|i| !named.contains(i))
-            .max_by(|a, b| size(a).total_cmp(&size(b)))
-            .expect("a term the row doesn't name");
-        let names: Vec<&str> = named.iter().map(|&i| NAMES[i]).collect();
-        self.report(
-            format!(
-                "{row}: on {} ({main:.4}°), the largest other term {} ({:.4}°)",
-                names.join(", "),
-                NAMES[other],
-                t[other].abs()
-            ),
-            main.is_finite() && t[other].abs() <= (0.15 * main).max(0.03),
-        );
-    }
-}
-
-/// How far a field's bins move, in pixels at 768² by 3.4's scales, over
-/// its valid bins.
-struct Sizes {
-    /// The least and the most a bin moves.
-    least: f64,
-    most: f64,
-    /// The most a bin moves along the seam.
-    along: f64,
-}
-
-fn sizes(bins: &[BinShift]) -> Sizes {
-    let mut sizes = Sizes {
-        least: f64::INFINITY,
-        most: 0.0,
-        along: 0.0,
-    };
-    for b in bins.iter().filter(|b| b.valid) {
-        let (across, along) = (b.across_deg * ACROSS_PX, b.along_deg * ALONG_PX);
-        // `min` and `max` would pass a NaN over.
-        assert!(across.is_finite() && along.is_finite(), "{b:?}");
-        sizes.least = sizes.least.min(across.hypot(along));
-        sizes.most = sizes.most.max(across.hypot(along));
-        sizes.along = sizes.along.max(along.abs());
-    }
-    sizes
-}
-
-/// A field's first harmonic across the seam, and along it, in degrees.
-fn harmonics(s: &Signature) -> (f64, f64) {
-    (s.a1.hypot(s.b1), s.c1.hypot(s.d1))
-}
-
-/// The radius of the seam's circle in a lens's picture, in its slot's
-/// pixels: r(90°) from where the lens's axis shows, averaged round the
-/// lens.
-fn seam_radius(lens: &RigLens) -> f64 {
-    let at = |d: DVec3| lens.model.project(d).expect("a direction the lens shows");
-    let axis = at(DVec3::Z);
-    let round = (0..360).map(|deg| {
-        let (sin, cos) = f64::from(deg).to_radians().sin_cos();
-        (at(DVec3::new(cos, sin, 0.0)) - axis).length()
-    });
-    round.sum::<f64>() / 360.0
-}
-
-/// How far apart a calibration's two principal points lie, each in its
-/// own square, in pixels at 768² under map C: block 0's less block 1's.
-fn centres_apart(cal: &CalibTruth) -> [f64; 2] {
-    let src = f64::from(cal.canvas[1]);
-    let to_slot = f64::from(X5_LIKE_SIDE) / src;
-    let [first, second] = &cal.blocks;
-    [
-        (first.cx - (second.cx - src)) * to_slot,
-        (first.cy - second.cy) * to_slot,
-    ]
-}
-
-/// `direct` with each track's lens taking, through `part`, what `reversed`
-/// has on that track: a part of what reversing the binding swaps.
-fn swapped(direct: &Rig, reversed: &Rig, part: impl Fn(&mut RigLens, &RigLens)) -> Rig {
-    let mut lenses = direct.lenses;
-    for lens in &mut lenses {
-        let there = reversed.lenses.iter().find(|l| l.track == lens.track);
-        part(lens, there.expect("a lens on each track"));
-    }
-    Rig { lenses, ..*direct }
-}
-
 /// `predict_bins`' fields for the differences 3.4's error budget plants
 /// have the terms and the sizes 3.4 works out, each within 15 % or 0.2 px
 /// at 768² (the plan gives no tolerance; this is the slice's). No images:
@@ -1439,7 +1258,7 @@ fn predicted_fields_match_the_error_budget() {
         sphere_rig(cal, planted, tune, 0, sides).expect("a rig")
     };
     let predict = |truth: &RigTruth, rig: &Rig| predict_bins(truth, 0, rig, &SPEC);
-    let mut budget = Budget::default();
+    let mut budget = Budget::of("predicted");
 
     // Tier 1's rig, and the model that is its truth, which leaves no
     // shift.
