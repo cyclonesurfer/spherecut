@@ -106,15 +106,19 @@ fn weight(holds: bool) -> f64 {
 /// more than one rig to try on one pair of frames, as the fit has (8.4),
 /// makes a [`LensPair`] and calls [`strips_of`].
 ///
-/// Refuses what [`crate::reference::render_rig`] refuses of the rig and
-/// the planes, and a spec whose scale or band isn't finite and above 0,
-/// whose band passes 90°, or whose strip has no pixels or more than
-/// [`MAX_STRIP_PIXELS`].
+/// Refuses a spec whose scale or band isn't finite and above 0, whose
+/// band passes 90°, or whose strip has no pixels or more than
+/// [`MAX_STRIP_PIXELS`], and what [`crate::reference::render_rig`]
+/// refuses of the rig and then of the planes, in that order: a call
+/// refused for its spec or its rig builds no chain.
 pub fn strips(
     rig: &Rig,
     lenses: [&dyn VideoPlanes; 2],
     spec: &StripSpec,
 ) -> Result<Strips, RenderError> {
+    // What `strips_of` refuses, before the chains are paid for.
+    strip_size(spec)?;
+    check_tracks(rig)?;
     strips_of(&LensPair::new(lenses)?, rig, spec)
 }
 

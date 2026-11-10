@@ -237,9 +237,10 @@ pub fn render_blurred(
 /// more than one picture to make of one pair of frames makes a
 /// [`LensPair`] and calls [`render_rig_of`].
 ///
-/// Refuses a rig whose block reads a track other than 0 or 1 or whose
-/// blocks both read one track, a gain that isn't finite or is below 0,
-/// and planes [`render`] would refuse.
+/// Refuses a gain that isn't finite or is below 0, a rig whose block
+/// reads a track other than 0 or 1 or whose blocks both read one track,
+/// and planes [`render`] would refuse, in that order: a call refused for
+/// its gains or its rig builds no chain.
 pub fn render_rig(
     lenses: [&dyn VideoPlanes; 2],
     rig: &Rig,
@@ -248,6 +249,9 @@ pub fn render_rig(
     size: (u32, u32),
     opts: &RigOptions,
 ) -> Result<ImageF64, RenderError> {
+    // What `render_rig_of` refuses, before the chains are paid for.
+    check_gains(&gains)?;
+    check_tracks(rig)?;
     render_rig_of(&LensPair::new(lenses)?, rig, gains, view, size, opts)
 }
 
@@ -266,15 +270,7 @@ pub fn render_rig_of(
     size: (u32, u32),
     opts: &RigOptions,
 ) -> Result<ImageF64, RenderError> {
-    if let Some(gain) = gains
-        .iter()
-        .flatten()
-        .find(|g| !(g.is_finite() && **g >= 0.0))
-    {
-        return Err(RenderError::Invalid(format!(
-            "a lens's gain is {gain}: a gain is finite and 0 or more"
-        )));
-    }
+    check_gains(&gains)?;
     check_tracks(rig)?;
     let pixels = per_pixel_rows(size, |px| pair.shade(rig, &gains, view, size, px, opts));
     Ok(ImageF64 {
@@ -282,6 +278,20 @@ pub fn render_rig_of(
         height: size.1,
         data: pixels.into_iter().flatten().collect(),
     })
+}
+
+/// Refuses a gain that isn't a finite number of 0 or more.
+fn check_gains(gains: &[[f64; 3]; 2]) -> Result<(), RenderError> {
+    match gains
+        .iter()
+        .flatten()
+        .find(|g| !(g.is_finite() && **g >= 0.0))
+    {
+        Some(gain) => Err(RenderError::Invalid(format!(
+            "a lens's gain is {gain}: a gain is finite and 0 or more"
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Pixel `(i, j)`'s footprint in calibration block `b`'s slot, in texels:

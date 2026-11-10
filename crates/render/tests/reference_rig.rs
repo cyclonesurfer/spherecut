@@ -1505,6 +1505,50 @@ fn rig_lenses_come_from_their_tracks() {
         );
     }
     must_fail("the rig's own tracks refused", refusal(&rig));
+
+    // Those refusals, the gains' and the spec's come before the pictures
+    // are made ready, which is most of what a small call costs: with a
+    // picture that has lost a plane as well, the refusal is still the
+    // gains', the rig's or the spec's, and the picture's only when there
+    // is nothing else to refuse. The pair made ready first would refuse
+    // the picture every time.
+    let mut short = camera.frames[1].clone();
+    short.planes.pop();
+    let broken: [&dyn VideoPlanes; 2] = [by_track[0], &short];
+    let refused_for = |result: Result<(), RenderError>, word: &str| match result {
+        Err(RenderError::Invalid(why)) if why.contains(word) => Ok(()),
+        other => Err(format!("{other:?}, not a refusal for {word:?}")),
+    };
+    let opts = RigOptions::default();
+    let below_0 = [[1.0, -1.0, 1.0], [1.0; 3]];
+    let no_scale = StripSpec {
+        px_per_deg: f64::NAN,
+        ..spec
+    };
+    let picture = |rig: &Rig, gains: [[f64; 3]; 2]| {
+        render_rig(broken, rig, gains, view, (8, 4), &opts).map(|_| ())
+    };
+    let unwrapped = |rig: &Rig, spec: &StripSpec| strips(rig, broken, spec).map(|_| ());
+    refused_for(picture(&rig, below_0), "gain").expect("the gain's refusal");
+    refused_for(picture(&third, UNIT), "track 2").expect("the rig's refusal");
+    refused_for(unwrapped(&rig, &no_scale), "a strip of").expect("the spec's refusal");
+    refused_for(unwrapped(&third, &spec), "track 2").expect("the rig's refusal");
+    refused_for(picture(&rig, UNIT), "has no plane").expect("the picture's refusal");
+    refused_for(unwrapped(&rig, &spec), "has no plane").expect("the picture's refusal");
+    let ready_first = LensPair::new(broken)
+        .and_then(|pair| render_rig_of(&pair, &rig, below_0, view, (8, 4), &opts))
+        .map(|_| ());
+    must_fail(
+        "the pair made ready before the gains are looked at",
+        refused_for(ready_first, "gain"),
+    );
+    let ready_first = LensPair::new(broken)
+        .and_then(|pair| strips_of(&pair, &rig, &no_scale))
+        .map(|_| ());
+    must_fail(
+        "the pair made ready before the spec is looked at",
+        refused_for(ready_first, "a strip of"),
+    );
 }
 
 /// A block is 0 or 1: `lens_footprint` and `lens_coverage` say so of any
