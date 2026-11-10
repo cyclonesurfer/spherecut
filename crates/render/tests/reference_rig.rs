@@ -23,6 +23,15 @@
 //! most, which a blend made after rounding, a gain on display values or
 //! another LOD miss.
 //!
+//! A NaN is never a value to hold a picture by: `f64::max` drops one, and
+//! a NaN pixel isn't black. So every picture and every strip is held to be
+//! finite where it is made ([`finite`], [`finite_strips`]), and each worst
+//! miss is folded through `worse`, which keeps a NaN from the first on.
+//!
+//! The scene's pictures are made on a [`LensPair`] made ready once
+//! (`render_rig_of`), which [`a_pair_made_ready_once_serves_every_rig`]
+//! holds to `render_rig`, bit for bit.
+//!
 //! Budget (4.1 rule 5, 19.6): 2 s of the 15 s that M3.4's suites share;
 //! each test prints its time and the suite's.
 
@@ -40,9 +49,12 @@ use spherecut_render::compare::{View, Weights, psnr, psnr_weighted};
 use spherecut_render::plane::mip_levels;
 use spherecut_render::readback::round_f16;
 use spherecut_render::reference::{
-    ImageF64, RigDebug, RigOptions, halve_codes, lens_footprint, render_rig, uv_footprint,
+    ImageF64, LensPair, RigDebug, RigOptions, halve_codes, lens_footprint, render_rig,
+    render_rig_of, row_threads, uv_footprint,
 };
-use spherecut_render::seam::{StripSpec, band_weights, lens_coverage, strips};
+use spherecut_render::seam::{
+    StripSpec, Strips, band_weights, lens_coverage, strip_coverage, strips, strips_of,
+};
 use spherecut_render::{Framing, RenderError, ViewParams};
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_sphere::rig::{LensTune, Rig, Tune};
@@ -54,6 +66,7 @@ use spherecut_synth::{Pattern, render_view_ideal};
 use spherecut_testkit::control::{above, at_least, at_most, must_fail};
 
 use common::Frame;
+use common::budget::worse;
 use common::rig::{lens_frame, sphere_rig};
 
 /// The suite's budget in seconds (the module's doc).
@@ -89,9 +102,10 @@ impl Drop for Timed {
     }
 }
 
-/// How many threads `render_rig` deals its rows to here.
+/// How many threads `render_rig` deals its rows to here: the reference's
+/// own count.
 fn threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get())
+    row_threads()
 }
 
 // The scene.
@@ -115,6 +129,8 @@ struct Scene {
     /// what bounds the lens there (10.5's `dfish_mask_margin`).
     wide: Rig,
     frames: [Frame; 2],
+    /// The frames made ready to sample, once.
+    pair: LensPair,
     planes: [Planes; 2],
 }
 
@@ -156,6 +172,7 @@ fn scene() -> &'static Scene {
         let scene = Scene {
             rig: rig(100.0),
             wide: rig(104.0),
+            pair: LensPair::new([&frames[0], &frames[1]]).expect("the pair is made ready"),
             planes: [Planes::of(&frames[0]), Planes::of(&frames[1])],
             frames,
         };
@@ -172,7 +189,7 @@ impl Scene {
         [&self.frames[0], &self.frames[1]]
     }
 
-    /// `rig`'s picture of the scene through `view`.
+    /// `rig`'s picture of the scene through `view`, finite.
     fn render(
         &self,
         rig: &Rig,
@@ -184,8 +201,47 @@ impl Scene {
             debug,
             level0: false,
         };
-        render_rig(self.lenses(), rig, gains, view, *size, &opts).expect("the pair renders")
+        let picture = render_rig_of(&self.pair, rig, gains, view, *size, &opts);
+        finite("a picture of the scene", picture.expect("the pair renders"))
     }
+
+    /// `rig`'s strips of the scene, finite.
+    fn strips(&self, rig: &Rig, spec: &StripSpec) -> Strips {
+        finite_strips(strips_of(&self.pair, rig, spec).expect("the strips"))
+    }
+}
+
+/// Whether every one of `values` is a finite number, or the first that
+/// isn't.
+fn all_finite(what: &str, values: impl IntoIterator<Item = f64>) -> Result<(), String> {
+    match values.into_iter().enumerate().find(|v| !v.1.is_finite()) {
+        Some((n, v)) => Err(format!("{what}: value {n} is {v}")),
+        None => Ok(()),
+    }
+}
+
+/// `picture`, every value of it held to be finite.
+fn finite(what: &str, picture: ImageF64) -> ImageF64 {
+    if let Err(why) = all_finite(what, picture.data.iter().copied()) {
+        panic!("{why}");
+    }
+    picture
+}
+
+/// Every value of both strips, the invalid samples' zeros too.
+fn strip_values(strips: &Strips) -> impl Iterator<Item = f64> + '_ {
+    strips
+        .lenses
+        .iter()
+        .flat_map(|strip| strip.rgb.iter().flatten().copied())
+}
+
+/// `strips`, every sample of them held to be finite.
+fn finite_strips(strips: Strips) -> Strips {
+    if let Err(why) = all_finite("a strip", strip_values(&strips)) {
+        panic!("{why}");
+    }
+    strips
 }
 
 /// `rig` with its mask's frame term defeated: each lens's side, which the
@@ -490,21 +546,67 @@ fn steps_off(got: f64, want: f64) -> f64 {
 const NEAREST: f64 = 0.5 + 1e-6;
 
 /// The most any channel of `picture`'s pixel `n` is off `want`, in the
-/// target's steps.
+/// target's steps; NaN if either holds one.
 fn pixel_steps(picture: &ImageF64, n: usize, want: [f64; 3]) -> f64 {
     pixel(picture, n)
         .into_iter()
         .zip(want)
         .map(|(got, want)| steps_off(got, want))
-        .fold(0.0, f64::max)
+        .fold(0.0, worse)
 }
 
 /// The most any channel of `picture` is off what `want` gives for its
-/// pixel (the pixel's index, row after row), in the target's steps.
+/// pixel (the pixel's index, row after row), in the target's steps; NaN
+/// if either holds one.
 fn worst_steps(picture: &ImageF64, want: impl Fn(usize) -> [f64; 3]) -> f64 {
     (0..picture.data.len() / 3)
         .map(|n| pixel_steps(picture, n, want(n)))
-        .fold(0.0, f64::max)
+        .fold(0.0, worse)
+}
+
+/// Hermite's smooth step from `lo` to `hi`; where they meet, a step at
+/// `lo` that is ½ on it, as 6.2's feather of 0 is.
+fn ramp(lo: f64, hi: f64, x: f64) -> f64 {
+    if hi <= lo {
+        return match x.partial_cmp(&lo) {
+            Some(std::cmp::Ordering::Less) => 0.0,
+            Some(std::cmp::Ordering::Equal) => 0.5,
+            _ => 1.0,
+        };
+    }
+    let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// 6.2's weights as they stood before a covering lens took what no
+/// feather weighs (a control, and the weights wherever a feather weighs):
+/// each covering lens's 1 − smoothstep over 90° ± its own h, normalised,
+/// and both 0 where they sum to 0.
+fn feathers_alone(rig: &Rig, p: &Probe) -> [f64; 2] {
+    let w = [0, 1].map(|b| {
+        if !rig.covers(b, p.d, p.lod[b]) {
+            return 0.0;
+        }
+        let h = rig.feather_at(b, p.lod[b]);
+        1.0 - ramp(FRAC_PI_2 - h, FRAC_PI_2 + h, off_axis(rig.ray(b, p.d)))
+    });
+    let sum = w[0] + w[1];
+    if sum > 0.0 { w.map(|w| w / sum) } else { w }
+}
+
+/// What 6.2 gives a pixel that no feather weighs, by the test's own
+/// reading of the rule: the covering lens nearer its own axis, whole
+/// (½ each were the two as near), and 0 only where no lens covers.
+fn taken_whole(rig: &Rig, p: &Probe) -> [f64; 2] {
+    let theta = [0, 1].map(|b| off_axis(rig.ray(b, p.d)));
+    match [0, 1].map(|b| rig.covers(b, p.d, p.lod[b])) {
+        [true, true] if theta[0] < theta[1] => [1.0, 0.0],
+        [true, true] if theta[1] < theta[0] => [0.0, 1.0],
+        [true, true] => [0.5; 2],
+        [true, false] => [1.0, 0.0],
+        [false, true] => [0.0, 1.0],
+        [false, false] => [0.0; 2],
+    }
 }
 
 /// The stitch at one pixel, in linear light before the target rounds it:
@@ -588,8 +690,8 @@ fn rig_footprint_is_the_projected_half_pixel_rays() {
                     [across(h, 0.0), across(0.0, h)].map(|g| g.expect("a texel") / (2.0 * h));
                 let whole = [across(1.0, 0.0), across(0.0, 1.0)].map(|g| g.expect("a texel"));
                 for (k, g) in [gx, gy].into_iter().enumerate() {
-                    curve = curve.max((g - slope[k]).length() / slope[k].length());
-                    doubled = doubled.max((whole[k] - slope[k]).length() / slope[k].length());
+                    curve = worse(curve, (g - slope[k]).length() / slope[k].length());
+                    doubled = worse(doubled, (whole[k] - slope[k]).length() / slope[k].length());
                 }
             }
         }
@@ -638,8 +740,8 @@ fn rig_footprint_is_the_projected_half_pixel_rays() {
                     assert_eq!(pixel(&picture, n), BLACK, "lens {b}, pixel {n}");
                 }
             }
-            worst = worst.max(worst_steps(&picture, |n| light(n, probes[n].lod[b])));
-            worst_uv = worst_uv.max(worst_steps(&picture, |n| light(n, uv_lod(n))));
+            worst = worse(worst, worst_steps(&picture, |n| light(n, probes[n].lod[b])));
+            worst_uv = worse(worst_uv, worst_steps(&picture, |n| light(n, uv_lod(n))));
         }
     }
     eprintln!(
@@ -727,14 +829,31 @@ fn rig_mask_and_weights_are_the_rigs() {
         let p = &probes[n];
         s.planes[s.rig.lenses[b].track].light(p.texel[b].expect("a texel"), p.lod[b])
     };
-    let blend = worst_steps(&stitched, |n| blended(&s.rig, &probes[n], |b| light(n, b)));
+    // What the test works out once for each pixel: the weights, each
+    // weighed lens's light, and their blend.
+    let weights: Vec<[f64; 2]> = probes.iter().map(|p| s.rig.weights(p.d, p.lod)).collect();
+    let lights: Vec<[[f64; 3]; 2]> = (0..probes.len())
+        .map(|n| {
+            [0, 1].map(|b| {
+                if weights[n][b] > 0.0 {
+                    light(n, b)
+                } else {
+                    BLACK
+                }
+            })
+        })
+        .collect();
+    let wants: Vec<[f64; 3]> = (0..probes.len())
+        .map(|n| mixed(weights[n], |b| lights[n][b]))
+        .collect();
+    let blend = worst_steps(&stitched, |n| wants[n]);
     let rounded_first = worst_steps(&stitched, |n| {
-        blended(&s.rig, &probes[n], |b| light(n, b).map(round_f16))
+        mixed(weights[n], |b| lights[n][b].map(round_f16))
     });
-    let band = probes
-        .iter()
-        .filter(|p| s.rig.weights(p.d, p.lod).iter().all(|w| *w > 0.0))
-        .count();
+    let blended_pixels: Vec<usize> = (0..probes.len())
+        .filter(|n| weights[*n].iter().all(|w| *w > 0.0))
+        .collect();
+    let band = blended_pixels.len();
     eprintln!(
         "the stitch against the test's blend: {blend:.4} f16 steps at most over {band} blended \
          pixels; blended after rounding {rounded_first:.3}"
@@ -744,34 +863,67 @@ fn rig_mask_and_weights_are_the_rigs() {
     let off = must_fail("the blend after rounding", at_most(rounded_first, NEAREST));
     assert!(off > 0.7, "{off}");
 
+    // A NaN is no value of a picture. One planted in a blended pixel
+    // fails the picture's own check, and its worst miss is no number,
+    // which holds nothing; a fold by `f64::max` passes over it.
+    let blended_pixel = blended_pixels[0];
+    let mut planted = stitched.clone();
+    planted.data[3 * blended_pixel + 1] = f64::NAN;
+    let why = must_fail(
+        "a NaN planted in the picture",
+        all_finite("the picture", planted.data.iter().copied()),
+    );
+    assert!(why.contains("NaN"), "{why}");
+    let miss = worst_steps(&planted, |n| wants[n]);
+    assert!(miss.is_nan(), "{miss}");
+    must_fail("a NaN planted in the picture, compared", miss <= NEAREST);
+    let by_max = (0..wants.len())
+        .flat_map(|n| pixel(&planted, n).into_iter().zip(wants[n]))
+        .map(|(got, want)| steps_off(got, want))
+        .fold(0.0, f64::max);
+    assert!(by_max <= NEAREST, "{by_max}");
+
     // The frame term keeps every sample off the slot's edge: with θ_max
     // past the frame, lens 0 alone is black outside its coverage. With
-    // the term defeated the edge's texels repeat past it, as streaks
-    // (10.5's control).
-    let shot = equirect(192);
+    // the term defeated it lights pixels there whose taps read past the
+    // picture's edge, where a sampler repeats the edge's texels as
+    // streaks (10.5's control): those are what the control counts, and
+    // not the pixels the looser mask lights from texels the picture
+    // holds, inside the margin beside its edges. The seam on the right
+    // at the source's own scale has both; a small equirect, whose margin
+    // is wide, has none that reads past the edge.
+    let shot = right_close(128);
+    let probes = view_probes(&s.wide, &shot);
     let outside: Vec<bool> = lens_coverage(&s.wide, 0, &shot.0, shot.1)
         .iter()
         .map(|w| *w == 0.0)
         .collect();
-    let brightest_outside = |rig: &Rig| {
+    let planes = &s.planes[s.wide.lenses[0].track];
+    // The pixels outside lens 0's coverage that `rig` lights: those whose
+    // taps read past the picture's edge, and the rest.
+    let lit_outside = |rig: &Rig| {
         let picture = s.render(rig, UNIT, &shot, RigDebug::Lens0);
-        (0..outside.len())
-            .filter(|n| outside[*n])
-            .flat_map(|n| pixel(&picture, n))
-            .fold(0.0, f64::max)
+        let (mut past, mut within) = (0usize, 0usize);
+        for (n, p) in probes.iter().enumerate() {
+            if outside[n] && pixel(&picture, n) != BLACK {
+                let texel = p.texel[0].expect("a lit pixel's texel");
+                if planes.reads_past_the_edge(texel, p.lod[0]) {
+                    past += 1;
+                } else {
+                    within += 1;
+                }
+            }
+        }
+        (past, within)
     };
-    assert_eq!(brightest_outside(&s.wide), 0.0);
-    let streak = must_fail(
-        "the frame term defeated",
-        at_most(
-            brightest_outside(&frame_term_defeated(&s.wide)),
-            4.0 / 255.0,
-        ),
-    );
+    assert_eq!(lit_outside(&s.wide), (0, 0));
+    let (past, within) = lit_outside(&frame_term_defeated(&s.wide));
+    let off = must_fail("the frame term defeated", at_most(past, 0));
     eprintln!(
-        "the frame term defeated: {:.1} LSB outside lens 0's coverage",
-        streak * 255.0
+        "the frame term defeated: {off} pixels outside lens 0's coverage lit from past the \
+         picture's edge, and {within} from inside it"
     );
+    assert!(off > 30, "{off}");
 }
 
 /// Each lens's gain multiplies its linear light, after its EOTF and
@@ -840,7 +992,7 @@ fn rig_gains_apply_in_linear_light() {
         for c in 0..3 {
             let got = difference.data[3 * n + c];
             let off = |of: &[[f64; 3]; 2]| linear_steps_off(got, (of[0][c] - of[1][c]).abs() * 8.0);
-            worst = [worst[0].max(off(&lit)), worst[1].max(off(&unlit))];
+            worst = [worse(worst[0], off(&lit)), worse(worst[1], off(&unlit))];
         }
     }
     assert!(worst[0] <= NEAREST, "{worst:?}");
@@ -874,7 +1026,11 @@ fn rig_dims_past_the_frame_and_level0_takes_level_0() {
     let (planes, rig) = (&camera.planes, &camera.rig);
     let render = |(view, size): &Shot, debug: RigDebug, level0: bool| {
         let opts = RigOptions { debug, level0 };
-        render_rig(camera.lenses(), rig, UNIT, view, *size, &opts).expect("the pair renders")
+        let picture = render_rig(camera.lenses(), rig, UNIT, view, *size, &opts);
+        finite(
+            "a picture of the reversed camera",
+            picture.expect("the pair renders"),
+        )
     };
 
     // The seam view's lens over a frame of 32² in the middle of a 64²
@@ -959,8 +1115,8 @@ fn rig_dims_past_the_frame_and_level0_takes_level_0() {
         for (c, got) in pixel(&difference, n).into_iter().enumerate() {
             let apart = 8.0 * (lights[n][0][c] - lights[n][1][c]).abs();
             worst = [
-                worst[0].max(linear_steps_off(got, apart)),
-                worst[1].max(linear_steps_off(got, apart * dim_at(n))),
+                worse(worst[0], linear_steps_off(got, apart)),
+                worse(worst[1], linear_steps_off(got, apart * dim_at(n))),
             ];
         }
     }
@@ -1031,7 +1187,7 @@ fn rig_dims_past_the_frame_and_level0_takes_level_0() {
 
 /// Modes 4 and 5 draw each lens alone, 6 the weights (red w0, blue w1)
 /// and 7 the seam difference where both cover; the stitch they are read
-/// beside is black where neither lens weighs.
+/// beside is black where no lens covers.
 #[test]
 fn rig_debug_modes_4_to_7() {
     let _t = timed("rig_debug_modes_4_to_7");
@@ -1056,11 +1212,14 @@ fn rig_debug_modes_4_to_7() {
         for (n, p) in probes.iter().enumerate() {
             let w = rig.weights(p.d, p.lod);
             let covers = [0, 1].map(|b| rig.covers(b, p.d, p.lod[b]));
-            // The stitch is black where neither lens weighs, and only
-            // there: where the masks' margins, which grow with the LOD,
-            // leave a gap at the seam. A margin an LOD wider leaves a
-            // wider gap, which the stitch draws in.
-            if w == [0.0; 2] {
+            // The stitch is black where no lens covers, and only there,
+            // as its weights are both 0 only there: where the masks'
+            // margins, which grow with the LOD, leave a gap at the seam.
+            // A margin an LOD wider leaves a wider gap, which the stitch
+            // draws in.
+            let uncovered = !(covers[0] || covers[1]);
+            assert_eq!(w == [0.0; 2], uncovered, "pixel {n}");
+            if uncovered {
                 assert_eq!(pixel(&stitched, n), BLACK, "pixel {n}");
                 gap += 1;
             } else {
@@ -1106,9 +1265,9 @@ fn rig_debug_modes_4_to_7() {
                     let apart = (light[0][c] - light[1][c]).abs();
                     let off = linear_steps_off(got, 8.0 * apart);
                     assert!(off <= NEAREST, "pixel {n}: {got} for {apart}, {off} steps");
-                    unscaled = unscaled.max(linear_steps_off(got, apart));
+                    unscaled = worse(unscaled, linear_steps_off(got, apart));
                     if reported {
-                        largest = largest.max(got);
+                        largest = worse(largest, got);
                         means[0] += got;
                     }
                 }
@@ -1133,8 +1292,8 @@ fn rig_debug_modes_4_to_7() {
         } else {
             let (pixels, wider) = (probes.len(), drawn_in_wider + gap);
             eprintln!(
-                "the stitch at {} × {}: black at the {gap} of its {pixels} pixels that \
-                 neither lens weighs; a margin an LOD wider leaves {wider}",
+                "the stitch at {} × {}: black at the {gap} of its {pixels} pixels that no \
+                 lens covers; a margin an LOD wider leaves {wider}",
                 shot.1.0, shot.1.1
             );
             assert!(gap > 100, "{gap}");
@@ -1203,7 +1362,11 @@ fn rig_lenses_come_from_their_tracks() {
             debug,
             level0: false,
         };
-        render_rig(lenses, &rig, gains, view, *size, &opts).expect("the pair renders")
+        let picture = render_rig(lenses, &rig, gains, view, *size, &opts);
+        finite(
+            "a picture of the reversed camera",
+            picture.expect("the pair renders"),
+        )
     };
 
     // Each block alone is the test's taps of its own track's planes
@@ -1225,9 +1388,9 @@ fn rig_lenses_come_from_their_tracks() {
             let off = |light: [f64; 3], gain: [f64; 3]| {
                 pixel_steps(&picture, n, [0, 1, 2].map(|c| light[c] * gain[c]))
             };
-            own = own.max(off(light[0], gains[b]));
-            indexed = indexed.max(off(light[1], gains[b]));
-            of_track = of_track.max(off(light[0], gains[track]));
+            own = worse(own, off(light[0], gains[b]));
+            indexed = worse(indexed, off(light[1], gains[b]));
+            of_track = worse(of_track, off(light[0], gains[track]));
         }
     }
     assert!(own <= NEAREST, "{own}");
@@ -1246,7 +1409,7 @@ fn rig_lenses_come_from_their_tracks() {
         px_per_deg: 1.0,
         ..StripSpec::TIER1
     };
-    let unwrapped = strips(&rig, by_track, &spec).expect("the strips");
+    let unwrapped = finite_strips(strips(&rig, by_track, &spec).expect("the strips"));
     let strip_probes = crate::probes(&rig, |x, y| spec.dir(x, y), spec.size());
     let (mut both_valid, mut strip_own, mut strip_swapped) = (0usize, 0.0f64, 0.0f64);
     for (n, p) in strip_probes.iter().enumerate() {
@@ -1261,8 +1424,8 @@ fn rig_lenses_come_from_their_tracks() {
             let want = planes[rig.lenses[b].track].light(texel, p.lod[b]);
             for (c, want) in want.into_iter().enumerate() {
                 let off = |strip: usize| (unwrapped.lenses[strip].rgb[n][c] - want).abs();
-                strip_own = strip_own.max(off(b));
-                strip_swapped = strip_swapped.max(off(rig.lenses[b].track));
+                strip_own = worse(strip_own, off(b));
+                strip_swapped = worse(strip_swapped, off(rig.lenses[b].track));
             }
         }
     }
@@ -1315,13 +1478,174 @@ fn rig_lenses_come_from_their_tracks() {
     );
     assert!(stitched > 20.0, "{stitched}");
 
-    // A rig whose block names a track the pair doesn't have is refused.
+    // A rig whose block names a track the pair doesn't have is refused,
+    // and one whose blocks both read one track: each block reads its own
+    // (`Rig::build` gives no other rig), by `render_rig` and by `strips`
+    // in the same words.
+    let refusal = |rig: &Rig| {
+        let picture = render_rig(by_track, rig, UNIT, view, (8, 4), &RigOptions::default());
+        let unwrapped = strips(rig, by_track, &spec);
+        match (picture, unwrapped) {
+            (Err(RenderError::Invalid(a)), Err(RenderError::Invalid(b))) if a == b => Ok(a),
+            (picture, unwrapped) => Err(format!("{picture:?}, {:?}", unwrapped.map(|_| ()))),
+        }
+    };
     let mut third = rig;
     third.lenses[1].track = 2;
-    let refused = render_rig(by_track, &third, UNIT, view, (8, 4), &RigOptions::default());
+    let why = refusal(&third).expect("refused");
+    assert!(why.contains("track 2"), "{why}");
+    for track in 0..2 {
+        let mut one = rig;
+        one.lenses[0].track = track;
+        one.lenses[1].track = track;
+        let why = refusal(&one).expect("refused");
+        assert!(
+            why.contains(&format!("both blocks of the rig read track {track}")),
+            "{why}"
+        );
+    }
+    must_fail("the rig's own tracks refused", refusal(&rig));
+}
+
+/// A block is 0 or 1: `lens_footprint` and `lens_coverage` say so of any
+/// other, whatever the size, before a row's thread can lose the message.
+#[test]
+fn a_block_no_rig_has_is_refused() {
+    let _t = timed("a_block_no_rig_has_is_refused");
+    let rig = reversed().rig;
+    let (view, _) = equirect(8);
+    // What the call panics with, if it does.
+    let message = |call: &(dyn Fn() + std::panic::RefUnwindSafe)| {
+        let panicked = std::panic::catch_unwind(call).err()?;
+        let text = panicked.downcast_ref::<String>().cloned();
+        text.or_else(|| panicked.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+    };
+    let refused = Some("block 2: a rig's blocks are 0 and 1".to_owned());
+    for size in [(8, 4), (0, 0)] {
+        let footprint = |b: usize| {
+            message(&|| {
+                let _ = lens_footprint(&rig, b, &view, size, 0, 0);
+            })
+        };
+        let coverage = |b: usize| {
+            message(&|| {
+                let _ = lens_coverage(&rig, b, &view, size);
+            })
+        };
+        assert_eq!(footprint(2), refused, "{size:?}");
+        assert_eq!(coverage(2), refused, "{size:?}");
+        must_fail(
+            "block 1's footprint refused as block 2's is",
+            footprint(1).is_some(),
+        );
+        must_fail(
+            "block 1's coverage refused as block 2's is",
+            coverage(1).is_some(),
+        );
+    }
+}
+
+/// A pair made ready once serves every rig, view and strip of its two
+/// frames (8.4's fit tries many rigs on one pair): `render_rig_of` and
+/// `strips_of` give what `render_rig` and `strips` give afresh, bit for
+/// bit, whichever rig the pair served before.
+#[test]
+fn a_pair_made_ready_once_serves_every_rig() {
+    let _t = timed("a_pair_made_ready_once_serves_every_rig");
+    let camera = reversed();
+    let lenses = camera.lenses();
+    let pair = LensPair::new(lenses).expect("the pair is made ready");
+
+    // Two rigs of the two frames: the camera's own, whose block 0 reads
+    // track 1, and one that reads the tracks the other way round, with
+    // another θ_max, feather and stitch distance.
+    let first = camera.rig;
+    let second = {
+        let tune = Tune {
+            lenses: [
+                LensTune {
+                    theta_max_deg: 104.0,
+                    ..LensTune::default()
+                },
+                LensTune::default(),
+            ],
+            feather_deg: 2.0,
+            q_per_m: 0.5,
+        };
+        sphere_rig(&x5_like(), &x5_like_planted(), &tune, 0, [QUARTER; 2]).expect("the rig builds")
+    };
+    assert_eq!([second.lenses[0].track, second.lenses[1].track], [0, 1]);
+    // The second rig as a pair that kept the first's binding would
+    // sample it.
+    let bound_as_first = {
+        let mut rig = second;
+        for b in 0..2 {
+            rig.lenses[b].track = first.lenses[b].track;
+        }
+        rig
+    };
+
+    let gains = [[0.9, 1.0, 0.8], [1.1, 1.0, 1.2]];
+    let spec = StripSpec {
+        px_per_deg: 0.5,
+        half_band_deg: 12.0,
+        ..StripSpec::TIER1
+    };
+    let shots = [equirect(96), right(48)];
+    let modes = [
+        (RigDebug::Off, false),
+        (RigDebug::Lens0, true),
+        (RigDebug::Weights, false),
+        (RigDebug::SeamDiff, false),
+    ];
+    let (mut pictures, mut kept_binding, mut kept_strips) = (0usize, 0usize, 0usize);
+    for (name, rig) in [("the first", &first), ("the second", &second)] {
+        for (view, size) in &shots {
+            for (debug, level0) in modes {
+                let opts = RigOptions { debug, level0 };
+                let afresh = render_rig(lenses, rig, gains, view, *size, &opts);
+                let afresh = finite("a picture afresh", afresh.expect("the pair renders"));
+                let ready = render_rig_of(&pair, rig, gains, view, *size, &opts);
+                let ready = ready.expect("the pair renders");
+                assert!(ready == afresh, "{name}, {size:?}, {opts:?}");
+                pictures += 1;
+                if name == "the second" {
+                    let kept = render_rig_of(&pair, &bound_as_first, gains, view, *size, &opts);
+                    kept_binding += usize::from(kept.expect("the pair renders") != afresh);
+                }
+            }
+        }
+        let afresh = finite_strips(strips(rig, lenses, &spec).expect("the strips"));
+        let ready = strips_of(&pair, rig, &spec).expect("the strips");
+        assert!(ready == afresh, "{name}");
+        if name == "the second" {
+            let kept = strips_of(&pair, &bound_as_first, &spec).expect("the strips");
+            kept_strips += usize::from(kept != afresh);
+        }
+    }
+    eprintln!(
+        "a pair made ready once: {pictures} pictures and 2 pairs of strips under two rigs, each \
+         bit for bit what a call afresh gives; with the first rig's binding kept for the second, \
+         {kept_binding} of its {} pictures differ, and its strips",
+        shots.len() * modes.len()
+    );
+    // The weights take nothing from the pictures, so the binding leaves
+    // mode 6 alone; every other picture shows the wrong lens.
+    let off = must_fail(
+        "the first rig's binding kept for the second",
+        at_most(kept_binding, 0),
+    );
+    assert_eq!(off, shots.len() * (modes.len() - 1));
+    must_fail(
+        "the first rig's binding kept for the second's strips",
+        at_most(kept_strips, 0),
+    );
+
+    // The pair says what it holds without its chains.
+    let shown = format!("{pair:?}");
     assert!(
-        matches!(&refused, Err(RenderError::Invalid(why)) if why.contains("track 2")),
-        "{refused:?}"
+        shown.starts_with("LensPair") && shown.len() < 200,
+        "{shown}"
     );
 }
 
@@ -1335,17 +1659,36 @@ fn strips_mark_samples_outside_invalid() {
     // Tier 1's strips of the true rig: both wholly inside their masks,
     // the band of ±8° lying inside the overlap with room for the margin
     // (8.2).
+    let ms = |began: Instant| began.elapsed().as_secs_f64() * 1e3;
     let began = Instant::now();
-    let tier1 = strips(&s.rig, s.lenses(), &StripSpec::TIER1).expect("the strips");
-    eprintln!(
-        "strips at Tier 1's spec, 1372 × 61 a lens: {:.1} ms",
-        began.elapsed().as_secs_f64() * 1e3
-    );
+    let tier1 = s.strips(&s.rig, &StripSpec::TIER1);
+    let tier1_ms = ms(began);
     for strip in &tier1.lenses {
         assert_eq!((strip.width, strip.height), (1372, 61));
         assert_eq!((strip.rgb.len(), strip.valid.len()), (1372 * 61, 1372 * 61));
         assert!(strip.valid.iter().all(|v| *v));
     }
+
+    // Those are of the scene's pair, made ready once. A strip of the pair
+    // is the strip unwrapped afresh, bit for bit; one of 18 × 1 afresh is
+    // nearly the pictures' mip chains alone, which the pair spares.
+    let tiny = StripSpec {
+        px_per_deg: 0.05,
+        ..StripSpec::TIER1
+    };
+    assert_eq!(tiny.size(), (18, 1));
+    let began = Instant::now();
+    let afresh = strips(&s.rig, s.lenses(), &tiny).expect("the strips");
+    let afresh_ms = ms(began);
+    let began = Instant::now();
+    let ready = strips_of(&s.pair, &s.rig, &tiny).expect("the strips");
+    eprintln!(
+        "strips at Tier 1's spec, 1372 × 61 a lens, of the pair made ready: {tier1_ms:.1} ms; a \
+         strip of 18 × 1: {afresh_ms:.1} ms afresh, {:.2} ms of the pair; on {} threads",
+        ms(began),
+        threads()
+    );
+    assert_eq!(ready, finite_strips(afresh));
 
     // A band of ±13° passes each lens's mask: at θ_max 100° the mask's θ
     // bound ends it, and at 104° the slot's frame does. A sample is valid
@@ -1360,10 +1703,10 @@ fn strips_mark_samples_outside_invalid() {
     let size = spec.size();
     assert_eq!(size, (540, 39));
     let dir = |x: f64, y: f64| spec.dir(x, y);
-    // The valid samples, the invalid ones, those the frame term alone
-    // leaves out, and the valid ones that read past the edge.
-    let survey = |rig: &Rig, masked_by: &Rig| {
-        let strips = strips(rig, s.lenses(), &spec).expect("the strips");
+    // Of `strips`, which are `rig`'s: the valid samples, the invalid
+    // ones, those the frame term alone leaves out, the valid ones that
+    // read past the edge, and the valid ones' worst misses.
+    let survey = |strips: &Strips, rig: &Rig, masked_by: &Rig| {
         let probes = probes(rig, dir, size);
         let (mut valid, mut invalid, mut framed, mut clamped) = (0usize, 0usize, 0usize, 0usize);
         let (mut worst, mut worst_rounded) = (0.0f64, 0.0f64);
@@ -1392,15 +1735,28 @@ fn strips_mark_samples_outside_invalid() {
                 clamped += usize::from(planes.reads_past_the_edge(texel, p.lod[b]));
                 let want = planes.light(texel, p.lod[b]);
                 for (got, want) in strip.rgb[n].into_iter().zip(want) {
-                    worst = worst.max((got - want).abs());
-                    worst_rounded = worst_rounded.max((got - round_f16(want)).abs());
+                    worst = worse(worst, (got - want).abs());
+                    worst_rounded = worse(worst_rounded, (got - round_f16(want)).abs());
                 }
             }
         }
         (valid, invalid, framed, clamped, worst, worst_rounded)
     };
-    for (name, rig) in [("θ_max 100°", &s.rig), ("θ_max 104°", &s.wide)] {
-        let (valid, invalid, framed, clamped, worst, worst_rounded) = survey(rig, rig);
+    let rigs = [("θ_max 100°", &s.rig), ("θ_max 104°", &s.wide)];
+    let unwrapped = rigs.map(|(_, rig)| s.strips(rig, &spec));
+    // The samples' validity alone, with no picture sampled.
+    let coverage = rigs.map(|(_, rig)| strip_coverage(rig, &spec).expect("the coverage"));
+    for (k, (name, rig)) in rigs.into_iter().enumerate() {
+        let (valid, invalid, framed, clamped, worst, worst_rounded) =
+            survey(&unwrapped[k], rig, rig);
+        // The coverage is the strips' own validity; the other rig's
+        // isn't.
+        let unwrapped_valid = [0, 1].map(|b| unwrapped[k].lenses[b].valid.clone());
+        assert_eq!(coverage[k], unwrapped_valid, "{name}");
+        must_fail(
+            "the other rig's coverage for the strips' validity",
+            coverage[1 - k] == unwrapped_valid,
+        );
         eprintln!(
             "strips of ±13° at {name}: {valid} samples valid, {invalid} invalid, {framed} of \
              them by the frame term alone; {worst:.1e} from the test's taps"
@@ -1414,12 +1770,27 @@ fn strips_mark_samples_outside_invalid() {
         }
     }
     // With the frame term defeated, samples past the picture's edge are
-    // valid, and repeat the edge's texels.
+    // valid, and repeat the edge's texels. And a NaN is no sample of a
+    // strip: one planted in a valid sample of these fails the strips' own
+    // check, and the worst miss from the test's taps is then no number,
+    // which holds nothing.
     let loose = frame_term_defeated(&s.wide);
-    let (_, _, _, clamped, _, _) = survey(&loose, &s.wide);
+    let mut planted = s.strips(&loose, &spec);
+    let sample = (0..planted.lenses[1].valid.len())
+        .find(|n| planted.lenses[1].valid[*n])
+        .expect("a valid sample");
+    planted.lenses[1].rgb[sample][2] = f64::NAN;
+    let why = must_fail(
+        "a NaN planted in a strip",
+        all_finite("a strip", strip_values(&planted)),
+    );
+    assert!(why.contains("NaN"), "{why}");
+    let (_, _, _, clamped, miss, _) = survey(&planted, &loose, &s.wide);
     let off = must_fail("the frame term defeated", at_most(clamped, 0));
     eprintln!("the frame term defeated: {off} valid samples read past the picture's edge");
     assert!(off > 30, "{off}");
+    assert!(miss.is_nan(), "{miss}");
+    must_fail("a NaN planted in a strip, compared", miss <= 1e-12);
 
     // A spec with no strip to unwrap is refused.
     for bad in [
@@ -1450,16 +1821,34 @@ fn strips_mark_samples_outside_invalid() {
             "{bad:?}: {:?}",
             refused.map(|_| ())
         );
+        let refused = strip_coverage(&s.rig, &bad);
+        assert!(
+            matches!(&refused, Err(RenderError::Invalid(why)) if why.contains("strip")),
+            "{bad:?}: {:?}",
+            refused.map(|_| ())
+        );
     }
 }
 
 /// `band_weights` and `lens_coverage` are the pixels `render_rig` draws:
-/// each lens's coverage is where modes 4 and 5 draw it (8.1).
+/// each lens's coverage is where modes 4 and 5 draw it, and the band from
+/// 0° to 90° every pixel the stitch draws, on any rig: a lens that covers
+/// a pixel no feather weighs takes it (8.1, 6.2).
 #[test]
 fn masks_match_what_render_rig_draws() {
     let _t = timed("masks_match_what_render_rig_draws");
     let s = scene();
+    // The rigs whose feathers leave a ring unweighed are stitched beside
+    // the scene's own, for the suite's time.
+    std::thread::scope(|beside| {
+        beside.spawn(|| rings_no_feather_weighs_are_drawn(s));
+        masks_match_on_the_scenes_rigs(s);
+    });
+}
 
+/// [`masks_match_what_render_rig_draws`] on the scene's two rigs, whose
+/// feathers weigh every pixel a lens covers.
+fn masks_match_on_the_scenes_rigs(s: &Scene) {
     // 4.2's equirect output: the band from 0° to 90° is every pixel the
     // stitch draws, all of them here.
     let shot = equirect(512);
@@ -1604,3 +1993,110 @@ fn masks_match_what_render_rig_draws() {
     );
     assert!(off > 10_000, "{off}");
 }
+
+/// [`masks_match_what_render_rig_draws`] on two rigs whose feathers leave
+/// a ring unweighed. A lens that covers a pixel takes what no feather
+/// weighs there (6.2), so the stitch draws every pixel a lens covers, and
+/// the band from 0° to 90° is what it draws, on these too. One has a
+/// step for a feather and is stitched at 2 m, where the baseline puts
+/// both lenses' θ past 90° in a ring about the seam, which both cover.
+/// The other is stitched infinitely far with lens 1 ending at 91° under
+/// a feather of 1°: its mask, less the margin, ends short of where lens
+/// 0's feather does, and lens 0 alone covers the ring between. The
+/// feathers alone, as the weights stood, leave both rings black.
+fn rings_no_feather_weighs_are_drawn(s: &Scene) {
+    let step = Tune {
+        feather_deg: 0.0,
+        q_per_m: 0.5,
+        ..Tune::default()
+    };
+    let short = Tune {
+        lenses: [
+            LensTune::default(),
+            LensTune {
+                theta_max_deg: 91.0,
+                ..LensTune::default()
+            },
+        ],
+        feather_deg: 1.0,
+        q_per_m: 0.0,
+    };
+    let shot = equirect(RING_WIDTH);
+    let (view, size) = &shot;
+    for (name, tune) in [
+        ("a step for a feather", step),
+        ("θ_max 100° and 91°", short),
+    ] {
+        let rig = sphere_rig(&x5_like(), &x5_like_planted(), &tune, 0, [SIDE; 2]);
+        let rig = &rig.expect("the rig builds");
+        let probes = view_probes(rig, &shot);
+        let stitched = s.render(rig, UNIT, &shot, RigDebug::Off);
+        let all = band_weights(rig, view, *size, 0.0, 90.0);
+        // The pixels a lens covers that no feather weighs, by whether one
+        // lens covers them or both, and the pixels no lens covers.
+        let (mut ring, mut uncovered) = ([0usize; 2], 0usize);
+        // The stitch's worst miss from the test's blend by its own
+        // reading of the rule, the covering lens nearer its own axis
+        // taking the ring whole; from its blend by the feathers alone,
+        // which leave the ring black; and from the farther lens's light
+        // where both cover the ring.
+        let (mut own, mut alone, mut farther) = (0.0f64, 0.0f64, 0.0f64);
+        for (n, p) in probes.iter().enumerate() {
+            let covers = [0, 1].map(|b| rig.covers(b, p.d, p.lod[b]));
+            let covered = covers[0] || covers[1];
+            let drawn = pixel(&stitched, n) != BLACK;
+            assert_eq!(drawn, covered, "{name}, pixel {n}");
+            assert_eq!(all[n], if drawn { 1.0 } else { 0.0 }, "{name}, pixel {n}");
+            uncovered += usize::from(!covered);
+            let light = |b: usize| {
+                s.planes[rig.lenses[b].track].light(p.texel[b].expect("a texel"), p.lod[b])
+            };
+            let miss = |w: [f64; 2]| pixel_steps(&stitched, n, mixed(w, light));
+            let feathers = feathers_alone(rig, p);
+            if !covered || feathers != [0.0; 2] {
+                own = worse(own, miss(feathers));
+                continue;
+            }
+            let whole = taken_whole(rig, p);
+            own = worse(own, miss(whole));
+            alone = worse(alone, miss(feathers));
+            if covers == [true; 2] {
+                farther = worse(farther, miss([whole[1], whole[0]]));
+            }
+            ring[usize::from(covers == [true; 2])] += 1;
+        }
+        eprintln!(
+            "{name}, a {} × {} equirect: a lens covers {} pixels that no feather weighs, and \
+             both cover {} more, all drawn; {uncovered} pixels no lens covers; the stitch \
+             {own:.4} f16 steps at most from the test's blend, the nearer covering lens taking \
+             those whole; by the feathers alone {alone:.0}, from the farther lens {farther:.0}",
+            size.0, size.1, ring[0], ring[1]
+        );
+        assert!(own <= NEAREST, "{name}: {own}");
+        // As the weights stood, every pixel of the ring is one a lens
+        // covers and the stitch leaves black.
+        let holes = must_fail(
+            "the feathers alone, which leave black what a lens covers",
+            at_most(ring[0] + ring[1], 0),
+        );
+        assert!(holes > RING_LEAST, "{name}: {holes}");
+        must_fail(
+            "the feathers alone for the weights",
+            at_most(alone, NEAREST),
+        );
+        if name == "a step for a feather" {
+            assert!(ring[1] > RING_LEAST, "{name}: {ring:?}");
+            must_fail(
+                "the farther lens taking what no feather weighs",
+                at_most(farther, NEAREST),
+            );
+        } else {
+            assert!(ring[0] > RING_LEAST, "{name}: {ring:?}");
+        }
+    }
+}
+
+/// The width of the equirect that the rigs with a ring no feather weighs
+/// are stitched to, and the least pixels a ring must hold there.
+const RING_WIDTH: u32 = 192;
+const RING_LEAST: usize = 50;
