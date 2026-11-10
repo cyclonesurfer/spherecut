@@ -55,9 +55,15 @@ pub fn slack_px(table_px: f64) -> f64 {
 
 /// A figure against the table's, or the one worked for it, both in
 /// pixels at 768² and signed alike: within [`slack_px`] of it. What
-/// [`Budget::hold`] holds, for a control to take.
+/// [`Budget::hold`], [`Budget::hold_corrected`] and
+/// [`Budget::hold_worked`] hold, for a control to take.
 pub fn held(got_px: f64, figure_px: f64) -> Comparison<f64> {
     at_most((got_px - figure_px).abs(), slack_px(figure_px))
+}
+
+/// Whether [`held`] passes: a NaN fits no figure.
+fn fits(got_px: f64, figure_px: f64) -> bool {
+    held(got_px, figure_px).passes() == Some(true)
 }
 
 /// How far a figure under [`slack_px`]'s floor may lie from the one
@@ -99,11 +105,10 @@ impl Budget {
 
     /// Holds a figure to the table's, both in pixels at 768².
     pub fn hold(&mut self, row: &str, got_px: f64, table_px: f64) {
-        let fits = (got_px - table_px).abs() <= slack_px(table_px);
         let what = self.what;
         self.report(
             format!("{row}: {got_px:.2} px {what}, {table_px:.2} px in the table"),
-            fits,
+            fits(got_px, table_px),
         );
     }
 
@@ -119,15 +124,13 @@ impl Budget {
         table_px: f64,
         why: &str,
     ) {
-        let fits = (got_px - worked_px).abs() <= slack_px(worked_px);
-        let table_fits = (got_px - table_px).abs() <= slack_px(table_px);
         let what = self.what;
         self.report(
             format!(
                 "{row}: {got_px:.2} px {what}, {worked_px:.2} px worked again, {table_px:.2} px \
                  in the table, which is {why}"
             ),
-            fits && !table_fits,
+            fits(got_px, worked_px) && !fits(got_px, table_px),
         );
     }
 
@@ -148,11 +151,10 @@ impl Budget {
     /// Holds a figure to one 3.4's arithmetic gives and its table doesn't
     /// print.
     pub fn hold_worked(&mut self, row: &str, got_px: f64, worked_px: f64) {
-        let fits = (got_px - worked_px).abs() <= slack_px(worked_px);
         let what = self.what;
         self.report(
             format!("{row}: {got_px:.2} px {what}, {worked_px:.2} px worked, not in the table"),
-            fits,
+            fits(got_px, worked_px),
         );
     }
 
