@@ -33,20 +33,22 @@ use super::{BinShift, Signature, Strip, StripSpec, Strips};
 pub struct Method {
     /// How many Lucas–Kanade steps refine the coarse shift. With none,
     /// the shift is the coarse search's own: a whole number of strip
-    /// pixels, or the neighbour's shift where a bin starts from that.
+    /// pixels, or the neighbour's shift where a bin starts from that and
+    /// matches there.
     pub lk_steps: u32,
     /// Whether the steps run on patches normalised for gain and bias.
     /// Off, they compare the strips' values as they stand.
     pub normalise: bool,
-    /// Whether a bin with too few samples or too little texture is
-    /// marked invalid. Off, such a bin is passed off as measured, with a
-    /// zero shift.
+    /// Whether a bin with too few samples or too little texture, or one
+    /// whose steps end unsettled or at no match, is marked invalid. Off,
+    /// such a bin is passed off as measured: with a zero shift or, where
+    /// it took its steps, with wherever they stopped.
     pub validity: bool,
 }
 
 impl Method {
-    /// 8.2's: three steps on normalised patches, and a bin without
-    /// texture invalid.
+    /// 8.2's: three steps on normalised patches, and a bin that measures
+    /// nothing invalid.
     pub const PLAN: Method = Method {
         lk_steps: 3,
         normalise: true,
@@ -106,22 +108,30 @@ pub fn patch(spec: &StripSpec, bin: usize) -> Patch {
 /// bin's texture repeats (a checker's cells) or runs along one line,
 /// several shifts match alike. The bins with one match only, and no
 /// sample left out, start their steps from it and hand it to their
-/// neighbours, and so on round the seam: a bin with several matches
-/// within 0.05 of its best takes the one nearest the shift it is handed
-/// or, with none within 0.5° of that, starts its steps from the handed
-/// shift itself. When no bin has one match only, each takes its match
-/// nearest zero: a texture that repeats everywhere comes back at the
-/// match nearest zero.
+/// neighbours, and so on round the seam: a bin takes its match, of those
+/// within 0.05 of its best, nearest the shift it is handed. With none
+/// within 0.5° of that, a bin with one match keeps it and hands it on,
+/// if its search had an NCC at every shift to hold the match against (a
+/// step in the field, as a wall beside things further off leaves, which
+/// a sample left out mustn't smooth over); any other bin starts its
+/// steps from the handed shift itself, and measures only if they end at
+/// a match of its own. When no bin has one match only and no sample left
+/// out, each takes its match nearest zero: a texture that repeats
+/// everywhere comes back at the match nearest zero.
 ///
 /// An invalid bin's shift, NCC and log gains are NaN and its information
 /// zero. It is invalid when fewer than half its patch's samples are
 /// usable on both lenses, when either lens's patch has a contrast (its
 /// standard deviation over its mean) under 0.2 %, or when the normalised
 /// patch's gradients carry no shift: a flat patch, or a ramp, which a
-/// bias would explain as well. Each log gain is the median over the
-/// patch's samples of ln(lens 1 / lens 0) at the measured shift, both
-/// read off the smoothed strips, a sample below 0.01 on either lens left
-/// out, and NaN with fewer than 16 samples.
+/// bias would explain as well. It is invalid too when its steps haven't
+/// settled, the last of them moving the shift, as the patch's
+/// best-informed direction counts it, by more than a tenth of a strip
+/// pixel; and when steps from a handed shift end with an NCC more than
+/// 0.05 under its best match's, at no match of the bin's own. Each log
+/// gain is the median over the patch's samples of ln(lens 1 / lens 0) at
+/// the measured shift, both read off the smoothed strips, a sample below
+/// 0.01 on either lens left out, and NaN with fewer than 16 samples.
 pub fn bin_shifts(strips: &Strips, spec: &StripSpec) -> Vec<BinShift> {
     bin_shifts_by(strips, spec, &Method::PLAN)
 }
@@ -215,6 +225,13 @@ const MAX_STEP: f64 = 1.0;
 /// The steps' damping, as a share of the normal matrix's trace: it holds
 /// a step still along a line, where the matrix has nothing to say.
 const DAMPING: f64 = 1e-6;
+/// The longest last step of a bin that has settled, in strip pixels as
+/// the patch's best-informed direction counts them ([`informed_length`]).
+/// The last of three steps from a match is under 0.002 on the
+/// instrument's own tests, and 0.04 on patches not normalised; steps
+/// from a shift that isn't the bin's own are still moving by most of a
+/// pixel.
+const SETTLED: f64 = 0.1;
 /// The rows at each edge of a strip that the smoothing doesn't reach: two
 /// for the blur and one more for the spline.
 const EDGE_ROWS: usize = 3;
@@ -687,8 +704,9 @@ fn vertex(before: f64, here: f64, after: f64) -> (f64, f64) {
 }
 
 /// The peaks of `template`'s NCC over the search that lie within [`TIE`]
-/// of the best, the best first.
-fn matches(template: &Template, lens1: &Searched, layout: &Layout) -> Vec<Peak> {
+/// of the best, the best first, and whether the search had an NCC at
+/// every shift.
+fn matches(template: &Template, lens1: &Searched, layout: &Layout) -> (Vec<Peak>, bool) {
     let (rx, ry) = (layout.rx as i64, layout.ry as i64);
     let across = 2 * layout.rx + 1;
     let mut grid = vec![f64::NAN; across * (2 * layout.ry + 1)];
@@ -729,7 +747,7 @@ fn matches(template: &Template, lens1: &Searched, layout: &Layout) -> Vec<Peak> 
     if let Some(best) = peaks.first().map(|p| p.ncc) {
         peaks.retain(|p| p.ncc >= best - TIE);
     }
-    peaks
+    (peaks, grid.iter().all(|ncc| ncc.is_finite()))
 }
 
 /// What one bin measured, in strip pixels: the shift (u, v) by which lens
@@ -757,20 +775,24 @@ fn measure(
         .collect();
     let found: Vec<Found> = templates
         .iter()
-        .map(|template| Found {
-            peaks: if template.count >= template.least() {
+        .map(|template| {
+            let (peaks, everywhere) = if template.count >= template.least() {
                 matches(template, &searched, layout)
             } else {
-                Vec::new()
-            },
-            whole: template.count == template.len() && searched.covers(template, layout),
+                (Vec::new(), false)
+            };
+            Found {
+                peaks,
+                everywhere,
+                whole: template.count == template.len() && searched.covers(template, layout),
+            }
         })
         .collect();
     let near = NEAR_DEG * layout.sx.max(layout.sy);
     templates
         .iter()
         .zip(settle_ties(&found, near))
-        .map(|(template, start)| refine(template, surfaces, layout, start?, method))
+        .map(|(template, start)| refine(template, surfaces, layout, &start?, method))
         .collect()
 }
 
@@ -779,42 +801,82 @@ fn measure(
 struct Found {
     /// Its matches, the best first.
     peaks: Vec<Peak>,
+    /// Whether the search had an NCC at every shift. Where it hadn't, a
+    /// better match may lie at a shift it couldn't try.
+    everywhere: bool,
     /// Whether every sample of the patch, and every sample of lens 1 the
     /// search pairs one with, is usable: only then does every shift's NCC
     /// compare the same pairs.
     whole: bool,
 }
 
+impl Found {
+    /// The bin's one match: its best, when every peak tied with it lies
+    /// within [`ONE_MATCH`] of it.
+    fn sole(&self) -> Option<Peak> {
+        let best = *self.peaks.first()?;
+        self.peaks
+            .iter()
+            .all(|p| apart(p.fine, best.fine) <= ONE_MATCH)
+            .then_some(best)
+    }
+}
+
+/// How far apart two shifts lie.
+fn apart(a: [f64; 2], b: [f64; 2]) -> f64 {
+    (a[0] - b[0]).hypot(a[1] - b[1])
+}
+
+/// Where a bin's steps start.
+#[derive(Debug, Clone, Copy)]
+struct Start {
+    /// The shift, (u, v) in strip pixels.
+    shift: [f64; 2],
+    /// The least NCC the steps may end with. A start at one of the bin's
+    /// matches has none to keep. A start from a handed shift has [`TIE`]
+    /// under the bin's best: its steps end at a match of the bin's own,
+    /// or the bin measures nothing.
+    floor: f64,
+}
+
+impl Start {
+    /// At a match of the bin's own, in whole pixels.
+    fn at(peak: Peak) -> Start {
+        Start {
+            shift: [peak.at[0] as f64, peak.at[1] as f64],
+            floor: f64::NEG_INFINITY,
+        }
+    }
+}
+
 /// Where each bin's steps start, out of the matches tied for it. A whole
-/// bin with one match, all its tied peaks within [`ONE_MATCH`] of the
-/// best, starts there, and hands its match to its neighbours either way
-/// round the ring. A bin that is handed a shift takes its match nearest
-/// to it and hands that on; with no match within `near` strip pixels, it
-/// starts from the shift it was handed and hands the same on. A bin with
-/// no match at all has no start, and hands on what it was handed. With
-/// no bin to start from, each takes its match nearest zero.
-fn settle_ties(found: &[Found], near: f64) -> Vec<Option<[f64; 2]>> {
+/// bin with one match starts there, and hands its match to its
+/// neighbours either way round the ring. A bin that is handed a shift
+/// takes its match nearest to it and hands that on. With no match within
+/// `near` strip pixels, a bin with one match that its search tried every
+/// shift against keeps it and hands it on: the field steps there, and
+/// the bin's own match says so, whatever samples it is short of. Any
+/// other bin starts from the shift it was handed and hands the same on;
+/// its steps then have to end at a match of its own, or it measures
+/// nothing ([`refine`]). A bin with no match at all has no start, and
+/// hands on what it was handed. With no bin to start from, each takes
+/// its match nearest zero.
+fn settle_ties(found: &[Found], near: f64) -> Vec<Option<Start>> {
     let bins = found.len();
-    let apart = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
     let nearest = |peaks: &[Peak], to: [f64; 2]| {
         peaks
             .iter()
             .copied()
             .min_by(|a, b| apart(a.fine, to).total_cmp(&apart(b.fine, to)))
     };
-    let whole_pixels = |p: Peak| [p.at[0] as f64, p.at[1] as f64];
     let mut starts = vec![None; bins];
     let mut handed: Vec<Option<[f64; 2]>> = vec![None; bins];
     let mut queue = VecDeque::new();
     for (k, bin) in found.iter().enumerate() {
-        if let Some(&best) = bin.peaks.first()
-            && bin.whole
-            && bin
-                .peaks
-                .iter()
-                .all(|p| apart(p.fine, best.fine) <= ONE_MATCH)
+        if bin.whole
+            && let Some(best) = bin.sole()
         {
-            starts[k] = Some(whole_pixels(best));
+            starts[k] = Some(Start::at(best));
             handed[k] = Some(best.fine);
             queue.push_back(k);
         }
@@ -822,7 +884,7 @@ fn settle_ties(found: &[Found], near: f64) -> Vec<Option<[f64; 2]>> {
     if queue.is_empty() {
         return found
             .iter()
-            .map(|bin| nearest(&bin.peaks, [0.0; 2]).map(whole_pixels))
+            .map(|bin| nearest(&bin.peaks, [0.0; 2]).map(Start::at))
             .collect();
     }
     while let Some(k) = queue.pop_front() {
@@ -831,10 +893,22 @@ fn settle_ties(found: &[Found], near: f64) -> Vec<Option<[f64; 2]>> {
             if handed[next].is_some() {
                 continue;
             }
-            (starts[next], handed[next]) = match nearest(&found[next].peaks, from) {
-                Some(p) if apart(p.fine, from) <= near => (Some(whole_pixels(p)), Some(p.fine)),
-                Some(_) => (Some(from), Some(from)),
-                None => (None, Some(from)),
+            let bin = &found[next];
+            (starts[next], handed[next]) = match (bin.peaks.first(), nearest(&bin.peaks, from)) {
+                (Some(_), Some(p)) if apart(p.fine, from) <= near => {
+                    (Some(Start::at(p)), Some(p.fine))
+                }
+                (Some(best), Some(_)) => match bin.sole().filter(|_| bin.everywhere) {
+                    Some(own) => (Some(Start::at(own)), Some(own.fine)),
+                    None => {
+                        let start = Start {
+                            shift: from,
+                            floor: best.ncc - TIE,
+                        };
+                        (Some(start), Some(from))
+                    }
+                },
+                _ => (None, Some(from)),
             };
             queue.push_back(next);
         }
@@ -941,37 +1015,46 @@ fn read(
 }
 
 /// The shift `start`, refined by `method`'s steps, or `None` for a bin
-/// that measures nothing.
+/// that measures nothing. That is a bin without the samples or the
+/// texture; one whose last step was longer than [`SETTLED`], which three
+/// steps from a match never leave and steps from a shift far from the
+/// bin's own do; and one whose steps end under `start`'s floor, settled
+/// on something that is no match of the bin's.
 fn refine(
     template: &Template,
     surfaces: &[Surface; 2],
     layout: &Layout,
-    start: [f64; 2],
+    start: &Start,
     method: &Method,
 ) -> Option<Measured> {
-    let mut shift = start;
+    let mut shift = start.shift;
+    let mut last = 0.0;
     let most = [layout.rx as f64 + MAX_STEP, layout.ry as f64 + MAX_STEP];
     let mut pairs = Vec::with_capacity(template.len());
     for _ in 0..method.lk_steps {
         let reading = read(template, &surfaces[1], shift, &mut pairs)?;
-        let mut step = if method.normalise {
-            damped_solve(reading.normal, reading.rhs)
+        let (normal, rhs) = if method.normalise {
+            (reading.normal, reading.rhs)
         } else {
-            damped_solve(reading.plain_normal, reading.plain_rhs)
+            (reading.plain_normal, reading.plain_rhs)
         };
+        let mut step = damped_solve(normal, rhs);
         let length = step[0].hypot(step[1]);
         if length > MAX_STEP {
             step = step.map(|s| s * MAX_STEP / length);
         }
+        last = informed_length(normal, step);
         for ((shift, step), most) in shift.iter_mut().zip(step).zip(most) {
             *shift = (*shift + step).clamp(-most, most);
         }
     }
     let reading = read(template, &surfaces[1], shift, &mut pairs)?;
-    // The normal matrix's greater eigenvalue, per sample.
-    let [uu, uv, vv] = reading.normal;
-    let texture = 0.5 * (uu + vv + (uu - vv).hypot(2.0 * uv)) / reading.pairs as f64;
+    let texture = greater_eigenvalue(reading.normal) / reading.pairs as f64;
     if texture.is_nan() || texture < MIN_TEXTURE {
+        return None;
+    }
+    // With the rule off, wherever the steps stopped passes for the shift.
+    if method.validity && !(last <= SETTLED && reading.ncc >= start.floor) {
         return None;
     }
     Some(Measured {
@@ -980,6 +1063,28 @@ fn refine(
         ncc: reading.ncc,
         log_gain: log_gains(template, surfaces, shift),
     })
+}
+
+/// The greater eigenvalue of a normal matrix (uu, uv, vv): what the
+/// patch knows of a shift along its best-informed direction.
+fn greater_eigenvalue([uu, uv, vv]: [f64; 3]) -> f64 {
+    0.5 * (uu + vv + (uu - vv).hypot(2.0 * uv))
+}
+
+/// How long a step is as the normal matrix N that made it counts it:
+/// √(δᵀ N δ / λ), for N's greater eigenvalue λ. Along the patch's
+/// best-informed direction that is the step's length in strip pixels;
+/// along a line, where N has nothing to say and a step settles nothing,
+/// it is next to none.
+fn informed_length(normal: [f64; 3], step: [f64; 2]) -> f64 {
+    let [uu, uv, vv] = normal;
+    let [u, v] = step;
+    let greatest = greater_eigenvalue(normal);
+    if greatest > 0.0 {
+        ((u * (uu * u + uv * v) + v * (uv * u + vv * v)).max(0.0) / greatest).sqrt()
+    } else {
+        0.0
+    }
 }
 
 /// The step (N + [`DAMPING`] · tr N) δ = r of a normal matrix (uu, uv,

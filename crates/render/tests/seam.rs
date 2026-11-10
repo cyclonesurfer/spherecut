@@ -723,6 +723,188 @@ fn a_textureless_bin_is_invalid() {
     assert!(at_most(miss, 0.02).passes() == Some(true), "{miss}");
 }
 
+/// A grey that repeats nowhere a search reaches: waves of unrelated
+/// lengths, each bent by another, at the strip's point (x, y). Along the
+/// strip each is a whole number of waves a turn, so that the picture has
+/// no edge where φ wraps. A bin of it has one match and no more.
+fn grain(x: f64, y: f64) -> f64 {
+    let turn = 2.0 * PI * x / f64::from(SPEC.size().0);
+    0.3 + 0.05 * (71.0 * turn + 0.7 * (y / 2.3).sin()).sin()
+        + 0.05 * (y / 2.7 + 1.3 * (28.0 * turn).sin()).sin()
+        + 0.04 * (41.0 * turn + y / 3.1).sin()
+        + 0.04 * (23.0 * turn - y / 4.6 + (7.0 * turn).sin()).cos()
+        + 0.03 * (17.0 * turn).sin() * (y / 4.1).cos()
+}
+
+/// A step in the shift from one bin to the next, as a wall beside things
+/// further off leaves, gives no false shift where samples are left out.
+/// A bin with one match that its search tried every shift against keeps
+/// it, whatever shift its neighbour hands it. A bin that can't tell
+/// starts from the handed shift, and measures nothing unless its steps
+/// settle at a match of its own.
+#[test]
+fn a_step_in_the_shift_gives_no_false_shift() {
+    let _t = timed("a_step_in_the_shift_gives_no_false_shift");
+    // Away from the steps, as a pure shift comes back; beside one, a bin
+    // reads a few columns of the other side through the smoothing.
+    const WITHIN: f64 = 0.02;
+    const BESIDE: f64 = 0.5;
+    // From φ = 180° on, lens 1 shows the seam 0.9° further across: more
+    // than the 0.5° a bin takes from its neighbour on trust, and 3.4 px,
+    // more than three steps of a pixel cross.
+    const STEP_DEG: f64 = 0.9;
+    let (sx, sy) = scales();
+    let field = |phi_deg: f64| (if phi_deg >= 180.0 { STEP_DEG } else { 0.0 }, 0.0);
+    let past = 36..72;
+    let beside = [35, 36, 71, 0];
+    let tall = tall_of(grain);
+    let whole = Strips {
+        lenses: [strip(&tall), carried(&tall, field)],
+    };
+    let width = whole.lenses[0].width as usize;
+
+    // A bin's miss, in strip pixels and NaN of an invalid bin; then the
+    // worst away from the steps and the worst beside one, of every bin
+    // or of those that measure.
+    let miss = |b: &BinShift| {
+        let (across, along) = field(b.phi_deg);
+        ((b.along_deg - along) * sx).hypot((b.across_deg - across) * sy)
+    };
+    let worst_of = |bins: &[BinShift], measured_only: bool| {
+        let of = |beside_a_step: bool| {
+            bins.iter()
+                .enumerate()
+                .filter(|(k, b)| beside.contains(k) == beside_a_step && (b.valid || !measured_only))
+                .map(|(_, b)| miss(b))
+                .fold(0.0, worse)
+        };
+        (of(false), of(true))
+    };
+    let worst = |bins: &[BinShift]| worst_of(bins, false);
+    let every_bin_measures = |bins: &[BinShift]| bins.iter().all(|b| b.valid);
+    let unmeasured = |bins: &[BinShift]| past.clone().filter(|&k| !bins[k].valid).count();
+
+    // With every sample there, each bin has its own side's shift.
+    let bins = bin_shifts(&whole, &SPEC);
+    let (away, by) = worst(&bins);
+    eprintln!(
+        "a step of {STEP_DEG}° at 180° and at 0°: every bin within {away:.4} px, and {by:.4} px \
+         beside a step"
+    );
+    assert!(every_bin_measures(&bins));
+    assert!(at_most(away, WITHIN).passes() == Some(true), "{away}");
+    assert!(at_most(by, BESIDE).passes() == Some(true), "{by}");
+
+    // One sample left out at the middle of each patch past the step, of
+    // lens 0's strip in the first half of those bins and of lens 1's in
+    // the rest: each bin still has its one match, and keeps it.
+    let mut holed = whole.clone();
+    for k in past.clone() {
+        let p = patch(&SPEC, k);
+        let row = ((p.rows.start + p.rows.end) / 2) as usize;
+        let column = ((p.columns.start + p.columns.end) / 2) as usize;
+        holed.lenses[usize::from(k >= 54)].valid[row * width + column] = false;
+    }
+    let bins = bin_shifts(&holed, &SPEC);
+    let (away, by) = worst(&bins);
+    eprintln!(
+        "a sample left out of each bin past the step: every bin within {away:.4} px, and \
+         {by:.4} px beside a step"
+    );
+    assert!(every_bin_measures(&bins));
+    assert!(at_most(away, WITHIN).passes() == Some(true), "{away}");
+    assert!(at_most(by, BESIDE).passes() == Some(true), "{by}");
+
+    // Control: lens 1 covering nothing below row 40 past the step, the
+    // search can't try the shifts that reach there, so a bin's one match
+    // may be only the one it could try: it isn't kept against the shift
+    // handed over the step, and the bins there don't measure.
+    const CUT_ROW: usize = 40;
+    let uncovered = patch(&SPEC, past.start).columns.start as usize;
+    let mut cut = whole.clone();
+    for (at, valid) in cut.lenses[1].valid.iter_mut().enumerate() {
+        *valid = at % width < uncovered || at / width < CUT_ROW;
+    }
+    let bins = bin_shifts(&cut, &SPEC);
+    must_fail("the search cut short", every_bin_measures(&bins));
+
+    // They start from the handed shift instead, and three steps of a
+    // pixel are still moving when they end: each bin is invalid, never a
+    // shift on the way. The bins before the step measure as they did.
+    let false_shift = |bins: &[BinShift]| at_most(worst_of(bins, true).0, WITHIN);
+    let (away, by) = worst_of(&bins, true);
+    eprintln!(
+        "the search cut short past the step: {} of {} bins there invalid; the bins that \
+         measure within {away:.4} px, and {by:.4} px beside a step",
+        unmeasured(&bins),
+        past.len()
+    );
+    assert_eq!(unmeasured(&bins), past.len());
+    assert_eq!(bins.iter().filter(|b| b.valid).count(), 72 - past.len());
+    assert!(
+        false_shift(&bins).passes() == Some(true),
+        "{}",
+        false_shift(&bins)
+    );
+    assert!(at_most(by, BESIDE).passes() == Some(true), "{by}");
+
+    // Control: with the validity rule off, wherever the steps stopped is
+    // passed off as each such bin's shift: 3 px on the way and 0.4 px
+    // short, with an NCC that a match might have. Only the last step's
+    // length says the shift isn't there yet.
+    let loose = Method {
+        validity: false,
+        ..Method::PLAN
+    };
+    let claimed = bin_shifts_by(&cut, &SPEC, &loose);
+    let off = must_fail("the validity rule off", false_shift(&claimed));
+    assert_eq!(unmeasured(&claimed), 0);
+    let inner = || past.clone().filter(|k| !beside.contains(k));
+    for b in inner().map(|k| &claimed[k]) {
+        assert!(miss(b) > 10.0 * WITHIN && miss(b) < 1.0, "{b:?}");
+        assert!(b.ncc > 0.97, "{b:?}");
+    }
+    eprintln!(
+        "control, the validity rule off: the bins past the step {:.4} to {off:.4} px from their \
+         shift, with an NCC of {:.4} or more",
+        inner().map(|k| miss(&claimed[k])).fold(off, f64::min),
+        inner().map(|k| claimed[k].ncc).fold(1.0, f64::min)
+    );
+
+    // With no steps there is nothing to settle, and the handed shift
+    // would stand as it is. But a bin's NCC there is far under its
+    // match's, and so the bin is as invalid.
+    let coarse = Method {
+        lk_steps: 0,
+        ..Method::PLAN
+    };
+    let bins = bin_shifts_by(&cut, &SPEC, &coarse);
+    assert_eq!(unmeasured(&bins), past.len());
+    assert_eq!(bins.iter().filter(|b| b.valid).count(), 72 - past.len());
+
+    // Control: with the validity rule off as well, each such bin is
+    // passed off as having its neighbour's shift, the whole step from
+    // its own.
+    let loose = Method {
+        validity: false,
+        ..coarse
+    };
+    let claimed = bin_shifts_by(&cut, &SPEC, &loose);
+    let off = must_fail("no steps, and the validity rule off", false_shift(&claimed));
+    assert_eq!(unmeasured(&claimed), 0);
+    for b in inner().map(|k| &claimed[k]) {
+        assert!((miss(b) - STEP_DEG * sy).abs() < BESIDE, "{b:?}");
+        assert!(b.ncc < 0.9, "{b:?}");
+    }
+    eprintln!(
+        "control, no steps and the validity rule off: the bins past the step {:.4} to {off:.4} \
+         px from their shift, for a step of {:.4} px, with an NCC of {:.4} or less",
+        inner().map(|k| miss(&claimed[k])).fold(off, f64::min),
+        STEP_DEG * sy,
+        inner().map(|k| claimed[k].ncc).fold(-1.0, f64::max)
+    );
+}
+
 /// Texture along a single line gives information across the line and
 /// none along it: the aperture problem, kept out of the fit by each
 /// bin's normal matrix.
