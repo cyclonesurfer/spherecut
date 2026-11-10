@@ -27,9 +27,12 @@ pub const MAX_STRIP_PIXELS: u64 = 1 << 24;
 /// 0 elsewhere. Rung 1's "more than 12° from the seam" (4.2) is the band
 /// from 12° to 90°.
 ///
-/// A lens covers a pixel where [`lens_coverage`] is 1 for it. Bounds
-/// that hold no angle (a NaN, or `inner_deg` above `outer_deg`) leave
-/// every weight 0, which the weighted metrics refuse.
+/// A lens covers a pixel where [`lens_coverage`] is 1 for it, so a pixel
+/// that no lens of `rig` covers weighs nothing, and a metric under this
+/// mask can't see a hole that `rig` leaves in its own picture: where the
+/// rig under test may cover less than the true one, the mask to take is
+/// the true rig's. Bounds that hold no angle (a NaN, or `inner_deg` above
+/// `outer_deg`) leave every weight 0, which the weighted metrics refuse.
 pub fn band_weights(
     rig: &Rig,
     view: &ViewParams,
