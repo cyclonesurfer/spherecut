@@ -1220,14 +1220,43 @@ enum Lands {
 /// predicted ratio.
 const RATIO: f64 = 0.03;
 
-/// 8.3's step 3 on a measured seam: the dominant term is the one the
-/// prediction's is, and every term the geometry doesn't couple to it
-/// stays under max(0.03°, 15 % of it). Says what it found, or what
-/// doesn't fit.
-fn attribute(seam: &Seam, lands: Lands) -> Result<String, String> {
-    let (want, got) = (terms(&seam.want), terms(&seam.got));
+/// Which of step 3's rules a field breaks. Each has a control that must
+/// break that rule and no earlier one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Misfit {
+    /// A term has no measured value.
+    Unmeasured,
+    /// A term reaches 0.03° where the field should land nowhere.
+    Shifted,
+    /// The prediction's largest term isn't among those the test names.
+    Unnamed,
+    /// The images' largest term isn't the prediction's.
+    Elsewhere,
+    /// A term the geometry doesn't couple to the dominant one is over its
+    /// bound.
+    Crosstalk,
+    /// A coupled term doesn't come at the predicted ratio.
+    Ratio,
+}
+
+/// What step 3 found, or the rule that is broken and how.
+type Attributed = Result<String, (Misfit, String)>;
+
+/// 8.3's step 3 on a plant's seam: its measured terms against its own
+/// prediction's.
+fn attribute(seam: &Seam, lands: Lands) -> Attributed {
+    attribute_to(&seam.want, &seam.got, lands)
+}
+
+/// 8.3's step 3 on measured terms, `got`, against a prediction's, `want`:
+/// the dominant term is the one the prediction's is, every term the
+/// geometry doesn't couple to it stays under max(0.03°, 15 % of it), and
+/// a coupled term comes at the predicted ratio. Says what it found, or
+/// what doesn't fit.
+fn attribute_to(want: &Signature, got: &Signature, lands: Lands) -> Attributed {
+    let (want, got) = (terms(want), terms(got));
     if let Some(i) = got.iter().position(|t| !t.is_finite()) {
-        return Err(format!("{} wasn't measured", NAMES[i]));
+        return Err((Misfit::Unmeasured, format!("{} wasn't measured", NAMES[i])));
     }
     let largest = |t: &[f64; TERMS]| {
         let by_size = |a: &usize, b: &usize| t[*a].abs().total_cmp(&t[*b].abs());
@@ -1242,23 +1271,26 @@ fn attribute(seam: &Seam, lands: Lands) -> Result<String, String> {
                     NAMES[i], got[i]
                 ))
             } else {
-                Err(format!("{} is {:+.4}°, for no shift", NAMES[i], got[i]))
+                let said = format!("{} is {:+.4}°, for no shift", NAMES[i], got[i]);
+                Err((Misfit::Shifted, said))
             };
         }
         Lands::On(named) => named,
     };
     let (main, found) = (largest(&want), largest(&got));
     if !named.contains(&main) {
-        return Err(format!(
+        let said = format!(
             "the prediction lands on {} ({:+.4}°)",
             NAMES[main], want[main]
-        ));
+        );
+        return Err((Misfit::Unnamed, said));
     }
     if found != main {
-        return Err(format!(
+        let said = format!(
             "the images land on {} ({:+.4}°), the prediction on {} ({:+.4}°)",
             NAMES[found], got[found], NAMES[main], want[main]
-        ));
+        );
+        return Err((Misfit::Elsewhere, said));
     }
     let bound = (0.15 * got[main].abs()).max(TERM_DEG);
     let mut said = format!(
@@ -1269,10 +1301,11 @@ fn attribute(seam: &Seam, lands: Lands) -> Result<String, String> {
     for i in (0..TERMS).filter(|&i| i != main) {
         if !named.contains(&i) {
             if got[i].abs() > bound {
-                return Err(format!(
+                let said = format!(
                     "{} is {:+.4}°, over {bound:.4}° beside {} at {:+.4}°",
                     NAMES[i], got[i], NAMES[main], got[main]
-                ));
+                );
+                return Err((Misfit::Crosstalk, said));
             }
             if got[i].abs() > other.0 {
                 other = (got[i].abs(), NAMES[i]);
@@ -1281,10 +1314,11 @@ fn attribute(seam: &Seam, lands: Lands) -> Result<String, String> {
         }
         let (ratio, predicted) = (got[i] / got[main], want[i] / want[main]);
         if (ratio - predicted).abs() > RATIO {
-            return Err(format!(
+            let said = format!(
                 "{} comes at {ratio:+.4} of {}, for {predicted:+.4} predicted",
                 NAMES[i], NAMES[main]
-            ));
+            );
+            return Err((Misfit::Ratio, said));
         }
         if got[i].abs() > bound {
             said += &format!(
@@ -2181,6 +2215,15 @@ const LINES_OVER_COMMON_MODE_DB: f64 = 2.5;
 /// from the images within 0.05 px rms of the prediction, and lands on the
 /// term the prediction names, with the other terms under their bound.
 ///
+/// Step 3 has a control for each of its rules ([`Misfit`]), each held to
+/// break that rule and no earlier one: a field read as no shift, and as
+/// a term the prediction doesn't name; the yaw's measured terms for the
+/// pitch's prediction, which land on another term; a centre offset read
+/// as a tilt alone, whose d1 is over the bound; a centre offset for the
+/// prediction of a V6 reading that lands on a1 too, whose coupled terms
+/// come at other ratios; and the fields past the search, which leave no
+/// term measured.
+///
 /// Three controls plant a field larger than the strips' ±3° search, so
 /// the prediction holds no bin and steps 2 and 3 have nothing to hold:
 /// equidistant applied to Mei data, the turn left out, and the
@@ -2289,7 +2332,7 @@ fn seam_signature_attributes_planted_errors() {
             "{name}"
         );
         assert!(seam.off_px <= PREDICTED_PX, "{name}: {} px", seam.off_px);
-        let found = attribute(&seam, Lands::Nowhere).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let found = attribute(&seam, Lands::Nowhere).unwrap_or_else(|e| panic!("{name}: {}", e.1));
         eprintln!(
             "8.3 | {name}: {:.4} px off the prediction; {found}",
             seam.off_px
@@ -2305,7 +2348,8 @@ fn seam_signature_attributes_planted_errors() {
             seam.held
         );
         assert!(seam.off_px <= PREDICTED_PX, "{name}: {} px", seam.off_px);
-        let found = attribute(&seam, Lands::On(named)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let found =
+            attribute(&seam, Lands::On(named)).unwrap_or_else(|e| panic!("{name}: {}", e.1));
         // Each is a control of 4.2's misregistration.
         let px = must_fail(
             &format!("{name}, the misregistration"),
@@ -2327,7 +2371,7 @@ fn seam_signature_attributes_planted_errors() {
     let gains = Plant::Gains.seam();
     assert_eq!((gains.held, gains.unmeasured()), (gains.predicted.len(), 0));
     assert!(gains.off_px <= PREDICTED_PX, "{} px", gains.off_px);
-    let found = attribute(&gains, Lands::Nowhere).unwrap_or_else(|e| panic!("gains off: {e}"));
+    let found = attribute(&gains, Lands::Nowhere).unwrap_or_else(|e| panic!("gains off: {}", e.1));
     let log_gains = gained().lenses[1].gain.map(f64::ln);
     for (c, (got, planted)) in gains.own.log_gain.iter().zip(&log_gains).enumerate() {
         let off = (got - planted).abs();
@@ -2339,8 +2383,8 @@ fn seam_signature_attributes_planted_errors() {
         gains.own.log_gain, gains.off_px
     );
 
-    // Controls of steps 2 and 3: a field held to the prediction for
-    // another error, and read as another term.
+    // Control of step 2: a field held to the prediction for another
+    // error.
     let (yaw, pitch) = (Plant::Yaw.seam(), Plant::Pitch.seam());
     let (sx, sy) = scales();
     let apart = yaw.measured.iter().zip(&pitch.predicted).map(|(m, p)| {
@@ -2351,17 +2395,43 @@ fn seam_signature_attributes_planted_errors() {
         "the yaw's field against the prediction for a pitch",
         at_most(apart, PREDICTED_PX),
     );
-    let read = must_fail(
-        "the yaw's field read as a roll",
-        attribute(&yaw, Lands::On(&[C0])),
-    );
-    let none = must_fail(
+    eprintln!("8.3 | control: the yaw's field is {px:.3} px off the pitch's prediction");
+
+    // Controls of step 3, one for each of its rules, each held to break
+    // that rule and no earlier one. The first two read a field against
+    // the test's own list; the last three read the measured terms.
+    let centre = Plant::Centre.seam();
+    let radial_1 = Plant::V6Radial1.seam();
+    let breaks = |name: &str, found: Attributed, rule: Misfit| {
+        let (broken, said) = must_fail(name, found);
+        assert_eq!(broken, rule, "{name}: {said}");
+        eprintln!("8.3 | control, {name}: {said}");
+    };
+    breaks(
         "the yaw's field read as no shift",
         attribute(&yaw, Lands::Nowhere),
+        Misfit::Shifted,
     );
-    eprintln!(
-        "8.3 | controls: the yaw's field is {px:.3} px off the pitch's prediction; as a roll, \
-         {read}; as no shift, {none}"
+    breaks(
+        "the yaw's field read as a roll",
+        attribute(&yaw, Lands::On(&[C0])),
+        Misfit::Unnamed,
+    );
+    breaks(
+        "the yaw's field for the pitch's prediction",
+        attribute_to(&pitch.want, &yaw.got, Lands::On(&[A1, B1])),
+        Misfit::Elsewhere,
+    );
+    breaks(
+        "cx + 2 px on lens 1 read as a tilt alone",
+        attribute(&centre, Lands::On(&[A1])),
+        Misfit::Crosstalk,
+    );
+    // Both land on a1, and their coupled terms tell them apart.
+    breaks(
+        "cx + 2 px on lens 1 for the prediction of lens 1's V6 terms read as RadialOnly",
+        attribute_to(&radial_1.want, &centre.got, Lands::On(first)),
+        Misfit::Ratio,
     );
 
     for (name, plant) in gross {
@@ -2376,6 +2446,12 @@ fn seam_signature_attributes_planted_errors() {
             at_most(seam.misregistration_px, MISREGISTRATION_PX),
         );
         assert!(px >= 8.0, "{name}: {px} px");
+        // No bin is predicted, so step 3 has no term to read.
+        let (broken, said) = must_fail(
+            &format!("{name}, attributed by its terms"),
+            attribute(&seam, Lands::Nowhere),
+        );
+        assert_eq!(broken, Misfit::Unmeasured, "{name}: {said}");
         eprintln!(
             "8.3 | {name}: past the search. Predicted: the two lenses show the seam {mean:.2}° \
              apart (mean; {least:.2}° to {most:.2}°), no bin within the search of {}°. Measured: \
