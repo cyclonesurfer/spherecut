@@ -702,6 +702,16 @@ fn turned(lens: &RigLens, about: DVec3, deg: f64) -> RigLens {
     }
 }
 
+/// The X5-like rig with both of its lenses turned `deg` about +Y: a slip
+/// the seam can't see. 4.2's common-mode control turns them 0.5°.
+fn both_turned(deg: f64) -> Rig {
+    let rig = x5().rig;
+    Rig {
+        lenses: rig.lenses.map(|lens| turned(&lens, DVec3::Y, deg)),
+        ..rig
+    }
+}
+
 /// `lens` with another model in its place.
 fn with_model(lens: &RigLens, model: LensModel) -> RigLens {
     RigLens::new(
@@ -933,13 +943,7 @@ impl Plant {
             Plant::LatePan => lens_1(late_in_a_pan(), late(DVec3::Y)),
             Plant::LateRoll => lens_1(late_in_a_roll(), late(DVec3::Z)),
             Plant::Gains => lens_1(gained_lens(), gained()),
-            Plant::CommonMode => far(Rig {
-                lenses: [
-                    turned(&x5.rig.lenses[0], DVec3::Y, 0.5),
-                    turned(&x5.rig.lenses[1], DVec3::Y, 0.5),
-                ],
-                ..x5.rig
-            }),
+            Plant::CommonMode => far(both_turned(0.5)),
             Plant::OtherScene => lens_1(&grid()[1], x5.truth.clone()),
             Plant::EulerYaw0 => far(with_lens(&x5.rig, 0, wrong_sign(0).lenses[0])),
             Plant::EulerPitches => far(wrong_sign(1)),
@@ -2135,83 +2139,96 @@ const LOG_GAIN: f64 = 0.015;
 /// Both lenses turned 0.5° about +Y pass every seam check and fail the
 /// comparison with the ideal: the common-mode control.
 ///
-/// 4.2 asks the true stitch to score 3 dB over this control. On `Grid`,
-/// whose lines the turn crosses, it does, for the stitch and for each
-/// lens alone. On `SeamLines` more than 12° from the seam the margin is
-/// 2.9 dB: the 1° checker reaches 15° from the seam, and at the
-/// equirect's 0.70° a pixel it sets the error whatever the registration.
-/// There the control is held to fail the blessed floors, and the margin
-/// to [`LINES_OVER_COMMON_MODE_DB`].
+/// 4.2 asks the true stitch to score 3 dB over this control, so that a
+/// slip common to both lenses shows even where it was there at the
+/// bless. On `Grid`, whose lines the turn crosses, it does, for the
+/// stitch and for each lens alone. The rule's own control is a stitch
+/// that slips 1° already: it scores 1.1 dB over the control made from
+/// it, the same 0.5° again. One that slips 0.5° already scores 2.96 dB
+/// over its own, under the rule by too little to rest a control on, so
+/// that number is recorded and not held: on `Grid` the rule sees a slip
+/// from about 0.5° on.
+///
+/// On `SeamLines` more than 12° from the seam the true stitch is 2.9 dB
+/// over the control, and that margin is recorded and not held: the 1°
+/// checker reaches 15° from the seam, and at the equirect's 0.70° a
+/// pixel it sets the error whatever the registration. A stitch that
+/// slips 0.5° already scores 2.8 dB over its own control there, 0.1 dB
+/// from the true stitch's margin, so no threshold tells the two apart.
+/// With the mask at 15° the margins are 4.0 dB and 3.3 dB, and 4.2's
+/// 3 dB passes both (a probe's numbers when this was written). On
+/// `SeamLines` the control is held to fail the blessed floors.
 #[test]
 fn rung1_common_mode_control() {
     let _t = timed("rung1_common_mode_control");
-    let x5 = x5();
     let slipped = Plant::CommonMode.rig();
+    let mut row = Row::new(
+        "x5_common_mode",
+        format!(
+            "Both lenses of x5_like turned 0.5° about +Y, 4.2's common-mode control, which the \
+             seam can't see: how far apart its strips lie, its band on SeamLines, and its \
+             stitches of SeamLines and of Grid against the ideal more than {OFF_SEAM_DEG}° from \
+             the seam, each held to fail that picture's floors. *_over_db: the true rig's PSNR \
+             less the control's, held to {OVER_COMMON_MODE_DB} dB on Grid and recorded on \
+             SeamLines. grid_slipping_*_over_db: a stitch of Grid that slips so many degrees \
+             already, less the control made from it, 0.5° further; the one at 1° is held to \
+             come under {OVER_COMMON_MODE_DB} dB"
+        ),
+    );
 
     // Every seam check passes.
     let seam = Plant::CommonMode.seam();
     hold_seam("both lenses turned 0.5° about +Y", &seam);
+    row.measure("misregistration_px", seam.misregistration_px);
     for k in [0, 2] {
         let over = over_the_better(Scene::Lines.band_scores(&slipped, k));
-        eprintln!("the band on {}: {over:+.3} dB", VIEWS[k]);
+        row.measure(&format!("seamlines_band_{}_db", VIEW_KEYS[k]), over);
         assert!(over >= BAND_DB, "{}: {over} dB", VIEWS[k]);
     }
 
-    // The comparison with the ideal fails: the floors, and the margin.
-    let fails_the_ideal = |scene: Scene, margin: f64| {
+    // The comparison with the ideal fails: each picture's floors.
+    let mut fails_the_ideal = |scene: Scene, key: &str| {
         let (truth, floors) = (scene.truth(), scene.floors());
         let got = scene.stitched(&slipped);
+        row.measure(&format!("{key}_psnr_db"), got.psnr);
+        row.measure(&format!("{key}_ssim"), got.ssim);
         let what = format!("both lenses turned 0.5° about +Y, {}", scene.row());
         must_fail(&format!("{what}, PSNR"), at_least(got.psnr, floors[0].psnr));
         must_fail(&format!("{what}, SSIM"), at_least(got.ssim, floors[0].ssim));
         let over = truth[0].psnr - got.psnr;
-        eprintln!(
-            "{}: the stitch {:.3} dB and {:.5}, the control {:.3} dB and {:.5}: {over:.3} dB over",
-            scene.row(),
-            truth[0].psnr,
-            truth[0].ssim,
-            got.psnr,
-            got.ssim
-        );
-        assert!(over >= margin, "{}: {over} dB over", scene.row());
-        got
+        row.measure(&format!("{key}_over_db"), over);
+        (got, over)
     };
-    fails_the_ideal(Scene::Lines, LINES_OVER_COMMON_MODE_DB);
-    let once = fails_the_ideal(Scene::Grid, OVER_COMMON_MODE_DB);
-    // Each lens alone, on the lines the turn crosses.
+    fails_the_ideal(Scene::Lines, "seamlines");
+    let (once, over) = fails_the_ideal(Scene::Grid, "grid");
+
+    // The margin, on the lines the turn crosses: the stitch, and each
+    // lens alone.
     let scene = Scene::Grid;
+    assert!(
+        over >= OVER_COMMON_MODE_DB,
+        "{}: {over} dB over",
+        scene.row()
+    );
     for b in 0..2 {
         let got = scene.alone(&slipped, b);
         let over = scene.truth()[1 + b].psnr - got.psnr;
-        eprintln!(
-            "{}, lens {b} alone: {over:.3} dB over the control's {:.3}",
-            scene.row(),
-            got.psnr
-        );
+        row.measure(&format!("grid_lens{b}_over_db"), over);
         assert!(over >= OVER_COMMON_MODE_DB, "lens {b}: {over} dB over");
     }
 
-    // The margin's own control: a stitch that slips already scores under
-    // 3 dB over the control made from it, the same turn again.
-    let twice = Rig {
-        lenses: [
-            turned(&x5.rig.lenses[0], DVec3::Y, 1.0),
-            turned(&x5.rig.lenses[1], DVec3::Y, 1.0),
-        ],
-        ..x5.rig
-    };
-    let again = scene.stitched(&twice);
+    // The margin's own control: a stitch that slips already, over the
+    // control made from it, the same 0.5° again.
+    let slipping = |deg: f64| scene.stitched(&both_turned(deg)).psnr;
+    let (by_1, by_1_5) = (slipping(1.0), slipping(1.5));
+    row.measure("grid_slipping_0_5_over_db", once.psnr - by_1);
     let over = must_fail(
-        "a stitch that slips already, over its own common-mode control",
-        at_least(once.psnr - again.psnr, OVER_COMMON_MODE_DB),
+        "a stitch that slips 1° already, over its own common-mode control",
+        at_least(by_1 - by_1_5, OVER_COMMON_MODE_DB),
     );
-    eprintln!("control, a stitch that slips already: {over:.3} dB over its own control");
+    row.measure("grid_slipping_1_over_db", over);
+    row.done();
 }
-
-/// What the true stitch of `SeamLines` is held to score over the
-/// common-mode control's, in dB, where 4.2's 3 dB doesn't hold (the
-/// test's doc).
-const LINES_OVER_COMMON_MODE_DB: f64 = 2.5;
 
 // The matrix.
 
