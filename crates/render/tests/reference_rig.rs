@@ -1655,7 +1655,11 @@ fn a_pair_made_ready_once_serves_every_rig() {
                 pictures += 1;
                 if name == "the second" {
                     let kept = render_rig_of(&pair, &bound_as_first, gains, view, *size, &opts);
-                    kept_binding += usize::from(kept.expect("the pair renders") != afresh);
+                    let kept = finite(
+                        "a picture under the first rig's binding",
+                        kept.expect("the pair renders"),
+                    );
+                    kept_binding += usize::from(kept != afresh);
                 }
             }
         }
@@ -1664,7 +1668,7 @@ fn a_pair_made_ready_once_serves_every_rig() {
         assert!(ready == afresh, "{name}");
         if name == "the second" {
             let kept = strips_of(&pair, &bound_as_first, &spec).expect("the strips");
-            kept_strips += usize::from(kept != afresh);
+            kept_strips += usize::from(finite_strips(kept) != afresh);
         }
     }
     eprintln!(
@@ -1713,9 +1717,13 @@ fn strips_mark_samples_outside_invalid() {
         assert!(strip.valid.iter().all(|v| *v));
     }
 
-    // Those are of the scene's pair, made ready once. A strip of the pair
-    // is the strip unwrapped afresh, bit for bit; one of 18 × 1 afresh is
-    // nearly the pictures' mip chains alone, which the pair spares.
+    // Those are of the scene's pair, made ready once. A strip of 18 × 1
+    // afresh is nearly the pictures' mip chains alone, which the pair
+    // spares, and it is here for those two times: its pixels are 20°
+    // long, where the mask's margin leaves a lens nothing, so it has no
+    // valid sample and the two calls agree in their zeros alone. Strips
+    // of a pair are held to strips afresh, bit for bit, in
+    // `a_pair_made_ready_once_serves_every_rig`.
     let tiny = StripSpec {
         px_per_deg: 0.05,
         ..StripSpec::TIER1
@@ -1733,6 +1741,9 @@ fn strips_mark_samples_outside_invalid() {
         threads()
     );
     assert_eq!(ready, finite_strips(afresh));
+    for strip in &ready.lenses {
+        assert!(!strip.valid.contains(&true));
+    }
 
     // A band of ±13° passes each lens's mask: at θ_max 100° the mask's θ
     // bound ends it, and at 104° the slot's frame does. A sample is valid
