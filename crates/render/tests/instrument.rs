@@ -4,24 +4,38 @@
 //! so that rung 1 and the matrix share the renders of
 //! `RenderCache::shared()` (7.1).
 //!
-//! The scene is 4.2's: `SeamLines` and `Grid` at frame 0, infinitely far,
-//! and `SeamLines` again on a sphere of 1.5 m, through synth's X5-like
-//! camera at 768² a lens (`x5_like` under `x5_like_planted`) and, for the
-//! second rig, the same camera with Kannala–Brandt lenses (`kb_like`).
-//! Each lens's picture is coded as the X5 codes it, and sphere's rig of
-//! the same numbers (`common::rig`) stitches the pair at q = 0 or 1/1.5
-//! m⁻¹ into a 512 × 256 equirect and into 90° rectilinear views of 256²
-//! on each side seam (±X) and each pole (±Y). Of a view, the stripe that
-//! holds the band is rendered, the view's own pixels there, since the
-//! band check reads no others ([`view`]). The ideal is
-//! `render_view_ideal` of each view's own directions. Every picture is
-//! frame 0's, and no check reads a frame number from the scene: `Grid`'s
-//! code on the back hemisphere isn't built, and rung 1 needs none.
+//! The scene is 4.2's: `SeamLines` and `Grid` at frame 0, each infinitely
+//! far and on a sphere of 1.5 m, through synth's X5-like camera at 768² a
+//! lens (`x5_like` under `x5_like_planted`) and, for the second rig,
+//! `SeamLines` infinitely far through the same camera with Kannala–Brandt
+//! lenses (`kb_like`). Each lens's picture is coded as the X5 codes it,
+//! and sphere's rig of the same numbers (`common::rig`) stitches the pair
+//! at q = 0 or 1/1.5 m⁻¹ into a 512 × 256 equirect and into 90°
+//! rectilinear views of 256² on each side seam (±X) and each pole (±Y).
+//! Of a view, the stripe that holds the band is rendered, the view's own
+//! pixels there, since the band check reads no others ([`view`]). The
+//! ideal is `render_view_ideal` of each view's own directions. Every
+//! picture is frame 0's, and no check reads a frame number from the
+//! scene: `Grid`'s code on the back hemisphere isn't built, and rung 1
+//! needs none.
 //!
-//! `Grid` isn't rendered at 1.5 m. Its pair, with the stitches of its row
-//! and of its control, takes about a second run alone, which would take
-//! the binary past its 10 s, and `SeamLines` holds the near scene's path
-//! through the stitch.
+//! What each of the five scenes is held to ([`Scene`]): its stitch more
+//! than 12° from the seam and each lens alone, against blessed floors,
+//! with a wrong model failing them; and 4.2's band rule on the four
+//! views, with lens 1 turned 0.5° failing it on each. The band's rule
+//! holds a stitch to the better of its own two lenses, so it sees an
+//! error that one lens has and the other hasn't, and none that both
+//! share ([`the_bands_hold`]): the near pairs stitched at q = 0 pass it.
+//! A lens alone is black past its coverage, so its SSIM is taken over
+//! the windows that lie whole inside the coverage
+//! ([`Masks::alone_windows`]).
+//!
+//! The exposure step is measured on `SeamLines` infinitely far alone:
+//! `Grid`'s lines at 1.0 clip under 4.2's +0.5 EV at either depth, and
+//! the step leaves a clipped sample out.
+//!
+//! A pair's mip chains are made once and shared by every stitch and
+//! strip of the pair ([`ready`]).
 //!
 //! A planted error ([`Plant`]) goes into the model that unwraps one
 //! rendered pair; depth, motion and gains are rendered again (8.3). Each
@@ -43,7 +57,7 @@
 //! `SPHERECUT_UPDATE_GOLDENS=lower` lets a floor drop by more than 0.5 dB
 //! (for an SSIM floor, 0.0025).
 //!
-//! Budget (4.1 rule 5, 19.6): 10 s of the 15 s that M3.4's suites share;
+//! Budget (4.1 rule 5, 19.6): 11 s of the 15 s that M3.4's suites share;
 //! each test prints its time and the suite's.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -60,10 +74,12 @@ use std::time::Instant;
 use glam::{DQuat, DVec3};
 use serde_json::{Map, Value, json};
 use spherecut_render::compare::{View, Weights, equirect_coslat, psnr_weighted, ssim_weighted};
-use spherecut_render::reference::{ImageF64, RigDebug, RigOptions, render_rig, srgb_oetf};
+use spherecut_render::reference::{
+    ImageF64, LensPair, RigDebug, RigOptions, render_rig_of, srgb_oetf,
+};
 use spherecut_render::seam::shifts::TERMS;
 use spherecut_render::seam::{
-    BinShift, Signature, StripSpec, band_weights, bin_shifts, lens_coverage, signature, strips,
+    BinShift, Signature, StripSpec, band_weights, bin_shifts, lens_coverage, signature, strips_of,
 };
 use spherecut_render::{Framing, ViewParams};
 use spherecut_sphere::fisheye::{self, KbLens, LensModel};
@@ -81,7 +97,7 @@ use spherecut_testkit::control::{at_least, at_most, below, must_fail};
 use common::Frame;
 use common::budget::{
     A0, A1, ACROSS_PX, ALONG_PX, B1, Budget, C0, C1, CENTRE_ACROSS_DEG, CENTRE_ALONG_DEG, D1,
-    NAMES, centres_apart, harmonics, seam_radius, sizes, terms,
+    NAMES, SMALL_PX, centres_apart, harmonics, seam_radius, sizes, small, terms, worse,
 };
 use common::predict::predict_bins;
 use common::rig::{lens_frame, pats, rig_of_truth, sphere_rig};
@@ -89,7 +105,7 @@ use common::rig::{lens_frame, pats, rig_of_truth, sphere_rig};
 // The clock, and what a run blesses.
 
 /// The suite's budget in seconds (the module's doc).
-const BUDGET_S: f64 = 10.0;
+const BUDGET_S: f64 = 11.0;
 
 /// The binary's tests. A blessing is written once each has ended well.
 const TESTS: [&str; 7] = [
@@ -544,7 +560,7 @@ fn pair(pattern: Pattern, truth: &RigTruth) -> [Frame; 2] {
 }
 
 /// The X5-like camera's frames of `SeamLines` and of `Grid`, infinitely
-/// far, and of `SeamLines` [`NEAR_M`] away.
+/// far, and of each [`NEAR_M`] away.
 fn lines() -> &'static [Frame; 2] {
     static FRAMES: OnceLock<[Frame; 2]> = OnceLock::new();
     FRAMES.get_or_init(|| pair(Pattern::SeamLines, &x5().truth))
@@ -558,6 +574,11 @@ fn grid() -> &'static [Frame; 2] {
 fn near_lines() -> &'static [Frame; 2] {
     static FRAMES: OnceLock<[Frame; 2]> = OnceLock::new();
     FRAMES.get_or_init(|| pair(Pattern::SeamLines, &x5().near))
+}
+
+fn near_grid() -> &'static [Frame; 2] {
+    static FRAMES: OnceLock<[Frame; 2]> = OnceLock::new();
+    FRAMES.get_or_init(|| pair(Pattern::Grid, &x5().near))
 }
 
 /// The camera with lens 1 a frame late while the rig turns 10° a second
@@ -1097,7 +1118,7 @@ struct Seam {
 impl Seam {
     fn of(setup: &Setup) -> Seam {
         let predicted = predict_bins(&setup.truth, 0, &setup.rig, &SPEC);
-        let strips = strips(&setup.rig, [setup.frames[0], setup.frames[1]], &SPEC).unwrap();
+        let strips = strips_of(&ready(setup.frames), &setup.rig, &SPEC).unwrap();
         let measured = bin_shifts(&strips, &SPEC);
         let (sx, sy) = scales();
         let rms = |pairs: &mut dyn Iterator<Item = (f64, f64)>| {
@@ -1155,16 +1176,19 @@ const NCC: f64 = 0.5;
 /// 8.3's bound on step 2, in strip pixels rms.
 const PREDICTED_PX: f64 = 0.05;
 
-/// How many of the 72 bins the search holds with the tracks swapped: the
-/// field's 3.6° of a1 puts the bins about 0° and 180° past the ±3°.
+/// How many of the 72 bins the prediction holds with the tracks swapped.
+/// The field's 3.6° of a1 takes the seam past the estimator's search of
+/// ±12 px about φ = 0° and 180°, and `predict_bins` holds a bin only
+/// where every point of its patch lies inside the search: it leaves out
+/// the 28 bins within 35° of the two, bins 0 to 6, 29 to 42 and 65 to
+/// 71. Bin 6, whose mean lies inside the search and whose farthest
+/// points lie past it, is among them: the estimator gives an alias for
+/// it, 5.4 px from its mean.
 const SWAPPED_BINS: usize = 44;
 
 /// The largest of a signature's terms, in degrees; NaN if one is.
 fn largest_term(s: &Signature) -> f64 {
-    terms(s)
-        .iter()
-        .map(|t| t.abs())
-        .fold(0.0, common::budget::worse)
+    terms(s).iter().map(|t| t.abs()).fold(0.0, worse)
 }
 
 /// 4.2's seam checks on a true model's seam: every bin measured, the
@@ -1208,7 +1232,11 @@ fn apart_deg(truth: &RigTruth, rig: &Rig) -> [f64; 3] {
         let d = DVec3::new(cos, sin, 0.0);
         let shown = |b: usize| seen(truth, rig.lenses[b].track, 0, rig.texel(b, d)?);
         if let (Some(first), Some(second)) = (shown(0), shown(1)) {
-            let apart = first.angle_between(second).to_degrees();
+            // By the cross product: an arc cosine can't tell an angle
+            // under 1e-6° from none.
+            let apart = (first.cross(second).length())
+                .atan2(first.dot(second))
+                .to_degrees();
             sum += apart;
             least = least.min(apart);
             most = most.max(apart);
@@ -1217,6 +1245,11 @@ fn apart_deg(truth: &RigTruth, rig: &Rig) -> [f64; 3] {
     }
     [sum / n, least, most]
 }
+
+/// How far [`apart_deg`] may lie from its answer where that is known:
+/// from 0 under the truth's own model, and from a planted roll's size.
+const APART_STILL_DEG: f64 = 1e-6;
+const APART_DEG: f64 = 1e-3;
 
 /// Where 8.3's step 3 finds a field.
 #[derive(Debug, Clone, Copy)]
@@ -1243,7 +1276,8 @@ enum Misfit {
     Shifted,
     /// The prediction's largest term isn't among those the test names.
     Unnamed,
-    /// The images' largest term isn't the prediction's.
+    /// The images' largest term isn't the prediction's, nor a named term
+    /// that the prediction gives the same size.
     Elsewhere,
     /// A term the geometry doesn't couple to the dominant one is over its
     /// bound.
@@ -1266,6 +1300,12 @@ fn attribute(seam: &Seam, lands: Lands) -> Attributed {
 /// geometry doesn't couple to it stays under max(0.03°, 15 % of it), and
 /// a coupled term comes at the predicted ratio. Says what it found, or
 /// what doesn't fit.
+///
+/// The images' largest term may be another of the named ones where the
+/// prediction gives it the size of its own largest, within 0.03°: lens
+/// 0's V6 terms read as `RadialOnly` are predicted 0.9692° on c1 and
+/// 0.9667° on b1, 0.0025° apart, and which of two such terms an estimate
+/// good to 0.001° or 0.01° puts first says nothing of the instrument.
 fn attribute_to(want: &Signature, got: &Signature, lands: Lands) -> Attributed {
     let (want, got) = (terms(want), terms(got));
     if let Some(i) = got.iter().position(|t| !t.is_finite()) {
@@ -1298,7 +1338,11 @@ fn attribute_to(want: &Signature, got: &Signature, lands: Lands) -> Attributed {
         );
         return Err((Misfit::Unnamed, said));
     }
-    if found != main {
+    // Two named terms that the prediction gives one size, within the
+    // bound on a term, may come either way round in the images: the
+    // ratio's rule holds the pair.
+    let tied = named.contains(&found) && want[main].abs() - want[found].abs() <= TERM_DEG;
+    if found != main && !tied {
         let said = format!(
             "the images land on {} ({:+.4}°), the prediction on {} ({:+.4}°)",
             NAMES[found], got[found], NAMES[main], want[main]
@@ -1333,7 +1377,8 @@ fn attribute_to(want: &Signature, got: &Signature, lands: Lands) -> Attributed {
             );
             return Err((Misfit::Ratio, said));
         }
-        if got[i].abs() > bound {
+        // A coupled term is said where it is one: over a term's bound.
+        if got[i].abs() > TERM_DEG {
             said += &format!(
                 ", {} {:+.4}° at {ratio:+.4} of it for {predicted:+.4}",
                 NAMES[i], got[i]
@@ -1478,13 +1523,36 @@ fn ideal_view(pattern: Pattern, k: usize) -> &'static [f64] {
     IDEALS[slot(pattern)][k].get_or_init(|| ideal(pattern, &view(k), IDEAL_N_VIEW))
 }
 
-/// `rig`'s picture of a pair through a shot, in display light.
+/// A pair of frames made ready to sample, once for the binary: its two
+/// pictures' mip chains, which `render_rig` and `strips` build again at
+/// each call (about 10 ms a pair at 768²) and every stitch and strip of
+/// the pair here shares. `render_rig` and `strips` are `render_rig_of`
+/// and `strips_of` on a pair made for the call, and the rig reference's
+/// own tests hold the two ways to the same bits
+/// (`a_pair_made_ready_once_serves_every_rig`). The frames are the
+/// binary's own, each made once, so a pair is told by where its two
+/// frames lie.
+fn ready(frames: Pair) -> Arc<LensPair> {
+    type Cell = Arc<OnceLock<Arc<LensPair>>>;
+    static PAIRS: Mutex<BTreeMap<[usize; 2], Cell>> = Mutex::new(BTreeMap::new());
+    let cell = PAIRS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(frames.map(|frame| std::ptr::from_ref(frame).addr()))
+        .or_default()
+        .clone();
+    cell.get_or_init(|| Arc::new(LensPair::new([frames[0], frames[1]]).unwrap()))
+        .clone()
+}
+
+/// `rig`'s picture of a pair through a shot, in display light:
+/// `render_rig`'s, by `render_rig_of` on the pair made [`ready`].
 fn stitch(frames: Pair, rig: &Rig, gains: [[f64; 3]; 2], shot: &Shot, debug: RigDebug) -> ImageF64 {
     let opts = RigOptions {
         debug,
         level0: false,
     };
-    render_rig([frames[0], frames[1]], rig, gains, &shot.0, shot.1, &opts).unwrap()
+    render_rig_of(&ready(frames), rig, gains, &shot.0, shot.1, &opts).unwrap()
 }
 
 /// A lens alone: 10.3's debug modes 4 and 5.
@@ -1508,17 +1576,23 @@ fn psnr(got: &ImageF64, want: &[f64], mask: &[f64]) -> f64 {
     psnr_weighted(got, View::new(width, height, 3, want), &weights).unwrap()
 }
 
-fn score(got: &ImageF64, want: &[f64], mask: &[f64]) -> Score {
-    let (width, height) = (got.width as usize, got.height as usize);
+fn ssim(got: &[f64], want: &[f64], mask: &[f64], (width, height): (usize, usize)) -> f64 {
     let weights = Weights {
         width,
         height,
         w: mask,
     };
-    let got_view = View::new(width, height, 3, &got.data[..]);
+    let got = View::new(width, height, 3, got);
+    ssim_weighted(got, View::new(width, height, 3, want), &weights).unwrap()
+}
+
+/// A picture's score: its PSNR under `mask`, and its SSIM over the
+/// windows whose centres `windows` holds.
+fn score(got: &ImageF64, want: &[f64], mask: &[f64], windows: &[f64]) -> Score {
+    let size = (got.width as usize, got.height as usize);
     Score {
         psnr: psnr(got, want, mask),
-        ssim: ssim_weighted(got_view, View::new(width, height, 3, want), &weights).unwrap(),
+        ssim: ssim(&got.data, want, windows, size),
     }
 }
 
@@ -1529,22 +1603,59 @@ fn score(got: &ImageF64, want: &[f64], mask: &[f64]) -> Score {
 struct Masks {
     past_12: Vec<f64>,
     alone: [Vec<f64>; 2],
+    /// Each lens's coverage for the SSIM, whose windows count by their
+    /// centres: the pixels whose whole window the lens covers
+    /// ([`whole_windows`]). A lens alone is black past its coverage, so a
+    /// window that reached past it would hold the ideal's scene against
+    /// black, which is the mask's edge and nothing of the stitch.
+    alone_windows: [Vec<f64>; 2],
     overlap: Vec<f64>,
 }
 
 /// 4.2's "more than 12° from the seam".
 const OFF_SEAM_DEG: f64 = 12.0;
 
+/// How far an SSIM window reaches from its centre, in pixels: the half
+/// width of `ssim_weighted`'s 11 × 11.
+const WINDOW_REACH: usize = 5;
+
+/// `mask` less every pixel whose 11 × 11 window holds a pixel of weight
+/// 0 or passes the picture's edge: the centres of the windows that lie
+/// whole inside the mask.
+fn whole_windows(mask: &[f64], width: usize) -> Vec<f64> {
+    let (height, reach) = (mask.len() / width, WINDOW_REACH);
+    let covered = |x: usize, y: usize| {
+        let row = |j: usize| &mask[j * width + x - reach..=j * width + x + reach];
+        (y - reach..=y + reach).all(|j| row(j).iter().all(|w| *w > 0.0))
+    };
+    let whole = |x: usize, y: usize| {
+        let inside = (reach..width.saturating_sub(reach)).contains(&x)
+            && (reach..height.saturating_sub(reach)).contains(&y);
+        inside && covered(x, y)
+    };
+    (0..mask.len())
+        .map(|at| {
+            if whole(at % width, at / width) {
+                mask[at]
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
 impl Masks {
     fn of(rig: &Rig) -> Masks {
         let (view, size) = equirect();
-        let coslat = equirect_coslat(size.0 as usize, size.1 as usize);
+        let width = size.0 as usize;
+        let coslat = equirect_coslat(width, size.1 as usize);
         let weigh =
             |mask: &[f64]| -> Vec<f64> { mask.iter().zip(&coslat).map(|(m, c)| m * c).collect() };
         let cover = [0, 1].map(|b| lens_coverage(rig, b, &view, size));
         Masks {
             past_12: weigh(&band_weights(rig, &view, size, OFF_SEAM_DEG, 90.0)),
             alone: [weigh(&cover[0]), weigh(&cover[1])],
+            alone_windows: [0, 1].map(|b| weigh(&whole_windows(&cover[b], width))),
             overlap: cover[0].iter().zip(&cover[1]).map(|(a, b)| a * b).collect(),
         }
     }
@@ -1555,13 +1666,22 @@ impl Masks {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scene {
     /// The X5-like camera: `SeamLines` and `Grid` infinitely far, and
-    /// `SeamLines` 1.5 m away.
+    /// each 1.5 m away.
     Lines,
     Grid,
     NearLines,
+    NearGrid,
     /// The Kannala–Brandt camera, `SeamLines` infinitely far.
     KbLines,
 }
+
+/// How many scenes there are, for what is kept by scene.
+const SCENES: usize = 5;
+
+/// A far X5-like row's words for 4.2's own control of the band.
+const SMALL_TURN: &str = "band_*_small_turn_db: the same on a side seam with lens 1 turned 0.13° \
+     about +Y, 4.2's own control, which stays over it; band_*_small_turn_costs_db: what that \
+     turn costs the stitch's PSNR in the band, held to be more than nothing.";
 
 /// The manifest's keys for a scene's three pictures: the stitch, and
 /// each lens alone.
@@ -1578,6 +1698,7 @@ impl Scene {
             Scene::Lines => "x5_seamlines",
             Scene::Grid => "x5_grid",
             Scene::NearLines => "x5_seamlines_1m5",
+            Scene::NearGrid => "x5_grid_1m5",
             Scene::KbLines => "kb_seamlines",
         }
     }
@@ -1599,26 +1720,60 @@ impl Scene {
                 "SeamLines",
                 "on a sphere of 1.5 m, q = 1/1.5 per metre",
             ),
+            Scene::NearGrid => (
+                "x5_like under x5_like_planted",
+                "Grid",
+                "on a sphere of 1.5 m, q = 1/1.5 per metre",
+            ),
             Scene::KbLines => (
                 "kb_like of the X5-like camera",
                 "SeamLines",
                 "infinitely far, q = 0",
             ),
         };
+        let control = match self.pattern() {
+            Pattern::Grid => {
+                "band_*_yawed_db: the same with lens 1 yawed 0.5°, which must come under it on \
+                 a side seam and is recorded on a pole, where the yaw turns the graticule about \
+                 its own pole; band_*_rolled_db: with lens 1 rolled 0.5°, which must come under \
+                 it on a pole"
+            }
+            _ => {
+                "band_*_yawed_db: the same with lens 1 yawed 0.5°, which must come under it on \
+                 each"
+            }
+        };
+        // What the row measures beside the floors and the band.
+        let more = match self {
+            Scene::Lines => format!(
+                " {SMALL_TURN} lens*_edge_windows_ssim: the ideal, black where the lens covers \
+                 nothing, against the ideal over the lens's whole coverage, which must come \
+                 under 1; over the whole windows it is 1."
+            ),
+            Scene::Grid => format!(" {SMALL_TURN}"),
+            Scene::NearLines | Scene::NearGrid => " band_pos_x_q_0_db: the pair stitched at q = \
+                 0, which passes the band's rule, both lenses being wrong alike; \
+                 band_pos_x_q_0_costs_db: what that costs the stitch's own PSNR in the band."
+                .to_owned(),
+            Scene::KbLines => String::new(),
+        };
         format!(
             "{pattern} at frame 0, {at}, through {camera} at {SIDE}² a lens ({SS}² samples a \
              pixel), stitched by render_rig into a 512x256 equirect and held to \
              render_view_ideal ({IDEAL_N}² samples a pixel), weighted by cos(latitude): more \
-             than {OFF_SEAM_DEG}° from the seam, and each lens alone over its own coverage. \
-             band_*: in 90° rectilinear views of {VIEW_SIDE}² on the seam, where both lenses' \
-             weights are above 0, the stitch's PSNR less the better lens's alone, in dB"
+             than {OFF_SEAM_DEG}° from the seam, and each lens alone over its own coverage, \
+             its SSIM over the windows that lie whole inside it. band_*_db: in 90° rectilinear \
+             views of {VIEW_SIDE}² on each side seam and each pole, where both lenses' weights \
+             are above 0, the stitch's PSNR less the better lens's alone, in dB, held to \
+             {BAND_DB} dB or more; {control}. The band's rule sees an error that one lens has \
+             and the other hasn't, and none that both share.{more}"
         )
     }
 
     fn pattern(self) -> Pattern {
         match self {
-            Scene::Grid => Pattern::Grid,
-            _ => Pattern::SeamLines,
+            Scene::Grid | Scene::NearGrid => Pattern::Grid,
+            Scene::Lines | Scene::NearLines | Scene::KbLines => Pattern::SeamLines,
         }
     }
 
@@ -1627,6 +1782,7 @@ impl Scene {
             Scene::Lines => both(lines()),
             Scene::Grid => both(grid()),
             Scene::NearLines => both(near_lines()),
+            Scene::NearGrid => both(near_grid()),
             Scene::KbLines => both(&kb().frames),
         }
     }
@@ -1635,41 +1791,90 @@ impl Scene {
     fn rig(self) -> Rig {
         match self {
             Scene::Lines | Scene::Grid => x5().rig,
-            Scene::NearLines => x5().near_rig,
+            Scene::NearLines | Scene::NearGrid => x5().near_rig,
             Scene::KbLines => kb().rig,
         }
     }
 
-    /// The true rig's masks. The two far scenes of the X5-like camera
-    /// share theirs.
+    /// Which of the true rigs is the scene's: the X5-like camera's
+    /// stitched infinitely far, the same stitched 1.5 m away, and the
+    /// Kannala–Brandt camera's. What depends on the rig alone (the masks,
+    /// the band) is kept by this, for the two patterns to share.
+    fn camera(self) -> usize {
+        match self {
+            Scene::Lines | Scene::Grid => 0,
+            Scene::NearLines | Scene::NearGrid => 1,
+            Scene::KbLines => 2,
+        }
+    }
+
+    /// The true rig with lens 1 yawed 0.5° (`angle` 0) or rolled 0.5°
+    /// (`angle` 2), the band check's controls: by the tune on the X5-like
+    /// camera, at the scene's own stitch distance, and turned about +Y or
+    /// about the lens axis on the Kannala–Brandt rig, which takes no
+    /// angles from a tune. A yaw moves the seam across itself, most on
+    /// its sides, ±X, and not at all on its poles, ±Y; a roll moves it
+    /// along itself by the same 0.5° all round.
+    fn turned(self, angle: usize) -> Rig {
+        match self {
+            Scene::Lines | Scene::Grid => tuned(|t| t.lenses[1].ypr_deg[angle] = 0.5),
+            Scene::NearLines | Scene::NearGrid => {
+                let mut tune = near();
+                tune.lenses[1].ypr_deg[angle] = 0.5;
+                rig_as(&x5().cal, &x5().planted, &tune)
+            }
+            Scene::KbLines => {
+                let rig = kb().rig;
+                let about = [DVec3::Y, DVec3::X, DVec3::Z][angle];
+                with_lens(&rig, 1, turned(&rig.lenses[1], about, 0.5))
+            }
+        }
+    }
+
+    /// Whether lens 1 yawed 0.5° is the band's control on view `k`: on a
+    /// side seam always, and on a pole for `SeamLines`, whose checker the
+    /// yaw moves across 45° of the seam to either side of the pole. On
+    /// `Grid` it isn't: the yaw turns the graticule about its own pole,
+    /// which moves the meridians far from the pole and leaves the
+    /// parallels, and the band on a pole loses 0.1 dB to 1.3 dB to it.
+    /// There the control is the roll, which takes the seam across the
+    /// meridians at the pole.
+    fn yaw_fails(self, k: usize) -> bool {
+        seam_runs_down(k) || self.pattern() != Pattern::Grid
+    }
+
+    /// The true rig's masks.
     fn masks(self) -> &'static Masks {
         static MASKS: [OnceLock<Masks>; 3] = [const { OnceLock::new() }; 3];
-        let slot = match self {
-            Scene::Lines | Scene::Grid => 0,
-            Scene::NearLines => 1,
-            Scene::KbLines => 2,
-        };
-        MASKS[slot].get_or_init(|| Masks::of(&self.rig()))
+        MASKS[self.camera()].get_or_init(|| Masks::of(&self.rig()))
     }
 
     /// `model`'s stitch of the scene against the ideal, more than 12°
     /// from the seam.
     fn stitched(self, model: &Rig) -> Score {
         let got = stitch(self.frames(), model, UNIT, &equirect(), RigDebug::Off);
-        score(&got, ideal_equirect(self.pattern()), &self.masks().past_12)
+        let mask = &self.masks().past_12;
+        score(&got, ideal_equirect(self.pattern()), mask, mask)
     }
 
     /// `model`'s block `b` alone against the ideal, over the true rig's
-    /// coverage of it.
+    /// coverage of it: the PSNR over every pixel of it, the SSIM over
+    /// the windows that lie whole inside it.
     fn alone(self, model: &Rig, b: usize) -> Score {
         let got = stitch(self.frames(), model, UNIT, &equirect(), ALONE[b]);
-        score(&got, ideal_equirect(self.pattern()), &self.masks().alone[b])
+        let masks = self.masks();
+        score(
+            &got,
+            ideal_equirect(self.pattern()),
+            &masks.alone[b],
+            &masks.alone_windows[b],
+        )
     }
 
     /// The true rig's three scores, measured once: the stitch, and each
     /// lens alone.
     fn truth(self) -> &'static [Score; 3] {
-        static SCORES: [OnceLock<[Score; 3]>; 4] = [const { OnceLock::new() }; 4];
+        static SCORES: [OnceLock<[Score; 3]>; SCENES] = [const { OnceLock::new() }; SCENES];
         SCORES[self as usize].get_or_init(|| {
             let rig = self.rig();
             [
@@ -1710,15 +1915,10 @@ impl Scene {
     /// The true rig's band in view `k`'s stripe: 1 where both of its
     /// weights are non-zero, 0 elsewhere, from 10.3's debug mode 6. The
     /// band lies inside the stripe: no pixel of the stripe's two outer
-    /// lines is in it. The X5-like camera's far scenes share theirs.
+    /// lines is in it.
     fn band(self, k: usize) -> &'static [f64] {
-        static BANDS: [[OnceLock<Vec<f64>>; 4]; 2] = [const { [const { OnceLock::new() }; 4] }; 2];
-        let slot = match self {
-            Scene::Lines | Scene::Grid => 0,
-            Scene::KbLines => 1,
-            Scene::NearLines => panic!("the band is checked on the far scenes"),
-        };
-        BANDS[slot][k].get_or_init(|| {
+        static BANDS: [[OnceLock<Vec<f64>>; 4]; 3] = [const { [const { OnceLock::new() }; 4] }; 3];
+        BANDS[self.camera()][k].get_or_init(|| {
             let weights = stitch(
                 self.frames(),
                 &self.rig(),
@@ -1766,7 +1966,8 @@ impl Scene {
 
     /// The true rig's three, measured once.
     fn band_truth(self, k: usize) -> &'static [f64; 3] {
-        static SCORES: [[OnceLock<[f64; 3]>; 4]; 4] = [const { [const { OnceLock::new() }; 4] }; 4];
+        static SCORES: [[OnceLock<[f64; 3]>; 4]; SCENES] =
+            [const { [const { OnceLock::new() }; 4] }; SCENES];
         SCORES[self as usize][k].get_or_init(|| self.band_scores(&self.rig(), k))
     }
 
@@ -1854,9 +2055,11 @@ fn a_blessing_keeps_d32s_rules() {
 ///   3.6 dB of the plan's 1-D model: at the views' 0.35° a pixel a lens
 ///   alone already scores about 25 dB on the 1° checker, and half a
 ///   source pixel adds little to that. The check's control is lens 1
-///   yawed 0.5°, which fails it by 4 dB or more on the side seams; the
-///   0.13° turn is held to lower the band's PSNR, and fails the
-///   misregistration.
+///   yawed 0.5°, which fails it by 4 dB or more on the side seams and,
+///   on `SeamLines`, by 2 dB on the poles; on `Grid`'s poles, where the
+///   yaw turns the graticule about its own pole, it is lens 1 rolled
+///   0.5° ([`the_bands_hold`]). The 0.13° turn is held to lower the
+///   band's PSNR, and fails the misregistration.
 /// - **Median NCC under 0.5.** The turn left out doesn't collapse the
 ///   NCC on `SeamLines`, whose checker repeats every 2° inside the ±3°
 ///   search: the strips lock a period away, at the search's edge, with a
@@ -1871,16 +2074,40 @@ fn rung1_x5_like_rig_meets_the_thresholds() {
         &|| warm(&[Plant::Truth, Plant::Near, Plant::OtherScene, Plant::NoTurn]),
         &lines_meet_the_thresholds,
         &grid_meets_the_thresholds,
-        &|| {
-            let scene = Scene::NearLines;
-            let (mut row, floors) = scene.hold();
-            let at_infinity = Plant::NearAtInfinity.rig();
-            let name = "q = 0 against R = 1.5 m";
-            fails_the_floors(&mut row, scene, &floors, name, &at_infinity);
-            fails_alone(&mut row, scene, &floors, name, &at_infinity);
-            row.done();
-        },
+        &|| near_meets_the_thresholds(Scene::NearLines),
+        &|| near_meets_the_thresholds(Scene::NearGrid),
     ]);
+}
+
+/// A pattern through the X5-like rig on a sphere of 1.5 m, stitched at
+/// q = 1/1.5 m⁻¹: the floors, with the pair stitched at q = 0 failing
+/// them, and the band on the four views, with lens 1 turned 0.5° at that
+/// distance failing it.
+///
+/// The stitch at q = 0 is no control for the band: both lenses are wrong
+/// by the same parallax, each as bad alone as the stitch, and the rule
+/// holds the stitch to the better of them ([`the_bands_hold`]). Its
+/// number on +X goes in the row, held to pass the rule that it can't
+/// fail.
+fn near_meets_the_thresholds(scene: Scene) {
+    let (mut row, floors) = scene.hold();
+    let at_infinity = Plant::NearAtInfinity.rig();
+    let name = "q = 0 against R = 1.5 m";
+    fails_the_floors(&mut row, scene, &floors, name, &at_infinity);
+    fails_alone(&mut row, scene, &floors, name, &at_infinity);
+    the_bands_hold(&mut row, scene, None);
+    let [stitched, first, second] = scene.band_scores(&at_infinity, 0);
+    let over = over_the_better([stitched, first, second]);
+    row.measure("band_pos_x_q_0_db", over);
+    row.measure("band_pos_x_q_0_costs_db", scene.band_truth(0)[0] - stitched);
+    assert!(
+        over >= BAND_DB && stitched < scene.band_truth(0)[0] - 3.0,
+        "{}: at q = 0 the stitch is {stitched} dB in the band on +X, {over} dB over its \
+         better lens, and the true rig's {} dB",
+        scene.row(),
+        scene.band_truth(0)[0]
+    );
+    row.done();
 }
 
 /// A control on a scene's floors away from the seam: `model`'s stitch
@@ -1907,6 +2134,41 @@ fn fails_alone(row: &mut Row, scene: Scene, floors: &[Score; 3], name: &str, mod
     must_fail(&format!("{what}, SSIM"), at_least(got.ssim, floors[2].ssim));
 }
 
+/// The lens-alone SSIM counts no window that reaches past the lens's
+/// coverage, where a lens alone is black: the ideal with every pixel the
+/// lens doesn't cover made black scores exactly 1 against the ideal over
+/// the whole windows ([`Masks::alone_windows`]). Its control is the same
+/// pair over the lens's whole coverage, as the SSIM was taken before,
+/// whose windows at the edge hold the black and bring it under 1.
+fn the_windows_lie_inside(row: &mut Row, scene: Scene) {
+    let (masks, want) = (scene.masks(), ideal_equirect(scene.pattern()));
+    let (_, (width, height)) = equirect();
+    let size = (width as usize, height as usize);
+    for b in 0..2 {
+        let cover = &masks.alone[b];
+        let blacked: Vec<f64> = want
+            .chunks_exact(3)
+            .zip(cover)
+            .flat_map(|(px, w)| px.iter().map(move |v| if *w > 0.0 { *v } else { 0.0 }))
+            .collect();
+        let whole = ssim(&blacked, want, &masks.alone_windows[b], size);
+        assert!((whole - 1.0).abs() < 1e-12, "lens {b}: {whole}");
+        let edge = must_fail(
+            &format!("lens {b}'s coverage with its edge windows, the blacked ideal's SSIM"),
+            at_least(ssim(&blacked, want, cover, size), 1.0 - 1e-12),
+        );
+        row.measure(&format!("lens{b}_edge_windows_ssim"), edge);
+        let weight = |mask: &[f64]| mask.iter().sum::<f64>();
+        eprintln!(
+            "{}, lens {b} alone: the windows that reach past its coverage held {:.2} % of the \
+             SSIM's weight; the ideal blacked past the coverage scores {edge:.4} with them and \
+             {whole} without",
+            scene.row(),
+            100.0 * (1.0 - weight(&masks.alone_windows[b]) / weight(cover))
+        );
+    }
+}
+
 /// 4.2's band check on the true rig's view `k` of a scene.
 fn the_band_holds(row: &mut Row, scene: Scene, k: usize) {
     let over = over_the_better(*scene.band_truth(k));
@@ -1914,26 +2176,54 @@ fn the_band_holds(row: &mut Row, scene: Scene, k: usize) {
     assert!(over >= BAND_DB, "{} {}: {over} dB", scene.row(), VIEWS[k]);
 }
 
-/// The band check on each seam and each pole of a scene of the X5-like
-/// camera, with its controls on the side seams: lens 1 yawed 0.5°, which
-/// must fail it, and lens 1 turned 0.13° about +Y, which must lower the
-/// band's PSNR (rung 1's doc). Both turn lens 1 about +Y, which moves
-/// the side seams and leaves the poles.
-fn the_bands_hold(row: &mut Row, scene: Scene) {
-    let (yawed, small) = (Plant::Yaw.rig(), Plant::SmallTurn.rig());
+/// The band check on each side seam and each pole of a scene, with its
+/// control on each: the scene's rig with lens 1 turned 0.5°
+/// ([`Scene::turned`]), which must fail it. The control is the yaw
+/// wherever the yaw fails the rule ([`Scene::yaw_fails`]). A yaw is a
+/// turn about +Y, or nearly, so it leaves the poles themselves where
+/// they are; a pole's view holds 45° of the seam to either side of its
+/// pole, where the turn moves a point of the seam by 0.5° × the sine of
+/// its angle from the pole, and on `SeamLines` that fails the rule too,
+/// by less than on a side seam. On `Grid`'s poles the yaw's number is
+/// recorded and the control is the roll, which moves the seam along
+/// itself everywhere.
+///
+/// `small` is the far X5-like rig with lens 1 turned 0.13° about +Y, 4.2's
+/// own control for this check, which doesn't fail it and is held on the
+/// side seams to lower the band's PSNR (rung 1's doc).
+///
+/// What the rule can see: the stitch is held to the better of its own two
+/// lenses, so an error that one lens has shows, the other lens staying
+/// right, and an error that both share doesn't. The near pairs stitched
+/// at q = 0 pass it with the stitch several dB worse in the band
+/// ([`near_meets_the_thresholds`]), and so does the common-mode control
+/// (`rung1_common_mode_control`). The floors away from the seam and the
+/// seam's own checks hold those; nothing that reads this rule may take
+/// it for a check of an error both lenses share.
+fn the_bands_hold(row: &mut Row, scene: Scene, small: Option<&Rig>) {
+    let (yawed, rolled) = (scene.turned(0), scene.turned(2));
     for (k, name) in VIEWS.into_iter().enumerate() {
         the_band_holds(row, scene, k);
-        if !seam_runs_down(k) {
-            continue;
-        }
         let key = VIEW_KEYS[k];
         let over = over_the_better(scene.band_scores_lens_1(&yawed, k));
         row.measure(&format!("band_{key}_yawed_db"), over);
-        must_fail(
-            &format!("lens 1 yawed 0.5°, {}, the band on {name}", scene.row()),
-            at_least(over, BAND_DB),
-        );
-        let with_turn = scene.band_scores_lens_1(&small, k);
+        if scene.yaw_fails(k) {
+            must_fail(
+                &format!("lens 1 yawed 0.5°, {}, the band on {name}", scene.row()),
+                at_least(over, BAND_DB),
+            );
+        } else {
+            let over = over_the_better(scene.band_scores_lens_1(&rolled, k));
+            row.measure(&format!("band_{key}_rolled_db"), over);
+            must_fail(
+                &format!("lens 1 rolled 0.5°, {}, the band on {name}", scene.row()),
+                at_least(over, BAND_DB),
+            );
+        }
+        let Some(small) = small.filter(|_| seam_runs_down(k)) else {
+            continue;
+        };
+        let with_turn = scene.band_scores_lens_1(small, k);
         let costs = scene.band_truth(k)[0] - with_turn[0];
         row.measure(
             &format!("band_{key}_small_turn_db"),
@@ -1962,10 +2252,11 @@ fn lines_meet_the_thresholds() {
         fails_the_floors(&mut row, scene, &floors, name, &plant.rig());
     }
     fails_alone(&mut row, scene, &floors, "cx + 2 px", &Plant::Centre.rig());
+    the_windows_lie_inside(&mut row, scene);
 
     // In the band, on each seam and each pole; a stripe of a view is
     // the view's own pixels, on a side seam and on a pole.
-    the_bands_hold(&mut row, scene);
+    the_bands_hold(&mut row, scene, Some(&Plant::SmallTurn.rig()));
     the_stripe_is_the_views(scene, 0);
     the_stripe_is_the_views(scene, 2);
 
@@ -2000,7 +2291,7 @@ fn grid_meets_the_thresholds() {
         &equidistant,
     );
     fails_alone(&mut row, scene, &floors, "cx + 2 px", &Plant::Centre.rig());
-    the_bands_hold(&mut row, scene);
+    the_bands_hold(&mut row, scene, Some(&Plant::SmallTurn.rig()));
     row.done();
 }
 
@@ -2012,10 +2303,9 @@ fn rung1_kb_rig_meets_the_thresholds() {
     let scene = Scene::KbLines;
     let (mut row, floors) = scene.hold();
 
-    // In the band, on a side seam and a pole.
-    for k in [0, 2] {
-        the_band_holds(&mut row, scene, k);
-    }
+    // In the band, on each seam and each pole, with lens 1 turned 0.5°
+    // about +Y failing it on each.
+    the_bands_hold(&mut row, scene, None);
 
     // The seam.
     hold_seam("the Kannala–Brandt rig", &Plant::Kb.seam());
@@ -2250,6 +2540,15 @@ fn rung1_common_mode_control() {
 /// come at other ratios; and the fields past the search, which leave no
 /// term measured.
 ///
+/// The two depth rows name d1 with a0. The plan has parallax move the
+/// seam across itself alone (3.3, 8.2), which holds for lenses whose
+/// centres lie on one line along the lens axis. `x5_like`'s lie 4.30 mm
+/// apart in the seam's plane (Pat's V3 tx of −4.46 mm, less what lens
+/// 0's yaw brings in from tz), so at 1.5 m the seam moves 0.164° along
+/// itself too, a first harmonic on d1 at −0.134 of a0, at every depth.
+/// The rows hold d1 to that ratio, and not to the 15 % that it comes
+/// within 1.6 points of.
+///
 /// Three controls plant a field larger than the strips' ±3° search, so
 /// the prediction holds no bin and steps 2 and 3 have nothing to hold:
 /// equidistant applied to Mei data, the turn left out, and the
@@ -2261,6 +2560,7 @@ fn rung1_common_mode_control() {
 fn seam_signature_attributes_planted_errors() {
     let _t = timed("seam_signature_attributes_planted_errors");
     let first = &[A1, B1, C1, D1][..];
+    let depth = &[A0, D1][..];
     // Nothing planted, and what the seam can't see.
     let nothing = [
         ("the truth's model", Plant::Truth),
@@ -2279,8 +2579,10 @@ fn seam_signature_attributes_planted_errors() {
         ("lens 0 alone under A", Plant::OneLensA, &[A0]),
         ("cx + 2 px on lens 1", Plant::Centre, first),
         ("the tracks swapped", Plant::Swapped, first),
-        ("q = 0 against R = 1.5 m", Plant::NearAtInfinity, &[A0]),
-        ("tz's sign flipped at 1.5 m", Plant::TzFlipped, &[A0]),
+        // Parallax moves the seam along itself too, wherever the lenses'
+        // centres lie apart in the seam's plane: d1 comes with a0.
+        ("q = 0 against R = 1.5 m", Plant::NearAtInfinity, depth),
+        ("tz's sign flipped at 1.5 m", Plant::TzFlipped, depth),
         (
             "lens 1 a frame late in a pan about +Y",
             Plant::LatePan,
@@ -2464,6 +2766,31 @@ fn seam_signature_attributes_planted_errors() {
         attribute_to(&pitch.want, &yaw.got, Lands::On(&[A1, B1])),
         Misfit::Elsewhere,
     );
+    // Two named terms predicted one size may come either way round:
+    // lens 0's V6 terms read as RadialOnly, with b1 and c1, predicted
+    // 0.0025° apart, the other way round in the images. Predicted two
+    // bounds apart, they may not.
+    let radial_0 = Plant::V6Radial0.seam();
+    let (main, next) = (radial_0.want.c1.abs(), radial_0.want.b1.abs());
+    assert!(main > next && main - next < 0.1 * TERM_DEG, "{main} {next}");
+    assert!(radial_0.got.c1.abs() > radial_0.got.b1.abs());
+    let b1_first = Signature {
+        c1: 0.99 * radial_0.got.c1,
+        ..radial_0.got
+    };
+    assert!(b1_first.b1.abs() > b1_first.c1.abs());
+    let found = attribute_to(&radial_0.want, &b1_first, Lands::On(first))
+        .unwrap_or_else(|e| panic!("b1 over c1 in the images: {}", e.1));
+    eprintln!("8.3 | lens 0's V6 terms read as RadialOnly, b1 over c1 in the images: {found}");
+    let b1_predicted_less = Signature {
+        b1: radial_0.want.b1 - 2.0 * TERM_DEG,
+        ..radial_0.want
+    };
+    breaks(
+        "a named term two bounds under the prediction's largest, the largest in the images",
+        attribute_to(&b1_predicted_less, &b1_first, Lands::On(first)),
+        Misfit::Elsewhere,
+    );
     breaks(
         "cx + 2 px on lens 1 read as a tilt alone",
         attribute(&centre, Lands::On(&[A1])),
@@ -2475,11 +2802,62 @@ fn seam_signature_attributes_planted_errors() {
         attribute_to(&radial_1.want, &centre.got, Lands::On(first)),
         Misfit::Ratio,
     );
+    // Parallax on this rig comes with d1 at its predicted ratio to a0:
+    // a field of a0 alone isn't the stitch distance's, nor is one whose
+    // d1 has the other sign.
+    let at_infinity = Plant::NearAtInfinity.seam();
+    for (name, d1) in [
+        ("no d1", 0.0),
+        ("d1 of the other sign", -at_infinity.got.d1),
+    ] {
+        let across_alone = Signature {
+            d1,
+            ..at_infinity.got
+        };
+        breaks(
+            &format!("q = 0 against R = 1.5 m with {name}"),
+            attribute_to(&at_infinity.want, &across_alone, Lands::On(depth)),
+            Misfit::Ratio,
+        );
+    }
+
+    // What tells the fields past the search, held where its answer is
+    // known: nothing apart under the truth's own model, and 0.5° all
+    // round the seam with lens 1 rolled 0.5°. Each is the other's
+    // control.
+    let apart_of = |plant: Plant| {
+        let setup = plant.setup();
+        apart_deg(&setup.truth, &setup.rig)
+    };
+    let (still, rolled) = (apart_of(Plant::Truth), apart_of(Plant::Roll));
+    let all_within = |apart: [f64; 3], of: f64, by: f64| {
+        at_most(apart.iter().map(|a| (a - of).abs()).fold(0.0, worse), by)
+    };
+    assert!(
+        all_within(still, 0.0, APART_STILL_DEG).passes() == Some(true),
+        "{still:?}"
+    );
+    assert!(
+        all_within(rolled, 0.5, APART_DEG).passes() == Some(true),
+        "{rolled:?}"
+    );
+    must_fail(
+        "lens 1 rolled 0.5°, the seam held to lie nowhere apart",
+        all_within(rolled, 0.0, APART_STILL_DEG),
+    );
+    must_fail(
+        "the truth's model, the seam held to lie 0.5° apart",
+        all_within(still, 0.5, APART_DEG),
+    );
+    eprintln!(
+        "8.3 | apart_deg: {:.2e}° at most under the truth's model; {:.5}° to {:.5}° with lens 1 \
+         rolled 0.5°",
+        still[2], rolled[1], rolled[2]
+    );
 
     for (name, plant) in gross {
         let seam = plant.seam();
-        let setup = plant.setup();
-        let [mean, least, most] = apart_deg(&setup.truth, &setup.rig);
+        let [mean, least, most] = apart_of(plant);
         assert_eq!(seam.held, 0, "{name}");
         assert!(mean > SPEC.search_deg, "{name}: {mean}°");
         assert!(seam.own.valid_bins > 0, "{name}");
@@ -2705,19 +3083,27 @@ fn error_budget_matches_the_images() {
             moves[1],
         );
         // a0: the seam's circle is this much longer in V6's picture, so
-        // V3's picture under V6's model comes out that much shorter.
+        // V3's picture under V6's model comes out that much shorter. Both
+        // lenses' are under the budget's 0.2 px, which a zero would fit
+        // as well, so each is held with its sign to 0.05 px.
         let longer = seam_radius(&pats.as_v6.lenses[b]) - seam_radius(&pats.as_v3.lenses[b]);
-        let a0 = got(model).a0.abs() * ACROSS_PX;
+        let a0 = got(model).a0 * ACROSS_PX;
+        budget.hold_small(&format!("{row}, a0"), a0, -longer);
+        // Controls: no a0 at all, and one of the other sign.
+        let none = must_fail(&format!("{row}, no a0"), small(0.0, -longer));
+        let other = must_fail(
+            &format!("{row}, a0 with the other sign"),
+            small(-a0, -longer),
+        );
+        assert!(none > 2.0 * SMALL_PX && other > none, "{none} {other}");
         if b == 0 {
             budget.hold_corrected(
                 &format!("{row}, a0"),
                 a0,
-                longer.abs(),
-                0.15 * ACROSS_PX,
+                -longer,
+                -0.15 * ACROSS_PX,
                 "fx alone",
             );
-        } else {
-            budget.hold_worked(&format!("{row}, a0"), a0, longer.abs());
         }
         budget.hold(
             &format!("{row}, the angles' tilt, a1/b1"),
