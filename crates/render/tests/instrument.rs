@@ -4,19 +4,24 @@
 //! so that rung 1 and the matrix share the renders of
 //! `RenderCache::shared()` (7.1).
 //!
-//! The scene is 4.2's: `SeamLines` and `Grid` at frame 0, infinitely far
-//! and on a sphere of 1.5 m, through synth's X5-like camera at 768² a
-//! lens (`x5_like` under `x5_like_planted`) and, for the second rig, the
-//! same camera with Kannala–Brandt lenses (`kb_like`). Each lens's
-//! picture is coded as the X5 codes it, and sphere's rig of the same
-//! numbers (`common::rig`) stitches the pair at q = 0 or 1/1.5 m⁻¹ into a
-//! 512 × 256 equirect and into 90° rectilinear views of 256² on each side
-//! seam (±X) and each pole (±Y). Of a view, the stripe that holds the
-//! band is rendered, the view's own pixels there, since the band check
-//! reads no others ([`view`]). The ideal is `render_view_ideal` of each
-//! view's own directions. Every picture is frame 0's, and no check reads
-//! a frame number from the scene: `Grid`'s code on the back hemisphere
-//! isn't built, and rung 1 needs none.
+//! The scene is 4.2's: `SeamLines` and `Grid` at frame 0, infinitely far,
+//! and `SeamLines` again on a sphere of 1.5 m, through synth's X5-like
+//! camera at 768² a lens (`x5_like` under `x5_like_planted`) and, for the
+//! second rig, the same camera with Kannala–Brandt lenses (`kb_like`).
+//! Each lens's picture is coded as the X5 codes it, and sphere's rig of
+//! the same numbers (`common::rig`) stitches the pair at q = 0 or 1/1.5
+//! m⁻¹ into a 512 × 256 equirect and into 90° rectilinear views of 256²
+//! on each side seam (±X) and each pole (±Y). Of a view, the stripe that
+//! holds the band is rendered, the view's own pixels there, since the
+//! band check reads no others ([`view`]). The ideal is
+//! `render_view_ideal` of each view's own directions. Every picture is
+//! frame 0's, and no check reads a frame number from the scene: `Grid`'s
+//! code on the back hemisphere isn't built, and rung 1 needs none.
+//!
+//! `Grid` isn't rendered at 1.5 m. Its pair, with the stitches of its row
+//! and of its control, takes about a second run alone, which would take
+//! the binary past its 10 s, and `SeamLines` holds the near scene's path
+//! through the stitch.
 //!
 //! A planted error ([`Plant`]) goes into the model that unwraps one
 //! rendered pair; depth, motion and gains are rendered again (8.3). Each

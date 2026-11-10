@@ -1338,9 +1338,11 @@ below and with the analytic ideal. Rung 0 is sphere's, on points
 (M3.3). **Rung 1** and the **attribution matrix** are
 `crates/render/tests/instrument.rs` (M3.4):
 
-* synth renders each lens's picture of `SeamLines` and `Grid` through a
-  camera whose truth it knows (`synth::lens`), the X5-like rig at 768²
-  a lens and a Kannala–Brandt twin, infinitely far and at 1.5 m;
+* synth renders each lens's picture through a camera whose truth it
+  knows (`synth::lens`): `SeamLines` and `Grid` infinitely far, and
+  `SeamLines` again at 1.5 m, through the X5-like rig at 768² a lens,
+  and `SeamLines` through a Kannala–Brandt twin. `Grid` isn't rendered
+  at 1.5 m, to keep the binary inside its 10 s (D65);
 * `reference::render_rig` stitches each pair, and the result is held to
   `synth::render_view_ideal` under `seam`'s masks: more than 12° from
   the seam and for each lens alone, by floors blessed into
