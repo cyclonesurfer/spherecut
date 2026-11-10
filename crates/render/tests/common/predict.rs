@@ -42,7 +42,7 @@ use spherecut_synth::lens::{self, RigTruth};
 /// 11.8 px across, inside the search, while its farthest points lie
 /// 12.2 px, and the estimator gives an alias 5.4 px away, handed on from
 /// the bins past the search beside it. The 44 bins whose every point
-/// lies within the 12 px come back within 0.07 px of their means. Nor is
+/// lies within the 12 px come back within 0.08 px of their means. Nor is
 /// the shift's length the test, nor 3° on each axis: either leaves out
 /// four more bins there (7, 28, 43 and 64), which the estimator measures
 /// within 0.03 px.

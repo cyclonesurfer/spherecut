@@ -1256,9 +1256,11 @@ const APART_DEG: f64 = 1e-3;
 enum Lands {
     /// Nowhere: no term reaches 0.03°.
     Nowhere,
-    /// On these terms. The largest predicted term is among them and is
-    /// the largest measured; the others of them are the ones the geometry
-    /// couples to it, and come at the predicted ratio.
+    /// On these terms. The largest predicted term is among them, and the
+    /// largest measured is that term or another of them that the
+    /// prediction gives the same size within 0.03°. The others of them
+    /// are the ones the geometry couples to it, and come at the predicted
+    /// ratio.
     On(&'static [usize]),
 }
 
