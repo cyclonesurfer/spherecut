@@ -680,9 +680,12 @@ fn a_textureless_bin_is_invalid() {
         assert_eq!(b.info, [[0.0; 2]; 2]);
         assert!(b.log_gain.iter().all(|g| g.is_nan()), "{b:?}");
     }
-    // Every bin that does measure has the planted shift, and the fit is
-    // theirs alone. A bin at a stretch's edge measures from the sliver of
-    // texture it has left, less closely.
+    // Every bin that does measure has the planted shift. The flat bin and
+    // the ramp's at each end of their stretches measure from the sliver
+    // of texture that the smoothing brings over their patches' edges,
+    // less closely and without information (the interior rule, whose
+    // control is `a_sky_bin_beside_texture_tells_the_fit_nothing`'s): the
+    // fit is the other bins' alone.
     let measured: Vec<BinShift> = bins.iter().copied().filter(|b| b.valid).collect();
     let whole: Vec<BinShift> = (0..72)
         .filter(|k| !(8..=14).contains(k) && !(28..=34).contains(k))
@@ -709,6 +712,11 @@ fn a_textureless_bin_is_invalid() {
         "{edge_miss}"
     );
     assert_eq!(s.valid_bins, measured.len());
+    let slivers = [9, 13, 29, 33];
+    for k in slivers {
+        assert!(bins[k].valid && !bins[k].informed(), "{:?}", bins[k]);
+    }
+    assert_eq!(s.informed_bins, measured.len() - slivers.len());
     assert!(
         (s.c0 * sx - shift.0).hypot(-s.a0 * sy - shift.1) < 0.005,
         "{s:?}"
@@ -750,9 +758,25 @@ fn a_textureless_bin_is_invalid() {
     let none = Strips {
         lenses: [nothing.clone(), nothing],
     };
-    for (k, b) in bin_shifts(&none, &SPEC).iter().enumerate() {
-        assert!(!b.valid && b.phi_deg == 2.5 + 5.0 * k as f64, "{b:?}");
-    }
+    let says_where = |bins: &[BinShift]| {
+        let own_middle = |(k, b): (usize, &BinShift)| b.phi_deg == 2.5 + 5.0 * k as f64;
+        bins.len() == 72 && bins.iter().enumerate().all(own_middle)
+    };
+    let unmeasured = bin_shifts(&none, &SPEC);
+    assert!(unmeasured.iter().all(|b| !b.valid), "{unmeasured:?}");
+    assert!(says_where(&unmeasured), "{unmeasured:?}");
+    // Control: the middle of a bin's columns, where it has none, over the
+    // strip's pixels a degree, where it has none: 0 / 0.
+    let no_scale = f64::from(none.lenses[0].width) / 360.0;
+    let nowhere: Vec<BinShift> = unmeasured
+        .iter()
+        .map(|b| BinShift {
+            phi_deg: 0.0 / no_scale,
+            ..*b
+        })
+        .collect();
+    assert!(nowhere[0].phi_deg.is_nan());
+    must_fail("a bin of no columns at 0 / 0", says_where(&nowhere));
 
     // A spec whose bins aren't a positive number of degrees is one bin,
     // and bins narrower than a strip's pixel are a bin a column: never
@@ -1076,6 +1100,35 @@ const NO_FLOOR: Method = Method {
     ..Method::PLAN
 };
 
+/// The same with the interior rule off alone: the control of the tests of
+/// texture that lies past a patch's edge.
+const NO_INTERIOR: Method = Method {
+    interior: false,
+    ..Method::PLAN
+};
+
+/// `run` on each seed from 1 to `seeds`, in no order: the seeds are dealt
+/// to four threads, to keep a test's time.
+fn over_seeds<T: Send>(seeds: u64, run: impl Fn(u64) -> T + Sync) -> Vec<T> {
+    std::thread::scope(|scope| {
+        let run = &run;
+        let dealt: Vec<_> = (0..4)
+            .map(|t| {
+                scope.spawn(move || {
+                    (1..=seeds)
+                        .filter(|seed| seed % 4 == t)
+                        .map(run)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        dealt
+            .into_iter()
+            .flat_map(|thread| thread.join().expect("a thread's seeds"))
+            .collect()
+    })
+}
+
 /// The suite's xorshift from `seed`, scrambled: from a small seed as it
 /// stands its first numbers are small too, and the first deviates of
 /// them six standard deviations out.
@@ -1164,6 +1217,11 @@ fn informed(bins: &[BinShift]) -> usize {
     bins.iter().filter(|b| b.informed()).count()
 }
 
+/// The columns of the strip that `bins` measure from.
+fn columns_of(bins: Range<usize>) -> Range<usize> {
+    patch(&SPEC, bins.start).columns.start as usize..patch(&SPEC, bins.end - 1).columns.end as usize
+}
+
 /// Under noise a sky has a texture of its own, the noise's, and a best
 /// match in it: its bins come back valid, at shifts that mean nothing.
 /// They carry no information (`NOISE_FLOOR`), and the fit is the textured
@@ -1250,12 +1308,15 @@ fn a_noisy_sky_tells_the_fit_nothing() {
 }
 
 /// 8.4's reading at rest: one scene through both lenses, each under its
-/// own noise, half the ring a flat sky. Nothing is planted, and no term
-/// comes back over 8.4's 0.02°, on these seeds: the largest is 0.016°.
-/// Half a ring holds its worst term to 0.007° under 1 % noise and to
-/// 0.015° under 2 % (`term_se_deg`), so 8.4's threshold is one to three
-/// standard errors of such a frame's, and a reading at rest wants the
-/// standard errors beside it.
+/// own noise, half the ring a flat sky. Nothing is planted, and under
+/// 1 % noise no term comes back over 8.4's 0.02°. Under 2 % half a
+/// ring's own scatter reaches that, and the row is held to 0.03°: over
+/// 40 seeds outside the suite such a ring's largest term is 0.017° at
+/// the most under 1 % noise, and under 2 % over 0.02° on three or four
+/// and 0.024° at the most. Half a ring holds its worst term to 0.007°
+/// under 1 % noise and to 0.015° under 2 % (`term_se_deg`), so 8.4's
+/// threshold is one to three standard errors of such a frame's, and a
+/// reading at rest wants the standard errors beside it.
 #[test]
 fn a_scene_against_itself_under_noise_is_at_rest() {
     let _t = timed("a_scene_against_itself_under_noise_is_at_rest");
@@ -1265,7 +1326,7 @@ fn a_scene_against_itself_under_noise_is_at_rest() {
     let clean = Strips {
         lenses: [lens.clone(), lens],
     };
-    for (rel, seed) in [(0.01, 21), (0.02, 23)] {
+    for (rel, seed, within) in [(0.01, 21, AT_REST_DEG), (0.02, 23, 1.5 * AT_REST_DEG)] {
         let strips = under_noise(&clean, rel, seed);
         let bins = bin_shifts(&strips, &SPEC);
         let s = signature(&bins);
@@ -1273,11 +1334,12 @@ fn a_scene_against_itself_under_noise_is_at_rest() {
         let loose = signature(&bin_shifts_by(&strips, &SPEC, &NO_FLOOR));
         let off = must_fail(
             "the noise floor off",
-            at_most(worst_term(terms(&loose), [0.0; TERMS]), AT_REST_DEG),
+            at_most(worst_term(terms(&loose), [0.0; TERMS]), within),
         );
         eprintln!(
             "at rest, noise {:.0} %, seed {seed}: {} of {} sky bins valid, {} bins fitted, the \
-             largest term {largest:.4}° (se up to {:.4}°); control, the noise floor off: {off:.3}°",
+             largest term {largest:.4}° for {within}° (se up to {:.4}°); control, the noise \
+             floor off: {off:.3}°",
             rel * 100.0,
             bins[sky.clone()].iter().filter(|b| b.valid).count(),
             sky.len(),
@@ -1285,9 +1347,170 @@ fn a_scene_against_itself_under_noise_is_at_rest() {
             s.term_se_deg.iter().copied().fold(0.0, worse),
         );
         assert_eq!(informed(&bins[sky.clone()]), 0);
-        let rests = at_most(largest, AT_REST_DEG);
+        let rests = at_most(largest, within);
         assert!(rests.passes() == Some(true), "{rests}");
         assert!(off > 5.0 * AT_REST_DEG, "{off}");
+    }
+}
+
+/// A sky bin beside texture tells the fit nothing. Its own columns hold
+/// no texture; the smoothing brings three of its neighbour's over its
+/// patch's edge, and under noise the bin matches on those, at a shift
+/// that leans towards them (`bin_shifts`). With the interior rule off it
+/// weighs in the fit as a textured bin does, and from the end of half a
+/// ring it takes the fit with it.
+///
+/// [`grain`] over bins 0 to 35 and a flat sky of its mean over the rest,
+/// the edges on bins' edges, one scene through both lenses under 1 %
+/// noise. Of the sky, the bin beside the texture at each end and the one
+/// past it are covered, which keeps the test's time: the rest has
+/// nothing to say here (`a_noisy_sky_tells_the_fit_nothing`).
+#[test]
+fn a_sky_bin_beside_texture_tells_the_fit_nothing() {
+    let _t = timed("a_sky_bin_beside_texture_tells_the_fit_nothing");
+    const SEEDS: u64 = 6;
+    const AT_REST_DEG: f64 = 0.02;
+    let textured = columns_of(0..36);
+    let (beside, covered) = ([36, 71], [columns_of(0..38), columns_of(70..72)]);
+    let width = SPEC.size().0 as usize;
+    let mut lens = grey(&SPEC, |x, y| {
+        if textured.contains(&(x as usize)) {
+            grain(x, y)
+        } else {
+            0.3
+        }
+    });
+    for at in 0..lens.valid.len() {
+        lens.valid[at] = covered.iter().any(|c| c.contains(&(at % width)));
+    }
+    // A seed's strips by the plan's method and with the interior rule
+    // off: the largest term, how many of the two bins beside the texture
+    // are valid, how many of them have information, and how many bins the
+    // fit has.
+    let run = |seed: u64| {
+        let mut rng = seeded(seed);
+        let mut lenses = [lens.clone(), lens.clone()];
+        for lens in &mut lenses {
+            for columns in &covered {
+                add_noise(lens, columns.clone(), 0.01, &mut rng);
+            }
+        }
+        let strips = Strips { lenses };
+        let read = |method: &Method| {
+            let bins = bin_shifts_by(&strips, &SPEC, method);
+            let s = signature(&bins);
+            assert_eq!(s.informed_bins, informed(&bins), "seed {seed}");
+            (
+                worst_term(terms(&s), [0.0; TERMS]),
+                beside.iter().filter(|&&k| bins[k].valid).count(),
+                beside.iter().filter(|&&k| bins[k].informed()).count(),
+                s.informed_bins,
+            )
+        };
+        [read(&Method::PLAN), read(&NO_INTERIOR)]
+    };
+    let runs = over_seeds(SEEDS, run);
+    assert_eq!(runs.len() as u64, SEEDS);
+    let largest = |method: usize| runs.iter().map(|run| run[method].0).fold(0.0, worse);
+    let (held, loose) = (largest(0), largest(1));
+    let over = runs.iter().filter(|run| run[1].0 > AT_REST_DEG).count();
+    let valid: usize = runs.iter().map(|run| run[0].1).sum();
+    let loose_informed: usize = runs.iter().map(|run| run[1].2).sum();
+    eprintln!(
+        "texture beside a sky of its mean, at rest under 1 % noise, {SEEDS} seeds: the two sky \
+         bins beside it valid in {valid} of {}, with information in none, the largest term \
+         {held:.4}°; control, the interior rule off: with information in {loose_informed}, the \
+         largest term {loose:.3}°, over {AT_REST_DEG}° on {over} seeds",
+        2 * SEEDS
+    );
+    for [plan, _] in &runs {
+        // The bins beside the texture claim their match and no more, and
+        // the fit is the textured bins'.
+        assert_eq!((plan.2, plan.3), (0, 36), "{plan:?}");
+    }
+    assert_eq!(valid as u64, 2 * SEEDS);
+    let rests = at_most(held, AT_REST_DEG);
+    assert!(rests.passes() == Some(true), "{rests}");
+    // Control: with the interior rule off the two bins weigh in, and a
+    // term goes over 8.4's threshold on half the seeds or more.
+    let off = must_fail("the interior rule off", at_most(loose, AT_REST_DEG));
+    assert!(off > 1.5 * AT_REST_DEG, "{off}");
+    assert!(loose_informed as u64 >= SEEDS, "{loose_informed}");
+    assert!(2 * over as u64 >= SEEDS, "{over}");
+}
+
+/// Texture past a patch's rows tells the fit nothing either. A band whose
+/// patches hold a flat sky, with texture above their first row: the
+/// smoothing brings three rows of it over every patch's edge, and under
+/// noise each bin's NCC is best a little towards it, since more of it in
+/// lens 1's patch lifts the patch clear of its noise. With the interior
+/// rule off that is one lean round the whole ring, an a0 that no depth
+/// or misalignment put there.
+///
+/// One scene through both lenses under 0.5 % noise, twelve bins of the
+/// ring covered, to keep the test's time, and the ten inside them read.
+#[test]
+fn texture_past_a_patchs_rows_tells_the_fit_nothing() {
+    let _t = timed("texture_past_a_patchs_rows_tells_the_fit_nothing");
+    const SEEDS: u64 = 6;
+    const AT_REST_DEG: f64 = 0.02;
+    let first_row = f64::from(patch(&SPEC, 0).rows.start);
+    let (covered, read) = (columns_of(0..12), 1..11);
+    let width = SPEC.size().0 as usize;
+    let mut lens = grey(&SPEC, |x, y| if y < first_row { grain(x, y) } else { 0.3 });
+    for at in 0..lens.valid.len() {
+        lens.valid[at] = covered.contains(&(at % width));
+    }
+    // A seed's strips by the plan's method and with the interior rule
+    // off: how many of the bins read are valid, how many have
+    // information, and the mean shift across of those, in degrees; NaN of
+    // none.
+    let run = |seed: u64| {
+        let mut rng = seeded(seed);
+        let mut lenses = [lens.clone(), lens.clone()];
+        for lens in &mut lenses {
+            add_noise(lens, covered.clone(), 0.005, &mut rng);
+        }
+        let strips = Strips { lenses };
+        let by = |method: &Method| {
+            let bins = &bin_shifts_by(&strips, &SPEC, method)[read.clone()];
+            let across: Vec<f64> = bins
+                .iter()
+                .filter(|b| b.informed())
+                .map(|b| b.across_deg)
+                .collect();
+            (
+                bins.iter().filter(|b| b.valid).count(),
+                across.len(),
+                across.iter().sum::<f64>() / across.len() as f64,
+            )
+        };
+        [by(&Method::PLAN), by(&NO_INTERIOR)]
+    };
+    let runs = over_seeds(SEEDS, run);
+    assert_eq!(runs.len() as u64, SEEDS);
+    let bins = read.len() * runs.len();
+    let valid: usize = runs.iter().map(|run| run[0].0).sum();
+    let claimed: usize = runs.iter().map(|run| run[0].1).sum();
+    let loose: usize = runs.iter().map(|run| run[1].1).sum();
+    let lean = |pick: fn(f64, f64) -> f64| runs.iter().map(|run| run[1].2).fold(f64::NAN, pick);
+    let (least, most) = (lean(f64::min), lean(f64::max));
+    eprintln!(
+        "texture above the patches' rows, at rest under 0.5 % noise, {SEEDS} seeds: {valid} of \
+         {bins} bins valid, {claimed} with information; control, the interior rule off: {loose} \
+         with information, a seed's lying {least:+.4}° to {most:+.4}° across on average"
+    );
+    assert!(10 * valid >= 9 * bins, "{valid}");
+    let nothing = at_most(claimed, 0);
+    assert!(nothing.passes() == Some(true), "{nothing}");
+    // Control: with the interior rule off most of the bins weigh in, and
+    // on every seed they lean towards the texture by more than 8.4's
+    // threshold.
+    let loose = must_fail("the interior rule off", at_most(loose, 0));
+    assert!(10 * loose >= 9 * bins, "{loose}");
+    for [_, off] in &runs {
+        let lean = must_fail("the interior rule off", at_most(off.2, AT_REST_DEG));
+        assert!(lean > 1.5 * AT_REST_DEG, "{lean}");
     }
 }
 
@@ -1304,11 +1527,7 @@ fn a_bin_of_noise_carries_no_ring_to_an_alias() {
     let _t = timed("a_bin_of_noise_carries_no_ring_to_an_alias");
     const SEEDS: u64 = 40;
     let (sx, sy) = scales();
-    let columns = |bins: Range<usize>| {
-        patch(&SPEC, bins.start).columns.start as usize
-            ..patch(&SPEC, bins.end - 1).columns.end as usize
-    };
-    let (flat, covered) = (columns(20..23), columns(16..27));
+    let (flat, covered) = (columns_of(20..23), columns_of(16..27));
     // The cells' bins that are whole and not beside a flat one.
     let cells = [17, 18, 24, 25];
     let width = SPEC.size().0 as usize;
@@ -1343,46 +1562,32 @@ fn a_bin_of_noise_carries_no_ring_to_an_alias() {
         }
         let strips = Strips { lenses };
         let bins = bin_shifts(&strips, &SPEC);
-        // The middle one of the flat bins is noise alone; the two beside
-        // it hold three columns of the cells, which the smoothing reaches.
-        assert!(!bins[21].informed(), "seed {seed}");
-        (
-            astray(&bins),
-            astray(&bin_shifts_by(&strips, &SPEC, &NO_FLOOR)),
-        )
+        let loose = bin_shifts_by(&strips, &SPEC, &NO_FLOOR);
+        // The middle one of the flat bins is noise alone. The two beside
+        // it have three columns of the cells past their patches' edges,
+        // which the smoothing reaches, and nothing in their interiors.
+        assert_eq!(informed(&bins[20..23]), 0, "seed {seed}");
+        (astray(&bins), astray(&loose), informed(&loose[20..23]))
     };
-    // The seeds are dealt to four threads, to keep the test's time.
-    let runs: Vec<(f64, f64)> = std::thread::scope(|scope| {
-        let run = &run;
-        let dealt: Vec<_> = (0..4)
-            .map(|t| {
-                scope.spawn(move || {
-                    (1..=SEEDS)
-                        .filter(|seed| seed % 4 == t)
-                        .map(run)
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        dealt
-            .into_iter()
-            .flat_map(|thread| thread.join().expect("a thread's seeds"))
-            .collect()
-    });
+    let runs: Vec<(f64, f64, usize)> = over_seeds(SEEDS, run);
     assert_eq!(runs.len() as u64, SEEDS);
     let worst = runs.iter().map(|run| run.0).fold(0.0, worse);
     // An invalid bin took no alias, and a NaN is over no number.
     let aliases: Vec<f64> = runs.iter().map(|run| run.1).filter(|a| *a > 1.0).collect();
     let (aliased, furthest) = (aliases.len(), aliases.iter().copied().fold(0.0, f64::max));
+    let say: usize = runs.iter().map(|run| run.2).sum();
     eprintln!(
-        "cells with three flat bins under noise, {SEEDS} seeds: the cells' bins within \
-         {worst:.4} px of no shift, an alias in none; control, the noise floor off: an alias \
-         in {aliased}, up to {furthest:.2} px away"
+        "cells with three flat bins under noise, {SEEDS} seeds: no flat bin with information, \
+         the cells' bins within {worst:.4} px of no shift, an alias in none; control, the \
+         noise floor off: {say} flat bins with information, an alias in {aliased}, up to \
+         {furthest:.2} px away"
     );
     let none = at_most(worst, 0.05);
     assert!(none.passes() == Some(true), "{none}");
-    // Control: with the floor off, a flat bin's match places its
-    // neighbours, a cell or more away.
+    // Control: with the floor off the flat bins have their say, and one's
+    // match places its neighbours, a cell or more away.
+    let say = must_fail("the noise floor off, the flat bins", at_most(say, 0));
+    assert!(say as u64 >= SEEDS, "{say}");
     let aliased = must_fail("the noise floor off", at_most(aliased, 0));
     assert!(aliased >= 2, "{aliased}");
     assert!(furthest > 0.9 * sy, "{furthest}");
@@ -1563,8 +1768,9 @@ fn a_horizon_in_a_noisy_sky_informs_across_it_only() {
 
 /// The floor's figures are Tier 1's and Tier 2's (`NOISE_FLOOR`): at
 /// 8 px/° a ramp sky under noise has no information either, and texture
-/// beside it has. Eight bins of the ring are covered, to keep the test's
-/// time.
+/// beside it has. Nor has the sky bin beside the texture, which matches
+/// on the three columns of it past its patch's edge. Eight bins of the
+/// ring are covered, to keep the test's time.
 #[test]
 fn the_noise_floor_holds_at_tier_2() {
     let _t = timed("the_noise_floor_holds_at_tier_2");
@@ -1623,6 +1829,17 @@ fn the_noise_floor_holds_at_tier_2() {
         "the noise floor off",
         no_say(&bin_shifts_by(&strips, &spec, &NO_FLOOR)),
     );
+    // The sky bin beside the texture claims its match and no more.
+    let beside = sky_bins.start - 1;
+    let sliver_only = |bins: &[BinShift]| bins[beside].valid && !bins[beside].informed();
+    assert!(sliver_only(&bins), "{:?}", bins[beside]);
+    // Control: with the interior rule off it has its say, 0.7 px off at
+    // an NCC of 0.998.
+    let loose = bin_shifts_by(&strips, &spec, &NO_INTERIOR);
+    must_fail("the interior rule off", sliver_only(&loose));
+    let off =
+        (loose[beside].along_deg * sx - shift.0).hypot(-loose[beside].across_deg * sy - shift.1);
+    assert!(loose[beside].ncc > 0.99 && off > 0.3, "{:?}", loose[beside]);
 }
 
 /// Bins of a field of known terms: all of `phis` valid, each with the

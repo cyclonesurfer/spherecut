@@ -154,7 +154,17 @@ pub struct BinShift {
     /// doesn't stand clear of its mismatch ([`shifts::NOISE_FLOOR`]: a
     /// flat patch or a ramp under noise), which measures only its noise.
     /// Where the texture stands clear one way only (a horizon across a
-    /// noisy sky), the information is that way's alone, as a line's.
+    /// noisy sky), the information is that way's alone, as a line's. The
+    /// same holds of the patch's interior by itself, the patch less the
+    /// three samples at each edge that the smoothing makes partly of
+    /// what lies past it: a sky bin beside texture has none
+    /// ([`bin_shifts`]).
+    ///
+    /// A bin that is part sky and part texture has it, and more than its
+    /// shift is worth: the deviation it is normalised by is spread over
+    /// the sky's samples too. With texture over a fifth of its columns a
+    /// bin has 0.85 to 1.7 times the information of one textured
+    /// throughout, and measures up to three times worse.
     pub info: [[f64; 2]; 2],
     /// The normalised cross-correlation of the two lenses' patches at the
     /// shift, from −1 to 1.
@@ -175,7 +185,8 @@ pub struct BinShift {
     /// Whether the bin measured a shift: it found a match and settled on
     /// it. A bin with no texture to measure one from is invalid, and its
     /// shift is no measurement: never a zero. A valid bin's shift may
-    /// still be its noise's alone, with no information ([`Self::informed`]).
+    /// still be its noise's alone, or a match on texture that lies past
+    /// its patch's edge, with no information ([`Self::informed`]).
     pub valid: bool,
 }
 
@@ -229,7 +240,9 @@ pub struct Signature {
     /// fit leaves over its degrees of freedom, whatever the scale of the
     /// bins' information. NaN where the term is, and where the bins
     /// leave nothing over to tell the noise from. It covers the bins'
-    /// noise, not a bias they share.
+    /// noise, not a bias they share, and takes each bin's information
+    /// for what its shift is worth, which a bin of fainter texture than
+    /// the rest, or one part sky, has too much of ([`BinShift::info`]).
     pub term_se_deg: [f64; shifts::TERMS],
     /// The rms of what the fit leaves of the fitted bins' shifts, in
     /// degrees: depth that varies with azimuth, and the part of a rolling
@@ -238,7 +251,8 @@ pub struct Signature {
     /// How many bins measured a shift.
     pub valid_bins: usize,
     /// How many of those had information: the bins the terms are fitted
-    /// to. The rest measured only their noise.
+    /// to. The rest measured only their noise, or what lies past their
+    /// patches' edges.
     pub informed_bins: usize,
     /// The median of the valid bins' NCC. Below 0.5 the stitch has failed
     /// grossly: the turn wrong or left out, or a gross Euler error. A

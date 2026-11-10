@@ -50,17 +50,25 @@ pub struct Method {
     /// Off, such a bin weighs in a fit by its whole normal matrix and
     /// hands its shift on, as any other.
     pub noise_floor: bool,
+    /// Whether a bin has information only where its patch's interior has
+    /// it by itself, held to the same floor: the samples that the
+    /// smoothing makes of the patch's own alone. Off, a bin whose only
+    /// texture is what the smoothing brings in over the patch's edge
+    /// weighs in a fit as a textured bin does. It holds the interior to
+    /// `noise_floor`'s floor, and is off where that is.
+    pub interior: bool,
 }
 
 impl Method {
     /// 8.2's: three steps on normalised patches, a bin that measures
-    /// nothing invalid, and one that measures only its noise without
-    /// information.
+    /// nothing invalid, and one that measures only its noise, or only
+    /// what lies past its patch's edge, without information.
     pub const PLAN: Method = Method {
         lk_steps: 3,
         normalise: true,
         validity: true,
         noise_floor: true,
+        interior: true,
     };
 }
 
@@ -149,19 +157,58 @@ pub fn patch(spec: &StripSpec, bin: usize) -> Patch {
 /// keeps its information across that line and none along it, and places
 /// no neighbour.
 ///
-/// The floor doesn't see a bias. Where a patch's only texture lies at
-/// its edge, beside a flat stretch under noise, the NCC is best a little
-/// towards the texture, since more of it in lens 1's patch lifts the
-/// patch clear of its noise: bins that hold three columns of a checker
-/// beside a flat grey under 1.5 % noise came back 0.4 to 1.1 px that
-/// way, with information and an NCC of 0.82 to 0.96 (`tests/seam.rs`).
+/// **The interior.** The smoothing reads three samples to each side of
+/// the one it makes, so the three at each edge of a patch are made
+/// partly of what lies past it: a sky bin beside texture has three
+/// columns of its neighbour's, and a band whose patches hold sky has
+/// three rows of what lies above them. Under noise such a bin matches on
+/// that sliver, at an NCC of 0.95 to 0.99 and with as much information
+/// as a textured bin, and its NCC is best a little towards the texture,
+/// since more of it in lens 1's patch lifts the patch clear of its
+/// noise. So a bin has information only where its patch's interior has
+/// it by itself: the patch less three samples at each edge, which the
+/// smoothing makes of the patch's own samples alone, normalised by its
+/// own mean and deviation and held to the same floor each way. Where
+/// the interior stands clear one way only, the bin keeps its
+/// information along that direction; where neither way, none, and it
+/// places no neighbour. A patch under seven samples a side has no
+/// interior, and its bin no information.
+///
+/// The rule's figures are synthetic, as the floor's are: `tests/seam.rs`
+/// holds them on a few seeds, and these are from 40 outside it. Texture
+/// over half the ring beside a sky of its mean, at rest under 1 % noise:
+/// without the rule the two sky bins beside the texture come back 0.2 to
+/// 0.6 px towards it, with 0.85 to 1.5 times a textured bin's
+/// information, and from the ends of the half ring they put a term over
+/// 8.4's 0.02° on 20 seeds of 40, 0.067° at the most; with it they have
+/// none, and no seed is over, 0.015° at the most, which is the fit's
+/// without those two bins. Texture above the patches' rows, round the
+/// ring: without the rule an a0 of 0.035° to 0.062° under 0.5 % and 1 %
+/// noise, eight or more of its standard errors; with it no bin has
+/// information. Texture has to reach into a patch to count: four rows of
+/// it leave 69 bins or more of 72 with information under 1 % noise, two
+/// rows 13 to 19, and one row one bin at the most. A ring of texture
+/// throughout loses bins to the rule only where the floor is taking
+/// them: of 432, under 10 % noise 406 keep their information where the
+/// floor alone leaves 422, and at a fiftieth of the contrast under 0.2 %
+/// noise 403 for 425.
+///
+/// What the rule leaves is a bin that is part sky. With texture over
+/// four of its nineteen columns, a bin has 0.85 to 1.7 times the
+/// information of a bin of texture throughout and, under 1 % noise,
+/// measures to 0.07 or 0.08 px where such a bin measures to 0.03 or
+/// 0.05: the normalising spreads the patch's deviation over the sky's
+/// samples too, and the information leaves the contrast out
+/// ([`BinShift::info`]). A fit weighs such a bin several times too much,
+/// and `term_se_deg` doesn't see it.
 ///
 /// **The floors.** The 0.95 and the 0.01 are 8.2's. Every other one (the
 /// contrast of 0.2 %, the tie of 0.05, the 0.5°, the settled tenth of a
-/// pixel, a patch's half, the noise floor) was set on synthetic strips,
-/// without noise or with seeded white noise, and none has met real
-/// footage: a fit that reads these bins weights each by its information
-/// and gates it on its own NCC ([`BinShift`]).
+/// pixel, a patch's half, the noise floor, the interior's three samples)
+/// was set on synthetic strips, without noise or with seeded white
+/// noise, and none has met real footage: a fit that reads these bins
+/// weights each by its information and gates it on its own NCC
+/// ([`BinShift`]).
 ///
 /// An invalid bin's shift, NCC, contrasts and log gains are NaN and its
 /// information zero. It is invalid when fewer than half its patch's
@@ -288,8 +335,12 @@ const MIN_TEXTURE: f64 = 1e-4;
 /// mismatch and a median of 10 px from its shift; a ramp across the band
 /// (0.35 to 0.65) in 2873 to 2876, at 0.23 to 0.95 times, a median of
 /// 3 px off, with an NCC over 0.98. At Tier 2's 8 px/°, over 8 seeds,
-/// the patches are larger and ρ is less: 0.31 to 0.51 times. So 3 is
-/// three times the most that noise alone reached, in 18,000 such bins.
+/// the patches are larger and ρ is less: 0.31 to 0.51 times. Those are
+/// these seeds' figures, in 18,000 such bins. Another generator's, over
+/// 12 seeds outside the suite, reached 1.14 in one bin of a flat grey
+/// under 2 % noise, 1.06 with the noise blurred over a few pixels, and
+/// 0.54 at Tier 2. So 3 is about three times what noise alone reaches,
+/// and 2.6 times the most seen.
 ///
 /// What it costs is the faintest texture. Waves a few pixels long, of a
 /// fifth of the mean, have at the least 190, 48, 22 and 5.7 times their
@@ -330,9 +381,14 @@ const DAMPING: f64 = 1e-6;
 /// from a shift that isn't the bin's own are still moving by most of a
 /// pixel.
 const SETTLED: f64 = 0.1;
-/// The rows at each edge of a strip that the smoothing doesn't reach: two
-/// for the blur and one more for the spline.
-const EDGE_ROWS: usize = 3;
+/// How many samples the smoothing reads to each side of the one it
+/// makes: two for the blur and one more for the spline. That many rows at
+/// each edge of a strip have no smoothed sample, and that many samples in
+/// from each edge of a patch read past it.
+const REACH: usize = 3;
+/// A deviation under this share of the mean is rounding's: a flat patch's
+/// sums leave it some 1e-16 of the mean.
+const ROUNDING: f64 = 1e-9;
 /// The 5-tap binomial blur.
 const BLUR: [f64; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
 /// The cubic B-spline at a sample and at its two neighbours.
@@ -365,8 +421,8 @@ impl Layout {
         // A row j reads lens 1 at j + v for |v| up to ry + MAX_STEP, and
         // the spline there reaches one row up and two down, inside the
         // rows the blur made.
-        let top = ry + EDGE_ROWS + 1;
-        let bottom = h.saturating_sub(ry + EDGE_ROWS + 2);
+        let top = ry + REACH + 1;
+        let bottom = h.saturating_sub(ry + REACH + 2);
         Layout {
             w,
             bins: bin_count(spec),
@@ -851,7 +907,8 @@ fn matches(template: &Template, lens1: &Searched, layout: &Layout) -> (Vec<Peak>
 /// What one bin measured, in strip pixels: the shift (u, v) by which lens
 /// 1 shows the patch, the steps' normal matrix there (uu, uv, vv), less
 /// what of it doesn't stand clear of the bin's mismatch
-/// ([`NOISE_FLOOR`]), the NCC, each lens's contrast, and the log gains.
+/// ([`NOISE_FLOOR`]) or its patch's interior doesn't bear out
+/// ([`borne_out`]), the NCC, each lens's contrast, and the log gains.
 #[derive(Debug, Clone, Copy)]
 struct Measured {
     shift: [f64; 2],
@@ -967,9 +1024,9 @@ impl Start {
 /// Under `noise_floor` a bin's own match counts for its neighbours only
 /// where the bin measured from it with information both ways
 /// ([`NOISE_FLOOR`]): no other bin starts the ring, and one that is
-/// handed a shift hands the same on. So a bin of noise alone, whose one match lies anywhere in
-/// the search, can't carry its neighbours to it, nor a stretch of them
-/// let a shift drift from bin to bin.
+/// handed a shift hands the same on. So a bin of noise alone, whose one
+/// match lies anywhere in the search, can't carry its neighbours to it,
+/// nor a stretch of them let a shift drift from bin to bin.
 fn settle_ties(
     found: &[Found],
     near: f64,
@@ -1052,37 +1109,48 @@ struct Reading {
     /// Each side's standard deviation over its mean, over the pairs: the
     /// patch's, then lens 1's.
     contrast: [f64; 2],
+    /// Whether both contrasts reach [`MIN_CONTRAST`].
+    textured: bool,
 }
 
-/// `template` against lens 1's surface at `shift`, or `None` with fewer
-/// than half the patch's pairs or a contrast under [`MIN_CONTRAST`] on
-/// either side. `pairs` is working room.
+/// `template` against lens 1's surface at `shift`, less `inset` samples
+/// at each of the patch's edges, or `None` with fewer than half that
+/// part's pairs or a side whose deviation is rounding's ([`ROUNDING`]).
+/// The means and the deviations are that part's own. `pairs` is working
+/// room.
 ///
 /// With each patch less its mean and over its standard deviation, T̂ and
 /// Î, the step lessens Σ (T̂ − Î)². Moving lens 1's patch moves its mean
-/// and deviation too, so Î's slope in the shift is ((g − ḡ) − Î · mean(Î
-/// (g − ḡ))) / σ for the luma slope g: the slope's mean and its share
-/// along Î itself tell nothing, which leaves a ramp without information.
+/// and deviation too, so Î's slope in the shift is
+/// ((g − ḡ) − Î · mean(Î (g − ḡ))) / σ for the luma slope g: the slope's
+/// mean and its share along Î itself tell nothing, which leaves a ramp
+/// without information.
 fn read(
     template: &Template,
     lens1: &Surface,
     shift: [f64; 2],
+    inset: usize,
     pairs: &mut Vec<[f64; 4]>,
 ) -> Option<Reading> {
     pairs.clear();
     let width = template.columns.len();
-    for (j, row) in template.rows.clone().enumerate() {
-        for (i, column) in template.columns.clone().enumerate() {
+    // Counted from the patch's first; empty where the patch is no more
+    // than twice the inset.
+    let part = |len: usize| inset..len.saturating_sub(inset);
+    let (columns, rows) = (part(width), part(template.rows.len()));
+    for j in rows.clone() {
+        for i in columns.clone() {
             if !template.usable[j * width + i] {
                 continue;
             }
-            let (x, y) = (column as f64 + shift[0], row as f64 + shift[1]);
+            let x = (template.columns.start + i) as f64 + shift[0];
+            let y = (template.rows.start + j) as f64 + shift[1];
             if let Some([value, gx, gy]) = lens1.luma_at(x, y) {
                 pairs.push([template.value[j * width + i], value, gx, gy]);
             }
         }
     }
-    if pairs.len() < template.least() {
+    if pairs.len() < (columns.len() * rows.len()).div_ceil(2).max(2) {
         return None;
     }
     let n = pairs.len() as f64;
@@ -1097,8 +1165,11 @@ fn read(
             .sqrt()
     };
     let (sigma_t, sigma_i) = (deviation(0, mean_t), deviation(1, mean_i));
-    let textured = |sigma: f64, mean: f64| sigma > 0.0 && sigma >= MIN_CONTRAST * mean.abs();
-    if !(textured(sigma_t, mean_t) && textured(sigma_i, mean_i)) {
+    let reaches = |least: f64| {
+        let side = |sigma: f64, mean: f64| sigma > 0.0 && sigma >= least * mean.abs();
+        side(sigma_t, mean_t) && side(sigma_i, mean_i)
+    };
+    if !reaches(ROUNDING) {
         return None;
     }
     let mut along = [0.0; 2];
@@ -1115,6 +1186,7 @@ fn read(
         plain_rhs: [0.0; 2],
         ncc: 0.0,
         contrast: [sigma_t / mean_t.abs(), sigma_i / mean_i.abs()],
+        textured: reaches(MIN_CONTRAST),
     };
     for p in pairs.iter() {
         let t_hat = (p[0] - mean_t) / sigma_t;
@@ -1146,7 +1218,8 @@ fn read(
 /// on something that is no match of the bin's. Of a bin that measures,
 /// the normal matrix is kept along each direction where its eigenvalue
 /// per sample is [`NOISE_FLOOR`] times the mismatch or more
-/// ([`above_floor`]), and whole where `method` has that floor off.
+/// ([`above_floor`]) and the patch's interior bears it out
+/// ([`borne_out`]), and whole where `method` has that floor off.
 fn refine(
     template: &Template,
     surfaces: &[Surface; 2],
@@ -1158,8 +1231,11 @@ fn refine(
     let mut last = 0.0;
     let most = [layout.rx as f64 + MAX_STEP, layout.ry as f64 + MAX_STEP];
     let mut pairs = Vec::with_capacity(template.len());
+    let whole = |shift: [f64; 2], pairs: &mut Vec<[f64; 4]>| {
+        read(template, &surfaces[1], shift, 0, pairs).filter(|reading| reading.textured)
+    };
     for _ in 0..method.lk_steps {
-        let reading = read(template, &surfaces[1], shift, &mut pairs)?;
+        let reading = whole(shift, &mut pairs)?;
         let (normal, rhs) = if method.normalise {
             (reading.normal, reading.rhs)
         } else {
@@ -1175,7 +1251,7 @@ fn refine(
             *shift = (*shift + step).clamp(-most, most);
         }
     }
-    let reading = read(template, &surfaces[1], shift, &mut pairs)?;
+    let reading = whole(shift, &mut pairs)?;
     let texture = greater_eigenvalue(reading.normal) / reading.pairs as f64;
     if texture.is_nan() || texture < MIN_TEXTURE {
         return None;
@@ -1186,7 +1262,13 @@ fn refine(
     }
     let floor = NOISE_FLOOR * (1.0 - reading.ncc) * reading.pairs as f64;
     let (normal, directions) = if method.noise_floor {
-        above_floor(reading.normal, floor)
+        let kept = above_floor(reading.normal, floor);
+        if method.interior && kept.1 > 0 {
+            let own = read(template, &surfaces[1], shift, REACH, &mut pairs);
+            borne_out(kept, floor, own)
+        } else {
+            kept
+        }
     } else {
         (reading.normal, 2)
     };
@@ -1229,6 +1311,42 @@ fn above_floor(normal: [f64; 3], floor: f64) -> ([f64; 3], usize) {
         (along.map(|a| greater * a / length), 1)
     } else {
         (normal, 2)
+    }
+}
+
+/// What a bin keeps of `kept`, its normal matrix above its `floor` with
+/// that matrix's directions ([`above_floor`]), for `own`: its patch less
+/// the [`REACH`] samples at each edge, read by itself at the bin's shift.
+/// That interior is held to a floor of its own, [`NOISE_FLOOR`] times its
+/// own mismatch over its own samples. Where it stands clear both ways the
+/// bin keeps what it has. Where it does one way only, as a line's, the
+/// bin keeps its matrix's part along that direction, if that still
+/// reaches the bin's floor. Where it does neither way, or has no reading
+/// or no texture ([`MIN_TEXTURE`]), the bin keeps nothing.
+fn borne_out(kept: ([f64; 3], usize), floor: f64, own: Option<Reading>) -> ([f64; 3], usize) {
+    const NOTHING: ([f64; 3], usize) = ([0.0; 3], 0);
+    let Some(own) = own else {
+        return NOTHING;
+    };
+    let samples = own.pairs as f64;
+    let texture = greater_eigenvalue(own.normal) / samples;
+    if texture.is_nan() || texture < MIN_TEXTURE {
+        return NOTHING;
+    }
+    match above_floor(own.normal, NOISE_FLOOR * (1.0 - own.ncc) * samples) {
+        (_, 2) => kept,
+        (line, 1) => {
+            // The line's direction e, as e eᵀ: its matrix over its trace.
+            let e = line.map(|v| v / (line[0] + line[2]));
+            let [uu, uv, vv] = kept.0;
+            let along = uu * e[0] + 2.0 * uv * e[1] + vv * e[2];
+            if along > 0.0 && along >= floor {
+                (e.map(|v| along * v), 1)
+            } else {
+                NOTHING
+            }
+        }
+        _ => NOTHING,
     }
 }
 
@@ -1352,7 +1470,8 @@ pub const TERMS: usize = 8;
 /// weights' scale. It is NaN where the term is, and where ν is 0, with
 /// nothing left over to tell the noise from. It takes the bins'
 /// information for their inverse covariances up to one common factor
-/// (8.4), which bins of unlike contrast aren't ([`BinShift::info`]), and
+/// (8.4), which bins of unlike contrast aren't, nor a bin part sky
+/// beside bins of texture throughout ([`BinShift::info`]), and
 /// what the fit leaves for noise: depth that varies with azimuth widens
 /// it, and a bias common to the bins (a texture that aliases) doesn't
 /// show in it. The parameters' own covariance is the fit's (8.4's stage
