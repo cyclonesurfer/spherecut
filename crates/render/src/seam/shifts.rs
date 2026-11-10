@@ -206,7 +206,8 @@ pub fn patch(spec: &StripSpec, bin: usize) -> Patch {
 /// contrast of 0.2 %, the tie of 0.05, the 0.5°, the settled tenth of a
 /// pixel, a patch's half, the noise floor, the interior's three samples)
 /// was set on synthetic strips, without noise or with seeded white
-/// noise, and none has met real footage: a fit that reads these bins
+/// noise; for a log gain's 16 samples, below, no measurement is
+/// recorded. None has met real footage: a fit that reads these bins
 /// weights each by its information and gates it on its own NCC
 /// ([`BinShift`]).
 ///
@@ -223,7 +224,7 @@ pub fn patch(spec: &StripSpec, bin: usize) -> Patch {
 /// log gain is the median over the patch's samples of ln(lens 1 / lens 0)
 /// at the measured shift, both read off the smoothed strips, a sample
 /// below 0.01 on either lens left out, and NaN with fewer than 16
-/// samples.
+/// samples, which leaves the bin valid.
 ///
 /// A shift past the search isn't detected. Such a bin comes back valid
 /// at whatever matches best inside the search: on a texture that repeats

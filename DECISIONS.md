@@ -9546,22 +9546,25 @@ What:
   coded as the X5 codes it, each pair is made ready once, and
   `render_rig_of` stitches it into a 512 × 256 equirect, held to
   `render_view_ideal`.
-- **Rung 1's rules** (4.2), on each of the five scenes: more than 12°
+- **Rung 1's rules** (4.2). On each of the five scenes: more than 12°
   from the seam, and for each lens alone over its coverage, PSNR and
   SSIM at or above floors blessed 1 dB and 0.005 under what the true rig
   measured, with wrong models failing them (of the near pairs, the
-  stitch at q = 0); in the band of 90° views of 256² on each side seam
-  and pole, the stitch at most 1 dB under the better lens alone, with
-  lens 1 turned 0.5° failing it on each view. A lens alone is black past
-  its coverage, so its SSIM is taken over the windows that lie whole
-  inside the coverage. On the seam: the strips within 0.1 px rms of each
-  other and every term under 0.03°; and, on `SeamLines` infinitely far
+  stitch at q = 0); and in the band of 90° views of 256² on each side
+  seam and pole, the stitch at most 1 dB under the better lens alone,
+  with lens 1 turned 0.5° failing it on each view. A lens alone is black
+  past its coverage, so its SSIM is taken over the windows that lie
+  whole inside the coverage. On the seam, which is measured on
+  `SeamLines`' three pairs (infinitely far, at 1.5 m and through the
+  Kannala–Brandt twin) and on neither of `Grid`'s: every bin measured,
+  the strips within 0.1 px rms of each other, every term under 0.03° and
+  a median NCC of 0.5 or more. On `SeamLines` infinitely far alone
   (`Grid`'s lines clip), with lens 1 at +0.5 EV and +5 % red, a step
   across the seam under 1 LSB once `render_rig`'s gains are the inverse
   of the signature's log gains. Both lenses turned 0.5° about +Y, the
-  common-mode control, pass every seam check and fail the comparison
-  with the ideal: each pattern's floors, and on `Grid` the true stitch
-  scores 3 dB over it.
+  common-mode control, pass every seam check on `SeamLines` infinitely
+  far and fail the comparison with the ideal: each pattern's floors, and
+  on `Grid` the true stitch scores 3 dB over it.
 - **The floors** are blessed by D32's rules into
   `tests/goldens/instrument.json` (`SPHERECUT_UPDATE_GOLDENS=1 cargo
   test -p spherecut-render --test instrument`): written only when all
@@ -9672,10 +9675,10 @@ a loaded machine, had the calls afresh at 517, 549 and 751 ms at 3840².)
 
 **The estimator's floors, and where each was set.** Two are 8.2's: a
 sample above 0.95 on any channel is left out as clipped, and one below
-0.01 is left out of the log ratio. Every other was set in this slice on
-synthetic strips, without noise or with seeded white noise on luma
-(independent on the two lenses and in proportion to each sample's
-value), and none has met footage.
+0.01 is left out of the log ratio. Every other was set in this slice:
+all but the last below on synthetic strips, without noise or with seeded
+white noise on luma (independent on the two lenses and in proportion to
+each sample's value). None has met footage.
 
 - The noise floor of 3. The smoothing leaves white noise a texture of
   its own, 0.375 / (1 − ρ) times its mismatch for a best match that
@@ -9714,15 +9717,20 @@ value), and none has met footage.
   strip pixel, half a patch's samples) were set on the synthetic strips
   of the seam's own tests (a pure shift, a step in the field, cells that
   repeat, a line a bin) and on the matrix's.
+- The log gain's 16 samples. A channel's log gain is the median over
+  the patch's samples that are 0.01 or more on both lenses, and it is
+  NaN with fewer than 16 of them. No measurement is recorded for the 16,
+  and no test is written for it.
 
 A bin under the noise floor or the interior's is valid and without
-information, as above; a bin under any of the others is invalid. What
-the tests hold of the two rules is on a few seeds each: a flat or ramped
-sky under 1 % and 2 % noise leaves the terms within 0.010° where the
-floor off puts one 0.05° to 1.3° off; a scene against itself at rest
-under noise gives a largest term of 0.015°; and a bin of noise carries
-no ring of repeating cells to an alias on 40 seeds, where the floor off
-does on 5.
+information, as above; one short of the 16 samples on a channel lacks
+that channel's log gain and nothing else, its shift and its information
+kept; a bin under any of the others is invalid. What the tests hold of
+the two rules is on a few seeds each: a flat or ramped sky under 1 % and
+2 % noise leaves the terms within 0.010° where the floor off puts one
+0.05° to 1.3° off; a scene against itself at rest under noise gives a
+largest term of 0.015°; and a bin of noise carries no ring of repeating
+cells to an alias on 40 seeds, where the floor off does on 5.
 
 **Where the images didn't bear the plan out**, and what the tests hold
 instead:
@@ -9747,8 +9755,8 @@ instead:
   lenses read as equisolid 0.97. These three plant fields past the
   search, so the prediction holds no bin. They are told by the predicted
   size (the angle between what the two lenses show at one point of the
-  seam: 5.1°, 90° and 18.2° in the mean), by a misregistration of 11.5,
-  16.2 and 13.0 px, and by failing the ideal. The NCC check's own
+  seam: 90°, 5.1° and 18.2° in the mean), by a misregistration of 16.2,
+  11.5 and 13.0 px, and by failing the ideal. The NCC check's own
   control is a track showing another scene: 59 of its 72 bins come back
   valid, at a median NCC of 0.085.
 - **3 dB over the common-mode control** holds on `Grid` (4.32 dB for the
@@ -9910,10 +9918,11 @@ here that 10.3 to 10.5 and 13.4 don't say.
 - That parallax stays across the seam (above).
 
 It makes a `LensPair` once for each pair of frames and calls `strips_of`
-with each candidate. A pair of 3840² holds 470 MB, so 8.4's five frame
-sets held at once are 2.4 GB. `strips_of` deals its rows to
-`row_threads()` threads at each call, so candidates tried from threads
-of the fit's own multiply the two counts.
+with each candidate. A pair of 3840² holds 470 MB, and 8.4's five frame
+sets take ten frames between them, each frame a pair: held at once they
+are 4.7 GB. `strips_of` deals its rows to `row_threads()` threads at
+each call, so candidates tried from threads of the fit's own multiply
+the two counts.
 
 **Not held here.** 4.2's "no channel more than 0.1 off the CPU
 reference" is rung 2's rule, the shader against these pictures (M3.7):
@@ -9923,9 +9932,12 @@ one lens has and the other hasn't, and none that both share: the near
 pairs stitched at q = 0 pass it with the stitch 8.3 and 8.9 dB worse in
 the band, and so does the common-mode control. The floors away from the
 seam and the seam's own checks hold those errors, and nothing that reads
-the band rule may take it for a check of them. `Grid`'s frame code on
-the back hemisphere isn't built: every picture is frame 0's and no check
-reads a frame number, so M3.4 needed no code. The rows of 3.4 with no
+the band rule may take it for a check of them. `Grid`'s strips are never
+measured, at either depth: the seam's checks and the matrix read
+`SeamLines`' pairs alone, and `Grid` meets the estimator only as the
+other scene of the NCC check's control. `Grid`'s frame code on the back
+hemisphere isn't built: every picture is frame 0's and no check reads a
+frame number, so M3.4 needed no code. The rows of 3.4 with no
 figure at 768² (the scene at 10 m) and the two V6 readings the pair
 isn't rendered under stay with the predictions. No LOD map of a rig is
 built, and the estimator has met no footage: Tier 2's strips are held by

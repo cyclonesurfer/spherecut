@@ -1384,9 +1384,10 @@ below and with the analytic ideal. Rung 0 is sphere's, on points
   `tests/goldens/instrument.json` under the goldens' rules, a lens
   alone's SSIM over the windows that lie whole inside its coverage; in
   the band, on a view of each side seam and each pole, at most 1 dB
-  under the better lens alone; and across the seam by the signature
-  (the strips within 0.1 px of each other, every term under 0.03°, and
-  on `SeamLines` infinitely far under 1 LSB of exposure step once
+  under the better lens alone; and across the seam, on `SeamLines`'
+  three pairs and on neither of `Grid`'s, by the signature (the strips
+  within 0.1 px of each other, every term under 0.03°, and on
+  `SeamLines` infinitely far under 1 LSB of exposure step once
   matched). A pixel here is the strip's own, 3.81 a degree both ways;
 * each control of the plan is planted and must fail, through
   `testkit::control::must_fail`. The band rule's is lens 1 turned 0.5°
