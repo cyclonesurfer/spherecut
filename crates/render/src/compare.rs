@@ -1,9 +1,10 @@
 //! Image metrics (M1 plan, section 6): PSNR over RGB, SSIM on BT.709
 //! luma, and a count of the pixels that differ by more than a threshold,
 //! for the render tests; and PSNR and SSIM of one plane, for the
-//! export's parity tests (M2 plan section 11). Here rather than in
-//! testkit so that agent can measure an export too (A2, amendment 2 item
-//! 32).
+//! export's parity tests (M2 plan section 11); and the first three with a
+//! weight for each pixel, for the stitching round trip's masked
+//! comparisons (M3 plan 8.1). Here rather than in testkit so that agent
+//! can measure an export too (A2, amendment 2 item 32).
 //!
 //! Every metric works in unit scale, samples in `[0, 1]`: 8-bit samples
 //! count as `v / 255`, 16-bit ones as `v / 65535`, floats as they are. So
@@ -262,6 +263,70 @@ pub fn diff_stats<A: Sample, B: Sample>(
         }
     }
     Ok(s)
+}
+
+/// A weight for each pixel of an image, for the weighted metrics (M3 plan
+/// 8.1): `width` × `height` of them, row after row, none negative. A mask
+/// of 0s and 1s ([`crate::seam::band_weights`],
+/// [`crate::seam::lens_coverage`]), a density ([`equirect_coslat`]), or
+/// the product of the two.
+#[derive(Debug, Clone, Copy)]
+pub struct Weights<'a> {
+    pub width: usize,
+    pub height: usize,
+    pub w: &'a [f64],
+}
+
+/// [`psnr`] with each pixel's squared error counted by its weight:
+/// `10 log10(1 / MSE)`, where the MSE is the sum over the pixels of the
+/// weight times the pixel's squared error over RGB, over three times the
+/// sum of the weights. Weights of 1 everywhere give [`psnr`] exactly, and
+/// a pixel of weight 0 doesn't count. The weights must be of the images'
+/// size.
+#[expect(unused_variables, reason = "M3.4 unit (a) writes the body")]
+pub fn psnr_weighted<A: Sample, B: Sample>(
+    a: View<'_, A>,
+    b: View<'_, B>,
+    w: &Weights<'_>,
+) -> Result<f64, Mismatch> {
+    todo!()
+}
+
+/// [`ssim`] with its map averaged by weight: each position of the window
+/// counts with the weight of the pixel at the window's centre. Weights of
+/// 1 everywhere give [`ssim`] exactly. The weights must be of the images'
+/// size.
+#[expect(unused_variables, reason = "M3.4 unit (a) writes the body")]
+pub fn ssim_weighted<A: Sample, B: Sample>(
+    a: View<'_, A>,
+    b: View<'_, B>,
+    w: &Weights<'_>,
+) -> Result<f64, Mismatch> {
+    todo!()
+}
+
+/// [`diff_stats`] over the pixels whose weight is above 0: here the
+/// weights are a mask, since the largest difference and a count of pixels
+/// have no weighted form. `threshold` is in unit scale, as
+/// [`diff_stats`]'s. The weights must be of the images' size.
+#[expect(unused_variables, reason = "M3.4 unit (a) writes the body")]
+pub fn diff_stats_weighted<A: Sample, B: Sample>(
+    a: View<'_, A>,
+    b: View<'_, B>,
+    w: &Weights<'_>,
+    threshold: f64,
+) -> Result<DiffStats, Mismatch> {
+    todo!()
+}
+
+/// The weights of a `width` × `height` equirect picture's pixels by the
+/// solid angle each covers, `width` × `height` of them, row after row:
+/// the cosine of the latitude at the centre of the pixel's row,
+/// π/2 − (y + ½)/height · π for row y (as [`crate::OutKind::Equirect`]
+/// places the rows), the same all along the row.
+#[expect(unused_variables, reason = "M3.4 unit (a) writes the body")]
+pub fn equirect_coslat(width: usize, height: usize) -> Vec<f64> {
+    todo!()
 }
 
 /// One plane of a picture, its samples in unit scale, row after row:
@@ -537,5 +602,44 @@ mod tests {
         assert!(psnr(View::new(8, 8, 3, &a), View::new(8, 4, 3, &a[..96])).is_err());
         assert!(psnr(View::new(8, 8, 3, &a), View::new(8, 8, 4, &a)).is_err());
         assert!(ssim(View::new(8, 8, 3, &a), View::new(8, 8, 3, &a)).is_err());
+    }
+
+    /// Weights of 1 everywhere reproduce `psnr`, `ssim` and `diff_stats`
+    /// exactly (M3 plan 8.1).
+    #[test]
+    #[ignore = "M3.4 unit (a)"]
+    fn unit_weights_give_the_plain_metrics() {
+        todo!()
+    }
+
+    /// An error planted where the weight is 0 changes no weighted metric.
+    #[test]
+    #[ignore = "M3.4 unit (a)"]
+    fn an_error_at_weight_zero_changes_nothing() {
+        todo!()
+    }
+
+    /// An error planted where the weight is 1 lowers the weighted PSNR by
+    /// the amount worked out from the error and the weights.
+    #[test]
+    #[ignore = "M3.4 unit (a)"]
+    fn an_error_at_weight_one_costs_what_it_adds() {
+        todo!()
+    }
+
+    /// The weighted SSIM is the SSIM map's mean over the window centres,
+    /// each with its pixel's weight.
+    #[test]
+    #[ignore = "M3.4 unit (a)"]
+    fn weighted_ssim_weighs_window_centres() {
+        todo!()
+    }
+
+    /// `equirect_coslat` gives each row the cosine of its centre's
+    /// latitude.
+    #[test]
+    #[ignore = "M3.4 unit (a)"]
+    fn equirect_coslat_is_each_rows_latitude() {
+        todo!()
     }
 }

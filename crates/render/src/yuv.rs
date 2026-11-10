@@ -2,7 +2,7 @@
 //! target into the encoders' Y′CbCr, BT.709 in limited range, 4:2:0 with
 //! left siting, in a storage buffer laid out as the encoder takes it, so
 //! that each row maps into an `AVFrame`'s plane with one copy. The CPU
-//! never converts a frame; [`reference`] does the same in f64 for the
+//! never converts a frame; [`reference()`] does the same in f64 for the
 //! tests.
 
 use wgpu::util::DeviceExt;

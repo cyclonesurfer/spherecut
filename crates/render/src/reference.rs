@@ -14,6 +14,7 @@ use std::f64::consts::{PI, TAU};
 
 use glam::{DVec2, DVec3};
 use spherecut_core::video::{Transfer, VideoPlanes};
+use spherecut_sphere::rig::Rig;
 use spherecut_sphere::{equirect, pixel};
 
 use crate::color::{self, Placement};
@@ -44,6 +45,36 @@ pub struct Options {
     /// Level 0 only, as `DebugMode::Level0`.
     pub level0: bool,
     pub placement: Placement,
+}
+
+/// What [`render_rig`] writes instead of the stitched picture, for checks:
+/// M3 plan 10.3's debug modes 4 to 7. They stay apart from
+/// [`crate::DebugMode`], every one of whose values the pipeline tests
+/// build for the equirect pass, until the shader's stitch (M3.7) joins
+/// the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RigDebug {
+    #[default]
+    Off,
+    /// Mode 4: calibration block 0's lens alone, wherever its mask covers,
+    /// with no feather; black elsewhere.
+    Lens0,
+    /// Mode 5: block 1's lens alone.
+    Lens1,
+    /// Mode 6: the weights the lenses blend by, block 0's in red and
+    /// block 1's in blue.
+    Weights,
+    /// Mode 7: the seam difference, |lin0 − lin1| × 8 in linear light
+    /// where both lenses cover; black elsewhere.
+    SeamDiff,
+}
+
+/// How [`render_rig`] renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct RigOptions {
+    pub debug: RigDebug,
+    /// Level 0 only, as `DebugMode::Level0`.
+    pub level0: bool,
 }
 
 /// The world direction through point `(x, y)` of a `size` view, in
@@ -146,6 +177,35 @@ pub fn render_blurred(
             .map(|s| srgb_oetf(round_f16(s / n).clamp(0.0, 1.0)))
             .collect(),
     })
+}
+
+/// A lens pair stitched through `view`, `size` pixels large, as the encode
+/// pass computes it: M3 plan 10.3's stitch in f64 (10.4). `lenses` are the
+/// two tracks' pictures, by track, so calibration block b of `rig` samples
+/// `lenses[rig.lenses[b].track]`; `gains` are the frame's gains on linear
+/// RGB, by block.
+///
+/// For each output pixel and each lens: the parallax-corrected ray
+/// ([`Rig::ray`]) through the lens's model to its slot; a footprint from
+/// the pixel's four ±½ px rays, projected through the same lens, and the
+/// LOD it gives; the mask at that LOD ([`Rig::covers`]: θ_max less the
+/// margin, and the frame term); trilinear taps, or level 0 alone under
+/// `opts.level0`; the slot's own matrix and EOTF; then the lens's gain in
+/// linear light. The lenses blend by [`Rig::weights`] at their own LODs,
+/// (w0 rgb0 + w1 rgb1)/(w0 + w1), black where neither covers, and a lens
+/// whose weight is 0 isn't sampled; then the view's dim, f16 and the
+/// OETF, as [`render`] ends. `opts.debug` writes one of [`RigDebug`]'s
+/// pictures instead.
+#[expect(unused_variables, reason = "M3.4 unit (b) writes the body")]
+pub fn render_rig(
+    lenses: [&dyn VideoPlanes; 2],
+    rig: &Rig,
+    gains: [[f64; 3]; 2],
+    view: &ViewParams,
+    size: (u32, u32),
+    opts: &RigOptions,
+) -> Result<ImageF64, RenderError> {
+    todo!()
 }
 
 /// What the flat pass draws (`fs_flat`, the GUI's raw view, and
