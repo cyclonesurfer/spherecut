@@ -181,7 +181,11 @@ pub struct Signature {
     /// How many bins measured a shift.
     pub valid_bins: usize,
     /// The median of the valid bins' NCC. Below 0.5 the stitch has failed
-    /// grossly: the turn wrong or left out, or a gross Euler error.
+    /// grossly: the turn wrong or left out, or a gross Euler error. A
+    /// texture that repeats inside the search can keep it high all the
+    /// same: on synth's `SeamLines`, with the turn left out, the bins
+    /// lock a period of its checker away at 0.97
+    /// (`tests/instrument.rs`).
     pub median_ncc: f64,
     /// The photometric log gains of lens 1 over lens 0, for R, G and B,
     /// over the valid bins ([`BinShift::log_gain`]): exposure and white
