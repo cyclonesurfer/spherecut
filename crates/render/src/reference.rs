@@ -340,6 +340,13 @@ pub fn render_flat(
 
 /// What `DebugMode::LodHeatmap` writes, read back with `Depth::Linear`:
 /// luma's and chroma's LOD as sampled, then luma's before clamping.
+///
+/// This is one equirect frame's map, the frame placed on the sphere by
+/// `placement`. A rig has none yet: [`RigDebug`] has no LOD mode, and
+/// [`lens_footprint`] gives luma's footprint alone, with chroma's LOD
+/// and the levels that both clamp to left inside the sampler. The M3
+/// plan's `dfish_lod_heatmap` (10.5) holds the shader's debug mode 3
+/// against such a map for each lens, which is M3.7's to build.
 pub fn lod_map(
     frame: &dyn VideoPlanes,
     view: &ViewParams,
@@ -519,11 +526,11 @@ pub(crate) fn check_tracks(rig: &Rig) -> Result<(), RenderError> {
 /// A lens pair's two pictures made ready to sample: each track's planes
 /// as the shader sees them, clamped at their edges, with their mip chains
 /// in f64. The chains are most of what a small picture or a strip costs
-/// (about 12 ms a pair of 768² and half a second a pair of 3840², whose
-/// chains take about 470 MB), and they are the planes' alone: nothing of
-/// a rig is here, neither its binding nor a gain nor θ_max. So a caller
-/// that samples one pair of frames more than once, under one rig or
-/// under many as a fit does (8.4), makes the pair once and hands it to
+/// (11 to 17 ms a pair of 768² and about half a second a pair of 3840²,
+/// whose chains take about 470 MB), and they are the planes' alone:
+/// nothing of a rig is here, neither its binding nor a gain nor θ_max. So
+/// a caller that samples one pair of frames more than once, under one rig
+/// or under many as a fit does (8.4), makes the pair once and hands it to
 /// [`render_rig_of`] and [`crate::seam::strips_of`] with each rig.
 pub struct LensPair {
     /// By track.

@@ -25,6 +25,22 @@ pub use shifts::{bin_shifts, signature};
 pub use strips::{band_weights, lens_coverage, strip_coverage, strips, strips_of};
 
 /// How the band about the seam is unwrapped and measured (8.2).
+///
+/// A spec has one scale, so [`StripSpec::size`], [`StripSpec::dir`] and
+/// [`strip_coverage`] make strips of one scale along the seam and across
+/// it: 1372 × 61 at Tier 1 and 2880 × 128 at Tier 2. The 1440 × 128
+/// target that 13.4 gives Measure seam is neither, at 4 px a degree along
+/// and 8 across. [`bin_shifts`] reads a strip's own two scales and would
+/// take such a strip; nothing here makes one.
+///
+/// No view draws this grid. An equirect [`crate::ViewParams`] fills its
+/// target with the whole sphere and takes no framing, and a strip is no
+/// crop of an equirect at its scale: Tier 1's rows are 16°/61 each with
+/// the middle row's centre on the seam, where an equirect 1372 wide has
+/// rows of 180°/686 and a boundary between two of them. So a shader that
+/// draws a strip (M3.7) needs an output whose pixel (i, j) looks along
+/// [`StripSpec::dir`] at (i + ½, j + ½) in the rig frame, and takes the
+/// strip's `valid` from [`strip_coverage`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StripSpec {
     /// The strip's scale along the seam and across it, in pixels a
@@ -118,6 +134,11 @@ pub struct Strips {
 /// ε + `across_deg`). So across is positive towards +ε, the front lens
 /// (up the strip), and along is positive towards +φ (to the right along
 /// it). Swapping the strips flips both.
+///
+/// Both are in degrees at either tier. Nothing here converts a shift to
+/// source pixels, as 8.2 has Tier 2's reported: what reports one does it
+/// by the source's own two scales at the seam, which differ (at 768² a
+/// lens, 3.81 px a degree across the seam and 6.0 along it, 3.4).
 ///
 /// What reads the bins weights each by `info`, and should gate each on
 /// its own `ncc` as well. `valid` says only that the bin found a match

@@ -48,7 +48,11 @@
 //!
 //! 4.2's "no channel more than 0.1 off the CPU reference" isn't held
 //! here, where the pictures are the CPU reference's: it is rung 2's rule,
-//! the shader against these pictures (M3.7).
+//! the shader against these pictures (M3.7). The camera, the pairs,
+//! [`Scene`], [`Masks`], the stitches and the ideals are private to this
+//! file, and `RenderCache::shared()` is one process's, so rung 2 can't
+//! reach them from another binary: M3.7 lifts them into `tests/common`
+//! before it writes rung 2.
 //!
 //! The floors are blessed by D32's rules, as `goldens.rs` keeps them, into
 //! `goldens/instrument.json`: `SPHERECUT_UPDATE_GOLDENS=1 cargo test -p
@@ -58,7 +62,11 @@
 //! (for an SSIM floor, 0.0025).
 //!
 //! Budget (4.1 rule 5, 19.6): 11 s of the 15 s that M3.4's suites share;
-//! each test prints its time and the suite's.
+//! each test prints its time and the suite's. The share is for four free
+//! cores. The binary is bound by the CPU, at about 41 CPU-seconds: about
+//! 10.5 s on four cores, 20.6 s on two and 40.5 s on one (DECISIONS D65),
+//! so on fewer cores, or beside another build, it passes its share with
+//! nothing changed.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
