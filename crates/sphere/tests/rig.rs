@@ -2717,20 +2717,62 @@ fn feathers_alone(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
     }))
 }
 
-/// The weights with what no feather weighs given to the covering lens
-/// with the greater θ (a control).
-fn farther_lens_takes(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
+/// The weights with what no feather weighs and both lenses cover given
+/// to block 0 where `to_block_0` says so of the two θ, and to block 1
+/// elsewhere (the controls' rules).
+fn both_cover_by(
+    rig: &Rig,
+    d: DVec3,
+    lod: [f64; 2],
+    to_block_0: impl Fn(f64, f64) -> bool,
+) -> [f64; 2] {
     let w = feathers_alone(rig, d, lod);
     if w != [0.0; 2] {
         return w;
     }
     let theta = |b: usize| off_axis(rig.ray(b, d));
     match [0, 1].map(|b| rig.covers(b, d, lod[b])) {
-        [true, true] if theta(0) > theta(1) => [1.0, 0.0],
+        [true, true] if to_block_0(theta(0), theta(1)) => [1.0, 0.0],
         [true, true] => [0.0, 1.0],
         [true, false] => [1.0, 0.0],
         [false, true] => [0.0, 1.0],
         [false, false] => [0.0; 2],
+    }
+}
+
+/// The weights with what no feather weighs given to the covering lens
+/// with the greater θ (a control).
+fn farther_lens_takes(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
+    both_cover_by(rig, d, lod, |theta_0, theta_1| theta_0 > theta_1)
+}
+
+/// The weights with the smaller θ taking what no feather weighs, and
+/// block 0 taking it whole where the two θ are equal (a control).
+fn tie_to_block_0(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
+    both_cover_by(rig, d, lod, |theta_0, theta_1| theta_0 <= theta_1)
+}
+
+/// Two lenses that are one another's mirror image in the seam's plane to
+/// the last bit, for an exact tie: [`stereographic_rig`]'s model on both,
+/// lens 0 along +Z from 16 mm up it, lens 1 a half turn about Y from it
+/// and 16 mm down, stitched at 0.3 m with no feather. The half turn's
+/// quaternion, (0, 1, 0, 0), negates a vector's x and z and rounds
+/// nothing, so a direction in the plane z = 0 has one θ on both lenses,
+/// bit for bit: 3.06° past 90°, where both cover it and no feather weighs
+/// it.
+fn mirror_pair() -> Rig {
+    let model = stereographic_rig().lenses[0].model;
+    let centre = DVec3::new(0.0, 0.0, 0.016);
+    let half_turn = DQuat::from_xyzw(0.0, 1.0, 0.0, 0.0);
+    let lens = |track, turn, centre| RigLens::new(track, model, turn, centre, 104.0 * DEG, 768);
+    Rig {
+        lenses: [
+            lens(0, DQuat::IDENTITY, centre),
+            lens(1, half_turn, -centre),
+        ],
+        q: 3.34,
+        feather: 0.0,
+        margin_texels: 2.0,
     }
 }
 
@@ -3112,7 +3154,8 @@ fn scan_cases() {
 /// On every rig in `validate`'s bounds, the plain ones or not: where no
 /// feather weighs a direction a lens covers, which a tune in the bounds
 /// can leave, the covering lens with the smaller θ takes it, so that the
-/// picture has no hole there (the controls).
+/// picture has no hole there, and two lenses at one θ take ½ each (the
+/// controls).
 #[test]
 fn weights_lie_in_the_unit_interval_and_sum_to_one() {
     let _time = timed("weights_lie_in_the_unit_interval_and_sum_to_one");
@@ -3204,6 +3247,40 @@ fn weights_lie_in_the_unit_interval_and_sum_to_one() {
     );
     eprintln!(
         "lenses 30° apart: the feathers alone leave {holes} of 3600 horizon directions unweighed"
+    );
+    // An exact tie: on the mirror pair every direction in the seam's
+    // plane is at one θ on both lenses, where both cover and no feather
+    // weighs, and each lens takes ½, whichever of them is block 0. A hair
+    // to either side of the plane the nearer lens takes the direction
+    // whole. Control: the tie given to block 0.
+    let tied = mirror_pair();
+    let swapped = Rig {
+        lenses: [tied.lenses[1], tied.lenses[0]],
+        ..tied
+    };
+    let hair = DVec3::new(0.0, 0.0, 1e-6);
+    for j in 0..360 {
+        let d = on_sphere(0.0, f64::from(j) * DEG);
+        let theta = [0, 1].map(|b| off_axis(tied.ray(b, d)));
+        assert!(theta[0] == theta[1] && theta[0] > 93.0 * DEG, "{theta:?}");
+        for (rig, front) in [(&tied, [1.0, 0.0]), (&swapped, [0.0, 1.0])] {
+            assert_eq!(
+                weights_hold(rig, Rig::weights, d, lod),
+                Ok(Weighed::BothCover)
+            );
+            assert_eq!(rig.weights(d, lod), [0.5; 2], "{j}°");
+            // +Z is the side of the lens that looks along it.
+            assert_eq!(rig.weights(d + hair, lod), front, "{j}°");
+            assert_eq!(rig.weights(d - hair, lod), [front[1], front[0]], "{j}°");
+        }
+    }
+    must_fail(
+        "an exact tie given to block 0",
+        weights_hold(&tied, tie_to_block_0, DVec3::X, lod),
+    );
+    assert_eq!(
+        weights_hold(&tied, tie_to_block_0, DVec3::X + hair, lod),
+        Ok(Weighed::BothCover)
     );
 }
 
