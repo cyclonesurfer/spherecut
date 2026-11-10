@@ -1146,6 +1146,10 @@ const NCC: f64 = 0.5;
 /// 8.3's bound on step 2, in strip pixels rms.
 const PREDICTED_PX: f64 = 0.05;
 
+/// How many of the 72 bins the search holds with the tracks swapped: the
+/// field's 3.6° of a1 puts the bins about 0° and 180° past the ±3°.
+const SWAPPED_BINS: usize = 44;
+
 /// The largest of a signature's terms, in degrees; NaN if one is.
 fn largest_term(s: &Signature) -> f64 {
     terms(s)
@@ -2342,11 +2346,14 @@ fn seam_signature_attributes_planted_errors() {
 
     for (name, plant, named) in planted {
         let seam = plant.seam();
-        assert!(
-            seam.held > 0 && seam.unmeasured() == 0,
-            "{name}: {}",
-            seam.held
-        );
+        // Every bin is predicted and measured; of the tracks swapped,
+        // every bin that the search holds.
+        let bins = if plant == Plant::Swapped {
+            SWAPPED_BINS
+        } else {
+            seam.predicted.len()
+        };
+        assert_eq!((seam.held, seam.unmeasured()), (bins, 0), "{name}");
         assert!(seam.off_px <= PREDICTED_PX, "{name}: {} px", seam.off_px);
         let found =
             attribute(&seam, Lands::On(named)).unwrap_or_else(|e| panic!("{name}: {}", e.1));
@@ -2361,9 +2368,22 @@ fn seam_signature_attributes_planted_errors() {
         );
     }
 
-    // The tracks swapped never land on c0, nor collapse the NCC.
+    // Controls of the bins a row is held over: the tracks swapped, held
+    // to be predicted in every bin; and track 1 showing another scene,
+    // which every bin is predicted for and few are measured at.
     let swapped = Plant::Swapped.seam();
-    assert!(swapped.held < swapped.predicted.len(), "{}", swapped.held);
+    must_fail(
+        "the tracks swapped, a bin predicted for each",
+        swapped.held == swapped.predicted.len(),
+    );
+    let other = Plant::OtherScene.seam();
+    assert_eq!(other.held, other.predicted.len());
+    must_fail(
+        "track 1 showing another scene, each predicted bin measured",
+        other.unmeasured() == 0,
+    );
+
+    // The tracks swapped never land on c0, nor collapse the NCC.
     assert!(swapped.got.c0.abs() < TERM_DEG, "{}", line(&swapped.got));
     assert!(swapped.got.median_ncc >= NCC, "{}", swapped.got.median_ncc);
 
