@@ -9387,14 +9387,54 @@ more than 20 passes, or its tangential terms are large enough that the
 strip stops converging; or a source states a V6 reading outside the
 21.
 
+*Updated 2026-11-10 (M3.4):* `Rig::weights` has a rule for a direction
+that a lens covers and no feather weighs. 6.2's weight for a lens, 1 −
+smoothstep(90° − h, 90° + h, θ) inside its mask, is 0 past 90° + h, and
+the other lens can weigh nothing there either: where the lenses'
+parallax or a tilt puts the seam's plane further past 90° on both than
+the feather is wide (Pat's baseline puts it 0.46° past at q = 0.5 m⁻¹
+and 3.1° at 3.34), or where one lens's θ_max is so near 90° that its
+mask ends short of the other's band. All of that lies inside 11.2's
+bounds for the feather, q and θ_max. Normalised, the two zeros left such
+a direction black though a lens covered it. Now, where both feathered
+weights are 0, the covering lens with the smaller θ takes the direction
+whole, at a weight of 1, and where both cover it at one θ each takes ½.
+Wherever a feather weighs, the weights are what they were, to the bit,
+and a direction no lens covers stays at (0, 0). So the weights sum to 1
+wherever a lens covers, and a stitch is black only where no lens covers.
+Where both lenses cover such a direction the picture switches from one
+lens to the other where their θ meet, as a feather of 0 switches at 90°.
+
+Measured on a 512 × 256 equirect, with Pat's V3 numbers at 768² a lens
+(the M3.4 review's probe): the old rule left 3304 of the 131,072 pixels
+black under a feather of 0 at the default q of 0.5 m⁻¹, 6454 (4.9 %)
+under a feather of 2° at q = 3.34, and 401 with θ_max at 100° and 91°
+under a feather of 1°. The render tests hold both kinds on a 192 × 96
+equirect, where the feathers alone leave black 337 pixels that both
+lenses cover (a feather of 0 at q = 0.5) and 539 that one covers (θ_max
+100° and 91°); those are their controls. Sphere's
+`weights_lie_in_the_unit_interval_and_sum_to_one` holds the sum to 1 on
+every rig of its pool, 28 of which have such directions about the seam,
+with the old rule and the lens of the greater θ as its controls.
+
+10.3's WGSL (M3.7, D66) must copy the rule, or the shader and the CPU
+reference differ on that ring. Considered and not done: refusing such a
+tune in `Rig::build`, which would need a floor on the feather tied to q
+and the baseline (0.46° at q = 0.5 and 3.1° at 3.34 on Pat's numbers) as
+well as a rule for θ_max; and leaving the ring black and saying so.
+`sphere::rig`'s docs cite D64 for the rig, which is M3.5's and takes
+this note over when it is written.
+
 ## D65. The seam signature and the attribution matrix: the instrument measures what the geometry predicts
 
 *2026-11-10, M3 slice M3.4. The M3 plan, `docs/design/m3-plan.md`
 sections 3.4, 4.2, 8.1 to 8.3 and 10.4, has the detail; this is M3.4's
 half as built, the instrument and the proof that it measures what the
-geometry predicts. The fit that reads it (8.4 to 8.6: the stages, the
-decisiveness rule, σ, `rig-fit` and `fit-matrix`) is M3.6's, and this
-entry gains that half then. D64 is M3.5's.*
+geometry predicts, as the slice stood after its review. The fit that
+reads it (8.4 to 8.6: the stages, the decisiveness rule, σ, `rig-fit`
+and `fit-matrix`) is M3.6's, and this entry gains that half then. D64 is
+M3.5's. What the shader (M3.7, D66) and the fit have to take from here
+is listed under "For the shader" and "For the fit".*
 
 What:
 
@@ -9403,62 +9443,132 @@ What:
   judge (4.1 rule 2). The tests call the functions that `rig-fit`,
   Measure seam and `look seam` will call, so the numbers Pat and an
   agent see later are the numbers these tests hold.
-- **The stitch on the CPU.** `reference::render_rig` is 10.3's stitch
-  in f64: for each lens the parallax-corrected ray through the lens's
+- **The stitch on the CPU.** `reference::render_rig` is 10.3's stitch in
+  f64: for each lens the parallax-corrected ray through the lens's
   model, a footprint from the pixel's own four half-pixel rays and its
   LOD, the mask at that LOD, trilinear taps, the lens's gain in linear
-  light, then the blend by the rig's weights. `RigDebug` writes a lens
-  alone, the weights or the seam difference (debug modes 4 to 7).
+  light, then the blend by the rig's weights. The weights sum to 1
+  wherever a lens covers (D63's note of this date), so the stitch is
+  black only where no lens covers. `RigDebug` writes a lens alone, the
+  weights or the seam difference (debug modes 4 to 7).
+- **A pair made ready once.** `reference::LensPair` is a pair's two
+  pictures made ready to sample: each track's planes as the shader sees
+  them, clamped at their edges, with their mip chains in f64, and
+  nothing of a rig, neither its binding nor a gain nor θ_max.
+  `render_rig_of` and `seam::strips_of` take the pair and, with each
+  call, the rig; `render_rig` and `strips` make a pair and call them.
+  The tests hold the two ways to the same pictures and strips, bit for
+  bit, under two rigs on one pair. The chains are most of what a small
+  picture or a strip costs (under "What it costs"), so whatever tries
+  many rigs on one pair of frames, as the fit will (8.4), makes the pair
+  once.
 - **The masks** for the weighted metrics (D32's M3.4 note):
   `band_weights`, a band of angles off the seam's plane, and
   `lens_coverage`, where a lens's mask covers. A check takes the true
   rig's mask, so that a hole a wrong model leaves counts against it.
 - **The strips.** `strips` unwraps the band about the seam through each
   lens alone, sampled as `render_rig` samples, with no gain and no
-  rounding to f16. Tier 1's are 3.81 px a degree (the X5-like source's
-  own scale across the seam at 768²) over ±8°, 1372 × 61 pixels.
+  rounding to f16. A strip's pixel (i, j) looks along `StripSpec::dir`
+  at (i + ½, j + ½), and a sample outside its lens's mask is marked
+  invalid, never clamped. Tier 1's are 3.81 px a degree (the X5-like
+  source's own scale across the seam at 768²) over ±8°, 1372 × 61
+  pixels; Tier 2's, for footage, 8 px a degree, 2880 × 128.
+  `strip_coverage` gives each strip's valid samples for a rig and a spec
+  with no picture sampled, for a strip drawn another way on the same
+  grid.
 - **A bin's shift.** `bin_shifts` measures, in each 5° of azimuth, how
   far lens 1's strip sits from lens 0's: both strips smoothed alike (a
-  5 × 5 binomial blur under a cubic B-spline), a coarse search of ±3°
-  by NCC, then three Lucas–Kanade steps on patches normalised for gain
-  and bias. A bin carries its 2 × 2 information, so that a line informs
-  across it only; its NCC; and the median log gains by channel. A bin
-  with nothing to measure from is invalid, never zero.
-- **The signature.** `signature` fits, weighted by the bins'
-  information, across(φ) = a0 + a1 cos φ + b1 sin φ + a2 cos 2φ + b2
-  sin 2φ and along(φ) = c0 + c1 cos φ + d1 sin φ, and gives what the fit
-  leaves, the valid bins, the median NCC and the log gains.
+  5 × 5 binomial blur under a cubic B-spline), a coarse search of ±3° by
+  NCC over whole pixels, then three Lucas–Kanade steps on patches
+  normalised for gain and bias. A bin carries its shift, in degrees
+  across the seam and along it; its 2 × 2 information, so that a line
+  informs across it only; its NCC; each lens's contrast over the patch;
+  and the median log gains by channel. A bin with nothing to measure a
+  shift from is invalid, its shift NaN and never a zero: fewer than half
+  its patch's samples usable on both lenses, a contrast under 0.2 % on
+  either, gradients that carry no shift (a flat patch, or a ramp), steps
+  that haven't settled to a tenth of a pixel, or steps from a
+  neighbour's shift that end at no match of the bin's own.
+- **A valid bin may have no information.** Under noise a flat patch, or
+  a ramp, has a best match in its noise and settles on it: the bin comes
+  back valid, with a shift of several pixels that means nothing. Two
+  rules take such a bin's information and leave it valid. The noise
+  floor: a bin measures with information only where the texture of its
+  normalised patch (the greater eigenvalue of its normal matrix, per
+  sample) is at least 3 times its mismatch, 1 − NCC. The lesser
+  eigenvalue is held to the same, so a horizon across a noisy sky
+  informs across itself and not along. The interior: the smoothing makes
+  the three samples at each edge of a patch partly of what lies past it,
+  so the patch less those is held to the same floor by itself, and a sky
+  bin beside texture, or one whose rows lie just past it, has no
+  information. A bin under either rule stays valid, with its shift, NCC,
+  contrasts and log gains, and its information is all zero:
+  `BinShift::informed` is false, no neighbour takes its shift, and
+  `signature` fits nothing to it. It still counts in `valid_bins`, in
+  the median NCC, which only a bin that claims a match can lower (8.2's
+  gross failure), and in the log gains, where a flat patch is as good as
+  any. So 8.3's "a textureless bin is marked invalid, never zero" holds
+  of a bin with no texture at all, and of every shift, which is never a
+  made-up zero. Under noise it doesn't hold as written: what tells a
+  reader of the bins to leave one out is its information, not `valid`.
+- **The information's unit.** `BinShift::info` is in degrees⁻²: the sum
+  over the patch's samples of the squared slope, per degree of shift, of
+  lens 1's patch once its gain and bias are normalised out. It holds the
+  texture's shape and the number of samples, and leaves out the patch's
+  contrast and the noise's scale: a patch at a fiftieth of the contrast
+  has the same information and, under the same noise, fifty times the
+  error. `BinShift::contrast` (each lens's standard deviation of luma
+  over its mean, off the smoothed strips) is there to weigh or gate by,
+  and in the information's units a bin's own mismatch is 2 (1 − `ncc`).
+- **The signature.** `signature` fits, to the bins with information and
+  weighted by it, across(φ) = a0 + a1 cos φ + b1 sin φ + a2 cos 2φ + b2
+  sin 2φ and along(φ) = c0 + c1 cos φ + d1 sin φ, and gives each term's
+  standard error (`term_se_deg`), what the fit leaves, the valid bins
+  and how many of them had information (`informed_bins`), the median NCC
+  and the log gains. A term is NaN only where the bins leave the fit
+  short of rank for it, to 10⁻¹⁰: that marks rank, not conditioning.
+  Bins on one side of the ring leave every term finite and some of them
+  worthless, and only `term_se_deg` tells those apart (under "For the
+  fit").
 - **The prediction** (8.3's step 1) is the tests' own,
-  `tests/common/predict.rs`: for a truth and a model, the shift each
-  bin should show, point by point in f64 through the model's forward
-  and the truth's inverse, with no images. A bin is predicted only
-  where the shift lies within the search.
+  `tests/common/predict.rs`: for a truth and a model, the shift each bin
+  should show, point by point in f64 through the model's forward and the
+  truth's inverse, with no images. A bin is predicted only where every
+  point of its patch has its shift inside the estimator's coarse search,
+  ±12 px on each axis at Tier 1: `bin_shifts` gives one shift for a
+  whole patch, so a bin whose mean lies inside the search while its
+  farthest points lie past it is no bin to hold the estimator to.
 - **Rung 1 and the matrix** are one binary, `tests/instrument.rs`, so
   that they share the lens pictures: synth's `SeamLines` and `Grid` at
-  frame 0, infinitely far, and `SeamLines` again on a sphere of 1.5 m,
-  through the X5-like camera at 768² a lens; and `SeamLines`,
-  infinitely far, through its Kannala–Brandt twin. Each picture is coded
-  as the X5 codes it. `render_rig` stitches each pair into a 512 × 256
-  equirect, held to `render_view_ideal`. `Grid` isn't rendered at 1.5 m
-  (below).
-- **Rung 1's rules** (4.2): more than 12° from the seam, and for each
-  lens alone over its coverage, PSNR and SSIM at or above floors blessed
-  1 dB and 0.005 under what the true rig measured; in the band of 90°
-  views of 256² on each side seam and pole, the stitch at most 1 dB
-  under the better lens alone; the strips within 0.1 px rms of each
-  other and every term under 0.03°; with lens 1 at +0.5 EV and +5 % red,
-  a step across the seam under 1 LSB once `render_rig`'s gains are the
-  inverse of the signature's log gains. Both lenses turned 0.5° about
-  +Y, the common-mode control, pass every seam check and fail the
-  comparison with the ideal: each pattern's floors, and on `Grid` the
-  true stitch scores 3 dB over it.
+  frame 0, each infinitely far and on a sphere of 1.5 m, through the
+  X5-like camera at 768² a lens; and `SeamLines`, infinitely far,
+  through its Kannala–Brandt twin. That is five scenes. Each picture is
+  coded as the X5 codes it, each pair is made ready once, and
+  `render_rig_of` stitches it into a 512 × 256 equirect, held to
+  `render_view_ideal`.
+- **Rung 1's rules** (4.2), on each of the five scenes: more than 12°
+  from the seam, and for each lens alone over its coverage, PSNR and
+  SSIM at or above floors blessed 1 dB and 0.005 under what the true rig
+  measured, with wrong models failing them (of the near pairs, the
+  stitch at q = 0); in the band of 90° views of 256² on each side seam
+  and pole, the stitch at most 1 dB under the better lens alone, with
+  lens 1 turned 0.5° failing it on each view. A lens alone is black past
+  its coverage, so its SSIM is taken over the windows that lie whole
+  inside the coverage. On the seam: the strips within 0.1 px rms of each
+  other and every term under 0.03°; and, on `SeamLines` infinitely far
+  (`Grid`'s lines clip), with lens 1 at +0.5 EV and +5 % red, a step
+  across the seam under 1 LSB once `render_rig`'s gains are the inverse
+  of the signature's log gains. Both lenses turned 0.5° about +Y, the
+  common-mode control, pass every seam check and fail the comparison
+  with the ideal: each pattern's floors, and on `Grid` the true stitch
+  scores 3 dB over it.
 - **The floors** are blessed by D32's rules into
   `tests/goldens/instrument.json` (`SPHERECUT_UPDATE_GOLDENS=1 cargo
   test -p spherecut-render --test instrument`): written only when all
   seven tests pass and every control fails, and a floor lowered by more
   than 0.5 dB (0.0025 of SSIM) only under `=lower`. The manifest holds
-  each control's numbers beside the floors, the common-mode control's
-  in a row of its own, which has no floors.
+  each control's numbers beside the floors, the common-mode control's in
+  a row of its own, which has no floors.
 - **The band's stripe.** Of each 256² view only the 48 columns (on a
   pole, rows) that hold the band are rendered, as the view framed in a
   smaller target. The band check reads no other pixel; the test holds
@@ -9468,141 +9578,393 @@ What:
   each, the strips' shifts lie within 0.05 px rms of the prediction, the
   largest term is the one the prediction names, every term the geometry
   doesn't couple to it stays under max(0.03°, 15 %), and a coupled term
-  comes at the predicted ratio, within 0.03. Each also fails rung 1's
-  0.1 px. Each is held over all 72 bins, predicted and measured; the
-  tracks swapped over the 44 that the search holds. The model with
-  nothing planted, at both depths and on both V6 and Kannala–Brandt
-  lenses, and the common-mode control land nowhere; gains off land on
-  the log gains and nowhere in the geometry.
+  comes at the predicted ratio, within 0.03. Where the prediction gives
+  two named terms one size within 0.03°, the images may put either first
+  (lens 0's V6 terms read as `RadialOnly` are predicted 0.9692° on c1
+  and 0.9667° on b1), and the ratio's rule holds the pair. Each also
+  fails rung 1's 0.1 px. Each is held over all 72 bins, predicted and
+  measured; the tracks swapped over the 44 whose whole patch the search
+  holds, which leaves out the 28 bins within 35° of φ = 0° and 180°. The
+  two depth rows name d1 with a0 (below). The model with nothing
+  planted, at both depths and on both V6 and Kannala–Brandt lenses, and
+  the common-mode control land nowhere; gains off land on the log gains
+  and nowhere in the geometry.
+- **The pixel.** 8.3's 0.05 px and 4.2's 0.1 px are the strip's own
+  pixels, 3.81 a degree both ways. 3.4's rows are the source's at 768²,
+  3.81 a degree across the seam and 6.0 along it, by which a field that
+  lies along the seam is 1.57 times its figure in strip pixels.
 - **The matrix's controls.** Each rule of step 3 has a control held to
   break that rule and no earlier one: the yaw's field read as no shift,
   and as a roll, which the prediction doesn't name; the yaw's measured
-  terms against the pitch's prediction, which land on a1 for b1; lens
-  1's centre 2 px off read as a tilt alone, whose d1, at 0.33°, is
-  over its bound of 0.08°; the same field against the prediction for
-  lens 1's V6 terms read as `RadialOnly`, which lands on a1 too and
-  whose b1 comes at 0.01 of a1 for 0.76 predicted; and each field past
-  the search, which leaves no term measured. Step 2's control is the
-  yaw's field against the pitch's prediction (1.9 px). The bins' are
-  the tracks swapped held to a bin predicted for each, and a track
-  showing another scene, where 57 predicted bins aren't measured.
+  terms against the pitch's prediction, which land on a1 for b1; a named
+  term two bounds under the prediction's largest made the largest in the
+  images, which the rule for two terms of one size doesn't pass; lens
+  1's centre 2 px off read as a tilt alone, whose d1, at 0.33°, is over
+  its bound of 0.08°; the same field against the prediction for lens 1's
+  V6 terms read as `RadialOnly`, which lands on a1 too and whose b1
+  comes at 0.01 of a1 for 0.76 predicted; a depth row with its d1 left
+  out, and with d1 of the other sign, which come at 0 and at +0.134 of
+  a0 for −0.134 predicted; and each field past the search, which leaves
+  no term measured. Step 2's control is the yaw's field against the
+  pitch's prediction (1.9 px). The bins' are the tracks swapped held to
+  a bin predicted for each, and a track showing another scene, where 13
+  of the 72 predicted bins aren't measured. `apart_deg`, which sizes a
+  field past the search with no images, is held to 0 under the truth's
+  model (1.2 × 10⁻¹³° at most) and to a planted roll of 0.5°.
 - **3.4 on the images.** `error_budget_matches_the_images` holds each
   row of 3.4 that has a figure at 768² to the measured terms, within
-  15 % or 0.2 px, with 3.4's two scales (3.81 px a degree across the
-  seam, 6.0 along). The helpers are `tests/common/budget.rs`, which the
-  seam's own tests hold to the predicted fields.
+  15 % or 0.2 px, with 3.4's two scales. A figure under 0.2 px, which a
+  zero would fit as well, is held with its sign to 0.05 px of the figure
+  worked for it, with a zero and the other sign failing. The helpers are
+  `tests/common/budget.rs`, which the seam's own tests hold to the
+  predicted fields.
 
-**Measured** (a cloud container's 4 cores, debug build). The true
-stitch against the ideal, more than 12° from the seam: `SeamLines`
-32.50 dB and 0.9533 (at 1.5 m 32.54 and 0.9537; Kannala–Brandt 32.41
-and 0.9519), `Grid` 28.42 and 0.9271; a lens alone 26.2 to 26.4 dB on
-`SeamLines` and 27.8 to 28.0 on `Grid`. In the band the stitch is 0.10
-to 0.74 dB above the better lens. With nothing planted the strips lie
-0.017 to 0.023 px rms apart, every term under 0.002°, at a median NCC
-of 0.988 to 0.990. The 24 planted errors come back 0.016 to 0.048 px
-off their predictions (the two largest: the V6 terms read as {D5D6, D7
-by axis}, 0.048, and the tracks swapped, 0.045, over the 44 bins the
-search holds). The log gains come back as 0.3956, 0.3468 and 0.3561 for
-0.3954, 0.3466 and 0.3466 planted; matched by them the step is 0.18
-LSB, and with the gains off 22.3 LSB. The common-mode control scores
-29.58 dB on `SeamLines` and 24.09 dB on `Grid`, with a seam of 0.022
-px. The binary takes 9.7 s of the 10 s it has of 19.6's 15 s; with the
-metrics', the rig reference's and the seam's own tests the slice takes
-about 12 s.
+**Measured** (a cloud container's 4 cores, debug build). The true stitch
+against the ideal, more than 12° from the seam: `SeamLines` 32.50 dB and
+0.9533 (at 1.5 m 32.54 and 0.9537; Kannala–Brandt 32.41 and 0.9519),
+`Grid` 28.42 and 0.9271 (at 1.5 m 28.34 and 0.9255); a lens alone 26.2
+to 26.4 dB on `SeamLines` and 27.7 to 28.0 on `Grid`. In the band the
+stitch is 0.10 to 0.74 dB above the better lens, on all 20 views. With
+nothing planted the strips lie 0.017 to 0.023 px rms apart, every term
+under 0.002°, at a median NCC of 0.988 to 0.990. The 24 planted errors
+come back 0.016 to 0.048 px off their predictions; the two largest are
+the V6 terms read as {D5D6, D7 by axis}, 0.048, and the tracks swapped,
+0.036 over their 44 bins. By 3.4's scales those two are 0.066 and
+0.043 px, the other rows 0.021 to 0.039, and the true rigs'
+misregistration 0.021 to 0.027 px (a probe's numbers: the test prints
+the strip's): one row is over 0.05 px by the source's pixel, and rung
+1's 0.1 px holds either way. The log gains come back as 0.3956, 0.3468
+and 0.3561 for 0.3954, 0.3466 and 0.3466 planted; matched by them the
+step is 0.18 LSB, and with the gains off 22.3 LSB. The common-mode
+control scores 29.58 dB on `SeamLines` and 24.09 dB on `Grid`, with a
+seam of 0.022 px. A lens alone's windows that reach past its coverage
+held 4.9 % and 8.4 % of the SSIM's weight on the two lenses of
+`SeamLines`, and with them the ideal blacked past the coverage scores
+0.985 and 0.984 against the ideal, where the whole windows give 1; the
+lens-alone SSIM floors rose by 0.022 on `Grid` and by 0.026 to 0.029 on
+`SeamLines` when they were blessed again without those windows.
+
+**What it costs.** The instrument binary takes 10.4 to 10.6 s of the
+11 s it has of 19.6's 15 s (six runs; 10.1 to 10.4 s in the round's
+earlier ones); the rig reference's tests take 1.6 to 1.7 s of their 2 s,
+the seam's own 1.3 s of their 1.5 s and the crate's unit tests, the
+metrics' among them, 0.2 s, so the slice takes about 13.6 s. Those
+shares are for four free cores. The binary is bound by the CPU, at about
+41 CPU-seconds, and it took 20.6 s on two cores and 40.5 s on one
+(`taskset -c 0,1` and `-c 0`, a run each): on fewer cores, or beside
+another build, it passes its 11 s with nothing changed. The budgets are
+printed and not asserted (4.1 rule 5), and the binary has no share left
+for a later slice to add to.
+
+A pair of 768² takes 11 to 17 ms to make ready, by the machine's load
+(the best of several, in three sets of runs). That is all but 0.1 ms of
+an 18 × 1 strip afresh. Of a pair made ready Tier 1's strips take 33 to
+36 ms and Tier 2's about 131 ms, where afresh they take 51 to 56 ms and
+145 to 157 ms; `strip_coverage` takes 21 ms and 90 ms, and the 512 × 256
+equirect 54 ms. At 3840² a lens a pair takes about half a second, 455 ms
+at the best of three and 0.9 s in their mean, and its chains 470 MB. Of
+it Tier 1's strips take 45 ms and Tier 2's 245 ms, where afresh they
+take 537 ms and 750 ms: the chains were all but a tenth of a Tier 1 call
+and two thirds of a Tier 2 one. `bin_shifts` and `signature` after them
+take about 32 ms at Tier 1 and 280 to 340 ms at Tier 2, whatever the
+lenses' size. (The review's probe, before the pair was split off and on
+a loaded machine, had the calls afresh at 517, 549 and 751 ms at 3840².)
+
+**The estimator's floors, and where each was set.** Two are 8.2's: a
+sample above 0.95 on any channel is left out as clipped, and one below
+0.01 is left out of the log ratio. Every other was set in this slice on
+synthetic strips, without noise or with seeded white noise on luma
+(independent on the two lenses and in proportion to each sample's
+value), and none has met footage.
+
+- The noise floor of 3. The smoothing leaves white noise a texture of
+  its own, 0.375 / (1 − ρ) times its mismatch for a best match that
+  correlates by ρ. With the floor off, over 40 seeds of Tier 1's 72
+  bins, a flat grey under 1 % to 4 % noise comes back valid in 1104 to
+  1146 bins of 2880 at 0.38 to 0.92 times its mismatch, and a ramp
+  across the band (0.35 to 0.65) in 2873 to 2876 at 0.23 to 0.95 times,
+  with an NCC over 0.98; at Tier 2's 8 px a degree, 0.31 to 0.51 times.
+  Another generator's 12 seeds reached 1.14 in one bin. So 3 is about
+  three times what noise alone reaches and 2.6 times the most seen. What
+  it costs is the faintest texture: waves a few pixels long, of a fifth
+  of the mean, have at the least 190, 48, 22 and 5.7 times their
+  mismatch under 1 %, 2 %, 3 % and 6 % noise at Tier 1 and 57, 15, 6.6
+  and 1.9 times at Tier 2, where under 6 % noise some bins fall under
+  the floor with shifts within 0.27 px; at a fiftieth of the contrast
+  under 0.2 % noise they have 2.4 to 16 times, with shifts up to 0.5 px
+  off, which is what a bin at the floor measures to. On the matrix's own
+  strips a true model's bins have 12 times or more and a planted
+  difference's 7 or more, but for one bin at 2.96, under the floor (the
+  {D5D6, D7 by axis} row is fitted to 71 bins), and one at 3.6; another
+  scene's have 0.05 to 0.3, and none of its 59 valid bins has
+  information.
+- The interior's three samples are the smoothing's reach, two for the
+  blur and one for the spline. Texture over half the ring beside a sky
+  of its mean, at rest under 1 % noise, over 40 seeds: without the rule
+  the two sky bins beside the texture come back 0.2 to 0.6 px towards it
+  with 0.85 to 1.5 times a textured bin's information, and put a term
+  over 8.4's 0.02° on 20 seeds, 0.067° at the most; with it no seed is
+  over, 0.015° at the most. Texture above the patches' rows, round the
+  ring: without the rule an a0 of 0.035° to 0.062° under 0.5 % and 1 %
+  noise; with it no bin has information. A ring of texture throughout
+  loses bins to the rule only where the floor is already taking them.
+- The others (a contrast of 0.2 %, a mean square gradient of 10⁻⁴ a
+  sample, matches tied within 0.05 of NCC, a neighbour's shift within
+  0.5°, peaks within 1.5 px as one match, a last step under a tenth of a
+  strip pixel, half a patch's samples) were set on the synthetic strips
+  of the seam's own tests (a pure shift, a step in the field, cells that
+  repeat, a line a bin) and on the matrix's.
+
+A bin under the noise floor or the interior's is valid and without
+information, as above; a bin under any of the others is invalid. What
+the tests hold of the two rules is on a few seeds each: a flat or ramped
+sky under 1 % and 2 % noise leaves the terms within 0.010° where the
+floor off puts one 0.05° to 1.3° off; a scene against itself at rest
+under noise gives a largest term of 0.015°; and a bin of noise carries
+no ring of repeating cells to an alias on 40 seeds, where the floor off
+does on 5.
 
 **Where the images didn't bear the plan out**, and what the tests hold
 instead:
 
-- **The band check's control.** Lens 1 turned 0.13° about +Y lowers
-  the band's PSNR by 0.6 to 0.8 dB and leaves the stitch 0.2 to 0.4 dB
-  under the better lens (on one seam of `Grid`, still above it), not
-  the 3.6 dB of 4.2's 1-D model: at the views' 0.35° a pixel a lens
-  alone already scores about 25 dB on the 1° checker. The band check's
-  control is lens 1 yawed 0.5° (4.1 to 5.5 dB under the better lens on
-  the side seams). The 0.13° turn is held to lower the band's PSNR, and
-  it fails the misregistration at 0.35 px.
+- **The band check's control.** Lens 1 turned 0.13° about +Y lowers the
+  band's PSNR by 0.6 to 0.8 dB and leaves the stitch 0.2 to 0.4 dB under
+  the better lens (on one seam of `Grid`, still above it), not the
+  3.6 dB of 4.2's 1-D model: at the views' 0.35° a pixel a lens alone
+  already scores about 25 dB on the 1° checker. The band check's control
+  is lens 1 yawed 0.5°, on every scene and view where the yaw fails it:
+  4.0 to 5.5 dB under the better lens on the side seams, and 2.0 to
+  2.5 dB on `SeamLines`' poles, whose views hold 45° of the seam to
+  either side of a pole that the turn itself leaves alone. On `Grid`'s
+  poles the yaw leaves the stitch 0.1 to 1.3 dB under, which is
+  recorded, and the control is the roll, 6.2 to 8.5 dB under. The 0.13°
+  turn is held to lower the band's PSNR, and it fails the
+  misregistration at 0.35 px.
 - **No NCC collapse.** None of the gross controls brings the median NCC
   under 0.5 on these scenes. With the turn left out, the bins lock a
   period of `SeamLines`' checker away, at the search's edge, at 0.97;
-  equidistant lenses on Mei's pictures give 0.97, and the
-  Kannala–Brandt lenses read as equisolid 0.97. These three plant
-  fields past the search, so the prediction holds no bin. They are told
-  by the predicted size (the angle between what the two lenses show at
-  one point of the seam: 5.1°, 90° and 18.2° in the mean), by a
-  misregistration of 11.7, 16.2 and 13.0 px, and by failing the ideal.
-  The NCC check's own control is a track showing another scene (0.06).
-- **3 dB over the common-mode control** holds on `Grid` (4.32 dB for
-  the stitch, 4.75 and 3.89 dB for the lenses alone) and not on
-  `SeamLines` more than 12° from the seam (2.92 dB), where the 1°
-  checker, which reaches 15° from the seam, sets the error at the
-  equirect's 0.70° a pixel whatever the registration. The rule is
-  there to show a slip that was in the stitch when it was blessed, so
-  its own control is a stitch that slips already, against the control
-  made from it, 0.5° further. On `Grid` one that slips 1° scores
-  1.11 dB over its control, and that is the control held; one that
-  slips 0.5° scores 2.96 dB, under 3 by too little to rest a control
-  on, and is recorded. So on `Grid` the rule sees a slip from about
-  0.5° on. On `SeamLines` it sees none: a stitch that slips 0.5°
-  already scores 2.81 dB over its control, 0.11 dB from the true
-  stitch's margin, and with the mask at 15° the two score 3.33 and
-  3.98 dB, which 3 dB passes alike (a probe's numbers, which the test
-  doesn't hold). `SeamLines`' margin is recorded in the manifest and
-  not held, and its control is held to fail the floors.
+  equidistant lenses on Mei's pictures give 0.97, and the Kannala–Brandt
+  lenses read as equisolid 0.97. These three plant fields past the
+  search, so the prediction holds no bin. They are told by the predicted
+  size (the angle between what the two lenses show at one point of the
+  seam: 5.1°, 90° and 18.2° in the mean), by a misregistration of 11.5,
+  16.2 and 13.0 px, and by failing the ideal. The NCC check's own
+  control is a track showing another scene: 59 of its 72 bins come back
+  valid, at a median NCC of 0.085.
+- **3 dB over the common-mode control** holds on `Grid` (4.32 dB for the
+  stitch, 4.75 and 3.89 dB for the lenses alone) and not on `SeamLines`
+  more than 12° from the seam (2.92 dB), where the 1° checker, which
+  reaches 15° from the seam, sets the error at the equirect's 0.70° a
+  pixel whatever the registration. The rule is there to show a slip that
+  was in the stitch when it was blessed, so its own control is a stitch
+  that slips already, against the control made from it, 0.5° further. On
+  `Grid` one that slips 1° scores 1.11 dB over its control, and that is
+  the control held; one that slips 0.5° scores 2.96 dB, under 3 by too
+  little to rest a control on, and is recorded. So on `Grid` the rule
+  sees a slip from about 0.5° on. On `SeamLines` it sees none: a stitch
+  that slips 0.5° already scores 2.81 dB over its control, 0.11 dB from
+  the true stitch's margin, and with the mask at 15° the two score 3.33
+  and 3.98 dB, which 3 dB passes alike (a probe's numbers, which the
+  test doesn't hold). `SeamLines`' margin is recorded in the manifest
+  and not held, and its control is held to fail the floors.
 - **The blue gain** comes back 1 % above the truth's, and the step is
   smaller under the measured gains (0.18 LSB) than under the truth's
   (0.54): at mid grey, +5 % red moves an 8-bit Cb by 0.3 of a code,
   which rounds away, so the coded picture's blue rises with its luma.
   The gains matched are the coded picture's, as they should be.
-- **`Grid`'s score depends on the ideal's sampling.** The true stitch
-  of `Grid` scores 31.1, 28.4 and 29.6 dB against ideals of 4², 8² and
-  16² samples a pixel, its lines lying along the equirect's rows and
+- **`Grid`'s score depends on the ideal's sampling.** The true stitch of
+  `Grid` scores 31.1, 28.4 and 29.6 dB against ideals of 4², 8² and 16²
+  samples a pixel, its lines lying along the equirect's rows and
   columns; `SeamLines` moves by 0.05 dB from 8² to 16². The tests use
-  the goldens' 8². `Grid`'s floors hold the stitch to that ideal and
-  say little of how good the stitch is.
-- **3.4's figures.** The images confirm the three figures the seam's
-  tests corrected: both yaws of the Euler class with the wrong sign
-  give 4.19 px (the table's 2.3 is one lens's); the binding reversed in
-  Tier 1's rig gives 13.9 px across (the table: up to 9) and 9.1 px
-  along; and V3 against V6 on lens 0 gives an a0 of 0.14 px at 768²
-  (the table's 0.15° would be 0.57 px). Every other row holds as
-  written.
+  the goldens' 8². `Grid`'s floors hold the stitch to that ideal and say
+  little of how good the stitch is.
+- **3.4's figures.** Three rows are held to figures worked again, and
+  each prints the table's beside them. Both yaws of the Euler class with
+  the wrong sign measure 4.19 px, held to the 4.19 px that twice the two
+  yaws' difference gives: the table's 2.3 px is one lens's, which the
+  images hold too, at 2.29 px, and the pair's is a case the table lacks.
+  The binding reversed in Tier 1's rig measures 13.9 px across, held to
+  the 14.3 px worked from the angles' tilt and the swapped centres
+  together (the table's "up to 9" is without the centres' part across),
+  and 9.1 px along for 8.5 px worked, which the table doesn't have. V3
+  against V6 measures an a0 of −0.145 px on lens 0 for −0.137 px worked
+  from the seam circle's radius under the two models, and −0.101 px on
+  lens 1 for −0.115, each held with its sign to 0.05 px; the table's
+  0.15°, 0.57 px, is fx alone. Every other row with a figure at 768²
+  holds within 15 % or 0.2 px.
+- **Parallax along the seam.** 3.3 and 8.2 have parallax move the seam
+  across itself alone. That holds for lenses whose centres lie on one
+  line along the lens axis. `x5_like`'s lie 4.30 mm apart in the seam's
+  plane (Pat's V3 t_x of −4.46 mm, less what lens 0's yaw brings in from
+  t_z), so depth moves the seam along itself too, by that offset times
+  q: a first harmonic on d1 at −0.134 of a0 at every depth, 0.164°
+  (0.98 px by 3.4's scale along) for 1.5 m against infinity and 0.328°
+  (1.97 px) with t_z's sign flipped. The matrix's two depth rows name d1
+  with a0 and hold the ratio within 0.03, with d1 left out and d1 of the
+  other sign as controls; held as a term the geometry doesn't couple, d1
+  would have come within 1.6 points of the 15 %. 8.2 ranks the V6
+  readings on the near clips by their fields along the seam because
+  parallax has none; on a rig with a sideways offset it has this one,
+  which the fit has to take from the candidate's own centres.
+
+**Where the estimator differs from 8.2 as written.** A sample below 0.01
+keeps its place in the shift, where normalising for gain and bias makes
+a dark patch as good as a bright one, and is left out of the log ratio
+alone; 8.2 leaves it out of both. `BinShift` is in degrees at either
+tier: nothing converts Tier 2's shifts to source pixels, as 8.2 has them
+reported, and what reports them does it by the source's own two scales.
+`BinShift` has `contrast`, and `Signature` has `term_se_deg` and
+`informed_bins`, which 8.2 doesn't list. 8.2's q for each 15° sector on
+a near scene is the fit's (8.4) and isn't fitted here: depth that varies
+with azimuth shows in what the fit leaves.
+
+**For the shader** (M3.7, D66): what `fs_rig` and its tests take from
+here that 10.3 to 10.5 and 13.4 don't say.
+
+- The weights where no feather weighs a covered direction. Where both
+  feathered weights are 0 the covering lens with the smaller θ takes the
+  direction at a weight of 1, each takes ½ at one θ, and a lens that
+  alone covers takes 1 (`Rig::weights`; D63's note of this date has the
+  rule and its counts, 3304 of a 512 × 256 equirect's pixels under a
+  feather of 0 at the default q). 6.2 and 10.3 have the feathers alone,
+  and the WGSL copies the rule or differs from the reference on that
+  ring. 10.5's `dfish_feather` control at h = 0 is such a tune.
+- The mask's θ test is made in angle, or 10.3's cosine form is guarded
+  (the bound 0 or more, and cos θ ≥ cos of it). Once the margin's angle
+  passes θ_max the bound θ_max − margin · 2^λ / texels a radian is
+  negative, the cosine is even, and the unguarded form covers directions
+  `Rig::covers` refuses: on Pat's V3 lens 0 at 768² from LOD 7.25 to
+  7.58, outputs a few pixels across, up to 108 of 401 directions within
+  40° of the axis where the angle covers none (`render_rig`'s doc has
+  the counts). M3.7's mask test needs a case at such an LOD. λ is
+  clamped at 0 in the margin, as `Rig::covers`' doc says.
+- A strip on the instrument's grid. 10.4 and 10.5 hold the GPU's strips
+  to the CPU's and Measure seam (13.4) draws them, and today no view
+  draws `StripSpec::dir`'s grid: an equirect view fills its target with
+  the whole sphere and takes no framing, and a strip is no crop of an
+  equirect at its scale (Tier 1's 61 rows are 16°/61 each with the
+  middle row's centre on the seam, where an equirect 1372 wide has a
+  boundary between rows). The shader needs an output whose pixel (i, j)
+  looks along `StripSpec::dir(i + ½, j + ½)` in the rig frame, so that
+  10.4's "the instrument's strips have the GPU's shape" can be held
+  pixel for pixel.
+- `Strip::valid` of a strip drawn so comes from
+  `seam::strip_coverage(rig, spec)`: the mask at each sample's own
+  footprint's LOD, which nothing else works out.
+- 13.4's 1440 × 128 target is neither tier's size (1372 × 61 and
+  2880 × 128), and no one `px_per_deg` makes it: it is 4 px a degree
+  along and 8 across. `bin_shifts` reads a strip's own two scales and
+  would take it; `strips`, `StripSpec::dir` and `strip_coverage` have
+  one. Measure seam takes a tier's size, or a spec gains a second scale.
+- A LOD map of a rig. 10.5's `dfish_lod_heatmap` holds debug mode 3
+  against `reference::lod_map` for each lens, and `lod_map` is one
+  frame's through an equirect placement: `RigDebug` has no LOD mode, and
+  `lens_footprint` gives luma's footprint alone. The map for a lens
+  (luma's and chroma's LOD as sampled, and luma's before clamping) is
+  M3.7's to build.
+- Rung 2 is rung 1's planes through the shader. Rung 1's camera, pairs,
+  `Scene`, `Masks`, stitches and ideals are private to
+  `tests/instrument.rs`, and `RenderCache::shared()` is one process's.
+  M3.7 lifts them into `tests/common` before it writes rung 2, and costs
+  its own render of the pairs inside the 7 s that 19.6 gives it.
+
+**For the fit** (M3.6): what it must not take on trust.
+
+- That a valid bin matched. `valid` says only that the bin found a match
+  and settled on it. Where a lens shows another scene, or something
+  moves or hides in the overlap, a bin comes back valid with a shift of
+  several pixels at an NCC near 0, and where its texture is fine enough
+  it has information too. The fit weighs each bin by its information and
+  gates it on its own `ncc` as well, or shows that its Huber loss alone
+  holds against such bins.
+- That a bin's information is what its shift is worth. It leaves out the
+  contrast and the noise's scale (above): the seam's tests measure
+  0.0017 px rms at full contrast and 0.086 px at a fiftieth of it under
+  the same 0.1 % noise, with the same information. 8.4's division by the
+  weighted residuals' mean square sets one common factor, which bins of
+  unlike contrast don't share. A bin that is part sky is the other case:
+  with texture over a fifth of its columns it has 0.85 to 1.7 times the
+  information of a bin textured throughout and measures up to three
+  times worse, and neither rule above takes it.
+- That a finite term is a measured one. By the normal equations, for
+  bins informed alike both ways, a term's standard error is 0.12 to 0.17
+  of one bin's noise over the whole ring of 72; at most 1.6 times it
+  over two opposite sides of 12 bins each (8.6's usable take); 1.6 (a0)
+  and 2.5 (b1) times over half the ring; over one 90° arc of 18 bins 47
+  times for a0, 6 to 66 for a1 and b1 and 2.4 for c0; and over 30°
+  11,000 times for a0, still finite. `valid_bins` and `informed_bins`
+  don't tell these apart. The decisiveness rule reads `term_se_deg` or
+  the fit's own covariance, never a count of bins or the absence of a
+  NaN.
+- That `term_se_deg` is the whole error. It covers the bins' noise as
+  the fit's leftovers show it: a bias the bins share (a texture that
+  aliases) doesn't show in it, depth that varies with azimuth widens it,
+  and it takes each bin's information at its word.
+- That the floors suit footage. They are synthetic (above), and Pat's
+  clips are the first real pictures the estimator will see: bins of true
+  texture under the floor, or bins of noise over it, are both possible.
+- That a shift past the search shows. Such a bin comes back valid at
+  whatever matches best inside ±3°, on a texture that repeats an alias
+  with an NCC as high as a true match's. Only a prediction knows which
+  bins those are.
+- That parallax stays across the seam (above).
+
+It makes a `LensPair` once for each pair of frames and calls `strips_of`
+with each candidate. A pair of 3840² holds 470 MB, so 8.4's five frame
+sets held at once are 2.4 GB. `strips_of` deals its rows to
+`row_threads()` threads at each call, so candidates tried from threads
+of the fit's own multiply the two counts.
 
 **Not held here.** 4.2's "no channel more than 0.1 off the CPU
 reference" is rung 2's rule, the shader against these pictures (M3.7):
-in rung 1 the pictures are the CPU reference's own. `Grid`'s frame code
-on the back hemisphere isn't built: every picture is frame 0's and no
-check reads a frame number, so M3.4 needed no code. The rows of 3.4
-with no figure at 768² (the scene at 10 m) and the two V6 readings the
-pair isn't rendered under stay with the predictions. The near scene is
-`SeamLines` alone: `Grid` on the sphere of 1.5 m isn't rendered (below).
+in rung 1 the pictures are the CPU reference's own. The band rule holds
+a stitch to the better of its own two lenses, so it sees an error that
+one lens has and the other hasn't, and none that both share: the near
+pairs stitched at q = 0 pass it with the stitch 8.3 and 8.9 dB worse in
+the band, and so does the common-mode control. The floors away from the
+seam and the seam's own checks hold those errors, and nothing that reads
+the band rule may take it for a check of them. `Grid`'s frame code on
+the back hemisphere isn't built: every picture is frame 0's and no check
+reads a frame number, so M3.4 needed no code. The rows of 3.4 with no
+figure at 768² (the scene at 10 m) and the two V6 readings the pair
+isn't rendered under stay with the predictions. No LOD map of a rig is
+built, and the estimator has met no footage: Tier 2's strips are held by
+the seam's own tests on synthetic strips alone. The budgets are printed,
+not asserted.
 
-**Considered and not done.** `Grid` at 1.5 m, which the scene of 4.2
-has: its pair, with the stitches of its row and of its control (q = 0
-against it), takes about a second run alone and would take the binary
-past its 10 s, for a second pattern on a path that `SeamLines` at 1.5 m
-already holds. A probe gave 28.34 dB and 0.9255 for its stitch, and
-24.48 dB and 0.7995 stitched at q = 0. The slice has the room, at about
-12 s of 19.6's 15 s, so it is the binary's share that decides.
+**Considered and not done.** A bin under the noise floor marked invalid:
+a seam whose bins match nothing would then leave the median NCC to the
+few bins that happen to pass, and 8.2's gross failure reads that median.
+A control for the band rule out of an error both lenses share (the pair
+at q = 0, the common-mode turn): the rule can't fail it. The lens-alone
+SSIM over a lens's whole coverage, as it was first blessed: its windows
+at the edge hold black against the ideal's scene, which is the mask's
+edge and nothing of the stitch. The mean over the points of a patch that
+lie inside the search, as the prediction for a bin part past it: the
+estimator gives one shift for the whole patch, and for such a bin an
+alias (bin 6 with the tracks swapped, 5.4 px from its mean). a0 alone on
+the depth rows, and V3 against V6's a0 held to the budget's 0.2 px,
+which a zero fits.
 
 Also: a threshold of the test's own for `SeamLines`' margin over the
 common-mode control (2.5 dB at first), which a stitch that slips 0.5°
 already passes, at 2.81 dB; rendering the views whole (the band check
-reads the stripe alone, and the whole binary would pass its 10 s); an
+reads the stripe alone, and the whole binary would pass its 11 s); an
 ideal of 4² samples for the equirect (`Grid` above); masking a
 comparison by the bins the estimator held (a prediction decides which
 bins count, so that an estimator that gives up can't pass); an NCC
 collapse as the gross controls' attribution (above); a cache of a lens
 picture's ray directions in synth, which would spare `Grid`'s and the
-gained lens's pictures the lens's inverse, about half of what a
-picture costs (it would be synth's change, at 54 MiB a lens).
+gained lens's pictures the lens's inverse, about half of what a picture
+costs (it would be synth's change, at 54 MiB a lens).
 
 Revisit if: the search widens or a scene without a repeating texture
-joins rung 1, so that the gross controls can be attributed by the NCC;
-the binary's share of 19.6's 15 s grows, so that `Grid` at 1.5 m fits;
-the feather passes ±5°, so that the band leaves its 48 columns (the
-test fails and says so); the ideal's sampling changes, which moves
-`Grid`'s floors by a dB or more; or M3.6's fit needs a term the eight
-don't hold.
+joins rung 1, so that the gross controls can be attributed by the NCC; a
+later slice needs time in the instrument binary, which has none to give;
+the feather passes ±5°, so that the band leaves its 48 columns (the test
+fails and says so); the ideal's sampling changes, which moves `Grid`'s
+floors by a dB or more; footage shows a floor of the estimator wrong
+either way; or M3.6's fit needs a term the eight don't hold.
 
 ## Open
 
