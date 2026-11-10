@@ -196,8 +196,10 @@ pub fn render_blurred(
 /// taps, or level 0 alone under `opts.level0`, which leaves the mask at
 /// the footprint's LOD; the slot's own matrix and EOTF; then the lens's
 /// gain in linear light. The lenses blend by [`Rig::weights`] at their own
-/// LODs, (w0 rgb0 + w1 rgb1)/(w0 + w1), black where neither covers, and a
-/// lens whose weight is 0 isn't sampled; then the view's dim, f16 and the
+/// LODs, (w0 rgb0 + w1 rgb1)/(w0 + w1), and a lens whose weight is 0 isn't
+/// sampled. The weights sum to 1 wherever a lens covers the pixel, a
+/// covering lens taking whole what no feather weighs, so the stitch is
+/// black only where no lens covers. Then the view's dim, f16 and the
 /// OETF, as [`render`] ends. `opts.debug` writes one of [`RigDebug`]'s
 /// pictures instead: a lens alone ends as the stitch does, with its gain;
 /// the weights and the seam difference are written as [`lod_map`] writes,
@@ -212,13 +214,52 @@ pub fn render_blurred(
 /// (`RigLens::side`), which [`Rig::build`] takes from the track. Where a
 /// lens's model has no image for one of a pixel's five rays the lens has
 /// no footprint there, and doesn't cover the pixel. A fisheye view past
-/// θ = π is black, as [`render`]'s is. The rows are dealt to threads, and
-/// the picture is the same on any number of them.
+/// θ = π is black, as [`render`]'s is. The rows are dealt to threads
+/// ([`row_threads`]), and the picture is the same on any number of them.
 ///
-/// Refuses a rig whose block reads a track other than 0 or 1, a gain
-/// that isn't finite or is below 0, and planes [`render`] would refuse.
+/// What the shader's stitch (M3.7) must match that 10.3 doesn't say: the
+/// mask's θ test is made in angle. 10.3 writes it as cos θ ≥ cos(θ_max −
+/// margin · 2^λ / texels per radian), and [`Rig::covers`] compares θ with
+/// that bound. The two agree while the bound is 0 or more. Once the
+/// margin's angle passes θ_max the bound is negative, the cosine is even,
+/// and the cosine form covers directions that the angle refuses. On Pat's
+/// V3 lens 0 at 768² (174.73 texels a radian at a θ_max of 100°) the
+/// bound is below 0 from LOD 7.25, while the frame term still passes the
+/// lens's centre up to LOD 7.585: of 401 directions from 0° to 40° off
+/// the axis, the cosine form covers 14 at LOD 7.272 (a bound of −1.40°),
+/// 123 at 7.419 (−12.21°) and 21 at 7.565 (−24.18°), where the angle
+/// covers none; at LOD 7.202 both cover 35 and at 7.635 neither any. So
+/// the WGSL compares θ in angle, or guards the cosine form (the bound 0
+/// or more, and cos θ ≥ cos of it), and M3.7's mask test needs a case at
+/// such an LOD, an output a few pixels across.
+///
+/// This builds both pictures' mip chains and renders once: a caller with
+/// more than one picture to make of one pair of frames makes a
+/// [`LensPair`] and calls [`render_rig_of`].
+///
+/// Refuses a rig whose block reads a track other than 0 or 1 or whose
+/// blocks both read one track, a gain that isn't finite or is below 0,
+/// and planes [`render`] would refuse.
 pub fn render_rig(
     lenses: [&dyn VideoPlanes; 2],
+    rig: &Rig,
+    gains: [[f64; 3]; 2],
+    view: &ViewParams,
+    size: (u32, u32),
+    opts: &RigOptions,
+) -> Result<ImageF64, RenderError> {
+    render_rig_of(&LensPair::new(lenses)?, rig, gains, view, size, opts)
+}
+
+/// [`render_rig`] of a pair made ready once: the same picture, bit for
+/// bit, without the pair's mip chains built again. Everything of the rig
+/// (the binding, θ_max, the feather, q), the gains, the view and the
+/// options are this call's, so one pair serves any number of rigs and
+/// views of its two frames.
+///
+/// Refuses what [`render_rig`] refuses of the rig and the gains.
+pub fn render_rig_of(
+    pair: &LensPair,
     rig: &Rig,
     gains: [[f64; 3]; 2],
     view: &ViewParams,
@@ -234,8 +275,8 @@ pub fn render_rig(
             "a lens's gain is {gain}: a gain is finite and 0 or more"
         )));
     }
-    let pair = LensPair::new(lenses, rig)?;
-    let pixels = per_pixel_rows(size, |px| pair.shade(&gains, view, size, px, opts));
+    check_tracks(rig)?;
+    let pixels = per_pixel_rows(size, |px| pair.shade(rig, &gains, view, size, px, opts));
     Ok(ImageF64 {
         width: size.0,
         height: size.1,
@@ -252,6 +293,10 @@ pub fn render_rig(
 /// from that LOD. `None` where the lens's model has no image for the
 /// pixel's centre or for one of the four rays: the lens has no footprint
 /// there, and doesn't cover the pixel.
+///
+/// # Panics
+///
+/// If `b` is neither 0 nor 1.
 pub fn lens_footprint(
     rig: &Rig,
     b: usize,
@@ -260,6 +305,7 @@ pub fn lens_footprint(
     i: u32,
     j: u32,
 ) -> Option<(DVec2, DVec2)> {
+    check_block(b);
     let rays = Rays::at(|x, y| view.dir(size, x, y), pixel::centre(i, j));
     Footprint::of(rig, b, &rays).map(|f| (f.across[0], f.across[1]))
 }
@@ -322,10 +368,17 @@ pub(crate) fn per_pixel_rows<T: Copy + Default + Send>(
     size: (u32, u32),
     f: impl Fn((u32, u32)) -> T + Sync,
 ) -> Vec<T> {
-    let threads = std::thread::available_parallelism()
+    rows_on(row_threads(), size, f)
+}
+
+/// How many threads [`render_rig`], the masks and the strips of
+/// [`crate::seam`] deal their rows to: the machine's parallelism, and 16
+/// at most. Each call starts its own, so a caller that runs them from
+/// threads of its own multiplies the two counts.
+pub fn row_threads() -> usize {
+    std::thread::available_parallelism()
         .map_or(1, |n| n.get())
-        .min(16);
-    rows_on(threads, size, f)
+        .min(16)
 }
 
 /// [`per_pixel_rows`] on `threads` threads.
@@ -422,27 +475,64 @@ pub(crate) fn in_view(view: &ViewParams, size: (u32, u32), c: DVec2) -> bool {
     view.theta(size, c.x, c.y) <= PI + 1e-4
 }
 
-/// A lens pair as the stitch samples it: the rig, and each track's
-/// picture as the shader sees it, clamped at its edges.
-pub(crate) struct LensPair {
-    rig: Rig,
+/// Refuses a block index that no rig has: `b` is 0 or 1.
+pub(crate) fn check_block(b: usize) {
+    assert!(b < 2, "block {b}: a rig's blocks are 0 and 1");
+}
+
+/// Refuses a rig that a pair of pictures can't be sampled under: a block
+/// that reads a track other than 0 or 1, or both blocks reading one
+/// track. [`Rig::build`] gives each block its own track of the two, so
+/// only a rig put together by hand can fail; nothing renders two blocks
+/// from one picture (an LRV's two halves are two pictures, 15), and a rig
+/// that did would be a block's track written wrong.
+pub(crate) fn check_tracks(rig: &Rig) -> Result<(), RenderError> {
+    let tracks = [rig.lenses[0].track, rig.lenses[1].track];
+    for (b, track) in tracks.into_iter().enumerate() {
+        if track > 1 {
+            return Err(RenderError::Invalid(format!(
+                "block {b} of the rig reads track {track}: a pair has tracks 0 and 1"
+            )));
+        }
+    }
+    if tracks[0] == tracks[1] {
+        return Err(RenderError::Invalid(format!(
+            "both blocks of the rig read track {}: each block reads its own track",
+            tracks[0]
+        )));
+    }
+    Ok(())
+}
+
+/// A lens pair's two pictures made ready to sample: each track's planes
+/// as the shader sees them, clamped at their edges, with their mip chains
+/// in f64. The chains are most of what a small picture or a strip costs
+/// (about 12 ms a pair of 768² and half a second a pair of 3840², whose
+/// chains take about 470 MB), and they are the planes' alone: nothing of
+/// a rig is here, neither its binding nor a gain nor θ_max. So a caller
+/// that samples one pair of frames more than once, under one rig or
+/// under many as a fit does (8.4), makes the pair once and hands it to
+/// [`render_rig_of`] and [`crate::seam::strips_of`] with each rig.
+pub struct LensPair {
     /// By track.
     sources: [Source; 2],
     /// Whether each track's values are linear already, by track.
     linear: [bool; 2],
 }
 
+impl std::fmt::Debug for LensPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LensPair")
+            .field("sizes", &[self.sources[0].size0, self.sources[1].size0])
+            .field("linear", &self.linear)
+            .finish_non_exhaustive()
+    }
+}
+
 impl LensPair {
-    /// The pair for the two tracks' pictures, by track, under `rig`.
-    pub(crate) fn new(lenses: [&dyn VideoPlanes; 2], rig: &Rig) -> Result<LensPair, RenderError> {
-        for (b, lens) in rig.lenses.iter().enumerate() {
-            if lens.track > 1 {
-                return Err(RenderError::Invalid(format!(
-                    "block {b} of the rig reads track {}: a pair has tracks 0 and 1",
-                    lens.track
-                )));
-            }
-        }
+    /// The pair for the two tracks' pictures, by track. Refuses planes
+    /// [`render`] would refuse.
+    pub fn new(lenses: [&dyn VideoPlanes; 2]) -> Result<LensPair, RenderError> {
         let source = |frame: &dyn VideoPlanes| {
             let mut source = Source::new(frame, &Placement::FULL)?;
             // Fisheye uv has no wrap.
@@ -450,24 +540,26 @@ impl LensPair {
             Ok::<Source, RenderError>(source)
         };
         Ok(LensPair {
-            rig: *rig,
             sources: [source(lenses[0])?, source(lenses[1])?],
             linear: lenses.map(|frame| frame.color().transfer == Transfer::Linear),
         })
     }
 
-    /// Block `b`'s linear light at unit gain where `f` samples its
-    /// track's picture: trilinear taps (level 0 alone when `level0`), the
-    /// matrix and the EOTF, with no rounding.
-    pub(crate) fn light(&self, b: usize, f: &Footprint, level0: bool) -> [f64; 3] {
-        let track = self.rig.lenses[b].track;
+    /// Block `b` of `rig`'s linear light at unit gain where `f` samples
+    /// its track's picture: trilinear taps (level 0 alone when `level0`),
+    /// the matrix and the EOTF, with no rounding. `rig` is one that
+    /// [`check_tracks`] passed.
+    pub(crate) fn light(&self, rig: &Rig, b: usize, f: &Footprint, level0: bool) -> [f64; 3] {
+        let track = rig.lenses[b].track;
         let source = &self.sources[track];
         source.light(&source.lens_sampled(f), level0, self.linear[track])
     }
 
-    /// What [`render_rig`] writes at pixel `(i, j)`.
+    /// What [`render_rig_of`] writes at pixel `(i, j)` under `rig`, one
+    /// that [`check_tracks`] passed.
     fn shade(
         &self,
+        rig: &Rig,
         gains: &[[f64; 3]; 2],
         view: &ViewParams,
         size: (u32, u32),
@@ -478,7 +570,6 @@ impl LensPair {
         if !in_view(view, size, c) {
             return [0.0; 3];
         }
-        let rig = &self.rig;
         let rays = Rays::at(|x, y| view.dir(size, x, y), c);
         let feet = [0, 1].map(|b| Footprint::of(rig, b, &rays));
         // A lens with no footprint has no LOD: an infinite one, whose
@@ -487,7 +578,7 @@ impl LensPair {
         let covers = |b: usize| feet[b].is_some() && rig.covers(b, rays.d, lods[b]);
         // The lens's light with its gain, in linear light.
         let lit = |b: usize| {
-            let light = feet[b].map_or([0.0; 3], |f| self.light(b, &f, opts.level0));
+            let light = feet[b].map_or([0.0; 3], |f| self.light(rig, b, &f, opts.level0));
             [0, 1, 2].map(|k| light[k] * gains[b][k])
         };
         // The linear target is f16; the encode pass undoes the EOTF.

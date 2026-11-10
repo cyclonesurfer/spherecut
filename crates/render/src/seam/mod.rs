@@ -22,7 +22,7 @@ pub mod strips;
 use glam::DVec3;
 
 pub use shifts::{bin_shifts, signature};
-pub use strips::{band_weights, lens_coverage, strips};
+pub use strips::{band_weights, lens_coverage, strip_coverage, strips, strips_of};
 
 /// How the band about the seam is unwrapped and measured (8.2).
 #[derive(Debug, Clone, Copy, PartialEq)]
