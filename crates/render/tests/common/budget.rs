@@ -8,6 +8,7 @@ use spherecut_render::seam::shifts::TERMS;
 use spherecut_render::seam::{BinShift, Signature};
 use spherecut_sphere::rig::{Rig, RigLens};
 use spherecut_synth::lens::{CalibTruth, X5_LIKE_SIDE};
+use spherecut_testkit::control::{Comparison, at_most};
 
 /// The greater of the worst miss so far and one more, and NaN from the
 /// first that is NaN on: a miss that is no number (an invalid bin, a term
@@ -52,6 +53,26 @@ pub fn slack_px(table_px: f64) -> f64 {
     (0.15 * table_px.abs()).max(0.2)
 }
 
+/// A figure against the table's, or the one worked for it, both in
+/// pixels at 768² and signed alike: within [`slack_px`] of it. What
+/// [`Budget::hold`] holds, for a control to take.
+pub fn held(got_px: f64, figure_px: f64) -> Comparison<f64> {
+    at_most((got_px - figure_px).abs(), slack_px(figure_px))
+}
+
+/// How far a figure under [`slack_px`]'s floor may lie from the one
+/// worked for it, in pixels at 768². Under 0.2 px a hold to 0.2 px holds
+/// nothing, neither the figure's size nor its sign: a zero fits it.
+pub const SMALL_PX: f64 = 0.05;
+
+/// A figure under [`slack_px`]'s floor against the one worked for it,
+/// both signed, in pixels at 768²: within [`SMALL_PX`]. A figure of
+/// zero, or of the other sign, fails it wherever the worked one is more
+/// than [`SMALL_PX`].
+pub fn small(got_px: f64, worked_px: f64) -> Comparison<f64> {
+    at_most((got_px - worked_px).abs(), SMALL_PX)
+}
+
 /// 3.4's rows as a test holds them: each prints as it is held, and the
 /// ones that miss wait for the test's end, so that a run reports every
 /// row. `what` says where the test's figures come from: "predicted" for
@@ -87,18 +108,40 @@ impl Budget {
     }
 
     /// Holds a figure to `worked_px`, 3.4's arithmetic worked again,
-    /// where the table's own figure is wrong: the figure fits the one and
-    /// misses the other.
-    pub fn hold_corrected(&mut self, row: &str, got_px: f64, worked_px: f64, table_px: f64) {
+    /// where the table's own figure is another thing's: the figure fits
+    /// the one and misses the other. `why` says what the table's figure
+    /// is ("one lens's", "fx alone"), as the row prints it.
+    pub fn hold_corrected(
+        &mut self,
+        row: &str,
+        got_px: f64,
+        worked_px: f64,
+        table_px: f64,
+        why: &str,
+    ) {
         let fits = (got_px - worked_px).abs() <= slack_px(worked_px);
         let table_fits = (got_px - table_px).abs() <= slack_px(table_px);
         let what = self.what;
         self.report(
             format!(
                 "{row}: {got_px:.2} px {what}, {worked_px:.2} px worked again, {table_px:.2} px \
-                 in the table, which is wrong"
+                 in the table, which is {why}"
             ),
             fits && !table_fits,
+        );
+    }
+
+    /// Holds a signed figure under [`slack_px`]'s floor to the one worked
+    /// for it, within [`SMALL_PX`] ([`small`]). A worked figure of
+    /// [`SMALL_PX`] or less misses: against it a zero would fit.
+    pub fn hold_small(&mut self, row: &str, got_px: f64, worked_px: f64) {
+        let fits = worked_px.abs() > SMALL_PX && small(got_px, worked_px).passes() == Some(true);
+        let what = self.what;
+        self.report(
+            format!(
+                "{row}: {got_px:+.3} px {what}, {worked_px:+.3} px worked, held to {SMALL_PX} px"
+            ),
+            fits,
         );
     }
 

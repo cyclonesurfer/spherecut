@@ -44,15 +44,23 @@ pub struct Method {
     /// such a bin is passed off as measured: with a zero shift or, where
     /// it took its steps, with wherever they stopped.
     pub validity: bool,
+    /// Whether a bin whose texture doesn't stand clear of its mismatch
+    /// ([`NOISE_FLOOR`]: a flat patch or a ramp under noise) carries no
+    /// information, or none the way it doesn't, and places no neighbour.
+    /// Off, such a bin weighs in a fit by its whole normal matrix and
+    /// hands its shift on, as any other.
+    pub noise_floor: bool,
 }
 
 impl Method {
-    /// 8.2's: three steps on normalised patches, and a bin that measures
-    /// nothing invalid.
+    /// 8.2's: three steps on normalised patches, a bin that measures
+    /// nothing invalid, and one that measures only its noise without
+    /// information.
     pub const PLAN: Method = Method {
         lk_steps: 3,
         normalise: true,
         validity: true,
+        noise_floor: true,
     };
 }
 
@@ -102,36 +110,73 @@ pub fn patch(spec: &StripSpec, bin: usize) -> Patch {
 /// The strips are `spec`'s, both of its size's shape; of strips that
 /// differ in size, or too small to search, every bin is invalid. A bin's
 /// `phi_deg` is the middle of its patch's columns ([`patch`]), which a
-/// strip's whole pixels leave up to half a pixel from the bin's own.
+/// strip's whole pixels leave up to half a pixel from the bin's own. A
+/// bin that has no column of the strip (an empty strip, or one of fewer
+/// columns than bins) has the middle of its own span of φ, never NaN.
 ///
 /// The search runs on luma, over whole pixels across and along. Where a
 /// bin's texture repeats (a checker's cells) or runs along one line,
 /// several shifts match alike. The bins with one match only, and no
-/// sample left out, start their steps from it and hand it to their
-/// neighbours, and so on round the seam: a bin takes its match, of those
-/// within 0.05 of its best, nearest the shift it is handed. With none
-/// within 0.5° of that, a bin with one match keeps it and hands it on,
-/// if its search had an NCC at every shift to hold the match against (a
-/// step in the field, as a wall beside things further off leaves, which
-/// a sample left out mustn't smooth over); any other bin starts its
-/// steps from the handed shift itself, and measures only if they end at
-/// a match of its own. When no bin has one match only and no sample left
-/// out, each takes its match nearest zero: a texture that repeats
-/// everywhere comes back at the match nearest zero.
+/// sample left out, start their steps from it and, where they measure
+/// with information both ways (below), hand it to their neighbours,
+/// and so on round the seam: a bin takes its match, of those within
+/// 0.05 of its best, nearest the shift it is handed. With none within
+/// 0.5° of that, a bin with one match keeps it, if its search had an NCC
+/// at every shift to hold the match against (a step in the field, as a
+/// wall beside things further off leaves, which a sample left out
+/// mustn't smooth over); any other bin starts its steps from the handed
+/// shift itself, and measures only if they end at a match of its own. A
+/// bin hands its own match on only where it measured with information
+/// both ways; any other hands on the shift it was handed. When no bin
+/// with one match and no sample left out measures so, each takes its
+/// match nearest zero: a texture that repeats everywhere comes back at
+/// the match nearest zero.
 ///
-/// An invalid bin's shift, NCC and log gains are NaN and its information
-/// zero. It is invalid when fewer than half its patch's samples are
-/// usable on both lenses, when either lens's patch has a contrast (its
-/// standard deviation over its mean) under 0.2 %, or when the normalised
-/// patch's gradients carry no shift: a flat patch, or a ramp, which a
-/// bias would explain as well. It is invalid too when its steps haven't
-/// settled, the last of them moving the shift, as the patch's
-/// best-informed direction counts it, by more than a tenth of a strip
-/// pixel; and when steps from a handed shift end with an NCC more than
-/// 0.05 under its best match's, at no match of the bin's own. Each log
-/// gain is the median over the patch's samples of ln(lens 1 / lens 0) at
-/// the measured shift, both read off the smoothed strips, a sample below
-/// 0.01 on either lens left out, and NaN with fewer than 16 samples.
+/// **Noise.** Under noise a flat patch, or a ramp, has a texture of its
+/// own, the noise's, and a best match in it: such a bin settles and
+/// comes back valid, with a shift of several pixels that means nothing.
+/// A bin measures **with information** only where the texture of its
+/// normalised patch, the greater eigenvalue of its normal matrix per
+/// sample, is at least [`NOISE_FLOOR`] times its mismatch 1 − NCC.
+/// Under that the bin stays valid, with its shift, its NCC, its
+/// contrasts and its log gains, but its information is zero, no
+/// neighbour takes a shift from it, and [`signature`] fits nothing to
+/// it ([`BinShift::informed`]). It stays valid so that a seam whose bins
+/// match nothing shows in the median NCC (8.2's gross failure), which
+/// only a bin that claims a match can lower. The floor is held each way:
+/// where only the lesser eigenvalue is under it (a horizon across a
+/// noisy sky, whose match along the horizon is the noise's), the bin
+/// keeps its information across that line and none along it, and places
+/// no neighbour.
+///
+/// The floor doesn't see a bias. Where a patch's only texture lies at
+/// its edge, beside a flat stretch under noise, the NCC is best a little
+/// towards the texture, since more of it in lens 1's patch lifts the
+/// patch clear of its noise: bins that hold three columns of a checker
+/// beside a flat grey under 1.5 % noise came back 0.4 to 1.1 px that
+/// way, with information and an NCC of 0.82 to 0.96 (`tests/seam.rs`).
+///
+/// **The floors.** The 0.95 and the 0.01 are 8.2's. Every other one (the
+/// contrast of 0.2 %, the tie of 0.05, the 0.5°, the settled tenth of a
+/// pixel, a patch's half, the noise floor) was set on synthetic strips,
+/// without noise or with seeded white noise, and none has met real
+/// footage: a fit that reads these bins weights each by its information
+/// and gates it on its own NCC ([`BinShift`]).
+///
+/// An invalid bin's shift, NCC, contrasts and log gains are NaN and its
+/// information zero. It is invalid when fewer than half its patch's
+/// samples are usable on both lenses, when either lens's patch has a
+/// contrast (its standard deviation over its mean) under 0.2 %, or when
+/// the normalised patch's gradients carry no shift: a flat patch, or a
+/// ramp, which a bias would explain as well. It is invalid too when its
+/// steps haven't settled, the last of them moving the shift, as the
+/// patch's best-informed direction counts it, by more than a tenth of a
+/// strip pixel; and when steps from a handed shift end with an NCC more
+/// than 0.05 under its best match's, at no match of the bin's own. Each
+/// log gain is the median over the patch's samples of ln(lens 1 / lens 0)
+/// at the measured shift, both read off the smoothed strips, a sample
+/// below 0.01 on either lens left out, and NaN with fewer than 16
+/// samples.
 ///
 /// A shift past the search isn't detected. Such a bin comes back valid
 /// at whatever matches best inside the search: on a texture that repeats
@@ -160,9 +205,14 @@ pub fn bin_shifts_by(strips: &Strips, spec: &StripSpec, method: &Method) -> Vec<
     measured
         .iter()
         .zip(&patches)
-        .map(|(m, patch)| {
-            let centre = f64::from(patch.columns.start + patch.columns.end) / 2.0;
-            let phi_deg = centre / sx;
+        .enumerate()
+        .map(|(k, (m, patch))| {
+            let phi_deg = if patch.columns.is_empty() {
+                // No column of the strip is the bin's: its own middle.
+                (k as f64 + 0.5) * 360.0 / layout.bins as f64
+            } else {
+                f64::from(patch.columns.start + patch.columns.end) / 2.0 / sx
+            };
             match m {
                 // The strip's y runs down, against ε.
                 Some(m) => BinShift {
@@ -174,6 +224,7 @@ pub fn bin_shifts_by(strips: &Strips, spec: &StripSpec, method: &Method) -> Vec<
                         [-sx * sy * m.normal[1], sx * sx * m.normal[0]],
                     ],
                     ncc: m.ncc,
+                    contrast: m.contrast,
                     log_gain: m.log_gain,
                     valid: true,
                 },
@@ -183,6 +234,7 @@ pub fn bin_shifts_by(strips: &Strips, spec: &StripSpec, method: &Method) -> Vec<
                     along_deg: f64::NAN,
                     info: [[0.0; 2]; 2],
                     ncc: f64::NAN,
+                    contrast: [f64::NAN; 2],
                     log_gain: [f64::NAN; 3],
                     valid: false,
                 },
@@ -195,6 +247,7 @@ pub fn bin_shifts_by(strips: &Strips, spec: &StripSpec, method: &Method) -> Vec<
                     along_deg: 0.0,
                     info: [[0.0; 2]; 2],
                     ncc: 0.0,
+                    contrast: [f64::NAN; 2],
                     log_gain: [f64::NAN; 3],
                     valid: true,
                 },
@@ -213,6 +266,46 @@ const MIN_CONTRAST: f64 = 0.002;
 /// The least mean square gradient of a normalised patch, per sample and
 /// in strip pixels, that counts as texture.
 const MIN_TEXTURE: f64 = 1e-4;
+/// The least texture of a bin that measures with information, as a
+/// multiple of its mismatch 1 − NCC: the texture is the greater
+/// eigenvalue of the normalised patch's normal matrix per sample, in
+/// strip pixels⁻². The lesser eigenvalue is held to the same, for the
+/// information the other way.
+///
+/// The smoothing leaves white noise a texture of its own: a mean square
+/// slope of 3/8 of its variance a pixel² (the blur and the spline spread
+/// a sample over a variance of 4/3 px², and a slope's share is one over
+/// twice that), whatever the noise's size. So a patch of noise alone,
+/// whose best match in the search correlates by ρ, has 0.375 / (1 − ρ)
+/// times its mismatch, and a true texture under noise has 0.375 more
+/// than its own slopes are of the noise's.
+///
+/// The figures below are from synthetic strips with seeded white noise
+/// on luma, independent on the two lenses and in proportion to each
+/// sample's value; none is from footage. With the floor off, over 40
+/// seeds of Tier 1's 72 bins, a flat grey under 1 % to 4 % noise comes
+/// back valid in 1104 to 1146 bins of 2880, at 0.38 to 0.92 times its
+/// mismatch and a median of 10 px from its shift; a ramp across the band
+/// (0.35 to 0.65) in 2873 to 2876, at 0.23 to 0.95 times, a median of
+/// 3 px off, with an NCC over 0.98. At Tier 2's 8 px/°, over 8 seeds,
+/// the patches are larger and ρ is less: 0.31 to 0.51 times. So 3 is
+/// three times the most that noise alone reached, in 18,000 such bins.
+///
+/// What it costs is the faintest texture. Waves a few pixels long, of a
+/// fifth of the mean, have at the least 190, 48, 22 and 5.7 times their
+/// mismatch under 1 %, 2 %, 3 % and 6 % noise at Tier 1 (their shifts
+/// 0.05, 0.09, 0.14 and 0.31 px off at most), and 57, 15, 6.6 and 1.9
+/// times at Tier 2, where the same waves are 2.1 times as long in
+/// pixels: there, under 6 % noise, some bins fall under the floor with
+/// shifts within 0.27 px. The same waves at a fiftieth of the contrast
+/// under 0.2 % noise have 2.4 to 16 times at Tier 1, a median of 6.7,
+/// and shifts up to 0.5 px off: a bin at the floor measures to about
+/// that. On the attribution matrix's own strips (`tests/instrument.rs`),
+/// which have two samplings' aliasing for noise, a true model's bins
+/// have 12 times or more, a planted difference's 7 or more but for a
+/// bin in one row at 2.96 (under the floor) and one in another at 3.6,
+/// and another scene's 0.05 to 0.3.
+pub const NOISE_FLOOR: f64 = 3.0;
 /// The fewest samples a channel's log ratio is the median of.
 const MIN_GAIN_SAMPLES: usize = 16;
 /// Matches whose NCC lies within this of a bin's best are tied with it.
@@ -756,13 +849,18 @@ fn matches(template: &Template, lens1: &Searched, layout: &Layout) -> (Vec<Peak>
 }
 
 /// What one bin measured, in strip pixels: the shift (u, v) by which lens
-/// 1 shows the patch, the steps' normal matrix there (uu, uv, vv), the
-/// NCC, and the log gains.
+/// 1 shows the patch, the steps' normal matrix there (uu, uv, vv), less
+/// what of it doesn't stand clear of the bin's mismatch
+/// ([`NOISE_FLOOR`]), the NCC, each lens's contrast, and the log gains.
 #[derive(Debug, Clone, Copy)]
 struct Measured {
     shift: [f64; 2],
     normal: [f64; 3],
+    /// Whether the whole of the normal matrix stands clear, both ways:
+    /// the bin's match is fit to place its neighbours by.
+    sure: bool,
     ncc: f64,
+    contrast: [f64; 2],
     log_gain: [f64; 3],
 }
 
@@ -794,11 +892,9 @@ fn measure(
         })
         .collect();
     let near = NEAR_DEG * layout.sx.max(layout.sy);
-    templates
-        .iter()
-        .zip(settle_ties(&found, near))
-        .map(|(template, start)| refine(template, surfaces, layout, &start?, method))
-        .collect()
+    settle_ties(&found, near, method.noise_floor, |bin, start| {
+        refine(&templates[bin], surfaces, layout, start, method)
+    })
 }
 
 /// What one bin's coarse search found.
@@ -854,19 +950,32 @@ impl Start {
     }
 }
 
-/// Where each bin's steps start, out of the matches tied for it. A whole
-/// bin with one match starts there, and hands its match to its
-/// neighbours either way round the ring. A bin that is handed a shift
-/// takes its match nearest to it and hands that on. With no match within
-/// `near` strip pixels, a bin with one match that its search tried every
-/// shift against keeps it and hands it on: the field steps there, and
-/// the bin's own match says so, whatever samples it is short of. Any
-/// other bin starts from the shift it was handed and hands the same on;
-/// its steps then have to end at a match of its own, or it measures
-/// nothing ([`refine`]). A bin with no match at all has no start, and
-/// hands on what it was handed. With no bin to start from, each takes
-/// its match nearest zero.
-fn settle_ties(found: &[Found], near: f64) -> Vec<Option<Start>> {
+/// Each bin's measurement: where its steps start, out of the matches
+/// tied for it, and what `refine` makes of that start. A whole bin with
+/// one match starts there, and hands its match to its neighbours either
+/// way round the ring. A bin that is handed a shift takes its match
+/// nearest to it and hands that on. With no match within `near` strip
+/// pixels, a bin with one match that its search tried every shift
+/// against keeps it and hands it on: the field steps there, and the
+/// bin's own match says so, whatever samples it is short of. Any other
+/// bin starts from the shift it was handed and hands the same on; its
+/// steps then have to end at a match of its own, or it measures nothing
+/// ([`refine`]). A bin with no match at all has no start, and hands on
+/// what it was handed. With no bin to start from, each takes its match
+/// nearest zero.
+///
+/// Under `noise_floor` a bin's own match counts for its neighbours only
+/// where the bin measured from it with information both ways
+/// ([`NOISE_FLOOR`]): no other bin starts the ring, and one that is
+/// handed a shift hands the same on. So a bin of noise alone, whose one match lies anywhere in
+/// the search, can't carry its neighbours to it, nor a stretch of them
+/// let a shift drift from bin to bin.
+fn settle_ties(
+    found: &[Found],
+    near: f64,
+    noise_floor: bool,
+    refine: impl Fn(usize, &Start) -> Option<Measured>,
+) -> Vec<Option<Measured>> {
     let bins = found.len();
     let nearest = |peaks: &[Peak], to: [f64; 2]| {
         peaks
@@ -874,22 +983,27 @@ fn settle_ties(found: &[Found], near: f64) -> Vec<Option<Start>> {
             .copied()
             .min_by(|a, b| apart(a.fine, to).total_cmp(&apart(b.fine, to)))
     };
-    let mut starts = vec![None; bins];
+    let places = |m: &Option<Measured>| !noise_floor || m.is_some_and(|m| m.sure);
+    let mut measured = vec![None; bins];
     let mut handed: Vec<Option<[f64; 2]>> = vec![None; bins];
     let mut queue = VecDeque::new();
     for (k, bin) in found.iter().enumerate() {
         if bin.whole
             && let Some(best) = bin.sole()
         {
-            starts[k] = Some(Start::at(best));
-            handed[k] = Some(best.fine);
-            queue.push_back(k);
+            let own = refine(k, &Start::at(best));
+            if places(&own) {
+                measured[k] = own;
+                handed[k] = Some(best.fine);
+                queue.push_back(k);
+            }
         }
     }
     if queue.is_empty() {
         return found
             .iter()
-            .map(|bin| nearest(&bin.peaks, [0.0; 2]).map(Start::at))
+            .enumerate()
+            .map(|(k, bin)| refine(k, &Start::at(nearest(&bin.peaks, [0.0; 2])?)))
             .collect();
     }
     while let Some(k) = queue.pop_front() {
@@ -899,26 +1013,27 @@ fn settle_ties(found: &[Found], near: f64) -> Vec<Option<Start>> {
                 continue;
             }
             let bin = &found[next];
-            (starts[next], handed[next]) = match (bin.peaks.first(), nearest(&bin.peaks, from)) {
-                (Some(_), Some(p)) if apart(p.fine, from) <= near => {
-                    (Some(Start::at(p)), Some(p.fine))
-                }
+            // Where the bin starts, and the match it would hand on.
+            let (start, own) = match (bin.peaks.first(), nearest(&bin.peaks, from)) {
+                (Some(_), Some(p)) if apart(p.fine, from) <= near => (Some(Start::at(p)), p.fine),
                 (Some(best), Some(_)) => match bin.sole().filter(|_| bin.everywhere) {
-                    Some(own) => (Some(Start::at(own)), Some(own.fine)),
+                    Some(own) => (Some(Start::at(own)), own.fine),
                     None => {
                         let start = Start {
                             shift: from,
                             floor: best.ncc - TIE,
                         };
-                        (Some(start), Some(from))
+                        (Some(start), from)
                     }
                 },
-                _ => (None, Some(from)),
+                _ => (None, from),
             };
+            measured[next] = start.and_then(|start| refine(next, &start));
+            handed[next] = Some(if places(&measured[next]) { own } else { from });
             queue.push_back(next);
         }
     }
-    starts
+    measured
 }
 
 /// A patch against lens 1 at one shift: what a Lucas–Kanade step is made
@@ -934,6 +1049,9 @@ struct Reading {
     plain_normal: [f64; 3],
     plain_rhs: [f64; 2],
     ncc: f64,
+    /// Each side's standard deviation over its mean, over the pairs: the
+    /// patch's, then lens 1's.
+    contrast: [f64; 2],
 }
 
 /// `template` against lens 1's surface at `shift`, or `None` with fewer
@@ -996,6 +1114,7 @@ fn read(
         plain_normal: [0.0; 3],
         plain_rhs: [0.0; 2],
         ncc: 0.0,
+        contrast: [sigma_t / mean_t.abs(), sigma_i / mean_i.abs()],
     };
     for p in pairs.iter() {
         let t_hat = (p[0] - mean_t) / sigma_t;
@@ -1024,7 +1143,10 @@ fn read(
 /// texture; one whose last step was longer than [`SETTLED`], which three
 /// steps from a match never leave and steps from a shift far from the
 /// bin's own do; and one whose steps end under `start`'s floor, settled
-/// on something that is no match of the bin's.
+/// on something that is no match of the bin's. Of a bin that measures,
+/// the normal matrix is kept along each direction where its eigenvalue
+/// per sample is [`NOISE_FLOOR`] times the mismatch or more
+/// ([`above_floor`]), and whole where `method` has that floor off.
 fn refine(
     template: &Template,
     surfaces: &[Surface; 2],
@@ -1062,12 +1184,52 @@ fn refine(
     if method.validity && !(last <= SETTLED && reading.ncc >= start.floor) {
         return None;
     }
+    let floor = NOISE_FLOOR * (1.0 - reading.ncc) * reading.pairs as f64;
+    let (normal, directions) = if method.noise_floor {
+        above_floor(reading.normal, floor)
+    } else {
+        (reading.normal, 2)
+    };
     Some(Measured {
         shift,
-        normal: reading.normal,
+        normal,
+        sure: directions == 2,
         ncc: reading.ncc,
+        contrast: reading.contrast,
         log_gain: log_gains(template, surfaces, shift),
     })
+}
+
+/// A normal matrix (uu, uv, vv) less what of it lies under `floor`, and
+/// how many of its two directions are left: itself where both its
+/// eigenvalues reach the floor; its part along its best-informed
+/// direction where only the greater does, as a line's is; nothing where
+/// neither does.
+fn above_floor(normal: [f64; 3], floor: f64) -> ([f64; 3], usize) {
+    let [uu, uv, vv] = normal;
+    let greater = greater_eigenvalue(normal);
+    // A NaN is under any floor.
+    if greater.is_nan() || greater < floor {
+        return ([0.0; 3], 0);
+    }
+    // A match with no mismatch has no floor: its lesser eigenvalue is
+    // not to be held to a zero that rounding would decide.
+    if floor <= 0.0 || uu + vv - greater >= floor {
+        return (normal, 2);
+    }
+    // The greater eigenvector, by whichever row of N − λ is the longer.
+    let e = if (greater - uu).abs() >= (greater - vv).abs() {
+        [uv, greater - uu]
+    } else {
+        [greater - vv, uv]
+    };
+    let length = e[0] * e[0] + e[1] * e[1];
+    if length > 0.0 {
+        let along = [e[0] * e[0], e[0] * e[1], e[1] * e[1]];
+        (along.map(|a| greater * a / length), 1)
+    } else {
+        (normal, 2)
+    }
 }
 
 /// The greater eigenvalue of a normal matrix (uu, uv, vv): what the
@@ -1154,21 +1316,53 @@ fn median(values: &mut [f64]) -> f64 {
 pub const TERMS: usize = 8;
 
 /// The signature of one frame's bins (8.2): the fit of across(φ) and
-/// along(φ) to the valid bins' shifts, each weighted by its information,
-/// with the rms of what is left, the number of valid bins, their median
-/// NCC and the photometric log gains.
+/// along(φ) to the shifts of the bins with information
+/// ([`BinShift::informed`]), each weighted by its information, with each
+/// term's standard error, the rms of what is left, the numbers of valid
+/// bins and of those with information, the valid bins' median NCC and
+/// the photometric log gains.
 ///
 /// The fit is the least squares that makes Σ rᵀ W r least, over the
-/// valid bins, for a bin's leftover shift r = (across, along) less the
-/// fit at its φ and its information W. So a bin that a lone line informs
-/// across the line only pulls the fit across that line and not along it.
-/// A term the bins don't determine (no valid bin, no information along
-/// the seam anywhere, too few bins for the harmonics) is NaN, never a
-/// zero, as is a term that can't be told from such a one.
+/// bins with information, for a bin's leftover shift r = (across, along)
+/// less the fit at its φ and its information W. So a bin that a lone
+/// line informs across the line only pulls the fit across that line and
+/// not along it, and a valid bin without information (a flat patch
+/// under noise, [`NOISE_FLOOR`]) pulls it nowhere.
+///
+/// **What NaN marks, and what it doesn't.** A term is NaN, never a zero,
+/// where the normal equations are short of rank for it: its pivot is at
+/// most 10⁻¹⁰ of the greatest diagonal entry (no bin with information,
+/// no information along the seam anywhere, fewer bins than the terms
+/// across take), or it can't be told from such a term. That is
+/// rank alone, not conditioning. Bins on one side of the ring leave
+/// every term finite and some of them worthless: by the equations
+/// themselves, for bins informed alike both ways, a term's standard
+/// error is 0.12 to 0.17 of one bin's noise over the whole ring of 72;
+/// at most 1.6 times it over two opposite sides of 12 bins each (8.6's
+/// usable take); 1.6 (a0) and 2.5 (b1) times over half the ring; and
+/// over one 90° arc of 18 bins 47 times for a0, 6 to 66 for a1 and b1,
+/// and 2.4 for c0. Over 30° (6 bins) a0 is at 11,000 times, still
+/// finite. `valid_bins` and `informed_bins` don't tell these apart:
+/// `term_se_deg` does.
+///
+/// `term_se_deg` is each term's standard error: √(the term's diagonal
+/// entry of the normal matrix's inverse × Σ rᵀ W r / ν), for ν the
+/// degrees of freedom, the directions the bins inform (two a bin, one
+/// for a line's) less the terms fitted. It doesn't depend on the
+/// weights' scale. It is NaN where the term is, and where ν is 0, with
+/// nothing left over to tell the noise from. It takes the bins'
+/// information for their inverse covariances up to one common factor
+/// (8.4), which bins of unlike contrast aren't ([`BinShift::info`]), and
+/// what the fit leaves for noise: depth that varies with azimuth widens
+/// it, and a bias common to the bins (a texture that aliases) doesn't
+/// show in it. The parameters' own covariance is the fit's (8.4's stage
+/// F), over its own Jacobian.
 ///
 /// `rest_rms_deg` is √(Σ rᵀ W r / ½ Σ tr W): for bins informed alike
 /// both ways, the rms of the leftover shifts' lengths. `median_ncc` and
-/// each `log_gain` are medians over the valid bins that have one.
+/// each `log_gain` are medians over the valid bins that have one, with
+/// information or without: a bin without it still says how well its
+/// patches match, and a flat patch's log gain is as good as any.
 ///
 /// 8.2 also asks, on a near scene, for a q per 15° sector, which tells
 /// depth that varies with azimuth from the terms above. That is M3.6's,
@@ -1179,9 +1373,9 @@ pub fn signature(bins: &[BinShift]) -> Signature {
 }
 
 /// [`signature`] with only the terms `free` names fitted, in the order
-/// a0, a1, b1, a2, b2, c0, c1, d1: a term that isn't free is held at 0.
-/// What a fit short of a term makes of a field that has it is the control
-/// for fitting that term.
+/// a0, a1, b1, a2, b2, c0, c1, d1: a term that isn't free is held at 0,
+/// with a standard error of 0. What a fit short of a term makes of a
+/// field that has it is the control for fitting that term.
 pub fn signature_of(bins: &[BinShift], free: [bool; TERMS]) -> Signature {
     let finite = |b: &BinShift| {
         let numbers = [b.phi_deg, b.across_deg, b.along_deg];
@@ -1192,15 +1386,20 @@ pub fn signature_of(bins: &[BinShift], free: [bool; TERMS]) -> Signature {
     };
     let used: Vec<Used> = bins
         .iter()
-        .filter(|b| b.valid && finite(b))
+        .filter(|b| b.informed() && finite(b))
         .map(|b| Used {
             shift: [b.across_deg, b.along_deg],
             rows: basis(b.phi_deg),
             w: weights(b),
         })
         .collect();
-    // The normal equations, the right-hand side as a ninth column.
-    let mut normal = [[0.0; TERMS + 1]; TERMS];
+    // The normal equations, the right-hand side as a ninth column, and
+    // an identity after it, which the elimination turns into the normal
+    // matrix's inverse.
+    let mut normal = [[0.0; WIDTH]; TERMS];
+    for (i, equation) in normal.iter_mut().enumerate() {
+        equation[TERMS + 1 + i] = 1.0;
+    }
     for Used { shift, rows, w } in &used {
         for (i, equation) in normal.iter_mut().enumerate() {
             for a in 0..2 {
@@ -1214,8 +1413,8 @@ pub fn signature_of(bins: &[BinShift], free: [bool; TERMS]) -> Signature {
             }
         }
     }
-    let terms = solve(normal, free);
-    let fitted = terms.map(|t| t.unwrap_or(0.0));
+    let solved = solve(normal, free);
+    let fitted = solved.terms.map(|t| t.unwrap_or(0.0));
     let (mut left, mut trace) = (0.0, 0.0);
     for Used { shift, rows, w } in &used {
         let fit = |row: &[f64; TERMS]| row.iter().zip(fitted).map(|(r, t)| r * t).sum::<f64>();
@@ -1223,12 +1422,25 @@ pub fn signature_of(bins: &[BinShift], free: [bool; TERMS]) -> Signature {
         left += r[0] * (w[0][0] * r[0] + w[0][1] * r[1]) + r[1] * (w[1][0] * r[0] + w[1][1] * r[1]);
         trace += w[0][0] + w[1][1];
     }
+    // What a unit of weight came to, in degrees²: the leftover over its
+    // degrees of freedom.
+    let informed: usize = used.iter().map(|u| rank(&u.w)).sum();
+    let unit = if informed > solved.reached {
+        left.max(0.0) / (informed - solved.reached) as f64
+    } else {
+        f64::NAN
+    };
+    let term_se_deg = std::array::from_fn(|i| match solved.terms[i] {
+        Some(_) if !free[i] => 0.0,
+        Some(_) => (solved.inverse[i].max(0.0) * unit).sqrt(),
+        None => f64::NAN,
+    });
     let valid = || bins.iter().filter(|b| b.valid);
     let median_of = |value: &dyn Fn(&BinShift) -> f64| {
         let mut values: Vec<f64> = valid().map(value).filter(|v| v.is_finite()).collect();
         median(&mut values)
     };
-    let [a0, a1, b1, a2, b2, c0, c1, d1] = terms.map(|t| t.unwrap_or(f64::NAN));
+    let [a0, a1, b1, a2, b2, c0, c1, d1] = solved.terms.map(|t| t.unwrap_or(f64::NAN));
     Signature {
         a0,
         a1,
@@ -1238,12 +1450,14 @@ pub fn signature_of(bins: &[BinShift], free: [bool; TERMS]) -> Signature {
         c0,
         c1,
         d1,
+        term_se_deg,
         rest_rms_deg: if trace > 0.0 {
             (left.max(0.0) / (0.5 * trace)).sqrt()
         } else {
             f64::NAN
         },
         valid_bins: valid().count(),
+        informed_bins: used.len(),
         median_ncc: median_of(&|b| b.ncc),
         log_gain: [0, 1, 2].map(|k| median_of(&|b| b.log_gain[k])),
     }
@@ -1274,6 +1488,15 @@ fn weights(bin: &BinShift) -> [[f64; 2]; 2] {
     [[bin.info[0][0], cross], [cross, bin.info[1][1]]]
 }
 
+/// How many directions a weight informs: two, or one for a line's, whose
+/// lesser eigenvalue is no information beside its greater
+/// ([`NO_INFORMATION`]).
+fn rank(w: &[[f64; 2]; 2]) -> usize {
+    let (sum, spread) = (w[0][0] + w[1][1], (w[0][0] - w[1][1]).hypot(2.0 * w[0][1]));
+    let (greater, lesser) = (0.5 * (sum + spread), 0.5 * (sum - spread));
+    usize::from(greater > 0.0) + usize::from(lesser > NO_INFORMATION * greater)
+}
+
 /// A pivot at most this share of the greatest diagonal entry is no
 /// information about its term.
 const NO_INFORMATION: f64 = 1e-10;
@@ -1281,13 +1504,30 @@ const NO_INFORMATION: f64 = 1e-10;
 /// information has none either.
 const LEANS: f64 = 1e-6;
 
-/// The terms of the normal equations `m` (the right-hand side its last
-/// column) by Gauss–Jordan, each pivot the greatest diagonal entry left.
-/// A term that isn't free is 0. A free term is `None` when the equations
-/// say nothing about it, or tie it to one they say nothing about.
-fn solve(mut m: [[f64; TERMS + 1]; TERMS], free: [bool; TERMS]) -> [Option<f64>; TERMS] {
+/// The columns of the equations [`solve`] takes: the normal matrix, the
+/// right-hand side, and an identity.
+const WIDTH: usize = 2 * TERMS + 1;
+
+/// What [`solve`] makes of the normal equations.
+struct Solved {
+    /// Each term, `None` where the equations don't determine it.
+    terms: [Option<f64>; TERMS],
+    /// The diagonal of the normal matrix's inverse, over the terms the
+    /// elimination reached: each term's variance under unit weights.
+    inverse: [f64; TERMS],
+    /// How many terms the elimination reached.
+    reached: usize,
+}
+
+/// The terms of the normal equations `m` (the right-hand side its ninth
+/// column, an identity after it) by Gauss–Jordan, each pivot the greatest
+/// diagonal entry left; the identity ends as the inverse of the normal
+/// matrix over the terms reached. A term that isn't free is 0. A free
+/// term is `None` when the equations say nothing about it, or tie it to
+/// one they say nothing about.
+fn solve(mut m: [[f64; WIDTH]; TERMS], free: [bool; TERMS]) -> Solved {
     for held in (0..TERMS).filter(|&i| !free[i]) {
-        m[held] = [0.0; TERMS + 1];
+        m[held] = [0.0; WIDTH];
         for row in &mut m {
             row[held] = 0.0;
         }
@@ -1314,11 +1554,15 @@ fn solve(mut m: [[f64; TERMS + 1]; TERMS], free: [bool; TERMS]) -> [Option<f64>;
         }
         pivoted[p] = true;
     }
-    std::array::from_fn(|i| {
-        if !free[i] {
-            return Some(0.0);
-        }
-        let leans = (0..TERMS).any(|j| free[j] && !pivoted[j] && m[i][j].abs() > LEANS);
-        (pivoted[i] && !leans).then_some(m[i][TERMS])
-    })
+    Solved {
+        terms: std::array::from_fn(|i| {
+            if !free[i] {
+                return Some(0.0);
+            }
+            let leans = (0..TERMS).any(|j| free[j] && !pivoted[j] && m[i][j].abs() > LEANS);
+            (pivoted[i] && !leans).then_some(m[i][TERMS])
+        }),
+        inverse: std::array::from_fn(|i| m[i][TERMS + 1 + i]),
+        reached: pivoted.iter().filter(|&&p| p).count(),
+    }
 }
