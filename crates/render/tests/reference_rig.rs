@@ -8,7 +8,9 @@
 //! X5 codes it, and sphere's rig of the same numbers through the tests'
 //! boundary (`common::rig`), stitched at q = 0. `SeamLines` is nowhere
 //! black, so a lens drawn alone is black exactly where its mask leaves it
-//! out.
+//! out. The tests that want another binding, or none of the scene's size,
+//! take the same camera a quarter the size with its binding reversed
+//! ([`reversed`]).
 //!
 //! The tests hold the pictures to a sampler of their own ([`Planes`]),
 //! written from 10.3's text and the X5's coding apart from the
@@ -41,7 +43,7 @@ use spherecut_render::reference::{
     ImageF64, RigDebug, RigOptions, halve_codes, lens_footprint, render_rig, uv_footprint,
 };
 use spherecut_render::seam::{StripSpec, band_weights, lens_coverage, strips};
-use spherecut_render::{RenderError, ViewParams};
+use spherecut_render::{Framing, RenderError, ViewParams};
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_sphere::rig::{LensTune, Rig, Tune};
 use spherecut_synth::lens::{
@@ -134,10 +136,18 @@ fn scene() -> &'static Scene {
     SCENE.get_or_init(|| {
         let began = Instant::now();
         let (cal, planted) = (x5_like(), x5_like_planted());
-        let truth = compose(&cal, &planted, 0, [SIDE; 2]);
-        let frames = [0, 1].map(|track| {
-            let picture = RenderCache::shared().render(Pattern::SeamLines, &truth, track, 0, SS);
-            lens_frame(&lens_planes(&picture, Coding::X5), SIDE)
+        let truth = &compose(&cal, &planted, 0, [SIDE; 2]);
+        // Side by side, so that one track is coded while the other is
+        // drawn.
+        let frames = std::thread::scope(|s| {
+            let tracks = [0, 1].map(|track| {
+                s.spawn(move || {
+                    let picture =
+                        RenderCache::shared().render(Pattern::SeamLines, truth, track, 0, SS);
+                    lens_frame(&lens_planes(&picture, Coding::X5), SIDE)
+                })
+            });
+            tracks.map(|track| track.join().expect("a track's frame"))
         });
         let rig = |theta_max_deg| {
             sphere_rig(&cal, &planted, &tune(theta_max_deg), 0, [SIDE; 2])
@@ -188,6 +198,50 @@ fn frame_term_defeated(rig: &Rig) -> Rig {
         lens.side *= 2;
     }
     loose
+}
+
+/// A lens's side in the quarter-size camera.
+const QUARTER: u32 = SIDE / 4;
+
+/// The camera with its binding reversed, a quarter the size, for the
+/// tests that want its binding or need none of the scene's size: block
+/// 0's lens is on track 1 and block 1's on track 0, which is the front
+/// one.
+struct Reversed {
+    /// Sphere's rig of it at the default tune, q = 0.
+    rig: Rig,
+    frames: [Frame; 2],
+    planes: [Planes; 2],
+}
+
+fn reversed() -> &'static Reversed {
+    static REVERSED: OnceLock<Reversed> = OnceLock::new();
+    REVERSED.get_or_init(|| {
+        let cal = x5_like();
+        let planted = Planted {
+            binding: TruthBinding::Reversed,
+            ..x5_like_planted()
+        };
+        let truth = compose(&cal, &planted, 0, [QUARTER; 2]);
+        let frames = [0, 1].map(|track| {
+            let picture = render_lens(Pattern::SeamLines, &truth, track, 0, SS);
+            lens_frame(&lens_planes(&picture, Coding::X5), QUARTER)
+        });
+        let rig = sphere_rig(&cal, &planted, &tune(100.0), 0, [QUARTER; 2]);
+        let rig = rig.expect("the reversed rig builds");
+        assert_eq!([rig.lenses[0].track, rig.lenses[1].track], [1, 0]);
+        Reversed {
+            rig,
+            planes: [Planes::of(&frames[0]), Planes::of(&frames[1])],
+            frames,
+        }
+    })
+}
+
+impl Reversed {
+    fn lenses(&self) -> [&dyn VideoPlanes; 2] {
+        [&self.frames[0], &self.frames[1]]
+    }
 }
 
 // The views.
@@ -435,23 +489,34 @@ fn steps_off(got: f64, want: f64) -> f64 {
 /// taps.
 const NEAREST: f64 = 0.5 + 1e-6;
 
+/// The most any channel of `picture`'s pixel `n` is off `want`, in the
+/// target's steps.
+fn pixel_steps(picture: &ImageF64, n: usize, want: [f64; 3]) -> f64 {
+    pixel(picture, n)
+        .into_iter()
+        .zip(want)
+        .map(|(got, want)| steps_off(got, want))
+        .fold(0.0, f64::max)
+}
+
 /// The most any channel of `picture` is off what `want` gives for its
 /// pixel (the pixel's index, row after row), in the target's steps.
 fn worst_steps(picture: &ImageF64, want: impl Fn(usize) -> [f64; 3]) -> f64 {
-    let mut worst = 0.0f64;
-    for n in 0..picture.data.len() / 3 {
-        for (got, want) in pixel(picture, n).into_iter().zip(want(n)) {
-            worst = worst.max(steps_off(got, want));
-        }
-    }
-    worst
+    (0..picture.data.len() / 3)
+        .map(|n| pixel_steps(picture, n, want(n)))
+        .fold(0.0, f64::max)
 }
 
 /// The stitch at one pixel, in linear light before the target rounds it:
 /// each lens the rig weighs, as `lit` gives it, blended by the rig's
 /// weights at the lenses' own LODs.
 fn blended(rig: &Rig, p: &Probe, lit: impl Fn(usize) -> [f64; 3]) -> [f64; 3] {
-    let w = rig.weights(p.d, p.lod);
+    mixed(rig.weights(p.d, p.lod), lit)
+}
+
+/// The blend by the weights `w` of each lens they weigh, as `lit` gives
+/// it.
+fn mixed(w: [f64; 2], lit: impl Fn(usize) -> [f64; 3]) -> [f64; 3] {
     let mut blend = [0.0; 3];
     for b in 0..2 {
         if w[b] > 0.0 {
@@ -797,8 +862,176 @@ fn rig_gains_apply_in_linear_light() {
     }
 }
 
+/// The view's dim multiplies the blend in linear light past the view's
+/// frame, before the target rounds it, and `level0` takes each lens's
+/// taps from level 0 alone while the mask and the weights stay at the
+/// footprint's LOD (10.3: both as `render` has them).
+#[test]
+fn rig_dims_past_the_frame_and_level0_takes_level_0() {
+    let _t = timed("rig_dims_past_the_frame_and_level0_takes_level_0");
+    // Neither needs the scene's size: the quarter-size camera.
+    let camera = reversed();
+    let (planes, rig) = (&camera.planes, &camera.rig);
+    let render = |(view, size): &Shot, debug: RigDebug, level0: bool| {
+        let opts = RigOptions { debug, level0 };
+        render_rig(camera.lenses(), rig, UNIT, view, *size, &opts).expect("the pair renders")
+    };
+
+    // The seam view's lens over a frame of 32² in the middle of a 64²
+    // target, and what lies past the frame at 0.4 of its light: not a
+    // power of two, which would round as the undimmed value does.
+    let dim = 0.4;
+    let (view, size) = right(64);
+    let framing = Framing {
+        rect: [16.0, 16.0, 32.0, 32.0],
+        dim,
+    };
+    let shot = (view.framed(framing), size);
+    let probes = view_probes(rig, &shot);
+    let framed = |n: usize| {
+        let (i, j) = (n as u32 % size.0, n as u32 / size.0);
+        (16..48).contains(&i) && (16..48).contains(&j)
+    };
+    let dim_at = |n: usize| if framed(n) { 1.0 } else { dim };
+    // What the test works out once for each pixel: the weights, each
+    // lens's light where its mask covers, and their blend.
+    let weights: Vec<[f64; 2]> = probes.iter().map(|p| rig.weights(p.d, p.lod)).collect();
+    let covers = |n: usize, b: usize| rig.covers(b, probes[n].d, probes[n].lod[b]);
+    let lights: Vec<[[f64; 3]; 2]> = (0..probes.len())
+        .map(|n| {
+            [0, 1].map(|b| {
+                let p = &probes[n];
+                if covers(n, b) {
+                    planes[rig.lenses[b].track].light(p.texel[b].expect("a texel"), p.lod[b])
+                } else {
+                    BLACK
+                }
+            })
+        })
+        .collect();
+    let blends: Vec<[f64; 3]> = (0..probes.len())
+        .map(|n| mixed(weights[n], |b| lights[n][b]))
+        .collect();
+
+    // The stitch, and a lens alone, which ends as the stitch does.
+    let stitched = render(&shot, RigDebug::Off, false);
+    let against = |dimmed: &dyn Fn(f64, usize) -> f64| {
+        worst_steps(&stitched, |n| blends[n].map(|v| dimmed(v, n)))
+    };
+    let in_linear = against(&|v, n| v * dim_at(n));
+    let after_rounding = against(&|v, n| round_f16(v) * dim_at(n));
+    let on_display = against(&|v, n| eotf(oetf(v) * dim_at(n)));
+    let everywhere = against(&|v, _| v * dim);
+    let nowhere = against(&|v, _| v);
+    let alone = render(&shot, RigDebug::Lens1, false);
+    let lens_1 = worst_steps(&alone, |n| lights[n][1].map(|v| v * dim_at(n)));
+    eprintln!(
+        "the dim, 0.4 past a frame of 32² in 64²: {in_linear:.4} f16 steps at most in linear \
+         light, a lens alone {lens_1:.4}; after rounding {after_rounding:.3}, on display values \
+         {on_display:.0}, inside the frame too {everywhere:.0}, left out {nowhere:.0}"
+    );
+    assert!(in_linear <= NEAREST, "{in_linear}");
+    assert!(lens_1 <= NEAREST, "{lens_1}");
+    let off = must_fail(
+        "the dim after the target rounds",
+        at_most(after_rounding, NEAREST),
+    );
+    assert!(off > 0.7, "{off}");
+    let off = must_fail("the dim on display values", at_most(on_display, NEAREST));
+    assert!(off > 100.0, "{off}");
+    must_fail("the dim inside the frame too", at_most(everywhere, NEAREST));
+    must_fail("the dim left out", at_most(nowhere, NEAREST));
+
+    // Modes 6 and 7 are written as they are measured, with no dim.
+    let written = render(&shot, RigDebug::Weights, false);
+    let difference = render(&shot, RigDebug::SeamDiff, false);
+    let (mut dimmed_weights, mut both_past) = (0usize, 0usize);
+    let mut worst = [0.0f64; 2];
+    for (n, w) in weights.iter().enumerate() {
+        assert_eq!(pixel(&written, n), [w[0], 0.0, w[1]].map(round_f16), "{n}");
+        let dimmed = [w[0], 0.0, w[1]].map(|w| round_f16(w * dim_at(n)));
+        dimmed_weights += usize::from(pixel(&written, n) != dimmed);
+        if !(covers(n, 0) && covers(n, 1)) {
+            assert_eq!(pixel(&difference, n), BLACK, "pixel {n}");
+            continue;
+        }
+        both_past += usize::from(!framed(n));
+        for (c, got) in pixel(&difference, n).into_iter().enumerate() {
+            let apart = 8.0 * (lights[n][0][c] - lights[n][1][c]).abs();
+            worst = [
+                worst[0].max(linear_steps_off(got, apart)),
+                worst[1].max(linear_steps_off(got, apart * dim_at(n))),
+            ];
+        }
+    }
+    assert!(both_past > 100, "{both_past}");
+    assert!(worst[0] <= NEAREST, "{worst:?}");
+    let off = must_fail("the weights dimmed", at_most(dimmed_weights, 0));
+    assert!(off > 1000, "{off}");
+    must_fail("the seam difference dimmed", at_most(worst[1], NEAREST));
+
+    // Level 0 alone, on a small equirect: each lens's taps are level
+    // 0's, and the mask and the weights still the footprint's, as mode 6
+    // shows them.
+    let shot = equirect(96);
+    let probes = view_probes(rig, &shot);
+    let picture = render(&shot, RigDebug::Off, true);
+    // The test's blend of each lens's taps at `tap_lod` of its own LOD,
+    // under the weights at `mask_lod` of it.
+    let against = |tap_lod: &dyn Fn(f64) -> f64, mask_lod: &dyn Fn(f64) -> f64| {
+        worst_steps(&picture, |n| {
+            let p = &probes[n];
+            mixed(rig.weights(p.d, p.lod.map(mask_lod)), |b| {
+                let texel = p.texel[b].expect("a texel");
+                planes[rig.lenses[b].track].light(texel, tap_lod(p.lod[b]))
+            })
+        })
+    };
+    let own = |lod: f64| lod;
+    // A lens with no footprint has no LOD, at level 0 either.
+    let zero = |lod: f64| if lod.is_finite() { 0.0 } else { lod };
+    let (at_level_0, trilinear, mask_at_0) = (
+        against(&zero, &own),
+        against(&own, &own),
+        against(&zero, &zero),
+    );
+    let lods = probes
+        .iter()
+        .flat_map(|p| p.lod)
+        .filter(|lod| lod.is_finite())
+        .fold([f64::INFINITY, f64::NEG_INFINITY], |range, lod| {
+            [range[0].min(lod), range[1].max(lod)]
+        });
+    eprintln!(
+        "level 0 alone on a 96 × 48 equirect, footprints of LOD {:.2} to {:.2}: {at_level_0:.4} \
+         f16 steps at most from the test's level-0 taps; from its trilinear taps {trilinear:.0}, \
+         under the mask at LOD 0 {mask_at_0:.0}",
+        lods[0], lods[1]
+    );
+    // Every footprint is past level 0, so its trilinear taps aren't level
+    // 0's.
+    assert!(lods[0] > 0.5, "{lods:?}");
+    assert!(at_level_0 <= NEAREST, "{at_level_0}");
+    let off = must_fail(
+        "the trilinear taps for level 0's",
+        at_most(trilinear, NEAREST),
+    );
+    assert!(off > 100.0, "{off}");
+    let off = must_fail(
+        "the mask at LOD 0 under level0",
+        at_most(mask_at_0, NEAREST),
+    );
+    assert!(off > 100.0, "{off}");
+    let written = render(&shot, RigDebug::Weights, true);
+    for (n, p) in probes.iter().enumerate() {
+        let w = rig.weights(p.d, p.lod);
+        assert_eq!(pixel(&written, n), [w[0], 0.0, w[1]].map(round_f16), "{n}");
+    }
+}
+
 /// Modes 4 and 5 draw each lens alone, 6 the weights (red w0, blue w1)
-/// and 7 the seam difference where both cover.
+/// and 7 the seam difference where both cover; the stitch they are read
+/// beside is black where neither lens weighs.
 #[test]
 fn rig_debug_modes_4_to_7() {
     let _t = timed("rig_debug_modes_4_to_7");
@@ -819,9 +1052,24 @@ fn rig_debug_modes_4_to_7() {
         let difference = mode(RigDebug::SeamDiff);
         let (mut one_lens, mut swapped, mut reds, mut unscaled) =
             ([0usize; 2], 0usize, 0usize, 0.0f64);
+        let (mut gap, mut drawn_in_wider) = (0usize, 0usize);
         for (n, p) in probes.iter().enumerate() {
             let w = rig.weights(p.d, p.lod);
             let covers = [0, 1].map(|b| rig.covers(b, p.d, p.lod[b]));
+            // The stitch is black where neither lens weighs, and only
+            // there: where the masks' margins, which grow with the LOD,
+            // leave a gap at the seam. A margin an LOD wider leaves a
+            // wider gap, which the stitch draws in.
+            if w == [0.0; 2] {
+                assert_eq!(pixel(&stitched, n), BLACK, "pixel {n}");
+                gap += 1;
+            } else {
+                assert_ne!(pixel(&stitched, n), BLACK, "pixel {n}");
+            }
+            if !reported {
+                let wider = rig.weights(p.d, p.lod.map(|lod| lod + 1.0));
+                drawn_in_wider += usize::from(wider == [0.0; 2] && pixel(&stitched, n) != BLACK);
+            }
             // Modes 4 and 5: the stitch where the other lens weighs
             // nothing, to the bit; black where the lens doesn't cover.
             for b in 0..2 {
@@ -878,6 +1126,24 @@ fn rig_debug_modes_4_to_7() {
             "the seam difference without its × 8",
             at_most(unscaled, NEAREST),
         );
+        // At the source's own scale the lenses' masks overlap all along
+        // the seam; on the small equirect they leave a gap.
+        if reported {
+            assert_eq!(gap, 0);
+        } else {
+            let (pixels, wider) = (probes.len(), drawn_in_wider + gap);
+            eprintln!(
+                "the stitch at {} × {}: black at the {gap} of its {pixels} pixels that \
+                 neither lens weighs; a margin an LOD wider leaves {wider}",
+                shot.1.0, shot.1.1
+            );
+            assert!(gap > 100, "{gap}");
+            let off = must_fail(
+                "the gap of a margin an LOD wider",
+                at_most(drawn_in_wider, 0),
+            );
+            assert!(off > 100, "{off}");
+        }
     }
     means[0] /= (3 * both_cover) as f64;
 
@@ -918,63 +1184,98 @@ fn rig_debug_modes_4_to_7() {
 }
 
 /// `lenses` go by track and the rig's lenses by block: block b samples
-/// its own track's picture, under a reversed binding too.
+/// its own track's picture, under a reversed binding too, where the
+/// gains and the strips still go by block.
 #[test]
 fn rig_lenses_come_from_their_tracks() {
     let _t = timed("rig_lenses_come_from_their_tracks");
-    // The camera with its binding reversed, a quarter the size: block 0's
-    // lens on track 1 and block 1's on track 0, which is the front one.
-    let side = SIDE / 4;
-    let cal = x5_like();
-    let planted = Planted {
-        binding: TruthBinding::Reversed,
-        ..x5_like_planted()
-    };
-    let truth = compose(&cal, &planted, 0, [side; 2]);
-    let frames = [0, 1].map(|track| {
-        let picture = render_lens(Pattern::SeamLines, &truth, track, 0, SS);
-        lens_frame(&lens_planes(&picture, Coding::X5), side)
-    });
-    let planes = [Planes::of(&frames[0]), Planes::of(&frames[1])];
-    assert_eq!(planes[0].side(), side);
-    let rig = sphere_rig(&cal, &planted, &tune(100.0), 0, [side; 2]).expect("the rig builds");
-    assert_eq!([rig.lenses[0].track, rig.lenses[1].track], [1, 0]);
+    let camera = reversed();
+    let (planes, rig) = (&camera.planes, camera.rig);
+    assert_eq!(planes[0].side(), QUARTER);
 
-    let by_track: [&dyn VideoPlanes; 2] = [&frames[0], &frames[1]];
-    let by_block: [&dyn VideoPlanes; 2] = [&frames[1], &frames[0]];
+    let by_track = camera.lenses();
+    let by_block: [&dyn VideoPlanes; 2] = [by_track[1], by_track[0]];
     let shot = equirect(256);
     let (view, size) = &shot;
     let probes = view_probes(&rig, &shot);
-    let render = |lenses: [&dyn VideoPlanes; 2], debug: RigDebug| {
+    let render = |lenses: [&dyn VideoPlanes; 2], gains: [[f64; 3]; 2], debug: RigDebug| {
         let opts = RigOptions {
             debug,
             level0: false,
         };
-        render_rig(lenses, &rig, UNIT, view, *size, &opts).expect("the pair renders")
+        render_rig(lenses, &rig, gains, view, *size, &opts).expect("the pair renders")
     };
 
-    // Each block alone is the test's taps of its own track's planes; of
-    // the planes at its own index, it isn't.
-    let (mut own, mut indexed) = (0.0f64, 0.0f64);
+    // Each block alone is the test's taps of its own track's planes
+    // times the block's own gain: under this binding block 0's are track
+    // 1's planes, with `gains[0]`. Of the planes at the block's own index
+    // it isn't, nor with its track's gain.
+    let gains = [[0.9, 1.0, 0.8], [0.5, 0.6, 0.7]];
+    let (mut own, mut indexed, mut of_track) = (0.0f64, 0.0f64, 0.0f64);
     for (b, debug) in [(0, RigDebug::Lens0), (1, RigDebug::Lens1)] {
-        let picture = render(by_track, debug);
-        let light = |n: usize, track: usize| {
-            let p = &probes[n];
-            if rig.covers(b, p.d, p.lod[b]) {
-                planes[track].light(p.texel[b].expect("a texel"), p.lod[b])
-            } else {
-                BLACK
+        let picture = render(by_track, gains, debug);
+        let track = rig.lenses[b].track;
+        for (n, p) in probes.iter().enumerate() {
+            if !rig.covers(b, p.d, p.lod[b]) {
+                assert_eq!(pixel(&picture, n), BLACK, "lens {b}, pixel {n}");
+                continue;
             }
-        };
-        own = own.max(worst_steps(&picture, |n| light(n, 1 - b)));
-        indexed = indexed.max(worst_steps(&picture, |n| light(n, b)));
+            let texel = p.texel[b].expect("a texel");
+            let light = [track, b].map(|track| planes[track].light(texel, p.lod[b]));
+            let off = |light: [f64; 3], gain: [f64; 3]| {
+                pixel_steps(&picture, n, [0, 1, 2].map(|c| light[c] * gain[c]))
+            };
+            own = own.max(off(light[0], gains[b]));
+            indexed = indexed.max(off(light[1], gains[b]));
+            of_track = of_track.max(off(light[0], gains[track]));
+        }
     }
     assert!(own <= NEAREST, "{own}");
-    let off = must_fail(
+    let planes_off = must_fail(
         "each block's planes at its own index",
         at_most(indexed, NEAREST),
     );
-    assert!(off > 100.0, "{off}");
+    assert!(planes_off > 100.0, "{planes_off}");
+    let gains_off = must_fail("the gains by track", at_most(of_track, NEAREST));
+    assert!(gains_off > 100.0, "{gains_off}");
+
+    // And the strips come back by block: block b's strip is the test's
+    // taps of its own track's planes at its own texels, unrounded, which
+    // the other block's strip isn't.
+    let spec = StripSpec {
+        px_per_deg: 1.0,
+        ..StripSpec::TIER1
+    };
+    let unwrapped = strips(&rig, by_track, &spec).expect("the strips");
+    let strip_probes = crate::probes(&rig, |x, y| spec.dir(x, y), spec.size());
+    let (mut both_valid, mut strip_own, mut strip_swapped) = (0usize, 0.0f64, 0.0f64);
+    for (n, p) in strip_probes.iter().enumerate() {
+        let valid = [0, 1].map(|b| unwrapped.lenses[b].valid[n]);
+        assert_eq!(valid, [0, 1].map(|b| rig.covers(b, p.d, p.lod[b])), "{n}");
+        if valid != [true; 2] {
+            continue;
+        }
+        both_valid += 1;
+        for b in 0..2 {
+            let texel = p.texel[b].expect("a texel");
+            let want = planes[rig.lenses[b].track].light(texel, p.lod[b]);
+            for (c, want) in want.into_iter().enumerate() {
+                let off = |strip: usize| (unwrapped.lenses[strip].rgb[n][c] - want).abs();
+                strip_own = strip_own.max(off(b));
+                strip_swapped = strip_swapped.max(off(rig.lenses[b].track));
+            }
+        }
+    }
+    assert!(both_valid > 4000, "{both_valid}");
+    assert!(strip_own <= 1e-12, "{strip_own}");
+    let strips_off = must_fail("the strips by track", at_most(strip_swapped, 1e-12));
+    eprintln!(
+        "the reversed camera, each lens alone: {own:.4} f16 steps at most from its track's planes \
+         and its block's gain; from the planes at its index {planes_off:.0}, with its track's \
+         gain {gains_off:.0}; its strips over {both_valid} samples both lenses hold: \
+         {strip_own:.1e} from the test's taps by block, {strips_off:.3} by track"
+    );
+    assert!(strips_off > 0.01, "{strips_off}");
 
     // And the stitch shows the scene: against the ideal more than 12°
     // from the seam it holds what a quarter-size lens can, and with the
@@ -989,7 +1290,7 @@ fn rig_lenses_come_from_their_tracks() {
     let ideal: Vec<f64> = ideal.pixels.iter().flatten().copied().collect();
     let far = band_weights(&rig, view, *size, 12.0, 90.0);
     let against_ideal = |lenses: [&dyn VideoPlanes; 2]| {
-        let picture = render(lenses, RigDebug::Off);
+        let picture = render(lenses, UNIT, RigDebug::Off);
         let (w, h) = (size.0 as usize, size.1 as usize);
         let weights = Weights {
             width: w,
@@ -1174,6 +1475,27 @@ fn masks_match_what_render_rig_draws() {
     for (n, weight) in all.iter().enumerate() {
         assert_eq!((*weight, pixel(&stitched, n) != BLACK), (1.0, true), "{n}");
     }
+
+    // On a small equirect the masks' margins, which grow with the LOD,
+    // leave a gap at the seam: neither lens's coverage holds it, the
+    // stitch leaves it black (`rig_debug_modes_4_to_7`) and the band
+    // leaves it out. By its angle alone, the band from 0° to 90° is
+    // every pixel, the gap's too.
+    let (view, size) = equirect(128);
+    let all = band_weights(&s.rig, &view, size, 0.0, 90.0);
+    let coverage = [0, 1].map(|b| lens_coverage(&s.rig, b, &view, size));
+    let mut gap = 0usize;
+    for (n, weight) in all.iter().enumerate() {
+        let covered = coverage[0][n] + coverage[1][n] > 0.0;
+        assert_eq!(*weight, if covered { 1.0 } else { 0.0 }, "pixel {n}");
+        gap += usize::from(!covered);
+    }
+    let off = must_fail("the band where no lens covers", at_most(gap, 0));
+    eprintln!(
+        "the masks of a 128 × 64 equirect leave out {off} of its {} pixels, which no lens covers",
+        all.len()
+    );
+    assert!(off > 100, "{off}");
 
     let (mut other_lens, mut off_the_axis) = (0usize, 0usize);
     let shots = [equirect(192), right(128), zenith(128), equirect(128)];
