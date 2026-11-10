@@ -132,6 +132,11 @@ pub fn patch(spec: &StripSpec, bin: usize) -> Patch {
 /// gain is the median over the patch's samples of ln(lens 1 / lens 0) at
 /// the measured shift, both read off the smoothed strips, a sample below
 /// 0.01 on either lens left out, and NaN with fewer than 16 samples.
+///
+/// A shift past the search isn't detected. Such a bin comes back valid
+/// at whatever matches best inside the search: on a texture that repeats
+/// an alias of its shift, with an NCC as high as a true match's. Only
+/// what predicts the field (8.3) knows which bins those are.
 pub fn bin_shifts(strips: &Strips, spec: &StripSpec) -> Vec<BinShift> {
     bin_shifts_by(strips, spec, &Method::PLAN)
 }
