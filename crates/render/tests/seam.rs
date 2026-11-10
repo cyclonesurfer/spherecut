@@ -271,13 +271,24 @@ const SCENE_AGAIN: (f64, f64) = (-2.5, 0.25);
 
 // What came back.
 
+/// The greater of the worst miss so far and one more, and NaN from the
+/// first that is NaN on: a miss that is no number (an invalid bin, a term
+/// the fit couldn't say) is never passed over for the misses around it.
+fn worse(worst: f64, miss: f64) -> f64 {
+    if worst.is_nan() || miss <= worst {
+        worst
+    } else {
+        miss
+    }
+}
+
 /// The furthest any bin's shift lies from (u, v), in strip pixels; NaN
 /// if a bin is invalid.
 fn worst_miss(bins: &[BinShift], (u, v): (f64, f64)) -> f64 {
     let (sx, sy) = scales();
     bins.iter()
         .map(|b| (b.along_deg * sx - u).hypot(-b.across_deg * sy - v))
-        .fold(0.0, |worst, miss| if miss <= worst { worst } else { miss })
+        .fold(0.0, worse)
 }
 
 /// A signature's eight terms, in `signature_of`'s order.
@@ -292,7 +303,7 @@ fn worst_term(got: [f64; TERMS], want: [f64; TERMS]) -> f64 {
     got.iter()
         .zip(want)
         .map(|(g, w)| (g - w).abs())
-        .fold(0.0, |worst, miss| if miss <= worst { worst } else { miss })
+        .fold(0.0, worse)
 }
 
 /// The field of the eight terms, as `carried` takes it.
@@ -502,7 +513,7 @@ fn gains_leave_the_geometry_under_0_005_deg() {
         a.iter()
             .zip(b)
             .map(|(a, b)| (a.across_deg - b.across_deg).hypot(a.along_deg - b.along_deg))
-            .fold(0.0, |worst, d| if d <= worst { worst } else { d })
+            .fold(0.0, worse)
     };
     let geometry = worst_term(terms(&lit), terms(&unit));
     eprintln!(
@@ -749,11 +760,11 @@ fn a_line_informs_across_it_only() {
                 + v[1] * (b.info[1][0] * v[0] + b.info[1][1] * v[1])
         };
         let normal = [cos / sy, sin / sx];
-        slack = slack.max(quad(line) / quad(normal));
+        slack = worse(slack, quad(line) / quad(normal));
         let (across, along) = field_of(planted)(b.phi_deg);
         let miss = [(b.along_deg - along) * sx, -(b.across_deg - across) * sy];
-        along_line = along_line.max((miss[0] * cos + miss[1] * sin).abs());
-        across_line = across_line.max((miss[0] * sin - miss[1] * cos).abs());
+        along_line = worse(along_line, (miss[0] * cos + miss[1] * sin).abs());
+        across_line = worse(across_line, (miss[0] * sin - miss[1] * cos).abs());
     }
     eprintln!(
         "a line a bin: the information along the line is {slack:.2e} of that across it; the \
@@ -920,7 +931,7 @@ fn signature_recovers_each_term() {
         [0, 1, 2, 5, 6, 7]
             .iter()
             .map(|&i| (got[i] - want[i]).abs())
-            .fold(0.0, f64::max)
+            .fold(0.0, worse)
     };
     let off = must_fail("the fit without a2 and b2", at_most(others(&short), EXACT));
     eprintln!(
@@ -932,7 +943,14 @@ fn signature_recovers_each_term() {
     // The along terms don't lean on the across ones, and stay.
     assert!((short.c0 - planted[5]).abs() < EXACT, "{short:?}");
 
-    // A term the bins don't determine is NaN, never a zero.
+    // A term the bins don't determine is NaN, never a zero, and so is the
+    // miss these checks hold, whichever term it is and however far off
+    // the terms before it are.
+    for undetermined in 0..TERMS {
+        let mut got = planted.map(|t| t + 5.0);
+        got[undetermined] = f64::NAN;
+        assert!(worst_term(got, planted).is_nan(), "{}", NAMES[undetermined]);
+    }
     let none = signature(&[invalid(2.5), invalid(7.5)]);
     assert!(terms(&none).iter().all(|t| t.is_nan()), "{none:?}");
     assert!(
@@ -1092,7 +1110,7 @@ impl Budget {
     fn terms(&mut self, row: &str, s: &Signature, named: &[usize]) {
         let t = terms(s);
         let size = |i: &usize| t[*i].abs();
-        let main = named.iter().map(size).fold(0.0, f64::max);
+        let main = named.iter().map(size).fold(0.0, worse);
         let other = (0..TERMS)
             .filter(|i| !named.contains(i))
             .max_by(|a, b| size(a).total_cmp(&size(b)))
@@ -1105,7 +1123,7 @@ impl Budget {
                 NAMES[other],
                 t[other].abs()
             ),
-            t[other].abs() <= (0.15 * main).max(0.03),
+            main.is_finite() && t[other].abs() <= (0.15 * main).max(0.03),
         );
     }
 }
@@ -1128,6 +1146,8 @@ fn sizes(bins: &[BinShift]) -> Sizes {
     };
     for b in bins.iter().filter(|b| b.valid) {
         let (across, along) = (b.across_deg * ACROSS_PX, b.along_deg * ALONG_PX);
+        // `min` and `max` would pass a NaN over.
+        assert!(across.is_finite() && along.is_finite(), "{b:?}");
         sizes.least = sizes.least.min(across.hypot(along));
         sizes.most = sizes.most.max(across.hypot(along));
         sizes.along = sizes.along.max(along.abs());
