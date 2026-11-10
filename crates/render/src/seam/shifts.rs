@@ -67,10 +67,20 @@ pub struct Patch {
     pub rows: Range<u32>,
 }
 
-/// How many bins `spec` divides the turn of φ into: 72 at 5°.
+/// How many bins `spec` divides the turn of φ into: 72 at 5°. Never
+/// more than its strip has columns, and one where `bin_deg` isn't a
+/// positive number of degrees.
 pub fn bin_count(spec: &StripSpec) -> usize {
+    if !(spec.bin_deg > 0.0 && spec.bin_deg.is_finite()) {
+        return 1;
+    }
+    let columns = (spec.size().0 as usize).max(1);
     let bins = (360.0 / spec.bin_deg).round();
-    if bins >= 1.0 { bins as usize } else { 1 }
+    if bins >= 1.0 {
+        (bins as usize).min(columns)
+    } else {
+        1
+    }
 }
 
 /// Bin `bin`'s patch on a strip of `spec`'s size. What predicts a bin's

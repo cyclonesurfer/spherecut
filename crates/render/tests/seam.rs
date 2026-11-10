@@ -697,6 +697,30 @@ fn a_textureless_bin_is_invalid() {
         ],
     };
     assert!(bin_shifts(&short, &SPEC).iter().all(|b| !b.valid));
+
+    // A spec whose bins aren't a positive number of degrees is one bin,
+    // and bins narrower than a strip's pixel are a bin a column: never
+    // more bins than a strip has columns, which no machine could hold.
+    let of = |bin_deg: f64| StripSpec { bin_deg, ..SPEC };
+    for bin_deg in [0.0, -5.0, f64::NAN, f64::INFINITY, 1000.0] {
+        assert_eq!(bin_count(&of(bin_deg)), 1, "{bin_deg}");
+    }
+    for bin_deg in [0.25, 1e-9, f64::MIN_POSITIVE, 5e-324] {
+        assert_eq!(bin_count(&of(bin_deg)), SPEC.size().0 as usize, "{bin_deg}");
+    }
+    // Control: Tier 1's bins are 72, not one.
+    must_fail("a bin of 5°", bin_count(&SPEC) == 1);
+    assert_eq!(bin_count(&SPEC), 72);
+    // And the one bin measures: the scene against itself has no shift.
+    let lens = strip(scene());
+    let same = Strips {
+        lenses: [lens.clone(), lens],
+    };
+    let bins = bin_shifts(&same, &of(0.0));
+    assert_eq!(bins.len(), 1);
+    assert!(bins[0].valid && bins[0].phi_deg == 180.0, "{bins:?}");
+    let miss = worst_miss(&bins, (0.0, 0.0));
+    assert!(at_most(miss, 0.02).passes() == Some(true), "{miss}");
 }
 
 /// Texture along a single line gives information across the line and
