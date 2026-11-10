@@ -1,0 +1,131 @@
+{
+  "about": "Rung 1 of the stitching round trip (M3 plan 4.2, DECISIONS D65): synth's lens pictures through the CPU reference's stitch against the analytic ideal, with each picture's blessed floors and what it measured when blessed.",
+  "commit": "6b65987f8b",
+  "date": "2026-11-10",
+  "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test instrument",
+  "rows": {
+    "kb_seamlines": {
+      "measured": {
+        "band_pos_x_db": 0.2114,
+        "band_pos_y_db": 0.2173,
+        "equidistant_read_as_equisolid_lens1_psnr_db": 20.6925,
+        "equidistant_read_as_equisolid_lens1_ssim": 0.5621,
+        "equidistant_read_as_equisolid_misregistration_px": 12.9735,
+        "equidistant_read_as_equisolid_psnr_db": 24.6508,
+        "equidistant_read_as_equisolid_ssim": 0.7816,
+        "lens0_psnr_db": 26.2207,
+        "lens0_ssim": 0.7819,
+        "lens1_psnr_db": 26.2118,
+        "lens1_ssim": 0.7741,
+        "psnr_db": 32.4096,
+        "ssim": 0.9519
+      },
+      "thresholds": {
+        "lens0_psnr_db_min": 25.22,
+        "lens0_ssim_min": 0.7769,
+        "lens1_psnr_db_min": 25.21,
+        "lens1_ssim_min": 0.7691,
+        "psnr_db_min": 31.4,
+        "ssim_min": 0.9468
+      },
+      "what": "SeamLines at frame 0, infinitely far, q = 0, through kb_like of the X5-like camera at 768² a lens (2² samples a pixel), stitched by render_rig into a 512x256 equirect and held to render_view_ideal (8² samples a pixel), weighted by cos(latitude): more than 12° from the seam, and each lens alone over its own coverage. band_*: in 90° rectilinear views of 256² on the seam, where both lenses' weights are above 0, the stitch's PSNR less the better lens's alone, in dB"
+    },
+    "x5_grid": {
+      "measured": {
+        "band_neg_x_db": 0.0998,
+        "band_neg_x_small_turn_costs_db": 0.7773,
+        "band_neg_x_small_turn_db": 0.0916,
+        "band_neg_x_yawed_db": -5.5316,
+        "band_neg_y_db": 0.7352,
+        "band_pos_x_db": 0.211,
+        "band_pos_x_small_turn_costs_db": 0.6316,
+        "band_pos_x_small_turn_db": -0.4205,
+        "band_pos_x_yawed_db": -4.1533,
+        "band_pos_y_db": 0.3475,
+        "cx_2_px_lens1_psnr_db": 23.1556,
+        "cx_2_px_lens1_ssim": 0.7756,
+        "equidistant_applied_to_mei_data_psnr_db": 21.8808,
+        "equidistant_applied_to_mei_data_ssim": 0.6537,
+        "lens0_psnr_db": 28.0337,
+        "lens0_ssim": 0.8968,
+        "lens1_psnr_db": 27.7512,
+        "lens1_ssim": 0.8968,
+        "psnr_db": 28.4161,
+        "ssim": 0.9271
+      },
+      "thresholds": {
+        "lens0_psnr_db_min": 27.03,
+        "lens0_ssim_min": 0.8917,
+        "lens1_psnr_db_min": 26.75,
+        "lens1_ssim_min": 0.8917,
+        "psnr_db_min": 27.41,
+        "ssim_min": 0.922
+      },
+      "what": "Grid at frame 0, infinitely far, q = 0, through x5_like under x5_like_planted at 768² a lens (2² samples a pixel), stitched by render_rig into a 512x256 equirect and held to render_view_ideal (8² samples a pixel), weighted by cos(latitude): more than 12° from the seam, and each lens alone over its own coverage. band_*: in 90° rectilinear views of 256² on the seam, where both lenses' weights are above 0, the stitch's PSNR less the better lens's alone, in dB"
+    },
+    "x5_seamlines": {
+      "measured": {
+        "band_neg_x_db": 0.4738,
+        "band_neg_x_small_turn_costs_db": 0.7479,
+        "band_neg_x_small_turn_db": -0.2524,
+        "band_neg_x_yawed_db": -4.477,
+        "band_neg_y_db": 0.3617,
+        "band_pos_x_db": 0.3749,
+        "band_pos_x_small_turn_costs_db": 0.649,
+        "band_pos_x_small_turn_db": -0.1741,
+        "band_pos_x_yawed_db": -4.0931,
+        "band_pos_y_db": 0.4275,
+        "cx_2_px_lens1_psnr_db": 24.4779,
+        "cx_2_px_lens1_ssim": 0.6817,
+        "equidistant_applied_to_mei_data_psnr_db": 25.767,
+        "equidistant_applied_to_mei_data_ssim": 0.8188,
+        "lens0_psnr_db": 26.2213,
+        "lens0_ssim": 0.7833,
+        "lens1_psnr_db": 26.2682,
+        "lens1_ssim": 0.7783,
+        "other_scene_median_ncc": 0.0554,
+        "psnr_db": 32.5009,
+        "ssim": 0.9533,
+        "the_tracks_swapped_psnr_db": 24.9937,
+        "the_tracks_swapped_ssim": 0.7937,
+        "the_turn_left_out_median_ncc": 0.9655,
+        "the_turn_left_out_misregistration_px": 16.1697,
+        "the_turn_left_out_psnr_db": 9.6612,
+        "the_turn_left_out_ssim": 0.4181
+      },
+      "thresholds": {
+        "lens0_psnr_db_min": 25.22,
+        "lens0_ssim_min": 0.7782,
+        "lens1_psnr_db_min": 25.26,
+        "lens1_ssim_min": 0.7732,
+        "psnr_db_min": 31.5,
+        "ssim_min": 0.9482
+      },
+      "what": "SeamLines at frame 0, infinitely far, q = 0, through x5_like under x5_like_planted at 768² a lens (2² samples a pixel), stitched by render_rig into a 512x256 equirect and held to render_view_ideal (8² samples a pixel), weighted by cos(latitude): more than 12° from the seam, and each lens alone over its own coverage. band_*: in 90° rectilinear views of 256² on the seam, where both lenses' weights are above 0, the stitch's PSNR less the better lens's alone, in dB"
+    },
+    "x5_seamlines_1m5": {
+      "measured": {
+        "lens0_psnr_db": 26.3646,
+        "lens0_ssim": 0.7901,
+        "lens1_psnr_db": 26.341,
+        "lens1_ssim": 0.7809,
+        "psnr_db": 32.5428,
+        "q_0_against_r_1_5_m_lens1_psnr_db": 23.6906,
+        "q_0_against_r_1_5_m_lens1_ssim": 0.6271,
+        "q_0_against_r_1_5_m_psnr_db": 28.1425,
+        "q_0_against_r_1_5_m_ssim": 0.8799,
+        "ssim": 0.9537
+      },
+      "thresholds": {
+        "lens0_psnr_db_min": 25.36,
+        "lens0_ssim_min": 0.785,
+        "lens1_psnr_db_min": 25.34,
+        "lens1_ssim_min": 0.7759,
+        "psnr_db_min": 31.54,
+        "ssim_min": 0.9486
+      },
+      "what": "SeamLines at frame 0, on a sphere of 1.5 m, q = 1/1.5 per metre, through x5_like under x5_like_planted at 768² a lens (2² samples a pixel), stitched by render_rig into a 512x256 equirect and held to render_view_ideal (8² samples a pixel), weighted by cos(latitude): more than 12° from the seam, and each lens alone over its own coverage. band_*: in 90° rectilinear views of 256² on the seam, where both lenses' weights are above 0, the stitch's PSNR less the better lens's alone, in dB"
+    }
+  },
+  "schema": "spherecut.instrument/1"
+}
