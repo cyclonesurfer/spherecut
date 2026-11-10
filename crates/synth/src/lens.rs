@@ -3772,17 +3772,14 @@ mod tests {
             );
             // Controls: the other track, every row at the frame's own
             // time, and the scene infinitely far.
-            let controls: [(&str, &dyn Fn(DVec2) -> Option<DVec3>); 3] = [
-                ("the other track's sight", &|px| {
-                    seen(&rig, 1 - lens, 10, px)
-                }),
-                ("every row at the frame's time", &|px| {
-                    seen(&global, lens, 10, px)
-                }),
-                ("the scene infinitely far", &|px| seen(&far, lens, 10, px)),
+            let controls = [
+                ("the other track's sight", &rig, 1 - lens),
+                ("every row at the frame's time", &global, lens),
+                ("the scene infinitely far", &far, lens),
             ];
-            for (name, shows) in controls {
-                let wrong = must_fail(name, at_most(unlike(&picture, shows), 0));
+            for (name, rig, track) in controls {
+                let wrong = unlike(&picture, &|px| seen(rig, track, 10, px));
+                let wrong = must_fail(name, at_most(wrong, 0));
                 assert!(wrong > 64 * 64 / 16, "lens {lens}, {name}: {wrong}");
             }
         }
