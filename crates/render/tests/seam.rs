@@ -24,7 +24,7 @@ use std::ops::Range;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use glam::DVec3;
+use glam::{DQuat, DVec2, DVec3};
 use proptest::prelude::*;
 use spherecut_render::seam::shifts::{
     Method, TERMS, bin_count, bin_shifts_by, patch, signature_of,
@@ -47,7 +47,7 @@ use common::budget::{
     NAMES, SMALL_PX, centres_apart, harmonics, held, seam_radius, sizes, slack_px, small, swapped,
     terms, worse,
 };
-use common::predict::{predict_bins, predict_through};
+use common::predict::{LATTICE, predict_bins, predict_through};
 use common::rig::{pats, sphere_rig};
 
 /// The seam's own tests' share of M3.4's budget, in seconds (19.6).
@@ -2174,6 +2174,164 @@ proptest! {
 
 // The predicted fields.
 
+/// Tier 1's coarse search in strip pixels, on each axis: the estimator's
+/// own, 3° of the strip's scale rounded up to whole pixels.
+const SEARCH_PX: f64 = 12.0;
+
+/// `predict_bins` predicts a bin where the estimator can measure its
+/// whole patch, and the mean over the patch there: every point of the
+/// patch's lattice inside the search, on each axis. A bin with a point
+/// past the search is invalid, whatever its mean; a point where the
+/// truth shows nothing is left out of the mean, and a bin with more than
+/// half of them is invalid.
+///
+/// The truth here is the model's own inverse with lens 1's scene turned
+/// about +Y, so the shift at a point is known in closed form, with
+/// nothing of the prediction's solve: block 1's strip shows at x + s the
+/// direction block 0's shows at x where dir(x + s) is dir(x) turned
+/// back.
+#[test]
+fn a_bin_is_predicted_where_its_whole_patch_is_inside_the_search() {
+    let _t = timed("a_bin_is_predicted_where_its_whole_patch_is_inside_the_search");
+    let sides = [X5_LIKE_SIDE; 2];
+    let far = Tune {
+        q_per_m: 0.0,
+        ..Tune::default()
+    };
+    let model = sphere_rig(&x5_like(), &x5_like_planted(), &far, 0, sides).expect("a rig");
+    let (sx, sy) = scales();
+    assert_eq!((SPEC.search_deg * sx).ceil(), SEARCH_PX);
+    assert_eq!((SPEC.search_deg * sy).ceil(), SEARCH_PX);
+    let width = f64::from(SPEC.size().0);
+
+    // `StripSpec::dir`'s inverse, worked here: the strip's point for a
+    // direction, on the turn of φ nearest `near`.
+    let point = |d: DVec3, near: DVec2| {
+        let x = d.y.atan2(d.x).to_degrees() * sx;
+        let y = (SPEC.half_band_deg - (-d.z).asin().to_degrees()) * sy;
+        DVec2::new(x + width * ((near.x - x) / width).round(), y)
+    };
+    let back = point(SPEC.dir(700.25, 20.5), DVec2::new(700.0, 20.0));
+    assert!((back - DVec2::new(700.25, 20.5)).length() < 1e-9, "{back}");
+
+    let turn = |deg: f64| DQuat::from_axis_angle(DVec3::Y, deg.to_radians());
+    // The closed form, and the prediction; `nothing` says where, by φ in
+    // degrees, block 0's picture holds nothing.
+    let shift_at = |turn: DQuat, at: DVec2| point(turn.inverse() * SPEC.dir(at.x, at.y), at) - at;
+    let predicted = |turn: DQuat, nothing: &dyn Fn(f64) -> bool| {
+        predict_through(&model, &SPEC, |b, px| {
+            let d = model.unproject(b, px)?;
+            let phi = d.y.atan2(d.x).to_degrees().rem_euclid(360.0);
+            match b {
+                0 => (!nothing(phi)).then_some(d),
+                _ => Some(turn * d),
+            }
+        })
+    };
+    let lattice = |bin: usize| {
+        let p = patch(&SPEC, bin);
+        let (x0, x1) = (f64::from(p.columns.start), f64::from(p.columns.end));
+        let (y0, y1) = (f64::from(p.rows.start), f64::from(p.rows.end));
+        let [nx, ny] = LATTICE;
+        (0..nx * ny).map(move |n| {
+            let (i, j) = (f64::from(n % nx), f64::from(n / nx));
+            DVec2::new(
+                x0 + (i + 0.5) / f64::from(nx) * (x1 - x0),
+                y0 + (j + 0.5) / f64::from(ny) * (y1 - y0),
+            )
+        })
+    };
+    // A bin's points by the closed form: how many are inside the search,
+    // and the mean of all of them.
+    let inside = |s: DVec2| s.x.abs() <= SEARCH_PX && s.y.abs() <= SEARCH_PX;
+    let closed = |turn: DQuat, bin: usize| {
+        let shifts: Vec<DVec2> = lattice(bin).map(|at| shift_at(turn, at)).collect();
+        let mean = shifts.iter().sum::<DVec2>() / shifts.len() as f64;
+        (shifts.iter().filter(|s| inside(**s)).count(), mean)
+    };
+    // How far a predicted bin lies from a mean, in strip pixels.
+    let off = |bin: &BinShift, mean: DVec2| {
+        (DVec2::new(bin.along_deg * sx, -bin.across_deg * sy) - mean).length()
+    };
+    let points = (LATTICE[0] * LATTICE[1]) as usize;
+    let nowhere = |_: f64| false;
+
+    // A turn of 2°, 7.6 px at the most: every bin is predicted, at its
+    // patch's mean.
+    let small = turn(2.0);
+    let bins = predicted(small, &nowhere);
+    let mut worst = 0.0;
+    for (n, bin) in bins.iter().enumerate() {
+        let (held, mean) = closed(small, n);
+        assert!(bin.valid && held == points, "bin {n}: {bin:?}");
+        worst = worse(worst, off(bin, mean));
+    }
+    assert!(worst < 1e-6, "{worst} px");
+    // Control: the same bins against the means of another turn.
+    let other = (0..bins.len()).map(|n| off(&bins[n], closed(turn(2.01), n).1));
+    must_fail(
+        "a turn of 2° held to the means of a turn of 2.01°",
+        at_most(other.fold(0.0, worse), 1e-6),
+    );
+
+    // A turn that moves the seam 12.5 px at the most takes the patches
+    // about φ = 0° and 180° past the search. A bin is predicted exactly
+    // where all of its points are inside.
+    let large = turn(12.5 / sy);
+    let bins = predicted(large, &nowhere);
+    let (mut whole, mut partly, mut none) = (0, Vec::new(), 0);
+    for (n, bin) in bins.iter().enumerate() {
+        let (held, mean) = closed(large, n);
+        assert_eq!(bin.valid, held == points, "bin {n}: {held} points inside");
+        if bin.valid {
+            assert!(off(bin, mean) < 1e-6, "bin {n}: {} px", off(bin, mean));
+            whole += 1;
+        } else if held == 0 {
+            none += 1;
+        } else {
+            assert!(bin.across_deg.is_nan() && bin.along_deg.is_nan(), "{bin:?}");
+            partly.push((n, held, mean));
+        }
+    }
+    eprintln!(
+        "a turn of 12.5 px: {whole} bins whole inside the search, {none} whole past it, and in \
+         part {partly:?}"
+    );
+    assert!(whole > 0 && none > 0);
+    // Control: a patch with its mean inside the search and points past
+    // it, which a test of the mean alone would predict.
+    let (n, _, mean) = *(partly.iter())
+        .find(|(_, _, mean)| inside(*mean))
+        .expect("a bin whose mean is inside the search and whose points aren't all");
+    must_fail(
+        &format!("bin {n}, its mean {mean} inside the search and points of it past, predicted"),
+        bins[n].valid,
+    );
+
+    // Where the truth shows nothing: under half of a patch's points
+    // leaves the mean of the rest, and over half leaves no prediction.
+    // A patch's five columns of points lie a degree apart, from half a
+    // degree in: bin 0's first three go, and two of bin 2's.
+    let nothing = |phi: f64| phi < 3.2 || (10.0..11.9).contains(&phi);
+    let bins = predicted(small, &nothing);
+    let rest: Vec<DVec2> = lattice(2)
+        .filter(|at| !nothing(at.x / sx))
+        .map(|at| shift_at(small, at))
+        .collect();
+    assert_eq!(rest.len(), points * 3 / 5);
+    let mean = rest.iter().sum::<DVec2>() / rest.len() as f64;
+    assert!(bins[2].valid && off(&bins[2], mean) < 1e-6, "{:?}", bins[2]);
+    must_fail(
+        "a patch with two columns showing nothing, held to the mean of all five",
+        at_most(off(&bins[2], closed(small, 2).1), 1e-6),
+    );
+    must_fail(
+        "a patch with three of five columns showing nothing, predicted",
+        bins[0].valid,
+    );
+    assert!(bins[1].valid && bins[3..].iter().all(|b| b.valid));
+}
+
 /// `predict_bins`' fields for the differences 3.4's error budget plants
 /// have the terms and the sizes 3.4 works out, each within 15 % or 0.2 px
 /// at 768² (the plan gives no tolerance; this is the slice's). No images:
@@ -2362,9 +2520,33 @@ fn predicted_fields_match_the_error_budget() {
         scene_radius_m: Some(radius_m),
         ..truth.clone()
     };
+    // Parallax moves a point of the seam by the part of the lenses'
+    // baseline that lies square to its direction, over the distance. The
+    // part along the lens axis is the same all round, 3.4's a0. The part
+    // in the seam's plane moves the seam along itself, a first harmonic
+    // of the size of that part over the distance, which the table
+    // doesn't list: on this rig 4.30 mm, 0.164° at 1.5 m, on d1.
+    let baseline = truth.lenses[1].centre_m - truth.lenses[0].centre_m;
+    let along_deg = |radius_m: f64| (baseline.truncate().length() / radius_m).to_degrees();
     let s = signature(&predict(&scene_at(1.5), &model));
     budget.hold("∞ against 1.5 m, a0", s.a0.abs() * ACROSS_PX, 4.6);
-    budget.terms("∞ against 1.5 m", &s, &[A0]);
+    budget.hold_worked(
+        "∞ against 1.5 m, a0",
+        s.a0.abs() * ACROSS_PX,
+        (baseline.z.abs() / 1.5).to_degrees() * ACROSS_PX,
+    );
+    budget.terms("∞ against 1.5 m", &s, &[A0, D1]);
+    let along = harmonics(&s).1 * ALONG_PX;
+    budget.hold_worked("∞ against 1.5 m, c1/d1", along, along_deg(1.5) * ALONG_PX);
+    // Controls: a baseline along the lens axis alone, which moves
+    // nothing along the seam, and the terms' rule with a0 alone named,
+    // which d1 passes by 1.6 points of its 15 %.
+    must_fail(
+        "∞ against 1.5 m, no part along the seam",
+        held(0.0, along_deg(1.5) * ALONG_PX),
+    );
+    let d1_of_a0 = s.d1.abs() / s.a0.abs();
+    assert!((0.12..0.15).contains(&d1_of_a0), "{d1_of_a0}: {s:?}");
     let s = signature(&predict(&scene_at(10.0), &model));
     budget.hold(
         "∞ against 10 m, a0",
@@ -2383,7 +2565,14 @@ fn predicted_fields_match_the_error_budget() {
     };
     let s = signature(&predict(&scene_at(1.5), &rig_of(&cal, &flipped, &near)));
     budget.hold("tz flipped at 1.5 m, a0", s.a0.abs() * ACROSS_PX, 9.2);
-    budget.terms("tz flipped at 1.5 m", &s, &[A0]);
+    budget.terms("tz flipped at 1.5 m", &s, &[A0, D1]);
+    // The flipped sign takes the whole baseline the other way: twice the
+    // part along the seam, too.
+    budget.hold_worked(
+        "tz flipped at 1.5 m, c1/d1",
+        harmonics(&s).1 * ALONG_PX,
+        2.0 * along_deg(1.5) * ALONG_PX,
+    );
 
     // Lens 1 a frame late while the rig turns 10° a second: a rigid turn
     // of 0.33° about the turn's axis.

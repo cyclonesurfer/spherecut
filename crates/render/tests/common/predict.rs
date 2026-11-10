@@ -27,10 +27,32 @@ use spherecut_synth::lens::{self, RigTruth};
 /// (`seam::shifts::patch`), the samples `bin_shifts` measures it from,
 /// and its `phi_deg` the middle of the patch's columns, as `bin_shifts`
 /// gives it. Its information is the identity, its NCC 1 and its log
-/// gains 0: a prediction is as sure across the seam as along it. A bin
-/// is invalid, its shift NaN, where the truth shows nothing at more than
-/// half its points on either lens, or no point of lens 1's strip shows
-/// what lens 0's does within the search.
+/// gains 0: a prediction is as sure across the seam as along it.
+///
+/// A bin is predicted only where the estimator can measure the whole of
+/// its patch: each point of the lattice that the truth shows has its
+/// shift inside the estimator's coarse search on each axis, `search_deg`
+/// of the strip's scale rounded up to whole pixels (±12 px at Tier 1).
+/// `bin_shifts` gives one shift for a whole patch, searched for over
+/// those whole pixels on each axis, and nothing in it leaves a part of a
+/// patch out. So a mean over the points inside the search alone is not
+/// what it measures, and a bin with a point past the search is invalid,
+/// its shift NaN, whatever its other points say. The mean is no test
+/// either: with the tracks swapped on Tier 1's rig bin 6's mean lies
+/// 11.8 px across, inside the search, while its farthest points lie
+/// 12.2 px, and the estimator gives an alias 5.4 px away, handed on from
+/// the bins past the search beside it. The 44 bins whose every point
+/// lies within the 12 px come back within 0.07 px of their means. Nor is
+/// the shift's length the test, nor 3° on each axis: either leaves out
+/// four more bins there (7, 28, 43 and 64), which the estimator measures
+/// within 0.03 px.
+///
+/// A point where the truth shows nothing on either lens is no sample of
+/// the estimator's and is left out of the mean; a bin is invalid where
+/// they are more than half its points, and where a point's solve doesn't
+/// settle. The seam's own tests hold these rules on a field known in
+/// closed form
+/// (`a_bin_is_predicted_where_its_whole_patch_is_inside_the_search`).
 pub fn predict_bins(truth: &RigTruth, frame: u32, rig: &Rig, spec: &StripSpec) -> Vec<BinShift> {
     predict_through(rig, spec, |b, px| {
         lens::seen(truth, rig.lenses[b].track, frame, px)
@@ -51,6 +73,8 @@ pub fn predict_through(
     let sx = f64::from(width) / 360.0;
     let sy = f64::from(height) / (2.0 * spec.half_band_deg);
     let scene = |b: usize, at: DVec2| shows(b, rig.texel(b, spec.dir(at.x, at.y))?);
+    // The estimator's coarse search: whole pixels each way, on each axis.
+    let search = DVec2::new((spec.search_deg * sx).ceil(), (spec.search_deg * sy).ceil());
     (0..bin_count(spec))
         .map(|bin| {
             let patch = patch(spec, bin);
@@ -58,23 +82,26 @@ pub fn predict_through(
             let (x0, x1) = (f64::from(patch.columns.start), f64::from(patch.columns.end));
             let (y0, y1) = (f64::from(patch.rows.start), f64::from(patch.rows.end));
             let centre = DVec2::new(0.5 * (x0 + x1), 0.5 * (y0 + y1));
-            let most = spec.search_deg * sx.max(sy) + 1.0;
             let mean = Slope::at(|at| scene(1, at), centre).and_then(|slope| {
                 let mut sum = DVec2::ZERO;
-                let mut found = 0;
+                let (mut found, mut whole) = (0, true);
                 for j in 0..LATTICE[1] {
                     for i in 0..LATTICE[0] {
                         let at = DVec2::new(
                             x0 + (f64::from(i) + 0.5) / f64::from(LATTICE[0]) * (x1 - x0),
                             y0 + (f64::from(j) + 0.5) / f64::from(LATTICE[1]) * (y1 - y0),
                         );
-                        if let Some(shift) = carried(scene, &slope, at, most) {
-                            sum += shift;
-                            found += 1;
+                        match carried(scene, &slope, at, search) {
+                            Point::Carried(shift) => {
+                                sum += shift;
+                                found += 1;
+                            }
+                            Point::Nothing => {}
+                            Point::Unheld => whole = false,
                         }
                     }
                 }
-                (2 * found >= LATTICE[0] * LATTICE[1]).then(|| sum / f64::from(found))
+                (whole && 2 * found >= LATTICE[0] * LATTICE[1]).then(|| sum / f64::from(found))
             });
             let phi_deg = centre.x / sx;
             match mean {
@@ -106,7 +133,7 @@ pub fn predict_through(
 
 /// The points a bin's shift is the mean over: columns by rows, each at
 /// the middle of its cell of the patch.
-const LATTICE: [u32; 2] = [5, 7];
+pub const LATTICE: [u32; 2] = [5, 7];
 
 /// The solve ends when a step is shorter than this, in strip pixels.
 const SETTLED: f64 = 1e-9;
@@ -146,29 +173,51 @@ impl Slope {
     }
 }
 
+/// What one point of a patch says of its bin's shift.
+enum Point {
+    /// The shift (u, v) that carries block 0's strip onto block 1's
+    /// there, inside the search.
+    Carried(DVec2),
+    /// The truth shows nothing there on one of the lenses.
+    Nothing,
+    /// The estimator can't hold the point: its shift lies past the
+    /// search on an axis, or the solve for it doesn't settle.
+    Unheld,
+}
+
 /// The shift that carries block 0's strip at `at` onto block 1's: (u, v)
 /// with block 1 showing at `at` + (u, v) the direction block 0 shows at
-/// `at`. `None` where either shows nothing, or the shift is longer than
-/// `most`.
+/// `at`, where it lies within `search` on each axis. The steps may pass
+/// the search by a pixel on the way, as the estimator's own may, and no
+/// further.
 fn carried(
     scene: impl Fn(usize, DVec2) -> Option<DVec3>,
     slope: &Slope,
     at: DVec2,
-    most: f64,
-) -> Option<DVec2> {
-    let wanted = scene(0, at)?;
+    search: DVec2,
+) -> Point {
+    let Some(wanted) = scene(0, at) else {
+        return Point::Nothing;
+    };
+    let past = |shift: DVec2, by: f64| shift.abs().cmpgt(search + by).any();
     let mut shift = DVec2::ZERO;
     let mut last = f64::INFINITY;
     for _ in 0..STEPS {
-        let step = slope.step(wanted - scene(1, at + shift)?)?;
+        let Some(step) = scene(1, at + shift).and_then(|shown| slope.step(wanted - shown)) else {
+            return Point::Nothing;
+        };
         shift += step;
         last = step.length();
-        if shift.length() > most {
-            return None;
+        if past(shift, 1.0) {
+            return Point::Unheld;
         }
         if last < SETTLED {
             break;
         }
     }
-    (last < ROW_JUMP).then_some(shift)
+    if last < ROW_JUMP && !past(shift, 0.0) {
+        Point::Carried(shift)
+    } else {
+        Point::Unheld
+    }
 }
