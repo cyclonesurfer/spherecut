@@ -2651,6 +2651,7 @@ fn error_budget_matches_the_images() {
         got(Plant::EulerYaws).a1.abs() * ACROSS_PX,
         2.0 * (ypr[0][0] - ypr[1][0]).abs() * ACROSS_PX,
         2.3,
+        "one lens's",
     );
 
     // The V6 reading the pair is rendered under against RadialOnly, a
@@ -2676,6 +2677,7 @@ fn error_budget_matches_the_images() {
         across * ACROSS_PX,
         (tilt + 2.0 * CENTRE_ACROSS_DEG * centres[0]).abs() * ACROSS_PX,
         9.0,
+        "without the centres' part across",
     );
     budget.hold_worked(
         "the binding reversed, Tier 1's rig, c1/d1",
@@ -2707,7 +2709,13 @@ fn error_budget_matches_the_images() {
         let longer = seam_radius(&pats.as_v6.lenses[b]) - seam_radius(&pats.as_v3.lenses[b]);
         let a0 = got(model).a0.abs() * ACROSS_PX;
         if b == 0 {
-            budget.hold_corrected(&format!("{row}, a0"), a0, longer.abs(), 0.15 * ACROSS_PX);
+            budget.hold_corrected(
+                &format!("{row}, a0"),
+                a0,
+                longer.abs(),
+                0.15 * ACROSS_PX,
+                "fx alone",
+            );
         } else {
             budget.hold_worked(&format!("{row}, a0"), a0, longer.abs());
         }
