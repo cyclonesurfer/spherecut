@@ -10502,9 +10502,9 @@ The fault:
 - **The rates** (PR #32, three runs of `zero_copy_pair_matches_copy`,
   D67's check of every slot byte for byte against the copy path): 141
   wrong frames, 118 of them kept on the GPU by path B, 16 kept by path
-  A, 6 copied on path B's runs and 1 on path A's. A frame, that is
-  3.3 % of the frames kept on the GPU, paths A and B alike, and 0.17 % of
-  the frames copied through memory.
+  A, 6 copied on path B's runs and 1 on path A's. That is 3.3 % of the
+  frames kept on the GPU, paths A and B alike, and 0.17 % of the frames
+  copied through memory.
 - **The signature.** Luma only, an `R8Unorm` plane (3840×3840, 6
   levels), never chroma (`Rg8Unorm`, 1920×1920, 5 levels), though both
   are written in the same submissions. Almost always one 4×2 block, at
@@ -10516,20 +10516,31 @@ The fault:
 - **PR #33.** Under `RADV_DEBUG=nodcc` the test passed both runs; a
   plain run between them failed with 45 wrong frames, about the 47 a run
   the old rates give.
-- **The analysis** (the fix round's, from both PRs' logs). The damage
-  is after the source bytes, in the slot: in the GPU's write of level 0
-  (a buffer-to-image copy from the staging belt or path B's buffer, an
-  image copy from path A's import), or in every read of it alike. The
-  verdict is about 95 % sure of that, about 75 % that it is the write,
-  and about even (50 %) that DCC is the mechanism, since `nodcc` turns
-  off more than the slot's DCC. It ranks a RADV or GFX11 fault (a driver
-  bug or a hardware erratum) first: the decoded bytes, the cache, the
-  belt and the copies' sources are right, and frames copied through
-  memory, which take no import and no `Copier`, fail too, a twentieth
-  as often. Not known: write side or read side, and driver or
-  hardware. No sync validation run has cleared our
-  side yet; the round's other unit tightens path A's and path B's
-  hand-over to wgpu anyway.
+- **The analysis** (the fix round's, made from PR #32's logs before
+  PR #33 ran). The damage is after the source bytes, in the slot: in
+  the GPU's write of level 0 (a buffer-to-image copy from the staging
+  belt or path B's buffer, an image copy from path A's import), or in
+  every read of it alike. The verdict is about 95 % sure of that, and
+  about 75 % that it is the write, since the rate follows the copy's
+  source memory (about 3 % from device-local sources, 0.17 % from the
+  host-visible belt), which a misread on readback doesn't predict. It
+  gives DCC as the mechanism about even odds (50 %): DCC alone explains
+  luma only, failure only on a slot's reuse and the content gating
+  together, but no known DCC mechanism explains an error unit of 8, 16
+  or 32 bytes at the tail of a 32-byte cell inside a 256-byte
+  compressed block, why the Rg8 chroma plane, which DCC can compress
+  too, never fails, or the rows' profile (most blocks in the first 32
+  rows of every 128). It ranks a RADV or GFX11 fault (a driver bug or a
+  hardware erratum) first: the decoded bytes, the cache, the belt and
+  the copies' sources are right, and frames copied through memory,
+  which take no import and no `Copier`, fail too, a twentieth as often.
+- **PR #33 against the analysis.** The analysis's own reading of a
+  clean `nodcc` run: DCC being on, or something only `nodcc` changes,
+  is necessary, but that doesn't show that the slot's DCC is the cause,
+  nor which mechanism it is, nor that the fault is the driver's. Not
+  known: write side or read side, and driver or hardware. No sync
+  validation run has cleared our side yet; the round's other unit
+  tightens path A's and path B's hand-over to wgpu anyway.
 - **The M1 flake.** Path A's "19 of 2764800 values differ"
   (`zero_copy_matches_copy_path`, odin's H3 run at 0d491ae and M2's at
   0663e05), never explained, is probably this fault.
@@ -10588,7 +10599,8 @@ Tested on lavapipe (Mesa 25.2.8, LLVM 20.1.2), in `tests/upload.rs`:
   size) at 3840×3840, 1920×1920, 3840×1920, 1001×777, 15×15, 2×1 and
   1×1, each down to 1×1, through the compute pass and through the render
   passes it replaced, into slots made as before (`GpuFrame::renderable`
-  and `EightBitMips::RenderPass`, hidden, made for this test alone):
+  and `EightBitMips::RenderPass`, hidden and for tests only: this one,
+  the next one's control and `the_bench_sees_a_steps_own_blocks`):
   every byte of every level agrees. Its control, the compute pass with
   each mean truncated, must fail, and is 12776841 bytes off (1381789 of
   them at level 1 of the 3840² luma). 3.3 to 4.5 s.
@@ -10656,12 +10668,12 @@ six reused in turn); a frame's submission (a barrier, a buffer-to-image
 or image copy of all of level 0, then for levels 1 to 5 a barrier and a
 render pass that draws level n from n − 1 with `texelFetch`); the
 readback; the signature and rates above; what was tried (`syncshaders`
-no change, `nodcc` clean, `radv_disable_dcc_mips`, `img` and sync
-validation to fill in from odin's third run); and a reproducer without
-video decode (six such images, a natural 8-bit luma sequence copied in
-turn from a device-local buffer, the mips drawn, level 0 read back and
-compared, about 10,000 frames with and without `nodcc`). Not tested:
-other GFX11 parts, RDNA2, GFX12, Mesa 26.3 or main.
+no change, `nodcc` clean from PR #33, `radv_disable_dcc_mips`, `img`
+and sync validation to fill in from odin's third run); and a reproducer
+without video decode (six such images, a natural 8-bit luma sequence
+copied in turn from a device-local buffer, the mips drawn, level 0 read
+back and compared, about 10,000 frames with and without `nodcc`). Not
+tested: other GFX11 parts, RDNA2, GFX12, Mesa 26.3 or main.
 
 Revisit if: `zero_copy_pair_matches_copy` fails on odin with this in
 (DCC was not the mechanism, or not the only one: the analysis's next
