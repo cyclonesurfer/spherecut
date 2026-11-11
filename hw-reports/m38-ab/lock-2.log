@@ -1,0 +1,7 @@
+==> recording environment
+==> checking prerequisites
+==> building (release)
+==> listing Tier 2 tests
+==> running Tier 2 tests
+==> report written to /tmp/sc-m38ab/lock-2.md
+==> Tier 2: 1 passed, 0 failed, 0 skipped, 56 left out by `--only`, 0 did not run (57 tests)
