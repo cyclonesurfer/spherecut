@@ -12,8 +12,9 @@
 //! buffer into the slot as the copy path does from its staging belt.
 //!
 //! The render crate's second `unsafe` module, after [`crate::dmabuf`]:
-//! wgpu-hal's device creation with a callback, raw Vulkan through ash on
-//! the queue wgpu doesn't know, and buffers handed to wgpu.
+//! wgpu-hal's device creation with a callback (for every device on
+//! Vulkan, path B's and `open_plain`'s), raw Vulkan through ash on the
+//! queue wgpu doesn't know, and buffers handed to wgpu.
 
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -151,6 +152,63 @@ pub unsafe fn single_queue_gpu(choice: &crate::AdapterChoice) -> Result<crate::G
     let (device, queue, shared) =
         unsafe { open_single_queue(&adapter, &desc) }.map_err(RenderError::Device)?;
     Ok(crate::Gpu::from_parts(instance, adapter, device, queue).with_shared(shared))
+}
+
+/// `adapter`'s device with `desc`'s features and limits, made as wgpu
+/// makes it but with `VK_EXT_queue_family_foreign` where the device
+/// lists it, so that path A's acquire of an import ([`crate::dmabuf`])
+/// names the foreign family on every device Spherecut makes, not only
+/// on [`open_with`]'s; nothing else is added. It refuses what wgpu's
+/// `request_device` refuses before it opens a device, which
+/// `create_device_from_hal` leaves to its caller: an experimental
+/// feature the descriptor doesn't opt in to, a feature the adapter
+/// lacks, a limit above the adapter's. Blocks on the driver.
+pub(crate) fn open_plain(
+    adapter: &wgpu::Adapter,
+    desc: &wgpu::DeviceDescriptor<'_>,
+) -> Result<(wgpu::Device, wgpu::Queue), String> {
+    let experimental = desc.required_features & wgpu::Features::all_experimental_mask();
+    if !experimental.is_empty() && !desc.experimental_features.is_enabled() {
+        return Err(format!(
+            "{experimental:?} are experimental, and the descriptor doesn't opt in"
+        ));
+    }
+    let missing = desc.required_features - adapter.features();
+    if !missing.is_empty() {
+        return Err(format!("the adapter lacks {missing:?}"));
+    }
+    if !desc.required_limits.check_limits(&adapter.limits()) {
+        return Err("a limit asked for is above the adapter's".into());
+    }
+    let open = {
+        // SAFETY: the guard is dropped at the end of this block, before the
+        // device is wrapped, and nothing destroys the adapter meanwhile.
+        let hal = unsafe { adapter.as_hal::<Vulkan>() }
+            .ok_or_else(|| "the adapter isn't a Vulkan one".to_owned())?;
+        let name = ash::ext::queue_family_foreign::NAME;
+        let foreign = hal.physical_device_capabilities().supports_extension(name);
+        let callback: Box<wgpu::hal::vulkan::CreateDeviceCallback<'_>> = Box::new(move |args| {
+            if foreign && !args.extensions.contains(&name) {
+                args.extensions.push(name);
+            }
+        });
+        // SAFETY: `desc` asks for nothing the adapter lacks (checked above),
+        // and the callback only adds the foreign queue family's extension,
+        // which the device lists and which has no feature to turn on.
+        unsafe {
+            hal.open_with_callback(
+                desc.required_features,
+                &desc.required_limits,
+                &desc.memory_hints,
+                Some(callback),
+            )
+        }
+        .map_err(|e| format!("the driver refused the device: {e}"))?
+    };
+    // SAFETY: `open` was made from this adapter with `desc`'s features and
+    // limits.
+    unsafe { adapter.create_device_from_hal::<Vulkan>(open, desc) }
+        .map_err(|e| format!("wgpu refused the device: {e}"))
 }
 
 /// `adapter`'s device with `desc`'s features and limits, plus `add`'s
@@ -1894,6 +1952,52 @@ mod tests {
             plain.shared_video().unwrap_err(),
             "the device wasn't made to be shared with the decoder"
         );
+    }
+
+    /// [`open_plain`] refuses each descriptor wgpu's `request_device`
+    /// refuses before it opens a device, and opens the usual one, as
+    /// wgpu does (the checks' control).
+    #[test]
+    fn open_plain_refuses_what_wgpu_refuses() {
+        let (_, adapter, desc) =
+            crate::Gpu::single_queue_parts(&crate::AdapterChoice::Cpu).unwrap();
+        // The check: open_plain refuses, with the reason it gives, and so
+        // does wgpu.
+        let refused = |d: &wgpu::DeviceDescriptor<'_>| -> Result<String, String> {
+            let wgpu_opens = pollster::block_on(adapter.request_device(d)).is_ok();
+            match open_plain(&adapter, d) {
+                Err(e) if !wgpu_opens => Ok(e),
+                Err(e) => Err(format!("wgpu opens what open_plain refuses: {e}")),
+                Ok(_) => Err(format!("opened; wgpu opens it too: {wgpu_opens}")),
+            }
+        };
+        let first = |f: wgpu::Features| f.iter().next().expect("a feature");
+        let experimental = wgpu::DeviceDescriptor {
+            required_features: first(wgpu::Features::all_experimental_mask()),
+            ..desc.clone()
+        };
+        assert!(refused(&experimental).unwrap().contains("experimental"));
+        let lacking = wgpu::Features::all_native_mask()
+            - wgpu::Features::all_experimental_mask()
+            - adapter.features();
+        let lacking = wgpu::DeviceDescriptor {
+            required_features: desc.required_features | first(lacking),
+            ..desc.clone()
+        };
+        assert!(refused(&lacking).unwrap().starts_with("the adapter lacks "));
+        let above = wgpu::DeviceDescriptor {
+            required_limits: wgpu::Limits {
+                max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d + 1,
+                ..desc.required_limits.clone()
+            },
+            ..desc.clone()
+        };
+        assert_eq!(
+            refused(&above).unwrap(),
+            "a limit asked for is above the adapter's"
+        );
+        // Its control: the usual descriptor.
+        spherecut_testkit::control::must_fail("the usual descriptor", refused(&desc));
     }
 
     #[test]

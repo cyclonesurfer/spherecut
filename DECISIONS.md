@@ -1887,6 +1887,20 @@ Video copied, and its 8K modes three times and half again as fast (76
 and 59), where Vulkan Video copied makes 63 and 78. The choice before
 M3 waits for path B's rows and huginn's.
 
+*Updated 2026-11-11 (review-fix slice):* three claims in path A's note
+above are withdrawn (F088, F115). wgpu has a hook for the ownership
+transfer after all: a raw barrier recorded through
+`CommandEncoder::as_hal_mut`, which path A has submitted ahead of each
+upload since M3.8 (`docs/design/m1-5b.md`, "The acquire"), from
+`VK_QUEUE_FAMILY_FOREIGN_EXT` on every device Spherecut makes now that
+`gpu.rs` opens its devices with that family's extension too (D31).
+"ANV reads imported DMA-BUFs without it" was never run: no Intel GPU has
+run path A. And the Tier 2 comparison missed the cause twice:
+`zero_copy_matches_copy_path` failed on odin on the same frame (X5 frame
+26, view 0) at 0d491ae and at 0663e05 without naming a cause, and the
+likely one, RADV's DCC on the slots' 8-bit planes, was found by D67's
+pair check, not by it (D77).
+
 *Updated 2026-10-30 by slice 5b's path B, as built* (`docs/design/m1-5b.md`).
 FFmpeg's Vulkan Video decodes on wgpu's own device:
 `Gpu::headless_shared` and `for_window_shared` open it through wgpu-hal's
@@ -3930,6 +3944,21 @@ each level. It takes this amendment's means from the same function
 (`mean_codes`, shared with `fs_mip`), and a Tier 1 test holds it to the
 render passes byte for byte at every level, down to 1×1; the stored
 goldens didn't change. Deep planes keep the render pass.
+
+*Updated 2026-11-11 (review-fix slice):* "Slice 5b replaces
+`open_device` alone" no longer holds (F115). Every device but path B's
+is still made in `gpu::open_device`, and on Vulkan, the only backend the
+instance lists, that opens it through wgpu-hal's `open_with_callback`
+too (`vkshare::open_plain`), adding only `VK_EXT_queue_family_foreign`
+where the driver lists it, so that path A's acquire (D25) names the
+foreign queue family on the headless, window and export devices as on
+the shared one. It first refuses what wgpu's `request_device` refuses
+before opening a device, which `create_device_from_hal` leaves to its
+caller: an experimental feature the descriptor doesn't opt in to, and a
+feature or limit beyond the adapter's. Path B's devices are
+`vkshare::open_shared`'s, which add the video queues and extensions as
+well. The stored goldens came out identical, and every measurement the
+same, in three runs on lavapipe after the change.
 
 ## D32. Golden images
 

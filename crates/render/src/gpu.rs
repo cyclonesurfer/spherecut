@@ -2,17 +2,18 @@
 //!
 //! Every device Spherecut renders on is made here, from one instance
 //! descriptor (Vulkan only), one adapter rule and one device descriptor,
-//! in `open_device`, so that `spherecut frame`, the tests and the GUI
-//! agree on features and limits. The GUI (slice 7) opens its device here
-//! too and hands it to eframe through egui-wgpu's `WgpuSetup::Existing`;
+//! so that `spherecut frame`, the tests and the GUI agree on features
+//! and limits. The GUI (slice 7) opens its device here too and hands it
+//! to eframe through egui-wgpu's `WgpuSetup::Existing`;
 //! `WgpuSetup::CreateNew` would have egui-wgpu make its own. Slice 5b
 //! creates the Vulkan device itself, through wgpu-hal's
-//! `Adapter::open_with_callback`, to add the video-decode extensions and
-//! queues FFmpeg's Vulkan Video needs and the DMA-BUF import extensions,
-//! then wraps it with `wgpu::Adapter::create_device_from_hal`; that
-//! replaces `open_device` and nothing else (DECISIONS D31). As built,
-//! only path B's device is made so ([`Gpu::headless_shared`],
-//! [`crate::vkshare`]): path A needs no more than a feature.
+//! `Adapter::open_with_callback`, then wraps it with
+//! `wgpu::Adapter::create_device_from_hal` (DECISIONS D31). Every device
+//! but path B's is made in `open_device`, by `vkshare::open_plain`, which
+//! adds only `VK_EXT_queue_family_foreign`, for path A's acquire of an
+//! import ([`crate::dmabuf`]); path B's ([`Gpu::headless_shared`]) is
+//! [`vkshare::open_shared`]'s, which adds the video-decode extensions
+//! and queues FFmpeg's Vulkan Video needs too.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -479,12 +480,17 @@ impl Gpu {
     }
 }
 
-/// The device and queue for `adapter`: where slice 5b makes its own
-/// Vulkan device instead (module docs).
+/// The device and queue for `adapter`: on Vulkan [`vkshare::open_plain`]'s,
+/// with the foreign queue family's extension (module docs), elsewhere
+/// wgpu's own.
 fn open_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
-    pollster::block_on(adapter.request_device(&Gpu::device_descriptor(adapter))).map_err(|e| {
-        RenderError::Device(format!("{} refused a device: {e}", adapter.get_info().name))
-    })
+    let info = adapter.get_info();
+    let desc = Gpu::device_descriptor(adapter);
+    match info.backend {
+        wgpu::Backend::Vulkan => vkshare::open_plain(adapter, &desc),
+        _ => pollster::block_on(adapter.request_device(&desc)).map_err(|e| e.to_string()),
+    }
+    .map_err(|e| RenderError::Device(format!("{} refused a device: {e}", info.name)))
 }
 
 /// An adapter as the errors list it: its name, kind and driver.

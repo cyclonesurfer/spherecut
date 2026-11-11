@@ -47,11 +47,12 @@ pub fn imported_layout(format: wgpu::TextureFormat) -> vk::ImageLayout {
 
 /// The queue family an import is acquired from. The decoder isn't a
 /// Vulkan queue, so it is the foreign one where the device has
-/// `VK_EXT_queue_family_foreign` (`foreign`), as every device
-/// [`crate::vkshare`] makes has where the driver lists it. A device made
-/// without it (one wgpu opened itself) can name only the external one,
-/// which FFmpeg's own DRM import uses too, though Vulkan means that for
-/// another Vulkan instance on the same driver.
+/// `VK_EXT_queue_family_foreign` (`foreign`), as every device Spherecut
+/// makes has where the driver lists it ([`crate::vkshare`] makes them
+/// all). Only a device made elsewhere (one wgpu opened itself) lacks it,
+/// and can name only the external one, which FFmpeg's own DRM import
+/// uses too, though Vulkan means that for another Vulkan instance on the
+/// same driver.
 pub fn acquired_from(foreign: bool) -> u32 {
     if foreign {
         vk::QUEUE_FAMILY_FOREIGN_EXT
@@ -746,12 +747,13 @@ mod tests {
     }
 
     /// The acquire names the foreign family on a shared-device maker's
-    /// device and can't on one wgpu opened itself (the check and its
-    /// control); then a smoke run on lavapipe, which imports no DMA-BUF:
-    /// on stand-ins for the planes ([`stand_in`]) the acquire records and
-    /// submits on wgpu's queue, on both devices, and wgpu then copies the
-    /// planes out without an error of its own, where a plane it can't
-    /// copy from raises one (the scope's control). A wrong barrier, or the
+    /// device and on [`Gpu::headless`]'s, and can't on one wgpu opened
+    /// itself (the check and its control); then a smoke run on lavapipe,
+    /// which imports no DMA-BUF: on stand-ins for the planes
+    /// ([`stand_in`]) the acquire records and submits on wgpu's queue, on
+    /// all three devices, and wgpu then copies the planes out without an
+    /// error of its own, where a plane it can't copy from raises one (the
+    /// scope's control). A wrong barrier, or the
     /// order of the acquire and wgpu's reads, is invisible here: wgpu's
     /// error scope sees its own validation only, never the raw barrier,
     /// and this box has no Khronos validation layer. Real imports, and the
@@ -771,12 +773,19 @@ mod tests {
             }
         };
         from_foreign(&gpu).unwrap();
-        // Its control: a device wgpu opened itself can't name it.
-        let plain = Gpu::headless(&crate::AdapterChoice::Cpu).unwrap();
+        // Every other device Spherecut makes names it too.
+        let headless = Gpu::headless(&crate::AdapterChoice::Cpu).unwrap();
+        from_foreign(&headless).unwrap();
+        // Its control: a device wgpu opened itself, from the same
+        // descriptor, can't name it.
+        let (instance, adapter, desc) =
+            Gpu::single_queue_parts(&crate::AdapterChoice::Cpu).unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&desc)).unwrap();
+        let plain = Gpu::from_parts(instance, adapter, device, queue);
         spherecut_testkit::control::must_fail("wgpu's own device", from_foreign(&plain));
-        // The smoke run, on the shared device (from the foreign family)
-        // and on wgpu's own (from the external one).
-        for gpu in [&gpu, &plain] {
+        // The smoke run, on the shared device and the headless one (from
+        // the foreign family) and on wgpu's own (from the external one).
+        for gpu in [&gpu, &headless, &plain] {
             let planes = [
                 stand_in(gpu, wgpu::TextureFormat::R8Unorm),
                 stand_in(gpu, wgpu::TextureFormat::Rg8Unorm),
