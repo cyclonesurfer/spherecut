@@ -11,7 +11,12 @@
 //!   catch-up, the end and the backstop keep where a pair exists;
 //! - `play`: a locked pair plays on six slots without a mixed pair,
 //!   paced to its slowest lens, and unlocks below its slot floor or ends
-//!   when a member fails.
+//!   when a member fails;
+//! - `resume`: a pair plays on from a seek after its end or a member's
+//!   failure, and lands where its lenses can both show;
+//! - `catchup`: a pair trailing the clock together catches up as an
+//!   unlocked stream does;
+//! - `wait`: `pair_wait` is how far the clock is past the pair shown.
 //!
 //! Budget (M3 plan 4.1 rule 5, section 19.6): 10 s for the suite, which
 //! each test prints its time against.
@@ -22,9 +27,13 @@
 mod common;
 
 mod base;
+mod catchup;
+mod held;
 mod open;
 mod pick;
 mod play;
+mod resume;
+mod wait;
 
 use std::path::Path;
 use std::sync::{OnceLock, mpsc};
