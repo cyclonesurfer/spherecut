@@ -9,6 +9,14 @@
 //! `decode-v{i}` worker per stream. Each worker opens its own decoder,
 //! with the player's shutdown flag as its interrupt.
 //!
+//! A pair opened locked ([`crate::Player::open_locked`]) has both
+//! streams' timing tables read through the backend first, whatever the
+//! decoder preference, and its lock group pending in the status. The
+//! worker that opens second compares the lenses, under the status lock
+//! as it adds its stream's info, and locks the group or refuses it by
+//! the field that differs; a member that can't open or decode while the
+//! group is pending refuses it with `"open"` (M3 plan section 9).
+//!
 //! **Requests.** A worker takes one request at a time, the latest
 //! winning: the UI stops the ones before with a new [`StopToken`]
 //! generation before it sends the next, so a seek or a wait for room in
@@ -47,16 +55,19 @@ use spherecut_media::backend::{
     SeekMode, SeekOutcome, VideoDecode, VideoFrame, VideoRequest,
 };
 use spherecut_media::hw::GpuIds;
+use spherecut_media::mp4::TrackTiming;
 use spherecut_media::{HwDevice, MediaError};
 use spherecut_render::vkshare::SharedVideo;
 
 use crate::audio::{AudioOutputFactory, PlayerThreads};
 use crate::cache::Insert;
 use crate::decoder::{self, DecoderChoice, DecoderPreference, HwSupport, StreamFormat};
+use crate::lock::LockSpec;
 use crate::perf::{Counter, Stage};
 use crate::player::{PlayerError, PlayerEvent};
 use crate::shared::{
-    Command, Landed, Place, Request, Shared, StreamStatus, Want, frames_between, lock,
+    Command, Landed, LockGroup, Place, Request, Shared, Status, StreamStatus, Want, frames_between,
+    lock,
 };
 
 /// How long an idle worker waits for a command before it looks at the
@@ -95,6 +106,9 @@ pub(crate) struct OpenJob {
     /// Vulkan Video streams decode on the renderer's device, shared so
     /// (path B): zero copy is on and the device was made shared.
     pub(crate) shared_video: Option<Arc<SharedVideo>>,
+    /// How the two streams are locked, for a pair opened with
+    /// [`Player::open_locked`](crate::Player::open_locked).
+    pub(crate) lock: Option<LockSpec>,
 }
 
 impl OpenJob {
@@ -103,6 +117,12 @@ impl OpenJob {
     }
 
     pub(crate) fn run(self) {
+        // A locked pair's tables, read through the backend before the
+        // decoders are chosen, whatever the preference: `choose` probes
+        // the file only under Auto.
+        let group = self
+            .lock
+            .map(|spec| LockGroup::pending(spec, [0, 1].map(|m| self.timing(m))));
         let choices = self.choose();
         if self.stale() {
             return;
@@ -159,8 +179,9 @@ impl OpenJob {
                     ..StreamStatus::default()
                 })
                 .collect();
-            // An unlocked open; `open_locked`'s forms its group.
-            st.lock = None;
+            // A locked pair's group, pending until both members open; none
+            // for an unlocked open.
+            st.lock = group;
             std::mem::replace(&mut st.audio, audio)
         };
         // The last open's audio, if this holds it last, outside the lock.
@@ -217,11 +238,37 @@ impl OpenJob {
             };
             if let Err(e) = shared.spawn(format!("decode-v{stream}"), move || worker.run()) {
                 let error = PlayerError::new("thread_failed", format!("starting a decoder: {e}"));
-                shared.stream(self.epoch, stream, |s| s.error = Some(error.clone()));
+                let group = shared.stream_and_group(
+                    self.epoch,
+                    stream,
+                    |s| s.error = Some(error.clone()),
+                    |st| st.member_failed(stream),
+                );
                 shared.event(PlayerEvent::OpenFailed { stream, error });
+                for e in group {
+                    shared.event(e);
+                }
             }
         }
         shared.repaint();
+    }
+
+    /// Player stream `stream`'s timing tables, for its lock group: `None`
+    /// for a track with no tables, or whose tables couldn't be read,
+    /// which refuses the lock with `"timing"`.
+    fn timing(&self, stream: usize) -> Option<TrackTiming> {
+        let index = self.streams.get(stream).and_then(|(asked, _)| *asked)?;
+        match self.backend.track_timing(&self.path, index) {
+            Ok(Some(t)) => Some(t),
+            Ok(None) => {
+                tracing::info!(stream, "stream {index} has no timing tables to compare");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(stream, "can't read stream {index}'s timing tables: {e}");
+                None
+            }
+        }
     }
 
     /// Each stream's decoder, by the preference.
@@ -391,30 +438,44 @@ impl Worker {
             Ok(mut dec) => {
                 let info = dec.info().clone();
                 let path = dec.decode_path().clone();
-                self.shared.stream(self.epoch, self.stream, |s| {
-                    s.opened = true;
-                    s.info = Some(info.clone());
-                    s.decode = Some(path);
-                });
+                // With the other member's open, a locked pair's lenses are
+                // compared under the same lock.
+                let group = self.shared.stream_and_group(
+                    self.epoch,
+                    self.stream,
+                    |s| {
+                        s.opened = true;
+                        s.info = Some(info.clone());
+                        s.decode = Some(path);
+                    },
+                    Status::settle_lock,
+                );
                 self.start_audio(info.origin().ok());
                 self.take_events(dec.as_mut());
                 self.tell(PlayerEvent::Opened {
                     stream: self.stream,
                     info: Box::new(info),
                 });
+                for e in group {
+                    self.tell(e);
+                }
                 Some(dec)
             }
             Err(e) => {
                 if !self.shared.is_shut_down() {
                     let error = PlayerError::from(&e);
                     tracing::warn!(stream = self.stream, "can't open: {e}");
-                    self.shared.stream(self.epoch, self.stream, |s| {
-                        s.error = Some(error.clone());
-                    });
-                    self.tell(PlayerEvent::OpenFailed {
-                        stream: self.stream,
-                        error,
-                    });
+                    let stream = self.stream;
+                    let group = self.shared.stream_and_group(
+                        self.epoch,
+                        stream,
+                        |s| s.error = Some(error.clone()),
+                        |st| st.member_failed(stream),
+                    );
+                    self.tell(PlayerEvent::OpenFailed { stream, error });
+                    for e in group {
+                        self.tell(e);
+                    }
                     self.start_audio(None);
                 }
                 None
@@ -831,7 +892,9 @@ impl Worker {
         Ok(())
     }
 
-    /// The decoder failed with `e`: say so, unless it was shut down.
+    /// The decoder failed with `e`, after any fallback to software: say
+    /// so, unless it was shut down. A locked pair that hasn't formed yet
+    /// is refused with `"open"`.
     fn fail(&mut self, e: MediaError) -> Halt {
         self.failed = true;
         if self.shared.is_shut_down() {
@@ -841,14 +904,20 @@ impl Worker {
         self.reported = true;
         let error = PlayerError::from(&e);
         let working = self.working;
-        self.shared.stream(self.epoch, self.stream, |s| {
-            s.error = Some(error.clone());
-            s.failed_request = working;
-        });
-        self.tell(PlayerEvent::DecodeFailed {
-            stream: self.stream,
-            error,
-        });
+        let stream = self.stream;
+        let group = self.shared.stream_and_group(
+            self.epoch,
+            stream,
+            |s| {
+                s.error = Some(error.clone());
+                s.failed_request = working;
+            },
+            |st| st.member_failed(stream),
+        );
+        self.tell(PlayerEvent::DecodeFailed { stream, error });
+        for e in group {
+            self.tell(e);
+        }
         Halt::Failed
     }
 

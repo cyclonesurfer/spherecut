@@ -59,7 +59,7 @@ use crate::audio::{AudioOutput, AudioOutputFactory, PREROLL_AUDIO, PREROLL_LIMIT
 use crate::budget::{AUTO_MIN, AutoBudget, CacheBudget, read_auto_budget};
 use crate::cache::{CacheStats, FrameCache};
 use crate::decoder::{DecoderPreference, HwPromise, HwSupport};
-use crate::lock::{LockSnapshot, LockSpec};
+use crate::lock::{LockSnapshot, LockSpec, LockStatus};
 use crate::perf::{Counter, MemoryStats, PerfSnapshot, PerfStats, Stage};
 use crate::shared::{
     BudgetStatus, Command, Place, Repaint, Request, Shared, Status, StreamStatus, Want, av_offset,
@@ -507,6 +507,9 @@ struct Ui {
     /// The status as last read: its open, and each stream's part.
     view_epoch: u64,
     view: Vec<StreamView>,
+    /// The open's lock group's status as last read, for a pair opened
+    /// locked.
+    lock: Option<LockStatus>,
     last_present: Option<Instant>,
     intervals: VecDeque<f32>,
     /// Whether what is presented is painted: frames passed over while
@@ -709,6 +712,7 @@ impl Player {
                 shown: Vec::new(),
                 view_epoch: 0,
                 view: Vec::new(),
+                lock: None,
                 last_present: None,
                 intervals: VecDeque::with_capacity(INTERVALS),
                 painted: true,
@@ -730,6 +734,24 @@ impl Player {
     /// Open these video streams of `path`, by their indices in the file
     /// (`None` for the best), paused at their first frames.
     pub fn open_streams(&self, path: PathBuf, streams: Vec<Option<usize>>) {
+        self.open_with(path, streams, None);
+    }
+
+    /// Open video streams `streams` of `path`, by their indices in the
+    /// file, as a frame-locked pair (M3 plan section 9), paused at their
+    /// first frames: player streams 0 and 1, the group's members. Each
+    /// stream's timing is read through the backend whatever the decoder,
+    /// and nothing of the pair shows until the lenses agree and the group
+    /// forms, or the lock is refused ([`PlayerEvent::LockRefused`]) and
+    /// they show unlocked, as [`open_streams`](Self::open_streams) shows
+    /// them. Locked, they show only as pairs of one clip time, and end at
+    /// the shorter lens ([`PlayerEvent::LensShort`]).
+    pub fn open_locked(&self, path: PathBuf, streams: [usize; 2], lock: LockSpec) {
+        self.open_with(path, streams.map(Some).to_vec(), Some(lock));
+    }
+
+    /// Open `streams` of `path`, locked as a pair by `lock` if given.
+    fn open_with(&self, path: PathBuf, streams: Vec<Option<usize>>, lock: Option<LockSpec>) {
         let now = Instant::now();
         let Ok(mut ui) = self.ui.try_borrow_mut() else {
             return;
@@ -782,6 +804,7 @@ impl Player {
                 .shared_video
                 .clone()
                 .filter(|_| ui.config.zero_copy.vulkan()),
+            lock,
         };
         if let Err(e) = spawn_into(&self.handles_tx, "open".into(), move || job.run()) {
             self.shared.event(PlayerEvent::OpenFailed {
@@ -789,20 +812,6 @@ impl Player {
                 error: PlayerError::new("thread_failed", format!("starting the open: {e}")),
             });
         }
-    }
-
-    /// Open video streams `streams` of `path`, by their indices in the
-    /// file, as a frame-locked pair (M3 plan section 9), paused at their
-    /// first frames: player streams 0 and 1, the group's members. Each
-    /// stream's timing is read through the backend whatever the decoder,
-    /// and nothing of the pair shows until the lenses agree and the group
-    /// forms, or the lock is refused ([`PlayerEvent::LockRefused`]) and
-    /// they show unlocked, as [`open_streams`](Self::open_streams) shows
-    /// them. Locked, they show only as pairs of one clip time, and end at
-    /// the shorter lens ([`PlayerEvent::LensShort`]).
-    #[expect(unused_variables, reason = "M3.8 unit (a) writes the body")]
-    pub fn open_locked(&self, path: PathBuf, streams: [usize; 2], lock: LockSpec) {
-        todo!()
     }
 
     /// Close the open file: its threads stopped, nothing shown, and the
@@ -848,6 +857,7 @@ impl Player {
         ui.preroll = false;
         ui.view_epoch = 0;
         ui.view.clear();
+        ui.lock = None;
         ui.playhead = None;
         ui.last_new = None;
         ui.span = None;
@@ -1094,6 +1104,11 @@ impl Player {
         if ui.view_epoch != ui.epoch || ui.path.is_none() {
             return None;
         }
+        // Nothing of a locked pair shows until its lenses agree, or the
+        // lock is refused and they show unlocked (M3 plan section 9).
+        if ui.lock == Some(LockStatus::Pending) {
+            return None;
+        }
         let offset =
             Time(Rational::new(i64::from(ui.config.av_offset_ms), 1000).unwrap_or(Rational::ZERO));
         // The offset applies while playing: paused, the frame at the
@@ -1220,6 +1235,7 @@ impl Player {
             return;
         }
         ui.view_epoch = st.epoch;
+        ui.lock = st.lock.as_ref().map(|g| g.status);
         ui.view.resize(st.streams.len(), StreamView::default());
         for (v, s) in ui.view.iter_mut().zip(&st.streams) {
             *v = StreamView {
