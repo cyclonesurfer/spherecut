@@ -130,6 +130,29 @@ fn c_names(
         .collect()
 }
 
+/// The `VkPhysicalDeviceFeatures2` FFmpeg is handed for the device
+/// `handles` name: a copy of the head of the chain its maker kept, whose
+/// `pNext` still points into that chain, or an empty chain when the maker
+/// didn't say. FFmpeg 6.1 to 9.0 read the features they use from the
+/// physical device instead (`ff_vk_load_props`), but the header says the
+/// field holds what was enabled, and a later FFmpeg may go by it.
+fn enabled_features(handles: &VkDeviceHandles) -> sys::VkPhysicalDeviceFeatures2 {
+    if handles.device_features == 0 {
+        // SAFETY: a C struct of integers and a pointer, for which all
+        // zeroes is valid (a null `pNext`).
+        let mut empty: sys::VkPhysicalDeviceFeatures2 = unsafe { std::mem::zeroed() };
+        empty.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        return empty;
+    }
+    // SAFETY: the maker gives the address of a `VkPhysicalDeviceFeatures2`
+    // (Vulkan's layout, which ffmpeg-sys-next binds), valid while
+    // `keepalive` lives, which the caller holds.
+    unsafe {
+        std::ptr::with_exposed_provenance::<sys::VkPhysicalDeviceFeatures2>(handles.device_features)
+            .read()
+    }
+}
+
 impl HwDevice {
     /// FFmpeg's Vulkan device context on a device Spherecut made, from its
     /// raw `handles`: FFmpeg decodes on the queues `handles` grants it,
@@ -209,10 +232,9 @@ impl HwDevice {
             (*hw).inst = std::ptr::with_exposed_provenance_mut(handles.instance);
             (*hw).phys_dev = std::ptr::with_exposed_provenance_mut(handles.physical_device);
             (*hw).act_dev = std::ptr::with_exposed_provenance_mut(handles.device);
-            // FFmpeg reads the features it uses from the physical device
-            // (`ff_vk_load_props`); this chain is left empty.
-            (*hw).device_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-            (*hw).device_features.pNext = std::ptr::null_mut();
+            // The features the device was made with, as FFmpeg's header
+            // asks; its maker's chain, which `keepalive` keeps.
+            (*hw).device_features = enabled_features(handles);
             (*hw).enabled_inst_extensions = kept.instance_extensions.as_ptr();
             (*hw).nb_enabled_inst_extensions = nb_instance;
             (*hw).enabled_dev_extensions = kept.device_extensions.as_ptr();
@@ -466,7 +488,7 @@ impl VkPicture for VkFrame {
         &self.planes
     }
 
-    fn with_locked(&self, f: &mut dyn FnMut(&mut [VkImageState])) {
+    fn with_locked(&self, f: &mut dyn FnMut(&mut [VkImageState])) -> bool {
         // SAFETY: `self.frame` is a Vulkan frame FFmpeg can lock
         // (checked in `new`), alive while `self` is. Its AVVkFrame's
         // fields are read and written only under its frames context's
@@ -474,11 +496,11 @@ impl VkPicture for VkFrame {
         // the guard even if `f` panics, and then nothing is written.
         unsafe {
             let Some((vkf, fc)) = vk_parts(self.frame.as_ptr()) else {
-                return;
+                return false;
             };
             let vfc = (*fc).hwctx.cast::<sys::AVVulkanFramesContext>();
             let (Some(lock), Some(unlock)) = ((*vfc).lock_frame, (*vfc).unlock_frame) else {
-                return;
+                return false;
             };
             lock(fc, vkf);
             let _guard = Unlock { unlock, fc, vkf };
@@ -500,6 +522,7 @@ impl VkPicture for VkFrame {
                 (*vkf).sem_value[i] = s.value;
             }
         }
+        true
     }
 }
 
@@ -626,6 +649,7 @@ mod tests {
             device_extensions,
             queues,
             keepalive: Arc::new(()),
+            device_features: 0,
             gate: Default::default(),
         }
     }
@@ -662,6 +686,56 @@ mod tests {
             matches!(e, HwError::Nul { .. } | HwError::NotBuiltIn(_)),
             "{e}"
         );
+    }
+
+    #[test]
+    fn ffmpeg_is_handed_the_features_the_device_was_made_with() {
+        /// The first feature, `robustBufferAccess`: the `VkBool32` 16
+        /// bytes in, as Vulkan lays the struct out.
+        fn first(f: &sys::VkPhysicalDeviceFeatures2) -> u32 {
+            // SAFETY: inside the struct, aligned for a u32.
+            unsafe {
+                std::ptr::from_ref(f)
+                    .cast::<u8>()
+                    .add(16)
+                    .cast::<u32>()
+                    .read()
+            }
+        }
+        // A maker's chain: a head with a feature on, pointing on to the
+        // next struct.
+        let mut next = [0u64; 4];
+        // SAFETY: all zeroes is a valid VkPhysicalDeviceFeatures2.
+        let mut head: sys::VkPhysicalDeviceFeatures2 = unsafe { std::mem::zeroed() };
+        head.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        head.pNext = next.as_mut_ptr().cast();
+        // SAFETY: as `first`'s.
+        unsafe { (&raw mut head).cast::<u8>().add(16).cast::<u32>().write(1) };
+        // The check: FFmpeg's copy is the head, its features and its
+        // pointer into the maker's chain.
+        let same = |got: &sys::VkPhysicalDeviceFeatures2| -> Result<(), String> {
+            if (got.sType, got.pNext, first(got)) == (head.sType, head.pNext, 1) {
+                Ok(())
+            } else {
+                Err(format!("{} {:?} {}", got.sType, got.pNext, first(got)))
+            }
+        };
+        let mut h = handles(Vec::new(), Vec::new());
+        h.device_features = std::ptr::from_ref(&head).expose_provenance();
+        same(&enabled_features(&h)).unwrap();
+        // A maker that doesn't say: an empty chain, which the check tells
+        // apart.
+        h.device_features = 0;
+        let empty = enabled_features(&h);
+        assert_eq!(
+            (empty.sType, empty.pNext, first(&empty)),
+            (
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                std::ptr::null_mut(),
+                0
+            )
+        );
+        spherecut_testkit::control::must_fail("the empty chain", same(&empty));
     }
 
     #[test]

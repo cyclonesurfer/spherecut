@@ -4,9 +4,14 @@
 //! [`Uploader::upload_imported`](crate::Uploader::upload_imported) to copy
 //! or ingest from. Nothing goes through the CPU.
 //!
-//! The render crate's only `unsafe` (M1 plan section 2.4): the fd
-//! borrowed from the frame, what the driver takes asked through ash, and
-//! wgpu-hal's import and wrap.
+//! Each import is acquired from the decoder before anything reads it: a
+//! queue family ownership transfer from the foreign queue family (VA-API
+//! isn't a Vulkan queue) to wgpu's, recorded raw, since wgpu has no
+//! barrier of its own for that ([`acquire_barrier`]).
+//!
+//! The render crate's first `unsafe` module (M1 plan section 2.4): the fd
+//! borrowed from the frame, what the driver takes asked through ash,
+//! wgpu-hal's import and wrap, and the acquire.
 
 use std::collections::HashMap;
 use std::os::fd::BorrowedFd;
@@ -26,13 +31,68 @@ pub const USAGE: wgpu::TextureUsages =
     wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_SRC);
 
 /// The state wgpu is told an import starts in: both read-only uses at
-/// once, which wgpu-hal takes as `VK_IMAGE_LAYOUT_GENERAL`. So the first
-/// use is a barrier out of `GENERAL`, which keeps the decoder's bytes, as
-/// a release from a foreign queue leaves them; one out of `UNDEFINED`
-/// needn't. wgpu can't express the queue family transfer itself; the
-/// layouts [`plan`] takes have no compression to resolve, and Tier 2's
-/// `zero_copy_matches_copy_path` holds the result to the copy path's.
+/// once, which wgpu-hal takes as `VK_IMAGE_LAYOUT_GENERAL`
+/// ([`imported_layout`]). [`Importer::import`] acquires each plane into
+/// that layout before anything reads it, so wgpu's first barrier on the
+/// import starts where the acquire left it, and keeps the decoder's
+/// bytes; one out of `UNDEFINED` needn't keep them.
 const IMPORTED: wgpu::TextureUses = wgpu::TextureUses::COPY_SRC.union(wgpu::TextureUses::RESOURCE);
+
+/// The layout wgpu-hal tracks an import of `format` in from the start
+/// (that of `COPY_SRC` and `RESOURCE` together, the state wgpu is told
+/// it is made in), which the acquire leaves it in.
+pub fn imported_layout(format: wgpu::TextureFormat) -> vk::ImageLayout {
+    wgpu::hal::vulkan::conv::derive_image_layout(IMPORTED, format)
+}
+
+/// The queue family an import is acquired from. The decoder isn't a
+/// Vulkan queue, so it is the foreign one where the device has
+/// `VK_EXT_queue_family_foreign` (`foreign`), as every device
+/// [`crate::vkshare`] makes has where the driver lists it. A device made
+/// without it (one wgpu opened itself) can name only the external one,
+/// which FFmpeg's own DRM import uses too, though Vulkan means that for
+/// another Vulkan instance on the same driver.
+pub fn acquired_from(foreign: bool) -> u32 {
+    if foreign {
+        vk::QUEUE_FAMILY_FOREIGN_EXT
+    } else {
+        vk::QUEUE_FAMILY_EXTERNAL
+    }
+}
+
+/// The barrier that acquires an imported plane, `image` of `format`,
+/// from the decoder ([`acquired_from`]) for `family`, wgpu's queue
+/// family, its one level and layer. The layout is the same on both sides,
+/// [`imported_layout`]'s `GENERAL`: the decoder left its bytes in the
+/// layout their modifier gives, which Vulkan has no name for but
+/// `GENERAL` (as it says outright for a transfer from D3D11 memory, which
+/// may start in `GENERAL` or `UNDEFINED`), and a transition out of
+/// `UNDEFINED` may drop them. The source's stage and access are the
+/// releasing queue's, outside Vulkan, so none are named; the destination
+/// is every later read, which wgpu's own first barrier chains from.
+pub fn acquire_barrier(
+    image: vk::Image,
+    format: wgpu::TextureFormat,
+    family: u32,
+    foreign: bool,
+) -> vk::ImageMemoryBarrier<'static> {
+    let layout = imported_layout(format);
+    vk::ImageMemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::empty())
+        .dst_access_mask(vk::AccessFlags::MEMORY_READ)
+        .old_layout(layout)
+        .new_layout(layout)
+        .src_queue_family_index(acquired_from(foreign))
+        .dst_queue_family_index(family)
+        .image(image)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        })
+}
 
 /// One plane's import, checked against the frame's shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,10 +182,12 @@ impl Importer {
     }
 
     /// Imports each plane `planes` holds as a texture of its own over the
-    /// frame's memory, in [`USAGE`], ready for its first use. A texture
-    /// holds a dup of its layer's fd. Nothing stops the decoder writing the
-    /// memory again: the caller holds the frame until the GPU is done with
-    /// the work that reads it (`Queue::on_submitted_work_done`).
+    /// frame's memory, in [`USAGE`], and acquires them from the decoder
+    /// for wgpu's queue in a submission of their own, ahead of anything
+    /// that reads them. A texture holds a dup of its layer's fd. Nothing
+    /// stops the decoder writing the memory again: the caller holds the
+    /// frame until the GPU is done with the work that reads it
+    /// (`Queue::on_submitted_work_done`).
     ///
     /// `Import` when the device can't import or the driver refuses the
     /// plane's format, modifier or size, with the reason; the copy path
@@ -142,13 +204,15 @@ impl Importer {
                     .into(),
             ));
         }
-        planes
+        let imported = planes
             .iter()
             .map(|p| {
                 self.check(gpu, p)?;
                 import_one(gpu, p)
             })
-            .collect()
+            .collect::<Result<Vec<_>, RenderError>>()?;
+        acquire(gpu, &imported)?;
+        Ok(imported.into_iter().map(|(_, t)| t).collect())
     }
 
     /// `Import` unless the driver takes `p`'s format and modifier, as
@@ -261,8 +325,73 @@ fn ask_driver(gpu: &Gpu, format: wgpu::TextureFormat, modifier: u64) -> Result<(
     Ok((max.width, max.height))
 }
 
-/// One plane in: its fd dup'd, imported by wgpu-hal, and wrapped for wgpu.
-fn import_one(gpu: &Gpu, p: &PlaneImport) -> Result<wgpu::Texture, RenderError> {
+/// Acquires `planes` (each an import's `VkImage` and its texture) from the
+/// decoder for wgpu's queue ([`acquire_barrier`]), submitted on that queue
+/// ahead of anything that reads them. The barrier is recorded raw into an
+/// encoder of its own, since wgpu won't mix raw commands with its own in
+/// one; the textures are kept until the GPU has done it.
+fn acquire(gpu: &Gpu, planes: &[(vk::Image, wgpu::Texture)]) -> Result<(), RenderError> {
+    let (raw, family, foreign) = acquire_parts(gpu)?;
+    let barriers: Vec<vk::ImageMemoryBarrier<'_>> = planes
+        .iter()
+        .map(|(image, t)| acquire_barrier(*image, t.format(), family, foreign))
+        .collect();
+    let mut enc = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dmabuf acquire"),
+        });
+    // SAFETY: the encoder is wgpu's, open, and recorded into only here; the
+    // barriers name this device's images, of this queue family, which
+    // live until the work is done (kept below). The foreign family is
+    // named only when the device has its extension.
+    let recorded = unsafe {
+        enc.as_hal_mut::<Vulkan, _, _>(|e| {
+            let e = e?;
+            raw.cmd_pipeline_barrier(
+                e.raw_handle(),
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &barriers,
+            );
+            Some(())
+        })
+    };
+    if recorded.is_none() {
+        return Err(RenderError::Import(
+            "wgpu's encoder isn't a Vulkan one, to acquire an import on".into(),
+        ));
+    }
+    let keep: Vec<wgpu::Texture> = planes.iter().map(|(_, t)| t.clone()).collect();
+    gpu.submit_gate().wait();
+    gpu.queue.submit([enc.finish()]);
+    gpu.queue.on_submitted_work_done(move || drop(keep));
+    Ok(())
+}
+
+/// What an acquire on `gpu` needs: its raw device, wgpu's queue family,
+/// and whether the device has `VK_EXT_queue_family_foreign`.
+fn acquire_parts(gpu: &Gpu) -> Result<(ash::Device, u32, bool), RenderError> {
+    // SAFETY: the guard is dropped at the end of this function, and the
+    // device isn't destroyed while `gpu` lives, which is longer than the
+    // raw device's clone is used.
+    let device = unsafe { gpu.device.as_hal::<Vulkan>() }
+        .ok_or_else(|| RenderError::Import("the device isn't a Vulkan one".into()))?;
+    Ok((
+        device.raw_device().clone(),
+        device.queue_family_index(),
+        device
+            .enabled_device_extensions()
+            .contains(&ash::ext::queue_family_foreign::NAME),
+    ))
+}
+
+/// One plane in: its fd dup'd, imported by wgpu-hal, and wrapped for wgpu;
+/// its `VkImage` too, for the acquire.
+fn import_one(gpu: &Gpu, p: &PlaneImport) -> Result<(vk::Image, wgpu::Texture), RenderError> {
     let l = &p.layer;
     // SAFETY: `plan` takes only fds that aren't negative, and the frame the
     // layer came from holds its fd open while it lives, which is longer
@@ -315,20 +444,26 @@ fn import_one(gpu: &Gpu, p: &PlaneImport) -> Result<wgpu::Texture, RenderError> 
         usage: USAGE,
         view_formats: &[],
     };
+    // SAFETY: the handle is only named in the acquire's barrier, while the
+    // texture that owns it lives.
+    let image = unsafe { raw.raw_handle() };
     // SAFETY: `raw` was made on this device from `hal_desc`, `desc`'s twin
     // (the same size, format and usage); its memory holds the decoded
-    // picture, so it is initialized; and `IMPORTED` is the state its first
-    // barrier starts from (see there).
-    Ok(unsafe {
+    // picture, so it is initialized; and `IMPORTED` is the state the
+    // acquire leaves it in, which `import` records ahead of anything that
+    // uses the texture.
+    let texture = unsafe {
         gpu.device
             .create_texture_from_hal::<Vulkan>(raw, &desc, IMPORTED)
-    })
+    };
+    Ok((image, texture))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::plane::SlotShape;
+    use ash::vk::Handle;
     use spherecut_core::video::{ColorFamily, PixelLayout, PlaneDesc, SampleBytes};
 
     fn layout(bytes: SampleBytes) -> PixelLayout {
@@ -419,6 +554,256 @@ mod tests {
             assert_eq!(f.is_deep(), ints, "{f:?}");
         }
         assert_eq!(fourcc::name(layer_fourcc(PlaneFormat::Rg16F)), "GR32");
+    }
+
+    /// Why `b` isn't the acquire of a plane of `format` for `family` on a
+    /// device with the foreign queue family's extension or without
+    /// (`foreign`): ownership moves from the decoder's family (foreign,
+    /// or external without the extension) to `family`; the layout, the
+    /// same on both sides, isn't `UNDEFINED` and is the one wgpu-hal
+    /// tracks the import in; the whole image, its colour aspect; and a
+    /// read after it.
+    fn acquire_fault(
+        b: &vk::ImageMemoryBarrier<'_>,
+        format: wgpu::TextureFormat,
+        family: u32,
+        foreign: bool,
+    ) -> Result<(), String> {
+        let from = if foreign {
+            vk::QUEUE_FAMILY_FOREIGN_EXT
+        } else {
+            vk::QUEUE_FAMILY_EXTERNAL
+        };
+        if (b.src_queue_family_index, b.dst_queue_family_index) != (from, family) {
+            return Err(format!(
+                "from family {:#x} to {:#x}, not {from:#x} to {family:#x}",
+                b.src_queue_family_index, b.dst_queue_family_index
+            ));
+        }
+        let tracked = wgpu::hal::vulkan::conv::derive_image_layout(IMPORTED, format);
+        if b.old_layout != b.new_layout
+            || b.new_layout != tracked
+            || b.old_layout == vk::ImageLayout::UNDEFINED
+        {
+            return Err(format!(
+                "{:?} to {:?}, where wgpu tracks {tracked:?}",
+                b.old_layout, b.new_layout
+            ));
+        }
+        let r = b.subresource_range;
+        if (
+            r.aspect_mask,
+            r.base_mip_level,
+            r.level_count,
+            r.base_array_layer,
+            r.layer_count,
+        ) != (vk::ImageAspectFlags::COLOR, 0, 1, 0, 1)
+        {
+            return Err(format!("{r:?} isn't the whole plane"));
+        }
+        if !b
+            .dst_access_mask
+            .intersects(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::TRANSFER_READ)
+        {
+            return Err(format!("{:?} reads nothing after", b.dst_access_mask));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_import_is_acquired_from_the_decoder_where_wgpu_tracks_it() {
+        let image = vk::Image::from_raw(0x1234);
+        for f in PlaneFormat::ALL {
+            let format = imported_format(f);
+            // wgpu-hal tracks an import in GENERAL, which the decoder's
+            // bytes are in.
+            assert_eq!(imported_layout(format), vk::ImageLayout::GENERAL, "{f:?}");
+            for foreign in [true, false] {
+                let b = acquire_barrier(image, format, 3, foreign);
+                acquire_fault(&b, format, 3, foreign).unwrap();
+                assert_eq!(b.image, image);
+            }
+        }
+        // Its controls: the barrier as wgpu alone made it before (no
+        // ownership moved), out of UNDEFINED, into another layout than
+        // wgpu tracks, to another family, and from the external family
+        // where the foreign one is there.
+        let format = wgpu::TextureFormat::R8Unorm;
+        let good = acquire_barrier(image, format, 3, true);
+        let fault = |b: vk::ImageMemoryBarrier<'static>| acquire_fault(&b, format, 3, true);
+        let control = spherecut_testkit::control::must_fail;
+        control(
+            "no transfer",
+            fault(good.src_queue_family_index(0).dst_queue_family_index(0)),
+        );
+        control(
+            "out of UNDEFINED",
+            fault(good.old_layout(vk::ImageLayout::UNDEFINED)),
+        );
+        control(
+            "into TRANSFER_SRC_OPTIMAL",
+            fault(good.new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)),
+        );
+        control("for family 0", fault(good.dst_queue_family_index(0)));
+        control(
+            "from the external family",
+            fault(good.src_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL)),
+        );
+        control(
+            "only a level of it",
+            fault(good.subresource_range(vk::ImageSubresourceRange {
+                level_count: 0,
+                ..good.subresource_range
+            })),
+        );
+    }
+
+    /// A texture made as an import is, wgpu told it starts in
+    /// [`IMPORTED`], without the DMA-BUF (lavapipe imports none), and its
+    /// image.
+    fn stand_in(gpu: &Gpu, format: wgpu::TextureFormat) -> (vk::Image, wgpu::Texture) {
+        use wgpu::hal::Device as _;
+        let size = wgpu::Extent3d {
+            width: 64,
+            height: 32,
+            depth_or_array_layers: 1,
+        };
+        let hal_desc = wgpu::hal::TextureDescriptor {
+            label: Some("stand-in import"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUses::RESOURCE | wgpu::TextureUses::COPY_SRC,
+            memory_flags: wgpu::hal::MemoryFlags::empty(),
+            view_formats: Vec::new(),
+        };
+        // SAFETY: a valid descriptor on the live device; the guard goes at
+        // the end of the statement.
+        let raw = unsafe {
+            gpu.device
+                .as_hal::<Vulkan>()
+                .unwrap()
+                .create_texture(&hal_desc)
+                .unwrap()
+        };
+        // SAFETY: as `import_one`'s.
+        let image = unsafe { raw.raw_handle() };
+        let desc = wgpu::TextureDescriptor {
+            label: Some("stand-in import"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: USAGE,
+            view_formats: &[],
+        };
+        // SAFETY: made from `hal_desc`, `desc`'s twin; its bytes are
+        // never compared.
+        let texture = unsafe {
+            gpu.device
+                .create_texture_from_hal::<Vulkan>(raw, &desc, IMPORTED)
+        };
+        (image, texture)
+    }
+
+    /// `planes` copied out by wgpu as the upload reads them, to a buffer,
+    /// under a validation error scope, and waited for: the error wgpu
+    /// raised, if any. The scope sees wgpu's own validation only, never
+    /// a barrier recorded through `as_hal_mut`.
+    fn copy_out(gpu: &Gpu, planes: &[&wgpu::Texture]) -> Option<wgpu::Error> {
+        let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let out = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256 * 32 * planes.len() as u64,
+            usage: wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for (i, t) in planes.iter().enumerate() {
+            enc.copy_texture_to_buffer(
+                t.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &out,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 256 * 32 * i as u64,
+                        bytes_per_row: Some(256),
+                        rows_per_image: None,
+                    },
+                },
+                t.size(),
+            );
+        }
+        gpu.queue.submit([enc.finish()]);
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        pollster::block_on(scope.pop())
+    }
+
+    /// The acquire names the foreign family on a shared-device maker's
+    /// device and can't on one wgpu opened itself (the check and its
+    /// control); then a smoke run on lavapipe, which imports no DMA-BUF:
+    /// on stand-ins for the planes ([`stand_in`]) the acquire records and
+    /// submits on wgpu's queue, on both devices, and wgpu then copies the
+    /// planes out without an error of its own, where a plane it can't
+    /// copy from raises one (the scope's control). A wrong barrier, or the
+    /// order of the acquire and wgpu's reads, is invisible here: wgpu's
+    /// error scope sees its own validation only, never the raw barrier,
+    /// and this box has no Khronos validation layer. Real imports, and the
+    /// barrier under the validation layer, are odin's to run.
+    #[test]
+    fn the_acquire_names_its_family_and_submits_on_wgpus_queue() {
+        // A shared-device maker's device, which has the foreign family's
+        // extension where the driver lists it, as lavapipe does.
+        // SAFETY: one thing at a time on the device, from this thread.
+        let gpu = unsafe { crate::vkshare::single_queue_gpu(&crate::AdapterChoice::Cpu) }.unwrap();
+        // The check: the acquire names the foreign family.
+        let from_foreign = |gpu: &Gpu| -> Result<(), String> {
+            let (_, _, foreign) = acquire_parts(gpu).map_err(|e| e.to_string())?;
+            match acquired_from(foreign) {
+                vk::QUEUE_FAMILY_FOREIGN_EXT => Ok(()),
+                other => Err(format!("acquired from family {other:#x}")),
+            }
+        };
+        from_foreign(&gpu).unwrap();
+        // Its control: a device wgpu opened itself can't name it.
+        let plain = Gpu::headless(&crate::AdapterChoice::Cpu).unwrap();
+        spherecut_testkit::control::must_fail("wgpu's own device", from_foreign(&plain));
+        // The smoke run, on the shared device (from the foreign family)
+        // and on wgpu's own (from the external one).
+        for gpu in [&gpu, &plain] {
+            let planes = [
+                stand_in(gpu, wgpu::TextureFormat::R8Unorm),
+                stand_in(gpu, wgpu::TextureFormat::Rg8Unorm),
+            ];
+            acquire(gpu, &planes).unwrap();
+            let error = copy_out(gpu, &[&planes[0].1, &planes[1].1]);
+            assert!(error.is_none(), "{error:?}");
+        }
+        // The scope's control: a plane wgpu can't copy from.
+        let uncopyable = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("no COPY_SRC"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        spherecut_testkit::control::must_fail(
+            "a plane wgpu can't copy from",
+            copy_out(&gpu, &[&uncopyable]).is_none(),
+        );
     }
 
     #[test]
