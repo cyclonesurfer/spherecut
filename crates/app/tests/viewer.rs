@@ -373,6 +373,13 @@ fn an_unchanged_frame_and_view_only_encode() {
     h.set_size(egui::vec2(600.0, 400.0));
     h.step();
     assert_eq!(common::draws(&rs).0, p1 + 1);
+    // Once: the resize is this test's own change, so this holds on every
+    // run (until_shown's settled pass would hide a projection made once
+    // more on the pass after one made for a reason).
+    for _ in 0..5 {
+        h.step();
+    }
+    assert_eq!(common::draws(&rs).0, p1 + 1, "the resize projected once");
 }
 
 /// The submit gate (D41): `prepare` closes it before the surface is
