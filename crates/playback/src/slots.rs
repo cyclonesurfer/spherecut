@@ -190,7 +190,8 @@ impl Slot {
 /// How many slots are in each state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SlotStats {
-    /// Slots in use: the setting, less the dead ones.
+    /// Slots in use, less the dead ones: the setting, or all of them
+    /// while a locked pair is open ([`SlotRing::active`]).
     pub active: usize,
     pub free: usize,
     pub writing: usize,
