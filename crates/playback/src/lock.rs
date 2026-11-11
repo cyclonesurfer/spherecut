@@ -9,10 +9,10 @@
 //! refused by the [`field`] that differs and they play unlocked. Once
 //! locked, the presenter shows the newest time both lenses hold at or
 //! before the clock ([`pick_pair`]), both slots or neither
-//! ([`show_pair`]); the frame cache runs from the group base, the newest
-//! time both hold, so that such a time always exists; one catch-up time
-//! serves the group, so that the lenses skip to the same frame; and the
-//! pair ends at its shorter lens.
+//! ([`show_pair`], [`show_pair_over`]); the frame cache runs from the
+//! group base, the newest time both hold, so that such a time always
+//! exists; one catch-up time serves the group, so that the lenses skip
+//! to the same frame; and the pair ends at its shorter lens.
 //!
 //! The group's members are player streams, by their place in what was
 //! opened (`[0, 1]` for a pair of file streams), not file streams: the
@@ -180,7 +180,8 @@ pub fn pick_pair(
 ///
 /// `give_back` gets the view of the first slot as it was read: a caller
 /// gives back a slot its `try_show` moved from Ready to Shown, and
-/// leaves one that was Shown already (the frame on screen) as it is.
+/// leaves one that was Shown already (the frame on screen) as it is, as
+/// [`show_pair_over`] does for the presenter.
 pub fn show_pair<G>(
     pair: &[SlotView; 2],
     mut try_show: impl FnMut(&SlotView) -> Option<G>,
@@ -194,4 +195,30 @@ pub fn show_pair<G>(
             None
         }
     }
+}
+
+/// [`show_pair`] over the frames a presenter has on screen: a member
+/// that shows its slot in `pair` already keeps that frame (`on_screen`),
+/// and the other's slot goes up through `try_show`. If the second can't,
+/// the first is given back through `unshow`, but only if this call moved
+/// it from Ready to Shown: never the frame on screen, nor a slot that was
+/// Shown already. Both frames, member 0's first, or `None` with the slots
+/// as they were. A pure function of what it is given.
+pub fn show_pair_over<G>(
+    pair: &[SlotView; 2],
+    on_screen: [Option<G>; 2],
+    mut try_show: impl FnMut(&SlotView) -> Option<G>,
+    mut unshow: impl FnMut(&SlotView),
+) -> Option<[G; 2]> {
+    let moved = on_screen[0].is_none() && pair[0].state == SlotState::Ready;
+    let mut kept = on_screen.into_iter();
+    show_pair(
+        pair,
+        |v| kept.next().flatten().or_else(|| try_show(v)),
+        |v| {
+            if moved {
+                unshow(v);
+            }
+        },
+    )
 }

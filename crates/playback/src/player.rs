@@ -27,8 +27,8 @@
 //! as a pair: at the clock's time, the newest time both lenses hold at
 //! or before it ([`pick_pair`]); after a seek or a step, both landings
 //! together once they are at one time; both slots or neither
-//! ([`show_pair`]), never a lens's frame as it arrives, and the pair on
-//! screen stays up until another can go up whole.
+//! ([`show_pair_over`]), never a lens's frame as it arrives, and the
+//! pair on screen stays up until another can go up whole.
 //! It counts what the overlay shows: UI frame times and hitches (an
 //! interval over 1.5 times the median of the last ones), frames shown,
 //! dropped (passed over while playing, by run places, else by the time
@@ -69,7 +69,7 @@ use crate::audio::{AudioOutput, AudioOutputFactory, PREROLL_AUDIO, PREROLL_LIMIT
 use crate::budget::{AUTO_MIN, AutoBudget, CacheBudget, read_auto_budget};
 use crate::cache::{CacheStats, FrameCache};
 use crate::decoder::{DecoderPreference, HwPromise, HwSupport};
-use crate::lock::{LockSnapshot, LockSpec, LockStatus, pick_pair, show_pair};
+use crate::lock::{LockSnapshot, LockSpec, LockStatus, pick_pair, show_pair_over};
 use crate::perf::{Counter, MemoryStats, PerfSnapshot, PerfStats, Stage};
 use crate::shared::{
     BudgetStatus, Command, Place, Repaint, Request, Shared, Status, StreamStatus, Want, av_offset,
@@ -1524,7 +1524,7 @@ impl Player {
     }
 
     /// Show a locked group's `pair`, `members`' slots at one clip time,
-    /// both or neither ([`show_pair`]): `None` when neither went up (a
+    /// both or neither ([`show_pair_over`]): `None` when neither went up (a
     /// slot moved on, or its lock was busy), else whether a frame
     /// changed. Frames passed over count once for the pair, by member
     /// 0's.
@@ -1543,15 +1543,11 @@ impl Player {
         }
         // A member's frame on screen is shown already; the other's slot
         // goes from Ready to Shown, and back if its partner's can't.
-        let mut shown = up.iter().cloned();
-        let gpus = show_pair(
+        let gpus = show_pair_over(
             pair,
-            |v| shown.next().flatten().or_else(|| slots.try_show(v)),
-            |v| {
-                if up[0].is_none() && v.state == SlotState::Ready {
-                    slots.unshow(v.index, v.word);
-                }
-            },
+            up.clone(),
+            |v| slots.try_show(v),
+            |v| slots.unshow(v.index, v.word),
         )?;
         for (k, gpu) in gpus.into_iter().enumerate() {
             if up[k].is_none() {

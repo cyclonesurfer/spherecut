@@ -12,7 +12,9 @@
 //! - play reaches the end.
 //!
 //! [`pacing`] holds a run's [`Sample`]s to it and names the part that
-//! failed; [`play`] drives a run on a `ManualClock` and gathers them.
+//! failed; [`play`] drives a run on a `ManualClock` and gathers them,
+//! [`play_steady`] drives one that keeps to the rule, and [`play_with`]
+//! one whose clock a test moves itself.
 
 use std::time::{Duration, Instant};
 
@@ -88,8 +90,8 @@ pub struct Paced {
     pub trailed: i64,
 }
 
-/// The part of the rule a run failed, the first in the order the rule
-/// lists them, with the clock never passing the warm-up first.
+/// The part of the rule a run failed: the first in the order [`pacing`]
+/// checks them, which is `Short`, `Trailed`, `FewPairs`, then `NoEnd`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unpaced {
     /// The clock never passed the first [`WARM_UP`] frames: at most
@@ -190,17 +192,68 @@ pub fn play(
     pace: Pace,
     members: [usize; 2],
     wait: Duration,
-    mut each: impl FnMut(Option<&Presented>, &Sample),
+    each: impl FnMut(Option<&Presented>, &Sample),
 ) -> Vec<Sample> {
-    let mut samples = Vec::new();
-    player.play();
     let began = Instant::now();
-    while began.elapsed() < wait {
+    play_with(player, members, wait, each, || {
         let k = (began.elapsed().as_nanos() / pace.period.as_nanos().max(1)) as i64;
         let at = pace.rate.frame_to_time(k.min(pace.frames)).unwrap();
         if clock.is_running() && clock.now() < at {
             clock.set(at, Instant::now());
         }
+    })
+}
+
+/// Play `player` as [`play`] does, from the clock's frame to `frames`,
+/// the end of a clip at `rate`, but moving the clock on a frame only
+/// once both members' frames there are up in slots, never on the wall
+/// clock: a run that keeps to the rule however slowly the slots fill,
+/// the counterpart to one that freezes.
+pub fn play_steady(
+    player: &Player,
+    clock: &ManualClock,
+    rate: FrameRate,
+    frames: i64,
+    members: [usize; 2],
+    wait: Duration,
+    each: impl FnMut(Option<&Presented>, &Sample),
+) -> Vec<Sample> {
+    let epoch = snapshot(player).epoch;
+    let up = |t: Time| {
+        let views = player.slots().views();
+        members.iter().all(|&m| {
+            views
+                .iter()
+                .any(|v| v.frame.epoch == epoch && v.frame.stream == m && v.frame.time == t)
+        })
+    };
+    play_with(player, members, wait, each, || {
+        if !clock.is_running() {
+            return;
+        }
+        let k = rate.time_to_frame(clock.now(), Rounding::Floor).unwrap();
+        let next = rate.frame_to_time((k + 1).min(frames)).unwrap();
+        if k < frames && (k + 1 >= frames || up(next)) {
+            clock.set(next, Instant::now());
+        }
+    })
+}
+
+/// Play `player` as [`play`] does, but calling `step` before each
+/// present to move the clock, and whatever else the run changes (a
+/// lens's hold, say).
+pub fn play_with(
+    player: &Player,
+    members: [usize; 2],
+    wait: Duration,
+    mut each: impl FnMut(Option<&Presented>, &Sample),
+    mut step: impl FnMut(),
+) -> Vec<Sample> {
+    let mut samples = Vec::new();
+    player.play();
+    let began = Instant::now();
+    while began.elapsed() < wait {
+        step();
         let p = player.present(Instant::now());
         let s = Sample::of(p.as_ref(), &snapshot(player), members);
         each(p.as_ref(), &s);
