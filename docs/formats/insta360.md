@@ -737,18 +737,40 @@ off axis. [reported] `RF` Only a few legacy lens types get Studio's built-in pol
 ### 4.4 From canvas pixels to video pixels [conflict]
 
 The video track (X5 2880² or 3840²) is smaller than the calibration area (5376²), and field 27
-(`5376 → 5312`) describes a sensor window. Three readings exist.
+(`5376 → 5312`) describes a sensor window. Four readings exist. The fourth, D, is unsettled, and
+neither sphere's canvas maps nor synth's planted ones model it.
 
 | Reading | Focal | Centre | Who |
 |---|---|---|---|
 | A | `f · side / dst` (5312) | `c_local · side / src` (5376) | telemetry-parser's single-lens profile [code] `TP mod.rs:284-309`; orbis X5 and X2 (on the X2 `fx · 2880/2880` and `cx · 2880/3040`; stitch checked by seam correlation) [reported] |
 | B | `f · side / dst` | `(c_local − (src − dst)/2) · side / dst` (a centred crop window) | raw360-formats, measured on an X3 proxy, an X3 pair and an X4 file [reported] |
 | C | `f · side / src` | `c_local · side / src` (uniform: "the frame shows the whole calibration square") | telemetry-parser's rig [code] `TP rig.rs:454`; GyroView [reported] `GV adr/0014` |
+| D | `f · side / dst` | `(c_local − offset) · side / dst`, with field 27's stored offset (fields 5 and 6: `0, 0` on the X5) | no source; it is field 27 read literally. GyroView, the one source that names fields 5 and 6, uses C [unverified] |
 
 A and B give the same centre to within a pixel when the principal point is near the middle,
 but A and B differ from C by `src/dst` in focal length: **1.2% on the X5** (5376/5312) and
 **5.5% on the X2** (3040/2880). GyroView also reports a further per-unit radial scale of 0.8%
 to 4.5% on the X5 and X6, contested on a second unit. [reported] `GV adr/0023`
+
+**Reading D is unsettled.** With the X5's offset of `0, 0`, D moves every stored centre (V3 and
+V6, both lenses, both axes) by +23.1 to +23.4 px at 3840² from A, B and C (+17.3 to +17.5 at
+2880², +4.6 at 768²). That is about 32.5 canvas px, and A, B and C agree with each other within
+0.25 px (arithmetic on the strings in "Pat's X5 samples"). Equal shifts of both lenses' centres
+look like a relative tilt, at 0.0375° per canvas px (plan 8.4), so about 1.2°. Two things argue
+against D, and neither has been checked on footage:
+
+- Under D the stored centres would sit +29 to +57 canvas px right of and below the 5312
+  window's centre. Measured from the 5376 square's centre they sit −8 to +25 (V3: +13, +4, +5,
+  −3). A maker would centre the window on the optical axis.
+- Every source that has checked a reading against pictures puts the centres where A, B and C
+  do: orbis by seam correlation on the X5 and the X2 (on the X2, D would be about 80 canvas px
+  off) and raw360 on an X3 and an X4. [reported]
+
+An offset of `0, 0` fits D, fits a delta from a centred window (B), and fits an unused field.
+The parser cannot tell present zeros from absent fields either, since its default offset is
+`0, 0`. M3.6 can settle it on one frame of clip 8 or 10: fit a circle to the image circle's arcs
+in the black corners and compare its centre with each reading's principal point. D's sits 23 px
+from the other three at 3840², far above any lens decentring.
 
 The **X4's 8000×6000 per-lens area** breaks every square-canvas assumption. telemetry-parser
 scales `cx` by `1920/8000` and `cy` by `1920/6000` (i.e. non-uniformly) [code]. That only works
@@ -1020,7 +1042,7 @@ The clip numbers refer to `docs/SAMPLES.md`.
 | Q1 | Which Insta360 camera(s) the user owns, firmware versions, and whether those match the table in §2.2 | NOTES.txt |
 | Q2 | **Track ↔ lens binding** on one-file cameras (field 131 = 4, 80 = 1 → track 0 = screen-side lens?). The X5's LRV half order is answered by the bytes (left = track 1, Pat's X5 samples). *Suggestion: add "cover the screen-side lens with a hand for 2 s at the start" to clip 8.* | 8, 1 |
 | Q3 | **X4**: canvas 16000×6000 against the square tracks, field 27 values, V6 presence, `is_raw_gyro`, field 65, index alignment, hvcC, bit depth in each codec | 1, 3, 4, 5 |
-| Q4 | Canvas → video focal scaling: reading A/B (`dst`) or C (`src`), 1.2% on the X5, and any per-unit radial scale | 8 (with straight lines across the seams), 12 (Studio export) |
+| Q4 | Canvas → video focal scaling: reading A/B (`dst`) or C (`src`), 1.2% on the X5, and any per-unit radial scale; and whether the centre is read as D, field 27's offset taken literally (§4.4, about 23 px at 3840²) | 8 (with straight lines across the seams; D also by the image circle's corner arcs, as 10 can), 12 (Studio export) |
 | Q5 | Meaning and order of the V6 coefficients (the readings of §4.3: k1..k5 p1..p4 s1..s4, orbis's, or video-types' `RadtanPro`, which is Studio-derived [RE] and not used) | 8, 12 |
 | Q6 | Euler composition and sign conventions for `yaw pitch roll`, and the sign of `tz` | 8, 12 |
 | Q7 | IMU axis map per model, including the X4 (only telemetry-parser's `yzX` so far) and the ONE RS (assumed) | 10, then 9 |
