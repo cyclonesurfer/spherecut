@@ -1160,7 +1160,9 @@ impl PoolWatch {
                 ) else {
                     continue;
                 };
-                picture.with_locked(&mut |states| seen.extend(states.iter().map(|s| s.image)));
+                let locked =
+                    picture.with_locked(&mut |states| seen.extend(states.iter().map(|s| s.image)));
+                assert!(locked, "a cached frame of stream {stream} couldn't be locked");
                 // A picture's planes, each its size in texels by its
                 // texel's bytes, over the images that hold them.
                 let layout = frame.layout();
