@@ -31,12 +31,14 @@
 //! pair on screen stays up until another can go up whole.
 //! It counts what the overlay shows: UI frame times and hitches (an
 //! interval over 1.5 times the median of the last ones), frames shown,
-//! dropped (passed over while playing, by run places, else by the time
-//! between; once a pair for a locked pair), the interval between frames
-//! shown, the A/V offset, the presents at which the streams shown are at
-//! different clip times (`unpaired_presents`, locked or not), and how
-//! far a locked pair on screen trails the clock while it runs
-//! (`pair_wait`).
+//! the frames passed over while playing (by run places, else by the time
+//! between), as skipped up to the presents' cadence, the frames a
+//! display slower than the clip passes over, and as dropped beyond it
+//! (once a pair for a locked pair, once a stream otherwise), the interval
+//! between frames shown, the A/V offset, the presents at which the
+//! streams shown are at different clip times (`unpaired_presents`,
+//! locked or not), and how far the running clock is past the end of a
+//! locked pair on screen (`pair_wait`).
 //!
 //! **Steps** of one frame either way are instant when the slots hold the
 //! frame next to the one shown in its run (which the upload thread sees
@@ -563,7 +565,12 @@ impl Ui {
     /// than the frames in the median present interval, rounded up, so 0
     /// at or below the present rate, and 1 for a 120 fps clip at 60 Hz.
     /// Rounding up from a hair over a whole number of frames (a thousandth
-    /// of a frame) is the numbers' error, not a frame.
+    /// of a frame) is the numbers' error, not a frame. A clip just faster
+    /// than a whole multiple of the present rate (60 fps on a 59.94 Hz
+    /// panel, a ratio of 1.001) sits on that line, and past it takes the
+    /// next whole frame a present, though the display passes one over
+    /// only every thousand or so presents: a drop a present there counts
+    /// as skipped. The X5's own rates on a 60 Hz panel come out right.
     fn cadence(&self, duration: Option<Time>) -> u64 {
         let (Some(interval), Some(d)) = (self.median_interval(), duration) else {
             return 0;
@@ -1532,7 +1539,7 @@ impl Player {
     }
 
     /// Show slot `v` for stream `i`, giving back the one shown before.
-    /// `count`: whether frames passed over count as dropped.
+    /// `count`: whether frames passed over count as skipped or dropped.
     fn show(&self, ui: &mut Ui, i: usize, v: &SlotView, now: Instant, count: bool) -> bool {
         if ui.on_screen(i, v).is_some() {
             return false;

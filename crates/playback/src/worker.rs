@@ -14,8 +14,10 @@
 //! decoder preference, and its lock group pending in the status. The
 //! worker that opens second compares the lenses, under the status lock
 //! as it adds its stream's info, and locks the group or refuses it by
-//! the field that differs; a member that can't open or decode while the
-//! group is pending refuses it with `"open"` (M3 plan section 9).
+//! the field that differs. A member that can't open, or fails before it
+//! has handed out a frame of the open, refuses the group with `"open"`,
+//! pending or locked, and the other lens plays on alone (M3 plan
+//! section 9).
 //!
 //! **Requests.** A worker takes one request at a time, the latest
 //! winning: the UI stops the ones before with a new [`StopToken`]
@@ -37,22 +39,34 @@
 //! ([`VideoDecode::catch_up`]): it skips frames nothing refers to and
 //! never hands out (so never downloads) a frame before the clock's time;
 //! the frames it passed over count as decode-dropped. Once a frame at or
-//! after that time is out, catching up ends.
+//! after that time is out, catching up ends. A worker that reached its
+//! stream's end, or failed, is idle until a request comes. A seek or a
+//! step the cache answers gives it a place to go on from, the end of the
+//! run its landing is in, and it decodes on from there, so that playback
+//! goes on past the run; one whose run reaches the stream's last frame
+//! stays ended, and says so no second time. After a failure the decoder
+//! is sought to that place, not taken to be at its last frame.
 //!
 //! **A locked pair** (M3 plan section 9). Once the group locks, the cache
 //! runs both members from the group base ([`FrameCache::set_group`]), and
 //! a request's playhead holds the base until both have landed it. The
-//! members catch up to one time, the group's `until`: a member more than
-//! two frames behind the clock raises it to the clock's time, but never
-//! past the newest frame the other holds, and each member whose newest
-//! frame is before it catches up to it, so that both skip to the same
-//! frame. A seek or a step clears it. Decoding ahead, a member waiting
-//! for room may be told by the cache's backstop to seek exactly to the
-//! trailing member's newest frame instead ([`Insert::Resync`]). A member
-//! that can't decode on once the group has locked ends the pair at its
-//! last frame, as a shorter lens does: the stream's end is set there for
-//! the presenter, until a frame decoded past it (a seek past the damage)
-//! puts back what was there. Locked, the pair takes every GPU slot.
+//! members catch up to one time, the group's `until`, which a member more
+//! than two frames behind the clock raises. When every member is that
+//! far behind, it rises to the clock's time, so that the pair trails
+//! together and catches up together, as an unlocked stream does;
+//! otherwise to the clock's time or the newest frame the other holds,
+//! whichever is earlier, so that the member behind catches up to the one
+//! that leads and no further. Each member whose newest frame is before
+//! it catches up to it, so that both skip to the same frame. A seek or a
+//! step clears it. Decoding ahead, a member waiting for room may be told
+//! by the cache's backstop to seek exactly to the trailing member's
+//! newest frame instead ([`Insert::Resync`]). A member that can't decode
+//! on once it has handed out a frame of the open, the group pending or
+//! locked, ends the pair at its last frame, as a shorter lens does: the
+//! stream's end is set there for the presenter, until a frame decoded
+//! past it (a seek past the damage) puts back what was there. A seek or
+//! a step at or past that end lands the pair on that last frame. Locked,
+//! the pair takes every GPU slot.
 //!
 //! **Fallback.** A decoder that goes on in software says so with an
 //! event, which the worker puts in the stream's status and the player's
