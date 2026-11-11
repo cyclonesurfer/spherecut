@@ -222,19 +222,32 @@ pub fn last_drawn(rs: &egui_wgpu::RenderState) -> Option<DrawKey> {
 }
 
 /// Step until the viewer has projected the frame the app shows, with
-/// the untitled project made (it frames the picture).
+/// the untitled project made (it frames the picture), and the layout
+/// settled: a pass that projected nothing new. The pass the project
+/// arrives in projects its framed view at the size the transport bar
+/// left before the timeline strip replaced the scrub bar; egui sizes a
+/// panel from its last pass, so the strip's height takes the picture's
+/// on the pass after, which projects again. A viewer that projects on
+/// every pass never settles, and fails here.
 pub fn until_shown(h: &mut Harness<'_, SpherecutApp>, rs: &egui_wgpu::RenderState) {
     let start = Instant::now();
     loop {
+        let (projected, _) = draws(rs);
         h.step();
         let s = &h.state().state;
         let shown = s.shown.clone();
-        if shown.is_some() && !s.reframe.pending() && last_drawn(rs) == shown {
+        if shown.is_some()
+            && !s.reframe.pending()
+            && last_drawn(rs) == shown
+            && draws(rs).0 == projected
+        {
             return;
         }
         assert!(
             start.elapsed() < Duration::from_secs(20),
-            "no frame shown within 20 s"
+            "no frame shown and settled within 20 s (shown {}, projected {} times)",
+            shown.is_some(),
+            draws(rs).0
         );
         pace(Duration::from_millis(5));
     }
