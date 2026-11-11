@@ -4,7 +4,7 @@
 //! An agent reads footage through five tools (probe, look, analyze,
 //! check, doctor), read-only but for look's `output`, and reads, makes
 //! and edits projects through three more (project, edit, undo; A2,
-//! [`reference`] for the ops); docs/agents.md has them all. Each is a
+//! [`mod@reference`] for the ops); docs/agents.md has them all. Each is a
 //! schema in `docs/agents/schemas/` and an op in [`ops`]. [`rpc`] is the
 //! protocol, [`tools`] the table between the two. Nothing here touches
 //! the network: what a tool returns goes to the agent, and from there to

@@ -2,7 +2,7 @@
 //! the sample the device plays.
 //!
 //! Everything the engine, the output's callback and the decode thread
-//! share is in [`Shared`]: the clock's state in a [`SeqLock`], the chunk
+//! share is in `Shared`: the clock's state in a [`SeqLock`], the chunk
 //! ring, how far the decoder has filled it, and the callback's numbers.
 //! The engine writes the state through [`AudioClock`]'s [`Clock`]
 //! methods, the callback publishes its anchor into it, and a watchdog
@@ -466,7 +466,7 @@ fn lead() -> Rational {
     Rational::new(nanos_of(RESYNC_LEAD), NANOS).unwrap_or(Rational::ZERO)
 }
 
-/// The audio clock: a [`Clock`] over the output's [`Shared`] state (see
+/// The audio clock: a [`Clock`] over the output's `Shared` state (see
 /// the module docs). Reading it never blocks.
 #[derive(Clone)]
 pub struct AudioClock(pub(crate) Arc<Shared>);

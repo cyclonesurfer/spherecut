@@ -34,7 +34,7 @@ enum Cmd {
     /// its own target directory; --test also runs the Tier 1 tests against
     /// one.
     ///
-    /// Each build's target directory is spherecut-compat-<label>, <label>
+    /// Each build's target directory is `spherecut-compat-<label>`, `<label>`
     /// being the prefix's last component, in the directory
     /// SPHERECUT_FFMPEG_COMPAT_TARGET_DIR names, or else in compat/ in
     /// cargo's target directory. compat stamps each one it makes, and
@@ -50,7 +50,7 @@ enum Cmd {
     Compat(compat::Args),
     /// Write the synthetic test-media set to test-media/.
     GenMedia(gen_media::Args),
-    /// Tier 2 run on real hardware; writes hw-reports/<host>-<commit>.md.
+    /// Tier 2 run on real hardware; writes `hw-reports/<host>-<commit>.md`.
     HwTest(hw_test::Args),
 }
 

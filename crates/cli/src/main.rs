@@ -209,8 +209,8 @@ enum Cmd {
         args: String,
         #[command(flatten)]
         agent: AgentArgs,
-        /// Where look's images go, as spherecut-look-<ms>-<n>.jpg (or
-        /// .png): the temporary folder by default. The document's
+        /// Where look's images go, as `spherecut-look-<ms>-<n>.jpg` (or
+        /// `.png`): the temporary folder by default. The document's
         /// `images` lists them.
         #[arg(long, value_name = "DIR")]
         image_dir: Option<PathBuf>,

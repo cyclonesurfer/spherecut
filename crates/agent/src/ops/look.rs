@@ -6,7 +6,7 @@
 //! Each time is decoded once, in the order the file plays (the times
 //! sorted), with frame's decoder and the copy path ([`still`]), and all of
 //! its tiles are rendered from that frame on the one GPU a process keeps.
-//! [`crate::image`] lays the tiles out and labels them; the whole is
+//! `crate::image` lays the tiles out and labels them; the whole is
 //! encoded in memory, then returned inline within the image budget or
 //! written to `output` under the write root.
 //!
@@ -196,7 +196,7 @@ pub struct View {
 }
 
 /// A time as an agent writes it (a1-plan section 4.1): a string, or a
-/// `[num, den]` pair of seconds, which [`time`] checks.
+/// `[num, den]` pair of seconds, which `time` checks.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum TimeArg {

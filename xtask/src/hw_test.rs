@@ -81,7 +81,7 @@ pub struct Args {
     /// Build in debug mode and skip the benchmarks (environment and tests only).
     #[arg(long)]
     quick: bool,
-    /// Where to write the report (default: hw-reports/<host>-<commit>.md).
+    /// Where to write the report (default: `hw-reports/<host>-<commit>.md`).
     #[arg(long)]
     out: Option<PathBuf>,
     /// Leave out the Tier 1 tests on this machine.

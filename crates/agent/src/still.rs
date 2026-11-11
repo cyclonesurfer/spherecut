@@ -2,7 +2,7 @@
 //! frame` (M1 plan section 5, D27), which `look` renders its tiles with
 //! (a1-plan section 2). The steps are frame's 4 to 8:
 //!
-//! 4. [`probe`]: the file probed through the confinement (D24), its video
+//! 4. [`probe()`]: the file probed through the confinement (D24), its video
 //!    stream chosen, and checked to be a stitched equirect unless the
 //!    caller says it is one;
 //! 5. [`gpu`] and [`check_gpu`]: a headless GPU, and whether it can keep
@@ -167,7 +167,7 @@ pub fn probe_report(src: Source<'_>, stop: &Stop) -> Result<ProbeReport, Failure
 }
 
 /// The rest of step 4, on a report [`probe_report`] made: its video
-/// stream chosen and checked as [`probe`] does, and its damage a warning.
+/// stream chosen and checked as [`probe()`] does, and its damage a warning.
 pub fn probed(
     report: ProbeReport,
     opts: &Options,
@@ -190,7 +190,7 @@ pub fn probed(
     Ok(Probed { report, stream })
 }
 
-/// Why `probed` may not be a stitched equirect, as [`probe`] without
+/// Why `probed` may not be a stitched equirect, as [`probe()`] without
 /// [`Options::equirect`] refuses it: `None` when it is tagged one.
 pub fn equirect_doubt(probed: &Probed) -> Option<String> {
     check_equirect(&probed.report, &probed.stream)
@@ -199,7 +199,7 @@ pub fn equirect_doubt(probed: &Probed) -> Option<String> {
 }
 
 /// The report's video streams that aren't cover pictures, which
-/// [`probe`] chooses from.
+/// [`probe()`] chooses from.
 pub fn video_streams(report: &ProbeReport) -> Vec<&StreamInfo> {
     report
         .streams

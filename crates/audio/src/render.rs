@@ -4,7 +4,7 @@
 //!
 //! It runs on the real-time thread, so it takes no lock, allocates
 //! nothing and logs nothing: the seqlock and the ring are atomics, and
-//! its numbers go into [`Shared`]'s counters for `audio-out` to read.
+//! its numbers go into `Shared`'s counters for `audio-out` to read.
 //!
 //! **Underruns.** When the ring runs dry while playing, the buffer's
 //! rest is silence and the clock runs on regardless: the samples that
